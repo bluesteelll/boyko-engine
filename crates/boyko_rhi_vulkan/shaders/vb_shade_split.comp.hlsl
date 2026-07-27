@@ -134,18 +134,6 @@
 // binding 0 (`gVbInstances`, the `VbInstanceRow` SSBO) is declared inside `vb_geom_fetch.hlsli`
 // itself (that file's own INCLUDE CONTRACT -- self-contained, needs nothing pre-declared).
 #include "vb_pack.hlsli"
-// VB-SV0 (`docs/VB-SV0-SDF-SHADOW-PLAN.md` §4.3): a SOURCE-level `#define`, never a `-D` on the
-// dxc command line, so it adds ZERO compile variants. It arms `vb_geom_fetch.hlsli`'s
-// `tri_p0`/`tri_p1`/`tri_p2` members (the covered triangle's three world positions — register
-// copies, no ALU) plus the `vb_sv0_face_normal` leaf that turns them into the geometric
-// shadow-origin normal. Only the SV0 shadow block calls that leaf, and only from inside its
-// runtime gate, so a dark frame pays for neither. `vb_geo.comp.hlsl` (the fourth includer)
-// deliberately does NOT define `VB_SV0` and preprocesses character-identical to its pre-SV0 form.
-// Under the kill switch the define itself must vanish along with everything else it arms, which is
-// why it sits inside the guard rather than beside it.
-#ifndef VB_SV0_KILL
-#define VB_SV0
-#endif
 #include "vb_geom_fetch.hlsli"
 
 #ifdef TEXTURED
@@ -226,62 +214,6 @@ static const float3 LIGHT_UP = float3(0.0, 1.0, 0.0);
 
 #include "pbr_lighting.hlsli"
 #include "light_table.hlsli"
-
-// === VB-SV0 — the SDF soft-shadow + contact-AO seam (docs/VB-SV0-SDF-SHADOW-PLAN.md) ==========
-//
-// Binding 10 (Set 0): the SDF edit-list SSBO — the SAME `scene.edit_list` buffer the marcher and
-// the deferred resolve already bind (`deferred_pbr.hlsl:161` declares it at the identical Vulkan
-// binding for the identical reason). Slot 10 and NOT slot 8: slots 8/9 are `ClusterGrid` /
-// `LightIndexList` under `#ifdef FROXEL`, so 8 is free only in scenes that never arm the froxel
-// cull — a silent, scene-config-dependent collision no validation layer on this box would report
-// (validation is off; `robustBufferAccess` is off). Slot 10 is free in BOTH `vb_layout0` and
-// `vb_layout0_froxel`. A 5th descriptor set is not an alternative: the TEXTURED VB variant
-// already consumes all four sets and Vulkan's guaranteed `maxBoundDescriptorSets` floor is 4.
-//
-// `register(t0)` SPACE 0 is free in all three tails: `vb_resolve` uses t5/u6/t12/s12/t14/s14
-// only, and `vb_shade`/`vb_shade_split` declare their UNBOUNDED `gTextures[]` at t0 in SPACE 3 —
-// a different space, so no collision. A collision would be a hard `dxc` error, not a silent one.
-//
-// No new upload and no new barrier. The mechanism is NOT the marcher's — under `legs: Mesh`, and
-// on every VB configuration where the SDF marcher is never dispatched, there is no marcher upload
-// and no marcher barrier to inherit. The real write site is
-// `boyko_app/src/runner.rs:1401-1416`: on the FIRST frame whose `SdfEditStaging::is_dirty()` is
-// true (step "5-pre", before that same frame's `render_gbuffer_frame`), the host writes the whole
-// edit list ONCE through the HostVisibleCoherent MAPPED pointer of the buffer
-// `GpuSceneBundles::boot` minted, then calls `mark_uploaded()`. Visibility to the dispatch comes
-// from `vkQueueSubmit`'s own IMPLICIT host-write memory dependency — coherent memory needs no
-// `vkFlushMappedMemoryRanges` and no `VK_ACCESS_HOST_WRITE_BIT` barrier for writes made before the
-// submit — and the write runs under the fenced dispatcher token, so it cannot race an in-flight
-// read either. The R11 tripwire that keeps it one-shot is `is_dirty()` being false from frame 2
-// onward; if that ever stops holding, the write becomes per-frame and DOES need a barrier
-// argument. `scene.edit_list` is a plain (non-`Option`) field, valid on EVERY VB boot including
-// `legs: Mesh`, so the descriptor is always writable even when nothing ever reads it.
-#ifndef VB_SV0_KILL
-[[vk::binding(10, 0)]] StructuredBuffer<uint> Buf : register(t0);
-
-// `sdf_field.hlsli`'s INCLUDE CONTRACT requires `Buf` in scope FIRST (above). This tail is a
-// strict FIELD-CONSUMER: it CALLS `field_distance` read-only and never edits. `field_distance`
-// walks `min(Buf[0], MAX_SDF_EDITS)` edits — ALREADY clamped, so SV0 introduces no new indexing
-// and no new out-of-range surface.
-#include "sdf_field.hlsli"
-
-// The shadow-march tuning block — a VERBATIM mirror of `deferred_pbr.hlsl:466-474`, which itself
-// mirrors the marcher's frozen A1 consts, so the VB march matches the Deferred one it ports.
-// `sdf_shadow_leaves.hlsli`'s INCLUDE CONTRACT requires `MAX_IT`/`SHADOW_K`/`SHADOW_MINT`/
-// `SHADOW_MINT_STEP`/`SHADOW_HIT_EPS` in scope; `GRAD_H`/`FIELD_LIPSCHITZ_L` come from
-// `sdf_field.hlsli` above. `T_MAX` is the directional caster's march bound.
-static const float EPS                = 0.001;
-static const float T_MAX              = 10.0;
-static const uint  MAX_IT             = 128u;
-static const float SHADOW_K           = 8.0;
-static const float SHADOW_MINT        = 16.0 * GRAD_H;
-static const float SHADOW_MINT_STEP   = 16.0 * GRAD_H;
-static const float SHADOW_HIT_EPS     = 2.0 * EPS;
-static const float SHADOW_NDOTL_EPS   = 0.0;
-static const float SHADOW_NORMAL_BIAS = 0.02; // normal-offset march-origin lift (anti grazing-acne)
-
-#include "sdf_shadow_leaves.hlsli"
-#endif // VB_SV0_KILL
 
 // --- Set 1 (`vb_split_layout1`, NEW): the shadow table (@0-3, VERBATIM from `forward_layout1`
 // / `vb_resolve.comp.hlsl`'s own Set-1 block) + the R9b/R9c/R9d additions (@4-10). A DISTINCT
@@ -527,37 +459,6 @@ void main(uint3 tid : SV_DispatchThreadID) {
         float ssao_blurred = gSsao.Load(int2(px, py)).r;
         ao_final = min(ao_final, ssao_blurred);
     }
-#ifndef VB_SV0_KILL
-    // VB-SV0: the 2-bit runtime gate (light-header word 7, bits 5..6), hoisted ONCE per pixel —
-    // a wave-uniform header read, never a per-light one. Bit 5 arms the shadow, bit 6 the contact
-    // AO, and they arm INDEPENDENTLY, which is why these are two separate blocks and not one:
-    // each half must be able to move pixels ON ITS OWN, so neither can hide behind the other.
-    //
-    // Rung S2 ships this DARK — the host writes mode 0 on every configuration. There are exactly
-    // THREE SV0 spans in this tail's per-pixel path, and when the mode is 0 NONE of them runs:
-    //
-    //   1. the contact-AO block below, gated on `VB_SDF_MESH_AO_BIT`;
-    //   2. the soft-shadow block in the directional loop, gated on `VB_SDF_MESH_SHADOW_BIT`;
-    //   3. the geometric face-normal chain (`cross`/`dot`/`rsqrt`/orientation flip), which lives
-    //      in `vb_sv0_face_normal` and is CALLED FROM INSIDE span 2 — never from the geometry
-    //      fetch. It used to sit in the fetch's straight-line code, where it ran on every covered
-    //      pixel with the gate at 0; that is the dark cost this rung's review removed.
-    //
-    // So the only thing the dark path pays is this one wave-uniform header read plus its two
-    // `if`s. The binding-10 descriptor stays bound-but-unread and every frame is byte-identical to
-    // its pre-SV0 pin.
-    uint sv0_mode = load_vb_sdf_mesh_mode(LightBuf);
-    if ((sv0_mode & VB_SDF_MESH_AO_BIT) != 0u) {
-        // Contact AO: the 5-tap field-deficit AO along the SHADING normal, `min`-combined into
-        // `ao_final` — the SAME routing Deferred uses for the marcher's mesh-AO lane
-        // (`deferred_pbr.hlsl:785` -> `:936` -> `:965`), so `spec_ao` below inherits it through
-        // the existing formula rather than through a second, forkable expression. No origin bias:
-        // the taps start at `h = AO_STEP`, already off-surface. `min` on floats is exact and
-        // order-independent, so this combine commutes with the SSAO combine directly above and
-        // with the TEXTURED AO-texture seed above that — the shape this file already ships.
-        ao_final = min(ao_final, sdf_ao(P, n));
-    }
-#endif
     float spec_ao = saturate(pow(NoV + ao_final, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao_final);
 
     LightHeader H = load_light_header(LightBuf);
@@ -595,43 +496,6 @@ void main(uint3 tid : SV_DispatchThreadID) {
                     vis = min(vis, csm_visibility(P, n, view_z, NoL));
 #endif
                 }
-#ifndef VB_SV0_KILL
-                // VB-SV0: the SDF soft shadow on mesh, `min`-combined into the PRIMARY
-                // directional's `vis` beside the CSM / HWRT-denoised combine above — and
-                // deliberately OUTSIDE that `csm_mode` `if`, because the shadow sources arm
-                // independently and an SDF-shadow scene need not also run cascades.
-                //
-                // Under `#if HWRT` this block is compiled in but can never be ARMED: SV0 consumes
-                // `ShadowSources::SDF_SOFT_MARCH`, whose shipped predicate carries
-                // `!consumers.hwrt_denoise_or_vis_on` — exactly the condition the two `*_hwrt`
-                // pipelines require to be TRUE. As of this rung that exclusion rests on the
-                // predicate alone; the CPU truth-table test `sv0_never_arms_under_hwrt` that will
-                // make it mechanical rather than argued LANDS AT RUNG S4 and does not exist yet.
-                //
-                // `NoL > SHADOW_NDOTL_EPS` stands in for `sdf_soft_shadow`'s own back-face
-                // early-out; the RANGED leaf has none (its `n` parameter is unread — the caller
-                // owns the early-out, see the leaf's doc), so the caller must gate. At `NoL == 0`
-                // the direct term is multiplied by `NoL` anyway, so skipping the march is
-                // behaviourally identical and strictly cheaper.
-                //
-                // The march ORIGIN is lifted along the GEOMETRIC face normal (§4.2), not the
-                // shading normal: computed from actual world positions it is the true plane
-                // normal under any affine instance transform, and it removes the classic
-                // silhouette self-shadow acne. Under TEXTURED the shading normal is additionally
-                // normal-mapped, which is exactly the normal that must NOT drive the origin lift.
-                // Exactly ONE march per covered pixel regardless of light count — this is the
-                // primary directional only.
-                //
-                // `vb_sv0_face_normal` is called HERE, inside the gate, and not in
-                // `vb_geom_fetch`: the fetch exports only the three world positions (register
-                // copies SROA erases), so the `cross`/`dot`/`rsqrt`/flip chain exists solely on
-                // the armed path. See that function's doc — the placement is disassembly-verified
-                // on the committed `.spv`, not assumed to survive `-O3`.
-                if ((sv0_mode & VB_SDF_MESH_SHADOW_BIT) != 0u && NoL > SHADOW_NDOTL_EPS) {
-                    float3 sv0_face_n = vb_sv0_face_normal(geo);
-                    vis = min(vis, sdf_soft_shadow_ranged(P + sv0_face_n * SHADOW_NORMAL_BIAS, n, l, T_MAX));
-                }
-#endif
             }
             PbrDirectTerms bsdf = eval_pbr_direct_bsdf(surf, v, l, NoL);
             lit_direct += (bsdf.diffuse + bsdf.specular) * (NoL * vis) * L.color;
@@ -710,35 +574,5 @@ void main(uint3 tid : SV_DispatchThreadID) {
     float3 lit = (lit_direct + ambient + emissive) * H.exposure;
     lit = tonemap_select(lit, load_tonemap_mode(LightBuf));
     lit = pow(lit, OETF_GAMMA_EXP);
-#ifdef VB_SV0_ULP_PROBE
-    // VB-SV0 G2 SENSITIVITY CONTROL (plan §3.3, S2 gate (f)). NEVER a shipping variant: no
-    // manifest row, no embed, no pipeline, and no host code defines this. It exists so that
-    // "every OFF-path golden is byte-identical" can be shown to be a gate that CAN go red rather
-    // than one that is merely satisfied.
-    //
-    // It perturbs the final `lit` by exactly ONE ULP AFTER the OETF — downstream of the exposure
-    // scale, the tonemap and the gamma encode. That placement is the whole point: a 1-ULP
-    // perturbation of an UPSTREAM shading term was measured byte-invisible to this golden (§11.1)
-    // precisely because those three attenuators sit between it and the store. None of them is
-    // between this and the store.
-    //
-    // Honest limits, stated so a BLIND result is read correctly rather than explained away.
-    //
-    // BLIND SET — the probe runs BEFORE the `clamp(lit, 0, 1)` below, so it is not just the
-    // channels EXACTLY at 1.0/0.0 that cannot register: it is EVERY channel with `lit >= 1.0` or
-    // `lit <= 0.0`, i.e. every saturated pixel, since the clamp maps a whole half-line onto one
-    // byte. Any blown-out highlight and any fully-shadowed region is invisible to this probe.
-    //
-    // SENSITIVITY — the mechanism that decides whether an UNSATURATED channel registers is the
-    // ratio of the perturbation to the 8-bit quantisation step. One ULP near 1.0 is ~1.2e-7; the
-    // store's quantisation step is 1/255 = 3.9e-3. So the probe flips a byte only where a channel
-    // already sits within ~1.2e-7 / 3.9e-3 ≈ 1/32000 of a rounding boundary. Over ~1M pixels × 3
-    // channels that is on the order of 100 expected byte crossings — tiny, but far from zero, and
-    // it is a COUNT that a byte-compare either sees or does not.
-    //
-    // If the run still comes back BLIND, that is §7 clause 1's finding — the golden cannot
-    // resolve a 1-ULP change even at the store — and NOT a reason to widen the probe.
-    lit = asfloat(asuint(lit) + uint3(1u, 1u, 1u));
-#endif
     gLit[uint2(px, py)] = float4(clamp(lit, 0.0, 1.0), 1.0);
 }

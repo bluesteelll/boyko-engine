@@ -473,33 +473,6 @@ VbClippedTri vb_near_clip(float4 v0, float4 v1, float4 v2) {
 }
 // === GENERATED vb_near_clip END ===
 
-#ifdef VB_SV0
-// VB-SV0 §4.2: the squared-length floor below which `cross(e1, e2)` is treated as a degenerate
-// (zero-area) triangle and `vb_sv0_face_normal` falls back to the interpolated shading normal.
-//
-// The floor alone is NOT the whole guard, because `sv0_l2` can be poisoned at BOTH ends of the
-// range and only one end is a small number:
-//
-//   * `l2 == 0` (or denormal) — `rsqrt(0)` is `+inf` and `fn * inf` is NaN. `l2 > FACE_N_EPS2`
-//     excludes this, and the FALLBACK branch is the safe one.
-//   * `l2 == +inf` — reachable from a non-finite world position (a NaN/inf instance transform or
-//     vertex). Here `rsqrt(+inf)` is `0` and `fn * 0` is `inf * 0`, which is ALSO NaN. Note the
-//     direction carefully: `+inf > FACE_N_EPS2` is TRUE, so it is the TAKEN branch that produces
-//     the NaN, not the fallback — a bare magnitude floor lets this case straight through. That is
-//     why the shipped test is `isfinite(l2) && l2 > FACE_N_EPS2`.
-//   * `l2 == NaN` needs no clause of its own: every ordered comparison against NaN is false, so
-//     both `isfinite` and `>` reject it and the fallback is taken.
-//
-// With `isfinite(l2)` in front, a finite `l2` also rules out any non-finite COMPONENT of `fn`
-// (an inf or NaN component would make `dot(fn, fn)` non-finite), so the taken branch is
-// NaN-free by construction rather than by inspection.
-//
-// The floor value is far below any real triangle in this engine's meshes (1e-20 corresponds to a
-// cross-product magnitude of 1e-10, i.e. an edge pair whose enclosed area is ~5e-11 world units)
-// while still being comfortably above fp32 denormal territory.
-static const float FACE_N_EPS2 = 1.0e-20;
-#endif
-
 // The per-pixel result `vb_geom_fetch` reconstructs — the SAME per-fragment attribute set a
 // raster VS/FS pair would have interpolated for free (Decision 0's re-fetch trade-off).
 struct VbGeomFetchResult {
@@ -518,66 +491,7 @@ struct VbGeomFetchResult {
     float  tex_w;
     float4 uv_grad;
 #endif
-#ifdef VB_SV0
-    // VB-SV0 (`docs/VB-SV0-SDF-SHADOW-PLAN.md` §4.2/§4.3): the covered triangle's three WORLD-
-    // space corner positions, exported so a CALLER can build the GEOMETRIC (true plane) face
-    // normal that lifts the SDF shadow-march origin off the surface (`vb_sv0_face_normal` below).
-    //
-    // POSITIONS and not the finished normal, and that distinction is the whole point. The fetch
-    // already holds these three vectors in registers — it transforms them to clip space and
-    // interpolates `world_pos` from them — so exporting them is three register copies that
-    // inlining + SROA erase: zero new ALU, zero new memory traffic, on EVERY pixel including the
-    // ones that never take the SV0 gate. Computing `cross`/`dot`/`rsqrt`/the orientation flip
-    // HERE instead would place that chain in the fetch's straight-line result construction, where
-    // every covered pixel would pay it while `load_vb_sdf_mesh_mode` (word 7 bits 5..6) is 0 and
-    // nothing reads the result — a dark cost for a feature that is off, i.e. principle 1 and
-    // principle 3 in the SHIPPED DEFAULT. That is not hypothetical: it is the shape rung S2 first
-    // landed and the orchestrator rejected, with `spirv-dis` showing the `Cross`/`InverseSqrt`
-    // chain 80+ instructions AHEAD of the gate's own header read.
-    //
-    // Why the plane normal at all, rather than `world_normal`: built from the ACTUAL world
-    // positions it is the correct plane normal under any affine instance transform, whereas
-    // `world_normal` is `mul(m3, n)` with no inverse-transpose correction (see the limitation
-    // note at the `world_n*` lines below).
-    //
-    // `VB_SV0` is a SOURCE-level `#define` written by each of the three VB lit-producer tails
-    // before this header is `#include`d — NEVER a `-D` on the dxc command line, so it creates
-    // zero new compile variants. `vb_geo.comp.hlsl` does not define it and therefore preprocesses
-    // character-identical to its pre-SV0 form, which is what keeps `vb_geo.comp.spv` /
-    // `vb_geo_mv.comp.spv` byte-identical BY CONSTRUCTION rather than by DXC's goodwill. (DXC
-    // would in fact strip unguarded unread members anyway — measured, plan §11.4 — so the guard
-    // is checked at the level where it is observable, `dxc -P`, not at the `.spv` level.)
-    float3 tri_p0;
-    float3 tri_p1;
-    float3 tri_p2;
-#endif
 };
-
-#ifdef VB_SV0
-// VB-SV0 §4.2: the covered triangle's GEOMETRIC (true plane) face normal, oriented to agree with
-// the shading normal — the ONLY consumer of `tri_p0`/`tri_p1`/`tri_p2`.
-//
-// CALLERS MUST INVOKE THIS INSIDE THEIR `sv0_mode` GATE. It is deliberately not folded into
-// `vb_geom_fetch`: there it would sit in straight-line code and every covered pixel would pay a
-// `cross`, two `dot`s, an `rsqrt`, a `Normalize`, two selects and a conditional negate for a
-// feature whose runtime gate is 0 (principle 1). Keeping it a leaf that the three tails call from
-// inside `if ((sv0_mode & VB_SDF_MESH_SHADOW_BIT) != 0u && NoL > SHADOW_NDOTL_EPS)` is what makes
-// the dark path pay literally nothing — and that is verified on the artifact, not assumed: the
-// committed `.spv` are disassembled and the `Cross`/`InverseSqrt` chain must appear INSIDE the
-// gate's conditional region, never hoisted into the entry block by `-O3`.
-//
-// Degenerate / non-finite guard: fall back to the interpolated shading normal rather than emit a
-// NaN march origin — see `FACE_N_EPS2` for why the test is `isfinite && >` and not just `>`.
-// Winding-independent orientation: flip to agree with the shading normal, so a clockwise-wound
-// triangle does not bias the march origin INTO the surface.
-float3 vb_sv0_face_normal(VbGeomFetchResult geo) {
-    float3 fn = cross(geo.tri_p1 - geo.tri_p0, geo.tri_p2 - geo.tri_p0);
-    float l2 = dot(fn, fn);
-    bool plane_n_usable = isfinite(l2) && l2 > FACE_N_EPS2;
-    float3 face_n = plane_n_usable ? (fn * rsqrt(l2)) : normalize(geo.world_normal);
-    return (dot(face_n, geo.world_normal) < 0.0) ? -face_n : face_n;
-}
-#endif
 
 // The Decision-0/Decision-9 per-pixel geometry re-fetch: `(instance_id, raw_prim_id)` ->
 // `mesh_id` (via the instance row) -> `tri_count`/`index_width` (via `gMeshMeta`) -> 3 indices
@@ -669,14 +583,6 @@ VbGeomFetchResult vb_geom_fetch(uint instance_id, uint raw_prim_id, float2 pixel
     result.world_normal.x = vb_interp(grad.dlambda_dx, grad.dlambda_dy, sx0, sy0, pixel_xy.x, pixel_xy.y, float3(world_n0.x, world_n1.x, world_n2.x), w3).x;
     result.world_normal.y = vb_interp(grad.dlambda_dx, grad.dlambda_dy, sx0, sy0, pixel_xy.x, pixel_xy.y, float3(world_n0.y, world_n1.y, world_n2.y), w3).x;
     result.world_normal.z = vb_interp(grad.dlambda_dx, grad.dlambda_dy, sx0, sy0, pixel_xy.x, pixel_xy.y, float3(world_n0.z, world_n1.z, world_n2.z), w3).x;
-#ifdef VB_SV0
-    // VB-SV0 §4.2: export the three world positions the fetch already holds in registers — three
-    // register copies that inlining + SROA erase. NOT the face-normal chain: that belongs behind
-    // the caller's runtime gate, in `vb_sv0_face_normal`, so a frame with SV0 dark pays nothing.
-    result.tri_p0 = world_p0;
-    result.tri_p1 = world_p1;
-    result.tri_p2 = world_p2;
-#endif
     result.vertex_color.x = vb_interp(grad.dlambda_dx, grad.dlambda_dy, sx0, sy0, pixel_xy.x, pixel_xy.y, float3(v0.color.x, v1.color.x, v2.color.x), w3).x;
     result.vertex_color.y = vb_interp(grad.dlambda_dx, grad.dlambda_dy, sx0, sy0, pixel_xy.x, pixel_xy.y, float3(v0.color.y, v1.color.y, v2.color.y), w3).x;
     result.vertex_color.z = vb_interp(grad.dlambda_dx, grad.dlambda_dy, sx0, sy0, pixel_xy.x, pixel_xy.y, float3(v0.color.z, v1.color.z, v2.color.z), w3).x;

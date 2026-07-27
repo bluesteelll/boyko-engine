@@ -146,44 +146,13 @@ uint load_ddgi_mode(StructuredBuffer<uint> LightBuf) {
     return (LightBuf[7] >> 4) & 1u;
 }
 
-// === VB-SV0 — the VB tails' SDF-on-mesh shadow/contact-AO gate, packed in word 7 BITS 5..6 =====
-//
-// SV0 inlines an SDF soft shadow and a 5-tap contact AO into the VB lit-producer tails for pixels
-// the VB rasterizer covered. It is TWO terms, and they arm INDEPENDENTLY — hence a 2-bit field
-// rather than one bit: a rung can ship the shadow half armed while the AO half is still dark, and
-// (more importantly) each half's arming gate can be made to move pixels ON ITS OWN, so neither
-// can hide behind the other. Bit 5 = shadow, bit 6 = contact AO.
-//
-// Word 7 already carries `shadow_mode` (BIT 0), `contact_shadow_mode` (BIT 1), `csm_mode` (BIT 2),
-// `punctual_shadow_mode` (BIT 3), `ddgi_mode` (BIT 4), the tonemap sub-field (BITS 8..11) and the
-// terminator-softening sub-field (BITS 12..19). Bits 5..7 were the free run; SV0 claims 5..6 and
-// leaves 7. BIT-5..6 INDEPENDENCE: the mask `>> 5 & 3` reads ONLY bits 5 and 6, so a scene setting
-// any other sub-field never perturbs `sv0_mode`, and vice-versa. On every pre-SV0 scene word 7's
-// bits 5..6 are 0 ⇒ `VB_SDF_MESH_OFF` ⇒ both gated blocks (structural `if`s) never run ⇒ the
-// bound-but-unread binding-10 edit list is never read ⇒ byte-identical to today (the 0%-gate).
-// Host writer: `boyko_render::light::LightingConfig::shadow_gate_word` via
-// `VB_SDF_MESH_MODE_SHIFT`/`_MASK`.
-//
-// NOT wrapped in `#ifndef VB_SV0_KILL`: this header is included by a dozen shaders that have
-// nothing to do with SV0, and an unreferenced `static const` plus an uncalled function is inert in
-// every one of them. That inertness is MEASURED, not assumed — it is exactly what the kill-switch
-// byte gate (`vb_sv0_kill_switch.rs`) and the `deferred_pbr`/`vb_geo` byte gates assert.
-static const uint VB_SDF_MESH_OFF        = 0u;
-static const uint VB_SDF_MESH_SHADOW_BIT = 1u; // bit 5 — the SDF soft shadow on mesh
-static const uint VB_SDF_MESH_AO_BIT     = 2u; // bit 6 — the 5-tap contact AO on mesh
-
-uint load_vb_sdf_mesh_mode(StructuredBuffer<uint> LightBuf) {
-    return (LightBuf[7] >> 5) & 3u;
-}
-
 // === Tonemapper select — the resolve output-stage tonemap curve, packed in word 7 BITS 8..11 ====
 //
 // The resolve's final tonemap operator (applied to the accumulated linear radiance BEFORE the
 // manual gamma OETF) is a 4-bit field at bits 8..11 of the SAME header word 7 that carries
 // `shadow_mode`/`contact_shadow_mode`/`csm_mode`/`punctual_shadow_mode`/`ddgi_mode` (bits 0..4).
-// Bits 5..6 are VB-SV0's `sv0_mode`; bit 7 stays free. Reads ONLY bits 8..11, so it never
-// perturbs the shadow/GI gates — and vice-versa.
-// On every pre-tonemapper-select scene word 7's bits 8..11 are 0 ⇒
+// Bits 5..7 stay free (unused). Reads ONLY bits 8..11, so it never perturbs the shadow/GI gates —
+// and vice-versa. On every pre-tonemapper-select scene word 7's bits 8..11 are 0 ⇒
 // `load_tonemap_mode == TONEMAP_ACES` ⇒ the resolve calls the SAME `aces_fitted` it always did →
 // byte-identical to today (the 0%-gate). Host writer: `boyko_render::light::LightingConfig::
 // tonemap_bits` (via `LightHeaderGpu::new`).
@@ -201,9 +170,8 @@ uint load_tonemap_mode(StructuredBuffer<uint> LightBuf) {
 // wrapped ramp (`nol_wrapped`, Valve/half-Lambert style), so normal-mapped bump slopes fade into
 // shadow instead of clipping to hard dark islands under grazing light. An 8-bit fixed-point field
 // at bits 12..19 of the SAME header word 7 that carries the shadow/GI gates (bits 0..4) and the
-// tonemap sub-field (bits 8..11); bits 5..6 are VB-SV0's `sv0_mode`, and bit 7 plus 20..31 stay
-// free. Reads ONLY bits 12..19, so it never perturbs the other sub-fields — and vice-versa.
-// On every pre-softening scene word 7's bits
+// tonemap sub-field (bits 8..11); bits 5..7 and 20..31 stay free. Reads ONLY bits 12..19, so it
+// never perturbs the other sub-fields — and vice-versa. On every pre-softening scene word 7's bits
 // 12..19 are 0 ⇒ `load_terminator_softening == 0.0` ⇒ `nol_wrapped(nol, 0.0) == saturate(nol)` ⇒
 // byte-identical to today (the 0%-gate). Applied ONLY to the diffuse NoL of direct lights —
 // specular NoL and the shadow-gating NoL comparisons stay untouched. Host writer:

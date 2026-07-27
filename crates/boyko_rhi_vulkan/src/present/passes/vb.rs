@@ -54,204 +54,6 @@ const VB_DEPTH_CLEAR: f32 = 0.0;
 /// nothing for that pixel (the sky color already painted by `vb_sky` stands).
 const VB_ID_CLEAR: [u32; 4] = [0xFFFF_FFFF, 0, 0, 0];
 
-/// Projects one of the ten VB lit-producer pipelines out of the frame scene.
-///
-/// A fn-pointer table (rather than a `match` on the frame's selector inputs) is what lets
-/// [`note_vb_lit_producer`] identify the row from the pipeline the recorder ACTUALLY BOUND — see
-/// its doc for why that distinction is the whole point.
-///
-/// `any(debug_assertions, test)`, not `debug_assertions` alone: CI runs
-/// `cargo test --workspace --all-targets --release` (`.github/workflows/ci.yml`), and a
-/// `debug_assertions`-only table would silently take this file's two pins out of CI with it —
-/// the exact "the gate compiled itself away" vacuity this rung is closing elsewhere. A
-/// production build (release, not `test`) still compiles none of it.
-#[cfg(any(debug_assertions, test))]
-type VbLitProducerAccessor = fn(&GBufferScene<'_>) -> Option<VkPipeline>;
-
-/// The two `-D HWRT=1` split producers, when the feature is compiled in.
-#[cfg(all(any(debug_assertions, test), feature = "hwrt"))]
-const VB_LIT_PRODUCERS_HWRT: [VbLitProducerAccessor; 2] = [
-    |s| s.vb_shade_split_hwrt_pipeline.map(|p| p.pipeline),
-    |s| s.vb_shade_split_tex_hwrt_pipeline.map(|p| p.pipeline),
-];
-
-/// The `not(hwrt)` build has no such pipelines, so their rows can never match a bound handle.
-/// Kept as ROWS rather than dropped so the table's shape — and the plan's row numbering — is the
-/// same in both builds.
-#[cfg(all(any(debug_assertions, test), not(feature = "hwrt")))]
-const VB_LIT_PRODUCERS_HWRT: [VbLitProducerAccessor; 2] = [|_| None, |_| None];
-
-/// **The ten shipping VB lit-producer `.spv`, in the order of the VB-SV0 plan's §S4 variant
-/// matrix** — each `.spv` stem paired with the accessor for the scene field that carries it.
-///
-/// Name and field live in the SAME array element on purpose: they cannot be reordered apart, and
-/// there is no index space for a second table to disagree with. `boyko_app/tests/sv0_arm_matrix.rs`
-/// and `boyko_rhi_vulkan/tests/vb_sv0_offpath.rs::VB_SV0_ROWS` both number their rows in this
-/// order.
-#[cfg(any(debug_assertions, test))]
-const VB_LIT_PRODUCERS: [(&str, VbLitProducerAccessor); 10] = [
-    ("vb_resolve", |s| s.vb_resolve_pipeline.map(|p| p.pipeline)),
-    ("vb_resolve_froxel", |s| s.vb_resolve_froxel_pipeline.map(|p| p.pipeline)),
-    ("vb_shade", |s| s.vb_shade_pipeline.map(|p| p.pipeline)),
-    ("vb_shade_tex", |s| s.vb_shade_tex_pipeline.map(|p| p.pipeline)),
-    ("vb_shade_froxel", |s| s.vb_shade_froxel_pipeline.map(|p| p.pipeline)),
-    ("vb_shade_tex_froxel", |s| s.vb_shade_tex_froxel_pipeline.map(|p| p.pipeline)),
-    ("vb_shade_split", |s| s.vb_shade_split_pipeline.map(|p| p.pipeline)),
-    ("vb_shade_split_tex", |s| s.vb_shade_split_tex_pipeline.map(|p| p.pipeline)),
-    ("vb_shade_split_hwrt", VB_LIT_PRODUCERS_HWRT[0]),
-    ("vb_shade_split_tex_hwrt", VB_LIT_PRODUCERS_HWRT[1]),
-];
-
-/// The row index [`note_vb_lit_producer`] reports when the bound pipeline matches NO row of
-/// [`VB_LIT_PRODUCERS`] — one past the table, so it can share the change latch.
-#[cfg(any(debug_assertions, test))]
-const VB_LIT_PRODUCER_UNKNOWN: u32 = VB_LIT_PRODUCERS.len() as u32;
-
-/// Prints the VB lit producer this frame bound. Called only on a TRANSITION, never per frame, and
-/// at most [`VB_LIT_PRODUCER_LOG_CAP`] times per process.
-///
-/// `#[cold]` + `#[inline(never)]` so the debug-build record path keeps only
-/// [`note_vb_lit_producer`]'s table walk and compare — the same discipline
-/// `warn_textured_suppressed_by_motion_vectors` (`passes/gbuffer.rs`) uses.
-#[cfg(debug_assertions)]
-#[cold]
-#[inline(never)]
-fn report_vb_lit_producer(name: &str) {
-    eprintln!("boyko_rhi_vulkan: VB lit producer = {name}");
-}
-
-/// Printed once when the transition log is cut off, so a truncated log is never mistaken for a
-/// steady state that stopped changing.
-#[cfg(debug_assertions)]
-#[cold]
-#[inline(never)]
-fn report_vb_lit_producer_capped() {
-    eprintln!(
-        "boyko_rhi_vulkan: VB lit producer changed more than {VB_LIT_PRODUCER_LOG_CAP} times — \
-         further transitions suppressed (the producer selector is oscillating)"
-    );
-}
-
-/// The per-process cap on producer-transition lines.
-///
-/// The instrument reports on CHANGE, and one of the four selector inputs (`vb_use_classified`) is
-/// a PER-FRAME decision — so an oscillating scene could otherwise emit one line per frame for the
-/// life of the process, and `sv0_arm_matrix.rs` reads each run's whole log into a `String`. A cap
-/// bounds it. 64 is far above the 1-2 transitions a real boot makes (the textured-slot transient)
-/// and far below anything that could matter.
-#[cfg(debug_assertions)]
-const VB_LIT_PRODUCER_LOG_CAP: u32 = 64;
-
-/// **The row-identity instrument the VB-SV0 plan's §S4 per-row gate rests on.**
-///
-/// Which of the ten VB lit-producer `.spv` a frame binds is decided from four independent inputs
-/// (`path_vb_split` / `vb_use_classified` / `vb_tex_active` / `cluster_cull`), three of which are
-/// driven from OUTSIDE the process that asserts on the result (an env var, a resolved consumer
-/// set, an asset load that may not have finished on frame 0). A per-row gate that assumes "I set
-/// the env, therefore row 5 ran" is a gate quantified over a row it never verified — the exact
-/// vacuity class this campaign exists to close. One line in the run log makes the row an
-/// OBSERVATION.
-///
-/// # It identifies the row from the BOUND PIPELINE, not from the selector (code-review P2-d)
-///
-/// The first revision re-evaluated `(textured, froxel)` and mapped that to a row number. That is a
-/// MIRROR of the selector: it reports what the selector *decided*, so a selector that picks the
-/// right branch but reads the wrong scene field — the `(true, true)` cell wired to
-/// `vb_shade_tex_pipeline`, say — would log the row the gate expected while the GPU ran another
-/// module, and the gate would certify the wrong `.spv`. This crate has now had to un-drift two
-/// mirrors (the layer-3b host mirror, the pushed capacity word vs `OpArrayLength`), so the
-/// instrument takes the `VkPipeline` handle the recorder is about to bind and finds it in
-/// [`VB_LIT_PRODUCERS`]. There is exactly one evaluation of the selector, and this reads its
-/// OUTPUT.
-///
-/// A handle that matches no row is itself reported — that is a producer added without a row here,
-/// which would otherwise make the next row's gate silently unquantified.
-///
-/// # The rows-9-10 record-site assertion (code-review P1-a)
-///
-/// The §S4 variant matrix drops rows 9-10 (`vb_shade_split_hwrt`, `vb_shade_split_tex_hwrt`) on
-/// the argument that `ShadowSources::SDF_SOFT_MARCH` requires `!hwrt_denoise_or_vis_on`, which is
-/// exactly what selects them — so SV0 can never be armed while they are bound. That argument was
-/// checked only in the BOOT RESOLVER, which this record site never consults. The `debug_assert!`
-/// below closes the loop where the pipeline is actually bound, against
-/// `ResolvedRenderPathGpu::vb_sdf_mesh_armable` — the resolver's own answer, copied at the
-/// `boyko_app::gpu_scene` conversion seam. If a future edit ever binds an `_hwrt` producer on an
-/// SV0-armable boot, this fires instead of the matrix silently not covering it.
-///
-/// # Reports on CHANGE, and only in a `debug_assertions` build (code-review P2-a)
-///
-/// On CHANGE rather than once because `vb_use_classified` is a per-frame decision
-/// (`force || vb_tex_active_this_frame`) and a textured boot can spend its first frames on the
-/// untextured producer while the material's bindless slots are still being filled; a once-only
-/// latch would freeze that transient and name the WRONG row. A reader takes the LAST such line in
-/// a run's log as the steady state.
-///
-/// This reporting half — the latch and both `eprintln!`s — is `#[cfg(debug_assertions)]`. An
-/// unbounded stderr write reachable from `record_vb` violates principle 1 in the shipped default,
-/// and it is genuinely unbounded: `vb_use_classified` is decided per frame, so an oscillating
-/// scene emits a line per frame forever. (The [`VB_LIT_PRODUCER_LOG_CAP`] bound is the same
-/// defect's other half — even in a debug build, `sv0_arm_matrix.rs` reads each run's whole log
-/// into a `String`.)
-///
-/// Neither consumer needs it in release: `scripts\golden.ps1` and `scripts\sv0_arm_matrix.ps1`
-/// both drive `cargo test` in the dev profile, i.e. exactly the profile this is compiled into. An
-/// env-var latch was the alternative and is strictly worse here — it would leave a load and a
-/// branch per recorded frame in release to serve a knob no release consumer reads, whereas this
-/// leaves nothing at all.
-///
-/// The TABLE is deliberately on a wider gate (`any(debug_assertions, test)`) — see
-/// [`VbLitProducerAccessor`]: CI's release test run must still compile this file's two pins.
-#[cfg(debug_assertions)]
-#[inline]
-fn note_vb_lit_producer(scene: &GBufferScene<'_>, bound: VkPipeline) {
-    use core::sync::atomic::{AtomicU32, Ordering};
-
-    let row = VB_LIT_PRODUCERS.iter().position(|(_, accessor)| accessor(scene) == Some(bound));
-    let (idx, name) = row.map_or((VB_LIT_PRODUCER_UNKNOWN, "<not in VB_LIT_PRODUCERS>"), |i| {
-        (i as u32, VB_LIT_PRODUCERS[i].0)
-    });
-
-    // Identifying by handle is only unambiguous while the ten scene fields hold ten DISTINCT
-    // pipelines. Two rows carrying one handle would mean the frame assembly wired two variants to
-    // the same module — which is both a real rendering defect and the thing that would make this
-    // instrument name a plausible-but-wrong row (the `position` above takes the first match).
-    debug_assert!(
-        VB_LIT_PRODUCERS.iter().filter(|(_, accessor)| accessor(scene) == Some(bound)).count() <= 1,
-        "invariant: the bound VB lit pipeline matches more than one row of VB_LIT_PRODUCERS — two \
-         producer variants are wired to the same module, so the frame is not running the variant \
-         its selector chose"
-    );
-
-    debug_assert!(
-        !(name.ends_with("_hwrt") && scene.resolved_render_path.vb_sdf_mesh_armable),
-        "invariant: an `_hwrt` VB lit producer ({name}) is bound on a boot whose resolved render \
-         path IS SV0-armable — the VB-SV0 §S4 matrix excludes rows 9-10 precisely because \
-         ShadowSources::SDF_SOFT_MARCH and hwrt_denoise_or_vis_on are mutually exclusive, so this \
-         frame can carry an SV0 gate bit into a producer no gate covers"
-    );
-
-    // `u32::MAX` = "nothing reported yet", which no row index (nor the UNKNOWN sentinel) reaches.
-    static LAST: AtomicU32 = AtomicU32::new(u32::MAX);
-    static EMITTED: AtomicU32 = AtomicU32::new(0);
-    // Relaxed: a diagnostic latch, not a synchronization edge — nothing is published through it
-    // and the record path is single-threaded, so a racing duplicate line would be cosmetic.
-    if LAST.load(Ordering::Relaxed) != idx {
-        LAST.store(idx, Ordering::Relaxed);
-        match EMITTED.fetch_add(1, Ordering::Relaxed) {
-            n if n < VB_LIT_PRODUCER_LOG_CAP => report_vb_lit_producer(name),
-            n if n == VB_LIT_PRODUCER_LOG_CAP => report_vb_lit_producer_capped(),
-            _ => {}
-        }
-    }
-}
-
-/// Release builds carry no row-identity instrument at all — see the `debug_assertions` sibling's
-/// doc (code-review P2-a). Empty body, both arguments already live at every call site, so this
-/// compiles to nothing.
-#[cfg(not(debug_assertions))]
-#[inline(always)]
-fn note_vb_lit_producer(_scene: &GBufferScene<'_>, _bound: VkPipeline) {}
-
 impl Renderer<'_> {
     /// Records the VisibilityBuffer on-screen frame: `light_upload? → csm? → atlas? → vb_sky →
     /// vb_raster → vb_resolve → present-blit` — EXACTLY [`Renderer::declare_vb_graph`]'s
@@ -1088,14 +890,15 @@ impl Renderer<'_> {
             // frame — mirrors `declare_vb_graph`'s matching branch.
             //
             // VB-P1d: this three-way split is why the bench's `VbTimedPass::VbShade` bracket
-            // used to be recorded in ONLY the classified/fused arms (below).
+            // used to be recorded in ONLY the classified/fused arms (below) — a split frame RESET
+            // a query pair it then never WROTE, and the `VK_QUERY_RESULT_WAIT_BIT` readback would
+            // block forever on it. That hazard was held off by a caller-side precondition alone.
             //
-            // VB-SV0 rung S5 CLOSED that hole: the split arm (further down, at the
-            // `vb_shade_split` dispatch) now carries the SAME `VbTimedPass::VbShade` pair, so the
+            // It is now closed AT THE RECORDER: the split arm (further down, at the
+            // `vb_shade_split` dispatch) carries the SAME `VbTimedPass::VbShade` pair, so the
             // bracket covers whichever of the THREE lit producers a frame selects and exactly one
-            // begin/end pair is written per mesh-leg frame in every branch. S5 measures the SPLIT
-            // tail (matrix row 7) as one of its two structurally different rows, and a bench that
-            // cannot bracket it could not measure it at all.
+            // begin/end pair is written per mesh-leg frame in every branch. A precondition on one
+            // caller cannot protect a second one; writing the pair in every arm can.
             //
             // `boyko_app::runner`'s VB-P1d block keeps its `!mesh_geo_shade_split` assertion: it
             // is no longer a hang guard (the pair IS written on a split frame now) but a SCOPE
@@ -1189,10 +992,6 @@ impl Renderer<'_> {
                         vb_set0,
                     ),
                 };
-                // Row identity for the VB-SV0 §S4 per-row gate — the classified family (matrix
-                // rows 3-6). The BOUND handle is what is identified, never the `(textured,
-                // froxel)` cell that chose it (code-review P2-d).
-                note_vb_lit_producer(scene, vb_shade_pipeline.pipeline);
                 let vb_geometry_set = scene
                     .vb_geometry_set
                     .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_geometry_set");
@@ -1331,9 +1130,6 @@ impl Renderer<'_> {
                         vb_set0,
                     )
                 };
-                // Row identity for the VB-SV0 §S4 per-row gate — the fused family (matrix rows
-                // 1-2), identified from the BOUND handle (code-review P2-d).
-                note_vb_lit_producer(scene, vb_resolve_pipeline.pipeline);
                 let vb_geometry_set = scene
                     .vb_geometry_set
                     .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_geometry_set");
@@ -1885,16 +1681,16 @@ impl Renderer<'_> {
             let shade_pass = plan
                 .vb_shade_split
                 .expect("invariant: path_vb_split() => vb_shade_split pass declared");
-            // VB-SV0 rung S5: open the VbShade bracket on the SPLIT lit producer. The three
-            // producer arms are mutually exclusive (the `path_vb_split()` early arm above records
-            // neither of the other two), so exactly ONE begin/end pair of this slot is written per
-            // mesh-leg frame whichever branch runs — which is what keeps the `WAIT_BIT` readback
-            // from blocking and what lets one collector serve all three rows. Opened BEFORE
-            // `record_vb_pass` so the bracket spans the same "derived barriers + bind + dispatch"
-            // extent the classified/fused arms measure; a bracket that started after the barriers
-            // would not be comparable to the other two rows. GATED on `scene.vb_gpu_timing`:
-            // `None` on every golden/host/interactive frame records NOTHING, so the command stream
-            // stays byte-identical to the pre-S5 path.
+            // Open the VbShade bracket on the SPLIT lit producer. The three producer arms are
+            // mutually exclusive (the `path_vb_split()` early arm above records neither of the
+            // other two), so exactly ONE begin/end pair of this slot is written per mesh-leg frame
+            // whichever branch runs — which is what keeps the `WAIT_BIT` readback from blocking
+            // and what lets one collector serve all three rows. Opened BEFORE `record_vb_pass` so
+            // the bracket spans the same "derived barriers + bind + dispatch" extent the
+            // classified/fused arms measure; a bracket that started after the barriers would not
+            // be comparable to the other two rows. GATED on `scene.vb_gpu_timing`: `None` on every
+            // golden/host/interactive frame records NOTHING, so the command stream stays
+            // byte-identical to the path that had no bracket here.
             if let Some(tc) = scene.vb_gpu_timing {
                 // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
                 // reset at the frame top (`reset_frame`); `fi` is this present's in-flight slot.
@@ -1962,13 +1758,6 @@ impl Renderer<'_> {
                     vb_set0,
                 )
             };
-            // Row identity for the VB-SV0 §S4 per-row gate — the split family: matrix rows 7/8,
-            // and rows 9/10 (the `_hwrt` pair the plan removes from executing coverage on the
-            // structural argument that `SDF_SOFT_MARCH` and `hwrt_denoise_or_vis_on` are mutually
-            // exclusive). Identifying from the BOUND handle is what makes this one call cover all
-            // four in either feature build — and it carries the `debug_assert!` that reds if an
-            // `_hwrt` producer is ever bound on an SV0-armable boot (code-review P1-a).
-            note_vb_lit_producer(scene, shade_pipeline.pipeline);
             let vb_split_set1 = targets
                 .vb_split_set1
                 .as_ref()
@@ -2035,7 +1824,7 @@ impl Renderer<'_> {
                 );
                 (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
             }
-            // VB-SV0 rung S5: close the SPLIT lit producer's VbShade bracket. GATED.
+            // Close the SPLIT lit producer's VbShade bracket. GATED.
             if let Some(tc) = scene.vb_gpu_timing {
                 // SAFETY: recording is open; the pool was reset this frame; `fi` is this slot.
                 unsafe { tc.write_end(self.fns, cmd, fi, VbTimedPass::VbShade) };
@@ -2544,55 +2333,5 @@ impl Renderer<'_> {
             );
             (self.fns.cmd_dispatch)(cmd, group_x, group_y, 1);
         }
-    }
-}
-
-// Plain `#[cfg(test)]`: the TABLE is `any(debug_assertions, test)` precisely so these pins keep
-// running under CI's `cargo test --workspace --all-targets --release`. Only the reporting half
-// (`note_vb_lit_producer` and its two `#[cold]` printers) is `debug_assertions`-only.
-#[cfg(test)]
-mod tests {
-    use super::{VB_LIT_PRODUCERS, VB_LIT_PRODUCER_UNKNOWN};
-
-    /// The producer table's ROW ORDER is the VB-SV0 plan's §S4 variant matrix, which
-    /// `crates/boyko_app/tests/sv0_arm_matrix.rs` and
-    /// `boyko_rhi_vulkan/tests/vb_sv0_offpath.rs::VB_SV0_ROWS` both number against. Every name is
-    /// individually plausible, so a reorder or a typo would silently relabel a run log — and rows
-    /// 9/10's names are never asserted anywhere else (they cannot be rendered). This pins them.
-    ///
-    /// Names only: `note_vb_lit_producer` looks a row up by the pipeline handle the recorder
-    /// bound, so nothing here can be a second source of truth for WHICH row ran.
-    #[test]
-    fn vb_lit_producer_table_is_the_sv0_row_order() {
-        let names: Vec<&str> = VB_LIT_PRODUCERS.iter().map(|(n, _)| *n).collect();
-        assert_eq!(
-            names,
-            [
-                "vb_resolve",
-                "vb_resolve_froxel",
-                "vb_shade",
-                "vb_shade_tex",
-                "vb_shade_froxel",
-                "vb_shade_tex_froxel",
-                "vb_shade_split",
-                "vb_shade_split_tex",
-                "vb_shade_split_hwrt",
-                "vb_shade_split_tex_hwrt",
-            ]
-        );
-        assert_eq!(VB_LIT_PRODUCER_UNKNOWN, 10, "the unknown sentinel must sit one past the table");
-    }
-
-    /// Exactly the two rows the §S4 matrix excludes end in `_hwrt` — the predicate
-    /// `note_vb_lit_producer`'s rows-9-10 `debug_assert!` keys on (code-review P1-a).
-    ///
-    /// Without this, renaming `vb_shade_split_hwrt` (or adding a third hwrt producer whose stem
-    /// spells the suffix differently) would disarm that assertion silently, leaving the
-    /// structural-impossibility claim with no mechanical check at the record site again.
-    #[test]
-    fn exactly_the_two_excluded_rows_are_hwrt_suffixed() {
-        let hwrt: Vec<&str> =
-            VB_LIT_PRODUCERS.iter().map(|(n, _)| *n).filter(|n| n.ends_with("_hwrt")).collect();
-        assert_eq!(hwrt, ["vb_shade_split_hwrt", "vb_shade_split_tex_hwrt"]);
     }
 }

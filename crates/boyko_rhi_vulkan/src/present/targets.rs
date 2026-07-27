@@ -3021,15 +3021,6 @@ impl DeferredSets {
                     },
                     BindGroupEntry::StorageImage { texture: &core.lit[slot] },
                     BindGroupEntry::StorageBuffer { buffer: &gclassify_ring[slot] },
-                    // VB-SV0 rung S2 ("dark infra"): `b10` = `scene.edit_list`, the SDF edit-list
-                    // SSBO — the IDENTICAL expression the deferred/marcher sets already bind
-                    // (`:1402`, `:2378`, `:2745`, `:2903`). Entries are positional against the
-                    // layout's own binding numbers, so this must stay the LAST entry, matching
-                    // `vb_layout0`'s trailing `binding: 10`. `scene.edit_list` is a plain
-                    // (non-`Option`) field, so this is valid on EVERY VB boot including
-                    // `legs: Mesh` — where the list is boot-seeded EMPTY and the shader's own
-                    // gate keeps it bound-but-unread anyway.
-                    BindGroupEntry::StorageBuffer { buffer: scene.edit_list },
                 ];
                 let desc = BindGroupDesc::<Vulkan> { layout, entries: &entries };
                 match RhiDevice::create_bind_group(ctx, &desc) {
@@ -3126,10 +3117,6 @@ impl DeferredSets {
                     },
                     BindGroupEntry::StorageImage { texture: &core.lit[slot] },
                     BindGroupEntry::StorageBuffer { buffer: &gclassify_ring[slot] },
-                    // VB-SV0 rung S2: `b10` = `scene.edit_list` — see `vb_set0`'s own entry for
-                    // the full rationale. This set binds the SAME `vb_layout0` object, so it must
-                    // carry the SAME trailing entry or its arity no longer matches the layout.
-                    BindGroupEntry::StorageBuffer { buffer: scene.edit_list },
                 ];
                 let desc = BindGroupDesc::<Vulkan> { layout, entries: &entries };
                 match RhiDevice::create_bind_group(ctx, &desc) {
@@ -3239,11 +3226,6 @@ impl DeferredSets {
                     BindGroupEntry::StorageBuffer { buffer: &gclassify_ring[slot] },
                     BindGroupEntry::StorageBuffer { buffer: grid },
                     BindGroupEntry::StorageBuffer { buffer: index },
-                    // VB-SV0 rung S2: `b10` = `scene.edit_list` — see `vb_set0`'s own entry. It
-                    // trails `ClusterGrid` @8 / `LightIndexList` @9 here exactly as it trails
-                    // `gClassify` @7 in the non-froxel layout, which is the whole reason slot 10
-                    // was chosen over slot 8: ONE `Buf` declaration serves both layouts.
-                    BindGroupEntry::StorageBuffer { buffer: scene.edit_list },
                 ];
                 let desc = BindGroupDesc::<Vulkan> { layout, entries: &entries };
                 match RhiDevice::create_bind_group(ctx, &desc) {
@@ -3366,10 +3348,6 @@ impl DeferredSets {
                     BindGroupEntry::StorageBuffer { buffer: &gclassify_ring[slot] },
                     BindGroupEntry::StorageBuffer { buffer: grid },
                     BindGroupEntry::StorageBuffer { buffer: index },
-                    // VB-SV0 rung S2: `b10` = `scene.edit_list` — see `vb_set0`'s own entry. This
-                    // set binds the SAME `vb_layout0_froxel` object as `vb_set0_froxel`, so it
-                    // must carry the SAME trailing entry or its arity no longer matches.
-                    BindGroupEntry::StorageBuffer { buffer: scene.edit_list },
                 ];
                 let desc = BindGroupDesc::<Vulkan> { layout, entries: &entries };
                 match RhiDevice::create_bind_group(ctx, &desc) {

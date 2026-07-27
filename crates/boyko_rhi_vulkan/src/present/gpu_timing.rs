@@ -219,12 +219,13 @@ pub enum VbTimedPass {
     /// three branches — same "derived barriers + bind + dispatch" extent — so exactly one
     /// begin/end pair is written per mesh-leg frame whichever branch runs.
     ///
-    /// The split arm's bracket was added by **VB-SV0 rung S5**, whose paired A/B measures the
-    /// split tail (`.spv` matrix row 7) alongside the fused one (row 1). Before it, a split
+    /// The split arm's bracket closes a HANG HAZARD, not only a coverage gap. Before it, a split
     /// frame reset-but-never-wrote this pair and the `VK_QUERY_RESULT_WAIT_BIT` readback would
-    /// block forever; that hazard is now closed at the recorder rather than by a caller-side
-    /// precondition. VB-P1d's `!mesh_geo_shade_split` assertion survives as a SCOPE statement
-    /// (its break-even number is defined against the fused/classified tail), not as a hang guard.
+    /// block forever; the only thing standing between an armed bench and that hang was one
+    /// caller's `!mesh_geo_shade_split` precondition, which protects no second caller. The pair is
+    /// now written in every arm, so the hazard is closed at the recorder. VB-P1d's assertion
+    /// survives as a SCOPE statement (its break-even number is defined against the fused/
+    /// classified tail), not as a hang guard.
     VbShade = 2,
 }
 

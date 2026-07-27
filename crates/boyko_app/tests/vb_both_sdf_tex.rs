@@ -142,11 +142,5 @@ fn vb_both_sdf_tex_screenshot_dump() {
     // Requested AFTER `add_plugins` (which installs `RenderPathPlugin`'s `Deferred` default) so
     // this owner override wins — `vb_both.rs` / `vb_mesh_tex.rs`'s own post-plugins insert.
     app.insert_resource(RenderPathConfig { path: RenderPath::VisibilityBuffer, legs: GeometryLegs::Both });
-    // Rung S4's arming knobs — see `vb_both_sdf.rs`'s identical block for why they are inserted
-    // here (boot-read) and why the all-default case cannot move the blessed pin.
-    app.insert_resource(sv0_scene::lighting_config_from_env());
-    if let Some(ssao) = sv0_scene::ssao_config_from_env() {
-        app.insert_resource(ssao);
-    }
     app.run();
 }

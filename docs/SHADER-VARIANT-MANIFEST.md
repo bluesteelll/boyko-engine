@@ -94,9 +94,8 @@ tripwired by a `debug_assert` in `declare_forward_graph`).
 ## `vb_resolve.comp.hlsl` / `vb_shade.comp.hlsl` — the VisibilityBuffer shading family (compute)
 
 Two sources, each its own `{TEXTURED} x {FROXEL}` matrix against a shared VB-only Set-0 layout
-(`vb_layout0` — 9 bindings since VB-SV0 — for the base/TEXTURED rows, `vb_layout0_froxel` — 11
-bindings, `vb_layout0`'s own 0..7 plus `ClusterGrid`@8/`LightIndexList`@9 — for the FROXEL rows,
-both carrying the SV0 edit-list `Buf`@10; Set 1 = the
+(`vb_layout0` — 8 bindings — for the base/TEXTURED rows, `vb_layout0_froxel` — 10 bindings,
+`vb_layout0`'s own 0..7 plus `ClusterGrid`@8/`LightIndexList`@9 — for the FROXEL rows; Set 1 = the
 Forward-family shadow set verbatim, Set 2 = the Decision-0 geometry table). `vb_resolve.comp.hlsl`
 is the FUSED resolve (unpacks `vb_id`, re-fetches geometry, shades, writes `lit`);
 `vb_shade.comp.hlsl` is its material-classified sibling (VB-P2 classification plan) — the shading
@@ -109,36 +108,16 @@ unarmed frame on a FROXEL-compiled `.spv` still falls back to the identical flat
 (non-FROXEL) compile's tokens are byte-for-byte unperturbed by the `#else` arm — verified by re-DXC
 (`vb_froxel_spv_sync.rs`).
 
-**VB-SV0 interface delta, common to EVERY row in this family and in the split family below**
-(`docs/VB-SV0-SDF-SHADOW-PLAN.md`, rung S2 "dark infra"): `+ StructuredBuffer<uint> Buf` @10
-(`register(t0)`, space 0) — the SDF edit-list SSBO, the analytic `field_distance` source for the
-inlined SDF soft-shadow + contact-AO terms. It sits OUTSIDE every `-D` guard, so it is present in
-all ten rows and creates **no new variant**: the terms are gated at RUNTIME on light-header word 7
-bits 5..6 (`load_vb_sdf_mesh_mode`), which the host writes as 0 through rung S2, and the geometry
-the shadow-origin lift needs — the covered triangle's three world positions, `tri_p0`/`tri_p1`/
-`tri_p2` — is armed by a SOURCE-level `#define VB_SV0` rather than a command-line `-D`.
-
-The lift's `cross`/`dot`/`rsqrt`/orientation-flip chain is NOT in the geometry fetch: it lives in
-`vb_geom_fetch.hlsli`'s `vb_sv0_face_normal` leaf, which each tail calls from INSIDE its
-`sv0_mode & VB_SDF_MESH_SHADOW_BIT` gate, so an SV0-dark frame pays nothing for it beyond one
-wave-uniform header read. That placement is a GATE, not a convention:
-`vb_sv0_kill_switch.rs::vb_sv0_face_normal_chain_is_gated_not_straight_line` disassembles each of
-the ten committed artifacts and requires the chain's basic block to be reached only under a
-predicate derived from the runtime mode. It exists because nothing else in the rung can see a dark
-cost — the image golden is blind to cost by construction, and the kill-switch digest compares a
-compile in which the SV0 spans do not exist.
-
-Per-row byte growth vs the pre-SV0 artifact is **+10 124 B**, uniform across all ten (e.g.
-`vb_resolve.comp.spv` 47 824 → 57 952). Nearly all of it is the inlined march + AO behind the
-runtime `if` — that is what "compiled in" means — plus 148 B for the face-normal guard's finiteness
-test. `OpLoopMerge` goes 3 → 7 in the fused rows and 6 → 10 in the split rows and does NOT come back
-down, for the same reason: the loops are present in the module, just unreachable while the mode is 0.
-A later rung that widens these numbers has to say why.
-
-All ten `.spv` were re-DXC'd and re-pinned ONCE at S2; `vb_geo.comp.spv` / `vb_geo_mv.comp.spv` and
-all six `deferred_pbr` rows are byte-identical across that change and each of those is itself a gate
-(`vb_sv0_kill_switch.rs`,
-`cluster_grid_read_bound.rs::deferred_and_forward_families_spv_byte_identical`).
+⚠️ **A dark feature is not a free feature — MEASURED.** The VB-SV0 stage compiled an SDF
+soft-shadow + contact-AO march into all ten rows of this family and the split family below, behind
+a runtime light-header gate that shipped writing `0`. Every image golden held, and the cost was
+real anyway: with **both** A/B phases dark, the fused lit-producer dispatch went 24 576 / 23 552 ns
+before to 41 984 / 41 984 ns after — **+17.4..18.4 µs, ≈ +75 %**, on every VB frame of every VB
+scene, purely for CARRYING the term. It was reverted for that (the ten rows are back at their
+pre-SV0 bytes, `vb_resolve.comp.spv` 47 824 B). The lesson belongs in this manifest rather than
+only in the plan: neither gate that stage ran could see it — image byte-identity is blind to cost
+by construction, and the paired A/B cancelled it because both arms carried the same module. A rung
+that widens a shipped `.spv` owes a dark-path measurement, not only a byte-identity pin.
 
 | Source | Variant | `TEXTURED` | `FROXEL` | `.spv` | dxc `-T` | Interface delta vs base |
 |---|---|---|---|---|---|---|
@@ -167,11 +146,10 @@ DDGI, shadow-temporal, or the HWRT carrier — arms `mesh_geo_shade_split`). Set
 verbatim; Set 1 is a DISTINCT 11-binding `vb_split_layout1` (the Forward shadow table @0-3 plus
 `gSsao`@4, the DDGI atlas @5-9 and `gShadowVis`@10).
 
-*Recorded rather than silently fixed:* these four rows had **no manifest entry at all** before
-VB-SV0 S2 added this section — the same standing-rule gap `deferred_pbr_wrap.comp.spv` had until
-`a4824a8`. They are added here because S2 re-pins all four and the SV0 interface delta has to be
-documented somewhere. `vb_geo.comp.spv` / `vb_geo_mv.comp.spv` and `vb_raster.{vs,fs}.spv` are
-STILL unlisted; SV0 does not perturb them, so closing that gap belongs in its own commit.
+*Provenance: these four rows had **no manifest entry at all** until 2026-07-26 — the same
+standing-rule gap `deferred_pbr_wrap.comp.spv` carried until `a4824a8`. Found while enumerating the
+VB-SV0 blast radius, which had to re-pin all four; the section outlived that stage's revert because
+the rows themselves ship regardless of it.*
 
 | Variant | `TEXTURED` | `HWRT` | `.spv` | dxc `-T` | Interface delta vs base |
 |---|---|---|---|---|---|
@@ -181,16 +159,9 @@ STILL unlisted; SV0 does not perturb them, so closing that gap belongs in its ow
 | textured + hwrt | `1` | `1` | `vb_shade_split_tex_hwrt.comp.spv` | `cs_6_0` | both deltas above — the two `#ifdef`s are independent, non-overlapping spans. |
 
 Reachability note: the two `HWRT` rows require `hwrt_denoise_or_vis_on`, which is exactly the
-condition `ShadowSources::SDF_SOFT_MARCH` requires to be FALSE — so VB-SV0 is compiled into them
-but can never be armed while they are bound. As of rung **S4** that exclusion is MECHANICAL, not
-argued: `boyko_render::render_path_config::tests::sv0_never_arms_under_hwrt` runs the truth table
-through both `resolve_rules` and the production `resolve_render_path`, and its red mutation
-(delete the `&& !consumers.hwrt_denoise_or_vis_on` term from `resolve_rules`' `SDF_SOFT_MARCH`
-arming) was demonstrated at that rung. The runtime half is
-`boyko_render::light::sync_sv0_light_gate`, which clamps the owner's request to
-`ResolvedRenderPath::vb_sdf_mesh_armable()` and can therefore only ever CLEAR a bit; these two
-rows are additionally covered by `record_vb`'s `note_vb_lit_producer` line, which names the bound
-producer in the run log.
+condition `ShadowSources::SDF_SOFT_MARCH` requires to be FALSE — so no SDF-march-sourced shadow
+term can ever be armed while they are bound. That exclusion rests on the boot resolver's predicate
+alone and has no mechanical check at the site where the pipeline is selected.
 
 ## `vb_geo.comp.hlsl` — the R9 thin-aux geometry pre-pass (compute)
 
@@ -205,11 +176,9 @@ half, dispatched when `path_vb_split()` resolves. It re-fetches the covered tria
 
 *Provenance: this section was **missing** until 2026-07-26. `vb_geo` has shipped since rung R9 with a
 real `-D` axis and no row — the same standing-rule violation `deferred_pbr_wrap` carried until
-`a4824a8`. Found while enumerating the SV0 blast radius at rung S2, which re-DXCs both rows as its
-gate (b′) and must therefore prove them **unperturbed**: SV0's `#ifdef VB_SV0` seam in
-`vb_geom_fetch.hlsli` is compiled only by the three lit-producer tails, never by `vb_geo`, so both
-artifacts are byte-identical by construction — and that is a gate, not a hope, because `dxc -P` of
-`vb_geo.comp.hlsl` with and without the guard must differ.*
+`a4824a8`. Found while enumerating the VB-SV0 blast radius, which had to prove both rows
+**unperturbed**; the section outlived that stage's revert because the rows themselves ship
+regardless of it.*
 
 ## Deliberately ABSENT from this manifest: `vb_raster.{vs,fs}.hlsl`
 

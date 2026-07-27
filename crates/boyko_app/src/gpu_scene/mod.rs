@@ -342,10 +342,6 @@ fn to_gpu_resolved_render_path(r: &boyko_render::ResolvedRenderPath) -> Resolved
         thin_aux: r.thin_aux.bits(),
         shadow: r.shadow.bits(),
         froxel_light_cull: r.froxel_light_cull,
-        // VB-SV0 rung S4 (code-review P1-a): the resolver's OWN answer, called here rather than
-        // re-derived downstream — `boyko_rhi_vulkan` cannot name `ShadowSources`, so a recompute
-        // there would have to hardcode the `SDF_SOFT_MARCH` bit value.
-        vb_sdf_mesh_armable: r.vb_sdf_mesh_armable(),
     }
 }
 
@@ -1099,26 +1095,13 @@ pub(crate) struct GpuSceneBundles {
     /// against [`Self::vb_layout0_froxel`]. `None` unless the froxel arm is built.
     vb_shade_tex_froxel_pipeline: Option<ComputePipeline>,
     /// VB-P1d: the froxel cull/shade GPU-timestamp bench collector — a per-FIF ring of
-    /// `2 * VB_PASS_COUNT`-query TIMESTAMP pools. Built at [`Self::boot`] ONLY when
-    /// `BOYKO_VB_BENCH` **or** `BOYKO_SV0_S5_BENCH` is set AND the device supports timestamps
+    /// `2 * VB_PASS_COUNT`-query TIMESTAMP pools. Built at [`Self::boot`] ONLY when the
+    /// `BOYKO_VB_BENCH` env is set AND the device supports timestamps
     /// (`VulkanContext::device_caps().timestamps_usable()`); `None` on every other boot (every
     /// golden/host/interactive run — the DEFAULT), so [`Self::scene`] threads `vb_gpu_timing:
     /// None` into every `GBufferScene` and the `record_vb` command stream stays
-    /// byte-identical. See [`Self::vb_bench_armed`] / [`Self::read_vb_bench_ns`] (VB-P1d) and
-    /// [`Self::sv0_s5_bench_armed`] / [`Self::read_vb_lit_producer_ticks`] (VB-SV0 S5).
-    ///
-    /// ONE collector serves both benches because both bracket `record_vb`'s passes and both
-    /// would otherwise need their own `if let Some(tc)` at every one of the six recorder sites.
-    /// [`Self::sv0_s5_bench`] says which of the two DRIVES it; the two env knobs are mutually
-    /// exclusive (asserted at [`Self::boot`]).
+    /// byte-identical. See [`Self::vb_bench_armed`] / [`Self::read_vb_bench_ns`].
     vb_bench: Option<VbTimestampCollector>,
-    /// VB-SV0 rung S5: `true` iff `BOYKO_SV0_S5_BENCH` was set at [`Self::boot`] — i.e. the S5
-    /// paired A/B, not VB-P1d, drives the shared [`Self::vb_bench`] collector.
-    ///
-    /// A plain `bool` rather than a second collector: the two benches read DIFFERENT pairs of the
-    /// same pool (VB-P1d reads all three in ns; S5 reads only `VbShade`, in raw ticks, because it
-    /// must evidence the counter's integer lattice), but they record the same brackets.
-    sv0_s5_bench: bool,
     /// VB-SV0 rung S1.5: the DEFERRED fine-marcher GPU-timestamp bench collector — a per-FIF
     /// ring of `2 * SV0_PASS_COUNT`-query TIMESTAMP pools. Built at [`Self::boot`] ONLY when the
     /// `BOYKO_SV0_BENCH` env is set AND the device supports timestamps; `None` on every other
@@ -3477,26 +3460,6 @@ impl GpuSceneBundles {
                         kind: DescriptorKind::StorageBuffer,
                         stage: ShaderStage::COMPUTE,
                     },
-                    // VB-SV0 (docs/VB-SV0-SDF-SHADOW-PLAN.md §2), rung S2 ("dark infra"): the SDF
-                    // edit-list SSBO at slot 10 — `Buf`, the analytic `field_distance` source the
-                    // three VB lit-producer tails now declare. Added to this ONE shared layout
-                    // object BEFORE any VB pipeline is built (the SAME R5 reason `gClassify` @7
-                    // was: a set built against a structurally-identical-but-DISTINCT layout object
-                    // is silently incompatible), so `vb_raster`/`vb_sky`/`vb_resolve`/`vb_shade*`
-                    // all rebuild against the 9-binding layout and the ones whose SPIR-V never
-                    // declares a `binding(10, 0)` simply carry it bound-but-unread.
-                    //
-                    // Slot 10 and not 8: 8/9 are `ClusterGrid`/`LightIndexList` in the WIDER
-                    // `vb_layout0_froxel`, so 8 is free only in scenes that never arm the froxel
-                    // cull — a silent, scene-config-dependent collision. 10 is free in both, and
-                    // using the SAME slot in both layouts is what lets ONE `Buf` declaration in
-                    // the shared tail source serve the froxel and non-froxel pipelines alike.
-                    BindGroupLayoutEntry {
-                        binding: 10,
-                        count: 1,
-                        kind: DescriptorKind::StorageBuffer,
-                        stage: ShaderStage::COMPUTE,
-                    },
                 ],
             },
         )
@@ -3601,28 +3564,14 @@ impl GpuSceneBundles {
             "invariant: dispatch grid covers composite pixel count at any SSAA scale"
         );
 
-        // VB-P1d: the `record_vb` GPU-timestamp bench collector — armed ONLY when
+        // VB-P1d: the froxel cull/shade GPU-timestamp bench collector — armed ONLY when
         // `BOYKO_VB_BENCH` (presence-gate; any value) is set AND the device supports
         // timestamps. Unset (every golden/host/interactive boot, the DEFAULT) ⇒ `None` ⇒
         // `Self::scene` threads `vb_gpu_timing: None` ⇒ the `record_vb` command stream is
-        // byte-identical to the pre-VB-P1d path. These are the SOLE env reads this fn performs
+        // byte-identical to the pre-VB-P1d path. This is the SOLE env read this fn performs
         // (every other input is a plain fn parameter, `boot`'s own doc's discipline) — kept
         // isolated to this one bench-only capability so the rest of `boot` stays untouched.
-        let vb_p1d_bench_requested = std::env::var("BOYKO_VB_BENCH").is_ok();
-        // VB-SV0 rung S5: the SECOND consumer of the SAME collector — the paired A/B of the VB
-        // lit-producer dispatch. Same presence-gate shape; see `Self::sv0_s5_bench`'s doc for why
-        // one collector serves both.
-        let sv0_s5_bench_requested = std::env::var("BOYKO_SV0_S5_BENCH").is_ok();
-        // Mutually exclusive by construction: both drive `vb_bench`'s pools, both would run their
-        // own frame-tail readback + summary loop, and the two loops disagree about what a frame
-        // means (VB-P1d takes every frame; S5 tags each with an ABBA position). Fail at boot, not
-        // with a number nobody can interpret.
-        assert!(
-            !(vb_p1d_bench_requested && sv0_s5_bench_requested),
-            "invariant: BOYKO_VB_BENCH and BOYKO_SV0_S5_BENCH are mutually exclusive (both drive \
-             the same VbTimestampCollector, with different per-frame protocols)"
-        );
-        let vb_bench_requested = vb_p1d_bench_requested || sv0_s5_bench_requested;
+        let vb_bench_requested = std::env::var("BOYKO_VB_BENCH").is_ok();
         let vb_bench_timestamps_usable = ctx.device_caps().timestamps_usable();
         // O2: a requested-but-declined bench is otherwise SILENT — `vb_bench` stays `None`,
         // `vb_bench_armed()` reads `false`, and the runner's whole bench loop never arms, never
@@ -3630,8 +3579,7 @@ impl GpuSceneBundles {
         // here, the ONE place that knows both halves of the gate.
         if vb_bench_requested && !vb_bench_timestamps_usable {
             eprintln!(
-                "VB-P1d/VB-SV0-S5 bench: BOYKO_VB_BENCH or BOYKO_SV0_S5_BENCH set but device \
-                 timestamps are unusable — bench disabled."
+                "VB-P1d bench: BOYKO_VB_BENCH set but device timestamps are unusable — bench disabled."
             );
         }
         let vb_bench = (vb_bench_requested && vb_bench_timestamps_usable).then(|| {
@@ -3641,9 +3589,6 @@ impl GpuSceneBundles {
             });
             VbTimestampCollector::new(pools)
         });
-        // Kept even when the collector was declined, so `sv0_s5_bench_armed()` is exactly
-        // "requested AND usable" rather than "requested" — the runner's whole S5 block keys on it.
-        let sv0_s5_bench = sv0_s5_bench_requested && vb_bench_timestamps_usable;
 
         // VB-SV0 rung S1.5: the Deferred marcher bench collector — the SAME presence-gate +
         // device-cap shape as `vb_bench` above, on its own env knob so the two benches can never
@@ -3801,7 +3746,6 @@ impl GpuSceneBundles {
             vb_shade_froxel_pipeline: None,
             vb_shade_tex_froxel_pipeline: None,
             vb_bench,
-            sv0_s5_bench,
             sv0_bench,
         }
     }
@@ -4571,20 +4515,6 @@ impl GpuSceneBundles {
                     },
                     BindGroupLayoutEntry {
                         binding: 9,
-                        count: 1,
-                        kind: DescriptorKind::StorageBuffer,
-                        stage: ShaderStage::COMPUTE,
-                    },
-                    // VB-SV0 (docs/VB-SV0-SDF-SHADOW-PLAN.md §2), rung S2 ("dark infra"): the SDF
-                    // edit-list SSBO at slot 10 — the SAME entry `vb_layout0` gains, at the SAME
-                    // slot, so ONE `Buf` declaration in the shared tail sources binds correctly
-                    // against either layout. Slot 10 rather than 8 precisely because 8/9 are the
-                    // froxel pair right above: reusing 8 would be a collision visible only in
-                    // scenes that arm the cull, and no validation layer on this box reports it.
-                    // Binding numbers need not be contiguous — only the ENTRY COUNT is capped
-                    // (`MAX_BIND_GROUP_BINDINGS = 24`), so 10 entries -> 11 is well inside it.
-                    BindGroupLayoutEntry {
-                        binding: 10,
                         count: 1,
                         kind: DescriptorKind::StorageBuffer,
                         stage: ShaderStage::COMPUTE,
@@ -5758,12 +5688,10 @@ impl GpuSceneBundles {
             // identical command stream — the offline `software_ray_baseline_cost` harness is
             // the only `Some` caller).
             gpu_timing: None,
-            // VB-P1d + VB-SV0 rung S5: the shared `record_vb` bench collector, armed ONLY when
-            // `BOYKO_VB_BENCH` **or** `BOYKO_SV0_S5_BENCH` was read at `Self::boot` time AND the
-            // device supports timestamps — `None` on every other boot (every golden/host/
-            // interactive run), so the recorded command stream stays byte-identical. Which of the
-            // two DRIVES it is `Self::vb_bench_armed` / `Self::sv0_s5_bench_armed`; the recorder
-            // does not care and writes the same three pairs either way.
+            // VB-P1d: the froxel cull/shade bench collector, armed ONLY when `BOYKO_VB_BENCH`
+            // was read at `Self::boot` time AND the device supports timestamps
+            // (`Self::vb_bench_armed`'s own doc) — `None` on every other boot (every golden/
+            // host/interactive run), so the recorded command stream stays byte-identical.
             vb_gpu_timing: self.vb_bench.as_ref(),
             // VB-SV0 rung S1.5: the Deferred marcher bench collector, armed ONLY when
             // `BOYKO_SV0_BENCH` was read at `Self::boot` time AND the device supports timestamps
@@ -6146,83 +6074,13 @@ impl GpuSceneBundles {
     }
 
     /// VB-P1d: `true` iff the froxel cull/shade GPU-timestamp bench collector was armed at
-    /// [`Self::boot`] (`BOYKO_VB_BENCH` set AND the device supports timestamps) **and VB-P1d is
-    /// the bench driving it**. The runner reads this ONCE, before the frame loop starts, to
-    /// decide whether to drive the bench accumulation + summary print (see
-    /// `boyko_app::runner`'s VB-P1d block) — `false` on every non-bench run, so that whole block
-    /// is dead code there.
-    ///
-    /// The `&& !sv0_s5_bench` term is what keeps VB-SV0 S5 — which shares the collector — from
-    /// also arming VB-P1d's loop: two frame-tail readbacks of one pool would each consume the
-    /// other's results, and VB-P1d's own `!mesh_geo_shade_split` precondition would additionally
-    /// panic on S5's split row. The two knobs are already mutually exclusive at [`Self::boot`];
-    /// this makes the driver selection explicit at the read site too.
+    /// [`Self::boot`] (`BOYKO_VB_BENCH` set AND the device supports timestamps). The runner
+    /// reads this ONCE, before the frame loop starts, to decide whether to drive the bench
+    /// accumulation + summary print (see `boyko_app::runner`'s VB-P1d block) — `false` on
+    /// every non-bench run, so that whole block is dead code there.
     #[inline]
     pub(crate) fn vb_bench_armed(&self) -> bool {
-        self.vb_bench.is_some() && !self.sv0_s5_bench
-    }
-
-    /// VB-SV0 rung S5: `true` iff the shared `record_vb` timestamp collector was armed at
-    /// [`Self::boot`] **and S5 is the bench driving it** (`BOYKO_SV0_S5_BENCH` set AND the device
-    /// supports timestamps). The runner reads this ONCE, before the frame loop starts, to decide
-    /// whether to drive the counterbalanced A/B + summary print — `false` on every non-bench run,
-    /// so that whole block is dead code there.
-    #[inline]
-    pub(crate) fn sv0_s5_bench_armed(&self) -> bool {
-        self.vb_bench.is_some() && self.sv0_s5_bench
-    }
-
-    /// VB-SV0 rung S5: reads back frame `fi`'s VB **lit-producer** dispatch cost in RAW TIMESTAMP
-    /// TICKS from the shared `record_vb` bench collector. `None` iff [`Self::sv0_s5_bench_armed`]
-    /// is `false` (the collector was never created, or VB-P1d is driving it).
-    ///
-    /// # Why ticks and not nanoseconds
-    ///
-    /// The same reason [`Self::read_sv0_marcher_ticks`] gives, and it is load-bearing for S5's
-    /// gate rather than decorative: the GPU timestamp counter advances on a hardware LATTICE that
-    /// no Vulkan limit reports (`timestampPeriod` is the ns-per-tick SCALE, not the STEP), the
-    /// runner recovers it as the GCD of the raw per-frame tick counts, and a float round-trip
-    /// through the period is not evidence of an integer lattice. S1.5 measured that lattice at
-    /// 1024 ns on this box — six times the quantum was the WHOLE signal — so a rung that failed
-    /// to report its own resolution would be measuring it instead of the term.
-    ///
-    /// # Why only `VbShade`, when the pool holds three pairs
-    ///
-    /// `CullReset`/`CullDispatch` are written unconditionally on every bench-armed frame (their
-    /// own doc), so reading a SUBSET cannot hang: `read_query_pool_ticks` is asked for all three
-    /// pairs and S5 keeps one. The two cull pairs are outside the term under measurement (SV0
-    /// lives in the lit producer's per-pixel tail) and are dropped rather than reported, so no
-    /// reader can mistake them for part of the A/B.
-    ///
-    /// The `VbShade` pair is written by whichever of the three lit producers the frame selects —
-    /// including `vb_shade_split`, which rung S5 bracketed for exactly this purpose. The caller
-    /// MUST still hold `mesh_leg` (an SDF-only VB frame records no lit producer at all and the
-    /// `VK_QUERY_RESULT_WAIT_BIT` readback would block); `boyko_app::runner`'s S5 block asserts it.
-    ///
-    /// # Panics
-    /// Panics (`expect("invariant: ...")`) if the readback fails — a bench-only diagnostic path
-    /// (never reached on the shipped default), so a query-pool read failure here is a
-    /// setup/driver bug, not a recoverable per-frame condition.
-    pub(crate) fn read_vb_lit_producer_ticks(
-        &self,
-        ctx: &VulkanContext,
-        fi: usize,
-    ) -> Option<u64> {
-        if !self.sv0_s5_bench {
-            return None;
-        }
-        let collector = self.vb_bench.as_ref()?;
-        let mut scratch = [0u64; (2 * VB_PASS_COUNT) as usize];
-        let mut out_ticks = [0u64; VB_PASS_COUNT as usize];
-        RhiDevice::read_query_pool_ticks(
-            ctx,
-            collector.pool(fi),
-            VB_PASS_COUNT,
-            &mut scratch,
-            &mut out_ticks,
-        )
-        .expect("invariant: VB-SV0 S5 bench query-pool readback");
-        Some(out_ticks[VbTimedPass::VbShade.slot() as usize])
+        self.vb_bench.is_some()
     }
 
     /// VB-P1e H0: reads back frame `fi`'s bench triple — `(cull_reset_ns, cull_dispatch_ns,
@@ -6245,13 +6103,13 @@ impl GpuSceneBundles {
     /// `CullDispatch` run even when the froxel arm itself is not boot-built (reporting
     /// near-zero ns); `VbTimedPass::VbShade` brackets whichever of `vb_shade`
     /// (classified)/`vb_resolve` (fused) this frame's `mesh_leg` + `vb_use_classified` select —
-    /// mutually exclusive, always exactly one. **VB-SV0 rung S5 added the split arm's bracket**,
-    /// so `vb_shade_split` now writes the pair too and a split frame no longer hangs the
-    /// `VK_QUERY_RESULT_WAIT_BIT` readback below. The caller's `!mesh_geo_shade_split` assertion
-    /// therefore survives as a SCOPE statement rather than a hang guard: this bench's number is
-    /// `flat_shade_ns` vs `froxel_total_ns` on the fused/classified tail, and admitting a third
-    /// producer would silently change what the break-even means. S5 reads the same pair on the
-    /// split row through [`Self::read_vb_lit_producer_ticks`], which is where that row belongs.
+    /// mutually exclusive, always exactly one, ON A NON-SPLIT FRAME. The VB split lit-producer
+    /// (`vb_shade_split`, armed by `resolved_render_path.mesh_geo_shade_split` — a pre-light
+    /// consumer: SSAO/DDGI/SSR/shadow-denoise/Temporal under `VisibilityBuffer`) is UNBRACKETED
+    /// and OUT OF SCOPE for this bench (`vb.rs`'s own VB-P1d doc on its three-way producer
+    /// choice); a split frame would reset-but-never-write the VbShade pair, hanging the
+    /// `VK_QUERY_RESULT_WAIT_BIT` readback below — this is why the caller MUST assert
+    /// `!mesh_geo_shade_split` first.
     ///
     /// VB-SV0 rung S1.5: `true` iff the Deferred marcher bench collector was armed at
     /// [`Self::boot`] (`BOYKO_SV0_BENCH` set AND the device supports timestamps). The runner

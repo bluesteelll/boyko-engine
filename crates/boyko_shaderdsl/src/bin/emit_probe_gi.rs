@@ -551,26 +551,12 @@ void main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {{
     )
 }
 
-/// The `sdf_soft_shadow_ranged` function COPIED VERBATIM from the committed
-/// `crates/boyko_rhi_vulkan/shaders/sdf_shadow_leaves.hlsli` — pinned token-equal to it by the
-/// `sdf_soft_shadow_ranged_copy_matches_resolve` sync test, which is where to re-copy from when
-/// this constant has to be refreshed. The tuning symbols
+/// The `sdf_soft_shadow_ranged` function COPIED VERBATIM from the committed `deferred_pbr.hlsl`
+/// (plan §1.1 — the frozen resolve function, pinned byte-equal by the
+/// `sdf_soft_shadow_ranged_copy_matches_resolve` sync test). A shared `.hlsli` dedup is deferred
+/// to I3 (introducing it now would touch the frozen resolve → 0%-gate risk). The tuning symbols
 /// (`SHADOW_MINT`/`MAX_IT`/`SHADOW_K`/`SHADOW_HIT_EPS`/`FIELD_LIPSCHITZ_L`/`SHADOW_MINT_STEP`)
 /// are provided by `sdf_field.hlsli` + the shadow header this pass shares with the resolve.
-///
-/// It used to be copied from `deferred_pbr.hlsl`, which held the only hand-placed definition until
-/// VB-SV0 rung S2 moved it into the shared leaf header (`docs/VB-SV0-SDF-SHADOW-PLAN.md` §4.1) so
-/// the three VB lit-producer tails could consume one definition instead of hand-copying it. The
-/// copy's MEANING is unchanged — the probe-update march must equal the resolve's — and that is
-/// independent of which file the resolve's copy is spelled in.
-///
-/// ⚠️ The EMITTED comment inside the string below still says "copied VERBATIM from
-/// `deferred_pbr.hlsl`", and that is DELIBERATE, not an oversight — do NOT "fix" it. §4.1 scoped
-/// S2's blast radius to exactly ten re-pinned `.spv`. Editing the emitted text forces a re-emit
-/// and re-commit of the generated `sdf_probe_update.comp.hlsl`, and this repo's standing rule is
-/// that a regenerated shader is re-DXC'd and its `.spv` re-pinned — pulling
-/// `sdf_probe_update.comp.spv` into the rung for a comment. The pointer that has to be correct is
-/// THIS doc, because this is what a future regeneration reads.
 const SDF_SOFT_SHADOW_RANGED_COPY: &str = "\
 // The multi-light SDF shadow marcher — copied VERBATIM from `deferred_pbr.hlsl` (pinned equal by\n\
 // `sdf_soft_shadow_ranged_copy_matches_resolve`). `t_max` = the light reach.\n\

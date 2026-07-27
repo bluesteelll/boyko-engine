@@ -403,10 +403,7 @@ pub enum ClusterSelectMode {
 //   2        csm_mode                this file: CSM_MODE_BIT / LightingConfig::csm_shadows
 //   3        punctual_shadow_mode    this file: PUNCTUAL_MODE_BIT / LightingConfig::punctual_shadows
 //   4        ddgi_mode               this file: DDGI_MODE_BIT / LightingConfig::ddgi_indirect
-//   5..6     vb_sdf_mesh (SV0)       this file: VB_SDF_MESH_MODE_SHIFT/_MASK /
-//                                     LightingConfig::vb_sdf_mesh_shadow (bit 5) +
-//                                     ::vb_sdf_mesh_ao (bit 6) — two INDEPENDENT terms
-//   7        (free)                  —
+//   5..7     (free)                  —
 //   8..11    tonemap operator        this file: TONEMAP_MODE_SHIFT/_MASK / LightingConfig::tonemapper
 //   12..19   terminator softening    this file: TERMINATOR_SOFT_SHIFT/_MASK / LightingConfig::terminator_softening
 //   20..31   (free)                  —
@@ -439,40 +436,6 @@ pub const PUNCTUAL_MODE_BIT: u32 = 3;
 /// [`sync_ddgi_light_gate`](crate::ddgi_config::sync_ddgi_light_gate). DEFAULT `false` on
 /// every pre-SDFDDGI scene ⇒ word 7 bit 4 stays 0, the byte-identical 0%-gate.
 pub const DDGI_MODE_BIT: u32 = 4;
-
-/// Word-7 sub-field for VB-SV0's SDF-on-mesh gate: bits 5..6 (2 bits). Bit 5 arms the SDF
-/// soft shadow, bit 6 the 5-tap contact AO, and they arm INDEPENDENTLY — SV0 is two terms,
-/// not one, and giving them separate bits is what lets each half's arming gate be shown to
-/// move pixels ON ITS OWN instead of hiding behind the other. Above the shadow/GI gate bits
-/// (0..4) and below the tonemap sub-field (8..11); bit 7 stays free. Mirrors the shader's
-/// `load_vb_sdf_mesh_mode` (`light_table.hlsli`: `(LightBuf[7] >> 5) & 3`). `0` on every
-/// pre-SV0 scene ⇒ both gated blocks are structurally skipped ⇒ byte-identical (the 0%-gate).
-pub const VB_SDF_MESH_MODE_SHIFT: u32 = 5;
-/// The 2-bit mask for the VB-SV0 sub-field (bits [`VB_SDF_MESH_MODE_SHIFT`]..+2).
-pub const VB_SDF_MESH_MODE_MASK: u32 = 0x3;
-/// Bit 5 within the [`VB_SDF_MESH_MODE_SHIFT`] sub-field — the SDF soft shadow on mesh.
-/// Mirrors the shader's `VB_SDF_MESH_SHADOW_BIT`.
-pub const VB_SDF_MESH_SHADOW_BIT: u32 = 1;
-/// Bit 6 within the [`VB_SDF_MESH_MODE_SHIFT`] sub-field — the 5-tap contact AO on mesh.
-/// Mirrors the shader's `VB_SDF_MESH_AO_BIT`.
-pub const VB_SDF_MESH_AO_BIT: u32 = 2;
-
-// The bit-position pin, at COMPILE time rather than in a `debug_assert!`. The idiom
-// `ddgi_config.rs:288-289` uses puts the pin at the single production writer, but SV0's writer
-// is rung S4's resolver and does not exist yet — and a `debug_assert!` would in any case be
-// compiled out of the release profile the goldens run under (the same trap the plan's R11
-// tripwire had to be re-sited out of). A `const` assertion holds in every profile and needs no
-// writer to exist. It reds the moment either the sub-field or a neighbour is moved onto it.
-const _: () = assert!(
-    VB_SDF_MESH_MODE_SHIFT == 5 && VB_SDF_MESH_MODE_MASK == 0x3,
-    "invariant: the VB-SV0 header gate is word-7 bits 5..6"
-);
-const _: () = assert!(
-    VB_SDF_MESH_MODE_SHIFT > DDGI_MODE_BIT
-        && VB_SDF_MESH_MODE_SHIFT + 2 <= TONEMAP_MODE_SHIFT,
-    "invariant: the VB-SV0 sub-field must sit strictly between the DDGI gate bit and the \
-     tonemap sub-field, with no overlap on either side"
-);
 
 /// The resolve's output-stage tonemap curve — packed into light-header word 7
 /// bits [`TONEMAP_MODE_SHIFT`..+4) by [`LightHeaderGpu::new`]. `#[repr(u32)]` so
@@ -650,69 +613,6 @@ pub struct LightingConfig {
     /// [`sync_ddgi_light_gate`](crate::ddgi_config::sync_ddgi_light_gate)'s bridge shape (a
     /// single cold config Resource, no caster dependency).
     pub ssao_mode: bool,
-    /// VB-SV0: the VB lit-producer tails' SDF soft-shadow-on-mesh gate — packed into
-    /// light-header word 7 bit `VB_SDF_MESH_MODE_SHIFT + 0` (bit 5) by
-    /// [`shadow_gate_word`](Self::shadow_gate_word). DEFAULT `false` (bit 5 stays 0 — the
-    /// byte-identical 0%-gate, INDEPENDENT of every other gate including its own AO sibling).
-    ///
-    /// # Why this is a SEPARATE field from [`vb_sdf_mesh_ao`](Self::vb_sdf_mesh_ao)
-    ///
-    /// SV0 is two terms — a shadow and a contact AO — and every gate written against it as one
-    /// feature was satisfiable by the shadow half alone, which is how a structurally-dead AO
-    /// term could have shipped green. Two bits means each half can be armed on its own, and an
-    /// arming gate can require each half to move pixels on its own.
-    ///
-    /// # This field is the REQUEST; [`vb_sdf_mesh_shadow_armed`](Self::vb_sdf_mesh_shadow_armed)
-    /// is what the header packs (rung S4, code-review P2-c)
-    ///
-    /// The OWNER writes this one and nothing else reads it except rung S4's
-    /// [`sync_sv0_light_gate`], which ANDs it with
-    /// [`ResolvedRenderPath::vb_sdf_mesh_armable`](crate::render_path_config::ResolvedRenderPath::vb_sdf_mesh_armable)
-    /// — CONSUMING the already-resolved `SDF_SOFT_MARCH` bit rather than re-deriving the
-    /// predicate — and publishes the result into the `_armed` sibling.
-    ///
-    /// **Why the request and the resolved value are two fields and not one.** The first S4
-    /// revision clamped IN PLACE, writing the resolved value back over the owner's request. That
-    /// makes an owner who sets this field every frame (the ordinary way to drive a per-frame
-    /// toggle) pay a full light-table re-fold every frame on any boot that cannot carry SV0: the
-    /// gate clears the field, the owner re-sets it, the gate sees a change and re-dirties. With
-    /// the two separated, the gate's value comparison is against state only IT writes, so a
-    /// per-frame owner writer costs exactly nothing. This is also the shape every sibling gate
-    /// already has (`ssao_mode` ← `SsaoConfig`, `csm_shadows` ← the caster predicate): a DERIVED
-    /// field with one production writer, fed from a separate owner-facing input.
-    ///
-    /// DEFAULT `false`, and the resolve is monotone DOWNWARD (`request && capability`), so a
-    /// world that never opts in can never be armed by anything downstream — which is what makes
-    /// every pre-SV0 golden byte-identical by construction rather than by argument.
-    ///
-    /// Rung S2 shipped SV0 DARK — no writer existed at all, so the compiled-in shader blocks were
-    /// unreachable on every configuration.
-    pub vb_sdf_mesh_shadow: bool,
-    /// VB-SV0: the OWNER'S REQUEST for the contact-AO-on-mesh term — the AO sibling of
-    /// [`vb_sdf_mesh_shadow`](Self::vb_sdf_mesh_shadow), resolved into
-    /// [`vb_sdf_mesh_ao_armed`](Self::vb_sdf_mesh_ao_armed) by the same gate. DEFAULT `false`.
-    ///
-    /// See [`vb_sdf_mesh_shadow`](Self::vb_sdf_mesh_shadow) for why the two terms get separate
-    /// bits and for the request/resolved contract they share.
-    pub vb_sdf_mesh_ao: bool,
-    /// VB-SV0: the RESOLVED SDF soft-shadow-on-mesh gate — packed into light-header word 7 bit
-    /// `VB_SDF_MESH_MODE_SHIFT + 0` (bit 5) by [`shadow_gate_word`](Self::shadow_gate_word).
-    /// DEFAULT `false` (bit 5 stays 0 — the byte-identical 0%-gate, INDEPENDENT of every other
-    /// gate including its own AO sibling).
-    ///
-    /// # Single-writer contract
-    ///
-    /// DERIVED state with exactly ONE production writer, [`sync_sv0_light_gate`] — the same
-    /// contract `csm_shadows` / `punctual_shadows` / `ddgi_indirect` / `ssao_mode` carry. Setting
-    /// it by hand bypasses the capability clamp and arms a shader block on a boot whose producer
-    /// may not exist; the only legitimate direct writes are in this module's own unit tests,
-    /// which exercise the packing rather than the resolve.
-    pub vb_sdf_mesh_shadow_armed: bool,
-    /// VB-SV0: the RESOLVED contact-AO-on-mesh gate — packed into light-header word 7 bit
-    /// `VB_SDF_MESH_MODE_SHIFT + 1` (bit 6) by [`shadow_gate_word`](Self::shadow_gate_word).
-    /// DEFAULT `false`. Same single-writer contract as
-    /// [`vb_sdf_mesh_shadow_armed`](Self::vb_sdf_mesh_shadow_armed).
-    pub vb_sdf_mesh_ao_armed: bool,
     /// The resolve's output-stage tonemap curve — packed into light-header word 7 bits
     /// [`TONEMAP_MODE_SHIFT`..+4) by [`Self::tonemap_bits`]. DEFAULT [`Tonemapper::Aces`]
     /// (word 7 bits 8..11 stay 0 — the byte-identical 0%-gate).
@@ -744,10 +644,6 @@ impl Default for LightingConfig {
             punctual_shadows: false,
             ddgi_indirect: false,
             ssao_mode: false,
-            vb_sdf_mesh_shadow: false,
-            vb_sdf_mesh_ao: false,
-            vb_sdf_mesh_shadow_armed: false,
-            vb_sdf_mesh_ao_armed: false,
             tonemapper: Tonemapper::Aces,
             terminator_softening: 0.0,
         }
@@ -756,24 +652,14 @@ impl Default for LightingConfig {
 
 impl LightingConfig {
     /// Packs the header's word-7 shadow/GI-gate bits from this config: the CSM bit
-    /// ([`CSM_MODE_BIT`]), the punctual bit ([`PUNCTUAL_MODE_BIT`]), the DDGI bit
-    /// ([`DDGI_MODE_BIT`]), and VB-SV0's 2-bit sub-field ([`VB_SDF_MESH_MODE_SHIFT`]), each
-    /// independent. A default config returns 0 (word 7 == 0.0 — the 0%-gate anchor every
-    /// pre-R4/pre-punctual/pre-SDFDDGI/pre-SV0 golden pins).
+    /// ([`CSM_MODE_BIT`]), the punctual bit ([`PUNCTUAL_MODE_BIT`]), and the DDGI bit
+    /// ([`DDGI_MODE_BIT`]), each independent. A default config returns 0 (word 7 == 0.0 —
+    /// the 0%-gate anchor every pre-R4/pre-punctual/pre-SDFDDGI golden pins).
     #[inline]
     pub const fn shadow_gate_word(&self) -> u32 {
-        // VB-SV0's two bits are OR-ed as one sub-field so the shift/mask pair stays the single
-        // place the bit positions are spelled — the shader decodes with the same `>> 5 & 3`.
-        //
-        // The RESOLVED `_armed` pair, never the owner's request: the header must carry what the
-        // boot can actually execute, and routing the request straight through would arm a shader
-        // block on a producer that does not exist (code-review P2-c).
-        let sv0 = ((self.vb_sdf_mesh_shadow_armed as u32) * VB_SDF_MESH_SHADOW_BIT)
-            | ((self.vb_sdf_mesh_ao_armed as u32) * VB_SDF_MESH_AO_BIT);
         ((self.csm_shadows as u32) << CSM_MODE_BIT)
             | ((self.punctual_shadows as u32) << PUNCTUAL_MODE_BIT)
             | ((self.ddgi_indirect as u32) << DDGI_MODE_BIT)
-            | ((sv0 & VB_SDF_MESH_MODE_MASK) << VB_SDF_MESH_MODE_SHIFT)
     }
 
     /// Word-7 tonemap sub-field bits (0 for [`Tonemapper::Aces`] ⇒ the 0%-gate).
@@ -1006,120 +892,6 @@ pub fn sync_cluster_light_gate(
         cfg.cluster_z_bias = z_bias;
         cfg.cluster_packed_dims = packed_dims;
         dirty.0 = true;
-    }
-}
-
-/// Logs the first SV0 request this boot could not honour, and nothing thereafter.
-///
-/// `#[cold]` + `#[inline(never)]` for the same reason as `light_system`'s
-/// `report_dropped_non_finite_light`: only the two compares of [`sync_sv0_light_gate`]'s
-/// capability test stay on the per-frame straight-line code.
-///
-/// The `eprintln!` is bounded at ONE per process by the latch below — unlike a per-transition
-/// diagnostic it cannot be driven at frame rate by any input, so it needs no build-profile gate.
-///
-/// # Why this is worth a diagnostic at all
-///
-/// A silently-cleared request renders a frame that is byte-identical to the unarmed one, which
-/// downstream reads as "the SV0 term moved zero pixels" — the failure and its symptom are the
-/// same image. Naming the clamp in the run log is what separates "SV0 is broken" from "this
-/// scene was never a VB x Both boot in the first place".
-#[cold]
-#[inline(never)]
-fn report_sv0_request_clamped(shadow: bool, ao: bool) {
-    use core::sync::atomic::{AtomicBool, Ordering};
-    static LOGGED: AtomicBool = AtomicBool::new(false);
-    // Relaxed: a best-effort one-shot log guard, not a synchronization edge — nothing is
-    // published through this flag and a racing double-print is cosmetic.
-    if !LOGGED.swap(true, Ordering::Relaxed) {
-        eprintln!(
-            "boyko_render: VB-SV0 was requested (shadow={shadow}, ao={ao}) on a boot whose \
-             resolved render path cannot carry it (needs path == VisibilityBuffer, a mesh leg, \
-             and ShadowSources::SDF_SOFT_MARCH) — both gate bits forced OFF for this run"
-        );
-    }
-}
-
-/// **VB-SV0 (`docs/VB-SV0-SDF-SHADOW-PLAN.md` §S4, "arm"): the SOLE production writer of the
-/// light header's word-7 bits 5..6** — the SDF-soft-shadow-on-mesh and contact-AO-on-mesh gates
-/// the three VB lit-producer tails decode with `load_vb_sdf_mesh_mode`.
-///
-/// # Request in, capability-resolved value out
-///
-/// [`LightingConfig::vb_sdf_mesh_shadow`] / [`LightingConfig::vb_sdf_mesh_ao`] carry the OWNER's
-/// REQUEST (both DEFAULT `false` — the 0%-gate: a world that never opts in is byte-identical to
-/// every pre-SV0 pin). This gate ANDs each of them with
-/// [`ResolvedRenderPath::vb_sdf_mesh_armable`](crate::render_path_config::ResolvedRenderPath::vb_sdf_mesh_armable)
-/// and publishes the result into
-/// [`LightingConfig::vb_sdf_mesh_shadow_armed`] / [`LightingConfig::vb_sdf_mesh_ao_armed`], which
-/// is what [`LightingConfig::shadow_gate_word`] packs. So the header carries
-/// `request && capability`, and the owner's own field is never written.
-///
-/// **The resolve is monotone DOWNWARD and that is the load-bearing property.** `_armed` can only
-/// ever be `request && …`, never more, so no scene that has not asked for SV0 can be armed by
-/// this system — the "every existing golden stays byte-identical" guarantee is structural here,
-/// not an argument about which shipped fixtures happen to resolve `VB x Both`. (Several do:
-/// `boyko_app::runner` hardwires `sdf_shadows_wanted: true`, so `[vb_both]`, `[vb_both_taa]` and
-/// the two S1 fixtures are all *capable*. What keeps them unarmed is that they do not ask.)
-///
-/// # Why the request is not clamped IN PLACE (code-review P2-c)
-///
-/// An in-place clamp is invisible when the owner sets the field once at startup and pathological
-/// when they set it every frame — which is the ordinary way to drive a toggle. On a boot that
-/// cannot carry SV0 the gate would clear the request, the owner would re-set it, the gate would
-/// see a change and re-dirty [`LightTableDirty`], and the WHOLE light table would be re-packed
-/// and re-uploaded every frame, forever, with no visible symptom. Writing only state this system
-/// owns removes the cycle: the value comparison below is against the gate's own last output, so a
-/// per-frame owner writer is free.
-///
-/// # Why it CONSUMES `ResolvedRenderPath::shadow` instead of re-deriving the predicate
-///
-/// See [`ResolvedRenderPath::vb_sdf_mesh_armable`](crate::render_path_config::ResolvedRenderPath::vb_sdf_mesh_armable):
-/// the `sdf_leg && sdf_shadows_wanted && !hwrt_denoise_or_vis_on` rule lives in `resolve_rules`
-/// and nowhere else. A mirrored copy here would be a second truth to keep in sync, and the
-/// campaign's own record is that mirrored predicates drift.
-///
-/// # Registration — app-wired, WITH an ordering edge (code-review P2-b)
-///
-/// NOT registered by [`LightingPlugin`](crate::light_plugin::LightingPlugin): it bridges
-/// `RenderPathPlugin`'s [`ResolvedRenderPath`](crate::render_path_config::ResolvedRenderPath)
-/// and `LightingPlugin`'s [`LightingConfig`], so it lives in `boyko_app::plugins`' builder
-/// closure alongside the other `sync_*_light_gate` bridges.
-///
-/// It carries `.before_set(LightCollectSet)` — the edge `sync_cluster_light_gate` added at
-/// VB-P1b for the same reason and `sync_ssao_light_gate` does not need. `sync_ssao_light_gate`
-/// reads a config the owner sets and writes the bit that config implies, so an unordered first
-/// frame packs a value that is merely one frame late. THIS gate resolves a request against a
-/// CAPABILITY: unordered, the first armed frame packs whatever `_armed` held before the resolve
-/// ran. The residue is a one-frame WRONG-STATE header, not a late one — and on a fixture that
-/// dumps a small fixed number of frames, "one frame" can be the frame that gets measured.
-///
-/// # Value-gated write
-///
-/// Written only when the resolved pair actually moves, so an armed steady state does zero work
-/// and never re-dirties the light table (the sibling gates' discipline).
-#[allow(clippy::needless_pass_by_value)]
-pub fn sync_sv0_light_gate(
-    resolved_path: Res<crate::render_path_config::ResolvedRenderPath>,
-    mut cfg: ResMut<LightingConfig>,
-    mut dirty: ResMut<LightTableDirty>,
-) {
-    let armable = resolved_path.vb_sdf_mesh_armable();
-    let requested_shadow = cfg.vb_sdf_mesh_shadow;
-    let requested_ao = cfg.vb_sdf_mesh_ao;
-    let shadow = requested_shadow && armable;
-    let ao = requested_ao && armable;
-    // Value gate BEFORE the `DerefMut`: flip-only write, flip-only table dirtying.
-    if cfg.vb_sdf_mesh_shadow_armed != shadow || cfg.vb_sdf_mesh_ao_armed != ao {
-        cfg.vb_sdf_mesh_shadow_armed = shadow;
-        cfg.vb_sdf_mesh_ao_armed = ao;
-        dirty.0 = true;
-    }
-    // Keyed on REQUEST-vs-CAPABILITY, not on the write above: an honoured request also moves the
-    // value, and reporting that as a clamp would cry wolf on every armed boot. Two loads and a
-    // branch per frame on the straight-line path; the message itself is `#[cold]` and one-shot.
-    if !armable && (requested_shadow || requested_ao) {
-        report_sv0_request_clamped(requested_shadow, requested_ao);
     }
 }
 
@@ -1607,87 +1379,6 @@ mod tests {
         );
     }
 
-    /// VB-SV0's two terms occupy word-7 bits 5 and 6 and are independently armable — of each
-    /// other and of every neighbouring sub-field. The independence of the two SV0 bits FROM EACH
-    /// OTHER is the load-bearing half: SV0 is two terms, and a packing that armed both from one
-    /// flag would make every downstream per-term gate satisfiable by the shadow half alone.
-    ///
-    /// Written against the RESOLVED `_armed` pair, because that is what the packer reads: this
-    /// test pins the PACKING, and `sv0_gate_*` below pins the resolve that feeds it.
-    #[test]
-    fn vb_sv0_gate_bits_are_independent() {
-        // Default: SV0 contributes nothing — the 0%-gate rung S2 ships under.
-        let base = LightingConfig::default();
-        assert!(!base.vb_sdf_mesh_shadow_armed);
-        assert!(!base.vb_sdf_mesh_ao_armed);
-        assert_eq!(base.shadow_gate_word(), 0);
-
-        // An owner REQUEST that no gate has resolved packs nothing — the request is not a value
-        // (code-review P2-c). Without this, a packer wired to the request would still pass every
-        // other assertion in this test.
-        let requested_only = LightingConfig {
-            vb_sdf_mesh_shadow: true,
-            vb_sdf_mesh_ao: true,
-            ..LightingConfig::default()
-        };
-        assert_eq!(
-            requested_only.shadow_gate_word(),
-            0,
-            "an unresolved request must not reach the header — only `sync_sv0_light_gate` arms SV0"
-        );
-
-        // Shadow alone: bit 5 only.
-        let sh = LightingConfig { vb_sdf_mesh_shadow_armed: true, ..LightingConfig::default() };
-        assert_eq!(sh.shadow_gate_word(), 1 << 5);
-        assert_eq!(
-            (sh.shadow_gate_word() >> VB_SDF_MESH_MODE_SHIFT) & VB_SDF_MESH_MODE_MASK,
-            VB_SDF_MESH_SHADOW_BIT,
-            "the shader decodes `(word >> 5) & 3` and must see the shadow bit alone"
-        );
-
-        // AO alone: bit 6 only. NOT the same assertion as the shadow case wearing another name.
-        let ao = LightingConfig { vb_sdf_mesh_ao_armed: true, ..LightingConfig::default() };
-        assert_eq!(ao.shadow_gate_word(), 1 << 6);
-        assert_eq!(
-            (ao.shadow_gate_word() >> VB_SDF_MESH_MODE_SHIFT) & VB_SDF_MESH_MODE_MASK,
-            VB_SDF_MESH_AO_BIT,
-            "the shader decodes `(word >> 5) & 3` and must see the AO bit alone"
-        );
-        assert_eq!(sh.shadow_gate_word() & ao.shadow_gate_word(), 0, "the two SV0 bits must not overlap");
-
-        // Both: the two bits OR together into the full sub-field.
-        let both = LightingConfig {
-            vb_sdf_mesh_shadow_armed: true,
-            vb_sdf_mesh_ao_armed: true,
-            ..LightingConfig::default()
-        };
-        assert_eq!(
-            (both.shadow_gate_word() >> VB_SDF_MESH_MODE_SHIFT) & VB_SDF_MESH_MODE_MASK,
-            VB_SDF_MESH_SHADOW_BIT | VB_SDF_MESH_AO_BIT
-        );
-
-        // Neither SV0 bit touches a neighbouring sub-field, and no neighbour touches SV0's.
-        let sv0_mask = VB_SDF_MESH_MODE_MASK << VB_SDF_MESH_MODE_SHIFT;
-        let neighbours = (1 << CSM_MODE_BIT) | (1 << PUNCTUAL_MODE_BIT) | (1 << DDGI_MODE_BIT);
-        assert_eq!(both.shadow_gate_word() & neighbours, 0, "SV0 must not touch bits 2..4");
-        let all_neighbours = LightingConfig {
-            csm_shadows: true,
-            punctual_shadows: true,
-            ddgi_indirect: true,
-            tonemapper: Tonemapper::ReinhardJodie,
-            terminator_softening: 1.0,
-            ..LightingConfig::default()
-        };
-        let neighbour_word = all_neighbours.shadow_gate_word()
-            | all_neighbours.tonemap_bits()
-            | all_neighbours.terminator_bits();
-        assert_eq!(
-            neighbour_word & sv0_mask,
-            0,
-            "no neighbouring sub-field may write into word-7 bits 5..6"
-        );
-    }
-
     #[test]
     fn tonemapper_default_is_aces() {
         assert_eq!(Tonemapper::default(), Tonemapper::Aces);
@@ -2127,237 +1818,6 @@ mod tests {
         // bit is not this gate's concern) — the dims-only scoping is what this test pins.
         let h = LightHeaderGpu::new(2, 1, &synced_cfg);
         assert_eq!(h.cluster_params, [0.0, 0.0, 0.0, f32::from_bits(1)]);
-    }
-
-    // ---- VB-SV0 §S4 arming gate ------------------------------------------------------------
-
-    /// A REAL boot resolve of the rung-S1 fixture configuration (`VisibilityBuffer × Both`, the
-    /// runner's hardwired `sdf_shadows_wanted: true`, no hwrt), plus the optional consumers the
-    /// §S4 variant rows need. Built through the production entry point rather than as a literal,
-    /// so a change to the arming rules reaches these tests instead of being mirrored past them.
-    fn sv0_resolved(
-        legs: crate::render_path_config::GeometryLegs,
-        ssao_on: bool,
-        hwrt: bool,
-    ) -> crate::render_path_config::ResolvedRenderPath {
-        use crate::render_path_config::{
-            RenderPath, RenderPathConfig, RenderPathConsumers, RenderPathDeviceCaps,
-            resolve_render_path,
-        };
-        let (resolved, _) = resolve_render_path(
-            &RenderPathConfig { path: RenderPath::VisibilityBuffer, legs },
-            RenderPathConsumers {
-                sdf_shadows_wanted: true,
-                ssao_on,
-                hwrt_denoise_or_vis_on: hwrt,
-                ..Default::default()
-            },
-            RenderPathDeviceCaps::new(true),
-        );
-        resolved
-    }
-
-    /// Runs `sync_sv0_light_gate` over one (`resolved`, request) pair and returns the resolved
-    /// config plus whether the light table was dirtied.
-    ///
-    /// Also asserts, on EVERY call, that the owner's two request fields came back untouched — the
-    /// code-review P2-c property. Placed here rather than in one dedicated test so no future case
-    /// can be added that quietly reintroduces the in-place clamp.
-    fn run_sv0_gate(
-        resolved: crate::render_path_config::ResolvedRenderPath,
-        request_shadow: bool,
-        request_ao: bool,
-    ) -> (LightingConfig, bool) {
-        use boyko_ecs::ecs::core::app::App;
-
-        let mut app = App::new();
-        app.insert_resource(resolved);
-        app.insert_resource(LightingConfig {
-            vb_sdf_mesh_shadow: request_shadow,
-            vb_sdf_mesh_ao: request_ao,
-            ..LightingConfig::default()
-        });
-        app.insert_resource(LightTableDirty(false));
-        app.world_mut().run_system(sync_sv0_light_gate);
-        let cfg = *app.world().resource::<LightingConfig>();
-        assert_eq!(
-            (cfg.vb_sdf_mesh_shadow, cfg.vb_sdf_mesh_ao),
-            (request_shadow, request_ao),
-            "the gate must never write the OWNER's request fields — an in-place clamp makes a \
-             per-frame owner writer re-fold the whole light table every frame"
-        );
-        (cfg, app.world().resource::<LightTableDirty>().0)
-    }
-
-    /// **Code-review P2-c, the cost the separation buys.** An owner who re-asserts the request
-    /// EVERY frame on a boot that cannot carry SV0 dirties the light table exactly zero times.
-    ///
-    /// With the request and the resolved value fused into one field this test cannot pass: the
-    /// gate clears the field, the owner re-sets it, and every subsequent frame sees a change and
-    /// re-folds + re-uploads the entire table — a silent per-frame cost whose only symptom is
-    /// throughput.
-    #[test]
-    fn sv0_gate_does_not_refold_under_a_per_frame_owner_writer() {
-        use boyko_ecs::ecs::core::app::App;
-
-        use crate::render_path_config::GeometryLegs;
-
-        // VB x Mesh: structurally unarmable, so the request can never be honoured — the exact
-        // configuration the fused design would have re-folded on forever.
-        let resolved = sv0_resolved(GeometryLegs::Mesh, false, false);
-        assert!(!resolved.vb_sdf_mesh_armable(), "test setup: this boot must NOT be armable");
-
-        let mut app = App::new();
-        app.insert_resource(resolved);
-        app.insert_resource(LightingConfig::default());
-        app.insert_resource(LightTableDirty(false));
-
-        for frame in 0..8 {
-            // The owner's per-frame write, verbatim: re-assert the request, every frame.
-            app.world_mut().resource_mut::<LightingConfig>().vb_sdf_mesh_shadow = true;
-            app.world_mut().resource_mut::<LightingConfig>().vb_sdf_mesh_ao = true;
-            app.world_mut().run_system(sync_sv0_light_gate);
-            assert!(
-                !app.world().resource::<LightTableDirty>().0,
-                "frame {frame}: an unhonourable request must never dirty the light table"
-            );
-            let cfg = *app.world().resource::<LightingConfig>();
-            assert!(!cfg.vb_sdf_mesh_shadow_armed && !cfg.vb_sdf_mesh_ao_armed);
-            assert_eq!(cfg.shadow_gate_word(), 0);
-        }
-    }
-
-    /// **The 0%-gate, and the reason no shipped golden moves at rung S4.** An armable boot that
-    /// does NOT request SV0 keeps both bits clear and the header word at its pre-SV0 anchor.
-    ///
-    /// This is the assertion that makes "every existing golden stays byte-identical" structural:
-    /// `[vb_both]`, `[vb_both_taa]` and both S1 fixtures all resolve `VB × Both` with the
-    /// runner's hardwired `sdf_shadows_wanted`, i.e. they are all CAPABLE. What keeps them
-    /// unarmed is only that they never set the request — so the gate must never set it for them.
-    #[test]
-    fn sv0_gate_leaves_an_unrequesting_armable_boot_at_the_zero_gate() {
-        use crate::render_path_config::GeometryLegs;
-
-        let resolved = sv0_resolved(GeometryLegs::Both, false, false);
-        assert!(resolved.vb_sdf_mesh_armable(), "test setup: VB x Both must be SV0-armable");
-
-        let (cfg, dirty) = run_sv0_gate(resolved, false, false);
-        assert!(!cfg.vb_sdf_mesh_shadow_armed);
-        assert!(!cfg.vb_sdf_mesh_ao_armed);
-        assert_eq!(cfg.shadow_gate_word(), 0, "an unrequesting boot packs the pre-SV0 word");
-        assert!(!dirty, "a no-op resolve must not dirty the light table");
-    }
-
-    /// Each term arms ON ITS OWN. SV0 is two independently-gated terms and every gate written
-    /// against it as one feature was satisfiable by the shadow half alone — so the host gate is
-    /// required to pass each bit through without the other.
-    #[test]
-    fn sv0_gate_passes_each_requested_term_through_independently() {
-        use crate::render_path_config::GeometryLegs;
-
-        let resolved = sv0_resolved(GeometryLegs::Both, false, false);
-
-        let (shadow_only, _) = run_sv0_gate(resolved, true, false);
-        assert!(shadow_only.vb_sdf_mesh_shadow_armed);
-        assert!(!shadow_only.vb_sdf_mesh_ao_armed);
-        assert_eq!(
-            (shadow_only.shadow_gate_word() >> VB_SDF_MESH_MODE_SHIFT) & VB_SDF_MESH_MODE_MASK,
-            VB_SDF_MESH_SHADOW_BIT,
-            "the shader must decode sv0_mode == VB_SDF_MESH_SHADOW_BIT (gate ii-a)"
-        );
-
-        let (ao_only, _) = run_sv0_gate(resolved, false, true);
-        assert!(!ao_only.vb_sdf_mesh_shadow_armed);
-        assert!(ao_only.vb_sdf_mesh_ao_armed);
-        assert_eq!(
-            (ao_only.shadow_gate_word() >> VB_SDF_MESH_MODE_SHIFT) & VB_SDF_MESH_MODE_MASK,
-            VB_SDF_MESH_AO_BIT,
-            "the shader must decode sv0_mode == VB_SDF_MESH_AO_BIT (gate ii-b)"
-        );
-
-        let (both, dirty) = run_sv0_gate(resolved, true, true);
-        assert!(both.vb_sdf_mesh_shadow_armed && both.vb_sdf_mesh_ao_armed);
-        // An HONOURED request moves `_armed` false→true, so the table MUST be re-folded — the
-        // header is what carries the two bits to the shader, and a stale pack would render the
-        // armed frame unarmed.
-        assert!(dirty, "arming a term must dirty the light table so the header is re-packed");
-    }
-
-    /// The resolve clears BOTH bits on every structurally unarmable boot, including the hwrt
-    /// configuration that selects §S4's rows 9-10.
-    ///
-    /// The `dirty` assertion matters, and it is the OPPOSITE of the armed case: `_armed` starts
-    /// `false` and stays `false`, so nothing is written and the table is never re-folded. That is
-    /// the whole point of resolving into a separate field (code-review P2-c) — an unhonourable
-    /// request costs nothing, however often it is re-asserted.
-    #[test]
-    fn sv0_gate_clears_a_request_the_boot_cannot_carry() {
-        use crate::render_path_config::{GeometryLegs, ResolvedRenderPath, ShadowSources};
-
-        // Rows 9-10: `ssao_on` selects the split tail, the hwrt carrier selects its `_hwrt`
-        // variants — and displaces `SDF_SOFT_MARCH`, which is exactly why SV0 cannot ride them.
-        let hwrt = sv0_resolved(GeometryLegs::Both, true, true);
-        assert!(hwrt.shadow.contains(ShadowSources::HWRT_VIS), "test setup: the hwrt rows");
-        assert!(!hwrt.vb_sdf_mesh_armable());
-        let (cfg, dirty) = run_sv0_gate(hwrt, true, true);
-        assert!(!cfg.vb_sdf_mesh_shadow_armed && !cfg.vb_sdf_mesh_ao_armed, "rows 9-10 never arm");
-        assert_eq!(cfg.shadow_gate_word() >> VB_SDF_MESH_MODE_SHIFT & VB_SDF_MESH_MODE_MASK, 0);
-        assert!(!dirty, "a request that resolves to the already-published OFF state writes nothing");
-
-        // VB x Mesh (no field to march) and VB x Sdf (no mesh pixels to shade).
-        for legs in [GeometryLegs::Mesh, GeometryLegs::Sdf] {
-            let resolved = sv0_resolved(legs, false, false);
-            assert!(!resolved.vb_sdf_mesh_armable(), "{legs:?} must not be SV0-armable");
-            let (cfg, _) = run_sv0_gate(resolved, true, true);
-            assert!(
-                !cfg.vb_sdf_mesh_shadow_armed && !cfg.vb_sdf_mesh_ao_armed,
-                "{legs:?} must never arm"
-            );
-        }
-
-        // The never-resolved default carrier (Deferred + Both) — the state a world that never
-        // booted the windowed runner carries.
-        let (cfg, _) = run_sv0_gate(ResolvedRenderPath::default(), true, true);
-        assert!(
-            !cfg.vb_sdf_mesh_shadow_armed && !cfg.vb_sdf_mesh_ao_armed,
-            "Deferred must never arm SV0"
-        );
-    }
-
-    /// **The DISARM direction.** A boot whose capability goes away after a term was armed must
-    /// have the header bit cleared and the table re-folded — otherwise the shader keeps executing
-    /// a block whose producer is gone.
-    ///
-    /// Reachable state, not a hypothetical: `_armed` is `Resource` state that survives whatever
-    /// the owner does to the request, so an owner who withdraws the request mid-run lands here.
-    #[test]
-    fn sv0_gate_disarms_and_refolds_when_the_request_is_withdrawn() {
-        use boyko_ecs::ecs::core::app::App;
-
-        use crate::render_path_config::GeometryLegs;
-
-        let mut app = App::new();
-        app.insert_resource(sv0_resolved(GeometryLegs::Both, false, false));
-        app.insert_resource(LightingConfig {
-            vb_sdf_mesh_shadow: true,
-            vb_sdf_mesh_ao: true,
-            ..LightingConfig::default()
-        });
-        app.insert_resource(LightTableDirty(false));
-
-        app.world_mut().run_system(sync_sv0_light_gate);
-        assert!(app.world().resource::<LightingConfig>().vb_sdf_mesh_shadow_armed);
-        assert!(app.world().resource::<LightTableDirty>().0, "arming re-folds");
-
-        app.world_mut().resource_mut::<LightTableDirty>().0 = false;
-        app.world_mut().resource_mut::<LightingConfig>().vb_sdf_mesh_shadow = false;
-        app.world_mut().resource_mut::<LightingConfig>().vb_sdf_mesh_ao = false;
-        app.world_mut().run_system(sync_sv0_light_gate);
-
-        let cfg = *app.world().resource::<LightingConfig>();
-        assert!(!cfg.vb_sdf_mesh_shadow_armed && !cfg.vb_sdf_mesh_ao_armed);
-        assert_eq!(cfg.shadow_gate_word(), 0, "the header returns to the pre-SV0 anchor");
-        assert!(app.world().resource::<LightTableDirty>().0, "disarming must re-fold too");
     }
 
     #[test]
