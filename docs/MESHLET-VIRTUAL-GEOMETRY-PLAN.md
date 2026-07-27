@@ -1,6 +1,6 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 6** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 7** — **NOT APPROVED, and no code exists.** This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
@@ -31,6 +31,25 @@ adversarial pass that produced every correction below.
 | Claim scope named (`bracketed_vb_pass_chain`) | **HOLDS** — best reasoning in the plan |
 | Denominators written down | **HOLDS** — verified against the sibling exactly |
 | §12 anchors re-derived | **HELD FOR §12 ONLY** — the body kept the stale ones, including the `:334`→`:344` anchor §12 itself called the most expensive of the set. Fixed at Rev 4 |
+
+**Rev 7 — the governing defect was not any single gate, it was WHERE the fixes landed.** An
+adversarial review of Rev 6 scored its ten claims **2 hold, 7 partial, 1 does not**, and named the
+cause: **six of the ten landed only in `VG-CAMPAIGN-THRESHOLDS.toml`, while §8 — the section an
+implementer codes from — kept the superseded rule.** Rev 6 diagnoses exactly this at R0d
+(*"rewriting the explanation is not rewriting the gate"*) and then commits it at R0f′, whose gate
+text still carried the one-sided inequality **and the sentence the frozen file explicitly refutes**.
+
+**The generalisation, and it is Rev 7's whole lesson: a fix that lands only in the frozen file has
+not landed.** The frozen file is the authority for *values*; the rungs are the authority for *what
+is asserted*. Editing one and not the other leaves two documents disagreeing about the decision
+rule — Rev 2's inverted `all_three_below` defect reached by a different route.
+
+Rev 7 also retires a promise this document could not keep. §12's *"every line below was opened or
+grepped"* is **withdrawn**, having been false four revisions running. Gating the plan's anchors
+mechanically was attempted and **reverted with the reason recorded**: the plan cites bare basenames
+in prose while the gate binds to resolvable path links, giving 83 "stale" of 146 dominated by
+misbindings. Converting the citations is the named follow-up; until then the document states its
+numbers are unchecked rather than claiming they were verified.
 
 **Rev 6 — the fifth consecutive revision told it overclaimed, and the score is the point.** Rev 5
 claimed eight fixes: **two held, two partial, four did not**, plus five fresh defects. The three
@@ -206,7 +225,20 @@ routine event, any re-record can carry a simultaneous edit to a K1 threshold wit
 * **The thresholds that must never change are hashed, in their own file.**
   [`VG-CAMPAIGN-THRESHOLDS.toml`](VG-CAMPAIGN-THRESHOLDS.toml) carries K1's instrument and rule,
   the resolution ladder, the harness denominators and the scope rules — all authored before any
-  measurement is reachable. R0a records its sha256; R0c, R0d, R0e and R0f re-hash and assert it.
+  measurement is reachable. R0a records its sha256.
+  ⚠️ **Rev 7: Rev 6 enumerated R0c/R0d/R0e/R0f as the re-asserting rungs — and Rev 5 had already
+  measured that set to be exactly the wrong one.** Every member is a skipped or `#[ignore]`d
+  GPU/corpus test on a box whose CI never exercises the GPU path. Rev 6 added
+  `[hash_assertion].must_run_in_plain_workspace_test = true` to fix it, then gave it **no rung and
+  no test file**, so the field described an intention nobody implements. Rev 4 avoided Rev 2's
+  *guaranteed to break*; Rev 6 shipped its mirror image, **guaranteed not to fire**.
+  **The tripwire lives in `crates/boyko_render/tests/vg_thresholds_freeze.rs`** — a file whose only
+  job is to re-hash `VG-CAMPAIGN-THRESHOLDS.toml` against the value R0a recorded. No GPU, no `dxc`,
+  no corpus, so it runs under a bare `cargo test --workspace`. R0a lands it; the GPU rungs may
+  re-assert too, but none of them is the mechanism.
+  ⚠️ Standing hazard when checking this: `cargo check --all-targets` at the repo root is
+  **vacuum-green** on this virtual manifest, so "it is in the workspace" is not evidence that it
+  runs — R0a's gate must show the test executing.
   Because that file has **no** legitimate reason to change, a broken hash there is unambiguous.
 * **Red mutation, now demonstrable on both sides:** raise the floor above the claim → the
   inequality assertion reds; edit any threshold in the thresholds file → the hash assertion reds in
@@ -220,7 +252,7 @@ unblocked by it. `corpus.arrangement` (Q3) blocks R0b and is the only early one.
 
 | # | Kill | Test | Disposition if it fires |
 |---|---|---|---|
-| **K1** | **No content, no mechanism.** The corpus never approaches ~1 triangle/pixel, so cluster LOD has no mechanism of action on our content. | **Split by direction at Rev 5, because the cheap census can only settle it one way.** `D_est ≥ 1.0` at the decision resolution **refutes** K1 outright (a lower bound proves density). **Firing** K1 needs the upper-bound survivor counter — a separate, conditional rung. §5.5–§5.7. | **Campaign refuted** only when K1 *fires*. Not "descope" — the premise is gone. §9 clause 1. |
+| **K1** | **No content, no mechanism.** The corpus never approaches ~1 triangle/pixel, so cluster LOD has no mechanism of action on our content. | **Split by direction at Rev 5, because the cheap census can only settle it one way.** `D_est ≥ 1.0` at the decision resolution **refutes** K1 outright (a lower bound proves density). **Firing** K1 is UNREACHABLE at R0 (`[k1].k1_fire_at_r0 = false`): the upper-bound instrument is mis-sited and probably inert, and is recorded UNSOLVED rather than scheduled. §5.6, §9 clause 1. | **Campaign refuted** only when K1 *fires*. Not "descope" — the premise is gone. §9 clause 1. |
 | **K2** | **No baseline.** The Nanite reference cannot be produced on this box. | R0a's rig probe (before any engine code) — and the negative is **re-derived by the test**, not declared. §8 R0a. | **Scope restatement**, an owner VALUES call: the goal becomes an **absolute** ms/quality target, and the ladder terminates in **R0f′**, which closes the *same* inequality. §13 Q1, §8 R0f′. |
 | **K3** | **Undecidable harness.** The instrument cannot resolve the frozen claim. | R0e's decidability statement, with its null control. | Every future number is arguable. §9 clause 3 — and note this is the failure mode the sibling rung actually hit. |
 
@@ -545,8 +577,8 @@ backface**, incremented in the raster path under the census arm. That is not fre
 | Outcome of the cheap census | Next |
 |---|---|
 | `D_est ≥ 1.0` | **K1 dead.** No counter, no shader edit, no re-bless. Done. |
-| `D_est < 1.0` **and** the ladder converged | Genuinely sparse *or* instrument-limited — indistinguishable from below. **The counter is required**; it is scoped as its own rung with its own re-bless budget (§13 Q4). |
-| Ladder not converged | `[k1_instrument].on_not_converged` — **K1 not adjudicated**, §9 clause 4. |
+| `D_est < 1.0` **and** the ladder converged | Genuinely sparse *or* instrument-limited — indistinguishable from below. **K1 UNDECIDED** — R0 cannot tell this from the instrument's own ceiling seen from below. Owner VALUES call, §13 Q6. The counter is NOT a scheduled rung: §8 contains none, and its design is recorded UNSOLVED. |
+| Ladder not converged | `[k1_instrument].on_not_converged_fire_direction` — **K1 not adjudicated** for the FIRE direction, §9 clause 4. The REFUTE direction is unaffected: non-convergence means `D_est` understates, and an understatement already ≥ 1.0 still proves density ≥ 1 (`on_not_converged_refute_direction = "still_valid"`). |
 
 **This front-loads the cheap decisive case and makes the expensive one explicitly optional**, which
 is what Rev 3's single-path design hid.
@@ -1097,12 +1129,19 @@ two documents cannot disagree silently.
 > *resolution* being smaller than a *level* tells you nothing about whether you can see the gap.
 >
 > **Rev 5's gate (b), from `[absolute_mode]`'s three new rules:**
-> `absolute_floor_ms = spread × measured_chain_median_ms` and
-> `absolute_distance_ms = |measured_chain_median_ms − claim.absolute_chain_ms|`, with the gate
-> `absolute_floor_ms < absolute_distance_ms`. Both sides milliseconds, and the inequality is about
-> **the distance we intend to close**, not the level we intend to reach. A target already passed,
-> or one sitting inside our own resolution, now reds — which is the discrimination the branch
-> §11 calls expected has been missing for three revisions.
+> **`claim.absolute_chain_ms < measured_chain_median_ms`  AND  `absolute_floor_ms <
+> absolute_distance_ms`**, where `absolute_floor_ms = spread × measured_chain_median_ms` and
+> `absolute_distance_ms = |measured_chain_median_ms − claim.absolute_chain_ms|`. Under the first
+> conjunct this is `c < m(1−s)`. Both sides milliseconds; the inequality is about **the distance we
+> intend to close**, not the level we intend to reach.
+>
+> ⚠️ **Rev 7 wrote the second conjunct's partner into THIS SECTION, and that is the fix.** Rev 6
+> landed the two-sided rule in `[absolute_mode].absolute_gate_rule` and left §8 — the section an
+> implementer codes from — carrying the one-sided version *and the sentence the frozen file
+> explicitly refutes* (*"a target already passed now reds"*: false outside a ±`s·m` band, since
+> `c > m` passes whenever `c > m(1+s)`). Rev 6 diagnoses this exact failure at R0d — **"rewriting
+> the explanation is not rewriting the gate"** — and then committed it one rung over. The governing
+> lesson of Rev 7: **a fix that lands only in the frozen file has not landed.**
 
 **Absolute mode is honestly weaker, and saying so is the deliverable.** Its floor is roughly
 2.5× the paired-delta floor, because absolute readings keep every term ABBA was built to remove.
@@ -1110,11 +1149,28 @@ A weaker instrument reported plainly beats a strong-looking number the harness c
 and if (a) reds, the correct reading is that **this box cannot support an absolute claim at all**,
 which is a finding, not a failure.
 
-**RED if / mutations:** set `mode = "nanite_relative"` while `achievable = false` → (c) reds.
-Set `absolute_chain_ms` below the measured floor → (b) reds, and correctly: a target we cannot
-measure ourselves hitting is not a target. Reuse R0e's paired-delta floor as `absolute_floor`
-instead of measuring absolutes → (a) has no measurement to gate and the rung cannot report, which
-is the failure Rev 2 would have shipped silently.
+**RED if / mutations — re-derived at Rev 7 until they fire, not re-worded:**
+* set `mode = "nanite_relative"` while `achievable = false` → (c) reds;
+* set `c > m` (a target already beaten) → **conjunct 1** reds: there is nothing to close;
+* set `c` inside `(m − s·m, m)` → **conjunct 2** reds: the gap is inside our own resolution;
+* reuse R0e's paired-delta floor as `absolute_floor` instead of measuring absolutes → (a) has no
+  measurement to gate and the rung cannot report.
+
+> ⚠️ **The mutation Rev 5 and Rev 6 both named here PROVABLY DOES NOT FIRE, and it shipped three
+> times.** It read *"set `absolute_chain_ms` below the measured floor → (b) reds."* Plug it in:
+> `c < s·m` ⟹ `distance = m − c > m(1−s)` and `floor = s·m`, so the second conjunct asks
+> `s·m < m(1−s)` ⟺ **`s < 0.5`** — true for every `s ≤ 0.25` the ceiling permits. It also passes
+> conjunct 1, since `c < s·m ≤ 0.25m < m`. **Green under both the old gate and the new one.** Kept
+> struck through as a specimen: a red mutation is a claim about arithmetic, and this one was never
+> checked against the arithmetic in three revisions of writing it down.
+
+**Deliberately NOT red: an absurdly ambitious target** (`c → 0`). This gate adjudicates
+**decidability**, not achievability — a 1000× claim is trivially resolvable. ⚠️ But the handoff is
+real and Rev 7 names its cost rather than leaving it implied: the plan sends achievability to §13
+Q1, **and the pre-registration rule requires the owner to set that number before any measurement
+exists.** So the party asked to judge whether a target is sane is, by construction, the one party
+with no measurement. That tension is inherent to pre-registration and is accepted knowingly; it
+applies equally to `nanite_relative_chain_delta`, which likewise carries no sanity band.
 
 ---
 
@@ -1122,14 +1178,56 @@ is the failure Rev 2 would have shipped silently.
 
 The rung is **reverted or the campaign re-scoped** — not softened mid-flight — if any of:
 
-1. **K1 — no content.** `[k1].k1_fire_rule`: the **upper-bound survivor count** per covered pixel is
+1. **K1 — no content.** `[k1].k1_fire_rule` (**a field that does not exist — see the Rev 7 note below**): the **upper-bound survivor count** per covered pixel is
    below 1.0 at `[census].decision_resolution`. **Only the upper-bound instrument can fire this
    kill** — §5.6. The cheap census can *refute* K1 (`D_est ≥ 1.0`) and can never fire it, because
    `D_est` is a lower bound; anything below the threshold is indistinguishable from the
    instrument's own ceiling seen from underneath.
-   **K1 is not adjudicated at all** if `[k1_instrument]`'s ladder-convergence check fails, or if
-   the non-degeneracy minimums are not met: `D_est` is then an underestimate of unknown size, and
-   clause 4 governs.
+   ⚠️ **Rev 7 corrects two things in this clause, and the second was blocking the only outcome R0
+   can produce.**
+   * The field named above does **not exist**. `[k1]` carries `rule`, `k1_decision_rule`,
+     `k1_fire_at_r0` and `k1_fire_instrument_status`. The campaign's abort criterion was defined by
+     reference to a nonexistent field — the frozen file's whole purpose is that gates point at it,
+     so a dangling name is a gate pointing at nothing. The live rule is `k1_decision_rule`.
+   * Rev 6 wrote *"K1 is not adjudicated at all if the ladder-convergence check fails"*,
+     **unconditionally**. That contradicts `[k1_instrument].on_not_converged_refute_direction` and
+     is wrong in the direction that matters: non-convergence means `visible_tris` is still rising,
+     so `D_est` **understates** — and an understatement already ≥ 1.0 still proves density ≥ 1.
+     Convergence is a precondition for **firing**, never for **refuting**. Worse, the two are in
+     structural tension: in the micro-polygon regime this campaign exists to serve, `visible_tris`
+     is still climbing steeply between 1440p and 2160p, so `ladder_convergence_margin = 0.05`
+     **cannot** be met — and the unconditional form would therefore rule *the favourable case* out
+     of adjudication precisely when it is true. A frozen file vetoing its own plan's decisive case,
+     which is the shape §9's own Rev 6 note names one rung over.
+
+   **The rule, per direction:** `D_est ≥ 1.0` **refutes K1 regardless of convergence.** Only the
+   fire direction requires convergence, and R0 cannot fire K1 at all (`k1_fire_at_r0 = false`), so
+   in practice non-convergence leaves R0 with REFUTED-or-UNDECIDED — see the disposition below.
+   Non-degeneracy (`min_covered_pixels`, `min_visible_tris`) is required in **both** directions:
+   a sentinel-only readback proves nothing either way.
+
+   ### K1 has exactly two reachable outcomes at R0, and UNDECIDED is the likely one
+
+   ⚠️ **Rev 6 declared `k1_fire_at_r0 = false` and left `k1_decision_rule`'s `escalate` naming no
+   addressee — no rung, no `[gating]` field, no §13 question.** That is D3's shape relocated: the
+   most likely branch with no disposition. With `d_est_ceiling = 4.0`, a plausible corpus puts
+   `D_est` in the 0.7–1.3 band, so UNDECIDED is not a corner case.
+
+   | Outcome | Condition | Disposition |
+   |---|---|---|
+   | **K1 REFUTED** | `D_est ≥ 1.0` at the decision resolution, non-degeneracy met | The mechanism exists. The ladder proceeds to R1. This is the cheap decisive case §5.6 front-loads. |
+   | **K1 UNDECIDED** | `D_est < 1.0`, or non-degeneracy unmet | **Owner VALUES call — §13 Q6.** R0 cannot distinguish "genuinely sparse" from "the instrument hit its ceiling seen from below", because firing needs an upper bound R0 has no buildable instrument for. |
+   | **K1 FIRED** | — | **Unreachable at R0.** Requires the unsolved upper-bound instrument. |
+
+   **On UNDECIDED the ladder does NOT silently proceed.** The owner chooses: accept the campaign's
+   premise unadjudicated and proceed to R1 on that basis, knowing K1 was never tested; change the
+   target content class and re-run R0b–R0d; or fund the upper-bound instrument as its own campaign.
+   The one route foreclosed is the one this document forecloses everywhere else — re-running the
+   census until a number comes out favourable.
+
+   **Consequence for §0, stated rather than left standing:** the headline *"the three ways it kills
+   the campaign"* is now **false as written** — only K2 and K3 can fire at R0. K1 can be refuted or
+   left undecided, never fired.
 
    > ⚠️ **Two dead rules are recorded here rather than deleted, because each looked decisive.**
    > Rev 2's `rule = "all_three_below"` put a `_max` among two `_min`s, so on the canonical
@@ -1268,7 +1366,7 @@ dated entry here, in a new plan revision, never by an in-place edit. The recorde
 | — | — | — | — | *No amendment yet. The thresholds file is at its authoring state.* |
 
 **Findings that pre-authorize a fallback** (per `[census].cross_run_spread_fallback` and
-`[k1_instrument].on_not_converged`) are also entered here, by name and date, **before** the fallback
+`[k1_instrument].on_not_converged_fire_direction`) are also entered here, by name and date, **before** the fallback
 is used. A fallback adopted without an entry is the "widen the gate to make the run pass" move that
 §7 clause 2 forbids.
 
@@ -1276,7 +1374,21 @@ is used. A fallback adopted without an entry is the "widen the gate to make the 
 
 ## 12. Appendix — verified file:line anchors
 
-Every line below was opened or grepped while writing this revision.
+⚠️ **Rev 7 WITHDRAWS the blanket claim that stood here.** It read *"Every line below was opened
+or grepped while writing this revision"* and was **false in four consecutive revisions** — Rev 2
+carried a ~10-line drift through the whole Timing block; Rev 4 re-derived the appendix and left the
+body stale; Rev 6 re-derived the ingest block in the body and left the appendix stale, in the
+opposite direction; and `targets.rs`'s anchors were ~56 lines off in *both* at once. Four rounds of
+asserting verification, four rounds of being wrong, every time caught by an adversarial pass rather
+than by anything mechanical.
+
+**These anchors are NOT machine-checked, and that is now stated instead of denied.**
+`tests/internal_docs_anchors.rs` gates the three navigation documents; adding this plan was
+attempted and reverted, because the plan cites bare basenames in prose (`` `mesh_assets.rs:252` ``)
+while the gate binds an anchor to the nearest resolvable path link. Measured on the attempt: 83
+"stale" of 146, dominated by misbindings rather than rot. **Converting this document's citations to
+the link form is the named follow-up that would let the gate hold the promise this sentence used to
+make.** Until then, treat every number below as evidence to re-derive, not as a verified fact.
 
 **Ingest / mesh:** `crates/boyko_render/src/loaders/obj.rs:13` (default vertex colour), `:55`
 (`ObjMeshLoader`), `:60` (`EXTENSIONS = &["obj"]`), `:94-96` (dedup + `generate_tangents`) ·
@@ -1405,6 +1517,12 @@ rung six. Everything up to and including the census is unblocked by it.
 4. **Bless bandwidth.** How many byte-moving rungs per week can the owner actually bless? R0 moves
    no pin, but two hwrt legs are already `PENDING` (§9 clause 5), and that number caps the width of
    every rung after R2b.
+6. **If K1 comes back UNDECIDED, what happens?** R0 can refute K1 cheaply and soundly and cannot
+   fire it — the upper-bound instrument is unsolved (§5.6). So `D_est < 1.0` leaves the campaign's
+   premise untested rather than refuted. Proceed to R1 on an unadjudicated premise, change the
+   target content class, or fund the instrument? **This is the second-most consequential question
+   in the document after Q1**, and like Q1 it must be answered before the number exists, not after.
+
 5. **Quality target.** What pixel-error budget counts as "equal quality" — our equivalent of a
    pinned `MaxPixelsPerEdge` — and is the owner the arbiter by visual eval, or do we bind to a
    metric? Note the standing lesson that image statistics have already misled this project twice,

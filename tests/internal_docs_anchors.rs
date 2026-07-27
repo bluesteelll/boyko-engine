@@ -186,6 +186,28 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// The internal documents `CLAUDE.md` points agents at for navigation.
+/// The three navigation documents.
+///
+/// `MESHLET-VIRTUAL-GEOMETRY-PLAN.md` was ADDED HERE AND REMOVED AGAIN, and the reason is worth
+/// recording because it is a real limit of this gate rather than a preference.
+///
+/// The plan is the strongest candidate for gating in the tree: its §12 appendix opens *"Every line
+/// below was opened or grepped while writing this revision"*, and that blanket claim has been
+/// **false in four consecutive revisions** — Rev 4 re-derived the appendix and left the body stale,
+/// Rev 6 re-derived the body and left the appendix stale. Exactly the promise a machine should keep.
+///
+/// It cannot, as the documents are written. The navigation docs cite through resolvable markdown
+/// links (`[mesh.rs](../crates/.../mesh.rs):81`); the plan cites bare basenames in prose
+/// (`` `mesh_assets.rs:252` ``). This scanner binds an anchor to the nearest resolvable path
+/// mention, so a plan line naming `targets.rs:868` binds to whatever document link appeared above
+/// it — measured: 83 "stale" of 146, dominated by misbindings, including `VG-CAMPAIGN-CLAIM.toml`
+/// reported "past end of file" for an anchor meant for `targets.rs`.
+///
+/// Resolving basenames instead would be ambiguous by construction — this workspace has many
+/// `mod.rs`, `lib.rs` and `mesh.rs` files — so it would trade a loud misbinding for a silent one.
+/// **Gating the plan requires converting its citations to the link form first.** That is a bounded
+/// mechanical edit, it is a named follow-up, and until it happens the plan's §12 says plainly that
+/// its anchors are unchecked rather than asserting they were verified.
 const GATED_DOCS: &[&str] = &["FEATURE_MAP.md", "SYSTEMS.md", "ARCHITECTURE.md"];
 
 /// Opt-out marker for a line that quotes a stale anchor on purpose.

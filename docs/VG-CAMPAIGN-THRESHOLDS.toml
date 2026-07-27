@@ -345,7 +345,21 @@ reference_floor_source = "cross_session_spread_of_reference_capture"
 # from this project's recorded ~21% absolute-cost spread with margin, and R0f' reds if the measured
 # absolute spread exceeds it.
 absolute_session_spread_ceiling = 0.25
-absolute_floor_source = "cross_session_spread_of_absolute_per_pass_medians"
+# REV 7 CORRECTION -- this field said PER-PASS while absolute_floor_ms_rule scales the CHAIN
+# median by it, and [scope].chain_floor_rule forbids exactly that composition ("the passes share
+# occupancy, caches and the same queue"). Two implementers coding from this file built different
+# floors, and the floor is the left-hand side of the ONE gate on the expected branch. One
+# construction, named once, consistent with [scope]:
+absolute_floor_source = "cross_session_spread_of_the_CHAIN_TOTAL_absolute_medians"
+
+# REV 7 -- the lattice floor [decidability] has and this branch did not. Section 7 clause 3 is
+# labelled non-negotiable and the sibling MEASURED the failure it guards: a "spread" that is one
+# counter step carries no information. Without it absolute_gate_rule collapses at s -> 0 to
+# `c < m` -- any improvement however small is "decidable" -- and the error runs in the direction
+# that makes the ONE gate EASIER to close on the branch section 11 calls expected. That is R16
+# again (a gate transferred without its precondition), one branch over.
+absolute_effective_floor_rule = "max(measured_absolute_spread, measured_lattice_ns / |chain_median_ns|) * measured_chain_median_ms"
+absolute_lattice_evidence_required = true   # same SV0_LATTICE_MIN_DISTINCT_TICKS = 7 evidence floor
 
 #
 # REV 5 CORRECTION — the two fields above are a RELATIVE fraction, and Rev 3/Rev 4's R0f' gate (b)
