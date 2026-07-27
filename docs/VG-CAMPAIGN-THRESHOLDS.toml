@@ -1,0 +1,242 @@
+# VG campaign thresholds — AUTHOR-FROZEN. This file never changes.
+#
+# WHY THIS FILE IS SEPARATE FROM docs/VG-CAMPAIGN-CLAIM.toml.
+#
+# Rev 2 put both halves in one hashed unit and the freeze died on contact with its own schedule.
+# The claim file contains owner VALUES calls that the ladder REQUIRES to be filled — R0b cannot
+# author CORPUS.toml until `corpus.arrangement` is answered. Filling it changes the file's sha256,
+# so the hash recorded at R0a is guaranteed to break before the first rung that asserts it. Once
+# "the hash moved again, re-record it" is a routine event, the tripwire has no signal left: any
+# re-record can carry a simultaneous edit to a K1 threshold and every rung stays green.
+#
+# So the two halves are split by their update discipline, not by their subject:
+#
+#   * THIS file  — author-set, decision-bearing, frozen at authoring time, **never edited**. Its
+#                  sha256 is recorded once by R0a and re-asserted by R0c/R0d/R0e/R0f. A change here
+#                  is a new plan revision with a dated amendment in the plan's §11, and it reds
+#                  four rungs until the recorded hash is deliberately updated in the same act.
+#   * CLAIM file — owner VALUES calls, PENDING until answered, filled exactly once. Not hashed;
+#                  gated instead by a sentinel rule (a rung that needs a field asserts it is not
+#                  PENDING), which is the discipline goldens/PINS.toml already uses.
+#
+# Nothing in this file was tuned against a measurement: it is authored before the ingest path, the
+# census instrument, the census run, the harness and the reference capture exist.
+
+schema_version = 2
+frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 3"
+frozen_date = "2026-07-27"
+
+# ---------------------------------------------------------------------------------------------
+# [census] — the resolution ladder. Frozen because density scales as 1/resolution^2, which makes
+# resolution the parameter most able to decide K1 silently.
+# ---------------------------------------------------------------------------------------------
+[census]
+# The census runs the whole ladder and reports a CURVE. 512x512 is not a free choice — it is the
+# existing DUMP_EXTENT (crates/boyko_app/tests/sv0_scene/mod.rs:162), the extent every VB fixture
+# and golden pin already uses.
+resolution_ladder = [[512, 512], [1920, 1080], [2560, 1440], [3840, 2160]]
+
+# The resolution at which K1 is adjudicated. 1920x1080: the modal PC gaming resolution, and the
+# one at which a performance claim would be made. Choosing 2160p here would flatter the campaign
+# (denser pixels reach micro-polygon sooner); choosing 512x512 would refute it unfairly.
+decision_resolution = [1920, 1080]
+
+# The census must ASSERT the achieved extent equals the requested rung, per rung. This is not
+# paranoia: the sibling harness already carries the same check at 512x512
+# (sv0_deferred_term_bench.rs:297-299, "an OS-clamped window would silently measure a different
+# per-pixel workload"), and this engine's extent is a real OS window client area
+# (crates/boyko_rhi_vulkan/src/window.rs:252, AdjustWindowRectEx at :310). A display that clamps
+# 1440p and 2160p produces three plausible rows and a fabricated curve.
+assert_achieved_extent = true
+
+# The readback is streamed and hashed, never retained. At 3840x2160 x 8 B = 66.4 MB per censused
+# frame, and the plan's SS11 records this volume at 16 GB free with target/ at 58 GB, retention
+# would reproduce this project's standing hazard of disk exhaustion surfacing as mingw linker
+# errors.
+readback_retention = "stream_and_hash"
+
+# Cross-run gate. See [k1_instrument].ladder_convergence_margin for the other self-check.
+# NOTE: "byte_identical" is a HYPOTHESIS to be tested by R0c, not an assumption. Rev 2 justified it
+# by the 24 golden pins, which is invalid: the pins hash an 8-bit shaded BMP and this project has
+# MEASURED them blind below ~2^-16 relative. Two adjacent triangles of a smooth mesh can shade
+# identically to 8 bits and carry different vb_id. R0c must MEASURE cross-process vb_id identity
+# before R0d relies on it; if it does not hold, the fallback below applies and the non-determinism
+# is itself a finding about the raster path.
+cross_run_gate = "byte_identical"
+cross_run_spread_fallback = 0.05
+
+# ---------------------------------------------------------------------------------------------
+# [k1_instrument] — how screen-space triangle density is estimated. THIS IS THE PART REV 2 GOT
+# WRONG, and the reasoning is recorded because the error is instructive.
+#
+# Rev 2's decisive statistic was `submitted_per_covered_pixel` = all submitted triangles / covered
+# pixels, adopted as the "generous end of a bracket" so that a mis-set threshold would err toward
+# keeping the campaign alive.
+#
+# It IS a valid upper bound (submitted triangles are a superset of visible ones). It is also so
+# loose as to be useless: it counts back-face-culled and off-screen geometry, so it conflates "the
+# triangles are small" with "the level contains a lot of geometry". Firing K1 requires
+# submitted/covered < 1.0 — i.e. the whole frame submits fewer triangles than the screen has
+# covered pixels — while R0b's own gate requires the corpus to carry published high-poly counts.
+# A corpus that satisfies R0b can never satisfy K1's decisive conjunct. The kill was self-satisfied
+# out of existence.
+#
+# THE REPLACEMENT USES THE LADDER, WHICH COSTS NOTHING NEW.
+#
+# For a fixed camera and fixed geometry, a triangle's screen-space area scales exactly with pixel
+# count. A triangle covering 4 px at 2160p covers 1 px at 1080p. So:
+#
+#   * visible_tris(R) — the count of distinct (instance_id, local_tri) in the readback at
+#     resolution R — is monotonically increasing in R, because raising resolution lets smaller
+#     triangles win coverage races that they lost before;
+#   * it converges, as R grows, to the true count of front-facing, unoccluded triangles in view;
+#   * measuring at the TOP rung therefore reveals exactly the sub-pixel population that the
+#     decision resolution hides, which is the population this campaign is about.
+#
+# The uncapped density estimate at the decision resolution is then
+#
+#     D_est = visible_tris(top rung) / covered_pixels(decision_resolution)
+#
+# — unbounded above, unlike the saturating per-resolution ratio, and TIGHT, unlike submitted/covered.
+#
+# AND IT VALIDATES ITSELF. The ladder gives four points on a convergence curve. If the top two
+# rungs still differ by more than the margin below, visible_tris has NOT converged, D_est is an
+# underestimate of unknown size, and the census reports "density not resolved" — K1 is NOT
+# adjudicated. That is the plan's own SS9 clause 4 discipline (the instrument is blind, not the
+# effect absent) applied before the fact instead of after it.
+# ---------------------------------------------------------------------------------------------
+[k1_instrument]
+# The relative gap between the top two ladder rungs' visible_tris below which the count is
+# treated as converged. 0.05: a 5% residual on a curve that is flattening, chosen for the same
+# reason the sibling harness's spread gate is 0.10 — tight enough to mean something, loose enough
+# not to red on ordinary variation.
+ladder_convergence_margin = 0.05
+
+# If the ladder has not converged, K1 is not adjudicated and the campaign is neither refuted nor
+# confirmed by density. The disposition is to extend the ladder upward (a new plan revision), NOT
+# to adjudicate on an underestimate.
+on_not_converged = "k1_not_adjudicated"
+
+# ---------------------------------------------------------------------------------------------
+# [k1] — the "no content, no mechanism" kill. Two conjuncts, BOTH pointing the same way.
+#
+# Rev 2 had three, and its `rule = "all_three_below"` inverted the third: `modal_bucket_max_pixels`
+# is a MAX while the other two are MINs, so on the canonical no-mechanism scene (a few giant flat
+# quads) the first two conjuncts held and the third did not, and K1 did not fire on the exact
+# scene it was written to catch. An implementer coding from the frozen TOML would have written
+# `modal < 16` and produced a kill that fires when triangles are SMALL — i.e. when the campaign's
+# premise is confirmed.
+# ---------------------------------------------------------------------------------------------
+[k1]
+# Conjunct 1. D_est (see [k1_instrument]) below 1.0 at the decision resolution. Not a tuned value:
+# 1.0 IS the definition of the regime cluster LOD exists to serve.
+d_est_min = 1.0
+
+# Conjunct 2. The screen-space triangle-size histogram's modal bucket at the decision resolution,
+# in pixels, powers of two. 16 = a 4x4 footprint; above that, triangles are large and cluster LOD
+# is not the lever. Derived from the top rung's histogram by the exact power-of-two shift the
+# scaling law gives (2 buckets per 2x resolution step), which the ladder's own four points check.
+modal_bucket_pixels_above_which_k1_holds = 16
+
+# K1 fires iff BOTH conjuncts hold: D_est < d_est_min AND modal bucket >
+# modal_bucket_pixels_above_which_k1_holds. Spelled out as a sentence because Rev 2's terse rule
+# string is what inverted it.
+rule = "k1_fires_iff  d_est < d_est_min  AND  modal_bucket_px > modal_bucket_pixels_above_which_k1_holds"
+
+# Reported alongside, and deliberately NOT part of the rule: the saturating per-resolution ratio
+# (distinct visible triangles / covered pixels, capped at 1 by construction because vb_id is one
+# R32G32_UINT texel per pixel) and submitted_per_covered_pixel. The first is the raw reading, the
+# second is a cull-efficiency reading. Neither adjudicates K1; both are on the page so the
+# instrument's own behaviour is visible.
+report_only = ["visible_tri_per_covered_pixel", "submitted_per_covered_pixel"]
+
+# The census renders at FULL detail — this engine has no LOD, so there is no error target to hold.
+# That makes the censused density the CEILING of the mechanism available to any LOD scheme: a
+# cluster hierarchy can only reduce triangles below it. If the ceiling does not reach the regime,
+# no LOD scheme reaches it either. K1 is decidable without an error target, and this is why.
+measured_at = "full_detail_no_lod"
+
+# ---------------------------------------------------------------------------------------------
+# [decidability] — the harness contract. Plan SS7 and SS8 R0e.
+#
+# The three session constants are the literals crates/boyko_app/tests/sv0_deferred_term_bench.rs
+# already carries at :350, :366 and :378, measured on this exact box. But Rev 2 transferred the
+# literals while silently changing their DENOMINATORS, which weakened the null control by roughly
+# 20x: the sibling gates |null median delta| against the ARMED DELTA (it fired at 33% — -2048 ns
+# against a 6144 ns signal — and that failure is what produced the ABBA redesign), whereas Rev 2
+# gated it against "the smallest per-pass median", an absolute pass cost. A pass costing 100 us
+# would have had a 10 us null budget where the sibling's was 614 ns, and the precedent's own red
+# event would have passed. The denominators are therefore stated explicitly below, not implied.
+# ---------------------------------------------------------------------------------------------
+[decidability]
+sessions = 3
+
+# Denominator: the ARMED PAIRED DELTA, as in the sibling. Not a pass median.
+null_control_max_fraction = 0.10
+null_control_denominator = "armed_paired_delta"
+
+# Denominator: the PAIRED DELTA across sessions, as in the sibling. Not an absolute pass median.
+#
+# This distinction is load-bearing and measured: this project has recorded ~21% run-to-run spread
+# on ABSOLUTE GPU pass costs at high N (the VB-P1d bench), so a 0.10 gate applied to absolute
+# medians would red for a known instrument property rather than a finding. See
+# [absolute_mode] for the branch that has no choice but to measure absolutes.
+session_spread_max = 0.10
+session_spread_denominator = "paired_delta"
+
+# How the two instruments' floors combine into the joint floor of the ONE gate. "sum", and the
+# reason is stated rather than conventional: quadrature assumes two independent draws from one
+# noise process, and a systematic capture bias between two different engines (different clock
+# discipline, different pass boundaries, a driver-side difference) is not an independent random
+# error. Summing is conservative in the direction that makes our own claim harder to close.
+joint_floor_rule = "sum"
+
+# The reference side is an instrument too. A claim smaller than the REFERENCE's own reproducibility
+# is unfalsifiable no matter how good our side is — a term Rev 1 never had at all.
+reference_floor_source = "cross_session_spread_of_reference_capture"
+
+# ---------------------------------------------------------------------------------------------
+# [absolute_mode] — the K2 branch, which needs a DIFFERENT instrument and does not get to pretend
+# otherwise.
+#
+# Rev 2's R0f' claimed "nothing new to measure — the left-hand side is already ours". That is
+# false, and it is the sharpest thing the Rev 2 critique found. The harness SS7 mandates measures
+# PAIRED DIFFERENCES; its entire algebra exists to CANCEL the absolute terms
+# (sv0_deferred_term_bench.rs:34, :58-62 — the per-frame baseline mu, the frame-in-flight-slot
+# offset gamma, and the position drift beta all cancel in (d1+d2)/2). Those are exactly the terms
+# an absolute millisecond target must retain, and this repo has MEASURED them to be large.
+#
+# So absolute mode carries its own floor, measured its own way, and it is expected to be WORSE.
+# Stating that plainly is the point: a weaker instrument honestly reported beats a strong-looking
+# number the harness cannot support.
+# ---------------------------------------------------------------------------------------------
+[absolute_mode]
+# R0f' MUST derive this by measurement, not adopt it. The value below is the pre-registered
+# CEILING the measurement must come in under for absolute mode to be decidable at all; it is set
+# from this project's recorded ~21% absolute-cost spread with margin, and R0f' reds if the measured
+# absolute spread exceeds it.
+absolute_session_spread_ceiling = 0.25
+absolute_floor_source = "cross_session_spread_of_absolute_per_pass_medians"
+
+# ---------------------------------------------------------------------------------------------
+# [scope] — what the claim is ABOUT. Rev 2 compared a per-pass floor to a frame-total claim with
+# no composition rule stated anywhere, which made the ONE gate not evaluable.
+# ---------------------------------------------------------------------------------------------
+[scope]
+# The claim is about the BRACKETED PASS CHAIN, not a frame. R0e brackets the VB raster, vb_geo,
+# the classify chain, and the three passes VbTimedPass already covers. A frame also contains CSM,
+# SDF, DDGI, post/AA, present and all CPU time, none of which this campaign touches and none of
+# which the harness measures.
+claim_scope = "bracketed_vb_pass_chain"
+
+# How N per-pass floors compose into the chain floor: the chain total's floor is measured directly
+# on the chain total (one bracket spanning the chain), NOT composed arithmetically from the
+# per-pass floors. Composing them would require an independence assumption the passes do not
+# satisfy — they share occupancy, caches and the same queue.
+chain_floor_rule = "measured_directly_on_chain_total"
+
+# The per-pass regression rule needs a correspondence between our pass names and the reference's.
+# It cannot be evaluated without one, and whoever writes it after both tables exist writes it with
+# the answer in hand. R0a therefore records the reference's pass names for its stock scene BEFORE
+# any corpus capture, and R0f asserts the map is total over our bracketed set.
+require_pass_correspondence_map_at = "R0a"
