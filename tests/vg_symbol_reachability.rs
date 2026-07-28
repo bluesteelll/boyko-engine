@@ -194,11 +194,11 @@ const BASELINE_ORPHAN_FIELDS: [&str; 0] = [];
 /// It lists **every** table both frozen files define — no judgement about which ones the plan
 /// happens to cite bracketed today, because that is exactly the kind of incidental fact that goes
 /// stale between revisions.
-const CITABLE_TABLES: [&str; 9] = [
+const CITABLE_TABLES: [&str; 10] = [
     "census",
     "corpus",
     "gating",
-    "hash_assertion",
+    "hash_assertion", "ingest_ceiling",
     "k1",
     "k1_instrument",
     "k1_outcome",
@@ -733,7 +733,13 @@ fn the_sweep_reports_an_unresolvable_gating_payload() {
     // earlier mention in a comment and leaves the row untouched — this control caught that on its
     // first run, and it is the third time in this campaign that a sensitivity control mutated prose
     // instead of the thing it names.
-    let typo = claim.replacen("[\"corpus.arrangement\"]", "[\"corpus.arrangment\"]", 1);
+    // ⚠️ Rev 24: this read `replacen("[\"corpus.arrangement\"]", ...)`, anchored on the row's
+    // PAYLOAD SHAPE — a single-element list. Adding a second legitimate blocker to that row made
+    // the pattern vanish and the control died on its own invariant, which is the `replacen` trap
+    // one level up: the mutation named the shape of the value instead of the row. Use the shared
+    // row rewriter, anchored on the key at line start, as every sibling control here does.
+    let typo = rewrite_gating_row(&claim, "r0b_blocked_by", "r0b_blocked_by = [\"corpus.arrangment\"]
+");
     assert_ne!(typo, claim, "invariant: the mutation must change the file");
     assert!(
         !sweep(&thresholds, &typo, &plan).unresolved_gating.is_empty(),

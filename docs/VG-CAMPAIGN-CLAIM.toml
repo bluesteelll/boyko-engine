@@ -47,8 +47,8 @@
 # tests/vg_symbol_reachability.rs asserts that the newest `REV N` marker below and
 # `authored_at_revision` name the same revision, over THIS file as well as the hashed one, and it
 # ships a control that fires in both directions. It red on this file the first time it ran.
-schema_version = 6
-authored_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 14"
+schema_version = 7
+authored_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 24"
 
 # REV 13 -- the surviving dead index. Rev 12 converted every section-13 citation to name its
 # question instead of its index, and stated that as a universal; one dead index survived sixteen
@@ -128,7 +128,7 @@ undecided_disposition = "PENDING"
 # ---------------------------------------------------------------------------------------------
 [gating]
 r0a_blocked_by = []
-r0b_blocked_by = ["corpus.arrangement"]
+r0b_blocked_by = ["corpus.arrangement", "ingest_ceiling.disposition"]
 r0c_blocked_by = []
 r0d_blocked_by = []
 
@@ -137,3 +137,32 @@ r0d_blocked_by = []
 # and this row are the same rule stated in two places, and the rung that reads this table asserts
 # they agree.
 r1_blocked_by = ["k1_outcome.undecided_disposition"]
+
+# ---------------------------------------------------------------------------------------------
+# [ingest_ceiling] -- plan section 3.4 / section 13, the INGEST CEILING question. BLOCKS R0b.
+#
+# REV 24 -- THIS FIELD IS NEW, AND WITHOUT IT REV 23'S FINDING HAD NO CONSUMER. Rev 23 established
+# that mesh buffers route to ONE 64 MiB first-fit host block with no growth path, so the corpus a
+# density census needs cannot be resident: the whole corpus must satisfy
+# sum(T_i) <~ 1.5 M triangles minus the already-resident remainder. It then called the
+# device-local + staging path "a precondition of R0b" -- and gave it no producer. R0b's Lands list
+# was unchanged, no rung preceded it, this table had no row, and section 13 had no question. By the
+# plan's own rule (a rule is landed only when some consumer reads the symbol it defines) the
+# precondition was not landed. This row and this field are that consumer.
+#
+# It is an owner SCOPE call and not an architecture fork, which is why it is here rather than
+# decided in the plan: the routes differ in what the campaign IS, not in how a component is built.
+#   "extend_r0b"     -- the upload path + a capacity or growth change land INSIDE R0b, whose Lands
+#                       list, gate and blocked-by row are then re-derived together. R0b's Rev 17
+#                       approval does not survive this and must be re-earned.
+#   "new_rung"       -- a rung precedes R0b with its own gate and demonstrated red mutation, and
+#                       R0b keeps its approval unchanged.
+#   "rescope_corpus" -- the corpus is bounded to what today's allocator holds, and the campaign
+#                       records that K1 is being decided on content far below the regime the
+#                       premise is about. This is the route the document forecloses everywhere
+#                       else and is listed only so that choosing it is deliberate.
+# The route deliberately NOT offered is deferring it again: section 3.4 called this work a
+# "named follow-up, not R0 work" from the day it was written, and that sentence is what let three
+# rungs be specified on top of an ingest that cannot run.
+[ingest_ceiling]
+disposition = "PENDING"

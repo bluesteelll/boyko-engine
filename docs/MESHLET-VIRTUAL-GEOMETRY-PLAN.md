@@ -1,6 +1,6 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 23** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 24** — **NOT APPROVED, and no code exists.** This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
@@ -459,19 +459,27 @@ system RAM, not the BAR type. **The BAR window is not the constraint on either a
 binds first regardless of which type is chosen.**
 
 Substitute this section's own example asset, ~3 M triangles: `V ≈ 1.5 M`, so the **vertex buffer
-alone** is `64 · 1.5e6 = 96 MB` against a **67.11 MB** block — before its 36 MB of indices, and
-before every host-visible buffer already resident. So `max_i f_i` allocates on **no** box; the
-largest mesh that could fit a *pristine* block is `≈ 67.11e6 / 44 ≈ 1.5 M triangles` minus the
-resident remainder. **R0b(d) reds on asset one** — and it reds as a **panic**
-(`.expect("invariant: mesh vertex buffer create")`), not as the recoverable allocation failure (d)
-is worded against, which changes the shape of the test that observes it.
+alone** is `64 · 1.5e6 = 96 MB` against a **67.11 MB** block. That asset cannot be registered.
 
-**Three consequences, and they are the finding rather than a wording fix.** ① The limit bites at
-**R0b**, on the first asset, not at R0d on the sum — so §9.1's "discovered at R0d" bullet was
-inverted. ② **The device-local + staging path is a PRECONDITION OF R0b, not a follow-up**, because
-no corpus satisfying R0b(b)'s published high-poly counts can be registered without it. ③ And that
-path does not by itself relieve the ceiling: `SHARED_DEVICE_BLOCK_CAPACITY` is **also 64 MiB**, so
-the route relocates the limit unless a capacity or growth change goes with it.
+⚠️ **REV 24 CORRECTS THE QUANTITY REV 23 BOUND, AND WITHDRAWS ITS UNIVERSAL — the ceiling is real
+and Rev 23 stated it on the wrong variable.** The constraint is `Σᵢ fᵢ ≤ 67.11 MB − R`, where `R` is
+the host-visible bytes **already resident** (the block is created lazily on the first host-visible
+buffer and by mesh-registration time holds UBOs, instance rings and every other
+`HostVisibleCoherent` allocation, first-fit and fragmenting) — **and no text bounds `R`**, so the
+usable ceiling is below 67.11 MB by an unmeasured margin. Rev 23 wrote *"R0b(d) reds on asset one"*
+and *"no corpus satisfying R0b(b)'s published high-poly counts can be registered"*. The first is
+true only of assets above ~1.5 M triangles. The second is **not derivable at all**: R0b(b) asserts
+*decoded count **equals** published count* — an equality, never a magnitude — so nothing anywhere
+floors an asset's triangle count.
+
+**And the substitution that matters is the one Rev 23 did not try.** Eight assets of 4.0e5 triangles
+each (3.2 M triangles of corpus, every count decoded-equals-published, so (b) is satisfied):
+`maxᵢ fᵢ = 17.6 MB < 67.11 MB`, so **R0b(d) goes GREEN** — while `Σᵢ fᵢ = 140.8 MB` exhausts the
+first-fit block during **asset four** and `.expect("invariant: mesh vertex buffer create")` panics.
+**The gate part written to catch this passes the corpus that kills the rung.** At 44 B/triangle
+(32 B of vertices + 12 B of `u32` indices for a closed mesh) the whole corpus must satisfy
+`Σ Tᵢ ≲ 1.5 M triangles minus R/44` — which is *one* mid-sized asset's worth for the entire corpus,
+and is the honest statement of how far today's engine is from a high-poly census.
 
 This is the campaign's falsification-first ordering paying off in the direction nobody scheduled:
 K2 was put first as the cheapest kill, and the cheapest kill turns out to be one no K names — **the
@@ -2095,6 +2103,17 @@ requirement on whoever writes R1, and calling it anything stronger would repeat 
    no field for it and a `[gating]` table with no row, so the one outcome R0 is most likely to
    produce had no sentinel and blocked nothing — the enforcement predicate was vacuously true for
    every input. That is the same structural omission D3 named, in the table built to prevent it.
+
+3. **The ingest ceiling — who lands the upload path, and does R0b keep its approval?** §3.4 derives
+   that mesh buffers route to one 64 MiB first-fit host block with no growth path, so the whole
+   corpus must satisfy `Σ Tᵢ ≲ 1.5 M triangles` minus the already-resident remainder — roughly one
+   mid-sized asset for the entire corpus. The device-local + staging route is therefore a
+   **precondition of R0b** rather than the follow-up this document called it from the day it was
+   written, and it does not by itself suffice, because the device block is 64 MiB too.
+   → `ingest_ceiling.disposition`, **blocks R0b**. Three routes are offered and one is deliberately
+   not: deferring it again is what allowed three rungs to be specified on top of an ingest that
+   cannot run. ⚠️ Under `extend_r0b` **R0b's Rev 17 approval does not survive** — its Lands list,
+   gate and blocked-by row are re-derived together and the approval is re-earned.
 
 **Advisory — no field, no gate, and that is deliberate: they shape work but block no rung of R0:**
 

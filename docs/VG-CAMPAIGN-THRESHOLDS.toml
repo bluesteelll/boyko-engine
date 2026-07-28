@@ -31,8 +31,8 @@
 # and Rev 7 -- the third occurrence caught by an adversarial pass rather than by the fields
 # themselves, in the very revision whose slogan was about fixes that do not land. They are updated
 # here in the same act as the edit, which is the whole of their job.
-schema_version = 19
-frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 23"
+schema_version = 20
+frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 24"
 frozen_date = "2026-07-28"
 
 # THE EDIT DISCIPLINE, stated because Rev 4 and Rev 5 both edited this file in place while its
@@ -383,6 +383,9 @@ k1_path_aggregation = "min_over_committed_camera_paths"
 # left the codeable one USING it.
 committed_paths_rule = "committed camera paths are enumerated in assets/vg_corpus/CORPUS.toml at R0b; a CENSUS ROW is one reading at one (camera path, ladder rung) pair, so the census emits |P| x |ladder| rows; R0b(e) asserts |P| >= committed_paths_min at the rung that AUTHORS the set, and R0d(d) asserts SET EQUALITY between the PROJECTION of the census rows onto their path component and the enumeration, plus the same floor, at the rung that CONSUMES it (a missing path, an extra path and an undersized enumeration all red); R0d(d) RECORDS the sha256 of the enumeration beside the readback hashes as evidence, not as an assertion; R0 does not assert the set is representative, and (d) cannot see an edit to the enumeration made before the run"
 
+# REV 24 -- no threshold changes; the ingest ceiling gains an owner field and a gating row in the
+# claim file, so the precondition Rev 23 established finally has a consumer.
+#
 # REV 23 -- no threshold changes; plan section 3.4 re-derived: the corpus cannot be ingested on
 # the current allocator (one 64 MiB host block), so the staging path is a PRECONDITION of R0b.
 #
