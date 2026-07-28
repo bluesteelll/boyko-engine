@@ -1,6 +1,6 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 22** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 23** — **NOT APPROVED, and no code exists.** This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
@@ -443,22 +443,40 @@ engine lives in host-visible memory, seeded once and read-only thereafter ([`mes
 per vertex a multi-million-triangle corpus mesh is a large host-visible allocation, and on a
 discrete GPU without resizable BAR that heap is small. **R0b's gate includes "the corpus's largest
 mesh registers without allocation failure"** — that is `max_i f_i`, and it is the whole of what any
-R0 gate bounds. **The census needs `Σ_i f_i` resident SIMULTANEOUSLY**, because §4.3's subtraction
-made it run the whole corpus at every committed path, and `f_i = 64·V_i + 4·I_i` with both buffers
-`HostVisibleCoherent`. Forty assets at ~3 M triangles each is ~132 MB apiece: `max_i f_i` allocates
-on any box and greens R0b(d), while `Σ_i f_i ≈ 5.3 GB` of host-visible memory is ~20× a 256 MB BAR
-window — R0b greens on all six parts and R0d simply cannot execute.
+R0 gate bounds.
 
-⚠️ **NO R0 GATE BOUNDS THE SUM, and Rev 19 said it would land here and did not.** That promise was
-its own only witness: the sole text mentioning it was the sentence promising it, and this section —
-the named destination — never received it. By this document's own rule (*a rule is landed only when
-some consumer reads the symbol it defines*) it was never landed. It is landed now as a **recorded
-limit rather than a new gate**, deliberately: R0b is approved, and widening an approved rung's gate
-to absorb a consumer's need is how an approval stops meaning anything. The consequence is stated
-plainly instead — **an oversized corpus is discovered at R0d as an allocation failure, not at R0b
-as a red gate**, so the corpus author gets no early signal; §9.1 records it. The abort route is a
-device-local + staging upload path for meshes, which does not exist today and is a named follow-up,
-not R0 work.
+⚠️ **REV 23 RE-DERIVES THIS AGAINST THE ALLOCATOR THAT ACTUALLY SERVES MESH BUFFERS, AND THE
+CONCLUSION INVERTS: THE CORPUS CANNOT BE INGESTED ON TODAY'S ENGINE AT ALL.** Rev 22 compared the
+corpus SUM to a 256 MB BAR window and concluded that `max_i f_i` "allocates on any box and greens
+R0b(d)", with the failure "discovered at R0d". Every clause of that is wrong, and the comparand is
+wrong twice.
+
+`MemoryLocation::HostVisibleCoherent` — which `build_mesh_gpu` uses for **both** buffers — routes to
+`VulkanContext::host_block()`, **one** `HostVisibleBlock` of `SHARED_HOST_BLOCK_CAPACITY = 64 MiB`,
+first-fit sub-allocated with **no growth path**. And its memory type is selected as the *first*
+`HOST_VISIBLE|HOST_COHERENT` type, never requiring `DEVICE_LOCAL` — so on a discrete GPU it is
+system RAM, not the BAR type. **The BAR window is not the constraint on either axis, and 64 MiB
+binds first regardless of which type is chosen.**
+
+Substitute this section's own example asset, ~3 M triangles: `V ≈ 1.5 M`, so the **vertex buffer
+alone** is `64 · 1.5e6 = 96 MB` against a **67.11 MB** block — before its 36 MB of indices, and
+before every host-visible buffer already resident. So `max_i f_i` allocates on **no** box; the
+largest mesh that could fit a *pristine* block is `≈ 67.11e6 / 44 ≈ 1.5 M triangles` minus the
+resident remainder. **R0b(d) reds on asset one** — and it reds as a **panic**
+(`.expect("invariant: mesh vertex buffer create")`), not as the recoverable allocation failure (d)
+is worded against, which changes the shape of the test that observes it.
+
+**Three consequences, and they are the finding rather than a wording fix.** ① The limit bites at
+**R0b**, on the first asset, not at R0d on the sum — so §9.1's "discovered at R0d" bullet was
+inverted. ② **The device-local + staging path is a PRECONDITION OF R0b, not a follow-up**, because
+no corpus satisfying R0b(b)'s published high-poly counts can be registered without it. ③ And that
+path does not by itself relieve the ceiling: `SHARED_DEVICE_BLOCK_CAPACITY` is **also 64 MiB**, so
+the route relocates the limit unless a capacity or growth change goes with it.
+
+This is the campaign's falsification-first ordering paying off in the direction nobody scheduled:
+K2 was put first as the cheapest kill, and the cheapest kill turns out to be one no K names — **the
+ingest is blocked before any measurement is possible.** It is stated here, at the rung that
+authors the corpus, rather than discovered by an implementer at R0b.
 
 ---
 
@@ -1155,7 +1173,7 @@ runs the **whole corpus at every committed path**, so what R0d needs is the whol
 **simultaneously**, and the largest single mesh allocating says nothing about the sum. Recorded as a
 **precondition R0d inherits**, not silently widened into (d): widening it would mint a new
 mechanism at an approved rung, and §3.4's residency hazard is already the named home for the
-ceiling. Rev 19's scope is to state the sum requirement where §3.4 states the hazard;
+ceiling. §3.4 now states the real ceiling and its consequence — which is that this part reds on the FIRST asset, not on the sum;
 **(e) the manifest enumerates at least `[k1].committed_paths_min` distinct camera-path ids.**
 ⚠️ **This part is Rev 14's, and it exists because the parts above provably cannot supply it.** The
 enumeration immediately above — (a0) the arrangement sentinel, (a) payload sha256, (b) triangle
@@ -1780,7 +1798,17 @@ headline was false as written. Rather than a headline and a retraction, the limi
   no digest in R0 hashes, so **re-aiming** a committed path is neither a membership change nor a row
   count change and no gate part in R0 sees it. Both are exposures of the same kind as the choice
   itself: they are constrained by party separation and commit ordering, not by a gate.
-* **Two limits Rev 22 records rather than gates, both created by earlier repairs.** ⚠️ **No R0 gate bounds the corpus's TOTAL host-visible footprint.** R0b(d) bounds `max_i f_i`; §4.3's subtraction made the census need `Σ_i f_i` resident simultaneously (§3.4), so an oversized corpus is discovered at **R0d as an allocation failure**, not at R0b as a red gate — the author of the corpus gets no early signal. Recorded rather than gated because R0b is approved and widening an approved rung's gate to absorb a consumer's need would hollow out the approval. ⚠️ And **no R0c gate part is evaluated on an ARMED frame**, so the two hazards R0c's own preamble names — a new layout transition of a per-FIF ring image inside the RDG auto-barrier system, and a host read racing the frame fence — are *recorded and not asserted* at R0c. Both are the disposition R0c(a) itself carries, and both are here because a bounding enumeration is where limits go.
+* ⚠️ **R0's CORPUS CANNOT BE INGESTED ON TODAY'S ENGINE, and that is a blocker on R0b rather
+  than a limit on R0d.** Rev 22 recorded here that no R0 gate bounds the corpus's total footprint
+  and that an oversized corpus is "discovered at R0d as an allocation failure". **Rev 23 inverts
+  it**: mesh buffers route to a single **64 MiB** first-fit host block with no growth path, so the
+  vertex buffer of a 3 M-triangle asset (96 MB) does not fit an empty block — **R0b(d) reds on
+  asset one, as a panic**, and R0c/R0d are unreachable. The device-local + staging path is
+  therefore a **precondition of R0b**, not a follow-up, and does not by itself suffice because the
+  device block is 64 MiB too (§3.4). ② Separately and still true: **no R0c gate part is evaluated
+  on an ARMED frame**, so the two hazards R0c's preamble names — a new layout transition of a
+  per-FIF ring image in the RDG auto-barrier system, and a host read racing the frame fence — are
+  *recorded and not asserted* at R0c.
 * **When a censused frame fails non-degeneracy, R0d reds** — the rung is not commit-eligible and
   nothing is adjudicated. ⚠️ `[k1].k1_decision_rule` also maps that input to "UNDECIDED, escalate",
   which is a different act; **R0d's gate takes precedence**, because a frame that cannot be
