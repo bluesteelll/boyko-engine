@@ -84,7 +84,7 @@ adversarial pass that produced every correction below.
 | Two-file split | **PARTIAL** — nothing forbids editing the claim *after* the fill |
 | Claim scope named (`bracketed_vb_pass_chain`) | **HOLDS** — best reasoning in the plan |
 | Denominators written down | **HOLDS** — verified against the sibling exactly |
-| §12 anchors re-derived | **HELD FOR §12 ONLY** — the body kept the stale ones, including the `:334`→`:344` anchor §12 itself called the most expensive of the set. Fixed at Rev 4 |
+| §12 anchors re-derived | **HELD FOR §12 ONLY** — the body kept the stale ones, including the `:334~`→`:344~` anchor §12 itself called the most expensive of the set. Fixed at Rev 4 |
 
 **Rev 7 — the governing defect was not any single gate, it was WHERE the fixes landed.** An
 adversarial review of Rev 6 scored its ten claims **2 hold, 7 partial, 1 does not**, and named the
@@ -177,7 +177,7 @@ warning was not re-derived.
   `PENDING` fill — and once "re-record the hash" is routine, the tripwire carries no signal and can
   launder a simultaneous threshold edit. Now: [`VG-CAMPAIGN-THRESHOLDS.toml`](VG-CAMPAIGN-THRESHOLDS.toml)
   is hashed and **never changes**; [`VG-CAMPAIGN-CLAIM.toml`](VG-CAMPAIGN-CLAIM.toml) is
-  **not hashed** and is gated by the `PENDING`-sentinel rule `goldens/PINS.toml:15` already defines.
+  **not hashed** and is gated by the `PENDING`-sentinel rule `goldens/PINS.toml:15~` already defines.
 * **The claim's scope is named.** Rev 2 compared a **per-pass** floor to a **frame-total** claim
   with no composition rule stated anywhere, which made the ONE gate not evaluable. The claim is now
   explicitly about the **bracketed VB pass chain**, and the chain floor is measured directly on the
@@ -202,7 +202,7 @@ every revision to introduce defects at the lines it edited.
 
 | Research says | Verified |
 |---|---|
-| R0 has *"no render change whatsoever … byte-identical goldens"* | **Half true.** The density census cannot read the visibility buffer without widening the `vb_id` ring's image usage — [`targets.rs`](../crates/boyko_rhi_vulkan/src/present/targets.rs):868 declares `COLOR_ATTACHMENT \| SAMPLED`, no `TRANSFER_SRC`. R0c therefore makes a **device-object** change. Frame content is unaffected and the byte-identity of all VB pins is that rung's gate, but "no render change whatsoever" is withdrawn. |
+| R0 has *"no render change whatsoever … byte-identical goldens"* | **Half true.** The density census cannot read the visibility buffer without widening the `vb_id` ring's image usage — [`targets.rs`](../crates/boyko_rhi_vulkan/src/present/targets.rs):868~ declares `COLOR_ATTACHMENT \| SAMPLED`, no `TRANSFER_SRC`. R0c therefore makes a **device-object** change. Frame content is unaffected and the byte-identity of all VB pins is that rung's gate, but "no render change whatsoever" is withdrawn. |
 | *(orchestrator prescription)* `vb_geom_fetch.hlsli` *"is included by EIGHT shaders"* | **REFUTED.** `grep -rn 'include "vb_geom_fetch'` over `crates/boyko_rhi_vulkan/shaders/` returns exactly **four**: [`vb_geo.comp.hlsl`](../crates/boyko_rhi_vulkan/shaders/vb_geo.comp.hlsl):118, [`vb_resolve.comp.hlsl`](../crates/boyko_rhi_vulkan/shaders/vb_resolve.comp.hlsl):85, [`vb_shade.comp.hlsl`](../crates/boyko_rhi_vulkan/shaders/vb_shade.comp.hlsl):90, [`vb_shade_split.comp.hlsl`](../crates/boyko_rhi_vulkan/shaders/vb_shade_split.comp.hlsl):137. The research doc's own corrected count (four includers, **eight** sources touching the *encoding*) is the right one — §2. |
 | Research §4 item 1 includes *"plus the beginnings of a bake artifact format"* | **SCOPED OUT, on the record.** Rev 1 and Rev 2 dropped it silently while stating the other two corrections explicitly. A bake format is an output of the offline builder (research ladder R4/R5) and has no consumer at R0: nothing in R0 produces clusters, a DAG or simplified LODs, so a format authored now would be authored against no data. It returns with its first producer. The research doc's stronger point — *"There is no bake stage. This is the actual first blocker and no survey named it"* — stands and is why §3 exists. |
 
@@ -351,9 +351,9 @@ raster-path decision, not independent of it.** R0 records this and touches none 
 ### 3.1 What imports geometry today
 
 **Exactly one mesh loader exists.** `MeshGpu::LOADERS` is a single-entry compile-time table
-([`mesh.rs`](../crates/boyko_render/src/mesh.rs):238) holding `ObjMeshLoader`, whose `EXTENSIONS` is `&["obj"]` (`loaders/obj.rs:60`). It
+([`mesh.rs`](../crates/boyko_render/src/mesh.rs):238) holding `ObjMeshLoader`, whose `EXTENSIONS` is `&["obj"]` (`loaders/obj.rs:60~`). It
 decodes to `MeshData { vertices: Vec<Vertex>, indices: Vec<u32> }` and runs `generate_tangents` once
-over the whole mesh (`:94-96`). **There is no `.obj` file anywhere in the tree** — the loader has
+over the whole mesh (`:94~-96`). **There is no `.obj` file anywhere in the tree** — the loader has
 never been pointed at a committed asset.
 
 ### 3.2 The contract an importer must satisfy
@@ -362,8 +362,8 @@ The importer's *only* obligation is to produce a `MeshData`. Everything downstre
 
 | Seam | Contract | Anchor |
 |---|---|---|
-| `Vertex` | `#[repr(C)]`, **64 B** (static-asserted), `position`@0 / `normal`@12 / `color`@24 / `uv`@40 / `tangent`@48 | [`mesh.rs`](../crates/boyko_render/src/mesh.rs):81-104 |
-| Index width | `Uint16` iff unique-vertex count ≤ `U16_INDEX_VERTEX_LIMIT`, else `Uint32`; the shader reads the width from `gMeshMeta[].index_width` | [`mesh.rs`](../crates/boyko_render/src/mesh.rs):124, [`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):273 |
+| `Vertex` | `#[repr(C)]`, **64 B** (static-asserted), `position`@0 / `normal`@12 / `color`@24 / `uv`@40 / `tangent`@48 | [`mesh.rs`](../crates/boyko_render/src/mesh.rs):81~-104 |
+| Index width | `Uint16` iff unique-vertex count ≤ `U16_INDEX_VERTEX_LIMIT`, else `Uint32`; the shader reads the width from `gMeshMeta[].index_width` | [`mesh.rs`](../crates/boyko_render/src/mesh.rs):124, [`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):273~ |
 | Device upload | `build_mesh_gpu(ctx, &vertices, &indices, geometry_table)` | [`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):252 |
 | VB geometry slot | claimed **iff** a live table is threaded; otherwise the record carries `VB_GEOMETRY_RESERVED_SLOT` (`0`) | [`mesh.rs`](../crates/boyko_render/src/mesh.rs):170, [`mesh_geometry_table.rs`](../crates/boyko_render/src/mesh_geometry_table.rs):66 |
 | `gMeshMeta[]` row | `{index_width, vertex_count, index_count}` padded to 16 B; `tri_count = index_count / 3` | [`mesh_geometry_table.rs`](../crates/boyko_render/src/mesh_geometry_table.rs):82-93, `:116-118` |
@@ -373,12 +373,12 @@ The importer's *only* obligation is to produce a `MeshData`. Everything downstre
 `type Aux = MeshGeometryTableSlot` and calls `build_mesh_gpu(ctx, &cpu.vertices, &cpu.indices,
 aux.0.as_mut())` ([`gpu_upload.rs`](../crates/boyko_render/src/gpu_upload.rs):51, `:59`). So a **loader-decoded** mesh claims a real slot and is
 VB-visible. The **host-authored** primitives pass `None` at their own call site
-([`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):547), and the explicit VB sibling is `MeshAssetsVbExt::register_mesh_vb`
+([`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):547~), and the explicit VB sibling is `MeshAssetsVbExt::register_mesh_vb`
 ([`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):641, `:647`), which every VB fixture uses.
 
 > ⚠️ **CORRECTED at Rev 4 — Rev 1 through Rev 3 all stopped one function too early, and the error
 > propagated into R0b's headline red mutation (§8).** Passing `None` is **not** the end of the
-> story: `backfill_vb_geometry_slots` runs at boot ([`runner.rs`](../crates/boyko_app/src/runner.rs):787, after `upload_mesh_assets` and
+> story: `backfill_vb_geometry_slots` runs at boot ([`runner.rs`](../crates/boyko_app/src/runner.rs):787~, after `upload_mesh_assets` and
 > after `finish()`) and claims a slot for **every** still-reserved mesh under a VB boot — by design,
 > so that *any* scene's meshes are re-fetchable by `vb_resolve` rather than only the ones an author
 > remembered to route through `register_mesh_vb`. **A host-authored mesh registered during startup
@@ -395,7 +395,7 @@ VB-visible. The **host-authored** primitives pass `None` at their own call site
 > the fact.** Rev 1–Rev 5 warned that *"at least six doc comments still assert it is `false`"* and
 > enumerated nine anchors. **Zero of them do today:** `grep -rn VB_IMPLEMENTED crates/ --include=*.rs
 > | grep -ci false` returns **0**, and `const VB_IMPLEMENTED: bool = true;` is at
-> [`render_path_config.rs`](../crates/boyko_render/src/render_path_config.rs):130. The rot was cleared at `792d992`, which found **19** stale sites
+> [`render_path_config.rs`](../crates/boyko_render/src/render_path_config.rs):130~. The rot was cleared at `792d992`, which found **19** stale sites
 > across 12 files — not the six or nine this block claimed — and rewrote every one.
 >
 > **The block is kept, struck through, rather than deleted, because it is a specimen.** A warning
@@ -433,8 +433,8 @@ VB-visible. The **host-authored** primitives pass `None` at their own call site
 ### 3.4 The residency hazard, named because nothing else names it
 
 `build_mesh_gpu` creates **both** buffers as `MemoryLocation::HostVisibleCoherent`
-([`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):320 for the vertex buffer; the index buffer follows). Every mesh in this
-engine lives in host-visible memory, seeded once and read-only thereafter ([`mesh.rs`](../crates/boyko_render/src/mesh.rs):129). At 64 B
+([`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):320~ for the vertex buffer; the index buffer follows). Every mesh in this
+engine lives in host-visible memory, seeded once and read-only thereafter ([`mesh.rs`](../crates/boyko_render/src/mesh.rs):129~). At 64 B
 per vertex a multi-million-triangle corpus mesh is a large host-visible allocation, and on a
 discrete GPU without resizable BAR that heap is small. **R0b's gate includes "the corpus's largest
 mesh registers without allocation failure"**; the abort route is a device-local + staging upload
@@ -488,11 +488,11 @@ clone. §11 records the measured sizes that make this decisive.
   instance_count }` ([`mesh_draw.rs`](../crates/boyko_render/src/mesh_draw.rs):80-98) is gathered per frame; `index_count / 3 *
   instance_count` is the submitted-triangle count with no new plumbing.
 * **Per-pass GPU time, partially.** `VbTimedPass` ([`gpu_timing.rs`](../crates/boyko_rhi_vulkan/src/present/gpu_timing.rs):203) brackets **three** passes:
-  `CullReset` (`:211`), `CullDispatch` (`:214`), `VbShade` (`:229`); `VB_PASS_COUNT = 3` (`:242`).
+  `CullReset` (`:211~`), `CullDispatch` (`:214~`), `VbShade` (`:229~`); `VB_PASS_COUNT = 3` (`:242`).
   **The VB raster pass, the `vb_geo` pass and the classify chain are NOT bracketed.** A per-pass
   table comparable to a Nanite capture therefore requires extending this enum — §14's rung, not R0.
 * **A CPU coverage rasterizer.** `crates/boyko_app/tests/sv0_oracle/mod.rs` ships `rasterize`
-  (`:279`) producing a `Coverage` (`:211`) of `CoveredPixel` (`:193`) with `covered_count`
+  (`:279~`) producing a `Coverage` (`:211~`) of `CoveredPixel` (`:193~`) with `covered_count`
   (`:253`), plus `changed_covered_pixels` (`:798`). It is perspective-correct and supports
   translation-only instances.
 
@@ -500,8 +500,8 @@ clone. §11 records the measured sizes that make this decisive.
 
 Nothing anywhere produces a **screen-space triangle-size histogram** or a **triangles-per-pixel**
 statistic, and nothing reads the visibility buffer back to the host. `vb_id` is created with
-`usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED` ([`targets.rs`](../crates/boyko_rhi_vulkan/src/present/targets.rs):868) — **no
-`TRANSFER_SRC`** — and [`frame_driver.rs`](../crates/boyko_rhi_vulkan/src/present/frame_driver.rs):750 records that the engine deliberately has *"NO
+`usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED` ([`targets.rs`](../crates/boyko_rhi_vulkan/src/present/targets.rs):868~) — **no
+`TRANSFER_SRC`** — and [`frame_driver.rs`](../crates/boyko_rhi_vulkan/src/present/frame_driver.rs):750~ records that the engine deliberately has *"NO
 `copy_image_to_buffer(depth)`"*; the only host readback path is the swapchain
 (`host_dump.rs`, `BOYKO_HOST_DUMP`).
 
@@ -520,12 +520,12 @@ at 16 GB free with `target/` at 58 GB, so retention would reproduce this project
 of disk exhaustion surfacing as mingw linker errors.
 The census is armed by an env knob and threaded as an `Option`, so an
 unarmed frame records **zero** extra commands — the exact discipline
-`Option<&VbTimestampCollector>` documents ([`gpu_timing.rs`](../crates/boyko_rhi_vulkan/src/present/gpu_timing.rs):247) and the reason the golden
+`Option<&VbTimestampCollector>` documents ([`gpu_timing.rs`](../crates/boyko_rhi_vulkan/src/present/gpu_timing.rs):247~) and the reason the golden
 command stream stays byte-identical.
 
 ### 5.4 The statistic — a bracket, because the obvious one is capped at 1
 
-**Rev 1's defect, stated plainly.** `vb_id` is an `R32G32_UINT` image ([`targets.rs`](../crates/boyko_rhi_vulkan/src/present/targets.rs):866) — **one
+**Rev 1's defect, stated plainly.** `vb_id` is an `R32G32_UINT` image ([`targets.rs`](../crates/boyko_rhi_vulkan/src/present/targets.rs):866~) — **one
 `(instance_id, raw_prim_id)` pair per pixel**. So `distinct (instance_id, local_tri) pairs ÷
 covered pixels` is **≤ 1 by construction**, saturating exactly when every covered pixel carries its
 own triangle. It cannot distinguish *"we have just reached one triangle per pixel"* from *"we are
@@ -683,8 +683,8 @@ translations — so it cannot rasterize a multi-asset corpus or place a rotated 
 resolution. R0c gate (c) is therefore scoped to the fixture, explicitly.
 
 **The extent must be asserted, not assumed.** This engine's render extent is a real OS window
-client area ([`window.rs`](../crates/boyko_rhi_vulkan/src/window.rs):252, `AdjustWindowRectEx` at `:310`), and OS clamping is *already* a
-recorded hazard here at 512² — [`sv0_deferred_term_bench.rs`](../crates/boyko_app/tests/sv0_deferred_term_bench.rs):297-299 checks it, because *"an
+client area ([`window.rs`](../crates/boyko_rhi_vulkan/src/window.rs):252, `AdjustWindowRectEx` at `:310~`), and OS clamping is *already* a
+recorded hazard here at 512² — [`sv0_deferred_term_bench.rs`](../crates/boyko_app/tests/sv0_deferred_term_bench.rs):297~-299 checks it, because *"an
 OS-clamped window would silently measure a different per-pixel workload."* A display that clamps
 1440p and 2160p produces three plausible rows and a **fabricated curve**, and every conclusion
 above rests on the scaling law those rows are supposed to demonstrate. `[census]
@@ -698,7 +698,7 @@ triangles below it. If the ceiling does not reach the regime, no LOD scheme reac
 K1 is therefore decidable today, without the error target Rev 1's phrasing implied it needed.
 
 All statistics are reported per camera path, path definitions committed as test constants — the
-shape `sv0_scene/mod.rs:149-162` already uses for its camera.
+shape `sv0_scene/mod.rs:149~-162` already uses for its camera.
 
 ---
 
@@ -764,10 +764,10 @@ that R0's harness must be built to avoid:
   (`crates/boyko_render/src/ui/mod.rs:87`). Each phase therefore always landed on the same query
   pool, descriptor ring slot and staging region. The fix is a counterbalanced **ABBA quadruple**
   whose statistic is `(d1 + d2)/2` and whose *residual* `(d1 − d2)/2` is **printed, not hidden**
-  ([`sv0_deferred_term_bench.rs`](../crates/boyko_app/tests/sv0_deferred_term_bench.rs):53-77).
+  ([`sv0_deferred_term_bench.rs`](../crates/boyko_app/tests/sv0_deferred_term_bench.rs):53~-77).
 * **A spread gate measuring its own resolution.** The timestamp counter's *step* is not the
   `timestampPeriod` the device reports; the harness had to recover it as the **GCD of raw tick
-  counts** over a whole session (`:83-100`). A "cross-session spread" that is one lattice step
+  counts** over a whole session (`:83~-100`). A "cross-session spread" that is one lattice step
   carries no information.
 
 **R0's harness MUST therefore, non-negotiably:**
@@ -776,17 +776,17 @@ that R0's harness must be built to avoid:
 2. carry a **null control** — two identical configurations — with a **pre-registered** maximum, as
    `SV0_NULL_CONTROL_MAX_FRACTION` (`:378`) does, fixed before the run and never widened;
 3. **measure** the counter quantum by tick GCD and report it alongside `timestampPeriod`
-   (`:94-96` the RESOLUTION field list, `:448`/`:463` the transcribed bounds, `:751-772` the consistency check);
+   (`:94~-96` the RESOLUTION field list, `:448~`/`:463~` the transcribed bounds, `:751~-772` the consistency check);
 4. state the **resolvable delta with confidence intervals**, and make the effective spread gate
    `max(stated gate, measured median lattice / |median|)` — **but only where the lattice term is
    licensed by evidence.** ⚠️ Rev 3 transferred the `max()` and dropped the guard, which turned a
    non-negotiable clause into a gate a homogeneous sample could widen to rescue a failing run —
    this campaign's own #1 named defect, introduced in the clause written against it. The sibling
-   does **not** grant the widening by default: [`sv0_deferred_term_bench.rs`](../crates/boyko_app/tests/sv0_deferred_term_bench.rs):805-807 reads
+   does **not** grant the widening by default: [`sv0_deferred_term_bench.rs`](../crates/boyko_app/tests/sv0_deferred_term_bench.rs):805~-807 reads
    `if may_widen { SV0_SESSION_SPREAD_MAX.max(lattice_floor) } else { SV0_SESSION_SPREAD_MAX }`,
    where `may_widen` requires at least `SV0_LATTICE_MIN_DISTINCT_TICKS = 7` (`:399`) distinct
    observed tick values (`:680-681`), *"licensed by EVIDENCE … rather than granted by default"*
-   (`:798`). A **separate, non-waivable** test asserts `lattice_floor <= SV0_SESSION_SPREAD_MAX`
+   (`:798~`). A **separate, non-waivable** test asserts `lattice_floor <= SV0_SESSION_SPREAD_MAX`
    unconditionally, *"so it can never silently widen the gate"*. §14's rung lands **all three** — the
    `max()`, the distinct-tick evidence floor, and the non-waivable assertion — or none of them.
    This is R16 (*a literal transferred without its denominator*) one level up: **a gate transferred
@@ -796,7 +796,7 @@ that R0's harness must be built to avoid:
 
 **One trap §14's implementer will otherwise hit.** Every `read_query_pool_ns` reader requests all
 of its collector's `(begin,end)` pairs with `VK_QUERY_RESULT_WAIT_BIT`, which **blocks forever** on a
-pair its recorder never wrote that frame — [`gpu_timing.rs`](../crates/boyko_rhi_vulkan/src/present/gpu_timing.rs):344 states this, and it is why three
+pair its recorder never wrote that frame — [`gpu_timing.rs`](../crates/boyko_rhi_vulkan/src/present/gpu_timing.rs):344~ states this, and it is why three
 separate collectors exist rather than one widened `PASS_COUNT`. Extending `VbTimedPass` to cover
 raster/geo/classify means **every added pair must be written unconditionally on every armed frame**.
 That rung therefore also lands a **written-pair bitmask asserted before the read**, so a conditional
@@ -820,7 +820,7 @@ disk on the install volume, **the sha256 of
 [`VG-CAMPAIGN-THRESHOLDS.toml`](VG-CAMPAIGN-THRESHOLDS.toml) — the freeze (§0.1); the claim file is
 deliberately *not* hashed** — the **pass-correspondence map**, and a per-pass table for **one stock
 UE5 scene** (no corpus needed).
-Plus `crates/boyko_app/tests/vg_r0_reference_rig.rs` reading it.
+Plus `crates/boyko_app/tests/vg_r0_reference_rig.rs` reading it. <!-- doc-anchor-ignore -->
 
 **And — landed at Rev 8, ahead of the rung — the freeze tripwire itself:**
 `crates/boyko_render/tests/vg_thresholds_freeze.rs`
@@ -852,7 +852,7 @@ written, R0a could not pass on its own most likely outcome: the same structural 
 relocated from the assertion into the field list.
 
 **Gate (one) — `achievable = true` branch, four parts:** (a) every field in the *positive* set
-present and not the `PENDING` sentinel — the same discipline `goldens/PINS.toml:15` defines;
+present and not the `PENDING` sentinel — the same discipline `goldens/PINS.toml:15~` defines;
 (b) the recorded **GPU name matches the one this engine reports at boot** on this box — a
 mechanical cross-check, not a transcription; (c) the recorded resolution equals
 `[census].decision_resolution` read from the **thresholds** file, not from a constant this rung
@@ -939,7 +939,7 @@ falsify is not a gate on UE5 availability. The figure stays in the record, as a 
 
 **Lands:** the `.glb` decoder (§3.3) registered as a second `LoaderEntry` on `MeshGpu::LOADERS`;
 `assets/vg_corpus/CORPUS.toml` + the `.gitignore` rule + `fetch_corpus`;
-`crates/boyko_app/tests/vg_corpus_ingest.rs`.
+`crates/boyko_app/tests/vg_corpus_ingest.rs`. <!-- doc-anchor-ignore -->
 
 **Gate (one, five parts):** (a0) **`corpus.arrangement` is not the `PENDING` sentinel** — the
 owner VALUES call this rung is blocked on (`[gating].r0b_blocked_by`), asserted here because a
@@ -971,7 +971,7 @@ failure (§3.4).
   rung's most important.** It read: *"register the same mesh through host-authored `register_mesh`
   instead of the streamed path → slot is `0` → (c) reds."* It does **not** red.
   `backfill_vb_geometry_slots` (`crates/boyko_render/src/gpu_upload.rs`, run at
-  `crates/boyko_app/src/runner.rs:787`, after `upload_mesh_assets` and after `finish()`) claims a
+  `crates/boyko_app/src/runner.rs:787~`, after `upload_mesh_assets` and after `finish()`) claims a
   slot for **every** still-reserved mesh under a VB boot — precisely so that any scene's meshes are
   re-fetchable by `vb_resolve`, not only those routed through `register_mesh_vb`. So the mutated
   path lands a real slot, gate (c) stays green, and a mutation written against a
@@ -986,25 +986,25 @@ failure (§3.4).
   the tangent lane is identity; asserted separately so the fallback cannot rot silently.
 
 **Skip policy:** the payload is gitignored, so (a)–(d) skip when it is absent — the same shape as
-the `dxc`-dependent gates ([`cluster_cull_spv_sync.rs`](../crates/boyko_rhi_vulkan/tests/cluster_cull_spv_sync.rs):196-204). **Procedural mitigation, and it is
+the `dxc`-dependent gates ([`cluster_cull_spv_sync.rs`](../crates/boyko_rhi_vulkan/tests/cluster_cull_spv_sync.rs):196~-204). **Procedural mitigation, and it is
 binding: the rung is not commit-eligible until the gate has been run with the corpus present and
 its output pasted into the commit message.** A gate proven only on a box that skipped it is not a
 gate.
 
 ### R0c — the census instrument + its sensitivity control
 
-**Lands:** `TRANSFER_SRC` on the `vb_id` ring ([`targets.rs`](../crates/boyko_rhi_vulkan/src/present/targets.rs):862-872); an `Option`-threaded census
+**Lands:** `TRANSFER_SRC` on the `vb_id` ring ([`targets.rs`](../crates/boyko_rhi_vulkan/src/present/targets.rs):862~-872); an `Option`-threaded census
 readback armed by env knob; the host-side histogram + triangles-per-pixel reducer;
-`crates/boyko_app/tests/vg_density_census.rs`.
+`crates/boyko_app/tests/vg_density_census.rs`. <!-- doc-anchor-ignore -->
 
 > ⚠️ **R0c lands the first in-frame image readback in the shipped recorder, and that is a bigger
 > step than "reuse an existing seam" implies.** Every `copy_image_to_buffer` call site in this tree
 > today is under `crates/boyko_rhi_vulkan/tests/`; there is **none** in `src/present/`, and
-> [`frame_driver.rs`](../crates/boyko_rhi_vulkan/src/present/frame_driver.rs):750 records that the engine deliberately has no depth readback. So R0c adds
+> [`frame_driver.rs`](../crates/boyko_rhi_vulkan/src/present/frame_driver.rs):750~ records that the engine deliberately has no depth readback. So R0c adds
 > (i) a new layout transition of a **ring** image — `COLOR_ATTACHMENT_OPTIMAL → TRANSFER_SRC_OPTIMAL
 > →` its `SAMPLED` read — inside the RDG auto-barrier system, and (ii) a **host read of a per-FIF
 > resource**, which is the exact shape of this project's recorded cross-frame bug class (host
-> access racing the fence on per-FIF rings, with `FRAMES_IN_FLIGHT == 2` at `ui/mod.rs:87`).
+> access racing the fence on per-FIF rings, with `FRAMES_IN_FLIGHT == 2` at `ui/mod.rs:87~`).
 > Neither is visible to gate (a), because both exist only on **armed** frames — the frames the
 > goldens never render. The readback must therefore wait on the frame's own fence before mapping,
 > and that ordering is asserted in the rung's own test, not assumed.
@@ -1330,9 +1330,9 @@ headline was false as written. Rather than a headline and a retraction, the limi
 | R1 | **Vacuously-green gate** — an assertion quantified over an empty or self-referential selection. | The campaign's #1 recurring defect; found five times in the sibling plan alone. | Every rung names a mutation and the commit records its output; R0c(b)/(c) are deliberately paired so neither can pass alone. |
 | R2 | **A procedural corpus makes K1 untestable.** | New, and it is why §4.2 rejects the cheapest corpus option. | The corpus is fetched real content; procedural geometry is confined to R0c's sensitivity control. |
 | R3 | **The harness measures its own resolution, or its A/B rides the ring.** | MEASURED in the sibling rung, both of them: a "spread" that was one median lattice step, and an ABAB phase perfectly aliased with `FRAMES_IN_FLIGHT == 2`. | §7 clauses 1, 3–4: ABBA with the residual reported; the quantum measured by tick GCD and the spread gate read against it. |
-| R4 | **`WAIT_BIT` readback hangs instead of failing.** | [`gpu_timing.rs`](../crates/boyko_rhi_vulkan/src/present/gpu_timing.rs):344 documents the deadlock; three separate collectors exist because of it. | §7's written-pair bitmask, asserted before the read — binding on §14's rung, which is the one that brackets passes. Not an R0 risk any more. |
-| R5 | **Stale doc sends the importer down the `None` path.** | Verified: ≥6 comments still claim `VB_IMPLEMENTED == false` while [`render_path_config.rs`](../crates/boyko_render/src/render_path_config.rs):130 says `true`. | R0b's second red mutation targets exactly this; fixing the comments is a separate one-line commit, deliberately not absorbed here. |
-| R6 | **Host-visible residency ceiling.** | [`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):320: every mesh buffer is `HostVisibleCoherent`. | R0b gate (d); the device-local + staging path is a named follow-up, not R0 work. |
+| R4 | **`WAIT_BIT` readback hangs instead of failing.** | [`gpu_timing.rs`](../crates/boyko_rhi_vulkan/src/present/gpu_timing.rs):344~ documents the deadlock; three separate collectors exist because of it. | §7's written-pair bitmask, asserted before the read — binding on §14's rung, which is the one that brackets passes. Not an R0 risk any more. |
+| R5 | **Stale doc sends the importer down the `None` path.** | Verified: ≥6 comments still claim `VB_IMPLEMENTED == false` while [`render_path_config.rs`](../crates/boyko_render/src/render_path_config.rs):130~ says `true`. | R0b's second red mutation targets exactly this; fixing the comments is a separate one-line commit, deliberately not absorbed here. |
+| R6 | **Host-visible residency ceiling.** | [`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):320~: every mesh buffer is `HostVisibleCoherent`. | R0b gate (d); the device-local + staging path is a named follow-up, not R0 work. |
 | R7 | **The `vb_id` usage widening perturbs a golden.** | New. | R0c gate (a) over every VB pin, with a demonstrated red (record the copy unconditionally). |
 | R8 | **UE5 capture measures a different scene than our census.** | New — the two engines must load the same bytes. | §4.3: an asset that cannot be imported by both is not corpus material; R0a(c) pins the resolution across both. |
 | R9 | **Disk exhaustion masquerading as a build failure.** | This project's record: `target/` has filled this disk and surfaced as linker errors. | §11 records the measured headroom; R0a's record carries free-disk as a required field, and R0a's negative branch **re-reads** it at test time. |
@@ -1416,26 +1416,26 @@ the link form is the named follow-up that would let the gate hold the promise th
 make.** Until then, treat every number below as evidence to re-derive, not as a verified fact.
 
 **Ingest / mesh:** `crates/boyko_render/src/loaders/obj.rs:13` (default vertex colour), `:55`
-(`ObjMeshLoader`), `:60` (`EXTENSIONS = &["obj"]`), `:94-96` (dedup + `generate_tangents`) ·
-`crates/boyko_render/src/mesh.rs:81-100` (`Vertex`), `:103-104` (`VERTEX_STRIDE == 64`, static
-assert), `:124` (`U16_INDEX_VERTEX_LIMIT`), `:137-186` (`MeshGpu`), `:169` (`geometry_slot`),
-`:193` (`type Cpu = MeshData`), `:237` (single `LoaderEntry`) ·
-`crates/boyko_render/src/mesh_assets.rs:238-243` (`build_mesh_gpu` signature), `:259-263` (index
-width), `:290` (**stale** `VB_IMPLEMENTED == false` comment), `:295-305`
-(`MemoryLocation::HostVisibleCoherent`), `:529` (`register_mesh` passes `None`), `:619-631`
-(`MeshAssetsVbExt`), `:647` (`register_mesh_vb` trait decl; impl at `:669`) ·
-`crates/boyko_render/src/gpu_upload.rs:41-61` (`GpuUpload for MeshGpu`; `type Aux =
-MeshGeometryTableSlot` at `:50`; **the threaded call at `:59`**).
+(`ObjMeshLoader`), `:60~` (`EXTENSIONS = &["obj"]`), `:94~-96` (dedup + `generate_tangents`) ·
+`crates/boyko_render/src/mesh.rs:81~-100` (`Vertex`), `:103-104` (`VERTEX_STRIDE == 64`, static
+assert), `:124` (`U16_INDEX_VERTEX_LIMIT`), `:137-186` (`MeshGpu`), `:169~` (`geometry_slot`),
+`:193~` (`type Cpu = MeshData`), `:237~` (single `LoaderEntry`) ·
+`crates/boyko_render/src/mesh_assets.rs:238~-243` (`build_mesh_gpu` signature), `:259~-263` (index
+width), `:290~` (**stale** `VB_IMPLEMENTED == false` comment), `:295~-305`
+(`MemoryLocation::HostVisibleCoherent`), `:529~` (`register_mesh` passes `None`), `:619~-631`
+(`MeshAssetsVbExt`), `:647~` (`register_mesh_vb` trait decl; impl at `:669`) ·
+`crates/boyko_render/src/gpu_upload.rs:41~-61` (`GpuUpload for MeshGpu`; `type Aux =
+MeshGeometryTableSlot` at `:50~`; **the threaded call at `:59`**).
 
-**Geometry table:** `crates/boyko_render/src/mesh_geometry_table.rs:17-27` (module doc),
+**Geometry table:** `crates/boyko_render/src/mesh_geometry_table.rs:17~-27` (module doc),
 `:66` (`VB_GEOMETRY_RESERVED_SLOT`), `:82-93` (`MeshGeometryMeta`), `:97` (16 B stride),
-`:116-118` (`tri_count`), `:140-142` (`mesh_buffer_usage`), `:400` (**stale** comment), `:413`
-(`MeshGeometryTableSlot`) · `crates/boyko_rhi_vulkan/src/geometry_bindless.rs:61`
-(`MESH_GEOMETRY_TABLE_CAPACITY = 4096`), `:43` (**stale** comment).
+`:116-118` (`tri_count`), `:140-142` (`mesh_buffer_usage`), `:400~` (**stale** comment), `:413~`
+(`MeshGeometryTableSlot`) · `crates/boyko_rhi_vulkan/src/geometry_bindless.rs:61~`
+(`MESH_GEOMETRY_TABLE_CAPACITY = 4096`), `:43~` (**stale** comment).
 
-**Path resolution:** `crates/boyko_render/src/render_path_config.rs:25` (**stale** module-doc
-sentence), **`:128` (`const VB_IMPLEMENTED: bool = true;`)**, `:517` (`vb_geometry_table` field),
-`:890-892` (the predicate).
+**Path resolution:** `crates/boyko_render/src/render_path_config.rs:25~` (**stale** module-doc
+sentence), **`:128~` (`const VB_IMPLEMENTED: bool = true;`)**, `:517~` (`vb_geometry_table` field),
+`:890~-892` (the predicate).
 
 **Encode / decode:** `crates/boyko_rhi_vulkan/shaders/vb_geom_fetch.hlsli:516`
 (`vb_geom_fetch` signature), **`:521` (`uint local_tri = raw_prim_id % tri_count;`)** ·
@@ -1448,34 +1448,34 @@ includers: [`vb_geo.comp.hlsl`](../crates/boyko_rhi_vulkan/shaders/vb_geo.comp.h
 rows) · `crates/boyko_rhi_vulkan/tests/vb_raster_geo_classify_spv_sync.rs`'s
 `VB_RASTER_GEO_CLASSIFY_ROWS` (the complementary six, landed `598f4ff`).
 
-**Targets / readback:** `crates/boyko_rhi_vulkan/src/present/targets.rs:851-856` (`VbTargets`),
-**`:868` (`COLOR_ATTACHMENT | SAMPLED` — no `TRANSFER_SRC`)** ·
+**Targets / readback:** `crates/boyko_rhi_vulkan/src/present/targets.rs:851~-856` (`VbTargets`),
+**`:868~` (`COLOR_ATTACHMENT | SAMPLED` — no `TRANSFER_SRC`)** ·
 `crates/boyko_rhi/src/encoder.rs:115` (`copy_image_to_buffer`) ·
 `crates/boyko_rhi_vulkan/src/rhi_impl/encoder.rs:1031` (impl) ·
-`crates/boyko_rhi_vulkan/src/present/frame_driver.rs:750` (no depth readback) ·
-`crates/boyko_app/src/host_dump.rs:1-10`, `:67` (`BOYKO_HOST_DUMP`).
+`crates/boyko_rhi_vulkan/src/present/frame_driver.rs:750~` (no depth readback) ·
+`crates/boyko_app/src/host_dump.rs:1~-10`, `:67~` (`BOYKO_HOST_DUMP`).
 
 **Timing — RE-VERIFIED at Rev 3; Rev 1 and Rev 2 both carried a consistent ~10-line drift here,
 i.e. anchors read from a pre-VB-P1e-H0 tree.** `crates/boyko_rhi_vulkan/src/present/gpu_timing.rs`:
-`:188-194` (why collectors are separate — and the `PASS_COUNT` note), `:229` (**`VbShade = 2`**,
-not `:219`), **`:242` (`VB_PASS_COUNT: u32 = 3`, not `:232`)**, `:281`/`:293-294` (the pool reset),
-**`:344` (`WAIT_BIT` BLOCKS FOREVER on a pair its recorder never wrote, not `:334`)** — this one is
+`:188~-194` (why collectors are separate — and the `PASS_COUNT` note), `:229~` (**`VbShade = 2`**,
+not `:219~`), **`:242` (`VB_PASS_COUNT: u32 = 3`, not `:232`)**, `:281~`/`:293~-294` (the pool reset),
+**`:344~` (`WAIT_BIT` BLOCKS FOREVER on a pair its recorder never wrote, not `:334~`)** — this one is
 cited by §7's non-negotiable implementer trap and by risk R4, so the stale anchor was the most
-expensive of the set — `:357` (`Sv0TimedPass`, not `:347`), **`:381` (`SV0_PASS_COUNT = 1`, not
+expensive of the set — `:357` (`Sv0TimedPass`, not `:347~`), **`:381` (`SV0_PASS_COUNT = 1`, not
 `:371`)**.
 
-**Harness precedent:** `crates/boyko_app/tests/sv0_deferred_term_bench.rs:20-51` (ABAB refuted by
-its own null control), `:34` and `:58-62` (**the ABBA algebra — the model `m_k = μ + τ·armed + γ(fi)
-+ β·k + ε` and the cancellation that makes absolute readings unavailable**, §14.2), `:83-129`
-(the quantisation finding), `:297-299` (**the OS-clamped-extent check**, §5.4), **`:350`
+**Harness precedent:** `crates/boyko_app/tests/sv0_deferred_term_bench.rs:20~-51` (ABAB refuted by
+its own null control), `:34~` and `:58~-62` (**the ABBA algebra — the model `m_k = μ + τ·armed + γ(fi)
++ β·k + ε` and the cancellation that makes absolute readings unavailable**, §14.2), `:83~-129`
+(the quantisation finding), `:297~-299` (**the OS-clamped-extent check**, §5.4), **`:350`
 (`SV0_BENCH_SESSIONS = 3`), `:366` (`SV0_SESSION_SPREAD_MAX = 0.10`), `:378`
-(`SV0_NULL_CONTROL_MAX_FRACTION = 0.10`)** — Rev 2 cited `:284` and `:312` for two of these in one
+(`SV0_NULL_CONTROL_MAX_FRACTION = 0.10`)** — Rev 2 cited `:284~` and `:312~` for two of these in one
 block and `:350`/`:378` in another; **the `350`/`366`/`378` set is the correct one**, and the
 contradiction is direct evidence that the older block was never re-verified ·
 `crates/boyko_render/src/ui/mod.rs:87` (`FRAMES_IN_FLIGHT = 2`) ·
 `crates/boyko_render/src/mesh_draw.rs:80-98` (`DrawBatch`) ·
-`crates/boyko_rhi_vulkan/src/window.rs:252` (`Window::open`), `:310` (`AdjustWindowRectEx`),
-`:342-352` (`BOYKO_WIN_HIDDEN` — hidden, but still created at the requested size).
+`crates/boyko_rhi_vulkan/src/window.rs:252` (`Window::open`), `:310~` (`AdjustWindowRectEx`),
+`:342~-352` (`BOYKO_WIN_HIDDEN` — hidden, but still created at the requested size).
 
 > **§12's opening sentence — *"Every line below was opened or grepped while writing this
 > revision"* — was FALSE in Rev 2**, systematically, across the whole Timing block. It is the
@@ -1487,13 +1487,13 @@ contradiction is direct evidence that the older block was never re-verified ·
 **Oracles / fixtures:** `crates/boyko_app/tests/sv0_oracle/mod.rs:182-208` (`OracleVertex`,
 `CoveredPixel`), `:211-256` (`Coverage`, `covered_count` at `:253`), `:279-287` (`rasterize`),
 `:765-798` (`ChangedPixels`, `changed_covered_pixels`) · `crates/boyko_app/tests/sv0_scene/mod.rs:56-69`
-(mesh row constants), `:149-162` (camera + `DUMP_EXTENT`), `:223` (`uv_sphere`) ·
-`crates/boyko_app/tests/sv0_adequacy.rs:231-232`, `:514-515` (the shared-spawn inseparability test).
+(mesh row constants), `:149~-162` (camera + `DUMP_EXTENT`), `:223` (`uv_sphere`) ·
+`crates/boyko_app/tests/sv0_adequacy.rs:231~-232`, `:514~-515` (the shared-spawn inseparability test).
 
 **Rev 2/Rev 3 additions, verified this session:**
-`crates/boyko_rhi_vulkan/src/present/targets.rs:851-856` (`VbTargets` doc — the ring is **one
-`R32G32_UINT` texel per pixel**, which is what caps §5.4's statistic (1) at 1), **`:866`
-(`format: Format::R32G32Uint` — Rev 2 cited `:865`, which is `depth: 1`)**, `:868` (the usage bits,
+`crates/boyko_rhi_vulkan/src/present/targets.rs:851~-856` (`VbTargets` doc — the ring is **one
+`R32G32_UINT` texel per pixel**, which is what caps §5.4's statistic (1~) at 1), **`:866~`
+(`format: Format::R32G32Uint` — Rev 2 cited `:865~`, which is `depth: 1`)**, `:868~` (the usage bits,
 correct) · `crates/boyko_app/tests/sv0_scene/mod.rs:162` (`DUMP_EXTENT = 512`) ·
 `crates/boyko_app/tests/sv0_oracle/mod.rs:279-287` (**`rasterize` takes ONE indexed mesh and
 `instances: &[[f32; 3]]` — translation-only**, which is why R0c gate (c) is scoped to the procedural
@@ -1507,8 +1507,13 @@ mesh-covered pixels, not all pixels) ·
 
 **Corpus convention:** `crates/boyko_app/assets/pbr_fixtures/README.md:1-6` ·
 `.gitignore` (`/assets/materials/*` + the `!README.md` escape) ·
-`goldens/PINS.toml:15` (the `PENDING` sentinel rule), `:363-364`, `:408-409` (the two unblessed
-hwrt legs) · `crates/boyko_rhi_vulkan/tests/cluster_cull_spv_sync.rs:196-204` (the skip shape).
+[`PINS.toml`](../goldens/PINS.toml):15~ (the `PENDING` sentinel rule),
+[`PINS.toml`](../goldens/PINS.toml):372~ and [`PINS.toml`](../goldens/PINS.toml):417~ (the two
+unblessed hwrt legs — ⚠️ through Rev 8 these carried line numbers nine lines low AND in the bare
+continuation form, which bound them to the preceding `README.md` link, so the gate resolved them
+against a 44-line file. The stale numbers are described rather than quoted here, because a dead
+anchor written in citation form is a live citation to any gate that reads the document. Verified by
+grep: `sha256_hwrt = "PENDING"` sits at 372 and 417) · `crates/boyko_rhi_vulkan/tests/cluster_cull_spv_sync.rs:196~-204` (the skip shape).
 
 ---
 

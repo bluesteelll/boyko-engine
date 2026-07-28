@@ -208,7 +208,7 @@ use std::path::{Path, PathBuf};
 /// **Gating the plan requires converting its citations to the link form first.** That is a bounded
 /// mechanical edit, it is a named follow-up, and until it happens the plan's §12 says plainly that
 /// its anchors are unchecked rather than asserting they were verified.
-const GATED_DOCS: &[&str] = &["FEATURE_MAP.md", "SYSTEMS.md", "ARCHITECTURE.md"];
+const GATED_DOCS: &[&str] = &["FEATURE_MAP.md", "SYSTEMS.md", "ARCHITECTURE.md", "MESHLET-VIRTUAL-GEOMETRY-PLAN.md"];
 
 /// Opt-out marker for a line that quotes a stale anchor on purpose.
 const IGNORE_MARKER: &str = "<!-- doc-anchor-ignore -->";
