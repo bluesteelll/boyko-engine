@@ -1,6 +1,6 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 20** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 21** — **NOT APPROVED, and no code exists.** This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
@@ -1273,41 +1273,46 @@ vacuous-selection defect wearing a lab coat.
 * (b): subdivide the procedural fixture 4× → the modal bucket must move by **two** buckets. A
   sensitivity control that only asserts "the number changed" is the defect this campaign keeps
   finding; the required *direction and magnitude* is what makes it a gate.
-* **(a): change the `vb_id` ring's `format` in its own `TextureDesc` literal** — the field sitting
-  immediately beside the `usage` field R0c widens, in the ring's per-image descriptor, populated
-  unconditionally → `vb_resolve`/`vb_shade` sample different bits on **every** frame, armed or not
-  → the shaded BMP moves → **`[vb_mesh]`'s `sha256` reds**. `[vb_mesh]` is a blessed leg,
-  deliberately not one of the two carrying `sha256_hwrt = "PENDING"` where `golden.ps1` exits 2
-  before comparing anything.
+* **(a) is a RECORDED ASSERTION WITH NO AVAILABLE RED, and that is a finding rather than a gap.**
+  Four sitings have now failed, each for a different reason, and the fourth is the one that settles
+  it: **the axis R0c permanently changes cannot move a pin.** R0c's permanent edit is the ring's
+  `TRANSFER_SRC` usage bit; `vb_id` is `R32G32_UINT`, uncompressed, `.Load`ed unfiltered, so no
+  usage, tiling or layout choice the widening admits can alter a texel value — the same
+  representation-invariance argument that retired siting one. And the neighbouring `format` field
+  admits no *valid* firing edit either: the format is declared in **two** independent literals (the
+  ring's `TextureDesc` and `vb_raster`'s `color_formats`), and `vb_resolve` binds the view as
+  `Texture2D<uint2>`, so any same-width UINT value is bit-identical while any other value breaks the
+  attachment-format contract or the sampled-type match — a program whose output is driver-defined,
+  with `BOYKO_DISABLE_VALIDATION = "1"` on the pin and no host-side format check in the tree.
 
-  **Derived against the two things that killed the previous siting**: the ring is cleared to the
-  sentinel every frame and the RDG emits a fresh first-touch `UNDEFINED → COLOR_ATTACHMENT_OPTIMAL`
-  transition every frame — neither restores a *format*, so the mutated state survives to the sample.
-  And it is authorable **per image**: `format` is a member of the ring's own `TextureDesc`, so the
-  edit does not leak to any other target.
+  This takes the disposition this document already uses twice — R0c(e)'s measured-and-not-asserted
+  `vb_id` identity, and R0d's demoted histogram residual: **(a) asserts that the widening did not
+  move a pin, and that assertion is RECORDED as one whose red is structurally unavailable on the
+  axis R0c changes.** It is not a gate that failed to get a mutation; it is a gate over an artefact
+  the change provably cannot perturb, which is *why* the widening is safe and is worth stating in
+  those terms.
 
-  > ⚠️ **THREE SITINGS DIED HERE, EACH FOR A DIFFERENT REASON, and the catalogue is the useful
-  > part — it is why this one is derived against the tree rather than argued from the spec.**
-  > **First — executed, but not hashed.** *"Record the census copy unconditionally"* → an extra
-  > `vkCmdCopyImageToBuffer` writes **zero swapchain texels**; (a) hashes images, and nothing here
+  > ⚠️ **FOUR SITINGS, FOUR DISTINCT REASONS — the catalogue is the deliverable, because each
+  > death names a different thing a mutation must satisfy.**
+  > **First — executed, but not hashed.** *"Record the census copy unconditionally"*: an extra
+  > `vkCmdCopyImageToBuffer` writes **zero** swapchain texels; (a) hashes images and nothing here
   > pins a command stream.
-  > **Second — not executed at all.** *"Wrong layout after the census copy, on an unarmed frame"* →
+  > **Second — not executed at all.** *"Wrong layout after the census copy, on an unarmed frame"*:
   > §5.3 makes an unarmed frame record **zero** extra commands, so the site lives inside the
   > armed-only `Option` and never runs on the frames (a) renders.
-  > **Third — not authorable, and unreachable even if it were.** *"Wrong `initialLayout` in the
-  > unconditional creation"* → `TextureDesc` has **no layout member**; the engine's single
-  > `create_texture` body hard-codes `VK_IMAGE_LAYOUT_UNDEFINED` for **every** image, so the edit
-  > cannot be scoped to the ring; `VkImageCreateInfo::initialLayout` is spec-restricted to
-  > `UNDEFINED` or `PREINITIALIZED`, so *"a layout the image was never in"* has no representative in
-  > the field's permitted range; and the per-frame clear plus first-touch transition discard the
-  > creation state before any sample.
+  > **Third — not authorable.** *"Wrong `initialLayout`"*: `TextureDesc` has no layout member, the
+  > single `create_texture` body hard-codes `UNDEFINED` engine-wide, and the field's permitted range
+  > is `UNDEFINED`/`PREINITIALIZED` — no representative of "a layout it was never in".
+  > **Fourth — authorable, executed, surviving, but not VALID.** *"Change the ring's `format`"*: a
+  > second independent literal declares the same format on the pipeline, so the edit yields a
+  > spec-invalid program rather than the same program sampling different bits.
   >
-  > The through-line: **a mutation must be authorable at the site it names, executed on the frames
-  > the gate renders, and survive to the artefact the gate hashes.** Three sitings failed one of
-  > those three each. ⚠️ And the red is still **not demonstrated**: §8's standing rule is that an
-  > argued mutation does not count, so **(a) has no demonstrated red until R0c is implemented and
-  > the mutated run's output is recorded** — §10's risk R7 says the same and no longer claims
-  > otherwise.
+  > **A mutation must be AUTHORABLE at the site it names, EXECUTED on the frames the gate renders,
+  > SURVIVE to the artefact the gate hashes, and leave the program VALID.** Four properties, and
+  > four sitings each missed exactly one. ⚠️ **The fifth siting is not attempted**: when four
+  > derivations converge on "this axis cannot move the artefact", the honest output is that
+  > conclusion, not a fifth mechanism. Every repair in this campaign that only *subtracted* has
+  > survived review; every one that volunteered a new mechanism beside it has not.
 
 * (c): feed the reducer the CPU oracle's own coverage instead of the readback → (c) passes
   vacuously while (b) fails; the pairing is what proves (c) is not self-referential.
@@ -1778,7 +1783,7 @@ headline was false as written. Rather than a headline and a retraction, the limi
 | R4 | **`WAIT_BIT` readback hangs instead of failing.** | [`gpu_timing.rs`](../crates/boyko_rhi_vulkan/src/present/gpu_timing.rs):344~ documents the deadlock; three separate collectors exist because of it. | §7's written-pair bitmask, asserted before the read — binding on §14's rung, which is the one that brackets passes. Not an R0 risk any more. |
 | R5 | **Stale doc sends the importer down the `None` path.** | Verified: ≥6 comments still claim `VB_IMPLEMENTED == false` while [`render_path_config.rs`](../crates/boyko_render/src/render_path_config.rs):130~ says `true`. | R0b's second red mutation targets exactly this; fixing the comments is a separate one-line commit, deliberately not absorbed here. |
 | R6 | **Host-visible residency ceiling.** | [`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):320~: every mesh buffer is `HostVisibleCoherent`. | R0b gate (d); the device-local + staging path is a named follow-up, not R0 work. |
-| R7 | **The `vb_id` usage widening perturbs a golden.** | New. | R0c gate (a) over every VB pin. ⚠️ The mitigation cell read *"with a demonstrated red (record the copy unconditionally)"* — that mutation was retired at Rev 18 for not firing, and the cell claiming a demonstrated red is the risk register asserting the very thing the rung had lost. **(a) has no demonstrated red until the re-sited mutation is RUN**; §8's standing rule is that a mutation which is only argued does not count. |
+| R7 | **The `vb_id` usage widening perturbs a golden.** | New. | R0c gate (a) over every VB pin. ⚠️ The mitigation cell read *"with a demonstrated red (record the copy unconditionally)"* — that mutation was retired at Rev 18 for not firing, and the cell claiming a demonstrated red is the risk register asserting the very thing the rung had lost. **(a) has no AVAILABLE red**: four sitings failed for four distinct reasons and the axis R0c changes is representation-invariant for R32G32_UINT, so (a) is recorded as an assertion whose red is structurally unavailable rather than one awaiting a mutation; §8's standing rule is that a mutation which is only argued does not count. |
 | R8 | **UE5 capture measures a different scene than our census.** | New — the two engines must load the same bytes. | §4.3: an asset that cannot be imported by both is not corpus material; R0a(c) pins the resolution across both. |
 | R9 | **Disk exhaustion masquerading as a build failure.** | This project's record: `target/` has filled this disk and surfaced as linker errors. | §11 records the measured headroom; R0a's record carries free-disk as a required field, and R0a's negative branch **re-reads** it at test time. |
 | R10 | **The claim is set to meet the floor.** The cheapest way to close the ONE gate is to write the number on the right after seeing the left. | The P0 of Rev 1; of Rev 2, answered with a hash around the string `PENDING`; and of Rev 3–Rev 5, answered with an ordering rule that **named one rung for two instruments**. | **MOVED TO §14 AT REV 8, unresolved.** There is no claim at R0 to set against a floor, so this risk has no R0 surface — but it is not solved: §14.4 P0-5 carries the worked example showing the post-fill edit window still open on one branch. ⚠️ Rev 3–Rev 5 claimed here that ordering *"does not depend on anyone noticing an edit"* — **retracted**; ordering constrains commits, not knowledge, and party separation is what carries the weight. |
