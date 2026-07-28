@@ -1,6 +1,6 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 25** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 26** — **NOT APPROVED, and no code exists.** This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
@@ -1152,12 +1152,22 @@ falsify is not a gate on UE5 availability. The figure stays in the record, as a 
 `assets/vg_corpus/CORPUS.toml` + the `.gitignore` rule + `fetch_corpus`;
 `crates/boyko_app/tests/vg_corpus_ingest.rs`. <!-- doc-anchor-ignore -->
 
-**Gate (one, six parts):** (a0) **`corpus.arrangement` is not the `PENDING` sentinel** — the
+**Gate (one, six parts):** (a0) **EVERY `table.field` listed in `[gating].r0b_blocked_by` resolves and is not the `PENDING`
+sentinel** — ⚠️ **this read *"`corpus.arrangement` is not the `PENDING` sentinel"*, a function of ONE
+path, while Rev 24 made the row hold TWO.** Substitute the state where the owner answers the corpus
+question and not the ingest one: `arrangement = "fetched_gitignored"`,
+`ingest_ceiling.disposition = "PENDING"` — (a0) does not fire, and (a)–(e) all read `CORPUS.toml`
+and the registration path rather than the claim file, **so the whole six-part gate goes green on
+exactly the state the row was authored to cover**. Rev 24's sole purpose was to give that
+precondition a consumer; the row and the §13 question were consumers at the *reachability* level
+and the gate part was one link further down, unreached. Quantifying over the row rather than over a
+named path is what makes a fourth blocker, added later, impossible to escape the same way. **One
+mutation per path** — the
 owner VALUES call this rung is blocked on (`[gating].r0b_blocked_by`), asserted here because a
 `[gating]` row that no gate part reads blocks nothing. ⚠️ Rev 8 stated in the present indicative
 that "the named rung refuses to run while the field is unanswered" while no rung asserted any row;
 this is the part that makes the sentence true, and it is deliberately (a0) so the existing lettering
-and its mutations are untouched. **RED mutation:** run the rung with the field still `PENDING` → (a0)
+and its mutations are untouched. **RED mutations, one per path (N entries = N mutations):** answer `corpus.arrangement` and leave `ingest_ceiling.disposition` `PENDING` → (a0) reds on the second path; answer the ingest question and leave `corpus.arrangement` `PENDING` → (a0)
 reds, and `golden.ps1`'s exit-2 discipline is the precedent for the sentinel's shape;
 (a) every corpus payload's sha256 matches its manifest pin; (b) each
 `.glb` decodes to a `MeshData` whose triangle count equals the manifest's published count;
@@ -1723,8 +1733,11 @@ Rev 7's §0 opened with *"the three ways it kills the campaign"* and its own §9
 headline was false as written. Rather than a headline and a retraction, the limits are listed:
 
 * **K1 cannot be FIRED.** Only refuted or left undecided. Firing needs an upper bound on visible
-  density whose firing condition is demonstrably not precluded by R0b's own high-poly corpus gate —
-  an unsolved design problem, recorded as unsolved
+  density whose firing condition is demonstrably NON-SATURATING — ⚠️ this read *"not precluded by
+  R0b's own high-poly corpus gate"*, and R0b precludes nothing: (b) is an equality and floors no
+  triangle count, so a requirement stated against that preclusion can be neither met nor failed. The
+  operative requirement is the one D1 and R11 actually establish — an upper bound that does not cap
+  itself — an unsolved design problem, recorded as unsolved
   (`[k1].k1_fire_instrument_status`), and out of R0's scope until someone solves it.
 * **K2's four causes are all checked, but only one is re-derived, and one configuration cannot go
   green.** ⚠️ Rev 9 changed this and Rev 8's wording survived it, so the bullet said the opposite of
@@ -2088,7 +2101,10 @@ row is now a list of paths.
 ⚠️ **What is and is not mechanical, because Rev 8 asserted the wrong one in the present indicative.**
 Rev 8 wrote that "the named rung refuses to run while the field is unanswered" — and **no gate part
 anywhere read a `[gating]` row**, so the sentence described a mechanism that did not exist. Of the
-two non-empty rows: **R0b's is now asserted** by its own gate part (a0), so that half is true; **R1's
+two non-empty rows: **R0b's is asserted IN FULL** by its own gate part (a0), which quantifies over
+every path the row lists — ⚠️ it read *"now asserted"* of a one-entry row and stayed put when Rev 24
+made the row hold two, so for one revision half the row was asserted and the sentence said the row
+was; **R1's
 is not**, because R1 is outside this document and no rung here can assert it. The row is a recorded
 requirement on whoever writes R1, and calling it anything stronger would repeat the defect.
 
