@@ -31,8 +31,8 @@
 # and Rev 7 -- the third occurrence caught by an adversarial pass rather than by the fields
 # themselves, in the very revision whose slogan was about fixes that do not land. They are updated
 # here in the same act as the edit, which is the whole of their job.
-schema_version = 20
-frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 24"
+schema_version = 21
+frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 25"
 frozen_date = "2026-07-28"
 
 # THE EDIT DISCIPLINE, stated because Rev 4 and Rev 5 both edited this file in place while its
@@ -112,9 +112,16 @@ cross_run_sessions = 3
 # loose as to be useless: it counts back-face-culled and off-screen geometry, so it conflates "the
 # triangles are small" with "the level contains a lot of geometry". Firing K1 requires
 # submitted/covered < 1.0 — i.e. the whole frame submits fewer triangles than the screen has
-# covered pixels — while R0b's own gate requires the corpus to carry published high-poly counts.
-# A corpus that satisfies R0b can never satisfy K1's decisive conjunct. The kill was self-satisfied
-# out of existence.
+# covered pixels.
+#
+# ⚠️ REV 25 -- THE PRECLUSION THIS PARAGRAPH RESTED ON IS FALSE. It read: "while R0b's own gate
+# requires the corpus to carry published high-poly counts. A corpus that satisfies R0b can never
+# satisfy K1's decisive conjunct. The kill was self-satisfied out of existence." R0b(b) asserts
+# decoded count EQUALS published count -- an equality, never a magnitude -- so NO gate part anywhere
+# floors the corpus's triangle count, and a corpus of 1e5 triangles total satisfies R0b while
+# submitted/covered < 1.0 holds. The statistic is retired on the argument that survives and was
+# always the stronger one, stated two lines above: it counts back-face-culled and off-screen
+# geometry, so it conflates "the triangles are small" with "the level contains a lot of geometry".
 #
 # THE REPLACEMENT USES THE LADDER, WHICH COSTS NOTHING NEW.
 #
@@ -486,7 +493,8 @@ k1_decision_rule = "cheap_census_may_only_REFUTE, evaluated over the committed c
 # precluded by R0b's own high-poly corpus gate -- a design problem, not a scheduling one, and out
 # of R0's scope until someone solves it.
 k1_fire_at_r0 = false
-k1_fire_instrument_status = "UNSOLVED -- needs an upper bound not precluded by R0b's corpus gate"
+# REV 25 -- this value stated its requirement in terms of the preclusion withdrawn above.
+k1_fire_instrument_status = "UNSOLVED -- needs a non-saturating upper bound on VISIBLE density; R0b floors no triangle count, so the corpus constrains it neither way"
 
 # The modal-bucket conjunct is RETIRED from the decision. It is redundant against D_est, its
 # cross-rung derivation is unsupported by this ladder, and its direction was inverted in Rev 3.

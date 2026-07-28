@@ -1,6 +1,6 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 24** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 25** — **NOT APPROVED, and no code exists.** This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
@@ -1181,7 +1181,7 @@ runs the **whole corpus at every committed path**, so what R0d needs is the whol
 **simultaneously**, and the largest single mesh allocating says nothing about the sum. Recorded as a
 **precondition R0d inherits**, not silently widened into (d): widening it would mint a new
 mechanism at an approved rung, and §3.4's residency hazard is already the named home for the
-ceiling. §3.4 now states the real ceiling and its consequence — which is that this part reds on the FIRST asset, not on the sum;
+ceiling. §3.4 now states the real ceiling and its consequence — ⚠️ **Rev 25 re-derives what follows, because it asserted the exact proposition §3.4 withdrew forty lines into the same repair.** It read *"this part reds on the FIRST asset, not on the sum"*. (d)'s predicate is over `maxᵢ fᵢ` and `f(T) = 44·T`, so it reds only for a SINGLE mesh above `67.11e6/44 ≈ 1.5 M` triangles — on Rev 24's own eight-asset corpus (`4.0e5` each, `f = 17.6 MB`) **(d) is true on every asset and the rung still dies at asset four**. So (d) reds on an oversized single mesh and is **silent on the sum**, which is the failure that actually occurs. §8 is the authority for *what is asserted* and §3.4 for the *derivation*, and they had come to answer "can R0b run?" in opposite directions — Rev 7's governing lesson, in the location Rev 7 named;
 **(e) the manifest enumerates at least `[k1].committed_paths_min` distinct camera-path ids.**
 ⚠️ **This part is Rev 14's, and it exists because the parts above provably cannot supply it.** The
 enumeration immediately above — (a0) the arrangement sentinel, (a) payload sha256, (b) triangle
@@ -1810,8 +1810,13 @@ headline was false as written. Rather than a headline and a retraction, the limi
   than a limit on R0d.** Rev 22 recorded here that no R0 gate bounds the corpus's total footprint
   and that an oversized corpus is "discovered at R0d as an allocation failure". **Rev 23 inverts
   it**: mesh buffers route to a single **64 MiB** first-fit host block with no growth path, so the
-  vertex buffer of a 3 M-triangle asset (96 MB) does not fit an empty block — **R0b(d) reds on
-  asset one, as a panic**, and R0c/R0d are unreachable. The device-local + staging path is
+  vertex buffer of a 3 M-triangle asset (96 MB) does not fit an empty block. ⚠️ This read
+  **"R0b(d) reds on asset one, as a panic"**, which credits (d) with a red it does not produce on
+  any corpus the ceiling admits: (d) is over `maxᵢ fᵢ`, so it fires only for a single mesh above
+  ~1.5 M triangles, while eight assets of 4.0e5 leave (d) **green** and exhaust the block at asset
+  four. **The kill happens OUTSIDE every gate part, as a panic** — telling the reader the ceiling
+  is gated was the same false reassurance §8 gave, reached from the other side. R0c/R0d are
+  unreachable either way. The device-local + staging path is
   therefore a **precondition of R0b**, not a follow-up, and does not by itself suffice because the
   device block is 64 MiB too (§3.4). ② Separately and still true: **no R0c gate part is evaluated
   on an ARMED frame**, so the two hazards R0c's preamble names — a new layout transition of a
@@ -1851,7 +1856,7 @@ headline was false as written. Rather than a headline and a retraction, the limi
 | R8 | **UE5 capture measures a different scene than our census.** | New — the two engines must load the same bytes. | §4.3: an asset that cannot be imported by both is not corpus material; R0a(c) pins the resolution across both. |
 | R9 | **Disk exhaustion masquerading as a build failure.** | This project's record: `target/` has filled this disk and surfaced as linker errors. | §11 records the measured headroom; R0a's record carries free-disk as a required field, and R0a's negative branch **re-reads** it at test time. |
 | R10 | **The claim is set to meet the floor.** The cheapest way to close the ONE gate is to write the number on the right after seeing the left. | The P0 of Rev 1; of Rev 2, answered with a hash around the string `PENDING`; and of Rev 3–Rev 5, answered with an ordering rule that **named one rung for two instruments**. | **MOVED TO §14 AT REV 8, unresolved.** There is no claim at R0 to set against a floor, so this risk has no R0 surface — but it is not solved: §14.4 P0-5 carries the worked example showing the post-fill edit window still open on one branch. ⚠️ Rev 3–Rev 5 claimed here that ordering *"does not depend on anyone noticing an edit"* — **retracted**; ordering constrains commits, not knowledge, and party separation is what carries the weight. |
-| R11 | **A statistic that cannot exceed its own threshold.** | Rev 1: `visible_tri_per_covered_pixel ≤ 1` by construction. Rev 2: `submitted/covered < 1.0` precluded by R0b's corpus gate. **Rev 3–Rev 5: `D_est` capped at exactly 4.0 and a *lower* bound firing a kill.** Three instruments, one defect. | §5.6's directional split — `D_est` may only **refute** K1 — plus `[k1].k1_fire_at_r0 = false`, because the proposed firing instrument is both mis-sited (a fragment shader cannot see frustum/backface survivors) and **probably inert for the same reason Rev 2's was** (~2.5 M survivors vs ~2.07 M covered pixels). ⚠️ Rev 4's entry here called the estimator *"uncapped"*. |
+| R11 | **A statistic that cannot exceed its own threshold.** | Rev 1: `visible_tri_per_covered_pixel ≤ 1` by construction. Rev 2: `submitted/covered < 1.0`, retired — ⚠️ Rev 25 withdrew the stated reason ("precluded by R0b's corpus gate"); R0b(b) is an equality and floors no triangle count, so the surviving reason is that the statistic counts culled and off-screen geometry. **Rev 3–Rev 5: `D_est` capped at exactly 4.0 and a *lower* bound firing a kill.** Three instruments, one defect. | §5.6's directional split — `D_est` may only **refute** K1 — plus `[k1].k1_fire_at_r0 = false`, because the proposed firing instrument is both mis-sited (a fragment shader cannot see frustum/backface survivors) and **probably inert for the same reason Rev 2's was** (~2.5 M survivors vs ~2.07 M covered pixels). ⚠️ Rev 4's entry here called the estimator *"uncapped"*. |
 | R12 | **The census resolution silently decides K1.** Density scales as 1/resolution². | New in Rev 2 and the one fix that survived review. | Frozen ladder + frozen decision resolution; the curve is reported at every rung; **and the achieved extent is asserted**, because OS clamping is already a recorded hazard here at 512². |
 | R13 | **The most likely branch has no gate.** §11 measures no UE5 on this box. | New — and it kept re-appearing: through Rev 5 the absolute branch had the ordering rule attached to the wrong rung **and** a gate (b) that passed for its own named red mutation. | R0a's negative is re-derived over **bounded documented authorities** (launcher manifest + the registry hives recording launcher *and* source builds), with residual blindness recorded. ⚠️ Rev 4's *"enumerate fixed volumes"* is **retracted** — a recursive walk of two ~240 GB volumes inside a `cargo test`, with false positives from any stray binary. ⚠️ **Still only partly mitigated at Rev 8:** §6.2 fires K2 on *any* of three prerequisites and R0a re-derives only the first, so a legitimate negative caused by disk — the cause §11 calls most likely — is recorded rather than machine-checked (§9.1). |
 | R14 | **A frozen file whose schedule requires it to change.** A tripwire that fires routinely carries no signal, and a routine re-record can launder a threshold edit. | **Measured in Rev 2 by inspection:** its recorded hash was *guaranteed* to break at the `corpus.arrangement` fill, before the first rung that asserted it. | The split: thresholds hashed and never edited; claim unhashed and gated by the `PENDING` sentinel. |
