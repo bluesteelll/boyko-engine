@@ -1,6 +1,6 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 29** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 30** — **NOT APPROVED, and no code exists.** This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
@@ -1290,8 +1290,8 @@ the 2× SSAA composite is the route to it, with **SSAA arming ASSERTED rather th
 > VRAM miss, so a rung that trusts arming would measure `native` and red (d) with no indication
 > why. ⚠️ Whether a given client extent is actually granted on this box is **unmeasured** — the
 > window is created without `WS_VISIBLE` and the sweeps run it hidden, and nothing in the tree
-> handles `WM_GETMINMAXINFO`, so the max-track question is open in both directions. §11 records it
-> as a precondition rather than a derivation, because a defect that cannot be demonstrated is not a
+> handles `WM_GETMINMAXINFO`, so the max-track question is open in both directions. §9.1 carries it as a limit — ⚠️ this said §11 records it, which Rev 29 repudiated:
+> a precondition cannot live in the section whose charter is that nothing reads it, because a defect that cannot be demonstrated is not a
 > finding — and if a rung's request is refused, today's disposition is that **(d) reds with no
 > fallback named**, which is an instrument failure and adjudicates nothing.
 
@@ -1849,12 +1849,22 @@ headline was false as written. Rather than a headline and a retraction, the limi
   top rung, `D_est`'s numerator is unobtainable and K1 is adjudicable in **neither** direction — an
   instrument failure that produces no disposition, which is R0c(d)'s stated behaviour today, with
   no fallback named.
-  ⚠️ **And the framing may be wrong at the root:** the tree already carries a **headless** offscreen
-  raster-and-readback path ([`graphics_offscreen.rs`](../crates/boyko_rhi_vulkan/tests/graphics_offscreen.rs)),
-  which boots a device with no window and renders through dynamic rendering. If the census drives
-  that path, the OS client area is **not on the critical path at all** and this entire limit
-  dissolves. R0c's Lands list names the windowed route because that is what the shipped recorder
-  uses; whether the census should use it is the choice R0c must make, and it is cheap to settle —
+  ⚠️ **Rev 29 offered an escape from this limit and Rev 30 withdraws it as FALSE.** It read: the
+  tree "already carries a **headless** offscreen raster-and-readback path
+  ([`graphics_offscreen.rs`](../crates/boyko_rhi_vulkan/tests/graphics_offscreen.rs)) … If the
+  census drives that path, the OS client area is not on the critical path at all and this entire
+  limit dissolves." **That file does not raster.** Its own module doc says *"a headless offscreen
+  CLEAR … (no graphics pipeline, no draw — those are rung 2+)"*, and the body is one image, a
+  `begin_rendering(Clear)`/`end_rendering` pair with nothing recorded between them, a copy and a
+  texel assert. It is evidence for headless device boot and image readback — not for driving the
+  shipped VB chain without a window.
+  **And the antecedent is uninhabited.** `GpuSceneBundles::boot` is the only constructor and takes
+  a `swap_format` with no source but the swapchain, which comes from a `Window`. Every test in this
+  tree that calls itself *headless* boots a **hidden window** — `BOYKO_WIN_HIDDEN` — and one of
+  them even skips when "windowed boot unavailable". **Headless here means hidden-window, never
+  no-window.** Driving the census offscreen would need a new surfaceless host boot, an offscreen
+  ring and a readback recorder: larger than the whole of R0c's Lands list. I read two lines of a
+  module doc, and the word that refuted the claim — **CLEAR** — was in the sentence I quoted.
   one `Window::open` at the requested extent plus `GetClientRect`, hidden, no device needed.
 * ⚠️ **R0's CORPUS CANNOT BE INGESTED ON TODAY'S ENGINE, and that is a blocker on R0b rather
   than a limit on R0d.** Rev 22 recorded here that no R0 gate bounds the corpus's total footprint
