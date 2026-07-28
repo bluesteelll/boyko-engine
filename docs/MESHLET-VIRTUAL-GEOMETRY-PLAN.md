@@ -1,6 +1,6 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 9** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 10** — **NOT APPROVED, and no code exists.** This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
@@ -1333,6 +1333,25 @@ headline was false as written. Rather than a headline and a retraction, the limi
   interpretable near the one-pixel censoring floor — the micro-polygon regime the census exists for
   — so gating on it would red hardest exactly where the campaign's premise is most strongly
   confirmed.
+* **R0 has no representativeness floor, and the non-degeneracy floors are not one.**
+  `[k1_instrument].min_covered_pixels` was frozen as an EMPTY-FRAME guard — a sentinel-only readback
+  makes `D_est` a division by nothing — and 1024 px is about a hundredth of a percent of the
+  decision resolution. At the rule's own boundary, `covered_pixels = visible_tris = 1024` gives
+  `D_est = 1.0`, so K1 is refuted from a frame covering **0.049%** of the screen. `D_est` is
+  scale-free by construction (both terms shrink with the covered region), so no floor on that axis
+  can carry representativeness; it needs a floor on covered **fraction**, and R0 does not have one —
+  `[k1_instrument].representativeness_floor_status` records it UNSOLVED rather than giving it an
+  authored number nobody can justify yet.
+  What limits cherry-picking today is weaker and worth naming exactly: the camera paths are
+  committed as test constants and R0d(b) requires every statistic at every rung, so an
+  unrepresentative frame appears as a row in the census rather than being selectable afterwards.
+* **When a censused frame fails non-degeneracy, R0d reds** — the rung is not commit-eligible and
+  nothing is adjudicated. ⚠️ `[k1].k1_decision_rule` also maps that input to "UNDECIDED, escalate",
+  which is a different act; **R0d's gate takes precedence**, because a frame that cannot be
+  adjudicated is an instrument failure, not a finding about content, and §9 clause 3 already rules
+  that an instrument failure must not enter a later gate. The conjunct inside `k1_decision_rule` is
+  therefore vacuous *within R0* — R0d(c) asserts the same two floors before the rule is ever
+  evaluated — and it earns its place only at a rung that adjudicates without R0d's gate.
 * **No comparative claim is evaluated, decided or pre-registered.** There is no ONE gate at R0
   (§14). ⚠️ And the deferral leaves **five downstream gate rows orphaned**: the research ladder gives
   R2 through R5 gates that read *"decidable by R0's floor"*, and the floor now arrives at R6
@@ -1429,6 +1448,9 @@ asserting verification, four rounds of being wrong, every time caught by an adve
 than by anything mechanical.
 
 **These anchors are machine-checked in part as of Rev 9, and the part matters more than the fact.**
+⚠️ The printed denominator is also slightly generous: the `~` waiver is appended by textual match,
+so a `:N` that is not a citation at all can absorb one, which inflates "201 anchors" rather than the
+stale count. Read the 201 as an upper bound on what is bound, never as a count of verified claims.
 The document is in `internal_docs_anchors.rs`'s `GATED_DOCS` and the gate is green: 123 path
 mentions, 0 dead; 201 anchors, 0 stale. ⚠️ But it prints its own decomposition and the decomposition
 is the honest reading — **102 of the 201 anchors carry the `~` waiver**, which asserts only that the
@@ -1727,8 +1749,10 @@ by arithmetic rather than by reading.
 3. **The reference floor obeys the chain-floor rule too.** §6.3 derived it from the spread of
    **per-pass** medians and then used it as a chain floor — the exact composition the scope rule
    forbids, inside the same inequality whose other half obeys it. Constructed counterexample:
-   `A = (1.0, 1.4, 1.0)`, `B = (1.4, 1.0, 1.4)` ms gives per-pass spreads of 0.40/0.40 and a chain
-   spread of 0.00. Also state the aggregation over passes (max? mean?) — "the spread of that table"
+   `A = (1.0, 1.4, 1.0)`, `B = (1.4, 1.0, 1.0)` ms gives per-pass peak-to-peak spreads of
+   **0.40 / 0.40 / 0.00** and a chain-total spread of **0.00** — the totals are 3.4 both sessions.
+   ⚠️ Rev 9 wrote `B = (1.4, 1.0, 1.4)`, whose totals are 3.4 and 3.8, so the chain spread is 0.40
+   and the example demonstrated the opposite of its point. Re-derived here rather than re-worded. Also state the aggregation over passes (max? mean?) — "the spread of that table"
    is not a single number.
 4. **Give the floor a unit and a denominator.** No text in three files assigned one. The reference
    floor is relative to each reference pass's own median, the claim is relative to our chain total,

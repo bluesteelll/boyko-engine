@@ -38,8 +38,10 @@
 # whose hash is the literal PENDING is UNBLESSED and makes the checker EXIT 2 rather than pass.
 # Same discipline: a rung that needs a field below asserts it is not PENDING, and fails if it is.
 
-schema_version = 3
-authored_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 8"
+# ⚠️ Stale in four consecutive revisions, most recently in the very revision that edited this
+# file. This file is NOT hashed, so these two fields are the only record that it moved at all.
+schema_version = 4
+authored_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 10"
 authored_date = "2026-07-28"
 
 # ---------------------------------------------------------------------------------------------
