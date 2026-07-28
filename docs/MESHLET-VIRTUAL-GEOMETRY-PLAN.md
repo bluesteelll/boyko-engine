@@ -1,6 +1,6 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 19** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 20** — **NOT APPROVED, and no code exists.** This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
@@ -1273,30 +1273,41 @@ vacuous-selection defect wearing a lab coat.
 * (b): subdivide the procedural fixture 4× → the modal bucket must move by **two** buckets. A
   sensitivity control that only asserts "the number changed" is the defect this campaign keeps
   finding; the required *direction and magnitude* is what makes it a gate.
-* **(a): give the `vb_id` ring the WRONG `initialLayout` in its UNCONDITIONAL creation, so every
-  frame — armed or not — transitions from a layout the image was never in** → `vb_resolve`/
-  `vb_shade` sample it in an undefined state → the shaded BMP moves → **`[vb_mesh]`'s `sha256`
-  reds**. The pin and the leg are named because (a) is quantified over *image* goldens, and
-  `[vb_mesh]` is a blessed leg, deliberately not one of the two carrying `sha256_hwrt = "PENDING"`
-  on which `golden.ps1` exits 2 before comparing anything.
+* **(a): change the `vb_id` ring's `format` in its own `TextureDesc` literal** — the field sitting
+  immediately beside the `usage` field R0c widens, in the ring's per-image descriptor, populated
+  unconditionally → `vb_resolve`/`vb_shade` sample different bits on **every** frame, armed or not
+  → the shaded BMP moves → **`[vb_mesh]`'s `sha256` reds**. `[vb_mesh]` is a blessed leg,
+  deliberately not one of the two carrying `sha256_hwrt = "PENDING"` where `golden.ps1` exits 2
+  before comparing anything.
 
-  > ⚠️ **THE SITE IS THE WHOLE POINT, and two mutations have now died on it.** (a)'s domain is
-  > golden frames rendered with the census **unarmed**, and §5.3 makes an unarmed frame record
-  > **zero** extra commands — so any mutation sited *"after the census copy"* lives inside the
-  > armed-only `Option` and is **never executed on the frames (a) renders**. Rev 18 wrote exactly
-  > that and it did not fire, for a reason *adjacent to* the one that retired its predecessor
-  > rather than identical: the earlier mutation was **executed but not hashed**; this one is **not
-  > executed at all**. The permanent part of R0c's change is the ring's `TRANSFER_SRC` usage and its
-  > creation parameters — that is the only surface present on an unarmed frame, so that is where a
-  > mutation of (a) must live.
+  **Derived against the two things that killed the previous siting**: the ring is cleared to the
+  sentinel every frame and the RDG emits a fresh first-touch `UNDEFINED → COLOR_ATTACHMENT_OPTIMAL`
+  transition every frame — neither restores a *format*, so the mutated state survives to the sample.
+  And it is authorable **per image**: `format` is a member of the ring's own `TextureDesc`, so the
+  edit does not leak to any other target.
+
+  > ⚠️ **THREE SITINGS DIED HERE, EACH FOR A DIFFERENT REASON, and the catalogue is the useful
+  > part — it is why this one is derived against the tree rather than argued from the spec.**
+  > **First — executed, but not hashed.** *"Record the census copy unconditionally"* → an extra
+  > `vkCmdCopyImageToBuffer` writes **zero swapchain texels**; (a) hashes images, and nothing here
+  > pins a command stream.
+  > **Second — not executed at all.** *"Wrong layout after the census copy, on an unarmed frame"* →
+  > §5.3 makes an unarmed frame record **zero** extra commands, so the site lives inside the
+  > armed-only `Option` and never runs on the frames (a) renders.
+  > **Third — not authorable, and unreachable even if it were.** *"Wrong `initialLayout` in the
+  > unconditional creation"* → `TextureDesc` has **no layout member**; the engine's single
+  > `create_texture` body hard-codes `VK_IMAGE_LAYOUT_UNDEFINED` for **every** image, so the edit
+  > cannot be scoped to the ring; `VkImageCreateInfo::initialLayout` is spec-restricted to
+  > `UNDEFINED` or `PREINITIALIZED`, so *"a layout the image was never in"* has no representative in
+  > the field's permitted range; and the per-frame clear plus first-touch transition discard the
+  > creation state before any sample.
   >
-  > ⚠️ **And its red must be DEMONSTRATED, not cited.** The retirement argument two paragraphs up
-  > says `vb_id` is `R32G32_UINT`, so no tiling or compression choice the widening induces can
-  > perturb a value — and that same representation-invariance is a reason a layout mismatch may
-  > return the correct texels on *this* hardware even though it is spec-UB. §8's standing rule
-  > governs: *a mutation that is only argued does not count; the commit message records the mutated
-  > run's output.* Until R0c is implemented and that run is recorded, **(a) has no demonstrated
-  > red**, and §10's risk R7 no longer claims otherwise.
+  > The through-line: **a mutation must be authorable at the site it names, executed on the frames
+  > the gate renders, and survive to the artefact the gate hashes.** Three sitings failed one of
+  > those three each. ⚠️ And the red is still **not demonstrated**: §8's standing rule is that an
+  > argued mutation does not count, so **(a) has no demonstrated red until R0c is implemented and
+  > the mutated run's output is recorded** — §10's risk R7 says the same and no longer claims
+  > otherwise.
 
 * (c): feed the reducer the CPU oracle's own coverage instead of the readback → (c) passes
   vacuously while (b) fails; the pairing is what proves (c) is not self-referential.
