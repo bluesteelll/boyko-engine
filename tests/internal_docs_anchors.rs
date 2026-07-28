@@ -66,13 +66,15 @@
 //!    invisible. Measured on the live range `enable_store.rs:65-66`: rewriting it to `:65-54`
 //!    reports ``ends before it starts``, and to `:65-99999` reports
 //!    ``ends past end of file (1278 lines)``, while the first line 65 keeps passing the shape
-//!    test in both cases. ⚠️ That measurement was real and was also **the whole coverage this
-//!    check had**: it was taken on an unwaived `:N-M`, and the scanner tested `-` before `~`, so
-//!    the waived spelling `:N~-M` — which is how the meshlet plan writes *every* one of its
-//!    ranges — parsed no tail at all and reached neither assertion. Rev 12 accepts the waiver on
-//!    either side, and two controls below pin both the capture and the fact that the live corpus
-//!    exercises it, because a green corpus run cannot tell "no incoherent range" from "no range
-//!    parsed".
+//!    test in both cases. ⚠️ **The scanner tested `-` before `~`, so the waived spelling `:N~-M`
+//!    parsed no tail at all and reached neither assertion.** Measured on the meshlet plan: **34
+//!    occurrences are waiver-first and 23 are plain `:N-M`** — so the check was dead on about
+//!    three-fifths of that document's ranges, not on all of them. ⚠️ Rev 12's own justification
+//!    for this repair said "every one of its ranges" in four texts and that was FALSE; the 23
+//!    plain ones parsed a tail and reached both assertions all along. The repair stands on the 34
+//!    regardless. Rev 12 accepts the waiver on either side, and two controls below pin both the
+//!    capture and the fact that the live corpus exercises it, because a green corpus run cannot
+//!    tell "no incoherent range" from "no range parsed".
 //! 5. **Non-emptiness, per document** — a mis-typed pattern or a renamed document must fail
 //!    loudly rather than vacuously pass over an empty extraction. The counts are asserted *per
 //!    document* so a healthy `FEATURE_MAP.md` cannot mask a `SYSTEMS.md` that suddenly yields
@@ -169,17 +171,22 @@
 //!   — `:N~` or `(N~)` — waives the *definition* checks for that one anchor; the file must still
 //!   exist and line N must still be within it. This keeps the check at full strength for every
 //!   other anchor and leaves each waiver greppable instead of forcing the shape test to be
-//!   loosened for everyone. 26 anchors carry it today, on 16 lines — struct fields
+//!   loosened for everyone. 25 anchors carry it today, on 15 lines — struct fields
 //!   (`Archetype::enable_store`, `ObserverLists::by_kind_component`,
 //!   `ArchetypeMaster::observer_registry`), enforcement sites inside a derive body, the four call
 //!   sites of the enable-store 0%-gate, and the `dispatch.rs` OBS-FIRE-LOOP module-doc invariant.
 //!   Enumerate them from `docs/` with
 //!   `grep -oE '[:(][0-9]+(-[0-9]+)?~' FEATURE_MAP.md SYSTEMS.md ARCHITECTURE.md | wc -l`. Both
 //!   loosenings in that pattern are load-bearing and each was measured: dropping the `[:(]`
-//!   alternative to a bare `:` reports 25, because one waiver is written in the parenthesised
-//!   form (`(65~)`, FEATURE_MAP.md); dropping `(-[0-9]+)?` also reports 25, because one is
-//!   written on a range (`dispatch.rs:19-33~`, SYSTEMS.md). Use `-o`, not `-n`: three of these
-//!   lines carry four waivers each and one carries two, so counting lines reports 16, not 26.
+//!   alternative to a bare `:` reports 24, because one waiver is written in the parenthesised
+//!   form (`(65~`, FEATURE_MAP.md:756); dropping `(-[0-9]+)?` also reports 24, because one is
+//!   written on a range (`dispatch.rs:19-33~`, SYSTEMS.md:435). Use `-o`, not `-n`: several of
+//!   these lines carry more than one waiver, so counting lines reports 15, not 25.
+//!   ⚠️ **All four numbers here were 26/16/25/25 and went stale in the commit that un-waived one
+//!   anchor in SYSTEMS.md** — a repair that changed a measured INPUT rather than restating a fact,
+//!   so grepping for the sentence would not have found them. They are re-derived, not adjusted.
+//!   This pattern deliberately covers only the three navigation documents; the meshlet plan writes
+//!   its waivers before the range (`:N~-M`), a spelling with zero occurrences in these three.
 //! * **Historical quotes** — a line that deliberately reproduces a former, now-wrong anchor
 //!   ("this used to say ...") carries `<!-- doc-anchor-ignore -->` and is skipped whole. This is
 //!   an explicit opt-out rather than a heuristic on words like "formerly": a heuristic would
@@ -407,12 +414,14 @@ fn scan_line(text: &str) -> (Vec<Mention>, Vec<Anchor>) {
                 //
                 // ⚠️ The waiver may sit on EITHER side of the range, and until Rev 12 this scanner
                 // only recognised one side. It tested `-` before `~`, so it parsed `:N-M~` and
-                // stopped dead at the `~` in `:N~-M` — which is how every single one of the
-                // meshlet plan's 34 range citations is written. `range_end` was therefore `None`
-                // for all of them and the end-of-range check below never ran on that document
-                // once. A check that is structurally unreachable for the whole corpus it was
-                // written for is the same defect class the campaign it gates keeps finding, so
-                // both spellings are accepted here rather than the citations being rewritten.
+                // stopped dead at the `~` in `:N~-M`. Measured on the meshlet plan: **34
+                // occurrences waiver-first, 23 plain `:N-M`** — `range_end` was `None` for the 34,
+                // so the end-of-range check below never ran on them. ⚠️ Rev 12 first wrote that
+                // this was "every one of its ranges" and that the check "never ran on that
+                // document once"; both are FALSE — the 23 plain citations parsed a tail and
+                // reached both assertions before this repair existed. The 34 are reason enough,
+                // and the false half is recorded rather than quietly dropped because it was a
+                // volunteered claim in a repair, the exact class this campaign measures.
                 let mut after = end;
                 let mut shape_waived = false;
                 if after < bytes.len() && bytes[after] == b'~' {
@@ -1131,13 +1140,16 @@ fn internal_docs_line_anchors_land_on_definitions() {
 }
 
 /// Sensitivity control for the range tail — the only part of this gate that had **no** control and
-/// was, until Rev 12, unreachable on the corpus it was written for.
+/// was, until Rev 12, unreachable on **the majority of** the corpus it was written for.
 ///
 /// `range_end` feeds two assertions in `check_anchor`: a range whose end precedes its start, and a
 /// range whose end is past EOF. Both are dead whenever the parser fails to capture `M`. The parser
-/// tested `-` before `~`, so it recognised `:N-M~` and stopped at the `~` in `:N~-M` — and the
-/// meshlet plan writes the waiver first in **every** range citation it has. The gate ran green over
-/// that document with the tail check structurally unable to fire.
+/// tested `-` before `~`, so it recognised `:N-M~` and stopped at the `~` in `:N~-M`. Measured on
+/// the meshlet plan: **34 occurrences waiver-first, 23 plain** — the gate ran green over that
+/// document with the tail check unable to fire on the 34, while the 23 reached it normally.
+///
+/// ⚠️ Rev 12 wrote "**every** range citation it has" here and in three sibling texts. That was a
+/// volunteered claim inside a repair and it was false; the corrected split is above.
 ///
 /// This control asserts the capture directly, in both spellings, because a green corpus run cannot
 /// distinguish "no incoherent range exists" from "no range was parsed".
@@ -1170,26 +1182,51 @@ fn a_range_tail_is_captured_with_the_waiver_written_on_either_side() {
 /// green only if it were also edited, but would silently empty this count.
 #[test]
 fn the_gated_docs_actually_exercise_the_range_tail() {
-    let mut with_tail = 0usize;
+    // ⚠️ Counted PER DOCUMENT, not aggregated. Rev 12's first version summed all four and asserted
+    // `>= 30` against a live total of 33 — a margin of three, on a corpus where un-waiving three
+    // plan ranges is an instruction the sibling control prints. An aggregate floor lets the
+    // document the check was written for fall to zero while three others carry the sum.
+    let mut per_doc: Vec<(&str, usize)> = Vec::new();
     for doc in GATED_DOCS {
         let text = std::fs::read_to_string(docs_dir().join(doc))
             .unwrap_or_else(|e| panic!("read docs/{doc}: {e}"));
-        for line in text.lines() {
-            with_tail += scan_line(line)
-                .1
-                .iter()
-                .filter(|a| a.range_end.is_some())
-                .count();
-        }
+        let n = text
+            .lines()
+            .map(|l| {
+                scan_line(l)
+                    .1
+                    .iter()
+                    .filter(|a| a.range_end.is_some())
+                    .count()
+            })
+            .sum();
+        println!("docs/{doc}: {n} range citation(s) parsed a tail");
+        per_doc.push((doc, n));
     }
+    let with_tail: usize = per_doc.iter().map(|(_, n)| n).sum();
+
+    // The meshlet plan is the document this check was dead on, so it carries its own floor. It
+    // holds 34 waiver-first and 23 plain range occurrences; a collapse below 20 means the parser
+    // stopped reading one of the two spellings again.
+    let plan = per_doc
+        .iter()
+        .find(|(d, _)| *d == "MESHLET-VIRTUAL-GEOMETRY-PLAN.md")
+        .map(|(_, n)| *n)
+        .expect("invariant: the meshlet plan is in GATED_DOCS");
+    assert!(
+        plan >= 20,
+        "only {plan} range citations in the meshlet plan parsed a tail. That document is the one \
+         the end-of-range check was structurally unable to fire on before Rev 12 (34 of its range \
+         occurrences are written `:N~-M`), so it is floored on its own rather than inside a sum."
+    );
     // A floor, not a pin: the exact number moves with ordinary editing, and pinning it would make
     // every citation edit a test edit. Zero is the only value that means the check is dead.
     assert!(
         with_tail >= 30,
         "only {with_tail} range citations across GATED_DOCS parsed a range tail. The end-of-range \
          checks in check_anchor are reached only through `range_end`, so a collapse here means \
-         they have stopped running — which is exactly how they spent the whole of Rev 11 dead on \
-         the meshlet plan's 34 range citations."
+         they have stopped running — which is how they spent the whole of Rev 11 dead on the 34 \
+         waiver-first range occurrences in the meshlet plan (the 23 plain ones did reach them)."
     );
 }
 

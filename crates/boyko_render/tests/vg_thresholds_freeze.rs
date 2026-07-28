@@ -61,7 +61,7 @@ use std::path::PathBuf;
 /// Those two fields were stale through Rev 4, Rev 5 and Rev 7 — three revisions of a staleness
 /// marker going stale — because nothing checked them. After R0a the policy changes and this literal
 /// moves only by a dated amendment in the plan's §11.1, with the rig file updated in the same act.
-const THRESHOLDS_SHA256: &str = "1d51e6501b05f508adb4d293c2e2f9ec9aef7327a1c74949b60355f7aafbe872";
+const THRESHOLDS_SHA256: &str = "69a6e21293520ecaa46ecb04753e3a05add816f23bd86c81c8cbf24e50bd3313";
 
 /// Repo-relative path from this crate's manifest directory.
 const THRESHOLDS_REL: &str = "../../docs/VG-CAMPAIGN-THRESHOLDS.toml";
@@ -283,77 +283,14 @@ fn the_freeze_is_sensitive_to_a_single_changed_threshold_digit() {
     );
 }
 
-/// The highest revision number this file's own comment markers claim edited it.
-///
-/// Matches `Rev N` / `REV N` case-insensitively. `revision` does not match: the scan requires
-/// whitespace and then a digit immediately after `rev`.
-fn newest_rev_marker(text: &str) -> Option<u32> {
-    let lower = text.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
-    let mut best = None;
-    let mut i = 0usize;
-    while let Some(hit) = lower[i..].find("rev") {
-        let mut j = i + hit + 3;
-        // Require at least one space, then digits.
-        let space_start = j;
-        while j < bytes.len() && bytes[j] == b' ' {
-            j += 1;
-        }
-        if j > space_start {
-            let digits_start = j;
-            while j < bytes.len() && bytes[j].is_ascii_digit() {
-                j += 1;
-            }
-            if j > digits_start
-                && let Ok(n) = lower[digits_start..j].parse::<u32>()
-            {
-                best = Some(best.map_or(n, |b: u32| b.max(n)));
-            }
-        }
-        i = i + hit + 3;
-    }
-    best
-}
-
-/// The revision named by the `frozen_at_revision` field.
-fn frozen_at_revision(text: &str) -> u32 {
-    let line = text
-        .lines()
-        .find(|l| l.trim_start().starts_with("frozen_at_revision"))
-        .expect("invariant: the frozen file must carry frozen_at_revision");
-    newest_rev_marker(line).expect("frozen_at_revision must name a `Rev N`")
-}
-
-/// Binds the two staleness markers to something, which nothing did.
-///
-/// ⚠️ `schema_version` and `frozen_at_revision` exist so that an edit to this file cannot be
-/// silent. They went stale in Rev 4, Rev 5 and Rev 7 — a staleness marker going stale, three times
-/// — and each occurrence was caught by an adversarial reader rather than by a check. The
-/// symbol-reachability sweep cannot catch them either: they are in `PROVENANCE_KEYS`, exempted
-/// from the one class that would have noticed, and the exemption is correct on its own terms (the
-/// plan has no reason to cite them).
-///
-/// The binding that works without inventing a false red: this file's own edit discipline is that
-/// every content edit records itself as a `REV N` comment, so the **newest marker** and
-/// `frozen_at_revision` must name the same revision. A revision that does not touch this file moves
-/// neither, so it cannot red spuriously; a revision that edits the file must do both, in the same
-/// act that moves the digest above. The plan's revision number is deliberately NOT the reference —
-/// binding to it would red every time the plan advanced without this file changing, which is the
-/// normal case and would train the reader to re-stamp the field without thinking.
-#[test]
-fn the_newest_edit_marker_and_the_provenance_field_name_the_same_revision() {
-    let bytes = normalised_bytes();
-    let text = String::from_utf8(bytes).expect("the frozen file is UTF-8");
-
-    let newest = newest_rev_marker(&text).expect("the file must carry at least one `Rev N` marker");
-    let frozen = frozen_at_revision(&text);
-
-    assert_eq!(
-        frozen, newest,
-        "docs/VG-CAMPAIGN-THRESHOLDS.toml: frozen_at_revision names Rev {frozen} while the newest \
-         `REV N` comment marker in the file is Rev {newest}.\n\
-         If this file was edited, record the edit as a `# REV {newest} -- ...` marker AND bump \
-         frozen_at_revision and schema_version, all in the commit that moves THRESHOLDS_SHA256.\n\
-         If it was not edited, neither number should have moved."
-    );
-}
+// The provenance binding that used to live here (newest `REV N` marker vs `frozen_at_revision`)
+// moved to `tests/vg_symbol_reachability.rs` at Rev 13, and it moved because it belonged on TWO
+// files rather than one. Sited here it covered only the HASHED file -- which already carries the
+// digest above as a tripwire -- while `docs/VG-CAMPAIGN-CLAIM.toml`, the deliberately UNHASHED
+// file whose own text says its two provenance fields "are the only record that it moved at all",
+// had nothing pointed at it. That file was edited at Rev 12 and its fields stayed at Rev 10: the
+// fifth consecutive revision in which its staleness markers went stale, in the revision that
+// landed the binding meant to end exactly that -- aimed at the file that needed it least.
+//
+// One home, both files, one red control. See
+// `the_provenance_fields_name_the_revision_that_last_edited_the_file`.

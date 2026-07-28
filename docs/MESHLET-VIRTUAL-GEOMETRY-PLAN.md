@@ -1,6 +1,6 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 12** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 13** — **NOT APPROVED, and no code exists.** This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
@@ -584,9 +584,13 @@ The density estimate at the decision resolution is then
 **Indexed by camera path, and aggregated exactly once.** The census runs this per committed camera
 path (§5.7), so the quantity above is `D_est(p)` — one reading per path — while K1 is **one**
 decision. **Throughout this document the unqualified symbol `D_est` means the aggregate
-`min` over committed camera paths**, per `[k1].k1_path_aggregation`; §2's blast-radius row, §5.6's
-split table, §9 clause 1 and §9's outcome table inherit that definition and deliberately do not
-restate it. MIN because refutation is the campaign-**favourable** outcome and must therefore clear
+`min` over committed camera paths**, per `[k1].k1_path_aggregation`. Every text below that states a
+condition on `D_est` inherits that definition and deliberately does not restate it — and the
+inheriting texts are deliberately **not enumerated here**. ⚠️ Rev 12 did enumerate them, naming four
+and getting one wrong (§2 contains no occurrence of the symbol at all) while omitting seven others;
+a list of the texts obeying a rule is a second census to keep in step with the first, which is the
+failure this whole convention exists to avoid. The rule is stated once and holds everywhere.
+MIN because refutation is the campaign-**favourable** outcome and must therefore clear
 the bar on the weakest committed path rather than the strongest.
 
 ⚠️ **MIN's monotonicity cuts both ways and Rev 11 recorded only the favourable half.** From
@@ -594,9 +598,25 @@ the bar on the weakest committed path rather than the strongest.
 why MIN rather than MAX — but it opens the *omit-an-unflattering-path* lever, which is cheaper
 still, because an uncommitted path leaves no diff and produces no census row for §9.1's
 anti-cherry-pick argument to catch. Rev 11's frozen comment called MIN removal of "the cheapest
-remaining tuning lever"; it is not, and the superlative is withdrawn. What makes MIN sound is not
-the reduction but **the domain**: the committed set is pinned at R0b and asserted at R0d(d)
-(`[k1].committed_paths_rule`), so paths cannot be dropped after their readings are known.
+remaining tuning lever"; it is not, and the superlative is withdrawn.
+
+⚠️ **Rev 12 replaced that superlative with a second claim that is also false, and Rev 13 withdraws
+it rather than replacing it a third time.** It read: *"What makes MIN sound is not the reduction but
+the domain: the committed set is pinned at R0b and asserted at R0d(d), so paths cannot be dropped
+after their readings are known."* Enumerate R0b's five gate parts — (a0) `arrangement` not
+`PENDING`, (a) payload sha256 vs manifest pin, (b) decoded triangle count vs published count,
+(c) geometry slot + `gMeshMeta` row, (d) largest mesh registers — and **none reads the camera-path
+column**. Repoint or delete one asset's path id: payloads, counts, slots and allocation are all
+unchanged and all five stay green. R0d(d) *records* the enumeration digest in the same act as the
+run, with no earlier digest to compare against, so it cannot detect a change made before it. The
+modal **cannot** had no mechanism behind it in either named place.
+
+**What is true, and it is less:** R0d(d) makes an omission at *measurement* time visible — a
+committed path that produces no census row reds the rung. The *choice* of which paths are committed
+is unbounded and unasserted, §9.1 says so, and MIN's soundness rests on that choice being made
+before the readings exist, which is a matter of party separation and commit ordering rather than of
+any gate in R0. Stating it as a prevention was the third volunteered positive claim in this
+paragraph's history and the third to be refuted.
 
 — **tight**, unlike (2). ⚠️ **Rev 3 called it "unbounded above" and that was false in two ways at
 once. Both were caught by arithmetic on this page, and both matter to the kill's soundness.**
@@ -1124,15 +1144,25 @@ separate processes** under `[census].cross_run_gate` — **the sha256 of the rea
 (`visible_tri_per_covered_pixel` and `submitted_per_covered_pixel` — the saturating raw reading and
 the cull-efficiency reading, neither of which adjudicates anything, and the modal bucket alongside
 them under `[k1].modal_bucket_role`) are produced at **every** ladder rung, so the
-resolution-dependence is on the page rather than in the choice of one row; (c) the **non-degeneracy precondition** holds at the decision resolution and at the top rung —
+resolution-dependence is on the page rather than in the choice of one row; (c) the **non-degeneracy precondition** holds **for every committed camera path**, at the decision resolution and at the top rung —
 covered pixels at or above `[k1_instrument].min_covered_pixels` and distinct visible triangles at or
 above `[k1_instrument].min_visible_tris` — because `D_est` and the convergence check are both
 divisions and a sentinel-only readback proves nothing in either direction. ⚠️ This precondition was
 stated in §5.7 and frozen in the companion file from Rev 4 onward and appeared in **no gate part of
 either rung that produces the numbers**; Rev 8 lands it here and at R0c.
+⚠️ **The path quantifier is Rev 13's, and its absence made three codeable texts disagree.** Rev 12
+re-indexed `k1_decision_rule` over paths — *"non-degeneracy is per path and EVERY path must clear
+it"* — and left this part scalar, applying the symbol-carries-the-aggregation technique to `D_est`
+and not to non-degeneracy. Substitute `P = {A = (1.5e6 px, 2.4e6 tri), B = (800 px, 600 tri)}`
+against the 1024/1024 floors: R0d's gate read scalar is **green** (the aggregate frame is far above
+both floors), `k1_decision_rule` says **UNDECIDED, escalate**, and §9's outcome table says **K1 NOT
+ADJUDICATED**. One census, three answers — the Rev 8 shape the frozen file records at its own
+`k1_decision_rule`, reproduced by the re-indexing meant to end it. With the quantifier, B reds (c)
+and the three agree.
 **(d) the census covered the whole aggregation domain** — exactly one census row per camera path
-enumerated in `assets/vg_corpus/CORPUS.toml`, with the sha256 of that enumeration recorded beside
-the readback hashes (`[k1].committed_paths_rule`). ⚠️ Rev 11 froze `min` over committed paths as
+enumerated in `assets/vg_corpus/CORPUS.toml` — stated as a **set equality** between the census rows
+and the enumeration, so a missing row and an *extra* one both red — with the sha256 of that
+enumeration recorded beside the readback hashes (`[k1].committed_paths_rule`). ⚠️ Rev 11 froze `min` over committed paths as
 K1's aggregation and left the domain asserted by nothing, which is the same shape as a threshold
 with no reader: under MIN the cheap lever is not adding a flattering path but **omitting an
 unflattering one**, and an omitted path leaves no diff and no census row. This part is what makes
@@ -1231,22 +1261,45 @@ renumbering is to re-derive, not to re-word.
   honest reading of what (a) tests — the driver-side nondeterminism `[census].cross_run_gate`'s own
   comment flags as an untested hypothesis at 2160p.
 * **(b)** — drop the ladder to its decision row only → (b) reds.
-* **(c) — the non-degeneracy precondition.** Render the corpus scene with the camera pulled back far
-  enough that covered pixels at the decision resolution fall below
-  `[k1_instrument].min_covered_pixels`, or point it at empty space so `visible_tris` at the top rung
-  falls below `[k1_instrument].min_visible_tris` → (c) reds. The point of the mutation is that the
-  rung must refuse to adjudicate a frame it cannot adjudicate, rather than dividing by it: on a
-  sentinel-only readback the convergence check reads `0 ≤ 0` (converged) and `D_est = 0`, which is
-  how an empty frame came to satisfy K1's fire condition in an earlier revision.
-* **(d) — the aggregation domain.** Delete one camera path from `CORPUS.toml`'s enumeration, or skip
-  it in the run, and leave everything else alone → the census yields one row fewer than the
-  enumeration → (d) reds. **It isolates**, which is the property the other three make easy to get
-  wrong: the drop is present identically in all three processes, so (a)'s agreement predicate stays
-  true; it removes no ladder rung, so (b) stays true; and the surviving paths are as non-degenerate
-  as they were, so (c) stays true. (d) is the only part that moves — which is what a mutation
-  targeting one part must show, and is why the mutation is stated in terms of the *enumeration*
-  rather than in terms of the path's density: a mutation phrased as "drop the weakest path" would
-  also move `D_est` and could not distinguish (d) from the rule it feeds.
+* **(c) — the non-degeneracy precondition, and it takes TWO mutations because (c) has two
+  quantifiers.** *Per frame:* render the corpus scene with the camera pulled back far enough that
+  covered pixels at the decision resolution fall below `[k1_instrument].min_covered_pixels`, or
+  point it at empty space so `visible_tris` at the top rung falls below
+  `[k1_instrument].min_visible_tris` → (c) reds. The point is that the rung must refuse to
+  adjudicate a frame it cannot adjudicate, rather than dividing by it: on a sentinel-only readback
+  the convergence check reads `0 ≤ 0` (converged) and `D_est = 0`, which is how an empty frame came
+  to satisfy K1's fire condition in an earlier revision. *Per path:* leave every committed path
+  alone but add one framing a bare corner of the scene, degenerate on its own and invisible in any
+  aggregate → (c) reds **only if the path quantifier is implemented**, and passes without it. That
+  second mutation is what distinguishes the Rev 13 wording from Rev 12's, and it is stated
+  separately because a mutation that probes a different quantifier is a different mutation.
+* **(d) — the aggregation domain.** Skip one committed path in the run — leave `CORPUS.toml`
+  untouched — → the row set is a proper subset of the enumeration → (d) reds. The mirror also
+  reds: censusing a path that is *not* enumerated makes the row set a proper superset, which is
+  cherry-picking from the other side and which a per-path "exactly one row" universal would have
+  passed. **It isolates:** the skip is present identically in all three processes, so (a)'s
+  agreement predicate stays true; it removes no ladder rung, so (b) stays true; and the paths that
+  did run are as non-degenerate as they were, so (c) stays true. (d) is the only part that moves.
+  The mutation is stated in terms of the *enumeration* rather than the path's density on purpose:
+  "drop the weakest path" would also move `D_est` and could not distinguish (d) from the rule it
+  feeds.
+
+  > ⚠️ **Rev 12 wrote this mutation as a disjunction and its first arm does not fire.** *"Delete one
+  > camera path from `CORPUS.toml`'s enumeration, **or** skip it in the run … → the census yields
+  > one row fewer than the enumeration."* Both sides of (d) read that same file, so deleting from
+  > it moves both: if the run iterates the enumeration, rows = enum = N−1 and (d) is **green**; if
+  > the run iterates the §5.7 test constants, rows = N against an enumeration of N−1 — one row
+  > **more**, not fewer, and Rev 12's per-path universal (`∀p ∈ enum: |rows(p)| = 1`) was *satisfied*
+  > by the extra row, so **green** again. Under no reading did the stated consequence occur, and its
+  > sign was inverted. That is why (d) is now a **set equality** and why the arm is deleted rather
+  > than reworded. **A mutation with N disjuncts is N mutations** — each derived separately, each
+  > with the sign of its discrepancy stated, and a disjunct that does not fire is removed. The `or`
+  > is exactly what let an underived arm ride along past the obligation that every volunteered gate
+  > clause ship a firing mutation.
+  >
+  > What (d) still cannot see is an edit to the enumeration made *before* the run, because no
+  > earlier digest exists to compare against. That is not a gap this part can close and §9.1 records
+  > it: (d) bounds the measurement, not the choice.
 * **The histogram residual has no mutation, because it is no longer a gate.** It is produced and
   written into `docs/VG-R0-DENSITY-CENSUS.md` (see the demotion above). A mutation list entry for it
   would re-arm exactly what the demotion removed.
@@ -1548,14 +1601,16 @@ than by anything mechanical.
 
 **These anchors are machine-checked in part as of Rev 9, and the part matters more than the fact.**
 ⚠️ The printed denominator is also slightly generous: the `~` waiver is appended by textual match,
-so a `:N` that is not a citation at all can absorb one, which inflates "201 anchors" rather than the
-stale count. Read the 201 as an upper bound on what is bound, never as a count of verified claims.
-The document is in `internal_docs_anchors.rs`'s `GATED_DOCS` and the gate is green: 123 path
-mentions, 0 dead; 201 anchors, 0 stale. ⚠️ But it prints its own decomposition and the decomposition
-is the honest reading — **102 of the 201 anchors carry the `~` waiver**, which asserts only that the
-line number exists inside the cited file. `check_anchor` returns at the waiver branch *before* the
-shape test, so a waived anchor that names the wrong line still passes. Half this appendix is
-therefore bounds-checked, not verified.
+so a `:N` that is not a citation at all can absorb one, which inflates the anchor total rather than
+the stale count. Read that total as an upper bound on what is bound, never as a count of verified
+claims. The document is in `internal_docs_anchors.rs`'s `GATED_DOCS` and the gate is green: zero
+dead paths, zero stale anchors. ⚠️ **The counts themselves are printed by the run and are
+deliberately not restated here** — Rev 12 restated them (123 / 201 / 102) thirteen lines above its
+own sentence saying they were not restated, and both numbers had already moved by the next commit.
+What matters is the shape, which does not move: **the majority of this appendix's anchors carry the
+`~` waiver**, which asserts only that the line number exists inside the cited file. `check_anchor`
+returns at the waiver branch *before* the shape test, so a waived anchor that names the wrong line
+still passes. Most of this appendix is therefore bounds-checked, not verified.
 
 That is not the gate under-performing: it models an anchor as pointing at a **definition**, and this
 document cites **evidence lines** — a usage flag, an enum variant, a comment asserting the very fact
@@ -1681,10 +1736,19 @@ questions had no field, and one of those was the disposition of the outcome §9 
 likely one. A preamble asserting completeness it does not have is the highest-risk line in a
 document; the questions are now split by whether they block anything.
 ⚠️ **Rev 12 removes the question NUMBERS from that sentence rather than correcting them.** It named
-"Q2, Q4 and Q6" — Rev 7's indices — while the list below had since been renumbered underneath it, so
-the sentence pointed at a Q6 that no longer exists and at a Q2 that now *does* have a field, exactly
+three Rev 7 indices while the list below had since been renumbered underneath it, so the sentence
+pointed at one index that no longer exists and at another that now *does* have a field, exactly
 inverting its own point. **A renumbering is a deletion event**, and the citation that survives one
-names the question rather than its index. Every cross-reference into this section now does.
+names the question rather than its index.
+
+⚠️ **Rev 12 then wrote "Every cross-reference into this section now does", and that universal was
+false on both sides of its own repair.** Three dead indices survived in this very paragraph — it
+*quoted* them, which this document's own rule forbids: a dead reference is **described, never
+quoted**, because the scanner and the next reader alike cannot tell a live citation from a
+historical one, and quoting one re-creates it. A fourth survived in
+[`VG-CAMPAIGN-CLAIM.toml`](VG-CAMPAIGN-CLAIM.toml), sixteen lines below the note announcing the
+removal. N−1 of N, twice, inside the repair for N−1 of N. Rev 13 describes them instead, and states
+no universal — the enforceable claim is the rule above, not a census of the texts obeying it.
 
 **Blocking — each has a `PENDING` field and a `[gating]` row.** The rows are
 `[gating].r0a_blocked_by`, `[gating].r0b_blocked_by`, `[gating].r0c_blocked_by`,
@@ -1785,6 +1849,29 @@ replaces.** A repair of a stated fact is executed
 as a grep over every text stating it, all N fixed in one act; and a repair may subtract freely, but
 every positive claim it volunteers ships with its own substitution — and, if it is a gate clause,
 its own isolating red mutation.
+
+**Rev 13 adds two amendments, and it adds them because Rev 12 violated both obligations inside the
+commit that wrote the rule.** The rule's evidence base is now eight independent confirmations and
+no counterexample: every Rev 12 repair that only *subtracted* survived adversarial re-derivation
+(the precedence demotion, the two superlative withdrawals, the §13 index removals, §14.1 taking sole
+ownership of the orphan count), and **every** finding that survived attached to a *volunteered*
+claim. The rule predicted its own residual defect set. What it did not cover:
+
+1. **A mutation with N disjuncts is N mutations.** Each is derived separately, the sign of the
+   discrepancy is stated, and a disjunct that does not fire is deleted rather than carried. R0d(d)
+   is the demonstration: an `or` smuggled an underived arm past the obligation, and that arm was
+   green under both readings with its stated consequence inverted.
+2. **A repair that changes a measured INPUT must re-derive every number that is a function of that
+   input, not only the sentence stating the fact.** Un-waiving one anchor in `SYSTEMS.md` restated
+   nothing, so obligation (a)'s grep could not reach it — and it falsified four derived counts in a
+   single bullet of `internal_docs_anchors.rs`, in the file that denounces exactly this defect in
+   its own module doc.
+
+⚠️ **And the family moved.** It has left this document's prose and gone into the **justification
+text of the repairs** — the `//!` and `///` comments in the gate files, and the tests' own stated
+premises. Three of Rev 12's five blocking findings were defects there rather than here. The plan has
+a reachability gate, an anchor gate and a hash gate pointed at it; **the gates have nothing pointed
+at them but a reader.** That asymmetry is now the campaign's largest unmechanised surface.
 
 Repairing R2's row is out of this document's scope
 (§0 binds R1–R8 to the research document), so it is named as the first thing the R1 author

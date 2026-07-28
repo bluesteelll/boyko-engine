@@ -871,11 +871,18 @@ fn gating_rows_with_payload(text: &str) -> Vec<String> {
         if !in_gating || t.starts_with('#') {
             continue;
         }
+        // ⚠️ `strip_comment` FIRST. Rev 12's version trimmed only brackets and whitespace, so
+        // `r1_blocked_by = []  # answered` left `# answered` behind and read as a PAYLOAD: the one
+        // row blocking R1 on an unanswered owner VALUES call could be emptied with the whole suite
+        // green, because class 4 sees the comment-stripped `[]` and reports nothing on an empty
+        // row by design. The sibling `parse_fields` had always stripped comments; this predicate
+        // was written beside it and did not. Inline comments on value lines are live style in
+        // these files, so the input is not hypothetical.
         if let Some((key, value)) = t.split_once('=')
             && key.trim().ends_with("_blocked_by")
-            && !value
+            && !strip_comment(value)
                 .trim()
-                .trim_matches(|c: char| c == '[' || c == ']' || c.is_whitespace())
+                .trim_matches(|c: char| c == '[' || c == ']' || c == '"' || c.is_whitespace())
                 .is_empty()
         {
             out.push(key.trim().to_string());
@@ -975,4 +982,194 @@ fn the_sweep_reports_a_gating_payload_that_cannot_name_a_field() {
         violations.iter().any(|v| v.contains("arrangement")),
         "a dot-less [gating] payload must be reported as unresolvable. got={violations:?}"
     );
+}
+
+/// Provenance keys whose own line must be EXCLUDED when scanning for edit markers.
+///
+/// ⚠️ This exclusion is the whole binding. Rev 12's first version scanned the entire file, and
+/// `frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 12"` **contains a marker**, so
+/// `newest_marker >= frozen` held by construction and `assert_eq!` reduced to `newest <= frozen` —
+/// bumping the field with no edit could not fire. A binding whose two sides read the same bytes is
+/// not a binding.
+const PROVENANCE_LINE_KEYS: [&str; 2] = ["frozen_at_revision", "authored_at_revision"];
+
+/// The highest revision number a file's own `REV N` / `Rev N` comment markers claim edited it,
+/// ignoring the provenance lines themselves.
+///
+/// Matches case-insensitively; `revision` does not match, because whitespace and then a digit are
+/// required immediately after `rev`.
+fn newest_rev_marker(text: &str, skip_provenance_lines: bool) -> Option<u32> {
+    let mut best: Option<u32> = None;
+    for line in text.lines() {
+        let t = line.trim_start();
+        if skip_provenance_lines && PROVENANCE_LINE_KEYS.iter().any(|k| t.starts_with(k)) {
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+        let bytes = lower.as_bytes();
+        let mut i = 0usize;
+        while let Some(hit) = lower[i..].find("rev") {
+            let mut j = i + hit + 3;
+            let space_start = j;
+            while j < bytes.len() && bytes[j] == b' ' {
+                j += 1;
+            }
+            if j > space_start {
+                let digits = j;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > digits
+                    && let Ok(n) = lower[digits..j].parse::<u32>()
+                {
+                    best = Some(best.map_or(n, |b: u32| b.max(n)));
+                }
+            }
+            i = i + hit + 3;
+        }
+    }
+    best
+}
+
+/// The revision named by `key`'s value line.
+fn provenance_revision(text: &str, key: &str) -> Option<u32> {
+    let line = text
+        .lines()
+        .find(|l| l.trim_start().starts_with(key))?;
+    newest_rev_marker(line, false)
+}
+
+/// Binds each frozen file's staleness markers to something, which nothing did.
+///
+/// ⚠️ `schema_version` and `authored_at_revision` / `frozen_at_revision` exist so that an edit
+/// cannot be silent. They went stale in Rev 4, Rev 5, Rev 7 — and, in `VG-CAMPAIGN-CLAIM.toml`,
+/// again at Rev 12, which is the revision that landed the binding meant to stop it. That binding
+/// was pointed at the HASHED file, which already had the digest tripwire; the UNHASHED one, whose
+/// own text says these two fields "are the only record that it moved at all", had nothing.
+///
+/// The binding that works without manufacturing a false red is internal to each file: its stated
+/// edit discipline is that every content edit records itself as a `REV N` comment, so the newest
+/// marker and the provenance field must name the same revision. A revision that does not touch a
+/// file moves neither, so it cannot red spuriously; a revision that edits one must do both. The
+/// plan's own revision number is deliberately NOT the reference — binding to it would red every
+/// time the plan advanced without these files changing, which is the normal case, and would train
+/// the reader to re-stamp the field without reading it.
+#[test]
+fn the_provenance_fields_name_the_revision_that_last_edited_the_file() {
+    for (path, key) in [
+        ("docs/VG-CAMPAIGN-THRESHOLDS.toml", "frozen_at_revision"),
+        ("docs/VG-CAMPAIGN-CLAIM.toml", "authored_at_revision"),
+    ] {
+        let text = read(path);
+        let newest = newest_rev_marker(&text, true)
+            .unwrap_or_else(|| panic!("{path}: no `REV N` edit marker at all"));
+        let stamped = provenance_revision(&text, key)
+            .unwrap_or_else(|| panic!("{path}: `{key}` names no `Rev N`"));
+        assert_eq!(
+            stamped, newest,
+            "{path}: `{key}` names Rev {stamped} while the newest `REV N` edit marker in the file \
+             is Rev {newest}.\n\
+             If the file was edited, record the edit as a `# REV {newest} -- ...` marker AND bump \
+             `{key}` and `schema_version`, in the same commit.\n\
+             If it was not edited, neither number should have moved."
+        );
+    }
+}
+
+/// Sensitivity control: both directions of the binding must fire.
+///
+/// The live run above is green, so it exercises neither failure. Rev 12's version of this binding
+/// shipped with no control at all and was one-sided in a way no green run could reveal — it
+/// scanned its own provenance line, so raising the field alone could never disagree with the
+/// marker. Both mutations are driven here, on in-memory copies.
+#[test]
+fn the_provenance_binding_fires_in_both_directions() {
+    let text = read("docs/VG-CAMPAIGN-CLAIM.toml");
+    let key = "authored_at_revision";
+    let base_marker = newest_rev_marker(&text, true).expect("invariant: the file carries a marker");
+    let base_field = provenance_revision(&text, key).expect("invariant: the field names a revision");
+    assert_eq!(
+        base_field, base_marker,
+        "invariant: the live file must be consistent for the mutations below to mean anything"
+    );
+
+    // (1) Content edited, provenance NOT bumped: add a marker for a later revision.
+    let content_edited: String = text
+        .split_inclusive('\n')
+        .flat_map(|l| {
+            if l.trim_start().starts_with("[gating]") {
+                vec![format!("# REV {} -- a content edit\n", base_marker + 1), l.to_string()]
+            } else {
+                vec![l.to_string()]
+            }
+        })
+        .collect();
+    assert_ne!(content_edited, text, "invariant: the mutation must change the file");
+    assert_eq!(
+        newest_rev_marker(&content_edited, true),
+        Some(base_marker + 1),
+        "an added edit marker must move the newest marker"
+    );
+    assert_ne!(
+        provenance_revision(&content_edited, key),
+        newest_rev_marker(&content_edited, true),
+        "an edit recorded but not stamped must disagree — this is the arm that catches a silent \
+         content edit"
+    );
+
+    // (2) Provenance bumped with NO content edit. This is the arm Rev 12's version could not
+    // catch, because it scanned the provenance line itself and so moved BOTH sides at once.
+    let field_only: String = text
+        .split_inclusive('\n')
+        .map(|l| {
+            if l.trim_start().starts_with(key) {
+                format!("{key} = \"docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev {}\"\n", base_marker + 7)
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    assert_ne!(field_only, text, "invariant: the mutation must change the file");
+    assert_eq!(
+        newest_rev_marker(&field_only, true),
+        Some(base_marker),
+        "the newest MARKER must not move when only the provenance field is re-stamped — if this \
+         fails, the scan is reading the provenance line again and the binding is one-sided"
+    );
+    assert_ne!(
+        provenance_revision(&field_only, key),
+        newest_rev_marker(&field_only, true),
+        "a re-stamp with no edit must disagree"
+    );
+}
+
+/// The `[gating]` payload pin must not be defeatable by a comment.
+///
+/// ⚠️ Rev 12 shipped the pin with a predicate that trimmed brackets and whitespace but not
+/// comments, so `r1_blocked_by = []  # answered` left `# answered` behind and read as a payload.
+/// R1 is blocked by exactly one owner VALUES call; that row could be emptied with every test in
+/// this file green, because class 4 reports nothing on an empty row **by design** and the pin was
+/// the only thing watching. Both degenerate spellings are driven here.
+#[test]
+fn a_comment_cannot_disguise_an_emptied_gating_row() {
+    let claim = read("docs/VG-CAMPAIGN-CLAIM.toml");
+    assert!(
+        gating_rows_with_payload(&claim).contains(&"r1_blocked_by".to_string()),
+        "invariant: R1 must be blocked by something for this control to mean anything"
+    );
+
+    for (label, replacement) in [
+        ("trailing comment", "r1_blocked_by = []  # answered\n"),
+        ("comment with a dotted path inside it", "r1_blocked_by = []  # was k1_outcome.undecided_disposition\n"),
+        ("quoted empty string", "r1_blocked_by = [\"\"]\n"),
+    ] {
+        let emptied = rewrite_gating_row(&claim, "r1_blocked_by", replacement);
+        assert_ne!(emptied, claim, "invariant: the {label} mutation must change the file");
+        assert!(
+            !gating_rows_with_payload(&emptied).contains(&"r1_blocked_by".to_string()),
+            "the pin must see through a {label}: `{}` still read as a payload, so the row that \
+             blocks R1 could be emptied with the suite green",
+            replacement.trim()
+        );
+    }
 }

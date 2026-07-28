@@ -31,8 +31,8 @@
 # and Rev 7 -- the third occurrence caught by an adversarial pass rather than by the fields
 # themselves, in the very revision whose slogan was about fixes that do not land. They are updated
 # here in the same act as the edit, which is the whole of their job.
-schema_version = 8
-frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 12"
+schema_version = 9
+frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 13"
 frozen_date = "2026-07-28"
 
 # THE EDIT DISCIPLINE, stated because Rev 4 and Rev 5 both edited this file in place while its
@@ -317,7 +317,15 @@ k1_path_aggregation = "min_over_committed_camera_paths"
 # (every committed path was censused, and an omission is visible), not the CHOICE (which paths are
 # committed is settled one rung earlier at R0b). The residual is enumerated in plan section 9.1
 # beside the covered-fraction floor, which is the same unsolved axis reached from the domain side.
-committed_paths_rule = "committed camera paths are enumerated in assets/vg_corpus/CORPUS.toml at R0b; R0d(d) asserts exactly one census row per enumerated path and records the sha256 of the enumeration beside the readback hashes; R0 does not assert the set is representative"
+# REV 13 -- SET EQUALITY, not a per-path universal, and the recorded digest is EVIDENCE not an
+# assertion. Rev 12 wrote "exactly one census row per enumerated path", which is
+# `forall p in enum: |rows(p)| = 1`; that predicate is SATISFIED by a census that also emits rows
+# for paths NOT in the enumeration, so cherry-picking from the additive side passed it. Set
+# equality reds in both directions. And nothing compares the recorded enumeration sha256 against an
+# earlier one, because no earlier one exists at R0d -- it is recorded so a later rung can, which is
+# the honest status; calling it an assertion would make it the fourth field in this file frozen
+# without a reader.
+committed_paths_rule = "committed camera paths are enumerated in assets/vg_corpus/CORPUS.toml at R0b; R0d(d) asserts SET EQUALITY between the census row set and the enumeration (a missing row and an extra row both red) and RECORDS the sha256 of the enumeration beside the readback hashes as evidence, not as an assertion; R0 does not assert the set is representative, and (d) cannot see an edit to the enumeration made before the run"
 
 # ⚠️ REV 12 -- THE RULE IS NOW INDEXED BY CAMERA PATH, because it was scalar while the census it
 # consumes is per-path. Both documents nominate this string as the only live rule (see the note
