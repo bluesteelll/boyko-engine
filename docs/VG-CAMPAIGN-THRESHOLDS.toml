@@ -399,6 +399,33 @@ machine_rederived_reason = "no_engine_registered"
 # the set is therefore checked against something, and no value switches the branch off.
 non_rederived_reasons_require_engine_present = true
 
+# REV 10 -- `reason` IS A SCALAR AND MORE THAN ONE VALUE CAN BE TRUE AT ONCE. Section 11 measures
+# this box as BOTH "no installation present" AND "a UE5 install plus project plus DDC does not fit
+# on D: today". Two values hold, the field takes one, and which one is written selects which
+# assertion runs -- one green, three red. A gate whose verdict is chosen by the author's phrasing
+# is the defect this table was added to remove, one level up.
+#
+# The precedence is therefore frozen, and it is ordered by what the machine can settle: the
+# re-derivable cause outranks the others, because it is the only one an assertion can confirm
+# against the documented authorities rather than take on trust. Ties below it are impossible --
+# the remaining three are distinguished by which prerequisite the operator could not supply.
+reason_precedence = ["no_engine_registered", "insufficient_disk", "no_importable_project", "no_capture_protocol"]
+
+# ⚠️ THE ONE INPUT THIS RULE CANNOT SERVE, recorded rather than discovered later. The plan's R0a
+# already states that a hand-placed engine outside both documented authorities is invisible to
+# them. Combine that with short disk: the honest `insufficient_disk` reds (the authorities report
+# no engine, so the require-engine-present clause fails), and the only value that greens is
+# `no_engine_registered`, which is FALSE of that box. The rung then forces a choice between a red
+# gate and a false record.
+#
+# This is the intended cost of a bounded search rather than an unbounded volume walk -- Rev 4's
+# "enumerate fixed volumes" was retracted for being untestable -- but it is a cannot-go-green on a
+# real configuration and naming it is the whole discipline. The disposition is that R0a reds and
+# the operator registers the engine with one of the authorities before re-running. A search that
+# admits what it cannot see is stronger than one that claims to see everything; a search that also
+# admits what it MISJUDGES is what this line adds.
+hand_placed_engine_plus_short_disk_reds = true
+
 # ---------------------------------------------------------------------------------------------
 # [hash_assertion] — where this file's sha256 is actually checked.
 #

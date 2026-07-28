@@ -728,7 +728,15 @@ availability of, and what §14's rung would need. The operator must supply, befo
 3. a capture protocol — `stat GPU`, Unreal Insights, or RenderDoc — producing per-pass timings, with
    the same clock-pinning discipline §7 imposes on our own harness.
 
-**If any of the three cannot be supplied, K2 fires**, and the disposition is not "measure something
+⚠️ **Four causes, not three, and the frozen file is the authority on the count.** Disk headroom is
+listed above as a qualifier on prerequisite 1, but it fails independently of it — an engine can be
+installed and registered while the volume cannot hold a project plus its derived-data cache, which
+is exactly what §11 measures. `[k2_probe].reason_values` therefore enumerates it separately, and
+R0a's gate binds `reason` to that four-value set. Where this section says "three" it is counting
+prerequisites; where the frozen file says four it is counting causes, and the gate follows the
+frozen file.
+
+**If any of them cannot be supplied, K2 fires**, and the disposition is not "measure something
 else": it is a **scope restatement** the owner makes consciously (§13 Q1). The whole falsifiability
 argument for this campaign rests on this rung, which is why it runs first and why R0a's gate is
 mechanical rather than a paragraph.
@@ -1305,18 +1313,31 @@ headline was false as written. Rather than a headline and a retraction, the limi
   density whose firing condition is demonstrably not precluded by R0b's own high-poly corpus gate —
   an unsolved design problem, recorded as unsolved
   (`[k1].k1_fire_instrument_status`), and out of R0's scope until someone solves it.
-* **K2's gate covers one of its three causes.** §6.2 defines K2 as firing if *any* of three
-  prerequisites fails — no install, no importable project, no capture protocol — while R0a's
-  negative re-derivation asserts only that no engine is registered with the documented authorities.
-  A legitimate `achievable = false` caused by disk headroom or by the absence of a capture protocol
-  is recorded by the rung and is **not** machine-re-derived. §11 measures disk as the most likely
-  cause, so this is the common case, not the corner.
+* **K2's four causes are all checked, but only one is re-derived, and one configuration cannot go
+  green.** ⚠️ Rev 9 changed this and Rev 8's wording survived it, so the bullet said the opposite of
+  the gate beneath it. `[k2_probe].reason_values` enumerates **four** causes — no engine, short
+  disk, no importable project, no capture protocol; §6.2's "three prerequisites" counts disk as part
+  of the install, and the two counts are reconciled there. Every value is asserted against
+  something: the one named by `machine_rederived_reason` is confirmed against the documented
+  authorities, and the other three must be contradicted by those authorities reporting an engine
+  IS present, since all three presuppose an install. So "recorded but not re-derived" is now false —
+  a disk-caused negative is checked, just not by the same instrument.
+  Two limits, both named in `[k2_probe]` rather than left to be found: more than one cause can hold
+  at once (§11 measures this box as no-engine **and** short-disk simultaneously), so
+  `reason_precedence` freezes which one is recorded; and a hand-placed engine invisible to both
+  authorities, combined with short disk, **cannot go green**
+  (`[k2_probe].hand_placed_engine_plus_short_disk_reds`) — the honest value reds and the only
+  green value is false. That is the price of a bounded search rather than the unbounded volume walk
+  Rev 4 retracted, and the disposition is that R0a reds until the engine is registered.
 * **The census's cross-rung histogram shift is measured, not gated** (§8 R0d). It is not
   interpretable near the one-pixel censoring floor — the micro-polygon regime the census exists for
   — so gating on it would red hardest exactly where the campaign's premise is most strongly
   confirmed.
 * **No comparative claim is evaluated, decided or pre-registered.** There is no ONE gate at R0
-  (§14).
+  (§14). ⚠️ And the deferral leaves **five downstream gate rows orphaned**: the research ladder gives
+  R2 through R5 gates that read *"decidable by R0's floor"*, and the floor now arrives at R6
+  (§14.1). R0 does not fix them and cannot — they are in another document — so they are the R1
+  author's first inherited problem.
 * **This document's `file.rs:N` anchors are machine-checked only in part** (§12), and its citations of the
   two frozen files' field names **are** (`tests/vg_symbol_reachability.rs`). Those are different
   guarantees and only the second is mechanical.
@@ -1609,9 +1630,20 @@ decidability floor is a *resolvable delta*, the frozen table named our side's de
 **armed paired delta**, and a delta needs two configurations to sit between. R0 lands no meshlet, no
 cluster and no LOD.
 
-Deferring costs the campaign nothing, because pre-registration is **cheaper and stronger** there: at
-that rung the arm, the denominator and the floor are all defined in one place, so the claim is
-written against a named measurand instead of a placeholder. And the thing that actually carries the
+⚠️ **Rev 10 names the rung and withdraws "deferring costs the campaign nothing", which was false.**
+Against the research ladder this document is bound to (§0), "the first rung that lands an arm"
+resolves uniquely to **R6** — R5 is dark infra with the `Option` staying `None`, R6 is where the
+meshlet cull is armed. So the floor arrives at R6, and the research ladder gives **R2** a gate row
+reading *"measured Δ on R0 corpus, decidable by R0's floor"*. R2, R2b, R3, R4 and R5 therefore each
+carry a gate citing a measurand that will not exist until R6 — **five orphaned gate rows**, created
+by the deferral and recorded here rather than discovered at R2.
+
+What deferring genuinely buys is unchanged and is still the right trade: at R6 the arm, the
+denominator and the floor are defined in one place, so the claim is written against a named
+measurand instead of a placeholder. What it costs is that the five rungs between must either state
+their own gate or state that they have none. Repairing their rows is out of this document's scope
+(§0 binds R1–R8 to the research document), so it is named as the first thing the R1 author
+inherits. And the thing that actually carries the
 P0's weight — party separation, since §13's owner calls are not made by whoever runs the harness —
 is unchanged by moving it later.
 
@@ -1647,6 +1679,26 @@ is unchanged by moving it later.
 * **The ordering rule**, attached per mode to **whichever rung measures the floor for that mode**,
   with the claim pinned into that rung's own MEASURED-literal commit so the comparing rung compares
   against something frozen in the same act as the measurement.
+
+### 14.2b K3 — the kill this apparatus carries, named because two texts say it moved here
+
+⚠️ **§0.2 and §9 both state that K3 "moved to §14", and through Rev 9 the string `K3` appeared
+nowhere in this section.** A kill said to have been relocated to a section that does not name it has
+not been relocated; it has been dropped with a forwarding address.
+
+**K3 — the undecidable harness.** The instrument cannot resolve the frozen claim. Two outcomes,
+which must not be conflated: **(3a) the instrument misbehaves** — the null control is over budget, a
+pass sits at the lattice, the cross-session spread is out of band. The ladder does not proceed until
+the instrument is fixed, and nothing is learned about the campaign either way. **(3b) the instrument
+works and the answer is no** — the inequality reds because the floor is real, measured, and larger
+than the claim. The instrument is not broken, so fixing it is not the move: the owner either lowers
+the claim to something this pair of instruments can resolve, which may make the campaign not worth
+running, or invests in a better instrument. That is an owner VALUES call and it is the outcome the
+whole decidability apparatus exists to surface early.
+
+K3 is **not** an R0 criterion (§9): R0 builds no harness and measures no delta, so there is nothing
+at that rung for it to be true or false about. It becomes live at §14.1's rung, together with
+everything else here.
 
 ### 14.3 What §7 already settles, and it is binding here
 

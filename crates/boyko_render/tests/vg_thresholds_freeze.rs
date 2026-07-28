@@ -46,8 +46,10 @@
 
 use std::path::PathBuf;
 
-/// The sha256 of `docs/VG-CAMPAIGN-THRESHOLDS.toml` with `\r\n` normalised to `\n`, recorded at
-/// Rev 8.
+/// The sha256 of `docs/VG-CAMPAIGN-THRESHOLDS.toml` with `\r\n` normalised to `\n`, as of the revision the frozen file itself
+/// records. ⚠️ This doc named a revision directly and drifted from the file's own
+/// `frozen_at_revision` within one revision — an exhaustive disjunction in which both branches
+/// are defects. A second copy of a version number is a second thing to go stale.
 ///
 /// **This is the authoring-time baseline, not yet the campaign freeze.** The frozen file's own
 /// `freeze_begins_at` says the freeze begins when R0a records this hash into
@@ -59,7 +61,7 @@ use std::path::PathBuf;
 /// Those two fields were stale through Rev 4, Rev 5 and Rev 7 — three revisions of a staleness
 /// marker going stale — because nothing checked them. After R0a the policy changes and this literal
 /// moves only by a dated amendment in the plan's §11.1, with the rig file updated in the same act.
-const THRESHOLDS_SHA256: &str = "4dae0cf9ceb6a44dbaf2032bf5d75c53913ff832d4d5f382770a0482ca82e451";
+const THRESHOLDS_SHA256: &str = "8c5c24315bfe1b32ead4143dc8e9ef58597a52761e4f75682942ce433836abef";
 
 /// Repo-relative path from this crate's manifest directory.
 const THRESHOLDS_REL: &str = "../../docs/VG-CAMPAIGN-THRESHOLDS.toml";
