@@ -31,7 +31,7 @@
 //!
 //! # What is checked
 //!
-//! Three classes, over `docs/VG-CAMPAIGN-THRESHOLDS.toml`, `docs/VG-CAMPAIGN-CLAIM.toml` and the
+//! Four classes, over `docs/VG-CAMPAIGN-THRESHOLDS.toml`, `docs/VG-CAMPAIGN-CLAIM.toml` and the
 //! plan:
 //!
 //! 1. **Dangling citation** — a `[table].field` named in the plan that neither frozen file
@@ -43,6 +43,10 @@
 //!    side.
 //! 3. **Orphan field** — a key defined in a frozen file and named nowhere in the plan. An
 //!    implementer coding from §8 would never build it, so its frozen value decides nothing.
+//! 4. **Unresolvable `[gating]` payload** — a `table.field` path *inside* a gating row that no
+//!    frozen file defines. Classes 1–3 all test KEYS; this one tests a VALUE, because the gating
+//!    rows are the mechanism by which an unanswered owner VALUES call blocks a rung, and a
+//!    one-letter typo in one silently unblocks it.
 //!
 //! # What is NOT checked — enumerated, because a gate that does not name its exclusions is the
 //! defect this campaign keeps finding
@@ -92,7 +96,7 @@
 //!
 //! # Sensitivity
 //!
-//! Five controls, because a reachability sweep that cannot see an injected break is vacuous, and
+//! Six controls, because a reachability sweep that cannot see an injected break is vacuous, and
 //! with every baseline now empty they are the *only* thing standing between a green run and a
 //! scanner that has quietly stopped scanning. Each injects into an **in-memory copy** — no fixture
 //! on disk, no committed document touched — and asserts the specific class fires.
@@ -403,6 +407,7 @@ struct Report {
     dangling_citations: BTreeSet<String>,
     unread_rules: BTreeSet<String>,
     orphan_fields: BTreeSet<String>,
+    unresolved_gating: BTreeSet<String>,
     fields_parsed: usize,
 }
 
@@ -456,7 +461,38 @@ fn sweep(thresholds: &str, claim: &str, plan: &str) -> Report {
             }
         }
     }
+    report.unresolved_gating = unresolved_gating_paths(&parsed, &defined);
     report
+}
+
+/// Class 4 — every `table.field` path inside a `[gating]` row must resolve to a field the frozen
+/// files define.
+///
+/// ⚠️ **Added at Rev 10 because the `[gating]` rows were resolved by NOTHING.** The plan states that
+/// every row "is now a list of paths", meaning *resolvable* ones, and that claim had no mechanical
+/// backing: mutating a row to `["corpus.arrangment"]` — one letter — fired none of the three gates.
+/// Class 1 scans the plan, not the TOML values; class 2 needs a `_rule` suffix; class 3 tests the
+/// KEY and never the VALUE; and the freeze hashes the other file. The rows are the mechanism by
+/// which an unanswered owner VALUES call blocks a rung, so a typo in one silently unblocks it.
+fn unresolved_gating_paths(parsed: &[(&str, Vec<Field>)], defined: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for (_, fields) in parsed {
+        for f in fields {
+            if f.table != "gating" || !f.key.ends_with("_blocked_by") {
+                continue;
+            }
+            for raw in f.value.split(',') {
+                let path = raw.trim().trim_matches(|c| c == '[' || c == ']' || c == '"' || c == ' ');
+                if path.is_empty() || !path.contains('.') {
+                    continue;
+                }
+                if !defined.contains(path) {
+                    out.insert(format!("{}: {path}", f.key));
+                }
+            }
+        }
+    }
+    out
 }
 
 fn live_sweep() -> Report {
@@ -507,6 +543,11 @@ fn every_frozen_symbol_has_a_consumer_or_is_a_recorded_exception() {
     );
     assert_set_matches("unread rule definitions", &report.unread_rules, &BASELINE_UNREAD_RULES);
     assert_set_matches("orphan fields", &report.orphan_fields, &BASELINE_ORPHAN_FIELDS);
+    assert!(
+        report.unresolved_gating.is_empty(),
+        "a [gating] row names a field no frozen file defines — the row is what blocks a rung, so an \n         unresolvable path in it silently unblocks that rung: {:?}",
+        report.unresolved_gating
+    );
 
     eprintln!(
         "vg_symbol_reachability: {} fields across two frozen files; {} dangling citations, {} \
@@ -646,6 +687,39 @@ fn the_sweep_reports_the_deletion_of_a_rung_blocking_field() {
          UNDECIDED K1 from being walked past can be removed with this gate still green — which is \
          the state Rev 8 shipped in. dangling={:?}",
         dirty.dangling_citations
+    );
+}
+
+/// Sensitivity control for class 4 — the one that tests a VALUE rather than a key.
+///
+/// The mutation is a single transposed letter in a `[gating]` payload, which is what the defect
+/// looks like in the wild. Before this class existed it fired nothing: class 1 scans the plan, not
+/// the TOML values; class 2 needs a `_rule` suffix; class 3 tests the key and never the value; and
+/// the freeze hashes the other file. The row would still have *looked* like a list of paths.
+#[test]
+fn the_sweep_reports_an_unresolvable_gating_payload() {
+    let thresholds = read("docs/VG-CAMPAIGN-THRESHOLDS.toml");
+    let claim = read("docs/VG-CAMPAIGN-CLAIM.toml");
+    let plan = read("docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md");
+
+    assert!(
+        claim.contains("corpus.arrangement"),
+        "invariant: a [gating] row must name `corpus.arrangement` for this control to be meaningful"
+    );
+    assert!(
+        sweep(&thresholds, &claim, &plan).unresolved_gating.is_empty(),
+        "invariant: the live rows all resolve, so the failure below is the mutation's doing"
+    );
+
+    // ⚠️ Targets the ROW, not the first textual match. `replacen` on the bare field name hits an
+    // earlier mention in a comment and leaves the row untouched — this control caught that on its
+    // first run, and it is the third time in this campaign that a sensitivity control mutated prose
+    // instead of the thing it names.
+    let typo = claim.replacen("[\"corpus.arrangement\"]", "[\"corpus.arrangment\"]", 1);
+    assert_ne!(typo, claim, "invariant: the mutation must change the file");
+    assert!(
+        !sweep(&thresholds, &typo, &plan).unresolved_gating.is_empty(),
+        "RED: a [gating] row naming a field that does not exist was NOT reported. The rows are what          block a rung on an unanswered owner call, so an unresolvable path in one silently unblocks          that rung — and no other class looks at a value."
     );
 }
 
