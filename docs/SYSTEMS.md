@@ -725,7 +725,7 @@ PHASE-2 / `fire_enable_column_alloc_bookkeeping` :162 O2), each gated by
   `assert_query_shape` const-asserts (state.rs:205) reject an enable tuple with no
   positive bound (must be paired with a `With<_>` or be a SOLE single leaf;
   `CONTAINS_ENABLE_TERM && CONTAINS_CHANGE_DETECTION` is also rejected,
-  state.rs:205~). `HAS_ENABLE_TERM = F::CONTAINS_ENABLE_TERM` (state.rs:103) gates
+  state.rs:205). `HAS_ENABLE_TERM = F::CONTAINS_ENABLE_TERM` (state.rs:103) gates
   the whole enable machinery off for non-enable `(D, F)`. The candidate-seeded
   branch `IS_CANDIDATE_SEEDED` (state.rs:119 — sole single-enable, no data
   component, no positive archetypal) seeds the matched set from the bounded

@@ -723,6 +723,15 @@ struct DocScan {
     classes: [usize; 4],
     path_violations: Vec<String>,
     anchor_violations: Vec<String>,
+    /// Waived anchors whose cited line is nevertheless definition-shaped.
+    ///
+    /// ⚠️ A `~` says "this line is deliberately not the definition of that symbol", and it waives
+    /// *both* the shape and the identity assertion. When the cited line passes the shape test
+    /// anyway, the waiver is buying nothing on that axis and is giving up a check that would have
+    /// held — a silently weakened assertion, which is the exact defect class the campaign this
+    /// gate serves keeps finding. It is REPORTED and pinned, not failed: a definition-shaped line
+    /// can still be the wrong definition, so an over-waiver is a smell rather than a proof.
+    over_waived: Vec<String>,
 }
 
 impl DocScan {
@@ -746,6 +755,7 @@ fn check_anchor(
     expect_ident: Option<&str>,
     file_lines: &mut BTreeMap<PathBuf, Option<Vec<String>>>,
     out: &mut Vec<String>,
+    over_waived: &mut Vec<String>,
 ) -> Option<AnchorClass> {
     let entry = file_lines.entry(target.to_path_buf()).or_insert_with(|| {
         std::fs::read_to_string(target)
@@ -805,6 +815,16 @@ fn check_anchor(
     if class == AnchorClass::Waived {
         // `~` says "this line is deliberately not the definition of that symbol", which waives
         // the identity claim as well as the shape one — the two assert the same thing.
+        //
+        // But record the ones that did not need it: a waiver on a definition-shaped line gives up
+        // an assertion that would have held. See `DocScan::over_waived`.
+        if looks_like_definition(src_line, ext) {
+            over_waived.push(format!(
+                "  {doc}:{lineno}  `{raw}:{}~` is waived, yet that line is definition-shaped: {}",
+                anchor.line_no,
+                src_line.trim()
+            ));
+        }
         return Some(class);
     }
     if !looks_like_definition(src_line, ext) {
@@ -842,6 +862,7 @@ fn scan_doc(doc: &str) -> DocScan {
     let mut classes = [0usize; 4];
     let mut path_violations = Vec::new();
     let mut anchor_violations = Vec::new();
+    let mut over_waived = Vec::new();
 
     // Cache of file contents, so a document citing one file 15 times reads it once.
     let mut file_lines: BTreeMap<PathBuf, Option<Vec<String>>> = BTreeMap::new();
@@ -909,6 +930,7 @@ fn scan_doc(doc: &str) -> DocScan {
                     decl.as_deref(),
                     &mut file_lines,
                     &mut anchor_violations,
+                    &mut over_waived,
                 ) {
                     anchors += 1;
                     classes[class as usize] += 1;
@@ -972,6 +994,7 @@ fn scan_doc(doc: &str) -> DocScan {
                 expect,
                 &mut file_lines,
                 &mut anchor_violations,
+                &mut over_waived,
             ) {
                 anchors += 1;
                 classes[class as usize] += 1;
@@ -1001,6 +1024,7 @@ fn scan_doc(doc: &str) -> DocScan {
         classes,
         path_violations,
         anchor_violations,
+        over_waived,
     }
 }
 
@@ -1166,5 +1190,66 @@ fn the_gated_docs_actually_exercise_the_range_tail() {
          checks in check_anchor are reached only through `range_end`, so a collapse here means \
          they have stopped running — which is exactly how they spent the whole of Rev 11 dead on \
          the meshlet plan's 34 range citations."
+    );
+}
+
+/// Waivers sitting on definition-shaped lines — reported and pinned, because a waiver that buys
+/// nothing is a silently weakened assertion.
+///
+/// ⚠️ The meshlet plan entered `GATED_DOCS` with 102 of its ~200 anchors carrying `~`, applied in
+/// bulk by a textual applicator, and an adversarial review held that "at least four" of them sit on
+/// citations naming a definition — i.e. that the waiver gave up a check that would have passed.
+/// This finds all of them instead of four. It found **six** in the plan and one in SYSTEMS.md.
+///
+/// **Then measurement refuted the diagnosis for all six.** Dropping their `~` does not turn them
+/// green: every one reports ``does not define X`` where X is the symbol of the *neighbouring*
+/// anchor. The cause is the pairing rule two bullets up — pairing is positional, and this document
+/// writes the symbol *after* its citation (``(`:279`) producing a `Coverage` (`:211`) of
+/// `CoveredPixel` (`:193`)``), so anchor *i* is attributed symbol *i* while the prose intends
+/// symbol *i+1*. The anchors are correct; the attribution is off by one. The waiver was suppressing
+/// a false positive, which is exactly what the plan's §12 says the waivers are for. SYSTEMS.md's
+/// one was a genuine over-waiver and is now checked.
+///
+/// So this stays a **pinned report, not a violation**, and the ceiling is the count that survived
+/// that test. A definition-shaped line can still be the wrong definition, and — as measured here —
+/// a waiver on one can still be load-bearing. What must not happen is the number growing without
+/// anyone noticing, which is precisely how 102 waivers arrived in a single commit.
+#[test]
+fn waivers_that_were_not_needed_are_reported_and_pinned() {
+    /// Per-document ceiling on waivers sitting on definition-shaped lines.
+    const OVER_WAIVED_MAX: &[(&str, usize)] = &[
+        ("ARCHITECTURE.md", 0),
+        ("FEATURE_MAP.md", 0),
+        ("MESHLET-VIRTUAL-GEOMETRY-PLAN.md", 6),
+        ("SYSTEMS.md", 0),
+    ];
+
+    let scans = scan_all();
+    let mut report = String::new();
+    let mut failed = false;
+
+    for (doc, scan) in &scans {
+        let n = scan.over_waived.len();
+        let cap = OVER_WAIVED_MAX
+            .iter()
+            .find(|(d, _)| d == doc)
+            .map(|(_, c)| *c)
+            .unwrap_or_else(|| panic!("docs/{doc} has no entry in OVER_WAIVED_MAX"));
+        println!("docs/{doc}: {n} waived anchor(s) on definition-shaped lines (cap {cap})");
+        if n > cap {
+            failed = true;
+            report.push_str(&format!(
+                "docs/{doc}: {n} over-waivers, cap {cap}\n{}\n",
+                scan.over_waived.join("\n")
+            ));
+        }
+    }
+
+    assert!(
+        !failed,
+        "more anchors are waived-yet-definition-shaped than the pinned ceiling.\n\
+         A `~` waives BOTH the shape and the identity assertion, so putting one on a line that \
+         would have passed silently weakens the gate. Drop the `~` from the anchors listed below \
+         and let them be checked; lower the ceiling in the same commit.\n{report}"
     );
 }

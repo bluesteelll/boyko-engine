@@ -45,7 +45,12 @@ authored_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 10"
 authored_date = "2026-07-28"
 
 # ---------------------------------------------------------------------------------------------
-# [corpus] — plan §13 Q3. BLOCKS R0b.
+# [corpus] — plan section 13, the CORPUS PROVENANCE AND LICENCE question. BLOCKS R0b.
+#
+# ⚠️ REV 12: this header said "Q3", and the corpus question is Q1. Its neighbour below said "Q6",
+# which does not exist. Both were Rev 7 indices kept across a renumbering of the list they point
+# into -- a renumbering is a deletion event, and an index does not survive one. Every reference
+# into that section now names the question instead.
 # ---------------------------------------------------------------------------------------------
 [corpus]
 # Whether a fetched-and-gitignored payload with pinned hashes is acceptable as the permanent
@@ -54,10 +59,10 @@ authored_date = "2026-07-28"
 arrangement = "PENDING"
 
 # ---------------------------------------------------------------------------------------------
-# [k1_outcome] — plan §13 Q6. BLOCKS R1.
+# [k1_outcome] — plan section 13, the K1-UNDECIDED question. BLOCKS R1.
 #
 # REV 8 -- THIS FIELD IS NEW, AND ITS ABSENCE WAS A REAL HOLE. Section 9's disposition for K1
-# UNDECIDED pointed at §13 Q6; §13's preamble asserted that every question below has a field
+# UNDECIDED pointed at that question; section 13's preamble asserted that every question below has a field
 # waiting for it in this file; and Q6 had no field and no gating row. So the ONE outcome R0 is most
 # likely to produce — `D_est < 1.0`, which R0 cannot distinguish from its own instrument ceiling
 # seen from below — had no sentinel and blocked nothing. The enforcement predicate was vacuously

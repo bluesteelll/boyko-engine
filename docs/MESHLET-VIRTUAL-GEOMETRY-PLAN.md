@@ -290,7 +290,7 @@ threshold edit alongside a legitimate fill. It is gated instead by the `PENDING`
 
 | # | Kill | Test | Disposition if it fires |
 |---|---|---|---|
-| **K1** | **No content, no mechanism.** The corpus never approaches ~1 triangle/pixel, so cluster LOD has no mechanism of action on our content. | **Refute-only at R0.** `D_est ≥ [k1].d_est_min` at the decision resolution **refutes** K1 outright (a lower bound proves density). **Firing is UNREACHABLE at R0** (`[k1].k1_fire_at_r0`): the upper-bound instrument is mis-sited and probably inert, and is recorded UNSOLVED rather than scheduled. §5.6, §9 clause 1. | Refuted → the mechanism exists, proceed to R1. Undecided → owner VALUES call, §13 Q2, which blocks R1. |
+| **K1** | **No content, no mechanism.** The corpus never approaches ~1 triangle/pixel, so cluster LOD has no mechanism of action on our content. | **Refute-only at R0.** `D_est ≥ [k1].d_est_min` at the decision resolution **refutes** K1 outright (a lower bound proves density). **Firing is UNREACHABLE at R0** (`[k1].k1_fire_at_r0`): the upper-bound instrument is mis-sited and probably inert, and is recorded UNSOLVED rather than scheduled. §5.6, §9 clause 1. | Refuted → the mechanism exists, proceed to R1. Undecided → owner VALUES call, §13's *K1-UNDECIDED* question, which blocks R1. |
 | **K2** | **No baseline.** The Nanite reference cannot be produced on this box. | R0a's rig probe, before any engine code — and the negative is **re-derived by the test**, not declared. §8 R0a. | **Scope restatement**, an owner VALUES call: the eventual goal becomes an absolute ms/quality target. R0 records the branch; §14's rung is where a target is set. |
 
 **Falsification-first ordering.** K2 is the cheapest to test — *zero* engine code, one operator
@@ -424,8 +424,8 @@ VB-visible. The **host-authored** primitives pass `None` at their own call site
   text parse over hundreds of megabytes.
 * **Why in-house.** A `.glb` is a 12-byte header + a JSON chunk + a BIN chunk; only the JSON chunk
   needs a new reader. That is loader code, not hot-path code, and the same class of work
-  `boyko_image`'s in-house PNG/zlib/DEFLATE already carries. §13 Q2 asks the owner only the
-  **dependency-policy** half, which is a VALUES call; the format itself is decided.
+  `boyko_image`'s in-house PNG/zlib/DEFLATE already carries. §13's **third-party dependency policy**
+  question asks the owner only that half, which is a VALUES call; the format itself is decided.
 * **The subset, stated as a scope cut rather than discovered as a bug.** Supported:
   `mode == TRIANGLES`, `POSITION`, `NORMAL`, `TEXCOORD_0`, `TANGENT`, `COLOR_0`, and indexed
   primitives with `u16`/`u32` indices. **Unsupported and a hard decode error, never a silent
@@ -648,7 +648,8 @@ rather than discover.
 | Outcome of the cheap census | Next |
 |---|---|
 | `D_est ≥ 1.0` **and non-degeneracy met** | **K1 dead.** No counter, no shader edit, no re-bless. Done. ⚠️ The conjunct is not decoration and Rev 8 omitted it here: on a 500-pixel frame with 600 visible triangles `D_est = 1.2`, so without it this row declares the campaign's premise proven from a frame covering 0.02% of the screen. `[k1].k1_decision_rule` carries the conjunct as of Rev 9; this table and §9's outcome table must not diverge from it again. |
-| `D_est < 1.0`, **or** non-degeneracy unmet | Genuinely sparse, instrument-limited, or not adjudicable at all — indistinguishable from below. **K1 UNDECIDED**. Owner VALUES call, §13 Q2, held by `k1_outcome.undecided_disposition`, which blocks R1. The counter is NOT a scheduled rung: §8 contains none, and its design is recorded UNSOLVED. |
+| `D_est < 1.0`, non-degeneracy **met** | Genuinely sparse or instrument-limited — indistinguishable from below. **K1 UNDECIDED**. Owner VALUES call, §13's *K1-UNDECIDED* question, held by `k1_outcome.undecided_disposition`, which blocks R1. The counter is NOT a scheduled rung: §8 contains none, and its design is recorded UNSOLVED. |
+| Non-degeneracy **unmet** | ⚠️ **Not an outcome of this table.** R0d(c) reds, the rung is not commit-eligible, and nothing about K1 is adjudicated — §9.1 rules that R0d's gate takes precedence over `k1_decision_rule`'s *"UNDECIDED, escalate"*, because a frame that cannot be adjudicated is an **instrument failure**, not a finding about content. Through Rev 11 this input shared the row above under an "or", which routes an instrument failure to an owner VALUES call. |
 | Ladder not converged | `[k1_instrument].on_not_converged_fire_direction` — **K1 not adjudicated** for the FIRE direction, §9 clause 3. The REFUTE direction is unaffected: non-convergence means `D_est` understates, and an understatement already ≥ 1.0 still proves density ≥ 1 (`on_not_converged_refute_direction = "still_valid"`). |
 
 **This front-loads the cheap decisive case and makes the expensive one explicitly optional**, which
@@ -759,7 +760,8 @@ prerequisites; where the frozen file says four it is counting causes, and the ga
 frozen file.
 
 **If any of them cannot be supplied, K2 fires**, and the disposition is not "measure something
-else": it is a **scope restatement** the owner makes consciously (§13 Q1). The whole falsifiability
+else": it is a **scope restatement** the owner makes consciously (§14.5 — that question left §13 at
+Rev 8 with the rest of the claim, and this citation kept pointing at its old index). The whole falsifiability
 argument for this campaign rests on this rung, which is why it runs first and why R0a's gate is
 mechanical rather than a paragraph.
 
@@ -1316,7 +1318,8 @@ The rung is **reverted or the campaign re-scoped** — not softened mid-flight �
    | Outcome | Condition | Disposition |
    |---|---|---|
    | **K1 REFUTED** | `D_est ≥ [k1].d_est_min` at `[census].decision_resolution`, non-degeneracy met | The mechanism exists. The ladder proceeds to R1. This is the cheap decisive case §5.6 front-loads, and it is R0's whole claim. |
-   | **K1 UNDECIDED** | `D_est` below the threshold, or non-degeneracy unmet | **Owner VALUES call — §13 Q2**, held by `k1_outcome.undecided_disposition` in [`VG-CAMPAIGN-CLAIM.toml`](VG-CAMPAIGN-CLAIM.toml), which **blocks R1**. R0 cannot distinguish "genuinely sparse" from "the instrument hit its ceiling seen from below", because firing needs an upper bound R0 has no buildable instrument for. |
+   | **K1 UNDECIDED** | `D_est` below the threshold, non-degeneracy **met** | **Owner VALUES call — §13's *K1-UNDECIDED* question**, held by `k1_outcome.undecided_disposition` in [`VG-CAMPAIGN-CLAIM.toml`](VG-CAMPAIGN-CLAIM.toml), which **blocks R1**. R0 cannot distinguish "genuinely sparse" from "the instrument hit its ceiling seen from below", because firing needs an upper bound R0 has no buildable instrument for. |
+   | **K1 NOT ADJUDICATED** | non-degeneracy **unmet** | ⚠️ **R0d reds and no K1 disposition is produced at all** — not an UNDECIDED, which is a finding, but an instrument failure, per §9.1's precedence ruling over `k1_decision_rule`. Through Rev 11 this input shared the row above under an "or", so the two codeable decision tables and the frozen rule each mapped it somewhere different. §9.1 owns the ruling; these rows cite it and do not restate the argument. |
    | **K1 FIRED** | — | **Unreachable at R0** (`[k1].k1_fire_at_r0`). Requires the unsolved upper-bound instrument. |
 
    **On UNDECIDED the ladder does NOT silently proceed.** The owner chooses: accept the premise
@@ -1370,7 +1373,7 @@ The rung is **reverted or the campaign re-scoped** — not softened mid-flight �
    `sha256_hwrt = "PENDING"` — their software legs are blessed, their hwrt legs are not, and
    `golden.ps1` exits 2 on a PENDING leg by design, so any gate quantified over one is vacuous until
    it is blessed. R0 moves no pin, so it is unaffected; but the first byte-moving rung of this
-   campaign starts on an incompletely-green corpus, and §13 Q4 puts the bless-bandwidth question to
+   campaign starts on an incompletely-green corpus, and §13's bless-bandwidth question puts it to
    the owner before that rung is scheduled, not after.
 
 **K3 — the undecidable harness — is no longer an R0 abort criterion.** It moved to §14 with the
@@ -1560,7 +1563,9 @@ being cited. 93 of the 99 anchors it first called stale were that mismatch rathe
 re-pointing them at definitions would move the citations away from the evidence they cite. What
 membership does buy is the class that actually rots — a cited file that disappears or shrinks — and
 it caught three dead paths on its first run.
-⚠️ **This paragraph said, in the present indicative and thirteen lines below the sentence above, that the gate covers "the three navigation documents", that adding this plan "was attempted and reverted", and that converting the citations is still a pending follow-up.** All three were true history and false as current state: the round trip is real (added, removed, added again) and the conversion landed. The stale wording survived a repair that fixed four other texts and missed the one inside the section the repair was about — and it told the reader to trust nothing below it, so it weakened no gate but contradicted the section's own opening. **The live limit is not membership, it is the waiver:** 102 of 201 anchors carry `~` and assert only that the line number exists in the cited file.
+⚠️ **This paragraph said, in the present indicative and thirteen lines below the sentence above, that the gate covers "the three navigation documents", that adding this plan "was attempted and reverted", and that converting the citations is still a pending follow-up.** All three were true history and false as current state: the round trip is real (added, removed, added again) and the conversion landed. The stale wording survived a repair that fixed four other texts and missed the one inside the section the repair was about — and it told the reader to trust nothing below it, so it weakened no gate but contradicted the section's own opening. **The live limit is not membership, it is the waiver:** the majority of this document's anchors carry `~` and assert only that the line number exists in the cited file. The exact split is printed by the run and is deliberately not restated here — the count moved twice in two revisions while three texts quoted it.
+
+⚠️ **Rev 12 tested the claim that those waivers cover "evidence lines the gate mis-models", because a review held that at least four of them sit on citations naming a *definition*, where the waiver would be giving up a check that would have passed.** The gate now finds them all mechanically: **six** in this document. Then dropping the `~` from all six settled it — none goes green. Every one reports ``does not define X`` where X is the symbol of the **neighbouring** anchor, because the identity pairing is positional while this document writes the symbol *after* its citation (``(`:279~`) producing a `Coverage` (`:211~`) of `CoveredPixel` (`:193~`)``). The anchors are right and the attribution is off by one, so the waiver is suppressing a false positive — which is what this paragraph claimed. **The characterisation holds; the finding was a true observation with a wrong diagnosis.** The same sweep did find one genuine over-waiver, in `SYSTEMS.md`, now un-waived and checked.
 
 **Ingest / mesh:** `crates/boyko_render/src/loaders/obj.rs:13` (default vertex colour), `:55`
 (`ObjMeshLoader`), `:60~` (`EXTENSIONS = &["obj"]`), `:94~-96` (dedup + `generate_tangents`) ·
@@ -1671,10 +1676,15 @@ Performance and architecture forks are decided with numbers in this project; the
 K1's threshold (§5.4) are decided above and are not listed here.
 
 ⚠️ **Rev 7 opened this section with "every question below has a field waiting for it in
-[`VG-CAMPAIGN-CLAIM.toml`](VG-CAMPAIGN-CLAIM.toml)", and that universal was false** — Q2, Q4 and Q6
-had no field, and Q6 was the disposition of the outcome §9 itself calls the likely one. A preamble
-asserting completeness it does not have is the highest-risk line in a document; the questions are
-now split by whether they block anything.
+[`VG-CAMPAIGN-CLAIM.toml`](VG-CAMPAIGN-CLAIM.toml)", and that universal was false** — three of its
+questions had no field, and one of those was the disposition of the outcome §9 itself calls the
+likely one. A preamble asserting completeness it does not have is the highest-risk line in a
+document; the questions are now split by whether they block anything.
+⚠️ **Rev 12 removes the question NUMBERS from that sentence rather than correcting them.** It named
+"Q2, Q4 and Q6" — Rev 7's indices — while the list below had since been renumbered underneath it, so
+the sentence pointed at a Q6 that no longer exists and at a Q2 that now *does* have a field, exactly
+inverting its own point. **A renumbering is a deletion event**, and the citation that survives one
+names the question rather than its index. Every cross-reference into this section now does.
 
 **Blocking — each has a `PENDING` field and a `[gating]` row.** The rows are
 `[gating].r0a_blocked_by`, `[gating].r0b_blocked_by`, `[gating].r0c_blocked_by`,
