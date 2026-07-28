@@ -44,9 +44,15 @@
 //! 3. **Orphan field** — a key defined in a frozen file and named nowhere in the plan. An
 //!    implementer coding from §8 would never build it, so its frozen value decides nothing.
 //! 4. **Unresolvable `[gating]` payload** — a `table.field` path *inside* a gating row that no
-//!    frozen file defines. Classes 1–3 all test KEYS; this one tests a VALUE, because the gating
-//!    rows are the mechanism by which an unanswered owner VALUES call blocks a rung, and a
-//!    one-letter typo in one silently unblocks it.
+//!    frozen file defines, or one that cannot name a field at all. Classes 1–3 all test KEYS; this
+//!    one tests a VALUE, because the gating rows are the mechanism by which an unanswered owner
+//!    VALUES call blocks a rung, and a one-letter typo in one silently unblocks it.
+//! 5. **Which `[gating]` rows carry a payload at all** ([`GATING_ROWS_WITH_PAYLOAD`]), because
+//!    class 4 is structurally blind to the complementary move. It resolves what is *inside* a row;
+//!    an **emptied** row contains nothing to resolve and so reports nothing, which would let the
+//!    only VALUES call blocking a rung be deleted in silence. Emptiness cannot itself be the
+//!    violation — three of the five rows are empty by design — so the pin is over *which* rows are
+//!    non-empty, asserted for exact equality like every baseline here.
 //!
 //! # What is NOT checked — enumerated, because a gate that does not name its exclusions is the
 //! defect this campaign keeps finding
@@ -96,7 +102,10 @@
 //!
 //! # Sensitivity
 //!
-//! Six controls, because a reachability sweep that cannot see an injected break is vacuous, and
+//! One control per class and per blind spot — the number is deliberately not written here, because
+//! a count in a comment is a fact stated in two places and this repository has just spent a
+//! revision proving what that costs. A reachability sweep that cannot see an injected break is
+//! vacuous, and
 //! with every baseline now empty they are the *only* thing standing between a green run and a
 //! scanner that has quietly stopped scanning. Each injects into an **in-memory copy** — no fixture
 //! on disk, no committed document touched — and asserts the specific class fires.
@@ -483,10 +492,19 @@ fn unresolved_gating_paths(parsed: &[(&str, Vec<Field>)], defined: &BTreeSet<Str
             }
             for raw in f.value.split(',') {
                 let path = raw.trim().trim_matches(|c| c == '[' || c == ']' || c == '"' || c == ' ');
-                if path.is_empty() || !path.contains('.') {
+                // An empty row is a legitimate state — three of the five rungs are blocked by
+                // nothing — and `GATING_ROWS_WITH_PAYLOAD` is what stops a row being emptied
+                // quietly. Emptiness therefore cannot be a violation here.
+                if path.is_empty() {
                     continue;
                 }
-                if !defined.contains(path) {
+                // ⚠️ A dot-less payload used to be waved through on the same line as the empty
+                // row, which exempted the malformed shape from the class written to catch
+                // malformed rows: `["arrangement"]` and `["corpus arrangement"]` both resolved to
+                // nothing and reported nothing, while `["corpus.arrangment"]` — one letter — was
+                // caught. The distinction was accidental. A payload that cannot name a field is
+                // unresolvable by definition, so it is reported rather than skipped.
+                if !path.contains('.') || !defined.contains(path) {
                     out.insert(format!("{}: {path}", f.key));
                 }
             }
@@ -828,5 +846,133 @@ fn a_bare_english_word_key_is_not_counted_as_a_citation() {
             .contains("thresholds:synthetic.rule"),
         "RED: a field cited in the dotted `[table].field` form was still reported as an orphan — \
          the citation rule has become unsatisfiable for underscore-free keys"
+    );
+}
+
+/// The `[gating]` rows that carry a payload today, pinned for exact equality in both directions.
+///
+/// ⚠️ Class 4 resolves what is *inside* a row and is structurally blind to a row being **emptied**.
+/// `r0b_blocked_by = []` resolves nothing, so it reports nothing — and that row is the only thing
+/// standing between an unanswered owner VALUES call and a rung that runs anyway. Emptiness cannot
+/// itself be the violation, because three of the five rows are empty by design; what *can* be
+/// pinned is WHICH rows are non-empty, and that is a fact this campaign must never change quietly.
+const GATING_ROWS_WITH_PAYLOAD: [&str; 2] = ["r0b_blocked_by", "r1_blocked_by"];
+
+/// `[gating]` rows in `text` whose payload is non-empty, in file order.
+fn gating_rows_with_payload(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_gating = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with('[') && t.ends_with(']') {
+            in_gating = t == "[gating]";
+            continue;
+        }
+        if !in_gating || t.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = t.split_once('=')
+            && key.trim().ends_with("_blocked_by")
+            && !value
+                .trim()
+                .trim_matches(|c: char| c == '[' || c == ']' || c.is_whitespace())
+                .is_empty()
+        {
+            out.push(key.trim().to_string());
+        }
+    }
+    out
+}
+
+/// Rewrite exactly the `[gating]` row whose key is `key`, leaving every other byte alone.
+///
+/// Anchored to the KEY AT LINE START rather than to the payload text, deliberately. A mutation
+/// written as `replace("corpus.arrangement", …)` finds the PROSE first — this file's comments name
+/// the field repeatedly — and the control then passes for the wrong reason. That trap has been
+/// sprung three times in this campaign's own gates.
+fn rewrite_gating_row(text: &str, key: &str, new_line: &str) -> String {
+    text.split_inclusive('\n')
+        .map(|l| {
+            if l.trim_start().starts_with(key) {
+                new_line.to_string()
+            } else {
+                l.to_string()
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn the_blocking_gating_rows_are_pinned() {
+    let claim = read("docs/VG-CAMPAIGN-CLAIM.toml");
+    let actual = gating_rows_with_payload(&claim);
+    let expected: Vec<String> = GATING_ROWS_WITH_PAYLOAD
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "the set of [gating] rows carrying a payload moved.\n\
+         A row that GAINED one: add it to GATING_ROWS_WITH_PAYLOAD in the same commit.\n\
+         A row that LOST one: that is a rung which used to be blocked by an owner VALUES call and \
+         now is not — the exact change this pin exists to make impossible to do quietly. Class 4 \
+         cannot see it, because an empty row resolves nothing and so reports nothing."
+    );
+}
+
+#[test]
+fn the_pin_reports_a_gating_row_emptied_of_its_payload() {
+    let claim = read("docs/VG-CAMPAIGN-CLAIM.toml");
+    let thresholds = read("docs/VG-CAMPAIGN-THRESHOLDS.toml");
+    let plan = read("docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md");
+
+    assert!(
+        gating_rows_with_payload(&claim).contains(&"r0b_blocked_by".to_string()),
+        "invariant: r0b must be blocked by something for this control to mean anything"
+    );
+
+    let emptied = rewrite_gating_row(&claim, "r0b_blocked_by", "r0b_blocked_by = []\n");
+    assert_ne!(emptied, claim, "invariant: the mutation must change the file");
+
+    assert!(
+        !gating_rows_with_payload(&emptied).contains(&"r0b_blocked_by".to_string()),
+        "the pin must notice a row emptied of its payload"
+    );
+    // And the point of the pin: the class written to resolve these rows stays silent, so without
+    // the pin the emptying is invisible to every gate in this file.
+    assert!(
+        sweep(&thresholds, &emptied, &plan)
+            .unresolved_gating
+            .is_empty(),
+        "invariant: class 4 is expected to be BLIND here — if it has started catching emptied \
+         rows, this control's premise has changed and it should be re-derived, not deleted"
+    );
+}
+
+#[test]
+fn the_sweep_reports_a_gating_payload_that_cannot_name_a_field() {
+    let claim = read("docs/VG-CAMPAIGN-CLAIM.toml");
+    let thresholds = read("docs/VG-CAMPAIGN-THRESHOLDS.toml");
+    let plan = read("docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md");
+
+    assert!(
+        sweep(&thresholds, &claim, &plan).unresolved_gating.is_empty(),
+        "invariant: the live rows all resolve, so anything below is the mutation's doing"
+    );
+
+    // A payload with no dot cannot name `table.field` at all. It used to be skipped beside the
+    // legitimately empty row, so the malformed shape was exempt from the class written for
+    // malformed rows — while a one-letter typo inside a well-formed path was caught.
+    let mutated = rewrite_gating_row(
+        &claim,
+        "r0b_blocked_by",
+        "r0b_blocked_by = [\"arrangement\"]\n",
+    );
+    assert_ne!(mutated, claim, "invariant: the mutation must change the file");
+
+    let violations = sweep(&thresholds, &mutated, &plan).unresolved_gating;
+    assert!(
+        violations.iter().any(|v| v.contains("arrangement")),
+        "a dot-less [gating] payload must be reported as unresolvable. got={violations:?}"
     );
 }
