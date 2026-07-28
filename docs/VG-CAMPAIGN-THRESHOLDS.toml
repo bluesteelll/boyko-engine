@@ -31,8 +31,8 @@
 # and Rev 7 -- the third occurrence caught by an adversarial pass rather than by the fields
 # themselves, in the very revision whose slogan was about fixes that do not land. They are updated
 # here in the same act as the edit, which is the whole of their job.
-schema_version = 9
-frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 13"
+schema_version = 10
+frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 14"
 frozen_date = "2026-07-28"
 
 # THE EDIT DISCIPLINE, stated because Rev 4 and Rev 5 both edited this file in place while its
@@ -319,13 +319,51 @@ k1_path_aggregation = "min_over_committed_camera_paths"
 # beside the covered-fraction floor, which is the same unsolved axis reached from the domain side.
 # REV 13 -- SET EQUALITY, not a per-path universal, and the recorded digest is EVIDENCE not an
 # assertion. Rev 12 wrote "exactly one census row per enumerated path", which is
-# `forall p in enum: |rows(p)| = 1`; that predicate is SATISFIED by a census that also emits rows
-# for paths NOT in the enumeration, so cherry-picking from the additive side passed it. Set
-# equality reds in both directions. And nothing compares the recorded enumeration sha256 against an
+# `forall p in enum: |rows(p)| = 1`; a census emitting rows for paths NOT in the enumeration
+# satisfies that predicate, so the two are INCOMPARABLE rather than one strengthening the other:
+# set equality gains the extra-row direction and gives up the per-path multiplicity the universal
+# had. Both directions red. And nothing compares the recorded enumeration sha256 against an
 # earlier one, because no earlier one exists at R0d -- it is recorded so a later rung can, which is
 # the honest status; calling it an assertion would make it the fourth field in this file frozen
 # without a reader.
-committed_paths_rule = "committed camera paths are enumerated in assets/vg_corpus/CORPUS.toml at R0b; R0d(d) asserts SET EQUALITY between the census row set and the enumeration (a missing row and an extra row both red) and RECORDS the sha256 of the enumeration beside the readback hashes as evidence, not as an assertion; R0 does not assert the set is representative, and (d) cannot see an edit to the enumeration made before the run"
+#
+# ⚠️ REV 14 WITHDRAWS REV 13'S STATED REASON FOR THE EXTRA-ROW HALF -- "so cherry-picking from the
+# additive side passed it" -- which THIS FILE refutes four keys below. Under `k1_path_aggregation`
+# the min's domain IS the enumeration, so a row for a path outside it is inert; and under any
+# rows-based reduction min(S union {x}) <= min(S), which moves AWAY from REFUTED, the favourable
+# outcome. No additive row can produce a favourable verdict -- that is the same monotonicity this
+# file already uses to argue MIN closes the ADD lever and opens the OMIT one. The extra-row half is
+# KEPT and its true reason is DOMAIN INTEGRITY: the run and the enumeration must denote the same
+# set, because every downstream quantifier (`degenerate(p)`, the MIN, R0d(c)) is indexed over the
+# enumeration while the rows are what was actually measured, and a silent divergence between them
+# makes all three range over something no text names.
+committed_paths_rule = "committed camera paths are enumerated in assets/vg_corpus/CORPUS.toml at R0b; R0b(e) asserts |P| >= committed_paths_min at the rung that AUTHORS the set and R0d(d) asserts SET EQUALITY between the census row set and the enumeration plus the same floor at the rung that CONSUMES it (a missing row, an extra row and an undersized enumeration all red); R0d(d) RECORDS the sha256 of the enumeration beside the readback hashes as evidence, not as an assertion; R0 does not assert the set is representative, and (d) cannot see an edit to the enumeration made before the run"
+
+# REV 14 -- THE CARDINALITY FLOOR, absent until now and the one input on which EVERY R0d gate part
+# is vacuously green at once.
+#
+# Substitute P = the empty set. (c) is `forall p in P, ...` -> TRUE. (d)'s set equality is
+# `{} = {}` -> TRUE. (a) hashes three identical empty readbacks -> TRUE. (b) is quantified over
+# ladder rungs, and the plan states in its own words that (b) "catches a path measured at too few
+# rungs and never a path that was never measured at all", naming (d) as the closure -- and (d) is
+# exactly what has gone vacuous. Then this file's own decision rule: "ANY p in P degenerate" is
+# false vacuously, so control reaches the min, and min over the empty set is +inf under the natural
+# fold-with-identity => K1 REFUTED, the campaign-FAVOURABLE verdict, from a census that measured
+# nothing. This is the empty-frame defect that `min_covered_pixels` exists to close, one quantifier
+# up, on an axis nothing guarded.
+#
+# It was REACHABLE, not hypothetical: the plan enumerates R0b's five gate parts and shows that none
+# of them reads the camera-path column, and that enumeration was written at Rev 13 to withdraw a
+# different claim -- the proof was on the page and its consequence was not drawn.
+#
+# THE VALUE IS DERIVED, NOT PICKED. At |P| = 1 the MIN is the identity, so `min` and `max` coincide
+# and the soundness argument for choosing MIN -- "a favourable verdict must clear the bar on the
+# WEAKEST committed path rather than the strongest" -- is not merely weak but ABSENT: there is no
+# weakest and strongest to distinguish. Two is the smallest cardinality at which the reduction this
+# campaign froze does any work at all. A larger floor would be an authored number about
+# representativeness, which is the axis `representativeness_floor_status` records as UNSOLVED and
+# which this field deliberately does not pretend to close.
+committed_paths_min = 2
 
 # ⚠️ REV 12 -- THE RULE IS NOW INDEXED BY CAMERA PATH, because it was scalar while the census it
 # consumes is per-path. Both documents nominate this string as the only live rule (see the note
@@ -337,7 +375,11 @@ committed_paths_rule = "committed camera paths are enumerated in assets/vg_corpu
 # reader: non-degeneracy is per path and EVERY path must clear it, then the MIN is taken over
 # d_est. Non-degeneracy is not min'd -- a MIN over covered_pixels and a MIN over visible_tris taken
 # separately would recombine into a d_est that belongs to no measured path at all.
-k1_decision_rule = "cheap_census_may_only_REFUTE, evaluated over the committed camera paths P of committed_paths_rule: degenerate(p) := covered_pixels(p) < min_covered_pixels OR visible_tris(p) < min_visible_tris; ANY p in P degenerate => UNDECIDED, escalate (and R0d reds, which takes precedence); else min over p in P of d_est(p) >= d_est_min => K1 dead; min over p in P of d_est(p) < d_est_min => UNDECIDED, escalate"
+# ⚠️ REV 14 MAKES THE RULE TOTAL. Rev 12 indexed it over P and left it with no value on |P| = 0 --
+# the branch order sends an empty domain past a vacuously-false guard into a min over nothing. The
+# undersized case is now the FIRST clause and it is an INSTRUMENT FAILURE, not a finding about
+# content: the same disposition, and for the same reason, as a frame that fails non-degeneracy.
+k1_decision_rule = "cheap_census_may_only_REFUTE, evaluated over the committed camera paths P of committed_paths_rule: |P| < committed_paths_min => NOT ADJUDICATED and R0d reds (an instrument failure, never UNDECIDED and never a favourable verdict; the min is not evaluated); degenerate(p) := covered_pixels(p) < min_covered_pixels OR visible_tris(p) < min_visible_tris; ANY p in P degenerate => UNDECIDED, escalate (and R0d reds, which takes precedence); else min over p in P of d_est(p) >= d_est_min => K1 dead; min over p in P of d_est(p) < d_est_min => UNDECIDED, escalate"
 
 # FIRING K1 requires the upper-bound instrument (the frustum+backface survivor counter), which is a
 # separate conditional rung. Its threshold is pre-registered HERE, before that instrument exists,

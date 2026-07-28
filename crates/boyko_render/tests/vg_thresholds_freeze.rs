@@ -61,7 +61,7 @@ use std::path::PathBuf;
 /// Those two fields were stale through Rev 4, Rev 5 and Rev 7 — three revisions of a staleness
 /// marker going stale — because nothing checked them. After R0a the policy changes and this literal
 /// moves only by a dated amendment in the plan's §11.1, with the rig file updated in the same act.
-const THRESHOLDS_SHA256: &str = "69a6e21293520ecaa46ecb04753e3a05add816f23bd86c81c8cbf24e50bd3313";
+const THRESHOLDS_SHA256: &str = "6cb381bf6c33ddec3f6937bfe9db8d813ecc2763c410beec0fffc0f1b8994735";
 
 /// Repo-relative path from this crate's manifest directory.
 const THRESHOLDS_REL: &str = "../../docs/VG-CAMPAIGN-THRESHOLDS.toml";

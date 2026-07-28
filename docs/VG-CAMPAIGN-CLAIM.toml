@@ -47,22 +47,30 @@
 # tests/vg_symbol_reachability.rs asserts that the newest `REV N` marker below and
 # `authored_at_revision` name the same revision, over THIS file as well as the hashed one, and it
 # ships a control that fires in both directions. It red on this file the first time it ran.
-schema_version = 5
-authored_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 13"
+schema_version = 6
+authored_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 14"
 
 # REV 13 -- the surviving dead index. Rev 12 converted every section-13 citation to name its
-# question instead of its index, and stated that as a universal; a `Q6` survived sixteen lines
-# below the note announcing the removal, in this file, and three more survived in the plan's own
-# paragraph making the same universal. N-1 of N, on both sides of the same repair.
+# question instead of its index, and stated that as a universal; one dead index survived sixteen
+# lines below the note announcing the removal, in this file, and three more survived in the plan's
+# own paragraph making the same universal. N-1 of N, on both sides of the same repair.
+#
+# REV 14: and the note you are reading QUOTED the surviving index while announcing its removal --
+# re-creating a member of the class in the act of describing the class's repair, four lines from
+# the rule ("described, never quoted") that forbids it. Third consecutive revision to breach the
+# rule it was landing. The indices are described here now.
 authored_date = "2026-07-28"
 
 # ---------------------------------------------------------------------------------------------
 # [corpus] — plan section 13, the CORPUS PROVENANCE AND LICENCE question. BLOCKS R0b.
 #
-# ⚠️ REV 12: this header said "Q3", and the corpus question is Q1. Its neighbour below said "Q6",
-# which does not exist. Both were Rev 7 indices kept across a renumbering of the list they point
-# into -- a renumbering is a deletion event, and an index does not survive one. Every reference
-# into that section now names the question instead.
+# ⚠️ REV 12: this header cited the wrong index for the corpus question, and its neighbour below
+# cited one that does not exist at all. Both were Rev 7 indices kept across a renumbering of the
+# list they point into -- a renumbering is a deletion event, and an index does not survive one.
+# Every reference into that section names the question instead. ⚠️ REV 14 stopped QUOTING the dead
+# indices in this note: quoting one re-creates it, which is why the class was still non-empty two
+# revisions after it was declared repaired. No universal is claimed here; the enforceable statement
+# is the rule, not a census of the texts obeying it.
 # ---------------------------------------------------------------------------------------------
 [corpus]
 # Whether a fetched-and-gitignored payload with pinned hashes is acceptable as the permanent

@@ -111,8 +111,11 @@
 //!   own citation; that is an authoring constraint of these documents, not a heuristic to be
 //!   worked around.
 //! * **Identity is claimed only against a file that declares the symbol.** A line may pair an
-//!   anchor with a name that is not an item in the cited file at all. The scanner performs
-//!   exactly five such skips today; the representative one is SYSTEMS.md's
+//!   anchor with a name that is not an item in the cited file at all. The run prints how many such
+//!   skips each document takes; ⚠️ this comment used to say "exactly five today", a figure measured
+//!   over three documents before `GATED_DOCS` gained a fourth — live it is more than twice that,
+//!   and the count is not restated here for the same reason no other count in this file is. The
+//!   representative case is SYSTEMS.md's
 //!   `` / `From<TagId> for ComponentId` (:61) ``, which reduces to the identifier `From`, while
 //!   `tags.rs:61` reads `impl From<TagId> for ComponentId {` — a real definition, and one the
 //!   shape test accepts on its `impl ` keyword, but nothing in `tags.rs` *declares* an item named
@@ -1182,10 +1185,11 @@ fn a_range_tail_is_captured_with_the_waiver_written_on_either_side() {
 /// green only if it were also edited, but would silently empty this count.
 #[test]
 fn the_gated_docs_actually_exercise_the_range_tail() {
-    // ⚠️ Counted PER DOCUMENT, not aggregated. Rev 12's first version summed all four and asserted
-    // `>= 30` against a live total of 33 — a margin of three, on a corpus where un-waiving three
-    // plan ranges is an instruction the sibling control prints. An aggregate floor lets the
-    // document the check was written for fall to zero while three others carry the sum.
+    // ⚠️ Counted PER DOCUMENT, not aggregated, because an aggregate floor lets the document the
+    // check was written for fall to zero while the others carry the sum. Rev 13 justified this
+    // change with "a live total of 33 — a margin of three"; that figure was never re-derived and
+    // is wrong (the plan alone parses 57, which this very function prints three lines below).
+    // The argument for splitting the count does not depend on the margin and stands without it.
     let mut per_doc: Vec<(&str, usize)> = Vec::new();
     for doc in GATED_DOCS {
         let text = std::fs::read_to_string(docs_dir().join(doc))
@@ -1205,19 +1209,41 @@ fn the_gated_docs_actually_exercise_the_range_tail() {
     }
     let with_tail: usize = per_doc.iter().map(|(_, n)| n).sum();
 
-    // The meshlet plan is the document this check was dead on, so it carries its own floor. It
-    // holds 34 waiver-first and 23 plain range occurrences; a collapse below 20 means the parser
-    // stopped reading one of the two spellings again.
-    let plan = per_doc
-        .iter()
-        .find(|(d, _)| *d == "MESHLET-VIRTUAL-GEOMETRY-PLAN.md")
-        .map(|(_, n)| *n)
+    // ⚠️ A FLOOR ON A SUM CANNOT BE SENSITIVE TO LOSING ONE SPELLING, and Rev 13's `plan >= 20`
+    // was inert for exactly that reason: the regression its own message named — the parser testing
+    // `-` before `~` again — leaves the plan's 23 plain citations parsing tails, and 23 >= 20
+    // passes; the mirror leaves 34 and also passes. Only total parser death reached it. What IS
+    // sensitive is asserting that BOTH SPELLINGS are exercised, which is the property the repair
+    // actually established.
+    let plan_text = std::fs::read_to_string(docs_dir().join("MESHLET-VIRTUAL-GEOMETRY-PLAN.md"))
         .expect("invariant: the meshlet plan is in GATED_DOCS");
+    let (mut waived_ranges, mut plain_ranges) = (0usize, 0usize);
+    for line in plan_text.lines() {
+        for a in scan_line(line).1.iter().filter(|a| a.range_end.is_some()) {
+            if a.shape_waived {
+                waived_ranges += 1;
+            } else {
+                plain_ranges += 1;
+            }
+        }
+    }
+    println!(
+        "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md: {waived_ranges} waived + {plain_ranges} plain range \
+         citation(s) parsed a tail"
+    );
     assert!(
-        plan >= 20,
-        "only {plan} range citations in the meshlet plan parsed a tail. That document is the one \
-         the end-of-range check was structurally unable to fire on before Rev 12 (34 of its range \
-         occurrences are written `:N~-M`), so it is floored on its own rather than inside a sum."
+        waived_ranges > 0,
+        "no WAIVER-BEARING range citation in the meshlet plan parsed a tail. That is the Rev 11 \
+         defect recurring verbatim: the parser tested `-` before `~`, so every `:N~-M` lost its \
+         tail and both end-of-range assertions became unreachable on the majority of that \
+         document. A sum-based floor cannot see this — the plain citations keep the total up."
+    );
+    assert!(
+        plain_ranges > 0,
+        "no PLAIN `:N-M` range citation in the meshlet plan parsed a tail — the mirror regression, \
+         in which accepting the waiver-first spelling broke the spelling that always worked. \
+         Stated separately from the waived count because a check that cannot distinguish the two \
+         directions is the check that missed the first one."
     );
     // A floor, not a pin: the exact number moves with ordinary editing, and pinning it would make
     // every citation edit a test edit. Zero is the only value that means the check is dead.

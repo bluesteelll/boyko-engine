@@ -1,6 +1,6 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 13** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 14** — **NOT APPROVED, and no code exists.** This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
@@ -1020,7 +1020,7 @@ falsify is not a gate on UE5 availability. The figure stays in the record, as a 
 `assets/vg_corpus/CORPUS.toml` + the `.gitignore` rule + `fetch_corpus`;
 `crates/boyko_app/tests/vg_corpus_ingest.rs`. <!-- doc-anchor-ignore -->
 
-**Gate (one, five parts):** (a0) **`corpus.arrangement` is not the `PENDING` sentinel** — the
+**Gate (one, six parts):** (a0) **`corpus.arrangement` is not the `PENDING` sentinel** — the
 owner VALUES call this rung is blocked on (`[gating].r0b_blocked_by`), asserted here because a
 `[gating]` row that no gate part reads blocks nothing. ⚠️ Rev 8 stated in the present indicative
 that "the named rung refuses to run while the field is unanswered" while no rung asserted any row;
@@ -1042,10 +1042,28 @@ geometry slot `!= VB_GEOMETRY_RESERVED_SLOT` and a `gMeshMeta` row whose `index_
 > the gate side. The hole the mutation targets is real and verified: `backfill_vb_geometry_slots`
 > has no re-arm and exactly one call site, in `boyko_app::runner`'s boot path, so a mesh registered
 > at runtime under VB keeps `VB_GEOMETRY_RESERVED_SLOT` forever. (d) the largest corpus mesh registers without allocation
-failure (§3.4).
+failure (§3.4);
+**(e) the manifest enumerates at least `[k1].committed_paths_min` distinct camera-path ids.**
+⚠️ **This part is Rev 14's, and it exists because the parts above provably cannot supply it.** The
+enumeration immediately above — (a0) the arrangement sentinel, (a) payload sha256, (b) triangle
+count, (c) slot + `gMeshMeta` row, (d) allocation — is exactly the enumeration §5.5 uses to show
+that **none of them reads the camera-path column**. R0d's two path quantifiers therefore ranged over
+a set this rung could author empty, and on an empty set every R0d part is vacuously green while
+`k1_decision_rule` returns the campaign-**favourable** verdict from zero measurement. The floor is
+asserted here, at the rung that **authors** the domain, as well as at R0d, which **consumes** it;
+one of the two alone leaves the other's quantifier unbounded.
 
 **RED if / mutations (DEMONSTRATED):**
 * flip one byte of a pinned hash in `CORPUS.toml` → (a) reds;
+* **(e) — the aggregation domain, at the rung that authors it.** Author `CORPUS.toml` with every
+  asset carrying the same camera-path id — or with the column absent entirely — so the enumeration
+  holds fewer than `[k1].committed_paths_min` distinct ids → (e) reds. **It isolates**, and the
+  isolation is the point of siting it here: the payload bytes are untouched so (a) stays true, the
+  triangle counts are untouched so (b) stays true, every mesh still lands a slot and a `gMeshMeta`
+  row so (c) stays true, the largest mesh still allocates so (d) stays true, and the arrangement
+  sentinel is unrelated so (a0) stays true. (e) is the only part that moves — which is exactly the
+  demonstration that the other five could not have caught this, rather than an assertion that they
+  could not;
 * ⚠️ **RETRACTED at Rev 4 — this mutation was DEAD, and it was the one Rev 1–Rev 3 each called the
   rung's most important.** It read: *"register the same mesh through host-authored `register_mesh`
   instead of the streamed path → slot is `0` → (c) reds."* It does **not** red.
@@ -1161,7 +1179,8 @@ ADJUDICATED**. One census, three answers — the Rev 8 shape the frozen file rec
 and the three agree.
 **(d) the census covered the whole aggregation domain** — exactly one census row per camera path
 enumerated in `assets/vg_corpus/CORPUS.toml` — stated as a **set equality** between the census rows
-and the enumeration, so a missing row and an *extra* one both red — with the sha256 of that
+and the enumeration, so a missing row and an *extra* one both red — **and that enumeration holds at
+least `[k1].committed_paths_min` paths**, with the sha256 of that
 enumeration recorded beside the readback hashes (`[k1].committed_paths_rule`). ⚠️ Rev 11 froze `min` over committed paths as
 K1's aggregation and left the domain asserted by nothing, which is the same shape as a threshold
 with no reader: under MIN the cheap lever is not adding a flattering path but **omitting an
@@ -1273,14 +1292,33 @@ renumbering is to re-derive, not to re-word.
   aggregate → (c) reds **only if the path quantifier is implemented**, and passes without it. That
   second mutation is what distinguishes the Rev 13 wording from Rev 12's, and it is stated
   separately because a mutation that probes a different quantifier is a different mutation.
-* **(d) — the aggregation domain.** Skip one committed path in the run — leave `CORPUS.toml`
-  untouched — → the row set is a proper subset of the enumeration → (d) reds. The mirror also
-  reds: censusing a path that is *not* enumerated makes the row set a proper superset, which is
-  cherry-picking from the other side and which a per-path "exactly one row" universal would have
-  passed. **It isolates:** the skip is present identically in all three processes, so (a)'s
-  agreement predicate stays true; it removes no ladder rung, so (b) stays true; and the paths that
-  did run are as non-degenerate as they were, so (c) stays true. (d) is the only part that moves.
-  The mutation is stated in terms of the *enumeration* rather than the path's density on purpose:
+* **(d) — the aggregation domain. Three failure directions, three mutations, because a set equality
+  with a cardinality floor has three ways to fail and each is its own derivation.**
+
+  **(d-sup) — the isolating one.** Census a path that is **not** enumerated, leaving `CORPUS.toml`
+  and every committed path alone → the row set is a proper superset of the enumeration → (d) reds.
+  **It isolates:** the extra row is present identically in all three processes, so (a)'s agreement
+  predicate stays true; it removes no ladder rung, so (b) stays true; and the extra path is
+  **outside (c)'s domain**, which is the enumeration, so (c) is untouched. (d) is the only part that
+  moves.
+
+  **(d-sub) — fires, but does NOT isolate, and saying so is the correction.** Skip one committed
+  path in the run → the row set is a proper subset → (d) reds. ⚠️ **Rev 13 claimed this mutation
+  isolated and it does not, under the domain Rev 13 gave (c) in the same commit.** (c) is quantified
+  over every *committed* path; a skipped path has no reading, so `covered_pixels(p) < 1024` holds
+  vacuously or numerically and **(c) reds too**. Two clauses written independently in one revision,
+  each correct, colliding on a shared domain — which is why (d-sup) above carries the isolation
+  burden instead. The corollary is load-bearing for an implementer: **(c) already produces (d)'s
+  subset direction**, so the work (d) uniquely does is the superset direction and the floor below.
+
+  **(d-min) — the floor.** Reduce the enumeration below `[k1].committed_paths_min` → (d) reds.
+  Isolation is the whole reason this direction exists: at |P| = 0 the *other three parts are
+  vacuously green* — (a) agrees over three empty readbacks, (b) loses no rung, (c) is a universal
+  over an empty domain — so (d) is not merely the part that moves, it is the **only** part that
+  *can* move. Note it fires below the floor and not merely at zero: at |P| = 1 the MIN is the
+  identity and §5.5's soundness argument for choosing MIN over MAX is absent, not weak.
+
+  All three are stated in terms of the *enumeration* rather than a path's density on purpose:
   "drop the weakest path" would also move `D_est` and could not distinguish (d) from the rule it
   feeds.
 
@@ -1488,13 +1526,22 @@ headline was false as written. Rather than a headline and a retraction, the limi
   R0d(b) quantifies over **ladder rungs**, not over paths — its own red mutation is *"drop the
   ladder to its decision row only"* — so it catches a path measured at too few rungs and never a
   path that was never measured at all. Under Rev 11's `min`-over-paths aggregation that is exactly
-  the live lever, because MIN is monotone under set inclusion. **R0d(d) is what closes it**: one
-  census row per enumerated path, enumeration hashed beside the readback.
+  the live lever, because MIN is monotone under set inclusion. **R0d(d) is what closes it**: set
+  equality between the census rows and the enumeration, enumeration hashed beside the readback.
+  ⚠️ This sentence read *"one census row per enumerated path"* — the per-path universal Rev 13
+  replaced in §8 and in the frozen file and left standing here, the fourth site of a four-site
+  repair.
   **The residual, stated rather than claimed away — R0d bounds the measurement, not the choice.**
   Which paths are committed is settled at R0b, one rung earlier and by a different act, and no gate
   in R0 asserts that the committed set is representative of the content class. That is the same
   unsolved axis as the covered-fraction floor above, reached from the domain side instead of the
-  frame side.
+  frame side. **Two sharper limits inside it, both named rather than left to be found.** (i) R0b(e)
+  and R0d(d) bound the set's *cardinality* at `[k1].committed_paths_min`, and cardinality is not
+  representativeness — two paths clear the floor and can both be flattering. (ii) The floor and the
+  set equality bind path **membership**; a path's *definition* lives in test constants (§5.7) that
+  no digest in R0 hashes, so **re-aiming** a committed path is neither a membership change nor a row
+  count change and no gate part in R0 sees it. Both are exposures of the same kind as the choice
+  itself: they are constrained by party separation and commit ordering, not by a gate.
 * **When a censused frame fails non-degeneracy, R0d reds** — the rung is not commit-eligible and
   nothing is adjudicated. ⚠️ `[k1].k1_decision_rule` also maps that input to "UNDECIDED, escalate",
   which is a different act; **R0d's gate takes precedence**, because a frame that cannot be
@@ -1867,11 +1914,21 @@ claim. The rule predicted its own residual defect set. What it did not cover:
    single bullet of `internal_docs_anchors.rs`, in the file that denounces exactly this defect in
    its own module doc.
 
-⚠️ **And the family moved.** It has left this document's prose and gone into the **justification
-text of the repairs** — the `//!` and `///` comments in the gate files, and the tests' own stated
-premises. Three of Rev 12's five blocking findings were defects there rather than here. The plan has
-a reachability gate, an anchor gate and a hash gate pointed at it; **the gates have nothing pointed
-at them but a reader.** That asymmetry is now the campaign's largest unmechanised surface.
+⚠️ **Rev 13 wrote here that "the family moved" out of this document's prose and into the gate
+files' comments, and Rev 14 withdraws it: it never moved, and the geography was the wrong model.**
+Rev 13's own defects were distributed across all three surfaces — gate-file comments, plan prose
+(including the paragraph immediately above and §9.1's stale per-path form) and both frozen files —
+and the count the claim rested on had one home and no derivation, which is precisely the defect
+§14.1 was created to own. **The partition that does hold, on ten confirmations and no
+counterexample:** defects do not live in a *surface*, they live in the **volunteered positive
+claim**, and they surface in whichever file that revision volunteered most in. Rev 12 volunteered in
+the gate comments and its defects were there; Rev 13 volunteered everywhere and its defects were
+everywhere. A later author who reads this section as "watch the gate files now" will look in the
+wrong place — the instruction is to watch what the revision *added*, wherever it added it.
+
+That said, one asymmetry is real and unrelated to the false claim: the plan has a reachability gate,
+an anchor gate and a hash gate pointed at it, and **the gates have nothing pointed at them but a
+reader**. That is a coverage gap worth closing on its own merits, not evidence of a migration.
 
 Repairing R2's row is out of this document's scope
 (§0 binds R1–R8 to the research document), so it is named as the first thing the R1 author
