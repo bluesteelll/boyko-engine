@@ -31,8 +31,8 @@
 # and Rev 7 -- the third occurrence caught by an adversarial pass rather than by the fields
 # themselves, in the very revision whose slogan was about fixes that do not land. They are updated
 # here in the same act as the edit, which is the whole of their job.
-schema_version = 23
-frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 27"
+schema_version = 24
+frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 28"
 frozen_date = "2026-07-28"
 
 # THE EDIT DISCIPLINE, stated because Rev 4 and Rev 5 both edited this file in place while its
@@ -47,6 +47,13 @@ frozen_date = "2026-07-28"
 freeze_begins_at = "R0a records the sha256"
 pre_r0a_edits_are_authoring_not_amendment = true
 
+# REV 28 -- no threshold changes. R0c now names the PER-RUNG EXTENT ROUTE that
+# assert_achieved_extent below has always gated (which client extent per rung, and whether the
+# 2x SSAA composite is the route to it, with arming ASSERTED rather than trusted -- the probe
+# degrades to Off silently). The plan's section 11 records the display extent as an UNMEASURED
+# precondition: it is the one environment row that gates a rung rather than informing a design
+# decision.
+#
 # ---------------------------------------------------------------------------------------------
 # [census] — the resolution ladder. Frozen because density scales as 1/resolution^2, which makes
 # resolution the parameter most able to decide K1 silently.

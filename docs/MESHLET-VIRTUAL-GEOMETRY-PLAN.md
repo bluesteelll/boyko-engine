@@ -1,6 +1,6 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 27** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 28** — **NOT APPROVED, and no code exists.** This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
@@ -1272,7 +1272,28 @@ gate.
 
 **Lands:** `TRANSFER_SRC` on the `vb_id` ring ([`targets.rs`](../crates/boyko_rhi_vulkan/src/present/targets.rs):862~-872); an `Option`-threaded census
 readback armed by env knob; the host-side histogram + triangles-per-pixel reducer;
+**the PER-RUNG EXTENT ROUTE** — which client extent is requested for each ladder rung and whether
+the 2× SSAA composite is the route to it, with **SSAA arming ASSERTED rather than trusted**;
 `crates/boyko_app/tests/vg_density_census.rs`. <!-- doc-anchor-ignore -->
+
+> ⚠️ **The extent route is Rev 28's, and its absence was a precondition with no producer — the
+> §3.4 shape on a different axis.** `[census].assert_achieved_extent` gates every rung, and the
+> render extent is a function of the OS-granted client area: `Window::open` inflates the requested
+> CLIENT rect with `AdjustWindowRectEx(WS_OVERLAPPEDWINDOW)` and the composite is `native` or
+> `2× native` under armed SSAA. So each rung is reachable by *some* combination of requested
+> client extent and SSAA arming — the top rung needs either a 3840×2160 client or a 1920×1080
+> client with SSAA armed — and **no text said which**, while R0c's Lands list contained no producer
+> for either. The producer is public API inside the file R0c lands (`EnginePlugins::window` plus
+> `.with_ssaa_scale`), so this is a naming omission rather than missing mechanism.
+>
+> **And the arming must be asserted:** the SSAA probe **degrades to Off silently** on a caps or
+> VRAM miss, so a rung that trusts arming would measure `native` and red (d) with no indication
+> why. ⚠️ Whether a given client extent is actually granted on this box is **unmeasured** — the
+> window is created without `WS_VISIBLE` and the sweeps run it hidden, and nothing in the tree
+> handles `WM_GETMINMAXINFO`, so the max-track question is open in both directions. §11 records it
+> as a precondition rather than a derivation, because a defect that cannot be demonstrated is not a
+> finding — and if a rung's request is refused, today's disposition is that **(d) reds with no
+> fallback named**, which is an instrument failure and adjudicates nothing.
 
 > ⚠️ **R0c lands the first in-frame image readback in the shipped recorder, and that is a bigger
 > step than "reuse an existing seam" implies.** Every `copy_image_to_buffer` call site in this tree
@@ -1885,6 +1906,20 @@ machine and the tree as of authoring; they are **evidence for design decisions, 
 thresholds**. No test reads them, and any rung that depends on one re-derives it in its own code.
 
 **Probed 2026-07-26, this box, working tree on branch `feat/multi-paradigm-render` at `a139799`.**
+
+⚠️ **DISPLAY EXTENT — NOT PROBED, and it is the one row here that is a PRECONDITION rather than
+evidence.** Every other number in this section is context; this one gates R0c(d) on every ladder
+rung. `[census].assert_achieved_extent` compares the achieved render extent against the requested
+rung, and the achieved extent is the OS-granted client area (inflated by `AdjustWindowRectEx`),
+optionally doubled by armed SSAA. Whether a 1920×1080 client is granted on this display — and so
+whether the top rung is reached directly or only through the 2× composite — **has never been
+measured here**: every windowed render in the tree runs at 512², the only 1920×1080 sites are
+headless compute dispatches, and the window is created without `WS_VISIBLE` with the sweeps running
+it hidden, so the max-track path may not even be exercised. One probe settles it, and R0c is where
+it belongs because R0c is the rung that first requests a non-512² extent. Recorded as unmeasured
+rather than derived: this campaign's standard is that a defect one cannot demonstrate is not a
+finding, and the requirement on R0c — name the per-rung route, assert the arming — is the same
+whichever way the probe comes out.
 
 * **UE5:** no installation present. The only Epic-shaped directory on either volume,
   `D:\Epic Games`, exists and is **empty** (0 entries). No `UnrealEditor.exe` anywhere probed.
