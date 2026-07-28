@@ -189,11 +189,19 @@ it**: the set is built in `present/targets.rs` (the `vb_set0_tex_froxel` builder
 `vb_shade_tex_froxel_pipeline` are all `Some`), and `present/passes/vb.rs`'s `(textured, froxel)`
 match arm `expect`s BOTH `scene.vb_shade_tex_froxel_pipeline` and `targets.vb_set0_tex_froxel` to
 be `Some` — a mis-resolved boot panics loudly there instead of silently falling back to the
-non-froxel pipeline. ⚠️ The prose at BOTH of those sites is itself VB-P1a-era and never refreshed:
-each still says the arm bit is "hardcoded OFF" and the set "ALWAYS `None` in production this rung",
-and each cites `ResolvedRenderPath::froxel_light_cull`'s doc — which VB-P1b DID update, so the
-comments now contradict their own referent. Trust the `expect`, the field doc and the pins, not the
-prose beside them.
+non-froxel pipeline.
+
+⚠️ **This paragraph used to end "Trust the `expect`, the field doc and the pins, not the prose
+beside them" — a workaround standing in for a repair, and it under-counted the damage by an order
+of magnitude.** It said the stale prose was at "BOTH of those sites". Grepping the class found
+**thirteen**, across `graph_bridge.rs`, `passes/vb.rs`, `scene_types.rs`, `targets.rs` and
+`vb_froxel_spv_sync.rs`, and `graph_bridge.rs` carried "VB-P1b **ARMED** the cull" 535 lines below
+its own "hardcoded OFF". Every one is now repaired to the true statement: the arm is **default-OFF,
+an owner opt-in** via `LightingConfig::clusters_enabled`, so an unarmed boot builds and records
+nothing — which is all the 0%-gate byte-identity argument ever needed — while `vb_mesh_froxel` and
+`vb_mesh_tex_froxel` arm it, reach the froxel cells and are golden-pinned with screenshot dumps.
+The count needed three widenings to settle: the first grep was capped by `head`, the second was
+restricted to `*.rs`. **A count in a finding is a lower bound even when the finding is right.**
 
 `.spv` byte gate: `crates/boyko_rhi_vulkan/tests/vb_froxel_spv_sync.rs` —
 `vb_froxel_variant_spv_byte_identical` re-DXCs the three FROXEL rows (`vb_resolve_froxel`,

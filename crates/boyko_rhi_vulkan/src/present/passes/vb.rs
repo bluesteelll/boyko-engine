@@ -162,8 +162,10 @@ impl Renderer<'_> {
         }
         // === VB-P1a ("dark infra"): the L1 clustered froxel light-cull RESET — byte-for-byte
         // port of `record_forward`'s own `light_cull` fill+barrier. Recorded ONLY when
-        // `scene.cluster_cull.is_some()` (hardcoded OFF this rung, so this block NEVER records
-        // in production) AND the scene wires the cull set (the SAME "4-buffers-Some" gate
+        // `scene.cluster_cull.is_some()` (⚠️ default-OFF via the owner's
+        // `LightingConfig::clusters_enabled`, NOT hardcoded off — this block does not record on an
+        // unarmed boot, and does record on `vb_mesh_froxel`'s) AND the scene wires the cull set
+        // (the SAME "4-buffers-Some" gate
         // `declare_vb_graph` uses). ===
         if let (Some(_cull_pipeline), Some(_cull_set), Some(_grid), Some(_index), Some(alloc)) = (
             scene.cluster_cull,
@@ -953,11 +955,15 @@ impl Renderer<'_> {
                 // VB-P1c closes the VB-P1a scope cut: `textured`/`froxel` are INDEPENDENT axes
                 // (`vb_tex_active` never reads `cluster_cull`), so all four combinations select
                 // their own pipeline + Set-0 — `vb_set0_tex_froxel` (the TEXTURED+FROXEL combined
-                // Set-0) exists exactly for the `(true, true)` cell. Inert today: the arm bit is
-                // hardcoded OFF (`ResolvedRenderPath::froxel_light_cull`'s doc), so
-                // `scene.cluster_cull` is ALWAYS `None` on every current boot, textured or not —
-                // this frame's `(true, false)`/`(false, false)` cells are the only ones reachable
-                // in production.
+                // Set-0) exists exactly for the `(true, true)` cell. ⚠️ **The arm bit is
+                // default-OFF, not hardcoded off, and this comment said the latter.**
+                // `froxel_light_cull = clusters_wanted && path == VisibilityBuffer`, and
+                // `clusters_wanted` is the owner's `LightingConfig::clusters_enabled` (default
+                // `false`). So the `(true, false)`/`(false, false)` cells are the only ones a
+                // DEFAULT boot reaches — but `vb_mesh_froxel` and `vb_mesh_tex_froxel` set the
+                // flag `true`, reach the froxel cells, and are golden-pinned with screenshot
+                // dumps. Six sibling comments said the same false thing; VB-P1b armed the cull
+                // and the repair landed in the code and in one comment, not in the other seven.
                 let textured = scene.vb_tex_active();
                 let froxel = scene.cluster_cull.is_some();
                 let (vb_shade_pipeline, vb_shade_set0) = match (textured, froxel) {
@@ -1108,8 +1114,9 @@ impl Renderer<'_> {
 
                 // VB-P1a ("dark infra"): select the FROXEL-variant pipeline + its OWN WIDER
                 // Set-0 (`vb_set0_froxel`, 10 bindings) when the arm is built
-                // (`scene.cluster_cull.is_some()` — hardcoded OFF this rung, so this is ALWAYS
-                // the base arm in production today), else the base `vb_resolve_pipeline` +
+                // (`scene.cluster_cull.is_some()` — ⚠️ default-OFF, not hardcoded off, so this is
+                // the base arm on an unarmed boot and the froxel arm on `vb_mesh_froxel`'s),
+                // else the base `vb_resolve_pipeline` +
                 // `vb_set0` — mutually exclusive by construction (mirrors `vb_shade`'s own
                 // `textured` selector immediately above).
                 let froxel = scene.cluster_cull.is_some();

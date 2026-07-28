@@ -590,8 +590,9 @@ pub struct GBufferTargets {
     /// `ClusterGrid` @8 + `LightIndexList` @9, bound to [`GBufferScene::cluster_grid`]/
     /// [`GBufferScene::light_index`]). `Some` iff [`GBufferScene::vb_layout0_froxel`] AND
     /// [`GBufferScene::cluster_grid`] AND [`GBufferScene::light_index`] are all `Some` (the froxel
-    /// arm is built — hardcoded OFF today, `ResolvedRenderPath::froxel_light_cull`'s doc) — `None`
-    /// on every current boot (the 0%-gate). Built right after `vb_set0_tex` (needs the SAME
+    /// arm is built — ⚠️ default-OFF via the owner's `LightingConfig::clusters_enabled`, NOT
+    /// hardcoded off) — `None` on every DEFAULT boot, which is what the 0%-gate rests on;
+    /// `Some` on `vb_mesh_froxel`'s. Built right after `vb_set0_tex` (needs the SAME
     /// `lit[i]`/`vb.vb_id[i]` + the cluster buffers). The recorder selects
     /// `vb_set0_froxel[self.frame_index]` in place of `vb_set0`/`vb_set0_tex` when the froxel arm
     /// is armed.
@@ -604,7 +605,7 @@ pub struct GBufferTargets {
     /// IDENTICAL to [`Self::vb_set0_froxel`]'s own — mirrors the `vb_set0`/`vb_set0_tex` pairing,
     /// R5's "one shared layout, a distinct set" rule). `Some` iff
     /// [`GBufferScene::vb_layout0_froxel`] AND [`GBufferScene::cluster_grid`] AND
-    /// [`GBufferScene::light_index`] (the froxel arm — hardcoded OFF today) AND
+    /// [`GBufferScene::light_index`] (the froxel arm — default-OFF, an owner opt-in) AND
     /// [`GBufferScene::vb_tex_instance_material_ring`] AND
     /// [`GBufferScene::vb_shade_tex_froxel_pipeline`] (the TEXTURED resources + the
     /// TEXTURED+FROXEL `vb_shade` pipeline) are all `Some` — `None` on every current boot (the
@@ -2347,7 +2348,7 @@ struct DeferredSets {
     /// set including `vb_set0`.
     vb_set0_tex: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// VB-P1a ("dark infra"): the froxel-variant Set-0 vocabulary set — `None` unless the froxel
-    /// arm is built (hardcoded OFF today). Built immediately after `vb_set0_tex` (both need
+    /// arm is built (default-OFF, an owner opt-in). Built immediately after `vb_set0_tex` (both need
     /// `core.lit[i]` + `vb.vb_id[i]` + the cluster buffers), so its own error path tears down
     /// every prior set including `vb_set0_tex`.
     vb_set0_froxel: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
@@ -3264,8 +3265,8 @@ impl DeferredSets {
         // `LightIndexList` @9). Built immediately after `vb_set0_tex` (both need `core.lit`/
         // `vb.vb_id`, the SAME "needs `core`" point). `None` unless the froxel arm is built
         // (`scene.vb_layout0_froxel`/`scene.cluster_grid`/`scene.light_index` all `Some` —
-        // hardcoded OFF today, `ResolvedRenderPath::froxel_light_cull`'s doc, so this is ALWAYS
-        // `None` in production this rung).
+        // ⚠️ default-OFF via the owner's `LightingConfig::clusters_enabled`, NOT hardcoded off, so
+        // this is `None` on an unarmed boot and `Some` on `vb_mesh_froxel`'s).
         let vb_set0_froxel: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> = if let (
             Some(layout),
             Some(grid),
@@ -3381,9 +3382,9 @@ impl DeferredSets {
         // unless the froxel arm is built AND the TEXTURED resources + the TEXTURED+FROXEL
         // `vb_shade` pipeline both exist (`scene.vb_layout0_froxel`/`scene.cluster_grid`/
         // `scene.light_index`/`scene.vb_tex_instance_material_ring`/
-        // `scene.vb_shade_tex_froxel_pipeline` all `Some` — hardcoded OFF today,
-        // `ResolvedRenderPath::froxel_light_cull`'s doc, so this is ALWAYS `None` in production
-        // this rung).
+        // `scene.vb_shade_tex_froxel_pipeline` all `Some` — the arm is default-OFF via the
+        // owner's `LightingConfig::clusters_enabled`, NOT hardcoded off, so this is `None` on an
+        // unarmed boot and `Some` on `vb_mesh_tex_froxel`'s).
         let vb_set0_tex_froxel: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> = if let (
             Some(layout),
             Some(grid),
@@ -4267,16 +4268,17 @@ impl DeferredSets {
                 }
             }
             // VB-P1c: the TEXTURED+FROXEL-variant Set-0 vocabulary set, `Option`-guarded (present
-            // only when the froxel arm AND the TEXTURED resources both exist — hardcoded OFF
-            // today). Built AFTER `vb_set0_froxel` (so destroyed BEFORE it, reverse acquisition).
+            // only when the froxel arm AND the TEXTURED resources both exist — the arm is
+            // default-OFF, an owner opt-in). Built AFTER `vb_set0_froxel` (so destroyed BEFORE
+            // it, reverse acquisition).
             if let Some(vtf) = self.vb_set0_tex_froxel {
                 for g in vtf {
                     RhiDevice::destroy_bind_group(ctx, g);
                 }
             }
             // VB-P1a ("dark infra"): the froxel-variant Set-0 vocabulary set, `Option`-guarded
-            // (present only when the froxel arm is built — hardcoded OFF today). Built AFTER
-            // `vb_set0_tex` (so destroyed BEFORE it, reverse acquisition).
+            // (present only when the froxel arm is built — default-OFF, an owner opt-in). Built
+            // AFTER `vb_set0_tex` (so destroyed BEFORE it, reverse acquisition).
             if let Some(vf) = self.vb_set0_froxel {
                 for g in vf {
                     RhiDevice::destroy_bind_group(ctx, g);

@@ -10,9 +10,11 @@
 //! * `vb_shade_froxel.comp.spv` (`vb_shade.comp.hlsl`, `-D FROXEL=1`)
 //! * `vb_shade_tex_froxel.comp.spv` (`vb_shade.comp.hlsl`, `-D TEXTURED=1 -D FROXEL=1`)
 //!
-//! The arm bit (`ResolvedRenderPath::froxel_light_cull`) is hardcoded OFF this rung — nothing
-//! loads these modules — but the committed `.spv` must still byte-match their source under the
-//! frozen recipe, exactly like every other variant family in this crate.
+//! The arm bit (`ResolvedRenderPath::froxel_light_cull`) is **default-OFF, not hardcoded off** —
+//! an owner opt-in via `LightingConfig::clusters_enabled` — so a DEFAULT boot loads none of these
+//! modules, while `vb_mesh_froxel` / `vb_mesh_tex_froxel` do load them and are golden-pinned.
+//! Either way the committed `.spv` must byte-match their source under the frozen recipe, exactly
+//! like every other variant family in this crate.
 //!
 //! SKIPS (with an eprintln) when no `dxc` resolves on the host — the byte gate is only as
 //! hermetic as the pinned VulkanSDK 1.4.350.0 toolchain that produced the committed artifacts; a
@@ -105,8 +107,8 @@ fn vb_froxel_variant_spv_byte_identical() {
     }
 }
 
-/// VB-P1a byte-identity oracle (the whole point of the rung): the arm bit is hardcoded OFF, so
-/// the BASE (non-FROXEL) `.spv` for every VB shading variant this seam touched must stay
+/// VB-P1a byte-identity oracle (the whole point of the rung): an unarmed boot takes the base arm,
+/// so the BASE (non-FROXEL) `.spv` for every VB shading variant this seam touched must stay
 /// byte-identical to its pre-VB-P1a build — the `#else` arm is token-for-token the prior flat
 /// scan, so a base compile (no `-D FROXEL`) is physically unperturbed by the seam.
 #[test]

@@ -2633,8 +2633,12 @@ pub(crate) struct VbPassPlan {
     pub(crate) light_upload: Option<crate::framegraph::PassId>,
     /// VB-P1a ("dark infra"): the L1 clustered froxel light-cull pass — the SAME "4-buffers-Some"
     /// gate [`ForwardPassPlan::light_cull`] uses (`scene.cluster_cull`/`cluster_grid`/
-    /// `light_index`/`light_index_alloc` all `Some`), hardcoded OFF this rung
-    /// (`ResolvedRenderPath::froxel_light_cull`'s doc) so this is ALWAYS `None` in production.
+    /// `light_index`/`light_index_alloc` all `Some`). ⚠️ The arm is **default-OFF, not hardcoded
+    /// off**: `froxel_light_cull = clusters_wanted && path == VisibilityBuffer`, and
+    /// `clusters_wanted` threads from the owner-set `LightingConfig::clusters_enabled`, whose
+    /// default is `false`. So this is `None` on every DEFAULT boot — which is all the 0%-gate
+    /// byte-identity argument needs — but NOT on every boot: `vb_mesh_froxel` and
+    /// `vb_mesh_tex_froxel` set it `true` and are golden-pinned.
     /// Resets `light_index_alloc` (transfer), reads the light table, writes
     /// `cluster_grid`/`light_index`. Declared BEFORE `csm`/`atlas`/`vb_resolve`/`vb_shade` (which
     /// read the cull's writes) — the SAME declaration-order-parity discipline every pass in this
@@ -3202,9 +3206,11 @@ impl Renderer<'_> {
         // Pass `light_cull` (L1 clustered froxel cull) — VB-P1a ("dark infra"). Gated EXACTLY as
         // `declare_forward_graph`'s own `light_cull` pass (the "4-buffers-Some" predicate: the
         // cull pipeline AND all three cluster buffers are `Some`) — VB-ONLY, no separate path
-        // check needed (this declarator IS the VB one). Hardcoded OFF this rung
-        // (`ResolvedRenderPath::froxel_light_cull`'s doc), so `scene.cluster_cull` is ALWAYS
-        // `None` in production ⇒ this is ALWAYS `None` ⇒ zero declared accesses ⇒ byte-identical.
+        // check needed (this declarator IS the VB one). ⚠️ Default-OFF, not hardcoded off — the
+        // arm is the owner's `LightingConfig::clusters_enabled` (default `false`), so on an
+        // UNARMED boot `scene.cluster_cull` is `None` ⇒ this is `None` ⇒ zero declared accesses ⇒
+        // byte-identical. That is what the 0%-gate rests on, and it is unaffected by the armed
+        // boots existing (`vb_mesh_froxel`, golden-pinned).
         // Resets `light_index_alloc` (transfer), reads the light table, writes
         // `cluster_grid`/`light_index` — byte-for-byte the SAME access shape
         // `ForwardPassPlan::light_cull`'s declaration site uses.

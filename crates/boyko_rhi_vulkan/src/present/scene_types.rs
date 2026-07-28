@@ -2452,8 +2452,9 @@ pub struct GBufferScene<'a> {
     pub vb_tex_instance_material_ring: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
 
     // ---- VB-P1a ("dark infra"): the froxel light-cull machinery, gated on the single boot-frozen
-    // arm bit `ResolvedRenderPath::froxel_light_cull` (hardcoded OFF this rung — every field below
-    // stays `None` in production, so nothing is built/selected/recorded). See
+    // arm bit `ResolvedRenderPath::froxel_light_cull` (⚠️ default-OFF via the owner's
+    // `LightingConfig::clusters_enabled`, NOT hardcoded off — every field below stays `None` on an
+    // unarmed boot, so nothing is built/selected/recorded there; `vb_mesh_froxel` arms them). See
     // `GpuSceneBundles::build_froxel_light_cull`'s doc for the app-side build this feeds. -------
     /// The froxel-only Set-0 bind-group LAYOUT — 10 bindings: [`Self::vb_layout0`]'s own 0..7
     /// PLUS `ClusterGrid` @8 (COMPUTE, STORAGE_BUFFER) + `LightIndexList` @9 (COMPUTE,
