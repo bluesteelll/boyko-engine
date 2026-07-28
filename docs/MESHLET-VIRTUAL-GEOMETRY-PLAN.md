@@ -1,6 +1,6 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 28** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 29** — **NOT APPROVED, and no code exists.** This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
@@ -1840,6 +1840,22 @@ headline was false as written. Rather than a headline and a retraction, the limi
   no digest in R0 hashes, so **re-aiming** a committed path is neither a membership change nor a row
   count change and no gate part in R0 sees it. Both are exposures of the same kind as the choice
   itself: they are constrained by party separation and commit ordering, not by a gate.
+* ⚠️ **R0 does not know that any ladder rung's extent is obtainable, and the question is open in
+  BOTH directions.** `[census].assert_achieved_extent` gates every rung; the achieved extent is the
+  OS-granted client area, optionally doubled by armed SSAA, so a rung R is reachable iff
+  `R ∈ {C, 2C}` for some grantable client `C`. **The largest grantable client on this box has never
+  been measured** — every windowed render in the tree is 512², and the window is created without
+  `WS_VISIBLE` and run hidden, so the max-track path may never be exercised. If no `C` yields the
+  top rung, `D_est`'s numerator is unobtainable and K1 is adjudicable in **neither** direction — an
+  instrument failure that produces no disposition, which is R0c(d)'s stated behaviour today, with
+  no fallback named.
+  ⚠️ **And the framing may be wrong at the root:** the tree already carries a **headless** offscreen
+  raster-and-readback path ([`graphics_offscreen.rs`](../crates/boyko_rhi_vulkan/tests/graphics_offscreen.rs)),
+  which boots a device with no window and renders through dynamic rendering. If the census drives
+  that path, the OS client area is **not on the critical path at all** and this entire limit
+  dissolves. R0c's Lands list names the windowed route because that is what the shipped recorder
+  uses; whether the census should use it is the choice R0c must make, and it is cheap to settle —
+  one `Window::open` at the requested extent plus `GetClientRect`, hidden, no device needed.
 * ⚠️ **R0's CORPUS CANNOT BE INGESTED ON TODAY'S ENGINE, and that is a blocker on R0b rather
   than a limit on R0d.** Rev 22 recorded here that no R0 gate bounds the corpus's total footprint
   and that an oversized corpus is "discovered at R0d as an allocation failure". **Rev 23 inverts
@@ -1907,19 +1923,13 @@ thresholds**. No test reads them, and any rung that depends on one re-derives it
 
 **Probed 2026-07-26, this box, working tree on branch `feat/multi-paradigm-render` at `a139799`.**
 
-⚠️ **DISPLAY EXTENT — NOT PROBED, and it is the one row here that is a PRECONDITION rather than
-evidence.** Every other number in this section is context; this one gates R0c(d) on every ladder
-rung. `[census].assert_achieved_extent` compares the achieved render extent against the requested
-rung, and the achieved extent is the OS-granted client area (inflated by `AdjustWindowRectEx`),
-optionally doubled by armed SSAA. Whether a 1920×1080 client is granted on this display — and so
-whether the top rung is reached directly or only through the 2× composite — **has never been
-measured here**: every windowed render in the tree runs at 512², the only 1920×1080 sites are
-headless compute dispatches, and the window is created without `WS_VISIBLE` with the sweeps running
-it hidden, so the max-track path may not even be exercised. One probe settles it, and R0c is where
-it belongs because R0c is the rung that first requests a non-512² extent. Recorded as unmeasured
-rather than derived: this campaign's standard is that a defect one cannot demonstrate is not a
-finding, and the requirement on R0c — name the per-rung route, assert the arming — is the same
-whichever way the probe comes out.
+⚠️ **DISPLAY EXTENT — NOT PROBED. It is NOT recorded here, and that is Rev 29's correction.**
+Rev 28 put it in this section while calling it "a PRECONDITION rather than evidence" — in the one
+section whose heading is *NOTHING READS THESE NUMBERS* and whose preamble says these are "evidence
+for design decisions, not gate thresholds". A precondition cannot live where the charter says
+nothing reads it; every other fact here has a rung that re-derives and MEASURES it, while the
+nominated re-derivation for this one (`assert_achieved_extent`) measures the consequence and reds.
+The limit now lives in §9.1, where limits go, and the route lives in R0c's Lands list.
 
 * **UE5:** no installation present. The only Epic-shaped directory on either volume,
   `D:\Epic Games`, exists and is **empty** (0 entries). No `UnrealEditor.exe` anywhere probed.
