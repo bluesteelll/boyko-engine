@@ -31,8 +31,8 @@
 # and Rev 7 -- the third occurrence caught by an adversarial pass rather than by the fields
 # themselves, in the very revision whose slogan was about fixes that do not land. They are updated
 # here in the same act as the edit, which is the whole of their job.
-schema_version = 10
-frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 14"
+schema_version = 11
+frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 15"
 frozen_date = "2026-07-28"
 
 # THE EDIT DISCIPLINE, stated because Rev 4 and Rev 5 both edited this file in place while its
@@ -274,6 +274,9 @@ d_est_min = 1.0
 
 # What the CHEAP census (usage bit + Option-threaded copy, zero new .spv) can decide, soundly:
 #   D_est >= d_est_min  =>  K1 REFUTED. Density is genuinely >= 1 tri/pixel; the mechanism exists.
+#   (Sufficient only INSIDE k1_decision_rule's preconditions -- the domain floor first, then
+#   non-degeneracy. This line states the direction, never the whole rule; four texts restated it as
+#   though it were the whole rule and had to be re-derived when the rule gained a clause.)
 # It can decide nothing else. Everything below d_est_min is indistinguishable from the instrument's
 # own ceiling seen from underneath.
 # REV 9 -- THE NON-DEGENERACY CONJUNCT IS PART OF THE RULE, not a separate precondition, and
@@ -327,16 +330,35 @@ k1_path_aggregation = "min_over_committed_camera_paths"
 # the honest status; calling it an assertion would make it the fourth field in this file frozen
 # without a reader.
 #
-# ⚠️ REV 14 WITHDRAWS REV 13'S STATED REASON FOR THE EXTRA-ROW HALF -- "so cherry-picking from the
-# additive side passed it" -- which THIS FILE refutes four keys below. Under `k1_path_aggregation`
-# the min's domain IS the enumeration, so a row for a path outside it is inert; and under any
-# rows-based reduction min(S union {x}) <= min(S), which moves AWAY from REFUTED, the favourable
-# outcome. No additive row can produce a favourable verdict -- that is the same monotonicity this
-# file already uses to argue MIN closes the ADD lever and opens the OMIT one. The extra-row half is
-# KEPT and its true reason is DOMAIN INTEGRITY: the run and the enumeration must denote the same
-# set, because every downstream quantifier (`degenerate(p)`, the MIN, R0d(c)) is indexed over the
-# enumeration while the rows are what was actually measured, and a silent divergence between them
-# makes all three range over something no text names.
+# ⚠️ REV 15 -- THE EXTRA-ROW HALF IS KEPT AND ITS JUSTIFICATION IS WRITTEN FOR THE THIRD TIME,
+# because the first two were each refuted by this file. The rule was never in doubt; only the
+# reason. Both failures are recorded rather than overwritten, since they are the same defect twice
+# and the pattern is the point.
+#
+# Rev 13 said the per-path universal let "cherry-picking from the additive side" pass. Refuted:
+# under `k1_path_aggregation` the min's domain IS the enumeration, so an unenumerated row is inert.
+#
+# Rev 14 said the two must denote the same set or the downstream quantifiers "range over something
+# no text names", and volunteered "No additive row can produce a favourable verdict". Refuted on
+# BOTH halves. (i) The harm named is a property of the MISSING-row direction only: with
+# enum = {A,B} and rows = {A,B,C}, `degenerate(p)`, the MIN and R0d(c) are all indexed over {A,B},
+# which two texts name -- the consequence does not occur in the direction the reason was written
+# for. (ii) The universal is FALSE under the second of the two arms Rev 14 itself invoked. Evaluate
+# the WHOLE rule rows-based, which is what "rows-based" means to an implementer: S = {a} with
+# d_est = 1.60 hits clause 1 (|S| = 1 < 2) -> NOT ADJUDICATED, explicitly not favourable; add x
+# with d_est = 1.40 and |S'| = 2 clears the floor, min = 1.40 >= 1.0 -> REFUTED, favourable. An
+# additive row moved not-favourable to favourable. `min` is monotone DECREASING under insertion and
+# `|.|` is monotone INCREASING, and Rev 14 made the favourable branch reachable only after `|.|`
+# clears a floor -- it did the algebra for one monotonicity while the same commit, four keys away,
+# introduced the other.
+#
+# THE REASON THAT SURVIVES, and it is about evidence rather than about domains: the row set is the
+# only observable record of WHICH SOURCE THE RUN ITERATED. The enumeration and the test constants
+# are two authored lists that can disagree, and a run driven by the wrong one is invisible in every
+# other artefact -- the plan's own Rev 12 post-mortem on (d)'s deleted disjunct is the worked case.
+# Set equality is what makes the run's actual domain observable at all. No universal is claimed
+# here about what an additive row can or cannot do to the verdict; that question is decided by
+# `k1_decision_rule`, and this half exists to make the input to that rule checkable.
 committed_paths_rule = "committed camera paths are enumerated in assets/vg_corpus/CORPUS.toml at R0b; R0b(e) asserts |P| >= committed_paths_min at the rung that AUTHORS the set and R0d(d) asserts SET EQUALITY between the census row set and the enumeration plus the same floor at the rung that CONSUMES it (a missing row, an extra row and an undersized enumeration all red); R0d(d) RECORDS the sha256 of the enumeration beside the readback hashes as evidence, not as an assertion; R0 does not assert the set is representative, and (d) cannot see an edit to the enumeration made before the run"
 
 # REV 14 -- THE CARDINALITY FLOOR, absent until now and the one input on which EVERY R0d gate part
@@ -352,9 +374,15 @@ committed_paths_rule = "committed camera paths are enumerated in assets/vg_corpu
 # nothing. This is the empty-frame defect that `min_covered_pixels` exists to close, one quantifier
 # up, on an axis nothing guarded.
 #
-# It was REACHABLE, not hypothetical: the plan enumerates R0b's five gate parts and shows that none
-# of them reads the camera-path column, and that enumeration was written at Rev 13 to withdraw a
-# different claim -- the proof was on the page and its consequence was not drawn.
+# It was REACHABLE, not hypothetical. AS OF REV 13 the plan enumerated R0b's five gate parts and
+# showed that none of them read the camera-path column -- an enumeration written to withdraw a
+# different claim, so the proof was on the page and its consequence was not drawn. ⚠️ REV 15
+# re-derives that sentence rather than carrying it: R0b has SIX parts since Rev 14 and the sixth,
+# (e), reads exactly that column. Rev 14 changed the measured input this evidence is a function of
+# and left the evidence standing here, in the file R0a freezes and in the plan -- amendment 2
+# breached in the commit that restated amendment 2. The CONCLUSION is unaffected: (e) bounds the
+# set's cardinality, which is not the same as pinning its membership, so the reachability argument
+# above stands on the five parts that predate it.
 #
 # THE VALUE IS DERIVED, NOT PICKED. At |P| = 1 the MIN is the identity, so `min` and `max` coincide
 # and the soundness argument for choosing MIN -- "a favourable verdict must clear the bar on the

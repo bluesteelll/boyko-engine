@@ -1,6 +1,6 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 14** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 15** — **NOT APPROVED, and no code exists.** This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
@@ -290,7 +290,7 @@ threshold edit alongside a legitimate fill. It is gated instead by the `PENDING`
 
 | # | Kill | Test | Disposition if it fires |
 |---|---|---|---|
-| **K1** | **No content, no mechanism.** The corpus never approaches ~1 triangle/pixel, so cluster LOD has no mechanism of action on our content. | **Refute-only at R0.** `D_est ≥ [k1].d_est_min` at the decision resolution **refutes** K1 outright (a lower bound proves density). **Firing is UNREACHABLE at R0** (`[k1].k1_fire_at_r0`): the upper-bound instrument is mis-sited and probably inert, and is recorded UNSOLVED rather than scheduled. §5.6, §9 clause 1. | Refuted → the mechanism exists, proceed to R1. Undecided → owner VALUES call, §13's *K1-UNDECIDED* question, which blocks R1. |
+| **K1** | **No content, no mechanism.** The corpus never approaches ~1 triangle/pixel, so cluster LOD has no mechanism of action on our content. | **Refute-only at R0.** `D_est ≥ [k1].d_est_min` at the decision resolution **refutes** K1 outright (a lower bound proves density) — subject to `k1_decision_rule`'s preconditions, which this cell does not restate. **Firing is UNREACHABLE at R0** (`[k1].k1_fire_at_r0`): the upper-bound instrument is mis-sited and probably inert, and is recorded UNSOLVED rather than scheduled. §5.6, §9 clause 1. | Refuted → the mechanism exists, proceed to R1. Undecided → owner VALUES call, §13's *K1-UNDECIDED* question, which blocks R1. |
 | **K2** | **No baseline.** The Nanite reference cannot be produced on this box. | R0a's rig probe, before any engine code — and the negative is **re-derived by the test**, not declared. §8 R0a. | **Scope restatement**, an owner VALUES call: the eventual goal becomes an absolute ms/quality target. R0 records the branch; §14's rung is where a target is set. |
 
 **Falsification-first ordering.** K2 is the cheapest to test — *zero* engine code, one operator
@@ -603,13 +603,30 @@ remaining tuning lever"; it is not, and the superlative is withdrawn.
 ⚠️ **Rev 12 replaced that superlative with a second claim that is also false, and Rev 13 withdraws
 it rather than replacing it a third time.** It read: *"What makes MIN sound is not the reduction but
 the domain: the committed set is pinned at R0b and asserted at R0d(d), so paths cannot be dropped
-after their readings are known."* Enumerate R0b's five gate parts — (a0) `arrangement` not
-`PENDING`, (a) payload sha256 vs manifest pin, (b) decoded triangle count vs published count,
-(c) geometry slot + `gMeshMeta` row, (d) largest mesh registers — and **none reads the camera-path
-column**. Repoint or delete one asset's path id: payloads, counts, slots and allocation are all
-unchanged and all five stay green. R0d(d) *records* the enumeration digest in the same act as the
-run, with no earlier digest to compare against, so it cannot detect a change made before it. The
-modal **cannot** had no mechanism behind it in either named place.
+after their readings are known."* Enumerate the five gate parts R0b had **at Rev 13** — (a0)
+`arrangement` not `PENDING`, (a) payload sha256 vs manifest pin, (b) decoded triangle count vs
+published count, (c) geometry slot + `gMeshMeta` row, (d) largest mesh registers — and **none of
+those five reads the camera-path column**. R0d(d) *records* the enumeration digest in the same act
+as the run, with no earlier digest to compare against, so it cannot detect a change made before it.
+The modal **cannot** had no mechanism behind it in either named place.
+
+⚠️ **Rev 14 added a sixth part, (e), which reads exactly that column — and re-derived none of the
+three texts that are functions of this list.** The list is now six; the sentence above is marked
+as-of-Rev-13 rather than left in the present indicative; and the mutation this paragraph used to
+carry was a two-arm `or` that amendment 1 forbids, so it is split, because the two arms do not
+behave the same way against the six-part gate:
+
+* **Repoint** one asset's path id to another id already in the manifest → payloads, counts, slots
+  and allocation are unchanged, and the *distinct-id count* is unchanged, so **all six stay green**.
+  The membership hole this paragraph is about is still open, and (e) does not close it.
+* **Delete** one asset's path id → at |E| ≥ 3 the count still clears the floor and all six stay
+  green; **at |E| = 2 the count falls to 1 and (e) reds**. So this arm fires over part of the
+  permitted range only, which by this document's own standard means it does not fire — it is kept,
+  split out and labelled, rather than quoted as though it demonstrated the hole.
+
+**The conclusion is unchanged and that is why this is a re-derivation, not a reversal:** (e) bounds
+the set's *cardinality*, which is not the same as pinning its *membership*, so a cardinality floor
+cannot supply the prevention the withdrawn claim asserted.
 
 **What is true, and it is less:** R0d(d) makes an omission at *measurement* time visible — a
 committed path that produces no census row reds the rung. The *choice* of which paths are committed
@@ -664,6 +681,13 @@ committed, which is the intended behaviour and is a re-bless step this branch mu
 rather than discover.
 
 **The ladder therefore splits, and the expensive half is conditional:**
+
+⚠️ **PRECONDITION ON EVERY ROW BELOW — `|P| ≥ [k1].committed_paths_min`.** An undersized
+committed-path set is not an outcome of this table; it is an instrument failure, R0d reds, and no
+K1 disposition is produced. Stated once above the table rather than per row, for the same reason
+the row below gives for its own conjunct. Rev 14 introduced that clause and updated neither this
+table nor §9's, so both published a K1 disposition for a census the frozen rule refuses to
+adjudicate — the divergence the row below forbids by name, on a different input.
 
 | Outcome of the cheap census | Next |
 |---|---|
@@ -742,6 +766,24 @@ K1 is therefore decidable today, without the error target Rev 1's phrasing impli
 
 All statistics are reported per camera path, path definitions committed as test constants — the
 shape `sv0_scene/mod.rs:149~-162` already uses for its camera.
+
+> ⚠️ **A CENSUS ROW is one reading of the full statistic set at one `(camera path, ladder rung)`
+> pair, so the census emits `|P| × |ladder|` rows.** This definition is Rev 15's and its absence was
+> a P0 that no lens found by looking for it — it surfaced from two gate parts disagreeing.
+> **R0c(d)** said *"the census produces one row per rung"* and **R0d(d)** said *"one census row per
+> camera path"*, one screen apart: over two paths and four rungs the first makes four rows and the
+> second makes two, and a census cannot be both. Worse, (d)'s **set equality compared rows to the
+> enumeration** — rows against *paths*, objects of different type unless a row simply is a path.
+>
+> The term is load-bearing in three gate parts and was defined in none, and that is why **two
+> adversarial reviews reached opposite conclusions about R0d(b) on an empty domain**: one derived
+> that (b) reds because no statistic is produced at rung 512×512, the other that (b) is blind
+> because it never ranges over paths. Neither was reasoning badly — they read an undefined word two
+> ways. With the row defined as a `(path, rung)` pair, (b)'s domain is the product, an empty `P`
+> makes it empty, and **(b) is vacuously green**, which settles the question by construction rather
+> than by which review is quoted. R0c(d)'s "one row per rung" is correct for R0c's single-path
+> fixture and is now read that way; R0d(d) compares **the set of paths appearing in the rows** to
+> the enumeration, which is type-correct.
 
 ---
 
@@ -1055,9 +1097,21 @@ one of the two alone leaves the other's quantifier unbounded.
 
 **RED if / mutations (DEMONSTRATED):**
 * flip one byte of a pinned hash in `CORPUS.toml` → (a) reds;
-* **(e) — the aggregation domain, at the rung that authors it.** Author `CORPUS.toml` with every
-  asset carrying the same camera-path id — or with the column absent entirely — so the enumeration
-  holds fewer than `[k1].committed_paths_min` distinct ids → (e) reds. **It isolates**, and the
+* **(e) — the aggregation domain, at the rung that authors it. Two mutations, because Rev 14 wrote
+  this as a two-arm `or` with one shared derivation — amendment 1 breached in the commit that
+  restated amendment 1, and the two arms do not behave alike.**
+
+  **(e-collapse)** Author `CORPUS.toml` with every asset carrying the **same** camera-path id →
+  the enumeration holds one distinct id → `1 < 2` → (e) reds. This is the arm that fires on the
+  authoring act B-1 is about.
+
+  **(e-absent)** Author it with the column **absent entirely** → the enumeration holds zero
+  distinct ids → (e) reds — *provided the manifest schema makes the column's absence detectable
+  rather than defaulting it.* That proviso is the arm's real content and §4.3 does not yet supply
+  it, so this arm is recorded as **conditional on the schema**, not asserted alongside the first.
+
+  **It isolates** — one derivation covers both arms because neither touches what the other five
+  read, and the
   isolation is the point of siting it here: the payload bytes are untouched so (a) stays true, the
   triangle counts are untouched so (b) stays true, every mesh still lands a slot and a `gMeshMeta`
   row so (c) stays true, the largest mesh still allocates so (d) stays true, and the arrangement
@@ -1082,7 +1136,10 @@ one of the two alone leaves the other's quantifier unbounded.
 * declare a `TANGENT`-less asset and delete the `generate_tangents` post-pass → (b)/(c) survive but
   the tangent lane is identity; asserted separately so the fallback cannot rot silently.
 
-**Skip policy:** the payload is gitignored, so (a)–(d) skip when it is absent — the same shape as
+**Skip policy:** the payload is gitignored, so (a)–(e) skip when it is absent — ⚠️ this read
+"(a)–(d)" until Rev 15, leaving the part Rev 14 appended outside the only sentence that says what
+happens to the parts on the branch where the corpus is not on disk, which is the branch every
+current checkout takes — the same shape as
 the `dxc`-dependent gates ([`cluster_cull_spv_sync.rs`](../crates/boyko_rhi_vulkan/tests/cluster_cull_spv_sync.rs):196~-204). **Procedural mitigation, and it is
 binding: the rung is not commit-eligible until the gate has been run with the corpus present and
 its output pasted into the commit message.** A gate proven only on a box that skipped it is not a
@@ -1177,9 +1234,9 @@ both floors), `k1_decision_rule` says **UNDECIDED, escalate**, and §9's outcome
 ADJUDICATED**. One census, three answers — the Rev 8 shape the frozen file records at its own
 `k1_decision_rule`, reproduced by the re-indexing meant to end it. With the quantifier, B reds (c)
 and the three agree.
-**(d) the census covered the whole aggregation domain** — exactly one census row per camera path
-enumerated in `assets/vg_corpus/CORPUS.toml` — stated as a **set equality** between the census rows
-and the enumeration, so a missing row and an *extra* one both red — **and that enumeration holds at
+**(d) the census covered the whole aggregation domain** — **set equality** between the set of camera
+paths appearing in the census rows and the enumeration in `assets/vg_corpus/CORPUS.toml`, so a
+missing path and an *extra* one both red — **and that enumeration holds at
 least `[k1].committed_paths_min` paths**, with the sha256 of that
 enumeration recorded beside the readback hashes (`[k1].committed_paths_rule`). ⚠️ Rev 11 froze `min` over committed paths as
 K1's aggregation and left the domain asserted by nothing, which is the same shape as a threshold
@@ -1395,7 +1452,9 @@ The rung is **reverted or the campaign re-scoped** — not softened mid-flight �
    Rev 7, **were named nowhere in this document** — frozen precisely so prose could not drift from
    them, and then not read by the prose.
 
-   `D_est ≥ [k1].d_est_min` **refutes K1 regardless of convergence**: non-convergence means
+   `D_est ≥ [k1].d_est_min` **refutes K1 regardless of convergence** — but not regardless of
+   `k1_decision_rule`'s preconditions, whose first clause is the domain floor:
+   non-convergence means
    `visible_tris` is still rising, so `D_est` *understates*, and an understatement already at or
    above the threshold still proves density ≥ 1 triangle/pixel. Convergence — the top-two-rung gap
    coming in under `[k1_instrument].ladder_convergence_margin` — is a precondition for **firing**,
@@ -1404,7 +1463,18 @@ The rung is **reverted or the campaign re-scoped** — not softened mid-flight �
    (`[k1_instrument].min_covered_pixels`, `[k1_instrument].min_visible_tris`) is required in
    **both** directions: a sentinel-only readback proves nothing either way.
 
-   ### K1 has exactly two reachable outcomes at R0, and UNDECIDED is the likely one
+   ### K1 has two reachable outcomes at R0 once the domain clears its floor, and UNDECIDED is the likely one
+
+   ⚠️ **PRECONDITION ON EVERY ROW BELOW — `|P| ≥ [k1].committed_paths_min`.** An undersized
+   committed-path set is **not an outcome in this table**: it is an instrument failure,
+   `k1_decision_rule`'s first clause, R0d reds and **no K1 disposition is produced at all**. It is
+   stated once here rather than as a conjunct in each row, because a condition repeated per row is
+   a condition that will disagree with itself. ⚠️ Rev 14 added that clause to the frozen rule and to
+   §8 and to **neither table**, so on `|P| = 1` with a healthy path these rows published **K1
+   REFUTED** — the campaign-favourable verdict — while the rule called the same census an
+   instrument failure. Both rows were affected, not only the first, and §9 is where this document
+   says K1 is adjudicated. The heading above also said *exactly* two reachable outcomes; with the
+   floor there are three, and the third is this one.
 
    | Outcome | Condition | Disposition |
    |---|---|---|
@@ -1898,8 +1968,12 @@ every positive claim it volunteers ships with its own substitution — and, if i
 its own isolating red mutation.
 
 **Rev 13 adds two amendments, and it adds them because Rev 12 violated both obligations inside the
-commit that wrote the rule.** The rule's evidence base is now eight independent confirmations and
-no counterexample: every Rev 12 repair that only *subtracted* survived adversarial re-derivation
+commit that wrote the rule.** ⚠️ **The rule's evidence base is stated ONCE, below, as an invariant
+rather than as a count — this sentence carried a tally that disagreed with the one twenty-one lines
+down within a single revision, inside the section that took sole ownership of a count precisely
+because a number with two homes disagrees with itself. The invariant is falsifiable and does not
+need re-deriving every round: NO REPAIR THAT ONLY SUBTRACTED HAS YET FAILED REVIEW.**
+The evidence behind it: every Rev 12 repair that only *subtracted* survived adversarial re-derivation
 (the precedence demotion, the two superlative withdrawals, the §13 index removals, §14.1 taking sole
 ownership of the orphan count), and **every** finding that survived attached to a *volunteered*
 claim. The rule predicted its own residual defect set. What it did not cover:
@@ -1919,8 +1993,10 @@ files' comments, and Rev 14 withdraws it: it never moved, and the geography was 
 Rev 13's own defects were distributed across all three surfaces — gate-file comments, plan prose
 (including the paragraph immediately above and §9.1's stale per-path form) and both frozen files —
 and the count the claim rested on had one home and no derivation, which is precisely the defect
-§14.1 was created to own. **The partition that does hold, on ten confirmations and no
-counterexample:** defects do not live in a *surface*, they live in the **volunteered positive
+§14.1 was created to own — ⚠️ and this sentence then stated the evidence base at a *second* value,
+twenty-one lines from the first, which is the same defect once more and is why the base is now
+carried as the invariant above rather than as a tally anywhere. **The partition that does hold:**
+defects do not live in a *surface*, they live in the **volunteered positive
 claim**, and they surface in whichever file that revision volunteered most in. Rev 12 volunteered in
 the gate comments and its defects were there; Rev 13 volunteered everywhere and its defects were
 everywhere. A later author who reads this section as "watch the gate files now" will look in the
