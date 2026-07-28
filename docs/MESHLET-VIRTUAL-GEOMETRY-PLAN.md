@@ -1,6 +1,6 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 21** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 22** — **NOT APPROVED, and no code exists.** This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
@@ -442,8 +442,23 @@ VB-visible. The **host-authored** primitives pass `None` at their own call site
 engine lives in host-visible memory, seeded once and read-only thereafter ([`mesh.rs`](../crates/boyko_render/src/mesh.rs):129~). At 64 B
 per vertex a multi-million-triangle corpus mesh is a large host-visible allocation, and on a
 discrete GPU without resizable BAR that heap is small. **R0b's gate includes "the corpus's largest
-mesh registers without allocation failure"**; the abort route is a device-local + staging upload
-path for meshes, which does not exist today and is a named follow-up, not R0 work.
+mesh registers without allocation failure"** — that is `max_i f_i`, and it is the whole of what any
+R0 gate bounds. **The census needs `Σ_i f_i` resident SIMULTANEOUSLY**, because §4.3's subtraction
+made it run the whole corpus at every committed path, and `f_i = 64·V_i + 4·I_i` with both buffers
+`HostVisibleCoherent`. Forty assets at ~3 M triangles each is ~132 MB apiece: `max_i f_i` allocates
+on any box and greens R0b(d), while `Σ_i f_i ≈ 5.3 GB` of host-visible memory is ~20× a 256 MB BAR
+window — R0b greens on all six parts and R0d simply cannot execute.
+
+⚠️ **NO R0 GATE BOUNDS THE SUM, and Rev 19 said it would land here and did not.** That promise was
+its own only witness: the sole text mentioning it was the sentence promising it, and this section —
+the named destination — never received it. By this document's own rule (*a rule is landed only when
+some consumer reads the symbol it defines*) it was never landed. It is landed now as a **recorded
+limit rather than a new gate**, deliberately: R0b is approved, and widening an approved rung's gate
+to absorb a consumer's need is how an approval stops meaning anything. The consequence is stated
+plainly instead — **an oversized corpus is discovered at R0d as an allocation failure, not at R0b
+as a red gate**, so the corpus author gets no early signal; §9.1 records it. The abort route is a
+device-local + staging upload path for meshes, which does not exist today and is a named follow-up,
+not R0 work.
 
 ---
 
@@ -1232,8 +1247,20 @@ readback armed by env knob; the host-side histogram + triangles-per-pixel reduce
 > resource**, which is the exact shape of this project's recorded cross-frame bug class (host
 > access racing the fence on per-FIF rings, with `FRAMES_IN_FLIGHT == 2` at `ui/mod.rs:87~`).
 > Neither is visible to gate (a), because both exist only on **armed** frames — the frames the
-> goldens never render. The readback must therefore wait on the frame's own fence before mapping,
-> and that ordering is asserted in the rung's own test, not assumed.
+> goldens never render. The readback must therefore wait on the frame's own fence before mapping.
+>
+> ⚠️ **This sentence ended "and that ordering is asserted in the rung's own test, not assumed",
+> and Rev 22 withdraws it: no part asserts it, and it named none.** The consequence follows from
+> Rev 21's own derivation and Rev 21 did not draw it — enumerate what each of R0c's five parts is
+> evaluated on: (a) VB pins with the census **unarmed** (and Rev 21 proves the permanent edit
+> cannot perturb them, so (a) partitions no world); (b) the procedural fixture's modal bucket;
+> (c) oracle coverage on that fixture; (c′) non-degeneracy of the censused frame, a property of the
+> scene rather than of ordering; (d) ladder rows and achieved extent. **Not one reads the armed
+> frame's barrier or fence ordering.** So both hazards this block names are, at R0c, **recorded and
+> not asserted** — the disposition (a) itself now carries, and §9.1 records it. Claiming an
+> assertion that names no part is exactly the defect this campaign has spent twenty revisions
+> removing; the honest statement is that R0c changes the barrier graph on a frame no gate of R0c
+> evaluates.
 
 **Gate (one, five parts):** (a) **every VB image golden byte-identical** to its `PINS.toml` pin
 with the census unarmed — the usage widening and the unarmed `Option` must cost nothing. *Scoped to
@@ -1753,6 +1780,7 @@ headline was false as written. Rather than a headline and a retraction, the limi
   no digest in R0 hashes, so **re-aiming** a committed path is neither a membership change nor a row
   count change and no gate part in R0 sees it. Both are exposures of the same kind as the choice
   itself: they are constrained by party separation and commit ordering, not by a gate.
+* **Two limits Rev 22 records rather than gates, both created by earlier repairs.** ⚠️ **No R0 gate bounds the corpus's TOTAL host-visible footprint.** R0b(d) bounds `max_i f_i`; §4.3's subtraction made the census need `Σ_i f_i` resident simultaneously (§3.4), so an oversized corpus is discovered at **R0d as an allocation failure**, not at R0b as a red gate — the author of the corpus gets no early signal. Recorded rather than gated because R0b is approved and widening an approved rung's gate to absorb a consumer's need would hollow out the approval. ⚠️ And **no R0c gate part is evaluated on an ARMED frame**, so the two hazards R0c's own preamble names — a new layout transition of a per-FIF ring image inside the RDG auto-barrier system, and a host read racing the frame fence — are *recorded and not asserted* at R0c. Both are the disposition R0c(a) itself carries, and both are here because a bounding enumeration is where limits go.
 * **When a censused frame fails non-degeneracy, R0d reds** — the rung is not commit-eligible and
   nothing is adjudicated. ⚠️ `[k1].k1_decision_rule` also maps that input to "UNDECIDED, escalate",
   which is a different act; **R0d's gate takes precedence**, because a frame that cannot be
