@@ -1,6 +1,6 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 11** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 12** — **NOT APPROVED, and no code exists.** This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
@@ -99,11 +99,16 @@ is asserted*. Editing one and not the other leaves two documents disagreeing abo
 rule — Rev 2's inverted `all_three_below` defect reached by a different route.
 
 Rev 7 also retires a promise this document could not keep. §12's *"every line below was opened or
-grepped"* is **withdrawn**, having been false four revisions running. Gating the plan's anchors
-mechanically was attempted and **reverted with the reason recorded**: the plan cites bare basenames
-in prose while the gate binds to resolvable path links, giving 83 "stale" of 146 dominated by
-misbindings. Converting the citations is the named follow-up; until then the document states its
-numbers are unchecked rather than claiming they were verified.
+grepped"* is **withdrawn**, having been false four revisions running. ⚠️ **The rest of this
+paragraph was Rev 7 history left in the present indicative, and Rev 11's repair of the identical
+claim in §12 did not reach it — the same fix landing in N−1 of N texts, one section out.** As
+history: gating the plan's anchors mechanically was attempted and reverted, because the plan cited
+bare basenames in prose while the gate binds to resolvable path links, giving 83 "stale" of 146
+dominated by misbindings; converting the citations was then the named follow-up. **All of that is
+done.** The conversion landed, the plan is in `GATED_DOCS`, and the live limit is stated once, in
+§12, where it belongs: it is not membership but the waiver. This document still states its numbers
+as unchecked rather than verified — that clause is *not* superseded, because a bounds-checked
+anchor is not a verified claim.
 
 **Rev 6 — the fifth consecutive revision told it overclaimed, and the score is the point.** Rev 5
 claimed eight fixes: **two held, two partial, four did not**, plus five fresh defects. The three
@@ -576,6 +581,23 @@ The density estimate at the decision resolution is then
 
 > **`D_est = visible_tris(top rung) ÷ covered_pixels(decision_resolution)`**
 
+**Indexed by camera path, and aggregated exactly once.** The census runs this per committed camera
+path (§5.7), so the quantity above is `D_est(p)` — one reading per path — while K1 is **one**
+decision. **Throughout this document the unqualified symbol `D_est` means the aggregate
+`min` over committed camera paths**, per `[k1].k1_path_aggregation`; §2's blast-radius row, §5.6's
+split table, §9 clause 1 and §9's outcome table inherit that definition and deliberately do not
+restate it. MIN because refutation is the campaign-**favourable** outcome and must therefore clear
+the bar on the weakest committed path rather than the strongest.
+
+⚠️ **MIN's monotonicity cuts both ways and Rev 11 recorded only the favourable half.** From
+`min(S′) ≥ min(S)` for `S′ ⊆ S`: MIN closes the *add-a-flattering-path* lever — that is true and is
+why MIN rather than MAX — but it opens the *omit-an-unflattering-path* lever, which is cheaper
+still, because an uncommitted path leaves no diff and produces no census row for §9.1's
+anti-cherry-pick argument to catch. Rev 11's frozen comment called MIN removal of "the cheapest
+remaining tuning lever"; it is not, and the superlative is withdrawn. What makes MIN sound is not
+the reduction but **the domain**: the committed set is pinned at R0b and asserted at R0d(d)
+(`[k1].committed_paths_rule`), so paths cannot be dropped after their readings are known.
+
 — **tight**, unlike (2). ⚠️ **Rev 3 called it "unbounded above" and that was false in two ways at
 once. Both were caught by arithmetic on this page, and both matter to the kill's soundness.**
 
@@ -627,7 +649,7 @@ rather than discover.
 |---|---|
 | `D_est ≥ 1.0` **and non-degeneracy met** | **K1 dead.** No counter, no shader edit, no re-bless. Done. ⚠️ The conjunct is not decoration and Rev 8 omitted it here: on a 500-pixel frame with 600 visible triangles `D_est = 1.2`, so without it this row declares the campaign's premise proven from a frame covering 0.02% of the screen. `[k1].k1_decision_rule` carries the conjunct as of Rev 9; this table and §9's outcome table must not diverge from it again. |
 | `D_est < 1.0`, **or** non-degeneracy unmet | Genuinely sparse, instrument-limited, or not adjudicable at all — indistinguishable from below. **K1 UNDECIDED**. Owner VALUES call, §13 Q2, held by `k1_outcome.undecided_disposition`, which blocks R1. The counter is NOT a scheduled rung: §8 contains none, and its design is recorded UNSOLVED. |
-| Ladder not converged | `[k1_instrument].on_not_converged_fire_direction` — **K1 not adjudicated** for the FIRE direction, §9 clause 4. The REFUTE direction is unaffected: non-convergence means `D_est` understates, and an understatement already ≥ 1.0 still proves density ≥ 1 (`on_not_converged_refute_direction = "still_valid"`). |
+| Ladder not converged | `[k1_instrument].on_not_converged_fire_direction` — **K1 not adjudicated** for the FIRE direction, §9 clause 3. The REFUTE direction is unaffected: non-convergence means `D_est` understates, and an understatement already ≥ 1.0 still proves density ≥ 1 (`on_not_converged_refute_direction = "still_valid"`). |
 
 **This front-loads the cheap decisive case and makes the expensive one explicitly optional**, which
 is what Rev 3's single-path design hid.
@@ -874,9 +896,34 @@ available, and no gate can tell that from an honest one.
 
 **Gate (one) — `achievable = false` branch, three parts:** (a′) the *negative* field set is present
 and not `PENDING` — `reason`, `search_method`, `editor_binary_name`, `probed_at`, with `reason` one
-of `[k2_probe].reason_values` **and, where more than one of them holds, the first one
-`[k2_probe].reason_precedence` lists** — §11 measures this box as two of them simultaneously, so
-without that the record's author picks which assertion runs; (b′) the re-derivation below passes **for whichever of those values
+of `[k2_probe].reason_values`. **RED mutation:** record a `reason` outside the frozen set → (a′)
+reds on set membership. This red belongs to (a′) and is filed here; Rev 11 sited the assertion in
+(a′) and its mutation under (b′), which is one assertion under two part letters.
+
+> ⚠️ **Rev 12 withdraws Rev 11's precedence clause from this part, and the withdrawal is the honest
+> half of a dilemma rather than a retreat from it.** The clause read *"and, where more than one of
+> them holds, the first one `[k2_probe].reason_precedence` lists"*. Enumerate the gate's inputs —
+> the recorded `reason` (four legal values) crossed with what the authorities report (engine
+> present / absent): over all eight rows the verdict with the clause is **identical to (b′)'s
+> verdict without it**, and permuting `reason_precedence` moves no row. The reason is that its
+> antecedent is not machine-establishable: only `no_engine_registered` has an oracle (the two
+> authorities below), `no_importable_project` and `no_capture_protocol` have none at all, and the
+> disk cause is retracted by name further down this rung — *"free disk is recorded as evidence and
+> is deliberately NOT an assertion"*. So the clause **does not fire over the whole permitted range
+> of the field it names**, which is this campaign's #1 defect family reached from the gate side.
+>
+> The dilemma is real and both horns were priced. Implementing the clause requires minting a
+> `required_free_gb` threshold this document has retracted **twice**, on the same evidence both
+> times. Leaving it in place ships a gate clause that cites a frozen field and cannot move a
+> verdict, which is precisely the appearance of pre-registration that binds nothing. Rev 12 takes
+> the third route the document already uses twice — R0c(e) and free disk itself: **`reason_precedence`
+> is demoted to an authoring convention, recorded and deliberately not asserted**
+> (`[k2_probe].reason_precedence_status`), and §9.1 enumerates the resulting limit instead of the
+> document claiming a check it does not perform. What actually closes blocker 4's substantive
+> hazard — the author selecting which assertion runs — is Rev 9's `(b′)`, which asserts something
+> for **every** legal value and is untouched by this.
+
+(b′) the re-derivation below passes **for whichever of those values
 was recorded**: for `[k2_probe].machine_rederived_reason` the documented authorities must report NO
 engine, and for every other value they must report that an engine IS present, per
 `[k2_probe].non_rederived_reasons_require_engine_present`; (d) as above, unchanged — the thresholds
@@ -1021,7 +1068,7 @@ readback armed by env knob; the host-side histogram + triangles-per-pixel reduce
 
 **Gate (one, five parts):** (a) **every VB image golden byte-identical** to its `PINS.toml` pin
 with the census unarmed — the usage widening and the unarmed `Option` must cost nothing. *Scoped to
-the blessed legs:* §9 clause 5 records two `sha256_hwrt = "PENDING"` pins on which `golden.ps1`
+the blessed legs:* §9 clause 4 records two `sha256_hwrt = "PENDING"` pins on which `golden.ps1`
 exits 2 by design, and a gate quantified over an unblessed pin is the vacuous-selection defect
 again;
 (b) on a **procedurally generated** fixture whose screen-space triangle size is analytically known,
@@ -1044,7 +1091,7 @@ clamped by the OS, reds;
 (e) **cross-process `vb_id` identity is MEASURED and RECORDED here — and deliberately NOT
 asserted.** ⚠️ Rev 4 wrote (e) as a gate, which made it incoherent with R0d: a negative result is
 something the plan explicitly calls *"a real finding about the raster path"* and wants recorded,
-yet asserting identity would **red R0c** and, via §9 clause 4, make the rung not commit-eligible —
+yet asserting identity would **red R0c** and, via §9 clause 3, make the rung not commit-eligible —
 **a legitimate finding blocking the ladder.** So (e) produces a number and writes it into
 `docs/VG-R0-DENSITY-CENSUS.md`; **R0d** is where it becomes a gate, in whichever of the two shapes
 (e) established (see R0d). And (e) is measured **in the regime where it can actually fail** — the
@@ -1069,7 +1116,7 @@ the frozen resolution ladder**; results written to `docs/VG-R0-DENSITY-CENSUS.md
 curve, and the **decision-bearing** numbers pinned as literals in the test under the MEASURED
 discipline.
 
-**Gate (one, three parts):** (a) the census is **reproduced across `[census].cross_run_sessions`
+**Gate (one, four parts):** (a) the census is **reproduced across `[census].cross_run_sessions`
 separate processes** under `[census].cross_run_gate` — **the sha256 of the readback itself**;
 (b) `D_est`, the convergence check, the histogram and both `[k1].report_only` statistics
 (`visible_tri_per_covered_pixel` and `submitted_per_covered_pixel` — the saturating raw reading and
@@ -1081,6 +1128,15 @@ above `[k1_instrument].min_visible_tris` — because `D_est` and the convergence
 divisions and a sentinel-only readback proves nothing in either direction. ⚠️ This precondition was
 stated in §5.7 and frozen in the companion file from Rev 4 onward and appeared in **no gate part of
 either rung that produces the numbers**; Rev 8 lands it here and at R0c.
+**(d) the census covered the whole aggregation domain** — exactly one census row per camera path
+enumerated in `assets/vg_corpus/CORPUS.toml`, with the sha256 of that enumeration recorded beside
+the readback hashes (`[k1].committed_paths_rule`). ⚠️ Rev 11 froze `min` over committed paths as
+K1's aggregation and left the domain asserted by nothing, which is the same shape as a threshold
+with no reader: under MIN the cheap lever is not adding a flattering path but **omitting an
+unflattering one**, and an omitted path leaves no diff and no census row. This part is what makes
+the omission visible. It bounds the *measurement*, not the *choice*: which paths are committed is
+settled one rung earlier at R0b, by a different act, and §9.1 records that residual rather than
+claiming it away.
 
 **Measured and recorded, deliberately NOT a gate part:** the histogram's modal-bucket shift between
 adjacent rungs, against the **per-pair `log2` of the actual area ratio**
@@ -1180,6 +1236,15 @@ renumbering is to re-derive, not to re-word.
   rung must refuse to adjudicate a frame it cannot adjudicate, rather than dividing by it: on a
   sentinel-only readback the convergence check reads `0 ≤ 0` (converged) and `D_est = 0`, which is
   how an empty frame came to satisfy K1's fire condition in an earlier revision.
+* **(d) — the aggregation domain.** Delete one camera path from `CORPUS.toml`'s enumeration, or skip
+  it in the run, and leave everything else alone → the census yields one row fewer than the
+  enumeration → (d) reds. **It isolates**, which is the property the other three make easy to get
+  wrong: the drop is present identically in all three processes, so (a)'s agreement predicate stays
+  true; it removes no ladder rung, so (b) stays true; and the surviving paths are as non-degenerate
+  as they were, so (c) stays true. (d) is the only part that moves — which is what a mutation
+  targeting one part must show, and is why the mutation is stated in terms of the *enumeration*
+  rather than in terms of the path's density: a mutation phrased as "drop the weakest path" would
+  also move `D_est` and could not distinguish (d) from the rule it feeds.
 * **The histogram residual has no mutation, because it is no longer a gate.** It is produced and
   written into `docs/VG-R0-DENSITY-CENSUS.md` (see the demotion above). A mutation list entry for it
   would re-arm exactly what the demotion removed.
@@ -1329,11 +1394,21 @@ headline was false as written. Rather than a headline and a retraction, the limi
   of the install, and the two counts are reconciled there. Every value is asserted against
   something: the one named by `machine_rederived_reason` is confirmed against the documented
   authorities, and the other three must be contradicted by those authorities reporting an engine
-  IS present, since all three presuppose an install. So "recorded but not re-derived" is now false —
-  a disk-caused negative is checked, just not by the same instrument.
-  Two limits, both named in `[k2_probe]` rather than left to be found: more than one cause can hold
+  IS present, since all three presuppose an install. ⚠️ **Rev 10 concluded from that "a disk-caused
+  negative is checked, just not by the same instrument", and Rev 12 withdraws it as an
+  overstatement.** What (b′) asserts for a disk-caused negative is the cause's **presupposition** —
+  that an engine is present — so what is checked is that the record is not self-contradictory, not
+  that the disk was short. No instrument in R0 measures free disk against a threshold, because this
+  document retracted that threshold twice. The correct statement is the narrow one: every legal
+  `reason` now carries *some* machine assertion, and for three of the four that assertion is about
+  the presupposition rather than the cause.
+  Three limits, all named in `[k2_probe]` rather than left to be found: more than one cause can hold
   at once (§11 measures this box as no-engine **and** short-disk simultaneously), so
-  `reason_precedence` freezes which one is recorded; and a hand-placed engine invisible to both
+  `reason_precedence` fixes which one is recorded — ⚠️ **as an authoring convention only, and Rev 12
+  demotes it from R0a's gate for the reason recorded at `[k2_probe].reason_precedence_status`: over
+  all eight of that gate's inputs no permutation of the list changes a verdict, so which of two
+  simultaneously-true causes was written down is NOT machine-checked**; and a hand-placed engine
+  invisible to both
   authorities, combined with short disk, **cannot go green**
   (`[k2_probe].hand_placed_engine_plus_short_disk_reds`) — the honest value reds and the only
   green value is false. That is the price of a bounded search rather than the unbounded volume walk
@@ -1351,9 +1426,19 @@ headline was false as written. Rather than a headline and a retraction, the limi
   can carry representativeness; it needs a floor on covered **fraction**, and R0 does not have one —
   `[k1_instrument].representativeness_floor_status` records it UNSOLVED rather than giving it an
   authored number nobody can justify yet.
-  What limits cherry-picking today is weaker and worth naming exactly: the camera paths are
-  committed as test constants and R0d(b) requires every statistic at every rung, so an
-  unrepresentative frame appears as a row in the census rather than being selectable afterwards.
+  ⚠️ **And what limits cherry-picking is narrower than Rev 10 wrote here.** That text read: the
+  paths "are committed as test constants and R0d(b) requires every statistic at every rung, so an
+  unrepresentative frame appears as a row in the census rather than being selectable afterwards."
+  R0d(b) quantifies over **ladder rungs**, not over paths — its own red mutation is *"drop the
+  ladder to its decision row only"* — so it catches a path measured at too few rungs and never a
+  path that was never measured at all. Under Rev 11's `min`-over-paths aggregation that is exactly
+  the live lever, because MIN is monotone under set inclusion. **R0d(d) is what closes it**: one
+  census row per enumerated path, enumeration hashed beside the readback.
+  **The residual, stated rather than claimed away — R0d bounds the measurement, not the choice.**
+  Which paths are committed is settled at R0b, one rung earlier and by a different act, and no gate
+  in R0 asserts that the committed set is representative of the content class. That is the same
+  unsolved axis as the covered-fraction floor above, reached from the domain side instead of the
+  frame side.
 * **When a censused frame fails non-degeneracy, R0d reds** — the rung is not commit-eligible and
   nothing is adjudicated. ⚠️ `[k1].k1_decision_rule` also maps that input to "UNDECIDED, escalate",
   which is a different act; **R0d's gate takes precedence**, because a frame that cannot be
@@ -1362,10 +1447,12 @@ headline was false as written. Rather than a headline and a retraction, the limi
   therefore vacuous *within R0* — R0d(c) asserts the same two floors before the rule is ever
   evaluated — and it earns its place only at a rung that adjudicates without R0d's gate.
 * **No comparative claim is evaluated, decided or pre-registered.** There is no ONE gate at R0
-  (§14). ⚠️ And the deferral leaves **five downstream gate rows orphaned**: the research ladder gives
-  R2 through R5 gates that read *"decidable by R0's floor"*, and the floor now arrives at R6
-  (§14.1). R0 does not fix them and cannot — they are in another document — so they are the R1
-  author's first inherited problem.
+  (§14). The deferral orphans the downstream gate rows that cite R0's floor, and **§14.1 owns that
+  count — this bullet cites it and deliberately does not restate it.** ⚠️ Rev 11 restated it here as
+  *five*, in the bounding enumeration, in the same revision that re-derived it to **one** twelve
+  hundred lines below; a fact stated in two places is a fact that will disagree with itself. R0 does
+  not fix that row and cannot — it is in another document — so it is the R1 author's first
+  inherited problem.
 * **This document's `file.rs:N` anchors are machine-checked only in part** (§12), and its citations of the
   two frozen files' field names **are** (`tests/vg_symbol_reachability.rs`). Those are different
   guarantees and only the second is mechanical.
@@ -1659,15 +1746,37 @@ cluster and no LOD.
 ⚠️ **Rev 10 names the rung and withdraws "deferring costs the campaign nothing", which was false.**
 Against the research ladder this document is bound to (§0), "the first rung that lands an arm"
 resolves uniquely to **R6** — R5 is dark infra with the `Option` staying `None`, R6 is where the
-meshlet cull is armed. So the floor arrives at R6, and the research ladder gives **R2** a gate row
-reading *"measured Δ on R0 corpus, decidable by R0's floor"*. R2, R2b, R3, R4 and R5 therefore each
-carries a gate citing a measurand that will not exist until R6 — and it is **one row, R2**, not five.
+meshlet cull is armed. So the floor arrives at R6, and **exactly one** downstream gate row cites
+it: the research ladder gives **R2** a gate reading *"measured Δ on R0 corpus, decidable by R0's
+floor"*, and the deferral orphans that row until R6. **This paragraph owns the count. §9.1 cites it
+and does not restate it**, which is the only arrangement with a clean record here — a number stated
+in two texts has disagreed with itself every time it has been stated in two texts.
 
-⚠️ **Rev 10 wrote "R2, R2b, R3, R4 and R5 therefore each ... five orphaned gate rows" and the "therefore" does not follow.** Read the research ladder's gate column row by row: R2b is `*_spv_sync` tests, R3 is a measured pass-1 hit rate produced at R3, R4 is a triangles-at-error curve produced at R4, R5 is byte-identical goldens — a byte comparison needs no delta at all. Only R2's gate cites R0's floor. Overstating a cost fivefold is the same overclaiming this revision series exists to stop, committed in the repair for it, so the number is re-derived here rather than softened.
+⚠️ **Rev 10 wrote "R2, R2b, R3, R4 and R5 therefore each carry a gate citing a measurand that will
+not exist until R6 — five orphaned gate rows", and the "therefore" does not follow.** Read the
+ladder's gate column row by row: R2b is `*_spv_sync` tests, R3 a measured pass-1 hit rate produced
+at R3, R4 a triangles-at-error curve produced at R4, R5 byte-identical goldens — a byte comparison
+needs no delta at all. Only R2's gate cites R0's floor. Overstating a deferral cost fivefold is the
+same overclaiming this revision series exists to stop, committed inside the repair for it.
 
-And for that one row the framing is weaker still: §14.1's own criterion is a configuration that can be switched on and off, and R2 **is** an arm — per-instance GPU cull, on or off, byte-identical if conservative-exact — so R2's paired delta exists at R2. What R2 lacks is not an arm but the *reference* half of the comparison.
+⚠️ **And Rev 11's repair of that was itself both recorded shapes at once, which is why the rule
+below is stated as a rule rather than as another correction.** It fixed this paragraph and left
+§9.1 saying five (a fix landing in N−1 of N texts), and it fixed this paragraph by *appending* a
+denial to the erroneous clause instead of rewriting it, so one sentence carried the count and its
+negation across an em-dash. It further volunteered that "R2 **is** an arm — per-instance GPU cull,
+on or off". **That claim is withdrawn**: this section's criterion is a *meshlet/cluster* path
+switched against the shipped VB path, per-instance cull is neither, and had the claim held the
+orphan count would be **zero**, not one — the volunteered fact would have undone the subtraction it
+was appended to. The governing rule, and its evidence is that every repair which only *subtracted* has
+survived review while the three that volunteered a positive claim — Rev 8's conditioned `(b′)`, Rev
+11's "cheapest remaining tuning lever", Rev 11's "R2 is an arm" — were each refuted on the
+volunteered half: **a repair is itself a claim and inherits the full burden of the claim it
+replaces.** A repair of a stated fact is executed
+as a grep over every text stating it, all N fixed in one act; and a repair may subtract freely, but
+every positive claim it volunteers ships with its own substitution — and, if it is a gate clause,
+its own isolating red mutation.
 
-Repairing their rows is out of this document's scope
+Repairing R2's row is out of this document's scope
 (§0 binds R1–R8 to the research document), so it is named as the first thing the R1 author
 inherits. And the thing that actually carries the
 P0's weight — party separation, since §13's owner calls are not made by whoever runs the harness —

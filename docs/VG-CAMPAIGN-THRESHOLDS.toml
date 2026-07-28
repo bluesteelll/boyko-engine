@@ -31,8 +31,8 @@
 # and Rev 7 -- the third occurrence caught by an adversarial pass rather than by the fields
 # themselves, in the very revision whose slogan was about fixes that do not land. They are updated
 # here in the same act as the edit, which is the whole of their job.
-schema_version = 7
-frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 11"
+schema_version = 8
+frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 12"
 frozen_date = "2026-07-28"
 
 # THE EDIT DISCIPLINE, stated because Rev 4 and Rev 5 both edited this file in place while its
@@ -137,7 +137,7 @@ cross_run_sessions = 3
 # AND IT VALIDATES ITSELF. The ladder gives four points on a convergence curve. If the top two
 # rungs still differ by more than the margin below, visible_tris has NOT converged, D_est is an
 # underestimate of unknown size, and the census reports "density not resolved" — K1 is NOT
-# adjudicated. That is the plan's own SS9 clause 4 discipline (the instrument is blind, not the
+# adjudicated. That is the plan's own section 9 clause 3 discipline (the instrument is blind, not the
 # effect absent) applied before the fact instead of after it.
 # ---------------------------------------------------------------------------------------------
 #
@@ -297,11 +297,39 @@ d_est_min = 1.0
 # the same asymmetry that makes D_est refute-only: the cheap instrument is allowed to prove
 # density, never to deny it.
 #
-# It also removes the cheapest remaining tuning lever. Adding a favourable path cannot flip a MIN
-# from below the threshold to above it; under MAX it could, and the paths are authored.
+# Adding a favourable path cannot flip a MIN from below the threshold to above it; under MAX it
+# could, and the paths are authored. That much is true and it is why MIN rather than MAX.
+#
+# ⚠️ REV 12 WITHDRAWS THE SENTENCE THAT FOLLOWED IT: "It also removes the cheapest remaining tuning
+# lever." FALSE, and it was a superlative volunteered by a repair -- the class of claim this file
+# has been wrong about three times. MIN is monotone under set inclusion, min(S') >= min(S) for
+# S' subset of S, so it closes the ADD lever and OPENS the OMIT lever, which is cheaper still: an
+# uncommitted path leaves no diff and produces no census row. What makes MIN sound is therefore not
+# the reduction, it is the DOMAIN -- see committed_paths_rule below and the gate part that asserts
+# it. The reduction stays MIN; only the claim about it is withdrawn.
 k1_path_aggregation = "min_over_committed_camera_paths"
 
-k1_decision_rule = "cheap_census_may_only_REFUTE: (covered_pixels >= min_covered_pixels AND visible_tris >= min_visible_tris) AND d_est >= d_est_min => K1 dead; non-degeneracy unmet OR d_est < d_est_min => UNDECIDED, escalate"
+# THE DOMAIN OF THAT MIN, asserted rather than assumed. Rev 11 froze the reduction and left the set
+# it reduces over defined nowhere, counted nowhere and authored in the same act as the measurement
+# -- which is the condition the two-file split at the head of this document exists to prevent.
+#
+# The plan's R0d(d) is the reader. Note what it does and does not buy: it bounds the MEASUREMENT
+# (every committed path was censused, and an omission is visible), not the CHOICE (which paths are
+# committed is settled one rung earlier at R0b). The residual is enumerated in plan section 9.1
+# beside the covered-fraction floor, which is the same unsolved axis reached from the domain side.
+committed_paths_rule = "committed camera paths are enumerated in assets/vg_corpus/CORPUS.toml at R0b; R0d(d) asserts exactly one census row per enumerated path and records the sha256 of the enumeration beside the readback hashes; R0 does not assert the set is representative"
+
+# ⚠️ REV 12 -- THE RULE IS NOW INDEXED BY CAMERA PATH, because it was scalar while the census it
+# consumes is per-path. Both documents nominate this string as the only live rule (see the note
+# above), so a scalar rule and a min-over-paths aggregation two lines apart were two codeable texts
+# at different arities: substitute paths A = (1.5e6 px, 2.4e6 tri) -> D = 1.60 and B = (2.0e6 px,
+# 2.9e5 tri) -> D = 0.145, both clearing the 1024/1024 floors. A reader of the aggregation gets
+# min = 0.145 -> UNDECIDED; an implementer of the scalar rule gets row A -> 1.60 >= 1.0 -> K1 dead.
+# One census, opposite dispositions. The composition order is stated here rather than left to the
+# reader: non-degeneracy is per path and EVERY path must clear it, then the MIN is taken over
+# d_est. Non-degeneracy is not min'd -- a MIN over covered_pixels and a MIN over visible_tris taken
+# separately would recombine into a d_est that belongs to no measured path at all.
+k1_decision_rule = "cheap_census_may_only_REFUTE, evaluated over the committed camera paths P of committed_paths_rule: degenerate(p) := covered_pixels(p) < min_covered_pixels OR visible_tris(p) < min_visible_tris; ANY p in P degenerate => UNDECIDED, escalate (and R0d reds, which takes precedence); else min over p in P of d_est(p) >= d_est_min => K1 dead; min over p in P of d_est(p) < d_est_min => UNDECIDED, escalate"
 
 # FIRING K1 requires the upper-bound instrument (the frustum+backface survivor counter), which is a
 # separate conditional rung. Its threshold is pre-registered HERE, before that instrument exists,
@@ -435,9 +463,31 @@ non_rederived_reasons_require_engine_present = true
 #
 # The precedence is therefore frozen, and it is ordered by what the machine can settle: the
 # re-derivable cause outranks the others, because it is the only one an assertion can confirm
-# against the documented authorities rather than take on trust. Ties below it are impossible --
-# the remaining three are distinguished by which prerequisite the operator could not supply.
+# against the documented authorities rather than take on trust.
+#
+# ⚠️ REV 12 WITHDRAWS "Ties below it are impossible -- the remaining three are distinguished by
+# which prerequisite the operator could not supply." FALSE: a box with no importable project and no
+# capture protocol holds both, and nothing distinguishes them. The list orders ALL FOUR, ties
+# included, and that is its whole content.
 reason_precedence = ["no_engine_registered", "insufficient_disk", "no_importable_project", "no_capture_protocol"]
+
+# ⚠️ REV 12 -- WHAT READS THE LIST, stated because Rev 11 put it in a gate part where it could not
+# fire, and this file's signature defect is a frozen value that binds nothing.
+#
+# Rev 11's R0a (a') required the recorded `reason` to be the first holding value this list names.
+# Enumerate the gate's eight inputs (four legal `reason` values x authorities report engine
+# present/absent): the verdict is identical to (b')'s on all eight, and permuting this list moves no
+# row. The antecedent "where more than one holds" is not machine-establishable -- only
+# no_engine_registered has an oracle, no_importable_project and no_capture_protocol have none, and
+# the disk cause is retracted by name in the plan's R0a ("free disk is recorded as evidence and is
+# deliberately NOT an assertion"). Asserting it would require minting a required_free_gb this
+# campaign has retracted twice on the same evidence.
+#
+# So it is an AUTHORING convention and is deliberately not asserted -- the same disposition R0c(e)
+# and free disk already carry. The substantive hazard it was frozen to close (the author selecting
+# which assertion runs) is closed by (b'), which asserts something for EVERY legal value. The
+# residual limit is enumerated in the plan's section 9.1, not claimed away here.
+reason_precedence_status = "AUTHORING CONVENTION -- deliberately NOT gate-asserted; no machine oracle exists for three of the four reason_values, so no assertion over this list can fire"
 
 # ⚠️ THE ONE INPUT THIS RULE CANNOT SERVE, recorded rather than discovered later. The plan's R0a
 # already states that a hand-placed engine outside both documented authorities is invisible to
