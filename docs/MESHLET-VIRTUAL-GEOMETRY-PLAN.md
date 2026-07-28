@@ -874,7 +874,9 @@ available, and no gate can tell that from an honest one.
 
 **Gate (one) — `achievable = false` branch, three parts:** (a′) the *negative* field set is present
 and not `PENDING` — `reason`, `search_method`, `editor_binary_name`, `probed_at`, with `reason` one
-of `[k2_probe].reason_values`; (b′) the re-derivation below passes **for whichever of those values
+of `[k2_probe].reason_values` **and, where more than one of them holds, the first one
+`[k2_probe].reason_precedence` lists** — §11 measures this box as two of them simultaneously, so
+without that the record's author picks which assertion runs; (b′) the re-derivation below passes **for whichever of those values
 was recorded**: for `[k2_probe].machine_rederived_reason` the documented authorities must report NO
 engine, and for every other value they must report that an engine IS present, per
 `[k2_probe].non_rederived_reasons_require_engine_present`; (d) as above, unchanged — the thresholds
@@ -1220,6 +1222,13 @@ The rung is **reverted or the campaign re-scoped** — not softened mid-flight �
    [`tests/vg_symbol_reachability.rs`](../tests/vg_symbol_reachability.rs) now catches the class
    mechanically, and it cannot tell a live citation from a historical one, so leaving the spelling
    in place would have cost a permanent baseline exception for a name nothing should resolve.
+
+   **Aggregated over camera paths by `[k1].k1_path_aggregation` — the MINIMUM.** ⚠️ Until Rev 11
+   nothing said how the per-path readings combine, and the census is explicitly reported *per
+   camera path* while K1 is ONE decision: whoever picked the aggregation picked the answer. MIN
+   because refutation is the campaign-favourable outcome, so it must clear the bar on the weakest
+   committed path rather than the strongest — and because a MIN cannot be raised by authoring one
+   more flattering path.
 
    **The rule, per direction**, and the frozen file states each half as DATA so no later rung
    re-derives it from prose: `[k1_instrument].d_est_bound_direction` is `"lower"`,
