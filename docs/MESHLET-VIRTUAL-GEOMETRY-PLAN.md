@@ -1,6 +1,6 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 17** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 18** — **NOT APPROVED, and no code exists.** This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
@@ -470,9 +470,24 @@ clone. §11 records the measured sizes that make this decisive.
 
 * A committed, human-readable manifest `assets/vg_corpus/CORPUS.toml` — per asset: source URL,
   **licence identifier and licence URL**, sha256 of the archive, sha256 of each extracted `.glb`,
-  triangle count as published, and the camera-path id it is censused under. The manifest is
+  triangle count as published. The manifest is
   **tracked**; the payload is **gitignored** by a `/assets/vg_corpus/*` + `!CORPUS.toml` +
   `!README.md` rule mirroring the `assets/materials/` precedent exactly.
+* **Camera paths are a TOP-LEVEL enumeration in the manifest, not a per-asset column, and the
+  census runs the WHOLE corpus at every committed path.** ⚠️ Through Rev 17 this bullet gave each
+  asset "the camera-path id it is censused under", which licensed a *partition* of assets over
+  paths, while R0d said the census executes "over the corpus at the committed camera paths" and
+  R0d(c)'s mutation says "render the corpus scene" — singular. Both readings were licensed by the
+  text and they produce **different `covered_pixels`, different `visible_tris`, hence a different
+  `D_est(p)` and a different `min` over p**. The partition reading is rejected on the aggregation's
+  own argument: MIN over paths is meant to find the **weakest framing of one scene**, and over a
+  partition it would be a MIN over *different scenes*, which conflates framing with content and
+  makes "clear the bar on the weakest committed path" mean nothing.
+  **This is a subtraction and it removes two problems with it.** `carriers-per-id` — the quantity
+  R0b(e)'s REPOINT/DELETE verdicts turned out to be functions of, and which no schema carried —
+  **ceases to exist**, so those mutations become functions of `|E|` alone after all. And R0d(c)'s
+  per-path mutation ("add one path framing a bare corner") becomes expressible as what it always
+  sounded like: **append one entry to the enumeration**, touching no asset.
 * **Licence-clean means recorded, not assumed.** The repo carries no `LICENSE` file of its own, so
   the corpus manifest is the only place a licence claim can live. An asset whose licence permits
   redistribution but not the *reference capture* (e.g. loading it into a third-party engine) is
@@ -616,23 +631,23 @@ as-of-Rev-13 rather than left in the present indicative; and the mutation this p
 carry was a two-arm `or` that amendment 1 forbids, so it is split, because the two arms do not
 behave the same way against the six-part gate:
 
-⚠️ **Both arms' verdicts are functions of `(|E|, carriers-per-id)`, not of `|E|` alone, and Rev 15
-stated them as functions of `|E|` — so both were wrong at the boundary.** `|E|` is the number of
-**distinct** ids; what an edit moves is which assets carry which id.
+⚠️ **Rev 15 stated both arms as functions of `|E|`; Rev 16 found they were functions of
+`(|E|, carriers-per-id)` and were therefore wrong at the boundary; Rev 18's §4.3 subtraction
+DELETES `carriers-per-id` from the world, so they are functions of `|E|` after all.** Camera paths
+are a top-level enumeration, not a per-asset column, so no asset "carries" an id and there is
+nothing for a repoint to move. Recorded rather than silently reverted, because the sequence is the
+argument: a verdict was stated as a function of a quantity the schema did not carry — *a verdict
+nobody can check* — and the repair that made it checkable was removing the quantity, not adding a
+column to express it.
 
-* **Repoint** one asset's path id to another id already in the manifest → payloads, counts, slots
-  and allocation are unchanged. If the repointed asset was the **sole carrier** of its id, `|E|`
-  drops by one, and at `|E| = 2` that lands on 1 and **(e) reds**. If the id has other carriers,
-  `|E|` is unchanged and **all six stay green**. Rev 15 asserted the second case unconditionally.
-* **Delete** one asset's path id → same dependence: the count falls only if that asset was the sole
-  carrier, and then only crosses the floor at `|E| = 2`.
-
-Both arms therefore fire over part of the permitted range only, which by this document's own
-standard is **not firing**, and both are kept, split and labelled rather than quoted as though they
-demonstrated the hole. §4.3's schema does not currently express carriers-per-id, which is why the
-dependence could be missed: **a verdict stated as a function of a quantity the schema does not
-carry is a verdict nobody can check.** The membership hole this paragraph is about stays open under
-every case above; (e) bounds cardinality and does not close it.
+* **Remove** one entry from the enumeration → `|E|` falls by one; at `|E| = 2` it lands on 1 and
+  **(e) reds**; at `|E| ≥ 3` all six stay green. Fires over part of the permitted range, which by
+  this document's standard is **not firing** — kept, labelled, and not quoted as though it
+  demonstrated the hole.
+* **Re-aim** one entry (change its viewpoint, not its existence) → `|E|` is unchanged and **all six
+  stay green**. This is now the clean statement of the membership hole this paragraph is about:
+  (e) bounds the enumeration's **cardinality** and asserts nothing about **where the paths point**,
+  which is exactly the residual §9.1 records.
 
 **The conclusion is unchanged and that is why this is a re-derivation, not a reversal:** (e) bounds
 the set's *cardinality*, which is not the same as pinning its *membership*, so a cardinality floor
@@ -1133,14 +1148,14 @@ one of the two alone leaves the other's quantifier unbounded.
   this as a two-arm `or` with one shared derivation — amendment 1 breached in the commit that
   restated amendment 1, and the two arms do not behave alike.**
 
-  **(e-collapse)** Author `CORPUS.toml` with every asset carrying the **same** camera-path id →
-  the enumeration holds one distinct id → `1 < 2` → (e) reds. This is the arm that fires on the
-  authoring act B-1 is about.
+  **(e-short)** Author `CORPUS.toml`'s camera-path enumeration with one entry → `1 < 2` → (e)
+  reds. This is the arm that fires on the authoring act B-1 is about.
 
-  **(e-absent)** Author it with the column **absent entirely** → the enumeration holds zero
-  distinct ids → (e) reds — *provided the manifest schema makes the column's absence detectable
-  rather than defaulting it.* That proviso is the arm's real content and §4.3 does not yet supply
-  it, so this arm is recorded as **conditional on the schema**, not asserted alongside the first.
+  **(e-absent)** Author it with the enumeration **absent entirely** → zero entries → (e) reds,
+  unconditionally. ⚠️ Rev 16 recorded this arm as *conditional on a schema §4.3 does not supply*,
+  because absence of a per-asset **column** could be defaulted silently. §4.3's Rev 18 subtraction
+  makes the enumeration a **top-level key**, whose absence is a parse-level fact rather than a
+  per-row default, so the proviso is discharged by removing what made it necessary.
 
   **It isolates** — one derivation covers both arms because neither touches what the other five
   read, and the
@@ -1247,8 +1262,24 @@ vacuous-selection defect wearing a lab coat.
 * (b): subdivide the procedural fixture 4× → the modal bucket must move by **two** buckets. A
   sensitivity control that only asserts "the number changed" is the defect this campaign keeps
   finding; the required *direction and magnitude* is what makes it a gate.
-* (a): record the census copy unconditionally instead of under the `Option` → the command stream
-  changes on golden frames → pins move → red.
+* **(a): restore the `vb_id` ring to the WRONG layout after the census copy, on an unarmed frame** →
+  `vb_resolve`/`vb_shade` sample undefined contents → the shaded BMP moves → **`[vb_mesh]`'s
+  `sha256` reds**. The pin and the leg are named because (a) is quantified over *image* goldens and
+  a mutation has to reach that quantifier; `[vb_mesh]` is a blessed leg, deliberately not one of the
+  two carrying `sha256_hwrt = "PENDING"`, on which `golden.ps1` exits 2 before comparing anything.
+
+  > ⚠️ **The mutation this replaces DID NOT FIRE, and it is the third instance of one specific
+  > error: an edit that does not reach the predicate's quantifier.** It read *"record the census
+  > copy unconditionally instead of under the `Option` → the command stream changes on golden
+  > frames → pins move → red."* But (a) is quantified over **images**: each pin records the SHA-256
+  > of a dumped BMP, and **nothing in this repository pins a command stream**. Substitute: an extra
+  > `vkCmdCopyImageToBuffer` reading the ring into host-visible staging writes **zero swapchain
+  > texels**; a correctly specified layout transition preserves contents; `vb_id` is `R32G32_UINT`,
+  > so no tiling or compression choice the added `TRANSFER_SRC` usage could induce can perturb a
+  > value. Every pinned BMP hashes identically — **(a) stays GREEN under the mutation written to red
+  > it.** R0d(a)'s Rev-5 spawn-order mutation was retired for exactly this reason, and R0b(c)'s
+  > replacement mutation before it. Three times the same shape: **the mutation edits something real,
+  > and the gate is not quantified over it.** A mutation must name the artefact the gate hashes.
 * (c): feed the reducer the CPU oracle's own coverage instead of the readback → (c) passes
   vacuously while (b) fails; the pairing is what proves (c) is not self-referential.
 

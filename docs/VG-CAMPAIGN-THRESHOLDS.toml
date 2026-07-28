@@ -31,8 +31,8 @@
 # and Rev 7 -- the third occurrence caught by an adversarial pass rather than by the fields
 # themselves, in the very revision whose slogan was about fixes that do not land. They are updated
 # here in the same act as the edit, which is the whole of their job.
-schema_version = 13
-frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 17"
+schema_version = 14
+frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 18"
 frozen_date = "2026-07-28"
 
 # THE EDIT DISCIPLINE, stated because Rev 4 and Rev 5 both edited this file in place while its
@@ -372,6 +372,11 @@ k1_path_aggregation = "min_over_committed_camera_paths"
 # it: Rev 15 repaired the two prose sites and left the codeable one.
 committed_paths_rule = "committed camera paths are enumerated in assets/vg_corpus/CORPUS.toml at R0b; a CENSUS ROW is one reading at one (camera path, ladder rung) pair, so the census emits |P| x |ladder| rows; R0b(e) asserts |P| >= committed_paths_min at the rung that AUTHORS the set, and R0d(d) asserts SET EQUALITY between the PROJECTION of the census rows onto their path component and the enumeration, plus the same floor, at the rung that CONSUMES it (a missing path, an extra path and an undersized enumeration all red); R0d(d) RECORDS the sha256 of the enumeration beside the readback hashes as evidence, not as an assertion; R0 does not assert the set is representative, and (d) cannot see an edit to the enumeration made before the run"
 
+# REV 18 -- camera paths are a TOP-LEVEL enumeration in CORPUS.toml, not a per-asset column;
+# the census runs the whole corpus at every committed path (plan section 4.3). committed_paths_rule
+# below is unchanged in effect -- the enumeration is still where |P| is read -- but the quantity
+# carriers-per-id it used to depend on no longer exists.
+#
 # REV 14 -- THE CARDINALITY FLOOR, absent until now and the one input on which EVERY R0d gate part
 # is vacuously green at once.
 #
