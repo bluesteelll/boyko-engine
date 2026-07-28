@@ -1,6 +1,6 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 15** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 16** — **NOT APPROVED, and no code exists.** This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
@@ -616,13 +616,23 @@ as-of-Rev-13 rather than left in the present indicative; and the mutation this p
 carry was a two-arm `or` that amendment 1 forbids, so it is split, because the two arms do not
 behave the same way against the six-part gate:
 
+⚠️ **Both arms' verdicts are functions of `(|E|, carriers-per-id)`, not of `|E|` alone, and Rev 15
+stated them as functions of `|E|` — so both were wrong at the boundary.** `|E|` is the number of
+**distinct** ids; what an edit moves is which assets carry which id.
+
 * **Repoint** one asset's path id to another id already in the manifest → payloads, counts, slots
-  and allocation are unchanged, and the *distinct-id count* is unchanged, so **all six stay green**.
-  The membership hole this paragraph is about is still open, and (e) does not close it.
-* **Delete** one asset's path id → at |E| ≥ 3 the count still clears the floor and all six stay
-  green; **at |E| = 2 the count falls to 1 and (e) reds**. So this arm fires over part of the
-  permitted range only, which by this document's own standard means it does not fire — it is kept,
-  split out and labelled, rather than quoted as though it demonstrated the hole.
+  and allocation are unchanged. If the repointed asset was the **sole carrier** of its id, `|E|`
+  drops by one, and at `|E| = 2` that lands on 1 and **(e) reds**. If the id has other carriers,
+  `|E|` is unchanged and **all six stay green**. Rev 15 asserted the second case unconditionally.
+* **Delete** one asset's path id → same dependence: the count falls only if that asset was the sole
+  carrier, and then only crosses the floor at `|E| = 2`.
+
+Both arms therefore fire over part of the permitted range only, which by this document's own
+standard is **not firing**, and both are kept, split and labelled rather than quoted as though they
+demonstrated the hole. §4.3's schema does not currently express carriers-per-id, which is why the
+dependence could be missed: **a verdict stated as a function of a quantity the schema does not
+carry is a verdict nobody can check.** The membership hole this paragraph is about stays open under
+every case above; (e) bounds cardinality and does not close it.
 
 **The conclusion is unchanged and that is why this is a re-derivation, not a reversal:** (e) bounds
 the set's *cardinality*, which is not the same as pinning its *membership*, so a cardinality floor
@@ -767,8 +777,14 @@ K1 is therefore decidable today, without the error target Rev 1's phrasing impli
 All statistics are reported per camera path, path definitions committed as test constants — the
 shape `sv0_scene/mod.rs:149~-162` already uses for its camera.
 
-> ⚠️ **A CENSUS ROW is one reading of the full statistic set at one `(camera path, ladder rung)`
-> pair, so the census emits `|P| × |ladder|` rows.** This definition is Rev 15's and its absence was
+> ⚠️ **A CENSUS ROW is one reading, at one `(camera path, ladder rung)` pair, of every statistic
+> R0d(b) enumerates that is READABLE AT THAT PAIR. The census emits `|P| × |ladder|` rows.**
+> The qualifier is Rev 16's and it is not pedantry: Rev 15 wrote "the full statistic set", and two
+> members of the set (b) names are not readable at a single pair — the convergence check is a
+> relation *between* rungs and the modal-bucket shift is a difference *between adjacent* rungs. A
+> definition that its own dependents falsify is a definition that needed a definition, which is the
+> signature of one volunteered rather than derived. Per-pair statistics live in the row;
+> between-rung statistics are derived from the rows and are reported per path. This definition is Rev 15's and its absence was
 > a P0 that no lens found by looking for it — it surfaced from two gate parts disagreeing.
 > **R0c(d)** said *"the census produces one row per rung"* and **R0d(d)** said *"one census row per
 > camera path"*, one screen apart: over two paths and four rungs the first makes four rows and the
@@ -1136,10 +1152,24 @@ one of the two alone leaves the other's quantifier unbounded.
 * declare a `TANGENT`-less asset and delete the `generate_tangents` post-pass → (b)/(c) survive but
   the tangent lane is identity; asserted separately so the fallback cannot rot silently.
 
-**Skip policy:** the payload is gitignored, so (a)–(e) skip when it is absent — ⚠️ this read
-"(a)–(d)" until Rev 15, leaving the part Rev 14 appended outside the only sentence that says what
-happens to the parts on the branch where the corpus is not on disk, which is the branch every
-current checkout takes — the same shape as
+**Skip policy — derived from each part's INPUTS, not from a letter range.** The payload is
+gitignored and the manifest is **tracked** (§4.3), so **(a)–(d) skip when the payload is absent**
+while **(a0) and (e) do not**: both read tracked files and are evaluable on every checkout.
+
+> ⚠️ **Rev 15 widened this to "(a)–(e)" and that repair REGRESSED — it disarmed the domain floor on
+> the branch every current checkout takes.** (e) reads `CORPUS.toml`, which is tracked; the skip's
+> trigger is the *payload's* absence, so (e)'s evaluability never depended on it. Under the widened
+> range both of (e)'s mutations edit tracked files and neither could red anywhere CI runs, and
+> R0d(d)'s copy of the floor is payload-gated too — so "one of the two alone leaves the other's
+> quantifier unbounded" became *both* gated. That is verbatim the `[hash_assertion]` defect this
+> campaign spent Rev 4 → Rev 8 repairing (four re-assertions, every one a skipped GPU/corpus test:
+> *a tripwire guaranteed not to fire*), re-committed in the repair meant to close the (e)-shaped
+> hole. The tell was inside the same sentence: **(a0) was already outside the skip for exactly this
+> reason** — it reads a tracked field — and (e) was put inside it anyway. **This is the one Rev 15
+> repair that EXTENDED a clause's reach rather than bounding it, and it is the one that failed** —
+> the second consecutive revision in which that is true, and the invariant's own prediction.
+
+— the same shape as
 the `dxc`-dependent gates ([`cluster_cull_spv_sync.rs`](../crates/boyko_rhi_vulkan/tests/cluster_cull_spv_sync.rs):196~-204). **Procedural mitigation, and it is
 binding: the rung is not commit-eligible until the gate has been run with the corpus present and
 its output pasted into the commit message.** A gate proven only on a box that skipped it is not a
@@ -1218,7 +1248,18 @@ separate processes** under `[census].cross_run_gate` — **the sha256 of the rea
 (b) `D_est`, the convergence check, the histogram and both `[k1].report_only` statistics
 (`visible_tri_per_covered_pixel` and `submitted_per_covered_pixel` — the saturating raw reading and
 the cull-efficiency reading, neither of which adjudicates anything, and the modal bucket alongside
-them under `[k1].modal_bucket_role`) are produced at **every** ladder rung, so the
+them under `[k1].modal_bucket_role`) are produced at **every `(committed camera path, ladder rung)`
+pair — that is, one census row each, per §5.7's definition**. ⚠️ **This read "at every ladder rung"
+and that was a live codeable fork with opposite verdicts, not a wording preference.** Substitute
+`P = {A, B}` with B censused at 512², 1080p and 2160p but not 1440p: under the pair reading (b)
+**reds** — a committed path with a missing rung is exactly the hole (b) exists for — while under the
+rung reading it **greens**, because every rung still carries statistics from A. (a), (c) and (d) all
+stay green either way, so the whole R0d verdict turned on which of three texts an implementer coded
+from. Rev 15 defined the row and re-derived (c) and (d) against it and **not (b)**, then cited (b)
+as the definition's headline consequence — **a definition has strictly more dependents than a
+claim** (every text *using* the word, not every text *stating* the fact), and this is the text that
+proves it. At |P| = 0 the pair set is empty and (b) is vacuously green **from its own words**, which
+is what "settled by construction" was supposed to mean and did not until here. So the
 resolution-dependence is on the page rather than in the choice of one row; (c) the **non-degeneracy precondition** holds **for every committed camera path**, at the decision resolution and at the top rung —
 covered pixels at or above `[k1_instrument].min_covered_pixels` and distinct visible triangles at or
 above `[k1_instrument].min_visible_tris` — because `D_est` and the convergence check are both
@@ -1353,14 +1394,14 @@ renumbering is to re-derive, not to re-word.
   with a cardinality floor has three ways to fail and each is its own derivation.**
 
   **(d-sup) — the isolating one.** Census a path that is **not** enumerated, leaving `CORPUS.toml`
-  and every committed path alone → the row set is a proper superset of the enumeration → (d) reds.
+  and every committed path alone → the rows' PATH PROJECTION is a proper superset of the enumeration → (d) reds.
   **It isolates:** the extra row is present identically in all three processes, so (a)'s agreement
   predicate stays true; it removes no ladder rung, so (b) stays true; and the extra path is
   **outside (c)'s domain**, which is the enumeration, so (c) is untouched. (d) is the only part that
   moves.
 
   **(d-sub) — fires, but does NOT isolate, and saying so is the correction.** Skip one committed
-  path in the run → the row set is a proper subset → (d) reds. ⚠️ **Rev 13 claimed this mutation
+  path in the run → the rows' PATH PROJECTION is a proper subset → (d) reds. ⚠️ **Rev 13 claimed this mutation
   isolated and it does not, under the domain Rev 13 gave (c) in the same commit.** (c) is quantified
   over every *committed* path; a skipped path has no reading, so `covered_pixels(p) < 1024` holds
   vacuously or numerically and **(c) reds too**. Two clauses written independently in one revision,
@@ -1593,7 +1634,8 @@ headline was false as written. Rather than a headline and a retraction, the limi
   ⚠️ **And what limits cherry-picking is narrower than Rev 10 wrote here.** That text read: the
   paths "are committed as test constants and R0d(b) requires every statistic at every rung, so an
   unrepresentative frame appears as a row in the census rather than being selectable afterwards."
-  R0d(b) quantifies over **ladder rungs**, not over paths — its own red mutation is *"drop the
+  R0d(b) quantifies over **`(path, rung)` pairs** since Rev 16, so it *does* catch a committed path
+  measured at too few rungs; ⚠️ it read "over ladder rungs, not over paths" — its own red mutation is *"drop the
   ladder to its decision row only"* — so it catches a path measured at too few rungs and never a
   path that was never measured at all. Under Rev 11's `min`-over-paths aggregation that is exactly
   the live lever, because MIN is monotone under set inclusion. **R0d(d) is what closes it**: set
