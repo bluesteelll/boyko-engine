@@ -178,36 +178,36 @@
 //!
 //! # Scope
 //!
-//! Only the three navigation documents are gated. The rest of `docs/` is plan, audit and results
-//! files: dated records of what was believed at a point in time. Rewriting their anchors to
-//! match today's source would falsify the record, so they are deliberately out of scope.
+//! The three navigation documents **and** `MESHLET-VIRTUAL-GEOMETRY-PLAN.md`. The rest of `docs/`
+//! is audit and results files: dated records of what was believed at a point in time. Rewriting
+//! their anchors to match today's source would falsify the record, so they stay out of scope.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// The internal documents `CLAUDE.md` points agents at for navigation.
-/// The three navigation documents.
+/// The three navigation documents, plus the virtual-geometry plan.
 ///
-/// `MESHLET-VIRTUAL-GEOMETRY-PLAN.md` was ADDED HERE AND REMOVED AGAIN, and the reason is worth
-/// recording because it is a real limit of this gate rather than a preference.
+/// The plan was ADDED, REMOVED, and ADDED AGAIN, and the round trip is worth recording because it
+/// measured a real limit of this gate rather than a preference.
 ///
-/// The plan is the strongest candidate for gating in the tree: its §12 appendix opens *"Every line
-/// below was opened or grepped while writing this revision"*, and that blanket claim has been
-/// **false in four consecutive revisions** — Rev 4 re-derived the appendix and left the body stale,
-/// Rev 6 re-derived the body and left the appendix stale. Exactly the promise a machine should keep.
+/// It was the strongest candidate in the tree: its §12 appendix used to open *"Every line below was
+/// opened or grepped while writing this revision"*, and that blanket claim was **false in four
+/// consecutive revisions**. Exactly the promise a machine should keep. The first attempt failed
+/// because the plan cited bare basenames in prose (`` `mesh_assets.rs:252` ``) while this scanner
+/// binds an anchor to the nearest resolvable path mention — measured then: 83 "stale" of 146,
+/// dominated by misbindings.
 ///
-/// It cannot, as the documents are written. The navigation docs cite through resolvable markdown
-/// links (`[mesh.rs](../crates/.../mesh.rs):81`); the plan cites bare basenames in prose
-/// (`` `mesh_assets.rs:252` ``). This scanner binds an anchor to the nearest resolvable path
-/// mention, so a plan line naming `targets.rs:868` binds to whatever document link appeared above
-/// it — measured: 83 "stale" of 146, dominated by misbindings, including `VG-CAMPAIGN-CLAIM.toml`
-/// reported "past end of file" for an anchor meant for `targets.rs`.
-///
-/// Resolving basenames instead would be ambiguous by construction — this workspace has many
-/// `mod.rs`, `lib.rs` and `mesh.rs` files — so it would trade a loud misbinding for a silent one.
-/// **Gating the plan requires converting its citations to the link form first.** That is a bounded
-/// mechanical edit, it is a named follow-up, and until it happens the plan's §12 says plainly that
-/// its anchors are unchecked rather than asserting they were verified.
+/// Converting the citations to link form was the named follow-up and it landed, which raised the
+/// bound set to 201 and let the plan in. **Read the printed decomposition before trusting a green
+/// run here:** roughly half the plan's anchors carry the `~` waiver, because this gate models an
+/// anchor as pointing at a DEFINITION while the plan cites EVIDENCE lines — a usage flag, an enum
+/// variant, a comment asserting the fact being cited. Re-pointing those at definitions would move
+/// the citations away from the evidence they cite. A waived anchor asserts only that the line
+/// number exists in the file: `check_anchor` returns at the waiver branch before the shape test
+/// runs, so a waived anchor that is simply WRONG about which line holds the symbol still passes.
+/// What the plan's membership does buy is the class that actually rots — a cited file that
+/// disappears or shrinks — and it caught three dead paths on the first run.
 const GATED_DOCS: &[&str] = &["FEATURE_MAP.md", "SYSTEMS.md", "ARCHITECTURE.md", "MESHLET-VIRTUAL-GEOMETRY-PLAN.md"];
 
 /// Opt-out marker for a line that quotes a stale anchor on purpose.

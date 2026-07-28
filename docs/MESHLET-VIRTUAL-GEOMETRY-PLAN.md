@@ -1317,7 +1317,7 @@ headline was false as written. Rather than a headline and a retraction, the limi
   confirmed.
 * **No comparative claim is evaluated, decided or pre-registered.** There is no ONE gate at R0
   (§14).
-* **This document's `file.rs:N` anchors are not machine-checked** (§12), and its citations of the
+* **This document's `file.rs:N` anchors are machine-checked only in part** (§12), and its citations of the
   two frozen files' field names **are** (`tests/vg_symbol_reachability.rs`). Those are different
   guarantees and only the second is mechanical.
 
@@ -1407,7 +1407,20 @@ opposite direction; and `targets.rs`'s anchors were ~56 lines off in *both* at o
 asserting verification, four rounds of being wrong, every time caught by an adversarial pass rather
 than by anything mechanical.
 
-**These anchors are NOT machine-checked, and that is now stated instead of denied.**
+**These anchors are machine-checked in part as of Rev 9, and the part matters more than the fact.**
+The document is in `internal_docs_anchors.rs`'s `GATED_DOCS` and the gate is green: 123 path
+mentions, 0 dead; 201 anchors, 0 stale. ⚠️ But it prints its own decomposition and the decomposition
+is the honest reading — **102 of the 201 anchors carry the `~` waiver**, which asserts only that the
+line number exists inside the cited file. `check_anchor` returns at the waiver branch *before* the
+shape test, so a waived anchor that names the wrong line still passes. Half this appendix is
+therefore bounds-checked, not verified.
+
+That is not the gate under-performing: it models an anchor as pointing at a **definition**, and this
+document cites **evidence lines** — a usage flag, an enum variant, a comment asserting the very fact
+being cited. 93 of the 99 anchors it first called stale were that mismatch rather than rot, and
+re-pointing them at definitions would move the citations away from the evidence they cite. What
+membership does buy is the class that actually rots — a cited file that disappears or shrinks — and
+it caught three dead paths on its first run.
 `tests/internal_docs_anchors.rs` gates the three navigation documents; adding this plan was
 attempted and reverted, because the plan cites bare basenames in prose (`` [`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):252 ``)
 while the gate binds an anchor to the nearest resolvable path link. Measured on the attempt: 83
