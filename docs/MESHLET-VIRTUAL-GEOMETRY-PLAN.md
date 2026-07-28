@@ -1,6 +1,6 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 18** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 19** — **NOT APPROVED, and no code exists.** This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
@@ -625,8 +625,10 @@ those five reads the camera-path column**. R0d(d) *records* the enumeration dige
 as the run, with no earlier digest to compare against, so it cannot detect a change made before it.
 The modal **cannot** had no mechanism behind it in either named place.
 
-⚠️ **Rev 14 added a sixth part, (e), which reads exactly that column — and re-derived none of the
-three texts that are functions of this list.** The list is now six; the sentence above is marked
+⚠️ **Rev 14 added a sixth part, (e), and re-derived none of the three texts that are functions of
+this list.** (e) then read a per-asset camera-path column; §4.3's Rev 18 subtraction removed that
+column, so (e) now reads the manifest's **top-level camera-path enumeration** instead — a further
+dependent of the same list, recorded here rather than left for a fourth sweep. The list is now six; the sentence above is marked
 as-of-Rev-13 rather than left in the present indicative; and the mutation this paragraph used to
 carry was a two-arm `or` that amendment 1 forbids, so it is split, because the two arms do not
 behave the same way against the six-part gate:
@@ -1131,12 +1133,21 @@ geometry slot `!= VB_GEOMETRY_RESERVED_SLOT` and a `gMeshMeta` row whose `index_
 > the gate side. The hole the mutation targets is real and verified: `backfill_vb_geometry_slots`
 > has no re-arm and exactly one call site, in `boyko_app::runner`'s boot path, so a mesh registered
 > at runtime under VB keeps `VB_GEOMETRY_RESERVED_SLOT` forever. (d) the largest corpus mesh registers without allocation
-failure (§3.4);
+failure (§3.4) — ⚠️ **and §4.3's Rev 18 subtraction changed what this part has to cover, which
+Rev 18 did not re-derive.** Under the partition reading one asset needed to be resident per censused
+frame, so "the largest mesh allocates" was a sound proxy for the residency ceiling. The census now
+runs the **whole corpus at every committed path**, so what R0d needs is the whole corpus resident
+**simultaneously**, and the largest single mesh allocating says nothing about the sum. Recorded as a
+**precondition R0d inherits**, not silently widened into (d): widening it would mint a new
+mechanism at an approved rung, and §3.4's residency hazard is already the named home for the
+ceiling. Rev 19's scope is to state the sum requirement where §3.4 states the hazard;
 **(e) the manifest enumerates at least `[k1].committed_paths_min` distinct camera-path ids.**
 ⚠️ **This part is Rev 14's, and it exists because the parts above provably cannot supply it.** The
 enumeration immediately above — (a0) the arrangement sentinel, (a) payload sha256, (b) triangle
 count, (c) slot + `gMeshMeta` row, (d) allocation — is exactly the enumeration §5.5 uses to show
-that **none of them reads the camera-path column**. R0d's two path quantifiers therefore ranged over
+that **none of them reads the camera-path enumeration** (at Rev 13 that datum was a per-asset
+column; §4.3's Rev 18 subtraction made it a top-level key, which changes where it lives and not
+whether those five read it). R0d's two path quantifiers therefore ranged over
 a set this rung could author empty, and on an empty set every R0d part is vacuously green while
 `k1_decision_rule` returns the campaign-**favourable** verdict from zero measurement. The floor is
 asserted here, at the rung that **authors** the domain, as well as at R0d, which **consumes** it;
@@ -1262,24 +1273,31 @@ vacuous-selection defect wearing a lab coat.
 * (b): subdivide the procedural fixture 4× → the modal bucket must move by **two** buckets. A
   sensitivity control that only asserts "the number changed" is the defect this campaign keeps
   finding; the required *direction and magnitude* is what makes it a gate.
-* **(a): restore the `vb_id` ring to the WRONG layout after the census copy, on an unarmed frame** →
-  `vb_resolve`/`vb_shade` sample undefined contents → the shaded BMP moves → **`[vb_mesh]`'s
-  `sha256` reds**. The pin and the leg are named because (a) is quantified over *image* goldens and
-  a mutation has to reach that quantifier; `[vb_mesh]` is a blessed leg, deliberately not one of the
-  two carrying `sha256_hwrt = "PENDING"`, on which `golden.ps1` exits 2 before comparing anything.
+* **(a): give the `vb_id` ring the WRONG `initialLayout` in its UNCONDITIONAL creation, so every
+  frame — armed or not — transitions from a layout the image was never in** → `vb_resolve`/
+  `vb_shade` sample it in an undefined state → the shaded BMP moves → **`[vb_mesh]`'s `sha256`
+  reds**. The pin and the leg are named because (a) is quantified over *image* goldens, and
+  `[vb_mesh]` is a blessed leg, deliberately not one of the two carrying `sha256_hwrt = "PENDING"`
+  on which `golden.ps1` exits 2 before comparing anything.
 
-  > ⚠️ **The mutation this replaces DID NOT FIRE, and it is the third instance of one specific
-  > error: an edit that does not reach the predicate's quantifier.** It read *"record the census
-  > copy unconditionally instead of under the `Option` → the command stream changes on golden
-  > frames → pins move → red."* But (a) is quantified over **images**: each pin records the SHA-256
-  > of a dumped BMP, and **nothing in this repository pins a command stream**. Substitute: an extra
-  > `vkCmdCopyImageToBuffer` reading the ring into host-visible staging writes **zero swapchain
-  > texels**; a correctly specified layout transition preserves contents; `vb_id` is `R32G32_UINT`,
-  > so no tiling or compression choice the added `TRANSFER_SRC` usage could induce can perturb a
-  > value. Every pinned BMP hashes identically — **(a) stays GREEN under the mutation written to red
-  > it.** R0d(a)'s Rev-5 spawn-order mutation was retired for exactly this reason, and R0b(c)'s
-  > replacement mutation before it. Three times the same shape: **the mutation edits something real,
-  > and the gate is not quantified over it.** A mutation must name the artefact the gate hashes.
+  > ⚠️ **THE SITE IS THE WHOLE POINT, and two mutations have now died on it.** (a)'s domain is
+  > golden frames rendered with the census **unarmed**, and §5.3 makes an unarmed frame record
+  > **zero** extra commands — so any mutation sited *"after the census copy"* lives inside the
+  > armed-only `Option` and is **never executed on the frames (a) renders**. Rev 18 wrote exactly
+  > that and it did not fire, for a reason *adjacent to* the one that retired its predecessor
+  > rather than identical: the earlier mutation was **executed but not hashed**; this one is **not
+  > executed at all**. The permanent part of R0c's change is the ring's `TRANSFER_SRC` usage and its
+  > creation parameters — that is the only surface present on an unarmed frame, so that is where a
+  > mutation of (a) must live.
+  >
+  > ⚠️ **And its red must be DEMONSTRATED, not cited.** The retirement argument two paragraphs up
+  > says `vb_id` is `R32G32_UINT`, so no tiling or compression choice the widening induces can
+  > perturb a value — and that same representation-invariance is a reason a layout mismatch may
+  > return the correct texels on *this* hardware even though it is spec-UB. §8's standing rule
+  > governs: *a mutation that is only argued does not count; the commit message records the mutated
+  > run's output.* Until R0c is implemented and that run is recorded, **(a) has no demonstrated
+  > red**, and §10's risk R7 no longer claims otherwise.
+
 * (c): feed the reducer the CPU oracle's own coverage instead of the readback → (c) passes
   vacuously while (b) fails; the pairing is what proves (c) is not self-referential.
 
@@ -1749,7 +1767,7 @@ headline was false as written. Rather than a headline and a retraction, the limi
 | R4 | **`WAIT_BIT` readback hangs instead of failing.** | [`gpu_timing.rs`](../crates/boyko_rhi_vulkan/src/present/gpu_timing.rs):344~ documents the deadlock; three separate collectors exist because of it. | §7's written-pair bitmask, asserted before the read — binding on §14's rung, which is the one that brackets passes. Not an R0 risk any more. |
 | R5 | **Stale doc sends the importer down the `None` path.** | Verified: ≥6 comments still claim `VB_IMPLEMENTED == false` while [`render_path_config.rs`](../crates/boyko_render/src/render_path_config.rs):130~ says `true`. | R0b's second red mutation targets exactly this; fixing the comments is a separate one-line commit, deliberately not absorbed here. |
 | R6 | **Host-visible residency ceiling.** | [`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):320~: every mesh buffer is `HostVisibleCoherent`. | R0b gate (d); the device-local + staging path is a named follow-up, not R0 work. |
-| R7 | **The `vb_id` usage widening perturbs a golden.** | New. | R0c gate (a) over every VB pin, with a demonstrated red (record the copy unconditionally). |
+| R7 | **The `vb_id` usage widening perturbs a golden.** | New. | R0c gate (a) over every VB pin. ⚠️ The mitigation cell read *"with a demonstrated red (record the copy unconditionally)"* — that mutation was retired at Rev 18 for not firing, and the cell claiming a demonstrated red is the risk register asserting the very thing the rung had lost. **(a) has no demonstrated red until the re-sited mutation is RUN**; §8's standing rule is that a mutation which is only argued does not count. |
 | R8 | **UE5 capture measures a different scene than our census.** | New — the two engines must load the same bytes. | §4.3: an asset that cannot be imported by both is not corpus material; R0a(c) pins the resolution across both. |
 | R9 | **Disk exhaustion masquerading as a build failure.** | This project's record: `target/` has filled this disk and surfaced as linker errors. | §11 records the measured headroom; R0a's record carries free-disk as a required field, and R0a's negative branch **re-reads** it at test time. |
 | R10 | **The claim is set to meet the floor.** The cheapest way to close the ONE gate is to write the number on the right after seeing the left. | The P0 of Rev 1; of Rev 2, answered with a hash around the string `PENDING`; and of Rev 3–Rev 5, answered with an ordering rule that **named one rung for two instruments**. | **MOVED TO §14 AT REV 8, unresolved.** There is no claim at R0 to set against a floor, so this risk has no R0 surface — but it is not solved: §14.4 P0-5 carries the worked example showing the post-fill edit window still open on one branch. ⚠️ Rev 3–Rev 5 claimed here that ordering *"does not depend on anyone noticing an edit"* — **retracted**; ordering constrains commits, not knowledge, and party separation is what carries the weight. |
