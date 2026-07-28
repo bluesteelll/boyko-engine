@@ -1,6 +1,6 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 10** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 11** — **NOT APPROVED, and no code exists.** This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
@@ -1464,12 +1464,7 @@ being cited. 93 of the 99 anchors it first called stale were that mismatch rathe
 re-pointing them at definitions would move the citations away from the evidence they cite. What
 membership does buy is the class that actually rots — a cited file that disappears or shrinks — and
 it caught three dead paths on its first run.
-`tests/internal_docs_anchors.rs` gates the three navigation documents; adding this plan was
-attempted and reverted, because the plan cites bare basenames in prose (`` [`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):252 ``)
-while the gate binds an anchor to the nearest resolvable path link. Measured on the attempt: 83
-"stale" of 146, dominated by misbindings rather than rot. **Converting this document's citations to
-the link form is the named follow-up that would let the gate hold the promise this sentence used to
-make.** Until then, treat every number below as evidence to re-derive, not as a verified fact.
+⚠️ **This paragraph said, in the present indicative and thirteen lines below the sentence above, that the gate covers "the three navigation documents", that adding this plan "was attempted and reverted", and that converting the citations is still a pending follow-up.** All three were true history and false as current state: the round trip is real (added, removed, added again) and the conversion landed. The stale wording survived a repair that fixed four other texts and missed the one inside the section the repair was about — and it told the reader to trust nothing below it, so it weakened no gate but contradicted the section's own opening. **The live limit is not membership, it is the waiver:** 102 of 201 anchors carry `~` and assert only that the line number exists in the cited file.
 
 **Ingest / mesh:** `crates/boyko_render/src/loaders/obj.rs:13` (default vertex colour), `:55`
 (`ObjMeshLoader`), `:60~` (`EXTENSIONS = &["obj"]`), `:94~-96` (dedup + `generate_tangents`) ·
@@ -1657,13 +1652,13 @@ Against the research ladder this document is bound to (§0), "the first rung tha
 resolves uniquely to **R6** — R5 is dark infra with the `Option` staying `None`, R6 is where the
 meshlet cull is armed. So the floor arrives at R6, and the research ladder gives **R2** a gate row
 reading *"measured Δ on R0 corpus, decidable by R0's floor"*. R2, R2b, R3, R4 and R5 therefore each
-carry a gate citing a measurand that will not exist until R6 — **five orphaned gate rows**, created
-by the deferral and recorded here rather than discovered at R2.
+carries a gate citing a measurand that will not exist until R6 — and it is **one row, R2**, not five.
 
-What deferring genuinely buys is unchanged and is still the right trade: at R6 the arm, the
-denominator and the floor are defined in one place, so the claim is written against a named
-measurand instead of a placeholder. What it costs is that the five rungs between must either state
-their own gate or state that they have none. Repairing their rows is out of this document's scope
+⚠️ **Rev 10 wrote "R2, R2b, R3, R4 and R5 therefore each ... five orphaned gate rows" and the "therefore" does not follow.** Read the research ladder's gate column row by row: R2b is `*_spv_sync` tests, R3 is a measured pass-1 hit rate produced at R3, R4 is a triangles-at-error curve produced at R4, R5 is byte-identical goldens — a byte comparison needs no delta at all. Only R2's gate cites R0's floor. Overstating a cost fivefold is the same overclaiming this revision series exists to stop, committed in the repair for it, so the number is re-derived here rather than softened.
+
+And for that one row the framing is weaker still: §14.1's own criterion is a configuration that can be switched on and off, and R2 **is** an arm — per-instance GPU cull, on or off, byte-identical if conservative-exact — so R2's paired delta exists at R2. What R2 lacks is not an arm but the *reference* half of the comparison.
+
+Repairing their rows is out of this document's scope
 (§0 binds R1–R8 to the research document), so it is named as the first thing the R1 author
 inherits. And the thing that actually carries the
 P0's weight — party separation, since §13's owner calls are not made by whoever runs the harness —
