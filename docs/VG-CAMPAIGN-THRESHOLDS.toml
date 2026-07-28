@@ -31,8 +31,8 @@
 # and Rev 7 -- the third occurrence caught by an adversarial pass rather than by the fields
 # themselves, in the very revision whose slogan was about fixes that do not land. They are updated
 # here in the same act as the edit, which is the whole of their job.
-schema_version = 12
-frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 16"
+schema_version = 13
+frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 17"
 frozen_date = "2026-07-28"
 
 # THE EDIT DISCIPLINE, stated because Rev 4 and Rev 5 both edited this file in place while its
@@ -376,10 +376,17 @@ committed_paths_rule = "committed camera paths are enumerated in assets/vg_corpu
 # is vacuously green at once.
 #
 # Substitute P = the empty set. (c) is `forall p in P, ...` -> TRUE. (d)'s set equality is
-# `{} = {}` -> TRUE. (a) hashes three identical empty readbacks -> TRUE. (b) is quantified over
-# ladder rungs, and the plan states in its own words that (b) "catches a path measured at too few
-# rungs and never a path that was never measured at all", naming (d) as the closure -- and (d) is
-# exactly what has gone vacuous. Then this file's own decision rule: "ANY p in P degenerate" is
+# `{} = {}` -> TRUE. (a) hashes three identical empty readbacks -> TRUE. (b) is a universal over
+# (path, rung) pairs, and an empty P makes that product empty -> TRUE. ⚠️ REV 17: this sentence
+# read "(b) is quantified over ladder rungs" and quoted the plan saying (b) "catches a path
+# measured at too few rungs and never a path that was never measured at all". Rev 16 changed (b)'s
+# quantifier to pairs and swept ONE of the two texts in this file that are functions of it; both
+# the quantifier and the quoted consequence were stale here, in the file R0a hashes. The
+# CONCLUSION is unchanged -- every part is green on an empty domain either way, which is why the
+# floor exists -- but the reason (b) is green changed from "blind by construction" to "vacuous over
+# an empty product", and a derivation that states the wrong reason for the right answer is the
+# thing this campaign has spent sixteen revisions learning to distrust.
+# Then this file's own decision rule: "ANY p in P degenerate" is
 # false vacuously, so control reaches the min, and min over the empty set is +inf under the natural
 # fold-with-identity => K1 REFUTED, the campaign-FAVOURABLE verdict, from a census that measured
 # nothing. This is the empty-frame defect that `min_covered_pixels` exists to close, one quantifier

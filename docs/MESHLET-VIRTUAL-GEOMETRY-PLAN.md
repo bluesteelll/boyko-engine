@@ -1,6 +1,6 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 16** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 17** — **NOT APPROVED, and no code exists.** This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
@@ -779,12 +779,25 @@ shape `sv0_scene/mod.rs:149~-162` already uses for its camera.
 
 > ⚠️ **A CENSUS ROW is one reading, at one `(camera path, ladder rung)` pair, of every statistic
 > R0d(b) enumerates that is READABLE AT THAT PAIR. The census emits `|P| × |ladder|` rows.**
-> The qualifier is Rev 16's and it is not pedantry: Rev 15 wrote "the full statistic set", and two
-> members of the set (b) names are not readable at a single pair — the convergence check is a
-> relation *between* rungs and the modal-bucket shift is a difference *between adjacent* rungs. A
-> definition that its own dependents falsify is a definition that needed a definition, which is the
-> signature of one volunteered rather than derived. Per-pair statistics live in the row;
-> between-rung statistics are derived from the rows and are reported per path. This definition is Rev 15's and its absence was
+> **Readable at that pair** is a RULE, applied per statistic, not a list: *a statistic indexed by
+> more than one rung, or by none, is not a row member.* It is stated as a rule for the same reason
+> §5.5 declines to enumerate the texts inheriting the `D_est` convention — an enumeration is a second
+> census to keep in step with the first.
+>
+> ⚠️ **Rev 16 did enumerate, and got both entries wrong.** It named the convergence check (a
+> member, correctly excluded — a relation *between* the top two rungs) and the modal-bucket SHIFT,
+> which is **not a member of (b)'s set at all**: (b) names the modal *bucket*, and the shift lives
+> in R0d's separate measured-not-asserted clause. And it omitted the member that forces the rule:
+> **`D_est`**, whose §5.5 definition divides `visible_tris(top rung)` by
+> `covered_pixels(decision_resolution)` — two different rungs — and whose unqualified spelling is
+> the census-wide `min` over paths. The count "two" was right by coincidence and wrong by
+> enumeration. **Where `D_est(p)`'s production is asserted instead:** R0d(c), which requires for
+> every committed path that `covered_pixels` at the decision resolution and `visible_tris` at the
+> top rung each clear their floor — precisely `D_est(p)`'s denominator and numerator, at precisely
+> the two rungs its formula names.
+>
+> Per-pair statistics live in the row; between-rung statistics are derived from the rows and are
+> reported per path. This definition is Rev 15's and its absence was
 > a P0 that no lens found by looking for it — it surfaced from two gate parts disagreeing.
 > **R0c(d)** said *"the census produces one row per rung"* and **R0d(d)** said *"one census row per
 > camera path"*, one screen apart: over two paths and four rungs the first makes four rows and the
@@ -966,7 +979,10 @@ present and not the `PENDING` sentinel — the same discipline `goldens/PINS.tom
 (b) the recorded **GPU name matches the one this engine reports at boot** on this box — a
 mechanical cross-check, not a transcription; (c) the recorded resolution equals
 `[census].decision_resolution` read from the **thresholds** file, not from a constant this rung
-authors; (d) the recorded `VG-CAMPAIGN-THRESHOLDS.toml` sha256 matches the file re-hashed at test
+authors; (d) the recorded `VG-CAMPAIGN-THRESHOLDS.toml` sha256 — **the `\r\n`→`\n`-normalised
+SHA-256, the same number `THRESHOLDS_SHA256` pins in
+[`vg_thresholds_freeze.rs`](../crates/boyko_render/tests/vg_thresholds_freeze.rs), and R0a records
+*that* literal rather than minting a second one** — matches the file re-hashed at test
 time; and the record carries the **pass-correspondence map** — the reference's pass names for its
 stock scene — recorded *here*, at rung one, rather than at the rung that eventually compares two
 tables, where it would be written with both of them already in hand. That reasoning survives Rev 8's
@@ -1607,7 +1623,20 @@ headline was false as written. Rather than a headline and a retraction, the limi
   document retracted that threshold twice. The correct statement is the narrow one: every legal
   `reason` now carries *some* machine assertion, and for three of the four that assertion is about
   the presupposition rather than the cause.
-  Three limits, all named in `[k2_probe]` rather than left to be found: more than one cause can hold
+  ⚠️ **And a fourth limit, which is on the OTHER branch and which three revisions of §9.1 did not
+  name: `achievable = true` is AUTHOR-DECLARED.** This rung's stated purpose is *"that a negative be
+  the machine's, honestly bounded, rather than the author's"* — and every part armouring that is on
+  the negative branch. Enumerate the positive branch: (a) is four-plus non-`PENDING` strings, (b) is
+  **our** GPU's name, (c) is a constant read from the frozen file, (d) is a hash of a docs file.
+  **None of the four mentions an engine**, and neither named mutation probes a fabricated positive.
+  So R0a re-derives a NEGATIVE and merely records a POSITIVE. That asymmetry is defensible — a
+  fabricated positive is refuted at the next rung that tries to capture with the reference, whereas
+  a fabricated negative kills the campaign silently and is the branch §11 measures as likely — but
+  it is a limit, and the bounding enumeration is where limits go rather than where they are absent.
+  Discharged by **recording it**, the disposition R0c(e), free disk and `reason_precedence` already
+  carry, not by minting a positive-branch assertion; note `editor_binary_name` is a negative-branch
+  field today, so an assertion would need a new one.
+  Three limits on the negative branch, all named in `[k2_probe]` rather than left to be found: more than one cause can hold
   at once (§11 measures this box as no-engine **and** short-disk simultaneously), so
   `reason_precedence` fixes which one is recorded — ⚠️ **as an authoring convention only, and Rev 12
   demotes it from R0a's gate for the reason recorded at `[k2_probe].reason_precedence_status`: over
@@ -1634,15 +1663,20 @@ headline was false as written. Rather than a headline and a retraction, the limi
   ⚠️ **And what limits cherry-picking is narrower than Rev 10 wrote here.** That text read: the
   paths "are committed as test constants and R0d(b) requires every statistic at every rung, so an
   unrepresentative frame appears as a row in the census rather than being selectable afterwards."
-  R0d(b) quantifies over **`(path, rung)` pairs** since Rev 16, so it *does* catch a committed path
-  measured at too few rungs; ⚠️ it read "over ladder rungs, not over paths" — its own red mutation is *"drop the
-  ladder to its decision row only"* — so it catches a path measured at too few rungs and never a
-  path that was never measured at all. Under Rev 11's `min`-over-paths aggregation that is exactly
-  the live lever, because MIN is monotone under set inclusion. **R0d(d) is what closes it**: set
-  equality between the census rows and the enumeration, enumeration hashed beside the readback.
-  ⚠️ This sentence read *"one census row per enumerated path"* — the per-path universal Rev 13
-  replaced in §8 and in the frozen file and left standing here, the fourth site of a four-site
-  repair.
+  **R0d(b) quantifies over `(path, rung)` pairs, so it catches a committed path measured at too few
+  rungs *and* one measured at none** — a path with zero rows contributes `|ladder|` absent pairs and
+  (b) reds. Under Rev 11's `min`-over-paths aggregation the omit direction is the live lever,
+  because MIN is monotone under set inclusion, and **R0d(d) is what closes the *membership* half**:
+  set equality between the **path projection** of the census rows and the enumeration, enumeration
+  hashed beside the readback.
+  ⚠️ **This one sentence has now been the missed site of three consecutive repairs**, which is why
+  it is rewritten here rather than annotated a fourth time. It carried *"one census row per
+  enumerated path"* after Rev 13 replaced that form in §8 and the frozen file; it carried *"set
+  equality between the census rows and the enumeration"* after Rev 16 proved that comparand forces
+  `|P| = 0`; and Rev 16's own repair *prepended* a correction and left the superseded clause running
+  on behind it — appending a denial rather than rewriting, the very pattern this document condemned
+  at §14.1. A sentence that has survived three sweeps is not unlucky: it is evidence that annotating
+  in place leaves the grep-able text intact for the next sweep to miss again.
   **The residual, stated rather than claimed away — R0d bounds the measurement, not the choice.**
   Which paths are committed is settled at R0b, one rung earlier and by a different act, and no gate
   in R0 asserts that the committed set is representative of the content class. That is the same
