@@ -864,6 +864,104 @@ fn a_bare_english_word_key_is_not_counted_as_a_citation() {
 /// pinned is WHICH rows are non-empty, and that is a fact this campaign must never change quietly.
 const GATING_ROWS_WITH_PAYLOAD: [&str; 2] = ["r0b_blocked_by", "r1_blocked_by"];
 
+/// The exact MEMBERSHIP of every non-empty `[gating]` row, pinned in both directions.
+///
+/// ⚠️ Pinning which rows are non-empty is not enough since Rev 26, and the reason is a quantifier
+/// change one file away. R0b's gate part (a0) used to name `corpus.arrangement` directly; Rev 26
+/// made it a UNIVERSAL over `[gating].r0b_blocked_by`, so the row's CONTENTS became the domain of
+/// a gate. That closed the add-a-blocker blindness and opened the remove-one lever: deleting a path
+/// from a two-path row leaves the row non-empty, leaves every remaining path resolvable, and leaves
+/// the field cited in prose — so classes 1, 3, 4 and the row-identity pin are all green while R0b
+/// has silently lost a blocker. It is the `min(S′) ≥ min(S)` monotonicity this campaign already
+/// paid for on the camera-path set, one level up.
+///
+/// The residual note above ("what *can* be pinned is WHICH rows are non-empty") was written when a
+/// row's content drove no quantifier. It does now, so the pin extends from identity to membership —
+/// one constant, not a new mechanism.
+const GATING_ROW_MEMBERSHIP: [(&str, &[&str]); 2] = [
+    ("r0b_blocked_by", &["corpus.arrangement", "ingest_ceiling.disposition"]),
+    ("r1_blocked_by", &["k1_outcome.undecided_disposition"]),
+];
+
+/// Every `table.field` in a `[gating]` row, in file order.
+fn gating_row_paths(text: &str, key: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_gating = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with('[') && t.ends_with(']') {
+            in_gating = t == "[gating]";
+            continue;
+        }
+        if !in_gating || t.starts_with('#') {
+            continue;
+        }
+        if let Some((k, value)) = t.split_once('=')
+            && k.trim() == key
+        {
+            for raw in strip_comment(value).split(',') {
+                let p = raw
+                    .trim()
+                    .trim_matches(|c: char| c == '[' || c == ']' || c == '"' || c.is_whitespace());
+                if !p.is_empty() {
+                    out.push(p.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn the_membership_of_every_blocking_gating_row_is_pinned() {
+    let claim = read("docs/VG-CAMPAIGN-CLAIM.toml");
+    for (key, expected) in GATING_ROW_MEMBERSHIP {
+        let actual = gating_row_paths(&claim, key);
+        let want: Vec<String> = expected.iter().map(|s| (*s).to_string()).collect();
+        assert_eq!(
+            actual, want,
+            "[gating].{key}'s membership moved.
+             GAINED a path: R0b(a0) quantifies over this row, so a new blocker is asserted              automatically — add it here in the same commit.
+             LOST a path: a rung has silently stopped being blocked by an owner VALUES call, and              nothing else in this file can see it — the row is still non-empty, the survivors still              resolve, and the field is still cited in prose."
+        );
+    }
+}
+
+#[test]
+fn removing_one_path_from_a_blocking_row_is_reported() {
+    let claim = read("docs/VG-CAMPAIGN-CLAIM.toml");
+    let full = gating_row_paths(&claim, "r0b_blocked_by");
+    assert!(
+        full.len() >= 2,
+        "invariant: r0b_blocked_by must carry more than one path for this control to mean anything"
+    );
+
+    // Drop the LAST path, leaving a well-formed one-path row.
+    let kept = format!("r0b_blocked_by = [\"{}\"]
+", full[0]);
+    let thinned = rewrite_gating_row(&claim, "r0b_blocked_by", &kept);
+    assert_ne!(thinned, claim, "invariant: the mutation must change the file");
+
+    assert_ne!(
+        gating_row_paths(&thinned, "r0b_blocked_by"),
+        full,
+        "the membership pin must see a removed path"
+    );
+    // And the point: every other check stays green on it.
+    assert!(
+        gating_rows_with_payload(&thinned).contains(&"r0b_blocked_by".to_string()),
+        "invariant: the row is still non-empty, so the identity pin is BLIND here — that blindness          is why the membership pin exists"
+    );
+    let thresholds = read("docs/VG-CAMPAIGN-THRESHOLDS.toml");
+    let plan = read("docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md");
+    assert!(
+        sweep(&thresholds, &thinned, &plan)
+            .unresolved_gating
+            .is_empty(),
+        "invariant: class 4 resolves what is INSIDE the row, so a well-formed survivor keeps it          green — the second half of why the membership pin exists"
+    );
+}
+
 /// `[gating]` rows in `text` whose payload is non-empty, in file order.
 fn gating_rows_with_payload(text: &str) -> Vec<String> {
     let mut out = Vec::new();
