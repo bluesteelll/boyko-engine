@@ -349,6 +349,8 @@ pub mod ui;
 /// instance-model + light-table-staging + CSM-cascade-UBO memcpys the windowed host
 /// runs each frame.
 pub mod upload;
+/// VG-R0 rung R0c: the host-side density reducer — one `vb_id` readback into a census row.
+pub mod vg_census;
 pub mod view;
 
 pub use asset_refcount::{AssetRefcountPlugin, RETIRE_DELAY, RenderEpoch, apply_refcount_deltas, retire_deferred_frees};
