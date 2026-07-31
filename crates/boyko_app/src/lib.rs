@@ -40,6 +40,8 @@ mod host;
 #[cfg(windows)]
 mod host_dump;
 mod runner;
+#[cfg(windows)]
+mod vg_census_dump;
 mod window_info;
 
 /// The host half of the light-table generation protocol (host plan D5/R4):

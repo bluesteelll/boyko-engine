@@ -946,6 +946,9 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     // The env-gated frame dump (`BOYKO_HOST_DUMP` — the host's diagnostic /
     // owner-eval channel, see `host_dump`). `None` on the steady path.
     let mut dump = crate::host_dump::HostDump::from_env(host.swapchain.format());
+    // VG-R0 rung R0c: the env-gated density census (`BOYKO_VG_CENSUS`). `None` on the steady path,
+    // and independent of `dump` above — the two read different images at different extents.
+    let mut census = crate::vg_census_dump::VgCensusDump::from_env();
     // Automated-run frame cap (the `BOYKO_WIN_HIDDEN` companion, and the app-level
     // twin of `window_present_gbuffer`'s own `BOYKO_WINDOW_FRAMES`): `BOYKO_WINDOW_FRAMES=<n>`
     // bounds this loop to `n` iterations, then exits cleanly. Without it an
@@ -1451,6 +1454,13 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // returned borrow holds `dump` until the render call consumes it.
         let readback = match dump.as_mut() {
             Some(d) => d.request(ctx, host.swapchain.extent()),
+            None => None,
+        };
+        // The census's own request. `present_extent` (the COMPOSITE), not the swapchain extent:
+        // the `vb_id` ring is sized to the composite, which under armed SSAA is 2x the client
+        // area — the route the plan's §9.1 grant table takes to the top two ladder rungs.
+        let vb_id_readback = match census.as_mut() {
+            Some(c) => c.request(ctx, present_extent),
             None => None,
         };
         // Anti-aliasing Stage 4 (TAA W2): the resolved mode read early — BEFORE the render block
@@ -2374,7 +2384,10 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // MUST stay boot-fixed, not the live window size, for the same resize-
             // invariance `present_extent` already has); a `Some(readback)` is the dump's
             // host-visible staging, sized to the current swapchain extent by
-            // `HostDump::request` (`None` on the steady path).
+            // `HostDump::request` (`None` on the steady path); a `Some(vb_id_readback)` is the
+            // VG-R0 census's own host-visible staging, sized by `VgCensusDump::request` to
+            // `present_extent * 8 B` — the COMPOSITE extent the `vb_id` ring is built at, which is
+            // the extent the recorder's copy region names (`None` on the steady path).
             let aa_extent = VkExtent2D {
                 width: host.native_extent.0,
                 height: host.native_extent.1,
@@ -2393,8 +2406,20 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     present_extent,
                     aa_extent,
                     readback,
+                    vb_id_readback,
                 )
             }
+        };
+        // VG-R0 R0c: this frame's SUBMITTED triangle count — the `submitted_per_covered_pixel`
+        // report-only numerator, read from the draw list BEFORE the scratch is returned. Gated on
+        // the census being armed, so the steady path pays one `Option` check and no iteration.
+        let submitted_tris: u64 = if census.is_some() {
+            draws
+                .iter()
+                .map(|d| u64::from(d.index_count / 3) * u64::from(d.instance_count))
+                .sum()
+        } else {
+            0
         };
         host.draw_scratch.put(draws);
 
@@ -2503,6 +2528,43 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             dump.take()
                 .expect("invariant: the dump just reported ready")
                 .finish(ctx);
+        }
+
+        // VG-R0 rung R0c (cold): the same settle → request → drain progression for the density
+        // census. The drain is what makes the host read of the per-FIF `vb_id` ring safe — the
+        // readback frame's slot fence is re-waited before the staging is mapped.
+        let census_ready = match census.as_mut() {
+            Some(c) => c.after_present(presented_ok),
+            None => false,
+        };
+        if census_ready {
+            let cx = crate::vg_census_dump::CensusContext {
+                submitted_tris,
+                ssaa_armed: host.ssaa_armed,
+                native_extent: host.native_extent,
+                // Recorded, not assumed: a boot that resolved away from VB, or away from the mesh
+                // leg, records NO copy, and the row must say so rather than let a sentinel-only
+                // readback look like an empty scene.
+                vb_mesh_leg: matches!(
+                    host.resolved_render_path.path,
+                    boyko_render::RenderPath::VisibilityBuffer
+                ) && host.resolved_render_path.mesh_leg,
+            };
+            census
+                .take()
+                .expect("invariant: the census just reported ready")
+                .finish(ctx, &cx);
+        }
+
+        // Exit once EVERY armed capture has completed. Each driver `take()`s itself on completion,
+        // so `is_none()` reads "not armed, or already finished".
+        //
+        // ⚠️ The conjunction is load-bearing, not tidiness. Both drivers settle for the same 30
+        // frames and drain for the same 3, so with BOTH armed they report ready on the SAME frame
+        // — and a `return` inside the first branch would exit before the second ever ran. The
+        // census would silently produce no file, which is indistinguishable from a census that ran
+        // and found nothing: a skip that does not name itself.
+        if (dump_ready || census_ready) && dump.is_none() && census.is_none() {
             return;
         }
 

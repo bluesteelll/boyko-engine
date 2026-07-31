@@ -760,6 +760,13 @@ impl<'ctx> Renderer<'ctx> {
     /// on-screen golden readback path — proving the image-based composite reached the
     /// swapchain); the steady present path passes `None`.
     ///
+    /// `vb_id_readback` is the VG-R0 rung R0c density census's SECOND, INDEPENDENT staging: a
+    /// `Some` copies the VB path's `vb_id` image into it on THIS frame. Read by the `VisibilityBuffer`
+    /// recorder alone — the Deferred and Forward paths own no `vb_id` and never see it. The two
+    /// readbacks are deliberately separate parameters rather than one: they hash different images,
+    /// at different extents (`extent` vs `present_extent`) and different texel widths (4 B vs 8 B),
+    /// and the census is armed on frames the golden dump is not.
+    ///
     /// `present_extent` is the composite's native size for the top-left 1:1 present
     /// (`min(swapchain_extent, present_extent)` clamps the present viewport/scissor, so
     /// the per-texel golden is exact regardless of the WSI extent clamp — the same
@@ -791,7 +798,10 @@ impl<'ctx> Renderer<'ctx> {
     /// [`GBufferTargets::sync_gbuffer`] when needed), and both
     /// `scene.dispatch_group_count_x` and `scene.camera_uniform`'s `count` were sized to
     /// that extent. Any readback buffer is host-visible and at least
-    /// `swapchain.extent` * 4 bytes (4 B/texel).
+    /// `swapchain.extent` * 4 bytes (4 B/texel); any `vb_id_readback` buffer is host-visible and
+    /// at least `present_extent` * 8 bytes (`R32G32_UINT`, 8 B/texel — a DIFFERENT extent and a
+    /// DIFFERENT texel width from the swapchain readback's, which is why the two contracts are
+    /// stated separately).
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn render_gbuffer_frame(
         &mut self,
@@ -807,6 +817,7 @@ impl<'ctx> Renderer<'ctx> {
         present_extent: VkExtent2D,
         aa_extent: VkExtent2D,
         readback: Option<&BoundBuffer>,
+        vb_id_readback: Option<&BoundBuffer>,
     ) -> Result<bool, SwapchainError> {
         debug_assert_eq!(
             token.slot(),
@@ -904,6 +915,7 @@ impl<'ctx> Renderer<'ctx> {
                             fwd,
                             vb,
                             readback,
+                            vb_id_readback,
                             // Rung R9d: the AS command table (for the VB split's own per-frame
                             // TLAS build), the SAME resolve `record_gbuffer`'s own call uses
                             // below.

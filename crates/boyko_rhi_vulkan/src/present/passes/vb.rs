@@ -71,6 +71,13 @@ impl Renderer<'_> {
     /// (`extent`-sized) byte size. Rung R9d: `accel_fns` is the AS command table for the split's
     /// own per-frame TLAS build (`Some` only on an RT device) — the SAME contract
     /// [`record_gbuffer`](super::gbuffer)'s own `accel_fns` param documents.
+    ///
+    /// VG-R0 rung R0c: a `Some(vb_id_readback)` buffer is host-visible and ≥
+    /// `present_extent.width * present_extent.height * 8` bytes (`R32G32_UINT`, 8 B/texel — the
+    /// `vb_id` ring is sized to `present_extent`, NOT `extent`; under armed SSAA that is the 2×
+    /// composite, which is what makes the top two ladder rungs reachable at all). `None` on every
+    /// steady/golden frame, and an unarmed frame records **zero** extra commands — the byte-
+    /// neutrality R0c gate (a) rests on.
     #[allow(clippy::too_many_arguments)]
     pub(crate) unsafe fn record_vb(
         &self,
@@ -86,6 +93,7 @@ impl Renderer<'_> {
         forward: &ForwardTargets,
         vb: &VbTargets,
         readback: Option<&BoundBuffer>,
+        vb_id_readback: Option<&BoundBuffer>,
         #[cfg(feature = "hwrt")] accel_fns: Option<&crate::accel::AccelFns>,
     ) -> Result<(), SwapchainError> {
         let begin = VkCommandBufferBeginInfo {
@@ -2161,6 +2169,93 @@ impl Renderer<'_> {
             (self.fns.cmd_set_scissor)(cmd, 0, 1, &blit_scissor);
             (self.fns.cmd_draw)(cmd, 3, 1, 0, 0);
             (self.fns.cmd_end_rendering)(cmd);
+        }
+
+        // === VG-R0 rung R0c: the ARMED density-census copy — `vb_id` → host-visible staging. ===
+        //
+        // AND-gated on `mesh_leg` as well as on the `Option`, and the second conjunct is load-
+        // bearing rather than defensive: a `VisibilityBuffer × Sdf` frame skips `vb_raster`
+        // entirely (the gate ~1500 lines above), so this ring slot was never transitioned out of
+        // UNDEFINED this frame and holds no raster. Copying it would read undefined memory through
+        // a `srcLayout` it is not in. Recording nothing instead leaves the staging at the sentinel
+        // prefill its owner wrote, which reduces to `covered_pixels == 0` and reds R0c(c′) — an
+        // instrument failure that NAMES ITSELF, rather than a plausible fabricated row.
+        //
+        // Sited AFTER every `vb_id` reader and BEFORE the swapchain's own present/readback
+        // transition, so it needs no restore: the next frame in this ring slot re-enters through
+        // `vb_raster`'s UNDEFINED→COLOR_ATTACHMENT_OPTIMAL barrier, which discards contents by
+        // definition. An UNARMED frame records ZERO commands here (R0c gate (a)'s byte-neutrality).
+        if let Some(census) = vb_id_readback
+            && scene.resolved_render_path.mesh_leg
+        {
+            let vb_id_to_transfer = VkImageMemoryBarrier {
+                s_type: VkStructureType::ImageMemoryBarrier,
+                p_next: ptr::null(),
+                src_access_mask: VK_ACCESS_SHADER_READ_BIT,
+                dst_access_mask: VK_ACCESS_TRANSFER_READ_BIT,
+                old_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                new_layout: VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                image: vb.vb_id[fi].image,
+                subresource_range: COLOR_SUBRESOURCE_RANGE,
+            };
+            // SAFETY: recording is open; `mesh_leg` guarantees `vb_raster` ran and the graph's
+            // own first-reader barrier left this slot SHADER_READ_ONLY_OPTIMAL, so `old_layout`
+            // is the layout the image is actually in. The source stage mask is the union of the
+            // two shader stages that read `vb_id` (`vb_resolve`/`vb_classify`/`vb_geo` are
+            // compute; the split's thin-aux reader is fragment), so every prior read is ordered
+            // before the copy. `&vb_id_to_transfer` outlives the call.
+            unsafe {
+                (self.fns.cmd_pipeline_barrier)(
+                    cmd,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    0,
+                    0,
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                    1,
+                    (&vb_id_to_transfer as *const VkImageMemoryBarrier).cast(),
+                );
+            }
+
+            // `present_extent`, NOT `extent`: the ring is sized to the composite (`VbTargets::build`
+            // takes `GBufferTargets::create`'s `extent`, which IS the composite), and under armed
+            // SSAA the composite is 2× native — the route §9.1's grant table takes to the top two
+            // ladder rungs.
+            let census_region = VkBufferImageCopy {
+                buffer_offset: 0,
+                buffer_row_length: 0,
+                buffer_image_height: 0,
+                image_subresource: VkImageSubresourceLayers {
+                    aspect_mask: VK_IMAGE_ASPECT_COLOR_BIT,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+                image_offset: VkOffset3D { x: 0, y: 0, z: 0 },
+                image_extent: VkExtent3D {
+                    width: present_extent.width,
+                    height: present_extent.height,
+                    depth: 1,
+                },
+            };
+            // SAFETY: recording is open; `vb_id[fi]` is TRANSFER_SRC_OPTIMAL per the barrier
+            // above; one full-image tightly-packed color region copies into the live host-visible
+            // `census.buffer`, which is ≥ `present_extent.width * present_extent.height * 8` bytes
+            // per this fn's contract; `&census_region` outlives the call.
+            unsafe {
+                (self.fns.cmd_copy_image_to_buffer)(
+                    cmd,
+                    vb.vb_id[fi].image,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    census.buffer,
+                    1,
+                    &census_region,
+                );
+            }
         }
 
         match readback {
