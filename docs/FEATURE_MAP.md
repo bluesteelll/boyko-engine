@@ -916,3 +916,34 @@ gated-OFF path) must keep that hash unchanged (the "Tier-0" gate). Where things 
 
 **Usage:** `scripts\golden.ps1` (software leg) or `-Hwrt` (hwrt leg) to verify; `-Bless`
 after a visual owner sign-off to re-pin. Never run on CI (no GPU there — goldens skip).
+
+### VG-R0 density census (virtual-geometry measurement rung) ✅ COMPLETE
+
+A **measurement** instrument, not a render feature: it reads the VisibilityBuffer path's `vb_id`
+image back to the host and reports screen-space triangle density over a real high-poly corpus. It
+exists to adjudicate one pre-registered kill — *is real content actually in the micro-polygon regime
+a cluster-LOD system would serve?* — before any meshlet code is written. Verdict on the shipped
+corpus: **UNDECIDED, escalate** (`min D_est = 0.509 < 1.0`), so the owner's pre-registered
+disposition routes to building a non-saturating **upper-bound** instrument, which R0 records as an
+unsolved design problem rather than a scheduling one.
+
+| Piece | Location | What it is |
+|-------|----------|------------|
+| The spec | [MESHLET-VIRTUAL-GEOMETRY-PLAN.md](MESHLET-VIRTUAL-GEOMETRY-PLAN.md) | Rung R0 only. 37 revisions; §9.1 enumerates what R0 deliberately does NOT decide. |
+| Frozen thresholds | [VG-CAMPAIGN-THRESHOLDS.toml](VG-CAMPAIGN-THRESHOLDS.toml) | Author-set, decision-bearing, sha256-pinned, **never edited** — amendments go through the plan's §11.1. |
+| Owner VALUES calls | [VG-CAMPAIGN-CLAIM.toml](VG-CAMPAIGN-CLAIM.toml) | Unhashed, `PENDING`-sentinel gated; deliberately split from the frozen half by *update discipline*, not by subject. |
+| The result | [VG-R0-DENSITY-CENSUS.md](VG-R0-DENSITY-CENSUS.md) | **Machine-written** by the run that measured it — rows, `D_est`, cross-process digests, and the two measured-not-asserted residuals. |
+| Host reducer | [crates/boyko_render/src/vg_census.rs](../crates/boyko_render/src/vg_census.rs) | Turns one `vb_id` readback into a census row. Distinct triangles by sorting packed `(instance, primitive)` keys and counting runs — `HashMap` is banned and a run's *length* is that triangle's pixel count, so the histogram falls out of the same pass. Also carries the workspace's streaming SHA-256. |
+| Armed readback | [crates/boyko_app/src/vg_census_dump.rs](../crates/boyko_app/src/vg_census_dump.rs) | `BOYKO_VG_CENSUS=<path.toml>`. Settle → request → drain, so the readback frame's fence is re-waited before the per-FIF ring is mapped. **Unarmed frames record zero extra commands** — the byte-neutrality all 13 VB pins verify. |
+| The one permanent render edit | [crates/boyko_rhi_vulkan/src/present/targets.rs](../crates/boyko_rhi_vulkan/src/present/targets.rs) | `TRANSFER_SRC` on the `vb_id` ring. Provably cannot move a texel: the image is `R32G32_UINT`, uncompressed, `.Load`ed unfiltered. |
+| Instrument gate | [crates/boyko_app/tests/vg_density_census.rs](../crates/boyko_app/tests/vg_density_census.rs) + [vg_fixture/](../crates/boyko_app/tests/vg_fixture/) | R0c. A procedural fixture of ISOLATED right triangles offset by a quarter pixel, so the covered count is one exact number and no fill rule can decide it — the GPU and `sv0_oracle` agree **to the pixel**. |
+| Census run | [crates/boyko_app/tests/vg_r0d_census.rs](../crates/boyko_app/tests/vg_r0d_census.rs) + [vg_corpus_scene/](../crates/boyko_app/tests/vg_corpus_scene/) | R0d. One worker process per `(camera path, ladder rung)` pair, so each rung negotiates its own window and the achieved extent is a measurement rather than an echo of the request. |
+| Shared ladder readers | [crates/boyko_app/tests/vg_thresholds/](../crates/boyko_app/tests/vg_thresholds/) | The frozen-file parsers, the per-rung extent route, the row parser and the worker spawner — one text, because two copies of a ladder are two texts that can disagree. |
+| Corpus | [assets/vg_corpus/CORPUS.toml](../assets/vg_corpus/CORPUS.toml) + [scripts/fetch_corpus.ps1](../scripts/fetch_corpus.ps1) | Manifest tracked, payload **gitignored** and sha256-pinned before extraction. 7 licence-clean glTF assets, 2 279 237 triangles. |
+| In-house `.glb` decoder | [crates/boyko_render/src/loaders/glb.rs](../crates/boyko_render/src/loaders/glb.rs) | glTF 2.0 binary → `MeshData`, zero third-party deps. Concatenates primitives and composes node hierarchies; bakes each placement into model space. |
+| Reference-rig probe | [crates/boyko_app/tests/vg_r0_reference_rig.rs](../crates/boyko_app/tests/vg_r0_reference_rig.rs) | R0a. Records whether a Nanite reference is producible on this box — it is not — with the negative *re-derived by the machine* from the documented registry authorities rather than asserted by the author. |
+| Frozen-symbol sweep | [tests/vg_symbol_reachability.rs](../tests/vg_symbol_reachability.rs) | Every frozen field must have a consumer or a recorded exception. Catches the campaign's signature defect: a threshold nobody reads, which manufactures the appearance of pre-registration while binding nothing. |
+
+⚠️ **The census is armed by env and renders nothing on a normal run.** The GPU parts are `#[ignore]`d
+and R0d additionally **skips by name** without the fetched payload — a payload-dependent gate that
+stays silent is indistinguishable from one that passed.

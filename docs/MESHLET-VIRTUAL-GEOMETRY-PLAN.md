@@ -1082,7 +1082,7 @@ of those steps left with R0e/R0f/R0f′ at Rev 8 (§14), so the ladder now ends 
 independently committable, has **one** gate, and names the mutation that turns it red. *A mutation
 that is only argued does not count; the commit message records the mutated run's output.*
 
-### R0a — the reference-rig probe (zero engine code) — **kills K2 cheapest**
+### R0a — the reference-rig probe (zero engine code) — **kills K2 cheapest** ✅ LANDED @`b40d509`
 
 **Lands:** [`docs/VG-R0-REFERENCE-RIG.toml`](VG-R0-REFERENCE-RIG.toml) — a machine-readable record: UE version string, install
 path, GPU name, driver version, capture tool + version, render resolution, `MaxPixelsPerEdge`, free
@@ -1313,7 +1313,7 @@ byte-identity holds by construction as well as by measurement.
 > per covered pixel rather than milliseconds — but it is **unmeasured**, and it is recorded in §9.1
 > as a limit rather than reasoned away.
 
-### R0b — corpus + ingest
+### R0b — corpus + ingest ✅ LANDED @`3243f91`…`2abd063` (corpus: 7 assets, 2 279 237 triangles)
 
 **Lands:** the `.glb` decoder (§3.3) registered as a second `LoaderEntry` on `MeshGpu::LOADERS`;
 `assets/vg_corpus/CORPUS.toml` + the `.gitignore` rule + `fetch_corpus`;
@@ -1457,7 +1457,7 @@ binding: the rung is not commit-eligible until the gate has been run with the co
 its output pasted into the commit message.** A gate proven only on a box that skipped it is not a
 gate.
 
-### R0c — the census instrument + its sensitivity control
+### R0c — the census instrument + its sensitivity control ✅ LANDED @`acc60c6` + @`fcde734`, GATE GREEN (5/5)
 
 **Lands:** `TRANSFER_SRC` on the `vb_id` ring ([`targets.rs`](../crates/boyko_rhi_vulkan/src/present/targets.rs):862~-872); an `Option`-threaded census
 readback armed by env knob; the host-side histogram + triangles-per-pixel reducer;
@@ -1620,7 +1620,7 @@ vacuous-selection defect wearing a lab coat.
   direct-client rung the red requires an OS refusal, which is an environment fact the table
   records, not an authorable edit.
 
-### R0d — the census run — **K1's evidence**
+### R0d — the census run — **K1's evidence** ✅ LANDED @`21edc80`, GATE GREEN (4/4) — **K1: UNDECIDED, escalate**
 
 **Lands:** the census executed over the corpus at the committed camera paths, **at every rung of
 the frozen resolution ladder**; results written to `docs/VG-R0-DENSITY-CENSUS.md` as the density
