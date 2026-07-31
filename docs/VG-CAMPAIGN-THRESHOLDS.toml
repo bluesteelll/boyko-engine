@@ -31,9 +31,9 @@
 # and Rev 7 -- the third occurrence caught by an adversarial pass rather than by the fields
 # themselves, in the very revision whose slogan was about fixes that do not land. They are updated
 # here in the same act as the edit, which is the whole of their job.
-schema_version = 26
-frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 30"
-frozen_date = "2026-07-28"
+schema_version = 27
+frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 31"
+frozen_date = "2026-07-31"
 
 # THE EDIT DISCIPLINE, stated because Rev 4 and Rev 5 both edited this file in place while its
 # header said "never edited" and the plan's amendment table read "No amendment yet."
@@ -47,9 +47,17 @@ frozen_date = "2026-07-28"
 freeze_begins_at = "R0a records the sha256"
 pre_r0a_edits_are_authoring_not_amendment = true
 
+# REV 31 -- no threshold changes; the review loop closes (plan Status). The extent question this
+# block's entries track is now MEASURED: crates/boyko_rhi_vulkan/tests/vg_extent_probe.rs, with
+# the grant table and the per-rung route it decides recorded in the plan's section 9.1.
+#
 # REV 29 -- no threshold changes; the extent limit moved from the plan section 11 (whose charter
 # is that nothing reads it) to section 9.1, and a headless offscreen route is recorded that may
-# remove the OS client area from the critical path entirely.
+# remove the OS client area from the critical path entirely. ⚠️ REV 31: the second clause is
+# withdrawn -- Rev 30 established the route does not exist (the cited file records a CLEAR, not a
+# raster, and the shipped chain's only constructor requires a swapchain-derived format), and this
+# entry kept asserting it in the present indicative, in the one file R0a hashes: the repair reached
+# 1 of its 2 stating texts. The extent limit stands in section 9.1, measured.
 #
 # REV 28 -- no threshold changes. R0c now names the PER-RUNG EXTENT ROUTE that
 # assert_achieved_extent below has always gated (which client extent per rung, and whether the
@@ -94,8 +102,13 @@ readback_retention = "stream_and_hash"
 # by the 24 golden pins, which is invalid: the pins hash an 8-bit shaded BMP and this project has
 # MEASURED them blind below ~2^-16 relative. Two adjacent triangles of a smooth mesh can shade
 # identically to 8 bits and carry different vb_id. R0c must MEASURE cross-process vb_id identity
-# before R0d relies on it; if it does not hold, the fallback below applies and the non-determinism
-# is itself a finding about the raster path.
+# before R0d relies on it. If it does not hold, the non-determinism is itself a finding about the
+# raster path and R0d runs in its SECOND SHAPE (plan section 8 R0d): the finding is entered in the
+# plan's section 11.1 by name and date FIRST, and only then does the fallback below become gate
+# (a). ⚠️ REV 31 carries the plan's two conditions into this comment, which said "the fallback
+# below applies" unconditionally -- the fallback NAMES NO STATISTIC yet (a hash has no spread) and
+# is NOT usable until that dated amendment names its quantity (per-pixel disagreement fraction, or
+# the spread of the derived statistics); 0.05 is a placeholder magnitude, not a licensed bound.
 cross_run_gate = "byte_identical"
 cross_run_spread_fallback = 0.05
 
@@ -238,10 +251,13 @@ representativeness_floor_status = "UNSOLVED -- needs a covered-fraction floor, n
 histogram_shift_rule = "per_pair_log2_area_ratio_REPORTED_NOT_ASSERTED"
 histogram_shift_tolerance_buckets = 0.35
 
-# Rung 1 is EXCLUDED from the scaling check: 512^2 is 1:1 while the other three are 16:9, so the
-# projection is a DIFFERENT FRUSTUM, not a rescaling — the visible triangle set differs and the
-# "area scales with pixel count" premise does not hold across 512^2 -> 1080p at all. Rung 1 keeps
-# its one job: the CPU-oracle cross-check.
+# Rung 0 (512^2) is EXCLUDED from the scaling check -- rungs are 0-INDEXED into
+# [census].resolution_ladder, which is the index the value below names. ⚠️ REV 31: this comment
+# and the plan's section 5.7 both said "Rung 1" against a value of [0] -- two bases for one
+# referent, and an implementer reading [0] as 1-based would exclude nothing. 512^2 is 1:1 while
+# the other three rungs are 16:9, so the projection is a DIFFERENT FRUSTUM, not a rescaling — the
+# visible triangle set differs and the "area scales with pixel count" premise does not hold across
+# 512^2 -> 1080p at all. Rung 0 keeps its one job: the CPU-oracle cross-check.
 histogram_shift_excludes_rungs = [0]
 
 # The relative gap between the top two ladder rungs' visible_tris below which the count is

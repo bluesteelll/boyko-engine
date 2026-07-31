@@ -1,9 +1,23 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 30** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 31** — **REVIEW LOOP CLOSED; blocked on the three owner fields; no rung
+code exists** (the extent probe is the first landed instrument). This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
+
+**Rev 31 closes the adversarial-review loop, by owner decision.** Thirty revisions produced two
+kinds of remaining item and no third: owner SCOPE fields (`corpus.arrangement`,
+`ingest_ceiling.disposition`, `k1_outcome.undecided_disposition` — the claim file holds all
+three) and measurements. The Rev 30 pass — four derive lenses; its refutation stage died on an API
+quota, so its 19 findings were instead verified one by one against the tree by the author —
+returned no finding that changes what an implementer codes beyond the repairs this revision lands,
+and its approvability lens's own verdict was that **neither R0c nor R0d is blocked by a defect in
+what they specify**. The one measurement that blocked R0c is landed rather than described
+([`vg_extent_probe.rs`](../crates/boyko_rhi_vulkan/tests/vg_extent_probe.rs), §9.1). Closure is a
+decision, not a proof of perfection: the residual classes §9.1 and §14.1 enumerate stay live, and
+the next reviews happen at rung commits — where each rung's gate and mutations are **executed**
+rather than derived, which is the stronger instrument this loop never had.
 
 **Rev 9 discharges the six items that blocked Rev 8, and three of them were Rev 8's own.** Its
 review scored Rev 8 at **0 hold, 3 partial, 1 does not hold** — the sixth consecutive revision told
@@ -789,10 +803,13 @@ scaling law while only one passes. Rev 4 replaced the constant and reports the r
 asserting an
 integer.
 
-**And rung 1 is excluded from the scaling check entirely.** 512² is **1:1** while the other three
+**And rung 0 — 512² — is excluded from the scaling check entirely.** Rungs are **0-indexed** into
+`[census].resolution_ladder`, which is the index `[k1_instrument].histogram_shift_excludes_rungs =
+[0]` names (⚠️ Rev 31: this text and the frozen file's comment both said "rung 1" while the data
+and R0d said rung 0 — two bases for one referent). 512² is **1:1** while the other three
 are **16:9**, so the projection is a *different frustum*, not a rescaling — the visible triangle set
 differs, and §5.5's premise (*"a triangle's screen-space area scales exactly with pixel count"*)
-does not hold across 512²→1080p at all. Rung 1 keeps its one job: the CPU-oracle cross-check.
+does not hold across 512²→1080p at all. Rung 0 keeps its one job: the CPU-oracle cross-check.
 
 **Three further limits on the scaling law, stated because R0c must design around them:** sample
 lattices between rungs are **not nested** (a sliver holding one coarse centre and no fine centre
@@ -832,8 +849,9 @@ the **ceiling** of the mechanism available to any LOD scheme: a cluster hierarch
 triangles below it. If the ceiling does not reach the regime, no LOD scheme reaches it either.
 K1 is therefore decidable today, without the error target Rev 1's phrasing implied it needed.
 
-All statistics are reported per camera path, path definitions committed as test constants — the
-shape `sv0_scene/mod.rs:149~-162` already uses for its camera.
+All statistics are reported per camera path, path definitions checked in as test constants — the
+shape `sv0_scene/mod.rs:149~-162` already uses for its camera. (*Checked in*, not *committed*:
+"committed path" is reserved for manifest membership per `[k1].committed_paths_rule`.)
 
 > ⚠️ **A CENSUS ROW is one reading, at one `(camera path, ladder rung)` pair, of every statistic
 > R0d(b) enumerates that is READABLE AT THAT PAIR. The census emits `|P| × |ladder|` rows.**
@@ -1032,8 +1050,11 @@ a stock-scene pass table — **none of which can exist on the `achievable = fals
 written, R0a could not pass on its own most likely outcome: the same structural hole D3 names,
 relocated from the assertion into the field list.
 
-**Gate (one) — `achievable = true` branch, four parts:** (a) every field in the *positive* set
-present and not the `PENDING` sentinel — the same discipline `goldens/PINS.toml:15~` defines;
+**Gate (one) — `achievable = true` branch, four parts:** (a) every field in the *positive* set —
+**the record fields the Lands list above enumerates, all of them; that list is the set's single
+home** (⚠️ Rev 31: the set was enumerated nowhere and §9.1 read it as "four-plus strings", two
+codeable readings of one domain) — present and not the `PENDING` sentinel — the same discipline
+`goldens/PINS.toml:15~` defines;
 (b) the recorded **GPU name matches the one this engine reports at boot** on this box — a
 mechanical cross-check, not a transcription; (c) the recorded resolution equals
 `[census].decision_resolution` read from the **thresholds** file, not from a constant this rung
@@ -1273,7 +1294,9 @@ gate.
 **Lands:** `TRANSFER_SRC` on the `vb_id` ring ([`targets.rs`](../crates/boyko_rhi_vulkan/src/present/targets.rs):862~-872); an `Option`-threaded census
 readback armed by env knob; the host-side histogram + triangles-per-pixel reducer;
 **the PER-RUNG EXTENT ROUTE** — which client extent is requested for each ladder rung and whether
-the 2× SSAA composite is the route to it, with **SSAA arming ASSERTED rather than trusted**;
+the 2× SSAA composite is the route to it, **decided from §9.1's measured grant table** (on this
+box: rungs 0–1 direct, rungs 2–3 via the armed composite), with **SSAA arming ASSERTED rather than
+trusted**;
 `crates/boyko_app/tests/vg_density_census.rs`. <!-- doc-anchor-ignore -->
 
 > ⚠️ **The extent route is Rev 28's, and its absence was a precondition with no producer — the
@@ -1288,12 +1311,16 @@ the 2× SSAA composite is the route to it, with **SSAA arming ASSERTED rather th
 >
 > **And the arming must be asserted:** the SSAA probe **degrades to Off silently** on a caps or
 > VRAM miss, so a rung that trusts arming would measure `native` and red (d) with no indication
-> why. ⚠️ Whether a given client extent is actually granted on this box is **unmeasured** — the
-> window is created without `WS_VISIBLE` and the sweeps run it hidden, and nothing in the tree
-> handles `WM_GETMINMAXINFO`, so the max-track question is open in both directions. §9.1 carries it as a limit — ⚠️ this said §11 records it, which Rev 29 repudiated:
-> a precondition cannot live in the section whose charter is that nothing reads it, because a defect that cannot be demonstrated is not a
-> finding — and if a rung's request is refused, today's disposition is that **(d) reds with no
-> fallback named**, which is an instrument failure and adjudicates nothing.
+> why — and §9.1's measured grant table routes the top TWO rungs through the armed composite, so
+> the assertion is load-bearing, not defensive. ⚠️ Which client extents this box grants is
+> **MEASURED** as of Rev 31 — `vg_extent_probe.rs`, one hidden `Window` per candidate, no device —
+> and §9.1 holds the table and the per-rung route it decides. ⚠️ This said the question was
+> unmeasured and open in both directions, resting on two false premises whose repair §9.1 records;
+> and it earlier said §11 records the limit, which Rev 29 repudiated: a precondition cannot live in
+> the section whose charter is that nothing reads it. If a rung's request is refused at run time
+> regardless — the table is per-box — the disposition is unchanged: **(d) reds with no fallback
+> named**, an instrument failure that adjudicates nothing, now with the probe's table as the
+> diagnosis.
 
 > ⚠️ **R0c lands the first in-frame image readback in the shipped recorder, and that is a bigger
 > step than "reuse an existing seam" implies.** Every `copy_image_to_buffer` call site in this tree
@@ -1400,6 +1427,21 @@ vacuous-selection defect wearing a lab coat.
 
 * (c): feed the reducer the CPU oracle's own coverage instead of the readback → (c) passes
   vacuously while (b) fails; the pairing is what proves (c) is not self-referential.
+* (c′): shrink the procedural fixture — or pull its camera back — until covered pixels on the
+  censused frame fall below `[k1_instrument].min_covered_pixels` → (c′) reds, **and only (c′)**:
+  the fixture's analytic bucket moves with the camera, so (b) compares like with like and stays
+  green; the oracle rasterizes the same shrunken fixture, so (c)'s agreement holds; (d)'s ladder
+  and extents are untouched; (a)'s pins render unarmed frames. *(Added at Rev 31 — (c′) and (d)
+  carried argued reds inline and no derived mutation, against this section's own DEMONSTRATED
+  header.)*
+* (d): truncate the driven ladder at its top rung — three rows against a four-rung
+  `[census].resolution_ladder` → (d) reds, **and only (d)**: (b) and (c) read the fixture at 512²,
+  which the truncation keeps; (c′)'s censused frames all remain non-degenerate (the truncation
+  removes a frame, it degrades none); (a) is unarmed. The extent conjunct's red is route-dependent
+  and is stated with the route: on the two rungs §9.1's grant table reaches through the armed
+  composite, disarming the SSAA probe makes the achieved extent `native ≠ rung` → (d) reds; on a
+  direct-client rung the red requires an OS refusal, which is an environment fact the table
+  records, not an authorable edit.
 
 ### R0d — the census run — **K1's evidence**
 
@@ -1410,19 +1452,25 @@ discipline.
 
 **Gate (one, four parts):** (a) the census is **reproduced across `[census].cross_run_sessions`
 separate processes** under `[census].cross_run_gate` — **the sha256 of the readback itself**;
-(b) `D_est`, the convergence check, the histogram and both `[k1].report_only` statistics
-(`visible_tri_per_covered_pixel` and `submitted_per_covered_pixel` — the saturating raw reading and
-the cull-efficiency reading, neither of which adjudicates anything, and the modal bucket alongside
-them under `[k1].modal_bucket_role`) are produced at **every `(committed camera path, ladder rung)`
-pair — that is, one census row each, per §5.7's definition**. ⚠️ **This read "at every ladder rung"
+(b) **one census row is produced at every `(committed camera path, ladder rung)` pair**, its
+members given by §5.7's rule — the histogram, the modal bucket under `[k1].modal_bucket_role`, and
+both `[k1].report_only` statistics (`visible_tri_per_covered_pixel` and
+`submitted_per_covered_pixel` — the saturating raw reading and the cull-efficiency reading, neither
+of which adjudicates anything). ⚠️ This subject list opened with `D_est` and the convergence check,
+which §5.7's own rule excludes from every row — a subject the predicate could never satisfy; the
+trailing appositive carried the correct reading. `D_est(p)`'s production is asserted by (c) — its
+numerator and denominator, at exactly the two rungs its formula names — and the convergence
+residual is reported, not asserted, because firing is unreachable at R0. ⚠️ **This read "at every ladder rung"
 and that was a live codeable fork with opposite verdicts, not a wording preference.** Substitute
 `P = {A, B}` with B censused at 512², 1080p and 2160p but not 1440p: under the pair reading (b)
 **reds** — a committed path with a missing rung is exactly the hole (b) exists for — while under the
 rung reading it **greens**, because every rung still carries statistics from A. (a), (c) and (d) all
 stay green either way, so the whole R0d verdict turned on which of three texts an implementer coded
 from. Rev 15 defined the row and re-derived (c) and (d) against it and **not (b)**, then cited (b)
-as the definition's headline consequence — **a definition has strictly more dependents than a
-claim** (every text *using* the word, not every text *stating* the fact), and this is the text that
+as the definition's headline consequence — **a definition's dependents are every text *using* the
+word, a different set from a claim's texts *stating* the fact, neither containing the other** (the
+frozen file's note at `[k1].committed_paths_rule` holds the rule; its superlative form — "strictly
+more dependents" — is refuted there and stood here through Rev 30), and this is the text that
 proves it. At |P| = 0 the pair set is empty and (b) is vacuously green **from its own words**, which
 is what "settled by construction" was supposed to mean and did not until here. So the
 resolution-dependence is on the page rather than in the choice of one row; (c) the **non-degeneracy precondition** holds **for every committed camera path**, at the decision resolution and at the top rung —
@@ -1542,7 +1590,12 @@ renumbering is to re-derive, not to re-word.
   author can write into committed source diverges across processes of one build. That is also the
   honest reading of what (a) tests — the driver-side nondeterminism `[census].cross_run_gate`'s own
   comment flags as an untested hypothesis at 2160p.
-* **(b)** — drop the ladder to its decision row only → (b) reds.
+* **(b)** — census one committed path with one non-decision, non-top rung omitted (1440p) → the
+  `(path, 1440p)` pair carries no row → (b) reds, **and only (b)**: (c) reads the decision and top
+  rungs, both present; (a)'s agreement is over the same omission in all three processes; (d)'s path
+  projection is unchanged. ⚠️ Rev 31 replaces *"drop the ladder to its decision row only"*, which
+  fires but does not isolate: removing the top rung deprives (c)'s `visible_tris` floor of its
+  reading, so (c) reds too — the (d-sub) collision reproduced on the rung axis.
 * **(c) — the non-degeneracy precondition, and it takes TWO mutations because (c) has two
   quantifiers.** *Per frame:* render the corpus scene with the camera pulled back far enough that
   covered pixels at the decision resolution fall below `[k1_instrument].min_covered_pixels`, or
@@ -1571,8 +1624,11 @@ renumbering is to re-derive, not to re-word.
   over every *committed* path; a skipped path has no reading, so `covered_pixels(p) < 1024` holds
   vacuously or numerically and **(c) reds too**. Two clauses written independently in one revision,
   each correct, colliding on a shared domain — which is why (d-sup) above carries the isolation
-  burden instead. The corollary is load-bearing for an implementer: **(c) already produces (d)'s
-  subset direction**, so the work (d) uniquely does is the superset direction and the floor below.
+  burden instead. The corollary is load-bearing for an implementer, and Rev 31 re-derives it
+  against (b)'s pair quantifier (a repair that changed an input re-derives its dependents): **(b)
+  and (c) both already produce (d)'s subset direction** — a skipped path contributes `|ladder|`
+  absent pairs to (b), and §9.1 derives the same independently — so the work (d) uniquely does is
+  the superset direction and the floor below.
 
   **(d-min) — the floor.** Reduce the enumeration below `[k1].committed_paths_min` → (d) reds.
   Isolation is the whole reason this direction exists: at |P| = 0 the *other three parts are
@@ -1778,7 +1834,8 @@ headline was false as written. Rather than a headline and a retraction, the limi
   ⚠️ **And a fourth limit, which is on the OTHER branch and which three revisions of §9.1 did not
   name: `achievable = true` is AUTHOR-DECLARED.** This rung's stated purpose is *"that a negative be
   the machine's, honestly bounded, rather than the author's"* — and every part armouring that is on
-  the negative branch. Enumerate the positive branch: (a) is four-plus non-`PENDING` strings, (b) is
+  the negative branch. Enumerate the positive branch: (a) is the Lands field set non-`PENDING`
+  (§8 fixes its domain as that list), (b) is
   **our** GPU's name, (c) is a constant read from the frozen file, (d) is a hash of a docs file.
   **None of the four mentions an engine**, and neither named mutation probes a fabricated positive.
   So R0a re-derives a NEGATIVE and merely records a POSITIVE. That asymmetry is defensible — a
@@ -1840,15 +1897,26 @@ headline was false as written. Rather than a headline and a retraction, the limi
   no digest in R0 hashes, so **re-aiming** a committed path is neither a membership change nor a row
   count change and no gate part in R0 sees it. Both are exposures of the same kind as the choice
   itself: they are constrained by party separation and commit ordering, not by a gate.
-* ⚠️ **R0 does not know that any ladder rung's extent is obtainable, and the question is open in
-  BOTH directions.** `[census].assert_achieved_extent` gates every rung; the achieved extent is the
-  OS-granted client area, optionally doubled by armed SSAA, so a rung R is reachable iff
-  `R ∈ {C, 2C}` for some grantable client `C`. **The largest grantable client on this box has never
-  been measured** — every windowed render in the tree is 512², and the window is created without
-  `WS_VISIBLE` and run hidden, so the max-track path may never be exercised. If no `C` yields the
-  top rung, `D_est`'s numerator is unobtainable and K1 is adjudicable in **neither** direction — an
-  instrument failure that produces no disposition, which is R0c(d)'s stated behaviour today, with
-  no fallback named.
+* ⚠️ **Every ladder rung's extent is REACHABLE on this box, and that is now MEASURED rather than
+  open.** `[census].assert_achieved_extent` gates every rung; the achieved extent is the OS-granted
+  client area, optionally doubled by armed SSAA, so a rung R is reachable iff `R ∈ {C, 2C}` for
+  some grantable client `C`. ⚠️ Rev 30 called the largest grantable client unmeasured and rested
+  that on two premises, **both false**: *"every windowed render in the tree is 512²"* — the tree's
+  windowed tests request 320×240 up to 1280×1280 (`pbr_material_showcase` defaults `BOYKO_WIN` to
+  1280; `csm_fit_eval` and `taa_jitter_eval` to 900; counts are lower bounds) — and *"run hidden"*
+  — hiding is the opt-in `BOYKO_WIN_HIDDEN` knob and the default is show-and-paint. Repairing a
+  measured input obliges re-deriving what depends on it, so Rev 31 lands the probe whose naming
+  sentence Rev 30's subtraction had left as a subject-less fragment here:
+  [`vg_extent_probe.rs`](../crates/boyko_rhi_vulkan/tests/vg_extent_probe.rs) opens one hidden
+  `Window` per candidate client — no device — and reads back the granted client area. **Measured on
+  this box: 512×512, 960×540, 1280×720 and 1920×1080 are GRANTED exactly; 2560×1440 and 3840×2160
+  are CLAMPED to a 1133-px client height** (the width is granted). The PER-RUNG EXTENT ROUTE
+  follows from the table: **rungs 0 and 1 direct** (512², 1920×1080); **rung 2 via a 1280×720
+  client + armed 2× SSAA; rung 3 via a 1920×1080 client + armed 2× SSAA**. The top two rungs ride
+  the composite, so the arming assertion R0c's Lands list already carries is load-bearing for
+  exactly those two, and `assert_achieved_extent` re-asserts the outcome per rung at run time. The
+  numbers are THIS box's — the probe re-runs per box, and a box whose grants refuse every route to
+  a rung is an instrument failure R0c(d) reds on, with the probe's table as the diagnosis.
   ⚠️ **Rev 29 offered an escape from this limit and Rev 30 withdraws it as FALSE.** It read: the
   tree "already carries a **headless** offscreen raster-and-readback path
   ([`graphics_offscreen.rs`](../crates/boyko_rhi_vulkan/tests/graphics_offscreen.rs)) … If the
@@ -1856,16 +1924,16 @@ headline was false as written. Rather than a headline and a retraction, the limi
   limit dissolves." **That file does not raster.** Its own module doc says *"a headless offscreen
   CLEAR … (no graphics pipeline, no draw — those are rung 2+)"*, and the body is one image, a
   `begin_rendering(Clear)`/`end_rendering` pair with nothing recorded between them, a copy and a
-  texel assert. It is evidence for headless device boot and image readback — not for driving the
-  shipped VB chain without a window.
-  **And the antecedent is uninhabited.** `GpuSceneBundles::boot` is the only constructor and takes
-  a `swap_format` with no source but the swapchain, which comes from a `Window`. Every test in this
-  tree that calls itself *headless* boots a **hidden window** — `BOYKO_WIN_HIDDEN` — and one of
-  them even skips when "windowed boot unavailable". **Headless here means hidden-window, never
-  no-window.** Driving the census offscreen would need a new surfaceless host boot, an offscreen
-  ring and a readback recorder: larger than the whole of R0c's Lands list. I read two lines of a
-  module doc, and the word that refuted the claim — **CLEAR** — was in the sentence I quoted.
-  one `Window::open` at the requested extent plus `GetClientRect`, hidden, no device needed.
+  texel assert.
+  ⚠️ **And Rev 30's withdrawal volunteered a universal Rev 31 withdraws in turn.** *"Headless here
+  means hidden-window, never no-window"* is refuted by the withdrawal's own subject:
+  `graphics_offscreen.rs` boots `VulkanContext::boot` with **no window at all**, and its siblings
+  (`graphics_triangle.rs`, `graphics_deferred.rs`, more; counts are lower bounds) **raster real
+  geometry** on that no-window boot and golden-gate the readback. What forecloses the escape needs
+  no universal and is one layer up: the census must drive the SHIPPED VB chain (§5.3), whose only
+  constructor — `GpuSceneBundles::boot` — takes a `swap_format` with no producer but the swapchain,
+  which comes from a `Window`. The bound is HOST-scoped, not tree-wide; Rev 30's unmeasured cost
+  comparison ("larger than the whole of R0c's Lands list") is withdrawn with it, unpriced.
 * ⚠️ **R0's CORPUS CANNOT BE INGESTED ON TODAY'S ENGINE, and that is a blocker on R0b rather
   than a limit on R0d.** Rev 22 recorded here that no R0 gate bounds the corpus's total footprint
   and that an oversized corpus is "discovered at R0d as an allocation failure". **Rev 23 inverts
@@ -1878,10 +1946,14 @@ headline was false as written. Rather than a headline and a retraction, the limi
   is gated was the same false reassurance §8 gave, reached from the other side. R0c/R0d are
   unreachable either way. The device-local + staging path is
   therefore a **precondition of R0b**, not a follow-up, and does not by itself suffice because the
-  device block is 64 MiB too (§3.4). ② Separately and still true: **no R0c gate part is evaluated
-  on an ARMED frame**, so the two hazards R0c's preamble names — a new layout transition of a
-  per-FIF ring image in the RDG auto-barrier system, and a host read racing the frame fence — are
-  *recorded and not asserted* at R0c.
+  device block is 64 MiB too (§3.4). ② Separately: **no R0c gate part reads the armed frame's
+  barrier or fence ordering** — R0c's preamble enumerates all five parts and derives it — so the
+  two hazards that preamble names — a new layout transition of a per-FIF ring image in the RDG
+  auto-barrier system, and a host read racing the frame fence — are *recorded and not asserted* at
+  R0c. ⚠️ This bullet said *"no R0c gate part is evaluated on an ARMED frame"*, which the
+  preamble's own enumeration refutes: (b), (c), (c′) and (d) all read the census, which exists only
+  on armed frames (§5.3); only (a) renders unarmed. The conclusion survives on the corrected
+  predicate — the parts read the census's *products*, never its ordering.
 * **When a censused frame fails non-degeneracy, R0d reds** — the rung is not commit-eligible and
   nothing is adjudicated. ⚠️ `[k1].k1_decision_rule` also maps that input to "UNDECIDED, escalate",
   which is a different act; **R0d's gate takes precedence**, because a frame that cannot be
