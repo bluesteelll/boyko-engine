@@ -135,14 +135,6 @@ fn every_out_of_subset_document_is_refused() {
             ),
         ),
         (
-            "a second instance of the mesh",
-            glb(
-                &triangle_json("", "")
-                    .replace(r#""nodes": [{"mesh": 0}]"#, r#""nodes": [{"mesh": 0}, {"mesh": 0}]"#),
-                &bin,
-            ),
-        ),
-        (
             "a node hierarchy",
             glb(
                 &triangle_json("", "")
@@ -334,4 +326,27 @@ fn every_real_corpus_glb_decodes() {
             mesh.indices.len() / 3
         );
     }
+}
+
+/// Two ROOT mesh nodes concatenate rather than being refused, each with its own transform baked.
+///
+/// This is the Rev 38 line: neither act places one mesh RELATIVE to another, so both are decoding.
+/// Composing a parent transform with a child's does place them relative to one another, which is
+/// why a hierarchy stays refused (asserted in the refusal list above).
+#[test]
+fn root_mesh_nodes_concatenate_with_each_transform_baked() {
+    let json = triangle_json("", "").replace(
+        r#""nodes": [{"mesh": 0}]"#,
+        r#""nodes": [{"mesh": 0}, {"mesh": 0, "translation": [10, 0, 0]}]"#,
+    );
+    let m = GlbMeshLoader::decode(&glb(&json, &triangle_bin())).expect("two root nodes decode");
+    assert_eq!(m.vertices.len(), 6, "both instances contribute their vertices");
+    assert_eq!(m.indices.len(), 6, "and their triangles");
+    assert_eq!(m.vertices[0].position, [0.0, 0.0, 0.0], "the first is untransformed");
+    assert_eq!(m.vertices[3].position, [10.0, 0.0, 0.0], "the second carries its own translation");
+    assert_eq!(
+        &m.indices[3..],
+        &[3, 4, 5],
+        "the second instance's indices are OFFSET by the first's vertex count — un-offset indices          would silently re-draw the first triangle twice"
+    );
 }

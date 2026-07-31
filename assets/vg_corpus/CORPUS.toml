@@ -103,30 +103,53 @@ glb = "khronos/corset.glb"
 glb_sha256 = "9582c0dc0dee813be77f60e6ddf7213987c7e11497bf3cc66fd7b18957ae0d26"
 published_triangles = 18324
 
-# ---------------------------------------------------------------------------------------------
-# MEASURED 2026-07-31: WHAT NOW BLOCKS A HIGH-POLY CORPUS, and it is no longer the node transform.
-#
-# Fifteen candidates were probed for triangle count AND subset compliance. Every genuinely
-# high-poly one is MULTI-PRIMITIVE, which this decoder refuses:
-#
-#   ABeautifulGame     573 952 tris   15 meshes / 15 prims / hierarchy   REFUSED
-#   MetalRoughSpheres  501 776 tris    5 meshes /  5 prims / hierarchy   REFUSED
-#   DragonAttenuation  134 995 tris    2 meshes /  2 prims              REFUSED
-#   ToyCar             108 936 tris    3 meshes /  3 prims              REFUSED
-#   AntiqueCamera       20 066 tris    2 meshes /  2 prims              REFUSED
-#   corset              18 324 tris    1 mesh   /  1 prim               ACCEPTED  <- the largest
-#   damaged_helmet      15 452 tris    1 mesh   /  1 prim               ACCEPTED
-#
-# The pattern is structural, not incidental: real content splits primitives BY MATERIAL, so
-# "exactly one primitive" selects for toy assets. The ceiling on this corpus is therefore ~18 k
-# triangles, three orders of magnitude below the regime K1 is about.
-#
-# THE DECISION THIS FORCES, recorded rather than taken in a hurry -- the last time a §3.3
-# restriction was authored without running it against real content, it refused every real asset:
-# concatenating a file's primitives into one MeshData is arguably still DECODING (the census
-# measures triangles per covered pixel, and per-primitive material identity is not an input to it),
-# whereas flattening a NODE HIERARCHY places instances relative to one another and is scene
-# assembly. Those two are not the same act, and Rev 33 conflated them once already. Whichever way
-# it goes must be derived, and R0b(b)'s equality (decoded == published, summed over primitives) is
-# what keeps it honest.
 
+[[asset]]
+id = "dragon_attenuation"
+source_url = "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/DragonAttenuation/glTF-Binary/DragonAttenuation.glb"
+licence = "CC-BY-4.0"
+licence_url = "https://creativecommons.org/licenses/by/4.0/"
+attribution = "Khronos / Wayne Cochran - CC BY 4.0, via Khronos glTF-Sample-Assets"
+archive_sha256 = "ec97df715d4207c0e39b60c329db43032872794df60e1279b7652314cf0a999e"
+glb = "khronos/dragon_attenuation.glb"
+glb_sha256 = "ec97df715d4207c0e39b60c329db43032872794df60e1279b7652314cf0a999e"
+published_triangles = 134995
+[[asset]]
+id = "toy_car"
+source_url = "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/ToyCar/glTF-Binary/ToyCar.glb"
+licence = "CC0-1.0"
+licence_url = "https://creativecommons.org/publicdomain/zero/1.0/"
+attribution = "Microsoft - CC0 1.0, via Khronos glTF-Sample-Assets"
+archive_sha256 = "01a60862de55cd4b9f3acfab0b0def86451800f9c42467fcd61052c16cb9838c"
+glb = "khronos/toy_car.glb"
+glb_sha256 = "01a60862de55cd4b9f3acfab0b0def86451800f9c42467fcd61052c16cb9838c"
+published_triangles = 108936
+
+# ---------------------------------------------------------------------------------------------
+# MEASURED 2026-07-31, and then ACTED ON -- this note records both halves because the first half
+# alone was already stale by the next commit.
+#
+# Fifteen candidates were probed for triangle count AND subset compliance together. Every genuinely
+# high-poly one turned out to be MULTI-PRIMITIVE, which the decoder then refused, capping this
+# corpus at ~18 k triangles -- three orders of magnitude below the regime K1 is about. The pattern is
+# structural, not incidental: real content splits primitives BY MATERIAL.
+#
+# The line was then derived rather than guessed, because the last section-3.3 restriction authored
+# without running it against real content refused every real asset. A mesh's primitives already
+# share one coordinate space, and each ROOT node's transform applies to its own mesh alone --
+# neither act places one mesh RELATIVE to another, so both are DECODING and are now concatenated
+# (with indices offset). Composing a parent transform with a child's DOES place meshes relative to
+# one another; that is scene assembly and a hierarchy is still refused.
+#
+#   ABeautifulGame     573 952 tris   15 meshes / hierarchy   REFUSED (hierarchy)
+#   MetalRoughSpheres  501 776 tris    5 meshes / hierarchy   REFUSED (hierarchy)
+#   dragon_attenuation 134 995 tris    2 meshes / no children  ACCEPTED since Rev 38
+#   toy_car            108 936 tris    3 meshes / no children  ACCEPTED since Rev 38
+#   corset              18 324 tris    1 mesh                  ACCEPTED
+#   damaged_helmet      15 452 tris    1 mesh                  ACCEPTED
+#   avocado                682 tris    1 mesh                  ACCEPTED
+#
+# Corpus total: 278 389 triangles across five assets. Still short of the multi-million-triangle
+# regime the premise is about -- the remaining blocker is the node HIERARCHY refusal, which is where
+# the two largest candidates sit. R0b(b)'s equality (decoded == published, summed over primitives)
+# holds on all five and is what keeps each addition honest.

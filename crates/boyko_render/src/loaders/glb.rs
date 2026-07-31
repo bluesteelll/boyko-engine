@@ -17,8 +17,7 @@
 //! **Unsupported, and a hard [`AssetError`] rather than a silent fallback:**
 //! sparse accessors, Draco/meshopt compression (any non-empty
 //! `extensionsRequired`), animation, skins, morph targets, non-triangle modes,
-//! non-indexed primitives, `u8` indices, a node HIERARCHY, and more than one
-//! instance of the mesh.
+//! non-indexed primitives, `u8` indices, and a node HIERARCHY.
 //!
 //! # The node transform is BAKED, not refused — and that distinction is the point
 //!
@@ -32,8 +31,13 @@
 //! `.glb`. *Applying* a transform is not *ignoring* it. Positions take the matrix,
 //! normals take its inverse transpose (so non-uniform scale does not shear them
 //! off the surface), tangents take the matrix with their handedness `w` carried
-//! through. What stays refused is what is genuinely scene assembly rather than
-//! decoding: a hierarchy, and a second instance.
+//! through. Multiple primitives and multiple ROOT mesh nodes are CONCATENATED, each
+//! with its own transform baked and its indices offset: neither places one mesh
+//! relative to another, so both are decoding. Composing a parent transform with a
+//! child's does place them relative to one another — that is scene assembly, and a
+//! hierarchy stays refused. Measured justification: every genuinely high-poly sample
+//! asset is multi-primitive, so "exactly one primitive" capped the corpus at ~18 k
+//! triangles, three orders of magnitude below the regime K1 is about.
 //!
 //! A missing `TANGENT` runs the existing [`generate_tangents`] post-pass; a
 //! missing `COLOR_0` takes the neutral default. A missing `POSITION` or `NORMAL`
@@ -684,28 +688,131 @@ fn transform_dir(n: &[f32; 9], v: [f32; 3]) -> [f32; 3] {
 ///
 /// What is still refused, because it is scene assembly rather than decoding: a node
 /// hierarchy, and more than one instance of the mesh.
-fn resolve_instance_transform(root: &Json) -> Result<Mat4, AssetError> {
+fn resolve_instance_transform(root: &Json) -> Result<Vec<(usize, Mat4)>, AssetError> {
     let nodes = root.arr_at("nodes");
-    let mut found: Option<Mat4> = None;
+    let mut out = Vec::new();
     for (i, node) in nodes.iter().enumerate() {
         if !node.arr_at("children").is_empty() {
             return Err(err(format!(
-                "node {i} has children — flattening a hierarchy is scene assembly, not decoding \
-                 (§3.3)"
+                "node {i} has children — composing a parent transform with a child's PLACES one \
+                 mesh relative to another, which is scene assembly rather than decoding (§3.3)"
             )));
         }
-        if node.get("mesh").is_some() {
-            if found.is_some() {
-                return Err(err(
-                    "more than one node references a mesh — this decoder accepts exactly one \
-                     instance (§3.3)"
-                        .to_string(),
-                ));
-            }
-            found = Some(node_matrix(node));
+        if let Some(m) = node.usize_at("mesh") {
+            out.push((m, node_matrix(node)));
         }
     }
-    Ok(found.unwrap_or(IDENTITY))
+    // A file with no `nodes` at all still has its meshes; take them at identity.
+    if out.is_empty() {
+        out = (0..root.arr_at("meshes").len()).map(|m| (m, IDENTITY)).collect();
+    }
+    Ok(out)
+}
+
+
+/// Decodes ONE primitive into model-space vertices + indices, with no placement applied.
+///
+/// ⚠️ **Concatenating primitives and root-level mesh nodes is DECODING, not scene assembly, and
+/// Rev 38 draws that line where it can be defended.** A mesh's primitives already share one
+/// coordinate space (they are split by MATERIAL, which the density census does not read), and each
+/// root node's transform is applied to its own mesh alone. Neither act places one mesh RELATIVE to
+/// another. Composing a parent transform with a child's does, which is why a hierarchy is still
+/// refused. Measured justification: every genuinely high-poly sample asset is multi-primitive, so
+/// "exactly one primitive" capped this corpus at ~18 k triangles -- three orders of magnitude below
+/// the regime K1 is about.
+fn decode_primitive(
+    root: &Json,
+    bin: &[u8],
+    prim: &Json,
+    what: &str,
+) -> Result<(Vec<Vertex>, Vec<u32>), AssetError> {
+    let mode = prim.u64_at("mode").unwrap_or(MODE_TRIANGLES);
+    if mode != MODE_TRIANGLES {
+        return Err(err(format!("{what}: mode {mode} is not TRIANGLES (§3.3)")));
+    }
+    if !prim.arr_at("targets").is_empty() {
+        return Err(err(format!("{what}: morph targets are outside this subset (§3.3)")));
+    }
+    let index_accessor = prim
+        .usize_at("indices")
+        .ok_or_else(|| err(format!("{what}: non-indexed primitives are outside this subset (§3.3)")))?;
+
+    let attrs = prim.get("attributes").ok_or_else(|| err(format!("{what}: no attributes")))?;
+    let attr = |name: &str| attrs.usize_at(name);
+
+    let pos = Accessor::resolve(
+        root,
+        bin,
+        attr("POSITION").ok_or_else(|| err(format!("{what}: no POSITION")))?,
+        what,
+    )?;
+    let nrm = Accessor::resolve(
+        root,
+        bin,
+        attr("NORMAL")
+            .ok_or_else(|| err(format!("{what}: no NORMAL — refused rather than invented (§3.3)")))?,
+        what,
+    )?;
+    if nrm.count != pos.count {
+        return Err(err(format!("{what}: NORMAL count {} != POSITION count {}", nrm.count, pos.count)));
+    }
+
+    let uv = match attr("TEXCOORD_0") {
+        Some(i) => Some(Accessor::resolve(root, bin, i, what)?),
+        None => None,
+    };
+    let tan = match attr("TANGENT") {
+        Some(i) => Some(Accessor::resolve(root, bin, i, what)?),
+        None => None,
+    };
+    let col = match attr("COLOR_0") {
+        Some(i) => Some(Accessor::resolve(root, bin, i, what)?),
+        None => None,
+    };
+
+    let mut vertices = Vec::with_capacity(pos.count);
+    for i in 0..pos.count {
+        let p = pos.read(i);
+        let n = nrm.read(i);
+        let t = uv.as_ref().map_or([0.0; 4], |a| a.read(i));
+        let c = col.as_ref().map_or(DEFAULT_VERTEX_COLOR, |a| {
+            let v = a.read(i);
+            [v[0], v[1], v[2], if a.components == 4 { v[3] } else { 1.0 }]
+        });
+        let g = tan.as_ref().map_or([0.0; 4], |a| a.read(i));
+        vertices.push(Vertex {
+            position: [p[0], p[1], p[2]],
+            normal: [n[0], n[1], n[2]],
+            color: c,
+            uv: [t[0], t[1]],
+            tangent: g,
+        });
+    }
+
+    let idx = Accessor::resolve(root, bin, index_accessor, what)?;
+    if idx.components != 1 {
+        return Err(err(format!("{what}: index accessor is not SCALAR")));
+    }
+    if !idx.count.is_multiple_of(3) {
+        return Err(err(format!("{what}: index count {} is not a multiple of 3", idx.count)));
+    }
+    let mut indices = Vec::with_capacity(idx.count);
+    for i in 0..idx.count {
+        let v = idx.read_index(i)?;
+        if v as usize >= vertices.len() {
+            return Err(err(format!("{what}: index {v} out of range for {} vertices", vertices.len())));
+        }
+        indices.push(v);
+    }
+
+    // A missing TANGENT takes the engine's existing post-pass rather than a zero basis, which
+    // would flatten normal mapping silently. Run per primitive, BEFORE placement, so the basis is
+    // generated in the space the positions are in.
+    if tan.is_none() {
+        generate_tangents(&mut vertices, &indices);
+    }
+
+    Ok((vertices, indices))
 }
 
 /// Decodes a `.glb` into the engine's [`MeshData`] intermediate.
@@ -741,145 +848,54 @@ impl AssetLoader for GlbMeshLoader {
             }
         }
 
-        let instance = resolve_instance_transform(&root)?;
-
+        let placements = resolve_instance_transform(&root)?;
         let meshes = root.arr_at("meshes");
-        if meshes.len() != 1 {
-            return Err(err(format!(
-                "{} meshes — this decoder accepts exactly one (§3.3)",
-                meshes.len()
-            )));
-        }
-        let prims = meshes[0].arr_at("primitives");
-        if prims.len() != 1 {
-            return Err(err(format!(
-                "{} primitives — this decoder accepts exactly one (§3.3)",
-                prims.len()
-            )));
-        }
-        let prim = &prims[0];
-
-        let mode = prim.u64_at("mode").unwrap_or(MODE_TRIANGLES);
-        if mode != MODE_TRIANGLES {
-            return Err(err(format!("primitive mode {mode} is not TRIANGLES (§3.3)")));
-        }
-        if !prim.arr_at("targets").is_empty() {
-            return Err(err("morph targets are outside this decoder's subset (§3.3)"));
-        }
-        let index_accessor = prim
-            .usize_at("indices")
-            .ok_or_else(|| err("non-indexed primitives are outside this decoder's subset (§3.3)"))?;
-
-        let attrs = prim
-            .get("attributes")
-            .ok_or_else(|| err("primitive has no attributes"))?;
-        let attr = |name: &str| attrs.usize_at(name);
-
-        let pos = Accessor::resolve(
-            &root,
-            bin,
-            attr("POSITION").ok_or_else(|| err("primitive has no POSITION"))?,
-            "POSITION",
-        )?;
-        let nrm = Accessor::resolve(
-            &root,
-            bin,
-            attr("NORMAL").ok_or_else(|| {
-                err("primitive has no NORMAL — refused rather than invented (§3.3)")
-            })?,
-            "NORMAL",
-        )?;
-        if nrm.count != pos.count {
-            return Err(err(format!(
-                "NORMAL count {} != POSITION count {}",
-                nrm.count, pos.count
-            )));
+        if placements.is_empty() || meshes.is_empty() {
+            return Err(err("the document contains no mesh"));
         }
 
-        let uv = match attr("TEXCOORD_0") {
-            Some(i) => Some(Accessor::resolve(&root, bin, i, "TEXCOORD_0")?),
-            None => None,
-        };
-        let tan = match attr("TANGENT") {
-            Some(i) => Some(Accessor::resolve(&root, bin, i, "TANGENT")?),
-            None => None,
-        };
-        let col = match attr("COLOR_0") {
-            Some(i) => Some(Accessor::resolve(&root, bin, i, "COLOR_0")?),
-            None => None,
-        };
+        let mut vertices: Vec<Vertex> = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
 
-        let mut vertices = Vec::with_capacity(pos.count);
-        for i in 0..pos.count {
-            let p = pos.read(i);
-            let n = nrm.read(i);
-            let t = uv.as_ref().map_or([0.0; 4], |a| a.read(i));
-            let c = col.as_ref().map_or(DEFAULT_VERTEX_COLOR, |a| {
-                let v = a.read(i);
-                // COLOR_0 may be VEC3; alpha then defaults to opaque.
-                [v[0], v[1], v[2], if a.components == 4 { v[3] } else { 1.0 }]
-            });
-            let g = tan.as_ref().map_or([0.0; 4], |a| a.read(i));
-            vertices.push(Vertex {
-                position: [p[0], p[1], p[2]],
-                normal: [n[0], n[1], n[2]],
-                color: c,
-                uv: [t[0], t[1]],
-                tangent: g,
-            });
-        }
+        for (mesh_index, xform) in &placements {
+            let mesh = meshes
+                .get(*mesh_index)
+                .ok_or_else(|| err(format!("node references mesh {mesh_index}, which does not exist")))?;
+            for (pi, prim) in mesh.arr_at("primitives").iter().enumerate() {
+                let what = format!("mesh {mesh_index} primitive {pi}");
+                let base = vertices.len() as u32;
+                let (mut vs, is) = decode_primitive(&root, bin, prim, &what)?;
 
-        let idx = Accessor::resolve(&root, bin, index_accessor, "indices")?;
-        if idx.components != 1 {
-            return Err(err("index accessor is not SCALAR"));
-        }
-        if !idx.count.is_multiple_of(3) {
-            return Err(err(format!(
-                "index count {} is not a multiple of 3 (TRIANGLES)",
-                idx.count
-            )));
-        }
-        let mut indices = Vec::with_capacity(idx.count);
-        for i in 0..idx.count {
-            let v = idx.read_index(i)?;
-            if v as usize >= vertices.len() {
-                return Err(err(format!(
-                    "index {v} is out of range for {} vertices",
-                    vertices.len()
-                )));
-            }
-            indices.push(v);
-        }
+                // BAKE this placement into model space. The engine places instances itself, so a
+                // transform left in the file would be data nothing consumes -- and DROPPING it is
+                // invisible to every R0b gate part (triangle count, the gMeshMeta row and the
+                // allocation check are all affine-invariant) while the census renders a different
+                // scene than the manifest describes.
+                if !is_identity(xform) {
+                    let nm = normal_matrix(xform);
+                    let tm = [
+                        xform[0], xform[1], xform[2], //
+                        xform[4], xform[5], xform[6], //
+                        xform[8], xform[9], xform[10],
+                    ];
+                    for v in &mut vs {
+                        v.position = transform_point(xform, v.position);
+                        v.normal = transform_dir(&nm, v.normal);
+                        // A tangent runs ALONG the surface, so it takes the transform itself
+                        // rather than the inverse transpose; `w` is the bitangent handedness sign
+                        // and is carried through untouched.
+                        let t = transform_dir(&tm, [v.tangent[0], v.tangent[1], v.tangent[2]]);
+                        v.tangent = [t[0], t[1], t[2], v.tangent[3]];
+                    }
+                }
 
-        // BAKE the node transform into model space. The engine places instances itself,
-        // so a transform left in the file would be data nothing consumes — and dropping it
-        // is invisible to every R0b gate part (all three are affine-invariant) while the
-        // census renders a different scene than the manifest describes.
-        if !is_identity(&instance) {
-            let nm = normal_matrix(&instance);
-            for v in &mut vertices {
-                v.position = transform_point(&instance, v.position);
-                v.normal = transform_dir(&nm, v.normal);
-                // A tangent is a direction ALONG the surface, so it takes the transform
-                // itself rather than the inverse-transpose; `w` is the bitangent handedness
-                // sign and is carried through untouched.
-                let t = transform_dir(
-                    &[
-                        instance[0], instance[1], instance[2], //
-                        instance[4], instance[5], instance[6], //
-                        instance[8], instance[9], instance[10],
-                    ],
-                    [v.tangent[0], v.tangent[1], v.tangent[2]],
-                );
-                v.tangent = [t[0], t[1], t[2], v.tangent[3]];
+                vertices.extend(vs);
+                indices.extend(is.into_iter().map(|k| k + base));
             }
         }
 
-        // A missing TANGENT takes the engine's existing post-pass rather than a
-        // zero basis, which would flatten normal mapping silently. Run AFTER the bake so
-        // the basis is generated in the same space the positions now live in.
-        if tan.is_none() {
-            generate_tangents(&mut vertices, &indices);
+        if indices.is_empty() {
+            return Err(err("the document decodes to zero triangles"));
         }
 
         Ok(MeshData { vertices, indices })
