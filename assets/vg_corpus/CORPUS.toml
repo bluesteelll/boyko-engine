@@ -56,8 +56,8 @@ camera_paths = ["orbit_mid", "approach_close"]
 # which is a cross-check of our decoder against the publisher's own number. It is an equality and
 # floors nothing — it does not, and is not meant to, certify that the corpus is high-poly.
 #
-# ⚠️ **THE TWO ENTRIES BELOW ARE A PIPELINE SEED, NOT THE CENSUS CORPUS**, and the distinction is
-# load-bearing rather than modest. 682 and 15 452 triangles are orders of magnitude below the regime
+# ⚠️ **THE ENTRIES BELOW ARE A PIPELINE SEED, NOT THE CENSUS CORPUS**, and the distinction is
+# load-bearing rather than modest. The largest of them is 18 324 triangles, orders of magnitude below the regime
 # K1 is about. They are here because they are REAL, licence-clean content that exercises the ingest
 # path end to end — and they earned their place immediately: decoding them exposed two decoder
 # defects no synthetic fixture could. The first was a hand-written `glTF` magic constant with a
@@ -91,3 +91,42 @@ archive_sha256 = "a1e3b04de97b11de564ce6e53b95f02954a297f0008183ac63a4f5974f6b32
 glb = "khronos/damaged_helmet.glb"
 glb_sha256 = "a1e3b04de97b11de564ce6e53b95f02954a297f0008183ac63a4f5974f6b32d8"
 published_triangles = 15452
+
+[[asset]]
+id = "corset"
+source_url = "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Corset/glTF-Binary/Corset.glb"
+licence = "CC0-1.0"
+licence_url = "https://creativecommons.org/publicdomain/zero/1.0/"
+attribution = "Microsoft - CC0 1.0, via Khronos glTF-Sample-Assets"
+archive_sha256 = "9582c0dc0dee813be77f60e6ddf7213987c7e11497bf3cc66fd7b18957ae0d26"
+glb = "khronos/corset.glb"
+glb_sha256 = "9582c0dc0dee813be77f60e6ddf7213987c7e11497bf3cc66fd7b18957ae0d26"
+published_triangles = 18324
+
+# ---------------------------------------------------------------------------------------------
+# MEASURED 2026-07-31: WHAT NOW BLOCKS A HIGH-POLY CORPUS, and it is no longer the node transform.
+#
+# Fifteen candidates were probed for triangle count AND subset compliance. Every genuinely
+# high-poly one is MULTI-PRIMITIVE, which this decoder refuses:
+#
+#   ABeautifulGame     573 952 tris   15 meshes / 15 prims / hierarchy   REFUSED
+#   MetalRoughSpheres  501 776 tris    5 meshes /  5 prims / hierarchy   REFUSED
+#   DragonAttenuation  134 995 tris    2 meshes /  2 prims              REFUSED
+#   ToyCar             108 936 tris    3 meshes /  3 prims              REFUSED
+#   AntiqueCamera       20 066 tris    2 meshes /  2 prims              REFUSED
+#   corset              18 324 tris    1 mesh   /  1 prim               ACCEPTED  <- the largest
+#   damaged_helmet      15 452 tris    1 mesh   /  1 prim               ACCEPTED
+#
+# The pattern is structural, not incidental: real content splits primitives BY MATERIAL, so
+# "exactly one primitive" selects for toy assets. The ceiling on this corpus is therefore ~18 k
+# triangles, three orders of magnitude below the regime K1 is about.
+#
+# THE DECISION THIS FORCES, recorded rather than taken in a hurry -- the last time a §3.3
+# restriction was authored without running it against real content, it refused every real asset:
+# concatenating a file's primitives into one MeshData is arguably still DECODING (the census
+# measures triangles per covered pixel, and per-primitive material identity is not an input to it),
+# whereas flattening a NODE HIERARCHY places instances relative to one another and is scene
+# assembly. Those two are not the same act, and Rev 33 conflated them once already. Whichever way
+# it goes must be derived, and R0b(b)'s equality (decoded == published, summed over primitives) is
+# what keeps it honest.
+
