@@ -47,8 +47,11 @@
 # tests/vg_symbol_reachability.rs asserts that the newest `REV N` marker below and
 # `authored_at_revision` name the same revision, over THIS file as well as the hashed one, and it
 # ships a control that fires in both directions. It red on this file the first time it ran.
-schema_version = 7
-authored_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 24"
+# REV 32 -- THE OWNER ANSWERS ALL THREE FIELDS (2026-07-31). Each moves PENDING -> value exactly
+# once, which is the schedule this file's header requires. No field below is PENDING any more, so
+# no rung of R0 -- and not R1 -- is blocked by this file.
+schema_version = 8
+authored_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 32"
 
 # REV 13 -- the surviving dead index. Rev 12 converted every section-13 citation to name its
 # question instead of its index, and stated that as a universal; one dead index survived sixteen
@@ -59,7 +62,7 @@ authored_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 24"
 # re-creating a member of the class in the act of describing the class's repair, four lines from
 # the rule ("described, never quoted") that forbids it. Third consecutive revision to breach the
 # rule it was landing. The indices are described here now.
-authored_date = "2026-07-28"
+authored_date = "2026-07-31"
 
 # ---------------------------------------------------------------------------------------------
 # [corpus] — plan section 13, the CORPUS PROVENANCE AND LICENCE question. BLOCKS R0b.
@@ -76,7 +79,10 @@ authored_date = "2026-07-28"
 # Whether a fetched-and-gitignored payload with pinned hashes is acceptable as the permanent
 # arrangement, and who selects and licenses the high-poly assets. Without an answer R0b cannot
 # author CORPUS.toml, so this is the one early block in the ladder.
-arrangement = "PENDING"
+# REV 32 -- ANSWERED 2026-07-31: yes, fetched + gitignored + pinned sha256 is the permanent
+# arrangement. The agent selects the assets; licences are CC0 / CC-BY with the attribution and
+# licence id + URL recorded per asset in CORPUS.toml (the schema plan section 4.3 already fixes).
+arrangement = "fetched_gitignored_pinned_hashes"
 
 # ---------------------------------------------------------------------------------------------
 # [k1_outcome] — plan section 13, the K1-UNDECIDED question. BLOCKS R1.
@@ -108,8 +114,12 @@ arrangement = "PENDING"
 # reachability gate's class 1 recognised only the bracketed `[table].field` spelling and this
 # citation is unbracketed, while class 3 was satisfied because the key existed under SOME table.
 # Widening class 1 found it on the first run.
+# REV 32 -- ANSWERED 2026-07-31: fund_upper_bound. If the census leaves K1 UNDECIDED, the
+# upper-bound instrument becomes its own campaign; R1 does not proceed on an unadjudicated
+# premise, and the content class is not changed to dodge the answer. This was chosen BEFORE the
+# census number exists, which is the whole point of the field.
 [k1_outcome]
-undecided_disposition = "PENDING"
+undecided_disposition = "fund_upper_bound"
 
 # ---------------------------------------------------------------------------------------------
 # [gating] — which field blocks which rung.
@@ -164,5 +174,11 @@ r1_blocked_by = ["k1_outcome.undecided_disposition"]
 # The route deliberately NOT offered is deferring it again: section 3.4 called this work a
 # "named follow-up, not R0 work" from the day it was written, and that sentence is what let three
 # rungs be specified on top of an ingest that cannot run.
+# REV 32 -- ANSWERED 2026-07-31: new_rung, with an owner amplification: the answer explicitly
+# licenses splitting the work into MORE, SMALLER stages than one ("it can be split into a larger
+# number of stages to make it easier"). So the device-local + staging path precedes R0b as its own
+# rung -- or several small rungs -- each with its own gate and demonstrated red mutation, and R0b
+# keeps its Rev 17 approval unchanged. The rung specs land when the rungs land (plan Status:
+# further plan changes are rung-driven, not review-driven).
 [ingest_ceiling]
-disposition = "PENDING"
+disposition = "new_rung"

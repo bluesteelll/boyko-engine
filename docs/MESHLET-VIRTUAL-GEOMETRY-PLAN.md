@@ -1,6 +1,6 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 31** — **REVIEW LOOP CLOSED; blocked on the three owner fields; no rung
+**Status:** DESIGN, **Rev 32** — **REVIEW LOOP CLOSED; all three owner fields ANSWERED; no rung
 code exists** (the extent probe is the first landed instrument). This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
@@ -17,7 +17,10 @@ what they specify**. The one measurement that blocked R0c is landed rather than 
 ([`vg_extent_probe.rs`](../crates/boyko_rhi_vulkan/tests/vg_extent_probe.rs), §9.1). Closure is a
 decision, not a proof of perfection: the residual classes §9.1 and §14.1 enumerate stay live, and
 the next reviews happen at rung commits — where each rung's gate and mutations are **executed**
-rather than derived, which is the stronger instrument this loop never had.
+rather than derived, which is the stronger instrument this loop never had. **Rev 32 records the
+owner's answers to all three fields** (the claim file holds the values; §13 points at them), so no
+`PENDING` sentinel blocks any rung: the ladder is now `staging rung(s) → R0a..R0d`, and the next
+unit of work is code.
 
 **Rev 9 discharges the six items that blocked Rev 8, and three of them were Rev 8's own.** Its
 review scored Rev 8 at **0 hold, 3 partial, 1 does not hold** — the sixth consecutive revision told
@@ -2217,7 +2220,8 @@ historical one, and quoting one re-creates it. A fourth survived in
 removal. N−1 of N, twice, inside the repair for N−1 of N. Rev 13 describes them instead, and states
 no universal — the enforceable claim is the rule above, not a census of the texts obeying it.
 
-**Blocking — each has a `PENDING` field and a `[gating]` row.** The rows are
+**Blocking — each has a claim-file field and a `[gating]` row** (all three fields are ANSWERED as
+of Rev 32; the sentinel gates now pass by construction). The rows are
 `[gating].r0a_blocked_by`, `[gating].r0b_blocked_by`, `[gating].r0c_blocked_by`,
 `[gating].r0d_blocked_by` and `[gating].r1_blocked_by` — five rows for five rungs, three of them
 deliberately empty, so "nothing blocks this rung" is a recorded decision rather than a missing
@@ -2239,6 +2243,8 @@ requirement on whoever writes R1, and calling it anything stronger would repeat 
    fetched-and-gitignored payload with pinned hashes acceptable as the permanent arrangement?
    → `corpus.arrangement`, **blocks R0b**, which cannot author `CORPUS.toml` without it. This is the
    only early block in the ladder.
+   **ANSWERED 2026-07-31** — yes: fetched + gitignored + pinned hashes is permanent; the agent
+   selects, CC0/CC-BY with attribution recorded per asset. The value and terms live at the field.
 2. **If K1 comes back UNDECIDED, what happens?** R0 can refute K1 cheaply and soundly and **cannot
    fire it** — the upper-bound instrument is unsolved, not merely unscheduled (§5.6). So
    `D_est < [k1].d_est_min` leaves the campaign's premise *untested* rather than refuted, and with
@@ -2247,6 +2253,9 @@ requirement on whoever writes R1, and calling it anything stronger would repeat 
    class, or fund the instrument as its own campaign?
    → `k1_outcome.undecided_disposition`, **blocks R1**. Like every other pre-registration here it
    must be answered before the number exists; afterwards it is answered by someone who has seen it.
+   **ANSWERED 2026-07-31, before any census number exists** — `fund_upper_bound`: an UNDECIDED K1
+   makes the upper-bound instrument its own campaign rather than proceeding unadjudicated or
+   re-aiming the content class. The value lives at the field.
    ⚠️ This field is **new at Rev 8**. Through Rev 7 this question pointed at a claim file that had
    no field for it and a `[gating]` table with no row, so the one outcome R0 is most likely to
    produce had no sentinel and blocked nothing — the enforcement predicate was vacuously true for
@@ -2262,6 +2271,10 @@ requirement on whoever writes R1, and calling it anything stronger would repeat 
    not: deferring it again is what allowed three rungs to be specified on top of an ingest that
    cannot run. ⚠️ Under `extend_r0b` **R0b's Rev 17 approval does not survive** — its Lands list,
    gate and blocked-by row are re-derived together and the approval is re-earned.
+   **ANSWERED 2026-07-31** — `new_rung`, with an owner amplification recorded at the field: the
+   staging work may be split into **several smaller rungs**, each with its own gate and
+   demonstrated red mutation, all preceding R0b. R0b keeps its approval; the rung specs land with
+   the rungs (Status: further plan changes are rung-driven).
 
 **Advisory — no field, no gate, and that is deliberate: they shape work but block no rung of R0:**
 
