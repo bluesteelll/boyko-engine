@@ -1,6 +1,41 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** BUILDING, **Rev 36** — **R0a, R0-S1 AND R0b (bar its payload) ARE LANDED AND GREEN.**
+**Status: R0 IS COMPLETE, Rev 37 — every rung landed, every gate executed, and K1 is ADJUDICATED:
+UNDECIDED, escalate.**
+
+`docs/VG-R0-DENSITY-CENSUS.md` is machine-written by the run that measured it. Over the seven-asset,
+**2 279 237-triangle** corpus, at both committed camera paths, at all four ladder rungs:
+`D_est(orbit_mid) = 1.0527` and `D_est(approach_close) = 0.5090`, so the frozen
+`min`-over-committed-paths reduction gives **0.5090 < `[k1].d_est_min` = 1.0 ⇒ UNDECIDED**. The
+disposition was pre-registered by the owner *before* the measurement
+(`k1_outcome.undecided_disposition = "fund_upper_bound"` — cited unbracketed, which
+[`tests/vg_symbol_reachability.rs`](../tests/vg_symbol_reachability.rs)'s deletion control depends
+on; it caught this paragraph's first draft doing otherwise), which is exactly what the two-file
+split exists to guarantee: the outcome did not get to choose its own consequence.
+
+**Three results the census produced that no derivation had:**
+
+* **`vb_id` IS deterministic across processes** — 3 separate processes per path, byte-identical
+  readback sha256 at 3840×2160 on a multi-million-triangle corpus. R0c(e)'s measurement, taken in
+  the regime §12 predicted it would fail in, and R0d(a)'s gate passes on the first shape.
+* **The modal-bucket shift is +0 on every non-excluded pair, against targets 0.830 and 1.170** —
+  residuals of 0.83 and 1.17 against a 0.35 tolerance, on all four pairs. Had Rev 3's version stayed
+  a gate, R0d would red **because the corpus is in the micro-polygon regime**. Rev 8's demotion is
+  vindicated by measurement rather than by argument.
+* **`visible_tris` has NOT converged** (residuals 0.41 and 0.21 against a 0.05 margin), so `D_est` is
+  a lower bound that is still rising. The UNDECIDED verdict is therefore a statement about the
+  INSTRUMENT's reach, not a finding that the content is sparse.
+
+R0c's gate is green in all five parts: all **13** VB goldens byte-identical with the census unarmed;
+the modal bucket IS the procedural fixture's analytic bucket and a 4× subdivision moves it down by
+exactly two; the census's covered total matches `sv0_oracle` **exactly** (97020 vs 97020) against a
+pre-registered 2% tolerance; non-degeneracy holds; and **every ladder rung achieved its exact
+extent**, including the two this box cannot open a window for — §9.1's measured grant table routes
+them through the armed 2× composite and the arming is asserted per rung.
+
+---
+
+**Superseded status (Rev 36):** BUILDING — **R0a, R0-S1 AND R0b (bar its payload) ARE LANDED AND GREEN.**
 R0b ships the in-house `.glb` decoder, the tracked manifest + gitignore rule + fetch script, and the
 six-part ingest gate whose two payload-free parts run on every checkout while the other four skip
 and name themselves. The corpus payload is the one remaining stop and it is an owner call: fetching
