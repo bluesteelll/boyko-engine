@@ -1,0 +1,154 @@
+# VG-R0 REFERENCE-RIG RECORD — the machine's answer to K2, not the author's.
+#
+# Landed by rung R0a (the plan's section 8). The rung's whole purpose is that a NEGATIVE be
+# re-derived by a test against documented authorities rather than typed by whoever wanted one:
+# Rev 1 let the record ship `achievable = false` with the test asserting "that shape", which any
+# author satisfies by typing `false`.
+#
+# THE RECORD HAS TWO SHAPES and the gate says which fields each requires. On the
+# `achievable = true` branch the POSITIVE set (every field the plan's R0a "Lands" list enumerates)
+# must be present and not PENDING. On the `achievable = false` branch the NEGATIVE set is required
+# --- `reason`, `search_method`, `editor_binary_name`, `probed_at` --- and the positive fields that
+# presuppose an install are legitimately PENDING. `thresholds_sha256` is asserted on BOTH branches.
+#
+# THIS FILE RECORDS THE FREEZE. `[hash_assertion].freeze_begins_at` in
+# docs/VG-CAMPAIGN-THRESHOLDS.toml reads "R0a records the sha256", and `thresholds_sha256` below is
+# that act: from this commit an edit to the thresholds file is an AMENDMENT (a new plan revision
+# plus a dated entry in the plan's section 11.1, with the recorded hash updated in the same
+# commit), not authoring.
+schema_version = 1
+recorded_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 34"
+probed_at = "2026-07-31"
+
+# ---------------------------------------------------------------------------------------------
+# THE BRANCH.
+# ---------------------------------------------------------------------------------------------
+# K2 FIRES on this box: no Nanite reference is producible here today. The disposition is NOT
+# "measure something else" --- it is a scope restatement the owner makes consciously (plan
+# sections 6.2 / 14.5). R0's own ladder does not depend on it: R0 evaluates no comparative claim
+# (Rev 8 moved that to section 14), so K2 firing restates the goal and cancels no rung.
+achievable = false
+
+# ---------------------------------------------------------------------------------------------
+# NEGATIVE FIELD SET — gate (a'). Every field below is required and must not be the PENDING
+# sentinel; `reason` must additionally be a member of [k2_probe].reason_values.
+# ---------------------------------------------------------------------------------------------
+
+# One of [k2_probe].reason_values. This value is the one [k2_probe].machine_rederived_reason
+# names, so gate (b') re-derives it: the authorities must report NO engine.
+reason = "no_engine_registered"
+
+# The search space is DESCRIBED here and DEFINED by the test --- Rev 2's author-supplied
+# `probed_paths` list was rejected precisely because a record naming only an empty directory makes
+# the assertion permanently true while a real install elsewhere fires nothing. Rev 4's "enumerate
+# fixed volumes" was retracted in turn: a recursive walk of two ~240 GB volumes inside a
+# `cargo test` is unbounded runtime, permission denials, reparse-point cycles and false positives
+# from any stray editor binary in an extracted archive.
+#
+# ⚠️ THE BINARY-PRESENCE CLAUSE IS R0a's FIRST EXECUTED FINDING, and without it this rung could
+# not go green on a TRUE record. See `authority_stale_entry_note` below.
+search_method = "three documented authorities, none of them author-supplied, with an entry counting as a REGISTERED ENGINE only if the directory it names carries Engine/Binaries/Win64/<editor_binary_name>: (1) the Epic launcher manifest C:\\ProgramData\\Epic\\UnrealEngineLauncher\\LauncherInstalled.dat; (2) HKCU\\Software\\Epic Games\\Unreal Engine\\Builds (source builds); (3) HKLM\\SOFTWARE\\EpicGames\\Unreal Engine (launcher installs). No volume walk, no author-supplied path list."
+
+# The binary whose presence decides whether an authority's entry is a usable engine. Until R0a
+# ran, this required field had NO consumer --- the executed rung gave it one.
+editor_binary_name = "UnrealEditor.exe"
+
+# ---------------------------------------------------------------------------------------------
+# WHAT THE AUTHORITIES ACTUALLY REPORTED — evidence for (b'), recorded rather than summarised.
+# ---------------------------------------------------------------------------------------------
+authority_launcher_manifest_present = false
+authority_hkcu_builds_key_present = true
+authority_hklm_installs_key_present = false
+
+# Entries naming an install directory, and how many of those directories carry the editor binary.
+authority_entries_seen = 1
+authority_entries_with_editor_binary = 0
+
+# The derived answer (b') asserts against.
+authority_reports_engine = false
+
+# ⚠️ THE FINDING. The HKCU authority DOES carry an entry --- `{E52C0026-4C98-688F-2858-D7AF59EB4B60}`
+# -> `D:/Epic Games/UE_5.7` --- and that path DOES NOT EXIST (its parent `D:\Epic Games` is an
+# empty directory). The entry is STALE: an authority recording an engine that is gone.
+#
+# The plan's R0a anticipated this class in the OTHER direction only ("the launcher manifest is not
+# reliably pruned on uninstall, and a hand-placed engine outside both authorities is invisible to
+# them"), and the frozen file names the mirror case at
+# [k2_probe].hand_placed_engine_plus_short_disk_reds. This box exhibits the case neither text
+# covered, and under a naive read of the authorities it is a CANNOT-GO-GREEN ON A TRUE RECORD:
+# `no_engine_registered` is true of the filesystem, the raw entry says otherwise, so (b') would red
+# the honest record while `insufficient_disk` --- which is FALSE here, see the disk figures below
+# --- would have greened it. A gate whose only green value is a false one is the defect family this
+# campaign hunts, reached from a third side.
+#
+# The resolution narrows what "registered" MEANS and does not widen what counts as absent: an
+# authority reports an engine only when the directory it names carries the editor binary. This is
+# accurate in BOTH directions --- a real registered install still carries its binary, so a
+# fabricated `no_engine_registered` still reds --- and it reclassifies only entries pointing at
+# nothing, which cannot produce a capture and are therefore not a reference rig.
+authority_stale_entry_note = "HKCU builds key names D:/Epic Games/UE_5.7; the path does not exist and carries no editor binary, so the entry is stale and does not report a usable engine"
+
+# The residual this search still cannot see, recorded rather than claimed away: an engine placed by
+# hand outside all three authorities. A search that admits what it cannot see is stronger than one
+# claiming to see everything.
+search_residual_blindness = "an engine installed by hand and registered with none of the three authorities is invisible to this probe"
+
+# ---------------------------------------------------------------------------------------------
+# ASSERTED ON BOTH BRANCHES — gate (d), and the freeze itself.
+# ---------------------------------------------------------------------------------------------
+# The \r\n -> \n normalised SHA-256 of docs/VG-CAMPAIGN-THRESHOLDS.toml. R0a records the literal
+# THRESHOLDS_SHA256 already pinned in crates/boyko_render/tests/vg_thresholds_freeze.rs rather than
+# minting a second number; the gate asserts BOTH that this equals that literal and that it equals
+# the file re-hashed at test time. Normalised because this repository has core.autocrlf behaviour
+# active, so a hash over raw bytes would be a hash of the checkout configuration.
+thresholds_sha256 = "fea8f9c5583fafd7de39360974d1a52d41f656ce7fd961282a145620a16a2d19"
+
+# ---------------------------------------------------------------------------------------------
+# MEASURED ON THIS BOX — recorded because they are true and cheap, not because a gate reads them.
+# ---------------------------------------------------------------------------------------------
+# Gate (b) (positive branch) cross-checks `gpu_name` against the name this engine reports at boot.
+# It is recorded here on the negative branch as evidence; the branch does not assert it.
+gpu_name = "NVIDIA GeForce RTX 3060 Laptop GPU"
+driver_version = "32.0.16.1047"
+
+# Gate (c) (positive branch) requires this to equal [census].decision_resolution read from the
+# thresholds file rather than a constant this rung authors. Recorded now because it is OUR choice
+# and needs no UE install to be true.
+render_resolution = [1920, 1080]
+
+# FREE DISK IS EVIDENCE AND IS DELIBERATELY NOT AN ASSERTION. Rev 2 asserted free space against a
+# recorded `required_free_gb`, which fails twice over: the number is author-set, and its truth
+# value is controlled by the build directory --- a routine `cargo clean` flips it with nothing
+# broken. The campaign retracted that threshold twice, on the same evidence both times.
+#
+# ⚠️ AND THE FIGURES MOVED. The plan's section 11 recorded D: at 16-18.5 GB free with target/ at
+# 58 GB, which is why [k2_probe]'s Rev 10 note says this box holds TWO simultaneously-true K2
+# causes. It no longer does: with 78 GB free on D: and 65 GB on C:, `insufficient_disk` is not a
+# true statement about this box today, and `no_engine_registered` is the only holding cause. The
+# precedence list therefore has nothing to order here --- which changes no verdict, because
+# [k2_probe].reason_precedence_status already records it as an authoring convention that is
+# deliberately not gate-asserted.
+free_disk_gb_c = 64.92
+free_disk_gb_d = 78.06
+
+# ---------------------------------------------------------------------------------------------
+# POSITIVE FIELD SET — every one of these presupposes a UE5 install and cannot exist on this
+# branch. They are the PENDING sentinel, which gate (a) rejects and gate (a') does not read.
+# ---------------------------------------------------------------------------------------------
+ue_version = "PENDING"
+install_path = "PENDING"
+capture_tool = "PENDING"
+capture_tool_version = "PENDING"
+max_pixels_per_edge = "PENDING"
+
+# Free disk on the volume the engine is installed to. There is no install volume on this branch;
+# the measured figures for both volumes are recorded above as evidence.
+free_disk_gb_install_volume = "PENDING"
+
+# The reference's own pass names for its stock scene, recorded at rung ONE on purpose: whoever
+# writes a correspondence after seeing both sides writes it with the answer available, and no gate
+# can tell that from an honest one. The rung that consumes it is section 14's.
+pass_correspondence_map = "PENDING"
+
+# Per-pass milliseconds for ONE stock UE5 scene (no corpus needed).
+per_pass_table = "PENDING"

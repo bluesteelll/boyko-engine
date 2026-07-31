@@ -1,8 +1,13 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 33** — **TERMINAL: the Rev 32 verification pass named ONE code-changing
-finding and this revision repairs it by subtraction; all three owner fields ANSWERED; no rung code
-exists** (the extent probe is the first landed instrument). This document specifies
+**Status:** BUILDING, **Rev 34** — **R0a IS LANDED AND GREEN; the campaign freeze has BEGUN.** The
+design loop is closed (Rev 33) and the ladder is executing: `crates/boyko_app/tests/vg_r0_reference_rig.rs`
+asserts R0a's gate over [`docs/VG-R0-REFERENCE-RIG.toml`](VG-R0-REFERENCE-RIG.toml), 10 tests, both
+named red mutations demonstrated on the live record. K2 **FIRES** on this box — no Nanite reference
+is producible here — which restates the goal and cancels no rung, because R0 evaluates no
+comparative claim (§14). Recording the thresholds digest is the act the frozen file's
+`freeze_begins_at` names, so from this commit an edit to it is an
+**amendment** (§11.1), not authoring. Remaining rungs: staging → R0b → R0c → R0d. This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
@@ -1033,13 +1038,13 @@ that is only argued does not count; the commit message records the mutated run's
 
 ### R0a — the reference-rig probe (zero engine code) — **kills K2 cheapest**
 
-**Lands:** `docs/VG-R0-REFERENCE-RIG.toml` — a machine-readable record: UE version string, install
+**Lands:** [`docs/VG-R0-REFERENCE-RIG.toml`](VG-R0-REFERENCE-RIG.toml) — a machine-readable record: UE version string, install
 path, GPU name, driver version, capture tool + version, render resolution, `MaxPixelsPerEdge`, free
 disk on the install volume, **the sha256 of
 [`VG-CAMPAIGN-THRESHOLDS.toml`](VG-CAMPAIGN-THRESHOLDS.toml) — the freeze (§0.1); the claim file is
 deliberately *not* hashed** — the **pass-correspondence map**, and a per-pass table for **one stock
 UE5 scene** (no corpus needed).
-Plus `crates/boyko_app/tests/vg_r0_reference_rig.rs` reading it. <!-- doc-anchor-ignore -->
+Plus [`crates/boyko_app/tests/vg_r0_reference_rig.rs`](../crates/boyko_app/tests/vg_r0_reference_rig.rs) reading it.
 
 **And — landed at Rev 8, ahead of the rung — the freeze tripwire itself:**
 `crates/boyko_render/tests/vg_thresholds_freeze.rs`
@@ -1152,6 +1157,31 @@ hash is asserted on both branches.
 Blank one field of the branch's own set → (a)/(a′) reds. **Edit any threshold in
 `VG-CAMPAIGN-THRESHOLDS.toml` → (d) reds** — the P0's mutation, and the one Rev 1 had no way to
 express.
+
+> ✅ **RUN AT REV 34, AND THE RUNG PRODUCED A FINDING ABOUT ITS OWN INSTRUMENT.** The branch is
+> `achievable = false` and the two mutations the branch can reach were executed against the **live
+> record**, not argued: blanking `editor_binary_name` → *"(a'): negative field `editor_binary_name`
+> is absent or PENDING"*; `reason = "insufficient_disk"` → *"(b'): "insufficient_disk" presupposes
+> an install, but the documented authorities report NO engine — the record is self-contradictory"*.
+> Both directions of (b′), the `reason`-membership red and both halves of (d) are in-memory
+> controls over the live files.
+>
+> ⚠️ **The finding: a naive read of the authorities could not go green on a TRUE record here.** The
+> HKCU builds key names `D:/Epic Games/UE_5.7`; **that path does not exist**, so the entry is
+> STALE — an authority recording an engine that is gone. Under "an entry means an engine",
+> `no_engine_registered` (true of the filesystem) reds, while `insufficient_disk` — **false**, since
+> the volumes now hold 65 GB and 78 GB free (§11) — would have greened. The only green value would
+> have been a false one: this campaign's own defect family, reached from a third side, and neither
+> §8's own residual note (a hand-placed engine invisible to the authorities) nor
+> `[k2_probe].hand_placed_engine_plus_short_disk_reds` covers this direction.
+>
+> The resolution **narrows what "registered" means and widens nothing**: an authority reports an
+> engine only when the directory it names carries `Engine/Binaries/Win64/<editor_binary_name>`. A
+> real registered install still carries its binary, so a fabricated `no_engine_registered` is still
+> refuted — the test demonstrates that direction explicitly against a fixture — and only entries
+> pointing at nothing are reclassified, which cannot produce a capture and are therefore not a rig.
+> **This is also what finally gives `editor_binary_name` a consumer**: the field was required by the
+> negative set from Rev 3 onward and read by nothing until the rung ran.
 
 **The negative is re-derived, and the search space is not the author's to choose.** Rev 1 let the
 record ship `achievable = false` with the test asserting "that shape", which any author satisfies by
@@ -2017,7 +2047,7 @@ headline was false as written. Rather than a headline and a retraction, the limi
 | R6 | **Host-visible residency ceiling.** | [`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):320~: every mesh buffer is `HostVisibleCoherent`; §3.4 derives the 64 MiB sum ceiling. | R0b gate (d) bounds only `maxᵢ fᵢ` — the sum kills as a panic outside every gate (§3.4, §9.1). ⚠️ Rev 33 withdraws "a named follow-up, not R0 work": §3.4 made the path a **precondition of R0b**, and Rev 32's `ingest_ceiling.disposition` schedules it as the staging rung(s) preceding R0b. |
 | R7 | **The `vb_id` usage widening perturbs a golden.** | New. | R0c gate (a) over every VB pin. ⚠️ The mitigation cell read *"with a demonstrated red (record the copy unconditionally)"* — that mutation was retired at Rev 18 for not firing, and the cell claiming a demonstrated red is the risk register asserting the very thing the rung had lost. **(a) has no AVAILABLE red**: four sitings failed for four distinct reasons and the axis R0c changes is representation-invariant for R32G32_UINT, so (a) is recorded as an assertion whose red is structurally unavailable rather than one awaiting a mutation; §8's standing rule is that a mutation which is only argued does not count. |
 | R8 | **UE5 capture measures a different scene than our census.** | New — the two engines must load the same bytes. | §4.3: an asset that cannot be imported by both is not corpus material; R0a(c) pins the resolution across both. |
-| R9 | **Disk exhaustion masquerading as a build failure.** | This project's record: `target/` has filled this disk and surfaced as linker errors. | §11 records the measured headroom; R0a's record carries free-disk as a required field, and R0a's negative branch **re-reads** it at test time. |
+| R9 | **Disk exhaustion masquerading as a build failure.** | This project's record: `target/` has filled this disk and surfaced as linker errors. | §11 records the measured headroom and R0a's record carries the figures as evidence. ⚠️ Rev 34 withdraws *"and R0a's negative branch re-reads it at test time"*: the executed rung does not, and must not — R0a's own text rules that free disk is recorded and **deliberately not asserted**, because the number is author-set and its truth value is controlled by the build directory. The residual is enumerated in §9.1 rather than mitigated here. |
 | R10 | **The claim is set to meet the floor.** The cheapest way to close the ONE gate is to write the number on the right after seeing the left. | The P0 of Rev 1; of Rev 2, answered with a hash around the string `PENDING`; and of Rev 3–Rev 5, answered with an ordering rule that **named one rung for two instruments**. | **MOVED TO §14 AT REV 8, unresolved.** There is no claim at R0 to set against a floor, so this risk has no R0 surface — but it is not solved: §14.4 P0-5 carries the worked example showing the post-fill edit window still open on one branch. ⚠️ Rev 3–Rev 5 claimed here that ordering *"does not depend on anyone noticing an edit"* — **retracted**; ordering constrains commits, not knowledge, and party separation is what carries the weight. |
 | R11 | **A statistic that cannot exceed its own threshold.** | Rev 1: `visible_tri_per_covered_pixel ≤ 1` by construction. Rev 2: `submitted/covered < 1.0`, retired — ⚠️ Rev 25 withdrew the stated reason ("precluded by R0b's corpus gate"); R0b(b) is an equality and floors no triangle count, so the surviving reason is that the statistic counts culled and off-screen geometry. **Rev 3–Rev 5: `D_est` capped at exactly 4.0 and a *lower* bound firing a kill.** Three instruments, one defect. | §5.6's directional split — `D_est` may only **refute** K1 — plus `[k1].k1_fire_at_r0 = false`, because the proposed firing instrument is both mis-sited (a fragment shader cannot see frustum/backface survivors) and **probably inert for the same reason Rev 2's was** (~2.5 M survivors vs ~2.07 M covered pixels). ⚠️ Rev 4's entry here called the estimator *"uncapped"*. |
 | R12 | **The census resolution silently decides K1.** Density scales as 1/resolution². | New in Rev 2 and the one fix that survived review. | Frozen ladder + frozen decision resolution; the curve is reported at every rung; **and the achieved extent is asserted**, because OS clamping is already a recorded hazard here at 512². |
@@ -2070,15 +2100,38 @@ rather than trusting this record:
   visible rather than overwritten, since §11's whole contract is that it is a dated record no gate
   reads — a fact of the box at a date, not a live number.
 
+**Re-probed 2026-07-31 by R0a itself, at Rev 34** — recorded because this is the first entry here
+produced by a *rung* rather than by hand, and because two of the facts above moved:
+
+* **UE5:** still no usable installation, but the earlier entry's evidence was incomplete. The
+  registry authority `HKCU\Software\Epic Games\Unreal Engine\Builds` **does carry an entry** naming
+  `D:/Epic Games/UE_5.7` — a path that does not exist, under a parent directory that is empty. The
+  launcher manifest is absent and the `HKLM` installs key does not exist. So: one authority entry
+  seen, **zero** carrying an editor binary. The stale entry and what it forced are recorded at §8
+  R0a and in the rig file.
+* **Free space:** `C:` **64.92 GB** free; `D:` (the repo volume) **78.06 GB** free — both *rose*
+  substantially since the Rev 2 entry above. ⚠️ **This retires a premise two texts still rest on.**
+  `[k2_probe]`'s Rev 10 note and R0a's precedence rationale both say this box holds **two**
+  simultaneously-true K2 causes (no engine **and** short disk); with 78 GB free, `insufficient_disk`
+  is not a true statement about this machine today and `no_engine_registered` is the only holding
+  cause. No verdict moves — `reason_precedence` is an authoring convention that no gate asserts
+  (`[k2_probe].reason_precedence_status`) — which is precisely why the frozen file needs no
+  amendment for this.
+
 ### 11.1 Amendment record
 
 Frozen values in [`VG-CAMPAIGN-THRESHOLDS.toml`](VG-CAMPAIGN-THRESHOLDS.toml) change **only** by a
 dated entry here, in a new plan revision, never by an in-place edit. The recorded sha256 in
 `VG-R0-REFERENCE-RIG.toml` is updated in the same commit, deliberately and visibly.
 
+**THE FREEZE BEGAN 2026-07-31, at Rev 34**, when R0a recorded the thresholds digest
+`fea8f9c5…` into [`VG-R0-REFERENCE-RIG.toml`](VG-R0-REFERENCE-RIG.toml) — the act the frozen
+file's `freeze_begins_at` names. Every edit to the frozen file before that commit was
+authoring; every edit after it is an amendment and needs a row below.
+
 | Date | Revision | Value | From → To | Why |
 |---|---|---|---|---|
-| — | — | — | — | *No amendment yet. The thresholds file is at its authoring state.* |
+| — | — | — | — | *No amendment yet. The thresholds file is at its authoring state, now frozen.* |
 
 **Findings that pre-authorize a fallback** (per `[census].cross_run_spread_fallback` and
 `[k1_instrument].on_not_converged_fire_direction`) are also entered here, by name and date, **before** the fallback
