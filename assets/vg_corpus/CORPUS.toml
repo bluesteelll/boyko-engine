@@ -125,31 +125,58 @@ glb = "khronos/toy_car.glb"
 glb_sha256 = "01a60862de55cd4b9f3acfab0b0def86451800f9c42467fcd61052c16cb9838c"
 published_triangles = 108936
 
+
+[[asset]]
+id = "a_beautiful_game"
+source_url = "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/ABeautifulGame/glTF-Binary/ABeautifulGame.glb"
+licence = "CC-BY-4.0"
+licence_url = "https://creativecommons.org/licenses/by/4.0/"
+attribution = "Guido Odendahl / Khronos - CC BY 4.0, via Khronos glTF-Sample-Assets"
+archive_sha256 = "bd7133b4b322aae97c589b8839dae8155ad2546acb35ae32a127e722a959d007"
+glb = "khronos/a_beautiful_game.glb"
+glb_sha256 = "bd7133b4b322aae97c589b8839dae8155ad2546acb35ae32a127e722a959d007"
+published_triangles = 1499072
+[[asset]]
+id = "metal_rough_spheres"
+source_url = "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/MetalRoughSpheres/glTF-Binary/MetalRoughSpheres.glb"
+licence = "CC-BY-4.0"
+licence_url = "https://creativecommons.org/licenses/by/4.0/"
+attribution = "Ed Mackey / Khronos - CC BY 4.0, via Khronos glTF-Sample-Assets"
+archive_sha256 = "450c05557b0823a10835e32c05caf77a7b175eba94516555c1c9bb084f563f01"
+glb = "khronos/metal_rough_spheres.glb"
+glb_sha256 = "450c05557b0823a10835e32c05caf77a7b175eba94516555c1c9bb084f563f01"
+published_triangles = 501776
+
 # ---------------------------------------------------------------------------------------------
-# MEASURED 2026-07-31, and then ACTED ON -- this note records both halves because the first half
-# alone was already stale by the next commit.
+# MEASURED 2026-07-31, in three rounds, and every round corrected the one before it. All three are
+# kept, because what went stale is as instructive as what is true now.
 #
-# Fifteen candidates were probed for triangle count AND subset compliance together. Every genuinely
-# high-poly one turned out to be MULTI-PRIMITIVE, which the decoder then refused, capping this
-# corpus at ~18 k triangles -- three orders of magnitude below the regime K1 is about. The pattern is
-# structural, not incidental: real content splits primitives BY MATERIAL.
+# ROUND 1 found that every genuinely high-poly sample asset is multi-primitive or hierarchical,
+# so the decoder's "exactly one mesh, one primitive" rule capped this corpus at ~18 k triangles --
+# three orders of magnitude below the regime K1 is about. Real content splits primitives BY
+# MATERIAL and groups them under nodes; the rule selected for toy assets.
 #
-# The line was then derived rather than guessed, because the last section-3.3 restriction authored
-# without running it against real content refused every real asset. A mesh's primitives already
-# share one coordinate space, and each ROOT node's transform applies to its own mesh alone --
-# neither act places one mesh RELATIVE to another, so both are DECODING and are now concatenated
-# (with indices offset). Composing a parent transform with a child's DOES place meshes relative to
-# one another; that is scene assembly and a hierarchy is still refused.
+# ROUND 2 concatenated primitives and root nodes. ROUND 3 composed hierarchies too, on the
+# argument that a parent transform multiplied into a child's still yields the geometry THIS FILE
+# describes, in its own space -- placing assets relative to ONE ANOTHER is the census's job, and
+# the decoder never does it. What stays refused is a graph that reaches one node twice, since this
+# decoder emits each mesh exactly once.
 #
-#   ABeautifulGame     573 952 tris   15 meshes / hierarchy   REFUSED (hierarchy)
-#   MetalRoughSpheres  501 776 tris    5 meshes / hierarchy   REFUSED (hierarchy)
-#   dragon_attenuation 134 995 tris    2 meshes / no children  ACCEPTED since Rev 38
-#   toy_car            108 936 tris    3 meshes / no children  ACCEPTED since Rev 38
-#   corset              18 324 tris    1 mesh                  ACCEPTED
-#   damaged_helmet      15 452 tris    1 mesh                  ACCEPTED
-#   avocado                682 tris    1 mesh                  ACCEPTED
+# ⚠️ ROUND 3 ALSO EXPOSED A WRONG NUMBER IN THIS FILE. `a_beautiful_game` was recorded at 573 952
+# triangles -- the sum over UNIQUE meshes -- while the decoder produced 1 499 072, because the
+# scene INSTANCES those meshes (a chess set: many pieces, few distinct meshes). The rendered total
+# is 2.6x the unique total, and the rendered total is what a density census sees. The field now
+# carries the instance-weighted count. Any future entry must be counted the same way, or R0b(b)'s
+# equality reds for a reason that has nothing to do with the decoder.
 #
-# Corpus total: 278 389 triangles across five assets. Still short of the multi-million-triangle
-# regime the premise is about -- the remaining blocker is the node HIERARCHY refusal, which is where
-# the two largest candidates sit. R0b(b)'s equality (decoded == published, summed over primitives)
-# holds on all five and is what keeps each addition honest.
+#   a_beautiful_game   1 499 072 tris   hierarchy + instancing   ACCEPTED since Rev 39
+#   metal_rough_spheres  501 776 tris   hierarchy                ACCEPTED since Rev 39
+#   dragon_attenuation   134 995 tris   2 meshes                 ACCEPTED since Rev 38
+#   toy_car              108 936 tris   3 meshes                 ACCEPTED since Rev 38
+#   corset                18 324 tris   1 mesh
+#   damaged_helmet        15 452 tris   1 mesh
+#   avocado                  682 tris   1 mesh
+#
+# CORPUS TOTAL: 2 279 237 triangles across seven assets -- into the multi-million-triangle regime
+# the premise is about, from 682 at the start of the day. R0b(b)'s equality (decoded == published)
+# holds on all seven and is what keeps each addition honest.

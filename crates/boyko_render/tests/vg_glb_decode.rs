@@ -135,10 +135,13 @@ fn every_out_of_subset_document_is_refused() {
             ),
         ),
         (
-            "a node hierarchy",
+            "a scene graph reaching one node twice",
             glb(
-                &triangle_json("", "")
-                    .replace(r#""nodes": [{"mesh": 0}]"#, r#""nodes": [{"children": [1]}, {"mesh": 0}]"#),
+                &triangle_json("", "").replace(
+                    r#""nodes": [{"mesh": 0}]"#,
+                    r#""nodes": [{"children": [2]}, {"children": [2]}, {"mesh": 0}]"#,
+                )
+                .replace(r#""scenes": [{"nodes": [0]}]"#, r#""scenes": [{"nodes": [0, 1]}]"#),
                 &bin,
             ),
         ),
@@ -335,10 +338,14 @@ fn every_real_corpus_glb_decodes() {
 /// why a hierarchy stays refused (asserted in the refusal list above).
 #[test]
 fn root_mesh_nodes_concatenate_with_each_transform_baked() {
-    let json = triangle_json("", "").replace(
-        r#""nodes": [{"mesh": 0}]"#,
-        r#""nodes": [{"mesh": 0}, {"mesh": 0, "translation": [10, 0, 0]}]"#,
-    );
+    let json = triangle_json("", "")
+        .replace(
+            r#""nodes": [{"mesh": 0}]"#,
+            r#""nodes": [{"mesh": 0}, {"mesh": 0, "translation": [10, 0, 0]}]"#,
+        )
+        // The SCENE decides what is rendered: a node the scene does not name is not in the
+        // asset, and the decoder honours that rather than baking every mesh-bearing node it finds.
+        .replace(r#""scenes": [{"nodes": [0]}]"#, r#""scenes": [{"nodes": [0, 1]}]"#);
     let m = GlbMeshLoader::decode(&glb(&json, &triangle_bin())).expect("two root nodes decode");
     assert_eq!(m.vertices.len(), 6, "both instances contribute their vertices");
     assert_eq!(m.indices.len(), 6, "and their triangles");
@@ -348,5 +355,50 @@ fn root_mesh_nodes_concatenate_with_each_transform_baked() {
         &m.indices[3..],
         &[3, 4, 5],
         "the second instance's indices are OFFSET by the first's vertex count — un-offset indices          would silently re-draw the first triangle twice"
+    );
+}
+
+/// A node hierarchy is COMPOSED, not refused: the parent's transform multiplies the child's, and
+/// the result is still the geometry THIS FILE describes in its own space. Placing assets relative
+/// to one another is the census's job; nothing here does it.
+#[test]
+fn a_node_hierarchy_composes_parent_and_child_transforms() {
+    let json = triangle_json("", "")
+        .replace(
+            r#""nodes": [{"mesh": 0}]"#,
+            r#""nodes": [{"children": [1], "translation": [100, 0, 0]}, {"mesh": 0, "translation": [0, 7, 0]}]"#,
+        );
+    let m = GlbMeshLoader::decode(&glb(&json, &triangle_bin())).expect("a hierarchy decodes");
+    assert_eq!(m.vertices.len(), 3, "one mesh, reached once");
+    assert_eq!(
+        m.vertices[0].position,
+        [100.0, 7.0, 0.0],
+        "parent translation COMPOSED with the child's, not either one alone"
+    );
+    // Order matters: parent-then-child, not child-then-parent, is only visible under scale.
+    let scaled = triangle_json("", "").replace(
+        r#""nodes": [{"mesh": 0}]"#,
+        r#""nodes": [{"children": [1], "scale": [2, 2, 2]}, {"mesh": 0, "translation": [3, 0, 0]}]"#,
+    );
+    let s = GlbMeshLoader::decode(&glb(&scaled, &triangle_bin())).expect("scaled hierarchy decodes");
+    assert_eq!(
+        s.vertices[0].position,
+        [6.0, 0.0, 0.0],
+        "the parent's scale must apply TO the child's translation (6, not 3)"
+    );
+}
+
+/// A mesh node the SCENE does not name is not part of the asset, and must not be baked in.
+#[test]
+fn a_node_outside_the_scene_is_not_decoded() {
+    let json = triangle_json("", "").replace(
+        r#""nodes": [{"mesh": 0}]"#,
+        r#""nodes": [{"mesh": 0}, {"mesh": 0, "translation": [10, 0, 0]}]"#,
+    ); // scene still names only node 0
+    let m = GlbMeshLoader::decode(&glb(&json, &triangle_bin())).expect("decodes");
+    assert_eq!(
+        m.vertices.len(),
+        3,
+        "only the scene's own node contributes — an off-scene node would silently add geometry          the manifest's published triangle count does not describe"
     );
 }

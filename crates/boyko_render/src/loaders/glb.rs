@@ -17,7 +17,8 @@
 //! **Unsupported, and a hard [`AssetError`] rather than a silent fallback:**
 //! sparse accessors, Draco/meshopt compression (any non-empty
 //! `extensionsRequired`), animation, skins, morph targets, non-triangle modes,
-//! non-indexed primitives, `u8` indices, and a node HIERARCHY.
+//! non-indexed primitives, `u8` indices, and a scene graph that reaches one node twice
+//! (a cycle or a shared subtree — this decoder emits each mesh exactly once).
 //!
 //! # The node transform is BAKED, not refused — and that distinction is the point
 //!
@@ -34,10 +35,12 @@
 //! through. Multiple primitives and multiple ROOT mesh nodes are CONCATENATED, each
 //! with its own transform baked and its indices offset: neither places one mesh
 //! relative to another, so both are decoding. Composing a parent transform with a
-//! child's does place them relative to one another — that is scene assembly, and a
-//! hierarchy stays refused. Measured justification: every genuinely high-poly sample
-//! asset is multi-primitive, so "exactly one primitive" capped the corpus at ~18 k
-//! triangles, three orders of magnitude below the regime K1 is about.
+//! child's is composed the same way: the result is still the geometry THIS FILE
+//! describes, in its own space. Assembling a SCENE — placing assets relative to one
+//! another — is the census's job, not the decoder's, and nothing here does it.
+//! Measured justification: every genuinely high-poly sample asset is multi-primitive
+//! or hierarchical, so the earlier one-mesh rule capped the corpus at ~18 k triangles,
+//! three orders of magnitude below the regime K1 is about.
 //!
 //! A missing `TANGENT` runs the existing [`generate_tangents`] post-pass; a
 //! missing `COLOR_0` takes the neutral default. A missing `POSITION` or `NORMAL`
@@ -672,8 +675,7 @@ fn transform_dir(n: &[f32; 9], v: [f32; 3]) -> [f32; 3] {
     if len > 0.0 { [out[0] / len, out[1] / len, out[2] / len] } else { v }
 }
 
-/// Resolves the transform of the single mesh-bearing node, refusing anything this decoder
-/// cannot express as one instance.
+/// Resolves every mesh instance the file describes, as `(mesh index, world matrix)`.
 ///
 /// ⚠️ **Rev 37 BAKES the transform where Rev 33 refused it, and the distinction is the
 /// whole point.** Rev 33 was right that a decoder which silently *ignored* a node's TRS
@@ -691,24 +693,80 @@ fn transform_dir(n: &[f32; 9], v: [f32; 3]) -> [f32; 3] {
 fn resolve_instance_transform(root: &Json) -> Result<Vec<(usize, Mat4)>, AssetError> {
     let nodes = root.arr_at("nodes");
     let mut out = Vec::new();
-    for (i, node) in nodes.iter().enumerate() {
-        if !node.arr_at("children").is_empty() {
-            return Err(err(format!(
-                "node {i} has children — composing a parent transform with a child's PLACES one \
-                 mesh relative to another, which is scene assembly rather than decoding (§3.3)"
-            )));
+
+    // No `nodes` at all: the meshes still exist, at identity.
+    if nodes.is_empty() {
+        return Ok((0..root.arr_at("meshes").len()).map(|m| (m, IDENTITY)).collect());
+    }
+
+    // Roots are the scene's node list when there is one, else every node no other node claims as
+    // a child -- a file may omit `scenes` entirely.
+    let mut is_child = vec![false; nodes.len()];
+    for node in nodes {
+        for c in node.arr_at("children") {
+            if let Some(ci) = c.num().map(|n| n as usize)
+                && ci < is_child.len()
+            {
+                is_child[ci] = true;
+            }
         }
+    }
+    let scene_roots: Vec<usize> = {
+        let si = root.usize_at("scene").unwrap_or(0);
+        match root.arr_at("scenes").get(si).map(|sc| sc.arr_at("nodes")) {
+            Some(list) if !list.is_empty() => {
+                list.iter().filter_map(|n| n.num()).map(|n| n as usize).collect()
+            }
+            _ => (0..nodes.len()).filter(|i| !is_child[*i]).collect(),
+        }
+    };
+
+    // Iterative DFS with an explicit visited set: a malformed file can name a cycle, and a
+    // recursive walk would blow the stack on a hostile input rather than reporting it.
+    let mut visited = vec![false; nodes.len()];
+    let mut stack: Vec<(usize, Mat4)> = Vec::new();
+    for r in scene_roots.into_iter().rev() {
+        if r < nodes.len() {
+            stack.push((r, IDENTITY));
+        }
+    }
+    while let Some((ni, parent)) = stack.pop() {
+        if visited[ni] {
+            return Err(err(format!("node {ni} is reachable twice — the scene graph is cyclic or                                     shares a subtree, and this decoder emits each mesh once")));
+        }
+        visited[ni] = true;
+        let node = &nodes[ni];
+        let world = mat_mul(&parent, &node_matrix(node));
         if let Some(m) = node.usize_at("mesh") {
-            out.push((m, node_matrix(node)));
+            out.push((m, world));
+        }
+        for c in node.arr_at("children") {
+            if let Some(ci) = c.num().map(|n| n as usize) {
+                if ci >= nodes.len() {
+                    return Err(err(format!("node {ni} names child {ci}, which does not exist")));
+                }
+                stack.push((ci, world));
+            }
         }
     }
-    // A file with no `nodes` at all still has its meshes; take them at identity.
-    if out.is_empty() {
-        out = (0..root.arr_at("meshes").len()).map(|m| (m, IDENTITY)).collect();
-    }
+
     Ok(out)
 }
 
+/// `a * b` for column-major 4×4s: apply `b` first, then `a`.
+fn mat_mul(a: &Mat4, b: &Mat4) -> Mat4 {
+    let mut out = [0.0f32; 16];
+    for col in 0..4 {
+        for row in 0..4 {
+            let mut acc = 0.0;
+            for k in 0..4 {
+                acc += a[k * 4 + row] * b[col * 4 + k];
+            }
+            out[col * 4 + row] = acc;
+        }
+    }
+    out
+}
 
 /// Decodes ONE primitive into model-space vertices + indices, with no placement applied.
 ///
