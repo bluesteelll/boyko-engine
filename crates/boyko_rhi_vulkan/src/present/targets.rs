@@ -922,7 +922,20 @@ impl VbTargets {
             depth: 1,
             format: Format::R32G32Uint,
             dimension: TextureDimension::D2,
-            usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
+            // ⚠️ `TRANSFER_SRC` is VG-R0 rung R0c's ONE permanent edit to the shipped render path,
+            // and it is here rather than behind the census's arming knob on purpose: a usage bit is
+            // fixed at image creation, so an armed-only ring would be a SECOND ring, not the one
+            // the goldens render.
+            //
+            // It is safe on an axis that can be argued rather than merely hoped: `vb_id` is
+            // `R32G32_UINT`, uncompressed, and `.Load`ed unfiltered, so no usage, tiling or layout
+            // choice the widening admits can alter a texel value. That is also why R0c gate (a)
+            // ("every VB image golden byte-identical with the census UNARMED") is recorded as an
+            // assertion whose red is STRUCTURALLY UNAVAILABLE: four mutation sitings failed, each
+            // for a different reason, and the axis this bit moves provably cannot perturb the
+            // artefact the goldens hash. The gate is still asserted -- by measurement, on every
+            // blessed VB pin -- it simply cannot be falsified by construction.
+            usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED | ImageUsage::TRANSFER_SRC,
             array_layers: 1,
             mip_levels: 1,
             view_format: None,
