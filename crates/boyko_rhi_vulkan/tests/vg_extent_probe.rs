@@ -23,9 +23,10 @@
 
 use boyko_rhi_vulkan::window::Window;
 
-/// Ladder-rung natives and their SSAA-halved clients, deduplicated
+/// Ladder-rung natives (4) and their SSAA-halved clients (4), deduplicated to 7
 /// (`1920×1080` is both rung 1's native and rung 3's halved client).
-const CANDIDATES: [(u32, u32); 6] = [
+const CANDIDATES: [(u32, u32); 7] = [
+    (256, 256),
     (512, 512),
     (960, 540),
     (1280, 720),

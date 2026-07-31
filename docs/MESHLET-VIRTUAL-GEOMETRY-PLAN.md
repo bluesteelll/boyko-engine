@@ -1,7 +1,8 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 32** — **REVIEW LOOP CLOSED; all three owner fields ANSWERED; no rung
-code exists** (the extent probe is the first landed instrument). This document specifies
+**Status:** DESIGN, **Rev 33** — **TERMINAL: the Rev 32 verification pass named ONE code-changing
+finding and this revision repairs it by subtraction; all three owner fields ANSWERED; no rung code
+exists** (the extent probe is the first landed instrument). This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
@@ -20,7 +21,14 @@ the next reviews happen at rung commits — where each rung's gate and mutations
 rather than derived, which is the stronger instrument this loop never had. **Rev 32 records the
 owner's answers to all three fields** (the claim file holds the values; §13 points at them), so no
 `PENDING` sentinel blocks any rung: the ladder is now `staging rung(s) → R0a..R0d`, and the next
-unit of work is code.
+unit of work is code. **Rev 33 is the terminal repair**: an independent verification pass over
+Rev 32 (three lenses, live refutation, synthesis) ruled R0a / staging / R0b / R0d approved and
+named exactly one finding that changes what an implementer codes — Rev 31's (c′) mutation, whose
+scale/pull-back arm reds (b) alongside (c′); repaired here by deleting the non-isolating arm and
+keeping the triangle-count arm whose isolation derives. Both defects that pass surfaced attached
+to claims Rev 31 **volunteered** — the invariant's eleventh confirmation — and its remaining P2
+ledger (stale risk-register cells, once-stale §12 markers, the rows-vs-rungs count) is swept in
+the same act.
 
 **Rev 9 discharges the six items that blocked Rev 8, and three of them were Rev 8's own.** Its
 review scored Rev 8 at **0 hold, 3 partial, 1 does not hold** — the sixth consecutive revision told
@@ -240,8 +248,9 @@ DAG, no shader that did not exist before.
 
 > The census, run over a real high-poly corpus at a frozen resolution ladder, either **refutes K1**
 > — proving screen-space density genuinely reaches ~1 triangle/pixel, so cluster LOD has a
-> mechanism of action on our content — or leaves K1 **undecided**, which is an owner call with a
-> `PENDING` field that blocks R1. R0 also records whether a Nanite reference is producible here at
+> mechanism of action on our content — or leaves K1 **undecided**, whose disposition the owner
+> pre-registered before any number exists (`fund_upper_bound`, Rev 32: the upper-bound instrument
+> becomes its own campaign). R0 also records whether a Nanite reference is producible here at
 > all, and fires K2 if it is not.
 
 That is the whole of it. **R0 evaluates no comparative performance claim**, and Rev 8 is the
@@ -449,6 +458,12 @@ VB-visible. The **host-authored** primitives pass `None` at their own call site
   fallback:** sparse accessors, Draco/meshopt compression, animation, skins, morph targets,
   non-triangle modes, and non-indexed primitives. A missing `TANGENT` runs the existing
   `generate_tangents` post-pass; a missing `COLOR_0` takes `loaders/obj.rs:13`'s neutral default.
+  ⚠️ Rev 33 closes a fork this list left open: a `.glb` whose scene graph is not exactly **one
+  mesh with one primitive under an identity (or absent) node transform** is refused the same way —
+  flattening a node hierarchy is scene assembly, not decoding, and a decoder that silently ignored
+  a node TRS would pass every R0 gate (triangle count, `gMeshMeta` row and allocation are all
+  affine-invariant) while rendering a different scene. §4.3's manifest author selects, or
+  re-exports, assets that satisfy this.
   Refusing loudly is the point: a partial mesh silently accepted is a census that measures a
   different scene than the reference capture does.
 
@@ -1008,7 +1023,9 @@ bracket fails as a red assertion instead of hanging the test binary — a hang i
 
 ## 8. Rungs
 
-Ladder: **kill the baseline cheapest → land content → land the instrument → run the census → state
+Ladder: **kill the baseline cheapest → land the ingest (the staging rung(s) Rev 32 schedules via
+`ingest_ceiling.disposition`, specified when they land) → land content → land the instrument → run
+the census → state
 decidability**. ⚠️ That last clause used to read "→ state decidability → close the inequality"; both
 of those steps left with R0e/R0f/R0f′ at Rev 8 (§14), so the ladder now ends at the census. Each rung is
 independently committable, has **one** gate, and names the mutation that turns it red. *A mutation
@@ -1213,7 +1230,9 @@ Rev 18 did not re-derive.** Under the partition reading one asset needed to be r
 frame, so "the largest mesh allocates" was a sound proxy for the residency ceiling. The census now
 runs the **whole corpus at every committed path**, so what R0d needs is the whole corpus resident
 **simultaneously**, and the largest single mesh allocating says nothing about the sum. Recorded as a
-**precondition R0d inherits**, not silently widened into (d): widening it would mint a new
+**precondition the corpus-rendering rungs inherit — first R0c(e), which renders the whole corpus at
+the top rung, then R0d** (⚠️ Rev 33: this named R0d alone, two rungs late), not silently widened
+into (d): widening it would mint a new
 mechanism at an approved rung, and §3.4's residency hazard is already the named home for the
 ceiling. §3.4 now states the real ceiling and its consequence — ⚠️ **Rev 25 re-derives what follows, because it asserted the exact proposition §3.4 withdrew forty lines into the same repair.** It read *"this part reds on the FIRST asset, not on the sum"*. (d)'s predicate is over `maxᵢ fᵢ` and `f(T) = 44·T`, so it reds only for a SINGLE mesh above `67.11e6/44 ≈ 1.5 M` triangles — on Rev 24's own eight-asset corpus (`4.0e5` each, `f = 17.6 MB`) **(d) is true on every asset and the rung still dies at asset four**. So (d) reds on an oversized single mesh and is **silent on the sum**, which is the failure that actually occurs. §8 is the authority for *what is asserted* and §3.4 for the *derivation*, and they had come to answer "can R0b run?" in opposite directions — Rev 7's governing lesson, in the location Rev 7 named;
 **(e) the manifest enumerates at least `[k1].committed_paths_min` distinct camera-path ids.**
@@ -1430,13 +1449,22 @@ vacuous-selection defect wearing a lab coat.
 
 * (c): feed the reducer the CPU oracle's own coverage instead of the readback → (c) passes
   vacuously while (b) fails; the pairing is what proves (c) is not self-referential.
-* (c′): shrink the procedural fixture — or pull its camera back — until covered pixels on the
-  censused frame fall below `[k1_instrument].min_covered_pixels` → (c′) reds, **and only (c′)**:
-  the fixture's analytic bucket moves with the camera, so (b) compares like with like and stays
-  green; the oracle rasterizes the same shrunken fixture, so (c)'s agreement holds; (d)'s ladder
-  and extents are untouched; (a)'s pins render unarmed frames. *(Added at Rev 31 — (c′) and (d)
-  carried argued reds inline and no derived mutation, against this section's own DEMONSTRATED
-  header.)*
+* (c′): reduce the procedural fixture's triangle COUNT below `[k1_instrument].min_visible_tris`
+  while keeping each triangle at its nominal screen size — 31 triangles of 32 px at 512² gives
+  covered ≈ 992 < 1024 **and** distinct winners = 31 < 1024, so both floors red → (c′) reds,
+  **and only (c′)**: each triangle's analytic bucket is unchanged (⌊log₂ 32⌋ = 5) and the measured
+  mode is the same 5, so (b) is green; the oracle rasterizes the same fixture, so (c)'s agreement
+  holds; (d)'s ladder and extents are untouched; (a)'s pins render unarmed frames.
+  ⚠️ **Rev 33 replaces Rev 31's "shrink the fixture — or pull its camera back", and the collision
+  is arithmetic.** A pure projected-area scale keeps the in-view triangle count W ≥ 1024 (the
+  nominal state must clear the other floor) while driving covered below 1024, so per-triangle
+  analytic area = covered/W < 1 px ⇒ analytic bucket ≤ −1 — and the measured histogram's lowest
+  occupiable bucket is 0, because a sub-pixel triangle loses the coverage race and never appears
+  in it (§5.4). −1 ≠ 0 ⇒ **(b) reds too**: fires, does not isolate — the (d-sub) collision on the
+  (b) axis. It was also a two-arm `or` under one derivation, the shape §14.1 amendment 1 forbids;
+  the non-isolating arm is deleted rather than carried. *(The Rev 31 provenance stands: (c′) and
+  (d) had carried argued reds inline and no derived mutation, against this section's own
+  DEMONSTRATED header.)*
 * (d): truncate the driven ladder at its top rung — three rows against a four-rung
   `[census].resolution_ladder` → (d) reds, **and only (d)**: (b) and (c) read the fixture at 512²,
   which the truncation keeps; (c′)'s censused frames all remain non-degenerate (the truncation
@@ -1912,8 +1940,8 @@ headline was false as written. Rather than a headline and a retraction, the limi
   sentence Rev 30's subtraction had left as a subject-less fragment here:
   [`vg_extent_probe.rs`](../crates/boyko_rhi_vulkan/tests/vg_extent_probe.rs) opens one hidden
   `Window` per candidate client — no device — and reads back the granted client area. **Measured on
-  this box: 512×512, 960×540, 1280×720 and 1920×1080 are GRANTED exactly; 2560×1440 and 3840×2160
-  are CLAMPED to a 1133-px client height** (the width is granted). The PER-RUNG EXTENT ROUTE
+  this box: 256×256, 512×512, 960×540, 1280×720 and 1920×1080 are GRANTED exactly; 2560×1440 and
+  3840×2160 are CLAMPED to a 1133-px client height** (the width is granted). The PER-RUNG EXTENT ROUTE
   follows from the table: **rungs 0 and 1 direct** (512², 1920×1080); **rung 2 via a 1280×720
   client + armed 2× SSAA; rung 3 via a 1920×1080 client + armed 2× SSAA**. The top two rungs ride
   the composite, so the arming assertion R0c's Lands list already carries is load-bearing for
@@ -1985,8 +2013,8 @@ headline was false as written. Rather than a headline and a retraction, the limi
 | R2 | **A procedural corpus makes K1 untestable.** | New, and it is why §4.2 rejects the cheapest corpus option. | The corpus is fetched real content; procedural geometry is confined to R0c's sensitivity control. |
 | R3 | **The harness measures its own resolution, or its A/B rides the ring.** | MEASURED in the sibling rung, both of them: a "spread" that was one median lattice step, and an ABAB phase perfectly aliased with `FRAMES_IN_FLIGHT == 2`. | §7 clauses 1, 3–4: ABBA with the residual reported; the quantum measured by tick GCD and the spread gate read against it. |
 | R4 | **`WAIT_BIT` readback hangs instead of failing.** | [`gpu_timing.rs`](../crates/boyko_rhi_vulkan/src/present/gpu_timing.rs):344~ documents the deadlock; three separate collectors exist because of it. | §7's written-pair bitmask, asserted before the read — binding on §14's rung, which is the one that brackets passes. Not an R0 risk any more. |
-| R5 | **Stale doc sends the importer down the `None` path.** | Verified: ≥6 comments still claim `VB_IMPLEMENTED == false` while [`render_path_config.rs`](../crates/boyko_render/src/render_path_config.rs):130~ says `true`. | R0b's second red mutation targets exactly this; fixing the comments is a separate one-line commit, deliberately not absorbed here. |
-| R6 | **Host-visible residency ceiling.** | [`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):320~: every mesh buffer is `HostVisibleCoherent`. | R0b gate (d); the device-local + staging path is a named follow-up, not R0 work. |
+| R5 | **Stale doc sends the importer down the `None` path.** | Was verified at authoring time (≥6 comments then claimed `VB_IMPLEMENTED == false` against [`render_path_config.rs`](../crates/boyko_render/src/render_path_config.rs):130~'s `true`); ⚠️ Rev 33: **repaired since** — a grep now returns ZERO `== false` claims, every site says `true` (rung R8). | R0b's second red mutation targets exactly this class; the separate comment-fix commit the mitigation predicted has landed, and the row stays as the record of the class. |
+| R6 | **Host-visible residency ceiling.** | [`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):320~: every mesh buffer is `HostVisibleCoherent`; §3.4 derives the 64 MiB sum ceiling. | R0b gate (d) bounds only `maxᵢ fᵢ` — the sum kills as a panic outside every gate (§3.4, §9.1). ⚠️ Rev 33 withdraws "a named follow-up, not R0 work": §3.4 made the path a **precondition of R0b**, and Rev 32's `ingest_ceiling.disposition` schedules it as the staging rung(s) preceding R0b. |
 | R7 | **The `vb_id` usage widening perturbs a golden.** | New. | R0c gate (a) over every VB pin. ⚠️ The mitigation cell read *"with a demonstrated red (record the copy unconditionally)"* — that mutation was retired at Rev 18 for not firing, and the cell claiming a demonstrated red is the risk register asserting the very thing the rung had lost. **(a) has no AVAILABLE red**: four sitings failed for four distinct reasons and the axis R0c changes is representation-invariant for R32G32_UINT, so (a) is recorded as an assertion whose red is structurally unavailable rather than one awaiting a mutation; §8's standing rule is that a mutation which is only argued does not count. |
 | R8 | **UE5 capture measures a different scene than our census.** | New — the two engines must load the same bytes. | §4.3: an asset that cannot be imported by both is not corpus material; R0a(c) pins the resolution across both. |
 | R9 | **Disk exhaustion masquerading as a build failure.** | This project's record: `target/` has filled this disk and surfaced as linker errors. | §11 records the measured headroom; R0a's record carries free-disk as a required field, and R0a's negative branch **re-reads** it at test time. |
@@ -2098,7 +2126,8 @@ it caught three dead paths on its first run.
 assert), `:124` (`U16_INDEX_VERTEX_LIMIT`), `:137-186` (`MeshGpu`), `:169~` (`geometry_slot`),
 `:193~` (`type Cpu = MeshData`), `:237~` (single `LoaderEntry`) ·
 `crates/boyko_render/src/mesh_assets.rs:238~-243` (`build_mesh_gpu` signature), `:259~-263` (index
-width), `:290~` (**stale** `VB_IMPLEMENTED == false` comment), `:295~-305`
+width), `:290~` (the once-stale `VB_IMPLEMENTED == false` comment — repaired since; it now reads
+`true`, rung R8), `:295~-305`
 (`MemoryLocation::HostVisibleCoherent`), `:529~` (`register_mesh` passes `None`), `:619~-631`
 (`MeshAssetsVbExt`), `:647~` (`register_mesh_vb` trait decl; impl at `:669`) ·
 `crates/boyko_render/src/gpu_upload.rs:41~-61` (`GpuUpload for MeshGpu`; `type Aux =
@@ -2106,12 +2135,13 @@ MeshGeometryTableSlot` at `:50~`; **the threaded call at `:59`**).
 
 **Geometry table:** `crates/boyko_render/src/mesh_geometry_table.rs:17~-27` (module doc),
 `:66` (`VB_GEOMETRY_RESERVED_SLOT`), `:82-93` (`MeshGeometryMeta`), `:97` (16 B stride),
-`:116-118` (`tri_count`), `:140-142` (`mesh_buffer_usage`), `:400~` (**stale** comment), `:413~`
+`:116-118` (`tri_count`), `:140-142` (`mesh_buffer_usage`), `:400~` (once-stale comment, repaired
+since), `:413~`
 (`MeshGeometryTableSlot`) · `crates/boyko_rhi_vulkan/src/geometry_bindless.rs:61~`
-(`MESH_GEOMETRY_TABLE_CAPACITY = 4096`), `:43~` (**stale** comment).
+(`MESH_GEOMETRY_TABLE_CAPACITY = 4096`), `:43~` (once-stale comment, repaired since).
 
-**Path resolution:** `crates/boyko_render/src/render_path_config.rs:25~` (**stale** module-doc
-sentence), **`:128~` (`const VB_IMPLEMENTED: bool = true;`)**, `:517~` (`vb_geometry_table` field),
+**Path resolution:** `crates/boyko_render/src/render_path_config.rs:25~` (once-stale module-doc
+sentence, repaired since), **`:128~` (`const VB_IMPLEMENTED: bool = true;`)**, `:517~` (`vb_geometry_table` field),
 `:890~-892` (the predicate).
 
 **Encode / decode:** `crates/boyko_rhi_vulkan/shaders/vb_geom_fetch.hlsli:516`
@@ -2180,7 +2210,8 @@ fixture and cannot reach the corpus at any ladder rung) ·
 (`VB_ID_SENTINEL` marks a pixel the mesh raster leg never covered — the census's denominator is
 mesh-covered pixels, not all pixels) ·
 [`docs/VG-CAMPAIGN-THRESHOLDS.toml`](VG-CAMPAIGN-THRESHOLDS.toml) (hashed, never edited) ·
-[`docs/VG-CAMPAIGN-CLAIM.toml`](VG-CAMPAIGN-CLAIM.toml) (unhashed, `PENDING`-gated, blocks R0b and R1).
+[`docs/VG-CAMPAIGN-CLAIM.toml`](VG-CAMPAIGN-CLAIM.toml) (unhashed, sentinel-gated; every field
+answered at Rev 32).
 
 **Corpus convention:** `crates/boyko_app/assets/pbr_fixtures/README.md:1-6` ·
 `.gitignore` (`/assets/materials/*` + the `!README.md` escape) ·
@@ -2223,9 +2254,11 @@ no universal — the enforceable claim is the rule above, not a census of the te
 **Blocking — each has a claim-file field and a `[gating]` row** (all three fields are ANSWERED as
 of Rev 32; the sentinel gates now pass by construction). The rows are
 `[gating].r0a_blocked_by`, `[gating].r0b_blocked_by`, `[gating].r0c_blocked_by`,
-`[gating].r0d_blocked_by` and `[gating].r1_blocked_by` — five rows for five rungs, three of them
+`[gating].r0d_blocked_by` and `[gating].r1_blocked_by` — five rows, three of them
 deliberately empty, so "nothing blocks this rung" is a recorded decision rather than a missing
-entry. Two of the rows this table used to carry were English sentences rather than resolvable
+entry. ⚠️ Rev 33: this read "five rows for five rungs", and rows no longer equal rungs — the
+staging rung(s) Rev 32 added carry no row, because their blocker IS the answered
+`ingest_ceiling.disposition` on R0b's row. Two of the rows this table used to carry were English sentences rather than resolvable
 `table.field` paths, which the `PENDING`-sentinel checker they exist to drive cannot resolve; every
 row is now a list of paths.
 
