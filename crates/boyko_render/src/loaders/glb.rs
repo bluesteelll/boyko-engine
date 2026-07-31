@@ -17,16 +17,23 @@
 //! **Unsupported, and a hard [`AssetError`] rather than a silent fallback:**
 //! sparse accessors, Draco/meshopt compression (any non-empty
 //! `extensionsRequired`), animation, skins, morph targets, non-triangle modes,
-//! non-indexed primitives, `u8` indices, and a scene graph that is not exactly
-//! **one mesh with one primitive under an identity (or absent) node transform**.
+//! non-indexed primitives, `u8` indices, a node HIERARCHY, and more than one
+//! instance of the mesh.
 //!
-//! That last refusal is the one worth stating twice, because it is invisible to
-//! every gate downstream. Flattening a node hierarchy is *scene assembly*, not
-//! decoding, and a decoder that silently ignored a node's TRS would pass R0b's
-//! triangle-count equality, its `gMeshMeta` row and its allocation check — all
-//! three are affine-invariant — while the census rendered a different scene than
-//! the manifest describes. §4.3's manifest author selects, or re-exports, assets
-//! that satisfy this.
+//! # The node transform is BAKED, not refused — and that distinction is the point
+//!
+//! A decoder that silently *ignored* a node's TRS would pass R0b's triangle-count
+//! equality, its `gMeshMeta` row and its allocation check — all three are
+//! affine-invariant — while the census rendered a different scene than the
+//! manifest describes. Rev 33 saw that correctly and then drew the wrong
+//! conclusion: it refused *any* non-identity transform. Running this decoder
+//! against real content settled it — **every** single-mesh sample asset probed
+//! carries a node transform, so the restriction refused essentially all real
+//! `.glb`. *Applying* a transform is not *ignoring* it. Positions take the matrix,
+//! normals take its inverse transpose (so non-uniform scale does not shear them
+//! off the surface), tangents take the matrix with their handedness `w` carried
+//! through. What stays refused is what is genuinely scene assembly rather than
+//! decoding: a hierarchy, and a second instance.
 //!
 //! A missing `TANGENT` runs the existing [`generate_tangents`] post-pass; a
 //! missing `COLOR_0` takes the neutral default. A missing `POSITION` or `NORMAL`
@@ -45,11 +52,17 @@ use crate::tangent::generate_tangents;
 const DEFAULT_VERTEX_COLOR: [f32; 4] = [0.8, 0.8, 0.8, 1.0];
 
 /// `glTF` in ASCII, little-endian — the `.glb` magic.
-const GLB_MAGIC: u32 = 0x4674_6C67;
+///
+/// ⚠️ **This was hand-written as `0x4674_6C67`, which spells `g l t F` with a LOWERCASE
+/// `t`, where the spec's tag is `glTF` — so the decoder rejected every real `.glb`.** Each
+/// synthetic fixture passed anyway, because the test's own container builder repeated the
+/// same constant: the fixture agreed with the bug. It took a REAL asset to expose it.
+/// Deriving from a byte literal removes the class — there is no second place to mistype.
+const GLB_MAGIC: u32 = u32::from_le_bytes(*b"glTF");
 /// `JSON` in ASCII, little-endian — the structural chunk's type tag.
-const CHUNK_JSON: u32 = 0x4E4F_534A;
+const CHUNK_JSON: u32 = u32::from_le_bytes(*b"JSON");
 /// `BIN\0` in ASCII, little-endian — the binary chunk's type tag.
-const CHUNK_BIN: u32 = 0x004E_4942;
+const CHUNK_BIN: u32 = u32::from_le_bytes(*b"BIN\0");
 
 /// glTF `primitive.mode` for triangles; the only mode this subset accepts.
 const MODE_TRIANGLES: u64 = 4;
@@ -528,53 +541,171 @@ fn split_chunks(bytes: &[u8]) -> Result<(&[u8], &[u8]), AssetError> {
     Ok((json, bin))
 }
 
-/// Refuses any scene graph that is not one mesh under an identity transform.
-///
-/// Silent acceptance here is invisible downstream: triangle count, the
-/// `gMeshMeta` row and the allocation check are all affine-invariant, so a
-/// dropped node transform would pass every R0b gate part while the census
-/// rendered a different scene.
-fn assert_flat_identity_scene(root: &Json) -> Result<(), AssetError> {
-    const IDENTITY: [f64; 16] =
-        [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+/// A column-major 4×4, glTF's own convention.
+type Mat4 = [f32; 16];
 
-    let nodes = root.arr_at("nodes");
-    let mut mesh_nodes = 0usize;
-    for (i, node) in nodes.iter().enumerate() {
-        if node.get("mesh").is_some() {
-            mesh_nodes += 1;
+const IDENTITY: Mat4 = [
+    1.0, 0.0, 0.0, 0.0, //
+    0.0, 1.0, 0.0, 0.0, //
+    0.0, 0.0, 1.0, 0.0, //
+    0.0, 0.0, 0.0, 1.0, //
+];
+
+fn f32s(v: &Json) -> Vec<f32> {
+    v.arr().unwrap_or(&[]).iter().filter_map(Json::num).map(|n| n as f32).collect()
+}
+
+/// The node's local transform: an explicit `matrix`, or `T * R * S` composed from the
+/// separate channels. glTF forbids mixing the two forms on one node.
+fn node_matrix(node: &Json) -> Mat4 {
+    if let Some(m) = node.get("matrix") {
+        let v = f32s(m);
+        if v.len() == 16 {
+            let mut out = IDENTITY;
+            out.copy_from_slice(&v);
+            return out;
         }
+    }
+
+    let t = node.get("translation").map(f32s).unwrap_or_default();
+    let r = node.get("rotation").map(f32s).unwrap_or_default();
+    let s = node.get("scale").map(f32s).unwrap_or_default();
+    let (tx, ty, tz) = (
+        t.first().copied().unwrap_or(0.0),
+        t.get(1).copied().unwrap_or(0.0),
+        t.get(2).copied().unwrap_or(0.0),
+    );
+    // glTF stores the quaternion as (x, y, z, w).
+    let (qx, qy, qz, qw) = (
+        r.first().copied().unwrap_or(0.0),
+        r.get(1).copied().unwrap_or(0.0),
+        r.get(2).copied().unwrap_or(0.0),
+        r.get(3).copied().unwrap_or(1.0),
+    );
+    let (sx, sy, sz) = (
+        s.first().copied().unwrap_or(1.0),
+        s.get(1).copied().unwrap_or(1.0),
+        s.get(2).copied().unwrap_or(1.0),
+    );
+
+    // Rotation matrix from the unit quaternion, then scaled column-wise (R * S).
+    let (x2, y2, z2) = (qx + qx, qy + qy, qz + qz);
+    let (xx, xy, xz) = (qx * x2, qx * y2, qx * z2);
+    let (yy, yz, zz) = (qy * y2, qy * z2, qz * z2);
+    let (wx, wy, wz) = (qw * x2, qw * y2, qw * z2);
+
+    [
+        (1.0 - (yy + zz)) * sx,
+        (xy + wz) * sx,
+        (xz - wy) * sx,
+        0.0,
+        (xy - wz) * sy,
+        (1.0 - (xx + zz)) * sy,
+        (yz + wx) * sy,
+        0.0,
+        (xz + wy) * sz,
+        (yz - wx) * sz,
+        (1.0 - (xx + yy)) * sz,
+        0.0,
+        tx,
+        ty,
+        tz,
+        1.0,
+    ]
+}
+
+fn is_identity(m: &Mat4) -> bool {
+    m.iter().zip(IDENTITY.iter()).all(|(a, b)| a == b)
+}
+
+fn transform_point(m: &Mat4, p: [f32; 3]) -> [f32; 3] {
+    [
+        m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
+        m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
+        m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14],
+    ]
+}
+
+/// The cofactor matrix of `m`'s upper-left 3×3, divided by its determinant — i.e. the
+/// **inverse transpose**, which is what a normal must be transformed by. Using `m` itself
+/// would shear normals off the surface under non-uniform scale, and dividing by the
+/// determinant keeps handedness right under a mirroring transform.
+fn normal_matrix(m: &Mat4) -> [f32; 9] {
+    let (a, b, c) = (m[0], m[4], m[8]);
+    let (d, e, f) = (m[1], m[5], m[9]);
+    let (g, h, i) = (m[2], m[6], m[10]);
+    let det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    if det == 0.0 {
+        // A degenerate transform collapses the mesh; leave normals untouched rather than
+        // producing NaNs, and let the caller's own checks speak.
+        return [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    }
+    let inv = 1.0 / det;
+    // COLUMN-major, matching `transform_dir`'s indexing and the `Mat4` convention. ⚠️ Laid
+    // out row-major first, which silently applied the TRANSPOSE — for a pure rotation that
+    // is the inverse rotation, so positions and normals came out of the same file rotated
+    // opposite ways. The rotation test below is what caught it.
+    [
+        (e * i - f * h) * inv,
+        -(b * i - c * h) * inv,
+        (b * f - c * e) * inv,
+        -(d * i - f * g) * inv,
+        (a * i - c * g) * inv,
+        -(a * f - c * d) * inv,
+        (d * h - e * g) * inv,
+        -(a * h - b * g) * inv,
+        (a * e - b * d) * inv,
+    ]
+}
+
+fn transform_dir(n: &[f32; 9], v: [f32; 3]) -> [f32; 3] {
+    let out = [
+        n[0] * v[0] + n[3] * v[1] + n[6] * v[2],
+        n[1] * v[0] + n[4] * v[1] + n[7] * v[2],
+        n[2] * v[0] + n[5] * v[1] + n[8] * v[2],
+    ];
+    let len = (out[0] * out[0] + out[1] * out[1] + out[2] * out[2]).sqrt();
+    if len > 0.0 { [out[0] / len, out[1] / len, out[2] / len] } else { v }
+}
+
+/// Resolves the transform of the single mesh-bearing node, refusing anything this decoder
+/// cannot express as one instance.
+///
+/// ⚠️ **Rev 37 BAKES the transform where Rev 33 refused it, and the distinction is the
+/// whole point.** Rev 33 was right that a decoder which silently *ignored* a node's TRS
+/// would pass every R0b gate part — triangle count, the `gMeshMeta` row and the allocation
+/// check are all affine-invariant — while the census rendered a different scene. It then
+/// drew the wrong conclusion and refused *any* non-identity TRS. Running the decoder
+/// against real content settled it: **every** single-mesh sample asset probed carries a
+/// node transform, so the restriction refused essentially all real `.glb`, and §4.3's
+/// "the manifest author re-exports assets that satisfy this" was an instruction nobody
+/// could follow. *Applying* a transform is not *ignoring* it; ignoring is the defect, and
+/// baking is the fix.
+///
+/// What is still refused, because it is scene assembly rather than decoding: a node
+/// hierarchy, and more than one instance of the mesh.
+fn resolve_instance_transform(root: &Json) -> Result<Mat4, AssetError> {
+    let nodes = root.arr_at("nodes");
+    let mut found: Option<Mat4> = None;
+    for (i, node) in nodes.iter().enumerate() {
         if !node.arr_at("children").is_empty() {
             return Err(err(format!(
                 "node {i} has children — flattening a hierarchy is scene assembly, not decoding \
                  (§3.3)"
             )));
         }
-        if let Some(Json::Arr(m)) = node.get("matrix") {
-            let vals: Vec<f64> = m.iter().filter_map(Json::num).collect();
-            if vals.len() != 16 || vals != IDENTITY {
-                return Err(err(format!("node {i} carries a non-identity matrix (§3.3)")));
+        if node.get("mesh").is_some() {
+            if found.is_some() {
+                return Err(err(
+                    "more than one node references a mesh — this decoder accepts exactly one \
+                     instance (§3.3)"
+                        .to_string(),
+                ));
             }
-        }
-        for (key, identity) in [("translation", 0.0), ("rotation", f64::NAN), ("scale", 1.0)] {
-            let Some(Json::Arr(v)) = node.get(key) else { continue };
-            let vals: Vec<f64> = v.iter().filter_map(Json::num).collect();
-            let is_default = if key == "rotation" {
-                vals == [0.0, 0.0, 0.0, 1.0]
-            } else {
-                vals.iter().all(|x| *x == identity)
-            };
-            if !is_default {
-                return Err(err(format!("node {i} carries a non-identity {key} (§3.3)")));
-            }
+            found = Some(node_matrix(node));
         }
     }
-    if mesh_nodes > 1 {
-        return Err(err(format!(
-            "{mesh_nodes} nodes reference a mesh — this decoder accepts exactly one instance (§3.3)"
-        )));
-    }
-    Ok(())
+    Ok(found.unwrap_or(IDENTITY))
 }
 
 /// Decodes a `.glb` into the engine's [`MeshData`] intermediate.
@@ -610,7 +741,7 @@ impl AssetLoader for GlbMeshLoader {
             }
         }
 
-        assert_flat_identity_scene(&root)?;
+        let instance = resolve_instance_transform(&root)?;
 
         let meshes = root.arr_at("meshes");
         if meshes.len() != 1 {
@@ -720,8 +851,33 @@ impl AssetLoader for GlbMeshLoader {
             indices.push(v);
         }
 
+        // BAKE the node transform into model space. The engine places instances itself,
+        // so a transform left in the file would be data nothing consumes — and dropping it
+        // is invisible to every R0b gate part (all three are affine-invariant) while the
+        // census renders a different scene than the manifest describes.
+        if !is_identity(&instance) {
+            let nm = normal_matrix(&instance);
+            for v in &mut vertices {
+                v.position = transform_point(&instance, v.position);
+                v.normal = transform_dir(&nm, v.normal);
+                // A tangent is a direction ALONG the surface, so it takes the transform
+                // itself rather than the inverse-transpose; `w` is the bitangent handedness
+                // sign and is carried through untouched.
+                let t = transform_dir(
+                    &[
+                        instance[0], instance[1], instance[2], //
+                        instance[4], instance[5], instance[6], //
+                        instance[8], instance[9], instance[10],
+                    ],
+                    [v.tangent[0], v.tangent[1], v.tangent[2]],
+                );
+                v.tangent = [t[0], t[1], t[2], v.tangent[3]];
+            }
+        }
+
         // A missing TANGENT takes the engine's existing post-pass rather than a
-        // zero basis, which would flatten normal mapping silently.
+        // zero basis, which would flatten normal mapping silently. Run AFTER the bake so
+        // the basis is generated in the same space the positions now live in.
         if tan.is_none() {
             generate_tangents(&mut vertices, &indices);
         }

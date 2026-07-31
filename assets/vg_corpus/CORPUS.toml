@@ -56,25 +56,38 @@ camera_paths = ["orbit_mid", "approach_close"]
 # which is a cross-check of our decoder against the publisher's own number. It is an equality and
 # floors nothing — it does not, and is not meant to, certify that the corpus is high-poly.
 #
-# ⚠️ NO ASSETS ARE LISTED YET, and that is a deliberate stop rather than an omission. Selecting them
-# and fetching them are two different acts: the owner's answer authorises the ARRANGEMENT and
-# delegates selection to the agent under CC0/CC-BY with attribution recorded per asset, but the
-# fetch itself writes several hundred megabytes to this machine from third-party URLs. That is
-# surfaced for explicit approval before it runs, together with the licence of each candidate.
+# ⚠️ **THE TWO ENTRIES BELOW ARE A PIPELINE SEED, NOT THE CENSUS CORPUS**, and the distinction is
+# load-bearing rather than modest. 682 and 15 452 triangles are orders of magnitude below the regime
+# K1 is about. They are here because they are REAL, licence-clean content that exercises the ingest
+# path end to end — and they earned their place immediately: decoding them exposed two decoder
+# defects no synthetic fixture could. The first was a hand-written `glTF` magic constant with a
+# lowercase `t`, which rejected every real `.glb` while every fixture passed, because the test's own
+# container builder repeated the same constant — the fixture agreed with the bug. The second was the
+# Rev 33 rule refusing any non-identity node transform, which refused all real content.
 #
-# Until an entry exists here, `scripts/fetch_corpus.ps1` has nothing to fetch and the ingest gate's
-# payload-dependent parts SKIP by their own recorded policy, while (a0) and (e) — which read tracked
-# files only — run on every checkout.
-#
-# The shape of an entry, kept as a comment so the file parses as an empty corpus:
-#
-#   [[asset]]
-#   id = "example_scan"
-#   source_url = "https://example.org/example_scan.zip"
-#   licence = "CC0-1.0"
-#   licence_url = "https://creativecommons.org/publicdomain/zero/1.0/"
-#   attribution = "Example Author — CC0"
-#   archive_sha256 = "PENDING"
-#   glb = "example_scan/example_scan.glb"
-#   glb_sha256 = "PENDING"
-#   published_triangles = 0
+# **ADJUDICATING K1 ON CONTENT THIS SIZE WOULD BE THE `rescope_corpus` ROUTE THE PLAN FORECLOSES
+# EVERYWHERE ELSE.** Before R0d runs, high-poly entries must join or replace these. R0b(b)'s
+# equality is what ties each decode to its published count; it floors no magnitude, so nothing here
+# certifies that the corpus is high-poly and nothing is meant to.
+
+[[asset]]
+id = "avocado"
+source_url = "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Avocado/glTF-Binary/Avocado.glb"
+licence = "CC0-1.0"
+licence_url = "https://creativecommons.org/publicdomain/zero/1.0/"
+attribution = "Microsoft - CC0 1.0, via Khronos glTF-Sample-Assets"
+archive_sha256 = "ccc9c3ce56423720b09399c2351537207cd5a65f859f9e6e2f30922762f3abd4"
+glb = "khronos/avocado.glb"
+glb_sha256 = "ccc9c3ce56423720b09399c2351537207cd5a65f859f9e6e2f30922762f3abd4"
+published_triangles = 682
+
+[[asset]]
+id = "damaged_helmet"
+source_url = "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/DamagedHelmet/glTF-Binary/DamagedHelmet.glb"
+licence = "CC-BY-4.0"
+licence_url = "https://creativecommons.org/licenses/by/4.0/"
+attribution = "ctxwing / theblueturtle_ - CC BY 4.0, via Khronos glTF-Sample-Assets"
+archive_sha256 = "a1e3b04de97b11de564ce6e53b95f02954a297f0008183ac63a4f5974f6b32d8"
+glb = "khronos/damaged_helmet.glb"
+glb_sha256 = "a1e3b04de97b11de564ce6e53b95f02954a297f0008183ac63a4f5974f6b32d8"
+published_triangles = 15452

@@ -21,11 +21,11 @@ fn glb(json: &str, bin: &[u8]) -> Vec<u8> {
     }
     let total = 12 + 8 + j.len() + if b.is_empty() { 0 } else { 8 + b.len() };
     let mut out = Vec::with_capacity(total);
-    out.extend_from_slice(&0x4674_6C67u32.to_le_bytes()); // "glTF"
+    out.extend_from_slice(b"glTF"); // magic, written as BYTES: a hex constant here once repeated the decoder's own typo
     out.extend_from_slice(&2u32.to_le_bytes());
     out.extend_from_slice(&(total as u32).to_le_bytes());
     out.extend_from_slice(&(j.len() as u32).to_le_bytes());
-    out.extend_from_slice(&0x4E4F_534Au32.to_le_bytes()); // "JSON"
+    out.extend_from_slice(b"JSON");
     out.extend_from_slice(&j);
     if !b.is_empty() {
         out.extend_from_slice(&(b.len() as u32).to_le_bytes());
@@ -135,20 +135,10 @@ fn every_out_of_subset_document_is_refused() {
             ),
         ),
         (
-            "node with a non-identity translation",
+            "a second instance of the mesh",
             glb(
                 &triangle_json("", "")
-                    .replace(r#"{"mesh": 0}"#, r#"{"mesh": 0, "translation": [0, 5, 0]}"#),
-                &bin,
-            ),
-        ),
-        (
-            "node with a non-identity matrix",
-            glb(
-                &triangle_json("", "").replace(
-                    r#"{"mesh": 0}"#,
-                    r#"{"mesh": 0, "matrix": [2,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]}"#,
-                ),
+                    .replace(r#""nodes": [{"mesh": 0}]"#, r#""nodes": [{"mesh": 0}, {"mesh": 0}]"#),
                 &bin,
             ),
         ),
@@ -223,4 +213,125 @@ fn an_out_of_range_index_is_refused() {
     bin[IDX_OFF..IDX_OFF + 2].copy_from_slice(&7u16.to_le_bytes());
     let r = GlbMeshLoader::decode(&glb(&triangle_json("", ""), &bin));
     assert!(r.is_err(), "RED: an index of 7 into a 3-vertex mesh was accepted");
+}
+
+/// A node transform is BAKED, not refused. Rev 33 refused any non-identity TRS; every real
+/// single-mesh asset carries one, so the restriction refused essentially all real content.
+/// Ignoring a transform is the defect — applying it is the fix.
+#[test]
+fn a_node_transform_is_baked_into_model_space() {
+    let bin = triangle_bin();
+
+    // Pure translation: positions move, normals do not.
+    let moved = GlbMeshLoader::decode(&glb(
+        &triangle_json("", "").replace(r#"{"mesh": 0}"#, r#"{"mesh": 0, "translation": [0, 5, 0]}"#),
+        &bin,
+    ))
+    .expect("a translated node must DECODE, not be refused");
+    assert_eq!(moved.vertices[0].position, [0.0, 5.0, 0.0], "translation is applied");
+    assert_eq!(moved.vertices[1].position, [1.0, 5.0, 0.0], "applied to every vertex");
+    assert_eq!(moved.vertices[0].normal, [0.0, 0.0, 1.0], "a translation cannot rotate a normal");
+
+    // Non-uniform scale: the normal takes the INVERSE TRANSPOSE, not the matrix. Scaling x by 2
+    // and leaving z alone must leave a +Z normal at +Z, and stretch x positions.
+    let scaled = GlbMeshLoader::decode(&glb(
+        &triangle_json("", "").replace(r#"{"mesh": 0}"#, r#"{"mesh": 0, "scale": [2, 1, 1]}"#),
+        &bin,
+    ))
+    .expect("a scaled node must decode");
+    assert_eq!(scaled.vertices[1].position, [2.0, 0.0, 0.0], "scale is applied to positions");
+    assert_eq!(scaled.vertices[0].normal, [0.0, 0.0, 1.0], "+Z normal survives an x-only scale");
+
+    // An explicit matrix takes the same path.
+    let m = GlbMeshLoader::decode(&glb(
+        &triangle_json("", "").replace(
+            r#"{"mesh": 0}"#,
+            r#"{"mesh": 0, "matrix": [3,0,0,0, 0,3,0,0, 0,0,3,0, 1,2,3,1]}"#,
+        ),
+        &bin,
+    ))
+    .expect("an explicit matrix must decode");
+    assert_eq!(m.vertices[0].position, [1.0, 2.0, 3.0], "column-major translation column");
+    assert_eq!(m.vertices[1].position, [4.0, 2.0, 3.0], "uniform scale then translate");
+    assert_eq!(m.vertices[0].normal, [0.0, 0.0, 1.0], "uniform scale leaves the normal direction");
+
+    // And the identity path is untouched.
+    let plain = GlbMeshLoader::decode(&valid()).expect("identity still decodes");
+    assert_eq!(plain.vertices[1].position, [1.0, 0.0, 0.0]);
+}
+
+/// A 90-degree rotation about +X maps +Z to +Y. This is the case a naive "multiply the normal by
+/// the matrix" would still get right, and it is here so the rotation path is not left unasserted.
+#[test]
+fn a_rotation_moves_both_positions_and_normals() {
+    let s = (0.5f32).sqrt(); // sin(45) = cos(45); quaternion for a 90-degree X rotation
+    let json = triangle_json("", "").replace(
+        r#"{"mesh": 0}"#,
+        &format!(r#"{{"mesh": 0, "rotation": [{s}, 0, 0, {s}]}}"#),
+    );
+    let m = GlbMeshLoader::decode(&glb(&json, &triangle_bin())).expect("a rotated node decodes");
+    let near = |a: f32, b: f32| (a - b).abs() < 1e-5;
+    // (0,1,0) -> (0,0,1)
+    assert!(near(m.vertices[2].position[2], 1.0), "+Y position rotates to +Z, got {:?}", m.vertices[2].position);
+    // normal (0,0,1) -> (0,-1,0)
+    assert!(near(m.vertices[0].normal[1], -1.0), "+Z normal rotates to -Y, got {:?}", m.vertices[0].normal);
+}
+
+/// **The decoder against REAL content**, not synthetic fixtures.
+///
+/// Decodes every `.glb` present under `assets/vg_corpus/` — the gitignored corpus payload — and
+/// skips, naming itself, when none is there. This is the test that settled the Rev 33 restriction:
+/// every real single-mesh asset probed carries a node transform, so "refuse any non-identity TRS"
+/// refused essentially all real content, and only baking makes the corpus ingestible.
+#[test]
+fn every_real_corpus_glb_decodes() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/vg_corpus");
+    let mut found = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "glb") {
+                found.push(p);
+            }
+        }
+    }
+
+    if found.is_empty() {
+        eprintln!(
+            "SKIP: no .glb under assets/vg_corpus/ (the payload is gitignored). Run \
+             scripts/fetch_corpus.ps1. The synthetic-fixture tests above ran and are unaffected."
+        );
+        return;
+    }
+
+    found.sort();
+    for path in &found {
+        let bytes = std::fs::read(path).expect("a listed .glb is readable");
+        let name = path.file_name().unwrap().to_string_lossy();
+        let mesh = GlbMeshLoader::decode(&bytes)
+            .unwrap_or_else(|e| panic!("RED: real asset {name} failed to decode: {e:?}"));
+        assert!(!mesh.vertices.is_empty(), "{name}: decoded zero vertices");
+        assert_eq!(mesh.indices.len() % 3, 0, "{name}: index count is not a multiple of 3");
+        assert!(
+            mesh.indices.iter().all(|i| (*i as usize) < mesh.vertices.len()),
+            "{name}: an index is out of range"
+        );
+        // A real asset must not come out of the decoder collapsed at the origin: that is what a
+        // dropped or mis-transposed transform would look like.
+        let spread = mesh
+            .vertices
+            .iter()
+            .map(|v| v.position[0].abs() + v.position[1].abs() + v.position[2].abs())
+            .fold(0.0f32, f32::max);
+        assert!(spread > 0.0, "{name}: every vertex sits at the origin");
+        eprintln!(
+            "real asset {name}: {} vertices, {} triangles, max |pos| lane sum {spread:.3}",
+            mesh.vertices.len(),
+            mesh.indices.len() / 3
+        );
+    }
 }
