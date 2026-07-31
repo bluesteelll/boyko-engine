@@ -67,7 +67,7 @@ use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 use boyko_rhi::enums::IndexType;
 use boyko_rhi_vulkan::memory::BoundBuffer;
 
-use crate::loaders::ObjMeshLoader;
+use crate::loaders::{GlbMeshLoader, ObjMeshLoader};
 use crate::mesh_data::MeshData;
 
 /// The `gbuffer_mrt.vs` vertex: a model-space position (offset 0), an outward world
@@ -233,9 +233,12 @@ impl AssetBacking for MeshGpu {
 }
 
 impl HasLoaders for MeshGpu {
-    /// One entry: the in-house Wavefront `.obj` loader. Asset-streaming plan
-    /// F3 — a compile-time-static table, no runtime registration.
-    const LOADERS: &'static [LoaderEntry<Self>] = &[LoaderEntry::of::<ObjMeshLoader>()];
+    /// Two entries: the in-house Wavefront `.obj` loader and the in-house glTF
+    /// 2.0 binary (`.glb`) loader VG-R0 rung R0b added for the high-poly corpus.
+    /// Asset-streaming plan F3 — a compile-time-static table, no runtime
+    /// registration; the extension picks the entry.
+    const LOADERS: &'static [LoaderEntry<Self>] =
+        &[LoaderEntry::of::<ObjMeshLoader>(), LoaderEntry::of::<GlbMeshLoader>()];
 }
 
 // `Assets<MeshGpu>` is `!Send` (each record owns RHI buffers, device-bound and

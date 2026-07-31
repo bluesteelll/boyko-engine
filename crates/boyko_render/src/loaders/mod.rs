@@ -4,10 +4,13 @@
 //!
 //! [`AssetLoader`]: boyko_ecs::ecs::core::asset::AssetLoader
 
+/// VG-R0 rung R0b: the in-house glTF 2.0 binary (`.glb`) mesh decoder.
+pub mod glb;
 pub mod obj;
 pub mod png_texture;
 pub mod ron_material;
 
+pub use glb::GlbMeshLoader;
 pub use obj::ObjMeshLoader;
 pub use png_texture::PngTextureLoader;
 pub use ron_material::RonMaterialLoader;
