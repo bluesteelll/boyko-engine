@@ -26,6 +26,15 @@ graphify-out/
 /assets/materials/*
 !/assets/materials/README.md
 
+# VG-R0 density-census corpus (plan section 4.3): the MANIFEST is tracked, the payload is not.
+# Mirrors the assets/materials rule above. A high-poly corpus is not small by any definition that
+# keeps this repo cloneable, there is no .gitattributes (so no Git LFS seam), and git history is
+# immutable -- a corpus committed once is carried by every clone forever. Pinned instead by the
+# sha256 columns in CORPUS.toml, which scripts/fetch_corpus.ps1 verifies before extracting.
+/assets/vg_corpus/*
+!/assets/vg_corpus/CORPUS.toml
+!/assets/vg_corpus/README.md
+
 # Pristine pre-conversion normal maps left behind by scripts/normal_ogl_to_dx.py.
 # The green-channel inversion is its own inverse, so the committed DirectX map fully
 # determines the OpenGL source — these backups are a local convenience, not history.

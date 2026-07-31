@@ -1,0 +1,80 @@
+# VG-R0 CORPUS MANIFEST — tracked; the payload it describes is gitignored.
+#
+# The arrangement is the owner's answer to `corpus.arrangement`: fetched + gitignored + pinned by
+# content hash, permanent. A high-poly corpus is not small by any definition that keeps this repo
+# cloneable, there is no `.gitattributes` (so no Git LFS seam), and git history is immutable — a
+# corpus committed once is carried forever by every clone. The counterpart `.gitignore` rule mirrors
+# the `assets/materials/` precedent exactly: `/assets/vg_corpus/*` with `!CORPUS.toml` and
+# `!README.md` escapes.
+#
+# A PROCEDURAL corpus was rejected for a reason worth restating here, because it is the campaign's
+# most-repeated defect: a generator has a density knob, so a density census run against it can
+# always be cranked past ~1 triangle/pixel, which makes K1 UNFALSIFIABLE BY CONSTRUCTION. Procedural
+# geometry is confined to the census instrument's own sensitivity control (plan section 8 R0c).
+schema_version = 1
+authored_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 36"
+
+# ---------------------------------------------------------------------------------------------
+# CAMERA PATHS — a TOP-LEVEL enumeration, deliberately not a per-asset column.
+#
+# The census runs the WHOLE corpus at EVERY committed path. Through Rev 17 each asset carried "the
+# camera-path id it is censused under", which licensed a PARTITION of assets over paths — and MIN
+# over a partition is a MIN over DIFFERENT SCENES, which conflates framing with content and makes
+# "clear the bar on the weakest committed path" mean nothing. MIN over paths is meant to find the
+# weakest FRAMING OF ONE SCENE.
+#
+# What lives here is the ID; the path's DEFINITION is a test constant (plan section 5.7). That split
+# is a recorded exposure rather than an oversight: no digest in R0 hashes the definitions, so
+# RE-AIMING a committed path is neither a membership change nor a row-count change and no R0 gate
+# part sees it (plan section 9.1). What IS gated is membership and cardinality — R0b(e) asserts the
+# floor at the rung that AUTHORS this set, and R0d(d) asserts set equality against the census rows'
+# path projection at the rung that CONSUMES it.
+#
+# Two paths, chosen to span framings rather than to flatter: a mid-distance orbit is the canonical
+# viewing distance a density claim is about, and a close approach is where screen-space density is
+# highest. Under MIN the orbit is expected to be the binding one, which is the honest direction —
+# the floor must be cleared by the WEAKEST framing, not the most favourable.
+#
+# The set may only GROW by a committed edit to this file, and R0d(d) reds if the census visits a
+# path this list does not name, or fails to visit one it does.
+camera_paths = ["orbit_mid", "approach_close"]
+
+# ---------------------------------------------------------------------------------------------
+# ASSETS — per-entry schema, with every field REQUIRED:
+#
+#   id                = stable slug, used in log lines and census rows
+#   source_url        = where the archive is fetched from
+#   licence           = SPDX-style identifier (CC0-1.0 / CC-BY-4.0 / ...)
+#   licence_url       = the licence text for THIS asset, as published
+#   attribution       = the credit line the licence requires, verbatim
+#   archive_sha256    = sha256 of the downloaded archive, pinned before extraction
+#   glb               = path of the extracted `.glb`, relative to this directory
+#   glb_sha256        = sha256 of that extracted `.glb`
+#   published_triangles = the triangle count AS PUBLISHED by the source
+#
+# `published_triangles` is an EXTERNAL datum on purpose: R0b(b) asserts the decoded count EQUALS it,
+# which is a cross-check of our decoder against the publisher's own number. It is an equality and
+# floors nothing — it does not, and is not meant to, certify that the corpus is high-poly.
+#
+# ⚠️ NO ASSETS ARE LISTED YET, and that is a deliberate stop rather than an omission. Selecting them
+# and fetching them are two different acts: the owner's answer authorises the ARRANGEMENT and
+# delegates selection to the agent under CC0/CC-BY with attribution recorded per asset, but the
+# fetch itself writes several hundred megabytes to this machine from third-party URLs. That is
+# surfaced for explicit approval before it runs, together with the licence of each candidate.
+#
+# Until an entry exists here, `scripts/fetch_corpus.ps1` has nothing to fetch and the ingest gate's
+# payload-dependent parts SKIP by their own recorded policy, while (a0) and (e) — which read tracked
+# files only — run on every checkout.
+#
+# The shape of an entry, kept as a comment so the file parses as an empty corpus:
+#
+#   [[asset]]
+#   id = "example_scan"
+#   source_url = "https://example.org/example_scan.zip"
+#   licence = "CC0-1.0"
+#   licence_url = "https://creativecommons.org/publicdomain/zero/1.0/"
+#   attribution = "Example Author — CC0"
+#   archive_sha256 = "PENDING"
+#   glb = "example_scan/example_scan.glb"
+#   glb_sha256 = "PENDING"
+#   published_triangles = 0

@@ -1,7 +1,11 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** BUILDING, **Rev 35** — **R0a AND R0-S1 ARE LANDED AND GREEN; §3.4's ingest ceiling is
-GONE.** R0-S1 made the memory pools grow, which removed the `Σᵢ fᵢ ≤ 67.11 MB` ceiling on **both**
+**Status:** BUILDING, **Rev 36** — **R0a, R0-S1 AND R0b (bar its payload) ARE LANDED AND GREEN.**
+R0b ships the in-house `.glb` decoder, the tracked manifest + gitignore rule + fetch script, and the
+six-part ingest gate whose two payload-free parts run on every checkout while the other four skip
+and name themselves. The corpus payload is the one remaining stop and it is an owner call: fetching
+writes third-party bytes to this machine (§8 R0b). §3.4's ingest ceiling is
+GONE. R0-S1 made the memory pools grow, which removed the `Σᵢ fᵢ ≤ 67.11 MB` ceiling on **both**
 locations at once — so the corpus is ingestible, R0b is unblocked, and the device-local + staging
 half is a performance follow-up rather than a precondition (§8 R0-S1). The `vb_mesh` golden is
 byte-identical across the change. The
@@ -390,8 +394,11 @@ raster-path decision, not independent of it.** R0 records this and touches none 
 
 ### 3.1 What imports geometry today
 
-**Exactly one mesh loader exists.** `MeshGpu::LOADERS` is a single-entry compile-time table
-([`mesh.rs`](../crates/boyko_render/src/mesh.rs):238) holding `ObjMeshLoader`, whose `EXTENSIONS` is `&["obj"]` (`loaders/obj.rs:60~`). It
+**Exactly one mesh loader existed when this section was written.** `MeshGpu::LOADERS` is a
+compile-time table ([`mesh.rs`](../crates/boyko_render/src/mesh.rs):240) that held `ObjMeshLoader` alone, whose `EXTENSIONS` is `&["obj"]`
+(`loaders/obj.rs:60~`). ⚠️ **Rev 36 added the second entry** — `GlbMeshLoader`, §3.3's decoder — and
+the anchors gate caught this line's number going stale in the same commit, which is amendment 2
+working as intended: adding the entry lengthened the table's doc comment and moved the definition. It
 decodes to `MeshData { vertices: Vec<Vertex>, indices: Vec<u32> }` and runs `generate_tangents` once
 over the whole mesh (`:94~-96`). **There is no `.obj` file anywhere in the tree** — the loader has
 never been pointed at a committed asset.
@@ -1276,6 +1283,26 @@ byte-identity holds by construction as well as by measurement.
 **Lands:** the `.glb` decoder (§3.3) registered as a second `LoaderEntry` on `MeshGpu::LOADERS`;
 `assets/vg_corpus/CORPUS.toml` + the `.gitignore` rule + `fetch_corpus`;
 `crates/boyko_app/tests/vg_corpus_ingest.rs`. <!-- doc-anchor-ignore -->
+
+> ✅ **LANDED AT REV 36 EXCEPT THE PAYLOAD ITSELF, and the exception is a deliberate stop.** The
+> decoder ships with its own gate (one valid document decodes; **twelve** mutations, each changing
+> exactly one thing about that same file, are refused; plus malformed containers and an
+> out-of-range index). The manifest, the `/assets/vg_corpus/*` + `!CORPUS.toml` + `!README.md`
+> rule mirroring the `assets/materials/` precedent, the fetch script and the six-part gate are in.
+>
+> **(a0) and (e) are live on every checkout; (a)–(d) skip and NAME THEMSELVES as skipped** — a skip
+> that does not name itself is indistinguishable from a pass. (a0)'s mutations are one per path in
+> the `[gating]` row (`N` entries = `N` mutations); (e)'s are three — under the floor, key absent,
+> and a DUPLICATED id, because the floor is over *distinct* ids and a bare count would accept a
+> repeat.
+>
+> ⚠️ **`CORPUS.toml` names no assets yet, and that is the honest state rather than an omission.**
+> The owner's answer authorises the *arrangement* and delegates *selection*; it does not by itself
+> authorise the **fetch**, which writes hundreds of megabytes from third-party URLs to this
+> machine. The candidate list and each candidate's licence are surfaced for approval before
+> `scripts/fetch_corpus.ps1` runs. The script itself is written and verifies the archive pin
+> **before** extracting and each `.glb` pin after — a mismatch is a hard stop, because a census
+> against unpinned content measures nothing reproducible.
 
 **Gate (one, six parts):** (a0) **EVERY `table.field` listed in `[gating].r0b_blocked_by` resolves and is not the `PENDING`
 sentinel** — ⚠️ **this read *"`corpus.arrangement` is not the `PENDING` sentinel"*, a function of ONE
