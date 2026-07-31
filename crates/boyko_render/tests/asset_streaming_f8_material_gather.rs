@@ -44,7 +44,7 @@ use boyko_rhi_vulkan::memory::BoundBuffer;
 /// (`mesh_assets::cube_geometry(1.0)`), so the AABB is set to that same unit cube's bounds
 /// for consistency, even though nothing here checks it.
 fn dummy_mesh_gpu() -> MeshGpu {
-    let dummy_buf = || BoundBuffer { buffer: VkBuffer::NULL, offset: 0, size: 0, mapped: None };
+    let dummy_buf = || BoundBuffer { buffer: VkBuffer::NULL, offset: 0, size: 0, mapped: None, block: 0 };
     MeshGpu {
         vertex_buffer: dummy_buf(),
         index_buffer: dummy_buf(),

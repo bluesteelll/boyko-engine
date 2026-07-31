@@ -209,7 +209,7 @@ mod tests {
     /// from its device call. `offset` is repurposed here as a plain identity tag
     /// (never a real memory offset).
     fn dummy_buffer(id: u64) -> BoundBuffer {
-        BoundBuffer { buffer: boyko_rhi_vulkan::ffi::VkBuffer::NULL, offset: id, size: 0, mapped: None }
+        BoundBuffer { buffer: boyko_rhi_vulkan::ffi::VkBuffer::NULL, offset: id, size: 0, mapped: None, block: 0 }
     }
 
     #[test]

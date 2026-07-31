@@ -51,12 +51,25 @@ pub struct BoundBuffer {
     /// The Vulkan buffer handle.
     pub buffer: VkBuffer,
     /// The byte offset within the block where the buffer's memory is bound.
+    ///
+    /// This is a **memory-bind** offset into `block`'s `VkDeviceMemory`, never a
+    /// buffer-relative one: every `create_bound_buffer` mints a distinct
+    /// `VkBuffer` whose own addressing starts at 0, so a
+    /// `VkDescriptorBufferInfo.offset` must NOT be fed from this field.
     pub offset: u64,
     /// The buffer's requested size in bytes.
     pub size: u64,
     /// CPU pointer to the buffer's first byte (block map base + offset) for a
     /// host-visible buffer; `None` for a device-local (never-mapped) buffer.
     pub mapped: Option<NonNull<u8>>,
+    /// Index of the owning block within its [`BlockPool`].
+    ///
+    /// A pool grows by appending blocks, so `offset` alone no longer identifies
+    /// a sub-allocation — two blocks can both have a live region at the same
+    /// offset. Freeing must return the region to the block it came from, and
+    /// this is what says which one. The block constructors set `0`; the pool
+    /// stamps the real index, so a block stays index-agnostic.
+    pub block: u32,
 }
 
 /// One host-visible + host-coherent `VkDeviceMemory` block with a sub-allocator
@@ -289,7 +302,7 @@ impl HostVisibleBlock {
         // `map_base + offset` is in-bounds of the persistent mapping.
         let mapped = unsafe { NonNull::new_unchecked(self.map_base.as_ptr().add(offset as usize)) };
 
-        Ok(BoundBuffer { buffer, offset, size, mapped: Some(mapped) })
+        Ok(BoundBuffer { buffer, offset, size, mapped: Some(mapped), block: 0 })
     }
 
     /// Destroys a previously-created [`BoundBuffer`] and frees its sub-region.
@@ -522,7 +535,7 @@ impl DeviceLocalBlock {
         }
 
         // No `mapped` pointer: device-local memory is never mapped (plan D3/MF-8).
-        Ok(BoundBuffer { buffer, offset, size, mapped: None })
+        Ok(BoundBuffer { buffer, offset, size, mapped: None, block: 0 })
     }
 
     /// Destroys a previously-created [`BoundBuffer`] and frees its sub-region.
@@ -564,6 +577,220 @@ impl Drop for DeviceLocalBlock {
         unsafe {
             (fns.free_memory)(self.device, self.memory, ptr::null());
         }
+    }
+}
+
+/// The block operations a [`BlockPool`] needs, so one pool serves both the
+/// host-visible and the device-local block without duplicating the growth logic.
+///
+/// Deliberately narrow: a block knows how to allocate a `capacity` of memory and
+/// how to hand out / take back sub-allocations, and nothing about pools or
+/// indices. The pool stamps [`BoundBuffer::block`] after the fact.
+pub trait PoolBlock: Sized {
+    /// Allocates one `capacity`-byte block. Same contract as
+    /// [`HostVisibleBlock::new`] / [`DeviceLocalBlock::new`], which are its only
+    /// two implementations.
+    fn new_block(
+        device: VkDevice,
+        fns: &DeviceFns,
+        mem_props: &VkPhysicalDeviceMemoryProperties,
+        capacity: u64,
+        device_address: bool,
+    ) -> Result<Self, MemoryError>;
+
+    /// Sub-allocates a bound buffer, or `Err(MemoryError::SubAllocExhausted)`
+    /// when this block has no room for it.
+    fn create_in_block(&mut self, size: u64, usage: VkFlags) -> Result<BoundBuffer, MemoryError>;
+
+    /// This block's own capacity in bytes. Blocks in one pool are NOT uniformly
+    /// sized — a request larger than the default mints a block sized to fit —
+    /// so the pool sums this rather than multiplying.
+    fn block_capacity(&self) -> u64;
+
+    /// # Safety
+    ///
+    /// `bound` must have been produced by [`Self::create_in_block`] on THIS block
+    /// and not already destroyed.
+    unsafe fn destroy_in_block(&mut self, bound: BoundBuffer);
+}
+
+impl PoolBlock for HostVisibleBlock {
+    #[inline]
+    fn new_block(
+        device: VkDevice,
+        fns: &DeviceFns,
+        mem_props: &VkPhysicalDeviceMemoryProperties,
+        capacity: u64,
+        device_address: bool,
+    ) -> Result<Self, MemoryError> {
+        Self::new(device, fns, mem_props, capacity, device_address)
+    }
+
+    #[inline]
+    fn create_in_block(&mut self, size: u64, usage: VkFlags) -> Result<BoundBuffer, MemoryError> {
+        self.create_bound_buffer(size, usage)
+    }
+
+    #[inline]
+    fn block_capacity(&self) -> u64 {
+        self.capacity()
+    }
+
+    #[inline]
+    unsafe fn destroy_in_block(&mut self, bound: BoundBuffer) {
+        // SAFETY: forwarded verbatim from this trait method's own contract.
+        unsafe { self.destroy_bound_buffer(bound) }
+    }
+}
+
+impl PoolBlock for DeviceLocalBlock {
+    #[inline]
+    fn new_block(
+        device: VkDevice,
+        fns: &DeviceFns,
+        mem_props: &VkPhysicalDeviceMemoryProperties,
+        capacity: u64,
+        device_address: bool,
+    ) -> Result<Self, MemoryError> {
+        Self::new(device, fns, mem_props, capacity, device_address)
+    }
+
+    #[inline]
+    fn create_in_block(&mut self, size: u64, usage: VkFlags) -> Result<BoundBuffer, MemoryError> {
+        self.create_bound_buffer(size, usage)
+    }
+
+    #[inline]
+    fn block_capacity(&self) -> u64 {
+        self.capacity()
+    }
+
+    #[inline]
+    unsafe fn destroy_in_block(&mut self, bound: BoundBuffer) {
+        // SAFETY: forwarded verbatim from this trait method's own contract.
+        unsafe { self.destroy_bound_buffer(bound) }
+    }
+}
+
+/// A **growable** pool of same-kind memory blocks.
+///
+/// # Why this exists (VG-R0 staging rung S1)
+///
+/// Each memory location used to be ONE lazily-created block of a fixed 64 MiB,
+/// first-fit, with no growth path — so 64 MiB was a hard ceiling on everything
+/// that location backed. For mesh geometry that ceiling is reached by ordinary
+/// content: at 64 B/vertex and 0.5 vertices/triangle plus `u32` indices a mesh
+/// costs ~44 B/triangle, so the whole engine could hold roughly **1.5 M
+/// triangles** of mesh at once, and the failure was a `vkCreateBuffer` `.expect`
+/// panic rather than a recoverable `Err` — outside every gate that was supposed
+/// to bound the corpus.
+///
+/// The pool removes the ceiling in one place: allocation walks the existing
+/// blocks and, only if none has room, appends a new one sized to fit the
+/// request. Callers are unchanged.
+///
+/// # Cost
+///
+/// `alloc` may try several blocks, and each attempt costs a `vkCreateBuffer` +
+/// `vkDestroyBuffer` pair, because a buffer's alignment and true size are only
+/// knowable from `vkGetBufferMemoryRequirements` on a *created* buffer. That is
+/// bounded by the block count (one or two in practice) and this is an
+/// asset-upload path, never a per-frame one.
+pub struct BlockPool<B> {
+    blocks: Vec<B>,
+    default_capacity: u64,
+}
+
+impl<B: PoolBlock> BlockPool<B> {
+    /// A pool whose blocks are `default_capacity` bytes unless a single request
+    /// needs more. No memory is allocated until the first [`Self::alloc`].
+    pub fn new(default_capacity: u64) -> Self {
+        debug_assert!(default_capacity > 0, "invariant: non-zero default block capacity");
+        Self { blocks: Vec::new(), default_capacity }
+    }
+
+    /// Blocks currently allocated. `0` before the first allocation.
+    #[inline]
+    pub fn block_count(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// Sum of every block's capacity, in bytes. Summed, not multiplied: a
+    /// request larger than the default mints an over-sized block.
+    #[inline]
+    pub fn total_capacity(&self) -> u64 {
+        self.blocks.iter().map(B::block_capacity).sum()
+    }
+
+    /// The capacity a fresh block must have to hold `size`.
+    ///
+    /// Rounded up to a whole number of default blocks, **plus a slack term**:
+    /// `vkGetBufferMemoryRequirements` may report a size larger than the
+    /// requested one (alignment padding), so sizing a block to exactly the
+    /// request would fail for any request that is already an exact multiple.
+    fn capacity_for(&self, size: u64) -> u64 {
+        const SLACK: u64 = 1024 * 1024;
+        let want = size.saturating_add(SLACK);
+        let blocks = want.div_ceil(self.default_capacity).max(1);
+        self.default_capacity * blocks
+    }
+
+    /// Sub-allocates a bound buffer, growing the pool if no existing block has
+    /// room. The returned buffer's [`BoundBuffer::block`] names its owner.
+    pub fn alloc(
+        &mut self,
+        device: VkDevice,
+        fns: &DeviceFns,
+        mem_props: &VkPhysicalDeviceMemoryProperties,
+        device_address: bool,
+        size: u64,
+        usage: VkFlags,
+    ) -> Result<BoundBuffer, MemoryError> {
+        for (i, block) in self.blocks.iter_mut().enumerate() {
+            match block.create_in_block(size, usage) {
+                Ok(mut bound) => {
+                    bound.block = i as u32;
+                    return Ok(bound);
+                }
+                // Only exhaustion is a reason to try the next block; a real
+                // Vulkan failure is reported rather than retried N times.
+                Err(MemoryError::SubAllocExhausted) => {}
+                Err(e) => return Err(e),
+            }
+        }
+
+        let capacity = self.capacity_for(size);
+        let mut block = B::new_block(device, fns, mem_props, capacity, device_address)?;
+        // A block sized by `capacity_for` has room by construction; a failure
+        // here is a driver-side one and is propagated rather than looped on.
+        let mut bound = block.create_in_block(size, usage)?;
+        bound.block = self.blocks.len() as u32;
+        self.blocks.push(block);
+        Ok(bound)
+    }
+
+    /// Returns a sub-allocation to the block it came from.
+    ///
+    /// # Safety
+    ///
+    /// `bound` must have been produced by [`Self::alloc`] on THIS pool and not
+    /// already destroyed.
+    pub unsafe fn free(&mut self, bound: BoundBuffer) {
+        let idx = bound.block as usize;
+        debug_assert!(idx < self.blocks.len(), "invariant: freeing into a live block index");
+        // SAFETY: by this function's contract `bound` came from `alloc` on this
+        // pool, so `bound.block` is the index the pool stamped and the block at
+        // that index is the one that minted it. Blocks are only ever appended
+        // (never removed or reordered) until `clear`, so the index stays valid.
+        unsafe { self.blocks[idx].destroy_in_block(bound) };
+    }
+
+    /// Drops every block, freeing its device memory.
+    ///
+    /// The owning context calls this in its `Drop`, BEFORE `vkDestroyDevice` and
+    /// before the boxed fn-table each block cached a pointer into.
+    pub fn clear(&mut self) {
+        self.blocks.clear();
     }
 }
 

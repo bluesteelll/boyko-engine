@@ -673,7 +673,7 @@ mod tests {
     }
 
     fn dummy_buffer(id: u64) -> BoundBuffer {
-        BoundBuffer { buffer: boyko_rhi_vulkan::ffi::VkBuffer::NULL, offset: id, size: 0, mapped: None }
+        BoundBuffer { buffer: boyko_rhi_vulkan::ffi::VkBuffer::NULL, offset: id, size: 0, mapped: None, block: 0 }
     }
 
     // ── `new` / `Default` ────────────────────────────────────────────────

@@ -38,13 +38,11 @@ impl RhiDevice<Vulkan> for VulkanContext {
         // bits (plan D5), so the projection is an identity cast on the u32 family.
         let usage: VkFlags = desc.usage.bits();
         match desc.location {
-            // The host-visible foundation block (plan Q1).
-            MemoryLocation::HostVisibleCoherent => {
-                let block = self.host_block()?;
-                let bound = block.borrow_mut().create_bound_buffer(desc.size, usage)?;
-                Ok(bound)
-            }
-            // The Phase-5 device-local (VRAM) block (plan D3/MF-8). Always add the
+            // The host-visible foundation pool (plan Q1). Growable since VG-R0's
+            // staging rung S1: a request larger than the free space in every
+            // existing block appends one rather than failing.
+            MemoryLocation::HostVisibleCoherent => self.alloc_host_buffer(desc.size, usage),
+            // The Phase-5 device-local (VRAM) pool (plan D3/MF-8). Always add the
             // `TRANSFER_SRC | TRANSFER_DST` usage so the staging upload + the
             // test-only readback (`vkCmdCopyBuffer`) can name the buffer as either
             // copy endpoint regardless of the caller's declared usage. The result
@@ -53,41 +51,28 @@ impl RhiDevice<Vulkan> for VulkanContext {
                 let usage = usage
                     | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
                     | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-                let block = self.device_block()?;
-                let bound = block.borrow_mut().create_bound_buffer(desc.size, usage)?;
-                Ok(bound)
+                self.alloc_device_buffer(desc.size, usage)
             }
         }
     }
 
     unsafe fn destroy_buffer(&self, buffer: BoundBuffer) {
-        // Plan A3: if a `BoundBuffer` exists, it was sub-allocated from one of the
-        // shared blocks, so that block MUST already be initialized. A silent
-        // early-return on `Err` here would drop the owned `buffer` WITHOUT
-        // destroying its `VkBuffer` / returning its sub-allocation — a leak. The
-        // matching block's `*_block()` only fails on the first-ever allocation
-        // (which already happened to mint `buffer`), so these `expect`s are
-        // unreachable by construction. `mapped` discriminates the origin block: a
-        // host-visible buffer carries `Some(ptr)`, a device-local one `None`.
+        // Plan A3: if a `BoundBuffer` exists it was sub-allocated from one of the
+        // pools, and `buffer.block` names WHICH block inside that pool minted it —
+        // which is what makes freeing correct once a pool can hold more than one.
+        // `mapped` still discriminates the POOL: a host-visible buffer carries
+        // `Some(ptr)`, a device-local one `None`.
         if buffer.mapped.is_some() {
-            let block = self
-                .host_block()
-                .expect("invariant: host block initialized when a host BoundBuffer exists");
             // SAFETY: `buffer` was produced by `create_buffer(HostVisibleCoherent)`
-            // on this device's shared host block, the GPU is no longer using it
-            // (caller fence-waited per the trait contract), and the by-value move
-            // destroys it exactly once. The block is borrowed `&mut`
-            // single-threaded.
-            unsafe { block.borrow_mut().destroy_bound_buffer(buffer) };
+            // on this device's host pool, the GPU is no longer using it (caller
+            // fence-waited per the trait contract), and the by-value move destroys
+            // it exactly once. The pool is borrowed `&mut` single-threaded.
+            unsafe { self.free_host_buffer(buffer) };
         } else {
-            let block = self
-                .device_block()
-                .expect("invariant: device block initialized when a device BoundBuffer exists");
             // SAFETY: `buffer` was produced by `create_buffer(DeviceLocal)` on this
-            // device's shared device-local block, the GPU is no longer using it
-            // (caller fence-waited), and the by-value move destroys it exactly once.
-            // The block is borrowed `&mut` single-threaded.
-            unsafe { block.borrow_mut().destroy_bound_buffer(buffer) };
+            // device's device-local pool, the GPU is no longer using it (caller
+            // fence-waited), and the by-value move destroys it exactly once.
+            unsafe { self.free_device_buffer(buffer) };
         }
     }
 

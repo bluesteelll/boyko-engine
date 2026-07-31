@@ -80,6 +80,7 @@ fn structural_spawn_on_zero_substep_frame_reaches_the_instance_ring() {
         offset: 0,
         size: storage.len() as u64,
         mapped: core::ptr::NonNull::new(storage.as_mut_ptr()),
+        block: 0,
     };
     // SAFETY: no GPU work exists in this process (no device was booted), so
     // nothing submitted can reference the fake slot — the `forge_unfenced`

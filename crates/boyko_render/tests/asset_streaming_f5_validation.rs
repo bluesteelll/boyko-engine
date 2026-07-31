@@ -69,7 +69,7 @@ use boyko_rhi_vulkan::memory::BoundBuffer;
 /// documents (`MeshGpu::local_min`'s doc) is used here too, for consistency with a
 /// `vertex_count: 0` dummy that has no real geometry to bound.
 fn dummy_mesh_gpu() -> MeshGpu {
-    let dummy_buf = || BoundBuffer { buffer: VkBuffer::NULL, offset: 0, size: 0, mapped: None };
+    let dummy_buf = || BoundBuffer { buffer: VkBuffer::NULL, offset: 0, size: 0, mapped: None, block: 0 };
     MeshGpu {
         vertex_buffer: dummy_buf(),
         index_buffer: dummy_buf(),

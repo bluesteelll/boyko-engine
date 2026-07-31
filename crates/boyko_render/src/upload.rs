@@ -1330,6 +1330,7 @@ mod tests {
             offset: 0,
             size: storage.len() as u64,
             mapped: NonNull::new(storage.as_mut_ptr()),
+            block: 0,
         }
     }
 

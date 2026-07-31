@@ -968,6 +968,7 @@ mod tests {
                 offset: 0,
                 size: 0,
                 mapped: None,
+                block: 0,
             },
             0,
         );

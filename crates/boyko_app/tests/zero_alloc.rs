@@ -82,6 +82,7 @@ fn fake_slot(storage: &mut Vec<u8>) -> BoundBuffer {
         offset: 0,
         size: storage.len() as u64,
         mapped: core::ptr::NonNull::new(storage.as_mut_ptr()),
+        block: 0,
     }
 }
 

@@ -36,7 +36,7 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::debug::{self, DebugMessengerState};
 use crate::ffi::*;
-use crate::memory::{DeviceLocalBlock, HostVisibleBlock};
+use crate::memory::{BlockPool, DeviceLocalBlock, HostVisibleBlock};
 use crate::rhi_impl::ComputeLayouts;
 
 /// Capacity of the device's shared host-visible block backing
@@ -662,27 +662,35 @@ pub struct VulkanContext {
     /// `OnceLock` is needed. Torn down in `Drop` BEFORE `vkDestroyDevice`, so the
     /// layouts never outlive their device.
     compute_layouts: OnceCell<ComputeLayouts>,
-    /// The single shared host-visible+coherent block every
+    /// The **growable pool** of host-visible+coherent blocks every
     /// [`RhiDevice::create_buffer`](boyko_rhi::RhiDevice::create_buffer) sub-allocates
-    /// from (plan Q1), created lazily on first use.
+    /// from (plan Q1). Empty until the first allocation; blocks are appended on
+    /// demand.
     ///
-    /// The block caches a raw `*const DeviceFns` into the boxed `device_fns`
+    /// ⚠️ **This was ONE block of a fixed 64 MiB with no growth path**, which made
+    /// 64 MiB a hard ceiling on every host-visible resource in the engine — for
+    /// mesh geometry (~44 B/triangle) roughly **1.5 M triangles** total, failing
+    /// as a `vkCreateBuffer` panic rather than a recoverable `Err`. VG-R0's
+    /// staging rung S1 replaced it with [`BlockPool`]; see that type's docs.
+    ///
+    /// Each block caches a raw `*const DeviceFns` into the boxed `device_fns`
     /// (plan A1): the box gives the fn-table a stable heap address, so the cached
     /// pointer survives any move of this context — no false `'static` lifetime is
-    /// claimed. The block is torn down in `Drop` BEFORE `vkDestroyDevice` + before
+    /// claimed. Blocks are torn down in `Drop` BEFORE `vkDestroyDevice` + before
     /// the boxed fn-table is freed, so the pointer is live for every block use.
     /// The `RefCell` provides the `&mut` the sub-allocator needs from `&self`
     /// calls (single-threaded, `!Sync`).
     #[allow(clippy::disallowed_types)]
-    host_block: OnceCell<RefCell<HostVisibleBlock>>,
-    /// The single shared device-local (VRAM) block every
+    host_pool: RefCell<BlockPool<HostVisibleBlock>>,
+    /// The **growable pool** of device-local (VRAM) blocks every
     /// [`RhiDevice::create_buffer`](boyko_rhi::RhiDevice::create_buffer) with
     /// [`MemoryLocation::DeviceLocal`](boyko_rhi::MemoryLocation::DeviceLocal)
-    /// sub-allocates from (the Phase-5 `GpuColumn` seam), created lazily on first
-    /// use. Never mapped (plan D3/MF-8). Caches the same plan-A1 `*const DeviceFns`
-    /// and is torn down in `Drop` BEFORE `vkDestroyDevice` + the boxed fn-table.
+    /// sub-allocates from (the Phase-5 `GpuColumn` seam). Never mapped (plan
+    /// D3/MF-8). Same plan-A1 `*const DeviceFns` contract and the same `Drop`
+    /// ordering as the host pool above; it carried the identical 64 MiB ceiling,
+    /// which is why moving mesh data here would only have relocated it.
     #[allow(clippy::disallowed_types)]
-    device_block: OnceCell<RefCell<DeviceLocalBlock>>,
+    device_pool: RefCell<BlockPool<DeviceLocalBlock>>,
     /// HW-RT rung R2a-1: the resolved `VK_KHR_acceleration_structure` command table,
     /// `Some` ONLY when the RT extensions were enabled at device create (mirroring
     /// `DeviceFns::swapchain: Option<SwapchainDeviceFns>`). `None` when the device lacks
@@ -1165,6 +1173,17 @@ impl VulkanContext {
             }
         };
 
+        // `RefCell`, not a lock: `VulkanContext` is `!Send + !Sync` and every
+        // allocation path is single-threaded (plan §5.3), so this is interior
+        // mutability for the `&mut` a sub-allocator needs from `&self` calls —
+        // NOT hot-path synchronisation. It is also boot-time, once per device.
+        // Same exception the pool FIELDS already carry; the `let`s exist only
+        // because an attribute cannot sit on a struct-literal field expression.
+        #[allow(clippy::disallowed_types)]
+        let host_pool = RefCell::new(BlockPool::new(SHARED_HOST_BLOCK_CAPACITY));
+        #[allow(clippy::disallowed_types)]
+        let device_pool = RefCell::new(BlockPool::new(SHARED_DEVICE_BLOCK_CAPACITY));
+
         Ok(Self {
             module,
             instance,
@@ -1183,8 +1202,8 @@ impl VulkanContext {
             // `*const DeviceFns` that a move must not invalidate.
             device_fns: Box::new(device_fns),
             compute_layouts: OnceCell::new(),
-            host_block: OnceCell::new(),
-            device_block: OnceCell::new(),
+            host_pool,
+            device_pool,
             #[cfg(feature = "hwrt")]
             accel_fns,
             vb_geometry_table_armed: OnceCell::new(),
@@ -1361,73 +1380,92 @@ impl VulkanContext {
             .expect("invariant: compute_layouts was just set"))
     }
 
-    /// The single shared host-visible+coherent block, created on first use and
-    /// cached for the device's lifetime (plan Q1). Every
-    /// [`RhiDevice::create_buffer`](boyko_rhi::RhiDevice::create_buffer) sub-allocates
-    /// from it. Returns a [`VulkanError`](crate::error::VulkanError) if the block
-    /// allocation fails.
-    #[allow(clippy::disallowed_types)]
-    pub(crate) fn host_block(
+    /// Sub-allocates a host-visible+coherent buffer from the growable pool
+    /// (plan Q1), appending a block if no existing one has room.
+    ///
+    /// ⚠️ **The pool is not exposed by reference, deliberately.** It used to be a
+    /// `OnceCell` handing out `&RefCell<HostVisibleBlock>`; a pool that grows
+    /// stores its blocks in a `Vec`, and a `&` into a `Vec` element is
+    /// invalidated by the very push that growth performs. Allocation and freeing
+    /// therefore happen behind these methods, so no reference to a block ever
+    /// outlives a possible growth.
+    ///
+    /// Plan A1: each block caches a raw `*const DeviceFns` pointing into the
+    /// boxed `device_fns` — a stable heap address. NO `'static` lifetime is
+    /// fabricated; `HostVisibleBlock::new` captures the borrow as a raw pointer
+    /// internally. The invariant that makes this sound: the boxed fn-table
+    /// address does not move when the context moves, and every block is dropped
+    /// in this context's `Drop` (via `host_pool.clear()`) BEFORE the boxed
+    /// fn-table is freed and before `vkDestroyDevice`, so the pointee outlives
+    /// every block use. The context is `!Send + !Sync`, so it never crosses a
+    /// thread.
+    pub(crate) fn alloc_host_buffer(
         &self,
-    ) -> Result<&RefCell<HostVisibleBlock>, crate::error::VulkanError> {
-        if let Some(block) = self.host_block.get() {
-            return Ok(block);
-        }
-        // Plan A1: the block caches a raw `*const DeviceFns` pointing into the
-        // boxed `device_fns` — a stable heap address. NO `'static` lifetime is
-        // fabricated; `HostVisibleBlock::new` captures the borrow as a raw pointer
-        // internally. The invariant that makes this sound: the boxed fn-table
-        // address does not move when the context moves, and the block is dropped
-        // in this context's `Drop` (via `host_block.take()`) BEFORE the boxed
-        // fn-table is freed and before `vkDestroyDevice`, so the pointee outlives
-        // every block use. The context is `!Send + !Sync`, so it never crosses a
-        // thread.
-        let block = HostVisibleBlock::new(
+        size: u64,
+        usage: crate::ffi::VkFlags,
+    ) -> Result<crate::memory::BoundBuffer, crate::error::VulkanError> {
+        Ok(self.host_pool.borrow_mut().alloc(
             self.device(),
             self.device_fns(),
             self.memory_properties(),
-            SHARED_HOST_BLOCK_CAPACITY,
             self.rt_buffer_device_address(),
-        )?;
-        // Race-free: `&self` is single-threaded; the cell is empty here.
-        let _ = self.host_block.set(RefCell::new(block));
-        Ok(self
-            .host_block
-            .get()
-            .expect("invariant: host_block was just set"))
+            size,
+            usage,
+        )?)
     }
 
-    /// The single shared device-local (VRAM) block, created on first use and
-    /// cached for the device's lifetime (plan D3/MF-8). Every
-    /// [`RhiDevice::create_buffer`](boyko_rhi::RhiDevice::create_buffer) with
-    /// [`MemoryLocation::DeviceLocal`](boyko_rhi::MemoryLocation::DeviceLocal)
-    /// sub-allocates from it. The block is never mapped. Returns a
-    /// [`VulkanError`](crate::error::VulkanError) if the block allocation fails.
-    #[allow(clippy::disallowed_types)]
-    pub(crate) fn device_block(
+    /// Returns a host-visible sub-allocation to the block that minted it.
+    ///
+    /// # Safety
+    ///
+    /// `bound` must have come from [`Self::alloc_host_buffer`] on this context
+    /// and not already been destroyed; the GPU must no longer be using it.
+    pub(crate) unsafe fn free_host_buffer(&self, bound: crate::memory::BoundBuffer) {
+        // SAFETY: forwarded from this function's own contract — the pool routes
+        // by `bound.block`, which it stamped at allocation.
+        unsafe { self.host_pool.borrow_mut().free(bound) }
+    }
+
+    /// Sub-allocates a device-local (VRAM) buffer from the growable pool
+    /// (plan D3/MF-8), appending a block if no existing one has room. Blocks
+    /// here are never mapped. Same reference-safety and plan-A1 contracts as
+    /// [`Self::alloc_host_buffer`].
+    pub(crate) fn alloc_device_buffer(
         &self,
-    ) -> Result<&RefCell<DeviceLocalBlock>, crate::error::VulkanError> {
-        if let Some(block) = self.device_block.get() {
-            return Ok(block);
-        }
-        // Plan A1 (identical to `host_block`): the block caches a raw
-        // `*const DeviceFns` into the boxed `device_fns` — a stable heap address.
-        // The block is dropped in this context's `Drop` (via `device_block.take()`)
-        // BEFORE the boxed fn-table is freed and before `vkDestroyDevice`, so the
-        // pointee outlives every block use. The context is `!Send + !Sync`.
-        let block = DeviceLocalBlock::new(
+        size: u64,
+        usage: crate::ffi::VkFlags,
+    ) -> Result<crate::memory::BoundBuffer, crate::error::VulkanError> {
+        Ok(self.device_pool.borrow_mut().alloc(
             self.device(),
             self.device_fns(),
             self.memory_properties(),
-            SHARED_DEVICE_BLOCK_CAPACITY,
             self.rt_buffer_device_address(),
-        )?;
-        // Race-free: `&self` is single-threaded; the cell is empty here.
-        let _ = self.device_block.set(RefCell::new(block));
-        Ok(self
-            .device_block
-            .get()
-            .expect("invariant: device_block was just set"))
+            size,
+            usage,
+        )?)
+    }
+
+    /// Returns a device-local sub-allocation to the block that minted it.
+    ///
+    /// # Safety
+    ///
+    /// Identical contract to [`Self::free_host_buffer`].
+    pub(crate) unsafe fn free_device_buffer(&self, bound: crate::memory::BoundBuffer) {
+        // SAFETY: forwarded from this function's own contract.
+        unsafe { self.device_pool.borrow_mut().free(bound) }
+    }
+
+    /// How many blocks each pool currently holds, as `(host, device)`.
+    ///
+    /// Exposed so the growth gate can assert that exceeding one block's capacity
+    /// **adds a block** rather than failing — the property S1 exists to create.
+    pub fn pool_block_counts(&self) -> (usize, usize) {
+        (self.host_pool.borrow().block_count(), self.device_pool.borrow().block_count())
+    }
+
+    /// Total bytes each pool has allocated from the driver, as `(host, device)`.
+    pub fn pool_total_capacities(&self) -> (u64, u64) {
+        (self.host_pool.borrow().total_capacity(), self.device_pool.borrow().total_capacity())
     }
 }
 
@@ -1441,26 +1479,23 @@ impl Drop for VulkanContext {
         // messenger). `module` is the live HMODULE freed once. No handle is
         // used after its destroyer runs.
         //
-        // The shared host-visible block (if ever created) is torn down FIRST: its
-        // own `Drop` calls `vkUnmapMemory` + `vkFreeMemory` through the raw
+        // Every host-visible block is torn down FIRST: each block's own `Drop`
+        // calls `vkUnmapMemory` + `vkFreeMemory` through the raw
         // `*const DeviceFns` it cached, which targets the still-live boxed
         // `device_fns` (the box is a field of `self`, dropped implicitly AFTER this
-        // `drop` body runs — plan A1), and it must precede `vkDestroyDevice`. Any
-        // buffers sub-allocated from it were already destroyed via
+        // `drop` body runs — plan A1), and they must precede `vkDestroyDevice`. Any
+        // buffers sub-allocated from them were already destroyed via
         // `RhiDevice::destroy_buffer` / the registry's `destroy_all` before the
-        // context dropped.
-        if let Some(block) = self.host_block.take() {
-            drop(block);
-        }
-        // The shared device-local block (if ever created) is torn down next, also
-        // BEFORE `vkDestroyDevice`. Its `Drop` calls only `vkFreeMemory` (it was
+        // context dropped. `clear` drops the whole `Vec` of blocks, so growth does
+        // not change what this must reach — it changes how many.
+        self.host_pool.borrow_mut().clear();
+        // Every device-local block is torn down next, also BEFORE
+        // `vkDestroyDevice`. Their `Drop` calls only `vkFreeMemory` (they are
         // never mapped) through the same plan-A1 raw `*const DeviceFns` into the
         // still-live boxed `device_fns`. Any device-local buffers sub-allocated
-        // from it were already destroyed via `RhiDevice::destroy_buffer` / the
+        // from them were already destroyed via `RhiDevice::destroy_buffer` / the
         // registry's `destroy_all` before the context dropped.
-        if let Some(block) = self.device_block.take() {
-            drop(block);
-        }
+        self.device_pool.borrow_mut().clear();
         // The shared compute layouts (if ever created) are destroyed next — they
         // are device children, so they must go before `vkDestroyDevice` (plan
         // Q1/W2). `ComputeLayouts::destroy` consumes them exactly once.

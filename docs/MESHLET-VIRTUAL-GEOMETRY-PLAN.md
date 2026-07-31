@@ -1,6 +1,10 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** BUILDING, **Rev 34** — **R0a IS LANDED AND GREEN; the campaign freeze has BEGUN.** The
+**Status:** BUILDING, **Rev 35** — **R0a AND R0-S1 ARE LANDED AND GREEN; §3.4's ingest ceiling is
+GONE.** R0-S1 made the memory pools grow, which removed the `Σᵢ fᵢ ≤ 67.11 MB` ceiling on **both**
+locations at once — so the corpus is ingestible, R0b is unblocked, and the device-local + staging
+half is a performance follow-up rather than a precondition (§8 R0-S1). The `vb_mesh` golden is
+byte-identical across the change. The
 design loop is closed (Rev 33) and the ladder is executing: `crates/boyko_app/tests/vg_r0_reference_rig.rs`
 asserts R0a's gate over [`docs/VG-R0-REFERENCE-RIG.toml`](VG-R0-REFERENCE-RIG.toml), 10 tests, both
 named red mutations demonstrated on the live record. K2 **FIRES** on this box — no Nanite reference
@@ -1217,6 +1221,56 @@ to 500 GB and it can never be met), and its truth value is **controlled by the b
 "below" to "above" and reds R0a with nothing broken. An assertion a housekeeping command can
 falsify is not a gate on UE5 availability. The figure stays in the record, as a §11-class fact.
 
+### R0-S1 — the memory pools grow — **the ingest ceiling's load-bearing half** ✅ LANDED
+
+The first of the staging rung(s) `ingest_ceiling.disposition = "new_rung"` schedules, specified as
+it lands (§8's ladder). It is deliberately the SMALLEST change that removes §3.4's ceiling, and it
+turned out to be the whole of it.
+
+**Lands:** [`BlockPool`](../crates/boyko_rhi_vulkan/src/memory.rs) in `boyko_rhi_vulkan::memory` —
+a growable pool of blocks replacing the ONE fixed-capacity block each memory location had — plus
+`BoundBuffer::block` (the owning block's index, so freeing routes to the block that minted a
+region), the context's `alloc_/free_host_buffer` + `alloc_/free_device_buffer` seams, and
+[`crates/boyko_rhi_vulkan/tests/vg_block_pool_growth.rs`](../crates/boyko_rhi_vulkan/tests/vg_block_pool_growth.rs).
+
+⚠️ **The pool is not handed out by reference, and that is a soundness point rather than style.**
+The old `host_block()` returned `&RefCell<HostVisibleBlock>` out of a `OnceCell`; a pool that grows
+stores blocks in a `Vec`, and a reference into a `Vec` element is invalidated by the very push
+growth performs. Allocation and freeing therefore happen behind context methods, so no reference to
+a block can outlive a growth.
+
+**Gate (one, four parts):** (a) the **pre-S1 mechanism still refuses** — one `HostVisibleBlock`
+given requests past its capacity returns `SubAllocExhausted`; (b) a `BlockPool` given **the same
+requests** serves them all and reports `block_count() > 1`; (c) one request LARGER than the default
+block size is served (a fresh block is sized to fit — the case a multi-million-triangle mesh's
+vertex buffer alone needs); (d) freeing returns capacity to its own block, so re-running a workload
+after freeing it does **not** grow the pool further.
+
+**RED if / mutations (DEMONSTRATED):** (a) IS the mutation, and it is the pre-S1 code path run
+live rather than a synthetic edit — *"pre-S1 single block: accepted 2 of 4 × 3145728 B, then
+refused"* against *"pooled: 4 × 3145728 B served from 2 blocks"*. Same inputs, old mechanism red,
+new mechanism green. On the shipped seam: 5 × 20 MiB through `RhiDevice::create_buffer` → *"2 host
+blocks, 134217728 B"*, where before S1 the fourth request could not be served at all.
+
+**No render change, and it is measured, not argued:** the `vb_mesh` golden re-verified
+**byte-identical** (`f4719cbf…`), and the five headless graphics tests pass. With a workload under
+one block's capacity the pool holds exactly one block and its allocation order is the old one, so
+byte-identity holds by construction as well as by measurement.
+
+> ⚠️ **WHAT THIS DOES TO §3.4, AND IT IS MORE THAN THE RUNG WAS SCOPED FOR.** §3.4 derived the
+> ceiling as `Σᵢ fᵢ ≤ 67.11 MB − R` and called the **device-local + staging path** the precondition
+> of R0b, noting it "does not by itself suffice because the device block is 64 MiB too". Growth
+> removes the ceiling on **both** pools at once, so the sum constraint is gone and the corpus is
+> ingestible; the residual bound is system RAM, which a corpus of ~10 M triangles (~440 MB at
+> 44 B/tri) does not approach on this box.
+>
+> **So the staging half is now a PERFORMANCE follow-up rather than a correctness precondition**, and
+> the smaller change was the decisive one — the opposite of what §3.4 predicted. What is NOT claimed
+> here: mesh geometry still lives in **host-visible** memory, so the GPU fetches vertices across
+> PCIe. That is a throughput question, not an ingest one, and the density census measures triangles
+> per covered pixel rather than milliseconds — but it is **unmeasured**, and it is recorded in §9.1
+> as a limit rather than reasoned away.
+
 ### R0b — corpus + ingest
 
 **Lands:** the `.glb` decoder (§3.3) registered as a second `LoaderEntry` on `MeshGpu::LOADERS`;
@@ -2007,7 +2061,14 @@ headline was false as written. Rather than a headline and a retraction, the limi
   is gated was the same false reassurance §8 gave, reached from the other side. R0c/R0d are
   unreachable either way. The device-local + staging path is
   therefore a **precondition of R0b**, not a follow-up, and does not by itself suffice because the
-  device block is 64 MiB too (§3.4). ② Separately: **no R0c gate part reads the armed frame's
+  device block is 64 MiB too (§3.4). ✅ **RESOLVED AT REV 35 by R0-S1**, via the half this bullet
+  did not name: making the pools GROW lifts the ceiling on both locations at once, so the corpus is
+  ingestible and staging is a performance follow-up after all. The bullet stays because its
+  *derivation* was right and its consequence — three rungs specified on top of an ingest that could
+  not run — is what an executed rung was needed to end. ⚠️ **The residual, unmeasured:** mesh
+  geometry still lives in host-visible memory, so the GPU fetches vertices across PCIe; the census
+  measures triangles per covered pixel rather than milliseconds, so this is recorded as a limit
+  rather than reasoned away. ② Separately: **no R0c gate part reads the armed frame's
   barrier or fence ordering** — R0c's preamble enumerates all five parts and derives it — so the
   two hazards that preamble names — a new layout transition of a per-FIF ring image in the RDG
   auto-barrier system, and a host read racing the frame fence — are *recorded and not asserted* at
@@ -2044,7 +2105,7 @@ headline was false as written. Rather than a headline and a retraction, the limi
 | R3 | **The harness measures its own resolution, or its A/B rides the ring.** | MEASURED in the sibling rung, both of them: a "spread" that was one median lattice step, and an ABAB phase perfectly aliased with `FRAMES_IN_FLIGHT == 2`. | §7 clauses 1, 3–4: ABBA with the residual reported; the quantum measured by tick GCD and the spread gate read against it. |
 | R4 | **`WAIT_BIT` readback hangs instead of failing.** | [`gpu_timing.rs`](../crates/boyko_rhi_vulkan/src/present/gpu_timing.rs):344~ documents the deadlock; three separate collectors exist because of it. | §7's written-pair bitmask, asserted before the read — binding on §14's rung, which is the one that brackets passes. Not an R0 risk any more. |
 | R5 | **Stale doc sends the importer down the `None` path.** | Was verified at authoring time (≥6 comments then claimed `VB_IMPLEMENTED == false` against [`render_path_config.rs`](../crates/boyko_render/src/render_path_config.rs):130~'s `true`); ⚠️ Rev 33: **repaired since** — a grep now returns ZERO `== false` claims, every site says `true` (rung R8). | R0b's second red mutation targets exactly this class; the separate comment-fix commit the mitigation predicted has landed, and the row stays as the record of the class. |
-| R6 | **Host-visible residency ceiling.** | [`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):320~: every mesh buffer is `HostVisibleCoherent`; §3.4 derives the 64 MiB sum ceiling. | R0b gate (d) bounds only `maxᵢ fᵢ` — the sum kills as a panic outside every gate (§3.4, §9.1). ⚠️ Rev 33 withdraws "a named follow-up, not R0 work": §3.4 made the path a **precondition of R0b**, and Rev 32's `ingest_ceiling.disposition` schedules it as the staging rung(s) preceding R0b. |
+| R6 | **Host-visible residency ceiling.** | [`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):320~: every mesh buffer is `HostVisibleCoherent`; §3.4 derived a 64 MiB sum ceiling. | ✅ **CLOSED at Rev 35 by R0-S1** — the pools grow, so neither location caps at 64 MiB and the sum constraint is gone (gate: `vg_block_pool_growth.rs`, with the pre-S1 refusal executed beside the pooled success). Residual, recorded not mitigated: mesh geometry is still host-visible, a throughput question the census does not measure. |
 | R7 | **The `vb_id` usage widening perturbs a golden.** | New. | R0c gate (a) over every VB pin. ⚠️ The mitigation cell read *"with a demonstrated red (record the copy unconditionally)"* — that mutation was retired at Rev 18 for not firing, and the cell claiming a demonstrated red is the risk register asserting the very thing the rung had lost. **(a) has no AVAILABLE red**: four sitings failed for four distinct reasons and the axis R0c changes is representation-invariant for R32G32_UINT, so (a) is recorded as an assertion whose red is structurally unavailable rather than one awaiting a mutation; §8's standing rule is that a mutation which is only argued does not count. |
 | R8 | **UE5 capture measures a different scene than our census.** | New — the two engines must load the same bytes. | §4.3: an asset that cannot be imported by both is not corpus material; R0a(c) pins the resolution across both. |
 | R9 | **Disk exhaustion masquerading as a build failure.** | This project's record: `target/` has filled this disk and surfaced as linker errors. | §11 records the measured headroom and R0a's record carries the figures as evidence. ⚠️ Rev 34 withdraws *"and R0a's negative branch re-reads it at test time"*: the executed rung does not, and must not — R0a's own text rules that free disk is recorded and **deliberately not asserted**, because the number is author-set and its truth value is controlled by the build directory. The residual is enumerated in §9.1 rather than mitigated here. |
