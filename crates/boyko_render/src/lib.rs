@@ -194,6 +194,9 @@ pub mod mesh_data;
 /// [`MeshRenderScratch`](mesh_draw::MeshRenderScratch) reused resource, the
 /// per-mesh [`DrawBatch`](mesh_draw::DrawBatch), and the
 /// count→prefix-sum→scatter [`gather_mesh_draws`](mesh_draw::gather_mesh_draws) system.
+/// VG rung R2c: camera-frustum plane extraction + the conservative AABB rejection test — the HOST
+/// half of the per-batch draw cull, and the oracle its GPU half is compared against.
+pub mod frustum;
 pub mod mesh_draw;
 /// HW-RT rung 3b + TAA W3 — the camera view-proj carry for temporal reprojection
 /// ([`MotionCam`](motion_cam::MotionCam) UBO + [`MotionCamState`](motion_cam::MotionCamState)

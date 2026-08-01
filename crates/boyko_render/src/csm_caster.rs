@@ -246,6 +246,85 @@ pub struct CsmFitSet;
 ///
 /// O(instances + batches), cold, no allocation. One `Option`/inverted-box branch per
 /// BATCH; the per-instance inner loop is branch-free (`min`/`max`/`abs` only).
+/// The Arvo abs-matrix transform of a local AABB — centre `lc`, half-extent `lh` — through one
+/// instance's row-major 3×4 affine. Returns `(world_centre, world_half_extent)`.
+///
+/// `wc[r] = Σⱼ rows[r][j]·lc[j] + rows[r][3]` and `wh[r] = Σⱼ |rows[r][j]|·lh[j]`: exact for any
+/// linear map INCLUDING shear, and strictly better than a bounding-sphere route (no `sqrt`, no √3
+/// circumscription loss, and a sphere via max-column-norm underestimates under shear). Branch-free
+/// — `abs`/`+`/`*` only.
+///
+/// # Why this is a shared primitive
+///
+/// Two consumers now fold the SAME transform to different shapes: [`reduce_bounds_into`] unions it
+/// across every instance of every caster batch (and takes its depth extreme PER INSTANCE — the D4
+/// fix), while [`batch_world_aabb`] unions it within ONE batch for the VG rung-R2c draw cull. The
+/// FOLDS legitimately differ; the TRANSFORM must not. Two hand-copies of this arithmetic that drift
+/// by one `abs` would put the shadow fit and the draw cull on different geometry — a class this
+/// repository has already paid for elsewhere — so the arithmetic lives here once.
+#[inline]
+#[must_use]
+pub fn arvo_transform(rows: &[[f32; 4]; 3], lc: [f32; 3], lh: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+    let mut wc = [0.0f32; 3];
+    let mut wh = [0.0f32; 3];
+    for r in 0..3 {
+        let row = rows[r];
+        wc[r] = row[0] * lc[0] + row[1] * lc[1] + row[2] * lc[2] + row[3];
+        wh[r] = row[0].abs() * lh[0] + row[1].abs() * lh[1] + row[2].abs() * lh[2];
+    }
+    (wc, wh)
+}
+
+/// VG rung R2c: ONE batch's world-space AABB — the union of [`arvo_transform`] over that batch's
+/// slice of the instance ring. `None` when the batch has no instances, or when `mesh_aabb` is the
+/// C0 zero-vertex sentinel (an INVERTED box, `min > max`), which is skipped for the same reason
+/// [`reduce_bounds_into`] skips it: its centre is NaN and it would poison the fold.
+///
+/// This is the DRAW cull's geometry, and its error direction is fixed by construction: the returned
+/// box CONTAINS every vertex the batch can rasterize, so a frustum test that rejects only a box
+/// wholly outside can never cull something visible. Over-inclusion costs a wasted draw.
+///
+/// # Panics / bounds
+///
+/// Debug-asserts that the batch's `[base_instance, base_instance + instance_count)` range fits
+/// `ring`; in release an out-of-range batch returns `None` rather than reading past the slice.
+#[must_use]
+pub fn batch_world_aabb(
+    batch: &DrawBatch,
+    ring: &[InstanceModelCol],
+    mesh_aabb: ([f32; 3], [f32; 3]),
+) -> Option<([f32; 3], [f32; 3])> {
+    let (mn, mx) = mesh_aabb;
+    if mn[0] > mx[0] || mn[1] > mx[1] || mn[2] > mx[2] {
+        return None;
+    }
+    let base = batch.base_instance as usize;
+    let count = batch.instance_count as usize;
+    debug_assert!(
+        base.saturating_add(count) <= ring.len(),
+        "batch_world_aabb: batch range [{base}, {}) exceeds the ring's {} instances",
+        base + count,
+        ring.len()
+    );
+    if count == 0 || base.saturating_add(count) > ring.len() {
+        return None;
+    }
+
+    let lc = [(mn[0] + mx[0]) * 0.5, (mn[1] + mx[1]) * 0.5, (mn[2] + mx[2]) * 0.5];
+    let lh = [(mx[0] - mn[0]) * 0.5, (mx[1] - mn[1]) * 0.5, (mx[2] - mn[2]) * 0.5];
+
+    let mut world_min = [f32::INFINITY; 3];
+    let mut world_max = [f32::NEG_INFINITY; 3];
+    for inst in &ring[base..base + count] {
+        let (wc, wh) = arvo_transform(&inst.rows, lc, lh);
+        for r in 0..3 {
+            world_min[r] = world_min[r].min(wc[r] - wh[r]);
+            world_max[r] = world_max[r].max(wc[r] + wh[r]);
+        }
+    }
+    Some((world_min, world_max))
+}
+
 pub fn reduce_bounds_into(
     batches: &[DrawBatch],
     ring: &[InstanceModelCol],
@@ -284,16 +363,7 @@ pub fn reduce_bounds_into(
         );
 
         for inst in &ring[base..base + count] {
-            // Arvo abs-matrix transform of the local AABB (center lc, half-extent lh)
-            // through this instance's row-major 3×4 affine — exact for any linear map,
-            // including shear (D4). Branch-free: `abs`/`min`/`max` only.
-            let mut wc = [0.0f32; 3];
-            let mut wh = [0.0f32; 3];
-            for r in 0..3 {
-                let row = inst.rows[r];
-                wc[r] = row[0] * lc[0] + row[1] * lc[1] + row[2] * lc[2] + row[3];
-                wh[r] = row[0].abs() * lh[0] + row[1].abs() * lh[1] + row[2].abs() * lh[2];
-            }
+            let (wc, wh) = arvo_transform(&inst.rows, lc, lh);
 
             for r in 0..3 {
                 world_min[r] = world_min[r].min(wc[r] - wh[r]);
