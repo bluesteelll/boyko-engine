@@ -431,11 +431,47 @@ Also: the existing classify chain's scan is one 256-thread workgroup looping blo
 >
 > **What this reprioritises:** the pyramid (R3a) is still worth building — R5/R6's meshlet cull
 > samples an HZB, so building it later means building the meshlet cull twice. But raising
-> granularity to **per-INSTANCE** unlocks BOTH the already-shipped frustum cull and any future
-> occlusion cull on the same corpus where both currently yield zero. R2's plan already recorded
-> per-instance culling as out of scope (it needs the instance ring compacted across both lanes in
-> lock-step, edits to six vertex shaders, and a golden re-bless) — this finding is the argument for
-> promoting it ahead of further work at batch granularity.
+> granularity to **per-INSTANCE** is the precondition for any of it, so it goes first. R2's plan
+> already recorded per-instance culling as out of scope (it needs the instance ring compacted
+> across both lanes in lock-step, edits to six vertex shaders, and a golden re-bless) — this
+> finding is the argument for promoting it ahead of further work at batch granularity.
+>
+> ⚠️ **CORRECTION to the paragraph this replaced (was: "per-instance unlocks BOTH culls on the
+> same corpus where both currently yield zero"). That is FALSE on the binding framing.** The claim
+> was written from the granularity argument alone, without evaluating the predicate. Evaluated:
+>
+> | committed camera path | per-INSTANCE rejects | per-BATCH rejects |
+> |---|---|---|
+> | `orbit_mid` | 0 of 45 (see caveat) | 0 of 7 |
+> | `approach_close` | 9 of 45 | 0 of 7 |
+>
+> Computed twice independently — once by the orchestrator and once by a reviewer that was given
+> the question and not the answer — from `PATHS` (`tests/vg_corpus_scene/mod.rs`), `slot_position`,
+> and `frustum.rs`'s exact `dist + radius < 0` criterion at `aspect = 1.0`, the aspect
+> `vb_cull_offscreen.rs` actually renders. Both runs agree on every verdict.
+>
+> R2c's zero therefore had **two** causes, not one. Granularity is the first. The second is that
+> the corpus is entirely **on-screen at `orbit_mid` by construction** — and `orbit_mid` is the
+> framing this file's own corpus notes name as the BINDING one, the bar a favourable verdict must
+> clear. Granularity fixes only the first cause. That second cause is also why the shipped gate
+> `vb_cull_offscreen.rs` has to FABRICATE geometry at `x = 40.0`: the corpus has no naturally
+> off-screen instance at the canonical camera.
+>
+> **Consequence for the rung: per-instance culling ships STRUCTURAL — no perf claim, and no new
+> camera path.** Claiming a win from `approach_close` while the binding framing yields zero is the
+> vacuous-selection defect the corpus notes forbid, and registering a third path chosen after the
+> fact is the same defect wearing a different hat. Its justification is that per-instance
+> granularity is the precondition for R4+; its gate is CORRECTNESS at `approach_close`, where it
+> rejects 9 and the shipped per-batch cull rejects 0.
+>
+> ⚠️ **Both counts are LOWER BOUNDS, and the `orbit_mid` zero is the soft one.** Neither run could
+> read the decoded per-asset extents (the `.glb` payload is gitignored), so both used the
+> worst-case half-extent `0.5` that normalisation guarantees. A smaller true extent gives a smaller
+> projected radius and therefore MORE rejections. Three `orbit_mid` slots clear their plane by
+> under `~0.1` against a radius of `~0.72`, so the true `orbit_mid` count is 0 *or a small
+> positive number* depending on the payload. Settle it with a CPU pass over `slot_position` ×
+> `frustum::aabb_outside_frustum` using real decoded extents before any statement stronger than
+> this one is made.
 
 **One-way door to decide now, before the first file:** "cluster" is already taken in this codebase and means **light froxel** (`cluster_cull.hlsl`, `cluster_cull_spv_sync.rs`, `ClusterGrid`, `MAX_LIGHTS_PER_CLUSTER`, the whole VB-P1e "22× at 512 lights" campaign). Use **`meshlet`** for the leaf and **`geo_group`** for the DAG group; leave `cluster` to lights. Decided, not asked.
 
