@@ -6429,6 +6429,38 @@ impl GpuSceneBundles {
             if let Some(p) = self.vb_geo_pipeline {
                 RhiDevice::destroy_compute_pipeline(ctx, p);
             }
+            // ⚠️ TEARDOWN AUDIT (2026-08-01, VG-R2c): the block ABOVE freed the R9b SPLIT
+            // pipelines and stopped there — the classify/shade/resolve family built by the SAME
+            // deferred builders was reaching this teardown UNFREED, in EVERY build (none of these
+            // is cfg-gated). Each also leaked a dedicated `VkPipelineLayout`: they are created
+            // with `bind_group_layout: Some(&self.vb_layout0)`, which sets `owns_layout = true`
+            // (`rhi_impl/device.rs`), and `destroy_compute_pipeline` is the only thing that frees
+            // it — so six pipelines were six pipelines PLUS six layouts.
+            //
+            // Root cause worth stating, because ordering was never the problem: the deferred
+            // builders write `self.x = Some(..)` hundreds of lines from here, and nothing
+            // structurally forces a matching line to appear in this fn. Same shape as the
+            // `vb_indirect`/`vb_instance_rings` buffer omission closed at rung R2c0.
+            // Reverse creation order (`build_vb_classify_pipelines` builds count → scan →
+            // scatter → shade; the textured/resolve builders run after it).
+            if let Some(p) = self.vb_shade_tex_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            if let Some(p) = self.vb_shade_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            if let Some(p) = self.vb_classify_scatter_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            if let Some(p) = self.vb_classify_scan_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            if let Some(p) = self.vb_classify_count_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            if let Some(p) = self.vb_resolve_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
             // Rung R9d: the hwrt shadow-chain split siblings — `Option`-guarded (present only on
             // an RT device), destroyed in the SAME reverse-creation order as their software twins.
             #[cfg(feature = "hwrt")]
@@ -6501,6 +6533,14 @@ impl GpuSceneBundles {
             for buf in self.vb_instance_rings {
                 RhiDevice::destroy_buffer(ctx, buf);
             }
+            // Same audit: the three UNCONDITIONALLY boot-created VB objects were also unfreed.
+            // They are created BEFORE `vb_instance_rings` (the raster/sky pipelines and the Set-0
+            // layout), so they are destroyed AFTER it — reverse acquisition. `vb_layout0` goes
+            // LAST of the three: every VB pipeline is built against it, and this file's own
+            // `sdf_forward_march_layout` block states the same rule.
+            RhiDevice::destroy_graphics_pipeline(ctx, self.vb_sky_pipeline);
+            RhiDevice::destroy_graphics_pipeline(ctx, self.vb_raster_pipeline);
+            RhiDevice::destroy_bind_group_layout(ctx, self.vb_layout0);
             // VB-P1d: the froxel cull/shade bench query pools, `Option`-guarded (built only
             // under `BOYKO_VB_BENCH` + a timestamp-capable device — every other boot leaves
             // this `None`, a no-op here).
