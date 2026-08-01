@@ -334,7 +334,7 @@ Also: the existing classify chain's scan is one 256-thread workgroup looping blo
 | Rung | Content | Gate | Golden impact |
 |---|---|---|---|
 | **R1** ✅ **LANDED** | L1 indirect seam + `GpuStage::Indirect` barrier fix | clippy/tests green; `barrier.rs` superset test updated with rationale | none — **5 pins re-measured byte-identical across all four render paths** |
-| **R2** | L2 per-instance GPU cull → indirect draw | measured Δ on R0 corpus, **decidable** by R0's floor | byte-identical if cull is conservative-exact |
+| **R2** | L2 per-instance GPU cull → indirect draw | ⚠️ **its stated gate is UNSATISFIABLE — see below** | byte-identical if cull is conservative-exact |
 | **R2b** | Write the six missing re-DXC gates | six new `*_spv_sync` tests, sensitivity-asserted | none |
 | **R3** | L7 HZB + two-pass occlusion, second-pass yield **instrumented** | measured pass-1 hit rate + second-pass marginal yield on our scenes | new pins for the HZB arm |
 | **R4** | L4 DAG-quality harness + L5(a)(b)(c) builder | triangles-at-error curve improves vs a baseline builder, monotonicity verifier green | bake-only, none |
@@ -342,6 +342,34 @@ Also: the existing classify chain's scan is one 256-thread workgroup looping blo
 | **R6** | Arm the meshlet cull + `vb_id` re-encode | owner visual bless of 9 mesh-leg pins | **all 9 move** |
 | **R7** | **The fork:** in-house A/B of the R6 cluster set through HW raster vs a SW raster prototype, with the watertightness + SW-vs-HW pixel-identity oracle as a *precondition* | decided by our numbers, not literature | prototype behind a flag |
 | **R8** | L8 fixed-cost floor collapse; then L11 churn metric; then material resolve / aggregates | per-rung | per-rung |
+
+> ⚠️ **R2's GATE CITES A FLOOR THAT DOES NOT EXIST, AND THE FLOOR IS NOW MEASURED TO BE A MOVING
+> TARGET.** *"Measured Δ … decidable by R0's floor"* names something R0 never produces: the
+> decidability apparatus left `VG-CAMPAIGN-THRESHOLDS.toml` at Rev 8, and the R0 plan states in its
+> own words that *"R0 builds no harness and measures no delta, so there is nothing here for K3 to be
+> true or false about."* **Every rung from R2 down inherits that** — R3's hit rate, R4's curve, R7's
+> *"decided by our numbers"* are all measured deltas with no stated resolution.
+>
+> [`VG-DECIDABILITY-FLOOR.md`](VG-DECIDABILITY-FLOOR.md) is that missing measurement — K3's test,
+> run as a **null experiment** (same bench, same scene, same configuration, separate processes, so
+> every observed difference is instrument plus environment). Its result is not a threshold:
+>
+> **Four runs of the same protocol on this box reported floors of 6.3 %, 14.3 %, 4.7 % and 13.5 %.**
+> Identical-protocol pairs differ by ~3×. Changing the statistic did not fix it and tripling the
+> sessions did not fix it. **The floor drifts faster than the gap between two measurements of it.**
+>
+> So the rule that replaces the number: **a claimed GPU-timing delta below ~15 % is not defensible
+> on this box without a NULL CONTROL measured in the same sitting.** That fully explains the failure
+> this document already records — a *"22×"* result measured inside a regime that *"does not
+> reproduce"* — and it makes R2's gate unsatisfiable in **both** directions at once, because R2's own
+> expected magnitude here is stated above as **"near zero"**.
+>
+> **R2 is still worth building; its GATE is what needs replacing.** Its value, as this document
+> already says, is that it *"de-risks cull-pass declaration, compaction, indirect barriers and count
+> buffers before any meshlet exists"*. Those are all **correctness** properties — byte-identical
+> goldens under a conservative-exact cull, a cull that provably drops no visible instance, the
+> indirect plumbing existing and being exercised — and none of them needs a decidable delta. A rung
+> gated on a delta it cannot resolve would either red forever or be blessed on noise.
 
 **One-way door to decide now, before the first file:** "cluster" is already taken in this codebase and means **light froxel** (`cluster_cull.hlsl`, `cluster_cull_spv_sync.rs`, `ClusterGrid`, `MAX_LIGHTS_PER_CLUSTER`, the whole VB-P1e "22× at 512 lights" campaign). Use **`meshlet`** for the leaf and **`geo_group`** for the DAG group; leave `cluster` to lights. Decided, not asked.
 
