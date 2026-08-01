@@ -441,6 +441,8 @@ pub fn build_mesh_gpu(
     // host-authored mesh LEAVES THIS FN at `VB_GEOMETRY_RESERVED_SLOT` — the boot
     // one-shot `backfill_vb_geometry_slots` re-stamps it afterwards on a VB boot.
     let geometry_slot = match geometry_table {
+        // Virtual-geometry ladder, rung R2d-1: the `gMeshBounds[]` row is the model-space
+        // AABB folded once at the top of this fn - no second pass over `vertices`.
         Some(table) if ctx.vb_geometry_table_armed() => table.register(
             ctx,
             &vertex_buffer,
@@ -448,6 +450,8 @@ pub fn build_mesh_gpu(
             &index_buffer,
             indices.len() as u32,
             index_type,
+            local_min,
+            local_max,
         ),
         _ => VB_GEOMETRY_RESERVED_SLOT,
     };

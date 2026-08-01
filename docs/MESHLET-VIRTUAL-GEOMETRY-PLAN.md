@@ -499,8 +499,8 @@ The importer's *only* obligation is to produce a `MeshData`. Everything downstre
 | `Vertex` | `#[repr(C)]`, **64 B** (static-asserted), `position`@0 / `normal`@12 / `color`@24 / `uv`@40 / `tangent`@48 | [`mesh.rs`](../crates/boyko_render/src/mesh.rs):81~-104 |
 | Index width | `Uint16` iff unique-vertex count ≤ `U16_INDEX_VERTEX_LIMIT`, else `Uint32`; the shader reads the width from `gMeshMeta[].index_width` | [`mesh.rs`](../crates/boyko_render/src/mesh.rs):124, [`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):273~ |
 | Device upload | `build_mesh_gpu(ctx, &vertices, &indices, geometry_table)` | [`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):252 |
-| VB geometry slot | claimed **iff** a live table is threaded; otherwise the record carries `VB_GEOMETRY_RESERVED_SLOT` (`0`) | [`mesh.rs`](../crates/boyko_render/src/mesh.rs):170, [`mesh_geometry_table.rs`](../crates/boyko_render/src/mesh_geometry_table.rs):66 |
-| `gMeshMeta[]` row | `{index_width, vertex_count, index_count}` padded to 16 B; `tri_count = index_count / 3` | [`mesh_geometry_table.rs`](../crates/boyko_render/src/mesh_geometry_table.rs):82-93, `:116-118` |
+| VB geometry slot | claimed **iff** a live table is threaded; otherwise the record carries `VB_GEOMETRY_RESERVED_SLOT` (`0`) | [`mesh.rs`](../crates/boyko_render/src/mesh.rs):170, [`mesh_geometry_table.rs`](../crates/boyko_render/src/mesh_geometry_table.rs):79 |
+| `gMeshMeta[]` row | `{index_width, vertex_count, index_count}` padded to 16 B; `tri_count = index_count / 3` | [`mesh_geometry_table.rs`](../crates/boyko_render/src/mesh_geometry_table.rs):95-106, `:339` |
 | Table capacity | `MESH_GEOMETRY_TABLE_CAPACITY = 4096` slots | [`geometry_bindless.rs`](../crates/boyko_rhi_vulkan/src/geometry_bindless.rs):62 |
 
 **The streamed path already threads the table.** `impl GpuUpload for MeshGpu` sets
@@ -508,7 +508,7 @@ The importer's *only* obligation is to produce a `MeshData`. Everything downstre
 aux.0.as_mut())` ([`gpu_upload.rs`](../crates/boyko_render/src/gpu_upload.rs):51, `:59`). So a **loader-decoded** mesh claims a real slot and is
 VB-visible. The **host-authored** primitives pass `None` at their own call site
 ([`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):547~), and the explicit VB sibling is `MeshAssetsVbExt::register_mesh_vb`
-([`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):641, `:647`), which every VB fixture uses.
+([`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):645, `:651`), which every VB fixture uses.
 
 > ⚠️ **CORRECTED at Rev 4 — Rev 1 through Rev 3 all stopped one function too early, and the error
 > propagated into R0b's headline red mutation (§8).** Passing `None` is **not** the end of the
@@ -2384,13 +2384,13 @@ assert), `:124` (`U16_INDEX_VERTEX_LIMIT`), `:137-186` (`MeshGpu`), `:169~` (`ge
 width), `:290~` (the once-stale `VB_IMPLEMENTED == false` comment — repaired since; it now reads
 `true`, rung R8), `:295~-305`
 (`MemoryLocation::HostVisibleCoherent`), `:529~` (`register_mesh` passes `None`), `:619~-631`
-(`MeshAssetsVbExt`), `:647~` (`register_mesh_vb` trait decl; impl at `:669`) ·
+(`MeshAssetsVbExt`), `:651~` (`register_mesh_vb` trait decl; impl at `:673`) ·
 `crates/boyko_render/src/gpu_upload.rs:41~-61` (`GpuUpload for MeshGpu`; `type Aux =
 MeshGeometryTableSlot` at `:50~`; **the threaded call at `:59`**).
 
 **Geometry table:** `crates/boyko_render/src/mesh_geometry_table.rs:17~-27` (module doc),
-`:66` (`VB_GEOMETRY_RESERVED_SLOT`), `:82-93` (`MeshGeometryMeta`), `:97` (16 B stride),
-`:116-118` (`tri_count`), `:140-142` (`mesh_buffer_usage`), `:400~` (once-stale comment, repaired
+`:79` (`VB_GEOMETRY_RESERVED_SLOT`), `:95-106` (`MeshGeometryMeta`), `:110` (16 B stride),
+`:339` (`tri_count`), `:363` (`mesh_buffer_usage`), `:400~` (once-stale comment, repaired
 since), `:413~`
 (`MeshGeometryTableSlot`) · `crates/boyko_rhi_vulkan/src/geometry_bindless.rs:61~`
 (`MESH_GEOMETRY_TABLE_CAPACITY = 4096`), `:43~` (once-stale comment, repaired since).

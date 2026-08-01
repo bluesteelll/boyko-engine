@@ -221,6 +221,10 @@ pub fn backfill_vb_geometry_slots(
     }
     for handle in pending {
         if let Some(mesh) = assets.get_mut(handle) {
+            // Virtual-geometry ladder, rung R2d-1: a back-filled mesh gets its
+            // `gMeshBounds[]` row from the AABB `build_mesh_gpu` already folded onto the
+            // record - the back-fill reaches the same rows the streamed path writes, so a
+            // host-authored mesh is not left on the "bounds unknown" sentinel.
             let slot = table.register(
                 ctx,
                 &mesh.vertex_buffer,
@@ -228,6 +232,8 @@ pub fn backfill_vb_geometry_slots(
                 &mesh.index_buffer,
                 mesh.index_count,
                 mesh.index_type,
+                mesh.local_min,
+                mesh.local_max,
             );
             mesh.geometry_slot = slot;
         }

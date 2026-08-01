@@ -472,8 +472,9 @@ pub use mesh::{MeshGpu, U16_INDEX_VERTEX_LIMIT, VERTEX_STRIDE as MESH_VERTEX_STR
 pub use mesh_assets::{MeshAssetsExt, MeshAssetsVbExt, OrphanedMeshGpu, build_mesh_gpu};
 pub use mesh_data::MeshData;
 pub use mesh_geometry_table::{
-    MESH_GEOMETRY_META_BYTES, MeshGeometryMeta, MeshGeometryTable, MeshGeometryTableSlot,
-    VB_GEOMETRY_RESERVED_SLOT, index_width_bytes, mesh_buffer_usage, tri_count,
+    MESH_BOUNDS_UNKNOWN_COORD, MESH_GEOMETRY_META_BYTES, MESH_LOCAL_BOUNDS_BYTES, MeshGeometryMeta,
+    MeshGeometryTable, MeshGeometryTableSlot, MeshLocalBounds, VB_GEOMETRY_RESERVED_SLOT,
+    index_width_bytes, mesh_buffer_usage, prefill_bounds_unknown, tri_count,
 };
 pub use shadow_atlas::{
     ATLAS_SLOT_MASK, ATLAS_SLOT_SHIFT, CASTS_SHADOW_BIT, FaceTransform, M_SLOTS, POINT_FACE_COUNT,
