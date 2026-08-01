@@ -139,6 +139,18 @@ use tlas::TlasResources;
 /// plan R7.
 pub(crate) const INSTANCE_CAPACITY: usize = 1024;
 
+/// VG rung R2c-tail: the cull readback staging's size — the 16-byte counter block followed by the
+/// first [`VB_CULL_READBACK_INDICES`] entries of the compacted visible list.
+///
+/// A PREFIX of the list, not all of it: the count is the decisive number, and the prefix is what
+/// makes "the count is right but the list is garbage" detectable. Reading the whole 4 KiB list
+/// would buy nothing the prefix does not.
+pub(crate) const VB_CULL_READBACK_BYTES: u64 = 16 + (VB_CULL_READBACK_INDICES as u64) * 4;
+
+/// How many visible-list entries the readback carries.
+pub(crate) const VB_CULL_READBACK_INDICES: usize = 32;
+
+
 /// Textured-PBR T6c (review O3): the boot capacity of
 /// [`TexturedResources::tex_instance_material_rings`] — an INDEPENDENT literal (not
 /// [`INSTANCE_CAPACITY`] itself) so the const-assert immediately below actually guards
@@ -1055,6 +1067,9 @@ pub(crate) struct GpuSceneBundles {
     pub(crate) vb_cull_visible: [BoundBuffer; FRAMES_IN_FLIGHT],
     /// VG rung R2c0: the per-FIF visible-batch counter (one live `u32` at element 0).
     pub(crate) vb_cull_count: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// VG rung R2c-tail: the per-FIF host-visible READBACK staging for the cull's outputs —
+    /// `Some` only under `BOYKO_VB_CULL_READBACK`. See [`Self::read_vb_cull`].
+    pub(crate) vb_cull_readback: Option<[BoundBuffer; FRAMES_IN_FLIGHT]>,
     /// VG rung R2c0: the batch cull's own 1-set bind-group layout. Minted together with
     /// [`Self::vb_batch_cull_pipeline`] — the pairing `GBufferTargets` relies on when it builds
     /// the ring under a layout gate that `record_vb` then `.expect()`s under a pipeline gate.
@@ -3620,7 +3635,7 @@ impl GpuSceneBundles {
         let vb_cull_visible: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
             ctx.create_buffer(&BufferDesc {
                 size: (INSTANCE_CAPACITY as u64) * 4,
-                usage: BufferUsage::STORAGE,
+                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC,
                 location: MemoryLocation::DeviceLocal,
             })
             .expect("invariant: VB cull visible-list buffer create")
@@ -3631,11 +3646,33 @@ impl GpuSceneBundles {
         let vb_cull_count: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
             ctx.create_buffer(&BufferDesc {
                 size: 16,
-                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
                 location: MemoryLocation::DeviceLocal,
             })
             .expect("invariant: VB cull counter buffer create")
         });
+
+        // VG rung R2c-tail: the cull READBACK staging — `Some` ONLY under `BOYKO_VB_CULL_READBACK`.
+        // Every golden/interactive boot leaves this `None`, so `declare_vb_graph` declares no
+        // readback pass and `record_vb` records ZERO extra commands: the byte-identity of the nine
+        // pins is unaffected by this probe existing.
+        //
+        // Host-visible COHERENT, and it is the STAGING that is host-visible — not the counter. The
+        // counter and the visible list stay DEVICE_LOCAL exactly as they ship, and the probe reads
+        // a transfer COPY of them. Making the counter itself host-visible would have been less
+        // plumbing and would have proved the cull in a configuration nobody renders.
+        let vb_cull_readback_armed = std::env::var("BOYKO_VB_CULL_READBACK").is_ok();
+        let vb_cull_readback: Option<[BoundBuffer; FRAMES_IN_FLIGHT]> =
+            vb_cull_readback_armed.then(|| {
+                core::array::from_fn(|_| {
+                    ctx.create_buffer(&BufferDesc {
+                        size: VB_CULL_READBACK_BYTES,
+                        usage: BufferUsage::TRANSFER_DST,
+                        location: MemoryLocation::HostVisibleCoherent,
+                    })
+                    .expect("invariant: VB cull readback staging create")
+                })
+            });
 
         // The batch cull's OWN 1-set layout, matching `vb_batch_cull.comp.hlsl`'s @0..@3. A
         // DEDICATED layout rather than four more bindings on `vb_layout0`, because
@@ -3873,6 +3910,7 @@ impl GpuSceneBundles {
             vb_batch_desc,
             vb_cull_visible,
             vb_cull_count,
+            vb_cull_readback,
             vb_cull_layout,
             vb_batch_cull_pipeline,
             // VB-P1a/P1b: built LAZILY by `Self::build_froxel_light_cull`, gated on the arm bit
@@ -6038,6 +6076,7 @@ impl GpuSceneBundles {
             vb_batch_desc: Some(&self.vb_batch_desc),
             vb_cull_visible: Some(&self.vb_cull_visible),
             vb_cull_count: Some(&self.vb_cull_count),
+            vb_cull_readback: self.vb_cull_readback.as_ref(),
             vb_batch_cull_pipeline: Some(&self.vb_batch_cull_pipeline),
             vb_cull_layout: Some(&self.vb_cull_layout),
             vb_geometry_set,
@@ -6241,6 +6280,34 @@ impl GpuSceneBundles {
     #[inline]
     pub(crate) fn cluster_cull_armed(&self) -> bool {
         self.cluster_cull_pipeline.is_some()
+    }
+
+    /// VG rung R2c-tail: reads this frame's cull outputs out of the readback staging —
+    /// `(visible_count, visible_prefix)`. `None` when the probe is unarmed.
+    ///
+    /// # Ordering contract
+    ///
+    /// The caller MUST have made the frame's transfer writes visible to the host before calling
+    /// (the runner waits the device idle, mirroring `read_vb_bench_ns`'s own discipline). The
+    /// staging is HOST_COHERENT, so no explicit invalidate is needed once the copy has completed;
+    /// what is needed is that it HAS completed, and that is the caller's fence, not this fn's.
+    pub(crate) fn read_vb_cull(&self, fi: usize) -> Option<(u32, [u32; VB_CULL_READBACK_INDICES])> {
+        let rb = self.vb_cull_readback.as_ref()?;
+        let mapped = rb[fi].mapped?;
+        // SAFETY: `mapped` is the live host-coherent mapping of a `VB_CULL_READBACK_BYTES` buffer
+        // created by `boot`; the reads below stay inside that range (4 bytes at offset 0, then
+        // `VB_CULL_READBACK_INDICES * 4` bytes at offset 16). `read_unaligned` is used because the
+        // mapping's alignment is the allocator's business, not this fn's. The caller's contract
+        // above guarantees the device has finished writing it.
+        unsafe {
+            let base = mapped.as_ptr();
+            let count = base.cast::<u32>().read_unaligned();
+            let mut visible = [0u32; VB_CULL_READBACK_INDICES];
+            for (i, v) in visible.iter_mut().enumerate() {
+                *v = base.add(16 + i * 4).cast::<u32>().read_unaligned();
+            }
+            Some((count, visible))
+        }
     }
 
     /// VB-P1d: `true` iff the froxel cull/shade GPU-timestamp bench collector was armed at
@@ -6529,6 +6596,11 @@ impl GpuSceneBundles {
             // `Self::scene`, so there is exactly one owner and no other destroy site.
             RhiDevice::destroy_compute_pipeline(ctx, self.vb_batch_cull_pipeline);
             RhiDevice::destroy_bind_group_layout(ctx, self.vb_cull_layout);
+            if let Some(rb) = self.vb_cull_readback {
+                for buf in rb {
+                    RhiDevice::destroy_buffer(ctx, buf);
+                }
+            }
             for buf in self.vb_cull_count {
                 RhiDevice::destroy_buffer(ctx, buf);
             }

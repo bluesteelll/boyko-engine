@@ -2685,6 +2685,11 @@ pub(crate) struct VbPassPlan {
     /// visibility decision is the literal `true` — so an armed frame is byte-identical to an
     /// unarmed one, which is the gate R2c0 is graded on.
     pub(crate) vb_batch_cull: Option<crate::framegraph::PassId>,
+    /// VG rung R2c-tail: the cull READBACK copy — `Some` only when `scene.vb_cull_readback` is
+    /// armed (the `BOYKO_VB_CULL_READBACK` probe). Declares `TRANSFER_READ` on both cull outputs,
+    /// so the graph derives the `COMPUTE -> TRANSFER` dependency that makes the atomics' writes
+    /// available to the copy. Unarmed on every golden/interactive boot ⇒ no pass, no commands.
+    pub(crate) vb_cull_readback: Option<crate::framegraph::PassId>,
     /// VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2b (gate widened at
     /// rung P2c): the `fill` pass (two `vkCmdFillBuffer`s — zeros `counts[MAX]`, sentinels
     /// `group_to_mat[G+MAX]` with `0xFFFFFFFF`, critic P1-1) declared as the FIRST producer on
@@ -3359,6 +3364,7 @@ impl Renderer<'_> {
             vb_classify_scatter,
             vb_indirect_upload,
             vb_batch_cull,
+            vb_cull_readback,
             vb_raster,
             vb_resolve,
             vb_shade,
@@ -3410,6 +3416,17 @@ impl Renderer<'_> {
                 g.buffer_access(vb_batch_desc, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
                 g.buffer_access(vb_indirect, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
                 g.buffer_access(vb_cull_visible, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
+                p
+            });
+
+            // Rung R2c-tail: the readback copy. Its own pass, so the COMPUTE -> TRANSFER
+            // dependency against the atomics above is DERIVED rather than hand-written — the same
+            // discipline every other seam in this declarator follows. Gated on the probe, so an
+            // unarmed boot declares nothing and the nine pins stay byte-identical.
+            let vb_cull_readback = (batch_cull_armed && scene.vb_cull_readback.is_some()).then(|| {
+                let p = g.add_pass("vb_cull_readback");
+                g.buffer_access(vb_cull_count, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+                g.buffer_access(vb_cull_visible, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
                 p
             });
 
@@ -3667,12 +3684,13 @@ impl Renderer<'_> {
                 vb_classify_scatter,
                 vb_indirect_upload,
                 vb_batch_cull,
+                vb_cull_readback,
                 Some(vb_raster),
                 vb_resolve,
                 vb_shade,
             )
         } else {
-            (None, None, None, None, None, None, None, None, None)
+            (None, None, None, None, None, None, None, None, None, None)
         };
 
         // ---- Rung R9b: the SPLIT arm (docs/R9-VB-SPLIT-PLAN.md §3) — declared between
@@ -4301,6 +4319,7 @@ impl Renderer<'_> {
             vb_sky,
             vb_indirect_upload,
             vb_batch_cull,
+            vb_cull_readback,
             vb_raster,
             vb_classify_fill,
             vb_classify_count,

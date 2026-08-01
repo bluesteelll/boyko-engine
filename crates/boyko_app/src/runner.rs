@@ -972,6 +972,8 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     // line gated on `vb_bench` below is dead code there and this loop stays byte-identical to
     // the pre-VB-P1d path.
     let vb_bench = host.gpu.vb_bench_armed();
+    // VG rung R2c-tail: the cull-readback probe. `false` on every non-probe run.
+    let vb_cull_probe = host.gpu.vb_cull_readback.is_some();
     // The bench's own TIMED-frame budget — decoupled from `BOYKO_WINDOW_FRAMES` (kept free for
     // its existing automated-run-cap role). `BOYKO_VB_BENCH_LIGHTS` is read here ONLY as a print
     // label — the bench scene's own setup system reads the SAME env independently to spawn the
@@ -2434,6 +2436,9 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         } else {
             0
         };
+        // VG rung R2c-tail: captured BEFORE `draws` is handed back to the scratch, because the
+        // cull readback below compares the GPU's visible count against it.
+        let draw_batch_count = draws.len();
         host.draw_scratch.put(draws);
 
         let presented_ok = matches!(&presented, Ok(true));
@@ -2475,6 +2480,45 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     &vb_bench_cull_dispatch_ns,
                     &vb_bench_shade_ns,
                 );
+                return;
+            }
+        }
+
+        // VG rung R2c-tail: read back what the batch cull ACTUALLY decided on the GPU, and stop.
+        //
+        // This is the gate the goldens cannot be: every pinned scene is entirely on-screen, so a
+        // cull that rejects nothing renders the same image as a correct one. The visible COUNT is
+        // the observable that separates them, and it is the first consumer the compaction buffers
+        // have had since rung R2c0 built them.
+        //
+        // GATED on the probe (`BOYKO_VB_CULL_READBACK`); dead code on every other run.
+        if vb_cull_probe && presented_ok {
+            // Same offline discipline as the bench block above: wait the device idle so this
+            // frame's TRANSFER writes into the host-visible staging have completed before the
+            // mapping is read. Without it the read races the copy and would usually look right.
+            ctx.wait_idle().expect("invariant: VG R2c-tail cull readback wait_idle");
+            if let Some((count, visible)) = host.gpu.read_vb_cull(s) {
+                let drawn = draw_batch_count;
+                let list: Vec<String> = visible
+                    .iter()
+                    .take(count.min(8) as usize)
+                    .map(|v| v.to_string())
+                    .collect();
+                let line = format!(
+                    "VB_CULL_READBACK batches={drawn} visible={count} list=[{}]",
+                    list.join(",")
+                );
+                println!("{line}");
+                // `BOYKO_VB_CULL_READBACK` names a PATH, the same shape `BOYKO_HOST_DUMP` uses:
+                // printing alone would leave the result readable only by a human, and this rung
+                // needs a test to ASSERT on it. Written before the return so the run's exit is
+                // unambiguous evidence the file is complete.
+                if let Ok(path) = std::env::var("BOYKO_VB_CULL_READBACK")
+                    && !path.is_empty()
+                {
+                    std::fs::write(&path, &line)
+                        .expect("invariant: the cull-readback probe must be able to write its path");
+                }
                 return;
             }
         }

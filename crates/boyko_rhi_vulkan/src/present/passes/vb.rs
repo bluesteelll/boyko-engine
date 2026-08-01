@@ -838,6 +838,37 @@ impl Renderer<'_> {
                     );
                     (self.fns.cmd_dispatch)(cmd, groups, 1, 1);
                 }
+                // Rung R2c-tail: copy the cull's outputs into host-visible staging so a test can
+                // read what the GPU actually decided. ARMED ONLY under `BOYKO_VB_CULL_READBACK`;
+                // an unarmed frame records nothing here, which is what keeps the nine pins
+                // byte-identical while this probe exists.
+                if let Some(rb) = scene.vb_cull_readback {
+                    let rb_pass = plan
+                        .vb_cull_readback
+                        .expect("invariant: vb_cull_readback armed => the readback pass is declared");
+                    // SAFETY: recording is open; `record_vb_pass` records the graph's derived
+                    // COMPUTE->TRANSFER barrier, making the cull's atomic writes AVAILABLE to the
+                    // copies below. Without it the copy could read the counter before the
+                    // dispatch's writes landed — and it would usually look right.
+                    self.record_vb_pass(rb_pass, cmd, targets, forward, vb, scene, fi);
+                    let count_region = VkBufferCopy { src_offset: 0, dst_offset: 0, size: 16 };
+                    let list_region = VkBufferCopy {
+                        src_offset: 0,
+                        dst_offset: 16,
+                        size: rb[fi].size - 16,
+                    };
+                    // SAFETY: recording is open and outside any render scope; `count[fi]` and
+                    // `visible[fi]` are live TRANSFER_SRC device buffers and `rb[fi]` is a live
+                    // TRANSFER_DST host-visible staging. The counter copy takes 16 B from a 16-B
+                    // buffer; the list copy takes `rb.size - 16` B, and `rb` is sized to
+                    // `16 + INDICES * 4` with `INDICES * 4` far below the visible list's own
+                    // `INSTANCE_CAPACITY * 4`. Both regions outlive their calls.
+                    unsafe {
+                        (self.fns.cmd_copy_buffer)(cmd, count[fi].buffer, rb[fi].buffer, 1, &count_region);
+                        (self.fns.cmd_copy_buffer)(cmd, visible[fi].buffer, rb[fi].buffer, 1, &list_region);
+                    }
+                }
+
                 // The cull's `vb_indirect` write is made visible to the raster's indirect FETCH by
                 // the graph: derived at the reader (`vb_raster`'s own `DRAW_INDIRECT` access), not
                 // here.

@@ -2522,6 +2522,15 @@ pub struct GBufferScene<'a> {
     /// VG rung R2c0: the per-FIF visible-batch counter (one `u32` at element 0), transfer-zeroed
     /// each frame ahead of the graph-derived `TRANSFER → COMPUTE` barrier.
     pub vb_cull_count: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
+    /// VG rung R2c-tail: the per-FIF HOST-VISIBLE staging the cull's outputs are copied into —
+    /// `Some` only under the `BOYKO_VB_CULL_READBACK` probe, `None` on every golden/interactive
+    /// boot (so no readback pass is declared and no command is recorded).
+    ///
+    /// The staging is what is host-visible; [`Self::vb_cull_count`] and [`Self::vb_cull_visible`]
+    /// stay DEVICE_LOCAL exactly as they ship. Probing a copy rather than relocating the counter
+    /// is the difference between proving the cull in the configuration that renders and proving it
+    /// in one nobody does.
+    pub vb_cull_readback: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
     /// VG rung R2c0: the batch-cull compute pipeline (`vb_batch_cull.comp.hlsl`), built against
     /// [`Self::vb_cull_layout`]. `None` degrades the recorder to R2a''s transfer-only record
     /// path, which is byte-identical to this one by construction.
