@@ -3401,11 +3401,13 @@ impl Renderer<'_> {
                 p
             });
 
-            // Rung R2c0: the batch cull. Reads the descriptors, rewrites each record's
-            // `instanceCount`, atomic-appends into the compacted list. INERT this rung (the
-            // shader's decision is the literal `true`), so it is armed by DEFAULT -- the null
-            // control `docs/VG-DECIDABILITY-FLOOR.md` demands has to be present in the measured
-            // configuration to be a control at all, and byte-identity is what proves it inert.
+            // Rungs R2c0/R2c: the batch cull. Reads the descriptors, tests each batch's world AABB
+            // against the six pushed frustum planes, rewrites that record's `instanceCount`, and
+            // atomic-appends survivors into the compacted list. Declared on EVERY VB frame, never
+            // behind an opt-in: R2c0 shipped it INERT (the decision was the literal `true`) because
+            // the null control `docs/VG-DECIDABILITY-FLOOR.md` demands has to be present in the
+            // MEASURED configuration to be a control at all, and the same reasoning keeps the armed
+            // version unconditional.
             let vb_batch_cull = batch_cull_armed.then(|| {
                 const RW: u32 = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
                 let p = g.add_pass("vb_batch_cull");
