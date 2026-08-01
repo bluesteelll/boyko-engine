@@ -2667,6 +2667,10 @@ pub(crate) struct VbPassPlan {
     /// (mesh-less) frame gates this OFF entirely (it needs the Decision-0 geometry table, which
     /// carries no slot with no mesh leg) and leaves `lit` for `vb_sky` + [`Self::sdf_forward_march`]
     /// alone. `record_vb` reads the SAME `mesh_leg` predicate, so a `None` here is never recorded.
+    /// Rung R2a': the inline `vkCmdUpdateBuffer` that fills this frame's indirect draw records.
+    /// `Some` iff the mesh leg records a raster (the same gate `vb_raster` itself carries) AND
+    /// `scene.vb_indirect` is armed; `None` leaves the recorder on its direct-draw path.
+    pub(crate) vb_indirect_upload: Option<crate::framegraph::PassId>,
     pub(crate) vb_raster: Option<crate::framegraph::PassId>,
     /// VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2b (gate widened at
     /// rung P2c): the `fill` pass (two `vkCmdFillBuffer`s — zeros `counts[MAX]`, sentinels
@@ -2830,11 +2834,11 @@ pub(crate) struct VbBarrierSink<'a> {
     /// [`ForwardBarrierSink`]'s own trio uses; a `light_cull.is_none()` frame never routes a
     /// barrier naming these ResIds anyway, so the placeholder is inert.
     #[cfg(not(feature = "hwrt"))]
-    pub(crate) buffers: [VkBuffer; 8],
+    pub(crate) buffers: [VkBuffer; 9],
     /// See the `not(hwrt)` variant's doc: `hwrt` grows this by one (`tlas_instances` at index 5,
     /// the VB-P1a trio shifts to 6/7/8).
     #[cfg(feature = "hwrt")]
-    pub(crate) buffers: [VkBuffer; 9],
+    pub(crate) buffers: [VkBuffer; 10],
 }
 
 /// The number of IMAGE resources [`Renderer::declare_vb_graph`] declares — see
@@ -3192,6 +3196,12 @@ impl Renderer<'_> {
             "light_index_alloc",
             ResSync::seeded_writer(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT),
         );
+        // Rung R2a': the indirect-draw record buffer. Declared LAST so every existing sink slot
+        // keeps its index -- appending is the one edit shape that cannot silently re-key a barrier.
+        // Frame-private (per-FIF), so `add_buffer` (undefined seed) exactly like `vb_instance_ring`:
+        // a sibling in-flight frame touches a DIFFERENT slot, so there is no cross-frame WAR to
+        // seed against, and this frame's own TRANSFER write is its first touch.
+        let vb_indirect = g.add_buffer("vb_indirect");
 
         // Pass `light_upload` (async light-table re-upload) — the SAME gate
         // `declare_forward_graph`'s own `light_upload` pass uses.
@@ -3309,13 +3319,34 @@ impl Renderer<'_> {
         // `mesh_leg` (BOTH arms consume the `vb_id`/`vb_depth` it produces; the split's own
         // producers/consumer are declared AFTER this block, before `sdf_forward_march`).
         let split = scene.path_vb_split();
-        let (vb_classify_fill, vb_classify_count, vb_classify_scan, vb_classify_scatter, vb_raster, vb_resolve, vb_shade) = if mesh_leg {
+        let (
+            vb_classify_fill,
+            vb_classify_count,
+            vb_classify_scan,
+            vb_classify_scatter,
+            vb_indirect_upload,
+            vb_raster,
+            vb_resolve,
+            vb_shade,
+        ) = if mesh_leg {
             // Pass `vb_raster`: writes `vb_id` (COLOR, first-touch) + `vb_depth` (DEPTH,
             // first-touch, `GREATER`, write ON — Decision 4). Reads `vb_instance_ring` (VERTEX).
             // Declared UNCONDITIONALLY under `mesh_leg` — BOTH the fused (`vb_resolve`) and
             // classified (`vb_shade`) `lit`-producer arms re-fetch geometry through the `vb_id`
             // this pass writes.
+            // Rung R2a': the inline `vkCmdUpdateBuffer` that fills this frame's draw records.
+            // Its own pass, so the graph DERIVES the TRANSFER -> DRAW_INDIRECT dependency against
+            // the raster's read below instead of anyone hand-writing it.
+            let vb_indirect_upload = g.add_pass("vb_indirect_upload");
+            g.buffer_access(vb_indirect, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+
             let vb_raster = g.add_pass("vb_raster");
+            // The consumer side of that dependency: the indirect FETCH stage, not a shader read.
+            g.buffer_access(
+                vb_indirect,
+                VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+            );
             g.image_access(
                 vb_id,
                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -3556,12 +3587,13 @@ impl Renderer<'_> {
                 vb_classify_count,
                 vb_classify_scan,
                 vb_classify_scatter,
+                Some(vb_indirect_upload),
                 Some(vb_raster),
                 vb_resolve,
                 vb_shade,
             )
         } else {
-            (None, None, None, None, None, None, None)
+            (None, None, None, None, None, None, None, None)
         };
 
         // ---- Rung R9b: the SPLIT arm (docs/R9-VB-SPLIT-PLAN.md §3) — declared between
@@ -4188,6 +4220,7 @@ impl Renderer<'_> {
             csm,
             atlas: atlas_pass,
             vb_sky,
+            vb_indirect_upload,
             vb_raster,
             vb_classify_fill,
             vb_classify_count,
@@ -4316,6 +4349,12 @@ impl Renderer<'_> {
                 scene.cluster_grid.map_or(scene.light_table.buffer, |b| b.buffer),
                 scene.light_index.map_or(scene.light_table.buffer, |b| b.buffer),
                 scene.light_index_alloc.map_or(scene.light_table.buffer, |b| b.buffer),
+                // Rung R2a': the indirect record buffer, declared LAST so no slot above moved.
+                // Placeholder-backed when unarmed, the same bound-but-unread idiom the froxel trio
+                // uses -- an unarmed frame declares no pass naming this ResId, so it is inert.
+                scene
+                    .vb_indirect
+                    .map_or(scene.light_table.buffer, |r| r[fi].buffer),
             ],
             // Rung R9d (buffer ResId 5): `tlas_instances` — mirrors [`GbufferBarrierSink`]'s own
             // `scene.tlas.map_or(VkBuffer::NULL, |t| t.instance_array.buffer)` source.
@@ -4341,6 +4380,12 @@ impl Renderer<'_> {
                 scene.cluster_grid.map_or(scene.light_table.buffer, |b| b.buffer),
                 scene.light_index.map_or(scene.light_table.buffer, |b| b.buffer),
                 scene.light_index_alloc.map_or(scene.light_table.buffer, |b| b.buffer),
+                // Rung R2a': the indirect record buffer, declared LAST so no slot above moved.
+                // Placeholder-backed when unarmed, the same bound-but-unread idiom the froxel trio
+                // uses -- an unarmed frame declares no pass naming this ResId, so it is inert.
+                scene
+                    .vb_indirect
+                    .map_or(scene.light_table.buffer, |r| r[fi].buffer),
             ],
         };
         self.frame_graph.record_pass(pass, &mut sink);

@@ -1035,6 +1035,17 @@ pub(crate) struct GpuSceneBundles {
     /// VisibilityBuffer` (an `Option<[BoundBuffer; FRAMES_IN_FLIGHT]>`, mirroring
     /// `vb_resolve_pipeline`'s own `Option` shape) is a follow-up, not done this rung.
     pub(crate) vb_instance_rings: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// Virtual-geometry rung R2a': the per-FIF `VkDrawIndexedIndirectCommand` records the VB
+    /// id-raster's indirect draws fetch. DEVICE-LOCAL on purpose -- a host-visible buffer written
+    /// before `vkQueueSubmit` needs no barrier at all, so it would exercise none of the indirect
+    /// plumbing this rung exists to de-risk. Filled each frame by an inline `vkCmdUpdateBuffer`
+    /// (TRANSFER), read by `vkCmdDrawIndexedIndirect` (DRAW_INDIRECT), with the dependency between
+    /// them DERIVED by the framegraph rather than hand-written.
+    ///
+    /// Per-FIF and therefore FRAME-PRIVATE, so the graph declares it undefined-seeded exactly like
+    /// `vb_instance_ring` -- a sibling in-flight frame touches a different slot and there is no
+    /// cross-frame WAR to seed against.
+    pub(crate) vb_indirect: [BoundBuffer; FRAMES_IN_FLIGHT],
 
     // ── VB-P1b: the froxel light-cull machinery — built LAZILY by
     // [`Self::build_froxel_light_cull`], gated entirely on `ResolvedRenderPath::froxel_light_cull`
@@ -3554,6 +3565,25 @@ impl GpuSceneBundles {
             .expect("invariant: VB instance ring buffer create")
         });
 
+        // Rung R2a': one record per DrawBatch. `INSTANCE_CAPACITY` is a generous ceiling for the
+        // BATCH count (batches <= instances, since every batch holds at least one instance), and at
+        // 20 B/record the whole array is 20 KiB -- comfortably inside `vkCmdUpdateBuffer`'s 65536-byte
+        // inline limit, which is the constraint that actually binds here.
+        let vb_indirect_bytes =
+            (INSTANCE_CAPACITY as u64) * u64::from(boyko_rhi_vulkan::ffi::DRAW_INDEXED_INDIRECT_STRIDE);
+        const _: () = assert!(
+            INSTANCE_CAPACITY * 20 <= 65536,
+            "rung R2a': the indirect record array must fit vkCmdUpdateBuffer's inline limit"
+        );
+        let vb_indirect: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+            ctx.create_buffer(&BufferDesc {
+                size: vb_indirect_bytes,
+                usage: BufferUsage::INDIRECT | BufferUsage::TRANSFER_DST,
+                location: MemoryLocation::DeviceLocal,
+            })
+            .expect("invariant: VB indirect-draw record buffer create")
+        });
+
         let dispatch_group_count_x = (cw * ch).div_ceil(LOCAL_SIZE_X);
         // SSAA (W1): the dispatch grid must cover every composite pixel — see the
         // enumeration comment at the top of this fn. A future edit that keyed this to
@@ -3729,6 +3759,7 @@ impl GpuSceneBundles {
             // — see that fn's doc.
             vb_shade_tex_pipeline: None,
             vb_instance_rings,
+            vb_indirect,
             // VB-P1a/P1b: built LAZILY by `Self::build_froxel_light_cull`, gated on the arm bit
             // `ResolvedRenderPath::froxel_light_cull` (VB path AND `LightingConfig::
             // clusters_enabled`, default OFF — an owner opt-in) — see that fn's doc.
@@ -5872,6 +5903,7 @@ impl GpuSceneBundles {
             vb_resolve_pipeline: self.vb_resolve_pipeline.as_ref(),
             vb_layout0: Some(&self.vb_layout0),
             vb_instance_ring: Some(&self.vb_instance_rings),
+            vb_indirect: Some(&self.vb_indirect),
             vb_geometry_set,
             // VB-P2 classification plan, rung P2a (dark infra): `Some` only AFTER
             // `build_vb_classify_pipelines` ran (the SAME `vb_resolve_pipeline` `Option` shape

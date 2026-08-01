@@ -563,6 +563,9 @@ pub struct DeviceFns {
     /// `vkCmdFillBuffer` — the Lighting-L1 cull's per-frame reset of the `LightIndexAlloc`
     /// counter to 0 before the cull dispatch (Vulkan 1.0 core, always present).
     pub cmd_fill_buffer: PfnVkCmdFillBuffer,
+    /// `vkCmdUpdateBuffer` — virtual-geometry rung R2a': the inline (<=64 KiB) TRANSFER write that
+    /// fills the indirect-draw records. Vulkan 1.0 core, no feature bit, always present.
+    pub cmd_update_buffer: PfnVkCmdUpdateBuffer,
     /// `vkCmdClearColorImage` — the SDFDDGI I1 boot-clear of the probe IRRADIANCE + DEPTH
     /// color atlases to defined values (Vulkan 1.0 core, always present).
     pub cmd_clear_color_image: PfnVkCmdClearColorImage,
@@ -1969,6 +1972,7 @@ fn load_device_fns(
             cmd_pipeline_barrier: load_device_command(gdpa, device, c"vkCmdPipelineBarrier")?,
             cmd_copy_buffer: load_device_command(gdpa, device, c"vkCmdCopyBuffer")?,
             cmd_fill_buffer: load_device_command(gdpa, device, c"vkCmdFillBuffer")?,
+            cmd_update_buffer: load_device_command(gdpa, device, c"vkCmdUpdateBuffer")?,
             cmd_clear_color_image: load_device_command(gdpa, device, c"vkCmdClearColorImage")?,
             create_fence: load_device_command(gdpa, device, c"vkCreateFence")?,
             destroy_fence: load_device_command(gdpa, device, c"vkDestroyFence")?,

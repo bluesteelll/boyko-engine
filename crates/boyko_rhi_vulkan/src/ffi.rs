@@ -3461,6 +3461,50 @@ pub type PfnVkCmdFillBuffer = unsafe extern "system" fn(
     data: u32,
 );
 
+/// `PFN_vkCmdUpdateBuffer` — writes up to 65536 bytes INLINE in the command buffer.
+///
+/// Virtual-geometry rung R2a′. Vulkan 1.0 core, no feature bit. It is a TRANSFER-stage operation,
+/// which is exactly why it is used here instead of a host-visible buffer: a host write completed
+/// before `vkQueueSubmit` needs no barrier at all, so a host-filled indirect buffer would exercise
+/// none of the indirect-barrier plumbing this rung exists to de-risk.
+///
+/// ⚠️ Must be recorded OUTSIDE a render-pass instance (`VUID-vkCmdUpdateBuffer-renderpass`), and
+/// both `dst_offset` and `data_size` must be multiples of 4.
+pub type PfnVkCmdUpdateBuffer = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    dst_buffer: VkBuffer,
+    dst_offset: VkDeviceSize,
+    data_size: VkDeviceSize,
+    p_data: *const core::ffi::c_void,
+);
+
+/// `VkDrawIndexedIndirectCommand` — the 20-byte record `vkCmdDrawIndexedIndirect` fetches.
+///
+/// Field order and size are ABI, not a choice: the GPU reads this layout directly.
+///
+/// ⚠️ **`first_instance` MUST be 0 on this device.** `drawIndirectFirstInstance` is left `VK_FALSE`
+/// (only `samplerAnisotropy` is enabled), and the validation layers cannot read buffer CONTENTS —
+/// only GPU-assisted validation would catch a violation, so a nonzero value here is a silent
+/// corruption class. Every producer asserts it host-side.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VkDrawIndexedIndirectCommand {
+    pub index_count: u32,
+    pub instance_count: u32,
+    pub first_index: u32,
+    pub vertex_offset: i32,
+    pub first_instance: u32,
+}
+
+/// Bytes per [`VkDrawIndexedIndirectCommand`] — the `stride` an indirect draw is given, and the
+/// multiplier for a record's byte offset. A multiple of 4, so every record offset satisfies
+/// `VUID-vkCmdDrawIndexedIndirect-offset-02710`.
+pub const DRAW_INDEXED_INDIRECT_STRIDE: u32 = 20;
+
+const _: () = assert!(
+    core::mem::size_of::<VkDrawIndexedIndirectCommand>() == DRAW_INDEXED_INDIRECT_STRIDE as usize
+);
+
 /// `PFN_vkCmdClearColorImage` — clears the given subresource ranges of `image` (which must
 /// be in `image_layout`, one of `GENERAL`/`TRANSFER_DST_OPTIMAL`) to `p_color` (Vulkan 1.0
 /// core, always present). SDFDDGI I1 uses it to boot-clear the probe IRRADIANCE

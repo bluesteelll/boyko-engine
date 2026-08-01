@@ -2377,6 +2377,10 @@ pub struct GBufferScene<'a> {
     /// — built from `boyko_render::mesh_draw::MeshRenderScratch::vb_ring`, uploaded ONLY on a
     /// `VisibilityBuffer`-resolved boot. `None` rationale as [`Self::forward_pipeline`].
     pub vb_instance_ring: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
+    /// Rung R2a': the per-FIF `VkDrawIndexedIndirectCommand` record buffer the VB id-raster's
+    /// indirect draws fetch. `Some` on every VB boot; `None` degrades the recorder to the direct
+    /// `vkCmdDrawIndexed` path it replaced, so a boot that failed to build it still renders.
+    pub vb_indirect: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
     /// The Decision-0 bindless per-mesh geometry table's OWN Set (`gMeshVerts[]`/
     /// `gMeshIndices[]`/`gMeshMeta` — `boyko_render::mesh_geometry_table::MeshGeometryTable::set()`),
     /// threaded down as the raw low-level type (this crate cannot depend on `boyko_render`, which

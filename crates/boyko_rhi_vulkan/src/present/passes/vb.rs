@@ -601,9 +601,68 @@ impl Renderer<'_> {
         if scene.resolved_render_path.mesh_leg {
             // === Pass `vb_raster`: the mesh id-raster pass (Decision 9) — writes `vb_id` (COLOR,
             // R32G32_UINT) + `vb_depth` (DEPTH, HW reverse-Z, first-touch `GREATER`, write ON). ===
+            // === Rung R2a': fill this frame's indirect draw records, BEFORE any render scope. ===
+            //
+            // `vkCmdUpdateBuffer` is forbidden inside a render pass instance
+            // (VUID-vkCmdUpdateBuffer-renderpass), so it lands here rather than beside the draws it
+            // feeds. Written in CHUNKS: a single update would need the whole record array on the
+            // stack (a cap, and 20 KiB of it), while chunking bounds the stack at one chunk and
+            // removes the cap entirely. Each chunk's byte offset is `i * 20`, a multiple of 4, so
+            // every update satisfies `VUID-vkCmdUpdateBuffer-dstOffset-00036`.
+            if let Some(indirect) = scene.vb_indirect {
+                let upload = plan
+                    .vb_indirect_upload
+                    .expect("invariant: mesh_leg + vb_indirect => vb_indirect_upload pass declared");
+                // SAFETY: recording is open; `record_vb_pass` records the graph's derived
+                // barriers-in for the "vb_indirect_upload" pass (a first touch of a frame-private
+                // buffer, so typically none) into `cmd`.
+                self.record_vb_pass(upload, cmd, targets, forward, vb, scene, fi);
+
+                const CHUNK: usize = 64;
+                let stride = u64::from(DRAW_INDEXED_INDIRECT_STRIDE);
+                for (c, batches) in scene.mesh_draw.chunks(CHUNK).enumerate() {
+                    let mut records = [VkDrawIndexedIndirectCommand::default(); CHUNK];
+                    for (r, batch) in records.iter_mut().zip(batches) {
+                        *r = VkDrawIndexedIndirectCommand {
+                            index_count: batch.index_count,
+                            instance_count: batch.instance_count,
+                            first_index: 0,
+                            vertex_offset: 0,
+                            // ⚠️ MUST stay 0: `drawIndirectFirstInstance` is not enabled on this
+                            // device, and the validation layers cannot read buffer CONTENTS, so a
+                            // nonzero value here is silent corruption rather than a caught error.
+                            // The VS reads `instances[pc.base_instance + SV_InstanceID]`, so the
+                            // base travels in the push constant exactly as it did before this rung.
+                            first_instance: 0,
+                        };
+                    }
+                    debug_assert!(
+                        records.iter().all(|r| r.first_instance == 0),
+                        "invariant: drawIndirectFirstInstance is VK_FALSE on this device"
+                    );
+                    let bytes = (batches.len() as u64) * stride;
+                    // SAFETY: recording is open and NO render-pass instance is active (the raster's
+                    // `cmd_begin_rendering` is below); `indirect[fi]` is a live DEVICE_LOCAL buffer
+                    // created with TRANSFER_DST at `INSTANCE_CAPACITY` records, and this write ends
+                    // at `(c * CHUNK + batches.len()) * stride`, which the debug assert on the draw
+                    // loop below bounds; `records` outlives the call; `bytes` is a multiple of 4 and
+                    // at most `CHUNK * 20` = 1280, inside the 65536-byte inline limit.
+                    unsafe {
+                        (self.fns.cmd_update_buffer)(
+                            cmd,
+                            indirect[fi].buffer,
+                            (c * CHUNK) as u64 * stride,
+                            bytes,
+                            records.as_ptr().cast(),
+                        );
+                    }
+                }
+            }
+
             // SAFETY: recording is open; `record_vb_pass` records the graph's derived
             // UNDEFINED→COLOR_ATTACHMENT_OPTIMAL (`vb_id`) + UNDEFINED→DEPTH_ATTACHMENT_OPTIMAL
-            // (`vb_depth`) barriers-in for the "vb_raster" pass into `cmd`.
+            // (`vb_depth`) barriers-in for the "vb_raster" pass into `cmd` — and, since rung R2a',
+            // the TRANSFER→DRAW_INDIRECT dependency against the update above.
             self.record_vb_pass(
                 plan.vb_raster.expect("invariant: mesh_leg => vb_raster pass declared (declare_vb_graph)"),
                 cmd,
@@ -686,7 +745,7 @@ impl Renderer<'_> {
                 );
                 (self.fns.cmd_set_viewport)(cmd, 0, 1, &full_viewport);
                 (self.fns.cmd_set_scissor)(cmd, 0, 1, &full_area);
-                for batch in scene.mesh_draw {
+                for (i, batch) in scene.mesh_draw.iter().enumerate() {
                     let base = batch.base_instance;
                     (self.fns.cmd_push_constants)(
                         cmd,
@@ -698,7 +757,33 @@ impl Renderer<'_> {
                     );
                     (self.fns.cmd_bind_vertex_buffers)(cmd, 0, 1, &batch.vertex_buffer.buffer, &vertex_offset);
                     (self.fns.cmd_bind_index_buffer)(cmd, batch.index_buffer.buffer, 0, batch.index_type);
-                    (self.fns.cmd_draw_indexed)(cmd, batch.index_count, batch.instance_count, 0, 0, 0);
+                    // Rung R2a': the indirect seam. The record was filled above with EXACTLY the
+                    // arguments the direct call took, so this frame is byte-identical BY
+                    // CONSTRUCTION rather than by measurement — the point of the rung is the
+                    // TRANSFER→DRAW_INDIRECT dependency and the record path, not a different image.
+                    //
+                    // `draw_count = 1` is not a choice: `multiDrawIndirect` is not enabled on this
+                    // device, so the only legal values are 0 and 1. With `draw_count == 1` the
+                    // `stride` argument is unread, and it is passed truthfully anyway.
+                    match scene.vb_indirect {
+                        Some(indirect) => (self.fns.cmd_draw_indexed_indirect)(
+                            cmd,
+                            indirect[fi].buffer,
+                            i as u64 * u64::from(DRAW_INDEXED_INDIRECT_STRIDE),
+                            1,
+                            DRAW_INDEXED_INDIRECT_STRIDE,
+                        ),
+                        // A boot that failed to build the record buffer still renders, on the
+                        // direct path this rung replaced.
+                        None => (self.fns.cmd_draw_indexed)(
+                            cmd,
+                            batch.index_count,
+                            batch.instance_count,
+                            0,
+                            0,
+                            0,
+                        ),
+                    }
                 }
                 (self.fns.cmd_end_rendering)(cmd);
             }
