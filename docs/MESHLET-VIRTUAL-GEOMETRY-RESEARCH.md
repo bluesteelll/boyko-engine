@@ -334,7 +334,10 @@ Also: the existing classify chain's scan is one 256-thread workgroup looping blo
 | Rung | Content | Gate | Golden impact |
 |---|---|---|---|
 | **R1** ✅ **LANDED** | L1 indirect seam + `GpuStage::Indirect` barrier fix | clippy/tests green; `barrier.rs` superset test updated with rationale | none — **5 pins re-measured byte-identical across all four render paths** |
-| **R2** | L2 per-instance GPU cull → indirect draw | ⚠️ **its stated gate is UNSATISFIABLE — see below** | byte-identical if cull is conservative-exact |
+| **R2** | L2 per-instance GPU cull → indirect draw | ⚠️ **its stated gate was UNSATISFIABLE, and three of its premises were FALSE — re-scoped into R2a′/R2c0/R2c below** | byte-identical if cull is conservative-exact |
+| **R2a′** ✅ **LANDED** (`d12e9ff`) | The indirect draw seam under a REAL barrier: device-local `VkDrawIndexedIndirectCommand` records filled by an inline `vkCmdUpdateBuffer`, `TRANSFER → DRAW_INDIRECT` **derived by the framegraph** *(R2c0 re-sourced that edge onto the cull's `COMPUTE` write — the graph tracks the last writer, so no declaration changed)* | 9 pins byte-identical across all four render paths + **validation-layer clean** on the VB pin (indirect draws carry VUIDs ordinary draws do not) | none |
+| **R2c0** ✅ **LANDED** | Compaction + count buffers, provably **INERT** — the batch-cull compute pass, its atomic-append visible list and its counter, dispatched every VB frame and changing nothing. **The NULL CONTROL** `VG-DECIDABILITY-FLOOR.md` says every later delta needs | 9 pins byte-identical + validation-clean, **an artifact-level inertness census** (`vb_batch_cull_spv_sync.rs`: `OpSelect == 0` ⇒ the decision folded away, `OpAtomicIAdd == 1` ⇒ the machinery is present, so neither half can be vacuous), **and the derived barrier chain asserted from the sync algebra** (`vb_indirect_barrier_chain.rs`: WAW upload→cull then RAW cull→raster, with a sensitivity control — a golden cannot see a missing buffer dependency, and neither can the validation layers) | none |
+| **R2c** | Per-batch, all-or-nothing **camera** cull on the 4 camera-frustum sites only | host-oracle drawn-set equality + **one NEW pin with genuine off-screen geometry** (today's scenes are fully in frame and therefore cannot demonstrate that the cull ever culls) | none on existing pins |
 | **R2b** | Write the six missing re-DXC gates | six new `*_spv_sync` tests, sensitivity-asserted | none |
 | **R3** | L7 HZB + two-pass occlusion, second-pass yield **instrumented** | measured pass-1 hit rate + second-pass marginal yield on our scenes | new pins for the HZB arm |
 | **R4** | L4 DAG-quality harness + L5(a)(b)(c) builder | triangles-at-error curve improves vs a baseline builder, monotonicity verifier green | bake-only, none |
@@ -370,6 +373,34 @@ Also: the existing classify chain's scan is one 256-thread workgroup looping blo
 > goldens under a conservative-exact cull, a cull that provably drops no visible instance, the
 > indirect plumbing existing and being exercised — and none of them needs a decidable delta. A rung
 > gated on a delta it cannot resolve would either red forever or be blessed on noise.
+
+> ⚠️ **AND THREE OF R2's PREMISES WERE FALSE IN THIS ENGINE.** Verified by opening the files before
+> writing a line of it, which is why the re-scoping above exists at all:
+>
+> 1. **`instanceCount` is a PREFIX, not a mask.** Every VS reads
+>    `instances[pc.base_instance + SV_InstanceID]`, so lowering `instanceCount` from N to K draws the
+>    **first K of the bucket**, not the K visible ones. If instances {2,7,9} of 10 survive, no
+>    `instanceCount` expresses that. *"Overwrite `instanceCount` from a frustum test"* therefore
+>    **cannot be a per-instance cull** — it is all-or-nothing per batch, which is what R2c is.
+> 2. **`multiDrawIndirect` is not enabled** (`device.rs` enables only `samplerAnisotropy`), so
+>    `drawCount` must be 0 or 1. R2's stated endpoint *"one indirect draw"* additionally needs
+>    `drawIndirectCount`, `vkCmdDrawIndexedIndirectCount` (deliberately unloaded) **and** a merged
+>    vertex/index arena that does not exist — all ten draw loops rebind a per-mesh VB/IB with a
+>    per-mesh index width. **That endpoint is gated on an arena rung, not on a cull, and has left R2.**
+> 3. **There is no per-instance mesh id on the GPU** — the `mesh_ids` lane is documented
+>    *"Host-side only; the raster draw does not read it"*, and `GBufferMeshDraw` carries no
+>    `mesh_id`. A cull cannot look up per-mesh bounds by id, which is why R2c's bounds are
+>    **host-computed per-batch world AABBs** rather than a per-mesh GPU table.
+>
+> Also recorded rather than smuggled: **true per-instance culling** needs the instance ring
+> compacted across **both** lanes in lock-step (or an indirection lane), edits to six vertex
+> shaders, and a golden re-bless. Its own rung, budgeted honestly — not a sub-clause of R2.
+>
+> One trap worth stating because nothing would catch it: `drawIndirectFirstInstance` is **also**
+> `VK_FALSE`, and the validation layers **cannot read buffer CONTENTS**. A non-zero `firstInstance`
+> in a record is therefore silent corruption, not a caught error. R2a′ asserts it host-side, and
+> R2c0's shader deliberately writes **only** word 1 of each record so the invariant stays inside
+> the reach of that assert.
 
 **One-way door to decide now, before the first file:** "cluster" is already taken in this codebase and means **light froxel** (`cluster_cull.hlsl`, `cluster_cull_spv_sync.rs`, `ClusterGrid`, `MAX_LIGHTS_PER_CLUSTER`, the whole VB-P1e "22× at 512 lights" campaign). Use **`meshlet`** for the leaf and **`geo_group`** for the DAG group; leave `cluster` to lights. Decided, not asked.
 

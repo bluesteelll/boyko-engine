@@ -52,7 +52,8 @@ use boyko_rhi_vulkan::compute::{
     sdf_ssao_spirv_variant, smaa_blend_fs_spirv, smaa_edge_fs_spirv, smaa_weight_fs_spirv,
     SSAO_ATROUS_PUSH_BYTES, ssao_atrous_read8_spirv, ssao_atrous_spirv, ssao_atrous_write8_spirv,
     SSAO_QUALITY_COUNT, SSAO_QUALITY_HIGH, SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM,
-    ssaa_downsample_fs_spirv, taa_resolve_spirv, tile_grid_extent, VIEWT_FROM_DEPTH_PUSH_BYTES,
+    ssaa_downsample_fs_spirv, taa_resolve_spirv, tile_grid_extent, VB_BATCH_CULL_PUSH_BYTES,
+    VB_BATCH_DESC_STRIDE, vb_batch_cull_spirv, VIEWT_FROM_DEPTH_PUSH_BYTES,
     VIEWT_FROM_DEPTH_RZ_PUSH_BYTES,
     vb_classify_count_spirv, vb_classify_scan_spirv, vb_classify_scatter_spirv,
     vb_geo_spirv, vb_raster_fs_spirv, vb_raster_vs_spirv, vb_resolve_spirv, vb_resolve_froxel_spirv,
@@ -1046,6 +1047,20 @@ pub(crate) struct GpuSceneBundles {
     /// `vb_instance_ring` -- a sibling in-flight frame touches a different slot and there is no
     /// cross-frame WAR to seed against.
     pub(crate) vb_indirect: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// VG rung R2c0: the per-FIF `VbBatchDesc` array the batch cull reads (one 32-byte descriptor
+    /// per `DrawBatch`), transfer-filled each frame beside the indirect records.
+    pub(crate) vb_batch_desc: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// VG rung R2c0: the per-FIF compacted visible-batch list. Written and UNREAD — see
+    /// `GBufferScene::vb_cull_visible`'s doc for why it exists before a consumer does.
+    pub(crate) vb_cull_visible: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// VG rung R2c0: the per-FIF visible-batch counter (one live `u32` at element 0).
+    pub(crate) vb_cull_count: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// VG rung R2c0: the batch cull's own 1-set bind-group layout. Minted together with
+    /// [`Self::vb_batch_cull_pipeline`] — the pairing `GBufferTargets` relies on when it builds
+    /// the ring under a layout gate that `record_vb` then `.expect()`s under a pipeline gate.
+    pub(crate) vb_cull_layout: VulkanBindGroupLayout,
+    /// VG rung R2c0: the batch-cull compute pipeline (`vb_batch_cull.comp.hlsl`).
+    pub(crate) vb_batch_cull_pipeline: ComputePipeline,
 
     // ── VB-P1b: the froxel light-cull machinery — built LAZILY by
     // [`Self::build_froxel_light_cull`], gated entirely on `ResolvedRenderPath::froxel_light_cull`
@@ -3578,11 +3593,106 @@ impl GpuSceneBundles {
         let vb_indirect: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
             ctx.create_buffer(&BufferDesc {
                 size: vb_indirect_bytes,
-                usage: BufferUsage::INDIRECT | BufferUsage::TRANSFER_DST,
+                // Rung R2c0 added STORAGE: the batch cull rewrites `instanceCount` in place, so
+                // the same allocation is now both a compute UAV and an indirect-fetch source.
+                usage: BufferUsage::INDIRECT | BufferUsage::TRANSFER_DST | BufferUsage::STORAGE,
                 location: MemoryLocation::DeviceLocal,
             })
             .expect("invariant: VB indirect-draw record buffer create")
         });
+
+        // --- VG rung R2c0: the batch cull's three buffers. All per-FIF and DEVICE_LOCAL: the
+        // descriptors are transfer-filled (so the cull reads them at full device bandwidth rather
+        // than over PCIe), and the two outputs are pure GPU state. ---
+        let vb_batch_desc_bytes = (INSTANCE_CAPACITY as u64) * u64::from(VB_BATCH_DESC_STRIDE);
+        let vb_batch_desc: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+            ctx.create_buffer(&BufferDesc {
+                size: vb_batch_desc_bytes,
+                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+                location: MemoryLocation::DeviceLocal,
+            })
+            .expect("invariant: VB batch-descriptor buffer create")
+        });
+        // The compacted visible-batch list. Its ELEMENT COUNT is the cull's clamp-and-drop bound,
+        // and `record_vb` derives that bound from `BoundBuffer::size` rather than from a host
+        // constant — the VB-P1j lesson: a capacity pushed as a word can drift from the allocation
+        // it claims to describe, and nothing detects it (`robustBufferAccess` is off here).
+        let vb_cull_visible: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+            ctx.create_buffer(&BufferDesc {
+                size: (INSTANCE_CAPACITY as u64) * 4,
+                usage: BufferUsage::STORAGE,
+                location: MemoryLocation::DeviceLocal,
+            })
+            .expect("invariant: VB cull visible-list buffer create")
+        });
+        // The visible counter. One live `u32`, but allocated at 16 B so the buffer keeps a
+        // 16-byte-aligned tail under any allocator packing; `vkCmdFillBuffer` zeroes the whole
+        // range each frame regardless.
+        let vb_cull_count: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+            ctx.create_buffer(&BufferDesc {
+                size: 16,
+                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+                location: MemoryLocation::DeviceLocal,
+            })
+            .expect("invariant: VB cull counter buffer create")
+        });
+
+        // The batch cull's OWN 1-set layout, matching `vb_batch_cull.comp.hlsl`'s @0..@3. A
+        // DEDICATED layout rather than four more bindings on `vb_layout0`, because
+        // `vb_layout0_froxel` already occupies @8/@9 — appended bindings would land on DIFFERENT
+        // numbers in the two layouts and no single compiled module could name both. The
+        // `cull_layout` above is the precedent this follows.
+        let vb_cull_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 3,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                ],
+            },
+        )
+        .expect("invariant: VB batch-cull Set-0 bind-group layout create");
+        let vb_batch_cull_cs =
+            RhiDevice::create_shader_module(device, vb_batch_cull_spirv())
+                .expect("invariant: VB batch-cull compute shader module create");
+        let vb_batch_cull_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &vb_batch_cull_cs,
+                entry: c"main",
+                push_constant_bytes: VB_BATCH_CULL_PUSH_BYTES,
+                bind_group_layout: Some(&vb_cull_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: VB batch-cull compute pipeline create");
+        // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+        // destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_batch_cull_cs);
+        }
 
         let dispatch_group_count_x = (cw * ch).div_ceil(LOCAL_SIZE_X);
         // SSAA (W1): the dispatch grid must cover every composite pixel — see the
@@ -3760,6 +3870,11 @@ impl GpuSceneBundles {
             vb_shade_tex_pipeline: None,
             vb_instance_rings,
             vb_indirect,
+            vb_batch_desc,
+            vb_cull_visible,
+            vb_cull_count,
+            vb_cull_layout,
+            vb_batch_cull_pipeline,
             // VB-P1a/P1b: built LAZILY by `Self::build_froxel_light_cull`, gated on the arm bit
             // `ResolvedRenderPath::froxel_light_cull` (VB path AND `LightingConfig::
             // clusters_enabled`, default OFF — an owner opt-in) — see that fn's doc.
@@ -5904,6 +6019,16 @@ impl GpuSceneBundles {
             vb_layout0: Some(&self.vb_layout0),
             vb_instance_ring: Some(&self.vb_instance_rings),
             vb_indirect: Some(&self.vb_indirect),
+            // VG rung R2c0: the batch-cull arm, wired as ONE all-or-nothing group. Both
+            // `declare_vb_graph` and `record_vb` gate on all five being `Some` together, and a
+            // partial wiring here would let the two gates disagree — which is a MISSING barrier
+            // on the indirect buffer, not merely a skipped dispatch. Built unconditionally in
+            // `boot` beside `vb_indirect`, so the five are always `Some` in lock-step.
+            vb_batch_desc: Some(&self.vb_batch_desc),
+            vb_cull_visible: Some(&self.vb_cull_visible),
+            vb_cull_count: Some(&self.vb_cull_count),
+            vb_batch_cull_pipeline: Some(&self.vb_batch_cull_pipeline),
+            vb_cull_layout: Some(&self.vb_cull_layout),
             vb_geometry_set,
             // VB-P2 classification plan, rung P2a (dark infra): `Some` only AFTER
             // `build_vb_classify_pipelines` ran (the SAME `vb_resolve_pipeline` `Option` shape
@@ -6351,6 +6476,30 @@ impl GpuSceneBundles {
             }
             if let Some(layout) = self.cull_layout {
                 RhiDevice::destroy_bind_group_layout(ctx, layout);
+            }
+            // VG rung R2c0: the batch-cull pipeline + layout, and the VB-path buffers.
+            //
+            // ⚠️ `vb_instance_rings` and `vb_indirect` were reaching this teardown UNFREED —
+            // `instance_rings` two blocks down is freed, its VB-path siblings were not. Rather
+            // than add three more buffers to that omission, all five are freed here. Each is
+            // created in `boot`, stored only in this struct, and handed out solely as a borrow to
+            // `Self::scene`, so there is exactly one owner and no other destroy site.
+            RhiDevice::destroy_compute_pipeline(ctx, self.vb_batch_cull_pipeline);
+            RhiDevice::destroy_bind_group_layout(ctx, self.vb_cull_layout);
+            for buf in self.vb_cull_count {
+                RhiDevice::destroy_buffer(ctx, buf);
+            }
+            for buf in self.vb_cull_visible {
+                RhiDevice::destroy_buffer(ctx, buf);
+            }
+            for buf in self.vb_batch_desc {
+                RhiDevice::destroy_buffer(ctx, buf);
+            }
+            for buf in self.vb_indirect {
+                RhiDevice::destroy_buffer(ctx, buf);
+            }
+            for buf in self.vb_instance_rings {
+                RhiDevice::destroy_buffer(ctx, buf);
             }
             // VB-P1d: the froxel cull/shade bench query pools, `Option`-guarded (built only
             // under `BOYKO_VB_BENCH` + a timestamp-capable device — every other boot leaves

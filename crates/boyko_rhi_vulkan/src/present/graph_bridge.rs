@@ -2667,11 +2667,24 @@ pub(crate) struct VbPassPlan {
     /// (mesh-less) frame gates this OFF entirely (it needs the Decision-0 geometry table, which
     /// carries no slot with no mesh leg) and leaves `lit` for `vb_sky` + [`Self::sdf_forward_march`]
     /// alone. `record_vb` reads the SAME `mesh_leg` predicate, so a `None` here is never recorded.
-    /// Rung R2a': the inline `vkCmdUpdateBuffer` that fills this frame's indirect draw records.
-    /// `Some` iff the mesh leg records a raster (the same gate `vb_raster` itself carries) AND
-    /// `scene.vb_indirect` is armed; `None` leaves the recorder on its direct-draw path.
-    pub(crate) vb_indirect_upload: Option<crate::framegraph::PassId>,
     pub(crate) vb_raster: Option<crate::framegraph::PassId>,
+    /// Rung R2a': the inline `vkCmdUpdateBuffer` that fills this frame's indirect draw records —
+    /// and, since rung R2c0, the [`VbBatchDesc`](super::scene_types::VbBatchDesc) array the batch
+    /// cull reads. `Some` iff the mesh leg records a raster (the same gate `vb_raster` itself
+    /// carries) AND `scene.vb_indirect` is armed; `None` leaves the recorder on its direct-draw
+    /// path.
+    pub(crate) vb_indirect_upload: Option<crate::framegraph::PassId>,
+    /// VG rung R2c0: the per-BATCH draw-record cull compute pass (`vb_batch_cull.comp.hlsl`).
+    /// Declared BETWEEN [`Self::vb_indirect_upload`] and [`Self::vb_raster`], which is what makes
+    /// the graph derive both halves of the seam this rung exists to de-risk: `TRANSFER → COMPUTE`
+    /// against the upload, and `COMPUTE → DRAW_INDIRECT` against the raster's indirect fetch
+    /// (which until this rung was derived against the TRANSFER directly).
+    ///
+    /// `Some` iff [`Self::vb_indirect_upload`] is AND the whole R2c0 arm is wired (pipeline,
+    /// layout and all three cull buffers). INERT on this rung by construction — the shader's
+    /// visibility decision is the literal `true` — so an armed frame is byte-identical to an
+    /// unarmed one, which is the gate R2c0 is graded on.
+    pub(crate) vb_batch_cull: Option<crate::framegraph::PassId>,
     /// VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2b (gate widened at
     /// rung P2c): the `fill` pass (two `vkCmdFillBuffer`s — zeros `counts[MAX]`, sentinels
     /// `group_to_mat[G+MAX]` with `0xFFFFFFFF`, critic P1-1) declared as the FIRST producer on
@@ -2833,12 +2846,15 @@ pub(crate) struct VbBarrierSink<'a> {
     /// `light_index_alloc` are `None` — hardcoded today), the SAME bound-but-unread idiom
     /// [`ForwardBarrierSink`]'s own trio uses; a `light_cull.is_none()` frame never routes a
     /// barrier naming these ResIds anyway, so the placeholder is inert.
+    /// Rung R2a' appended `vb_indirect`; rung R2c0 appends the batch-cull trio
+    /// `[vb_batch_desc, vb_cull_visible, vb_cull_count]` after it — placeholder-backed when the
+    /// arm is unwired, and inert then for the same "no pass names the ResId" reason.
     #[cfg(not(feature = "hwrt"))]
-    pub(crate) buffers: [VkBuffer; 9],
+    pub(crate) buffers: [VkBuffer; 12],
     /// See the `not(hwrt)` variant's doc: `hwrt` grows this by one (`tlas_instances` at index 5,
     /// the VB-P1a trio shifts to 6/7/8).
     #[cfg(feature = "hwrt")]
-    pub(crate) buffers: [VkBuffer; 10],
+    pub(crate) buffers: [VkBuffer; 13],
 }
 
 /// The number of IMAGE resources [`Renderer::declare_vb_graph`] declares — see
@@ -3202,6 +3218,13 @@ impl Renderer<'_> {
         // a sibling in-flight frame touches a DIFFERENT slot, so there is no cross-frame WAR to
         // seed against, and this frame's own TRANSFER write is its first touch.
         let vb_indirect = g.add_buffer("vb_indirect");
+        // Rung R2c0: the batch-cull's three buffers, appended after `vb_indirect` for the SAME
+        // reason it was appended after the froxel trio. All three are frame-private (per-FIF), so
+        // `add_buffer`'s undefined seed is right: this frame's own TRANSFER/COMPUTE write is the
+        // first touch of its own slot.
+        let vb_batch_desc = g.add_buffer("vb_batch_desc");
+        let vb_cull_visible = g.add_buffer("vb_cull_visible");
+        let vb_cull_count = g.add_buffer("vb_cull_count");
 
         // Pass `light_upload` (async light-table re-upload) — the SAME gate
         // `declare_forward_graph`'s own `light_upload` pass uses.
@@ -3319,12 +3342,23 @@ impl Renderer<'_> {
         // `mesh_leg` (BOTH arms consume the `vb_id`/`vb_depth` it produces; the split's own
         // producers/consumer are declared AFTER this block, before `sdf_forward_march`).
         let split = scene.path_vb_split();
+        // VG rung R2c0: the batch-cull arm, read ONCE so the pass gate, the upload's extra
+        // `vb_batch_desc` access and `record_vb`'s own recording gate cannot disagree (the same
+        // W1 single-predicate discipline `use_classified` above follows). The five `Option`s are
+        // wired together or not at all by `GpuSceneBundles::scene`, so this is an all-or-nothing
+        // arm, never a partial one.
+        let batch_cull_armed = scene.vb_indirect.is_some()
+            && scene.vb_batch_desc.is_some()
+            && scene.vb_cull_visible.is_some()
+            && scene.vb_cull_count.is_some()
+            && scene.vb_batch_cull_pipeline.is_some();
         let (
             vb_classify_fill,
             vb_classify_count,
             vb_classify_scan,
             vb_classify_scatter,
             vb_indirect_upload,
+            vb_batch_cull,
             vb_raster,
             vb_resolve,
             vb_shade,
@@ -3334,19 +3368,63 @@ impl Renderer<'_> {
             // Declared UNCONDITIONALLY under `mesh_leg` — BOTH the fused (`vb_resolve`) and
             // classified (`vb_shade`) `lit`-producer arms re-fetch geometry through the `vb_id`
             // this pass writes.
-            // Rung R2a': the inline `vkCmdUpdateBuffer` that fills this frame's draw records.
-            // Its own pass, so the graph DERIVES the TRANSFER -> DRAW_INDIRECT dependency against
-            // the raster's read below instead of anyone hand-writing it.
-            let vb_indirect_upload = g.add_pass("vb_indirect_upload");
-            g.buffer_access(vb_indirect, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+            // Rung R2a': the inline `vkCmdUpdateBuffer` that fills this frame's draw records --
+            // and, since rung R2c0, the `VbBatchDesc` array the cull reads. Its own pass, so the
+            // graph DERIVES the TRANSFER -> COMPUTE / TRANSFER -> DRAW_INDIRECT dependency against
+            // the consumers below instead of anyone hand-writing it.
+            //
+            // ⚠️ This gate and `record_vb`'s must be IDENTICAL, not nested. A frame that declared
+            // the cull pass but skipped recording it would leave `vb_indirect`'s last declared
+            // writer as the COMPUTE that never ran, and the TRANSFER -> DRAW_INDIRECT dependency
+            // the upload actually needs would be derived nowhere -- a missing barrier, not a
+            // wasted one. Rung R2a' declared the upload unconditionally under `mesh_leg`; that
+            // also put a spurious TRANSFER -> DRAW_INDIRECT barrier on the placeholder buffer of a
+            // `vb_indirect: None` (direct-draw) boot, which this narrowing removes.
+            let indirect_armed = scene.vb_indirect.is_some();
+            let vb_indirect_upload = indirect_armed.then(|| {
+                let p = g.add_pass("vb_indirect_upload");
+                g.buffer_access(vb_indirect, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+                if batch_cull_armed {
+                    g.buffer_access(
+                        vb_batch_desc,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_ACCESS_TRANSFER_WRITE_BIT,
+                    );
+                }
+                p
+            });
+
+            // Rung R2c0: the batch cull. Reads the descriptors, rewrites each record's
+            // `instanceCount`, atomic-appends into the compacted list. INERT this rung (the
+            // shader's decision is the literal `true`), so it is armed by DEFAULT -- the null
+            // control `docs/VG-DECIDABILITY-FLOOR.md` demands has to be present in the measured
+            // configuration to be a control at all, and byte-identity is what proves it inert.
+            let vb_batch_cull = batch_cull_armed.then(|| {
+                const RW: u32 = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+                let p = g.add_pass("vb_batch_cull");
+                // The counter's own `vkCmdFillBuffer` reset and the atomics that follow it, in ONE
+                // pass -- the SAME intra-pass TRANSFER -> COMPUTE shape `light_cull` uses for
+                // `light_index_alloc`.
+                g.buffer_access(vb_cull_count, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+                g.buffer_access(vb_cull_count, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, RW);
+                g.buffer_access(vb_batch_desc, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+                g.buffer_access(vb_indirect, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
+                g.buffer_access(vb_cull_visible, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
+                p
+            });
 
             let vb_raster = g.add_pass("vb_raster");
             // The consumer side of that dependency: the indirect FETCH stage, not a shader read.
-            g.buffer_access(
-                vb_indirect,
-                VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
-                VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
-            );
+            // Since rung R2c0 the producer it resolves against is the CULL's compute write rather
+            // than the upload's transfer write -- the same declaration, a different derived
+            // source stage, because the graph tracks the last writer rather than a hand-picked one.
+            if indirect_armed {
+                g.buffer_access(
+                    vb_indirect,
+                    VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                    VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+                );
+            }
             g.image_access(
                 vb_id,
                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -3587,13 +3665,14 @@ impl Renderer<'_> {
                 vb_classify_count,
                 vb_classify_scan,
                 vb_classify_scatter,
-                Some(vb_indirect_upload),
+                vb_indirect_upload,
+                vb_batch_cull,
                 Some(vb_raster),
                 vb_resolve,
                 vb_shade,
             )
         } else {
-            (None, None, None, None, None, None, None, None)
+            (None, None, None, None, None, None, None, None, None)
         };
 
         // ---- Rung R9b: the SPLIT arm (docs/R9-VB-SPLIT-PLAN.md §3) — declared between
@@ -4221,6 +4300,7 @@ impl Renderer<'_> {
             atlas: atlas_pass,
             vb_sky,
             vb_indirect_upload,
+            vb_batch_cull,
             vb_raster,
             vb_classify_fill,
             vb_classify_count,
@@ -4355,6 +4435,16 @@ impl Renderer<'_> {
                 scene
                     .vb_indirect
                     .map_or(scene.light_table.buffer, |r| r[fi].buffer),
+                // Rung R2c0: the batch-cull trio, appended after `vb_indirect` for the same reason.
+                scene
+                    .vb_batch_desc
+                    .map_or(scene.light_table.buffer, |r| r[fi].buffer),
+                scene
+                    .vb_cull_visible
+                    .map_or(scene.light_table.buffer, |r| r[fi].buffer),
+                scene
+                    .vb_cull_count
+                    .map_or(scene.light_table.buffer, |r| r[fi].buffer),
             ],
             // Rung R9d (buffer ResId 5): `tlas_instances` — mirrors [`GbufferBarrierSink`]'s own
             // `scene.tlas.map_or(VkBuffer::NULL, |t| t.instance_array.buffer)` source.
@@ -4385,6 +4475,16 @@ impl Renderer<'_> {
                 // uses -- an unarmed frame declares no pass naming this ResId, so it is inert.
                 scene
                     .vb_indirect
+                    .map_or(scene.light_table.buffer, |r| r[fi].buffer),
+                // Rung R2c0: the batch-cull trio, appended after `vb_indirect` for the same reason.
+                scene
+                    .vb_batch_desc
+                    .map_or(scene.light_table.buffer, |r| r[fi].buffer),
+                scene
+                    .vb_cull_visible
+                    .map_or(scene.light_table.buffer, |r| r[fi].buffer),
+                scene
+                    .vb_cull_count
                     .map_or(scene.light_table.buffer, |r| r[fi].buffer),
             ],
         };

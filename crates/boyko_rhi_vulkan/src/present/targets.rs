@@ -228,6 +228,14 @@ pub struct GBufferTargets {
     /// A RING when `Some` (one per in-flight frame): slot `i` binds `scene.camera_ring[i]` @0 — the
     /// lock-free per-frame ring fix. The recorder selects `cull_set[self.frame_index]`.
     pub(crate) cull_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// VG rung R2c0: the per-BATCH draw-record cull descriptor set, written ONCE against
+    /// [`GBufferScene::vb_cull_layout`] (`VbIndirect` @0, `VbBatchDesc` @1, `VbCullVisible` @2,
+    /// `VbCullCount` @3 — all COMPUTE STORAGE_BUFFER). `None` unless the R2c0 arm is wired. NO
+    /// per-frame update.
+    ///
+    /// A RING when `Some`: every one of the four buffers is per-FIF, so slot `i` binds each
+    /// buffer's own `[i]`. The recorder selects `vb_cull_set[self.frame_index]`.
+    pub(crate) vb_cull_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// The Render P7 SSAO descriptor set, written ONCE against [`SsaoActivation::layout`]
     /// (5 bindings: gNormal @0, gMaterial @1, gViewT @2 STORAGE images READ, the `ssao` out
     /// STORAGE image @3 WRITE, the camera UBO @4) — `None` when SSAO is off
@@ -2391,6 +2399,11 @@ struct DeferredSets {
     smaa_weight_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// Anti-aliasing Stage 2: pass 3's (blend) INPUT set RING — `None` when SMAA is off.
     smaa_blend_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// VG rung R2c0: the batch-cull's own 1-set ring (`VbIndirect` @0, `VbBatchDesc` @1,
+    /// `VbCullVisible` @2, `VbCullCount` @3). THE NEW TERMINAL fallible set, built LAST — after
+    /// `downsample_set` — so its own error path tears down every prior set and no EXISTING error
+    /// path had to learn about it. `None` unless the whole R2c0 arm is wired.
+    vb_cull_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// Anti-aliasing Stage 3: the SSAA downsample INPUT set RING — `None` when SSAA is off.
     /// THE NEW TERMINAL fallible set (W1), built LAST (after `smaa_*_set`) so its own error
     /// path tears down every prior set.
@@ -4202,6 +4215,86 @@ impl DeferredSets {
             None => None,
         };
 
+        // VG rung R2c0: the batch-cull's own 1-set ring — THE NEW TERMINAL fallible set (the W1
+        // discipline `smaa_edge_set`'s doc states). Built LAST, so its error path tears down every
+        // prior set and no EXISTING error path needed a new arm; that teardown is delegated to
+        // `DeferredSets::destroy`, which already walks reverse acquisition order, rather than
+        // hand-copied for the twentieth time.
+        //
+        // Gated on the layout plus all four buffers. `GpuSceneBundles` mints
+        // `vb_cull_layout`/`vb_batch_cull_pipeline` together or not at all, which is what lets
+        // `record_vb` `.expect()` this ring under a gate phrased on the PIPELINE.
+        let vb_cull_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> = match (
+            scene.vb_cull_layout,
+            scene.vb_indirect,
+            scene.vb_batch_desc,
+            scene.vb_cull_visible,
+            scene.vb_cull_count,
+        ) {
+            (Some(layout), Some(indirect), Some(batch_desc), Some(visible), Some(count)) => {
+                let mut slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+                    [const { None }; FRAMES_IN_FLIGHT];
+                let mut failure: Option<crate::error::VulkanError> = None;
+                for (slot, dst) in slots.iter_mut().enumerate() {
+                    let entries = [
+                        BindGroupEntry::StorageBuffer { buffer: &indirect[slot] },
+                        BindGroupEntry::StorageBuffer { buffer: &batch_desc[slot] },
+                        BindGroupEntry::StorageBuffer { buffer: &visible[slot] },
+                        BindGroupEntry::StorageBuffer { buffer: &count[slot] },
+                    ];
+                    let desc = BindGroupDesc::<Vulkan> { layout, entries: &entries };
+                    match RhiDevice::create_bind_group(ctx, &desc) {
+                        Ok(g) => *dst = Some(g),
+                        Err(e) => {
+                            failure = Some(e);
+                            break;
+                        }
+                    }
+                }
+                if let Some(e) = failure {
+                    // SAFETY: the slots already built [0..slot) were created on `ctx` and are
+                    // referenced by no submission; each is destroyed exactly once here. Every
+                    // PRIOR set is then destroyed exactly once by `DeferredSets::destroy`, which
+                    // consumes the value and walks reverse acquisition order — the sets are moved
+                    // into it, so none can be double-freed by a later path.
+                    unsafe {
+                        for s in slots.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        DeferredSets {
+                            vocab_set,
+                            resolve_set,
+                            cull_set,
+                            ssao_set,
+                            viewt_from_depth_set,
+                            ddgi_update_set,
+                            present_set,
+                            sdf_forward_set,
+                            vb_set0,
+                            vb_set0_tex,
+                            vb_set0_froxel,
+                            vb_set0_tex_froxel,
+                            viewt_from_vb_depth_set,
+                            #[cfg(feature = "hwrt")]
+                            resolve_set_hwrt,
+                            fxaa_set,
+                            smaa_edge_set,
+                            smaa_weight_set,
+                            smaa_blend_set,
+                            downsample_set,
+                            vb_cull_set: None,
+                        }
+                        .destroy(ctx);
+                    }
+                    return Err(SwapchainError::DepthImage(e));
+                }
+                Some(slots.map(|s| s.expect("invariant: every batch-cull ring slot built before reaching here")))
+            }
+            _ => None,
+        };
+
         Ok(DeferredSets {
             vocab_set,
             resolve_set,
@@ -4223,6 +4316,7 @@ impl DeferredSets {
             smaa_weight_set,
             smaa_blend_set,
             downsample_set,
+            vb_cull_set,
         })
     }
 
@@ -4240,7 +4334,14 @@ impl DeferredSets {
         // SAFETY: per the contract `ctx` is live and nothing references these sets; each was created
         // on `ctx` and is destroyed exactly once, in reverse acquisition order.
         unsafe {
-            // Anti-aliasing Stage 3: the SSAA downsample set (LAST-acquired), `Option`-guarded
+            // VG rung R2c0: the batch-cull ring (LAST-acquired ⇒ FIRST destroyed),
+            // `Option`-guarded (present only when the R2c0 arm is wired).
+            if let Some(bc) = self.vb_cull_set {
+                for g in bc {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
+            // Anti-aliasing Stage 3: the SSAA downsample set, `Option`-guarded
             // (present only when `scene.ssaa` was armed).
             if let Some(ds) = self.downsample_set {
                 for g in ds {
@@ -6675,6 +6776,7 @@ impl GBufferTargets {
             vocab_set,
             resolve_set,
             cull_set,
+            vb_cull_set,
             ssao_set,
             viewt_from_depth_set,
             ddgi_update_set,
@@ -7124,6 +7226,7 @@ impl GBufferTargets {
             #[cfg(feature = "hwrt")]
             resolve_set_hwrt,
             cull_set,
+            vb_cull_set,
             ssao_set,
             viewt_from_depth_set,
             viewt_from_vb_depth_set,
@@ -7486,6 +7589,7 @@ impl GBufferTargets {
                 vocab_set: self.vocab_set,
                 resolve_set: self.resolve_set,
                 cull_set: self.cull_set,
+                vb_cull_set: self.vb_cull_set,
                 ssao_set: self.ssao_set,
                 viewt_from_depth_set: self.viewt_from_depth_set,
                 ddgi_update_set: self.ddgi_update_set,
@@ -7843,6 +7947,7 @@ mod tests {
             vocab_set: bg_ring(),
             resolve_set: bg_ring(),
             cull_set: None,
+            vb_cull_set: None,
             ssao_set: None,
             viewt_from_depth_set: None,
             viewt_from_vb_depth_set: None,
@@ -7941,6 +8046,7 @@ mod tests {
             resolve_set: bg_ring(),
             resolve_set_hwrt: resolve_set_hwrt.then(bg_ring),
             cull_set: None,
+            vb_cull_set: None,
             ssao_set: None,
             viewt_from_depth_set: None,
             viewt_from_vb_depth_set: None,

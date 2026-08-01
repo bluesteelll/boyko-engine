@@ -33,7 +33,8 @@ use super::super::frame_driver::Renderer;
 use super::super::gpu_timing::VbTimedPass;
 use super::super::scene_types::{
     CLUSTER_CULL_HIER_PUSH_BYTES, CLUSTER_CULL_PUSH_BYTES, GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
-    GBufferScene, LIGHT_CULL_LOCAL_SIZE_X,
+    GBufferScene, LIGHT_CULL_LOCAL_SIZE_X, VB_BATCH_CULL_LOCAL_SIZE_X, VB_BATCH_CULL_PUSH_BYTES,
+    VB_BATCH_DESC_STRIDE, VbBatchDesc,
 };
 use super::super::targets::{ForwardTargets, GBufferTargets, VB_CLASSIFY_MAX_MATERIAL_ROWS, VbTargets};
 use super::super::{COLOR_SUBRESOURCE_RANGE, SwapchainError};
@@ -599,6 +600,16 @@ impl Renderer<'_> {
         // gate). `vb_sky`'s `lit` write above stands for the sky; `sdf_forward_march` below
         // composites the SDF field over whatever the mesh raster/resolve left. ===
         if scene.resolved_render_path.mesh_leg {
+            // VG rung R2c0: the batch-cull arm — the SAME five-`Option` predicate
+            // `declare_vb_graph` reads, spelled once here so the recorder cannot drift from the
+            // declarator. See the dispatch block below for why a narrower recorder gate would be a
+            // missing barrier rather than merely a skipped optimisation.
+            let batch_cull_armed = scene.vb_indirect.is_some()
+                && scene.vb_batch_desc.is_some()
+                && scene.vb_cull_visible.is_some()
+                && scene.vb_cull_count.is_some()
+                && scene.vb_batch_cull_pipeline.is_some();
+
             // === Pass `vb_raster`: the mesh id-raster pass (Decision 9) — writes `vb_id` (COLOR,
             // R32G32_UINT) + `vb_depth` (DEPTH, HW reverse-Z, first-touch `GREATER`, write ON). ===
             // === Rung R2a': fill this frame's indirect draw records, BEFORE any render scope. ===
@@ -609,6 +620,29 @@ impl Renderer<'_> {
             // stack (a cap, and 20 KiB of it), while chunking bounds the stack at one chunk and
             // removes the cap entirely. Each chunk's byte offset is `i * 20`, a multiple of 4, so
             // every update satisfies `VUID-vkCmdUpdateBuffer-dstOffset-00036`.
+            // The record array's capacity, taken from the ALLOCATION rather than from the host
+            // constant that sized it — the VB-P1j lesson, where a capacity carried as a separate
+            // word had drifted from the buffer it claimed to describe and nothing detected it.
+            // Hoisted above the fill because the DRAW LOOP needs the same bound: a batch with no
+            // record must keep its direct draw rather than fetch past the end of the buffer.
+            //
+            // `mesh_draw.len() <= record_capacity` holds today by an ARGUMENT (batches ≤ instances,
+            // since every batch holds at least one instance, and both arrays are sized to
+            // `INSTANCE_CAPACITY`) — not by a check. Rung R2a''s SAFETY comment cited "the debug
+            // assert on the draw loop below" for this bound and NO SUCH ASSERT EXISTED. Here it is,
+            // with a release-side clamp behind it: an indirect fetch past the end of the allocation
+            // would be an out-of-bounds device read that nothing in this repository detects
+            // (`robustBufferAccess` is off, and the validation layers do not follow buffer
+            // contents), whereas falling back to the direct draw renders the same image.
+            let record_capacity = scene
+                .vb_indirect
+                .map_or(0, |r| (r[fi].size / u64::from(DRAW_INDEXED_INDIRECT_STRIDE)) as usize);
+            debug_assert!(
+                scene.vb_indirect.is_none() || scene.mesh_draw.len() <= record_capacity,
+                "invariant: {} draw batches exceed the {record_capacity}-record indirect allocation",
+                scene.mesh_draw.len()
+            );
+
             if let Some(indirect) = scene.vb_indirect {
                 let upload = plan
                     .vb_indirect_upload
@@ -620,7 +654,8 @@ impl Renderer<'_> {
 
                 const CHUNK: usize = 64;
                 let stride = u64::from(DRAW_INDEXED_INDIRECT_STRIDE);
-                for (c, batches) in scene.mesh_draw.chunks(CHUNK).enumerate() {
+                let recorded = &scene.mesh_draw[..scene.mesh_draw.len().min(record_capacity)];
+                for (c, batches) in recorded.chunks(CHUNK).enumerate() {
                     let mut records = [VkDrawIndexedIndirectCommand::default(); CHUNK];
                     for (r, batch) in records.iter_mut().zip(batches) {
                         *r = VkDrawIndexedIndirectCommand {
@@ -657,6 +692,138 @@ impl Renderer<'_> {
                         );
                     }
                 }
+
+                // === Rung R2c0: the batch-cull DESCRIPTORS, filled in the SAME transfer pass. ===
+                //
+                // One 32-byte `VbBatchDesc` per batch, chunked exactly like the records above (64
+                // descriptors = 2048 bytes per update, inside the 65536-byte inline limit; every
+                // offset is a multiple of 32 and therefore of 4).
+                //
+                // `instance_count` is the SAME word the record above already carries. That is the
+                // rung's whole point: the cull rewrites the record with a value the host had
+                // already written, so the frame is byte-identical and the machinery is a NULL
+                // CONTROL rather than a change. The AABB corners are the conservative
+                // `VbBatchDesc::UNBOUNDED` sentinel — unread on this compile (the shader's
+                // decision is the literal `true`), and when rung R2c arms the test an unfilled
+                // box survives every plane, so the reachable error is a wasted draw, never a
+                // vanished object.
+                if let Some(desc) = scene.vb_batch_desc.filter(|_| batch_cull_armed) {
+                    let desc_stride = u64::from(VB_BATCH_DESC_STRIDE);
+                    // Bounded by BOTH allocations: the cull reads a descriptor and writes the
+                    // record at the same index, so the smaller capacity governs. Same
+                    // allocation-derived discipline as above.
+                    let desc_capacity = (desc[fi].size / desc_stride) as usize;
+                    let described = &recorded[..recorded.len().min(desc_capacity)];
+                    for (c, batches) in described.chunks(CHUNK).enumerate() {
+                        let mut descs = [VbBatchDesc::unbounded(0); CHUNK];
+                        for (d, batch) in descs.iter_mut().zip(batches) {
+                            *d = VbBatchDesc::unbounded(batch.instance_count);
+                        }
+                        let bytes = (batches.len() as u64) * desc_stride;
+                        // SAFETY: recording is open and NO render-pass instance is active (the
+                        // raster's `cmd_begin_rendering` is below); `desc[fi]` is a live
+                        // DEVICE_LOCAL buffer created with TRANSFER_DST at `INSTANCE_CAPACITY`
+                        // descriptors, and this write ends at `(c * CHUNK + batches.len()) *
+                        // desc_stride`, which the draw loop's own batch-count assert bounds;
+                        // `descs` outlives the call; `bytes` is a multiple of 4 and at most
+                        // `CHUNK * 32` = 2048, inside the 65536-byte inline limit.
+                        unsafe {
+                            (self.fns.cmd_update_buffer)(
+                                cmd,
+                                desc[fi].buffer,
+                                (c * CHUNK) as u64 * desc_stride,
+                                bytes,
+                                descs.as_ptr().cast(),
+                            );
+                        }
+                    }
+                }
+            }
+
+            // === Rung R2c0: the per-BATCH draw-record cull dispatch. ===
+            //
+            // ⚠️ This gate is the DECLARATOR's, verbatim — `targets.vb_cull_set` is deliberately
+            // NOT part of it, and is `.expect()`ed instead. A recorder gate NARROWER than
+            // `declare_vb_graph`'s would skip the dispatch while the graph still believes a
+            // COMPUTE wrote `vb_indirect` last, and the `TRANSFER → DRAW_INDIRECT` dependency the
+            // upload actually needs would then be derived nowhere. That is a missing barrier, not
+            // a wasted one, so the two predicates must be the same predicate. The set's presence
+            // is implied: `GBufferTargets::sync` builds it under the same VB gate that produces
+            // these scene buffers, and a create FAILURE returns `Err` rather than a silent `None`.
+            if batch_cull_armed {
+                let pipeline = scene
+                    .vb_batch_cull_pipeline
+                    .expect("invariant: batch_cull_armed => vb_batch_cull_pipeline");
+                let count = scene.vb_cull_count.expect("invariant: batch_cull_armed => vb_cull_count");
+                let visible = scene.vb_cull_visible.expect("invariant: batch_cull_armed => vb_cull_visible");
+                let cull_set = &targets
+                    .vb_cull_set
+                    .as_ref()
+                    .expect("invariant: batch_cull_armed => targets.vb_cull_set (same VB gate)")[fi];
+
+                // Reset the visible counter to 0 (a transfer fill), then order it before the
+                // dispatch's atomics — the SAME shape the L1 cull's `light_index_alloc` reset
+                // uses. The FILL is GPU work and runs unconditionally within this arm; only the
+                // barrier that follows is graph-driven.
+                // SAFETY: recording is open and no render scope is active; `count[fi]` is a live
+                // device-local STORAGE buffer (≥ 4 B, the single u32 counter); `cmd_fill_buffer`
+                // zero-fills it (Vulkan 1.0 core).
+                unsafe {
+                    (self.fns.cmd_fill_buffer)(cmd, count[fi].buffer, 0, VK_WHOLE_SIZE, 0);
+                }
+                let cull_pass = plan
+                    .vb_batch_cull
+                    .expect("invariant: batch_cull_armed => vb_batch_cull pass declared");
+                // SAFETY: recording is open; `record_vb_pass` records the graph's derived barriers
+                // for the "vb_batch_cull" pass into `cmd` — the TRANSFER→COMPUTE ordering of both
+                // the descriptor upload and this counter fill against the atomics below.
+                self.record_vb_pass(cull_pass, cmd, targets, forward, vb, scene, fi);
+
+                // Bounded by BOTH allocations the cull touches at index `i`: it reads
+                // `VbBatchDesc[i]` and writes record `i`, so the smaller capacity governs the
+                // dispatch. The shader's own `i >= pc.batch_count` guard then trims the tail
+                // group's lanes — together that is what keeps every device access in bounds with
+                // `robustBufferAccess` off.
+                let desc = scene.vb_batch_desc.expect("invariant: batch_cull_armed => vb_batch_desc");
+                let desc_capacity = (desc[fi].size / u64::from(VB_BATCH_DESC_STRIDE)) as usize;
+                let batch_count = scene.mesh_draw.len().min(record_capacity).min(desc_capacity) as u32;
+                // The clamp bound comes from the ALLOCATION, not from a host mirror of it: a push
+                // word describing a capacity can drift from the buffer it describes, which is
+                // exactly the failure VB-P1j had to close for `ClusterGrid`.
+                let visible_cap = (visible[fi].size / 4) as u32;
+                let push: [u32; 2] = [batch_count, visible_cap];
+                let groups = batch_count.div_ceil(VB_BATCH_CULL_LOCAL_SIZE_X);
+                // SAFETY: recording is open and outside any render scope; `pipeline` + its layout
+                // (one COMPUTE set + an 8-byte COMPUTE push range) are live on this device (caller
+                // contract); `cull_set` binds exactly the four buffers `vb_batch_cull.comp.hlsl`
+                // declares at @0..@3, written once at `GBufferTargets::sync`; the dispatch covers
+                // `batch_count` lanes and the shader trims its tail group's out-of-range lanes.
+                // `&cull_set.descriptor_set` and `push` are locals alive for the calls.
+                unsafe {
+                    (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        pipeline.layout,
+                        0,
+                        1,
+                        &cull_set.descriptor_set,
+                        0,
+                        ptr::null(),
+                    );
+                    (self.fns.cmd_push_constants)(
+                        cmd,
+                        pipeline.layout,
+                        VK_SHADER_STAGE_COMPUTE_BIT,
+                        0,
+                        VB_BATCH_CULL_PUSH_BYTES,
+                        push.as_ptr().cast(),
+                    );
+                    (self.fns.cmd_dispatch)(cmd, groups, 1, 1);
+                }
+                // The cull's `vb_indirect` write is made visible to the raster's indirect FETCH by
+                // the graph: derived at the reader (`vb_raster`'s own `DRAW_INDIRECT` access), not
+                // here.
             }
 
             // SAFETY: recording is open; `record_vb_pass` records the graph's derived
@@ -765,7 +932,10 @@ impl Renderer<'_> {
                     // `draw_count = 1` is not a choice: `multiDrawIndirect` is not enabled on this
                     // device, so the only legal values are 0 and 1. With `draw_count == 1` the
                     // `stride` argument is unread, and it is passed truthfully anyway.
-                    match scene.vb_indirect {
+                    // `i < record_capacity` is the same allocation-derived bound the fill above
+                    // used: a batch with no record falls through to the direct arm rather than
+                    // fetching a command past the end of the buffer.
+                    match scene.vb_indirect.filter(|_| i < record_capacity) {
                         Some(indirect) => (self.fns.cmd_draw_indexed_indirect)(
                             cmd,
                             indirect[fi].buffer,

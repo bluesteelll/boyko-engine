@@ -2330,6 +2330,11 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         vb_layout0: None,
         vb_instance_ring: None,
         vb_indirect: None,
+        vb_batch_desc: None,
+        vb_cull_visible: None,
+        vb_cull_count: None,
+        vb_batch_cull_pipeline: None,
+        vb_cull_layout: None,
         vb_geometry_set: None,
         // VB-P2 classification plan, rung P2b: unread by this harness (never resolves VB, the
         // same rationale as the VB fields above) — `0` is the `MaterialTable::new()` default.
@@ -3405,6 +3410,11 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         vb_layout0: None,
         vb_instance_ring: None,
         vb_indirect: None,
+        vb_batch_desc: None,
+        vb_cull_visible: None,
+        vb_cull_count: None,
+        vb_batch_cull_pipeline: None,
+        vb_cull_layout: None,
         vb_geometry_set: None,
         // VB-P2 classification plan, rung P2b: unread by this harness (never resolves VB, the
         // same rationale as the VB fields above) — `0` is the `MaterialTable::new()` default.
@@ -8399,6 +8409,11 @@ fn run_showcase_body_ddgi(
         vb_layout0: None,
         vb_instance_ring: None,
         vb_indirect: None,
+        vb_batch_desc: None,
+        vb_cull_visible: None,
+        vb_cull_count: None,
+        vb_batch_cull_pipeline: None,
+        vb_cull_layout: None,
         vb_geometry_set: None,
         // VB-P2 classification plan, rung P2b: unread by this harness (never resolves VB, the
         // same rationale as the VB fields above) — `0` is the `MaterialTable::new()` default.
@@ -9887,6 +9902,11 @@ fn run_showcase_body(
         vb_layout0: None,
         vb_instance_ring: None,
         vb_indirect: None,
+        vb_batch_desc: None,
+        vb_cull_visible: None,
+        vb_cull_count: None,
+        vb_batch_cull_pipeline: None,
+        vb_cull_layout: None,
         vb_geometry_set: None,
         // VB-P2 classification plan, rung P2b: unread by this harness (never resolves VB, the
         // same rationale as the VB fields above) — `0` is the `MaterialTable::new()` default.

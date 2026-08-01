@@ -548,6 +548,19 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// VG rung R2c0: the committed per-BATCH draw-record cull SPIR-V
+    /// (`shaders/vb_batch_cull.comp.hlsl`).
+    ///
+    /// One invocation per `DrawBatch`. Writes `instanceCount` into word 1 of that batch's
+    /// `VkDrawIndexedIndirectCommand` and atomic-appends the batch index into a compacted
+    /// visible list. INERT on this compile — the visibility decision is the literal `true`, so
+    /// the value written is the one the host's transfer fill already placed there. The re-DXC
+    /// byte gate + the inertness census live in `tests/vb_batch_cull_spv_sync.rs`.
+    VB_BATCH_CULL_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_batch_cull.comp.spv")
+}
+
+embed_spirv! {
     /// The committed Render P4b coarse-cull / tile pre-trace SPIR-V
     /// (`shaders/sdf_tile_cull.hlsl`). A 1/8-res CONSERVATIVE cone-trace: one invocation
     /// per 8×8 fine-pixel tile emits a [`TileBound`] the fine marcher reads to early-out
@@ -1646,6 +1659,27 @@ pub fn cluster_cull_spirv() -> &'static [u32] {
 #[inline]
 pub fn cluster_cull_hier_spirv() -> &'static [u32] {
     CLUSTER_CULL_HIER_SPV.as_words()
+}
+
+/// VG rung R2c0: the batch-cull pipeline's COMPUTE push range — `vb_batch_cull.comp.hlsl`'s
+/// `VbBatchCullPush { uint batch_count; uint visible_cap; }`.
+pub const VB_BATCH_CULL_PUSH_BYTES: u32 = 8;
+
+/// VG rung R2c0: the byte stride of one `VbBatchDesc` — `vb_batch_cull.comp.hlsl`'s
+/// `VbBatchDescGpu { float3 aabb_min; uint instance_count; float3 aabb_max; uint pad; }`.
+pub const VB_BATCH_DESC_STRIDE: u32 = 32;
+
+/// VG rung R2c0: the per-BATCH draw-record cull SPIR-V as a `u32` word stream. See
+/// [`VB_BATCH_CULL_SPV`]'s doc.
+///
+/// Bound to the batch-cull set { `RWByteAddressBuffer` VbIndirect @0,
+/// `StructuredBuffer<VbBatchDescGpu>` VbBatchDesc @1, `RWStructuredBuffer<uint>` VbCullVisible
+/// @2, `RWStructuredBuffer<uint>` VbCullCount @3 } + an 8-byte `{ batch_count, visible_cap }`
+/// push. Dispatched 1D over the batch count BEFORE `vb_raster`, with the `TRANSFER → COMPUTE`
+/// and `COMPUTE → DRAW_INDIRECT` dependencies DERIVED by the framegraph rather than hand-written.
+#[inline]
+pub fn vb_batch_cull_spirv() -> &'static [u32] {
+    VB_BATCH_CULL_SPV.as_words()
 }
 
 /// The committed Render P4b coarse-cull / tile pre-trace SPIR-V as a `u32` word

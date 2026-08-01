@@ -414,6 +414,77 @@ pub(crate) const CLUSTER_CULL_PUSH_BYTES: u32 = crate::compute::CLUSTER_CULL_PUS
 /// group count is `ceil(cluster_count / LIGHT_CULL_LOCAL_SIZE_X)`.
 pub(crate) const LIGHT_CULL_LOCAL_SIZE_X: u32 = 64;
 
+/// VG rung R2c0: the batch-cull shader's `[numthreads(64,1,1)]` group width
+/// (`vb_batch_cull.comp.hlsl`'s own `LOCAL_SIZE_X`). The dispatch is
+/// `ceil(batch_count / VB_BATCH_CULL_LOCAL_SIZE_X)` groups; the tail group's out-of-range lanes
+/// are trimmed by the shader's own `i >= pc.batch_count` guard.
+pub(crate) const VB_BATCH_CULL_LOCAL_SIZE_X: u32 = 64;
+
+/// VG rung R2c0: the batch-cull pipeline's COMPUTE push range (`{ batch_count, visible_cap }`,
+/// `vb_batch_cull.comp.hlsl`'s `VbBatchCullPush`). Re-exported from `compute` so this field-decl
+/// site does not depend on it — the SAME idiom [`CLUSTER_CULL_PUSH_BYTES`] follows.
+pub(crate) const VB_BATCH_CULL_PUSH_BYTES: u32 = crate::compute::VB_BATCH_CULL_PUSH_BYTES;
+
+/// VG rung R2c0: one batch's cull inputs, as `vb_batch_cull.comp.hlsl`'s `VbBatchDescGpu` reads
+/// them. 32 bytes; `[f32; 3]`-then-`u32` twice, so both 16-byte halves are naturally packed and
+/// the struct needs no explicit padding member beyond the reserved `pad` word.
+///
+/// # Why the AABB is here at rung R2c0, where nothing reads it
+///
+/// The DECISION is what rung R2c adds; the LAYOUT is what it needs. Fixing the record now means
+/// R2c touches the shader body and this struct's fill, and leaves the descriptor-set layout, the
+/// buffer sizes and the framegraph alone.
+///
+/// [`Self::UNBOUNDED`] is the rung-R2c0 corner value and the CONSERVATIVE one: an unfilled batch
+/// survives every plane test, so the only reachable error direction is a wasted draw — never a
+/// false cull. See that constant's own doc for why it is finite.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VbBatchDesc {
+    /// World-space AABB min corner. Rung R2c0 writes `-`[`Self::UNBOUNDED`]; unread by the
+    /// shader on this compile (DXC dead-codes it — pinned by `tests/vb_batch_cull_spv_sync.rs`).
+    pub aabb_min: [f32; 3],
+    /// The `instanceCount` a VISIBLE batch draws — the SAME value the transfer fill already put
+    /// in this batch's `VkDrawIndexedIndirectCommand`, which is what makes rung R2c0 inert.
+    pub instance_count: u32,
+    /// World-space AABB max corner. Rung R2c0 writes `+`[`Self::UNBOUNDED`].
+    pub aabb_max: [f32; 3],
+    /// Reserved (rung R2c: the plane-set / batch-flags word). Written zero.
+    pub pad: u32,
+}
+
+impl VbBatchDesc {
+    /// The rung-R2c0 "unbounded box" corner magnitude — a large FINITE value, never an infinity.
+    ///
+    /// A frustum plane evaluated at an infinite corner (`dot(n, p) + d` with a zero normal
+    /// component) yields a NaN, and a NaN does not propagate through `NMin`/`NMax`: it silently
+    /// selects the OTHER operand, so a NaN-poisoned test can read as *culled* rather than as
+    /// obviously broken. A finite magnitude keeps every plane evaluation finite and correctly
+    /// signed while still exceeding any world extent this engine renders.
+    pub const UNBOUNDED: f32 = 1.0e30;
+
+    /// The rung-R2c0 descriptor for a batch of `instance_count` instances: an unbounded box, so
+    /// the cull cannot reject it once rung R2c arms the test.
+    #[inline]
+    #[must_use]
+    pub const fn unbounded(instance_count: u32) -> Self {
+        Self {
+            aabb_min: [-Self::UNBOUNDED; 3],
+            instance_count,
+            aabb_max: [Self::UNBOUNDED; 3],
+            pad: 0,
+        }
+    }
+}
+
+/// The [`VbBatchDesc`] byte stride — mirrors `vb_batch_cull.comp.hlsl`'s `VbBatchDescGpu`.
+pub(crate) const VB_BATCH_DESC_STRIDE: u32 = crate::compute::VB_BATCH_DESC_STRIDE;
+
+const _: () = assert!(
+    core::mem::size_of::<VbBatchDesc>() == VB_BATCH_DESC_STRIDE as usize,
+    "rung R2c0: VbBatchDesc must match the shader's 32-byte VbBatchDescGpu stride"
+);
+
 /// VB-P1e D11: the hierarchical cull pipeline's COMPUTE push range size (24 B
 /// [`crate::compute::ClusterCullHierPush`]). Re-exported so [`ClusterCullHierDispatch::push`]
 /// can size its inline byte array without depending on `compute` at the field-decl site.
@@ -2381,6 +2452,32 @@ pub struct GBufferScene<'a> {
     /// indirect draws fetch. `Some` on every VB boot; `None` degrades the recorder to the direct
     /// `vkCmdDrawIndexed` path it replaced, so a boot that failed to build it still renders.
     pub vb_indirect: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
+    /// VG rung R2c0: the per-FIF [`VbBatchDesc`] buffer the batch-cull compute pass reads. `Some`
+    /// exactly when [`Self::vb_batch_cull_pipeline`] and the other two cull buffers are — the
+    /// whole R2c0 arm is one all-or-nothing gate, so no half-wired frame can dispatch a cull that
+    /// reads an unbound descriptor.
+    pub vb_batch_desc: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
+    /// VG rung R2c0: the per-FIF compacted visible-batch list. WRITTEN AND UNREAD — the
+    /// compaction half of what R2 de-risks; a consumer needs `multiDrawIndirect` plus a merged
+    /// vertex/index arena, neither of which this device/engine has.
+    pub vb_cull_visible: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
+    /// VG rung R2c0: the per-FIF visible-batch counter (one `u32` at element 0), transfer-zeroed
+    /// each frame ahead of the graph-derived `TRANSFER → COMPUTE` barrier.
+    pub vb_cull_count: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
+    /// VG rung R2c0: the batch-cull compute pipeline (`vb_batch_cull.comp.hlsl`), built against
+    /// [`Self::vb_cull_layout`]. `None` degrades the recorder to R2a''s transfer-only record
+    /// path, which is byte-identical to this one by construction.
+    pub vb_batch_cull_pipeline: Option<&'a ComputePipeline>,
+    /// VG rung R2c0: the batch-cull's OWN 1-set bind-group layout (`VbIndirect` @0,
+    /// `VbBatchDesc` @1, `VbCullVisible` @2, `VbCullCount` @3 — all COMPUTE, all STORAGE_BUFFER,
+    /// matching `vb_batch_cull.comp.hlsl`'s binding table).
+    ///
+    /// A DEDICATED layout rather than four more bindings on `vb_layout0`, and the reason is
+    /// structural: `vb_layout0_froxel` already occupies @8/@9 with the froxel pair, so appended
+    /// bindings would land on DIFFERENT numbers in the two layouts and no single compiled module
+    /// could name both. The [`Self::cull_layout`] precedent — the L1 cull's own 1-set pipeline —
+    /// is the shape this follows.
+    pub vb_cull_layout: Option<&'a VulkanBindGroupLayout>,
     /// The Decision-0 bindless per-mesh geometry table's OWN Set (`gMeshVerts[]`/
     /// `gMeshIndices[]`/`gMeshMeta` — `boyko_render::mesh_geometry_table::MeshGeometryTable::set()`),
     /// threaded down as the raw low-level type (this crate cannot depend on `boyko_render`, which
