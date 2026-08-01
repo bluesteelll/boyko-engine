@@ -2,13 +2,16 @@
 
 **Status: UNSOLVED, and the statement of why is now much sharper than "nobody has designed it yet."**
 
-> ⚠️ **AMENDED AT R0b′ (2026-08-01).** This document originally concluded that K1's FIRE branch was
-> closed on `assets/vg_corpus` by R0's own rows, which made `fund_upper_bound` provably futile there.
-> **That conclusion is WITHDRAWN** — see §3.1. It rested on `orbit_mid` reading `D_est = 1.0527`, and
-> that reading was inflated by an arrangement covering only 8.1 % of the frame. Recomposing the same
-> content to fill the frame drops it to **0.7425**, so no committed path carries a proven `D_est ≥ 1.0`
-> any more and the instrument is no longer provably futile. The catalogue of seven deaths (§4) and the
-> structural results in §3.2 and §3.3 are unaffected: none of them depended on the corpus's numbers.
+> ⚠️ **WITHDRAWN AT R0b′ AND RE-ESTABLISHED AT R0e — BY MEASUREMENT, ON A BETTER CORPUS AND WITH A
+> LARGER MARGIN (2026-08-01).** The conclusion that K1's FIRE branch is closed on `assets/vg_corpus`
+> rested on `orbit_mid` reading `D_est = 1.0527`. **R0b′ withdrew it**: that reading was inflated by an
+> arrangement covering only 8.1 % of the frame, and recomposing the same content to fill the frame
+> dropped it to 0.7425. **R0e restores it**: the ladder was extended to the hardware limit under its
+> own pre-registered non-convergence disposition, and at `7680×4320` `orbit_mid` measures
+> **`D_est = 1.1809`** — a *higher* margin over the bar than the reading that was withdrawn, now on a
+> **53.6 %-covered** frame instead of an 8.1 %-covered one. §3.1's consequence therefore stands again,
+> and stands better. The route through the withdrawal is kept below because it is the single most
+> instructive thing this campaign measured.
 
 `[k1].k1_fire_instrument_status` has read `"UNSOLVED -- needs a non-saturating upper bound on VISIBLE
 density"` since Rev 25. This document does not change that value. What it adds is a **catalogue of
@@ -98,10 +101,42 @@ what it implies rather than after a measurement wanted it.
 
 ## 3. Four structural results
 
-### 3.1 The governing theorem — and ⚠️ its CONSEQUENCE FOR THIS CORPUS IS WITHDRAWN at R0b′
+### 3.1 The governing theorem — withdrawn at R0b′, RE-ESTABLISHED at R0e
 
-**ORCHESTRATOR-VERIFIED. The theorem below still holds. What it *yielded on `assets/vg_corpus`* does
-not, and the reason is that the arrangement it was evaluated against has been repaired.**
+**ORCHESTRATOR-VERIFIED, and the round trip is the point.**
+
+### 3.1.0 Where it ended up: FIRE is closed, on a properly framed corpus, measured to the hardware limit
+
+| stage | `orbit_mid` covered | `orbit_mid` `D_est` | FIRE branch |
+|---|---|---|---|
+| R0d — flat layer in a void, 4-rung ladder | 8.1 % | 1.0527 | closed, but on an unrepresentative frame |
+| R0b′ — frame filled, 4-rung ladder | 53.6 % | **0.7425** | **open** — no path proven ≥ 1.0 |
+| R0e — frame filled, ladder to the hardware limit | 53.6 % | **1.1809** | **closed again, with a larger margin** |
+
+`D_est` is a **lower** bound, so `D(orbit_mid) ≥ 1.1809 > 1.0` is a *proof* about the content, not an
+estimate. Any sound upper bound therefore reads `U(orbit_mid) ≥ 1.1809`, and under the now-frozen
+`[k1].k1_fire_aggregation = "max_over_committed_camera_paths"` **K1 cannot fire on this corpus,
+whatever the instrument.** `fund_upper_bound` is futile here again — and this time the statement
+survives the framing objection that dissolved the first one.
+
+**The formal verdict is still UNDECIDED**, because MIN binds on `approach_close` at **0.3447** and
+crossing 1.0 there needs ~320 Mpx and a 42 GB heap by the same growth arithmetic. So: K1 cannot be
+fired and cannot be refuted, and both closures are now derived rather than asserted.
+
+⚠️ **Why extending the ladder is not threshold-chasing, stated because it looks like it.** The
+direction is what makes it sound: `D_est` is a lower bound, so a further rung moves it only TOWARD the
+truth. Crossing at ANY rung proves density; never crossing proves nothing. The stopping rule was
+pre-committed in the frozen file *before* the rung ran — the ladder stops at `7680×4320` because that
+is `4 × 1920×1080`, the largest granted client at the largest admitted SSAA scale, i.e. **the hardware
+limit, not the first favourable reading**. And the extrapolation that motivated the fifth rung was
+**wrong**: it predicted 14.4 Mpx would suffice, the rung measured 0.9364, and the growth exponent had
+decayed again (0.640 → 0.540 → 0.403). That is why the rungs were measured instead of the prediction
+being published.
+
+---
+
+**The R0b′ withdrawal follows, kept in full because it is the single most instructive measurement of
+this campaign: the same content, framed two ways, moved the decisive statistic by 42 %.**
 
 R0's original arrangement framed the seven assets as one flat layer in a void, covering **8.1 %** and
 **22.2 %** of the frame — the axis §5.3 names as unsolved. Rung **R0b′** recomposed the SAME content

@@ -1,7 +1,41 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status: R0 IS COMPLETE, Rev 38 — every rung landed, every gate executed, K1 is ADJUDICATED
-(UNDECIDED, escalate), and the FIRE branch is now proven CLOSED on this corpus.**
+**Status: R0 IS COMPLETE, Rev 39 — K1 is ADJUDICATED (UNDECIDED, escalate) and BOTH of its branches
+are now CLOSED BY MEASUREMENT rather than by argument.**
+
+**The finding, on a frame that finally looks like a frame.** R0b′ recomposed the corpus — same seven
+assets, same hashes, same 2 279 237 triangles — from one flat layer in a void (8.1 % / 22.2 % covered)
+into three staggered depth layers filling the view (**53.6 % / 77.4 %**). R0e then extended the ladder
+to this box's hardware limit under `[k1_instrument].on_not_converged_fire_direction`'s own
+non-convergence disposition. Measured at `7680×4320`:
+
+| path | covered | `D_est` | |
+|---|---|---|---|
+| `orbit_mid` | 53.6 % | **1.1809** | ≥ 1.0 — **the content IS micro-polygon at the canonical viewing distance, PROVEN** |
+| `approach_close` | 77.4 % | **0.3447** | < 1.0 — binds the MIN |
+
+`D_est` is a **lower** bound, so `1.1809` is a proof and not an estimate. Consequences:
+
+* **K1 cannot FIRE**, whatever the instrument: every sound upper bound reads `≥ 1.1809` on
+  `orbit_mid`, and `[k1].k1_fire_aggregation` (frozen at Rev 38) is `max` over paths. So
+  `k1_outcome.undecided_disposition = "fund_upper_bound"` would buy an instrument that cannot change
+  the verdict here — and unlike the first time this was concluded, the statement now survives the
+  framing objection.
+* **K1 cannot be REFUTED** on this box: MIN binds at 0.3447 and crossing 1.0 on `approach_close`
+  needs ~320 Mpx and a 42 GB device-local heap by the measured growth exponent.
+* **The premise the campaign rests on is CONFIRMED at the canonical framing** — which is evidence
+  *for* building the mechanism, though not the evidence `k1_decision_rule` asks for.
+
+⚠️ **And the route there is the most instructive thing R0 measured: the same content, framed two ways,
+moved the decisive statistic by 42 %** (1.0527 at 8.1 % covered → 0.7425 at 53.6 %). The thin framing
+had been *overstating* density in the direction that flatters the campaign.
+[VG-R11-UPPER-BOUND-INSTRUMENT.md](VG-R11-UPPER-BOUND-INSTRUMENT.md) §3.1 carries the withdrawal and
+the re-establishment in full, plus the catalogue of **seven dead candidate families**.
+
+---
+
+**Superseded status (Rev 38):** every rung landed, every gate executed, K1 ADJUDICATED
+(UNDECIDED, escalate), FIRE branch proven closed on the *pre-R0b′* arrangement.
 
 **Rev 38 is the first amendment after the freeze** (§11.1 carries all three rows, owner-authorised
 2026-08-01). It freezes `[k1].k1_fire_aggregation` as `max_over_committed_camera_paths` — a fold that
@@ -2289,6 +2323,8 @@ authoring; every edit after it is an amendment and needs a row below.
 
 | Date | Revision | Value | From → To | Why |
 |---|---|---|---|---|
+| 2026-08-01 | Rev 39 | `[census].resolution_ladder` | 4 rungs → **5**, appending `5120×2880` | **Owner-delegated** ("choose the best option yourself"). This is the field's OWN pre-registered disposition, not a convenience: R0d measured `visible_tris` as NOT converged on either committed path (residuals **0.3545** and **0.2444** against a 0.05 margin), and `[k1_instrument].on_not_converged_fire_direction`'s note says *"The disposition is to extend the ladder upward (a new plan revision), NOT to adjudicate on an underestimate."* The rung is `4 × 1280×720`, and 1280×720 is a client extent §9.1's grant table records this box granting **exactly**. It was chosen to settle a **pre-computed** question — the measured growth exponent puts `orbit_mid`'s crossing of `d_est_min` at 14.4 Mpx against this rung's 14.75 — and it may perfectly well fail to settle it. |
+| 2026-08-01 | Rev 39 | `[k1_instrument].d_est_ceiling` | `4.0` → **`7.111111111111111`** | **Forced, not chosen.** The ceiling is *defined* as top-rung pixels / decision-rung pixels, so appending a rung re-derives it: `(5120·2880)/(1920·1080)`. §14.1 **amendment 2** — *"a repair changing a measured INPUT must re-derive every number that is a function of it"* — is the rule that catches this, and a stale derived value is a defect class this file has shipped before. Direction: a **higher** ceiling weakens nothing, since the ceiling is *why* `D_est` cannot fire K1 and raising it only widens the band in which a lower bound is uninformative. `d_est_min` is unmoved. |
 | 2026-08-01 | Rev 38 | `[k1].k1_fire_aggregation` | *(absent)* → `"max_over_committed_camera_paths"` | **Owner-authorised.** `k1_path_aggregation` is justified explicitly and only for REFUTATION and `k1_decision_rule` has **no FIRE branch at all**, so the fold a firing instrument reduces by was going to be chosen by whoever first measured against it — the condition the two-file split exists to prevent. `MAX` mirrors `MIN`'s own reasoning rather than negating it: a campaign-favourable verdict must clear the bar on the WEAKEST framing, an unfavourable one on the STRONGEST. Frozen **before** any upper-bound instrument exists, which is the only moment at which freezing it means anything. |
 | 2026-08-01 | Rev 38 | `[k1]`'s firing paragraph | *"the upper-bound instrument **(the frustum+backface survivor counter)**"* → the parenthetical **subtracted** | **Owner-authorised.** The paragraph an implementer greps named a candidate its own refutation five lines below rejects and that `k1_fire_instrument_status` calls UNSOLVED — the defect the frozen file condemns in its own note on the `rule` key deleted at Rev 8 (*"a superseded field left in place with a comment saying so is still a field an implementer greps for and codes from"*). ⚠️ That note is named in prose rather than in the bracketed table-and-field spelling, because the key no longer exists and the spelling would be a **dangling citation** — which `vg_symbol_reachability` caught twice in this row's drafting, the second time on the sentence written to explain the first. R11 adds a third, engine-specific refutation: **this engine backface-culls nowhere in its scene passes**, so the numerator is unsound here. Sibling repair at §5.6 in the same commit. |
 | 2026-08-01 | Rev 38 | `[k1_instrument]`'s `visible_tris` derivation | *"is **monotonically increasing** in R"* → *"RISES with R"* | **Owner-authorised.** §5.7 has always stated the opposite (non-nested sample lattices, depth-tie flips). True of R0's measured rows, false as a theorem, and it is the sentence any extrapolation proposal cites. Sibling repair at §5.5 in the same commit. |

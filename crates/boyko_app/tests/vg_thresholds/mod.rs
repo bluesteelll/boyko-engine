@@ -18,7 +18,7 @@ pub const THRESHOLDS: &str = "../../docs/VG-CAMPAIGN-THRESHOLDS.toml";
 /// The sha256 R0a recorded. Re-asserted by every rung that DRIVES the ladder, because a ladder read
 /// from an edited frozen file is not read from the frozen file.
 pub const THRESHOLDS_SHA256: &str =
-    "864778bddf9790ee32764873a7b6ab0d32f23027798246a432342a2867ed6f1a";
+    "137379553feafa19217ce1b964f1663d3912815f12c8ebfd0ca14e94eedc41fa";
 
 /// Repository-relative path resolved against this crate's manifest directory.
 pub fn repo_path(rel: &str) -> PathBuf {
@@ -144,10 +144,13 @@ pub fn route_for(rung: (u32, u32)) -> Option<(u32, u32, u32)> {
     if matches!((w, h), (512, 512) | (1920, 1080)) {
         return Some((w, h, 1));
     }
-    if w.is_multiple_of(2) && h.is_multiple_of(2) {
-        let (cw, ch) = (w / 2, h / 2);
-        if matches!((cw, ch), (1280, 720) | (960, 540) | (1920, 1080) | (256, 256)) {
-            return Some((cw, ch, 2));
+    // Composite routes, tried finest-scale-first so a rung reachable at 2x never takes 4x.
+    for scale in [2u32, 4u32] {
+        if w.is_multiple_of(scale) && h.is_multiple_of(scale) {
+            let (cw, ch) = (w / scale, h / scale);
+            if matches!((cw, ch), (1280, 720) | (960, 540) | (1920, 1080) | (256, 256)) {
+                return Some((cw, ch, scale));
+            }
         }
     }
     None
@@ -159,6 +162,7 @@ pub struct Row {
     pub achieved: (u32, u32),
     pub native: (u32, u32),
     pub ssaa_armed: bool,
+    pub ssaa_scale: u32,
     pub vb_mesh_leg: bool,
     pub covered_pixels: u64,
     pub visible_tris: u64,
@@ -203,6 +207,7 @@ pub fn parse_row(src: &str) -> Row {
             field_u64(src, "extent.native_height") as u32,
         ),
         ssaa_armed: field_bool(src, "extent.ssaa_armed"),
+        ssaa_scale: field_u64(src, "extent.ssaa_scale") as u32,
         vb_mesh_leg: field_bool(src, "extent.vb_mesh_leg"),
         covered_pixels: field_u64(src, "row.covered_pixels"),
         visible_tris: field_u64(src, "row.visible_tris"),

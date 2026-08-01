@@ -108,8 +108,14 @@ pub(crate) struct WindowHost {
     /// device-capability degrade seam `AaConfig`'s doc reserves, resolved host-side
     /// because this layer is the only one that sees the boot resolution + device caps.
     pub(crate) ssaa_armed: bool,
+    /// The ARMED render scale per axis — a member of [`SSAA_SCALES`] when
+    /// [`Self::ssaa_armed`], and **1** otherwise, so `composite_extent == native_extent *
+    /// ssaa_scale` is total rather than conditional. Added at VG-R0 rung R0e, when the admitted
+    /// set stopped being a single constant: a `bool` can no longer say WHICH scale armed, and the
+    /// density census asserts the achieved extent against the rung it requested.
+    pub(crate) ssaa_scale: u32,
     /// SSAA (W2): the pre-scale window client size (`window.width()`/`height()` at
-    /// boot) — ALWAYS the render extent `aa_out` uses (native, never 2×), regardless of
+    /// boot) — ALWAYS the render extent `aa_out` uses (native, never scaled), regardless of
     /// [`Self::ssaa_armed`]. Equals [`Self::composite_extent`] when SSAA is not armed.
     pub(crate) native_extent: (u32, u32),
     /// Multi-paradigm render-path plan, rung R1: the boot-committed render-path selection
@@ -208,27 +214,34 @@ impl WindowHost {
         // proceeds exactly as an unscaled boot would.
         let caps = ctx.device_caps();
         let want = desc.ssaa_scale;
-        let dims_ok = native_extent.0.saturating_mul(SSAA_SCALE) <= caps.max_image_dimension_2d
-            && native_extent.1.saturating_mul(SSAA_SCALE) <= caps.max_image_dimension_2d;
-        let est = ssaa_ring_bytes_estimate(native_extent, SSAA_SCALE);
-        let vram_ok = est < caps.device_local_heap_bytes / SSAA_VRAM_FRACTION_DEN;
-        let ssaa_armed = want == SSAA_SCALE && dims_ok && vram_ok;
+        // VG-R0 rung R0e: the admitted set gained 4×. The probe is now parameterised BY the
+        // requested scale instead of by one constant, so `want == 2` follows exactly the arithmetic
+        // it followed before (`SSAA_SCALES[0] == 2`) and every golden that arms SSAA is
+        // byte-identical across the widening; `want == 4` runs the same probe against 4.
+        let admitted = SSAA_SCALES.contains(&want);
+        let dims_ok = admitted
+            && native_extent.0.saturating_mul(want) <= caps.max_image_dimension_2d
+            && native_extent.1.saturating_mul(want) <= caps.max_image_dimension_2d;
+        let est = if admitted { ssaa_ring_bytes_estimate(native_extent, want) } else { 0 };
+        let vram_ok = admitted && est < caps.device_local_heap_bytes / SSAA_VRAM_FRACTION_DEN;
+        let ssaa_armed = admitted && dims_ok && vram_ok;
+        // 1 when SSAA is off or degraded, so `composite = native * ssaa_scale` is total.
+        let ssaa_scale = if ssaa_armed { want } else { 1 };
         // Cold, boot-once diagnostics (mirrors `query_device_caps`'s DDGI/shadow-denoise
         // degrade logging) — never on the frame path, never a panic. Emitted UNCONDITIONALLY
         // (not `#[cfg(debug_assertions)]`): a RELEASE-build degrade-to-Off must be observable,
         // else an owner requesting `BOYKO_AA=ssaa` on a device that fails the dims/VRAM probe
         // silently gets no supersampling with zero explanation (spec B11).
-        if want == SSAA_SCALE && !ssaa_armed {
-            eprintln!("SSAA 2x unavailable (dims_ok={dims_ok} vram_ok={vram_ok}) -> Off");
+        if admitted && !ssaa_armed {
+            eprintln!(
+                "SSAA {want}x unavailable (dims_ok={dims_ok} vram_ok={vram_ok} est={est} heap={}) -> Off",
+                caps.device_local_heap_bytes
+            );
         }
-        if want != 0 && want != 1 && want != SSAA_SCALE {
-            eprintln!("SSAA scale {want} unsupported (v1: 2x only) -> Off");
+        if want != 0 && want != 1 && !admitted {
+            eprintln!("SSAA scale {want} unsupported (admitted: {SSAA_SCALES:?}) -> Off");
         }
-        let composite_extent = if ssaa_armed {
-            (native_extent.0 * SSAA_SCALE, native_extent.1 * SSAA_SCALE)
-        } else {
-            native_extent
-        };
+        let composite_extent = (native_extent.0 * ssaa_scale, native_extent.1 * ssaa_scale);
 
         let gpu = GpuSceneBundles::boot(ctx, composite_extent, swap_format);
 
@@ -240,6 +253,7 @@ impl WindowHost {
             retire_scratch: Vec::new(),
             composite_extent,
             ssaa_armed,
+            ssaa_scale,
             native_extent,
             resolved_render_path: ResolvedRenderPath::default(),
             // u64::MAX ≠ any real generation ⇒ both slots upload the ECS light
@@ -252,10 +266,19 @@ impl WindowHost {
     }
 }
 
-/// SSAA (W2): the v1 render scale — 2× per axis (4× pixels). The boot arming probe
-/// (see [`WindowHost::boot`]) admits ONLY this value; any other `WindowDesc::ssaa_scale`
-/// degrades to `Off`.
-const SSAA_SCALE: u32 = 2;
+/// SSAA: the admitted render scales, per axis. The boot arming probe
+/// ([`WindowHost::boot`]) admits ONLY these; any other `WindowDesc::ssaa_scale` degrades to `Off`.
+///
+/// ⚠️ **4× is VG-R0 rung R0e's addition and it is a MEASUREMENT capability, not a quality feature.**
+/// R0d measured `visible_tris` as NOT CONVERGED on either committed camera path (residuals 0.3545
+/// and 0.2444 against a 0.05 margin), and `[k1_instrument].on_not_converged_refute_direction`'s own
+/// disposition for that is to **extend the ladder upward**, never to adjudicate on an underestimate.
+/// Extending it needs a composite beyond `2 × 1920×1080`. The arithmetic that made 4× worth adding:
+/// on `orbit_mid`, `D_est` needs a further **1.35×** in `visible_tris` to cross `[k1].d_est_min`,
+/// which the measured growth exponent puts at **14.4 Mpx** — reachable at `4 × 1280×720` = 14.75 Mpx
+/// for an estimated 0.95 GB, well inside this box. On `approach_close` the same arithmetic says
+/// **320 Mpx** and a 42 GB heap, which is why the ladder can settle one path and not the other.
+const SSAA_SCALES: [u32; 2] = [2, 4];
 
 /// SSAA (W2): the VRAM-budget divisor — arm only if the estimated 2× ring cost stays
 /// under `1 / SSAA_VRAM_FRACTION_DEN` of the largest `DEVICE_LOCAL` heap.

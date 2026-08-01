@@ -2541,6 +2541,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             let cx = crate::vg_census_dump::CensusContext {
                 submitted_tris,
                 ssaa_armed: host.ssaa_armed,
+                ssaa_scale: host.ssaa_scale,
                 native_extent: host.native_extent,
                 // Recorded, not assumed: a boot that resolved away from VB, or away from the mesh
                 // leg, records NO copy, and the row must say so rather than let a sentinel-only
@@ -3198,6 +3199,7 @@ unsafe fn destroy_host_gpu_chain(host: WindowHost, ctx: &VulkanContext) {
         retire_scratch: _,
         composite_extent: _,
         ssaa_armed: _,
+        ssaa_scale: _,
         native_extent: _,
         resolved_render_path: _,
         light_uploaded_gen: _,

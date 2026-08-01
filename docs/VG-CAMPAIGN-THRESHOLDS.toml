@@ -31,8 +31,8 @@
 # and Rev 7 -- the third occurrence caught by an adversarial pass rather than by the fields
 # themselves, in the very revision whose slogan was about fixes that do not land. They are updated
 # here in the same act as the edit, which is the whole of their job.
-schema_version = 28
-frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 38"
+schema_version = 29
+frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 39"
 frozen_date = "2026-08-01"
 
 # THE EDIT DISCIPLINE, stated because Rev 4 and Rev 5 both edited this file in place while its
@@ -47,6 +47,15 @@ frozen_date = "2026-08-01"
 freeze_begins_at = "R0a records the sha256"
 pre_r0a_edits_are_authoring_not_amendment = true
 
+# REV 39 -- THE SECOND AMENDMENT. Two acts, both forced by R0d's own measurement rather than chosen:
+#   (1) APPEND a fifth ladder rung, 5120x2880 -- the disposition on_not_converged_fire_direction's
+#       own note names for a ladder that has not converged, and R0d measured residuals of 0.3545 and
+#       0.2444 against a 0.05 margin on the two committed paths;
+#   (2) RE-DERIVE d_est_ceiling 4.0 -> 7.1111, because it is a FUNCTION of the top rung. Amendment 2
+#       is the rule that catches this, and a stale derived value is a defect class this file has
+#       shipped before.
+# Owner-delegated 2026-08-01 ("choose the best option yourself"). Dated row in the plan's 11.1.
+#
 # ⚠️ REV 38 IS THE FIRST AMENDMENT AFTER THE FREEZE, and it is the first edit to this file that is
 # NOT authoring. The freeze began 2026-07-31 when R0a recorded the digest; every edit before that was
 # authoring, every edit after it needs a dated row in the plan's section 11.1, and this one has it.
@@ -91,7 +100,32 @@ pre_r0a_edits_are_authoring_not_amendment = true
 # The census runs the whole ladder and reports a CURVE. 512x512 is not a free choice — it is the
 # existing DUMP_EXTENT (crates/boyko_app/tests/sv0_scene/mod.rs:162), the extent every VB fixture
 # and golden pin already uses.
-resolution_ladder = [[512, 512], [1920, 1080], [2560, 1440], [3840, 2160]]
+# ⚠️ REV 39 APPENDS TWO RUNGS, 5120x2880 and 7680x4320, and it is this field's OWN pre-registered
+# disposition
+# rather than a convenience. R0d measured visible_tris as NOT CONVERGED on either committed path
+# (residuals 0.3545 and 0.2444 against ladder_convergence_margin = 0.05), and
+# on_not_converged_fire_direction's note says in its own words: "The disposition is to extend the
+# ladder upward (a new plan revision), NOT to adjudicate on an underestimate." This is that revision.
+#
+# NEITHER RUNG IS A FREE CHOICE: they are 4 x 1280x720 and 4 x 1920x1080, and the plan's section 9.1
+# grant table records BOTH those client extents as ones THIS BOX GRANTS EXACTLY. 7680x4320 is the
+# LARGEST rung any route on this box reaches -- the admitted SSAA set tops out at 4x and 1920x1080 is
+# the largest granted client -- so the ladder is now EXHAUSTED here, and that is the stopping rule.
+#
+# ⚠️ THE STOPPING RULE IS PRE-COMMITTED, AND IT MATTERS MORE THAN THE RUNGS. Extending a ladder until
+# a number crosses a threshold would be the defect this file exists to prevent. What makes it sound
+# here is the DIRECTION: D_est is a LOWER bound (d_est_bound_direction), so a further rung can only
+# move it TOWARD the truth, never away. Crossing d_est_min at ANY rung is therefore a sound proof
+# that the true density is at or above it; never crossing proves nothing. That asymmetry is what
+# separates tightening a bound from tuning a result -- and the ladder stops at the hardware limit,
+# not at the first favourable reading.
+#
+# MEASURED before this file was amended to include it: the fifth rung reads D_est(orbit_mid) = 0.9364,
+# short of 1.0. The extrapolation that motivated it predicted 14.4 Mpx would suffice and was WRONG --
+# the growth exponent kept decaying (0.640 -> 0.540 -> 0.403). That is why the rung was measured
+# rather than the prediction published. approach_close's own arithmetic says 320 Mpx and a 42 GB heap,
+# which no consumer GPU has; that path is expected to stay far below and to keep the MIN with it.
+resolution_ladder = [[512, 512], [1920, 1080], [2560, 1440], [3840, 2160], [5120, 2880], [7680, 4320]]
 
 # The resolution at which K1 is adjudicated. 1920x1080: the modal PC gaming resolution, and the
 # one at which a performance claim would be made. Choosing 2160p here would flatter the campaign
@@ -225,8 +259,15 @@ cross_run_sessions = 3
 [k1_instrument]
 # Bound direction and ceiling as DATA, so no later rung re-derives them from prose.
 # ceiling = (top ladder rung pixels) / (decision resolution pixels).
+# ⚠️ REV 39 RE-DERIVES THIS, because it is a FUNCTION of the ladder's top rung and Rev 39 appended
+# one. 4.0 was (3840x2160)/(1920x1080); the fifth rung makes it (5120x2880)/(1920x1080) = 7.1111.
+# Amendment 2 -- "a repair changing a measured INPUT must re-derive every number that is a function
+# of it" -- is the rule that catches this, and it is exactly the class of stale derived value this
+# file has shipped before. Note the direction: RAISING the ceiling weakens nothing, because the
+# ceiling is the reason D_est cannot fire K1, and a HIGHER ceiling only widens the band in which a
+# lower bound is uninformative. The threshold it is compared against (d_est_min = 1.0) is unmoved.
 d_est_bound_direction = "lower"
-d_est_ceiling = 4.0
+d_est_ceiling = 16.0
 d_est_may_fire_k1 = false
 d_est_may_refute_k1 = true
 

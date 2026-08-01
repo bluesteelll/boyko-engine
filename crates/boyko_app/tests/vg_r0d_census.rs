@@ -296,7 +296,11 @@ fn vg_r0d_census_gate() {
                 "({path}, rung {i}): the readback is {:?} but the rung is {rung:?}",
                 row.achieved
             );
-            assert_eq!(row.ssaa_armed, ssaa > 1, "({path}, rung {i}): SSAA arming is asserted");
+            assert_eq!(
+                (row.ssaa_armed, row.ssaa_scale),
+                (ssaa > 1, ssaa),
+                "({path}, rung {i}): the ARMED SCALE is asserted, not merely that something armed"
+            );
             assert!(row.vb_mesh_leg, "({path}, rung {i}): the census frame must carry a VB mesh leg");
             rows.push((path.clone(), i, row));
         }

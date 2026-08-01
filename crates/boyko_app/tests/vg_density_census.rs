@@ -211,7 +211,17 @@ fn the_thresholds_file_is_the_one_r0a_froze() {
 fn the_ladder_is_read_from_the_frozen_file_and_every_rung_has_a_route() {
     let src = read_thresholds();
     let ladder = resolution_ladder(&src);
-    assert_eq!(ladder, vec![(512, 512), (1920, 1080), (2560, 1440), (3840, 2160)]);
+    assert_eq!(
+        ladder,
+        vec![
+            (512, 512),
+            (1920, 1080),
+            (2560, 1440),
+            (3840, 2160),
+            (5120, 2880),
+            (7680, 4320)
+        ]
+    );
     assert!(field_bool(&src, "census.assert_achieved_extent"));
     for (i, rung) in ladder.iter().enumerate() {
         let (cw, ch, ssaa) = route_for(*rung).unwrap_or_else(|| {
@@ -332,8 +342,8 @@ fn vg_density_census_gate() {
             row.achieved
         );
         assert_eq!(
-            row.ssaa_armed,
-            ssaa > 1,
+            (row.ssaa_armed, row.ssaa_scale),
+            (ssaa > 1, ssaa),
             "(d) rung {i}: SSAA arming is ASSERTED, not trusted -- the probe degrades to Off \
              silently on a caps or VRAM miss, and this box routes the top two rungs through the \
              armed composite"
@@ -441,6 +451,6 @@ fn vg_density_census_gate() {
             r.submitted_tris,
             &r.readback_sha256[..16]
         );
-        assert_eq!(r.native.0 * if r.ssaa_armed { 2 } else { 1 }, r.achieved.0);
+        assert_eq!(r.native.0 * r.ssaa_scale, r.achieved.0);
     }
 }

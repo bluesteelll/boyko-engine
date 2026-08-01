@@ -2,7 +2,7 @@
 
 Every number below was produced by the run that wrote this file; nothing here is hand-entered. The census renders at FULL detail (`[k1].measured_at`), so the densities are the CEILING of the mechanism available to any LOD scheme.
 
-`assets/vg_corpus/CORPUS.toml` sha256: `5999af9567849b87467303691ed2a3ab4f4fa120db96e2c2d684602d7ce8e2f7`
+`assets/vg_corpus/CORPUS.toml` sha256: `30c02d38c4a76e378bc10eaf2d8ee7fb9c330e0510767cddec0564a58e9c81c7`
 
 ## Rows — one per (committed camera path, ladder rung) pair
 
@@ -12,10 +12,14 @@ Every number below was produced by the run that wrote this file; nothing here is
 | orbit_mid | 1 | 1920×1080 | 1110569 | **53.6 %** | 367946 | 0 | 13709880 | 0.331313 | 12.344915 | `da4e9869f823bf26` |
 | orbit_mid | 2 | 2560×1440 | 1974355 | **53.6 %** | 532341 | 0 | 13709880 | 0.269628 | 6.943979 | `f77a1c7b460f55e7` |
 | orbit_mid | 3 | 3840×2160 | 4442145 | **53.6 %** | 824651 | 0 | 13709880 | 0.185643 | 3.086320 | `8b5de0b20b2836d1` |
+| orbit_mid | 4 | 5120×2880 | 7897259 | **53.6 %** | 1039940 | 0 | 13709880 | 0.131684 | 1.736030 | `7d665a47c43da054` |
+| orbit_mid | 5 | 7680×4320 | 17768887 | **53.6 %** | 1311466 | 1 | 13709880 | 0.073807 | 0.771567 | `d00e7dd3d0851d8d` |
 | approach_close | 0 | 512×512 | 211369 | **80.6 %** | 33630 | 0 | 13709880 | 0.159106 | 64.862302 | `1e42045fd51ecaf0` |
 | approach_close | 1 | 1920×1080 | 1605538 | **77.4 %** | 249183 | 0 | 13709880 | 0.155202 | 8.539119 | `b658ee97aa87b246` |
 | approach_close | 2 | 2560×1440 | 2854287 | **77.4 %** | 343241 | 0 | 13709880 | 0.120255 | 4.803259 | `289b1fe46a7399b0` |
 | approach_close | 3 | 3840×2160 | 6422334 | **77.4 %** | 454260 | 1 | 13709880 | 0.070731 | 2.134719 | `e2c489eb3396c85e` |
+| approach_close | 4 | 5120×2880 | 11417523 | **77.4 %** | 505851 | 1 | 13709880 | 0.044305 | 1.200775 | `7e691d582f1e7ec5` |
+| approach_close | 5 | 7680×4320 | 25689246 | **77.4 %** | 553407 | 2 | 13709880 | 0.021542 | 0.533682 | `07d98e4c52c35e87` |
 
 The **covered %** column is what rung R0b′ exists for. No floor is frozen for it here either — `[k1_instrument].representativeness_floor_status` still records that axis UNSOLVED — but the frame now looks like a frame, and the number is on the page per row instead of being absent.
 
@@ -40,10 +44,10 @@ The poses were set from the arrangement's geometry and from the stated goal of f
 
 | path | D_est | vs d_est_min |
 |---|---|---|
-| orbit_mid | 0.7425 | < |
-| approach_close | 0.2829 | < |
+| orbit_mid | 1.1809 | ≥ |
+| approach_close | 0.3447 | < |
 
-**MIN over committed paths = 0.2829** against `[k1].d_est_min` = 1 ⇒ **UNDECIDED, escalate**.
+**MIN over committed paths = 0.3447** against `[k1].d_est_min` = 1 ⇒ **UNDECIDED, escalate**.
 
 MIN rather than MAX because refutation is the campaign-FAVOURABLE outcome: a favourable verdict must clear the bar on the WEAKEST committed framing, not the strongest.
 
@@ -53,8 +57,8 @@ MIN rather than MAX because refutation is the campaign-FAVOURABLE outcome: a fav
 
 | path | rung | identical | digests |
 |---|---|---|---|
-| orbit_mid | 3 | true | `8b5de0b20b2836d1`, `8b5de0b20b2836d1`, `8b5de0b20b2836d1` |
-| approach_close | 3 | true | `e2c489eb3396c85e`, `e2c489eb3396c85e`, `e2c489eb3396c85e` |
+| orbit_mid | 5 | true | `d00e7dd3d0851d8d`, `d00e7dd3d0851d8d`, `d00e7dd3d0851d8d` |
+| approach_close | 5 | true | `07d98e4c52c35e87`, `07d98e4c52c35e87`, `07d98e4c52c35e87` |
 
 ## Convergence residual — REPORTED, not gated
 
@@ -62,8 +66,8 @@ Firing K1 is unreachable at R0 (no non-saturating upper bound exists), and conve
 
 | path | visible_tris(top-1) | visible_tris(top) | residual | margin |
 |---|---|---|---|---|
-| orbit_mid | 532341 | 824651 | 0.3545 | 0.05 |
-| approach_close | 343241 | 454260 | 0.2444 | 0.05 |
+| orbit_mid | 1039940 | 1311466 | 0.2070 | 0.05 |
+| approach_close | 505851 | 553407 | 0.0859 | 0.05 |
 
 ## Modal-bucket shift — MEASURED AND RECORDED, deliberately NOT a gate
 
@@ -75,8 +79,12 @@ Rung [0] excluded: 512² is 1:1 while the other rungs are 16:9, so the projectio
 |---|---|---|---|---|---|---|
 | orbit_mid | 1→2 | 1.7778 | 0.830075 | +0 | 0.830075 | 0.35 |
 | orbit_mid | 2→3 | 2.2500 | 1.169925 | +0 | 1.169925 | 0.35 |
+| orbit_mid | 3→4 | 1.7778 | 0.830075 | +0 | 0.830075 | 0.35 |
+| orbit_mid | 4→5 | 2.2500 | 1.169925 | +1 | 0.169925 | 0.35 |
 | approach_close | 1→2 | 1.7778 | 0.830075 | +0 | 0.830075 | 0.35 |
 | approach_close | 2→3 | 2.2500 | 1.169925 | +1 | 0.169925 | 0.35 |
+| approach_close | 3→4 | 1.7778 | 0.830075 | +0 | 0.830075 | 0.35 |
+| approach_close | 4→5 | 2.2500 | 1.169925 | +1 | 0.169925 | 0.35 |
 
 ## What this census does NOT decide
 

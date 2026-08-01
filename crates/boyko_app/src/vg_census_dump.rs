@@ -69,6 +69,9 @@ pub(crate) struct CensusContext {
     /// table routes the top TWO ladder rungs through the composite — so a rung that merely hoped
     /// for arming would measure `native`, red the extent conjunct, and give no indication why.
     pub(crate) ssaa_armed: bool,
+    /// The ARMED render scale per axis (1 when SSAA is off). Recorded because the admitted set
+    /// is no longer a single constant, so `ssaa_armed` alone cannot say which rung a row is at.
+    pub(crate) ssaa_scale: u32,
     /// The window's client extent, before any SSAA doubling — recorded beside the achieved extent
     /// so the route a rung actually took is readable from the row rather than inferred.
     pub(crate) native_extent: (u32, u32),
@@ -285,6 +288,7 @@ fn write_row(
     out.push_str(&format!("native_width = {}\n", cx.native_extent.0));
     out.push_str(&format!("native_height = {}\n", cx.native_extent.1));
     out.push_str(&format!("ssaa_armed = {}\n", cx.ssaa_armed));
+    out.push_str(&format!("ssaa_scale = {}\n", cx.ssaa_scale));
     out.push_str(&format!("vb_mesh_leg = {}\n\n", cx.vb_mesh_leg));
 
     out.push_str("[row]\n");
