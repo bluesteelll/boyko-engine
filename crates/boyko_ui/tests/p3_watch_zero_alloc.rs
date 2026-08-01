@@ -84,13 +84,26 @@ fn count_allocs(f: impl FnOnce()) -> usize {
 
 /// Builds a finished `App` with a `UiPlugin` watching a temp file (1 ms poll).
 fn build(tag: &str, src: &str) -> (App, TempUi) {
+    build_with_interval(tag, src, Duration::from_millis(1))
+}
+
+/// As [`build`], with an explicit poll interval.
+///
+/// The 1 ms default is right for tests that want the throttle to CLEAR quickly. It is wrong for the
+/// one test that asserts a tick IS throttled: the budget between `last_poll` being stamped and the
+/// second tick reading it is a few hundred nanoseconds of straight-line code, and a single OS
+/// preemption inside that window pushes `elapsed()` past 1 ms. The tick then runs for real,
+/// `metadata()` allocates (already noted below as allocating on windows-gnu), and a `== 0`
+/// assertion fails for a reason that has nothing to do with what it is testing. That test passes a
+/// generous interval instead.
+fn build_with_interval(tag: &str, src: &str, poll: Duration) -> (App, TempUi) {
     let temp = TempUi::new(tag, src);
     let mut app = App::with_threads(1);
     app.add_plugin(
         UiPlugin::new()
             .with_ui_path(temp.path)
             .with_hot_reload(true)
-            .with_poll_interval(Duration::from_millis(1)),
+            .with_poll_interval(poll),
     );
     app.finish();
     (app, temp)
@@ -106,7 +119,9 @@ version=1
 #[test]
 fn watch_throttled_tick_allocates_nothing() {
     let _arm = lock_arm();
-    let (mut app, _temp) = build("throttle", DOC);
+    // A 5 s interval, not the 1 ms default: "an immediate second tick is throttled" must not be
+    // hostage to one scheduler preemption. See `build_with_interval`.
+    let (mut app, _temp) = build_with_interval("throttle", DOC, Duration::from_secs(5));
     // First direct tick polls (the resource seeds last_poll in the past) and sets
     // last_poll = now. An IMMEDIATE second tick is throttled → returns before any
     // syscall or alloc.
