@@ -41,18 +41,46 @@ pub const NORMALISED_SIZE: f32 = 1.0;
 
 /// Centre-to-centre spacing, in world units. Greater than [`NORMALISED_SIZE`], so normalised
 /// assets never interpenetrate — an overlap would make coverage depend on draw order.
-pub const GRID_SPACING: f32 = 1.30;
+pub const GRID_SPACING: f32 = 1.06;
 
-/// Columns in the layout grid.
+/// Columns per depth layer. Five against three rows gives a 5.30 × 3.18 arrangement, aspect 1.67,
+/// close to the 16:9 the four ladder rungs above rung 0 all use.
 ///
 /// ⚠️ A GRID rather than the row this file first used, and the reason is the ladder rather than
 /// aesthetics. Rung 0 is 512² (1:1) while every other rung is 16:9, so one camera pose frames a
 /// WIDE arrangement quite differently across the ladder — the same reason
-/// `[k1_instrument].histogram_shift_excludes_rungs` names rung 0 as a different frustum. A compact
-/// square-ish arrangement is what makes one committed pose mean the same framing at every rung.
-/// Measured on the row layout: 4.9% of the frame covered at `orbit_mid`, which clears the
-/// non-degeneracy floors and is still a thin reading.
-pub const GRID_COLUMNS: usize = 3;
+/// `[k1_instrument].histogram_shift_excludes_rungs` names rung 0 as a different frustum. Measured on
+/// the row layout: 4.9% of the frame covered at `orbit_mid`.
+pub const GRID_COLUMNS: usize = 5;
+
+/// Rows per depth layer.
+pub const GRID_ROWS: usize = 3;
+
+/// Depth layers behind the first.
+///
+/// ⚠️ **THE R0b′ RECOMPOSITION, and it repairs a MEASUREMENT defect rather than changing what is
+/// measured.** R0's arrangement was one flat layer of seven assets in a void, and it produced two
+/// framings covering **8.1 %** and **22.2 %** of the screen. That is not what a rendered frame looks
+/// like — in a real frame you never see void through a scene, you see more scene — and
+/// `docs/VG-R11-UPPER-BOUND-INSTRUMENT.md` §5.3 records the consequence: a verdict from an
+/// 8 %-covered frame inherits every criticism the other direction already carries. The flat layer
+/// also had **no inter-asset occlusion at all** (spacing exceeded the asset diameter), so depth
+/// complexity — the thing that decides whether an occlusion-culling instrument buys anything — was
+/// structurally absent from the census.
+///
+/// Layers stack away from the camera and are offset laterally by half a cell, so a back layer shows
+/// through the gaps of the one in front. That fills the frame and creates real occlusion.
+///
+/// **What this deliberately does NOT change: the CONTENT.** `CORPUS.toml`'s asset list, hashes and
+/// published counts are untouched, so R0b(b)'s decoded-equals-published equality still holds on the
+/// same seven assets. Swapping in sparser or denser content would have chosen the K1 verdict, which
+/// is the vacuous-selection defect this campaign refuses everywhere else; recomposing the same
+/// content does not. Instancing is free here: the seven MESHES are registered once and placed many
+/// times, so vertex and index memory are unchanged and only the instance ring grows.
+pub const DEPTH_LAYERS: usize = 3;
+
+/// Centre-to-centre spacing between depth layers, in world units.
+pub const LAYER_SPACING: f32 = 1.60;
 
 /// One committed camera path's definition.
 #[derive(Clone, Copy, Debug)]
@@ -71,22 +99,28 @@ pub struct CameraPath {
 /// the binding one, which is the honest direction — a favourable verdict must clear the bar on the
 /// WEAKEST framing.
 ///
-/// Both poses are set from the layout's GEOMETRY — the grid's half-extent against the vertical
-/// field of view — and not from any statistic they produce. `orbit_mid` sits at 5.34 world units,
-/// where a 50° vertical field spans 2.49 units against the grid's 1.95 half-extent, so the whole
-/// corpus is in frame with margin; `approach_close` sits at 1.84, spanning 0.86, so it sees the
-/// central assets at the highest screen density the scene offers.
+/// Both poses are set from the layout's GEOMETRY and from ONE stated methodological goal — that the
+/// frame be FILLED, which `docs/VG-R11-UPPER-BOUND-INSTRUMENT.md` §5.3 names as the axis R0 left
+/// open. Neither is set from `D_est`, and the distinction is the whole of this rung's honesty: the
+/// covered FRACTION is a property of the framing and is legitimate to aim at, while the density is
+/// the measurement and is not.
+///
+/// The arrangement's front layer is 5.30 × 3.18 world units. A 50° vertical field spans the 3.18
+/// height at `d = 1.59 / tan(25°) = 3.41`, so `orbit_mid` sits just inside that, off-axis, looking
+/// into the middle depth layer — the whole point being that the back layers close the gaps the front
+/// one leaves. `approach_close` sits at roughly a third of that distance, where the near assets
+/// overflow the frame entirely and every pixel is geometry.
 pub const PATHS: [CameraPath; 2] = [
     CameraPath {
         id: "orbit_mid",
-        eye: [2.20, 1.60, 4.60],
-        target: [0.0, 0.0, 0.0],
+        eye: [0.85, 0.60, 3.25],
+        target: [0.0, 0.0, -1.60],
         fov_y_degrees: 50.0,
     },
     CameraPath {
         id: "approach_close",
-        eye: [0.45, 0.35, 1.75],
-        target: [0.0, 0.0, 0.0],
+        eye: [0.30, 0.22, 1.15],
+        target: [0.0, 0.0, -1.60],
         fov_y_degrees: 50.0,
     },
 ];
@@ -191,17 +225,19 @@ pub fn payload_present() -> bool {
     !assets.is_empty() && assets.iter().all(|a| a.glb.is_file())
 }
 
-/// One decoded asset, plus the placement that normalises it onto the row.
+/// One decoded asset and the normalisation that makes it comparable to its siblings.
+///
+/// A slot is NOT a member: the arrangement places each asset in several slots, and the mesh is
+/// registered with the device exactly once per asset. That split is what keeps the recomposition
+/// free — vertex and index memory are a function of the seven assets, never of the slot count.
 pub struct PlacedAsset {
     pub id: String,
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
     /// Uniform scale that makes the largest bounding-box extent [`NORMALISED_SIZE`].
     pub scale: f32,
-    /// Model-space translation applied BEFORE the scale, centring the asset on its own bounds.
+    /// Model-space bounds centre; the caller folds `-scale * centre` into the instance translation.
     pub centre: [f32; 3],
-    /// The grid slot's world position.
-    pub slot: [f32; 3],
 }
 
 impl PlacedAsset {
@@ -210,19 +246,42 @@ impl PlacedAsset {
     }
 }
 
-/// The world position of grid slot `i` of `n`, centred on the origin.
-pub fn grid_slot(i: usize, n: usize) -> [f32; 3] {
-    let cols = GRID_COLUMNS.min(n.max(1));
-    let rows = n.div_ceil(cols);
-    let (col, row) = (i % cols, i / cols);
+/// The arrangement: for each slot, which decoded asset fills it.
+///
+/// Assets cycle through the slots in manifest order, so the mix is fixed by the manifest rather
+/// than chosen per slot — there is no per-slot lever with which to place the dense assets where a
+/// camera would flatter them.
+pub fn slot_asset(slot: usize, asset_count: usize) -> usize {
+    slot % asset_count.max(1)
+}
+
+/// Triangles the arrangement SUBMITS per frame — the sum over slots of the asset filling it.
+pub fn submitted_triangles(assets: &[PlacedAsset]) -> u64 {
+    (0..SLOT_COUNT).map(|s| assets[slot_asset(s, assets.len())].triangles()).sum()
+}
+
+/// Slots in the whole arrangement: `GRID_COLUMNS × GRID_ROWS × DEPTH_LAYERS`.
+pub const SLOT_COUNT: usize = GRID_COLUMNS * GRID_ROWS * DEPTH_LAYERS;
+
+/// The world position of arrangement slot `i`, centred laterally on the origin with layer 0 at
+/// `z = 0` and later layers receding.
+///
+/// Odd layers are offset laterally by half a cell in both axes, so a back layer shows through the
+/// gaps of the one in front instead of hiding exactly behind it.
+pub fn slot_position(i: usize) -> [f32; 3] {
+    let per_layer = GRID_COLUMNS * GRID_ROWS;
+    let layer = i / per_layer;
+    let within = i % per_layer;
+    let (col, row) = (within % GRID_COLUMNS, within / GRID_COLUMNS);
+    let stagger = if layer % 2 == 1 { 0.5 } else { 0.0 };
     [
-        (col as f32 - (cols as f32 - 1.0) * 0.5) * GRID_SPACING,
-        ((rows as f32 - 1.0) * 0.5 - row as f32) * GRID_SPACING,
-        0.0,
+        (col as f32 - (GRID_COLUMNS as f32 - 1.0) * 0.5 + stagger) * GRID_SPACING,
+        ((GRID_ROWS as f32 - 1.0) * 0.5 - row as f32 + stagger) * GRID_SPACING,
+        -(layer as f32) * LAYER_SPACING,
     ]
 }
 
-/// Decodes every manifest asset and computes its normalised grid placement.
+/// Decodes every manifest asset and computes its normalisation.
 ///
 /// # Panics
 ///
@@ -230,12 +289,9 @@ pub fn grid_slot(i: usize, n: usize) -> [f32; 3] {
 /// name, because a payload-dependent gate part that does not name itself as skipped is
 /// indistinguishable from one that passed.
 pub fn decode_corpus() -> Vec<PlacedAsset> {
-    let assets = manifest_assets();
-    let n = assets.len();
-    assets
+    manifest_assets()
         .iter()
-        .enumerate()
-        .map(|(i, a)| {
+        .map(|a| {
             let bytes = std::fs::read(&a.glb)
                 .unwrap_or_else(|e| panic!("corpus asset `{}` unreadable: {e}", a.id));
             let mesh = GlbMeshLoader::decode(&bytes)
@@ -253,7 +309,6 @@ pub fn decode_corpus() -> Vec<PlacedAsset> {
                     (lo[1] + hi[1]) * 0.5,
                     (lo[2] + hi[2]) * 0.5,
                 ],
-                slot: grid_slot(i, n),
             }
         })
         .collect()

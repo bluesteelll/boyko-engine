@@ -180,3 +180,35 @@ published_triangles = 501776
 # CORPUS TOTAL: 2 279 237 triangles across seven assets -- into the multi-million-triangle regime
 # the premise is about, from 682 at the start of the day. R0b(b)'s equality (decoded == published)
 # holds on all seven and is what keeps each addition honest.
+#
+# ---------------------------------------------------------------------------------------------
+# R0b' -- THE RECOMPOSITION, 2026-08-01. NO ASSET ROW ABOVE CHANGES.
+#
+# The owner's answer to the K1-UNDECIDED disposition was "change the corpus and re-run R0b-R0d". What
+# changed is the ARRANGEMENT and the two camera poses, not the content: the seven rows above, their
+# hashes and their published counts are untouched, so R0b(b)'s decoded-equals-published equality
+# still holds on the same 2 279 237 triangles.
+#
+# WHY THE CONTENT DID NOT CHANGE. Swapping in sparser assets would make K1 fire by construction and
+# denser ones would make it refute by construction -- the vacuous-selection defect this campaign
+# refuses everywhere else. The defect R0 actually had was on a different axis: its arrangement was
+# one FLAT LAYER of seven assets in a void, covering 8.1% and 22.2% of the frame with NO inter-asset
+# occlusion at all. That is not what a rendered frame looks like, and the plan's own section 9.1
+# records the covered-fraction axis as UNSOLVED.
+#
+# THE NEW ARRANGEMENT: three staggered depth layers, five columns by three rows each, framed to fill
+# the view. Instancing makes it free -- the seven MESHES are registered once and placed 45 times, so
+# vertex and index memory are unchanged. Measured: 53.6% and 77.4% covered.
+#
+# ⚠️ AND IT MOVED THE READING AGAINST THE CAMPAIGN, which is recorded here rather than only in the
+# machine-written census. D_est fell from 1.0527 to 0.7425 on orbit_mid and from 0.5090 to 0.2829 on
+# approach_close, because the same assets magnified to fill the frame carry LARGER triangles and
+# therefore fewer triangles per covered pixel. The 8%-covered reading OVERSTATED density. The verdict
+# is unchanged (UNDECIDED -- a lower bound below the threshold decides nothing either way), but the
+# proof that one committed framing was dense is withdrawn: see docs/VG-R11-UPPER-BOUND-INSTRUMENT.md
+# section 3.1.
+#
+# The camera poses were set from the arrangement's geometry and from the stated goal of FILLING THE
+# FRAME, before any density was read. Section 9.1 records that re-aiming a committed path is invisible
+# to every R0 gate part, so what constrains it is commit ordering and the fact that both readings are
+# published -- not a check. The path IDs are unchanged, so R0d(d)'s set equality is unaffected.

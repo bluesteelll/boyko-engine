@@ -2,6 +2,14 @@
 
 **Status: UNSOLVED, and the statement of why is now much sharper than "nobody has designed it yet."**
 
+> ⚠️ **AMENDED AT R0b′ (2026-08-01).** This document originally concluded that K1's FIRE branch was
+> closed on `assets/vg_corpus` by R0's own rows, which made `fund_upper_bound` provably futile there.
+> **That conclusion is WITHDRAWN** — see §3.1. It rested on `orbit_mid` reading `D_est = 1.0527`, and
+> that reading was inflated by an arrangement covering only 8.1 % of the frame. Recomposing the same
+> content to fill the frame drops it to **0.7425**, so no committed path carries a proven `D_est ≥ 1.0`
+> any more and the instrument is no longer provably futile. The catalogue of seven deaths (§4) and the
+> structural results in §3.2 and §3.3 are unaffected: none of them depended on the corpus's numbers.
+
 `[k1].k1_fire_instrument_status` has read `"UNSOLVED -- needs a non-saturating upper bound on VISIBLE
 density"` since Rev 25. This document does not change that value. What it adds is a **catalogue of
 seven adjudicated deaths** and **four structural results**, two of which close whole families rather
@@ -90,9 +98,46 @@ what it implies rather than after a measurement wanted it.
 
 ## 3. Four structural results
 
-### 3.1 The governing theorem — K1's FIRE branch is closed on this corpus, whatever the instrument
+### 3.1 The governing theorem — and ⚠️ its CONSEQUENCE FOR THIS CORPUS IS WITHDRAWN at R0b′
 
-**ORCHESTRATOR-VERIFIED.**
+**ORCHESTRATOR-VERIFIED. The theorem below still holds. What it *yielded on `assets/vg_corpus`* does
+not, and the reason is that the arrangement it was evaluated against has been repaired.**
+
+R0's original arrangement framed the seven assets as one flat layer in a void, covering **8.1 %** and
+**22.2 %** of the frame — the axis §5.3 names as unsolved. Rung **R0b′** recomposed the SAME content
+(same manifest, same hashes, same 2 279 237 decoded triangles, so R0b(b)'s equality is untouched)
+into three staggered depth layers framed to fill the view: **53.6 %** and **77.4 %** covered.
+
+**Filling the frame LOWERED the measured density on both paths:**
+
+| path | flat layer in a void | filled frame |
+|---|---|---|
+| `orbit_mid` | `D_est` = **1.0527**, 8.1 % covered | `D_est` = **0.7425**, 53.6 % covered |
+| `approach_close` | `D_est` = **0.5090**, 22.2 % covered | `D_est` = **0.2829**, 77.4 % covered |
+
+The mechanism is geometric, not methodological: the same assets magnified to cover more screen carry
+larger triangles, hence fewer triangles per covered pixel. **So the 8 %-covered reading OVERSTATED
+density — in the direction that flatters the campaign — and the `1.0527 > 1.0` this section rested on
+was an artefact of framing the corpus small.**
+
+Consequences, stated plainly:
+
+* **No committed path now carries a proven `D_est ≥ 1.0`**, so the inference *"every sound upper bound
+  reads ≥ 1.0527 on `orbit_mid`"* has no premise. **The FIRE branch is no longer provably closed on
+  this corpus**, and `fund_upper_bound` is no longer provably futile on it.
+* The **theorem itself is unaffected** — `U(p) ≥ D(p) ≥ D_est(p)` for any sound `U`, always. It simply
+  yields `U ≥ 0.7425` now, which decides nothing.
+* The **verdict is unchanged**: `min` = 0.2829 < 1.0 ⇒ **UNDECIDED, escalate**. `D_est` is a lower
+  bound, so a reading below the threshold has never been able to decide anything.
+* Everything in §3.2, §3.3 and §4 is **untouched** — none of it depended on the corpus's numbers.
+* ⚠️ §3.4's zero-slack arithmetic **is** corpus-dependent and is superseded: it rested on the flat
+  layer having no inter-asset occlusion, which the three-layer arrangement no longer has. Its
+  conclusion is not re-derived here and should be treated as UNVERIFIED against R0b′.
+
+**The original text follows, kept because the argument is correct and will bind again on any corpus
+whose densest committed framing reads at or above 1.0.**
+
+---
 
 Winning a texel *proves* visibility, so `visible_tris(p, 2160p) ⊆ N(p)`, hence `D_est(p) ≤ D(p)` —
 which is exactly what `d_est_bound_direction = "lower"` asserts. On `orbit_mid`:

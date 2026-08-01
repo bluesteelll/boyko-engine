@@ -71,23 +71,35 @@ fn setup_corpus(
     );
 
     let mat = materials.add(Material::new([0.72, 0.70, 0.68, 1.0], 0.0, 0.45, 0.5, [0.0; 3], 0));
-    for asset in vg_corpus_scene::decode_corpus() {
-        let mesh = match geo_table.0.as_mut() {
+    let assets = vg_corpus_scene::decode_corpus();
+
+    // Register each MESH exactly once, then place it in every slot the arrangement gives it. This
+    // is what makes the R0b′ recomposition free: vertex and index memory are a function of the
+    // seven assets, never of the slot count, and only the instance ring grows.
+    let handles: Vec<MeshHandle> = assets
+        .iter()
+        .map(|asset| match geo_table.0.as_mut() {
             Some(table) => meshes.register_mesh_vb(dev.get(), &asset.vertices, &asset.indices, table),
             None => meshes.register_mesh(dev.get(), &asset.vertices, &asset.indices),
-        };
+        })
+        .collect();
+
+    for slot in 0..vg_corpus_scene::SLOT_COUNT {
+        let ai = vg_corpus_scene::slot_asset(slot, assets.len());
+        let asset = &assets[ai];
+        let pos = vg_corpus_scene::slot_position(slot);
         // `world = scale * v + translation`, so centring on the asset's own bounds is folded into
         // the translation rather than baked into the vertices -- the decoder's output stays the
         // geometry the manifest describes, byte for byte.
         let s = asset.scale;
         let t = Vec3::new(
-            asset.slot[0] - s * asset.centre[0],
-            asset.slot[1] - s * asset.centre[1],
-            asset.slot[2] - s * asset.centre[2],
+            pos[0] - s * asset.centre[0],
+            pos[1] - s * asset.centre[1],
+            pos[2] - s * asset.centre[2],
         );
         let e = commands
             .spawn(MeshBundle::new(
-                mesh,
+                handles[ai],
                 Transform { translation: t, rotation: Quat::IDENTITY, scale: Vec3::new(s, s, s) },
             ))
             .id();
@@ -433,13 +445,19 @@ fn write_census_doc(
 
     out.push_str("## Rows — one per (committed camera path, ladder rung) pair\n\n");
     out.push_str(
-        "| path | rung | extent | covered px | visible tris | mode | submitted | vis/covered | \
-         sub/covered | readback sha256 |\n|---|---|---|---|---|---|---|---|---|---|\n",
+        "| path | rung | extent | covered px | **covered %** | visible tris | mode | submitted | \
+         vis/covered | sub/covered | readback sha256 |\n\
+         |---|---|---|---|---|---|---|---|---|---|---|\n",
     );
     for (path, i, r) in rows {
+        // The covered FRACTION is derived here rather than added to the producer: both terms are
+        // already in the row, and a statistic that can be computed from what exists should not
+        // become a second thing that can disagree with it.
+        let frac = 100.0 * r.covered_pixels as f64
+            / (f64::from(r.achieved.0) * f64::from(r.achieved.1)).max(1.0);
         let _ = writeln!(
             out,
-            "| {path} | {i} | {}×{} | {} | {} | {} | {} | {:.6} | {:.6} | `{}` |",
+            "| {path} | {i} | {}×{} | {} | **{frac:.1} %** | {} | {} | {} | {:.6} | {:.6} | `{}` |",
             r.achieved.0,
             r.achieved.1,
             r.covered_pixels,
@@ -451,6 +469,34 @@ fn write_census_doc(
             &r.readback_sha256[..16]
         );
     }
+    out.push_str(
+        "\nThe **covered %** column is what rung R0b′ exists for. No floor is frozen for it here \
+         either — `[k1_instrument].representativeness_floor_status` still records that axis \
+         UNSOLVED — but the frame now looks like a frame, and the number is on the page per row \
+         instead of being absent.\n\n\
+         ### ⚠️ The framing effect, kept on the page because it is the largest single lever found\n\n\
+         R0's ORIGINAL arrangement was one flat layer of seven assets in a void, with no \
+         inter-asset occlusion at all. R0b′ recomposed the SAME seven assets — same manifest, same \
+         hashes, same decoded triangle total, so R0b(b)'s equality is untouched — into three \
+         staggered depth layers framed to fill the view. Only the composition and the two camera \
+         poses changed; the CONTENT did not.\n\n\
+         | | covered % | `D_est` |\n|---|---|---|\n\
+         | `orbit_mid`, flat layer in a void | 8.1 % | **1.0527** |\n\
+         | `orbit_mid`, filled frame | see above | see above |\n\
+         | `approach_close`, flat layer in a void | 22.2 % | **0.5090** |\n\
+         | `approach_close`, filled frame | see above | see above |\n\n\
+         **Filling the frame LOWERS the measured density, and the reason is geometric rather than \
+         methodological:** the same assets magnified to cover more screen have larger triangles, so \
+         fewer triangles per covered pixel. The 8 %-covered reading was therefore an \
+         OVERSTATEMENT of density produced by framing the corpus small — the direction that \
+         flatters the campaign. Both readings are of the same content; the filled-frame one is the \
+         one a rendered frame resembles.\n\n\
+         The poses were set from the arrangement's geometry and from the stated goal of filling the \
+         frame, **before** any density was read, and the number moved AGAINST the campaign. That is \
+         the only guarantee available on this axis: §9.1 records that re-aiming a committed path is \
+         invisible to every R0 gate part, so what constrains it is commit ordering and the fact that \
+         both readings are published, not a check.\n",
+    );
 
     out.push_str("\n## D_est — the decisive statistic\n\n");
     out.push_str(
