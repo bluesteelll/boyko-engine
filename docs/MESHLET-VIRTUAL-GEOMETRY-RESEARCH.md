@@ -341,7 +341,7 @@ Also: the existing classify chain's scan is one 256-thread workgroup looping blo
 | **R2c-tail (a)** ✅ **CLOSED** | The GPU-side proof that the cull ever culls. A two-mesh fixture (`vb_cull_offscreen.rs`) puts one sphere in frame and one at `x = 40`, and the runner copies the cull's DEVICE-LOCAL counter + compacted list into host-visible staging behind a graph-derived `COMPUTE → TRANSFER` barrier. **MEASURED: `batches=2 visible=1 list=[0]`.** The counter and list are NOT relocated for the probe — the read is a transfer copy of the buffers exactly as they ship, so this proves the cull in the configuration that renders. Rung R2c0 built those buffers deliberately unread; this is their first consumer | GPU says `visible=1`, **and the gate is two-sided: MEASURED `visible=2 list=[0,1]` with the planes force-disarmed**, i.e. it goes RED on an armed-but-inert cull — the exact state every golden would wave through. Probe is env-gated (`BOYKO_VB_CULL_READBACK=<path>`), so no pass is declared and no command recorded on a normal boot: 4 pins re-checked byte-identical + validation-clean with the plumbing present | none |
 | **R2c-tail (b)** ⚠️ **OPEN, owner-scoped** | Only the VB raster site is armed. The 3 remaining camera sites (`forward.rs` ×2, `gbuffer.rs`) are untouched — **deliberate: the owner scoped this campaign to VB for now**. **The 6 shadow sites are NOT a pending item — leaving them unculled is the correct behaviour, and camera-culling them would be a defect.** Three separate reasons, measured against the code rather than argued: (1) **wrong matrix** — those passes push `cascade_view_proj[c]` / `face_view_proj[s]`, i.e. the view from the LIGHT, while R2c's planes come from the camera push's own 64 bytes, so a camera plane says nothing about what a shadow pass draws (verified: the 6 sites each carry a `casts_shadow` skip 16–28 lines above their draw; the 4 camera sites carry none); (2) an off-screen caster still casts **into** view, so camera-culling casters deletes visible shadows; (3) **feedback** — `reduce_caster_bounds` folds the caster set into `CsmCasterBounds` and the cascade FIT is computed from it, so culling casters shrinks the bounds, moves the fit, and shifts **every** shadow pixel, including those of objects nothing culled | (3) is also what gates the one legitimate version of this — culling shadow casters by the **LIGHT's** frustum — which additionally has **no measurable payoff on current content** (1–2 batches, all in frame) and could not be defended if it did: `VG-DECIDABILITY-FLOOR.md` puts the floor at ~15 %. Revisit at R4/R5, when the meshlet importer supplies content where it can be measured, and only after the fit is decoupled from the drawn set | per-site |
 | **R2b** ✅ **LANDED** (`598f4ff`) | Write the six missing re-DXC gates | `vb_raster_geo_classify_spv_sync.rs` (6 rows) + `vb_lit_producer_spv_sync.rs` (10 rows) — **exact complements, 16 distinct `.spv`, no overlap** (verified against the two row tables, not against this text). Sensitivity-asserted by `vb_raster_fs_redxc_is_sensitive_to_a_swapped_vb_id_lane` and `vb_lit_producer_redxc_is_sensitive_to_an_untouched_literal`. ⚠️ Both files SKIP by design where no pinned `dxc` resolves, so a green run is not evidence they RAN — **re-verified 2026-08-01 executing (no skip message) on the pinned VulkanSDK 1.4.350.0 host** | none |
-| **R3** | L7 HZB + two-pass occlusion, second-pass yield **instrumented** | measured pass-1 hit rate + second-pass marginal yield on our scenes | new pins for the HZB arm |
+| **R3** ⚠️ **SURVEYED, RE-SCOPED — see "R3's granularity finding" below** | L7 HZB + two-pass occlusion. Survey verdict: build **R3a** (the pyramid, dark — `MAX_HZB_LEVELS` single-mip `R32_SFLOAT` images reduced with `min()`, the à-trous chain's shape, NOT a packed buffer, so `SampleLevel` survives for R4/R5) and **R3b** (the cull samples it, decision forced off — the R2c0 null-control shape). **Do NOT build classic two-pass**: its cross-frame carrier has no stable key (batch index is recompacted twice per frame, `mesh_draw.rs:814-833` + `runner.rs:1961-1963`, and `GBufferMeshDraw` carries no mesh id). The variant that sidesteps it carries a screen-space IMAGE (previous frame's depth) rather than an index-keyed set | ⚠️ **the written gate is VACUOUS and for a NEW reason.** It is a COUNT, so the decidability floor does not touch it — but on 1–2 fully-visible batches the honest answer is `hit rate = 100 %, marginal yield = 0`, which is exactly what a TOTALLY INERT HZB also produces. Re-gate on correctness: a **bit-exact** host oracle recomputing the `min()` reduce from a depth readback at every level (pure `f32` min — no ULP question), plus a corruption control (flip one level to `max()`, the oracle must go RED) | none for R3a/R3b |
 | **R4** | L4 DAG-quality harness + L5(a)(b)(c) builder | triangles-at-error curve improves vs a baseline builder, monotonicity verifier green | bake-only, none |
 | **R5** | Meshlet metadata as a 4th Set-2 binding (mesh cardinality) + meshlet cull, **dark infra** (Option stays `None`, seeds declared correctly at *build* time not *arm* time) | byte-identical goldens | none |
 | **R6** | Arm the meshlet cull + `vb_id` re-encode | owner visual bless of 9 mesh-leg pins | **all 9 move** |
@@ -403,6 +403,39 @@ Also: the existing classify chain's scan is one 256-thread workgroup looping blo
 > in a record is therefore silent corruption, not a caught error. R2a′ asserts it host-side, and
 > R2c0's shader deliberately writes **only** word 1 of each record so the invariant stays inside
 > the reach of that assert.
+
+> ⚠️ **R3's GRANULARITY FINDING — the binding constraint is not the culling TEST, it is the
+> per-BATCH granularity, and this invalidates the value case for every smarter test built at that
+> granularity (including the frustum cull rung R2c already shipped).**
+>
+> A batch's world AABB is the union over **every instance of that mesh**
+> (`csm_caster.rs::batch_world_aabb`). The VG corpus registers 7 assets and instances them across
+> 45 slots by `slot_asset = slot % asset_count` (`tests/vg_corpus_scene/mod.rs`), while
+> `slot_position` spreads slot *i* over 3 depth layers. **Arithmetic, not estimate:** asset 0 lands
+> in slots 0/7/14 (layer 0), 21/28 (layer 1), 35/42 (layer 2) — every asset appears in every layer.
+> Each of the 7 batch AABBs therefore spans front to back, always contains unoccluded front-layer
+> geometry, and is always partially on-screen.
+>
+> **Consequences, both measured against the code rather than argued:**
+> * A per-batch OCCLUSION cull rejects **zero** on that corpus — the corpus R0b′ rebuilt
+>   specifically *because* depth complexity "was structurally absent".
+> * **Rung R2c's shipped frustum cull also rejects zero on it.** That is not a defect in R2c: its
+>   own gate (`vb_cull_offscreen.rs`, measured `visible=1` of 2) uses two DISTINCT meshes with one
+>   fully off-screen, which proves CORRECTNESS and was never claimed to be representative content.
+>
+> Second, independent structural blocker: reverse-Z clears depth to `0.0`, so the conservative
+> pyramid is a `min()` reduce and **any tile containing one background pixel reduces to 0.0 and has
+> zero occluding power**. Every scene here is sparse objects on a cleared background, and the
+> corpus's deliberate half-cell stagger ("a back layer shows through the gaps") keeps back instances
+> partially visible, which a conservative AABB test never rejects.
+>
+> **What this reprioritises:** the pyramid (R3a) is still worth building — R5/R6's meshlet cull
+> samples an HZB, so building it later means building the meshlet cull twice. But raising
+> granularity to **per-INSTANCE** unlocks BOTH the already-shipped frustum cull and any future
+> occlusion cull on the same corpus where both currently yield zero. R2's plan already recorded
+> per-instance culling as out of scope (it needs the instance ring compacted across both lanes in
+> lock-step, edits to six vertex shaders, and a golden re-bless) — this finding is the argument for
+> promoting it ahead of further work at batch granularity.
 
 **One-way door to decide now, before the first file:** "cluster" is already taken in this codebase and means **light froxel** (`cluster_cull.hlsl`, `cluster_cull_spv_sync.rs`, `ClusterGrid`, `MAX_LIGHTS_PER_CLUSTER`, the whole VB-P1e "22× at 512 lights" campaign). Use **`meshlet`** for the leaf and **`geo_group`** for the DAG group; leave `cluster` to lights. Decided, not asked.
 
