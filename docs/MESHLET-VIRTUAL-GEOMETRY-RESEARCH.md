@@ -440,15 +440,33 @@ Also: the existing classify chain's scan is one 256-thread workgroup looping blo
 > same corpus where both currently yield zero"). That is FALSE on the binding framing.** The claim
 > was written from the granularity argument alone, without evaluating the predicate. Evaluated:
 >
-> | committed camera path | per-INSTANCE rejects | per-BATCH rejects |
-> |---|---|---|
-> | `orbit_mid` | 0 of 45 (see caveat) | 0 of 7 |
-> | `approach_close` | 9 of 45 | 0 of 7 |
+> **MEASURED** by `tests/vg_cull_granularity_census.rs`, which decodes the real corpus payload and
+> extracts the planes from the PRODUCTION raster push (`forward_gbuffer_push_from_view` — the
+> reverse-Z one the VB path actually pushes, `runner.rs:2065-2079`, *not* the Deferred marcher
+> matrix) so there is exactly one copy of the matrix arithmetic:
 >
-> Computed twice independently — once by the orchestrator and once by a reviewer that was given
-> the question and not the answer — from `PATHS` (`tests/vg_corpus_scene/mod.rs`), `slot_position`,
-> and `frustum.rs`'s exact `dist + radius < 0` criterion at `aspect = 1.0`, the aspect
-> `vb_cull_offscreen.rs` actually renders. Both runs agree on every verdict.
+> | committed camera path | per-INSTANCE rejects | per-BATCH rejects | instances the BATCH cull removes |
+> |---|---|---|---|
+> | **at 512×512** (1:1, the pinned rung) | | | |
+> | `orbit_mid` | 1 of 45 | 0 of 7 | 0 of 45 |
+> | `approach_close` | 14 of 45 | 0 of 7 | 0 of 45 |
+> | **at 1920×1080** (16:9, the decision rung) | | | |
+> | `orbit_mid` | 0 of 45 | 0 of 7 | 0 of 45 |
+> | `approach_close` | 11 of 45 | 0 of 7 | 0 of 45 |
+>
+> The last column is the only one comparable with the second: a batch count cannot be weighed
+> against an instance count. On this corpus one batch carries 6 or 7 members, so "per-instance
+> rejects more than per-batch" would be satisfied by rejecting one batch and exactly its own
+> members — the case where granularity buys nothing. The census therefore states its premise in
+> instance units on both sides, and asserts it at BOTH rungs: aspect moves the count (a 16:9 field
+> is horizontally wider and rejects no more), so a premise true only at the pinned 1:1 rung while
+> false where the campaign adjudicates would be a false premise wearing a green test.
+>
+> **This supersedes two hand computations that said 0 and 9.** Both were lower bounds — neither
+> could read the decoded per-asset extents, so both used the worst-case half-extent `0.5` that
+> normalisation guarantees, and a smaller true extent means a smaller radius and MORE rejections.
+> The measured numbers moved in exactly that direction. Recorded because the caveat was written
+> before the measurement and was right: an argued number and a measured one are different objects.
 >
 > R2c's zero therefore had **two** causes, not one. Granularity is the first. The second is that
 > the corpus is entirely **on-screen at `orbit_mid` by construction** — and `orbit_mid` is the
@@ -462,16 +480,20 @@ Also: the existing classify chain's scan is one 256-thread workgroup looping blo
 > vacuous-selection defect the corpus notes forbid, and registering a third path chosen after the
 > fact is the same defect wearing a different hat. Its justification is that per-instance
 > granularity is the precondition for R4+; its gate is CORRECTNESS at `approach_close`, where it
-> rejects 9 and the shipped per-batch cull rejects 0.
+> rejects 14 instances at the pinned rung and 11 at the decision rung while the shipped per-batch
+> cull removes 0 at both.
 >
-> ⚠️ **Both counts are LOWER BOUNDS, and the `orbit_mid` zero is the soft one.** Neither run could
-> read the decoded per-asset extents (the `.glb` payload is gitignored), so both used the
-> worst-case half-extent `0.5` that normalisation guarantees. A smaller true extent gives a smaller
-> projected radius and therefore MORE rejections. Three `orbit_mid` slots clear their plane by
-> under `~0.1` against a radius of `~0.72`, so the true `orbit_mid` count is 0 *or a small
-> positive number* depending on the payload. Settle it with a CPU pass over `slot_position` ×
-> `frustum::aabb_outside_frustum` using real decoded extents before any statement stronger than
-> this one is made.
+> ⚠️ **The `orbit_mid` result is the one to keep in view: per-instance granularity buys NOTHING
+> there** — 1 instance of 45 at the pinned rung and 0 at the decision rung. The whole existential
+> rests on `approach_close`. That is the honest shape of the rung and the reason it carries no perf
+> claim: the framing the corpus names as binding is the framing where the win is absent.
+>
+> The census is guarded against being green while meaningless. Its `assert_premise` was
+> demonstrated RED by degenerating the per-instance measurement back to per-batch (the existential
+> fired, naming itself); a separate guard cross-checks the production instance packing against a
+> direct `scale * local + translation` fold and measured `2.4e-7` world units of disagreement,
+> which is what catches a transposed 3×4 row-major pack — the class of bug that produces
+> plausible-but-wrong boxes and therefore plausible-but-wrong counts.
 
 **One-way door to decide now, before the first file:** "cluster" is already taken in this codebase and means **light froxel** (`cluster_cull.hlsl`, `cluster_cull_spv_sync.rs`, `ClusterGrid`, `MAX_LIGHTS_PER_CLUSTER`, the whole VB-P1e "22× at 512 lights" campaign). Use **`meshlet`** for the leaf and **`geo_group`** for the DAG group; leave `cluster` to lights. Decided, not asked.
 
