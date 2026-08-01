@@ -553,9 +553,11 @@ embed_spirv! {
     ///
     /// One invocation per `DrawBatch`. Writes `instanceCount` into word 1 of that batch's
     /// `VkDrawIndexedIndirectCommand` and atomic-appends the batch index into a compacted
-    /// visible list. INERT on this compile — the visibility decision is the literal `true`, so
-    /// the value written is the one the host's transfer fill already placed there. The re-DXC
-    /// byte gate + the inertness census live in `tests/vb_batch_cull_spv_sync.rs`.
+    /// visible list. ARMED since rung R2c: the decision is a conservative AABB-vs-frustum test
+    /// against six host-pushed planes. (Rung R2c0 shipped it INERT — `visible` was the literal
+    /// `true` — as the null control `docs/VG-DECIDABILITY-FLOOR.md` requires; the re-DXC byte gate
+    /// and the opcode census in `tests/vb_batch_cull_spv_sync.rs` pin whichever state ships, and
+    /// R2c re-pinned them rather than deleting them.)
     VB_BATCH_CULL_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_batch_cull.comp.spv")
 }
@@ -1669,6 +1671,14 @@ pub fn cluster_cull_hier_spirv() -> &'static [u32] {
 /// `maxPushConstantsSize`, which is the bound that actually binds here — the raster's own push is
 /// 88 bytes, so the device plainly clears 104.
 pub const VB_BATCH_CULL_PUSH_BYTES: u32 = 104;
+
+/// The batch-cull shader's `[numthreads(64,1,1)]` group width, and the host's dispatch divisor:
+/// the dispatch is `ceil(batch_count / VB_BATCH_CULL_LOCAL_SIZE_X)` groups.
+///
+/// HLSL requires a literal in `[numthreads]`, so this cannot be the SAME symbol the shader uses —
+/// the two spellings are held together by `tests/vb_batch_cull_spv_sync.rs`, which reads the
+/// compiled `LocalSize` out of the module and asserts it equals this.
+pub const VB_BATCH_CULL_LOCAL_SIZE_X: u32 = 64;
 
 /// VG rung R2c0: the byte stride of one `VbBatchDesc` — `vb_batch_cull.comp.hlsl`'s
 /// `VbBatchDescGpu { float3 aabb_min; uint instance_count; float3 aabb_max; uint pad; }`.

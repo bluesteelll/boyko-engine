@@ -432,7 +432,7 @@ pub(crate) const LIGHT_CULL_LOCAL_SIZE_X: u32 = 64;
 /// (`vb_batch_cull.comp.hlsl`'s own `LOCAL_SIZE_X`). The dispatch is
 /// `ceil(batch_count / VB_BATCH_CULL_LOCAL_SIZE_X)` groups; the tail group's out-of-range lanes
 /// are trimmed by the shader's own `i >= pc.batch_count` guard.
-pub(crate) const VB_BATCH_CULL_LOCAL_SIZE_X: u32 = 64;
+pub(crate) const VB_BATCH_CULL_LOCAL_SIZE_X: u32 = crate::compute::VB_BATCH_CULL_LOCAL_SIZE_X;
 
 /// VG rung R2c0: the batch-cull pipeline's COMPUTE push range (`{ batch_count, visible_cap }`,
 /// `vb_batch_cull.comp.hlsl`'s `VbBatchCullPush`). Re-exported from `compute` so this field-decl
@@ -455,11 +455,13 @@ pub(crate) const VB_BATCH_CULL_PUSH_BYTES: u32 = crate::compute::VB_BATCH_CULL_P
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VbBatchDesc {
-    /// World-space AABB min corner. Rung R2c0 writes `-`[`Self::UNBOUNDED`]; unread by the
-    /// shader on this compile (DXC dead-codes it — pinned by `tests/vb_batch_cull_spv_sync.rs`).
+    /// World-space AABB min corner. `-`[`Self::UNBOUNDED`] when the host could not compute real
+    /// bounds. (Rung R2c0 wrote the sentinel unconditionally and the shader dead-coded the field;
+    /// rung R2c fills it for real and reads it.)
     pub aabb_min: [f32; 3],
-    /// The `instanceCount` a VISIBLE batch draws — the SAME value the transfer fill already put
-    /// in this batch's `VkDrawIndexedIndirectCommand`, which is what makes rung R2c0 inert.
+    /// The `instanceCount` a VISIBLE batch draws — the SAME value the transfer fill already put in
+    /// this batch's `VkDrawIndexedIndirectCommand`. A culled batch gets `0` written over it
+    /// instead; at rung R2c0 nothing was ever culled, which is what made that rung inert.
     pub instance_count: u32,
     /// World-space AABB max corner. Rung R2c0 writes `+`[`Self::UNBOUNDED`].
     pub aabb_max: [f32; 3],
@@ -2515,9 +2517,11 @@ pub struct GBufferScene<'a> {
     /// whole R2c0 arm is one all-or-nothing gate, so no half-wired frame can dispatch a cull that
     /// reads an unbound descriptor.
     pub vb_batch_desc: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
-    /// VG rung R2c0: the per-FIF compacted visible-batch list. WRITTEN AND UNREAD — the
-    /// compaction half of what R2 de-risks; a consumer needs `multiDrawIndirect` plus a merged
-    /// vertex/index arena, neither of which this device/engine has.
+    /// VG rung R2c0: the per-FIF compacted visible-batch list. Written by the cull; read only by
+    /// the rung-R2c-tail readback probe ([`Self::vb_cull_readback`]), which copies its prefix to
+    /// the host so a test can assert WHICH batches survived. No RENDER pass consumes it — that
+    /// needs `multiDrawIndirect` plus a merged vertex/index arena, neither of which this
+    /// device/engine has.
     pub vb_cull_visible: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
     /// VG rung R2c0: the per-FIF visible-batch counter (one `u32` at element 0), transfer-zeroed
     /// each frame ahead of the graph-derived `TRANSFER → COMPUTE` barrier.

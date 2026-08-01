@@ -1,43 +1,47 @@
-// VG rung R2c0: the per-BATCH draw-record cull compute pass (`vb_batch_cull.comp.hlsl`).
+// VG rungs R2c0/R2c: the per-BATCH draw-record cull compute pass (`vb_batch_cull.comp.hlsl`).
 //
 // One invocation per `DrawBatch`. Each thread:
 //   (a) READS its batch's descriptor (`VbBatchDesc[i]` — the world AABB + the instance count);
-//   (b) DECIDES visibility (rung R2c0: unconditionally VISIBLE — see "INERT BY CONSTRUCTION");
+//   (b) DECIDES visibility by testing that AABB against the six pushed frustum planes;
 //   (c) WRITES `instanceCount` into word 1 of that batch's `VkDrawIndexedIndirectCommand`
 //       record, which `vkCmdDrawIndexedIndirect` fetches this same frame;
 //   (d) atomic-appends the surviving batch index into the flat `VbCullVisible` list via one
 //       `InterlockedAdd` on `VbCullCount[0]` — the SAME lock-free bump + clamp-and-drop shape
 //       `cluster_cull.hlsl`'s own `LightIndexAlloc` claim uses.
 //
-// # INERT BY CONSTRUCTION (rung R2c0)
+// # ARMED AT RUNG R2c — and this file shipped INERT first, on purpose
 //
-// `visible` is the literal `true` on this compile. That is not a placeholder that "happens to
-// be true today" — it is the rung's DELIVERABLE. `docs/VG-DECIDABILITY-FLOOR.md` measured this
-// engine's GPU-timing floor at 6.3 / 14.3 / 4.7 / 13.5 % across four runs of ONE protocol, so
-// no later cull delta is defensible without a NULL CONTROL taken in the same sitting: the cull
-// machinery present, dispatched, and provably changing nothing. This module is that control.
-// `instanceCount` is therefore re-written with EXACTLY the value the host's `vkCmdUpdateBuffer`
-// already placed there, and the frame stays byte-identical — which is the gate this rung is
-// graded on (`scripts/golden.ps1`), not a timing delta.
+// Rung R2c0 shipped this module with `visible` as the literal `true`. That was not a placeholder:
+// `docs/VG-DECIDABILITY-FLOOR.md` measured this box's GPU-timing floor at 6.3 / 14.3 / 4.7 / 13.5 %
+// across four runs of ONE protocol, so no cull delta is defensible without a NULL CONTROL taken in
+// the same sitting — the machinery present, dispatched, and provably changing nothing. Rung R2c
+// then replaced that one line with the test below.
 //
-// Because `visible` is a compile-time constant, DXC constant-folds the branch and DEAD-CODES
-// `aabb_min`/`aabb_max` out of the module entirely. That is deliberate and it is CHECKED:
-// `tests/vb_batch_cull_spv_sync.rs` pins `OpFOrdLessThan == 0` and `OpDot == 0`, so a compile
-// that quietly acquired a comparison would be RED at the artifact.
+// Both states are pinned at the ARTIFACT by `tests/vb_batch_cull_spv_sync.rs`, which R2c re-pinned
+// rather than deleted: R2c0 asserted `OpSelect == 0` / `OpDot == 0` (no decision at all), R2c
+// asserts `OpSelect == 1` / `OpDot == 2` / `OpFOrdLessThan == 1` (a real one) while holding
+// `OpAtomicIAdd == 1` across the change — the compaction claim must survive the arming untouched.
 //
-// # Why the AABB fields exist NOW, unread
+// ⚠️ A GOLDEN CANNOT SEE THE DIFFERENCE. Every pinned scene is entirely on-screen, so a cull that
+// rejects nothing renders a byte-identical image to a correct one. The evidence that this module
+// actually rejects is `crates/boyko_app/tests/vb_cull_offscreen.rs`, which reads the visible COUNT
+// back off the GPU (measured: 2 batches in, 1 visible out) and goes RED at `visible=2` when the
+// planes are disarmed.
 //
-// The descriptor's LAYOUT is what rung R2c (the real camera cull) needs; only the DECISION is
-// missing. Fixing the 32-byte record here means R2c edits the shader body and the host's AABB
-// fill, and touches neither the descriptor-set layout, the buffer sizes, nor the graph — the
-// churn that a "just the count for now" struct would have forced on the very next rung.
+// # The AABB fields, and why they shipped one rung before they were read
 //
-// Rung R2c0 fills both corners with +/- `VbBatchDesc::UNBOUNDED` (a large FINITE magnitude,
-// never an infinity: a frustum plane's `dot(n, p) + d` against an infinite corner can produce a
-// NaN, and a NaN compare picks the OTHER operand under `NMin`/`NMax` rather than propagating).
-// The sentinel therefore reads as "unbounded box", the CONSERVATIVE value: a batch whose AABB
-// was never filled survives every plane test. R2c's own error direction is the same one — a
-// wasted draw, never a false cull.
+// Rung R2c0 shipped the 32-byte descriptor with its AABB fields present and dead (DXC dead-coded
+// them out of that module, which the census pinned). Fixing the LAYOUT one rung early is what let
+// R2c change the shader body and the host's AABB fill while touching neither the descriptor-set
+// layout, the buffer sizes, nor the graph — the churn a "just the count for now" struct would have
+// forced on the very next rung.
+//
+// The corners are `+/- VbBatchDesc::UNBOUNDED` whenever the host could not compute real bounds
+// (a mesh still streaming in, or the C0 zero-vertex sentinel). That magnitude is large but FINITE,
+// never an infinity: `dot(n, p) + d` against an infinite corner can produce a NaN, and a NaN
+// compare picks the OTHER operand under `NMin`/`NMax` rather than propagating. So an unfilled
+// descriptor reads as "unbounded box" and survives every plane — the CONSERVATIVE direction, which
+// is the same one the test below errs in: a wasted draw, never a false cull.
 //
 // # first_instance / index_count are NOT touched here
 //
@@ -51,9 +55,16 @@
 //   dxc.exe -spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3 vb_batch_cull.comp.hlsl \
 //       -Fo vb_batch_cull.comp.spv
 
-// The workgroup width. Mirrors the host's `VB_BATCH_CULL_LOCAL_SIZE_X` — the dispatch is
-// `ceil(batch_count / 64)` groups, so the tail group runs partly out of range and is trimmed by
-// the `i >= pc.batch_count` guard below.
+// The workgroup width, used by `[numthreads]` below so this file has ONE spelling of it rather
+// than a constant beside a literal that could drift from it. The host mirrors it as
+// `VB_BATCH_CULL_LOCAL_SIZE_X` and dispatches `ceil(batch_count / width)` groups, so the tail group
+// runs partly out of range and is trimmed by the `i >= pc.batch_count` guard below.
+//
+// The two spellings CANNOT be one symbol across the language boundary, so they are held together at
+// the ARTIFACT: `tests/vb_batch_cull_spv_sync.rs` reads the compiled `LocalSize` out of the module
+// and asserts it equals the host constant. A silent divergence would either leave tail batches
+// unvisited (stale `instanceCount`) or over-dispatch — neither of which a golden would show on a
+// scene whose batch count divides the width.
 static const uint LOCAL_SIZE_X = 64u;
 
 // The `VkDrawIndexedIndirectCommand` byte stride. Mirrors the host's
@@ -73,19 +84,20 @@ RWByteAddressBuffer VbIndirect : register(u0);
 // A batch's cull inputs. 32 bytes, `float3`-then-`uint` twice so the two 16-byte halves need no
 // explicit padding member. Mirrors the host `VbBatchDesc`.
 struct VbBatchDescGpu {
-    float3 aabb_min;       // world-space AABB min corner (rung R2c0: -`VbBatchDesc::UNBOUNDED`)
+    float3 aabb_min;       // world-space AABB min corner (`-UNBOUNDED` when host bounds are absent)
     uint   instance_count; // the `instanceCount` a VISIBLE batch draws
-    float3 aabb_max;       // world-space AABB max corner (rung R2c0: +`VbBatchDesc::UNBOUNDED`)
-    uint   pad;            // reserved (rung R2c: the plane-set / batch-flags word)
+    float3 aabb_max;       // world-space AABB max corner (`+UNBOUNDED` when host bounds are absent)
+    uint   pad;            // reserved, written zero — R2c did not need it after all
 };
 
 // binding 1: the per-batch descriptors, transfer-filled by the host each frame (read-only).
 StructuredBuffer<VbBatchDescGpu> VbBatchDesc : register(t1);
 
-// binding 2: the compacted visible-batch list (RW). WRITTEN AND UNREAD at rung R2c0 — it is the
-// compaction half of what R2 exists to de-risk, and nothing consumes it until a rung that can
-// issue a merged multi-draw (which needs `multiDrawIndirect` + a merged vertex/index arena,
-// neither of which exists on this device today).
+// binding 2: the compacted visible-batch list (RW). Written here; read by the rung-R2c-tail
+// readback probe (`BOYKO_VB_CULL_READBACK`), which copies its prefix to the host so a test can
+// assert WHICH batches survived rather than only how many. No RENDER pass consumes it yet — that
+// needs a merged multi-draw, i.e. `multiDrawIndirect` plus a merged vertex/index arena, neither of
+// which exists on this device today.
 RWStructuredBuffer<uint> VbCullVisible : register(u2);
 
 // binding 3: the visible-batch counter (RW, one u32 at element 0). Transfer-zeroed by the host
@@ -137,7 +149,7 @@ bool aabb_outside_frustum(float3 mn, float3 mx) {
     return false;
 }
 
-[numthreads(64, 1, 1)]
+[numthreads(LOCAL_SIZE_X, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
     const uint i = tid.x;
     // The tail group's out-of-range lanes. Every buffer access below is behind this guard, so no

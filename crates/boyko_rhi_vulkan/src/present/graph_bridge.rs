@@ -2681,9 +2681,10 @@ pub(crate) struct VbPassPlan {
     /// (which until this rung was derived against the TRANSFER directly).
     ///
     /// `Some` iff [`Self::vb_indirect_upload`] is AND the whole R2c0 arm is wired (pipeline,
-    /// layout and all three cull buffers). INERT on this rung by construction — the shader's
-    /// visibility decision is the literal `true` — so an armed frame is byte-identical to an
-    /// unarmed one, which is the gate R2c0 is graded on.
+    /// layout and all three cull buffers). Since rung R2c the shader makes a real decision; the
+    /// nine golden pins stay byte-identical anyway because every pinned scene is entirely
+    /// on-screen, which is exactly why `vb_cull_offscreen.rs` — not a golden — is what proves the
+    /// cull rejects.
     pub(crate) vb_batch_cull: Option<crate::framegraph::PassId>,
     /// VG rung R2c-tail: the cull READBACK copy — `Some` only when `scene.vb_cull_readback` is
     /// armed (the `BOYKO_VB_CULL_READBACK` probe). Declares `TRANSFER_READ` on both cull outputs,
