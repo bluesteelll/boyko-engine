@@ -29,7 +29,13 @@ unsafe fn write_after_submit<'ctx>(
     // SAFETY: never executed — a compile-fail case; the call only needs to typecheck.
     let _ = unsafe {
         renderer.render_gbuffer_frame(
+            // ⚠️ The argument list must stay COMPLETE. When VG-R0 rung R0c added the census's
+            // `vb_id_readback` parameter this call kept the old arity, so the compiler reported a
+            // WRONG-ARGUMENT-COUNT error instead of the use-after-move this gate exists to catch --
+            // the gate went red for the right reason by accident and would have gone GREEN for the
+            // wrong one had the expectation been blessed. Keep every parameter supplied.
             token, ctx, surface, swapchain, scene, frame, 64, 64, [0.0; 4], extent, extent, None,
+            None,
         )
     };
     token.slot()

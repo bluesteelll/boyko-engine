@@ -819,6 +819,10 @@ pub const VK_PIPELINE_STAGE_TRANSFER_BIT: VkFlags = 0x0000_1000;
 
 /// `VkAccessFlagBits` (subset used by the 0d buffer barrier).
 pub const VK_ACCESS_SHADER_READ_BIT: VkFlags = 0x0000_0020;
+/// `VK_ACCESS_INDIRECT_COMMAND_READ_BIT` — the only access
+/// `VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT` performs. Virtual-geometry rung R1: its absence is
+/// why `boyko_render`'s `GpuStage::Indirect` widened to a whole shader/transfer superset.
+pub const VK_ACCESS_INDIRECT_COMMAND_READ_BIT: VkFlags = 0x0000_0001;
 pub const VK_ACCESS_SHADER_WRITE_BIT: VkFlags = 0x0000_0040;
 /// `VkAccessFlagBits::VK_ACCESS_TRANSFER_READ_BIT`.
 pub const VK_ACCESS_TRANSFER_READ_BIT: VkFlags = 0x0000_0800;
@@ -1163,6 +1167,9 @@ pub const VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL: i32 = 1_000_241_000;
 
 /// `VkPipelineStageFlagBits` used by the present barriers / submit wait stage.
 pub const VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT: VkFlags = 0x0000_0001;
+/// `VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT` — the stage that FETCHES indirect draw/dispatch
+/// arguments from a buffer. Virtual-geometry rung R1.
+pub const VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT: VkFlags = 0x0000_0002;
 /// `VK_PIPELINE_STAGE_VERTEX_SHADER_BIT` (Pillar B B3: the interp draw SSBO is READ by the
 /// raster + shadow VERTEX shaders — the destination stage of the COMPUTE→VERTEX RAW barrier
 /// the framegraph derives after the interp compute writes the interpolated model columns).
@@ -3326,6 +3333,33 @@ pub type PfnVkCmdDispatch = unsafe extern "system" fn(
     group_count_x: u32,
     group_count_y: u32,
     group_count_z: u32,
+);
+
+// --- Virtual-geometry rung R1: the indirect seam. Both commands are Vulkan 1.0 CORE and need no
+//     feature bit, which is what makes this rung free. Their `Count` variants (`vkCmdDrawIndexed-
+//     IndirectCount`) are NOT: those need `drawIndirectCount` in a `VkPhysicalDeviceVulkan12Features`
+//     this device never chains, so they belong to a later rung and are deliberately absent here. ---
+
+/// `PFN_vkCmdDispatchIndirect` — a compute dispatch whose `VkDispatchIndirectCommand`
+/// (three `u32` group counts) is FETCHED FROM `buffer` at `offset` by the GPU, so the
+/// group count can be decided by an earlier pass instead of by the host.
+pub type PfnVkCmdDispatchIndirect = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    buffer: VkBuffer,
+    offset: VkDeviceSize,
+);
+
+/// `PFN_vkCmdDrawIndexedIndirect` — `draw_count` indexed draws whose
+/// `VkDrawIndexedIndirectCommand` records are fetched from `buffer` starting at `offset`
+/// with `stride` bytes between them. The record count is still host-supplied; only the
+/// record CONTENTS are GPU-decided (the fully GPU-decided count needs the `Count` variant
+/// and its feature bit — see the note above).
+pub type PfnVkCmdDrawIndexedIndirect = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    buffer: VkBuffer,
+    offset: VkDeviceSize,
+    draw_count: u32,
+    stride: u32,
 );
 
 // --- Phase-6 S0 rung-2 graphics draw commands (Vulkan 1.0 core). ---

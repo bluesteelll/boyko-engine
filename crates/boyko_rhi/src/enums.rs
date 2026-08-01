@@ -136,6 +136,12 @@ impl BarrierStage {
     pub const LATE_FRAGMENT_TESTS: BarrierStage = BarrierStage(0x0000_0200);
     /// `VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT`.
     pub const BOTTOM_OF_PIPE: BarrierStage = BarrierStage(0x0000_2000);
+    /// `VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT` — the stage that FETCHES indirect
+    /// draw/dispatch arguments from a buffer. Virtual-geometry rung R1 ("load the
+    /// indirect seam"): its absence is why `boyko_render`'s `GpuStage::Indirect`
+    /// widened to a `COMPUTE_SHADER | TRANSFER` superset, which is sound but
+    /// synchronises far more than a GPU-decided cut needs.
+    pub const DRAW_INDIRECT: BarrierStage = BarrierStage(0x0000_0002);
 
     /// The empty set (no stage bits) — an invalid barrier; callers must set at
     /// least one when a buffer barrier is present (asserted at the encoder).
@@ -185,6 +191,14 @@ impl BarrierAccess {
     /// `VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT` — the depth write the
     /// UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL barrier makes available (rung 4).
     pub const DEPTH_STENCIL_ATTACHMENT_WRITE: BarrierAccess = BarrierAccess(0x0000_0400);
+    /// `VK_ACCESS_INDIRECT_COMMAND_READ_BIT` — the ONLY access the
+    /// [`BarrierStage::DRAW_INDIRECT`] stage performs. Virtual-geometry rung R1.
+    ///
+    /// ⚠️ There is deliberately no write counterpart, because Vulkan has none: an
+    /// indirect-argument buffer is WRITTEN by a compute shader or a transfer, and
+    /// read by this stage. A declaration of "indirect write" is incoherent, and
+    /// `boyko_render`'s mapping widens it rather than inventing a bit.
+    pub const INDIRECT_COMMAND_READ: BarrierAccess = BarrierAccess(0x0000_0001);
 
     /// The empty set (no access bits).
     pub const NONE: BarrierAccess = BarrierAccess(0);

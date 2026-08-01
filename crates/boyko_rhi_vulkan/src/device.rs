@@ -553,6 +553,9 @@ pub struct DeviceFns {
     pub cmd_bind_descriptor_sets: PfnVkCmdBindDescriptorSets,
     pub cmd_push_constants: PfnVkCmdPushConstants,
     pub cmd_dispatch: PfnVkCmdDispatch,
+    /// `vkCmdDispatchIndirect` — virtual-geometry rung R1's half of the indirect seam on the
+    /// compute side (Vulkan 1.0 core, no feature bit, always present).
+    pub cmd_dispatch_indirect: PfnVkCmdDispatchIndirect,
     pub cmd_pipeline_barrier: PfnVkCmdPipelineBarrier,
     /// `vkCmdCopyBuffer` — the Phase-5 staging upload + readback transfer
     /// (Vulkan 1.0 core, always present).
@@ -606,6 +609,11 @@ pub struct DeviceFns {
     /// requires a bound index buffer via `cmd_bind_index_buffer`; Vulkan 1.0 core,
     /// always present).
     pub cmd_draw_indexed: PfnVkCmdDrawIndexed,
+    /// `vkCmdDrawIndexedIndirect` — virtual-geometry rung R1's half of the indirect seam on the
+    /// graphics side (Vulkan 1.0 core, no feature bit, always present). The `Count` variant is
+    /// deliberately NOT loaded: it needs `drawIndirectCount` in a `VkPhysicalDeviceVulkan12Features`
+    /// this device never chains, so loading it here would fail on a conformant 1.0 driver.
+    pub cmd_draw_indexed_indirect: PfnVkCmdDrawIndexedIndirect,
     // --- Phase-6 S0 rung-3 vertex/index buffer bind commands, Vulkan 1.0 core,
     //     always loaded. ---
     pub cmd_bind_vertex_buffers: PfnVkCmdBindVertexBuffers,
@@ -1957,6 +1965,7 @@ fn load_device_fns(
             )?,
             cmd_push_constants: load_device_command(gdpa, device, c"vkCmdPushConstants")?,
             cmd_dispatch: load_device_command(gdpa, device, c"vkCmdDispatch")?,
+            cmd_dispatch_indirect: load_device_command(gdpa, device, c"vkCmdDispatchIndirect")?,
             cmd_pipeline_barrier: load_device_command(gdpa, device, c"vkCmdPipelineBarrier")?,
             cmd_copy_buffer: load_device_command(gdpa, device, c"vkCmdCopyBuffer")?,
             cmd_fill_buffer: load_device_command(gdpa, device, c"vkCmdFillBuffer")?,
@@ -2012,6 +2021,7 @@ fn load_device_fns(
             cmd_set_scissor: load_device_command(gdpa, device, c"vkCmdSetScissor")?,
             cmd_draw: load_device_command(gdpa, device, c"vkCmdDraw")?,
             cmd_draw_indexed: load_device_command(gdpa, device, c"vkCmdDrawIndexed")?,
+            cmd_draw_indexed_indirect: load_device_command(gdpa, device, c"vkCmdDrawIndexedIndirect")?,
             // Phase-6 S0 rung-3 vertex/index buffer bind commands (Vulkan 1.0 core).
             cmd_bind_vertex_buffers: load_device_command(
                 gdpa,

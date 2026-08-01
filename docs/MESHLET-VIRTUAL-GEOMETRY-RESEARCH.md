@@ -142,6 +142,30 @@ Ranking rule, as this project's existing perf tracks do it: enablers and measure
 - **Cost:** ~3 fn-table entries + 2 constants + 1 usage path + 1 test update. No shader change, no `.spv` change, no golden change.
 - **Risk / trap:** **REPO-VERIFIED this session** — `device.rs` loads exactly `vkCmdDispatch`, `vkCmdDraw`, `vkCmdDrawIndexed` and nothing else, and contains **no** `VkPhysicalDeviceVulkan12Features`, **no** `shaderInt64`, **no** `drawIndirectCount`. The two commands above are core 1.0 with no feature bit and are genuinely free. **`vkCmdDrawIndexedIndirectCount` is not** — it needs the `drawIndirectCount` feature in the unchained `VkPhysicalDeviceVulkan12Features`. Ship the two free ones in this rung; the Count variant belongs to L4b.
 
+> ✅ **LANDED. Three things the rung established that the estimate did not.**
+>
+> **(1) The usage path needed NOTHING.** `BufferUsage::INDIRECT` was already routed: `create_buffer`
+> does `let usage: VkFlags = desc.usage.bits()` — a raw pass-through — and `INDIRECT`'s value *is*
+> `VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT`. One of the four listed items was complete by construction.
+> The estimate said "1 usage path"; the correct answer was zero, and finding that out cost one grep.
+>
+> **(2) The fn-table load IS the feature probe, so "core 1.0, no feature bit" is now MEASURED.**
+> `load_device_command(..)?` fails boot when a command is absent, and every golden pin booted — so
+> the claim is a measurement rather than a reading of the spec.
+>
+> **(3) `wide_stage()` was DELETED, not left unused.** Its only caller was the `Indirect` arm this
+> rung narrowed. A widening helper kept "in case" is a thing an implementer greps for and reaches
+> for. `wide_access()` survives because it still has one honest caller — see below.
+>
+> ⚠️ **The barrier fix is a NARROWING ON ONE ARM ONLY, and the asymmetry is Vulkan's.**
+> `(Indirect, Read)` becomes exactly `DRAW_INDIRECT` / `INDIRECT_COMMAND_READ`. `(Indirect, Write)`
+> still widens, because **Vulkan defines no indirect-write access bit at all**: an indirect-argument
+> buffer is *written* by compute or transfer and only *read* by the indirect-fetch stage, so an
+> "indirect write" declaration names a stage that cannot write. Substituting `SHADER_WRITE` there
+> would **under**-synchronise whenever the real producer was a transfer — the one direction a
+> barrier may never be wrong in. The replacement test asserts **both** arms, so the asymmetry is
+> checked rather than described.
+
 ---
 
 **L2 — Per-instance GPU cull + indirect draw.** *(the rung every survey skipped)*
@@ -309,7 +333,7 @@ Also: the existing classify chain's scan is one 256-thread workgroup looping blo
 
 | Rung | Content | Gate | Golden impact |
 |---|---|---|---|
-| **R1** | L1 indirect seam + `GpuStage::Indirect` barrier fix | clippy/tests green; `barrier.rs` superset test updated with rationale | none (byte-identical) |
+| **R1** ✅ **LANDED** | L1 indirect seam + `GpuStage::Indirect` barrier fix | clippy/tests green; `barrier.rs` superset test updated with rationale | none — **5 pins re-measured byte-identical across all four render paths** |
 | **R2** | L2 per-instance GPU cull → indirect draw | measured Δ on R0 corpus, **decidable** by R0's floor | byte-identical if cull is conservative-exact |
 | **R2b** | Write the six missing re-DXC gates | six new `*_spv_sync` tests, sensitivity-asserted | none |
 | **R3** | L7 HZB + two-pass occlusion, second-pass yield **instrumented** | measured pass-1 hit rate + second-pass marginal yield on our scenes | new pins for the HZB arm |
