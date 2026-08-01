@@ -1939,6 +1939,9 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             let material_table = world.non_send_resource::<MaterialTable>();
             let casters = world.resource::<CsmCasterScratch>();
             let caster_batches = casters.batches();
+            // VG rung R2c: the instance ring the per-batch AABB fold reads. Bound ONCE outside
+            // the loop — every batch indexes the same slice by its own `base_instance`.
+            let instance_ring = scratch.ring.as_read_slice();
             let mut ci = 0usize;
             for b in scratch.batches.as_read_slice() {
                 while ci < caster_batches.len() && caster_batches[ci].mesh_id < b.mesh_id {
@@ -1964,6 +1967,16 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     base_instance: b.base_instance,
                     instance_count: b.instance_count,
                     casts_shadow,
+                    // VG rung R2c: this batch's world AABB, folded from the SAME instance ring the
+                    // raster draws and through the SAME Arvo transform the CSM caster fit uses
+                    // (`arvo_transform`, shared so the two can never drift). `None` when the fold
+                    // declines — a zero-instance batch or the C0 zero-vertex sentinel — and the
+                    // recorder then writes the UNBOUNDED corners, which survive every plane.
+                    world_aabb: boyko_render::csm_caster::batch_world_aabb(
+                        b,
+                        instance_ring,
+                        (mesh.local_min, mesh.local_max),
+                    ),
                 });
             }
 

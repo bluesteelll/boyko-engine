@@ -34,7 +34,7 @@ use super::super::gpu_timing::VbTimedPass;
 use super::super::scene_types::{
     CLUSTER_CULL_HIER_PUSH_BYTES, CLUSTER_CULL_PUSH_BYTES, GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
     GBufferScene, LIGHT_CULL_LOCAL_SIZE_X, VB_BATCH_CULL_LOCAL_SIZE_X, VB_BATCH_CULL_PUSH_BYTES,
-    VB_BATCH_DESC_STRIDE, VbBatchDesc,
+    VB_BATCH_DESC_STRIDE, VbBatchCullPush, VbBatchDesc,
 };
 use super::super::targets::{ForwardTargets, GBufferTargets, VB_CLASSIFY_MAX_MATERIAL_ROWS, VbTargets};
 use super::super::{COLOR_SUBRESOURCE_RANGE, SwapchainError};
@@ -717,7 +717,16 @@ impl Renderer<'_> {
                     for (c, batches) in described.chunks(CHUNK).enumerate() {
                         let mut descs = [VbBatchDesc::unbounded(0); CHUNK];
                         for (d, batch) in descs.iter_mut().zip(batches) {
-                            *d = VbBatchDesc::unbounded(batch.instance_count);
+                            // Rung R2c: the batch's real world AABB when the host could compute
+                            // one. `None` (mesh not `Loaded`, or the C0 zero-vertex sentinel)
+                            // falls back to the UNBOUNDED corners, which survive every plane —
+                            // absence of bounds is not evidence of invisibility, and the fallback
+                            // is conservative by construction rather than by a branch in the
+                            // shader.
+                            *d = match batch.world_aabb {
+                                Some((mn, mx)) => VbBatchDesc::bounded(batch.instance_count, mn, mx),
+                                None => VbBatchDesc::unbounded(batch.instance_count),
+                            };
                         }
                         let bytes = (batches.len() as u64) * desc_stride;
                         // SAFETY: recording is open and NO render-pass instance is active (the
@@ -791,7 +800,15 @@ impl Renderer<'_> {
                 // word describing a capacity can drift from the buffer it describes, which is
                 // exactly the failure VB-P1j had to close for `ClusterGrid`.
                 let visible_cap = (visible[fi].size / 4) as u32;
-                let push: [u32; 2] = [batch_count, visible_cap];
+                // Rung R2c: the six frustum planes the host extracted from the SAME 64 push bytes
+                // the raster's VS reads. A frame that carries none pushes `DISARMED_PLANES`, which
+                // cannot reject any box — so the cull degrades to rung R2c0's null control exactly,
+                // not to something merely similar.
+                let push = VbBatchCullPush {
+                    planes: scene.vb_cull_planes.unwrap_or(VbBatchCullPush::DISARMED_PLANES),
+                    batch_count,
+                    visible_cap,
+                };
                 let groups = batch_count.div_ceil(VB_BATCH_CULL_LOCAL_SIZE_X);
                 // SAFETY: recording is open and outside any render scope; `pipeline` + its layout
                 // (one COMPUTE set + an 8-byte COMPUTE push range) are live on this device (caller
@@ -817,7 +834,7 @@ impl Renderer<'_> {
                         VK_SHADER_STAGE_COMPUTE_BIT,
                         0,
                         VB_BATCH_CULL_PUSH_BYTES,
-                        push.as_ptr().cast(),
+                        (&push as *const VbBatchCullPush).cast(),
                     );
                     (self.fns.cmd_dispatch)(cmd, groups, 1, 1);
                 }

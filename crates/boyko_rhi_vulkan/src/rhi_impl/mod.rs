@@ -193,12 +193,22 @@ const _: () = assert!(
 /// [`crate::compute::COMPOSITE_PUSH_CONSTANT_BYTES`]-byte path alike). A pipeline
 /// layout may declare MORE push bytes than a given shader uses — that is valid
 /// Vulkan; only declaring FEWER than a shader reads is the bug. So the shared
-/// range is sized to the LARGEST consumer (the marcher) and every smaller-push
-/// pipeline binds against it unchanged. Derived from the consumer constant, never
-/// a magic literal, so a future widening of the marcher block re-sizes the range
+/// range is sized to the LARGEST consumer and every smaller-push pipeline binds
+/// against it unchanged. Derived from the consumer constants, never a magic
+/// literal, so a future widening of a consumer block re-sizes the range
 /// automatically. The value stays within the Vulkan-guaranteed 128-byte floor for
 /// `maxPushConstantsSize` (asserted below), so no device-limit query is required.
-const COMPUTE_PUSH_CONSTANT_RANGE_BYTES: u32 = crate::compute::COMPOSITE_PUSH_CONSTANT_BYTES;
+///
+/// VG rung R2c took the "largest consumer" title off the marcher: the batch cull's
+/// 104-byte block (six `float4` frustum planes plus two counts) exceeds the
+/// marcher's 80. So the derivation is now an explicit `max` over BOTH consumers
+/// rather than a single name — which is what this doc always described, and what
+/// keeps the next consumer from having to notice which one currently wins.
+const COMPUTE_PUSH_CONSTANT_RANGE_BYTES: u32 = {
+    let marcher = crate::compute::COMPOSITE_PUSH_CONSTANT_BYTES;
+    let batch_cull = crate::compute::VB_BATCH_CULL_PUSH_BYTES;
+    if batch_cull > marcher { batch_cull } else { marcher }
+};
 
 /// The Vulkan-guaranteed minimum `maxPushConstantsSize` (Vulkan 1.3 spec,
 /// "Required Limits"). The shared compute push range must fit within it so the

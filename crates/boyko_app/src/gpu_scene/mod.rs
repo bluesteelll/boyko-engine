@@ -6024,6 +6024,17 @@ impl GpuSceneBundles {
             // partial wiring here would let the two gates disagree — which is a MISSING barrier
             // on the indirect buffer, not merely a skipped dispatch. Built unconditionally in
             // `boot` beside `vb_indirect`, so the five are always `Some` in lock-step.
+            // VG rung R2c: the six camera-frustum planes, extracted HERE from this call's OWN
+            // `mvp` argument — the very bytes threaded on to the raster's vertex push a few lines
+            // below. Same function, same value, so the cull cannot end up testing against a
+            // different matrix than the one being drawn with; the TAA path jitters that matrix per
+            // frame, which is exactly the drift this forecloses. `boyko_rhi_vulkan` cannot do this
+            // itself — `boyko_render` sits above it — so the planes cross the boundary as data.
+            vb_cull_planes: Some(boyko_render::frustum::frustum_planes_from_push_bytes(
+                mvp[0..64]
+                    .try_into()
+                    .expect("invariant: the raster push's leading 64 bytes are view_proj"),
+            )),
             vb_batch_desc: Some(&self.vb_batch_desc),
             vb_cull_visible: Some(&self.vb_cull_visible),
             vb_cull_count: Some(&self.vb_cull_count),

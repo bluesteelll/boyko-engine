@@ -92,12 +92,50 @@ RWStructuredBuffer<uint> VbCullVisible : register(u2);
 // each frame ahead of the TRANSFER -> COMPUTE barrier the graph derives.
 RWStructuredBuffer<uint> VbCullCount : register(u3);
 
-// The batch-cull push constants. Mirrors the host `VbBatchCullPush` (8 bytes).
+// The number of camera-frustum planes. Fixed order: left, right, bottom, top, near, far — the
+// SAME order `boyko_render::frustum::frustum_planes_from_view_proj` emits.
+static const uint FRUSTUM_PLANE_COUNT = 6u;
+
+// The batch-cull push constants. Mirrors the host `VbBatchCullPush` (104 bytes).
 struct VbBatchCullPush {
+    // Rung R2c: the six frustum planes as (a, b, c, d), inside => a*x + b*y + c*z + d >= 0.
+    // EXTRACTED ON THE HOST from the same 64 push bytes the raster's VS reads as `view_proj`, and
+    // pushed here rather than re-derived: one extraction, two consumers, so a disagreement between
+    // this shader and its host oracle is a shader bug rather than a math bug. UNNORMALISED — the
+    // sign of a comparison against zero is scale-invariant, and normalising would introduce a
+    // division that a degenerate row turns into a NaN.
+    float4 planes[6];
     uint batch_count;  // number of live `DrawBatch` records this frame (the range guard)
     uint visible_cap;  // element capacity of `VbCullVisible` (the clamp-and-drop bound)
 };
 [[vk::push_constant]] VbBatchCullPush pc;
+
+// Rung R2c: the conservative rejection test — true iff the world AABB is WHOLLY in the negative
+// half-space of at least one plane, and therefore certainly invisible.
+//
+// For each plane, `dist` is the centre's signed distance and `radius` is the box's extent projected
+// onto the plane normal, so `dist + radius` is the signed distance of the box's FARTHEST corner
+// along that normal. Still negative => all eight corners are outside. That is an EXACT statement
+// about the box, not an approximation.
+//
+// The converse is deliberately not computed: a box straddling two planes' outsides without being
+// wholly outside either is reported VISIBLE. A false reject would delete geometry from the frame; a
+// false keep costs one wasted draw. Do not "tighten" this without re-deriving that guarantee.
+//
+// A NaN anywhere makes every comparison false, so the box reads VISIBLE — the same safe direction.
+bool aabb_outside_frustum(float3 mn, float3 mx) {
+    const float3 c = (mn + mx) * 0.5;
+    const float3 h = (mx - mn) * 0.5;
+    for (uint p = 0u; p < FRUSTUM_PLANE_COUNT; ++p) {
+        const float4 pl = pc.planes[p];
+        const float dist = dot(pl.xyz, c) + pl.w;
+        const float radius = dot(abs(pl.xyz), h);
+        if (dist + radius < 0.0) {
+            return true;
+        }
+    }
+    return false;
+}
 
 [numthreads(64, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
@@ -111,11 +149,12 @@ void main(uint3 tid : SV_DispatchThreadID) {
 
     const VbBatchDescGpu d = VbBatchDesc[i];
 
-    // Rung R2c0: THE decision, and it is deliberately constant. Rung R2c replaces this line with
-    // the conservative AABB-vs-frustum test over `d.aabb_min`/`d.aabb_max` — reject only when the
-    // whole box sits in one plane's negative half-space, so a surviving batch can never be a
-    // false cull. Nothing else in this file changes.
-    const bool visible = true;
+    // Rung R2c: THE decision, armed. Rung R2c0 shipped this line as the literal `true` — the null
+    // control `docs/VG-DECIDABILITY-FLOOR.md` demands — and this is the one line that rung promised
+    // would change. A batch whose descriptor was never filled carries the `VbBatchDesc::UNBOUNDED`
+    // corners, which survive every plane, so an unfilled descriptor degrades to "keep" rather than
+    // to "cull".
+    const bool visible = !aabb_outside_frustum(d.aabb_min, d.aabb_max);
 
     // Word 1 of the record. A culled batch writes 0, which draws nothing while leaving the rest
     // of the record — and therefore the host's `first_instance == 0` invariant — untouched.

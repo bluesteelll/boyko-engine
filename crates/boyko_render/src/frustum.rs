@@ -277,6 +277,53 @@ mod tests {
         );
     }
 
+    /// THE ORACLE, END TO END: a batch behind the camera is culled to `0`, one in front keeps its
+    /// full instance count.
+    ///
+    /// This is the assertion the goldens CANNOT make. Every pinned scene is entirely on-screen, so
+    /// a cull that rejects nothing is byte-identical to a correct one — "9 pins unchanged" is
+    /// evidence the cull breaks nothing, and no evidence at all that it ever culls. This test is
+    /// the other half, and it runs the whole host path: mesh-local AABB → `batch_world_aabb`'s
+    /// Arvo fold through the instance ring → the plane test.
+    #[test]
+    fn the_oracle_culls_a_batch_behind_the_camera_and_keeps_one_in_front() {
+        let planes = frustum_planes_from_view_proj(&perspective_at_origin());
+        // A unit cube at the origin in model space.
+        let local = ([-0.5f32, -0.5, -0.5], [0.5f32, 0.5, 0.5]);
+        // Two instances: translation only, identity linear part.
+        let at = |z: f32| InstanceModelCol {
+            rows: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, z]],
+        };
+        // ring[0] sits in front of the camera (-z), ring[1] behind it (+z).
+        let ring = [at(-6.0), at(6.0)];
+        let batch = |base: u32| DrawBatch {
+            mesh_id: 0,
+            index_count: 36,
+            index_type: boyko_rhi::IndexType::Uint16,
+            base_instance: base,
+            instance_count: 1,
+        };
+
+        assert_eq!(
+            batch_instance_count_after_cull(&planes, &batch(0), &ring, Some(local)),
+            1,
+            "a batch in front of the camera must keep every instance"
+        );
+        assert_eq!(
+            batch_instance_count_after_cull(&planes, &batch(1), &ring, Some(local)),
+            0,
+            "a batch wholly behind the camera must cull to zero — if this is 1 the cull is armed \
+             but inert, which every golden would happily accept"
+        );
+        // Bounds unavailable ⇒ KEEP. Absence of bounds is not evidence of invisibility, and this
+        // is the path a not-yet-`Loaded` mesh takes every frame it is streaming in.
+        assert_eq!(
+            batch_instance_count_after_cull(&planes, &batch(1), &ring, None),
+            1,
+            "a batch with no bounds must be KEPT — the streaming path would otherwise pop"
+        );
+    }
+
     /// A NaN must read as VISIBLE, not as culled. `NaN < 0.0` is false, so the early-out never
     /// fires — asserted rather than assumed, because the opposite would delete geometry.
     #[test]

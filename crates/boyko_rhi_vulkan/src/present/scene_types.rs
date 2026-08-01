@@ -393,6 +393,20 @@ pub struct GBufferMeshDraw<'a> {
     /// mesh (a room floor / wall) does not stamp itself into the shadow maps and cast a
     /// spurious shadow over the scene. `true` reproduces the prior all-casters behavior.
     pub casts_shadow: bool,
+    /// VG rung R2c: this batch's WORLD-space AABB — the union of its instances' Arvo-transformed
+    /// local boxes, computed host-side by `boyko_render::csm_caster::batch_world_aabb`.
+    ///
+    /// `None` means "bounds unavailable" (the mesh has not resolved `Loaded`, or it carries the C0
+    /// zero-vertex sentinel), and the cull then KEEPS the batch: absence of bounds is not evidence
+    /// of invisibility. The recorder writes [`VbBatchDesc::UNBOUNDED`] corners for a `None`, which
+    /// survives every frustum plane — so the degraded path is the conservative one by construction
+    /// rather than by a branch anyone has to remember.
+    ///
+    /// Host-computed on purpose: there is no per-instance mesh id on the GPU (the `mesh_ids` lane
+    /// is host-side only), so a shader could not look these up; and computing them here means the
+    /// cull's oracle and the shader read the SAME numbers, making any disagreement a shader bug
+    /// rather than a math bug.
+    pub world_aabb: Option<([f32; 3], [f32; 3])>,
 }
 
 /// The byte size of the marcher's COMPUTE push constant — DERIVED from the
@@ -463,6 +477,17 @@ impl VbBatchDesc {
     /// signed while still exceeding any world extent this engine renders.
     pub const UNBOUNDED: f32 = 1.0e30;
 
+    /// VG rung R2c: the descriptor for a batch whose world AABB the host COULD compute.
+    ///
+    /// No validation of `min <= max` here on purpose: an inverted box is already filtered upstream
+    /// by `batch_world_aabb` (it returns `None` for the C0 zero-vertex sentinel), and re-checking
+    /// it here would either duplicate that rule or quietly disagree with it.
+    #[inline]
+    #[must_use]
+    pub const fn bounded(instance_count: u32, aabb_min: [f32; 3], aabb_max: [f32; 3]) -> Self {
+        Self { aabb_min, instance_count, aabb_max, pad: 0 }
+    }
+
     /// The rung-R2c0 descriptor for a batch of `instance_count` instances: an unbounded box, so
     /// the cull cannot reject it once rung R2c arms the test.
     #[inline]
@@ -476,6 +501,39 @@ impl VbBatchDesc {
         }
     }
 }
+
+/// VG rung R2c: the batch-cull's push constants — `vb_batch_cull.comp.hlsl`'s `VbBatchCullPush`.
+///
+/// `float4 planes[6]` occupies the leading 96 bytes (std430 push layout: a `float4` array needs no
+/// interior padding), then the two counts. 104 bytes total, inside Vulkan's guaranteed 128-byte
+/// `maxPushConstantsSize` minimum.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VbBatchCullPush {
+    /// The six frustum planes, `(a, b, c, d)`, inside ⇒ `a·x + b·y + c·z + d ≥ 0`, in the order
+    /// left, right, bottom, top, near, far.
+    pub planes: [[f32; 4]; 6],
+    /// Live `DrawBatch` count this frame — the shader's tail-lane range guard.
+    pub batch_count: u32,
+    /// `VbCullVisible`'s element capacity — the clamp-and-drop bound, derived from the ALLOCATION.
+    pub visible_cap: u32,
+}
+
+impl VbBatchCullPush {
+    /// The DISARMED plane set: every plane `(0, 0, 0, 0)`, so `dist + radius == 0.0` and the
+    /// `< 0.0` rejection never fires — every batch survives.
+    ///
+    /// This is what a frame with no `vb_cull_planes` pushes, and it degrades the cull to rung
+    /// R2c0's null control EXACTLY rather than to something merely similar: a zeroed plane cannot
+    /// reject, whatever the box. Zero is the right disarm value here precisely because the planes
+    /// are unnormalised — there is no normalisation step to turn it into a NaN.
+    pub const DISARMED_PLANES: [[f32; 4]; 6] = [[0.0; 4]; 6];
+}
+
+const _: () = assert!(
+    core::mem::size_of::<VbBatchCullPush>() == VB_BATCH_CULL_PUSH_BYTES as usize,
+    "rung R2c: VbBatchCullPush must match the shader's 104-byte push block"
+);
 
 /// The [`VbBatchDesc`] byte stride — mirrors `vb_batch_cull.comp.hlsl`'s `VbBatchDescGpu`.
 pub(crate) const VB_BATCH_DESC_STRIDE: u32 = crate::compute::VB_BATCH_DESC_STRIDE;
@@ -2468,6 +2526,22 @@ pub struct GBufferScene<'a> {
     /// [`Self::vb_cull_layout`]. `None` degrades the recorder to R2a''s transfer-only record
     /// path, which is byte-identical to this one by construction.
     pub vb_batch_cull_pipeline: Option<&'a ComputePipeline>,
+    /// VG rung R2c: the six camera-frustum planes, `(a, b, c, d)` with **inside ⇒
+    /// `a·x + b·y + c·z + d ≥ 0`**, in the fixed order left, right, bottom, top, near, far that
+    /// `vb_batch_cull.comp.hlsl` mirrors.
+    ///
+    /// Extracted host-side by `boyko_render::frustum::frustum_planes_from_push_bytes` **from the
+    /// first 64 bytes of [`Self::mvp`]** — the same bytes the raster's vertex shader reads as its
+    /// `view_proj`. Not re-derived from the camera UBO (which holds basis vectors, not a matrix)
+    /// and not taken from a separately computed matrix: the TAA path jitters the projection per
+    /// frame, and byte provenance is what keeps the cull and the raster on one matrix without
+    /// anyone having to remember to update two places.
+    ///
+    /// `None` DISARMS the decision — the recorder then pushes planes that reject nothing, so the
+    /// cull degrades to the rung-R2c0 null control rather than to an unbounded one. This crate
+    /// cannot compute them itself (`boyko_render` sits ABOVE it in the dependency graph), which is
+    /// exactly why they arrive as data rather than as a call.
+    pub vb_cull_planes: Option<[[f32; 4]; 6]>,
     /// VG rung R2c0: the batch-cull's OWN 1-set bind-group layout (`VbIndirect` @0,
     /// `VbBatchDesc` @1, `VbCullVisible` @2, `VbCullCount` @3 — all COMPUTE, all STORAGE_BUFFER,
     /// matching `vb_batch_cull.comp.hlsl`'s binding table).

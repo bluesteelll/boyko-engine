@@ -8,7 +8,9 @@
 //!   variants, so no `docs/SHADER-VARIANT-MANIFEST.md` row — the manifest registers `-D`
 //!   variants only).
 //!
-//! * **(b) INERTNESS** — the committed module contains **no visibility decision**. Rung R2c0 is
+//! * **(b) WHAT THE MODULE DOES** — rung R2c0 pinned this as INERTNESS (no visibility decision at
+//!   all); rung R2c armed the decision and RE-PINNED the same census against its own measured
+//!   module. The reasoning below is kept because it is why the census exists at all. Rung R2c0 is
 //!   the null control `docs/VG-DECIDABILITY-FLOOR.md` says every later cull delta needs: the
 //!   compaction machinery present, dispatched, and provably changing nothing. "Provably" is this
 //!   test. The shader's `visible` is the literal `true`, so DXC constant-folds the ternary and
@@ -183,19 +185,22 @@ fn vb_batch_cull_spv_byte_identical() {
     );
 }
 
-/// Gate (b): THE RUNG'S DELIVERABLE — the committed module carries no visibility decision, and
-/// does carry the compaction machinery.
+/// Gate (b): the module carries the rung-R2c DECISION, and still carries the rung-R2c0 MACHINERY.
+///
+/// This pin was `vb_batch_cull_module_is_inert` at rung R2c0 and asserted the exact opposite
+/// (`OpSelect == 0`, `OpDot == 0`, `OpFOrdLessThan == 0`). Arming the cull made that RED, which is
+/// what it was for — so R2c RE-PINS it against its own measured module rather than deleting it.
+/// The one field that must NOT have moved is `op_atomic_iadd`: the compaction claim is R2c0's
+/// contribution and R2c was not supposed to touch it, so holding it at 1 across the arming is a
+/// cross-rung invariant rather than a restatement.
 ///
 /// MEASURED on the artifact this rung commits. Do not edit these literals to make a failing run
-/// pass: a non-zero `op_select` means rung R2c's decision landed, and R2c's own job includes
-/// re-pinning this census with its new measured numbers and re-stating what "inert" then means
-/// (nothing — R2c is not a null control, which is exactly why R2c0 exists separately).
+/// pass: they say what the module DOES, and a change in them is a change in the cull.
 #[test]
-fn vb_batch_cull_module_is_inert() {
+fn vb_batch_cull_module_carries_the_armed_decision() {
     let Some(spirv_dis) = find_spirv_dis() else {
         eprintln!(
-            "vb_batch_cull_spv_sync: spirv-dis not found — SKIPPING the R2c0 inertness census on \
-             this host."
+            "vb_batch_cull_spv_sync: spirv-dis not found — SKIPPING the R2c arming census on this              host."
         );
         return;
     };
@@ -205,32 +210,32 @@ fn vb_batch_cull_module_is_inert() {
     let actual = census(&disassemble(&spirv_dis, &committed_path));
 
     let expected = SpvCensus {
-        op_select: 0,
-        op_dot: 0,
-        op_ford_less_than: 0,
+        // The ternary on `visible` no longer folds — the decision is real.
+        op_select: 1,
+        // `dot(pl.xyz, c)` and `dot(abs(pl.xyz), h)`, in a ROLLED loop (2, not 12).
+        op_dot: 2,
+        // The single `dist + radius < 0.0` rejection.
+        op_ford_less_than: 1,
+        // Unchanged from R2c0 — see this test's doc.
         op_atomic_iadd: 1,
         op_ugreater_than_equal: 1,
-        op_uless_than: 1,
+        // The visible-list clamp, plus the plane loop's own bound.
+        op_uless_than: 2,
         op_store: 2,
     };
     assert_eq!(
         actual, expected,
-        "vb_batch_cull.comp.spv's inertness census diverged. Expected {expected:?}, got {actual:?}."
+        "vb_batch_cull.comp.spv's census diverged. Expected {expected:?}, got {actual:?}."
     );
 
-    // Stated separately from the aggregate so a failure names the PROPERTY rather than "the
-    // census drifted". These two are the whole point of the rung.
-    assert_eq!(
-        actual.op_select, 0,
-        "invariant: rung R2c0's module must carry NO `OpSelect` — the visibility decision is the \
-         literal `true` and DXC must fold it away. A non-zero count means the module makes a \
-         choice, and it is no longer the null control `docs/VG-DECIDABILITY-FLOOR.md` requires."
+    // Stated separately so a failure names the PROPERTY rather than "the census drifted".
+    assert!(
+        actual.op_select > 0 && actual.op_dot > 0 && actual.op_ford_less_than > 0,
+        "invariant: rung R2c's module must carry a real decision — an `OpSelect` fed by a plane          test. All three at zero means the cull silently reverted to R2c0's constant `true`, which          renders identically on today's fully-on-screen scenes and would therefore pass every          golden while culling nothing."
     );
     assert_eq!(
         actual.op_atomic_iadd, 1,
-        "invariant: the compaction claim must be PRESENT — exactly one `InterlockedAdd` on the \
-         visible counter. A count of 0 would make the inertness above vacuous: a module that does \
-         nothing at all is trivially inert and de-risks nothing."
+        "invariant: the compaction claim must SURVIVE the arming — exactly one `InterlockedAdd`,          the same count rung R2c0 pinned. R2c was not supposed to touch the machinery."
     );
 }
 

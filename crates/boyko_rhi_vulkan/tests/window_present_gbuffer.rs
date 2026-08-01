@@ -2330,6 +2330,7 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         vb_layout0: None,
         vb_instance_ring: None,
         vb_indirect: None,
+        vb_cull_planes: None,
         vb_batch_desc: None,
         vb_cull_visible: None,
         vb_cull_count: None,
@@ -3410,6 +3411,7 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         vb_layout0: None,
         vb_instance_ring: None,
         vb_indirect: None,
+        vb_cull_planes: None,
         vb_batch_desc: None,
         vb_cull_visible: None,
         vb_cull_count: None,
@@ -8335,6 +8337,10 @@ fn run_showcase_body_ddgi(
                     base_instance: b.base_instance,
                     instance_count: b.instance_count,
                     casts_shadow: b.casts_shadow,
+                    // VG rung R2c: this fixture path carries no mesh bounds, so the cull keeps
+                    // every batch (UNBOUNDED corners survive every plane) — the conservative
+                    // fallback, not a special case.
+                    world_aabb: None,
                 })
                 .collect()
         })
@@ -8409,6 +8415,7 @@ fn run_showcase_body_ddgi(
         vb_layout0: None,
         vb_instance_ring: None,
         vb_indirect: None,
+        vb_cull_planes: None,
         vb_batch_desc: None,
         vb_cull_visible: None,
         vb_cull_count: None,
@@ -9824,6 +9831,10 @@ fn run_showcase_body(
                     base_instance: b.base_instance,
                     instance_count: b.instance_count,
                     casts_shadow: b.casts_shadow,
+                    // VG rung R2c: this fixture path carries no mesh bounds, so the cull keeps
+                    // every batch (UNBOUNDED corners survive every plane) — the conservative
+                    // fallback, not a special case.
+                    world_aabb: None,
                 })
                 .collect()
         })
@@ -9902,6 +9913,7 @@ fn run_showcase_body(
         vb_layout0: None,
         vb_instance_ring: None,
         vb_indirect: None,
+        vb_cull_planes: None,
         vb_batch_desc: None,
         vb_cull_visible: None,
         vb_cull_count: None,

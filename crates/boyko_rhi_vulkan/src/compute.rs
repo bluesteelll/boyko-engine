@@ -1661,9 +1661,14 @@ pub fn cluster_cull_hier_spirv() -> &'static [u32] {
     CLUSTER_CULL_HIER_SPV.as_words()
 }
 
-/// VG rung R2c0: the batch-cull pipeline's COMPUTE push range — `vb_batch_cull.comp.hlsl`'s
-/// `VbBatchCullPush { uint batch_count; uint visible_cap; }`.
-pub const VB_BATCH_CULL_PUSH_BYTES: u32 = 8;
+/// The batch-cull pipeline's COMPUTE push range — `vb_batch_cull.comp.hlsl`'s
+/// `VbBatchCullPush { float4 planes[6]; uint batch_count; uint visible_cap; }`.
+///
+/// 96 bytes of planes + 8 of counts. Rung R2c0 shipped this at 8 bytes (counts only); rung R2c
+/// widened it when the decision arrived. Well inside Vulkan's guaranteed 128-byte minimum
+/// `maxPushConstantsSize`, which is the bound that actually binds here — the raster's own push is
+/// 88 bytes, so the device plainly clears 104.
+pub const VB_BATCH_CULL_PUSH_BYTES: u32 = 104;
 
 /// VG rung R2c0: the byte stride of one `VbBatchDesc` — `vb_batch_cull.comp.hlsl`'s
 /// `VbBatchDescGpu { float3 aabb_min; uint instance_count; float3 aabb_max; uint pad; }`.
