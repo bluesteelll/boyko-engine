@@ -31,9 +31,9 @@
 # and Rev 7 -- the third occurrence caught by an adversarial pass rather than by the fields
 # themselves, in the very revision whose slogan was about fixes that do not land. They are updated
 # here in the same act as the edit, which is the whole of their job.
-schema_version = 27
-frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 31"
-frozen_date = "2026-07-31"
+schema_version = 28
+frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 38"
+frozen_date = "2026-08-01"
 
 # THE EDIT DISCIPLINE, stated because Rev 4 and Rev 5 both edited this file in place while its
 # header said "never edited" and the plan's amendment table read "No amendment yet."
@@ -47,6 +47,21 @@ frozen_date = "2026-07-31"
 freeze_begins_at = "R0a records the sha256"
 pre_r0a_edits_are_authoring_not_amendment = true
 
+# ⚠️ REV 38 IS THE FIRST AMENDMENT AFTER THE FREEZE, and it is the first edit to this file that is
+# NOT authoring. The freeze began 2026-07-31 when R0a recorded the digest; every edit before that was
+# authoring, every edit after it needs a dated row in the plan's section 11.1, and this one has it.
+# Owner-authorised 2026-08-01. Three acts, in one commit with the recorded hash update:
+#   (1) ADD k1_fire_aggregation -- a fold that did not exist while k1_decision_rule had no FIRE
+#       branch, frozen BEFORE any upper-bound instrument exists;
+#   (2) SUBTRACT "(the frustum+backface survivor counter)" from the firing paragraph an implementer
+#       greps -- it named a candidate its own refutation rejects, and R11 adds a third, engine-
+#       specific refutation: this engine backface-culls NOWHERE in its scene passes;
+#   (3) SUBTRACT "monotonically increasing" from the visible_tris derivation -- the plan's own
+#       section 5.7 stated the opposite, and non-nested sample lattices make the strict claim false.
+# (2) and (3) are SUBTRACTIONS, which is this campaign's only repair class with an unbroken record;
+# each had a sibling statement in the plan and BOTH texts move in this commit, because a repair that
+# reaches one of two stating texts is the Rev 31 defect by name.
+#
 # REV 31 -- no threshold changes; the review loop closes (plan Status). The extent question this
 # block's entries track is now MEASURED: crates/boyko_rhi_vulkan/tests/vg_extent_probe.rs, with
 # the grant table and the per-rung route it decides recorded in the plan's section 9.1.
@@ -155,8 +170,15 @@ cross_run_sessions = 3
 # count. A triangle covering 4 px at 2160p covers 1 px at 1080p. So:
 #
 #   * visible_tris(R) — the count of distinct (instance_id, local_tri) in the readback at
-#     resolution R — is monotonically increasing in R, because raising resolution lets smaller
-#     triangles win coverage races that they lost before;
+#     resolution R — RISES with R, because raising resolution lets smaller triangles win coverage
+#     races that they lost before. ⚠️ REV 38 SUBTRACTS "monotonically increasing", which this file
+#     stated as a property while the plan's section 5.7 stated the opposite 170 lines from where the
+#     plan repeated it: sample lattices between rungs are NOT NESTED, so a sliver holding one coarse
+#     centre and no fine centre DISAPPEARS at higher resolution, and depth-test tie-breaking can flip
+#     a triangle from visible to invisible as resolution rises. The claim was true of R0's measured
+#     rows (69517 -> 103819 -> 176397 and 146965 -> 185065 -> 234094, both paths rising at every
+#     rung) and false as a theorem, and it is the sentence any extrapolation proposal cites. The
+#     ARGUMENT below is unaffected — it needs the tendency, never strict monotonicity;
 #   * it converges, as R grows, to the true count of front-facing, unoccluded triangles in view;
 #   * measuring at the TOP rung therefore reveals exactly the sub-pixel population that the
 #     decision resolution hides, which is the population this campaign is about.
@@ -494,11 +516,23 @@ committed_paths_min = 2
 # content: the same disposition, and for the same reason, as a frame that fails non-degeneracy.
 k1_decision_rule = "cheap_census_may_only_REFUTE, evaluated over the committed camera paths P of committed_paths_rule: |P| < committed_paths_min => NOT ADJUDICATED and R0d reds (an instrument failure, never UNDECIDED and never a favourable verdict; the min is not evaluated); degenerate(p) := covered_pixels(p) < min_covered_pixels OR visible_tris(p) < min_visible_tris; ANY p in P degenerate => UNDECIDED, escalate (and R0d reds, which takes precedence); else min over p in P of d_est(p) >= d_est_min => K1 dead; min over p in P of d_est(p) < d_est_min => UNDECIDED, escalate"
 
-# FIRING K1 requires the upper-bound instrument (the frustum+backface survivor counter), which is a
-# separate conditional rung. Its threshold is pre-registered HERE, before that instrument exists,
-# for the same reason everything else in this file is: so it cannot be chosen by whoever measures
-# against it. Same value, because 1.0 IS the definition of the regime — but now applied to a
-# statistic that can soundly sit below it.
+# FIRING K1 requires an upper-bound instrument, which is a separate conditional rung. Its threshold
+# is pre-registered HERE, before that instrument exists, for the same reason everything else in this
+# file is: so it cannot be chosen by whoever measures against it. Same value, because 1.0 IS the
+# definition of the regime — but now applied to a statistic that can soundly sit below it.
+#
+# ⚠️ REV 38 SUBTRACTS the parenthetical "(the frustum+backface survivor counter)" that stood here.
+# This paragraph is the one an implementer greps, and it named a candidate that the paragraph's OWN
+# refutation five lines below rejects and that k1_fire_instrument_status calls UNSOLVED — the exact
+# defect this file condemns at [k1]'s note on the deleted `rule` field ("a superseded field left in
+# place with a comment saying so is still a field an implementer greps for and codes from"). The
+# candidate now has a THIRD and engine-specific refutation, recorded in
+# docs/VG-R11-UPPER-BOUND-INSTRUMENT.md: this engine performs NO backface culling in any scene pass
+# (vb_raster_pipeline is built cull_mode: CullMode::None; the only two non-None sites in the tree are
+# CullMode::Front in the CSM passes), so a BACKFACE conjunct in the numerator is UNSOUND here — back
+# faces win vb_id texels and R0's own visible_tris contains them. Removing that conjunct collapses
+# the candidate onto submitted/covered, refuted above. Seven candidate families are now adjudicated
+# and all seven are dead; the sibling repair is in the plan's section 5.6.
 # REV 6 -- K1 IS REFUTATION-ONLY AT R0, and this is a scope decision, not a deferral.
 #
 # Rev 5 named a "frustum+backface survivor counter in vb_raster.fs.hlsl" as the firing instrument.
@@ -533,6 +567,38 @@ k1_decision_rule = "cheap_census_may_only_REFUTE, evaluated over the committed c
 k1_fire_at_r0 = false
 # REV 25 -- this value stated its requirement in terms of the preclusion withdrawn above.
 k1_fire_instrument_status = "UNSOLVED -- needs a non-saturating upper bound on VISIBLE density; R0b floors no triangle count, so the corpus constrains it neither way"
+
+# REV 38 -- THE FIRING AGGREGATION, absent until now, and its absence was a live hole rather than a
+# tidiness one. k1_path_aggregation above is justified EXPLICITLY AND ONLY for refutation, and
+# k1_decision_rule has NO FIRE BRANCH AT ALL, so the fold a firing instrument reduces by was going to
+# be chosen by whoever first measured against it. That is precisely the condition the two-file split
+# at the head of this document exists to prevent, and it is frozen here BEFORE any upper-bound
+# instrument exists -- which is the only moment at which freezing it means anything.
+#
+# MAX, and the direction is an argument rather than a symmetry. K1 is stated as a UNIVERSAL over
+# framings (plan section 6: "The corpus NEVER approaches ~1 triangle/pixel"), so establishing it
+# requires the DENSEST committed framing to sit below the bar. This is the mirror of MIN's own
+# reasoning and not its negation: a favourable-to-the-campaign verdict must clear the bar on the
+# WEAKEST framing (MIN, refute), and an UNfavourable one must clear it on the STRONGEST (MAX, fire).
+# Both folds put the burden on the side that would benefit.
+#
+# MAX is monotone INCREASING under insertion, so adding a flattering (sparse) path cannot flip a
+# non-firing verdict to firing -- the additive lever is closed by the reduction itself. The OMIT
+# lever, which MIN leaves open and which R0d(d)'s set equality closes, is closed here by the same
+# part, unchanged: the census row set is still the only observable record of which source the run
+# iterated.
+#
+# ⚠️ WHAT THIS FIELD DOES *NOT* DO, stated because a frozen value that quietly decides an outcome is
+# this file's signature defect. Under MAX, K1 CANNOT FIRE on the corpus R0 measured, and that is a
+# THEOREM from R0's own rows rather than a consequence of this choice: winning a texel proves
+# visibility, so d_est is a LOWER bound (d_est_bound_direction above), and orbit_mid measured
+# d_est = 176397/167573 = 1.052658 > 1.0, so D_true(orbit_mid) >= 1.052658 and EVERY sound upper
+# bound reads at least that on that path. MIN would not rescue the fire branch honestly either -- it
+# would let K1 fire on approach_close (0.5090) while orbit_mid is PROVEN dense, a verdict
+# contradicting a proof on the same census. The owner answered this field on 2026-08-01 knowing that
+# consequence, which is why the answer is recorded as a values call and not derived here.
+# Full derivation and the seven adjudicated candidate deaths: docs/VG-R11-UPPER-BOUND-INSTRUMENT.md.
+k1_fire_aggregation = "max_over_committed_camera_paths"
 
 # The modal-bucket conjunct is RETIRED from the decision. It is redundant against D_est, its
 # cross-rung derivation is unsupported by this ladder, and its direction was inverted in Rev 3.

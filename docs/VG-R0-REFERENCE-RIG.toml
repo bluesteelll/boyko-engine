@@ -101,7 +101,7 @@ search_residual_blindness = "an engine installed by hand and registered with non
 # minting a second number; the gate asserts BOTH that this equals that literal and that it equals
 # the file re-hashed at test time. Normalised because this repository has core.autocrlf behaviour
 # active, so a hash over raw bytes would be a hash of the checkout configuration.
-thresholds_sha256 = "fea8f9c5583fafd7de39360974d1a52d41f656ce7fd961282a145620a16a2d19"
+thresholds_sha256 = "864778bddf9790ee32764873a7b6ab0d32f23027798246a432342a2867ed6f1a"
 
 # ---------------------------------------------------------------------------------------------
 # MEASURED ON THIS BOX — recorded because they are true and cheap, not because a gate reads them.

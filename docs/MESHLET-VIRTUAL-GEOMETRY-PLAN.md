@@ -1,7 +1,25 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status: R0 IS COMPLETE, Rev 37 — every rung landed, every gate executed, and K1 is ADJUDICATED:
-UNDECIDED, escalate.**
+**Status: R0 IS COMPLETE, Rev 38 — every rung landed, every gate executed, K1 is ADJUDICATED
+(UNDECIDED, escalate), and the FIRE branch is now proven CLOSED on this corpus.**
+
+**Rev 38 is the first amendment after the freeze** (§11.1 carries all three rows, owner-authorised
+2026-08-01). It freezes `[k1].k1_fire_aggregation` as `max_over_committed_camera_paths` — a fold that
+did not exist while `k1_decision_rule` had no FIRE branch — and subtracts two claims that had a
+sibling in each document. [VG-R11-UPPER-BOUND-INSTRUMENT.md](VG-R11-UPPER-BOUND-INSTRUMENT.md) holds
+the adjudication: **seven candidate families, all seven dead**, and the theorem that follows from R0's
+own rows — winning a texel proves visibility, so `D_est` is a lower bound, `orbit_mid` measured
+`1.052658 > 1.0`, therefore **every sound upper bound reads ≥ 1.0527 on that path and K1 cannot fire
+on `assets/vg_corpus` whatever the instrument**. The owner's answer to that, 2026-08-01, is to
+**change the corpus and re-run R0b–R0d** — the only route on which a firing instrument can return a
+verdict at all.
+
+⚠️ **One engine fact 37 revisions did not notice, and it invalidates the candidate both documents
+named:** this engine performs **no backface culling in any scene pass** (`vb_raster_pipeline` is
+`cull_mode: CullMode::None`; the tree's only two non-`None` sites are `CullMode::Front` in CSM). So
+*"frustum **+ backface** survivors"* has an unsound numerator here — back faces win `vb_id` texels
+and R0's own `visible_tris` contains them. The candidate was argued about for 37 revisions and never
+sited against the code.
 
 `docs/VG-R0-DENSITY-CENSUS.md` is machine-written by the run that measured it. Over the seven-asset,
 **2 279 237-triangle** corpus, at both committed camera paths, at all four ladder rungs:
@@ -709,9 +727,14 @@ silent.
 geometry, a triangle's screen-space area scales *exactly* with pixel count: a triangle covering 4 px
 at 2160p covers 1 px at 1080p. Therefore
 
-* `visible_tris(R)` — distinct `(instance_id, local_tri)` in the readback at resolution `R` — is
-  **monotonically increasing** in `R`, because raising resolution lets smaller triangles win
-  coverage races they previously lost;
+* `visible_tris(R)` — distinct `(instance_id, local_tri)` in the readback at resolution `R` —
+  **RISES** with `R`, because raising resolution lets smaller triangles win coverage races they
+  previously lost. ⚠️ **Rev 38 subtracts "monotonically increasing"**, which §5.7 forty lines below
+  has always contradicted (*"sample lattices between rungs are **not nested**… so `visible_tris(R)`
+  is not strictly monotone"*), and the sibling claim in the frozen file moves in the same commit —
+  a repair reaching one of two stating texts is the Rev 31 defect by name. R0 measured the tendency
+  on both paths at every rung (69 517 → 103 819 → 176 397; 146 965 → 185 065 → 234 094), and the
+  argument below needs only that;
 * it **converges**, as `R` grows, to the true count of front-facing, unoccluded triangles in view;
 * so measuring at the **top** rung reveals precisely the sub-pixel population the decision
   resolution hides — which is the population this campaign exists to serve.
@@ -822,8 +845,20 @@ outcome and it is the one worth attempting first.
 
 **Refuting the premise costs more, and the plan must say so rather than pretend otherwise.** Any
 statistic derived from `vb_id` is capped by one-winner-per-texel, so a sound upper bound **must**
-come from outside it. The tight one available is a **counter of triangles surviving frustum +
-backface**, incremented in the raster path under the census arm. That is not free: it edits
+come from outside it — ⚠️ and **Rev 38 subtracts the candidate this sentence used to offer**, with
+its sibling in the frozen file moving in the same commit. It read *"the tight one available is a
+counter of triangles surviving frustum + backface, incremented in the raster path under the census
+arm."* Three refutations stand against it and the third is engine-specific and fatal on its own:
+**this engine backface-culls NOWHERE in its scene passes** (`vb_raster_pipeline` is built
+`cull_mode: CullMode::None`; the only two non-`None` sites in the tree are `CullMode::Front` in the
+CSM passes), so a **backface** conjunct in the numerator is **unsound here** — back faces win
+`vb_id` texels and R0's own `visible_tris` contains them. Removing the conjunct collapses the
+candidate onto `submitted/covered`, refuted at §5.4. Seven candidate families are now adjudicated
+and **all seven are dead** — see [VG-R11-UPPER-BOUND-INSTRUMENT.md](VG-R11-UPPER-BOUND-INSTRUMENT.md),
+which also freezes the firing fold as `[k1].k1_fire_aggregation` and proves that under it K1
+**cannot fire on the corpus R0 measured, whatever the instrument**. The cost note below is kept
+because it prices the *class* of edit correctly, and that pricing is what any future candidate
+inherits: it edits
 `vb_raster.fs.hlsl`, which moves the very blast radius §5.3 chose option (a) to keep at zero
 (16 `.spv`, all sixteen now byte-gated — §2). ⚠️ The gate does not make the edit cheaper; it makes
 the cost **visible**. Editing `vb_raster.fs.hlsl` now reds
@@ -2254,7 +2289,15 @@ authoring; every edit after it is an amendment and needs a row below.
 
 | Date | Revision | Value | From → To | Why |
 |---|---|---|---|---|
-| — | — | — | — | *No amendment yet. The thresholds file is at its authoring state, now frozen.* |
+| 2026-08-01 | Rev 38 | `[k1].k1_fire_aggregation` | *(absent)* → `"max_over_committed_camera_paths"` | **Owner-authorised.** `k1_path_aggregation` is justified explicitly and only for REFUTATION and `k1_decision_rule` has **no FIRE branch at all**, so the fold a firing instrument reduces by was going to be chosen by whoever first measured against it — the condition the two-file split exists to prevent. `MAX` mirrors `MIN`'s own reasoning rather than negating it: a campaign-favourable verdict must clear the bar on the WEAKEST framing, an unfavourable one on the STRONGEST. Frozen **before** any upper-bound instrument exists, which is the only moment at which freezing it means anything. |
+| 2026-08-01 | Rev 38 | `[k1]`'s firing paragraph | *"the upper-bound instrument **(the frustum+backface survivor counter)**"* → the parenthetical **subtracted** | **Owner-authorised.** The paragraph an implementer greps named a candidate its own refutation five lines below rejects and that `k1_fire_instrument_status` calls UNSOLVED — the defect the frozen file condemns in its own note on the `rule` key deleted at Rev 8 (*"a superseded field left in place with a comment saying so is still a field an implementer greps for and codes from"*). ⚠️ That note is named in prose rather than in the bracketed table-and-field spelling, because the key no longer exists and the spelling would be a **dangling citation** — which `vg_symbol_reachability` caught twice in this row's drafting, the second time on the sentence written to explain the first. R11 adds a third, engine-specific refutation: **this engine backface-culls nowhere in its scene passes**, so the numerator is unsound here. Sibling repair at §5.6 in the same commit. |
+| 2026-08-01 | Rev 38 | `[k1_instrument]`'s `visible_tris` derivation | *"is **monotonically increasing** in R"* → *"RISES with R"* | **Owner-authorised.** §5.7 has always stated the opposite (non-nested sample lattices, depth-tie flips). True of R0's measured rows, false as a theorem, and it is the sentence any extrapolation proposal cites. Sibling repair at §5.5 in the same commit. |
+
+⚠️ **All three rows are one commit**, together with the recorded `thresholds_sha256` in
+[VG-R0-REFERENCE-RIG.toml](VG-R0-REFERENCE-RIG.toml) and the two test constants that re-assert it.
+Two of the three are **subtractions** — this campaign's only repair class with an unbroken record —
+and each had a sibling statement in the plan, so **both texts move together**: a repair reaching one
+of two stating texts is the Rev 31 defect by name.
 
 **Findings that pre-authorize a fallback** (per `[census].cross_run_spread_fallback` and
 `[k1_instrument].on_not_converged_fire_direction`) are also entered here, by name and date, **before** the fallback

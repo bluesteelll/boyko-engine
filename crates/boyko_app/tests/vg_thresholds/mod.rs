@@ -18,7 +18,7 @@ pub const THRESHOLDS: &str = "../../docs/VG-CAMPAIGN-THRESHOLDS.toml";
 /// The sha256 R0a recorded. Re-asserted by every rung that DRIVES the ladder, because a ladder read
 /// from an edited frozen file is not read from the frozen file.
 pub const THRESHOLDS_SHA256: &str =
-    "fea8f9c5583fafd7de39360974d1a52d41f656ce7fd961282a145620a16a2d19";
+    "864778bddf9790ee32764873a7b6ab0d32f23027798246a432342a2867ed6f1a";
 
 /// Repository-relative path resolved against this crate's manifest directory.
 pub fn repo_path(rel: &str) -> PathBuf {

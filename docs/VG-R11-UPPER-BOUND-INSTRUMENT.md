@@ -67,14 +67,24 @@ R-1  DIRECTION       U(p) ≥ D(p) for every p, PROVABLY
 R-2  NON-SATURATING  U has no construction ceiling
 R-3  REACHABILITY    U(p) < 1.0 attainable on genuinely sparse content
 R-4  SITE            measures the SHIPPED VisibilityBuffer chain
-R-5  AGGREGATION     one verdict over P — AND THIS DOES NOT EXIST YET (§6 Q1)
+R-5  AGGREGATION     max over p in P of U(p) < 1.0   [k1].k1_fire_aggregation, frozen at Rev 38
 ```
 
-⚠️ **There is no firing aggregation anywhere in the frozen file, and `k1_decision_rule` has no FIRE
-branch at all.** `[k1].k1_path_aggregation = "min_over_committed_camera_paths"` is justified
-*explicitly and only* for refutation. Choosing the firing fold **after** seeing the numbers is exactly
-the defect the two-document split exists to prevent, so it is raised as an owner question in §6 and
-deliberately **not** settled here.
+✅ **RESOLVED 2026-08-01.** When this document was first written there was no firing aggregation
+anywhere in the frozen file, and `k1_decision_rule` had no FIRE branch at all —
+`[k1].k1_path_aggregation` is justified *explicitly and only* for refutation. The owner authorised
+freezing it, and `[k1].k1_fire_aggregation = "max_over_committed_camera_paths"` landed as a Rev 38
+amendment with a dated row in the plan's §11.1.
+
+`max` mirrors `min`'s own reasoning rather than negating it: a campaign-**favourable** verdict must
+clear the bar on the **weakest** framing, an **unfavourable** one on the **strongest**. Both folds put
+the burden on the side that would benefit. `max` is also monotone *increasing* under insertion, so
+adding a flattering sparse path cannot flip a non-firing verdict to firing; the omit lever stays
+closed by R0d(d)'s set equality, unchanged.
+
+It was frozen **before** any upper-bound instrument exists — the only moment at which freezing it
+means anything — and with §3.1's consequence already on the record, so the value was chosen knowing
+what it implies rather than after a measurement wanted it.
 
 ---
 
@@ -217,32 +227,37 @@ Nothing here is a recommendation to build. These are the only doors that are not
 
 ---
 
-## 6. Owner questions
+## 6. Owner decisions — ANSWERED 2026-08-01
 
-**Q1 — SCOPE: freeze `k1_fire_aggregation` before anything else, or not at all.**
-No firing fold exists in the frozen file. §2 argues `max` from K1's own universal phrasing, and it is
-stated here so it is on the record, **not** so it is settled. *If `max`* — the sound reading — K1
-cannot fire on this corpus and Q2 becomes the live question. *If `min`* — K1 could fire on
-`approach_close` while `orbit_mid` is proven dense at 1.0527, producing a verdict that contradicts a
-proof on the same census.
+All three were put to the owner with their consequences stated, and all three are answered. They are
+kept here in full, because the *alternatives not taken* are what a later reader needs.
 
-**Q2 — VALUES: `fund_upper_bound` is shown futile on this corpus. Which branch?**
-*(a) Fund it anyway, for a future corpus.* Returns a bracket on `approach_close` and a reusable
-instrument; returns **no K1 verdict here**. And §4 row 7 shows the concrete design that reached
-recommendation status is refuted on all three axes, so this branch starts from a blank sheet, not from
-a spec.
-*(b) Change the target content class and re-run R0b–R0d.* The only route on which the instrument can
-return a verdict. Cost: a new corpus, a new manifest + fetch + hashes, and a full census re-run.
-*(c) Accept the premise unadjudicated and proceed.* Costs nothing now; means the campaign proceeds
-knowing K1 was never tested — which is exactly what the UNDECIDED disposition exists to make explicit
-rather than silent. Note that §3.1 proves the corpus **is** dense on one committed framing, which is
-evidence *for* the mechanism, though not the evidence `k1_decision_rule` asks for.
+**Q1 — freeze the firing aggregation? → `max_over_committed_camera_paths`, FROZEN at Rev 38.**
+The alternative, `min`, would have let K1 fire on `approach_close` (0.5090) while `orbit_mid` is
+**proven** dense at 1.0527 — a verdict contradicting a proof on the same census. The consequence of
+`max` was stated before the answer: under it K1 **cannot fire on this corpus** (§3.1).
 
-**Q3 — SCOPE: the two text repairs in §7 need a frozen-file amendment. Authorise it?**
+**Q2 — `fund_upper_bound` is futile on this corpus. Which branch? → CHANGE THE CORPUS and re-run
+R0b–R0d.** The two branches not taken: *fund it anyway* returns a bracket on `approach_close` and a
+reusable instrument but **no K1 verdict here**, and starts from a blank sheet since §4 row 7's design
+is refuted on all three axes; *proceed unadjudicated* costs nothing now and means the campaign
+advances knowing K1 was never tested.
+
+⚠️ **What the chosen branch does and does not license.** It licenses re-running R0b–R0d against
+content more representative of the target class. It does **not** license selecting content *because
+it is sparse* — that is the vacuous-selection defect this campaign has refused everywhere else, and
+it would make K1 fire by construction. The corpus-side lever is real and §5.3's unsolved
+covered-fraction axis is the reason: R0's two frames cover **8.1 %** and **22.2 %** of the screen,
+which is not what a game frame looks like, and a corpus whose framing is that thin measures its own
+composition as much as its content.
+
+**Q3 — authorise a frozen-file amendment for the two blocked repairs? → YES.** Landed at Rev 38 with
+all three §11.1 rows, both sibling texts moving in the same commit, and the recorded `sha256` updated
+at all three sites in that commit. §7 records what the repairs were.
 
 ---
 
-## 7. Text repairs owed — and why they are BLOCKED
+## 7. Text repairs — WERE blocked, LANDED at Rev 38
 
 Two live texts still offer a refuted instrument in the present indicative, and one states a property
 its own document contradicts 170 lines later. **Both repairs are blocked, for the same reason, and the
@@ -259,9 +274,17 @@ Repairing only the plan is precisely the recorded Rev 31 defect — *"the repair
 stating texts"* — so a partial repair would be worse than none.
 
 Editing the frozen file is an amendment: a new plan revision, a dated §11.1 row, and the recorded
-sha256 updated **in the same commit** (which reds `vg_thresholds_freeze.rs` and
-`vg_density_census.rs::the_thresholds_file_is_the_one_r0a_froze` until it is). That is an owner-visible
-act, so **neither repair is made here.** Q3 asks for it.
+sha256 updated **in the same commit**. ✅ **Owner-authorised and landed at Rev 38** — both siblings of
+both claims moved together, and the digest `fea8f9c5…` → `864778bd…` was updated at all three
+recording sites (`VG-R0-REFERENCE-RIG.toml`, `vg_thresholds_freeze.rs`, `vg_thresholds/mod.rs`) in
+that commit.
+
+⚠️ **Drafting the amendment introduced the very defect it repairs, twice, and the gate caught both.**
+The §11.1 row first cited the Rev-8-deleted `rule` key in the bracketed table-and-field spelling —
+a **dangling citation**, which `vg_symbol_reachability` reported by name. The sentence written to
+explain *that* then used the same spelling as an example, and was reported in turn. Both are now in
+prose. The lesson is not that the author was careless; it is that a mechanical gate catches a class
+of defect that careful prose about the same defect does not.
 
 ⚠️ **One "repair" from the first synthesis is REJECTED rather than carried.** It called the figure
 *"~2.07 M covered pixels"* an error repeated in four texts. It is not: the plan writes *"the screen has
