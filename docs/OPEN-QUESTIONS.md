@@ -4,6 +4,9 @@ Difficulties, disputable calls and things I did not understand — written down 
 owner can read them later and weigh in, rather than finding them buried in a report after the
 decision was already made.
 
+> Russian version: [`ru/OPEN-QUESTIONS.md`](ru/OPEN-QUESTIONS.md). **This file is the source of
+> truth**; editing either side updates the other in the same commit. See [`ru/README.md`](ru/README.md).
+
 **Convention.** Newest first. Each item states the situation, the options, and what it blocks. An
 item is marked `RESOLVED` with the date and the owner's decision rather than deleted — the record of
 *why* a call was made outlives the call. Perf and architecture forks are decided without asking, with
