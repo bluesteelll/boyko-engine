@@ -89,6 +89,55 @@ impl SubRange {
             layer_count: layers,
         }
     }
+
+    /// A whole-MIP-CHAIN COLOR range over `[0, mips)`, one array layer — the range a pass
+    /// that touches an entire mipped image declares (VG R3: the HZB depth pyramid, whose
+    /// build seeds mip 0 and whose consumers sample the chain). The mip analogue of
+    /// [`color_layers`](Self::color_layers) — and the first constructor here that varies
+    /// `mip_count` at all; every other range in this module pins it to 1.
+    ///
+    /// The range is copied VERBATIM into the derived [`ImgBarrier`] by
+    /// [`FrameGraph::compile`](super::graph::FrameGraph::compile), so this constructor is
+    /// the whole of what a whole-chain access needs to emit a correct barrier. It does NOT
+    /// make the sync state machine subresource-aware: [`transition`] is keyed per resource
+    /// and never reads a `SubRange`. The boundary that keeps that sound is
+    /// `INVARIANT HZB-SUBRESOURCE-UNIFORM`, documented and mechanically checked in
+    /// `FrameGraph::compile`.
+    #[inline]
+    pub const fn color_mips(mips: u32) -> Self {
+        Self {
+            aspect: VK_IMAGE_ASPECT_COLOR_BIT,
+            base_mip: 0,
+            mip_count: mips,
+            base_layer: 0,
+            layer_count: 1,
+        }
+    }
+
+    /// `true` iff `self` and `other` select the SAME set of subresources — equal
+    /// `(base_mip, mip_count, base_layer, layer_count)`.
+    ///
+    /// `aspect` is deliberately NOT compared. The four span fields are what a per-ResId
+    /// tracked layout can be wrong ABOUT (two passes touching different mips/layers of one
+    /// image), which is the question `INVARIANT HZB-SUBRESOURCE-UNIFORM` in
+    /// [`FrameGraph::compile`](super::graph::FrameGraph::compile) is stated over. Aspect
+    /// selects which PLANES a barrier covers and is a separate axis this predicate makes no
+    /// claim about; today no resource declares two aspects (color images declare
+    /// [`COLOR`](Self::COLOR)/[`color_layers`](Self::color_layers), depth images
+    /// [`DEPTH`](Self::DEPTH)/[`depth_layers`](Self::depth_layers), and buffers always the
+    /// `COLOR` placeholder).
+    /// `cfg(debug_assertions)` + `pub(crate)`: its only caller is the debug-only invariant
+    /// check, so it is not permanent public API. A `pub` spelling would have made it one
+    /// forever in exchange for silencing a dead-code warning that this attribute removes at
+    /// the source.
+    #[cfg(debug_assertions)]
+    #[inline]
+    pub(crate) const fn same_span(&self, other: &Self) -> bool {
+        self.base_mip == other.base_mip
+            && self.mip_count == other.mip_count
+            && self.base_layer == other.base_layer
+            && self.layer_count == other.layer_count
+    }
 }
 
 /// A derived image-memory barrier (Vk-valued, resource-logical). Lowered to a

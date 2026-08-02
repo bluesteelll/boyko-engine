@@ -944,3 +944,240 @@ fn compile_does_not_panic_on_seeded_resource_read_first() {
 
     g.compile();
 }
+
+// ===========================================================================
+// `compile()`'s DEBUG-ONLY `INVARIANT HZB-SUBRESOURCE-UNIFORM` guard (VG R3 S2).
+//
+// The sync state machine keys one `ResSync` per `ResId` and never reads a
+// `SubRange`, so a single tracked layout can misdescribe a subresource exactly
+// when a resource's accesses vary in BOTH the mip/layer span AND the layout.
+// The guard latches one bit per axis and fires only on the conjunction. These
+// tests pin both verdicts — a guard never shown RED is not a guard — and pin
+// that the shipped layered declarations (CSM cascades, the punctual atlas, the
+// DDGI probe atlases: one span, several layouts) are on the permitted side.
+// ===========================================================================
+
+/// `SubRange::color_mips` is a whole-chain COLOR range at layer 0 — the shape a
+/// mip-pyramid access declares. Pinned because the guard's span comparison and
+/// the emitted barrier both read these four fields verbatim.
+#[test]
+fn subrange_color_mips_spans_the_whole_chain_at_one_layer() {
+    let m = SubRange::color_mips(5);
+    assert_eq!(m.aspect, SubRange::COLOR.aspect, "color_mips must use the COLOR aspect");
+    assert_eq!(m.base_mip, 0);
+    assert_eq!(m.mip_count, 5);
+    assert_eq!(m.base_layer, 0);
+    assert_eq!(m.layer_count, 1);
+    // `mip_count = 1` degenerates to the existing single-mip COLOR range, so the
+    // constructor is a strict generalization and cannot perturb existing declarations.
+    assert_eq!(SubRange::color_mips(1), SubRange::COLOR);
+}
+
+/// Both axes vary on one resource (whole chain at GENERAL, then mip 0 alone at
+/// SHADER_READ_ONLY_OPTIMAL) — the tracked layout now misdescribes mips 1..n, so
+/// the guard must fire. This is the exact shape an HZB build/consume pair takes.
+///
+/// `cfg(debug_assertions)`: the guard IS a `debug_assert!`, so in a release test
+/// binary `compile` correctly does not panic and a `should_panic` test would report
+/// a failure that is not one. CI runs a debug × release matrix, so the debug leg
+/// still gates this.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "HZB-SUBRESOURCE-UNIFORM")]
+fn compile_panics_when_span_and_layout_both_vary() {
+    let mut g = FrameGraph::with_capacity(4, 4, 4);
+    let pyramid = g.add_image("pyramid");
+
+    g.add_pass("pyramid_build");
+    g.image_access(
+        pyramid,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_IMAGE_LAYOUT_GENERAL,
+        SubRange::color_mips(4),
+    );
+
+    g.add_pass("pyramid_sample_mip0");
+    g.image_access(
+        pyramid,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        SubRange::COLOR,
+    );
+
+    g.compile();
+}
+
+/// The violation need not involve the FIRST access: here access 2 differs from
+/// access 1 only in layout and access 3 only in span, so no single pair differs in
+/// both — yet the resource as a whole varies on both axes and the tracked layout is
+/// still a lie. Pins that the guard accumulates per axis instead of comparing each
+/// access pairwise against the first (which would pass this and miss the bug).
+///
+/// `cfg(debug_assertions)` for the same reason as the test above.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "HZB-SUBRESOURCE-UNIFORM")]
+fn compile_panics_when_the_variation_straddles_three_accesses() {
+    let mut g = FrameGraph::with_capacity(4, 4, 4);
+    let pyramid = g.add_image("pyramid");
+
+    g.add_pass("build_whole_chain");
+    g.image_access(
+        pyramid,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_IMAGE_LAYOUT_GENERAL,
+        SubRange::color_mips(4),
+    );
+
+    g.add_pass("read_whole_chain_other_layout");
+    g.image_access(
+        pyramid,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        SubRange::color_mips(4),
+    );
+
+    g.add_pass("read_mip0_first_layout");
+    g.image_access(
+        pyramid,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_GENERAL,
+        SubRange::COLOR,
+    );
+
+    g.compile();
+}
+
+/// ⚠️ THIS TEST ONCE ASSERTED THE OPPOSITE, and the reversal is the point of the rung.
+///
+/// Its first version was named `compile_allows_a_varying_span_at_a_uniform_layout` and it
+/// PASSED: the guard's original condition permitted a varying span as long as every access
+/// declared one layout, on the reasoning that "one layout is true of every subresource".
+/// That reasoning is false. A uniform DECLARED layout does not give a uniform ACTUAL one —
+/// only the union of spans that actually appeared in an emitted barrier has been
+/// transitioned, and every other subresource is still in the image's start layout.
+///
+/// Reverse the two passes below and the old guard still passed while the frame was UB: the
+/// subset-first order transitions mips [0,1) only, then the superset access emits a barrier
+/// over [0,4) claiming `oldLayout = GENERAL` for mips 1..3, which are UNDEFINED
+/// (VUID-VkImageMemoryBarrier-oldLayout-01197). A guard whose verdict depends on
+/// declaration order is not a guard, so the condition was strengthened to span-uniformity
+/// and this fixture became the RED case.
+///
+/// It is also the exact shape a per-mip HZB build chain wants — write mip k, read mip k-1 —
+/// which is why the panic message points at per-subresource sync state rather than at
+/// making the declarations agree by hand. Tripping here is the intended way to discover
+/// that work.
+#[test]
+#[should_panic(expected = "HZB-SUBRESOURCE-UNIFORM")]
+fn compile_panics_when_one_resource_declares_two_spans() {
+    let mut g = FrameGraph::with_capacity(4, 4, 4);
+    let pyramid = g.add_image("pyramid");
+
+    g.add_pass("build_whole_chain");
+    g.image_access(
+        pyramid,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_IMAGE_LAYOUT_GENERAL,
+        SubRange::color_mips(4),
+    );
+
+    g.add_pass("read_mip0");
+    g.image_access(
+        pyramid,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_GENERAL,
+        SubRange::COLOR,
+    );
+
+    g.compile();
+}
+
+/// Layouts vary but every access declares the SAME layered span — the CSM cascade /
+/// punctual atlas shape shipped today (`depth_layers(N)` written at
+/// DEPTH_ATTACHMENT_OPTIMAL, then read at SHADER_READ_ONLY_OPTIMAL). One span means
+/// one subresource set, so the tracked layout describes it exactly and the guard must
+/// stay silent. This is the regression pin for the whole live layered corpus.
+#[test]
+fn compile_allows_a_varying_layout_at_a_uniform_span() {
+    let mut g = FrameGraph::with_capacity(4, 4, 4);
+    let cascade = g.add_image_seeded(
+        "cascade",
+        ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
+    );
+
+    g.add_pass("csm_depth");
+    g.image_access(
+        cascade,
+        FRAG,
+        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        SubRange::depth_layers(CASCADE_LAYERS),
+    );
+
+    g.add_pass("resolve");
+    g.image_access(
+        cascade,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        SubRange::depth_layers(CASCADE_LAYERS),
+    );
+
+    g.compile();
+}
+
+/// The witness is per-COMPILE scratch, not accumulated state. A `FrameGraph` is reused
+/// every frame, so a witness surviving `reset` + re-declare would judge this frame's
+/// accesses against LAST frame's resource: here graph A pins ResId 0 at
+/// `(COLOR, COLOR_ATTACHMENT_OPTIMAL)`, and graph B's first access (`color_mips(4)` at
+/// GENERAL) differs from it on BOTH axes — a leak would latch both bits and fire on a
+/// declaration that is in fact uniform-span. Silence is the discriminating outcome.
+#[test]
+fn subresource_guard_does_not_leak_across_reset_and_recompile() {
+    let mut g = FrameGraph::with_capacity(4, 4, 8);
+
+    // Graph A — ResId 0 is a plain single-mip color attachment.
+    let a = g.add_image("attachment");
+    g.add_pass("raster");
+    g.image_access(
+        a,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        SubRange::COLOR,
+    );
+    g.compile();
+
+    // Graph B — ResId 0 is now a whole-chain pyramid at two layouts: one span, so
+    // permitted. Only a leaked witness from graph A could make this fire.
+    g.reset();
+    let pyramid = g.add_image("pyramid");
+    g.add_pass("build_whole_chain");
+    g.image_access(
+        pyramid,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_IMAGE_LAYOUT_GENERAL,
+        SubRange::color_mips(4),
+    );
+    g.add_pass("read_whole_chain");
+    g.image_access(
+        pyramid,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        SubRange::color_mips(4),
+    );
+    g.compile();
+
+    // Two hazards: the first-touch UNDEFINED→GENERAL write, then the RAW read.
+    assert_eq!(g.img_barriers().len(), 2);
+}

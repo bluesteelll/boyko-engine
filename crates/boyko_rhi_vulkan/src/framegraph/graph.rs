@@ -43,6 +43,27 @@ pub struct PassBarrierRange {
     pub buf_count: u32,
 }
 
+/// The DEBUG-ONLY per-resource accumulator behind `INVARIANT HZB-SUBRESOURCE-UNIFORM`
+/// (documented at its check site in [`FrameGraph::compile`]).
+///
+/// It records the resource's FIRST declared `(SubRange, layout)` plus one bit per axis
+/// saying that some later access disagreed with it. Two bits suffice because "some two
+/// accesses differ" is equivalent to "some access differs from the first" — if every
+/// access equals the first, no pair differs; if any differs from the first, that pair
+/// does. So the invariant is decidable in one linear pass, with no per-resource set.
+#[cfg(debug_assertions)]
+#[derive(Clone, Copy)]
+struct SubWitness {
+    /// The resource's first declared subresource range — the span every later access to it
+    /// must match, per INVARIANT HZB-SUBRESOURCE-UNIFORM.
+    first_sub: SubRange,
+    /// Some later access declared a different mip/layer SPAN than `first_sub`.
+    ///
+    /// Latched rather than compared pairwise on the spot so the assert can name BOTH the
+    /// offending span and the one it should have matched.
+    span_varied: bool,
+}
+
 /// A declarative render-dependency graph. Declare resources + passes + their
 /// accesses, call [`compile`](FrameGraph::compile), then read the derived
 /// per-pass barrier plan. Rebuilt every frame; [`reset`](FrameGraph::reset)
@@ -92,6 +113,14 @@ pub struct FrameGraph {
     /// runs every frame, so the tracking must cost nothing there (Principle 1/7).
     #[cfg(debug_assertions)]
     res_written: Vec<bool>,
+    /// DEBUG-ONLY per-resource witness for `INVARIANT HZB-SUBRESOURCE-UNIFORM` (stated in
+    /// full at its check site in `compile`): the first declared `(SubRange, layout)` of each
+    /// resource plus the two "varied since" bits the invariant is decided from. `None` until
+    /// a resource's first access; refilled with `None` every compile, mirroring how
+    /// `res_written` is refilled from `res_seeded`. Entirely compiled out in release —
+    /// `compile` runs every frame, so the tracking must cost nothing there (Principle 1/7).
+    #[cfg(debug_assertions)]
+    res_sub_witness: Vec<Option<SubWitness>>,
 
     // --- compile output ---
     img_barriers: Vec<ImgBarrier>,
@@ -121,6 +150,8 @@ impl FrameGraph {
             state: Vec::with_capacity(max_res),
             #[cfg(debug_assertions)]
             res_written: Vec::with_capacity(max_res),
+            #[cfg(debug_assertions)]
+            res_sub_witness: Vec::with_capacity(max_res),
             img_barriers: Vec::with_capacity(max_acc),
             buf_barriers: Vec::with_capacity(max_acc),
             pass_barriers: Vec::with_capacity(max_pass),
@@ -145,6 +176,8 @@ impl FrameGraph {
         self.state.clear();
         #[cfg(debug_assertions)]
         self.res_written.clear();
+        #[cfg(debug_assertions)]
+        self.res_sub_witness.clear();
         self.img_barriers.clear();
         self.buf_barriers.clear();
         self.pass_barriers.clear();
@@ -281,6 +314,10 @@ impl FrameGraph {
         {
             self.res_written.clear();
             self.res_written.extend_from_slice(&self.res_seeded);
+            // No declare-time seed exists for the subresource witness: it is derived purely
+            // from this compile's accesses, so every resource starts unwitnessed.
+            self.res_sub_witness.clear();
+            self.res_sub_witness.resize(self.res_is_image.len(), None);
         }
 
         for p in 0..self.pass_name.len() {
@@ -319,6 +356,93 @@ impl FrameGraph {
                     if is_write {
                         self.res_written[ri] = true;
                     }
+
+                    // === INVARIANT HZB-SUBRESOURCE-UNIFORM (debug-only, release-neutral) ===
+                    //
+                    // EVERY access to one `ResId` must declare the SAME subresource span —
+                    // the same `(base_mip, mip_count, base_layer, layer_count)`. Aspect is
+                    // excluded: it is a property of the image's format, not a selection.
+                    //
+                    // WHY THE SPAN ALONE, AND NOT "SPAN *AND* LAYOUT BOTH VARY". The weaker
+                    // two-axis condition is the one this guard was first written with, and it
+                    // is UNSOUND. A uniform DECLARED layout does not give a uniform ACTUAL
+                    // layout, because only the union of the spans that have actually appeared
+                    // in an emitted barrier has been transitioned — every other subresource is
+                    // still in the image's start layout. Concretely, and this passed the weaker
+                    // guard silently:
+                    //
+                    //     let pyr = g.add_image("pyr");            // starts UNDEFINED
+                    //     pass A: SHADER_WRITE, GENERAL, SubRange::COLOR       // mips [0,1)
+                    //     pass B: SHADER_READ,  GENERAL, color_mips(4)         // mips [0,4)
+                    //
+                    // A is a first touch, so its barrier transitions mips [0,1) only. B needs
+                    // no layout change but does need a flush, so `transition` returns a barrier
+                    // over [0,4) claiming `oldLayout = GENERAL` — for mips 1..3, which were
+                    // never transitioned and are still UNDEFINED
+                    // (VUID-VkImageMemoryBarrier-oldLayout-01197). Undefined, and invisible to
+                    // the validation layers, which see a well-formed barrier and cannot follow
+                    // its provenance back to the state machine that invented the `oldLayout`.
+                    //
+                    // Note the hazard is ORDER-DEPENDENT: declaring the superset FIRST is fine,
+                    // the subset first is UB. A guard whose verdict depends on declaration order
+                    // is not a guard, which is the second reason the two-axis form is rejected
+                    // rather than merely tightened.
+                    //
+                    // This condition is therefore an OVER-APPROXIMATION on purpose: some
+                    // varying-span declarations are safe (superset-first ones), and the guard
+                    // fires on them anyway. A fire means "this declaration is outside the region
+                    // this state machine can prove safe", NOT "this declaration is broken".
+                    //
+                    // PER-SUBRESOURCE TRACKING IS THE CORRECT LONG-TERM ANSWER, and this assert
+                    // is its TRIGGER. Keying `state` by `(ResId, mip, layer)` is what lifts the
+                    // restriction, and it is what a mip pyramid wants: the HZB build writes mip
+                    // k while reading mip k-1. When that pass is authored, it trips this assert.
+                    // That is the INTENDED way to discover the work — a mechanical, unmissable
+                    // notice at the moment the first declaration needs it. The response is to
+                    // build per-subresource tracking, never to relax the condition until it
+                    // goes quiet.
+                    //
+                    // WHY RELEASE IS UNGUARDED. Not "the declaration surface is compile-time
+                    // fixed" — WHICH accesses run is heavily data-conditional here (leg and
+                    // path predicates gate whole pass families). What IS compile-time fixed is
+                    // the span argument at every `image_access` site: they are literal
+                    // `SubRange` constructors, so a debug run that REACHES a pass settles that
+                    // pass's spans for the release build of the same source. CI runs its tests
+                    // as a debug x release matrix, so the debug leg reaches everything the
+                    // release leg does. Paying for the check in the release frame path would
+                    // buy no information the debug leg did not already have, on a `compile`
+                    // that runs every frame (Principle 1/7). What this does NOT cover is a pass
+                    // no debug run ever reaches; covering that is the gate's problem, not this
+                    // assert's.
+                    //
+                    // Buffers are structurally exempt without a branch: `buffer_access` always
+                    // passes `SubRange::COLOR`, so their span is uniform by construction.
+
+                    // `SubWitness` is `Copy`: read it out, fold this access in, write it
+                    // back — no borrow of `self` outlives the update, so the assert below
+                    // can still name the pass and resource.
+                    let witness = match self.res_sub_witness[ri] {
+                        Some(mut w) => {
+                            w.span_varied |= !sub.same_span(&w.first_sub);
+                            w
+                        }
+                        None => SubWitness { first_sub: sub, span_varied: false },
+                    };
+                    self.res_sub_witness[ri] = Some(witness);
+                    debug_assert!(
+                        !witness.span_varied,
+                        "framegraph: INVARIANT HZB-SUBRESOURCE-UNIFORM violated at pass '{}' \
+                         on resource '{}' — its accesses declare DIFFERENT subresource spans \
+                         (this access: {:?}; first declared: {:?}), and this state machine \
+                         tracks ONE layout per ResId, so a subresource that never appeared in \
+                         an emitted barrier is still in the image's start layout while a later \
+                         barrier claims otherwise. Fix by giving this resource per-subresource \
+                         sync state, not by making the declarations agree by hand",
+                        self.pass_name[p],
+                        self.res_name[ri],
+                        sub,
+                        witness.first_sub,
+                    );
                 }
 
                 // Split-borrow: read the access scalars above, mutate state here,
