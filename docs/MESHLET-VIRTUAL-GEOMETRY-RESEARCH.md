@@ -484,6 +484,33 @@ Also: the existing classify chain's scan is one 256-thread workgroup looping blo
 > **Row 3 fires: the ceiling is nonzero on the binding framing, so R3a is built** — and the
 > previous-frame soundness question is its FIRST step, not a later one.
 >
+> ### ⚠️ CORRECTION — what the ceiling governs, and what it does NOT
+>
+> The disposition table above was written as if the measured ceiling decided whether to BUILD. It
+> does not, and reading it that way was an error worth naming because it is easy to repeat.
+>
+> **The corpus is an INSTRUMENT, not the target workload.** It exists to keep this campaign honest
+> about what may be CLAIMED from a measurement — which is exactly the job it did at R2d, where the
+> rung shipped structural with no perf claim because the binding framing yielded nothing. That is a
+> statement about the fixture's content, never about the feature's worth.
+>
+> boyko-engine is a general-purpose engine. Occlusion culling pays on interiors, streets, dense
+> vegetation, any scene with real depth complexity — content this fixture deliberately does not
+> have, because it was recomposed (rung R0b′) to measure TRIANGLE DENSITY, not occlusion. Declining
+> to build a subsystem because the density fixture cannot exercise it would be choosing the engine's
+> capabilities to fit the test harness, which is the vacuous-selection defect pointed backwards.
+>
+> So the ceiling's real force is narrow and unchanged: **R3a and every rung above it ship with NO
+> occlusion perf claim measurable here** — 1 of 44 at the binding framing is not a number to build a
+> claim on — and the campaign must not pretend otherwise. Whether the implementation is built, and
+> how well, is decided by what a correct engine needs, not by what this fixture can see.
+>
+> The engineering consequences stand on their own merits and are addressed in
+> [docs/VG-R3-HZB-PLAN.md](VG-R3-HZB-PLAN.md): the RHI has no per-mip image views and the framegraph
+> tracks sync per-ResId rather than per-subresource (both real gaps to close), and a previous-frame
+> pyramid is NOT conservative (a real soundness problem to solve properly rather than to route
+> around).
+>
 > ⚠️ Two honesty notes that travel with the number. **It is 1 of 44 at `orbit_mid`** — alive, but
 > barely; the 11 of 31 belongs to the close approach, and R2d already established that reading a
 > verdict off that framing alone is the vacuous-selection defect. And **the ceiling is an UPPER
