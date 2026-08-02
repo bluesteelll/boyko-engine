@@ -232,18 +232,30 @@ const _: () = assert!(
      boot instance budget, not a separately-tunable capacity)"
 );
 
-/// VG rung R2d-4: the survivor list must hold at least as many ELEMENTS as the instance ring.
+/// The survivor list and the instance ring must hold EXACTLY the same number of elements. Two
+/// separate reads need this, and they need it in OPPOSITE directions — which is why an inequality
+/// is not enough and the first version of this assert, which had only one of them, was unsound.
 ///
-/// `vb_raster.vs.hlsl` selects between `visible_instances[base + id]` and `base + id` with a `? :`,
-/// and DXC is free to lower that to an EAGER load plus an `OpSelect` — so the address
-/// `base + id` may be issued against the survivor list even on a draw whose indirection bit is
-/// clear. `robustBufferAccess` is OFF on this device, so "issued but discarded" still has to be
-/// IN RANGE. The shader header carries that argument; this assert is what makes it mechanical
-/// rather than a claim about two allocations that merely happen to agree today.
+/// ⊇ (rung R2d-4, the vertex shader): `vb_raster.vs.hlsl` selects between
+/// `visible_instances[base + id]` and `base + id` with a `? :`, and DXC may lower that to an EAGER
+/// load plus an `OpSelect` — so the address may be issued against the survivor list even on a draw
+/// whose indirection bit is clear. Every index the RING admits must therefore be in range for the
+/// LIST.
+///
+/// ⊆ (rung R2d-6, the armed cull): the cull reads `gVbInstances[base_instance + j]` for
+/// `j < instance_count`, and the only thing bounding that address is
+/// `vb_cull_batch_count_visible_clamp`, which clamps against the SURVIVOR LIST's element count.
+/// So every index the LIST admits must in turn be in range for the RING — a list LARGER than the
+/// ring would let the clamp admit a batch whose rows run off the end of the ring.
+///
+/// `robustBufferAccess` is OFF on this device, so neither direction degrades to a zero read; both
+/// are real out-of-bounds device accesses. Equality is the only relation that satisfies both.
 const _: () = assert!(
-    VB_VISIBLE_INSTANCE_ELEMS >= INSTANCE_CAPACITY,
-    "vb_visible_instance must hold at least INSTANCE_CAPACITY elements: the VB vertex shader may \
-     address it at any index the instance ring admits, whether or not that arm is selected"
+    VB_VISIBLE_INSTANCE_ELEMS == INSTANCE_CAPACITY,
+    "vb_visible_instance and the VB instance ring must have EQUAL element counts: the vertex \
+     shader may address the list at any index the ring admits (R2d-4), and the armed cull's \
+     batch-count clamp bounds its ring reads by the LIST's capacity (R2d-6). An inequality in \
+     either direction is an out-of-bounds device access with robustBufferAccess off."
 );
 
 /// Element count of `vb_visible_instance` — one `uint` global instance index per instance-ring

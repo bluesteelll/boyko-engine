@@ -1038,12 +1038,12 @@ impl Renderer<'_> {
                 // (one COMPUTE set + the shared `COMPUTE_PUSH_CONSTANT_RANGE_BYTES` push range,
                 // of which this pass writes `VB_BATCH_CULL_PUSH_BYTES` = 104) are live on this
                 // device (caller contract). `cull_set` binds SEVEN COMPUTE storage buffers against
-                // the 7-entry `vb_cull_layout`, all written once at `GBufferTargets::sync`. Rung
-                // R2d-3's module names @6 (`gVbVisibleInstance`, written) alongside @0..@3; @4/@5
-                // (`gVbInstances`/`gMeshBounds`) are declared in the HLSL but unread while `keep`
-                // is hardwired, so DXC may drop them from the module entirely — either way a
-                // WRITTEN descriptor a shader never loads from is never dereferenced, so the bound
-                // set legally exceeds what the module declares. The dispatch covers
+                // the 7-entry `vb_cull_layout`, all written once at `GBufferTargets::sync`. Since
+                // rung R2d-6 the module names all seven: @4/@5 (`gVbInstances`/`gMeshBounds`) are
+                // LOADED by the armed per-instance predicate, where rung R2d-3 declared them
+                // unread and DXC stripped them. Either way the binding is safe in this direction —
+                // a WRITTEN descriptor a shader never loads from is never dereferenced, so the
+                // bound set may legally exceed what the module declares. The dispatch covers
                 // `dispatched_batches` lanes and the shader trims its tail group's out-of-range
                 // lanes. `&cull_set.descriptor_set` and `push` are locals alive for the calls.
                 unsafe {

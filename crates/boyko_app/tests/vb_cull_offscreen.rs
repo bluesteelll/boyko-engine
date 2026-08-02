@@ -19,17 +19,14 @@
 //! R2d-3 added the level-2 per-instance loop and moved the bump behind `visible && k > 0u`, so
 //! `visible` now counts batches that survived level 1 **AND** carry at least one level-2 survivor.
 //!
-//! On THIS build the two readings are the same number: `keep` is hardwired `true`, so `k` equals
-//! the batch's full instance count, and the host's gather emits no batch with zero instances
-//! (`boyko_render::mesh_draw`'s `counts[m] == 0` collapses to `resolved == None` and pushes no
-//! `DrawBatch`), so `k > 0` holds for every dispatched lane. The effective gate is still level 1,
-//! which is what this fixture measures.
-//!
-//! It stops being the same number at rung R2d-6, where a batch can lose every member to the
-//! per-INSTANCE test and drop out of the count with its union box still straddling the frustum.
-//! This fixture is unaffected — its surviving batch is a single ON-SCREEN sphere, so it cannot lose
-//! its only instance — but the sentence "visible = batches that passed the frustum test" is no
-//! longer the definition, and the assertions below are worded against the real one.
+//! Rung R2d-6 armed level 2, and from that rung the two readings genuinely differ: a batch can lose
+//! every member to the per-INSTANCE test and drop out of the count with its union box still
+//! straddling the frustum. **THIS FIXTURE'S NUMBERS ARE UNCHANGED ACROSS THAT ARMING, and it is
+//! worth stating why rather than observing it**: each batch here holds exactly ONE instance whose
+//! world box IS its batch's union box, so level 2 can only ever agree with level 1 on this scene —
+//! the on-screen sphere survives both, the sphere at `x = OFFSCREEN_X` fails both. Every assertion
+//! below therefore reads identically on the inert and the armed build, which is exactly what makes
+//! this file a LEVEL-1 gate and `vb_inst_cull_narrow.rs` the level-2 one.
 //!
 //! # The fixture
 //!
@@ -227,9 +224,10 @@ fn vb_cull_rejects_the_offscreen_batch() {
          `visible=2` means the cull is armed but rejects nothing: the off-screen sphere at x={} \
          survived every frustum plane. That state renders a byte-identical image on every pinned \
          scene, so no golden would catch it — which is why this test exists.\n\
-         `visible=0` means it rejected the sphere in front of the camera, OR that the level-2 loop \
-         produced no survivor for a batch whose union box passed. Both batches hold ONE instance \
-         here, so with `keep` hardwired `true` the second disjunct cannot fire on this build.",
+         `visible=0` means it rejected the sphere in front of the camera, OR that the armed \
+         level-2 test (rung R2d-6) produced no survivor for a batch whose union box passed. Both \
+         batches hold ONE instance here, whose world box IS the union box, so the two disjuncts \
+         cannot come apart on this scene: either way the cull rejected geometry in frame.",
         OFFSCREEN_X
     );
     // The compacted list must name the batch that survived, not merely count it: a correct count
@@ -249,11 +247,12 @@ fn vb_cull_rejects_the_offscreen_batch() {
         "the per-record `instanceCount` words must be one `1` (the drawn batch) and one `0` (the \
          rejected one) — got {line:?}"
     );
-    // The survivor regions are printed as `base:members` per batch. The rejected batch still WRITES
-    // its region (the `visible ?` gate is on the RECORD, not on the level-2 loop — INVARIANT
-    // R2d-REGION-DEFINED), but its record reports 0 instances, so the printer selects
-    // `[base, base + 0)` and its group is EMPTY. The drawn batch's group is its own base, since the
-    // list is the identity while `keep` is hardwired.
+    // The survivor regions are printed as `base:members` per batch, sliced by the RECORD word. The
+    // rejected batch reports 0 instances, so the printer selects `[base, base + 0)` and its group
+    // is EMPTY — on both builds, though for different reasons: with the inert `keep` it wrote its
+    // region and the record hid it; with the armed one (rung R2d-6) its only instance fails level 2
+    // as well, so `k` is 0 and nothing was written. The drawn batch's group is its own base — a
+    // one-instance compaction is the identity.
     assert!(
         line.contains("vis=[0:0|1:]") || line.contains("vis=[0:|1:1]"),
         "one survivor region must carry exactly its own base and the other must be empty — got \

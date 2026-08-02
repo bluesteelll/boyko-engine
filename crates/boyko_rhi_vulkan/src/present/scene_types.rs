@@ -2558,9 +2558,16 @@ pub struct GBufferScene<'a> {
     /// VG rung R2d-3 arms the PRODUCER side: `vb_batch_cull.comp.hlsl` declares it at @6 and writes
     /// each batch's OWNED region `[base_instance, base_instance + survivors)`. VG rung R2d-4 arms
     /// the CONSUMER side: `vb_raster.vs.hlsl` declares it at @11 and, for a draw whose per-batch
-    /// push carries the indirection bit, reads its instance index through it. That is still INERT —
-    /// the list R2d-3 writes is the IDENTITY (`keep` hardwired), so the indirected expression is
-    /// literally the pre-R2d one.
+    /// push carries the indirection bit, reads its instance index through it. Both were inert while
+    /// the cull's `keep` predicate was hardwired `true` — the list was then the IDENTITY, so the
+    /// indirected expression was literally the pre-R2d one.
+    ///
+    /// VG rung R2d-6 armed that predicate, so the region is now a COMPACTION: `survivors <=
+    /// instance_count`, and the tail `[base + survivors, base + instance_count)` is deliberately
+    /// left holding the previous frame's residue. Every reader is bounded by the record's
+    /// `instanceCount` — which the cull sets to the same survivor count — so nothing dereferences
+    /// that tail (`vb_batch_cull.comp.hlsl`'s INVARIANT R2d-REGION-DEFINED, which enumerates the
+    /// readers).
     pub vb_visible_instance: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
     /// VG rung R2d-1/R2d-2: the geometry table's `gMeshBounds[]` buffer — one 32-byte
     /// `MeshLocalBounds` row (LOCAL-space AABB, inverted-sentinel prefilled) per mesh slot, keyed
@@ -2616,10 +2623,12 @@ pub struct GBufferScene<'a> {
     /// `gVbVisibleInstance` @6 ([`Self::vb_visible_instance`]) — same kind, same stage.
     ///
     /// VG rung R2d-3's `vb_batch_cull.comp.hlsl` declares all seven and WRITES @6 (the per-instance
-    /// survivor region). @4/@5 stay declared-but-unloaded while the cull's `keep` predicate is
-    /// hardwired, so DXC may strip them from the module — which is legal (the host writes every
-    /// descriptor in the set; one no shader dereferences is simply never read) and is what
-    /// `tests/vb_batch_cull_spv_sync.rs`'s binding-set census states rather than assumes.
+    /// survivor region). @4/@5 were declared-but-unloaded while the cull's `keep` predicate was
+    /// hardwired, and `tests/vb_batch_cull_spv_sync.rs`'s binding-set census MEASURED that DXC
+    /// stripped them from that module (a written descriptor no shader dereferences is simply never
+    /// read, so a bound set legally exceeds what the module declares). VG rung R2d-6 armed the
+    /// predicate: all seven are now loaded, stored or atomically updated, and their reappearance in
+    /// that census is the artifact-level evidence that the arming is real.
     ///
     /// A DEDICATED layout rather than four more bindings on `vb_layout0`, and the reason is
     /// structural: `vb_layout0_froxel` already occupies @8/@9 with the froxel pair, so appended

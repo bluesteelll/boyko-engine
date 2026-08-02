@@ -32,11 +32,20 @@
 // cull writes (`vb_batch_cull.comp.hlsl`, rung R2d-3: `VbVisibleInstance[base + k] = <the global
 // index of this batch's k-th survivor>`) instead of computing it. The host arms that PER DRAW.
 //
-// This rung is INERT by construction, and for a reason distinct from the two rungs before it. It
-// is not "nobody reads it" (R2d-2) and not "the value equals what the host wrote" (R2d-3): the
-// list R2d-3 writes is the IDENTITY, because its `keep` predicate is hardwired `true`, so
-// `visible_instances[base + id] == base + id` for every slot the cull wrote this frame and the
-// indirected expression is LITERALLY the pre-R2d one.
+// ⚠️ HISTORICAL, and no longer the state of this file. Rung R2d-4 shipped this read INERT: the
+// list rung R2d-3 wrote was the IDENTITY (its `keep` was hardwired `true`), so
+// `visible_instances[base + id] == base + id` and the indirected expression was literally the
+// pre-R2d one. **Rung R2d-6 armed the cull, and every clause of that is now false.**
+//
+// The armed reality: the list is a COMPACTION. `visible_instances[base + id]` is the global index
+// of this batch's id-th SURVIVOR, which is `>= base + id` and generally not equal to it.
+// `SV_InstanceID` ranges over `[0, instanceCount)` where `instanceCount` is the survivor count `k`
+// the cull itself stored into the record — so this read is confined to `[base, base + k)`, exactly
+// the slots the cull wrote this frame, and the slots `[base + k, base + count)` it did not write
+// are unreachable from here. The identity survives in exactly one case: a batch nothing rejects.
+//
+// Kept rather than deleted because the inert form is what every VB golden pin was blessed against
+// through rungs R2d-2..R2d-5, and a reader bisecting those pins needs to know why they did not move.
 //
 // ## The `use_model_matrix` BITFIELD contract
 //

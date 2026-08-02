@@ -454,6 +454,48 @@ mod tests {
         assert!(instance_visible_after_cull(&planes, &far_off, one_axis));
     }
 
+    /// ⚠️ THE ORDER of the unknown-bounds test against the Arvo fold, which is the one thing a
+    /// deleted-arm census could not see: moving the sentinel check AFTER the transform changes no
+    /// opcode COUNT, only their sequence.
+    ///
+    /// This is the case that inverts the guarantee, and a critic found exactly it in an earlier
+    /// draft of the shader. A DEGENERATE affine — zero linear part, which a zero-scale or
+    /// not-yet-initialised instance really produces — folds the large-but-finite inverted sentinel
+    /// to `lc = (S + -S)/2 = 0`, `lh = -S`, and then every `wh[r] = dot(abs(row.xyz), lh)` is
+    /// `0 * -S = 0`. The "unbounded" box has become a POINT at the translation, and a point far
+    /// outside the frustum is REJECTED — so "bounds unknown" would silently mean "cull it", the
+    /// exact inversion of the contract `MeshLocalBounds::UNKNOWN`'s doc states.
+    ///
+    /// Both evaluators of this predicate must test the sentinel first. This pins the host one; the
+    /// shader mirrors it, and its header carries the same derivation.
+    #[test]
+    fn the_sentinel_is_tested_before_the_fold_so_a_degenerate_affine_cannot_invert_it() {
+        let planes = frustum_planes_from_view_proj(&perspective_at_origin());
+        // Zero linear part, translation far outside the frustum. `at()` builds an identity linear
+        // part, so this instance is written out longhand.
+        let degenerate = InstanceModelCol {
+            rows: [
+                [0.0, 0.0, 0.0, 80.0],
+                [0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, -6.0],
+            ],
+        };
+        // Control: with REAL bounds the fold yields that same point, and it must be rejected —
+        // otherwise the assertion below would pass for the wrong reason (nothing is culled here).
+        assert!(
+            !instance_visible_after_cull(&planes, &degenerate, UNIT_CUBE),
+            "a degenerate affine at x=80 collapses any box to a point outside the frustum, so the \
+             REJECT here is what makes the sentinel case below meaningful"
+        );
+        let sentinel = ([1.0e30f32, 1.0e30, 1.0e30], [-1.0e30f32, -1.0e30, -1.0e30]);
+        assert!(
+            instance_visible_after_cull(&planes, &degenerate, sentinel),
+            "the sentinel must be recognised BEFORE the fold. Folded first, it collapses to the \
+             same rejected point as the control above, and `bounds unknown` would come to mean \
+             `cull it` — inverting the one guarantee this predicate owes its callers"
+        );
+    }
+
     /// A SHEARED affine, and the assertion is two-sided against the `abs` in the Arvo fold.
     ///
     /// The instance's linear part is `r0 = (1, -4, 0)`, so the world half-extent along X is

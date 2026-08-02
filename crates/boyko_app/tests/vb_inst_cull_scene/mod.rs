@@ -532,7 +532,13 @@ impl CullProbe {
     }
 
     /// `true` iff every batch's survivor region is the IDENTITY run `base, base+1, …` of its own
-    /// recorded length — the shape rung R2d-5 ships, before the arming rung compacts anything.
+    /// recorded length.
+    ///
+    /// That was every region's shape while rung R2d-5's `keep` was hardwired. Since the rung R2d-6
+    /// arming it is the shape of a batch with NOTHING rejected — compaction with no rejections is
+    /// the identity — so `vb_inst_cull_wide.rs` (the control) asserts it and
+    /// `vb_inst_cull_narrow.rs` (the gate, whose culled instance is INTERIOR to its batch) asserts
+    /// its negation.
     pub fn regions_are_identity(&self) -> bool {
         self.vis
             .iter()

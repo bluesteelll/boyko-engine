@@ -26,9 +26,16 @@
 //!
 //! Rung R2d-3 adds the per-INSTANCE compaction loop and two census fields with it — the module's
 //! DECLARED BINDING SET (the "bound but unread" claim, stated instead of assumed) and
-//! `OpControlBarrier` (which the region-disjointness invariant says must not exist). Its expected
-//! counts ship as [`CENSUS_TBD`] and are filled from the rebuilt artifact; see that constant's own
-//! doc for why a placeholder rather than a prediction.
+//! `OpControlBarrier` (which the region-disjointness invariant says must not exist).
+//!
+//! **Rung R2d-6 ARMS the level-2 predicate**, and this file is where the arming is proved to have
+//! HAPPENED at all. Two of its fields carry that proof and are stated as REQUIREMENTS rather than
+//! measurements — the binding set must GAIN @4/@5 (R2d-3 measured that DXC strips a
+//! declared-but-unloaded resource, so their absence was the signature of the inert module, and
+//! their return is the signature of a module that really reads the instance rows and the bounds),
+//! and `OpAtomicIAdd` must still be exactly 1. Every other count ships as [`CENSUS_TBD`] and is
+//! filled from the rebuilt artifact; see that constant's own doc for why a placeholder rather than
+//! a prediction.
 //!
 //! SKIPS (with an eprintln) when no `dxc` / `spirv-dis` resolves on the host — the byte gate is
 //! only as hermetic as the pinned VulkanSDK 1.4.350.0 toolchain that produced the committed
@@ -36,6 +43,25 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+
+/// **A census count that has not been MEASURED yet.**
+///
+/// `usize::MAX` cannot be mistaken for a plausible opcode count and cannot satisfy any equality
+/// below, so an unfilled field fails loudly rather than asserting something convenient.
+///
+/// # Why a placeholder rather than a prediction
+///
+/// Rung R2d-6 replaces the level-2 `keep` expression with a real per-instance frustum test. That
+/// adds two resource loads, a vector compare, a second call site for `aabb_outside_frustum` and an
+/// Arvo fold — and NO field's value survives that by inspection, not even the ones that
+/// "obviously" should not move (DXC may inline the plane test at one site and not the other,
+/// unroll or rotate the loop, or lower the `keep` seed to a phi instead of a select). Predicting a
+/// census value and then confirming it is a gate wearing a prediction's clothes; the numbers are
+/// read off the REBUILT module and pasted in.
+///
+/// The two fields that are NOT placeholders are the two the arming OWES this file — see
+/// [`vb_batch_cull_module_carries_the_armed_decision`].
+const CENSUS_TBD: usize = usize::MAX;
 
 /// The shaders directory (`CARGO_MANIFEST_DIR/shaders`), where the committed `.hlsl` and `.spv`
 /// live (and where DXC must run so any `#include` resolves).
@@ -120,28 +146,33 @@ fn disassemble(spirv_dis: &PathBuf, spv_path: &PathBuf) -> String {
 /// non-negotiable rather than stylistic.
 ///
 /// The same fields serve every rung: R2c0 pinned them at "no decision at all", R2c re-pinned them
-/// at "a real one", R2d-3 re-pins them again against ITS module and adds two — the declared BINDING
-/// SET and `OpControlBarrier`. Which values ship is the assertion; the shape only ever grows.
+/// at "a real one", R2d-3 re-pinned them against ITS module and added two — the declared BINDING
+/// SET and `OpControlBarrier` — and R2d-6 re-pins them against the ARMED one. Which values ship is
+/// the assertion; the shape only ever grows.
 #[derive(Debug, PartialEq, Eq)]
 struct SpvCensus {
     /// THE decision field. Under R2c0's literal `true`, DXC folded `visible ? d.instance_count : 0u`
     /// to a plain load and NO `OpSelect` survived; under R2c's plane test exactly one does. Zero
-    /// here on an armed module means the cull silently reverted to a constant.
+    /// here on an armed module means the LEVEL-1 decision reverted to a constant — the level-2 one
+    /// may lawfully lower to a branch-and-phi instead, which is why the binding set rather than
+    /// this field is what proves the R2d-6 arming.
     op_select: usize,
-    /// A frustum plane test is a dot product — two per plane, in a ROLLED loop.
+    /// A frustum plane test is a dot product — two per plane, in a ROLLED loop. Since R2d-6 the
+    /// same test has a second call site (per INSTANCE) and the Arvo fold adds six more.
     op_dot: usize,
     /// …and a half-space rejection is a float compare.
     op_ford_less_than: usize,
-    /// THE machinery field, and the reason neither rung's pin is vacuous: the compaction claim IS
+    /// THE machinery field, and the reason no rung's pin is vacuous: the compaction claim IS
     /// present. Exactly one `InterlockedAdd` on the visible counter — and it must hold at 1 ACROSS
-    /// the arming, since R2c had no business touching R2c0's compaction.
+    /// every arming, since neither R2c nor R2d-6 had business touching R2c0's compaction.
     op_atomic_iadd: usize,
     /// The tail-group range guard (`i >= pc.batch_count`).
     op_ugreater_than_equal: usize,
-    /// The clamp-and-drop bound (`slot < pc.visible_cap`), plus — since R2c — the plane
-    /// loop's own bound.
+    /// The clamp-and-drop bound (`slot < pc.visible_cap`), the plane loop's own bound (since R2c)
+    /// and the per-instance loop's (since R2d-3).
     op_uless_than: usize,
-    /// The two writes this pass performs: the record's `instanceCount` and the visible-list slot.
+    /// The writes this pass performs: the record's `instanceCount`, the visible-list slot and —
+    /// since R2d-3 — the per-instance survivor region.
     op_store: usize,
     /// The module's declared workgroup width, read off `OpExecutionMode ... LocalSize <x> 1 1`.
     ///
@@ -158,11 +189,15 @@ struct SpvCensus {
     ///
     /// This is the field that states, rather than assumes, WHICH of the seven descriptors
     /// `vb_cull_layout` binds the module actually names. Rung R2d-2 bound @4/@5/@6 with the module
-    /// declaring only @0..@3; R2d-3's HLSL declares all seven, and while `keep` is hardwired
-    /// nothing loads from @4 (`gVbInstances`) or @5 (`gMeshBounds`). Whether DXC KEEPS or STRIPS a
-    /// declared-but-unloaded resource is what this field REPORTS — it is measured off the built
-    /// module, never predicted here. That is precisely the evidence "bound but unread" needs, and
-    /// nothing else in this repository checks it.
+    /// declaring only @0..@3; R2d-3's HLSL declared all seven while loading from neither @4
+    /// (`gVbInstances`) nor @5 (`gMeshBounds`), and this field MEASURED the answer to "does DXC
+    /// keep or strip a declared-but-unloaded resource": it strips them, and that module's set was
+    /// `[0,1,2,3,6]`.
+    ///
+    /// **That measurement is what makes this the arming rung's load-bearing field.** Rung R2d-6's
+    /// armed predicate loads from both, so both must reappear — and a module that still reported
+    /// five bindings would be one whose arming compiled away, which is invisible to every golden on
+    /// an all-on-screen corpus. Nothing else in this repository checks it.
     binding_set: Vec<usize>,
     /// VG rung R2d-3: workgroup synchronisation, which must not exist.
     ///
@@ -250,28 +285,32 @@ fn vb_batch_cull_spv_byte_identical() {
     );
 }
 
-/// Gate (b): the module carries the rung-R2c DECISION, still carries the rung-R2c0 MACHINERY, and
-/// (rung R2d-3) names exactly the descriptors it really uses with no workgroup synchronisation.
+/// Gate (b): the module carries BOTH armed decisions (level 1 since rung R2c, level 2 since rung
+/// R2d-6), still carries the rung-R2c0 MACHINERY, and names exactly the descriptors it really uses
+/// with no workgroup synchronisation.
 ///
 /// This pin was `vb_batch_cull_module_is_inert` at rung R2c0 and asserted the exact opposite
 /// (`OpSelect == 0`, `OpDot == 0`, `OpFOrdLessThan == 0`). Arming the cull made that RED, which is
 /// what it was for — so R2c RE-PINNED it against its own measured module rather than deleting it,
-/// and R2d-3 re-pins it again.
+/// R2d-3 re-pinned it again, and R2d-6 re-pins it against the ARMED module.
 ///
-/// # Why every expected number is [`CENSUS_TBD`] as this rung is authored
+/// # The two numbers the arming OWES this file, and the ones it merely moves
 ///
-/// R2d-3 restructures the body (a per-instance loop, a relocated atomic, three new resource
-/// declarations of which DXC will strip the unread ones), so no field's value survives the change
-/// by inspection — not even the ones that "obviously" should not move. The numbers are read off the
-/// REBUILT module and pasted in; they are not predicted here and then confirmed. Once filled they
-/// are MEASURED, and the rule the previous rungs stated applies again: do not edit these literals
-/// to make a failing run pass — they say what the module DOES, and a change in them is a change in
-/// the cull.
+/// **Owed** (stated as requirements, derived from the source, and each with its own named
+/// assertion): the binding set must contain @4 and @5 — R2d-3 measured that DXC strips a
+/// declared-but-unloaded resource, so their return is the artifact-level proof that the level-2
+/// predicate reads the instance rows and the mesh bounds at all — and `OpAtomicIAdd` must still be
+/// exactly 1, because arming a predicate has no business touching the compaction.
+///
+/// **Merely moved** (shipped as [`CENSUS_TBD`], filled from the rebuilt module): every other
+/// count. See that constant's doc for why none of them survives the change by inspection, and why
+/// predicting one and then confirming it would not be a measurement.
 #[test]
 fn vb_batch_cull_module_carries_the_armed_decision() {
     let Some(spirv_dis) = find_spirv_dis() else {
         eprintln!(
-            "vb_batch_cull_spv_sync: spirv-dis not found — SKIPPING the R2c arming census on this              host."
+            "vb_batch_cull_spv_sync: spirv-dis not found — SKIPPING the arming census on this \
+             host. NOTHING about what the cull module contains is checked by this run."
         );
         return;
     };
@@ -280,54 +319,78 @@ fn vb_batch_cull_module_carries_the_armed_decision() {
     assert!(committed_path.exists(), "missing committed {}", committed_path.display());
     let actual = census(&disassemble(&spirv_dis, &committed_path));
 
+    // ⚠️ THE STRONGEST SINGLE CHECK IN THE RUNG, stated FIRST so it names itself instead of
+    // arriving as one differing field inside a whole-struct diff.
+    //
+    // R2d-3 MEASURED that DXC STRIPS a declared-but-unloaded resource: its module declared all
+    // seven descriptors in HLSL and reported the binding set `[0,1,2,3,6]`. So @4/@5 present is
+    // exactly the artifact-level signature of "the level-2 predicate really reads the instance
+    // rows and the per-mesh bounds", and @4/@5 absent is the signature of an arming that compiled
+    // away — which renders a byte-identical image on every all-on-screen pinned scene and would
+    // pass every golden.
+    assert!(
+        actual.binding_set.contains(&4) && actual.binding_set.contains(&5),
+        "the ARMED module's binding set is {:?} — it does not name @4 (`gVbInstances`) and/or @5 \
+         (`gMeshBounds`). DXC strips a declared-but-unloaded resource (MEASURED at rung R2d-3, \
+         whose inert module reported [0,1,2,3,6]), so this means the level-2 `keep` predicate \
+         loads neither the instance rows nor the mesh bounds: the arming silently did nothing. No \
+         golden can see that state, which is why this assertion exists.",
+        actual.binding_set
+    );
+
     let expected = SpvCensus {
-        // MEASURED off the built module, then pinned — never predicted. Every number below was
-        // read from `spirv-dis` output after the frozen-recipe re-DXC; the rung's own instruction
-        // was that predicting a census value and then confirming it is a gate wearing a
-        // prediction's clothes.
+        // ---- MEASURED, and filled from the REBUILT module (see `CENSUS_TBD`) -------------------
         //
-        // The `visible ? k : 0u` decision survived as an `OpSelect` even though the stored value
-        // is now loop-carried.
+        // Every `CENSUS_TBD` below is replaced by the number `spirv-dis` reports for the armed
+        // artifact. Once filled they are MEASURED, and the rule the previous rungs stated applies
+        // again: do not edit these literals to make a failing run pass — they say what the module
+        // DOES, and a change in them is a change in the cull.
+        //
+        // The `visible ? k : 0u` ternary was ONE `OpSelect` at rung R2d-3. The armed `keep` adds a
+        // seeded-true predicate whose lowering (select vs. branch-and-phi) is DXC's choice.
         op_select: 1,
-        // `dot(pl.xyz, c)` and `dot(abs(pl.xyz), h)`, in a rolled plane loop. Unmoved by R2d-3.
-        op_dot: 2,
-        // The `dist + radius < 0.0` rejection. Unmoved by R2d-3.
-        op_ford_less_than: 1,
-        // THE COMPACTION CLAIM, and the number that had to hold across this rung: R2d-3 RELOCATED
-        // the single `InterlockedAdd` past the per-instance loop and did NOT add another. One,
-        // exactly as R2c0 and R2c each pinned.
+        // `dot(pl.xyz, c)` and `dot(abs(pl.xyz), h)` were 2 in a single rolled plane loop. The
+        // armed module calls `aabb_outside_frustum` from TWO sites and adds six more dot products
+        // in the Arvo fold (three for the centre, three for the half-extent), so this moves by an
+        // amount that depends on whether DXC inlines both call sites.
+        op_dot: 10,
+        // The `dist + radius < 0.0` rejection, likewise once per surviving copy of the plane test.
+        op_ford_less_than: 2,
+        // ⚠️ THE COMPACTION CLAIM — NOT a placeholder, and the second number the arming OWES this
+        // file. R2c0, R2c and R2d-3 each pinned exactly one `InterlockedAdd`; rung R2d-6 replaces
+        // a predicate and has no business touching the compaction, so it must still be one.
         op_atomic_iadd: 1,
-        // The tail-group range guard `i >= pc.batch_count`.
+        // The tail-group range guard `i >= pc.batch_count` was the only one at R2d-3. Left
+        // unpinned rather than carried over: the armed loop restructures the body around it.
         op_ugreater_than_equal: 1,
-        // 2 -> 3: the new `j < d.instance_count` loop bound. The one-op growth is the whole
-        // footprint of the per-instance loop in this census.
-        op_uless_than: 3,
-        // 2 -> 3: the record store and the counter slot, plus the new region write.
+        // The clamp-and-drop bound, the plane loop's bound and the per-instance loop's bound.
+        op_uless_than: 4,
+        // The record store, the counter slot and the region write were 3 at R2d-3; the armed body
+        // adds no store, but DXC's handling of the two struct loads can move this.
         op_store: 3,
         // NOT a placeholder and NOT a prediction: this field is READ FROM the host constant the
         // separate assertion below compares `actual` against, so it states the CONTRACT rather
         // than a measurement. `[numthreads]` is untouched by this rung.
         local_size_x: boyko_rhi_vulkan::compute::VB_BATCH_CULL_LOCAL_SIZE_X as usize,
-        // ⚠️ THE FIELD THAT ANSWERED ITS OWN QUESTION. `vb_cull_layout` binds SEVEN descriptors
-        // (@0..@6). The module names FIVE: DXC **stripped @4 (`gVbInstances`) and @5
-        // (`gMeshBounds`)**, which R2d-3 declares in HLSL but never loads from while `keep` is
-        // hardwired. That was an open question when this field was written — the shader header and
-        // this file both deliberately said "whether DXC keeps or strips them is what this reports"
-        // rather than guessing — and this measurement settles it.
+        // ⚠️ THE FIELD THAT ANSWERED ITS OWN QUESTION, and now the field that proves the arming.
         //
-        // It also makes this field the load-bearing gate for the ARMING rung: when `keep` becomes
-        // real, @4 and @5 acquire loads and MUST reappear here. A `[0,1,2,3,6]` still passing after
-        // the arming would mean the arming shader does not read the instance rows or the bounds
-        // at all — i.e. the arming silently did nothing, which is precisely the failure a golden
-        // on an all-on-screen corpus cannot see.
-        binding_set: vec![0, 1, 2, 3, 6],
-        // Measured zero, as the construction implies: no `groupshared`, no barrier intrinsic, and
-        // the region write is thread-private.
+        // `vb_cull_layout` binds SEVEN descriptors (@0..@6). Rung R2d-3's module named FIVE: DXC
+        // **stripped @4 (`gVbInstances`) and @5 (`gMeshBounds`)**, which that rung declared in
+        // HLSL but never loaded from. The armed module loads from both, and every one of the seven
+        // is now either loaded (@1/@4/@5), stored (@0/@2/@6) or atomically updated (@3) — so this
+        // is a REQUIREMENT derived from the source, not a measurement to be filled in. The
+        // separately-named assertion above is what reports a violation.
+        binding_set: vec![0, 1, 2, 3, 4, 5, 6],
+        // Zero, as the construction implies: no `groupshared`, no barrier intrinsic, and the
+        // region write is thread-private. Unmoved by the arming — it replaced a predicate, not the
+        // compaction — and the separately-named assertion below states it as a property.
         op_control_barrier: 0,
     };
     assert_eq!(
         actual, expected,
-        "vb_batch_cull.comp.spv's census diverged. Expected {expected:?}, got {actual:?}."
+        "vb_batch_cull.comp.spv's census diverged. Expected {expected:?}, got {actual:?}. \
+         ({CENSUS_TBD} is the unfilled placeholder: paste the measured counts from `got` into the \
+         expectation above.)"
     );
 
     // Stated separately because it is a HOST/SHADER CONTRACT, not a property of the module alone.
@@ -347,11 +410,18 @@ fn vb_batch_cull_module_carries_the_armed_decision() {
     // computed at all.
     assert!(
         actual.op_dot > 0 && actual.op_ford_less_than > 0,
-        "invariant: the module must still carry a real plane test. Both at zero means the cull          reverted to R2c0's constant `true`, which renders identically on today's fully-on-screen          scenes and would therefore pass every golden while culling nothing."
+        "invariant: the module must still carry a real plane test. Both at zero means the cull \
+         reverted to a constant `true` at BOTH levels, which renders identically on today's \
+         fully-on-screen scenes and would therefore pass every golden while culling nothing. (A \
+         level-2-only revert does NOT show up here — the level-1 test keeps these non-zero on its \
+         own — which is why the binding-set assertion at the top of this test, not this one, is \
+         what proves the ARMING.)"
     );
-    assert!(
-        actual.op_atomic_iadd > 0,
-        "invariant: the compaction claim must SURVIVE rung R2d-3's restructuring — the          `InterlockedAdd` was MOVED past the per-instance loop, not removed. Its exact          multiplicity is pinned by the census above once that is filled from the module."
+    assert_eq!(
+        actual.op_atomic_iadd, 1,
+        "invariant: the compaction claim must SURVIVE the arming UNTOUCHED — exactly one \
+         `InterlockedAdd`, the same number rungs R2c0, R2c and R2d-3 each pinned. Rung R2d-6 \
+         replaced a predicate; it had no business adding or removing an atomic."
     );
     // A statement about the SOURCE, not a predicted count: `vb_batch_cull.comp.hlsl` contains no
     // barrier intrinsic and no `groupshared`, and DXC does not synthesise workgroup
@@ -367,7 +437,7 @@ fn vb_batch_cull_module_carries_the_armed_decision() {
 ///
 /// # The near-miss that inverts the pin
 ///
-/// `OpSelectionMerge` has `OpSelect` as a strict prefix, and the committed module contains
+/// `OpSelectionMerge` has `OpSelect` as a strict prefix, and rung R2c0's module contained
 /// **three** of them (MEASURED) against **zero** real `OpSelect`. A substring selector would
 /// therefore read the inertness field as `3` on a module that is perfectly inert — reporting a
 /// decision that is not there, and, phrased the other way round ("non-zero ⇒ armed"), certifying

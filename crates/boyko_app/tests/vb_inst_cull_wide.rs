@@ -1,4 +1,4 @@
-//! **VG rung R2d-5 — the WIDE framing: the narrow gate's CONTROL.**
+//! **VG rungs R2d-5 / R2d-6 — the WIDE framing: the narrow gate's CONTROL.**
 //!
 //! The SAME fixture as `vb_inst_cull_narrow.rs` — same meshes, same six instances, same materials,
 //! same extent — on a framing that CONTAINS all six. The two `Framing` constants differ in exactly
@@ -6,17 +6,18 @@
 //!
 //! # Why a control is required rather than nice
 //!
-//! At rung R2d-6 the narrow run's `inst` becomes `[2, 2]` and its survivor regions lose an entry.
-//! Without this run, that could equally be "the arming rung culls one instance per batch" or "the
-//! arming rung breaks one instance per batch everywhere". This run answers it: the SAME armed
-//! build, on a framing where nothing is off-screen, must still report `[3, 3]` and the identity
-//! regions. A cull that rejects visible geometry reds HERE while the narrow run looks correct.
+//! At rung R2d-6 the narrow run's `inst` became `[2, 2]` and its survivor regions lost an entry.
+//! On its own that could equally be "the arming rung culls one instance per batch" or "the arming
+//! rung breaks one instance per batch everywhere". This run answers it: the SAME armed build, on a
+//! framing where nothing is off-screen, must still report `[3, 3]` and the identity regions. A
+//! cull that rejects visible geometry reds HERE while the narrow run looks correct.
 //!
-//! # What this rung asserts
+//! # What this file asserts — and every number is UNCHANGED across the arming
 //!
-//! `inst = [3, 3]`, both regions the identity, `visible = 2`, `batches = 2` — and every one of
-//! those numbers is UNCHANGED at rung R2d-6, which is precisely what makes it a control rather
-//! than a second experiment.
+//! `inst = [3, 3]`, both regions the identity, `visible = 2`, `batches = 2`. Not one of them moved
+//! from rung R2d-5 to rung R2d-6, which is precisely what makes this a control rather than a
+//! second experiment: the file is byte-for-byte the same expectation on both builds, so the only
+//! thing that can change its verdict is the shader.
 //!
 //! `#[ignore]`: needs a real windowed GPU device. `BOYKO_DISABLE_VALIDATION=1`, `--test-threads=1`.
 
@@ -65,8 +66,9 @@ fn vb_inst_cull_wide_keeps_every_instance() {
         probe.inst.as_slice(),
         [BATCH_INSTANCES as u32; BATCH_COUNT].as_slice(),
         "the wide framing contains all {INSTANCE_COUNT} instances, so every record must keep its \
-         full {BATCH_INSTANCES}. This assertion is UNCHANGED at rung R2d-6 -- a drop here on the \
-         armed build means the per-instance cull rejects visible geometry -- got {:?}",
+         full {BATCH_INSTANCES}. This assertion is UNCHANGED across the rung R2d-6 arming -- a \
+         drop here on the armed build means the per-instance cull rejects visible geometry, which \
+         is the failure the narrow gate's `inst=[2,2]` cannot distinguish on its own -- got {:?}",
         probe.raw
     );
     assert_eq!(probe.drawn_instances() as usize, INSTANCE_COUNT, "got {:?}", probe.raw);
@@ -77,7 +79,8 @@ fn vb_inst_cull_wide_keeps_every_instance() {
     }
     assert!(
         probe.regions_are_identity(),
-        "with nothing culled, every survivor region is the identity run at BOTH rungs -- got {:?}",
+        "with nothing culled, every survivor region is the identity run on BOTH the inert and the \
+         armed build: compaction with no rejections is the identity -- got {:?}",
         probe.raw
     );
 }

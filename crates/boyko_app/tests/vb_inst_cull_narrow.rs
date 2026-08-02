@@ -1,26 +1,35 @@
-//! **VG rung R2d-5 — the NARROW framing: the gate rung R2d-6 will flip.**
+//! **VG rung R2d-6 — the NARROW framing: THE GATE, armed.**
 //!
 //! Two batches of [`vb_inst_cull_scene::BATCH_INSTANCES`] instances each, framed so that exactly
 //! ONE instance per batch — the one at [`vb_inst_cull_scene::OFFSCREEN_LOCAL_INDEX`], interior to
 //! its batch — is wholly outside the frustum while its batch's UNION box straddles it. That is the
-//! whole point of the arrangement: the per-BATCH cull rung R2c already ships rejects NOTHING here,
-//! so anything this gate observes changing is per-INSTANCE granularity and nothing else.
+//! whole point of the arrangement: the per-BATCH cull rung R2c ships rejects NOTHING here, so
+//! anything this gate observes changing is per-INSTANCE granularity and nothing else.
 //!
-//! # What THIS rung asserts, and why every number is what the build produces
+//! # What THIS rung asserts, and what moved
 //!
-//! `vb_batch_cull.comp.hlsl` ships with its level-2 `keep` predicate HARDWIRED `true` (rung R2d-3),
-//! and `vb_raster.vs.hlsl` reads a survivor list that is therefore the IDENTITY (rung R2d-4). So on
-//! THIS build:
+//! Rung R2d-6 replaced `vb_batch_cull.comp.hlsl`'s level-2 `keep` — hardwired `true` since rung
+//! R2d-3 — with the instance's own world box against the six pushed planes. `vb_raster.vs.hlsl`
+//! has read the survivor list since rung R2d-4, so the compaction now reaches the image:
 //!
-//! | field | this rung | rung R2d-6 (armed) |
+//! | field | rung R2d-5 (inert) | THIS rung (armed) |
 //! |---|---|---|
 //! | `batches` | 2 | 2 — the host still submits both batches |
 //! | `visible` | 2 | 2 — level 1 keeps both; their union boxes straddle the frustum |
-//! | `inst` | `[3, 3]` | `[2, 2]` — one survivor per batch removed |
-//! | `vis` | `0:0,1,2` and `3:3,4,5` | `0:0,2` and `3:3,5` — the culled LOCAL index 1 is gone |
+//! | `inst` | `[3, 3]` | **`[2, 2]`** — one survivor per batch removed |
+//! | `vis` | `0:0,1,2` and `3:3,4,5` | **`0:0,2` and `3:3,5`** — the culled LOCAL index 1 is gone |
 //!
 //! `visible` is deliberately NOT the observable here: it counts BATCHES, and no batch is rejected
 //! at either rung. `inst` and `vis` are.
+//!
+//! # The survivor regions are no longer the IDENTITY, and that is asserted rather than implied
+//!
+//! [`vb_inst_cull_scene::OFFSCREEN_LOCAL_INDEX`] is INTERIOR to its batch by const assertion, so a
+//! compacted region (`base, base + 2`) holds a value that a stale identity run does not
+//! (`base + 2` at compacted slot 1). The gate below asserts
+//! `!probe.regions_are_identity()` for exactly that reason: without it, a raster reading LAST
+//! frame's list, or a cull that wrote the identity and merely lowered the record word, would still
+//! satisfy every other assertion here.
 //!
 //! # `#[ignore]`
 //!
@@ -51,11 +60,29 @@ fn setup(
     vb_inst_cull_scene::fixture_setup_system(commands, meshes, materials, geo_table, dev, &NARROW);
 }
 
+/// Instances of each batch that survive the narrow framing: every local index except
+/// [`OFFSCREEN_LOCAL_INDEX`]. Derived from the fixture's own constants rather than typed in, so a
+/// fixture edit moves the expectation with the geometry.
+const SURVIVORS_PER_BATCH: usize = BATCH_INSTANCES - 1;
+
+/// Batch `batch`'s survivor region under the armed cull: its surviving instances' GLOBAL ring
+/// indices in COMPACTION order — ascending local index with [`OFFSCREEN_LOCAL_INDEX`] removed,
+/// which is the order the shader's `k` cursor writes them in.
+fn expected_region(batch: usize) -> Vec<u32> {
+    (0..BATCH_INSTANCES)
+        .filter(|local| *local != OFFSCREEN_LOCAL_INDEX)
+        .map(|local| vb_inst_cull_scene::global_instance_id(batch, local))
+        .collect()
+}
+
 /// **The gate.** Boots the narrow framing with the cull-readback probe armed and asserts every
 /// number this build produces.
+///
+/// RENAMED at rung R2d-6 (`..._reports_the_inert_regions`): the regions are no longer inert, and a
+/// test whose name states the opposite of what it asserts is worse than no name.
 #[test]
 #[ignore = "needs a real windowed GPU device; the orchestrator runs it to read the per-instance cull's survivor regions"]
-fn vb_inst_cull_narrow_reports_the_inert_regions() {
+fn vb_inst_cull_narrow_drops_the_offscreen_instance() {
     let probe = vb_inst_cull_scene::probe_in_process("narrow", || {
         let mut app = App::new();
         app.add_plugins(EnginePlugins::window(
@@ -96,19 +123,27 @@ fn vb_inst_cull_narrow_reports_the_inert_regions() {
         probe.raw
     );
 
-    // ---- the two observables the arming rung flips -------------------------------------------
+    // ---- the two observables the arming rung flipped ------------------------------------------
     assert_eq!(
         probe.inst.as_slice(),
-        [BATCH_INSTANCES as u32; BATCH_COUNT].as_slice(),
-        "with `keep` hardwired `true` (`vb_batch_cull.comp.hlsl`, rung R2d-3) every instance \
-         survives, so each record's post-cull `instanceCount` is still {BATCH_INSTANCES}. Rung \
-         R2d-6 makes this [{}, {}]. A value BELOW {BATCH_INSTANCES} on THIS build means the level-2 \
-         predicate is not the constant the module claims -- got {:?}",
-        BATCH_INSTANCES - 1,
-        BATCH_INSTANCES - 1,
+        [SURVIVORS_PER_BATCH as u32; BATCH_COUNT].as_slice(),
+        "the armed level-2 predicate (`vb_batch_cull.comp.hlsl`, rung R2d-6) rejects the instance \
+         at local index {OFFSCREEN_LOCAL_INDEX} of each batch, so each record's post-cull \
+         `instanceCount` -- the word `vkCmdDrawIndexedIndirect` fetches -- is \
+         {SURVIVORS_PER_BATCH}. [{BATCH_INSTANCES}, {BATCH_INSTANCES}] means the predicate is \
+         still the constant `true` rung R2d-5 shipped: armed in name only, and byte-identical on \
+         every on-screen golden. Anything BELOW {SURVIVORS_PER_BATCH} means it is rejecting \
+         geometry the camera can see -- and `vb_inst_cull_wide.rs`, the control, is where that \
+         reads unambiguously -- got {:?}",
         probe.raw
     );
-    assert_eq!(probe.drawn_instances() as usize, INSTANCE_COUNT);
+    assert_eq!(
+        probe.drawn_instances() as usize,
+        INSTANCE_COUNT - BATCH_COUNT,
+        "exactly one instance per batch must be removed from the {INSTANCE_COUNT} the fixture \
+         spawns -- got {:?}",
+        probe.raw
+    );
 
     assert_eq!(
         probe.vis.len(),
@@ -120,19 +155,32 @@ fn vb_inst_cull_narrow_reports_the_inert_regions() {
         assert_eq!(
             *base as usize,
             b * BATCH_INSTANCES,
-            "batch {b}'s region base must be the gather's prefix sum -- got {:?}",
+            "batch {b}'s region base must be the gather's prefix sum -- the base is a property of \
+             the SUBMITTED batch, not of the cull, so it does not move when instances are \
+             rejected -- got {:?}",
             probe.raw
         );
         assert_eq!(
             *members,
-            (0..BATCH_INSTANCES as u32).map(|i| base + i).collect::<Vec<_>>(),
-            "batch {b}'s survivor region must be the IDENTITY run `base .. base + {BATCH_INSTANCES}` \
-             on this build. Rung R2d-6 removes the entry at local index \
-             {OFFSCREEN_LOCAL_INDEX} -- got {:?}",
+            expected_region(b),
+            "batch {b}'s survivor region must be its surviving GLOBAL ids in compaction order, \
+             with the entry for local index {OFFSCREEN_LOCAL_INDEX} gone. The stored values are \
+             ORIGINAL ring indices, never compacted slots (`vb_raster.vs.hlsl`'s INVARIANT \
+             R2d-EXPORT-IS-GLOBAL): a region reading `base, base+1` would be the compacted SLOT \
+             numbers, and one reading `base, base+1, base+2` would be rung R2d-5's identity run \
+             -- got {:?}",
             probe.raw
         );
     }
-    assert!(probe.regions_are_identity(), "got {:?}", probe.raw);
+    assert!(
+        !probe.regions_are_identity(),
+        "every survivor region is still the IDENTITY run. Because the culled instance is INTERIOR \
+         to its batch (`vb_inst_cull_scene`'s const-asserted fixture property 2), a compacted \
+         region CANNOT be the identity -- so this state means the raster is reading a survivor \
+         list nobody compacted this frame: a stale list, or a cull that lowered the record word \
+         without moving the entries -- got {:?}",
+        probe.raw
+    );
 
     // FIXTURE PROPERTY 1, observed rather than assumed: the second batch's region does not start
     // at 0, so `visible[base + id]` and `visible[id]` are distinguishable expressions.
@@ -146,11 +194,16 @@ fn vb_inst_cull_narrow_reports_the_inert_regions() {
 
 /// **The fixture's own teeth, on the CPU — NOT `#[ignore]`d.**
 ///
-/// The GPU gate above asserts INERT numbers, so it stays green even if the fixture stops being able
-/// to detect anything. This test is what fails instead: it checks that the narrow framing rejects
-/// exactly the interior instance of each batch, that it does so by a MARGIN rather than marginally,
-/// that the on-screen instances are inside by their centres rather than by a corner, and that the
-/// per-BATCH cull rejects NOTHING — which is the premise the whole rung rests on.
+/// The GPU gate above needs a device, so in CI it never runs at all; this test is what holds the
+/// fixture's premises in the meantime. It checks that the narrow framing rejects exactly the
+/// interior instance of each batch, that it does so by a MARGIN rather than marginally, that the
+/// on-screen instances are inside by their centres rather than by a corner, and that the per-BATCH
+/// cull rejects NOTHING — the premise the whole rung rests on.
+///
+/// It is also the HOST ORACLE the GPU gate is compared against: it names the same instances, by
+/// the same [`boyko_render::frustum::instance_visible_after_cull`] the armed shader mirrors. A
+/// disagreement between the two is a SHADER bug, not a math bug — the planes are extracted once on
+/// the host and pushed.
 #[test]
 fn the_fixture_margins_are_not_marginal() {
     vb_inst_cull_scene::assert_fixture_invariants();
@@ -173,6 +226,31 @@ fn the_fixture_margins_are_not_marginal() {
          `inst` change could be attributed to level 1 and the fixture would say nothing about \
          per-INSTANCE granularity"
     );
+
+    // ---- the GPU gate's own expectation, against the HOST ORACLE -------------------------------
+    // The gate above is `#[ignore]`d and needs a device, so without this the region expectation
+    // could drift away from the fixture and nothing in CI would notice until a GPU run.
+    let rejected = vb_inst_cull_scene::instance_rejections(&NARROW);
+    for batch in 0..BATCH_COUNT {
+        let kept: Vec<u32> = (0..BATCH_INSTANCES)
+            .map(|local| vb_inst_cull_scene::global_instance_id(batch, local))
+            .filter(|g| !rejected.contains(g))
+            .collect();
+        assert_eq!(
+            expected_region(batch),
+            kept,
+            "batch {batch}'s expected survivor region must be exactly the instances the host \
+             oracle KEEPS, in ring order — the GPU gate compares the device's region against this \
+             list, so the two must be one statement"
+        );
+        assert_eq!(
+            kept.len(),
+            SURVIVORS_PER_BATCH,
+            "batch {batch} keeps {} instances but the record expectation says \
+             {SURVIVORS_PER_BATCH}",
+            kept.len()
+        );
+    }
 
     // ---- margins: rejected by a wide margin, kept by their centres ----------------------------
     let planes = vb_inst_cull_scene::frustum_planes(&NARROW, EXTENT.0, EXTENT.1);
