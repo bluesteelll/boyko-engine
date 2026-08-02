@@ -13,6 +13,24 @@
 //! built that counter and its compacted list and left them deliberately unread; this is their first
 //! consumer.
 //!
+//! # ⚠️ WHAT `visible=N` MEANS SINCE RUNG R2d-3 — the counter's gate widened
+//!
+//! Rung R2c0's counter incremented for every batch that passed the LEVEL-1 union-AABB test. Rung
+//! R2d-3 added the level-2 per-instance loop and moved the bump behind `visible && k > 0u`, so
+//! `visible` now counts batches that survived level 1 **AND** carry at least one level-2 survivor.
+//!
+//! On THIS build the two readings are the same number: `keep` is hardwired `true`, so `k` equals
+//! the batch's full instance count, and the host's gather emits no batch with zero instances
+//! (`boyko_render::mesh_draw`'s `counts[m] == 0` collapses to `resolved == None` and pushes no
+//! `DrawBatch`), so `k > 0` holds for every dispatched lane. The effective gate is still level 1,
+//! which is what this fixture measures.
+//!
+//! It stops being the same number at rung R2d-6, where a batch can lose every member to the
+//! per-INSTANCE test and drop out of the count with its union box still straddling the frustum.
+//! This fixture is unaffected — its surviving batch is a single ON-SCREEN sphere, so it cannot lose
+//! its only instance — but the sentence "visible = batches that passed the frustum test" is no
+//! longer the definition, and the assertions below are worded against the real one.
+//!
 //! # The fixture
 //!
 //! TWO distinct meshes, hence two `DrawBatch`es (`gather_mesh_draws` buckets by `mesh_id`, so two
@@ -27,6 +45,10 @@
 //! 2` means the cull kept something it should have rejected (armed but inert — exactly what a
 //! golden would wave through), `visible == 0` means it rejected something visible (which the
 //! goldens WOULD catch, but this names it precisely).
+//!
+//! Each batch here holds exactly ONE instance, which is why this fixture says nothing about
+//! per-INSTANCE granularity: `vb_inst_cull_narrow.rs` is the fixture for that, and it is built the
+//! other way round — one batch, several instances, the off-screen one interior to it.
 //!
 //! `#[ignore]`: needs a real windowed GPU device. Run with `BOYKO_DISABLE_VALIDATION=1` and
 //! `--test-threads=1`, the same conventions every windowed test here follows.
@@ -199,11 +221,15 @@ fn vb_cull_rejects_the_offscreen_batch() {
     );
     assert!(
         line.contains("visible=1"),
-        "the GPU cull must report exactly ONE visible batch — got {line:?}.\n\
+        "the counter must report exactly ONE batch that BOTH survived the level-1 union-AABB test \
+         AND carries a level-2 survivor (`vb_batch_cull.comp.hlsl`'s `visible && k > 0u` gate) — \
+         got {line:?}.\n\
          `visible=2` means the cull is armed but rejects nothing: the off-screen sphere at x={} \
          survived every frustum plane. That state renders a byte-identical image on every pinned \
          scene, so no golden would catch it — which is why this test exists.\n\
-         `visible=0` means it rejected the sphere in front of the camera.",
+         `visible=0` means it rejected the sphere in front of the camera, OR that the level-2 loop \
+         produced no survivor for a batch whose union box passed. Both batches hold ONE instance \
+         here, so with `keep` hardwired `true` the second disjunct cannot fire on this build.",
         OFFSCREEN_X
     );
     // The compacted list must name the batch that survived, not merely count it: a correct count
@@ -211,5 +237,26 @@ fn vb_cull_rejects_the_offscreen_batch() {
     assert!(
         line.contains("list=[0]") || line.contains("list=[1]"),
         "the visible list must carry the surviving batch's index — got {line:?}"
+    );
+    // Rung R2d-5 widened the line with `inst=` (post-cull `instanceCount` per drawn batch) and
+    // `vis=` (each batch's own region of the per-INSTANCE survivor list). Each batch here holds ONE
+    // instance and one batch is rejected, so the record words are a permutation of `1, 0` — and
+    // that zero is what `vkCmdDrawIndexedIndirect` fetches, i.e. the reason the off-screen sphere
+    // is not rasterized at all. Which permutation depends on which mesh id the surviving sphere
+    // took, the same uncertainty the `list=` assertion above already hedges.
+    assert!(
+        line.contains("inst=[1,0]") || line.contains("inst=[0,1]"),
+        "the per-record `instanceCount` words must be one `1` (the drawn batch) and one `0` (the \
+         rejected one) — got {line:?}"
+    );
+    // The survivor regions are printed as `base:members` per batch. The rejected batch still WRITES
+    // its region (the `visible ?` gate is on the RECORD, not on the level-2 loop — INVARIANT
+    // R2d-REGION-DEFINED), but its record reports 0 instances, so the printer selects
+    // `[base, base + 0)` and its group is EMPTY. The drawn batch's group is its own base, since the
+    // list is the identity while `keep` is hardwired.
+    assert!(
+        line.contains("vis=[0:0|1:]") || line.contains("vis=[0:|1:1]"),
+        "one survivor region must carry exactly its own base and the other must be empty — got \
+         {line:?}"
     );
 }

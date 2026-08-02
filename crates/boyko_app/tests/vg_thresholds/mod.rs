@@ -170,6 +170,14 @@ pub struct Row {
     pub histogram: Vec<u64>,
     pub submitted_tris: u64,
     pub readback_sha256: String,
+    /// VG rung R2d-5: the distinct instance ids the raster exported, sorted ascending and capped
+    /// at [`Self::distinct_instance_cap`].
+    pub distinct_instances: Vec<u32>,
+    /// The TRUE distinct-instance count, uncapped. `> distinct_instances.len()` means the cap bound.
+    pub distinct_instance_count: u64,
+    /// The cap the producing process was built with — carried in the row so a reader can tell a
+    /// truncated list from a small scene without knowing which build wrote the row.
+    pub distinct_instance_cap: u64,
 }
 
 impl Row {
@@ -219,6 +227,16 @@ pub fn parse_row(src: &str) -> Row {
         histogram,
         submitted_tris: field_u64(src, "row.submitted_tris"),
         readback_sha256: field_str(src, "readback.sha256"),
+        distinct_instances: field(src, "row.distinct_instances")
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.parse().expect("a distinct instance id is an integer"))
+            .collect(),
+        distinct_instance_count: field_u64(src, "row.distinct_instance_count"),
+        distinct_instance_cap: field_u64(src, "row.distinct_instance_cap"),
     }
 }
 

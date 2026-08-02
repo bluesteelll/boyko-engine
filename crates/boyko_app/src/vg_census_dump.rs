@@ -308,6 +308,22 @@ fn write_row(
         out.push_str(&n.to_string());
     }
     out.push_str("]\n");
+    // VG rung R2d-5: the distinct instance ids the RASTER exported, and the TRUE count beside them.
+    // Emitted as new `[row]` keys — the reader (`tests/vg_thresholds`) is key-driven, so this is
+    // additive and no existing consumer moves.
+    out.push_str("distinct_instances = [");
+    for (i, id) in row.distinct_instances.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&id.to_string());
+    }
+    out.push_str("]\n");
+    out.push_str(&format!("distinct_instance_count = {}\n", row.distinct_instance_count));
+    // The cap travels WITH the row: `distinct_instance_count > distinct_instance_cap` is how a
+    // reader tells a truncated list from a small scene, and a reader that had to know the cap from
+    // elsewhere could be reading a row written under a different one.
+    out.push_str(&format!("distinct_instance_cap = {}\n", vg_census::CENSUS_DISTINCT_INSTANCE_CAP));
     out.push_str(&format!("submitted_tris = {}\n", cx.submitted_tris));
     out.push_str(&format!(
         "visible_tri_per_covered_pixel = {:.9}\n",

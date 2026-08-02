@@ -2444,6 +2444,20 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // VG rung R2c-tail: captured BEFORE `draws` is handed back to the scratch, because the
         // cull readback below compares the GPU's visible count against it.
         let draw_batch_count = draws.len();
+        // VG rung R2d-5: the per-batch BASES, likewise captured before the scratch takes `draws`
+        // back. The survivor list is REGION-addressed — batch `b` owns
+        // `[base_instance(b), base_instance(b) + instanceCount(b))` and writes nowhere else — and
+        // the base lives only on the host (the GPU sees it inside a descriptor the probe does not
+        // copy). Without it the readback could only print a FLAT prefix, which interleaves real
+        // survivors with slots no batch owns: this loop's own `try_get` skip above makes
+        // `scene.mesh_draw` a SUBSEQUENCE of the gather, so the bases can leave gaps.
+        //
+        // Gated on the probe, so a steady frame allocates nothing here.
+        let vb_cull_bases: Vec<u32> = if vb_cull_probe {
+            draws.iter().map(|d| d.base_instance).collect()
+        } else {
+            Vec::new()
+        };
         host.draw_scratch.put(draws);
 
         let presented_ok = matches!(&presented, Ok(true));
@@ -2489,12 +2503,14 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             }
         }
 
-        // VG rung R2c-tail: read back what the batch cull ACTUALLY decided on the GPU, and stop.
+        // VG rung R2c-tail / R2d-5: read back what the cull ACTUALLY decided on the GPU, and stop.
         //
         // This is the gate the goldens cannot be: every pinned scene is entirely on-screen, so a
         // cull that rejects nothing renders the same image as a correct one. The visible COUNT is
         // the observable that separates them, and it is the first consumer the compaction buffers
-        // have had since rung R2c0 built them.
+        // have had since rung R2c0 built them. Rung R2d-5 widens it from that count to the four
+        // regions `format_vb_cull_probe_line` documents — the per-record `instanceCount` the
+        // rasterizer fetches, and each batch's own region of the per-INSTANCE survivor list.
         //
         // GATED on the probe (`BOYKO_VB_CULL_READBACK`); dead code on every other run.
         if vb_cull_probe && presented_ok {
@@ -2502,17 +2518,8 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // frame's TRANSFER writes into the host-visible staging have completed before the
             // mapping is read. Without it the read races the copy and would usually look right.
             ctx.wait_idle().expect("invariant: VG R2c-tail cull readback wait_idle");
-            if let Some((count, visible)) = host.gpu.read_vb_cull(s) {
-                let drawn = draw_batch_count;
-                let list: Vec<String> = visible
-                    .iter()
-                    .take(count.min(8) as usize)
-                    .map(|v| v.to_string())
-                    .collect();
-                let line = format!(
-                    "VB_CULL_READBACK batches={drawn} visible={count} list=[{}]",
-                    list.join(",")
-                );
+            if let Some(rb) = host.gpu.read_vb_cull(s) {
+                let line = format_vb_cull_probe_line(draw_batch_count, &vb_cull_bases, &rb);
                 println!("{line}");
                 // `BOYKO_VB_CULL_READBACK` names a PATH, the same shape `BOYKO_HOST_DUMP` uses:
                 // printing alone would leave the result readable only by a human, and this rung
@@ -2751,6 +2758,68 @@ fn print_vb_bench_summary(
          independently-measured brackets. Fine for the CLUSTER_HI break-even comparison, not \
          an isolated-cost claim (mirrors the R0 GPU-pass-cost harness's own methodology note)."
     );
+}
+
+/// **VG rung R2d-5: the cull-probe line** — `VB_CULL_READBACK batches=B visible=V list=[..]
+/// inst=[..] vis=[..]`.
+///
+/// | field | source | meaning |
+/// |---|---|---|
+/// | `batches` | host | live `DrawBatch` records this frame (`scene.mesh_draw.len()`) |
+/// | `visible` | GPU counter | batches that passed the level-1 AABB test AND carry at least one survivor |
+/// | `list` | GPU `vb_cull_visible` | the compacted visible-BATCH indices, `visible` of them |
+/// | `inst` | GPU `vb_indirect` | word 1 of each record — the post-cull `instanceCount` the rasterizer FETCHES, one per drawn batch, in batch order |
+/// | `vis` | GPU `vb_visible_instance` | `base:members` groups, pipe-separated, one per drawn batch |
+///
+/// # `vis` is decoded PER BATCH, and that is not a formatting choice
+///
+/// Batch `b` owns exactly `[base(b), base(b) + inst[b])` of the survivor list and writes nowhere
+/// else (`vb_batch_cull.comp.hlsl`'s INVARIANT R2d-REGION-DISJOINT). The regions need NOT be
+/// contiguous: the frame loop skips batches whose mesh asset is not `Loaded`, so `scene.mesh_draw`
+/// is a SUBSEQUENCE of the gather's list and consecutive bases can leave gaps. A flat prefix of the
+/// buffer would therefore interleave real survivors with slots no batch owns — which is why each
+/// group carries its own base rather than being positioned by it.
+///
+/// `bases[b]` is the HOST's `base_instance` for drawn batch `b`; the region LENGTH comes from the
+/// GPU's own record word, so the printed group is exactly the range the rasterizer dereferences.
+///
+/// The line's length is a property of the SCENE (batches and their instance counts), never of the
+/// allocation: nothing here iterates a capacity.
+///
+/// `#[cold]`/`#[inline(never)]`: a once-per-process diagnostic, never on the hot path.
+#[cfg(windows)]
+#[cold]
+#[inline(never)]
+fn format_vb_cull_probe_line(
+    drawn_batches: usize,
+    bases: &[u32],
+    rb: &crate::gpu_scene::VbCullReadback,
+) -> String {
+    let join = |v: &[u32]| v.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+    // The counter can EXCEED the list's capacity — the shader counts a dropped entry so a trimmed
+    // list is detectable — so the printable prefix is the minimum of the two.
+    let listed = (rb.visible_batches as usize).min(rb.batch_list.len());
+    let list = join(&rb.batch_list[..listed]);
+
+    // One record per DRAWN batch. `record_instance_counts` spans the whole allocation, so the
+    // frame's own batch count is what bounds it.
+    let recorded = drawn_batches.min(rb.record_instance_counts.len());
+    let inst = join(&rb.record_instance_counts[..recorded]);
+
+    let mut groups: Vec<String> = Vec::with_capacity(recorded);
+    for (b, &base) in bases.iter().take(recorded).enumerate() {
+        let lo = (base as usize).min(rb.visible_instances.len());
+        let hi = lo
+            .saturating_add(rb.record_instance_counts[b] as usize)
+            .min(rb.visible_instances.len());
+        groups.push(format!("{base}:{}", join(&rb.visible_instances[lo..hi])));
+    }
+
+    format!(
+        "VB_CULL_READBACK batches={drawn_batches} visible={} list=[{list}] inst=[{inst}] vis=[{}]",
+        rb.visible_batches,
+        groups.join("|")
+    )
 }
 
 /// VB-SV0 rung S1.5: the MEDIAN of `samples` (ns).
@@ -3732,5 +3801,65 @@ mod sv0_stats_tests {
     fn median_of_an_even_count_averages_the_two_central_values() {
         assert_eq!(sv0_median_ns(&[1024.0, 2048.0, 3072.0, 4096.0]), 2560.0);
         assert_eq!(sv0_median_ns(&[1024.0, 2048.0, 3072.0]), 2048.0);
+    }
+}
+
+/// VG rung R2d-5: the probe line's PER-BATCH survivor decode.
+///
+/// This exists because no GPU gate in the rung can pin it. On every shipped fixture the survivor
+/// list is the identity and the bases are contiguous, so a correct per-batch decode and the
+/// forbidden flat-prefix decode emit the SAME string — the narrow fixture prints
+/// `0:0,1,2|3:3,4,5` either way. The distinguishing input is a scene with NON-CONTIGUOUS bases and
+/// UNEQUAL per-batch counts, which the runtime produces whenever a batch's mesh asset is not
+/// `Loaded` (the gather still assigned it a region; `scene.mesh_draw` skips it), and which only a
+/// synthetic case can exercise here.
+#[cfg(all(test, windows))]
+mod vb_cull_probe_decode_tests {
+    use super::format_vb_cull_probe_line;
+    use crate::gpu_scene::VbCullReadback;
+
+    /// Bases with a HOLE between them and counts that differ, so every wrong decode is visible:
+    /// batch 0 owns `[0, 2)`, batch 1 owns `[5, 8)`, and slots 2..5 belong to a batch that was
+    /// gathered but not drawn.
+    fn readback() -> VbCullReadback {
+        VbCullReadback {
+            visible_batches: 2,
+            batch_list: vec![0, 1, 0, 0],
+            record_instance_counts: vec![2, 3, 0, 0],
+            visible_instances: vec![10, 11, 900, 901, 902, 20, 21, 22, 903, 904],
+        }
+    }
+
+    #[test]
+    fn each_group_is_read_from_its_own_base_not_from_a_running_cursor() {
+        let line = format_vb_cull_probe_line(2, &[0, 5], &readback());
+        assert!(
+            line.contains("vis=[0:10,11|5:20,21,22]"),
+            "the decode must select [base, base+count) per batch. A flat prefix would print \
+             `0:10,11|5:900,901,902` (a running cursor) or splice the hole's contents into the \
+             second group. Got: {line}"
+        );
+        assert!(
+            !line.contains("900") && !line.contains("904"),
+            "slots owned by no drawn batch must never appear: {line}"
+        );
+    }
+
+    #[test]
+    fn a_group_is_bounded_by_its_own_record_word_not_by_the_next_base() {
+        // Batch 1's count is 3 while the gap to the end of the list is 5. Bounding by the next
+        // base (or by the allocation) would print two extra slots the rasterizer never reads.
+        let line = format_vb_cull_probe_line(2, &[0, 5], &readback());
+        let group = line.split('|').nth(1).expect("invariant: two groups are printed");
+        assert!(group.starts_with("5:20,21,22]"), "group must stop at base+count: {group}");
+    }
+
+    #[test]
+    fn a_base_past_the_end_yields_an_empty_group_rather_than_a_panic() {
+        // A truncated VIS region (staging too small) leaves fewer slots than the bases name.
+        let mut rb = readback();
+        rb.visible_instances.truncate(1);
+        let line = format_vb_cull_probe_line(2, &[0, 5], &rb);
+        assert!(line.contains("vis=[0:10|5:]"), "clamping must be silent and total: {line}");
     }
 }

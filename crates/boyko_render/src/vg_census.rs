@@ -24,6 +24,15 @@
 /// mirror of the shader-side `VB_ID_SENTINEL` in `vb_pack.hlsli`.
 pub const VB_ID_SENTINEL: u32 = 0xFFFF_FFFF;
 
+/// How many DISTINCT instance ids [`CensusRow::distinct_instances`] carries at most.
+///
+/// A cap rather than the whole set because the set is written verbatim into a census row and a
+/// top-rung corpus frame can hold thousands of instances, while every consumer of the field asks a
+/// question about a handful. The cap is NOT a silent truncation:
+/// [`CensusRow::distinct_instance_count`] always carries the TRUE distinct count beside it, so an
+/// overflow is readable (`count > list.len()`) instead of looking like a smaller scene.
+pub const CENSUS_DISTINCT_INSTANCE_CAP: usize = 256;
+
 /// The per-pair statistics of one census row.
 ///
 /// Every field here is readable at a single `(path, rung)` pair. Anything indexed by more than one
@@ -46,6 +55,19 @@ pub struct CensusRow {
     /// The most populated bucket, or `None` on an empty frame. Ties take the LOWER bucket, stated
     /// because a silent tie-break would be an unrecorded decision in a decision-bearing statistic.
     pub modal_bucket: Option<u32>,
+    /// **VG rung R2d-5** — the distinct `instance_id`s that won at least one texel, SORTED
+    /// ascending and truncated to [`CENSUS_DISTINCT_INSTANCE_CAP`].
+    ///
+    /// The raster exports a GLOBAL instance-ring index (`vb_raster.vs.hlsl`'s
+    /// `output.instance_id = global`), so this set is the answer to "which instances did the frame
+    /// actually put on screen" — the observable a per-INSTANCE cull's id MAPPING is read through.
+    /// It says nothing about whether the cull rejected anything: a culled instance covers no texel
+    /// either way, so absence from this set is not evidence of culling.
+    pub distinct_instances: Vec<u32>,
+    /// The TRUE number of distinct instance ids, uncapped. Greater than
+    /// `distinct_instances.len()` exactly when the cap bound; carried beside the list so an
+    /// overflow is visible rather than silent.
+    pub distinct_instance_count: u64,
 }
 
 impl CensusRow {
@@ -104,9 +126,17 @@ pub fn reduce(texels: &[[u32; 2]]) -> CensusRow {
 
     // A run of equal keys is one triangle; the run's LENGTH is its covered-pixel count, so the
     // distinct count and the histogram come out of the same pass.
+    //
+    // The DISTINCT INSTANCE set falls out of the same sorted array for free: the key's high 32 bits
+    // are the instance id, so a sorted key array is also sorted by instance, and a change in the
+    // high half starts a new instance exactly as a change in the whole key starts a new triangle.
+    // No second structure, no second sort — and no hash set, which this workspace disallows.
     let mut histogram: Vec<u64> = Vec::new();
     let mut visible_tris = 0u64;
     let mut run_start = 0usize;
+    let mut distinct_instances: Vec<u32> = Vec::new();
+    let mut distinct_instance_count = 0u64;
+    let mut last_instance: Option<u32> = None;
     for i in 1..=keys.len() {
         if i == keys.len() || keys[i] != keys[run_start] {
             visible_tris += 1;
@@ -116,6 +146,14 @@ pub fn reduce(texels: &[[u32; 2]]) -> CensusRow {
                 histogram.resize(bucket + 1, 0);
             }
             histogram[bucket] += 1;
+            let instance = (keys[run_start] >> 32) as u32;
+            if last_instance != Some(instance) {
+                distinct_instance_count += 1;
+                if distinct_instances.len() < CENSUS_DISTINCT_INSTANCE_CAP {
+                    distinct_instances.push(instance);
+                }
+                last_instance = Some(instance);
+            }
             run_start = i;
         }
     }
@@ -131,7 +169,14 @@ pub fn reduce(texels: &[[u32; 2]]) -> CensusRow {
         })
         .map(|(b, _)| b as u32);
 
-    CensusRow { covered_pixels, visible_tris, histogram, modal_bucket }
+    CensusRow {
+        covered_pixels,
+        visible_tris,
+        histogram,
+        modal_bucket,
+        distinct_instances,
+        distinct_instance_count,
+    }
 }
 
 /// The SHA-256 round constants (first 32 bits of the fractional parts of the cube roots of the
@@ -408,6 +453,70 @@ mod tests {
         let row = reduce(&tri(0, 0, 4096));
         assert!(row.covered_pixels >= 1024);
         assert!(!row.is_non_degenerate(1024, 1024), "the triangle floor must bind on its own");
+    }
+
+    // ===========================================================================================
+    // VG rung R2d-5 — the distinct instance-id set
+    // ===========================================================================================
+
+    /// The set is SORTED and DISTINCT, and it is keyed on the instance half of the key alone —
+    /// several triangles of one instance collapse to one entry, and one primitive id appearing
+    /// under two instances yields two.
+    #[test]
+    fn the_distinct_instance_set_is_sorted_and_deduplicated() {
+        let mut t = tri(7, 0, 3);
+        t.extend(tri(7, 1, 3)); // same instance, second primitive
+        t.extend(tri(2, 1, 3)); // LOWER instance, primitive id reused
+        t.extend(tri(7, 0, 1)); // a second, non-adjacent run of an instance already seen
+        let row = reduce(&t);
+        assert_eq!(row.distinct_instances, vec![2, 7], "the set is sorted ascending and distinct");
+        assert_eq!(row.distinct_instance_count, 2);
+        assert_eq!(row.visible_tris, 3, "the triangle count is still keyed on the PAIR");
+    }
+
+    /// A sentinel-only frame has an EMPTY set and a zero count — not a fabricated instance 0.
+    #[test]
+    fn a_sentinel_only_frame_has_no_distinct_instances() {
+        let row = reduce(&vec![[VB_ID_SENTINEL, 0]; 256]);
+        assert!(row.distinct_instances.is_empty());
+        assert_eq!(row.distinct_instance_count, 0);
+        // Sentinel texels must not contribute their own `0xFFFF_FFFF` id either.
+        let mut mixed = tri(5, 0, 4);
+        mixed.extend(vec![[VB_ID_SENTINEL, 0]; 64]);
+        let row = reduce(&mixed);
+        assert_eq!(row.distinct_instances, vec![5], "a miss is not an instance");
+    }
+
+    /// A CAP OVERFLOW IS VISIBLE, not silent: the list stops at the cap while the count keeps
+    /// going, so `count > list.len()` is the overflow signal a consumer can test.
+    #[test]
+    fn a_cap_overflow_is_readable_from_the_count_beside_the_list() {
+        let over = CENSUS_DISTINCT_INSTANCE_CAP as u32 + 37;
+        let texels: Vec<[u32; 2]> = (0..over).flat_map(|i| tri(i, 0, 1)).collect();
+        let row = reduce(&texels);
+        assert_eq!(row.distinct_instances.len(), CENSUS_DISTINCT_INSTANCE_CAP);
+        assert_eq!(
+            row.distinct_instance_count,
+            u64::from(over),
+            "the TRUE count must survive the cap, or a truncated list reads as a smaller scene"
+        );
+        // The kept prefix is the LOWEST ids, because the underlying key array is sorted.
+        assert_eq!(row.distinct_instances[0], 0);
+        assert_eq!(
+            row.distinct_instances[CENSUS_DISTINCT_INSTANCE_CAP - 1],
+            CENSUS_DISTINCT_INSTANCE_CAP as u32 - 1
+        );
+    }
+
+    /// The id ORDERING is the numeric one, not the order texels were encountered — the property a
+    /// consumer comparing against a sorted expectation relies on.
+    #[test]
+    fn the_set_does_not_depend_on_texel_order() {
+        let forward: Vec<[u32; 2]> = [9u32, 1, 4, 1, 9].iter().flat_map(|i| tri(*i, 0, 2)).collect();
+        let backward: Vec<[u32; 2]> =
+            [9u32, 1, 4, 1, 9].iter().rev().flat_map(|i| tri(*i, 0, 2)).collect();
+        assert_eq!(reduce(&forward).distinct_instances, vec![1, 4, 9]);
+        assert_eq!(reduce(&backward).distinct_instances, vec![1, 4, 9]);
     }
 
     fn hash(data: &[u8]) -> String {

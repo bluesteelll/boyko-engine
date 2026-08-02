@@ -145,6 +145,45 @@ pub fn batch_instance_count_after_cull(
     if aabb_outside_frustum(planes, aabb.0, aabb.1) { 0 } else { batch.instance_count }
 }
 
+/// The rung-R2d HOST ORACLE at INSTANCE granularity: `true` iff this one instance survives the
+/// per-instance cull.
+///
+/// The GPU half is `vb_batch_cull.comp.hlsl`'s level 2, whose `keep` expression the arming rung
+/// replaces with exactly this test: the instance's mesh-LOCAL box (`gMeshBounds[mesh_id]`)
+/// Arvo-transformed by that instance's affine (`gVbInstances[...]`), then run through the same six
+/// pushed planes. One test, two granularities — [`batch_instance_count_after_cull`] is the same
+/// predicate over a batch's UNION box.
+///
+/// The abs-matrix fold is [`arvo_transform`](crate::csm_caster::arvo_transform), REUSED rather than
+/// transcribed: this repository already carries two callers of it (`batch_world_aabb` and
+/// `reduce_bounds_into`), and a third copy would be a third text that can disagree with the shader.
+///
+/// # Unknown bounds KEEP
+///
+/// An INVERTED local box (`min > max` on any axis) is the "bounds unknown" sentinel — a
+/// `MeshLocalBounds` row for a mesh that never registered, or the C0 zero-vertex fold — and it
+/// returns `true`. **Absence of bounds is not evidence of invisibility**, and the sentinel's centre
+/// is NaN, so folding it would poison the box rather than merely widen it. This is the same
+/// direction [`batch_instance_count_after_cull`] takes for a `None` batch AABB and the same one
+/// `MeshLocalBounds`' own doc obliges every consumer to take.
+#[must_use]
+pub fn instance_visible_after_cull(
+    planes: &[Plane; FRUSTUM_PLANE_COUNT],
+    instance: &InstanceModelCol,
+    mesh_aabb: ([f32; 3], [f32; 3]),
+) -> bool {
+    let (mn, mx) = mesh_aabb;
+    if mn[0] > mx[0] || mn[1] > mx[1] || mn[2] > mx[2] {
+        return true;
+    }
+    let lc = [(mn[0] + mx[0]) * 0.5, (mn[1] + mx[1]) * 0.5, (mn[2] + mx[2]) * 0.5];
+    let lh = [(mx[0] - mn[0]) * 0.5, (mx[1] - mn[1]) * 0.5, (mx[2] - mn[2]) * 0.5];
+    let (wc, wh) = crate::csm_caster::arvo_transform(&instance.rows, lc, lh);
+    let min = [wc[0] - wh[0], wc[1] - wh[1], wc[2] - wh[2]];
+    let max = [wc[0] + wh[0], wc[1] + wh[1], wc[2] + wh[2]];
+    !aabb_outside_frustum(planes, min, max)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,5 +371,172 @@ mod tests {
         let n = f32::NAN;
         assert!(!aabb_outside_frustum(&planes, [n, n, n], [n, n, n]));
         assert!(!aabb_outside_frustum(&planes, [99.0, n, -5.5], [100.0, n, -4.5]));
+    }
+
+    // ===========================================================================================
+    // VG rung R2d — the per-INSTANCE oracle
+    //
+    // Every expectation below is HAND-COMPUTED from `perspective_at_origin`'s own rows, never
+    // read off a second implementation: an oracle checked against an oracle agrees about its
+    // shared mistakes.
+    // ===========================================================================================
+
+    /// The unit cube in model space — half-extent `0.5` on every axis, so a plane's projected
+    /// radius is `(|a| + |b| + |c|) * 0.5` for the identity affine.
+    const UNIT_CUBE: ([f32; 3], [f32; 3]) = ([-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]);
+
+    /// A translation-only instance row (identity linear part).
+    fn at(t: [f32; 3]) -> InstanceModelCol {
+        InstanceModelCol {
+            rows: [[1.0, 0.0, 0.0, t[0]], [0.0, 1.0, 0.0, t[1]], [0.0, 0.0, 1.0, t[2]]],
+        }
+    }
+
+    /// The right plane of [`perspective_at_origin`] is `pv[3] - pv[0] = (-1, 0, -1, 0)`, i.e.
+    /// inside ⇒ `-x - z ≥ 0` ⇒ `x ≤ -z`. At `z = -6` the frustum admits `x ≤ 6`, and a unit cube's
+    /// projected radius on that normal is `(1 + 0 + 1) * 0.5 = 1`.
+    ///
+    /// So the closed form rejects exactly when `(-x + 6) + 1 < 0`, i.e. `x > 7`. Both sides of that
+    /// boundary are asserted, by hand:
+    ///
+    /// * `x = 8` ⇒ `-2 + 1 = -1 < 0` ⇒ CULLED;
+    /// * `x = 6.4` ⇒ `-0.4 + 1 = 0.6 ≥ 0` ⇒ KEPT (the box straddles the plane, which the
+    ///   conservative test must never reject).
+    #[test]
+    fn the_instance_oracle_rejects_past_the_hand_computed_plane_boundary() {
+        let planes = frustum_planes_from_view_proj(&perspective_at_origin());
+        assert!(
+            !instance_visible_after_cull(&planes, &at([8.0, 0.0, -6.0]), UNIT_CUBE),
+            "x = 8 at z = -6 is one unit outside the right plane once the cube's radius is \
+             credited — the oracle must reject it"
+        );
+        assert!(
+            instance_visible_after_cull(&planes, &at([6.4, 0.0, -6.0]), UNIT_CUBE),
+            "x = 6.4 at z = -6 straddles the right plane (0.6 of the cube is still inside); a \
+             conservative cull that rejects it would delete visible geometry"
+        );
+        // BEHIND the camera, on the near plane `pv[2]` — the case an OpenGL-style extraction gets
+        // wrong on this matrix. `pv[2] = (0, 0, fa/(n-fa), fa*n/(n-fa))` with `fa/(n-fa) < 0`, so
+        // at `z = +6` the centre distance is strongly negative and the radius is ~0.5.
+        assert!(
+            !instance_visible_after_cull(&planes, &at([0.0, 0.0, 6.0]), UNIT_CUBE),
+            "an instance behind the camera must be rejected"
+        );
+        assert!(
+            instance_visible_after_cull(&planes, &at([0.0, 0.0, -6.0]), UNIT_CUBE),
+            "an instance squarely in front of the camera must be kept"
+        );
+    }
+
+    /// UNKNOWN BOUNDS ⇒ KEEP. An inverted local box is the sentinel a mesh that never registered
+    /// (or the C0 zero-vertex fold) leaves behind; it must not read as "empty, therefore invisible".
+    ///
+    /// Asserted at a position the oracle rejects with REAL bounds, so the test cannot pass merely
+    /// because the instance happens to be on screen.
+    #[test]
+    fn an_instance_with_inverted_sentinel_bounds_is_kept_not_culled() {
+        let planes = frustum_planes_from_view_proj(&perspective_at_origin());
+        let far_off = at([80.0, 0.0, -6.0]);
+        assert!(
+            !instance_visible_after_cull(&planes, &far_off, UNIT_CUBE),
+            "the fixture position must be REJECTED with real bounds, or the sentinel assertion \
+             below proves nothing"
+        );
+        // The `MeshLocalBounds` sentinel shape: min > max on every axis.
+        let sentinel = ([1.0f32, 1.0, 1.0], [-1.0f32, -1.0, -1.0]);
+        assert!(
+            instance_visible_after_cull(&planes, &far_off, sentinel),
+            "absence of bounds is not evidence of invisibility — a streaming-in mesh would pop"
+        );
+        // Inverted on ONE axis only is still the sentinel: the fold's centre would be finite but
+        // the half-extent negative, which is not a box at all.
+        let one_axis = ([-0.5f32, 1.0, -0.5], [0.5f32, -1.0, 0.5]);
+        assert!(instance_visible_after_cull(&planes, &far_off, one_axis));
+    }
+
+    /// A SHEARED affine, and the assertion is two-sided against the `abs` in the Arvo fold.
+    ///
+    /// The instance's linear part is `r0 = (1, -4, 0)`, so the world half-extent along X is
+    /// `|1|*0.5 + |-4|*0.5 = 2.5` WITH the absolute value and `1*0.5 + (-4)*0.5 = -1.5` without it.
+    /// Centred at `x = 7, z = -6`, the right plane `(-1, 0, -1, 0)` gives centre distance
+    /// `-7 + 6 = -1` and radius `wh_x + wh_z`:
+    ///
+    /// * with `abs`: `2.5 + 0.5 = 3.0` ⇒ `-1 + 3 = 2 ≥ 0` ⇒ KEPT;
+    /// * without `abs`: `-1.5 + 0.5 = -1.0` ⇒ `-1 + (-1) = -2 < 0` ⇒ CULLED.
+    ///
+    /// The counterfactual box is built here by hand and fed to the SHIPPED plane test, so the
+    /// "a mutation dropping the abs would flip this" claim is executed rather than asserted in
+    /// prose.
+    #[test]
+    fn a_sheared_instance_needs_the_abs_in_the_arvo_fold() {
+        let planes = frustum_planes_from_view_proj(&perspective_at_origin());
+        let sheared = InstanceModelCol {
+            rows: [[1.0, -4.0, 0.0, 7.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, -6.0]],
+        };
+        assert!(
+            instance_visible_after_cull(&planes, &sheared, UNIT_CUBE),
+            "the sheared box reaches back into the frustum (half-extent 2.5 along X against a \
+             centre 1 unit outside the right plane) and must be KEPT"
+        );
+
+        // The mutation, spelled out: the same fold with the absolute values removed.
+        let lh = [0.5f32, 0.5, 0.5];
+        let mut wc = [0.0f32; 3];
+        let mut wh_no_abs = [0.0f32; 3];
+        for r in 0..3 {
+            let row = sheared.rows[r];
+            wc[r] = row[3];
+            wh_no_abs[r] = row[0] * lh[0] + row[1] * lh[1] + row[2] * lh[2];
+        }
+        assert_eq!(wh_no_abs[0], -1.5, "the counterfactual half-extent is the one the doc names");
+        assert!(
+            aabb_outside_frustum(
+                &planes,
+                [wc[0] - wh_no_abs[0], wc[1] - wh_no_abs[1], wc[2] - wh_no_abs[2]],
+                [wc[0] + wh_no_abs[0], wc[1] + wh_no_abs[1], wc[2] + wh_no_abs[2]],
+            ),
+            "an abs-less fold must REJECT this instance — if it does not, this fixture cannot \
+             detect the mutation it exists for"
+        );
+    }
+
+    /// The union implication, at the two granularities the rung compares: a batch whose UNION box
+    /// is rejected has every member rejected. Stated as a test because the whole per-instance rung
+    /// rests on it, and a fold that lost an instance would break it silently.
+    #[test]
+    fn a_rejected_batch_implies_every_member_instance_is_rejected() {
+        let planes = frustum_planes_from_view_proj(&perspective_at_origin());
+        // Three instances, all far to the right of the frustum at z = -6 (the boundary is x = 7).
+        let ring = [at([40.0, 0.0, -6.0]), at([41.0, 0.5, -6.0]), at([42.0, -0.5, -6.0])];
+        let batch = DrawBatch {
+            mesh_id: 0,
+            index_count: 36,
+            index_type: boyko_rhi::IndexType::Uint16,
+            base_instance: 0,
+            instance_count: 3,
+        };
+        assert_eq!(
+            batch_instance_count_after_cull(&planes, &batch, &ring, Some(UNIT_CUBE)),
+            0,
+            "the union of three off-screen boxes is off-screen"
+        );
+        for (i, inst) in ring.iter().enumerate() {
+            assert!(
+                !instance_visible_after_cull(&planes, inst, UNIT_CUBE),
+                "member {i} of a rejected batch must itself be rejected"
+            );
+        }
+        // The converse must NOT hold, or per-instance granularity buys nothing: one member inside
+        // keeps the whole batch while the other two stay individually rejected.
+        let mixed = [at([0.0, 0.0, -6.0]), ring[1], ring[2]];
+        assert_eq!(
+            batch_instance_count_after_cull(&planes, &batch, &mixed, Some(UNIT_CUBE)),
+            3,
+            "a batch with one visible member keeps ALL THREE at batch granularity — this is the \
+             waste the per-instance rung exists to remove"
+        );
+        assert!(instance_visible_after_cull(&planes, &mixed[0], UNIT_CUBE));
+        assert!(!instance_visible_after_cull(&planes, &mixed[1], UNIT_CUBE));
+        assert!(!instance_visible_after_cull(&planes, &mixed[2], UNIT_CUBE));
     }
 }

@@ -113,6 +113,118 @@ pub(crate) fn vb_cull_batch_count_visible_clamp(
         .unwrap_or(mesh_draw.len())
 }
 
+/// VG rung R2d-5: byte offset of the cull readback staging's COUNT region. The other three offsets
+/// are derived from the region sizes ([`VbCullReadbackLayout`]), because only the first one can be
+/// a constant — the rest depend on how large the buffers they follow actually are.
+pub(crate) const VB_CULL_READBACK_COUNT_OFFSET: u64 = 0;
+
+/// VG rung R2d-5: the four region SIZES of the cull readback staging, in staging order —
+/// COUNT | LIST | RECORDS | VIS.
+///
+/// Every field is the byte size of the ALLOCATION that region copies, capped by whatever the
+/// staging still has unassigned. There is deliberately no "remainder" region and no literal size:
+/// rung R2c-tail's `rb.size - 16` could not be checked against its source, and the design draft
+/// that preceded this rung proposed the literals "8 records" and "32 entries", neither of which can
+/// hold the 45-instance, 7-batch corpus the probe exists to observe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct VbCullReadbackLayout {
+    /// Bytes copied from the visible-BATCH counter (`vb_cull_count`).
+    pub(crate) count: u64,
+    /// Bytes copied from the compacted visible-BATCH list (`vb_cull_visible`).
+    pub(crate) list: u64,
+    /// Bytes copied from the indirect draw-record array (`vb_indirect`) — the post-cull
+    /// `instanceCount` words live at word 1 of each record.
+    pub(crate) records: u64,
+    /// Bytes copied from the per-INSTANCE survivor list (`vb_visible_instance`).
+    pub(crate) vis: u64,
+}
+
+impl VbCullReadbackLayout {
+    /// Destination byte offset of the LIST region — the COUNT region begins the staging at
+    /// [`VB_CULL_READBACK_COUNT_OFFSET`], so the LIST begins where it ends.
+    pub(crate) const fn list_offset(&self) -> u64 {
+        self.count
+    }
+
+    /// Destination byte offset of the RECORDS region.
+    pub(crate) const fn records_offset(&self) -> u64 {
+        self.list_offset() + self.list
+    }
+
+    /// Destination byte offset of the VIS region.
+    pub(crate) const fn vis_offset(&self) -> u64 {
+        self.records_offset() + self.records
+    }
+
+    /// Total staging bytes the four regions occupy.
+    pub(crate) const fn total(&self) -> u64 {
+        self.vis_offset() + self.vis
+    }
+
+    /// `true` iff every region carries its whole source buffer — i.e. the staging was large enough
+    /// and nothing was silently trimmed.
+    pub(crate) const fn is_untruncated(
+        &self,
+        count_bytes: u64,
+        list_bytes: u64,
+        records_bytes: u64,
+        vis_bytes: u64,
+    ) -> bool {
+        self.count == count_bytes
+            && self.list == list_bytes
+            && self.records == records_bytes
+            && self.vis == vis_bytes
+    }
+}
+
+/// Packs the four cull output allocations into the readback staging.
+///
+/// Each region takes its SOURCE buffer's size, capped by the staging bytes the regions before it
+/// left unassigned. That cap is what makes an overflowing copy unrepresentable rather than merely
+/// unlikely: a staging smaller than the four sources produces short (or zero-length) trailing
+/// regions, which the caller skips, instead of a `vkCmdCopyBuffer` writing past the allocation —
+/// undefined with `robustBufferAccess` off and invisible to the validation layers, which do not
+/// follow buffer contents.
+///
+/// The host sizes the staging from the same four capacity constants (`boyko_app`'s
+/// `VB_CULL_READBACK_BYTES`), so on every real boot nothing is trimmed and the recorder's
+/// `debug_assert` on [`VbCullReadbackLayout::is_untruncated`] holds.
+pub(crate) fn vb_cull_readback_layout(
+    count_bytes: u64,
+    list_bytes: u64,
+    records_bytes: u64,
+    vis_bytes: u64,
+    staging_bytes: u64,
+) -> VbCullReadbackLayout {
+    // TWO properties, and each rules out a different silent corruption.
+    //
+    // ALL-OR-NOTHING per region, not `min`: a `min` makes a PARTIAL region representable, so a
+    // staging one byte short would yield a 20479-of-20480-byte RECORDS copy and the decode would
+    // read a record array truncated mid-record while every length it checks still looked sane.
+    //
+    // PREFIX, not per-region: once one region does not fit, every LATER one is dropped too, even
+    // if it would have fitted in the space the dropped one vacated. Letting a successor slide
+    // forward would move its destination offset — and the host decodes at CONSTANT offsets, so a
+    // slid region is read as the wrong bytes rather than as missing data. This is the same
+    // monotone-prefix discipline `vb_cull_batch_count_visible_clamp` applies to batches, for the
+    // same reason: a hole in the middle is undetectable downstream, a truncated tail is not.
+    let mut remaining = staging_bytes;
+    let mut take = |want: u64| {
+        if want <= remaining {
+            remaining -= want;
+            want
+        } else {
+            remaining = 0;
+            0
+        }
+    };
+    let count = take(count_bytes);
+    let list = take(list_bytes);
+    let records = take(records_bytes);
+    let vis = take(vis_bytes);
+    VbCullReadbackLayout { count, list, records, vis }
+}
+
 impl Renderer<'_> {
     /// Records the VisibilityBuffer on-screen frame: `light_upload? → csm? → atlas? → vb_sky →
     /// vb_raster → vb_resolve → present-blit` — EXACTLY [`Renderer::declare_vb_graph`]'s
@@ -969,27 +1081,84 @@ impl Renderer<'_> {
                     // copies below. Without it the copy could read the counter before the
                     // dispatch's writes landed — and it would usually look right.
                     self.record_vb_pass(rb_pass, cmd, targets, forward, vb, scene, fi);
-                    let count_region = VkBufferCopy { src_offset: 0, dst_offset: 0, size: 16 };
-                    let list_region = VkBufferCopy {
-                        src_offset: 0,
-                        dst_offset: 16,
-                        size: rb[fi].size - 16,
-                    };
-                    // SAFETY: recording is open and outside any render scope; `count[fi]` and
-                    // `visible[fi]` are live TRANSFER_SRC device buffers and `rb[fi]` is a live
-                    // TRANSFER_DST host-visible staging. The counter copy takes 16 B from a 16-B
-                    // buffer; the list copy takes `rb.size - 16` B, and `rb` is sized to
-                    // `16 + INDICES * 4` with `INDICES * 4` far below the visible list's own
-                    // `INSTANCE_CAPACITY * 4`. Both regions outlive their calls.
-                    unsafe {
-                        (self.fns.cmd_copy_buffer)(cmd, count[fi].buffer, rb[fi].buffer, 1, &count_region);
-                        (self.fns.cmd_copy_buffer)(cmd, visible[fi].buffer, rb[fi].buffer, 1, &list_region);
+
+                    // === VG rung R2d-5: FOUR named regions, every size taken from the ALLOCATION
+                    // it copies. ===
+                    //
+                    // Rung R2c-tail copied the counter and then `rb.size - 16` — a REMAINDER, which
+                    // is the one region shape that cannot be checked against its source: it is
+                    // whatever the staging has left, so a staging that grew or shrank silently
+                    // changed how much of the visible list was read. Each region below names its
+                    // source buffer and takes that buffer's own `size`.
+                    let indirect = scene
+                        .vb_indirect
+                        .expect("invariant: batch_cull_armed => vb_indirect");
+                    let vis = scene
+                        .vb_visible_instance
+                        .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_visible_instance");
+                    let layout = vb_cull_readback_layout(
+                        count[fi].size,
+                        visible[fi].size,
+                        indirect[fi].size,
+                        vis[fi].size,
+                        rb[fi].size,
+                    );
+                    debug_assert!(
+                        layout.is_untruncated(
+                            count[fi].size,
+                            visible[fi].size,
+                            indirect[fi].size,
+                            vis[fi].size,
+                        ),
+                        // `total() <= rb.size` is NOT asserted beside this: it is IMPLIED. If every
+                        // region received its whole source then each already fitted the staging
+                        // remaining at its turn, so the sum cannot exceed it. Asserting both would
+                        // read as two independent checks when one is a restatement of the other.
+                        "invariant: the cull readback staging holds all four regions whole \
+                         (count {} + list {} + records {} + vis {} = {} into a {}-byte staging)",
+                        count[fi].size,
+                        visible[fi].size,
+                        indirect[fi].size,
+                        vis[fi].size,
+                        layout.total(),
+                        rb[fi].size
+                    );
+                    let copies = [
+                        (count[fi].buffer, layout.count, VB_CULL_READBACK_COUNT_OFFSET),
+                        (visible[fi].buffer, layout.list, layout.list_offset()),
+                        (indirect[fi].buffer, layout.records, layout.records_offset()),
+                        (vis[fi].buffer, layout.vis, layout.vis_offset()),
+                    ];
+                    for (src, size, dst_offset) in copies {
+                        // `vkCmdCopyBuffer` forbids a zero-size region
+                        // (VUID-VkBufferCopy-size-00112); a region the staging could not hold is
+                        // skipped rather than clamped to nothing.
+                        if size == 0 {
+                            continue;
+                        }
+                        let region = VkBufferCopy { src_offset: 0, dst_offset, size };
+                        // SAFETY: recording is open and outside any render scope. `src` is one of
+                        // the four live cull buffers, each created with `TRANSFER_SRC`
+                        // (`vb_cull_count`, `vb_cull_visible`, `vb_indirect` and
+                        // `vb_visible_instance` — see `GpuSceneBundles::boot`), and `rb[fi]` is the
+                        // live host-visible `TRANSFER_DST` staging. `vb_cull_readback_layout`
+                        // computed `size` as `min(src_size, staging bytes still unassigned)` and
+                        // assigned the four regions in order, so `dst_offset + size <= rb[fi].size`
+                        // and `size <= src.size` both hold for every element of `copies` — the
+                        // source read and the destination write are each in bounds. `region` is a
+                        // local that outlives the call.
+                        unsafe {
+                            (self.fns.cmd_copy_buffer)(cmd, src, rb[fi].buffer, 1, &region);
+                        }
                     }
                 }
 
                 // The cull's `vb_indirect` write is made visible to the raster's indirect FETCH by
                 // the graph: derived at the reader (`vb_raster`'s own `DRAW_INDIRECT` access), not
-                // here.
+                // here. Under the probe there is now a TRANSFER read between the two, so that one
+                // edge becomes two — `COMPUTE -> TRANSFER` (availability) then
+                // `TRANSFER -> DRAW_INDIRECT` (visibility) — which `declare_vb_graph`'s
+                // `vb_cull_readback` block records in full. Still derived, still at the reader.
             }
 
             // SAFETY: recording is open; `record_vb_pass` records the graph's derived
@@ -2941,6 +3110,73 @@ impl Renderer<'_> {
             );
             (self.fns.cmd_dispatch)(cmd, group_x, group_y, 1);
         }
+    }
+}
+
+#[cfg(test)]
+mod vb_cull_readback_layout_tests {
+    use super::vb_cull_readback_layout;
+
+    /// The four real source sizes on every current boot, spelled here so the exact-fit case pins
+    /// the shipped geometry rather than an invented one: counter 16 B, batch list
+    /// `INSTANCE_CAPACITY * 4`, records `INSTANCE_CAPACITY * DRAW_INDEXED_INDIRECT_STRIDE`,
+    /// survivor list `INSTANCE_CAPACITY * 4`.
+    const COUNT: u64 = 16;
+    const LIST: u64 = 1024 * 4;
+    const RECORDS: u64 = 1024 * 20;
+    const VIS: u64 = 1024 * 4;
+    const TOTAL: u64 = COUNT + LIST + RECORDS + VIS;
+
+    #[test]
+    fn the_shipped_staging_fits_all_four_regions_at_their_documented_offsets() {
+        let l = vb_cull_readback_layout(COUNT, LIST, RECORDS, VIS, TOTAL);
+        assert_eq!((l.count, l.list, l.records, l.vis), (COUNT, LIST, RECORDS, VIS));
+        assert_eq!(l.list_offset(), 16);
+        assert_eq!(l.records_offset(), 16 + 4096);
+        assert_eq!(l.vis_offset(), 16 + 4096 + 20480);
+        assert_eq!(l.total(), 28688, "the staging the host allocates must equal what is packed");
+        assert!(l.is_untruncated(COUNT, LIST, RECORDS, VIS));
+    }
+
+    /// THE PROPERTY THAT MADE `min` WRONG: a region either carries its whole source or is absent.
+    /// A partial copy would truncate a record array mid-record while every length the decode reads
+    /// still looked sane, and nothing downstream could detect it.
+    #[test]
+    fn a_region_that_does_not_fit_whole_is_dropped_rather_than_truncated() {
+        // One byte short of the full packing: VIS cannot fit, so it must be 0 — never 4095.
+        let l = vb_cull_readback_layout(COUNT, LIST, RECORDS, VIS, TOTAL - 1);
+        assert_eq!(l.vis, 0, "a short trailing region must be dropped, not truncated");
+        assert_eq!((l.count, l.list, l.records), (COUNT, LIST, RECORDS));
+        assert!(!l.is_untruncated(COUNT, LIST, RECORDS, VIS), "and the truncation must be visible");
+
+        // One byte short of RECORDS. VIS would FIT in the space RECORDS vacated (4096 <= 20479),
+        // and letting it slide there is the defect this case exists to forbid: the host decodes at
+        // constant offsets, so a slid region is read as the WRONG BYTES rather than as missing
+        // data. The packing is a prefix, so VIS drops too.
+        let l = vb_cull_readback_layout(COUNT, LIST, RECORDS, VIS, COUNT + LIST + RECORDS - 1);
+        assert_eq!(
+            (l.records, l.vis),
+            (0, 0),
+            "a dropped region must drop every successor, not let one slide forward into its space"
+        );
+    }
+
+    #[test]
+    fn a_staging_too_small_for_even_the_counter_packs_nothing() {
+        let l = vb_cull_readback_layout(COUNT, LIST, RECORDS, VIS, COUNT - 1);
+        assert_eq!((l.count, l.list, l.records, l.vis), (0, 0, 0, 0));
+        assert_eq!(l.total(), 0);
+        assert!(!l.is_untruncated(COUNT, LIST, RECORDS, VIS));
+    }
+
+    #[test]
+    fn a_zero_sized_source_is_not_a_truncation() {
+        // An absent optional buffer reports size 0; the layout must call that untruncated, or the
+        // recorder's debug_assert would fire on a legitimately empty source.
+        let l = vb_cull_readback_layout(COUNT, LIST, 0, VIS, TOTAL);
+        assert_eq!(l.records, 0);
+        assert_eq!(l.vis_offset(), COUNT + LIST);
+        assert!(l.is_untruncated(COUNT, LIST, 0, VIS));
     }
 }
 

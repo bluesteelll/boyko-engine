@@ -139,17 +139,81 @@ use tlas::TlasResources;
 /// plan R7.
 pub(crate) const INSTANCE_CAPACITY: usize = 1024;
 
-/// VG rung R2c-tail: the cull readback staging's size — the 16-byte counter block followed by the
-/// first [`VB_CULL_READBACK_INDICES`] entries of the compacted visible list.
+/// VG rung R2c0: the visible-batch COUNTER allocation's byte size. One live `u32` at element 0,
+/// allocated at 16 B so the buffer keeps a 16-byte-aligned tail under any allocator packing.
 ///
-/// A PREFIX of the list, not all of it: the count is the decisive number, and the prefix is what
-/// makes "the count is right but the list is garbage" detectable. Reading the whole 4 KiB list
-/// would buy nothing the prefix does not.
-pub(crate) const VB_CULL_READBACK_BYTES: u64 = 16 + (VB_CULL_READBACK_INDICES as u64) * 4;
+/// Named rather than spelled at the create site because the readback's COUNT region is sized from
+/// it: a region sized by a bare literal is exactly the drift the VB-P1j lesson closed.
+pub(crate) const VB_CULL_COUNT_BYTES: u64 = 16;
 
-/// How many visible-list entries the readback carries.
-pub(crate) const VB_CULL_READBACK_INDICES: usize = 32;
+/// VG rung R2c0: the compacted visible-BATCH list allocation's byte size — one `u32` per batch, and
+/// batches are bounded by instances, so [`INSTANCE_CAPACITY`] is the ceiling.
+pub(crate) const VB_CULL_VISIBLE_BYTES: u64 = (INSTANCE_CAPACITY as u64) * 4;
 
+/// Rung R2a': the indirect draw-record allocation's byte size — one
+/// `VkDrawIndexedIndirectCommand` per batch.
+pub(crate) const VB_INDIRECT_BYTES: u64 =
+    (INSTANCE_CAPACITY as u64) * boyko_rhi_vulkan::ffi::DRAW_INDEXED_INDIRECT_STRIDE as u64;
+
+/// VG rung R2d-2: the per-INSTANCE survivor-list allocation's byte size.
+pub(crate) const VB_VISIBLE_INSTANCE_BYTES: u64 = (VB_VISIBLE_INSTANCE_ELEMS as u64) * 4;
+
+// ── VG rung R2d-5: the cull readback staging's FOUR regions ────────────────────────────────────
+//
+// Rung R2c-tail's staging was a 16-byte counter block plus a `size - 16` REMAINDER, and the
+// remainder is what this rung removes: a region whose size is "whatever is left" cannot be checked
+// against the buffer it copies, and the design draft that preceded this rung proposed replacing it
+// with the literals `8 records` and `32 entries` — numbers that cannot even hold the 45-instance,
+// 7-batch corpus the probe is meant to observe. EVERY region below is sized from the ALLOCATION it
+// copies (or from the capacity constant that sized that allocation), and the recorder
+// (`present/passes/vb.rs`) derives the same four sizes from `BoundBuffer::size` at record time, so
+// the two agree by derivation rather than by a matching pair of literals.
+//
+// Layout, in staging order: COUNT | LIST | RECORDS | VIS.
+
+/// Byte offset of the COUNT region — the cull's visible-BATCH counter, copied from `vb_cull_count`.
+pub(crate) const VB_CULL_READBACK_COUNT_OFFSET: u64 = 0;
+
+/// Byte offset of the LIST region — the compacted visible-BATCH indices, from `vb_cull_visible`.
+/// The COUNT region starts the staging at [`VB_CULL_READBACK_COUNT_OFFSET`] (zero), so the LIST
+/// begins exactly where the counter's own allocation ends.
+pub(crate) const VB_CULL_READBACK_LIST_OFFSET: u64 = VB_CULL_COUNT_BYTES;
+
+/// Byte offset of the RECORDS region — the whole `vb_indirect` record array, whose word 1 per
+/// 20-byte record is the post-cull `instanceCount` the rasterizer actually fetches.
+pub(crate) const VB_CULL_READBACK_RECORDS_OFFSET: u64 =
+    VB_CULL_READBACK_LIST_OFFSET + VB_CULL_VISIBLE_BYTES;
+
+/// Byte offset of the VIS region — the per-INSTANCE survivor list, from `vb_visible_instance`.
+pub(crate) const VB_CULL_READBACK_VIS_OFFSET: u64 =
+    VB_CULL_READBACK_RECORDS_OFFSET + VB_INDIRECT_BYTES;
+
+/// The cull readback staging's total size: the four regions, back to back.
+pub(crate) const VB_CULL_READBACK_BYTES: u64 =
+    VB_CULL_READBACK_VIS_OFFSET + VB_VISIBLE_INSTANCE_BYTES;
+
+/// VG rung R2d-5: one frame's decoded cull readback — every region of the staging, in host form.
+///
+/// Each vector spans its whole ALLOCATION, not the frame's live prefix: the readback has no way to
+/// know a batch count, and slicing here would put a policy decision inside the decoder. The caller
+/// holds the frame's own batch count and slices with it.
+pub(crate) struct VbCullReadback {
+    /// The cull's `InterlockedAdd` counter: batches that passed the level-1 AABB test AND carry at
+    /// least one level-2 survivor (`vb_batch_cull.comp.hlsl`'s `visible && k > 0u` gate).
+    pub(crate) visible_batches: u32,
+    /// The compacted visible-BATCH indices. Only the first [`Self::visible_batches`] entries are
+    /// written this frame, and the counter may exceed the list's capacity — the shader's
+    /// clamp-and-drop discipline — so a reader must take the MINIMUM of the two.
+    pub(crate) batch_list: Vec<u32>,
+    /// Word 1 of each `VkDrawIndexedIndirectCommand`: the post-cull `instanceCount` the
+    /// rasterizer's indirect fetch actually reads, in batch order.
+    pub(crate) record_instance_counts: Vec<u32>,
+    /// The per-INSTANCE survivor list. Batch `b` owns exactly
+    /// `[base_instance(b), base_instance(b) + record_instance_counts[b])` and writes nowhere else,
+    /// so this must be read PER BATCH — a flat prefix interleaves real entries with slots no batch
+    /// owns (the runner skips batches whose mesh is not `Loaded`, so the bases can leave gaps).
+    pub(crate) visible_instances: Vec<u32>,
+}
 
 /// Textured-PBR T6c (review O3): the boot capacity of
 /// [`TexturedResources::tex_instance_material_rings`] — an INDEPENDENT literal (not
@@ -3646,18 +3710,27 @@ impl GpuSceneBundles {
         // BATCH count (batches <= instances, since every batch holds at least one instance), and at
         // 20 B/record the whole array is 20 KiB -- comfortably inside `vkCmdUpdateBuffer`'s 65536-byte
         // inline limit, which is the constraint that actually binds here.
-        let vb_indirect_bytes =
-            (INSTANCE_CAPACITY as u64) * u64::from(boyko_rhi_vulkan::ffi::DRAW_INDEXED_INDIRECT_STRIDE);
         const _: () = assert!(
             INSTANCE_CAPACITY * 20 <= 65536,
             "rung R2a': the indirect record array must fit vkCmdUpdateBuffer's inline limit"
         );
         let vb_indirect: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
             ctx.create_buffer(&BufferDesc {
-                size: vb_indirect_bytes,
+                size: VB_INDIRECT_BYTES,
                 // Rung R2c0 added STORAGE: the batch cull rewrites `instanceCount` in place, so
                 // the same allocation is now both a compute UAV and an indirect-fetch source.
-                usage: BufferUsage::INDIRECT | BufferUsage::TRANSFER_DST | BufferUsage::STORAGE,
+                // Rung R2d-5 spells TRANSFER_SRC: the readback probe copies this array's
+                // post-cull `instanceCount` words, which is the only place the number the
+                // rasterizer FETCHES can be observed (the descriptors carry the pre-cull one).
+                // The bit is DECLARATIVE, not enabling — `create_buffer` already ORs
+                // TRANSFER_SRC | TRANSFER_DST into every DeviceLocal buffer, so the created usage
+                // is byte-identical with or without it. It is written to state the intent and to
+                // match `vb_cull_visible`'s spelling; no reader should conclude the copy depended
+                // on this edit.
+                usage: BufferUsage::INDIRECT
+                    | BufferUsage::TRANSFER_DST
+                    | BufferUsage::STORAGE
+                    | BufferUsage::TRANSFER_SRC,
                 location: MemoryLocation::DeviceLocal,
             })
             .expect("invariant: VB indirect-draw record buffer create")
@@ -3681,18 +3754,17 @@ impl GpuSceneBundles {
         // it claims to describe, and nothing detects it (`robustBufferAccess` is off here).
         let vb_cull_visible: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
             ctx.create_buffer(&BufferDesc {
-                size: (INSTANCE_CAPACITY as u64) * 4,
+                size: VB_CULL_VISIBLE_BYTES,
                 usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC,
                 location: MemoryLocation::DeviceLocal,
             })
             .expect("invariant: VB cull visible-list buffer create")
         });
-        // The visible counter. One live `u32`, but allocated at 16 B so the buffer keeps a
-        // 16-byte-aligned tail under any allocator packing; `vkCmdFillBuffer` zeroes the whole
-        // range each frame regardless.
+        // The visible counter — [`VB_CULL_COUNT_BYTES`]; `vkCmdFillBuffer` zeroes the whole range
+        // each frame regardless of how much of it is live.
         let vb_cull_count: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
             ctx.create_buffer(&BufferDesc {
-                size: 16,
+                size: VB_CULL_COUNT_BYTES,
                 usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
                 location: MemoryLocation::DeviceLocal,
             })
@@ -3701,8 +3773,8 @@ impl GpuSceneBundles {
         // Virtual-geometry ladder, rung R2d-2: the per-INSTANCE survivor list — one `u32` global
         // instance id per surviving instance, compacted by the R2d cull. Sized `INSTANCE_CAPACITY`
         // ids because that is the ceiling on the instances a frame can carry (the same bound the
-        // instance ring itself is sized to). `TRANSFER_SRC` matches `vb_cull_visible`'s usage so a
-        // later rung can extend the R2c-tail readback probe over it; NOTHING copies it this rung.
+        // instance ring itself is sized to). `TRANSFER_SRC` matches `vb_cull_visible`'s usage, and
+        // since rung R2d-5 it is USED: the cull readback probe's VIS region copies this buffer.
         //
         // Allocated UNCONDITIONALLY, like `vb_indirect` and the three R2c0 buffers above and
         // unlike the R2d-1 bounds table — it is a per-frame GPU-private output owned by this
@@ -3718,7 +3790,7 @@ impl GpuSceneBundles {
         // absence of GPU work.
         let vb_visible_instance: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
             ctx.create_buffer(&BufferDesc {
-                size: (VB_VISIBLE_INSTANCE_ELEMS as u64) * 4,
+                size: VB_VISIBLE_INSTANCE_BYTES,
                 usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC,
                 location: MemoryLocation::DeviceLocal,
             })
@@ -6414,8 +6486,8 @@ impl GpuSceneBundles {
         self.cluster_cull_pipeline.is_some()
     }
 
-    /// VG rung R2c-tail: reads this frame's cull outputs out of the readback staging —
-    /// `(visible_count, visible_prefix)`. `None` when the probe is unarmed.
+    /// VG rung R2c-tail / R2d-5: reads this frame's cull outputs out of the readback staging.
+    /// `None` when the probe is unarmed.
     ///
     /// # Ordering contract
     ///
@@ -6423,22 +6495,79 @@ impl GpuSceneBundles {
     /// (the runner waits the device idle, mirroring `read_vb_bench_ns`'s own discipline). The
     /// staging is HOST_COHERENT, so no explicit invalidate is needed once the copy has completed;
     /// what is needed is that it HAS completed, and that is the caller's fence, not this fn's.
-    pub(crate) fn read_vb_cull(&self, fi: usize) -> Option<(u32, [u32; VB_CULL_READBACK_INDICES])> {
+    pub(crate) fn read_vb_cull(&self, fi: usize) -> Option<VbCullReadback> {
         let rb = self.vb_cull_readback.as_ref()?;
         let mapped = rb[fi].mapped?;
-        // SAFETY: `mapped` is the live host-coherent mapping of a `VB_CULL_READBACK_BYTES` buffer
-        // created by `boot`; the reads below stay inside that range (4 bytes at offset 0, then
-        // `VB_CULL_READBACK_INDICES * 4` bytes at offset 16). `read_unaligned` is used because the
-        // mapping's alignment is the allocator's business, not this fn's. The caller's contract
-        // above guarantees the device has finished writing it.
+        debug_assert!(
+            rb[fi].size >= VB_CULL_READBACK_BYTES,
+            "invariant: the cull readback staging is created at VB_CULL_READBACK_BYTES"
+        );
+        // The recorder packs the four regions from the live `BoundBuffer::size` of each SOURCE,
+        // while this decode addresses them at the constants that sized those sources. The two
+        // derivations agree only because every create site spells the matching constant — a
+        // CONVENTION, and until this assert, one nothing checked. If any source were ever created
+        // at some other size the recorder would pack differently while these offsets stayed put,
+        // and every field below would be read from the wrong bytes: no crash, no validation error,
+        // just a probe that reports confident nonsense. Checked here rather than at the create
+        // sites because this is the only place that depends on the agreement.
+        debug_assert_eq!(
+            (
+                self.vb_cull_count[fi].size,
+                self.vb_cull_visible[fi].size,
+                self.vb_indirect[fi].size,
+                self.vb_visible_instance[fi].size,
+            ),
+            (VB_CULL_COUNT_BYTES, VB_CULL_VISIBLE_BYTES, VB_INDIRECT_BYTES, VB_VISIBLE_INSTANCE_BYTES),
+            "invariant: each cull source is allocated at the constant this decode addresses it by"
+        );
+        let list_elems = (VB_CULL_VISIBLE_BYTES / 4) as usize;
+        let record_stride = boyko_rhi_vulkan::ffi::DRAW_INDEXED_INDIRECT_STRIDE as u64;
+        let records = (VB_INDIRECT_BYTES / record_stride) as usize;
+        let vis_elems = (VB_VISIBLE_INSTANCE_BYTES / 4) as usize;
+        let mut batch_list = Vec::with_capacity(list_elems);
+        let mut record_instance_counts = Vec::with_capacity(records);
+        let mut visible_instances = Vec::with_capacity(vis_elems);
+
+        // SAFETY: `mapped` is the live host-coherent mapping of the staging `boot` created at
+        // `VB_CULL_READBACK_BYTES` bytes. Every read below is inside that range BY CONSTRUCTION,
+        // because each region's element count is derived from the SAME constant that fixes that
+        // region's byte size and the offsets are the region offsets themselves:
+        //   * 4 B at `VB_CULL_READBACK_COUNT_OFFSET`, inside the `VB_CULL_COUNT_BYTES` (>= 4) region;
+        //   * `list_elems * 4 == VB_CULL_VISIBLE_BYTES` bytes at `VB_CULL_READBACK_LIST_OFFSET`;
+        //   * `records * record_stride == VB_INDIRECT_BYTES` bytes at
+        //     `VB_CULL_READBACK_RECORDS_OFFSET`, each read taking the 4-byte `instanceCount` at
+        //     `+ 4` inside its own 20-byte record;
+        //   * `vis_elems * 4 == VB_VISIBLE_INSTANCE_BYTES` bytes at `VB_CULL_READBACK_VIS_OFFSET`.
+        // `VB_CULL_READBACK_BYTES` is defined as the sum of exactly those four regions, so the last
+        // byte touched is the staging's last byte. `read_unaligned` is used because the mapping's
+        // alignment is the allocator's business, not this fn's, and a record's `instanceCount` sits
+        // at a 20-byte stride that is not 4-aligned relative to an arbitrary base. The caller's
+        // ordering contract above guarantees the device has finished writing the buffer.
         unsafe {
             let base = mapped.as_ptr();
-            let count = base.cast::<u32>().read_unaligned();
-            let mut visible = [0u32; VB_CULL_READBACK_INDICES];
-            for (i, v) in visible.iter_mut().enumerate() {
-                *v = base.add(16 + i * 4).cast::<u32>().read_unaligned();
+            let visible_batches = base
+                .add(VB_CULL_READBACK_COUNT_OFFSET as usize)
+                .cast::<u32>()
+                .read_unaligned();
+            for i in 0..list_elems {
+                let off = VB_CULL_READBACK_LIST_OFFSET as usize + i * 4;
+                batch_list.push(base.add(off).cast::<u32>().read_unaligned());
             }
-            Some((count, visible))
+            for i in 0..records {
+                // Word 1 of `VkDrawIndexedIndirectCommand` — the same offset the cull stores to.
+                let off = VB_CULL_READBACK_RECORDS_OFFSET as usize + i * record_stride as usize + 4;
+                record_instance_counts.push(base.add(off).cast::<u32>().read_unaligned());
+            }
+            for i in 0..vis_elems {
+                let off = VB_CULL_READBACK_VIS_OFFSET as usize + i * 4;
+                visible_instances.push(base.add(off).cast::<u32>().read_unaligned());
+            }
+            Some(VbCullReadback {
+                visible_batches,
+                batch_list,
+                record_instance_counts,
+                visible_instances,
+            })
         }
     }
 

@@ -2690,10 +2690,11 @@ pub(crate) struct VbPassPlan {
     /// on-screen, which is exactly why `vb_cull_offscreen.rs` — not a golden — is what proves the
     /// cull rejects.
     pub(crate) vb_batch_cull: Option<crate::framegraph::PassId>,
-    /// VG rung R2c-tail: the cull READBACK copy — `Some` only when `scene.vb_cull_readback` is
-    /// armed (the `BOYKO_VB_CULL_READBACK` probe). Declares `TRANSFER_READ` on both cull outputs,
-    /// so the graph derives the `COMPUTE -> TRANSFER` dependency that makes the atomics' writes
-    /// available to the copy. Unarmed on every golden/interactive boot ⇒ no pass, no commands.
+    /// VG rung R2c-tail / R2d-5: the cull READBACK copy — `Some` only when `scene.vb_cull_readback`
+    /// is armed (the `BOYKO_VB_CULL_READBACK` probe). Declares `TRANSFER_READ` on all FOUR buffers
+    /// the probe copies (`vb_cull_count`, `vb_cull_visible`, `vb_indirect`, `vb_visible_instance`),
+    /// so the graph derives the `COMPUTE -> TRANSFER` dependency that makes the cull's writes
+    /// available to the copies. Unarmed on every golden/interactive boot ⇒ no pass, no commands.
     pub(crate) vb_cull_readback: Option<crate::framegraph::PassId>,
     /// VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2b (gate widened at
     /// rung P2c): the `fill` pass (two `vkCmdFillBuffer`s — zeros `counts[MAX]`, sentinels
@@ -3479,6 +3480,27 @@ impl Renderer<'_> {
                 let p = g.add_pass("vb_cull_readback");
                 g.buffer_access(vb_cull_count, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
                 g.buffer_access(vb_cull_visible, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+                // Rung R2d-5: the two regions the probe gained. `vb_indirect` carries the POST-cull
+                // `instanceCount` the rasterizer fetches — the only place that number is
+                // observable, since the descriptors hold the pre-cull one — and
+                // `vb_visible_instance` carries the survivor regions the VS indexes through.
+                //
+                // BOTH are also read LATER in the frame by `vb_raster` (DRAW_INDIRECT and VERTEX
+                // respectively), so inserting this TRANSFER read between the cull's COMPUTE write
+                // and those readers RE-SOURCES their barriers: instead of one `COMPUTE -> reader`
+                // RAW they become `COMPUTE -> TRANSFER` (which makes the write AVAILABLE) followed
+                // by a `TRANSFER -> reader` visibility extension. That is sound — an available
+                // write stays available and any later visibility operation picks it up, and the
+                // two execution dependencies chain — and it is the SAME shape `vb_instance_ring`
+                // already takes since rung R2d-3 (see the cull pass's own note above). It happens
+                // ONLY under the probe: an unarmed boot declares no pass here at all, which is what
+                // keeps the recorded stream, and therefore the golden pins, untouched.
+                g.buffer_access(vb_indirect, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+                g.buffer_access(
+                    vb_visible_instance,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_ACCESS_TRANSFER_READ_BIT,
+                );
                 p
             });
 
