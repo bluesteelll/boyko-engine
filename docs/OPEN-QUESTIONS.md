@@ -14,7 +14,28 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
-## OPEN — Occlusion culling has no measurable perf claim in this repository
+## OPEN — Which scene becomes the depth-complexity perf fixture?
+
+**Situation.** Decision (b) above commits to a separate fixture with real occlusion. What it should
+contain is not decided, and it is an asset question I should not answer alone.
+
+The VG corpus is seven fetched Khronos glTF sample assets arranged on a 5x3x3 grid — chosen for
+triangle density, and it has almost no occlusion by construction. A depth-complexity fixture wants
+the opposite: large occluders with substantial geometry behind them. The classic choices are Sponza
+(an interior with a colonnade that occludes heavily) or Bistro; neither is in the manifest today.
+
+**What it needs from you.** Which scene, and whether its payload may be fetched into
+`assets/` alongside the VG corpus (gitignored, same as the corpus) or should live elsewhere.
+
+**What I will do either way.** Keep it OUT of `vg_corpus_scene` and out of the density census, with
+its own manifest and its own camera paths, so a number read off one instrument can never be quoted
+about the other.
+
+**Blocks.** Any occlusion perf claim. Blocks no implementation work.
+
+---
+
+## RESOLVED 2026-08-02 — Occlusion perf claim: option (b), a separate depth-complexity fixture
 
 **Situation.** The VG corpus is a triangle-density instrument, deliberately recomposed at rung R0b′
 to measure density rather than occlusion. Measured ceiling on it: **1 of 44 drawn instances at
@@ -31,12 +52,15 @@ honest, and leaves the claim unmade until content exists. (b) Add a scene with r
 instruments cannot contaminate each other. (c) Accept the claim will be made by whatever project is
 built on the engine, not by this repository.
 
-**Blocks.** Nothing immediately — implementation proceeds either way. It decides what the rung's
-header is allowed to say, and whether a new fixture is worth building.
+**OWNER'S DECISION: (b).** Build a scene with real depth complexity — an interior or a street — as
+a SEPARATE perf fixture, deliberately kept out of the density corpus so the two instruments cannot
+contaminate each other. Until it exists, the HZB rung ships correctness-gated with no speed claim.
+
+**Follow-on, and it needs an asset decision** — recorded as its own item below rather than assumed.
 
 ---
 
-## OPEN — K2: no Nanite baseline, so the campaign's goal is unfalsifiable as stated
+## RESOLVED 2026-08-02 — K2: option (c), stays deferred
 
 **Situation.** The virtual-geometry campaign's kill criterion K2 requires a Nanite reference table.
 It has never been produced (UE is not installed; I cannot install it — the flow requires accepting an
@@ -47,9 +71,9 @@ EULA and creating an account, which I must not do). K2's own text says an unprod
 target (frame time at a stated triangle count and error bound) and record K2 as taken by its own
 escape hatch. (c) Leave deferred and keep the goal formally unfalsifiable.
 
-**Blocks.** No rung is blocked. It decides whether the campaign can ever declare success.
-
-**History.** Raised earlier and deferred by the owner. Recorded here so it stops being invisible.
+**OWNER'S DECISION: (c).** Stays deferred; the goal remains formally unfalsifiable, knowingly. No
+rung is blocked by it. Recorded rather than quietly dropped, so a future reader does not mistake the
+campaign's silence on K2 for K2 having been satisfied.
 
 ---
 
@@ -69,7 +93,7 @@ Full statement and proof: [VG-R3-HZB-PLAN.md](VG-R3-HZB-PLAN.md) §1. **No owner
 
 ---
 
-## OPEN — The HZB implementation design was REJECTED with 8 blockers
+## RESOLVED 2026-08-02 — HZB design: option (a), a full revision round then implement
 
 **Situation.** With soundness settled, the implementation design was reviewed and returned REJECTED
 by both reviewers. The blockers are real, not stylistic — among them: the design revives
@@ -88,10 +112,12 @@ first (S1 the RHI `TextureView`, S2 the framegraph guard, S3 the host oracle) wh
 is revised — these three are independently useful and none depends on the disputed parts.
 (c) Park the rung.
 
-**Blocks.** All HZB work. Nothing already shipped.
+**OWNER'S DECISION: (a).** One full revision round against all 8 blockers, then implement in step
+order. My own recommendation had been (b) — land the uncontroversial foundation first — and it was
+not taken; (a) is the same loop that carried rung R2d from 8 blockers to shipped, and it keeps the
+step order intact rather than interleaving foundation work with a design still in motion.
 
-**Note.** Option (b) is what I would pick: S1 and S2 close real engine gaps that exist regardless of
-whether occlusion culling is ever armed, and S3 is a host oracle that the eventual gates need.
+**Blocks.** All HZB work until the revision returns. Nothing already shipped.
 
 ---
 
