@@ -230,11 +230,17 @@ pub struct GBufferTargets {
     pub(crate) cull_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// VG rung R2c0: the per-BATCH draw-record cull descriptor set, written ONCE against
     /// [`GBufferScene::vb_cull_layout`] (`VbIndirect` @0, `VbBatchDesc` @1, `VbCullVisible` @2,
-    /// `VbCullCount` @3 — all COMPUTE STORAGE_BUFFER). `None` unless the R2c0 arm is wired. NO
-    /// per-frame update.
+    /// `VbCullCount` @3, plus rung R2d-2's `gVbInstances` @4 / `gMeshBounds` @5 /
+    /// `gVbVisibleInstance` @6 — all COMPUTE STORAGE_BUFFER). NO per-frame update.
     ///
-    /// A RING when `Some`: every one of the four buffers is per-FIF, so slot `i` binds each
-    /// buffer's own `[i]`. The recorder selects `vb_cull_set[self.frame_index]`.
+    /// `None` unless the R2c0 arm is wired AND [`GBufferScene::vb_mesh_bounds`] is armed — i.e.
+    /// `None` on every Deferred / Forward / Forward+ / `VisibilityBuffer × Sdf` boot, which is
+    /// the same set of boots on which `record_vb`/`declare_vb_graph` leave `batch_cull_armed`
+    /// false. The two conditions are ONE predicate by construction; see the build site.
+    ///
+    /// A RING when `Some`: every buffer but `gMeshBounds` is per-FIF, so slot `i` binds each of
+    /// those buffers' own `[i]` (`gMeshBounds` is one boot-lived table, bound identically in every
+    /// slot). The recorder selects `vb_cull_set[self.frame_index]`.
     pub(crate) vb_cull_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// The Render P7 SSAO descriptor set, written ONCE against [`SsaoActivation::layout`]
     /// (5 bindings: gNormal @0, gMaterial @1, gViewT @2 STORAGE images READ, the `ssao` out
@@ -594,8 +600,9 @@ pub struct GBufferTargets {
     /// [`GBufferScene::vb_tex_active`] holds this frame.
     pub(crate) vb_set0_tex: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// VB-P1a ("dark infra"): the froxel-variant Set-0 vocabulary descriptor set RING, written
-    /// ONCE against [`GBufferScene::vb_layout0_froxel`] (10 bindings: `vb_set0`'s own 0..7 PLUS
-    /// `ClusterGrid` @8 + `LightIndexList` @9, bound to [`GBufferScene::cluster_grid`]/
+    /// ONCE against [`GBufferScene::vb_layout0_froxel`] (11 bindings: `vb_set0`'s own
+    /// `{0..7, 11}` PLUS `ClusterGrid` @8 + `LightIndexList` @9, bound to
+    /// [`GBufferScene::cluster_grid`]/
     /// [`GBufferScene::light_index`]). `Some` iff [`GBufferScene::vb_layout0_froxel`] AND
     /// [`GBufferScene::cluster_grid`] AND [`GBufferScene::light_index`] are all `Some` (the froxel
     /// arm is built — ⚠️ default-OFF via the owner's `LightingConfig::clusters_enabled`, NOT
@@ -3109,6 +3116,9 @@ impl DeferredSets {
             let gclassify_ring = &vb_classify
                 .expect("invariant: path_is_vb() implies TargetsProfile::VbMesh (vb_classify is Some)")
                 .gclassify;
+            let vb_visible_instance = scene
+                .vb_visible_instance
+                .expect("invariant: path_is_vb() requires vb_visible_instance");
             let mut vb_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] = [const { None }; FRAMES_IN_FLIGHT];
             let mut failure: Option<crate::error::VulkanError> = None;
             for (slot, dst) in vb_slots.iter_mut().enumerate() {
@@ -3124,6 +3134,9 @@ impl DeferredSets {
                     },
                     BindGroupEntry::StorageImage { texture: &core.lit[slot] },
                     BindGroupEntry::StorageBuffer { buffer: &gclassify_ring[slot] },
+                    // VG rung R2d-2: `gVbVisibleInstance` @11 — the LAST layout entry, so it is
+                    // the LAST slice element (`create_bind_group` matches positionally).
+                    BindGroupEntry::StorageBuffer { buffer: &vb_visible_instance[slot] },
                 ];
                 let desc = BindGroupDesc::<Vulkan> { layout, entries: &entries };
                 match RhiDevice::create_bind_group(ctx, &desc) {
@@ -3204,6 +3217,9 @@ impl DeferredSets {
             let gclassify_ring = &vb_classify
                 .expect("invariant: path_is_vb() implies TargetsProfile::VbMesh (vb_classify is Some)")
                 .gclassify;
+            let vb_visible_instance = scene
+                .vb_visible_instance
+                .expect("invariant: path_is_vb() requires vb_visible_instance");
             let mut vb_tex_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
                 [const { None }; FRAMES_IN_FLIGHT];
             let mut failure: Option<crate::error::VulkanError> = None;
@@ -3220,6 +3236,9 @@ impl DeferredSets {
                     },
                     BindGroupEntry::StorageImage { texture: &core.lit[slot] },
                     BindGroupEntry::StorageBuffer { buffer: &gclassify_ring[slot] },
+                    // VG rung R2d-2: `gVbVisibleInstance` @11 — identical to `vb_set0`'s own; this
+                    // variant differs from it only at binding 1.
+                    BindGroupEntry::StorageBuffer { buffer: &vb_visible_instance[slot] },
                 ];
                 let desc = BindGroupDesc::<Vulkan> { layout, entries: &entries };
                 match RhiDevice::create_bind_group(ctx, &desc) {
@@ -3287,9 +3306,9 @@ impl DeferredSets {
 
         // VB-P1a ("dark infra"): the froxel-variant Set-0 vocabulary RING — a DISTINCT descriptor
         // SET instance against [`GBufferScene::vb_layout0_froxel`] (a WIDER, DISTINCT layout
-        // object from `vb_layout0` — 10 bindings, `vb_set0`'s own 0..7 PLUS `ClusterGrid` @8 +
-        // `LightIndexList` @9). Built immediately after `vb_set0_tex` (both need `core.lit`/
-        // `vb.vb_id`, the SAME "needs `core`" point). `None` unless the froxel arm is built
+        // object from `vb_layout0` — 11 bindings, `vb_set0`'s own `{0..7, 11}` PLUS
+        // `ClusterGrid` @8 + `LightIndexList` @9). Built immediately after `vb_set0_tex` (both
+        // need `core.lit`/`vb.vb_id`, the SAME "needs `core`" point). `None` unless the arm is built
         // (`scene.vb_layout0_froxel`/`scene.cluster_grid`/`scene.light_index` all `Some` —
         // ⚠️ default-OFF via the owner's `LightingConfig::clusters_enabled`, NOT hardcoded off, so
         // this is `None` on an unarmed boot and `Some` on `vb_mesh_froxel`'s).
@@ -3311,6 +3330,9 @@ impl DeferredSets {
             let gclassify_ring = &vb_classify
                 .expect("invariant: vb_layout0_froxel armed implies TargetsProfile::VbMesh (vb_classify is Some)")
                 .gclassify;
+            let vb_visible_instance = scene
+                .vb_visible_instance
+                .expect("invariant: vb_layout0_froxel armed implies scene.vb_visible_instance");
             let mut vb_froxel_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
                 [const { None }; FRAMES_IN_FLIGHT];
             let mut failure: Option<crate::error::VulkanError> = None;
@@ -3329,6 +3351,9 @@ impl DeferredSets {
                     BindGroupEntry::StorageBuffer { buffer: &gclassify_ring[slot] },
                     BindGroupEntry::StorageBuffer { buffer: grid },
                     BindGroupEntry::StorageBuffer { buffer: index },
+                    // VG rung R2d-2: `gVbVisibleInstance` @11 — LAST in `vb_layout0_froxel` too
+                    // (`{0..9, 11}`), so it stays the LAST slice element here as well.
+                    BindGroupEntry::StorageBuffer { buffer: &vb_visible_instance[slot] },
                 ];
                 let desc = BindGroupDesc::<Vulkan> { layout, entries: &entries };
                 match RhiDevice::create_bind_group(ctx, &desc) {
@@ -3433,6 +3458,9 @@ impl DeferredSets {
             let gclassify_ring = &vb_classify
                 .expect("invariant: vb_layout0_froxel armed implies TargetsProfile::VbMesh (vb_classify is Some)")
                 .gclassify;
+            let vb_visible_instance = scene
+                .vb_visible_instance
+                .expect("invariant: vb_layout0_froxel armed implies scene.vb_visible_instance");
             let mut vb_tex_froxel_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
                 [const { None }; FRAMES_IN_FLIGHT];
             let mut failure: Option<crate::error::VulkanError> = None;
@@ -3451,6 +3479,9 @@ impl DeferredSets {
                     BindGroupEntry::StorageBuffer { buffer: &gclassify_ring[slot] },
                     BindGroupEntry::StorageBuffer { buffer: grid },
                     BindGroupEntry::StorageBuffer { buffer: index },
+                    // VG rung R2d-2: `gVbVisibleInstance` @11 — identical to `vb_set0_froxel`'s
+                    // own; this variant differs from it only at binding 1.
+                    BindGroupEntry::StorageBuffer { buffer: &vb_visible_instance[slot] },
                 ];
                 let desc = BindGroupDesc::<Vulkan> { layout, entries: &entries };
                 match RhiDevice::create_bind_group(ctx, &desc) {
@@ -4221,17 +4252,46 @@ impl DeferredSets {
         // `DeferredSets::destroy`, which already walks reverse acquisition order, rather than
         // hand-copied for the twentieth time.
         //
-        // Gated on the layout plus all four buffers. `GpuSceneBundles` mints
-        // `vb_cull_layout`/`vb_batch_cull_pipeline` together or not at all, which is what lets
-        // `record_vb` `.expect()` this ring under a gate phrased on the PIPELINE.
+        // Gated on the layout plus the four R2c0 buffers plus (since R2d-2) the mesh-bounds table.
+        // `GpuSceneBundles` mints `vb_cull_layout`/`vb_batch_cull_pipeline` together or not at all,
+        // which is what lets `record_vb` `.expect()` this ring under a gate phrased on the PIPELINE.
+        //
+        // ⚠️ VG rung R2d-2 added `scene.vb_mesh_bounds` to this tuple, and it is the ONLY
+        // conjunct here that is not `Some` on every boot. It has to be here: @5 of the widened
+        // `vb_cull_layout` is the geometry table's `gMeshBounds[]`, which does not exist on a
+        // Deferred / Forward / Forward+ / `VisibilityBuffer × Sdf` boot, and a bound set with an
+        // unwritten descriptor is undefined behaviour the pipeline may read (`robustBufferAccess`
+        // is OFF on this device). The consequence is that this set is now `None` on exactly those
+        // boots — which is why `record_vb`/`declare_vb_graph`'s `batch_cull_armed` gained
+        // `scene.vb_mesh_bounds.is_some()` in the same rung: this tuple and that predicate must
+        // stay ONE predicate, or `record_vb`'s `.expect()` on this field becomes reachable.
+        //
+        // `vb_instance_ring` (@4) and `vb_visible_instance` (@6) are `.expect()`ed rather than
+        // matched: both are unconditional `Some(...)` literals in the SAME `GpuSceneBundles::scene`
+        // struct expression that wires `vb_cull_layout`, so neither can be `None` in an arm this
+        // match already required `vb_cull_layout` to enter. Same treatment as `vb_set0`'s own.
         let vb_cull_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> = match (
             scene.vb_cull_layout,
             scene.vb_indirect,
             scene.vb_batch_desc,
             scene.vb_cull_visible,
             scene.vb_cull_count,
+            scene.vb_mesh_bounds,
         ) {
-            (Some(layout), Some(indirect), Some(batch_desc), Some(visible), Some(count)) => {
+            (
+                Some(layout),
+                Some(indirect),
+                Some(batch_desc),
+                Some(visible),
+                Some(count),
+                Some(mesh_bounds),
+            ) => {
+                let instances = scene
+                    .vb_instance_ring
+                    .expect("invariant: vb_cull_layout armed implies scene.vb_instance_ring");
+                let visible_instance = scene
+                    .vb_visible_instance
+                    .expect("invariant: vb_cull_layout armed implies scene.vb_visible_instance");
                 let mut slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
                     [const { None }; FRAMES_IN_FLIGHT];
                 let mut failure: Option<crate::error::VulkanError> = None;
@@ -4241,6 +4301,12 @@ impl DeferredSets {
                         BindGroupEntry::StorageBuffer { buffer: &batch_desc[slot] },
                         BindGroupEntry::StorageBuffer { buffer: &visible[slot] },
                         BindGroupEntry::StorageBuffer { buffer: &count[slot] },
+                        // VG rung R2d-2: @4/@5/@6, positionally after the R2c0 four. The bounds
+                        // table is NOT per-FIF (one host-coherent table for the whole boot), so it
+                        // binds the same buffer in every slot; the other two are per-FIF.
+                        BindGroupEntry::StorageBuffer { buffer: &instances[slot] },
+                        BindGroupEntry::StorageBuffer { buffer: mesh_bounds },
+                        BindGroupEntry::StorageBuffer { buffer: &visible_instance[slot] },
                     ];
                     let desc = BindGroupDesc::<Vulkan> { layout, entries: &entries };
                     match RhiDevice::create_bind_group(ctx, &desc) {

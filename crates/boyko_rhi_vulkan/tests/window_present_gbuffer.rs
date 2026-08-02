@@ -2334,6 +2334,12 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         vb_batch_desc: None,
         vb_cull_visible: None,
         vb_cull_count: None,
+        // VG rung R2d-2: unread by this harness (never resolves VB, the same rationale as the VB
+        // fields above). `vb_visible_instance` is MANDATORY on a real boot but this fixture builds
+        // no VB Set-0 at all, and `vb_mesh_bounds` is armed only by a live `MeshGeometryTable`,
+        // which this fixture never creates.
+        vb_visible_instance: None,
+        vb_mesh_bounds: None,
         vb_cull_readback: None,
         vb_batch_cull_pipeline: None,
         vb_cull_layout: None,
@@ -3416,6 +3422,12 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         vb_batch_desc: None,
         vb_cull_visible: None,
         vb_cull_count: None,
+        // VG rung R2d-2: unread by this harness (never resolves VB, the same rationale as the VB
+        // fields above). `vb_visible_instance` is MANDATORY on a real boot but this fixture builds
+        // no VB Set-0 at all, and `vb_mesh_bounds` is armed only by a live `MeshGeometryTable`,
+        // which this fixture never creates.
+        vb_visible_instance: None,
+        vb_mesh_bounds: None,
         vb_cull_readback: None,
         vb_batch_cull_pipeline: None,
         vb_cull_layout: None,
@@ -8421,6 +8433,12 @@ fn run_showcase_body_ddgi(
         vb_batch_desc: None,
         vb_cull_visible: None,
         vb_cull_count: None,
+        // VG rung R2d-2: unread by this harness (never resolves VB, the same rationale as the VB
+        // fields above). `vb_visible_instance` is MANDATORY on a real boot but this fixture builds
+        // no VB Set-0 at all, and `vb_mesh_bounds` is armed only by a live `MeshGeometryTable`,
+        // which this fixture never creates.
+        vb_visible_instance: None,
+        vb_mesh_bounds: None,
         vb_cull_readback: None,
         vb_batch_cull_pipeline: None,
         vb_cull_layout: None,
@@ -9920,6 +9938,12 @@ fn run_showcase_body(
         vb_batch_desc: None,
         vb_cull_visible: None,
         vb_cull_count: None,
+        // VG rung R2d-2: unread by this harness (never resolves VB, the same rationale as the VB
+        // fields above). `vb_visible_instance` is MANDATORY on a real boot but this fixture builds
+        // no VB Set-0 at all, and `vb_mesh_bounds` is armed only by a live `MeshGeometryTable`,
+        // which this fixture never creates.
+        vb_visible_instance: None,
+        vb_mesh_bounds: None,
         vb_cull_readback: None,
         vb_batch_cull_pipeline: None,
         vb_cull_layout: None,

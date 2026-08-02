@@ -2284,11 +2284,15 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // avoids by taking this as a plain param — this fn's own doc). `None` on every boot
             // that never armed the table (`MeshGeometryTableSlot(None)` — every non-VB boot, or a
             // VB boot whose device lacks the descriptor-indexing prerequisite).
-            let vb_geometry_set = world
-                .non_send_resource::<boyko_render::MeshGeometryTableSlot>()
-                .0
-                .as_ref()
-                .map(boyko_render::MeshGeometryTable::set);
+            // Virtual-geometry ladder, rung R2d-2: the SAME slot yields the table's `gMeshBounds[]`
+            // buffer. Read through ONE borrow of the resource so the two cannot come from
+            // different table generations — `vb_geometry_set` and `vb_mesh_bounds` are `Some`
+            // together or `None` together, which is the property `vb_cull_set`'s gate rests on.
+            let vb_geometry_table =
+                world.non_send_resource::<boyko_render::MeshGeometryTableSlot>().0.as_ref();
+            let vb_geometry_set = vb_geometry_table.map(boyko_render::MeshGeometryTable::set);
+            let vb_mesh_bounds =
+                vb_geometry_table.map(boyko_render::MeshGeometryTable::bounds_buffer);
             // VB-P1e D11: `ClusterConfig` dims are a BOOT commitment — `build_froxel_light_cull`
             // sized every L1 buffer (and, on the HIER arm, the pushed `cluster_dims_packed`) from
             // the dims read at boot; a live edit to the `ClusterConfig` Resource behind this
@@ -2375,6 +2379,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 vb_viewt_view_z_a,
                 vb_viewt_view_z_b,
                 vb_geometry_set,
+                vb_mesh_bounds,
                 sv0_bench_lighting_flags,
                 ctx,
             );

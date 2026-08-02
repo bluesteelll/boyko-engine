@@ -3350,13 +3350,20 @@ impl Renderer<'_> {
         let split = scene.path_vb_split();
         // VG rung R2c0: the batch-cull arm, read ONCE so the pass gate, the upload's extra
         // `vb_batch_desc` access and `record_vb`'s own recording gate cannot disagree (the same
-        // W1 single-predicate discipline `use_classified` above follows). The five `Option`s are
+        // W1 single-predicate discipline `use_classified` above follows). The R2c0 `Option`s are
         // wired together or not at all by `GpuSceneBundles::scene`, so this is an all-or-nothing
         // arm, never a partial one.
+        //
+        // VG rung R2d-2 added `vb_mesh_bounds` — spelled VERBATIM as in `record_vb`, and for the
+        // reason stated there: it is the one conjunct that is false on a boot without a geometry
+        // table, and it is exactly the condition under which `GBufferTargets::sync` leaves
+        // `vb_cull_set` `None`. Declaring a cull pass the recorder then skips would strand
+        // `vb_indirect`'s declared writer on a COMPUTE that never ran.
         let batch_cull_armed = scene.vb_indirect.is_some()
             && scene.vb_batch_desc.is_some()
             && scene.vb_cull_visible.is_some()
             && scene.vb_cull_count.is_some()
+            && scene.vb_mesh_bounds.is_some()
             && scene.vb_batch_cull_pipeline.is_some();
         let (
             vb_classify_fill,

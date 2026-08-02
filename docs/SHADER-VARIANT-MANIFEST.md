@@ -97,7 +97,7 @@ tripwired by a `debug_assert` in `declare_forward_graph`).
 ## `vb_resolve.comp.hlsl` / `vb_shade.comp.hlsl` — the VisibilityBuffer shading family (compute)
 
 Two sources, each its own `{TEXTURED} x {FROXEL}` matrix against a shared VB-only Set-0 layout
-(`vb_layout0` — 8 bindings — for the base/TEXTURED rows, `vb_layout0_froxel` — 10 bindings,
+(`vb_layout0` — 9 bindings `{0..7, 11}` — for the base/TEXTURED rows, `vb_layout0_froxel` — 11 bindings `{0..9, 11}`,
 `vb_layout0`'s own 0..7 plus `ClusterGrid`@8/`LightIndexList`@9 — for the FROXEL rows; Set 1 = the
 Forward-family shadow set verbatim, Set 2 = the Decision-0 geometry table). `vb_resolve.comp.hlsl`
 is the FUSED resolve (unpacks `vb_id`, re-fetches geometry, shades, writes `lit`);

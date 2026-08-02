@@ -600,14 +600,20 @@ impl Renderer<'_> {
         // gate). `vb_sky`'s `lit` write above stands for the sky; `sdf_forward_march` below
         // composites the SDF field over whatever the mesh raster/resolve left. ===
         if scene.resolved_render_path.mesh_leg {
-            // VG rung R2c0: the batch-cull arm — the SAME five-`Option` predicate
-            // `declare_vb_graph` reads, spelled once here so the recorder cannot drift from the
-            // declarator. See the dispatch block below for why a narrower recorder gate would be a
-            // missing barrier rather than merely a skipped optimisation.
+            // VG rung R2c0: the batch-cull arm — the SAME `Option` predicate `declare_vb_graph`
+            // reads, spelled once here so the recorder cannot drift from the declarator. See the
+            // dispatch block below for why a narrower recorder gate would be a missing barrier
+            // rather than merely a skipped optimisation.
+            //
+            // VG rung R2d-2 added `vb_mesh_bounds`, and it is the conjunct that can actually be
+            // false: `GBufferTargets::sync` cannot build `vb_cull_set` without a geometry table to
+            // bind at `vb_cull_layout` @5, so this predicate must go false on exactly the boots
+            // where that set goes `None` — otherwise the `.expect()` on it below is reachable.
             let batch_cull_armed = scene.vb_indirect.is_some()
                 && scene.vb_batch_desc.is_some()
                 && scene.vb_cull_visible.is_some()
                 && scene.vb_cull_count.is_some()
+                && scene.vb_mesh_bounds.is_some()
                 && scene.vb_batch_cull_pipeline.is_some();
 
             // === Pass `vb_raster`: the mesh id-raster pass (Decision 9) — writes `vb_id` (COLOR,
@@ -811,11 +817,16 @@ impl Renderer<'_> {
                 };
                 let groups = batch_count.div_ceil(VB_BATCH_CULL_LOCAL_SIZE_X);
                 // SAFETY: recording is open and outside any render scope; `pipeline` + its layout
-                // (one COMPUTE set + an 8-byte COMPUTE push range) are live on this device (caller
-                // contract); `cull_set` binds exactly the four buffers `vb_batch_cull.comp.hlsl`
-                // declares at @0..@3, written once at `GBufferTargets::sync`; the dispatch covers
-                // `batch_count` lanes and the shader trims its tail group's out-of-range lanes.
-                // `&cull_set.descriptor_set` and `push` are locals alive for the calls.
+                // (one COMPUTE set + the shared `COMPUTE_PUSH_CONSTANT_RANGE_BYTES` push range,
+                // of which this pass writes `VB_BATCH_CULL_PUSH_BYTES` = 104) are live on this
+                // device (caller contract). `cull_set` binds SEVEN COMPUTE storage buffers against
+                // the 7-entry `vb_cull_layout`, all written once at `GBufferTargets::sync`; the
+                // frozen SPIR-V declares only @0..@3, while @4/@5/@6 (rung R2d-2) are bound and
+                // written but read by nothing — which is legal precisely because a descriptor a
+                // shader never loads from is never dereferenced, and is why this rung leaves the
+                // module byte-identical. The dispatch covers `batch_count` lanes and the shader
+                // trims its tail group's out-of-range lanes. `&cull_set.descriptor_set` and `push`
+                // are locals alive for the calls.
                 unsafe {
                     (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
                     (self.fns.cmd_bind_descriptor_sets)(
@@ -1424,7 +1435,7 @@ impl Renderer<'_> {
                 );
 
                 // VB-P1a ("dark infra"): select the FROXEL-variant pipeline + its OWN WIDER
-                // Set-0 (`vb_set0_froxel`, 10 bindings) when the arm is built
+                // Set-0 (`vb_set0_froxel`, 11 bindings) when the arm is built
                 // (`scene.cluster_cull.is_some()` — ⚠️ default-OFF, not hardcoded off, so this is
                 // the base arm on an unarmed boot and the froxel arm on `vb_mesh_froxel`'s),
                 // else the base `vb_resolve_pipeline` +

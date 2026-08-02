@@ -2488,7 +2488,7 @@ pub struct GBufferScene<'a> {
     /// Set 2 = [`Self::vb_geometry_set`]'s layout), the SAME `Option`/UNREAD rationale as
     /// [`Self::vb_classify_count_pipeline`].
     pub vb_shade_pipeline: Option<&'a ComputePipeline>,
-    /// The VB-only Set-0 (core + images + classify) bind-group LAYOUT — 8 bindings:
+    /// The VB-only Set-0 (core + images + classify) bind-group LAYOUT — 9 bindings, `{0..7, 11}`:
     /// `gVbInstances` @0 (VERTEX+COMPUTE, [`Self::vb_instance_ring`]), `instance_materials` @1
     /// (COMPUTE, [`Self::forward_instance_material_ring`] — the SAME per-instance-material ring
     /// the Forward family already threads, indexed identically by global instance id), `Camera`
@@ -2498,7 +2498,11 @@ pub struct GBufferScene<'a> {
     /// (COMPUTE, STORAGE, the shared `lit` target) — see `vb_resolve.comp.hlsl`'s own binding
     /// table doc. `gClassify` @7 (COMPUTE, STORAGE_BUFFER, the packed classify buffer — VB-P2
     /// classification plan rung P2a; bound-but-unread by every pipeline's frozen SPIR-V except
-    /// the classify/`vb_shade` family). [`GBufferTargets`] writes the per-FIF bind group against
+    /// the classify/`vb_shade` family). `gVbVisibleInstance` @11 (VERTEX, STORAGE_BUFFER,
+    /// [`Self::vb_visible_instance`] — VG rung R2d-2; bound-but-unread by every pipeline's frozen
+    /// SPIR-V, the @7 precedent; @11 rather than @8 because @8/@9 are the froxel pair in
+    /// [`Self::vb_layout0_froxel`] and @10 is held for VB-SV0, so ONE number is free in both
+    /// layouts). [`GBufferTargets`] writes the per-FIF bind group against
     /// this layout once per extent (the `forward_layout0` precedent). `None` rationale as
     /// [`Self::forward_pipeline`].
     pub vb_layout0: Option<&'a VulkanBindGroupLayout>,
@@ -2526,6 +2530,34 @@ pub struct GBufferScene<'a> {
     /// VG rung R2c0: the per-FIF visible-batch counter (one `u32` at element 0), transfer-zeroed
     /// each frame ahead of the graph-derived `TRANSFER → COMPUTE` barrier.
     pub vb_cull_count: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
+    /// VG rung R2d-2: the per-FIF per-INSTANCE survivor list (one `u32` global instance id per
+    /// surviving instance) the R2d per-instance cull will compact into.
+    ///
+    /// MANDATORY, deliberately NOT part of the R2c0 all-or-nothing arm: `GpuSceneBundles::boot`
+    /// allocates it unconditionally and `GpuSceneBundles::scene` wires it as an unconditional
+    /// `Some(...)`, exactly like [`Self::vb_instance_ring`]. Every VB Set-0 builder therefore
+    /// `.expect()`s it under `path_is_vb()` rather than carrying another `Option` arm.
+    ///
+    /// Bound at `vb_cull_layout` @6 and at every VB Set-0 layout @11, and read by NO shader this
+    /// rung — the `gClassify` @7 precedent ([`Self::vb_layout0`]'s doc): the descriptor arrives
+    /// before its consumer so the consumer rung changes only shader code.
+    pub vb_visible_instance: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
+    /// VG rung R2d-1/R2d-2: the geometry table's `gMeshBounds[]` buffer — one 32-byte
+    /// `MeshLocalBounds` row (LOCAL-space AABB, inverted-sentinel prefilled) per mesh slot, keyed
+    /// by the same `mesh_id` lane `VbInstanceRow` carries at offset 48. NOT per-FIF: the table is
+    /// host-visible-coherent and written at mesh registration, not per frame.
+    ///
+    /// ARMED, unlike [`Self::vb_visible_instance`]: it is owned by the geometry table, so it is
+    /// `Some` exactly when [`Self::vb_geometry_set`] is (both are read from the one
+    /// `MeshGeometryTableSlot` borrow) — i.e. only on a `VisibilityBuffer`-resolved boot with the
+    /// mesh leg and the descriptor-indexing cap. `None` on Deferred / Forward / Forward+ /
+    /// `VisibilityBuffer × Sdf`.
+    ///
+    /// This is what `GBufferTargets`'s `vb_cull_set` gate keys on: with nothing legal to bind at
+    /// `vb_cull_layout` @5 on an unarmed boot, the set must not be built at all — an unwritten
+    /// descriptor in a bound set is undefined behaviour the pipeline could read, and
+    /// `robustBufferAccess` is off on this device.
+    pub vb_mesh_bounds: Option<&'a BoundBuffer>,
     /// VG rung R2c-tail: the per-FIF HOST-VISIBLE staging the cull's outputs are copied into —
     /// `Some` only under the `BOYKO_VB_CULL_READBACK` probe, `None` on every golden/interactive
     /// boot (so no readback pass is declared and no command is recorded).
@@ -2558,6 +2590,11 @@ pub struct GBufferScene<'a> {
     /// VG rung R2c0: the batch-cull's OWN 1-set bind-group layout (`VbIndirect` @0,
     /// `VbBatchDesc` @1, `VbCullVisible` @2, `VbCullCount` @3 — all COMPUTE, all STORAGE_BUFFER,
     /// matching `vb_batch_cull.comp.hlsl`'s binding table).
+    ///
+    /// VG rung R2d-2 widened it to 7 with the per-INSTANCE cull's inputs: `gVbInstances` @4
+    /// ([`Self::vb_instance_ring`]), `gMeshBounds` @5 ([`Self::vb_mesh_bounds`]) and
+    /// `gVbVisibleInstance` @6 ([`Self::vb_visible_instance`]) — same kind, same stage, all three
+    /// bound-but-unread by `vb_batch_cull.comp.hlsl`'s frozen SPIR-V, which declares only @0..@3.
     ///
     /// A DEDICATED layout rather than four more bindings on `vb_layout0`, and the reason is
     /// structural: `vb_layout0_froxel` already occupies @8/@9 with the froxel pair, so appended
@@ -2644,14 +2681,14 @@ pub struct GBufferScene<'a> {
     // `LightingConfig::clusters_enabled`, NOT hardcoded off — every field below stays `None` on an
     // unarmed boot, so nothing is built/selected/recorded there; `vb_mesh_froxel` arms them). See
     // `GpuSceneBundles::build_froxel_light_cull`'s doc for the app-side build this feeds. -------
-    /// The froxel-only Set-0 bind-group LAYOUT — 10 bindings: [`Self::vb_layout0`]'s own 0..7
-    /// PLUS `ClusterGrid` @8 (COMPUTE, STORAGE_BUFFER) + `LightIndexList` @9 (COMPUTE,
+    /// The froxel-only Set-0 bind-group LAYOUT — 11 bindings: [`Self::vb_layout0`]'s own
+    /// `{0..7, 11}` PLUS `ClusterGrid` @8 (COMPUTE, STORAGE_BUFFER) + `LightIndexList` @9 (COMPUTE,
     /// STORAGE_BUFFER) — matching `vb_resolve.comp.hlsl`'s/`vb_shade.comp.hlsl`'s own `-D FROXEL`
     /// binding table doc. A DISTINCT layout OBJECT from [`Self::vb_layout0`] (Vulkan pipeline
-    /// layouts are structurally compared; a 10-binding layout is never compatible with an
-    /// 8-binding one), never a second Set — the froxel VB pipelines are built against THIS
-    /// object, `vb_layout0` itself stays UNCHANGED (8 bindings, byte-identical descriptor-set
-    /// shape). `None` unless `ResolvedRenderPath::froxel_light_cull`'s gate is armed.
+    /// layouts are structurally compared; an 11-binding layout is never compatible with a
+    /// 9-binding one), never a second Set — the froxel VB pipelines are built against THIS
+    /// object, `vb_layout0` itself is never widened by the froxel arm. `None` unless
+    /// `ResolvedRenderPath::froxel_light_cull`'s gate is armed.
     pub vb_layout0_froxel: Option<&'a VulkanBindGroupLayout>,
     /// The `vb_resolve` FROXEL-variant compute pipeline (`vb_resolve.comp.hlsl`, `-D FROXEL=1`) —
     /// the SAME 3-Vulkan-set shape as [`Self::vb_resolve_pipeline`] (Set 0 =

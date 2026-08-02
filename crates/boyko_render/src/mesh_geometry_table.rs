@@ -397,14 +397,18 @@ fn exhausted_slot_fallback(capacity: u32) -> u32 {
 ///    allocator immediately; [`Self::retire_ready_slots`] only recycles it once its
 ///    fence horizon has passed — see [`BindlessSlotAllocator`]'s docs.
 ///
-/// # `gMeshBounds[]` — allocated and filled, bound to NOTHING (rung R2d-1)
+/// # `gMeshBounds[]` — bound at `vb_cull_layout` @5 since rung R2d-2, still read by nothing
 ///
 /// The table additionally owns a [`MeshLocalBounds`] row per slot ([`Self::bounds_buffer`]),
 /// prefilled with the inverted "unknown" sentinel and written by [`Self::register`].
-/// It is deliberately INERT this rung: no descriptor binding, no layout entry, no
-/// shader reads it, no pass declares an edge on it. The GPU sees one extra allocation
-/// and not one changed command — which is what makes this step the campaign's null
-/// control, decidable on its own.
+///
+/// Rung R2d-1 shipped it bound to NOTHING. Rung R2d-2 binds it as one COMPUTE storage
+/// buffer at `vb_cull_layout` @5 — identically in every frame-in-flight slot, because the
+/// table is not per-FIF — and its presence became the conjunct that arms the whole cull:
+/// `vb_cull_set` is `Some` and `batch_cull_armed` is true precisely when this buffer
+/// exists, which is a VisibilityBuffer-resolved boot with the mesh leg and the
+/// descriptor-indexing cap. No shader declares @5 yet, so it is still read by nothing and
+/// the compiled modules are untouched.
 pub struct MeshGeometryTable {
     set: VulkanGeometryBindlessSet,
     meta_buffer: BoundBuffer,
@@ -560,8 +564,9 @@ impl MeshGeometryTable {
     /// The `gMeshBounds[]` backing buffer — one [`MeshLocalBounds`] row per slot,
     /// indexed by the same `mesh_id` as `gMeshMeta[]`.
     ///
-    /// Bound to no descriptor as of rung R2d-1 (see the type doc); this accessor is
-    /// what a later rung binds, and what a test can inspect.
+    /// Since rung R2d-2 this is what `GBufferScene::vb_mesh_bounds` carries and what
+    /// `vb_cull_set` binds at @5 (see the type doc); no shader declares that binding yet.
+    /// It is also what a test can inspect.
     #[inline]
     pub fn bounds_buffer(&self) -> &BoundBuffer {
         &self.bounds_buffer

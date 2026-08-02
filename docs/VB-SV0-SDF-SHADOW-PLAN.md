@@ -277,8 +277,15 @@ VB Set 0 today: 0 `gVbInstances` · 1 `instance_materials{,_tex}` · 2 `Camera` 
 4 `Materials` · 5 `gVbId` · 6 `gLit` · 7 `gClassify` · **8, 9 `ClusterGrid`/`LightIndexList` —
 `#ifdef FROXEL` ONLY** (`vb_resolve.comp.hlsl:151-154`).
 
-Two host layout objects exist: `vb_layout0` (8 entries,
-`crates/boyko_app/src/gpu_scene/mod.rs:3395-3459`) and `vb_layout0_froxel` (10 entries, `:4425-4492`).
+Two host layout objects exist: `vb_layout0` (**9** entries, `{0..7, 11}`) and `vb_layout0_froxel`
+(**11** entries, `{0..9, 11}`), both in `crates/boyko_app/src/gpu_scene/mod.rs`.
+
+> ⚠️ **Rebased by VG rung R2d-2.** These were 8 and 10 when this plan was written. R2d-2 took
+> **@11** on both layouts for the per-instance visible list, leaving **@10 still free and still
+> reserved for SV0** — so this plan's chosen binding number is unaffected, but every entry-COUNT
+> below is one greater than written. The counts in §5 have been rebased; the source line ranges
+> cited here have not, because R2d-1/R2d-2 moved them and re-deriving a range is how a doc repair
+> introduces a fresh falsehood. Re-derive them from the symbol names when you next touch this plan.
 **Slot 8 is free only in scenes that never arm the froxel cull** — using it would be a silent,
 scene-config-dependent collision that no validation layer reports (validation is off on this box;
 `robustBufferAccess` is off). **Slot 10 is free in both.**
@@ -302,7 +309,7 @@ here.
 
 Binding numbers need not be contiguous; only the *entry count* is capped
 (`crates/boyko_rhi_vulkan/src/rhi_impl/mod.rs:93`, `MAX_BIND_GROUP_BINDINGS = 24`). `vb_layout0`
-goes 8 → 9 (`{0..7, 10}`), `vb_layout0_froxel` 10 → 11. Four Set-0 descriptor **set** instances gain
+goes 9 → 10 (`{0..7, 10, 11}`), `vb_layout0_froxel` 11 → 12. Four Set-0 descriptor **set** instances gain
 the entry, all binding the same buffer: `vb_set0` (`crates/boyko_rhi_vulkan/src/present/targets.rs:2995-3079`,
 entry array `:3012-3024`), `vb_set0_tex` (`:3090`), `vb_set0_froxel` (`:3193`),
 `vb_set0_tex_froxel` (`:3311`).
@@ -811,7 +818,7 @@ one sentence noting the SV0 binding-10 interface delta. `vb_geo.comp.spv`, `vb_g
 itself a gate.
 
 Interface delta for all ten: `+ StructuredBuffer<uint> Buf @10 (register t0, space 0)`. Set 0 widens
-to 9 entries (`vb_layout0`) or 11 (`vb_layout0_froxel`).
+to 10 entries (`vb_layout0`) or 12 (`vb_layout0_froxel`) — rebased by R2d-2, see §3.
 
 ### 5.2 Gates and their skip behaviour
 
