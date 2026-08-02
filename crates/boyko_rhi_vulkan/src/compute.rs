@@ -1681,7 +1681,8 @@ pub const VB_BATCH_CULL_PUSH_BYTES: u32 = 104;
 pub const VB_BATCH_CULL_LOCAL_SIZE_X: u32 = 64;
 
 /// VG rung R2c0: the byte stride of one `VbBatchDesc` — `vb_batch_cull.comp.hlsl`'s
-/// `VbBatchDescGpu { float3 aabb_min; uint instance_count; float3 aabb_max; uint pad; }`.
+/// `VbBatchDescGpu { float3 aabb_min; uint instance_count; float3 aabb_max; uint base_instance; }`
+/// (rung R2d-3 named the trailing word, which R2c0 had reserved as `pad`; the stride is unchanged).
 pub const VB_BATCH_DESC_STRIDE: u32 = 32;
 
 /// VG rung R2c0: the per-BATCH draw-record cull SPIR-V as a `u32` word stream. See

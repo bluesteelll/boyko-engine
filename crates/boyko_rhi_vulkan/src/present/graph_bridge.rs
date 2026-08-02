@@ -2854,13 +2854,16 @@ pub(crate) struct VbBarrierSink<'a> {
     /// barrier naming these ResIds anyway, so the placeholder is inert.
     /// Rung R2a' appended `vb_indirect`; rung R2c0 appends the batch-cull trio
     /// `[vb_batch_desc, vb_cull_visible, vb_cull_count]` after it — placeholder-backed when the
-    /// arm is unwired, and inert then for the same "no pass names the ResId" reason.
+    /// arm is unwired, and inert then for the same "no pass names the ResId" reason. Rung R2d-3
+    /// appends `vb_visible_instance` (the per-INSTANCE survivor list the cull writes) LAST, and it
+    /// is MANDATORY rather than placeholder-backed — `GpuSceneBundles` wires it unconditionally,
+    /// exactly like `vb_instance_ring` at index 1.
     #[cfg(not(feature = "hwrt"))]
-    pub(crate) buffers: [VkBuffer; 12],
+    pub(crate) buffers: [VkBuffer; 13],
     /// See the `not(hwrt)` variant's doc: `hwrt` grows this by one (`tlas_instances` at index 5,
     /// the VB-P1a trio shifts to 6/7/8).
     #[cfg(feature = "hwrt")]
-    pub(crate) buffers: [VkBuffer; 13],
+    pub(crate) buffers: [VkBuffer; 14],
 }
 
 /// The number of IMAGE resources [`Renderer::declare_vb_graph`] declares — see
@@ -3231,6 +3234,17 @@ impl Renderer<'_> {
         let vb_batch_desc = g.add_buffer("vb_batch_desc");
         let vb_cull_visible = g.add_buffer("vb_cull_visible");
         let vb_cull_count = g.add_buffer("vb_cull_count");
+        // Rung R2d-3: the per-INSTANCE survivor list the cull now WRITES. Appended LAST, the same
+        // edit shape every addition above used — no existing sink slot moves. Frame-private
+        // (per-FIF) like the trio above, so `add_buffer`'s undefined seed is right: this frame's
+        // own COMPUTE write is the first touch of its own slot.
+        //
+        // The per-mesh bounds buffer (`gMeshBounds`, bound at `vb_cull_layout` @5) gets NO ResId,
+        // and that asymmetry is deliberate rather than an omission: it is the same class as
+        // `gMeshMeta[]` — a single host-coherent allocation written at mesh REGISTRATION, read by
+        // the GPU, never written by it — so there is no producer for the graph to order a reader
+        // against, and `gMeshMeta` (bound on every VB shade/resolve pass) carries none either.
+        let vb_visible_instance = g.add_buffer("vb_visible_instance");
 
         // Pass `light_upload` (async light-table re-upload) — the SAME gate
         // `declare_forward_graph`'s own `light_upload` pass uses.
@@ -3426,6 +3440,30 @@ impl Renderer<'_> {
                 g.buffer_access(vb_batch_desc, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
                 g.buffer_access(vb_indirect, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
                 g.buffer_access(vb_cull_visible, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
+                // Rung R2d-3: the two per-INSTANCE accesses. `vb_instance_ring` was bound to this
+                // pass at rung R2d-2 (`vb_cull_layout` @4) and DECLARED nowhere — its only declared
+                // access in this whole graph was `vb_raster`'s VERTEX read below. Declare/record
+                // parity is the invariant this file and the recorder both treat as load-bearing:
+                // an access the recorder performs but the declarator omits is a barrier derived
+                // nowhere, and a buffer hazard is invisible to goldens, to the validation layers
+                // and to `robustBufferAccess` (off on this device). The COMPUTE read is declared
+                // whether or not `keep` is hardwired this rung — the descriptor is bound and the
+                // module may load from it the moment the arming rung edits one expression.
+                //
+                // TWO CONCRETE BARRIER CONSEQUENCES, recorded so a future reader diffing barrier
+                // counts is not surprised. Both are execution-only edges (`src_access` 0) and
+                // neither can move a pixel, but the recorded stream is NOT byte-identical here —
+                // this is the one place in R2d-3 where it changes:
+                //   1. The cull acquires a TOP_OF_PIPE -> COMPUTE edge on the ring, which is that
+                //      resource's first touch of the frame.
+                //   2. `vb_raster`'s ring read is re-sourced from TOP_OF_PIPE -> VERTEX to
+                //      COMPUTE -> VERTEX, because the cull now precedes it as the ring's reader.
+                g.buffer_access(vb_instance_ring, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+                g.buffer_access(
+                    vb_visible_instance,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                );
                 p
             });
 
@@ -4474,6 +4512,15 @@ impl Renderer<'_> {
                 scene
                     .vb_cull_count
                     .map_or(scene.light_table.buffer, |r| r[fi].buffer),
+                // Rung R2d-3: the per-INSTANCE survivor list, appended LAST. `.expect()`ed rather
+                // than placeholder-backed because it is MANDATORY on every VB boot (its own field
+                // doc), the same wiring `vb_instance_ring` at index 1 has and the same `.expect()`
+                // every VB Set-0 builder already applies to it.
+                scene
+                    .vb_visible_instance
+                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_visible_instance")
+                    [fi]
+                    .buffer,
             ],
             // Rung R9d (buffer ResId 5): `tlas_instances` — mirrors [`GbufferBarrierSink`]'s own
             // `scene.tlas.map_or(VkBuffer::NULL, |t| t.instance_array.buffer)` source.
@@ -4515,6 +4562,13 @@ impl Renderer<'_> {
                 scene
                     .vb_cull_count
                     .map_or(scene.light_table.buffer, |r| r[fi].buffer),
+                // Rung R2d-3: see the `not(hwrt)` variant's own comment for why this one is
+                // `.expect()`ed rather than placeholder-backed.
+                scene
+                    .vb_visible_instance
+                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_visible_instance")
+                    [fi]
+                    .buffer,
             ],
         };
         self.frame_graph.record_pass(pass, &mut sink);

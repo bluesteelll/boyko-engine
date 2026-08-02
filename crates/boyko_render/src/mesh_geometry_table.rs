@@ -407,8 +407,10 @@ fn exhausted_slot_fallback(capacity: u32) -> u32 {
 /// table is not per-FIF — and its presence became the conjunct that arms the whole cull:
 /// `vb_cull_set` is `Some` and `batch_cull_armed` is true precisely when this buffer
 /// exists, which is a VisibilityBuffer-resolved boot with the mesh leg and the
-/// descriptor-indexing cap. No shader declares @5 yet, so it is still read by nothing and
-/// the compiled modules are untouched.
+/// descriptor-indexing cap. Rung R2d-3's `vb_batch_cull.comp.hlsl` DECLARES @5 as
+/// `StructuredBuffer<MeshLocalBounds> gMeshBounds` but loads nothing from it while the
+/// per-instance `keep` predicate is hardwired, so the table is still read by no shader —
+/// the arming rung is what turns the declaration into a load.
 pub struct MeshGeometryTable {
     set: VulkanGeometryBindlessSet,
     meta_buffer: BoundBuffer,
@@ -565,8 +567,8 @@ impl MeshGeometryTable {
     /// indexed by the same `mesh_id` as `gMeshMeta[]`.
     ///
     /// Since rung R2d-2 this is what `GBufferScene::vb_mesh_bounds` carries and what
-    /// `vb_cull_set` binds at @5 (see the type doc); no shader declares that binding yet.
-    /// It is also what a test can inspect.
+    /// `vb_cull_set` binds at @5 (see the type doc); rung R2d-3's cull shader declares that
+    /// binding but does not yet load from it. It is also what a test can inspect.
     #[inline]
     pub fn bounds_buffer(&self) -> &BoundBuffer {
         &self.bounds_buffer

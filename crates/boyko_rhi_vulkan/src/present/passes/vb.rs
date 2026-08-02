@@ -33,8 +33,8 @@ use super::super::frame_driver::Renderer;
 use super::super::gpu_timing::VbTimedPass;
 use super::super::scene_types::{
     CLUSTER_CULL_HIER_PUSH_BYTES, CLUSTER_CULL_PUSH_BYTES, GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
-    GBufferScene, LIGHT_CULL_LOCAL_SIZE_X, VB_BATCH_CULL_LOCAL_SIZE_X, VB_BATCH_CULL_PUSH_BYTES,
-    VB_BATCH_DESC_STRIDE, VbBatchCullPush, VbBatchDesc,
+    GBufferMeshDraw, GBufferScene, LIGHT_CULL_LOCAL_SIZE_X, VB_BATCH_CULL_LOCAL_SIZE_X,
+    VB_BATCH_CULL_PUSH_BYTES, VB_BATCH_DESC_STRIDE, VbBatchCullPush, VbBatchDesc,
 };
 use super::super::targets::{ForwardTargets, GBufferTargets, VB_CLASSIFY_MAX_MATERIAL_ROWS, VbTargets};
 use super::super::{COLOR_SUBRESOURCE_RANGE, SwapchainError};
@@ -54,6 +54,48 @@ const VB_DEPTH_CLEAR: f32 = 0.0;
 /// `vb_pack.hlsli`). A miss reads `instance_id == VB_ID_SENTINEL` and `vb_resolve` writes
 /// nothing for that pixel (the sky color already painted by `vb_sky` stands).
 const VB_ID_CLEAR: [u32; 4] = [0xFFFF_FFFF, 0, 0, 0];
+
+/// VG rung R2d-3: the number of LEADING batches whose OWNED region of the per-instance survivor
+/// list (`gVbVisibleInstance`) fits inside `visible_elems` — i.e. the index of the FIRST batch
+/// whose `base_instance + instance_count` would run past the end, or `mesh_draw.len()` when none
+/// does.
+///
+/// `visible_elems` must be derived from the ALLOCATION (`BoundBuffer::size / 4`), never from the
+/// host constant that sized it — the VB-P1j lesson, which this file already applies at
+/// `record_capacity` and at the cull's own `visible_cap`: a capacity carried as a separate word
+/// drifts from the buffer it claims to describe and nothing detects it. (Both are cited by
+/// IDENTIFIER rather than by line: they are unique in this file, and a line number in a doc
+/// comment inside the very file it points into is the one citation form guaranteed to rot on the
+/// next edit — as this comment's first draft demonstrated by pointing at unrelated code.)
+///
+/// # Why a PREFIX is sound — the clamp cannot let a later batch slip through
+///
+/// `MeshRenderScratch::gather_mixed_into` assigns `base_instance = running` BEFORE it adds that
+/// mesh's count (`crates/boyko_render/src/mesh_draw.rs:815-832`: `offsets[m] = running;` … `running
+/// += c;`, and the emitted `DrawBatch` carries `base_instance: running` from the same iteration).
+/// Bases are therefore NON-DECREASING in batch order, and every emitted batch has `c >= 1`
+/// (`counts[m] == 0` zeroes out into `resolved == None` and emits no batch at all — same lines), so
+/// they are STRICTLY ASCENDING. `base + count` is likewise non-decreasing, which makes the
+/// predicate `base + count > visible_elems` MONOTONE: once it is true for one batch it is true for
+/// every later one. The first index that trips it is thus a genuine prefix boundary, not a filter —
+/// no batch past it can fit, so none is silently dropped from the middle of the list.
+///
+/// A clamped-away batch is NOT degraded: it keeps the `VkDrawIndexedIndirectCommand` the host's own
+/// transfer fill wrote (the cull never visits it, since the dispatch covers only this prefix) and,
+/// from rung R2d-4 on, a CLEAR indirection bit — i.e. exactly pre-R2d rendering for that batch.
+///
+/// Widened to `usize` on purpose: the two `u32` fields are summed in `usize` so the check itself
+/// cannot wrap on a pathological descriptor (a wrapped sum would compare SMALL and admit a batch
+/// whose region runs off the end).
+pub(crate) fn vb_cull_batch_count_visible_clamp(
+    mesh_draw: &[GBufferMeshDraw<'_>],
+    visible_elems: usize,
+) -> usize {
+    mesh_draw
+        .iter()
+        .position(|b| b.base_instance as usize + b.instance_count as usize > visible_elems)
+        .unwrap_or(mesh_draw.len())
+}
 
 impl Renderer<'_> {
     /// Records the VisibilityBuffer on-screen frame: `light_upload? → csm? → atlas? → vb_sky →
@@ -649,6 +691,30 @@ impl Renderer<'_> {
                 scene.mesh_draw.len()
             );
 
+            // === VG rung R2d-3: the cull's batch count, HOISTED above BOTH fills. ===
+            //
+            // It used to be computed at the dispatch, AFTER the descriptor fill had already chosen
+            // its own bound. Now the descriptor fill and the dispatch read the ONE number, so a
+            // lane can never be dispatched over a descriptor that was never written (the W1
+            // single-value discipline this file already applies to `batch_cull_armed`).
+            //
+            // Every bound is ALLOCATION-derived, none is a host constant: the record array, the
+            // descriptor array, and — new this rung — the per-instance survivor list, whose element
+            // count is its own `size / 4`. See `vb_cull_batch_count_visible_clamp`'s doc for why
+            // clamping on that last one is a PREFIX (bases are strictly ascending, so the predicate
+            // is monotone) and therefore cannot drop a batch out of the middle of the list.
+            let desc_capacity = scene
+                .vb_batch_desc
+                .map_or(0, |d| (d[fi].size / u64::from(VB_BATCH_DESC_STRIDE)) as usize);
+            let visible_elems =
+                scene.vb_visible_instance.map_or(0, |v| (v[fi].size / 4) as usize);
+            let batch_count = scene
+                .mesh_draw
+                .len()
+                .min(record_capacity)
+                .min(desc_capacity)
+                .min(vb_cull_batch_count_visible_clamp(scene.mesh_draw, visible_elems));
+
             if let Some(indirect) = scene.vb_indirect {
                 let upload = plan
                     .vb_indirect_upload
@@ -708,20 +774,18 @@ impl Renderer<'_> {
                 // `instance_count` is the SAME word the record above already carries. That is the
                 // rung's whole point: the cull rewrites the record with a value the host had
                 // already written, so the frame is byte-identical and the machinery is a NULL
-                // CONTROL rather than a change. The AABB corners are the conservative
-                // `VbBatchDesc::UNBOUNDED` sentinel — unread on this compile (the shader's
-                // decision is the literal `true`), and when rung R2c arms the test an unfilled
-                // box survives every plane, so the reachable error is a wasted draw, never a
-                // vanished object.
+                // CONTROL rather than a change. A batch whose AABB the host could NOT compute
+                // keeps the conservative `VbBatchDesc::UNBOUNDED` corners, which survive every
+                // plane of the test rung R2c armed — so the reachable error is a wasted draw,
+                // never a vanished object.
                 if let Some(desc) = scene.vb_batch_desc.filter(|_| batch_cull_armed) {
                     let desc_stride = u64::from(VB_BATCH_DESC_STRIDE);
-                    // Bounded by BOTH allocations: the cull reads a descriptor and writes the
-                    // record at the same index, so the smaller capacity governs. Same
-                    // allocation-derived discipline as above.
-                    let desc_capacity = (desc[fi].size / desc_stride) as usize;
-                    let described = &recorded[..recorded.len().min(desc_capacity)];
+                    // Rung R2d-3: the SAME `batch_count` the dispatch below covers — bounded by
+                    // the record, descriptor AND survivor-list allocations at one site above, so a
+                    // dispatched lane can never read a descriptor this loop skipped.
+                    let described = &recorded[..batch_count.min(recorded.len())];
                     for (c, batches) in described.chunks(CHUNK).enumerate() {
-                        let mut descs = [VbBatchDesc::unbounded(0); CHUNK];
+                        let mut descs = [VbBatchDesc::unbounded(0, 0); CHUNK];
                         for (d, batch) in descs.iter_mut().zip(batches) {
                             // Rung R2c: the batch's real world AABB when the host could compute
                             // one. `None` (mesh not `Loaded`, or the C0 zero-vertex sentinel)
@@ -729,9 +793,21 @@ impl Renderer<'_> {
                             // absence of bounds is not evidence of invisibility, and the fallback
                             // is conservative by construction rather than by a branch in the
                             // shader.
+                            //
+                            // Rung R2d-3: `base_instance` is the SAME prefix-sum offset the raster
+                            // pushes per batch, so the shader's survivor region and the VS's
+                            // instance bucket are keyed off one host number.
                             *d = match batch.world_aabb {
-                                Some((mn, mx)) => VbBatchDesc::bounded(batch.instance_count, mn, mx),
-                                None => VbBatchDesc::unbounded(batch.instance_count),
+                                Some((mn, mx)) => VbBatchDesc::bounded(
+                                    batch.instance_count,
+                                    batch.base_instance,
+                                    mn,
+                                    mx,
+                                ),
+                                None => VbBatchDesc::unbounded(
+                                    batch.instance_count,
+                                    batch.base_instance,
+                                ),
                             };
                         }
                         let bytes = (batches.len() as u64) * desc_stride;
@@ -794,14 +870,19 @@ impl Renderer<'_> {
                 // the descriptor upload and this counter fill against the atomics below.
                 self.record_vb_pass(cull_pass, cmd, targets, forward, vb, scene, fi);
 
-                // Bounded by BOTH allocations the cull touches at index `i`: it reads
-                // `VbBatchDesc[i]` and writes record `i`, so the smaller capacity governs the
-                // dispatch. The shader's own `i >= pc.batch_count` guard then trims the tail
-                // group's lanes — together that is what keeps every device access in bounds with
-                // `robustBufferAccess` off.
-                let desc = scene.vb_batch_desc.expect("invariant: batch_cull_armed => vb_batch_desc");
-                let desc_capacity = (desc[fi].size / u64::from(VB_BATCH_DESC_STRIDE)) as usize;
-                let batch_count = scene.mesh_draw.len().min(record_capacity).min(desc_capacity) as u32;
+                // Bounded by EVERY allocation the cull touches at index `i` — it reads
+                // `VbBatchDesc[i]`, writes record `i`, and (rung R2d-3) writes that batch's OWNED
+                // region of the survivor list — so the smallest capacity governs the dispatch.
+                // Computed ONCE above, beside the fills, rather than re-derived here. The shader's
+                // own `i >= pc.batch_count` guard then trims the tail group's lanes — together
+                // that is what keeps every device access in bounds with `robustBufferAccess` off.
+                //
+                // ⚠️ Rung R2d-3 deliberately puts NO capacity guard in the shader for the region
+                // write: a clamped-and-dropped region write would leave a survivor slot unwritten
+                // while `instanceCount` still reported it, which the rasterizer would then
+                // dereference. The host prefix above is the ONLY bound, and it drops the whole
+                // batch (record intact, exactly pre-R2d rendering) rather than half of one.
+                let dispatched_batches = batch_count as u32;
                 // The clamp bound comes from the ALLOCATION, not from a host mirror of it: a push
                 // word describing a capacity can drift from the buffer it describes, which is
                 // exactly the failure VB-P1j had to close for `ClusterGrid`.
@@ -812,21 +893,22 @@ impl Renderer<'_> {
                 // not to something merely similar.
                 let push = VbBatchCullPush {
                     planes: scene.vb_cull_planes.unwrap_or(VbBatchCullPush::DISARMED_PLANES),
-                    batch_count,
+                    batch_count: dispatched_batches,
                     visible_cap,
                 };
-                let groups = batch_count.div_ceil(VB_BATCH_CULL_LOCAL_SIZE_X);
+                let groups = dispatched_batches.div_ceil(VB_BATCH_CULL_LOCAL_SIZE_X);
                 // SAFETY: recording is open and outside any render scope; `pipeline` + its layout
                 // (one COMPUTE set + the shared `COMPUTE_PUSH_CONSTANT_RANGE_BYTES` push range,
                 // of which this pass writes `VB_BATCH_CULL_PUSH_BYTES` = 104) are live on this
                 // device (caller contract). `cull_set` binds SEVEN COMPUTE storage buffers against
-                // the 7-entry `vb_cull_layout`, all written once at `GBufferTargets::sync`; the
-                // frozen SPIR-V declares only @0..@3, while @4/@5/@6 (rung R2d-2) are bound and
-                // written but read by nothing — which is legal precisely because a descriptor a
-                // shader never loads from is never dereferenced, and is why this rung leaves the
-                // module byte-identical. The dispatch covers `batch_count` lanes and the shader
-                // trims its tail group's out-of-range lanes. `&cull_set.descriptor_set` and `push`
-                // are locals alive for the calls.
+                // the 7-entry `vb_cull_layout`, all written once at `GBufferTargets::sync`. Rung
+                // R2d-3's module names @6 (`gVbVisibleInstance`, written) alongside @0..@3; @4/@5
+                // (`gVbInstances`/`gMeshBounds`) are declared in the HLSL but unread while `keep`
+                // is hardwired, so DXC may drop them from the module entirely — either way a
+                // WRITTEN descriptor a shader never loads from is never dereferenced, so the bound
+                // set legally exceeds what the module declares. The dispatch covers
+                // `dispatched_batches` lanes and the shader trims its tail group's out-of-range
+                // lanes. `&cull_set.descriptor_set` and `push` are locals alive for the calls.
                 unsafe {
                     (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
                     (self.fns.cmd_bind_descriptor_sets)(
@@ -2775,5 +2857,152 @@ impl Renderer<'_> {
             );
             (self.fns.cmd_dispatch)(cmd, group_x, group_y, 1);
         }
+    }
+}
+
+#[cfg(test)]
+mod vb_cull_clamp_tests {
+    use super::{GBufferMeshDraw, vb_cull_batch_count_visible_clamp};
+    use crate::memory::BoundBuffer;
+
+    /// A device-inert `BoundBuffer` — every handle field is null and nothing is mapped. The clamp
+    /// reads only `base_instance`/`instance_count`, so the two buffer references a
+    /// `GBufferMeshDraw` carries are pure padding here (the `fake_targets` idiom `targets.rs`'s own
+    /// unit tests use).
+    fn null_buffer() -> BoundBuffer {
+        BoundBuffer {
+            buffer: crate::ffi::VkBuffer::NULL,
+            offset: 0,
+            size: 0,
+            mapped: None,
+            block: 0,
+        }
+    }
+
+    /// Builds the batch list from `(base_instance, instance_count)` pairs, borrowing ONE inert
+    /// buffer for every batch's vertex/index slots.
+    fn batches<'a>(buf: &'a BoundBuffer, spec: &[(u32, u32)]) -> Vec<GBufferMeshDraw<'a>> {
+        spec.iter()
+            .map(|&(base_instance, instance_count)| GBufferMeshDraw {
+                vertex_buffer: buf,
+                index_buffer: buf,
+                index_count: 3,
+                index_type: 0,
+                base_instance,
+                instance_count,
+                casts_shadow: true,
+                world_aabb: None,
+            })
+            .collect()
+    }
+
+    /// The ordinary case: every batch's region fits, so the clamp is the identity and NOTHING is
+    /// dropped. This is the shape every golden-pinned scene takes, and it is what makes rung R2d-3
+    /// inert on them.
+    #[test]
+    fn a_list_that_fits_is_not_clamped() {
+        let buf = null_buffer();
+        // Bases are the running prefix sum: 0, 4, 6 — regions [0,4), [4,6), [6,13).
+        let m = batches(&buf, &[(0, 4), (4, 2), (6, 7)]);
+        assert_eq!(vb_cull_batch_count_visible_clamp(&m, 1024), 3);
+        assert_eq!(vb_cull_batch_count_visible_clamp(&[], 1024), 0, "an empty list clamps to 0");
+    }
+
+    /// THE BOUNDARY: the last batch ENDS exactly at the capacity. `base + count == visible_elems`
+    /// is the last legal region (the slots written are `base ..= visible_elems - 1`), so the
+    /// predicate must be `>` and not `>=` — an off-by-one here silently drops the final batch of
+    /// every perfectly-sized frame, which renders correctly and is therefore invisible to a golden.
+    #[test]
+    fn a_batch_that_exactly_fills_the_capacity_survives() {
+        let buf = null_buffer();
+        let m = batches(&buf, &[(0, 4), (4, 2), (6, 7)]);
+        assert_eq!(vb_cull_batch_count_visible_clamp(&m, 13), 3, "region [6,13) fits in 13 slots");
+        assert_eq!(
+            vb_cull_batch_count_visible_clamp(&m, 12),
+            2,
+            "one slot short: the last batch must be clamped away whole"
+        );
+    }
+
+    /// The PREFIX property, stated as the thing that could actually go wrong: the clamp must return
+    /// a boundary, never a filtered subset. Every batch below the returned index fits and every
+    /// batch at or above it does NOT — checked exhaustively against the returned index rather than
+    /// against a hand-copied expectation, so the assertion is about the property.
+    #[test]
+    fn the_clamp_is_a_prefix_boundary_not_a_filter() {
+        let buf = null_buffer();
+        // A deliberately lumpy list — a big batch in the middle, so a "filter" implementation
+        // (skip the batch that does not fit, keep the smaller ones after it) would return a
+        // DIFFERENT count and be caught here.
+        let m = batches(&buf, &[(0, 2), (2, 1), (3, 100), (103, 1), (104, 1)]);
+        for cap in [0_usize, 1, 2, 3, 4, 50, 102, 103, 104, 105, 4096] {
+            let n = vb_cull_batch_count_visible_clamp(&m, cap);
+            for (i, b) in m.iter().enumerate() {
+                let fits = b.base_instance as usize + b.instance_count as usize <= cap;
+                assert_eq!(
+                    i < n,
+                    fits,
+                    "cap {cap}: batch {i} (base {}, count {}) is on the wrong side of the boundary \
+                     {n} - the clamp filtered instead of truncating",
+                    b.base_instance,
+                    b.instance_count
+                );
+            }
+        }
+    }
+
+    /// MONOTONICITY, which is what makes the prefix argument sound rather than merely observed:
+    /// `gather_mixed_into` reads `base_instance = running` BEFORE `running += c`
+    /// (`boyko_render/src/mesh_draw.rs:815-832`), so `base + count` is non-decreasing across the
+    /// list and the predicate "does not fit" can never go back to false once it is true.
+    ///
+    /// Pinned on the GATHER'S OWN arithmetic — the running prefix sum is recomputed here rather
+    /// than assumed — so this test fails if that invariant is ever broken upstream.
+    #[test]
+    fn ends_are_non_decreasing_so_the_predicate_is_monotone() {
+        let buf = null_buffer();
+        let counts = [4_u32, 1, 7, 2, 9, 1];
+        let mut running = 0_u32;
+        let spec: Vec<(u32, u32)> = counts
+            .iter()
+            .map(|&c| {
+                let base = running;
+                running += c;
+                (base, c)
+            })
+            .collect();
+        let m = batches(&buf, &spec);
+
+        let ends: Vec<usize> =
+            m.iter().map(|b| b.base_instance as usize + b.instance_count as usize).collect();
+        assert!(
+            ends.windows(2).all(|w| w[0] <= w[1]),
+            "the gather's prefix sum must produce non-decreasing region ends; got {ends:?}"
+        );
+
+        // …and the clamp is therefore monotone in the capacity: a larger allocation never admits
+        // FEWER batches.
+        let mut prev = 0_usize;
+        for cap in 0..=(running as usize + 2) {
+            let n = vb_cull_batch_count_visible_clamp(&m, cap);
+            assert!(n >= prev, "cap {cap}: the admitted prefix shrank from {prev} to {n}");
+            prev = n;
+        }
+        assert_eq!(
+            vb_cull_batch_count_visible_clamp(&m, running as usize),
+            m.len(),
+            "an allocation sized to the total instance count admits every batch"
+        );
+    }
+
+    /// A zero-element survivor list (an unwired `vb_visible_instance`, which the recorder maps to
+    /// `0`) admits NOTHING — the cull then dispatches zero lanes and every record keeps the value
+    /// the host's own transfer fill wrote. Degrading to "no cull" rather than to "cull with an
+    /// out-of-bounds region write" is the whole point of deriving the bound from the allocation.
+    #[test]
+    fn a_zero_element_list_admits_no_batch() {
+        let buf = null_buffer();
+        let m = batches(&buf, &[(0, 1), (1, 1)]);
+        assert_eq!(vb_cull_batch_count_visible_clamp(&m, 0), 0);
     }
 }

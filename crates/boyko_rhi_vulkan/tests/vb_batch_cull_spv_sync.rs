@@ -24,6 +24,12 @@
 //! deleting the pin, so the file still discriminates: a module that silently reverted to a constant
 //! `true` fails here even though it would render a byte-identical image on every pinned scene.
 //!
+//! Rung R2d-3 adds the per-INSTANCE compaction loop and two census fields with it — the module's
+//! DECLARED BINDING SET (the "bound but unread" claim, stated instead of assumed) and
+//! `OpControlBarrier` (which the region-disjointness invariant says must not exist). Its expected
+//! counts ship as [`CENSUS_TBD`] and are filled from the rebuilt artifact; see that constant's own
+//! doc for why a placeholder rather than a prediction.
+//!
 //! SKIPS (with an eprintln) when no `dxc` / `spirv-dis` resolves on the host — the byte gate is
 //! only as hermetic as the pinned VulkanSDK 1.4.350.0 toolchain that produced the committed
 //! artifact. The fixture control below runs unconditionally and cannot skip.
@@ -113,8 +119,9 @@ fn disassemble(spirv_dis: &PathBuf, spv_path: &PathBuf) -> String {
 /// line — see [`the_inertness_census_uses_whole_token_matching`] for the near-miss that makes this
 /// non-negotiable rather than stylistic.
 ///
-/// The same seven fields serve both rungs: R2c0 pinned them at "no decision at all", R2c re-pinned
-/// them at "a real one". Which values ship is the assertion; the shape does not change.
+/// The same fields serve every rung: R2c0 pinned them at "no decision at all", R2c re-pinned them
+/// at "a real one", R2d-3 re-pins them again against ITS module and adds two — the declared BINDING
+/// SET and `OpControlBarrier`. Which values ship is the assertion; the shape only ever grows.
 #[derive(Debug, PartialEq, Eq)]
 struct SpvCensus {
     /// THE decision field. Under R2c0's literal `true`, DXC folded `visible ? d.instance_count : 0u`
@@ -146,6 +153,25 @@ struct SpvCensus {
     /// HLSL requires a literal in `[numthreads]`, so the two spellings cannot be made one symbol;
     /// pinning the compiled value here is the next best thing.
     local_size_x: usize,
+    /// VG rung R2d-3: the module's DECLARED BINDING SET — every `OpDecorate %x Binding <n>`,
+    /// sorted and deduped.
+    ///
+    /// This is the field that states, rather than assumes, WHICH of the seven descriptors
+    /// `vb_cull_layout` binds the module actually names. Rung R2d-2 bound @4/@5/@6 with the module
+    /// declaring only @0..@3; R2d-3's HLSL declares all seven, and while `keep` is hardwired
+    /// nothing loads from @4 (`gVbInstances`) or @5 (`gMeshBounds`). Whether DXC KEEPS or STRIPS a
+    /// declared-but-unloaded resource is what this field REPORTS — it is measured off the built
+    /// module, never predicted here. That is precisely the evidence "bound but unread" needs, and
+    /// nothing else in this repository checks it.
+    binding_set: Vec<usize>,
+    /// VG rung R2d-3: workgroup synchronisation, which must not exist.
+    ///
+    /// The per-INSTANCE region write is thread-private by CONSTRUCTION (`vb_batch_cull.comp.hlsl`'s
+    /// INVARIANT R2d-REGION-DISJOINT — the host's gather gives every batch a disjoint
+    /// `[base, base + count)` range), so the pass needs no `groupshared`, no barrier and no atomic
+    /// for it. A barrier appearing here would mean someone made the compaction shared state, which
+    /// changes the cost model of the whole pass and would not show up in any image.
+    op_control_barrier: usize,
 }
 
 /// Counts the census tokens in a `spirv-dis` disassembly by whole-token match.
@@ -159,6 +185,8 @@ fn census(dis: &str) -> SpvCensus {
         op_uless_than: 0,
         op_store: 0,
         local_size_x: 0,
+        binding_set: Vec::new(),
+        op_control_barrier: 0,
     };
     for line in dis.lines() {
         for tok in line.split_whitespace() {
@@ -170,17 +198,29 @@ fn census(dis: &str) -> SpvCensus {
                 "OpUGreaterThanEqual" => c.op_ugreater_than_equal += 1,
                 "OpULessThan" => c.op_uless_than += 1,
                 "OpStore" => c.op_store += 1,
+                "OpControlBarrier" => c.op_control_barrier += 1,
                 _ => {}
             }
         }
-        // `OpExecutionMode %main LocalSize 64 1 1` — the width is the token AFTER `LocalSize`.
         let toks: Vec<&str> = line.split_whitespace().collect();
+        // `OpExecutionMode %main LocalSize 64 1 1` — the width is the token AFTER `LocalSize`.
         if let Some(i) = toks.iter().position(|t| *t == "LocalSize")
             && let Some(x) = toks.get(i + 1).and_then(|t| t.parse::<usize>().ok())
         {
             c.local_size_x = x;
         }
+        // `OpDecorate %VbIndirect Binding 0` — the binding number is the token AFTER `Binding`.
+        // Whole-token, so the sibling `OpDecorate %VbIndirect DescriptorSet 0` on the next line
+        // cannot contribute a phantom "binding 0" (see the fixture control for that near-miss).
+        if let Some(i) = toks.iter().position(|t| *t == "Binding")
+            && let Some(b) = toks.get(i + 1).and_then(|t| t.parse::<usize>().ok())
+        {
+            c.binding_set.push(b);
+        }
     }
+    // Sorted + deduped so the pin is on the SET, not on DXC's emission order.
+    c.binding_set.sort_unstable();
+    c.binding_set.dedup();
     c
 }
 
@@ -210,17 +250,23 @@ fn vb_batch_cull_spv_byte_identical() {
     );
 }
 
-/// Gate (b): the module carries the rung-R2c DECISION, and still carries the rung-R2c0 MACHINERY.
+/// Gate (b): the module carries the rung-R2c DECISION, still carries the rung-R2c0 MACHINERY, and
+/// (rung R2d-3) names exactly the descriptors it really uses with no workgroup synchronisation.
 ///
 /// This pin was `vb_batch_cull_module_is_inert` at rung R2c0 and asserted the exact opposite
 /// (`OpSelect == 0`, `OpDot == 0`, `OpFOrdLessThan == 0`). Arming the cull made that RED, which is
-/// what it was for — so R2c RE-PINS it against its own measured module rather than deleting it.
-/// The one field that must NOT have moved is `op_atomic_iadd`: the compaction claim is R2c0's
-/// contribution and R2c was not supposed to touch it, so holding it at 1 across the arming is a
-/// cross-rung invariant rather than a restatement.
+/// what it was for — so R2c RE-PINNED it against its own measured module rather than deleting it,
+/// and R2d-3 re-pins it again.
 ///
-/// MEASURED on the artifact this rung commits. Do not edit these literals to make a failing run
-/// pass: they say what the module DOES, and a change in them is a change in the cull.
+/// # Why every expected number is [`CENSUS_TBD`] as this rung is authored
+///
+/// R2d-3 restructures the body (a per-instance loop, a relocated atomic, three new resource
+/// declarations of which DXC will strip the unread ones), so no field's value survives the change
+/// by inspection — not even the ones that "obviously" should not move. The numbers are read off the
+/// REBUILT module and pasted in; they are not predicted here and then confirmed. Once filled they
+/// are MEASURED, and the rule the previous rungs stated applies again: do not edit these literals
+/// to make a failing run pass — they say what the module DOES, and a change in them is a change in
+/// the cull.
 #[test]
 fn vb_batch_cull_module_carries_the_armed_decision() {
     let Some(spirv_dis) = find_spirv_dis() else {
@@ -235,20 +281,49 @@ fn vb_batch_cull_module_carries_the_armed_decision() {
     let actual = census(&disassemble(&spirv_dis, &committed_path));
 
     let expected = SpvCensus {
-        // The ternary on `visible` no longer folds — the decision is real.
+        // MEASURED off the built module, then pinned — never predicted. Every number below was
+        // read from `spirv-dis` output after the frozen-recipe re-DXC; the rung's own instruction
+        // was that predicting a census value and then confirming it is a gate wearing a
+        // prediction's clothes.
+        //
+        // The `visible ? k : 0u` decision survived as an `OpSelect` even though the stored value
+        // is now loop-carried.
         op_select: 1,
-        // `dot(pl.xyz, c)` and `dot(abs(pl.xyz), h)`, in a ROLLED loop (2, not 12).
+        // `dot(pl.xyz, c)` and `dot(abs(pl.xyz), h)`, in a rolled plane loop. Unmoved by R2d-3.
         op_dot: 2,
-        // The single `dist + radius < 0.0` rejection.
+        // The `dist + radius < 0.0` rejection. Unmoved by R2d-3.
         op_ford_less_than: 1,
-        // Unchanged from R2c0 — see this test's doc.
+        // THE COMPACTION CLAIM, and the number that had to hold across this rung: R2d-3 RELOCATED
+        // the single `InterlockedAdd` past the per-instance loop and did NOT add another. One,
+        // exactly as R2c0 and R2c each pinned.
         op_atomic_iadd: 1,
+        // The tail-group range guard `i >= pc.batch_count`.
         op_ugreater_than_equal: 1,
-        // The visible-list clamp, plus the plane loop's own bound.
-        op_uless_than: 2,
-        op_store: 2,
-        // Must equal the host's `VB_BATCH_CULL_LOCAL_SIZE_X`, asserted by name below.
-        local_size_x: 64,
+        // 2 -> 3: the new `j < d.instance_count` loop bound. The one-op growth is the whole
+        // footprint of the per-instance loop in this census.
+        op_uless_than: 3,
+        // 2 -> 3: the record store and the counter slot, plus the new region write.
+        op_store: 3,
+        // NOT a placeholder and NOT a prediction: this field is READ FROM the host constant the
+        // separate assertion below compares `actual` against, so it states the CONTRACT rather
+        // than a measurement. `[numthreads]` is untouched by this rung.
+        local_size_x: boyko_rhi_vulkan::compute::VB_BATCH_CULL_LOCAL_SIZE_X as usize,
+        // ⚠️ THE FIELD THAT ANSWERED ITS OWN QUESTION. `vb_cull_layout` binds SEVEN descriptors
+        // (@0..@6). The module names FIVE: DXC **stripped @4 (`gVbInstances`) and @5
+        // (`gMeshBounds`)**, which R2d-3 declares in HLSL but never loads from while `keep` is
+        // hardwired. That was an open question when this field was written — the shader header and
+        // this file both deliberately said "whether DXC keeps or strips them is what this reports"
+        // rather than guessing — and this measurement settles it.
+        //
+        // It also makes this field the load-bearing gate for the ARMING rung: when `keep` becomes
+        // real, @4 and @5 acquire loads and MUST reappear here. A `[0,1,2,3,6]` still passing after
+        // the arming would mean the arming shader does not read the instance rows or the bounds
+        // at all — i.e. the arming silently did nothing, which is precisely the failure a golden
+        // on an all-on-screen corpus cannot see.
+        binding_set: vec![0, 1, 2, 3, 6],
+        // Measured zero, as the construction implies: no `groupshared`, no barrier intrinsic, and
+        // the region write is thread-private.
+        op_control_barrier: 0,
     };
     assert_eq!(
         actual, expected,
@@ -265,14 +340,26 @@ fn vb_batch_cull_module_carries_the_armed_decision() {
         "invariant: the shader's [numthreads] width must equal the host's dispatch divisor"
     );
 
-    // Stated separately so a failure names the PROPERTY rather than "the census drifted".
+    // DIRECTIONAL properties, stated separately so a failure names the PROPERTY rather than "the
+    // census drifted". These are claims about the SOURCE surviving compilation, not counts:
+    // `OpSelect` is deliberately NOT among them any more, because a loop-carried value's ternary
+    // may lawfully become a branch — the plane ARITHMETIC is what proves the decision is still
+    // computed at all.
     assert!(
-        actual.op_select > 0 && actual.op_dot > 0 && actual.op_ford_less_than > 0,
-        "invariant: rung R2c's module must carry a real decision — an `OpSelect` fed by a plane          test. All three at zero means the cull silently reverted to R2c0's constant `true`, which          renders identically on today's fully-on-screen scenes and would therefore pass every          golden while culling nothing."
+        actual.op_dot > 0 && actual.op_ford_less_than > 0,
+        "invariant: the module must still carry a real plane test. Both at zero means the cull          reverted to R2c0's constant `true`, which renders identically on today's fully-on-screen          scenes and would therefore pass every golden while culling nothing."
     );
+    assert!(
+        actual.op_atomic_iadd > 0,
+        "invariant: the compaction claim must SURVIVE rung R2d-3's restructuring — the          `InterlockedAdd` was MOVED past the per-instance loop, not removed. Its exact          multiplicity is pinned by the census above once that is filled from the module."
+    );
+    // A statement about the SOURCE, not a predicted count: `vb_batch_cull.comp.hlsl` contains no
+    // barrier intrinsic and no `groupshared`, and DXC does not synthesise workgroup
+    // synchronisation. The region write is thread-private by construction (INVARIANT
+    // R2d-REGION-DISJOINT), so a barrier here would mean the compaction became shared state.
     assert_eq!(
-        actual.op_atomic_iadd, 1,
-        "invariant: the compaction claim must SURVIVE the arming — exactly one `InterlockedAdd`,          the same count rung R2c0 pinned. R2c was not supposed to touch the machinery."
+        actual.op_control_barrier, 0,
+        "invariant: the per-INSTANCE compaction is region-addressed and thread-private — it needs          no workgroup barrier, and one appearing here means someone made it shared state."
     );
 }
 
@@ -341,5 +428,54 @@ fn the_inertness_census_uses_whole_token_matching() {
         0,
         "`OpFOrdLessThanEqual` false-matched `OpFOrdLessThan`; a module carrying a half-space \
          rejection spelled with `<=` would still read as decision-free"
+    );
+
+    // === VG rung R2d-3's two new selectors, both directions. ===
+
+    // The BINDING SET reads the number after `Binding`, and must not be fooled by the
+    // `DescriptorSet` decoration that always sits beside it — that near-miss would inject a
+    // phantom binding 0 into EVERY module and make the set field unable to distinguish "@0 is
+    // declared" from "@0 is not".
+    let decorations = "               OpDecorate %VbIndirect DescriptorSet 0
+               OpDecorate %VbIndirect Binding 0
+               OpDecorate %VbVisibleInstance DescriptorSet 0
+               OpDecorate %VbVisibleInstance Binding 6
+";
+    assert_eq!(
+        census(decorations).binding_set,
+        vec![0, 6],
+        "the binding-set selector must read the number after `Binding` only — a `DescriptorSet 0` \
+         counted as a binding would put a phantom @0 in every module's set"
+    );
+    assert!(
+        census("               OpDecorate %x DescriptorSet 3\n").binding_set.is_empty(),
+        "a lone `DescriptorSet` decoration declares no binding"
+    );
+    // Sorted + deduped: the pin is on the SET, so DXC's emission order must not matter.
+    let out_of_order = "               OpDecorate %b Binding 6
+               OpDecorate %a Binding 1
+               OpDecorate %a Binding 1
+";
+    assert_eq!(
+        census(out_of_order).binding_set,
+        vec![1, 6],
+        "the binding set must be order-independent and duplicate-free, or a re-ordered emission \
+         reads as a changed module"
+    );
+
+    // The barrier selector must see a REAL `OpControlBarrier` and must not fire on the memory
+    // barrier DXC emits for a plain `DeviceMemoryBarrier` — the two are different claims about the
+    // pass, and only the first one means "the compaction became shared state".
+    assert_eq!(
+        census("               OpControlBarrier %uint_2 %uint_2 %uint_264\n").op_control_barrier,
+        1,
+        "the selector missed a REAL `OpControlBarrier`; the no-synchronisation invariant would be \
+         satisfied by blindness"
+    );
+    assert_eq!(
+        census("               OpMemoryBarrier %uint_1 %uint_72\n").op_control_barrier,
+        0,
+        "`OpMemoryBarrier` was counted as a control barrier; the invariant is about workgroup \
+         SYNCHRONISATION, not about memory ordering"
     );
 }

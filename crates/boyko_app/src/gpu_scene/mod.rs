@@ -3686,8 +3686,11 @@ impl GpuSceneBundles {
         // struct, not a per-mesh table owned by the geometry table, so its existence cannot be
         // conditioned on a resolved path without splitting `vb_cull_set`'s all-or-nothing gate.
         //
-        // Nothing reads it: no shader declares `vb_cull_layout` @6 or any VB Set-0 @11, so this
-        // allocation adds one buffer and not one recorded command (the R2d-1 null-control shape).
+        // Since rung R2d-3 the cull shader DECLARES @6 and WRITES this buffer on every dispatched
+        // lane — the identity compaction, `VbVisibleInstance[base + j] = base + j`. Nothing READS
+        // it yet: no VB vertex shader declares Set-0 @11 until rung R2d-4, so the writes reach no
+        // pixel and every VB golden pin stays byte-identical. That is the null-control shape held
+        // one rung longer, not the absence of GPU work.
         let vb_visible_instance: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
             ctx.create_buffer(&BufferDesc {
                 size: (INSTANCE_CAPACITY as u64) * 4,
@@ -3719,7 +3722,7 @@ impl GpuSceneBundles {
                 })
             });
 
-        // The batch cull's OWN 1-set layout, matching `vb_batch_cull.comp.hlsl`'s @0..@3. A
+        // The batch cull's OWN 1-set layout — seven bindings @0..@6 since rung R2d-3. A
         // DEDICATED layout rather than four more bindings on `vb_layout0`, because
         // `vb_layout0_froxel` already occupies @8/@9 — appended bindings would land on DIFFERENT
         // numbers in the two layouts and no single compiled module could name both. The
@@ -3760,8 +3763,9 @@ impl GpuSceneBundles {
                     // (`Self::vb_visible_instance`, the survivor list to compact into). Appended
                     // to the entries array BEFORE `vb_batch_cull_pipeline` is created against this
                     // layout below, so the shipped pipeline is built against the 7-binding shape;
-                    // `vb_batch_cull.comp.hlsl`'s frozen SPIR-V declares only @0..@3, so all three
-                    // are bound-but-unread this rung (the `vb_layout0` @7 precedent).
+                    // Rung R2d-3's HLSL declares all seven and WRITES @6; whether its module still
+                    // names @4/@5 while nothing loads from them is reported by the `binding_set`
+                    // census field in `vb_batch_cull_spv_sync.rs`, not assumed here.
                     BindGroupLayoutEntry {
                         binding: 4,
                         count: 1,

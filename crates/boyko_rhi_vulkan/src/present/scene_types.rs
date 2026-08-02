@@ -441,7 +441,7 @@ pub(crate) const VB_BATCH_CULL_PUSH_BYTES: u32 = crate::compute::VB_BATCH_CULL_P
 
 /// VG rung R2c0: one batch's cull inputs, as `vb_batch_cull.comp.hlsl`'s `VbBatchDescGpu` reads
 /// them. 32 bytes; `[f32; 3]`-then-`u32` twice, so both 16-byte halves are naturally packed and
-/// the struct needs no explicit padding member beyond the reserved `pad` word.
+/// the struct needs no explicit padding member.
 ///
 /// # Why the AABB is here at rung R2c0, where nothing reads it
 ///
@@ -465,8 +465,15 @@ pub struct VbBatchDesc {
     pub instance_count: u32,
     /// World-space AABB max corner. Rung R2c0 writes `+`[`Self::UNBOUNDED`].
     pub aabb_max: [f32; 3],
-    /// Reserved (rung R2c: the plane-set / batch-flags word). Written zero.
-    pub pad: u32,
+    /// VG rung R2d-3: this batch's start in the per-INSTANCE survivor list — the SAME
+    /// `base_instance` prefix-sum offset [`GBufferMeshDraw::base_instance`] carries and the raster
+    /// pushes, so the batch's OWNED region of `gVbVisibleInstance` is
+    /// `[base_instance, base_instance + instance_count)`.
+    ///
+    /// Occupies the word rung R2c0 reserved as `pad` (written zero, read by nothing), so the
+    /// 32-byte stride, the descriptor allocation and the 64-descriptor chunking are all unchanged
+    /// by its arrival — the whole reason that word was reserved.
+    pub base_instance: u32,
 }
 
 impl VbBatchDesc {
@@ -486,20 +493,25 @@ impl VbBatchDesc {
     /// it here would either duplicate that rule or quietly disagree with it.
     #[inline]
     #[must_use]
-    pub const fn bounded(instance_count: u32, aabb_min: [f32; 3], aabb_max: [f32; 3]) -> Self {
-        Self { aabb_min, instance_count, aabb_max, pad: 0 }
+    pub const fn bounded(
+        instance_count: u32,
+        base_instance: u32,
+        aabb_min: [f32; 3],
+        aabb_max: [f32; 3],
+    ) -> Self {
+        Self { aabb_min, instance_count, aabb_max, base_instance }
     }
 
     /// The rung-R2c0 descriptor for a batch of `instance_count` instances: an unbounded box, so
     /// the cull cannot reject it once rung R2c arms the test.
     #[inline]
     #[must_use]
-    pub const fn unbounded(instance_count: u32) -> Self {
+    pub const fn unbounded(instance_count: u32, base_instance: u32) -> Self {
         Self {
             aabb_min: [-Self::UNBOUNDED; 3],
             instance_count,
             aabb_max: [Self::UNBOUNDED; 3],
-            pad: 0,
+            base_instance,
         }
     }
 }
@@ -2538,9 +2550,14 @@ pub struct GBufferScene<'a> {
     /// `Some(...)`, exactly like [`Self::vb_instance_ring`]. Every VB Set-0 builder therefore
     /// `.expect()`s it under `path_is_vb()` rather than carrying another `Option` arm.
     ///
-    /// Bound at `vb_cull_layout` @6 and at every VB Set-0 layout @11, and read by NO shader this
-    /// rung — the `gClassify` @7 precedent ([`Self::vb_layout0`]'s doc): the descriptor arrives
-    /// before its consumer so the consumer rung changes only shader code.
+    /// Bound at `vb_cull_layout` @6 and at every VB Set-0 layout @11 — the `gClassify` @7 precedent
+    /// ([`Self::vb_layout0`]'s doc): the descriptor arrives before its consumer so the consumer rung
+    /// changes only shader code.
+    ///
+    /// VG rung R2d-3 arms the PRODUCER side: `vb_batch_cull.comp.hlsl` declares it at @6 and writes
+    /// each batch's OWNED region `[base_instance, base_instance + survivors)`. Still read by NO
+    /// shader — the @11 Set-0 binding stays bound-but-unread until rung R2d-4 makes the raster's VS
+    /// index it.
     pub vb_visible_instance: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
     /// VG rung R2d-1/R2d-2: the geometry table's `gMeshBounds[]` buffer — one 32-byte
     /// `MeshLocalBounds` row (LOCAL-space AABB, inverted-sentinel prefilled) per mesh slot, keyed
@@ -2593,8 +2610,13 @@ pub struct GBufferScene<'a> {
     ///
     /// VG rung R2d-2 widened it to 7 with the per-INSTANCE cull's inputs: `gVbInstances` @4
     /// ([`Self::vb_instance_ring`]), `gMeshBounds` @5 ([`Self::vb_mesh_bounds`]) and
-    /// `gVbVisibleInstance` @6 ([`Self::vb_visible_instance`]) — same kind, same stage, all three
-    /// bound-but-unread by `vb_batch_cull.comp.hlsl`'s frozen SPIR-V, which declares only @0..@3.
+    /// `gVbVisibleInstance` @6 ([`Self::vb_visible_instance`]) — same kind, same stage.
+    ///
+    /// VG rung R2d-3's `vb_batch_cull.comp.hlsl` declares all seven and WRITES @6 (the per-instance
+    /// survivor region). @4/@5 stay declared-but-unloaded while the cull's `keep` predicate is
+    /// hardwired, so DXC may strip them from the module — which is legal (the host writes every
+    /// descriptor in the set; one no shader dereferences is simply never read) and is what
+    /// `tests/vb_batch_cull_spv_sync.rs`'s binding-set census states rather than assumes.
     ///
     /// A DEDICATED layout rather than four more bindings on `vb_layout0`, and the reason is
     /// structural: `vb_layout0_froxel` already occupies @8/@9 with the froxel pair, so appended
