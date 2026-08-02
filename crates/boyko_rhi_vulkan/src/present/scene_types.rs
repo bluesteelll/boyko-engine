@@ -2512,7 +2512,8 @@ pub struct GBufferScene<'a> {
     /// classification plan rung P2a; bound-but-unread by every pipeline's frozen SPIR-V except
     /// the classify/`vb_shade` family). `gVbVisibleInstance` @11 (VERTEX, STORAGE_BUFFER,
     /// [`Self::vb_visible_instance`] — VG rung R2d-2; bound-but-unread by every pipeline's frozen
-    /// SPIR-V, the @7 precedent; @11 rather than @8 because @8/@9 are the froxel pair in
+    /// SPIR-V EXCEPT `vb_raster`'s VS, which declares and reads it from rung R2d-4; the @7
+    /// precedent; @11 rather than @8 because @8/@9 are the froxel pair in
     /// [`Self::vb_layout0_froxel`] and @10 is held for VB-SV0, so ONE number is free in both
     /// layouts). [`GBufferTargets`] writes the per-FIF bind group against
     /// this layout once per extent (the `forward_layout0` precedent). `None` rationale as
@@ -2555,9 +2556,11 @@ pub struct GBufferScene<'a> {
     /// changes only shader code.
     ///
     /// VG rung R2d-3 arms the PRODUCER side: `vb_batch_cull.comp.hlsl` declares it at @6 and writes
-    /// each batch's OWNED region `[base_instance, base_instance + survivors)`. Still read by NO
-    /// shader — the @11 Set-0 binding stays bound-but-unread until rung R2d-4 makes the raster's VS
-    /// index it.
+    /// each batch's OWNED region `[base_instance, base_instance + survivors)`. VG rung R2d-4 arms
+    /// the CONSUMER side: `vb_raster.vs.hlsl` declares it at @11 and, for a draw whose per-batch
+    /// push carries the indirection bit, reads its instance index through it. That is still INERT —
+    /// the list R2d-3 writes is the IDENTITY (`keep` hardwired), so the indirected expression is
+    /// literally the pre-R2d one.
     pub vb_visible_instance: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
     /// VG rung R2d-1/R2d-2: the geometry table's `gMeshBounds[]` buffer — one 32-byte
     /// `MeshLocalBounds` row (LOCAL-space AABB, inverted-sentinel prefilled) per mesh slot, keyed

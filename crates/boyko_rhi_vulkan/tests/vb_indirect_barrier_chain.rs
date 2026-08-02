@@ -32,6 +32,15 @@
 //! [`dropping_the_cull_moves_the_derived_source_back_to_transfer`] shape establishes — an
 //! assertion that cannot tell the declared world from the undeclared one is not a gate.
 //!
+//! # Rung R2d-4 closes the second of those two
+//!
+//! | ResId | pass | stage | access |
+//! |---|---|---|---|
+//! | `vb_visible_instance` | `vb_raster` | `VERTEX_SHADER` | `SHADER_READ` (the VS indexes Set-0 @11) |
+//!
+//! That completes the `COMPUTE → VERTEX_SHADER` RAW the R2d-3 write existed to produce. It gets the
+//! same pair — a chain test and its own sensitivity control.
+//!
 //! Runs unconditionally — pure algebra, no device, no `dxc`, so it cannot SKIP.
 
 use boyko_rhi_vulkan::ffi::{
@@ -221,18 +230,92 @@ fn vb_visible_instance_write_is_silent_but_leaves_a_pending_flush() {
     );
     assert_eq!(s.flush_stages, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
-    // FORWARD-LOOKING, and labelled as such: no pass declares this read yet. Replaying it here is
-    // what shows the state left behind is a PRODUCER state — the property the write is declared for
-    // in the first place, and the one that would silently be missing if the declaration were
-    // dropped.
-    let future_reader =
+    // The state left behind is a PRODUCER state — the property the write is declared for in the
+    // first place, and the one that would silently be missing if the declaration were dropped.
+    // Written as a forward-looking replay at rung R2d-3, when no pass declared this read; rung
+    // R2d-4 made it REAL ([`vb_visible_instance_raster_read_is_a_raw_against_the_culls_write`]
+    // pins the declared chain, with its own sensitivity control). Kept here because it asserts a
+    // different thing: that the WRITE's own left-behind state is sufficient, independent of who
+    // reads it.
+    let reader =
         transition(&mut s, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, BUF)
             .expect("invariant: a reader of the survivor list must order after the cull's write");
-    assert_eq!(future_reader.src_stage, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    assert_eq!(reader.src_stage, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     assert_eq!(
-        future_reader.src_access, VK_ACCESS_SHADER_WRITE_BIT,
+        reader.src_access, VK_ACCESS_SHADER_WRITE_BIT,
         "invariant: the RAW must make the cull's WRITE available — `src_access = 0` here would be \
          an execution edge that orders the stages while leaving the data unflushed"
+    );
+}
+
+/// VG rung R2d-4: `vb_visible_instance`'s VERTEX read, declared on `vb_raster` — the arming half of
+/// the pair rung R2d-3 left half-declared.
+///
+/// The chain is `vb_batch_cull` (COMPUTE, SHADER_WRITE) → `vb_raster` (VERTEX_SHADER, SHADER_READ),
+/// and the derived transition must be a real RAW: `src_stage = COMPUTE_SHADER` with
+/// `src_access = SHADER_WRITE`, so the cull's region stores are made AVAILABLE before the vertex
+/// stage loads them.
+///
+/// ⚠️ Why this one is worth a gate even though the rung is inert: the list R2d-3 writes is the
+/// IDENTITY (`visible[base + j] == base + j`), so a raster that read it BEFORE the cull's stores
+/// landed would get a plausible-looking answer on frame 2 onward and an undefined one on frame 1 —
+/// and on this corpus, where every batch survives, even the undefined read would usually paint
+/// something. No golden can see a missing barrier here. The algebra can.
+#[test]
+fn vb_visible_instance_raster_read_is_a_raw_against_the_culls_write() {
+    // `declare_vb_graph` seeds `vb_visible_instance` with `add_buffer` (undefined) — per-FIF, so a
+    // sibling in-flight frame touches a DIFFERENT slot and there is no cross-frame hazard to seed.
+    let mut s = ResSync::undefined();
+
+    // (1) `vb_batch_cull`'s per-INSTANCE region write — the buffer's first touch this frame.
+    let cull =
+        transition(&mut s, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, BUF);
+    assert!(cull.is_none(), "the cull's region write is the first touch this frame; got {cull:?}");
+
+    // (2) `vb_raster`'s VERTEX read, new this rung.
+    let raster =
+        transition(&mut s, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, BUF)
+            .expect("invariant: the VS's survivor-list read must order after the cull's write");
+    assert_eq!(
+        raster.src_stage, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        "the raster's survivor-list read is sourced on the wrong producer — the only writer of \
+         `vb_visible_instance` is the cull's COMPUTE dispatch"
+    );
+    assert_eq!(
+        raster.src_access, VK_ACCESS_SHADER_WRITE_BIT,
+        "invariant: the RAW must make the cull's WRITE available — `src_access = 0` here would be \
+         an execution edge that orders the stages while leaving the data unflushed, which is a \
+         stale read behind a barrier that looks entirely correct"
+    );
+    assert_eq!(raster.dst_stage, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
+    assert_eq!(
+        raster.dst_access, VK_ACCESS_SHADER_READ_BIT,
+        "invariant: the consumer side is a VERTEX-stage SHADER READ — the VS indexes @11, it does \
+         not fetch it as an indirect command"
+    );
+}
+
+/// SENSITIVITY CONTROL for the test above, in the shape
+/// [`dropping_the_cull_moves_the_derived_source_back_to_transfer`] establishes: replay the graph as
+/// it stood BEFORE rung R2d-3 declared the cull's region write, and show the raster's read derives a
+/// DIFFERENT source. Without this, the assertion above could be passing because `transition` reports
+/// a plausible constant rather than because the write is actually declared.
+#[test]
+fn dropping_the_culls_region_write_leaves_the_raster_read_on_a_first_touch() {
+    let mut s = ResSync::undefined();
+    let raster =
+        transition(&mut s, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, BUF)
+            .expect("invariant: R2d-2's own world — the VS read would be the list's first touch");
+    assert_eq!(raster.src_stage, boyko_rhi_vulkan::ffi::VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
+    assert_eq!(
+        raster.src_access, 0,
+        "invariant: with no declared writer there is no memory to make available — a nonzero \
+         src_access here would be a fabricated dependency"
+    );
+    assert_ne!(
+        raster.src_stage, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        "the two chains derive the SAME source, so the sibling test cannot distinguish a declared \
+         cull write from a missing one and its central assertion is vacuous"
     );
 }
 

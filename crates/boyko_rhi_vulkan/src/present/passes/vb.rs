@@ -55,6 +55,22 @@ const VB_DEPTH_CLEAR: f32 = 0.0;
 /// nothing for that pixel (the sky color already painted by `vb_sky` stands).
 const VB_ID_CLEAR: [u32; 4] = [0xFFFF_FFFF, 0, 0, 0];
 
+/// VG rung R2d-4: bit 1 of the `vb_raster.vs.hlsl` push's `use_model_matrix` word — "read this
+/// draw's instance indices THROUGH `gVbVisibleInstance` (Set-0 @11) instead of computing them".
+///
+/// Bit 0 keeps its pre-R2d meaning (`0` = legacy arm, non-zero = instanced arm), which is what
+/// makes the word safe to widen: every VS in `crates/boyko_rhi_vulkan/shaders` spells the arm test
+/// `pc.use_model_matrix == 0u` and NONE tests `== 1u`, so a set bit 1 cannot select the wrong arm
+/// in any of them. The bit is meaningful ONLY beside a set bit 0 — see the recorder's own
+/// `debug_assert!`.
+pub(crate) const VB_RASTER_FLAG_VISIBLE_INDIRECTION: u32 = 2;
+
+/// Bit 0 of the same word — the pre-R2d ARM selector (`0` = legacy arm, non-zero = instanced arm),
+/// minted by `boyko_render::view::forward_view_proj_rows` into `GBufferScene::mvp`'s byte 84.
+/// Named here only so the recorder's `debug_assert!` can state its relationship to
+/// [`VB_RASTER_FLAG_VISIBLE_INDIRECTION`] without a bare `1`.
+const VB_RASTER_FLAG_INSTANCED_ARM: u32 = 1;
+
 /// VG rung R2d-3: the number of LEADING batches whose OWNED region of the per-instance survivor
 /// list (`gVbVisibleInstance`) fits inside `visible_elems` — i.e. the index of the FIRST batch
 /// whose `base_instance + instance_count` would run past the end, or `mesh_draw.len()` when none
@@ -740,6 +756,15 @@ impl Renderer<'_> {
                             // nonzero value here is silent corruption rather than a caught error.
                             // The VS reads `instances[pc.base_instance + SV_InstanceID]`, so the
                             // base travels in the push constant exactly as it did before this rung.
+                            //
+                            // ⚠️ Rung R2d-4 RAISED THE STAKES on this field. `SV_InstanceID` now
+                            // also indexes `gVbVisibleInstance`, whose written region per batch is
+                            // exactly `[base_instance, base_instance + instance_count)`. If a
+                            // later rung enables the feature and writes a nonzero value here, an
+                            // id shifted by it stops being a wrong transform and becomes an
+                            // OUT-OF-RANGE read of that SSBO, undefined with `robustBufferAccess`
+                            // off. `vb_raster.vs.hlsl`'s header states the same warning from the
+                            // shader side and names the `.spv` census that pins the lowering.
                             first_instance: 0,
                         };
                     }
@@ -1022,12 +1047,37 @@ impl Renderer<'_> {
                 p_depth_attachment: (&vb_depth_attachment as *const VkRenderingAttachmentInfo).cast(),
                 p_stencil_attachment: ptr::null(),
             };
+            // === VG rung R2d-4: the per-draw `{ base_instance, flags }` push image. ===
+            //
+            // The pass-wide push below writes all 88 bytes of `scene.mvp`, whose word at offset 84
+            // is the arm selector `boyko_render::view::forward_view_proj_rows` mints (1 when an
+            // instanced batch list draws, 0 for a legacy merged draw). Each batch then re-writes
+            // the LAST TWO words of that range in ONE call — 8 bytes at
+            // `GBUFFER_PUSH_BASE_INSTANCE_OFFSET` (80), ending at exactly `GBUFFER_PUSH_BYTES`
+            // (88), which is the whole range this pipeline's layout declares for VERTEX|FRAGMENT
+            // at offset 0 (`GraphicsPipelineDesc::push_constant_bytes`, wired to
+            // `GBUFFER_PUSH_BYTES` at the pipeline's build site). Both the offset and the size are
+            // multiples of 4, as `vkCmdPushConstants` requires.
+            //
+            // The flags word is read out of `scene.mvp` rather than re-derived, so this recorder
+            // cannot disagree with the pass-wide push about which ARM the draw is on — it only
+            // ever ADDS a bit.
+            const FLAGS_OFFSET: usize = GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize + 4;
+            let base_flags = u32::from_le_bytes([
+                scene.mvp[FLAGS_OFFSET],
+                scene.mvp[FLAGS_OFFSET + 1],
+                scene.mvp[FLAGS_OFFSET + 2],
+                scene.mvp[FLAGS_OFFSET + 3],
+            ]);
+
             // SAFETY: recording is open; `vb_rendering` names the live `vb_id` view (now
             // COLOR_ATTACHMENT_OPTIMAL) + the live `vb_depth` (`forward.depth[fi]`, REUSED verbatim)
             // view (now DEPTH_ATTACHMENT_OPTIMAL); `vb_raster_pipeline` (1-set, built against
-            // `vb_layout0` — its VS references only `instances`/the push, a bound-but-unread subset
-            // of `vb_set0`) + the 88-byte VERTEX push range belong to this device (caller contract);
-            // `vb_set0[fi]` is a live descriptor set. `full_viewport`/`full_area` outlive the
+            // `vb_layout0` — since rung R2d-4 its VS references `instances` @0, `visible_instances`
+            // @11 and the push, still a subset of what `vb_set0` binds) + the 88-byte VERTEX push
+            // range belong to this device (caller contract); `vb_set0[fi]` is a live descriptor set
+            // whose @11 entry is the survivor list the VS now loads from. The per-draw push writes
+            // bytes [80, 88) of that 88-byte range. `full_viewport`/`full_area` outlive the
             // bracketed calls; each `DrawBatch`'s per-instance draw reads that batch's bound
             // vertex+index buffers. Begin/End bracket the pass exactly.
             unsafe {
@@ -1054,14 +1104,48 @@ impl Renderer<'_> {
                 (self.fns.cmd_set_viewport)(cmd, 0, 1, &full_viewport);
                 (self.fns.cmd_set_scissor)(cmd, 0, 1, &full_area);
                 for (i, batch) in scene.mesh_draw.iter().enumerate() {
-                    let base = batch.base_instance;
+                    // ⚠️ Rung R2d-4: `i < batch_count` is LOAD-BEARING, and it is the RELEASE-path
+                    // mechanism — not a debug check. The cull's dispatch covers exactly
+                    // `[0, batch_count)` (the SAME hoisted local the descriptor fill and the
+                    // dispatch read), and the shader's own tail guard trims lanes past it. A batch
+                    // OUTSIDE that range — clamped away by the visible-capacity clamp
+                    // (`vb_cull_batch_count_visible_clamp`), by the record/descriptor capacities, or
+                    // simply beyond the dispatch — had its region of the survivor list NOT written
+                    // this frame. `gVbVisibleInstance` is DEVICE_LOCAL and nothing clears it, so
+                    // that region holds undefined device memory on frame 1 and a previous frame's
+                    // residue afterwards. Clearing the bit makes the VS evaluate the pre-R2d
+                    // expression literally for exactly those batches, which is also why a clamped
+                    // batch renders identically rather than merely "close".
+                    // The instanced-arm term makes `flags == 2` STRUCTURALLY unreachable rather
+                    // than merely asserted. Bit 1 without bit 0 is not a no-op: it makes the VS's
+                    // `use_model_matrix == 0u` test false and flips the draw from the legacy arm to
+                    // the instanced one. The contract that byte 84 is 1 whenever `mesh_draw` is
+                    // non-empty is minted in a DIFFERENT crate (`boyko_app`'s runner), so guarding
+                    // it only with a `debug_assert!` here would leave the release path depending on
+                    // a promise this file cannot see. Reading bit 0 back out of the word we are
+                    // about to push costs one AND and removes the dependency.
+                    let indirection = batch_cull_armed
+                        && i < batch_count
+                        && (base_flags & VB_RASTER_FLAG_INSTANCED_ARM) != 0;
+                    let mut flags = base_flags;
+                    if indirection {
+                        flags |= VB_RASTER_FLAG_VISIBLE_INDIRECTION;
+                    }
+                    debug_assert!(
+                        (flags & VB_RASTER_FLAG_VISIBLE_INDIRECTION) == 0
+                            || (flags & VB_RASTER_FLAG_INSTANCED_ARM) != 0,
+                        "invariant: the visible-indirection bit is meaningless without the \
+                         instanced arm — flags {flags:#x} means the word was assembled wrong, and \
+                         the VS would take the instanced arm on a draw that has no instance rows"
+                    );
+                    let push: [u32; 2] = [batch.base_instance, flags];
                     (self.fns.cmd_push_constants)(
                         cmd,
                         vb_raster_pipeline.layout,
                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
-                        4,
-                        (&base as *const u32).cast(),
+                        core::mem::size_of_val(&push) as u32,
+                        push.as_ptr().cast(),
                     );
                     (self.fns.cmd_bind_vertex_buffers)(cmd, 0, 1, &batch.vertex_buffer.buffer, &vertex_offset);
                     (self.fns.cmd_bind_index_buffer)(cmd, batch.index_buffer.buffer, 0, batch.index_type);

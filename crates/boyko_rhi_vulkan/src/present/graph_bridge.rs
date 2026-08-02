@@ -2663,6 +2663,10 @@ pub(crate) struct VbPassPlan {
     /// `vb_depth` (`DepthStencilAttachmentWrite`/`DEPTH_ATTACHMENT_OPTIMAL`, first-touch, `GREATER`,
     /// Decision 4). Early-Z-clean (no `SV_Depth`/`discard`/UAV in the FS).
     ///
+    /// VG rung R2d-4: it also READS `vb_visible_instance` (`SHADER_READ` at `VERTEX_SHADER`, Set-0
+    /// @11) when the cull is armed — the consumer half of the `COMPUTE → VERTEX_SHADER` RAW the
+    /// rung-R2d-3 region write exists to produce.
+    ///
     /// Rung R10: `Some` only when `resolved_render_path.mesh_leg` — a `VisibilityBuffer × Sdf`
     /// (mesh-less) frame gates this OFF entirely (it needs the Decision-0 geometry table, which
     /// carries no slot with no mesh leg) and leaves `lit` for `vb_sky` + [`Self::sdf_forward_march`]
@@ -3505,6 +3509,36 @@ impl Renderer<'_> {
                 SubRange::DEPTH,
             );
             g.buffer_access(vb_instance_ring, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+            // Rung R2d-4: the VS's read of the per-INSTANCE survivor list (Set-0 @11), which
+            // derives the COMPUTE -> VERTEX_SHADER RAW against the cull's region write. Without it
+            // the raster could sample the list before the dispatch's stores landed, and it would
+            // usually look right: the list is the IDENTITY this rung, so a stale read returns the
+            // same numbers a correct one would. That is precisely the hazard a golden cannot see.
+            //
+            // Gated on `batch_cull_armed`, the SAME predicate the recorder's per-draw indirection
+            // bit carries — the `indirect_armed` shape immediately above, for the same reason: on a
+            // boot with no cull, nothing WRITES this buffer, so an unconditional declaration would
+            // put a spurious TOP_OF_PIPE -> VERTEX edge on a resource no pass ever produces.
+            //
+            // Note the gate does NOT rest on the VS skipping the load. It may not skip it: DXC is
+            // free to lower the `? :` to an eager load plus an `OpSelect`, in which case the
+            // fetch happens and its result is DISCARDED when the bit is clear. That is why the
+            // shader header carries an in-range argument for the not-taken address rather than
+            // an it-never-executes one. What makes the gate sound is the absence of a WRITER to
+            // synchronise against, not the absence of a reader.
+            //
+            // The recorder's predicate additionally carries `i < batch_count`, a per-BATCH term no
+            // declarator can see (it is derived from three allocation sizes at record time). That
+            // asymmetry is safe in exactly one direction, and this is that direction: it can only
+            // make this declaration cover MORE draws than actually read, i.e. a barrier that was
+            // not needed — never a read that was not barriered.
+            if batch_cull_armed {
+                g.buffer_access(
+                    vb_visible_instance,
+                    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                );
+            }
 
             // VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2c: the
             // classify chain `fill -> count -> scan -> scatter`, declared BEFORE the `lit`

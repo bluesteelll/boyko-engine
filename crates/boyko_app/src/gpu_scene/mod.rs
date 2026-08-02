@@ -168,6 +168,26 @@ const _: () = assert!(
      boot instance budget, not a separately-tunable capacity)"
 );
 
+/// VG rung R2d-4: the survivor list must hold at least as many ELEMENTS as the instance ring.
+///
+/// `vb_raster.vs.hlsl` selects between `visible_instances[base + id]` and `base + id` with a `? :`,
+/// and DXC is free to lower that to an EAGER load plus an `OpSelect` — so the address
+/// `base + id` may be issued against the survivor list even on a draw whose indirection bit is
+/// clear. `robustBufferAccess` is OFF on this device, so "issued but discarded" still has to be
+/// IN RANGE. The shader header carries that argument; this assert is what makes it mechanical
+/// rather than a claim about two allocations that merely happen to agree today.
+const _: () = assert!(
+    VB_VISIBLE_INSTANCE_ELEMS >= INSTANCE_CAPACITY,
+    "vb_visible_instance must hold at least INSTANCE_CAPACITY elements: the VB vertex shader may \
+     address it at any index the instance ring admits, whether or not that arm is selected"
+);
+
+/// Element count of `vb_visible_instance` — one `uint` global instance index per instance-ring
+/// slot. The allocation is sized FROM this constant, so the assert above is the real coupling
+/// rather than a restatement: changing the allocation means changing this, which trips the assert
+/// the moment it falls below the ring.
+const VB_VISIBLE_INSTANCE_ELEMS: usize = INSTANCE_CAPACITY;
+
 /// Asset-streaming plan F7 Q2: a sane upper bound on the non-RT instance family's
 /// grown capacity — mirrors `MESH_ADDR_CAP`'s role for the BLAS-address table.
 /// `debug_assert`-only (not a hard cap like `boyko_render::MaterialTable`'s
@@ -1070,9 +1090,11 @@ pub(crate) struct GpuSceneBundles {
     /// VG rung R2c0: the per-FIF visible-batch counter (one live `u32` at element 0).
     pub(crate) vb_cull_count: [BoundBuffer; FRAMES_IN_FLIGHT],
     /// Virtual-geometry ladder, rung R2d-2: the per-FIF per-INSTANCE survivor list
-    /// ([`INSTANCE_CAPACITY`] × 4 B, DEVICE_LOCAL). Allocated and BOUND (`vb_cull_layout` @6,
-    /// every VB Set-0 layout @11) but read by no shader this rung — see
-    /// `GBufferScene::vb_visible_instance`'s doc for why the binding lands before the consumer.
+    /// ([`INSTANCE_CAPACITY`] × 4 B, DEVICE_LOCAL — the SAME element count as
+    /// [`Self::vb_instance_rings`], which is what keeps one index valid for both). Allocated and
+    /// BOUND at `vb_cull_layout` @6 (written by the cull since rung R2d-3) and at every VB Set-0
+    /// layout @11 (read by `vb_raster`'s VS since rung R2d-4) — see
+    /// `GBufferScene::vb_visible_instance`'s doc for why the binding landed before the consumer.
     pub(crate) vb_visible_instance: [BoundBuffer; FRAMES_IN_FLIGHT],
     /// VG rung R2c-tail: the per-FIF host-visible READBACK staging for the cull's outputs —
     /// `Some` only under `BOYKO_VB_CULL_READBACK`. See [`Self::read_vb_cull`].
@@ -3518,7 +3540,8 @@ impl GpuSceneBundles {
                     // BEFORE any VB pipeline is built below (R5 — a set built against a DIFFERENT,
                     // structurally-identical layout object is silently incompatible), so every VB
                     // pipeline rebuilds against the 9-binding layout; bound-but-unread by their
-                    // frozen SPIR-V (none declares a `binding(11,0)`), the @7 precedent above.
+                    // frozen SPIR-V, the @7 precedent above — EXCEPT `vb_raster.vs.hlsl`, which
+                    // declares `binding(11, 0)` and reads it from VG rung R2d-4 on.
                     BindGroupLayoutEntry {
                         binding: 11,
                         count: 1,
@@ -3687,13 +3710,15 @@ impl GpuSceneBundles {
         // conditioned on a resolved path without splitting `vb_cull_set`'s all-or-nothing gate.
         //
         // Since rung R2d-3 the cull shader DECLARES @6 and WRITES this buffer on every dispatched
-        // lane — the identity compaction, `VbVisibleInstance[base + j] = base + j`. Nothing READS
-        // it yet: no VB vertex shader declares Set-0 @11 until rung R2d-4, so the writes reach no
-        // pixel and every VB golden pin stays byte-identical. That is the null-control shape held
-        // one rung longer, not the absence of GPU work.
+        // lane — the identity compaction, `VbVisibleInstance[base + j] = base + j`. Since rung
+        // R2d-4 `vb_raster.vs.hlsl` DECLARES Set-0 @11 and READS it for every draw whose per-batch
+        // push carries the indirection bit. Every VB golden pin still stays byte-identical, and now
+        // for a third kind of reason: the list is the IDENTITY, so the indirected expression is
+        // literally the pre-R2d one. That is the null-control shape held one rung longer, not the
+        // absence of GPU work.
         let vb_visible_instance: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
             ctx.create_buffer(&BufferDesc {
-                size: (INSTANCE_CAPACITY as u64) * 4,
+                size: (VB_VISIBLE_INSTANCE_ELEMS as u64) * 4,
                 usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC,
                 location: MemoryLocation::DeviceLocal,
             })

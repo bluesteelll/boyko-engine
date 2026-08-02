@@ -766,8 +766,10 @@ embed_spirv! {
     /// Multi-paradigm render-path plan, rung R8: the VisibilityBuffer v1 mesh id-raster VERTEX
     /// SPIR-V (`shaders/vb_raster.vs.hlsl`) — reads the 64-byte `VbInstanceRow` SSBO (byte-
     /// identical leading 48 bytes to `InstanceModelCol` + an appended `mesh_id` lane) and exports
-    /// a flat `instance_id = base_instance + SV_InstanceID` interpolant (Decision 9 — no FS-side
-    /// `SV_InstanceID` read). Paired with [`VB_RASTER_FS_SPV`].
+    /// the GLOBAL instance index as a flat interpolant (Decision 9 — no FS-side `SV_InstanceID`
+    /// read). VG rung R2d-4: that index is `base_instance + SV_InstanceID`, or — when the per-draw
+    /// push carries the indirection bit — that same expression read THROUGH `gVbVisibleInstance`
+    /// (@11), whose entries are themselves global indices. Paired with [`VB_RASTER_FS_SPV`].
     VB_RASTER_VS_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_raster.vs.spv")
 }

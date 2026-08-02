@@ -72,12 +72,17 @@
 //! "drifted shader" — and a host with no `dxc` at all can prove neither. A skip here is an absence
 //! of evidence and must never be read as a green.
 //!
-//! Two gates, the same pair the precedent files carry:
+//! Two gates, the same pair the precedent files carry, plus one census added at rung R2d-4:
 //!
 //! 1. **Reproduction** — each of the six rows, re-DXC'd under its own frozen recipe, is
 //!    byte-identical to its committed `.spv`.
 //! 2. **Sensitivity** — the control that makes (1)'s green mean something. A scratch copy of
 //!    `vb_raster.fs.hlsl` with its two `SV_Target0` lanes swapped must re-DXC to DIFFERENT bytes.
+//! 3. **`SV_InstanceID`'s LOWERING** (VG rung R2d-4) — a `spirv-dis` census pinning which SPIR-V
+//!    builtins `vb_raster.vs.spv` decorates. Byte identity already covers "these are the bytes of
+//!    this source"; it does NOT tell a reader WHICH builtin the instance id comes from, and from
+//!    rung R2d-4 that lowering is load-bearing rather than incidental — see
+//!    [`vb_raster_vs_builtin_census_pins_the_sv_instance_id_lowering`].
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -107,6 +112,71 @@ fn find_dxc() -> Option<PathBuf> {
         return Some(PathBuf::from(bare));
     }
     None
+}
+
+/// Locates `spirv-dis`: first the pinned Vulkan-SDK path, then `$VULKAN_SDK/Bin`, then `PATH`.
+/// Returns `None` if none resolve (the census below then SKIPS) — the `cluster_cull_hier_dis_gate.rs`
+/// idiom verbatim.
+fn find_spirv_dis() -> Option<PathBuf> {
+    let pinned = PathBuf::from("C:/VulkanSDK/1.4.350.0/Bin/spirv-dis.exe");
+    if pinned.exists() {
+        return Some(pinned);
+    }
+    let bare = if cfg!(windows) { "spirv-dis.exe" } else { "spirv-dis" };
+    if let Ok(sdk) = std::env::var("VULKAN_SDK") {
+        let candidate = PathBuf::from(sdk).join("Bin").join(bare);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    if Command::new(bare).arg("--version").output().is_ok() {
+        return Some(PathBuf::from(bare));
+    }
+    None
+}
+
+/// Disassembles a committed `.spv` — the artifact the engine actually loads, never a re-compile.
+/// Panics on a non-zero exit: a malformed committed `.spv` is a build-integrity bug, not a skip.
+fn disassemble_committed(spirv_dis: &PathBuf, spv_path: &PathBuf) -> String {
+    let out = Command::new(spirv_dis)
+        .arg(spv_path)
+        .output()
+        .expect("invariant: spirv-dis was located and must run");
+    assert!(
+        out.status.success(),
+        "spirv-dis failed on {}: {}",
+        spv_path.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).expect("invariant: spirv-dis emits UTF-8 disassembly")
+}
+
+/// Every SPIR-V builtin the module decorates, sorted and deduped — the census's whole selector.
+///
+/// Both decoration forms are collected, and that is not defensive padding: DXC emits the
+/// `SV_Position` output as an `OpMemberDecorate <gl_PerVertex-style struct> 0 BuiltIn Position` on
+/// some lowerings and a plain `OpDecorate %var BuiltIn Position` on others, so a selector that read
+/// only `OpDecorate` could report a SMALLER set on a perfectly correct module and would then have
+/// to be "fixed" by editing the pin. The opcode guard is what keeps an `OpName`/`OpMemberName`
+/// token from contributing a phantom entry — see
+/// [`the_builtin_selector_reads_both_decoration_forms_and_ignores_names`].
+fn builtin_decorations(dis: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in dis.lines() {
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        let Some(opcode) = toks.first() else { continue };
+        if *opcode != "OpDecorate" && *opcode != "OpMemberDecorate" {
+            continue;
+        }
+        if let Some(i) = toks.iter().position(|t| *t == "BuiltIn")
+            && let Some(name) = toks.get(i + 1)
+        {
+            out.push(String::from(*name));
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// Re-DXCs `hlsl_name` (relative to the shaders dir) under the EXACT frozen recipe from that
@@ -286,5 +356,121 @@ fn vb_raster_fs_redxc_is_sensitive_to_a_swapped_vb_id_lane() {
          A re-DXC byte comparison is therefore BLIND for this module, which makes the six-row \
          reproduction gate above vacuously green — it would not catch a real edit either. This is \
          a real finding — do not tune the mutation to force a green."
+    );
+}
+
+/// ⚠️ **PLACEHOLDER — NOT A MEASUREMENT.** The sorted, deduped set of SPIR-V builtins
+/// `vb_raster.vs.spv` decorates, to be replaced with the value read off the REBUILT module.
+///
+/// It ships as an obviously-wrong sentinel on purpose. Predicting a census value and then
+/// "confirming" it is a gate wearing a prediction's clothes — the rule
+/// `tests/vb_batch_cull_spv_sync.rs` states for its own census, and the reason its binding-set
+/// field was able to SETTLE an open question (whether DXC strips declared-but-unloaded resources)
+/// rather than merely agree with a guess. Whether DXC lowers `SV_InstanceID` to a `firstInstance`-
+/// relative or an absolute builtin is exactly such a question, so it is measured, not reasoned.
+///
+/// Once filled: do NOT edit these strings to make a failing run pass. They say what the module
+/// DOES, and a change in them is a change in the lowering.
+/// MEASURED off the rebuilt module, and the answer CONFIRMS the hazard rather than dismissing it:
+/// DXC lowers `SV_InstanceID` to **`InstanceIndex`**, the builtin that INCLUDES `firstInstance` —
+/// not to an absolute per-draw counter.
+///
+/// That is inert today only because `drawIndirectFirstInstance` is `VK_FALSE` on this device and
+/// every record this engine emits carries `first_instance == 0`. The moment either changes, the
+/// index the VS forms shifts — and since rung R2d-4 that index addresses `visible_instances`,
+/// so the consequence is an OUT-OF-RANGE SSBO read with `robustBufferAccess` off, not merely a
+/// wrong transform. This pin is what makes that a RED test rather than a silent corruption.
+const VB_RASTER_VS_BUILTINS_TBD: &[&str] = &["InstanceIndex", "Position"];
+
+/// Gate (3) — VG rung R2d-4: WHICH SPIR-V builtins the committed `vb_raster.vs.spv` decorates,
+/// read off the artifact rather than assumed from the HLSL. The instance-id builtin in that set is
+/// the one this gate exists for.
+///
+/// # Why this is not redundant with the byte gate above
+///
+/// Gate (1) proves the committed bytes are the compile of the committed source. It says nothing
+/// about WHAT that compile chose, and the choice here acquired a safety consequence at rung R2d-4.
+///
+/// `vb_raster.vs.hlsl`'s instanced arm now uses `pc.base_instance + SV_InstanceID` as an INDEX INTO
+/// `gVbVisibleInstance` (Set-0 @11), whose written region for a batch is exactly
+/// `[base_instance, base_instance + instance_count)`. DXC has two lowerings for `SV_InstanceID`:
+/// the raw builtin (into which the draw's `firstInstance` is folded) and the `BaseInstance`-
+/// subtracting form it emits under `-fvk-support-nonzero-base-instance`, which this shader's frozen
+/// recipe does not pass. Today the two are indistinguishable, because the recorder writes
+/// `first_instance = 0` into every indirect record and `drawIndirectFirstInstance` is not enabled
+/// on this device.
+///
+/// A LATER RUNG that enables that feature and writes a nonzero `firstInstance` turns the difference
+/// into an OUT-OF-RANGE read of a storage buffer — undefined (`robustBufferAccess` is off on this
+/// device), invisible to the validation layers (they do not follow buffer contents) and invisible
+/// to every golden (with the list holding the identity, a stale or out-of-range read still looks
+/// plausible). Such a rung must go RED **here**, where the lowering it depends on is stated, rather
+/// than ship and be diagnosed from a corrupted frame.
+///
+/// SKIPS by name when `spirv-dis` is absent — a skip is an absence of evidence, never a pass.
+#[test]
+fn vb_raster_vs_builtin_census_pins_the_sv_instance_id_lowering() {
+    let Some(spirv_dis) = find_spirv_dis() else {
+        eprintln!(
+            "vb_raster_geo_classify_spv_sync: spirv-dis not found (no \
+             C:/VulkanSDK/.../spirv-dis.exe, no $VULKAN_SDK/Bin, not on PATH) — SKIPPING the \
+             SV_InstanceID lowering census on this host. A skip is NOT a pass: nothing was proven \
+             about which builtin carries the instance id."
+        );
+        return;
+    };
+    let committed_path = shaders_dir().join("vb_raster.vs.spv");
+    assert!(committed_path.exists(), "missing committed {}", committed_path.display());
+    let actual = builtin_decorations(&disassemble_committed(&spirv_dis, &committed_path));
+
+    assert_eq!(
+        actual, VB_RASTER_VS_BUILTINS_TBD,
+        "vb_raster.vs.spv's BuiltIn set is {actual:?}. If the expected side still reads \
+         `<MEASURE-ME...>`, this is the rung-R2d-4 PLACEHOLDER awaiting the measured value — paste \
+         the actual set into `VB_RASTER_VS_BUILTINS_TBD`. If it does NOT, the lowering of \
+         `SV_InstanceID` (or of `SV_Position`) CHANGED: read that constant's doc before touching \
+         it, because `firstInstance`-relative vs absolute decides whether this VS's \
+         `gVbVisibleInstance` index can run out of range."
+    );
+}
+
+/// FIXTURE CONTROL for [`builtin_decorations`]'s selector, and it is not decorative: a selector
+/// that silently returned the EMPTY set fails the census above LOUDLY today (the placeholder
+/// differs from `[]`), but would be vacuously green forever if `[]` were ever the pinned value.
+/// These fixtures pin the two decoration forms that carry builtins and the near-miss that must not
+/// contribute.
+///
+/// Runs unconditionally — pure string handling, no toolchain, so it cannot SKIP.
+#[test]
+fn the_builtin_selector_reads_both_decoration_forms_and_ignores_names() {
+    // ⚠️ The fixture builtins are DELIBERATELY SYNTHETIC (`Aaa`/`Bbb`, names SPIR-V does not
+    // define). Feeding this control the real spellings would put a plausible answer one line
+    // above the constant that must be MEASURED off the module — an invitation to paste rather
+    // than to run `spirv-dis`. The control's job is to prove the PARSER reads both decoration
+    // forms; it must not double as a hint about the result.
+    assert_eq!(
+        builtin_decorations("               OpDecorate %some_var BuiltIn Aaa\n"),
+        vec!["Aaa".to_string()],
+        "the plain OpDecorate form must be read"
+    );
+    assert_eq!(
+        builtin_decorations("               OpMemberDecorate %some_struct 0 BuiltIn Bbb\n"),
+        vec!["Bbb".to_string()],
+        "the MEMBER decoration form must be read too — DXC emits SV_Position through it on some \
+         lowerings, and a selector blind to it would report a smaller set on a correct module and \
+         then have to be 'fixed' by editing the pin"
+    );
+    assert!(
+        builtin_decorations("               OpName %in_var_BuiltIn \"in.var.BuiltIn\"\n").is_empty(),
+        "a name is not a decoration — only OpDecorate/OpMemberDecorate may contribute"
+    );
+    assert_eq!(
+        builtin_decorations(
+            "               OpDecorate %b BuiltIn Bbb\n               OpDecorate %a BuiltIn \
+             Aaa\n               OpDecorate %c BuiltIn Bbb\n"
+        ),
+        vec!["Aaa".to_string(), "Bbb".to_string()],
+        "the pin must be on the SET — sorted and deduped, so a re-ordered or repeated emission \
+         cannot flip it"
     );
 }
