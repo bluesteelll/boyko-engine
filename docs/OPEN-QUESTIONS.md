@@ -14,24 +14,47 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
-## OPEN — Which scene becomes the depth-complexity perf fixture?
+## RESOLVED 2026-08-02 — the depth-complexity fixture is Khronos Sponza (delegated to me)
 
 **Situation.** Decision (b) above commits to a separate fixture with real occlusion. What it should
-contain is not decided, and it is an asset question I should not answer alone.
+contain was not decided, and it is an asset question I raised rather than settled on my own — the owner then delegated it back to me.
 
 The VG corpus is seven fetched Khronos glTF sample assets arranged on a 5x3x3 grid — chosen for
 triangle density, and it has almost no occlusion by construction. A depth-complexity fixture wants
 the opposite: large occluders with substantial geometry behind them. The classic choices are Sponza
 (an interior with a colonnade that occludes heavily) or Bistro; neither is in the manifest today.
 
-**What it needs from you.** Which scene, and whether its payload may be fetched into
-`assets/` alongside the VG corpus (gitignored, same as the corpus) or should live elsewhere.
+**OWNER'S DECISION: delegated to me.** Chosen: **Sponza, from the same Khronos glTF-Sample-Assets
+family the density corpus already draws on**, fetched into `assets/vg_occlusion/` under its own
+manifest, gitignored and content-pinned exactly as `assets/vg_corpus/` is.
 
-**What I will do either way.** Keep it OUT of `vg_corpus_scene` and out of the density census, with
-its own manifest and its own camera paths, so a number read off one instrument can never be quoted
-about the other.
+**Why Sponza and not Bistro or Intel Sponza.**
 
-**Blocks.** Any occlusion perf claim. Blocks no implementation work.
+- *Same source family as the existing corpus*, so the fetch script's shape, the licence posture and
+  the gitignore precedent all transfer. No new infrastructure and no new licensing question — the
+  three things that would otherwise make this a multi-session detour.
+- *Same loader path*: glTF/`.glb` through `GlbMeshLoader`, already exercised by every corpus asset.
+- *It has the right OCCLUSION STRUCTURE*, which is the whole point: a colonnade plus an upper
+  gallery, so a camera at floor level down the nave has its far half hidden behind columns. That is
+  exactly what the density corpus lacks by construction.
+- *Size*. This session already hit zero free space at a 73 GB `target/`. Bistro is ~2.4 GB, and its
+  glTF conversions vary in provenance — which matters more here than usual, because this repo pins
+  by content hash and a pin on an artifact nobody can re-derive is not a pin.
+- *Comparability*: Sponza is the published occlusion/GI benchmark, so a number measured on it means
+  something to a reader outside this repository.
+
+**The risk I am taking, stated rather than discovered later.** ONE scene is the same
+vacuous-selection exposure the corpus notes warn about — a single framing can be chosen to flatter.
+Mitigation is the corpus's own: several committed camera paths spanning degrees of occlusion (down
+the nave = heavy; from the gallery = moderate; outside looking in = little), with the WEAKEST
+binding, exactly as `orbit_mid` binds the density corpus. A win claimed off the heavy framing alone
+would be the defect, not the fixture.
+
+**Still to do when it is built.** The `source_url` / `archive_sha256` / per-file `glb_sha256` pins
+are filled from the first verified fetch, the way `CORPUS.toml`'s were — not written from a guess.
+
+**Blocks.** Any occlusion perf claim. Blocks no implementation work, and is not on the HZB critical
+path.
 
 ---
 
