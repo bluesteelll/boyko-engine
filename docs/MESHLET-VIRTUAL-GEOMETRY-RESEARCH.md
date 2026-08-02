@@ -469,6 +469,29 @@ Also: the existing classify chain's scan is one 256-thread workgroup looping blo
 >
 > In every row the previous-frame corollary is a precondition of ARMING, never of building.
 >
+> **THE MEASUREMENT, run with the existing instrument at zero new code** (`BOYKO_VG_CENSUS` over
+> `vg_r0d_census.rs`'s worker, ladder rung 0 = 512×512, the armed R2d-6 build):
+>
+> | | covered px | drawn | win ≥1 px | **win ZERO px** = the ceiling |
+> |---|---|---|---|---|
+> | `orbit_mid` | 164 746 / 262 144 = 62.9 % | 44 | 43 | **1** |
+> | `approach_close` | 211 369 / 262 144 = 80.6 % | 31 | 20 | **11** |
+>
+> The coverage agrees with the machine-written `docs/VG-R0-DENSITY-CENSUS.md` (62.8 % / 80.6 %),
+> which is the check that the instrument measures what it claims. `drawn` is R2d-6's measured
+> `Σ inst` at the same extent and paths.
+>
+> **Row 3 fires: the ceiling is nonzero on the binding framing, so R3a is built** — and the
+> previous-frame soundness question is its FIRST step, not a later one.
+>
+> ⚠️ Two honesty notes that travel with the number. **It is 1 of 44 at `orbit_mid`** — alive, but
+> barely; the 11 of 31 belongs to the close approach, and R2d already established that reading a
+> verdict off that framing alone is the vacuous-selection defect. And **the ceiling is an UPPER
+> bound on more than occlusion**: an instance wins zero pixels if it is fully occluded, but also if
+> it is sub-pixel or degenerate, so occlusion's true share is ≤ these numbers. The design's own
+> hand-computed ceiling said ≤5 and ≤7; measurement replaced it with 1 and 11 — the third time this
+> campaign has had a hand computation corrected by its own instrument.
+>
 > ---
 >
 > **What this reprioritises:** the pyramid (R3a) is still worth building — R5/R6's meshlet cull
