@@ -429,6 +429,48 @@ Also: the existing classify chain's scan is one 256-thread workgroup looping blo
 > corpus's deliberate half-cell stagger ("a back layer shows through the gaps") keeps back instances
 > partially visible, which a conservative AABB test never rejects.
 >
+> ---
+>
+> ### ⚠️ R3a DESIGN OUTCOME — the occlusion existential, and a BINDING disposition table
+>
+> Designing R3a produced two results that govern whether it is built at all. Both are recorded
+> BEFORE the measurement below is run, so the pre-commitment is verifiable from git history rather
+> than from this paragraph's tone.
+>
+> **1. THE SAME-FRAME THEOREM.** Under reverse-Z the conservative reduce is `min()`, so `H[t]` is
+> the FARTHEST surface in the footprint. If instance *i* wins any pixel *p*, then `D[p]` is *i*'s
+> own surface, so `H[t(p)] ≤ D[p] ≤ depth_near(i)` and the strict rejection inequality can never
+> hold. **A min-reduced HZB cannot reject a partially visible instance** — at any tile size, any
+> mip. Occlusion-rejectable ⊆ instances that win ZERO pixels.
+>
+> ⚠️ **The theorem is SAME-FRAME ONLY, and R3b cannot be same-frame.** The cull runs BEFORE the
+> raster, so a pyramid built from this frame's depth is samplable only NEXT frame. Under a
+> previous-frame pyramid the premise fails — `H` is a min over frame N−1 while `depth_near(i)` is
+> evaluated against frame N's transform — so an instance emerging from behind an occluder CAN be
+> falsely rejected. **Conservatism is NOT inherited across the frame boundary.** That is the reason
+> two-pass occlusion culling exists, and it must be settled before any allocation, not after.
+>
+> **2. THE EXISTENTIAL IS SATISFIED BY A SUBSET OF WHAT R3a BUILDS.** A min-reduced pyramid is a
+> pure function of the depth buffer, so a host oracle over a LEVEL-0 readback computes every level
+> and the predicate exactly; levels 1..N on the GPU add nothing to the question being asked. And
+> the CEILING needs no readback at all: `vg_census::CensusRow::distinct_instance_count` (shipped at
+> rung R2d-5) already counts instances owning at least one covered texel, so
+> `drawn − distinct_instance_count` IS the occlusion ceiling, measurable today at zero new code.
+>
+> **THE DISPOSITION TABLE.** Written before the run. A measurement whose every branch leads to the
+> same action is decoration attached to a decision already made — the defect this campaign named
+> when it declared R2's gate unsatisfiable and VB-P1g dead as specified.
+>
+> | ceiling `drawn − distinct_instance_count` | disposition |
+> |---|---|
+> | **0 at `orbit_mid` AND 0 at `approach_close`** | The occlusion existential is DEAD on all measurable content. R3a/R3b/R4-occlusion are not built. Record the theorem and the number; the ladder proceeds to whatever rung has a demonstrable consumer. |
+> | **0 at `orbit_mid`, >0 at `approach_close`** | Same shape as R2d: no occlusion claim on the binding framing. R3a may ship only if the ladder INDEPENDENTLY requires a pyramid for R5/R6 meshlet culling — verified by quoting those rows, not assumed. |
+> | **>0 at `orbit_mid`** | The existential is alive on the binding framing. Build R3a, and settle the previous-frame soundness question first. |
+>
+> In every row the previous-frame corollary is a precondition of ARMING, never of building.
+>
+> ---
+>
 > **What this reprioritises:** the pyramid (R3a) is still worth building — R5/R6's meshlet cull
 > samples an HZB, so building it later means building the meshlet cull twice. But raising
 > granularity to **per-INSTANCE** is the precondition for any of it, so it goes first. R2's plan
