@@ -116,7 +116,7 @@ Full statement and proof: [VG-R3-HZB-PLAN.md](VG-R3-HZB-PLAN.md) §1. **No owner
 
 ---
 
-## RESOLVED 2026-08-02 — HZB design: option (a), a full revision round then implement
+## RESOLVED 2026-08-02 — HZB: option (a), then REVISED TO (b) — foundation first
 
 **Situation.** With soundness settled, the implementation design was reviewed and returned REJECTED
 by both reviewers. The blockers are real, not stylistic — among them: the design revives
@@ -140,7 +140,27 @@ order. My own recommendation had been (b) — land the uncontroversial foundatio
 not taken; (a) is the same loop that carried rung R2d from 8 blockers to shipped, and it keeps the
 step order intact rather than interleaving foundation work with a design still in motion.
 
-**Blocks.** All HZB work until the revision returns. Nothing already shipped.
+**REVISED TO (b) the same day, by the owner, after the revision round returned.** The round closed
+every prior blocker (10 YES / 6 PARTIAL / **0 NO**) and produced 3 NEW blockers plus a dozen majors
+— and every one of them lands in the FEATURE: candidate routing, a capability predicate missing its
+`mesh_leg` conjunct, a boot clear needing a `TRANSFER_DST` the image is not created with, an
+un-ringed per-frame UBO, an unobservable `prev_view_proj`, an unexecutable anti-vacuity clause.
+
+**Not one lands against the foundation** — the RHI `TextureView`, the framegraph subresource guard,
+or the host oracle. Three design rounds, zero blockers there. That is evidence rather than
+preference, and it inverts my original reason for recommending (b): it was a hunch then, it is a
+measurement now.
+
+Some blockers exist BECAUSE the foundation does not: one says outright that a step's acceptance
+cannot be executed at that step because the instrument does not exist yet. Building the foundation
+first removes a class of objections rather than postponing it.
+
+**So: implement S1 (RHI `TextureView`), S2 (framegraph subresource guard) and S3 (host oracle) now.**
+Each is independently correct, needed regardless of whether occlusion culling is ever armed, and
+none depends on a disputed part. The feature's design continues to settle against its remaining
+blockers, on a foundation that by then exists.
+
+**Blocks.** The occlusion feature only. The foundation proceeds.
 
 ---
 
