@@ -42,10 +42,65 @@
 //! single-mip, `flags: 0`, own-format path. A multi-layer texture (CSM) is never
 //! combined with `mip_levels > 1` (a `debug_assert!` in `create` traps it) — its
 //! per-layer RENDER views always target mip 0 only.
+//!
+//! # Explicit views — [`VulkanTextureView`] (VG R3 step S1)
+//!
+//! Every view described above is created by the texture, FOR the texture, at
+//! `base_mip_level = 0`. None of them can name mip `k` alone, and a GPU mip chain is
+//! built exactly one level at a time. [`VulkanTextureView`] is the explicit,
+//! caller-owned view that closes that gap: created from a
+//! [`TextureViewDesc`](boyko_rhi::TextureViewDesc) with
+//! `base_mip_level = desc.base_mip` and `level_count = desc.mip_count`, it is the one
+//! view shape no path above can produce. It follows [`VulkanTexture`]'s ownership
+//! discipline verbatim — not `Copy`/`Clone`, destroyed by value, so the move encodes
+//! "destroyed exactly once".
+//!
+//! ## ⚠️ THE OWNERSHIP RULE
+//!
+//! **A [`VulkanTextureView`] MUST be owned by the same struct that owns its
+//! [`VulkanTexture`], and destroyed BEFORE it.**
+//!
+//! A view is a CHILD object of the image. Destroying the image first leaves the view
+//! naming a dead `VkImage`; destroying the image while a view of it is live is
+//! `VUID-vkDestroyImage-image-01000`. Only co-ownership makes "before" expressible at
+//! the site that has to honor it — a view held by a different struct than its image has
+//! no teardown order to be right about.
+//!
+//! The rule is enforced the way `// SAFETY:` is enforced: by a marker comment that one
+//! grep enumerates. Every field holding a view carries, on the line above it,
+//!
+//! ```text
+//! // VIEW-OWNER: <the texture field this is a view OF>; destroyed before it in <teardown fn>.
+//! ```
+//!
+//! and the census is
+//!
+//! ```text
+//! rg "^\s*// VIEW-OWNER:" crates/
+//! ```
+//!
+//! The pattern matches only real marker comments: a `///` doc line and a `//!`
+//! module-doc line both fail it (the third `/`, and the `!`, break `// VIEW-OWNER:`), so
+//! this section does not pollute its own census. As of S1 the census is **empty** — the
+//! step lands the capability and no owner.
+//!
+//! ## Debt: the view duality, and its named trigger
+//!
+//! After S1 this crate has TWO kinds of image view: the IMPLICIT texture-owned ones
+//! (`view`, `layer_views`, `array_view`, created inside `VulkanTexture::create` and
+//! never handed out as owned values) and the EXPLICIT [`VulkanTextureView`]. The
+//! duality is deliberate, and it is debt: `layer_views` is a per-layer view set that the
+//! explicit form could express as `base_layer: i, layer_count: 1`.
+//!
+//! It is NOT paid down here. Migrating `layer_views` in a foundation step would be an
+//! unrelated change riding along inside it, and it would move golden pins for no reason.
+//! The trigger is named instead: **the next feature that needs a per-layer OR per-mip
+//! view migrates `layer_views` to [`VulkanTextureView`] in the same rung.** Until then
+//! the implicit set stays exactly as it is.
 
 use core::ptr;
 
-use boyko_rhi::TextureDesc;
+use boyko_rhi::{TextureDesc, TextureViewDesc, TextureViewDimension};
 
 use crate::device::DeviceFns;
 use crate::error::VulkanError;
@@ -111,6 +166,21 @@ pub struct VulkanTexture {
     /// (CSM Increment 0): the resolve samples `float3(uv, layer)` through it. `NULL`
     /// for a single-layer image (no array view is created there).
     pub(crate) array_view: VkImageView,
+    /// The `VkFormat` every view of this image is created in — the decoupled
+    /// [`TextureDesc::view_format`] when it is `Some`, else [`TextureDesc::format`]
+    /// (VG R3 step S1). Retained because an image handle carries no queryable metadata
+    /// in this raw-FFI backend, and an explicit [`VulkanTextureView`] with
+    /// `TextureViewDesc::format == None` inherits exactly this value.
+    pub(crate) view_format: i32,
+    /// The `VkImageAspectFlags` every view of this image uses — DEPTH for a
+    /// depth-stencil-attachment image, COLOR otherwise (VG R3 step S1). Retained for the
+    /// same reason as `view_format`: an explicit view MUST reuse the parent image's
+    /// aspect, and a mismatched aspect faults `vkCreateImageView` under validation.
+    pub(crate) aspect_mask: VkFlags,
+    /// The image's `mipLevels` (VG R3 step S1). Retained so an explicit view's
+    /// `[base_mip, base_mip + mip_count)` range can be `debug_assert`ed against the
+    /// image it is a view of.
+    pub(crate) mip_levels: u32,
 }
 
 impl VulkanTexture {
@@ -398,6 +468,12 @@ impl VulkanTexture {
             layer_views,
             active_layers: layers,
             array_view,
+            // S1 metadata: recorded from the values the views above were just built
+            // with, so an explicit `VulkanTextureView` inherits the same format/aspect
+            // rather than re-deriving them from a desc the caller no longer holds.
+            view_format,
+            aspect_mask,
+            mip_levels: desc.mip_levels,
         })
     }
 
@@ -477,6 +553,391 @@ impl VulkanTexture {
             }
             (fns.destroy_image)(device, self.image, ptr::null());
             (fns.free_memory)(device, self.memory, ptr::null());
+        }
+    }
+}
+
+/// Lowers a [`TextureViewDesc`] onto the `VkImageViewCreateInfo` that creates it (VG R3
+/// step S1) — the whole agnostic→Vulkan mapping of the explicit-view path, in one pure
+/// function so it can be asserted without a device.
+///
+/// `image` is the parent's `VkImage`; `aspect_mask` and `inherited_format` are the
+/// parent's `aspect_mask` / `view_format` — the aspect is never a desc field (a view's
+/// aspect must equal its image's) and the format is one only when the caller asks to
+/// reinterpret. `components` is the identity swizzle and `flags` is 0, matching the
+/// texture's own views.
+pub(crate) fn texture_view_create_info(
+    image: VkImage,
+    aspect_mask: VkFlags,
+    inherited_format: i32,
+    desc: &TextureViewDesc,
+) -> VkImageViewCreateInfo {
+    VkImageViewCreateInfo {
+        s_type: VkStructureType::ImageViewCreateInfo,
+        p_next: ptr::null(),
+        flags: 0,
+        image,
+        view_type: desc.dimension.as_i32(),
+        format: desc.format.map_or(inherited_format, |f| f.as_i32()),
+        components: VkComponentMapping {
+            r: VK_COMPONENT_SWIZZLE_IDENTITY,
+            g: VK_COMPONENT_SWIZZLE_IDENTITY,
+            b: VK_COMPONENT_SWIZZLE_IDENTITY,
+            a: VK_COMPONENT_SWIZZLE_IDENTITY,
+        },
+        subresource_range: VkImageSubresourceRange {
+            aspect_mask,
+            base_mip_level: desc.base_mip,
+            level_count: desc.mip_count,
+            base_array_layer: desc.base_layer,
+            layer_count: desc.layer_count,
+        },
+    }
+}
+
+/// An owned EXPLICIT `VkImageView` over a sub-range of a [`VulkanTexture`]
+/// ([`RhiApi::TextureView`](boyko_rhi::RhiApi::TextureView), VG R3 step S1).
+///
+/// Created with `base_mip_level = desc.base_mip` and `level_count = desc.mip_count` —
+/// the shape none of the texture's own views can produce, since every one of those is
+/// pinned to mip 0 (see the module docs).
+///
+/// # Ownership & teardown (mirrors [`VulkanTexture`])
+///
+/// **Not** `Copy`/`Clone`: destruction is by value
+/// ([`RhiDevice::destroy_texture_view`](boyko_rhi::RhiDevice::destroy_texture_view)), so
+/// the move encodes "destroyed exactly once". The non-`Copy`ness is load-bearing rather
+/// than stylistic — a `Copy` view would let two values name one `VkImageView` and be
+/// destroyed twice. Beyond that, THE OWNERSHIP RULE in the module docs applies: this
+/// view is owned by whichever struct owns its texture, and is destroyed BEFORE it.
+///
+/// # Safety
+///
+/// The originating [`VulkanContext`](crate::device::VulkanContext) MUST still be alive
+/// when this view is used (written into a bind group) or destroyed: each goes through
+/// the context's device fn-table. No compile-time `'ctx` tie this phase (plan F1; the
+/// [`VulkanTexture`] precedent).
+pub struct VulkanTextureView {
+    /// The `VkImageView` over the desc's subresource range; destroyed by
+    /// `destroy_texture_view`, which per THE OWNERSHIP RULE runs before the parent
+    /// texture's `destroy`.
+    pub(crate) view: VkImageView,
+}
+
+impl VulkanTextureView {
+    /// Creates the explicit view of `texture` described by `desc`.
+    ///
+    /// The parent supplies what a desc must not: the image handle, the aspect (a view's
+    /// aspect must equal its image's), and the format an inheriting (`format: None`)
+    /// desc adopts.
+    ///
+    /// # Safety
+    ///
+    /// `device`/`fns` must be the live device + its command table, and `texture` must be
+    /// a live texture created on that same device (its `image` is named by the view).
+    pub(crate) unsafe fn create(
+        device: VkDevice,
+        fns: &DeviceFns,
+        texture: &VulkanTexture,
+        desc: &TextureViewDesc,
+    ) -> Result<Self, VulkanError> {
+        debug_assert!(
+            desc.mip_count >= 1 && desc.layer_count >= 1,
+            "invariant: an image view spans at least one mip level and one array layer"
+        );
+        debug_assert!(
+            desc.base_mip.saturating_add(desc.mip_count) <= texture.mip_levels,
+            "invariant: the view's mip range must lie within the image's mip chain"
+        );
+        debug_assert!(
+            desc.base_layer.saturating_add(desc.layer_count) <= texture.active_layers,
+            "invariant: the view's layer range must lie within the image's array layers"
+        );
+        // The constraint `TextureViewDesc::dimension`'s own doc declares as a MUST, checked here
+        // rather than left to the caller — and `Default` is precisely why it needs checking: the
+        // default names a NON-array dimension, so raising `layer_count` alone, which reads like the
+        // obvious way to view several layers, silently produces a multi-layer view through a
+        // single-layer view type. Vulkan requires `layerCount == 1` for every view type outside the
+        // ARRAY family (`VUID-VkImageViewCreateInfo-imageViewType-04973`), and the validation layers
+        // are the only other thing that would catch it — which is exactly the configuration this
+        // engine disables under `BOYKO_DISABLE_VALIDATION` on its GPU test legs.
+        debug_assert!(
+            desc.layer_count == 1 || matches!(desc.dimension, TextureViewDimension::D2Array),
+            "invariant: a view type outside the ARRAY family spans exactly one array layer; \
+             `dimension` must be D2Array to span {} of them",
+            desc.layer_count
+        );
+
+        let view_info =
+            texture_view_create_info(texture.image, texture.aspect_mask, texture.view_format, desc);
+        let mut view = VkImageView::NULL;
+        // SAFETY: `device` is live and `texture` was created on it (caller contract), so
+        // `view_info.image` names a live image; the subresource range lies within that
+        // image's mip chain / array layers and carries the image's own aspect (the three
+        // `debug_assert`s above plus `texture.aspect_mask`, which `create` recorded from
+        // the values the image's own views were built with); `&mut view` is a valid
+        // out-pointer; NULL allocator.
+        let raw = unsafe { (fns.create_image_view)(device, &view_info, ptr::null(), &mut view) };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(VulkanError::Vk("vkCreateImageView(explicit view)", result));
+        }
+        Ok(Self { view })
+    }
+
+    /// The raw `VkImageView` handle — the value a descriptor write or an attachment
+    /// names. Public for the same reason [`VulkanTexture`]'s `view()` accessor is: a
+    /// cross-crate caller hands the handle to a path that takes raw handles rather than
+    /// a whole owned view.
+    #[inline]
+    pub fn view(&self) -> VkImageView {
+        self.view
+    }
+
+    /// Destroys the view, consuming `self`.
+    ///
+    /// # Safety
+    ///
+    /// `device`/`fns` must be the live device the view was created on; no GPU work
+    /// referencing it is in flight (caller fence-waited / `wait_idle`'d); the parent
+    /// texture is still alive (THE OWNERSHIP RULE: the view is destroyed BEFORE its
+    /// image, since `vkDestroyImage` on an image with a live view is
+    /// `VUID-vkDestroyImage-image-01000`); it is destroyed exactly once (the by-value
+    /// `self` enforces the latter).
+    pub(crate) unsafe fn destroy(self, device: VkDevice, fns: &DeviceFns) {
+        // SAFETY: per the contract `device` is live, nothing references the view, and
+        // its image outlives this call — so destroying it here is the correct half of
+        // the reverse-creation order (view, then image). Exactly once: `self` is by
+        // value and `VulkanTextureView` is not `Copy`/`Clone`.
+        unsafe { (fns.destroy_image_view)(device, self.view, ptr::null()) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use boyko_rhi::{Format, TextureViewDesc, TextureViewDimension};
+
+    use crate::ffi::{
+        VK_COMPONENT_SWIZZLE_IDENTITY, VK_FORMAT_D32_SFLOAT, VK_FORMAT_R32_SFLOAT,
+        VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D_ARRAY,
+        VK_IMAGE_VIEW_TYPE_3D, VkFlags, VkImage, VkStructureType,
+    };
+
+    use super::texture_view_create_info;
+
+    /// One row of the desc→`VkImageViewCreateInfo` mapping table: the agnostic input,
+    /// the parent-supplied aspect/inherited format, and the Vulkan values the lowering
+    /// must produce.
+    struct Row {
+        what: &'static str,
+        desc: TextureViewDesc,
+        aspect: VkFlags,
+        inherited_format: i32,
+        want_view_type: i32,
+        want_format: i32,
+        want_range: (u32, u32, u32, u32),
+    }
+
+    /// The desc's Vulkan mapping, table-driven over the axes that exist: mip range,
+    /// layer range, view shape, and format inheritance vs reinterpretation.
+    ///
+    /// Device-free by construction — [`texture_view_create_info`] is a pure lowering, so
+    /// a `VK_NULL_HANDLE` image is a fine stand-in: no Vulkan call is made and the image
+    /// handle is only copied through.
+    #[test]
+    fn desc_lowers_to_the_expected_subresource_range() {
+        let rows = [
+            Row {
+                what: "the default desc: mip 0 alone, layer 0 alone, 2D, inherited format",
+                desc: TextureViewDesc::default(),
+                aspect: VK_IMAGE_ASPECT_COLOR_BIT,
+                inherited_format: VK_FORMAT_R32_SFLOAT,
+                want_view_type: VK_IMAGE_VIEW_TYPE_2D,
+                want_format: VK_FORMAT_R32_SFLOAT,
+                want_range: (0, 1, 0, 1),
+            },
+            Row {
+                what: "a single INTERIOR mip — the pyramid-level shape",
+                desc: TextureViewDesc {
+                    base_mip: 3,
+                    mip_count: 1,
+                    ..TextureViewDesc::default()
+                },
+                aspect: VK_IMAGE_ASPECT_COLOR_BIT,
+                inherited_format: VK_FORMAT_R32_SFLOAT,
+                want_view_type: VK_IMAGE_VIEW_TYPE_2D,
+                want_format: VK_FORMAT_R32_SFLOAT,
+                want_range: (3, 1, 0, 1),
+            },
+            Row {
+                what: "a multi-level tail starting above 0",
+                desc: TextureViewDesc {
+                    base_mip: 2,
+                    mip_count: 5,
+                    ..TextureViewDesc::default()
+                },
+                aspect: VK_IMAGE_ASPECT_COLOR_BIT,
+                inherited_format: VK_FORMAT_R32_SFLOAT,
+                want_view_type: VK_IMAGE_VIEW_TYPE_2D,
+                want_format: VK_FORMAT_R32_SFLOAT,
+                want_range: (2, 5, 0, 1),
+            },
+            Row {
+                what: "a single INTERIOR array layer at a non-zero mip (both axes at once)",
+                desc: TextureViewDesc {
+                    base_mip: 1,
+                    mip_count: 1,
+                    base_layer: 2,
+                    layer_count: 1,
+                    ..TextureViewDesc::default()
+                },
+                aspect: VK_IMAGE_ASPECT_DEPTH_BIT,
+                inherited_format: VK_FORMAT_D32_SFLOAT,
+                want_view_type: VK_IMAGE_VIEW_TYPE_2D,
+                want_format: VK_FORMAT_D32_SFLOAT,
+                want_range: (1, 1, 2, 1),
+            },
+            Row {
+                what: "a 2D-ARRAY slice of four layers",
+                desc: TextureViewDesc {
+                    base_layer: 1,
+                    layer_count: 4,
+                    dimension: TextureViewDimension::D2Array,
+                    ..TextureViewDesc::default()
+                },
+                aspect: VK_IMAGE_ASPECT_DEPTH_BIT,
+                inherited_format: VK_FORMAT_D32_SFLOAT,
+                want_view_type: VK_IMAGE_VIEW_TYPE_2D_ARRAY,
+                want_format: VK_FORMAT_D32_SFLOAT,
+                want_range: (0, 1, 1, 4),
+            },
+            Row {
+                what: "a 3D view",
+                desc: TextureViewDesc {
+                    dimension: TextureViewDimension::D3,
+                    ..TextureViewDesc::default()
+                },
+                aspect: VK_IMAGE_ASPECT_COLOR_BIT,
+                inherited_format: VK_FORMAT_R8G8B8A8_UNORM,
+                want_view_type: VK_IMAGE_VIEW_TYPE_3D,
+                want_format: VK_FORMAT_R8G8B8A8_UNORM,
+                want_range: (0, 1, 0, 1),
+            },
+            Row {
+                what: "format REINTERPRETATION overrides the inherited format",
+                desc: TextureViewDesc {
+                    format: Some(Format::R8G8B8A8Srgb),
+                    ..TextureViewDesc::default()
+                },
+                aspect: VK_IMAGE_ASPECT_COLOR_BIT,
+                inherited_format: VK_FORMAT_R8G8B8A8_UNORM,
+                want_view_type: VK_IMAGE_VIEW_TYPE_2D,
+                want_format: VK_FORMAT_R8G8B8A8_SRGB,
+                want_range: (0, 1, 0, 1),
+            },
+            Row {
+                what: "an explicit format EQUAL to the inherited one lowers the same",
+                desc: TextureViewDesc {
+                    base_mip: 7,
+                    format: Some(Format::R32Sfloat),
+                    ..TextureViewDesc::default()
+                },
+                aspect: VK_IMAGE_ASPECT_COLOR_BIT,
+                inherited_format: VK_FORMAT_R32_SFLOAT,
+                want_view_type: VK_IMAGE_VIEW_TYPE_2D,
+                want_format: VK_FORMAT_R32_SFLOAT,
+                want_range: (7, 1, 0, 1),
+            },
+        ];
+
+        for row in &rows {
+            let info = texture_view_create_info(
+                VkImage::NULL,
+                row.aspect,
+                row.inherited_format,
+                &row.desc,
+            );
+            let r = info.subresource_range;
+
+            assert_eq!(info.view_type, row.want_view_type, "viewType: {}", row.what);
+            assert_eq!(info.format, row.want_format, "format: {}", row.what);
+            assert_eq!(
+                (
+                    r.base_mip_level,
+                    r.level_count,
+                    r.base_array_layer,
+                    r.layer_count
+                ),
+                row.want_range,
+                "subresourceRange: {}",
+                row.what
+            );
+            assert_eq!(
+                r.aspect_mask, row.aspect,
+                "aspectMask comes from the TEXTURE, not the desc: {}",
+                row.what
+            );
+
+            // The invariant half: an explicit view is spelled like the texture's own
+            // views everywhere the desc does not speak.
+            assert!(
+                matches!(info.s_type, VkStructureType::ImageViewCreateInfo),
+                "sType: {}",
+                row.what
+            );
+            assert!(info.p_next.is_null(), "pNext must stay null: {}", row.what);
+            assert_eq!(info.flags, 0, "flags: {}", row.what);
+            // `VkImage` is a bare handle newtype with no `Debug`, so this is `assert!`
+            // over `==` rather than `assert_eq!`.
+            assert!(
+                info.image == VkImage::NULL,
+                "image is copied through: {}",
+                row.what
+            );
+            let c = info.components;
+            assert_eq!(
+                [c.r, c.g, c.b, c.a],
+                [VK_COMPONENT_SWIZZLE_IDENTITY; 4],
+                "components must stay the identity swizzle: {}",
+                row.what
+            );
+        }
+    }
+
+    /// The one shape the whole step exists for: `base_mip = k, mip_count = 1` is
+    /// EXACTLY what no texture-owned view produces. `VulkanTexture::create` builds every
+    /// view at `base_mip_level: 0` with `level_count` either `desc.mip_levels` (single
+    /// layer) or `1` (array), so for `k > 0` the explicit lowering must differ from both.
+    #[test]
+    fn per_mip_view_is_a_shape_the_texture_owned_views_cannot_produce() {
+        let mip_levels = 6u32;
+        for k in 1..mip_levels {
+            let info = texture_view_create_info(
+                VkImage::NULL,
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                VK_FORMAT_R32_SFLOAT,
+                &TextureViewDesc {
+                    base_mip: k,
+                    mip_count: 1,
+                    ..TextureViewDesc::default()
+                },
+            );
+            let r = info.subresource_range;
+            assert_eq!(r.base_mip_level, k);
+            assert_eq!(r.level_count, 1);
+            // The texture-owned single-layer view: base 0, count `mip_levels`.
+            assert_ne!(
+                (r.base_mip_level, r.level_count),
+                (0, mip_levels),
+                "per-mip view must differ from the texture's full-chain view"
+            );
+            // The texture-owned per-layer (array) view: base 0, count 1.
+            assert_ne!(
+                (r.base_mip_level, r.level_count),
+                (0, 1),
+                "per-mip view must differ from the texture's per-layer view"
+            );
         }
     }
 }

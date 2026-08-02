@@ -59,6 +59,16 @@ pub trait RhiApi: Sized + 'static {
     type Semaphore;
     /// SDF 3D storage image / texture. Seam: Phase 6+.
     type Texture;
+    /// An owned EXPLICIT image view over a sub-range of a [`Self::Texture`] — a
+    /// single mip level, a layer slice, or a format reinterpretation (VG R3 step S1;
+    /// Vulkan backend: `VulkanTextureView`).
+    ///
+    /// Distinct from the views a texture creates for ITSELF (which the backend keeps
+    /// inside the `Texture` and never hands out as owned values): those all start at
+    /// mip 0, so none of them can name mip `k`. This type is what a caller owns, and it
+    /// is owned by whichever struct owns the texture — see the ownership rule on
+    /// [`RhiDevice::create_texture_view`].
+    type TextureView;
     /// Texture sampler. Seam: Phase 6+.
     type Sampler;
     /// Dynamic-rendering graphics pipeline. Seam: Phase 6+.

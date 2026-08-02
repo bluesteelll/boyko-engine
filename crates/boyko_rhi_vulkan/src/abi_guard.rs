@@ -16,7 +16,8 @@
 use boyko_rhi::enums::{
     AddressMode, BarrierAccess, BarrierStage, BlendFactor, BlendOp, BufferUsage, CompareOp,
     CullMode, DescriptorKind, Filter, Format, ImageAspect, ImageLayout, ImageUsage, IndexType,
-    LoadOp, PrimitiveTopology, ShaderStage, StoreOp, TextureDimension, TimestampStage, VertexFormat,
+    LoadOp, PrimitiveTopology, ShaderStage, StoreOp, TextureDimension, TextureViewDimension,
+    TimestampStage, VertexFormat,
 };
 
 use crate::ffi::{
@@ -51,6 +52,7 @@ use crate::ffi::{
     VK_IMAGE_TYPE_3D, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
     VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_USAGE_SAMPLED_BIT,
     VK_IMAGE_USAGE_STORAGE_BIT, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+    VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D_ARRAY, VK_IMAGE_VIEW_TYPE_3D,
     VK_INDEX_TYPE_UINT16, VK_INDEX_TYPE_UINT32, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
     VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
@@ -572,8 +574,8 @@ const _: () = assert!(
 // discriminants MUST equal the matching `VK_COMPARE_OP_*` / `VK_CULL_MODE_*`
 // constants. These pin that equality; any drift breaks the build instead of writing
 // the wrong compare op / cull mode. (The depth-array texture's `VK_IMAGE_VIEW_TYPE_*`
-// view types are backend-only constants the agnostic surface never names, so they
-// have no agnostic counterpart to assert.)
+// view types were backend-only constants with no agnostic counterpart until VG R3 step
+// S1 surfaced `TextureViewDimension`; they are asserted in that step's section below.)
 // ===========================================================================
 
 // --- CompareOp `as_i32()` (mapped in `create_sampler`). ---
@@ -606,6 +608,34 @@ const _: () = assert!(
 const _: () = assert!(
     CullMode::Back.as_u32() == VK_CULL_MODE_BACK_BIT,
     "CullMode::Back must equal VK_CULL_MODE_BACK_BIT"
+);
+
+// ===========================================================================
+// VG R3 step S1 — the explicit image-view contract. `TextureViewDimension` `as_i32()`
+// is mapped in `texture.rs::texture_view_create_info` (the `VkImageViewCreateInfo::
+// viewType`) by a trivial `as i32` cast, so its discriminants MUST equal the matching
+// `VK_IMAGE_VIEW_TYPE_*` constants. A wrong view type is not a compile error anywhere
+// else: it is a driver-side type mismatch against the image (or, worse, a silently
+// layer-clamped view), so pin the equality here.
+//
+// `D2`/`D3` numerically COINCIDE with `VK_IMAGE_TYPE_2D`/`_3D` (asserted above for
+// `TextureDimension`), but the two live in DIFFERENT Vulkan enum namespaces
+// (`VkImageViewType` here vs `VkImageType` there) — the coincidence is not a reason to
+// merge either family into the other, exactly as with the `DescriptorKind`/`VkStructureType`
+// `1_000_150_000` collision.
+// ===========================================================================
+
+const _: () = assert!(
+    TextureViewDimension::D2.as_i32() == VK_IMAGE_VIEW_TYPE_2D,
+    "TextureViewDimension::D2 must equal VK_IMAGE_VIEW_TYPE_2D"
+);
+const _: () = assert!(
+    TextureViewDimension::D3.as_i32() == VK_IMAGE_VIEW_TYPE_3D,
+    "TextureViewDimension::D3 must equal VK_IMAGE_VIEW_TYPE_3D"
+);
+const _: () = assert!(
+    TextureViewDimension::D2Array.as_i32() == VK_IMAGE_VIEW_TYPE_2D_ARRAY,
+    "TextureViewDimension::D2Array must equal VK_IMAGE_VIEW_TYPE_2D_ARRAY"
 );
 
 // ===========================================================================

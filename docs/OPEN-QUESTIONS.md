@@ -174,4 +174,10 @@ blockers, on a foundation that by then exists.
   flake — reproducible contention.
 - **graphify has been off-target for the render/VB path** for this entire session; every query
   returned `boyko_demo` internals. Grep/Read is the working path there.
+- **The ECS's global query-type registry can exhaust under the full lib suite.**
+  `MAX_QUERY_TYPES = 1024` is a process-global cap minted lazily, and `boyko-ecs --lib` runs 864
+  tests in parallel. When scheduling happens to mint the 1025th distinct query shape, whichever test
+  is unlucky dies with a TERMINAL panic naming the cap. Observed once, then 3 consecutive clean runs
+  of the same binary. It is order-dependent, not a regression signal — check by re-running before
+  bisecting anything.
 - **`.claude/settings.local.json` is dirty** from earlier sessions and is deliberately never staged.

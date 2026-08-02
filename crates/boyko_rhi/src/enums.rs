@@ -490,6 +490,48 @@ impl TextureDimension {
     }
 }
 
+/// The shape an image VIEW presents its subresource range as (the `VkImageViewType`
+/// `i32` family, VG R3 step S1).
+///
+/// `#[repr(i32)]` with discriminants equal to the matching `VK_IMAGE_VIEW_TYPE_*`
+/// constants (asserted backend-side in `abi_guard.rs`), so the backend lowers a
+/// [`crate::device::TextureViewDesc::dimension`] to a `VkImageViewType` with a trivial
+/// `as i32` cast — no per-shape translation table.
+///
+/// This is deliberately NOT [`TextureDimension`]. That family is the IMAGE's
+/// `VkImageType` (`VK_IMAGE_TYPE_2D`/`_3D`), which has no spelling for "an array slice
+/// of a 2D image"; a view over a multi-layer image needs exactly that spelling, so the
+/// view shape is its own family. The two coincide numerically at `D2`/`D3` (Vulkan
+/// assigns `VK_IMAGE_VIEW_TYPE_2D == VK_IMAGE_TYPE_2D == 1` and
+/// `VK_IMAGE_VIEW_TYPE_3D == VK_IMAGE_TYPE_3D == 2`) and diverge at [`Self::D2Array`],
+/// which is `5` — a value the image-type family does not have at all.
+///
+/// Only the shapes an image created through
+/// [`crate::device::RhiDevice::create_texture`] can actually take are defined (2D,
+/// 2D-array, 3D); 1D and cube views are absent because no image in the engine is
+/// created with those shapes. The family grows per phase.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextureViewDimension {
+    /// `VK_IMAGE_VIEW_TYPE_2D` — one 2D slice. The shape a per-mip depth-pyramid
+    /// level is written through (`base_mip: k, mip_count: 1, layer_count: 1`).
+    D2 = 1,
+    /// `VK_IMAGE_VIEW_TYPE_3D` — a whole 3D image (a 3D image has no array layers).
+    D3 = 2,
+    /// `VK_IMAGE_VIEW_TYPE_2D_ARRAY` — `layer_count` consecutive 2D layers of a
+    /// multi-layer image, addressed by a shader as `Texture2DArray` /
+    /// `RWTexture2DArray`.
+    D2Array = 5,
+}
+
+impl TextureViewDimension {
+    /// The raw `i32` discriminant — equal to the matching `VkImageViewType`.
+    #[inline]
+    pub const fn as_i32(self) -> i32 {
+        self as i32
+    }
+}
+
 /// A dynamic-rendering attachment load op (`VkAttachmentLoadOp` family).
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -14,7 +14,7 @@ use crate::descriptor::{
 };
 use crate::enums::{
     AddressMode, CompareOp, DescriptorKind, Filter, Format, ImageUsage, ShaderStage,
-    TextureDimension,
+    TextureDimension, TextureViewDimension,
 };
 use crate::error::RhiError;
 
@@ -135,6 +135,94 @@ impl Default for TextureDesc {
             array_layers: 1,
             mip_levels: 1,
             view_format: None,
+        }
+    }
+}
+
+/// Parameters for [`RhiDevice::create_texture_view`] — one EXPLICIT image view over a
+/// SUB-RANGE of an already-created texture (VG R3 step S1).
+///
+/// `#[repr(C)]` POD with an explicit field order (the four `u32` range fields first,
+/// then the `i32` [`TextureViewDimension`] FFI seam, then the optional format) so a
+/// backend reads it without depending on Rust's default field reordering.
+///
+/// # Why this desc exists
+///
+/// Every view a texture creates FOR ITSELF is pinned to mip 0: the full-subresource
+/// view spans `[0, mip_levels)` and each per-layer view spans `[0, 1)`. There is no
+/// texture-owned view whose range starts at mip `k`. A GPU mip chain is built one level
+/// at a time — level `k` is written through a view whose range is exactly `[k, k+1)` —
+/// so that shape has to come from somewhere else. This desc is that somewhere.
+///
+/// # Vulkan mapping
+///
+/// The whole desc lowers to a single `VkImageViewCreateInfo`:
+///
+/// * `viewType` ← [`Self::dimension`] (identity `as i32`);
+/// * `format` ← [`Self::format`], or the texture's own view format when `None`;
+/// * `subresourceRange.baseMipLevel` ← [`Self::base_mip`];
+/// * `subresourceRange.levelCount` ← [`Self::mip_count`];
+/// * `subresourceRange.baseArrayLayer` ← [`Self::base_layer`];
+/// * `subresourceRange.layerCount` ← [`Self::layer_count`];
+/// * `subresourceRange.aspectMask` ← **the TEXTURE's** aspect (DEPTH for a
+///   depth-stencil-attachment image, COLOR otherwise), NOT a field here: an aspect that
+///   disagreed with the parent image is invalid usage, so it is derived exactly where
+///   the texture's own views derive it and cannot be spelled wrong at a call site;
+/// * `components` ← identity swizzle, and `flags` ← 0, matching the texture's own views.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextureViewDesc {
+    /// The first mip level the view exposes → `VkImageSubresourceRange::baseMipLevel`.
+    /// Must be `<` the texture's [`TextureDesc::mip_levels`]. Mip `k` ALONE — the
+    /// pyramid-level shape — is `base_mip: k, mip_count: 1`.
+    pub base_mip: u32,
+    /// The number of mip levels the view exposes → `levelCount`. Must be `>= 1`, with
+    /// `base_mip + mip_count <=` the texture's [`TextureDesc::mip_levels`]. There is no
+    /// "remaining levels" sentinel (`VK_REMAINING_MIP_LEVELS`): the count is always
+    /// explicit, so a view's extent is readable at the call site without knowing the
+    /// texture's.
+    pub mip_count: u32,
+    /// The first array layer the view exposes → `baseArrayLayer`. `0` for a
+    /// single-layer image. Must be `<` the texture's [`TextureDesc::array_layers`].
+    pub base_layer: u32,
+    /// The number of array layers the view exposes → `layerCount`. Must be `>= 1`, with
+    /// `base_layer + layer_count <=` the texture's [`TextureDesc::array_layers`]. As
+    /// with [`Self::mip_count`] there is no "remaining layers" sentinel. A
+    /// [`TextureViewDimension::D2`] or [`TextureViewDimension::D3`] view takes exactly
+    /// `1`; `> 1` requires [`TextureViewDimension::D2Array`].
+    pub layer_count: u32,
+    /// The shape the view presents the range as → `VkImageViewCreateInfo::viewType`.
+    /// Must agree with both the parent image's type and [`Self::layer_count`] (see
+    /// [`TextureViewDimension`]).
+    pub dimension: TextureViewDimension,
+    /// The optional format REINTERPRETATION → `VkImageViewCreateInfo::format`.
+    ///
+    /// `None` inherits the format the texture's OWN views were created in — that is
+    /// [`TextureDesc::view_format`] when it is `Some`, else [`TextureDesc::format`] —
+    /// so a `None` view is spelled exactly like the views the texture already owns.
+    /// (The distinction only bites on a texture that declared a decoupled
+    /// `view_format`; for every other texture the two are the same value.)
+    ///
+    /// `Some(f)` reinterprets. `f` different from the inherited format requires the
+    /// image to have been created with `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`, which the
+    /// backend sets iff the texture declared a `view_format` — reinterpreting a
+    /// non-mutable image is invalid usage the validation layer rejects.
+    pub format: Option<Format>,
+}
+
+impl Default for TextureViewDesc {
+    /// The single-mip, single-layer 2D view of mip 0, in the texture's own format —
+    /// i.e. the narrowest possible view, so a caller spreading
+    /// `..TextureViewDesc::default()` states only the axis it actually moves.
+    #[inline]
+    fn default() -> Self {
+        TextureViewDesc {
+            base_mip: 0,
+            mip_count: 1,
+            base_layer: 0,
+            layer_count: 1,
+            dimension: TextureViewDimension::D2,
+            format: None,
         }
     }
 }
@@ -260,6 +348,21 @@ pub enum BindGroupEntry<'a, A: RhiApi> {
     StorageImage {
         /// The texture whose image view is bound as the storage image.
         texture: &'a A::Texture,
+    },
+    /// A `STORAGE_IMAGE` bound through an EXPLICIT [`RhiApi::TextureView`] instead of
+    /// the texture's own implicit view (VG R3 step S1).
+    ///
+    /// Descriptor-IDENTICAL to [`Self::StorageImage`]: the same
+    /// [`DescriptorKind::StorageImage`], the same `GENERAL` image layout, the same NULL
+    /// sampler. The ONLY difference is which `VkImageView` handle the write names — and
+    /// that is the entire point, because a per-mip view is a shape no texture-owned view
+    /// can produce. The image must be in [`crate::enums::ImageLayout::General`] before a
+    /// dispatch accesses it, exactly as for [`Self::StorageImage`].
+    StorageImageView {
+        /// The explicit view bound as the storage image. Its parent texture must outlive
+        /// the view, and the view must outlive every submission binding this group — see
+        /// the ownership rule on [`RhiDevice::create_texture_view`].
+        view: &'a A::TextureView,
     },
     /// A `SAMPLED_IMAGE` — a sampled image with the sampler bound separately.
     SampledImage {
@@ -452,6 +555,84 @@ pub trait RhiDevice<A: RhiApi> {
         // Default seam: drop the value. A zero-sized `Texture` (Mock) drops to a
         // no-op; a backend with GPU-owned image objects overrides this.
         drop(texture);
+    }
+
+    /// Creates an EXPLICIT image view over a sub-range of `texture` (VG R3 step S1) —
+    /// the only way to name a single mip level, since every view a texture creates for
+    /// itself starts at mip 0.
+    ///
+    /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; a
+    /// backend with an image-view path (Vulkan) overrides it. Keeps the trait ABI stable
+    /// for a backend (e.g. the Mock) without one.
+    ///
+    /// # ⚠️ Ownership rule (mandatory, grep-enumerable)
+    ///
+    /// **A [`RhiApi::TextureView`] MUST be owned by the same struct that owns its
+    /// [`RhiApi::Texture`], and destroyed BEFORE it.**
+    ///
+    /// A view is a CHILD of the image: destroying the image first leaves the view naming
+    /// a dead `VkImage`, and destroying the image while any view of it is live is
+    /// `VUID-vkDestroyImage-image-01000`. Splitting the two across owners makes that
+    /// order unenforceable at the point where it matters, so the rule is structural
+    /// rather than a matter of care — co-ownership is what makes "before" expressible.
+    ///
+    /// It is enforced the way `// SAFETY:` is enforced: by a marker comment one grep
+    /// enumerates. Every field holding a view carries, on the line above it,
+    ///
+    /// ```text
+    /// // VIEW-OWNER: <the texture field this is a view OF>; destroyed before it in <teardown fn>.
+    /// ```
+    ///
+    /// and the census is
+    ///
+    /// ```text
+    /// rg "^\s*// VIEW-OWNER:" crates/
+    /// ```
+    ///
+    /// That pattern matches only real marker comments — a `///` doc line and a `//!`
+    /// module-doc line both fail it (the third `/` and the `!` break `// VIEW-OWNER:`),
+    /// so this documentation does not pollute its own census. As of the step that
+    /// introduced the verb the census is **empty**: S1 lands the capability and no owner.
+    ///
+    /// ⚠️ **The census enumerates owners; it cannot force one to enrol.** A field holding a
+    /// view without the marker is invisible to it, so the marker census alone would report a
+    /// clean sheet on exactly the code that broke the rule. Use it as a PAIR with the mint
+    /// census:
+    ///
+    /// ```text
+    /// rg "create_texture_view\(" crates/ --glob '!**/tests/**'
+    /// ```
+    ///
+    /// Every non-test call site must land in a field carrying the marker. The two lists
+    /// agreeing is the check; either alone is an assertion about the half it can see.
+    #[cold]
+    #[inline(never)]
+    fn create_texture_view(
+        &self,
+        _texture: &A::Texture,
+        _desc: &TextureViewDesc,
+    ) -> Result<A::TextureView, Self::Error> {
+        Err(RhiError::unsupported("create_texture_view").into())
+    }
+
+    /// Destroys `view`, consuming it (VG R3 step S1).
+    ///
+    /// The default body drops the value (a no-op for a backend whose `TextureView` is
+    /// zero-sized, e.g. the Mock); a backend whose view owns a GPU object (Vulkan)
+    /// overrides it. Keeps the trait ABI stable.
+    ///
+    /// # Safety
+    /// The GPU must no longer be using `view` (every submission binding it has completed
+    /// — fence-waited or `wait_idle`'d), and the texture it views MUST still be alive:
+    /// per the ownership rule on [`Self::create_texture_view`], this call precedes that
+    /// texture's [`Self::destroy_texture`]. The by-value move guarantees it is destroyed
+    /// at most once.
+    #[cold]
+    #[inline(never)]
+    unsafe fn destroy_texture_view(&self, view: A::TextureView) {
+        // Default seam: drop the value. A zero-sized `TextureView` (Mock) drops to a
+        // no-op; a backend with a GPU-owned `VkImageView` overrides this.
+        drop(view);
     }
 
     /// Creates a sampler (Phase-6 S0 rung 5: a `VkSampler` with the desc's

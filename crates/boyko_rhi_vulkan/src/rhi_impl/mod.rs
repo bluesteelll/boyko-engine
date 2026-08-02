@@ -50,7 +50,7 @@ use crate::device::{DeviceFns, VulkanContext};
 use crate::error::VulkanError;
 use crate::ffi::*;
 use crate::memory::BoundBuffer;
-use crate::texture::VulkanTexture;
+use crate::texture::{VulkanTexture, VulkanTextureView};
 
 /// The maximum number of color attachments a single `begin_rendering` scope
 /// binds inline without heap allocation (Phase-6 S0). Sized for the basic-slice
@@ -157,6 +157,11 @@ fn descriptor_kind_slot(kind: DescriptorKind) -> usize {
 fn bind_group_entry_kind(entry: &BindGroupEntry<Vulkan>) -> DescriptorKind {
     match entry {
         BindGroupEntry::StorageImage { .. } => DescriptorKind::StorageImage,
+        // VG R3 step S1: an explicit view is the SAME descriptor kind as the implicit
+        // one — Vulkan has a single `VK_DESCRIPTOR_TYPE_STORAGE_IMAGE`, and only the
+        // `VkImageView` handle the write names differs. So this shares the histogram
+        // slot, the pool sizing, and the write's `descriptor_type` with `StorageImage`.
+        BindGroupEntry::StorageImageView { .. } => DescriptorKind::StorageImage,
         BindGroupEntry::SampledImage { .. } => DescriptorKind::SampledImage,
         BindGroupEntry::CombinedImage { .. } => DescriptorKind::CombinedImageSampler,
         BindGroupEntry::StorageBuffer { .. } => DescriptorKind::StorageBuffer,
@@ -302,6 +307,10 @@ impl RhiApi for Vulkan {
     type Swapchain = ();
     type Semaphore = VkSemaphore;
     type Texture = VulkanTexture;
+    // VG R3 step S1: the explicit per-mip / per-layer / format-reinterpreting view now
+    // that `create_texture_view` is implemented. Nothing binds one yet — the step adds
+    // the capability and no owner.
+    type TextureView = VulkanTextureView;
     // `Sampler`/`BindGroupLayout`/`BindGroup` bind to the S0 rung-5 concrete types
     // now that `create_sampler`/`create_bind_group_layout`/`create_bind_group` are
     // implemented (the combined-image-sampler graphics descriptor surface).

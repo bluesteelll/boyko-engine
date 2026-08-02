@@ -7981,6 +7981,13 @@ mod tests {
             layer_views: [VkImageView::NULL; MAX_TEXTURE_LAYERS],
             active_layers: 1,
             array_view: VkImageView::NULL,
+            // VG R3 step S1 view metadata. Inert here: this fake is never handed to
+            // `create_texture_view` (nothing in these tests creates a view), and the
+            // fields are plain PODs, so any value drops harmlessly. `VK_FORMAT_UNDEFINED`
+            // + a COLOR aspect + a single mip level is the honest "no image behind this".
+            view_format: crate::ffi::VK_FORMAT_UNDEFINED,
+            aspect_mask: crate::ffi::VK_IMAGE_ASPECT_COLOR_BIT,
+            mip_levels: 1,
         }
     }
 

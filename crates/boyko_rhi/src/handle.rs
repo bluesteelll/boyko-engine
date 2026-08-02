@@ -465,6 +465,7 @@ mod tests {
         type Swapchain = ();
         type Semaphore = ();
         type Texture = ();
+        type TextureView = ();
         type Sampler = ();
         type GraphicsPipeline = ();
         type BindGroup = ();

@@ -16,14 +16,14 @@ use core::ptr::{self, NonNull};
 use boyko_rhi::{
     BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BufferDesc, ComputePipelineDesc,
     DescriptorKind, GraphicsPipelineDesc, MemoryLocation, MipMode, QueryPoolDesc, RhiDevice,
-    SamplerDesc, TextureDesc,
+    SamplerDesc, TextureDesc, TextureViewDesc,
 };
 
 use crate::compute::ComputeError;
 use crate::device::{DeviceFns, VulkanContext};
 use crate::error::VulkanError;
 use crate::memory::BoundBuffer;
-use crate::texture::VulkanTexture;
+use crate::texture::{VulkanTexture, VulkanTextureView};
 
 impl RhiDevice<Vulkan> for VulkanContext {
     type Error = VulkanError;
@@ -104,6 +104,27 @@ impl RhiDevice<Vulkan> for VulkanContext {
         // contract); the by-value move destroys it exactly once. `destroy` tears
         // down the view → image → dedicated memory in reverse order.
         unsafe { texture.destroy(self.device(), self.device_fns()) };
+    }
+
+    fn create_texture_view(
+        &self,
+        texture: &VulkanTexture,
+        desc: &TextureViewDesc,
+    ) -> Result<VulkanTextureView, VulkanError> {
+        // SAFETY: `self.device()`/`self.device_fns()` are the live device + its command
+        // table; `texture` is a live `&VulkanTexture` created by `create_texture` on this
+        // same device (the trait's context-alive contract), so the view names a live
+        // image. `VulkanTextureView::create` upholds the rest of the FFI invariants
+        // internally (documented at its own `unsafe` block).
+        unsafe { VulkanTextureView::create(self.device(), self.device_fns(), texture, desc) }
+    }
+
+    unsafe fn destroy_texture_view(&self, view: VulkanTextureView) {
+        // SAFETY: `view` was created on this device by `create_texture_view`; the GPU is
+        // no longer using it and its parent texture is still alive (caller contract —
+        // THE OWNERSHIP RULE has the view destroyed BEFORE its image); the by-value move
+        // destroys it exactly once.
+        unsafe { view.destroy(self.device(), self.device_fns()) };
     }
 
     fn create_sampler(&self, desc: &SamplerDesc) -> Result<VulkanSampler, VulkanError> {
@@ -496,6 +517,19 @@ impl RhiDevice<Vulkan> for VulkanContext {
                     image_infos[i] = VkDescriptorImageInfo {
                         sampler: VkSampler::NULL,
                         image_view,
+                        image_layout: VK_IMAGE_LAYOUT_GENERAL,
+                    };
+                    p_image_info = (&image_infos[i] as *const VkDescriptorImageInfo).cast();
+                }
+                // VG R3 step S1: the same descriptor write as `StorageImage` above —
+                // `VK_IMAGE_LAYOUT_GENERAL`, NULL sampler, one `p_image_info` — with the
+                // view handle taken from the caller's EXPLICIT view instead of being
+                // selected out of the texture. There is no array/single-layer fallback to
+                // make here: the desc already said which layers the view spans.
+                BindGroupEntry::StorageImageView { view } => {
+                    image_infos[i] = VkDescriptorImageInfo {
+                        sampler: VkSampler::NULL,
+                        image_view: view.view,
                         image_layout: VK_IMAGE_LAYOUT_GENERAL,
                     };
                     p_image_info = (&image_infos[i] as *const VkDescriptorImageInfo).cast();

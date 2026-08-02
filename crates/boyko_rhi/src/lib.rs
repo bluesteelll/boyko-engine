@@ -50,14 +50,14 @@ pub use descriptor::{
 };
 pub use device::{
     BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,
-    MAX_BIND_GROUP_BINDINGS, MipMode, RhiDevice, SamplerDesc, TextureDesc,
+    MAX_BIND_GROUP_BINDINGS, MipMode, RhiDevice, SamplerDesc, TextureDesc, TextureViewDesc,
 };
 pub use encoder::RhiCommandEncoder;
 pub use enums::{
     AddressMode, BarrierAccess, BarrierStage, BlendFactor, BlendOp, BlendState, BufferUsage,
     CompareOp, CullMode, DescriptorKind, Filter, Format, ImageAspect, ImageLayout, ImageUsage,
     IndexType, LoadOp, MemoryLocation, PrimitiveTopology, ShaderStage, StoreOp, TextureDimension,
-    TimestampStage, VertexFormat,
+    TextureViewDimension, TimestampStage, VertexFormat,
 };
 pub use error::RhiError;
 pub use handle::{
