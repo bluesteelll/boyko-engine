@@ -50,18 +50,45 @@ escape hatch. (c) Leave deferred and keep the goal formally unfalsifiable.
 
 ---
 
-## OPEN — Cross-frame occlusion soundness (in flight)
+## RESOLVED 2026-08-02 — Cross-frame occlusion soundness
 
-**Situation.** The cull runs *before* the raster, so a same-frame depth pyramid does not exist; only
-the previous frame's is available. Under a previous-frame pyramid the conservatism theorem fails and
-**false rejects become possible** — geometry visibly disappearing when an object emerges from behind
-an occluder. Every golden in this tree is a static scene and cannot show it.
+**The worry was mine and it was misframed.** A previous-frame pyramid is indeed not conservative —
+but only for a ONE-pass cull. In two-pass it is never the last word: soundness lives entirely in the
+late pass, which tests against a pyramid built from THIS frame's depth. The early pass is an
+*unverified heuristic* whose only job is to fill the depth buffer with a good occluder set; its
+mistakes cost late-pass work and never cost geometry. The theorem quantifies over every possible
+early-pass output, so nothing about the early pass has to be proven at all.
 
-Being designed now. The candidate answer is classic two-pass with the persistent visibility bit
-living in ECS storage keyed by entity (Principle 0), which would dissolve the "no stable key"
-objection the R2 survey raised. Under verification, not assumed.
+Confirmed against practice rather than assumed: UE5 Nanite, Assassin's Creed Unity (SIGGRAPH 2015),
+Granite, Bevy 0.16 and Unity 6's GPU Resident Drawer all have this same structure.
 
-**Blocks.** The HZB rung's first step. Will be reported when the design returns.
+Full statement and proof: [VG-R3-HZB-PLAN.md](VG-R3-HZB-PLAN.md) §1. **No owner decision needed.**
+
+---
+
+## OPEN — The HZB implementation design was REJECTED with 8 blockers
+
+**Situation.** With soundness settled, the implementation design was reviewed and returned REJECTED
+by both reviewers. The blockers are real, not stylistic — among them: the design revives
+frustum-culled instances and thereby deletes rung R2d-6's arming; unknown mesh bounds produce a
+PERMANENT false reject for any streaming-in mesh, surviving both passes; the one gate that can see a
+false reject cannot be built as specified, because `vb_depth` carries no `TRANSFER_SRC` and the
+readback path it depends on is listed UNVERIFIED while being load-bearing; and the pyramid build,
+being compute, must split the VB raster's single dynamic-rendering scope in two, which the plan does
+not address — a naive second scope would `LOAD_OP_CLEAR` away the early pass.
+
+Full list: [VG-R3-HZB-PLAN.md](VG-R3-HZB-PLAN.md) §5.
+
+**Options.** (a) One more design revision round against the 8 blockers, then implement — the same
+loop that took rung R2d from 8 blockers to shipped. (b) Implement the uncontroversial foundation
+first (S1 the RHI `TextureView`, S2 the framegraph guard, S3 the host oracle) while the cull design
+is revised — these three are independently useful and none depends on the disputed parts.
+(c) Park the rung.
+
+**Blocks.** All HZB work. Nothing already shipped.
+
+**Note.** Option (b) is what I would pick: S1 and S2 close real engine gaps that exist regardless of
+whether occlusion culling is ever armed, and S3 is a host oracle that the eventual gates need.
 
 ---
 
