@@ -172,6 +172,10 @@ blockers, on a foundation that by then exists.
 - **The trybuild test fails under a concurrent full-suite run** (`compile_fail_frame_write_token`,
   3/3 fixtures) and passes standalone. trybuild spawns its own cargo into the same `target`. Not a
   flake — reproducible contention.
+- **`cargo test` STOPS at the first failing binary, and the suite count silently shrinks.** A run
+  that trips the flake above reports ~51 suites instead of ~445 — so "I ran the full suite" can mean
+  "I ran a ninth of it" with nothing in the output saying so. Always pass `--no-fail-fast` when the
+  claim being made is about coverage, and read the suite COUNT, not just the failure count.
 - **graphify has been off-target for the render/VB path** for this entire session; every query
   returned `boyko_demo` internals. Grep/Read is the working path there.
 - **The ECS's global query-type registry can exhaust under the full lib suite.**

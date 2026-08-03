@@ -139,6 +139,14 @@ pub mod gpu_transform_pack;
 /// [`upload_assets`](gpu_upload::upload_assets) drain that drives it. No concrete
 /// `GpuUpload` impl exists yet — rung A3b adds the first one.
 pub mod gpu_upload;
+/// VG R3 step S3 — the HOST ORACLE for the hierarchical-Z pyramid and the two-pass occlusion
+/// test: the [`HzbLayout`](hzb::HzbLayout) / [`HzbAxis`](hzb::HzbAxis) integer base map,
+/// [`build_pyramid`](hzb::build_pyramid)'s reverse-Z `min` chain, and the guarded
+/// [`occlusion_verdict`](hzb::occlusion_verdict). Pure CPU, on no frame path — the reference the
+/// eventual GPU pyramid and cull are gated against, landed BEFORE any shader exists so that a
+/// later GPU/CPU disagreement is a shader bug rather than a math bug. Plays for the HZB arm
+/// exactly the role [`frustum`] plays for the frustum arm.
+pub mod hzb;
 /// The per-entity 48-byte model-affine instance column (mesh foundation M3):
 /// [`InstanceModelCol`](instance_model::InstanceModelCol), the exact SSBO layout the
 /// M1/M2 gbuffer VS reads, + its `GlobalTransform` pack system.
@@ -420,6 +428,11 @@ pub use gpu_transform_pack::{add_gpu_transform_pack, pack_gpu_transforms};
 pub use gpu_upload::{
     GpuUpload, backfill_vb_geometry_slots, upload_assets, upload_material_assets,
     upload_mesh_assets, upload_texture_assets,
+};
+pub use hzb::{
+    HzbAxis, HzbLayout, HzbLayoutError, KeepReason, MAX_HZB_EXTENT, MAX_HZB_LEVELS,
+    OcclusionVerdict, ScreenRect, TexelSelection, build_pyramid, conservative_min,
+    occluder_depth, occlusion_verdict, prev_pow2, project_aabb, select_texels,
 };
 pub use instance_model::{
     INSTANCE_MODEL_COL_BYTES, InstanceModelCol, VB_INSTANCE_ROW_BYTES, VbInstanceRow,
