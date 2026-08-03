@@ -14,7 +14,7 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
-## OPEN — the HZB feature design does not converge in one piece; propose decomposing it
+## RESOLVED 2026-08-03 — the HZB feature design does not converge in one piece: decomposed
 
 **Situation, measured over three review rounds rather than felt.**
 
@@ -55,7 +55,11 @@ design + review round:
 alternative cost**, also stated: a fourth whole-feature round that on this evidence resolves ~30
 items and raises ~6 more.
 
-**Blocks.** Nothing shipped. The next HZB step only.
+**OWNER'S DECISION: decompose.** The four pieces above each get their own design + review round
+and land independently, starting with the pyramid alone. Recorded so a later reader sees the four
+rounds were a deliberate structure, not a design that kept failing.
+
+**Blocks.** Nothing.
 
 ---
 
