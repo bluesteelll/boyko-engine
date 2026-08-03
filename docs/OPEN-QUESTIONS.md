@@ -14,6 +14,51 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## OPEN — the HZB feature design does not converge in one piece; propose decomposing it
+
+**Situation, measured over three review rounds rather than felt.**
+
+| round | prior items closed | new blockers | new majors |
+|---|---|---|---|
+| 1 | — | 8 | — |
+| 2 | 10 YES / 6 PARTIAL / 0 NO | 3 | ~12 |
+| 3 | 31 YES / 12 PARTIAL / 2 NO | 6 | 11 |
+
+Each round genuinely resolves most of what the last one raised, and each raises about as much
+again. After round 3 **every substantive step carries a blocker** (S4, S6a, S6b, S7, S9); the four
+clean steps are gates and records that depend on the blocked ones. So unlike the foundation case
+there is no independent subset to land.
+
+The new blockers have also changed CHARACTER, which is the useful signal. They are no longer "the
+algorithm is wrong" — they are collisions with shipped invariants: a fourth route by which the
+design disarms rung R2d-6 (doubling the survivor list breaks the very const-assert added in R2d-4
+to prevent an out-of-bounds device read); an `+INFINITY` fixture vertex reaching a second, unfenced
+host consumer on the shipped VB path; a capability that is a per-frame ECS fact gating objects
+minted at boot with no seam named between them.
+
+**What I read from that.** The feature is simply larger than one design pass can hold. The
+foundation converged in a single round each because S1/S2/S3 were small, independent and
+self-contained — not because the process was better there.
+
+**Proposal.** Decompose the feature the way the foundation already was, and give each piece its own
+design + review round:
+
+1. **The pyramid alone** — allocate, build, gate against the S3 host oracle. No cull integration of
+   any kind. It is self-contained, its oracle already exists, and its own blockers are local.
+2. **The capability and the raster split alone**, inert — the second scope drawing nothing, proven
+   byte-identical on the pins.
+3. **The cull integration**, once 1 and 2 are shipped and the collisions above are concrete rather
+   than predicted.
+4. **The arming**, with the drawn-set gate.
+
+**The cost, stated.** Four design rounds instead of one, and the feature lands later. **The
+alternative cost**, also stated: a fourth whole-feature round that on this evidence resolves ~30
+items and raises ~6 more.
+
+**Blocks.** Nothing shipped. The next HZB step only.
+
+---
+
 ## RESOLVED 2026-08-02 — the depth-complexity fixture is Khronos Sponza (delegated to me)
 
 **Situation.** Decision (b) above commits to a separate fixture with real occlusion. What it should
