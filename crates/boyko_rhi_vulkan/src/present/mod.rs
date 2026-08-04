@@ -53,10 +53,10 @@ pub use gpu_timing::{
 pub use scene_types::{
     AaActivation, BrickActivation, ClusterCullHierDispatch, CsmDepthActivation, DdgiUpdateActivation,
     GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferMeshDraw,
-    GBufferScene, InterpActivation, PunctualDepthActivation, RcasActivation, ResolvedRenderPathGpu,
-    SCENE_MVP_BYTES, SHADOW_SOURCE_SDF_SOFT_MARCH, SampledComposite, Scene, SmaaActivation,
-    SsaaActivation, SsaoActivation, TaaActivation, UiPass, ViewtFromDepthActivation,
-    ViewtFromVbDepthActivation,
+    GBufferScene, HzbPlan, InterpActivation, MAX_HZB_LEVELS, PunctualDepthActivation,
+    RcasActivation, ResolvedRenderPathGpu, SCENE_MVP_BYTES, SHADOW_SOURCE_SDF_SOFT_MARCH,
+    SampledComposite, Scene, SmaaActivation, SsaaActivation, SsaoActivation, TaaActivation, UiPass,
+    ViewtFromDepthActivation, ViewtFromVbDepthActivation,
 };
 #[cfg(feature = "hwrt")]
 pub use scene_types::{ShadowVisActivation, TlasBuildActivation};

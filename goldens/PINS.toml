@@ -306,6 +306,39 @@ BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\vb_mesh.bmp"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 
+[vb_mesh_hzb]
+# VG R3 piece 1 step P1-2 (docs/VG-R3-P1-PYRAMID-PLAN.md): [vb_mesh]'s scene, binary and test,
+# with BOYKO_VG_HZB=1 arming the depth pyramid. SAME test_binary + test_name on purpose -- the
+# pyramid is allocated and read by NOTHING, so this is not a second scene that ought to look the
+# same, it is the same code path with one allocation added.
+#
+# THE SHA IS DELIBERATELY IDENTICAL TO [vb_mesh]'s. That equality IS the inertness claim: a
+# divergence means the pyramid's allocation perturbed a render it must not touch. Re-bless the
+# two together or not at all -- a lone re-bless here would silently convert the gate from
+# "inert" to "whatever it does now".
+#
+# THE LOAD-BEARING LEG IS -ValidationOn, NOT the hash. This is the engine's FIRST storage image
+# with a mip chain (every other TextureDesc call site in the tree passes mip_levels: 1), so the
+# validation layer is what proves the image and its per-mip views are legal. A byte-identical
+# dump cannot make that claim: an illegal view that no pass binds changes no pixel. Run BOTH:
+#   scripts\golden.ps1 -Pin vb_mesh_hzb
+#   scripts\golden.ps1 -Pin vb_mesh_hzb -ValidationOn
+crate           = "boyko-app"
+test_binary     = "vb_mesh"
+test_name       = "vb_mesh_screenshot_dump"
+bmp             = "D:\\tmp\\vb_mesh_hzb.bmp"
+width           = 512
+height          = 512
+sha256_software = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913ea1"
+sha256_hwrt     = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913ea1"
+
+[vb_mesh_hzb.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_mesh_hzb.bmp"
+BOYKO_VG_HZB             = "1"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+
 [vb_both]
 # Multi-paradigm render-path plan, rung R10: the VisibilityBuffer x Both golden. Clones [vb_mesh]'s
 # five-sphere grand_showcase_2mat scene + production boyko_app::runner/gpu_scene::GpuSceneBundles

@@ -254,6 +254,18 @@ impl Plugin for EnginePlugins {
         // yet", which stopped being true at R2.
         app.add_plugin(RenderPathPlugin);
 
+        // VG R3 piece 1 (docs/VG-R3-P1-PYRAMID-PLAN.md) — `HzbPlugin`: seeds the owner-set
+        // `HzbConfig` (default `HzbMode::Off`, the byte-identity anchor). Like `RenderPathPlugin`
+        // above and UNLIKE `AaPlugin`/`SsaoPlugin` it registers NO system: the producer knob maps
+        // to downstream state by the identity, so there is no `Resolved*` carrier to derive and
+        // no policy to schedule (see `boyko_render::hzb_config`'s module doc).
+        //
+        // The consumer is `runner::frame_loop`, which reads the config per frame and threads the
+        // derived pyramid shape onto `GBufferScene`. Under the default `Off` that is `None`: no
+        // image, no per-mip views, no build passes — so composing it unconditionally leaves every
+        // host world byte-identical, exactly as `AaPlugin`'s default `Off` does.
+        app.add_plugin(boyko_render::HzbPlugin);
+
         // Dev/test launch seam: `BOYKO_RENDER_PATH` / `BOYKO_GEOMETRY_LEGS` override the
         // `Deferred + Both` anchor `RenderPathPlugin` just seeded, so `scripts/run-scene.ps1` can
         // launch ANY windowed example in ANY paradigm without editing the scene. Runs DURING

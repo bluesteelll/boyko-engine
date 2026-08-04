@@ -81,8 +81,10 @@
 //!
 //! The pattern matches only real marker comments: a `///` doc line and a `//!`
 //! module-doc line both fail it (the third `/`, and the `!`, break `// VIEW-OWNER:`), so
-//! this section does not pollute its own census. As of S1 the census is **empty** — the
-//! step lands the capability and no owner.
+//! this section does not pollute its own census. S1 landed the capability with no owner,
+//! so the census was empty; as of VG R3 piece 1 step P1-2 it has exactly ONE entry —
+//! `present::targets::HzbTargets::level_views` (the depth pyramid's per-mip views), owned
+//! beside the `pyramid` image they view and destroyed before it in `HzbTargets::destroy`.
 //!
 //! ## Debt: the view duality, and its named trigger
 //!

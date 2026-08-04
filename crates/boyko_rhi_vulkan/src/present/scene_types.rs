@@ -1344,6 +1344,69 @@ impl Default for ResolvedRenderPathGpu {
     }
 }
 
+/// VG R3 piece 1 step P1-2 — the fixed inline capacity of [`HzbPlan::level_extent`]: the level
+/// count of the LARGEST pyramid the host oracle admits (`msb(65536) + 1 == 17`).
+///
+/// ⚠️ **A CAPACITY, never a SPAN.** Nothing may declare a barrier subresource range, a descriptor
+/// count or a dispatch bound from this value: the live pyramid has [`HzbPlan::levels`] levels, and
+/// at every real render extent that is far below this cap. The barrier path in `graph_bridge`
+/// copies `base_mip`/`mip_count` verbatim into `VkImageSubresourceRange` and bounds them against
+/// NOTHING (the sink holds bare `VkImage` handles), so a `MAX_HZB_LEVELS`-wide range would be
+/// out-of-range at every real resolution with nothing to catch it. Read the count from the plan.
+///
+/// This crate cannot depend on `boyko_render` (the dependency runs the other way — the SAME
+/// plain-value boundary crossing [`SHADOW_SOURCE_SDF_SOFT_MARCH`] explains), so the array-sizing
+/// constant has to be restated here to be spellable at all. It is PINNED against its owner
+/// (`boyko_render::hzb::MAX_HZB_LEVELS`) by a `const _: () = assert!(..)` on that side — a drift
+/// fails the BUILD rather than a test that has to be run.
+pub const MAX_HZB_LEVELS: usize = 17;
+
+/// VG R3 piece 1 step P1-2 — the DERIVED hierarchical-Z pyramid shape, handed to the backend by
+/// the host.
+///
+/// # The RHI derives NOTHING
+///
+/// `prev_pow2`, `msb` and `max(1, base >> k)` live in `boyko_render::hzb` and ONLY there (plan §4):
+/// `boyko_render` depends on this crate, not the reverse, so a `HzbLayout` cannot be named here —
+/// and a second implementation of those formulas inside this crate is exactly what the plan
+/// forbids. `boyko_app` links both crates, calls the oracle ONCE per frame and threads the
+/// resulting scalars in through [`GBufferScene::hzb`]. This struct stores what it was handed.
+///
+/// # Presence IS the arming
+///
+/// `Some` ⇔ `HzbConfig::enabled()` — the same Option-presence arming
+/// [`GBufferScene::aa`]/[`GBufferScene::smaa`]/[`GBufferScene::taa`] use and `AaArm::from_scene`
+/// reads. "Armed but planless" and "planned but disarmed" are both unrepresentable, so the arm
+/// bit cannot disagree with the shape it arms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HzbPlan {
+    /// The pyramid's level count — `boyko_render::hzb::HzbLayout::levels()`, always in
+    /// `1..=MAX_HZB_LEVELS`. THE span for every mip range, descriptor count and dispatch bound;
+    /// see [`MAX_HZB_LEVELS`]'s own warning.
+    pub levels: u32,
+    /// `level_extent[k] == HzbLayout::level_extent(k)` for `k < levels` — the `[width, height]`
+    /// texel extent of each level, level 0 being `prev_pow2` of each SOURCE axis (NOT the source
+    /// extent itself). Entries at `k >= levels` are unspecified padding and MUST NOT be read;
+    /// [`Self::extent_of`] is the checked accessor.
+    pub level_extent: [[u32; 2]; MAX_HZB_LEVELS],
+}
+
+impl HzbPlan {
+    /// The `[width, height]` of level `level`.
+    ///
+    /// # Panics
+    ///
+    /// If `level >= levels`. A hard assertion rather than a `debug_assert!`: past `levels` the
+    /// array holds padding, and a release build reading it would silently size a dispatch or a
+    /// view to a level that has no storage behind it.
+    #[inline]
+    #[must_use]
+    pub fn extent_of(&self, level: u32) -> [u32; 2] {
+        assert!(level < self.levels, "invariant: level is inside the pyramid the host planned");
+        self.level_extent[level as usize]
+    }
+}
+
 pub struct GBufferScene<'a> {
     /// The mesh-raster graphics pipeline (pass A). Render P5-r0: a 3-MRT G-buffer
     /// PRODUCER — the fronto-parallel quad is drawn into the D32 depth image AND the three
@@ -2810,6 +2873,20 @@ pub struct GBufferScene<'a> {
     /// [`Self::vb_shade_split_hwrt_pipeline`].
     #[cfg(feature = "hwrt")]
     pub vb_shade_split_tex_hwrt_pipeline: Option<&'a ComputePipeline>,
+
+    // ---- VG R3 piece 1 (docs/VG-R3-P1-PYRAMID-PLAN.md): the depth pyramid ------------------
+    /// The hierarchical-Z pyramid's DERIVED shape, or `None` when `HzbConfig::mode` is `Off` —
+    /// the 0%-gate default, under which no image, no per-mip view and no build pass exists.
+    ///
+    /// Presence IS the arming (see [`HzbPlan`]'s own doc); `GBufferTargets::create` allocates the
+    /// pyramid iff this is `Some`, and stores the arm so a live `Off ⇄ Build` flip at FIXED extent
+    /// still triggers `sync_gbuffer`'s fence-safe rebuild — an arm that rode only on this
+    /// per-frame carrier could not, because the fast path returns early on `(extent, aa_arm)`
+    /// alone.
+    ///
+    /// In piece 1 the built pyramid is read by NOTHING: no descriptor binds it, no pass writes
+    /// it, and it never leaves the `UNDEFINED` layout it is created in.
+    pub hzb: Option<HzbPlan>,
 }
 
 impl GBufferScene<'_> {

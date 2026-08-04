@@ -5,7 +5,7 @@
 use boyko_rhi::{
     BindGroupDesc, BindGroupEntry, BufferDesc, BufferUsage, Format, ImageAspect, ImageBarrierDesc,
     ImageLayout, ImageSubresourceRange, ImageUsage, MemoryLocation, RhiCommandEncoder, RhiDevice,
-    RhiQueue, TextureDesc, TextureDimension,
+    RhiQueue, TextureDesc, TextureDimension, TextureViewDesc,
 };
 use boyko_rhi::enums::{BarrierAccess, BarrierStage};
 
@@ -16,9 +16,9 @@ use crate::device::VulkanContext;
 use crate::ffi::*;
 use crate::memory::BoundBuffer;
 use crate::rhi_impl::{Vulkan, VulkanBindGroup};
-use crate::texture::VulkanTexture;
+use crate::texture::{VulkanTexture, VulkanTextureView};
 
-use super::scene_types::GBufferScene;
+use super::scene_types::{GBufferScene, HzbPlan, MAX_HZB_LEVELS};
 use super::{FRAMES_IN_FLIGHT, SwapchainError};
 
 // Doc-link scope: types referenced only from doc-comments (the targets document how
@@ -648,6 +648,27 @@ pub struct GBufferTargets {
     /// Nothing declares/records against this buffer yet (`record_vb`/`declare_vb_graph` are
     /// untouched this rung) — [`Self::vb_set0`] binds it at `b7`, bound-but-unread.
     pub(crate) vb_classify: Option<VbClassifyTargets>,
+    /// VG R3 piece 1 step P1-2 — the hierarchical-Z depth pyramid ([`HzbTargets`]): ONE
+    /// non-ringed `R32_SFLOAT` mip-chained image + one explicit view per level. `Some` iff
+    /// `scene.hzb` was `Some` at create time (`HzbConfig::mode != Off`); `None` on the default
+    /// 0%-gate. Built LAST in [`Self::create`] (it depends on nothing but the extent), so it is
+    /// destroyed FIRST here — see that fn's placement comment.
+    ///
+    /// Read by NOTHING in piece 1: no descriptor binds it, no pass writes it, and it never
+    /// leaves `UNDEFINED`.
+    pub(crate) hzb: Option<HzbTargets>,
+    /// VG R3 piece 1 step P1-2 — whether the pyramid was ARMED when these targets were built.
+    ///
+    /// A STORED field for exactly the reason [`Self::aa_arm`] is one: [`Self::sync_gbuffer`]'s
+    /// fast path returns on `(extent, aa_arm)` alone, so an arm that rode only on
+    /// [`GBufferScene::hzb`] could not survive a live `Off → Build` flip at FIXED extent — the
+    /// fast path would return `Ok(())` and no pyramid would ever be built. Joining the resync
+    /// predicate makes the flip ride the same fence-safe rebuild a resize uses.
+    ///
+    /// The pyramid's SHAPE needs no separate compare: it is a pure function of the extent, which
+    /// the predicate already compares. With the default `Off` this is `false` on both sides
+    /// forever, so no existing path gains a recreate.
+    pub(crate) hzb_arm: bool,
     /// The extent the images were created at (so [`GBufferTargets::sync_gbuffer`] can
     /// detect a resize and reallocate).
     pub(crate) extent: VkExtent2D,
@@ -1085,6 +1106,166 @@ impl VbClassifyTargets {
             for b in self.gclassify {
                 RhiDevice::destroy_buffer(ctx, b);
             }
+        }
+    }
+}
+
+/// VG R3 piece 1 (docs/VG-R3-P1-PYRAMID-PLAN.md), step P1-2: the hierarchical-Z depth pyramid —
+/// ONE `R32_SFLOAT` image carrying a real Vulkan mip chain, plus one explicit single-mip
+/// [`VulkanTextureView`] per level.
+///
+/// # Allocated, and read by NOTHING
+///
+/// That is the whole of this step (plan §1). No pipeline, no descriptor set, no framegraph
+/// declaration, no pass, no barrier: the image is created `UNDEFINED` and STAYS `UNDEFINED`,
+/// because the transition belongs to the build pass and there is no build pass yet. It costs its
+/// VRAM and changes no rendered pixel.
+///
+/// # NON-RINGED — one image, not a `[_; FRAMES_IN_FLIGHT]` ring
+///
+/// Fixed by the plan (§2). Nothing here can argue the point either way: a ring exists to separate
+/// a frame's write from a previous frame's read, and this step has no reader and no writer at all.
+/// The piece that adds the build pass and its consumer is where that hazard first becomes
+/// expressible.
+///
+/// # The usage set, one bit at a time (plan §7)
+///
+/// * `STORAGE` — the per-level views the build passes will bind as storage images.
+/// * `SAMPLED` — what makes the texture-owned `[0, levels)` view [`VulkanTexture::create`] ALWAYS
+///   builds unambiguously legal. A multi-mip view cannot be bound as a storage descriptor, so
+///   without `SAMPLED` the image would own a view no usage bit admits. This is the engine's FIRST
+///   storage image with a mip chain; every other `TextureDesc` call site passes `mip_levels: 1`.
+/// * `TRANSFER_SRC` — the gate's dump copy (plan §5's G8). A usage bit is fixed at image creation,
+///   so an armed-only variant would be a SECOND image rather than the one the gate measures — the
+///   same argument `vb_id`'s own `TRANSFER_SRC` makes.
+///
+/// # The RHI derives NOTHING
+///
+/// `prev_pow2` / `msb` / `max(1, base >> k)` live in `boyko_render::hzb` and only there (plan §4).
+/// This struct is handed [`HzbPlan`] and stores it. The one consistency it may lean on is Vulkan's
+/// own: an image created at `level_extent[0]` with `mip_levels = levels` has mip `k` at exactly
+/// `max(1, base >> k)`, which IS the oracle's `level_extent(k)` — so the image's real mip extents
+/// and the stored plan agree by construction, not by a second derivation.
+pub(crate) struct HzbTargets {
+    /// The `R32_SFLOAT` pyramid image, `plan.levels` mips deep, single array layer. Created
+    /// `UNDEFINED`; nothing transitions it this step.
+    pub(crate) pyramid: VulkanTexture,
+    // VIEW-OWNER: `pyramid`; destroyed before it in `HzbTargets::destroy`.
+    /// One single-mip view per level: slot `k` is `Some` iff `k < plan.levels`, and views level
+    /// `k` ALONE (`base_mip: k, mip_count: 1`) — the shape no texture-owned view can produce, and
+    /// the shape a storage-image descriptor requires. The tail slots are `None` padding, NOT
+    /// levels: [`MAX_HZB_LEVELS`] is a capacity, never a span (see its own doc).
+    pub(crate) level_views: [Option<VulkanTextureView>; MAX_HZB_LEVELS],
+    /// The derived shape this bundle was built from — the level count and the per-level extents
+    /// the host oracle computed. Stored so a later step's dispatch bounds and mip ranges read the
+    /// DERIVED count rather than the capacity constant.
+    ///
+    /// `dead_code`: piece 1 allocates the pyramid and reads it with nothing (the step's whole
+    /// point), so the plan has no consumer until the build passes land — the same "dark infra,
+    /// unwired" allow `VB_GROUP_SENTINEL` carries. It is stored NOW rather than re-threaded later
+    /// because the numbers must come from the allocation that used them, not from a second read of
+    /// a config that may since have flipped.
+    #[allow(dead_code)]
+    pub(crate) plan: HzbPlan,
+}
+
+impl HzbTargets {
+    /// Allocates the pyramid + its per-level views from the plan `scene` carries, or `Ok(None)`
+    /// when the pyramid is disarmed (`scene.hzb == None` — the `HzbMode::Off` 0%-gate).
+    ///
+    /// Reverse-acquisition draining on partial failure: a failed view destroys the views already
+    /// built and then the image, so no partially-built bundle escapes (mirrors
+    /// [`VbClassifyTargets::build`], with THE OWNERSHIP RULE's view-before-image order layered on
+    /// top).
+    ///
+    /// `extent` is the SOURCE extent the pyramid reduces — used only to check the handed plan
+    /// against the image the rest of `create` is sizing to, never to derive anything.
+    fn build(
+        ctx: &VulkanContext,
+        scene: &GBufferScene<'_>,
+        extent: VkExtent2D,
+    ) -> Result<Option<Self>, SwapchainError> {
+        let Some(plan) = scene.hzb else {
+            // The 0%-gate: no image, no views. Byte-identical to a build without this step.
+            return Ok(None);
+        };
+
+        // Structural invariants on the HANDED plan. Deliberately NOT a re-derivation of
+        // `prev_pow2`/`msb` (the plan §4 boundary — one implementation in the tree): these check
+        // only that the numbers can back a legal `VkImage`, and that level 0 is inside the source
+        // the pyramid claims to reduce.
+        debug_assert!(
+            plan.levels >= 1 && (plan.levels as usize) <= MAX_HZB_LEVELS,
+            "invariant: the HZB plan's level count fits the pyramid's inline view capacity"
+        );
+        let [base_w, base_h] = plan.extent_of(0);
+        debug_assert!(
+            base_w >= 1 && base_h >= 1 && base_w <= extent.width && base_h <= extent.height,
+            "invariant: HZB level 0 is non-empty and lies inside the source extent"
+        );
+
+        let pyramid_desc = TextureDesc {
+            width: base_w,
+            height: base_h,
+            depth: 1,
+            format: Format::R32Sfloat,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::STORAGE | ImageUsage::SAMPLED | ImageUsage::TRANSFER_SRC,
+            array_layers: 1,
+            mip_levels: plan.levels,
+            view_format: None,
+        };
+        let pyramid =
+            RhiDevice::create_texture(ctx, &pyramid_desc).map_err(SwapchainError::DepthImage)?;
+
+        let mut level_views: [Option<VulkanTextureView>; MAX_HZB_LEVELS] =
+            [const { None }; MAX_HZB_LEVELS];
+        for level in 0..plan.levels {
+            let view_desc = TextureViewDesc {
+                base_mip: level,
+                mip_count: 1,
+                ..TextureViewDesc::default()
+            };
+            match RhiDevice::create_texture_view(ctx, &pyramid, &view_desc) {
+                Ok(v) => level_views[level as usize] = Some(v),
+                Err(e) => {
+                    // SAFETY: every drained view was created on `ctx` from `pyramid` just above
+                    // and is referenced by no submission (the build phase); `Option::take` leaves
+                    // the slot `None`, so each is destroyed exactly once. The views are destroyed
+                    // BEFORE `pyramid` — THE OWNERSHIP RULE (`texture.rs`), i.e.
+                    // `VUID-vkDestroyImage-image-01000`: destroying an image with a live view of
+                    // it is invalid usage. `pyramid` is likewise destroyed exactly once (by value)
+                    // and is still alive while its views are torn down.
+                    unsafe {
+                        for built in level_views.iter_mut() {
+                            if let Some(v) = built.take() {
+                                RhiDevice::destroy_texture_view(ctx, v);
+                            }
+                        }
+                        RhiDevice::destroy_texture(ctx, pyramid);
+                    }
+                    return Err(SwapchainError::DepthImage(e));
+                }
+            }
+        }
+
+        Ok(Some(Self { pyramid, level_views, plan }))
+    }
+
+    /// # Safety
+    /// The image and every view were created on `ctx`, the device is idle (the caller's teardown
+    /// waited), and each is destroyed exactly once (by-value).
+    unsafe fn destroy(self, ctx: &VulkanContext) {
+        // SAFETY: per the contract `ctx` is live + idle and nothing references these objects.
+        // Every view is destroyed BEFORE the image it views — THE OWNERSHIP RULE (`texture.rs`),
+        // `VUID-vkDestroyImage-image-01000`. Both the array and the image are consumed by value,
+        // and `VulkanTextureView`/`VulkanTexture` are neither `Copy` nor `Clone`, so each object
+        // is destroyed exactly once.
+        unsafe {
+            for view in self.level_views.into_iter().flatten() {
+                RhiDevice::destroy_texture_view(ctx, view);
+            }
+            RhiDevice::destroy_texture(ctx, self.pyramid);
         }
     }
 }
@@ -7268,7 +7449,7 @@ impl GBufferTargets {
             temporal_shadow_ubo.as_ref(),
         );
 
-        Ok(Self {
+        let mut targets = Self {
             depth,
             albedo,
             normal,
@@ -7354,8 +7535,52 @@ impl GBufferTargets {
             forward,
             vb,
             vb_classify,
+            // VG R3 piece 1 step P1-2: the pyramid itself is allocated BELOW, after this literal
+            // (see the placement argument there); the arm is captured HERE, from the scene, so the
+            // stored bit and the allocation can only disagree if the build fails — which returns.
+            hzb: None,
+            hzb_arm: scene.hzb.is_some(),
             extent,
-        })
+        };
+
+        // === VG R3 piece 1 step P1-2: the hierarchical-Z pyramid, built LAST. ===
+        //
+        // PLACEMENT. The plan constrains OWNERSHIP only — the pyramid is owned by
+        // `GBufferTargets` so it inherits this struct's verified drain-and-recreate — and names no
+        // line, so the choice is made here and argued here:
+        //
+        //  * The pyramid depends on NOTHING but the extent: no image, no descriptor set, no
+        //    layout. Nothing in the create body orders it.
+        //  * Built LAST, the successful create ORDER of every existing bundle is byte-identical —
+        //    every allocation above runs in exactly the sequence it did before this step, armed or
+        //    not. (Under the default `Off` there is no allocation here at all.)
+        //  * The teardown ladder stays honest without touching one existing error arm. Built
+        //    FIRST instead, the pyramid would have to be drained by every `?` and every `Err` arm
+        //    below it — a dozen edits on paths a green build never executes, each one a chance to
+        //    miss a drain. Built last, the only new failure edge is the one right here, and it
+        //    tears down through the struct's OWN `destroy`: the same reverse-acquisition ladder
+        //    the caller runs, which cannot drift out of step with the field list.
+        //  * Reverse acquisition therefore destroys it FIRST in `Self::destroy`.
+        match HzbTargets::build(ctx, scene, extent) {
+            Ok(h) => targets.hzb = h,
+            Err(e) => {
+                // SAFETY: every resource in `targets` was created on `ctx` in this fn and is
+                // referenced by no submission (nothing has been recorded, let alone submitted,
+                // against targets that have not been returned yet). `destroy` consumes `targets`
+                // by value and tears each resource down exactly once, in reverse acquisition
+                // order. `targets.hzb` is still `None` here — `HzbTargets::build` drains its own
+                // partial allocations before returning `Err`.
+                unsafe { targets.destroy(ctx) };
+                return Err(e);
+            }
+        }
+        debug_assert_eq!(
+            targets.hzb_arm,
+            targets.hzb.is_some(),
+            "invariant: the stored HZB arm and the pyramid allocation move in lockstep"
+        );
+
+        Ok(targets)
     }
 
     /// Ensures the G-buffer images + descriptor sets exist and match `extent`,
@@ -7382,6 +7607,14 @@ impl GBufferTargets {
     /// to [`Self::create`] on a (re)build; unread on the fast-path `extent`/`aa_arm` match
     /// above (a profile-only change with no extent/AA change cannot occur today — R3 revisits
     /// this once a live path/legs toggle exists, which Decision 1 forbids in any case).
+    ///
+    /// VG R3 piece 1 step P1-2: the predicate ALSO compares [`Self::hzb_arm`] against
+    /// `scene.hzb.is_some()`. Without it a live `HzbMode::Off → Build` flip at fixed extent would
+    /// hit the fast path and no pyramid would ever be built — the arm cannot ride on
+    /// [`GBufferScene`] alone (`TargetsProfile` shows why: it is a parameter, never a stored
+    /// field, so it can be compared against nothing here). The pyramid's SHAPE needs no compare of
+    /// its own: it is a pure function of `extent`, which the predicate already matches. Under the
+    /// default `Off` both sides are `false` forever, so no existing path gains a recreate.
     pub(crate) fn sync_gbuffer(
         targets: &mut Option<Self>,
         ctx: &VulkanContext,
@@ -7394,6 +7627,7 @@ impl GBufferTargets {
             && t.extent.width == extent.width
             && t.extent.height == extent.height
             && t.aa_arm == AaArm::from_scene(scene)
+            && t.hzb_arm == scene.hzb.is_some()
         {
             return Ok(());
         }
@@ -7479,6 +7713,14 @@ impl GBufferTargets {
         // slots — every slot of every ring (and the single set) is drained. Rung 3a (`hwrt`) adds
         // the two `Option`-guarded shadow-vis image RINGS, drained before ssao (reverse acquisition).
         unsafe {
+            // VG R3 piece 1 step P1-2: the depth pyramid — acquired LAST in `create` (it depends
+            // on nothing but the extent; see the placement argument there), so destroyed FIRST
+            // here. `Option`-guarded (`None` on the default `HzbMode::Off` 0%-gate). Its own
+            // `destroy` tears the per-level views down before the image they view (THE OWNERSHIP
+            // RULE).
+            if let Some(h) = self.hzb {
+                h.destroy(ctx);
+            }
             // TAA rung T3: the RCAS descriptor set — acquired LAST (after `taa_resolved`/
             // `aa_out`/`taa_resolve_set`), so destroyed FIRST here (before everything it reads
             // from). `Option`-guarded (`None` unless `scene.rcas` was armed).
@@ -8066,6 +8308,8 @@ mod tests {
             forward: None,
             vb: None,
             vb_classify: None,
+            hzb: None,
+            hzb_arm: false,
             extent: VkExtent2D::default(),
         }
     }
@@ -8173,6 +8417,8 @@ mod tests {
             forward: None,
             vb: None,
             vb_classify: None,
+            hzb: None,
+            hzb_arm: false,
             extent: VkExtent2D::default(),
         }
     }

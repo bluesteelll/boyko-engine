@@ -2576,6 +2576,10 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // R2: the declarator dispatch matches on this value's `path`, so the default is exactly
         // what keeps these fixtures on the Deferred declarator they were pinned against.
         resolved_render_path: ResolvedRenderPathGpu::default(),
+        // VG R3 piece 1 step P1-2: no depth pyramid — the `HzbMode::Off` 0%-gate, and the only
+        // honest value here (this harness has no `HzbConfig` and no `boyko_render` to derive a
+        // plan with). `None` ⇒ no image, no per-mip views, no build passes ⇒ byte-identical.
+        hzb: None,
     };
 
     // The composite's native size — drives the G-buffer alloc + the 1:1 top-left present.
@@ -3645,6 +3649,10 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         // R2: the declarator dispatch matches on this value's `path`, so the default is exactly
         // what keeps these fixtures on the Deferred declarator they were pinned against.
         resolved_render_path: ResolvedRenderPathGpu::default(),
+        // VG R3 piece 1 step P1-2: no depth pyramid — the `HzbMode::Off` 0%-gate, and the only
+        // honest value here (this harness has no `HzbConfig` and no `boyko_render` to derive a
+        // plan with). `None` ⇒ no image, no per-mip views, no build passes ⇒ byte-identical.
+        hzb: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -8652,6 +8660,10 @@ fn run_showcase_body_ddgi(
         // R2: the declarator dispatch matches on this value's `path`, so the default is exactly
         // what keeps these fixtures on the Deferred declarator they were pinned against.
         resolved_render_path: ResolvedRenderPathGpu::default(),
+        // VG R3 piece 1 step P1-2: no depth pyramid — the `HzbMode::Off` 0%-gate, and the only
+        // honest value here (this harness has no `HzbConfig` and no `boyko_render` to derive a
+        // plan with). `None` ⇒ no image, no per-mip views, no build passes ⇒ byte-identical.
+        hzb: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -10199,6 +10211,9 @@ fn run_showcase_body(
         // derived flag off); `run_showcase_dump_with_render_path` forces the R3
         // leg-disable goldens' `Deferred x Sdf` carrier.
         resolved_render_path,
+        // VG R3 piece 1 step P1-2: no depth pyramid — the `HzbMode::Off` 0%-gate (see the sibling
+        // fixtures). `None` ⇒ no image, no per-mip views, no build passes ⇒ byte-identical.
+        hzb: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };

@@ -63,6 +63,10 @@ use boyko_rhi_vulkan::compute::{
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::ffi::VkDescriptorSet;
 use boyko_rhi_vulkan::memory::BoundBuffer;
+// VG R3 piece 1 step P1-2: the depth pyramid's derived-scalar carrier. Named through
+// `present` (its home) rather than the legacy `swapchain` shim below, which exists only to
+// preserve pre-decomposition paths.
+use boyko_rhi_vulkan::present::HzbPlan;
 use boyko_rhi_vulkan::rhi_impl::{
     ComputePipeline, VulkanBindGroup, VulkanBindGroupLayout, VulkanGraphicsPipeline,
     VulkanQueryPool, VulkanSampler, VulkanShaderModule, rebind_storage_buffer,
@@ -5511,6 +5515,15 @@ impl GpuSceneBundles {
         // pipeline key — flipping it needs no re-record and no pipeline rebuild, which is what
         // makes the two phases of a pair comparable (see `GBufferScene::lighting_flags`).
         sv0_bench_lighting_flags: Option<u32>,
+        // VG R3 piece 1 step P1-2: THIS frame's hierarchical-Z pyramid plan — the level count and
+        // per-level extents `boyko_render::hzb::HzbLayout` derived from the composite extent,
+        // computed ONCE in `boyko_app::runner` (`crate::hzb_plan::hzb_plan_for`) and threaded as
+        // plain scalars, the SAME "host reads the World, threads the plain value" discipline every
+        // knob above follows. `None` (the default `HzbMode::Off`, or an extent the oracle refuses)
+        // ⇒ `GBufferScene::hzb == None` ⇒ no image, no per-mip views, no build passes — the
+        // 0%-gate. The RHI derives NOTHING from it (plan §4): the formulas live in
+        // `boyko_render::hzb` and only there.
+        hzb: Option<HzbPlan>,
         device: &VulkanContext,
     ) -> GBufferScene<'a> {
         debug_assert!(
@@ -6354,6 +6367,10 @@ impl GpuSceneBundles {
             // Multi-paradigm render-path plan, rung R1: the plain-POD conversion (see this
             // fn's `resolved_render_path` param doc for why it cannot be a `From` impl).
             resolved_render_path: to_gpu_resolved_render_path(&resolved_render_path),
+            // VG R3 piece 1 step P1-2: the pyramid plan, threaded verbatim from the runner's
+            // single `HzbLayout` call (see this fn's `hzb` param doc). `None` on the default
+            // `HzbMode::Off` — no image, no views, no passes.
+            hzb,
         }
     }
 

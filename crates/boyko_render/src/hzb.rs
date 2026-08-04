@@ -163,6 +163,16 @@ pub const MAX_HZB_LEVELS: u32 = 17;
 const _: () = assert!(MAX_HZB_LEVELS == msb(MAX_HZB_EXTENT) + 1);
 const _: () = assert!(MAX_HZB_EXTENT.is_power_of_two());
 
+/// VG R3 piece 1 step P1-2 — the compile-time tie to the backend's array-sizing mirror.
+///
+/// `boyko_rhi_vulkan` sits BELOW this crate in the dependency graph and cannot name [`HzbLayout`]
+/// (plan §4), yet it needs a `const` to size `[Option<VulkanTextureView>; N]`. So it restates the
+/// level count, and this assert pins the restatement: a drift fails the BUILD, in the shape
+/// [`crate::gbuffer_depth`] already uses for its own cross-crate constant, rather than a test that
+/// has to be run. This is the ONLY thing the backend spells for itself — every per-level extent is
+/// derived here and threaded to it.
+const _: () = assert!(MAX_HZB_LEVELS as usize == boyko_rhi_vulkan::present::MAX_HZB_LEVELS);
+
 /// Why [`HzbLayout`] construction was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HzbLayoutError {

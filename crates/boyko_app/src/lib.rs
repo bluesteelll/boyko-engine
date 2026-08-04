@@ -39,6 +39,12 @@ mod gpu_scene;
 mod host;
 #[cfg(windows)]
 mod host_dump;
+// VG R3 piece 1 step P1-2: the HZB oracle → backend-scalars seam. `#[cfg(windows)]` for the same
+// reason `gpu_scene` is — its only caller is the windowed frame loop, and windowing is
+// Windows-first (`runner::run_windowed`'s non-Windows arm exits immediately), so an ungated module
+// would be dead code on every other target.
+#[cfg(windows)]
+mod hzb_plan;
 mod runner;
 #[cfg(windows)]
 mod vg_census_dump;

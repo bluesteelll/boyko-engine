@@ -47,7 +47,10 @@ use boyko_ecs::ecs::core::system::ResMut;
 use boyko_render::Material;
 use boyko_render::generate_tangents;
 use boyko_render::mesh::Vertex;
-use boyko_render::{GeometryLegs, MeshAssetsVbExt, MeshGeometryTableSlot, RenderPath, RenderPathConfig};
+use boyko_render::{
+    GeometryLegs, HzbConfig, HzbMode, MeshAssetsVbExt, MeshGeometryTableSlot, RenderPath,
+    RenderPathConfig,
+};
 
 /// The sun direction TO the light (byte-identical to `grand_showcase_2mat.rs`'s /
 /// `forward_mesh.rs`'s).
@@ -180,5 +183,20 @@ fn vb_mesh_screenshot_dump() {
     // AFTER `add_plugins` (which installs `RenderPathPlugin`'s `Deferred`-default) so this
     // override wins, mirroring `forward_mesh.rs`'s own post-plugins owner-override insert.
     app.insert_resource(RenderPathConfig { path: RenderPath::VisibilityBuffer, legs: GeometryLegs::Mesh });
+    // VG R3 piece 1 step P1-2: `BOYKO_VG_HZB=1` arms the depth pyramid on THIS scene, THIS
+    // binary and THIS test — deliberately not a cloned fixture. The pyramid is allocated and read
+    // by nothing, so the armed dump must hash to `[vb_mesh]`'s own pin; sharing the code path
+    // makes that an identity rather than a resemblance between two scenes that merely look alike.
+    // `goldens/PINS.toml`'s `[vb_mesh_hzb]` is that leg, and it carries the SAME sha256 on
+    // purpose: a divergence means the allocation perturbed a render it must not touch.
+    //
+    // The real prize is the VALIDATION leg (`golden.ps1 -Pin vb_mesh_hzb -ValidationOn`). This is
+    // the engine's FIRST storage image with a mip chain — every other `TextureDesc` call site in
+    // the tree passes `mip_levels: 1` — so the layer is what proves the image and its per-mip
+    // views are legal. A byte-identical dump alone would not: an illegal view that nothing binds
+    // changes no pixel.
+    if std::env::var("BOYKO_VG_HZB").is_ok_and(|v| v == "1") {
+        app.insert_resource(HzbConfig { mode: HzbMode::Build });
+    }
     app.run();
 }
