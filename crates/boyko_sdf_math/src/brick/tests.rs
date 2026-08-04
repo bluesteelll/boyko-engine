@@ -203,7 +203,7 @@ fn brick_field_is_conservative_lower_bound() {
                                 recon <= analytic + 1e-6,
                                 "R1 OVER-REPORT (surface overshoot): recon={recon} > analytic={analytic} \
                                  at world={world:?} local={local:?} seed={seed}; edits={:?}",
-                                &edits,
+                                edits,
                             );
                         }
 

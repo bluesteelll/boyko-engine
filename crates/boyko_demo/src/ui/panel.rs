@@ -209,7 +209,7 @@ fn plot(ui: &mut egui::Ui, stats: &FrameStats) {
             egui::pos2(rect.left(), target_y),
             egui::pos2(rect.right(), target_y),
         ],
-        egui::Stroke::new(1.0, visuals.weak_text_color()),
+        egui::Stroke::new(1.0_f32, visuals.weak_text_color()),
     );
 
     // Need at least two samples to draw a segment.
@@ -229,7 +229,7 @@ fn plot(ui: &mut egui::Ui, stats: &FrameStats) {
         let x = rect.left() + dx * i as f32;
         let p = egui::pos2(x, y_for_ms(ms));
         if let Some(prev_p) = prev {
-            painter.line_segment([prev_p, p], egui::Stroke::new(1.5, line_color));
+            painter.line_segment([prev_p, p], egui::Stroke::new(1.5_f32, line_color));
         }
         prev = Some(p);
     }
