@@ -73,6 +73,20 @@ tests, which depend on both crates.
 This also keeps the dependency direction honest rather than working around it: the RHI has no
 business naming a render-layer type, and the scalars are what it actually needs.
 
+**Who DERIVES them, made explicit (the review's one real improvement to this section).** The
+resolution above was silent on it, and silence invites a second implementation of `prev_pow2` /
+`msb` / `level_extent` inside `boyko_rhi_vulkan`. It must not exist. `boyko_app` links both
+crates and already authors the extent `GBufferTargets::create` sizes to, so **the host calls
+`boyko_render::hzb::HzbLayout` ONCE and threads the resulting scalars onto `GBufferScene`
+beside the arm bit** — the same seam `shadow_denoise_enabled` uses. The RHI stores what it is
+handed and derives nothing. One implementation in the tree, no cross-crate formula to drift.
+
+The `MAX_HZB_LEVELS` array-sizing constant is the one thing the RHI must still spell for itself
+(a `[VulkanTextureView; N]` needs a `const`). That tie does **not** need a runtime test in
+`boyko_app`: `boyko_render/src/gbuffer_depth.rs:44,82` already `use`s a `boyko_rhi_vulkan`
+constant and pins it with `const _: () = assert!(...)`, so the equality is a **compile error**
+on drift rather than a test that has to be run.
+
 ## 5. The two gates, and why both are required
 
 - **G3 — the shader equals the oracle, with no engine involved.** It creates its own depth image,
@@ -100,3 +114,42 @@ derived edge changes no layout and the seed is not falsified on a dump frame.
 
 `TRANSFER_SRC` on `ForwardTargets::depth`, in the shape `targets.rs` already argues for `vb_id`,
 gated by the full golden set in its own step. It is what makes G8 possible at all.
+
+## 7. Mechanical facts established by the P1-1 review (27 raised, 25 refuted)
+
+The review of step P1-1 raised 27 findings and **25 were refuted** — but the refutations had to
+read the code to kill the claims, and what they established is worth more than the claims were.
+Each item below is anchored, and each removes a question the implementation would otherwise
+have had to answer at its own cost.
+
+- **Per-mip barrier spans are spellable today.** `SubRange`'s five fields are all `pub`
+  (`framegraph/sync.rs:37-44`, re-exported at `framegraph/mod.rs:49`), so
+  `SubRange { base_mip: k, mip_count: 1, .. }` is writable at any pass site. No new constructor.
+- **⚠️ The barrier path bounds NOTHING.** `graph_bridge.rs:392-398` and `:576-582` copy
+  `base_mip`/`mip_count` verbatim into `VkImageSubresourceRange`, and the sink holds bare
+  `VkImage` handles with no mip count to check against (`:317`) — unlike the VIEW path, which
+  does assert it (`texture.rs:648-651`). **Consequence: every `SubRange` the pyramid declares
+  must carry the DERIVED level count. `color_mips(MAX_HZB_LEVELS)` — the natural constant
+  spelling — is out of range at every real resolution**, and nothing would catch it.
+- **A mipped `UNDEFINED` transition already has a precedent**, contrary to the "both precedents
+  hardcode `level_count: 1`" reading: `boyko_render/src/texture.rs:246-262` emits
+  `old_layout: Undefined` with `level_count: mip_levels` over "every mip". The boot transition
+  is not novel work.
+- **The pyramid does not force a global ResId bump.** The VB path has a PRIVATE ResId space
+  (`graph_bridge.rs:2874-2886`, `VB_IMAGE_COUNT = 14`/`20`), documented as never related to
+  `FRAMEGRAPH_IMAGE_COUNT`.
+- **`VulkanTexture::create` holds for `mip_levels = N`, single layer**: exactly one view is
+  built, `is_array` is false, nothing trips. The usage set is `STORAGE | SAMPLED | TRANSFER_SRC`
+  — `SAMPLED` so the texture-owned `[0, N)` view is unambiguously legal (a multi-mip view is not
+  bindable as a storage descriptor), `STORAGE` for the per-level views the build binds,
+  `TRANSFER_SRC` for G8's dump copy. This is the engine's FIRST storage image with a mip chain;
+  every other call site in the tree passes `mip_levels: 1`.
+- **⚠️ Carried forward to piece 3:** `SAMPLED_IMAGE_FILTER_LINEAR` is **not** mandatory for
+  `R32_SFLOAT` (only `SAMPLED_IMAGE` and `STORAGE_IMAGE` are). Whatever reads the pyramid must
+  do so point-sampled — `.Load`, never a linear-filtered sample — or probe first.
+- **⚠️ `sync_gbuffer` short-circuits on `(extent, aa_arm)` alone** (`targets.rs:7393-7399`), and
+  `TargetsProfile` is a parameter, never a stored field (`:7381-7384`). So an arm bit that only
+  rides on `GBufferScene` cannot survive a runtime flip at fixed extent. Either the HZB arm
+  becomes a STORED field joining that predicate — the shape `aa_arm` already argues for at
+  `:473-476` — or arming is boot-only *by construction* and says so. Piece 1 defaults `Off` and
+  is read by nothing, so this is a design choice to make deliberately, not a latent bug.

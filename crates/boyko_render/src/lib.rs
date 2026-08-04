@@ -147,6 +147,17 @@ pub mod gpu_upload;
 /// later GPU/CPU disagreement is a shader bug rather than a math bug. Plays for the HZB arm
 /// exactly the role [`frustum`] plays for the frustum arm.
 pub mod hzb;
+/// VG R3 piece 1 step P1-1 — the ECS-native depth-pyramid ARMING config
+/// ([`HzbConfig`](hzb_config::HzbConfig) + its [`HzbMode`](hzb_config::HzbMode) knob).
+/// Capability is structural (`Off` IS disabled); default `Off` is the 0%-gate. No derived
+/// carrier and no policy system — the map to "build or not" is the identity, so the render
+/// driver reads [`HzbConfig::enabled`](hzb_config::HzbConfig::enabled) directly. Read by
+/// nothing in piece 1.
+pub mod hzb_config;
+/// VG R3 piece 1 step P1-1 — the [`HzbPlugin`](hzb_plugin::HzbPlugin) that seeds the
+/// depth-pyramid config substrate. System-less (the
+/// [`RenderPathPlugin`](render_path_plugin::RenderPathPlugin) shape).
+pub mod hzb_plugin;
 /// The per-entity 48-byte model-affine instance column (mesh foundation M3):
 /// [`InstanceModelCol`](instance_model::InstanceModelCol), the exact SSBO layout the
 /// M1/M2 gbuffer VS reads, + its `GlobalTransform` pack system.
@@ -434,6 +445,8 @@ pub use hzb::{
     OcclusionVerdict, ScreenRect, TexelSelection, build_pyramid, conservative_min,
     occluder_depth, occlusion_verdict, prev_pow2, project_aabb, select_texels,
 };
+pub use hzb_config::{HzbConfig, HzbMode};
+pub use hzb_plugin::HzbPlugin;
 pub use instance_model::{
     INSTANCE_MODEL_COL_BYTES, InstanceModelCol, VB_INSTANCE_ROW_BYTES, VbInstanceRow,
     sync_instance_model_cols,
