@@ -151,12 +151,22 @@ foreach ($k in $pins.Keys) {
 }
 
 # -ValidationOn overrides (AFTER the pin env is applied): strip the pin's
-# BOYKO_DISABLE_VALIDATION so the layer + messenger oracle are live, and hide the window so
-# the audit never parks a window on the desktop. Everything else stays the pin's truth.
+# BOYKO_DISABLE_VALIDATION, SET BOYKO_ENABLE_VALIDATION so the layer + messenger oracle are
+# actually live, and hide the window so the audit never parks a window on the desktop.
+# Everything else stays the pin's truth.
+#
+# BOYKO_ENABLE_VALIDATION is not redundant with the strip, and the difference was measured, not
+# assumed. The backend gates the layer on `enable_validation && BOYKO_DISABLE_VALIDATION unset`
+# (boyko_rhi_vulkan/src/device.rs:2350), and boyko_app's runner hardcoded the first conjunct to
+# `false`. Stripping alone therefore enabled NOTHING on all 22 boyko-app pins -- this switch
+# reported "VALIDATION: clean (0 messages)" unconditionally, a gate that could not fail. Proof:
+# a deliberately illegal `mip_levels: 12` on a 512x512 image (max 10) was accepted by
+# vkCreateImage and drew zero messages. See docs/OPEN-QUESTIONS.md.
 if ($ValidationOn) {
     Remove-Item Env:BOYKO_DISABLE_VALIDATION -ErrorAction SilentlyContinue
+    $env:BOYKO_ENABLE_VALIDATION = '1'
     $env:BOYKO_WIN_HIDDEN = '1'
-    Write-Host "  env OVERRIDE (-ValidationOn): BOYKO_DISABLE_VALIDATION stripped, BOYKO_WIN_HIDDEN=1" -ForegroundColor Yellow
+    Write-Host "  env OVERRIDE (-ValidationOn): BOYKO_DISABLE_VALIDATION stripped, BOYKO_ENABLE_VALIDATION=1, BOYKO_WIN_HIDDEN=1" -ForegroundColor Yellow
 }
 
 # Ensure the dump directory exists (D:\tmp is wiped by a Windows crash -- recreate it).

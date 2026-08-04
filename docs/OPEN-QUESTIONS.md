@@ -14,6 +14,59 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-04 — ⚠️ `golden.ps1 -ValidationOn` never enabled the validation layer on ANY `boyko-app` pin
+
+**Found while gating VG R3 P1-2, and it is the vacuum-green shape again.** The switch is the
+engine's validation-audit instrument; the campaign records a "Validation-ON audit — COMPLETE"
+milestone that ran through it. On the 22 of 25 pins that boot through `boyko_app`, it could not
+fail.
+
+**Mechanism.** The backend gates the layer on a conjunction —
+`config.enable_validation && BOYKO_DISABLE_VALIDATION unset` (`boyko_rhi_vulkan/src/device.rs:2350`)
+— and `boyko_app`'s runner hardcoded `enable_validation: false`. `-ValidationOn` only ever
+*stripped the env var*, i.e. satisfied the second conjunct while the first stayed false. The layer
+was never requested, no messenger existed, and the scan for `[vk-validation]` lines therefore
+reported **"clean (0 messages)"** unconditionally.
+
+The runner's own doc said so, in a passage read as a design note rather than as a gate defect:
+"The shipped runner does NOT request the validation layer… a debug validation knob arrives with a
+later rung."
+
+**Measured, not inferred.** I built a `512×512` image with `mip_levels: 12` (the legal max is 10).
+`vkCreateImage` returned SUCCESS and the audit reported clean. With the fix, the same corruption
+draws the exact message: `vkCreateImage(): pCreateInfo->mipLevels (12) must be less than or equal
+to 10`.
+
+**Fixed here**, because P1-2's load-bearing gate depends on it: `BOYKO_ENABLE_VALIDATION` opts the
+runner in (absent ⇒ boot byte-identical to before), and `-ValidationOn` now sets it alongside the
+strip.
+
+**⚠️ WHAT IT REVEALED, AND THE OPEN QUESTION.** With the layer actually live, the `vb_mesh` pin
+emits **19 validation messages** — a baseline nobody has seen:
+
+| count | message |
+|---|---|
+| 9 | `vkCreateComputePipelines()`: compute shader uses descriptor `[Set 1, …]` |
+| 6 | `vkCreateGraphicsPipelines()`: vertex attribute at location 1/2 not consumed by vertex shader |
+| 1 | **`vkDestroyDevice(): VkDevice has 13 leaked objects that have not been destroyed`** |
+| 1 | `vkCreateShaderModule()`: SPIR-V capability `Geometry` declared without the feature |
+| 1 | `vkCreateShaderModule()`: SPIR-V capability `DemoteToHelperInvocation` declared without the feature |
+| 1 | duplicate-limit warning |
+
+The pyramid is not implicated: armed and unarmed logs are **byte-identical** after handle
+normalization, so P1-2 contributes zero. But the two shader-capability messages and the 13 leaked
+objects are real, they are on the flagship VB pin, and one of them is a resource leak.
+
+**The question is SCOPE, not method.** Options: (a) I audit and fix the 19 now, before continuing
+the pyramid — it is a leak and two feature-declaration bugs on the main path; (b) I finish piece 1
+and take the validation baseline as its own campaign afterwards; (c) I fix only the leak now and
+defer the rest. I lean (b): the 19 predate this work by a long way, the pyramid is proven clean
+against them, and interleaving an unbounded audit into a decomposition that was created
+*specifically* to keep scope local would undo the decomposition. But it is your call — this is
+scope, and the leak is the kind of thing that gets worse while it waits.
+
+---
+
 ## RESOLVED 2026-08-03 — the HZB feature design does not converge in one piece: decomposed
 
 **Situation, measured over three review rounds rather than felt.**

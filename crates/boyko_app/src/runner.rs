@@ -188,17 +188,29 @@ const MATERIAL_CAPACITY: usize = 256;
 /// line at the binary boundary and returns `AppExit(true)` — the app must exit
 /// gracefully on a GPU-less machine.
 ///
-/// The shipped runner does NOT request the validation layer (review P1-3): per
-/// [`InstanceConfig`]'s contract an ABSENT `VK_LAYER_KHRONOS_validation` fails
-/// boot with `ValidationUnavailable` (no silent fallback), which would kill
-/// the app on every machine without the Vulkan SDK. The messenger oracle stays
-/// a test-harness convention; a debug validation knob arrives with a later
-/// rung.
+/// The shipped runner does NOT request the validation layer BY DEFAULT (review
+/// P1-3): per [`InstanceConfig`]'s contract an ABSENT
+/// `VK_LAYER_KHRONOS_validation` fails boot with `ValidationUnavailable` (no
+/// silent fallback), which would kill the app on every machine without the
+/// Vulkan SDK.
+///
+/// `BOYKO_ENABLE_VALIDATION` is the opt-in knob that doc deferred to "a later
+/// rung", and it turned out to be load-bearing rather than a convenience. The
+/// backend gates the layer on `enable_validation && BOYKO_DISABLE_VALIDATION
+/// unset` (`device.rs:2350`), so with this flag hardcoded `false` the FIRST
+/// conjunct was always false and stripping the env var could not enable
+/// anything. `scripts/golden.ps1 -ValidationOn` stripped it and reported
+/// "VALIDATION: clean (0 messages)" for all 22 `boyko-app` pins — a gate that
+/// could not fail. Measured, not inferred: a deliberately illegal
+/// `mip_levels: 12` on a 512x512 image (max 10) was accepted by
+/// `vkCreateImage` and drew ZERO validation messages.
+///
+/// Absent the variable the boot is byte-identical to before.
 #[cfg(windows)]
 pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // ── Boot: the device singleton (plan D2 step 1). ─────────────────────────
     let config = InstanceConfig {
-        enable_validation: false,
+        enable_validation: std::env::var_os("BOYKO_ENABLE_VALIDATION").is_some(),
         windowed: true,
     };
     let ctx = match VulkanContext::boot_singleton(config) {
@@ -2257,6 +2269,21 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             let ssao_atrous_levels = world
                 .try_resource::<ResolvedSsao>()
                 .map_or(0, |r| r.atrous_levels);
+            // VG R3 piece 1 step P1-2: the depth-pyramid arming + its DERIVED shape, in ONE call.
+            // The SAME `try_resource` pattern `ssao_variant`/`resolved_aa_mode` use — a host that
+            // omits `HzbPlugin` degrades to "no pyramid" rather than panicking — and the ONLY site
+            // in the tree that calls `boyko_render::hzb::HzbLayout` on a frame path (plan §4: one
+            // implementation of `prev_pow2`/`msb`/`level_extent`, the backend derives nothing).
+            //
+            // Sized to `present_extent`, the COMPOSITE extent `GBufferTargets::create` allocates
+            // every other per-extent target at — the extent whose depth attachment the pyramid
+            // reduces, not the window's live client size. Default/absent `HzbMode::Off` ⇒ `None`
+            // ⇒ `scene.hzb == None` ⇒ no image, no per-mip views, no build passes (the 0%-gate).
+            let hzb_plan = crate::hzb_plan::hzb_plan_for(
+                world.try_resource::<boyko_render::HzbConfig>().copied(),
+                present_extent.width,
+                present_extent.height,
+            );
             // SSAA (AA campaign Stage 3, C1) — the HOST-AUTHORITATIVE LOCK: resolution is
             // a boot commitment (`WindowHost::boot`'s device-capability probe), so the
             // per-frame mode MUST agree with it, never the reverse. `host.ssaa_armed` ⇒
@@ -2381,6 +2408,9 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 vb_geometry_set,
                 vb_mesh_bounds,
                 sv0_bench_lighting_flags,
+                // VG R3 piece 1 step P1-2: this frame's pyramid plan (the single `HzbLayout` call
+                // above). `None` on the default `HzbMode::Off` — the 0%-gate.
+                hzb_plan,
                 ctx,
             );
 
