@@ -1,6 +1,20 @@
 # VG R3 — piece 1 of 4: the depth pyramid, alone
 
-Status: **DESIGNED, one mechanical blocker resolved below, ready to implement.**
+Status: **SHIPPED.** All eight steps, `4d3c529 … 736fb67`. The pyramid is built by the engine every
+armed frame and read by nothing; the cull is piece 3.
+
+Both gates are green and both were shown RED on the property they exist for. **G3** — the shader
+against the oracle, no engine involved — is bit-exact over seven extents including `4096×4096`
+(13 levels, three dispatches, 22 369 621 texels), and its one divergence is characterised, not
+tolerated: exactly three `±0` ties from a driver fusing the compare-and-select into a hardware min
+(§10). **G8** — the pyramid the engine built — is bit-exact over 349 525 texels rebuilt from the
+engine's own dumped depth, with non-vacuity carried by a `-1.0` image poison rather than by scene
+coverage (§13, §14). 25/25 golden pins byte-identical throughout; validation 19 armed / 19 unarmed.
+
+One step was not in the original plan: **P1-5a**, per-mip framegraph sync state (§11). `INVARIANT
+HZB-SUBRESOURCE-UNIFORM` refused the reduce pass's two spans on one ResId by name, and its own
+comment — written in advance, naming this exact pass — prescribed the answer. In release the assert
+is compiled out and the derivation was genuinely wrong, so it was a defect and not only a guard.
 
 Three design rounds. Round 1: 5 blockers, 12 majors. Round 2: 33 prior items closed, 2 blockers
 left. Round 3: 31 more closed, **one verdict `APPROVED_WITH_CHANGES`**, one new blocker — a Cargo
