@@ -66,6 +66,9 @@ use boyko_sdf_math::{BrickClass, SDF_EDIT_BAND_HALF, SdfEditAabb, SdfEditField};
 
 use crate::ffi::VkResult;
 use crate::memory::MemoryError;
+// VG R3 piece 1 step P1-4: the pyramid's level CAPACITY, which is what makes `MAX_HZB_PASSES`
+// derivable here rather than a second hand-counted number.
+use crate::present::MAX_HZB_LEVELS;
 
 /// Re-exports of the leaf items whose canonical import path the rung-8/9/10/11
 /// tests (and any external caller) use as `boyko_rhi_vulkan::compute::{..}`.
@@ -560,6 +563,29 @@ embed_spirv! {
     /// R2c re-pinned them rather than deleting them.)
     VB_BATCH_CULL_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_batch_cull.comp.spv")
+}
+
+embed_spirv! {
+    /// VG R3 piece 1 step P1-3: the committed hierarchical-Z depth-pyramid BUILD SPIR-V
+    /// (`shaders/hzb_build.comp.hlsl`).
+    ///
+    /// One 16×16 workgroup per 32×32 tile of the pass's FIRST OUTPUT LEVEL, reducing by `min` —
+    /// under this engine's reverse-Z that is the FARTHEST surface of each footprint, the lower
+    /// bound a later occlusion test needs — and writing up to [`HZB_LEVELS_PER_PASS`] mips per
+    /// dispatch. Bound to its OWN 8-binding set { SAMPLED `gSrcDepth` @0, STORAGE `gFine` @1,
+    /// STORAGE `gDst0`..`gDst5` @2..@7 } plus the [`HZB_BUILD_PUSH_BYTES`] push that carries every
+    /// per-level extent (the shader derives none of them).
+    ///
+    /// **Step P1-4 mints the pipeline and its descriptor sets, and NOTHING DISPATCHES THEM** — no
+    /// framegraph declaration, no pass, no barrier; that is step P1-5. Machinery that exists and
+    /// provably changes nothing observable, one step before its consumer, is the same null-control
+    /// discipline rung R2c0 shipped [`VB_BATCH_CULL_SPV`] under.
+    ///
+    /// The host oracle is `boyko_render::hzb::build_pyramid`, matched BIT-EXACTLY: the only float
+    /// operation in the entire build is `min`, so agreement is decidable to `to_bits()` at every
+    /// texel of every level.
+    HZB_BUILD_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/hzb_build.comp.spv")
 }
 
 embed_spirv! {
@@ -1681,6 +1707,110 @@ pub const VB_BATCH_CULL_PUSH_BYTES: u32 = 104;
 /// the two spellings are held together by `tests/vb_batch_cull_spv_sync.rs`, which reads the
 /// compiled `LocalSize` out of the module and asserts it equals this.
 pub const VB_BATCH_CULL_LOCAL_SIZE_X: u32 = 64;
+
+/// VG R3 piece 1 step P1-4: the HZB build pipeline's COMPUTE push range —
+/// `hzb_build.comp.hlsl`'s `HzbBuildPush`.
+///
+/// The layout the shader pins, offset by offset: eight `uint2` at 0 (`src_extent`), 8
+/// (`fine_extent`), 16, 24, 32, 40, 48, 56 (`out_extent0`..`out_extent5`), then two `uint` at 64
+/// (`base_level`) and 68 (`level_count`) — 72 bytes, `68 + 4`. Well inside Vulkan's guaranteed
+/// 128-byte minimum `maxPushConstantsSize`; the raster's own push is 88 bytes, so the device
+/// plainly clears this.
+///
+/// The SHADER half of that table is pinned by `tests/hzb_build_spv_sync.rs`, which reads every
+/// `OpMemberDecorate %type_PushConstant_HzbBuildPush <i> Offset <n>` out of the compiled module
+/// and asserts the member-ordered sequence `[0, 8, 16, 24, 32, 40, 48, 56, 64, 68]`. That is the
+/// one contract no other test can see: a drift makes the shader read a level extent from the
+/// wrong bytes, and the outcome — a pyramid that writes nothing, or one that reduces over the
+/// wrong footprint — carries no validation message at all. So a drift fails that test instead of
+/// silently corrupting a dispatch.
+pub const HZB_BUILD_PUSH_BYTES: u32 = 72;
+
+/// VG R3 piece 1 step P1-3: the HZB build shader's `[numthreads(16,16,1)]` group edge —
+/// `hzb_build.comp.hlsl`'s `LOCAL_SIZE`.
+///
+/// A 16×16 workgroup in which every thread owns a 2×2 block of the pass's FIRST OUTPUT LEVEL, hence
+/// the [`HZB_BUILD_TILE`] the host actually divides by. Drift here changes the LDS region layout the
+/// shader's reduce chain is built on (16×16 → 8×8 → 4×4 → 2×2 → 1), so it is not a tuning knob: it
+/// is pinned to the compiled module by `tests/hzb_build_spv_sync.rs`, which reads `LocalSize` out of
+/// the `.spv` and asserts it equals this.
+pub const HZB_BUILD_LOCAL_SIZE: u32 = 16;
+
+/// VG R3 piece 1 step P1-3: the HZB build shader's tile edge, in texels of the pass's FIRST OUTPUT
+/// LEVEL `d` — and THE DISPATCH DIVISOR, `groups[a] = ceil(E_a(d) / HZB_BUILD_TILE)`.
+///
+/// ⚠️ The divisor is over the OUTPUT level's extent, never the source's: level 0 is `prev_pow2` of
+/// each source axis (`P <= S < 2P`), so the two differ at every non-power-of-two extent.
+///
+/// Too small a divisor under-dispatches and leaves the pyramid's tail texels holding the boot clear
+/// `0.0`, which under reverse-Z is the FAR plane — the pyramid would then report that nothing is in
+/// front of those texels, which is the geometry-deleting direction for whatever reads it. Too large
+/// costs empty groups, which the boundary rule makes harmless but not free.
+///
+/// # ⚠️ How this one is pinned, and how it is NOT
+///
+/// The three HZB constants here read as three equivalent pins and they are not:
+///
+/// * [`HZB_BUILD_LOCAL_SIZE`] is pinned DIRECTLY — the module declares
+///   `OpExecutionMode … LocalSize 16 16 1` and the sync test compares it.
+/// * **This one has no field to read.** The tile appears in the module only as the anonymous
+///   multipliers `TILE >> k`, so the sync test ties it through the CONSTANTS those multipliers
+///   declare, in both directions: `%uint_TILE` must be present and `%uint_(2*TILE)` must be
+///   absent. That was added after a review found the previous assertion —
+///   `local_size[0] * 2 == HZB_BUILD_TILE` — could not fail, since the `const _` below already
+///   makes both sides the same expression. A `TILE = 64u` in the shader against an unchanged
+///   `[numthreads(16,16,1)]` passed BOTH gates and left half of every level unwritten.
+/// * [`HZB_LEVELS_PER_PASS`] is pinned INDIRECTLY, through `op_image_write` and the binding-set
+///   length, both of which the sync test now derives from it rather than spelling as literals.
+pub const HZB_BUILD_TILE: u32 = 32;
+
+/// VG R3 piece 1 step P1-3: how many pyramid levels ONE dispatch of `hzb_build.comp.hlsl` writes
+/// (`d ..= d+5`), and therefore what makes the host's pass count `ceil(levels / HZB_LEVELS_PER_PASS)`
+/// — at most 3 for the 17-level deepest pyramid the oracle admits.
+///
+/// It is not free to raise: the shader's six destination bindings and the tile-collapse identity
+/// below both encode it. Lowering it silently leaves the top mips unwritten — again at the boot
+/// clear `0.0`, the far plane.
+///
+/// Pinned INDIRECTLY (see [`HZB_BUILD_TILE`]'s note on the three different pin strengths): the sync
+/// test derives its `op_image_write` expectation and its binding-set length FROM this constant, so
+/// a change here that the shader does not follow fails there. The shader's own `LEVELS_PER_PASS`
+/// declaration is documentation — no expression reads it, and a `.spv` census cannot see it.
+pub const HZB_LEVELS_PER_PASS: u32 = 6;
+
+// Each thread owns a 2×2 block of the first output level, so the tile a workgroup covers is exactly
+// twice its own edge. The shader's `block_base = tile_base + tid * 2` is this identity.
+const _: () = assert!(HZB_BUILD_TILE == HZB_BUILD_LOCAL_SIZE * 2);
+
+// The tile halves once per level, so it collapses to exactly 1×1 at the pass's LAST level — which is
+// what makes every texel a pass writes a fold of level-`d` texels the group already owns, i.e. what
+// makes a pass free of cross-tile dependencies and of any intra-dispatch image barrier.
+const _: () = assert!(1u32 << HZB_LEVELS_PER_PASS == HZB_BUILD_TILE * 2);
+
+/// VG R3 piece 1 step P1-4: the fixed inline CAPACITY of the per-frame `hzb_build` descriptor-set
+/// array — how many dispatches the DEEPEST pyramid the host oracle admits would need.
+///
+/// ⚠️ **A CAPACITY, never a SPAN** — the same warning [`MAX_HZB_LEVELS`] carries, for the same
+/// reason. The LIVE pass count is `plan.levels.div_ceil(HZB_LEVELS_PER_PASS)`, and at every real
+/// render extent that is 2 (11 levels at 1920×1080; the third pass is first reached at a
+/// 4096-wide source). Nothing may size a dispatch loop, a barrier range or a mip index from this
+/// value — read the count from the plan.
+pub const MAX_HZB_PASSES: usize = 3;
+
+// `MAX_HZB_LEVELS` levels at `HZB_LEVELS_PER_PASS` levels per dispatch. Spelled as a literal so the
+// number is readable where the array is declared; the assert is what keeps it true if either input
+// moves.
+const _: () = assert!(MAX_HZB_PASSES == MAX_HZB_LEVELS.div_ceil(HZB_LEVELS_PER_PASS as usize));
+
+/// VG R3 piece 1 step P1-3: the HZB depth-pyramid build SPIR-V as a `u32` word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// See [`HZB_BUILD_SPV`]'s doc for the binding table and the null-control state (step P1-4 mints
+/// the pipeline and its sets; nothing dispatches them until P1-5).
+#[inline]
+pub fn hzb_build_spirv() -> &'static [u32] {
+    HZB_BUILD_SPV.as_words()
+}
 
 /// VG rung R2c0: the byte stride of one `VbBatchDesc` — `vb_batch_cull.comp.hlsl`'s
 /// `VbBatchDescGpu { float3 aabb_min; uint instance_count; float3 aabb_max; uint base_instance; }`

@@ -2884,9 +2884,37 @@ pub struct GBufferScene<'a> {
     /// per-frame carrier could not, because the fast path returns early on `(extent, aa_arm)`
     /// alone.
     ///
-    /// In piece 1 the built pyramid is read by NOTHING: no descriptor binds it, no pass writes
-    /// it, and it never leaves the `UNDEFINED` layout it is created in.
+    /// Step P1-4 bound the pyramid to the `hzb_build` descriptor sets (see
+    /// [`Self::hzb_build_layout`]), so it is no longer bound by nothing — but it is still
+    /// DISPATCHED by nothing: no framegraph declaration, no pass, no barrier (step P1-5), and it
+    /// never leaves the `UNDEFINED` layout it is created in.
     pub hzb: Option<HzbPlan>,
+    /// VG R3 piece 1 step P1-4: the `hzb_build` pass's OWN 8-binding set-0 LAYOUT (SAMPLED
+    /// `gSrcDepth` @0, STORAGE `gFine` @1, STORAGE `gDst0`..`gDst5` @2..@7 — all COMPUTE, all
+    /// `count: 1`), matching `hzb_build.comp.hlsl`'s binding table.
+    ///
+    /// Minted UNCONDITIONALLY by `GpuSceneBundles::boot` (one layout + one pipeline, no arm
+    /// dependency), so this is an unconditional `Some(...)` on every production boot — the
+    /// `Option` exists for the low-level RHI test fixtures that build a [`GBufferScene`] with no
+    /// `GpuSceneBundles` behind it.
+    ///
+    /// ⚠️ **The ARM lives on the TARGETS, not here.** `GBufferTargets` builds the descriptor sets
+    /// inside `HzbTargets`, which exists iff [`Self::hzb`] is `Some` — so the sets are absent
+    /// exactly when the pyramid is, by construction rather than by a second predicate that could
+    /// disagree with it. Rung R2d-2 hit the opposite defect on
+    /// `vb_cull_set` (five unconditional `Some` literals against a resource that was only
+    /// sometimes armed, so the set-build gate and the record gate could diverge — a MISSING
+    /// barrier, not merely a skipped dispatch), and the fix was to make presence and arming ONE
+    /// predicate. This field is wired that way from the start.
+    pub hzb_build_layout: Option<&'a VulkanBindGroupLayout>,
+    /// VG R3 piece 1 step P1-4: the `hzb_build` compute pipeline (`hzb_build.comp.hlsl` /
+    /// [`crate::compute::hzb_build_spirv`]), built against [`Self::hzb_build_layout`] and carrying
+    /// the [`HZB_BUILD_PUSH_BYTES`](crate::compute::HZB_BUILD_PUSH_BYTES) push range. Minted
+    /// unconditionally beside that layout — the two are created together or not at all.
+    ///
+    /// DISPATCHED BY NOTHING at this step: no framegraph declaration, no pass, no barrier binds
+    /// it (step P1-5). Threaded now so the recorder needs no further plumbing then.
+    pub hzb_build_pipeline: Option<&'a ComputePipeline>,
 }
 
 impl GBufferScene<'_> {

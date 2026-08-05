@@ -11,7 +11,7 @@ use boyko_rhi::enums::{BarrierAccess, BarrierStage};
 
 #[cfg(feature = "hwrt")]
 use crate::accel::BoundAccelStruct;
-use crate::compute::LOCAL_SIZE_X;
+use crate::compute::{HZB_LEVELS_PER_PASS, LOCAL_SIZE_X, MAX_HZB_PASSES};
 use crate::device::VulkanContext;
 use crate::ffi::*;
 use crate::memory::BoundBuffer;
@@ -654,8 +654,9 @@ pub struct GBufferTargets {
     /// 0%-gate. Built LAST in [`Self::create`] (it depends on nothing but the extent), so it is
     /// destroyed FIRST here — see that fn's placement comment.
     ///
-    /// Read by NOTHING in piece 1: no descriptor binds it, no pass writes it, and it never
-    /// leaves `UNDEFINED`.
+    /// Step P1-4 added the `hzb_build` descriptor sets to that same bundle, so the pyramid IS now
+    /// bound — and still DISPATCHED BY NOTHING: no framegraph declaration, no pass, no barrier
+    /// (step P1-5), and it never leaves the `UNDEFINED` layout it is created in.
     pub(crate) hzb: Option<HzbTargets>,
     /// VG R3 piece 1 step P1-2 — whether the pyramid was ARMED when these targets were built.
     ///
@@ -1110,16 +1111,17 @@ impl VbClassifyTargets {
     }
 }
 
-/// VG R3 piece 1 (docs/VG-R3-P1-PYRAMID-PLAN.md), step P1-2: the hierarchical-Z depth pyramid —
-/// ONE `R32_SFLOAT` image carrying a real Vulkan mip chain, plus one explicit single-mip
-/// [`VulkanTextureView`] per level.
+/// VG R3 piece 1 (docs/VG-R3-P1-PYRAMID-PLAN.md), steps P1-2 and P1-4: the hierarchical-Z depth
+/// pyramid — ONE `R32_SFLOAT` image carrying a real Vulkan mip chain, one explicit single-mip
+/// [`VulkanTextureView`] per level, and (P1-4) the per-frame-in-flight `hzb_build` descriptor sets
+/// bound against them.
 ///
-/// # Allocated, and read by NOTHING
+/// # Allocated and BOUND, and dispatched by NOTHING
 ///
-/// That is the whole of this step (plan §1). No pipeline, no descriptor set, no framegraph
-/// declaration, no pass, no barrier: the image is created `UNDEFINED` and STAYS `UNDEFINED`,
-/// because the transition belongs to the build pass and there is no build pass yet. It costs its
-/// VRAM and changes no rendered pixel.
+/// That is the whole of these two steps (plan §1). No framegraph declaration, no pass, no barrier,
+/// no dispatch: the image is created `UNDEFINED` and STAYS `UNDEFINED`, because the transition
+/// belongs to the build pass and there is no build pass yet (step P1-5). It costs its VRAM plus
+/// `FRAMES_IN_FLIGHT × pass_count` descriptor sets, and changes no rendered pixel.
 ///
 /// # NON-RINGED — one image, not a `[_; FRAMES_IN_FLIGHT]` ring
 ///
@@ -1127,6 +1129,21 @@ impl VbClassifyTargets {
 /// a frame's write from a previous frame's read, and this step has no reader and no writer at all.
 /// The piece that adds the build pass and its consumer is where that hazard first becomes
 /// expressible.
+///
+/// # …but the SETS are per-frame-in-flight, and the SOURCE DEPTH is why
+///
+/// `core.depth` IS a ring of [`FRAMES_IN_FLIGHT`] images (see [`GBufferTargets::depth`]'s own doc:
+/// frame N+1 rasterizes into `depth[1]` while frame N still reads `depth[0]`). Binding @0 must
+/// therefore name a DIFFERENT image per slot, and a descriptor set cannot be rewritten per frame
+/// without the per-frame `vkUpdateDescriptorSets` this whole targets struct exists to avoid. So
+/// [`Self::sets`] is `[[_; MAX_HZB_PASSES]; FRAMES_IN_FLIGHT]`: `sets[slot][p]`.
+///
+/// Only @0 differs between slots — every other binding in every pass is the SAME pyramid view in
+/// all slots, because the pyramid is not ringed. Ringing all `pass_count` passes rather than only
+/// the base one (the only pass that reads `gSrcDepth`) is deliberate: at `FRAMES_IN_FLIGHT == 2` it
+/// costs ONE extra descriptor set per non-base pass — at most two, since `pass_count` is at most
+/// [`MAX_HZB_PASSES`] — and it removes a special case from the recorder, which will index
+/// `sets[frame][pass]` uniformly instead of branching on `p == 0` at every bind site.
 ///
 /// # The usage set, one bit at a time (plan §7)
 ///
@@ -1155,38 +1172,56 @@ pub(crate) struct HzbTargets {
     /// `k` ALONE (`base_mip: k, mip_count: 1`) — the shape no texture-owned view can produce, and
     /// the shape a storage-image descriptor requires. The tail slots are `None` padding, NOT
     /// levels: [`MAX_HZB_LEVELS`] is a capacity, never a span (see its own doc).
+    ///
+    /// Destroyed AFTER [`Self::sets`] (which name these views by raw `VkImageView` handle) and
+    /// BEFORE `pyramid` — the full reverse-acquisition ladder [`Self::destroy`] walks.
     pub(crate) level_views: [Option<VulkanTextureView>; MAX_HZB_LEVELS],
     /// The derived shape this bundle was built from — the level count and the per-level extents
-    /// the host oracle computed. Stored so a later step's dispatch bounds and mip ranges read the
-    /// DERIVED count rather than the capacity constant.
-    ///
-    /// `dead_code`: piece 1 allocates the pyramid and reads it with nothing (the step's whole
-    /// point), so the plan has no consumer until the build passes land — the same "dark infra,
-    /// unwired" allow `VB_GROUP_SENTINEL` carries. It is stored NOW rather than re-threaded later
-    /// because the numbers must come from the allocation that used them, not from a second read of
-    /// a config that may since have flipped.
-    #[allow(dead_code)]
+    /// the host oracle computed. THE source of the set arithmetic below (`pass_count`, and each
+    /// pass's `d`/`n`), so the descriptor sets and the allocation cannot be sized from two
+    /// different level counts; the later dispatch bounds and mip ranges read it for the same
+    /// reason. Read from the FIELD rather than from `build`'s local so there is one number, held
+    /// where the pyramid it describes is held.
     pub(crate) plan: HzbPlan,
+    /// VG R3 piece 1 step P1-4: the `hzb_build` descriptor sets — `sets[slot][p]` is pass `p`'s
+    /// set for frame-in-flight `slot`, `Some` iff `p < plan.levels.div_ceil(HZB_LEVELS_PER_PASS)`.
+    ///
+    /// See the struct doc for why the SETS are ringed while the pyramid is not (binding @0 is the
+    /// per-slot source depth), and why every pass is ringed rather than only the base one.
+    ///
+    /// A pass with `n < HZB_LEVELS_PER_PASS` live levels still binds all six destinations: the
+    /// module DECLARES `gDst0..gDst5` unconditionally, so a valid view must sit at each, and the
+    /// tail slots are PADDED with the pass's own first level (`level_views[d]`) — never written,
+    /// because every store in the shader is guarded by `k < pc.level_count`. Same for `gFine` on
+    /// the base pass, where `d - 1` does not exist.
+    pub(crate) sets: [[Option<VulkanBindGroup>; MAX_HZB_PASSES]; FRAMES_IN_FLIGHT],
 }
 
 impl HzbTargets {
-    /// Allocates the pyramid + its per-level views from the plan `scene` carries, or `Ok(None)`
-    /// when the pyramid is disarmed (`scene.hzb == None` — the `HzbMode::Off` 0%-gate).
+    /// Allocates the pyramid + its per-level views + the `hzb_build` descriptor sets from the plan
+    /// `scene` carries, or `Ok(None)` when the pyramid is disarmed (`scene.hzb == None` — the
+    /// `HzbMode::Off` 0%-gate).
     ///
-    /// Reverse-acquisition draining on partial failure: a failed view destroys the views already
-    /// built and then the image, so no partially-built bundle escapes (mirrors
+    /// Reverse-acquisition draining on partial failure, in two stages. A failed VIEW destroys the
+    /// views already built and then the image, by hand — `Self` does not exist yet (mirrors
     /// [`VbClassifyTargets::build`], with THE OWNERSHIP RULE's view-before-image order layered on
-    /// top).
+    /// top). A failed SET tears down through [`Self::destroy`], which walks sets → views → image:
+    /// the struct is assembled BEFORE the sets are built precisely so that one ladder — the same
+    /// one the caller runs — covers the partial case, instead of a hand-written drain that can
+    /// drift out of step with the field list. Either way no partially-built bundle escapes.
     ///
-    /// `extent` is the SOURCE extent the pyramid reduces — used only to check the handed plan
+    /// `depth_ring` is the SOURCE depth the pyramid reduces ([`GBufferTargets::depth`]), bound at
+    /// @0 of slot `i`'s sets. `extent` is that ring's extent — used only to check the handed plan
     /// against the image the rest of `create` is sizing to, never to derive anything.
     fn build(
         ctx: &VulkanContext,
         scene: &GBufferScene<'_>,
+        depth_ring: &[VulkanTexture; FRAMES_IN_FLIGHT],
         extent: VkExtent2D,
     ) -> Result<Option<Self>, SwapchainError> {
         let Some(plan) = scene.hzb else {
-            // The 0%-gate: no image, no views. Byte-identical to a build without this step.
+            // The 0%-gate: no image, no views, no descriptor sets — the SINGLE predicate the
+            // whole pyramid's presence rides on. Byte-identical to a build without this step.
             return Ok(None);
         };
 
@@ -1249,19 +1284,121 @@ impl HzbTargets {
             }
         }
 
-        Ok(Some(Self { pyramid, level_views, plan }))
+        // The bundle is assembled HERE, before its descriptor sets exist, so that a failure while
+        // building them tears down through `Self::destroy` — see this fn's doc.
+        let mut targets = Self {
+            pyramid,
+            level_views,
+            plan,
+            sets: core::array::from_fn(|_| [const { None }; MAX_HZB_PASSES]),
+        };
+
+        // A wiring bug, not a degrade path: `GpuSceneBundles::boot` mints the layout
+        // UNCONDITIONALLY (it carries no arm dependency), so `scene.hzb` being armed while the
+        // layout is absent means a `GBufferScene` was assembled by hand without one. Binding the
+        // pyramid to nothing would leave the build pass permanently unrunnable with no message —
+        // the same treatment `vb_cull_layout`'s own implications get at `vb_cull_set`.
+        let layout = scene
+            .hzb_build_layout
+            .expect("invariant: scene.hzb armed implies scene.hzb_build_layout");
+
+        // THE SET ARITHMETIC. Read from `targets.plan`, not from the local `plan`, so the sets and
+        // the allocation are sized from ONE number (the field's own doc).
+        //
+        // Pass `p` writes levels `d ..= d + n - 1`, where `d = p * HZB_LEVELS_PER_PASS` is its
+        // first output level and `n` its live level count — `HZB_LEVELS_PER_PASS` for every pass
+        // but the last, which takes the remainder. `pass_count <= MAX_HZB_PASSES` holds because
+        // `plan.levels <= MAX_HZB_LEVELS` (debug-asserted above) and `MAX_HZB_PASSES` is that
+        // capacity's own `div_ceil` (`compute.rs`'s const assert).
+        let levels = targets.plan.levels as usize;
+        let per_pass = HZB_LEVELS_PER_PASS as usize;
+        let pass_count = levels.div_ceil(per_pass);
+        debug_assert!(
+            pass_count <= MAX_HZB_PASSES,
+            "invariant: the plan's pass count fits the inline descriptor-set capacity"
+        );
+
+        // Borrowed once, up front: the loop below holds `&mut targets.sets`, and these are the
+        // DISJOINT field it reads from while doing so.
+        let views = &targets.level_views;
+        let mut failure: Option<crate::error::VulkanError> = None;
+        'rings: for (slot, row) in targets.sets.iter_mut().enumerate() {
+            for (p, dst_set) in row.iter_mut().enumerate().take(pass_count) {
+                let d = p * per_pass;
+                let n = (levels - d).min(per_pass);
+
+                // @1 `gFine` is mip `d-1`, which does not exist on the BASE pass. Level 0 is bound
+                // there instead — a valid view, and the shader's `pc.base_level == 0` arm
+                // guarantees the binding is never accessed (`hzb_build.comp.hlsl`'s "WHAT THE HOST
+                // BINDS, INCLUDING WHAT A PASS NEVER READS": the module STATICALLY references both
+                // `gSrcDepth` and `gFine`, so both must carry a valid view on every pass).
+                let fine = views[d.saturating_sub(1)]
+                    .as_ref()
+                    .expect("invariant: every level below plan.levels has a single-mip view");
+
+                // @2..@7 `gDst0..gDst5`. Past this pass's `n` live levels the destination is PADDED
+                // with level `d` — a real view of a real mip, never written, because every store in
+                // the shader is guarded by `k < pc.level_count`.
+                let dst_views: [&VulkanTextureView; HZB_LEVELS_PER_PASS as usize] =
+                    core::array::from_fn(|k| {
+                        views[if k < n { d + k } else { d }]
+                            .as_ref()
+                            .expect("invariant: every level below plan.levels has a single-mip view")
+                    });
+
+                let entries = [
+                    // The ONE binding that differs between ring slots — see the struct doc.
+                    BindGroupEntry::SampledImage {
+                        texture: &depth_ring[slot],
+                        sampler: scene.depth_sampler,
+                    },
+                    BindGroupEntry::StorageImageView { view: fine },
+                    BindGroupEntry::StorageImageView { view: dst_views[0] },
+                    BindGroupEntry::StorageImageView { view: dst_views[1] },
+                    BindGroupEntry::StorageImageView { view: dst_views[2] },
+                    BindGroupEntry::StorageImageView { view: dst_views[3] },
+                    BindGroupEntry::StorageImageView { view: dst_views[4] },
+                    BindGroupEntry::StorageImageView { view: dst_views[5] },
+                ];
+                let desc = BindGroupDesc::<Vulkan> { layout, entries: &entries };
+                match RhiDevice::create_bind_group(ctx, &desc) {
+                    Ok(g) => *dst_set = Some(g),
+                    Err(e) => {
+                        failure = Some(e);
+                        break 'rings;
+                    }
+                }
+            }
+        }
+        if let Some(e) = failure {
+            // SAFETY: every set built before the failure, every view and the image were created on
+            // `ctx` in this fn and are referenced by no submission (the build phase). `destroy`
+            // consumes `targets` by value and tears each down exactly once, in reverse acquisition
+            // order — sets, then views, then the image they view (THE OWNERSHIP RULE). The
+            // unbuilt set slots are `None` and are skipped.
+            unsafe { targets.destroy(ctx) };
+            return Err(SwapchainError::DepthImage(e));
+        }
+
+        Ok(Some(targets))
     }
 
     /// # Safety
-    /// The image and every view were created on `ctx`, the device is idle (the caller's teardown
-    /// waited), and each is destroyed exactly once (by-value).
+    /// The image, every view and every descriptor set were created on `ctx`, the device is idle
+    /// (the caller's teardown waited), and each is destroyed exactly once (by-value).
     unsafe fn destroy(self, ctx: &VulkanContext) {
         // SAFETY: per the contract `ctx` is live + idle and nothing references these objects.
-        // Every view is destroyed BEFORE the image it views — THE OWNERSHIP RULE (`texture.rs`),
-        // `VUID-vkDestroyImage-image-01000`. Both the array and the image are consumed by value,
-        // and `VulkanTextureView`/`VulkanTexture` are neither `Copy` nor `Clone`, so each object
-        // is destroyed exactly once.
+        // REVERSE ACQUISITION: the descriptor sets go first (they retain the views by raw
+        // `VkImageView` handle), then every view BEFORE the image it views — THE OWNERSHIP RULE
+        // (`texture.rs`), `VUID-vkDestroyImage-image-01000`. The arrays and the image are consumed
+        // by value, and `VulkanBindGroup`/`VulkanTextureView`/`VulkanTexture` are neither `Copy`
+        // nor `Clone`, so each object is destroyed exactly once.
         unsafe {
+            for row in self.sets {
+                for group in row.into_iter().flatten() {
+                    RhiDevice::destroy_bind_group(ctx, group);
+                }
+            }
             for view in self.level_views.into_iter().flatten() {
                 RhiDevice::destroy_texture_view(ctx, view);
             }
@@ -7549,8 +7686,10 @@ impl GBufferTargets {
         // `GBufferTargets` so it inherits this struct's verified drain-and-recreate — and names no
         // line, so the choice is made here and argued here:
         //
-        //  * The pyramid depends on NOTHING but the extent: no image, no descriptor set, no
-        //    layout. Nothing in the create body orders it.
+        //  * The pyramid IMAGE depends on nothing but the extent. Its DESCRIPTOR SETS (step P1-4)
+        //    additionally need the depth ring and `scene.hzb_build_layout` — the ring is built at
+        //    the TOP of this fn and the layout is boot-owned, so both are already in hand at this
+        //    line. Nothing in the create body has to move for either.
         //  * Built LAST, the successful create ORDER of every existing bundle is byte-identical —
         //    every allocation above runs in exactly the sequence it did before this step, armed or
         //    not. (Under the default `Off` there is no allocation here at all.)
@@ -7561,7 +7700,12 @@ impl GBufferTargets {
         //    tears down through the struct's OWN `destroy`: the same reverse-acquisition ladder
         //    the caller runs, which cannot drift out of step with the field list.
         //  * Reverse acquisition therefore destroys it FIRST in `Self::destroy`.
-        match HzbTargets::build(ctx, scene, extent) {
+        //
+        // VG R3 piece 1 step P1-4 adds the descriptor sets to that same bundle, which is why the
+        // depth RING is handed over here: binding @0 of slot `i`'s set is `targets.depth[i]`, the
+        // per-frame source the pyramid reduces. Nothing else about the placement changes.
+        let built_hzb = HzbTargets::build(ctx, scene, &targets.depth, extent);
+        match built_hzb {
             Ok(h) => targets.hzb = h,
             Err(e) => {
                 // SAFETY: every resource in `targets` was created on `ctx` in this fn and is

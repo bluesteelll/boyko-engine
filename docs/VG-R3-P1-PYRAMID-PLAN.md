@@ -54,9 +54,17 @@ Why it is exact rather than approximate, in the two cases the review demanded:
 - **A clamped-to-1 axis** bottoms out: at `S=3, P=2`, `E_y(1) = 1`, tap 1 is dropped — exactly the
   oracle's `if sy >= fine_h { continue; }`.
 
-Round 2's defect (`first(5) = 9` against a 7-pixel source — an out-of-bounds Load with
-`robustBufferAccess` OFF) is now **unspellable**, because the extent test precedes the address
-computation.
+Round 2's defect (`first(5) = 9` against a 7-pixel source) is now **unspellable**, because the
+extent test precedes the address computation.
+
+⚠️ **That defect was an ORACLE-AGREEMENT bug, not a memory-safety one, and this section used to say
+otherwise.** It cited `robustBufferAccess` being off. That feature governs BUFFERS; Vulkan bounds
+IMAGE accesses unconditionally, with no feature required — an out-of-range fetch returns undefined
+values and an out-of-range write is discarded, and neither can fault. So the rule is not a guard
+against a robustness bit somebody might later flip on: without it the fold takes UNDEFINED DATA
+where the oracle's `continue` contributes `+INFINITY`, and under reverse-Z an undefined zero is the
+far plane, so the pyramid comes out conservatively too small — invisible in every golden. The old
+wording invited exactly the inference that deletes the property.
 
 ## 4. ⚠️ The one blocker from round 3, and its resolution
 
@@ -91,10 +99,20 @@ on drift rather than a test that has to be run.
 
 - **G3 — the shader equals the oracle, with no engine involved.** It creates its own depth image,
   pattern, views, pipelines and readback, and compares `to_bits()` at every texel of every level at
-  **7×3, 8×16, 1×1, 511×1023 and 1920×1080**. Bit-exact is legitimate here because the only float
-  operation in the whole build is `min` — exact selection, no rounding, no ULP question. Every
-  golden pin in the tree is 512×512, a power of two, where a clamp or base-map bug cannot fire;
-  four of these five extents fire it.
+  **7×3, 8×16, 1×1, 511×1023, 1920×1080, 1024×64 and 4096×4096**. Bit-exact is legitimate here
+  because the only float operation in the whole build is `min` — exact selection, no rounding, no
+  ULP question. Every golden pin in the tree is 512×512, a power of two, where a clamp or base-map
+  bug cannot fire; four of these extents fire it.
+
+  ⚠️ **The last two were added by the P1-3 review, and they close a gap that made §2's own
+  justification untested.** The first five all produce at most TWO passes — three passes need
+  `levels ≥ 13`, i.e. `max(W, H) ≥ 4096`. So the reason §2 chose a 32-texel tile over a 64-texel one
+  ("the deepest structural case runs on any conformant device, rather than shipping untested") was
+  not exercised by the gate it was made for. `4096×4096` reaches the third dispatch AND gives it a
+  `level_count == 1` final pass, in which `gDst1..gDst5` are bound to views the pass must not write.
+  `1024×64` is the other absent shape: an axis bottoming out EXACTLY at a pass boundary
+  (`E(6) = [16, 1]` reading `fine = [32, 2]`). The reviewer could not break the shader on either by
+  hand — but "checked by hand" is not this campaign's standard, which is the whole point.
 - **G8 — the pyramid the ENGINE built.** G3 cannot see a wrong source, a wrong extent, a stale
   descriptor, a missing barrier or a pass that never ran, *because* it builds its own everything.
   So `BOYKO_HZB_DUMP` copies the engine's own depth and every mip of the engine's own pyramid, and
@@ -147,9 +165,188 @@ have had to answer at its own cost.
 - **⚠️ Carried forward to piece 3:** `SAMPLED_IMAGE_FILTER_LINEAR` is **not** mandatory for
   `R32_SFLOAT` (only `SAMPLED_IMAGE` and `STORAGE_IMAGE` are). Whatever reads the pyramid must
   do so point-sampled — `.Load`, never a linear-filtered sample — or probe first.
+- **⚠️ The pyramid is NON-RINGED while the depth it reduces IS ringed** (`targets.rs:769-771` —
+  one `D32_SFLOAT` image per `FRAMES_IN_FLIGHT`). Two consequences, both carried forward. The
+  BASE pass's descriptor set must be a `[VulkanBindGroup; FRAMES_IN_FLIGHT]` binding
+  `core.depth[slot]`, exactly `viewt_from_depth_set`'s shape (`targets.rs:2958-2984`); the reduce
+  passes' sets touch only pyramid mips and need no ring. And **piece 3 inherits a cross-frame WAR
+  question that piece 1 cannot answer**: a single-buffered image written every frame is safe only
+  while nothing reads it, which is exactly piece 1's situation and exactly not piece 3's. The
+  engine has recorded this failure shape before ("wrong only in motion, stable when stopped").
 - **⚠️ `sync_gbuffer` short-circuits on `(extent, aa_arm)` alone** (`targets.rs:7393-7399`), and
   `TargetsProfile` is a parameter, never a stored field (`:7381-7384`). So an arm bit that only
   rides on `GBufferScene` cannot survive a runtime flip at fixed extent. Either the HZB arm
   becomes a STORED field joining that predicate — the shape `aa_arm` already argues for at
   `:473-476` — or arming is boot-only *by construction* and says so. Piece 1 defaults `Off` and
   is read by nothing, so this is a design choice to make deliberately, not a latent bug.
+
+## 8. Step P1-3 as built — the shader, and what its artifact gate can actually see
+
+**One shader, one entry point, no `-D` variant** (`shaders/hzb_build.comp.hlsl`, `LocalSize 16 16 1`).
+The base/reduce fork is a uniform branch on `pc.base_level == 0` rather than two artifacts: §2's
+argument that the two variants have the SAME SHAPE in the first-output-level index space is
+precisely the argument for sharing the body, and the tile/LDS/barrier code — the part that is hard —
+then exists exactly once. No `docs/SHADER-VARIANT-MANIFEST.md` row, since that manifest registers
+`-D` variants only.
+
+**Hand-authored, not eDSL, and that is the rule rather than an exception to it.** The eDSL owns
+numeric LEAVES — one generic Rust body instantiated over `f32` (the host oracle) and `Emit` (the
+HLSL printer), so that nontrivial float math is bit-exact across the boundary. This shader's entire
+float content is `min`. There is no leaf. What the shader *is* — the tiling, the LDS regions, the
+barriers, the per-mip UAV addressing — is the category every generated shader in the tree
+hand-authors AROUND its sentinels, and `bin/emit_probe_gi.rs:16-19` names it as such.
+
+**The LDS layout is four DISJOINT regions, not one reused array**: 256 + 64 + 16 + 4 = 340 floats
+(1360 B) for levels `d+1 .. d+4`; level `d+5` is one texel and needs none. §2's "1 KiB" counted only
+the first region. Disjointness is what buys ONE barrier per step and hence §2's four: a single
+reused 16×16 array races (thread (0,0) reads index 1 while thread (1,0) writes it), and the
+read-barrier-write repair would double the count to eight.
+
+**Every per-level extent is PUSHED — the shader derives none.** §4 put `prev_pow2`/`msb`/
+`max(1, base >> k)` in `boyko_render::hzb` and only there; `HzbPlan::level_extent` already holds
+every value, so the 72-byte push carries them and the shader re-derives nothing. This also means a
+base-map disagreement can only ever be a SHADER bug, never a math one.
+
+**One correctness detail §2 did not reach.** `first(t) = (t*S + P - 1)/P` is computed in `uint`, and
+at `t == P` with `P == S == MAX_HZB_EXTENT == 65536` the product `P*S` is exactly `2^32` and WRAPS,
+returning `0` where the answer is `S`. For `t <= P-1` there is no overflow (`t*S + P - 1 <= P*S - 1`,
+using `P <= S`), so the `t == P` case is both necessary and sufficient, and it is reached on every
+base pass — it is the exclusive END of the last live texel's preimage.
+
+### What the gate proves, and the two corruptions that proved it proves anything
+
+`tests/hzb_build_spv_sync.rs` — byte identity plus a module census. At this step **no image in the
+repository can move if the shader is wrong**, because nothing builds the pyramid yet; that is why
+the gate is structural rather than deferred to P1-7.
+
+The strongest pin is `OpExtInst == 0` **and** `OpExtInstImport == 0`: HLSL's `min()` lowers to
+`GLSL.std.450 NMin`, under which **a NaN operand is silently discarded rather than propagated**
+(this engine has a recorded incident on exactly that). `hzb_build.comp.hlsl` therefore calls no
+intrinsic at all — its reduce is `isnan` plus a compare-and-select — so a module that reaches no
+extended instruction set is the artifact-level proof that no `NMin` is hiding in it.
+
+Both directions were EXECUTED, not asserted in prose:
+
+| corruption | observed |
+|---|---|
+| one `hzb_min` → `min()` | 1 import + **4** `OpExtInst` (the helper inlines at four sites); the NaN pin red |
+| barrier 3 of 4 deleted | `op_control_barrier` 4 → 3; the barrier pin red |
+| both restored | committed `.spv` byte-equals the re-DXC |
+
+⚠️ **The byte gate stayed GREEN under both corruptions** — correctly, since the `.spv` was recompiled
+and honestly matches the corrupted `.hlsl`. That is the whole reason the census is a separate test:
+byte identity certifies provenance and says nothing whatever about content.
+
+Ordering inside the census test is deliberate and was itself measured: with the whole-struct compare
+first, the dropped barrier reported as a sixteen-field `SpvCensus` diff in which the one changed
+field sat among fifteen identical ones, and the named message explaining what a missing barrier DOES
+never ran. Every named property therefore fires ahead of the struct compare, which stays behind them
+as the catch-all.
+
+`op_ford_less_than == 17` is measured **and derived**, so it can be reasoned about when it moves:
+1 (`hzb_base_texel`, dynamic bounds → rolled) + 1 (`hzb_fine_texel`, kept rolled) + 3 (the per-thread
+`q[0..4]` fold) + 12 (`hzb_fold_lds` inlined at four sites, 3 apiece). The census corroborates the
+rolled `main` loop independently: `op_image_fetch == 1` and `op_image_read == 1` rather than 4 each.
+
+`OpCapability` is pinned to exactly `["Shader"]`, and what that proves is what is ABSENT: no
+`StorageImageWriteWithoutFormat` (every RW view carries `[[vk::image_format("r32f")]]`), no
+`StorageImageArrayDynamicIndexing` (six separate bindings rather than an array DXC might decline to
+unroll), no `Int64` (the overflow argument is carried in 32-bit arithmetic by the `t == P` case).
+Each absence is a device feature this pass does not require and would otherwise have discovered on
+someone else's hardware.
+
+### What the P1-3 review changed, and the one claim it got wrong
+
+The review found **no oracle disagreement** — it walked the shader against `build_pyramid` on eight
+extents, three of which the gate list did not contain (`1024×64`, `8192×8`, `4096×4096`), and
+verified the LDS bounds at all four fold sites, the barrier uniformity, and the `+INFINITY`
+propagation lemma in both directions. What it found instead was worth more than a math bug:
+
+- **⚠️ A VACUOUS ASSERTION, in the file whose subject is vacuous gates.**
+  `assert_eq!(local_size[0] * 2, HZB_BUILD_TILE)` could not fail: the assertion above it already
+  established `local_size[0] == HZB_BUILD_LOCAL_SIZE`, and `const _: () = assert!(HZB_BUILD_TILE ==
+  HZB_BUILD_LOCAL_SIZE * 2)` makes both sides the same expression at compile time. It read nothing
+  from the module. **`TILE = 64u` against an unchanged `[numthreads(16,16,1)]` passed BOTH gates**
+  — every opcode count, the LocalSize, the bindings, the push offsets, the capabilities and the LDS
+  length are untouched by it — while half of every level goes unwritten and keeps the boot clear.
+  The tile is now tied through the constants its `TILE >> k` multipliers declare, in both
+  directions (`%uint_TILE` present, `%uint_(2*TILE)` absent), and that corruption was EXECUTED and
+  turns the gate red.
+- **⚠️ `robustBufferAccess` was the wrong threat model** for the boundary rule, here and in §3 above.
+  It governs BUFFERS; Vulkan bounds image accesses unconditionally, with no feature required. The
+  guard is mandatory for **ORACLE AGREEMENT**, not memory safety: without it the fold takes
+  undefined data where the oracle contributes `+INFINITY`, and under reverse-Z an undefined zero is
+  the far plane. The inference the old wording invited — "robustness handles it, the guard is
+  belt-and-braces" — deletes the property the step rests on.
+- **⚠️ The module requests no `SignedZeroInfNanPreserve`.** The capability pin reads every absence
+  as a benefit; this one is not. `HZB_IDENTITY` is `+INFINITY` on every partial tile, `isnan` IS the
+  NaN policy (and may fold to `false` where no-NaN is assumed — the `OpExtInst == 0` outcome reached
+  from the other side), and "no ULP question" is true of the selection, not of the comparison under
+  denorm-flush. Risk is low and the failure direction conservative, but the step's thesis is that
+  bit-exactness is DECIDABLE, so the assumption is stated rather than discovered on other hardware.
+- Three fixture and citation defects: `lds_words` read the LAST Workgroup variable rather than the
+  sum (a second `groupshared` array — the natural way to extend the chain — would have left `340`
+  green while shared memory grew); `op_image_fetch`/`op_image_read` were cited as INDEPENDENT
+  corroboration of the rolled loop when they share its full-inlining premise (`op_image_write` is
+  the count that does not); and binding 0's `.Load` justification cited `R32_SFLOAT`'s filter
+  feature, which is about the PYRAMID, not the `D32_SFLOAT` depth this binding names.
+- `op_image_write` and the binding-set length are now DERIVED from `HZB_LEVELS_PER_PASS` rather than
+  spelled `6` and `[0..=7]` — two literals beside a host constant agree today; they are not a tie.
+
+**The one finding that was wrong, and it is instructive.** The review read `[unroll]` on the
+level-`d` loop as decoration, reasoning that `op_image_write == 6` rather than 9 proves DXC did not
+unroll. That inference is sound and the conclusion is not. Removing the attribute was MEASURED to
+change the module by exactly one token — `OpLoopMerge %90 %88 Unroll` becomes `... None`, nothing
+else in 15856 bytes moves. The attribute does not unroll the loop in DXC; it RECORDS the request in
+the SPIR-V for the DRIVER's backend, which is where the unroll happens and where `q[4]`'s dynamic
+indexing gets promoted out of function-scope memory — precisely the concern the same finding raised
+two sentences earlier. The hint's survival is now its own census field. Deleting a working
+optimisation directive on a plausible inference is the exact failure this campaign records as
+"verification is an ACTION": the claim was checkable in one recompile, and one recompile refuted it.
+
+## 9. Step P1-4 as built — the pipeline and its sets, dispatched by nothing
+
+One `VkDescriptorSetLayout` (8 bindings: `SampledImage` @0, `StorageImage` @1..@7) and one
+`VkPipeline`, both minted UNCONDITIONALLY in `GpuSceneBundles::boot` beside the cull's. The arm
+lives on the TARGETS — `HzbTargets` is `None` when `HzbConfig` is `Off`, so the SETS are absent
+exactly when the pyramid is, and there is no second predicate that could disagree with them. (Rung
+R2d-2 hit the mirror-image defect on `vb_cull_set`: five unconditional `Some` literals against an
+armed resource.)
+
+`HzbTargets::sets` is `[[Option<VulkanBindGroup>; MAX_HZB_PASSES]; FRAMES_IN_FLIGHT]`, `Some` iff
+`p < levels.div_ceil(6)`. Per pass `p`: `d = 6p`, `n = min(6, levels - d)`; `@0` binds
+`depth[slot]`, `@1` binds `level_views[d-1]` (or `level_views[0]` on the base pass — never read,
+the `pc.base_level == 0` branch guarantees it), and `@2+k` binds `level_views[d+k]` for `k < n`,
+PADDING with `level_views[d]` beyond that — a real view of a real mip that no store reaches, because
+every store is guarded by `k < pc.level_count`.
+
+**The sets are per-FIF because the DEPTH is ringed and the pyramid is not.** Only `@0` differs
+between slots. Ringing all passes rather than only the base one costs `FRAMES_IN_FLIGHT × pass_count`
+sets — four at every real extent — and removes a special case from the recorder P1-5 will write.
+
+### Gates, and the control that makes them mean something
+
+All **25 golden pins byte-identical**. The validation leg shows **19 messages armed and 19 unarmed,
+identical after handle normalisation** — so the pyramid, its four descriptor sets and its pipeline
+contribute ZERO. That leg is the load-bearing one here exactly as it was at P1-2: this is the
+engine's first storage image with a mip chain and now also its first per-mip storage-image
+descriptor, and an illegal view that no pass binds changes no pixel.
+
+Byte-identity still does not prove the armed path RAN, so the two-sided control was executed again.
+A panic in the set-build loop reported **`sets built = 4, pass_count = 2, levels = 10`** on the armed
+pin — the exact predicted arithmetic for 512×512 (`msb(512) + 1 = 10` levels, `⌈10/6⌉ = 2` passes,
+× 2 frames in flight) — while the unarmed pin stayed green with the same panic compiled in.
+
+⚠️ **A harness fact worth recording: `golden.ps1` reports a red pin WITHOUT the panic text.** It does
+not pass `--nocapture`, so the first run of this control showed only "RED" and no message, which is
+"red without proof" — the mirror of the byte-identical-without-execution trap. The message had to be
+recovered by invoking the test binary directly (with `--ignored`, since the GPU dumps are
+`#[ignore]`d). A gate one cannot read the failure of is a gate one has to re-run differently to
+believe.
+
+⚠️ **Carried forward to P1-5, found by the implementer rather than the spec.** `@0` binds
+`GBufferTargets::depth` — the CORE ring, which is what `viewt_from_depth_set` calls `core.depth`.
+Under `TargetsProfile::ForwardMesh` the Forward path rasterises into its OWN reverse-Z ring
+(`ForwardTargets::depth`), so on a Forward boot `@0` would name a depth that frame never wrote.
+Inert today (nothing dispatches), and correct under VB, where `VbTargets` carries no depth of its
+own. **P1-5 must resolve which ring the base pass reads before it declares a pass, not after.**

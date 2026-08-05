@@ -77,9 +77,15 @@ use boyko_macros::Resource;
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum HzbMode {
-    /// No pyramid — the 0%-gate: no image, no per-mip views, no pipelines, no descriptor
-    /// sets, no build passes, zero barriers. The DEFAULT, so a world that never inserts a
-    /// non-default [`HzbConfig`] is byte-identical to today.
+    /// No pyramid — the 0%-gate: no image, no per-mip views, no descriptor sets, no build
+    /// passes, zero barriers, and not one recorded command. The DEFAULT, so a world that never
+    /// inserts a non-default [`HzbConfig`] is byte-identical to today.
+    ///
+    /// The ONE thing this arm does not suppress (VG R3 piece 1 step P1-4) is the `hzb_build`
+    /// bind-group LAYOUT and PIPELINE: the backend mints those unconditionally at boot, so that
+    /// the pyramid's arming is a SINGLE predicate living on the targets (`HzbTargets` exists iff
+    /// the plan does) rather than a second one here that could disagree with it. A boot-time
+    /// `VkDescriptorSetLayout` + `VkPipeline` dispatched by nothing changes no rendered pixel.
     #[default]
     Off,
     /// Build the pyramid every frame from the depth attachment (`R32_SFLOAT`, a real Vulkan

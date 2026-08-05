@@ -45,7 +45,8 @@ use boyko_rhi_vulkan::compute::{
     fullscreen_sample_vs_spirv, fxaa_fs_spirv,
     gbuffer_mrt_fs_spirv,
     gbuffer_mrt_pm_fs_spirv, gbuffer_mrt_pm_vs_spirv, gbuffer_mrt_tex_fs_spirv,
-    gbuffer_mrt_tex_vs_spirv, gbuffer_mrt_vs_spirv, interp_instances_spirv, punctual_depth_fs_spirv,
+    gbuffer_mrt_tex_vs_spirv, gbuffer_mrt_vs_spirv, HZB_BUILD_PUSH_BYTES, hzb_build_spirv,
+    interp_instances_spirv, punctual_depth_fs_spirv,
     punctual_depth_vs_spirv, rcas_spirv, sdf_forward_march_spirv, sdf_forward_march_sdfonly_spirv,
     sdf_forward_march_sdfonly_viewt_spirv, sdf_forward_march_viewt_spirv,
     sdf_gbuffer_composite_spirv, sdf_probe_update_spirv,
@@ -1185,6 +1186,16 @@ pub(crate) struct GpuSceneBundles {
     pub(crate) vb_cull_layout: VulkanBindGroupLayout,
     /// VG rung R2c0: the batch-cull compute pipeline (`vb_batch_cull.comp.hlsl`).
     pub(crate) vb_batch_cull_pipeline: ComputePipeline,
+    /// VG R3 piece 1 step P1-4: the HZB depth-pyramid build pass's own 8-binding set-0 layout
+    /// (SAMPLED `gSrcDepth` @0, STORAGE `gFine` @1, STORAGE `gDst0`..`gDst5` @2..@7). Minted
+    /// UNCONDITIONALLY together with [`Self::hzb_build_pipeline`] — see `boot`'s comment for why
+    /// the arm lives on the TARGETS (`HzbTargets` exists iff the pyramid does) rather than on a
+    /// second predicate here.
+    pub(crate) hzb_build_layout: VulkanBindGroupLayout,
+    /// VG R3 piece 1 step P1-4: the HZB depth-pyramid build compute pipeline
+    /// (`hzb_build.comp.hlsl`), built against [`Self::hzb_build_layout`] with the 72-byte
+    /// `HzbBuildPush` range. DISPATCHED BY NOTHING at this step (step P1-5 declares the pass).
+    pub(crate) hzb_build_pipeline: ComputePipeline,
 
     // ── VB-P1b: the froxel light-cull machinery — built LAZILY by
     // [`Self::build_froxel_light_cull`], gated entirely on `ResolvedRenderPath::froxel_light_cull`
@@ -3921,6 +3932,101 @@ impl GpuSceneBundles {
             RhiDevice::destroy_shader_module(device, vb_batch_cull_cs);
         }
 
+        // VG R3 piece 1 step P1-4: the HZB depth-pyramid BUILD pass's own 1-set layout — eight
+        // bindings @0..@7, exactly `hzb_build.comp.hlsl`'s table: SAMPLED `gSrcDepth` @0, then the
+        // seven STORAGE images (`gFine` @1, `gDst0`..`gDst5` @2..@7). A DEDICATED layout, like
+        // `vb_cull_layout` above and `viewt_from_depth`'s own 2-binding one: a pass compiled from
+        // its own module names its own binding numbers, and no existing layout has this shape.
+        //
+        // ⚠️ MINTED UNCONDITIONALLY, and NOT because it is cheap (though it is one layout plus one
+        // pipeline, on a boot that may never dispatch either). The reason is that the ARM must be
+        // ONE predicate, and that predicate lives on the TARGETS: `HzbTargets` — and therefore
+        // every `hzb_build` descriptor SET — exists iff `GBufferScene::hzb` is `Some`, i.e. iff
+        // `HzbConfig` is not `Off`. The set is absent exactly when the pyramid is, by
+        // construction. Gating the pipeline on a SECOND arm bit here would create a pair that can
+        // disagree; rung R2d-2 hit precisely that defect on `vb_cull_set` (five unconditional
+        // `Some` literals threaded against a resource that was only sometimes armed, so the
+        // set-build gate and the record gate could diverge — a MISSING barrier, not merely a
+        // skipped dispatch), and the fix was to collapse presence and arming into one predicate.
+        //
+        // NOTHING DISPATCHES this pipeline at this step: no framegraph declaration, no pass, no
+        // barrier (that is step P1-5). The recorded command stream is untouched, so every pinned
+        // golden stays byte-identical.
+        let hzb_build_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        count: 1,
+                        kind: DescriptorKind::SampledImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        count: 1,
+                        kind: DescriptorKind::StorageImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        count: 1,
+                        kind: DescriptorKind::StorageImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 3,
+                        count: 1,
+                        kind: DescriptorKind::StorageImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 4,
+                        count: 1,
+                        kind: DescriptorKind::StorageImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 5,
+                        count: 1,
+                        kind: DescriptorKind::StorageImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 6,
+                        count: 1,
+                        kind: DescriptorKind::StorageImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 7,
+                        count: 1,
+                        kind: DescriptorKind::StorageImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                ],
+            },
+        )
+        .expect("invariant: HZB build Set-0 bind-group layout create");
+        let hzb_build_cs = RhiDevice::create_shader_module(device, hzb_build_spirv())
+            .expect("invariant: HZB build compute shader module create");
+        let hzb_build_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &hzb_build_cs,
+                entry: c"main",
+                push_constant_bytes: HZB_BUILD_PUSH_BYTES,
+                bind_group_layout: Some(&hzb_build_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: HZB build compute pipeline create");
+        // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+        // destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, hzb_build_cs);
+        }
+
         let dispatch_group_count_x = (cw * ch).div_ceil(LOCAL_SIZE_X);
         // SSAA (W1): the dispatch grid must cover every composite pixel — see the
         // enumeration comment at the top of this fn. A future edit that keyed this to
@@ -4104,6 +4210,8 @@ impl GpuSceneBundles {
             vb_cull_readback,
             vb_cull_layout,
             vb_batch_cull_pipeline,
+            hzb_build_layout,
+            hzb_build_pipeline,
             // VB-P1a/P1b: built LAZILY by `Self::build_froxel_light_cull`, gated on the arm bit
             // `ResolvedRenderPath::froxel_light_cull` (VB path AND `LightingConfig::
             // clusters_enabled`, default OFF — an owner opt-in) — see that fn's doc.
@@ -6371,6 +6479,13 @@ impl GpuSceneBundles {
             // single `HzbLayout` call (see this fn's `hzb` param doc). `None` on the default
             // `HzbMode::Off` — no image, no views, no passes.
             hzb,
+            // VG R3 piece 1 step P1-4: unconditional `Some(...)` — `boot` mints both without an
+            // arm dependency (see its comment). The ARMING is `hzb` directly above: `HzbTargets`,
+            // and with it every `hzb_build` descriptor set, exists iff that is `Some`. So these
+            // two being always-present cannot disagree with the pyramid's presence — there is only
+            // one predicate to disagree with.
+            hzb_build_layout: Some(&self.hzb_build_layout),
+            hzb_build_pipeline: Some(&self.hzb_build_pipeline),
         }
     }
 
@@ -6885,6 +7000,11 @@ impl GpuSceneBundles {
             // rung R2d-2's `vb_visible_instance`). Each is created in `boot`, stored only in this
             // struct, and handed out solely as a borrow to `Self::scene`, so there is exactly one
             // owner and no other destroy site.
+            // VG R3 piece 1 step P1-4: the HZB build pipeline + layout, acquired in `boot`
+            // immediately AFTER the batch cull's pair, so freed immediately BEFORE them — reverse
+            // acquisition, the discipline this block's header records the cost of breaking.
+            RhiDevice::destroy_compute_pipeline(ctx, self.hzb_build_pipeline);
+            RhiDevice::destroy_bind_group_layout(ctx, self.hzb_build_layout);
             RhiDevice::destroy_compute_pipeline(ctx, self.vb_batch_cull_pipeline);
             RhiDevice::destroy_bind_group_layout(ctx, self.vb_cull_layout);
             if let Some(rb) = self.vb_cull_readback {

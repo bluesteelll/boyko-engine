@@ -2580,6 +2580,12 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // honest value here (this harness has no `HzbConfig` and no `boyko_render` to derive a
         // plan with). `None` ⇒ no image, no per-mip views, no build passes ⇒ byte-identical.
         hzb: None,
+        // VG R3 piece 1 step P1-4: no `hzb_build` pipeline or layout either. This harness mints
+        // its own pipelines rather than booting `GpuSceneBundles` (which is what mints those two
+        // unconditionally in production), and with `hzb: None` above no descriptor set would be
+        // built against them anyway — the arm is ONE predicate, and it is `hzb`.
+        hzb_build_layout: None,
+        hzb_build_pipeline: None,
     };
 
     // The composite's native size — drives the G-buffer alloc + the 1:1 top-left present.
@@ -3653,6 +3659,12 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         // honest value here (this harness has no `HzbConfig` and no `boyko_render` to derive a
         // plan with). `None` ⇒ no image, no per-mip views, no build passes ⇒ byte-identical.
         hzb: None,
+        // VG R3 piece 1 step P1-4: no `hzb_build` pipeline or layout either. This harness mints
+        // its own pipelines rather than booting `GpuSceneBundles` (which is what mints those two
+        // unconditionally in production), and with `hzb: None` above no descriptor set would be
+        // built against them anyway — the arm is ONE predicate, and it is `hzb`.
+        hzb_build_layout: None,
+        hzb_build_pipeline: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -8664,6 +8676,12 @@ fn run_showcase_body_ddgi(
         // honest value here (this harness has no `HzbConfig` and no `boyko_render` to derive a
         // plan with). `None` ⇒ no image, no per-mip views, no build passes ⇒ byte-identical.
         hzb: None,
+        // VG R3 piece 1 step P1-4: no `hzb_build` pipeline or layout either. This harness mints
+        // its own pipelines rather than booting `GpuSceneBundles` (which is what mints those two
+        // unconditionally in production), and with `hzb: None` above no descriptor set would be
+        // built against them anyway — the arm is ONE predicate, and it is `hzb`.
+        hzb_build_layout: None,
+        hzb_build_pipeline: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -10214,6 +10232,10 @@ fn run_showcase_body(
         // VG R3 piece 1 step P1-2: no depth pyramid — the `HzbMode::Off` 0%-gate (see the sibling
         // fixtures). `None` ⇒ no image, no per-mip views, no build passes ⇒ byte-identical.
         hzb: None,
+        // VG R3 piece 1 step P1-4: and therefore no `hzb_build` layout/pipeline — see the sibling
+        // fixtures. The arm is ONE predicate, and it is `hzb`.
+        hzb_build_layout: None,
+        hzb_build_pipeline: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
