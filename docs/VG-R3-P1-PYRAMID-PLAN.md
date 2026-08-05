@@ -366,3 +366,60 @@ Worth recording HOW it was caught, because the report contained the correct fact
 conclusion. The profile enum's own doc says `VbMesh` builds `ForwardTargets` "REUSED for the depth
 ring", but it says it in prose about a BUNDLE, and the implementer read it as a bundle-level remark.
 What settled it was reading the attachment the VB raster actually binds — a grep, not an inference.
+
+## 10. Step P1-7 as built — gate G3, and the one place the GPU does not agree
+
+`crates/boyko_app/tests/hzb_build_oracle_gate.rs`. It lives in `boyko_app` because that is one of
+only two crates naming both `boyko_render` (the oracle) and `boyko_rhi_vulkan` (the shader) — §4's
+Cargo resolution, arriving where it was always going to.
+
+It builds its own everything: a `D32_SFLOAT` source uploaded with the DEPTH aspect, an
+`R32_SFLOAT` pyramid with a real mip chain, one single-mip view per level, its own 8-binding
+layout, its own pipeline from `hzb_build_spirv()`, one descriptor set per pass with the same
+padding rule `HzbTargets` uses — and **hand-written barriers**, which is what let it land before the
+framegraph work (§8's blocker) does.
+
+### The result
+
+**Seven extents, BIT-EXACT.** `7×3`, `8×16`, `1×1`, `511×1023`, `1920×1080`, `1024×64` and
+`4096×4096` — 22 369 621 texels on the last, thirteen levels, **three dispatches**, every texel's
+`to_bits()` equal to `boyko_render::hzb::build_pyramid`. The two extents the P1-3 review added are
+the ones that exercise §2's own justification for a 32-texel tile; both pass.
+
+Non-vacuity is asserted, not hoped: the pyramid is poisoned to `-1.0` through a buffer copy before
+every dispatch and no texel may retain it; three depth probes confirm the upload; and `levels`,
+`pass_count` and the per-pass `[d, n, groups_x, groups_y]` are checked against a hand-computed
+table before a byte is allocated. The gate was then shown RED: replacing the base map's `⌈t·S/P⌉`
+with a floor broke `7×3` at 5 of 8 level-0 texels.
+
+### ⚠️ The signed-zero divergence, and why it is not a shader defect
+
+The P1-3 review called the tree-vs-left-fold association "the single most fragile equivalence in
+the step" and reasoned that both compute *the earliest minimal element in program order*. **That
+reasoning is correct about the SOURCE and wrong about what runs.**
+
+Measured, deterministic over three runs on an RTX 3060 Laptop: of two 2×2 footprints planted with
+`+0.0` and `-0.0` in OPPOSITE operand orders, the one whose source semantics say `+0.0` comes back
+`-0.0`; the one that should be `-0.0` agrees. That asymmetry is the whole diagnosis — **the driver
+recognised `b < a ? b : a` and fused it into a hardware min**, whose `±0` tie-break returns the
+negative zero regardless of operand order. It is allowed to: the two values compare EQUAL, so no
+`<` in the program can distinguish the semantics, and the module requests no
+`SignedZeroInfNanPreserve`. This is the first hard evidence for the P1-3 review's W3, which until
+now was a stated assumption.
+
+**Consequence for what a `.spv` census can claim.** `OpExtInst == 0` proves DXC emitted no `NMin`.
+It cannot prove the DRIVER did not build one afterwards. That is a permanent limit on
+artifact-level pins and it is now recorded in the shader header beside the pin it qualifies.
+
+**The half with teeth was measured separately and SURVIVED.** `hzb_build_nan_collapses_to_negative_infinity`
+plants a quiet NaN and requires `-INFINITY` at every level: bit-exact. The explicit `isnan` branch
+was not fused away — had it been, the fold would have returned the OTHER operand, which is exactly
+the `NMin` behaviour the shader is written to avoid, reached from outside the compiler it can pin.
+
+**Accepted, not fixed.** `+0.0` and `-0.0` are numerically equal; the pyramid is a conservative
+lower bound whose only consumer is `depth_near < occ`; a real reverse-Z rasteriser never produces
+zero depth. Requesting the execution mode would cost a device feature, a new capability in the
+census and a hardware constraint, to fix a difference that cannot reach a pixel. The gate therefore
+asserts the NARROWED claim: **every** divergence in the chain is a ±0 tie, and there are EXACTLY
+three — a count that is measured AND derived (level 1 `(1,1)`, then levels 2 and 3 inherit it),
+so a change in it can be reasoned about rather than merely re-pinned.

@@ -149,12 +149,31 @@
 //     `<` on denormal operands, and reverse-Z puts distant geometry at exactly the near-zero depths
 //     where denormals live.
 //
-// The practical risk is low — every desktop driver reports `shaderSignedZeroInfNanPreserveFloat32`
-// — and the failure direction is conservative (a flushed `+INF` folds toward SMALLER, which cannot
-// delete geometry). But the step's thesis is that a bit-exact comparison is DECIDABLE, and this is
-// the assumption that thesis rests on. It is stated here rather than discovered as a red G3 on
-// somebody else's hardware. Requesting the execution mode would mean enabling a device feature at
-// context creation, which is a change with its own justification and is not piece 1's.
+// ⚠️ **MEASURED, and the first half of it is REAL on this hardware.** Gate G3
+// (`boyko_app/tests/hzb_build_oracle_gate.rs`) planted `+0.0` and `-0.0` in two 2×2 footprints with
+// the operands in opposite orders. Deterministic on an RTX 3060 Laptop, three runs: the footprint
+// whose source semantics say `+0.0` comes back `-0.0`; the one that should be `-0.0` agrees. That
+// asymmetry is the diagnosis — **the DRIVER recognised `b < a ? b : a` and fused it into a hardware
+// min**, whose `±0` tie-break returns the negative zero regardless of operand order. It is allowed
+// to: the two values compare EQUAL, so no `<` anywhere in the program can tell the semantics apart,
+// and this module asks for no preservation.
+//
+// So `OpExtInst == 0` proves DXC emitted no `NMin`; it cannot prove the driver did not build one
+// afterwards. That is a real limit on what any artifact-level census can claim, and it is why the
+// NaN half is measured rather than inferred from the same pin.
+//
+// **The NaN half SURVIVED, and that is the half with teeth.** `hzb_build_nan_collapses_to_negative_infinity`
+// plants a quiet NaN at one source pixel and requires `-INFINITY` at every level of the chain: bit-exact,
+// so the explicit `isnan` branch was NOT fused away. Had it been, the fold would have returned the
+// OTHER operand — the exact `NMin` behaviour this file is written to avoid, arrived at from outside
+// the compiler this file can pin.
+//
+// The signed-zero difference is ACCEPTED rather than fixed: the two values are numerically equal,
+// the pyramid is a conservative lower bound whose only consumer is `depth_near < occ`, and a real
+// reverse-Z rasteriser never produces zero depth at all. Requesting the execution mode would mean a
+// device feature, a new capability in the census, and a hardware constraint, to fix a difference
+// that cannot reach a pixel. G3 pins the divergence to EXACTLY three texels of a known fixture, so
+// it stays characterised rather than tolerated.
 //
 // # INVARIANT HZB-BARRIER-UNIFORM — all four barriers sit in uniform control flow
 //
