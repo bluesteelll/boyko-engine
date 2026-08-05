@@ -1433,6 +1433,26 @@ pub const HZB_DUMP_HEADER_BYTES: u64 = (HZB_DUMP_HEADER_WORDS * 4) as u64;
 /// `f32`, which is what lets the depth and the pyramid share one stride.
 pub const HZB_DUMP_SAMPLE_BYTES: u64 = 4;
 
+/// VG R3 piece 1 step P1-8 (plan §5/§13, gate G8) — the value every mip of the pyramid IMAGE is
+/// cleared to on a `BOYKO_HZB_DUMP` frame, before the first build dispatch.
+///
+/// ⚠️ **This is the IMAGE poison, not the staging one.** The staging prefill (`0xFFFFFFFF`,
+/// `boyko_app::hzb_dump`) catches a failed COPY; it cannot see a level the BUILD never wrote,
+/// because a copy of an unwritten level succeeds and returns whatever the image holds.
+///
+/// `-1.0` is unreachable by the reduce and therefore says "nobody wrote this texel", at ANY scene
+/// coverage: the build is a `min` over reverse-Z depths in `[0, 1]` (a real attachment cannot hold
+/// a NaN — the rasteriser clamps to `[minDepth, maxDepth]`), so every written texel is in `[0, 1]`.
+/// The two plausible alternatives are both wrong here. `0.0` is the reverse-Z FAR PLANE and the
+/// boot clear — the very value step P1-6 measured across 89.3% of the pyramid, which is why an
+/// unwritten level agreed with the oracle at every texel. `+INFINITY` is the boundary rule's own
+/// `min` identity, so it cannot distinguish "unwritten" from "written by a lane that folded no
+/// live tap".
+///
+/// The value is spelled ONCE, here, because the recorder writes it and the G8 host half asserts its
+/// absence — two literals would agree today and would not be a tie.
+pub const HZB_PYRAMID_POISON: f32 = -1.0;
+
 /// VG R3 piece 1 step P1-6 (plan §5, gate G8) — the byte layout of the `BOYKO_HZB_DUMP` staging
 /// buffer, shared by the RECORDER (which names the copy regions and writes the header) and the
 /// HOST (which sizes the staging and decodes it).

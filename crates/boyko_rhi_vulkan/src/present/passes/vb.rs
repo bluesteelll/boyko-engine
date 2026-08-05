@@ -34,7 +34,7 @@ use super::super::frame_driver::Renderer;
 use super::super::gpu_timing::VbTimedPass;
 use super::super::scene_types::{
     CLUSTER_CULL_HIER_PUSH_BYTES, CLUSTER_CULL_PUSH_BYTES, GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
-    GBufferMeshDraw, GBufferScene, HZB_DUMP_HEADER_BYTES, HzbDumpLayout,
+    GBufferMeshDraw, GBufferScene, HZB_DUMP_HEADER_BYTES, HZB_PYRAMID_POISON, HzbDumpLayout,
     LIGHT_CULL_LOCAL_SIZE_X, MAX_HZB_LEVELS, VB_BATCH_CULL_LOCAL_SIZE_X, VB_BATCH_CULL_PUSH_BYTES,
     VB_BATCH_DESC_STRIDE, VbBatchCullPush, VbBatchDesc,
 };
@@ -1950,6 +1950,71 @@ impl Renderer<'_> {
                     // SAFETY: recording is open; the pool was reset this frame; `fi` is this slot.
                     unsafe { tc.write_end(self.fns, cmd, fi, VbTimedPass::VbShade) };
                 }
+            }
+        }
+
+        // === VG R3 piece 1 step P1-8 (plan §5/§13, gate G8): the pyramid POISON clear. ===
+        //
+        // Recorded HERE — immediately before the first `hzb_build` dispatch below, in EXACTLY
+        // `declare_vb_graph`'s position (the declarator asserts the ordering both ways). Every mip
+        // is filled with a value the reduce cannot produce, so a level the build fails to write
+        // reads `HZB_PYRAMID_POISON` in the dump and G8 reds by name instead of agreeing with the
+        // oracle over a field of far-plane zeros — the vacuity step P1-6 measured (89.3% of the
+        // `vb_mesh` pyramid is `0.0`; levels 6..9, the second build pass's whole output, entirely
+        // so).
+        //
+        // ⚠️ THE GATE IS THE DECLARATOR'S, VERBATIM, with NO extra conjunct. Unlike the dump block
+        // far below — which may skip its copies on a short staging because it is the LAST declared
+        // pass — this pass has readers after it: skipping the recording while the declaration
+        // stands would leave the pyramid's `UNDEFINED → GENERAL` transition unrecorded and hand
+        // `hzb_build_0` a storage image in the wrong layout.
+        //
+        // ⚠️ An UNARMED frame records ZERO commands here — no clear, no barrier — which is what
+        // keeps every golden pin byte-identical.
+        if scene.hzb_dump.is_some() && scene.hzb.is_some() && scene.resolved_render_path.mesh_leg {
+            let hzb = targets
+                .hzb
+                .as_ref()
+                .expect("invariant: scene.hzb armed => targets.hzb (sync_gbuffer's hzb_arm predicate)");
+            let poison_pass = plan
+                .hzb_poison
+                .expect("invariant: the recorder's poison gate is the declarator's, verbatim");
+            // SAFETY: recording is open; `record_vb_pass` records this pass's derived barrier into
+            // `cmd` — the `UNDEFINED → GENERAL` first touch of mips `[0, levels)`, which is what
+            // makes the clear below legal on an image the frame has not otherwise touched yet.
+            self.record_vb_pass(poison_pass, cmd, targets, forward, vb, scene, fi);
+
+            // `R32_SFLOAT` reads only `float32[0]`; the other three components are ignored for a
+            // single-component format and are spelled as the same value rather than left as
+            // arbitrary padding.
+            let poison = VkClearColorValue { float32: [HZB_PYRAMID_POISON; 4] };
+            // ⚠️ `hzb.plan.levels`, NEVER `MAX_HZB_LEVELS`: the capacity is 17 and the image has
+            // `levels` mips (`HzbTargets::build` creates it from this same number), so a
+            // capacity-wide range would name mips that do not exist at every real render extent.
+            let range = VkImageSubresourceRange {
+                aspect_mask: VK_IMAGE_ASPECT_COLOR_BIT,
+                base_mip_level: 0,
+                level_count: hzb.plan.levels,
+                base_array_layer: 0,
+                layer_count: 1,
+            };
+            // SAFETY: recording is open and no render-pass instance is active (the raster's
+            // `cmd_end_rendering` is above). `hzb.pyramid.image` is the live pyramid, created with
+            // `TRANSFER_DST` usage (`HzbTargets::build`'s `pyramid_desc`, which
+            // `VUID-vkCmdClearColorImage-image-00002` requires) and a COLOR `R32_SFLOAT` format
+            // with no depth/stencil aspect. It is in `GENERAL` — one of the two layouts this
+            // command accepts — by the pass's derived first-touch barrier just recorded. The range
+            // names mips `[0, levels)` and layer 0 of a `levels`-mip, single-layer image, so it is
+            // in bounds. `&poison` and `&range` are fully-initialized locals alive for the call.
+            unsafe {
+                (self.fns.cmd_clear_color_image)(
+                    cmd,
+                    hzb.pyramid.image,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    &poison,
+                    1,
+                    &range,
+                );
             }
         }
 

@@ -648,3 +648,55 @@ condition itself** — every dumped depth texel `> 0.0`, at least two distinct d
 An alternative that is scene-independent is to poison the PYRAMID IMAGE (not just the staging)
 before the build on a dump frame, so an unwritten level reads a value the reduce can never produce;
 that costs one clear on a frame nobody ships and removes the fixture dependency entirely.
+
+## 14. Step P1-8 as built — gate G8, and the poison that replaced the fixture
+
+**§13's alternative is the one taken.** The full-coverage fixture is NOT built and is no longer
+needed: G8 asserts the non-vacuity clauses §13 demands, but the clause that carries them is
+`hzb_poison` rather than the scene. **The poison — not the coverage — is what makes a green here
+mean anything**, and §13 is the reason: at ~11% coverage the AGREEMENT is mostly an agreement about
+far-plane zeros, so a gate that rested on it would certify a pyramid nobody built.
+
+`hzb_poison` is a declared framegraph pass — one `vkCmdClearColorImage` filling mips
+`[0, plan.levels)` with `-1.0`, gated on EXACTLY `hzb_dump`'s predicate and declared BEFORE every
+`hzb_build_p`, with the mirror of P1-6's own ordering `debug_assert!` plus a second one pinning the
+two probes to ONE arming decision. Under `TRANSFER(TRANSFER_WRITE)` at `GENERAL` the derived
+barriers are the pyramid's `UNDEFINED → GENERAL` first touch over the whole chain, after which each
+build pass derives a real WAW flush instead of the first touch it derives on an undumped frame. An
+unarmed frame declares nothing and records nothing.
+
+**`-1.0`, and why the two natural alternatives are both wrong.** The reduce is a `min` over
+reverse-Z depths in `[0, 1]` and a real attachment cannot hold a NaN (the rasteriser clamps), so
+`-1.0` is unreachable — at ANY coverage, which is the property the fixture could not provide.
+`0.0` is the far plane AND the boot clear, i.e. the very value §13 measured across 89.3% of the
+pyramid. `+INFINITY` is the boundary rule's own `min` identity, so it cannot separate "unwritten"
+from "written by a lane that folded no live tap".
+
+⚠️ **One usage bit the plan did not name.** `vkCmdClearColorImage` requires
+`VK_IMAGE_USAGE_TRANSFER_DST_BIT` (`VUID-vkCmdClearColorImage-image-00002`), which §7's usage set
+does not carry. It joins the pyramid's set UNCONDITIONALLY, on P1-6's own argument for
+`TRANSFER_SRC`: usage is fixed at image creation, so a dump-only variant would be a SECOND image
+rather than the one every other run renders with. The combination is not novel — G3 already creates
+an `R32_SFLOAT` mip chain with exactly `STORAGE | SAMPLED | TRANSFER_SRC | TRANSFER_DST`, for the
+same poison, on the same device.
+
+**The gate** is `crates/boyko_app/tests/hzb_engine_pyramid_gate.rs`, in the census's two-test shape
+(a `#[ignore]`d WORKER that boots the engine, a DRIVER that re-executes this binary's worker as a
+child process with `BOYKO_HZB_DUMP` set and then adjudicates the file). That shape is forced, not
+chosen: the dump is armed by ENV, read once inside `app.run()`, and the host loop RETURNS when the
+capture completes — so a dump IS a process, and arming it in-process would mean `std::env::set_var`,
+`unsafe` in Rust 2024 and racy once the threadpool exists. The worker SKIPS rather than booting when
+the knob is absent, because without an armed capture `app.run()` never returns.
+
+It decodes the header, takes the source extent and every level extent **FROM THE HEADER** (never
+re-derived — a host that computes the extent it expects agrees with itself no matter what the engine
+did), builds `HzbLayout::new(source_w, source_h)`, runs `build_pyramid` over the dumped depth and
+compares `to_bits()` at every texel of every level. Five clauses fail it when unmet: no pyramid texel
+is the poison (named by `level, (x, y)`); the header's `levels` and every `level_extent(k)` equal the
+oracle's; the dumped depth has ≥2 distinct values and ≥1 `> 0.0`; no pyramid texel is `+INFINITY`;
+and no texel of either payload is NaN (the staging prefill, which separates "the copy never ran"
+from "the build never ran"). Coverage is **reported, never gated on** — §13's point is that the
+number changes what the green means, not that a particular number is required.
+
+⚠️ **Not yet run.** This section describes what is BUILT; the gate's own result, and the
+golden/validation legs, are the run that follows.

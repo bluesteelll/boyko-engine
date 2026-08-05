@@ -2706,6 +2706,22 @@ pub(crate) struct VbPassPlan {
     /// (`VisibilityBuffer × Sdf`) frame: the pyramid reduces the depth THIS FRAME'S RASTER
     /// WROTE, and without the mesh leg `vb_depth` has no producer at all this frame.
     pub(crate) hzb_build: [Option<crate::framegraph::PassId>; crate::compute::MAX_HZB_PASSES],
+    /// VG R3 piece 1 step P1-8 (plan §5/§13, gate G8): the pyramid POISON clear — one
+    /// `vkCmdClearColorImage` filling mips `[0, plan.levels)` with
+    /// [`HZB_PYRAMID_POISON`](super::scene_types::HZB_PYRAMID_POISON), declared BEFORE the first
+    /// [`Self::hzb_build`] pass and gated on EXACTLY [`Self::hzb_dump`]'s predicate.
+    ///
+    /// It is what makes G8 non-vacuous WITHOUT depending on the fixture's screen coverage. Step
+    /// P1-6 measured the `vb_mesh` dump: the scene covers ~11% of the framebuffer, the rest is the
+    /// reverse-Z far plane `0.0`, a `min` footprint containing any `0.0` is `0.0` — so 89.3% of
+    /// the pyramid is `0.0` and levels 6..9 are ENTIRELY so. A pyramid a driver zero-filled and
+    /// NOBODY WROTE matches the oracle at every one of those texels, and levels 6..9 are precisely
+    /// what the SECOND build pass writes. Poisoned first, an unwritten texel reads `-1.0`, which
+    /// the reduce cannot produce at any coverage.
+    ///
+    /// `None` on every frame that is not a `BOYKO_HZB_DUMP` frame ⇒ no pass, no barrier, no
+    /// command, and every golden pin stays byte-identical.
+    pub(crate) hzb_poison: Option<crate::framegraph::PassId>,
     /// VG R3 piece 1 step P1-6 (plan §5, gate G8): the pyramid DUMP copy — `Some` only when
     /// `scene.hzb_dump` is armed (the `BOYKO_HZB_DUMP` probe) on a frame that also builds a
     /// pyramid. Declares `TRANSFER_READ` on `vb_depth` (`TRANSFER_SRC_OPTIMAL`, DEPTH aspect) and
@@ -3882,6 +3898,46 @@ impl Renderer<'_> {
             (None, None, None, None, None, None, None, None, None, None)
         };
 
+        // ==== VG R3 piece 1 step P1-8 (plan §5/§13, gate G8): the pyramid POISON clear. ====
+        //
+        // Declared HERE — BEFORE every `hzb_build_p`, which is the whole point of it and is
+        // asserted below in the shape step P1-6 used to pin the dump's own position. On a dump
+        // frame the pyramid IMAGE is filled with `HZB_PYRAMID_POISON` so that an unwritten texel
+        // holds a value the reduce can never produce; the host half then reads "no texel is the
+        // poison" as "every level was WRITTEN", at any scene coverage.
+        //
+        // ⚠️ THE IMAGE, NOT THE STAGING. The host driver already prefills the staging with NaN,
+        // and that catches a failed COPY — it cannot see a level the BUILD never wrote, because
+        // copying an unwritten level succeeds and faithfully transfers whatever the image holds.
+        // Step P1-6 measured what that costs: 89.3% of the `vb_mesh` pyramid is the far plane
+        // `0.0`, levels 6..9 entirely so, and a zero-filled image agrees with the oracle there.
+        //
+        // ⚠️ THE GATE IS `hzb_dump`'s, VERBATIM — the same `(scene.hzb.filter(|_| mesh_leg),
+        // scene.hzb_dump)` pair, so a frame that is poisoned is always a frame that is dumped and
+        // vice versa. Anything narrower would poison a pyramid nobody reads back; anything wider
+        // would put a transfer write on a frame that ships.
+        //
+        // The write is `TRANSFER(TRANSFER_WRITE)` at `GENERAL`, so the derived barrier is this
+        // resource's `UNDEFINED → GENERAL` first touch over mips `[0, levels)`, and `hzb_build_0`
+        // then derives a real WAW flush (`TRANSFER_WRITE → SHADER_WRITE`) instead of the first
+        // touch it derives on an undumped frame. `GENERAL` is one of the two layouts
+        // `vkCmdClearColorImage` accepts, and it is the layout the pyramid holds for life, so no
+        // extra transition appears anywhere.
+        let hzb_poison = match (scene.hzb.filter(|_| mesh_leg), scene.hzb_dump) {
+            (Some(hzb_plan), Some(_)) => {
+                let p = g.add_pass("hzb_poison");
+                g.image_access(
+                    hzb_pyramid,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    hzb_mips(0, hzb_plan.levels),
+                );
+                Some(p)
+            }
+            _ => None,
+        };
+
         // ==== VG R3 piece 1 step P1-5: the HZB depth-pyramid BUILD chain. ====
         //
         // Declared HERE — after `vb_raster`, the pass that WRITES `vb_depth`, and beside the
@@ -4647,6 +4703,28 @@ impl Renderer<'_> {
             "invariant: the HZB dump pass is declared after every hzb_build pass"
         );
 
+        // VG R3 piece 1 step P1-8: the MIRROR of the assertion above, and it is load-bearing for
+        // the same reason in the opposite direction. A poison declared after any build pass would
+        // erase the levels that pass had just written — the dump would then read `-1.0` everywhere
+        // and G8 would red claiming "the build never ran", which is a gate reporting the wrong
+        // defect. The block order above says it today; this says it after the next insertion too.
+        debug_assert!(
+            hzb_poison.is_none_or(|poison| hzb_build
+                .iter()
+                .flatten()
+                .all(|build| poison.index() < build.index())),
+            "invariant: the HZB poison pass is declared before every hzb_build pass"
+        );
+        // The two probes are ONE arming decision (`hzb_dump`'s predicate, verbatim), so a frame
+        // that poisons must be a frame that dumps: a poisoned pyramid nobody reads back would be a
+        // transfer write for nothing, and a dump over an unpoisoned pyramid is exactly the vacuous
+        // comparison step P1-6 measured.
+        debug_assert_eq!(
+            hzb_poison.is_some(),
+            hzb_dump.is_some(),
+            "invariant: the HZB poison and dump passes are armed by ONE predicate"
+        );
+
         g.compile();
 
         self.vb_pass_plan = Some(VbPassPlan {
@@ -4659,6 +4737,7 @@ impl Renderer<'_> {
             vb_batch_cull,
             vb_cull_readback,
             hzb_build,
+            hzb_poison,
             hzb_dump,
             vb_raster,
             vb_classify_fill,

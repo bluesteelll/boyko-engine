@@ -1180,6 +1180,16 @@ impl VbClassifyTargets {
 /// * `TRANSFER_SRC` — the gate's dump copy (plan §5's G8). A usage bit is fixed at image creation,
 ///   so an armed-only variant would be a SECOND image rather than the one the gate measures — the
 ///   same argument `vb_id`'s own `TRANSFER_SRC` makes.
+/// * `TRANSFER_DST` — step P1-8's `hzb_poison` pass, which fills every mip with
+///   [`HZB_PYRAMID_POISON`](super::scene_types::HZB_PYRAMID_POISON) on a dump frame so that a
+///   level the build never wrote cannot be confused with a correct one;
+///   `VUID-vkCmdClearColorImage-image-00002` requires this bit for the clear to be legal at all.
+///   UNCONDITIONAL for the same reason `TRANSFER_SRC` is: usage is fixed at creation, so a
+///   dump-only variant would be a different image from the one every other run renders with, and
+///   the gate would then measure something no golden covers. This exact four-bit set on this
+///   exact format and a real mip chain is already created and used by
+///   `boyko_app/tests/hzb_build_oracle_gate.rs` (gate G3, which poisons for the same reason), so
+///   it is a combination the target device has been measured to accept.
 ///
 /// # The RHI derives NOTHING
 ///
@@ -1271,7 +1281,10 @@ impl HzbTargets {
             depth: 1,
             format: Format::R32Sfloat,
             dimension: TextureDimension::D2,
-            usage: ImageUsage::STORAGE | ImageUsage::SAMPLED | ImageUsage::TRANSFER_SRC,
+            usage: ImageUsage::STORAGE
+                | ImageUsage::SAMPLED
+                | ImageUsage::TRANSFER_SRC
+                | ImageUsage::TRANSFER_DST,
             array_layers: 1,
             mip_levels: plan.levels,
             view_format: None,
