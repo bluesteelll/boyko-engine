@@ -883,9 +883,10 @@ fn hwrt_resid_18_sink_slot_mapping_pinned() {
 /// ⚠️ This attribute was MISSING, and its absence was measured rather than reasoned about: CI runs
 /// `cargo test --workspace --all-targets --release` (`.github/workflows/ci.yml:62`, `:103`), so
 /// this test and its neighbour below have been FAILING the release leg. The rule was already
-/// written down — the sibling at `compile_panics_when_span_and_layout_both_vary` carries both the
-/// attribute and this exact rationale — so what was missing was not the knowledge but the gate on
-/// two tests that were added later.
+/// written down on the subresource-guard fixtures that carried both the attribute and this exact
+/// rationale — so what was missing was not the knowledge but the gate on two tests that were added
+/// later. (Those fixtures no longer need the attribute: VG R3 P1-5a turned them into assertions on
+/// the DERIVED BARRIERS, which are release-live. This one still does — it gates a `debug_assert!`.)
 #[cfg(debug_assertions)]
 #[test]
 #[should_panic(expected = "reads transient image")]
@@ -963,20 +964,23 @@ fn compile_does_not_panic_on_seeded_resource_read_first() {
 }
 
 // ===========================================================================
-// `compile()`'s DEBUG-ONLY `INVARIANT HZB-SUBRESOURCE-UNIFORM` guard (VG R3 S2).
+// The MIP axis (VG R3 P1-5a): tracked, not asserted — and the DEBUG-ONLY
+// `INVARIANT SUBRESOURCE-LAYER-UNIFORM` guard that is what remains.
 //
-// The sync state machine keys one `ResSync` per `ResId` and never reads a
-// `SubRange`, so a single tracked layout can misdescribe a subresource exactly
-// when a resource's accesses vary in BOTH the mip/layer span AND the layout.
-// The guard latches one bit per axis and fires only on the conjunction. These
-// tests pin both verdicts — a guard never shown RED is not a guard — and pin
-// that the shipped layered declarations (CSM cascades, the punctual atlas, the
-// DDGI probe atlases: one span, several layouts) are on the permitted side.
+// The sync state machine keys one `ResSync` per `(ResId, mip)`, so accesses that
+// name different mips of one image are tracked separately and there is no single
+// layout for them to disagree about: the three fixtures below USED to assert a
+// panic on exactly that shape and now assert the derived barrier list instead.
+// Layers are still uniform-by-requirement — one `ResSync` block covers all of a
+// resource's layers — so that axis keeps its guard, and these tests pin that the
+// shipped layered declarations (CSM cascades, the punctual atlas, the DDGI probe
+// atlases: one layer span, several layouts) are on the permitted side.
 // ===========================================================================
 
 /// `SubRange::color_mips` is a whole-chain COLOR range at layer 0 — the shape a
-/// mip-pyramid access declares. Pinned because the guard's span comparison and
-/// the emitted barrier both read these four fields verbatim.
+/// mip-pyramid access declares. Pinned because `image_access`'s release-live range check reads
+/// `base_mip`/`mip_count`, the layer guard reads `base_layer`/`layer_count`, and the derived
+/// barrier carries the aspect and the layer span verbatim.
 #[test]
 fn subrange_color_mips_spans_the_whole_chain_at_one_layer() {
     let m = SubRange::color_mips(5);
@@ -990,20 +994,25 @@ fn subrange_color_mips_spans_the_whole_chain_at_one_layer() {
     assert_eq!(SubRange::color_mips(1), SubRange::COLOR);
 }
 
-/// Both axes vary on one resource (whole chain at GENERAL, then mip 0 alone at
-/// SHADER_READ_ONLY_OPTIMAL) — the tracked layout now misdescribes mips 1..n, so
-/// the guard must fire. This is the exact shape an HZB build/consume pair takes.
+/// ⚠️ THIS TEST ONCE ASSERTED A PANIC. It is the same reversal, on a second fixture, that
+/// `compile_allows_two_mip_spans_on_one_resource` records in full — read that one for the
+/// discriminator between "the machine answers the question" and "the condition was widened".
 ///
-/// `cfg(debug_assertions)`: the guard IS a `debug_assert!`, so in a release test
-/// binary `compile` correctly does not panic and a `should_panic` test would report
-/// a failure that is not one. CI runs a debug × release matrix, so the debug leg
-/// still gates this.
-#[cfg(debug_assertions)]
+/// The declaration is unchanged in substance: a whole 4-level chain written at GENERAL, then
+/// mip 0 ALONE sampled at SHADER_READ_ONLY_OPTIMAL — the exact shape an HZB build/consume pair
+/// takes. Under the per-`ResId` machine one tracked layout would have claimed
+/// SHADER_READ_ONLY_OPTIMAL for mips 1..3, which nothing had transitioned, so
+/// `INVARIANT HZB-SUBRESOURCE-UNIFORM` fired. Under the `(ResId, mip)` machine the mips hold
+/// their own states, and THAT is what is asserted here: two barriers, the second covering mip
+/// 0 alone rather than the chain, and `resolved_layout_mip` reporting two different layouts on
+/// one image.
+///
+/// No `cfg(debug_assertions)`: the assertions are on the DERIVED barriers, which are
+/// release-live, so this now gates both legs of CI's matrix instead of only the debug one.
 #[test]
-#[should_panic(expected = "HZB-SUBRESOURCE-UNIFORM")]
-fn compile_panics_when_span_and_layout_both_vary() {
+fn compile_tracks_a_distinct_layout_per_mip() {
     let mut g = FrameGraph::with_capacity(4, 4, 4);
-    let pyramid = g.add_image("pyramid");
+    let pyramid = g.add_image_mipped("pyramid", 4, ResSync::undefined());
 
     g.add_pass("pyramid_build");
     g.image_access(
@@ -1024,21 +1033,73 @@ fn compile_panics_when_span_and_layout_both_vary() {
     );
 
     g.compile();
+
+    let img = g.img_barriers();
+    assert_eq!(img.len(), 2, "one first-touch write barrier + one RAW on mip 0");
+    // The build: all four mips are in the same (fresh) state, derive the same transition, and
+    // MERGE into the single whole-chain barrier the per-ResId machine also emitted.
+    assert_eq!(
+        img[0],
+        ImgBarrier {
+            res: pyramid,
+            src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            src_access: 0,
+            dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+            old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            new_layout: VK_IMAGE_LAYOUT_GENERAL,
+            subresource: SubRange::color_mips(4),
+        },
+        "the uniform chain must still merge into ONE barrier over [0, 4)"
+    );
+    // The consumer: mip 0 ALONE — the span it declared, not the chain. This is the widening
+    // that used to be unrepresentable and is the reason the old guard existed.
+    assert_eq!(
+        img[1],
+        ImgBarrier {
+            res: pyramid,
+            src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            src_access: VK_ACCESS_SHADER_WRITE_BIT,
+            dst_access: VK_ACCESS_SHADER_READ_BIT,
+            old_layout: VK_IMAGE_LAYOUT_GENERAL,
+            new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            subresource: SubRange::COLOR,
+        },
+        "the mip-0 read must transition mip 0 ONLY, from ITS layout"
+    );
+    // The state the barriers were derived from: one image, two layouts.
+    assert_eq!(
+        g.resolved_layout_mip(pyramid, 0),
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        "mip 0 was sampled last"
+    );
+    for m in 1..4 {
+        assert_eq!(
+            g.resolved_layout_mip(pyramid, m),
+            VK_IMAGE_LAYOUT_GENERAL,
+            "mip {m} was never sampled and must still be GENERAL"
+        );
+    }
 }
 
-/// The violation need not involve the FIRST access: here access 2 differs from
-/// access 1 only in layout and access 3 only in span, so no single pair differs in
-/// both — yet the resource as a whole varies on both axes and the tracked layout is
-/// still a lie. Pins that the guard accumulates per axis instead of comparing each
-/// access pairwise against the first (which would pass this and miss the bug).
+/// ⚠️ THIS TEST ONCE ASSERTED A PANIC (see `compile_allows_two_mip_spans_on_one_resource` for
+/// the full record of the two reversals this axis has taken).
 ///
-/// `cfg(debug_assertions)` for the same reason as the test above.
-#[cfg(debug_assertions)]
+/// Its shape is the one no PAIRWISE comparison catches: access 2 differs from access 1 only in
+/// layout, access 3 only in span, so no single pair differs on both axes while the resource as
+/// a whole varies on both. Under the per-`ResId` machine that made the tracked layout a lie and
+/// the accumulating guard fired. Under the `(ResId, mip)` machine the third access moves mip 0
+/// back to GENERAL while mips 1..3 stay SHADER_READ_ONLY_OPTIMAL — three barriers, the last one
+/// over mip 0 alone — and that trajectory is what is pinned here.
+///
+/// The pin that matters is barrier [2]'s span: a machine that widened it to the chain would
+/// transition mips 1..3 out of the layout their last reader left them in, which is precisely
+/// the bug the old assert was standing in for.
 #[test]
-#[should_panic(expected = "HZB-SUBRESOURCE-UNIFORM")]
-fn compile_panics_when_the_variation_straddles_three_accesses() {
+fn compile_derives_per_mip_barriers_when_the_variation_straddles_three_accesses() {
     let mut g = FrameGraph::with_capacity(4, 4, 4);
-    let pyramid = g.add_image("pyramid");
+    let pyramid = g.add_image_mipped("pyramid", 4, ResSync::undefined());
 
     g.add_pass("build_whole_chain");
     g.image_access(
@@ -1068,38 +1129,101 @@ fn compile_panics_when_the_variation_straddles_three_accesses() {
     );
 
     g.compile();
+
+    let img = g.img_barriers();
+    assert_eq!(img.len(), 3, "first-touch write, whole-chain RAW, then mip 0's layout flip");
+    assert_eq!(
+        img[0],
+        ImgBarrier {
+            res: pyramid,
+            src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            src_access: 0,
+            dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+            old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            new_layout: VK_IMAGE_LAYOUT_GENERAL,
+            subresource: SubRange::color_mips(4),
+        },
+        "the uniform chain's first touch must merge into ONE barrier"
+    );
+    assert_eq!(
+        img[1],
+        ImgBarrier {
+            res: pyramid,
+            src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            src_access: VK_ACCESS_SHADER_WRITE_BIT,
+            dst_access: VK_ACCESS_SHADER_READ_BIT,
+            old_layout: VK_IMAGE_LAYOUT_GENERAL,
+            new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            subresource: SubRange::color_mips(4),
+        },
+        "all four mips are still in step, so the RAW must merge back into ONE barrier"
+    );
+    // src_access 0: the mips' pending write was already flushed by barrier [1], so this is the
+    // WAR/execution-only dependency on the prior readers — a layout flip, not a memory one.
+    assert_eq!(
+        img[2],
+        ImgBarrier {
+            res: pyramid,
+            src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            src_access: 0,
+            dst_access: VK_ACCESS_SHADER_READ_BIT,
+            old_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            new_layout: VK_IMAGE_LAYOUT_GENERAL,
+            subresource: SubRange::COLOR,
+        },
+        "mip 0's layout flip must cover mip 0 ONLY — widening it would drag mips 1..3 out of \
+         the layout their reader left them in"
+    );
+    assert_eq!(g.resolved_layout_mip(pyramid, 0), VK_IMAGE_LAYOUT_GENERAL, "mip 0 read last at GENERAL");
+    for m in 1..4 {
+        assert_eq!(
+            g.resolved_layout_mip(pyramid, m),
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            "mip {m} was last read at SHADER_READ_ONLY_OPTIMAL"
+        );
+    }
 }
 
-/// ⚠️ THIS TEST ONCE ASSERTED THE OPPOSITE, and the reversal is the point of the rung.
+/// ⚠️ THIS FIXTURE HAS REVERSED ITS VERDICT TWICE, and a reader who sees only the latest flip
+/// cannot tell it apart from the thing `graph.rs` forbids by name ("never to relax the
+/// condition until it goes quiet"). So both reversals are recorded here, with the
+/// discriminator.
 ///
-/// Its first version was named `compile_allows_a_varying_span_at_a_uniform_layout` and it
-/// PASSED: the guard's original condition permitted a varying span as long as every access
-/// declared one layout, on the reasoning that "one layout is true of every subresource".
-/// That reasoning is false. A uniform DECLARED layout does not give a uniform ACTUAL one —
-/// only the union of spans that actually appeared in an emitted barrier has been
-/// transitioned, and every other subresource is still in the image's start layout.
+/// **Reversal 1 — GREEN → RED, and it STRENGTHENED an unsound guard.** The first version was
+/// named `compile_allows_a_varying_span_at_a_uniform_layout` and it PASSED: the guard's
+/// original condition permitted a varying span as long as every access declared one layout, on
+/// the reasoning that "one layout is true of every subresource". That reasoning is false. A
+/// uniform DECLARED layout does not give a uniform ACTUAL one — only the union of spans that
+/// actually appeared in an emitted barrier has been transitioned, and every other subresource
+/// is still in the image's start layout. Reverse the two passes below and the old guard still
+/// passed while the frame was UB: the subset-first order transitions mips [0,1) only, then the
+/// superset access emits a barrier over [0,4) claiming `oldLayout = GENERAL` for mips 1..3,
+/// which are UNDEFINED (VUID-VkImageMemoryBarrier-oldLayout-01197). A guard whose verdict
+/// depends on declaration order is not a guard, so the condition was strengthened to
+/// span-uniformity and this fixture became the RED case.
 ///
-/// Reverse the two passes below and the old guard still passed while the frame was UB: the
-/// subset-first order transitions mips [0,1) only, then the superset access emits a barrier
-/// over [0,4) claiming `oldLayout = GENERAL` for mips 1..3, which are UNDEFINED
-/// (VUID-VkImageMemoryBarrier-oldLayout-01197). A guard whose verdict depends on
-/// declaration order is not a guard, so the condition was strengthened to span-uniformity
-/// and this fixture became the RED case.
+/// **Reversal 2 — RED → GREEN, and it REMOVED THE GUARD'S NEED on this axis by tracking it.**
+/// The panic message reversal 1 installed pointed at the fix by name: "give this resource
+/// per-subresource sync state, not … make the declarations agree by hand", and the comment
+/// beside it called this assert the TRIGGER for that work. VG R3 P1-5a did the work. Sync state
+/// is now keyed `(ResId, mip)` — one `ResSync` per level, located by `ResShape::state_base` —
+/// so mips 1..3 keep their own layouts and nothing can misdescribe them.
 ///
-/// It is also the exact shape a per-mip HZB build chain wants — write mip k, read mip k-1 —
-/// which is why the panic message points at per-subresource sync state rather than at
-/// making the declarations agree by hand. Tripping here is the intended way to discover
-/// that work.
+/// **The discriminator**, because both "build the machine" and "widen the condition" end with
+/// this fixture green: the assertions below are on the DERIVED BARRIERS, not on the absence of
+/// a panic. A widened condition would leave the mip-0 read emitting the old whole-chain
+/// barrier under one tracked layout; this test requires `mip_count == 1` on it, and its
+/// siblings require two different layouts to coexist on one image. Green here is a claim about
+/// what the machine derives, which is not a claim silence could make.
 ///
-/// `cfg(debug_assertions)`: the guard IS a `debug_assert!` — see
-/// `compile_panics_on_unwritten_transient_image_read` for the measurement that showed both of
-/// these were failing CI's release leg without it.
-#[cfg(debug_assertions)]
+/// No `cfg(debug_assertions)`: derived barriers are release-live, so both legs gate it now.
 #[test]
-#[should_panic(expected = "HZB-SUBRESOURCE-UNIFORM")]
-fn compile_panics_when_one_resource_declares_two_spans() {
+fn compile_allows_two_mip_spans_on_one_resource() {
     let mut g = FrameGraph::with_capacity(4, 4, 4);
-    let pyramid = g.add_image("pyramid");
+    let pyramid = g.add_image_mipped("pyramid", 4, ResSync::undefined());
 
     g.add_pass("build_whole_chain");
     g.image_access(
@@ -1120,6 +1244,165 @@ fn compile_panics_when_one_resource_declares_two_spans() {
     );
 
     g.compile();
+
+    let img = g.img_barriers();
+    assert_eq!(img.len(), 2, "the whole-chain first touch, then the mip-0 RAW");
+    assert_eq!(
+        img[0],
+        ImgBarrier {
+            res: pyramid,
+            src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            src_access: 0,
+            dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+            old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            new_layout: VK_IMAGE_LAYOUT_GENERAL,
+            subresource: SubRange::color_mips(4),
+        },
+        "the whole-chain write must merge into ONE barrier over [0, 4)"
+    );
+    // No layout change here (GENERAL → GENERAL): a pure RAW flush of the write to mip 0. Its
+    // span is [0, 1) — the SUBSET the reader declared, not the chain the writer did.
+    assert_eq!(
+        img[1],
+        ImgBarrier {
+            res: pyramid,
+            src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            src_access: VK_ACCESS_SHADER_WRITE_BIT,
+            dst_access: VK_ACCESS_SHADER_READ_BIT,
+            old_layout: VK_IMAGE_LAYOUT_GENERAL,
+            new_layout: VK_IMAGE_LAYOUT_GENERAL,
+            subresource: SubRange::COLOR,
+        },
+        "the mip-0 read's barrier must cover mip 0 ONLY"
+    );
+    for m in 0..4 {
+        assert_eq!(
+            g.resolved_layout_mip(pyramid, m),
+            VK_IMAGE_LAYOUT_GENERAL,
+            "every mip ends GENERAL here; only mip 0's PENDING WRITE was flushed"
+        );
+    }
+}
+
+/// ⚠️ **THE MEASURED BUG, asserted.** This is the real HZB build shape at a 512×512 render
+/// extent — `levels = 10`, two passes — and it is the exact graph that could not be declared
+/// before VG R3 P1-5a.
+///
+/// Pass 0 writes mips `[0, 6)`. Pass 1 reads mip 5 (which pass 0 wrote) and writes mips `[6, 10)`.
+///
+/// **What the OLD per-`ResId` machine derived, traced in release before the change:** pass 0's
+/// first touch transitions `[0, 6)` only, so mips 6..9 are still `UNDEFINED` — but `state` records
+/// one layout for the whole `ResId`, so it believes the image is `GENERAL`. Pass 1's write then
+/// finds `layout_change == false` and emits a barrier with `old_layout == new_layout == GENERAL`.
+/// **Mips 6..9 are never transitioned**, while the dispatch writes them through storage descriptors
+/// declared `GENERAL`. Reachable at every extent with `prev_pow2(max(W, H)) >= 64`, invisible to
+/// every golden pin, and a well-formed barrier as far as the validation layers can see.
+///
+/// The third assertion below — `old_layout: UNDEFINED` on the `[6, 4)` span — is that bug, stated
+/// as the thing the machine must now get right. Nothing else in this file would catch it.
+#[test]
+fn compile_derives_the_hzb_build_chain_at_a_real_extent() {
+    // `levels = 10`, `HZB_LEVELS_PER_PASS = 6`, so `pass_count = 2` — the numbers step P1-4's own
+    // corruption control reported from the engine (`sets built = 4, pass_count = 2, levels = 10`).
+    let mut g = FrameGraph::with_capacity(4, 4, 8);
+    let pyramid = g.add_image_mipped("hzb", 10, ResSync::undefined());
+
+    let mip = |base_mip: u32, mip_count: u32| SubRange {
+        aspect: VK_IMAGE_ASPECT_COLOR_BIT,
+        base_mip,
+        mip_count,
+        base_layer: 0,
+        layer_count: 1,
+    };
+
+    g.add_pass("hzb_build_0");
+    g.image_access(
+        pyramid,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_IMAGE_LAYOUT_GENERAL,
+        mip(0, 6),
+    );
+
+    g.add_pass("hzb_build_1");
+    // The reduce pass reads mip `d - 1` …
+    g.image_access(
+        pyramid,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_GENERAL,
+        mip(5, 1),
+    );
+    // … and writes mips `[d, d + n)` — the SECOND span on the same ResId in the same pass, which
+    // is what `INVARIANT HZB-SUBRESOURCE-UNIFORM` used to refuse by name.
+    g.image_access(
+        pyramid,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_IMAGE_LAYOUT_GENERAL,
+        mip(6, 4),
+    );
+
+    g.compile();
+
+    let img = g.img_barriers();
+    assert_eq!(img.len(), 3, "first touch of [0,6), the mip-5 RAW, then the first touch of [6,10)");
+    assert_eq!(
+        img[0],
+        ImgBarrier {
+            res: pyramid,
+            src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            src_access: 0,
+            dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+            old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            new_layout: VK_IMAGE_LAYOUT_GENERAL,
+            subresource: mip(0, 6),
+        },
+        "pass 0's six mips are all in the same state, so they MERGE into one barrier"
+    );
+    assert_eq!(
+        img[1],
+        ImgBarrier {
+            res: pyramid,
+            src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            src_access: VK_ACCESS_SHADER_WRITE_BIT,
+            dst_access: VK_ACCESS_SHADER_READ_BIT,
+            old_layout: VK_IMAGE_LAYOUT_GENERAL,
+            new_layout: VK_IMAGE_LAYOUT_GENERAL,
+            subresource: mip(5, 1),
+        },
+        "the reduce pass's read of mip 5 is a RAW flush over mip 5 ALONE"
+    );
+    assert_eq!(
+        img[2],
+        ImgBarrier {
+            res: pyramid,
+            src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            src_access: 0,
+            dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+            old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            new_layout: VK_IMAGE_LAYOUT_GENERAL,
+            subresource: mip(6, 4),
+        },
+        "⚠️ THE BUG: mips 6..9 are a FIRST TOUCH and must transition out of UNDEFINED. The old \
+         per-ResId machine derived `old_layout == new_layout == GENERAL` here — no transition at \
+         all — while the dispatch wrote them through GENERAL storage descriptors"
+    );
+
+    // Stated separately because it is the property, not the barrier: every mip the two passes
+    // wrote must END in GENERAL, and the machine must be able to answer PER MIP at all.
+    for m in 0..10 {
+        assert_eq!(
+            g.resolved_layout_mip(pyramid, m),
+            VK_IMAGE_LAYOUT_GENERAL,
+            "mip {m} must end GENERAL — the whole chain was written by one of the two passes"
+        );
+    }
 }
 
 /// Layouts vary but every access declares the SAME layered span — the CSM cascade /
@@ -1156,32 +1439,53 @@ fn compile_allows_a_varying_layout_at_a_uniform_span() {
     g.compile();
 }
 
-/// The witness is per-COMPILE scratch, not accumulated state. A `FrameGraph` is reused
-/// every frame, so a witness surviving `reset` + re-declare would judge this frame's
-/// accesses against LAST frame's resource: here graph A pins ResId 0 at
-/// `(COLOR, COLOR_ATTACHMENT_OPTIMAL)`, and graph B's first access (`color_mips(4)` at
-/// GENERAL) differs from it on BOTH axes — a leak would latch both bits and fire on a
-/// declaration that is in fact uniform-span. Silence is the discriminating outcome.
+/// `reset` + re-declare must leave NOTHING of the previous frame behind. A `FrameGraph` is
+/// reused every frame, so this fixture declares two different graphs into one `FrameGraph` and
+/// pins the second, on the two arenas whose leak is silent:
+///
+/// 1. **The layer witness** (`res_sub_witness`), per-COMPILE scratch. Graph A pins ResId 0 at
+///    a 4-LAYER depth span; graph B's ResId 0 declares a 1-layer color chain. A witness
+///    surviving the reset would compare graph B's layer span against graph A's, latch
+///    `layers_varied`, and fire `INVARIANT SUBRESOURCE-LAYER-UNIFORM` on a declaration that is
+///    in fact layer-uniform. Silence is the discriminating outcome.
+///    ⚠️ Graph A used to declare a single-LAYER color attachment, which discriminated on the
+///    MIP axis. VG R3 P1-5a made mips TRACKED rather than asserted, so a mip-only difference no
+///    longer reaches the witness at all and that spelling would have been vacuous — it would
+///    have passed whether the witness leaked or not. The layer span is what the guard still
+///    judges, so that is what graph A varies.
+/// 2. **The shape arena** (`res_shape` + `res_state_total`), which P1-5a added and which is a
+///    prefix sum — the failure mode `reset` is written against. Graph B is MIPPED, so if
+///    `res_state_total` survived the reset its pyramid would be handed `state_base = 1` while
+///    `compile` sizes the state arena to 4 entries, and mip 3 would index past the end. The
+///    `res_state_total()` assertion below names that directly instead of leaving it to a
+///    panic-with-no-diagnosis.
 #[test]
 fn subresource_guard_does_not_leak_across_reset_and_recompile() {
     let mut g = FrameGraph::with_capacity(4, 4, 8);
 
-    // Graph A — ResId 0 is a plain single-mip color attachment.
-    let a = g.add_image("attachment");
-    g.add_pass("raster");
+    // Graph A — ResId 0 is a single-mip, FOUR-LAYER depth target (the CSM cascade shape).
+    let a = g.add_image("cascade");
+    g.add_pass("csm_depth");
     g.image_access(
         a,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        SubRange::COLOR,
+        FRAG,
+        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        SubRange::depth_layers(CASCADE_LAYERS),
     );
     g.compile();
 
-    // Graph B — ResId 0 is now a whole-chain pyramid at two layouts: one span, so
-    // permitted. Only a leaked witness from graph A could make this fire.
+    // Graph B — ResId 0 is now a MIPPED, single-layer pyramid at two layouts: one layer span,
+    // so permitted. Only a leaked witness from graph A could make this fire, and only a leaked
+    // prefix sum could make it index the wrong entries.
     g.reset();
-    let pyramid = g.add_image("pyramid");
+    let pyramid = g.add_image_mipped("pyramid", 4, ResSync::undefined());
+    assert_eq!(
+        g.res_state_total(),
+        4,
+        "reset must clear `res_state_total` with `res_shape`: the pyramid is the FIRST resource \
+         of this graph, so the four entries it declares are the whole arena"
+    );
     g.add_pass("build_whole_chain");
     g.image_access(
         pyramid,
@@ -1200,8 +1504,38 @@ fn subresource_guard_does_not_leak_across_reset_and_recompile() {
     );
     g.compile();
 
-    // Two hazards: the first-touch UNDEFINED→GENERAL write, then the RAW read.
-    assert_eq!(g.img_barriers().len(), 2);
+    // Two hazards: the first-touch UNDEFINED→GENERAL write, then the RAW read. Both merge over
+    // the whole chain, because every mip of a freshly declared pyramid moves in step.
+    let img = g.img_barriers();
+    assert_eq!(img.len(), 2);
+    assert_eq!(
+        img[0],
+        ImgBarrier {
+            res: pyramid,
+            src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            src_access: 0,
+            dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+            old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            new_layout: VK_IMAGE_LAYOUT_GENERAL,
+            subresource: SubRange::color_mips(4),
+        },
+        "a stale `state_base` that happened to stay IN BOUNDS would show up here as the wrong \
+         `old_layout` — the failure the length check alone cannot see"
+    );
+    assert_eq!(
+        img[1],
+        ImgBarrier {
+            res: pyramid,
+            src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            src_access: VK_ACCESS_SHADER_WRITE_BIT,
+            dst_access: VK_ACCESS_SHADER_READ_BIT,
+            old_layout: VK_IMAGE_LAYOUT_GENERAL,
+            new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            subresource: SubRange::color_mips(4),
+        }
+    );
 }
 
 // ===========================================================================

@@ -546,3 +546,46 @@ layer_count: 1`, so the layer-narrowed guard cannot be reached by flipping anyth
   `PartialEq` over all five fields, and the equiv test's `has_img` compares `subresource` in FULL —
   so a `layer_count` transcription slip is caught by already-committed assertions.
 - `texture.rs:227-231` makes mipped and layered DISJOINT at image creation.
+
+### C2 as built, and what §11 got wrong
+
+The machine landed as §11 specifies. `maximal_frame_barrier_stream_is_pinned` — captured in C1 on
+the unmodified tree — is **green**: 23 image barriers, 10 buffer barriers, 11 per-pass ranges, every
+field identical after re-keying the state machine. All 25 golden pins byte-identical. The framegraph
+suite passes on BOTH legs. Zero production call sites changed.
+
+`compile_derives_the_hzb_build_chain_at_a_real_extent` is the new load-bearing test: the real HZB
+shape at a 512×512 extent (`levels = 10`, two passes), asserting all three derived barriers, of
+which the third — `UNDEFINED → GENERAL` over mips `[6, 10)` — **is the measured bug stated as a
+requirement**. The old machine derived `old_layout == new_layout == GENERAL` there and left those
+mips untransitioned. Nothing else in the file catches it.
+
+**Five things §11 asserts that turned out to be wrong or incomplete**, each found by the
+implementer rather than by the plan:
+
+1. **⚠️ §11's "mechanical facts" are all PRE-C1.** `graph.rs:451/:525/:528` and "`same_span` has
+   exactly two sites" describe the tree *before* C1 added the frozen `compile_per_resource_reference`.
+   Today `same_span` has three occurrences and `self.state` has four index sites. That produced a
+   direct conflict between two of §11's own instructions — "rename `same_span` (2 sites)" and "do not
+   modify the frozen reference". **A fact list captured at one commit and applied at a later one is a
+   trap, and this one was laid by the same document that warns against re-deriving.**
+2. **The `SubWitness` field rename cannot avoid the frozen body**, because `res_sub_witness` is ONE
+   arena of ONE type shared by both `compile()` and the frozen copy. Resolution taken: the field is
+   renamed (three identifier tokens inside the frozen body) while `same_span` is kept alive in
+   `sync.rs` under its one caller's `cfg`, so the frozen body's PREDICATE is unchanged and it still
+   answers as the C1 machine did on every input. Recorded in situ.
+3. **§11 has no "algorithm block"** — the implementation brief cited one that does not exist in the
+   document. Implemented from the prose plus G-B3's fixture shape instead.
+4. **`add_image_mipped` forcing a seed makes `res_written`'s mip-weighting inert TODAY.** §11
+   justifies it with "a pure-read consumer of a mip its writer never wrote goes silent" — but the
+   seed is required, and `res_written` is initialised from `res_seeded`, so every mip of every mipped
+   resource starts `true`. The mip-weighting is still correct (the arenas must stay in step, and it
+   covers any future non-seeded route) but it is not a live catch, and §11 claimed it was.
+5. **G-A2 cannot be an integration test.** `compile_per_resource_reference` is `#[cfg(test)]`, so it
+   does not exist in the rlib that `tests/*.rs` link against. The differential must live in a
+   `#[cfg(test)] mod tests` inside `src/`. Carried to part 2.
+
+Two additions §11 did not name: `res_state_total()` (the replacement G-E needs, since
+`state.capacity()` measures a property of `Vec` rather than of the plan) and a documented note that
+`with_capacity(max_res, …)` sizes `state` by RESOURCE count, so a mipped declarator regrows it on
+frame 1 — the same class of fact §11 already records for `frame_driver.rs:188`.
