@@ -2706,6 +2706,14 @@ pub(crate) struct VbPassPlan {
     /// (`VisibilityBuffer × Sdf`) frame: the pyramid reduces the depth THIS FRAME'S RASTER
     /// WROTE, and without the mesh leg `vb_depth` has no producer at all this frame.
     pub(crate) hzb_build: [Option<crate::framegraph::PassId>; crate::compute::MAX_HZB_PASSES],
+    /// VG R3 piece 1 step P1-6 (plan §5, gate G8): the pyramid DUMP copy — `Some` only when
+    /// `scene.hzb_dump` is armed (the `BOYKO_HZB_DUMP` probe) on a frame that also builds a
+    /// pyramid. Declares `TRANSFER_READ` on `vb_depth` (`TRANSFER_SRC_OPTIMAL`, DEPTH aspect) and
+    /// on `hzb_pyramid` (`GENERAL`, mips `[0, plan.levels)`), so the graph derives both the
+    /// layout transition out of the depth's last reader and the `COMPUTE → TRANSFER` flush of the
+    /// build's stores. Declared LAST in the whole graph, so it observes the FINISHED pyramid.
+    /// Unarmed on every golden/interactive boot ⇒ no pass, no barrier, no command.
+    pub(crate) hzb_dump: Option<crate::framegraph::PassId>,
     /// VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2b (gate widened at
     /// rung P2c): the `fill` pass (two `vkCmdFillBuffer`s — zeros `counts[MAX]`, sentinels
     /// `group_to_mat[G+MAX]` with `0xFFFFFFFF`, critic P1-1) declared as the FIRST producer on
@@ -4555,6 +4563,67 @@ impl Renderer<'_> {
             SubRange::COLOR,
         );
 
+        // ==== VG R3 piece 1 step P1-6 (plan §5, gate G8): the pyramid DUMP copy. ====
+        //
+        // A DECLARED PASS, not a hand-written barrier — the one place this seam improves on the
+        // census's own `vb_id` copy, which it is otherwise modelled on. It is expressible here
+        // precisely because `vkCmdCopyImageToBuffer` accepts `GENERAL` and the pyramid is
+        // `GENERAL` for life: the derived edge on `hzb_pyramid` is a pure `COMPUTE(SHADER_WRITE)
+        // → TRANSFER(TRANSFER_READ)` flush that changes NO layout, so a dump frame leaves the
+        // resource in exactly the state an undumped frame does and `ResSync::undefined()` — the
+        // seed the pyramid's declaration argues for — is not falsified on it.
+        //
+        // DECLARED LAST in the whole graph. The requirement is only that it follow every pass
+        // touching these two resources (so it observes the FINISHED pyramid rather than a
+        // half-built one), and "last" is the spelling of that which a later step cannot
+        // invalidate by inserting a pass above it. `record_vb` records it at the matching
+        // position — after the present blit, beside the census copy — so declare/record order
+        // parity holds.
+        //
+        // ⚠️ THE GATE IS `hzb_build`'s, PLUS the probe. `scene.hzb_dump.is_some()` alone is not
+        // enough: without the mesh leg `vb_raster` is not declared, nothing writes `vb_depth` this
+        // frame, and a TRANSFER read of it would take `compile`'s first-touch arm on an unwritten
+        // transient — the failure that guard exists to catch. Reading the arm off the SAME
+        // `scene.hzb.filter(|_| mesh_leg)` the build chain reads means the two cannot disagree
+        // about whether there is a pyramid to dump.
+        //
+        // ⚠️ `plan.levels`, NEVER `MAX_HZB_LEVELS` — see `hzb_mips`'s own doc. The capacity is 17
+        // and the live count is 10 at 512×512; a capacity-wide span is out of range at every real
+        // extent, and the barrier path bounds nothing.
+        let hzb_dump = match (scene.hzb.filter(|_| mesh_leg), scene.hzb_dump) {
+            (Some(hzb_plan), Some(_)) => {
+                let p = g.add_pass("hzb_dump");
+                // The SOURCE depth. Its tracked layout here is whatever the last reader left — on
+                // every armed frame that is `SHADER_READ_ONLY_OPTIMAL`, since `hzb_build_0` itself
+                // reads it there (and `vb_viewt`/`sdf_forward_march` read it at the same layout
+                // when armed) — so the graph DERIVES that transition rather than this site
+                // assuming it. No restore is declared and none is needed: the ring slot re-enters
+                // next frame through `vb_raster`'s own `UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL`
+                // first touch, which discards contents by definition.
+                g.image_access(
+                    vb_depth,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_ACCESS_TRANSFER_READ_BIT,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    SubRange::DEPTH,
+                );
+                // Every mip in ONE access. The per-mip states differ across the span (mips
+                // `[0, 6)` were written by pass 0, `[6, levels)` by pass 1, and mip 5 was also
+                // READ by pass 1), which is exactly the heterogeneity step P1-5a re-keyed the sync
+                // state to admit: `compile` splits the span into maximal equal-state runs and
+                // derives one barrier per run.
+                g.image_access(
+                    hzb_pyramid,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_ACCESS_TRANSFER_READ_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    hzb_mips(0, hzb_plan.levels),
+                );
+                Some(p)
+            }
+            _ => None,
+        };
+
         // Rung R9d structural order guard (mirrors the `tlas_build < shadow_vis` assert above):
         // `vb_geo` (the `thin_normal` producer) must be declared before `shadow_temporal` (a
         // `thin_normal`-adjacent consumer via the à-trous chain it follows) whenever both are
@@ -4563,6 +4632,19 @@ impl Renderer<'_> {
         debug_assert!(
             vb_geo.is_none_or(|geo| vb_shadow_temporal_pass.is_none_or(|t| geo.index() < t.index())),
             "invariant: vb_geo must be declared before shadow_temporal when both are armed"
+        );
+
+        // VG R3 piece 1 step P1-6: the dump observes the finished pyramid only if it is declared
+        // after the last build pass. Asserted rather than left to the block order above, because
+        // "declared last" is a property of THIS function's layout that a future insertion can
+        // break silently — the derived barrier would still be legal, it would simply flush a
+        // pyramid that was not finished.
+        debug_assert!(
+            hzb_dump.is_none_or(|dump| hzb_build
+                .iter()
+                .flatten()
+                .all(|build| build.index() < dump.index())),
+            "invariant: the HZB dump pass is declared after every hzb_build pass"
         );
 
         g.compile();
@@ -4577,6 +4659,7 @@ impl Renderer<'_> {
             vb_batch_cull,
             vb_cull_readback,
             hzb_build,
+            hzb_dump,
             vb_raster,
             vb_classify_fill,
             vb_classify_count,

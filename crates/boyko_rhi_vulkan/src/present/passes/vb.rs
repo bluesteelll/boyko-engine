@@ -34,8 +34,9 @@ use super::super::frame_driver::Renderer;
 use super::super::gpu_timing::VbTimedPass;
 use super::super::scene_types::{
     CLUSTER_CULL_HIER_PUSH_BYTES, CLUSTER_CULL_PUSH_BYTES, GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
-    GBufferMeshDraw, GBufferScene, LIGHT_CULL_LOCAL_SIZE_X, VB_BATCH_CULL_LOCAL_SIZE_X,
-    VB_BATCH_CULL_PUSH_BYTES, VB_BATCH_DESC_STRIDE, VbBatchCullPush, VbBatchDesc,
+    GBufferMeshDraw, GBufferScene, HZB_DUMP_HEADER_BYTES, HzbDumpLayout,
+    LIGHT_CULL_LOCAL_SIZE_X, MAX_HZB_LEVELS, VB_BATCH_CULL_LOCAL_SIZE_X, VB_BATCH_CULL_PUSH_BYTES,
+    VB_BATCH_DESC_STRIDE, VbBatchCullPush, VbBatchDesc,
 };
 use super::super::targets::{ForwardTargets, GBufferTargets, VB_CLASSIFY_MAX_MATERIAL_ROWS, VbTargets};
 use super::super::{COLOR_SUBRESOURCE_RANGE, SwapchainError};
@@ -336,6 +337,14 @@ impl Renderer<'_> {
     /// composite, which is what makes the top two ladder rungs reachable at all). `None` on every
     /// steady/golden frame, and an unarmed frame records **zero** extra commands — the byte-
     /// neutrality R0c gate (a) rests on.
+    ///
+    /// VG R3 piece 1 step P1-6: the pyramid dump's staging is NOT a parameter — it rides on
+    /// [`GBufferScene::hzb_dump`](super::super::scene_types::GBufferScene::hzb_dump), because
+    /// unlike the census's `vb_id` copy it is a DECLARED framegraph pass and the declarator sees
+    /// only the scene. A `Some` there (plus an armed pyramid and a mesh leg) means this frame
+    /// copies `vb_depth` and every pyramid mip into a buffer of at least
+    /// [`HzbDumpLayout::total_bytes`](super::super::scene_types::HzbDumpLayout::total_bytes) for
+    /// this frame's plan and `present_extent`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) unsafe fn record_vb(
         &self,
@@ -3127,6 +3136,185 @@ impl Renderer<'_> {
                     1,
                     &census_region,
                 );
+            }
+        }
+
+        // === VG R3 piece 1 step P1-6 (plan §5, gate G8): the ARMED pyramid dump. ===
+        //
+        // Copies the ENGINE'S OWN depth (mip 0, DEPTH aspect — the source the pyramid reduced)
+        // and EVERY mip of the ENGINE'S OWN pyramid into one host-visible buffer, laid out so
+        // P1-8's host half can address level `k` by a flat offset. G3 builds its own everything
+        // and therefore cannot see a wrong source, a wrong extent, a stale descriptor, a missing
+        // barrier or a pass that never ran; this is the readback that can.
+        //
+        // ⚠️ THE GATE IS THE DECLARATOR'S, VERBATIM (`scene.hzb_dump` + `scene.hzb` + `mesh_leg`),
+        // and `targets.hzb`/`plan.hzb_dump` are `.expect()`ed under it rather than made further
+        // conjuncts — the same single-predicate discipline the build block above follows. Spelling
+        // it identically is what keeps `plan.hzb_dump` an `.expect()` instead of a silent skip: a
+        // gate that could be false here while the declarator's was true would turn a declared pass
+        // into an unrecorded one, and the only reason that is survivable at all is that this pass
+        // is declared LAST.
+        //
+        // Sited HERE — after every pyramid writer and after the present blit, beside the census
+        // copy, before the swapchain's own present/readback transition. The declaration is
+        // correspondingly LAST in `declare_vb_graph`, which is the order parity `record_vb_pass`
+        // depends on. An UNARMED frame records ZERO commands in this block.
+        if let Some(staging) = scene.hzb_dump
+            && scene.hzb.is_some()
+            && scene.resolved_render_path.mesh_leg
+        {
+            let hzb = targets
+                .hzb
+                .as_ref()
+                .expect("invariant: scene.hzb armed => targets.hzb (sync_gbuffer's hzb_arm predicate)");
+
+            // THE plan is the bundle's OWN field — the same number the dispatch arithmetic and
+            // the descriptor sets were sized from (`HzbTargets::plan`'s rule), so the copy regions
+            // cannot name a level the image does not have.
+            //
+            // The SOURCE extent is `present_extent`, the SAME value the build pushed as
+            // `src_extent`: the depth ring is sized to the composite, which under armed SSAA is 2×
+            // native. Passing the client extent would copy a quarter of the image the pyramid
+            // reduced and the gate would compare against the wrong depth.
+            let layout = HzbDumpLayout::new(
+                hzb.plan,
+                [present_extent.width, present_extent.height],
+            );
+            let levels = hzb.plan.levels;
+
+            // ⚠️ A RELEASE-LIVE bound, not a `debug_assert!`. The host sized this staging from
+            // `GBufferScene::hzb`, while every offset below comes from `HzbTargets::plan`; the two
+            // agree on every real boot (the build block above debug-asserts it, and both derive
+            // from the same boot-fixed composite extent), but "agree today" is not a bound, and
+            // the failure mode of being wrong is a transfer writing past a host-visible allocation
+            // — undefined, and invisible to the validation layers, which do not follow buffer
+            // contents.
+            //
+            // A short staging therefore records NOTHING — not even the pass's derived barriers,
+            // which is sound precisely because the dump is the LAST declared pass: nothing later
+            // in this frame consumes the layout it would have produced, and the ring re-enters
+            // next frame through `vb_raster`'s own `UNDEFINED` first touch. And the silence is not
+            // silent: the host driver prefills the whole staging with `0xFF` — `f32::NAN` — which
+            // neither payload can legitimately contain (a reverse-Z attachment is clamped and
+            // cannot hold NaN, and `hzb_build`'s reduce collapses NaN to `-INFINITY`). G8 reds on
+            // "no texel is NaN", by name, instead of comparing a truncated pyramid against a full
+            // one.
+            debug_assert!(
+                staging.size >= layout.total_bytes(),
+                "invariant: the HZB dump staging is sized by HzbDumpLayout::total_bytes"
+            );
+            if staging.size >= layout.total_bytes() {
+                let dump_pass = plan
+                    .hzb_dump
+                    .expect("invariant: the recorder's dump gate is the declarator's, verbatim");
+                // SAFETY: recording is open; `record_vb_pass` records this pass's derived barriers
+                // into `cmd` — the `vb_depth` SHADER_READ_ONLY_OPTIMAL → TRANSFER_SRC_OPTIMAL
+                // transition out of its last reader, and the `COMPUTE(SHADER_WRITE) → TRANSFER`
+                // flush of the build's stores over mips `[0, levels)`. Without it the copies could
+                // read the pyramid before the last dispatch's stores landed, and it would usually
+                // look right.
+                self.record_vb_pass(dump_pass, cmd, targets, forward, vb, scene, fi);
+
+                // The header, written by the RECORDER rather than by the host: these are the
+                // numbers the copies below actually used, and G8 exists to catch a WRONG extent —
+                // a host that re-derived the extent it expected and decoded with that could not
+                // see one.
+                let header = layout.header_words();
+                // SAFETY: recording is open and no render-pass instance is active (the present
+                // blit's `cmd_end_rendering` is above). `staging.buffer` is the live host-visible
+                // TRANSFER_DST dump staging, `>= layout.total_bytes()` per the branch condition,
+                // and `HZB_DUMP_HEADER_BYTES` is that layout's leading region, so the write is in
+                // bounds. It is a multiple of 4 and 152 bytes, inside the 65536-byte inline limit.
+                // `header` is a local that outlives the call.
+                unsafe {
+                    (self.fns.cmd_update_buffer)(
+                        cmd,
+                        staging.buffer,
+                        0,
+                        HZB_DUMP_HEADER_BYTES,
+                        header.as_ptr().cast(),
+                    );
+                }
+
+                let depth_region = VkBufferImageCopy {
+                    buffer_offset: layout.depth_offset(),
+                    buffer_row_length: 0,
+                    buffer_image_height: 0,
+                    image_subresource: VkImageSubresourceLayers {
+                        aspect_mask: VK_IMAGE_ASPECT_DEPTH_BIT,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    },
+                    image_offset: VkOffset3D { x: 0, y: 0, z: 0 },
+                    image_extent: VkExtent3D {
+                        width: present_extent.width,
+                        height: present_extent.height,
+                        depth: 1,
+                    },
+                };
+                // SAFETY: recording is open; `forward.depth[fi]` is TRANSFER_SRC_OPTIMAL per the
+                // pass's derived barrier above and was created with `TRANSFER_SRC` usage
+                // (`ForwardTargets::build`'s `depth_desc`, plan §6); one full-image tightly-packed
+                // DEPTH region copies into `[depth_offset, depth_offset + depth_bytes)` of the
+                // staging, which `total_bytes` covers and the branch condition bounds;
+                // `&depth_region` outlives the call.
+                unsafe {
+                    (self.fns.cmd_copy_image_to_buffer)(
+                        cmd,
+                        forward.depth[fi].image,
+                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        staging.buffer,
+                        1,
+                        &depth_region,
+                    );
+                }
+
+                // ONE region per mip, all in one call. The buffer offsets are
+                // `HzbDumpLayout::level_byte_offset`'s — levels back to back, finest first, each
+                // row-major — which is `boyko_render::hzb::HzbLayout::level_offset`'s own layout,
+                // so P1-8 can compare `build_pyramid`'s flat output against this region word for
+                // word.
+                let regions: [VkBufferImageCopy; MAX_HZB_LEVELS] = core::array::from_fn(|k| {
+                    // Slots at `k >= levels` are PADDING — the copy count below is `levels`, so
+                    // Vulkan never reads them. They repeat the last live level rather than
+                    // carrying a zero extent, which no VUID admits even in an unread entry a
+                    // validation layer might one day walk.
+                    let level = (k as u32).min(levels - 1);
+                    let [w, h] = hzb.plan.extent_of(level);
+                    VkBufferImageCopy {
+                        buffer_offset: layout.level_byte_offset(level),
+                        buffer_row_length: 0,
+                        buffer_image_height: 0,
+                        image_subresource: VkImageSubresourceLayers {
+                            aspect_mask: VK_IMAGE_ASPECT_COLOR_BIT,
+                            mip_level: level,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        },
+                        image_offset: VkOffset3D { x: 0, y: 0, z: 0 },
+                        image_extent: VkExtent3D { width: w, height: h, depth: 1 },
+                    }
+                });
+                // SAFETY: recording is open; the pyramid is `GENERAL` for life and
+                // `vkCmdCopyImageToBuffer` accepts that layout, which is why the pass's derived
+                // edge needed no transition; the image was created with `TRANSFER_SRC` and
+                // `levels` mips (`HzbTargets::build`), so every `mip_level` named is a real mip
+                // and every extent is that mip's own; the regions tile
+                // `[pyramid_offset, pyramid_offset + pyramid_bytes)` without overlap, inside the
+                // staging per the branch condition. `levels <= MAX_HZB_LEVELS` (the plan's own
+                // invariant) bounds the region count to the array's length. `regions` is a local
+                // that outlives the call.
+                unsafe {
+                    (self.fns.cmd_copy_image_to_buffer)(
+                        cmd,
+                        hzb.pyramid.image,
+                        VK_IMAGE_LAYOUT_GENERAL,
+                        staging.buffer,
+                        levels,
+                        regions.as_ptr(),
+                    );
+                }
             }
         }
 

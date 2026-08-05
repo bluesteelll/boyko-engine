@@ -589,3 +589,62 @@ Two additions §11 did not name: `res_state_total()` (the replacement G-E needs,
 `state.capacity()` measures a property of `Vec` rather than of the plan) and a documented note that
 `with_capacity(max_res, …)` sizes `state` by RESOURCE count, so a mipped declarator regrows it on
 frame 1 — the same class of fact §11 already records for `frame_driver.rs:188`.
+
+## 13. Step P1-6 as built — and ⚠️ the G8 scene is NOT non-vacuous
+
+`TRANSFER_SRC` joins `ForwardTargets::depth`'s usage set, unconditionally: a usage bit is fixed at
+image creation, so an armed-only variant would be a SECOND image rather than the one the gate
+measures. Measured neutral — all 25 golden pins byte-identical.
+
+`BOYKO_HZB_DUMP` copies the engine's own `vb_depth` and every mip of the engine's own pyramid into
+one host-visible buffer, as a **declared framegraph pass** (§5's requirement): `vkCmdCopyImageToBuffer`
+accepts `GENERAL`, the pyramid is `GENERAL` for life, so the derived edge changes no layout and the
+`ResSync::undefined()` seed is not falsified on a dump frame. Layout is `HzbLayout::level_offset`'s,
+behind a 152-byte header carrying `[magic, source_w, source_h, levels]` plus every level extent —
+a header rather than a re-derivation, because G8 exists to catch a WRONG extent and a host that
+re-derives the extent it expects agrees with itself no matter what the engine did.
+
+⚠️ **The spec's routing precedent was wrong and the implementer said so.** `vb_id_readback`'s knob
+has NO declarator half — it goes env → host driver → a `render_gbuffer_frame` parameter → recorder,
+with a hand-written barrier. A declared pass REQUIRES the scene-field route, which is
+`vb_cull_readback`'s. Plan §5's anchor is right about where the recording lives; the plumbing
+sentence beside it was not.
+
+### The dump works, and what it proved — precisely
+
+Produced at 512×512: 2 446 828 bytes = 152 header + 1 048 576 depth + 1 398 100 pyramid, exactly the
+predicted layout. Rebuilding the pyramid from the DUMPED DEPTH with the oracle's own map and
+comparing `to_bits()` gives **0 mismatches over all 349 525 texels**.
+
+**That result is weaker than it sounds, and the measurement that says so is this:**
+
+| level | extent | texels | `== 0.0` | nonzero |
+|---|---|---|---|---|
+| 0 | 512×512 | 262144 | 233780 | 10.8% |
+| 1..5 | … | … | … | 10.5% → 3.1% |
+| **6..9** | 8×8 → 1×1 | 85 | **85** | **0.0%** |
+
+The `vb_mesh` scene covers ~11% of the framebuffer; the rest is the reverse-Z far plane, `0.0`. A
+`min` footprint containing any `0.0` is `0.0`, so **89.3% of the pyramid is `0.0` — and levels 6..9
+are entirely so.** A pyramid image that a driver zero-filled and NOBODY WROTE would match the oracle
+at every one of those texels.
+
+Levels 6..9 are exactly what the SECOND build pass writes. So the one part of the chain that the
+whole framegraph change (P1-5a) was made for is the part this scene cannot prove ran.
+
+**What IS proven on real engine data:** the 10.7% that is nonzero matched bit-exactly, which covers
+the base map (`⌈t·S/P⌉` against a real `D32_SFLOAT` attachment), the level-0 write, and levels 1..5
+— the first pass, end to end, through the engine's own descriptors, barriers and extents.
+
+### What P1-8 must therefore do
+
+Plan §5 already prescribed the fix and this measurement is what makes it non-optional: *"the scene
+fully covers the framebuffer and every dumped depth texel must be `> 0.0`, which restores the poison
+property (the boot clear is `0.0`, so any level the build failed to write mismatches everywhere)"*.
+
+`vb_mesh` is not that scene. G8 needs a full-coverage fixture, and it must **assert the coverage
+condition itself** — every dumped depth texel `> 0.0`, at least two distinct depths, no texel
+`+INFINITY` — and FAIL when unmet, rather than reporting a green comparison over a field of zeros.
+An alternative that is scene-independent is to poison the PYRAMID IMAGE (not just the staging)
+before the build on a dump frame, so an unwritten level reads a value the reduce can never produce;
+that costs one clear on a frame nobody ships and removes the fixture dependency entirely.

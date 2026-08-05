@@ -52,8 +52,10 @@ pub use gpu_timing::{
 };
 pub use scene_types::{
     AaActivation, BrickActivation, ClusterCullHierDispatch, CsmDepthActivation, DdgiUpdateActivation,
-    GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferMeshDraw,
-    GBufferScene, HzbPlan, InterpActivation, MAX_HZB_LEVELS, PunctualDepthActivation,
+    GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES,
+    GBufferMeshDraw, GBufferScene, HZB_DUMP_HEADER_BYTES, HZB_DUMP_HEADER_WORDS, HZB_DUMP_MAGIC,
+    HZB_DUMP_SAMPLE_BYTES, HzbDumpLayout, HzbPlan, InterpActivation, MAX_HZB_LEVELS,
+    PunctualDepthActivation,
     RcasActivation, ResolvedRenderPathGpu, SCENE_MVP_BYTES, SHADOW_SOURCE_SDF_SOFT_MARCH,
     SampledComposite, Scene, SmaaActivation, SsaaActivation, SsaoActivation, TaaActivation, UiPass,
     ViewtFromDepthActivation, ViewtFromVbDepthActivation,

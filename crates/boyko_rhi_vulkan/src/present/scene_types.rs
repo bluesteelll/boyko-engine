@@ -1407,6 +1407,183 @@ impl HzbPlan {
     }
 }
 
+/// VG R3 piece 1 step P1-6 — the `BOYKO_HZB_DUMP` header's leading word, `"HZBD"` in ASCII.
+///
+/// A magic rather than a bare length prefix: the dump is raw binary written to a path the caller
+/// chose, and a host half that decoded a truncated or unrelated file as a pyramid would report a
+/// mismatch at every texel — a red gate that names the wrong defect.
+pub const HZB_DUMP_MAGIC: u32 = 0x485A_4244;
+
+/// VG R3 piece 1 step P1-6 — the `u32` word count of the `BOYKO_HZB_DUMP` header.
+///
+/// `[magic, source_w, source_h, levels]` then `[w, h]` per level, padded to [`MAX_HZB_LEVELS`] so
+/// the header is a FIXED size and the two payload offsets are constants rather than functions of
+/// the level count.
+pub const HZB_DUMP_HEADER_WORDS: usize = 4 + 2 * MAX_HZB_LEVELS;
+
+/// VG R3 piece 1 step P1-6 — [`HZB_DUMP_HEADER_WORDS`] in bytes.
+///
+/// A multiple of 4 BY CONSTRUCTION (a `u32` word count times 4), which is what
+/// `vkCmdCopyImageToBuffer` requires of every `bufferOffset` for both a depth format and an
+/// `R32_SFLOAT` colour one. Stated rather than asserted: an assert over this expression could not
+/// fail, and this campaign's own record is that a gate which cannot fail is worse than none.
+pub const HZB_DUMP_HEADER_BYTES: u64 = (HZB_DUMP_HEADER_WORDS * 4) as u64;
+
+/// VG R3 piece 1 step P1-6 — bytes per dumped sample: `D32_SFLOAT` and `R32_SFLOAT` are both one
+/// `f32`, which is what lets the depth and the pyramid share one stride.
+pub const HZB_DUMP_SAMPLE_BYTES: u64 = 4;
+
+/// VG R3 piece 1 step P1-6 (plan §5, gate G8) — the byte layout of the `BOYKO_HZB_DUMP` staging
+/// buffer, shared by the RECORDER (which names the copy regions and writes the header) and the
+/// HOST (which sizes the staging and decodes it).
+///
+/// ```text
+///     [0, HZB_DUMP_HEADER_BYTES)          header, u32 words (see HZB_DUMP_HEADER_WORDS)
+///     [depth_offset,   +depth_bytes)      the SOURCE depth, row-major, source_w * source_h f32
+///     [pyramid_offset, +pyramid_bytes)    every mip, finest first, back to back, each row-major
+/// ```
+///
+/// ⚠️ **The pyramid region's layout is `boyko_render::hzb::HzbLayout::level_offset`'s**, spelled
+/// here in the only terms this crate can spell it in (plan §4 forbids naming `HzbLayout` from the
+/// RHI): levels back to back, finest first, each row-major, level `k` starting at the sum of
+/// `w_j * h_j` over `j < k`. That is the same sum `level_offset` computes, over the same extents —
+/// [`HzbPlan::level_extent`] IS `HzbLayout::level_extent` verbatim, threaded by the host. The two
+/// must not drift, because P1-8's host half rebuilds from the dumped depth with
+/// `boyko_render::hzb::build_pyramid` and compares its FLAT output against this region word for
+/// word; a layout disagreement would report a mismatch at every texel of every level but the
+/// first, which reads as a broken shader rather than as a broken dump.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HzbDumpLayout {
+    /// The pyramid shape the ENGINE built with — `HzbTargets::plan`, not a host re-derivation.
+    plan: HzbPlan,
+    /// The `[width, height]` of the depth the pyramid reduced (the composite render extent).
+    source: [u32; 2],
+}
+
+impl HzbDumpLayout {
+    /// The layout for one dump of `plan`'s pyramid over a `source`-sized depth.
+    #[inline]
+    #[must_use]
+    pub const fn new(plan: HzbPlan, source: [u32; 2]) -> Self {
+        Self { plan, source }
+    }
+
+    /// The pyramid shape this dump was laid out for.
+    #[inline]
+    #[must_use]
+    pub const fn plan(&self) -> HzbPlan {
+        self.plan
+    }
+
+    /// The source depth extent this dump was laid out for.
+    #[inline]
+    #[must_use]
+    pub const fn source(&self) -> [u32; 2] {
+        self.source
+    }
+
+    /// Byte offset of the depth region.
+    #[inline]
+    #[must_use]
+    pub const fn depth_offset(&self) -> u64 {
+        HZB_DUMP_HEADER_BYTES
+    }
+
+    /// Byte length of the depth region: `source_w * source_h` `f32`s.
+    #[inline]
+    #[must_use]
+    pub const fn depth_bytes(&self) -> u64 {
+        self.source[0] as u64 * self.source[1] as u64 * HZB_DUMP_SAMPLE_BYTES
+    }
+
+    /// Byte offset of the pyramid region — level 0 starts here.
+    #[inline]
+    #[must_use]
+    pub const fn pyramid_offset(&self) -> u64 {
+        HZB_DUMP_HEADER_BYTES + self.depth_bytes()
+    }
+
+    /// The TEXEL offset of level `level` inside the pyramid region — `HzbLayout::level_offset`'s
+    /// own value, and `level == levels` yields the pyramid's total texel count (which is what
+    /// makes [`Self::pyramid_texels`] a call to this).
+    ///
+    /// # Panics
+    ///
+    /// If `level > levels`.
+    #[must_use]
+    pub fn level_texel_offset(&self, level: u32) -> u64 {
+        assert!(level <= self.plan.levels, "invariant: level is inside the dumped pyramid");
+        let mut off = 0u64;
+        let mut k = 0u32;
+        while k < level {
+            // Indexed directly rather than through `extent_of`: `k < level <= levels` holds by the
+            // assertion above, so every entry read is a real level and never the tail padding.
+            let [w, h] = self.plan.level_extent[k as usize];
+            off += u64::from(w) * u64::from(h);
+            k += 1;
+        }
+        off
+    }
+
+    /// The BYTE offset of level `level` from the start of the buffer — the `bufferOffset` the
+    /// recorder puts in that level's copy region.
+    ///
+    /// # Panics
+    ///
+    /// If `level > levels`.
+    #[must_use]
+    pub fn level_byte_offset(&self, level: u32) -> u64 {
+        self.pyramid_offset() + self.level_texel_offset(level) * HZB_DUMP_SAMPLE_BYTES
+    }
+
+    /// Total texels across every level — `HzbLayout::pyramid_len`'s value.
+    #[inline]
+    #[must_use]
+    pub fn pyramid_texels(&self) -> u64 {
+        self.level_texel_offset(self.plan.levels)
+    }
+
+    /// Byte length of the pyramid region.
+    #[inline]
+    #[must_use]
+    pub fn pyramid_bytes(&self) -> u64 {
+        self.pyramid_texels() * HZB_DUMP_SAMPLE_BYTES
+    }
+
+    /// The staging size one dump needs: header + depth + pyramid.
+    #[inline]
+    #[must_use]
+    pub fn total_bytes(&self) -> u64 {
+        self.pyramid_offset() + self.pyramid_bytes()
+    }
+
+    /// The header words, in the order [`HZB_DUMP_HEADER_WORDS`] documents.
+    ///
+    /// ⚠️ **A header rather than a host re-derivation, and that is the whole point of G8.** The
+    /// gate exists to catch a WRONG extent — a pyramid built from the wrong source, or sized to a
+    /// stale one — and a host that computed the extent it expected and then decoded the dump with
+    /// it would agree with itself no matter what the engine did. These words are the numbers the
+    /// RECORDER actually copied with, so a disagreement between them and the oracle's is data in
+    /// the file rather than an assumption in the reader.
+    #[must_use]
+    pub fn header_words(&self) -> [u32; HZB_DUMP_HEADER_WORDS] {
+        let mut words = [0u32; HZB_DUMP_HEADER_WORDS];
+        words[0] = HZB_DUMP_MAGIC;
+        words[1] = self.source[0];
+        words[2] = self.source[1];
+        words[3] = self.plan.levels;
+        // `take(levels)`, so the tail stays ZERO rather than echoing the plan's padding: a reader
+        // that trusted a padded entry would see a plausible extent for a level with no storage.
+        for (level, extent) in
+            self.plan.level_extent.iter().enumerate().take(self.plan.levels as usize)
+        {
+            words[4 + 2 * level] = extent[0];
+            words[5 + 2 * level] = extent[1];
+        }
+        words
+    }
+}
+
 pub struct GBufferScene<'a> {
     /// The mesh-raster graphics pipeline (pass A). Render P5-r0: a 3-MRT G-buffer
     /// PRODUCER — the fronto-parallel quad is drawn into the D32 depth image AND the three
@@ -2917,6 +3094,23 @@ pub struct GBufferScene<'a> {
     /// (`present/passes/vb.rs`), pushing the 72-byte block and dispatching
     /// `ceil(E(d)/HZB_BUILD_TILE)` groups per axis.
     pub hzb_build_pipeline: Option<&'a ComputePipeline>,
+    /// VG R3 piece 1 step P1-6 (plan §5, gate G8): the host-visible staging one frame copies the
+    /// ENGINE'S OWN depth and every mip of the ENGINE'S OWN pyramid into — `Some` ONLY under the
+    /// `BOYKO_HZB_DUMP` probe, and `None` on every golden, interactive and test boot.
+    ///
+    /// At least [`HzbDumpLayout::total_bytes`] for THIS frame's plan and composite extent, laid
+    /// out exactly as [`HzbDumpLayout`] documents. The buffer itself is NOT a framegraph resource
+    /// (no ResId, no declared access) — the SAME untracked-staging shape `vb_cull_readback`'s four
+    /// copies and the census's own `vb_id` copy already use; what IS declared is the pass's
+    /// `TRANSFER_READ` on the two SOURCES, which is where the barriers come from.
+    ///
+    /// ⚠️ Presence here is a NECESSARY but not sufficient condition for a copy: the dump pass is
+    /// declared and recorded iff this is `Some` **and** [`Self::hzb`] is `Some` **and** the frame
+    /// carries a mesh leg. Without the mesh leg nothing wrote `vb_depth` this frame and there is
+    /// no pyramid build to observe, which is the same conjunction `hzb_build` itself carries.
+    ///
+    /// Unarmed ⇒ no pass, no barrier, no copy, no allocation ⇒ every golden pin byte-identical.
+    pub hzb_dump: Option<&'a BoundBuffer>,
 }
 
 impl GBufferScene<'_> {

@@ -2586,6 +2586,9 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // built against them anyway — the arm is ONE predicate, and it is `hzb`.
         hzb_build_layout: None,
         hzb_build_pipeline: None,
+        // VG R3 piece 1 step P1-6: the `BOYKO_HZB_DUMP` probe is unarmed here, as it is on every
+        // golden and every non-probe boot — no dump pass is declared and no copy is recorded.
+        hzb_dump: None,
     };
 
     // The composite's native size — drives the G-buffer alloc + the 1:1 top-left present.
@@ -3665,6 +3668,9 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         // built against them anyway — the arm is ONE predicate, and it is `hzb`.
         hzb_build_layout: None,
         hzb_build_pipeline: None,
+        // VG R3 piece 1 step P1-6: the `BOYKO_HZB_DUMP` probe is unarmed here, as it is on every
+        // golden and every non-probe boot — no dump pass is declared and no copy is recorded.
+        hzb_dump: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -8682,6 +8688,9 @@ fn run_showcase_body_ddgi(
         // built against them anyway — the arm is ONE predicate, and it is `hzb`.
         hzb_build_layout: None,
         hzb_build_pipeline: None,
+        // VG R3 piece 1 step P1-6: the `BOYKO_HZB_DUMP` probe is unarmed here, as it is on every
+        // golden and every non-probe boot — no dump pass is declared and no copy is recorded.
+        hzb_dump: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -10236,6 +10245,9 @@ fn run_showcase_body(
         // fixtures. The arm is ONE predicate, and it is `hzb`.
         hzb_build_layout: None,
         hzb_build_pipeline: None,
+        // VG R3 piece 1 step P1-6: the `BOYKO_HZB_DUMP` probe is unarmed here — no dump pass, no
+        // copy (see the sibling fixtures).
+        hzb_dump: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };

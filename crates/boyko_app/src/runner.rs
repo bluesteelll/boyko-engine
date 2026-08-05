@@ -961,6 +961,10 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     // VG-R0 rung R0c: the env-gated density census (`BOYKO_VG_CENSUS`). `None` on the steady path,
     // and independent of `dump` above — the two read different images at different extents.
     let mut census = crate::vg_census_dump::VgCensusDump::from_env();
+    // VG R3 piece 1 step P1-6: the env-gated HZB pyramid dump (`BOYKO_HZB_DUMP`) — gate G8's
+    // recording seam. `None` on the steady path, and independent of both drivers above: it copies
+    // the depth ring and the pyramid, neither of which the other two touch.
+    let mut hzb_dump = crate::hzb_dump::HzbDump::from_env();
     // Automated-run frame cap (the `BOYKO_WIN_HIDDEN` companion, and the app-level
     // twin of `window_present_gbuffer`'s own `BOYKO_WINDOW_FRAMES`): `BOYKO_WINDOW_FRAMES=<n>`
     // bounds this loop to `n` iterations, then exits cleanly. Without it an
@@ -2284,6 +2288,18 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 present_extent.width,
                 present_extent.height,
             );
+            // VG R3 piece 1 step P1-6: the dump's own request, sited HERE because it needs
+            // `hzb_plan` — the staging is sized from the plan's per-level extents, not from the
+            // extent alone, so it cannot be requested beside the census's at the top of the frame.
+            // `present_extent` (the COMPOSITE) for the same reason the census uses it: that is the
+            // extent the depth ring is built at and the extent the recorder's copy region names.
+            // `None` on every non-probe frame, and also on a probe run whose pyramid is disarmed —
+            // there is nothing to dump then, and the driver stays in `Request` rather than
+            // draining a staging nothing was copied into.
+            let hzb_dump_staging = match hzb_dump.as_mut() {
+                Some(d) => d.request(ctx, present_extent, hzb_plan),
+                None => None,
+            };
             // SSAA (AA campaign Stage 3, C1) — the HOST-AUTHORITATIVE LOCK: resolution is
             // a boot commitment (`WindowHost::boot`'s device-capability probe), so the
             // per-frame mode MUST agree with it, never the reverse. `host.ssaa_armed` ⇒
@@ -2411,6 +2427,10 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 // VG R3 piece 1 step P1-2: this frame's pyramid plan (the single `HzbLayout` call
                 // above). `None` on the default `HzbMode::Off` — the 0%-gate.
                 hzb_plan,
+                // VG R3 piece 1 step P1-6: the dump staging, requested just above from the SAME
+                // `hzb_plan` and the SAME `present_extent` this call threads — one site, so the
+                // staging's size and the recorder's copy regions cannot disagree.
+                hzb_dump_staging,
                 ctx,
             );
 
@@ -2656,15 +2676,34 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 .finish(ctx, &cx);
         }
 
+        // VG R3 piece 1 step P1-6 (cold): the same settle → request → drain progression for the
+        // pyramid dump. The drain is what makes the host read safe — `vb_depth` is a per-FIF RING
+        // (the pyramid is not), so the dump frame's slot fence must be re-waited before the
+        // staging is mapped.
+        let hzb_dump_ready = match hzb_dump.as_mut() {
+            Some(d) => d.after_present(presented_ok),
+            None => false,
+        };
+        if hzb_dump_ready {
+            hzb_dump
+                .take()
+                .expect("invariant: the HZB dump just reported ready")
+                .finish(ctx);
+        }
+
         // Exit once EVERY armed capture has completed. Each driver `take()`s itself on completion,
         // so `is_none()` reads "not armed, or already finished".
         //
-        // ⚠️ The conjunction is load-bearing, not tidiness. Both drivers settle for the same 30
-        // frames and drain for the same 3, so with BOTH armed they report ready on the SAME frame
-        // — and a `return` inside the first branch would exit before the second ever ran. The
-        // census would silently produce no file, which is indistinguishable from a census that ran
-        // and found nothing: a skip that does not name itself.
-        if (dump_ready || census_ready) && dump.is_none() && census.is_none() {
+        // ⚠️ The conjunction is load-bearing, not tidiness. All three drivers settle for the same
+        // 30 frames and drain for the same 3, so with several armed they report ready on the SAME
+        // frame — and a `return` inside the first branch would exit before the others ever ran.
+        // The later capture would silently produce no file, which is indistinguishable from one
+        // that ran and found nothing: a skip that does not name itself.
+        if (dump_ready || census_ready || hzb_dump_ready)
+            && dump.is_none()
+            && census.is_none()
+            && hzb_dump.is_none()
+        {
             return;
         }
 

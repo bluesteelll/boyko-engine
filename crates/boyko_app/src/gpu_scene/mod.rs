@@ -5632,6 +5632,13 @@ impl GpuSceneBundles {
         // 0%-gate. The RHI derives NOTHING from it (plan §4): the formulas live in
         // `boyko_render::hzb` and only there.
         hzb: Option<HzbPlan>,
+        // VG R3 piece 1 step P1-6: the `BOYKO_HZB_DUMP` probe's host-visible staging, threaded
+        // from `boyko_app::runner`'s `HzbDump::request` (`None` on every non-probe frame, which is
+        // every golden and every interactive run). Sized by the driver to
+        // `HzbDumpLayout::total_bytes` for the SAME `hzb` plan directly above and the SAME
+        // composite extent — the two are read from one site in the runner, so the staging and the
+        // copy regions cannot be sized from different numbers.
+        hzb_dump: Option<&'a BoundBuffer>,
         device: &VulkanContext,
     ) -> GBufferScene<'a> {
         debug_assert!(
@@ -6486,6 +6493,9 @@ impl GpuSceneBundles {
             // one predicate to disagree with.
             hzb_build_layout: Some(&self.hzb_build_layout),
             hzb_build_pipeline: Some(&self.hzb_build_pipeline),
+            // VG R3 piece 1 step P1-6: the dump staging, threaded verbatim (see this fn's
+            // `hzb_dump` param doc). `None` on every non-probe frame ⇒ no dump pass, no copy.
+            hzb_dump,
         }
     }
 

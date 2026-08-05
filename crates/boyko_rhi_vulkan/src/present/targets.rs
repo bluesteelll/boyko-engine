@@ -688,10 +688,15 @@ pub struct GBufferTargets {
 pub(crate) struct ForwardTargets {
     /// The D32_SFLOAT reverse-Z depth image RING (one per in-flight frame):
     /// `DEPTH_STENCIL_ATTACHMENT` (rasterize into, `VK_COMPARE_OP_GREATER`) | `SAMPLED`
-    /// (a future consumer's inv-proj reconstruct). Re-cleared to `0.0` (the reverse-Z
-    /// "nothing drawn yet" sentinel — farther than any real `depth ∈ (0, 1]`) every frame by
-    /// `record_forward`. RINGED (the SAME cross-frame Write-After-Read fix
-    /// [`GBufferTargets::depth`]'s doc explains).
+    /// (a future consumer's inv-proj reconstruct) | `TRANSFER_SRC` (VG R3 piece 1 step P1-6 —
+    /// gate G8's dump copy; see [`Self::build`]'s `depth_desc` for the full argument). Re-cleared
+    /// to `0.0` (the reverse-Z "nothing drawn yet" sentinel — farther than any real
+    /// `depth ∈ (0, 1]`) every frame by `record_forward`. RINGED (the SAME cross-frame
+    /// Write-After-Read fix [`GBufferTargets::depth`]'s doc explains).
+    ///
+    /// ⚠️ This is ALSO the VB path's `vb_depth`: `VbTargets` carries no depth of its own and
+    /// `VbMesh` builds a `ForwardTargets` bundle precisely to reuse this ring (see
+    /// [`VbTargets`]'s doc), so it is the image `vb_raster` writes and the HZB pyramid reduces.
     pub(crate) depth: [VulkanTexture; FRAMES_IN_FLIGHT],
     /// Forward-family Set-0 (core) bind-group RING, written ONCE per extent against
     /// [`GBufferScene::forward_layout0`](super::scene_types::GBufferScene::forward_layout0) — the
@@ -762,7 +767,26 @@ impl ForwardTargets {
             depth: 1,
             format: Format::D32Sfloat,
             dimension: TextureDimension::D2,
-            usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
+            // ⚠️ `TRANSFER_SRC` is VG R3 piece 1's ONE permanent edit outside the pyramid
+            // (plan §6), and it is here rather than behind `BOYKO_HZB_DUMP` on purpose: a usage
+            // bit is fixed at image creation, so an armed-only variant would be a SECOND image
+            // rather than the one gate G8 measures — the SAME argument `VbTargets`'s own `vb_id`
+            // `TRANSFER_SRC` makes (see that desc's comment).
+            //
+            // It exists so G8 can read the ENGINE'S OWN DEPTH: this ring is what `vb_raster`
+            // writes as `vb_depth` and what the HZB build pass reduces, and a gate that rebuilds
+            // the pyramid from a depth it produced itself (G3) cannot see a wrong source, a wrong
+            // extent or a pass that never ran.
+            //
+            // It costs nothing measurable and it is NOT free of obligation. The bit widens the
+            // allowed-usage set of a D32_SFLOAT attachment, which the driver may in principle
+            // answer with a different tiling — so it is not self-evidently pixel-neutral the way
+            // an unfiltered `R32G32_UINT` `.Load` source is, and the claim that it moves nothing
+            // is discharged by MEASUREMENT: the full golden set, run by the orchestrator on this
+            // step, armed and unarmed.
+            usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT
+                | ImageUsage::SAMPLED
+                | ImageUsage::TRANSFER_SRC,
             array_layers: 1,
             mip_levels: 1,
             view_format: None,
