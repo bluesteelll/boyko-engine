@@ -423,3 +423,126 @@ census and a hardware constraint, to fix a difference that cannot reach a pixel.
 asserts the NARROWED claim: **every** divergence in the chain is a ±0 tie, and there are EXACTLY
 three — a count that is measured AND derived (level 1 `(1,1)`, then levels 2 and 3 inherit it),
 so a change in it can be reasoned about rather than merely re-pinned.
+
+## 11. Step P1-5a — per-mip framegraph sync state, as CORRECTED by its critique
+
+Verdict `APPROVED_WITH_CHANGES`: the machine is sound and the byte-identity fold survives every
+attack on the production corpus. What was defective was everything *around* the machine — one API
+signature wrong on arrival, a migration set of four tests where the plan named one, a baseline that
+could not be certified, and four gates that could not fail.
+
+### The design, corrected
+
+**State is keyed `(ResId, mip)`.** Layers stay uniform-by-requirement; the invariant survives,
+narrowed to the layer axis. The asymmetry has a stronger justification than the plan offered:
+`texture.rs:227-231` `debug_assert!(!(is_array && mip_levels > 1))` makes mipped and layered
+**disjoint at creation**, so a flat `state_base + m` cannot collide with a layered resource. Every
+layer span in the tree is a compile-time constant and every layered resource is written and read
+whole-array. *(The plan's entry arithmetic was wrong: per-layer tracking would give **65**, not 69 —
+a layered resource is REPLACED in the flat sum, not supplemented. `sum of mip_count x layer_count`.)*
+
+**The seed is a REQUIRED argument: `add_image_mipped(name, mips, seed: ResSync)`.** The plan
+deliberately omitted a seeded-and-mipped constructor, calling its absence "a compile error the day
+it is needed". It is not; it is a **one-way door**. `add_image_mipped` would be the only declarable
+route for a mipped resource, its seed would be `undefined()`, and the pyramid is NON-RINGED — so
+frame N+1's first write to mip `d` would derive `TOP_OF_PIPE` with no dependency on frame N's
+still-pipelined reads, and no gate inspects `res_seed`. `add_image_seeded` cannot substitute: it
+yields `mip_count == 1` and the range check then rejects `base_mip > 0`. The declarator's convention
+admits no counterexample — plain `add_image` for every ringed image, `add_image_seeded` for **every**
+non-ringed one. Making the seed required turns piece 1's unanswered cross-frame WAR question into a
+compile error, which is what the omission was supposed to achieve and did not.
+
+**`resolved_layout` must be REBASED, not merely asserted.** `graph.rs:528` is
+`state[res.index()]`; once `state` is mip-weighted the correct entry is
+`state[res_shape[ri].state_base]`. The plan's proposed "assert the resource is single-mip" is
+ORTHOGONAL to the precondition the index needs — `state_base(i) == i` iff every EARLIER resource is
+single-mip. Declare `depth`(1), `pyramid`(10), `lit`(1) and `resolved_layout(lit)` reads the
+pyramid's mip 2: the assert passes, the bounds check passes (and gets WEAKER, since `state.len()`
+grew), and release returns a neighbour's layout. Five of the ten expectations at
+`tests/framegraph_gbuffer_equiv.rs:233-242` are `GENERAL`, so the wrong read agrees by coincidence.
+
+**`res_written` must be mip-weighted too.** It is `#[cfg(debug_assertions)]`, so this costs nothing
+in release. Left per-ResId while `state` goes per-mip, a pure-read consumer of a mip its writer
+never wrote is silent — the guard sees the ResId as written — and `transition` then takes the
+first-touch arm and emits `UNDEFINED -> GENERAL`, which is verbatim the failure `graph.rs:350-352`
+says the guard exists to prevent. `res_sub_witness` stays per-ResId (the invariant is layer-only).
+
+### The gates, with the four that could not fail replaced
+
+- **G-A1** the ordered barrier-stream pin, authored on the unmodified tree FIRST. Scope: the
+  deferred replica only; VB and Forward have no barrier-level test, and the bridge is the
+  release-live range check plus the fold.
+- **G-A2** the differential against a frozen `compile_per_resource_reference`, plus proptest over
+  single-mip graphs. It is **structurally incapable** of testing `state_base`: over an all-1s corpus
+  `total += mip_count` and `total += 1` are the same function.
+- **NEW, closing that hole:** a fixture declaring `[single, mipped(M>=3), single, mipped(M>=2)]` and
+  asserting the derived barriers on the **LAST** resource. Every proposed G-B fixture used one
+  mipped resource declared last, where the buggy and correct prefix sums agree. The escape is
+  silent, not loud — the aliasing index stays in bounds — and it would detonate at P1-6, where the
+  declarator puts ~20 resources after the image block.
+- **G-B3 must be authored in the LAYOUT-CHANGING shape.** `transition` returns `None` only on a
+  READ, so a write-authored "a free mip breaks the run" fixture tests nothing. Correct: write [0,3)
+  GENERAL, read mip 1 alone at SRO, read [0,3) at SRO — asserting both barriers field-by-field.
+- **G-E replaced.** `state.capacity()` across reset+recompile measures a property of `Vec`, not of
+  the plan: `clear` retains capacity, and a fresh same-size allocation every frame would pass.
+  Worse, `reset()` itself clears `state`, so a dropped `clear()` in the new seed loop is MASKED by a
+  reset+recompile gate. Assert `res_state_total <= N` directly, and compile TWICE WITHOUT RESET.
+  *(Correction the plan must absorb: `frame_driver.rs:188` is `with_capacity(16, 16, 64)` under a
+  comment claiming zero-alloc, while the deferred declarator mints 33 resources — `state` already
+  grows on frame 1 today, so "assert capacity unchanged" fails on the production shape.)*
+- **Nothing reads RECORDED order.** Every gate reads `img_barriers()`/`pass_barriers()`, but
+  `record.rs:92-99` groups by stage pair alone and never inspects `subresource`, and one group
+  lowers to one `vkCmdPipelineBarrier`. Add a `BarrierSink` asserting, per pass, that no two
+  barriers in one emitted group intersect in `(res, mip span, layer span)` and that per `(res, mip)`
+  the recorded order equals the derived order.
+
+### Commit order, which the findings make mandatory
+
+- **C0 — DONE.** `#[cfg(debug_assertions)]` on the two `#[should_panic]` tests over `debug_assert!`
+  guards. **The release leg was RED before this**: `12 passed; 2 failed`, measured, and CI runs
+  `cargo test --workspace --all-targets --release`. A baseline cannot be authored on a leg that does
+  not pass.
+- **C1** — the G-A1 stream pin and the frozen reference, on the unmodified tree. Authoring them
+  after the change would certify the new behaviour.
+- **C2** — the machine, all four test migrations, and every gate, ATOMICALLY: the invariant retarget
+  and the migration cannot be split without a red intermediate.
+
+### The four test sites that migrate, which the plan named as one
+
+`tests/framegraph_gbuffer_equiv.rs` pairs `add_image("pyramid")` with `SubRange::color_mips(4)` in
+FOUR graphs: `:989`, `:1024`, `:1080`, `:1162`. Under the corrected design `add_image` means
+`mips = 1` and the range check is release-live in `image_access` — a DECLARE-time function — so the
+first three would panic with the RANGE-CHECK message and fail their `should_panic(expected = ...)`
+substring, and the fourth (`subresource_guard_does_not_leak_across_reset_and_recompile`, green and
+ungated in both legs today, asserting `img_barriers().len() == 2`) would go from green to a hard
+failure. **The plan named none of them.**
+
+Two further consequences: the range-check panic message must be FORBIDDEN from containing the
+substring `HZB-SUBRESOURCE-UNIFORM`, or the cheapest repair fuses two distinct failure modes into
+one — a third vacuous gate. And the layer-axis RED fixture must be authored NEW: no test in the
+corpus varies `layer_count` on one resource, and `color_mips` hard-pins `base_layer: 0,
+layer_count: 1`, so the layer-narrowed guard cannot be reached by flipping anything that exists.
+
+### Mechanical facts the refutations established — do not re-derive
+
+- `push_res` (`graph.rs:219-230`) is the SOLE writer of all four per-resource arenas; all four
+  public constructors funnel through it. `ResId(` is constructed in exactly one place workspace-wide.
+- `push_access` (`graph.rs:275`) is the SOLE writer of `acc_sub`; its only callers are
+  `image_access` and `buffer_access` (which hardcodes `SubRange::COLOR`). **A check in
+  `image_access` therefore DOMINATES every mip-weighted index** — provable, not assumed.
+- `self.state` has exactly THREE index sites: `graph.rs:451`, `:525`, `:528`.
+- `same_span` has exactly two sites; the rename is a 2-site change.
+- **`SubRange::color_mips` has ZERO production call sites** workspace-wide.
+- **`resolved_layout` has ZERO production callers** — its only ten sites are in the equiv test.
+- `VK_REMAINING_MIP_LEVELS` is **not defined anywhere** in the engine; the range-check test must
+  spell `u32::MAX`.
+- There are **FOUR** production `compile()` sites, not three: the three declarators plus
+  `frame_driver.rs:194-222`, a 4-image boot graph declared with no preceding `reset()`.
+- `transition` returns `None` **only on a read**, for images.
+- `MAX_PASS_BARRIERS = 16` is a stack CHUNK size, explicitly "NOT a hard cap"; oversized passes
+  chunk soundly, and the bound is PER PASS.
+- Release runs with `debug-assertions` and `overflow-checks` OFF (only `[profile.bench]` is declared).
+- `Trans` derives `PartialEq`/`Eq`, so the merge's `t == rt` compiles; `SubRange` derives
+  `PartialEq` over all five fields, and the equiv test's `has_img` compares `subresource` in FULL —
+  so a `layer_count` transcription slip is caught by already-committed assertions.
+- `texture.rs:227-231` makes mipped and layered DISJOINT at image creation.

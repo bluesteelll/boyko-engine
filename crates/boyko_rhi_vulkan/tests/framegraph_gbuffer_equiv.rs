@@ -8,9 +8,12 @@
 //! runs on any machine (no `#[ignore]`, no Vulkan device). It is the reference
 //! the live hand path is measured against before Step 1f deletes it.
 
+use std::fmt::Write as _;
+
 use boyko_rhi_vulkan::ffi::{
     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
     VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+    VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_ASPECT_DEPTH_BIT,
     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
     VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_UNDEFINED,
@@ -20,7 +23,9 @@ use boyko_rhi_vulkan::ffi::{
     VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
     VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
 };
-use boyko_rhi_vulkan::framegraph::{BufBarrier, FrameGraph, ImgBarrier, ResId, ResSync, SubRange};
+use boyko_rhi_vulkan::framegraph::{
+    BufBarrier, FrameGraph, ImgBarrier, PassBarrierRange, ResId, ResSync, SubRange,
+};
 
 /// Cascade / atlas layer counts, pinned to the scene's clamped `csm.active_count`
 /// and atlas `active_layers` (record_gbuffer clamps `[1, MAX_CASCADES]` /
@@ -1197,4 +1202,927 @@ fn subresource_guard_does_not_leak_across_reset_and_recompile() {
 
     // Two hazards: the first-touch UNDEFINED→GENERAL write, then the RAW read.
     assert_eq!(g.img_barriers().len(), 2);
+}
+
+// ===========================================================================
+// VG R3 P1-5a commit C1 — the BASELINE barrier-stream pin.
+//
+// Step P1-5a re-keys the framegraph's sync state from `ResId` to `(ResId, mip)`.
+// Its central claim is that every path that exists TODAY keeps emitting a
+// BYTE-IDENTICAL barrier stream — not "an equivalent one". Nothing above can
+// check that: the count pin cannot see a reordering, the membership pins cannot
+// see a redundant barrier, and no golden image can see either (a barrier stream
+// differs from a correct one in ways an 8-bit framebuffer never renders — a
+// missing hazard has to both materialise on this machine's scheduler AND survive
+// quantisation before a pixel moves).
+//
+// So the stream is pinned FIRST, on the UNMODIFIED tree. Authoring this pin after
+// the re-key would certify the NEW behaviour under the old name, which is the
+// false-fresh trap: the numbers would agree with the code because they were read
+// off it.
+//
+// This section adds no behaviour. It is a generator, a pin, and the tables both
+// share.
+// ===========================================================================
+
+/// The passes [`build_maximal_frame`] declares, in `add_pass` order.
+///
+/// `FrameGraph` exposes no pass-name accessor (`pass_barriers()` returns bare index
+/// ranges), so the dumper and the divergence report read pass names from here. The pin
+/// asserts this table's length against `pass_barriers().len()`, so a pass added to the
+/// frame without a row here fails loudly instead of silently mislabelling every later
+/// entry in a failure report.
+const MAXIMAL_FRAME_PASS_NAMES: &[&str] = &[
+    "raster",
+    "light_upload",
+    "coarse_cull",
+    "marcher",
+    "ssao",
+    "light_cull",
+    "csm_depth",
+    "atlas_depth",
+    "resolve",
+    "present_draw",
+    "present_transition",
+];
+
+/// Single-BIT `VkPipelineStageFlags` → the constant name, in ascending bit order.
+///
+/// ONLY constants `use`d at the top of this file may appear here: the dumper emits these
+/// names verbatim into text that must COMPILE when pasted, and the table is the compiler's
+/// own witness of that — a name not in scope fails to build this table, not the paste.
+/// Ascending order makes a multi-bit mask render the same way every run, so a diff of two
+/// dumps is a diff of the stream and not of the formatter.
+const STAGE_BITS: &[(u32, &str)] = &[
+    (VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, "VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT"),
+    (VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, "VK_PIPELINE_STAGE_VERTEX_SHADER_BIT"),
+    (VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, "VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT"),
+    (VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, "VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT"),
+    (VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, "VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT"),
+    (VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, "VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT"),
+    (VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, "VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT"),
+    (VK_PIPELINE_STAGE_TRANSFER_BIT, "VK_PIPELINE_STAGE_TRANSFER_BIT"),
+    (VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, "VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT"),
+];
+
+/// Single-BIT `VkAccessFlags` → the constant name, in ascending bit order (see [`STAGE_BITS`]).
+const ACCESS_BITS: &[(u32, &str)] = &[
+    (VK_ACCESS_SHADER_READ_BIT, "VK_ACCESS_SHADER_READ_BIT"),
+    (VK_ACCESS_SHADER_WRITE_BIT, "VK_ACCESS_SHADER_WRITE_BIT"),
+    (VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, "VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT"),
+    (VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, "VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT"),
+    (VK_ACCESS_TRANSFER_WRITE_BIT, "VK_ACCESS_TRANSFER_WRITE_BIT"),
+];
+
+/// Single-BIT `VkImageAspectFlags` → the constant name (see [`STAGE_BITS`]).
+const ASPECT_BITS: &[(u32, &str)] = &[
+    (VK_IMAGE_ASPECT_COLOR_BIT, "VK_IMAGE_ASPECT_COLOR_BIT"),
+    (VK_IMAGE_ASPECT_DEPTH_BIT, "VK_IMAGE_ASPECT_DEPTH_BIT"),
+];
+
+/// `VkImageLayout` value → the constant name (see [`STAGE_BITS`]). Layouts are enum-valued,
+/// not a bit set, so this is an exact-match table.
+const LAYOUT_VALUES: &[(i32, &str)] = &[
+    (VK_IMAGE_LAYOUT_UNDEFINED, "VK_IMAGE_LAYOUT_UNDEFINED"),
+    (VK_IMAGE_LAYOUT_GENERAL, "VK_IMAGE_LAYOUT_GENERAL"),
+    (VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, "VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL"),
+    (VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, "VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL"),
+    (VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, "VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL"),
+    (VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, "VK_IMAGE_LAYOUT_PRESENT_SRC_KHR"),
+];
+
+/// A stage/access/aspect mask as a Rust expression: the `|`-joined names of the known bits,
+/// plus a `0x…` literal for any bit this file has no name for, and a bare `0` for an empty
+/// mask (`dst_access: 0` on the present transition, `src_access: 0` on every WAR/first touch).
+///
+/// The hex tail is what keeps the emitter HONEST: an unknown bit is printed rather than
+/// dropped, so a pasted expectation still equals the value it was measured from.
+fn mask_expr(mask: u32, table: &[(u32, &str)]) -> String {
+    if mask == 0 {
+        return "0".to_string();
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut rest = mask;
+    for &(bit, name) in table {
+        if rest & bit != 0 {
+            parts.push(name.to_string());
+            rest &= !bit;
+        }
+    }
+    if rest != 0 {
+        parts.push(format!("0x{rest:X}"));
+    }
+    parts.join(" | ")
+}
+
+/// A `VkImageLayout` as a Rust expression: the constant name if this file has one in scope,
+/// else the raw literal (which still compiles, and still equals what was measured).
+fn layout_expr(layout: i32) -> String {
+    LAYOUT_VALUES
+        .iter()
+        .find(|&&(value, _)| value == layout)
+        .map_or_else(|| layout.to_string(), |&(_, name)| name.to_string())
+}
+
+/// The resource's declared debug name, quoted — or a loud marker when the `ResId` is outside
+/// the frame's declared range.
+///
+/// `FrameGraph::res_name` PANICS on an out-of-range `ResId`, and the divergence report below
+/// labels the EXPECTED side too, whose `ResId` comes from a hand-pasted literal. A panic
+/// while formatting a failure message would replace the diagnosis with its own noise.
+/// `alloc` is the LAST resource [`build_maximal_frame`] declares, so its index is the bound.
+fn res_label(f: &Frame, res: ResId) -> String {
+    if res.index() <= f.alloc.index() {
+        format!("{:?}", f.g.res_name(res))
+    } else {
+        format!("<ResId {} is outside this frame's {} resources>", res.0, f.alloc.index() + 1)
+    }
+}
+
+/// One derived [`ImgBarrier`] as a copy-pasteable Rust struct literal, with the resource name
+/// as a trailing comment on the `res` line so a human diff of two dumps reads as prose.
+fn img_barrier_source(b: &ImgBarrier, label: &str, index: usize) -> String {
+    let mut s = String::new();
+    let _ = writeln!(s, "    ImgBarrier {{");
+    let _ = writeln!(s, "        res: ResId({}), // [{index}] {label}", b.res.0);
+    let _ = writeln!(s, "        src_stage: {},", mask_expr(b.src_stage, STAGE_BITS));
+    let _ = writeln!(s, "        dst_stage: {},", mask_expr(b.dst_stage, STAGE_BITS));
+    let _ = writeln!(s, "        src_access: {},", mask_expr(b.src_access, ACCESS_BITS));
+    let _ = writeln!(s, "        dst_access: {},", mask_expr(b.dst_access, ACCESS_BITS));
+    let _ = writeln!(s, "        old_layout: {},", layout_expr(b.old_layout));
+    let _ = writeln!(s, "        new_layout: {},", layout_expr(b.new_layout));
+    let sub = b.subresource;
+    let _ = writeln!(
+        s,
+        "        subresource: SubRange {{ aspect: {}, base_mip: {}, mip_count: {}, base_layer: {}, layer_count: {} }},",
+        mask_expr(sub.aspect, ASPECT_BITS),
+        sub.base_mip,
+        sub.mip_count,
+        sub.base_layer,
+        sub.layer_count,
+    );
+    let _ = writeln!(s, "    }},");
+    s
+}
+
+/// One derived [`BufBarrier`] as a copy-pasteable Rust struct literal (see
+/// [`img_barrier_source`]). Buffers carry no layout and no subresource.
+fn buf_barrier_source(b: &BufBarrier, label: &str, index: usize) -> String {
+    let mut s = String::new();
+    let _ = writeln!(s, "    BufBarrier {{");
+    let _ = writeln!(s, "        res: ResId({}), // [{index}] {label}", b.res.0);
+    let _ = writeln!(s, "        src_stage: {},", mask_expr(b.src_stage, STAGE_BITS));
+    let _ = writeln!(s, "        dst_stage: {},", mask_expr(b.dst_stage, STAGE_BITS));
+    let _ = writeln!(s, "        src_access: {},", mask_expr(b.src_access, ACCESS_BITS));
+    let _ = writeln!(s, "        dst_access: {},", mask_expr(b.dst_access, ACCESS_BITS));
+    let _ = writeln!(s, "    }},");
+    s
+}
+
+/// One [`PassBarrierRange`] as a copy-pasteable Rust struct literal, labelled with the pass
+/// name from [`MAXIMAL_FRAME_PASS_NAMES`].
+fn pass_range_source(r: &PassBarrierRange, label: &str, index: usize) -> String {
+    format!(
+        "    PassBarrierRange {{ img_begin: {}, img_count: {}, buf_begin: {}, buf_count: {} }}, // [{index}] {label}\n",
+        r.img_begin, r.img_count, r.buf_begin, r.buf_count,
+    )
+}
+
+/// The pass name at `index`, or a loud marker when the pin outran
+/// [`MAXIMAL_FRAME_PASS_NAMES`] (same reasoning as [`res_label`]: a formatter must not panic
+/// while reporting someone else's failure).
+fn pass_label(index: usize) -> String {
+    MAXIMAL_FRAME_PASS_NAMES
+        .get(index)
+        .map_or_else(|| format!("<no name for pass {index}>"), |name| format!("{name:?}"))
+}
+
+/// **GENERATOR, not a gate** — prints the whole compiled stream of
+/// [`build_maximal_frame`] as the three expectation constants below, ready to paste.
+///
+/// ```text
+/// cargo test -p boyko_rhi_vulkan --test framegraph_gbuffer_equiv \
+///     dump_maximal_frame_barrier_stream -- --ignored --nocapture
+/// ```
+///
+/// `#[ignore]` because it asserts nothing: it exists so the pin's expectation is MEASURED
+/// off a compile rather than predicted by whoever writes the pin. Predicting a barrier
+/// stream and then confirming it is a gate wearing a prediction's clothes — the values are
+/// read off `compile()` and pasted, and thereafter they say what the graph DOES.
+///
+/// `--nocapture` is not optional: without it libtest swallows the output and the run looks
+/// like a silent pass.
+#[test]
+#[ignore = "generator, not a gate: prints the pin below as Rust source; the orchestrator runs it"]
+fn dump_maximal_frame_barrier_stream() {
+    let f = build_maximal_frame();
+    let img = f.g.img_barriers();
+    let buf = f.g.buf_barriers();
+    let passes = f.g.pass_barriers();
+
+    println!("// ===== BEGIN dump_maximal_frame_barrier_stream =====");
+    println!(
+        "// {} image barriers, {} buffer barriers, {} pass ranges.",
+        img.len(),
+        buf.len(),
+        passes.len()
+    );
+    println!("// Replace each `const EXPECTED_…` array in framegraph_gbuffer_equiv.rs (each");
+    println!("// currently holds one TBD_* sentinel) with the matching block below, KEEPING");
+    println!("// the `///` doc comment already above it.");
+    println!();
+
+    println!("const EXPECTED_IMG_BARRIERS: &[ImgBarrier] = &[");
+    for (i, b) in img.iter().enumerate() {
+        print!("{}", img_barrier_source(b, &res_label(&f, b.res), i));
+    }
+    println!("];");
+    println!();
+
+    println!("const EXPECTED_BUF_BARRIERS: &[BufBarrier] = &[");
+    for (i, b) in buf.iter().enumerate() {
+        print!("{}", buf_barrier_source(b, &res_label(&f, b.res), i));
+    }
+    println!("];");
+    println!();
+
+    println!("const EXPECTED_PASS_BARRIERS: &[PassBarrierRange] = &[");
+    for (i, r) in passes.iter().enumerate() {
+        print!("{}", pass_range_source(r, &pass_label(i), i));
+    }
+    println!("];");
+    println!("// ===== END dump_maximal_frame_barrier_stream =====");
+}
+
+/// **A barrier that has not been MEASURED yet** — the `CENSUS_TBD` shape of
+/// `vb_batch_cull_spv_sync.rs`, carried from a scalar to a struct.
+///
+/// Every field is its type's MAX: `ResId(u16::MAX)` names no resource in any frame graph
+/// (the arena is debug-asserted below `u16::MAX`), `u32::MAX` is not a stage/access mask the
+/// frame can form, and `i32::MAX` is not a `VkImageLayout`. So it cannot be mistaken for a
+/// plausible barrier and cannot satisfy any comparison in the pin — an unfilled baseline
+/// fails loudly rather than asserting something convenient, and even with the pin's explicit
+/// placeholder guard removed the divergence report would name it (`res_label` renders the
+/// `ResId` as out-of-range).
+const TBD_IMG_BARRIER: ImgBarrier = ImgBarrier {
+    res: ResId(u16::MAX),
+    src_stage: u32::MAX,
+    dst_stage: u32::MAX,
+    src_access: u32::MAX,
+    dst_access: u32::MAX,
+    old_layout: i32::MAX,
+    new_layout: i32::MAX,
+    subresource: SubRange {
+        aspect: u32::MAX,
+        base_mip: u32::MAX,
+        mip_count: u32::MAX,
+        base_layer: u32::MAX,
+        layer_count: u32::MAX,
+    },
+};
+
+/// The buffer-barrier unfilled sentinel — see [`TBD_IMG_BARRIER`].
+const TBD_BUF_BARRIER: BufBarrier = BufBarrier {
+    res: ResId(u16::MAX),
+    src_stage: u32::MAX,
+    dst_stage: u32::MAX,
+    src_access: u32::MAX,
+    dst_access: u32::MAX,
+};
+
+/// The per-pass-range unfilled sentinel — see [`TBD_IMG_BARRIER`]. `u32::MAX` begins no
+/// slice into an arena the frame can fill.
+const TBD_PASS_RANGE: PassBarrierRange = PassBarrierRange {
+    img_begin: u32::MAX,
+    img_count: u32::MAX,
+    buf_begin: u32::MAX,
+    buf_count: u32::MAX,
+};
+
+/// **The UNFILLED image-barrier expectation.**
+///
+/// # Why a placeholder and not a prediction
+///
+/// The values are read off `dump_maximal_frame_barrier_stream` and pasted. A stream derived
+/// by hand from the state machine, or by calling `compile()` a second time inside the pin,
+/// asserts only that the code equals itself: both sides would move together under exactly
+/// the change this pin exists to catch.
+///
+/// Once filled these are MEASURED, and the rule the census pins state applies here too — do
+/// NOT edit these literals to make a failing run green. They say what the graph emits, and a
+/// change in them is a change in the frame's synchronisation.
+const EXPECTED_IMG_BARRIERS: &[ImgBarrier] = &[
+    ImgBarrier {
+        res: ResId(0), // [0] "albedo"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(1), // [1] "normal"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(2), // [2] "material"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(3), // [3] "depth"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(3), // [4] "depth"
+        src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(0), // [5] "albedo"
+        src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(1), // [6] "normal"
+        src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(2), // [7] "material"
+        src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(4), // [8] "viewt"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(1), // [9] "normal"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(2), // [10] "material"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(4), // [11] "viewt"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(6), // [12] "ssao"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(7), // [13] "cascade"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 4 },
+    },
+    ImgBarrier {
+        res: ResId(8), // [14] "atlas"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 6 },
+    },
+    ImgBarrier {
+        res: ResId(0), // [15] "albedo"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(6), // [16] "ssao"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(7), // [17] "cascade"
+        src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 4 },
+    },
+    ImgBarrier {
+        res: ResId(8), // [18] "atlas"
+        src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 6 },
+    },
+    ImgBarrier {
+        res: ResId(5), // [19] "lit"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(5), // [20] "lit"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(9), // [21] "swapchain"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(9), // [22] "swapchain"
+        src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        dst_stage: VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        dst_access: 0,
+        old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+];
+
+/// **The UNFILLED buffer-barrier expectation** — see [`EXPECTED_IMG_BARRIERS`].
+const EXPECTED_BUF_BARRIERS: &[BufBarrier] = &[
+    BufBarrier {
+        res: ResId(10), // [0] "light_table"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+    },
+    BufBarrier {
+        res: ResId(11), // [1] "tiles"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+    },
+    BufBarrier {
+        res: ResId(11), // [2] "tiles"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(14), // [3] "alloc"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+    },
+    BufBarrier {
+        res: ResId(14), // [4] "alloc"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+    },
+    BufBarrier {
+        res: ResId(10), // [5] "light_table"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(12), // [6] "grid"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+    },
+    BufBarrier {
+        res: ResId(13), // [7] "index"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+    },
+    BufBarrier {
+        res: ResId(12), // [8] "grid"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(13), // [9] "index"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+];
+
+/// **The UNFILLED per-pass range expectation** — see [`EXPECTED_IMG_BARRIERS`].
+///
+/// This is the array a count pin cannot substitute for: the totals can be right while the
+/// barriers sit in front of the WRONG passes, which is precisely the failure mode of a
+/// re-keyed state machine that flushes a hazard one pass early or late.
+const EXPECTED_PASS_BARRIERS: &[PassBarrierRange] = &[
+    PassBarrierRange { img_begin: 0, img_count: 4, buf_begin: 0, buf_count: 0 }, // [0] "raster"
+    PassBarrierRange { img_begin: 4, img_count: 0, buf_begin: 0, buf_count: 1 }, // [1] "light_upload"
+    PassBarrierRange { img_begin: 4, img_count: 1, buf_begin: 1, buf_count: 1 }, // [2] "coarse_cull"
+    PassBarrierRange { img_begin: 5, img_count: 4, buf_begin: 2, buf_count: 1 }, // [3] "marcher"
+    PassBarrierRange { img_begin: 9, img_count: 4, buf_begin: 3, buf_count: 0 }, // [4] "ssao"
+    PassBarrierRange { img_begin: 13, img_count: 0, buf_begin: 3, buf_count: 5 }, // [5] "light_cull"
+    PassBarrierRange { img_begin: 13, img_count: 1, buf_begin: 8, buf_count: 0 }, // [6] "csm_depth"
+    PassBarrierRange { img_begin: 14, img_count: 1, buf_begin: 8, buf_count: 0 }, // [7] "atlas_depth"
+    PassBarrierRange { img_begin: 15, img_count: 5, buf_begin: 8, buf_count: 2 }, // [8] "resolve"
+    PassBarrierRange { img_begin: 20, img_count: 2, buf_begin: 10, buf_count: 0 }, // [9] "present_draw"
+    PassBarrierRange { img_begin: 22, img_count: 1, buf_begin: 10, buf_count: 0 }, // [10] "present_transition"
+];
+
+/// The first index at which two streams differ, INCLUDING a length difference (reported at
+/// the end of the shorter one). `None` iff the two are element-for-element equal.
+fn first_divergence<T: PartialEq>(actual: &[T], expected: &[T]) -> Option<usize> {
+    if let Some(i) = actual.iter().zip(expected.iter()).position(|(a, e)| a != e) {
+        return Some(i);
+    }
+    if actual.len() != expected.len() {
+        return Some(actual.len().min(expected.len()));
+    }
+    None
+}
+
+/// The names of the [`ImgBarrier`] fields that differ, so a failure says WHICH axis moved
+/// (a widened `subresource` and a reordered stream read very differently, and the reader
+/// should not have to diff eight lines by eye to tell them apart).
+fn img_field_diffs(a: &ImgBarrier, e: &ImgBarrier) -> String {
+    let mut d: Vec<&str> = Vec::new();
+    if a.res != e.res {
+        d.push("res");
+    }
+    if a.src_stage != e.src_stage {
+        d.push("src_stage");
+    }
+    if a.dst_stage != e.dst_stage {
+        d.push("dst_stage");
+    }
+    if a.src_access != e.src_access {
+        d.push("src_access");
+    }
+    if a.dst_access != e.dst_access {
+        d.push("dst_access");
+    }
+    if a.old_layout != e.old_layout {
+        d.push("old_layout");
+    }
+    if a.new_layout != e.new_layout {
+        d.push("new_layout");
+    }
+    if a.subresource.aspect != e.subresource.aspect {
+        d.push("subresource.aspect");
+    }
+    if a.subresource.base_mip != e.subresource.base_mip {
+        d.push("subresource.base_mip");
+    }
+    if a.subresource.mip_count != e.subresource.mip_count {
+        d.push("subresource.mip_count");
+    }
+    if a.subresource.base_layer != e.subresource.base_layer {
+        d.push("subresource.base_layer");
+    }
+    if a.subresource.layer_count != e.subresource.layer_count {
+        d.push("subresource.layer_count");
+    }
+    d.join(", ")
+}
+
+/// The names of the [`BufBarrier`] fields that differ (see [`img_field_diffs`]).
+fn buf_field_diffs(a: &BufBarrier, e: &BufBarrier) -> String {
+    let mut d: Vec<&str> = Vec::new();
+    if a.res != e.res {
+        d.push("res");
+    }
+    if a.src_stage != e.src_stage {
+        d.push("src_stage");
+    }
+    if a.dst_stage != e.dst_stage {
+        d.push("dst_stage");
+    }
+    if a.src_access != e.src_access {
+        d.push("src_access");
+    }
+    if a.dst_access != e.dst_access {
+        d.push("dst_access");
+    }
+    d.join(", ")
+}
+
+/// One [`ImgBarrier`], field by field, each mask as BOTH its raw value and its `VK_*` name.
+///
+/// The raw value is there because a name table is a claim about the value, and a failure
+/// report is the wrong place to trust one.
+fn describe_img(f: &Frame, b: &ImgBarrier) -> String {
+    let sub = b.subresource;
+    let mut s = String::new();
+    let _ = writeln!(s, "    res         = ResId({}) {}", b.res.0, res_label(f, b.res));
+    let _ = writeln!(s, "    src_stage   = 0x{:08X}  {}", b.src_stage, mask_expr(b.src_stage, STAGE_BITS));
+    let _ = writeln!(s, "    dst_stage   = 0x{:08X}  {}", b.dst_stage, mask_expr(b.dst_stage, STAGE_BITS));
+    let _ = writeln!(s, "    src_access  = 0x{:08X}  {}", b.src_access, mask_expr(b.src_access, ACCESS_BITS));
+    let _ = writeln!(s, "    dst_access  = 0x{:08X}  {}", b.dst_access, mask_expr(b.dst_access, ACCESS_BITS));
+    let _ = writeln!(s, "    old_layout  = {:<11} {}", b.old_layout, layout_expr(b.old_layout));
+    let _ = writeln!(s, "    new_layout  = {:<11} {}", b.new_layout, layout_expr(b.new_layout));
+    let _ = writeln!(
+        s,
+        "    subresource = aspect 0x{:X} {}, mips [{}, {}), layers [{}, {})",
+        sub.aspect,
+        mask_expr(sub.aspect, ASPECT_BITS),
+        sub.base_mip,
+        sub.base_mip + sub.mip_count,
+        sub.base_layer,
+        sub.base_layer + sub.layer_count,
+    );
+    s
+}
+
+/// One [`BufBarrier`], field by field (see [`describe_img`]).
+fn describe_buf(f: &Frame, b: &BufBarrier) -> String {
+    let mut s = String::new();
+    let _ = writeln!(s, "    res        = ResId({}) {}", b.res.0, res_label(f, b.res));
+    let _ = writeln!(s, "    src_stage  = 0x{:08X}  {}", b.src_stage, mask_expr(b.src_stage, STAGE_BITS));
+    let _ = writeln!(s, "    dst_stage  = 0x{:08X}  {}", b.dst_stage, mask_expr(b.dst_stage, STAGE_BITS));
+    let _ = writeln!(s, "    src_access = 0x{:08X}  {}", b.src_access, mask_expr(b.src_access, ACCESS_BITS));
+    let _ = writeln!(s, "    dst_access = 0x{:08X}  {}", b.dst_access, mask_expr(b.dst_access, ACCESS_BITS));
+    s
+}
+
+/// One [`PassBarrierRange`], field by field, with the pass name.
+fn describe_pass(r: &PassBarrierRange, index: usize) -> String {
+    format!(
+        "    pass {} img [{}, {}) buf [{}, {})\n",
+        pass_label(index),
+        r.img_begin,
+        r.img_begin + r.img_count,
+        r.buf_begin,
+        r.buf_begin + r.buf_count,
+    )
+}
+
+/// The shared head of every divergence report: what diverged, where, and how to act on it.
+fn divergence_header(kind: &str, index: usize, actual_len: usize, expected_len: usize) -> String {
+    format!(
+        "the compiled {kind} stream of `build_maximal_frame` diverged from the pinned \
+         baseline at index {index} (compiled {actual_len} entries, pinned {expected_len}).\n\
+         This pin is the VG R3 P1-5a BASELINE: it was measured on the per-ResId state \
+         machine BEFORE the (ResId, mip) re-key, and P1-5a's claim is that it does not \
+         move. If you believe the new stream is correct, re-run \
+         `dump_maximal_frame_barrier_stream` and justify EVERY changed line — do not paste \
+         over the pin to make this green.\n"
+    )
+}
+
+/// The full image-stream divergence report: the first differing index, which fields moved,
+/// and both sides field-by-field with the resource NAME on each.
+fn img_divergence_report(f: &Frame, actual: &[ImgBarrier], expected: &[ImgBarrier], i: usize) -> String {
+    let mut s = divergence_header("IMAGE barrier", i, actual.len(), expected.len());
+    match (actual.get(i), expected.get(i)) {
+        (Some(a), Some(e)) => {
+            let _ = writeln!(s, "  fields that differ: {}", img_field_diffs(a, e));
+            let _ = writeln!(s, "  COMPILED [{i}]:\n{}", describe_img(f, a));
+            let _ = writeln!(s, "  PINNED   [{i}]:\n{}", describe_img(f, e));
+        }
+        (Some(a), None) => {
+            let _ = writeln!(s, "  the pinned stream ENDS here; the compiled one continues with:");
+            let _ = writeln!(s, "  COMPILED [{i}]:\n{}", describe_img(f, a));
+        }
+        (None, Some(e)) => {
+            let _ = writeln!(s, "  the compiled stream ENDS here; the pin still expects:");
+            let _ = writeln!(s, "  PINNED   [{i}]:\n{}", describe_img(f, e));
+        }
+        (None, None) => {
+            let _ = writeln!(s, "  index is past BOTH streams — bug in `first_divergence`.");
+        }
+    }
+    s
+}
+
+/// The full buffer-stream divergence report (see [`img_divergence_report`]).
+fn buf_divergence_report(f: &Frame, actual: &[BufBarrier], expected: &[BufBarrier], i: usize) -> String {
+    let mut s = divergence_header("BUFFER barrier", i, actual.len(), expected.len());
+    match (actual.get(i), expected.get(i)) {
+        (Some(a), Some(e)) => {
+            let _ = writeln!(s, "  fields that differ: {}", buf_field_diffs(a, e));
+            let _ = writeln!(s, "  COMPILED [{i}]:\n{}", describe_buf(f, a));
+            let _ = writeln!(s, "  PINNED   [{i}]:\n{}", describe_buf(f, e));
+        }
+        (Some(a), None) => {
+            let _ = writeln!(s, "  the pinned stream ENDS here; the compiled one continues with:");
+            let _ = writeln!(s, "  COMPILED [{i}]:\n{}", describe_buf(f, a));
+        }
+        (None, Some(e)) => {
+            let _ = writeln!(s, "  the compiled stream ENDS here; the pin still expects:");
+            let _ = writeln!(s, "  PINNED   [{i}]:\n{}", describe_buf(f, e));
+        }
+        (None, None) => {
+            let _ = writeln!(s, "  index is past BOTH streams — bug in `first_divergence`.");
+        }
+    }
+    s
+}
+
+/// The full per-pass-range divergence report (see [`img_divergence_report`]). A difference
+/// here with IDENTICAL barrier arrays means the barriers were RE-ATTRIBUTED to other passes —
+/// the same stream recorded at different points in the frame.
+fn pass_divergence_report(actual: &[PassBarrierRange], expected: &[PassBarrierRange], i: usize) -> String {
+    let mut s = divergence_header("PASS barrier-range", i, actual.len(), expected.len());
+    match (actual.get(i), expected.get(i)) {
+        (Some(a), Some(e)) => {
+            let _ = write!(s, "  COMPILED [{i}]:\n{}", describe_pass(a, i));
+            let _ = write!(s, "  PINNED   [{i}]:\n{}", describe_pass(e, i));
+        }
+        (Some(a), None) => {
+            let _ = writeln!(s, "  the pinned stream ENDS here; the compiled one continues with:");
+            let _ = write!(s, "  COMPILED [{i}]:\n{}", describe_pass(a, i));
+        }
+        (None, Some(e)) => {
+            let _ = writeln!(s, "  the compiled stream ENDS here; the pin still expects:");
+            let _ = write!(s, "  PINNED   [{i}]:\n{}", describe_pass(e, i));
+        }
+        (None, None) => {
+            let _ = writeln!(s, "  index is past BOTH streams — bug in `first_divergence`.");
+        }
+    }
+    s
+}
+
+/// **VG R3 P1-5a BASELINE**: the compiled barrier stream of [`build_maximal_frame`] equals
+/// the pinned one ELEMENT FOR ELEMENT AND FIELD FOR FIELD, in order, across
+/// `img_barriers()`, `buf_barriers()` AND `pass_barriers()`.
+///
+/// # What this pin CAN claim
+///
+/// That the DEFERRED replica frame — the maximal-permutation G-buffer path this file has
+/// modelled since Step 1b, mirroring `declare_deferred_graph` — derives the exact same
+/// barrier stream, in the exact same order, attributed to the exact same passes, as it did
+/// on the per-`ResId` state machine before P1-5a. It is a strict superset of the count pin
+/// (`graph_matches_hand_path_barrier_count_exactly`) and the membership pins
+/// (`graph_covers_every_gbuffer_producer_consumer_hazard`): it is the only test here that
+/// catches a REORDERING, a WIDENED `subresource`, or a barrier moved to another pass — all
+/// three of which leave both counts and memberships intact.
+///
+/// # What this pin CANNOT claim
+///
+/// * **Nothing about the VB or the FORWARD declarators.** `declare_vb_graph` and
+///   `declare_forward_graph` (`present/graph_bridge.rs`) have NO barrier-level test at all —
+///   not this one, not a count, not a membership set. Whatever P1-5a does to their streams is
+///   unmeasured by this file, and "the framegraph tests are green" says nothing about them.
+///   Their coverage today is a rendered golden, which sees a barrier bug only if the hazard
+///   materialises on this machine and survives to 8 bits.
+/// * **Nothing about `declare_deferred_graph` ITSELF.** This is a hand-written REPLICA of it,
+///   in this file, and the two can drift; the replica is what is pinned.
+/// * **Nothing about recording.** The pin stops at the derived plan. How `record_all` batches
+///   it into `vkCmdPipelineBarrier` array calls is `record_step_call_count_is_pinned`'s
+///   subject, and that pin is a COUNT.
+/// * **Nothing about soundness.** A stream can be pinned and wrong. This says "unchanged",
+///   which is exactly the claim P1-5a needs and no more.
+#[test]
+fn maximal_frame_barrier_stream_is_pinned() {
+    // FIRST, so an unfilled baseline reports ITSELF instead of a divergence at index 0
+    // against a sentinel.
+    let unfilled = EXPECTED_IMG_BARRIERS.contains(&TBD_IMG_BARRIER)
+        || EXPECTED_BUF_BARRIERS.contains(&TBD_BUF_BARRIER)
+        || EXPECTED_PASS_BARRIERS.contains(&TBD_PASS_RANGE);
+    assert!(
+        !unfilled,
+        "the barrier-stream baseline is the UNFILLED PLACEHOLDER. Run \
+         `dump_maximal_frame_barrier_stream` and paste its output over the three \
+         `const EXPECTED_…` arrays in this file:\n    \
+         cargo test -p boyko_rhi_vulkan --test framegraph_gbuffer_equiv \
+         dump_maximal_frame_barrier_stream -- --ignored --nocapture\n\
+         (The values are MEASURED off `compile()`, never predicted — see \
+         `EXPECTED_IMG_BARRIERS`'s doc.)"
+    );
+
+    let f = build_maximal_frame();
+    let img = f.g.img_barriers();
+    let buf = f.g.buf_barriers();
+    let passes = f.g.pass_barriers();
+
+    // The pass-name table labels every report below; if it has drifted from the frame, the
+    // labels lie, so check it before trusting anything they say.
+    assert_eq!(
+        passes.len(),
+        MAXIMAL_FRAME_PASS_NAMES.len(),
+        "MAXIMAL_FRAME_PASS_NAMES has {} rows but `build_maximal_frame` declares {} passes — \
+         add the missing name(s) in `add_pass` order, or every failure report below \
+         mislabels its pass",
+        MAXIMAL_FRAME_PASS_NAMES.len(),
+        passes.len()
+    );
+
+    if let Some(i) = first_divergence(img, EXPECTED_IMG_BARRIERS) {
+        panic!("{}", img_divergence_report(&f, img, EXPECTED_IMG_BARRIERS, i));
+    }
+    if let Some(i) = first_divergence(buf, EXPECTED_BUF_BARRIERS) {
+        panic!("{}", buf_divergence_report(&f, buf, EXPECTED_BUF_BARRIERS, i));
+    }
+    if let Some(i) = first_divergence(passes, EXPECTED_PASS_BARRIERS) {
+        panic!("{}", pass_divergence_report(passes, EXPECTED_PASS_BARRIERS, i));
+    }
 }

@@ -488,6 +488,238 @@ impl FrameGraph {
         }
     }
 
+    /// **FROZEN REFERENCE — a verbatim copy of [`compile`](FrameGraph::compile) as it stood at
+    /// VG R3 P1-5a commit C1**, i.e. the per-`ResId` sync state machine BEFORE the state was
+    /// re-keyed to `(ResId, mip)`.
+    ///
+    /// It writes into the same three output arenas as `compile` (`img_barriers`,
+    /// `buf_barriers`, `pass_barriers`), so a differential can run one, snapshot, run the
+    /// other, and compare the streams element for element.
+    ///
+    /// # Its whole purpose
+    ///
+    /// To be DIFFED against the new `compile` over the SINGLE-MIP regime — every declaration
+    /// that exists today, where each resource's accesses all name one mip. Over that regime
+    /// the two must agree EXACTLY: `(ResId, mip)` keying collapses to `ResId` keying when
+    /// there is only ever one mip, and P1-5a's claim is precisely that nothing existing moves.
+    /// The differential is what makes that claim testable rather than asserted, because the
+    /// baseline it compares against is code that cannot have been edited to agree.
+    ///
+    /// # NEVER PATCHED
+    ///
+    /// This body is not maintained. If a later, legitimate change to `compile` makes the
+    /// differential fail, **the DIFFERENTIAL is deleted, not this function** — the moment
+    /// someone "fixes" the reference to match the new behaviour, it stops being a record of
+    /// the old one and the differential starts asserting that the code equals itself. A
+    /// frozen copy that drifts is worse than no copy, because it still looks like evidence.
+    ///
+    /// # Deletion condition
+    ///
+    /// Delete this function together with its differential at **the end of piece 1** of
+    /// P1-5a — once the re-keyed `compile` has been proved equivalent over the single-mip
+    /// regime and the first genuinely multi-mip declaration lands, at which point the two
+    /// machines are no longer expected to agree and the reference has said everything it can.
+    ///
+    /// `pub` rather than `pub(crate)`: it has no caller until the differential lands, and only
+    /// a `pub` method on a `pub` type is seeded as reachable by the dead-code pass, so this
+    /// spelling is what keeps the interim commit warning-clean without an `#[allow]`. The
+    /// precedent is in this crate: `goldens::golden_deferred_resolve_clustered_shadowed` is a
+    /// `pub fn` in a `#[cfg(any(test, feature = "goldens"))]` module whose only occurrence in
+    /// the workspace is its own definition, and the `--all-targets -D warnings` gate is green.
+    #[cfg(test)]
+    pub fn compile_per_resource_reference(&mut self) {
+        self.img_barriers.clear();
+        self.buf_barriers.clear();
+        self.pass_barriers.clear();
+
+        // Per-resource start state: ringed/transient resources start UNDEFINED
+        // (re-`UNDEFINED`'d each frame — prior content discarded); NON-RINGED
+        // shared resources start from their declared cross-frame seed (visible
+        // consumer scopes), so their first write orders after the sibling
+        // in-flight frame's reads (see `add_image_seeded`).
+        self.state.clear();
+        self.state.extend_from_slice(&self.res_seed);
+        // DEBUG-ONLY authoring-guard scratch: starts from the declare-time seeded
+        // bit (a seeded resource is exempt everywhere), then latches `true` at
+        // each write encountered below. Entirely compiled out in release.
+        #[cfg(debug_assertions)]
+        {
+            self.res_written.clear();
+            self.res_written.extend_from_slice(&self.res_seeded);
+            // No declare-time seed exists for the subresource witness: it is derived purely
+            // from this compile's accesses, so every resource starts unwitnessed.
+            self.res_sub_witness.clear();
+            self.res_sub_witness.resize(self.res_is_image.len(), None);
+        }
+
+        for p in 0..self.pass_name.len() {
+            let img_begin = self.img_barriers.len() as u32;
+            let buf_begin = self.buf_barriers.len() as u32;
+
+            let begin = self.pass_access_begin[p] as usize;
+            let count = self.pass_access_count[p] as usize;
+            for a in begin..begin + count {
+                let res = self.acc_res[a];
+                let stage = self.acc_stage[a];
+                let access = self.acc_access[a];
+                let layout = self.acc_layout[a];
+                let sub = self.acc_sub[a];
+                let ri = res.index();
+                let is_image = self.res_is_image[ri];
+
+                // DEBUG-ONLY authoring guard (release-neutral): a non-seeded
+                // transient IMAGE must be written by a prior pass before its first
+                // read, or a mis-authored pass silently derives a hazard-free
+                // `TOP_OF_PIPE` barrier below instead of surfacing as a caught bug.
+                // Ringed/seeded resources (`res_seeded`) are exempt — cross-frame
+                // content is intentional for them (the shadow-temporal history pool,
+                // the DDGI atlas, CSM cascade / shadow atlas, the shared buffers).
+                #[cfg(debug_assertions)]
+                {
+                    let is_write = access & WRITE_ACCESS_MASK != 0;
+                    debug_assert!(
+                        !is_image || is_write || self.res_written[ri],
+                        "framegraph: pass '{}' reads transient image '{}' with no prior \
+                         producer or seed (add_image_seeded) — this would silently derive \
+                         a hazard-free TOP_OF_PIPE barrier",
+                        self.pass_name[p],
+                        self.res_name[ri],
+                    );
+                    if is_write {
+                        self.res_written[ri] = true;
+                    }
+
+                    // === INVARIANT HZB-SUBRESOURCE-UNIFORM (debug-only, release-neutral) ===
+                    //
+                    // EVERY access to one `ResId` must declare the SAME subresource span —
+                    // the same `(base_mip, mip_count, base_layer, layer_count)`. Aspect is
+                    // excluded: it is a property of the image's format, not a selection.
+                    //
+                    // WHY THE SPAN ALONE, AND NOT "SPAN *AND* LAYOUT BOTH VARY". The weaker
+                    // two-axis condition is the one this guard was first written with, and it
+                    // is UNSOUND. A uniform DECLARED layout does not give a uniform ACTUAL
+                    // layout, because only the union of the spans that have actually appeared
+                    // in an emitted barrier has been transitioned — every other subresource is
+                    // still in the image's start layout. Concretely, and this passed the weaker
+                    // guard silently:
+                    //
+                    //     let pyr = g.add_image("pyr");            // starts UNDEFINED
+                    //     pass A: SHADER_WRITE, GENERAL, SubRange::COLOR       // mips [0,1)
+                    //     pass B: SHADER_READ,  GENERAL, color_mips(4)         // mips [0,4)
+                    //
+                    // A is a first touch, so its barrier transitions mips [0,1) only. B needs
+                    // no layout change but does need a flush, so `transition` returns a barrier
+                    // over [0,4) claiming `oldLayout = GENERAL` — for mips 1..3, which were
+                    // never transitioned and are still UNDEFINED
+                    // (VUID-VkImageMemoryBarrier-oldLayout-01197). Undefined, and invisible to
+                    // the validation layers, which see a well-formed barrier and cannot follow
+                    // its provenance back to the state machine that invented the `oldLayout`.
+                    //
+                    // Note the hazard is ORDER-DEPENDENT: declaring the superset FIRST is fine,
+                    // the subset first is UB. A guard whose verdict depends on declaration order
+                    // is not a guard, which is the second reason the two-axis form is rejected
+                    // rather than merely tightened.
+                    //
+                    // This condition is therefore an OVER-APPROXIMATION on purpose: some
+                    // varying-span declarations are safe (superset-first ones), and the guard
+                    // fires on them anyway. A fire means "this declaration is outside the region
+                    // this state machine can prove safe", NOT "this declaration is broken".
+                    //
+                    // PER-SUBRESOURCE TRACKING IS THE CORRECT LONG-TERM ANSWER, and this assert
+                    // is its TRIGGER. Keying `state` by `(ResId, mip, layer)` is what lifts the
+                    // restriction, and it is what a mip pyramid wants: the HZB build writes mip
+                    // k while reading mip k-1. When that pass is authored, it trips this assert.
+                    // That is the INTENDED way to discover the work — a mechanical, unmissable
+                    // notice at the moment the first declaration needs it. The response is to
+                    // build per-subresource tracking, never to relax the condition until it
+                    // goes quiet.
+                    //
+                    // WHY RELEASE IS UNGUARDED. Not "the declaration surface is compile-time
+                    // fixed" — WHICH accesses run is heavily data-conditional here (leg and
+                    // path predicates gate whole pass families). What IS compile-time fixed is
+                    // the span argument at every `image_access` site: they are literal
+                    // `SubRange` constructors, so a debug run that REACHES a pass settles that
+                    // pass's spans for the release build of the same source. CI runs its tests
+                    // as a debug x release matrix, so the debug leg reaches everything the
+                    // release leg does. Paying for the check in the release frame path would
+                    // buy no information the debug leg did not already have, on a `compile`
+                    // that runs every frame (Principle 1/7). What this does NOT cover is a pass
+                    // no debug run ever reaches; covering that is the gate's problem, not this
+                    // assert's.
+                    //
+                    // Buffers are structurally exempt without a branch: `buffer_access` always
+                    // passes `SubRange::COLOR`, so their span is uniform by construction.
+
+                    // `SubWitness` is `Copy`: read it out, fold this access in, write it
+                    // back — no borrow of `self` outlives the update, so the assert below
+                    // can still name the pass and resource.
+                    let witness = match self.res_sub_witness[ri] {
+                        Some(mut w) => {
+                            w.span_varied |= !sub.same_span(&w.first_sub);
+                            w
+                        }
+                        None => SubWitness { first_sub: sub, span_varied: false },
+                    };
+                    self.res_sub_witness[ri] = Some(witness);
+                    debug_assert!(
+                        !witness.span_varied,
+                        "framegraph: INVARIANT HZB-SUBRESOURCE-UNIFORM violated at pass '{}' \
+                         on resource '{}' — its accesses declare DIFFERENT subresource spans \
+                         (this access: {:?}; first declared: {:?}), and this state machine \
+                         tracks ONE layout per ResId, so a subresource that never appeared in \
+                         an emitted barrier is still in the image's start layout while a later \
+                         barrier claims otherwise. Fix by giving this resource per-subresource \
+                         sync state, not by making the declarations agree by hand",
+                        self.pass_name[p],
+                        self.res_name[ri],
+                        sub,
+                        witness.first_sub,
+                    );
+                }
+
+                // Split-borrow: read the access scalars above, mutate state here,
+                // release the borrow before pushing into the barrier arenas.
+                let trans = {
+                    let st = &mut self.state[ri];
+                    // Buffers: pass the current (sentinel) layout so the layout
+                    // arm never fires.
+                    let want_layout = if is_image { layout } else { st.layout };
+                    transition(st, stage, access, want_layout)
+                };
+
+                if let Some(t) = trans {
+                    if is_image {
+                        self.img_barriers.push(ImgBarrier {
+                            res,
+                            src_stage: t.src_stage,
+                            dst_stage: t.dst_stage,
+                            src_access: t.src_access,
+                            dst_access: t.dst_access,
+                            old_layout: t.old_layout,
+                            new_layout: t.new_layout,
+                            subresource: sub,
+                        });
+                    } else {
+                        self.buf_barriers.push(BufBarrier {
+                            res,
+                            src_stage: t.src_stage,
+                            dst_stage: t.dst_stage,
+                            src_access: t.src_access,
+                            dst_access: t.dst_access,
+                        });
+                    }
+                }
+            }
+
+            self.pass_barriers.push(PassBarrierRange {
+                img_begin,
+                img_count: self.img_barriers.len() as u32 - img_begin,
+                buf_begin,
+                buf_count: self.buf_barriers.len() as u32 - buf_begin,
+            });
+        }
+    }
+
     // --- read-back accessors (for the record step + the equivalence tests) ---
 
     /// All derived image barriers, in emission order.
