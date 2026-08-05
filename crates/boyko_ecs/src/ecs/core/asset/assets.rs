@@ -2482,6 +2482,10 @@ mod tests {
     /// double-drain bug (which would otherwise double-push the free-list and
     /// corrupt a later `add`'s slot assignment) is caught immediately rather
     /// than corrupting state silently.
+    // `cfg(debug_assertions)`: the guard IS a `debug_assert!`, so in a release test binary the
+    // call correctly does not panic and `should_panic` reports a failure that is not one. CI runs
+    // `cargo test --workspace --all-targets --release`, so this leg was RED without it.
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "invariant: retire must target a Retiring row")]
     fn retire_again_on_the_now_vacant_slot_panics_the_one_shot_contract() {

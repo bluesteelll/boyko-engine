@@ -52,8 +52,17 @@ const ENV_FIXTURE: &str = "BOYKO_VG_FIXTURE";
 
 /// The VB golden pins (a) is measured over. Enumerated so the DOMAIN is machine-checked even
 /// though the hashes are not checked here.
-const VB_PINS: [&str; 13] = [
+const VB_PINS: [&str; 14] = [
     "vb_mesh",
+    // VG R3 piece 1 step P1-2: `vb_mesh`'s scene, binary and test with `BOYKO_VG_HZB=1` arming the
+    // depth pyramid. It belongs in this DOMAIN like any other VB pin, and it was measured the same
+    // way — `scripts/golden.ps1 -Pin vb_mesh_hzb`, byte-identical, with the density census unarmed.
+    //
+    // It was missing for four commits, and this test is what reported it. Worth recording WHY it
+    // was not caught sooner: the gating runs during that stretch were `cargo test --workspace
+    // --lib`, which does not build integration tests at all, so a `tests/` failure was structurally
+    // invisible to them. The release-leg audit that found it ran `--all-targets`.
+    "vb_mesh_hzb",
     "vb_both",
     "vb_both_sdf",
     "vb_both_sdf_tex",

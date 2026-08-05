@@ -2278,12 +2278,20 @@ mod tests {
         assert_eq!(exp2i_clamp(EXP2I_MIN_EXPONENT), EXP2I_MIN_EXPONENT, "an in-range exponent is unchanged");
     }
 
+    // `cfg(debug_assertions)`: the guard IS a `debug_assert!`, so in a release test binary the
+    // call correctly does not panic and `should_panic` reports a failure that is not one. CI runs
+    // `cargo test --workspace --all-targets --release`, so this leg was RED without it.
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "must be finite and > 0")]
     fn grid_cell_debug_asserts_on_non_positive_input() {
         let _ = grid_cell(0.0);
     }
 
+    // `cfg(debug_assertions)`: the guard IS a `debug_assert!`, so in a release test binary the
+    // call correctly does not panic and `should_panic` reports a failure that is not one. CI runs
+    // `cargo test --workspace --all-targets --release`, so this leg was RED without it.
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "outside the safe range")]
     fn grid_value_debug_asserts_on_out_of_range_k() {
@@ -2293,6 +2301,10 @@ mod tests {
         let _ = grid_value(k_max + 1);
     }
 
+    // `cfg(debug_assertions)`: the guard IS a `debug_assert!`, so in a release test binary the
+    // call correctly does not panic and `should_panic` reports a failure that is not one. CI runs
+    // `cargo test --workspace --all-targets --release`, so this leg was RED without it.
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "must be finite and > 0")]
     fn latch_cell_debug_asserts_on_non_positive_raw() {
