@@ -14,6 +14,58 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-05 — CI's release leg is red, and two of the classes are STRICTNESS calls
+
+Found while preparing the P1-5a baseline, which needs a leg that passes. Running CI's own command —
+`cargo test --workspace --all-targets --release --exclude boyko_demo --exclude bench-bevy-vs-boyko`
+([ci.yml:62](../.github/workflows/ci.yml), `:103`) — **fails on six targets**. Two more appear on a
+second run, which is itself the diagnosis: those are flaky, not release-specific.
+
+Six were mechanical and are **fixed**: five `#[should_panic]` tests over `debug_assert!` guards
+missing `#[cfg(debug_assertions)]` (boyko_math, boyko_ecs, boyko_render ×3, plus two in
+boyko_rhi_vulkan), and one missing `VB_PINS` entry that was mine — `vb_mesh_hzb` from VG R3 P1-2.
+
+Two classes are left, and both are decisions about how strict a gate should be rather than
+architecture forks, so they are here rather than taken.
+
+### 1. `boyko_shaderdsl --test eval_byte_identity` — three failures, on the NaN SIGN BIT alone
+
+`NaN (0xffc00000)` vs `NaN (0x7fc00000)`. Both quiet NaNs; the values are identical (a NaN is not
+even equal to itself); only the sign differs.
+
+This is the same family as what gate G3 measured on the depth pyramid the same day: **the sign of a
+zero and the sign of a NaN are exactly the two bits no `<` in a program can observe**, which is why
+hardware and optimisers are free to move them — G3 caught a driver fusing a compare-and-select into
+a hardware min whose ±0 tie-break differs. Expecting either bit to be stable between `-O0` and `-O3`
+is not well founded.
+
+**Options.** (a) Compare NaN as "both are NaN" rather than by bits. (b) Canonicalise the sign before
+comparing. (c) Leave it, and accept that the eDSL's release leg is not a gate.
+
+**My recommendation is (a).** The contract the eDSL exists to enforce is about VALUES, and the sign
+of a NaN is not a value. It costs nothing on the finite domain, which is the whole domain that
+matters, and it stops a real gate from being permanently red — which is worse than a slightly
+narrower one, because a red gate nobody can fix is a gate nobody reads.
+
+### 2. Two global-state tests that are flaky under parallel execution
+
+`boyko-scene bundles_s6::interner_is_off_the_per_frame_path` reads the process-global
+`identity::interner_len()`. `boyko-ui zero_alloc::unchanged_frame_layout_pair_allocates_zero_over_baseline`
+reads a global allocation counter — and reported a delta of **minus one**, an improvement its
+`assert_eq!` cannot express while its own message says "no more than".
+
+Both pass alone, pass under `--test-threads=1`, and pass in debug. They fail only in release with
+default parallelism.
+
+**Options.** (a) A serial guard in each test file. (b) `--test-threads=1` for those binaries in CI.
+(c) Make the UI assertion `<=`, matching its own message, and serialise only the scene one.
+
+**My recommendation is (a) plus the `<=` repair**, because the harness flag would slow every test in
+those crates to fix two, and because an equality assertion that fails on an improvement will fail
+again the next time somebody improves it.
+
+---
+
 ## 2026-08-05 — SCOPE: the pyramid needs a core framegraph change (per-subresource sync state)
 
 **Decided and under way, not blocking — recorded because it grows piece 1 beyond what its plan
