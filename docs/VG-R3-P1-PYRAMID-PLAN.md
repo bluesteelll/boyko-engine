@@ -344,9 +344,25 @@ recovered by invoking the test binary directly (with `--ignored`, since the GPU 
 `#[ignore]`d). A gate one cannot read the failure of is a gate one has to re-run differently to
 believe.
 
-⚠️ **Carried forward to P1-5, found by the implementer rather than the spec.** `@0` binds
-`GBufferTargets::depth` — the CORE ring, which is what `viewt_from_depth_set` calls `core.depth`.
-Under `TargetsProfile::ForwardMesh` the Forward path rasterises into its OWN reverse-Z ring
-(`ForwardTargets::depth`), so on a Forward boot `@0` would name a depth that frame never wrote.
-Inert today (nothing dispatches), and correct under VB, where `VbTargets` carries no depth of its
-own. **P1-5 must resolve which ring the base pass reads before it declares a pass, not after.**
+### ⚠️ The wrong depth ring — raised by the implementer, and WORSE than the raising said
+
+The implementer flagged that `@0` bound `GBufferTargets::depth`, the CORE ring, while
+`TargetsProfile::ForwardMesh` rasterises into its own `ForwardTargets::depth` — and closed the
+report with "correct under VB, where `VbTargets` carries no depth of its own". That last clause is
+true and it is not the question. **`VbMesh` builds a `ForwardTargets` bundle too, precisely to REUSE
+its depth ring**, and the VB raster binds it directly:
+`present/passes/vb.rs` — `image_view: forward.depth[fi].view`, named `vb_depth` throughout.
+
+So the binding was wrong under **VB as well** — the one profile this entire feature exists for — and
+it would have handed the pyramid the DEFERRED depth, an image the VB frame never writes. Inert while
+nothing dispatches; a silently empty pyramid the moment P1-5 does.
+
+The resolution needs no profile `match`. `forward.is_some()` is exactly "this profile rasterises
+somewhere other than the core ring", so the call site picks `forward.depth` when the bundle exists
+and `targets.depth` otherwise — correct for all five profiles, one rule, stated as what it means:
+**the pyramid reduces the depth THIS FRAME'S RASTER WROTE.**
+
+Worth recording HOW it was caught, because the report contained the correct facts and the wrong
+conclusion. The profile enum's own doc says `VbMesh` builds `ForwardTargets` "REUSED for the depth
+ring", but it says it in prose about a BUNDLE, and the implementer read it as a bundle-level remark.
+What settled it was reading the attachment the VB raster actually binds — a grep, not an inference.

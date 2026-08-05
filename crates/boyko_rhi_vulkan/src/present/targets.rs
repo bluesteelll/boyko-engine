@@ -7702,9 +7702,30 @@ impl GBufferTargets {
         //  * Reverse acquisition therefore destroys it FIRST in `Self::destroy`.
         //
         // VG R3 piece 1 step P1-4 adds the descriptor sets to that same bundle, which is why the
-        // depth RING is handed over here: binding @0 of slot `i`'s set is `targets.depth[i]`, the
-        // per-frame source the pyramid reduces. Nothing else about the placement changes.
-        let built_hzb = HzbTargets::build(ctx, scene, &targets.depth, extent);
+        // depth RING is handed over here: binding @0 of slot `i`'s set is the per-frame source the
+        // pyramid reduces. Nothing else about the placement changes.
+        //
+        // ⚠️ WHICH RING, and why it is not `targets.depth`. THE PYRAMID REDUCES THE DEPTH THIS
+        // FRAME'S RASTER WROTE, and this bundle owns TWO reverse-Z rings:
+        //
+        //   * `targets.depth` — the core/deferred one, rasterized into by the Deferred family;
+        //   * `forward.depth` — built additively under `ForwardMesh` AND under `VbMesh`, where the
+        //     VB raster names it `vb_depth` and writes it directly
+        //     (`present/passes/vb.rs` — `image_view: forward.depth[fi].view`).
+        //
+        // So `forward.is_some()` is exactly "this profile rasterizes somewhere other than the core
+        // ring", and picking by it is correct for all five profiles without a `match`. Reading
+        // `targets.depth` under `VbMesh` would hand the pyramid the DEFERRED depth — an image the
+        // VB frame never writes — which is the one case this whole feature exists for. The first
+        // draft of P1-4 did exactly that: the core ring was cited as "what `viewt_from_depth_set`
+        // calls `core.depth`", true and beside the point, and the profile doc that mentions the
+        // reuse says it in prose about a bundle rather than about a ring. It was caught by reading
+        // the attachment the VB raster actually binds.
+        let hzb_depth_ring = match &targets.forward {
+            Some(forward) => &forward.depth,
+            None => &targets.depth,
+        };
+        let built_hzb = HzbTargets::build(ctx, scene, hzb_depth_ring, extent);
         match built_hzb {
             Ok(h) => targets.hzb = h,
             Err(e) => {
