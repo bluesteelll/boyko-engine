@@ -14,6 +14,51 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-05 — SCOPE: the pyramid needs a core framegraph change (per-subresource sync state)
+
+**Decided and under way, not blocking — recorded because it grows piece 1 beyond what its plan
+scoped.** Step P1-5 (declare the HZB build passes) cannot be written against the framegraph as it
+stands, and the framegraph says so itself.
+
+**The wall.** `framegraph/graph.rs:360-445` carries `INVARIANT HZB-SUBRESOURCE-UNIFORM`: every
+access to one `ResId` must declare the same `(base_mip, mip_count, base_layer, layer_count)`,
+because `FrameGraph::state` is a `Vec<ResSync>` indexed by `ResId` alone and `transition` never
+receives the span. The HZB build needs, on ONE image in ONE pass, a read of mip `6p-1` and a write
+of mips `[6p, 6p+n)`.
+
+That comment was written in advance, names this exact pass, and prescribes the answer:
+
+> "PER-SUBRESOURCE TRACKING IS THE CORRECT LONG-TERM ANSWER, and this assert is its TRIGGER … the
+> HZB build writes mip k while reading mip k-1. When that pass is authored, it trips this assert.
+> That is the INTENDED way to discover the work … The response is to build per-subresource
+> tracking, never to relax the condition until it goes quiet."
+
+**It is not merely a debug assert.** In release the assert is compiled out and the derivation is
+genuinely wrong, traced at 512×512: pass 0 first-touches mips [0,6) so only those leave `UNDEFINED`;
+pass 1 then writes mips [6,10) with the state claiming GENERAL for the whole ResId, so the derived
+barrier has `old_layout == new_layout` and mips 6..9 are **never transitioned** while the dispatch
+writes them through storage descriptors declared `GENERAL`. Every extent with
+`prev_pow2(max(W,H)) >= 64` reaches it.
+
+**The workaround I rejected.** Three ResIds aliasing one `VkImage` over disjoint mip spans is
+uniform by construction and needs no framegraph change. I turned it down for two reasons. It is
+literally what the invariant's own text forbids ("not by making the declarations agree by hand"),
+and it is a dead end one piece later: piece 3's cull selects a pyramid LEVEL per instance, and a
+per-pass ResId cannot be named by a dynamic level. Taking it would be the interim design deferred to
+later that this project has ruled out.
+
+**What it costs.** A new step P1-5a ahead of P1-5, touching the core state machine every render path
+compiles through. The byte-identity argument is strong — `SubRange::color_mips` is called by nothing
+today and every existing `image_access` site passes `base_mip: 0, mip_count: 1`, so a per-mip
+machine should fold to today's behaviour barrier-for-barrier — but "should" is why it gets its own
+gate rather than a golden pin, which cannot see a redundant or a missing barrier.
+
+**Nothing is blocked on an answer.** Architecture forks are mine to decide; this is here because the
+SCOPE grew, and the owner may prefer piece 1 to stop at "allocated and compiled" and hand the
+framegraph work to its own campaign. Say so and I will split it.
+
+---
+
 ## 2026-08-04 — ⚠️ `golden.ps1 -ValidationOn` never enabled the validation layer on ANY `boyko-app` pin
 
 **Found while gating VG R3 P1-2, and it is the vacuum-green shape again.** The switch is the
