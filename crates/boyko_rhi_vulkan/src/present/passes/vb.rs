@@ -25,6 +25,7 @@ use core::ptr;
 
 #[cfg(feature = "hwrt")]
 use crate::compute::LOCAL_SIZE_X;
+use crate::compute::{HZB_BUILD_PUSH_BYTES, HZB_BUILD_TILE, HZB_LEVELS_PER_PASS};
 use crate::ffi::*;
 use crate::memory::BoundBuffer;
 use crate::texture::{MAX_CASCADES, MAX_TEXTURE_LAYERS};
@@ -70,6 +71,92 @@ pub(crate) const VB_RASTER_FLAG_VISIBLE_INDIRECTION: u32 = 2;
 /// Named here only so the recorder's `debug_assert!` can state its relationship to
 /// [`VB_RASTER_FLAG_VISIBLE_INDIRECTION`] without a bare `1`.
 const VB_RASTER_FLAG_INSTANCED_ARM: u32 = 1;
+
+/// VG R3 piece 1 step P1-5: the 72-byte `hzb_build` push constant, mirrored FIELD FOR FIELD from
+/// `crates/boyko_rhi_vulkan/shaders/hzb_build.comp.hlsl`'s `HzbBuildPush`.
+///
+/// The six destination extents are SIX NAMED FIELDS rather than a `[[u32; 2]; 6]`, because that is
+/// how the HLSL spells them: a reader can diff this declaration one-for-one against the shader
+/// instead of counting subscripts. The layout is the shader's own
+/// `OpMemberDecorate ... Offset` sequence — eight `uint2` at 0, 8, …, 56, then two `uint` at 64
+/// and 68 — pinned host-side by the `const _` below and shader-side by
+/// `tests/hzb_build_spv_sync.rs`.
+///
+/// `#[repr(C)]` PLUS a hand-written [`Self::to_bytes`], which is the shape
+/// `boyko_app/tests/hzb_build_oracle_gate.rs` already ships for this same block: the attribute and
+/// the `const` size assert pin the layout, while writing the words out is what makes the byte
+/// OFFSETS — the actual contract with the HLSL — reviewable rather than implied.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct HzbBuildPush {
+    /// `S` — the SOURCE depth extent, on EVERY pass.
+    ///
+    /// ⚠️ NOT `plan.extent_of(0)`. Level 0 is `prev_pow2` of each source axis, so at 1920×1080 the
+    /// source is 1920×1080 while level 0 is 1024×1024, and the base map `first(t) = ⌈t·S/P⌉` reads
+    /// BOTH. The two coincide only when `S == P` — which is every golden pin's 512×512 — so a
+    /// confusion here is invisible at the extents this repository gates and wrong at every other.
+    src_extent: [u32; 2],
+    /// `E(d-1)`, the level this pass reduces FROM. Read only by a reduce pass (`base_level != 0`);
+    /// the base pass is handed level 0's own extent as a well-defined placeholder rather than a
+    /// zero that would divide.
+    fine_extent: [u32; 2],
+    /// `E(d)` — and, on the base pass, `P = prev_pow2(S)` per axis.
+    out_extent0: [u32; 2],
+    /// `E(d+1)`.
+    out_extent1: [u32; 2],
+    /// `E(d+2)`.
+    out_extent2: [u32; 2],
+    /// `E(d+3)`.
+    out_extent3: [u32; 2],
+    /// `E(d+4)`.
+    out_extent4: [u32; 2],
+    /// `E(d+5)`.
+    out_extent5: [u32; 2],
+    /// `d` — this pass's first output level, and the base/reduce variant discriminator
+    /// (`0` ⇔ BASE, the shader's one uniform branch).
+    base_level: u32,
+    /// How many levels THIS pass writes, in `1 ..= HZB_LEVELS_PER_PASS`. Every store in the shader
+    /// is guarded by `k < level_count`, which is what makes the padded `gDst` bindings unwritten.
+    level_count: u32,
+}
+
+const _: () = assert!(
+    core::mem::size_of::<HzbBuildPush>() == HZB_BUILD_PUSH_BYTES as usize,
+    "VG R3 P1-5: HzbBuildPush must match hzb_build.comp.hlsl's 72-byte push block"
+);
+
+impl HzbBuildPush {
+    /// Serializes the block to its 72 wire bytes, little-endian, field by field — eighteen `u32`
+    /// words in the shader's own member order.
+    #[inline]
+    fn to_bytes(self) -> [u8; HZB_BUILD_PUSH_BYTES as usize] {
+        let words: [u32; HZB_BUILD_PUSH_BYTES as usize / 4] = [
+            self.src_extent[0],
+            self.src_extent[1],
+            self.fine_extent[0],
+            self.fine_extent[1],
+            self.out_extent0[0],
+            self.out_extent0[1],
+            self.out_extent1[0],
+            self.out_extent1[1],
+            self.out_extent2[0],
+            self.out_extent2[1],
+            self.out_extent3[0],
+            self.out_extent3[1],
+            self.out_extent4[0],
+            self.out_extent4[1],
+            self.out_extent5[0],
+            self.out_extent5[1],
+            self.base_level,
+            self.level_count,
+        ];
+        let mut bytes = [0u8; HZB_BUILD_PUSH_BYTES as usize];
+        for (i, w) in words.iter().enumerate() {
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        bytes
+    }
+}
 
 /// VG rung R2d-3: the number of LEADING batches whose OWNED region of the per-instance survivor
 /// list (`gVbVisibleInstance`) fits inside `visible_elems` — i.e. the index of the FIRST batch
@@ -1853,6 +1940,142 @@ impl Renderer<'_> {
                 if let Some(tc) = scene.vb_gpu_timing {
                     // SAFETY: recording is open; the pool was reset this frame; `fi` is this slot.
                     unsafe { tc.write_end(self.fns, cmd, fi, VbTimedPass::VbShade) };
+                }
+            }
+        }
+
+        // === VG R3 piece 1 step P1-5: the HZB depth-pyramid BUILD dispatches. ===
+        //
+        // Recorded HERE — after the mesh raster has written `vb_depth`, in EXACTLY
+        // `declare_vb_graph`'s position for the same chain (immediately before the split arm's
+        // `vb_viewt` pre-tail slot below). Declare/record ORDER parity is the invariant this file
+        // and the declarator both treat as load-bearing.
+        //
+        // ⚠️ THE GATE IS THE DECLARATOR'S, VERBATIM — `scene.hzb.is_some() && mesh_leg`, and
+        // `targets.hzb` is `.expect()`ed rather than made a third conjunct (the `batch_cull_armed`
+        // discipline above). `sync_gbuffer`'s rebuild predicate carries `hzb_arm ==
+        // scene.hzb.is_some()` and `GBufferTargets::create` asserts the arm and the allocation
+        // move in lockstep, so an armed scene ALWAYS has the bundle; a create failure returns
+        // `Err` rather than a silent `None`. A recorder gate narrower than the declarator's would
+        // leave declared writes on the pyramid that no dispatch performs.
+        //
+        // ⚠️ Under `HzbMode::Off` this records NOTHING — no barrier, no bind, no dispatch — which
+        // is what keeps every golden pin byte-identical. The ARMED pins stay byte-identical too,
+        // for a different reason: the pyramid is an image nothing samples in piece 1 (the cull is
+        // piece 3), so the dispatches move no pixel.
+        if scene.hzb.is_some() && scene.resolved_render_path.mesh_leg {
+            let hzb = targets
+                .hzb
+                .as_ref()
+                .expect("invariant: scene.hzb armed => targets.hzb (sync_gbuffer's hzb_arm predicate)");
+            // THE plan is the bundle's OWN field, not `scene.hzb`: the descriptor sets, the image's
+            // real mip count and this dispatch arithmetic must be sized from ONE number, or a lane
+            // can be dispatched over a level whose view was never built (`HzbTargets::plan`'s own
+            // doc states the rule; `build` follows it for the sets).
+            let hzb_plan = hzb.plan;
+            debug_assert_eq!(
+                Some(hzb_plan),
+                scene.hzb,
+                "invariant: the pyramid bundle's plan matches the scene's — both are derived from \
+                 present_extent, and `sync_gbuffer` rebuilds the bundle when that changes"
+            );
+            let pipeline = scene
+                .hzb_build_pipeline
+                .expect("invariant: scene.hzb armed => scene.hzb_build_pipeline (GpuSceneBundles::boot mints it unconditionally)");
+
+            let levels = hzb_plan.levels;
+            let pass_count = levels.div_ceil(HZB_LEVELS_PER_PASS) as usize;
+            // The SOURCE extent, `S` — the extent the depth ring was sized to, which is what the
+            // pyramid reduces. NOT `hzb_plan.extent_of(0)`: that is `P = prev_pow2(S)` per axis,
+            // and the shader's base map `⌈t·S/P⌉` reads BOTH (see `HzbBuildPush::src_extent`).
+            let src_extent = [present_extent.width, present_extent.height];
+
+            for p in 0..pass_count {
+                let d = p as u32 * HZB_LEVELS_PER_PASS;
+                let n = (levels - d).min(HZB_LEVELS_PER_PASS);
+
+                let hzb_pass = plan.hzb_build[p]
+                    .expect("invariant: the recorder's pass count equals the declarator's (one plan)");
+                // SAFETY: recording is open; `record_vb_pass` records this pass's derived
+                // barriers into `cmd` — the raster's DEPTH_ATTACHMENT→SHADER_READ_ONLY transition
+                // on `vb_depth` (pass 0), the previous pass's write→read flush on mip `d-1`
+                // (passes 1+), and the UNDEFINED→GENERAL first touch of mips `[d, d+n)`.
+                self.record_vb_pass(hzb_pass, cmd, targets, forward, vb, scene, fi);
+
+                let set = hzb.sets[fi][p]
+                    .as_ref()
+                    .expect("invariant: sets[slot][p] is Some for every p < levels.div_ceil(HZB_LEVELS_PER_PASS)");
+
+                // `k >= n` pads with level `d` — a real level of a real mip, matching the view
+                // `HzbTargets::build` binds at that destination slot. NEVER zero: the shader
+                // divides by these extents before it tests `k < level_count`, and a padded slot
+                // must therefore be well-defined rather than merely unwritten.
+                let out = |k: u32| hzb_plan.extent_of(if k < n { d + k } else { d });
+                let push = HzbBuildPush {
+                    src_extent,
+                    // `E(d-1)` on a reduce pass; on the BASE pass mip `d-1` does not exist and the
+                    // shader's `base_level == 0` arm never reads it, so level 0's own extent goes
+                    // in as a well-defined placeholder.
+                    fine_extent: hzb_plan.extent_of(d.saturating_sub(1)),
+                    out_extent0: out(0),
+                    out_extent1: out(1),
+                    out_extent2: out(2),
+                    out_extent3: out(3),
+                    out_extent4: out(4),
+                    out_extent5: out(5),
+                    base_level: d,
+                    level_count: n,
+                }
+                .to_bytes();
+
+                // THE DISPATCH DIVISOR is this pass's FIRST OUTPUT LEVEL — the one index space in
+                // which the base and reduce variants have the same shape (plan §2). One workgroup
+                // covers a `HZB_BUILD_TILE`-texel tile of level `d`.
+                let [ex, ey] = hzb_plan.extent_of(d);
+
+                // SAFETY: recording is open and outside any render scope; `pipeline` + its layout
+                // (one COMPUTE set + a `HZB_BUILD_PUSH_BYTES` = 72-byte COMPUTE push range) are
+                // live on this device — `GpuSceneBundles::boot` mints both unconditionally and
+                // owns them for the device's lifetime. `set` binds all 8 entries
+                // `hzb_build_layout` declares (SAMPLED `gSrcDepth` @0 — the `[fi]` slot's depth,
+                // which is why the sets are ringed — plus the seven single-mip storage views
+                // @1..@7), written once when these targets were built (`HzbTargets::build`, which
+                // binds a REAL view at every slot including the padded ones) and untouched since.
+                // The push writes exactly the declared range at offset 0 from a
+                // `[u8; HZB_BUILD_PUSH_BYTES]` local. The dispatch covers `ceil(E(d)/TILE)` groups
+                // per axis; lanes past the level extent issue no tap and store nothing (the
+                // shader's own boundary rule). `&set.descriptor_set` and `push` are locals alive
+                // for the calls.
+                unsafe {
+                    (self.fns.cmd_bind_pipeline)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        pipeline.pipeline,
+                    );
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        pipeline.layout,
+                        0,
+                        1,
+                        &set.descriptor_set,
+                        0,
+                        ptr::null(),
+                    );
+                    (self.fns.cmd_push_constants)(
+                        cmd,
+                        pipeline.layout,
+                        VK_SHADER_STAGE_COMPUTE_BIT,
+                        0,
+                        HZB_BUILD_PUSH_BYTES,
+                        push.as_ptr().cast(),
+                    );
+                    (self.fns.cmd_dispatch)(
+                        cmd,
+                        ex.div_ceil(HZB_BUILD_TILE),
+                        ey.div_ceil(HZB_BUILD_TILE),
+                        1,
+                    );
                 }
             }
         }

@@ -2885,9 +2885,10 @@ pub struct GBufferScene<'a> {
     /// alone.
     ///
     /// Step P1-4 bound the pyramid to the `hzb_build` descriptor sets (see
-    /// [`Self::hzb_build_layout`]), so it is no longer bound by nothing — but it is still
-    /// DISPATCHED by nothing: no framegraph declaration, no pass, no barrier (step P1-5), and it
-    /// never leaves the `UNDEFINED` layout it is created in.
+    /// [`Self::hzb_build_layout`]); step P1-5 declared the build passes and DISPATCHES them, so
+    /// the pyramid is now genuinely built (`UNDEFINED → GENERAL` on the first touch of each mip)
+    /// on every armed `VisibilityBuffer` frame carrying a mesh leg. It is still READ by nothing —
+    /// the occlusion cull that consumes it is piece 3 — so an armed frame moves no pixel.
     pub hzb: Option<HzbPlan>,
     /// VG R3 piece 1 step P1-4: the `hzb_build` pass's OWN 8-binding set-0 LAYOUT (SAMPLED
     /// `gSrcDepth` @0, STORAGE `gFine` @1, STORAGE `gDst0`..`gDst5` @2..@7 — all COMPUTE, all
@@ -2912,8 +2913,9 @@ pub struct GBufferScene<'a> {
     /// the [`HZB_BUILD_PUSH_BYTES`](crate::compute::HZB_BUILD_PUSH_BYTES) push range. Minted
     /// unconditionally beside that layout — the two are created together or not at all.
     ///
-    /// DISPATCHED BY NOTHING at this step: no framegraph declaration, no pass, no barrier binds
-    /// it (step P1-5). Threaded now so the recorder needs no further plumbing then.
+    /// Step P1-5 dispatches it: `record_vb` binds this pipeline once per build pass
+    /// (`present/passes/vb.rs`), pushing the 72-byte block and dispatching
+    /// `ceil(E(d)/HZB_BUILD_TILE)` groups per axis.
     pub hzb_build_pipeline: Option<&'a ComputePipeline>,
 }
 

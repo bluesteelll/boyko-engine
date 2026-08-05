@@ -654,9 +654,9 @@ pub struct GBufferTargets {
     /// 0%-gate. Built LAST in [`Self::create`] (it depends on nothing but the extent), so it is
     /// destroyed FIRST here — see that fn's placement comment.
     ///
-    /// Step P1-4 added the `hzb_build` descriptor sets to that same bundle, so the pyramid IS now
-    /// bound — and still DISPATCHED BY NOTHING: no framegraph declaration, no pass, no barrier
-    /// (step P1-5), and it never leaves the `UNDEFINED` layout it is created in.
+    /// Step P1-4 added the `hzb_build` descriptor sets to that same bundle; step P1-5 declared the
+    /// build chain and dispatches it, so the pyramid is BUILT on every armed VB mesh frame and
+    /// READ by nothing (the occlusion cull is piece 3).
     pub(crate) hzb: Option<HzbTargets>,
     /// VG R3 piece 1 step P1-2 — whether the pyramid was ARMED when these targets were built.
     ///
@@ -1116,12 +1116,13 @@ impl VbClassifyTargets {
 /// [`VulkanTextureView`] per level, and (P1-4) the per-frame-in-flight `hzb_build` descriptor sets
 /// bound against them.
 ///
-/// # Allocated and BOUND, and dispatched by NOTHING
+/// # Allocated, BOUND, BUILT — and read by NOTHING
 ///
-/// That is the whole of these two steps (plan §1). No framegraph declaration, no pass, no barrier,
-/// no dispatch: the image is created `UNDEFINED` and STAYS `UNDEFINED`, because the transition
-/// belongs to the build pass and there is no build pass yet (step P1-5). It costs its VRAM plus
-/// `FRAMES_IN_FLIGHT × pass_count` descriptor sets, and changes no rendered pixel.
+/// Steps P1-2/P1-4 allocated and bound it; step P1-5 declared the build passes into
+/// `declare_vb_graph` and dispatches them from `record_vb`, so the image no longer stays
+/// `UNDEFINED`: each pass's first touch of mips `[d, d+n)` derives the `UNDEFINED → GENERAL`
+/// transition, and the pyramid then holds a real reduction of this frame's depth. Nothing SAMPLES
+/// it — the occlusion cull is piece 3 — so an armed frame still changes no rendered pixel.
 ///
 /// # NON-RINGED — one image, not a `[_; FRAMES_IN_FLIGHT]` ring
 ///
@@ -1142,8 +1143,8 @@ impl VbClassifyTargets {
 /// all slots, because the pyramid is not ringed. Ringing all `pass_count` passes rather than only
 /// the base one (the only pass that reads `gSrcDepth`) is deliberate: at `FRAMES_IN_FLIGHT == 2` it
 /// costs ONE extra descriptor set per non-base pass — at most two, since `pass_count` is at most
-/// [`MAX_HZB_PASSES`] — and it removes a special case from the recorder, which will index
-/// `sets[frame][pass]` uniformly instead of branching on `p == 0` at every bind site.
+/// [`MAX_HZB_PASSES`] — and it removes a special case from the recorder, which (since step P1-5)
+/// indexes `sets[frame][pass]` uniformly instead of branching on `p == 0` at every bind site.
 ///
 /// # The usage set, one bit at a time (plan §7)
 ///
@@ -1165,7 +1166,8 @@ impl VbClassifyTargets {
 /// and the stored plan agree by construction, not by a second derivation.
 pub(crate) struct HzbTargets {
     /// The `R32_SFLOAT` pyramid image, `plan.levels` mips deep, single array layer. Created
-    /// `UNDEFINED`; nothing transitions it this step.
+    /// `UNDEFINED`; since step P1-5 the build passes transition it to `GENERAL` per mip, one
+    /// first-touch barrier per pass (`declare_vb_graph`'s `hzb_build_*` chain).
     pub(crate) pyramid: VulkanTexture,
     // VIEW-OWNER: `pyramid`; destroyed before it in `HzbTargets::destroy`.
     /// One single-mip view per level: slot `k` is `Some` iff `k < plan.levels`, and views level

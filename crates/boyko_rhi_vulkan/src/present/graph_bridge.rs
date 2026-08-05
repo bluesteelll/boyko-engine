@@ -2696,6 +2696,16 @@ pub(crate) struct VbPassPlan {
     /// so the graph derives the `COMPUTE -> TRANSFER` dependency that makes the cull's writes
     /// available to the copies. Unarmed on every golden/interactive boot ⇒ no pass, no commands.
     pub(crate) vb_cull_readback: Option<crate::framegraph::PassId>,
+    /// VG R3 piece 1 step P1-5 (docs/VG-R3-P1-PYRAMID-PLAN.md): the HZB depth-pyramid BUILD
+    /// chain — `hzb_build_p` writes pyramid mips `[6p, 6p + n)` and, for `p > 0`, reads mip
+    /// `6p - 1`. Slot `p` is `Some` iff `p < plan.levels.div_ceil(HZB_LEVELS_PER_PASS)`, the
+    /// SAME arithmetic `HzbTargets::sets` is sized by, so a recorded dispatch always has both a
+    /// declared pass and a built descriptor set.
+    ///
+    /// `[None; MAX_HZB_PASSES]` on the `HzbMode::Off` 0%-gate AND on a mesh-less
+    /// (`VisibilityBuffer × Sdf`) frame: the pyramid reduces the depth THIS FRAME'S RASTER
+    /// WROTE, and without the mesh leg `vb_depth` has no producer at all this frame.
+    pub(crate) hzb_build: [Option<crate::framegraph::PassId>; crate::compute::MAX_HZB_PASSES],
     /// VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2b (gate widened at
     /// rung P2c): the `fill` pass (two `vkCmdFillBuffer`s — zeros `counts[MAX]`, sentinels
     /// `group_to_mat[G+MAX]` with `0xFFFFFFFF`, critic P1-1) declared as the FIRST producer on
@@ -2842,6 +2852,11 @@ pub(crate) struct VbBarrierSink<'a> {
     /// `[shadow_vis, shadow_vis2, motion_vec, shadow_temporal_hist, temporal_out,
     /// shadow_temporal_hist_read]` tail the deferred sink's own [`FRAMEGRAPH_IMAGE_COUNT`] doc
     /// documents (ResIds 14..19) — same NULL-when-ungated rule.
+    ///
+    /// VG R3 piece 1 step P1-5 appends `hzb_pyramid` LAST (ResId 14, or 20 under `hwrt`) — the
+    /// `HzbTargets::pyramid` image, `VkImage::NULL` on the `HzbMode::Off` 0%-gate, where no pass
+    /// names its ResId (the `taa_hist`/`thin_normal`/`ssao_ring_a` precedent, NOT `viewt`'s
+    /// always-allocated one). It is the ONE entry whose barriers carry a non-trivial mip span.
     pub(crate) images: [VkImage; VB_IMAGE_COUNT],
     /// `[light_table, vb_instance_ring, gclassify, ddgi_classification, ddgi_ray_table]` (+ rung
     /// R9d's `tlas_instances` under `hwrt`). A pass that does not declare an access on an unarmed
@@ -2879,11 +2894,40 @@ pub(crate) struct VbBarrierSink<'a> {
 /// `motion_vec`/`shadow_temporal_hist`/`temporal_out`/`shadow_temporal_hist_read` tail the
 /// deferred declarator appends after `ddgi_depth` ([`FRAMEGRAPH_IMAGE_COUNT`]'s own doc) — VB
 /// appends the SAME six after ITS OWN `ddgi_depth` (ResId 13), landing at 14..19.
+///
+/// VG R3 piece 1 step P1-5 appends the HZB depth pyramid LAST in BOTH `cfg` arms — ResId 20
+/// under `hwrt`, ResId 14 without it — so every existing ResId is byte-unchanged.
 #[cfg(feature = "hwrt")]
-const VB_IMAGE_COUNT: usize = 20;
-/// See the `hwrt` variant's doc: a `not(hwrt)` build keeps the count at 14 (byte-unchanged).
+const VB_IMAGE_COUNT: usize = 21;
+/// See the `hwrt` variant's doc: a `not(hwrt)` build keeps the count at 14 + the pyramid = 15.
 #[cfg(not(feature = "hwrt"))]
-const VB_IMAGE_COUNT: usize = 14;
+const VB_IMAGE_COUNT: usize = 15;
+
+/// VG R3 piece 1 step P1-5: the HZB build passes' framegraph names, indexed by pass number.
+/// [`FrameGraph::add_pass`](crate::framegraph::FrameGraph::add_pass) takes a `&'static str`, so a
+/// per-pass name cannot be formatted at declare time — one literal per slot IS the mechanism.
+/// Sized by [`MAX_HZB_PASSES`](crate::compute::MAX_HZB_PASSES), so a capacity change is a compile
+/// error here rather than an index panic first reached at a 4096-wide render extent.
+const HZB_BUILD_PASS_NAMES: [&str; crate::compute::MAX_HZB_PASSES] =
+    ["hzb_build_0", "hzb_build_1", "hzb_build_2"];
+
+/// VG R3 piece 1 step P1-5: a single-layer COLOR [`SubRange`](crate::framegraph::SubRange) over
+/// mips `[base, base + count)` — the HZB build chain's per-pass span.
+///
+/// [`SubRange::color_mips`](crate::framegraph::SubRange::color_mips) cannot express it (it pins
+/// `base_mip: 0`, while a reduce pass reads mip `d - 1` and writes from mip `d`), and it is also
+/// the spelling that invites the `MAX_HZB_LEVELS` mistake. Every span this helper is called with
+/// is DERIVED from `HzbPlan::levels`; the capacity constant is never a span.
+#[inline]
+const fn hzb_mips(base: u32, count: u32) -> crate::framegraph::SubRange {
+    crate::framegraph::SubRange {
+        aspect: VK_IMAGE_ASPECT_COLOR_BIT,
+        base_mip: base,
+        mip_count: count,
+        base_layer: 0,
+        layer_count: 1,
+    }
+}
 
 impl crate::framegraph::BarrierSink for VbBarrierSink<'_> {
     fn image_barriers(&mut self, src_stage: u32, dst_stage: u32, group: &[crate::framegraph::ImgBarrier]) {
@@ -3014,8 +3058,9 @@ impl Renderer<'_> {
     /// Multi-paradigm render-path plan, rung R8 (the `lit`-producer branch widened at VB-P2
     /// classification plan rung P2c): (re)declares the VisibilityBuffer v1 frame graph into
     /// `self.frame_graph` — `light_upload? → csm? → atlas? → vb_sky → vb_raster → (classify?)
-    /// → vb_shade | vb_resolve → present_sample` — mirrors [`Self::declare_forward_graph`]'s
-    /// shape, trimmed to VB v1's scope cut (see [`VbPassPlan`]'s doc). The classify chain
+    /// → vb_shade | vb_resolve → hzb_build_*? → present_sample` — mirrors
+    /// [`Self::declare_forward_graph`]'s shape, trimmed to VB v1's scope cut (see
+    /// [`VbPassPlan`]'s doc). The classify chain
     /// (`fill`/`count`/`scan`/`scatter`) and the `vb_shade` vs `vb_resolve` `lit`-producer choice
     /// both key off `scene.vb_use_classified` (plan P1-4); exactly one of `vb_shade`/`vb_resolve`
     /// is ever `Some`. Stores the result in [`Self::vb_pass_plan`]; [`Self::record_vb`] then
@@ -3127,12 +3172,6 @@ impl Renderer<'_> {
                 VK_ACCESS_SHADER_READ_BIT,
             ),
         );
-        #[cfg(not(feature = "hwrt"))]
-        debug_assert_eq!(
-            ddgi_depth.index() + 1,
-            VB_IMAGE_COUNT,
-            "invariant: declare_vb_graph's image declarations must match VB_IMAGE_COUNT"
-        );
 
         // Rung R9d (ResIds 14..19): the VB hardware shadow chain's own image tail, appended AFTER
         // `ddgi_depth` in the SAME DEFERRED order/seeds — see `declare_deferred_graph`'s own
@@ -3167,9 +3206,47 @@ impl Renderer<'_> {
                 VK_ACCESS_SHADER_WRITE_BIT,
             ),
         ); // ResId 19
-        #[cfg(feature = "hwrt")]
+
+        // VG R3 piece 1 step P1-5 (docs/VG-R3-P1-PYRAMID-PLAN.md): the hierarchical-Z depth
+        // pyramid, appended LAST in BOTH `cfg` arms — ResId 14 without `hwrt`, 20 with it — so
+        // every ResId above is byte-unchanged (the Track-A append discipline every addition in
+        // this block follows).
+        //
+        // DECLARED UNCONDITIONALLY, armed or not, exactly like `viewt`/`taa_hist` above: with the
+        // pyramid disarmed NO pass names this ResId, so the graph routes ZERO barriers on it and
+        // an unarmed boot's recorded command stream is byte-identical. The sink's slot then holds
+        // `VkImage::NULL` and is never read (`VbBarrierSink::images`'s own NULL-when-ungated rule).
+        //
+        // ⚠️ THE DECLARED MIP COUNT. `image_access` range-checks every span against this number IN
+        // RELEASE, so it is not a formality: the live chain has `plan.levels` mips, and a DISARMED
+        // boot has no image at all. `1` is the disarmed value — the minimum `add_image_mipped`
+        // accepts (`0` panics: a zero-mip resource owns no sync entries and the NEXT resource
+        // would alias its `state_base`) — and it is sound precisely because no access names the
+        // ResId then. When the image DOES exist the declared shape and the real image agree
+        // EXACTLY: `HzbTargets::build` creates it with `mip_levels: plan.levels` from the same
+        // `scene.hzb` this line reads.
+        //
+        // ⚠️ THE SEED, which is a decision and not a default. The pyramid is NON-RINGED (one image
+        // shared by both frames in flight) and is written EVERY frame, so the cross-frame question
+        // is real. In piece 1 it has NO READER AT ALL — nothing samples the pyramid, in this frame
+        // or the sibling one — so the only cross-frame hazard is a WAW on content nobody consumes,
+        // and "every frame first-touches it" is the honest description: `ResSync::undefined()`.
+        // PIECE 3 ADDS THE READER AND IS WHERE THIS MUST BE REVISITED — at that point frame N+1's
+        // first write to mip `d` would need to order against frame N's still-pipelined occlusion
+        // reads (`seeded_readers_at_layout(GENERAL, COMPUTE, SHADER_READ)`), which is the engine's
+        // recorded "wrong only in motion" fingerprint. P1-5a made the seed a REQUIRED argument for
+        // exactly this reason, so the question is a visible argument at this call site rather than
+        // an omission nothing would surface.
+        let hzb_pyramid = g.add_image_mipped(
+            "hzb_pyramid",
+            scene.hzb.map_or(1, |p| p.levels),
+            ResSync::undefined(),
+        );
+        // ONE assert rather than the two `cfg`-split ones this step replaced: the pyramid is the
+        // last image in BOTH arms, so `ddgi_depth`'s and `shadow_temporal_hist_read`'s former
+        // invariants collapse into this single statement.
         debug_assert_eq!(
-            shadow_temporal_hist_read.index() + 1,
+            hzb_pyramid.index() + 1,
             VB_IMAGE_COUNT,
             "invariant: declare_vb_graph's image declarations must match VB_IMAGE_COUNT"
         );
@@ -3796,6 +3873,81 @@ impl Renderer<'_> {
         } else {
             (None, None, None, None, None, None, None, None, None, None)
         };
+
+        // ==== VG R3 piece 1 step P1-5: the HZB depth-pyramid BUILD chain. ====
+        //
+        // Declared HERE — after `vb_raster`, the pass that WRITES `vb_depth`, and beside the
+        // `vb_viewt` pre-tail slot below, the other `vb_depth` shader-reader. `hzb_build_0`'s read
+        // is what derives the DEPTH_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL transition out
+        // of the raster on an armed frame; every later same-layout read then needs none.
+        //
+        // Pass `p` writes mips `[d, d + n)` where `d = p * HZB_LEVELS_PER_PASS` and
+        // `n = min(HZB_LEVELS_PER_PASS, levels - d)`, and (for `p > 0`) reads mip `d - 1`. That is
+        // TWO spans on ONE ResId inside ONE pass, which is exactly what step P1-5a re-keyed the
+        // sync state `(ResId, mip)` to admit; `tests/framegraph_gbuffer_equiv.rs`'s
+        // `compile_derives_the_hzb_build_chain_at_a_real_extent` pins the three barriers this
+        // declaration derives at `levels = 10`.
+        //
+        // ⚠️ EVERY SPAN COMES FROM `plan.levels`. Never `SubRange::color_mips(MAX_HZB_LEVELS)`:
+        // that constant is a CAPACITY (17), and a capacity-wide span is out of range at every real
+        // render extent. Since P1-5a `image_access` rejects it in RELEASE rather than silently
+        // indexing a neighbouring resource's sync entry — but it is declared right here in the
+        // first place, which is the actual requirement.
+        //
+        // ⚠️ THE `mesh_leg` CONJUNCT. `scene.hzb.is_some()` alone is NOT the gate: the pyramid
+        // reduces the depth THIS FRAME'S RASTER WROTE (the step-P1-4 finding, plan §9), and on a
+        // mesh-less `VisibilityBuffer × Sdf` frame `vb_raster` is not declared, so NOTHING writes
+        // `vb_depth` this frame. Reading it would take `compile`'s first-touch arm on a transient
+        // image with no producer — a `TOP_OF_PIPE` barrier over undefined contents — which is the
+        // exact failure that declarator's unwritten-transient-read guard exists to catch. Every
+        // other `vb_depth` reader in this fn is already `mesh_leg`-gated (`sdf_forward_march`'s
+        // HAS_MESH arm; `vb_viewt`, whose `viewt_from_vb_depth` arm is `VB × Mesh` by
+        // construction), so this conjunct is that convention rather than a new rule.
+        let mut hzb_build: [Option<crate::framegraph::PassId>; crate::compute::MAX_HZB_PASSES] =
+            [None; crate::compute::MAX_HZB_PASSES];
+        if let Some(hzb_plan) = scene.hzb.filter(|_| mesh_leg) {
+            let levels = hzb_plan.levels;
+            let pass_count = levels.div_ceil(crate::compute::HZB_LEVELS_PER_PASS) as usize;
+            debug_assert!(
+                pass_count <= crate::compute::MAX_HZB_PASSES,
+                "invariant: the plan's pass count fits MAX_HZB_PASSES (levels <= MAX_HZB_LEVELS)"
+            );
+            for (p, slot) in hzb_build.iter_mut().enumerate().take(pass_count) {
+                let d = p as u32 * crate::compute::HZB_LEVELS_PER_PASS;
+                let n = (levels - d).min(crate::compute::HZB_LEVELS_PER_PASS);
+                let pass = g.add_pass(HZB_BUILD_PASS_NAMES[p]);
+                if p == 0 {
+                    // The SOURCE depth, at the SAME (stage, access, layout, aspect) shape
+                    // `vb_viewt`/`sdf_forward_march` already declare for this image.
+                    g.image_access(
+                        vb_depth,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        SubRange::DEPTH,
+                    );
+                } else {
+                    // The FINE level this pass reduces from — mip `d - 1`, written by pass
+                    // `p - 1`. One mip, so the derived barrier is a RAW flush over that mip
+                    // ALONE, leaving the rest of the chain untouched.
+                    g.image_access(
+                        hzb_pyramid,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        VK_IMAGE_LAYOUT_GENERAL,
+                        hzb_mips(d - 1, 1),
+                    );
+                }
+                g.image_access(
+                    hzb_pyramid,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    hzb_mips(d, n),
+                );
+                *slot = Some(pass);
+            }
+        }
 
         // ---- Rung R9b: the SPLIT arm (docs/R9-VB-SPLIT-PLAN.md §3) — declared between
         // `vb_raster` (whose `vb_id`/`vb_depth` both split passes consume) and
@@ -4424,6 +4576,7 @@ impl Renderer<'_> {
             vb_indirect_upload,
             vb_batch_cull,
             vb_cull_readback,
+            hzb_build,
             vb_raster,
             vb_classify_fill,
             vb_classify_count,
@@ -4528,6 +4681,13 @@ impl Renderer<'_> {
                 // [`Renderer::record_graph_pass`]'s doc for why `[fi]` here would be a bug).
                 #[cfg(feature = "hwrt")]
                 targets.shadow_temporal_hist.as_ref().map_or(VkImage::NULL, |r| r[fi ^ 1].image),
+                // VG R3 piece 1 step P1-5 (LAST in both `cfg` arms — ResId 14, or 20 under
+                // `hwrt`): the HZB depth pyramid. NON-RINGED, so there is no `[fi]` here — one
+                // image serves both frames in flight. `Option`-guarded on the `HzbMode::Off`
+                // 0%-gate (the `taa_hist`/`thin_normal`/`ssao_ring_a` shape, NOT `viewt`'s bare
+                // always-allocated one): with the pyramid disarmed no pass names its ResId, so
+                // the NULL is inert.
+                targets.hzb.as_ref().map_or(VkImage::NULL, |h| h.pyramid.image),
             ],
             #[cfg(not(feature = "hwrt"))]
             buffers: [
