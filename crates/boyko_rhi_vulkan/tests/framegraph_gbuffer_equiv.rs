@@ -870,6 +870,18 @@ fn hwrt_resid_18_sink_slot_mapping_pinned() {
 
 /// A pass reads a transient image that no prior pass wrote and that was never
 /// declared via `add_image_seeded` — the guard must fire.
+///
+/// `cfg(debug_assertions)`: the guard IS a `debug_assert!`, so in a release test binary `compile`
+/// correctly does not panic and a `should_panic` test reports a failure that is not one. CI runs a
+/// debug × release matrix, so the debug leg still gates this.
+///
+/// ⚠️ This attribute was MISSING, and its absence was measured rather than reasoned about: CI runs
+/// `cargo test --workspace --all-targets --release` (`.github/workflows/ci.yml:62`, `:103`), so
+/// this test and its neighbour below have been FAILING the release leg. The rule was already
+/// written down — the sibling at `compile_panics_when_span_and_layout_both_vary` carries both the
+/// attribute and this exact rationale — so what was missing was not the knowledge but the gate on
+/// two tests that were added later.
+#[cfg(debug_assertions)]
 #[test]
 #[should_panic(expected = "reads transient image")]
 fn compile_panics_on_unwritten_transient_image_read() {
@@ -1073,6 +1085,11 @@ fn compile_panics_when_the_variation_straddles_three_accesses() {
 /// which is why the panic message points at per-subresource sync state rather than at
 /// making the declarations agree by hand. Tripping here is the intended way to discover
 /// that work.
+///
+/// `cfg(debug_assertions)`: the guard IS a `debug_assert!` — see
+/// `compile_panics_on_unwritten_transient_image_read` for the measurement that showed both of
+/// these were failing CI's release leg without it.
+#[cfg(debug_assertions)]
 #[test]
 #[should_panic(expected = "HZB-SUBRESOURCE-UNIFORM")]
 fn compile_panics_when_one_resource_declares_two_spans() {
