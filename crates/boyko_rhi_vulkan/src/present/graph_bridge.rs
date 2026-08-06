@@ -2672,12 +2672,55 @@ pub(crate) struct VbPassPlan {
     /// carries no slot with no mesh leg) and leaves `lit` for `vb_sky` + [`Self::sdf_forward_march`]
     /// alone. `record_vb` reads the SAME `mesh_leg` predicate, so a `None` here is never recorded.
     pub(crate) vb_raster: Option<crate::framegraph::PassId>,
+    /// VG R3 piece 2 step P2-5 (docs/VG-R3-P2-CAPABILITY-SPLIT-PLAN.md, decision D4): the LATE
+    /// raster scope — a SECOND `vkCmdBeginRendering`/`EndRendering` bracket over the SAME two
+    /// attachments and the SAME `renderArea`, `LOAD_OP_LOAD`/`STORE_OP_STORE` on both, fed by its
+    /// own [`GBufferScene::vb_indirect_late`](super::scene_types::GBufferScene::vb_indirect_late)
+    /// record array.
+    ///
+    /// `Some` iff [`GBufferScene::path_vb_occlusion_split`](super::scene_types::GBufferScene::path_vb_occlusion_split)
+    /// — the SAME single predicate `record_vb` reads, so declare and record cannot disagree.
+    ///
+    /// IT DRAWS NOTHING IN THIS PIECE: every record it fetches carries `instanceCount = 0`, so
+    /// `LOAD_OP_LOAD` yields exactly what the early scope stored, no fragment is produced, and
+    /// `STORE_OP_STORE` writes the loaded contents back — final contents identical, by an argument
+    /// that needs no numerics. That is the shipped-inert discipline `vb_batch_cull.comp.hlsl`
+    /// documents for its own two rungs ("EACH LEVEL SHIPPED INERT ONE RUNG BEFORE IT WAS ARMED, on
+    /// purpose… Neither was a placeholder"): the scope, the per-batch loop and the record array are
+    /// real, and only the one word a later rung produces is the inert constant. Piece 3 changes
+    /// that word's PRODUCER (host `0` → cull-written `k`) and sets the survivor-indirection bit; it
+    /// adds no structure here.
+    ///
+    /// A dedicated array rather than a rewrite of [`GBufferScene::vb_indirect`](super::scene_types::GBufferScene::vb_indirect)
+    /// between the scopes: the early scope needs `instanceCount = early_k` and the late one
+    /// `instanceCount = late_k` in ONE command buffer, so sharing would put a transfer against the
+    /// early scope's still-in-flight indirect fetches, every frame, forever, to save 20 KiB × FIF.
+    pub(crate) vb_raster_late: Option<crate::framegraph::PassId>,
     /// Rung R2a': the inline `vkCmdUpdateBuffer` that fills this frame's indirect draw records —
     /// and, since rung R2c0, the [`VbBatchDesc`](super::scene_types::VbBatchDesc) array the batch
     /// cull reads. `Some` iff the mesh leg records a raster (the same gate `vb_raster` itself
     /// carries) AND `scene.vb_indirect` is armed; `None` leaves the recorder on its direct-draw
     /// path.
     pub(crate) vb_indirect_upload: Option<crate::framegraph::PassId>,
+    /// VG R3 piece 2 step P2-5 (plan D4): the inline `vkCmdUpdateBuffer` that fills this frame's
+    /// LATE indirect draw records. `Some` iff
+    /// [`GBufferScene::path_vb_occlusion_split`](super::scene_types::GBufferScene::path_vb_occlusion_split),
+    /// declared BEFORE [`Self::vb_raster_late`] fetches from them.
+    ///
+    /// ⚠️ ITS OWN PASS, deliberately NOT folded into [`Self::vb_indirect_upload`], whose gate is
+    /// `scene.vb_indirect.is_some()` — reconciling two different predicates on one pass is exactly
+    /// how the single-predicate discipline gets broken.
+    ///
+    /// ⚠️ AND IT MUST EXIST. With no declared writer the graph takes the first-touch arm and
+    /// derives `(TOP_OF_PIPE, 0)` for the late raster's indirect fetch — an execution-only edge
+    /// that makes the fill neither available nor visible. On frame 1, over freshly allocated
+    /// DEVICE_LOCAL memory, `instanceCount` is then arbitrary, `firstInstance` may be nonzero with
+    /// `drawIndirectFirstInstance` VK_FALSE and `robustBufferAccess` off, and the scope this whole
+    /// piece claims draws nothing, draws. Nothing else catches that: `graph.rs`'s unwritten-read
+    /// backstop waves a BUFFER read with no producer through by construction (and lives under
+    /// `debug_assertions`), and a barrier COUNT cannot see it either — the defective shape derives
+    /// the SAME three barriers and differs only in `src_stage`/`src_access`.
+    pub(crate) vb_indirect_late_upload: Option<crate::framegraph::PassId>,
     /// VG rung R2c0: the per-BATCH draw-record cull compute pass (`vb_batch_cull.comp.hlsl`).
     /// Declared BETWEEN [`Self::vb_indirect_upload`] and [`Self::vb_raster`], which is what makes
     /// the graph derive both halves of the seam this rung exists to de-risk: `TRANSFER → COMPUTE`
@@ -2975,6 +3018,147 @@ const fn hzb_mips(base: u32, count: u32) -> crate::framegraph::SubRange {
     }
 }
 
+/// VG R3 piece 2 step P2-5 (docs/VG-R3-P2-CAPABILITY-SPLIT-PLAN.md, decision D6): declares the
+/// `[hzb_poison, hzb_build_0 .. hzb_build_{n-1}]` BLOCK, which
+/// [`Renderer::declare_vb_graph`] places in ONE of two slots per frame — today's (after the `lit`
+/// producer) on an unsplit frame, and immediately after the EARLY `vb_raster` on an armed-split
+/// one. Returns `(hzb_poison, hzb_build)` for [`VbPassPlan`].
+///
+/// # Why the block is ONE unit, and why that is a function rather than a convention
+///
+/// `hzb_poison` is asserted to precede EVERY `hzb_build_*` (the `debug_assert!` beside the plan
+/// construction in `declare_vb_graph`), [`PassId`](crate::framegraph::PassId) is strictly
+/// monotonic in declare order and `compile()` does not reorder. So moving the builds without the
+/// poison puts `build.index() < poison.index()`: a clear that ERASES the levels the dispatches
+/// just wrote. A dev-profile build fires the assert; a release binary compiles it out, the dump
+/// then reads `HZB_PYRAMID_POISON` everywhere and gate G8 reds claiming "the build never ran" —
+/// a gate reporting the wrong defect. One function is what makes "the block moves whole" a
+/// property of the code instead of a property of a reviewer.
+///
+/// # The arguments carry the gates, so the two call sites cannot disagree
+///
+/// `hzb_levels` is `scene.hzb.filter(|_| mesh_leg).map(|p| p.levels)` — the pyramid's LIVE level
+/// count with the `mesh_leg` conjunct already folded in. That conjunct is load-bearing: without a
+/// mesh leg `vb_raster` is not declared, nothing writes `vb_depth` this frame, and `hzb_build_0`'s
+/// read would take `compile`'s first-touch arm on an unwritten transient. Every span below is
+/// derived from that number and NEVER from `MAX_HZB_LEVELS`, which is a capacity (17) and out of
+/// range at every real render extent — since P1-5a `image_access` rejects it in RELEASE.
+///
+/// `dump_armed` is `scene.hzb_dump.is_some()`. The poison arms on EXACTLY
+/// `hzb_levels.is_some() && dump_armed`, which is the dump pass's own predicate verbatim: a frame
+/// that is poisoned is always a frame that is dumped, and vice versa. Anything narrower poisons a
+/// pyramid nobody reads back; anything wider puts a transfer write on a frame that ships.
+fn declare_hzb_poison_build(
+    g: &mut crate::framegraph::FrameGraph,
+    hzb_levels: Option<u32>,
+    dump_armed: bool,
+    hzb_pyramid: crate::framegraph::ResId,
+    vb_depth: crate::framegraph::ResId,
+) -> (
+    Option<crate::framegraph::PassId>,
+    [Option<crate::framegraph::PassId>; crate::compute::MAX_HZB_PASSES],
+) {
+    use crate::framegraph::SubRange;
+
+    // ==== VG R3 piece 1 step P1-8 (plan §5/§13, gate G8): the pyramid POISON clear. ====
+    //
+    // Declared FIRST — before every `hzb_build_p`, which is the whole point of it and is asserted
+    // at the plan construction in the shape step P1-6 used to pin the dump's own position. On a
+    // dump frame the pyramid IMAGE is filled with `HZB_PYRAMID_POISON` so that an unwritten texel
+    // holds a value the reduce can never produce; the host half then reads "no texel is the
+    // poison" as "every level was WRITTEN", at any scene coverage.
+    //
+    // ⚠️ THE IMAGE, NOT THE STAGING. The host driver already prefills the staging with NaN, and
+    // that catches a failed COPY — it cannot see a level the BUILD never wrote, because copying an
+    // unwritten level succeeds and faithfully transfers whatever the image holds. Step P1-6
+    // measured what that costs: 89.3% of the `vb_mesh` pyramid is the far plane `0.0`, levels 6..9
+    // entirely so, and a zero-filled image agrees with the oracle there.
+    //
+    // The write is `TRANSFER(TRANSFER_WRITE)` at `GENERAL`, so the derived barrier is this
+    // resource's `UNDEFINED → GENERAL` first touch over mips `[0, levels)`, and `hzb_build_0` then
+    // derives a real WAW flush (`TRANSFER_WRITE → SHADER_WRITE`) instead of the first touch it
+    // derives on an undumped frame. `GENERAL` is one of the two layouts `vkCmdClearColorImage`
+    // accepts, and it is the layout the pyramid holds for life, so no extra transition appears
+    // anywhere.
+    let hzb_poison = match (hzb_levels, dump_armed) {
+        (Some(levels), true) => {
+            let p = g.add_pass("hzb_poison");
+            g.image_access(
+                hzb_pyramid,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_GENERAL,
+                hzb_mips(0, levels),
+            );
+            Some(p)
+        }
+        _ => None,
+    };
+
+    // ==== VG R3 piece 1 step P1-5: the HZB depth-pyramid BUILD chain. ====
+    //
+    // Pass `p` writes mips `[d, d + n)` where `d = p * HZB_LEVELS_PER_PASS` and
+    // `n = min(HZB_LEVELS_PER_PASS, levels - d)`, and (for `p > 0`) reads mip `d - 1`. That is TWO
+    // spans on ONE ResId inside ONE pass, which is exactly what step P1-5a re-keyed the sync state
+    // `(ResId, mip)` to admit; `tests/framegraph_gbuffer_equiv.rs`'s
+    // `compile_derives_the_hzb_build_chain_at_a_real_extent` pins the three barriers this
+    // declaration derives at `levels = 10`.
+    //
+    // `hzb_build_0`'s `vb_depth` read is what derives that image's
+    // `DEPTH_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL` transition out of the raster; every
+    // later same-layout read then needs none. ⚠️ VG R3 piece 2 step P2-5: at the ARMED-SPLIT slot
+    // "later" no longer means "for the rest of the frame" — `vb_raster_late` writes the depth
+    // again immediately after this block, so every downstream reader is re-sourced from a real RAW
+    // flush plus a preserving layout transition (strictly stronger than the execution-only edge it
+    // replaces, and the reason `hzb_dump`'s own comment had to be corrected).
+    let mut hzb_build: [Option<crate::framegraph::PassId>; crate::compute::MAX_HZB_PASSES] =
+        [None; crate::compute::MAX_HZB_PASSES];
+    if let Some(levels) = hzb_levels {
+        let pass_count = levels.div_ceil(crate::compute::HZB_LEVELS_PER_PASS) as usize;
+        debug_assert!(
+            pass_count <= crate::compute::MAX_HZB_PASSES,
+            "invariant: the plan's pass count fits MAX_HZB_PASSES (levels <= MAX_HZB_LEVELS)"
+        );
+        for (p, slot) in hzb_build.iter_mut().enumerate().take(pass_count) {
+            let d = p as u32 * crate::compute::HZB_LEVELS_PER_PASS;
+            let n = (levels - d).min(crate::compute::HZB_LEVELS_PER_PASS);
+            let pass = g.add_pass(HZB_BUILD_PASS_NAMES[p]);
+            if p == 0 {
+                // The SOURCE depth, at the SAME (stage, access, layout, aspect) shape
+                // `vb_viewt`/`sdf_forward_march` already declare for this image.
+                g.image_access(
+                    vb_depth,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    SubRange::DEPTH,
+                );
+            } else {
+                // The FINE level this pass reduces from — mip `d - 1`, written by pass `p - 1`.
+                // One mip, so the derived barrier is a RAW flush over that mip ALONE, leaving the
+                // rest of the chain untouched.
+                g.image_access(
+                    hzb_pyramid,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    hzb_mips(d - 1, 1),
+                );
+            }
+            g.image_access(
+                hzb_pyramid,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_GENERAL,
+                hzb_mips(d, n),
+            );
+            *slot = Some(pass);
+        }
+    }
+
+    (hzb_poison, hzb_build)
+}
+
 impl crate::framegraph::BarrierSink for VbBarrierSink<'_> {
     fn image_barriers(&mut self, src_stage: u32, dst_stage: u32, group: &[crate::framegraph::ImgBarrier]) {
         debug_assert!(
@@ -3103,15 +3287,34 @@ impl crate::framegraph::BarrierSink for VbBarrierSink<'_> {
 impl Renderer<'_> {
     /// Multi-paradigm render-path plan, rung R8 (the `lit`-producer branch widened at VB-P2
     /// classification plan rung P2c): (re)declares the VisibilityBuffer v1 frame graph into
-    /// `self.frame_graph` — `light_upload? → csm? → atlas? → vb_sky → vb_raster → (classify?)
-    /// → vb_shade | vb_resolve → hzb_build_*? → present_sample` — mirrors
-    /// [`Self::declare_forward_graph`]'s shape, trimmed to VB v1's scope cut (see
-    /// [`VbPassPlan`]'s doc). The classify chain
+    /// `self.frame_graph` — mirrors [`Self::declare_forward_graph`]'s shape, trimmed to VB v1's
+    /// scope cut (see [`VbPassPlan`]'s doc). The classify chain
     /// (`fill`/`count`/`scan`/`scatter`) and the `vb_shade` vs `vb_resolve` `lit`-producer choice
     /// both key off `scene.vb_use_classified` (plan P1-4); exactly one of `vb_shade`/`vb_resolve`
     /// is ever `Some`. Stores the result in [`Self::vb_pass_plan`]; [`Self::record_vb`] then
     /// drives each pass's derived barriers through it. Called ONLY by
     /// [`Self::declare_frame_graph`]'s `VisibilityBuffer` arm.
+    ///
+    /// # The pass chain, and the ONE predicate that picks between its two shapes
+    ///
+    /// VG R3 piece 2 step P2-5 (docs/VG-R3-P2-CAPABILITY-SPLIT-PLAN.md, decisions D4/D6): the
+    /// `[hzb_poison, hzb_build_*]` block and the raster scopes are ordered by
+    /// [`GBufferScene::path_vb_occlusion_split`](super::scene_types::GBufferScene::path_vb_occlusion_split)
+    /// alone, read ONCE into a local so this declarator and `record_vb` cannot disagree about
+    /// which shape the frame has:
+    ///
+    /// * **unsplit** (every scene in the tree today) — `light_upload? → light_cull? → csm? →
+    ///   atlas? → vb_sky → vb_indirect_upload? → vb_batch_cull? → vb_raster → (classify?) →
+    ///   vb_shade | vb_resolve → hzb_poison? → hzb_build_*? → (split arm) → … → present_sample →
+    ///   hzb_dump?`, i.e. byte-for-byte the chain that shipped before the split existed;
+    /// * **armed split** — `… → vb_indirect_upload? → vb_indirect_late_upload → vb_batch_cull? →
+    ///   vb_raster → hzb_poison? → hzb_build_*? → vb_raster_late → (classify?) → vb_shade |
+    ///   vb_resolve → …`.
+    ///
+    /// The block moves EARLIER, never later, so the `hzb_poison < hzb_build_* < hzb_dump` chain of
+    /// asserts below is preserved (the dump is declared last in the whole graph). The reorder lands
+    /// in the one step where it is provably neutral — while the late scope still draws nothing —
+    /// rather than in the step that arms a decision.
     pub(crate) fn declare_vb_graph(&mut self, scene: &GBufferScene<'_>) {
         use crate::framegraph::{ResSync, SubRange};
 
@@ -3379,14 +3582,14 @@ impl Renderer<'_> {
         // Frame-private (per-FIF) like `vb_indirect` itself, so `add_buffer`'s undefined seed is
         // right: this frame's own write is the first touch of its own slot.
         //
-        // DECLARED HERE, NAMED BY NO PASS AT THIS STEP — the `hzb_pyramid` shape one screen up.
-        // A resource no access names routes ZERO barriers, so every existing pin's recorded
-        // command stream is byte-identical; what the declaration buys now is that the sink slot
-        // below it has a ResId to be addressed by, and that the drift assert has something to
-        // measure. Step P2-5 adds `vb_indirect_late_upload` (the TRANSFER write) and
-        // `vb_raster_late` (the DRAW_INDIRECT read) TOGETHER, because a declared indirect read
-        // with no declared writer derives `(TOP_OF_PIPE, 0)` — a missing barrier, not a wasted
-        // one, and `graph.rs`'s unwritten-read backstop waves buffers through by construction.
+        // NAMED BY NO PASS unless the occlusion split arms this frame — the `hzb_pyramid` shape
+        // one screen up. A resource no access names routes ZERO barriers, so every UNSPLIT frame's
+        // recorded command stream is byte-identical to the one that shipped before the split
+        // existed. Step P2-5 added `vb_indirect_late_upload` (the TRANSFER write) and
+        // `vb_raster_late` (the DRAW_INDIRECT read) TOGETHER, in one commit, because a declared
+        // indirect read with no declared writer derives `(TOP_OF_PIPE, 0)` — a missing barrier, not
+        // a wasted one, and `graph.rs`'s unwritten-read backstop waves buffers through by
+        // construction.
         let vb_indirect_late = g.add_buffer("vb_indirect_late");
         // The buffer-side sibling of the `hzb_pyramid` assert above, and the buffer side is where
         // it matters more: a mis-keyed buffer barrier names a LIVE WRONG buffer (every sink slot
@@ -3532,6 +3735,30 @@ impl Renderer<'_> {
             && scene.vb_cull_count.is_some()
             && scene.vb_mesh_bounds.is_some()
             && scene.vb_batch_cull_pipeline.is_some();
+        // VG R3 piece 2 step P2-5 (plan D3/D4/D6): THE single source of "this frame has two raster
+        // scopes", read ONCE here because it gates FOUR things that must agree — the
+        // `vb_indirect_late_upload` pass, the `vb_raster_late` pass, which of the two slots the
+        // `[hzb_poison, hzb_build_*]` block occupies, and (through the same method on the same
+        // scene) every one of `record_vb`'s matching gates. Two spellings of one decision is how
+        // declare/record parity breaks.
+        let occlusion_split = scene.path_vb_occlusion_split();
+        // VG R3 piece 2 step P2-5 (plan D6): the poison+build block's two INPUTS, computed once,
+        // above BOTH slots. `mesh_leg` is folded in here (never re-derived at a slot) so the block
+        // is armed by one expression no matter where it lands — see
+        // `declare_hzb_poison_build`'s own doc for why each conjunct is load-bearing.
+        let hzb_levels = scene.hzb.filter(|_| mesh_leg).map(|p| p.levels);
+        let hzb_dump_armed = scene.hzb_dump.is_some();
+        // The moving unit's outputs: ONE binding with TWO possible assignment sites, exactly one of
+        // which runs. `mut` locals rather than more elements of the tuple below, because the armed
+        // slot is INSIDE that tuple's `if mesh_leg` block and the unsplit one is after it.
+        let mut hzb_poison: Option<crate::framegraph::PassId> = None;
+        let mut hzb_build: [Option<crate::framegraph::PassId>; crate::compute::MAX_HZB_PASSES] =
+            [None; crate::compute::MAX_HZB_PASSES];
+        // The split's own two passes, likewise: both are declared inside the `if mesh_leg` block,
+        // and `path_vb_occlusion_split()` already carries `mesh_leg`, so a `None` on a mesh-less
+        // frame is not a special case — it is the predicate being false.
+        let mut vb_indirect_late_upload: Option<crate::framegraph::PassId> = None;
+        let mut vb_raster_late: Option<crate::framegraph::PassId> = None;
         let (
             vb_classify_fill,
             vb_classify_count,
@@ -3572,6 +3799,38 @@ impl Renderer<'_> {
                         VK_ACCESS_TRANSFER_WRITE_BIT,
                     );
                 }
+                p
+            });
+
+            // ==== VG R3 piece 2 step P2-5 (plan D4): the LATE indirect record array's WRITE. ====
+            //
+            // The mirror of the upload directly above, and it is a SEPARATE pass on purpose: its
+            // gate is `path_vb_occlusion_split()` while that one's is `scene.vb_indirect.is_some()`,
+            // and folding two different predicates onto one pass is how a pass ends up declaring an
+            // access the recorder does not perform (or the reverse).
+            //
+            // ⚠️ THIS DECLARATION IS THE DIFFERENCE BETWEEN "DRAWS NOTHING" AND "DRAWS WHATEVER WAS
+            // IN FRESHLY ALLOCATED DEVICE MEMORY". The fill is a `vkCmdUpdateBuffer` — the buffer is
+            // DEVICE_LOCAL | TRANSFER_DST, so it can only be a transfer op — and `vb_raster_late`
+            // fetches from it in the SAME command buffer. Omit this half and the graph finds no
+            // writer, takes the first-touch arm, and derives `(TOP_OF_PIPE, 0)`: an execution-only
+            // edge that makes the update neither available nor visible. That is a MISSING barrier,
+            // not a wasted one, and nothing in this repository would report it — a buffer hazard is
+            // invisible to the goldens, to the validation layers, and to `robustBufferAccess` (off
+            // on this device); `graph.rs`'s unwritten-read backstop is `!is_image || is_write ||
+            // res_written[ri]`, so a BUFFER read with no producer is waved through by construction,
+            // and it lives under `debug_assertions` besides.
+            //
+            // ⚠️ AND THE BARRIER COUNT CANNOT SEE IT EITHER. Dropping this access leaves the late
+            // scope's boundary at the SAME three barriers, differing only in `src_stage`/
+            // `src_access` — which is why gate G4 asserts the derived barrier's FIELDS.
+            vb_indirect_late_upload = occlusion_split.then(|| {
+                let p = g.add_pass("vb_indirect_late_upload");
+                g.buffer_access(
+                    vb_indirect_late,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT,
+                );
                 p
             });
 
@@ -3709,6 +3968,80 @@ impl Renderer<'_> {
                     VK_ACCESS_SHADER_READ_BIT,
                 );
             }
+
+            // ==== VG R3 piece 2 step P2-5 (plan D6): the `[hzb_poison, hzb_build_*]` block's
+            // ARMED-SPLIT slot — between the two raster scopes. ====
+            //
+            // WHY THE MOVE IS REQUIRED AT ALL: in the target design the late raster must write
+            // `vb_id`/`vb_depth` BEFORE `vb_resolve`/`vb_shade` read `vb_id`, or the late geometry
+            // is never shaded — and the pyramid the late scope's occlusion test consults must be
+            // built from the EARLY depth. That fixes the armed order as
+            // `vb_raster → hzb_poison → hzb_build_* → vb_raster_late → classify → lit`.
+            //
+            // WHY NOW: the only moment the reorder is PROVABLY neutral is while the late scope
+            // draws nothing. Deferring it to piece 3 would ship a graph reorder in the same step
+            // that arms a decision.
+            //
+            // WHY ONE PREDICATE PICKS A SLOT rather than an unconditional move: the `vb_viewt`
+            // PRE-TAIL/LATE pair below is the same idiom — the accesses are IDENTICAL in both
+            // slots, only the position differs — and it is what keeps an UNSPLIT frame deriving a
+            // barrier stream bit-identical to the one that shipped.
+            if occlusion_split {
+                let (poison, build) =
+                    declare_hzb_poison_build(g, hzb_levels, hzb_dump_armed, hzb_pyramid, vb_depth);
+                hzb_poison = poison;
+                hzb_build = build;
+            }
+
+            // ==== VG R3 piece 2 step P2-5 (plan D4): the LATE raster scope. ====
+            //
+            // Three accesses, and each one is load-bearing:
+            //
+            //  * `vb_indirect_late` at DRAW_INDIRECT/INDIRECT_COMMAND_READ — the consumer half of
+            //    `vb_indirect_late_upload`'s transfer write, mirroring `vb_raster`'s own indirect
+            //    fetch declaration above. Together they derive the TRANSFER → DRAW_INDIRECT edge;
+            //    either half alone derives a barrier that is wrong rather than absent.
+            //  * `vb_id` as a COLOR write at `COLOR_ATTACHMENT_OPTIMAL` — a WAW against the early
+            //    scope's store, at the layout the early scope left it in. ⚠️ NOT `UNDEFINED`: a
+            //    first touch here would license DISCARDING what the early scope wrote, which is
+            //    exactly the equivalence this piece rests on.
+            //  * `vb_depth` as a DEPTH write at `DEPTH_ATTACHMENT_OPTIMAL` — the same WAW, and on
+            //    an HZB-armed frame the return half of the round trip
+            //    `DEPTH_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL` (into `hzb_build_0`, just
+            //    above) `→ DEPTH_ATTACHMENT_OPTIMAL`. Both are content-preserving, and neither may
+            //    become a first touch.
+            //
+            // ⚠️ WHAT IS DELIBERATELY *NOT* DECLARED, and what piece 3 must add. The late scope
+            // binds the same pipeline and the same Set-0 as the early one, whose VS reads
+            // `vb_instance_ring` @0 and `vb_visible_instance` @11 — but every late record carries
+            // `instanceCount = 0`, so this scope issues ZERO vertex invocations and performs
+            // neither read. Declaring them now would be declaring an access the recorder does not
+            // perform. The moment piece 3 writes a nonzero count those two reads become real and
+            // must be declared in the SAME change, exactly as rung R2d-3/R2d-4 declared the cull's
+            // pair when it armed them.
+            vb_raster_late = occlusion_split.then(|| {
+                let p = g.add_pass("vb_raster_late");
+                g.buffer_access(
+                    vb_indirect_late,
+                    VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                    VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+                );
+                g.image_access(
+                    vb_id,
+                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    SubRange::COLOR,
+                );
+                g.image_access(
+                    vb_depth,
+                    FRAG,
+                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                    SubRange::DEPTH,
+                );
+                p
+            });
 
             // VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2c: the
             // classify chain `fill -> count -> scan -> scatter`, declared BEFORE the `lit`
@@ -3945,119 +4278,26 @@ impl Renderer<'_> {
             (None, None, None, None, None, None, None, None, None, None)
         };
 
-        // ==== VG R3 piece 1 step P1-8 (plan §5/§13, gate G8): the pyramid POISON clear. ====
+        // ==== VG R3 piece 1 steps P1-8/P1-5 + VG R3 piece 2 step P2-5 (plan D6): the
+        // `[hzb_poison, hzb_build_*]` block's UNSPLIT slot — after the `lit` producer, before the
+        // `vb_viewt` PRE-TAIL slot below. ====
         //
-        // Declared HERE — BEFORE every `hzb_build_p`, which is the whole point of it and is
-        // asserted below in the shape step P1-6 used to pin the dump's own position. On a dump
-        // frame the pyramid IMAGE is filled with `HZB_PYRAMID_POISON` so that an unwritten texel
-        // holds a value the reduce can never produce; the host half then reads "no texel is the
-        // poison" as "every level was WRITTEN", at any scene coverage.
+        // This is the position the block has held since piece 1, and it is where it stays on every
+        // frame the occlusion split is not armed — which is every scene in this tree today. The
+        // declaration is byte-for-byte the one that shipped (it moved into
+        // `declare_hzb_poison_build` so that BOTH slots are one text and the poison cannot be left
+        // behind by the builds), so an unsplit frame derives a barrier stream identical to the
+        // baseline `tests/vb_barrier_stream_baseline.rs` pinned before this step existed.
         //
-        // ⚠️ THE IMAGE, NOT THE STAGING. The host driver already prefills the staging with NaN,
-        // and that catches a failed COPY — it cannot see a level the BUILD never wrote, because
-        // copying an unwritten level succeeds and faithfully transfers whatever the image holds.
-        // Step P1-6 measured what that costs: 89.3% of the `vb_mesh` pyramid is the far plane
-        // `0.0`, levels 6..9 entirely so, and a zero-filled image agrees with the oracle there.
-        //
-        // ⚠️ THE GATE IS `hzb_dump`'s, VERBATIM — the same `(scene.hzb.filter(|_| mesh_leg),
-        // scene.hzb_dump)` pair, so a frame that is poisoned is always a frame that is dumped and
-        // vice versa. Anything narrower would poison a pyramid nobody reads back; anything wider
-        // would put a transfer write on a frame that ships.
-        //
-        // The write is `TRANSFER(TRANSFER_WRITE)` at `GENERAL`, so the derived barrier is this
-        // resource's `UNDEFINED → GENERAL` first touch over mips `[0, levels)`, and `hzb_build_0`
-        // then derives a real WAW flush (`TRANSFER_WRITE → SHADER_WRITE`) instead of the first
-        // touch it derives on an undumped frame. `GENERAL` is one of the two layouts
-        // `vkCmdClearColorImage` accepts, and it is the layout the pyramid holds for life, so no
-        // extra transition appears anywhere.
-        let hzb_poison = match (scene.hzb.filter(|_| mesh_leg), scene.hzb_dump) {
-            (Some(hzb_plan), Some(_)) => {
-                let p = g.add_pass("hzb_poison");
-                g.image_access(
-                    hzb_pyramid,
-                    VK_PIPELINE_STAGE_TRANSFER_BIT,
-                    VK_ACCESS_TRANSFER_WRITE_BIT,
-                    VK_IMAGE_LAYOUT_GENERAL,
-                    hzb_mips(0, hzb_plan.levels),
-                );
-                Some(p)
-            }
-            _ => None,
-        };
-
-        // ==== VG R3 piece 1 step P1-5: the HZB depth-pyramid BUILD chain. ====
-        //
-        // Declared HERE — after `vb_raster`, the pass that WRITES `vb_depth`, and beside the
-        // `vb_viewt` pre-tail slot below, the other `vb_depth` shader-reader. `hzb_build_0`'s read
-        // is what derives the DEPTH_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL transition out
-        // of the raster on an armed frame; every later same-layout read then needs none.
-        //
-        // Pass `p` writes mips `[d, d + n)` where `d = p * HZB_LEVELS_PER_PASS` and
-        // `n = min(HZB_LEVELS_PER_PASS, levels - d)`, and (for `p > 0`) reads mip `d - 1`. That is
-        // TWO spans on ONE ResId inside ONE pass, which is exactly what step P1-5a re-keyed the
-        // sync state `(ResId, mip)` to admit; `tests/framegraph_gbuffer_equiv.rs`'s
-        // `compile_derives_the_hzb_build_chain_at_a_real_extent` pins the three barriers this
-        // declaration derives at `levels = 10`.
-        //
-        // ⚠️ EVERY SPAN COMES FROM `plan.levels`. Never `SubRange::color_mips(MAX_HZB_LEVELS)`:
-        // that constant is a CAPACITY (17), and a capacity-wide span is out of range at every real
-        // render extent. Since P1-5a `image_access` rejects it in RELEASE rather than silently
-        // indexing a neighbouring resource's sync entry — but it is declared right here in the
-        // first place, which is the actual requirement.
-        //
-        // ⚠️ THE `mesh_leg` CONJUNCT. `scene.hzb.is_some()` alone is NOT the gate: the pyramid
-        // reduces the depth THIS FRAME'S RASTER WROTE (the step-P1-4 finding, plan §9), and on a
-        // mesh-less `VisibilityBuffer × Sdf` frame `vb_raster` is not declared, so NOTHING writes
-        // `vb_depth` this frame. Reading it would take `compile`'s first-touch arm on a transient
-        // image with no producer — a `TOP_OF_PIPE` barrier over undefined contents — which is the
-        // exact failure that declarator's unwritten-transient-read guard exists to catch. Every
-        // other `vb_depth` reader in this fn is already `mesh_leg`-gated (`sdf_forward_march`'s
-        // HAS_MESH arm; `vb_viewt`, whose `viewt_from_vb_depth` arm is `VB × Mesh` by
-        // construction), so this conjunct is that convention rather than a new rule.
-        let mut hzb_build: [Option<crate::framegraph::PassId>; crate::compute::MAX_HZB_PASSES] =
-            [None; crate::compute::MAX_HZB_PASSES];
-        if let Some(hzb_plan) = scene.hzb.filter(|_| mesh_leg) {
-            let levels = hzb_plan.levels;
-            let pass_count = levels.div_ceil(crate::compute::HZB_LEVELS_PER_PASS) as usize;
-            debug_assert!(
-                pass_count <= crate::compute::MAX_HZB_PASSES,
-                "invariant: the plan's pass count fits MAX_HZB_PASSES (levels <= MAX_HZB_LEVELS)"
-            );
-            for (p, slot) in hzb_build.iter_mut().enumerate().take(pass_count) {
-                let d = p as u32 * crate::compute::HZB_LEVELS_PER_PASS;
-                let n = (levels - d).min(crate::compute::HZB_LEVELS_PER_PASS);
-                let pass = g.add_pass(HZB_BUILD_PASS_NAMES[p]);
-                if p == 0 {
-                    // The SOURCE depth, at the SAME (stage, access, layout, aspect) shape
-                    // `vb_viewt`/`sdf_forward_march` already declare for this image.
-                    g.image_access(
-                        vb_depth,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_ACCESS_SHADER_READ_BIT,
-                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                        SubRange::DEPTH,
-                    );
-                } else {
-                    // The FINE level this pass reduces from — mip `d - 1`, written by pass
-                    // `p - 1`. One mip, so the derived barrier is a RAW flush over that mip
-                    // ALONE, leaving the rest of the chain untouched.
-                    g.image_access(
-                        hzb_pyramid,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_ACCESS_SHADER_READ_BIT,
-                        VK_IMAGE_LAYOUT_GENERAL,
-                        hzb_mips(d - 1, 1),
-                    );
-                }
-                g.image_access(
-                    hzb_pyramid,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    VK_ACCESS_SHADER_WRITE_BIT,
-                    VK_IMAGE_LAYOUT_GENERAL,
-                    hzb_mips(d, n),
-                );
-                *slot = Some(pass);
-            }
+        // `hzb_build_0`'s `vb_depth` read at THIS slot derives the raster's
+        // `DEPTH_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL` transition, and every later
+        // same-layout reader (`vb_viewt`, `sdf_forward_march`, `hzb_dump`) then needs none. That is
+        // the property the armed-split slot changes — see the early slot's own comment.
+        if !occlusion_split {
+            let (poison, build) =
+                declare_hzb_poison_build(g, hzb_levels, hzb_dump_armed, hzb_pyramid, vb_depth);
+            hzb_poison = poison;
+            hzb_build = build;
         }
 
         // ---- Rung R9b: the SPLIT arm (docs/R9-VB-SPLIT-PLAN.md §3) — declared between
@@ -4696,13 +4936,31 @@ impl Renderer<'_> {
         let hzb_dump = match (scene.hzb.filter(|_| mesh_leg), scene.hzb_dump) {
             (Some(hzb_plan), Some(_)) => {
                 let p = g.add_pass("hzb_dump");
-                // The SOURCE depth. Its tracked layout here is whatever the last reader left — on
+                // The SOURCE depth. Its tracked layout here is whatever the last TOUCHER left, and
+                // the graph DERIVES the transition rather than this site assuming it. No restore is
+                // declared and none is needed: the ring slot re-enters next frame through
+                // `vb_raster`'s own `UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL` first touch, which
+                // discards contents by definition.
+                //
+                // ⚠️ VG R3 piece 2 step P2-5 FALSIFIED THIS SITE'S FORMER CLAIM, which read "on
                 // every armed frame that is `SHADER_READ_ONLY_OPTIMAL`, since `hzb_build_0` itself
-                // reads it there (and `vb_viewt`/`sdf_forward_march` read it at the same layout
-                // when armed) — so the graph DERIVES that transition rather than this site
-                // assuming it. No restore is declared and none is needed: the ring slot re-enters
-                // next frame through `vb_raster`'s own `UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL`
-                // first touch, which discards contents by definition.
+                // reads it there". That is now true only on an UNSPLIT frame. With the split armed
+                // the `[hzb_poison, hzb_build_*]` block moves BETWEEN the two raster scopes (D6),
+                // so the last toucher is `vb_raster_late` at `DEPTH_ATTACHMENT_OPTIMAL` with a
+                // pending write, and this read is re-sourced from the execution-only arm (COMPUTE,
+                // `src_access` 0) to a real RAW flush — `FRAG`/`DEPTH_STENCIL_ATTACHMENT_WRITE →
+                // TRANSFER`/`TRANSFER_READ` with a `DEPTH_ATTACHMENT_OPTIMAL → TRANSFER_SRC_OPTIMAL`
+                // transition. That is STRICTLY STRONGER than what it replaces, so the change is in
+                // the model and not in the soundness; it is stated because a reader diffing the
+                // derived stream would otherwise read a correct value as a regression. The same
+                // re-sourcing applies to `vb_viewt` (both slots) and `sdf_forward_march`'s mesh arm.
+                //
+                // ⚠️ AND THE ORDERING THIS SITE CANNOT SEE, recorded for piece 3: on an armed-split
+                // frame the pyramid is built from the depth as of the EARLY scope, while the dump
+                // copies `vb_depth` at frame END. In piece 2 those are the same bytes because the
+                // late scope draws nothing — so gate G8 still holds AND is blind to the ordering.
+                // The moment piece 3 arms the late draws they diverge, and the dump must move
+                // between the scopes or copy both depths.
                 g.image_access(
                     vb_depth,
                     VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -4772,6 +5030,46 @@ impl Renderer<'_> {
             "invariant: the HZB poison and dump passes are armed by ONE predicate"
         );
 
+        // ==== VG R3 piece 2 step P2-5 (plan, gate G4): the declare-side half of the split's
+        // declare/record parity, and the ORDER the derived barriers depend on. ====
+        //
+        // These run in production on every dev-profile build, which is what the golden runs use
+        // (`scripts/golden.ps1` carries no `--release`) — and that matters because the gate that
+        // pins this stream is a hand-written REPLICA of this function (`declare_vb_graph` is
+        // `pub(crate)` on a `Renderer` no test constructs). A replica proves the framegraph derives
+        // the right stream from a declaration shaped like this one; only these asserts constrain
+        // THIS function to write that shape.
+        debug_assert_eq!(
+            vb_raster_late.is_some(),
+            occlusion_split,
+            "invariant: the late raster scope is declared on EXACTLY path_vb_occlusion_split() — \
+             a declared-but-unrecorded pass (or the reverse) is a barrier derived for work that \
+             never happens"
+        );
+        debug_assert_eq!(
+            vb_indirect_late_upload.is_some(),
+            occlusion_split,
+            "invariant: the late indirect upload is declared on EXACTLY path_vb_occlusion_split()"
+        );
+        debug_assert!(
+            vb_indirect_late_upload
+                .is_none_or(|u| vb_raster_late.is_some_and(|l| u.index() < l.index())),
+            "invariant: the late indirect upload is declared before the late raster reads it — \
+             reversed, the TRANSFER write is not the fetch's source and the derived edge orders \
+             nothing"
+        );
+        debug_assert!(
+            vb_raster_late
+                .is_none_or(|l| hzb_build.iter().flatten().all(|b| b.index() < l.index())),
+            "invariant: on an armed split the pyramid build precedes the late raster — the pyramid \
+             must reduce the EARLY scope's depth, and the late scope writes that depth again"
+        );
+        debug_assert!(
+            vb_raster_late.is_none_or(|l| vb_raster.is_some_and(|e| e.index() < l.index())),
+            "invariant: the early raster precedes the late raster — the late scope LOAD_OP_LOADs \
+             what the early scope stored, and with no early scope there is nothing to load"
+        );
+
         g.compile();
 
         self.vb_pass_plan = Some(VbPassPlan {
@@ -4781,12 +5079,14 @@ impl Renderer<'_> {
             atlas: atlas_pass,
             vb_sky,
             vb_indirect_upload,
+            vb_indirect_late_upload,
             vb_batch_cull,
             vb_cull_readback,
             hzb_build,
             hzb_poison,
             hzb_dump,
             vb_raster,
+            vb_raster_late,
             vb_classify_fill,
             vb_classify_count,
             vb_classify_scan,

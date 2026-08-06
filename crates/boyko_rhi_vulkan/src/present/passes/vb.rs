@@ -319,6 +319,23 @@ impl Renderer<'_> {
     /// declaration order (the SAME "declare/record order parity" invariant `record_forward`'s
     /// doc explains).
     ///
+    /// # The two shapes, and the ONE predicate that picks between them
+    ///
+    /// VG R3 piece 2 step P2-5 (docs/VG-R3-P2-CAPABILITY-SPLIT-PLAN.md, decisions D4/D6):
+    /// [`GBufferScene::path_vb_occlusion_split`] — the SAME method `declare_vb_graph` reads,
+    /// evaluated ONCE per frame here — picks the frame's pass chain:
+    ///
+    /// * **unsplit** (every scene in the tree today, since nothing marks `OcclusionCulling`):
+    ///   `… → vb_indirect_upload? → vb_batch_cull? → vb_raster → (classify?) →
+    ///   vb_shade | vb_resolve → hzb_poison? → hzb_build_*? → …`, i.e. ZERO recorded commands
+    ///   change — no extra pass, no extra barrier, no extra draw;
+    /// * **armed split**: `… → vb_indirect_upload? → vb_indirect_late_upload → vb_batch_cull? →
+    ///   vb_raster → hzb_poison? → hzb_build_*? → vb_raster_late → (classify?) → …`.
+    ///
+    /// The late scope is fully recorded and DRAWS NOTHING: every record it fetches carries
+    /// `instanceCount = 0`, both attachments are `LOAD_OP_LOAD`/`STORE_OP_STORE` over the same
+    /// `renderArea`, so the framebuffer contents it stores are the ones the early scope stored.
+    ///
     /// # Safety
     ///
     /// `cmd` must be recordable (waited free); `image`/`view` must belong to the swapchain image
@@ -392,6 +409,26 @@ impl Renderer<'_> {
         }
 
         let plan = self.vb_pass_plan.as_ref().expect("invariant: declare_frame_graph ran before record_vb");
+
+        // VG R3 piece 2 step P2-5 (plan D3/D4/D6): THE single source of "this frame records TWO
+        // raster scopes", read ONCE — the SAME method `declare_vb_graph` read when it built `plan`,
+        // off the SAME scene. Four recorded things key off it (the late fill, the late scope, and
+        // which of the two slots the `[hzb_poison, hzb_build_*]` block occupies), and every one of
+        // them has a declared counterpart; a second spelling here is how declare/record parity
+        // breaks. The `debug_assert!`s below check the agreement rather than assume it.
+        let occlusion_split = scene.path_vb_occlusion_split();
+        debug_assert_eq!(
+            plan.vb_raster_late.is_some(),
+            occlusion_split,
+            "invariant: declare/record parity — the late raster scope is declared on EXACTLY the \
+             predicate that records it"
+        );
+        debug_assert_eq!(
+            plan.vb_indirect_late_upload.is_some(),
+            occlusion_split,
+            "invariant: declare/record parity — the late indirect upload is declared on EXACTLY \
+             the predicate that records it"
+        );
 
         let vertex_offset: VkDeviceSize = 0;
 
@@ -1064,6 +1101,107 @@ impl Renderer<'_> {
                 }
             }
 
+            // === VG R3 piece 2 step P2-5 (plan D4): the LATE indirect record fill. ===
+            //
+            // Recorded HERE — immediately after the early fill and before the cull dispatch, which
+            // is EXACTLY `declare_vb_graph`'s position for `vb_indirect_late_upload` (declare/record
+            // ORDER parity). Its gate is `path_vb_occlusion_split()` and NOTHING else:
+            // `scene.vb_indirect_late` is minted unconditionally on every VB boot, so an extra
+            // `is_some()` conjunct would be a dead one — and a recorder gate NARROWER than the
+            // declarator's would leave the declared TRANSFER write on a buffer nothing wrote, i.e.
+            // the late fetch's dependency derived against a transfer that never happened.
+            //
+            // THE RECORDS ARE REAL EXCEPT FOR ONE WORD. Each carries the early record's true
+            // `index_count`, `first_index`, `vertex_offset` and `first_instance: 0`; only
+            // `instance_count` is the inert `0`. An all-zero record would be a placeholder, and
+            // piece 3 would then be adding structure rather than flipping a producer — the
+            // shipped-inert discipline `vb_batch_cull.comp.hlsl` states for its own two rungs.
+            if occlusion_split {
+                let late = scene.vb_indirect_late.expect(
+                    "invariant: path_vb_occlusion_split ⇒ vb_indirect_late (GpuSceneBundles::boot \
+                     mints it unconditionally on every VB boot)",
+                );
+                let late_upload = plan
+                    .vb_indirect_late_upload
+                    .expect("invariant: the recorder's late-upload gate is the declarator's, verbatim");
+                // SAFETY: recording is open; `record_vb_pass` records the graph's derived
+                // barriers-in for the "vb_indirect_late_upload" pass (a first touch of a
+                // frame-private buffer, so typically none) into `cmd`, ahead of the updates below.
+                self.record_vb_pass(late_upload, cmd, targets, forward, vb, scene, fi);
+
+                const CHUNK: usize = 64;
+                let stride = u64::from(DRAW_INDEXED_INDIRECT_STRIDE);
+                // The array's capacity from the ALLOCATION, never from the host constant that
+                // sized it (the VB-P1j lesson). It bounds nothing that `batch_count` does not
+                // already bound — it is asserted, not min-ed, because a late array SHORTER than
+                // the early one would silently drop the tail batches from the late scope, and D5's
+                // build-time const-assert on the two capacities is what actually prevents that.
+                let record_capacity_late = (late[fi].size / stride) as usize;
+                debug_assert!(
+                    record_capacity_late >= batch_count,
+                    "invariant: the late record array holds every batch the late scope draws \
+                     ({batch_count} batches into {record_capacity_late} records)"
+                );
+
+                // ⚠️ BOUNDED BY `batch_count`, the SAME hoisted local the early fill and the cull
+                // dispatch read — NOT by `record_capacity_late`. The record array is a PREFIX, not
+                // a mask: the late scope records exactly as many empty draws as the early scope
+                // records real ones, never the full 1024-record allocation.
+                let late_batches = &scene.mesh_draw[..batch_count.min(scene.mesh_draw.len())];
+                for (c, batches) in late_batches.chunks(CHUNK).enumerate() {
+                    let mut records = [VkDrawIndexedIndirectCommand::default(); CHUNK];
+                    for (r, batch) in records.iter_mut().zip(batches) {
+                        *r = VkDrawIndexedIndirectCommand {
+                            index_count: batch.index_count,
+                            // ⚠️ THE ONE INERT WORD, and it is the CONSERVATIVE constant (the two
+                            // earlier inert rungs shipped the permissive one) because this scope
+                            // must draw NOTHING. Piece 3 replaces the producer of this word — host
+                            // `0` becomes the late cull's survivor count — and deletes the
+                            // `debug_assert!` below in the same change.
+                            instance_count: 0,
+                            first_index: 0,
+                            vertex_offset: 0,
+                            // ⚠️ MUST stay 0, for the SAME reason the early fill states:
+                            // `drawIndirectFirstInstance` is not enabled on this device and the
+                            // validation layers cannot read buffer CONTENTS, so a nonzero value is
+                            // silent corruption rather than a caught error.
+                            first_instance: 0,
+                        };
+                    }
+                    debug_assert!(
+                        records.iter().all(|r| r.first_instance == 0),
+                        "invariant: drawIndirectFirstInstance is VK_FALSE on this device"
+                    );
+                    debug_assert!(
+                        records.iter().all(|r| r.instance_count == 0),
+                        "invariant: PIECE 2 ONLY — the late scope draws nothing, so every late \
+                         record's instanceCount is the inert 0. DELETE THIS ASSERT IN PIECE 3, \
+                         deliberately, in the change that makes the late cull the producer of \
+                         this word"
+                    );
+                    let bytes = (batches.len() as u64) * stride;
+                    // SAFETY: recording is open and NO render-pass instance is active (the early
+                    // raster's `cmd_begin_rendering` is below, and `vkCmdUpdateBuffer` is forbidden
+                    // inside one per VUID-vkCmdUpdateBuffer-renderpass); `late[fi]` is a live
+                    // DEVICE_LOCAL buffer created with TRANSFER_DST at `VB_INDIRECT_LATE_RECORDS`
+                    // records, and this write ends at `(c * CHUNK + batches.len()) * stride`, which
+                    // the `record_capacity_late >= batch_count` assert above bounds; `records`
+                    // outlives the call; `bytes` is a multiple of 4 (the stride is 20) and at most
+                    // `CHUNK * 20` = 1280, inside the 65536-byte inline limit; the destination
+                    // offset `c * CHUNK * stride` is a multiple of 4, as
+                    // VUID-vkCmdUpdateBuffer-dstOffset-00036 requires.
+                    unsafe {
+                        (self.fns.cmd_update_buffer)(
+                            cmd,
+                            late[fi].buffer,
+                            (c * CHUNK) as u64 * stride,
+                            bytes,
+                            records.as_ptr().cast(),
+                        );
+                    }
+                }
+            }
+
             // === Rung R2c0: the per-BATCH draw-record cull dispatch. ===
             //
             // ⚠️ This gate is the DECLARATOR's, verbatim — `targets.vb_cull_set` is deliberately
@@ -1446,6 +1584,186 @@ impl Renderer<'_> {
                     }
                 }
                 (self.fns.cmd_end_rendering)(cmd);
+            }
+
+            // === VG R3 piece 2 step P2-5 (plan D6): the `[hzb_poison, hzb_build_*]` block's
+            // ARMED-SPLIT slot — BETWEEN the two raster scopes. ===
+            //
+            // The unit moves WHOLE, at both declare and record: `hzb_poison` is asserted to precede
+            // every `hzb_build_*`, and a build that moved without its clear would have the clear
+            // ERASE what the dispatches just wrote (dev profile: the declarator's assert fires;
+            // release: gate G8 reds at every texel claiming "the build never ran"). One helper
+            // records both, so leaving the poison behind is not expressible here.
+            //
+            // The pyramid must reduce the depth the EARLY scope wrote, which is why the block lands
+            // before the late scope rather than after it.
+            if occlusion_split {
+                self.record_hzb_poison_build(plan, cmd, targets, forward, vb, scene, present_extent, fi);
+            }
+
+            // === VG R3 piece 2 step P2-5 (plan D4): the LATE raster scope. ===
+            //
+            // A SECOND `begin/endRendering` bracket over the SAME two views and the SAME
+            // `renderArea`, `LOAD_OP_LOAD`/`STORE_OP_STORE` on both, drawing `batch_count` indirect
+            // draws whose every record carries `instanceCount = 0`. `LOAD_OP_LOAD` yields exactly
+            // what the early scope stored, no fragment is produced, and `STORE_OP_STORE` writes the
+            // loaded contents back — so the final `vb_id`/`vb_depth` contents are the early scope's,
+            // by an argument that needs no numerics and is therefore not subject to the 8-bit
+            // golden floor.
+            //
+            // The binds are REPEATED rather than relied on to survive `vkCmdEndRendering` and the
+            // interposed compute dispatches: four commands to remove a subtle dependence on state
+            // leakage across a render scope.
+            if occlusion_split {
+                let late = scene.vb_indirect_late.expect(
+                    "invariant: path_vb_occlusion_split ⇒ vb_indirect_late (GpuSceneBundles::boot \
+                     mints it unconditionally on every VB boot)",
+                );
+                let late_pass = plan
+                    .vb_raster_late
+                    .expect("invariant: the recorder's late-scope gate is the declarator's, verbatim");
+                // SAFETY: recording is open and the early scope's `cmd_end_rendering` is above;
+                // `record_vb_pass` records this pass's derived barriers into `cmd` — the `vb_id`
+                // and `vb_depth` WAWs at their existing layouts (on an HZB-armed frame the depth's
+                // `SHADER_READ_ONLY_OPTIMAL → DEPTH_ATTACHMENT_OPTIMAL` return leg), and the
+                // `TRANSFER → DRAW_INDIRECT` dependency against the late fill above.
+                self.record_vb_pass(late_pass, cmd, targets, forward, vb, scene, fi);
+
+                // ⚠️ `LOAD_OP_LOAD`, not CLEAR, and this is the whole equivalence. A CLEAR here
+                // would present only what the late scope drew — nothing. Every other field is the
+                // early scope's, spelled OUT rather than functional-update-copied: this FFI struct
+                // is deliberately neither `Clone` nor `Copy` (it owns a `p_next` raw pointer), and
+                // `..early` would partially MOVE out of a local the early scope's already-submitted
+                // `VkRenderingInfo` still points at. The `clear_value` is ignored under
+                // `LOAD_OP_LOAD`; it carries the early scope's value so the union has a defined
+                // active field rather than arbitrary padding.
+                let vb_id_attachment_late = VkRenderingAttachmentInfo {
+                    s_type: VkStructureType::RenderingAttachmentInfo,
+                    p_next: ptr::null(),
+                    image_view: vb.vb_id[fi].view,
+                    image_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    resolve_mode: 0,
+                    resolve_image_view: VkImageView::NULL,
+                    resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+                    load_op: VK_ATTACHMENT_LOAD_OP_LOAD,
+                    store_op: VK_ATTACHMENT_STORE_OP_STORE,
+                    clear_value: VkClearValue { color: VkClearColorValue { uint32: VB_ID_CLEAR } },
+                };
+                let vb_depth_attachment_late = VkRenderingAttachmentInfo {
+                    s_type: VkStructureType::RenderingAttachmentInfo,
+                    p_next: ptr::null(),
+                    image_view: forward.depth[fi].view,
+                    image_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                    resolve_mode: 0,
+                    resolve_image_view: VkImageView::NULL,
+                    resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+                    load_op: VK_ATTACHMENT_LOAD_OP_LOAD,
+                    store_op: VK_ATTACHMENT_STORE_OP_STORE,
+                    clear_value: VkClearValue {
+                        depth_stencil: VkClearDepthStencilValue { depth: VB_DEPTH_CLEAR, stencil: 0 },
+                    },
+                };
+                let vb_rendering_late = VkRenderingInfo {
+                    s_type: VkStructureType::RenderingInfo,
+                    p_next: ptr::null(),
+                    flags: 0,
+                    render_area: full_area,
+                    layer_count: 1,
+                    view_mask: 0,
+                    color_attachment_count: 1,
+                    p_color_attachments: &vb_id_attachment_late,
+                    p_depth_attachment: (&vb_depth_attachment_late as *const VkRenderingAttachmentInfo).cast(),
+                    p_stencil_attachment: ptr::null(),
+                };
+                // The equivalence argument depends on the two scopes covering the SAME region: a
+                // narrower late `renderArea` would leave the store undefined outside it. They share
+                // one `full_area` local, and this checks that they still do — `VkRect2D` carries no
+                // `PartialEq`, so the four fields are compared by hand.
+                debug_assert!(
+                    vb_rendering_late.render_area.offset.x == vb_rendering.render_area.offset.x
+                        && vb_rendering_late.render_area.offset.y == vb_rendering.render_area.offset.y
+                        && vb_rendering_late.render_area.extent.width
+                            == vb_rendering.render_area.extent.width
+                        && vb_rendering_late.render_area.extent.height
+                            == vb_rendering.render_area.extent.height,
+                    "invariant: the late scope's renderArea equals the early scope's"
+                );
+
+                // SAFETY: recording is open and no render scope is active (the early scope's
+                // `cmd_end_rendering` is above). `vb_rendering_late` names the SAME live `vb_id`
+                // and `vb_depth` views the early scope named, each in the layout the derived
+                // barrier just left it in (`COLOR_ATTACHMENT_OPTIMAL` / `DEPTH_ATTACHMENT_OPTIMAL`);
+                // both attachments are `LOAD_OP_LOAD`, which requires exactly that the contents be
+                // defined — they are, the early scope stored them. `vb_raster_pipeline` and its
+                // 88-byte VERTEX|FRAGMENT push range and `vb_set0[fi]` are the same live objects the
+                // early scope bound (caller contract). Each per-batch push writes bytes [80, 88) of
+                // that range, both offset and size multiples of 4. `vb_rendering_late`,
+                // `vb_id_attachment_late`, `vb_depth_attachment_late`, `full_viewport`, `full_area`
+                // and `push` are locals alive across the bracketed calls; every `i` is `<
+                // batch_count <= record_capacity_late`, so `i * DRAW_INDEXED_INDIRECT_STRIDE + 20`
+                // is inside `late[fi]`, whose contents this frame's own `vkCmdUpdateBuffer` wrote
+                // above and whose visibility to the indirect FETCH the declared
+                // `TRANSFER → DRAW_INDIRECT` edge provides. Begin/End bracket the pass exactly.
+                unsafe {
+                    (self.fns.cmd_begin_rendering)(cmd, &vb_rendering_late);
+                    (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vb_raster_pipeline.pipeline);
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        vb_raster_pipeline.layout,
+                        0,
+                        1,
+                        &vb_set0[fi].descriptor_set,
+                        0,
+                        ptr::null(),
+                    );
+                    (self.fns.cmd_push_constants)(
+                        cmd,
+                        vb_raster_pipeline.layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0,
+                        scene.mvp.len() as u32,
+                        scene.mvp.as_ptr().cast(),
+                    );
+                    (self.fns.cmd_set_viewport)(cmd, 0, 1, &full_viewport);
+                    (self.fns.cmd_set_scissor)(cmd, 0, 1, &full_area);
+                    for (i, batch) in scene.mesh_draw.iter().enumerate().take(batch_count) {
+                        // ⚠️ THE SURVIVOR-INDIRECTION BIT IS CLEAR, and "harmless because the count
+                        // is zero" is not the reason. A set bit would name a region of
+                        // `gVbVisibleInstance` that NO pass wrote this frame — verbatim the residue
+                        // hazard `R2d-REGION-DEFINED` exists to forbid — and DXC is free to lower
+                        // the VS's `? :` to an eager load plus an `OpSelect`. Piece 3 sets the bit
+                        // in the same change that writes the region.
+                        let push: [u32; 2] = [batch.base_instance, base_flags];
+                        debug_assert!(
+                            (push[1] & VB_RASTER_FLAG_VISIBLE_INDIRECTION) == 0,
+                            "invariant: PIECE 2 ONLY — the late scope pushes the survivor \
+                             indirection CLEAR, because no pass writes that region this frame"
+                        );
+                        (self.fns.cmd_push_constants)(
+                            cmd,
+                            vb_raster_pipeline.layout,
+                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                            GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
+                            core::mem::size_of_val(&push) as u32,
+                            push.as_ptr().cast(),
+                        );
+                        (self.fns.cmd_bind_vertex_buffers)(cmd, 0, 1, &batch.vertex_buffer.buffer, &vertex_offset);
+                        (self.fns.cmd_bind_index_buffer)(cmd, batch.index_buffer.buffer, 0, batch.index_type);
+                        // `draw_count = 1` is not a choice: `multiDrawIndirect` is not enabled on
+                        // this device, so the only legal values are 0 and 1. There is no direct-draw
+                        // fallback arm here, unlike the early scope: this scope EXISTS to fetch from
+                        // the late array, and a direct draw would draw the batch for real.
+                        (self.fns.cmd_draw_indexed_indirect)(
+                            cmd,
+                            late[fi].buffer,
+                            i as u64 * u64::from(DRAW_INDEXED_INDIRECT_STRIDE),
+                            1,
+                            DRAW_INDEXED_INDIRECT_STRIDE,
+                        );
+                    }
+                    (self.fns.cmd_end_rendering)(cmd);
+                }
             }
 
             // === VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2c: the
@@ -1953,205 +2271,19 @@ impl Renderer<'_> {
             }
         }
 
-        // === VG R3 piece 1 step P1-8 (plan §5/§13, gate G8): the pyramid POISON clear. ===
+        // === VG R3 piece 1 steps P1-8/P1-5 + VG R3 piece 2 step P2-5 (plan D6): the
+        // `[hzb_poison, hzb_build_*]` block's UNSPLIT slot — after the `lit` producer, before the
+        // split arm's `vb_viewt` PRE-TAIL slot below. ===
         //
-        // Recorded HERE — immediately before the first `hzb_build` dispatch below, in EXACTLY
-        // `declare_vb_graph`'s position (the declarator asserts the ordering both ways). Every mip
-        // is filled with a value the reduce cannot produce, so a level the build fails to write
-        // reads `HZB_PYRAMID_POISON` in the dump and G8 reds by name instead of agreeing with the
-        // oracle over a field of far-plane zeros — the vacuity step P1-6 measured (89.3% of the
-        // `vb_mesh` pyramid is `0.0`; levels 6..9, the second build pass's whole output, entirely
-        // so).
+        // The position the block has held since piece 1, and the one it keeps on every frame the
+        // occlusion split is not armed — which is every scene in this tree today. Recorded in
+        // EXACTLY `declare_vb_graph`'s matching slot; the two sites read ONE predicate, so they
+        // cannot disagree about which slot this frame uses.
         //
-        // ⚠️ THE GATE IS THE DECLARATOR'S, VERBATIM, with NO extra conjunct. Unlike the dump block
-        // far below — which may skip its copies on a short staging because it is the LAST declared
-        // pass — this pass has readers after it: skipping the recording while the declaration
-        // stands would leave the pyramid's `UNDEFINED → GENERAL` transition unrecorded and hand
-        // `hzb_build_0` a storage image in the wrong layout.
-        //
-        // ⚠️ An UNARMED frame records ZERO commands here — no clear, no barrier — which is what
-        // keeps every golden pin byte-identical.
-        if scene.hzb_dump.is_some() && scene.hzb.is_some() && scene.resolved_render_path.mesh_leg {
-            let hzb = targets
-                .hzb
-                .as_ref()
-                .expect("invariant: scene.hzb armed => targets.hzb (sync_gbuffer's hzb_arm predicate)");
-            let poison_pass = plan
-                .hzb_poison
-                .expect("invariant: the recorder's poison gate is the declarator's, verbatim");
-            // SAFETY: recording is open; `record_vb_pass` records this pass's derived barrier into
-            // `cmd` — the `UNDEFINED → GENERAL` first touch of mips `[0, levels)`, which is what
-            // makes the clear below legal on an image the frame has not otherwise touched yet.
-            self.record_vb_pass(poison_pass, cmd, targets, forward, vb, scene, fi);
-
-            // `R32_SFLOAT` reads only `float32[0]`; the other three components are ignored for a
-            // single-component format and are spelled as the same value rather than left as
-            // arbitrary padding.
-            let poison = VkClearColorValue { float32: [HZB_PYRAMID_POISON; 4] };
-            // ⚠️ `hzb.plan.levels`, NEVER `MAX_HZB_LEVELS`: the capacity is 17 and the image has
-            // `levels` mips (`HzbTargets::build` creates it from this same number), so a
-            // capacity-wide range would name mips that do not exist at every real render extent.
-            let range = VkImageSubresourceRange {
-                aspect_mask: VK_IMAGE_ASPECT_COLOR_BIT,
-                base_mip_level: 0,
-                level_count: hzb.plan.levels,
-                base_array_layer: 0,
-                layer_count: 1,
-            };
-            // SAFETY: recording is open and no render-pass instance is active (the raster's
-            // `cmd_end_rendering` is above). `hzb.pyramid.image` is the live pyramid, created with
-            // `TRANSFER_DST` usage (`HzbTargets::build`'s `pyramid_desc`, which
-            // `VUID-vkCmdClearColorImage-image-00002` requires) and a COLOR `R32_SFLOAT` format
-            // with no depth/stencil aspect. It is in `GENERAL` — one of the two layouts this
-            // command accepts — by the pass's derived first-touch barrier just recorded. The range
-            // names mips `[0, levels)` and layer 0 of a `levels`-mip, single-layer image, so it is
-            // in bounds. `&poison` and `&range` are fully-initialized locals alive for the call.
-            unsafe {
-                (self.fns.cmd_clear_color_image)(
-                    cmd,
-                    hzb.pyramid.image,
-                    VK_IMAGE_LAYOUT_GENERAL,
-                    &poison,
-                    1,
-                    &range,
-                );
-            }
-        }
-
-        // === VG R3 piece 1 step P1-5: the HZB depth-pyramid BUILD dispatches. ===
-        //
-        // Recorded HERE — after the mesh raster has written `vb_depth`, in EXACTLY
-        // `declare_vb_graph`'s position for the same chain (immediately before the split arm's
-        // `vb_viewt` pre-tail slot below). Declare/record ORDER parity is the invariant this file
-        // and the declarator both treat as load-bearing.
-        //
-        // ⚠️ THE GATE IS THE DECLARATOR'S, VERBATIM — `scene.hzb.is_some() && mesh_leg`, and
-        // `targets.hzb` is `.expect()`ed rather than made a third conjunct (the `batch_cull_armed`
-        // discipline above). `sync_gbuffer`'s rebuild predicate carries `hzb_arm ==
-        // scene.hzb.is_some()` and `GBufferTargets::create` asserts the arm and the allocation
-        // move in lockstep, so an armed scene ALWAYS has the bundle; a create failure returns
-        // `Err` rather than a silent `None`. A recorder gate narrower than the declarator's would
-        // leave declared writes on the pyramid that no dispatch performs.
-        //
-        // ⚠️ Under `HzbMode::Off` this records NOTHING — no barrier, no bind, no dispatch — which
-        // is what keeps every golden pin byte-identical. The ARMED pins stay byte-identical too,
-        // for a different reason: the pyramid is an image nothing samples in piece 1 (the cull is
-        // piece 3), so the dispatches move no pixel.
-        if scene.hzb.is_some() && scene.resolved_render_path.mesh_leg {
-            let hzb = targets
-                .hzb
-                .as_ref()
-                .expect("invariant: scene.hzb armed => targets.hzb (sync_gbuffer's hzb_arm predicate)");
-            // THE plan is the bundle's OWN field, not `scene.hzb`: the descriptor sets, the image's
-            // real mip count and this dispatch arithmetic must be sized from ONE number, or a lane
-            // can be dispatched over a level whose view was never built (`HzbTargets::plan`'s own
-            // doc states the rule; `build` follows it for the sets).
-            let hzb_plan = hzb.plan;
-            debug_assert_eq!(
-                Some(hzb_plan),
-                scene.hzb,
-                "invariant: the pyramid bundle's plan matches the scene's — both are derived from \
-                 present_extent, and `sync_gbuffer` rebuilds the bundle when that changes"
-            );
-            let pipeline = scene
-                .hzb_build_pipeline
-                .expect("invariant: scene.hzb armed => scene.hzb_build_pipeline (GpuSceneBundles::boot mints it unconditionally)");
-
-            let levels = hzb_plan.levels;
-            let pass_count = levels.div_ceil(HZB_LEVELS_PER_PASS) as usize;
-            // The SOURCE extent, `S` — the extent the depth ring was sized to, which is what the
-            // pyramid reduces. NOT `hzb_plan.extent_of(0)`: that is `P = prev_pow2(S)` per axis,
-            // and the shader's base map `⌈t·S/P⌉` reads BOTH (see `HzbBuildPush::src_extent`).
-            let src_extent = [present_extent.width, present_extent.height];
-
-            for p in 0..pass_count {
-                let d = p as u32 * HZB_LEVELS_PER_PASS;
-                let n = (levels - d).min(HZB_LEVELS_PER_PASS);
-
-                let hzb_pass = plan.hzb_build[p]
-                    .expect("invariant: the recorder's pass count equals the declarator's (one plan)");
-                // SAFETY: recording is open; `record_vb_pass` records this pass's derived
-                // barriers into `cmd` — the raster's DEPTH_ATTACHMENT→SHADER_READ_ONLY transition
-                // on `vb_depth` (pass 0), the previous pass's write→read flush on mip `d-1`
-                // (passes 1+), and the UNDEFINED→GENERAL first touch of mips `[d, d+n)`.
-                self.record_vb_pass(hzb_pass, cmd, targets, forward, vb, scene, fi);
-
-                let set = hzb.sets[fi][p]
-                    .as_ref()
-                    .expect("invariant: sets[slot][p] is Some for every p < levels.div_ceil(HZB_LEVELS_PER_PASS)");
-
-                // `k >= n` pads with level `d` — a real level of a real mip, matching the view
-                // `HzbTargets::build` binds at that destination slot. NEVER zero: the shader
-                // divides by these extents before it tests `k < level_count`, and a padded slot
-                // must therefore be well-defined rather than merely unwritten.
-                let out = |k: u32| hzb_plan.extent_of(if k < n { d + k } else { d });
-                let push = HzbBuildPush {
-                    src_extent,
-                    // `E(d-1)` on a reduce pass; on the BASE pass mip `d-1` does not exist and the
-                    // shader's `base_level == 0` arm never reads it, so level 0's own extent goes
-                    // in as a well-defined placeholder.
-                    fine_extent: hzb_plan.extent_of(d.saturating_sub(1)),
-                    out_extent0: out(0),
-                    out_extent1: out(1),
-                    out_extent2: out(2),
-                    out_extent3: out(3),
-                    out_extent4: out(4),
-                    out_extent5: out(5),
-                    base_level: d,
-                    level_count: n,
-                }
-                .to_bytes();
-
-                // THE DISPATCH DIVISOR is this pass's FIRST OUTPUT LEVEL — the one index space in
-                // which the base and reduce variants have the same shape (plan §2). One workgroup
-                // covers a `HZB_BUILD_TILE`-texel tile of level `d`.
-                let [ex, ey] = hzb_plan.extent_of(d);
-
-                // SAFETY: recording is open and outside any render scope; `pipeline` + its layout
-                // (one COMPUTE set + a `HZB_BUILD_PUSH_BYTES` = 72-byte COMPUTE push range) are
-                // live on this device — `GpuSceneBundles::boot` mints both unconditionally and
-                // owns them for the device's lifetime. `set` binds all 8 entries
-                // `hzb_build_layout` declares (SAMPLED `gSrcDepth` @0 — the `[fi]` slot's depth,
-                // which is why the sets are ringed — plus the seven single-mip storage views
-                // @1..@7), written once when these targets were built (`HzbTargets::build`, which
-                // binds a REAL view at every slot including the padded ones) and untouched since.
-                // The push writes exactly the declared range at offset 0 from a
-                // `[u8; HZB_BUILD_PUSH_BYTES]` local. The dispatch covers `ceil(E(d)/TILE)` groups
-                // per axis; lanes past the level extent issue no tap and store nothing (the
-                // shader's own boundary rule). `&set.descriptor_set` and `push` are locals alive
-                // for the calls.
-                unsafe {
-                    (self.fns.cmd_bind_pipeline)(
-                        cmd,
-                        VK_PIPELINE_BIND_POINT_COMPUTE,
-                        pipeline.pipeline,
-                    );
-                    (self.fns.cmd_bind_descriptor_sets)(
-                        cmd,
-                        VK_PIPELINE_BIND_POINT_COMPUTE,
-                        pipeline.layout,
-                        0,
-                        1,
-                        &set.descriptor_set,
-                        0,
-                        ptr::null(),
-                    );
-                    (self.fns.cmd_push_constants)(
-                        cmd,
-                        pipeline.layout,
-                        VK_SHADER_STAGE_COMPUTE_BIT,
-                        0,
-                        HZB_BUILD_PUSH_BYTES,
-                        push.as_ptr().cast(),
-                    );
-                    (self.fns.cmd_dispatch)(
-                        cmd,
-                        ex.div_ceil(HZB_BUILD_TILE),
-                        ey.div_ceil(HZB_BUILD_TILE),
-                        1,
-                    );
-                }
-            }
+        // ⚠️ An UNARMED frame records ZERO commands here — no clear, no barrier, no dispatch —
+        // which is what keeps every golden pin byte-identical.
+        if !occlusion_split {
+            self.record_hzb_poison_build(plan, cmd, targets, forward, vb, scene, present_extent, fi);
         }
 
         // === Rung R9b: the SPLIT arm — recorded in EXACTLY `declare_vb_graph`'s order:
@@ -3513,6 +3645,238 @@ impl Renderer<'_> {
             return Err(SwapchainError::VkError("vkEndCommandBuffer", result));
         }
         Ok(())
+    }
+
+    /// VG R3 piece 2 step P2-5 (docs/VG-R3-P2-CAPABILITY-SPLIT-PLAN.md, decision D6): the
+    /// `[hzb_poison, hzb_build_0 .. hzb_build_{n-1}]` BLOCK's pass-barriers + commands, extracted
+    /// so BOTH record slots share one implementation — today's (after the `lit` producer) on an
+    /// unsplit frame, and between the two raster scopes on an armed-split one.
+    /// `declare_vb_graph` declares the block in exactly one position per frame
+    /// ([`GBufferScene::path_vb_occlusion_split`] picks it), and the recorder replays the SAME
+    /// body at the matching site — the [`Self::record_vb_viewt_dispatch`] idiom directly below.
+    ///
+    /// # Why the poison and the builds are ONE function
+    ///
+    /// `hzb_poison` is asserted to be declared before every `hzb_build_*`, and its clear must
+    /// therefore also be RECORDED before every dispatch — otherwise it erases exactly the levels
+    /// they just wrote, the dump reads [`HZB_PYRAMID_POISON`] everywhere, and gate G8 reds
+    /// claiming "the build never ran". In a dev-profile build (which is what the golden runs use)
+    /// the declarator's `debug_assert!` fires first; in a release binary it is compiled out and
+    /// only the wrong-looking gate remains. One function is what makes "the block moves whole" a
+    /// property of the code rather than of a reviewer.
+    ///
+    /// # The gates are the DECLARATOR'S, verbatim
+    ///
+    /// Both conditions below are spelled exactly as `declare_hzb_poison_build`'s inputs are
+    /// derived, and `targets.hzb` is `.expect()`ed rather than made an extra conjunct (the
+    /// `batch_cull_armed` discipline this file already follows): `sync_gbuffer`'s rebuild
+    /// predicate carries `hzb_arm == scene.hzb.is_some()`, so an armed scene ALWAYS has the
+    /// bundle and a create failure returns `Err` rather than a silent `None`. A recorder gate
+    /// narrower than the declarator's would leave declared writes on the pyramid that no command
+    /// performs — and, for the poison specifically, would leave the pyramid's
+    /// `UNDEFINED → GENERAL` transition unrecorded and hand `hzb_build_0` a storage image in the
+    /// wrong layout.
+    ///
+    /// # Recording contract
+    ///
+    /// Recording must be open on `cmd` and NO render-pass instance may be active: both
+    /// `vkCmdClearColorImage` and `vkCmdDispatch` are forbidden inside one. Both call sites
+    /// record after a `cmd_end_rendering`, and the `unsafe` blocks below cite this.
+    #[allow(clippy::too_many_arguments)]
+    fn record_hzb_poison_build(
+        &self,
+        plan: &super::super::graph_bridge::VbPassPlan,
+        cmd: VkCommandBuffer,
+        targets: &GBufferTargets,
+        forward: &ForwardTargets,
+        vb: &VbTargets,
+        scene: &GBufferScene<'_>,
+        present_extent: VkExtent2D,
+        fi: usize,
+    ) {
+        // === VG R3 piece 1 step P1-8 (plan §5/§13, gate G8): the pyramid POISON clear. ===
+        //
+        // Recorded FIRST — immediately before the first `hzb_build` dispatch below, in EXACTLY
+        // `declare_vb_graph`'s position (the declarator asserts the ordering both ways). Every mip
+        // is filled with a value the reduce cannot produce, so a level the build fails to write
+        // reads `HZB_PYRAMID_POISON` in the dump and G8 reds by name instead of agreeing with the
+        // oracle over a field of far-plane zeros — the vacuity step P1-6 measured (89.3% of the
+        // `vb_mesh` pyramid is `0.0`; levels 6..9, the second build pass's whole output, entirely
+        // so).
+        if scene.hzb_dump.is_some() && scene.hzb.is_some() && scene.resolved_render_path.mesh_leg {
+            let hzb = targets
+                .hzb
+                .as_ref()
+                .expect("invariant: scene.hzb armed => targets.hzb (sync_gbuffer's hzb_arm predicate)");
+            let poison_pass = plan
+                .hzb_poison
+                .expect("invariant: the recorder's poison gate is the declarator's, verbatim");
+            // SAFETY: recording is open; `record_vb_pass` records this pass's derived barrier into
+            // `cmd` — the `UNDEFINED → GENERAL` first touch of mips `[0, levels)`, which is what
+            // makes the clear below legal on an image the frame has not otherwise touched yet.
+            self.record_vb_pass(poison_pass, cmd, targets, forward, vb, scene, fi);
+
+            // `R32_SFLOAT` reads only `float32[0]`; the other three components are ignored for a
+            // single-component format and are spelled as the same value rather than left as
+            // arbitrary padding.
+            let poison = VkClearColorValue { float32: [HZB_PYRAMID_POISON; 4] };
+            // ⚠️ `hzb.plan.levels`, NEVER `MAX_HZB_LEVELS`: the capacity is 17 and the image has
+            // `levels` mips (`HzbTargets::build` creates it from this same number), so a
+            // capacity-wide range would name mips that do not exist at every real render extent.
+            let range = VkImageSubresourceRange {
+                aspect_mask: VK_IMAGE_ASPECT_COLOR_BIT,
+                base_mip_level: 0,
+                level_count: hzb.plan.levels,
+                base_array_layer: 0,
+                layer_count: 1,
+            };
+            // SAFETY: recording is open and no render-pass instance is active (this fn's own
+            // contract — both call sites record after a `cmd_end_rendering`). `hzb.pyramid.image`
+            // is the live pyramid, created with `TRANSFER_DST` usage (`HzbTargets::build`'s
+            // `pyramid_desc`, which `VUID-vkCmdClearColorImage-image-00002` requires) and a COLOR
+            // `R32_SFLOAT` format with no depth/stencil aspect. It is in `GENERAL` — one of the two
+            // layouts this command accepts — by the pass's derived first-touch barrier just
+            // recorded. The range names mips `[0, levels)` and layer 0 of a `levels`-mip,
+            // single-layer image, so it is in bounds. `&poison` and `&range` are fully-initialized
+            // locals alive for the call.
+            unsafe {
+                (self.fns.cmd_clear_color_image)(
+                    cmd,
+                    hzb.pyramid.image,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    &poison,
+                    1,
+                    &range,
+                );
+            }
+        }
+
+        // === VG R3 piece 1 step P1-5: the HZB depth-pyramid BUILD dispatches. ===
+        //
+        // Recorded after the mesh raster has written `vb_depth`, in EXACTLY `declare_vb_graph`'s
+        // position for the same chain. Declare/record ORDER parity is the invariant this file and
+        // the declarator both treat as load-bearing.
+        //
+        // ⚠️ Under `HzbMode::Off` this records NOTHING — no barrier, no bind, no dispatch — which
+        // is what keeps every golden pin byte-identical. The ARMED pins stay byte-identical too,
+        // for a different reason: the pyramid is an image nothing samples in pieces 1 and 2 (the
+        // cull is piece 3), so the dispatches move no pixel — at EITHER slot.
+        if scene.hzb.is_some() && scene.resolved_render_path.mesh_leg {
+            let hzb = targets
+                .hzb
+                .as_ref()
+                .expect("invariant: scene.hzb armed => targets.hzb (sync_gbuffer's hzb_arm predicate)");
+            // THE plan is the bundle's OWN field, not `scene.hzb`: the descriptor sets, the image's
+            // real mip count and this dispatch arithmetic must be sized from ONE number, or a lane
+            // can be dispatched over a level whose view was never built (`HzbTargets::plan`'s own
+            // doc states the rule; `build` follows it for the sets).
+            let hzb_plan = hzb.plan;
+            debug_assert_eq!(
+                Some(hzb_plan),
+                scene.hzb,
+                "invariant: the pyramid bundle's plan matches the scene's — both are derived from \
+                 present_extent, and `sync_gbuffer` rebuilds the bundle when that changes"
+            );
+            let pipeline = scene
+                .hzb_build_pipeline
+                .expect("invariant: scene.hzb armed => scene.hzb_build_pipeline (GpuSceneBundles::boot mints it unconditionally)");
+
+            let levels = hzb_plan.levels;
+            let pass_count = levels.div_ceil(HZB_LEVELS_PER_PASS) as usize;
+            // The SOURCE extent, `S` — the extent the depth ring was sized to, which is what the
+            // pyramid reduces. NOT `hzb_plan.extent_of(0)`: that is `P = prev_pow2(S)` per axis,
+            // and the shader's base map `⌈t·S/P⌉` reads BOTH (see `HzbBuildPush::src_extent`).
+            let src_extent = [present_extent.width, present_extent.height];
+
+            for p in 0..pass_count {
+                let d = p as u32 * HZB_LEVELS_PER_PASS;
+                let n = (levels - d).min(HZB_LEVELS_PER_PASS);
+
+                let hzb_pass = plan.hzb_build[p]
+                    .expect("invariant: the recorder's pass count equals the declarator's (one plan)");
+                // SAFETY: recording is open; `record_vb_pass` records this pass's derived
+                // barriers into `cmd` — the raster's DEPTH_ATTACHMENT→SHADER_READ_ONLY transition
+                // on `vb_depth` (pass 0), the previous pass's write→read flush on mip `d-1`
+                // (passes 1+), and the UNDEFINED→GENERAL first touch of mips `[d, d+n)`.
+                self.record_vb_pass(hzb_pass, cmd, targets, forward, vb, scene, fi);
+
+                let set = hzb.sets[fi][p]
+                    .as_ref()
+                    .expect("invariant: sets[slot][p] is Some for every p < levels.div_ceil(HZB_LEVELS_PER_PASS)");
+
+                // `k >= n` pads with level `d` — a real level of a real mip, matching the view
+                // `HzbTargets::build` binds at that destination slot. NEVER zero: the shader
+                // divides by these extents before it tests `k < level_count`, and a padded slot
+                // must therefore be well-defined rather than merely unwritten.
+                let out = |k: u32| hzb_plan.extent_of(if k < n { d + k } else { d });
+                let push = HzbBuildPush {
+                    src_extent,
+                    // `E(d-1)` on a reduce pass; on the BASE pass mip `d-1` does not exist and the
+                    // shader's `base_level == 0` arm never reads it, so level 0's own extent goes
+                    // in as a well-defined placeholder.
+                    fine_extent: hzb_plan.extent_of(d.saturating_sub(1)),
+                    out_extent0: out(0),
+                    out_extent1: out(1),
+                    out_extent2: out(2),
+                    out_extent3: out(3),
+                    out_extent4: out(4),
+                    out_extent5: out(5),
+                    base_level: d,
+                    level_count: n,
+                }
+                .to_bytes();
+
+                // THE DISPATCH DIVISOR is this pass's FIRST OUTPUT LEVEL — the one index space in
+                // which the base and reduce variants have the same shape (plan §2). One workgroup
+                // covers a `HZB_BUILD_TILE`-texel tile of level `d`.
+                let [ex, ey] = hzb_plan.extent_of(d);
+
+                // SAFETY: recording is open and outside any render scope (this fn's own contract);
+                // `pipeline` + its layout (one COMPUTE set + a `HZB_BUILD_PUSH_BYTES` = 72-byte
+                // COMPUTE push range) are live on this device — `GpuSceneBundles::boot` mints both
+                // unconditionally and owns them for the device's lifetime. `set` binds all 8
+                // entries `hzb_build_layout` declares (SAMPLED `gSrcDepth` @0 — the `[fi]` slot's
+                // depth, which is why the sets are ringed — plus the seven single-mip storage views
+                // @1..@7), written once when these targets were built (`HzbTargets::build`, which
+                // binds a REAL view at every slot including the padded ones) and untouched since.
+                // The push writes exactly the declared range at offset 0 from a
+                // `[u8; HZB_BUILD_PUSH_BYTES]` local. The dispatch covers `ceil(E(d)/TILE)` groups
+                // per axis; lanes past the level extent issue no tap and store nothing (the
+                // shader's own boundary rule). `&set.descriptor_set` and `push` are locals alive
+                // for the calls.
+                unsafe {
+                    (self.fns.cmd_bind_pipeline)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        pipeline.pipeline,
+                    );
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        pipeline.layout,
+                        0,
+                        1,
+                        &set.descriptor_set,
+                        0,
+                        ptr::null(),
+                    );
+                    (self.fns.cmd_push_constants)(
+                        cmd,
+                        pipeline.layout,
+                        VK_SHADER_STAGE_COMPUTE_BIT,
+                        0,
+                        HZB_BUILD_PUSH_BYTES,
+                        push.as_ptr().cast(),
+                    );
+                    (self.fns.cmd_dispatch)(
+                        cmd,
+                        ex.div_ceil(HZB_BUILD_TILE),
+                        ey.div_ceil(HZB_BUILD_TILE),
+                        1,
+                    );
+                }
+            }
+        }
     }
 
     /// Rung R9b: the `vb_viewt` (viewt_from_depth_rz) pass-barriers + dispatch body, extracted

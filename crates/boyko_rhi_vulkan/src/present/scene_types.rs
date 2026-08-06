@@ -3147,10 +3147,16 @@ pub struct GBufferScene<'a> {
     /// [`Self::path_vb_occlusion_split`] and is deliberately NOT a conjunct of that predicate —
     /// a dead conjunct is what `vb_visible_instance`'s own doc exists to avoid.
     ///
-    /// WRITTEN BY NOTHING at this step: the declaring `vb_indirect_late_upload` pass and the
-    /// late scope that reads it are step P2-5. An indirect fetch off a buffer with no DECLARED
-    /// writer derives `(TOP_OF_PIPE, 0)` — an execution-only edge that makes the fill neither
-    /// available nor visible — so the two land in one commit, never separately.
+    /// Step P2-5 wired BOTH halves in ONE commit: the `vb_indirect_late_upload` pass that declares
+    /// and records the `vkCmdUpdateBuffer` fill, and the `vb_raster_late` scope that fetches from
+    /// it. Never separately — an indirect fetch off a buffer with no DECLARED writer derives
+    /// `(TOP_OF_PIPE, 0)`, an execution-only edge that makes the fill neither available nor
+    /// visible, and on frame 1 over freshly allocated DEVICE_LOCAL memory the scope that "draws
+    /// nothing" draws.
+    ///
+    /// Every record it carries has `instanceCount = 0` in piece 2. Piece 3 replaces that word's
+    /// PRODUCER (host fill → the late cull's descriptor write), which also changes the declared
+    /// access from `(TRANSFER, TRANSFER_WRITE)` to `(COMPUTE_SHADER, SHADER_WRITE)`.
     pub vb_indirect_late: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
     /// VG R3 piece 2 step P2-3 (plan D2/D3): instances in THIS frame's VB ring whose entity
     /// carries `boyko_render::OcclusionCulling` — the STRUCTURAL conjunct of

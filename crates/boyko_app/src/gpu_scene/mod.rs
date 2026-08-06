@@ -1194,10 +1194,11 @@ pub(crate) struct GpuSceneBundles {
     /// so `GpuSceneBundles::scene` wires it as an unconditional `Some(...)` and every reader can
     /// `.expect()` it under the split predicate rather than carry another `Option` arm.
     ///
-    /// WRITTEN BY NOTHING at this step: its `vb_indirect_late_upload` filling pass and the late
-    /// scope that fetches from it both land in step P2-5, together, because a declared indirect
-    /// READ with no declared WRITE derives an execution-only `(TOP_OF_PIPE, 0)` edge — a missing
-    /// barrier, not a wasted one, over freshly allocated device memory.
+    /// Step P2-5 landed its `vb_indirect_late_upload` filling pass and the late scope that fetches
+    /// from it TOGETHER, in one commit, because a declared indirect READ with no declared WRITE
+    /// derives an execution-only `(TOP_OF_PIPE, 0)` edge — a missing barrier, not a wasted one,
+    /// over freshly allocated device memory. The fill writes `instanceCount = 0` into every
+    /// record while the split is inert; piece 3 makes the late cull that word's producer.
     pub(crate) vb_indirect_late: [BoundBuffer; FRAMES_IN_FLIGHT],
     /// VG rung R2c0: the per-FIF `VbBatchDesc` array the batch cull reads (one 32-byte descriptor
     /// per `DrawBatch`), transfer-filled each frame beside the indirect records.
