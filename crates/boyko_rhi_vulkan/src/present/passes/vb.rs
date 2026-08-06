@@ -73,6 +73,48 @@ pub(crate) const VB_RASTER_FLAG_VISIBLE_INDIRECTION: u32 = 2;
 /// [`VB_RASTER_FLAG_VISIBLE_INDIRECTION`] without a bare `1`.
 const VB_RASTER_FLAG_INSTANCED_ARM: u32 = 1;
 
+/// VG R3 piece 2 step P2-6 — **gate G2's counts, AUTHORED BY THE RECORDER.**
+///
+/// [`Renderer::record_vb`] fills one of these through an `Option<&mut VbRecordProbe>` parameter
+/// when a caller asks for it; `None` on every steady, golden and interactive frame, where the
+/// whole probe costs one `Option` check per counted site and records no command.
+///
+/// # Why these numbers ORIGINATE here rather than being re-derived on the host
+///
+/// The gate's question is "did the recorder actually record two raster scopes?". A host that
+/// re-derives `scopes` from `GBufferScene::vb_occlusion_instances` agrees with itself no matter
+/// what this function did — the tautology this campaign has shipped as a gate five times. So the
+/// counts are incremented AT the `vkCmd*` calls they count, and the host's own numbers
+/// (`draw_batches`, the marked-instance count) travel beside them as an INDEPENDENT cross-check
+/// rather than as their source.
+///
+/// # Why a `&mut` parameter and not a device buffer
+///
+/// Every count is known on the host at record time. A buffer would add an allocation, a declared
+/// pass, a barrier, a fence wait and a decode to move a number that is already in a register —
+/// and would change the recorded command stream, which is precisely what this piece claims not
+/// to do.
+///
+/// # What a filled probe CANNOT claim
+///
+/// That the GPU *executed* the scope. A scope whose every draw carries `instanceCount = 0` has no
+/// observable consequence of execution, so no gate in this repository can close that gap; this
+/// one stops at "the host recorded it".
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VbRecordProbe {
+    /// Raster scopes (`vkCmdBeginRendering`/`EndRendering` brackets over `vb_id` + `vb_depth`)
+    /// recorded this frame: `1` unsplit, `2` on an armed split, and `0` on a frame that records
+    /// no mesh raster at all (`VisibilityBuffer × Sdf`, or a non-VB path where `record_vb` never
+    /// runs — the probe then stays at its `Default`).
+    pub scopes: u32,
+    /// `vkCmdDrawIndexedIndirect` calls issued in the LATE scope. `0` unless the split is armed;
+    /// otherwise the same `batch_count` bound the early scope and the cull dispatch share.
+    pub late_draws: u32,
+    /// The sum of `instanceCount` over the late records this frame WROTE. `0` in piece 2 by
+    /// construction — the late scope draws nothing — and the number piece 3 turns nonzero.
+    pub late_instances: u32,
+}
+
 /// VG R3 piece 1 step P1-5: the 72-byte `hzb_build` push constant, mirrored FIELD FOR FIELD from
 /// `crates/boyko_rhi_vulkan/shaders/hzb_build.comp.hlsl`'s `HzbBuildPush`.
 ///
@@ -362,6 +404,12 @@ impl Renderer<'_> {
     /// copies `vb_depth` and every pyramid mip into a buffer of at least
     /// [`HzbDumpLayout::total_bytes`](super::super::scene_types::HzbDumpLayout::total_bytes) for
     /// this frame's plan and `present_extent`.
+    ///
+    /// VG R3 piece 2 step P2-6: `probe` is gate G2's recorder-authored count sink
+    /// ([`VbRecordProbe`]). `None` on every steady/golden/interactive frame, and a `None` frame
+    /// records byte-identical commands — the probe writes host memory only. It is a `&mut`
+    /// PARAMETER despite the `&self` receiver precisely so it cannot become recorder state that
+    /// survives a frame.
     #[allow(clippy::too_many_arguments)]
     pub(crate) unsafe fn record_vb(
         &self,
@@ -378,6 +426,7 @@ impl Renderer<'_> {
         vb: &VbTargets,
         readback: Option<&BoundBuffer>,
         vb_id_readback: Option<&BoundBuffer>,
+        mut probe: Option<&mut VbRecordProbe>,
         #[cfg(feature = "hwrt")] accel_fns: Option<&crate::accel::AccelFns>,
     ) -> Result<(), SwapchainError> {
         let begin = VkCommandBufferBeginInfo {
@@ -1179,6 +1228,16 @@ impl Renderer<'_> {
                          deliberately, in the change that makes the late cull the producer of \
                          this word"
                     );
+                    // Gate G2's `late_instances`, summed over the records this chunk WRITES —
+                    // `zip(batches)` filled only the first `batches.len()` slots, and the rest of
+                    // the fixed-size array is the `Default` the loop never reached. Summed from
+                    // the record array rather than from the constant `0` above, so a piece-3 edit
+                    // that starts writing a real count is reflected here without touching the
+                    // probe.
+                    if let Some(p) = probe.as_deref_mut() {
+                        p.late_instances +=
+                            records[..batches.len()].iter().map(|r| r.instance_count).sum::<u32>();
+                    }
                     let bytes = (batches.len() as u64) * stride;
                     // SAFETY: recording is open and NO render-pass instance is active (the early
                     // raster's `cmd_begin_rendering` is below, and `vkCmdUpdateBuffer` is forbidden
@@ -1585,6 +1644,11 @@ impl Renderer<'_> {
                 }
                 (self.fns.cmd_end_rendering)(cmd);
             }
+            // Gate G2's `scopes`, counted AT the bracket that closes the EARLY scope rather than
+            // derived from the arming predicate — the difference between a gate and a tautology.
+            if let Some(p) = probe.as_deref_mut() {
+                p.scopes += 1;
+            }
 
             // === VG R3 piece 2 step P2-5 (plan D6): the `[hzb_poison, hzb_build_*]` block's
             // ARMED-SPLIT slot — BETWEEN the two raster scopes. ===
@@ -1761,8 +1825,17 @@ impl Renderer<'_> {
                             1,
                             DRAW_INDEXED_INDIRECT_STRIDE,
                         );
+                        // Gate G2's `late_draws`, counted PER ISSUED DRAW inside the loop. A count
+                        // assigned from `batch_count` after the loop would be green under the
+                        // `take(1)` corruption the gate's own red control uses.
+                        if let Some(p) = probe.as_deref_mut() {
+                            p.late_draws += 1;
+                        }
                     }
                     (self.fns.cmd_end_rendering)(cmd);
+                }
+                if let Some(p) = probe {
+                    p.scopes += 1;
                 }
             }
 

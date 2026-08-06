@@ -46,6 +46,9 @@ mod swapchain;
 mod targets;
 
 pub use frame_driver::{FrameWriteToken, Renderer};
+/// VG R3 piece 2 step P2-6: gate G2's recorder-authored count sink, threaded into
+/// [`Renderer::render_gbuffer_frame`] as `Option<&mut VbRecordProbe>`.
+pub use passes::vb::VbRecordProbe;
 pub use gpu_timing::{
     PASS_COUNT, SV0_PASS_COUNT, Sv0TimedPass, Sv0TimestampCollector, TimedPass, TimestampCollector,
     VB_PASS_COUNT, VbTimedPass, VbTimestampCollector,

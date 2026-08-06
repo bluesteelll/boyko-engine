@@ -1,14 +1,19 @@
-//! VG R3 piece 2, step **P2-4** — the BASELINE barrier-stream pin for the VisibilityBuffer
-//! frame, on the UNMODIFIED declarator, over the four UNSPLIT rows of gate G4's matrix
-//! (`docs/VG-R3-P2-CAPABILITY-SPLIT-PLAN.md`, "G4 — the derived barrier stream, per
-//! CONFIGURATION, asserted FIELD-BY-FIELD").
+//! VG R3 piece 2 — **gate G4**: the derived barrier stream for the VisibilityBuffer frame, per
+//! CONFIGURATION, asserted FIELD BY FIELD (`docs/VG-R3-P2-CAPABILITY-SPLIT-PLAN.md`, "G4").
 //!
-//! # Why this file exists BEFORE the split does
+//! Eight rows, authored in two steps and in this order on purpose:
 //!
-//! `docs/VG-R3-P1-PYRAMID-PLAN.md` states the discipline this step obeys: *"Authoring them
-//! after the change would certify the new behaviour instead of the old one."* Every expectation
-//! here is measured against today's declaration shape, so P2-5's diff is measured against a
-//! baseline nobody could have tuned to it.
+//! * **U1..U4 — step P2-4**, on the UNMODIFIED declarator, before the split existed.
+//! * **S1..S4 — step P2-6**, on the declarator P2-5 changed.
+//!
+//! # Why the halves were authored in that order, and why they must never be re-measured together
+//!
+//! `docs/VG-R3-P1-PYRAMID-PLAN.md` states the discipline: *"Authoring them after the change would
+//! certify the new behaviour instead of the old one."* The four `U*` expectations were measured
+//! against a declaration shape nobody could have tuned to the split, and the split's diff is
+//! measured against them. They have two generators for that reason
+//! ([`dump_vb_unsplit_barrier_streams`] / [`dump_vb_split_barrier_streams`]): "re-measure the
+//! split rows" must not be able to silently also re-measure the rows they are compared against.
 //!
 //! # Why it is the ONLY gate that can see a missing barrier
 //!
@@ -61,15 +66,14 @@
 //!      assert, the `vb_indirect_late`-is-the-last-buffer assert, `poison < build`,
 //!      `build < dump`, and `poison.is_some() == dump.is_some()`. Those constrain the real
 //!      declarator where this replica cannot reach it.
-//!   4. G2 (step P2-6) contributes a scope count that originates in the RECORDER. Replica pin,
-//!      production asserts and recorder count are the evidence together; none of them alone is.
+//!   4. G2 (step P2-6, `boyko_app/tests/vb_occ_split_gate.rs`) contributes a scope count that
+//!      originates in the RECORDER. Replica pin, production asserts and recorder count are the
+//!      evidence together; none of them alone is.
 //! * **Nothing about recording.** The pin stops at the derived plan; how `record_all` batches it
-//!   into `vkCmdPipelineBarrier` array calls is a different question.
+//!   into `vkCmdPipelineBarrier` array calls is a different question, and whether `record_vb`
+//!   records the scope at all is gate G2's.
 //! * **Nothing about pixels, and nothing about soundness.** A stream can be pinned and wrong.
-//!   This says "this is what the machine derives, and it has not moved", which is exactly the
-//!   claim P2-5's diff needs and no more.
-//! * **Nothing about the occlusion split**, which does not exist yet. No row here records a
-//!   second raster scope; G4's four split rows (S1..S4) are authored at P2-5.
+//!   This says "this is what the machine derives, and it has not moved".
 //! * **Nothing about the `hwrt` image/buffer tail.** The `hwrt` arm of `declare_vb_graph`
 //!   appends six images and one buffer that NO pass in these four configurations names (the VB
 //!   hardware shadow chain needs `split && scene.shadow`, and the rows below hold `shadow` off),
@@ -134,17 +138,25 @@ const fn hzb_mips(base: u32, count: u32) -> SubRange {
 // The matrix
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-/// One row of G4's matrix, in the UNSPLIT half. The knobs are exactly the columns G4 varies;
-/// everything else is held FIXED across all four rows (see [`declare_vb_unsplit_frame`]), so a
-/// row-to-row difference in the pinned stream is attributable to the row's own column.
+/// One row of G4's matrix. The knobs are exactly the columns G4 varies; everything else is held
+/// FIXED across all eight rows (see [`declare_vb_frame`]), so a row-to-row difference in the
+/// pinned stream is attributable to the row's own column.
 ///
-/// The occlusion split itself has no field here **on purpose**: it does not exist at P2-4, and a
-/// knob for it would be a place for P2-5 to be tuned into this baseline.
+/// ⚠️ At P2-4 this type was `VbRow` and carried no `split` field **on purpose** — the split
+/// did not exist, and a knob for it would have been a place for P2-5 to be tuned into the
+/// baseline. P2-5 landed; P2-6 adds the field and the four `S*` rows. **The four `U*` rows and
+/// their twelve measured expectation arrays are UNTOUCHED**, which is itself an assertion: an
+/// unsplit frame must derive the stream that was pinned before the split existed, and `split:
+/// false` reaching any declaration below would show up there first.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct VbUnsplitRow {
+struct VbRow {
     /// G4's row label, used in every failure message so a divergence names WHICH configuration
     /// moved rather than "the stream drifted".
     id: &'static str,
+    /// `GBufferScene::path_vb_occlusion_split()` — arms `vb_indirect_late_upload`, `vb_raster_late`
+    /// and the `[hzb_poison, hzb_build_*]` block's EARLY slot (plan D4/D6). False on every scene in
+    /// the tree today, since nothing carries `OcclusionCulling`.
+    split: bool,
     /// `scene.hzb` — `Some(levels)` arms `hzb_build_*`; `None` is the `HzbMode::Off` 0%-gate,
     /// where the pyramid `ResId` is still declared and named by no pass.
     hzb_levels: Option<u32>,
@@ -167,51 +179,89 @@ struct VbUnsplitRow {
     /// Every pinned row below holds this `false`; only
     /// [`a_dropped_writer_keeps_every_count_and_moves_only_fields`] sets it.
     red_control_drop_cull_survivor_write: bool,
+    /// **RED CONTROL ONLY (G4's R1).** Drops `vb_indirect_late_upload`'s declared TRANSFER write
+    /// while leaving `vb_raster_late`'s indirect fetch in place — the SAME defect class, on the
+    /// resource piece 2 actually adds. Every pinned row holds this `false`; only
+    /// [`a_dropped_late_upload_write_keeps_the_count_and_moves_only_fields`] sets it.
+    red_control_drop_late_upload_write: bool,
 }
 
 /// **U1** — split off, HZB off, dump off, SSAO off, `VB × Mesh`. The shipping baseline: nothing
 /// about the split leaks into the unarmed path.
-const U1: VbUnsplitRow = VbUnsplitRow {
+const U1: VbRow = VbRow {
     id: "U1 (split off, HZB off, dump off, SSAO off, VB×Mesh)",
+    split: false,
     hzb_levels: None,
     hzb_dump: false,
     ssao: false,
     sdf_leg: false,
     red_control_drop_cull_survivor_write: false,
+    red_control_drop_late_upload_write: false,
 };
 
 /// **U2** — split off, HZB armed, dump off, SSAO off, `VB × Mesh`. Today's `vb_mesh_hzb` shape,
 /// including the three pyramid barriers at `levels = 10`.
-const U2: VbUnsplitRow = VbUnsplitRow {
+const U2: VbRow = VbRow {
     id: "U2 (split off, HZB armed, dump off, SSAO off, VB×Mesh)",
     hzb_levels: Some(HZB_LEVELS),
-    hzb_dump: false,
-    ssao: false,
-    sdf_leg: false,
-    red_control_drop_cull_survivor_write: false,
+    ..U1
 };
 
 /// **U3** — split off, HZB armed, dump ON, SSAO off, `VB × Mesh`. G5's own path: `hzb_poison`'s
 /// `UNDEFINED → GENERAL` first touch, and `hzb_dump`'s `vb_depth` source — the source P2-5
 /// re-sources.
-const U3: VbUnsplitRow = VbUnsplitRow {
+const U3: VbRow = VbRow {
     id: "U3 (split off, HZB armed, dump ON, SSAO off, VB×Mesh)",
-    hzb_levels: Some(HZB_LEVELS),
     hzb_dump: true,
-    ssao: false,
-    sdf_leg: false,
-    red_control_drop_cull_survivor_write: false,
+    ..U2
 };
 
 /// **U4** — split off, HZB armed, dump off, SSAO ON, `VB × Both`. The other re-sourced
 /// `vb_depth` readers: the `vb_viewt` PRE-TAIL slot and `sdf_forward_march`'s mesh arm.
-const U4: VbUnsplitRow = VbUnsplitRow {
+const U4: VbRow = VbRow {
     id: "U4 (split off, HZB armed, dump off, SSAO ON, VB×Both)",
-    hzb_levels: Some(HZB_LEVELS),
-    hzb_dump: false,
     ssao: true,
     sdf_leg: true,
-    red_control_drop_cull_survivor_write: false,
+    ..U2
+};
+
+/// **S1** (VG R3 piece 2 step P2-6) — split **ON**, HZB off, dump off, SSAO off, `VB × Mesh`.
+///
+/// The three new barriers at the late scope's boundary, and the row where they stand alone:
+/// `vb_id` WAW, `vb_depth` WAW, and `vb_indirect_late`'s `TRANSFER_WRITE → INDIRECT_COMMAND_READ`.
+/// ⚠️ The COUNT of three is not evidence — the read-declared/write-undeclared defect yields three
+/// as well, differing only in `src_stage`/`src_access`. See
+/// [`s1_pins_the_late_boundary_barriers_field_by_field`] and the R1 control.
+const S1: VbRow = VbRow {
+    id: "S1 (split ON, HZB off, dump off, SSAO off, VB×Mesh)",
+    split: true,
+    ..U1
+};
+
+/// **S2** — split ON, HZB armed, dump off, SSAO off, `VB × Mesh`. The depth ROUND TRIP across the
+/// moved poison+build block: `DEPTH_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL` into
+/// `hzb_build_0`, then back into `vb_raster_late` — neither of them a first touch, because a first
+/// touch here would license DISCARDING the early scope's depth.
+const S2: VbRow = VbRow {
+    id: "S2 (split ON, HZB armed, dump off, SSAO off, VB×Mesh)",
+    split: true,
+    ..U2
+};
+
+/// **S3** — split ON, HZB armed, dump ON, SSAO off, `VB × Mesh`. **Mandatory**: `hzb_dump` is one
+/// of the four `vb_depth` readers the block move re-sources, and it is gate G5's own path.
+const S3: VbRow = VbRow {
+    id: "S3 (split ON, HZB armed, dump ON, SSAO off, VB×Mesh)",
+    split: true,
+    ..U3
+};
+
+/// **S4** — split ON, HZB armed, dump off, SSAO ON, `VB × Both`. The other two re-sourced
+/// readers: the `vb_viewt` PRE-TAIL slot and `sdf_forward_march`'s mesh arm.
+const S4: VbRow = VbRow {
+    id: "S4 (split ON, HZB armed, dump off, SSAO ON, VB×Both)",
+    split: true,
+    ..U4
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -221,7 +271,7 @@ const U4: VbUnsplitRow = VbUnsplitRow {
 /// A compiled replica frame plus the handles the named-hazard assertions read.
 ///
 /// Only the `ResId`s an assertion names are carried; the rest are declared as `_`-prefixed
-/// locals in [`declare_vb_unsplit_frame`], where the underscore records "declared for `ResId`
+/// locals in [`declare_vb_frame`], where the underscore records "declared for `ResId`
 /// fidelity, named by no pass in these rows".
 struct VbFrame {
     /// The compiled graph.
@@ -232,7 +282,7 @@ struct VbFrame {
     /// can disagree with the frame — here there is only one.
     pass_names: Vec<&'static str>,
     /// The row this frame was built from, for failure messages.
-    row: VbUnsplitRow,
+    row: VbRow,
     lit: ResId,
     vb_id: ResId,
     vb_depth: ResId,
@@ -242,14 +292,100 @@ struct VbFrame {
     vb_instance_ring: ResId,
     vb_indirect: ResId,
     vb_visible_instance: ResId,
-    /// P2-3's late record array — declared, named by NO pass at this step. Every row asserts it
-    /// routes zero barriers; that is the structural form of "nothing about the split leaks into
-    /// the unarmed path", and it is the assertion P2-5 must flip.
+    /// P2-3's late record array. On an UNSPLIT row it is declared and named by NO pass, and the
+    /// row asserts it routes ZERO barriers — the structural form of "nothing about the split leaks
+    /// into the unarmed path". On a SPLIT row it carries exactly one:
+    /// `vb_indirect_late_upload`'s TRANSFER write → `vb_raster_late`'s indirect fetch.
     vb_indirect_late: ResId,
 }
 
-/// Declare and compile one UNSPLIT row of G4's matrix, mirroring `declare_vb_graph`'s
-/// declaration order pass for pass and access for access.
+/// The `[hzb_poison, hzb_build_0 .. hzb_build_{n-1}]` block, declared WHOLE — the replica's mirror
+/// of `graph_bridge.rs`'s `declare_hzb_poison_build`.
+///
+/// It is one function for the reason the production one is: the block has two slots (plan D6) and
+/// **moving the builds without their clear is not expressible** here either. `PassId` is strictly
+/// monotonic in declare order and `compile()` does not reorder, so a build declared ahead of its
+/// poison would have the clear ERASE what the dispatches wrote — the defect the declarator's
+/// `poison < build` assert exists to refuse.
+///
+/// `names` is threaded beside `g` rather than captured, because the caller's `pass!` macro owns
+/// both and a closure over them would borrow twice.
+fn declare_hzb_poison_build_replica(
+    g: &mut FrameGraph,
+    names: &mut Vec<&'static str>,
+    hzb_levels: Option<u32>,
+    dump_armed: bool,
+    hzb_pyramid: ResId,
+    vb_depth: ResId,
+) {
+    // The poison arms on EXACTLY `hzb_levels.is_some() && dump_armed` — the dump pass's own
+    // predicate, verbatim: a frame that is poisoned is always a frame that is dumped.
+    if let (Some(levels), true) = (hzb_levels, dump_armed) {
+        names.push("hzb_poison");
+        g.add_pass("hzb_poison");
+        g.image_access(
+            hzb_pyramid,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_IMAGE_LAYOUT_GENERAL,
+            hzb_mips(0, levels),
+        );
+    }
+
+    let Some(levels) = hzb_levels else {
+        return;
+    };
+    let pass_count = levels.div_ceil(HZB_LEVELS_PER_PASS) as usize;
+    assert!(
+        pass_count <= MAX_HZB_PASSES,
+        "the row's level count needs {pass_count} passes, more than MAX_HZB_PASSES"
+    );
+    // Iterated by NAME rather than by index: the declarator's own loop is
+    // `for p in 0..pass_count { g.add_pass(HZB_BUILD_PASS_NAMES[p]) }`, and the replica must walk
+    // the same names in the same order. `.take(pass_count)` is what keeps the two in step — the
+    // array is `MAX_HZB_PASSES` long (a CAPACITY) while `pass_count` is the live span, the
+    // distinction `MAX_HZB_LEVELS`' own doc warns about.
+    for (p, pass_name) in HZB_BUILD_PASS_NAMES.iter().enumerate().take(pass_count) {
+        let d = p as u32 * HZB_LEVELS_PER_PASS;
+        let n = (levels - d).min(HZB_LEVELS_PER_PASS);
+        names.push(*pass_name);
+        g.add_pass(pass_name);
+        if p == 0 {
+            // The SOURCE depth, at the same (stage, access, layout, aspect) shape `vb_viewt` /
+            // `sdf_forward_march` declare. At the UNSPLIT slot THIS is the access that derives
+            // `vb_depth`'s DEPTH_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL transition, and
+            // every later same-layout read then needs none. At the ARMED-SPLIT slot "later" stops
+            // meaning "for the rest of the frame": `vb_raster_late` writes the depth again
+            // immediately after this block, so every downstream reader is re-sourced from a real
+            // RAW flush plus a preserving layout transition.
+            g.image_access(
+                vb_depth,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                SubRange::DEPTH,
+            );
+        } else {
+            g.image_access(
+                hzb_pyramid,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_GENERAL,
+                hzb_mips(d - 1, 1),
+            );
+        }
+        g.image_access(
+            hzb_pyramid,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_IMAGE_LAYOUT_GENERAL,
+            hzb_mips(d, n),
+        );
+    }
+}
+
+/// Declare and compile one row of G4's matrix, mirroring `declare_vb_graph`'s declaration order
+/// pass for pass and access for access.
 ///
 /// # The knobs this replica holds FIXED, and why each is a fixed base rather than a column
 ///
@@ -266,7 +402,7 @@ struct VbFrame {
 /// | DDGI (`path_vb_ddgi`) | off | GI-off is the byte-identity discipline the tree already pins |
 /// | `scene.shadow` (hwrt chain) | off | see the module doc: the `hwrt` tail is unnamed by every pass here |
 /// | SSAO à-trous levels | 0 | a legal clamped value (the storage-degrade path, `ssao_atrous_levels == 0 \|\| (2..=MAX)`), and the ladder touches no `vb_depth` reader U4 exists to pin |
-fn declare_vb_unsplit_frame(row: VbUnsplitRow) -> VbFrame {
+fn declare_vb_frame(row: VbRow) -> VbFrame {
     // Sized past the mip-weighted state total (29 resources, of which the pyramid contributes
     // `HZB_LEVELS` entries) so a declare pass performs no reallocation.
     let mut g = FrameGraph::with_capacity(48, 24, 128);
@@ -423,6 +559,25 @@ fn declare_vb_unsplit_frame(row: VbUnsplitRow) -> VbFrame {
     g.buffer_access(vb_indirect, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
     g.buffer_access(vb_batch_desc, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
 
+    // `vb_indirect_late_upload` (P2-5) — the LATE record array's `vkCmdUpdateBuffer`, in its own
+    // pass because its gate is `path_vb_occlusion_split()` while the upload above is gated on
+    // `scene.vb_indirect.is_some()`; folding two predicates onto one pass is how a pass ends up
+    // declaring an access the recorder does not perform.
+    //
+    // ⚠️ THIS DECLARATION IS THE DIFFERENCE BETWEEN "DRAWS NOTHING" AND "DRAWS WHATEVER WAS IN
+    // FRESHLY ALLOCATED DEVICE MEMORY" — and dropping it costs the stream NO barrier and NO count,
+    // only two fields. That is what `red_control_drop_late_upload_write` reproduces.
+    if row.split {
+        pass!("vb_indirect_late_upload");
+        if !row.red_control_drop_late_upload_write {
+            g.buffer_access(
+                vb_indirect_late,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+            );
+        }
+    }
+
     // `vb_batch_cull` — the counter's `vkCmdFillBuffer` reset and the atomics that follow it in
     // ONE pass (the intra-pass TRANSFER → COMPUTE shape `light_cull` uses for its own allocator),
     // then the descriptor read, the `instanceCount` rewrite, the compacted list, and R2d-3's two
@@ -444,7 +599,8 @@ fn declare_vb_unsplit_frame(row: VbUnsplitRow) -> VbFrame {
 
     // `vb_cull_readback` — the probe, held OFF across the matrix.
 
-    // `vb_raster` — the early scope, and the only one that exists at P2-4.
+    // `vb_raster` — the EARLY scope. On a split row `vb_raster_late` follows it below, past the
+    // poison+build block; on an unsplit row it is the frame's only raster scope.
     pass!("vb_raster");
     g.buffer_access(
         vb_indirect,
@@ -472,13 +628,68 @@ fn declare_vb_unsplit_frame(row: VbUnsplitRow) -> VbFrame {
         VK_ACCESS_SHADER_READ_BIT,
     );
 
+    // ---- The poison+build block's ARMED-SPLIT slot, and the LATE raster scope (P2-5, D6/D4) ----
+    //
+    // The pyramid must reduce the depth the EARLY scope wrote, which fixes the armed order as
+    // `vb_raster → hzb_poison → hzb_build_* → vb_raster_late`. ONE predicate picks the block's
+    // slot at both declare and record; the accesses are identical in both slots and only the
+    // position differs (the `vb_viewt` PRE-TAIL/LATE idiom).
+    if row.split {
+        declare_hzb_poison_build_replica(
+            &mut g,
+            &mut pass_names,
+            row.hzb_levels,
+            row.hzb_dump,
+            hzb_pyramid,
+            vb_depth,
+        );
+
+        // `vb_raster_late` — THREE accesses, each load-bearing:
+        //  * `vb_indirect_late` at DRAW_INDIRECT/INDIRECT_COMMAND_READ — the consumer half of the
+        //    transfer write above; either half alone derives a barrier that is WRONG rather than
+        //    absent.
+        //  * `vb_id` as a COLOR write at `COLOR_ATTACHMENT_OPTIMAL` — a WAW against the early
+        //    scope's store, at the layout the early scope left it in. NOT `UNDEFINED`: a first
+        //    touch would license DISCARDING what the early scope wrote, which is the equivalence
+        //    this whole piece rests on.
+        //  * `vb_depth` as a DEPTH write at `DEPTH_ATTACHMENT_OPTIMAL` — the same WAW, and on an
+        //    HZB-armed row the RETURN half of the round trip through `hzb_build_0`'s read.
+        //
+        // Deliberately NOT declared (and P2-5's declarator says so in the same words): the VS's
+        // `vb_instance_ring` and `vb_visible_instance` reads. Every late record carries
+        // `instanceCount = 0`, so this scope issues zero vertex invocations and performs neither
+        // read; declaring them would declare an access the recorder does not perform.
+        pass!("vb_raster_late");
+        g.buffer_access(
+            vb_indirect_late,
+            VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+            VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+        );
+        g.image_access(
+            vb_id,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            SubRange::COLOR,
+        );
+        g.image_access(
+            vb_depth,
+            FRAG,
+            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            SubRange::DEPTH,
+        );
+    }
+
     // The classify chain is skipped: `use_classified` is off across the matrix, and the R9b split
     // (row U4) displaces it regardless (`path_vb_fused()` is false under the split).
 
     // The FUSED `lit` producer. Under the R9b split NEITHER `vb_resolve` nor `vb_shade` runs —
     // `vb_shade_split`, declared further down, is the producer.
-    let split = row.ssao;
-    if !split {
+    // The rung-R9b GEO/SHADE split (NOT the occlusion split — `row.split` is that one; the two
+    // are independent and S4 arms both).
+    let geo_shade_split = row.ssao;
+    if !geo_shade_split {
         pass!("vb_resolve");
         g.image_access(
             vb_id,
@@ -515,66 +726,20 @@ fn declare_vb_unsplit_frame(row: VbUnsplitRow) -> VbFrame {
         );
     }
 
-    // ---- The pyramid POISON + BUILD block, at TODAY'S slot ----------------------------------
-    // This is the block D6 moves between the two raster scopes on an armed-split frame. Its
-    // position here — after the `lit` producer, before the `vb_viewt` PRE-TAIL slot — is
-    // precisely what P2-5's diff is measured against, and it is why `pass_barriers()` is part of
-    // this pin rather than an extra.
-    if let Some(levels) = row.hzb_levels {
-        if row.hzb_dump {
-            pass!("hzb_poison");
-            g.image_access(
-                hzb_pyramid,
-                VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_ACCESS_TRANSFER_WRITE_BIT,
-                VK_IMAGE_LAYOUT_GENERAL,
-                hzb_mips(0, levels),
-            );
-        }
-
-        let pass_count = levels.div_ceil(HZB_LEVELS_PER_PASS) as usize;
-        assert!(
-            pass_count <= MAX_HZB_PASSES,
-            "the row's level count needs {pass_count} passes, more than MAX_HZB_PASSES"
+    // ---- The pyramid POISON + BUILD block, at the UNSPLIT slot -------------------------------
+    // After the `lit` producer, before the `vb_viewt` PRE-TAIL slot: the position the block has
+    // held since piece 1, and where it stays on every frame the occlusion split is not armed —
+    // which is every scene in this tree today. The four `U*` baselines were measured with it
+    // here, so `!row.split` keeping them byte-identical is part of what P2-6 asserts.
+    if !row.split {
+        declare_hzb_poison_build_replica(
+            &mut g,
+            &mut pass_names,
+            row.hzb_levels,
+            row.hzb_dump,
+            hzb_pyramid,
+            vb_depth,
         );
-        // Iterated by NAME rather than by index: the declarator's own loop is
-        // `for p in 0..pass_count { g.add_pass(HZB_BUILD_PASS_NAMES[p]) }`, and the replica must
-        // walk the same names in the same order. `.take(pass_count)` is what keeps the two in
-        // step — the array is `MAX_HZB_PASSES` long (a CAPACITY) while `pass_count` is the live
-        // span, the distinction `MAX_HZB_LEVELS`' own doc warns about.
-        for (p, pass_name) in HZB_BUILD_PASS_NAMES.iter().enumerate().take(pass_count) {
-            let d = p as u32 * HZB_LEVELS_PER_PASS;
-            let n = (levels - d).min(HZB_LEVELS_PER_PASS);
-            pass!(*pass_name);
-            if p == 0 {
-                // The SOURCE depth, at the same (stage, access, layout, aspect) shape
-                // `vb_viewt` / `sdf_forward_march` declare. THIS is the access that derives
-                // `vb_depth`'s DEPTH_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL transition
-                // today, and every later same-layout read then needs none.
-                g.image_access(
-                    vb_depth,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    VK_ACCESS_SHADER_READ_BIT,
-                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                    SubRange::DEPTH,
-                );
-            } else {
-                g.image_access(
-                    hzb_pyramid,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    VK_ACCESS_SHADER_READ_BIT,
-                    VK_IMAGE_LAYOUT_GENERAL,
-                    hzb_mips(d - 1, 1),
-                );
-            }
-            g.image_access(
-                hzb_pyramid,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_ACCESS_SHADER_WRITE_BIT,
-                VK_IMAGE_LAYOUT_GENERAL,
-                hzb_mips(d, n),
-            );
-        }
     }
 
     // ---- The rung-R9b split arm -------------------------------------------------------------
@@ -599,7 +764,7 @@ fn declare_vb_unsplit_frame(row: VbUnsplitRow) -> VbFrame {
             SubRange::COLOR,
         );
     }
-    if split {
+    if geo_shade_split {
         // `vb_geo` — the split's thin-aux producer and the FIRST `vb_id` reader under split.
         pass!("vb_geo");
         g.image_access(
@@ -891,7 +1056,7 @@ fn layout_expr(layout: i32) -> String {
 /// `FrameGraph::res_name` PANICS on an out-of-range `ResId`, and the divergence reports label the
 /// EXPECTED side too, whose `ResId` comes from a hand-pasted literal. A panic while formatting a
 /// failure message would replace the diagnosis with its own noise. `vb_indirect_late` is the LAST
-/// resource [`declare_vb_unsplit_frame`] declares, so its index is the bound.
+/// resource [`declare_vb_frame`] declares, so its index is the bound.
 fn res_label(f: &VbFrame, res: ResId) -> String {
     if res.index() <= f.vb_indirect_late.index() {
         format!("{:?}", f.g.res_name(res))
@@ -957,8 +1122,8 @@ fn pass_range_source(r: &PassBarrierRange, label: &str, index: usize) -> String 
 }
 
 /// Print one row's whole compiled stream as the three expectation constants, ready to paste.
-fn dump_row(row: VbUnsplitRow, prefix: &str) {
-    let f = declare_vb_unsplit_frame(row);
+fn dump_row(row: VbRow, prefix: &str) {
+    let f = declare_vb_frame(row);
     let img = f.g.img_barriers();
     let buf = f.g.buf_barriers();
     let passes = f.g.pass_barriers();
@@ -983,8 +1148,8 @@ fn dump_row(row: VbUnsplitRow, prefix: &str) {
     println!();
 }
 
-/// **GENERATOR, not a gate** — prints all four rows' compiled streams as the twelve expectation
-/// constants below, ready to paste.
+/// **GENERATOR, not a gate** — the UNSPLIT half: prints U1..U4's compiled streams as the twelve
+/// `U?_EXPECTED_…` constants below, ready to paste.
 ///
 /// ```text
 /// cargo test -p boyko_rhi_vulkan --test vb_barrier_stream_baseline \
@@ -1011,6 +1176,34 @@ fn dump_vb_unsplit_barrier_streams() {
     dump_row(U3, "U3");
     dump_row(U4, "U4");
     println!("// ===== END dump_vb_unsplit_barrier_streams =====");
+}
+
+/// **GENERATOR, not a gate** — the SPLIT half (VG R3 piece 2 step P2-6), printing S1..S4's
+/// compiled streams as the twelve `S?_EXPECTED_…` constants, ready to paste.
+///
+/// ```text
+/// cargo test -p boyko_rhi_vulkan --test vb_barrier_stream_baseline \
+///     dump_vb_split_barrier_streams -- --ignored --nocapture
+/// ```
+///
+/// A SECOND generator rather than four more rows in the first one: the unsplit baselines were
+/// measured on the UNMODIFIED declarator at P2-4 and must never be re-measured casually (that is
+/// the whole authoring-order discipline — a baseline authored after the change certifies the new
+/// behaviour). Two generators keep "re-measure the split rows" from silently also re-measuring the
+/// four rows the split is being compared against.
+#[test]
+#[ignore = "generator, not a gate: prints the four SPLIT streams as Rust source; the orchestrator runs it"]
+fn dump_vb_split_barrier_streams() {
+    println!("// ===== BEGIN dump_vb_split_barrier_streams =====");
+    println!("// Replace each `const S?_EXPECTED_…` array in tests/vb_barrier_stream_baseline.rs");
+    println!("// (each currently holds one TBD_* sentinel) with the matching block below, KEEPING");
+    println!("// the `///` doc comment already above it. Do NOT touch the U? arrays.");
+    println!();
+    dump_row(S1, "S1");
+    dump_row(S2, "S2");
+    dump_row(S3, "S3");
+    dump_row(S4, "S4");
+    println!("// ===== END dump_vb_split_barrier_streams =====");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -2034,6 +2227,1116 @@ const U4_EXPECTED_PASS: &[PassBarrierRange] = &[
     PassBarrierRange { img_begin: 20, img_count: 1, buf_begin: 9, buf_count: 0 }, // [14] "present_sample"
 ];
 
+/// **S1's image baseline** (VG R3 piece 2 step P2-6). Read off [`dump_vb_split_barrier_streams`]
+/// and pasted — MEASURED off `compile()`, never predicted, for the reason [`U1_EXPECTED_IMG`]
+/// states. Unlike the `U*` arrays, these four rows are measured on the declarator P2-5 already
+/// changed, so what they pin is "this is what the split derives", checked against the four
+/// UNSPLIT rows that were pinned before it existed.
+const S1_EXPECTED_IMG: &[ImgBarrier] = &[
+    ImgBarrier {
+        res: ResId(3), // [0] "cascade"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 4 },
+    },
+    ImgBarrier {
+        res: ResId(4), // [1] "atlas"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 16 },
+    },
+    ImgBarrier {
+        res: ResId(0), // [2] "lit"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(1), // [3] "vb_id"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(2), // [4] "vb_depth"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(1), // [5] "vb_id"
+        src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(2), // [6] "vb_depth"
+        src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        dst_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(1), // [7] "vb_id"
+        src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(0), // [8] "lit"
+        src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(3), // [9] "cascade"
+        src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 4 },
+    },
+    ImgBarrier {
+        res: ResId(4), // [10] "atlas"
+        src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 16 },
+    },
+    ImgBarrier {
+        res: ResId(0), // [11] "lit"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+];
+/// S1's buffer baseline — see [`S1_EXPECTED_IMG`].
+const S1_EXPECTED_BUF: &[BufBarrier] = &[
+    BufBarrier {
+        res: ResId(15), // [0] "light_table"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+    },
+    BufBarrier {
+        res: ResId(26), // [1] "vb_cull_count"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+    },
+    BufBarrier {
+        res: ResId(24), // [2] "vb_batch_desc"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(23), // [3] "vb_indirect"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+    },
+    BufBarrier {
+        res: ResId(16), // [4] "vb_instance_ring"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(23), // [5] "vb_indirect"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(16), // [6] "vb_instance_ring"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(27), // [7] "vb_visible_instance"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(28), // [8] "vb_indirect_late"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(15), // [9] "light_table"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+];
+/// S1's per-pass attribution baseline — see [`S1_EXPECTED_IMG`].
+const S1_EXPECTED_PASS: &[PassBarrierRange] = &[
+    PassBarrierRange { img_begin: 0, img_count: 0, buf_begin: 0, buf_count: 1 }, // [0] "light_upload"
+    PassBarrierRange { img_begin: 0, img_count: 1, buf_begin: 1, buf_count: 0 }, // [1] "csm_depth"
+    PassBarrierRange { img_begin: 1, img_count: 1, buf_begin: 1, buf_count: 0 }, // [2] "atlas_depth"
+    PassBarrierRange { img_begin: 2, img_count: 1, buf_begin: 1, buf_count: 0 }, // [3] "vb_sky"
+    PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 0 }, // [4] "vb_indirect_upload"
+    PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 0 }, // [5] "vb_indirect_late_upload"
+    PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 4 }, // [6] "vb_batch_cull"
+    PassBarrierRange { img_begin: 3, img_count: 2, buf_begin: 5, buf_count: 3 }, // [7] "vb_raster"
+    PassBarrierRange { img_begin: 5, img_count: 2, buf_begin: 8, buf_count: 1 }, // [8] "vb_raster_late"
+    PassBarrierRange { img_begin: 7, img_count: 4, buf_begin: 9, buf_count: 1 }, // [9] "vb_resolve"
+    PassBarrierRange { img_begin: 11, img_count: 1, buf_begin: 10, buf_count: 0 }, // [10] "present_sample"
+];
+
+/// S2's image baseline — see [`S1_EXPECTED_IMG`].
+const S2_EXPECTED_IMG: &[ImgBarrier] = &[
+    ImgBarrier {
+        res: ResId(3), // [0] "cascade"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 4 },
+    },
+    ImgBarrier {
+        res: ResId(4), // [1] "atlas"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 16 },
+    },
+    ImgBarrier {
+        res: ResId(0), // [2] "lit"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(1), // [3] "vb_id"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(2), // [4] "vb_depth"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(2), // [5] "vb_depth"
+        src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(14), // [6] "hzb_pyramid"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 6, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(14), // [7] "hzb_pyramid"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 5, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(14), // [8] "hzb_pyramid"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 6, mip_count: 4, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(1), // [9] "vb_id"
+        src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(2), // [10] "vb_depth"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(1), // [11] "vb_id"
+        src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(0), // [12] "lit"
+        src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(3), // [13] "cascade"
+        src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 4 },
+    },
+    ImgBarrier {
+        res: ResId(4), // [14] "atlas"
+        src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 16 },
+    },
+    ImgBarrier {
+        res: ResId(0), // [15] "lit"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+];
+/// S2's buffer baseline — see [`S1_EXPECTED_IMG`].
+const S2_EXPECTED_BUF: &[BufBarrier] = &[
+    BufBarrier {
+        res: ResId(15), // [0] "light_table"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+    },
+    BufBarrier {
+        res: ResId(26), // [1] "vb_cull_count"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+    },
+    BufBarrier {
+        res: ResId(24), // [2] "vb_batch_desc"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(23), // [3] "vb_indirect"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+    },
+    BufBarrier {
+        res: ResId(16), // [4] "vb_instance_ring"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(23), // [5] "vb_indirect"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(16), // [6] "vb_instance_ring"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(27), // [7] "vb_visible_instance"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(28), // [8] "vb_indirect_late"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(15), // [9] "light_table"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+];
+/// S2's per-pass attribution baseline — see [`S1_EXPECTED_IMG`].
+const S2_EXPECTED_PASS: &[PassBarrierRange] = &[
+    PassBarrierRange { img_begin: 0, img_count: 0, buf_begin: 0, buf_count: 1 }, // [0] "light_upload"
+    PassBarrierRange { img_begin: 0, img_count: 1, buf_begin: 1, buf_count: 0 }, // [1] "csm_depth"
+    PassBarrierRange { img_begin: 1, img_count: 1, buf_begin: 1, buf_count: 0 }, // [2] "atlas_depth"
+    PassBarrierRange { img_begin: 2, img_count: 1, buf_begin: 1, buf_count: 0 }, // [3] "vb_sky"
+    PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 0 }, // [4] "vb_indirect_upload"
+    PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 0 }, // [5] "vb_indirect_late_upload"
+    PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 4 }, // [6] "vb_batch_cull"
+    PassBarrierRange { img_begin: 3, img_count: 2, buf_begin: 5, buf_count: 3 }, // [7] "vb_raster"
+    PassBarrierRange { img_begin: 5, img_count: 2, buf_begin: 8, buf_count: 0 }, // [8] "hzb_build_0"
+    PassBarrierRange { img_begin: 7, img_count: 2, buf_begin: 8, buf_count: 0 }, // [9] "hzb_build_1"
+    PassBarrierRange { img_begin: 9, img_count: 2, buf_begin: 8, buf_count: 1 }, // [10] "vb_raster_late"
+    PassBarrierRange { img_begin: 11, img_count: 4, buf_begin: 9, buf_count: 1 }, // [11] "vb_resolve"
+    PassBarrierRange { img_begin: 15, img_count: 1, buf_begin: 10, buf_count: 0 }, // [12] "present_sample"
+];
+
+/// S3's image baseline — see [`S1_EXPECTED_IMG`].
+const S3_EXPECTED_IMG: &[ImgBarrier] = &[
+    ImgBarrier {
+        res: ResId(3), // [0] "cascade"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 4 },
+    },
+    ImgBarrier {
+        res: ResId(4), // [1] "atlas"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 16 },
+    },
+    ImgBarrier {
+        res: ResId(0), // [2] "lit"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(1), // [3] "vb_id"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(2), // [4] "vb_depth"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(14), // [5] "hzb_pyramid"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 10, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(2), // [6] "vb_depth"
+        src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(14), // [7] "hzb_pyramid"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 6, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(14), // [8] "hzb_pyramid"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 5, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(14), // [9] "hzb_pyramid"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 6, mip_count: 4, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(1), // [10] "vb_id"
+        src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(2), // [11] "vb_depth"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(1), // [12] "vb_id"
+        src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(0), // [13] "lit"
+        src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(3), // [14] "cascade"
+        src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 4 },
+    },
+    ImgBarrier {
+        res: ResId(4), // [15] "atlas"
+        src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 16 },
+    },
+    ImgBarrier {
+        res: ResId(0), // [16] "lit"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(2), // [17] "vb_depth"
+        src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        dst_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_TRANSFER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(14), // [18] "hzb_pyramid"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_TRANSFER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 5, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(14), // [19] "hzb_pyramid"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_TRANSFER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 5, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(14), // [20] "hzb_pyramid"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_TRANSFER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 6, mip_count: 4, base_layer: 0, layer_count: 1 },
+    },
+];
+/// S3's buffer baseline — see [`S1_EXPECTED_IMG`].
+const S3_EXPECTED_BUF: &[BufBarrier] = &[
+    BufBarrier {
+        res: ResId(15), // [0] "light_table"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+    },
+    BufBarrier {
+        res: ResId(26), // [1] "vb_cull_count"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+    },
+    BufBarrier {
+        res: ResId(24), // [2] "vb_batch_desc"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(23), // [3] "vb_indirect"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+    },
+    BufBarrier {
+        res: ResId(16), // [4] "vb_instance_ring"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(23), // [5] "vb_indirect"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(16), // [6] "vb_instance_ring"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(27), // [7] "vb_visible_instance"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(28), // [8] "vb_indirect_late"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(15), // [9] "light_table"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+];
+/// S3's per-pass attribution baseline — see [`S1_EXPECTED_IMG`].
+const S3_EXPECTED_PASS: &[PassBarrierRange] = &[
+    PassBarrierRange { img_begin: 0, img_count: 0, buf_begin: 0, buf_count: 1 }, // [0] "light_upload"
+    PassBarrierRange { img_begin: 0, img_count: 1, buf_begin: 1, buf_count: 0 }, // [1] "csm_depth"
+    PassBarrierRange { img_begin: 1, img_count: 1, buf_begin: 1, buf_count: 0 }, // [2] "atlas_depth"
+    PassBarrierRange { img_begin: 2, img_count: 1, buf_begin: 1, buf_count: 0 }, // [3] "vb_sky"
+    PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 0 }, // [4] "vb_indirect_upload"
+    PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 0 }, // [5] "vb_indirect_late_upload"
+    PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 4 }, // [6] "vb_batch_cull"
+    PassBarrierRange { img_begin: 3, img_count: 2, buf_begin: 5, buf_count: 3 }, // [7] "vb_raster"
+    PassBarrierRange { img_begin: 5, img_count: 1, buf_begin: 8, buf_count: 0 }, // [8] "hzb_poison"
+    PassBarrierRange { img_begin: 6, img_count: 2, buf_begin: 8, buf_count: 0 }, // [9] "hzb_build_0"
+    PassBarrierRange { img_begin: 8, img_count: 2, buf_begin: 8, buf_count: 0 }, // [10] "hzb_build_1"
+    PassBarrierRange { img_begin: 10, img_count: 2, buf_begin: 8, buf_count: 1 }, // [11] "vb_raster_late"
+    PassBarrierRange { img_begin: 12, img_count: 4, buf_begin: 9, buf_count: 1 }, // [12] "vb_resolve"
+    PassBarrierRange { img_begin: 16, img_count: 1, buf_begin: 10, buf_count: 0 }, // [13] "present_sample"
+    PassBarrierRange { img_begin: 17, img_count: 4, buf_begin: 10, buf_count: 0 }, // [14] "hzb_dump"
+];
+
+/// S4's image baseline — see [`S1_EXPECTED_IMG`].
+const S4_EXPECTED_IMG: &[ImgBarrier] = &[
+    ImgBarrier {
+        res: ResId(3), // [0] "cascade"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 4 },
+    },
+    ImgBarrier {
+        res: ResId(4), // [1] "atlas"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 16 },
+    },
+    ImgBarrier {
+        res: ResId(0), // [2] "lit"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(1), // [3] "vb_id"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(2), // [4] "vb_depth"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(2), // [5] "vb_depth"
+        src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(14), // [6] "hzb_pyramid"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 6, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(14), // [7] "hzb_pyramid"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 5, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(14), // [8] "hzb_pyramid"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 6, mip_count: 4, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(1), // [9] "vb_id"
+        src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(2), // [10] "vb_depth"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(2), // [11] "vb_depth"
+        src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(5), // [12] "viewt"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(1), // [13] "vb_id"
+        src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(8), // [14] "thin_normal"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(8), // [15] "thin_normal"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(5), // [16] "viewt"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(9), // [17] "ssao"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(0), // [18] "lit"
+        src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(3), // [19] "cascade"
+        src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 4 },
+    },
+    ImgBarrier {
+        res: ResId(4), // [20] "atlas"
+        src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 16 },
+    },
+    ImgBarrier {
+        res: ResId(9), // [21] "ssao"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(0), // [22] "lit"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(0), // [23] "lit"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+    },
+];
+/// S4's buffer baseline — see [`S1_EXPECTED_IMG`].
+const S4_EXPECTED_BUF: &[BufBarrier] = &[
+    BufBarrier {
+        res: ResId(15), // [0] "light_table"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+    },
+    BufBarrier {
+        res: ResId(26), // [1] "vb_cull_count"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+    },
+    BufBarrier {
+        res: ResId(24), // [2] "vb_batch_desc"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(23), // [3] "vb_indirect"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+    },
+    BufBarrier {
+        res: ResId(16), // [4] "vb_instance_ring"
+        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(23), // [5] "vb_indirect"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(16), // [6] "vb_instance_ring"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(27), // [7] "vb_visible_instance"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(28), // [8] "vb_indirect_late"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(15), // [9] "light_table"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+];
+/// S4's per-pass attribution baseline — see [`S1_EXPECTED_IMG`].
+const S4_EXPECTED_PASS: &[PassBarrierRange] = &[
+    PassBarrierRange { img_begin: 0, img_count: 0, buf_begin: 0, buf_count: 1 }, // [0] "light_upload"
+    PassBarrierRange { img_begin: 0, img_count: 1, buf_begin: 1, buf_count: 0 }, // [1] "csm_depth"
+    PassBarrierRange { img_begin: 1, img_count: 1, buf_begin: 1, buf_count: 0 }, // [2] "atlas_depth"
+    PassBarrierRange { img_begin: 2, img_count: 1, buf_begin: 1, buf_count: 0 }, // [3] "vb_sky"
+    PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 0 }, // [4] "vb_indirect_upload"
+    PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 0 }, // [5] "vb_indirect_late_upload"
+    PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 4 }, // [6] "vb_batch_cull"
+    PassBarrierRange { img_begin: 3, img_count: 2, buf_begin: 5, buf_count: 3 }, // [7] "vb_raster"
+    PassBarrierRange { img_begin: 5, img_count: 2, buf_begin: 8, buf_count: 0 }, // [8] "hzb_build_0"
+    PassBarrierRange { img_begin: 7, img_count: 2, buf_begin: 8, buf_count: 0 }, // [9] "hzb_build_1"
+    PassBarrierRange { img_begin: 9, img_count: 2, buf_begin: 8, buf_count: 1 }, // [10] "vb_raster_late"
+    PassBarrierRange { img_begin: 11, img_count: 2, buf_begin: 9, buf_count: 0 }, // [11] "vb_viewt"
+    PassBarrierRange { img_begin: 13, img_count: 2, buf_begin: 9, buf_count: 0 }, // [12] "vb_geo"
+    PassBarrierRange { img_begin: 15, img_count: 3, buf_begin: 9, buf_count: 0 }, // [13] "ssao"
+    PassBarrierRange { img_begin: 18, img_count: 4, buf_begin: 9, buf_count: 1 }, // [14] "vb_shade_split"
+    PassBarrierRange { img_begin: 22, img_count: 1, buf_begin: 10, buf_count: 0 }, // [15] "sdf_forward_march"
+    PassBarrierRange { img_begin: 23, img_count: 1, buf_begin: 10, buf_count: 0 }, // [16] "present_sample"
+];
+
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // Divergence reporting
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -2147,13 +3450,15 @@ fn divergence_header(f: &VbFrame, kind: &str, index: usize, actual_len: usize, e
     format!(
         "configuration {}: the compiled {kind} stream diverged from the pinned baseline at index \
          {index} (compiled {actual_len} entries, pinned {expected_len}).\n\
-         This is the VG R3 P2-4 BASELINE, measured on the UNMODIFIED declarator BEFORE the \
-         occlusion split existed. Synchronization validation is NOT live on this machine (the \
-         plan's P2-0 RESOLVED measurement: a genuine missing barrier emitted no message and \
-         changed no pixel), so this pin is the ONLY thing that can see a barrier defect here. If \
-         you believe the new stream is correct, re-run `dump_vb_unsplit_barrier_streams` and \
-         justify EVERY changed line — do not paste over the pin to make this green.\n",
-        f.row.id
+         The UNSPLIT (`U*`) baselines were measured on the UNMODIFIED declarator BEFORE the \
+         occlusion split existed; the SPLIT (`S*`) ones on the declarator P2-5 changed. \
+         Synchronization validation is NOT live on this machine (the plan's P2-0 RESOLVED \
+         measurement: a genuine missing barrier emitted no message and changed no pixel), so this \
+         pin is the ONLY thing that can see a barrier defect here. If you believe the new stream \
+         is correct, re-run the generator for THIS half ({}) and justify EVERY changed line — do \
+         not paste over the pin to make this green.\n",
+        f.row.id,
+        if f.row.split { "dump_vb_split_barrier_streams" } else { "dump_vb_unsplit_barrier_streams" }
     )
 }
 
@@ -2232,18 +3537,19 @@ fn pass_divergence_report(f: &VbFrame, actual: &[PassBarrierRange], expected: &[
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-// The four pins
+// The eight pins
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 /// Assert one row's whole compiled stream against its pinned baseline, element for element and
 /// field for field, across images, buffers AND per-pass attribution.
 ///
-/// Also asserts the one property every UNSPLIT row shares: `vb_indirect_late` — P2-3's late
-/// record array, declared and named by no pass — routes ZERO barriers. That is the structural
-/// form of "nothing about the split leaks into the unarmed path", and it is the assertion P2-5
-/// must flip on its own four rows while leaving these four untouched.
+/// Also asserts the one property that separates the two halves of the matrix: `vb_indirect_late`
+/// routes ZERO barriers on an UNSPLIT row (the structural form of "nothing about the split leaks
+/// into the unarmed path") and EXACTLY ONE on a split row. The field values of that one are
+/// [`s1_pins_the_late_boundary_barriers_field_by_field`]'s subject; here only its existence is
+/// claimed, because this is the assertion whose two halves must not be confusable.
 fn assert_row_is_pinned(
-    row: VbUnsplitRow,
+    row: VbRow,
     expected_img: &[ImgBarrier],
     expected_buf: &[BufBarrier],
     expected_pass: &[PassBarrierRange],
@@ -2253,20 +3559,27 @@ fn assert_row_is_pinned(
     let unfilled = expected_img.contains(&TBD_IMG_BARRIER)
         || expected_buf.contains(&TBD_BUF_BARRIER)
         || expected_pass.contains(&TBD_PASS_RANGE);
+    let generator = if row.split {
+        "dump_vb_split_barrier_streams"
+    } else {
+        "dump_vb_unsplit_barrier_streams"
+    };
     assert!(
         !unfilled,
         "configuration {}: the barrier-stream baseline is the UNFILLED PLACEHOLDER. Run the \
-         generator and paste its output over the twelve `const U?_EXPECTED_…` arrays in this \
-         file:\n    \
+         generator for THIS half of the matrix and paste its output over the twelve \
+         `const {}?_EXPECTED_…` arrays in this file:\n    \
          cargo test -p boyko_rhi_vulkan --test vb_barrier_stream_baseline \
-         dump_vb_unsplit_barrier_streams -- --ignored --nocapture\n\
+         {generator} -- --ignored --nocapture\n\
          (The values are MEASURED off `compile()`, never predicted — see `U1_EXPECTED_IMG`'s \
-         doc. This must be done BEFORE step P2-5 exists: a baseline authored after the change \
-         certifies the new behaviour instead of the old one.)",
-        row.id
+         doc. ⚠️ Paste ONLY the arrays for the half you generated: the four UNSPLIT baselines were \
+         measured on the declarator BEFORE P2-5 changed it, and re-measuring them now would \
+         certify the new behaviour instead of the old one.)",
+        row.id,
+        if row.split { "S" } else { "U" }
     );
 
-    let f = declare_vb_unsplit_frame(row);
+    let f = declare_vb_frame(row);
     let img = f.g.img_barriers();
     let buf = f.g.buf_barriers();
     let passes = f.g.pass_barriers();
@@ -2288,14 +3601,26 @@ fn assert_row_is_pinned(
         "configuration {}: the pyramid ResId is named by a pass on an HZB-OFF frame",
         row.id
     );
-    assert!(
-        buf_on(buf, f.vb_indirect_late).is_empty(),
-        "configuration {}: `vb_indirect_late` routed a barrier at P2-4, where NO pass declares an \
-         access on it. The late record array is declared so the sink slot has a ResId and the \
-         drift assert has something to measure; its first access arrives with P2-5's \
-         `vb_indirect_late_upload`.",
-        row.id
-    );
+    let late_barriers = buf_on(buf, f.vb_indirect_late).len();
+    if row.split {
+        assert_eq!(
+            late_barriers, 1,
+            "configuration {}: `vb_indirect_late` routed {late_barriers} barriers on an ARMED \
+             SPLIT, expected exactly one — `vb_indirect_late_upload`'s TRANSFER write flushed to \
+             `vb_raster_late`'s indirect FETCH. Zero means one of the two halves is undeclared, \
+             which is a MISSING barrier that nothing else on this machine can see.",
+            row.id
+        );
+    } else {
+        assert_eq!(
+            late_barriers, 0,
+            "configuration {}: `vb_indirect_late` routed {late_barriers} barriers on an UNSPLIT \
+             frame, where NO pass declares an access on it. The late record array is declared so \
+             the sink slot has a ResId and the drift assert has something to measure; its accesses \
+             exist only under `path_vb_occlusion_split()`.",
+            row.id
+        );
+    }
 
     if let Some(i) = first_divergence(img, expected_img) {
         panic!("{}", img_divergence_report(&f, img, expected_img, i));
@@ -2334,6 +3659,35 @@ fn u4_ssao_and_sdf_leg_stream_is_pinned() {
     assert_row_is_pinned(U4, U4_EXPECTED_IMG, U4_EXPECTED_BUF, U4_EXPECTED_PASS);
 }
 
+/// **G4 row S1** — split ON, HZB off, dump off, SSAO off, `VB × Mesh`: the three new barriers at
+/// the late scope's boundary, with nothing else in the frame to hide behind.
+#[test]
+fn s1_split_boundary_stream_is_pinned() {
+    assert_row_is_pinned(S1, S1_EXPECTED_IMG, S1_EXPECTED_BUF, S1_EXPECTED_PASS);
+}
+
+/// **G4 row S2** — split ON, HZB armed, dump off, SSAO off, `VB × Mesh`: the depth round trip
+/// across the moved poison+build block, and the pyramid's own three barriers unchanged in content
+/// and MOVED in position (which is what `pass_barriers()` is in this pin for).
+#[test]
+fn s2_split_with_hzb_stream_is_pinned() {
+    assert_row_is_pinned(S2, S2_EXPECTED_IMG, S2_EXPECTED_BUF, S2_EXPECTED_PASS);
+}
+
+/// **G4 row S3** — split ON, HZB armed, dump ON, SSAO off, `VB × Mesh`: gate G5's own path, where
+/// `hzb_dump`'s `vb_depth` source is re-sourced by the block move.
+#[test]
+fn s3_split_with_hzb_dump_stream_is_pinned() {
+    assert_row_is_pinned(S3, S3_EXPECTED_IMG, S3_EXPECTED_BUF, S3_EXPECTED_PASS);
+}
+
+/// **G4 row S4** — split ON, HZB armed, dump off, SSAO ON, `VB × Both`: the `vb_viewt` PRE-TAIL
+/// slot and `sdf_forward_march`'s mesh arm, the other two re-sourced `vb_depth` readers.
+#[test]
+fn s4_split_with_ssao_and_sdf_leg_stream_is_pinned() {
+    assert_row_is_pinned(S4, S4_EXPECTED_IMG, S4_EXPECTED_BUF, S4_EXPECTED_PASS);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // Named hazards — what each row exists to catch, spelled as a property
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -2354,7 +3708,7 @@ fn u4_ssao_and_sdf_leg_stream_is_pinned() {
 /// thing P2-5 adds a second, parallel copy of on `vb_indirect_late`.
 #[test]
 fn u1_pins_the_early_indirect_chain_and_the_raster_first_touches() {
-    let f = declare_vb_unsplit_frame(U1);
+    let f = declare_vb_frame(U1);
     let img = f.g.img_barriers();
     let buf = f.g.buf_barriers();
 
@@ -2526,7 +3880,7 @@ fn u1_pins_the_early_indirect_chain_and_the_raster_first_touches() {
 /// raster.
 #[test]
 fn u2_pins_the_pyramid_chain_and_the_depth_handoff() {
-    let f = declare_vb_unsplit_frame(U2);
+    let f = declare_vb_frame(U2);
     let img = f.g.img_barriers();
 
     assert!(
@@ -2607,7 +3961,7 @@ fn u2_pins_the_pyramid_chain_and_the_depth_handoff() {
 /// be a prediction wearing a gate's clothes. The measured whole-stream baseline carries them.
 #[test]
 fn u3_pins_the_poison_first_touch_and_the_dump_layout_pair() {
-    let f = declare_vb_unsplit_frame(U3);
+    let f = declare_vb_frame(U3);
     let img = f.g.img_barriers();
 
     assert!(
@@ -2665,13 +4019,14 @@ fn u3_pins_the_poison_first_touch_and_the_dump_layout_pair() {
 /// `SHADER_READ_ONLY_OPTIMAL` with COMPUTE visibility, so a same-layout same-stage read needs
 /// nothing.
 ///
-/// That absence is exactly what P2-5 must move. With the poison+build block relocated between the
-/// scopes, the last toucher of `vb_depth` becomes the LATE raster with a pending write, and every
-/// one of these readers changes character to a real RAW flush plus a layout transition. A gate
-/// that only asserted the barriers that exist today would go green on both worlds.
+/// That absence is exactly what the D6 block move changes, and
+/// [`s4_pins_the_re_sourced_later_depth_readers`] is its other half: with the block relocated
+/// between the scopes, the last toucher of `vb_depth` becomes the LATE raster with a pending
+/// write, and these readers change character to a real RAW flush plus a layout transition. A gate
+/// that only asserted the barriers that exist on one of the two frames would go green on both.
 #[test]
 fn u4_pins_the_absent_barriers_on_the_later_depth_readers() {
-    let f = declare_vb_unsplit_frame(U4);
+    let f = declare_vb_frame(U4);
     let img = f.g.img_barriers();
 
     let depth = img_on(img, f.vb_depth);
@@ -2729,6 +4084,223 @@ fn u4_pins_the_absent_barriers_on_the_later_depth_readers() {
     );
 }
 
+/// **S1's claim, and it is the load-bearing one of the whole piece.** The THREE barriers at the
+/// late scope's boundary, asserted FIELD BY FIELD.
+///
+/// ⚠️ **The count of three is not the claim, and asserting it would certify the defect.** The
+/// read-declared/write-undeclared variant of `vb_indirect_late` yields three as well, differing
+/// only in `src_stage` / `src_access` — round 1 specified this gate as a count, which would have
+/// gone RED on the correct implementation and GREEN on the defective one.
+/// [`a_dropped_late_upload_write_keeps_the_count_and_moves_only_fields`] demonstrates exactly that
+/// on this replica.
+///
+/// The two attachment WAWs are asserted **not to come from `UNDEFINED`**, because a first touch
+/// there would license the driver to DISCARD what the early scope wrote — which is the equivalence
+/// (`LOAD_OP_LOAD` yields what the early scope stored) the whole piece rests on.
+#[test]
+fn s1_pins_the_late_boundary_barriers_field_by_field() {
+    let f = declare_vb_frame(S1);
+    let img = f.g.img_barriers();
+    let buf = f.g.buf_barriers();
+
+    assert!(
+        has_buf(
+            buf,
+            f.vb_indirect_late,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+            VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+        ),
+        "the late record array's TRANSFER_WRITE → INDIRECT_COMMAND_READ edge is missing or \
+         mis-sourced. `(TOP_OF_PIPE, 0)` here is the fingerprint of an UNDECLARED writer: the \
+         `vkCmdUpdateBuffer` fill would be neither available nor visible to the indirect fetch, \
+         and on frame 1 the scope that must draw NOTHING would fetch freshly allocated device \
+         memory — arbitrary `instanceCount`, arbitrary `firstInstance`, `robustBufferAccess` OFF. \
+         Nothing else in this repository can see that: it changes no pixel and emits no \
+         validation message (measured — the plan's P2-0 table).\n\
+         Got: {:#?}",
+        buf_on(buf, f.vb_indirect_late)
+    );
+
+    let id = img_on(img, f.vb_id);
+    let waw = id
+        .iter()
+        .find(|b| {
+            b.src_stage == VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                && b.dst_stage == VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no COLOR_ATTACHMENT_OUTPUT → COLOR_ATTACHMENT_OUTPUT WAW on `vb_id`: the late \
+                 scope writes the same attachment the early scope wrote, and the graph must order \
+                 the two.\nGot: {id:#?}"
+            )
+        });
+    assert_eq!(waw.src_access, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+    assert_eq!(waw.dst_access, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+    assert_eq!(
+        (waw.old_layout, waw.new_layout),
+        (VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL),
+        "the late scope's `vb_id` WAW must be layout-PRESERVING. `UNDEFINED → …` licenses \
+         discarding the early scope's contents, and `LOAD_OP_LOAD` would then load garbage"
+    );
+
+    let depth = img_on(img, f.vb_depth);
+    assert_eq!(
+        depth.len(),
+        2,
+        "with HZB off, `vb_depth` carries exactly TWO barriers on a split frame: the early \
+         raster's first touch and the late raster's WAW.\nGot: {depth:#?}"
+    );
+    assert_eq!(depth[0].old_layout, VK_IMAGE_LAYOUT_UNDEFINED, "the early scope's first touch");
+    assert_eq!(
+        (depth[1].src_stage, depth[1].dst_stage),
+        (FRAG, FRAG),
+        "the late scope's depth WAW is FRAG → FRAG"
+    );
+    assert_eq!(depth[1].src_access, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+    assert_eq!(depth[1].dst_access, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+    assert_eq!(
+        (depth[1].old_layout, depth[1].new_layout),
+        (VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL),
+        "layout-PRESERVING, for the same reason as `vb_id`'s: a first touch here would discard the \
+         depth the early scope tested against"
+    );
+}
+
+/// **S2's claim.** The depth ROUND TRIP across the moved poison+build block, and that NEITHER leg
+/// of it is a first touch.
+///
+/// `DEPTH_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL` (into `hzb_build_0`, which now sits
+/// between the scopes) and `SHADER_READ_ONLY_OPTIMAL → DEPTH_ATTACHMENT_OPTIMAL` (back into
+/// `vb_raster_late`). Both content-preserving: an `UNDEFINED` on the return leg is round-1 blocker
+/// 4's failure — it would discard the early scope's depth after the pyramid was built from it.
+#[test]
+fn s2_pins_the_depth_round_trip_across_the_moved_block() {
+    let f = declare_vb_frame(S2);
+    let img = f.g.img_barriers();
+
+    let depth = img_on(img, f.vb_depth);
+    assert_eq!(
+        depth.len(),
+        3,
+        "on a split HZB-armed frame `vb_depth` carries THREE barriers: the early raster's first \
+         touch, the hand-off into `hzb_build_0`, and the RETURN into `vb_raster_late`.\n\
+         Got: {depth:#?}"
+    );
+    assert_eq!(depth[0].old_layout, VK_IMAGE_LAYOUT_UNDEFINED);
+    assert_eq!(depth[0].new_layout, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+
+    assert_eq!(
+        (depth[1].old_layout, depth[1].new_layout),
+        (VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+        "the hand-off into the pyramid build"
+    );
+    assert_eq!(depth[1].src_access, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+    assert_eq!(depth[1].dst_access, VK_ACCESS_SHADER_READ_BIT);
+
+    assert_eq!(
+        (depth[2].old_layout, depth[2].new_layout),
+        (VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL),
+        "the RETURN leg into `vb_raster_late`. ⚠️ `UNDEFINED` as the old layout here would discard \
+         the very depth the pyramid was just built from — round-1 blocker 4's failure, and one \
+         that no golden could see, because the late scope writes no fragment"
+    );
+    assert_eq!(depth[2].dst_stage, FRAG);
+    assert_eq!(depth[2].dst_access, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+
+    // The pyramid's own three barriers are unchanged in CONTENT by the move; their POSITION is
+    // what changed, and `pass_barriers()` in the whole-stream pin is what measures that.
+    assert!(
+        has_img(
+            img,
+            f.hzb_pyramid,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_GENERAL,
+            hzb_mips(0, HZB_LEVELS_PER_PASS),
+        ),
+        "the pyramid's first touch must be unchanged by the slot move: the block moved WHOLE, so \
+         `hzb_build_0` is still the first writer on an undumped frame"
+    );
+}
+
+/// **S3's claim.** `hzb_dump`'s `vb_depth` source has CHANGED CHARACTER, and this is the asserted
+/// -correct value rather than a regression.
+///
+/// On an unsplit armed frame the dump finds the depth already in `SHADER_READ_ONLY_OPTIMAL` where
+/// `hzb_build_0` left it (`u3_pins_the_poison_first_touch_and_the_dump_layout_pair` pins that).
+/// With the block moved between the scopes, the last toucher is `vb_raster_late` with a PENDING
+/// WRITE, so the dump's transition becomes a real RAW flush out of the depth attachment. That is
+/// strictly stronger than the execution-only edge it replaces — and it is why the declarator's own
+/// comment ("on every armed frame that is `SHADER_READ_ONLY_OPTIMAL`, since `hzb_build_0` itself
+/// reads it there") had to be corrected in P2-5 rather than left standing.
+#[test]
+fn s3_pins_the_re_sourced_hzb_dump_depth_read() {
+    let f = declare_vb_frame(S3);
+    let img = f.g.img_barriers();
+
+    let depth = img_on(img, f.vb_depth);
+    let dump = depth
+        .iter()
+        .find(|b| b.new_layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+        .expect("invariant: the dump's depth copy derives a transition into TRANSFER_SRC_OPTIMAL");
+    assert_eq!(
+        (dump.src_stage, dump.src_access),
+        (FRAG, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT),
+        "on an ARMED-SPLIT frame the dump must flush the LATE raster's depth write. A \
+         `(COMPUTE, 0)` source here would mean the graph still believes `hzb_build_0` was the last \
+         toucher — i.e. the block did not move, or the late scope's depth access is undeclared"
+    );
+    assert_eq!(
+        dump.old_layout, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        "…and it finds the image where the late raster left it, not where the build did"
+    );
+    assert_eq!(dump.dst_stage, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    assert_eq!(dump.dst_access, VK_ACCESS_TRANSFER_READ_BIT);
+    assert_eq!(dump.subresource, SubRange::DEPTH);
+}
+
+/// **S4's claim.** The same character change on the other two re-sourced readers — the `vb_viewt`
+/// PRE-TAIL slot and `sdf_forward_march`'s mesh arm.
+///
+/// U4 pins that these two derive NO barrier on an unsplit frame. Here each derives one, out of the
+/// late raster's pending depth write. The PAIR of tests is the claim: neither alone distinguishes
+/// "the readers were re-sourced" from "the matrix row does not exercise them".
+#[test]
+fn s4_pins_the_re_sourced_later_depth_readers() {
+    let f = declare_vb_frame(S4);
+    let img = f.g.img_barriers();
+
+    let depth = img_on(img, f.vb_depth);
+    assert_eq!(
+        depth.len(),
+        4,
+        "on a split `VB × Both` SSAO frame `vb_depth` carries FOUR barriers: the early raster's \
+         first touch, the hand-off into `hzb_build_0`, the RETURN into `vb_raster_late`, and ONE \
+         re-sourced read shared by the `vb_viewt` PRE-TAIL slot and `sdf_forward_march` (the \
+         second reader needs none once the first has transitioned the image).\nGot: {depth:#?}"
+    );
+    assert_eq!(
+        (depth[3].src_stage, depth[3].src_access),
+        (FRAG, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT),
+        "the first post-late-scope reader must flush the LATE raster's write — on an UNSPLIT frame \
+         it derived NOTHING at all (see `u4_pins_the_absent_barriers_on_the_later_depth_readers`), \
+         which is exactly the modelling change D6 makes"
+    );
+    assert_eq!(
+        (depth[3].old_layout, depth[3].new_layout),
+        (VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+        "…with a preserving transition back into the layout a COMPUTE read wants"
+    );
+    assert_eq!(depth[3].dst_stage, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    assert_eq!(depth[3].dst_access, VK_ACCESS_SHADER_READ_BIT);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // The red control
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -2747,10 +4319,10 @@ fn u4_pins_the_absent_barriers_on_the_later_depth_readers() {
 /// no declared WRITER, which is the exact shape `vb_indirect_late` would have if P2-5 declared
 /// `vb_raster_late`'s indirect fetch without `vb_indirect_late_upload`'s transfer write.
 ///
-/// # Which edit reds the four pins
+/// # Which edit reds the eight pins
 ///
 /// Deleting that one `buffer_access` — in this replica, or in `declare_vb_graph`'s `vb_batch_cull`
-/// arm, which is what the replica mirrors. The four whole-stream pins go RED on the FIELDS of one
+/// arm, which is what the replica mirrors. All eight whole-stream pins go RED on the FIELDS of one
 /// buffer barrier; the image stream, both counts and the per-pass attribution are untouched.
 ///
 /// # Why the pin's own assertion shape is what catches it
@@ -2764,8 +4336,8 @@ fn u4_pins_the_absent_barriers_on_the_later_depth_readers() {
 /// identity, so even a stale read paints the right picture.
 #[test]
 fn a_dropped_writer_keeps_every_count_and_moves_only_fields() {
-    let faithful = declare_vb_unsplit_frame(U1);
-    let corrupt = declare_vb_unsplit_frame(VbUnsplitRow {
+    let faithful = declare_vb_frame(U1);
+    let corrupt = declare_vb_frame(VbRow {
         id: "U1 + RED CONTROL (cull's survivor-list write undeclared)",
         red_control_drop_cull_survivor_write: true,
         ..U1
@@ -2828,6 +4400,78 @@ fn a_dropped_writer_keeps_every_count_and_moves_only_fields() {
     );
 }
 
+/// **G4's R1 red control** (VG R3 piece 2 step P2-6) — the SAME defect class as the control above,
+/// on the resource piece 2 actually adds, and the one the plan names.
+///
+/// Drop `vb_indirect_late_upload`'s declared `buffer_access(TRANSFER, TRANSFER_WRITE)` while
+/// leaving `vb_raster_late`'s indirect fetch in place. The stream keeps **exactly three barriers at
+/// the late boundary** and keeps every per-pass attribution; only `src_stage`/`src_access` on ONE
+/// buffer barrier move, to `(TOP_OF_PIPE, 0)`.
+///
+/// That is the whole reason G4 asserts fields: as round 1 specified it — "exactly two/three new
+/// barriers" — this gate would have gone **red on the correct implementation and green on the
+/// defective one**. And nothing else on this machine can see the defect: it changes no pixel
+/// (`instanceCount = 0` draws nothing either way), emits no validation message (measured: a
+/// genuine missing barrier produced the unchanged 19-message baseline and no `SYNC-HAZARD`), and
+/// the framegraph's own unwritten-read backstop is image-only and debug-only by construction.
+#[test]
+fn a_dropped_late_upload_write_keeps_the_count_and_moves_only_fields() {
+    let faithful = declare_vb_frame(S1);
+    let corrupt = declare_vb_frame(VbRow {
+        id: "S1 + RED CONTROL R1 (late upload's transfer write undeclared)",
+        red_control_drop_late_upload_write: true,
+        ..S1
+    });
+
+    let f_buf = faithful.g.buf_barriers();
+    let c_buf = corrupt.g.buf_barriers();
+
+    // (1) A COUNT gate is GREEN on the defect.
+    assert_eq!(
+        faithful.g.img_barriers(),
+        corrupt.g.img_barriers(),
+        "the control must isolate ONE buffer declaration; the image stream moving too would mean \
+         it is testing something else"
+    );
+    assert_eq!(
+        f_buf.len(),
+        c_buf.len(),
+        "the point of this control is that the defect PRESERVES the barrier count: a first-touch \
+         read emits one barrier exactly as a RAW does"
+    );
+    assert_eq!(
+        faithful.g.pass_barriers(),
+        corrupt.g.pass_barriers(),
+        "per-pass attribution is identical too — the defect moves no barrier to another pass, so a \
+         gate on attribution is green on it as well"
+    );
+
+    // (2) A FIELD gate is RED on the defect.
+    let faithful_late = buf_on(f_buf, faithful.vb_indirect_late);
+    let corrupt_late = buf_on(c_buf, corrupt.vb_indirect_late);
+    assert_eq!(faithful_late.len(), 1, "the late record array carries exactly one barrier when correct");
+    assert_eq!(corrupt_late.len(), 1, "…and exactly one when its writer is undeclared — the SAME count");
+    assert_eq!(
+        (faithful_late[0].src_stage, faithful_late[0].src_access),
+        (VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT),
+        "correct: the indirect FETCH is a RAW that makes the `vkCmdUpdateBuffer` fill AVAILABLE"
+    );
+    assert_eq!(
+        (corrupt_late[0].src_stage, corrupt_late[0].src_access),
+        (VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0),
+        "defective: with no declared writer the fetch takes the first-touch arm — an execution-only \
+         edge that orders the stages while leaving the update neither available nor visible. On \
+         frame 1, against freshly allocated DEVICE_LOCAL memory, the scope this whole piece claims \
+         draws nothing DRAWS"
+    );
+    assert_eq!(
+        (corrupt_late[0].dst_stage, corrupt_late[0].dst_access),
+        (faithful_late[0].dst_stage, faithful_late[0].dst_access),
+        "the CONSUMER side is unchanged by the defect — which is why only the source fields can \
+         discriminate it"
+    );
+}
+
 /// `compile()` is idempotent and a re-declared frame reproduces its own stream — so a divergence
 /// reported by the pins above is a change in the DECLARATION, never a stale arena.
 ///
@@ -2836,41 +4480,43 @@ fn a_dropped_writer_keeps_every_count_and_moves_only_fields() {
 /// the pyramid is the mipped resource that would index past the end if one survived).
 #[test]
 fn every_row_is_reproducible_and_compile_is_idempotent() {
-    for row in [U1, U2, U3, U4] {
-        let mut f = declare_vb_unsplit_frame(row);
+    for row in [U1, U2, U3, U4, S1, S2, S3, S4] {
+        let mut f = declare_vb_frame(row);
         let first: Vec<ImgBarrier> = f.g.img_barriers().to_vec();
         let first_buf: Vec<BufBarrier> = f.g.buf_barriers().to_vec();
         f.g.compile();
         assert_eq!(f.g.img_barriers(), first.as_slice(), "configuration {}: compile not idempotent", row.id);
         assert_eq!(f.g.buf_barriers(), first_buf.as_slice(), "configuration {}: compile not idempotent", row.id);
 
-        let again = declare_vb_unsplit_frame(row);
+        let again = declare_vb_frame(row);
         assert_eq!(again.g.img_barriers(), first.as_slice(), "configuration {}: rebuild diverged", row.id);
         assert_eq!(again.g.buf_barriers(), first_buf.as_slice(), "configuration {}: rebuild diverged", row.id);
     }
 }
 
-/// The four rows must be four DIFFERENT frames. A matrix whose rows compile to the same stream
-/// pins one configuration four times and reports it as coverage — the vacuity mode this campaign
+/// The eight rows must be eight DIFFERENT frames. A matrix whose rows compile to the same stream
+/// pins one configuration eight times and reports it as coverage — the vacuity mode this campaign
 /// has shipped five times.
 ///
 /// Stated as a property of the compiled streams rather than of the config structs, because it is
-/// the streams the pins compare.
+/// the streams the pins compare. The `U*`/`S*` pairs are the load-bearing comparisons here: if
+/// `S1` compiled to `U1`'s stream, the split would be declaring nothing and every split-row pin
+/// below would be certifying the unsplit frame.
 #[test]
-fn the_four_rows_are_four_distinct_configurations() {
-    /// One row's compiled streams, owned so all four can be compared pairwise.
+fn the_eight_rows_are_eight_distinct_configurations() {
+    /// One row's compiled streams, owned so all eight can be compared pairwise.
     struct RowStream {
-        row: VbUnsplitRow,
+        row: VbRow,
         img: Vec<ImgBarrier>,
         buf: Vec<BufBarrier>,
         passes: Vec<PassBarrierRange>,
         pass_count: usize,
     }
 
-    let frames: Vec<RowStream> = [U1, U2, U3, U4]
+    let frames: Vec<RowStream> = [U1, U2, U3, U4, S1, S2, S3, S4]
         .into_iter()
         .map(|row| {
-            let f = declare_vb_unsplit_frame(row);
+            let f = declare_vb_frame(row);
             RowStream {
                 row,
                 img: f.g.img_barriers().to_vec(),
@@ -2908,36 +4554,102 @@ fn the_four_rows_are_four_distinct_configurations() {
         "U4 drops `vb_resolve` for the split trio (vb_geo, ssao, vb_shade_split) and adds \
          `vb_viewt` (pre-tail) and `sdf_forward_march` on top of U2"
     );
+    // The split adds EXACTLY TWO passes — `vb_indirect_late_upload` and `vb_raster_late` — to each
+    // row it arms, and MOVES the poison+build block rather than duplicating it. A `+3` or `+4`
+    // here would mean the block was declared at both slots, which is how a "moved" block quietly
+    // becomes a second one.
+    for (u, s) in [(0usize, 4usize), (1, 5), (2, 6), (3, 7)] {
+        assert_eq!(
+            frames[s].pass_count,
+            frames[u].pass_count + 2,
+            "{} declares {} passes against {}'s {} — the split adds exactly two (the late upload \
+             and the late raster) and MOVES the poison+build block, never duplicates it",
+            frames[s].row.id,
+            frames[s].pass_count,
+            frames[u].row.id,
+            frames[u].pass_count
+        );
+    }
 }
 
 /// `PassId` is strictly monotonic in declaration order and `compile()` does not reorder, so the
 /// declare-order invariants `declare_vb_graph` asserts in production hold in this replica too —
-/// and the one D6 will move is asserted here BEFORE it moves.
+/// on BOTH slots of the poison+build block.
+///
+/// The production asserts are `debug_assert!`s inside a `pub(crate)` fn no test can call, and they
+/// run in the dev-profile builds every golden and gate run uses. These are the same properties,
+/// asserted where a plain `cargo test` reaches them.
 #[test]
 fn declare_order_invariants_hold_in_the_replica() {
-    let f = declare_vb_unsplit_frame(U3);
-    let index_of = |name: &str| -> Option<usize> { f.pass_names.iter().position(|n| *n == name) };
+    for row in [U3, S3] {
+        let f = declare_vb_frame(row);
+        let index_of =
+            |name: &str| -> Option<usize> { f.pass_names.iter().position(|n| *n == name) };
 
-    let poison = index_of("hzb_poison").expect("invariant: U3 arms the poison");
-    let build0 = index_of("hzb_build_0").expect("invariant: U3 arms the build chain");
-    let dump = index_of("hzb_dump").expect("invariant: U3 arms the dump");
-    let raster = index_of("vb_raster").expect("invariant: every row declares the early raster");
+        let poison = index_of("hzb_poison").expect("invariant: the row arms the poison");
+        let build0 = index_of("hzb_build_0").expect("invariant: the row arms the build chain");
+        let dump = index_of("hzb_dump").expect("invariant: the row arms the dump");
+        let raster = index_of("vb_raster").expect("invariant: every row declares the early raster");
 
-    assert!(poison < build0, "the poison must be declared BEFORE every build pass, or it erases what the build wrote");
-    assert!(build0 < dump, "the dump must observe a FINISHED pyramid");
-    assert!(
-        raster < build0,
-        "the pyramid reduces the depth THIS FRAME'S raster wrote; a build declared first would \
-         read an unwritten transient"
-    );
-    // The property P2-5 changes: today the whole poison+build block sits AFTER the lit producer.
-    // D6 moves it whole to immediately after the early raster, and the pin above measures the
-    // per-pass attribution that move rewrites.
-    let lit_producer = index_of("vb_resolve").expect("invariant: U3 is a fused frame");
-    assert!(
-        lit_producer < poison,
-        "at P2-4 the poison+build block is declared AFTER the lit producer. When this assertion \
-         reverses, D6's block move has landed and the four baselines above must be re-measured \
-         for the SPLIT rows only — the unsplit rows keep this order by the same single predicate"
-    );
+        assert!(
+            poison < build0,
+            "{}: the poison must be declared BEFORE every build pass, or it erases what the build \
+             wrote. This is the assert whose violation D6 makes possible — moving the builds \
+             without their clear — and the one production carries as a `debug_assert!`",
+            row.id
+        );
+        assert!(build0 < dump, "{}: the dump must observe a FINISHED pyramid", row.id);
+        assert!(
+            raster < build0,
+            "{}: the pyramid reduces the depth THIS FRAME'S raster wrote; a build declared first \
+             would read an unwritten transient",
+            row.id
+        );
+
+        match (row.split, index_of("vb_raster_late"), index_of("vb_indirect_late_upload")) {
+            (false, None, None) => {
+                // The UNSPLIT slot: the block sits AFTER the `lit` producer, exactly where it has
+                // been since piece 1. This is the order the four `U*` baselines were measured at.
+                let lit_producer =
+                    index_of("vb_resolve").expect("invariant: U3 is a fused frame");
+                assert!(
+                    lit_producer < poison,
+                    "U3: on an unsplit frame the poison+build block is declared AFTER the lit \
+                     producer. If this reverses, the block moved on a frame that did not arm the \
+                     split — and the four measured `U*` baselines are then pinning a shape the \
+                     shipping path no longer has"
+                );
+            }
+            (true, Some(late), Some(late_upload)) => {
+                // The ARMED-SPLIT slot: between the two scopes, so the pyramid reduces the EARLY
+                // scope's depth and the late scope can (from piece 3) consult it.
+                assert!(
+                    raster < poison && build0 < late,
+                    "S3: the armed order is `vb_raster → hzb_poison → hzb_build_* → \
+                     vb_raster_late`. Got raster={raster}, poison={poison}, build0={build0}, \
+                     late={late}"
+                );
+                assert!(
+                    late_upload < late,
+                    "S3: the late indirect upload must be declared BEFORE the late raster fetches \
+                     from it — otherwise the derived dependency runs the wrong way. Got \
+                     upload={late_upload}, late={late}"
+                );
+                let lit_producer =
+                    index_of("vb_resolve").expect("invariant: S3 is a fused frame");
+                assert!(
+                    late < lit_producer,
+                    "S3: the late scope must write `vb_id` BEFORE the `lit` producer reads it, or \
+                     (from piece 3) the late geometry is never shaded. Got late={late}, \
+                     lit={lit_producer}"
+                );
+            }
+            (split, late, upload) => panic!(
+                "{}: split={split} but vb_raster_late={late:?} and \
+                 vb_indirect_late_upload={upload:?} — the two late passes are declared on EXACTLY \
+                 the split predicate, together or not at all",
+                row.id
+            ),
+        }
+    }
 }

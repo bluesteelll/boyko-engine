@@ -88,8 +88,15 @@
 //! [`gather_mesh_draws`](crate::mesh_draw::gather_mesh_draws) until that flush: the split arms
 //! ONE FRAME LATE. That is the safe direction (one frame of extra draws, never missing
 //! geometry), but it makes "which frame does a gate read?" ambiguous — so every fixture in this
-//! campaign marks at SPAWN, inside the bundle
-//! (`spawn((MeshBundle { .. }, OcclusionCulling))`), never through a later `insert`.
+//! campaign marks in the SAME COMMAND FLUSH as the spawn, never from a later frame.
+//!
+//! ⚠️ **Not by a tuple spawn.** An earlier draft of this doc wrote
+//! `spawn((MeshBundle { .. }, OcclusionCulling))`, and that does not compile: this kernel has **no
+//! tuple `Bundle` impl** — `Bundle` is sealed and per-type (`bundle/self_bundle.rs`), and
+//! `system/params/commands.rs` records the tuple impl's deletion at Phase 8.5. The route is an
+//! `insert(OcclusionCulling)` queued into the same flush as the spawn, which is what
+//! `MaterialHandle` already does in every one of these fixtures. One flush applies both before any
+//! gather runs, so the one-frame-late hazard — an insert issued in a LATER frame — does not arise.
 
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_macros::Component;
@@ -102,8 +109,9 @@ use boyko_macros::Component;
 /// [`CastsPunctualShadow`](crate::shadow_marker::CastsPunctualShadow) are.
 ///
 /// Opt-IN: the failure mode of a forgotten marker is a wasted draw, never vanished geometry.
-/// Apply it at SPAWN (inside the bundle) — a later `insert` migrates the archetype at the next
-/// command flush and therefore arms the split one frame late (see the module doc).
+/// Apply it in the SAME COMMAND FLUSH as the spawn — an `insert` issued in a LATER frame migrates
+/// the archetype at that frame's flush and therefore arms the split one frame late. There is no
+/// tuple `Bundle` in this kernel, so "inside the bundle" is not the route; see the module doc.
 ///
 /// The derived `Default` is load-bearing rather than cosmetic: `#[require(OcclusionCulling)]`,
 /// the route by which a game marks an object KIND once instead of once per spawn, auto-inserts

@@ -6,9 +6,13 @@
 //!   by `scripts/golden.ps1` over the VB pins, because a pin is a GPU render against a blessed
 //!   hash and no cargo test drives that. What IS machine-checked here is (a)'s DOMAIN —
 //!   [`the_a_domain_is_exactly_the_vb_pins_that_were_measured`] pins the enumeration, so a
-//!   fourteenth VB pin reds until it has been measured too. The distinction is the point: this
+//!   sixteenth VB pin reds until it has been measured too. The distinction is the point: this
 //!   file cannot claim to run (a), and a gate whose domain drifts silently is the vacuous-selection
 //!   defect.
+//! * **the cross-pin agreement of pins DECLARED byte-identical** —
+//!   [`the_pins_declared_byte_identical_actually_agree`]. Not part of R0c; it lives here because
+//!   this is the file that already parses `goldens/PINS.toml`, and because nothing else in the
+//!   tree checks that two pins whose whole claim is an EQUALITY still hold it.
 //! * **(b)** the census's modal bucket IS the procedural fixture's analytic bucket; its red is a
 //!   4x subdivision, which must move the mode down by EXACTLY two.
 //! * **(c)** the census's covered-pixel total agrees with `sv0_oracle::rasterize`'s `covered_count`
@@ -41,8 +45,8 @@ mod vg_thresholds;
 use sv0_oracle::OracleVertex;
 use vg_fixture::Fixture;
 use vg_thresholds::{
-    assert_thresholds_frozen, field_bool, field_f64, field_u64, read_thresholds, repo_path,
-    resolution_ladder, route_for, run_worker, strip_comment,
+    assert_thresholds_frozen, field_bool, field_f64, field_str, field_u64, read_thresholds,
+    repo_path, resolution_ladder, route_for, run_worker, strip_comment,
 };
 
 /// The env knob the worker reads to know which ladder rung it is.
@@ -52,7 +56,7 @@ const ENV_FIXTURE: &str = "BOYKO_VG_FIXTURE";
 
 /// The VB golden pins (a) is measured over. Enumerated so the DOMAIN is machine-checked even
 /// though the hashes are not checked here.
-const VB_PINS: [&str; 14] = [
+const VB_PINS: [&str; 15] = [
     "vb_mesh",
     // VG R3 piece 1 step P1-2: `vb_mesh`'s scene, binary and test with `BOYKO_VG_HZB=1` arming the
     // depth pyramid. It belongs in this DOMAIN like any other VB pin, and it was measured the same
@@ -63,6 +67,15 @@ const VB_PINS: [&str; 14] = [
     // --lib`, which does not build integration tests at all, so a `tests/` failure was structurally
     // invisible to them. The release-leg audit that found it ran `--all-targets`.
     "vb_mesh_hzb",
+    // VG R3 piece 2 step P2-6 (gate G1): `vb_mesh`'s scene, binary and test with
+    // `BOYKO_VG_OCC=1` marking all five spheres, which arms the LATE RASTER SCOPE. Same DOMAIN,
+    // same measurement route, and bumped in the SAME commit as the pin — the omission this test
+    // caught once already in this campaign.
+    //
+    // It needs no density row: `vg_density_census_gate` drives its OWN fixtures (`base`,
+    // `subdivided`) through `run_worker` and never reads a pin, so the pin list is (a)'s domain
+    // and nothing else. (The plan left that as open question 3; this is the answer.)
+    "vb_occ_split",
     "vb_both",
     "vb_both_sdf",
     "vb_both_sdf_tex",
@@ -205,6 +218,80 @@ fn the_a_domain_is_exactly_the_vb_pins_that_were_measured() {
          (all byte-identical with the census unarmed); a pin added or removed since must be \
          re-measured with scripts/golden.ps1 and this list updated in the same act."
     );
+}
+
+// ===============================================================================================
+// The cross-pin agreement guard (VG R3 piece 2 step P2-6, gate G1's other half)
+// ===============================================================================================
+
+/// Pins whose ENTIRE claim is that they hash the same as another pin: `(derived, base, why)`.
+///
+/// Each row is a pin that renders the SAME scene through the SAME binary and test as its base,
+/// with ONE inert thing added. The hash equality IS the inertness claim, so a divergence is the
+/// finding — not a hash to re-bless.
+///
+/// ⚠️ Deliberately NOT in this table: `vb_both` / `vb_both_sdf`, which also carry `[vb_mesh]`'s
+/// literals today. Their equality is a claim about a SCENE (an SDF edit list that is boot-seeded
+/// empty, so the marcher writes nothing), not about an inert addition to one code path — a red
+/// there would report a different defect, and this table exists so that every row's red has one
+/// meaning.
+const DECLARED_IDENTICAL_PINS: [(&str, &str, &str); 2] = [
+    (
+        "vb_mesh_hzb",
+        "vb_mesh",
+        "the HZB pyramid is allocated and read by nothing (VG R3 piece 1 step P1-2)",
+    ),
+    (
+        "vb_occ_split",
+        "vb_mesh",
+        "the late raster scope is recorded and draws nothing: LOAD_OP_LOAD yields what the early \
+         scope stored, no fragment is produced, STORE_OP_STORE writes it back (VG R3 piece 2, D4)",
+    ),
+];
+
+/// **The pins that DECLARE themselves byte-identical to another pin still agree.**
+///
+/// Nothing else in the tree checks this, and the harness actively works against it:
+/// `scripts/golden.ps1 -Bless` overwrites `sha256_*` with whatever the run produced, and on a
+/// mismatch the check path prints *"re-run with -Bless"* — the destroying advice, printed on the
+/// very divergence the pin exists to report. A lone re-bless of a derived pin silently converts
+/// its gate from "the addition is inert" into "whatever it does now", and no test would notice.
+/// This is that test.
+///
+/// # What it CANNOT claim
+///
+/// * **Nothing about the rendered pixels.** It compares two literals in a text file. If BOTH pins
+///   are re-blessed together to a new, wrong value, this stays green — the equality is preserved
+///   and the claim it encodes is not. What that costs is bounded and known: the base pin
+///   (`vb_mesh`) is itself owner-signed-off, and re-blessing a base is a deliberate act.
+/// * **Nothing about whether the derived pin was ever RENDERED.** A pre-filled pair agrees before
+///   either leg has run on a GPU. `scripts/golden.ps1 -Pin <name>` is what turns the literals into
+///   a measurement; this test only keeps them from drifting apart afterwards.
+#[test]
+fn the_pins_declared_byte_identical_actually_agree() {
+    let pins = std::fs::read_to_string(repo_path("../../goldens/PINS.toml"))
+        .expect("invariant: goldens/PINS.toml is in the repository");
+
+    for (derived, base, why) in DECLARED_IDENTICAL_PINS {
+        for leg in ["sha256_software", "sha256_hwrt"] {
+            let got = field_str(&pins, &format!("{derived}.{leg}"));
+            let want = field_str(&pins, &format!("{base}.{leg}"));
+            assert_eq!(
+                got, want,
+                "goldens/PINS.toml: [{derived}] and [{base}] have DIVERGED on `{leg}`\n  \
+                 [{derived}] = {got}\n  [{base}]    = {want}\n\
+                 [{derived}] exists to assert an equality: {why}.\n\
+                 ⚠️ Do NOT re-bless one leg to make this pass — that is exactly the act this test \
+                 exists to stop, and `golden.ps1` prints the advice to do it. Either the addition \
+                 stopped being inert (the finding), or both pins were re-measured together and \
+                 BOTH literals must move in the SAME edit."
+            );
+        }
+        assert_ne!(
+            derived, base,
+            "a pin compared against itself is green by construction and covers nothing"
+        );
+    }
 }
 
 /// The thresholds file gate (d) reads is the file R0a froze — re-asserted here as well as in the

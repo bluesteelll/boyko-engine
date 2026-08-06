@@ -50,6 +50,11 @@ mod hzb_dump;
 #[cfg(windows)]
 mod hzb_plan;
 mod runner;
+// VG R3 piece 2 step P2-6: the `BOYKO_VB_PROBE` recording probe (gate G2's host half).
+// `#[cfg(windows)]` for the same reason `hzb_dump` above is — its only caller is the windowed
+// frame loop.
+#[cfg(windows)]
+mod vb_probe_dump;
 #[cfg(windows)]
 mod vg_census_dump;
 mod window_info;

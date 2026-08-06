@@ -12,6 +12,7 @@ use crate::ffi::*;
 use crate::memory::BoundBuffer;
 
 use super::graph_bridge::{ForwardPassPlan, GbufferPassPlan, VbPassPlan};
+use super::passes::vb::VbRecordProbe;
 use super::scene_types::{GBufferScene, SampledComposite, Scene, UiPass};
 use super::swapchain::swapchain_image_for;
 use super::targets::{GBufferFrame, GBufferTargets, TargetsProfile};
@@ -802,6 +803,12 @@ impl<'ctx> Renderer<'ctx> {
     /// at least `present_extent` * 8 bytes (`R32G32_UINT`, 8 B/texel — a DIFFERENT extent and a
     /// DIFFERENT texel width from the swapchain readback's, which is why the two contracts are
     /// stated separately).
+    ///
+    /// VG R3 piece 2 step P2-6: `vb_record_probe` is gate G2's count sink
+    /// ([`VbRecordProbe`](super::VbRecordProbe)) — host memory, no device resource, no contract
+    /// beyond "the borrow outlives the call". It reaches only the `VisibilityBuffer` arm below;
+    /// the Deferred/Forward recorders have no second raster scope to report and are handed
+    /// nothing. `None` (every steady/golden/interactive frame) records byte-identical commands.
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn render_gbuffer_frame(
         &mut self,
@@ -818,6 +825,7 @@ impl<'ctx> Renderer<'ctx> {
         aa_extent: VkExtent2D,
         readback: Option<&BoundBuffer>,
         vb_id_readback: Option<&BoundBuffer>,
+        vb_record_probe: Option<&mut VbRecordProbe>,
     ) -> Result<bool, SwapchainError> {
         debug_assert_eq!(
             token.slot(),
@@ -916,6 +924,10 @@ impl<'ctx> Renderer<'ctx> {
                             vb,
                             readback,
                             vb_id_readback,
+                            // VG R3 piece 2 step P2-6: gate G2's count sink, moved in (the record
+                            // closure is `FnOnce`). The VB arm is the only one that can report a
+                            // second raster scope, so this is the only arm it reaches.
+                            vb_record_probe,
                             // Rung R9d: the AS command table (for the VB split's own per-frame
                             // TLAS build), the SAME resolve `record_gbuffer`'s own call uses
                             // below.

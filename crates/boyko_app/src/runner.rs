@@ -965,6 +965,10 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     // recording seam. `None` on the steady path, and independent of both drivers above: it copies
     // the depth ring and the pyramid, neither of which the other two touch.
     let mut hzb_dump = crate::hzb_dump::HzbDump::from_env();
+    // VG R3 piece 2 step P2-6: the env-gated VB RECORDING probe (`BOYKO_VB_PROBE`) — gate G2's
+    // seam. `None` on the steady path, and independent of the three drivers above: it copies no
+    // resource at all, it hands the recorder a host-memory count sink for one settled frame.
+    let mut vb_probe = crate::vb_probe_dump::VbProbeDump::from_env();
     // Automated-run frame cap (the `BOYKO_WIN_HIDDEN` companion, and the app-level
     // twin of `window_present_gbuffer`'s own `BOYKO_WINDOW_FRAMES`): `BOYKO_WINDOW_FRAMES=<n>`
     // bounds this loop to `n` iterations, then exits cleanly. Without it an
@@ -1468,6 +1472,20 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // The interp-armed probe (host plan R5): set when this frame's pair gather
         // produced instances (the pair ring was uploaded + `scene.interp` armed).
         let frame_interp_armed;
+        // VG R3 piece 2 step P2-6: this frame's marked-instance count, carried OUT of the render
+        // block so gate G2's artifact can record the host's own view beside the recorder's. Read
+        // from the SAME `scratch.occlusion_instances()` call that threads it into the scene, so
+        // the file cannot report a number the frame did not use.
+        //
+        // DEFINITE-INITIALIZED, not seeded. An earlier draft wrote `= 0` and argued the seed was
+        // the truthful answer on a minimized (0x0) window, where the block below skips scene
+        // assembly. That argument is false and the compiler says so: every path that READS this
+        // reads it inside the block that assigns it, so the seed was dead — `unused_assignments`
+        // fired on it. Leaving the declaration bare makes the property a build error rather than a
+        // comment: if a future edit adds a read on the skip path, this stops compiling instead of
+        // silently reporting a zero the frame never computed. Not `mut` either — with the seed gone
+        // the binding is assigned exactly once, which is the shape the value actually has.
+        let frame_occlusion_instances: u32;
         // The dump's readback request (cold; `None` without the env knob). The
         // returned borrow holds `dump` until the render call consumes it.
         let readback = match dump.as_mut() {
@@ -2361,6 +2379,10 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     "invariant: ClusterConfig dims are a boot commitment (cull buffers are boot-sized)"
                 );
             }
+            // VG R3 piece 2 steps P2-3/P2-6: read ONCE, here, and used twice below — threaded
+            // into the scene (where it is the split's structural conjunct) and carried out to
+            // gate G2's artifact. Two calls would be two chances to read a different scratch.
+            frame_occlusion_instances = scratch.occlusion_instances();
             let scene = host.gpu.scene(
                 mvp,
                 s,
@@ -2437,7 +2459,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 // on its own caster-filtered scratch and is therefore redundant, never
                 // authoritative. Reading it off anything but this scratch would be a SECOND
                 // frame-level predicate that can disagree with the first.
-                scratch.occlusion_instances(),
+                frame_occlusion_instances,
                 ctx,
             );
 
@@ -2484,6 +2506,12 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     aa_extent,
                     readback,
                     vb_id_readback,
+                    // VG R3 piece 2 step P2-6: gate G2's count sink, `Some` on ONE settled frame
+                    // of a `BOYKO_VB_PROBE` run and `None` on every other frame of every other
+                    // run. The recorder writes host memory through it and records no command for
+                    // it, which is what keeps an armed run's command stream identical to a
+                    // steady one's.
+                    vb_probe.as_mut().and_then(crate::vb_probe_dump::VbProbeDump::request),
                 )
             }
         };
@@ -2698,18 +2726,45 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 .finish(ctx);
         }
 
+        // VG R3 piece 2 step P2-6 (cold): gate G2's recording probe. Settle → probe, with NO
+        // drain — it copies no device resource, so its counts are complete the moment the record
+        // body returned (`vb_probe_dump`'s own doc states why the sibling drains do not apply).
+        let vb_probe_ready = match vb_probe.as_mut() {
+            Some(p) => p.after_present(presented_ok),
+            None => false,
+        };
+        if vb_probe_ready {
+            let cx = crate::vb_probe_dump::VbProbeContext {
+                draw_batches: draw_batch_count as u32,
+                occlusion_instances: frame_occlusion_instances,
+                // Recorded, not assumed: a device that fails the VB capability probe degrades to
+                // `Deferred` and `record_vb` never runs, so a zero `scopes` would be an
+                // INSTRUMENT failure. The gate reads these two before it reads any count.
+                vb_path: matches!(
+                    host.resolved_render_path.path,
+                    boyko_render::RenderPath::VisibilityBuffer
+                ),
+                mesh_leg: host.resolved_render_path.mesh_leg,
+            };
+            vb_probe
+                .take()
+                .expect("invariant: the VB record probe just reported ready")
+                .finish(&cx);
+        }
+
         // Exit once EVERY armed capture has completed. Each driver `take()`s itself on completion,
         // so `is_none()` reads "not armed, or already finished".
         //
-        // ⚠️ The conjunction is load-bearing, not tidiness. All three drivers settle for the same
-        // 30 frames and drain for the same 3, so with several armed they report ready on the SAME
-        // frame — and a `return` inside the first branch would exit before the others ever ran.
-        // The later capture would silently produce no file, which is indistinguishable from one
-        // that ran and found nothing: a skip that does not name itself.
-        if (dump_ready || census_ready || hzb_dump_ready)
+        // ⚠️ The conjunction is load-bearing, not tidiness. All four drivers settle for the same
+        // 30 frames (three of them then drain for 3 more), so with several armed they report ready
+        // on the SAME frame — and a `return` inside the first branch would exit before the others
+        // ever ran. The later capture would silently produce no file, which is indistinguishable
+        // from one that ran and found nothing: a skip that does not name itself.
+        if (dump_ready || census_ready || hzb_dump_ready || vb_probe_ready)
             && dump.is_none()
             && census.is_none()
             && hzb_dump.is_none()
+            && vb_probe.is_none()
         {
             return;
         }

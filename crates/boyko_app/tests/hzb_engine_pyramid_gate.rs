@@ -59,12 +59,27 @@
 //! it), but a golden-pin test writes a screenshot and asserts nothing, whereas G8 must read a file
 //! back and adjudicate it in the same `cargo test` invocation.
 //!
+//! # TWO worker+driver pairs since VG R3 piece 2 (gate G5)
+//!
+//! Piece 2's occlusion split moves the whole `[hzb_poison, hzb_build_*]` block BETWEEN the two
+//! raster scopes on an armed-split frame (plan D6), which makes the block's slot **conditional**.
+//! So this file now runs the same comparison twice:
+//!
+//! * [`hzb_engine_pyramid_equals_the_oracle`] — the UNSPLIT frame (gate G8, unchanged). This is
+//!   the configuration every shipping frame and all 25 golden pins take.
+//! * [`hzb_engine_pyramid_equals_the_oracle_occ`] — the ARMED-SPLIT frame (gate G5), where the
+//!   block sits at its early slot.
+//!
+//! ⚠️ The second is an **ADDITION**. Re-pointing the existing worker at the marked scene would
+//! have DELETED the unsplit leg — the only engine-level gate over the path piece 2 newly made
+//! conditional. **Both must be green in the same sitting.**
+//!
 //! # Run
 //!
 //! `cargo test -p boyko-app --test hzb_engine_pyramid_gate -- --ignored --nocapture
-//! --test-threads=1` with `BOYKO_DISABLE_VALIDATION=1`. The driver spawns the worker itself; the
-//! worker run directly needs `BOYKO_HZB_DUMP=<path.bin>` and SKIPS (rather than looping forever)
-//! without it.
+//! --test-threads=1` with `BOYKO_DISABLE_VALIDATION=1`. Each driver spawns its own worker by name
+//! (`--exact`) into its own dump path; a worker run directly needs `BOYKO_HZB_DUMP=<path.bin>` and
+//! SKIPS (rather than looping forever) without it.
 
 #![cfg(windows)]
 
@@ -76,8 +91,8 @@ use boyko_ecs::ecs::core::system::ResMut;
 use boyko_render::hzb::{HzbLayout, build_pyramid};
 use boyko_render::mesh::Vertex;
 use boyko_render::{
-    GeometryLegs, HzbConfig, HzbMode, Material, MeshAssetsVbExt, MeshGeometryTableSlot, RenderPath,
-    RenderPathConfig, generate_tangents,
+    GeometryLegs, HzbConfig, HzbMode, Material, MeshAssetsVbExt, MeshGeometryTableSlot,
+    OcclusionCulling, RenderPath, RenderPathConfig, generate_tangents,
 };
 use boyko_rhi_vulkan::present::{
     HZB_DUMP_HEADER_BYTES, HZB_DUMP_HEADER_WORDS, HZB_DUMP_MAGIC, HZB_DUMP_SAMPLE_BYTES,
@@ -87,8 +102,22 @@ use boyko_rhi_vulkan::present::{
 /// The env knob that arms `boyko_app::hzb_dump` — the value is the output path.
 const ENV_DUMP: &str = "BOYKO_HZB_DUMP";
 
-/// The worker test the driver re-executes.
+/// The worker test the UNSPLIT driver re-executes.
 const WORKER: &str = "hzb_engine_pyramid_dump";
+
+/// VG R3 piece 2 step P2-6 — **gate G5's** worker: the same scene with `OcclusionCulling` in the
+/// spawn bundle, which arms the occlusion split and therefore moves the whole
+/// `[hzb_poison, hzb_build_*]` block between the two raster scopes (plan D6).
+///
+/// ⚠️ **An ADDITION, not a conversion.** [`WORKER`] above stays exactly as it was, and both pairs
+/// must be green in the same sitting. The unsplit path is the one every shipping frame and all 25
+/// golden pins take, and piece 2 is precisely the change that makes its `hzb_build` slot
+/// CONDITIONAL — converting this file to the marked scene would have deleted the only
+/// engine-level gate over that path. Nothing else covers it: `hzb_build_spv_sync` is a byte gate,
+/// `hzb_build_oracle_gate` is structurally blind by its own header, gate G4 is a synthetic
+/// declaration replica, and the declarator's parity asserts cover `vb_raster_late`, not the HZB
+/// slot.
+const WORKER_OCC: &str = "hzb_engine_pyramid_dump_occ";
 
 /// The worker window's client extent. 512² is the extent step P1-6 measured the dump at
 /// (`levels = 10`, two build passes), so the coverage this gate reports is directly comparable with
@@ -152,12 +181,18 @@ fn uv_sphere(radius: f32, stacks: u32, slices: u32, color: [f32; 4]) -> (Vec<Ver
 ///
 /// Neither delta is what makes the gate non-vacuous — the IMAGE poison is (see the module header).
 /// They make the comparison less likely to agree by coincidence, which is a different property.
-fn setup(
-    mut commands: Commands,
-    mut meshes: NonSendResMut<Assets<MeshGpu>>,
-    mut materials: ResMut<Assets<Material>>,
-    mut geo_table: NonSendResMut<MeshGeometryTableSlot>,
-    dev: NonSendRes<GpuDevice>,
+///
+/// VG R3 piece 2 step P2-6: `marked` puts [`OcclusionCulling`] in every spawn bundle, which is the
+/// ONLY difference between gate G8's scene and gate G5's. One function, two constants at the two
+/// call sites — so "the same scene apart from the marker" is a property of the code rather than of
+/// two copies a later edit can desynchronise.
+fn setup_scene(
+    commands: &mut Commands,
+    meshes: &mut Assets<MeshGpu>,
+    materials: &mut Assets<Material>,
+    geo_table: &mut MeshGeometryTableSlot,
+    dev: &GpuDevice,
+    marked: bool,
 ) {
     let (verts, idx) = uv_sphere(0.62, 28, 40, [0.7, 0.7, 0.72, 1.0]);
     let sphere = match geo_table.0.as_mut() {
@@ -176,6 +211,15 @@ fn setup(
         let e = commands
             .spawn(MeshBundle::new(sphere, Transform::from_translation(Vec3::new(x, 0.6, z))))
             .id();
+        // ⚠️ Queued into the SAME command flush as the spawn — NOT into the bundle. This kernel
+        // has no tuple `Bundle` impl (`Bundle` is sealed and implemented per type), so
+        // `spawn((MeshBundle, OcclusionCulling))` does not compile. What would arm the split one
+        // frame late is an insert from a LATER frame; queued together, spawn and insert are
+        // applied by ONE flush before any gather runs — the route `MaterialHandle` below already
+        // takes.
+        if marked {
+            commands.entity(e).insert(OcclusionCulling);
+        }
         commands.entity(e).insert(MaterialHandle(mat_index));
     }
 
@@ -217,35 +261,94 @@ fn setup(
     });
 }
 
-/// **The G8 WORKER** — one process, one `VisibilityBuffer × Mesh` boot with the pyramid armed, one
-/// `BOYKO_HZB_DUMP` file.
+/// [`setup_scene`] with NO marker — gate G8's scene, the one every shipping frame's pass order
+/// matches.
+fn setup(
+    mut commands: Commands,
+    mut meshes: NonSendResMut<Assets<MeshGpu>>,
+    mut materials: ResMut<Assets<Material>>,
+    mut geo_table: NonSendResMut<MeshGeometryTableSlot>,
+    dev: NonSendRes<GpuDevice>,
+) {
+    setup_scene(&mut commands, &mut meshes, &mut materials, &mut geo_table, &dev, false);
+}
+
+/// [`setup_scene`] WITH the marker — gate G5's scene: the occlusion split is armed, so the
+/// `[hzb_poison, hzb_build_*]` block is declared and recorded BETWEEN the two raster scopes
+/// instead of after the `lit` producer.
+fn setup_occ(
+    mut commands: Commands,
+    mut meshes: NonSendResMut<Assets<MeshGpu>>,
+    mut materials: ResMut<Assets<Material>>,
+    mut geo_table: NonSendResMut<MeshGeometryTableSlot>,
+    dev: NonSendRes<GpuDevice>,
+) {
+    setup_scene(&mut commands, &mut meshes, &mut materials, &mut geo_table, &dev, true);
+}
+
+/// The dump path, or `None` after announcing a SKIP.
 ///
-/// SKIPS when [`ENV_DUMP`] is unset instead of booting. Without the knob no capture is armed, the
-/// host loop has nothing to complete and `app.run()` never returns — a hang, which is the worst
-/// failure mode a test sweep can have. The driver always sets it.
+/// A worker booted without [`ENV_DUMP`] arms no capture, so the host loop has nothing to complete
+/// and `app.run()` never returns — a hang, which is the worst failure mode a test sweep can have.
+/// The drivers always set it.
+fn dump_path_or_skip(label: &str) -> Option<String> {
+    match std::env::var(ENV_DUMP) {
+        Ok(path) => {
+            eprintln!("{label}: dumping to {path}");
+            Some(path)
+        }
+        Err(_) => {
+            eprintln!(
+                "{label}: {ENV_DUMP} is unset -- SKIPPED. This worker exists to be spawned by its \
+                 driver; booted without the knob it would render forever, since no armed capture \
+                 could ever complete."
+            );
+            None
+        }
+    }
+}
+
+/// The path both workers request. Inserted AFTER `add_plugins` so it overrides
+/// `RenderPathPlugin`'s `Deferred` default — `vb_mesh.rs`'s own post-plugins override discipline.
+const VB_MESH_PATH: RenderPathConfig =
+    RenderPathConfig { path: RenderPath::VisibilityBuffer, legs: GeometryLegs::Mesh };
+
+/// **The G8 WORKER** — one process, one `VisibilityBuffer × Mesh` boot with the pyramid armed and
+/// the occlusion split UNARMED, one `BOYKO_HZB_DUMP` file.
+///
+/// `HzbMode::Build` is what makes `GBufferScene::hzb` `Some`, which is what the dump, the poison
+/// and the build chain all read.
 #[test]
 #[ignore = "needs a real windowed GPU device; the G8 driver spawns it with BOYKO_HZB_DUMP set"]
 fn hzb_engine_pyramid_dump() {
-    let Ok(path) = std::env::var(ENV_DUMP) else {
-        eprintln!(
-            "hzb_engine_pyramid_dump: {ENV_DUMP} is unset -- SKIPPED. This worker exists to be \
-             spawned by `hzb_engine_pyramid_equals_the_oracle`; booted without the knob it would \
-             render forever, since no armed capture could ever complete."
-        );
+    if dump_path_or_skip("hzb_engine_pyramid_dump").is_none() {
         return;
-    };
-    eprintln!("hzb_engine_pyramid_dump: dumping to {path}");
-
+    }
     let mut app = App::new();
     app.add_plugins(EnginePlugins::window("boyko_engine hzb G8", EXTENT, EXTENT));
     app.add_startup_system(setup);
-    // Inserted AFTER `add_plugins` so these override `RenderPathPlugin`'s `Deferred` default —
-    // `vb_mesh.rs`'s own post-plugins override discipline. `HzbMode::Build` is what makes
-    // `GBufferScene::hzb` `Some`, which is what the dump, the poison and the build chain all read.
-    app.insert_resource(RenderPathConfig {
-        path: RenderPath::VisibilityBuffer,
-        legs: GeometryLegs::Mesh,
-    });
+    app.insert_resource(VB_MESH_PATH);
+    app.insert_resource(HzbConfig { mode: HzbMode::Build });
+    app.run();
+}
+
+/// **The G5 WORKER** (VG R3 piece 2 step P2-6) — the same boot with the occlusion split ARMED, so
+/// the `[hzb_poison, hzb_build_*]` block is declared and recorded BETWEEN the two raster scopes
+/// and the pyramid is built from the EARLY scope's depth.
+///
+/// Armed-split AND armed-poison in the same frame, by construction: that is the configuration D6's
+/// whole-block move exists for, and the one whose halves the declarator's `poison < build` assert
+/// refuses to let drift apart (dev profile — which is what every golden and gate run uses).
+#[test]
+#[ignore = "needs a real windowed GPU device; the G5 driver spawns it with BOYKO_HZB_DUMP set"]
+fn hzb_engine_pyramid_dump_occ() {
+    if dump_path_or_skip("hzb_engine_pyramid_dump_occ").is_none() {
+        return;
+    }
+    let mut app = App::new();
+    app.add_plugins(EnginePlugins::window("boyko_engine hzb G5 (split)", EXTENT, EXTENT));
+    app.add_startup_system(setup_occ);
+    app.insert_resource(VB_MESH_PATH);
     app.insert_resource(HzbConfig { mode: HzbMode::Build });
     app.run();
 }
@@ -370,49 +473,48 @@ fn decode(bytes: &[u8], path: &Path) -> Dump {
 // The driver
 // ===============================================================================================
 
-/// Spawns the worker and returns the file it wrote.
+/// Spawns `worker` (selected by name with `--exact`) and returns the file it wrote at
+/// `out_name` — a DISTINCT path per worker, so two legs run in the same sitting without one
+/// reading the other's artifact.
 ///
 /// One process, as the census's `run_worker` is: the env knob has to exist before the engine boots,
 /// and the host loop exits by returning from `app.run()` rather than by yielding control.
-fn run_dump_worker() -> (PathBuf, Vec<u8>) {
+fn run_dump_worker(worker: &str, out_name: &str) -> (PathBuf, Vec<u8>) {
     let exe = std::env::current_exe().expect("invariant: the test binary knows its own path");
-    let out = std::env::temp_dir().join("hzb_engine_pyramid_g8.bin");
+    let out = std::env::temp_dir().join(out_name);
     // A stale file from a previous run that this run failed to overwrite would be read as this
     // run's evidence.
     let _ = std::fs::remove_file(&out);
 
     let status = Command::new(&exe)
-        .args([WORKER, "--ignored", "--exact", "--test-threads=1", "--nocapture"])
+        .args([worker, "--ignored", "--exact", "--test-threads=1", "--nocapture"])
         .env(ENV_DUMP, &out)
         .env("BOYKO_DISABLE_VALIDATION", "1")
         // The pyramid dump is the only capture this run is for. Another armed capture would render
         // the same frames for no reason AND hold the host loop open until it too completed.
         .env_remove("BOYKO_HOST_DUMP")
         .env_remove("BOYKO_VG_CENSUS")
+        .env_remove("BOYKO_VB_PROBE")
         .status()
         .expect("invariant: the worker process spawns");
-    assert!(status.success(), "the G8 dump worker exited {status}");
+    assert!(status.success(), "the dump worker `{worker}` exited {status}");
 
     let bytes = std::fs::read(&out).unwrap_or_else(|e| {
         panic!(
-            "the G8 dump worker wrote no file at {}: {e}. A worker that renders and produces \
-             nothing is an instrument failure, not an empty pyramid.",
+            "the dump worker `{worker}` wrote no file at {}: {e}. A worker that renders and \
+             produces nothing is an instrument failure, not an empty pyramid.",
             out.display()
         )
     });
     (out, bytes)
 }
 
-/// **GATE G8** — the pyramid the ENGINE built, through the engine's own extents, descriptors,
-/// barriers and dispatches, equals `boyko_render::hzb::build_pyramid` rebuilt from the engine's own
-/// dumped depth, to BITS, at every texel of every level.
+/// The comparison both gates run, over whichever worker's dump it is handed.
 ///
-/// See the module header for the five non-vacuity clauses and for why the POISON — not the scene's
-/// coverage — is what makes the agreement mean anything.
-#[test]
-#[ignore = "live GPU gate (spawns a windowed worker); the orchestrator runs it with --test-threads=1"]
-fn hzb_engine_pyramid_equals_the_oracle() {
-    let (path, bytes) = run_dump_worker();
+/// `leg` labels the configuration in every failure message and in the final report line, so a red
+/// names WHICH of the two pass orders produced it instead of "the pyramid differs".
+fn assert_engine_pyramid_equals_the_oracle(worker: &str, out_name: &str, leg: &str) {
+    let (path, bytes) = run_dump_worker(worker, out_name);
     let dump = decode(&bytes, &path);
     let [source_w, source_h] = dump.source;
 
@@ -578,12 +680,61 @@ fn hzb_engine_pyramid_equals_the_oracle() {
     // levels were written at all.
     let pct = 100.0 * covered as f64 / dump.depth.len() as f64;
     println!(
-        "hzb_build G8: engine pyramid at {source_w}x{source_h}, {} levels, {} texels BIT-EXACT vs \
-         boyko_render::hzb::build_pyramid rebuilt from the engine's own depth. Depth coverage \
+        "hzb_build {leg}: engine pyramid at {source_w}x{source_h}, {} levels, {} texels BIT-EXACT \
+         vs boyko_render::hzb::build_pyramid rebuilt from the engine's own depth. Depth coverage \
          {covered}/{} = {pct:.2}% > 0.0 (the rest is the reverse-Z far plane). Non-vacuity is \
          carried by the -1.0 IMAGE poison, not by this number.",
         dump.levels,
         dump.pyramid_bits.len(),
         dump.depth.len()
+    );
+}
+
+/// **GATE G8** — the pyramid the ENGINE built, through the engine's own extents, descriptors,
+/// barriers and dispatches, equals `boyko_render::hzb::build_pyramid` rebuilt from the engine's own
+/// dumped depth, to BITS, at every texel of every level — on the UNSPLIT frame, the one every
+/// shipping frame and all 25 golden pins take.
+///
+/// See the module header for the five non-vacuity clauses and for why the POISON — not the scene's
+/// coverage — is what makes the agreement mean anything.
+#[test]
+#[ignore = "live GPU gate (spawns a windowed worker); the orchestrator runs it with --test-threads=1"]
+fn hzb_engine_pyramid_equals_the_oracle() {
+    assert_engine_pyramid_equals_the_oracle(WORKER, "hzb_engine_pyramid_g8.bin", "G8 (unsplit)");
+}
+
+/// **GATE G5** (VG R3 piece 2 step P2-6) — the same comparison on the ARMED-SPLIT frame, where the
+/// `[hzb_poison, hzb_build_*]` block sits BETWEEN the two raster scopes instead of after the `lit`
+/// producer.
+///
+/// # What it proves
+///
+/// The D6 slot move did not hand `hzb_build_0` a wrong or untransitioned image: the pyramid the
+/// engine builds from the EARLIER slot is still bit-exact against the host oracle over the dumped
+/// depth, with the `-1.0` poison and all five non-vacuity clauses intact. It also exercises, on a
+/// real device, the configuration that is armed-split AND armed-poison at once — the one whose
+/// declare-order asserts fire in the dev profile these runs use.
+///
+/// # ⚠️ What it structurally CANNOT prove, in piece 2
+///
+/// **That the ORDERING is right.** The late scope draws nothing, so the early-scope depth and the
+/// end-of-frame depth are the same bytes, and a pyramid built at EITHER slot agrees with the
+/// oracle over the dumped depth. The ordering's real gate is piece 3's, and piece 3 must first
+/// move the dump's own depth copy between the scopes (or dump both depths) — otherwise it would
+/// compare the pyramid against a depth it was not built from. Naming this here is what stops a
+/// green G5 from being read as ordering evidence.
+///
+/// # Why this is an ADDITION and not a conversion
+///
+/// See [`WORKER_OCC`]. Both pairs must be green in the same sitting; this one alone would leave
+/// the unsplit pyramid path — every shipping frame's — with no engine-level gate at the very step
+/// that makes its `hzb_build` slot conditional.
+#[test]
+#[ignore = "live GPU gate (spawns a windowed worker); the orchestrator runs it with --test-threads=1"]
+fn hzb_engine_pyramid_equals_the_oracle_occ() {
+    assert_engine_pyramid_equals_the_oracle(
+        WORKER_OCC,
+        "hzb_engine_pyramid_g5_occ.bin",
+        "G5 (armed split)",
     );
 }

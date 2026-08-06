@@ -48,9 +48,20 @@ use boyko_render::Material;
 use boyko_render::generate_tangents;
 use boyko_render::mesh::Vertex;
 use boyko_render::{
-    GeometryLegs, HzbConfig, HzbMode, MeshAssetsVbExt, MeshGeometryTableSlot, RenderPath,
-    RenderPathConfig,
+    GeometryLegs, HzbConfig, HzbMode, MeshAssetsVbExt, MeshGeometryTableSlot, OcclusionCulling,
+    RenderPath, RenderPathConfig,
 };
+
+/// VG R3 piece 2 step P2-6 (gate G1): `BOYKO_VG_OCC=1` puts [`OcclusionCulling`] in the spawn
+/// bundle of ALL FIVE spheres, which arms `GBufferScene::path_vb_occlusion_split()` and therefore
+/// the late raster scope — on THIS scene, THIS binary and THIS test, exactly as `BOYKO_VG_HZB`
+/// arms the pyramid. `goldens/PINS.toml`'s `[vb_occ_split]` is that leg.
+///
+/// Read inside [`setup`] rather than turned into a Resource read: the marker has to be in the
+/// BUNDLE (a later `insert` migrates the archetype at the next command flush and arms the split
+/// one frame late), and a startup system reading its own env is the shape
+/// `vg_density_census.rs`'s fixture already uses.
+const ENV_OCC: &str = "BOYKO_VG_OCC";
 
 /// The sun direction TO the light (byte-identical to `grand_showcase_2mat.rs`'s /
 /// `forward_mesh.rs`'s).
@@ -113,6 +124,15 @@ fn setup(
     let gold = materials.add(Material::new([1.0, 0.71, 0.29, 1.0], 1.0, 0.13, 0.5, [0.0; 3], 0));
     let blue = materials.add(Material::new([0.20, 0.38, 0.92, 1.0], 1.0, 0.42, 0.5, [0.0; 3], 0));
 
+    // VG R3 piece 2 step P2-6 (gate G1): ALL FIVE spheres, or none. A strict subset would split
+    // the mesh family into two archetypes, and the gather walks archetypes in order — so the RING
+    // ORDER would change, and with it the order two instances writing the same pixel at exactly
+    // equal depth resolve. Marking all five keeps ONE archetype and therefore the exact ring
+    // order, which is what makes `[vb_occ_split]`'s byte-identity evidence about the RECORDING
+    // path rather than about a reshuffle that happened to be invisible. The mixed-archetype case
+    // is gate G2's `vb_occ_multi` fixture, where the gate is a count and an order change cannot
+    // produce a false red.
+    let occ = std::env::var(ENV_OCC).is_ok_and(|v| v == "1");
     let spacing = 1.55;
     let materials_row: [Option<u16>; 5] =
         [None, Some(red.index() as u16), Some(green.index() as u16), Some(gold.index() as u16), Some(blue.index() as u16)];
@@ -121,6 +141,16 @@ fn setup(
         let e = commands
             .spawn(MeshBundle::new(sphere, Transform::from_translation(Vec3::new(x, 0.6, 0.0))))
             .id();
+        // ⚠️ Queued into the SAME command flush as the spawn — NOT into the bundle. This kernel
+        // has no tuple `Bundle` impl (`Bundle` is sealed and implemented per type; the tuple impl
+        // was deleted in Phase 8.5), so `spawn((MeshBundle, OcclusionCulling))` does not compile.
+        // What the plan forbids is an insert from a LATER frame, which arms the split one frame
+        // late; spawn and insert queued together are applied by ONE flush before any gather runs —
+        // exactly the route `MaterialHandle` below already takes, and an equally late
+        // `MaterialHandle` would be visible in this very pin.
+        if occ {
+            commands.entity(e).insert(OcclusionCulling);
+        }
         if let Some(id) = mat {
             commands.entity(e).insert(MaterialHandle(*id));
         }
@@ -172,6 +202,18 @@ fn setup(
 ///
 /// `#[ignore]`: needs a real windowed GPU device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
+///
+/// # Three pins, one test
+///
+/// Two env knobs each add ONE inert thing to this same code path, and each has its own pin
+/// carrying `[vb_mesh]`'s own hash: `BOYKO_VG_HZB=1` → `[vb_mesh_hzb]` (the pyramid, read by
+/// nothing) and `BOYKO_VG_OCC=1` → `[vb_occ_split]` (the marker, hence the LATE RASTER SCOPE,
+/// which draws nothing). Sharing the binary makes each equality an identity rather than a
+/// resemblance between two scenes that merely look alike.
+///
+/// ⚠️ **What a green `[vb_occ_split]` cannot claim: that the split happened at all.** It is
+/// satisfied just as well by not splitting. Gate G2 (`vb_occ_split_gate.rs`) is what says the
+/// recorder recorded two scopes, and the PAIR is the evidence — neither alone.
 #[test]
 #[ignore = "needs a real windowed GPU device; the orchestrator runs it on the GPU to dump the VisibilityBuffer mesh-only screenshot"]
 fn vb_mesh_screenshot_dump() {

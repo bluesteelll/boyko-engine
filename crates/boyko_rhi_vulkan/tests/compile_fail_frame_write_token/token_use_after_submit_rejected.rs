@@ -36,6 +36,7 @@ unsafe fn write_after_submit<'ctx>(
             // wrong one had the expectation been blessed. Keep every parameter supplied.
             token, ctx, surface, swapchain, scene, frame, 64, 64, [0.0; 4], extent, extent, None,
             None,
+            None, // vb_record_probe (VG R3 P2-6): only gate G2's own frames ask for counts
         )
     };
     token.slot()

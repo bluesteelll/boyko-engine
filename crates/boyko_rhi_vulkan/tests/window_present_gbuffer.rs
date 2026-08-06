@@ -2663,6 +2663,7 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
                 token, ctx, surface, &mut swapchain, &scene, &mut frame,
                 window.width(), window.height(), clear, present_extent, present_extent, Some(&staging),
                 None,
+                None, // vb_record_probe (VG R3 P2-6): only gate G2's own frames ask for counts
             )
         }
         .unwrap_or_else(|e| panic!("brick dump frame ({path}) failed: {e:?}"));
@@ -2687,6 +2688,7 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
                     token, ctx, surface, &mut swapchain, &scene, &mut frame,
                     window.width(), window.height(), clear, present_extent, present_extent, None,
                     None,
+                    None, // vb_record_probe (VG R3 P2-6): only gate G2's own frames ask for counts
                 )
             }
             .unwrap_or_else(|e| panic!("brick dump drain frame ({path}) failed: {e:?}"));
@@ -2811,6 +2813,7 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
                 present_extent,
                 rb,
                 None,
+                None, // vb_record_probe (VG R3 P2-6): only gate G2's own frames ask for counts
             )
         }
         .unwrap_or_else(|e| panic!("gbuffer present frame {i} failed: {e:?}"));
@@ -3733,6 +3736,7 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
                 token, ctx, surface, &mut swapchain, &scene, &mut frame,
                 window.width(), window.height(), clear, present_extent, present_extent, Some(&staging),
                 None,
+                None, // vb_record_probe (VG R3 P2-6): only gate G2's own frames ask for counts
             )
         }
         .unwrap_or_else(|e| panic!("p0 cull readback frame (cull_on={cull_on}) failed: {e:?}"));
@@ -3756,6 +3760,7 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
                     token, ctx, surface, &mut swapchain, &scene, &mut frame,
                     window.width(), window.height(), clear, present_extent, present_extent, None,
                     None,
+                    None, // vb_record_probe (VG R3 P2-6): only gate G2's own frames ask for counts
                 )
             }
             .unwrap_or_else(|e| panic!("p0 cull drain frame (cull_on={cull_on}) failed: {e:?}"));
@@ -6361,6 +6366,7 @@ fn ab_present_one<'ctx>(
             present_extent,
             readback,
             None,
+            None, // vb_record_probe (VG R3 P2-6): only gate G2's own frames ask for counts
         )
     };
     matches!(r, Ok(true))
@@ -8798,6 +8804,7 @@ fn run_showcase_body_ddgi(
                 token, ctx, surface, &mut swapchain, &scene, &mut frame,
                 window.width(), window.height(), clear, present_extent, present_extent, staging_arg,
                 None,
+                None, // vb_record_probe (VG R3 P2-6): only gate G2's own frames ask for counts
             )
         }
         .unwrap_or_else(|e| panic!("showcase DDGI converge frame failed: {e:?}"));
@@ -8824,6 +8831,7 @@ fn run_showcase_body_ddgi(
                     token, ctx, surface, &mut swapchain, &scene, &mut frame,
                     window.width(), window.height(), clear, present_extent, present_extent, None,
                     None,
+                    None, // vb_record_probe (VG R3 P2-6): only gate G2's own frames ask for counts
                 )
             }
             .unwrap_or_else(|e| panic!("showcase DDGI drain frame failed: {e:?}"));
@@ -9048,6 +9056,7 @@ fn run_gpu_pass_cost_timing<'ctx>(
                 token, ctx, surface, swapchain, scene, frame,
                 window.width(), window.height(), *clear, present_extent, present_extent, None,
                 None,
+                None, // vb_record_probe (VG R3 P2-6): only gate G2's own frames ask for counts
             )
         }
         .unwrap_or_else(|e| panic!("gpu_pass_cost frame failed: {e:?}"));
@@ -10467,6 +10476,7 @@ fn run_showcase_body(
                     token, ctx, surface, &mut swapchain, &scene, &mut frame,
                     window.width(), window.height(), clear, present_extent, present_extent, Some(&staging),
                     None,
+                    None, // vb_record_probe (VG R3 P2-6): only gate G2's own frames ask for counts
                 )
             }
             .unwrap_or_else(|e| panic!("showcase readback frame failed: {e:?}"));
@@ -10489,6 +10499,7 @@ fn run_showcase_body(
                             token, ctx, surface, &mut swapchain, &scene, &mut frame,
                             window.width(), window.height(), clear, present_extent, present_extent, None,
                             None,
+                            None, // vb_record_probe (VG R3 P2-6): only gate G2's own frames ask for counts
                         )
                     }
                     .unwrap_or_else(|e| panic!("showcase drain frame failed: {e:?}"));

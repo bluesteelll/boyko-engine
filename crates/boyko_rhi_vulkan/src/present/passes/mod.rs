@@ -15,4 +15,7 @@ mod scene;
 mod smaa;
 mod ssaa;
 mod taa;
-mod vb;
+// `pub(crate)` for ONE item: VG R3 piece 2 step P2-6's `VbRecordProbe`, which `super` re-exports
+// (gate G2's counts must reach `boyko_app`'s frame loop). Every other item in the module stays
+// `pub(crate)`/private exactly as before.
+pub(crate) mod vb;

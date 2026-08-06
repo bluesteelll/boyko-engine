@@ -339,6 +339,61 @@ BOYKO_HOST_DUMP          = "D:\\tmp\\vb_mesh_hzb.bmp"
 BOYKO_VG_HZB             = "1"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 
+[vb_occ_split]
+# VG R3 piece 2 step P2-6, GATE G1 (docs/VG-R3-P2-CAPABILITY-SPLIT-PLAN.md): [vb_mesh]'s scene,
+# binary and test, with BOYKO_VG_OCC=1 putting the OcclusionCulling marker in the spawn bundle of
+# ALL FIVE spheres. That arms GBufferScene::path_vb_occlusion_split(), which records a SECOND
+# raster scope -- vb_indirect_late_upload's vkCmdUpdateBuffer, a second begin/endRendering bracket
+# over the same two views, and one zero-instanceCount vkCmdDrawIndexedIndirect per batch.
+#
+# THE SHA IS DELIBERATELY IDENTICAL TO [vb_mesh]'s, and here it is the whole D4 equivalence:
+# LOAD_OP_LOAD yields exactly what the early scope stored, no fragment is produced, STORE_OP_STORE
+# writes the loaded contents back. Re-bless the two together or not at all -- a lone re-bless here
+# would silently convert the gate from "the late scope draws nothing" to "whatever it draws now".
+# Unlike [vb_mesh_hzb], that equality is now MACHINE-CHECKED as well: the cross-pin guard
+# `the_pins_declared_byte_identical_actually_agree` (crates/boyko_app/tests/vg_density_census.rs)
+# parses this file and fails if the two literals ever diverge, which is the only thing standing
+# between a `-Bless` and a silently redefined gate.
+#
+# ⚠️ WHAT THIS PIN CANNOT CLAIM -- and it is the reason it never ships alone:
+#  * THAT THE SPLIT HAPPENED. A run that never recorded the late scope produces exactly this hash.
+#    Gate G2 (crates/boyko_app/tests/vb_occ_split_gate.rs) is the leg that reports the RECORDER's
+#    own scope count; the pair (G1 green + G2 red under the same corruption) is the evidence.
+#  * ANYTHING ABOUT BARRIERS. A missing barrier changed no pixel and emitted no message when it
+#    was measured on this machine (the plan's "P2-0 RESOLVED" table), so the barrier evidence is
+#    gate G4's field-level assertions in
+#    crates/boyko_rhi_vulkan/tests/vb_barrier_stream_baseline.rs -- not this hash.
+#  * ANYTHING ABOUT A MULTI-BATCH LATE SCOPE. These five spheres share ONE MeshHandle, so the late
+#    loop runs exactly once here. No golden covers draw_batches >= 2; that is piece 3's first gate.
+#
+# THE VALIDATION LEG (`scripts\golden.ps1 -Pin vb_occ_split -ValidationOn`) is gate G3, and its
+# claim is bounded by the same measurement: on this machine it sees STATIC legality only -- the
+# LOAD_OP_LOAD against the layout the graph left, vb_indirect_late's usage bits, the second
+# DRAW_INDIRECT access, the second begin/endRendering bracket, and vkCmdUpdateBuffer's alignment
+# and size rules. It CANNOT see a missing barrier: synchronization validation is not live here
+# (VK_EXT_validation_features is absent and the instance chain degrades silently), which was
+# established by deleting a real barrier and measuring 19 messages, no SYNC-HAZARD and a
+# byte-identical image. Run it against `-Pin vb_mesh -ValidationOn` and compare message for
+# message after handle normalisation; the counts must agree.
+#
+# PRE-FILLED with [vb_mesh]'s hashes (the pattern [vb_both] and [vb_mesh_hzb] use): the
+# orchestrator VERIFIES the equality on a real windowed GPU rather than blessing a fresh value.
+crate           = "boyko-app"
+test_binary     = "vb_mesh"
+test_name       = "vb_mesh_screenshot_dump"
+bmp             = "D:\\tmp\\vb_occ_split.bmp"
+width           = 512
+height          = 512
+sha256_software = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913ea1"
+sha256_hwrt     = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913ea1"
+
+[vb_occ_split.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_occ_split.bmp"
+BOYKO_VG_OCC             = "1"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+
 [vb_both]
 # Multi-paradigm render-path plan, rung R10: the VisibilityBuffer x Both golden. Clones [vb_mesh]'s
 # five-sphere grand_showcase_2mat scene + production boyko_app::runner/gpu_scene::GpuSceneBundles
