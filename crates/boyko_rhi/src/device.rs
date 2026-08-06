@@ -343,6 +343,12 @@ pub struct BindGroupLayoutDesc<'a> {
 /// mismatch). A sampled image (`CombinedImage`/`SampledImage`) MUST be in
 /// [`crate::enums::ImageLayout::ShaderReadOnlyOptimal`] and a `StorageImage` in
 /// [`crate::enums::ImageLayout::General`] before a draw/dispatch accesses it.
+///
+/// **THE KIND NAMES THE LAYOUT**: the layout a descriptor records is a property of the
+/// variant, never a parameter, so a caller cannot bind an image at a layout the backend
+/// did not sanction. [`Self::SampledImageAtGeneral`] is the ONE sampled-image kind that
+/// records [`crate::enums::ImageLayout::General`] — for an image the engine keeps in
+/// `GENERAL` for life (VG R3 step P3-1).
 pub enum BindGroupEntry<'a, A: RhiApi> {
     /// A `STORAGE_IMAGE` — a read/write image bound by view (no sampler).
     StorageImage {
@@ -370,6 +376,33 @@ pub enum BindGroupEntry<'a, A: RhiApi> {
         texture: &'a A::Texture,
         /// The sampler bound (at this binding's separate sampler, backend-defined).
         sampler: &'a A::Sampler,
+    },
+    /// A `SAMPLED_IMAGE` an engine keeps in [`crate::enums::ImageLayout::General`] for
+    /// life, bound WITHOUT a sampler (VG R3 step P3-1).
+    ///
+    /// Descriptor-IDENTICAL to [`Self::SampledImage`] — the same
+    /// [`DescriptorKind::SampledImage`], the same texture-owned image view — except that
+    /// the recorded `image_layout` is `General` instead of `ShaderReadOnlyOptimal` and the
+    /// sampler slot is NULL. This is exactly the [`Self::StorageImage`] →
+    /// [`Self::StorageImageView`] relation already in this enum: one property differs, and
+    /// it is the property the variant is named for.
+    ///
+    /// It exists because the kind implies the layout (see this enum's doc). The HZB depth
+    /// pyramid is `GENERAL` from its boot clear onward — the framegraph seed asserts that
+    /// layout, and the build pass writes it as a storage image — so binding it as
+    /// [`Self::SampledImage`] would record a layout the image is NEVER in, a core-validation
+    /// error at every dispatch that binds the set.
+    ///
+    /// No sampler is needed because the reader this variant exists for fetches with
+    /// `.Load(int3(x, y, level))` — integer coordinates and an explicit mip, so there is no
+    /// filter to configure. A linear filter would in fact be UNSOUND over a min-reduced
+    /// pyramid: a bilinear blend of four reduced texels lies strictly between their min and
+    /// max, so it bounds the footprint from neither side.
+    SampledImageAtGeneral {
+        /// The texture whose image view is bound as the sampled image. It must be in
+        /// [`crate::enums::ImageLayout::General`] before a draw/dispatch accesses it —
+        /// unlike [`Self::SampledImage`], which requires `ShaderReadOnlyOptimal`.
+        texture: &'a A::Texture,
     },
     /// A `COMBINED_IMAGE_SAMPLER` — a sampled image bundled with its sampler.
     CombinedImage {

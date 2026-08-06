@@ -423,7 +423,8 @@ impl RhiDevice<Vulkan> for VulkanContext {
         //     write's `dst_binding` is the LAYOUT entry's binding (caller contract:
         //     entries are in layout order, so `desc.layout`'s binding `i`). Image kinds
         //     declare the layout the descriptor records: GENERAL for a storage image,
-        //     SHADER_READ_ONLY_OPTIMAL for a sampled one — the caller transitions each
+        //     SHADER_READ_ONLY_OPTIMAL for a sampled one (and GENERAL for the one sampled
+        //     kind named for it, `SampledImageAtGeneral`) — the caller transitions each
         //     via `image_barrier` before access (the P1a SAFETY contract), and
         //     validation cross-checks the recorded layout at access time. All three
         //     inline arrays are fixed-capacity (zero heap) and outlive the update call. ---
@@ -539,6 +540,22 @@ impl RhiDevice<Vulkan> for VulkanContext {
                         sampler: sampler.sampler,
                         image_view: texture.view,
                         image_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    };
+                    p_image_info = (&image_infos[i] as *const VkDescriptorImageInfo).cast();
+                }
+                // VG R3 step P3-1: the same descriptor write as `SampledImage` above — one
+                // `p_image_info`, the texture's own view, `VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE` — with
+                // the recorded layout GENERAL and the sampler slot NULL. The caller keeps the image
+                // in `GENERAL` for life (the HZB pyramid is boot-cleared into it and written there
+                // by the build pass), so recording SHADER_READ_ONLY_OPTIMAL would name a layout the
+                // image is never in. No array/single-layer fallback is made here — as for
+                // `SampledImage` above, `texture.view` is the full-subresource view, which is what a
+                // single-layer MIP-CHAINED image wants: the reader indexes mips, not layers.
+                BindGroupEntry::SampledImageAtGeneral { texture } => {
+                    image_infos[i] = VkDescriptorImageInfo {
+                        sampler: VkSampler::NULL,
+                        image_view: texture.view,
+                        image_layout: VK_IMAGE_LAYOUT_GENERAL,
                     };
                     p_image_info = (&image_infos[i] as *const VkDescriptorImageInfo).cast();
                 }

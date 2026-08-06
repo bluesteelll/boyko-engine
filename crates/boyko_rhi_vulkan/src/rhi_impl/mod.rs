@@ -163,6 +163,12 @@ fn bind_group_entry_kind(entry: &BindGroupEntry<Vulkan>) -> DescriptorKind {
         // slot, the pool sizing, and the write's `descriptor_type` with `StorageImage`.
         BindGroupEntry::StorageImageView { .. } => DescriptorKind::StorageImage,
         BindGroupEntry::SampledImage { .. } => DescriptorKind::SampledImage,
+        // VG R3 step P3-1: a `GENERAL`-layout sampled image is the SAME descriptor kind as a
+        // `SHADER_READ_ONLY_OPTIMAL` one — Vulkan has a single
+        // `VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE`, and only the layout the write RECORDS differs. So
+        // this shares the histogram slot, the pool sizing and the write's `descriptor_type` with
+        // `SampledImage`, exactly as `StorageImageView` shares them with `StorageImage`.
+        BindGroupEntry::SampledImageAtGeneral { .. } => DescriptorKind::SampledImage,
         BindGroupEntry::CombinedImage { .. } => DescriptorKind::CombinedImageSampler,
         BindGroupEntry::StorageBuffer { .. } => DescriptorKind::StorageBuffer,
         BindGroupEntry::UniformBuffer { .. } => DescriptorKind::UniformBuffer,

@@ -658,6 +658,28 @@ pub struct GBufferTargets {
     /// build chain and dispatches it, so the pyramid is BUILT on every armed VB mesh frame and
     /// READ by nothing (the occlusion cull is piece 3).
     pub(crate) hzb: Option<HzbTargets>,
+    /// VG R3 piece 3 step P3-1 (plan D7) — the 1×1 `R32_SFLOAT` placeholder the cull's descriptor
+    /// set binds at the pyramid's binding when [`Self::hzb`] is `None`.
+    ///
+    /// ⚠️ **Read by nothing, and bound by nothing, at step P3-1.** Step P3-2 widens
+    /// `vb_cull_layout` and writes it at @9; step P3-4 gives the cull module the load. It is minted
+    /// here, one step early, because its transition cannot live in an armed-only builder and
+    /// because the step that MINTS an image is the step that owes it a defined layout.
+    ///
+    /// UNCONDITIONAL, unlike [`Self::hzb`]: the cull's set is written once per extent and its
+    /// entry list has fixed arity, so SOMETHING valid must sit at that binding on a boot with no
+    /// pyramid — which is every committed golden pin but one. Minted, cleared to `0.0` and
+    /// transitioned to `GENERAL` by [`Self::boot_seed_hzb_null`] in [`Self::create`], immediately
+    /// before `DeferredSets::build` (its only consumer) and never touched again: no framegraph pass
+    /// names it, so that boot submit is its ONLY layout producer for the life of the generation.
+    ///
+    /// `0.0` is the reverse-Z far plane, so on the disarmed path the placeholder is safe in both
+    /// senses at once — in range by ADDRESS (1×1, single mip, the reader's coordinates clamped to
+    /// 0) and conservative by VALUE (a far-plane occluder rejects nothing).
+    ///
+    /// Acquired just before the deferred sets, so [`Self::destroy`] tears it down just after them
+    /// — a descriptor set retains the image view it was written with by raw handle.
+    pub(crate) hzb_null: VulkanTexture,
     /// VG R3 piece 1 step P1-2 — whether the pyramid was ARMED when these targets were built.
     ///
     /// A STORED field for exactly the reason [`Self::aa_arm`] is one: [`Self::sync_gbuffer`]'s
@@ -1646,6 +1668,56 @@ impl HzbTargets {
 #[inline]
 const fn hzb_arm_matches_allocation(hzb_arm: bool, allocated: bool) -> bool {
     hzb_arm == allocated
+}
+
+/// VG R3 piece 3 step P3-1 (plan D7) — the description of [`GBufferTargets::hzb_null`], the 1×1
+/// placeholder bound at the cull's pyramid binding on every boot the pyramid is DISARMED on.
+///
+/// Named rather than written as a literal inside [`GBufferTargets::boot_seed_hzb_null`] so the two
+/// properties nothing else in the tree can check on a CPU-only run — the usage bits and the
+/// single-mip 1×1 shape — are reachable by a unit test ([`hzb_null_desc_is_bindable_and_seedable`]
+/// is the predicate; the test drives THAT, not a second copy of these numbers).
+///
+/// * `SAMPLED` is what makes the `SampledImageAtGeneral` descriptor write legal
+///   (`VUID-VkWriteDescriptorSet-descriptorType-00337`: a `SAMPLED_IMAGE` descriptor's image must
+///   have been created with `VK_IMAGE_USAGE_SAMPLED_BIT`).
+/// * `TRANSFER_DST` is what makes the boot CLEAR legal — and the clear is not decoration: a bare
+///   layout transition leaves the texel's VALUE undefined, and the disarmed path may still ISSUE
+///   the load (DXC is free to lower a `? :` to an eager fetch plus an `OpSelect`). `0.0` is the
+///   reverse-Z far plane, so even a value that reaches a verdict provably rejects nothing.
+/// * 1×1 with ONE mip is what makes the disarmed load in RANGE by ADDRESS: the cull's reader (step
+///   P3-4) clamps its four coordinates and its level to 0 unconditionally on the disarmed path, and
+///   `(0, 0, 0)` is inside a 1×1 single-mip image. The clamp is structural, never derived from a
+///   uniform, so this shape is the whole of that argument. `STORAGE` is deliberately absent —
+///   nothing writes this image after the clear.
+///
+/// A fn rather than a `const` only because [`ImageUsage`]'s `|` is a plain `BitOr` impl, which is
+/// not callable in a const initializer; nothing about the value is dynamic.
+#[inline]
+fn hzb_null_desc() -> TextureDesc {
+    TextureDesc {
+        width: 1,
+        height: 1,
+        depth: 1,
+        format: Format::R32Sfloat,
+        dimension: TextureDimension::D2,
+        usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
+        array_layers: 1,
+        mip_levels: 1,
+        view_format: None,
+    }
+}
+
+/// VG R3 piece 3 step P3-1 (plan D7) — the two-part invariant [`hzb_null_desc`] must satisfy for
+/// [`GBufferTargets::boot_seed_hzb_null`] to be able to do BOTH halves of its job: bind the image
+/// as a sampled descriptor (`SAMPLED`) and clear it to a value (`TRANSFER_DST`).
+///
+/// A named `const fn` for [`hzb_arm_matches_allocation`]'s reason: the unit test that characterises
+/// it must drive the predicate production depends on, so that dropping a usage bit reds a test
+/// instead of surfacing as a validation message on a GPU nobody runs the disarmed pin against.
+#[inline]
+const fn hzb_null_desc_is_bindable_and_seedable(desc: &TextureDesc) -> bool {
+    desc.usage.contains(ImageUsage::SAMPLED) && desc.usage.contains(ImageUsage::TRANSFER_DST)
 }
 
 /// Anti-aliasing campaign: which AA mode [`GBufferTargets`] is CURRENTLY armed for —
@@ -2994,9 +3066,13 @@ impl DeferredSets {
     /// fully-built prior set destroyed (reverse acquisition); the orchestrator owns the image
     /// rings, which it tears down on this method's `Err`.
     ///
-    /// `#[allow(clippy::too_many_arguments)]`: `forward` (rung R-SDFFWD) joins the existing
-    /// AA-bundle params — every argument is a distinct borrow the sets bind; grouping them into
-    /// a struct would only move the argument list (the SAME rationale
+    /// `hzb_null` (VG R3 step P3-1) is the caller's 1×1 pyramid placeholder, already cleared and in
+    /// `GENERAL`; it is threaded here because `vb_cull_set` is built in this function and binds it
+    /// from step P3-2 on.
+    ///
+    /// `#[allow(clippy::too_many_arguments)]`: `forward` (rung R-SDFFWD) and `hzb_null` (VG R3
+    /// P3-1) join the existing AA-bundle params — every argument is a distinct borrow the sets
+    /// bind; grouping them into a struct would only move the argument list (the SAME rationale
     /// `build_shadow_denoise_sets`'s own `#[allow]` documents).
     #[allow(clippy::too_many_arguments)]
     fn build(
@@ -3016,7 +3092,24 @@ impl DeferredSets {
         // value (`Some` iff `TargetsProfile::VbMesh`, the SAME gate `vb` uses) — needed for
         // `vb_set0`'s new `b7` binding (`gclassify[i]`, bound-but-unread this rung).
         vb_classify: Option<&VbClassifyTargets>,
+        // VG R3 piece 3 step P3-1 (plan D7): [`GBufferTargets::hzb_null`], minted + cleared +
+        // transitioned by the caller immediately before this call. UNCONDITIONAL (not an `Option`)
+        // — every boot has one, because `vb_cull_set`'s entry list has fixed arity and the pyramid
+        // binding needs a valid descriptor on the boots where no pyramid exists. Step P3-2 widens
+        // `vb_cull_layout` and writes it at @9; until then this parameter exists to fix the ORDER
+        // (the image must be constructed before the sets that bind it) and to carry the check
+        // below.
+        hzb_null: &VulkanTexture,
     ) -> Result<DeferredSets, SwapchainError> {
+        // The address half of D7's in-range argument, checked at the seam where the image is handed
+        // to the set builder: the disarmed reader clamps its coordinates AND its level to 0, and
+        // `(0, 0, 0)` is in range only because this image is 1×1 with a single mip. A future
+        // resize of the placeholder would silently invalidate that argument, and no other CPU-side
+        // gate looks at this image at all.
+        debug_assert_eq!(
+            hzb_null.mip_levels, 1,
+            "invariant: hzb_null is single-mip (D7: the clamped (0, 0, 0) load must be in range)"
+        );
         // The marcher vocabulary set, written ONCE here (NO per-frame update). The
         // entry order matches the layout: SSBO @0, sampled depth @1, storage albedo @2,
         // storage normal @3, storage material @4, UNIFORM camera @5, STORAGE tiles @6,
@@ -6974,6 +7067,155 @@ impl GBufferTargets {
         record
     }
 
+    /// VG R3 piece 3 step P3-1 (plan D7) — mints [`Self::hzb_null`] and puts it through ONE
+    /// encoder that clears it to `0.0` and leaves it in `GENERAL`
+    /// (`UNDEFINED` → `TRANSFER_DST_OPTIMAL` → clear → `GENERAL`), fence-waited. Returns the
+    /// ready-to-bind image, or `Err` with nothing allocated.
+    ///
+    /// # Why this helper is UNCONDITIONAL, and why it cannot live in `HzbTargets::build`
+    ///
+    /// `hzb_null` is minted on EVERY boot, because the cull's descriptor set binds SOMETHING at the
+    /// pyramid's binding on every boot — the pyramid itself when it is armed, this 1×1 image when it
+    /// is not. [`HzbTargets::build`]'s FIRST statement is the armed-only 0%-gate (`scene.hzb ==
+    /// None` ⇒ `Ok(None)`, before any encoder or fence exists), so anything folded into that
+    /// function is armed-only by construction. Folding the two — "one encoder, two images" — would
+    /// therefore leave `hzb_null` in `UNDEFINED` on every DISARMED boot, which is all but one of the
+    /// committed golden pins, under a descriptor that records `GENERAL` — from step P3-2, at every
+    /// cull dispatch, on the configuration that always runs.
+    ///
+    /// The precedent for paying a whole boot submit for a layout nothing dynamically reads yet is
+    /// `boyko_app::gpu_scene::csm`'s `seed_boot_layouts`, and it states the reason: a module that
+    /// STATICALLY references a binding makes the descriptor's recorded layout a validation
+    /// obligation whether or not the load is dynamically reached.
+    ///
+    /// # Why it is CLEARED rather than only transitioned
+    ///
+    /// A transition alone leaves the texel's VALUE undefined, and the disarmed path may still issue
+    /// the load: DXC is free to lower a `? :` into an eager fetch plus an `OpSelect`, so "no tap is
+    /// issued" cannot be a property of an evaluation rule. `0.0` is the reverse-Z FAR plane — the
+    /// same value `VB_DEPTH_CLEAR` and the pyramid's own boot clear use — so even a value that does
+    /// reach a verdict provably rejects nothing. The safety argument is then two-layered: in range
+    /// by ADDRESS (1×1, single mip, coordinates clamped to 0) *and* conservative by VALUE.
+    ///
+    /// # Degrade policy
+    ///
+    /// None: any failure propagates and the image is destroyed here, so the caller inherits nothing
+    /// to drain. Same class as every other `create_*` failure in [`Self::create`].
+    fn boot_seed_hzb_null(ctx: &VulkanContext) -> Result<VulkanTexture, SwapchainError> {
+        let desc = hzb_null_desc();
+        debug_assert!(
+            hzb_null_desc_is_bindable_and_seedable(&desc),
+            "invariant: hzb_null needs SAMPLED (the descriptor write) and TRANSFER_DST (this clear)"
+        );
+        let hzb_null = RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)?;
+
+        let mut encoder = match RhiDevice::create_command_encoder(ctx) {
+            Ok(e) => e,
+            Err(e) => {
+                // SAFETY: `hzb_null` was just created on `ctx` and no view of it and no submission
+                // references it (nothing has been recorded yet); destroyed once, by value.
+                unsafe { RhiDevice::destroy_texture(ctx, hzb_null) };
+                return Err(SwapchainError::DepthImage(e));
+            }
+        };
+        let fence = match RhiDevice::create_fence(ctx, false) {
+            Ok(f) => f,
+            Err(e) => {
+                // SAFETY: `encoder` was just created on `ctx` and never submitted; `hzb_null` was
+                // created on `ctx` and is referenced by nothing. Each is moved by value ⇒ destroyed
+                // exactly once, the encoder before the image it never recorded against.
+                unsafe {
+                    RhiDevice::destroy_command_encoder(ctx, encoder);
+                    RhiDevice::destroy_texture(ctx, hzb_null);
+                }
+                return Err(SwapchainError::DepthImage(e));
+            }
+        };
+
+        // The whole image: one COLOR mip, one layer (per `hzb_null_desc`).
+        let range = ImageSubresourceRange {
+            aspect: ImageAspect::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+
+        let record = (|| -> Result<(), SwapchainError> {
+            encoder.begin().map_err(SwapchainError::DepthImage)?;
+
+            // UNDEFINED → TRANSFER_DST_OPTIMAL (a fresh image has no prior contents, so UNDEFINED
+            // discards — this is the clear destination).
+            encoder.image_barrier(&ImageBarrierDesc {
+                texture: &hzb_null,
+                src_stage: BarrierStage::TOP_OF_PIPE,
+                dst_stage: BarrierStage::TRANSFER,
+                src_access: BarrierAccess::NONE,
+                dst_access: BarrierAccess::TRANSFER_WRITE,
+                old_layout: ImageLayout::Undefined,
+                new_layout: ImageLayout::TransferDstOptimal,
+                range,
+            });
+
+            // `0.0` — the reverse-Z far plane (see this fn's doc). Only the R channel is meaningful
+            // (`R32_SFLOAT`); the rest are written as zero because `clear_color_image` takes the
+            // full `[f32; 4]`.
+            encoder.clear_color_image(&hzb_null, ImageLayout::TransferDstOptimal, [0.0; 4], range);
+
+            // TRANSFER_DST_OPTIMAL → GENERAL, made available to COMPUTE_SHADER/SHADER_READ. The
+            // fence wait below signals the CPU only, so the first dispatch that binds this image
+            // must still see the clear; `GENERAL` is additionally the layout its descriptor records
+            // (`BindGroupEntry::SampledImageAtGeneral`), and this is the ONLY producer of that
+            // layout — no framegraph pass ever names this image.
+            encoder.image_barrier(&ImageBarrierDesc {
+                texture: &hzb_null,
+                src_stage: BarrierStage::TRANSFER,
+                dst_stage: BarrierStage::COMPUTE_SHADER,
+                src_access: BarrierAccess::TRANSFER_WRITE,
+                dst_access: BarrierAccess::SHADER_READ,
+                old_layout: ImageLayout::TransferDstOptimal,
+                new_layout: ImageLayout::General,
+                range,
+            });
+
+            encoder.end().map_err(SwapchainError::DepthImage)?;
+            let queue = ctx.rhi_queue();
+            queue.submit(&encoder, &fence).map_err(SwapchainError::DepthImage)?;
+            RhiDevice::wait_fence(ctx, &fence, u64::MAX).map_err(SwapchainError::DepthImage)?;
+            Ok(())
+        })();
+
+        // On the error path the submit may have been issued and only THEN faulted (a failed
+        // `wait_fence` is exactly that case), so a queue operation can still reference both the
+        // encoder and the image. Drain first — the same belt-and-braces `HzbTargets::build` applies
+        // around its own failed boot clear, hoisted inside here because this fn owns the image as
+        // well as the transients.
+        if record.is_err() {
+            let _ = RhiDevice::wait_idle(ctx);
+        }
+
+        // Tear down the setup-class transients on EVERY path.
+        // SAFETY: encoder/fence were created on `ctx`; the encoder's only submission (if one was
+        // reached at all) has completed — fence-waited on the Ok path, device-drained on the Err
+        // path — so no GPU work references either, and each is moved by value ⇒ destroyed exactly
+        // once.
+        unsafe {
+            RhiDevice::destroy_command_encoder(ctx, encoder);
+            RhiDevice::destroy_fence(ctx, fence);
+        }
+
+        match record {
+            Ok(()) => Ok(hzb_null),
+            Err(e) => {
+                // SAFETY: `hzb_null` was created on `ctx` in this fn; the device was drained above,
+                // so no submission still references it, and it is moved by value ⇒ destroyed
+                // exactly once. No separate view of it exists (the texture owns its own).
+                unsafe { RhiDevice::destroy_texture(ctx, hzb_null) };
+                Err(e)
+            }
+        }
+    }
+
     /// Allocates the depth + MRT G-buffer images at `extent` and writes the marcher
     /// vocabulary set + the present-sample set against them (ONCE). The caller
     /// ([`GBufferTargets::sync_gbuffer`]) destroys any prior targets + waits idle
@@ -7214,6 +7456,44 @@ impl GBufferTargets {
         let cluster_grid_buf = scene.cluster_grid.unwrap_or(scene.light_table);
         let light_index_buf = scene.light_index.unwrap_or(scene.light_table);
 
+        // === VG R3 piece 3 step P3-1: the DISARMED-path pyramid placeholder (plan D7). ===
+        //
+        // Minted UNCONDITIONALLY and IMMEDIATELY before `DeferredSets::build`, because that is what
+        // builds `vb_cull_set` and the cull binds a pyramid-shaped descriptor on every boot — the
+        // real pyramid when it is armed, this 1×1 image when it is not. It depends on no extent, no
+        // profile and no field of the bundle being assembled, so it is constructible at the
+        // earliest point its consumer needs it, and that is where it is put.
+        //
+        // Its own encoder/fence/submit are self-draining (`boot_seed_hzb_null` returns `Err` with
+        // nothing allocated), so this arm tears down exactly what the `DeferredSets::build` arm
+        // below tears down and nothing more.
+        let hzb_null = match Self::boot_seed_hzb_null(ctx) {
+            Ok(t) => t,
+            Err(e) => {
+                // SAFETY: `smaa_imgs` + `aa_imgs` + the SSAO à-trous ring images + the shadow-vis
+                // images (hwrt) + `core` were built above on `ctx`, referenced by no submission;
+                // each destroyed exactly once, reverse acquisition (smaa_imgs → aa_imgs →
+                // ssao_atrous_imgs → shadow-vis → core).
+                unsafe {
+                    if let Some(s) = smaa_imgs {
+                        s.destroy(ctx);
+                    }
+                    if let Some(a) = aa_imgs {
+                        a.destroy(ctx);
+                    }
+                    if let Some(s) = ssao_atrous_imgs {
+                        s.destroy(ctx);
+                    }
+                    #[cfg(feature = "hwrt")]
+                    if let Some(v) = shadow_vis_imgs {
+                        v.destroy(ctx);
+                    }
+                    core.destroy(ctx);
+                }
+                return Err(e);
+            }
+        };
+
         let deferred = match DeferredSets::build(
             ctx,
             scene,
@@ -7225,14 +7505,18 @@ impl GBufferTargets {
             forward.as_ref(),
             vb.as_ref(),
             vb_classify.as_ref(),
+            &hzb_null,
         ) {
             Ok(s) => s,
             Err(e) => {
-                // SAFETY: `smaa_imgs` + `aa_imgs` + the SSAO à-trous ring images + the shadow-vis
-                // images (hwrt) + `core` were built above on `ctx`, referenced by no submission;
-                // each destroyed exactly once, reverse acquisition (smaa_imgs → aa_imgs →
-                // ssao_atrous_imgs → shadow-vis → core).
+                // SAFETY: `hzb_null` + `smaa_imgs` + `aa_imgs` + the SSAO à-trous ring images + the
+                // shadow-vis images (hwrt) + `core` were built above on `ctx`, referenced by no
+                // submission (`hzb_null`'s own boot submit was fence-waited before it was
+                // returned); each destroyed exactly once, reverse acquisition (hzb_null →
+                // smaa_imgs → aa_imgs → ssao_atrous_imgs → shadow-vis → core). `DeferredSets::build`
+                // already drained its own partial sets, so no set retains `hzb_null`'s view.
                 unsafe {
+                    RhiDevice::destroy_texture(ctx, hzb_null);
                     if let Some(s) = smaa_imgs {
                         s.destroy(ctx);
                     }
@@ -7287,14 +7571,17 @@ impl GBufferTargets {
             ),
             Ok(None) => (None, None, None, None),
             Err(e) => {
-                // SAFETY: the deferred sets + `smaa_imgs` + `aa_imgs` + the SSAO à-trous ring
-                // images + the shadow-vis images + `core` were built above on `ctx`, referenced
-                // by no submission; each is destroyed exactly once, in reverse acquisition order
-                // (deferred sets → smaa_imgs → aa_imgs → ssao_atrous_imgs → shadow-vis → core).
-                // `build_shadow_denoise_sets` already drained its OWN partial allocations before
-                // returning `Err`.
+                // SAFETY: the deferred sets + `hzb_null` + `smaa_imgs` + `aa_imgs` + the SSAO
+                // à-trous ring images + the shadow-vis images + `core` were built above on `ctx`,
+                // referenced by no submission; each is destroyed exactly once, in reverse
+                // acquisition order (deferred sets → hzb_null → smaa_imgs → aa_imgs →
+                // ssao_atrous_imgs → shadow-vis → core). The deferred sets go BEFORE `hzb_null`
+                // because a descriptor set retains the image view it was written with by raw
+                // handle. `build_shadow_denoise_sets` already drained its OWN partial allocations
+                // before returning `Err`.
                 unsafe {
                     deferred.destroy(ctx);
+                    RhiDevice::destroy_texture(ctx, hzb_null);
                     if let Some(s) = smaa_imgs {
                         s.destroy(ctx);
                     }
@@ -7329,14 +7616,17 @@ impl GBufferTargets {
         ) {
             Ok(v) => v,
             Err(e) => {
-                // SAFETY: the deferred sets + `smaa_imgs` + `aa_imgs` + the SSAO à-trous ring
-                // images + the shadow-vis images (hwrt) + `core` were built above on `ctx`,
-                // referenced by no submission; each destroyed exactly once, reverse acquisition
-                // (deferred sets → smaa_imgs → aa_imgs → ssao_atrous_imgs → shadow-vis → core).
+                // SAFETY: the deferred sets + `hzb_null` + `smaa_imgs` + `aa_imgs` + the SSAO
+                // à-trous ring images + the shadow-vis images (hwrt) + `core` were built above on
+                // `ctx`, referenced by no submission; each destroyed exactly once, reverse
+                // acquisition (deferred sets → hzb_null → smaa_imgs → aa_imgs → ssao_atrous_imgs →
+                // shadow-vis → core). The deferred sets go BEFORE `hzb_null` because a descriptor
+                // set retains the image view it was written with by raw handle.
                 // `build_ssao_atrous_sets` already drained its OWN partial allocations before
                 // returning `Err`.
                 unsafe {
                     deferred.destroy(ctx);
+                    RhiDevice::destroy_texture(ctx, hzb_null);
                     if let Some(s) = smaa_imgs {
                         s.destroy(ctx);
                     }
@@ -7913,6 +8203,10 @@ impl GBufferTargets {
             forward,
             vb,
             vb_classify,
+            // VG R3 piece 3 step P3-1: minted + cleared + transitioned ABOVE, before the deferred
+            // sets, because those are what bind it. Unconditional on both arms — see the field's
+            // own doc for why the disarmed boot is the path it exists for.
+            hzb_null,
             // VG R3 piece 1 step P1-2: the pyramid itself is allocated BELOW, after this literal
             // (see the placement argument there); the arm is captured HERE, from the scene, so the
             // stored bit and the allocation can only disagree if the build fails — which returns.
@@ -8328,6 +8622,13 @@ impl GBufferTargets {
                 downsample_set: self.downsample_set,
             }
             .destroy(ctx);
+            // VG R3 piece 3 step P3-1: the disarmed-path pyramid placeholder — acquired
+            // IMMEDIATELY BEFORE the deferred sets above (its only consumer), so destroyed
+            // immediately after them. The order is load-bearing, not cosmetic: `vb_cull_set`
+            // retains this image's view by raw `VkImageView` handle, and destroying an image with a
+            // live view of it is `VUID-vkDestroyImage-image-01000`. UNCONDITIONAL on both arms —
+            // every generation mints one.
+            RhiDevice::destroy_texture(ctx, self.hzb_null);
             // HW-RT Rung 3b: the three temporal denoise target RINGS (motion_vec / hist /
             // temporal_out), built LAST so destroyed FIRST in reverse-acquisition order. `Option`-
             // guarded (degrade-to-None on an unsupported device), each a
@@ -8719,6 +9020,7 @@ mod tests {
             forward: None,
             vb: None,
             vb_classify: None,
+            hzb_null: null_texture(),
             hzb: None,
             hzb_arm: false,
             extent: VkExtent2D::default(),
@@ -8828,6 +9130,7 @@ mod tests {
             forward: None,
             vb: None,
             vb_classify: None,
+            hzb_null: null_texture(),
             hzb: None,
             hzb_arm: false,
             extent: VkExtent2D::default(),
@@ -9006,6 +9309,80 @@ mod tests {
             "CONTROL: the Ok(None) degrade must FAIL the lockstep predicate. If it passes, the \
              assert at the end of GBufferTargets::create cannot see the degrade, and D2's \
              'the safety net is the thing that fires' is unsupported"
+        );
+    }
+
+    /// VG R3 piece 3 step P3-1 (plan D7) — `hzb_null`'s description, CHARACTERISED rather than
+    /// merely exercised.
+    ///
+    /// Two claims, and both are load-bearing on the DISARMED path, which is every committed golden
+    /// pin but one:
+    ///
+    /// * **The usage bits.** `SAMPLED` is what makes the `SampledImageAtGeneral` descriptor write
+    ///   legal; `TRANSFER_DST` is what makes the boot clear legal. Drop either and the defect is a
+    ///   validation message on a GPU run of a pin nobody suspects, not a red test — so the
+    ///   predicate is driven over ALL FOUR combinations, not only the one the shipped desc is in.
+    ///   The three refused rows are the CONTROL: if the predicate accepted a desc with a bit
+    ///   missing it would be a tautology, and "the usage bits are checked" would be untrue.
+    /// * **The shape.** 1×1 with ONE mip is the whole of D7's in-range-by-ADDRESS argument: the
+    ///   disarmed reader clamps its four coordinates and its level to 0 unconditionally, and
+    ///   `(0, 0, 0)` is inside the image only for exactly this shape.
+    ///
+    /// It constructs no device, so it does not exercise the clear itself — it drives the
+    /// description production creates the image from, which is the part a future edit could change
+    /// without any other CPU-side gate noticing.
+    #[test]
+    fn hzb_null_desc_carries_both_usage_bits_and_the_shape_the_in_range_argument_needs() {
+        let desc = hzb_null_desc();
+        assert!(
+            hzb_null_desc_is_bindable_and_seedable(&desc),
+            "the shipped hzb_null desc must satisfy the predicate boot_seed_hzb_null asserts"
+        );
+
+        for (usage, expected, why) in [
+            (ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST, true, "the shipped pair"),
+            (
+                ImageUsage::SAMPLED,
+                false,
+                "CONTROL: without TRANSFER_DST the boot clear is illegal, and the placeholder is \
+                 then safe by ADDRESS only — its VALUE is whatever the allocator left",
+            ),
+            (
+                ImageUsage::TRANSFER_DST,
+                false,
+                "CONTROL: without SAMPLED the SampledImageAtGeneral write is illegal \
+                 (VUID-VkWriteDescriptorSet-descriptorType-00337) at every boot that binds it",
+            ),
+            (ImageUsage::NONE, false, "CONTROL: neither bit"),
+        ] {
+            let probe = TextureDesc { usage, ..desc };
+            assert_eq!(
+                hzb_null_desc_is_bindable_and_seedable(&probe),
+                expected,
+                "usage bits {:#x}: {why}",
+                usage.bits()
+            );
+        }
+
+        assert_eq!(
+            (desc.width, desc.height, desc.depth),
+            (1, 1, 1),
+            "D7: the disarmed load's clamped (0, 0) coordinate is in range only for a 1x1 image"
+        );
+        assert_eq!(
+            desc.mip_levels, 1,
+            "D7: the disarmed load's clamped level 0 is in range only for a single-mip image"
+        );
+        assert_eq!(desc.array_layers, 1, "the placeholder is single-layer, like the pyramid");
+        assert_eq!(
+            desc.format,
+            Format::R32Sfloat,
+            "the placeholder must read back as the pyramid does — one float per texel"
+        );
+        assert!(
+            !desc.usage.contains(ImageUsage::STORAGE),
+            "nothing writes this image after the boot clear; STORAGE would advertise a producer \
+             that does not exist"
         );
     }
 }
