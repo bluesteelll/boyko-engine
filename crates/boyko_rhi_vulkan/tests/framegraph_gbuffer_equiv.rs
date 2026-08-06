@@ -12,16 +12,16 @@ use std::fmt::Write as _;
 
 use boyko_rhi_vulkan::ffi::{
     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-    VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-    VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_ASPECT_DEPTH_BIT,
+    VK_ACCESS_INDIRECT_COMMAND_READ_BIT, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+    VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_ASPECT_DEPTH_BIT,
     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
     VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_UNDEFINED,
     VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+    VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+    VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
 };
 use boyko_rhi_vulkan::framegraph::{
     BufBarrier, FrameGraph, ImgBarrier, PassBarrierRange, ResId, ResSync, SubRange,
@@ -559,12 +559,17 @@ fn interp_prepass_adds_exactly_one_shared_ring_compute_to_vertex_barrier() {
     // The B3 interp SSBOs. `interp_model_out` (ResId 20 in `declare_deferred_graph` after the
     // SDFDDGI I2 buffer reshuffle — DDGI classification/ray-table occupy 16/17, so the interp
     // trio is 18/19/20) is the SHARED instance ring; `interp_pairs` is the host-written pair
-    // input. Both FIF-ringed / frame-private ⇒ `add_buffer` (undefined seed), so no cross-frame
+    // input. Both FIF-ringed / frame-private ⇒ an `undefined()` start state, so no cross-frame
     // ordering — only the intra-frame COMPUTE→VERTEX RAW is derived. ResIds are declared BEFORE
     // the interp pass (which accesses them), mirroring `declare_deferred_graph`. This test builds
     // its OWN local frame (not `declare_deferred_graph`), so the absolute ResId numbering does not
     // affect it — the note keeps the cross-reference accurate.
-    let interp_pairs = g.add_buffer("interp_pairs");
+    //
+    // VG R3 P2-8: `interp_pairs` takes the declarator's `add_buffer_seeded(.., undefined())`
+    // spelling, because it is HOST-filled and the `interp` pass below only READS it — a bare
+    // `add_buffer` now asserts an in-graph producer. `interp_model_out` stays bare: `interp`
+    // WRITES it. The seed value is unchanged, so the barrier counts asserted below are unmoved.
+    let interp_pairs = g.add_buffer_seeded("interp_pairs", ResSync::undefined());
     let interp_model_out = g.add_buffer("interp_model_out");
 
     // Pass `interp` — runs FIRST: reads pairs (first touch), writes the shared ring.
@@ -864,13 +869,23 @@ fn hwrt_resid_18_sink_slot_mapping_pinned() {
 }
 
 // ===========================================================================
-// `compile()`'s DEBUG-ONLY unwritten-transient-image-read authoring guard.
+// `compile()`'s DEBUG-ONLY unwritten-transient-read authoring guard.
 //
-// A mis-authored pass that READS a transient (non-seeded) image with no prior
+// A mis-authored pass that READS a transient (non-seeded) resource with no prior
 // producer/seed would otherwise silently derive a hazard-free `TOP_OF_PIPE`
 // barrier — a whole class of authoring regressions going uncaught. `compile`
-// tracks a per-resource written-or-seeded bit and `debug_assert!`s it holds
-// before a non-seeded transient IMAGE's first read.
+// tracks a per-`(ResId, mip)` written-or-seeded bit and `debug_assert!`s it holds
+// before a non-seeded transient resource's first read.
+//
+// VG R3 P2-8: the guard covers BUFFERS as well as images. It used to read
+// `!is_image || ..`, and P2-7 measured what that cost — deleting
+// `vb_indirect_late_upload`'s declared TRANSFER_WRITE from `declare_vb_graph`,
+// while the recorder still filled the buffer and `vb_raster_late` still fetched
+// from it, left the golden, the recorder probe, validation AND the barrier-stream
+// pin all GREEN. The discriminator is now the DECLARED PROVENANCE (`add_buffer`
+// versus `add_buffer_seeded`), not the resource kind: a host-filled buffer
+// legitimately has no in-graph producer, which is why dropping the kind test
+// blanket-wise (measured) reds `interp_pairs`.
 // ===========================================================================
 
 /// A pass reads a transient image that no prior pass wrote and that was never
@@ -889,7 +904,7 @@ fn hwrt_resid_18_sink_slot_mapping_pinned() {
 /// the DERIVED BARRIERS, which are release-live. This one still does — it gates a `debug_assert!`.)
 #[cfg(debug_assertions)]
 #[test]
-#[should_panic(expected = "reads transient image")]
+#[should_panic(expected = "reads UNWRITTEN transient image")]
 fn compile_panics_on_unwritten_transient_image_read() {
     let mut g = FrameGraph::with_capacity(4, 4, 4);
     let orphan = g.add_image("orphan");
@@ -961,6 +976,125 @@ fn compile_does_not_panic_on_seeded_resource_read_first() {
     );
 
     g.compile();
+}
+
+/// VG R3 P2-8 — THE BUFFER ARM, and the exact shape P2-7 measured every gate blind to.
+///
+/// A pass declares an indirect FETCH from a transient buffer that no pass declared a write
+/// to, and that was not declared with `add_buffer_seeded`. This is `vb_raster_late` reading
+/// `vb_indirect_late` with `vb_indirect_late_upload`'s TRANSFER_WRITE deleted — the
+/// production defect that left the `[vb_occ_split]` golden, the recorder probe, validation
+/// and the barrier-stream pin ALL GREEN. The guard must fire.
+///
+/// `cfg(debug_assertions)` for the same reason its image sibling carries it: the guard IS a
+/// `debug_assert!`, so in a release test binary `compile` correctly does not panic and a
+/// `should_panic` test would report a failure that is not one. CI runs a debug × release
+/// matrix, so the debug leg gates this.
+///
+/// The `expected` substring names the BUFFER arm specifically — the image arm's message says
+/// `transient image`, so neither fixture can be satisfied by the other's fire, and no
+/// unrelated panic (a bounds check, an arena assert) carries this phrase either.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "reads UNWRITTEN transient buffer")]
+fn compile_panics_on_unwritten_transient_buffer_read() {
+    let mut g = FrameGraph::with_capacity(4, 4, 4);
+    let indirect = g.add_buffer("vb_indirect_late");
+
+    g.add_pass("vb_raster_late");
+    g.buffer_access(
+        indirect,
+        VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+        VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+    );
+
+    g.compile();
+}
+
+/// The same two-pass graph with the declared writer PRESENT — the shipped
+/// `vb_indirect_late_upload` → `vb_raster_late` pair — must not trip the guard.
+///
+/// It asserts the DERIVED BARRIER rather than merely "no panic", which is what makes it
+/// non-vacuous: a fixture that only demanded silence would still pass if the guard were
+/// deleted outright. The pinned edge is `TRANSFER/TRANSFER_WRITE → DRAW_INDIRECT/
+/// INDIRECT_COMMAND_READ`, i.e. a src half that makes the fill AVAILABLE — the precise field
+/// the defect replaces with `(TOP_OF_PIPE, 0)`. Silence and a real barrier, together.
+#[test]
+fn compile_does_not_panic_when_a_pass_writes_the_buffer_before_the_read() {
+    let mut g = FrameGraph::with_capacity(4, 4, 4);
+    let indirect = g.add_buffer("vb_indirect_late");
+
+    g.add_pass("vb_indirect_late_upload");
+    g.buffer_access(indirect, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+
+    g.add_pass("vb_raster_late");
+    g.buffer_access(
+        indirect,
+        VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+        VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+    );
+
+    g.compile();
+
+    assert!(
+        has_buf(
+            g.buf_barriers(),
+            indirect,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+            VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+        ),
+        "a declared writer must derive the TRANSFER(WRITE)→DRAW_INDIRECT(FETCH) RAW that makes \
+         the fill available — the exact src half the unwritten-read defect drops to (TOP_OF_PIPE, 0)"
+    );
+    assert_eq!(
+        g.buf_barriers().len(),
+        1,
+        "exactly one buffer barrier: the first-touch WRITE needs none (nothing to order against), \
+         the read needs the RAW"
+    );
+}
+
+/// A buffer whose content comes from OUTSIDE the graph — the host-filled instance ring
+/// (`interp_pairs`, `vb_instance_ring`) — declared with `add_buffer_seeded` and READ FIRST,
+/// with no in-graph producer, must NOT trip the guard. This is the case that proved the
+/// exemption load-bearing: dropping the guard's kind test blanket-wise reds it.
+///
+/// Non-vacuous on the axis that matters for the three production conversions P2-8 made: it
+/// pins the derived edge FIELD BY FIELD as `(TOP_OF_PIPE, 0) → (COMPUTE, SHADER_READ)` —
+/// verbatim what the bare `add_buffer` spelling derived before the conversion, since the seed
+/// VALUE is `ResSync::undefined()` either way. So this fixture asserts the conversion is inert
+/// on the barrier stream, not merely that it silences an assert; a seed that actually changed
+/// the start state would move `src_stage` here and fail.
+#[test]
+fn compile_does_not_panic_on_seeded_buffer_read_first() {
+    let mut g = FrameGraph::with_capacity(4, 4, 4);
+    let ring = g.add_buffer_seeded("vb_instance_ring", ResSync::undefined());
+
+    g.add_pass("vb_batch_cull");
+    g.buffer_access(ring, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+
+    g.compile();
+
+    assert!(
+        has_buf(
+            g.buf_barriers(),
+            ring,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0,
+            VK_ACCESS_SHADER_READ_BIT,
+        ),
+        "an `undefined()`-seeded buffer must still derive the SAME first-touch \
+         TOP_OF_PIPE→COMPUTE edge the bare `add_buffer` derived — the seeded bit is a \
+         provenance declaration, not a state change"
+    );
+    assert_eq!(
+        g.buf_barriers().len(),
+        1,
+        "the seed adds no barrier of its own"
+    );
 }
 
 // ===========================================================================

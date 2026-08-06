@@ -1032,13 +1032,26 @@ impl Renderer<'_> {
         // writes this frame's slot of `interp_pairs` + `interp_out_slot`, the interp compute
         // writes the DYNAMIC slots of the SHARED `interp_model_out` (the instance ring), and the
         // raster/shadow VS read the SAME `interp_model_out` slot — a sibling in-flight frame
-        // touches a DIFFERENT slot. So they start `undefined()` (plain `add_buffer`, NOT seeded):
-        // no cross-frame WAR/WAW hazard, only the intra-frame COMPUTE→VERTEX RAW the graph derives
-        // at the raster (the model_out reader).
+        // touches a DIFFERENT slot. All three therefore START `undefined()`: no cross-frame
+        // WAR/WAW hazard, only the intra-frame COMPUTE→VERTEX RAW the graph derives at the raster
+        // (the model_out reader).
+        //
+        // VG R3 P2-8 — WHY THE FIRST TWO ARE `add_buffer_seeded(.., undefined())` AND THE THIRD IS
+        // NOT. The seed is now the framegraph's PROVENANCE declaration, not just a cross-frame
+        // start state (`graph.rs::add_buffer`'s contract): a bare `add_buffer` promises this graph
+        // WRITES the resource before reading it, and `compile`'s debug guard enforces that for
+        // buffers as of P2-8. `interp_pairs`/`interp_out_slot` are filled by the HOST into
+        // host-coherent memory and only READ in this graph (the `interp` pass below is their sole
+        // access, and it is a read) — the submit's host-write → device-domain dependency is what
+        // orders them, so they have no in-graph producer BY DESIGN and must say so. That is the
+        // exact case the blanket "drop the kind test" experiment reddened, which is what proved the
+        // exemption load-bearing. `interp_model_out` keeps the bare `add_buffer`: the `interp`
+        // compute WRITES it here, before every reader. The seed VALUE is `undefined()` in both
+        // spellings, so not one derived barrier field moves.
         let (interp_pairs, interp_out_slot, interp_model_out) = if scene.interp.is_some() {
             (
-                Some(g.add_buffer("interp_pairs")),
-                Some(g.add_buffer("interp_out_slot")),
+                Some(g.add_buffer_seeded("interp_pairs", ResSync::undefined())),
+                Some(g.add_buffer_seeded("interp_out_slot", ResSync::undefined())),
                 Some(g.add_buffer("interp_model_out")),
             )
         } else {
@@ -2031,7 +2044,10 @@ impl Renderer<'_> {
         // buffer, not two distinct rings (unlike a hypothetical design with a separate model_out
         // ring — this codebase has none; `interp.rs`'s own doc: "model_out_buffer is the SHARED
         // instance ring slot"). Frame-private (a sibling in-flight frame touches a DIFFERENT ring
-        // slot), so `add_buffer` (undefined).
+        // slot), so `add_buffer` (undefined) — and it stays a BARE `add_buffer` under VG R3 P2-8's
+        // provenance contract because this graph does produce it: `interp`'s COMPUTE write below is
+        // declared under `scene.interp.is_some()`, the SAME predicate that gates every declared
+        // read of it (`depth_prepass`, `forward_opaque`), so no frame reads it unproduced.
         let light_table = g.add_buffer_seeded(
             "light_table",
             ResSync::seeded_readers(VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
@@ -2716,10 +2732,13 @@ pub(crate) struct VbPassPlan {
     /// that makes the fill neither available nor visible. On frame 1, over freshly allocated
     /// DEVICE_LOCAL memory, `instanceCount` is then arbitrary, `firstInstance` may be nonzero with
     /// `drawIndirectFirstInstance` VK_FALSE and `robustBufferAccess` off, and the scope this whole
-    /// piece claims draws nothing, draws. Nothing else catches that: `graph.rs`'s unwritten-read
-    /// backstop waves a BUFFER read with no producer through by construction (and lives under
-    /// `debug_assertions`), and a barrier COUNT cannot see it either — the defective shape derives
-    /// the SAME three barriers and differs only in `src_stage`/`src_access`.
+    /// piece claims draws nothing, draws. A barrier COUNT cannot see that — the defective shape
+    /// derives the SAME three barriers and differs only in `src_stage`/`src_access` — which is why
+    /// G4 asserts fields. Since VG R3 P2-8 `graph.rs`'s unwritten-read backstop catches it too: it
+    /// discriminates by declared PROVENANCE rather than resource kind, and `vb_indirect_late` is a
+    /// bare `add_buffer`, so dropping this pass's write fires a `debug_assert!` in every
+    /// dev-profile run. (It waved every BUFFER read through until then — P2-7 executed the
+    /// deletion and measured all four gates green.)
     pub(crate) vb_indirect_late_upload: Option<crate::framegraph::PassId>,
     /// VG rung R2c0: the per-BATCH draw-record cull compute pass (`vb_batch_cull.comp.hlsl`).
     /// Declared BETWEEN [`Self::vb_indirect_upload`] and [`Self::vb_raster`], which is what makes
@@ -3502,15 +3521,26 @@ impl Renderer<'_> {
 
         // --- Buffers (light_table=0, vb_instance_ring=1, gclassify=2). `light_table`'s seed
         // stage is COMPUTE for the SAME P1-1 reason as `cascade`/`atlas` above (`vb_resolve` is
-        // its reader, not a fragment shader). `vb_instance_ring`/`gclassify` are frame-private (a
-        // sibling in-flight frame touches a DIFFERENT ring slot), so `add_buffer` (undefined) — no
-        // `interp` producer this rung (V1 scope cut, `VbPassPlan`'s doc); `gclassify`'s own FIRST
-        // producer this frame is the `fill` pass (VB-P2 classification plan rung P2b).
+        // its reader, not a fragment shader). `vb_instance_ring`/`gclassify` are both
+        // frame-private (a sibling in-flight frame touches a DIFFERENT ring slot), so both START
+        // `undefined()` — no cross-frame WAR to seed against.
+        //
+        // VG R3 P2-8 — WHY THE RING IS `add_buffer_seeded(.., undefined())` AND `gclassify` IS A
+        // BARE `add_buffer`. The two spellings now declare PROVENANCE (`graph.rs::add_buffer`'s
+        // contract), and the two resources differ on exactly that: VB v1 has NO `interp` pass (the
+        // V1 scope cut, `VbPassPlan`'s doc), so `vb_instance_ring` is HOST-CPU-scattered into
+        // host-coherent memory and every one of its declared accesses in this graph is a READ —
+        // it has no in-graph producer by design, and the submit's host-write → device-domain
+        // dependency is what orders it. `gclassify`'s own FIRST producer this frame IS in the
+        // graph: the `vb_classify_fill` pass's TRANSFER_WRITE (VB-P2 classification plan rung
+        // P2b), declared under the same predicate as every reader of it. The seed VALUE is
+        // `undefined()`, i.e. what the bare declarator already used, so the derived stream —
+        // including the ring's `TOP_OF_PIPE → COMPUTE` first touch at the cull — is unmoved.
         let light_table = g.add_buffer_seeded(
             "light_table",
             ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
         );
-        let vb_instance_ring = g.add_buffer("vb_instance_ring");
+        let vb_instance_ring = g.add_buffer_seeded("vb_instance_ring", ResSync::undefined());
         let gclassify = g.add_buffer("gclassify");
         // Rung R9c (buffer ResIds 3/4): the DDGI classification + Fibonacci ray table — the
         // DEFERRED declarator's WAR seeds verbatim (single device-local instances; a cross-frame
@@ -3588,8 +3618,10 @@ impl Renderer<'_> {
         // existed. Step P2-5 added `vb_indirect_late_upload` (the TRANSFER write) and
         // `vb_raster_late` (the DRAW_INDIRECT read) TOGETHER, in one commit, because a declared
         // indirect read with no declared writer derives `(TOP_OF_PIPE, 0)` — a missing barrier, not
-        // a wasted one, and `graph.rs`'s unwritten-read backstop waves buffers through by
-        // construction.
+        // a wasted one, and at that time `graph.rs`'s unwritten-read backstop waved buffers through
+        // by construction. Since VG R3 P2-8 it does not: the BARE `add_buffer` here is now the
+        // declaration that this graph produces the buffer, and separating the two halves again
+        // fires `compile`'s `debug_assert!` instead of shipping silently.
         let vb_indirect_late = g.add_buffer("vb_indirect_late");
         // The buffer-side sibling of the `hzb_pyramid` assert above, and the buffer side is where
         // it matters more: a mis-keyed buffer barrier names a LIVE WRONG buffer (every sink slot
@@ -3815,11 +3847,14 @@ impl Renderer<'_> {
             // fetches from it in the SAME command buffer. Omit this half and the graph finds no
             // writer, takes the first-touch arm, and derives `(TOP_OF_PIPE, 0)`: an execution-only
             // edge that makes the update neither available nor visible. That is a MISSING barrier,
-            // not a wasted one, and nothing in this repository would report it — a buffer hazard is
-            // invisible to the goldens, to the validation layers, and to `robustBufferAccess` (off
-            // on this device); `graph.rs`'s unwritten-read backstop is `!is_image || is_write ||
-            // res_written[ri]`, so a BUFFER read with no producer is waved through by construction,
-            // and it lives under `debug_assertions` besides.
+            // not a wasted one, and until VG R3 P2-8 nothing in this repository would have reported
+            // it — a buffer hazard is invisible to the goldens, to the validation layers, and to
+            // `robustBufferAccess` (off on this device), and `graph.rs`'s unwritten-read backstop
+            // waved every buffer through by construction (`!is_image || ..`). P2-7 EXECUTED that
+            // deletion and measured all four gates GREEN, which is why P2-8 re-cut the backstop on
+            // declared PROVENANCE instead of kind: `vb_indirect_late` is a bare `add_buffer`, so
+            // deleting this access now trips `compile`'s debug_assert in every dev-profile run —
+            // and every golden run is one.
             //
             // ⚠️ AND THE BARRIER COUNT CANNOT SEE IT EITHER. Dropping this access leaves the late
             // scope's boundary at the SAME three barriers, differing only in `src_stage`/

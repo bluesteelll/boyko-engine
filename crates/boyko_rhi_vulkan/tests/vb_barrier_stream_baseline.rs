@@ -485,7 +485,15 @@ fn declare_vb_frame(row: VbRow) -> VbFrame {
         "light_table",
         ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
     );
-    let vb_instance_ring = g.add_buffer("vb_instance_ring");
+    // VG R3 P2-8: the ring is `add_buffer_seeded(.., undefined())`, mirroring the declarator —
+    // VB v1 has no `interp` pass, so the ring is HOST-scattered and every declared access to it
+    // in this replica (and in `declare_vb_graph`) is a READ. The seed VALUE is `undefined()`,
+    // the same state the bare declarator used, so every pinned row below is unmoved; what the
+    // spelling buys is that `compile`'s unwritten-read guard, which now covers buffers, does not
+    // fire on a resource whose content legitimately comes from outside the graph. `gclassify`
+    // stays bare here for the same reason it does in the declarator (its producer is in-graph);
+    // no pass in this replica names it at all.
+    let vb_instance_ring = g.add_buffer_seeded("vb_instance_ring", ResSync::undefined());
     let _gclassify = g.add_buffer("gclassify");
     let _ddgi_classification = g.add_buffer_seeded(
         "ddgi_classification",
@@ -4334,6 +4342,18 @@ fn s4_pins_the_re_sourced_later_depth_readers() {
 /// else would notice: `robustBufferAccess` is off, the validation layers do not track buffer
 /// hazards, synchronization validation is not live (P2-0), and the survivor list is currently the
 /// identity, so even a stale read paints the right picture.
+///
+/// # Why this body is now RELEASE-ONLY, and what runs in its place in debug
+///
+/// VG R3 P2-8 re-cut `graph.rs`'s unwritten-read guard from resource KIND to declared PROVENANCE,
+/// so a bare `add_buffer` with a declared reader and no declared writer is a `debug_assert!` fire.
+/// The corrupt frame below can therefore no longer be COMPILED in a dev-profile build — which is
+/// the improvement, not an obstacle. The claim this body makes (a count gate is green on the
+/// defect, a field gate is red) is a statement about the derived STREAM and stays pinned on the
+/// release leg, where the guard is compiled out; the debug leg gets
+/// `the_dropped_survivor_write_now_trips_the_framegraph_guard` below, which asserts the stronger
+/// property that the declaration is rejected outright. CI runs both legs.
+#[cfg(not(debug_assertions))]
 #[test]
 fn a_dropped_writer_keeps_every_count_and_moves_only_fields() {
     let faithful = declare_vb_frame(U1);
@@ -4400,6 +4420,28 @@ fn a_dropped_writer_keeps_every_count_and_moves_only_fields() {
     );
 }
 
+/// **The DEBUG-leg half of the control above** (VG R3 P2-8): the same corrupt frame, and the
+/// claim is now that it cannot be compiled at all.
+///
+/// `vb_visible_instance` is declared with a bare `add_buffer` — the provenance declaration that
+/// says "this graph writes it" — so a frame declaring `vb_raster`'s VERTEX read of it with the
+/// cull's `SHADER_WRITE` dropped trips `compile`'s unwritten-read `debug_assert!`. Before P2-8 the
+/// guard carried a `!is_image` term and this shape was waved through in every build, which is what
+/// made the release-leg sibling's field assertions the ONLY thing in the tree that could see it.
+///
+/// The `expected` substring names the BUFFER arm, so an unrelated panic — a bounds check, the
+/// layer-uniform invariant, the mip range check — cannot satisfy this test.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "reads UNWRITTEN transient buffer")]
+fn the_dropped_survivor_write_now_trips_the_framegraph_guard() {
+    let _ = declare_vb_frame(VbRow {
+        id: "U1 + RED CONTROL (cull's survivor-list write undeclared)",
+        red_control_drop_cull_survivor_write: true,
+        ..U1
+    });
+}
+
 /// **G4's R1 red control** (VG R3 piece 2 step P2-6) — the SAME defect class as the control above,
 /// on the resource piece 2 actually adds, and the one the plan names.
 ///
@@ -4410,10 +4452,22 @@ fn a_dropped_writer_keeps_every_count_and_moves_only_fields() {
 ///
 /// That is the whole reason G4 asserts fields: as round 1 specified it — "exactly two/three new
 /// barriers" — this gate would have gone **red on the correct implementation and green on the
-/// defective one**. And nothing else on this machine can see the defect: it changes no pixel
-/// (`instanceCount = 0` draws nothing either way), emits no validation message (measured: a
-/// genuine missing barrier produced the unchanged 19-message baseline and no `SYNC-HAZARD`), and
-/// the framegraph's own unwritten-read backstop is image-only and debug-only by construction.
+/// defective one**. And when this control was written nothing else on this machine could see the
+/// defect: it changes no pixel (`instanceCount = 0` draws nothing either way), emits no validation
+/// message (measured: a genuine missing barrier produced the unchanged 19-message baseline and no
+/// `SYNC-HAZARD`), and the framegraph's own unwritten-read backstop was image-only (`!is_image ||
+/// ..`) and debug-only by construction.
+///
+/// # What VG R3 P2-8 changed, and why this body is now RELEASE-ONLY
+///
+/// P2-8 re-cut that backstop on declared PROVENANCE rather than kind, so a bare `add_buffer` with
+/// a declared reader and no declared writer now fires a `debug_assert!` — the corrupt frame below
+/// cannot be compiled in a dev-profile build. The STREAM claim (count gate green, field gate red)
+/// is a statement about the derived barriers and stays pinned here, on the release leg where the
+/// guard is compiled out. The debug leg gets
+/// `the_dropped_late_upload_write_now_trips_the_framegraph_guard` below, which asserts the
+/// stronger property. CI runs both legs.
+#[cfg(not(debug_assertions))]
 #[test]
 fn a_dropped_late_upload_write_keeps_the_count_and_moves_only_fields() {
     let faithful = declare_vb_frame(S1);
@@ -4470,6 +4524,32 @@ fn a_dropped_late_upload_write_keeps_the_count_and_moves_only_fields() {
         "the CONSUMER side is unchanged by the defect — which is why only the source fields can \
          discriminate it"
     );
+}
+
+/// **The DEBUG-leg half of G4's R1 red control** (VG R3 P2-8), and the closing of the P2-7 hole
+/// this whole step exists for.
+///
+/// P2-7 EXECUTED exactly this corruption against the PRODUCTION declarator — deleting
+/// `vb_indirect_late_upload`'s declared `buffer_access(vb_indirect_late, TRANSFER,
+/// TRANSFER_WRITE)` in `declare_vb_graph` while the recorder still filled the buffer and
+/// `vb_raster_late` still fetched from it — and measured all four gates GREEN: the
+/// `[vb_occ_split]` golden, the recorder probe, validation, and this very barrier-stream pin
+/// (green because it is a hand-written REPLICA and cannot see the declarator changing shape).
+/// P2-8 makes the framegraph itself reject it: `vb_indirect_late` is a bare `add_buffer`, so a
+/// declared indirect fetch with no declared writer is a `debug_assert!` fire in every dev-profile
+/// run — and every golden run is one (`scripts/golden.ps1` shells a bare `cargo test`).
+///
+/// This fixture asserts it on the REPLICA, which is what a `cargo test` can reach; the production
+/// declarator takes the same guard through the same `compile`.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "reads UNWRITTEN transient buffer")]
+fn the_dropped_late_upload_write_now_trips_the_framegraph_guard() {
+    let _ = declare_vb_frame(VbRow {
+        id: "S1 + RED CONTROL R1 (late upload's transfer write undeclared)",
+        red_control_drop_late_upload_write: true,
+        ..S1
+    });
 }
 
 /// `compile()` is idempotent and a re-declared frame reproduces its own stream — so a divergence

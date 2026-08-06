@@ -171,11 +171,13 @@ pub struct FrameGraph {
     /// replicated across its mips) every compile.
     state: Vec<ResSync>,
     /// DEBUG-ONLY per-`(ResId, mip)` "written-or-seeded" bit for `compile`'s authoring
-    /// guard: a non-seeded transient IMAGE must be written by a prior pass before
-    /// its first read, or a mis-authored pass silently derives a hazard-free
-    /// `TOP_OF_PIPE` barrier instead of a caught bug (see `compile`). Cleared to
-    /// `res_seeded` every compile; entirely compiled out in release — `compile`
-    /// runs every frame, so the tracking must cost nothing there (Principle 1/7).
+    /// guard: a non-seeded transient resource — IMAGE OR BUFFER — must be written by
+    /// a prior pass before its first read, or a mis-authored pass silently derives a
+    /// hazard-free `TOP_OF_PIPE` barrier instead of a caught bug (see `compile`).
+    /// Cleared to `res_seeded` every compile — which is why the guard's condition
+    /// needs no separate `res_seeded` term: a seeded resource starts "written".
+    /// Entirely compiled out in release — `compile` runs every frame, so the tracking
+    /// must cost nothing there (Principle 1/7).
     ///
     /// MIP-WEIGHTED for the same reason `state` is, and it must stay in step with it: left
     /// per-`ResId`, a pure-read consumer of a mip its writer never wrote would be silent (the
@@ -333,7 +335,16 @@ impl FrameGraph {
         self.push_res(true, name, ResSync::undefined(), false, 1)
     }
 
-    /// Declare a BUFFER resource (no layout; ordering is flush/visibility only).
+    /// Declare a TRANSIENT BUFFER resource (no layout; ordering is flush/visibility only) —
+    /// one **this graph fills every frame**.
+    ///
+    /// That is a CONTRACT, not a description: since VG R3 P2-8 `compile`'s debug-only
+    /// authoring guard requires a pass declaring a WRITE to a bare `add_buffer` resource
+    /// before any pass declares a read of it. A buffer whose content comes from OUTSIDE the
+    /// graph (a host-filled ring, a cross-frame shared instance) is declared with
+    /// [`add_buffer_seeded`](FrameGraph::add_buffer_seeded) instead — pass
+    /// [`ResSync::undefined`] as the seed when it needs no cross-frame ordering, which marks
+    /// the provenance without changing the derived barrier stream by one field.
     #[inline]
     pub fn add_buffer(&mut self, name: &'static str) -> ResId {
         self.push_res(false, name, ResSync::undefined(), false, 1)
@@ -389,10 +400,17 @@ impl FrameGraph {
         self.push_res(true, name, seed, true, mips)
     }
 
-    /// Declare a NON-RINGED BUFFER shared by both in-flight frames (light table,
-    /// tiles, cluster grid/index/alloc): same cross-frame seeding as
-    /// [`add_image_seeded`](FrameGraph::add_image_seeded) (buffers have no
-    /// layout; the seed only strengthens the first access's src scope).
+    /// Declare a BUFFER whose content comes from OUTSIDE this graph: a non-ringed buffer
+    /// shared by both in-flight frames (light table, tiles, cluster grid/index/alloc), or a
+    /// per-frame ring the HOST fills (`interp_pairs`, `vb_instance_ring`). Same cross-frame
+    /// seeding as [`add_image_seeded`](FrameGraph::add_image_seeded) (buffers have no layout;
+    /// the seed only strengthens the first access's src scope).
+    ///
+    /// This is also what EXEMPTS the resource from `compile`'s debug-only unwritten-read
+    /// guard, which since VG R3 P2-8 covers buffers as well as images: a host-filled buffer
+    /// legitimately has no in-graph producer. Pass [`ResSync::undefined`] for one that needs
+    /// no cross-frame ordering either — the seeded bit is then the ONLY thing that changes,
+    /// so the derived barrier stream is identical to the bare `add_buffer` one.
     #[inline]
     pub fn add_buffer_seeded(&mut self, name: &'static str, seed: ResSync) -> ResId {
         self.push_res(false, name, seed, true, 1)
@@ -623,12 +641,54 @@ impl FrameGraph {
                 let mip_base = state_base + sub.base_mip as usize;
 
                 // DEBUG-ONLY authoring guard (release-neutral): a non-seeded
-                // transient IMAGE must be written by a prior pass before its first
-                // read, or a mis-authored pass silently derives a hazard-free
-                // `TOP_OF_PIPE` barrier below instead of surfacing as a caught bug.
-                // Ringed/seeded resources (`res_seeded`) are exempt — cross-frame
-                // content is intentional for them (the shadow-temporal history pool,
-                // the DDGI atlas, CSM cascade / shadow atlas, the shared buffers).
+                // transient resource — IMAGE **OR BUFFER** — must be written by a prior
+                // pass before its first read, or a mis-authored pass silently derives a
+                // hazard-free `TOP_OF_PIPE` barrier below instead of surfacing as a
+                // caught bug. Seeded resources (`res_seeded`) are exempt — content that
+                // arrives from outside this graph is intentional for them (the
+                // shadow-temporal history pool, the DDGI atlas, CSM cascade / shadow
+                // atlas, the cross-frame shared buffers, the host-filled instance rings).
+                //
+                // THE DISCRIMINATOR IS THE DECLARED PROVENANCE, NOT THE RESOURCE KIND.
+                // This condition used to read `!is_image || is_write || res_written[..]`,
+                // and the `!is_image` term waved EVERY buffer through. VG R3 P2-7
+                // measured what that costs (docs/VG-R3-P2-CAPABILITY-SPLIT-PLAN.md,
+                // "P2-7 — the corruptions, EXECUTED"): deleting the declared
+                // `buffer_access(vb_indirect_late, TRANSFER, TRANSFER_WRITE)` in
+                // `declare_vb_graph` — while the recorder still filled the buffer and
+                // `vb_raster_late` still fetched from it — left ALL FOUR gates GREEN (the
+                // `[vb_occ_split]` golden, the recorder probe, validation, and the
+                // barrier-stream pin). The graph took the first-touch arm and derived
+                // `src_stage = TOP_OF_PIPE, src_access = 0`, so the fill was neither
+                // available nor visible to the reader, and nothing in this repository
+                // can see a buffer hazard: it is invisible to the goldens, to the
+                // validation layers (synchronization validation is not live on this box)
+                // and to `robustBufferAccess` (off on this device).
+                //
+                // Dropping the kind test BLANKET-WISE is equally wrong, and that was
+                // measured too: it immediately reds `interp_pairs`, a buffer the HOST
+                // fills outside the graph, which legitimately has no in-graph producer.
+                // What separates the two cases is provenance, and the declare API
+                // already spells it — `add_buffer` (transient, the graph fills it every
+                // frame) versus `add_buffer_seeded` (the content comes from outside the
+                // graph) — so that is what this guard consults.
+                //
+                // `res_seeded` does not appear in the condition because it is ALREADY
+                // folded in: this `compile`'s prologue REFILLS `res_written` from
+                // `res_seeded` (a seeded resource starts "written", replicated across its
+                // mips), so `is_write || res_written[..]` reads exactly "written by this
+                // access, OR produced earlier in this graph, OR declared seeded". Spelling
+                // the seed a second time here would be a second place to keep in step.
+                //
+                // WHY DEBUG-ONLY IS ENOUGH HERE. Every golden run is a dev-profile run —
+                // `scripts/golden.ps1` builds and runs the pin with a bare `cargo test`
+                // (no `--release`), so `debug_assertions` is on in the runs that decide
+                // whether a render change ships — and CI runs its tests as a debug ×
+                // release matrix besides. A declaration that is missing a producer is
+                // missing it on EVERY frame that reaches the pass, never on an unlucky
+                // one, so the debug leg settles the question for the release build of the
+                // same source. `compile` runs every frame, so paying for the tracking in
+                // the release frame path would buy no information (Principle 1/7).
                 #[cfg(debug_assertions)]
                 {
                     let is_write = access & WRITE_ACCESS_MASK != 0;
@@ -636,14 +696,26 @@ impl FrameGraph {
                     // a producer of mip 0. Left per-`ResId` this guard would see the RESOURCE
                     // as written, stay silent, and let `transition` take the first-touch arm
                     // on mip k — emitting exactly the `UNDEFINED → GENERAL` it exists to stop.
+                    // Buffers run this loop exactly once: `buffer_access` hardcodes
+                    // `SubRange::COLOR` (`base_mip 0, mip_count 1`) against the single sync
+                    // entry every buffer owns.
                     for m in 0..sub.mip_count as usize {
                         debug_assert!(
-                            !is_image || is_write || self.res_written[mip_base + m],
-                            "framegraph: pass '{}' reads transient image '{}' mip {} with no \
-                             prior producer or seed (add_image_seeded / add_image_mipped) — \
-                             this would silently derive a hazard-free TOP_OF_PIPE barrier",
+                            is_write || self.res_written[mip_base + m],
+                            "framegraph: pass '{}' reads UNWRITTEN transient {} '{}' ({} {}) — \
+                             no pass in this graph declared a WRITE to it before this read, and \
+                             it was not declared seeded (add_image_seeded / add_image_mipped / \
+                             add_buffer_seeded). The state machine takes its first-touch arm and \
+                             derives src_stage = TOP_OF_PIPE, src_access = 0, so whatever fills \
+                             this resource is neither available nor visible to this read — a \
+                             MISSING barrier, not a wasted one. Declare the producing pass's \
+                             access, or, if the content genuinely comes from OUTSIDE the graph \
+                             (a host-filled ring, a cross-frame shared instance), declare the \
+                             resource SEEDED",
                             self.pass_name[p],
+                            if is_image { "image" } else { "buffer" },
                             self.res_name[ri],
+                            if is_image { "mip" } else { "sync entry" },
                             sub.base_mip as usize + m,
                         );
                         if is_write {
@@ -872,11 +944,11 @@ impl FrameGraph {
     /// the old one and the differential starts asserting that the code equals itself. A
     /// frozen copy that drifts is worse than no copy, because it still looks like evidence.
     ///
-    /// # The ONE difference from the C1 text, and why it is not a patch
+    /// # The differences from the C1 text, and why NEITHER is a patch
     ///
-    /// Commit C2 renamed `SubWitness::span_varied` to `layers_varied` (the live guard is now
-    /// the layer-only `INVARIANT SUBRESOURCE-LAYER-UNIFORM`). That struct is SHARED with this
-    /// body, so the field's new spelling appears here three times — and nothing else does.
+    /// **(1)** Commit C2 renamed `SubWitness::span_varied` to `layers_varied` (the live guard
+    /// is now the layer-only `INVARIANT SUBRESOURCE-LAYER-UNIFORM`). That struct is SHARED
+    /// with this body, so the field's new spelling appears here three times.
     /// The PREDICATE is untouched: this body still calls
     /// [`SubRange::same_span`](super::sync::SubRange::same_span), which still compares all
     /// four span fields and is kept alive in `sync.rs` for this caller alone, precisely so
@@ -886,6 +958,13 @@ impl FrameGraph {
     /// therefore still panics exactly as the C1 machine did. Everything the differential
     /// reads — `img_barriers`, `buf_barriers`, `pass_barriers` — is downstream of code this
     /// rename does not touch.
+    ///
+    /// **(2)** A `NOTE` COMMENT beside the unwritten-read guard below, and only a comment.
+    /// VG R3 P2-8 changed that guard in the LIVE `compile` from "kind" to "declared
+    /// provenance" — a real behavioural change — and did NOT apply it here, because this body
+    /// is the record of what the C1 machine did, not a second copy of the current one. The
+    /// comment exists so the next reader does not mistake the older spelling for an oversight
+    /// and "fix" it. It changes no predicate and no output arena.
     ///
     /// # Deletion condition
     ///
@@ -948,6 +1027,15 @@ impl FrameGraph {
                 // Ringed/seeded resources (`res_seeded`) are exempt — cross-frame
                 // content is intentional for them (the shadow-temporal history pool,
                 // the DDGI atlas, CSM cascade / shadow atlas, the shared buffers).
+                //
+                // NOTE (VG R3 P2-8) — NOT AN OVERSIGHT, see difference (2) in this
+                // function's doc. The LIVE `compile` no longer carries the `!is_image`
+                // term: it discriminates by DECLARED PROVENANCE (`res_seeded`, folded
+                // into `res_written`) rather than by resource kind, so an unwritten
+                // transient BUFFER read fires there too. This body keeps the C1
+                // spelling because it is the record of the C1 machine; "fixing" it to
+                // match the current one would turn the differential into an assertion
+                // that the code equals itself.
                 #[cfg(debug_assertions)]
                 {
                     let is_write = access & WRITE_ACCESS_MASK != 0;
