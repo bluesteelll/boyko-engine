@@ -1582,3 +1582,59 @@ All five lenses read the plan as a *graph/gate* artifact. None read it as an **E
 4. **`CsmCasterScratch` wraps a `MeshRenderScratch` and shares `gather_mixed_into`, so the CSM caster gather runs the occlusion fold on its own scratch.** Harmless today (the runner reads the main scratch's count) but entirely unstated in D2's seam table — and it is exactly the kind of "second instance of the datum" that becomes a second predicate the moment someone reads the wrong scratch. State it, or make `occlusion_instances()` structurally unavailable on the caster wrapper.
 
 A sixth lens would also have caught **M-k** (the `:69`/`:289` anchor collision, where the same line range is cited both as the fused precedent and as the non-fused contrast) — a small thing, but it is the same class of error as `:150` pointing into the poison block, and that one is a BLOCKER.
+
+---
+
+# P2-0 RUN — the sync-validation liveness probe, EXECUTED and INCONCLUSIVE
+
+Round 2 made P2-0 the first step and said the meaning of two gates hangs on it: until the probe runs,
+whether **G3** (validation) or **G4** (the synthetic declaration pin) is the gate that can see a
+missing barrier is undetermined. It has now been run, and the answer is neither yet — **because the
+probe as specified cannot produce the hazard it looks for.**
+
+## What was executed
+
+`hzb_build_0`'s declared `image_access(vb_depth, COMPUTE, SHADER_READ, SHADER_READ_ONLY_OPTIMAL,
+DEPTH)` was deleted while the dispatch that reads it stayed. `scripts\golden.ps1 -Pin vb_mesh_hzb
+-ValidationOn`, against a restored baseline measured in the same session and the same build.
+
+| | occurrences | DISTINCT messages |
+|---|---|---|
+| restored (×2) | **19**, 19 | 11 |
+| probe | **29** | **11 — set-identical to the baseline** |
+
+`Compare-Object` over the normalised message set returns **empty**: the probe produced ten more
+*instances* of message classes the baseline already had, and **not one new class**. No
+`SYNC-HAZARD-*`. No image-layout error either.
+
+## ⚠️ Why that is not "sync-validation is absent"
+
+**`vb_depth` has SIX declared access sites, not one** (`graph_bridge.rs:3628, 3987, 4029, 4482, 4538,
+4660`). `vb_viewt`, `sdf_forward_march`'s mesh arm and the `hzb_dump` copy declare reads of the same
+image, and on the `vb_mesh_hzb` configuration at least one of them is armed. So deleting
+`hzb_build_0`'s declaration **removes neither the transition nor the dependency** — a sibling
+declaration still carries both. The image is still in `SHADER_READ_ONLY_OPTIMAL` when the dispatch
+reads it, and the raster's write is still ordered before it.
+
+The probe therefore tested nothing. Its negative result is a property of the fixture, not of the
+device, and the critique's proposed wording — "if not, the limitation to write in the commit is *the
+extension is absent on this device*" — would have recorded a **false** limitation from it.
+
+The 10 extra occurrences are unexplained and are NOT evidence of the hazard: they are additional
+instances of the same `vkCreate*`-time classes, which arrive before any frame is recorded.
+
+## What a decisive probe requires
+
+One of:
+
+1. **Remove EVERY declared reader** of `vb_depth` in the measured configuration, not one — six sites,
+   and the count must be re-derived per configuration since some are conditionally armed; or
+2. **Probe a resource with exactly one declared reader.** The pyramid qualifies on an unarmed-dump
+   frame: `hzb_build_p`'s read of mip `d-1` (`graph_bridge.rs:3997`) is the only declared read of that
+   mip, so deleting it leaves a genuine RAW with no sibling to cover it. This is the cheaper probe and
+   it is the one to run.
+
+Until one of those runs, **the plan must keep saying the question is open** rather than resolving it
+in either direction. What IS established, and matches the round-1 critique's own observation: the
+19-message baseline is **entirely `vkCreate*`-time**, so nothing in it demonstrates that
+synchronization validation was ever live on a recorded frame.
