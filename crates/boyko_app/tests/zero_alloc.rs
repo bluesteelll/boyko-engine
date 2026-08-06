@@ -136,14 +136,18 @@ fn frame_helpers_allocate_zero_after_warmup() {
             GpuTransform3D::from_transform(&Transform::from_translation(Vec3::new(i as f32, 0.0, 0.0)))
         })
         .collect();
-    let inputs: Vec<(u32, &InstanceModelCol, Option<&GpuTransform3D>, PerInstanceMaterial)> = records
-        .iter()
-        .enumerate()
-        .map(|(i, r)| {
-            let pair = if i % 4 == 0 { Some(&pairs[i]) } else { None };
-            ((i as u32) % 2, r, pair, PerInstanceMaterial::default())
-        })
-        .collect();
+    // The 5th element (VG R3 piece 2 step P2-2) is the row's occlusion-culling capability.
+    // `false` here, and the Principle-5 budget is unchanged either way: `inst_flags` is a
+    // `ScratchColumn` reused across frames, so the steady state still allocates zero.
+    let inputs: Vec<(u32, &InstanceModelCol, Option<&GpuTransform3D>, PerInstanceMaterial, bool)> =
+        records
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let pair = if i % 4 == 0 { Some(&pairs[i]) } else { None };
+                ((i as u32) % 2, r, pair, PerInstanceMaterial::default(), false)
+            })
+            .collect();
     let meta = |_mesh: u32| Some((36u32, IndexType::Uint16));
 
     // SAFETY: no GPU work exists in this process (no device was booted), so no

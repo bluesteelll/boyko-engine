@@ -235,7 +235,8 @@ pub mod motion_cam;
 /// presence IS the datum, Axis-1 beside `Enabled<RenderEnabled>`'s Axis-2) plus
 /// [`VB_INST_FLAG_OCCLUSION_CULLING`](occlusion_marker::VB_INST_FLAG_OCCLUSION_CULLING), bit 0
 /// of the per-instance flags word P2-2 folds into
-/// [`VbInstanceRow`](instance_model::VbInstanceRow). Read by nothing in P2-1.
+/// [`VbInstanceRow::flags`](instance_model::VbInstanceRow::flags). Read on the host by both
+/// gathers since P2-2; read by NOTHING on the device until piece 3.
 pub mod occlusion_marker;
 /// HW-RT rung R1 — the dormant unified ray / acceleration-structure backend seam:
 /// the [`RayBackendConfig`](ray_backend::RayBackendConfig) derived carrier +

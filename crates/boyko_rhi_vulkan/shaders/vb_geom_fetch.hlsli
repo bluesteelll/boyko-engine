@@ -41,6 +41,19 @@
 // ALSO reads `tangent` under `#ifdef TEXTURED` (the world-tangent + handedness the TBN normal
 // map needs) — the base (non-`TEXTURED`) compile leaves it unread, byte-frozen.
 
+// One per-instance row of the VB instance ring (64 B), mirroring the host
+// `boyko_render::instance_model::VbInstanceRow`: `r0`/`r1`/`r2` @0..48 (the interleaved 3×4
+// row-major affine), `mesh_id` @48, and — since VG R3 piece 2 step P2-2 — a per-instance
+// FLAGS word @52 followed by an 8-byte pad @56, where the host previously carried a single
+// 12-byte pad @52.
+//
+// The `uint3 _pad` spelling is DELIBERATELY kept: at offset 52 it has the identical layout
+// with or without the split, and this header is `#include`d by four modules, each of which
+// would have to be re-DXC'd and re-pinned for a rename that buys no layout change. The datum
+// the rename would have carried is written here instead, because the reader who needs it is
+// piece 3's author — bit 0 of word @52 is "this instance's entity carries `OcclusionCulling`"
+// (bits 1..31 reserved, written zero). NOTHING in this file or its includers reads it as of
+// P2-2; piece 3 renames the field and is the first code to load it.
 struct VbInstanceRow {
     float4 r0;
     float4 r1;

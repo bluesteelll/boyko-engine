@@ -7,13 +7,25 @@
 //! is already reviewed — the [`hzb_config`](crate::hzb_config) P1-1 shape (the knob before the
 //! machinery).
 //!
-//! # Read by nothing, deliberately
+//! # Read by nothing ON THE DEVICE, deliberately
 //!
-//! Piece 2 lands the capability and the visibility-buffer raster split INERT. At THIS step the
-//! marker has zero call sites: no query names it, no gather folds it, nothing on the device
-//! sees it. The gather lane and the per-instance flag word arrive in P2-2, the frame-level
-//! predicate `GBufferScene::path_vb_occlusion_split()` in P2-3, and the late raster scope — which
-//! draws nothing — in P2-5.
+//! Piece 2 lands the capability and the visibility-buffer raster split INERT.
+//!
+//! * **P2-1** minted the marker with zero call sites.
+//! * **P2-2** (landed) gave it two non-filtering readers on the HOST — the main gather
+//!   ([`gather_mesh_draws`](crate::mesh_draw::gather_mesh_draws), both `cfg` variants) and the
+//!   caster gather ([`gather_shadow_casters`](crate::csm_caster::gather_shadow_casters)) — which
+//!   scatter [`VB_INST_FLAG_OCCLUSION_CULLING`] into
+//!   [`MeshRenderScratch::inst_flags`](crate::mesh_draw::MeshRenderScratch::inst_flags), fold
+//!   [`MeshRenderScratch::occlusion_instances()`](crate::mesh_draw::MeshRenderScratch::occlusion_instances),
+//!   and pack the word into [`VbInstanceRow::flags`](crate::instance_model::VbInstanceRow::flags).
+//!   **Nothing on the device reads that word**: the HLSL mirrors still spell offsets 52..64
+//!   `uint3 _pad`, which is layout-identical, and no shader loads it.
+//! * **P2-3** adds the frame-level predicate `GBufferScene::path_vb_occlusion_split()`, and
+//!   **P2-5** the late raster scope — which draws nothing.
+//!
+//! Because no entity in the tree carries the marker, every scattered flags word is `0` — bit for
+//! bit what the retired `_pad[0]` carried — so the uploaded instance ring is byte-UNCHANGED.
 //!
 //! # Axis-1 (structural capability), beside — not instead of — Axis-2 (runtime on/off)
 //!
@@ -22,9 +34,13 @@
 //! ([`gather_shadow_casters`](crate::csm_caster::gather_shadow_casters)):
 //!
 //! ```text
-//! Query<(&MeshHandle, &InstanceModelCol), (Enabled<RenderEnabled>, With<ShadowCaster>)>
-//!                                          ^^^^ Axis-2: runtime  ^^^^ Axis-1: capability
+//! Query<(&MeshHandle, &InstanceModelCol, Option<&OcclusionCulling>),
+//!       (Enabled<RenderEnabled>, With<ShadowCaster>)>
+//!        ^^^^ Axis-2: runtime  ^^^^ Axis-1: capability
 //! ```
+//!
+//! (The data tuple's third term is P2-2's own Axis-1 read — non-filtering, so it sits in the
+//! DATA position, never in the filter position the two axes above occupy.)
 //!
 //! Occlusion-culling participation is a property of the object KIND — a skybox, a first-person
 //! weapon and a UI proxy never participate — and that is decided at spawn, never toggled per
@@ -93,8 +109,8 @@ use boyko_macros::Component;
 /// the route by which a game marks an object KIND once instead of once per spawn, auto-inserts
 /// the required component through its `Default`.
 ///
-/// Read by NOTHING as of P2-1. The read that arrives in P2-2 is `Option<&OcclusionCulling>` —
-/// non-filtering, so the gather's per-row lock-step with the instance ring is preserved.
+/// Read as `Option<&OcclusionCulling>` — non-filtering, so the gather's per-row lock-step with
+/// the instance ring is preserved. Read by nothing on the DEVICE (see the module doc).
 #[derive(Component, Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct OcclusionCulling;
 
@@ -125,10 +141,11 @@ const _: () = assert!(
 /// The lane is a WORD rather than a bool so that piece 3 adds a BIT instead of a column; bits
 /// 1..31 are reserved and written zero.
 ///
-/// Written by nothing as of P2-1. P2-2 folds it into
-/// [`VbInstanceRow`](crate::instance_model::VbInstanceRow) over today's `_pad[0]` (offset 52),
-/// the same 16-byte lane as `mesh_id` — which the batch cull's existing per-candidate instance
-/// load already brings into cache, so the flag costs zero extra device fetches.
+/// Written by P2-2 into
+/// [`VbInstanceRow::flags`](crate::instance_model::VbInstanceRow::flags) — offset 52, formerly
+/// `_pad[0]`, the same 16-byte lane as `mesh_id`, which the batch cull's existing per-candidate
+/// instance load already brings into cache, so the flag costs zero extra device fetches. READ
+/// by nothing on the device: piece 3 is the first code to load the bit.
 pub const VB_INST_FLAG_OCCLUSION_CULLING: u32 = 1 << 0;
 
 // Exactly one bit, and bit 0. P2-2's scatter encodes presence branchlessly as

@@ -45,6 +45,10 @@ fn count_substep(mut s: ResMut<Substeps>) {
 /// (`Option<&GpuTransform3D>` keys static vs interpolated) + the same
 /// count→prefix-sum→scatter core, with a fixed meta table (no GPU registry). The
 /// test spawns only static meshes, so every row takes the `None` branch.
+///
+/// The 5th gather-input element (VG R3 piece 2 step P2-2: the occlusion-culling capability)
+/// is `false` for every row — this test spawns through `MeshBundle`, which carries no
+/// `OcclusionCulling`, so `false` is what the real query term would resolve to here.
 #[allow(clippy::needless_pass_by_value)]
 fn gather_headless(
     q: Query<
@@ -56,7 +60,7 @@ fn gather_headless(
     scratch.gather_mixed_into(
         1,
         |_mesh| Some((36u32, IndexType::Uint16)),
-        || q.iter().map(|(h, col, pair)| (h.0, col, pair, PerInstanceMaterial::default())),
+        || q.iter().map(|(h, col, pair)| (h.0, col, pair, PerInstanceMaterial::default(), false)),
     );
 }
 

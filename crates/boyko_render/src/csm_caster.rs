@@ -72,6 +72,7 @@ use crate::light::{LightTableDirty, LightingConfig};
 use crate::mesh::MeshGpu;
 use crate::mesh_assets::MeshAssetsExt;
 use crate::mesh_draw::{DrawBatch, MeshRenderScratch, PerInstanceMaterial};
+use crate::occlusion_marker::OcclusionCulling;
 
 /// The reused per-frame shadow-caster gather scratch (CSM Inc 2) — a SEPARATE
 /// [`Resource`] from the main [`MeshRenderScratch`]
@@ -152,6 +153,20 @@ impl CsmCasterScratch {
 /// matching rows, so the gather emits zero caster batches + an empty caster ring — the
 /// depth pass then draws nothing, byte-identical to a CSM-disabled frame.
 ///
+/// # The occlusion-culling capability term (VG R3 piece 2 step P2-2)
+///
+/// The shared gather core scatters a per-instance occlusion-culling flags lane and folds a
+/// frame-level count, so this gather runs that fold on the CASTER scratch too. The query
+/// therefore carries `Option<&OcclusionCulling>` and the closure supplies each caster's REAL
+/// marker presence: a caster row supplies the same value the main gather would give that same
+/// entity. Hard-coding `false` here would put a LIE in the caster scratch's lane, and a lane
+/// that lies is worse than one that is redundant — `Option<&ZST>` is non-filtering and free,
+/// so truthfulness costs nothing and no caster row is dropped or reordered.
+///
+/// The caster count is REDUNDANT, never authoritative: the frame-level split predicate is
+/// read off the MAIN `MeshRenderScratch`. Reading `CsmCasterScratch.0.occlusion_instances()`
+/// would be a SECOND predicate that can disagree with the first, and that is a defect.
+///
 /// # Registration — unwired-API (matches `gather_mesh_draws`)
 ///
 /// This system is NOT registered in [`CsmPlugin`](crate::csm_plugin::CsmPlugin) (nor any
@@ -170,7 +185,10 @@ impl CsmCasterScratch {
 // caster term), so factoring it behind a `type` alias would hide the load-bearing intent.
 #[allow(clippy::type_complexity, clippy::needless_pass_by_value)]
 pub fn gather_shadow_casters(
-    q: Query<(&MeshHandle, &InstanceModelCol), (Enabled<RenderEnabled>, With<ShadowCaster>)>,
+    q: Query<
+        (&MeshHandle, &InstanceModelCol, Option<&OcclusionCulling>),
+        (Enabled<RenderEnabled>, With<ShadowCaster>),
+    >,
     mesh_assets: NonSendRes<Assets<MeshGpu>>,
     mut scratch: ResMut<CsmCasterScratch>,
 ) {
@@ -195,8 +213,14 @@ pub fn gather_shadow_casters(
         // slot resolved by index; staleness is caught by validate_asset_refs earlier this frame (apply→validate→gather)
         // The caster gather has no material dimension (the CSM depth pass reads only
         // `.batches`/`.ring`, never `.material_ids`) — a constant default payload feeds the
-        // shared gather core's material lane inertly (asset-streaming plan F8+).
-        || q.iter().map(|(h, col)| (h.0, col, None, PerInstanceMaterial::default())),
+        // shared gather core's material lane inertly (asset-streaming plan F8+). The
+        // occlusion capability is NOT constant-folded the same way: it is the row's real
+        // marker presence (see this fn's doc).
+        || {
+            q.iter().map(|(h, col, occ)| {
+                (h.0, col, None, PerInstanceMaterial::default(), occ.is_some())
+            })
+        },
     );
 }
 
@@ -562,7 +586,7 @@ mod tests {
         scratch.0.gather_mixed_into(mesh_count, meta, || {
             rows.iter()
                 .filter(|r| r.is_caster)
-                .map(|r| (r.mesh_id, &r.col, None, PerInstanceMaterial::default()))
+                .map(|r| (r.mesh_id, &r.col, None, PerInstanceMaterial::default(), false))
         });
     }
 
@@ -672,7 +696,7 @@ mod tests {
         // The same inputs through the foundation's unified gather directly (no filter).
         let mut main = MeshRenderScratch::default();
         main.gather_mixed_into(2, meta, || {
-            rows.iter().map(|r| (r.mesh_id, &r.col, None, PerInstanceMaterial::default()))
+            rows.iter().map(|r| (r.mesh_id, &r.col, None, PerInstanceMaterial::default(), false))
         });
 
         assert_eq!(casters.batch_count(), main.batch_count());

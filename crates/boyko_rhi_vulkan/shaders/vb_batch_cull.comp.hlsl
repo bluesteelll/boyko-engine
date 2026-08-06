@@ -277,10 +277,20 @@ RWStructuredBuffer<uint> VbCullVisible : register(u2);
 RWStructuredBuffer<uint> VbCullCount : register(u3);
 
 // One per-instance row of the VB instance ring. 64 bytes, mirroring the host
-// `boyko_render::instance_model::VbInstanceRow` (`instance_model.rs:221-233` + its offset
-// const-asserts: `affine` @0 as three interleaved `[linear_row.xyz | translation]` quads,
-// `mesh_id` @48, a 12-byte `_pad` @52) and the SAME HLSL spelling `vb_geom_fetch.hlsli:44-50`
-// already uses, so the two mirrors of one host type cannot drift into different layouts.
+// `boyko_render::instance_model::VbInstanceRow` (grep the type + its offset const-asserts:
+// `affine` @0 as three interleaved `[linear_row.xyz | translation]` quads, `mesh_id` @48,
+// `flags` @52, an 8-byte `_pad` @56) and the SAME HLSL spelling `vb_geom_fetch.hlsli` already
+// uses, so the two mirrors of one host type cannot drift into different layouts.
+//
+// VG R3 piece 2 step P2-2 split the host's former 12-byte `_pad` @52 into a `flags` word @52
+// plus an 8-byte pad @56. The HLSL spelling below is DELIBERATELY unchanged: `uint3 _pad` at
+// offset 52 has the identical layout either way, so renaming it here would re-DXC four
+// modules for zero layout benefit against a charter that keeps every `.spv` byte-frozen.
+// What the rename would have bought is stated instead: word @52 is the per-instance FLAGS
+// word, bit 0 = "this instance's entity carries `OcclusionCulling`", bits 1..31 reserved and
+// written zero. NOTHING on the device reads it as of P2-2 — piece 3 renames the field and is
+// the first code to load it, out of the `gVbInstances[base_instance + j]` fetch this shader
+// already issues (so the flag costs zero extra device fetches).
 struct VbInstanceRow {
     float4 r0;
     float4 r1;

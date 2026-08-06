@@ -138,9 +138,16 @@ struct PushConstants {
 [[vk::push_constant]] PushConstants pc;
 
 // Decision 0's VB-path instance row (64 B) — byte-identical leading bytes to `InstanceModelCol`
-// (offset 0..48), plus the appended `mesh_id` lane (offset 48) and a 12-byte pad (offset 52..64,
-// std430 stability). This VS reads ONLY `r0`/`r1`/`r2` — `mesh_id`/`_pad` are declared for byte
-// layout parity but never referenced here (the compute fetch reads them back by `instance_id`).
+// (offset 0..48), plus the appended `mesh_id` lane (offset 48), a per-instance `flags` word
+// (offset 52) and an 8-byte pad (offset 56..64, std430 stability). This VS reads ONLY
+// `r0`/`r1`/`r2` — `mesh_id`/`_pad` are declared for byte layout parity but never referenced
+// here (the compute fetch reads them back by `instance_id`).
+//
+// VG R3 piece 2 step P2-2 made the host's word @52 a FLAGS word (bit 0 = "this instance's
+// entity carries `OcclusionCulling`"; bits 1..31 reserved, written zero) where it was
+// `_pad[0]`. The `uint3 _pad` spelling below covers offsets 52..64 and is layout-identical
+// either way, so it is deliberately NOT renamed here — piece 3 renames it in the same change
+// that first reads the bit. Read by nothing on the device as of P2-2.
 struct VbInstanceRow {
     float4 r0;
     float4 r1;

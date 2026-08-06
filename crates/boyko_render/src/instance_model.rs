@@ -199,8 +199,9 @@ pub fn sync_prev_instance_model_cols(
 /// Multi-paradigm render-path plan, rung R-VBGEO (plan §Data structures) — the
 /// `VisibilityBuffer` path's OWN instance row: [`InstanceModelCol`]'s 48-byte 3×4
 /// row-major affine (byte-identical leading bytes, offset 0..48) plus an appended
-/// `mesh_id: u32` lane (offset 48, Decision 0's geometry-table slot) padded to a
-/// 64-byte std430-stable stride.
+/// `mesh_id: u32` lane (offset 48, Decision 0's geometry-table slot) and — since VG R3
+/// piece 2 step P2-2 — a [`flags`](Self::flags) word (offset 52, formerly `_pad[0]`),
+/// padded to a 64-byte std430-stable stride.
 ///
 /// A VB-path-CONDITIONAL row shape, NOT a widening of [`InstanceModelCol`] itself:
 /// Deferred/Forward keep the 48-byte column EXACTLY (byte-identity — this type is
@@ -228,13 +229,30 @@ pub struct VbInstanceRow {
     /// the VB compute fetch resolves `gMeshIndices[]`/`gMeshVerts[]`/`gMeshMeta[]`
     /// through. Offset 48.
     pub mesh_id: u32,
-    /// Pads the row to a 64-byte std430-stable stride — unused, always zero. Offset 52.
-    pub _pad: [u32; 3],
+    /// VG R3 piece 2 step P2-2 — the per-instance FLAGS word. Offset 52, formerly
+    /// `_pad[0]`.
+    ///
+    /// Bit 0 is
+    /// [`VB_INST_FLAG_OCCLUSION_CULLING`](crate::occlusion_marker::VB_INST_FLAG_OCCLUSION_CULLING):
+    /// set iff this instance's entity carries
+    /// [`OcclusionCulling`](crate::occlusion_marker::OcclusionCulling). Bits 1..31 are
+    /// reserved and written zero.
+    ///
+    /// It occupies the SAME 16-byte lane as `mesh_id` @48 — the batch cull's existing
+    /// `gVbInstances[base_instance + j]` load already brings those bytes into cache, so the
+    /// flag costs ZERO extra device fetches. Read by NOTHING on the device as of P2-2: the
+    /// HLSL mirrors still spell offsets 52..64 `uint3 _pad` (a layout-identical spelling),
+    /// and piece 3 is what renames the field and reads the bit.
+    ///
+    /// A word rather than a `bool` so piece 3 adds a BIT, not a column.
+    pub flags: u32,
+    /// Pads the row to a 64-byte std430-stable stride — unused, always zero. Offset 56.
+    pub _pad: [u32; 2],
 }
 
 /// The byte size of one [`VbInstanceRow`] — the VB-path instance SSBO's per-instance
-/// stride (64 B: [`InstanceModelCol`]'s 48-byte affine + a `uint` `mesh_id` + a
-/// 12-byte pad to the next std430 lane).
+/// stride (64 B: [`InstanceModelCol`]'s 48-byte affine + a `uint` `mesh_id` + a `uint`
+/// `flags` + an 8-byte pad to the next std430 lane).
 pub const VB_INSTANCE_ROW_BYTES: usize = 64;
 
 const _: () = assert!(
@@ -244,19 +262,30 @@ const _: () = assert!(
 const _: () = assert!(align_of::<VbInstanceRow>() == 4);
 const _: () = assert!(core::mem::offset_of!(VbInstanceRow, affine) == 0);
 const _: () = assert!(core::mem::offset_of!(VbInstanceRow, mesh_id) == 48);
+// P2-2: `flags` inherits `_pad[0]`'s offset EXACTLY, and the surviving pad starts one word
+// later. Nothing pinned the pad's offset before, so a reader could not tell from the asserts
+// alone that the flags word landed where the device mirrors' `uint3 _pad` begins — these two
+// lines are what make that a build error rather than a review claim.
+const _: () = assert!(core::mem::offset_of!(VbInstanceRow, flags) == 52);
+const _: () = assert!(core::mem::offset_of!(VbInstanceRow, _pad) == 56);
 // The leading 48 bytes MUST byte-match `InstanceModelCol` — Deferred/Forward read
 // exactly that layout; the VB path reads the SAME leading bytes plus the appended lane.
 const _: () = assert!(core::mem::offset_of!(VbInstanceRow, affine) == core::mem::offset_of!(InstanceModelCol, rows));
 
 impl VbInstanceRow {
     /// Packs an [`InstanceModelCol`] (the already-computed 3×4 affine) plus its
-    /// resolved `mesh_id` into the VB-path row shape — the "second packing fn selected
-    /// at boot" Principle 1 calls for (a future VB gather, R8/R9, calls this instead of
-    /// writing `InstanceModelCol` directly; no per-instance path branch is needed
-    /// since the boot-resolved path selects WHICH gather runs, not a per-row check).
+    /// resolved `mesh_id` and its per-instance `flags` word into the VB-path row shape —
+    /// the "second packing fn selected at boot" Principle 1 calls for (a future VB gather,
+    /// R8/R9, calls this instead of writing `InstanceModelCol` directly; no per-instance
+    /// path branch is needed since the boot-resolved path selects WHICH gather runs, not a
+    /// per-row check).
+    ///
+    /// `flags` is the [`flags`](Self::flags) lane verbatim — the gather's `inst_flags`
+    /// entry for this ring slot. Passing `0` reproduces the pre-P2-2 bytes exactly, which
+    /// is what every scene in the tree produces today (nothing marks anything yet).
     #[inline]
-    pub const fn from_model_col(model: &InstanceModelCol, mesh_id: u32) -> Self {
-        Self { affine: model.rows, mesh_id, _pad: [0; 3] }
+    pub const fn from_model_col(model: &InstanceModelCol, mesh_id: u32, flags: u32) -> Self {
+        Self { affine: model.rows, mesh_id, flags, _pad: [0; 2] }
     }
 }
 
@@ -264,15 +293,32 @@ impl VbInstanceRow {
 mod vb_instance_row_tests {
     use super::*;
 
+    use crate::occlusion_marker::VB_INST_FLAG_OCCLUSION_CULLING;
+
     #[test]
     fn from_model_col_copies_the_affine_and_mesh_id_verbatim() {
         let model = InstanceModelCol {
             rows: [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]],
         };
-        let row = VbInstanceRow::from_model_col(&model, 42);
+        let row = VbInstanceRow::from_model_col(&model, 42, VB_INST_FLAG_OCCLUSION_CULLING);
         assert_eq!(row.affine, model.rows);
         assert_eq!(row.mesh_id, 42);
-        assert_eq!(row._pad, [0, 0, 0]);
+        // P2-2 narrowed this pin: word @52 is now `flags` (set from the new argument) and
+        // only words @56/@60 remain "unused, always zero".
+        assert_eq!(row.flags, VB_INST_FLAG_OCCLUSION_CULLING);
+        assert_eq!(row._pad, [0, 0]);
+    }
+
+    #[test]
+    fn from_model_col_with_zero_flags_is_byte_identical_to_the_pre_p2_2_row() {
+        let model = InstanceModelCol {
+            rows: [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]],
+        };
+        let row = VbInstanceRow::from_model_col(&model, 42, 0);
+        // Words @52..64 all zero — exactly what the retired `_pad: [u32; 3]` carried. This
+        // is the whole reason the uploaded ring bytes are unchanged on every scene that
+        // exists today: nothing marks anything, so every `flags` is 0.
+        assert_eq!(bytemuck::bytes_of(&row)[52..64], [0u8; 12]);
     }
 
     #[test]
@@ -280,7 +326,9 @@ mod vb_instance_row_tests {
         let model = InstanceModelCol {
             rows: [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]],
         };
-        let row = VbInstanceRow::from_model_col(&model, 7);
+        // A SET flag word: the leading 48 bytes must be unaffected by it (the flags lane
+        // lives past `InstanceModelCol`'s footprint, at offset 52).
+        let row = VbInstanceRow::from_model_col(&model, 7, VB_INST_FLAG_OCCLUSION_CULLING);
         let model_bytes = bytemuck::bytes_of(&model);
         let row_bytes = bytemuck::bytes_of(&row);
         assert_eq!(&row_bytes[0..INSTANCE_MODEL_COL_BYTES], model_bytes);
