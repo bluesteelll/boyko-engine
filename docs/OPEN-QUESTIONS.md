@@ -14,6 +14,48 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-06 — ⚠️ MEASURED: synchronization validation is not live, so the `-ValidationOn` leg proves nothing about barriers
+
+**A genuine missing barrier changed no pixel and emitted no message.** Executed while resolving
+piece 2's first step, which existed precisely to find this out.
+
+The probe: delete the ONLY declared read of a resource with exactly one reader — the HZB pyramid's
+mip `d-1` read — while the dispatch that reads it stays. Pass 0 writes mip 5, pass 1 reads mip 5, no
+derived dependency.
+
+| | messages | `SYNC-HAZARD-*` | golden |
+|---|---|---|---|
+| baseline (×2, same build) | 19 | — | byte-identical |
+| **real missing barrier** | **19** | **none** | **byte-identical** |
+
+The feature bit IS requested in `boyko_rhi_vulkan/src/device.rs`, but the instance chain degrades
+**silently** when `VK_EXT_validation_features` is absent, and the whole 19-message baseline is
+`vkCreate*`-time — nothing in it was ever produced by a recorded frame.
+
+**Why this is here rather than merely recorded.** It is not a piece-2 fact. It says that the
+engine's validation leg — the instrument this campaign has been leaning on since the P1-2
+`-ValidationOn` repair — covers object, descriptor and format legality and **nothing about
+synchronization**. Every "validation clean" claim in the campaign's commit messages is true and
+narrower than it reads.
+
+**Options.** (a) Leave it, and gate barrier correctness structurally (pin the derived barrier stream
+by FIELDS, which is what piece 2's G4 now does). (b) Find out whether `VK_EXT_validation_features` is
+genuinely absent on this device or merely not reaching the layer, and fix it if it is the latter —
+this is a ~1-hour investigation and would restore a general-purpose instrument. (c) Both.
+
+**My recommendation is (c), with (a) first**, because (a) is already specified and blocks nothing,
+while (b) is worth doing before piece 3 — that piece adds the first pyramid READER, and a
+read-after-write across two passes is exactly the hazard class the layer would catch and the golden
+cannot.
+
+⚠️ **A methodological note worth as much as the finding.** The FIRST probe was inconclusive by
+construction: it deleted one of SIX declared readers of the same image, so siblings still carried
+both the transition and the dependency and nothing was tested. Its negative result would have been
+recorded as "the extension is absent on this device" — a true statement reached by an invalid route.
+When probing for a missing dependency, count the OTHER declared accesses to that resource first.
+
+---
+
 ## 2026-08-05 — CI's release leg is red, and two of the classes are STRICTNESS calls
 
 Found while preparing the P1-5a baseline, which needs a leg that passes. Running CI's own command —
