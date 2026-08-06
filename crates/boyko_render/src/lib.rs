@@ -230,6 +230,13 @@ pub mod mesh_draw;
 /// `hwrt`-gated (v1.1, per-object mesh motion vectors) — un-walling those is a materially
 /// bigger, cross-crate change this rung deliberately did not attempt (see the D1 report).
 pub mod motion_cam;
+/// VG R3 piece 2 step P2-1 — the structural
+/// [`OcclusionCulling`](occlusion_marker::OcclusionCulling) capability marker (a table ZST:
+/// presence IS the datum, Axis-1 beside `Enabled<RenderEnabled>`'s Axis-2) plus
+/// [`VB_INST_FLAG_OCCLUSION_CULLING`](occlusion_marker::VB_INST_FLAG_OCCLUSION_CULLING), bit 0
+/// of the per-instance flags word P2-2 folds into
+/// [`VbInstanceRow`](instance_model::VbInstanceRow). Read by nothing in P2-1.
+pub mod occlusion_marker;
 /// HW-RT rung R1 — the dormant unified ray / acceleration-structure backend seam:
 /// the [`RayBackendConfig`](ray_backend::RayBackendConfig) derived carrier +
 /// [`RayCaps`](ray_backend::RayCaps) device-tier input Resources, the pure
@@ -447,6 +454,7 @@ pub use hzb::{
 };
 pub use hzb_config::{HzbConfig, HzbMode};
 pub use hzb_plugin::HzbPlugin;
+pub use occlusion_marker::{OcclusionCulling, VB_INST_FLAG_OCCLUSION_CULLING};
 pub use instance_model::{
     INSTANCE_MODEL_COL_BYTES, InstanceModelCol, VB_INSTANCE_ROW_BYTES, VbInstanceRow,
     sync_instance_model_cols,
