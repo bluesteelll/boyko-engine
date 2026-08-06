@@ -1674,3 +1674,74 @@ reach for first — the golden pin and the validation leg — returned exactly w
 everything is correct. That is the concrete, executed form of the claim this campaign has been
 repeating since piece 1 §5: *a golden pin cannot see a redundant or a missing barrier.* It is no
 longer an argument. It is a table.
+
+---
+
+# P2-7 — the corruptions, EXECUTED, including the ones that DID NOT FIRE
+
+⚠️ **The headline is a control that did not fire, and it is the most important result of the piece.**
+
+## The production B2 defect is invisible to every gate in the tree
+
+The defect: delete `vb_indirect_late_upload`'s declared `buffer_access(vb_indirect_late, TRANSFER,
+TRANSFER_WRITE)` **in `declare_vb_graph` itself** — not in G4's replica — while the recorder still
+fills the buffer and the late scope still fetches from it. The graph then takes the first-touch arm
+and derives `src_stage = TOP_OF_PIPE, src_access = 0`: the fill is neither available nor visible to
+the indirect fetch.
+
+| gate | on the production defect |
+|---|---|
+| **G1** `[vb_occ_split]` golden | **GREEN** |
+| **G2** the recorder probe | **GREEN** |
+| **G3** validation | **GREEN** — 19 messages, the baseline, no `SYNC-HAZARD` |
+| **G4** the barrier-stream pin | **GREEN** |
+
+All four. G4's own doc already said why, and this is the executed form of it: **G4 is a hand-written
+REPLICA.** It proves the framegraph *derives* the right stream from a declaration shaped like the
+declarator's; it cannot see the declarator writing a different shape. Its red control R1 fires in
+the replica and only there.
+
+So the sentence this plan carried after P2-0 — *"G4 is the only gate that can see a missing
+barrier"* — is **wrong as written**. The correct statement is: G4 is the only gate that can see a
+missing barrier **in the replica**; a missing barrier in the production declarator is seen by
+nothing.
+
+## Why validation cannot help, and why that was already known
+
+P2-0 measured it on a different resource and the answer transfers: synchronization validation is not
+live on this machine, so `-ValidationOn` sees static legality only. Two independent measurements now
+say the same thing about the same class.
+
+## The framegraph HAS a guard for this, and it exempts buffers by KIND
+
+`framegraph/graph.rs` guards an unwritten transient read — but as
+`!is_image || is_write || res_written[..]`. The `!is_image` term waves **every buffer** through, and
+the comment beside it names the exemption as deliberate: some resources' content is intentional
+across frames.
+
+**The exemption is right in substance and wrong in shape.** It discriminates by RESOURCE KIND when
+the real distinction is DECLARED PROVENANCE: a buffer the host fills outside the graph legitimately
+has no in-graph producer; a transient buffer the graph itself fills every frame must have one. The
+framegraph already spells that difference — `add_buffer` versus `add_buffer_seeded` — and the guard
+does not consult it.
+
+Measured, not assumed: dropping `!is_image` blanket-wise immediately reds a real, correct case
+(`interp_pairs`, a host-uploaded shared buffer), which is what proves the exemption is load-bearing
+rather than sloppy.
+
+**The fix is bounded.** Guard on `is_write || res_written[..] || res_seeded[..]` for both kinds, and
+audit the **14 bare `add_buffer` sites** in `graph_bridge.rs` (against 17 already seeded), seeding
+each whose content comes from outside the graph. That converts B2's whole class — a declared reader
+with no declared writer — from *invisible to every gate* into a `debug_assert` that fires in every
+dev-profile golden run, which is where this campaign's other structural guards live.
+
+It is **not** done here: it is a framegraph-core change with a 14-site audit, and piece 2's charter
+is the capability and the raster split. It is recorded in `OPEN-QUESTIONS.md` with the measurement.
+
+## What this does NOT change
+
+The shipped split is correct — the declared write is present, and G4's four split rows pin its
+derived edge field for field. What the measurement establishes is the *coverage* of the gates, not a
+defect in the code they gate. Piece 3, which replaces the host fill with the cull writing
+`instanceCount` through a storage buffer, changes that declaration — and would do so with no gate
+watching. That is the sentence to carry forward.
