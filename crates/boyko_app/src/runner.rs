@@ -2431,6 +2431,13 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 // `hzb_plan` and the SAME `present_extent` this call threads — one site, so the
                 // staging's size and the recorder's copy regions cannot disagree.
                 hzb_dump_staging,
+                // VG R3 piece 2 step P2-3: this frame's occlusion-capable instance count, read
+                // from the SAME `scratch` the two material gates above are — the MAIN
+                // `MeshRenderScratch`, never `CsmCasterScratch.0`, which runs the identical fold
+                // on its own caster-filtered scratch and is therefore redundant, never
+                // authoritative. Reading it off anything but this scratch would be a SECOND
+                // frame-level predicate that can disagree with the first.
+                scratch.occlusion_instances(),
                 ctx,
             );
 

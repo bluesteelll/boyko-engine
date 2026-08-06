@@ -2901,14 +2901,36 @@ pub(crate) struct VbBarrierSink<'a> {
     /// arm is unwired, and inert then for the same "no pass names the ResId" reason. Rung R2d-3
     /// appends `vb_visible_instance` (the per-INSTANCE survivor list the cull writes) LAST, and it
     /// is MANDATORY rather than placeholder-backed — `GpuSceneBundles` wires it unconditionally,
-    /// exactly like `vb_instance_ring` at index 1.
-    #[cfg(not(feature = "hwrt"))]
-    pub(crate) buffers: [VkBuffer; 13],
-    /// See the `not(hwrt)` variant's doc: `hwrt` grows this by one (`tlas_instances` at index 5,
-    /// the VB-P1a trio shifts to 6/7/8).
-    #[cfg(feature = "hwrt")]
-    pub(crate) buffers: [VkBuffer; 14],
+    /// exactly like `vb_instance_ring` at index 1. VG R3 piece 2 step P2-3 appends
+    /// `vb_indirect_late` after IT, LAST in both `cfg` arms and `.expect()`ed for the same
+    /// mandatory-on-every-VB-boot reason — see [`VB_BUFFER_COUNT`].
+    pub(crate) buffers: [VkBuffer; VB_BUFFER_COUNT],
 }
+
+/// The number of BUFFER resources [`Renderer::declare_vb_graph`] declares — see
+/// [`VbBarrierSink::buffers`]'s doc for the fixed order. The buffer-side sibling of
+/// [`VB_IMAGE_COUNT`], and it is the ARRAY LENGTH rather than a number standing beside one: a
+/// constant that merely equals a hand-written literal is dead, and dead is what the two literals
+/// it replaces (13 / 14) were.
+///
+/// ⚠️ The buffer side needs this MORE than the image side does. A `res.index()` that lands on the
+/// wrong buffer slot names a **live wrong buffer** — every slot resolves to a real handle, since
+/// the unarmed ones fall back to `scene.light_table.buffer` — so a mis-indexed buffer barrier
+/// synchronises the wrong allocation with no VUID and no validation message, where the image array
+/// would hold `VkImage::NULL` and fault loudly. Appending is the one edit shape that cannot
+/// re-key an existing barrier, and `declare_vb_graph`'s `debug_assert_eq!` on the LAST buffer
+/// ResId is what keeps this count and the declaration order from drifting apart.
+///
+/// The `hwrt` arm's one extra slot is rung R9d's `tlas_instances` at index 5, which shifts the
+/// VB-P1a froxel trio to 6/7/8 and every slot after it by one — the two arms share no index past
+/// 4, which is why the count is `cfg`-split rather than derived.
+///
+/// VG R3 piece 2 step P2-3: 13 → 14 (`vb_indirect_late`), 14 → 15 under `hwrt`.
+#[cfg(feature = "hwrt")]
+const VB_BUFFER_COUNT: usize = 15;
+/// See the `hwrt` variant's doc: a `not(hwrt)` build has no `tlas_instances` slot, so 15 - 1 = 14.
+#[cfg(not(feature = "hwrt"))]
+const VB_BUFFER_COUNT: usize = 14;
 
 /// The number of IMAGE resources [`Renderer::declare_vb_graph`] declares — see
 /// [`VbBarrierSink::images`]'s doc for the fixed order. A PRIVATE, per-frame ResId space (mirrors
@@ -3351,6 +3373,31 @@ impl Renderer<'_> {
         // the GPU, never written by it — so there is no producer for the graph to order a reader
         // against, and `gMeshMeta` (bound on every VB shade/resolve pass) carries none either.
         let vb_visible_instance = g.add_buffer("vb_visible_instance");
+        // VG R3 piece 2 step P2-3 (docs/VG-R3-P2-CAPABILITY-SPLIT-PLAN.md, decision D4): the
+        // occlusion split's LATE indirect record array. Appended LAST — the same edit shape every
+        // addition above used, and the only one that cannot re-key an existing barrier.
+        // Frame-private (per-FIF) like `vb_indirect` itself, so `add_buffer`'s undefined seed is
+        // right: this frame's own write is the first touch of its own slot.
+        //
+        // DECLARED HERE, NAMED BY NO PASS AT THIS STEP — the `hzb_pyramid` shape one screen up.
+        // A resource no access names routes ZERO barriers, so every existing pin's recorded
+        // command stream is byte-identical; what the declaration buys now is that the sink slot
+        // below it has a ResId to be addressed by, and that the drift assert has something to
+        // measure. Step P2-5 adds `vb_indirect_late_upload` (the TRANSFER write) and
+        // `vb_raster_late` (the DRAW_INDIRECT read) TOGETHER, because a declared indirect read
+        // with no declared writer derives `(TOP_OF_PIPE, 0)` — a missing barrier, not a wasted
+        // one, and `graph.rs`'s unwritten-read backstop waves buffers through by construction.
+        let vb_indirect_late = g.add_buffer("vb_indirect_late");
+        // The buffer-side sibling of the `hzb_pyramid` assert above, and the buffer side is where
+        // it matters more: a mis-keyed buffer barrier names a LIVE WRONG buffer (every sink slot
+        // resolves to a real handle) instead of faulting on a NULL. `- VB_IMAGE_COUNT` is exactly
+        // the mapping `VbBarrierSink::buffer_barriers` performs.
+        debug_assert_eq!(
+            vb_indirect_late.index() + 1 - VB_IMAGE_COUNT,
+            VB_BUFFER_COUNT,
+            "invariant: vb_indirect_late is the LAST buffer ResId declare_vb_graph declares, and \
+             the buffer ResIds must exactly fill VbBarrierSink::buffers"
+        );
 
         // Pass `light_upload` (async light-table re-upload) — the SAME gate
         // `declare_forward_graph`'s own `light_upload` pass uses.
@@ -4899,6 +4946,17 @@ impl Renderer<'_> {
                     .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_visible_instance")
                     [fi]
                     .buffer,
+                // VG R3 piece 2 step P2-3: the LATE indirect record array, appended LAST so no
+                // slot above moved. `.expect()`ed rather than placeholder-backed for the SAME
+                // reason as `vb_visible_instance` directly above — `GpuSceneBundles::boot` mints
+                // it unconditionally — and the placeholder would be worse here than a `None`: it
+                // resolves to `scene.light_table.buffer`, so a mis-keyed barrier would silently
+                // synchronise a live wrong buffer with no VUID.
+                scene
+                    .vb_indirect_late
+                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_indirect_late")
+                    [fi]
+                    .buffer,
             ],
             // Rung R9d (buffer ResId 5): `tlas_instances` — mirrors [`GbufferBarrierSink`]'s own
             // `scene.tlas.map_or(VkBuffer::NULL, |t| t.instance_array.buffer)` source.
@@ -4945,6 +5003,13 @@ impl Renderer<'_> {
                 scene
                     .vb_visible_instance
                     .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_visible_instance")
+                    [fi]
+                    .buffer,
+                // VG R3 piece 2 step P2-3: the LATE indirect record array, appended LAST — see the
+                // `not(hwrt)` variant's own comment.
+                scene
+                    .vb_indirect_late
+                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_indirect_late")
                     [fi]
                     .buffer,
             ],

@@ -3131,6 +3131,43 @@ pub struct GBufferScene<'a> {
     ///
     /// Unarmed ⇒ no pass, no barrier, no copy, no allocation ⇒ every golden pin byte-identical.
     pub hzb_dump: Option<&'a BoundBuffer>,
+
+    // ---- VG R3 piece 2 (docs/VG-R3-P2-CAPABILITY-SPLIT-PLAN.md): the raster split ----------
+    /// VG R3 piece 2 step P2-3 (plan D4): the per-FIF LATE indirect record array — the
+    /// `VkDrawIndexedIndirectCommand` array the SECOND (late) raster scope's draws will fetch,
+    /// DEDICATED rather than shared with [`Self::vb_indirect`].
+    ///
+    /// Sharing one array would need it rewritten BETWEEN the two scopes in one command buffer —
+    /// a transfer racing the early scope's still-in-flight indirect fetches, paid every frame
+    /// forever to save 20 KiB × FIF. Nanite makes the same call ("separate per pass").
+    ///
+    /// `Some` on every VB boot (`GpuSceneBundles::boot` mints it unconditionally, the
+    /// [`Self::vb_visible_instance`] rule); `None` only in the hand-written low-level test
+    /// fixtures, exactly as [`Self::vb_indirect`] is. It is `.expect()`ed under
+    /// [`Self::path_vb_occlusion_split`] and is deliberately NOT a conjunct of that predicate —
+    /// a dead conjunct is what `vb_visible_instance`'s own doc exists to avoid.
+    ///
+    /// WRITTEN BY NOTHING at this step: the declaring `vb_indirect_late_upload` pass and the
+    /// late scope that reads it are step P2-5. An indirect fetch off a buffer with no DECLARED
+    /// writer derives `(TOP_OF_PIPE, 0)` — an execution-only edge that makes the fill neither
+    /// available nor visible — so the two land in one commit, never separately.
+    pub vb_indirect_late: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
+    /// VG R3 piece 2 step P2-3 (plan D2/D3): instances in THIS frame's VB ring whose entity
+    /// carries `boyko_render::OcclusionCulling` — the STRUCTURAL conjunct of
+    /// [`Self::path_vb_occlusion_split`].
+    ///
+    /// A plain `u32` because this crate cannot depend on `boyko_render` (which sits ABOVE it in
+    /// the dependency graph) — the SAME plain-value boundary crossing
+    /// [`Self::vb_classify_material_count`] documents. Folded during the host gather's primary
+    /// scatter (`MeshRenderScratch::occlusion_instances`) and read off the MAIN scratch only:
+    /// `CsmCasterScratch` carries a second, caster-filtered copy that is redundant, never
+    /// authoritative.
+    ///
+    /// It over-approximates in the harmless direction: the fold counts instances that reached
+    /// the ring, while the runner further skips batches whose mesh is not `Loaded`, so a frame
+    /// can arm the split with zero marked instances in the DRAWN set — an armed empty scope,
+    /// never the reverse.
+    pub vb_occlusion_instances: u32,
 }
 
 impl GBufferScene<'_> {
@@ -3470,6 +3507,34 @@ impl GBufferScene<'_> {
     #[inline]
     pub(crate) fn path_is_vb(&self) -> bool {
         self.resolved_render_path.path == RENDER_PATH_VISIBILITY_BUFFER
+    }
+
+    /// VG R3 piece 2 (docs/VG-R3-P2-CAPABILITY-SPLIT-PLAN.md, decision D3) — THE single source
+    /// of "this frame records TWO raster scopes", to be read by `declare_vb_graph` AND
+    /// `record_vb` alike (the W1 declare/record-parity rule every sibling predicate here
+    /// follows). DERIVED, never stored: a second stored bool is a second thing that can
+    /// disagree — the `boyko_render::hzb_config::HzbConfig::enabled()` discipline (derived from
+    /// `mode != Off` rather than kept as a field beside it).
+    ///
+    /// Gated on the CAPABILITY ALONE at this piece; piece 4 AND-s in the owner config knob. A
+    /// split nobody can record is a split nobody can prove inert, so gating it on a knob that
+    /// does not exist yet would make every gate for it vacuous by construction.
+    ///
+    /// The `mesh_leg` conjunct is load-bearing, not defensive: a `VisibilityBuffer × Sdf`
+    /// (mesh-less) frame declares no `vb_raster` at all, and a late scope with no early scope
+    /// would `LOAD_OP_LOAD` an image nothing wrote this frame — the same conjunct, for the same
+    /// reason, the HZB build's own gate carries. [`Self::path_is_vb`] is kept even though both
+    /// VB call sites make it redundant, so the method is correct at ANY call site: a predicate
+    /// sound in only one caller is a trap for the next reader.
+    ///
+    /// ⚠️ `pub`, not `pub(crate)`: it is authored one step BEFORE its readers exist (step P2-5
+    /// declares and records the split), and a `pub(crate)` method with no in-crate caller is
+    /// `dead_code` under `-D warnings` for that commit.
+    #[inline]
+    pub fn path_vb_occlusion_split(&self) -> bool {
+        self.path_is_vb()
+            && self.resolved_render_path.mesh_leg
+            && self.vb_occlusion_instances > 0
     }
 }
 

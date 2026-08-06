@@ -160,6 +160,30 @@ pub(crate) const VB_CULL_VISIBLE_BYTES: u64 = (INSTANCE_CAPACITY as u64) * 4;
 pub(crate) const VB_INDIRECT_BYTES: u64 =
     (INSTANCE_CAPACITY as u64) * boyko_rhi_vulkan::ffi::DRAW_INDEXED_INDIRECT_STRIDE as u64;
 
+/// VG R3 piece 2 (docs/VG-R3-P2-CAPABILITY-SPLIT-PLAN.md, decision D5 §3): the record capacity
+/// of the occlusion split's LATE indirect array — an INDEPENDENT literal (not
+/// [`INSTANCE_CAPACITY`] itself), so the const-assert immediately below actually guards drift
+/// rather than restating a definition. The [`TEX_INSTANCE_CAPACITY`] shape verbatim.
+const VB_INDIRECT_LATE_RECORDS: usize = 1024;
+const _: () = assert!(
+    VB_INDIRECT_LATE_RECORDS == INSTANCE_CAPACITY,
+    "the late record array's capacity must track the early one: both raster scopes bound their \
+     record loops by the SAME hoisted `draw_batches` (min-ed against EACH array's own derived \
+     record_capacity), so a late array shorter than the early one silently drops the tail \
+     batches from the late scope"
+);
+
+/// VG R3 piece 2: the LATE indirect draw-record allocation's byte size — 20 KiB, the same
+/// per-record stride and the same per-FIF shape as [`VB_INDIRECT_BYTES`].
+///
+/// A DEDICATED array rather than a second use of `vb_indirect` (plan D4): the early scope needs
+/// `instanceCount = early_k` and the late scope `instanceCount = late_k` in ONE command buffer,
+/// so a shared array would have to be rewritten between the scopes — a transfer racing the early
+/// scope's still-in-flight indirect fetches. `vkCmdDrawIndexedIndirectCount` (which would let one
+/// array be refilled to a zero count instead) is deliberately not loaded on this device.
+pub(crate) const VB_INDIRECT_LATE_BYTES: u64 =
+    (VB_INDIRECT_LATE_RECORDS as u64) * boyko_rhi_vulkan::ffi::DRAW_INDEXED_INDIRECT_STRIDE as u64;
+
 /// VG rung R2d-2: the per-INSTANCE survivor-list allocation's byte size.
 pub(crate) const VB_VISIBLE_INSTANCE_BYTES: u64 = (VB_VISIBLE_INSTANCE_ELEMS as u64) * 4;
 
@@ -1162,6 +1186,19 @@ pub(crate) struct GpuSceneBundles {
     /// `vb_instance_ring` -- a sibling in-flight frame touches a different slot and there is no
     /// cross-frame WAR to seed against.
     pub(crate) vb_indirect: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// VG R3 piece 2 step P2-3: the per-FIF LATE `VkDrawIndexedIndirectCommand` records the
+    /// occlusion split's SECOND raster scope will fetch — [`Self::vb_indirect`]'s dedicated twin,
+    /// same size, same usage, same DEVICE_LOCAL location, same per-FIF frame-private shape.
+    ///
+    /// Allocated UNCONDITIONALLY beside `vb_indirect` (the [`Self::vb_visible_instance`] rule),
+    /// so `GpuSceneBundles::scene` wires it as an unconditional `Some(...)` and every reader can
+    /// `.expect()` it under the split predicate rather than carry another `Option` arm.
+    ///
+    /// WRITTEN BY NOTHING at this step: its `vb_indirect_late_upload` filling pass and the late
+    /// scope that fetches from it both land in step P2-5, together, because a declared indirect
+    /// READ with no declared WRITE derives an execution-only `(TOP_OF_PIPE, 0)` edge — a missing
+    /// barrier, not a wasted one, over freshly allocated device memory.
+    pub(crate) vb_indirect_late: [BoundBuffer; FRAMES_IN_FLIGHT],
     /// VG rung R2c0: the per-FIF `VbBatchDesc` array the batch cull reads (one 32-byte descriptor
     /// per `DrawBatch`), transfer-filled each frame beside the indirect records.
     pub(crate) vb_batch_desc: [BoundBuffer; FRAMES_IN_FLIGHT],
@@ -3762,6 +3799,30 @@ impl GpuSceneBundles {
             })
             .expect("invariant: VB indirect-draw record buffer create")
         });
+        // VG R3 piece 2 step P2-3: the LATE record array, minted right beside the early one and,
+        // like it, UNCONDITIONALLY — the `vb_visible_instance` rule (a per-frame GPU-private
+        // resource owned by this struct cannot have its existence conditioned on a per-frame ECS
+        // fact, which is exactly what the occlusion capability is).
+        //
+        // The usage set is `vb_indirect`'s, bit for bit, and each bit is here for its own reason:
+        // INDIRECT because the late scope fetches records from it; TRANSFER_DST because the fill
+        // is an inline `vkCmdUpdateBuffer` (piece 2); STORAGE because piece 3 replaces that host
+        // fill with the cull writing `instanceCount` through a descriptor, which is not a
+        // transfer — minting it now is legal and inert on a buffer nothing binds, and adding it
+        // later would mean re-creating the allocation. TRANSFER_SRC is declarative: `create_buffer`
+        // already ORs both TRANSFER bits into every DeviceLocal buffer (see `vb_indirect`'s own
+        // note), so it states intent and matches its twin's spelling.
+        let vb_indirect_late: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+            ctx.create_buffer(&BufferDesc {
+                size: VB_INDIRECT_LATE_BYTES,
+                usage: BufferUsage::INDIRECT
+                    | BufferUsage::TRANSFER_DST
+                    | BufferUsage::STORAGE
+                    | BufferUsage::TRANSFER_SRC,
+                location: MemoryLocation::DeviceLocal,
+            })
+            .expect("invariant: VB late indirect-draw record buffer create")
+        });
 
         // --- VG rung R2c0: the batch cull's three buffers. All per-FIF and DEVICE_LOCAL: the
         // descriptors are transfer-filled (so the cull reads them at full device bandwidth rather
@@ -4203,6 +4264,7 @@ impl GpuSceneBundles {
             vb_shade_tex_pipeline: None,
             vb_instance_rings,
             vb_indirect,
+            vb_indirect_late,
             vb_batch_desc,
             vb_cull_visible,
             vb_cull_count,
@@ -5639,6 +5701,13 @@ impl GpuSceneBundles {
         // composite extent — the two are read from one site in the runner, so the staging and the
         // copy regions cannot be sized from different numbers.
         hzb_dump: Option<&'a BoundBuffer>,
+        // VG R3 piece 2 step P2-3: instances in THIS frame's VB ring carrying
+        // `boyko_render::OcclusionCulling` (`MeshRenderScratch::occlusion_instances`, read by the
+        // runner off the SAME `scratch` the instance-model upload just read — the
+        // `any_non_default_material` / `any_textured_material` threading verbatim). The
+        // STRUCTURAL conjunct of `GBufferScene::path_vb_occlusion_split`; `0` on every scene in
+        // the tree today (nothing inserts the marker), which is the 0%-gate.
+        vb_occlusion_instances: u32,
         device: &VulkanContext,
     ) -> GBufferScene<'a> {
         debug_assert!(
@@ -6391,6 +6460,11 @@ impl GpuSceneBundles {
             vb_layout0: Some(&self.vb_layout0),
             vb_instance_ring: Some(&self.vb_instance_rings),
             vb_indirect: Some(&self.vb_indirect),
+            // VG R3 piece 2 step P2-3: the LATE record array — an unconditional `Some(...)`, the
+            // `vb_visible_instance` discipline, because `boot` mints it unconditionally beside
+            // `vb_indirect`. It is deliberately NOT threaded as a conjunct of the split predicate:
+            // an always-`Some` field in a gate is a dead conjunct that reads like a real one.
+            vb_indirect_late: Some(&self.vb_indirect_late),
             // VG rung R2c0: the batch-cull arm, wired as ONE all-or-nothing group. Both
             // `declare_vb_graph` and `record_vb` gate on all five being `Some` together, and a
             // partial wiring here would let the two gates disagree — which is a MISSING barrier
@@ -6496,6 +6570,11 @@ impl GpuSceneBundles {
             // VG R3 piece 1 step P1-6: the dump staging, threaded verbatim (see this fn's
             // `hzb_dump` param doc). `None` on every non-probe frame ⇒ no dump pass, no copy.
             hzb_dump,
+            // VG R3 piece 2 step P2-3: this frame's occlusion-capable instance count, threaded
+            // verbatim from the gather (see this fn's `vb_occlusion_instances` param doc). It is
+            // the ONLY per-frame input of `GBufferScene::path_vb_occlusion_split`, so there is
+            // one number for declare and record to agree on and no second one to disagree with.
+            vb_occlusion_instances,
         }
     }
 
@@ -7037,6 +7116,14 @@ impl GpuSceneBundles {
                 RhiDevice::destroy_buffer(ctx, buf);
             }
             for buf in self.vb_batch_desc {
+                RhiDevice::destroy_buffer(ctx, buf);
+            }
+            // VG R3 piece 2 step P2-3: created in `boot` immediately AFTER `vb_indirect` and
+            // before the R2c0 trio, so it is freed here — between them — keeping this block
+            // reverse-acquisition. The omission this block's own header records (VB buffers
+            // reaching teardown unfreed) is why a new VB buffer gets its destroy in the same edit
+            // that allocates it.
+            for buf in self.vb_indirect_late {
                 RhiDevice::destroy_buffer(ctx, buf);
             }
             for buf in self.vb_indirect {

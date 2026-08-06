@@ -2589,6 +2589,13 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // VG R3 piece 1 step P1-6: the `BOYKO_HZB_DUMP` probe is unarmed here, as it is on every
         // golden and every non-probe boot — no dump pass is declared and no copy is recorded.
         hzb_dump: None,
+        // VG R3 piece 2 step P2-3: no LATE indirect record array and no marked instance. This
+        // harness never resolves VB (the same rationale as the VB fields above), so
+        // `path_vb_occlusion_split()` is `false` here through its FIRST conjunct already —
+        // `vb_occlusion_instances: 0` is the honest value for a fixture with no ECS gather
+        // behind it, not a second gate.
+        vb_indirect_late: None,
+        vb_occlusion_instances: 0,
     };
 
     // The composite's native size — drives the G-buffer alloc + the 1:1 top-left present.
@@ -3671,6 +3678,13 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         // VG R3 piece 1 step P1-6: the `BOYKO_HZB_DUMP` probe is unarmed here, as it is on every
         // golden and every non-probe boot — no dump pass is declared and no copy is recorded.
         hzb_dump: None,
+        // VG R3 piece 2 step P2-3: no LATE indirect record array and no marked instance. This
+        // harness never resolves VB (the same rationale as the VB fields above), so
+        // `path_vb_occlusion_split()` is `false` here through its FIRST conjunct already —
+        // `vb_occlusion_instances: 0` is the honest value for a fixture with no ECS gather
+        // behind it, not a second gate.
+        vb_indirect_late: None,
+        vb_occlusion_instances: 0,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -8691,6 +8705,13 @@ fn run_showcase_body_ddgi(
         // VG R3 piece 1 step P1-6: the `BOYKO_HZB_DUMP` probe is unarmed here, as it is on every
         // golden and every non-probe boot — no dump pass is declared and no copy is recorded.
         hzb_dump: None,
+        // VG R3 piece 2 step P2-3: no LATE indirect record array and no marked instance. This
+        // harness never resolves VB (the same rationale as the VB fields above), so
+        // `path_vb_occlusion_split()` is `false` here through its FIRST conjunct already —
+        // `vb_occlusion_instances: 0` is the honest value for a fixture with no ECS gather
+        // behind it, not a second gate.
+        vb_indirect_late: None,
+        vb_occlusion_instances: 0,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -10248,6 +10269,11 @@ fn run_showcase_body(
         // VG R3 piece 1 step P1-6: the `BOYKO_HZB_DUMP` probe is unarmed here — no dump pass, no
         // copy (see the sibling fixtures).
         hzb_dump: None,
+        // VG R3 piece 2 step P2-3: no LATE indirect record array, no marked instance — see the
+        // sibling fixtures. `path_vb_occlusion_split()` is `false` here through `path_is_vb()`
+        // already.
+        vb_indirect_late: None,
+        vb_occlusion_instances: 0,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
