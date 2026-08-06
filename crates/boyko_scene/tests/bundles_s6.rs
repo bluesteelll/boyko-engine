@@ -25,9 +25,9 @@
 
 // Test-harness plumbing only: `Arc<Mutex<…>>` is this repo's established probe for
 // smuggling a spawned `Entity` out of the `Send + Sync` one-shot system closure, and the
-// file-static `Mutex<()>` guards serialize tests that arm a process-global (allocator /
-// propagation counter). Neither is engine code — the whole file is compiled out of every
-// shipping build.
+// file-static `Mutex<()>` guard (`INTERNER_LOCK`) serializes the tests that touch the
+// process-global string interner. Neither is engine code — the whole file is compiled out
+// of every shipping build.
 #![allow(clippy::disallowed_types)]
 
 use std::sync::{Arc, Mutex};
@@ -54,6 +54,32 @@ use boyko_scene::transform::{GlobalTransform, Transform};
 /// The kernel's component-id ceiling (mirror of `component_registry::MAX_COMPONENTS`,
 /// which is crate-private to `boyko_ecs`). The exact-set walk scans `[0, MAX)`.
 const MAX_COMPONENTS: usize = 512;
+
+// ── interner serialization ──────────────────────────────────────────────────────
+//
+// `boyko_scene::identity`'s interner is a PROCESS-GLOBAL mint registry
+// (`identity.rs:81`), shared by every test thread in this binary. `interner_len()` is
+// therefore a shared counter, and `interner_is_off_the_per_frame_path` asserts that it
+// does NOT move across a stretch of work — a claim a SIBLING test can falsify by
+// interning at the same moment. libtest runs these tests on parallel threads by default,
+// and that is precisely the measured signature: the reader passes alone, passes under
+// `--test-threads=1`, and passes in debug, and fails ONLY in release with default
+// parallelism — where nothing about the claim changed, only whether a sibling's mint
+// lands inside its window.
+//
+// Every test that READS or WRITES the interner holds this lock for its whole body, so at
+// most one of them is live at a time. Nothing else in the file is serialized: the bundle /
+// archetype gates own their `EcsMaster` outright and share no global, and serializing them
+// would only slow the suite and blur which tests actually share state.
+static INTERNER_LOCK: Mutex<()> = Mutex::new(());
+
+/// Takes the interner guard, TOLERATING poison: if a guarded test panics while holding the
+/// lock, its siblings must still report their own verdict rather than cascade a
+/// `PoisonError` — the protected datum is a process-global the panicking test does not
+/// leave in a torn state (a `usize` count and an append-only registry).
+fn lock_interner() -> std::sync::MutexGuard<'static, ()> {
+    INTERNER_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 // ── shared exact-membership oracle ──────────────────────────────────────────────
 
@@ -394,6 +420,9 @@ fn bundle_spawn_lands_in_same_archetype_as_manual_insert() {
 
 #[test]
 fn intern_round_trips_and_dedups() {
+    // Mints into the process-global interner (a WRITER of the count
+    // `interner_is_off_the_per_frame_path` pins).
+    let _interner = lock_interner();
     let a = identity::intern("player_one_s6");
     let resolved = identity::resolve(a).expect("interned string resolves");
     assert_eq!(resolved, "player_one_s6", "intern→resolve round-trips the string");
@@ -427,6 +456,9 @@ fn name_is_a_transparent_u32_lane() {
 /// never calls back into `intern`/`resolve`).
 #[test]
 fn interner_is_off_the_per_frame_path() {
+    // READS the process-global `identity::interner_len()` and asserts it does not move;
+    // the guard keeps every interning sibling out of that window.
+    let _interner = lock_interner();
     let mut world = EcsMaster::new();
 
     // Setup: intern N distinct names ONCE, spawn an entity carrying each Name.
@@ -497,6 +529,9 @@ struct NamedSpatial {
 
 #[test]
 fn name_participates_in_a_derived_bundle() {
+    // Mints into the process-global interner (a WRITER of the count
+    // `interner_is_off_the_per_frame_path` pins).
+    let _interner = lock_interner();
     let mut world = EcsMaster::new();
     let name = identity::intern("named_spatial_s6");
     let sink: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
