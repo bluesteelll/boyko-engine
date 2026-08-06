@@ -1638,3 +1638,39 @@ Until one of those runs, **the plan must keep saying the question is open** rath
 in either direction. What IS established, and matches the round-1 critique's own observation: the
 19-message baseline is **entirely `vkCreate*`-time**, so nothing in it demonstrates that
 synchronization validation was ever live on a recorded frame.
+
+## P2-0 RESOLVED — probe 2, and the answer is that validation cannot see it
+
+The decisive probe was the second one named above: `hzb_build_p`'s read of mip `d-1`
+(`graph_bridge.rs:3997`), which is the **only** declared read of that mip and therefore has no
+sibling to cover it. Deleted while the dispatch that reads it stayed.
+
+Pass 0 writes mip 5. Pass 1 reads mip 5. With the declaration gone the graph derives no dependency
+between them — and the per-mip state P1-5a shipped is what guarantees that: pass 1's own write of
+mips `[6, 10)` is tracked separately and cannot accidentally cover mip 5.
+
+| | validation messages | `SYNC-HAZARD-*` | golden image |
+|---|---|---|---|
+| baseline (×2, same build) | 19 | — | byte-identical |
+| **probe 2 — a REAL missing barrier** | **19** | **none** | **byte-identical** |
+
+**Synchronization validation is NOT live on this machine.** The feature bit is requested in the code,
+but the instance chain degrades silently when `VK_EXT_validation_features` is absent, and the entire
+19-message baseline is `vkCreate*`-time — nothing in it was ever produced by a recorded frame.
+
+### What this settles, and it settles it in the direction that costs more work
+
+**G4 — the synthetic declaration pin — is the ONLY gate that can see a missing barrier here. G3
+cannot.** Round 2 said the meaning of both gates hung on this and refused to pick; the measurement
+picks, and it picks the harder one. G4's field-level assertions are therefore not belt-and-braces:
+they are the sole coverage, and B2's red control (delete the upload access, watch the count stay 3
+while the fields become `TOP_OF_PIPE`/`0`) is the only thing standing between piece 2 and a shipped
+missing barrier.
+
+### The sharpest line in the whole measurement
+
+**A genuine missing barrier changed no pixel and emitted no message.** Both gates a reader would
+reach for first — the golden pin and the validation leg — returned exactly what they return when
+everything is correct. That is the concrete, executed form of the claim this campaign has been
+repeating since piece 1 §5: *a golden pin cannot see a redundant or a missing barrier.* It is no
+longer an argument. It is a table.
