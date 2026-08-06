@@ -1143,17 +1143,34 @@ impl VbClassifyTargets {
 /// # Allocated, BOUND, BUILT — and read by NOTHING
 ///
 /// Steps P1-2/P1-4 allocated and bound it; step P1-5 declared the build passes into
-/// `declare_vb_graph` and dispatches them from `record_vb`, so the image no longer stays
-/// `UNDEFINED`: each pass's first touch of mips `[d, d+n)` derives the `UNDEFINED → GENERAL`
-/// transition, and the pyramid then holds a real reduction of this frame's depth. Nothing SAMPLES
-/// it — the occlusion cull is piece 3 — so an armed frame still changes no rendered pixel.
+/// `declare_vb_graph` and dispatches them from `record_vb`, so the pyramid holds a real reduction
+/// of this frame's depth. Nothing SAMPLES it — the occlusion cull is piece 3 — so an armed frame
+/// still changes no rendered pixel.
+///
+/// # `GENERAL` from BIRTH (piece 3 step P3-0), not from the graph's first touch
+///
+/// Until P3-0 the image's only layout producer was the framegraph: each build pass's first touch
+/// of mips `[d, d+n)` derived an `UNDEFINED → GENERAL` transition, one per pass, every frame of
+/// the generation. Piece 3 makes the pyramid a CROSS-FRAME resource — frame N+1 reads what frame
+/// N built — which is a state `UNDEFINED` cannot describe, because a first touch licenses the
+/// driver to DISCARD the contents. The graph therefore seeds it `GENERAL`, and
+/// [`Self::boot_clear_hzb_pyramid`] is what makes that claim true: one encoder, once per targets
+/// generation, clearing every mip to `0.0` and landing the image in `GENERAL` before any frame is
+/// recorded.
 ///
 /// # NON-RINGED — one image, not a `[_; FRAMES_IN_FLIGHT]` ring
 ///
-/// Fixed by the plan (§2). Nothing here can argue the point either way: a ring exists to separate
-/// a frame's write from a previous frame's read, and this step has no reader and no writer at all.
-/// The piece that adds the build pass and its consumer is where that hazard first becomes
-/// expressible.
+/// Fixed by the plan (§2). Nothing in piece 1 could argue the point either way: a ring exists to
+/// separate a frame's write from a previous frame's read, and that step had no reader and no
+/// writer at all.
+///
+/// Piece 3 makes the hazard expressible and KEEPS the single image. The ordering is carried by
+/// barriers under a stated premise — one queue, one queue family, every one of these barriers
+/// recorded outside a render-pass instance, so a `vkCmdPipelineBarrier`'s first synchronization
+/// scope reaches the previous frame's commands in submission order. Ringing would cost 2× VRAM
+/// and, more to the point, double [`Self::level_views`], [`Self::sets`] and every declared span
+/// while making the dump ambiguous about which slot it copied. The premise is written at the
+/// `hzb_pyramid` seed's declaration site so it can be re-derived the day async compute lands.
 ///
 /// # …but the SETS are per-frame-in-flight, and the SOURCE DEPTH is why
 ///
@@ -1200,8 +1217,10 @@ impl VbClassifyTargets {
 /// and the stored plan agree by construction, not by a second derivation.
 pub(crate) struct HzbTargets {
     /// The `R32_SFLOAT` pyramid image, `plan.levels` mips deep, single array layer. Created
-    /// `UNDEFINED`; since step P1-5 the build passes transition it to `GENERAL` per mip, one
-    /// first-touch barrier per pass (`declare_vb_graph`'s `hzb_build_*` chain).
+    /// `UNDEFINED` and put into `GENERAL` — with every mip cleared to `0.0` — by
+    /// [`Self::boot_clear_hzb_pyramid`] before [`Self::build`] returns (piece 3 step P3-0); it is
+    /// `GENERAL` for life from there on, which is what `declare_vb_graph`'s cross-frame seed on
+    /// `hzb_pyramid` asserts and what the `hzb_build_*` chain's own barriers preserve.
     pub(crate) pyramid: VulkanTexture,
     // VIEW-OWNER: `pyramid`; destroyed before it in `HzbTargets::destroy`.
     /// One single-mip view per level: slot `k` is `Some` iff `k < plan.levels`, and views level
@@ -1419,7 +1438,175 @@ impl HzbTargets {
             return Err(SwapchainError::DepthImage(e));
         }
 
+        // === VG R3 piece 3 step P3-0: THE BOOT CLEAR (plan D2). ===
+        //
+        // Everything above this line allocates; nothing above it TRANSITIONS. That is the whole
+        // reason this call exists: `declare_vb_graph` seeds `hzb_pyramid` with
+        // `seeded_writer_at_layout(GENERAL, …)`, and a seed is a CLAIM about the layout the image
+        // is already in. Without a real transition the graph's first touch would emit
+        // `oldLayout = GENERAL` against an image genuinely in `UNDEFINED` —
+        // `VUID-VkImageMemoryBarrier-oldLayout-01197` — for the entire life of every `HzbTargets`
+        // generation, i.e. after every resize and not merely once at boot.
+        //
+        // Clearing (rather than only transitioning) is not decoration either: `0.0` is the
+        // reverse-Z FAR plane, so an unbuilt or partially built pyramid PROVABLY REJECTS NOTHING.
+        // "The pyramid holds a conservative lower bound over its footprint" becomes true from
+        // birth instead of from frame 2, which also makes convergence after a resize one frame.
+        //
+        // Placed LAST for the same reason the pyramid itself is built last in
+        // `GBufferTargets::create`: the only new failure edge is right here, and it tears down
+        // through the struct's OWN reverse-acquisition ladder rather than a hand-written drain.
+        if let Err(e) = Self::boot_clear_hzb_pyramid(ctx, &targets.pyramid, targets.plan.levels) {
+            // The clear submit may have been issued and only then faulted, so a queue operation
+            // can still reference the image. Drain the device before destroying it — the same
+            // belt-and-braces `build_and_clear_taa_hist` applies to its own failed boot clear.
+            let _ = RhiDevice::wait_idle(ctx);
+            // SAFETY: the image, every view and every descriptor set were created on `ctx` in this
+            // fn; the device is drained above, so no submission still references them. `destroy`
+            // consumes `targets` by value and tears each down exactly once, in reverse acquisition
+            // order — sets, then views, then the image they view (THE OWNERSHIP RULE,
+            // `VUID-vkDestroyImage-image-01000`).
+            unsafe { targets.destroy(ctx) };
+            return Self::boot_clear_failed(e);
+        }
+
         Ok(Some(targets))
+    }
+
+    /// VG R3 piece 3 step P3-0 (plan D2) — records, submits and fence-waits ONE encoder that
+    /// clears every mip of `pyramid` to `0.0` and leaves the image in `GENERAL`
+    /// (`UNDEFINED` → `TRANSFER_DST_OPTIMAL` → clear → `GENERAL`), modelled statement for
+    /// statement on [`GBufferTargets::boot_clear_taa_hist`] /
+    /// `GBufferTargets::boot_clear_shadow_temporal_hist`, whose own final-barrier comment states
+    /// this motive in the engine's words: the `GENERAL` layout is what satisfies the framegraph
+    /// seed's `GENERAL`-layout assumption.
+    ///
+    /// `levels` is the plan's level count — the SAME number `pyramid` was created with
+    /// (`mip_levels: plan.levels`), read from the field rather than re-derived, so the cleared
+    /// span and the allocation cannot come from two different numbers. A partial clear would leave
+    /// the untouched tail mips in `UNDEFINED` under a seed that claims `GENERAL`.
+    ///
+    /// The encoder + fence are setup-class transients, torn down here on EVERY path.
+    ///
+    /// # Degrade policy
+    ///
+    /// None: any failure propagates. See [`Self::boot_clear_failed`] for why this resource cannot
+    /// take the `Ok(None)` route `build_and_clear_taa_hist` takes.
+    fn boot_clear_hzb_pyramid(
+        ctx: &VulkanContext,
+        pyramid: &VulkanTexture,
+        levels: u32,
+    ) -> Result<(), SwapchainError> {
+        let mut encoder =
+            RhiDevice::create_command_encoder(ctx).map_err(SwapchainError::DepthImage)?;
+        let fence = match RhiDevice::create_fence(ctx, false) {
+            Ok(f) => f,
+            Err(e) => {
+                // SAFETY: `encoder` was just created on `ctx`, never submitted; destroy once.
+                unsafe { RhiDevice::destroy_command_encoder(ctx, encoder) };
+                return Err(SwapchainError::DepthImage(e));
+            }
+        };
+
+        // The WHOLE mip chain of a 2D single-layer COLOR image (per `build`'s `pyramid_desc`).
+        let range = ImageSubresourceRange {
+            aspect: ImageAspect::COLOR,
+            base_mip_level: 0,
+            level_count: levels,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+
+        let record = (|| -> Result<(), SwapchainError> {
+            encoder.begin().map_err(SwapchainError::DepthImage)?;
+
+            // UNDEFINED → TRANSFER_DST_OPTIMAL over every mip (a fresh image has no prior
+            // contents, so UNDEFINED discards — this is the clear destination).
+            encoder.image_barrier(&ImageBarrierDesc {
+                texture: pyramid,
+                src_stage: BarrierStage::TOP_OF_PIPE,
+                dst_stage: BarrierStage::TRANSFER,
+                src_access: BarrierAccess::NONE,
+                dst_access: BarrierAccess::TRANSFER_WRITE,
+                old_layout: ImageLayout::Undefined,
+                new_layout: ImageLayout::TransferDstOptimal,
+                range,
+            });
+
+            // `0.0` is the reverse-Z FAR plane and the same value `VB_DEPTH_CLEAR` uses, so a
+            // level nothing has reduced yet is a conservative lower bound that rejects nothing.
+            // Only the R channel is meaningful (`R32_SFLOAT`); the rest are written as zero
+            // because `clear_color_image` takes the full `[f32; 4]`.
+            encoder.clear_color_image(pyramid, ImageLayout::TransferDstOptimal, [0.0; 4], range);
+
+            // TRANSFER_DST_OPTIMAL → GENERAL, made available to COMPUTE_SHADER/SHADER_READ. The
+            // fence wait below signals the CPU only, so the FIRST in-graph access must still see
+            // the clear; `GENERAL` is additionally what the `hzb_pyramid` framegraph seed asserts
+            // the image is already in.
+            encoder.image_barrier(&ImageBarrierDesc {
+                texture: pyramid,
+                src_stage: BarrierStage::TRANSFER,
+                dst_stage: BarrierStage::COMPUTE_SHADER,
+                src_access: BarrierAccess::TRANSFER_WRITE,
+                dst_access: BarrierAccess::SHADER_READ,
+                old_layout: ImageLayout::TransferDstOptimal,
+                new_layout: ImageLayout::General,
+                range,
+            });
+
+            encoder.end().map_err(SwapchainError::DepthImage)?;
+            let queue = ctx.rhi_queue();
+            queue.submit(&encoder, &fence).map_err(SwapchainError::DepthImage)?;
+            RhiDevice::wait_fence(ctx, &fence, u64::MAX).map_err(SwapchainError::DepthImage)?;
+            Ok(())
+        })();
+
+        // Tear down the setup-class transients. The submit (if it ran) is fence-waited on the Ok
+        // path.
+        // SAFETY: encoder/fence were created on `ctx`; the encoder's only submission (if any) is
+        // fence-waited above on the Ok path (or never submitted / faulted on an error path), and
+        // each is moved by value ⇒ destroyed exactly once.
+        unsafe {
+            RhiDevice::destroy_command_encoder(ctx, encoder);
+            RhiDevice::destroy_fence(ctx, fence);
+        }
+        record
+    }
+
+    /// VG R3 piece 3 step P3-0 (plan D2) — THE DEGRADE POLICY for a failed pyramid boot clear,
+    /// funnelled through ONE function so a unit test can execute the policy itself rather than a
+    /// paraphrase of it: the failure is PROPAGATED as `Err`, never swallowed into `Ok(None)`.
+    ///
+    /// # Why `Ok(None)` is refused, when `build_and_clear_taa_hist` takes exactly that route
+    ///
+    /// TAA-off is byte-identical, so a degraded TAA history costs nothing. The pyramid cannot
+    /// degrade that way, and the reasons are shipped code rather than taste:
+    ///
+    /// * [`GBufferTargets::hzb_arm`] is captured from the SCENE before the build, and the
+    ///   lockstep [`hzb_arm_matches_allocation`] assert compares it against the ALLOCATION. A
+    ///   second `Ok(None)` whose precondition is `scene.hzb == Some` makes those two disagree —
+    ///   the assert one might reach for as the safety net is the thing that FIRES.
+    /// * Release is worse than debug. `present/passes/vb.rs` holds three release-live, per-frame,
+    ///   unconditional `.expect("invariant: scene.hzb armed => targets.hzb …")`, so a degraded
+    ///   generation would panic every frame, in every profile.
+    /// * Nothing downstream could repair it. `GBufferScene::hzb` is the host PLAN, computed once
+    ///   per frame in the runner; no runtime failure can flip it, so no predicate derived from it
+    ///   can disarm anything in response to one.
+    ///
+    /// `Ok(None)` therefore stays reserved for [`Self::build`]'s 0%-gate — the disarmed
+    /// `HzbMode::Off` scene — and acquires no second producer.
+    ///
+    /// # What it costs, stated rather than hidden
+    ///
+    /// A device on which a few-megabyte clear submit fails now fails the whole targets build: boot
+    /// or resize returns `Err` and the caller's existing error path runs. That is the same class
+    /// as every other `create_*` failure in [`GBufferTargets::create`], and strictly better than
+    /// the alternatives — a silent `None` is a guaranteed release panic, and "seed `GENERAL`, skip
+    /// the clear" is `VUID-VkImageMemoryBarrier-oldLayout-01197` for the life of the generation.
+    #[cold]
+    #[inline(never)]
+    fn boot_clear_failed(e: SwapchainError) -> Result<Option<Self>, SwapchainError> {
+        Err(e)
     }
 
     /// # Safety
@@ -1444,6 +1631,21 @@ impl HzbTargets {
             RhiDevice::destroy_texture(ctx, self.pyramid);
         }
     }
+}
+
+/// VG R3 piece 1 step P1-2 / piece 3 step P3-0 — the LOCKSTEP invariant
+/// [`GBufferTargets::create`] asserts once the pyramid has been built: the STORED arm bit
+/// ([`GBufferTargets::hzb_arm`], captured from the scene BEFORE the build) and the ALLOCATION
+/// ([`GBufferTargets::hzb`]) must agree. They can only disagree if a build failure was swallowed
+/// instead of returned.
+///
+/// A named `const fn` rather than an inline `==` so the P3-0 degrade-policy unit test can execute
+/// the SAME predicate production asserts. That test's CONTROL — "make a failed boot clear return
+/// `Ok(None)` and show the lockstep assert fire" — is only meaningful if the thing it drives is
+/// the production predicate and not a second copy of it.
+#[inline]
+const fn hzb_arm_matches_allocation(hzb_arm: bool, allocated: bool) -> bool {
+    hzb_arm == allocated
 }
 
 /// Anti-aliasing campaign: which AA mode [`GBufferTargets`] is CURRENTLY armed for —
@@ -7714,6 +7916,9 @@ impl GBufferTargets {
             // VG R3 piece 1 step P1-2: the pyramid itself is allocated BELOW, after this literal
             // (see the placement argument there); the arm is captured HERE, from the scene, so the
             // stored bit and the allocation can only disagree if the build fails — which returns.
+            // VG R3 piece 3 step P3-0 added a SECOND failure edge inside that build — the boot
+            // clear — and it returns `Err` for exactly this reason (`HzbTargets::boot_clear_failed`
+            // states the argument in full).
             hzb: None,
             hzb_arm: scene.hzb.is_some(),
             extent,
@@ -7778,10 +7983,12 @@ impl GBufferTargets {
                 return Err(e);
             }
         }
-        debug_assert_eq!(
+        debug_assert!(
+            hzb_arm_matches_allocation(targets.hzb_arm, targets.hzb.is_some()),
+            "invariant: the stored HZB arm and the pyramid allocation move in lockstep \
+             (arm = {}, allocated = {})",
             targets.hzb_arm,
-            targets.hzb.is_some(),
-            "invariant: the stored HZB arm and the pyramid allocation move in lockstep"
+            targets.hzb.is_some()
         );
 
         Ok(targets)
@@ -8713,6 +8920,93 @@ mod tests {
         assert_eq!(TLAS_ACCEL_BINDING, 19, "TLAS must stay at binding 19 (unshifted by gPbr)");
         assert_eq!(RESOLVE_HWRT_DENOISE_BINDINGS, 22);
         assert_eq!(RESOLVE_HWRT_VIS_MV_BINDINGS, 24, "must stay exactly at MAX_BIND_GROUP_BINDINGS");
+    }
+
+    /// The fault a forced boot-clear failure delivers to the policy funnel: the shape
+    /// `RhiDevice::create_fence` / `RhiQueue::submit` return when they fail, wrapped exactly as
+    /// `HzbTargets::boot_clear_hzb_pyramid` wraps it.
+    fn forced_boot_clear_fault() -> SwapchainError {
+        SwapchainError::DepthImage(crate::error::VulkanError::Vk(
+            "vkCreateFence",
+            VkResult::ERROR_OUT_OF_DEVICE_MEMORY,
+        ))
+    }
+
+    /// VG R3 piece 3 step P3-0 (plan D2) — THE DEGRADE POLICY, executed rather than commented.
+    ///
+    /// Forces the pyramid's boot clear to fail at the seam and asserts the shipped policy:
+    /// [`HzbTargets::boot_clear_failed`] returns `Err`, so `HzbTargets::build` returns `Err`, so
+    /// `GBufferTargets::create` tears down and returns `Err` — no `GBufferTargets` is constructed
+    /// at all. `Ok(None)` on this path would be a SECOND `Ok(None)` producer whose precondition is
+    /// an ARMED scene; the companion test below shows what that costs.
+    ///
+    /// # What this test does NOT claim
+    ///
+    /// It constructs no device, so it does not exercise the encoder/submit/fence path itself. It
+    /// drives the POLICY function that path funnels every failure through — which is the part a
+    /// future edit could change without any other gate noticing.
+    #[test]
+    fn a_failed_pyramid_boot_clear_returns_err_and_never_ok_none() {
+        match HzbTargets::boot_clear_failed(forced_boot_clear_fault()) {
+            Err(_) => {}
+            Ok(None) => panic!(
+                "D2: a failed boot clear must NOT degrade to Ok(None). Ok(None) is the disarmed \
+                 0%-gate and nothing else; a second producer whose precondition is an armed scene \
+                 puts hzb_arm and the allocation out of lockstep, and makes three release-live \
+                 per-frame .expect()s in present/passes/vb.rs panic every frame"
+            ),
+            Ok(Some(_)) => {
+                panic!("a failed boot clear cannot yield a built pyramid")
+            }
+        }
+    }
+
+    /// VG R3 piece 3 step P3-0 (plan D2) — the policy's SELF-CONSISTENCY claim and ITS CONTROL,
+    /// both driven through [`hzb_arm_matches_allocation`], the predicate
+    /// `GBufferTargets::create`'s own `debug_assert` evaluates.
+    ///
+    /// Under the shipped `Err` policy the only `(arm, allocation)` pairs a live `GBufferTargets`
+    /// can be observed in are `(false, false)` (the disarmed 0%-gate) and `(true, true)` (armed
+    /// and built) — a failed clear contributes no row, because it constructs no targets. The
+    /// CONTROL is round 2's refuted shape: degrade the same failure to `Ok(None)` on an armed
+    /// scene and the pair becomes `(true, false)`, which the predicate REFUSES. A control that
+    /// passed here would mean the lockstep assert cannot see the degrade at all, and the whole
+    /// argument for returning `Err` would be unmeasured.
+    #[test]
+    fn the_err_policy_stays_in_lockstep_and_the_ok_none_control_breaks_it() {
+        // The predicate CHARACTERISED over all four pairs, not merely exercised on the two it
+        // accepts — an all-true loop would be a tautology, which is how a vacuous gate ships. The
+        // first two rows are the only pairs the shipped `Err` policy can produce; the third is
+        // exactly what the refused `Ok(None)` degrade would produce.
+        for (arm, allocated, expected) in [
+            (false, false, true), // disarmed: `build`'s 0%-gate returned Ok(None), nothing built
+            (true, true, true),   // armed and built — the whole success path
+            (true, false, false), // THE Ok(None) DEGRADE on an armed scene — must be refused
+            (false, true, false), // an allocation with no arm — equally refused
+        ] {
+            assert_eq!(
+                hzb_arm_matches_allocation(arm, allocated),
+                expected,
+                "the lockstep predicate must accept (arm = {arm}, allocated = {allocated}) \
+                 iff the two agree — this is the predicate GBufferTargets::create asserts"
+            );
+        }
+
+        // The control, built as a REAL `GBufferTargets` so it reads the two fields the production
+        // assert reads. `hzb_arm` is captured from `scene.hzb.is_some()` BEFORE the build, so a
+        // swallowed failure leaves it `true` over an absent allocation.
+        #[cfg(not(feature = "hwrt"))]
+        let mut degraded = fake_targets();
+        #[cfg(feature = "hwrt")]
+        let mut degraded = fake_targets(false, false, false, false, false);
+        degraded.hzb_arm = true;
+        assert!(degraded.hzb.is_none(), "the degraded generation allocates no pyramid");
+        assert!(
+            !hzb_arm_matches_allocation(degraded.hzb_arm, degraded.hzb.is_some()),
+            "CONTROL: the Ok(None) degrade must FAIL the lockstep predicate. If it passes, the \
+             assert at the end of GBufferTargets::create cannot see the degrade, and D2's \
+             'the safety net is the thing that fires' is unsupported"
+        );
     }
 }
 

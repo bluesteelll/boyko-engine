@@ -3746,9 +3746,13 @@ impl Renderer<'_> {
     /// predicate carries `hzb_arm == scene.hzb.is_some()`, so an armed scene ALWAYS has the
     /// bundle and a create failure returns `Err` rather than a silent `None`. A recorder gate
     /// narrower than the declarator's would leave declared writes on the pyramid that no command
-    /// performs — and, for the poison specifically, would leave the pyramid's
-    /// `UNDEFINED → GENERAL` transition unrecorded and hand `hzb_build_0` a storage image in the
-    /// wrong layout.
+    /// performs — and, for the poison specifically, would leave its declared barrier unemitted
+    /// while `hzb_build_0`'s own barrier still flushes a `TRANSFER_WRITE` that never happened.
+    /// ⚠️ Before VG R3 piece 3 step P3-0 the poison ALSO carried the pyramid's only
+    /// `UNDEFINED → GENERAL` transition; `HzbTargets::boot_clear_hzb_pyramid` owns that now (the
+    /// image is `GENERAL` from birth), so a skipped poison no longer hands `hzb_build_0` a storage
+    /// image in the wrong LAYOUT — it hands it an UNPOISONED one, which is the defect gate G8
+    /// exists to refuse.
     ///
     /// # Recording contract
     ///

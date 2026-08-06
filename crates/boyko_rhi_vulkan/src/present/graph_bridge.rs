@@ -3094,11 +3094,17 @@ fn declare_hzb_poison_build(
     // entirely so, and a zero-filled image agrees with the oracle there.
     //
     // The write is `TRANSFER(TRANSFER_WRITE)` at `GENERAL`, so the derived barrier is this
-    // resource's `UNDEFINED → GENERAL` first touch over mips `[0, levels)`, and `hzb_build_0` then
-    // derives a real WAW flush (`TRANSFER_WRITE → SHADER_WRITE`) instead of the first touch it
-    // derives on an undumped frame. `GENERAL` is one of the two layouts `vkCmdClearColorImage`
-    // accepts, and it is the layout the pyramid holds for life, so no extra transition appears
-    // anywhere.
+    // resource's FIRST access of the frame, over mips `[0, levels)`. ⚠️ Since VG R3 piece 3 step
+    // P3-0 that is no longer a first TOUCH: the pyramid is seeded
+    // `seeded_writer_at_layout(GENERAL, COMPUTE_SHADER, SHADER_WRITE)` (the cross-frame seed D2
+    // argues for), so the clear derives `COMPUTE(SHADER_WRITE) → TRANSFER(TRANSFER_WRITE)` at
+    // `GENERAL → GENERAL` — a WAW against the PREVIOUS frame's build, rather than an
+    // `UNDEFINED → GENERAL` transition that would have licensed discarding what that build wrote.
+    // `hzb_build_0` still derives a real WAW flush (`TRANSFER_WRITE → SHADER_WRITE`) off this
+    // clear; on an UNDUMPED frame the frame's first access is `hzb_build_0`'s own write and it is
+    // sourced from the seed instead. `GENERAL` is one of the two layouts `vkCmdClearColorImage`
+    // accepts, and it is the layout the pyramid holds for life — from `boot_clear_hzb_pyramid`
+    // onward — so no extra transition appears anywhere.
     let hzb_poison = match (hzb_levels, dump_armed) {
         (Some(levels), true) => {
             let p = g.add_pass("hzb_poison");
@@ -3494,21 +3500,70 @@ impl Renderer<'_> {
         // EXACTLY: `HzbTargets::build` creates it with `mip_levels: plan.levels` from the same
         // `scene.hzb` this line reads.
         //
-        // ⚠️ THE SEED, which is a decision and not a default. The pyramid is NON-RINGED (one image
-        // shared by both frames in flight) and is written EVERY frame, so the cross-frame question
-        // is real. In piece 1 it has NO READER AT ALL — nothing samples the pyramid, in this frame
-        // or the sibling one — so the only cross-frame hazard is a WAW on content nobody consumes,
-        // and "every frame first-touches it" is the honest description: `ResSync::undefined()`.
-        // PIECE 3 ADDS THE READER AND IS WHERE THIS MUST BE REVISITED — at that point frame N+1's
-        // first write to mip `d` would need to order against frame N's still-pipelined occlusion
-        // reads (`seeded_readers_at_layout(GENERAL, COMPUTE, SHADER_READ)`), which is the engine's
-        // recorded "wrong only in motion" fingerprint. P1-5a made the seed a REQUIRED argument for
-        // exactly this reason, so the question is a visible argument at this call site rather than
-        // an omission nothing would surface.
+        // ⚠️ THE SEED, which is a decision and not a default. VG R3 piece 3 step P3-0
+        // (`docs/VG-R3-P3-CULL-INTEGRATION-PLAN.md`, D2). The pyramid is NON-RINGED (one image
+        // shared by both frames in flight) and is written EVERY armed frame, so the cross-frame
+        // question is real, and piece 3 gives it a READER.
+        //
+        // ⚠️ WHAT THIS COMMENT SAID UNTIL P3-0, AND WHY IT WAS WRONG. It prescribed
+        // `seeded_readers_at_layout(GENERAL, COMPUTE, SHADER_READ)` for the moment a reader
+        // appears. That is the WRONG HALF. A seed describes the state a frame ENDS in, and piece 3
+        // produces TWO different endings:
+        //
+        //   * ARMED-SPLIT frame — the pyramid's last access is `vb_cull_late`'s COMPUTE
+        //     `SHADER_READ` (or, on a dump frame, `hzb_dump`'s TRANSFER_READ). Next frame's first
+        //     WRITE must WAR against it.
+        //   * HZB-ARMED, SPLIT OFF (today's `[vb_mesh_hzb]` pin, the ONLY committed pin that
+        //     builds a pyramid) — the last access is `hzb_build_{n-1}`'s COMPUTE `SHADER_WRITE`.
+        //     Next frame's first READ must RAW against it.
+        //
+        // A READER seed makes the first case right and the second SILENTLY wrong:
+        // `ResSync::seeded_readers_at_layout`'s sibling doc names that failure in the engine's own
+        // words — *"the reader WAR seed would leave the read FREE/already-visible, which is
+        // exactly the race"*. A WRITER seed makes the second case exactly right and the first
+        // merely CONSERVATIVE (next frame's first write derives a WAW where a WAR would have
+        // sufficed). Only the writer form is conservative for BOTH residuals, and both residuals
+        // are reachable in the shipped pin set. This is `shadow_temporal_hist_read`'s shape,
+        // already used above for the same cross-frame reason.
+        //
+        // ⚠️ AND `ResSync::undefined()` becomes actively WRONG the moment a reader exists: a first
+        // touch derives `oldLayout = UNDEFINED`, which LICENSES THE DRIVER TO DISCARD the image
+        // contents. Frame N+1 would read an image the graph just told the driver it may throw
+        // away — content- and motion-dependent, i.e. verbatim the engine's recorded "wrong only in
+        // motion, stable when stopped" fingerprint.
+        //
+        // ⚠️ WHAT MAKES THE `GENERAL` CLAIM TRUE. `HzbTargets::build` only ALLOCATED — no encoder,
+        // no barrier, no submit — so until P3-0 the framegraph's first touch WAS the pyramid's
+        // only layout producer. P3-0 added `HzbTargets::boot_clear_hzb_pyramid`, a real encoder +
+        // submit + fence wait that clears every mip to `0.0` and lands the image in `GENERAL`
+        // before any frame is recorded — once per targets generation, i.e. after every resize,
+        // not once at boot. Without it this seed would emit `oldLayout = GENERAL` against an image
+        // genuinely in `UNDEFINED` (`VUID-VkImageMemoryBarrier-oldLayout-01197`) for the life of
+        // the generation. The seed and the clear are ONE change; neither is sound alone.
+        //
+        // ⚠️ ONE RESIDUAL, STATED RATHER THAN LEFT IMPLICIT. On a DUMP frame the pyramid's last
+        // access is `hzb_dump`'s TRANSFER_READ, and no derived `srcStageMask` can ever name
+        // TRANSFER for the next frame's first write — `seeded_writer_at_layout` sets
+        // `visible_stages = 0` and the last-writer branch in `sync::transition` sources from
+        // there. That one-frame exposure is on a diagnostic path and is strictly IMPROVED by this
+        // seed: the previous `undefined()` gave `TOP_OF_PIPE` *plus* a licensed content discard.
+        // A both-halves seed would close it and is deliberately NOT taken — the two-residual
+        // argument selects the writer-only form and a hybrid seed has no second consumer.
+        //
+        // ⚠️ THE PREMISE, named so it can be re-derived when it stops holding: this cross-frame
+        // ordering rides on SUBMISSION ORDER (ONE queue, ONE queue family — no async compute
+        // exists) and on every one of these barriers being recorded OUTSIDE a render-pass
+        // instance, which is what makes a `vkCmdPipelineBarrier`'s first synchronization scope
+        // reach the PREVIOUS frame's commands. The day async compute lands, submission order stops
+        // being a total order and the pyramid must be re-examined or ringed.
         let hzb_pyramid = g.add_image_mipped(
             "hzb_pyramid",
             scene.hzb.map_or(1, |p| p.levels),
-            ResSync::undefined(),
+            ResSync::seeded_writer_at_layout(
+                VK_IMAGE_LAYOUT_GENERAL,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+            ),
         );
         // ONE assert rather than the two `cfg`-split ones this step replaced: the pyramid is the
         // last image in BOTH arms, so `ddgi_depth`'s and `shadow_temporal_hist_read`'s former
@@ -4948,8 +5003,13 @@ impl Renderer<'_> {
         // precisely because `vkCmdCopyImageToBuffer` accepts `GENERAL` and the pyramid is
         // `GENERAL` for life: the derived edge on `hzb_pyramid` is a pure `COMPUTE(SHADER_WRITE)
         // → TRANSFER(TRANSFER_READ)` flush that changes NO layout, so a dump frame leaves the
-        // resource in exactly the state an undumped frame does and `ResSync::undefined()` — the
-        // seed the pyramid's declaration argues for — is not falsified on it.
+        // resource in exactly the LAYOUT an undumped frame does, and the seed the pyramid's
+        // declaration argues for is not falsified on it. ⚠️ Since VG R3 P3-0 that seed is
+        // `seeded_writer_at_layout(GENERAL, …)` rather than `ResSync::undefined()`, and the
+        // sentence holds in the STRONGER sense — the layout the seed names is the one this copy
+        // both requires and preserves. What a dump frame DOES change is the pyramid's last ACCESS
+        // (a TRANSFER read rather than a COMPUTE write); the seed's declaration site states that
+        // one-frame residual in full and why it is strictly improved by the new seed.
         //
         // DECLARED LAST in the whole graph. The requirement is only that it follow every pass
         // touching these two resources (so it observes the FINISHED pyramid rather than a

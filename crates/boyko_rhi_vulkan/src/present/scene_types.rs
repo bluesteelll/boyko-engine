@@ -3083,9 +3083,13 @@ pub struct GBufferScene<'a> {
     ///
     /// Step P1-4 bound the pyramid to the `hzb_build` descriptor sets (see
     /// [`Self::hzb_build_layout`]); step P1-5 declared the build passes and DISPATCHES them, so
-    /// the pyramid is now genuinely built (`UNDEFINED → GENERAL` on the first touch of each mip)
-    /// on every armed `VisibilityBuffer` frame carrying a mesh leg. It is still READ by nothing —
-    /// the occlusion cull that consumes it is piece 3 — so an armed frame moves no pixel.
+    /// the pyramid is genuinely built on every armed `VisibilityBuffer` frame carrying a mesh leg.
+    /// Piece 3 step P3-0 made it a CROSS-FRAME resource: `HzbTargets::build` boot-clears it to
+    /// `0.0` and lands it in `GENERAL` once per targets generation, and the framegraph seeds it
+    /// there, so a build pass's first access is a WAW against the previous frame rather than an
+    /// `UNDEFINED → GENERAL` transition that would license discarding what that frame built. It is
+    /// still READ by nothing — the occlusion cull that consumes it lands later in piece 3 — so an
+    /// armed frame moves no pixel.
     pub hzb: Option<HzbPlan>,
     /// VG R3 piece 1 step P1-4: the `hzb_build` pass's OWN 8-binding set-0 LAYOUT (SAMPLED
     /// `gSrcDepth` @0, STORAGE `gFine` @1, STORAGE `gDst0`..`gDst5` @2..@7 — all COMPUTE, all

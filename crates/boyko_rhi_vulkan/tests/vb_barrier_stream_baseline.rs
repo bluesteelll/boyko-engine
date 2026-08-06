@@ -15,6 +15,35 @@
 //! ([`dump_vb_unsplit_barrier_streams`] / [`dump_vb_split_barrier_streams`]): "re-measure the
 //! split rows" must not be able to silently also re-measure the rows they are compared against.
 //!
+//! # The ONE deliberate re-pin, and what makes it a re-pin rather than a re-authoring
+//!
+//! VG R3 piece 3 step P3-0 flipped `hzb_pyramid`'s framegraph SEED from `ResSync::undefined()` to
+//! `seeded_writer_at_layout(GENERAL, COMPUTE_SHADER, SHADER_WRITE)` — the cross-frame decision D2
+//! of `docs/VG-R3-P3-CULL-INTEGRATION-PLAN.md` argues, landed alone precisely because it is the
+//! one change in that piece that moves an existing stream. Ten pinned rows moved with it: every
+//! `hzb_pyramid` barrier that had been a FIRST TOUCH (U2 `[10]`/`[12]`, U3 `[9]`, U4 `[6]`/`[8]`,
+//! S2 `[6]`/`[8]`, S3 `[5]`, S4 `[6]`/`[8]`).
+//!
+//! The delta was DERIVED FROM `sync::transition` BEFORE it was measured, and it is total: with the
+//! seed carrying a pending flush at a real layout, the first access finds `layout_change == false`
+//! and `flush_access != 0`, so it still emits a barrier (`need` is true either way) but sources it
+//! from the seed's writer. `src_stage: TOP_OF_PIPE → COMPUTE_SHADER`, `src_access: 0 →
+//! SHADER_WRITE`, `old_layout: UNDEFINED → GENERAL`; `dst_*`, `new_layout`, every subresource, the
+//! ORDER and every COUNT unmoved, on every row. Anything else that moves is a real finding, not
+//! this re-pin — which is the whole reason the prediction is written down here instead of the
+//! generator's output being pasted in and trusted.
+//!
+//! **Three NAMED-HAZARD assertions moved with those rows**, and they are re-pinned rather than
+//! deleted for the same reason: each asserted a FIRST-TOUCH property whose subject the seed
+//! removed. [`u2_pins_the_pyramid_chain_and_the_depth_handoff`],
+//! [`u3_pins_the_poison_whole_chain_waw_and_the_dump_layout_pair`] (RENAMED — it was
+//! `u3_pins_the_poison_first_touch_…`, and a name is a claim) and
+//! [`s2_pins_the_depth_round_trip_across_the_moved_block`] each carry the argument in their own
+//! doc, including what they now catch and the ONE way each is weaker than what it replaced. The
+//! MERGE each of them asserts — six mips into one barrier, ten into one — is unaffected by the
+//! seed and is stated more sharply than before: a seeded chain still folds, and if it stopped
+//! folding that would be a finding about `compile`, not something to re-pin around.
+//!
 //! # Why it is the ONLY gate that can see a missing barrier
 //!
 //! Step P2-0 was executed and RESOLVED (the plan's "P2-0 RESOLVED" section): a genuine missing
@@ -208,8 +237,12 @@ const U2: VbRow = VbRow {
 };
 
 /// **U3** — split off, HZB armed, dump ON, SSAO off, `VB × Mesh`. G5's own path: `hzb_poison`'s
-/// `UNDEFINED → GENERAL` first touch, and `hzb_dump`'s `vb_depth` source — the source P2-5
-/// re-sources.
+/// one whole-chain `GENERAL → GENERAL` clear barrier, and `hzb_dump`'s `vb_depth` source — the
+/// source P2-5 re-sources.
+///
+/// ⚠️ This line read *"`hzb_poison`'s `UNDEFINED → GENERAL` first touch"* until VG R3 P3-0, whose
+/// seed removed the first touch (see the module doc's re-pin section and
+/// [`u3_pins_the_poison_whole_chain_waw_and_the_dump_layout_pair`]).
 const U3: VbRow = VbRow {
     id: "U3 (split off, HZB armed, dump ON, SSAO off, VB×Mesh)",
     hzb_dump: true,
@@ -478,7 +511,26 @@ fn declare_vb_frame(row: VbRow) -> VbFrame {
     // The pyramid is declared LAST among images in both `cfg` arms, with `plan.levels` mips when
     // armed and the minimum `1` when not — `add_image_mipped` rejects `0`, and the disarmed value
     // is sound precisely because no access names the ResId then.
-    let hzb_pyramid = g.add_image_mipped("hzb_pyramid", row.hzb_levels.unwrap_or(1), ResSync::undefined());
+    //
+    // VG R3 piece 3 step P3-0 flipped the SEED from `ResSync::undefined()` to the cross-frame
+    // writer form the declarator now uses (plan D2's two-residual argument, stated in full at the
+    // production call site). The replica must mirror it or this pin certifies a stream nothing
+    // derives. What it MOVES, derived from `sync::transition` BEFORE it was measured: every
+    // `hzb_pyramid` barrier that was a FIRST TOUCH — `src_stage = TOP_OF_PIPE`, `src_access = 0`,
+    // `old_layout = UNDEFINED` — becomes `src_stage = COMPUTE_SHADER`, `src_access = SHADER_WRITE`,
+    // `old_layout = GENERAL` (the seed's pending flush is now the src, and the layout no longer
+    // changes). Counts, order, `dst_*`, `new_layout` and every subresource are UNMOVED, on every
+    // row, because `need` is true either way and the state advance is identical. A disarmed row is
+    // untouched entirely: no pass names the ResId, so it routes zero barriers whatever the seed.
+    let hzb_pyramid = g.add_image_mipped(
+        "hzb_pyramid",
+        row.hzb_levels.unwrap_or(1),
+        ResSync::seeded_writer_at_layout(
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+        ),
+    );
 
     // ---- Buffers, in the declarator's FIXED order ------------------------------------------
     let light_table = g.add_buffer_seeded(
@@ -1541,11 +1593,11 @@ const U2_EXPECTED_IMG: &[ImgBarrier] = &[
     },
     ImgBarrier {
         res: ResId(14), // [10] "hzb_pyramid"
-        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        src_access: 0,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_SHADER_WRITE_BIT,
-        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
         new_layout: VK_IMAGE_LAYOUT_GENERAL,
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 6, base_layer: 0, layer_count: 1 },
     },
@@ -1561,11 +1613,11 @@ const U2_EXPECTED_IMG: &[ImgBarrier] = &[
     },
     ImgBarrier {
         res: ResId(14), // [12] "hzb_pyramid"
-        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        src_access: 0,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_SHADER_WRITE_BIT,
-        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
         new_layout: VK_IMAGE_LAYOUT_GENERAL,
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 6, mip_count: 4, base_layer: 0, layer_count: 1 },
     },
@@ -1755,11 +1807,11 @@ const U3_EXPECTED_IMG: &[ImgBarrier] = &[
     },
     ImgBarrier {
         res: ResId(14), // [9] "hzb_pyramid"
-        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
-        src_access: 0,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_TRANSFER_WRITE_BIT,
-        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
         new_layout: VK_IMAGE_LAYOUT_GENERAL,
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 10, base_layer: 0, layer_count: 1 },
     },
@@ -2001,11 +2053,11 @@ const U4_EXPECTED_IMG: &[ImgBarrier] = &[
     },
     ImgBarrier {
         res: ResId(14), // [6] "hzb_pyramid"
-        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        src_access: 0,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_SHADER_WRITE_BIT,
-        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
         new_layout: VK_IMAGE_LAYOUT_GENERAL,
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 6, base_layer: 0, layer_count: 1 },
     },
@@ -2021,11 +2073,11 @@ const U4_EXPECTED_IMG: &[ImgBarrier] = &[
     },
     ImgBarrier {
         res: ResId(14), // [8] "hzb_pyramid"
-        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        src_access: 0,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_SHADER_WRITE_BIT,
-        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
         new_layout: VK_IMAGE_LAYOUT_GENERAL,
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 6, mip_count: 4, base_layer: 0, layer_count: 1 },
     },
@@ -2514,11 +2566,11 @@ const S2_EXPECTED_IMG: &[ImgBarrier] = &[
     },
     ImgBarrier {
         res: ResId(14), // [6] "hzb_pyramid"
-        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        src_access: 0,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_SHADER_WRITE_BIT,
-        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
         new_layout: VK_IMAGE_LAYOUT_GENERAL,
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 6, base_layer: 0, layer_count: 1 },
     },
@@ -2534,11 +2586,11 @@ const S2_EXPECTED_IMG: &[ImgBarrier] = &[
     },
     ImgBarrier {
         res: ResId(14), // [8] "hzb_pyramid"
-        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        src_access: 0,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_SHADER_WRITE_BIT,
-        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
         new_layout: VK_IMAGE_LAYOUT_GENERAL,
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 6, mip_count: 4, base_layer: 0, layer_count: 1 },
     },
@@ -2757,11 +2809,11 @@ const S3_EXPECTED_IMG: &[ImgBarrier] = &[
     },
     ImgBarrier {
         res: ResId(14), // [5] "hzb_pyramid"
-        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
-        src_access: 0,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_TRANSFER_WRITE_BIT,
-        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
         new_layout: VK_IMAGE_LAYOUT_GENERAL,
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 10, base_layer: 0, layer_count: 1 },
     },
@@ -3072,11 +3124,11 @@ const S4_EXPECTED_IMG: &[ImgBarrier] = &[
     },
     ImgBarrier {
         res: ResId(14), // [6] "hzb_pyramid"
-        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        src_access: 0,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_SHADER_WRITE_BIT,
-        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
         new_layout: VK_IMAGE_LAYOUT_GENERAL,
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 6, base_layer: 0, layer_count: 1 },
     },
@@ -3092,11 +3144,11 @@ const S4_EXPECTED_IMG: &[ImgBarrier] = &[
     },
     ImgBarrier {
         res: ResId(14), // [8] "hzb_pyramid"
-        src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        src_access: 0,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_SHADER_WRITE_BIT,
-        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
         new_layout: VK_IMAGE_LAYOUT_GENERAL,
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 6, mip_count: 4, base_layer: 0, layer_count: 1 },
     },
@@ -3881,11 +3933,63 @@ fn u1_pins_the_early_indirect_chain_and_the_raster_first_touches() {
     );
 }
 
-/// **U2's claim.** The pyramid build chain at `levels = 10`: pass 0's merged first touch over
-/// mips `[0, 6)`, pass 1's RAW over mip 5 ALONE, and pass 1's first touch over `[6, 10)` — the
-/// three barriers `compile_derives_the_hzb_build_chain_at_a_real_extent` measured in isolation,
-/// here inside a whole VB frame. Plus the `vb_depth` hand-off `hzb_build_0` derives out of the
-/// raster.
+/// **U2's claim.** The pyramid build chain at `levels = 10`: pass 0's ONE merged barrier over
+/// mips `[0, 6)`, pass 1's RAW over mip 5 ALONE, and pass 1's ONE merged barrier over `[6, 10)` —
+/// the three barriers `compile_derives_the_hzb_build_chain_at_a_real_extent` measured in
+/// isolation, here inside a whole VB frame. Plus the `vb_depth` hand-off `hzb_build_0` derives out
+/// of the raster.
+///
+/// # RE-PINNED at VG R3 P3-0 — what changed, and why
+///
+/// Two of the assertions below read `(TOP_OF_PIPE, 0, UNDEFINED → GENERAL)` until P3-0: a FIRST
+/// TOUCH. **There is no first touch on this resource any more**, so the two are re-pinned against
+/// the machine's own new answer rather than deleted — piece 1's census precedent, where a rung
+/// that armed a decision re-pinned the gate and wrote down the reason.
+///
+/// P3-0 flipped `hzb_pyramid`'s framegraph SEED from `ResSync::undefined()` to
+/// `seeded_writer_at_layout(GENERAL, COMPUTE_SHADER, SHADER_WRITE)` (plan D2, argued in full at
+/// the `add_image_mipped` call site in `present/graph_bridge.rs`). `sync::transition` then finds
+/// `layout_change == false` and `flush_access != 0` on the frame's first access, so it takes the
+/// **flush** branch instead of the first-touch one: `src` is the seed's pending cross-frame write,
+/// and `old_layout` is the layout the image is already in. What makes the `GENERAL`-from-birth
+/// claim TRUE is a real encoder — `HzbTargets::boot_clear_hzb_pyramid` clears every mip and lands
+/// the image in `GENERAL` before any frame is recorded, once per targets generation — so
+/// `oldLayout = GENERAL` DESCRIBES the image rather than asserting something about it. `dst_*`,
+/// `new_layout`, every subresource span, the ORDER and the COUNT are unmoved, which is why only
+/// the `src_*`/`old_layout` half of two assertions is touched.
+///
+/// # THE MERGE IS THE PROPERTY HERE, and the seed did not cost it
+///
+/// Pass 0's six mips all sit in ONE state at the access — before P3-0 the fresh `UNDEFINED` one,
+/// now the seeded one — so `compile` derives one identical `Trans` per mip and folds them into a
+/// single `MipRun`. That fold is what P1-5a shipped a whole step for, and a seeded resource must
+/// still get it. It does, on both spans: `[0, 6)` and `[6, 10)` each arrive as ONE barrier.
+///
+/// # What each assertion catches NOW
+///
+/// * **A broken merge** — if the per-mip machine stopped folding, pass 0 would emit six
+///   single-mip barriers and pass 1 four, no barrier would carry `mip_count == 6` or `4`, and the
+///   census at the bottom would read 11 instead of 3. Both halves of that red independently.
+/// * **A lost or reverted seed** — `(TOP_OF_PIPE, 0)` as the source means the frame's first
+///   pyramid write carries NO dependency on the sibling in-flight frame's still-pipelined write of
+///   the same NON-RINGED image, and `UNDEFINED` as the old layout licenses the driver to DISCARD
+///   content the pyramid now carries across frames. D2 rules out both; this is what refuses them.
+/// * **A moved span** — a widened or re-based `hzb_mips` on either build pass.
+///
+/// # Where this is WEAKER than what it replaced — stated, not left to be discovered
+///
+/// `(TOP_OF_PIPE, 0, UNDEFINED)` was a fingerprint of *"nothing in this frame has touched these
+/// mips"*. `(COMPUTE, SHADER_WRITE, GENERAL → GENERAL)` is not: an earlier IN-FRAME COMPUTE write
+/// of the same mips would derive byte-identical fields. Nothing on this row does that — the census
+/// below is what says so, since a fourth pyramid writer would move the count — but taken alone
+/// these two assertions no longer separate "sourced from the cross-frame seed" from "sourced from
+/// an earlier in-frame COMPUTE write". The whole-stream pin's ORDER and per-pass attribution are
+/// what still do.
+///
+/// The expected values are spelled as literal `VK_*` constants rather than read back from the
+/// replica's seed ON PURPOSE. An assertion that took its `src` from the same constant the
+/// declaration uses would follow a future seed edit silently — and a seed reverting to
+/// `undefined()` is exactly the defect the bullet above exists to catch.
 #[test]
 fn u2_pins_the_pyramid_chain_and_the_depth_handoff() {
     let f = declare_vb_frame(U2);
@@ -3911,16 +4015,22 @@ fn u2_pins_the_pyramid_chain_and_the_depth_handoff() {
         has_img(
             img,
             f.hzb_pyramid,
-            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            0,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             VK_ACCESS_SHADER_WRITE_BIT,
-            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_IMAGE_LAYOUT_GENERAL,
             VK_IMAGE_LAYOUT_GENERAL,
             hzb_mips(0, HZB_LEVELS_PER_PASS),
         ),
-        "pass 0's six mips are all in the same state, so they must MERGE into ONE first-touch \
-         barrier over [0, 6)"
+        "pass 0's six mips are all in the same state — the SEED's, since P3-0 — so they must MERGE \
+         into ONE barrier over [0, 6). Six single-mip barriers here is the per-mip state machine \
+         having stopped folding, which is the whole of what P1-5a shipped; the census below reads \
+         11 instead of 3 in that case.\n\
+         The source is the seed's pending cross-frame write, NOT `(TOP_OF_PIPE, 0)`: this frame's \
+         first pyramid write must be ordered after the sibling in-flight frame's still-pipelined \
+         one on this NON-RINGED image. And GENERAL → GENERAL is layout-PRESERVING — `UNDEFINED` \
+         would license discarding content the pyramid now carries across frames (plan D2)"
     );
     assert!(
         has_img(
@@ -3941,34 +4051,73 @@ fn u2_pins_the_pyramid_chain_and_the_depth_handoff() {
         has_img(
             img,
             f.hzb_pyramid,
-            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            0,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             VK_ACCESS_SHADER_WRITE_BIT,
-            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_IMAGE_LAYOUT_GENERAL,
             VK_IMAGE_LAYOUT_GENERAL,
             hzb_mips(HZB_LEVELS_PER_PASS, HZB_LEVELS - HZB_LEVELS_PER_PASS),
         ),
-        "mips 6..9 are a FIRST TOUCH and must transition out of UNDEFINED — the per-ResId machine \
-         derived `old_layout == new_layout == GENERAL` here while the dispatch wrote them through \
-         GENERAL storage descriptors"
+        "mips 6..9 are still untouched when pass 1 reaches them, so they still carry the SEED's \
+         state — all four alike — and must MERGE into ONE barrier over [6, 10). Before P3-0 this \
+         run was a first touch out of UNDEFINED; the seed removed the first touch, not the run"
     );
     assert_eq!(
         img_on(img, f.hzb_pyramid).len(),
         3,
-        "an undumped, unpoisoned pyramid derives EXACTLY the three build-chain barriers"
+        "an undumped, unpoisoned pyramid derives EXACTLY the three build-chain barriers. This \
+         count IS the merge stated as a census: unfolded, the same accesses would derive 6 + 1 + 4 \
+         = 11. The seed moved no count — it re-sources barriers that were already being emitted"
     );
 }
 
-/// **U3's claim.** The poison's `UNDEFINED → GENERAL` first touch over the whole chain, the WAW
-/// it turns `hzb_build_0`'s write into, and the layout pair `hzb_dump` derives on `vb_depth`.
+/// **U3's claim.** The poison clear's ONE whole-chain barrier over all ten mips, the WAW it turns
+/// `hzb_build_0`'s write into, and the layout pair `hzb_dump` derives on `vb_depth`.
 ///
 /// ⚠️ The dump's `src_stage`/`src_access` are deliberately NOT asserted here: they are precisely
 /// the fields P2-5 changes (the plan's S3 row — from the "already SHADER_READ_ONLY,
 /// execution-only" arm to a real RAW flush out of the late raster), so writing them by hand would
 /// be a prediction wearing a gate's clothes. The measured whole-stream baseline carries them.
+///
+/// # RENAMED and RE-PINNED at VG R3 P3-0 — what changed, and why
+///
+/// This was `u3_pins_the_poison_first_touch_and_the_dump_layout_pair`. **The poison is not a
+/// first touch any more, so the name could not stay** — a name is a claim like any other. P3-0
+/// flipped `hzb_pyramid`'s framegraph SEED from `ResSync::undefined()` to
+/// `seeded_writer_at_layout(GENERAL, COMPUTE_SHADER, SHADER_WRITE)` (plan D2), so
+/// `sync::transition` finds `layout_change == false` and `flush_access != 0` at the clear and
+/// takes the **flush** branch: the clear now flushes the SEED's pending cross-frame write
+/// (`COMPUTE/SHADER_WRITE`) into its own `TRANSFER/TRANSFER_WRITE`, at `GENERAL → GENERAL`. The
+/// `GENERAL`-from-birth premise is made true by a real encoder, not by assertion —
+/// `HzbTargets::boot_clear_hzb_pyramid` clears every mip and leaves the image in `GENERAL` before
+/// any frame is recorded, once per targets generation. `dst_*`, `new_layout`, the subresource and
+/// the position in the stream are unmoved, so ONLY the first assertion's `src_*`/`old_layout` half
+/// moves. Everything below it — `hzb_build_0`'s WAW and the dump's four pinned fields — keeps its
+/// measured values; the WAW's MESSAGE is corrected, because it described the undumped frame as
+/// deriving a first touch and that sentence is now false.
+///
+/// # THE MERGE, and it is the widest instance of it in this file
+///
+/// The clear declares `hzb_mips(0, 10)`, and all ten mips are in the same (seeded) state, so
+/// `compile` must fold them into ONE barrier over the whole chain. Ten single-mip barriers here
+/// is the per-mip machine having stopped merging — the P1-5a property — and the assertion reds,
+/// because no barrier would then carry `mip_count == 10`.
+///
+/// # What the re-pinned assertion catches, and where it is weaker
+///
+/// It still refuses a narrowed or re-based clear span, a clear at the wrong stage/access, and an
+/// unmerged chain. It newly refuses a LOST seed: `(TOP_OF_PIPE, 0, UNDEFINED)` would mean the
+/// clear is unordered against the sibling in-flight frame's still-pipelined pyramid write on this
+/// NON-RINGED image, with a licensed content discard on top.
+///
+/// ⚠️ **Weaker in one way, stated rather than left to be found:** `UNDEFINED` used to prove the
+/// clear was the frame's first pyramid toucher. `GENERAL → GENERAL` does not — an in-frame COMPUTE
+/// write ahead of the clear would derive the same `src`. What still orders the clear ahead of the
+/// builds is the declarator's release-live `poison < build` assert and the whole-stream pin's
+/// per-pass attribution, not this line.
 #[test]
-fn u3_pins_the_poison_first_touch_and_the_dump_layout_pair() {
+fn u3_pins_the_poison_whole_chain_waw_and_the_dump_layout_pair() {
     let f = declare_vb_frame(U3);
     let img = f.g.img_barriers();
 
@@ -3976,18 +4125,24 @@ fn u3_pins_the_poison_first_touch_and_the_dump_layout_pair() {
         has_img(
             img,
             f.hzb_pyramid,
-            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT,
-            0,
+            VK_ACCESS_SHADER_WRITE_BIT,
             VK_ACCESS_TRANSFER_WRITE_BIT,
-            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_GENERAL,
             VK_IMAGE_LAYOUT_GENERAL,
             hzb_mips(0, HZB_LEVELS),
         ),
-        "the poison clear's UNDEFINED → GENERAL first touch over ALL {} mips is missing. GENERAL \
-         is one of the two layouts `vkCmdClearColorImage` accepts and it is the layout the pyramid \
-         holds for life, so no extra transition may appear anywhere",
-        HZB_LEVELS
+        "the poison clear's ONE whole-chain barrier over ALL {HZB_LEVELS} mips is missing. Every \
+         one of them is in the same (seeded) state, so they must MERGE into a single barrier — \
+         {HZB_LEVELS} single-mip barriers here is the per-mip state machine having stopped \
+         folding.\n\
+         GENERAL is one of the two layouts `vkCmdClearColorImage` accepts and it is the layout the \
+         pyramid holds FOR LIFE, so GENERAL → GENERAL is the only legal pair and no extra \
+         transition may appear anywhere. Since P3-0 the src is the SEED's pending cross-frame \
+         write: `(TOP_OF_PIPE, 0, UNDEFINED)` here would mean the clear is unordered against the \
+         sibling in-flight frame's still-pipelined pyramid write, with a licensed content discard \
+         on top (plan D2)"
     );
     assert!(
         has_img(
@@ -4001,8 +4156,12 @@ fn u3_pins_the_poison_first_touch_and_the_dump_layout_pair() {
             VK_IMAGE_LAYOUT_GENERAL,
             hzb_mips(0, HZB_LEVELS_PER_PASS),
         ),
-        "on a poisoned frame `hzb_build_0` must derive a real WAW flush (TRANSFER_WRITE → \
-         SHADER_WRITE) instead of the first touch it derives on an undumped frame"
+        "on a poisoned frame `hzb_build_0` must derive its WAW flush out of the CLEAR \
+         (TRANSFER_WRITE → SHADER_WRITE), not out of the seed. On an undumped frame the same \
+         access sources `COMPUTE/SHADER_WRITE` instead — the seed's pending write, since P3-0 \
+         removed the first touch that used to stand there \
+         (`u2_pins_the_pyramid_chain_and_the_depth_handoff`). A `COMPUTE` src on a POISONED frame \
+         means the clear was not modelled as this run's producer"
     );
 
     let depth = img_on(img, f.vb_depth);
@@ -4184,6 +4343,32 @@ fn s1_pins_the_late_boundary_barriers_field_by_field() {
 /// between the scopes) and `SHADER_READ_ONLY_OPTIMAL → DEPTH_ATTACHMENT_OPTIMAL` (back into
 /// `vb_raster_late`). Both content-preserving: an `UNDEFINED` on the return leg is round-1 blocker
 /// 4's failure — it would discard the early scope's depth after the pyramid was built from it.
+///
+/// # RE-PINNED at VG R3 P3-0 — and ONLY the tail assertion moved
+///
+/// The round trip is `vb_depth`'s, and `vb_depth` is not the resource P3-0 seeded: all three of
+/// its barriers, all three counts and both layout pairs are byte-unmoved, so the claim this test
+/// is named for is untouched and is still asserted in full. What moved is the LAST assertion, the
+/// one about the pyramid: it read `(TOP_OF_PIPE, 0, UNDEFINED → GENERAL)` — a FIRST TOUCH — and
+/// **there is no first touch on `hzb_pyramid` any more.** P3-0 flipped its framegraph SEED from
+/// `ResSync::undefined()` to `seeded_writer_at_layout(GENERAL, COMPUTE_SHADER, SHADER_WRITE)`
+/// (plan D2), so `sync::transition` takes the **flush** branch on the first access — `src` is the
+/// seed's pending cross-frame write, `old_layout` is the layout the image already holds. The
+/// `GENERAL`-from-birth premise is made true by `HzbTargets::boot_clear_hzb_pyramid`, a real
+/// encoder + submit + fence that clears every mip once per targets generation before any frame is
+/// recorded. `dst_*`, `new_layout`, the subresource span and the position are unmoved.
+///
+/// **The claim the tail assertion makes is unchanged in substance and still load-bearing**: the
+/// poison+build block moved WHOLE, so `hzb_build_0` is still the first pyramid writer, its six
+/// mips are still all in one state, and they must still MERGE into ONE barrier over `[0, 6)`. Only
+/// the state they are all in has a name now. It reds on: an unmerged chain (six single-mip
+/// barriers, none carrying `mip_count == 6`), a block that moved without its clear, a re-based
+/// span, and a lost seed — `(TOP_OF_PIPE, 0, UNDEFINED)` would leave this frame's first pyramid
+/// write unordered against the sibling in-flight frame's, on a NON-RINGED image, with a licensed
+/// content discard on top.
+///
+/// ⚠️ Weaker in the one way `u2`'s doc spells out: `UNDEFINED` proved "untouched this frame",
+/// `GENERAL → GENERAL` does not.
 #[test]
 fn s2_pins_the_depth_round_trip_across_the_moved_block() {
     let f = declare_vb_frame(S2);
@@ -4219,21 +4404,28 @@ fn s2_pins_the_depth_round_trip_across_the_moved_block() {
     assert_eq!(depth[2].dst_access, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
 
     // The pyramid's own three barriers are unchanged in CONTENT by the move; their POSITION is
-    // what changed, and `pass_barriers()` in the whole-stream pin is what measures that.
+    // what changed, and `pass_barriers()` in the whole-stream pin is what measures that. P3-0's
+    // seed re-sourced them at BOTH slots alike, which is why U2's and S2's pyramid rows stay
+    // field-for-field identical to each other and differ only in where they sit in the stream.
     assert!(
         has_img(
             img,
             f.hzb_pyramid,
-            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            0,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             VK_ACCESS_SHADER_WRITE_BIT,
-            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_IMAGE_LAYOUT_GENERAL,
             VK_IMAGE_LAYOUT_GENERAL,
             hzb_mips(0, HZB_LEVELS_PER_PASS),
         ),
-        "the pyramid's first touch must be unchanged by the slot move: the block moved WHOLE, so \
-         `hzb_build_0` is still the first writer on an undumped frame"
+        "the pyramid's first WRITE must be unchanged by the slot move: the block moved WHOLE, so \
+         `hzb_build_0` is still the first pyramid writer on an undumped frame, and its six mips — \
+         all in the SEED's state — must still MERGE into ONE barrier over [0, 6).\n\
+         Since P3-0 that write flushes the seed's pending cross-frame write rather than being a \
+         first touch; `(TOP_OF_PIPE, 0, UNDEFINED)` here means the seed was lost, which leaves \
+         this frame unordered against the sibling's pyramid write and licenses a content discard \
+         (plan D2)"
     );
 }
 
@@ -4241,7 +4433,7 @@ fn s2_pins_the_depth_round_trip_across_the_moved_block() {
 /// -correct value rather than a regression.
 ///
 /// On an unsplit armed frame the dump finds the depth already in `SHADER_READ_ONLY_OPTIMAL` where
-/// `hzb_build_0` left it (`u3_pins_the_poison_first_touch_and_the_dump_layout_pair` pins that).
+/// `hzb_build_0` left it (`u3_pins_the_poison_whole_chain_waw_and_the_dump_layout_pair` pins that).
 /// With the block moved between the scopes, the last toucher is `vb_raster_late` with a PENDING
 /// WRITE, so the dump's transition becomes a real RAW flush out of the depth attachment. That is
 /// strictly stronger than the execution-only edge it replaces — and it is why the declarator's own
