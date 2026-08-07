@@ -463,7 +463,7 @@ test_name       = "vb_mesh_screenshot_dump"
 bmp             = "D:\\tmp\\vb_occ_mixed_off.bmp"
 width           = 512
 height          = 512
-sha256_software = "PENDING"
+sha256_software = "85b7d3788130a8bb65f0b5b92ba86c71499bd7a4babe7d6900a711944d2913d9"
 sha256_hwrt     = "PENDING"
 
 [vb_occ_mixed_off.env]
@@ -488,7 +488,7 @@ test_name       = "vb_mesh_screenshot_dump"
 bmp             = "D:\\tmp\\vb_occ_mixed_keep.bmp"
 width           = 512
 height          = 512
-sha256_software = "PENDING"
+sha256_software = "85b7d3788130a8bb65f0b5b92ba86c71499bd7a4babe7d6900a711944d2913d9"
 sha256_hwrt     = "PENDING"
 
 [vb_occ_mixed_keep.env]
@@ -517,7 +517,7 @@ test_name       = "vb_mesh_screenshot_dump"
 bmp             = "D:\\tmp\\vb_occ_mixed.bmp"
 width           = 512
 height          = 512
-sha256_software = "PENDING"
+sha256_software = "85b7d3788130a8bb65f0b5b92ba86c71499bd7a4babe7d6900a711944d2913d9"
 sha256_hwrt     = "PENDING"
 
 [vb_occ_mixed.env]
@@ -545,7 +545,7 @@ test_name       = "vb_mesh_screenshot_dump"
 bmp             = "D:\\tmp\\vb_occ_mixed_late.bmp"
 width           = 512
 height          = 512
-sha256_software = "PENDING"
+sha256_software = "85b7d3788130a8bb65f0b5b92ba86c71499bd7a4babe7d6900a711944d2913d9"
 sha256_hwrt     = "PENDING"
 
 [vb_occ_mixed_late.env]
