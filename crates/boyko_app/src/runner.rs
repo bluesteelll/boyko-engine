@@ -969,6 +969,20 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     // seam. `None` on the steady path, and independent of the three drivers above: it copies no
     // resource at all, it hands the recorder a host-memory count sink for one settled frame.
     let mut vb_probe = crate::vb_probe_dump::VbProbeDump::from_env();
+    // VG R3 piece 3 step P3-5: the env-gated cull READBACK capture (`BOYKO_VB_CULL_READBACK`).
+    // `None` on the steady path. Until this step the readback ran on the FIRST presented frame and
+    // `return`ed from inside its own branch, which is why arming it beside `BOYKO_HZB_DUMP` wrote
+    // the cull file and never the pyramid one; it now settles, requests and drains on the SAME
+    // schedule as `hzb_dump` and exits through the conjunction below with the other four.
+    let mut vb_cull_probe = crate::vb_cull_probe::VbCullProbe::from_env();
+    // The staging and the driver read the SAME variable at two sites (`GpuSceneBundles::boot` mints
+    // the buffer, this drives the capture). A boot that allocated the staging with no driver to end
+    // the run would spin forever; a driver with no staging would drain and decode nothing.
+    debug_assert_eq!(
+        vb_cull_probe.is_some(),
+        host.gpu.vb_cull_readback.is_some(),
+        "invariant: the cull-probe driver and its staging are armed by one variable"
+    );
     // Automated-run frame cap (the `BOYKO_WIN_HIDDEN` companion, and the app-level
     // twin of `window_present_gbuffer`'s own `BOYKO_WINDOW_FRAMES`): `BOYKO_WINDOW_FRAMES=<n>`
     // bounds this loop to `n` iterations, then exits cleanly. Without it an
@@ -992,8 +1006,6 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     // line gated on `vb_bench` below is dead code there and this loop stays byte-identical to
     // the pre-VB-P1d path.
     let vb_bench = host.gpu.vb_bench_armed();
-    // VG rung R2c-tail: the cull-readback probe. `false` on every non-probe run.
-    let vb_cull_probe = host.gpu.vb_cull_readback.is_some();
     // The bench's own TIMED-frame budget — decoupled from `BOYKO_WINDOW_FRAMES` (kept free for
     // its existing automated-run-cap role). `BOYKO_VB_BENCH_LIGHTS` is read here ONLY as a print
     // label — the bench scene's own setup system reads the SAME env independently to spawn the
@@ -1486,6 +1498,13 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // silently reporting a zero the frame never computed. Not `mut` either — with the seed gone
         // the binding is assigned exactly once, which is the shape the value actually has.
         let frame_occlusion_instances: u32;
+        // VG R3 piece 3 step P3-5: `true` on the ONE frame the cull-readback probe captures.
+        //
+        // DEFINITE-INITIALIZED for verbatim the reason the binding above is, and it is not a style
+        // choice: the block below assigns it on every path that reaches it, so a `= false` seed
+        // would be dead and `unused_assignments` — a `-D warnings` gate — would say so. The
+        // minimized (0×0 client) iteration never gets here at all; it `continue`s far above.
+        let vb_cull_capture: bool;
         // The dump's readback request (cold; `None` without the env knob). The
         // returned borrow holds `dump` until the render call consumes it.
         let readback = match dump.as_mut() {
@@ -2318,6 +2337,15 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 Some(d) => d.request(ctx, present_extent, hzb_plan),
                 None => None,
             };
+            // VG R3 piece 3 step P3-5: the cull readback's own request, sited beside the pyramid
+            // dump's so the two probes ask on the SAME frame. That is what makes the pairing check a
+            // statement about ONE frame: both drivers count the same `SETTLE_FRAMES` of presented
+            // frames from the same start, so on an armed-together run they enter `Request` together.
+            //
+            // Unlike the dump's, this request hands out no buffer — the staging is boot-owned and
+            // per-FIF. What it hands out is the ARMING: `scene.vb_cull_readback` is `Some` on this
+            // frame only, so the copies run once and the drained slot still holds this frame's bytes.
+            vb_cull_capture = vb_cull_probe.as_mut().is_some_and(|p| p.request(s, frame_index));
             // SSAA (AA campaign Stage 3, C1) — the HOST-AUTHORITATIVE LOCK: resolution is
             // a boot commitment (`WindowHost::boot`'s device-capability probe), so the
             // per-frame mode MUST agree with it, never the reverse. `host.ssaa_armed` ⇒
@@ -2460,6 +2488,9 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 // authoritative. Reading it off anything but this scratch would be a SECOND
                 // frame-level predicate that can disagree with the first.
                 frame_occlusion_instances,
+                // VG R3 piece 3 step P3-5: this frame's cull-readback arming, from the request just
+                // above — `false` on every frame but the one the probe captures.
+                vb_cull_capture,
                 ctx,
             );
 
@@ -2526,8 +2557,9 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         } else {
             0
         };
-        // VG rung R2c-tail: captured BEFORE `draws` is handed back to the scratch, because the
-        // cull readback below compares the GPU's visible count against it.
+        // VG rung R2c-tail: captured BEFORE `draws` is handed back to the scratch — the cull
+        // readback's line reports it beside the GPU's own visible count, and gate G2's probe
+        // artifact carries it as the host's independent cross-check.
         let draw_batch_count = draws.len();
         // VG rung R2d-5: the per-batch BASES, likewise captured before the scratch takes `draws`
         // back. The survivor list is REGION-addressed — batch `b` owns
@@ -2537,12 +2569,19 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // survivors with slots no batch owns: this loop's own `try_get` skip above makes
         // `scene.mesh_draw` a SUBSEQUENCE of the gather, so the bases can leave gaps.
         //
-        // Gated on the probe, so a steady frame allocates nothing here.
-        let vb_cull_bases: Vec<u32> = if vb_cull_probe {
-            draws.iter().map(|d| d.base_instance).collect()
-        } else {
-            Vec::new()
-        };
+        // VG R3 piece 3 step P3-5: LATCHED INTO THE DRIVER rather than kept in a loop local. The
+        // payload is decoded `DRAIN_FRAMES` presented frames after this one, and by then `draws` has
+        // been returned to the scratch and re-gathered three times. A local would therefore describe
+        // the DRAIN frame's batches while the bytes describe the CAPTURE frame's — identical on a
+        // static fixture and wrong on anything that moves, which is the class of agreement this
+        // campaign has shipped as a gate before.
+        //
+        // Gated on the capture frame, so no other frame of any run allocates here.
+        if vb_cull_capture
+            && let Some(p) = vb_cull_probe.as_mut()
+        {
+            p.latch_batches(draw_batch_count, draws.iter().map(|d| d.base_instance).collect());
+        }
         host.draw_scratch.put(draws);
 
         let presented_ok = matches!(&presented, Ok(true));
@@ -2584,38 +2623,6 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     &vb_bench_cull_dispatch_ns,
                     &vb_bench_shade_ns,
                 );
-                return;
-            }
-        }
-
-        // VG rung R2c-tail / R2d-5: read back what the cull ACTUALLY decided on the GPU, and stop.
-        //
-        // This is the gate the goldens cannot be: every pinned scene is entirely on-screen, so a
-        // cull that rejects nothing renders the same image as a correct one. The visible COUNT is
-        // the observable that separates them, and it is the first consumer the compaction buffers
-        // have had since rung R2c0 built them. Rung R2d-5 widens it from that count to the four
-        // regions `format_vb_cull_probe_line` documents — the per-record `instanceCount` the
-        // rasterizer fetches, and each batch's own region of the per-INSTANCE survivor list.
-        //
-        // GATED on the probe (`BOYKO_VB_CULL_READBACK`); dead code on every other run.
-        if vb_cull_probe && presented_ok {
-            // Same offline discipline as the bench block above: wait the device idle so this
-            // frame's TRANSFER writes into the host-visible staging have completed before the
-            // mapping is read. Without it the read races the copy and would usually look right.
-            ctx.wait_idle().expect("invariant: VG R2c-tail cull readback wait_idle");
-            if let Some(rb) = host.gpu.read_vb_cull(s) {
-                let line = format_vb_cull_probe_line(draw_batch_count, &vb_cull_bases, &rb);
-                println!("{line}");
-                // `BOYKO_VB_CULL_READBACK` names a PATH, the same shape `BOYKO_HOST_DUMP` uses:
-                // printing alone would leave the result readable only by a human, and this rung
-                // needs a test to ASSERT on it. Written before the return so the run's exit is
-                // unambiguous evidence the file is complete.
-                if let Ok(path) = std::env::var("BOYKO_VB_CULL_READBACK")
-                    && !path.is_empty()
-                {
-                    std::fs::write(&path, &line)
-                        .expect("invariant: the cull-readback probe must be able to write its path");
-                }
                 return;
             }
         }
@@ -2752,19 +2759,76 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 .finish(&cx);
         }
 
+        // VG rung R2c-tail / R2d-5, converted at VG R3 piece 3 step P3-5 (cold): the same settle →
+        // request → drain progression for the cull readback.
+        //
+        // This is the gate the goldens cannot be: every pinned scene is entirely on-screen, so a
+        // cull that rejects nothing renders the same image as a correct one. The visible COUNT is
+        // the observable that separates them, and it is the first consumer the compaction buffers
+        // have had since rung R2c0 built them.
+        //
+        // The DRAIN is what replaced the `wait_idle` this block used until P3-5: the copies ran on
+        // the capture frame alone, and `DRAIN_FRAMES (3) > FRAMES_IN_FLIGHT (2)` presented frames
+        // later the loop has necessarily re-waited that frame's slot fence. That is the same
+        // argument the pyramid dump's drain rests on, and it is what lets the two captures come from
+        // ONE frame instead of one of them ending the process before the other ran.
+        let vb_cull_ready = match vb_cull_probe.as_mut() {
+            Some(p) => p.after_present(presented_ok),
+            None => false,
+        };
+        if vb_cull_ready {
+            let probe = vb_cull_probe
+                .take()
+                .expect("invariant: the cull readback just reported ready");
+            let (capture_slot, capture_frame) = probe.capture();
+            // `read_vb_cull` is `None` only when the staging is absent, and the boot-time
+            // `debug_assert_eq!` above states that a run with this driver has one. `expect` rather
+            // than an `if let`: silently skipping here would leave the driver taken and the run
+            // exiting with no file, which reads exactly like a scene that produced nothing.
+            let rb = host
+                .gpu
+                .read_vb_cull(capture_slot, capture_frame)
+                .expect("invariant: the cull-probe driver and its staging are armed by one variable");
+            let line = crate::vb_cull_probe::format_vb_cull_probe_line(
+                &crate::vb_cull_probe::VbCullProbeFields {
+                    drawn_batches: probe.batch_count(),
+                    bases: probe.bases(),
+                    visible_batches: rb.visible_batches,
+                    batch_list: &rb.batch_list,
+                    record_instance_counts: &rb.record_instance_counts,
+                    visible_instances: &rb.visible_instances,
+                    late_candidates: &rb.late_candidates,
+                    late_count_pre: &rb.late_count_pre,
+                    late_survivors: &rb.late_survivors,
+                    late_count_post: &rb.late_count_post,
+                    late_record_instance_counts: &rb.late_record_instance_counts,
+                    frame_index: rb.frame_index,
+                    gpu_observed_frame_index: rb.gpu_observed_frame_index,
+                },
+            );
+            probe.finish(&line);
+        }
+
         // Exit once EVERY armed capture has completed. Each driver `take()`s itself on completion,
         // so `is_none()` reads "not armed, or already finished".
         //
-        // ⚠️ The conjunction is load-bearing, not tidiness. All four drivers settle for the same
-        // 30 frames (three of them then drain for 3 more), so with several armed they report ready
+        // ⚠️ The conjunction is load-bearing, not tidiness. All five drivers settle for the same
+        // 30 frames (four of them then drain for 3 more), so with several armed they report ready
         // on the SAME frame — and a `return` inside the first branch would exit before the others
         // ever ran. The later capture would silently produce no file, which is indistinguishable
         // from one that ran and found nothing: a skip that does not name itself.
-        if (dump_ready || census_ready || hzb_dump_ready || vb_probe_ready)
+        //
+        // VG R3 piece 3 step P3-5 folded the FIFTH driver in, and that was a defect being fixed
+        // rather than a symmetry being tidied: the cull readback used to `return` from its own
+        // branch on the FIRST presented frame, so `BOYKO_VB_CULL_READBACK` beside `BOYKO_HZB_DUMP`
+        // exited at frame 1 with the cull file written and the pyramid file never. The pairing check
+        // that compares the two captures' frame index could not be run at all until this line.
+        if (dump_ready || census_ready || hzb_dump_ready || vb_probe_ready || vb_cull_ready)
             && dump.is_none()
             && census.is_none()
             && hzb_dump.is_none()
             && vb_probe.is_none()
+            && vb_cull_probe.is_none()
         {
             return;
         }
@@ -2889,68 +2953,6 @@ fn print_vb_bench_summary(
          independently-measured brackets. Fine for the CLUSTER_HI break-even comparison, not \
          an isolated-cost claim (mirrors the R0 GPU-pass-cost harness's own methodology note)."
     );
-}
-
-/// **VG rung R2d-5: the cull-probe line** — `VB_CULL_READBACK batches=B visible=V list=[..]
-/// inst=[..] vis=[..]`.
-///
-/// | field | source | meaning |
-/// |---|---|---|
-/// | `batches` | host | live `DrawBatch` records this frame (`scene.mesh_draw.len()`) |
-/// | `visible` | GPU counter | batches that passed the level-1 AABB test AND carry at least one survivor |
-/// | `list` | GPU `vb_cull_visible` | the compacted visible-BATCH indices, `visible` of them |
-/// | `inst` | GPU `vb_indirect` | word 1 of each record — the post-cull `instanceCount` the rasterizer FETCHES, one per drawn batch, in batch order |
-/// | `vis` | GPU `vb_visible_instance` | `base:members` groups, pipe-separated, one per drawn batch |
-///
-/// # `vis` is decoded PER BATCH, and that is not a formatting choice
-///
-/// Batch `b` owns exactly `[base(b), base(b) + inst[b])` of the survivor list and writes nowhere
-/// else (`vb_batch_cull.comp.hlsl`'s INVARIANT R2d-REGION-DISJOINT). The regions need NOT be
-/// contiguous: the frame loop skips batches whose mesh asset is not `Loaded`, so `scene.mesh_draw`
-/// is a SUBSEQUENCE of the gather's list and consecutive bases can leave gaps. A flat prefix of the
-/// buffer would therefore interleave real survivors with slots no batch owns — which is why each
-/// group carries its own base rather than being positioned by it.
-///
-/// `bases[b]` is the HOST's `base_instance` for drawn batch `b`; the region LENGTH comes from the
-/// GPU's own record word, so the printed group is exactly the range the rasterizer dereferences.
-///
-/// The line's length is a property of the SCENE (batches and their instance counts), never of the
-/// allocation: nothing here iterates a capacity.
-///
-/// `#[cold]`/`#[inline(never)]`: a once-per-process diagnostic, never on the hot path.
-#[cfg(windows)]
-#[cold]
-#[inline(never)]
-fn format_vb_cull_probe_line(
-    drawn_batches: usize,
-    bases: &[u32],
-    rb: &crate::gpu_scene::VbCullReadback,
-) -> String {
-    let join = |v: &[u32]| v.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
-    // The counter can EXCEED the list's capacity — the shader counts a dropped entry so a trimmed
-    // list is detectable — so the printable prefix is the minimum of the two.
-    let listed = (rb.visible_batches as usize).min(rb.batch_list.len());
-    let list = join(&rb.batch_list[..listed]);
-
-    // One record per DRAWN batch. `record_instance_counts` spans the whole allocation, so the
-    // frame's own batch count is what bounds it.
-    let recorded = drawn_batches.min(rb.record_instance_counts.len());
-    let inst = join(&rb.record_instance_counts[..recorded]);
-
-    let mut groups: Vec<String> = Vec::with_capacity(recorded);
-    for (b, &base) in bases.iter().take(recorded).enumerate() {
-        let lo = (base as usize).min(rb.visible_instances.len());
-        let hi = lo
-            .saturating_add(rb.record_instance_counts[b] as usize)
-            .min(rb.visible_instances.len());
-        groups.push(format!("{base}:{}", join(&rb.visible_instances[lo..hi])));
-    }
-
-    format!(
-        "VB_CULL_READBACK batches={drawn_batches} visible={} list=[{list}] inst=[{inst}] vis=[{}]",
-        rb.visible_batches,
-        groups.join("|")
-    )
 }
 
 /// VB-SV0 rung S1.5: the MEDIAN of `samples` (ns).
@@ -3935,62 +3937,3 @@ mod sv0_stats_tests {
     }
 }
 
-/// VG rung R2d-5: the probe line's PER-BATCH survivor decode.
-///
-/// This exists because no GPU gate in the rung can pin it. On every shipped fixture the survivor
-/// list is the identity and the bases are contiguous, so a correct per-batch decode and the
-/// forbidden flat-prefix decode emit the SAME string — the narrow fixture prints
-/// `0:0,1,2|3:3,4,5` either way. The distinguishing input is a scene with NON-CONTIGUOUS bases and
-/// UNEQUAL per-batch counts, which the runtime produces whenever a batch's mesh asset is not
-/// `Loaded` (the gather still assigned it a region; `scene.mesh_draw` skips it), and which only a
-/// synthetic case can exercise here.
-#[cfg(all(test, windows))]
-mod vb_cull_probe_decode_tests {
-    use super::format_vb_cull_probe_line;
-    use crate::gpu_scene::VbCullReadback;
-
-    /// Bases with a HOLE between them and counts that differ, so every wrong decode is visible:
-    /// batch 0 owns `[0, 2)`, batch 1 owns `[5, 8)`, and slots 2..5 belong to a batch that was
-    /// gathered but not drawn.
-    fn readback() -> VbCullReadback {
-        VbCullReadback {
-            visible_batches: 2,
-            batch_list: vec![0, 1, 0, 0],
-            record_instance_counts: vec![2, 3, 0, 0],
-            visible_instances: vec![10, 11, 900, 901, 902, 20, 21, 22, 903, 904],
-        }
-    }
-
-    #[test]
-    fn each_group_is_read_from_its_own_base_not_from_a_running_cursor() {
-        let line = format_vb_cull_probe_line(2, &[0, 5], &readback());
-        assert!(
-            line.contains("vis=[0:10,11|5:20,21,22]"),
-            "the decode must select [base, base+count) per batch. A flat prefix would print \
-             `0:10,11|5:900,901,902` (a running cursor) or splice the hole's contents into the \
-             second group. Got: {line}"
-        );
-        assert!(
-            !line.contains("900") && !line.contains("904"),
-            "slots owned by no drawn batch must never appear: {line}"
-        );
-    }
-
-    #[test]
-    fn a_group_is_bounded_by_its_own_record_word_not_by_the_next_base() {
-        // Batch 1's count is 3 while the gap to the end of the list is 5. Bounding by the next
-        // base (or by the allocation) would print two extra slots the rasterizer never reads.
-        let line = format_vb_cull_probe_line(2, &[0, 5], &readback());
-        let group = line.split('|').nth(1).expect("invariant: two groups are printed");
-        assert!(group.starts_with("5:20,21,22]"), "group must stop at base+count: {group}");
-    }
-
-    #[test]
-    fn a_base_past_the_end_yields_an_empty_group_rather_than_a_panic() {
-        // A truncated VIS region (staging too small) leaves fewer slots than the bases name.
-        let mut rb = readback();
-        rb.visible_instances.truncate(1);
-        let line = format_vb_cull_probe_line(2, &[0, 5], &rb);
-        assert!(line.contains("vis=[0:10|5:]"), "clamping must be silent and total: {line}");
-    }
-}

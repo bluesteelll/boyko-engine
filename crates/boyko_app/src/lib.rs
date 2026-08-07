@@ -50,6 +50,18 @@ mod hzb_dump;
 #[cfg(windows)]
 mod hzb_plan;
 mod runner;
+// VG R3 piece 3 step P3-5: the `BOYKO_VB_CULL_READBACK` capture driver AND the probe line's one
+// serializer.
+//
+// The MODULE is not `#[cfg(windows)]`, unlike its sibling drivers, because the line format is pure
+// string work with no device and no OS in it; the DRIVER inside it IS gated, like `hzb_dump`, since
+// its only caller is the windowed frame loop.
+//
+// `#[doc(hidden)] pub` is a TEST SEAM: the emitter lives here and the parser lives in `tests/`, so
+// the round-trip gate can only compare the two if it can call the real emitter across the crate
+// boundary. Nothing outside the gate should use it.
+#[doc(hidden)]
+pub mod vb_cull_probe;
 // VG R3 piece 2 step P2-6: the `BOYKO_VB_PROBE` recording probe (gate G2's host half).
 // `#[cfg(windows)]` for the same reason `hzb_dump` above is — its only caller is the windowed
 // frame loop.

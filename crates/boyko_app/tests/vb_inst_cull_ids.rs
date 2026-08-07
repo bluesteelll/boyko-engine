@@ -85,8 +85,14 @@ fn vb_inst_cull_ids_are_the_global_ring_indices() {
     let _ = std::fs::remove_file(&out);
     // SAFETY: single-threaded test setup, before any engine thread exists. Windowed tests in this
     // crate run with `--test-threads=1` by convention, so no sibling test observes this write.
-    // `BOYKO_VB_CULL_READBACK` is deliberately NOT set: the readback block returns from the frame
-    // loop BEFORE the census driver runs, so arming both would leave this file unwritten.
+    // `BOYKO_VB_CULL_READBACK` is deliberately NOT set: this gate reads the CENSUS row, and a second
+    // armed capture would render the same frames for no reason while holding the loop open until it
+    // too completed.
+    //
+    // ⚠️ The reason CHANGED at VG R3 piece 3 step P3-5 and is restated rather than left standing:
+    // until then the readback block `return`ed from the frame loop before the census driver ran, so
+    // arming both would have left this file unwritten. All five capture drivers now exit through one
+    // conjunction, so co-arming is merely wasteful rather than destructive.
     unsafe {
         std::env::set_var("BOYKO_VG_CENSUS", &out);
     }

@@ -198,7 +198,8 @@ pub(crate) const VB_VISIBLE_INSTANCE_BYTES: u64 = (VB_VISIBLE_INSTANCE_ELEMS as 
 // (`present/passes/vb.rs`) derives the same four sizes from `BoundBuffer::size` at record time, so
 // the two agree by derivation rather than by a matching pair of literals.
 //
-// Layout, in staging order: COUNT | LIST | RECORDS | VIS.
+// Layout, in staging order: COUNT | LIST | RECORDS | VIS | LATE_CAND | LATE_CNT_PRE | LATE_SURV |
+// LATE_CNT_POST | LATE_REC (VG R3 piece 3 step P3-5 appended the last five).
 
 /// Byte offset of the COUNT region — the cull's visible-BATCH counter, copied from `vb_cull_count`.
 pub(crate) const VB_CULL_READBACK_COUNT_OFFSET: u64 = 0;
@@ -217,9 +218,40 @@ pub(crate) const VB_CULL_READBACK_RECORDS_OFFSET: u64 =
 pub(crate) const VB_CULL_READBACK_VIS_OFFSET: u64 =
     VB_CULL_READBACK_RECORDS_OFFSET + VB_INDIRECT_BYTES;
 
-/// The cull readback staging's total size: the four regions, back to back.
-pub(crate) const VB_CULL_READBACK_BYTES: u64 =
+/// VG R3 piece 3 step P3-5: byte offset of the PRE-late CANDIDATE region — `vb_late_visible` as the
+/// EARLY cull phase wrote it, copied by the `vb_cull_readback` pass BEFORE `vb_cull_late` runs.
+///
+/// The only place the candidate set is observable at all: the late phase compacts the same region in
+/// place, so after it the region holds the survivors followed by the original tail — a multiset that
+/// is not the candidate set (plan A3's corollary).
+pub(crate) const VB_CULL_READBACK_LATE_CAND_OFFSET: u64 =
     VB_CULL_READBACK_VIS_OFFSET + VB_VISIBLE_INSTANCE_BYTES;
+
+/// VG R3 piece 3 step P3-5: byte offset of the PRE-late COUNT region — each batch's `n_defer`, plus
+/// the reserved [`VB_LATE_COUNT_FRAME_SLOT`] tail the early phase stamps the observed frame index
+/// into.
+pub(crate) const VB_CULL_READBACK_LATE_CNT_PRE_OFFSET: u64 =
+    VB_CULL_READBACK_LATE_CAND_OFFSET + VB_LATE_VISIBLE_BYTES;
+
+/// VG R3 piece 3 step P3-5: byte offset of the POST-late SURVIVOR region — the same
+/// `vb_late_visible` allocation, copied by `vb_cull_readback_late` AFTER the late raster, so its
+/// prefix is the compacted survivor list.
+pub(crate) const VB_CULL_READBACK_LATE_SURV_OFFSET: u64 =
+    VB_CULL_READBACK_LATE_CNT_PRE_OFFSET + VB_LATE_COUNT_BYTES;
+
+/// VG R3 piece 3 step P3-5: byte offset of the POST-late COUNT region — the second side of the
+/// no-clobber clause (`late_count_post[b] == late_count_pre[b]`, plan A5).
+pub(crate) const VB_CULL_READBACK_LATE_CNT_POST_OFFSET: u64 =
+    VB_CULL_READBACK_LATE_SURV_OFFSET + VB_LATE_VISIBLE_BYTES;
+
+/// VG R3 piece 3 step P3-5: byte offset of the POST-late RECORD region — `vb_indirect_late`, whose
+/// word 1 per 20-byte record is the `instanceCount` the LATE cull wrote and the late raster fetches.
+pub(crate) const VB_CULL_READBACK_LATE_REC_OFFSET: u64 =
+    VB_CULL_READBACK_LATE_CNT_POST_OFFSET + VB_LATE_COUNT_BYTES;
+
+/// The cull readback staging's total size: the nine regions, back to back.
+pub(crate) const VB_CULL_READBACK_BYTES: u64 =
+    VB_CULL_READBACK_LATE_REC_OFFSET + VB_INDIRECT_LATE_BYTES;
 
 /// VG rung R2d-5: one frame's decoded cull readback — every region of the staging, in host form.
 ///
@@ -242,6 +274,34 @@ pub(crate) struct VbCullReadback {
     /// so this must be read PER BATCH — a flat prefix interleaves real entries with slots no batch
     /// owns (the runner skips batches whose mesh is not `Loaded`, so the bases can leave gaps).
     pub(crate) visible_instances: Vec<u32>,
+    /// VG R3 piece 3 step P3-5 (plan D8/B1) — PRE-late snapshot: the CANDIDATE list, region-addressed
+    /// by the same `base_instance` the survivor list uses and sized per batch by
+    /// [`Self::late_count_pre`].
+    pub(crate) late_candidates: Vec<u32>,
+    /// PRE-late snapshot: per-batch `n_defer`, plus [`VB_LATE_COUNT_FRAME_SLOT`]'s reserved tail.
+    pub(crate) late_count_pre: Vec<u32>,
+    /// POST-late snapshot: the same allocation after the late phase compacted it in place. Batch
+    /// `b`'s SURVIVORS are its first [`Self::late_record_instance_counts`]`[b]` entries; what
+    /// follows them inside the batch's region is the untouched candidate tail, never a survivor.
+    pub(crate) late_survivors: Vec<u32>,
+    /// POST-late snapshot: `vb_late_count` re-read. The late phase does not write it, so
+    /// `late_count_post[b] != late_count_pre[b]` is a clobber (plan A5's first clause).
+    pub(crate) late_count_post: Vec<u32>,
+    /// POST-late snapshot: word 1 of each late `VkDrawIndexedIndirectCommand` — the ONLY producer
+    /// of which is the late cull, so this is `n_keep` per batch.
+    pub(crate) late_record_instance_counts: Vec<u32>,
+    /// The ENGINE frame this capture came from — the host's own monotonic counter, supplied by the
+    /// caller (the decoder reads device bytes and cannot know it).
+    pub(crate) frame_index: u32,
+    /// The frame index the GPU read out of `VbCullUniform`, taken from
+    /// [`VB_LATE_COUNT_FRAME_SLOT`] of the PRE-late count region.
+    ///
+    /// ⚠️ Written by the early phase ONLY under `VB_CULL_OCC_ARMED`
+    /// (`vb_batch_cull.comp.hlsl`'s `if (occ_armed && i == 0u)`), which the host still pushes as
+    /// `0` before the P3-6 arming commit — so on every configuration today this reads the staging's
+    /// boot prefill, not a GPU observation. Equality with [`Self::frame_index`] is plan D6's control
+    /// F-M4a and becomes assertable at P3-6, never before.
+    pub(crate) gpu_observed_frame_index: u32,
 }
 
 /// Textured-PBR T6c (review O3): the boot capacity of
@@ -4159,12 +4219,40 @@ impl GpuSceneBundles {
         let vb_cull_readback: Option<[BoundBuffer; FRAMES_IN_FLIGHT]> =
             vb_cull_readback_armed.then(|| {
                 core::array::from_fn(|_| {
-                    ctx.create_buffer(&BufferDesc {
-                        size: VB_CULL_READBACK_BYTES,
-                        usage: BufferUsage::TRANSFER_DST,
-                        location: MemoryLocation::HostVisibleCoherent,
-                    })
-                    .expect("invariant: VB cull readback staging create")
+                    let staging = ctx
+                        .create_buffer(&BufferDesc {
+                            size: VB_CULL_READBACK_BYTES,
+                            usage: BufferUsage::TRANSFER_DST,
+                            location: MemoryLocation::HostVisibleCoherent,
+                        })
+                        .expect("invariant: VB cull readback staging create");
+                    // VG R3 piece 3 step P3-5: ZERO the whole staging once, at creation.
+                    //
+                    // Since P3-5 the staging carries five regions that are copied ONLY on an
+                    // occlusion-SPLIT frame (the two late snapshots), while the layout — and
+                    // therefore the host's decode offsets — is the same on every frame. Without a
+                    // prefill, an unsplit frame would decode never-written host-visible memory: not
+                    // a crash, but 2049 arbitrary `u32`s printed onto the probe line and read as
+                    // GPU observations. Zero is the honest value there, because "no candidates" is
+                    // precisely what an unsplit frame has.
+                    //
+                    // ⚠️ Deliberately NOT the `0xFF` poison `hzb_dump` prefills with. That value is
+                    // right for a payload that is ALWAYS copied (it makes a failed copy loud), and
+                    // wrong here: `late_count_pre[b] == 0xFFFFFFFF` would size batch `b`'s printed
+                    // candidate group to the whole clamped list on every unsplit probe run, which is
+                    // every run of the shipped corpus gates. A missing copy on an ARMED split is
+                    // caught instead by the non-vacuity clauses (`n_defer > 0`), which is where that
+                    // question belongs.
+                    let mapped = RhiDevice::buffer_mapped_ptr(ctx, &staging)
+                        .expect("invariant: host-visible cull readback staging is mapped");
+                    // SAFETY: the mapping covers `VB_CULL_READBACK_BYTES` bytes (the buffer was
+                    // just created at that size) and this runs before the staging is handed to any
+                    // submission, so nothing else reads or writes it. `write_bytes` fills whole
+                    // bytes, so no alignment beyond 1 is required.
+                    unsafe {
+                        mapped.as_ptr().write_bytes(0, VB_CULL_READBACK_BYTES as usize);
+                    }
+                    staging
                 })
             });
 
@@ -5921,6 +6009,16 @@ impl GpuSceneBundles {
         // STRUCTURAL conjunct of `GBufferScene::path_vb_occlusion_split`; `0` on every scene in
         // the tree today (nothing inserts the marker), which is the 0%-gate.
         vb_occlusion_instances: u32,
+        // VG R3 piece 3 step P3-5: THIS frame's cull-readback arming, threaded from
+        // `boyko_app::runner`'s `VbCullProbe::request` — `false` on every frame but the ONE the
+        // probe captures, and on every frame of every non-probe run.
+        //
+        // The staging itself is boot-owned and per-FIF, so this flag (not the staging's existence)
+        // is what makes the capture ONE frame: the copies are recorded only while it holds, so a
+        // later frame reusing the same slot cannot overwrite what the drain is waiting to read. It
+        // is the `hzb_dump` staging's own per-frame `Option` in boolean form — that probe reaches
+        // the same property by handing out its buffer on the request frame alone.
+        vb_cull_readback_armed: bool,
         device: &VulkanContext,
     ) -> GBufferScene<'a> {
         debug_assert!(
@@ -6724,10 +6822,18 @@ impl GpuSceneBundles {
             // and repeats every other frame) so the cull's record-order control and the pyramid
             // dump's pairing check compare against ONE clock instead of two that happen to agree.
             //
-            // The recorder stamps it into `VbCullUniform::frame_index`; nothing reads it back until
-            // step P3-5 wires the probe.
+            // The recorder stamps it into `VbCullUniform::frame_index`; step P3-5 reads it back out
+            // of `vb_late_count`'s reserved tail slot (once the ARMED bit makes the shader write it).
             engine_frame_index: frame_index,
-            vb_cull_readback: self.vb_cull_readback.as_ref(),
+            // VG R3 piece 3 step P3-5: armed for ONE frame per run, not for the run.
+            //
+            // Boot mints the staging when `BOYKO_VB_CULL_READBACK` is set; `vb_cull_readback_armed`
+            // is the driver's REQUEST-frame flag. Both must hold, so `filter` rather than a second
+            // `then`: a run without the staging can never arm, and a run with it arms exactly once.
+            // The declarator and the recorder both gate the two readback passes on this field, so a
+            // non-request frame records no copy at all and the drained slot still holds the request
+            // frame's bytes.
+            vb_cull_readback: self.vb_cull_readback.as_ref().filter(|_| vb_cull_readback_armed),
             vb_batch_cull_pipeline: Some(&self.vb_batch_cull_pipeline),
             vb_cull_layout: Some(&self.vb_cull_layout),
             vb_geometry_set,
@@ -6957,23 +7063,30 @@ impl GpuSceneBundles {
         self.cluster_cull_pipeline.is_some()
     }
 
-    /// VG rung R2c-tail / R2d-5: reads this frame's cull outputs out of the readback staging.
-    /// `None` when the probe is unarmed.
+    /// VG rung R2c-tail / R2d-5 / VG R3 piece 3 step P3-5: reads this frame's cull outputs out of
+    /// the readback staging. `None` when the probe is unarmed.
+    ///
+    /// `fi` is the frame-in-flight slot the CAPTURE frame used, and `frame_index` is that frame's
+    /// engine index — neither is "the current frame". The probe hands its staging to exactly one
+    /// frame and reads it after a drain, so the caller holds both and this fn takes them rather than
+    /// re-deriving either.
     ///
     /// # Ordering contract
     ///
-    /// The caller MUST have made the frame's transfer writes visible to the host before calling
-    /// (the runner waits the device idle, mirroring `read_vb_bench_ns`'s own discipline). The
+    /// The caller MUST have made the capture frame's transfer writes visible to the host before
+    /// calling. Since step P3-5 that is the settle → request → DRAIN progression the pyramid dump
+    /// uses (`crate::vb_cull_probe`): `DRAIN_FRAMES (3) > FRAMES_IN_FLIGHT (2)` presented frames
+    /// after the capture, so the capture frame's slot fence has necessarily been re-waited. The
     /// staging is HOST_COHERENT, so no explicit invalidate is needed once the copy has completed;
-    /// what is needed is that it HAS completed, and that is the caller's fence, not this fn's.
-    pub(crate) fn read_vb_cull(&self, fi: usize) -> Option<VbCullReadback> {
+    /// what is needed is that it HAS completed, and that is the caller's drain, not this fn's.
+    pub(crate) fn read_vb_cull(&self, fi: usize, frame_index: u32) -> Option<VbCullReadback> {
         let rb = self.vb_cull_readback.as_ref()?;
         let mapped = rb[fi].mapped?;
         debug_assert!(
             rb[fi].size >= VB_CULL_READBACK_BYTES,
             "invariant: the cull readback staging is created at VB_CULL_READBACK_BYTES"
         );
-        // The recorder packs the four regions from the live `BoundBuffer::size` of each SOURCE,
+        // The recorder packs the nine regions from the live `BoundBuffer::size` of each SOURCE,
         // while this decode addresses them at the constants that sized those sources. The two
         // derivations agree only because every create site spells the matching constant — a
         // CONVENTION, and until this assert, one nothing checked. If any source were ever created
@@ -6991,13 +7104,33 @@ impl GpuSceneBundles {
             (VB_CULL_COUNT_BYTES, VB_CULL_VISIBLE_BYTES, VB_INDIRECT_BYTES, VB_VISIBLE_INSTANCE_BYTES),
             "invariant: each cull source is allocated at the constant this decode addresses it by"
         );
+        // VG R3 piece 3 step P3-5: the same two-sided check for the three LATE sources. Split from
+        // the tuple above rather than widened into a seven-tuple so a failure names which half
+        // drifted; the reason is identical and stated there.
+        debug_assert_eq!(
+            (
+                self.vb_late_visible[fi].size,
+                self.vb_late_count[fi].size,
+                self.vb_indirect_late[fi].size,
+            ),
+            (VB_LATE_VISIBLE_BYTES, VB_LATE_COUNT_BYTES, VB_INDIRECT_LATE_BYTES),
+            "invariant: each late-cull source is allocated at the constant this decode addresses it by"
+        );
         let list_elems = (VB_CULL_VISIBLE_BYTES / 4) as usize;
         let record_stride = boyko_rhi_vulkan::ffi::DRAW_INDEXED_INDIRECT_STRIDE as u64;
         let records = (VB_INDIRECT_BYTES / record_stride) as usize;
         let vis_elems = (VB_VISIBLE_INSTANCE_BYTES / 4) as usize;
+        let late_vis_elems = (VB_LATE_VISIBLE_BYTES / 4) as usize;
+        let late_count_elems = VB_LATE_COUNT_ELEMS;
+        let late_records = (VB_INDIRECT_LATE_BYTES / record_stride) as usize;
         let mut batch_list = Vec::with_capacity(list_elems);
         let mut record_instance_counts = Vec::with_capacity(records);
         let mut visible_instances = Vec::with_capacity(vis_elems);
+        let mut late_candidates = Vec::with_capacity(late_vis_elems);
+        let mut late_count_pre = Vec::with_capacity(late_count_elems);
+        let mut late_survivors = Vec::with_capacity(late_vis_elems);
+        let mut late_count_post = Vec::with_capacity(late_count_elems);
+        let mut late_record_instance_counts = Vec::with_capacity(late_records);
 
         // SAFETY: `mapped` is the live host-coherent mapping of the staging `boot` created at
         // `VB_CULL_READBACK_BYTES` bytes. Every read below is inside that range BY CONSTRUCTION,
@@ -7008,12 +7141,21 @@ impl GpuSceneBundles {
         //   * `records * record_stride == VB_INDIRECT_BYTES` bytes at
         //     `VB_CULL_READBACK_RECORDS_OFFSET`, each read taking the 4-byte `instanceCount` at
         //     `+ 4` inside its own 20-byte record;
-        //   * `vis_elems * 4 == VB_VISIBLE_INSTANCE_BYTES` bytes at `VB_CULL_READBACK_VIS_OFFSET`.
-        // `VB_CULL_READBACK_BYTES` is defined as the sum of exactly those four regions, so the last
+        //   * `vis_elems * 4 == VB_VISIBLE_INSTANCE_BYTES` bytes at `VB_CULL_READBACK_VIS_OFFSET`;
+        //   * `late_vis_elems * 4 == VB_LATE_VISIBLE_BYTES` bytes at each of
+        //     `VB_CULL_READBACK_LATE_CAND_OFFSET` and `VB_CULL_READBACK_LATE_SURV_OFFSET`;
+        //   * `late_count_elems * 4 == VB_LATE_COUNT_BYTES` bytes at each of
+        //     `VB_CULL_READBACK_LATE_CNT_PRE_OFFSET` and `VB_CULL_READBACK_LATE_CNT_POST_OFFSET`;
+        //   * `late_records * record_stride == VB_INDIRECT_LATE_BYTES` bytes at
+        //     `VB_CULL_READBACK_LATE_REC_OFFSET`, each read taking the 4-byte `instanceCount` at
+        //     `+ 4` inside its own 20-byte record.
+        // `VB_CULL_READBACK_BYTES` is defined as the sum of exactly those nine regions, so the last
         // byte touched is the staging's last byte. `read_unaligned` is used because the mapping's
         // alignment is the allocator's business, not this fn's, and a record's `instanceCount` sits
         // at a 20-byte stride that is not 4-aligned relative to an arbitrary base. The caller's
-        // ordering contract above guarantees the device has finished writing the buffer.
+        // ordering contract above guarantees the device has finished writing the buffer, and
+        // `boot`'s zero prefill guarantees every byte is initialised even on a frame that copied
+        // into only some of the nine regions.
         unsafe {
             let base = mapped.as_ptr();
             let visible_batches = base
@@ -7033,11 +7175,38 @@ impl GpuSceneBundles {
                 let off = VB_CULL_READBACK_VIS_OFFSET as usize + i * 4;
                 visible_instances.push(base.add(off).cast::<u32>().read_unaligned());
             }
+            for i in 0..late_vis_elems {
+                let pre = VB_CULL_READBACK_LATE_CAND_OFFSET as usize + i * 4;
+                let post = VB_CULL_READBACK_LATE_SURV_OFFSET as usize + i * 4;
+                late_candidates.push(base.add(pre).cast::<u32>().read_unaligned());
+                late_survivors.push(base.add(post).cast::<u32>().read_unaligned());
+            }
+            for i in 0..late_count_elems {
+                let pre = VB_CULL_READBACK_LATE_CNT_PRE_OFFSET as usize + i * 4;
+                let post = VB_CULL_READBACK_LATE_CNT_POST_OFFSET as usize + i * 4;
+                late_count_pre.push(base.add(pre).cast::<u32>().read_unaligned());
+                late_count_post.push(base.add(post).cast::<u32>().read_unaligned());
+            }
+            for i in 0..late_records {
+                let off =
+                    VB_CULL_READBACK_LATE_REC_OFFSET as usize + i * record_stride as usize + 4;
+                late_record_instance_counts.push(base.add(off).cast::<u32>().read_unaligned());
+            }
+            // The reserved TAIL slot, addressed by the constant the shader derives from the
+            // descriptor's own range rather than mirrors — see `VB_LATE_COUNT_FRAME_SLOT`.
+            let gpu_observed_frame_index = late_count_pre[VB_LATE_COUNT_FRAME_SLOT];
             Some(VbCullReadback {
                 visible_batches,
                 batch_list,
                 record_instance_counts,
                 visible_instances,
+                late_candidates,
+                late_count_pre,
+                late_survivors,
+                late_count_post,
+                late_record_instance_counts,
+                frame_index,
+                gpu_observed_frame_index,
             })
         }
     }

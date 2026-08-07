@@ -191,7 +191,7 @@
 //     `instanceCount` from the record written below, so `SV_InstanceID < k` and the read stays
 //     inside `[base, base + k)` — every one of them written this frame. No shift widens it:
 //     `first_instance` is 0 in every record (see the section on that field below);
-//   * the READBACK PROBE — `boyko_app::runner`'s `format_vb_cull_probe_line` decodes PER BATCH and
+//   * the READBACK PROBE — `boyko_app::vb_cull_probe`'s `format_vb_cull_probe_line` decodes PER BATCH and
 //     slices `[base, base + <that batch's record word>)`, i.e. the same `k` again, never a flat
 //     prefix of the allocation;
 //   * NOTHING ELSE. No other shader in `crates/boyko_rhi_vulkan/shaders` names this buffer.

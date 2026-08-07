@@ -42,13 +42,21 @@ use boyko_rhi_vulkan::present::{HzbDumpLayout, HzbPlan};
 /// clause requires the scene to actually COVER the framebuffer: a mid-settle frame with a
 /// partially-populated draw list would dump a depth of mostly-cleared texels, and "every dumped
 /// depth texel is `> 0.0`" would red for an instrument reason rather than a pyramid one.
-const SETTLE_FRAMES: u32 = 30;
+///
+/// ⚠️ **SHARED with [`crate::vb_cull_probe`] since VG R3 piece 3 step P3-5, and the sharing is the
+/// point.** The two probes must reach their request frame on the SAME presented frame, because the
+/// pairing check compares the cull payload's frame index against the dump header's — two settle
+/// windows that merely happened to agree would make that gate green for a coincidence.
+pub(crate) const SETTLE_FRAMES: u32 = 30;
 
 /// Presented frames rendered AFTER the dump frame before the staging is mapped:
 /// `FRAMES_IN_FLIGHT (2) + 1`. The dump frame's slot fence has necessarily been re-waited by then —
 /// the frame loop waits a slot's fence before reusing it, and after `FRAMES_IN_FLIGHT` further
 /// presents every slot has been reused at least once.
-const DRAIN_FRAMES: u32 = 3;
+///
+/// ⚠️ **SHARED with [`crate::vb_cull_probe`]** — see [`SETTLE_FRAMES`]. The cull probe's staging is
+/// per-FIF, so the same `> FRAMES_IN_FLIGHT` argument is what makes ITS drained read safe too.
+pub(crate) const DRAIN_FRAMES: u32 = 3;
 
 /// The settle → request → drain progression. `Settle`/`Drain` count REMAINING presented frames;
 /// `Request` keeps re-requesting across `Ok(false)` recreate-skips until a dump frame presents.

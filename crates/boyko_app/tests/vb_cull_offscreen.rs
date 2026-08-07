@@ -180,11 +180,13 @@ fn setup(
 
 /// Boots the fixture with the readback probe armed, then asserts on what the GPU reported.
 ///
-/// The probe path (`BOYKO_VB_CULL_READBACK=<path>`) makes the runner wait the device idle after a
-/// presented frame, copy the cull's DEVICE-LOCAL counter and visible list into host-visible
-/// staging, write one line, and stop. The counter and the list are NOT relocated for the probe —
-/// what is read is a transfer copy of the buffers exactly as they ship, so this proves the cull in
-/// the configuration that renders rather than in one built for the test.
+/// The probe path (`BOYKO_VB_CULL_READBACK=<path>`) makes the runner settle 30 presented frames,
+/// copy the cull's DEVICE-LOCAL counter and visible list into host-visible staging on ONE frame,
+/// drain 3 more so that frame's slot fence has been re-waited, write one line and stop (VG R3 piece
+/// 3 step P3-5 replaced the first-presented-frame capture and its `wait_idle` with that
+/// progression). The counter and the list are NOT relocated for the probe — what is read is a
+/// transfer copy of the buffers exactly as they ship, so this proves the cull in the configuration
+/// that renders rather than in one built for the test.
 #[test]
 #[ignore = "needs a real windowed GPU device; the orchestrator runs it on the GPU to read the batch cull's visible count"]
 fn vb_cull_rejects_the_offscreen_batch() {

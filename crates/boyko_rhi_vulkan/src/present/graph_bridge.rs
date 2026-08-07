@@ -4171,10 +4171,12 @@ impl Renderer<'_> {
                 // the late raster.
                 //
                 // ⚠️ Round 1 of the plan assigned these copies to the recorder alone and declared
-                // neither — shipping undeclared transfer reads, the P2-7 class. They are declared
-                // here; the COPIES themselves land at P3-5 with the probe plumbing, which is the
-                // safe direction of the declare/record asymmetry (a barrier that was not needed,
-                // never a read that was not barriered).
+                // neither — shipping undeclared transfer reads, the P2-7 class. They were declared
+                // here one step BEFORE the copies landed (P3-5), which is the safe direction of the
+                // declare/record asymmetry: a barrier that was not needed, never a read that was not
+                // barriered. The recorder's two copies now carry `if occlusion_split { .. } else { 0 }`
+                // on their sizes — this predicate, verbatim — so a copy can never outrun its
+                // declaration.
                 if occlusion_split {
                     g.buffer_access(
                         vb_late_visible,
@@ -4464,8 +4466,9 @@ impl Renderer<'_> {
             // `vb_indirect_late` (the `n_keep` the late cull wrote, derived INDEPENDENTLY on the
             // host from the candidate list and the dumped pyramid).
             //
-            // ⚠️ Like the pre-late pair above, the COPIES land at P3-5; this step declares the pass
-            // and the recorder records its barriers, so declare/record pass parity holds.
+            // ⚠️ Like the pre-late pair above, this pass was DECLARED at P3-3 with the recorder
+            // emitting only its barriers; the three COPIES landed at P3-5. Declare/record pass
+            // parity held in between, which is what made the intermediate tree shippable.
             vb_cull_readback_late =
                 (occlusion_split && scene.vb_cull_readback.is_some()).then(|| {
                     let p = g.add_pass("vb_cull_readback_late");

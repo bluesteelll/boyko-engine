@@ -3012,8 +3012,15 @@ pub struct GBufferScene<'a> {
     /// `robustBufferAccess` is off on this device.
     pub vb_mesh_bounds: Option<&'a BoundBuffer>,
     /// VG rung R2c-tail: the per-FIF HOST-VISIBLE staging the cull's outputs are copied into —
-    /// `Some` only under the `BOYKO_VB_CULL_READBACK` probe, `None` on every golden/interactive
-    /// boot (so no readback pass is declared and no command is recorded).
+    /// `None` on every golden/interactive boot (so no readback pass is declared and no command is
+    /// recorded).
+    ///
+    /// ⚠️ Since VG R3 piece 3 step P3-5 this is `Some` on **ONE frame** of a `BOYKO_VB_CULL_READBACK`
+    /// run, not on all of them: the host's capture driver settles, arms this for the request frame
+    /// alone, then drains. That is what makes the drained read describe the frame the payload came
+    /// from — the staging is per-FIF, so with the copies running every frame the capture slot would
+    /// be rewritten twice before it was mapped. Both readback passes are declared and recorded on
+    /// exactly this field's presence, so a non-request frame records no copy at all.
     ///
     /// The staging is what is host-visible; [`Self::vb_cull_count`] and [`Self::vb_cull_visible`]
     /// stay DEVICE_LOCAL exactly as they ship. Probing a copy rather than relocating the counter

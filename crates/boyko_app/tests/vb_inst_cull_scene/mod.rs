@@ -507,19 +507,46 @@ pub fn fixture_setup_system(
 // The probe line
 // ===============================================================================================
 
-/// One parsed `VB_CULL_READBACK` line (`boyko_app::runner`'s `format_vb_cull_probe_line`).
+/// One parsed `VB_CULL_READBACK` line (`boyko_app::vb_cull_probe::format_vb_cull_probe_line`).
 #[derive(Debug, Clone)]
 pub struct CullProbe {
     /// `batches=` — live `DrawBatch` records the host submitted.
     pub batches: usize,
     /// `visible=` — the GPU counter: batches that passed level 1 AND carry ≥ 1 survivor.
     pub visible: u32,
+    /// `frame=` — the ENGINE frame the capture came from (VG R3 piece 3 step P3-5). The probe
+    /// settles 30 presented frames before capturing, so a small value here means the run captured
+    /// an unconverged frame.
+    pub frame: u32,
+    /// `gpu_frame=` — the frame index the CULL read out of `VbCullUniform`, taken from
+    /// `vb_late_count`'s reserved tail slot.
+    ///
+    /// ⚠️ The shader writes it only under `VB_CULL_OCC_ARMED`, which the host pushes as `0` until
+    /// the P3-6 arming commit. Before that it reads the staging's boot prefill, so equality with
+    /// [`Self::frame`] (plan D6's control F-M4a) is NOT assertable yet.
+    pub gpu_frame: u32,
     /// `list=[..]` — the compacted visible-BATCH indices.
     pub list: Vec<u32>,
     /// `inst=[..]` — post-cull `instanceCount` per drawn batch, in batch order.
     pub inst: Vec<u32>,
     /// `vis=[base:members|..]` — each batch's OWN region of the per-instance survivor list.
     pub vis: Vec<(u32, Vec<u32>)>,
+    /// `late_cnt_pre=[..]` — `n_defer` per drawn batch, as the EARLY cull phase wrote it.
+    pub late_cnt_pre: Vec<u32>,
+    /// `late_cnt_post=[..]` — the same words re-read AFTER the late cull. A difference from
+    /// [`Self::late_cnt_pre`] is a clobber (plan A5's first clause).
+    pub late_cnt_post: Vec<u32>,
+    /// `late_ic=[..]` — `n_keep` per drawn batch: word 1 of each late draw record, whose only
+    /// producer is the late cull.
+    pub late_ic: Vec<u32>,
+    /// `late_cand=[base:members|..]` — each batch's CANDIDATE region, sized by
+    /// [`Self::late_cnt_pre`]. Observable only in the PRE-late snapshot: the late phase compacts
+    /// the same allocation in place.
+    pub late_cand: Vec<(u32, Vec<u32>)>,
+    /// `late_surv=[base:members|..]` — each batch's compacted SURVIVOR prefix, sized by
+    /// [`Self::late_ic`]. Deliberately not sized by `late_cnt_pre`: what follows the prefix inside
+    /// the region is the untouched candidate tail, never a survivor.
+    pub late_surv: Vec<(u32, Vec<u32>)>,
     /// The line as written, for assertion messages.
     pub raw: String,
 }
@@ -558,10 +585,37 @@ fn parse_u32_list(body: &str) -> Vec<u32> {
         .collect()
 }
 
+/// Parses a pipe-separated `base:members` group list.
+///
+/// Each group carries its OWN base rather than being positioned by one, because the per-batch
+/// regions need not be contiguous — the frame loop skips batches whose mesh is not `Loaded`, so the
+/// bases can leave gaps. This function is therefore the only place that has to know the shape, and
+/// the three grouped fields (`vis`, `late_cand`, `late_surv`) all go through it.
+fn parse_groups(key: &str, body: &str) -> Vec<(u32, Vec<u32>)> {
+    bracketed(body)
+        .split('|')
+        .filter(|g| !g.is_empty())
+        .map(|g| {
+            let (base, members) = g
+                .split_once(':')
+                .unwrap_or_else(|| panic!("a `{key}` group is `base:members` -- got {g:?}"));
+            let base: u32 = base
+                .parse()
+                .unwrap_or_else(|_| panic!("a `{key}` group base is an integer -- got {base:?}"));
+            (base, parse_u32_list(members))
+        })
+        .collect()
+}
+
 /// Parses one `VB_CULL_READBACK …` line.
 ///
 /// Key-driven rather than positional: the line's fields are `key=value` with no interior spaces, so
-/// a field added later cannot shift the ones already read.
+/// a field added later cannot shift the ones already read. VG R3 piece 3 step P3-5 added seven
+/// fields on exactly that promise.
+///
+/// ⚠️ Every `field()` below PANICS on a missing key, and that is deliberate: a probe line without
+/// `late_cand=` means the emitter and this reader disagree about the format, and a default would
+/// turn that into a green gate over an empty list.
 pub fn parse_probe_line(line: &str) -> CullProbe {
     let field = |key: &str| -> String {
         line.split_whitespace()
@@ -577,32 +631,35 @@ pub fn parse_probe_line(line: &str) -> CullProbe {
     let vis_body = field("vis=");
     let list_body = field("list=");
     let inst_body = field("inst=");
-    let vis = bracketed(&vis_body)
-        .split('|')
-        .filter(|g| !g.is_empty())
-        .map(|g| {
-            let (base, members) = g
-                .split_once(':')
-                .unwrap_or_else(|| panic!("a `vis` group is `base:members` -- got {g:?}"));
-            let base: u32 = base.parse().expect("a `vis` group base is an integer");
-            (base, parse_u32_list(members))
-        })
-        .collect();
+    let cnt_pre_body = field("late_cnt_pre=");
+    let cnt_post_body = field("late_cnt_post=");
+    let late_ic_body = field("late_ic=");
+    let cand_body = field("late_cand=");
+    let surv_body = field("late_surv=");
     CullProbe {
         batches: field("batches=").parse().expect("`batches=` is an integer"),
         visible: field("visible=").parse().expect("`visible=` is an integer"),
+        frame: field("frame=").parse().expect("`frame=` is an integer"),
+        gpu_frame: field("gpu_frame=").parse().expect("`gpu_frame=` is an integer"),
         list: parse_u32_list(bracketed(&list_body)),
         inst: parse_u32_list(bracketed(&inst_body)),
-        vis,
+        vis: parse_groups("vis", &vis_body),
+        late_cnt_pre: parse_u32_list(bracketed(&cnt_pre_body)),
+        late_cnt_post: parse_u32_list(bracketed(&cnt_post_body)),
+        late_ic: parse_u32_list(bracketed(&late_ic_body)),
+        late_cand: parse_groups("late_cand", &cand_body),
+        late_surv: parse_groups("late_surv", &surv_body),
         raw: line.to_string(),
     }
 }
 
 /// Boots THIS process with the cull-readback probe armed and returns the parsed line.
 ///
-/// The probe path (`BOYKO_VB_CULL_READBACK=<path>`) makes the runner wait the device idle after a
-/// presented frame, copy the cull's DEVICE-LOCAL outputs into host-visible staging, write one line,
-/// and stop. Nothing is relocated for the probe — what is read is a transfer copy of the buffers
+/// The probe path (`BOYKO_VB_CULL_READBACK=<path>`) makes the runner settle 30 presented frames,
+/// copy the cull's DEVICE-LOCAL outputs into host-visible staging on ONE frame, drain 3 more so that
+/// frame's slot fence has been re-waited, write one line and stop (VG R3 piece 3 step P3-5; before
+/// it, the capture was the FIRST presented frame and the run `return`ed from inside the readback
+/// branch). Nothing is relocated for the probe — what is read is a transfer copy of the buffers
 /// exactly as they ship, so this observes the cull in the configuration that renders.
 ///
 /// # Panics
@@ -643,9 +700,17 @@ pub fn run_cull_probe_worker(worker: &str, tag: &str, env: &[(&str, String)]) ->
     cmd.args([worker, "--ignored", "--exact", "--test-threads=1", "--nocapture"])
         .env("BOYKO_VB_CULL_READBACK", &out)
         .env("BOYKO_DISABLE_VALIDATION", "1")
-        // The cull readback is the only capture this run is for. Both other capture drivers exit
-        // the frame loop on their own schedule, and the readback block returns BEFORE the census
-        // one, so a second armed capture would silently produce no file.
+        // The cull readback is the only capture THIS worker is for, and an inherited `BOYKO_HOST_DUMP`
+        // or `BOYKO_VG_CENSUS` would render the same frames for no reason while holding the loop
+        // open until it too completed.
+        //
+        // ⚠️ The reason has CHANGED, and the old one is retired here rather than left standing.
+        // Until VG R3 piece 3 step P3-5 this comment said a second armed capture "would silently
+        // produce no file", because the readback `return`ed out of the frame loop from inside its own
+        // branch on the first presented frame. It no longer does: all five drivers now exit through
+        // ONE conjunction, so a co-armed capture completes. `BOYKO_HZB_DUMP` is deliberately NOT
+        // removed — `vb_cull_hzb_pairing.rs` arms it BESIDE this variable in one process, which is
+        // the whole point of that gate.
         .env_remove("BOYKO_HOST_DUMP")
         .env_remove("BOYKO_VG_CENSUS");
     for (k, v) in env {
