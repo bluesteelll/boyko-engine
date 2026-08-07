@@ -2596,6 +2596,17 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // behind it, not a second gate.
         vb_indirect_late: None,
         vb_occlusion_instances: 0,
+        // VG R3 piece 3 step P3-2: the occlusion split's three buffers and its flag word.
+        // `None`/`0` for the SAME reason every VB field above is: this harness mints its own
+        // pipelines instead of booting `GpuSceneBundles` (which is what allocates these
+        // unconditionally in production), and it never resolves VB, so nothing here would
+        // bind them. `vb_occ_flags: 0` is the disarmed word — no bit set means the cull may
+        // defer nothing — and it is read by nothing at this step in any case: the push block
+        // still ends at `visible_cap`.
+        vb_late_visible: None,
+        vb_late_count: None,
+        vb_cull_uniform: None,
+        vb_occ_flags: 0,
     };
 
     // The composite's native size — drives the G-buffer alloc + the 1:1 top-left present.
@@ -3688,6 +3699,17 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         // behind it, not a second gate.
         vb_indirect_late: None,
         vb_occlusion_instances: 0,
+        // VG R3 piece 3 step P3-2: the occlusion split's three buffers and its flag word.
+        // `None`/`0` for the SAME reason every VB field above is: this harness mints its own
+        // pipelines instead of booting `GpuSceneBundles` (which is what allocates these
+        // unconditionally in production), and it never resolves VB, so nothing here would
+        // bind them. `vb_occ_flags: 0` is the disarmed word — no bit set means the cull may
+        // defer nothing — and it is read by nothing at this step in any case: the push block
+        // still ends at `visible_cap`.
+        vb_late_visible: None,
+        vb_late_count: None,
+        vb_cull_uniform: None,
+        vb_occ_flags: 0,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -8718,6 +8740,17 @@ fn run_showcase_body_ddgi(
         // behind it, not a second gate.
         vb_indirect_late: None,
         vb_occlusion_instances: 0,
+        // VG R3 piece 3 step P3-2: the occlusion split's three buffers and its flag word.
+        // `None`/`0` for the SAME reason every VB field above is: this harness mints its own
+        // pipelines instead of booting `GpuSceneBundles` (which is what allocates these
+        // unconditionally in production), and it never resolves VB, so nothing here would
+        // bind them. `vb_occ_flags: 0` is the disarmed word — no bit set means the cull may
+        // defer nothing — and it is read by nothing at this step in any case: the push block
+        // still ends at `visible_cap`.
+        vb_late_visible: None,
+        vb_late_count: None,
+        vb_cull_uniform: None,
+        vb_occ_flags: 0,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -10283,6 +10316,17 @@ fn run_showcase_body(
         // already.
         vb_indirect_late: None,
         vb_occlusion_instances: 0,
+        // VG R3 piece 3 step P3-2: the occlusion split's three buffers and its flag word.
+        // `None`/`0` for the SAME reason every VB field above is: this harness mints its own
+        // pipelines instead of booting `GpuSceneBundles` (which is what allocates these
+        // unconditionally in production), and it never resolves VB, so nothing here would
+        // bind them. `vb_occ_flags: 0` is the disarmed word — no bit set means the cull may
+        // defer nothing — and it is read by nothing at this step in any case: the push block
+        // still ends at `visible_cap`.
+        vb_late_visible: None,
+        vb_late_count: None,
+        vb_cull_uniform: None,
+        vb_occ_flags: 0,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };

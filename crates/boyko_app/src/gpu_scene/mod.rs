@@ -21,9 +21,9 @@ use boyko_rhi::{
     BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry, BufferDesc,
     BufferUsage, CompareOp, ComputePipelineDesc, CullMode, DepthBias, Format,
     GraphicsPipelineDesc, ImageAspect, ImageBarrierDesc, ImageLayout, ImageSubresourceRange,
-    ImageUsage, MemoryLocation, MipMode, PrimitiveTopology, QueryPoolDesc, RhiCommandEncoder,
-    RhiDevice, RhiQueue, SamplerDesc, ShaderStage, TextureDesc, TextureDimension, VertexAttribute,
-    VertexBufferLayout, VertexFormat,
+    ImageUsage, MAX_BIND_GROUP_BINDINGS, MemoryLocation, MipMode, PrimitiveTopology, QueryPoolDesc,
+    RhiCommandEncoder, RhiDevice, RhiQueue, SamplerDesc, ShaderStage, TextureDesc, TextureDimension,
+    VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi::SpecConstant;
@@ -54,8 +54,8 @@ use boyko_rhi_vulkan::compute::{
     SSAO_ATROUS_PUSH_BYTES, ssao_atrous_read8_spirv, ssao_atrous_spirv, ssao_atrous_write8_spirv,
     SSAO_QUALITY_COUNT, SSAO_QUALITY_HIGH, SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM,
     ssaa_downsample_fs_spirv, taa_resolve_spirv, tile_grid_extent, VB_BATCH_CULL_PUSH_BYTES,
-    VB_BATCH_DESC_STRIDE, vb_batch_cull_spirv, VIEWT_FROM_DEPTH_PUSH_BYTES,
-    VIEWT_FROM_DEPTH_RZ_PUSH_BYTES,
+    VB_BATCH_DESC_STRIDE, VB_CULL_LAYOUT_BINDINGS, VB_CULL_UNIFORM_BYTES, vb_batch_cull_spirv,
+    VIEWT_FROM_DEPTH_PUSH_BYTES, VIEWT_FROM_DEPTH_RZ_PUSH_BYTES,
     vb_classify_count_spirv, vb_classify_scan_spirv, vb_classify_scatter_spirv,
     vb_geo_spirv, vb_raster_fs_spirv, vb_raster_vs_spirv, vb_resolve_spirv, vb_resolve_froxel_spirv,
     sdf_ssao_vb_spirv, vb_shade_spirv, vb_shade_froxel_spirv, vb_shade_split_spirv, vb_shade_split_tex_spirv,
@@ -292,6 +292,194 @@ const _: () = assert!(
 /// rather than a restatement: changing the allocation means changing this, which trips the assert
 /// the moment it falls below the ring.
 const VB_VISIBLE_INSTANCE_ELEMS: usize = INSTANCE_CAPACITY;
+
+/// VG R3 piece 3 step P3-2 (plan D3): element count of `vb_late_visible`, the occlusion split's
+/// early-reject / late-survivor list.
+///
+/// EQUAL to [`VB_VISIBLE_INSTANCE_ELEMS`], const-asserted below rather than spelled as the same
+/// definition twice: the two lists partition the SAME per-batch regions out of the SAME
+/// `VbBatchDesc` fields, and `vb_cull_batch_count_visible_clamp` bounds BOTH with the one number it
+/// already computes from the early list's allocation.
+///
+/// ⚠️ The equality above (the R2d-6 `VB_VISIBLE_INSTANCE_ELEMS == INSTANCE_CAPACITY` pair) is
+/// CONTEXT for this constant, never a third participant: this one must track the SURVIVOR LIST, and
+/// it tracks the ring only through it.
+const VB_LATE_VISIBLE_ELEMS: usize = INSTANCE_CAPACITY;
+const _: () = assert!(
+    VB_LATE_VISIBLE_ELEMS == VB_VISIBLE_INSTANCE_ELEMS,
+    "the late candidate/survivor list must hold every index the early survivor list can: both are \
+     addressed by the SAME VbBatchDesc region and bounded by the SAME \
+     vb_cull_batch_count_visible_clamp, which is computed from ONE element count. A late list \
+     SHORTER than the early one is an out-of-bounds device write with robustBufferAccess off."
+);
+
+/// VG R3 piece 3 step P3-2: the `vb_late_visible` allocation's byte size — the SAME byte count as
+/// [`VB_VISIBLE_INSTANCE_BYTES`], by the const-assert above.
+pub(crate) const VB_LATE_VISIBLE_BYTES: u64 = (VB_LATE_VISIBLE_ELEMS as u64) * 4;
+
+/// VG R3 piece 3 step P3-2 (plan D3/D6): the index of `vb_late_count`'s RESERVED tail slot — the
+/// one element that is not a batch's `n_defer` but the frame index the GPU read out of
+/// `VbCullUniform`.
+///
+/// It sits one past the last DRAW RECORD rather than one past the last live batch, because the live
+/// batch count is a per-frame quantity and this offset must be a boot constant both the shader and
+/// the readback can address without agreeing on a frame.
+pub(crate) const VB_LATE_COUNT_FRAME_SLOT: usize = VB_INDIRECT_LATE_RECORDS;
+
+/// VG R3 piece 3 step P3-2: element count of `vb_late_count` — one `u32` per LATE DRAW RECORD plus
+/// [`VB_LATE_COUNT_FRAME_SLOT`]'s reserved tail.
+///
+/// Sized off the same record capacity `vb_indirect_late` uses, so the two arrays cannot disagree
+/// about how many batches exist — the array whose `[b]` the late cull reads and the array whose
+/// `[b].instanceCount` it writes are indexed identically.
+pub(crate) const VB_LATE_COUNT_ELEMS: usize = VB_LATE_COUNT_FRAME_SLOT + 1;
+
+/// VG R3 piece 3 step P3-2: the `vb_late_count` allocation's byte size.
+pub(crate) const VB_LATE_COUNT_BYTES: u64 = (VB_LATE_COUNT_ELEMS as u64) * 4;
+
+/// The count array and the LATE RECORD array must describe the same number of batches, checked
+/// across the record STRIDE rather than by restating [`VB_LATE_COUNT_FRAME_SLOT`]'s definition:
+/// this is the one relation the definitions above do not already state, because the record array's
+/// size is a byte count and this one is an element count. A late record array resized without
+/// resizing this — or a stride change on one side only — is a batch whose `n_defer` has no slot.
+const _: () = assert!(
+    VB_LATE_COUNT_BYTES
+        == (VB_INDIRECT_LATE_BYTES / (boyko_rhi_vulkan::ffi::DRAW_INDEXED_INDIRECT_STRIDE as u64)
+            + 1)
+            * 4,
+    "vb_late_count must hold one u32 per LATE DRAW RECORD plus exactly one reserved frame slot"
+);
+
+/// VG R3 piece 3 step P3-2: the ONE binding on `vb_cull_layout` that is not a storage buffer —
+/// the depth pyramid, read with `.Load(int3(x, y, level))` through a mip-complete SAMPLED view.
+///
+/// Named because two independent things must agree on it and neither can see the other: this
+/// layout's `DescriptorKind::SampledImage` entry, and `GBufferTargets`' `BindGroupEntry::
+/// SampledImageAtGeneral` write. `SampledImage` is deliberately NOT `CombinedImageSampler` —
+/// **no `VkSampler` is created anywhere in this piece**, because `.Load` takes integer coordinates
+/// and an explicit mip and there is no filter to configure. A linear filter would in fact be
+/// UNSOUND over a min-reduced pyramid: a bilinear blend of four reduced texels lies strictly
+/// between their min and max, so it bounds the footprint from neither side, and a false negative
+/// is missing geometry.
+pub(crate) const VB_CULL_HZB_BINDING: u32 = 9;
+
+/// VG R3 piece 3 step P3-2: `vb_cull_layout`'s ENTRY TABLE — twelve COMPUTE bindings @0..@11, in
+/// the positional order [`RhiDevice::create_bind_group`] matches its entries against.
+///
+/// | binding | resource | since |
+/// |---|---|---|
+/// | @0 | `VbIndirect` — the early draw records | R2c0 |
+/// | @1 | `VbBatchDesc` — the per-batch cull inputs | R2c0 |
+/// | @2 | `VbCullVisible` — the compacted visible-BATCH list | R2c0 |
+/// | @3 | `VbCullCount` — the visible-batch counter | R2c0 |
+/// | @4 | `gVbInstances` — the per-instance affine + `mesh_id` ring | R2d-2 |
+/// | @5 | `gMeshBounds` — the per-mesh LOCAL AABB table | R2d-2 |
+/// | @6 | `gVbVisibleInstance` — the per-instance survivor list | R2d-2 |
+/// | @7 | `VbLateVisible` — the early-reject / late-survivor list | **P3-2** |
+/// | @8 | `VbCullUni` — the `VbCullUniform` block | **P3-2** |
+/// | @9 | `gHzbPyramid` — the depth pyramid, SAMPLED at `GENERAL` | **P3-2** |
+/// | @10 | `VbIndirectLate` — the late draw records | **P3-2** |
+/// | @11 | `VbLateCount` — per-batch `n_defer` + the frame slot | **P3-2** |
+///
+/// ⚠️ The MODULE spells its bindings as `: register(uN/tN)`, and the register index IS the Vulkan
+/// binding — so the `t` and `u` spaces are kept mutually exclusive BY HAND. A new binding that
+/// reused an index across the two spaces would alias silently, with no validation message and no
+/// pixel change until something loaded from the wrong buffer. That is what
+/// [`vb_cull_layout_table_is_well_formed`] exists to make a BUILD error.
+///
+/// ⚠️ Five of the twelve are bound-but-unread at this step: the shipped `vb_batch_cull.comp.spv`
+/// still declares seven. That direction is legal — a WRITTEN descriptor a shader never loads from
+/// is never dereferenced, so the bound set may legally exceed what the module declares. The reverse
+/// is a `debug_assert` in `create_bind_group` (`entries.len() == layout.entry_count`), which is why
+/// the layout and the set move in ONE commit and the shader lags rather than leads.
+const VB_CULL_LAYOUT_ENTRIES: [BindGroupLayoutEntry; VB_CULL_LAYOUT_BINDINGS as usize] = {
+    // Every binding in this table is a single COMPUTE storage buffer except @9, so the table is
+    // written as a fold over that rule instead of twelve near-identical literals — the shape a
+    // reader can check against the doc table above without counting braces.
+    const fn slot(binding: u32) -> BindGroupLayoutEntry {
+        BindGroupLayoutEntry {
+            binding,
+            count: 1,
+            kind: if binding == VB_CULL_HZB_BINDING {
+                DescriptorKind::SampledImage
+            } else {
+                DescriptorKind::StorageBuffer
+            },
+            stage: ShaderStage::COMPUTE,
+        }
+    }
+    [
+        slot(0),
+        slot(1),
+        slot(2),
+        slot(3),
+        slot(4),
+        slot(5),
+        slot(6),
+        slot(7),
+        slot(8),
+        slot(9),
+        slot(10),
+        slot(11),
+    ]
+};
+
+/// VG R3 piece 3 step P3-2 — the invariant [`VB_CULL_LAYOUT_ENTRIES`] must satisfy for the layout
+/// and the descriptor set built against it to be able to agree:
+///
+/// 1. **entry `i` declares binding `i`** — `create_bind_group` matches entries to layout bindings
+///    POSITIONALLY, so a table whose binding numbers are not the identity binds resources to the
+///    wrong slots with no error anywhere. This subsumes "distinct" and "dense".
+/// 2. **exactly one descriptor per entry**, `count == 1` — nothing here is a bindless array.
+/// 3. **COMPUTE visibility on every entry** — the cull is the only consumer of this layout.
+/// 4. **[`VB_CULL_HZB_BINDING`] alone is `SampledImage`; every other entry is `StorageBuffer`** —
+///    the kind is what makes the `SampledImageAtGeneral` write legal at @9 and what would make it
+///    illegal anywhere else.
+///
+/// A named `const fn` rather than an inline chain for the reason
+/// `boyko_rhi_vulkan`'s own `hzb_null_desc_is_bindable_and_seedable` is one: the const-assert below
+/// executes it on the SHIPPED table, and a unit test executes the SAME function on deliberately
+/// corrupted copies. A test that re-implemented the predicate would be a second opinion, not a
+/// control.
+const fn vb_cull_layout_table_is_well_formed(
+    entries: &[BindGroupLayoutEntry; VB_CULL_LAYOUT_BINDINGS as usize],
+) -> bool {
+    let mut i = 0;
+    while i < VB_CULL_LAYOUT_BINDINGS as usize {
+        let e = &entries[i];
+        if e.binding != i as u32 || e.count != 1 {
+            return false;
+        }
+        if e.stage.bits() != ShaderStage::COMPUTE.bits() {
+            return false;
+        }
+        // The pyramid slot must be SAMPLED and every OTHER slot must be a storage buffer. Stated as
+        // two exhaustive arms rather than as "the sampled one is at @9", because the second form
+        // would still admit a SECOND sampled entry elsewhere in the table.
+        let kind_ok = if e.binding == VB_CULL_HZB_BINDING {
+            matches!(e.kind, DescriptorKind::SampledImage)
+        } else {
+            matches!(e.kind, DescriptorKind::StorageBuffer)
+        };
+        if !kind_ok {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+const _: () = assert!(
+    vb_cull_layout_table_is_well_formed(&VB_CULL_LAYOUT_ENTRIES),
+    "VG R3 P3-2: vb_cull_layout's entry table must declare binding i at index i, one COMPUTE \
+     descriptor each, with the depth pyramid at VB_CULL_HZB_BINDING as the ONLY SampledImage"
+);
+
+const _: () = assert!(
+    (VB_CULL_LAYOUT_BINDINGS as usize) <= MAX_BIND_GROUP_BINDINGS,
+    "VG R3 P3-2: vb_cull_layout's arity must fit the RHI's per-set binding cap, which \
+     create_bind_group_layout rejects at runtime rather than at build time"
+);
 
 /// Asset-streaming plan F7 Q2: a sane upper bound on the non-RT instance family's
 /// grown capacity — mirrors `MESH_ADDR_CAP`'s role for the BLAS-address table.
@@ -1215,6 +1403,19 @@ pub(crate) struct GpuSceneBundles {
     /// layout @11 (read by `vb_raster`'s VS since rung R2d-4) — see
     /// `GBufferScene::vb_visible_instance`'s doc for why the binding landed before the consumer.
     pub(crate) vb_visible_instance: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// VG R3 piece 3 step P3-2 (plan D3): the per-FIF early-reject / late-survivor list
+    /// ([`VB_LATE_VISIBLE_ELEMS`] × 4 B, DEVICE_LOCAL — the SAME element count as
+    /// [`Self::vb_visible_instance`], const-asserted, which is what lets ONE clamp bound both).
+    /// Allocated and BOUND at `vb_cull_layout` @7 and at `vb_set0_late` @11; read and written by
+    /// nothing until the shader arms — see `GBufferScene::vb_late_visible`.
+    pub(crate) vb_late_visible: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// VG R3 piece 3 step P3-2 (plan D3): the per-FIF per-batch `n_defer` array plus its reserved
+    /// frame slot ([`VB_LATE_COUNT_ELEMS`] × 4 B, DEVICE_LOCAL). Bound at `vb_cull_layout` @11.
+    pub(crate) vb_late_count: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// VG R3 piece 3 step P3-2 (plan D6): the per-FIF
+    /// [`VbCullUniform`](boyko_rhi_vulkan::present::VbCullUniform) block
+    /// ([`VB_CULL_UNIFORM_BYTES`], DEVICE_LOCAL). Bound at `vb_cull_layout` @8.
+    pub(crate) vb_cull_uniform: [BoundBuffer; FRAMES_IN_FLIGHT],
     /// VG rung R2c-tail: the per-FIF host-visible READBACK staging for the cull's outputs —
     /// `Some` only under `BOYKO_VB_CULL_READBACK`. See [`Self::read_vb_cull`].
     pub(crate) vb_cull_readback: Option<[BoundBuffer; FRAMES_IN_FLIGHT]>,
@@ -3886,6 +4087,61 @@ impl GpuSceneBundles {
             .expect("invariant: VB visible-instance buffer create")
         });
 
+        // === VG R3 piece 3 step P3-2 (plan D3/D6): the occlusion split's THREE new buffers. ===
+        //
+        // All three UNCONDITIONALLY, immediately after `vb_visible_instance` and by its rule: a
+        // per-frame GPU-private resource owned by this struct cannot have its EXISTENCE conditioned
+        // on a per-frame ECS fact, which is exactly what the occlusion capability is. So
+        // `GpuSceneBundles::scene` wires all three as unconditional `Some(...)` and every reader
+        // `.expect()`s them under the split predicate rather than carrying three more `Option` arms
+        // — the dead-conjunct trap `vb_indirect_late`'s own doc records.
+        //
+        // BOUND at `vb_cull_layout` @7/@8/@11 in this same step and READ BY NOTHING: the shipped
+        // cull module still declares seven bindings. That is the `gVbVisibleInstance` @6 pattern
+        // held one step — the descriptor arrives before its consumer, so the consumer step changes
+        // shader code alone.
+        //
+        // The candidate/survivor list. `TRANSFER_SRC` is what the P3-5 readback probe will copy
+        // through; `TRANSFER_DST` is declarative (`create_buffer` already ORs both TRANSFER bits
+        // into every DeviceLocal buffer — see `vb_indirect`'s note), stated so the usage set reads
+        // as the intent rather than as an accident of the allocator.
+        let vb_late_visible: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+            ctx.create_buffer(&BufferDesc {
+                size: VB_LATE_VISIBLE_BYTES,
+                usage: BufferUsage::STORAGE
+                    | BufferUsage::TRANSFER_DST
+                    | BufferUsage::TRANSFER_SRC,
+                location: MemoryLocation::DeviceLocal,
+            })
+            .expect("invariant: VB late visible-instance buffer create")
+        });
+        // Per-batch `n_defer` plus the reserved frame slot. The array that gives
+        // `vb_indirect_late[b].instanceCount` exactly ONE producer — see
+        // `GBufferScene::vb_late_count`'s doc for the three gates the alternative destroyed.
+        let vb_late_count: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+            ctx.create_buffer(&BufferDesc {
+                size: VB_LATE_COUNT_BYTES,
+                usage: BufferUsage::STORAGE
+                    | BufferUsage::TRANSFER_DST
+                    | BufferUsage::TRANSFER_SRC,
+                location: MemoryLocation::DeviceLocal,
+            })
+            .expect("invariant: VB late per-batch count buffer create")
+        });
+        // The cull's non-push inputs. `TRANSFER_DST` is load-bearing rather than declarative here:
+        // the fill is an inline `vkCmdUpdateBuffer`, which is a transfer. No `TRANSFER_SRC` — no
+        // probe copies it back; the frame index it carries is observed through `vb_late_count`'s
+        // reserved slot, which is what makes that control a GPU observation rather than a host
+        // echo of what the host itself wrote.
+        let vb_cull_uniform: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+            ctx.create_buffer(&BufferDesc {
+                size: u64::from(VB_CULL_UNIFORM_BYTES),
+                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+                location: MemoryLocation::DeviceLocal,
+            })
+            .expect("invariant: VB cull uniform buffer create")
+        });
+
         // VG rung R2c-tail: the cull READBACK staging — `Some` ONLY under `BOYKO_VB_CULL_READBACK`.
         // Every golden/interactive boot leaves this `None`, so `declare_vb_graph` declares no
         // readback pass and `record_vb` records ZERO extra commands: the byte-identity of the nine
@@ -3908,70 +4164,17 @@ impl GpuSceneBundles {
                 })
             });
 
-        // The batch cull's OWN 1-set layout — seven bindings @0..@6 since rung R2d-3. A
-        // DEDICATED layout rather than four more bindings on `vb_layout0`, because
-        // `vb_layout0_froxel` already occupies @8/@9 — appended bindings would land on DIFFERENT
-        // numbers in the two layouts and no single compiled module could name both. The
-        // `cull_layout` above is the precedent this follows.
+        // The batch cull's OWN 1-set layout — TWELVE bindings @0..@11 since VG R3 piece 3 step
+        // P3-2 (seven @0..@6 from rung R2d-3). A DEDICATED layout rather than more bindings on
+        // `vb_layout0`, because `vb_layout0_froxel` already occupies @8/@9 — appended bindings
+        // would land on DIFFERENT numbers in the two layouts and no single compiled module could
+        // name both. The `cull_layout` above is the precedent this follows.
+        //
+        // The table itself is `VB_CULL_LAYOUT_ENTRIES`, a named const so its arity is a TYPE
+        // (`[_; VB_CULL_LAYOUT_BINDINGS]`) and not a count anyone has to keep re-deriving.
         let vb_cull_layout = RhiDevice::create_bind_group_layout(
             device,
-            &BindGroupLayoutDesc {
-                entries: &[
-                    BindGroupLayoutEntry {
-                        binding: 0,
-                        count: 1,
-                        kind: DescriptorKind::StorageBuffer,
-                        stage: ShaderStage::COMPUTE,
-                    },
-                    BindGroupLayoutEntry {
-                        binding: 1,
-                        count: 1,
-                        kind: DescriptorKind::StorageBuffer,
-                        stage: ShaderStage::COMPUTE,
-                    },
-                    BindGroupLayoutEntry {
-                        binding: 2,
-                        count: 1,
-                        kind: DescriptorKind::StorageBuffer,
-                        stage: ShaderStage::COMPUTE,
-                    },
-                    BindGroupLayoutEntry {
-                        binding: 3,
-                        count: 1,
-                        kind: DescriptorKind::StorageBuffer,
-                        stage: ShaderStage::COMPUTE,
-                    },
-                    // Virtual-geometry ladder, rung R2d-2 (inert plumbing): the three inputs a
-                    // per-INSTANCE cull needs but a per-BATCH one does not — `gVbInstances` @4
-                    // (`Self::vb_instance_rings`, the affine + `mesh_id` per instance),
-                    // `gMeshBounds` @5 (`MeshGeometryTable::bounds_buffer`, the R2d-1 per-mesh
-                    // LOCAL AABB keyed by that same `mesh_id`), `gVbVisibleInstance` @6
-                    // (`Self::vb_visible_instance`, the survivor list to compact into). Appended
-                    // to the entries array BEFORE `vb_batch_cull_pipeline` is created against this
-                    // layout below, so the shipped pipeline is built against the 7-binding shape;
-                    // Rung R2d-3's HLSL declares all seven and WRITES @6; whether its module still
-                    // names @4/@5 while nothing loads from them is reported by the `binding_set`
-                    // census field in `vb_batch_cull_spv_sync.rs`, not assumed here.
-                    BindGroupLayoutEntry {
-                        binding: 4,
-                        count: 1,
-                        kind: DescriptorKind::StorageBuffer,
-                        stage: ShaderStage::COMPUTE,
-                    },
-                    BindGroupLayoutEntry {
-                        binding: 5,
-                        count: 1,
-                        kind: DescriptorKind::StorageBuffer,
-                        stage: ShaderStage::COMPUTE,
-                    },
-                    BindGroupLayoutEntry {
-                        binding: 6,
-                        count: 1,
-                        kind: DescriptorKind::StorageBuffer,
-                        stage: ShaderStage::COMPUTE,
-                    },
-                ],
-            },
+            &BindGroupLayoutDesc { entries: &VB_CULL_LAYOUT_ENTRIES },
         )
         .expect("invariant: VB batch-cull Set-0 bind-group layout create");
         let vb_batch_cull_cs =
@@ -4270,6 +4473,11 @@ impl GpuSceneBundles {
             vb_cull_visible,
             vb_cull_count,
             vb_visible_instance,
+            // VG R3 piece 3 step P3-2: created immediately after `vb_visible_instance`, so freed
+            // immediately before it in `destroy` — reverse acquisition.
+            vb_late_visible,
+            vb_late_count,
+            vb_cull_uniform,
             vb_cull_readback,
             vb_cull_layout,
             vb_batch_cull_pipeline,
@@ -6490,6 +6698,21 @@ impl GpuSceneBundles {
             // `vb_instance_ring` above follows, and the reason the four Set-0 builders can
             // `.expect()` it under `path_is_vb()` rather than carry a fifth `Option` arm.
             vb_visible_instance: Some(&self.vb_visible_instance),
+            // VG R3 piece 3 step P3-2: the split's three buffers, wired as unconditional
+            // `Some(...)` — `boot` mints them unconditionally beside `vb_visible_instance`, so
+            // making any of them a conjunct of `path_vb_occlusion_split()` would be a dead conjunct
+            // that reads like a real gate (`vb_indirect_late`'s own doc records the trap).
+            vb_late_visible: Some(&self.vb_late_visible),
+            vb_late_count: Some(&self.vb_late_count),
+            vb_cull_uniform: Some(&self.vb_cull_uniform),
+            // VG R3 piece 3 step P3-2: the occlusion decision's flag word, pushed by nothing yet —
+            // the push block still ends at `visible_cap`, so no shader can observe this number at
+            // this step. It is threaded now so the four exhaustive `GBufferScene` literals and the
+            // set/layout widening land in ONE commit; the fold that computes it (the ARMED bit from
+            // the resolved path, the FORCE bits from a boot-time selector) belongs to the arming
+            // step and lives HERE beside `vb_cull_planes` when it lands — never in `runner.rs`, and
+            // never per frame.
+            vb_occ_flags: 0,
             vb_cull_readback: self.vb_cull_readback.as_ref(),
             vb_batch_cull_pipeline: Some(&self.vb_batch_cull_pipeline),
             vb_cull_layout: Some(&self.vb_cull_layout),
@@ -7102,6 +7325,21 @@ impl GpuSceneBundles {
                     RhiDevice::destroy_buffer(ctx, buf);
                 }
             }
+            // VG R3 piece 3 step P3-2: the three occlusion-split buffers, created in `boot`
+            // immediately AFTER `vb_visible_instance` and before the readback staging, so they are
+            // freed here — between them — in reverse creation order
+            // (uniform → late_count → late_visible). Same reason as every VB buffer below: the
+            // omission this block's header records is why a new one gets its destroy in the same
+            // edit that allocates it.
+            for buf in self.vb_cull_uniform {
+                RhiDevice::destroy_buffer(ctx, buf);
+            }
+            for buf in self.vb_late_count {
+                RhiDevice::destroy_buffer(ctx, buf);
+            }
+            for buf in self.vb_late_visible {
+                RhiDevice::destroy_buffer(ctx, buf);
+            }
             // Rung R2d-2: created in `boot` after `vb_cull_count` and before the readback staging,
             // so it is freed here — between them — to keep this block reverse-acquisition. The
             // omission this block's own header records (`vb_instance_rings`/`vb_indirect` reaching
@@ -7392,6 +7630,80 @@ mod tests {
     };
 
     use super::*;
+
+    /// VG R3 piece 3 step P3-2 — `vb_cull_layout`'s widened entry table, CHARACTERISED against the
+    /// production predicate rather than restated.
+    ///
+    /// # What this test CANNOT claim
+    ///
+    /// * **Nothing about the SHADER.** The shipped `vb_batch_cull.comp.spv` declares seven
+    ///   bindings; five of the twelve here are bound-but-unread at this step. Whether the module
+    ///   ever names @7..@11 is measured by `vb_batch_cull_spv_sync.rs`'s census, not here.
+    /// * **Nothing about the descriptor SET.** This is the LAYOUT's table. That the set's entry
+    ///   list is in the same order and of the same arity is checked by `create_bind_group`'s own
+    ///   `entries.len() == layout.entry_count` debug-assert, on a device, at boot.
+    /// * **Nothing about IMAGE LAYOUT.** That @9's descriptor records `GENERAL` is a property of
+    ///   the `BindGroupEntry` VARIANT written there, in `boyko_rhi_vulkan`; the layout entry only
+    ///   fixes the descriptor KIND. A `SampledImage` written as `BindGroupEntry::SampledImage`
+    ///   would satisfy every assertion below and still record the wrong layout.
+    /// * **No GPU runs.** This is a table over a `const`.
+    ///
+    /// # Why it can fail
+    ///
+    /// The three controls below are the answer, and they are EXECUTED, not described: each corrupts
+    /// the shipped table in one of the three ways this step can plausibly get it wrong and shows the
+    /// SAME production predicate reject it. Delete any one of them and the test would pass on a
+    /// table that aliased two bindings, declared the pyramid as a buffer, or declared a second
+    /// sampled image.
+    ///
+    /// The table's ARITY is deliberately not asserted here: it is the array's own type
+    /// (`[_; VB_CULL_LAYOUT_BINDINGS as usize]`), so an assertion about it would compare an
+    /// expression against itself — the vacuous shape this campaign has already shipped once.
+    #[test]
+    fn vb_cull_layout_declares_twelve_compute_slots_with_the_pyramid_alone_sampled() {
+        assert!(
+            vb_cull_layout_table_is_well_formed(&VB_CULL_LAYOUT_ENTRIES),
+            "the shipped vb_cull_layout table must satisfy the predicate its const-assert executes"
+        );
+        assert_eq!(
+            VB_CULL_LAYOUT_ENTRIES[VB_CULL_HZB_BINDING as usize].kind,
+            DescriptorKind::SampledImage,
+            "the pyramid's slot must be reachable AT the named index — the predicate above checks a \
+             RULE over the whole table, this reads the one entry every SampledImageAtGeneral write \
+             depends on"
+        );
+
+        // CONTROL 1 — the SILENT ALIAS. The module spells its bindings as `register(uN/tN)` and the
+        // `t`/`u` spaces are kept mutually exclusive by hand, so a new binding that reused an index
+        // would resolve to the same Vulkan slot with no validation message and no pixel change.
+        // Give @11 the index @7 already holds and the predicate must reject the table.
+        let mut aliased = VB_CULL_LAYOUT_ENTRIES;
+        aliased[11].binding = 7;
+        assert!(
+            !vb_cull_layout_table_is_well_formed(&aliased),
+            "CONTROL: two entries claiming binding 7 must be rejected — otherwise this gate is \
+             blind to exactly the aliasing hazard the register-space split creates"
+        );
+
+        // CONTROL 2 — the WRONG KIND at the pyramid slot. A `StorageBuffer` there is what a
+        // copy-paste of the eleven surrounding entries produces, and it would make every
+        // `SampledImageAtGeneral` write at @9 a descriptor-type mismatch.
+        let mut wrong_kind = VB_CULL_LAYOUT_ENTRIES;
+        wrong_kind[VB_CULL_HZB_BINDING as usize].kind = DescriptorKind::StorageBuffer;
+        assert!(
+            !vb_cull_layout_table_is_well_formed(&wrong_kind),
+            "CONTROL: the pyramid slot declared as a storage buffer must be rejected"
+        );
+
+        // CONTROL 3 — the CONVERSE of control 2: a SECOND sampled image. The predicate must pin
+        // the pyramid slot as the ONLY one, not merely as one of them.
+        let mut extra_sampled = VB_CULL_LAYOUT_ENTRIES;
+        extra_sampled[0].kind = DescriptorKind::SampledImage;
+        assert!(
+            !vb_cull_layout_table_is_well_formed(&extra_sampled),
+            "CONTROL: a second SampledImage entry must be rejected"
+        );
+    }
 
     /// P2-1(a): the 0%-gate carrier converts to the `ResolvedRenderPathGpu` 0%-gate default —
     /// a never-resolved world's `GBufferScene::resolved_render_path` matches what a booted world

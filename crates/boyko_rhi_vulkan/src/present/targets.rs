@@ -629,6 +629,15 @@ pub struct GBufferTargets {
     /// `vb_set0_froxel`/`vb_set0_tex`/`vb_set0` when BOTH [`GBufferScene::vb_tex_active`] AND the
     /// froxel arm hold this frame.
     pub(crate) vb_set0_tex_froxel: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// VG R3 piece 3 step P3-2 (plan D5): [`Self::vb_set0`] with ONE entry changed — @11 binds
+    /// `GBufferScene::vb_late_visible` instead of `GBufferScene::vb_visible_instance`, so the late
+    /// raster scope's VS reads the LATE list through the IDENTICAL
+    /// `visible_instances[base_instance + instance_id]` expression and `vb_raster.vs.spv` stays
+    /// byte-unchanged. `Some` under [`GBufferScene::path_is_vb`], `vb_set0`'s own gate verbatim.
+    ///
+    /// ⚠️ BOUND BY NOTHING at this step — the late scope still binds `vb_set0`. See
+    /// [`DeferredSets`]'s field doc for why it is built LAST.
+    pub(crate) vb_set0_late: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// Multi-paradigm render-path plan, rung R4b-b — the Forward v1 mesh path's OWN depth image
     /// ring + descriptor sets ([`ForwardTargets`]). `Some` iff `profile ==
     /// `[`TargetsProfile::ForwardMesh`]` (built at [`Self::create`]'s TOP, before the unconditional
@@ -661,10 +670,15 @@ pub struct GBufferTargets {
     /// VG R3 piece 3 step P3-1 (plan D7) — the 1×1 `R32_SFLOAT` placeholder the cull's descriptor
     /// set binds at the pyramid's binding when [`Self::hzb`] is `None`.
     ///
-    /// ⚠️ **Read by nothing, and bound by nothing, at step P3-1.** Step P3-2 widens
-    /// `vb_cull_layout` and writes it at @9; step P3-4 gives the cull module the load. It is minted
-    /// here, one step early, because its transition cannot live in an armed-only builder and
-    /// because the step that MINTS an image is the step that owes it a defined layout.
+    /// ⚠️ **BOUND at `vb_cull_layout` @9 since step P3-2, and read by nothing.** The cull module
+    /// still declares seven bindings; step P3-4 gives it the load. It was minted one step earlier
+    /// than the binding, because its transition cannot live in an armed-only builder and because
+    /// the step that MINTS an image is the step that owes it a defined layout.
+    ///
+    /// On an HZB-ARMED boot this image is STILL bound — at @9 of `DeferredSets::vb_cull_set` — and
+    /// simply not the set the recorder will pick: `HzbTargets::vb_cull_set_hzb` is the same twelve
+    /// entries with the real pyramid there. Two complete sets rather than one rewritten binding,
+    /// for the reason that field's doc gives.
     ///
     /// UNCONDITIONAL, unlike [`Self::hzb`]: the cull's set is written once per extent and its
     /// entry list has fixed arity, so SOMETHING valid must sit at that binding on a boot with no
@@ -1272,6 +1286,35 @@ pub(crate) struct HzbTargets {
     /// because every store in the shader is guarded by `k < pc.level_count`. Same for `gFine` on
     /// the base pass, where `d - 1` does not exist.
     pub(crate) sets: [[Option<VulkanBindGroup>; MAX_HZB_PASSES]; FRAMES_IN_FLIGHT],
+    /// VG R3 piece 3 step P3-2 (plan D5): the batch cull's descriptor ring with ONE entry changed —
+    /// @9 binds the REAL pyramid instead of `GBufferTargets::hzb_null`. A complete second set, per
+    /// frame-in-flight, identical to `DeferredSets::vb_cull_set` in every other entry.
+    ///
+    /// # Why it is built HERE and not in `DeferredSets::build`
+    ///
+    /// @9 needs the pyramid's view, which does not exist when the deferred sets are written: the
+    /// pyramid is built LAST in [`GBufferTargets::create`], from a depth ring selected out of
+    /// `targets.forward` / `targets.depth` — struct fields that do not exist until the
+    /// `GBufferTargets` literal itself. Reordering to build the pyramid first is NOT a statement
+    /// move: it would relocate a fallible allocation above a dozen error arms that would each have
+    /// to learn to drain it, refuting the placement argument [`GBufferTargets::create`] carries in
+    /// words. A second complete set costs one `VulkanBindGroup` per FIF and touches ZERO existing
+    /// error arms — the `vb_set0` / `vb_set0_tex` pairing applied again.
+    ///
+    /// (`hzb_null` needs none of that and IS threaded into `DeferredSets::build`: it is 1×1, takes
+    /// no extent, and depends on no field of the bundle being assembled.)
+    ///
+    /// # Why it is an `Option`
+    ///
+    /// `HzbTargets` exists iff `scene.hzb` is armed, which is independent of whether the CULL's
+    /// inputs exist — an HZB-armed boot with no geometry table has nothing legal to bind at @5.
+    /// So this ring is `Some` under exactly the tuple `vb_cull_set` is `Some` under, and the
+    /// recorder's `batch_cull_armed` predicate is what keeps both `.expect()`s unreachable.
+    ///
+    /// Acquired LAST inside [`Self::build`], so [`Self::destroy`] tears it down FIRST.
+    ///
+    /// ⚠️ BOUND BY NOTHING at this step: the recorder still binds `vb_cull_set` unconditionally.
+    pub(crate) vb_cull_set_hzb: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
 }
 
 impl HzbTargets {
@@ -1371,6 +1414,7 @@ impl HzbTargets {
             level_views,
             plan,
             sets: core::array::from_fn(|_| [const { None }; MAX_HZB_PASSES]),
+            vb_cull_set_hzb: None,
         };
 
         // A wiring bug, not a degrade path: `GpuSceneBundles::boot` mints the layout
@@ -1458,6 +1502,111 @@ impl HzbTargets {
             // unbuilt set slots are `None` and are skipped.
             unsafe { targets.destroy(ctx) };
             return Err(SwapchainError::DepthImage(e));
+        }
+
+        // === VG R3 piece 3 step P3-2: the cull's ARMED descriptor ring (plan D5). ===
+        //
+        // `vb_cull_set` — written by `DeferredSets::build`, one step earlier in `create` — binds
+        // `hzb_null` at @9 because the real pyramid does not exist at that point. This is the same
+        // twelve entries with the REAL pyramid there. See the field's own doc for why a second
+        // complete set beats reordering `sync_gbuffer` or adding an update-one-binding RHI helper.
+        //
+        // The gate is `vb_cull_set`'s, term for term: an HZB-armed boot need not be a
+        // geometry-table boot, and the ONE conjunct that can be false is `vb_mesh_bounds` — @5 has
+        // nothing legal to bind without it, and a bound set with an unwritten descriptor is
+        // undefined behaviour the pipeline may read (`robustBufferAccess` is OFF here).
+        //
+        // @9 is the only entry that reads a field of `targets`, and it takes the pyramid's own
+        // texture-owned `[0, levels)` view — mip-complete, which is what a reader indexing levels
+        // with `.Load(int3(x, y, level))` needs. `SampledImageAtGeneral` records `GENERAL`, the
+        // layout the boot clear below is about to put the image in and the layout it keeps for
+        // life.
+        if let (
+            Some(cull_layout),
+            Some(indirect),
+            Some(batch_desc),
+            Some(cull_visible),
+            Some(cull_count),
+            Some(mesh_bounds),
+        ) = (
+            scene.vb_cull_layout,
+            scene.vb_indirect,
+            scene.vb_batch_desc,
+            scene.vb_cull_visible,
+            scene.vb_cull_count,
+            scene.vb_mesh_bounds,
+        ) {
+            // The five unconditional siblings, `.expect()`ed for `vb_cull_set`'s stated reason:
+            // each is an unconditional `Some(...)` in the same `GpuSceneBundles::scene` expression
+            // that wires `vb_cull_layout`, so none can be `None` in a branch that layout admitted.
+            let instances = scene
+                .vb_instance_ring
+                .expect("invariant: vb_cull_layout armed implies scene.vb_instance_ring");
+            let visible_instance = scene
+                .vb_visible_instance
+                .expect("invariant: vb_cull_layout armed implies scene.vb_visible_instance");
+            let late_visible = scene
+                .vb_late_visible
+                .expect("invariant: vb_cull_layout armed implies scene.vb_late_visible");
+            let cull_uniform = scene
+                .vb_cull_uniform
+                .expect("invariant: vb_cull_layout armed implies scene.vb_cull_uniform");
+            let indirect_late = scene
+                .vb_indirect_late
+                .expect("invariant: vb_cull_layout armed implies scene.vb_indirect_late");
+            let late_count = scene
+                .vb_late_count
+                .expect("invariant: vb_cull_layout armed implies scene.vb_late_count");
+
+            let mut cull_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+                [const { None }; FRAMES_IN_FLIGHT];
+            let mut cull_failure: Option<crate::error::VulkanError> = None;
+            for (slot, dst) in cull_slots.iter_mut().enumerate() {
+                let entries = [
+                    BindGroupEntry::StorageBuffer { buffer: &indirect[slot] },
+                    BindGroupEntry::StorageBuffer { buffer: &batch_desc[slot] },
+                    BindGroupEntry::StorageBuffer { buffer: &cull_visible[slot] },
+                    BindGroupEntry::StorageBuffer { buffer: &cull_count[slot] },
+                    BindGroupEntry::StorageBuffer { buffer: &instances[slot] },
+                    BindGroupEntry::StorageBuffer { buffer: mesh_bounds },
+                    BindGroupEntry::StorageBuffer { buffer: &visible_instance[slot] },
+                    BindGroupEntry::StorageBuffer { buffer: &late_visible[slot] },
+                    BindGroupEntry::StorageBuffer { buffer: &cull_uniform[slot] },
+                    // THE ONE ENTRY THAT DIFFERS from `vb_cull_set`: the real pyramid, not the 1×1
+                    // placeholder. NOT ringed — the pyramid is one image (see the struct doc), so
+                    // every slot names it.
+                    BindGroupEntry::SampledImageAtGeneral { texture: &targets.pyramid },
+                    BindGroupEntry::StorageBuffer { buffer: &indirect_late[slot] },
+                    BindGroupEntry::StorageBuffer { buffer: &late_count[slot] },
+                ];
+                let desc = BindGroupDesc::<Vulkan> { layout: cull_layout, entries: &entries };
+                match RhiDevice::create_bind_group(ctx, &desc) {
+                    Ok(g) => *dst = Some(g),
+                    Err(e) => {
+                        cull_failure = Some(e);
+                        break;
+                    }
+                }
+            }
+            if let Some(e) = cull_failure {
+                // SAFETY: the slots already built [0..slot) were created on `ctx` in this loop and
+                // are referenced by no submission; each is destroyed exactly once here. `destroy`
+                // then consumes `targets` by value and tears down the `hzb_build` sets, the views
+                // and the image exactly once, in reverse acquisition order. `targets
+                // .vb_cull_set_hzb` is still `None`, so nothing is freed twice.
+                unsafe {
+                    for s in cull_slots.iter_mut() {
+                        if let Some(g) = s.take() {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    targets.destroy(ctx);
+                }
+                return Err(SwapchainError::DepthImage(e));
+            }
+            targets.vb_cull_set_hzb = Some(cull_slots.map(|s| {
+                s.expect("invariant: every armed batch-cull ring slot built before reaching here")
+            }));
         }
 
         // === VG R3 piece 3 step P3-0: THE BOOT CLEAR (plan D2). ===
@@ -1642,6 +1791,14 @@ impl HzbTargets {
         // by value, and `VulkanBindGroup`/`VulkanTextureView`/`VulkanTexture` are neither `Copy`
         // nor `Clone`, so each object is destroyed exactly once.
         unsafe {
+            // VG R3 piece 3 step P3-2: the armed cull ring — LAST-acquired inside `build`, so FIRST
+            // destroyed. It retains the pyramid's view by raw `VkImageView` handle exactly as the
+            // `hzb_build` sets do, so it obeys the same set-before-view-before-image order.
+            if let Some(ring) = self.vb_cull_set_hzb {
+                for group in ring {
+                    RhiDevice::destroy_bind_group(ctx, group);
+                }
+            }
             for row in self.sets {
                 for group in row.into_iter().flatten() {
                     RhiDevice::destroy_bind_group(ctx, group);
@@ -3042,6 +3199,11 @@ struct DeferredSets {
     /// `downsample_set` — so its own error path tears down every prior set and no EXISTING error
     /// path had to learn about it. `None` unless the whole R2c0 arm is wired.
     vb_cull_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// VG R3 piece 3 step P3-2 (plan D5): `vb_set0` with ONE entry changed — @11 binds
+    /// `vb_late_visible` instead of `vb_visible_instance`. THE NEW TERMINAL fallible set, built
+    /// LAST (after `vb_cull_set`), so its error path tears down every prior set and no EXISTING
+    /// error path had to learn about it. `None` unless `scene.path_is_vb()`.
+    vb_set0_late: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// Anti-aliasing Stage 3: the SSAA downsample INPUT set RING — `None` when SSAA is off.
     /// THE NEW TERMINAL fallible set (W1), built LAST (after `smaa_*_set`) so its own error
     /// path tears down every prior set.
@@ -3095,10 +3257,10 @@ impl DeferredSets {
         // VG R3 piece 3 step P3-1 (plan D7): [`GBufferTargets::hzb_null`], minted + cleared +
         // transitioned by the caller immediately before this call. UNCONDITIONAL (not an `Option`)
         // — every boot has one, because `vb_cull_set`'s entry list has fixed arity and the pyramid
-        // binding needs a valid descriptor on the boots where no pyramid exists. Step P3-2 widens
-        // `vb_cull_layout` and writes it at @9; until then this parameter exists to fix the ORDER
-        // (the image must be constructed before the sets that bind it) and to carry the check
-        // below.
+        // binding needs a valid descriptor on the boots where no pyramid exists. Step P3-2 widened
+        // `vb_cull_layout` to twelve entries and writes this image at @9, on EVERY boot; an
+        // HZB-armed one additionally gets `HzbTargets::vb_cull_set_hzb`, the same entries with the
+        // real pyramid there.
         hzb_null: &VulkanTexture,
     ) -> Result<DeferredSets, SwapchainError> {
         // The address half of D7's in-range argument, checked at the seam where the image is handed
@@ -4922,6 +5084,19 @@ impl DeferredSets {
         // matched: both are unconditional `Some(...)` literals in the SAME `GpuSceneBundles::scene`
         // struct expression that wires `vb_cull_layout`, so neither can be `None` in an arm this
         // match already required `vb_cull_layout` to enter. Same treatment as `vb_set0`'s own.
+        //
+        // ⚠️ VG R3 piece 3 step P3-2 widened the layout to TWELVE, and all four new BUFFER bindings
+        // — `vb_late_visible` @7, `vb_cull_uniform` @8, `vb_indirect_late` @10, `vb_late_count`
+        // @11 — join the `.expect()` group for exactly that reason, not the match tuple: every one
+        // of them is minted unconditionally on every VB boot. Adding them as conjuncts would grow
+        // the gate with four terms that can never be false, and a dead conjunct beside the ONE live
+        // one (`vb_mesh_bounds`) is how a reader stops being able to see which gate is real.
+        //
+        // @9 is `hzb_null`, the caller's 1×1 placeholder — see the parameter's own doc. On an
+        // HZB-ARMED boot `HzbTargets::build` additionally writes `vb_cull_set_hzb`, the same twelve
+        // entries with the real pyramid at @9; the recorder picks between the two sets on
+        // `scene.hzb.is_some()`, which is stored on the targets and cannot flip inside a
+        // generation.
         let vb_cull_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> = match (
             scene.vb_cull_layout,
             scene.vb_indirect,
@@ -4944,6 +5119,18 @@ impl DeferredSets {
                 let visible_instance = scene
                     .vb_visible_instance
                     .expect("invariant: vb_cull_layout armed implies scene.vb_visible_instance");
+                let late_visible = scene
+                    .vb_late_visible
+                    .expect("invariant: vb_cull_layout armed implies scene.vb_late_visible");
+                let cull_uniform = scene
+                    .vb_cull_uniform
+                    .expect("invariant: vb_cull_layout armed implies scene.vb_cull_uniform");
+                let indirect_late = scene
+                    .vb_indirect_late
+                    .expect("invariant: vb_cull_layout armed implies scene.vb_indirect_late");
+                let late_count = scene
+                    .vb_late_count
+                    .expect("invariant: vb_cull_layout armed implies scene.vb_late_count");
                 let mut slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
                     [const { None }; FRAMES_IN_FLIGHT];
                 let mut failure: Option<crate::error::VulkanError> = None;
@@ -4959,6 +5146,24 @@ impl DeferredSets {
                         BindGroupEntry::StorageBuffer { buffer: &instances[slot] },
                         BindGroupEntry::StorageBuffer { buffer: mesh_bounds },
                         BindGroupEntry::StorageBuffer { buffer: &visible_instance[slot] },
+                        // VG R3 piece 3 step P3-2: @7..@11, positionally after the R2d-2 three and
+                        // in `vb_cull_layout`'s own table order. All five are BOUND-BUT-UNREAD at
+                        // this step — the shipped module declares seven bindings — which is legal
+                        // in this direction only: a written descriptor a shader never loads from is
+                        // never dereferenced. The reverse (a module naming a binding the set never
+                        // wrote) is undefined with `robustBufferAccess` off, which is why the
+                        // layout and the set widen in ONE commit and the shader lags.
+                        BindGroupEntry::StorageBuffer { buffer: &late_visible[slot] },
+                        BindGroupEntry::StorageBuffer { buffer: &cull_uniform[slot] },
+                        // @9 — the DISARMED-path pyramid. `SampledImageAtGeneral`, not
+                        // `SampledImage`: the kind names the layout in this enum, and the image
+                        // this binding is for is `GENERAL` for life (both the 1×1 placeholder, put
+                        // there by `boot_seed_hzb_null`, and the real pyramid, put there by its
+                        // boot clear). `SampledImage` would record
+                        // `SHADER_READ_ONLY_OPTIMAL` — a layout neither image is ever in.
+                        BindGroupEntry::SampledImageAtGeneral { texture: hzb_null },
+                        BindGroupEntry::StorageBuffer { buffer: &indirect_late[slot] },
+                        BindGroupEntry::StorageBuffer { buffer: &late_count[slot] },
                     ];
                     let desc = BindGroupDesc::<Vulkan> { layout, entries: &entries };
                     match RhiDevice::create_bind_group(ctx, &desc) {
@@ -5003,6 +5208,7 @@ impl DeferredSets {
                             smaa_blend_set,
                             downsample_set,
                             vb_cull_set: None,
+                            vb_set0_late: None,
                         }
                         .destroy(ctx);
                     }
@@ -5011,6 +5217,128 @@ impl DeferredSets {
                 Some(slots.map(|s| s.expect("invariant: every batch-cull ring slot built before reaching here")))
             }
             _ => None,
+        };
+
+        // === VG R3 piece 3 step P3-2 (plan D5): the LATE raster scope's Set-0 ring. ===
+        //
+        // A DISTINCT descriptor SET instance against the SAME `vb_layout0` layout object, `vb_set0`
+        // entry for entry EXCEPT @11, which binds `vb_late_visible` in place of
+        // `vb_visible_instance` — the `vb_set0`/`vb_set0_tex` pairing applied a third time.
+        //
+        // # Why a second SET rather than a vertex-shader edit
+        //
+        // `vb_raster.vs.hlsl` resolves `visible_instances[pc.base_instance + instance_id]` at @11.
+        // Binding the late list there makes the IDENTICAL expression read the late list at the
+        // IDENTICAL base, so `vb_raster.vs.spv` stays BYTE-UNCHANGED. That is a gate-quality
+        // argument, not a convenience one: piece 3 is the first piece whose change is meant to move
+        // pixels, and if the rasterizer's artifact moved too, a pixel diff could not separate "the
+        // cull rejected wrongly" from "the VS indexes wrongly".
+        //
+        // # Placement
+        //
+        // Built LAST — after `vb_cull_set`, which held that slot until now — so it is THE NEW
+        // TERMINAL fallible set (the W1 discipline `smaa_edge_set`'s doc states): its error path
+        // tears down every prior set through `DeferredSets::destroy`, and no EXISTING error arm
+        // needed to learn about it. Built after `vb_set0` instead, four later arms would each have
+        // grown a drain — four edits on paths a green build never executes.
+        //
+        // ⚠️ BOUND BY NOTHING at this step. The late scope still binds `vb_set0`; the switch is part
+        // of the arming commit. `vb_late_visible` is likewise written by nothing, so this ring
+        // currently names a buffer holding freshly allocated device memory — harmless precisely
+        // because no draw reads it.
+        //
+        // Gated on `scene.path_is_vb()`, `vb_set0`'s own gate verbatim: the two rings differ in one
+        // entry and in nothing else, so a predicate that admitted one and not the other would be a
+        // second thing to keep in step.
+        let vb_set0_late: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> = if scene.path_is_vb() {
+            let layout = scene.vb_layout0.expect("invariant: path_is_vb() requires scene.vb_layout0");
+            let vb_instance_ring = scene
+                .vb_instance_ring
+                .expect("invariant: path_is_vb() requires scene.vb_instance_ring");
+            let instance_material_ring = scene.forward_instance_material_ring.expect(
+                "invariant: path_is_vb() requires scene.forward_instance_material_ring",
+            );
+            let vb_id_ring = &vb
+                .expect("invariant: path_is_vb() implies TargetsProfile::VbMesh (vb is Some)")
+                .vb_id;
+            let gclassify_ring = &vb_classify
+                .expect("invariant: path_is_vb() implies TargetsProfile::VbMesh (vb_classify is Some)")
+                .gclassify;
+            let vb_late_visible = scene
+                .vb_late_visible
+                .expect("invariant: path_is_vb() requires vb_late_visible");
+            let mut late_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+                [const { None }; FRAMES_IN_FLIGHT];
+            let mut failure: Option<crate::error::VulkanError> = None;
+            for (slot, dst) in late_slots.iter_mut().enumerate() {
+                let entries = [
+                    BindGroupEntry::StorageBuffer { buffer: &vb_instance_ring[slot] },
+                    BindGroupEntry::StorageBuffer { buffer: &instance_material_ring[slot] },
+                    BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[slot] },
+                    BindGroupEntry::StorageBuffer { buffer: scene.light_table },
+                    BindGroupEntry::StorageBuffer { buffer: scene.material_table },
+                    BindGroupEntry::SampledImage {
+                        texture: &vb_id_ring[slot],
+                        sampler: scene.depth_sampler,
+                    },
+                    BindGroupEntry::StorageImage { texture: &core.lit[slot] },
+                    BindGroupEntry::StorageBuffer { buffer: &gclassify_ring[slot] },
+                    // THE ONE ENTRY THAT DIFFERS from `vb_set0`: @11 is the LATE candidate/survivor
+                    // list, not the early one.
+                    BindGroupEntry::StorageBuffer { buffer: &vb_late_visible[slot] },
+                ];
+                let desc = BindGroupDesc::<Vulkan> { layout, entries: &entries };
+                match RhiDevice::create_bind_group(ctx, &desc) {
+                    Ok(g) => *dst = Some(g),
+                    Err(e) => {
+                        failure = Some(e);
+                        break;
+                    }
+                }
+            }
+            if let Some(e) = failure {
+                // SAFETY: the late slots already built [0..slot) were created on `ctx` and are
+                // referenced by no submission; each is destroyed exactly once here. Every PRIOR set
+                // is then destroyed exactly once by `DeferredSets::destroy`, which consumes the
+                // value and walks reverse acquisition order — the sets are moved into it, so none
+                // can be double-freed by a later path.
+                unsafe {
+                    for s in late_slots.iter_mut() {
+                        if let Some(g) = s.take() {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    DeferredSets {
+                        vocab_set,
+                        resolve_set,
+                        cull_set,
+                        ssao_set,
+                        viewt_from_depth_set,
+                        ddgi_update_set,
+                        present_set,
+                        sdf_forward_set,
+                        vb_set0,
+                        vb_set0_tex,
+                        vb_set0_froxel,
+                        vb_set0_tex_froxel,
+                        viewt_from_vb_depth_set,
+                        #[cfg(feature = "hwrt")]
+                        resolve_set_hwrt,
+                        fxaa_set,
+                        smaa_edge_set,
+                        smaa_weight_set,
+                        smaa_blend_set,
+                        downsample_set,
+                        vb_cull_set,
+                        vb_set0_late: None,
+                    }
+                    .destroy(ctx);
+                }
+                return Err(SwapchainError::DepthImage(e));
+            }
+            Some(late_slots.map(|s| s.expect("invariant: every late VB Set-0 ring slot built before reaching here")))
+        } else {
+            None
         };
 
         Ok(DeferredSets {
@@ -5035,25 +5363,34 @@ impl DeferredSets {
             smaa_blend_set,
             downsample_set,
             vb_cull_set,
+            vb_set0_late,
         })
     }
 
-    /// Tears down the deferred sets in reverse acquisition order (ssaa-downsample → smaa →
-    /// fxaa → resolve-hwrt → sdf-forward-march → present → ddgi-update → viewt-from-depth → ssao →
-    /// cull → resolve → vocab), consuming `self`.
+    /// Tears down the deferred sets in reverse acquisition order (vb-set0-late → vb-cull →
+    /// ssaa-downsample → smaa → fxaa → resolve-hwrt → sdf-forward-march → present → ddgi-update →
+    /// viewt-from-depth → ssao → cull → resolve → vocab), consuming `self`.
     ///
     /// # Safety
     ///
     /// `ctx` is live; no submission references these descriptor sets; each is destroyed exactly once
     /// (the by-value `self`). The `cull`/`ssao`/`viewt_from_depth`/`ddgi-update`/`resolve-hwrt`/
-    /// `sdf-forward-march`/`fxaa`/`smaa_*`/`downsample` sets are `Option`-guarded (present only when
-    /// their feature was wired).
+    /// `sdf-forward-march`/`fxaa`/`smaa_*`/`downsample`/`vb_cull`/`vb_set0_late` sets are
+    /// `Option`-guarded (present only when their feature was wired).
     unsafe fn destroy(self, ctx: &VulkanContext) {
         // SAFETY: per the contract `ctx` is live and nothing references these sets; each was created
         // on `ctx` and is destroyed exactly once, in reverse acquisition order.
         unsafe {
-            // VG rung R2c0: the batch-cull ring (LAST-acquired ⇒ FIRST destroyed),
-            // `Option`-guarded (present only when the R2c0 arm is wired).
+            // VG R3 piece 3 step P3-2: the LATE VB Set-0 ring (LAST-acquired ⇒ FIRST destroyed),
+            // `Option`-guarded (present only when `scene.path_is_vb()` held).
+            if let Some(vl) = self.vb_set0_late {
+                for g in vl {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
+            // VG rung R2c0: the batch-cull ring, `Option`-guarded (present only when the R2c0 arm
+            // is wired). Acquired immediately BEFORE `vb_set0_late` above, so destroyed
+            // immediately after it.
             if let Some(bc) = self.vb_cull_set {
                 for g in bc {
                     RhiDevice::destroy_bind_group(ctx, g);
@@ -7701,6 +8038,7 @@ impl GBufferTargets {
             vb_set0_tex,
             vb_set0_froxel,
             vb_set0_tex_froxel,
+            vb_set0_late,
             viewt_from_vb_depth_set,
             #[cfg(feature = "hwrt")]
             resolve_set_hwrt,
@@ -8200,6 +8538,9 @@ impl GBufferTargets {
             vb_set0_tex,
             vb_set0_froxel,
             vb_set0_tex_froxel,
+            // VG R3 piece 3 step P3-2: the LATE raster scope's Set-0 ring, built LAST among the
+            // deferred sets and bound by nothing yet.
+            vb_set0_late,
             forward,
             vb,
             vb_classify,
@@ -8612,6 +8953,7 @@ impl GBufferTargets {
                 vb_set0_tex: self.vb_set0_tex,
                 vb_set0_froxel: self.vb_set0_froxel,
                 vb_set0_tex_froxel: self.vb_set0_tex_froxel,
+                vb_set0_late: self.vb_set0_late,
                 viewt_from_vb_depth_set: self.viewt_from_vb_depth_set,
                 #[cfg(feature = "hwrt")]
                 resolve_set_hwrt: self.resolve_set_hwrt,
@@ -9017,6 +9359,7 @@ mod tests {
             vb_set0_tex: None,
             vb_set0_froxel: None,
             vb_set0_tex_froxel: None,
+            vb_set0_late: None,
             forward: None,
             vb: None,
             vb_classify: None,
@@ -9127,6 +9470,7 @@ mod tests {
             vb_set0_tex: None,
             vb_set0_froxel: None,
             vb_set0_tex_froxel: None,
+            vb_set0_late: None,
             forward: None,
             vb: None,
             vb_classify: None,

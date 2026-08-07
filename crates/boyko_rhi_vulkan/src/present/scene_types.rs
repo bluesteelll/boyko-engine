@@ -549,6 +549,74 @@ const _: () = assert!(
     "rung R2c: VbBatchCullPush must match the shader's 104-byte push block"
 );
 
+/// VG R3 piece 3 step P3-2: [`VbCullUniform`]'s byte size, re-exported from `compute` so this
+/// declaration site does not depend on it — the SAME idiom [`VB_BATCH_CULL_PUSH_BYTES`] follows.
+pub(crate) const VB_CULL_UNIFORM_BYTES: u32 = crate::compute::VB_CULL_UNIFORM_BYTES;
+
+/// VG R3 piece 3 step P3-2 (plan D6): the batch cull's NON-push inputs — 96 bytes, per-FIF,
+/// `DEVICE_LOCAL`, bound at `vb_cull_layout` @8 and read by BOTH cull phases.
+///
+/// It exists because the push range has no room for a matrix (see
+/// [`crate::compute::VB_CULL_UNIFORM_BYTES`] for the arithmetic). The plan writes it
+/// UNCONDITIONALLY — on every frame the cull is recorded, armed or not — because the shader's
+/// `level >= levels ⇒ Keep` early-out, the guard that makes the disarmed pyramid load safe, reads
+/// `levels` out of this buffer: gating the fill would make that read unwritten allocation contents
+/// on a disarmed boot.
+///
+/// ⚠️ At THIS step the buffer is allocated and bound and NOTHING writes or reads it. The fill lands
+/// at step P3-3 (at a named record site, ahead of `record_vb_pass`, for the intra-pass
+/// `TRANSFER → COMPUTE` edge's sake) and the shader-side read at P3-4.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VbCullUniform {
+    /// The view-projection in MATH-ROW form — `pv[row][col]`, `clip = pv · world` — which is
+    /// verbatim what `boyko_render::hzb::project_aabb` takes. The HOST performs the one byte
+    /// inversion out of the column-major push buffer, at ONE site, so the cull and the raster
+    /// cannot end up on two different matrices.
+    pub view_proj_rows: [[f32; 4]; 4],
+    /// The pyramid's SOURCE extent — `present_extent`, the same value the build pass pushed as
+    /// `src_extent`, NOT the client extent (under armed SSAA the two differ by 2×).
+    pub src_extent: [u32; 2],
+    /// The pyramid's LEVEL-0 extent (`prev_pow2` per axis). PUSHED, never re-derived in the
+    /// shader — P1-3's rule: a base-map disagreement must be a SHADER bug, never a second
+    /// implementation of the host oracle's arithmetic.
+    pub base_extent: [u32; 2],
+    /// `HzbPlan::levels`. A selected `level >= levels` is `Keep(LevelUnavailable)`, never a clamp
+    /// down onto a level the pyramid does not have.
+    pub levels: u32,
+    /// The engine frame this uniform describes. Phase 0's batch lane 0 will store it into
+    /// `vb_late_count`'s reserved tail slot and the readback will compare it against the host's —
+    /// the ONLY executable control for the record-order hazard, which is otherwise invisible on
+    /// every static fixture (a fill on the wrong side of the barrier reads frame N−2's matrix, and
+    /// on a static scene that is bit-identical).
+    pub frame_index: u32,
+    /// Tail padding to the 16-byte std430 stride. Written zero; read by nothing.
+    pub _pad: [u32; 2],
+}
+
+const _: () = assert!(
+    core::mem::size_of::<VbCullUniform>() == VB_CULL_UNIFORM_BYTES as usize,
+    "VG R3 P3-2: VbCullUniform must match the shader's 96-byte VbCullUniform block"
+);
+
+/// VG R3 piece 3 (plan D6): `occ_flags` bit 0 — the pyramid exists AND the occlusion split is
+/// armed, so the early phase may DEFER an instance instead of drawing it.
+///
+/// Clear ⇒ `defer` is identically false ⇒ the cull degrades to the pre-piece-3 loop exactly, not to
+/// something merely similar. The host folds the whole word ONCE (`GBufferScene::vb_occ_flags`) so
+/// declare, record and shader read one number.
+pub const VB_CULL_OCC_ARMED: u32 = 1 << 0;
+
+/// VG R3 piece 3 (plan D6): `occ_flags` bit 1 — the FORCE-LATE control. The early phase defers
+/// EVERY marked instance regardless of the occlusion verdict, which is what makes a nonzero
+/// late-survivor count observable on a converged static scene (where the correct count is zero).
+pub const VB_CULL_OCC_FORCE_LATE: u32 = 1 << 1;
+
+/// VG R3 piece 3 (plan D6): `occ_flags` bit 2 — the OFF SWITCH. The early phase defers NOTHING, so
+/// the split runs its full machinery over an empty candidate set. The zero control for the
+/// FORCE_KEEP / ARMED / DISARMED timing triple.
+pub const VB_CULL_OCC_FORCE_KEEP: u32 = 1 << 2;
+
 /// The [`VbBatchDesc`] byte stride — mirrors `vb_batch_cull.comp.hlsl`'s `VbBatchDescGpu`.
 pub(crate) const VB_BATCH_DESC_STRIDE: u32 = crate::compute::VB_BATCH_DESC_STRIDE;
 
@@ -2890,6 +2958,15 @@ pub struct GBufferScene<'a> {
     /// predicate: all seven are now loaded, stored or atomically updated, and their reappearance in
     /// that census is the artifact-level evidence that the arming is real.
     ///
+    /// VG R3 piece 3 step P3-2 widened it to TWELVE with the occlusion split's inputs:
+    /// `VbLateVisible` @7 ([`Self::vb_late_visible`]), `VbCullUni` @8 ([`Self::vb_cull_uniform`]),
+    /// `gHzbPyramid` @9 — the ONE non-buffer binding, a `SampledImage` recorded at `GENERAL` —
+    /// `VbIndirectLate` @10 ([`Self::vb_indirect_late`]) and `VbLateCount` @11
+    /// ([`Self::vb_late_count`]). All five are DECLARED-BUT-UNLOADED by the shipped module, the
+    /// same state @4/@5 were in between rungs R2d-2 and R2d-6, and legal for the same reason: a
+    /// written descriptor no shader dereferences is simply never read. The table itself lives on
+    /// the host (`boyko_app`'s `VB_CULL_LAYOUT_ENTRIES`), where a const-assert pins its shape.
+    ///
     /// A DEDICATED layout rather than four more bindings on `vb_layout0`, and the reason is
     /// structural: `vb_layout0_froxel` already occupies @8/@9 with the froxel pair, so appended
     /// bindings would land on DIFFERENT numbers in the two layouts and no single compiled module
@@ -3178,6 +3255,58 @@ pub struct GBufferScene<'a> {
     /// can arm the split with zero marked instances in the DRAWN set — an armed empty scope,
     /// never the reverse.
     pub vb_occlusion_instances: u32,
+
+    // ---- VG R3 piece 3 step P3-2 (plan D3/D6): the cull's three new buffers ----------------
+    /// The per-FIF early-reject / late-survivor list — `INSTANCE_CAPACITY` `u32`s, region-addressed
+    /// by the SAME [`VbBatchDesc::base_instance`] / `instance_count` fields that address
+    /// [`Self::vb_visible_instance`].
+    ///
+    /// A SEPARATE buffer rather than two-ended packing inside `vb_visible_instance`, and the
+    /// decisive reason is gate quality, not VRAM: two-ended packing would make `vb_raster.vs.hlsl`
+    /// grow a descending index path and a third flags bit, and piece 3 is the first piece whose
+    /// change is meant to move pixels. With the rasterizer's `.spv` byte-unchanged, every pixel
+    /// difference is attributable to the CULL alone.
+    ///
+    /// > INVARIANT VG-P3-LATE-REGION. Batch `b` owns
+    /// > `[base_instance_b, base_instance_b + instance_count_b)` and writes nowhere else — the same
+    /// > host-established disjointness `vb_visible_instance` has, from the same `VbBatchDesc`
+    /// > fields. The EARLY phase writes `[base, base + n_defer)`; the LATE phase reads that prefix
+    /// > and writes `[base, base + n_keep)` with `n_keep <= n_defer`. The only dereferencing reader
+    /// > is the late raster's VS, bounded by `SV_InstanceID < instanceCount = n_keep`, so no tail
+    /// > fill is required.
+    ///
+    /// Minted UNCONDITIONALLY on every VB boot (the [`Self::vb_visible_instance`] rule), hence
+    /// `.expect()`ed under [`Self::path_vb_occlusion_split`] and never a conjunct of it.
+    ///
+    /// ⚠️ At THIS step it is allocated and bound at `vb_cull_layout` @7 and at `vb_set0_late` @11,
+    /// and NOTHING reads or writes it: the shader still declares seven bindings and the late scope
+    /// still binds `vb_set0`.
+    pub vb_late_visible: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
+    /// The per-FIF per-batch deferral count `n_defer`, plus ONE reserved tail slot carrying the
+    /// frame index the GPU observed in [`VbCullUniform`].
+    ///
+    /// It exists so that `vb_indirect_late[b].instanceCount` has EXACTLY ONE producer — the late
+    /// cull. Writing `n_defer` into the draw record instead (the design this replaces) would make
+    /// a frame whose late cull did not run draw `n_defer` UNTESTED instances rather than a blank
+    /// scope, and would make "the late phase is load-bearing" unprovable by any image gate: a
+    /// redraw of a superset at identical depth is pixel-invisible under `VK_COMPARE_OP_GREATER`
+    /// with no `discard` and no `SV_Depth`.
+    ///
+    /// Indexed by batch id `b`, the SAME index `vb_indirect_late` uses, with no base arithmetic at
+    /// all — so its region rule is the trivial one.
+    ///
+    /// ⚠️ Allocated and bound at `vb_cull_layout` @11 at this step; written by nothing.
+    pub vb_late_count: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
+    /// The per-FIF [`VbCullUniform`], bound at `vb_cull_layout` @8. Same unconditional minting rule
+    /// as the two above. ⚠️ Filled by nothing at this step — see [`VbCullUniform`]'s own doc.
+    pub vb_cull_uniform: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
+    /// The occlusion decision's flag word — [`VB_CULL_OCC_ARMED`] / [`VB_CULL_OCC_FORCE_LATE`] /
+    /// [`VB_CULL_OCC_FORCE_KEEP`], folded ONCE on the host so the declarator, the recorder and the
+    /// shader read ONE number rather than three re-derivations of the same predicate.
+    ///
+    /// ⚠️ `0` at this step, and pushed by nothing: the push block still ends at `visible_cap`. The
+    /// fold that computes it lands with the arming commit.
+    pub vb_occ_flags: u32,
 }
 
 impl GBufferScene<'_> {

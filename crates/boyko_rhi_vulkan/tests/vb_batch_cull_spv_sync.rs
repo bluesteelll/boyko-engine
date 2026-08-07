@@ -187,8 +187,10 @@ struct SpvCensus {
     /// VG rung R2d-3: the module's DECLARED BINDING SET — every `OpDecorate %x Binding <n>`,
     /// sorted and deduped.
     ///
-    /// This is the field that states, rather than assumes, WHICH of the seven descriptors
-    /// `vb_cull_layout` binds the module actually names. Rung R2d-2 bound @4/@5/@6 with the module
+    /// This is the field that states, rather than assumes, WHICH of the descriptors
+    /// `vb_cull_layout` binds the module actually names — seven of them at rung R2d-6, TWELVE since
+    /// VG R3 piece 3 step P3-2 widened the host layout while leaving the module alone. Rung R2d-2
+    /// bound @4/@5/@6 with the module
     /// declaring only @0..@3; R2d-3's HLSL declared all seven while loading from neither @4
     /// (`gVbInstances`) nor @5 (`gMeshBounds`), and this field MEASURED the answer to "does DXC
     /// keep or strip a declared-but-unloaded resource": it strips them, and that module's set was
@@ -374,12 +376,17 @@ fn vb_batch_cull_module_carries_the_armed_decision() {
         local_size_x: boyko_rhi_vulkan::compute::VB_BATCH_CULL_LOCAL_SIZE_X as usize,
         // ⚠️ THE FIELD THAT ANSWERED ITS OWN QUESTION, and now the field that proves the arming.
         //
-        // `vb_cull_layout` binds SEVEN descriptors (@0..@6). Rung R2d-3's module named FIVE: DXC
+        // `vb_cull_layout` bound SEVEN descriptors (@0..@6) when this expectation was written, and
+        // binds TWELVE (@0..@11) since VG R3 piece 3 step P3-2. Rung R2d-3's module named FIVE: DXC
         // **stripped @4 (`gVbInstances`) and @5 (`gMeshBounds`)**, which that rung declared in
         // HLSL but never loaded from. The armed module loads from both, and every one of the seven
-        // is now either loaded (@1/@4/@5), stored (@0/@2/@6) or atomically updated (@3) — so this
-        // is a REQUIREMENT derived from the source, not a measurement to be filled in. The
-        // separately-named assertion above is what reports a violation.
+        // the MODULE declares is either loaded (@1/@4/@5), stored (@0/@2/@6) or atomically updated
+        // (@3) — so this is a REQUIREMENT derived from the source, not a measurement to be filled
+        // in. It is UNMOVED by P3-2, which widened the host layout and the descriptor set and
+        // touched no HLSL: the five new bindings are bound-but-unread, so the module cannot name
+        // them. When the shader does load from them (step P3-4) this list grows, and its growing is
+        // the artifact-level evidence that the load is real. The separately-named assertion above
+        // is what reports a violation.
         binding_set: vec![0, 1, 2, 3, 4, 5, 6],
         // Zero, as the construction implies: no `groupshared`, no barrier intrinsic, and the
         // region write is thread-private. Unmoved by the arming — it replaced a predicate, not the

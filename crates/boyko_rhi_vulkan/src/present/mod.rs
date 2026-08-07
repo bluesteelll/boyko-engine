@@ -62,6 +62,7 @@ pub use scene_types::{
     PunctualDepthActivation,
     RcasActivation, ResolvedRenderPathGpu, SCENE_MVP_BYTES, SHADOW_SOURCE_SDF_SOFT_MARCH,
     SampledComposite, Scene, SmaaActivation, SsaaActivation, SsaoActivation, TaaActivation, UiPass,
+    VB_CULL_OCC_ARMED, VB_CULL_OCC_FORCE_KEEP, VB_CULL_OCC_FORCE_LATE, VbCullUniform,
     ViewtFromDepthActivation, ViewtFromVbDepthActivation,
 };
 #[cfg(feature = "hwrt")]

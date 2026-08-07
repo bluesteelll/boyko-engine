@@ -1700,6 +1700,37 @@ pub fn cluster_cull_hier_spirv() -> &'static [u32] {
 /// 88 bytes, so the device plainly clears 104.
 pub const VB_BATCH_CULL_PUSH_BYTES: u32 = 104;
 
+/// VG R3 piece 3 step P3-2 (plan D6): the byte size of the batch cull's NON-push input block —
+/// `vb_batch_cull.comp.hlsl`'s `VbCullUniform`, a per-FIF `DEVICE_LOCAL` buffer written by
+/// `vkCmdUpdateBuffer` and read as a `StructuredBuffer`.
+///
+/// It is a BUFFER rather than more push words because [`VB_BATCH_CULL_PUSH_BYTES`] is 104 against a
+/// shared COMPUTE range const-asserted at most `VULKAN_MIN_MAX_PUSH_CONSTANTS_SIZE` (128) — 24 bytes
+/// of headroom, and the occlusion test needs a `float4x4` (64) plus two extents, a level count and a
+/// frame index. Raising the range instead would destroy the property `rhi_impl`'s push module states
+/// in words: no device-limit query is required.
+///
+/// 96 = 64 (the row-major view-projection) + 8 (`src_extent`) + 8 (`base_extent`) + 4 (`levels`) +
+/// 4 (`frame_index`) + 8 of tail padding to the 16-byte std430 stride. The HOST half of that layout
+/// is pinned by `present::scene_types::VbCullUniform`'s own size const-assert.
+pub const VB_CULL_UNIFORM_BYTES: u32 = 96;
+
+/// VG R3 piece 3 step P3-2: the ARITY of the batch cull's descriptor-set layout — twelve COMPUTE
+/// bindings @0..@11 since this step (seven @0..@6 before it).
+///
+/// ONE number, so the host layout's entry array is sized by it (a `[BindGroupLayoutEntry; N]`, whose
+/// length a literal cannot drift from) rather than by counting elements at each reader. Round 1 of
+/// the plan wrote the arity as a literal in six places against a table of five additions on a base
+/// of seven, and the arithmetic disagreed with itself.
+///
+/// ⚠️ This is the HOST layout's arity, NOT the module's declared binding count. The two are allowed
+/// to differ in exactly one direction — a WRITTEN descriptor a shader never loads from is never
+/// dereferenced, so a bound set may legally exceed what the module declares (`present/passes/vb.rs`
+/// states the argument at the dispatch's own SAFETY comment). The reverse would be a
+/// `debug_assert` failure in `create_bind_group`, which is why the set and the layout move in one
+/// commit while the shader lags.
+pub const VB_CULL_LAYOUT_BINDINGS: u32 = 12;
+
 /// The batch-cull shader's `[numthreads(64,1,1)]` group width, and the host's dispatch divisor:
 /// the dispatch is `ceil(batch_count / VB_BATCH_CULL_LOCAL_SIZE_X)` groups.
 ///

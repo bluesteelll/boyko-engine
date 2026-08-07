@@ -1018,6 +1018,25 @@ impl Renderer<'_> {
                 .map_or(0, |d| (d[fi].size / u64::from(VB_BATCH_DESC_STRIDE)) as usize);
             let visible_elems =
                 scene.vb_visible_instance.map_or(0, |v| (v[fi].size / 4) as usize);
+            // === VG R3 piece 3 step P3-2 (plan D3): the LATE list's size BACKSTOP. ===
+            //
+            // ASSERTED, never folded into the `.min()` chain above, and the reason is the one
+            // `record_capacity_late`'s own assert states for the late RECORD array: a late list
+            // SHORTER than the early one would silently drop the tail batches from the late scope,
+            // and the fix for that is the build-time const-assert that pins the two ELEMENT COUNTS
+            // equal (`boyko_app`'s `VB_LATE_VISIBLE_ELEMS == VB_VISIBLE_INSTANCE_ELEMS`), not a
+            // runtime clamp that would make the drop quiet and legal. `.min()`-ing it here would
+            // ALSO change `batch_count` on a frame where the two allocations disagreed — i.e. it
+            // would silently repair the wiring bug this is here to expose.
+            //
+            // Derived from the ALLOCATION on both sides (the VB-P1j lesson), so it compares the
+            // buffers rather than the constants that were meant to size them.
+            debug_assert!(
+                scene.vb_late_visible.is_none_or(|l| (l[fi].size / 4) as usize >= visible_elems),
+                "invariant: the late candidate/survivor list holds every index the early survivor \
+                 list can ({} late elems against {visible_elems} early)",
+                scene.vb_late_visible.map_or(0, |l| l[fi].size / 4)
+            );
             let batch_count = scene
                 .mesh_draw
                 .len()
@@ -1191,6 +1210,21 @@ impl Renderer<'_> {
                     "invariant: the late record array holds every batch the late scope draws \
                      ({batch_count} batches into {record_capacity_late} records)"
                 );
+                // VG R3 piece 3 step P3-2 (plan D3): the second size BACKSTOP — `vb_late_count`
+                // carries one `u32` per late RECORD plus one reserved tail slot for the frame index
+                // the GPU observed. Compared against the record array beside it rather than against
+                // a host constant, for the same VB-P1j reason: this is the pair that must agree,
+                // and both numbers come from the allocations. Asserted, not clamped — a short count
+                // array is a wiring bug, and clamping would let a batch report a deferral count no
+                // slot exists for.
+                debug_assert!(
+                    scene
+                        .vb_late_count
+                        .is_none_or(|c| (c[fi].size / 4) as usize > record_capacity_late),
+                    "invariant: vb_late_count holds one u32 per late record plus the reserved \
+                     frame slot ({} elems against {record_capacity_late} records)",
+                    scene.vb_late_count.map_or(0, |c| c[fi].size / 4)
+                );
 
                 // ⚠️ BOUNDED BY `batch_count`, the SAME hoisted local the early fill and the cull
                 // dispatch read — NOT by `record_capacity_late`. The record array is a PREFIX, not
@@ -1330,15 +1364,18 @@ impl Renderer<'_> {
                 // SAFETY: recording is open and outside any render scope; `pipeline` + its layout
                 // (one COMPUTE set + the shared `COMPUTE_PUSH_CONSTANT_RANGE_BYTES` push range,
                 // of which this pass writes `VB_BATCH_CULL_PUSH_BYTES` = 104) are live on this
-                // device (caller contract). `cull_set` binds SEVEN COMPUTE storage buffers against
-                // the 7-entry `vb_cull_layout`, all written once at `GBufferTargets::sync`. Since
-                // rung R2d-6 the module names all seven: @4/@5 (`gVbInstances`/`gMeshBounds`) are
-                // LOADED by the armed per-instance predicate, where rung R2d-3 declared them
-                // unread and DXC stripped them. Either way the binding is safe in this direction —
-                // a WRITTEN descriptor a shader never loads from is never dereferenced, so the
-                // bound set may legally exceed what the module declares. The dispatch covers
-                // `dispatched_batches` lanes and the shader trims its tail group's out-of-range
-                // lanes. `&cull_set.descriptor_set` and `push` are locals alive for the calls.
+                // device (caller contract). `cull_set` binds TWELVE COMPUTE descriptors against the
+                // 12-entry `vb_cull_layout` — eleven storage buffers and, at @9, one SAMPLED image
+                // recorded at `GENERAL` — all written once at `GBufferTargets::sync`. The module
+                // names SEVEN of them: @0..@6, all loaded, stored or atomically updated since rung
+                // R2d-6. The five VG R3 P3-2 added (@7/@8/@9/@10/@11) are bound-but-unread, and the
+                // binding is safe in THIS direction only — a WRITTEN descriptor a shader never
+                // loads from is never dereferenced, so the bound set may legally exceed what the
+                // module declares. (The reverse is undefined with `robustBufferAccess` off, which
+                // is why the set and the layout widened in one commit while the shader lags.) The
+                // dispatch covers `dispatched_batches` lanes and the shader trims its tail group's
+                // out-of-range lanes. `&cull_set.descriptor_set` and `push` are locals alive for
+                // the calls.
                 unsafe {
                     (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
                     (self.fns.cmd_bind_descriptor_sets)(
