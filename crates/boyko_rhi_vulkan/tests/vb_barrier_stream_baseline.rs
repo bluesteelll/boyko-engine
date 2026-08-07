@@ -63,6 +63,38 @@
 //! is a divergence that will be forgotten. Divergence 1 survived three steps because it was written
 //! at its own site in block caps; divergence 2 was invisible for one step because it was not.
 //!
+//! # VG R3 piece 4 step P4-5 — the TWO PROBE-ON rows, and why they are a DELTA and not two more pins
+//!
+//! All eight PINNED rows hold `scene.vb_cull_readback` OFF, while the gates that decide whether the
+//! occlusion split WORKS — `boyko_app/tests/vb_occ_mixed.rs`'s G-P3-B/C — run with
+//! `BOYKO_VB_CULL_READBACK` ARMED. So until this step the barrier stream a *gate* executes was
+//! modelled by nothing, and a defect there makes a gate LIE (a readback of stale bytes) rather than
+//! merely making a diagnostic wrong. The asymmetry is stated from the other side at
+//! `vb_occ_mixed.rs:40-43`.
+//!
+//! [`P1`] and [`P3`] are [`S1`] and [`S3`] with `probe: true`. They are deliberately **NOT** pinned
+//! field by field — [`assert_row_is_pinned`] is never called on them, and its
+//! `vb_indirect_late`-routes-TWO-barriers clause would red on them by construction, because the
+//! probe appends a THIRD (see [`probe_delta_expectation`]). What is asserted instead is the
+//! DIFFERENCE against their PROBE-OFF twins, which already carry the whole-stream pin:
+//! [`probe_on_appends_the_readback_reads_and_resources_four_readers`].
+//!
+//! **The delta was DERIVED from the two declaration sites (`graph_bridge.rs`'s `vb_cull_readback`
+//! and `vb_cull_readback_late` blocks) and from `framegraph/sync.rs`'s `transition`, never
+//! regenerated** — [`dump_vb_split_barrier_streams`]'s doc states why that matters, and
+//! [`probe_delta_expectation`] carries the derivation beside every row it produced.
+//!
+//! ⚠️ **A PLAN PREDICTION THAT THE TREE REFUTES, recorded here because a divergence recorded only
+//! in a plan is forgotten.** `docs/VG-R3-P4-CONFIG-AND-INSTRUMENT-PLAN.md`'s P4-5 entry predicts
+//! *"the re-sourcing of `vb_raster_late`'s indirect fetch from `COMPUTE(SHADER_WRITE) →
+//! INDIRECT_COMMAND_READ` into `COMPUTE → TRANSFER` + `TRANSFER → INDIRECT_COMMAND_READ`"*. The
+//! tree does NOT do that, and refuses to on purpose: `vb_cull_readback_late` is declared AFTER
+//! `vb_raster_late`, and `graph_bridge.rs`'s own comment at that site says the alternative siting
+//! *"would RE-SOURCE that fetch … Sited here it does not"*. The shipping
+//! `vb_indirect_late_upload → vb_cull_late → vb_raster_late` chain is therefore field-identical with
+//! and without the probe — which this step asserts rather than assumes. The re-sourcing the probe
+//! DOES cause is on the EARLY pass and reaches four other readers; see [`probe_delta_expectation`].
+//!
 //! # The SECOND re-pin: VG R3 piece 3 step P3-3, and the ONE place the plan's own prediction is wrong
 //!
 //! P3-3 declares the late cull and the occlusion split's three buffers. Its plan entry says it moves
@@ -110,7 +142,9 @@
 //! ONE declaration moves all four: `vb_cull_late` writes `vb_indirect_late`. That buffer had exactly
 //! ONE declared producer — the host's `vb_indirect_late_upload` — and now has TWO, so the chain the
 //! stream derives across it is TWO barriers where it was one. This is plan D8's four-link chain; a
-//! PROBE-OFF matrix (every row here) derives its first three links:
+//! PROBE-OFF matrix (every PINNED row here) derives its first three links, and since VG R3 piece 4
+//! step P4-5 the two unpinned probe rows derive the FOURTH — the post-late snapshot's TRANSFER read
+//! — as an appended third barrier that leaves these two field-identical:
 //!
 //! ```text
 //! vb_indirect_late_upload  TRANSFER(TRANSFER_WRITE) ──WAW──▶ vb_cull_late    COMPUTE(SHADER_WRITE)
@@ -322,6 +356,16 @@ struct VbRow {
     /// in the declarator). Requires `hzb_levels`, exactly as `scene.hzb.filter(|_| mesh_leg)`
     /// does in production.
     hzb_dump: bool,
+    /// `scene.vb_cull_readback` (the `BOYKO_VB_CULL_READBACK` boot knob) — arms the
+    /// `vb_cull_readback` pass before `vb_raster` and, on a split row, `vb_cull_readback_late`
+    /// after `vb_raster_late`.
+    ///
+    /// ⚠️ **A FIXED BASE until VG R3 piece 4 step P4-5, a COLUMN since.** All EIGHT pinned rows
+    /// hold it `false` and their twelve measured expectation arrays are untouched by this step —
+    /// an unarmed boot declares no pass at all, so a `true` reaching any pinned row would show up
+    /// as a whole-stream divergence first. Only [`P1`] and [`P3`] set it, and they are asserted as
+    /// a DELTA against [`S1`]/[`S3`] rather than pinned (see the module doc's P4-5 section).
+    probe: bool,
     /// `scene.ssao` — arms the rung-R9b geo/shade split (`path_vb_ssao()` is
     /// `mesh_geo_shade_split && ssao.is_some()`, and SSAO under VB reads the split's `thin_normal`
     /// lane), and with it the `vb_viewt` PRE-TAIL slot: the host arms `viewt_from_vb_depth` on
@@ -376,6 +420,7 @@ const U1: VbRow = VbRow {
     split: false,
     hzb_levels: None,
     hzb_dump: false,
+    probe: false,
     ssao: false,
     sdf_leg: false,
     red_control_drop_cull_survivor_write: false,
@@ -460,6 +505,33 @@ const S4: VbRow = VbRow {
     ..U4
 };
 
+/// **P1** (VG R3 piece 4 step P4-5) — [`S1`] with the READBACK PROBE armed. Not pinned; compared
+/// against `S1` as a delta.
+///
+/// `S1` is the twin that isolates the probe's effect on the split's own three buffers with no HZB
+/// in the frame: `vb_cull_late` still runs (its gate is the split alone — only its pyramid read
+/// carries the `hzb_levels` conjunct), so every buffer edge the probe perturbs is present here.
+const P1: VbRow = VbRow {
+    id: "P1 (S1 + readback PROBE: split ON, HZB off, dump off, SSAO off, VB×Mesh)",
+    probe: true,
+    ..S1
+};
+
+/// **P3** (VG R3 piece 4 step P4-5) — [`S3`] with the READBACK PROBE armed. Not pinned; compared
+/// against `S3` as a delta.
+///
+/// The second twin, and it is `S3` rather than `S2`/`S4` because `S3` is the row carrying the most
+/// IMAGE traffic of the four (the poison, the ten-level build chain, `hzb_dump_depth_early` and the
+/// frame-end dump), which is what makes the "the probe moves NO image barrier" half of the delta
+/// worth executing twice. The BUFFER half is asserted identical to `P1`'s — the probe declares no
+/// image access and `S1`/`S3` differ only in image accesses — and that row-independence is itself
+/// asserted rather than assumed.
+const P3: VbRow = VbRow {
+    id: "P3 (S3 + readback PROBE: split ON, HZB armed, dump ON, SSAO off, VB×Mesh)",
+    probe: true,
+    ..S3
+};
+
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // The replica
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -488,6 +560,14 @@ struct VbFrame {
     vb_instance_ring: ResId,
     vb_indirect: ResId,
     vb_visible_instance: ResId,
+    /// The cull's atomic counter. Carried since VG R3 piece 4 step P4-5, whose delta names it:
+    /// PROBE-OFF it routes exactly the intra-pass `TRANSFER → COMPUTE` reset edge, PROBE-ON it
+    /// gains the snapshot's `COMPUTE(SHADER_WRITE) → TRANSFER(TRANSFER_READ)` flush.
+    vb_cull_count: ResId,
+    /// The cull's compacted BATCH list. Carried since VG R3 piece 4 step P4-5: it is the one
+    /// resource in the whole matrix that routes ZERO barriers on all eight pinned rows and exactly
+    /// one on a probe row, which makes it the delta's cleanest single-edge witness.
+    vb_cull_visible: ResId,
     /// P2-3's late record array. On an UNSPLIT row it is declared and named by NO pass, and the
     /// row asserts it routes ZERO barriers — the structural form of "nothing about the split leaks
     /// into the unarmed path". On a SPLIT row it carries — since VG R3 piece 3 step P3-3 — the
@@ -499,19 +579,21 @@ struct VbFrame {
     /// on an unsplit row; on a split row it carries the early phase's write, `vb_cull_late`'s
     /// read-then-write pair (declared as TWO calls so the P2-8 provenance guard can test the read
     /// half) and therefore the self-WAR execution-only edge that split costs.
-    /// Held so the struct mirrors `declare_vb_graph`'s ResId set one-for-one, and so a future
-    /// assertion can name it without re-plumbing the builder. No assertion reads it TODAY: the two
-    /// buffers are already covered by name through `red_control_drop_cull_late_visible_write` and
-    /// `red_control_drop_cull_late_count_write`, which fire inside the builder rather than through
-    /// a field read. Dropping the fields would make the replica's resource list diverge from the
-    /// declarator's, which is the one property this file cannot afford to lose.
-    #[allow(dead_code)]
+    ///
+    /// ⚠️ Through VG R3 piece 3 this field was carried `#[allow(dead_code)]`, read by NO assertion:
+    /// the two split buffers were covered by name only through
+    /// `red_control_drop_cull_late_visible_write` / `red_control_drop_cull_late_count_write`, which
+    /// fire inside the builder. Piece 4 step P4-5 reads it — the probe's snapshot re-sources both of
+    /// this buffer's `vb_cull_late` edges and appends a third — so the allow is gone.
     vb_late_visible: ResId,
     /// VG R3 piece 3 step P3-3: per-batch `n_defer` plus the reserved frame slot. The ONE new
     /// buffer in this piece whose first touch is a COMPUTE WRITE, which is what makes the P2-8
     /// provenance guard live on it — see
     /// [`the_dropped_late_count_write_now_trips_the_framegraph_guard`].
-    #[allow(dead_code)]
+    ///
+    /// Read by an assertion since VG R3 piece 4 step P4-5: it is the buffer whose POST-late
+    /// TRANSFER read derives NO barrier at all, the one row of the probe delta a count-only
+    /// expectation would have got wrong.
     vb_late_count: ResId,
     /// VG R3 piece 3 step P3-3: the cull's non-push inputs. ⚠️ The ONE resource this step adds that
     /// an UNSPLIT row also carries a barrier for: its `TRANSFER_WRITE → SHADER_READ` pair is
@@ -617,7 +699,7 @@ fn declare_hzb_poison_build_replica(
 /// | `scene.cluster_cull` (L1 froxel) | off | the owner default (`LightingConfig::clusters_enabled == false`); the armed boot is its own golden pin, not a G4 row |
 /// | `scene.csm` / `scene.atlas_punctual` | on | the shipping shadow vocabulary, constant across the matrix |
 /// | `scene.vb_indirect` / the R2c batch cull | on | armed on the shipping VB pins; the `vb_indirect` upload→cull→raster chain is exactly what P2-5's `vb_indirect_late` mirrors, so the baseline must contain it |
-/// | `scene.vb_cull_readback` | off | a probe; an unarmed boot declares no pass at all |
+/// | `scene.vb_cull_readback` | off on the eight PINNED rows | ⚠️ NO LONGER A FIXED BASE: VG R3 piece 4 step P4-5 made it the `VbRow::probe` COLUMN, because the gates that decide the split run with it ARMED. The eight pinned rows still hold it off, so their measured arrays are untouched |
 /// | `vb_use_classified` | off (FUSED `vb_resolve`) | the classify chain is orthogonal to every resource the occlusion split touches, and the split arm (U4) displaces it anyway |
 /// | `scene.taa` | off | TAA arms a second `gViewT` producer schedule that G4 does not vary |
 /// | DDGI (`path_vb_ddgi`) | off | GI-off is the byte-identity discipline the tree already pins |
@@ -909,11 +991,44 @@ fn declare_vb_frame(row: VbRow) -> VbFrame {
         }
     }
 
-    // `vb_cull_readback` — the probe, held OFF across the matrix. VG R3 piece 3 step P3-3 gives it
-    // two more regions on a split frame (`vb_late_visible` + `vb_late_count`, the PRE-late
-    // snapshot) and adds a `vb_cull_readback_late` pass after the late scope; neither is modelled
-    // here, for the same reason none of the probe is: with it unarmed the declarator adds no pass
-    // at all, and the PROBE-ON row set is a second, smaller matrix this step does not author.
+    // `vb_cull_readback` — the PRE-late snapshot (rung R2c-tail + VG R3 piece 3 step P3-3),
+    // MODELLED since VG R3 piece 4 step P4-5. Held OFF on all eight pinned rows; only `P1`/`P3`
+    // arm it.
+    //
+    // Its production gate is `batch_cull_armed && scene.vb_cull_readback.is_some()`, and
+    // `batch_cull_armed` is a fixed base of this matrix (see the table above), so `row.probe` alone
+    // is that predicate here. Its POSITION — between `vb_batch_cull` and `vb_raster` — is the whole
+    // of its cost: four of its six reads sit between a COMPUTE write and a later reader, so they
+    // RE-SOURCE that reader's barrier from the write to this pass. The declarator says the same at
+    // its own site ("BOTH are also read LATER in the frame by `vb_raster` … this TRANSFER read
+    // RE-SOURCES their barriers").
+    //
+    // The last two are gated on the SPLIT as well as on the probe, exactly as production gates
+    // them: this pass sits before `vb_cull_late`, so what it observes is the CANDIDATE list as the
+    // early phase wrote it, the only point in the frame at which that multiset is observable.
+    if row.probe {
+        pass!("vb_cull_readback");
+        g.buffer_access(vb_cull_count, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        g.buffer_access(vb_cull_visible, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        g.buffer_access(vb_indirect, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        g.buffer_access(
+            vb_visible_instance,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT,
+        );
+        if row.split {
+            g.buffer_access(
+                vb_late_visible,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT,
+            );
+            g.buffer_access(
+                vb_late_count,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT,
+            );
+        }
+    }
 
     // `vb_raster` — the EARLY scope. On a split row `vb_raster_late` follows it below, past the
     // poison+build block; on an unsplit row it is the frame's only raster scope.
@@ -1119,6 +1234,36 @@ fn declare_vb_frame(row: VbRow) -> VbFrame {
             VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
             SubRange::DEPTH,
         );
+
+        // `vb_cull_readback_late` (VG R3 piece 3 step P3-3, plan D8) — the POST-late snapshot,
+        // MODELLED since VG R3 piece 4 step P4-5. Gated on `occlusion_split && probe`, which is
+        // why it lives inside this block while its pre-late sibling above carries its own gate.
+        //
+        // ⚠️ THE POSITION IS THE DECISION, and it is the reason the shipping chain is field-
+        // identical with and without the probe. Sited BETWEEN `vb_cull_late`'s COMPUTE write and
+        // `vb_raster_late`'s DRAW_INDIRECT fetch it would re-source that fetch, exactly as the
+        // pre-late pass re-sources four other readers; sited HERE the late raster only READS these
+        // three buffers, so the probe appends edges and moves none of the shipping ones. The
+        // declarator argues it in those words at its own site; this replica is where the claim is
+        // EXECUTED (`probe_on_appends_the_readback_reads_and_resources_four_readers`).
+        if row.probe {
+            pass!("vb_cull_readback_late");
+            g.buffer_access(
+                vb_late_visible,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT,
+            );
+            g.buffer_access(
+                vb_late_count,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT,
+            );
+            g.buffer_access(
+                vb_indirect_late,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT,
+            );
+        }
     }
 
     // The classify chain is skipped: `use_classified` is off across the matrix, and the R9b split
@@ -1357,6 +1502,8 @@ fn declare_vb_frame(row: VbRow) -> VbFrame {
         vb_instance_ring,
         vb_indirect,
         vb_visible_instance,
+        vb_cull_count,
+        vb_cull_visible,
         vb_indirect_late,
         vb_late_visible,
         vb_late_count,
@@ -5841,9 +5988,13 @@ fn the_dropped_late_count_write_now_trips_the_framegraph_guard() {
 /// Both legs matter: recompiling one graph catches a `compile` that accumulates, and rebuilding a
 /// second frame catches a `reset` that leaks (`res_shape`/`res_state_total` are a prefix sum, and
 /// the pyramid is the mipped resource that would index past the end if one survived).
+///
+/// The two PROBE-ON rows join the loop at VG R3 piece 4 step P4-5 rather than being left out of a
+/// test whose name says "every row": the delta they are asserted through is a comparison of two
+/// compiled streams, so "the stream a row compiles to is a function of the row" is a premise of it.
 #[test]
 fn every_row_is_reproducible_and_compile_is_idempotent() {
-    for row in [U1, U2, U3, U4, S1, S2, S3, S4] {
+    for row in [U1, U2, U3, U4, S1, S2, S3, S4, P1, P3] {
         let mut f = declare_vb_frame(row);
         let first: Vec<ImgBarrier> = f.g.img_barriers().to_vec();
         let first_buf: Vec<BufBarrier> = f.g.buf_barriers().to_vec();
@@ -6065,4 +6216,456 @@ fn declare_order_invariants_hold_in_the_replica() {
             ),
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// VG R3 piece 4 step P4-5 — the PROBE-ON delta
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// One derived buffer edge, spelled `src → dst` in the order a derivation reads it.
+///
+/// [`BufBarrier`]'s own field order interleaves the two halves (`res, src_stage, dst_stage,
+/// src_access, dst_access`), while a derivation is written as a pair of `(stage, access)`
+/// endpoints. An expectation that reads differently from the argument it was derived from is an
+/// expectation with a transposition waiting in it, so this constructor takes the endpoints paired.
+const fn edge(
+    res: ResId,
+    src_stage: u32,
+    src_access: u32,
+    dst_stage: u32,
+    dst_access: u32,
+) -> BufBarrier {
+    BufBarrier { res, src_stage, dst_stage, src_access, dst_access }
+}
+
+/// The MULTISET difference `a \ b`, in `a`'s order: every element of `a` for which no *unconsumed*
+/// equal element remains in `b`.
+///
+/// A multiset rather than a set, because two barriers with identical fields on the same resource
+/// are a real possibility in a derived stream and a set difference would let one silently cancel
+/// the other — reporting "no change" across an edit that deleted one of a pair.
+fn multiset_minus(a: &[BufBarrier], b: &[BufBarrier]) -> Vec<BufBarrier> {
+    let mut pool: Vec<BufBarrier> = b.to_vec();
+    let mut out: Vec<BufBarrier> = Vec::new();
+    for x in a {
+        match pool.iter().position(|y| y == x) {
+            // `swap_remove`: the pool is a bag, not a sequence — only membership counts.
+            Some(i) => {
+                pool.swap_remove(i);
+            }
+            None => out.push(*x),
+        }
+    }
+    out
+}
+
+/// Render a derived-barrier list for a failure report, field by field (see [`describe_buf`]).
+fn describe_buf_list(f: &VbFrame, bs: &[BufBarrier]) -> String {
+    if bs.is_empty() {
+        return "    (none)\n".to_string();
+    }
+    let mut s = String::new();
+    for (i, b) in bs.iter().enumerate() {
+        let _ = writeln!(s, "  [{i}]:");
+        s.push_str(&describe_buf(f, b));
+    }
+    s
+}
+
+/// The PROBE-ON delta, returned as `(added, removed)` in COMPILED-STREAM ORDER.
+///
+/// # DERIVED from the declarations and `framegraph/sync.rs`'s `transition`, never regenerated
+///
+/// [`dump_vb_split_barrier_streams`]'s doc states the discipline this obeys: *a baseline authored
+/// after the change certifies the new behaviour*, and this file's generators print streams as Rust
+/// source, so pasting one would make the replica agree with production BY CONSTRUCTION. Every row
+/// below is derived beside the declaration that produced it.
+///
+/// The probe declares NINE accesses across two passes, all of them `(TRANSFER, TRANSFER_READ)` on
+/// buffers, and every buffer it names is written earlier in the frame, so `transition` never takes
+/// a first-touch arm and `compile`'s P2-8 provenance guard is silent. `layout_change` is false
+/// throughout — `buffer_access` passes the UNDEFINED sentinel a buffer never leaves.
+///
+/// ## The SIX pre-late reads (`vb_cull_readback`, declared between `vb_batch_cull` and `vb_raster`)
+///
+/// Each of the six finds `flush_access != 0` — the pass immediately before wrote all six buffers —
+/// so each takes the RAW arm and sources `(flush_stages, flush_access)`. Five of those writes are
+/// `vb_batch_cull`'s own COMPUTE stores; `vb_cull_count`'s is the `RW` access, whose pending flush
+/// is `access & WRITE_ACCESS_MASK` = `SHADER_WRITE` alone. So all six are the SAME shape,
+/// `COMPUTE_SHADER(SHADER_WRITE) → TRANSFER(TRANSFER_READ)`, and they differ only in `res`.
+///
+/// ## The FOUR re-sourcings that pass causes, which are the delta's real content
+///
+/// A read CLEARS the pending flush and accumulates `(stage, access)` into the visible pair. So the
+/// next reader of each of those buffers no longer finds a flush: it finds `visible_stages ==
+/// TRANSFER`, its own stage is not covered, and it takes the WAR/visibility-extend arm —
+/// `(visible_stages, 0)`. Four readers sit downstream and move:
+///
+/// * `vb_indirect` at `vb_raster` — `COMPUTE(SHADER_WRITE) → DRAW_INDIRECT(INDIRECT_COMMAND_READ)`
+///   becomes `TRANSFER(0) → DRAW_INDIRECT(INDIRECT_COMMAND_READ)`;
+/// * `vb_visible_instance` at `vb_raster` — the same move to `TRANSFER(0) → VERTEX(SHADER_READ)`;
+/// * `vb_late_count` and `vb_late_visible` at `vb_cull_late` — to `TRANSFER(0) → COMPUTE(SHADER_READ)`.
+///
+/// The count is unchanged on all four; TWO FIELDS move. That is the class this file exists for:
+/// `src_access` going to `0` is an execution-only edge, and it is CORRECT here only because the
+/// availability was already discharged by the TRANSFER read that consumed the flush.
+///
+/// ## The FIFTH move, which is a WIDENING and is easy to miss
+///
+/// `vb_cull_late` READS `vb_late_visible` and then WRITES it (two declared calls, so the P2-8 guard
+/// can test the read half). That write takes the WAR arm on `visible_stages`, and `visible_stages`
+/// is accumulated MONOTONICALLY across reads — so with the snapshot's TRANSFER read in front of the
+/// pass's COMPUTE read, the self-WAR's `src_stage` is `TRANSFER | COMPUTE_SHADER` where PROBE-OFF
+/// it is `COMPUTE_SHADER` alone. One field, one bit, and it is sound in the conservative direction:
+/// the compaction's stores must indeed be ordered after the snapshot's copy.
+///
+/// ## The THREE post-late reads (`vb_cull_readback_late`, declared after `vb_raster_late`)
+///
+/// * `vb_late_visible` — last touched by `vb_raster_late`'s VERTEX read, so no flush is pending and
+///   TRANSFER is not among the visible stages ⇒ the visibility-extend arm ⇒
+///   `VERTEX_SHADER(0) → TRANSFER(TRANSFER_READ)`.
+/// * `vb_late_count` — **NO BARRIER**. The pre-late snapshot already made `(TRANSFER,
+///   TRANSFER_READ)` visible, `vb_cull_late` only READ it since, and a read does not re-arm a
+///   flush. So `need` is false on all four terms and the access is FREE. Nine declared accesses,
+///   EIGHT derived barriers: the one row of this derivation that a count-only expectation would
+///   have got wrong.
+/// * `vb_indirect_late` — last touched by the late raster's indirect fetch ⇒
+///   `DRAW_INDIRECT(0) → TRANSFER(TRANSFER_READ)`.
+///
+/// ## What does NOT move, and it is the half the plan predicted backwards
+///
+/// The shipping chain `vb_indirect_late_upload → vb_cull_late → vb_raster_late` is FIELD-IDENTICAL
+/// with and without the probe, because `vb_cull_readback_late` is declared AFTER the late raster
+/// rather than between the cull and the fetch. See the module doc's P4-5 section for the plan
+/// sentence this refutes and the declarator comment that predicted it.
+///
+/// `f` is either frame: `declare_vb_frame` declares every resource unconditionally and before any
+/// pass, so `ResId` numbering is independent of the row (asserted at the call site).
+fn probe_delta_expectation(f: &VbFrame) -> (Vec<BufBarrier>, Vec<BufBarrier>) {
+    let added = vec![
+        // ---- `vb_cull_readback`, six RAW flushes of the pass immediately before ----
+        edge(
+            f.vb_cull_count,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT,
+        ),
+        edge(
+            f.vb_cull_visible,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT,
+        ),
+        edge(
+            f.vb_indirect,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT,
+        ),
+        edge(
+            f.vb_visible_instance,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT,
+        ),
+        edge(
+            f.vb_late_visible,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT,
+        ),
+        edge(
+            f.vb_late_count,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT,
+        ),
+        // ---- `vb_raster`, its two readers re-sourced onto the snapshot ----
+        edge(
+            f.vb_indirect,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0,
+            VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+            VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+        ),
+        edge(
+            f.vb_visible_instance,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0,
+            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+        ),
+        // ---- `vb_cull_late`, its two reads re-sourced and its self-WAR widened ----
+        // `vb_late_count` precedes `vb_late_visible` here, in the declarator's own access order.
+        edge(
+            f.vb_late_count,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+        ),
+        edge(
+            f.vb_late_visible,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+        ),
+        edge(
+            f.vb_late_visible,
+            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+        ),
+        // ---- `vb_cull_readback_late`, two visibility extensions and one FREE access ----
+        edge(
+            f.vb_late_visible,
+            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+            0,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT,
+        ),
+        edge(
+            f.vb_indirect_late,
+            VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+            0,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT,
+        ),
+    ];
+
+    // The PROBE-OFF shapes the five moves above replace, in PROBE-OFF stream order. Each is a
+    // barrier the twin row's whole-stream pin asserts by index, so this list is also the statement
+    // of WHICH pinned elements the probe perturbs — the rest are untouched.
+    let removed = vec![
+        edge(
+            f.vb_indirect,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+            VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+        ),
+        edge(
+            f.vb_visible_instance,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+        ),
+        edge(
+            f.vb_late_count,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+        ),
+        edge(
+            f.vb_late_visible,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+        ),
+        edge(
+            f.vb_late_visible,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+        ),
+    ];
+
+    (added, removed)
+}
+
+/// **VG R3 piece 4 step P4-5, disposition (c3)** — the PROBE-ON rows, asserted as a DELTA against
+/// their PROBE-OFF twins.
+///
+/// # The debt this pays
+///
+/// G-P3-B/C — the gates that decide whether the occlusion split culls anything — run with
+/// `BOYKO_VB_CULL_READBACK` armed, and their verdict is read out of buffers this probe copies. A
+/// defect in the probe's barrier stream therefore makes a GATE lie: it reads stale bytes and
+/// reports them as the GPU's answer. Every pinned row above holds the probe OFF, so until this step
+/// that stream was modelled by nothing at all.
+///
+/// # What is asserted, and why a delta rather than two more field-by-field rows
+///
+/// The twin already carries the whole-stream pin, so re-pinning ~40 barriers to state 18 would put
+/// the interesting ones inside two arrays nobody diffs. Asserted here:
+///
+/// 1. the IMAGE stream is byte-identical — the probe declares no image access, so anything moving
+///    there means the probe branch touched a resource it has no business touching;
+/// 2. the pass list gains EXACTLY `vb_cull_readback` immediately before `vb_raster` and
+///    `vb_cull_readback_late` immediately after `vb_raster_late` — both positions are correctness,
+///    not layout (the second one is the whole reason the shipping chain does not move);
+/// 3. the BUFFER multiset difference, both directions, against [`probe_delta_expectation`];
+/// 4. the shipping `vb_indirect_late` chain's first two links are FIELD-identical to the twin's,
+///    with the snapshot appended as a third — the executable form of the declarator's own claim;
+/// 5. the delta is the SAME on both rows, which is the derivation's own prediction (the probe
+///    declares only buffer accesses; `S1` and `S3` differ only in image accesses).
+///
+/// [`assert_row_is_pinned`] is deliberately NOT called on `P1`/`P3`: its split branch asserts
+/// `vb_indirect_late` routes exactly TWO barriers, and clause 4 above is precisely the statement
+/// that a probe row routes THREE.
+///
+/// # The RED control
+///
+/// Delete the `vb_late_visible` `TRANSFER_READ` from `declare_vb_frame`'s `vb_cull_readback` branch
+/// — one access — and this test reds in three places at once: the added list loses the pre-late
+/// snapshot's flush, the `vb_late_visible`/self-WAR re-sourcings revert to their PROBE-OFF shapes
+/// so the removed list empties by two, and the twin comparison in clause 5 still agrees (both rows
+/// break identically), which is what makes clause 5 a claim about the derivation rather than a
+/// self-check.
+///
+/// # What this CANNOT claim
+///
+/// Nothing about `declare_vb_graph`, for the reason stated in the module doc: this is a hand-written
+/// REPLICA, and this campaign has MEASURED that a replica cannot see a missing barrier in the real
+/// recorder (P2-0: a genuine deletion left the golden byte-identical and the validation baseline
+/// unchanged at 19 messages). It covers one class — a future edit that changes the probe branch's
+/// DECLARED accesses, or their position, without noticing what it does to four other readers.
+#[test]
+fn probe_on_appends_the_readback_reads_and_resources_four_readers() {
+    let mut deltas: Vec<(VbRow, Vec<BufBarrier>, Vec<BufBarrier>)> = Vec::new();
+
+    for (off_row, on_row) in [(S1, P1), (S3, P3)] {
+        let f_off = declare_vb_frame(off_row);
+        let f_on = declare_vb_frame(on_row);
+
+        // The two frames must NUMBER their resources identically, or comparing their streams
+        // element-wise compares different buffers. True by construction — every `add_image` /
+        // `add_buffer` in `declare_vb_frame` runs unconditionally, before any pass — and checked
+        // here so the construction cannot quietly stop holding.
+        assert_eq!(
+            (
+                f_off.vb_indirect,
+                f_off.vb_visible_instance,
+                f_off.vb_cull_count,
+                f_off.vb_cull_visible,
+                f_off.vb_late_visible,
+                f_off.vb_late_count,
+                f_off.vb_indirect_late,
+            ),
+            (
+                f_on.vb_indirect,
+                f_on.vb_visible_instance,
+                f_on.vb_cull_count,
+                f_on.vb_cull_visible,
+                f_on.vb_late_visible,
+                f_on.vb_late_count,
+                f_on.vb_indirect_late,
+            ),
+            "{} vs {}: the probe declares no RESOURCE, so the two rows must number them identically",
+            off_row.id,
+            on_row.id
+        );
+
+        // (1) The probe declares no IMAGE access, so not one image barrier may move — including the
+        // ten-level pyramid chain and the depth round trip `P3` carries.
+        assert_eq!(
+            f_on.g.img_barriers(),
+            f_off.g.img_barriers(),
+            "{}: the readback probe moved an IMAGE barrier. It declares only buffer accesses, so \
+             either the probe branch names an image or an image access was re-ordered behind it",
+            on_row.id
+        );
+
+        // (2) The two passes and their POSITIONS, derived from the two declaration sites rather
+        // than from the compiled result.
+        let mut want_names = f_off.pass_names.clone();
+        let raster = want_names
+            .iter()
+            .position(|n| *n == "vb_raster")
+            .expect("invariant: every row declares the early raster");
+        want_names.insert(raster, "vb_cull_readback");
+        let raster_late = want_names
+            .iter()
+            .position(|n| *n == "vb_raster_late")
+            .expect("invariant: a split row declares the late raster");
+        want_names.insert(raster_late + 1, "vb_cull_readback_late");
+        assert_eq!(
+            f_on.pass_names, want_names,
+            "{}: the probe must add EXACTLY `vb_cull_readback` immediately before `vb_raster` and \
+             `vb_cull_readback_late` immediately after `vb_raster_late`. Both positions are \
+             correctness: the first sits between the cull's stores and their readers, which is what \
+             re-sources four barriers; the second sits AFTER the late raster, which is the only \
+             reason the shipping `vb_indirect_late` chain does not move",
+            on_row.id
+        );
+
+        // (3) The buffer delta, both directions, against the derivation.
+        let (want_added, want_removed) = probe_delta_expectation(&f_on);
+        let added = multiset_minus(f_on.g.buf_barriers(), f_off.g.buf_barriers());
+        let removed = multiset_minus(f_off.g.buf_barriers(), f_on.g.buf_barriers());
+        assert_eq!(
+            added,
+            want_added,
+            "{}: the barriers the probe ADDS diverged from the derivation.\nDERIVED:\n{}\nCOMPILED:\n{}\n\
+             Every entry is argued at `probe_delta_expectation`; a divergence is a real finding \
+             about the declaration, not a baseline to re-measure.",
+            on_row.id,
+            describe_buf_list(&f_on, &want_added),
+            describe_buf_list(&f_on, &added)
+        );
+        assert_eq!(
+            removed,
+            want_removed,
+            "{}: the PROBE-OFF barriers the probe REPLACES diverged from the derivation.\n\
+             DERIVED:\n{}\nCOMPILED:\n{}\n\
+             An EMPTY list here would mean the probe perturbs nothing that was pinned, which \
+             contradicts its position between the cull's stores and their readers.",
+            on_row.id,
+            describe_buf_list(&f_off, &want_removed),
+            describe_buf_list(&f_off, &removed)
+        );
+
+        // (4) The shipping chain, field-identical, with the snapshot appended as a THIRD link.
+        let chain_off = buf_on(f_off.g.buf_barriers(), f_off.vb_indirect_late);
+        let chain_on = buf_on(f_on.g.buf_barriers(), f_on.vb_indirect_late);
+        assert_eq!(
+            (chain_off.len(), chain_on.len()),
+            (2, 3),
+            "{}: `vb_indirect_late` must route TWO barriers PROBE-OFF (the upload→cull WAW and the \
+             cull→fetch RAW) and THREE PROBE-ON (plus the post-late snapshot's TRANSFER read). This \
+             is why `assert_row_is_pinned`, whose split branch demands exactly two, is not called \
+             on a probe row",
+            on_row.id
+        );
+        assert_eq!(
+            (*chain_on[0], *chain_on[1]),
+            (*chain_off[0], *chain_off[1]),
+            "{}: the SHIPPING chain `vb_indirect_late_upload → vb_cull_late → vb_raster_late` must \
+             be FIELD-IDENTICAL with and without the probe. `graph_bridge.rs` argues exactly this \
+             where it declares `vb_cull_readback_late` AFTER the late raster — sited between the \
+             cull's write and the fetch it WOULD re-source the fetch. A divergence here means that \
+             siting changed, and with it what the four `S*` pins certify",
+            on_row.id
+        );
+
+        deltas.push((on_row, added, removed));
+    }
+
+    // (5) The delta is ROW-INDEPENDENT, which is the derivation's own prediction rather than an
+    // observation: the probe declares only buffer accesses, and `S1`/`S3` differ only in image
+    // accesses (the pyramid chain, the poison, the two depth copies). If this reds while (3) passes
+    // on both rows, one of the probe's accesses has acquired an HZB-dependent gate.
+    let [(row_a, added_a, removed_a), (row_b, added_b, removed_b)] = &deltas[..] else {
+        panic!("invariant: the loop above pushes exactly two deltas");
+    };
+    assert_eq!(
+        (added_a, removed_a),
+        (added_b, removed_b),
+        "{} and {} must derive the SAME buffer delta — the probe declares no image access, and \
+         those two rows differ only in image accesses",
+        row_a.id,
+        row_b.id
+    );
 }
