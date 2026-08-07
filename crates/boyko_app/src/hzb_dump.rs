@@ -1,7 +1,8 @@
 //! **VG R3 piece 1 step P1-6 — the armed HZB pyramid dump** (`BOYKO_HZB_DUMP=<path.bin>`).
 //!
-//! The host half of the recording seam plan §5 specifies for gate G8: it arms ONE frame's copy of
-//! the engine's own `vb_depth` and every mip of the engine's own pyramid into a host-visible
+//! The host half of the recording seam plan §5 specifies for gate G8: it arms ONE frame's copies of
+//! the engine's own `vb_depth` — both the EARLY-scope and the frame-end state of it since VG R3
+//! piece 3 step P3-7 — and every mip of the engine's own pyramid into a host-visible
 //! staging, waits for that frame's fence, and writes the raw bytes to the named path. Entirely
 //! COLD — the steady loop pays one `Option` check per frame, and without the variable nothing is
 //! created and **no extra command is recorded**, which is what keeps every golden pin
@@ -33,7 +34,7 @@ use boyko_rhi::{BufferDesc, BufferUsage, MemoryLocation, RhiDevice};
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::ffi::VkExtent2D;
 use boyko_rhi_vulkan::memory::BoundBuffer;
-use boyko_rhi_vulkan::present::{HzbDumpLayout, HzbPlan};
+use boyko_rhi_vulkan::present::{HZB_DUMP_WORD_FRAME_INDEX, HzbDumpLayout, HzbPlan};
 
 /// Presented frames rendered before the dump is requested — the same settle window the frame dump
 /// and the density census use, and for the same reasons (propagation, light reconcile, the
@@ -193,6 +194,13 @@ impl HzbDump {
     /// (whose readback is 66 MB at the top rung and is streamed and hashed), this payload IS the
     /// evidence — P1-8 rebuilds from the depth half and compares against the pyramid half, so a
     /// digest would be a gate that can only ever say "different".
+    ///
+    /// ⚠️ **VERBATIM includes the header, and that is why this half writes no word of it.** Since
+    /// VG R3 piece 3 step P3-7 the header carries a `frame_index`, and it is stamped by the
+    /// RECORDER inside the copy frame's own command buffer. This function runs `DRAIN_FRAMES`
+    /// presented frames later; a number written here would be the frame the HOST believes it
+    /// captured, which is exactly the claim the pairing check must not be allowed to assume. The
+    /// index below is READ BACK OUT of the file for the log line, never authored.
     pub(crate) fn finish(mut self, ctx: &VulkanContext) {
         let staging = self.staging.take().expect("invariant: finish follows a drained request");
         let layout = self.layout.expect("invariant: a staging implies the layout it was sized to");
@@ -206,6 +214,11 @@ impl HzbDump {
         // exceeds FRAMES_IN_FLIGHT), so the GPU's transfer writes are complete and no submission
         // still writes the buffer; the slice does not outlive the `destroy_buffer` below.
         let bytes = unsafe { core::slice::from_raw_parts(mapped.as_ptr(), byte_len) };
+        // The RECORDER's stamp, read back for the log line alone (see this fn's doc). The index is
+        // in bounds because `total_bytes` starts with the whole fixed-size header.
+        let o = HZB_DUMP_WORD_FRAME_INDEX * 4;
+        let stamped_frame =
+            u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
         let write_result = write_dump(&self.path, bytes);
 
         // SAFETY: created on `ctx` in `request`; the only submission referencing it completed (the
@@ -218,7 +231,8 @@ impl HzbDump {
         let [sw, sh] = layout.source();
         match write_result {
             Ok(()) => eprintln!(
-                "boyko_app: HZB dump written -> {} ({sw}x{sh}, levels={}, {byte_len} B)",
+                "boyko_app: HZB dump written -> {} ({sw}x{sh}, levels={}, {byte_len} B, \
+                 engine frame {stamped_frame} per the recorder's own stamp)",
                 self.path,
                 layout.plan().levels
             ),

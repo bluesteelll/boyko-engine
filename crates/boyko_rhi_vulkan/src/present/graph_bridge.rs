@@ -2830,6 +2830,28 @@ pub(crate) struct VbPassPlan {
     /// build's stores. Declared LAST in the whole graph, so it observes the FINISHED pyramid.
     /// Unarmed on every golden/interactive boot ⇒ no pass, no barrier, no command.
     pub(crate) hzb_dump: Option<crate::framegraph::PassId>,
+    /// VG R3 piece 3 step P3-7 (plan D10, gate G-P3-E): the EARLY-DEPTH dump copy — one
+    /// `TRANSFER_READ` of `vb_depth` at `TRANSFER_SRC_OPTIMAL` (DEPTH aspect), declared between the
+    /// last [`Self::hzb_build`] pass and [`Self::vb_cull_late`].
+    ///
+    /// `Some` iff the frame arms the occlusion split AND `scene.hzb_dump` is armed — the ONLY
+    /// configuration in which the two depths can differ, and the only one in which the question is
+    /// asked. `path_vb_occlusion_split()` already carries `mesh_leg` and `hzb.is_some()`, so this
+    /// pass's presence implies [`Self::hzb_dump`]'s (asserted below, not assumed).
+    ///
+    /// # Why the copy is a SECOND pass and the end-of-frame one did not simply move
+    ///
+    /// Moving it would give ONE depth and therefore only a one-sided claim: "the pyramid agrees
+    /// with a rebuild from this depth". Dumping BOTH lets the gate also state the negative — where
+    /// the two depths differ, a rebuild from the FINAL one disagrees with the pyramid — which is
+    /// what turns G5 from "the build is correct" into "the build ran at the right point in the
+    /// frame". Piece 2's own `hzb_dump` comment records that it could not make that claim.
+    ///
+    /// The declared position is the whole of its correctness: after the builds, the depth is still
+    /// exactly what they reduced; before `vb_raster_late`, nothing has drawn into it again. The
+    /// graph derives the round trip out of `hzb_build_0`'s `SHADER_READ_ONLY_OPTIMAL` and back into
+    /// `vb_raster_late`'s `DEPTH_ATTACHMENT_OPTIMAL` — both preserving, neither a first touch.
+    pub(crate) hzb_dump_depth_early: Option<crate::framegraph::PassId>,
     /// VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2b (gate widened at
     /// rung P2c): the `fill` pass (two `vkCmdFillBuffer`s — zeros `counts[MAX]`, sentinels
     /// `group_to_mat[G+MAX]` with `0xFFFFFFFF`, critic P1-1) declared as the FIRST producer on
@@ -3936,6 +3958,10 @@ impl Renderer<'_> {
         // than a special case, exactly as for the two bindings above.
         let mut vb_cull_late: Option<crate::framegraph::PassId> = None;
         let mut vb_cull_readback_late: Option<crate::framegraph::PassId> = None;
+        // VG R3 piece 3 step P3-7 (plan D10): the early-depth dump copy, for the same reason — its
+        // slot is between the poison+build block's ARMED position and `vb_cull_late`, both of which
+        // live inside the `if mesh_leg` block below.
+        let mut hzb_dump_depth_early: Option<crate::framegraph::PassId> = None;
         let (
             vb_classify_fill,
             vb_classify_count,
@@ -4284,6 +4310,43 @@ impl Renderer<'_> {
                 hzb_poison = poison;
                 hzb_build = build;
             }
+
+            // ==== VG R3 piece 3 step P3-7 (plan D10, gate G-P3-E): the EARLY-DEPTH dump copy. ====
+            //
+            // ONE access — `vb_depth` at `(TRANSFER, TRANSFER_READ, TRANSFER_SRC_OPTIMAL, DEPTH)`,
+            // the SAME shape the end-of-frame `hzb_dump` pass declares on the same image. The
+            // pyramid is NOT read here: this pass exists to capture the depth the builds above just
+            // reduced, and the pyramid's own copy stays where it was, at frame end, where it
+            // observes the FINISHED image.
+            //
+            // THE POSITION IS THE CLAIM. Declared after the last `hzb_build_*`, so what it copies is
+            // exactly what they read; declared before `vb_raster_late`, so nothing has drawn into
+            // the depth again. Both neighbours are asserted below rather than left to this
+            // function's layout — the discipline `hzb_dump`'s own two order asserts follow.
+            //
+            // The derived edges are a round trip on `vb_depth`:
+            // `hzb_build_0`'s `SHADER_READ_ONLY_OPTIMAL` → `TRANSFER_SRC_OPTIMAL` (here) →
+            // `vb_raster_late`'s `DEPTH_ATTACHMENT_OPTIMAL`. Both transitions are CONTENT-PRESERVING
+            // and neither may become a first touch: `vb_raster` wrote this image earlier in the same
+            // frame, and a first touch on the return leg would license discarding it.
+            //
+            // ⚠️ The gate is `occlusion_split && hzb_dump_armed` and nothing else.
+            // `path_vb_occlusion_split()` already carries `mesh_leg` and `hzb.is_some()`, so a frame
+            // that declares this pass always declares `hzb_dump` too (asserted below) — which is
+            // what makes "the early region is live" a bit the frame-end header can honestly stamp.
+            // On an unsplit dump frame the two depths are the same bytes by construction (one
+            // raster scope), so a second copy would cost a barrier and prove nothing.
+            hzb_dump_depth_early = (occlusion_split && hzb_dump_armed).then(|| {
+                let p = g.add_pass("hzb_dump_depth_early");
+                g.image_access(
+                    vb_depth,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_ACCESS_TRANSFER_READ_BIT,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    SubRange::DEPTH,
+                );
+                p
+            });
 
             // ==== VG R3 piece 3 step P3-3 (plan D4/D5/D8): the LATE cull pass. ====
             //
@@ -5505,6 +5568,42 @@ impl Renderer<'_> {
             "invariant: the HZB poison and dump passes are armed by ONE predicate"
         );
 
+        // ==== VG R3 piece 3 step P3-7 (plan D10): the early-depth copy's own four asserts. ====
+        //
+        // Its whole claim is POSITIONAL — "these are the bytes the pyramid was built from" — so the
+        // relations that make it true are checked here rather than left to the block order above,
+        // exactly as the poison's and the dump's are.
+        debug_assert_eq!(
+            hzb_dump_depth_early.is_some(),
+            occlusion_split && hzb_dump_armed,
+            "invariant: the early-depth copy is declared on EXACTLY (occlusion_split && dump armed) \
+             — the same conjunction `record_vb` records it under, so a declared-but-unrecorded pass \
+             (or the reverse) cannot happen"
+        );
+        debug_assert!(
+            hzb_dump_depth_early
+                .is_none_or(|d| hzb_build.iter().flatten().all(|b| b.index() < d.index())),
+            "invariant: the early-depth copy is declared after every hzb_build pass — declared \
+             before them it would copy a depth the builds had not yet read, and the two-sided claim \
+             would compare the pyramid against bytes nothing reduced"
+        );
+        debug_assert!(
+            hzb_dump_depth_early
+                .is_none_or(|d| vb_raster_late.is_some_and(|l| d.index() < l.index())),
+            "invariant: the early-depth copy is declared before the late raster scope — after it, \
+             it would copy the FINAL depth into the EARLY region and both of G-P3-E's clauses would \
+             be statements about the same bytes"
+        );
+        // A frame with an early region always has a final one to put beside it: `hzb_dump`'s gate is
+        // `(hzb && mesh_leg) && dump_armed` and `path_vb_occlusion_split()` implies both of the
+        // first two conjuncts since step P3-6. Stated as an assert because the header's `flags` bit
+        // is written by the FRAME-END block, so an early copy with no frame-end block would leave
+        // the region live and the bit unset — a live payload the reader is told to ignore.
+        debug_assert!(
+            hzb_dump_depth_early.is_none() || hzb_dump.is_some(),
+            "invariant: an early-depth copy implies the frame-end dump that stamps its flag"
+        );
+
         // ==== VG R3 piece 2 step P2-5 (plan, gate G4): the declare-side half of the split's
         // declare/record parity, and the ORDER the derived barriers depend on. ====
         //
@@ -5598,6 +5697,7 @@ impl Renderer<'_> {
             hzb_build,
             hzb_poison,
             hzb_dump,
+            hzb_dump_depth_early,
             vb_raster,
             vb_raster_late,
             vb_classify_fill,

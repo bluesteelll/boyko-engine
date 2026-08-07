@@ -34,7 +34,8 @@ use super::super::frame_driver::Renderer;
 use super::super::gpu_timing::VbTimedPass;
 use super::super::scene_types::{
     CLUSTER_CULL_HIER_PUSH_BYTES, CLUSTER_CULL_PUSH_BYTES, GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
-    GBufferMeshDraw, GBufferScene, HZB_DUMP_HEADER_BYTES, HZB_PYRAMID_POISON, HzbDumpLayout,
+    GBufferMeshDraw, GBufferScene, HZB_DUMP_FLAG_DEPTH_EARLY, HZB_DUMP_HEADER_BYTES,
+    HZB_PYRAMID_POISON, HzbDumpLayout,
     LIGHT_CULL_LOCAL_SIZE_X, MAX_HZB_LEVELS, VB_BATCH_CULL_LOCAL_SIZE_X, VB_BATCH_CULL_PUSH_BYTES,
     VB_BATCH_DESC_STRIDE, VB_CULL_OCC_ARMED, VB_CULL_OCC_FORCE_KEEP, VB_CULL_OCC_FORCE_LATE,
     VB_CULL_PHASE_EARLY, VB_CULL_PHASE_LATE, VB_CULL_UNIFORM_BYTES, VbBatchCullPush, VbBatchDesc,
@@ -664,6 +665,17 @@ impl Renderer<'_> {
             "invariant: declare/record parity — the late indirect upload is declared on EXACTLY \
              the predicate that records it"
         );
+
+        // VG R3 piece 3 step P3-7 (plan D10): set at the EARLY-DEPTH copy itself, read by the
+        // frame-end dump block that stamps `HZB_DUMP_FLAG_DEPTH_EARLY` into the header.
+        //
+        // A latch rather than a second reading of the predicate, and this is the same distinction
+        // gate G2's `scopes` counter draws: the bit tells the host reader that a region of the file
+        // holds engine data instead of the `0xFF`/NaN prefill, and the only honest source for that
+        // claim is the site that issued the copy. Every route by which the copy is skipped (an
+        // unsplit frame, an unarmed probe, a staging shorter than the layout) leaves it false
+        // without a further conjunct having to be remembered here.
+        let mut hzb_dump_early_copied = false;
 
         let vertex_offset: VkDeviceSize = 0;
 
@@ -2020,6 +2032,109 @@ impl Renderer<'_> {
             // before the late scope rather than after it.
             if occlusion_split {
                 self.record_hzb_poison_build(plan, cmd, targets, forward, vb, scene, present_extent, fi);
+            }
+
+            // === VG R3 piece 3 step P3-7 (plan D10, gate G-P3-E): the EARLY-DEPTH dump copy. ===
+            //
+            // The depth AS OF THE EARLY SCOPE — the bytes the `hzb_build_*` dispatches directly
+            // above have just reduced, before `vb_raster_late` draws into the same image. The
+            // frame-end `hzb_dump` block copies the SAME image again after that scope, into the
+            // FINAL region, and the pair is what lets gate G-P3-E state the ordering: the pyramid
+            // agrees with a rebuild from THIS copy, and — wherever the two differ — disagrees with a
+            // rebuild from the other. Piece 2's `hzb_dump` comment records that one depth could not
+            // say that.
+            //
+            // ⚠️ THE GATE IS THE DECLARATOR'S, VERBATIM (`occlusion_split && scene.hzb_dump`).
+            // `path_vb_occlusion_split()` already carries `mesh_leg` and `hzb.is_some()`, so
+            // `targets.hzb` is `.expect()`ed under it rather than made a further conjunct — the
+            // single-predicate discipline both dump blocks follow.
+            //
+            // An UNSPLIT frame records ZERO commands here, and so does every frame without the
+            // probe: no barrier, no copy, no allocation ⇒ every golden pin byte-identical.
+            if occlusion_split
+                && let Some(staging) = scene.hzb_dump
+            {
+                let hzb = targets.hzb.as_ref().expect(
+                    "invariant: path_vb_occlusion_split ⇒ scene.hzb ⇒ targets.hzb (P3-6's conjunct)",
+                );
+                // The SAME two inputs the frame-end block computes its layout from — the bundle's
+                // OWN plan and the COMPOSITE extent — so the two copies address one layout and the
+                // early region cannot land where the pyramid region starts.
+                let layout =
+                    HzbDumpLayout::new(hzb.plan, [present_extent.width, present_extent.height]);
+
+                let early_pass = plan.hzb_dump_depth_early.expect(
+                    "invariant: the recorder's early-depth gate is the declarator's, verbatim",
+                );
+                // ⚠️ THE BARRIERS ARE NOT OPTIONAL, and this is where this block differs from the
+                // frame-end one. That block may record NOTHING on a short staging because it is
+                // declared LAST — no later pass consumes the layout it would have produced. THIS
+                // pass has two successors that do: the graph derived `vb_raster_late`'s
+                // `TRANSFER_SRC_OPTIMAL → DEPTH_ATTACHMENT_OPTIMAL` transition from the state this
+                // pass leaves `vb_depth` in, so skipping the transition here would leave that
+                // barrier naming an `oldLayout` the image is not in. The COPY is what the size bound
+                // below may skip; the pass's derived barriers are recorded either way.
+                //
+                // SAFETY: recording is open and no render scope is active (the early scope's
+                // `cmd_end_rendering` is above and the late scope's `cmd_begin_rendering` is below);
+                // `record_vb_pass` records this pass's derived barrier into `cmd` — the `vb_depth`
+                // `SHADER_READ_ONLY_OPTIMAL → TRANSFER_SRC_OPTIMAL` transition out of
+                // `hzb_build_0`'s read, which is what makes the copy below legal.
+                self.record_vb_pass(early_pass, cmd, targets, forward, vb, scene, fi);
+
+                // The same RELEASE-LIVE bound the frame-end block carries, for the same reason: the
+                // staging was sized by the host from `GBufferScene::hzb` while these offsets come
+                // from `HzbTargets::plan`, and being wrong means a transfer past the end of a
+                // host-visible allocation — undefined, and invisible to the validation layers, which
+                // do not follow buffer contents. A short staging copies NOTHING, the flag below
+                // stays clear, and the region keeps the host's `0xFF`/NaN prefill, which the gate
+                // reads as "the copy never ran" by name.
+                debug_assert!(
+                    staging.size >= layout.total_bytes(),
+                    "invariant: the HZB dump staging is sized by HzbDumpLayout::total_bytes"
+                );
+                if staging.size >= layout.total_bytes() {
+                    let early_region = VkBufferImageCopy {
+                        buffer_offset: layout.depth_early_offset(),
+                        buffer_row_length: 0,
+                        buffer_image_height: 0,
+                        image_subresource: VkImageSubresourceLayers {
+                            aspect_mask: VK_IMAGE_ASPECT_DEPTH_BIT,
+                            mip_level: 0,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        },
+                        image_offset: VkOffset3D { x: 0, y: 0, z: 0 },
+                        image_extent: VkExtent3D {
+                            width: present_extent.width,
+                            height: present_extent.height,
+                            depth: 1,
+                        },
+                    };
+                    // SAFETY: recording is open; `forward.depth[fi]` is TRANSFER_SRC_OPTIMAL per the
+                    // pass's derived barrier just recorded and was created with `TRANSFER_SRC` usage
+                    // (`ForwardTargets::build`'s `depth_desc`); one full-image tightly-packed DEPTH
+                    // region copies into `[depth_early_offset, +depth_bytes)` of the staging, a
+                    // region `total_bytes` covers and the branch condition bounds, disjoint from the
+                    // final-depth and pyramid regions by `HzbDumpLayout`'s own offsets;
+                    // `&early_region` outlives the call.
+                    unsafe {
+                        (self.fns.cmd_copy_image_to_buffer)(
+                            cmd,
+                            forward.depth[fi].image,
+                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                            staging.buffer,
+                            1,
+                            &early_region,
+                        );
+                    }
+                    // RECORDED, not assumed. The header's `flags` bit is stamped from this local at
+                    // the frame-end block, so it says "a copy was issued into that region" rather
+                    // than "a predicate that should imply one was true" — the difference between a
+                    // flag and a re-derivation, and the reason a short staging (which skips the copy
+                    // above) cannot leave the reader trusting NaN as depth.
+                    hzb_dump_early_copied = true;
+                }
             }
 
             // === VG R3 piece 3 step P3-3 (plan D4/D5): the LATE cull dispatch. ===
@@ -4006,11 +4121,18 @@ impl Renderer<'_> {
 
         // === VG R3 piece 1 step P1-6 (plan §5, gate G8): the ARMED pyramid dump. ===
         //
-        // Copies the ENGINE'S OWN depth (mip 0, DEPTH aspect — the source the pyramid reduced)
-        // and EVERY mip of the ENGINE'S OWN pyramid into one host-visible buffer, laid out so
-        // P1-8's host half can address level `k` by a flat offset. G3 builds its own everything
-        // and therefore cannot see a wrong source, a wrong extent, a stale descriptor, a missing
-        // barrier or a pass that never ran; this is the readback that can.
+        // Copies the ENGINE'S OWN depth (mip 0, DEPTH aspect) and EVERY mip of the ENGINE'S OWN
+        // pyramid into one host-visible buffer, laid out so P1-8's host half can address level `k`
+        // by a flat offset. G3 builds its own everything and therefore cannot see a wrong source, a
+        // wrong extent, a stale descriptor, a missing barrier or a pass that never ran; this is the
+        // readback that can.
+        //
+        // ⚠️ VG R3 piece 3 step P3-7 (plan D10): the depth this block copies is the FINAL one —
+        // this image as the frame leaves it. It stopped being "the source the pyramid reduced" the
+        // moment the late scope could draw: on a split frame the pyramid reduced the depth as of the
+        // EARLY scope, which the `hzb_dump_depth_early` block copies between the two scopes into its
+        // own region. This block also writes the HEADER, and therefore stamps the flag saying
+        // whether that region is live and the engine frame index the whole capture came from.
         //
         // ⚠️ THE GATE IS THE DECLARATOR'S, VERBATIM (`scene.hzb_dump` + `scene.hzb` + `mesh_leg`),
         // and `targets.hzb`/`plan.hzb_dump` are `.expect()`ed under it rather than made further
@@ -4084,12 +4206,27 @@ impl Renderer<'_> {
                 // numbers the copies below actually used, and G8 exists to catch a WRONG extent —
                 // a host that re-derived the extent it expected and decoded with that could not
                 // see one.
-                let header = layout.header_words();
+                //
+                // ⚠️ VG R3 piece 3 step P3-7 (plan D10 / B2): `frame_index` is stamped HERE, inside
+                // this frame's command buffer, from the engine frame index the scene carries. The
+                // host CANNOT stamp it — `HzbDump::finish` runs three presented frames later and
+                // writes the mapped bytes verbatim, so a host stamp would record the frame the host
+                // believes it copied rather than the frame whose command buffer carried the copies.
+                // That distinction is the entire content of the pairing check: `probe.frame ==
+                // dump_header.frame_index` says the two captures describe ONE frame only if both
+                // numbers were taken by the work that ran.
+                //
+                // `flags` comes from the LATCH the early-depth block sets at its copy, never from
+                // `occlusion_split` re-read here — see that local's declaration.
+                let header = layout.header_words(
+                    if hzb_dump_early_copied { HZB_DUMP_FLAG_DEPTH_EARLY } else { 0 },
+                    scene.engine_frame_index,
+                );
                 // SAFETY: recording is open and no render-pass instance is active (the present
                 // blit's `cmd_end_rendering` is above). `staging.buffer` is the live host-visible
                 // TRANSFER_DST dump staging, `>= layout.total_bytes()` per the branch condition,
                 // and `HZB_DUMP_HEADER_BYTES` is that layout's leading region, so the write is in
-                // bounds. It is a multiple of 4 and 152 bytes, inside the 65536-byte inline limit.
+                // bounds. It is a multiple of 4 and 160 bytes, inside the 65536-byte inline limit.
                 // `header` is a local that outlives the call.
                 unsafe {
                     (self.fns.cmd_update_buffer)(
@@ -4101,8 +4238,12 @@ impl Renderer<'_> {
                     );
                 }
 
+                // The FINAL depth — this image as the frame LEAVES it, after `vb_raster_late` (if
+                // the frame split at all). Its region moved name, not position: `depth_offset` is
+                // `depth_final_offset` since step P3-7, and the early copy recorded between the two
+                // raster scopes fills the region that follows it.
                 let depth_region = VkBufferImageCopy {
-                    buffer_offset: layout.depth_offset(),
+                    buffer_offset: layout.depth_final_offset(),
                     buffer_row_length: 0,
                     buffer_image_height: 0,
                     image_subresource: VkImageSubresourceLayers {
@@ -4121,8 +4262,9 @@ impl Renderer<'_> {
                 // SAFETY: recording is open; `forward.depth[fi]` is TRANSFER_SRC_OPTIMAL per the
                 // pass's derived barrier above and was created with `TRANSFER_SRC` usage
                 // (`ForwardTargets::build`'s `depth_desc`, plan §6); one full-image tightly-packed
-                // DEPTH region copies into `[depth_offset, depth_offset + depth_bytes)` of the
-                // staging, which `total_bytes` covers and the branch condition bounds;
+                // DEPTH region copies into `[depth_final_offset, +depth_bytes)` of the staging,
+                // which `total_bytes` covers and the branch condition bounds, and which is disjoint
+                // from the early-depth and pyramid regions by `HzbDumpLayout`'s own offsets;
                 // `&depth_region` outlives the call.
                 unsafe {
                     (self.fns.cmd_copy_image_to_buffer)(

@@ -1,4 +1,4 @@
-//! **VG R3 piece 3 step P3-5 — the B2 PAIRING gate: both captures, ONE process.**
+//! **VG R3 piece 3 steps P3-5/P3-7 — the B2 PAIRING gate: both captures, ONE process, ONE frame.**
 //!
 //! `BOYKO_VB_CULL_READBACK` and `BOYKO_HZB_DUMP` armed together in one windowed boot must produce
 //! BOTH files. Nothing in the tree had ever run that combination, and it did not work:
@@ -20,22 +20,30 @@
 //! from one process and a pyramid from another describe two different frames of two different runs,
 //! and the only way to green a comparison between them would be to relax it.
 //!
-//! # ⚠️ What this gate CANNOT claim yet, and the tripwire that makes the gap loud
+//! # VG R3 piece 3 step P3-7 — the clause this file was waiting for
 //!
-//! **It cannot compare the two frame indices.** The probe line carries `frame=` since this step; the
-//! dump header does **not** carry one until step **P3-7** widens it (`HZB_DUMP_HEADER_SCALAR_WORDS`,
-//! the magic bump, and the recorder stamping the index inside the copy frame's command buffer). So
-//! the equality clause `probe.frame_index == dump_header.frame_index` — the third and load-bearing
-//! half of the plan's frame-index trap — has no second side to read.
+//! Step P3-5 could not compare the two frame indices: the probe line carried `frame=`, the dump
+//! header carried no such word, and a tripwire test
+//! (`the_dump_header_still_carries_no_frame_index`) pinned the header's four-scalar-word shape so
+//! that widening it would red HERE with the instruction attached. Step P3-7 widened it
+//! (`HZB_DUMP_HEADER_SCALAR_WORDS` 4 → 6, the magic bumped, the RECORDER stamping the index inside
+//! the copy frame's own command buffer), the tripwire fired, and its instruction was: write the
+//! real clause and DELETE the test rather than update its number. That is what happened.
 //!
-//! Rather than leave that as a note nobody re-reads,
-//! [`the_dump_header_still_carries_no_frame_index`] asserts the header's CURRENT shape. When P3-7
-//! widens it, that test goes red and names what must be written here. A missing clause that
-//! announces itself is the only kind worth having.
+//! **Clause 4 is now `probe.frame == dump_header.frame_index`** — the third and load-bearing half
+//! of the plan's frame-index trap, and the only one that says the two captures describe ONE frame
+//! rather than two frames of one run. Both numbers come from the SAME engine clock (the runner's
+//! monotonic per-iteration counter): the probe latches it at its request frame, and the recorder
+//! stamps it into the header from `GBufferScene::engine_frame_index` while recording that frame's
+//! copies. Neither side is a host guess made after the fact.
 //!
-//! It also claims nothing about the cull's decisions: the payload is still the inert partition
-//! (`occ_flags == 0`, so `n_defer == 0` everywhere). What it claims is that the two instruments can
-//! be read from one frame of one run.
+//! # ⚠️ What this gate still claims nothing about
+//!
+//! The cull's decisions. This fixture marks nothing, so `path_vb_occlusion_split()` is false, the
+//! dump's early-depth region is not live and `gpu_frame=` still reads the boot prefill — the
+//! `gpu_frame == frame` control (plan D6's F-M4a) needs a MARKED readback fixture and is step
+//! P3-8's. What this file claims is that the two instruments can be read from one frame of one run,
+//! and that they agree about which frame that was.
 //!
 //! # Run
 //!
@@ -53,7 +61,9 @@ use boyko_ecs::ecs::core::system::ResMut;
 use boyko_render::{
     GeometryLegs, HzbConfig, HzbMode, Material, MeshGeometryTableSlot, RenderPath, RenderPathConfig,
 };
-use boyko_rhi_vulkan::present::{HZB_DUMP_HEADER_BYTES, HZB_DUMP_HEADER_WORDS, HZB_DUMP_MAGIC, MAX_HZB_LEVELS};
+use boyko_rhi_vulkan::present::{
+    HZB_DUMP_HEADER_BYTES, HZB_DUMP_MAGIC, HZB_DUMP_WORD_FRAME_INDEX,
+};
 
 mod vb_inst_cull_scene;
 
@@ -133,7 +143,8 @@ fn word(bytes: &[u8], i: usize) -> u32 {
     u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]])
 }
 
-/// **THE B2 GATE** — one process, both knobs, both files.
+/// **THE B2 GATE** — one process, both knobs, both files, and (since step P3-7) both stamped with
+/// the same engine frame.
 #[test]
 #[ignore = "live GPU gate (spawns one windowed worker); the orchestrator runs it with --test-threads=1"]
 fn both_captures_are_produced_by_one_process() {
@@ -209,39 +220,43 @@ fn both_captures_are_produced_by_one_process() {
          evidence, is exactly what the removals above exist to prevent."
     );
 
+    // ---- clause 4 (VG R3 piece 3 step P3-7): the two captures describe ONE frame ----------------
+    //
+    // THE clause this file was built to owe. Clauses 1-3 say both instruments produced a file and
+    // each file is well-formed; only this one says they are looking at the same frame. Without it,
+    // a cull payload from frame N and a pyramid from frame N+4 would green every clause above while
+    // describing two different states of the scene — and every downstream comparison between the
+    // cull's verdicts and the pyramid they were tested against would rest on that.
+    //
+    // Both numbers come from the runner's monotonic per-iteration counter, taken by the work that
+    // ran: the probe latches it at its request frame; the recorder stamps it into the header from
+    // `GBufferScene::engine_frame_index` with a `vkCmdUpdateBuffer` inside that frame's command
+    // buffer. A host-written header would have made this an equality between two host beliefs.
+    //
+    // The two drivers reach `Request` together because they count the SAME `SETTLE_FRAMES` of
+    // presented frames from the same start and are asked on the same loop iteration — that sharing
+    // is why `hzb_dump::SETTLE_FRAMES` is a shared constant rather than two literals that agree.
+    // This assertion is what MEASURES that, instead of trusting it.
+    let dump_frame = word(&dump_bytes, HZB_DUMP_WORD_FRAME_INDEX);
+    assert_eq!(
+        probe.frame, dump_frame,
+        "the two captures came from DIFFERENT engine frames: the cull probe latched frame {}, the \
+         pyramid dump's header was stamped with frame {dump_frame}. Both are the runner's own \
+         per-iteration counter, taken by the frame that ran, so a difference means the two drivers \
+         no longer request on one iteration -- a settle window that drifted, or a driver given its \
+         own exit again. Every comparison that treats the cull's verdicts and this pyramid as one \
+         frame's evidence is void until they agree. Probe line: {:?}",
+        probe.frame,
+        probe.raw
+    );
+
     println!(
-        "VG R3 P3-5 pairing: ONE process produced BOTH captures -- cull frame={} gpu_frame={} \
-         batches={}, pyramid {} B (levels={}). ⚠️ The frame-index EQUALITY clause is not asserted \
-         here: the dump header carries no frame index until step P3-7.",
+        "VG R3 P3-7 pairing: ONE process produced BOTH captures FROM ONE FRAME -- cull frame={} \
+         gpu_frame={} batches={}, pyramid {} B (levels={}) stamped frame={dump_frame}.",
         probe.frame,
         probe.gpu_frame,
         probe.batches,
         dump_bytes.len(),
         word(&dump_bytes, 3)
-    );
-}
-
-/// **THE TRIPWIRE FOR THE CLAUSE THIS STEP CANNOT WRITE.**
-///
-/// The pairing gate above owes one more clause — `probe.frame == dump_header.frame_index` — and it
-/// cannot be written yet, because the dump header has no such word. Step P3-7 adds it by raising
-/// `HZB_DUMP_HEADER_SCALAR_WORDS` from 4 to 6 and bumping the magic.
-///
-/// This test pins the header's CURRENT shape, so that widening reds HERE with the instruction
-/// attached, instead of leaving the missing clause to be noticed by nobody. It is NOT `#[ignore]`d:
-/// it needs no device, and the whole point is that it runs in every sweep.
-///
-/// **When it goes red, the fix is to WRITE the equality clause in
-/// [`both_captures_are_produced_by_one_process`] and delete this test** — not to update the number.
-#[test]
-fn the_dump_header_still_carries_no_frame_index() {
-    assert_eq!(
-        HZB_DUMP_HEADER_WORDS,
-        4 + 2 * MAX_HZB_LEVELS,
-        "the `BOYKO_HZB_DUMP` header has grown past its four scalar words \
-         `[magic, source_w, source_h, levels]`. If step P3-7 added `frame_index`, the pairing gate \
-         in this file must now assert `probe.frame == dump_header.frame_index` -- the third clause \
-         of the plan's frame-index trap, which is the ONLY one that says the two captures describe \
-         ONE frame. Write that clause and delete this test; do not update this number."
     );
 }

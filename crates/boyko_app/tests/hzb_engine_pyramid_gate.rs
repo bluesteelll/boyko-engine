@@ -42,6 +42,23 @@
 //!    separates "the copy never ran" from "the build never ran"; without it a failed copy would
 //!    read as a failed build.
 //!
+//! # VG R3 piece 3 step P3-7 (plan D10) — the dump carries TWO depths, and this file decodes both
+//!
+//! The pyramid is built from the depth as of the EARLY raster scope; the frame-end `hzb_dump` pass
+//! copies that image again after the LATE scope has drawn into it. Through piece 2 those were the
+//! same bytes (the late scope drew nothing), so this gate compared against a depth it had no way of
+//! knowing was the right one. The dump now carries both regions plus a `flags` bit saying which are
+//! live and a `frame_index` the RECORDER stamps inside the copy frame's command buffer.
+//!
+//! Each leg therefore DECLARES its regime ([`DepthRegime`]) and the gate checks the file against
+//! that declaration — never the reverse. G8's leg declares "no early region" and additionally
+//! asserts that region is untouched staging prefill; G5's declares the converged split and gains
+//! G-P3-E's clause 2' (`depth_early == depth_final`, byte for byte).
+//!
+//! The magic was bumped in the same step, so a stale pre-P3-7 file cannot decode against the moved
+//! offsets. [`a_stale_pre_p3_7_dump_fails_to_decode_instead_of_being_believed`] EXECUTES that
+//! failure — it needs no device and runs in every sweep.
+//!
 //! # How this test drives the engine, and why THAT harness
 //!
 //! `vg_density_census.rs`'s shape: one `#[ignore]`d WORKER test that boots the app, and a DRIVER
@@ -95,8 +112,9 @@ use boyko_render::{
     OcclusionCulling, RenderPath, RenderPathConfig, generate_tangents,
 };
 use boyko_rhi_vulkan::present::{
-    HZB_DUMP_HEADER_BYTES, HZB_DUMP_HEADER_WORDS, HZB_DUMP_MAGIC, HZB_DUMP_SAMPLE_BYTES,
-    HZB_PYRAMID_POISON, MAX_HZB_LEVELS,
+    HZB_DUMP_FLAG_DEPTH_EARLY, HZB_DUMP_HEADER_BYTES, HZB_DUMP_HEADER_SCALAR_WORDS,
+    HZB_DUMP_HEADER_WORDS, HZB_DUMP_MAGIC, HZB_DUMP_SAMPLE_BYTES, HZB_DUMP_WORD_FLAGS,
+    HZB_DUMP_WORD_FRAME_INDEX, HZB_PYRAMID_POISON, MAX_HZB_LEVELS,
 };
 
 /// The env knob that arms `boyko_app::hzb_dump` — the value is the output path.
@@ -130,8 +148,24 @@ const SUN_DIR: [f32; 3] = [-0.40, 0.78, 0.48];
 /// How many `[w, h]` pairs the fixed-size header carries — `levels` of them are live and the rest
 /// are zero padding. Derived from the header's own word count rather than spelled, and tied to the
 /// capacity it must equal, so the two cannot drift into a reader that walks the wrong tail.
-const HEADER_LEVEL_SLOTS: usize = (HZB_DUMP_HEADER_WORDS - 4) / 2;
+///
+/// ⚠️ **The `4` here was a LITERAL until VG R3 piece 3 step P3-7, and that made this guard's
+/// ability to see a drift depend on the parity of the drift.** Widening the scalar prefix to 6
+/// reds this assertion (`(40 - 4) / 2 == 18 != 17`) — but widening it to any ODD count truncates in
+/// the division and passes silently. With [`HZB_DUMP_HEADER_SCALAR_WORDS`] exported, the writer's
+/// word indices and this reader's derived offsets come from ONE number, and what remains here is a
+/// relation neither side can restate.
+const HEADER_LEVEL_SLOTS: usize = (HZB_DUMP_HEADER_WORDS - HZB_DUMP_HEADER_SCALAR_WORDS) / 2;
 const _: () = assert!(HEADER_LEVEL_SLOTS == MAX_HZB_LEVELS);
+
+/// The `f32` bit pattern the host driver prefills the whole dump staging with
+/// (`boyko_app::hzb_dump::prefill_with_poison`'s `0xFF` byte fill) — a quiet NaN, which neither
+/// payload can legitimately hold.
+///
+/// Spelled here because step P3-7 needs to assert its PRESENCE, not only its absence: on an unsplit
+/// dump frame the early-depth region is never written, and "every texel of it is exactly this" is
+/// the falsifiable form of "the early copy did not run".
+const STAGING_PREFILL_BITS: u32 = 0xFFFF_FFFF;
 
 // ===============================================================================================
 // The worker: one process, one engine boot, one dump file
@@ -367,10 +401,21 @@ struct Dump {
     source: [u32; 2],
     /// The pyramid's level count, from header word 3.
     levels: u32,
-    /// `level_extent[k]`, from header words `4 + 2k` / `5 + 2k`. Exactly `levels` entries.
+    /// The `flags` bitfield, from header word [`HZB_DUMP_WORD_FLAGS`].
+    /// [`HZB_DUMP_FLAG_DEPTH_EARLY`] is its only bit today.
+    flags: u32,
+    /// The ENGINE frame the capture came from, from header word [`HZB_DUMP_WORD_FRAME_INDEX`] —
+    /// stamped by the RECORDER inside the copy frame's command buffer.
+    frame_index: u32,
+    /// `level_extent[k]`, from header words `SCALAR + 2k` / `SCALAR + 2k + 1`. Exactly `levels`
+    /// entries.
     level_extent: Vec<[u32; 2]>,
-    /// The source depth, row-major, `source[0] * source[1]` samples.
-    depth: Vec<f32>,
+    /// The FRAME-END depth, row-major, `source[0] * source[1]` samples — this image as the frame
+    /// left it, after the late raster scope (if the frame had one).
+    depth_final: Vec<f32>,
+    /// The EARLY-SCOPE depth, same shape — the bytes the pyramid was built from on a split frame.
+    /// Live iff [`HZB_DUMP_FLAG_DEPTH_EARLY`]; otherwise every texel is the staging prefill.
+    depth_early: Vec<f32>,
     /// Every mip, finest first, back to back, each row-major — kept as raw BITS, because that is
     /// the fidelity the comparison runs at.
     pyramid_bits: Vec<u32>,
@@ -404,12 +449,27 @@ fn decode(bytes: &[u8], path: &Path) -> Dump {
         magic, HZB_DUMP_MAGIC,
         "{}: leading word is 0x{magic:08x}, not HZB_DUMP_MAGIC (0x{HZB_DUMP_MAGIC:08x}). A stale \
          or unrelated file decoded as a pyramid would mismatch at every texel — a red gate naming \
-         the wrong defect.",
+         the wrong defect. ⚠️ VG R3 piece 3 step P3-7 BUMPED this value (from 0x485a4244) because \
+         it widened the header and moved every payload offset: a pre-P3-7 file decoded here would \
+         read `levels` out of what is now the `flags` slot, so the bump is what turns \"this file \
+         predates the format\" into this one assertion.",
         path.display()
     );
 
     let source = [word(bytes, 1), word(bytes, 2)];
     let levels = word(bytes, 3);
+    let flags = word(bytes, HZB_DUMP_WORD_FLAGS);
+    let frame_index = word(bytes, HZB_DUMP_WORD_FRAME_INDEX);
+    // Structural, like the two below it: an unknown bit means the writer carries a region or a
+    // meaning this reader does not model, and every clause past here would be adjudicating a file
+    // it does not understand.
+    assert_eq!(
+        flags & !HZB_DUMP_FLAG_DEPTH_EARLY,
+        0,
+        "{}: the header's flags are 0x{flags:08x}, which carries bits outside the set this reader \
+         models (0x{HZB_DUMP_FLAG_DEPTH_EARLY:08x})",
+        path.display()
+    );
     assert!(
         source[0] > 0 && source[1] > 0,
         "{}: the header's source extent is {source:?} — a zero axis has no pyramid",
@@ -421,9 +481,15 @@ fn decode(bytes: &[u8], path: &Path) -> Dump {
         path.display()
     );
 
+    // The level-extent pairs start at the END of the scalar prefix — derived, never spelled, so the
+    // writer's `header_words` and this walk cannot index two different tables.
+    let extent_word = |k: usize| {
+        let w0 = HZB_DUMP_HEADER_SCALAR_WORDS + 2 * k;
+        [word(bytes, w0), word(bytes, w0 + 1)]
+    };
     let mut level_extent = Vec::with_capacity(levels as usize);
     for k in 0..levels as usize {
-        let e = [word(bytes, 4 + 2 * k), word(bytes, 5 + 2 * k)];
+        let e = extent_word(k);
         assert!(
             e[0] > 0 && e[1] > 0,
             "{}: the header's level {k} extent is {e:?} — a level with a zero axis has no storage",
@@ -434,7 +500,7 @@ fn decode(bytes: &[u8], path: &Path) -> Dump {
     // The tail past `levels` is written as ZERO on purpose (`HzbDumpLayout::header_words`), so a
     // reader cannot mistake the plan's padding for a real level.
     for k in levels as usize..HEADER_LEVEL_SLOTS {
-        let e = [word(bytes, 4 + 2 * k), word(bytes, 5 + 2 * k)];
+        let e = extent_word(k);
         assert_eq!(
             e,
             [0, 0],
@@ -447,26 +513,129 @@ fn decode(bytes: &[u8], path: &Path) -> Dump {
     let depth_texels = source[0] as usize * source[1] as usize;
     let pyramid_texels: usize =
         level_extent.iter().map(|e| e[0] as usize * e[1] as usize).sum();
+    // TWO depth regions since VG R3 piece 3 step P3-7 — final then early — and both are counted
+    // whether or not the early one was written, because the staging is sized before the frame that
+    // fills it decides whether it splits.
     let want_bytes = HZB_DUMP_HEADER_BYTES as usize
-        + (depth_texels + pyramid_texels) * HZB_DUMP_SAMPLE_BYTES as usize;
+        + (2 * depth_texels + pyramid_texels) * HZB_DUMP_SAMPLE_BYTES as usize;
     assert_eq!(
         bytes.len(),
         want_bytes,
-        "{}: {} bytes, but the header describes {want_bytes} (152 + {depth_texels} depth + \
-         {pyramid_texels} pyramid samples). The file and its own header disagree, so nothing below \
-         it can be trusted.",
+        "{}: {} bytes, but the header describes {want_bytes} ({HZB_DUMP_HEADER_BYTES} header + \
+         2 x {depth_texels} depth + {pyramid_texels} pyramid samples). The file and its own header \
+         disagree, so nothing below it can be trusted.",
         path.display(),
         bytes.len()
     );
 
-    let depth_word0 = HZB_DUMP_HEADER_BYTES as usize / 4;
-    let depth: Vec<f32> =
-        (0..depth_texels).map(|i| f32::from_bits(word(bytes, depth_word0 + i))).collect();
-    let pyramid_word0 = depth_word0 + depth_texels;
+    let final_word0 = HZB_DUMP_HEADER_BYTES as usize / 4;
+    let depth_final: Vec<f32> =
+        (0..depth_texels).map(|i| f32::from_bits(word(bytes, final_word0 + i))).collect();
+    let early_word0 = final_word0 + depth_texels;
+    let depth_early: Vec<f32> =
+        (0..depth_texels).map(|i| f32::from_bits(word(bytes, early_word0 + i))).collect();
+    let pyramid_word0 = early_word0 + depth_texels;
     let pyramid_bits: Vec<u32> =
         (0..pyramid_texels).map(|i| word(bytes, pyramid_word0 + i)).collect();
 
-    Dump { source, levels, level_extent, depth, pyramid_bits }
+    Dump { source, levels, flags, frame_index, level_extent, depth_final, depth_early, pyramid_bits }
+}
+
+/// ⚠️ **The OLD-MAGIC gate for step P3-7's format change, and the control that keeps it honest.**
+///
+/// The magic was bumped precisely so a pre-P3-7 dump fails LOUDLY instead of decoding against the
+/// new offsets — where it would read `levels` out of what is now the `flags` slot, walk the extent
+/// table two words early, and report a mismatch at every texel, i.e. a red gate naming the wrong
+/// defect. A property stated only in prose is a property nobody executed, so this runs the decoder
+/// over a file in the OLD format and requires it to panic.
+///
+/// # What makes it able to fail
+///
+/// * The stale file is **long enough for every other structural assertion to pass**
+///   (`>= HZB_DUMP_HEADER_BYTES`, and its byte count is exactly what the OLD writer would have
+///   produced), and the panic message is required to NAME the magic — so a green here cannot come
+///   from the length check, and the test cannot pass merely because `decode` panics on everything.
+/// * The old magic is spelled as a LITERAL, not derived from [`HZB_DUMP_MAGIC`]. Reverting the bump
+///   would make the two equal and this test reds; deriving it (`HZB_DUMP_MAGIC - 18` and such)
+///   would make it green by construction forever.
+/// * The **positive control** below decodes a synthetic file in the CURRENT format and requires it
+///   to succeed. Without it, deleting the format's payload arithmetic would leave the negative leg
+///   green.
+#[test]
+fn a_stale_pre_p3_7_dump_fails_to_decode_instead_of_being_believed() {
+    /// The `"HZBD"` magic every dump written before VG R3 piece 3 step P3-7 carries.
+    const OLD_MAGIC: u32 = 0x485A_4244;
+    assert_ne!(
+        OLD_MAGIC, HZB_DUMP_MAGIC,
+        "the P3-7 magic bump has been reverted: a stale dump would now decode against offsets it \
+         was not written with, and mismatch at every texel instead of failing by name"
+    );
+
+    // A 4x4 source with a 3-level pyramid (4x4, 2x2, 1x1) — small, and shaped exactly as a real
+    // header is, so the ONLY thing wrong with the stale file is its leading word.
+    let source = [4u32, 4u32];
+    let levels = [[4u32, 4u32], [2, 2], [1, 1]];
+    let depth_texels = (source[0] * source[1]) as usize;
+    let pyramid_texels: usize = levels.iter().map(|e| (e[0] * e[1]) as usize).sum();
+
+    let build = |magic: u32, scalar_words: usize, depth_regions: usize| -> Vec<u8> {
+        let mut words = vec![0u32; scalar_words + 2 * MAX_HZB_LEVELS];
+        words[0] = magic;
+        words[1] = source[0];
+        words[2] = source[1];
+        words[3] = levels.len() as u32;
+        for (k, e) in levels.iter().enumerate() {
+            words[scalar_words + 2 * k] = e[0];
+            words[scalar_words + 2 * k + 1] = e[1];
+        }
+        words.resize(words.len() + depth_regions * depth_texels + pyramid_texels, 0);
+        words.iter().flat_map(|w| w.to_le_bytes()).collect()
+    };
+
+    // The STALE file: the old magic, the old 4-word scalar prefix, ONE depth region — exactly what
+    // the pre-P3-7 writer emitted.
+    let stale = build(OLD_MAGIC, 4, 1);
+    assert!(
+        stale.len() >= HZB_DUMP_HEADER_BYTES as usize,
+        "the stale fixture must clear the length check, or a green below would prove nothing about \
+         the magic"
+    );
+    eprintln!(
+        "a_stale_pre_p3_7_dump_fails_to_decode: the panic printed below is the ASSERTION UNDER \
+         TEST, caught and inspected -- not a failure of this test."
+    );
+    // Matched rather than `expect_err`ed: `Dump` carries no `Debug`, and giving it one purely to
+    // format a value this branch proves does not exist would be the tail wagging the dog.
+    let err = match std::panic::catch_unwind(|| decode(&stale, Path::new("<stale pre-P3-7 dump>")))
+    {
+        Ok(_) => panic!(
+            "a pre-P3-7 dump DECODED. The magic bump is the only thing standing between a stale \
+             file and a texel-by-texel mismatch report that names the shader instead of the file."
+        ),
+        Err(e) => e,
+    };
+    let msg = err
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| err.downcast_ref::<&str>().copied())
+        .unwrap_or("<non-string panic payload>")
+        .to_string();
+    assert!(
+        msg.contains("HZB_DUMP_MAGIC"),
+        "the stale dump was rejected, but not BY THE MAGIC -- got {msg:?}. A rejection for another \
+         reason (a length, a level count) would make this gate green on a file whose magic was \
+         never checked."
+    );
+
+    // The POSITIVE CONTROL: the same fixture in the CURRENT format decodes. Without this leg, a
+    // `decode` that panicked unconditionally would pass the assertion above.
+    let current = build(HZB_DUMP_MAGIC, HZB_DUMP_HEADER_SCALAR_WORDS, 2);
+    let dump = decode(&current, Path::new("<synthetic current-format dump>"));
+    assert_eq!(dump.source, source);
+    assert_eq!(dump.levels, levels.len() as u32);
+    assert_eq!(dump.depth_final.len(), depth_texels);
+    assert_eq!(dump.depth_early.len(), depth_texels);
+    assert_eq!(dump.pyramid_bits.len(), pyramid_texels);
 }
 
 // ===============================================================================================
@@ -509,11 +678,43 @@ fn run_dump_worker(worker: &str, out_name: &str) -> (PathBuf, Vec<u8>) {
     (out, bytes)
 }
 
+/// VG R3 piece 3 step P3-7 (plan D10 / gate G-P3-E) — **which of the two dumped depths the caller
+/// declares this worker produces, and what relation must hold between them.**
+///
+/// ⚠️ **The regime is DECLARED by the caller and then CHECKED against the file, never read out of
+/// it.** Deriving it from the header's own `flags` bit would make a worker that silently failed to
+/// arm the split take the unsplit branch and report green — the vacuity this campaign has shipped
+/// twice. The caller knows whether its scene carries the marker; the file says what the recorder
+/// did; the gate is the comparison of the two.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DepthRegime {
+    /// ONE raster scope: no `hzb_dump_depth_early` pass is declared, the early region is never
+    /// written, and the pyramid was reduced from the frame-end depth because they are the same
+    /// bytes by construction. The early region must still hold the host staging's prefill.
+    NoEarlyRegion,
+    /// TWO raster scopes on a CONVERGED, UNFORCED frame — G-P3-E's second regime. The pyramid was
+    /// reduced from the EARLY depth, and by plan D12's fixed point the late scope draws zero, so
+    /// the two depths must be BYTE-IDENTICAL. That is a positive falsifiable claim, not an
+    /// embarrassment: if the late scope ever draws a pixel on a converged static frame, it reds.
+    ///
+    /// ⚠️ G-P3-E's FIRST regime (FORCE-LATE: `depth_early != depth_final`, and
+    /// `build_pyramid(depth_final) != pyramid`) has NO variant here, because it has no fixture —
+    /// `vb_occ_mixed_late` is authored at step P3-8, and a variant with no constructor is dead code
+    /// under `-D warnings`. What lands here is the machinery those clauses need; the clauses
+    /// themselves land with the scene that can satisfy them.
+    ConvergedFixedPoint,
+}
+
 /// The comparison both gates run, over whichever worker's dump it is handed.
 ///
 /// `leg` labels the configuration in every failure message and in the final report line, so a red
 /// names WHICH of the two pass orders produced it instead of "the pyramid differs".
-fn assert_engine_pyramid_equals_the_oracle(worker: &str, out_name: &str, leg: &str) {
+fn assert_engine_pyramid_equals_the_oracle(
+    worker: &str,
+    out_name: &str,
+    leg: &str,
+    regime: DepthRegime,
+) {
     let (path, bytes) = run_dump_worker(worker, out_name);
     let dump = decode(&bytes, &path);
     let [source_w, source_h] = dump.source;
@@ -547,8 +748,82 @@ fn assert_engine_pyramid_equals_the_oracle(worker: &str, out_name: &str, leg: &s
         );
     }
 
+    // ---- VG R3 piece 3 step P3-7 (plan D10 / G-P3-E): THE TWO DEPTHS ----------------------------
+    //
+    // The declared regime against the recorder's own stamp, FIRST — before any payload clause, for
+    // the same reason clause 2 precedes the texel walk. A worker whose scene failed to arm the split
+    // would otherwise fall through to a green comparison over the wrong region.
+    let early_live = (dump.flags & HZB_DUMP_FLAG_DEPTH_EARLY) != 0;
+    assert_eq!(
+        early_live,
+        regime == DepthRegime::ConvergedFixedPoint,
+        "{leg}: the dump header's HZB_DUMP_FLAG_DEPTH_EARLY is {early_live}, but this worker's \
+         scene declares the {} regime. The bit is latched AT the early-depth copy inside the \
+         recorder, so a disagreement means the frame did not split the way the fixture says it \
+         does — and every clause below would then be adjudicating the wrong region.",
+        match regime {
+            DepthRegime::NoEarlyRegion => "unsplit (no early region)",
+            DepthRegime::ConvergedFixedPoint => "armed-split, converged",
+        }
+    );
+
+    // THE depth the pyramid must equal a rebuild from. On a split frame that is the EARLY one — the
+    // bytes the `hzb_build_*` dispatches reduced, copied between the two raster scopes. Choosing the
+    // final one there is the exact blindness step P3-7 exists to remove.
+    let source_depth: &[f32] = match regime {
+        DepthRegime::NoEarlyRegion => dump.depth_final.as_slice(),
+        DepthRegime::ConvergedFixedPoint => dump.depth_early.as_slice(),
+    };
+
+    match regime {
+        // The early region was never written, so it must still be the host driver's prefill AT
+        // EVERY TEXEL. Asserted rather than merely skipped: "nobody wrote it" and "something wrote
+        // it and the reader ignored that" are different states, and only one of them is correct.
+        DepthRegime::NoEarlyRegion => {
+            let touched = dump.depth_early.iter().position(|d| d.to_bits() != STAGING_PREFILL_BITS);
+            assert_eq!(
+                touched, None,
+                "{leg}: the early-depth region is not the 0x{STAGING_PREFILL_BITS:08x} staging \
+                 prefill at index {touched:?} — but this frame declares ONE raster scope, so no \
+                 `hzb_dump_depth_early` pass was declared and nothing should have copied there"
+            );
+        }
+        // ---- G-P3-E clause 2' (the converged regime): the two depths are BYTE-IDENTICAL. ----
+        //
+        // Plan D12's fixed point, as a claim rather than a footnote: a rejected instance writes no
+        // depth, so on a converged static frame the depth (and therefore the pyramid) is a fixed
+        // point and both cull phases reject the same candidates — the late scope draws nothing and
+        // cannot change these bytes. It reds the moment it does.
+        //
+        // ⚠️ Bit equality alone would ALSO be satisfied by two failed copies (both regions all
+        // prefill), which is why the NaN clause below runs over BOTH regions in this regime.
+        DepthRegime::ConvergedFixedPoint => {
+            let differs = dump
+                .depth_early
+                .iter()
+                .zip(dump.depth_final.iter())
+                .position(|(e, f)| e.to_bits() != f.to_bits());
+            assert_eq!(
+                differs, None,
+                "{leg}: the EARLY and FINAL depths differ at index {differs:?} \
+                 (early={:?}, final={:?}). On a converged static frame the late scope draws ZERO \
+                 (plan D12's fixed point: both phases evaluate one predicate over the same bytes), \
+                 so a difference means the late scope drew — which no gate on this fixture can \
+                 adjudicate as correct.",
+                differs.map(|i| dump.depth_early[i]),
+                differs.map(|i| dump.depth_final[i])
+            );
+            let final_nan = dump.depth_final.iter().position(|d| d.is_nan());
+            assert_eq!(
+                final_nan, None,
+                "{leg}: the FINAL depth region holds a NaN at index {final_nan:?} — the staging's \
+                 `0xFFFFFFFF` prefill showing through, i.e. the frame-end depth copy did not run"
+            );
+        }
+    }
+
     // ---- clause 5 (depth half) + clause 3: the frame rendered something --------------------------
-    let depth_nan = dump.depth.iter().position(|d| d.is_nan());
+    let depth_nan = source_depth.iter().position(|d| d.is_nan());
     assert_eq!(
         depth_nan, None,
         "the dumped depth holds a NaN at index {:?}. A reverse-Z attachment is clamped to \
@@ -556,16 +831,16 @@ fn assert_engine_pyramid_equals_the_oracle(worker: &str, out_name: &str, leg: &s
          `0xFFFFFFFF` = NaN — so this is the depth COPY not having run, not a depth value.",
         depth_nan
     );
-    let first_bits = dump.depth[0].to_bits();
-    let distinct = dump.depth.iter().any(|d| d.to_bits() != first_bits);
+    let first_bits = source_depth[0].to_bits();
+    let distinct = source_depth.iter().any(|d| d.to_bits() != first_bits);
     assert!(
         distinct,
         "every one of the {} dumped depth texels is the same value ({}) — the frame rendered \
          nothing, and comparing two reductions of a constant field proves nothing about either",
-        dump.depth.len(),
-        dump.depth[0]
+        source_depth.len(),
+        source_depth[0]
     );
-    let covered = dump.depth.iter().filter(|d| **d > 0.0).count();
+    let covered = source_depth.iter().filter(|d| **d > 0.0).count();
     assert!(
         covered > 0,
         "no dumped depth texel is > 0.0 — under reverse-Z that is the far plane at every pixel, \
@@ -574,7 +849,7 @@ fn assert_engine_pyramid_equals_the_oracle(worker: &str, out_name: &str, leg: &s
 
     // ---- the comparison ---------------------------------------------------------------------
     let mut oracle = vec![0.0f32; layout.pyramid_len()];
-    build_pyramid(&layout, &dump.depth, &mut oracle);
+    build_pyramid(&layout, source_depth, &mut oracle);
     assert_eq!(
         dump.pyramid_bits.len(),
         oracle.len(),
@@ -678,15 +953,18 @@ fn assert_engine_pyramid_equals_the_oracle(worker: &str, out_name: &str, leg: &s
     // point is that this number changes what a green here means: at 11% coverage the AGREEMENT
     // covers mostly far-plane zeros, and it is clause 1 — not the agreement — that says the
     // levels were written at all.
-    let pct = 100.0 * covered as f64 / dump.depth.len() as f64;
+    let pct = 100.0 * covered as f64 / source_depth.len() as f64;
     println!(
         "hzb_build {leg}: engine pyramid at {source_w}x{source_h}, {} levels, {} texels BIT-EXACT \
-         vs boyko_render::hzb::build_pyramid rebuilt from the engine's own depth. Depth coverage \
-         {covered}/{} = {pct:.2}% > 0.0 (the rest is the reverse-Z far plane). Non-vacuity is \
-         carried by the -1.0 IMAGE poison, not by this number.",
+         vs boyko_render::hzb::build_pyramid rebuilt from the engine's own {} depth (engine frame \
+         {}, per the recorder's own header stamp). Depth coverage {covered}/{} = {pct:.2}% > 0.0 \
+         (the rest is the reverse-Z far plane). Non-vacuity is carried by the -1.0 IMAGE poison, \
+         not by this number.",
         dump.levels,
         dump.pyramid_bits.len(),
-        dump.depth.len()
+        if early_live { "EARLY-scope" } else { "frame-end" },
+        dump.frame_index,
+        source_depth.len()
     );
 }
 
@@ -700,7 +978,12 @@ fn assert_engine_pyramid_equals_the_oracle(worker: &str, out_name: &str, leg: &s
 #[test]
 #[ignore = "live GPU gate (spawns a windowed worker); the orchestrator runs it with --test-threads=1"]
 fn hzb_engine_pyramid_equals_the_oracle() {
-    assert_engine_pyramid_equals_the_oracle(WORKER, "hzb_engine_pyramid_g8.bin", "G8 (unsplit)");
+    assert_engine_pyramid_equals_the_oracle(
+        WORKER,
+        "hzb_engine_pyramid_g8.bin",
+        "G8 (unsplit)",
+        DepthRegime::NoEarlyRegion,
+    );
 }
 
 /// **GATE G5** (VG R3 piece 2 step P2-6) — the same comparison on the ARMED-SPLIT frame, where the
@@ -714,6 +997,26 @@ fn hzb_engine_pyramid_equals_the_oracle() {
 /// depth, with the `-1.0` poison and all five non-vacuity clauses intact. It also exercises, on a
 /// real device, the configuration that is armed-split AND armed-poison at once — the one whose
 /// declare-order asserts fire in the dev profile these runs use.
+///
+/// # VG R3 piece 3 step P3-7 (plan D10) — what the two-depth dump ADDS here, and what it still
+/// # cannot claim on THIS fixture
+///
+/// Until step P3-7 the dump carried ONE depth, copied at frame end, and this leg compared the
+/// pyramid against it. That was sound only while the late scope drew nothing; the sentences below
+/// (kept, because they are the record of why) said so. The dump now carries BOTH depths, and this
+/// leg is re-pointed at the EARLY one — the bytes the build actually reduced — so its clause 1 is
+/// G-P3-E's clause 1 verbatim rather than a coincidence of the two being equal.
+///
+/// It also gains **G-P3-E clause 2'**: `depth_early == depth_final`, byte for byte, asserted. On a
+/// converged static frame plan D12's fixed point makes the late scope draw zero, so this is a
+/// positive falsifiable claim about the arming rather than an admission that nothing happened.
+///
+/// ⚠️ **Clauses 2 and 3 — `depth_early != depth_final` and `build_pyramid(depth_final) != pyramid`,
+/// the pair that proves the ORDERING — are NOT here, and cannot be on this fixture.** They need a
+/// frame where the late scope actually draws, which on a converged frame requires the FORCE-LATE
+/// selector over a mixed-marking scene (`vb_occ_mixed_late`). That scene is authored at step P3-8;
+/// asserting clause 2 here would be a hard red with no defect present, which is exactly the error
+/// the plan records round 1 making.
 ///
 /// # ⚠️ What it structurally CANNOT prove, in piece 2
 ///
@@ -736,5 +1039,6 @@ fn hzb_engine_pyramid_equals_the_oracle_occ() {
         WORKER_OCC,
         "hzb_engine_pyramid_g5_occ.bin",
         "G5 (armed split)",
+        DepthRegime::ConvergedFixedPoint,
     );
 }

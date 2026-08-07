@@ -1574,19 +1574,73 @@ impl HzbPlan {
     }
 }
 
-/// VG R3 piece 1 step P1-6 — the `BOYKO_HZB_DUMP` header's leading word, `"HZBD"` in ASCII.
+/// VG R3 piece 1 step P1-6 — the `BOYKO_HZB_DUMP` header's leading word, `"HZB2"` in ASCII.
 ///
 /// A magic rather than a bare length prefix: the dump is raw binary written to a path the caller
 /// chose, and a host half that decoded a truncated or unrelated file as a pyramid would report a
 /// mismatch at every texel — a red gate that names the wrong defect.
-pub const HZB_DUMP_MAGIC: u32 = 0x485A_4244;
+///
+/// ⚠️ **BUMPED at VG R3 piece 3 step P3-7** (plan D10), from `0x485A_4244` (`"HZBD"`) — the value
+/// every dump written before that step carries. That step widened the header from four scalar
+/// words to six ([`HZB_DUMP_HEADER_SCALAR_WORDS`]) and added a SECOND depth region, so every
+/// payload offset moved. A stale file decoded against the new offsets would not fail: it would
+/// read `levels` out of what is now the `flags` slot and mismatch at every texel, which is the
+/// exact failure mode the magic exists to convert into one named assertion. The bump is what makes
+/// "this file predates the format" a distinguishable state rather than a wall of wrong numbers.
+pub const HZB_DUMP_MAGIC: u32 = 0x485A_4232;
+
+/// VG R3 piece 3 step P3-7 (plan D10) — the count of FIXED scalar words at the head of the
+/// `BOYKO_HZB_DUMP` header, before the per-level extent pairs:
+/// `[magic, source_w, source_h, levels, flags, frame_index]`.
+///
+/// ⚠️ **Exported because the header-drift guard could not fire without it.** The gate asserted
+/// `(HZB_DUMP_HEADER_WORDS - 4) / 2 == MAX_HZB_LEVELS` with the `4` spelled as a literal on the
+/// reader's side. Going from 4 scalar words to 6 reds that (`(40 - 4) / 2 == 18 ≠ 17`) — but going
+/// to any ODD count truncates in the division and passes SILENTLY, i.e. the guard's ability to see
+/// a drift depended on the parity of the drift. With the count exported, both the writer's word
+/// indices and the reader's derived offsets come from ONE number and the guard tests a relation
+/// neither side can restate.
+pub const HZB_DUMP_HEADER_SCALAR_WORDS: usize = 6;
+
+/// VG R3 piece 3 step P3-7 — the header word index of the `flags` bitfield
+/// ([`HZB_DUMP_FLAG_DEPTH_EARLY`] is its only bit today).
+///
+/// Spelled once so the RECORDER that writes it and the host gates that read it cannot index two
+/// different words — the same reason [`HZB_DUMP_HEADER_SCALAR_WORDS`] is exported at all.
+pub const HZB_DUMP_WORD_FLAGS: usize = 4;
+
+/// VG R3 piece 3 step P3-7 (plan D10 / B2) — the header word index of `frame_index`: the ENGINE
+/// frame the capture came from.
+///
+/// ⚠️ **Stamped by the RECORDER, inside the copy frame's own command buffer**
+/// ([`HzbDumpLayout::header_words`] is called from `record_vb` and written with
+/// `vkCmdUpdateBuffer`), never by the host after the fact. A host stamp would record the frame the
+/// host BELIEVES it copied; this records the frame whose command buffer actually carried the
+/// copies. The difference is the whole content of the pairing check — `probe.frame ==
+/// dump_header.frame_index` is only a statement about ONE frame if both numbers come from the
+/// frame that ran.
+pub const HZB_DUMP_WORD_FRAME_INDEX: usize = 5;
+
+/// VG R3 piece 3 step P3-7 (plan D10) — `flags` bit 0: **the early-depth region is LIVE**.
+///
+/// Set iff the frame armed the occlusion split, which is exactly when the `hzb_dump_depth_early`
+/// pass is declared and its copy recorded. Clear ⇒ the early region was never written and still
+/// holds the host driver's `0xFF` (NaN) prefill, which the reader must treat as "the copy never
+/// ran" rather than as depth — the same discrimination the existing NaN clause makes.
+pub const HZB_DUMP_FLAG_DEPTH_EARLY: u32 = 1 << 0;
 
 /// VG R3 piece 1 step P1-6 — the `u32` word count of the `BOYKO_HZB_DUMP` header.
 ///
-/// `[magic, source_w, source_h, levels]` then `[w, h]` per level, padded to [`MAX_HZB_LEVELS`] so
-/// the header is a FIXED size and the two payload offsets are constants rather than functions of
-/// the level count.
-pub const HZB_DUMP_HEADER_WORDS: usize = 4 + 2 * MAX_HZB_LEVELS;
+/// [`HZB_DUMP_HEADER_SCALAR_WORDS`] scalars — `[magic, source_w, source_h, levels, flags,
+/// frame_index]` — then `[w, h]` per level, padded to [`MAX_HZB_LEVELS`] so the header is a FIXED
+/// size and the payload offsets are constants rather than functions of the level count.
+pub const HZB_DUMP_HEADER_WORDS: usize = HZB_DUMP_HEADER_SCALAR_WORDS + 2 * MAX_HZB_LEVELS;
+
+// The two named word indices must lie inside the scalar prefix, or a header write would land in
+// what a reader walks as a level extent. A build failure rather than a test, because the three
+// constants move together or not at all.
+const _: () = assert!(HZB_DUMP_WORD_FLAGS < HZB_DUMP_HEADER_SCALAR_WORDS);
+const _: () = assert!(HZB_DUMP_WORD_FRAME_INDEX < HZB_DUMP_HEADER_SCALAR_WORDS);
 
 /// VG R3 piece 1 step P1-6 — [`HZB_DUMP_HEADER_WORDS`] in bytes.
 ///
@@ -1625,10 +1679,31 @@ pub const HZB_PYRAMID_POISON: f32 = -1.0;
 /// HOST (which sizes the staging and decodes it).
 ///
 /// ```text
-///     [0, HZB_DUMP_HEADER_BYTES)          header, u32 words (see HZB_DUMP_HEADER_WORDS)
-///     [depth_offset,   +depth_bytes)      the SOURCE depth, row-major, source_w * source_h f32
-///     [pyramid_offset, +pyramid_bytes)    every mip, finest first, back to back, each row-major
+///     [0, HZB_DUMP_HEADER_BYTES)             header, u32 words (see HZB_DUMP_HEADER_WORDS)
+///     [depth_final_offset, +depth_bytes)     the FRAME-END depth, row-major, source_w*source_h f32
+///     [depth_early_offset, +depth_bytes)     the EARLY-SCOPE depth (live iff flags bit 0)
+///     [pyramid_offset,     +pyramid_bytes)   every mip, finest first, back to back, row-major
 /// ```
+///
+/// # VG R3 piece 3 step P3-7 (plan D10): why there are TWO depths, and what the second one proves
+///
+/// The pyramid is built from the depth as of the EARLY raster scope, while the end-of-frame
+/// `hzb_dump` pass copies `vb_depth` after the LATE scope has drawn into it. Through piece 2 those
+/// were the same bytes because the late scope drew nothing — `graph_bridge.rs` said so in words —
+/// and gate G8 was therefore blind to the ordering. Once the late draws are armed they can
+/// diverge, and a ONE-depth dump can only ever state the weaker half of the claim.
+///
+/// Two regions make it two-sided:
+///
+/// * `build_pyramid(depth_early) == pyramid`, bit-exact — the pyramid WAS built from the early
+///   depth;
+/// * and where `depth_early != depth_final`, `build_pyramid(depth_final) != pyramid` — it was NOT
+///   built from the final one.
+///
+/// `flags` bit 0 ([`HZB_DUMP_FLAG_DEPTH_EARLY`]) says which regions are live. On an UNSPLIT dump
+/// frame there is one raster scope, no `hzb_dump_depth_early` pass is declared, the early region is
+/// never written, and the bit is clear — the region then holds the host staging's `0xFF`/NaN
+/// prefill, which is a state the reader can assert rather than a value it must avoid.
 ///
 /// ⚠️ **The pyramid region's layout is `boyko_render::hzb::HzbLayout::level_offset`'s**, spelled
 /// here in the only terms this crate can spell it in (plan §4 forbids naming `HzbLayout` from the
@@ -1669,14 +1744,32 @@ impl HzbDumpLayout {
         self.source
     }
 
-    /// Byte offset of the depth region.
+    /// Byte offset of the FRAME-END depth region — the copy the end-of-frame `hzb_dump` pass makes,
+    /// after the late raster scope (if any) has drawn.
+    ///
+    /// ⚠️ Renamed from `depth_offset` at VG R3 piece 3 step P3-7 rather than kept and joined by a
+    /// sibling: with two depth regions, an unqualified `depth_offset` at a call site is a question
+    /// the reader cannot answer from the call site, and the rename makes every one of them a
+    /// compile error until it has been read.
     #[inline]
     #[must_use]
-    pub const fn depth_offset(&self) -> u64 {
+    pub const fn depth_final_offset(&self) -> u64 {
         HZB_DUMP_HEADER_BYTES
     }
 
-    /// Byte length of the depth region: `source_w * source_h` `f32`s.
+    /// Byte offset of the EARLY-SCOPE depth region — the copy the `hzb_dump_depth_early` pass makes
+    /// between the last `hzb_build_*` and `vb_cull_late`, i.e. the depth the pyramid reduced.
+    ///
+    /// Written only on a frame that armed the occlusion split; [`HZB_DUMP_FLAG_DEPTH_EARLY`] in the
+    /// header says whether it was.
+    #[inline]
+    #[must_use]
+    pub const fn depth_early_offset(&self) -> u64 {
+        HZB_DUMP_HEADER_BYTES + self.depth_bytes()
+    }
+
+    /// Byte length of ONE depth region: `source_w * source_h` `f32`s. Both regions are this size —
+    /// they are two copies of the same image at the same extent.
     #[inline]
     #[must_use]
     pub const fn depth_bytes(&self) -> u64 {
@@ -1687,7 +1780,7 @@ impl HzbDumpLayout {
     #[inline]
     #[must_use]
     pub const fn pyramid_offset(&self) -> u64 {
-        HZB_DUMP_HEADER_BYTES + self.depth_bytes()
+        HZB_DUMP_HEADER_BYTES + 2 * self.depth_bytes()
     }
 
     /// The TEXEL offset of level `level` inside the pyramid region — `HzbLayout::level_offset`'s
@@ -1737,7 +1830,14 @@ impl HzbDumpLayout {
         self.pyramid_texels() * HZB_DUMP_SAMPLE_BYTES
     }
 
-    /// The staging size one dump needs: header + depth + pyramid.
+    /// The staging size one dump needs: header + BOTH depth regions + pyramid.
+    ///
+    /// ⚠️ The early region is counted unconditionally, on split and unsplit dump frames alike. The
+    /// staging is sized by the HOST (`boyko_app::hzb_dump`) on the request frame, before the gather
+    /// that decides whether this frame splits; a size that depended on the split would be a size
+    /// derived from a prediction, and being wrong about it means a transfer past the end of a
+    /// host-visible allocation. One dump image of slack on a probe-only path is not a cost worth
+    /// paying a prediction for.
     #[inline]
     #[must_use]
     pub fn total_bytes(&self) -> u64 {
@@ -1752,20 +1852,29 @@ impl HzbDumpLayout {
     /// it would agree with itself no matter what the engine did. These words are the numbers the
     /// RECORDER actually copied with, so a disagreement between them and the oracle's is data in
     /// the file rather than an assumption in the reader.
+    ///
+    /// `flags` and `frame_index` are PARAMETERS rather than fields of this struct, and that is
+    /// load-bearing in two directions. `frame_index` changes every frame while the layout does not,
+    /// and the host compares whole layouts to decide whether its staging is stale
+    /// (`boyko_app::hzb_dump::request`) — a frame counter inside the layout would make every frame
+    /// look like a resize. `flags` is a statement about what the RECORDER did with this command
+    /// buffer, which is not a property of a byte layout at all.
     #[must_use]
-    pub fn header_words(&self) -> [u32; HZB_DUMP_HEADER_WORDS] {
+    pub fn header_words(&self, flags: u32, frame_index: u32) -> [u32; HZB_DUMP_HEADER_WORDS] {
         let mut words = [0u32; HZB_DUMP_HEADER_WORDS];
         words[0] = HZB_DUMP_MAGIC;
         words[1] = self.source[0];
         words[2] = self.source[1];
         words[3] = self.plan.levels;
+        words[HZB_DUMP_WORD_FLAGS] = flags;
+        words[HZB_DUMP_WORD_FRAME_INDEX] = frame_index;
         // `take(levels)`, so the tail stays ZERO rather than echoing the plan's padding: a reader
         // that trusted a padded entry would see a plausible extent for a level with no storage.
         for (level, extent) in
             self.plan.level_extent.iter().enumerate().take(self.plan.levels as usize)
         {
-            words[4 + 2 * level] = extent[0];
-            words[5 + 2 * level] = extent[1];
+            words[HZB_DUMP_HEADER_SCALAR_WORDS + 2 * level] = extent[0];
+            words[HZB_DUMP_HEADER_SCALAR_WORDS + 2 * level + 1] = extent[1];
         }
         words
     }
