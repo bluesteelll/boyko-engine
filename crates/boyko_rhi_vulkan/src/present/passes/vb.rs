@@ -1795,13 +1795,31 @@ impl Renderer<'_> {
                 // barrier). Two adjacent sites, opposite orders, and nothing but this comment says
                 // so.
                 //
-                // ⚠️ NO RUNTIME ASSERT CAN CHECK THIS. `FrameGraph::pass_access_count` is private
-                // and no per-pass accessor exists, so the ordering is carried by this comment and by
+                // ⚠️ THE TWO HALVES OF THIS INVARIANT ARE NOT EQUALLY COVERED (OQ 9).
+                //
+                // The RECORD-ORDER half — that the two transfers below reach `cmd` BEFORE
+                // `record_vb_pass` emits this pass's barrier range — is checked since VG R3 piece 4
+                // rung P4-3 by the `cull_uniform_filled` witness: the `unsafe` block below EVALUATES
+                // to it, and the `debug_assert!` reading it sits between `cull_pass` and the
+                // record call, so neither statement can be moved across the other without the read
+                // naming a value that is not in scope. That is a compile error in BOTH profiles,
+                // which is the point — the defect it forecloses (piece 3's F-M4b) had no executable
+                // red anywhere on this machine.
+                //
+                // The DECLARATION half — that the graph derived an intra-pass TRANSFER → COMPUTE
+                // edge from this pass's second declared access on this buffer — is checked by
+                // NOTHING. `FrameGraph::pass_access_count` is private (`framegraph/graph.rs:158`)
+                // and no per-pass accessor exists, so that half is carried by this comment and by
                 // the `frame_index` control the uniform itself provides — `vb_late_count`'s reserved
                 // tail slot, which the readback compares against the host's number. A fill on the
                 // wrong side would make the dispatch read frame N−FRAMES_IN_FLIGHT's uniform, and on
                 // a static fixture that is BIT-IDENTICAL: invisible to every golden, every image
                 // gate and every oracle differential.
+                //
+                // The `unsafe` block's tail value is rung P4-3's witness: a host-side `bool`, no
+                // command, no declared access, no barrier. It is BOUND THERE — rather than assigned
+                // to a flag declared further up — so that the two transfers and the witness are ONE
+                // statement and cannot be separated by an edit that moves only "the fill".
                 //
                 // SAFETY: recording is open and no render scope is active. `count[fi]` is a live
                 // device-local STORAGE buffer (≥ 4 B, the single u32 counter); `cmd_fill_buffer`
@@ -1812,8 +1830,9 @@ impl Renderer<'_> {
                 // `-dataSize-00037` require — and 96 is far inside the 65536-byte inline limit.
                 // `cull_uniform` is a local that outlives the call, and `vkCmdUpdateBuffer` is
                 // forbidden inside a render-pass instance (VUID-vkCmdUpdateBuffer-renderpass):
-                // none is active here, the early raster's `cmd_begin_rendering` is below.
-                unsafe {
+                // none is active here, the early raster's `cmd_begin_rendering` is below. The tail
+                // `true` is a host-side value, not an unsafe operation.
+                let cull_uniform_filled = unsafe {
                     (self.fns.cmd_fill_buffer)(cmd, count[fi].buffer, 0, VK_WHOLE_SIZE, 0);
                     (self.fns.cmd_update_buffer)(
                         cmd,
@@ -1822,10 +1841,30 @@ impl Renderer<'_> {
                         u64::from(VB_CULL_UNIFORM_BYTES),
                         (&cull_uniform as *const VbCullUniform).cast(),
                     );
-                }
+                    true
+                };
                 let cull_pass = plan
                     .vb_batch_cull
                     .expect("invariant: batch_cull_armed => vb_batch_cull pass declared");
+                // === VG R3 piece 4 rung P4-3: the record-order witness READS here (OQ 9's half). ===
+                //
+                // It claims ONE thing: the uniform's fill and update were recorded into `cmd` before
+                // the call below emitted this pass's barriers. It claims NOTHING about GPU
+                // VISIBILITY — whether the derived barrier set actually contains the
+                // TRANSFER → COMPUTE edge is the declaration half, which nothing here can reach (see
+                // the ⚠️ above), and sync-validation is measured dead on this machine, so no layer
+                // reds that half either. The read is syntactically present in both profiles
+                // (`debug_assert!` expands to `if cfg!(debug_assertions) { … }`), which is what makes
+                // the witness's scope, not its runtime value, the load-bearing half.
+                debug_assert!(
+                    cull_uniform_filled,
+                    "invariant: VbCullUniform's fill and update are recorded BEFORE \
+                     `record_vb_pass(vb_batch_cull)`, because a pass's ENTIRE barrier set — including \
+                     the intra-pass TRANSFER → COMPUTE edge on this buffer — is emitted at the pass \
+                     boundary; a transfer recorded after it is ordered by nothing, and the dispatch \
+                     then reads frame N−FRAMES_IN_FLIGHT's uniform, which on a static fixture is \
+                     bit-identical and therefore invisible to every golden"
+                );
                 // SAFETY: recording is open; `record_vb_pass` records the graph's derived barriers
                 // for the "vb_batch_cull" pass into `cmd` — the TRANSFER→COMPUTE ordering of the
                 // descriptor upload, this counter fill and (since VG R3 P3-3) the uniform update
