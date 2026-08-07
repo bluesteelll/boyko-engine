@@ -405,6 +405,47 @@ blockers, on a foundation that by then exists.
 
 ---
 
+## 2026-08-07 — TWO THINGS PIECE 3 CANNOT DECIDE FOR ITSELF
+
+VG R3 piece 3 is COMPLETE and pushed (`b6337dd`..`6a9a7f9`). Two items are blocked on the owner,
+and neither is a defect.
+
+### 1. Four new pins are UNBLESSED, and blessing is not mine to give
+
+`goldens/PINS.toml` gained `vb_occ_mixed_off`, `vb_occ_mixed_keep`, `vb_occ_mixed` and
+`vb_occ_mixed_late`, every `sha256_*` seeded with the literal `PENDING`. That is the path the file's
+own header prescribes for adding a leg by hand; `golden.ps1` reports "NO PIN recorded" and exits 2
+on all four rather than passing. **Verified, all four.**
+
+All four render the SAME image:
+
+    actual = 85b7d3788130a8bb65f0b5b92ba86c71499bd7a4babe7d6900a711944d2913d9
+
+That identity across four regimes — disarmed, FORCE_KEEP, armed (defers 4), FORCE_LATE (defers 6,
+re-admits 2) — is the piece's central claim: the cull rejects geometry and the picture does not move.
+
+**What is needed:** a visual sign-off on the freshly-dumped BMPs. Then bless `vb_occ_mixed_off`
+first (both legs) and verify the other three reproduce the same literal;
+`the_pins_declared_byte_identical_actually_agree` keeps them from drifting afterwards. Until then
+those four gates claim nothing — `PENDING == PENDING` is vacuous, and the guard's own doc now says so.
+
+### 2. Piece 4 has no plan, and its scope is a VALUES call
+
+There is no `VG-R3-P4-*.md`. Piece 3's own text assigns piece 4 the **owner-facing config field** —
+occlusion culling as a setting rather than an env var — and until then the supported disarm is
+`BOYKO_VG_OCC_FORCE=keep`. That is a product-surface decision, not a perf/architecture fork, so it
+is not mine to settle.
+
+Piece 4's other inherited job is a number. The three-number measurement returned **NOT RESOLVED on
+every contrast**, and the reason is structural rather than statistical: nothing brackets
+`vb_batch_cull`, `vb_cull_late` or the late raster scope with timestamps, and `swapchain.rs` sets
+`VK_PRESENT_MODE_FIFO_KHR` unconditionally, so wall clock is bounded below by the display refresh
+(measured 6.893 ms/frame = 145.1 Hz). The zero control came in at 0.47 % against a resolution band
+of 287.91 %. Adding the bracket touches the shipping recorder, which piece 3's boundary excludes —
+so it is piece 4's first job if piece 4 wants a number.
+
+---
+
 ## 2026-08-07 — RESOLVED — the cull verdict divided, and a division cannot agree with a host oracle
 
 **ANSWERED and implemented in the same session. Kept here in full because the reasoning is the
