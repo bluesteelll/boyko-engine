@@ -631,6 +631,122 @@ every option originally listed. The window rect keeps its divide, which is measu
 
 ---
 
+## 2026-08-07 — Profiling + logging, review round 3: both REJECTED, and the SEAM is incompatible
+
+The two plans reached revision 3 and were reviewed a third time — separately, and for the first
+time **against each other**. Verdicts: profiling `REJECTED (6 blockers)`, logging
+`REJECTED (10 blockers)`, seam `INCOMPATIBLE AS WRITTEN (6 blockers)`. Revision 4 is in flight;
+these three items are not the reviewers' to decide.
+
+### The seam was never designed, and that is the round's main finding
+
+Two prior rounds read one plan each. The first reader of the seam found the two documents
+asserting **contradictory facts**: profiling justifies moving its ABI into `boyko_utils` because
+that crate has zero dependencies; logging states flatly that `boyko_utils` depends on `boyko_log`.
+Both cannot hold. Below that, each plan independently invented the same four primitives — a
+per-thread lane index, an `rdtsc` calibration, a never-freeing lane allocator, and a loss
+accounting — with incompatible semantics: one worker would be lane 5 to the profiler and lane 37
+to the logger, and only one of the two clocks would know about a suspend/resume. That is precisely
+the failure Principle 0 names: a capability two subsystems need, built twice as per-crate adapters
+instead of once as a kernel feature.
+
+**Decided by me, not the owner** (architecture, per the standing agreement): a new zero-dependency
+bottom crate `boyko_diag` owns the clock, the lane registry, the loss vocabulary and the
+never-freed storage policy; it is *diagnostically mute* (it emits no `boyko-####` code and prints
+nothing, which is what keeps the graph acyclic); `profiling_abi` is hosted there rather than in
+`boyko_utils`, which keeps its empty `[dependencies]`. Full design:
+`docs/DIAGNOSTICS-SUBSTRATE-PLAN.md`.
+
+### VALUES 1 — how much does a SHIPPED title pay for diagnostics?
+
+Nobody had computed the joint number. Measured from the two plans' own tables:
+
+| | profiling alone | logging alone | **jointly** |
+|---|---|---|---|
+| dev, `.bss` + reserved | 6.65 MiB | 3.46 MiB | **9.33 MiB** (10.11 naive; the shared crate saves 0.78) |
+| **shipping** | 0.85 MiB | 1.16 MiB | **1.95 MiB** — **WRONG; corrected immediately below** |
+| hot-path cache lines | 3-4 | ≤ 4 | **7-8** |
+
+> **CORRECTED 2026-08-08 — the shipping figure above was already wrong on the day it was first put
+> to you, and it is corrected in the open here rather than quietly re-based.**
+>
+> **1.95 MiB has never equalled the sum of its own operands, in any revision.**
+>
+> - As put to you above (rev 3): `0.85 + 1.16 = **2.01**`, printed as **1.95**.
+> - At the corpus's first carved revision the operands moved and the total did not:
+>   `0.89 | 1.15 | naive 1.95`, and `0.89 + 1.15 = **2.04**`.
+> - **Then a second, independent error surfaced underneath the first.** The logger re-derived its
+>   own `shipping` column term by term (`docs/diagnostics/logging/01-EMISSION-RING.md:130`:
+>   512 + 32 + 16 + 16 + 4.25 + 0.008 + 256 + 64 + 320 = **1 220.26 KiB ≈ 1.19 MiB**) and showed
+>   that **no subset of its rows sums to the 1 180 KiB** the seam was quoting — so 1.15 was not a
+>   different configuration, it was wrong too.
+>
+> There is no third quantity 1.95 could have been. Both revisions state that the shared substrate
+> saves **ZERO bytes in shipping** — the 0.78 MiB saving is dev-only — and with a zero saving the
+> joint figure simply **is** the naive sum. **The corrected shipping figure is ≈ 2.08 MiB**
+> (908 + 1 220.26 = 2 128.26 KiB), against ≈ 2.01 MiB on the numbers as they were handed to you.
+> The error ran against you every time: the ask was understated by 0.06 MiB then and by 0.13 MiB
+> now.
+>
+> 🔑 **The lesson that outlives the number, because it defeated a repair pass whose stated job was
+> to catch exactly this.** After the first correction the seam table was *internally consistent* —
+> `0.89 + 1.15` really is `2.04` — and that is precisely why the stale **operand** survived. **A
+> total that checks out against its printed operands proves nothing about those operands.** The
+> durable rule: with a zero shipping saving the joint figure is the sum of the two columns, and
+> any edit to it must re-read the source rows it quotes rather than re-adding the numbers already
+> printed beside it.
+>
+> **What the figure MEANS also changed, and that narrows what is being asked.** S13 —
+> *free when not enabled*, folded in after this entry was written — moved every syscall, thread,
+> hook and first write off the boot path and onto the enable path, so a shipped process that never
+> enables diagnostics **never touches these tables at all**. An untouched all-zero `.bss` table is
+> emitted by the linker with a virtual size and no raw data, so ≈ 2.08 MiB is **declared address
+> space, not resident RAM** (`docs/diagnostics/SEAM.md` §S13, MEMORY row). Two limits on that,
+> both stated by the corpus itself rather than smoothed away: the property holds **only if boot
+> touches nothing** — one write to one lane buffer commits that page and it is lost for that page
+> — and the corpus **explicitly refuses to claim** that the loader leaves an untouched page
+> uncommitted (`substrate/section-report` proves the bytes are absent from the *image*, and no
+> more; `docs/diagnostics/substrate/05-LADDER-GATES.md`, gate DG12).
+>
+> **So the question is narrower than this section's heading suggests.** Not *"what does a player's
+> machine spend on diagnostics"*, but: **is ≈ 2.08 MiB of declared address space — resident only
+> in the sessions where diagnostics are actually switched on — an acceptable price for a shipped
+> title?** Still a VALUES call, and still not mine.
+
+So the profiling plan's headline **"≤ 1 MiB retail" is false in the configuration that will
+actually ship**, and the shared substrate saves **nothing** in shipping — its 0.78 MiB saving is
+dev-only. It is bought for correctness (one lane number, one clock epoch, a loss report that
+cannot itself be dropped), not for footprint, and neither plan may claim otherwise.
+
+Cutting **≈ 2.08 MiB** means cutting one of: logging's 32 × 16 KiB lanes (512 KiB), `SINK_OUT`
+(256 KiB), or the profiler's dynamic-zone arenas (96 KiB — *the current revision states this third
+candidate as **40 KiB** in `shipping`, `docs/diagnostics/SEAM.md` §Open — needs the OWNER, item 1;
+the divergence is recorded here, not resolved, because resolving it belongs to the profiling
+plan*). **This is a VALUES call about what a player's machine spends on diagnostics, and it is not
+mine.**
+
+### SCOPE 1 — what does `shipping-min` actually mean?
+
+Logging's `shipping-min` exists for a title that wants **no resident diagnostics thread**. But
+profiling's `Always` tier still writes a telemetry window synchronously on the dispatcher, so such
+a title pays a periodic `write_all` anyway. Either `shipping-min` also disables telemetry, or the
+profile does not mean what its name says. **SCOPE call.**
+
+### SCOPE 2 — the plans are growing faster than they are converging
+
+Three review rounds, and the blocker count has not come down: **35 findings → 17 → 22**. The two
+documents are now 3370 lines for two subsystems that do not exist as a single line of code, and
+more than half of round 3's new blockers were introduced by what round 2 added — the game-facing
+half — while the seam only became visible because both documents grew into full architectures.
+
+That is a signal about **how much is being designed at once**, not about the reviewers. The
+alternative is a narrowed first tranche — `boyko_diag` + CPU zones + log levels — built and
+measured, with telemetry, retention and the game-facing API returning afterwards on a working
+foundation. Stated here as an option; **the owner decides the scope, not me.** Work continues on
+the full revision 4 unless told otherwise.
+
+---
+
 ## KNOWN FRICTIONS — no decision needed, recorded so they are not rediscovered
 
 - **`target/` grows without bound and silently breaks builds.** It reached 73 GB and hit zero free
@@ -645,6 +761,11 @@ every option originally listed. The window rect keeps its divide, which is measu
   claim being made is about coverage, and read the suite COUNT, not just the failure count.
 - **graphify has been off-target for the render/VB path** for this entire session; every query
   returned `boyko_demo` internals. Grep/Read is the working path there.
+- **The `graphify` binary is not installed in this environment at all** (not on `PATH`), while the
+  `PreToolUse` hooks demand `graphify query` before every Read and Grep. `graphify-out/` exists but
+  its newest subdirectory is from July, so the graph is also stale. The hooks only remind, never
+  block — but they fire on every file access. Fix is either an install or a hook that checks the
+  binary exists before demanding it.
 - **The ECS's global query-type registry can exhaust under the full lib suite.**
   `MAX_QUERY_TYPES = 1024` is a process-global cap minted lazily, and `boyko-ecs --lib` runs 864
   tests in parallel. When scheduling happens to mint the 1025th distinct query shape, whichever test

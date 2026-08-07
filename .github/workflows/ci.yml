@@ -37,6 +37,21 @@ jobs:
       - uses: actions/checkout@v4
       - run: python3 scripts/check_hotpath_exceptions.py
 
+  # docs/diagnostics/ is a 22-file design corpus carved out of two plans that were each reviewed
+  # twice and passed, and which the first reader to hold them side by side found asserting
+  # CONTRADICTORY facts about the same object. Splitting them makes each piece reviewable and makes
+  # that failure more likely, not less — two documents can disagree in one way, twenty-two in many.
+  # Every file declares what it provides and assumes; this job walks the resulting graph so the
+  # question "do these documents agree?" stops needing a reviewer who has read all of them at once.
+  # The script exits 1 rather than passing quietly when the corpus is absent: a green gate with no
+  # subject is the failure mode this campaign has caught nine times.
+  doc-contracts:
+    name: diagnostics corpus contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/check_doc_contracts.py
+
   check:
     name: cargo check
     runs-on: ubuntu-latest
