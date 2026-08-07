@@ -410,7 +410,14 @@ blockers, on a foundation that by then exists.
 VG R3 piece 3 is COMPLETE and pushed (`b6337dd`..`6a9a7f9`). Two items are blocked on the owner,
 and neither is a defect.
 
-### 1. Four new pins are UNBLESSED, and blessing is not mine to give
+### 1. Four new pins are UNBLESSED, and blessing is not mine to give — **RESOLVED: blessed @e160434**
+
+**The owner reviewed the BMPs and signed off; all four legs now record
+`85b7d378…4d2913d9` and re-verify green.** The review raised one real question — the corner
+spheres look stretched — which was investigated before blessing, not waved through: the
+silhouettes are ellipses with RADIAL major axes at `1/cos θ ≈ 1.18` (FOV_Y = 52°), and a
+pixel-exact Bevy 0.14 replica of the two corner spheres reproduced the same ellipses to 0.2 px.
+Rectilinear perspective, not a defect. The original record follows.
 
 `goldens/PINS.toml` gained `vb_occ_mixed_off`, `vb_occ_mixed_keep`, `vb_occ_mixed` and
 `vb_occ_mixed_late`, every `sha256_*` seeded with the literal `PENDING`. That is the path the file's
