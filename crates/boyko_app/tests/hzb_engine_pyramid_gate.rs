@@ -53,7 +53,9 @@
 //! Each leg therefore DECLARES its regime ([`DepthRegime`]) and the gate checks the file against
 //! that declaration — never the reverse. G8's leg declares "no early region" and additionally
 //! asserts that region is untouched staging prefill; G5's declares the converged split and gains
-//! G-P3-E's clause 2' (`depth_early == depth_final`, byte for byte).
+//! G-P3-E's clause 2' (`depth_early == depth_final`, byte for byte); and step P3-8's FORCE-LATE leg
+//! declares the regime in which the two depths DIFFER, which is what makes clauses 2 and 3 — the
+//! pair that proves the pyramid was built at the right point in the frame — assertable at all.
 //!
 //! The magic was bumped in the same step, so a stale pre-P3-7 file cannot decode against the moved
 //! offsets. [`a_stale_pre_p3_7_dump_fails_to_decode_instead_of_being_believed`] EXECUTES that
@@ -76,20 +78,25 @@
 //! it), but a golden-pin test writes a screenshot and asserts nothing, whereas G8 must read a file
 //! back and adjudicate it in the same `cargo test` invocation.
 //!
-//! # TWO worker+driver pairs since VG R3 piece 2 (gate G5)
+//! # THREE worker+driver pairs since VG R3 piece 3 step P3-8
 //!
 //! Piece 2's occlusion split moves the whole `[hzb_poison, hzb_build_*]` block BETWEEN the two
 //! raster scopes on an armed-split frame (plan D6), which makes the block's slot **conditional**.
-//! So this file now runs the same comparison twice:
+//! So this file runs the same comparison three times, once per depth regime:
 //!
 //! * [`hzb_engine_pyramid_equals_the_oracle`] — the UNSPLIT frame (gate G8, unchanged). This is
-//!   the configuration every shipping frame and all 25 golden pins take.
-//! * [`hzb_engine_pyramid_equals_the_oracle_occ`] — the ARMED-SPLIT frame (gate G5), where the
-//!   block sits at its early slot.
+//!   the configuration every shipping frame and all 26 golden pins take.
+//! * [`hzb_engine_pyramid_equals_the_oracle_occ`] — the ARMED-SPLIT, CONVERGED frame (gate G5),
+//!   where the block sits at its early slot and plan D12's fixed point makes the two depths
+//!   byte-identical (G-P3-E clause 2').
+//! * [`hzb_engine_pyramid_equals_the_oracle_force_late`] — the ARMED-SPLIT frame under
+//!   `VB_CULL_OCC_FORCE_LATE` on the `vb_occ_mixed` scene (G-P3-E clauses 2 and 3), the ONLY
+//!   configuration on a static scene in which the late scope draws and therefore the only one in
+//!   which the pyramid's POSITION in the frame is falsifiable.
 //!
-//! ⚠️ The second is an **ADDITION**. Re-pointing the existing worker at the marked scene would
-//! have DELETED the unsplit leg — the only engine-level gate over the path piece 2 newly made
-//! conditional. **Both must be green in the same sitting.**
+//! ⚠️ Each is an **ADDITION**. Re-pointing the existing worker at a marked scene would have DELETED
+//! the unsplit leg — the only engine-level gate over the path piece 2 newly made conditional. **All
+//! three must be green in the same sitting.**
 //!
 //! # Run
 //!
@@ -117,6 +124,8 @@ use boyko_rhi_vulkan::present::{
     HZB_DUMP_WORD_FRAME_INDEX, HZB_PYRAMID_POISON, MAX_HZB_LEVELS,
 };
 
+mod vb_occ_mixed_scene;
+
 /// The env knob that arms `boyko_app::hzb_dump` — the value is the output path.
 const ENV_DUMP: &str = "BOYKO_HZB_DUMP";
 
@@ -136,6 +145,22 @@ const WORKER: &str = "hzb_engine_pyramid_dump";
 /// declaration replica, and the declarator's parity asserts cover `vb_raster_late`, not the HZB
 /// slot.
 const WORKER_OCC: &str = "hzb_engine_pyramid_dump_occ";
+
+/// VG R3 piece 3 step P3-8 — **G-P3-E's FORCE-LATE worker**: the `vb_occ_mixed` scene with
+/// `BOYKO_VG_OCC_FORCE=late`, where the early phase defers EVERY marked instance regardless of the
+/// pyramid.
+///
+/// It is the only configuration in this repository in which the two dumped depths can DIFFER on a
+/// static scene, and therefore the only one in which clauses 2 and 3 — the pair that proves the
+/// pyramid was built at the right point in the frame — are non-vacuous. The five-sphere scene cannot
+/// serve: with every instance marked, FORCE-LATE empties the early depth entirely and trips this
+/// file's own SHIPPED non-vacuity clauses. `vb_occ_mixed` carries an UNMARKED occluder and an
+/// UNMARKED filler precisely so the early depth is populated and varied.
+const WORKER_OCC_LATE: &str = "hzb_engine_pyramid_dump_occ_late";
+
+/// The env that selects the FORCE-LATE regime. Read ONCE at `GpuSceneBundles::boot`, so a regime IS
+/// a process — which is why it is set on the CHILD rather than toggled in one.
+const ENV_OCC_FORCE: [(&str, &str); 1] = [("BOYKO_VG_OCC_FORCE", "late")];
 
 /// The worker window's client extent. 512² is the extent step P1-6 measured the dump at
 /// (`levels = 10`, two build passes), so the coverage this gate reports is directly comparable with
@@ -382,6 +407,47 @@ fn hzb_engine_pyramid_dump_occ() {
     let mut app = App::new();
     app.add_plugins(EnginePlugins::window("boyko_engine hzb G5 (split)", EXTENT, EXTENT));
     app.add_startup_system(setup_occ);
+    app.insert_resource(VB_MESH_PATH);
+    app.insert_resource(HzbConfig { mode: HzbMode::Build });
+    app.run();
+}
+
+/// The `vb_occ_mixed` scene, fully marked, as an ECS startup system — G-P3-E's FORCE-LATE worker's
+/// setup. One scene definition shared with `vb_mesh.rs`, `vb_occ_mixed.rs` and
+/// `vg_occ_verdict_census.rs`; a second copy here would be a second text that can disagree with the
+/// pins it is supposed to describe.
+fn setup_mixed(
+    mut commands: Commands,
+    mut meshes: NonSendResMut<Assets<MeshGpu>>,
+    mut materials: ResMut<Assets<Material>>,
+    mut geo_table: NonSendResMut<MeshGeometryTableSlot>,
+    dev: NonSendRes<GpuDevice>,
+) {
+    vb_occ_mixed_scene::spawn_mixed(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut geo_table,
+        &dev,
+        true,
+    );
+}
+
+/// **G-P3-E's FORCE-LATE WORKER** (VG R3 piece 3 step P3-8) — the `vb_occ_mixed` scene under
+/// `BOYKO_VG_OCC_FORCE=late`, so the early scope draws only the two UNMARKED instances and the LATE
+/// scope draws the two marked survivors.
+///
+/// The regime comes from the env the driver sets, not from a resource: `GpuSceneBundles::boot` reads
+/// `BOYKO_VG_OCC_FORCE` once and freezes it, so it cannot be toggled inside a running process.
+#[test]
+#[ignore = "needs a real windowed GPU device; the G-P3-E driver spawns it with BOYKO_HZB_DUMP and BOYKO_VG_OCC_FORCE=late"]
+fn hzb_engine_pyramid_dump_occ_late() {
+    if dump_path_or_skip("hzb_engine_pyramid_dump_occ_late").is_none() {
+        return;
+    }
+    let mut app = App::new();
+    app.add_plugins(EnginePlugins::window("boyko_engine hzb G-P3-E (force late)", EXTENT, EXTENT));
+    app.add_startup_system(setup_mixed);
     app.insert_resource(VB_MESH_PATH);
     app.insert_resource(HzbConfig { mode: HzbMode::Build });
     app.run();
@@ -648,15 +714,15 @@ fn a_stale_pre_p3_7_dump_fails_to_decode_instead_of_being_believed() {
 ///
 /// One process, as the census's `run_worker` is: the env knob has to exist before the engine boots,
 /// and the host loop exits by returning from `app.run()` rather than by yielding control.
-fn run_dump_worker(worker: &str, out_name: &str) -> (PathBuf, Vec<u8>) {
+fn run_dump_worker(worker: &str, out_name: &str, extra_env: &[(&str, &str)]) -> (PathBuf, Vec<u8>) {
     let exe = std::env::current_exe().expect("invariant: the test binary knows its own path");
     let out = std::env::temp_dir().join(out_name);
     // A stale file from a previous run that this run failed to overwrite would be read as this
     // run's evidence.
     let _ = std::fs::remove_file(&out);
 
-    let status = Command::new(&exe)
-        .args([worker, "--ignored", "--exact", "--test-threads=1", "--nocapture"])
+    let mut cmd = Command::new(&exe);
+    cmd.args([worker, "--ignored", "--exact", "--test-threads=1", "--nocapture"])
         .env(ENV_DUMP, &out)
         .env("BOYKO_DISABLE_VALIDATION", "1")
         // The pyramid dump is the only capture this run is for. Another armed capture would render
@@ -664,8 +730,14 @@ fn run_dump_worker(worker: &str, out_name: &str) -> (PathBuf, Vec<u8>) {
         .env_remove("BOYKO_HOST_DUMP")
         .env_remove("BOYKO_VG_CENSUS")
         .env_remove("BOYKO_VB_PROBE")
-        .status()
-        .expect("invariant: the worker process spawns");
+        // VG R3 piece 3 step P3-8: the regime is a per-worker variable, so it is REMOVED first and
+        // then set only by the leg that wants it. Inherited, a stray shell value would silently
+        // make the converged legs forced ones and their fixed-point clause would red with no defect.
+        .env_remove("BOYKO_VG_OCC_FORCE");
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    let status = cmd.status().expect("invariant: the worker process spawns");
     assert!(status.success(), "the dump worker `{worker}` exited {status}");
 
     let bytes = std::fs::read(&out).unwrap_or_else(|e| {
@@ -697,12 +769,25 @@ enum DepthRegime {
     /// the two depths must be BYTE-IDENTICAL. That is a positive falsifiable claim, not an
     /// embarrassment: if the late scope ever draws a pixel on a converged static frame, it reds.
     ///
-    /// ⚠️ G-P3-E's FIRST regime (FORCE-LATE: `depth_early != depth_final`, and
-    /// `build_pyramid(depth_final) != pyramid`) has NO variant here, because it has no fixture —
-    /// `vb_occ_mixed_late` is authored at step P3-8, and a variant with no constructor is dead code
-    /// under `-D warnings`. What lands here is the machinery those clauses need; the clauses
-    /// themselves land with the scene that can satisfy them.
+    /// ⚠️ G-P3-E's FIRST regime landed at step P3-8 as [`Self::ForcedLateSplit`], with the
+    /// `vb_occ_mixed` scene that can satisfy it. Until then this enum deliberately carried no
+    /// variant for it: a variant with no constructor is dead code under `-D warnings`, and a clause
+    /// asserted on a fixture that cannot satisfy it is a hard red with no defect present.
     ConvergedFixedPoint,
+    /// TWO raster scopes with `VB_CULL_OCC_FORCE_LATE` set (VG R3 piece 3 step P3-8) — G-P3-E's
+    /// FIRST regime, and the ONLY one on a static scene in which the late scope actually draws.
+    ///
+    /// The early phase defers every marked instance regardless of the pyramid, so the early depth
+    /// holds only the UNMARKED occluder and filler while the frame-end depth also holds the two
+    /// marked survivors the late scope drew. Two clauses become non-vacuous and both are asserted:
+    ///
+    /// * **clause 2** — `depth_early != depth_final` at ≥ 1 texel, guaranteed by construction;
+    /// * **clause 3** — `build_pyramid(depth_final) != pyramid`, i.e. the pyramid was NOT built from
+    ///   the final depth. **This is the ordering proof piece 2 could not make.** Clause 1 alone says
+    ///   the pyramid agrees with a rebuild from the EARLY depth; on every earlier fixture the two
+    ///   depths were the same bytes, so a build at EITHER slot agreed and the position was
+    ///   unfalsifiable.
+    ForcedLateSplit,
 }
 
 /// The comparison both gates run, over whichever worker's dump it is handed.
@@ -714,8 +799,9 @@ fn assert_engine_pyramid_equals_the_oracle(
     out_name: &str,
     leg: &str,
     regime: DepthRegime,
+    extra_env: &[(&str, &str)],
 ) {
-    let (path, bytes) = run_dump_worker(worker, out_name);
+    let (path, bytes) = run_dump_worker(worker, out_name, extra_env);
     let dump = decode(&bytes, &path);
     let [source_w, source_h] = dump.source;
 
@@ -756,7 +842,7 @@ fn assert_engine_pyramid_equals_the_oracle(
     let early_live = (dump.flags & HZB_DUMP_FLAG_DEPTH_EARLY) != 0;
     assert_eq!(
         early_live,
-        regime == DepthRegime::ConvergedFixedPoint,
+        regime != DepthRegime::NoEarlyRegion,
         "{leg}: the dump header's HZB_DUMP_FLAG_DEPTH_EARLY is {early_live}, but this worker's \
          scene declares the {} regime. The bit is latched AT the early-depth copy inside the \
          recorder, so a disagreement means the frame did not split the way the fixture says it \
@@ -764,6 +850,7 @@ fn assert_engine_pyramid_equals_the_oracle(
         match regime {
             DepthRegime::NoEarlyRegion => "unsplit (no early region)",
             DepthRegime::ConvergedFixedPoint => "armed-split, converged",
+            DepthRegime::ForcedLateSplit => "armed-split, FORCE-LATE",
         }
     );
 
@@ -772,7 +859,9 @@ fn assert_engine_pyramid_equals_the_oracle(
     // final one there is the exact blindness step P3-7 exists to remove.
     let source_depth: &[f32] = match regime {
         DepthRegime::NoEarlyRegion => dump.depth_final.as_slice(),
-        DepthRegime::ConvergedFixedPoint => dump.depth_early.as_slice(),
+        DepthRegime::ConvergedFixedPoint | DepthRegime::ForcedLateSplit => {
+            dump.depth_early.as_slice()
+        }
     };
 
     match regime {
@@ -818,6 +907,40 @@ fn assert_engine_pyramid_equals_the_oracle(
                 final_nan, None,
                 "{leg}: the FINAL depth region holds a NaN at index {final_nan:?} — the staging's \
                  `0xFFFFFFFF` prefill showing through, i.e. the frame-end depth copy did not run"
+            );
+        }
+        // ---- G-P3-E clause 2 (the FORCE-LATE regime): the two depths DIFFER. ----
+        //
+        // Guaranteed by construction here: the early scope draws only the two UNMARKED instances,
+        // and the late scope then draws the two marked survivors into the same attachment. It is
+        // ASSERTED rather than assumed because it is also the precondition clause 3 rests on — a
+        // frame where the late scope drew nothing would make clause 3 a comparison of the pyramid
+        // against a rebuild from the same bytes it was built from, i.e. green by construction.
+        DepthRegime::ForcedLateSplit => {
+            let final_nan = dump.depth_final.iter().position(|d| d.is_nan());
+            assert_eq!(
+                final_nan, None,
+                "{leg}: the FINAL depth region holds a NaN at index {final_nan:?} — the staging's \
+                 `0xFFFFFFFF` prefill showing through, i.e. the frame-end depth copy did not run"
+            );
+            let differs = dump
+                .depth_early
+                .iter()
+                .zip(dump.depth_final.iter())
+                .filter(|(e, f)| e.to_bits() != f.to_bits())
+                .count();
+            assert!(
+                differs > 0,
+                "{leg}: the EARLY and FINAL depths are BYTE-IDENTICAL over all {} texels. Under \
+                 VB_CULL_OCC_FORCE_LATE the early phase defers EVERY marked instance, so the early \
+                 scope draws only the two unmarked ones and the late scope draws the two marked \
+                 survivors — the two depths differ BY CONSTRUCTION. Equality means the late scope \
+                 drew nothing, and clause 3 below would then be green by construction.",
+                dump.depth_final.len()
+            );
+            eprintln!(
+                "{leg}: clause 2 — depth_early differs from depth_final at {differs} of {} texels",
+                dump.depth_final.len()
             );
         }
     }
@@ -946,6 +1069,44 @@ fn assert_engine_pyramid_equals_the_oracle(
         dump.pyramid_bits.len()
     );
 
+    // ---- G-P3-E clause 3: the pyramid was NOT built from the FINAL depth ------------------------
+    //
+    // THE ORDERING PROOF. Clause 1 above says the pyramid equals a rebuild from the EARLY depth; on
+    // its own that is satisfied by a build at either slot whenever the two depths are the same
+    // bytes, which is every fixture in the tree before this one. Under FORCE-LATE they are not, so
+    // the negative is decidable — and it is what turns "the build is correct" into "the build ran at
+    // the right point in the frame".
+    //
+    // ⚠️ Asserted ONLY in this regime. On the converged one `depth_early == depth_final` byte for
+    // byte (clause 2'), so the two rebuilds are the same array and this would be a hard red with no
+    // defect present — the exact error the plan records round 1 making with clause 2.
+    if regime == DepthRegime::ForcedLateSplit {
+        let mut from_final = vec![0.0f32; layout.pyramid_len()];
+        build_pyramid(&layout, &dump.depth_final, &mut from_final);
+        let agreeing = from_final
+            .iter()
+            .zip(dump.pyramid_bits.iter())
+            .filter(|(o, g)| o.to_bits() == **g)
+            .count();
+        assert_ne!(
+            agreeing,
+            from_final.len(),
+            "{leg}: a pyramid rebuilt from the FINAL depth matches the engine's at EVERY one of \
+             {} texels. The frame-end depth carries the late scope's two survivors, which the \
+             early depth does not, so a build that reduced the EARLY depth cannot agree everywhere \
+             with a reduction of the FINAL one. Equality here means the `[hzb_poison, hzb_build_*]` \
+             block ran AFTER the late raster scope — the ordering defect this clause exists for, \
+             and the one clause 1 alone is structurally blind to.",
+            from_final.len()
+        );
+        eprintln!(
+            "{leg}: clause 3 — build_pyramid(depth_final) agrees with the engine's pyramid at {} of \
+             {} texels, i.e. NOT everywhere, so the pyramid was not reduced from the final depth",
+            agreeing,
+            from_final.len()
+        );
+    }
+
     // ---- the record ---------------------------------------------------------------------------
     //
     // The coverage is REPORTED, never gated on (plan §5 asked for a full-coverage fixture; the
@@ -983,6 +1144,7 @@ fn hzb_engine_pyramid_equals_the_oracle() {
         "hzb_engine_pyramid_g8.bin",
         "G8 (unsplit)",
         DepthRegime::NoEarlyRegion,
+        &[],
     );
 }
 
@@ -1040,5 +1202,47 @@ fn hzb_engine_pyramid_equals_the_oracle_occ() {
         "hzb_engine_pyramid_g5_occ.bin",
         "G5 (armed split)",
         DepthRegime::ConvergedFixedPoint,
+        &[],
+    );
+}
+
+/// **GATE G-P3-E, the FORCE-LATE regime** (VG R3 piece 3 step P3-8) — the same bit-exact comparison
+/// on a frame where the LATE SCOPE ACTUALLY DRAWS, plus the two clauses that need it.
+///
+/// # What this leg adds that no other can
+///
+/// 1. **Clause 1 over a depth the late scope changed.** The pyramid is compared against a rebuild
+///    from `depth_early`, which here holds ONLY the two unmarked instances — a genuinely different
+///    array from the frame-end depth, so the choice of region is load-bearing rather than moot.
+/// 2. **Clause 2**: `depth_early != depth_final` at ≥ 1 texel, asserted, and guaranteed by
+///    construction — the two marked survivors are drawn by the late scope and by nothing else.
+/// 3. **Clause 3**: `build_pyramid(depth_final) != pyramid`. **The ordering proof piece 2 could not
+///    make.** Its own header says so in as many words: with the late scope drawing nothing, a
+///    pyramid built at EITHER slot agreed with the oracle over the dumped depth.
+///
+/// # Controls
+///
+/// * **E1** — move the poison+build block back AFTER the late scope: clauses 1 and 3 both red.
+/// * **E2** — swap the two depth regions in the dump writer: clause 1 reds HERE while clause 2'
+///   stays green on [`hzb_engine_pyramid_equals_the_oracle_occ`], and that PAIR is what proves the
+///   two regions are not interchangeable. E2's discriminating leg is this one: on the converged
+///   fixture the two regions hold the same bytes, so swapping them is invisible there by
+///   construction.
+///
+/// # What it CANNOT claim
+///
+/// That the UNFORCED early phase defers anything (that is `vb_occ_mixed.rs`'s clause 1), or anything
+/// about the pyramid the FORCE-LATE early phase actually READ — under this regime `P_prev != P_cur`
+/// in general and only one pyramid is dumped. That limit is narrowed, not closed, and closing it
+/// would need a second dump pass.
+#[test]
+#[ignore = "live GPU gate (spawns one windowed worker); the orchestrator runs it with --test-threads=1"]
+fn hzb_engine_pyramid_equals_the_oracle_force_late() {
+    assert_engine_pyramid_equals_the_oracle(
+        WORKER_OCC_LATE,
+        "hzb_engine_pyramid_gp3e_late.bin",
+        "G-P3-E (FORCE-LATE, vb_occ_mixed)",
+        DepthRegime::ForcedLateSplit,
+        &ENV_OCC_FORCE,
     );
 }

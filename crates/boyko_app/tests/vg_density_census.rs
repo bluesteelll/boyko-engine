@@ -6,7 +6,7 @@
 //!   by `scripts/golden.ps1` over the VB pins, because a pin is a GPU render against a blessed
 //!   hash and no cargo test drives that. What IS machine-checked here is (a)'s DOMAIN —
 //!   [`the_a_domain_is_exactly_the_vb_pins_that_were_measured`] pins the enumeration, so a
-//!   sixteenth VB pin reds until it has been measured too. The distinction is the point: this
+//!   twentieth VB pin reds until it has been measured too. The distinction is the point: this
 //!   file cannot claim to run (a), and a gate whose domain drifts silently is the vacuous-selection
 //!   defect.
 //! * **the cross-pin agreement of pins DECLARED byte-identical** —
@@ -56,7 +56,7 @@ const ENV_FIXTURE: &str = "BOYKO_VG_FIXTURE";
 
 /// The VB golden pins (a) is measured over. Enumerated so the DOMAIN is machine-checked even
 /// though the hashes are not checked here.
-const VB_PINS: [&str; 15] = [
+const VB_PINS: [&str; 19] = [
     "vb_mesh",
     // VG R3 piece 1 step P1-2: `vb_mesh`'s scene, binary and test with `BOYKO_VG_HZB=1` arming the
     // depth pyramid. It belongs in this DOMAIN like any other VB pin, and it was measured the same
@@ -81,6 +81,21 @@ const VB_PINS: [&str; 15] = [
     // reason above: the census gate's rows come from workers it spawns itself. Adding a name here
     // costs exactly one line, and a future author authoring a bump does not owe a measurement.
     "vb_occ_split",
+    // VG R3 piece 3 step P3-8: the `vb_occ_mixed` four-pin family — `vb_mesh`'s binary and test with
+    // `BOYKO_VG_SCENE=mixed` selecting the first fixture in the tree on which the cull can reject
+    // anything. Same DOMAIN, same measurement route, same commit as the pins.
+    //
+    // ⚠️ All four ship with `sha256_* = "PENDING"`. That is DELIBERATE and it is the file header's
+    // own documented way to add a leg by hand: `golden.ps1` reports a PENDING leg and exits 2 rather
+    // than passing, so an unblessed pin cannot be mistaken for a measured one. Blessing needs a
+    // visual owner sign-off on the freshly-dumped BMP, which no agent can supply.
+    //
+    // They need no density row, for the structural reason recorded above: `vg_density_census_gate`
+    // drives its OWN fixtures through `run_worker` and never reads a pin.
+    "vb_occ_mixed_off",
+    "vb_occ_mixed_keep",
+    "vb_occ_mixed",
+    "vb_occ_mixed_late",
     "vb_both",
     "vb_both_sdf",
     "vb_both_sdf_tex",
@@ -240,7 +255,7 @@ fn the_a_domain_is_exactly_the_vb_pins_that_were_measured() {
 /// empty, so the marcher writes nothing), not about an inert addition to one code path — a red
 /// there would report a different defect, and this table exists so that every row's red has one
 /// meaning.
-const DECLARED_IDENTICAL_PINS: [(&str, &str, &str); 2] = [
+const DECLARED_IDENTICAL_PINS: [(&str, &str, &str); 5] = [
     (
         "vb_mesh_hzb",
         "vb_mesh",
@@ -255,6 +270,40 @@ const DECLARED_IDENTICAL_PINS: [(&str, &str, &str); 2] = [
          The late scope therefore draws zero, and LOAD_OP_LOAD / STORE_OP_STORE make a scope that \
          draws nothing pixel-identical to no scope at all (piece 2, D4). ⚠️ A divergence is the \
          CULL DELETING VISIBLE GEOMETRY, not a plumbing change",
+    ),
+    // ---- VG R3 piece 3 step P3-8: the `vb_occ_mixed` family, whose base is its OWN `off` leg ----
+    //
+    // Not `vb_mesh`: these four render a DIFFERENT scene (`BOYKO_VG_SCENE=mixed`), so their common
+    // hash is a property of that scene and comparing them against the five-sphere pin would be a
+    // guaranteed red with no defect present. `vb_occ_mixed_off` is the unarmed leg of the same
+    // geometry through the same binary, which is what makes each row below a one-step claim.
+    (
+        "vb_occ_mixed_keep",
+        "vb_occ_mixed_off",
+        "the occlusion split is armed in FULL — second raster scope, late cull dispatch, both extra \
+         descriptor sets — while `VB_CULL_OCC_FORCE_KEEP` makes the early phase defer NOTHING. This \
+         row is the PLUMBING claim: it says every mechanism the split adds is pixel-inert before \
+         the decision is switched on. ⚠️ A divergence here is a plumbing defect, NOT a wrong \
+         verdict — the verdict is not yet being computed on this leg",
+    ),
+    (
+        "vb_occ_mixed",
+        "vb_occ_mixed_off",
+        "the cull is ARMED and UNFORCED on a scene that actually occludes: four marked instances \
+         sit wholly inside the near slab's silhouette, so the early phase defers exactly them and \
+         the late phase (plan D12's fixed point — one predicate, the same pyramid bytes, the same \
+         verdict) rejects every candidate again. ⚠️ A divergence here is THE CULL DELETING VISIBLE \
+         GEOMETRY. Against `vb_occ_mixed_keep` it is a ONE-BIT contrast, which is what makes it a \
+         DECISION claim rather than a plumbing one",
+    ),
+    (
+        "vb_occ_mixed_late",
+        "vb_occ_mixed_off",
+        "`VB_CULL_OCC_FORCE_LATE` defers EVERY marked instance regardless of the pyramid, so the \
+         two marked-VISIBLE instances are rasterised by the LATE scope through `vb_set0_late` and \
+         the survivor-indirection bit, with a GPU-written `instanceCount`. This is the only row in \
+         the family whose green says the late raster path produces correct pixels. ⚠️ A divergence \
+         is the late scope drawing the wrong geometry, or drawing none of it",
     ),
 ];
 
@@ -276,6 +325,11 @@ const DECLARED_IDENTICAL_PINS: [(&str, &str, &str); 2] = [
 /// * **Nothing about whether the derived pin was ever RENDERED.** A pre-filled pair agrees before
 ///   either leg has run on a GPU. `scripts/golden.ps1 -Pin <name>` is what turns the literals into
 ///   a measurement; this test only keeps them from drifting apart afterwards.
+/// * **⚠️ Nothing at all, while both legs read `PENDING`.** The four `vb_occ_mixed` rows ship
+///   unblessed at VG R3 piece 3 step P3-8, so `"PENDING" == "PENDING"` is green by construction.
+///   That is not a hole this test can close — a hash requires a visual owner sign-off — and it is
+///   stated here rather than left for a reader to discover. `golden.ps1` is the leg that reports an
+///   unblessed pin: it exits 2 on a `PENDING` literal instead of passing.
 #[test]
 fn the_pins_declared_byte_identical_actually_agree() {
     let pins = std::fs::read_to_string(repo_path("../../goldens/PINS.toml"))

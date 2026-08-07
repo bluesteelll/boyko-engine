@@ -523,10 +523,14 @@ pub struct CullProbe {
     ///
     /// ⚠️ The shader writes it only under `VB_CULL_OCC_ARMED`, which VG R3 piece 3 step P3-6 sets
     /// on exactly the frames `path_vb_occlusion_split()` holds — i.e. frames with marked
-    /// instances, a pyramid and a mesh-bounds table. **No fixture that arms this readback marks
-    /// anything**, so it still reads the staging's boot prefill here and equality with
-    /// [`Self::frame`] (plan D6's control F-M4a) is NOT assertable on this channel. A marked
-    /// readback fixture is step P3-8's `vb_occ_mixed`.
+    /// instances, a pyramid and a mesh-bounds table. **No fixture in THIS module marks anything**,
+    /// so on `vb_inst_cull_*` and `vb_cull_hzb_pairing` it still reads the staging's boot prefill
+    /// and equality with [`Self::frame`] (plan D6's control F-M4a) is NOT assertable there.
+    ///
+    /// Step P3-8's `vb_occ_mixed.rs` is the fixture that changed that: it marks six of eight
+    /// instances and arms this readback in the same process, which makes `gpu_frame == frame` a
+    /// real GPU observation and gives control F-M4a its channel. ⚠️ It proves the INSTRUMENT is
+    /// live; it does NOT test the intra-pass `TRANSFER → COMPUTE` barrier behind it.
     pub gpu_frame: u32,
     /// `list=[..]` — the compacted visible-BATCH indices.
     pub list: Vec<u32>,

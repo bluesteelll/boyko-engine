@@ -33,6 +33,36 @@
 //! this re-pin — which is the whole reason the prediction is written down here instead of the
 //! generator's output being pasted in and trusted.
 //!
+//! # ⚠️ THE THIRD RE-PIN: VG R3 piece 3 step P3-8, and the debt it pays — one DOCUMENTED gap and one that was NOT
+//!
+//! Step P3-8 closes two divergences between this replica and `declare_vb_graph`. **Both were opened
+//! by earlier steps of the same piece; only ONE of them was written down**, and the difference is
+//! worth recording because it decides how a reader should treat a green run of this file.
+//!
+//! 1. **`vb_raster_late`'s two new VERTEX reads** (all four `S*` rows). P3-6 armed the cull, so the
+//!    late scope's VS really does read `vb_instance_ring` and `vb_late_visible`. The gap was
+//!    recorded in block caps at its own declaration site the moment it was opened, with the shape of
+//!    the missing edge named. Closing it adds **exactly one** buffer barrier per split row —
+//!    `vb_late_visible`, `COMPUTE_SHADER(SHADER_WRITE) → VERTEX_SHADER(SHADER_READ)` — because the
+//!    ring read is already visible at that stage and access and `sync::transition` returns `None`
+//!    for it.
+//! 2. **`hzb_dump_depth_early`** (row `S3` only). P3-7 added the pass to production **and recorded
+//!    nothing here**, so between P3-7 and P3-8 the S3 baseline pinned a stream production had
+//!    stopped producing — a replica short one whole PASS, which also shifts every later index. It
+//!    adds one image barrier, moves TWO FIELDS of `vb_raster_late`'s depth WAW (`old_layout` and
+//!    `src_stage`, with the COUNT unchanged — the class this file exists to catch), and makes the
+//!    "the split adds three passes" arithmetic row-dependent for the first time.
+//!
+//! **Both deltas were DERIVED from `sync::transition` and the declaration order, not regenerated.**
+//! [`dump_vb_split_barrier_streams`]'s own doc states why that mattered here: a baseline authored
+//! after the change certifies the new behaviour, and re-running the generator would have made the
+//! replica agree with production BY CONSTRUCTION — the "gate that certifies the defect" this
+//! campaign has already recorded once. Each derivation is written beside the row it produced.
+//!
+//! ⚠️ **The lesson, stated where the next author will hit it:** a divergence recorded only in a plan
+//! is a divergence that will be forgotten. Divergence 1 survived three steps because it was written
+//! at its own site in block caps; divergence 2 was invisible for one step because it was not.
+//!
 //! # The SECOND re-pin: VG R3 piece 3 step P3-3, and the ONE place the plan's own prediction is wrong
 //!
 //! P3-3 declares the late cull and the occlusion split's three buffers. Its plan entry says it moves
@@ -411,6 +441,11 @@ const S2: VbRow = VbRow {
 
 /// **S3** — split ON, HZB armed, dump ON, SSAO off, `VB × Mesh`. **Mandatory**: `hzb_dump` is one
 /// of the four `vb_depth` readers the block move re-sources, and it is gate G5's own path.
+///
+/// ⚠️ Since VG R3 piece 3 step P3-8 it is also the ONLY row that declares `hzb_dump_depth_early`
+/// (plan D10) — the pass P3-7 added to production and did not add here. It is therefore the only row
+/// on which the split adds FOUR passes rather than three, and the only one whose `vb_depth` carries
+/// TWO transitions into `TRANSFER_SRC_OPTIMAL`.
 const S3: VbRow = VbRow {
     id: "S3 (split ON, HZB armed, dump ON, SSAO off, VB×Mesh)",
     split: true,
@@ -925,6 +960,34 @@ fn declare_vb_frame(row: VbRow) -> VbFrame {
             vb_depth,
         );
 
+        // `hzb_dump_depth_early` (VG R3 piece 3 step P3-7, plan D10) — the EARLY-DEPTH dump copy,
+        // added to this replica at step P3-8.
+        //
+        // ⚠️ **P3-7 ADDED IT TO PRODUCTION AND NOT HERE, AND RECORDED NOTHING.** The `vb_raster_late`
+        // divergence below was written down in block caps at its own site when it was opened; this
+        // one was not, so between P3-7 and P3-8 the S3 baseline pinned a stream that production had
+        // stopped producing — a replica silently one PASS short, which is a strictly worse state
+        // than the documented one-barrier gap because a missing PASS also shifts every later index.
+        //
+        // ONE access, the SAME shape the end-of-frame `hzb_dump` declares on the same image, and the
+        // POSITION is the claim: after the last `hzb_build_*` so what it copies is exactly what they
+        // reduced, and before `vb_raster_late` so nothing has drawn into the depth again. Both
+        // neighbours are asserted by `declare_order_invariants_hold_in_the_replica`.
+        //
+        // The gate is `occlusion_split && hzb_dump_armed` and nothing else — the declarator's, with
+        // the `hzb_levels` conjunct that `row.hzb_dump` carries here because the `hzb_dump` pass
+        // itself takes it.
+        if row.hzb_dump && row.hzb_levels.is_some() {
+            pass!("hzb_dump_depth_early");
+            g.image_access(
+                vb_depth,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                SubRange::DEPTH,
+            );
+        }
+
         // `vb_cull_late` (VG R3 piece 3 step P3-3, plan D4/D5/D8) — the SECOND dispatch of the cull
         // module, declared after the last `hzb_build_*` and before `vb_raster_late`: it reads the
         // pyramid THIS frame's build wrote and writes the `instanceCount` the late scope fetches.
@@ -1001,30 +1064,46 @@ fn declare_vb_frame(row: VbRow) -> VbFrame {
         //  * `vb_depth` as a DEPTH write at `DEPTH_ATTACHMENT_OPTIMAL` — the same WAW, and on an
         //    HZB-armed row the RETURN half of the round trip through `hzb_build_0`'s read.
         //
-        // ⚠️⚠️ **KNOWN DIVERGENCE FROM PRODUCTION, OPENED AT VG R3 PIECE 3 STEP P3-6 AND CLOSED AT
-        // P3-8.** Through piece 2 and steps P3-1..P3-5 this pass declared exactly three accesses,
-        // and the VS's `vb_instance_ring` / `vb_visible_instance` reads were deliberately absent
-        // because every late record carried `instanceCount = 0`: zero vertex invocations, neither
-        // read performed, and declaring them would have declared an access the recorder does not
-        // make. Step P3-6 ARMED the cull, so `declare_vb_graph` now declares TWO MORE accesses
-        // here — `vb_instance_ring` at VERTEX and **`vb_late_visible`** at VERTEX (not
+        // ⚠️⚠️ **DIVERGENCE OPENED AT VG R3 PIECE 3 STEP P3-6, CLOSED HERE AT P3-8.** Through piece 2
+        // and steps P3-1..P3-5 this pass declared exactly three accesses, and the VS's
+        // `vb_instance_ring` / `vb_visible_instance` reads were deliberately absent because every
+        // late record carried `instanceCount = 0`: zero vertex invocations, neither read performed,
+        // and declaring them would have declared an access the recorder does not make. Step P3-6
+        // ARMED the cull, so `declare_vb_graph` declares TWO MORE accesses here —
+        // `vb_instance_ring` at VERTEX and **`vb_late_visible`** at VERTEX (not
         // `vb_visible_instance`: the late scope binds `vb_set0_late`, which is `vb_set0` with @11
-        // changed, leaving `vb_raster.vs.hlsl` byte-unchanged). The `vb_late_visible` read derives
-        // a `vb_cull_late (COMPUTE, SHADER_WRITE) → vb_raster_late (VERTEX, SHADER_READ)` RAW that
-        // this replica's split rows DO NOT MODEL.
+        // changed, leaving `vb_raster.vs.hlsl` byte-unchanged).
         //
-        // ⇒ **On a split row this file's stream is one barrier short of production's, on purpose
-        // and for exactly one step.** It is recorded here rather than fixed in place because
-        // adding the rows means re-measuring every field of the derived edge, which is the plan's
-        // P3-8 work item (G-P3-F's "`vb_raster_late`'s two new VERTEX reads") and not a number to
-        // guess at. What the file's own header says about replicas applies with full force until
-        // then: this pins what the framegraph DERIVES from a declaration shaped like the
-        // declarator's, and on split rows that shape is now stale.
+        // ⚠️ **The two rows below were DERIVED from the declarations, never regenerated by re-running
+        // `dump_vb_split_barrier_streams`.** That generator's own doc states the authoring-order
+        // discipline: *a baseline authored after the change certifies the new behaviour*. Regenerating
+        // here would have made the replica agree with production BY CONSTRUCTION — the "gate that
+        // certifies the defect" this campaign has already recorded once. What the derivation says,
+        // from `sync::transition`:
+        //
+        //  * `vb_instance_ring` — `vb_raster` already read it at VERTEX/SHADER_READ and nothing has
+        //    written it since, so `layout_change` is false, `flush_access` is 0, and both
+        //    `stage & !visible_stages` and `access & !visible_access` are 0 ⇒ `need == false` ⇒
+        //    **NO BARRIER**. The declaration still matters (it is what makes that visibility a
+        //    declared fact rather than an accident), but it routes nothing.
+        //  * `vb_late_visible` — `vb_cull_late`'s read-then-write pair ends in a WRITE, so a pending
+        //    COMPUTE/SHADER_WRITE flush is outstanding ⇒ the RAW arm ⇒ **ONE barrier**,
+        //    `COMPUTE_SHADER(SHADER_WRITE) → VERTEX_SHADER(SHADER_READ)`.
         pass!("vb_raster_late");
         g.buffer_access(
             vb_indirect_late,
             VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
             VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+        );
+        g.buffer_access(
+            vb_instance_ring,
+            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+        );
+        g.buffer_access(
+            vb_late_visible,
+            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
         );
         g.image_access(
             vb_id,
@@ -2854,8 +2933,23 @@ const S1_EXPECTED_BUF: &[BufBarrier] = &[
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
     },
+    // VG R3 piece 3 step P3-8: `vb_raster_late`'s `vb_late_visible` VERTEX read. DERIVED from the
+    // declarations, not regenerated: `vb_cull_late` leaves a pending COMPUTE/SHADER_WRITE flush on
+    // this buffer (its read-then-write pair ends in the write), so the next access takes
+    // `sync::transition`'s RAW arm — `src = (flush_stages, flush_access)` — and the dst is the
+    // VERTEX/SHADER_READ this pass declares. The sibling `vb_instance_ring` read declared beside it
+    // adds NO barrier: `vb_raster` already read that buffer at VERTEX/SHADER_READ and nothing wrote
+    // it since, so `stage & !visible_stages` and `access & !visible_access` are both zero and
+    // `need` is false.
     BufBarrier {
-        res: ResId(15), // [14] "light_table"
+        res: ResId(29), // [14] "vb_late_visible"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(15), // [15] "light_table"
         src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -2873,9 +2967,9 @@ const S1_EXPECTED_PASS: &[PassBarrierRange] = &[
     PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 5 }, // [6] "vb_batch_cull"
     PassBarrierRange { img_begin: 3, img_count: 2, buf_begin: 6, buf_count: 3 }, // [7] "vb_raster"
     PassBarrierRange { img_begin: 5, img_count: 0, buf_begin: 9, buf_count: 4 }, // [8] "vb_cull_late"
-    PassBarrierRange { img_begin: 5, img_count: 2, buf_begin: 13, buf_count: 1 }, // [9] "vb_raster_late"
-    PassBarrierRange { img_begin: 7, img_count: 4, buf_begin: 14, buf_count: 1 }, // [10] "vb_resolve"
-    PassBarrierRange { img_begin: 11, img_count: 1, buf_begin: 15, buf_count: 0 }, // [11] "present_sample"
+    PassBarrierRange { img_begin: 5, img_count: 2, buf_begin: 13, buf_count: 2 }, // [9] "vb_raster_late"
+    PassBarrierRange { img_begin: 7, img_count: 4, buf_begin: 15, buf_count: 1 }, // [10] "vb_resolve"
+    PassBarrierRange { img_begin: 11, img_count: 1, buf_begin: 16, buf_count: 0 }, // [11] "present_sample"
 ];
 
 /// S2's image baseline — see [`S1_EXPECTED_IMG`].
@@ -3171,8 +3265,23 @@ const S2_EXPECTED_BUF: &[BufBarrier] = &[
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
     },
+    // VG R3 piece 3 step P3-8: `vb_raster_late`'s `vb_late_visible` VERTEX read. DERIVED from the
+    // declarations, not regenerated: `vb_cull_late` leaves a pending COMPUTE/SHADER_WRITE flush on
+    // this buffer (its read-then-write pair ends in the write), so the next access takes
+    // `sync::transition`'s RAW arm — `src = (flush_stages, flush_access)` — and the dst is the
+    // VERTEX/SHADER_READ this pass declares. The sibling `vb_instance_ring` read declared beside it
+    // adds NO barrier: `vb_raster` already read that buffer at VERTEX/SHADER_READ and nothing wrote
+    // it since, so `stage & !visible_stages` and `access & !visible_access` are both zero and
+    // `need` is false.
     BufBarrier {
-        res: ResId(15), // [14] "light_table"
+        res: ResId(29), // [14] "vb_late_visible"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(15), // [15] "light_table"
         src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -3192,9 +3301,9 @@ const S2_EXPECTED_PASS: &[PassBarrierRange] = &[
     PassBarrierRange { img_begin: 6, img_count: 2, buf_begin: 9, buf_count: 0 }, // [8] "hzb_build_0"
     PassBarrierRange { img_begin: 8, img_count: 2, buf_begin: 9, buf_count: 0 }, // [9] "hzb_build_1"
     PassBarrierRange { img_begin: 10, img_count: 2, buf_begin: 9, buf_count: 4 }, // [10] "vb_cull_late"
-    PassBarrierRange { img_begin: 12, img_count: 2, buf_begin: 13, buf_count: 1 }, // [11] "vb_raster_late"
-    PassBarrierRange { img_begin: 14, img_count: 4, buf_begin: 14, buf_count: 1 }, // [12] "vb_resolve"
-    PassBarrierRange { img_begin: 18, img_count: 1, buf_begin: 15, buf_count: 0 }, // [13] "present_sample"
+    PassBarrierRange { img_begin: 12, img_count: 2, buf_begin: 13, buf_count: 2 }, // [11] "vb_raster_late"
+    PassBarrierRange { img_begin: 14, img_count: 4, buf_begin: 15, buf_count: 1 }, // [12] "vb_resolve"
+    PassBarrierRange { img_begin: 18, img_count: 1, buf_begin: 16, buf_count: 0 }, // [13] "present_sample"
 ];
 
 /// S3's image baseline — see [`S1_EXPECTED_IMG`].
@@ -3309,15 +3418,22 @@ const S3_EXPECTED_IMG: &[ImgBarrier] = &[
         new_layout: VK_IMAGE_LAYOUT_GENERAL,
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 6, mip_count: 4, base_layer: 0, layer_count: 1 },
     },
+    // VG R3 piece 3 step P3-8: `hzb_dump_depth_early`'s ONE access. DERIVED, not regenerated.
+    // `hzb_build_0` read `vb_depth` at COMPUTE/SHADER_READ and left `SHADER_READ_ONLY_OPTIMAL` with
+    // NO pending flush (a read clears it) and `visible = {COMPUTE, SHADER_READ}`. This access
+    // changes the layout, so `need` is true; `flush_access == 0` and `visible_stages != 0` select
+    // `sync::transition`'s WAR / visibility-extend arm, whose src is `(visible_stages, 0)` — an
+    // EXECUTION dependency on the prior readers, with no memory to make available because the src
+    // is a read.
     ImgBarrier {
-        res: ResId(14), // [11] "hzb_pyramid"
+        res: ResId(2), // [11] "vb_depth"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        src_access: VK_ACCESS_SHADER_WRITE_BIT,
-        dst_access: VK_ACCESS_SHADER_READ_BIT,
-        old_layout: VK_IMAGE_LAYOUT_GENERAL,
-        new_layout: VK_IMAGE_LAYOUT_GENERAL,
-        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 5, base_layer: 0, layer_count: 1 },
+        dst_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_TRANSFER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        new_layout: VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
         res: ResId(14), // [12] "hzb_pyramid"
@@ -3327,10 +3443,20 @@ const S3_EXPECTED_IMG: &[ImgBarrier] = &[
         dst_access: VK_ACCESS_SHADER_READ_BIT,
         old_layout: VK_IMAGE_LAYOUT_GENERAL,
         new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 5, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(14), // [13] "hzb_pyramid"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 6, mip_count: 4, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(1), // [13] "vb_id"
+        res: ResId(1), // [14] "vb_id"
         src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         dst_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
@@ -3339,18 +3465,25 @@ const S3_EXPECTED_IMG: &[ImgBarrier] = &[
         new_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
+    // ⚠️ VG R3 piece 3 step P3-8 MOVES TWO FIELDS OF THIS BARRIER, and the move is the whole point
+    // of pinning fields rather than counts. `hzb_dump_depth_early` above now sits between
+    // `hzb_build_0`'s read and this write, so the depth's state when the late scope claims it is
+    // `TRANSFER_SRC_OPTIMAL` with `visible_stages = {COMPUTE, TRANSFER}` — the old_layout was
+    // `SHADER_READ_ONLY_OPTIMAL` and the src_stage was `COMPUTE_SHADER` alone. The COUNT is
+    // unchanged, which is exactly the class `a_dropped_writer_keeps_every_count_and_moves_only
+    // _fields` exists for.
     ImgBarrier {
-        res: ResId(2), // [14] "vb_depth"
-        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        res: ResId(2), // [15] "vb_depth"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
         dst_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
         src_access: 0,
         dst_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-        old_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        old_layout: VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
         new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(1), // [15] "vb_id"
+        res: ResId(1), // [16] "vb_id"
         src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
@@ -3360,7 +3493,7 @@ const S3_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(0), // [16] "lit"
+        res: ResId(0), // [17] "lit"
         src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
@@ -3370,7 +3503,7 @@ const S3_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(3), // [17] "cascade"
+        res: ResId(3), // [18] "cascade"
         src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
@@ -3380,7 +3513,7 @@ const S3_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 4 },
     },
     ImgBarrier {
-        res: ResId(4), // [18] "atlas"
+        res: ResId(4), // [19] "atlas"
         src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
@@ -3390,7 +3523,7 @@ const S3_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 16 },
     },
     ImgBarrier {
-        res: ResId(0), // [19] "lit"
+        res: ResId(0), // [20] "lit"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
@@ -3399,8 +3532,11 @@ const S3_EXPECTED_IMG: &[ImgBarrier] = &[
         new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
+    // UNMOVED by step P3-8, and that is itself derived rather than hoped for: `vb_raster_late`'s
+    // depth WRITE resets the visibility accumulator, so the frame-end dump's source is the late
+    // scope's own flush whether or not an early copy happened earlier in the frame.
     ImgBarrier {
-        res: ResId(2), // [20] "vb_depth"
+        res: ResId(2), // [21] "vb_depth"
         src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
         dst_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
         src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
@@ -3410,7 +3546,7 @@ const S3_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(14), // [21] "hzb_pyramid"
+        res: ResId(14), // [22] "hzb_pyramid"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
         src_access: 0,
@@ -3520,8 +3656,23 @@ const S3_EXPECTED_BUF: &[BufBarrier] = &[
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
     },
+    // VG R3 piece 3 step P3-8: `vb_raster_late`'s `vb_late_visible` VERTEX read. DERIVED from the
+    // declarations, not regenerated: `vb_cull_late` leaves a pending COMPUTE/SHADER_WRITE flush on
+    // this buffer (its read-then-write pair ends in the write), so the next access takes
+    // `sync::transition`'s RAW arm — `src = (flush_stages, flush_access)` — and the dst is the
+    // VERTEX/SHADER_READ this pass declares. The sibling `vb_instance_ring` read declared beside it
+    // adds NO barrier: `vb_raster` already read that buffer at VERTEX/SHADER_READ and nothing wrote
+    // it since, so `stage & !visible_stages` and `access & !visible_access` are both zero and
+    // `need` is false.
     BufBarrier {
-        res: ResId(15), // [14] "light_table"
+        res: ResId(29), // [14] "vb_late_visible"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(15), // [15] "light_table"
         src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -3541,11 +3692,14 @@ const S3_EXPECTED_PASS: &[PassBarrierRange] = &[
     PassBarrierRange { img_begin: 6, img_count: 1, buf_begin: 9, buf_count: 0 }, // [8] "hzb_poison"
     PassBarrierRange { img_begin: 7, img_count: 2, buf_begin: 9, buf_count: 0 }, // [9] "hzb_build_0"
     PassBarrierRange { img_begin: 9, img_count: 2, buf_begin: 9, buf_count: 0 }, // [10] "hzb_build_1"
-    PassBarrierRange { img_begin: 11, img_count: 2, buf_begin: 9, buf_count: 4 }, // [11] "vb_cull_late"
-    PassBarrierRange { img_begin: 13, img_count: 2, buf_begin: 13, buf_count: 1 }, // [12] "vb_raster_late"
-    PassBarrierRange { img_begin: 15, img_count: 4, buf_begin: 14, buf_count: 1 }, // [13] "vb_resolve"
-    PassBarrierRange { img_begin: 19, img_count: 1, buf_begin: 15, buf_count: 0 }, // [14] "present_sample"
-    PassBarrierRange { img_begin: 20, img_count: 2, buf_begin: 15, buf_count: 0 }, // [15] "hzb_dump"
+    // VG R3 piece 3 step P3-8: the pass P3-7 added to production and did NOT add here. It routes
+    // exactly ONE image barrier and no buffer barriers.
+    PassBarrierRange { img_begin: 11, img_count: 1, buf_begin: 9, buf_count: 0 }, // [11] "hzb_dump_depth_early"
+    PassBarrierRange { img_begin: 12, img_count: 2, buf_begin: 9, buf_count: 4 }, // [12] "vb_cull_late"
+    PassBarrierRange { img_begin: 14, img_count: 2, buf_begin: 13, buf_count: 2 }, // [13] "vb_raster_late"
+    PassBarrierRange { img_begin: 16, img_count: 4, buf_begin: 15, buf_count: 1 }, // [14] "vb_resolve"
+    PassBarrierRange { img_begin: 20, img_count: 1, buf_begin: 16, buf_count: 0 }, // [15] "present_sample"
+    PassBarrierRange { img_begin: 21, img_count: 2, buf_begin: 16, buf_count: 0 }, // [16] "hzb_dump"
 ];
 
 /// S4's image baseline — see [`S1_EXPECTED_IMG`].
@@ -3921,8 +4075,23 @@ const S4_EXPECTED_BUF: &[BufBarrier] = &[
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
     },
+    // VG R3 piece 3 step P3-8: `vb_raster_late`'s `vb_late_visible` VERTEX read. DERIVED from the
+    // declarations, not regenerated: `vb_cull_late` leaves a pending COMPUTE/SHADER_WRITE flush on
+    // this buffer (its read-then-write pair ends in the write), so the next access takes
+    // `sync::transition`'s RAW arm — `src = (flush_stages, flush_access)` — and the dst is the
+    // VERTEX/SHADER_READ this pass declares. The sibling `vb_instance_ring` read declared beside it
+    // adds NO barrier: `vb_raster` already read that buffer at VERTEX/SHADER_READ and nothing wrote
+    // it since, so `stage & !visible_stages` and `access & !visible_access` are both zero and
+    // `need` is false.
     BufBarrier {
-        res: ResId(15), // [14] "light_table"
+        res: ResId(29), // [14] "vb_late_visible"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(15), // [15] "light_table"
         src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -3942,13 +4111,13 @@ const S4_EXPECTED_PASS: &[PassBarrierRange] = &[
     PassBarrierRange { img_begin: 6, img_count: 2, buf_begin: 9, buf_count: 0 }, // [8] "hzb_build_0"
     PassBarrierRange { img_begin: 8, img_count: 2, buf_begin: 9, buf_count: 0 }, // [9] "hzb_build_1"
     PassBarrierRange { img_begin: 10, img_count: 2, buf_begin: 9, buf_count: 4 }, // [10] "vb_cull_late"
-    PassBarrierRange { img_begin: 12, img_count: 2, buf_begin: 13, buf_count: 1 }, // [11] "vb_raster_late"
-    PassBarrierRange { img_begin: 14, img_count: 2, buf_begin: 14, buf_count: 0 }, // [12] "vb_viewt"
-    PassBarrierRange { img_begin: 16, img_count: 2, buf_begin: 14, buf_count: 0 }, // [13] "vb_geo"
-    PassBarrierRange { img_begin: 18, img_count: 3, buf_begin: 14, buf_count: 0 }, // [14] "ssao"
-    PassBarrierRange { img_begin: 21, img_count: 4, buf_begin: 14, buf_count: 1 }, // [15] "vb_shade_split"
-    PassBarrierRange { img_begin: 25, img_count: 1, buf_begin: 15, buf_count: 0 }, // [16] "sdf_forward_march"
-    PassBarrierRange { img_begin: 26, img_count: 1, buf_begin: 15, buf_count: 0 }, // [17] "present_sample"
+    PassBarrierRange { img_begin: 12, img_count: 2, buf_begin: 13, buf_count: 2 }, // [11] "vb_raster_late"
+    PassBarrierRange { img_begin: 14, img_count: 2, buf_begin: 15, buf_count: 0 }, // [12] "vb_viewt"
+    PassBarrierRange { img_begin: 16, img_count: 2, buf_begin: 15, buf_count: 0 }, // [13] "vb_geo"
+    PassBarrierRange { img_begin: 18, img_count: 3, buf_begin: 15, buf_count: 0 }, // [14] "ssao"
+    PassBarrierRange { img_begin: 21, img_count: 4, buf_begin: 15, buf_count: 1 }, // [15] "vb_shade_split"
+    PassBarrierRange { img_begin: 25, img_count: 1, buf_begin: 16, buf_count: 0 }, // [16] "sdf_forward_march"
+    PassBarrierRange { img_begin: 26, img_count: 1, buf_begin: 16, buf_count: 0 }, // [17] "present_sample"
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -5187,7 +5356,8 @@ fn s2_pins_the_depth_round_trip_across_the_moved_block() {
 }
 
 /// **S3's claim.** `hzb_dump`'s `vb_depth` source has CHANGED CHARACTER, and this is the asserted
-/// -correct value rather than a regression.
+/// -correct value rather than a regression — and, since VG R3 piece 3 step P3-8, the fact that a
+/// dumped split frame now takes **TWO** depth copies whose sources are DIFFERENT.
 ///
 /// On an unsplit armed frame the dump finds the depth already in `SHADER_READ_ONLY_OPTIMAL` where
 /// `hzb_build_0` left it (`u3_pins_the_poison_whole_chain_waw_and_the_dump_layout_pair` pins that).
@@ -5196,16 +5366,58 @@ fn s2_pins_the_depth_round_trip_across_the_moved_block() {
 /// strictly stronger than the execution-only edge it replaces — and it is why the declarator's own
 /// comment ("on every armed frame that is `SHADER_READ_ONLY_OPTIMAL`, since `hzb_build_0` itself
 /// reads it there") had to be corrected in P2-5 rather than left standing.
+///
+/// # ⚠️ P3-8: the two copies must be told apart BY SOURCE, and this test used to pick the wrong one
+///
+/// Step P3-7 added `hzb_dump_depth_early` to production — a SECOND `TRANSFER_SRC_OPTIMAL` transition
+/// on the same image, earlier in the frame — and this test selected `find(new_layout ==
+/// TRANSFER_SRC_OPTIMAL)`, i.e. the FIRST. Once the replica models the pass, that predicate returns
+/// the EARLY copy, whose source is `(COMPUTE, 0)` — the exact value the assertion below calls the
+/// defect. Both are now selected explicitly and pinned separately, which is also the stronger claim:
+/// the pair says the two copies observe DIFFERENT states of the image, which is the whole reason
+/// there are two of them.
 #[test]
 fn s3_pins_the_re_sourced_hzb_dump_depth_read() {
     let f = declare_vb_frame(S3);
     let img = f.g.img_barriers();
 
     let depth = img_on(img, f.vb_depth);
-    let dump = depth
+    let copies: Vec<_> = depth
         .iter()
-        .find(|b| b.new_layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
-        .expect("invariant: the dump's depth copy derives a transition into TRANSFER_SRC_OPTIMAL");
+        .filter(|b| b.new_layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+        .collect();
+    assert_eq!(
+        copies.len(),
+        2,
+        "a DUMPED SPLIT frame copies the depth TWICE — `hzb_dump_depth_early` between the scopes \
+         (plan D10) and `hzb_dump` at frame end — so `vb_depth` must carry exactly two transitions \
+         into TRANSFER_SRC_OPTIMAL. ONE means the early copy is not declared, and then the dump's \
+         `flags` word claims an early region the graph never ordered a copy into.\nGot: {depth:#?}"
+    );
+
+    // The EARLY copy: it observes the depth exactly as `hzb_build_0` read it. Its source is an
+    // EXECUTION dependency on that read (`src_access = 0`) because a read has nothing to make
+    // available — and `SHADER_READ_ONLY_OPTIMAL` as the old layout is what says the copy happens
+    // BEFORE the late scope has claimed the attachment again.
+    assert_eq!(
+        (copies[0].src_stage, copies[0].src_access),
+        (VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0),
+        "the EARLY depth copy must be sourced from `hzb_build_0`'s read. A `(FRAG, \
+         DEPTH_STENCIL_ATTACHMENT_WRITE)` source here would mean it is declared AFTER the late \
+         raster — and then it copies the FINAL depth while the header still calls it the early one, \
+         which is control E2's defect arriving through the graph instead of through the writer"
+    );
+    assert_eq!(
+        (copies[0].old_layout, copies[0].new_layout),
+        (VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL),
+    );
+    assert_eq!(copies[0].dst_stage, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    assert_eq!(copies[0].dst_access, VK_ACCESS_TRANSFER_READ_BIT);
+    assert_eq!(copies[0].subresource, SubRange::DEPTH);
+
+    // The FRAME-END copy: the late raster wrote the depth after the early copy, so this one is a
+    // real RAW flush out of the depth attachment.
+    let dump = copies[1];
     assert_eq!(
         (dump.src_stage, dump.src_access),
         (FRAG, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT),
@@ -5220,6 +5432,28 @@ fn s3_pins_the_re_sourced_hzb_dump_depth_read() {
     assert_eq!(dump.dst_stage, VK_PIPELINE_STAGE_TRANSFER_BIT);
     assert_eq!(dump.dst_access, VK_ACCESS_TRANSFER_READ_BIT);
     assert_eq!(dump.subresource, SubRange::DEPTH);
+
+    // ---- The RETURN leg the early copy re-sources (VG R3 piece 3 step P3-8) --------------------
+    //
+    // `vb_raster_late`'s depth WAW now comes out of TRANSFER_SRC_OPTIMAL with the TRANSFER stage
+    // folded into its source, where before P3-7 it came out of SHADER_READ_ONLY_OPTIMAL. The COUNT
+    // is unchanged by that, which is exactly why this file pins FIELDS.
+    let ret = depth
+        .iter()
+        .find(|b| b.new_layout == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL && b.old_layout != VK_IMAGE_LAYOUT_UNDEFINED)
+        .expect("invariant: the late raster claims the depth attachment back");
+    assert_eq!(
+        (ret.old_layout, ret.src_stage, ret.src_access),
+        (
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0
+        ),
+        "the late scope must claim the depth back from where the EARLY DUMP COPY left it, ordered \
+         against BOTH prior readers (the build's COMPUTE read and the copy's TRANSFER read). A \
+         `SHADER_READ_ONLY_OPTIMAL` old layout with a bare COMPUTE source is the pre-P3-7 shape — \
+         it means the early copy is not declared on this row"
+    );
 }
 
 /// **S4's claim.** The same character change on the other two re-sourced readers — the `vb_viewt`
@@ -5693,17 +5927,25 @@ fn the_eight_rows_are_eight_distinct_configurations() {
     // step would mean the late cull was never declared, which is the state in which
     // `vb_indirect_late`'s writer never moved to COMPUTE and piece 2's obligation 1 is undischarged.
     // The `vb_cull_readback_late` pass is NOT counted here: the probe is off across this matrix.
+    //
+    // ⚠️ VG R3 piece 3 step P3-8 makes the number ROW-DEPENDENT for the first time: a row that arms
+    // the DUMP as well as the split gains a FOURTH pass, `hzb_dump_depth_early` (plan D10, added to
+    // production at step P3-7 and to this replica at P3-8). The expectation is DERIVED from the
+    // row's own `hzb_dump` flag rather than hard-coded per row, so a future row that arms the dump
+    // inherits the right number instead of the number S3 happened to have.
     for (u, s) in [(0usize, 4usize), (1, 5), (2, 6), (3, 7)] {
+        let added = if frames[s].row.hzb_dump { 4 } else { 3 };
         assert_eq!(
             frames[s].pass_count,
-            frames[u].pass_count + 3,
-            "{} declares {} passes against {}'s {} — the split adds exactly three (the late upload, \
-             the late cull and the late raster) and MOVES the poison+build block, never duplicates \
-             it",
+            frames[u].pass_count + added,
+            "{} declares {} passes against {}'s {} — the split adds exactly {added} (the late \
+             upload, the late cull, the late raster{}) and MOVES the poison+build block, never \
+             duplicates it",
             frames[s].row.id,
             frames[s].pass_count,
             frames[u].row.id,
-            frames[u].pass_count
+            frames[u].pass_count,
+            if frames[s].row.hzb_dump { " and the early-depth dump copy" } else { "" }
         );
     }
 }
@@ -5791,6 +6033,28 @@ fn declare_order_invariants_hold_in_the_replica() {
                     build0 < late_cull && late_cull < late,
                     "S3: the armed order is `hzb_build_* → vb_cull_late → vb_raster_late`. Got \
                      build0={build0}, late_cull={late_cull}, late={late}"
+                );
+                // VG R3 piece 3 step P3-8: `hzb_dump_depth_early`'s POSITION IS ITS CORRECTNESS
+                // (plan D10). After the last build, so what it copies is exactly what the builds
+                // reduced; before the late raster, so nothing has drawn into the depth again. The
+                // production declarator carries both as `debug_assert!`s; this is the replica half,
+                // reachable from a plain `cargo test`.
+                let early_dump = index_of("hzb_dump_depth_early")
+                    .expect("invariant: a split row that arms the dump declares the early copy");
+                assert!(
+                    build0 < early_dump && early_dump < late,
+                    "S3: the early-depth copy must sit between the last `hzb_build_*` and \
+                     `vb_raster_late`. Declared BEFORE the builds it would copy a depth they had \
+                     not read yet; declared AFTER the late raster it would copy the FINAL depth \
+                     while the header's flag still calls it the early one — and G-P3-E's clause 3 \
+                     would then compare the pyramid against a rebuild from the same bytes it was \
+                     built from, i.e. green by construction. Got build0={build0}, \
+                     early_dump={early_dump}, late={late}"
+                );
+                assert!(
+                    early_dump < dump,
+                    "S3: the EARLY copy must precede the FRAME-END one, or the two regions of the \
+                     dump file hold each other's bytes. Got early_dump={early_dump}, dump={dump}"
                 );
             }
             (split, late, upload) => panic!(

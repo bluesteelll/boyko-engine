@@ -52,6 +52,8 @@ use boyko_render::{
     RenderPath, RenderPathConfig,
 };
 
+mod vb_occ_mixed_scene;
+
 /// VG R3 piece 2 step P2-6 (gate G1): `BOYKO_VG_OCC=1` puts [`OcclusionCulling`] in the spawn
 /// bundle of ALL FIVE spheres, which arms `GBufferScene::path_vb_occlusion_split()` and therefore
 /// the late raster scope — on THIS scene, THIS binary and THIS test.
@@ -131,6 +133,28 @@ fn setup(
     mut geo_table: NonSendResMut<MeshGeometryTableSlot>,
     dev: NonSendRes<GpuDevice>,
 ) {
+    // VG R3 piece 3 step P3-8 (plan D9): the NEW, ORTHOGONAL scene selector. `BOYKO_VG_SCENE=mixed`
+    // replaces the five-sphere loop below with `vb_occ_mixed` — two registered meshes, eight
+    // instances, six of them marked when `BOYKO_VG_OCC=1`. It is orthogonal to `BOYKO_VG_OCC`
+    // precisely so `[vb_occ_mixed_off]` can render the SAME geometry with NOTHING marked; folding
+    // the two into one variable (round 2's table) made that baseline unproducible.
+    //
+    // ⚠️ The five-sphere scene's "all five or none" rule below is SCOPED to it, not deleted. The
+    // mixed scene breaks that rule deliberately and carries its own reorder-safety argument: no two
+    // instances share a depth, so a ring reshuffle cannot change which one wins a pixel — and the
+    // four-pin byte-identity IS the check on that claim.
+    if vb_occ_mixed_scene::scene_is_mixed() {
+        vb_occ_mixed_scene::spawn_mixed(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &mut geo_table,
+            &dev,
+            occ_marked(),
+        );
+        return;
+    }
+
     let (verts, idx) = uv_sphere(0.62, 28, 40, [0.7, 0.7, 0.72, 1.0]);
     let sphere = match geo_table.0.as_mut() {
         Some(table) => meshes.register_mesh_vb(dev.get(), &verts, &idx, table),
@@ -221,13 +245,28 @@ fn setup(
 /// `#[ignore]`: needs a real windowed GPU device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
 ///
-/// # Three pins, one test
+/// # Seven pins, one test
 ///
-/// Two env knobs drive this same code path, and each has its own pin carrying `[vb_mesh]`'s own
-/// hash: `BOYKO_VG_HZB=1` → `[vb_mesh_hzb]` (the pyramid, built and read by nothing) and
-/// `BOYKO_VG_OCC=1` → `[vb_occ_split]` (the marker, hence the pyramid AND the LATE RASTER SCOPE).
-/// Sharing the binary makes each equality an identity rather than a resemblance between two scenes
-/// that merely look alike.
+/// Env knobs drive this same code path, and each configuration has its own pin. Three render the
+/// five-sphere scene and carry `[vb_mesh]`'s own hash: `BOYKO_VG_HZB=1` → `[vb_mesh_hzb]` (the
+/// pyramid, built and read by nothing) and `BOYKO_VG_OCC=1` → `[vb_occ_split]` (the marker, hence
+/// the pyramid AND the LATE RASTER SCOPE). Sharing the binary makes each equality an identity
+/// rather than a resemblance between two scenes that merely look alike.
+///
+/// **VG R3 piece 3 step P3-8** adds four more behind `BOYKO_VG_SCENE=mixed` — `[vb_occ_mixed_off]`,
+/// `[vb_occ_mixed_keep]`, `[vb_occ_mixed]`, `[vb_occ_mixed_late]` — on `vb_occ_mixed_scene`, the
+/// first fixture in the tree where the cull can actually reject something. Their four hashes are the
+/// SAME literal, and the ladder between them is what makes each difference attributable:
+///
+/// | step | what changes | a difference means |
+/// |---|---|---|
+/// | `off` → `keep` | the split predicate, the late scope's bracket, the late dispatch, the second and third descriptor sets | a **PLUMBING** defect |
+/// | `keep` → `mixed` | ONE push-constant bit; `defer` goes from identically-false to computed | a **DECISION** defect |
+/// | `keep` → `late` | the other push-constant bit | the late raster path |
+///
+/// The pyramid's existence is deliberately NOT a variable in that family — `off` carries
+/// `BOYKO_VG_HZB=1` too, and the pyramid's byte-neutrality is already pinned by `[vb_mesh]` vs
+/// `[vb_mesh_hzb]`.
 ///
 /// ⚠️ **Since VG R3 piece 3 step P3-6 `[vb_occ_split]` is no longer an INERT addition — it is a
 /// LIVE occlusion cull, and its hash equality is a claim about the DECISION.** The five spheres

@@ -411,6 +411,153 @@ BOYKO_VG_OCC             = "1"
 BOYKO_VG_HZB             = "1"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 
+# ===============================================================================================
+# VG R3 piece 3 step P3-8 -- the vb_occ_mixed FOUR-PIN FAMILY.
+#
+# The first fixture in this repository on which the occlusion cull can reject anything. Every other
+# VB scene stands its geometry side by side against the sky, so the conservative min-over-footprint
+# test defers ZERO instances and "the cull decided correctly" and "the cull decided nothing" are the
+# same pixels AND the same counts. vb_occ_mixed puts four marked instances wholly inside a near
+# slab's silhouette (crates/boyko_app/tests/vb_occ_mixed_scene/mod.rs).
+#
+# ⚠️ ALL FOUR sha256_* ARE SEEDED "PENDING" AND MUST NOT BE HAND-EDITED. golden.ps1's -Check reports
+# a PENDING leg and exits 2 rather than passing, which is the file header's own documented way to
+# ADD a leg by hand. Blessing requires a VISUAL OWNER SIGN-OFF on the freshly-dumped BMP; nobody
+# else may supply one, and a hand-written hash would convert a gate into a transcription.
+#
+# ⚠️ WHEN THEY ARE BLESSED, ALL FOUR MUST CARRY THE SAME LITERAL. That equality is the whole gate
+# (G-P3-A), and it is MACHINE-CHECKED by `the_pins_declared_byte_identical_actually_agree`
+# (crates/boyko_app/tests/vg_density_census.rs), which parses this file and fails if any of the
+# three derived legs ever diverges from [vb_occ_mixed_off]. A lone re-bless would silently convert
+# "the cull kept everything it should have" into "whatever it culls now".
+#
+# THE VARIABLE LADDER, which is the point of having four:
+#   off -> keep   FOUR variables: the split predicate, the late scope's bracket, the late dispatch,
+#                 and the second/third descriptor sets. A difference here is a PLUMBING defect.
+#   keep -> mixed ONE push-constant bit. Same pyramid, same scopes, same dispatches, same sets;
+#                 `defer` goes from identically-false to computed. A difference is a DECISION defect.
+#   keep -> late  ONE push-constant bit, the other one: the late raster path.
+# The pyramid's EXISTENCE is deliberately not a variable in this family -- [vb_occ_mixed_off]
+# carries BOYKO_VG_HZB="1" too, and the pyramid's byte-neutrality is already pinned by [vb_mesh] vs
+# [vb_mesh_hzb]. Round 2's table left `off` with no env at all, which would have rendered the
+# five-sphere scene instead of this one and made the four-pin equality meaningless.
+#
+# ⚠️ WHAT THE FOUR HASHES CANNOT CLAIM:
+#  * THAT ANYTHING WAS DEFERRED. Byte-identity is satisfied by a cull that rejects nothing. The
+#    non-vacuity clause (S n_defer > 0) is asserted from the GPU readback in
+#    crates/boyko_app/tests/vb_occ_mixed.rs (gate G-P3-B), never from a hash.
+#  * THAT THE LATE PHASE DID ANYTHING on the three unforced pins. On a converged static frame the
+#    correct late survivor count is ZERO (plan D12's fixed point); only [vb_occ_mixed_late] makes
+#    the late scope draw.
+#  * ANYTHING ABOUT BARRIERS -- a missing barrier was MEASURED to change no pixel and emit no
+#    message on this machine.
+# ===============================================================================================
+
+[vb_occ_mixed_off]
+# The BASELINE of the four-pin family: the mixed scene with the pyramid built and NOTHING marked, so
+# `path_vb_occlusion_split()` is false, there is ONE raster scope and all eight instances are drawn
+# in it. This is the image the other three must reproduce byte for byte.
+crate           = "boyko-app"
+test_binary     = "vb_mesh"
+test_name       = "vb_mesh_screenshot_dump"
+bmp             = "D:\\tmp\\vb_occ_mixed_off.bmp"
+width           = 512
+height          = 512
+sha256_software = "PENDING"
+sha256_hwrt     = "PENDING"
+
+[vb_occ_mixed_off.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_occ_mixed_off.bmp"
+BOYKO_VG_SCENE           = "mixed"
+BOYKO_VG_HZB             = "1"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+
+[vb_occ_mixed_keep]
+# FORCE_KEEP: the split is armed in full -- second scope, late cull dispatch, both extra descriptor
+# sets -- and the early phase defers NOTHING, which is exactly the behaviour that shipped before the
+# cull was armed. It is the ONE-VARIABLE baseline of the decision, the null control the decidability
+# protocol asks for, and the NAMED DISARM ROUTE until piece 4 gives the owner a config field.
+#
+# Round 1 shipped VB_CULL_OCC_FORCE_KEEP as production shader surface that no gate ever set; this
+# pin is what makes it a supported switch rather than untested surface.
+crate           = "boyko-app"
+test_binary     = "vb_mesh"
+test_name       = "vb_mesh_screenshot_dump"
+bmp             = "D:\\tmp\\vb_occ_mixed_keep.bmp"
+width           = 512
+height          = 512
+sha256_software = "PENDING"
+sha256_hwrt     = "PENDING"
+
+[vb_occ_mixed_keep.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_occ_mixed_keep.bmp"
+BOYKO_VG_SCENE           = "mixed"
+BOYKO_VG_HZB             = "1"
+BOYKO_VG_OCC             = "1"
+BOYKO_VG_OCC_FORCE       = "keep"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+
+[vb_occ_mixed]
+# THE LOAD-BEARING PIN: the cull ARMED and UNFORCED on a scene that actually occludes. Four marked
+# instances sit wholly inside the near slab's silhouette and inside one 128-aligned pyramid block
+# each, so the early phase defers exactly them; the two marked instances outside the slab's rect are
+# drawn early. On a converged frame the late phase then rejects every candidate again (plan D12: one
+# predicate, the same bytes, the same verdict), so the late scope draws zero and the image is
+# [vb_occ_mixed_off]'s.
+#
+# A DIVERGENCE HERE IS THE CULL DELETING VISIBLE GEOMETRY. It is the one failure a hash is uniquely
+# placed to catch, and the reason this pin ships beside a count gate rather than alone.
+crate           = "boyko-app"
+test_binary     = "vb_mesh"
+test_name       = "vb_mesh_screenshot_dump"
+bmp             = "D:\\tmp\\vb_occ_mixed.bmp"
+width           = 512
+height          = 512
+sha256_software = "PENDING"
+sha256_hwrt     = "PENDING"
+
+[vb_occ_mixed.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_occ_mixed.bmp"
+BOYKO_VG_SCENE           = "mixed"
+BOYKO_VG_HZB             = "1"
+BOYKO_VG_OCC             = "1"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+
+[vb_occ_mixed_late]
+# FORCE_LATE: the early phase defers EVERY marked instance regardless of the pyramid, so the early
+# scope draws only the two UNMARKED ones (the slab and the far filler) and the LATE scope is the one
+# that rasterises the two survivors. This is the ONLY regime in which a static scene can exercise
+# the late raster path at all, and the only one in which `depth_early != depth_final` -- the pair of
+# clauses that prove the pyramid was built at the right point in the frame (G-P3-E clauses 2 and 3).
+#
+# The unmarked filler exists precisely so the early depth is not EMPTY here: with every instance
+# marked, FORCE-LATE would leave every texel at the reverse-Z far plane and trip the SHIPPED
+# non-vacuity clauses in crates/boyko_app/tests/hzb_engine_pyramid_gate.rs.
+crate           = "boyko-app"
+test_binary     = "vb_mesh"
+test_name       = "vb_mesh_screenshot_dump"
+bmp             = "D:\\tmp\\vb_occ_mixed_late.bmp"
+width           = 512
+height          = 512
+sha256_software = "PENDING"
+sha256_hwrt     = "PENDING"
+
+[vb_occ_mixed_late.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_occ_mixed_late.bmp"
+BOYKO_VG_SCENE           = "mixed"
+BOYKO_VG_HZB             = "1"
+BOYKO_VG_OCC             = "1"
+BOYKO_VG_OCC_FORCE       = "late"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+
 [vb_both]
 # Multi-paradigm render-path plan, rung R10: the VisibilityBuffer x Both golden. Clones [vb_mesh]'s
 # five-sphere grand_showcase_2mat scene + production boyko_app::runner/gpu_scene::GpuSceneBundles
