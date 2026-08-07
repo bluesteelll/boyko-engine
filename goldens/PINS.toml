@@ -578,7 +578,7 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 crate           = "boyko-app"
 test_binary     = "vb_both"
 test_name       = "vb_both_screenshot_dump"
-bmp             = "D:\tmp\vb_both.bmp"
+bmp             = "D:\\tmp\\vb_both.bmp"
 width           = 512
 height          = 512
 sha256_software = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913ea1"
@@ -587,7 +587,7 @@ sha256_hwrt     = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913
 [vb_both.env]
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
-BOYKO_HOST_DUMP          = "D:\tmp\vb_both.bmp"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_both.bmp"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 
 [vb_both_sdf]
@@ -703,7 +703,7 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 crate           = "boyko-app"
 test_binary     = "vb_sdf_only"
 test_name       = "vb_sdf_only_screenshot_dump"
-bmp             = "D:\tmp\vb_sdf_only.bmp"
+bmp             = "D:\\tmp\\vb_sdf_only.bmp"
 width           = 512
 height          = 512
 sha256_software = "a1256bde136464915fa3be3b456c8a9a5ab669fe19f24164be73ccbcc0858a17"
@@ -712,7 +712,7 @@ sha256_hwrt     = "a1256bde136464915fa3be3b456c8a9a5ab669fe19f24164be73ccbcc0858
 [vb_sdf_only.env]
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
-BOYKO_HOST_DUMP          = "D:\tmp\vb_sdf_only.bmp"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_sdf_only.bmp"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 
 [vb_mesh_tex]
@@ -791,7 +791,7 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 crate           = "boyko-app"
 test_binary     = "taa_jitter_eval"
 test_name       = "taa_jitter_eval_screenshot_dump"
-bmp             = "D:\tmp\taa_armed.bmp"
+bmp             = "D:\\tmp\\taa_armed.bmp"
 width           = 512
 height          = 512
 sha256_software = "ee3a8a8cf32897f21b64428c4e549e3e89eed2efe9e99ab0e4afb35af357322b"
@@ -800,7 +800,7 @@ sha256_hwrt     = "109c7055dfeebe1a67e50b9b9b0eacc609eff4aa752cfe2de47fc44d69883
 [taa_armed.env]
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
-BOYKO_HOST_DUMP          = "D:\tmp\taa_armed.bmp"
+BOYKO_HOST_DUMP          = "D:\\tmp\\taa_armed.bmp"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 BOYKO_AA                 = "taa"
 BOYKO_WIN                = "512"
@@ -848,7 +848,7 @@ BOYKO_TAA_SCOPE          = "raster"
 crate           = "boyko-app"
 test_binary     = "taa_jitter_eval"
 test_name       = "taa_jitter_eval_screenshot_dump"
-bmp             = "D:\tmp\taa_armed_basis.bmp"
+bmp             = "D:\\tmp\\taa_armed_basis.bmp"
 width           = 512
 height          = 512
 sha256_software = "87559012f1fd9f61faf995428c0b72ce138d31c9966c80a1c5bd3620c99aa36d"
@@ -857,7 +857,7 @@ sha256_hwrt     = "70aefdfb727deeee65c60a804ac9191bdf69390d0b4e4000dc47979d4b4c7
 [taa_armed_basis.env]
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
-BOYKO_HOST_DUMP          = "D:\tmp\taa_armed_basis.bmp"
+BOYKO_HOST_DUMP          = "D:\\tmp\\taa_armed_basis.bmp"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 BOYKO_AA                 = "taa"
 BOYKO_TAA_SCOPE          = "basis"
@@ -881,7 +881,7 @@ BOYKO_WIN                = "512"
 crate           = "boyko-app"
 test_binary     = "taa_jitter_eval"
 test_name       = "taa_jitter_eval_screenshot_dump"
-bmp             = "D:\tmp\taa_rcas.bmp"
+bmp             = "D:\\tmp\\taa_rcas.bmp"
 width           = 512
 height          = 512
 sha256_software = "37839075a34db560f44c1f1a0d51908f60559aa598bbdf1687bb97ec595db593"
@@ -890,7 +890,7 @@ sha256_hwrt     = "08752f67e3239ed441e4f8cd3718a769be2f2208332e5aace80526c79381c
 [taa_rcas.env]
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
-BOYKO_HOST_DUMP          = "D:\tmp\taa_rcas.bmp"
+BOYKO_HOST_DUMP          = "D:\\tmp\\taa_rcas.bmp"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 BOYKO_AA                 = "taa"
 BOYKO_WIN                = "512"
@@ -922,7 +922,7 @@ BOYKO_TAA_SHARPEN        = "rcas"
 crate           = "boyko-app"
 test_binary     = "taa_jitter_eval"
 test_name       = "taa_jitter_eval_screenshot_dump"
-bmp             = "D:\tmp\vb_taa.bmp"
+bmp             = "D:\\tmp\\vb_taa.bmp"
 width           = 512
 height          = 512
 sha256_software = "6eaca7457c5a8f7c73e446fcf545cef7d0c46ae2b81a1c9115f68cdaba897185"
@@ -931,7 +931,7 @@ sha256_hwrt     = "6eaca7457c5a8f7c73e446fcf545cef7d0c46ae2b81a1c9115f68cdaba897
 [vb_taa.env]
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
-BOYKO_HOST_DUMP          = "D:\tmp\vb_taa.bmp"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_taa.bmp"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 BOYKO_AA                 = "taa"
 BOYKO_WIN                = "512"
@@ -951,7 +951,7 @@ BOYKO_GEOMETRY_LEGS      = "mesh"
 crate           = "boyko-app"
 test_binary     = "taa_jitter_eval"
 test_name       = "taa_jitter_eval_screenshot_dump"
-bmp             = "D:\tmp\vb_taa_rcas.bmp"
+bmp             = "D:\\tmp\\vb_taa_rcas.bmp"
 width           = 512
 height          = 512
 sha256_software = "b695fe80d73534779693a208bc3d346e9a1314bedbe9cc1d1a0adae1b5a69518"
@@ -960,7 +960,7 @@ sha256_hwrt     = "b695fe80d73534779693a208bc3d346e9a1314bedbe9cc1d1a0adae1b5a69
 [vb_taa_rcas.env]
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
-BOYKO_HOST_DUMP          = "D:\tmp\vb_taa_rcas.bmp"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_taa_rcas.bmp"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 BOYKO_AA                 = "taa"
 BOYKO_WIN                = "512"
@@ -980,7 +980,7 @@ BOYKO_GEOMETRY_LEGS      = "mesh"
 crate           = "boyko-app"
 test_binary     = "vb_mesh_ssao"
 test_name       = "vb_mesh_ssao_screenshot_dump"
-bmp             = "D:\tmp\vb_mesh_ssao.bmp"
+bmp             = "D:\\tmp\\vb_mesh_ssao.bmp"
 width           = 512
 height          = 512
 sha256_software = "85625a11684d4f2e40ee98510b840647546331b9fa0ba555499faf4109e8144f"
@@ -989,7 +989,7 @@ sha256_hwrt     = "85625a11684d4f2e40ee98510b840647546331b9fa0ba555499faf4109e81
 [vb_mesh_ssao.env]
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
-BOYKO_HOST_DUMP          = "D:\tmp\vb_mesh_ssao.bmp"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_mesh_ssao.bmp"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 
 [vb_mesh_froxel]
@@ -1019,7 +1019,7 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 crate           = "boyko-app"
 test_binary     = "vb_mesh_froxel"
 test_name       = "vb_mesh_froxel_screenshot_dump"
-bmp             = "D:\tmp\vb_mesh_froxel.bmp"
+bmp             = "D:\\tmp\\vb_mesh_froxel.bmp"
 width           = 512
 height          = 512
 sha256_software = "fb220ff30f16658e8efa165db2c822263253274a17006c5ecf66ad19414d86ba"
@@ -1028,7 +1028,7 @@ sha256_hwrt     = "fb220ff30f16658e8efa165db2c822263253274a17006c5ecf66ad19414d8
 [vb_mesh_froxel.env]
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
-BOYKO_HOST_DUMP          = "D:\tmp\vb_mesh_froxel.bmp"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_mesh_froxel.bmp"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 
 [vb_mesh_tex_froxel]
@@ -1061,7 +1061,7 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 crate           = "boyko-app"
 test_binary     = "vb_mesh_tex_froxel"
 test_name       = "vb_mesh_tex_froxel_screenshot_dump"
-bmp             = "D:\tmp\vb_mesh_tex_froxel.bmp"
+bmp             = "D:\\tmp\\vb_mesh_tex_froxel.bmp"
 width           = 512
 height          = 512
 sha256_software = "6d7ea00d35c8e77156cb1124d291edcd98209f5124878d7aa459feae81701c23"
@@ -1070,7 +1070,7 @@ sha256_hwrt     = "6d7ea00d35c8e77156cb1124d291edcd98209f5124878d7aa459feae81701
 [vb_mesh_tex_froxel.env]
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
-BOYKO_HOST_DUMP          = "D:\tmp\vb_mesh_tex_froxel.bmp"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_mesh_tex_froxel.bmp"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 
 [vb_both_taa]
@@ -1089,7 +1089,7 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 crate           = "boyko-app"
 test_binary     = "taa_jitter_eval"
 test_name       = "taa_jitter_eval_screenshot_dump"
-bmp             = "D:\tmp\vb_both_taa.bmp"
+bmp             = "D:\\tmp\\vb_both_taa.bmp"
 width           = 512
 height          = 512
 sha256_software = "61dc2630b15a08712f95be5983a6bd75ffbf03650266857ed62c10cb03b81230"
@@ -1098,7 +1098,7 @@ sha256_hwrt     = "61dc2630b15a08712f95be5983a6bd75ffbf03650266857ed62c10cb03b81
 [vb_both_taa.env]
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
-BOYKO_HOST_DUMP          = "D:\tmp\vb_both_taa.bmp"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_both_taa.bmp"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 BOYKO_AA                 = "taa"
 BOYKO_WIN                = "512"
@@ -1119,7 +1119,7 @@ BOYKO_GEOMETRY_LEGS      = "both"
 crate           = "boyko-app"
 test_binary     = "taa_jitter_eval"
 test_name       = "taa_jitter_eval_screenshot_dump"
-bmp             = "D:\tmp\vb_sdf_taa.bmp"
+bmp             = "D:\\tmp\\vb_sdf_taa.bmp"
 width           = 512
 height          = 512
 sha256_software = "00da67699d2d4615e5d7fd9196ab4671db044915463a0b4dce6f9531a50373de"
@@ -1128,7 +1128,7 @@ sha256_hwrt     = "00da67699d2d4615e5d7fd9196ab4671db044915463a0b4dce6f9531a5037
 [vb_sdf_taa.env]
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
-BOYKO_HOST_DUMP          = "D:\tmp\vb_sdf_taa.bmp"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_sdf_taa.bmp"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 BOYKO_AA                 = "taa"
 BOYKO_WIN                = "512"
