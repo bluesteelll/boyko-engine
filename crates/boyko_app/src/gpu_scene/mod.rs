@@ -7408,12 +7408,14 @@ impl GpuSceneBundles {
     /// SMALL — see [`crate::runner`]'s bench-print doc for the numbers and why it no longer
     /// gates anything.
     ///
-    /// All three queries are written on every bench-armed frame, and since VG R3 piece 4 rung
-    /// P4-1 that is a property of the RECORDER rather than of its caller's preconditions:
+    /// All `VB_PASS_COUNT` queries are written on every bench-armed frame, and since VG R3 piece 4
+    /// rung P4-1 that is a property of the RECORDER rather than of its caller's preconditions:
     /// `VbTimedPass::CullReset`/`CullDispatch` are bracketed outside the froxel arm's own gate
     /// (reporting near-zero ns when it is not boot-built); `VbTimedPass::VbShade` is bracketed in
     /// ALL THREE lit-producer arms — `vb_shade` (classified), `vb_resolve` (fused) and
     /// `vb_shade_split` (the pre-light-consumer split, `vb.rs`'s own three-way producer doc);
+    /// rung P4-2's seven brackets each sit OUTSIDE their own unit's gate (`if occlusion_split`,
+    /// `if batch_cull_armed`), so a disarmed leg writes them around blocks that record nothing;
     /// and any pair a leg leaves unbracketed is closed by `TsWitness::finish`, the release-live
     /// totality epilogue, before `vkEndCommandBuffer`.
     ///

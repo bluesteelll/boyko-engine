@@ -161,6 +161,15 @@ pub struct VbRecordProbe {
 ///
 /// Constructed AFTER `reset_frame`, so "the witness exists" structurally implies "the pool was
 /// reset this frame" — the precondition every `vkCmdWriteTimestamp` below needs.
+///
+/// # It crosses a function boundary, deliberately (VG R3 piece 4 rung P4-2)
+///
+/// [`Renderer::record_hzb_poison_build`] takes `&mut TsWitness` and stamps
+/// [`VbTimedPass::VbHzbBuild`] at its own first and last statements. The alternative — setting that
+/// slot's bits at the two call sites — would make the mask a claim about a body the caller cannot
+/// see, which is the premise-shaped guarantee this type exists to delete: delete the stamp inside
+/// the function and the masks would still read "complete" while one query stayed unwritten, and the
+/// `WAIT_BIT` readback would block forever with nothing to red.
 struct TsWitness<'a> {
     /// `None` ⇒ every method is a no-op recording ZERO commands (every golden/host/interactive
     /// frame, `GBufferScene::vb_gpu_timing`'s own doc).
@@ -1550,6 +1559,29 @@ impl Renderer<'_> {
                 }
             }
 
+            // === VG R3 piece 4 rung P4-2: the RUN bracket opens, then the late-upload bracket. ===
+            //
+            // `VbRun` (slot 9) spans EXACTLY `[b3, e8]` — it opens immediately before slot 3's
+            // begin and closes immediately after slot 8's end. All eight stamps in between are
+            // `BOTTOM_OF_PIPE`, so the per-slot intervals exactly PARTITION the run: work that
+            // migrates from one bracketed unit into its neighbour is zero-sum inside `m9` and
+            // cancels in the armed-vs-armed paired difference the plan calls `NetRun`. That is the
+            // whole reason a redundant-looking outer bracket exists rather than a sum of the six.
+            //
+            // ⚠️ Every bracket from here to `e9` sits OUTSIDE its own unit's gate — `if
+            // occlusion_split`, `if batch_cull_armed` — so a DISARMED leg still writes all of them,
+            // around blocks that record nothing, and reports near-zero MEASURED costs. Moving one
+            // inside its gate would make that leg report `FALLBACK` for it instead, which is
+            // exactly the confusion the label exists to prevent (the plan's control (ii)).
+            //
+            // SAFETY (both stamps): recording is open; `self.fns` is the live device fn-table; the
+            // pool was reset at the frame top (`reset_frame`, before this witness was constructed);
+            // `fi` is this present's in-flight slot; neither query has been written since that
+            // reset — `TsWitness`'s masks are the record, and every stamp in this fn goes through
+            // them.
+            unsafe { ts.begin(self.fns, cmd, fi, VbTimedPass::VbRun) };
+            unsafe { ts.begin(self.fns, cmd, fi, VbTimedPass::VbLateUpload) };
+
             // === VG R3 piece 2 step P2-5 (plan D4): the LATE indirect record fill. ===
             //
             // Recorded HERE — immediately after the early fill and before the cull dispatch, which
@@ -1685,6 +1717,15 @@ impl Renderer<'_> {
                     }
                 }
             }
+
+            // VG R3 piece 4 rung P4-2: `e3` closes the late upload, `b4` opens the early cull.
+            // Nothing is recorded between them, so the two stamps wait on prefixes differing by
+            // nothing and the gap contributes zero to the run's partition.
+            // SAFETY (both stamps): as at `b9`/`b3` above — recording is open, the pool was reset
+            // this frame, `fi` is this present's slot, and neither query has been written since
+            // (slot 3's end and slot 4's begin are each stamped exactly once, here).
+            unsafe { ts.end(self.fns, cmd, fi, VbTimedPass::VbLateUpload) };
+            unsafe { ts.begin(self.fns, cmd, fi, VbTimedPass::VbEarlyCull) };
 
             // === Rung R2c0: the per-BATCH draw-record cull dispatch. ===
             //
@@ -1994,6 +2035,17 @@ impl Renderer<'_> {
                 // `vb_cull_readback` block records in full. Still derived, still at the reader.
             }
 
+            // VG R3 piece 4 rung P4-2: `e4` closes the early cull, `b5` opens the early raster.
+            //
+            // ⚠️ `b5` is BEFORE `record_vb_pass(vb_raster)`, not before `cmd_begin_rendering`: the
+            // pass's derived barriers-in are part of what the raster costs, and the declarator
+            // emits them at the reader. A bracket starting after them would attribute the layout
+            // transitions this scope needs to whatever precedes it.
+            // SAFETY (both stamps): recording is open, the pool was reset this frame, `fi` is this
+            // present's slot, and neither query has been written since (each is stamped once).
+            unsafe { ts.end(self.fns, cmd, fi, VbTimedPass::VbEarlyCull) };
+            unsafe { ts.begin(self.fns, cmd, fi, VbTimedPass::VbEarlyRaster) };
+
             // SAFETY: recording is open; `record_vb_pass` records the graph's derived
             // UNDEFINED→COLOR_ATTACHMENT_OPTIMAL (`vb_id`) + UNDEFINED→DEPTH_ATTACHMENT_OPTIMAL
             // (`vb_depth`) barriers-in for the "vb_raster" pass into `cmd` — and, since rung R2a',
@@ -2184,6 +2236,15 @@ impl Renderer<'_> {
                 }
                 (self.fns.cmd_end_rendering)(cmd);
             }
+            // VG R3 piece 4 rung P4-2: `e5` closes the early raster, immediately after the scope's
+            // `cmd_end_rendering` and BEFORE the host-side probe counter below — so the counter
+            // increment lands in the `e5 → b6` gap, where the plan enumerates it, rather than
+            // inside a measured bracket.
+            // SAFETY: recording is open (the scope was closed by the `cmd_end_rendering` above, so
+            // no rendering instance is active either); the pool was reset this frame; `fi` is this
+            // present's in-flight slot; this query has not been written since that reset.
+            unsafe { ts.end(self.fns, cmd, fi, VbTimedPass::VbEarlyRaster) };
+
             // Gate G2's `scopes`, counted AT the bracket that closes the EARLY scope rather than
             // derived from the arming predicate — the difference between a gate and a tautology.
             if let Some(p) = probe.as_deref_mut() {
@@ -2201,8 +2262,24 @@ impl Renderer<'_> {
             //
             // The pyramid must reduce the depth the EARLY scope wrote, which is why the block lands
             // before the late scope rather than after it.
+            //
+            // VG R3 piece 4 rung P4-2: the slot-6 (`VbHzbBuild`) bracket travels INSIDE the
+            // function, so this call site hands the witness over rather than predicting what the
+            // body records. The two call sites are mutually exclusive on ONE local and the function
+            // has no early return, so exactly one pair is written per frame — and the dev-profile
+            // double-write counter reds if a future edit makes both reachable.
             if occlusion_split {
-                self.record_hzb_poison_build(plan, cmd, targets, forward, vb, scene, present_extent, fi);
+                self.record_hzb_poison_build(
+                    plan,
+                    cmd,
+                    targets,
+                    forward,
+                    vb,
+                    scene,
+                    present_extent,
+                    fi,
+                    &mut ts,
+                );
             }
 
             // === VG R3 piece 3 step P3-7 (plan D10, gate G-P3-E): the EARLY-DEPTH dump copy. ===
@@ -2307,6 +2384,14 @@ impl Renderer<'_> {
                     hzb_dump_early_copied = true;
                 }
             }
+
+            // VG R3 piece 4 rung P4-2: `b7` opens the late cull. The `e6 → b7` gap holds the
+            // EARLY-DEPTH dump copy above (`occlusion_split && scene.hzb_dump`), which no timing
+            // leg arms — enumerated in the plan's gap list rather than folded into either bracket.
+            // SAFETY: recording is open and no rendering scope is active (the early scope's
+            // `cmd_end_rendering` is above, the late scope's `cmd_begin_rendering` below); the pool
+            // was reset this frame; `fi` is this present's slot; this query is unwritten since.
+            unsafe { ts.begin(self.fns, cmd, fi, VbTimedPass::VbLateCull) };
 
             // === VG R3 piece 3 step P3-3 (plan D4/D5): the LATE cull dispatch. ===
             //
@@ -2427,6 +2512,13 @@ impl Renderer<'_> {
                     p.late_cull_dispatches += 1;
                 }
             }
+
+            // VG R3 piece 4 rung P4-2: `e7` closes the late cull, `b8` opens the late raster. The
+            // gap holds the host-side `late_cull_dispatches` probe counter only.
+            // SAFETY (both stamps): recording is open and no rendering scope is active; the pool
+            // was reset this frame; `fi` is this present's slot; each query is stamped once here.
+            unsafe { ts.end(self.fns, cmd, fi, VbTimedPass::VbLateCull) };
+            unsafe { ts.begin(self.fns, cmd, fi, VbTimedPass::VbLateRaster) };
 
             // === VG R3 piece 2 step P2-5 (plan D4): the LATE raster scope. ===
             //
@@ -2641,6 +2733,22 @@ impl Renderer<'_> {
                     p.scopes += 1;
                 }
             }
+
+            // === VG R3 piece 4 rung P4-2: `e8` then `e9` — the late raster closes, then the run. ===
+            //
+            // ⚠️ BOTH sit BEFORE the POST-LATE readback block below, and that is deliberate: under
+            // `BOYKO_VB_CULL_READBACK` that block records three TRANSFER copies, and stretching the
+            // run over a diagnostic would make the shipped headline interval depend on a probe.
+            // The two instruments are therefore mutually exclusive at boot (`boyko_app::runner`
+            // panics if both env knobs are set), so no published timestamp number contains either
+            // half of the probe's cost — stated once, here and there, instead of qualifying `m9`.
+            //
+            // SAFETY (both stamps): recording is open and no rendering scope is active (the late
+            // scope's `cmd_end_rendering` is above, inside the block that just closed); the pool
+            // was reset this frame; `fi` is this present's in-flight slot; slot 8's end and slot
+            // 9's end are each stamped exactly once, here.
+            unsafe { ts.end(self.fns, cmd, fi, VbTimedPass::VbLateRaster) };
+            unsafe { ts.end(self.fns, cmd, fi, VbTimedPass::VbRun) };
 
             // === VG R3 piece 3 steps P3-3/P3-5 (plan D8): the POST-LATE readback snapshot. ===
             //
@@ -3228,8 +3336,23 @@ impl Renderer<'_> {
         //
         // ⚠️ An UNARMED frame records ZERO commands here — no clear, no barrier, no dispatch —
         // which is what keeps every golden pin byte-identical.
+        //
+        // ⚠️ VG R3 piece 4 rung P4-2: this is the OTHER slot-6 site, and it is OUTSIDE the run
+        // bracket (`e9` is above, inside the `mesh_leg` block) — which is why `m_6` is not
+        // comparable across an armed/disarmed pair and why every aggregate that spans both legs
+        // excludes it by name.
         if !occlusion_split {
-            self.record_hzb_poison_build(plan, cmd, targets, forward, vb, scene, present_extent, fi);
+            self.record_hzb_poison_build(
+                plan,
+                cmd,
+                targets,
+                forward,
+                vb,
+                scene,
+                present_extent,
+                fi,
+                &mut ts,
+            );
         }
 
         // === Rung R9b: the SPLIT arm — recorded in EXACTLY `declare_vb_graph`'s order:
@@ -4667,6 +4790,22 @@ impl Renderer<'_> {
     /// Recording must be open on `cmd` and NO render-pass instance may be active: both
     /// `vkCmdClearColorImage` and `vkCmdDispatch` are forbidden inside one. Both call sites
     /// record after a `cmd_end_rendering`, and the `unsafe` blocks below cite this.
+    ///
+    /// # The timestamp bracket is INSIDE, and that is the point (VG R3 piece 4 rung P4-2)
+    ///
+    /// [`VbTimedPass::VbHzbBuild`]'s pair is stamped at this fn's first and last statements, from
+    /// the `ts` the caller threads in. Setting the bits at the CALL SITES instead would restore
+    /// exactly the premise-shaped guarantee rung P4-1 exists to delete: the mask would be a claim
+    /// about this body made from outside it, and deleting a stamp in here would leave the witness
+    /// reading "complete" over an unwritten query — a `VK_QUERY_RESULT_WAIT_BIT` readback that
+    /// blocks forever, which no mask and no epilogue could then catch.
+    ///
+    /// ⚠️ **The two call sites' mutual exclusion is load-bearing.** They are `if occlusion_split`
+    /// and `if !occlusion_split` on ONE local, and this fn has no early return, so the pair is
+    /// written exactly once per frame. If a future edit makes both reachable, the dev-profile
+    /// double-write counter in `TsWitness::finish` reds by slot name — a double `vkCmdWriteTimestamp`
+    /// into one query after a single reset is a `VUID-vkCmdWriteTimestamp` violation and a silently
+    /// wrong delta, not a hang, so nothing else in the instrument would notice.
     #[allow(clippy::too_many_arguments)]
     fn record_hzb_poison_build(
         &self,
@@ -4678,7 +4817,17 @@ impl Renderer<'_> {
         scene: &GBufferScene<'_>,
         present_extent: VkExtent2D,
         fi: usize,
+        ts: &mut TsWitness<'_>,
     ) {
+        // VG R3 piece 4 rung P4-2: `b6` — the FIRST statement, so the bracket covers the poison
+        // clear's derived barrier as well as the clear and every build dispatch.
+        // SAFETY: recording is open and no render-pass instance is active (this fn's own recording
+        // contract, which both call sites satisfy); `self.fns` is the live device fn-table; the
+        // pool was reset at the frame top (`ts` was constructed after `reset_frame`, and it is the
+        // caller's own witness); `fi` is this present's in-flight slot; this query is unwritten
+        // since that reset — the two call sites are mutually exclusive, so this fn runs once.
+        unsafe { ts.begin(self.fns, cmd, fi, VbTimedPass::VbHzbBuild) };
+
         // === VG R3 piece 1 step P1-8 (plan §5/§13, gate G8): the pyramid POISON clear. ===
         //
         // Recorded FIRST — immediately before the first `hzb_build` dispatch below, in EXACTLY
@@ -4862,6 +5011,15 @@ impl Renderer<'_> {
                 }
             }
         }
+
+        // VG R3 piece 4 rung P4-2: `e6` — the LAST statement, closing the bracket over the whole
+        // `[hzb_poison, hzb_build_0 .. hzb_build_{n-1}]` block. On a frame that records none of it
+        // (`HzbMode::Off`, or no mesh leg) the pair is still written, around nothing, and reports a
+        // near-zero MEASURED cost — never a `FALLBACK`, because the bracket did execute.
+        // SAFETY: recording is open and no render-pass instance is active (nothing above opened
+        // one); the pool was reset this frame; `fi` is this present's in-flight slot; this query is
+        // unwritten since that reset (the begin above wrote the OTHER query of the pair).
+        unsafe { ts.end(self.fns, cmd, fi, VbTimedPass::VbHzbBuild) };
     }
 
     /// Rung R9b: the `vb_viewt` (viewt_from_depth_rz) pass-barriers + dispatch body, extracted

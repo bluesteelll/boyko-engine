@@ -1046,6 +1046,18 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     let mut vb_bench_labels = [VbPassLabel::Measured; VB_PASS_COUNT as usize];
     let mut vb_bench_seen: u32 = 0;
     if vb_bench {
+        // VG R3 piece 4 rung P4-2: the bench and the cull READBACK probe are mutually exclusive,
+        // and the reason is that the probe records commands INSIDE the timed brackets. Under
+        // `BOYKO_VB_CULL_READBACK` the recorder issues copies in TWO places: a pre-snapshot inside
+        // `VbEarlyCull`'s extent, and a post-late block that sits after `VbLateRaster`'s end AND
+        // after `VbRun`'s. Stretching the run bracket over a diagnostic would make the shipped
+        // headline interval depend on whether a probe was armed; qualifying the numbers afterwards
+        // would leave a reader to discover it in prose. Refusing the combination at boot is what
+        // makes "no published timestamp number contains any part of the probe's cost" a structural
+        // statement. Same shape and same reason as the `BOYKO_SV0_BENCH` exclusion below.
+        if host.gpu.vb_cull_readback.is_some() {
+            vb_bench_readback_exclusivity_panic();
+        }
         // VG R3 piece 4 rung P4-1: this was a release-live `assert!` on `mesh_leg`, standing in
         // for a per-frame invariant it could not state — `record_vb`'s VbShade pair is written
         // only on a mesh-leg frame, so an SDF-only VB leg hung the `WAIT_BIT` readback. The
@@ -2940,6 +2952,14 @@ fn vb_bench_mean_ns(samples: &[f64]) -> f64 {
 /// `FALLBACK`/`TORN` flag from the recorder's bracket witness. A flagged pass measured nothing
 /// and must be excluded from every aggregate; a `TORN` one rejects the run.
 ///
+/// VG R3 piece 4 rung P4-2: there are now TEN such lines, and their RECORD ORDER is leg-dependent.
+/// `vb_run` (slot 9) spans `[b3, e8]` identically on every leg and is the only interval whose
+/// begin-offset ordering a harness may assert across legs; `vb_hzb_build` (slot 6) and `vb_shade`
+/// (slot 2) each move between two mutually-exclusive recorder sites, so neither is comparable
+/// across an armed/disarmed pair. `vb_shade`'s begin is additionally `TOP_OF_PIPE` (kept for
+/// VB-P1d compatibility), so comparing its offset with any other slot's is an OBSERVATION and not
+/// an ordering — a TOP stamp recorded later may legally report an earlier time.
+///
 /// `#[cold]`/`#[inline(never)]`: a once-per-process diagnostic print, never on the hot path.
 #[cfg(windows)]
 #[cold]
@@ -3117,10 +3137,38 @@ fn vb_bench_stats_ns(samples: &[f64]) -> (f64, f64, f64) {
 #[inline(never)]
 fn vb_bench_no_mesh_leg_note() {
     eprintln!(
-        "VB-P1d bench SCOPE: this render path has no mesh leg, so record_vb brackets no lit \
-         producer — the vb_shade pass will report FALLBACK (a frame-end zero pair written by the \
-         totality epilogue) and must be excluded from every aggregate. The cull_reset/\
-         cull_dispatch pairs are unaffected."
+        "VB-P1d bench SCOPE: this render path has no mesh leg, so record_vb never enters the \
+         mesh-leg block — SEVEN of the ten passes will report FALLBACK (a frame-end zero pair \
+         written by the totality epilogue) and must be excluded from every aggregate: vb_shade, \
+         vb_late_upload, vb_early_cull, vb_early_raster, vb_late_cull, vb_late_raster and vb_run. \
+         The cull_reset/cull_dispatch pairs are unaffected — they are bracketed above that block. \
+         ⚠️ vb_hzb_build reports MEASURED at ~0 and that is NOT a fallback: without the split its \
+         call site sits outside the mesh-leg block, so the bracket genuinely executes, around a \
+         body that records nothing on this leg. A near-zero MEASURED number here says the block \
+         was empty, never that a pyramid build is free."
+    );
+}
+
+/// VG R3 piece 4 rung P4-2: `BOYKO_VB_BENCH` and `BOYKO_VB_CULL_READBACK` were both set.
+///
+/// The cull readback probe records `vkCmdCopyBuffer` work at two sites the timestamp brackets
+/// enclose — a pre-snapshot inside `VbEarlyCull`, and a post-late block after both `VbLateRaster`'s
+/// and `VbRun`'s end stamps. A run with both armed would publish per-pass numbers containing a
+/// diagnostic's cost under names that do not mention it, and would make the run bracket's meaning
+/// depend on an env var. The combination is refused rather than annotated, for the reason the
+/// `BOYKO_SV0_BENCH` exclusion is refused: a measurement whose scope depends on the ambient
+/// environment is not a measurement.
+///
+/// `#[cold]`/`#[inline(never)]`: a boot-time diagnostic that diverges.
+#[cfg(windows)]
+#[cold]
+#[inline(never)]
+fn vb_bench_readback_exclusivity_panic() -> ! {
+    panic!(
+        "invariant: BOYKO_VB_BENCH and BOYKO_VB_CULL_READBACK are mutually exclusive. The cull \
+         readback probe records buffer copies INSIDE the VbEarlyCull bracket and immediately after \
+         the VbLateRaster/VbRun end stamps, so every published VB-P4 number would silently include \
+         a diagnostic's cost. Run the bench without the probe, or the probe without the bench."
     );
 }
 

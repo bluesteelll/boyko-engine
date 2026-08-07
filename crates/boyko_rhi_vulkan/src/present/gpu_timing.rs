@@ -193,13 +193,37 @@ impl TimestampCollector {
 // passes would make that EXISTING harness request extra pairs while `record_gbuffer` writes
 // only `PASS_COUNT` of them — an instant deadlock. A dedicated
 // `VbTimestampCollector`/`VbTimedPass`/`VB_PASS_COUNT` keeps the two rungs' query-pool sizing
-// independent — VB-P1e H0 grew `VB_PASS_COUNT` 2 → 3 without touching `PASS_COUNT` at all.
+// independent — VB-P1e H0 grew `VB_PASS_COUNT` 2 → 3 and VG R3 piece 4 rung P4-2 grew it 3 → 10,
+// neither touching `PASS_COUNT` at all.
+//
+// ⚠️ The argument above is F2, and it does NOT apply to widening THIS collector: since rung P4-1
+// the recorder's totality epilogue (`TsWitness::finish`) writes every pair on every VB frame and
+// the boot-time path disarm removes the non-VB boots, so the "harness demands a pair its recorder
+// never wrote" state is unreachable here — which is what made P4-2's seven new slots safe to add
+// to the SAME pool, the SAME readback and the SAME single reader.
 
-/// The three `record_vb` dispatches the VB-P1d/VB-P1e bench brackets, in query-pair-slot order
+/// The `record_vb` units the VB-P1d/VB-P1e/VG-R3-P4 bench brackets, in query-pair-slot order
 /// (the begin query for pass `p` is `2 * p`, its end query `2 * p + 1`).
 ///
 /// `#[repr(u32)]` so the discriminant IS the pair slot index — mirrors [`TimedPass`]'s own
 /// shape.
+///
+/// # Slots 0/1/2 keep their meaning
+///
+/// VB-P1d's published numbers are defined against them (and against their `TOP_OF_PIPE` begins —
+/// see [`Self::begin_stage`]), so P4-2 APPENDED its seven and renumbered nothing.
+///
+/// # Record order is LEG-DEPENDENT, and two slots are the ones that move
+///
+/// | leg | order of BEGIN stamps |
+/// |---|---|
+/// | armed split | `0 1` ‖ `9b 3 4 5 6 7 8 9e` ‖ `2` |
+/// | disarmed | `0 1` ‖ `9b 3 4 5 7 8 9e` ‖ `2` ‖ `6` |
+///
+/// [`Self::VbHzbBuild`] moves because `record_hzb_poison_build` has two mutually-exclusive call
+/// sites on opposite sides of the lit producer; [`Self::VbShade`] moves between its own three
+/// producer arms. The `9b … 9e` span is identical on every leg, which is what the harness's
+/// monotonicity clause is scoped to.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VbTimedPass {
@@ -229,6 +253,51 @@ pub enum VbTimedPass {
     /// survives as a SCOPE statement (its break-even number is defined against the fused/
     /// classified tail), not as a hang guard.
     VbShade = 2,
+    /// VG R3 piece 4 rung P4-2: the LATE indirect-record fill — the host `vkCmdUpdateBuffer` chunks
+    /// that seed `vb_indirect_late` with `instanceCount = 0`, plus the pass's derived barriers.
+    ///
+    /// The bracket sits OUTSIDE `if occlusion_split`, so a disarmed frame writes the pair around a
+    /// block that records nothing and reports a near-zero MEASURED cost. Moving it inside would
+    /// make the disarmed leg report `FALLBACK` instead — the plan's control (ii), and the reason
+    /// the placement is stated here rather than left to the recorder's indentation.
+    VbLateUpload = 3,
+    /// VG R3 piece 4 rung P4-2: the EARLY batch-cull dispatch — `vb_batch_cull.comp` at
+    /// `phase = EARLY`, its derived barriers, its descriptor bind and (under
+    /// `BOYKO_VB_CULL_READBACK`, which the bench refuses to co-exist with) its pre-snapshot copies.
+    ///
+    /// Bracketed outside `if batch_cull_armed` for [`Self::VbLateUpload`]'s reason.
+    VbEarlyCull = 4,
+    /// VG R3 piece 4 rung P4-2: the EARLY raster scope — `vb_raster`'s derived barriers, the
+    /// `cmd_begin_rendering`/`cmd_end_rendering` pair and every indirect draw between them. THE
+    /// pass the occlusion split exists to shrink, so `-Δ5` is the plan's `Saving` term.
+    VbEarlyRaster = 5,
+    /// VG R3 piece 4 rung P4-2: the `[hzb_poison, hzb_build_*]` block — bracketed INSIDE
+    /// `record_hzb_poison_build`, at its first and last statements, so ONE bracket site serves both
+    /// of that function's mutually-exclusive call sites.
+    ///
+    /// ⚠️ Its POSITION is leg-dependent (see the type doc's table) and its magnitude is therefore
+    /// NOT comparable across an armed/disarmed pair. Bracketing inside the function rather than at
+    /// the call sites is what makes the witness a record of what executed instead of a caller's
+    /// prediction about a body it cannot see.
+    VbHzbBuild = 6,
+    /// VG R3 piece 4 rung P4-2: the LATE batch-cull dispatch — the second `vb_batch_cull.comp`
+    /// dispatch at `phase = LATE`, reading the pyramid this frame's [`Self::VbHzbBuild`] wrote.
+    /// Bracketed outside `if occlusion_split`.
+    VbLateCull = 7,
+    /// VG R3 piece 4 rung P4-2: the LATE raster scope — the second `begin/endRendering` bracket
+    /// over the same two views, drawing whatever `instanceCount` the late cull wrote. Bracketed
+    /// outside `if occlusion_split`, and closed AFTER the host-side probe counter that follows the
+    /// scope, so the pair covers the whole recorded unit rather than the scope alone.
+    VbLateRaster = 8,
+    /// VG R3 piece 4 rung P4-2: **the run bracket** — opens immediately before
+    /// [`Self::VbLateUpload`]'s begin and closes immediately after [`Self::VbLateRaster`]'s end.
+    ///
+    /// THE headline interval, and the only aggregate that is migration-immune: all eight stamps
+    /// `b9 … e9` are `BOTTOM_OF_PIPE`, so the intervals between consecutive ones exactly PARTITION
+    /// `[t(b9), t(e9)]` — work that migrates between slots 3..8 is zero-sum inside it and cancels
+    /// in a paired difference of two structurally identical runs. Its span is identical on every
+    /// leg (unlike slots 2 and 6), which is why the harness's record-order clause is scoped to it.
+    VbRun = 9,
 }
 
 impl VbTimedPass {
@@ -250,17 +319,33 @@ impl VbTimedPass {
             0 => Self::CullReset,
             1 => Self::CullDispatch,
             2 => Self::VbShade,
+            3 => Self::VbLateUpload,
+            4 => Self::VbEarlyCull,
+            5 => Self::VbEarlyRaster,
+            6 => Self::VbHzbBuild,
+            7 => Self::VbLateCull,
+            8 => Self::VbLateRaster,
+            9 => Self::VbRun,
             _ => panic!("invariant: VbTimedPass slot must be < VB_PASS_COUNT"),
         }
     }
 
-    /// The pipeline stage this pass's BEGIN stamp is written at (VG R3 piece 4 rung P4-1).
+    /// The pipeline stage this pass's BEGIN stamp is written at (VG R3 piece 4 rungs P4-1/P4-2).
     ///
-    /// `TOP_OF_PIPE` for all three of today's members, and that is a COMPATIBILITY decision
-    /// rather than a preference:
+    /// `TOP_OF_PIPE` for slots 0..2, and that is a COMPATIBILITY decision rather than a preference:
     /// VB-P1d's published break-even numbers are defined against a `TOP`/`BOTTOM` bracket
     /// (`boyko_app::runner`'s `print_vb_bench_summary` doc quantifies the ~3 % bias), and
     /// redefining the stage would silently change what an already-published number means.
+    ///
+    /// `BOTTOM_OF_PIPE` for slots 3..9 — the P4-2 partitioning brackets. A `BOTTOM_OF_PIPE` stamp
+    /// writes when every previously-submitted command has COMPLETED, i.e. it is a
+    /// prefix-completion time `t_k`. Prefixes are nested, so consecutive `BOTTOM` stamps are
+    /// non-decreasing and the intervals between them exactly partition their span: no time is
+    /// double-counted and none is lost. A `TOP_OF_PIPE` stamp waits only for prior commands to
+    /// REACH the top of the pipe, so it measures a different quantity — a TOP stamp recorded AFTER
+    /// a BOTTOM stamp may legally report an EARLIER time, which is why only BOTTOM-vs-BOTTOM
+    /// comparisons carry the partition property and why mixing the two is a reported observation
+    /// rather than an assertion.
     ///
     /// Consulted by [`VbTimestampCollector::write_begin`] rather than hardcoded there, so a pass
     /// whose stage differs cannot acquire the wrong one by being stamped from a different call
@@ -269,6 +354,13 @@ impl VbTimedPass {
     pub const fn begin_stage(self) -> TimestampStage {
         match self {
             Self::CullReset | Self::CullDispatch | Self::VbShade => TimestampStage::TopOfPipe,
+            Self::VbLateUpload
+            | Self::VbEarlyCull
+            | Self::VbEarlyRaster
+            | Self::VbHzbBuild
+            | Self::VbLateCull
+            | Self::VbLateRaster
+            | Self::VbRun => TimestampStage::BottomOfPipe,
         }
     }
 
@@ -282,13 +374,21 @@ impl VbTimedPass {
             Self::CullReset => "cull_reset",
             Self::CullDispatch => "cull_dispatch",
             Self::VbShade => "vb_shade",
+            Self::VbLateUpload => "vb_late_upload",
+            Self::VbEarlyCull => "vb_early_cull",
+            Self::VbEarlyRaster => "vb_early_raster",
+            Self::VbHzbBuild => "vb_hzb_build",
+            Self::VbLateCull => "vb_late_cull",
+            Self::VbLateRaster => "vb_late_raster",
+            Self::VbRun => "vb_run",
         }
     }
 }
 
-/// The number of bracketed VB-P1d/VB-P1e passes (`CullReset`, `CullDispatch`, `VbShade`). Each
-/// needs a begin+end query, so a pool holds `2 * VB_PASS_COUNT` queries.
-pub const VB_PASS_COUNT: u32 = 3;
+/// The number of bracketed VB-P1d/VB-P1e/VG-R3-P4 passes — every [`VbTimedPass`] member. Each
+/// needs a begin+end query, so a pool holds `2 * VB_PASS_COUNT` queries (20 × 8 B ×
+/// [`FRAMES_IN_FLIGHT`] = 320 B, boot-owned).
+pub const VB_PASS_COUNT: u32 = 10;
 
 // The per-frame witness masks ([`VbTimestampCollector::publish_witness`]) are `u16`, one bit per
 // slot, so the pass count may not outgrow that width without widening them too.
@@ -477,7 +577,7 @@ impl VbTimestampCollector {
 // A THIRD dedicated collector, for the same reason [`VbTimestampCollector`] is a second one
 // (see its block comment): every `read_query_pool_ns` reader asks for ALL of its collector's
 // (begin,end) pairs with `VK_QUERY_RESULT_WAIT_BIT`, which BLOCKS FOREVER on a pair its
-// recorder never wrote this frame. `VbTimedPass`'s three pairs are written by `record_vb`,
+// recorder never wrote this frame. `VbTimedPass`'s ten pairs are written by `record_vb`,
 // which a **Deferred** frame never runs; `TimedPass`'s four are written by passes S1.5's
 // fixture does not arm (DDGI / CSM / punctual). Widening either would deadlock the other
 // rung's harness on the very first frame. A one-pass collector with its own pool sizing keeps

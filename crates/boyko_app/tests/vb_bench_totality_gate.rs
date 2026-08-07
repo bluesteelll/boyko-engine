@@ -8,6 +8,10 @@
 //! | A | `VisibilityBuffer × Sdf` + `BOYKO_VB_BENCH=1` | **PANICS** before frame 1 (`runner.rs`'s `mesh_leg` `assert!`) | completes; `vb_shade` reports `FALLBACK` |
 //! | B | `Deferred × Both` + `BOYKO_VB_BENCH=1` | **HANGS FOREVER** (the pool is never even reset; the `WAIT_BIT` readback never returns) | exits immediately with a named message |
 //!
+//! Since rung P4-2 gate A's leg carries TEN passes, not three: seven come back `FALLBACK` and
+//! three (`cull_reset`, `cull_dispatch`, `vb_hzb_build`) are structurally MEASURED. The gate's
+//! clauses are unchanged; clause 3 states the widened expectation at its site.
+//!
 //! # Why this file exists rather than a runbook line
 //!
 //! Both gates were first demonstrated ad hoc, from a shell. A gate that exists only as a chat-log
@@ -366,8 +370,17 @@ fn vb_sdf_leg_completes_with_vb_shade_flagged_fallback() {
 
     // ---- clause 3: NON-VACUITY. The epilogue did not simply zero everything --------------------
     //
-    // Without this, an epilogue that filled ALL THREE pairs (a witness that never records a bit, a
+    // Without this, an epilogue that filled EVERY pair (a witness that never records a bit, a
     // collector wired to nothing) would green clause 2 while measuring nothing at all.
+    //
+    // ⚠️ VG R3 piece 4 rung P4-2 widened `VbTimedPass` 3 -> 10, so this clause's EXPECTATION moved
+    // and is restated rather than left to be re-derived: on `VisibilityBuffer x Sdf` the mesh-leg
+    // block never runs, so SEVEN slots are structurally FALLBACK (vb_shade, vb_late_upload,
+    // vb_early_cull, vb_early_raster, vb_late_cull, vb_late_raster, vb_run) and THREE are
+    // structurally MEASURED — cull_reset and cull_dispatch, bracketed above the block, and
+    // vb_hzb_build, whose recorder site on an unsplit frame sits BELOW it. The clause itself is
+    // unchanged in strength: it asserts the set is non-empty, which is what makes clause 2 a
+    // statement about labelling rather than about a collector that labels everything.
     let measured: Vec<&str> = output
         .lines()
         .filter(|l| l.contains("VB-P4 pass="))
@@ -377,9 +390,10 @@ fn vb_sdf_leg_completes_with_vb_shade_flagged_fallback() {
         !measured.is_empty(),
         "EVERY VB-P4 pass came back flagged -- the epilogue filled the whole frame. The \
          CullReset/CullDispatch brackets sit OUTSIDE the froxel arm's gate and outside the mesh-leg \
-         block, so they are written on every VB frame whatever the leg; all three flagged means the \
-         witness is recording no bits at all, and this gate's clause 2 would be green for a \
-         collector that measures nothing.\n---- worker output ----\n{output}"
+         block, and VbHzbBuild's unsplit call site sits below that block, so all three are written \
+         on every VB frame whatever the leg; ALL TEN flagged means the witness is recording no bits \
+         at all, and this gate's clause 2 would be green for a collector that measures \
+         nothing.\n---- worker output ----\n{output}"
     );
 
     // ---- clause 4: the scope note replaced the assert, and says so -----------------------------
