@@ -1041,10 +1041,13 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     // VG R3 piece 4 rung P4-1: one table per HALF of the readback — durations (what VB-P1d has
     // always published) and begin OFFSETS (what tells a measurement from an epilogue fill) —
     // indexed by `VbTimedPass::slot()`, so a new pass costs a row, not a variable.
-    let mut vb_bench_dur_ns: [Vec<f64>; VB_PASS_COUNT as usize] =
-        core::array::from_fn(|_| Vec::with_capacity(vb_bench_frames as usize));
-    let mut vb_bench_begin_off_ns: [Vec<f64>; VB_PASS_COUNT as usize] =
-        core::array::from_fn(|_| Vec::with_capacity(vb_bench_frames as usize));
+    // VG R3 piece 4 rung P4-6 adds a THIRD: end OFFSETS. See `VbBenchTables::end_off_ns` for why a
+    // harness cannot get one by adding the other two after they are reduced.
+    let mut vb_bench_tables = VbBenchTables {
+        dur_ns: core::array::from_fn(|_| Vec::with_capacity(vb_bench_frames as usize)),
+        begin_off_ns: core::array::from_fn(|_| Vec::with_capacity(vb_bench_frames as usize)),
+        end_off_ns: core::array::from_fn(|_| Vec::with_capacity(vb_bench_frames as usize)),
+    };
     // Per pass, the worst label observed over the kept frames (see `VbPassLabel`): the recorder
     // publishes the two bracket masks per frame, so this is structural, not inferred from the
     // numbers.
@@ -2696,28 +2699,34 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     // so the summary describes the frames it timed rather than the state at exit.
                     vb_bench_force_seen |= 1u8 << frame_occ_force.slot();
                     vb_bench_mode_seen |= 1u8 << (frame_occ_mode as u32);
-                    for slot in 0..VB_PASS_COUNT as usize {
-                        vb_bench_dur_ns[slot].push(sample.dur_ns[slot]);
-                        vb_bench_begin_off_ns[slot].push(sample.begin_off_ns[slot]);
+                    for (slot, worst) in vb_bench_labels.iter_mut().enumerate() {
+                        vb_bench_tables.dur_ns[slot].push(sample.dur_ns[slot]);
+                        vb_bench_tables.begin_off_ns[slot].push(sample.begin_off_ns[slot]);
+                        // VG R3 piece 4 rung P4-6: the END offset is formed HERE, from THIS frame's
+                        // two halves, and only then reduced. Both terms come from one readback of
+                        // one frame's pool, so the sum is that frame's `end − base` — the quantity
+                        // a reader wants — whereas adding the two published MEDIANS afterwards is
+                        // not a time any frame had.
+                        vb_bench_tables.end_off_ns[slot]
+                            .push(sample.begin_off_ns[slot] + sample.dur_ns[slot]);
                         let bit = 1u16 << slot;
                         let label = VbPassLabel::from_witness(
                             sample.begun & bit != 0,
                             sample.ended & bit != 0,
                         );
-                        vb_bench_labels[slot] = vb_bench_labels[slot].worse_of(label);
+                        *worst = worst.worse_of(label);
                     }
                 }
             }
             // Every row grows together (one push per pass per kept frame), so any one of them
             // measures the budget; name the row VB-P1d's own budget check always used.
-            if vb_bench_dur_ns[VbTimedPass::CullReset.slot() as usize].len()
+            if vb_bench_tables.dur_ns[VbTimedPass::CullReset.slot() as usize].len()
                 >= vb_bench_frames as usize
             {
                 print_vb_bench_summary(
                     host.resolved_render_path.froxel_light_cull,
                     vb_bench_lights,
-                    &vb_bench_dur_ns,
-                    &vb_bench_begin_off_ns,
+                    &vb_bench_tables,
                     &vb_bench_labels,
                     vb_bench_force_seen,
                     vb_bench_mode_seen,
@@ -3024,6 +3033,21 @@ fn vb_bench_mean_ns(samples: &[f64]) -> f64 {
 /// VB-P1d compatibility), so comparing its offset with any other slot's is an OBSERVATION and not
 /// an ordering — a TOP stamp recorded later may legally report an earlier time.
 ///
+/// # VG R3 piece 4 rung P4-6: the ELEVENTH key, `end_off_ns`, and why it is published rather than
+/// derived
+///
+/// **Two independently reduced medians cannot be added.** `median(begin_off) + median(dur)` is not
+/// `median(begin_off + dur)` unless the begin offset is constant across frames, and it is not: the
+/// pre-run work a stamp waits on jitters frame to frame. P4-6's first sitting measured the
+/// consequence — on the disarmed leg, `off(vb_late_raster) + dur` exceeded
+/// `off(vb_run) + dur(vb_run)` by 144 ns on a 47 µs run (`vb_occ_mixed`) and by 240 ns on a 691 µs
+/// run (`vb_occ_dense`), while the per-frame relation `e8 ≤ e9` holds ALWAYS: there is no GPU
+/// command between those two stamps. The property was true; the reduction could not express it.
+///
+/// So a clause that needs an END TIME gets one reduced WHOLE, from per-frame sums formed at the
+/// accumulation site. `begin_off_ns` and the duration statistics are unchanged — they are correct
+/// for what they report, and VB-P1d's and P4-2's published numbers stay comparable.
+///
 /// `#[cold]`/`#[inline(never)]`: a once-per-process diagnostic print, never on the hot path.
 #[cfg(windows)]
 #[cold]
@@ -3031,12 +3055,12 @@ fn vb_bench_mean_ns(samples: &[f64]) -> f64 {
 fn print_vb_bench_summary(
     froxel_light_cull: bool,
     n_ps: u32,
-    dur_ns: &[Vec<f64>; VB_PASS_COUNT as usize],
-    begin_off_ns: &[Vec<f64>; VB_PASS_COUNT as usize],
+    tables: &VbBenchTables,
     labels: &[VbPassLabel; VB_PASS_COUNT as usize],
     force_seen: u8,
     mode_seen: u8,
 ) {
+    let dur_ns = &tables.dur_ns;
     let cull_reset_ns: &[f64] = &dur_ns[VbTimedPass::CullReset.slot() as usize];
     let cull_dispatch_ns: &[f64] = &dur_ns[VbTimedPass::CullDispatch.slot() as usize];
     let shade_ns: &[f64] = &dur_ns[VbTimedPass::VbShade.slot() as usize];
@@ -3083,13 +3107,20 @@ fn print_vb_bench_summary(
 
     // VG R3 piece 4 rung P4-1: the per-pass lines, beside — never instead of — the VB-P1d line
     // above, which stays byte-identical because `vg_occ_split_timing.rs` parses it.
+    //
+    // ⚠️ Rung P4-6's `end_off_ns` is inserted BEFORE `n=`, so the `FALLBACK`/`TORN` suffix stays the
+    // last token on the line: every existing reader matches its keys by name
+    // (`vb_bench_totality_gate.rs`'s `key_f64`) or scans for the suffix, and both survive a key
+    // added in the middle. `n=` remains the first literal `n=` on the line — every other key ends
+    // `_ns=`, which contains no `n=` — so a `find("n=")` reader is unaffected too.
     for slot in 0..VB_PASS_COUNT as usize {
         let pass = VbTimedPass::from_slot(slot as u32);
         let (median, mean, p95) = vb_bench_stats_ns(&dur_ns[slot]);
-        let (begin_median, _, _) = vb_bench_stats_ns(&begin_off_ns[slot]);
+        let (begin_median, _, _) = vb_bench_stats_ns(&tables.begin_off_ns[slot]);
+        let (end_median, _, _) = vb_bench_stats_ns(&tables.end_off_ns[slot]);
         println!(
             "VB-P4 pass={} median_ns={median:.1} mean_ns={mean:.1} p95_ns={p95:.1} \
-             begin_off_ns={begin_median:.1} n={}{}",
+             begin_off_ns={begin_median:.1} end_off_ns={end_median:.1} n={}{}",
             pass.label(),
             dur_ns[slot].len(),
             labels[slot].suffix()
@@ -3135,6 +3166,36 @@ fn word_set<T: Copy>(variants: &[T], seen: u8, word: impl Fn(T) -> &'static str)
         }
     }
     if out.is_empty() { "-".to_string() } else { out }
+}
+
+/// VG R3 piece 4 rung P4-6: the bench's three per-pass sample tables, one row per
+/// `VbTimedPass::slot()`.
+///
+/// Grouped into one type rather than threaded as three parameters so that adding a fourth reduction
+/// costs a field instead of a signature, and so the "reduce whole, never compose" rule below has a
+/// single place to live.
+///
+/// Every row is preallocated ONCE at the bench's final frame budget (Principle 5) and never
+/// reallocates during the run. On a non-bench boot the budget is `0`, so all thirty rows are
+/// zero-capacity `Vec`s that allocate nothing.
+#[cfg(windows)]
+struct VbBenchTables {
+    /// Per pass, per kept frame: the bracket's duration in ns. VB-P1d's published means and
+    /// P4-2's per-pass medians both reduce this row.
+    dur_ns: [Vec<f64>; VB_PASS_COUNT as usize],
+    /// Per pass, per kept frame: the BEGIN stamp as an offset from pair 0's begin.
+    begin_off_ns: [Vec<f64>; VB_PASS_COUNT as usize],
+    /// Per pass, per kept frame: the END stamp as an offset from pair 0's begin — **formed per
+    /// frame at the accumulation site, then reduced whole.**
+    ///
+    /// ⚠️ **A consumer must never reconstruct this by adding the two published medians.**
+    /// `median(begin_off) + median(dur)` equals `median(begin_off + dur)` only when the begin
+    /// offset is constant across frames, and it is not — the pre-run work a `BOTTOM_OF_PIPE` stamp
+    /// waits on jitters frame to frame. Rung P4-6's first sitting measured the size of the error
+    /// (144 ns on a 47 µs run; 240 ns on a 691 µs run) against a relation whose true per-frame
+    /// margin is zero, and the composed form reported the inequality backwards. See
+    /// [`print_vb_bench_summary`]'s doc for the full derivation.
+    end_off_ns: [Vec<f64>; VB_PASS_COUNT as usize],
 }
 
 /// VG R3 piece 4 rung P4-1: what the recorder's two bracket masks say about one pass on one
