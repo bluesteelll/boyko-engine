@@ -432,9 +432,10 @@ mod tests {
     /// batch 0 owns `[0, 2)`, batch 1 owns `[5, 8)`, and slots 2..5 belong to a batch that was
     /// gathered but not drawn.
     ///
-    /// The late fields are the INERT payload every configuration produces before the P3-6 arming
-    /// commit — zero counts and an untouched list — so these three cases stay statements about the
-    /// early decode alone.
+    /// The late fields carry the payload an UNSPLIT frame produces — zero counts and an untouched
+    /// list — so these three cases stay statements about the early decode alone. That is also what
+    /// every committed `BOYKO_VB_CULL_READBACK` fixture produces, since none of them marks
+    /// `OcclusionCulling`.
     fn readback_line(vis: &[u32]) -> String {
         format_vb_cull_probe_line(&VbCullProbeFields {
             drawn_batches: 2,

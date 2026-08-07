@@ -122,11 +122,13 @@ impl VbProbeDump {
         match write_probe(&self.path, &self.probe, cx) {
             Ok(()) => eprintln!(
                 "boyko_app: vb record probe written -> {} (scopes={}, late_draws={}, \
-                 late_instances={}, host draw_batches={}, occlusion_instances={})",
+                 late_cull_dispatches={}, late_seed_instances={}, host draw_batches={}, \
+                 occlusion_instances={})",
                 self.path,
                 self.probe.scopes,
                 self.probe.late_draws,
-                self.probe.late_instances,
+                self.probe.late_cull_dispatches,
+                self.probe.late_seed_instances,
                 cx.draw_batches,
                 cx.occlusion_instances
             ),
@@ -148,14 +150,20 @@ fn write_probe(path: &str, probe: &VbRecordProbe, cx: &VbProbeContext) -> std::i
     out.push_str("# [host] is derived independently, so `late_draws == draw_batches` compares two\n");
     out.push_str("# sites rather than one site with itself.\n");
     out.push_str("# LIMIT: this says the HOST RECORDED the scope, never that the GPU executed it.\n");
-    out.push_str("# A scope whose every draw carries instanceCount = 0 has no observable\n");
-    out.push_str("# consequence of execution, so no gate in this repository can close that gap.\n");
-    out.push_str("schema_version = 1\n\n");
+    out.push_str("# On a converged static frame the late scope correctly draws ZERO instances, so\n");
+    out.push_str("# its execution has no observable consequence and no gate here can see it.\n");
+    out.push_str("# The GPU's own numbers come from BOYKO_VB_CULL_READBACK, not from this file.\n");
+    // VG R3 piece 3 step P3-6: schema 2 renames `late_instances` -> `late_seed_instances` and adds
+    // `late_cull_dispatches`. The version is BUMPED rather than left alone because the rename makes
+    // a schema-1 reader's `late_instances` lookup fail loudly (`vb_occ_split_gate.rs`'s `field()`
+    // panics on a missing key) instead of reading a field that has changed meaning.
+    out.push_str("schema_version = 2\n\n");
 
     out.push_str("[probe]\n");
     out.push_str(&format!("scopes = {}\n", probe.scopes));
     out.push_str(&format!("late_draws = {}\n", probe.late_draws));
-    out.push_str(&format!("late_instances = {}\n\n", probe.late_instances));
+    out.push_str(&format!("late_cull_dispatches = {}\n", probe.late_cull_dispatches));
+    out.push_str(&format!("late_seed_instances = {}\n\n", probe.late_seed_instances));
 
     out.push_str("[host]\n");
     out.push_str(&format!("draw_batches = {}\n", cx.draw_batches));

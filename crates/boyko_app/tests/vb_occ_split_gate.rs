@@ -32,10 +32,19 @@
 //!
 //! # What this gate CANNOT claim
 //!
-//! * **That the GPU EXECUTED the late scope.** It proves the host RECORDED it. A scope whose every
-//!   draw carries `instanceCount = 0` has no observable consequence of execution, so no gate in
-//!   this repository can close that gap; the nearest independent evidence is the validation leg
-//!   (G3), and on this machine that leg sees static legality only (the plan's "P2-0 RESOLVED").
+//! * **That the GPU EXECUTED the late scope or the late cull.** It proves the host RECORDED both.
+//!   ⚠️ Since VG R3 piece 3 step P3-6 the split is ARMED, and on these STATIC fixtures the correct
+//!   late instance count is still ZERO — plan D12's fixed point: an instance the early phase
+//!   rejects writes no depth, so from frame 2 the pyramid is unchanged and both phases evaluate one
+//!   predicate over the same bytes, rejecting every candidate again. A late scope drawing nothing
+//!   here is the theorem holding, not inertness and not a defect. It also means execution has no
+//!   observable consequence, so no gate in this repository can close that gap; the nearest
+//!   independent evidence is the validation leg (G3), and on this machine that leg sees static
+//!   legality only (the plan's "P2-0 RESOLVED").
+//! * **That anything was DEFERRED.** These five spheres stand side by side against the sky, so
+//!   none lies behind another's silhouette and the conservative test rejects nothing. The
+//!   non-vacuity clause (`Σ n_defer > 0`) needs a fixture that actually occludes — `vb_occ_mixed`,
+//!   step P3-8 — and it reads the `BOYKO_VB_CULL_READBACK` payload, not this file.
 //! * **Anything about barriers.** These are host counts. A missing barrier leaves every one of
 //!   them exactly as it is — measured, on this machine: a genuine missing barrier produced 19
 //!   validation messages, no `SYNC-HAZARD` and a byte-identical image. Gate G4
@@ -48,7 +57,7 @@
 //! | corruption | expected |
 //! |---|---|
 //! | force `GBufferScene::path_vb_occlusion_split()` to `false` | `scopes == 1` on the marked scene: **G2 reds while G1 stays green** — the pair that proves G1 needs G2 |
-//! | set one late record's `instanceCount = 1` | G1 stays green by construction (`GREATER` rejects a redraw at identical depth); **G2 reds** on `late_instances` |
+//! | set one late record's HOST SEED to `instanceCount = 1` | G1 stays green by construction (`GREATER` rejects a redraw at identical depth); **G2 reds** on `late_seed_instances` |
 //! | `take(1)` in the late draw loop | green on the single-batch fixture, **red on `vb_occ_multi`** — which is the whole reason that fixture exists |
 //!
 //! # Run
@@ -66,8 +75,8 @@ use boyko_app::prelude::*;
 use boyko_ecs::ecs::core::system::ResMut;
 use boyko_render::mesh::Vertex;
 use boyko_render::{
-    GeometryLegs, Material, MeshAssetsVbExt, MeshGeometryTableSlot, OcclusionCulling, RenderPath,
-    RenderPathConfig, generate_tangents,
+    GeometryLegs, HzbConfig, HzbMode, Material, MeshAssetsVbExt, MeshGeometryTableSlot,
+    OcclusionCulling, RenderPath, RenderPathConfig, generate_tangents,
 };
 
 /// The env knob that arms `boyko_app::vb_probe_dump` — the value is the output path.
@@ -330,6 +339,20 @@ fn probe_path_or_skip(label: &str) -> Option<String> {
 const VB_MESH_PATH: RenderPathConfig =
     RenderPathConfig { path: RenderPath::VisibilityBuffer, legs: GeometryLegs::Mesh };
 
+/// VG R3 piece 3 step P3-6 (plan D9): the pyramid, armed on **all three** workers.
+///
+/// `path_vb_occlusion_split()` gained a `hzb.is_some()` conjunct at that step — the split IS the
+/// occlusion test now, and a late scope with no pyramid decides nothing — so a marked worker
+/// without this resource would report `scopes == 1` and red this gate for an INSTRUMENT reason with
+/// no defect present.
+///
+/// ⚠️ It is inserted on the UNMARKED worker too, and that is the point: the control's whole value
+/// is that the two runs differ in exactly one component's presence. Arming the pyramid only where
+/// it is needed would make the pair differ in two things and turn `scopes == 1` into a statement
+/// about the pyramid rather than about the marker. The pyramid's own byte-neutrality is pinned
+/// elsewhere (`[vb_mesh]` vs `[vb_mesh_hzb]`), so it costs this gate nothing.
+const HZB_BUILD: HzbConfig = HzbConfig { mode: HzbMode::Build };
+
 /// **G2 worker — the MARKED single-batch scene** (`vb_occ_split`'s own).
 #[test]
 #[ignore = "needs a real windowed GPU device; the G2 driver spawns it with BOYKO_VB_PROBE set"]
@@ -341,6 +364,7 @@ fn vb_occ_probe_dump_marked() {
     app.add_plugins(EnginePlugins::window("boyko_engine vb occ G2 marked", EXTENT, EXTENT));
     app.add_startup_system(setup_single_marked);
     app.insert_resource(VB_MESH_PATH);
+    app.insert_resource(HZB_BUILD);
     app.run();
 }
 
@@ -356,6 +380,7 @@ fn vb_occ_probe_dump_unmarked() {
     app.add_plugins(EnginePlugins::window("boyko_engine vb occ G2 unmarked", EXTENT, EXTENT));
     app.add_startup_system(setup_single_unmarked);
     app.insert_resource(VB_MESH_PATH);
+    app.insert_resource(HZB_BUILD);
     app.run();
 }
 
@@ -370,6 +395,7 @@ fn vb_occ_probe_dump_multi() {
     app.add_plugins(EnginePlugins::window("boyko_engine vb occ G2 multi", EXTENT, EXTENT));
     app.add_startup_system(setup_multi);
     app.insert_resource(VB_MESH_PATH);
+    app.insert_resource(HZB_BUILD);
     app.run();
 }
 
@@ -382,7 +408,12 @@ struct Probe {
     /// `[probe]` — written by `Renderer::record_vb` at the `vkCmd*` calls it counts.
     scopes: u32,
     late_draws: u32,
-    late_instances: u32,
+    /// The sum of `instanceCount` over the late records the HOST SEEDS — permanently `0` since
+    /// plan D3 made the late cull the only producer of a nonzero value in that array. Renamed from
+    /// `late_instances` at step P3-6, in the change that made the old name a lie.
+    late_seed_instances: u32,
+    /// Late cull (`vb_cull_late`) dispatches recorded this frame, counted AT the `vkCmdDispatch`.
+    late_cull_dispatches: u32,
     /// `[host]` — derived on the host, at other sites, for the cross-check.
     draw_batches: u32,
     occlusion_instances: u32,
@@ -463,7 +494,8 @@ fn run_worker(worker: &str) -> Probe {
     Probe {
         scopes: field_u32(&text, "probe.scopes", &out),
         late_draws: field_u32(&text, "probe.late_draws", &out),
-        late_instances: field_u32(&text, "probe.late_instances", &out),
+        late_seed_instances: field_u32(&text, "probe.late_seed_instances", &out),
+        late_cull_dispatches: field_u32(&text, "probe.late_cull_dispatches", &out),
         draw_batches: field_u32(&text, "host.draw_batches", &out),
         occlusion_instances: field_u32(&text, "host.occlusion_instances", &out),
         vb_path: field_bool(&text, "host.vb_path", &out),
@@ -563,6 +595,31 @@ fn vb_occ_split_records_two_scopes() {
     );
     assert_eq!(multi.scopes, 2, "vb_occ_multi: expected two scopes, got {}", multi.scopes);
 
+    // ---- the LATE CULL was dispatched (VG R3 piece 3 step P3-6) ---------------------------------
+    //
+    // The `scopes` clause above proves the second RASTER bracket was recorded. This one is the
+    // second half, and it is the only evidence in this repository that the phase-1 DISPATCH was
+    // recorded at all: on a converged static frame the late cull correctly writes
+    // `instanceCount = 0` for every batch (plan D12's fixed point), so its execution changes no
+    // pixel and no image gate can distinguish "dispatched" from "deleted". The counter is
+    // incremented AT the `vkCmdDispatch`, never derived from the arming predicate.
+    for (label, p) in [("marked", &marked), ("vb_occ_multi", &multi)] {
+        assert_eq!(
+            p.late_cull_dispatches, 1,
+            "{label}: the recorder reported {} late cull dispatches on a SPLIT frame. Exactly one \
+             is recorded per split frame, at the `vkCmdDispatch` itself -- a 0 here means the \
+             phase-1 dispatch was not recorded, and the late scope would then draw whatever the \
+             host seeded (nothing), which every image gate reads as green.",
+            p.late_cull_dispatches
+        );
+    }
+    assert_eq!(
+        unmarked.late_cull_dispatches, 0,
+        "unmarked: {} late cull dispatches on a scene that marks NOTHING -- the split arming \
+         itself on the unarmed path",
+        unmarked.late_cull_dispatches
+    );
+
     // ---- the per-batch clause, falsifiable only on the multi fixture ------------------------------
     //
     // `late_draws` is counted per ISSUED draw inside the loop and `draw_batches` is the host's own
@@ -589,31 +646,47 @@ fn vb_occ_split_records_two_scopes() {
         unmarked.late_draws
     );
 
-    // ---- the inertness clause, and the tripwire piece 3 must delete deliberately -------------------
+
+    // ---- the HOST-SEED clause, retired from "inertness" and kept as a safety property -------------
+    //
+    // ⚠️ VG R3 piece 3 step P3-6 armed the split, so this is no longer a claim that the late scope
+    // draws nothing — it is the claim that the HOST seeds nothing. After plan D3 moved the early
+    // phase's `n_defer` into `vb_late_count`, the late cull became the ONLY producer of a nonzero
+    // `instanceCount` in the late record array, which is what makes a frame whose late cull did not
+    // run draw a BLANK scope rather than `n_defer` untested instances.
+    //
+    // It is STRUCTURALLY blind to the GPU's word (the recorder sums a host-local array), and that
+    // is stated rather than papered over: the GPU's late count is gated by the
+    // `BOYKO_VB_CULL_READBACK` corpus's `late_ic=`, never here.
     for (label, p) in
         [("marked", &marked), ("unmarked", &unmarked), ("vb_occ_multi", &multi)]
     {
         assert_eq!(
-            p.late_instances, 0,
-            "{label}: the late records sum to {} instances. PIECE 2 ONLY: the late scope draws \
-             NOTHING, so every late record's `instanceCount` is the inert 0. Piece 3 makes the \
-             late cull the producer of that word and must retire this clause DELIBERATELY, in the \
-             same change -- not let it quietly stop holding.",
-            p.late_instances
+            p.late_seed_instances, 0,
+            "{label}: the host seeded {} late instances. The HOST must seed every late record with \
+             instanceCount = 0 and let the LATE CULL be the only producer of a nonzero value -- \
+             that is the property which makes a missing late-cull dispatch a blank scope instead \
+             of a draw of untested geometry.",
+            p.late_seed_instances
         );
     }
 
     println!(
-        "vb occlusion split G2: marked scopes={} late_draws={} (batches={}), unmarked scopes={}, \
-         vb_occ_multi scopes={} late_draws={} (batches={}). Every count is the RECORDER's; \
+        "vb occlusion split G2: marked scopes={} late_draws={} late_cull_dispatches={} \
+         (batches={}), unmarked scopes={} late_cull_dispatches={}, vb_occ_multi scopes={} \
+         late_draws={} late_cull_dispatches={} (batches={}). Every count is the RECORDER's; \
          `draw_batches` and `occlusion_instances` are the host's, for cross-check. This says the \
-         host RECORDED the scope -- never that the GPU executed it.",
+         host RECORDED the scope and the dispatch -- never that the GPU executed either, and on \
+         these static fixtures the correct late instance count is ZERO (plan D12).",
         marked.scopes,
         marked.late_draws,
+        marked.late_cull_dispatches,
         marked.draw_batches,
         unmarked.scopes,
+        unmarked.late_cull_dispatches,
         multi.scopes,
         multi.late_draws,
+        multi.late_cull_dispatches,
         multi.draw_batches
     );
 }

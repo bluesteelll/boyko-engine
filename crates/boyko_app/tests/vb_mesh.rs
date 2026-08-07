@@ -54,14 +54,32 @@ use boyko_render::{
 
 /// VG R3 piece 2 step P2-6 (gate G1): `BOYKO_VG_OCC=1` puts [`OcclusionCulling`] in the spawn
 /// bundle of ALL FIVE spheres, which arms `GBufferScene::path_vb_occlusion_split()` and therefore
-/// the late raster scope — on THIS scene, THIS binary and THIS test, exactly as `BOYKO_VG_HZB`
-/// arms the pyramid. `goldens/PINS.toml`'s `[vb_occ_split]` is that leg.
+/// the late raster scope — on THIS scene, THIS binary and THIS test.
+/// `goldens/PINS.toml`'s `[vb_occ_split]` is that leg.
+///
+/// ⚠️ Since VG R3 piece 3 step P3-6 it ALSO implies the pyramid ([`vb_mesh_screenshot_dump`]'s
+/// `HzbConfig` branch), because the split's new `hzb.is_some()` conjunct would otherwise disarm the
+/// very thing this knob exists to arm.
 ///
 /// Read inside [`setup`] rather than turned into a Resource read: the marker has to be in the
 /// BUNDLE (a later `insert` migrates the archetype at the next command flush and arms the split
 /// one frame late), and a startup system reading its own env is the shape
 /// `vg_density_census.rs`'s fixture already uses.
 const ENV_OCC: &str = "BOYKO_VG_OCC";
+
+/// The env knob that arms the depth pyramid — `[vb_mesh_hzb]`'s own.
+const ENV_HZB: &str = "BOYKO_VG_HZB";
+
+/// `BOYKO_VG_OCC == "1"`, spelled ONCE for its two readers: [`setup`], which puts
+/// [`OcclusionCulling`] in the spawn bundle, and [`vb_mesh_screenshot_dump`], where it implies the
+/// pyramid (VG R3 piece 3 step P3-6, plan D9).
+///
+/// ⚠️ The predicate is `== "1"` and nothing wider. Any other value — including a plausible-looking
+/// `"true"` or a scene name — is FALSE and marks nothing, which is a fixture that renders the
+/// default scene while the operator believes it armed something.
+fn occ_marked() -> bool {
+    std::env::var(ENV_OCC).is_ok_and(|v| v == "1")
+}
 
 /// The sun direction TO the light (byte-identical to `grand_showcase_2mat.rs`'s /
 /// `forward_mesh.rs`'s).
@@ -132,7 +150,7 @@ fn setup(
     // path rather than about a reshuffle that happened to be invisible. The mixed-archetype case
     // is gate G2's `vb_occ_multi` fixture, where the gate is a count and an order change cannot
     // produce a false red.
-    let occ = std::env::var(ENV_OCC).is_ok_and(|v| v == "1");
+    let occ = occ_marked();
     let spacing = 1.55;
     let materials_row: [Option<u16>; 5] =
         [None, Some(red.index() as u16), Some(green.index() as u16), Some(gold.index() as u16), Some(blue.index() as u16)];
@@ -205,15 +223,23 @@ fn setup(
 ///
 /// # Three pins, one test
 ///
-/// Two env knobs each add ONE inert thing to this same code path, and each has its own pin
-/// carrying `[vb_mesh]`'s own hash: `BOYKO_VG_HZB=1` → `[vb_mesh_hzb]` (the pyramid, read by
-/// nothing) and `BOYKO_VG_OCC=1` → `[vb_occ_split]` (the marker, hence the LATE RASTER SCOPE,
-/// which draws nothing). Sharing the binary makes each equality an identity rather than a
-/// resemblance between two scenes that merely look alike.
+/// Two env knobs drive this same code path, and each has its own pin carrying `[vb_mesh]`'s own
+/// hash: `BOYKO_VG_HZB=1` → `[vb_mesh_hzb]` (the pyramid, built and read by nothing) and
+/// `BOYKO_VG_OCC=1` → `[vb_occ_split]` (the marker, hence the pyramid AND the LATE RASTER SCOPE).
+/// Sharing the binary makes each equality an identity rather than a resemblance between two scenes
+/// that merely look alike.
 ///
-/// ⚠️ **What a green `[vb_occ_split]` cannot claim: that the split happened at all.** It is
-/// satisfied just as well by not splitting. Gate G2 (`vb_occ_split_gate.rs`) is what says the
-/// recorder recorded two scopes, and the PAIR is the evidence — neither alone.
+/// ⚠️ **Since VG R3 piece 3 step P3-6 `[vb_occ_split]` is no longer an INERT addition — it is a
+/// LIVE occlusion cull, and its hash equality is a claim about the DECISION.** The five spheres
+/// stand side by side against the sky, so none of them lies behind another's silhouette and the
+/// conservative pyramid test rejects nothing: the early phase defers zero instances, the late
+/// scope draws zero, and the frame is `[vb_mesh]`'s. A divergence here says the cull deleted
+/// visible geometry — the one failure this pin is uniquely placed to catch.
+///
+/// ⚠️ **What a green `[vb_occ_split]` still cannot claim: that anything was DEFERRED.** A cull that
+/// defers nothing and a cull that is off produce the same pixels. Gate G2
+/// (`vb_occ_split_gate.rs`) says the recorder recorded two scopes; the non-vacuity clause
+/// (`Σ n_defer > 0`) needs a fixture that actually occludes, which is step P3-8's `vb_occ_mixed`.
 #[test]
 #[ignore = "needs a real windowed GPU device; the orchestrator runs it on the GPU to dump the VisibilityBuffer mesh-only screenshot"]
 fn vb_mesh_screenshot_dump() {
@@ -226,8 +252,9 @@ fn vb_mesh_screenshot_dump() {
     // override wins, mirroring `forward_mesh.rs`'s own post-plugins owner-override insert.
     app.insert_resource(RenderPathConfig { path: RenderPath::VisibilityBuffer, legs: GeometryLegs::Mesh });
     // VG R3 piece 1 step P1-2: `BOYKO_VG_HZB=1` arms the depth pyramid on THIS scene, THIS
-    // binary and THIS test — deliberately not a cloned fixture. The pyramid is allocated and read
-    // by nothing, so the armed dump must hash to `[vb_mesh]`'s own pin; sharing the code path
+    // binary and THIS test — deliberately not a cloned fixture. On the `BOYKO_VG_HZB`-only leg the
+    // pyramid is allocated and read by NOTHING (that leg marks no instance, so the cull binds
+    // `hzb_null`), so the armed dump must hash to `[vb_mesh]`'s own pin; sharing the code path
     // makes that an identity rather than a resemblance between two scenes that merely look alike.
     // `goldens/PINS.toml`'s `[vb_mesh_hzb]` is that leg, and it carries the SAME sha256 on
     // purpose: a divergence means the allocation perturbed a render it must not touch.
@@ -237,7 +264,15 @@ fn vb_mesh_screenshot_dump() {
     // the tree passes `mip_levels: 1` — so the layer is what proves the image and its per-mip
     // views are legal. A byte-identical dump alone would not: an illegal view that nothing binds
     // changes no pixel.
-    if std::env::var("BOYKO_VG_HZB").is_ok_and(|v| v == "1") {
+    //
+    // ⚠️ VG R3 piece 3 step P3-6 (plan D9): `BOYKO_VG_OCC` IMPLIES the pyramid. That step added
+    // `hzb.is_some()` to `path_vb_occlusion_split()` — the split IS the occlusion test now, and a
+    // late scope with no pyramid is a second scope that can decide nothing. Without this
+    // disjunction the `[vb_occ_split]` pin, whose entire purpose is to ARM the split, would
+    // silently stop splitting and its green would mean nothing. `BOYKO_VG_HZB="1"` is also written
+    // into `[vb_occ_split.env]` in the same change, so the configuration is legible from the pin
+    // file and not only from this fixture.
+    if std::env::var(ENV_HZB).is_ok_and(|v| v == "1") || occ_marked() {
         app.insert_resource(HzbConfig { mode: HzbMode::Build });
     }
     app.run();

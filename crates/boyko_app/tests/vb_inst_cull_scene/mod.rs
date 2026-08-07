@@ -521,9 +521,12 @@ pub struct CullProbe {
     /// `gpu_frame=` — the frame index the CULL read out of `VbCullUniform`, taken from
     /// `vb_late_count`'s reserved tail slot.
     ///
-    /// ⚠️ The shader writes it only under `VB_CULL_OCC_ARMED`, which the host pushes as `0` until
-    /// the P3-6 arming commit. Before that it reads the staging's boot prefill, so equality with
-    /// [`Self::frame`] (plan D6's control F-M4a) is NOT assertable yet.
+    /// ⚠️ The shader writes it only under `VB_CULL_OCC_ARMED`, which VG R3 piece 3 step P3-6 sets
+    /// on exactly the frames `path_vb_occlusion_split()` holds — i.e. frames with marked
+    /// instances, a pyramid and a mesh-bounds table. **No fixture that arms this readback marks
+    /// anything**, so it still reads the staging's boot prefill here and equality with
+    /// [`Self::frame`] (plan D6's control F-M4a) is NOT assertable on this channel. A marked
+    /// readback fixture is step P3-8's `vb_occ_mixed`.
     pub gpu_frame: u32,
     /// `list=[..]` — the compacted visible-BATCH indices.
     pub list: Vec<u32>,

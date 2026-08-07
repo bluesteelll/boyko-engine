@@ -1001,15 +1001,25 @@ fn declare_vb_frame(row: VbRow) -> VbFrame {
         //  * `vb_depth` as a DEPTH write at `DEPTH_ATTACHMENT_OPTIMAL` — the same WAW, and on an
         //    HZB-armed row the RETURN half of the round trip through `hzb_build_0`'s read.
         //
-        // Deliberately NOT declared (and P2-5's declarator says so in the same words): the VS's
-        // `vb_instance_ring` and `vb_visible_instance` reads. Every late record carries
-        // `instanceCount = 0`, so this scope issues zero vertex invocations and performs neither
-        // read; declaring them would declare an access the recorder does not perform. VG R3 piece 3
-        // step P3-3 does not change that — it makes `vb_cull_late` the record word's PRODUCER while
-        // the module's phase-1 body is still a bare `return`, so the count is the host's `0` until
-        // the arming step. ⚠️ And when those reads do become real, the second one is
-        // `vb_late_visible`, not `vb_visible_instance`: the late scope binds `vb_set0_late`, which
-        // is `vb_set0` with @11 changed, leaving `vb_raster.vs.hlsl` byte-unchanged.
+        // ⚠️⚠️ **KNOWN DIVERGENCE FROM PRODUCTION, OPENED AT VG R3 PIECE 3 STEP P3-6 AND CLOSED AT
+        // P3-8.** Through piece 2 and steps P3-1..P3-5 this pass declared exactly three accesses,
+        // and the VS's `vb_instance_ring` / `vb_visible_instance` reads were deliberately absent
+        // because every late record carried `instanceCount = 0`: zero vertex invocations, neither
+        // read performed, and declaring them would have declared an access the recorder does not
+        // make. Step P3-6 ARMED the cull, so `declare_vb_graph` now declares TWO MORE accesses
+        // here — `vb_instance_ring` at VERTEX and **`vb_late_visible`** at VERTEX (not
+        // `vb_visible_instance`: the late scope binds `vb_set0_late`, which is `vb_set0` with @11
+        // changed, leaving `vb_raster.vs.hlsl` byte-unchanged). The `vb_late_visible` read derives
+        // a `vb_cull_late (COMPUTE, SHADER_WRITE) → vb_raster_late (VERTEX, SHADER_READ)` RAW that
+        // this replica's split rows DO NOT MODEL.
+        //
+        // ⇒ **On a split row this file's stream is one barrier short of production's, on purpose
+        // and for exactly one step.** It is recorded here rather than fixed in place because
+        // adding the rows means re-measuring every field of the derived edge, which is the plan's
+        // P3-8 work item (G-P3-F's "`vb_raster_late`'s two new VERTEX reads") and not a number to
+        // guess at. What the file's own header says about replicas applies with full force until
+        // then: this pins what the framegraph DERIVES from a declaration shaped like the
+        // declarator's, and on split rows that shape is now stale.
         pass!("vb_raster_late");
         g.buffer_access(
             vb_indirect_late,

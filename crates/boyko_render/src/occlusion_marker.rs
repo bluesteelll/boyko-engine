@@ -7,9 +7,9 @@
 //! is already reviewed — the [`hzb_config`](crate::hzb_config) P1-1 shape (the knob before the
 //! machinery).
 //!
-//! # Read by nothing ON THE DEVICE, deliberately
+//! # LIVE since VG R3 piece 3 step P3-6 — the ladder that got it there
 //!
-//! Piece 2 lands the capability and the visibility-buffer raster split INERT.
+//! Piece 2 landed the capability and the visibility-buffer raster split INERT.
 //!
 //! * **P2-1** minted the marker with zero call sites.
 //! * **P2-2** (landed) gave it two non-filtering readers on the HOST — the main gather
@@ -19,13 +19,22 @@
 //!   [`MeshRenderScratch::inst_flags`](crate::mesh_draw::MeshRenderScratch::inst_flags), fold
 //!   [`MeshRenderScratch::occlusion_instances()`](crate::mesh_draw::MeshRenderScratch::occlusion_instances),
 //!   and pack the word into [`VbInstanceRow::flags`](crate::instance_model::VbInstanceRow::flags).
-//!   **Nothing on the device reads that word**: the HLSL mirrors still spell offsets 52..64
-//!   `uint3 _pad`, which is layout-identical, and no shader loads it.
-//! * **P2-3** adds the frame-level predicate `GBufferScene::path_vb_occlusion_split()`, and
-//!   **P2-5** the late raster scope — which draws nothing.
+//! * **P2-3** added the frame-level predicate `GBufferScene::path_vb_occlusion_split()`, and
+//!   **P2-5** the late raster scope — which drew nothing.
+//! * **P3-4** gave `vb_batch_cull.comp.hlsl` the occlusion leaf and the first DEVICE read of the
+//!   flag word, still behind a host-cleared `VB_CULL_OCC_ARMED` bit.
+//! * **P3-6** ARMED it. The marker's meaning is therefore no longer "may be rejected once a later
+//!   piece lands" but **"is tested against the depth pyramid every frame"**: an instance carrying
+//!   it whose world AABB projects wholly behind the pyramid's conservative occluder depth is
+//!   DEFERRED out of the early raster scope and re-tested in the late one.
 //!
-//! Because no entity in the tree carries the marker, every scattered flags word is `0` — bit for
-//! bit what the retired `_pad[0]` carried — so the uploaded instance ring is byte-UNCHANGED.
+//! The opt-IN direction below is what makes that safe: an entity type that never heard of this
+//! feature carries no marker, is never tested, and is always drawn.
+//!
+//! Because no entity in the SHIPPED tree carries the marker (only test fixtures do), every
+//! scattered flags word is `0` — bit for bit what the retired `_pad[0]` carried — so the uploaded
+//! instance ring is byte-UNCHANGED and `path_vb_occlusion_split()` is false on every non-fixture
+//! frame.
 //!
 //! # Axis-1 (structural capability), beside — not instead of — Axis-2 (runtime on/off)
 //!
@@ -101,8 +110,9 @@
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_macros::Component;
 
-/// The structural occlusion-culling capability: an entity carrying [`OcclusionCulling`] MAY be
-/// rejected by the HZB occlusion test (from piece 3 on); an entity WITHOUT it is always drawn.
+/// The structural occlusion-culling capability: an entity carrying [`OcclusionCulling`] IS tested
+/// against the depth pyramid every frame (VG R3 piece 3 step P3-6) and may be deferred out of the
+/// early raster scope; an entity WITHOUT it is never tested and always drawn.
 /// A zero-sized marker (`#[derive(Component)]`, table storage — no `#[component(storage = ...)]`
 /// attribute) — its PRESENCE is the whole datum, exactly as
 /// [`ShadowCaster`](crate::csm_marker::ShadowCaster) and
@@ -118,7 +128,9 @@ use boyko_macros::Component;
 /// the required component through its `Default`.
 ///
 /// Read as `Option<&OcclusionCulling>` — non-filtering, so the gather's per-row lock-step with
-/// the instance ring is preserved. Read by nothing on the DEVICE (see the module doc).
+/// the instance ring is preserved. On the DEVICE it is read as bit 0 of
+/// [`VbInstanceRow::flags`](crate::instance_model::VbInstanceRow::flags) by
+/// `vb_batch_cull.comp.hlsl` (see the module doc).
 #[derive(Component, Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct OcclusionCulling;
 
@@ -152,8 +164,9 @@ const _: () = assert!(
 /// Written by P2-2 into
 /// [`VbInstanceRow::flags`](crate::instance_model::VbInstanceRow::flags) — offset 52, formerly
 /// `_pad[0]`, the same 16-byte lane as `mesh_id`, which the batch cull's existing per-candidate
-/// instance load already brings into cache, so the flag costs zero extra device fetches. READ
-/// by nothing on the device: piece 3 is the first code to load the bit.
+/// instance load already brings into cache, so the flag costs zero extra device fetches. LOADED on
+/// the device by `vb_batch_cull.comp.hlsl` since VG R3 piece 3 step P3-4, and reaching a verdict
+/// since P3-6.
 pub const VB_INST_FLAG_OCCLUSION_CULLING: u32 = 1 << 0;
 
 // Exactly one bit, and bit 0. P2-2's scatter encodes presence branchlessly as

@@ -552,9 +552,10 @@ pub struct VbBatchCullPush {
     /// ([`GBufferScene::vb_occ_flags`]) so the declarator, the recorder and the shader read one
     /// number.
     ///
-    /// ⚠️ Pushed as `0` at this step, and that is the whole of the inertness argument: with the
-    /// ARMED bit clear the shader's `defer` predicate is identically false, so the early phase
-    /// degrades to the pre-piece-3 loop EXACTLY rather than to something merely similar.
+    /// ⚠️ `0` on every frame that does not take the occlusion split (step P3-6), and that is what
+    /// keeps those frames byte-identical: with the ARMED bit clear the shader's `defer` predicate
+    /// is identically false, so the early phase degrades to the pre-piece-3 loop EXACTLY rather
+    /// than to something merely similar.
     pub occ_flags: u32,
 }
 
@@ -567,9 +568,9 @@ pub const VB_CULL_PHASE_EARLY: u32 = 0;
 /// phase's deferred candidates against the pyramid this frame's build wrote, compact them in place
 /// and store the survivor count into `vb_indirect_late[b].instanceCount`.
 ///
-/// ⚠️ At this step the module's phase fork is a bare `return`, so a phase-1 dispatch is a no-op BY
-/// CONSTRUCTION rather than by luck. That fork and this dispatch land in ONE commit deliberately:
-/// without it, phase 1 would re-run phase 0's body and rewrite the early lists.
+/// ⚠️ The module's phase fork landed with the late DISPATCH (step P3-3), one step before phase 1
+/// had a body, so an inert late dispatch was a no-op BY CONSTRUCTION rather than by luck: without
+/// the fork, phase 1 would have re-run phase 0's body and rewritten the early lists.
 pub const VB_CULL_PHASE_LATE: u32 = 1;
 
 impl VbBatchCullPush {
@@ -3383,10 +3384,12 @@ pub struct GBufferScene<'a> {
     /// Minted UNCONDITIONALLY on every VB boot (the [`Self::vb_visible_instance`] rule), hence
     /// `.expect()`ed under [`Self::path_vb_occlusion_split`] and never a conjunct of it.
     ///
-    /// ⚠️ Since step P3-4 the cull module DOES read and write it — the early phase appends its
-    /// deferred instances, the late phase compacts the survivors in place — but only under
-    /// `VB_CULL_OCC_ARMED`, which the host still pushes as `0`. So the payload is still empty on
-    /// every configuration, and the late scope still binds `vb_set0`; the arming commit is P3-6.
+    /// ⚠️ Since step P3-4 the cull module reads and writes it — the early phase appends its
+    /// deferred instances, the late phase compacts the survivors in place — under
+    /// `VB_CULL_OCC_ARMED`, which step P3-6 sets on exactly the frames
+    /// [`Self::path_vb_occlusion_split`] holds. The late raster scope binds it through
+    /// `GBufferTargets::vb_set0_late` at @11 since that step, so the VS's unchanged
+    /// `visible_instances[base_instance + instance_id]` resolves against THIS list.
     pub vb_late_visible: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
     /// The per-FIF per-batch deferral count `n_defer`, plus ONE reserved tail slot carrying the
     /// frame index the GPU observed in [`VbCullUniform`].
@@ -3401,9 +3404,10 @@ pub struct GBufferScene<'a> {
     /// Indexed by batch id `b`, the SAME index `vb_indirect_late` uses, with no base arithmetic at
     /// all — so its region rule is the trivial one.
     ///
-    /// ⚠️ Written and read by the cull module since step P3-4, but only under
-    /// `VB_CULL_OCC_ARMED` — which the host pushes as `0` until the P3-6 arming commit, so on every
-    /// configuration today the early phase stores nothing here and the late phase reads `0`.
+    /// ⚠️ Written and read by the cull module since step P3-4, under `VB_CULL_OCC_ARMED` — which
+    /// step P3-6 sets on exactly the frames [`Self::path_vb_occlusion_split`] holds. On every
+    /// other frame the early phase stores nothing here and the late phase reads `0`, which is
+    /// what keeps the disarmed configurations byte-identical.
     pub vb_late_count: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
     /// The per-FIF [`VbCullUniform`], bound at `vb_cull_layout` @8 and — since VG R3 piece 3 step
     /// P3-3 — FILLED every frame the cull is recorded, armed or not (plan D6). Same unconditional
@@ -3414,10 +3418,20 @@ pub struct GBufferScene<'a> {
     /// [`VB_CULL_OCC_FORCE_KEEP`], folded ONCE on the host so the declarator, the recorder and the
     /// shader read ONE number rather than three re-derivations of the same predicate.
     ///
-    /// ⚠️ `0` at this step. Since VG R3 piece 3 step P3-3 it IS pushed (at
-    /// [`VbBatchCullPush::occ_flags`]) and the shader's `defer` predicate is therefore identically
-    /// false — the inertness argument. The fold that computes a nonzero value lands with the
-    /// arming commit.
+    /// # VG R3 piece 3 step P3-6 (plan D9): the fold, and the implication it exists to make
+    /// # STRUCTURAL
+    ///
+    /// `GpuSceneBundles::scene` sets [`VB_CULL_OCC_ARMED`] by CALLING
+    /// [`Self::path_vb_occlusion_split`] on the assembled scene — never by re-deriving its
+    /// conjuncts. That is the whole point: `declare_vb_graph` declares the cull's
+    /// `vb_late_visible` / `vb_late_count` writes and the pyramid READ under that predicate, while
+    /// the module performs them under this bit, so two independently-computed booleans could drift
+    /// into a frame that stores where nothing declared it (and reads a resource the graph never
+    /// named). One predicate, read twice, cannot.
+    ///
+    /// The FORCE bits come from a boot-time `BOYKO_VG_OCC_FORCE` selector and are `0` on every
+    /// committed pin. They are meaningful only beside the ARMED bit, so they too are `0` on an
+    /// unsplit frame.
     pub vb_occ_flags: u32,
     /// VG R3 piece 3 step P3-3 (plan D6): the ENGINE frame index this scene describes — the
     /// monotonic host counter the runner advances once per presented frame, wrapping benignly at
@@ -3794,6 +3808,25 @@ impl GBufferScene<'_> {
     /// VB call sites make it redundant, so the method is correct at ANY call site: a predicate
     /// sound in only one caller is a trap for the next reader.
     ///
+    /// # VG R3 piece 3 step P3-6 (plan D9): the two conjuncts the ARMING commit adds
+    ///
+    /// * **[`Self::hzb`] is `Some`.** Piece 2's split was inert, so a pyramid was not needed and
+    ///   the conjunct would have made every piece-2 gate reachable only under HZB. Piece 3's
+    ///   split IS the occlusion test, and a late scope with no pyramid is a second scope that can
+    ///   decide nothing. It is also the host half of the containment
+    ///   `vb_batch_cull.comp.hlsl`'s header states: the module performs its list stores under
+    ///   `VB_CULL_OCC_ARMED` while `declare_vb_graph` declares them under THIS predicate, so
+    ///   ARMED must imply it — which `GpuSceneBundles::scene` delivers by folding
+    ///   [`GBufferScene::vb_occ_flags`] FROM this very method rather than from a second
+    ///   re-derivation of its conjuncts.
+    /// * **[`Self::vb_mesh_bounds`] is `Some` (plan C16).** `record_vb`'s `batch_cull_armed`
+    ///   carries this term and this predicate did not, so on a device without
+    ///   `storage_buffer_array_non_uniform_indexing` the split could arm while the cull was not
+    ///   recorded at all — reaching a `.expect()` on an absent `vb_cull_set` under the
+    ///   declare/record parity rule. On the machines this repository gates the feature is
+    ///   present, so the golden impact is nil, which is exactly why it must be a conjunct and not
+    ///   a comment.
+    ///
     /// ⚠️ `pub`, not `pub(crate)`: it is authored one step BEFORE its readers exist (step P2-5
     /// declares and records the split), and a `pub(crate)` method with no in-crate caller is
     /// `dead_code` under `-D warnings` for that commit.
@@ -3802,6 +3835,8 @@ impl GBufferScene<'_> {
         self.path_is_vb()
             && self.resolved_render_path.mesh_leg
             && self.vb_occlusion_instances > 0
+            && self.hzb.is_some()
+            && self.vb_mesh_bounds.is_some()
     }
 }
 

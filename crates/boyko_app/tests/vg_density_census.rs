@@ -75,6 +75,11 @@ const VB_PINS: [&str; 15] = [
     // It needs no density row: `vg_density_census_gate` drives its OWN fixtures (`base`,
     // `subdivided`) through `run_worker` and never reads a pin, so the pin list is (a)'s domain
     // and nothing else. (The plan left that as open question 3; this is the answer.)
+    //
+    // ⚠️ And it is a RULE, not a fact about this one name — re-verified at VG R3 piece 3 step P3-6
+    // (that plan's open question 4). NO pin in this array needs a density row, for the structural
+    // reason above: the census gate's rows come from workers it spawns itself. Adding a name here
+    // costs exactly one line, and a future author authoring a bump does not owe a measurement.
     "vb_occ_split",
     "vb_both",
     "vb_both_sdf",
@@ -244,8 +249,12 @@ const DECLARED_IDENTICAL_PINS: [(&str, &str, &str); 2] = [
     (
         "vb_occ_split",
         "vb_mesh",
-        "the late raster scope is recorded and draws nothing: LOAD_OP_LOAD yields what the early \
-         scope stored, no fragment is produced, STORE_OP_STORE writes it back (VG R3 piece 2, D4)",
+        "the occlusion cull is ARMED and correctly rejects nothing on this scene (VG R3 piece 3, \
+         step P3-6): the five spheres stand side by side against the sky, so none lies behind \
+         another's silhouette and the conservative min-over-footprint test defers zero instances. \
+         The late scope therefore draws zero, and LOAD_OP_LOAD / STORE_OP_STORE make a scope that \
+         draws nothing pixel-identical to no scope at all (piece 2, D4). ⚠️ A divergence is the \
+         CULL DELETING VISIBLE GEOMETRY, not a plumbing change",
     ),
 ];
 

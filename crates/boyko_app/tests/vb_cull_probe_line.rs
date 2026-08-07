@@ -248,9 +248,10 @@ fn a_contiguous_payload_cannot_tell_the_two_layouts_apart() {
     );
 }
 
-/// Every group empty, on every grouped list — the shape an unsplit frame produces, which is every
-/// probe run in the tree until the P3-6 arming commit and therefore the shape the existing corpus
-/// gates will actually see.
+/// Every group empty, on every grouped list — the shape an UNSPLIT frame produces, which is every
+/// probe run in the tree (no committed `BOYKO_VB_CULL_READBACK` fixture marks `OcclusionCulling`,
+/// so none of them arms the split even after the P3-6 arming commit) and therefore the shape the
+/// existing corpus gates will actually see.
 ///
 /// It must round-trip as "three groups, each with no members", never as "no groups": the group
 /// COUNT is what carries the batch identity, and a parser that dropped empties would renumber the

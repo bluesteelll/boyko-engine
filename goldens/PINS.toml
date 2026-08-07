@@ -346,11 +346,19 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 # raster scope -- vb_indirect_late_upload's vkCmdUpdateBuffer, a second begin/endRendering bracket
 # over the same two views, and one zero-instanceCount vkCmdDrawIndexedIndirect per batch.
 #
-# THE SHA IS DELIBERATELY IDENTICAL TO [vb_mesh]'s, and here it is the whole D4 equivalence:
-# LOAD_OP_LOAD yields exactly what the early scope stored, no fragment is produced, STORE_OP_STORE
-# writes the loaded contents back. Re-bless the two together or not at all -- a lone re-bless here
-# would silently convert the gate from "the late scope draws nothing" to "whatever it draws now".
-# Unlike [vb_mesh_hzb], that equality is now MACHINE-CHECKED as well: the cross-pin guard
+# ⚠️ VG R3 piece 3 step P3-6 ARMED THE CULL, so what this equality asserts CHANGED, and it changed
+# from a plumbing claim into a DECISION claim. Piece 2's argument was purely structural (LOAD_OP_LOAD
+# yields what the early scope stored, no fragment is produced, STORE_OP_STORE writes it back, so a
+# scope drawing nothing is invisible). That still holds, but the cull now really tests occlusion:
+# the early phase projects every marked instance against the previous frame's depth pyramid and may
+# DEFER it to the late scope. The five spheres stand side by side against the sky, so none lies
+# behind another's silhouette and the conservative min-over-footprint test rejects NOTHING -- zero
+# deferred, zero drawn late, [vb_mesh]'s pixels. A divergence here now means THE CULL DELETED
+# VISIBLE GEOMETRY, which is the failure this pin is uniquely placed to catch.
+#
+# Re-bless the two together or not at all -- a lone re-bless here would silently convert the gate
+# from "the cull kept everything it should have" to "whatever it culls now". Unlike [vb_mesh_hzb],
+# that equality is MACHINE-CHECKED as well: the cross-pin guard
 # `the_pins_declared_byte_identical_actually_agree` (crates/boyko_app/tests/vg_density_census.rs)
 # parses this file and fails if the two literals ever diverge, which is the only thing standing
 # between a `-Bless` and a silently redefined gate.
@@ -359,6 +367,9 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 #  * THAT THE SPLIT HAPPENED. A run that never recorded the late scope produces exactly this hash.
 #    Gate G2 (crates/boyko_app/tests/vb_occ_split_gate.rs) is the leg that reports the RECORDER's
 #    own scope count; the pair (G1 green + G2 red under the same corruption) is the evidence.
+#  * THAT ANYTHING WAS DEFERRED. On this scene the correct deferral count is ZERO, so a cull that
+#    decided nothing and a correct cull are the same pixels. The non-vacuity clause needs a fixture
+#    that actually occludes -- vb_occ_mixed, VG R3 piece 3 step P3-8.
 #  * ANYTHING ABOUT BARRIERS. A missing barrier changed no pixel and emitted no message when it
 #    was measured on this machine (the plan's "P2-0 RESOLVED" table), so the barrier evidence is
 #    gate G4's field-level assertions in
@@ -392,6 +403,12 @@ BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\vb_occ_split.bmp"
 BOYKO_VG_OCC             = "1"
+# VG R3 piece 3 step P3-6 (plan D9): the split gained a `hzb.is_some()` conjunct -- it IS the
+# occlusion test now, and a late scope with no pyramid decides nothing. The fixture makes
+# BOYKO_VG_OCC imply HzbMode::Build, so this line is REDUNDANT with it BY DESIGN: written here so
+# the configuration is legible from the pin file rather than only from crates/boyko_app/tests/
+# vb_mesh.rs. This makes TWO of the 26 pins HZB-armed ([vb_mesh_hzb] is the other).
+BOYKO_VG_HZB             = "1"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 
 [vb_both]

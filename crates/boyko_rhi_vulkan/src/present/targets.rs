@@ -635,8 +635,10 @@ pub struct GBufferTargets {
     /// `visible_instances[base_instance + instance_id]` expression and `vb_raster.vs.spv` stays
     /// byte-unchanged. `Some` under [`GBufferScene::path_is_vb`], `vb_set0`'s own gate verbatim.
     ///
-    /// ⚠️ BOUND BY NOTHING at this step — the late scope still binds `vb_set0`. See
-    /// [`DeferredSets`]'s field doc for why it is built LAST.
+    /// Bound by the LATE raster scope, and by nothing else, since VG R3 piece 3 step P3-6 — the
+    /// step that also sets `VB_RASTER_FLAG_VISIBLE_INDIRECTION` on that scope's push, so the region
+    /// the VS indexes is the one the late cull just wrote. See [`DeferredSets`]'s field doc for why
+    /// it is built LAST.
     pub(crate) vb_set0_late: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// Multi-paradigm render-path plan, rung R4b-b — the Forward v1 mesh path's OWN depth image
     /// ring + descriptor sets ([`ForwardTargets`]). `Some` iff `profile ==
@@ -664,8 +666,9 @@ pub struct GBufferTargets {
     /// destroyed FIRST here — see that fn's placement comment.
     ///
     /// Step P1-4 added the `hzb_build` descriptor sets to that same bundle; step P1-5 declared the
-    /// build chain and dispatches it, so the pyramid is BUILT on every armed VB mesh frame and
-    /// READ by nothing (the occlusion cull is piece 3).
+    /// build chain and dispatches it, so the pyramid is BUILT on every armed VB mesh frame. Piece 3
+    /// step P3-6 gave it its first READER: both `vb_batch_cull` dispatches, through
+    /// [`HzbTargets::vb_cull_set_hzb`], on an occlusion-split frame.
     pub(crate) hzb: Option<HzbTargets>,
     /// VG R3 piece 3 step P3-1 (plan D7) — the 1×1 `R32_SFLOAT` placeholder the cull's descriptor
     /// set binds at the pyramid's binding when [`Self::hzb`] is `None`.
@@ -678,10 +681,11 @@ pub struct GBufferTargets {
     /// cannot live in an armed-only builder and because the step that MINTS an image is the step
     /// that owes it a defined layout.
     ///
-    /// On an HZB-ARMED boot this image is STILL bound — at @9 of `DeferredSets::vb_cull_set` — and
-    /// simply not the set the recorder will pick: `HzbTargets::vb_cull_set_hzb` is the same twelve
-    /// entries with the real pyramid there. Two complete sets rather than one rewritten binding,
-    /// for the reason that field's doc gives.
+    /// On an HZB-ARMED boot this image is STILL bound — at @9 of `DeferredSets::vb_cull_set` —
+    /// beside `HzbTargets::vb_cull_set_hzb`, the same twelve entries with the real pyramid there.
+    /// Two complete sets rather than one rewritten binding, for the reason that field's doc gives.
+    /// The recorder picks the pyramid set on an occlusion-SPLIT frame and THIS one on every other,
+    /// so an HZB-armed frame that marks nothing still binds the placeholder (`vb_cull_set_for`).
     ///
     /// UNCONDITIONAL, unlike [`Self::hzb`]: the cull's set is written once per extent and its
     /// entry list has fixed arity, so SOMETHING valid must sit at that binding on a boot with no
@@ -1316,7 +1320,10 @@ pub(crate) struct HzbTargets {
     ///
     /// Acquired LAST inside [`Self::build`], so [`Self::destroy`] tears it down FIRST.
     ///
-    /// ⚠️ BOUND BY NOTHING at this step: the recorder still binds `vb_cull_set` unconditionally.
+    /// Bound by BOTH cull dispatches since VG R3 piece 3 step P3-6, on an occlusion-SPLIT frame and
+    /// on no other — `passes::vb::vb_cull_set_for` states why the selector is the split rather than
+    /// the pyramid's mere existence (the pyramid READ is declared under the split, and a not-taken
+    /// load may still issue, so binding it on an unsplit HZB frame would be an undeclared read).
     pub(crate) vb_cull_set_hzb: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
 }
 
