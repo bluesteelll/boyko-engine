@@ -37,6 +37,31 @@
 //! filled from the rebuilt artifact; see that constant's own doc for why a placeholder rather than
 //! a prediction.
 //!
+//! # VG R3 piece 3 step P3-3: the PREDICTION, written down before the artifact was rebuilt
+//!
+//! P3-3 edits this module in exactly two places — `VbBatchCullPush` gains `phase` and `occ_flags`
+//! (104 → 112 bytes), and `main` gains `if (pc.phase != VB_CULL_PHASE_EARLY) return;` immediately
+//! after the tail-lane guard. **Every census field below is predicted UNMOVED**, and the prediction
+//! is derived rather than hoped:
+//!
+//! * Two extra push members produce two extra `OpMemberDecorate … Offset` lines and nothing else.
+//!   No census selector reads a member decoration — [`SpvCensus::binding_set`] reads the token after
+//!   `Binding`, which a member offset never emits.
+//! * The fork lowers to a push load, an `OpINotEqual`, an `OpSelectionMerge` +
+//!   `OpBranchConditional` and an `OpReturn`. None of those is a counted token, and
+//!   [`the_inertness_census_uses_whole_token_matching`] already proves `OpSelectionMerge` is not
+//!   read as an `OpSelect` — that near-miss is the reason the selectors are whole-token.
+//! * No resource is loaded that was not loaded before, so `binding_set` stays `[0,1,2,3,4,5,6]`.
+//!   The five descriptors P3-2 bound are still unread; the step that makes them appear is P3-4.
+//!
+//! **The two fields with a non-zero risk of moving anyway, named so a movement is diagnosed instead
+//! of blessed:** `op_select` and `op_ugreater_than_equal`, both because the module now has TWO early
+//! returns in a row and DXC is free to fold them into one predicate. A fold would keep the count at
+//! one `OpUGreaterThanEqual` and add an `OpLogicalOr`, which is uncounted — but a lowering that
+//! reached for `OpSelect` instead would move `op_select` 1 → 2. **If either moves, the number is
+//! MEASURED off the rebuilt module and re-pinned with the reason stated**, exactly as rungs R2c and
+//! R2d-6 did. Editing an expectation to make a failing run pass is what this file exists to prevent.
+//!
 //! SKIPS (with an eprintln) when no `dxc` / `spirv-dis` resolves on the host — the byte gate is
 //! only as hermetic as the pinned VulkanSDK 1.4.350.0 toolchain that produced the committed
 //! artifact. The fixture control below runs unconditionally and cannot skip.

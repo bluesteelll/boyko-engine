@@ -36,7 +36,9 @@ use super::super::scene_types::{
     CLUSTER_CULL_HIER_PUSH_BYTES, CLUSTER_CULL_PUSH_BYTES, GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
     GBufferMeshDraw, GBufferScene, HZB_DUMP_HEADER_BYTES, HZB_PYRAMID_POISON, HzbDumpLayout,
     LIGHT_CULL_LOCAL_SIZE_X, MAX_HZB_LEVELS, VB_BATCH_CULL_LOCAL_SIZE_X, VB_BATCH_CULL_PUSH_BYTES,
-    VB_BATCH_DESC_STRIDE, VbBatchCullPush, VbBatchDesc,
+    VB_BATCH_DESC_STRIDE, VB_CULL_OCC_ARMED, VB_CULL_OCC_FORCE_KEEP, VB_CULL_OCC_FORCE_LATE,
+    VB_CULL_PHASE_EARLY, VB_CULL_PHASE_LATE, VB_CULL_UNIFORM_BYTES, VbBatchCullPush, VbBatchDesc,
+    VbCullUniform,
 };
 use super::super::targets::{ForwardTargets, GBufferTargets, VB_CLASSIFY_MAX_MATERIAL_ROWS, VbTargets};
 use super::super::{COLOR_SUBRESOURCE_RANGE, SwapchainError};
@@ -372,11 +374,16 @@ impl Renderer<'_> {
     ///   vb_shade | vb_resolve → hzb_poison? → hzb_build_*? → …`, i.e. ZERO recorded commands
     ///   change — no extra pass, no extra barrier, no extra draw;
     /// * **armed split**: `… → vb_indirect_upload? → vb_indirect_late_upload → vb_batch_cull? →
-    ///   vb_raster → hzb_poison? → hzb_build_*? → vb_raster_late → (classify?) → …`.
+    ///   vb_cull_readback? → vb_raster → hzb_poison? → hzb_build_*? → vb_cull_late →
+    ///   vb_raster_late → vb_cull_readback_late? → (classify?) → …` (VG R3 piece 3 step P3-3
+    ///   inserted the two `vb_cull_*late` passes).
     ///
     /// The late scope is fully recorded and DRAWS NOTHING: every record it fetches carries
     /// `instanceCount = 0`, both attachments are `LOAD_OP_LOAD`/`STORE_OP_STORE` over the same
     /// `renderArea`, so the framebuffer contents it stores are the ones the early scope stored.
+    /// The late CULL is likewise recorded and DECIDES NOTHING: the module's `pc.phase` fork returns
+    /// immediately on phase 1 until step P3-4 writes that phase's body, so the record word the late
+    /// scope fetches is still the host's `0`.
     ///
     /// # Safety
     ///
@@ -1316,22 +1323,87 @@ impl Renderer<'_> {
                     .as_ref()
                     .expect("invariant: batch_cull_armed => targets.vb_cull_set (same VB gate)")[fi];
 
+                // === VG R3 piece 3 step P3-3 (plan D6): the cull's UNIFORM, built ONCE here. ===
+                //
+                // `VbCullUniform::for_frame` performs the ONE byte inversion out of the raster
+                // push's column-major leading 64 bytes into the MATH-ROW form the occlusion leaf
+                // will take — the same bytes `boyko_render::frustum::frustum_planes_from_push_bytes`
+                // derived `scene.vb_cull_planes` from, so the cull's frustum test and its occlusion
+                // test cannot end up on two different matrices (and the TAA path jitters that matrix
+                // per frame, which is exactly the drift byte provenance forecloses).
+                //
+                // UNCONDITIONAL — armed or not, split or not. See `VbCullUniform::for_frame`'s doc
+                // for each disarmed field's value and why the alternative (gating the fill) would
+                // leave the shader's `levels` read on unwritten allocation contents.
+                let cull_uniform = VbCullUniform::for_frame(
+                    scene.mvp[0..64]
+                        .try_into()
+                        .expect("invariant: the raster push's leading 64 bytes are view_proj"),
+                    [present_extent.width, present_extent.height],
+                    scene.hzb,
+                    scene.engine_frame_index,
+                );
+                let cull_uniform_buf = scene
+                    .vb_cull_uniform
+                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_cull_uniform");
+
                 // Reset the visible counter to 0 (a transfer fill), then order it before the
                 // dispatch's atomics — the SAME shape the L1 cull's `light_index_alloc` reset
                 // uses. The FILL is GPU work and runs unconditionally within this arm; only the
                 // barrier that follows is graph-driven.
-                // SAFETY: recording is open and no render scope is active; `count[fi]` is a live
+                //
+                // ⚠️ VG R3 piece 3 step P3-3: THE UNIFORM UPDATE BELONGS ON THIS SIDE OF
+                // `record_vb_pass`, AND THAT IS NOT A STYLE CHOICE. A pass's ENTIRE barrier set —
+                // including the intra-pass `TRANSFER → COMPUTE` edge derived from its second
+                // declared access on this very buffer — is emitted at ONE site, at the pass
+                // boundary (`framegraph::graph`'s `PassBarrierRange` + `record::record_pass`). So
+                // TRANSFER work belonging to a pass must be recorded BEFORE `record_vb_pass`, or the
+                // barrier precedes the write it is supposed to order and the dispatch reads stale
+                // bytes.
+                //
+                // ⚠️ AND THE NEIGHBOURING PASS DOES THE OPPOSITE, CORRECTLY — that is the trap.
+                // `vb_indirect_late_upload` above calls `record_vb_pass` FIRST and issues its
+                // `cmd_update_buffer` AFTER. Both orders are right, for opposite reasons: that
+                // pass's barrier orders THE WRITE ITSELF (a WAW/WAR flush must precede it), while
+                // this pass's barrier orders an INTRA-pass edge (the write must precede the
+                // barrier). Two adjacent sites, opposite orders, and nothing but this comment says
+                // so.
+                //
+                // ⚠️ NO RUNTIME ASSERT CAN CHECK THIS. `FrameGraph::pass_access_count` is private
+                // and no per-pass accessor exists, so the ordering is carried by this comment and by
+                // the `frame_index` control the uniform itself provides — `vb_late_count`'s reserved
+                // tail slot, which the readback compares against the host's number. A fill on the
+                // wrong side would make the dispatch read frame N−FRAMES_IN_FLIGHT's uniform, and on
+                // a static fixture that is BIT-IDENTICAL: invisible to every golden, every image
+                // gate and every oracle differential.
+                //
+                // SAFETY: recording is open and no render scope is active. `count[fi]` is a live
                 // device-local STORAGE buffer (≥ 4 B, the single u32 counter); `cmd_fill_buffer`
-                // zero-fills it (Vulkan 1.0 core).
+                // zero-fills it (Vulkan 1.0 core). `cull_uniform_buf[fi]` is a live DEVICE_LOCAL
+                // buffer created with `TRANSFER_DST` at exactly `VB_CULL_UNIFORM_BYTES`, so the
+                // update covers it whole; the destination offset is 0 and the size is 96 — both
+                // multiples of 4, as `VUID-vkCmdUpdateBuffer-dstOffset-00036` /
+                // `-dataSize-00037` require — and 96 is far inside the 65536-byte inline limit.
+                // `cull_uniform` is a local that outlives the call, and `vkCmdUpdateBuffer` is
+                // forbidden inside a render-pass instance (VUID-vkCmdUpdateBuffer-renderpass):
+                // none is active here, the early raster's `cmd_begin_rendering` is below.
                 unsafe {
                     (self.fns.cmd_fill_buffer)(cmd, count[fi].buffer, 0, VK_WHOLE_SIZE, 0);
+                    (self.fns.cmd_update_buffer)(
+                        cmd,
+                        cull_uniform_buf[fi].buffer,
+                        0,
+                        u64::from(VB_CULL_UNIFORM_BYTES),
+                        (&cull_uniform as *const VbCullUniform).cast(),
+                    );
                 }
                 let cull_pass = plan
                     .vb_batch_cull
                     .expect("invariant: batch_cull_armed => vb_batch_cull pass declared");
                 // SAFETY: recording is open; `record_vb_pass` records the graph's derived barriers
-                // for the "vb_batch_cull" pass into `cmd` — the TRANSFER→COMPUTE ordering of both
-                // the descriptor upload and this counter fill against the atomics below.
+                // for the "vb_batch_cull" pass into `cmd` — the TRANSFER→COMPUTE ordering of the
+                // descriptor upload, this counter fill and (since VG R3 P3-3) the uniform update
+                // against the dispatch below, plus that step's split-gated pyramid read.
                 self.record_vb_pass(cull_pass, cmd, targets, forward, vb, scene, fi);
 
                 // Bounded by EVERY allocation the cull touches at index `i` — it reads
@@ -1355,27 +1427,52 @@ impl Renderer<'_> {
                 // the raster's VS reads. A frame that carries none pushes `DISARMED_PLANES`, which
                 // cannot reject any box — so the cull degrades to rung R2c0's null control exactly,
                 // not to something merely similar.
+                // === VG R3 piece 3 step P3-3: the occlusion flag word's two host invariants. ===
+                //
+                // Checked ONCE, at the first site that consumes the word, so the late push below
+                // inherits them. Both are properties of the HOST fold, so a violation is a wiring
+                // bug in `GpuSceneBundles::scene` rather than a device fact — which is why they are
+                // `debug_assert!`s here and not a runtime clamp that would repair the bug quietly.
+                debug_assert!(
+                    scene.vb_occ_flags & VB_CULL_OCC_ARMED == 0 || scene.hzb.is_some(),
+                    "invariant: the ARMED bit claims a pyramid exists to test against; without one \
+                     the occlusion leaf would project into `hzb_null` and reject nothing while the \
+                     frame paid for the partition"
+                );
+                debug_assert!(
+                    scene.vb_occ_flags & (VB_CULL_OCC_FORCE_LATE | VB_CULL_OCC_FORCE_KEEP)
+                        != (VB_CULL_OCC_FORCE_LATE | VB_CULL_OCC_FORCE_KEEP),
+                    "invariant: FORCE_LATE (defer everything marked) and FORCE_KEEP (defer nothing) \
+                     are opposite controls — both set is a contradiction whose resolution would be \
+                     whichever branch the shader tests first"
+                );
                 let push = VbBatchCullPush {
                     planes: scene.vb_cull_planes.unwrap_or(VbBatchCullPush::DISARMED_PLANES),
                     batch_count: dispatched_batches,
                     visible_cap,
+                    // VG R3 piece 3 step P3-3: the EARLY phase. The late dispatch below pushes the
+                    // SAME struct with `VB_CULL_PHASE_LATE`, which is the only word that differs.
+                    phase: VB_CULL_PHASE_EARLY,
+                    // Read by nothing in the module at this step (the occlusion leaf lands at
+                    // P3-4), and `0` on every configuration until the arming commit folds it.
+                    occ_flags: scene.vb_occ_flags,
                 };
                 let groups = dispatched_batches.div_ceil(VB_BATCH_CULL_LOCAL_SIZE_X);
                 // SAFETY: recording is open and outside any render scope; `pipeline` + its layout
                 // (one COMPUTE set + the shared `COMPUTE_PUSH_CONSTANT_RANGE_BYTES` push range,
-                // of which this pass writes `VB_BATCH_CULL_PUSH_BYTES` = 104) are live on this
-                // device (caller contract). `cull_set` binds TWELVE COMPUTE descriptors against the
-                // 12-entry `vb_cull_layout` — eleven storage buffers and, at @9, one SAMPLED image
-                // recorded at `GENERAL` — all written once at `GBufferTargets::sync`. The module
-                // names SEVEN of them: @0..@6, all loaded, stored or atomically updated since rung
-                // R2d-6. The five VG R3 P3-2 added (@7/@8/@9/@10/@11) are bound-but-unread, and the
-                // binding is safe in THIS direction only — a WRITTEN descriptor a shader never
-                // loads from is never dereferenced, so the bound set may legally exceed what the
-                // module declares. (The reverse is undefined with `robustBufferAccess` off, which
-                // is why the set and the layout widened in one commit while the shader lags.) The
-                // dispatch covers `dispatched_batches` lanes and the shader trims its tail group's
-                // out-of-range lanes. `&cull_set.descriptor_set` and `push` are locals alive for
-                // the calls.
+                // of which this pass writes `VB_BATCH_CULL_PUSH_BYTES` = 112 since VG R3 P3-3) are
+                // live on this device (caller contract). `cull_set` binds TWELVE COMPUTE descriptors
+                // against the 12-entry `vb_cull_layout` — eleven storage buffers and, at @9, one
+                // SAMPLED image recorded at `GENERAL` — all written once at `GBufferTargets::sync`.
+                // The module names SEVEN of them: @0..@6, all loaded, stored or atomically updated
+                // since rung R2d-6. The five VG R3 P3-2 added (@7/@8/@9/@10/@11) are
+                // bound-but-unread, and the binding is safe in THIS direction only — a WRITTEN
+                // descriptor a shader never loads from is never dereferenced, so the bound set may
+                // legally exceed what the module declares. (The reverse is undefined with
+                // `robustBufferAccess` off, which is why the set and the layout widened in one
+                // commit while the shader lags.) The dispatch covers `dispatched_batches` lanes and
+                // the shader trims its tail group's out-of-range lanes.
+                // `&cull_set.descriptor_set` and `push` are locals alive for the calls.
                 unsafe {
                     (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
                     (self.fns.cmd_bind_descriptor_sets)(
@@ -1702,6 +1799,110 @@ impl Renderer<'_> {
                 self.record_hzb_poison_build(plan, cmd, targets, forward, vb, scene, present_extent, fi);
             }
 
+            // === VG R3 piece 3 step P3-3 (plan D4/D5): the LATE cull dispatch. ===
+            //
+            // The SECOND dispatch of `vb_batch_cull.comp.hlsl`, differing from the early one in ONE
+            // pushed word (`phase`). Recorded HERE — after the pyramid this frame's raster fed, and
+            // before the late scope that fetches the count it will write — which is EXACTLY
+            // `declare_vb_graph`'s position for `vb_cull_late` (declare/record ORDER parity, the
+            // invariant this file and the declarator both treat as load-bearing).
+            //
+            // FIXED AND HOST-SIZED: `batch_count` lanes, the same number and the same
+            // `VB_BATCH_CULL_LOCAL_SIZE_X` divisor the early dispatch uses. The cull runs ONE LANE
+            // PER BATCH and `batch_count` is a host number, so no `vkCmdDispatchIndirect` and no
+            // `vkCmdDrawIndexedIndirectCount` is needed — neither is in this device's fn table, and
+            // the GPU-only quantity (the per-batch candidate count) is a LOOP BOUND inside a lane,
+            // never a dispatch size.
+            //
+            // ⚠️ IT IS A NO-OP IN THIS STEP, BY CONSTRUCTION AND NOT BY LUCK. The module's phase
+            // fork (`if (pc.phase != VB_CULL_PHASE_EARLY) return;`) landed in this same commit —
+            // deliberately, because without it this dispatch would re-run the EARLY body and rewrite
+            // `VbVisibleInstance` and every record's `instanceCount` AFTER the early raster had
+            // fetched them. On a static scene it would write the same numbers, so no golden could
+            // see it.
+            //
+            // ⚠️ THE GATE IS THE DECLARATOR'S, VERBATIM — `occlusion_split`, not
+            // `batch_cull_armed`. A recorder gate NARROWER than `declare_vb_graph`'s would leave
+            // `vb_indirect_late`'s declared writer as a COMPUTE that never ran, and the
+            // `TRANSFER → DRAW_INDIRECT` dependency the host fill actually needs would be derived
+            // nowhere: a missing barrier, not a wasted one. The pipeline and the set are
+            // `.expect()`ed rather than folded into the gate for the same reason the early dispatch
+            // states — and the residual that makes those `.expect()`s reachable at all (a device
+            // without `storage_buffer_array_non_uniform_indexing`, where the split can arm while
+            // the cull is unwired) is named at the declaration site and closed by step P3-6's
+            // `vb_mesh_bounds.is_some()` conjunct.
+            //
+            // ⚠️ IT BINDS `vb_cull_set`, THE SAME SET THE EARLY DISPATCH BOUND, so @9 is `hzb_null`
+            // even on an HZB-armed frame. Binding the REAL pyramid is `vb_cull_set_hzb`'s job at
+            // step P3-6, together with the shader code that first loads from @9; a set swap now
+            // would change a descriptor nothing reads.
+            if occlusion_split {
+                let pipeline = scene
+                    .vb_batch_cull_pipeline
+                    .expect("invariant: path_vb_occlusion_split ⇒ vb_batch_cull_pipeline (the C16 \
+                             residual is closed by P3-6's vb_mesh_bounds conjunct)");
+                let cull_set = &targets
+                    .vb_cull_set
+                    .as_ref()
+                    .expect("invariant: path_vb_occlusion_split ⇒ targets.vb_cull_set (same VB gate)")[fi];
+                let late_cull_pass = plan
+                    .vb_cull_late
+                    .expect("invariant: the recorder's late-cull gate is the declarator's, verbatim");
+                // SAFETY: recording is open and no render scope is active (the early scope's
+                // `cmd_end_rendering` is above and the late scope's `cmd_begin_rendering` is below);
+                // `record_vb_pass` records the graph's derived barriers for the "vb_cull_late" pass
+                // into `cmd` — the pyramid's `hzb_build_{n-1}` → COMPUTE RAW at `GENERAL` (no layout
+                // change), the early phase's `vb_late_visible` / `vb_late_count` writes made visible
+                // to this dispatch, and this pass's own read→write self-edge on `vb_late_visible`.
+                self.record_vb_pass(late_cull_pass, cmd, targets, forward, vb, scene, fi);
+
+                let dispatched_batches = batch_count as u32;
+                let late_push = VbBatchCullPush {
+                    // Byte-identical to the early push except for `phase`: the late phase re-tests
+                    // the SAME instances with the SAME camera, so a second plane set (or a second
+                    // capacity) would be a second thing that can drift.
+                    planes: scene.vb_cull_planes.unwrap_or(VbBatchCullPush::DISARMED_PLANES),
+                    batch_count: dispatched_batches,
+                    visible_cap: visible_elems as u32,
+                    phase: VB_CULL_PHASE_LATE,
+                    occ_flags: scene.vb_occ_flags,
+                };
+                let late_groups = dispatched_batches.div_ceil(VB_BATCH_CULL_LOCAL_SIZE_X);
+                // SAFETY: recording is open and outside any render scope. `pipeline` + its layout
+                // are the SAME live objects the early dispatch bound (caller contract), and this
+                // pass writes the same `VB_BATCH_CULL_PUSH_BYTES` = 112 prefix of the shared COMPUTE
+                // push range at offset 0 — both multiples of 4. `cull_set` binds all TWELVE entries
+                // `vb_cull_layout` declares, written once at `GBufferTargets::sync` and untouched
+                // since; the module names seven of them and dereferences none on this phase, since
+                // its `pc.phase` fork returns before the first buffer load. The dispatch covers
+                // `dispatched_batches` lanes — the SAME host number the early dispatch used, bounded
+                // by the same three allocation-derived capacities — and the shader's own
+                // `i >= pc.batch_count` guard trims the tail group. `&cull_set.descriptor_set` and
+                // `late_push` are locals alive for the calls.
+                unsafe {
+                    (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        pipeline.layout,
+                        0,
+                        1,
+                        &cull_set.descriptor_set,
+                        0,
+                        ptr::null(),
+                    );
+                    (self.fns.cmd_push_constants)(
+                        cmd,
+                        pipeline.layout,
+                        VK_SHADER_STAGE_COMPUTE_BIT,
+                        0,
+                        VB_BATCH_CULL_PUSH_BYTES,
+                        (&late_push as *const VbBatchCullPush).cast(),
+                    );
+                    (self.fns.cmd_dispatch)(cmd, late_groups, 1, 1);
+                }
+            }
+
             // === VG R3 piece 2 step P2-5 (plan D4): the LATE raster scope. ===
             //
             // A SECOND `begin/endRendering` bracket over the SAME two views and the SAME
@@ -1874,6 +2075,29 @@ impl Renderer<'_> {
                 if let Some(p) = probe {
                     p.scopes += 1;
                 }
+            }
+
+            // === VG R3 piece 3 step P3-3 (plan D8): the POST-LATE readback snapshot's barriers. ===
+            //
+            // Recorded at `declare_vb_graph`'s matching position — AFTER the late scope — so pass
+            // ORDER parity holds between declarator and recorder. The COPIES themselves land at step
+            // P3-5 with the rest of the probe plumbing; what this records today is the pass's derived
+            // `COMPUTE`/`DRAW_INDIRECT → TRANSFER` availability edges, which is the half that must
+            // not be silently absent: a declared pass whose barriers are never recorded is a pass
+            // whose derived edges the command stream never establishes, and the graph would go on
+            // deriving the NEXT pass's edges from a state nothing produced.
+            //
+            // Armed only under `BOYKO_VB_CULL_READBACK` (and only on a split frame), so every
+            // golden and interactive boot records nothing here at all.
+            if let Some(rb_late_pass) = plan.vb_cull_readback_late {
+                debug_assert!(
+                    occlusion_split && scene.vb_cull_readback.is_some(),
+                    "invariant: the recorder's post-late snapshot gate is the declarator's, verbatim"
+                );
+                // SAFETY: recording is open and no render scope is active (the late scope's
+                // `cmd_end_rendering` is above); `record_vb_pass` records the graph's derived
+                // barriers for the "vb_cull_readback_late" pass into `cmd`.
+                self.record_vb_pass(rb_late_pass, cmd, targets, forward, vb, scene, fi);
             }
 
             // === VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2c: the

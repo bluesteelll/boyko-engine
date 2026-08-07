@@ -211,10 +211,14 @@ const _: () = assert!(
 /// `maxPushConstantsSize` (asserted below), so no device-limit query is required.
 ///
 /// VG rung R2c took the "largest consumer" title off the marcher: the batch cull's
-/// 104-byte block (six `float4` frustum planes plus two counts) exceeds the
-/// marcher's 80. So the derivation is now an explicit `max` over BOTH consumers
-/// rather than a single name — which is what this doc always described, and what
-/// keeps the next consumer from having to notice which one currently wins.
+/// block (six `float4` frustum planes plus two counts — 104 bytes then, 112 since
+/// VG R3 piece 3 step P3-3 added `phase` + `occ_flags`) exceeds the marcher's 80.
+/// So the derivation is now an explicit `max` over BOTH consumers rather than a
+/// single name — which is what this doc always described, and what keeps the next
+/// consumer from having to notice which one currently wins. ⚠️ 112 leaves 16 bytes
+/// of the guaranteed floor, which is why the occlusion test's `float4x4` travels in
+/// a buffer instead: raising this range would destroy the property the paragraph
+/// above states — that no device-limit query is required.
 const COMPUTE_PUSH_CONSTANT_RANGE_BYTES: u32 = {
     let marcher = crate::compute::COMPOSITE_PUSH_CONSTANT_BYTES;
     let batch_cull = crate::compute::VB_BATCH_CULL_PUSH_BYTES;

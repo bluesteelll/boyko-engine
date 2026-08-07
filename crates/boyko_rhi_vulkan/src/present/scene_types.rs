@@ -519,8 +519,8 @@ impl VbBatchDesc {
 /// VG rung R2c: the batch-cull's push constants — `vb_batch_cull.comp.hlsl`'s `VbBatchCullPush`.
 ///
 /// `float4 planes[6]` occupies the leading 96 bytes (std430 push layout: a `float4` array needs no
-/// interior padding), then the two counts. 104 bytes total, inside Vulkan's guaranteed 128-byte
-/// `maxPushConstantsSize` minimum.
+/// interior padding), then the two counts, then VG R3 piece 3 step P3-3's two selector words. 112
+/// bytes total, inside Vulkan's guaranteed 128-byte `maxPushConstantsSize` minimum.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VbBatchCullPush {
@@ -531,7 +531,46 @@ pub struct VbBatchCullPush {
     pub batch_count: u32,
     /// `VbCullVisible`'s element capacity — the clamp-and-drop bound, derived from the ALLOCATION.
     pub visible_cap: u32,
+    /// VG R3 piece 3 step P3-3 (plan D5): WHICH of the two cull phases this dispatch is —
+    /// [`VB_CULL_PHASE_EARLY`] (frustum + the two-way occlusion partition) or
+    /// [`VB_CULL_PHASE_LATE`] (re-test the deferred candidates against the freshly built pyramid
+    /// and compact them in place).
+    ///
+    /// A PUSH CONSTANT, so the branch on it is UNIFORM across the dispatch — which is what makes
+    /// the two passes' framegraph declarations sound: a store under `pc.phase == 1u` cannot be
+    /// introduced by the compiler into a phase-0 dispatch, because a compiler may not add a write
+    /// the source does not perform. (The converse licence — a not-taken LOAD may still issue —
+    /// is why every load either phase can issue is declared on BOTH passes.)
+    ///
+    /// ONE module, ONE pipeline, ONE entry point rather than a `-D` variant pair: the occlusion
+    /// leaf must be the SAME function in both phases, and two artifacts are two implementations
+    /// that can drift — in the direction where the late test is stricter than the early one, which
+    /// is geometry deletion.
+    pub phase: u32,
+    /// VG R3 piece 3 step P3-3 (plan D6): the occlusion decision's flag word —
+    /// [`VB_CULL_OCC_ARMED`] plus the two FORCE controls. Folded ONCE on the host
+    /// ([`GBufferScene::vb_occ_flags`]) so the declarator, the recorder and the shader read one
+    /// number.
+    ///
+    /// ⚠️ Pushed as `0` at this step, and that is the whole of the inertness argument: with the
+    /// ARMED bit clear the shader's `defer` predicate is identically false, so the early phase
+    /// degrades to the pre-piece-3 loop EXACTLY rather than to something merely similar.
+    pub occ_flags: u32,
 }
+
+/// VG R3 piece 3 step P3-3 (plan D5): [`VbBatchCullPush::phase`]'s EARLY value — the frustum test
+/// plus the two-way occlusion partition, writing the early survivor list and the late candidate
+/// list.
+pub const VB_CULL_PHASE_EARLY: u32 = 0;
+
+/// VG R3 piece 3 step P3-3 (plan D5): [`VbBatchCullPush::phase`]'s LATE value — re-test the early
+/// phase's deferred candidates against the pyramid this frame's build wrote, compact them in place
+/// and store the survivor count into `vb_indirect_late[b].instanceCount`.
+///
+/// ⚠️ At this step the module's phase fork is a bare `return`, so a phase-1 dispatch is a no-op BY
+/// CONSTRUCTION rather than by luck. That fork and this dispatch land in ONE commit deliberately:
+/// without it, phase 1 would re-run phase 0's body and rewrite the early lists.
+pub const VB_CULL_PHASE_LATE: u32 = 1;
 
 impl VbBatchCullPush {
     /// The DISARMED plane set: every plane `(0, 0, 0, 0)`, so `dist + radius == 0.0` and the
@@ -546,7 +585,8 @@ impl VbBatchCullPush {
 
 const _: () = assert!(
     core::mem::size_of::<VbBatchCullPush>() == VB_BATCH_CULL_PUSH_BYTES as usize,
-    "rung R2c: VbBatchCullPush must match the shader's 104-byte push block"
+    "VG R3 P3-3: VbBatchCullPush must match the shader's 112-byte push block (104 through rung R2c; \
+     the `phase` + `occ_flags` pair widened it)"
 );
 
 /// VG R3 piece 3 step P3-2: [`VbCullUniform`]'s byte size, re-exported from `compute` so this
@@ -563,9 +603,9 @@ pub(crate) const VB_CULL_UNIFORM_BYTES: u32 = crate::compute::VB_CULL_UNIFORM_BY
 /// `levels` out of this buffer: gating the fill would make that read unwritten allocation contents
 /// on a disarmed boot.
 ///
-/// ⚠️ At THIS step the buffer is allocated and bound and NOTHING writes or reads it. The fill lands
-/// at step P3-3 (at a named record site, ahead of `record_vb_pass`, for the intra-pass
-/// `TRANSFER → COMPUTE` edge's sake) and the shader-side read at P3-4.
+/// ⚠️ Since step P3-3 the buffer IS written — by [`Self::for_frame`] through a `vkCmdUpdateBuffer`
+/// recorded at a named site, ahead of `record_vb_pass`, for the intra-pass `TRANSFER → COMPUTE`
+/// edge's sake. NOTHING READS IT YET: the shader-side read lands at P3-4.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VbCullUniform {
@@ -598,6 +638,63 @@ const _: () = assert!(
     core::mem::size_of::<VbCullUniform>() == VB_CULL_UNIFORM_BYTES as usize,
     "VG R3 P3-2: VbCullUniform must match the shader's 96-byte VbCullUniform block"
 );
+
+impl VbCullUniform {
+    /// VG R3 piece 3 step P3-3 (plan D6): builds one frame's cull uniform.
+    ///
+    /// `view_proj_push` is the raster push's LEADING 64 BYTES — the very bytes the vertex shader
+    /// reads as its `view_proj`, and the very bytes
+    /// `boyko_render::frustum::frustum_planes_from_push_bytes` extracts
+    /// [`GBufferScene::vb_cull_planes`] from. Taking the matrix from anywhere else would let the
+    /// occlusion test project against a matrix the frame is not drawn with, and something already
+    /// perturbs one without the other: the TAA path jitters the projection per frame. Byte
+    /// provenance makes that question not arise — the ONE inversion out of the column-major push
+    /// storage happens here and only here.
+    ///
+    /// `hzb` is `GBufferScene::hzb` — the pyramid's HOST PLAN, `None` on an `HzbMode::Off` boot.
+    ///
+    /// # The DISARMED values, each chosen so a not-taken load is safe by ADDRESS and by VALUE
+    ///
+    /// With no pyramid the descriptor at `vb_cull_layout` @9 binds `hzb_null`, a 1×1 single-mip
+    /// image. So:
+    ///
+    /// * `levels = 0` — the shader's `level >= levels ⇒ Keep(LevelUnavailable)` early-out then
+    ///   fires for EVERY selected level, which is the guard that makes the disarmed load safe, and
+    ///   the conservative direction (KEEP) is what it produces. It is also the literal truth: a
+    ///   boot with no pyramid has no levels.
+    /// * `base_extent = [1, 1]` — `hzb_null`'s real extent, so a coordinate clamped into
+    ///   `[0, base − 1]` lands on the one texel that exists.
+    /// * `src_extent` is `present_extent` UNCONDITIONALLY — the honest source extent whether or not
+    ///   a pyramid reduces it, and the SAME number `HzbBuildPush::src_extent` carries.
+    ///
+    /// This is why the fill is UNCONDITIONAL (plan D6): gating it on the split would leave `levels`
+    /// as unwritten allocation contents on a disarmed boot, and `robustBufferAccess` is off.
+    #[must_use]
+    pub fn for_frame(
+        view_proj_push: &[u8; 64],
+        src_extent: [u32; 2],
+        hzb: Option<HzbPlan>,
+        frame_index: u32,
+    ) -> Self {
+        let mut view_proj_rows = [[0.0f32; 4]; 4];
+        for e in 0..16 {
+            let mut w = [0u8; 4];
+            w.copy_from_slice(&view_proj_push[e * 4..e * 4 + 4]);
+            // The inverse of the push's `out[(col * 4 + row) * 4]` column-major serialisation,
+            // character-for-character `frustum_planes_from_push_bytes`'s own inversion — the
+            // MATH-ROW form `hzb::project_aabb` takes, where `clip = pv · world`.
+            view_proj_rows[e % 4][e / 4] = f32::from_le_bytes(w);
+        }
+        Self {
+            view_proj_rows,
+            src_extent,
+            base_extent: hzb.map_or([1, 1], |p| p.extent_of(0)),
+            levels: hzb.map_or(0, |p| p.levels),
+            frame_index,
+            _pad: [0; 2],
+        }
+    }
+}
 
 /// VG R3 piece 3 (plan D6): `occ_flags` bit 0 — the pyramid exists AND the occlusion split is
 /// armed, so the early phase may DEFER an instance instead of drawing it.
@@ -3297,16 +3394,35 @@ pub struct GBufferScene<'a> {
     ///
     /// ⚠️ Allocated and bound at `vb_cull_layout` @11 at this step; written by nothing.
     pub vb_late_count: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
-    /// The per-FIF [`VbCullUniform`], bound at `vb_cull_layout` @8. Same unconditional minting rule
-    /// as the two above. ⚠️ Filled by nothing at this step — see [`VbCullUniform`]'s own doc.
+    /// The per-FIF [`VbCullUniform`], bound at `vb_cull_layout` @8 and — since VG R3 piece 3 step
+    /// P3-3 — FILLED every frame the cull is recorded, armed or not (plan D6). Same unconditional
+    /// minting rule as the two above. ⚠️ Read by nothing until P3-4.
     pub vb_cull_uniform: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
     /// The occlusion decision's flag word — [`VB_CULL_OCC_ARMED`] / [`VB_CULL_OCC_FORCE_LATE`] /
     /// [`VB_CULL_OCC_FORCE_KEEP`], folded ONCE on the host so the declarator, the recorder and the
     /// shader read ONE number rather than three re-derivations of the same predicate.
     ///
-    /// ⚠️ `0` at this step, and pushed by nothing: the push block still ends at `visible_cap`. The
-    /// fold that computes it lands with the arming commit.
+    /// ⚠️ `0` at this step. Since VG R3 piece 3 step P3-3 it IS pushed (at
+    /// [`VbBatchCullPush::occ_flags`]) and the shader's `defer` predicate is therefore identically
+    /// false — the inertness argument. The fold that computes a nonzero value lands with the
+    /// arming commit.
     pub vb_occ_flags: u32,
+    /// VG R3 piece 3 step P3-3 (plan D6): the ENGINE frame index this scene describes — the
+    /// monotonic host counter the runner advances once per presented frame, wrapping benignly at
+    /// `u32::MAX`.
+    ///
+    /// ⚠️ NOT `Renderer::frame_index`, which is the round-robin frame-in-flight SLOT (`0..
+    /// FRAMES_IN_FLIGHT`) and repeats every other frame. The recorder threads this number into
+    /// [`VbCullUniform::frame_index`], and it is the only executable control for D6's record-order
+    /// hazard: a uniform fill landing on the wrong side of the derived `TRANSFER → COMPUTE` barrier
+    /// makes the dispatch read frame N−`FRAMES_IN_FLIGHT`'s uniform, which is BIT-IDENTICAL on every
+    /// static fixture and therefore invisible to every golden, every image gate and every oracle
+    /// differential.
+    ///
+    /// It is the SAME counter `boyko_app`'s runner already threads into the DDGI probe-update UBO,
+    /// so the cull's control and the dump's pairing check (piece 3 steps P3-5/P3-7) can be compared
+    /// against ONE clock rather than two that happen to agree.
+    pub engine_frame_index: u32,
 }
 
 impl GBufferScene<'_> {
@@ -3766,5 +3882,124 @@ pub struct PunctualDepthActivation<'a> {
     /// render area + viewport. MUST equal the resolution [`GBufferScene::shadow_atlas_texture`] was
     /// created at.
     pub shadow_dim: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HzbPlan, MAX_HZB_LEVELS, VbCullUniform};
+
+    /// A push buffer whose element `e` (the `e`-th `f32`, i.e. bytes `[4e, 4e + 4)`) holds the value
+    /// `e as f32` — so every one of the sixteen matrix slots is distinguishable from every other and
+    /// no index mistake can hide behind a coincidence.
+    fn indexed_push() -> [u8; 64] {
+        let mut bytes = [0u8; 64];
+        for (e, word) in bytes.chunks_exact_mut(4).enumerate() {
+            word.copy_from_slice(&(e as f32).to_le_bytes());
+        }
+        bytes
+    }
+
+    /// VG R3 piece 3 step P3-3 (plan D6): the ONE byte inversion, at the ONE site.
+    ///
+    /// The raster push stores the matrix COLUMN-major — element index `col * 4 + row`, HLSL's
+    /// `float4x4` storage — and `hzb::project_aabb` takes the MATH-ROW form `pv[row][col]` with
+    /// `clip = pv · world`. This asserts the inversion is performed and performed in the right
+    /// direction.
+    ///
+    /// # What it CANNOT claim
+    ///
+    /// * **Nothing about agreement with `boyko_render::frustum::frustum_planes_from_push_bytes`**,
+    ///   which performs the identical inversion for the frustum planes. `boyko_render` depends on
+    ///   this crate, not the reverse, so no test here can name it; the two-consumer equality is a
+    ///   `boyko_app`-level test (that crate links both), and it is not written yet.
+    /// * **Nothing about the matrix being the right one.** It asserts a transposition, not that the
+    ///   64 bytes handed in are the bytes the raster draws with — that is byte provenance, and it is
+    ///   carried by the call site taking `scene.mvp[0..64]` rather than by this test.
+    /// * **Nothing about the device.** No shader reads this buffer until step P3-4.
+    #[test]
+    fn cull_uniform_inverts_the_column_major_push_into_math_rows() {
+        let u = VbCullUniform::for_frame(&indexed_push(), [1920, 1080], None, 0);
+
+        for (row, cells) in u.view_proj_rows.iter().enumerate() {
+            for (col, value) in cells.iter().enumerate() {
+                assert_eq!(
+                    *value,
+                    (col * 4 + row) as f32,
+                    "view_proj_rows[{row}][{col}] must be push element {} (column-major storage is \
+                     `col * 4 + row`); a straight-through copy would put element {} here",
+                    col * 4 + row,
+                    row * 4 + col
+                );
+            }
+        }
+
+        // THE CONTROL, and it is executable rather than rhetorical: if the fixture were symmetric,
+        // every assertion above would hold for a copy that never transposed anything. This line
+        // fails on such a fixture, so "the test passed" cannot mean "the test could not fail".
+        assert_ne!(
+            u.view_proj_rows[0][1], u.view_proj_rows[1][0],
+            "the fixture must be ASYMMETRIC across the diagonal, or the loop above is satisfied by \
+             an implementation that copies the push straight through"
+        );
+    }
+
+    /// VG R3 piece 3 step P3-3 (plan D6/D7): the DISARMED uniform, field by field.
+    ///
+    /// With no pyramid the descriptor at `vb_cull_layout` @9 binds `hzb_null`, a 1×1 single-mip
+    /// image holding `0.0` — the reverse-Z far plane. These three values are what make a not-taken
+    /// (but possibly still-ISSUED) load safe by ADDRESS as well as by VALUE, and they are the reason
+    /// the fill is unconditional: gating it would leave `levels` as unwritten allocation contents on
+    /// a disarmed boot, with `robustBufferAccess` off.
+    ///
+    /// # What it CANNOT claim
+    ///
+    /// Nothing about the shader honouring `levels == 0`. The `level >= levels ⇒ Keep` early-out
+    /// lands at step P3-4; this pins only the number the host hands it.
+    #[test]
+    fn cull_uniform_disarmed_levels_are_zero_and_base_is_the_null_image() {
+        let disarmed = VbCullUniform::for_frame(&indexed_push(), [640, 480], None, 7);
+        assert_eq!(
+            disarmed.levels, 0,
+            "a boot with no pyramid has no levels, and 0 is what makes the shader's \
+             `level >= levels ⇒ Keep` guard fire for EVERY selected level"
+        );
+        assert_eq!(
+            disarmed.base_extent, [1, 1],
+            "the disarmed base extent must describe `hzb_null`, the 1×1 image actually bound at @9 \
+             — a larger value would let a clamped coordinate address a texel that does not exist"
+        );
+        assert_eq!(
+            disarmed.src_extent, [640, 480],
+            "the SOURCE extent is honest whether or not a pyramid reduces it — it is `present_extent`"
+        );
+        assert_eq!(disarmed.frame_index, 7, "the engine frame index passes through unchanged");
+        assert_eq!(disarmed._pad, [0, 0], "the std430 tail padding is written zero, never left over");
+    }
+
+    /// The ARMED sibling of the test above — the same call with a plan, so the two disarmed values
+    /// are shown to be a CHOICE rather than the only thing this constructor can produce.
+    ///
+    /// Without this, `levels == 0` and `base_extent == [1, 1]` would be satisfied by a constructor
+    /// that ignores its `hzb` argument entirely.
+    #[test]
+    fn cull_uniform_armed_takes_its_levels_and_base_from_the_plan() {
+        let mut level_extent = [[0u32; 2]; MAX_HZB_LEVELS];
+        level_extent[0] = [256, 128];
+        level_extent[1] = [128, 64];
+        let plan = HzbPlan { levels: 2, level_extent };
+
+        let armed = VbCullUniform::for_frame(&indexed_push(), [300, 200], Some(plan), 11);
+        assert_eq!(armed.levels, 2, "the level count is the plan's, never a capacity");
+        assert_eq!(
+            armed.base_extent, [256, 128],
+            "the base extent is LEVEL 0's — `prev_pow2` of each source axis, pushed rather than \
+             re-derived in the shader, so a base-map disagreement is a SHADER bug and never a second \
+             implementation of the host oracle's arithmetic"
+        );
+        assert_eq!(
+            armed.src_extent, [300, 200],
+            "`src_extent` is the SOURCE extent, NOT level 0's — the shader's base map reads both"
+        );
+    }
 }
 

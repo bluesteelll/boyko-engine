@@ -33,6 +33,32 @@
 //! this re-pin — which is the whole reason the prediction is written down here instead of the
 //! generator's output being pasted in and trusted.
 //!
+//! # The SECOND re-pin: VG R3 piece 3 step P3-3, and the ONE place the plan's own prediction is wrong
+//!
+//! P3-3 declares the late cull and the occlusion split's three buffers. Its plan entry says it moves
+//! the **S-rows** — and it does — but it ALSO moves all four **U-rows**, which that entry does not
+//! say, and the reason is a contradiction inside the plan's own D8: the section opens with *"New
+//! accesses on `vb_batch_cull`, ALL gated on `occlusion_split` so an unsplit frame's declared set …
+//! is bit-unchanged"* and then names the exception two paragraphs later — *"the uniform's pair is
+//! the ONE exception to the gating: it is declared and written on every frame the cull runs"*. Both
+//! cannot hold. The exception is the specific statement and the one D6 argues for (the module reads
+//! `levels` out of that buffer, so a gated fill leaves it unwritten on a disarmed boot), so the
+//! exception wins and the opening sentence is false for the U-rows.
+//!
+//! **The delta, DERIVED before it was measured, and it is total.** `vb_cull_uniform` is appended
+//! LAST among the buffers, so no existing `ResId` moves and no pinned barrier's `res` field changes.
+//! Inside `vb_batch_cull` its first access is a first-touch TRANSFER write (no barrier — nothing to
+//! order against) and its second is a COMPUTE read, which derives exactly ONE
+//! `TRANSFER(TRANSFER_WRITE) → COMPUTE(SHADER_READ)` buffer barrier — the same shape `vb_cull_count`'s
+//! own fill already derives in that pass, and it joins that pass's existing `TRANSFER → COMPUTE`
+//! group. So every row gains ONE `BufBarrier` element and every `PassBarrierRange` from
+//! `vb_batch_cull` onward shifts by one. The S-rows additionally gain the split-gated early accesses
+//! and the whole `vb_cull_late` pass.
+//!
+//! **What is NOT moved by it: any pixel.** `vb_cull_uniform` is read by no shader until step P3-4,
+//! and a barrier cannot move a pixel it orders nothing against, so the 26 golden pins are
+//! byte-identical. What moved is this file, which is the point of this file.
+//!
 //! **Three NAMED-HAZARD assertions moved with those rows**, and they are re-pinned rather than
 //! deleted for the same reason: each asserted a FIRST-TOUCH property whose subject the seed
 //! removed. [`u2_pins_the_pyramid_chain_and_the_depth_handoff`],
@@ -43,6 +69,79 @@
 //! MERGE each of them asserts — six mips into one barrier, ten into one — is unaffected by the
 //! seed and is stated more sharply than before: a seeded chain still folds, and if it stopped
 //! folding that would be a finding about `compile`, not something to re-pin around.
+//!
+//! ## FOUR NAMED assertion SITES moved by P3-3's TWO-PRODUCER chain, and what they now state
+//!
+//! Four SITES, seven distinct failing tests and six on either leg — the first site is the helper all
+//! four `S*` whole-stream pins call, and the last two are the debug and release legs of one control.
+//! (A FIFTH site moved with P3-3's rows, from a DIFFERENT declaration; it has its own section
+//! below, and was found only after this one was written.)
+//!
+//! ONE declaration moves all four: `vb_cull_late` writes `vb_indirect_late`. That buffer had exactly
+//! ONE declared producer — the host's `vb_indirect_late_upload` — and now has TWO, so the chain the
+//! stream derives across it is TWO barriers where it was one. This is plan D8's four-link chain; a
+//! PROBE-OFF matrix (every row here) derives its first three links:
+//!
+//! ```text
+//! vb_indirect_late_upload  TRANSFER(TRANSFER_WRITE) ──WAW──▶ vb_cull_late    COMPUTE(SHADER_WRITE)
+//! vb_cull_late             COMPUTE(SHADER_WRITE)    ──RAW──▶ vb_raster_late  DRAW_INDIRECT(INDIRECT_COMMAND_READ)
+//! ```
+//!
+//! * [`assert_row_is_pinned`]'s split branch said *"expected exactly one"* and now says TWO — and it
+//!   no longer stops at the count, because after P3-3 a count alone cannot see the defect class the
+//!   assertion exists for (spelled out two paragraphs down).
+//! * [`s1_pins_the_late_boundary_barriers_field_by_field`] asserted the `TRANSFER_WRITE →
+//!   INDIRECT_COMMAND_READ` edge. **That edge no longer exists** — the fetch is sourced from the
+//!   cull. Its successor asserts BOTH links, and the first of them is now the ONLY place in the
+//!   entire derived stream where the host upload is observable at all.
+//! * `a_dropped_late_upload_write_keeps_the_count_and_moves_only_fields` is RENAMED to
+//!   [`a_dropped_late_upload_write_deletes_the_upload_to_cull_waw`], because a name is a claim and
+//!   that claim INVERTED. With a second producer, dropping the upload's write no longer re-sources
+//!   the fetch: it DELETES the WAW and leaves the fetch barrier field-identical. The defect became
+//!   count-VISIBLE and field-INVISIBLE — the exact opposite of the shape the R1 control was written
+//!   to demonstrate — and the control now asserts that inversion instead of the old one.
+//! * `the_dropped_late_upload_write_now_trips_the_framegraph_guard` **can no longer fire**: with a
+//!   second declared producer, dropping the upload leaves the fetch preceded by a declared write, so
+//!   `compile`'s provenance guard has nothing to catch. It is replaced by
+//!   [`the_dropped_early_survivor_write_trips_the_guard_through_the_split_read`]; the disposition,
+//!   including what the replacement does NOT cover, is argued at that test.
+//!
+//! **What the re-pinned assertions still catch — the property the originals were load-bearing
+//! for.** Deleting any ONE of the three links leaves exactly ONE barrier: without the upload's write
+//! the cull's store is a first touch (no barrier) and only the fetch's RAW survives; without the
+//! cull's write the upload's fill is the first touch and only the fetch's RAW survives; without the
+//! fetch only the WAW survives. So a missing half still REDS on the count, which is the original
+//! claim carried over verbatim at the new number. And the one shape a count CANNOT see — the late
+//! cull's access declared as a READ rather than a write — leaves the count at two and moves
+//! `src_access` to `0` on the second barrier. That is why the re-pin asserts all four `(stage,
+//! access)` pairs and not merely the number.
+//!
+//! ## The FIFTH site: P3-3's EARLY pyramid READ, which re-sources the pyramid's first WRITE
+//!
+//! A second P3-3 declaration moves a named-hazard assertion, and it is unrelated to the record
+//! array: `vb_batch_cull` gains a READ of the whole pyramid, gated on `split &&
+//! hzb_levels.is_some()`. It DECLARES plan D1's early-predicate input — the pyramid **as the
+//! previous frame left it** — ahead of the leaf that consumes it (P3-4). So on a SPLIT row that
+//! read, not `hzb_build_0`, is the frame's first pyramid access.
+//!
+//! The consequence is one field on one barrier, and plan D2's own hazard table names both halves of
+//! it: the **cross-frame RAW** the P3-0 seed exists for is discharged at that READ, and the build's
+//! write behind it becomes a **WAR** — `src_access: 0`, an execution-only dependency, since a read
+//! has no memory to make available. `s2_pins_the_depth_round_trip_across_the_moved_block`'s tail
+//! asserted that write as a seed FLUSH and is re-pinned at the test, with what it now catches and
+//! the two ways it is weaker. The MERGE is unmoved and stated on a wider span than before: the
+//! build's six mips still fold into ONE barrier over `[0, 6)` and the early read's ten fold into one
+//! over `[0, 10)`.
+//!
+//! **The U-rows are NOT affected by this one** — the gate is on `split`, so an unsplit frame
+//! declares no early pyramid read, `hzb_build_0`'s write stays the frame's first pyramid access,
+//! and it still flushes the seed. Verified against the regenerated arrays rather than inferred from
+//! the gate: the FIRST `hzb_pyramid` element of each unsplit row still reads
+//! `(COMPUTE, SHADER_WRITE, GENERAL → GENERAL)` — `U2_EXPECTED_IMG[10]` and `U4_EXPECTED_IMG[6]`
+//! (`hzb_build_0`'s write), `U3_EXPECTED_IMG[9]` (the poison clear) — which is the seed-flush shape
+//! P3-0 pinned, so `u2`'s and `u3`'s assertions are untouched. (Their LATER pyramid elements are
+//! sourced from the clear or from each other and always were; what P3-3 does move on those rows is
+//! one BUFFER barrier, argued above.)
 //!
 //! # Why it is the ONLY gate that can see a missing barrier
 //!
@@ -209,10 +308,35 @@ struct VbRow {
     /// [`a_dropped_writer_keeps_every_count_and_moves_only_fields`] sets it.
     red_control_drop_cull_survivor_write: bool,
     /// **RED CONTROL ONLY (G4's R1).** Drops `vb_indirect_late_upload`'s declared TRANSFER write
-    /// while leaving `vb_raster_late`'s indirect fetch in place — the SAME defect class, on the
-    /// resource piece 2 actually adds. Every pinned row holds this `false`; only
-    /// [`a_dropped_late_upload_write_keeps_the_count_and_moves_only_fields`] sets it.
+    /// while leaving `vb_raster_late`'s indirect fetch in place, on the resource piece 2 adds.
+    ///
+    /// ⚠️ **Its defect class CHANGED at VG R3 P3-3.** While the upload was the buffer's only
+    /// producer this was the read-declared/write-undeclared shape: same barrier count, two moved
+    /// source fields. `vb_cull_late` is now a second producer, so the fetch stays correctly sourced
+    /// from the cull and what the drop removes is the upload→cull WAW — one whole barrier, and the
+    /// only trace the host fill leaves in the stream. Every pinned row holds this `false`; only
+    /// [`a_dropped_late_upload_write_deletes_the_upload_to_cull_waw`] sets it.
     red_control_drop_late_upload_write: bool,
+    /// **RED CONTROL ONLY (VG R3 piece 3 step P3-3).** Drops `vb_batch_cull`'s declared
+    /// `vb_late_visible` WRITE while leaving `vb_cull_late`'s READ of it in place.
+    ///
+    /// Like `red_control_drop_cull_late_count_write` this fires `compile`'s P2-8 provenance guard
+    /// rather than moving fields — but it is the only control that reaches the guard THROUGH the
+    /// read half of a read-then-write pair, which is the property plan D8 pays a self-WAR edge for
+    /// and which nothing else in this file demonstrates. Every pinned row holds this `false`; only
+    /// [`the_dropped_early_survivor_write_trips_the_guard_through_the_split_read`] sets it.
+    red_control_drop_cull_late_visible_write: bool,
+    /// **RED CONTROL ONLY (VG R3 piece 3 step P3-3, plan G-P3-F's F4).** Drops `vb_batch_cull`'s
+    /// declared `vb_late_count` WRITE while leaving `vb_cull_late`'s read of it in place.
+    ///
+    /// Unlike the two controls above this one does NOT move fields — it fires `compile`'s P2-8
+    /// provenance guard, because `vb_late_count`'s first touch is that write and the read then
+    /// becomes a first-touch read of a bare `add_buffer`. It is the ONE new buffer in piece 3 the
+    /// guard can protect (`vb_indirect_late`'s first touch is the host upload's TRANSFER write, and
+    /// a write is never tested), so this control is what demonstrates the coverage exists rather
+    /// than asserting it. Every pinned row holds this `false`; only
+    /// [`the_dropped_late_count_write_now_trips_the_framegraph_guard`] sets it.
+    red_control_drop_cull_late_count_write: bool,
 }
 
 /// **U1** — split off, HZB off, dump off, SSAO off, `VB × Mesh`. The shipping baseline: nothing
@@ -226,6 +350,8 @@ const U1: VbRow = VbRow {
     sdf_leg: false,
     red_control_drop_cull_survivor_write: false,
     red_control_drop_late_upload_write: false,
+    red_control_drop_cull_late_count_write: false,
+    red_control_drop_cull_late_visible_write: false,
 };
 
 /// **U2** — split off, HZB armed, dump off, SSAO off, `VB × Mesh`. Today's `vb_mesh_hzb` shape,
@@ -260,10 +386,12 @@ const U4: VbRow = VbRow {
 
 /// **S1** (VG R3 piece 2 step P2-6) — split **ON**, HZB off, dump off, SSAO off, `VB × Mesh`.
 ///
-/// The three new barriers at the late scope's boundary, and the row where they stand alone:
-/// `vb_id` WAW, `vb_depth` WAW, and `vb_indirect_late`'s `TRANSFER_WRITE → INDIRECT_COMMAND_READ`.
-/// ⚠️ The COUNT of three is not evidence — the read-declared/write-undeclared defect yields three
-/// as well, differing only in `src_stage`/`src_access`. See
+/// The new barriers at the late scope's boundary, and the row where they stand alone: `vb_id` WAW,
+/// `vb_depth` WAW, and — since VG R3 piece 3 step P3-3 made `vb_cull_late` a SECOND producer of the
+/// record array — `vb_indirect_late`'s TWO links, `TRANSFER_WRITE → SHADER_WRITE` (the host fill
+/// flushed to the cull's store) and `SHADER_WRITE → INDIRECT_COMMAND_READ` (that store made
+/// available to the fetch). ⚠️ The COUNT is not the whole evidence: an access declared as a READ
+/// where the chain needs a WRITE keeps every count and moves only `src_access`. See
 /// [`s1_pins_the_late_boundary_barriers_field_by_field`] and the R1 control.
 const S1: VbRow = VbRow {
     id: "S1 (split ON, HZB off, dump off, SSAO off, VB×Mesh)",
@@ -327,9 +455,34 @@ struct VbFrame {
     vb_visible_instance: ResId,
     /// P2-3's late record array. On an UNSPLIT row it is declared and named by NO pass, and the
     /// row asserts it routes ZERO barriers — the structural form of "nothing about the split leaks
-    /// into the unarmed path". On a SPLIT row it carries exactly one:
-    /// `vb_indirect_late_upload`'s TRANSFER write → `vb_raster_late`'s indirect fetch.
+    /// into the unarmed path". On a SPLIT row it carries — since VG R3 piece 3 step P3-3 — the
+    /// four-link chain `vb_indirect_late_upload` (TRANSFER write) → `vb_cull_late` (COMPUTE write,
+    /// piece 2's obligation 1) → `vb_raster_late` (indirect fetch), plus the post-late snapshot's
+    /// TRANSFER read on a PROBE-ON frame.
     vb_indirect_late: ResId,
+    /// VG R3 piece 3 step P3-3: the occlusion split's candidate/survivor list. Unnamed by any pass
+    /// on an unsplit row; on a split row it carries the early phase's write, `vb_cull_late`'s
+    /// read-then-write pair (declared as TWO calls so the P2-8 provenance guard can test the read
+    /// half) and therefore the self-WAR execution-only edge that split costs.
+    /// Held so the struct mirrors `declare_vb_graph`'s ResId set one-for-one, and so a future
+    /// assertion can name it without re-plumbing the builder. No assertion reads it TODAY: the two
+    /// buffers are already covered by name through `red_control_drop_cull_late_visible_write` and
+    /// `red_control_drop_cull_late_count_write`, which fire inside the builder rather than through
+    /// a field read. Dropping the fields would make the replica's resource list diverge from the
+    /// declarator's, which is the one property this file cannot afford to lose.
+    #[allow(dead_code)]
+    vb_late_visible: ResId,
+    /// VG R3 piece 3 step P3-3: per-batch `n_defer` plus the reserved frame slot. The ONE new
+    /// buffer in this piece whose first touch is a COMPUTE WRITE, which is what makes the P2-8
+    /// provenance guard live on it — see
+    /// [`the_dropped_late_count_write_now_trips_the_framegraph_guard`].
+    #[allow(dead_code)]
+    vb_late_count: ResId,
+    /// VG R3 piece 3 step P3-3: the cull's non-push inputs. ⚠️ The ONE resource this step adds that
+    /// an UNSPLIT row also carries a barrier for: its `TRANSFER_WRITE → SHADER_READ` pair is
+    /// declared on EVERY frame the cull runs (plan D6), so it moves the U-rows as well as the
+    /// S-rows.
+    vb_cull_uniform: ResId,
 }
 
 /// The `[hzb_poison, hzb_build_0 .. hzb_build_{n-1}]` block, declared WHOLE — the replica's mirror
@@ -572,8 +725,15 @@ fn declare_vb_frame(row: VbRow) -> VbFrame {
     let vb_cull_visible = g.add_buffer("vb_cull_visible");
     let vb_cull_count = g.add_buffer("vb_cull_count");
     let vb_visible_instance = g.add_buffer("vb_visible_instance");
-    // P2-3's append. Declared, named by no pass — the `hzb_pyramid` shape one screen up.
+    // P2-3's append. Declared, named by no pass on an unsplit row — the `hzb_pyramid` shape one
+    // screen up.
     let vb_indirect_late = g.add_buffer("vb_indirect_late");
+    // VG R3 piece 3 step P3-3's append: the occlusion split's trio, LAST and in the declarator's
+    // order. All three are BARE `add_buffer` — after P2-8 that spelling is the provenance claim,
+    // and each has an in-graph producer on every frame it is read.
+    let vb_late_visible = g.add_buffer("vb_late_visible");
+    let vb_late_count = g.add_buffer("vb_late_count");
+    let vb_cull_uniform = g.add_buffer("vb_cull_uniform");
 
     // ---- Passes, in declaration (execution) order -------------------------------------------
 
@@ -624,9 +784,13 @@ fn declare_vb_frame(row: VbRow) -> VbFrame {
     // `scene.vb_indirect.is_some()`; folding two predicates onto one pass is how a pass ends up
     // declaring an access the recorder does not perform.
     //
-    // ⚠️ THIS DECLARATION IS THE DIFFERENCE BETWEEN "DRAWS NOTHING" AND "DRAWS WHATEVER WAS IN
-    // FRESHLY ALLOCATED DEVICE MEMORY" — and dropping it costs the stream NO barrier and NO count,
-    // only two fields. That is what `red_control_drop_late_upload_write` reproduces.
+    // ⚠️ THIS DECLARATION IS WHAT ORDERS THE HOST FILL OF THE FOUR RECORD WORDS `vb_cull_late` DOES
+    // NOT WRITE. Until VG R3 P3-3 it also sourced the indirect fetch, and dropping it cost the
+    // stream no barrier and no count, only two fields. With the cull declared as a second producer
+    // the fetch is sourced from the cull instead, so dropping this line now DELETES one whole
+    // barrier — the upload→cull WAW, the only trace of the fill in the derived stream — while the
+    // fetch's barrier stays field-identical. That is what
+    // `red_control_drop_late_upload_write` reproduces.
     if row.split {
         pass!("vb_indirect_late_upload");
         if !row.red_control_drop_late_upload_write {
@@ -656,8 +820,65 @@ fn declare_vb_frame(row: VbRow) -> VbFrame {
             VK_ACCESS_SHADER_WRITE_BIT,
         );
     }
+    // VG R3 piece 3 step P3-3 (plan D6): the cull's UNIFORM — a `vkCmdUpdateBuffer` (TRANSFER) and
+    // the dispatch's read (COMPUTE) inside THIS pass, the same intra-pass shape the counter fill
+    // above uses.
+    //
+    // ⚠️ UNCONDITIONAL, the ONE access P3-3 adds that is not gated on the split — because the
+    // module's `level >= levels ⇒ Keep` early-out reads `levels` out of this buffer, so a gated fill
+    // would leave that read on unwritten allocation contents on a disarmed boot. It is therefore
+    // also the one access that moves the U-rows: every row in this matrix gains exactly one
+    // `TRANSFER(TRANSFER_WRITE) → COMPUTE(SHADER_READ)` buffer barrier inside `vb_batch_cull`.
+    g.buffer_access(vb_cull_uniform, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+    g.buffer_access(vb_cull_uniform, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+    // VG R3 piece 3 step P3-3 (plan D8): the EARLY phase's three split-only accesses.
+    //
+    // The pyramid read is the EARLY predicate's input — the pyramid AS THE PREVIOUS FRAME LEFT IT,
+    // since this frame's build has not run yet — which is the cross-frame RAW the P3-0 writer seed
+    // exists to order. It carries the extra `hzb_levels.is_some()` conjunct the declarator carries,
+    // and for the declarator's reason: `path_vb_occlusion_split()` does not imply
+    // `scene.hzb.is_some()` until step P3-6, so row S1 (split ON, HZB off) is a real configuration
+    // in which the pyramid image does not exist.
+    if row.split {
+        if let Some(levels) = row.hzb_levels {
+            g.image_access(
+                hzb_pyramid,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_GENERAL,
+                hzb_mips(0, levels),
+            );
+        }
+        // ⚠️ `red_control_drop_cull_late_visible_write` drops THIS line and nothing else, which
+        // turns `vb_cull_late`'s READ of the survivor list below into a first-touch read. It fires
+        // only because that read is declared as its OWN call — see
+        // [`the_dropped_early_survivor_write_trips_the_guard_through_the_split_read`].
+        if !row.red_control_drop_cull_late_visible_write {
+            g.buffer_access(
+                vb_late_visible,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+            );
+        }
+        // ⚠️ `red_control_drop_cull_late_count_write` drops THIS line and nothing else. It is the
+        // one buffer piece 3 adds whose first touch is a COMPUTE WRITE, so dropping it turns
+        // `vb_cull_late`'s read below into a first-touch read of a bare `add_buffer` and the P2-8
+        // provenance guard fires — a `debug_assert!`, not a moved field. See
+        // [`the_dropped_late_count_write_now_trips_the_framegraph_guard`].
+        if !row.red_control_drop_cull_late_count_write {
+            g.buffer_access(
+                vb_late_count,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+            );
+        }
+    }
 
-    // `vb_cull_readback` — the probe, held OFF across the matrix.
+    // `vb_cull_readback` — the probe, held OFF across the matrix. VG R3 piece 3 step P3-3 gives it
+    // two more regions on a split frame (`vb_late_visible` + `vb_late_count`, the PRE-late
+    // snapshot) and adds a `vb_cull_readback_late` pass after the late scope; neither is modelled
+    // here, for the same reason none of the probe is: with it unarmed the declarator adds no pass
+    // at all, and the PROBE-ON row set is a second, smaller matrix this step does not author.
 
     // `vb_raster` — the EARLY scope. On a split row `vb_raster_late` follows it below, past the
     // poison+build block; on an unsplit row it is the frame's only raster scope.
@@ -704,6 +925,71 @@ fn declare_vb_frame(row: VbRow) -> VbFrame {
             vb_depth,
         );
 
+        // `vb_cull_late` (VG R3 piece 3 step P3-3, plan D4/D5/D8) — the SECOND dispatch of the cull
+        // module, declared after the last `hzb_build_*` and before `vb_raster_late`: it reads the
+        // pyramid THIS frame's build wrote and writes the `instanceCount` the late scope fetches.
+        //
+        // The access list is deliberately ASYMMETRIC with `vb_batch_cull`'s, and the rule is the one
+        // the declarator states: a not-taken LOAD may still issue (DXC may lower a `? :` to an eager
+        // load plus an `OpSelect`), but a compiler may not introduce a STORE the source does not
+        // perform. `pc.phase` is a push constant, uniform across the dispatch. So every LOAD either
+        // phase can issue is declared on BOTH passes, while `vb_indirect_late`'s store is declared
+        // HERE only and `vb_indirect`/`vb_cull_visible`/`vb_cull_count`/`vb_visible_instance`'s
+        // stores are declared on `vb_batch_cull` only.
+        //
+        // ⚠️ `vb_late_visible` IS TWO CALLS — read, then write — never one combined
+        // `SHADER_READ|SHADER_WRITE`. A combined access is `is_write`, so `compile`'s provenance
+        // guard would never test the read half. The cost of the split is a SECOND, execution-only
+        // self-WAR edge on this pass, which is a new PINNED row rather than a hidden one.
+        pass!("vb_cull_late");
+        g.buffer_access(
+            vb_batch_desc,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+        );
+        g.buffer_access(
+            vb_instance_ring,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+        );
+        g.buffer_access(
+            vb_cull_uniform,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+        );
+        if let Some(levels) = row.hzb_levels {
+            g.image_access(
+                hzb_pyramid,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_GENERAL,
+                hzb_mips(0, levels),
+            );
+        }
+        g.buffer_access(
+            vb_late_count,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+        );
+        g.buffer_access(
+            vb_late_visible,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+        );
+        g.buffer_access(
+            vb_late_visible,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+        );
+        // Piece 2's obligation 1, discharged: `vb_indirect_late`'s declared writer moves from
+        // `(TRANSFER, TRANSFER_WRITE)` to `(COMPUTE_SHADER, SHADER_WRITE)` — and the writer that
+        // changes is THIS pass, never `vb_batch_cull`, which does not touch the record array at all.
+        g.buffer_access(
+            vb_indirect_late,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+        );
+
         // `vb_raster_late` — THREE accesses, each load-bearing:
         //  * `vb_indirect_late` at DRAW_INDIRECT/INDIRECT_COMMAND_READ — the consumer half of the
         //    transfer write above; either half alone derives a barrier that is WRONG rather than
@@ -718,7 +1004,12 @@ fn declare_vb_frame(row: VbRow) -> VbFrame {
         // Deliberately NOT declared (and P2-5's declarator says so in the same words): the VS's
         // `vb_instance_ring` and `vb_visible_instance` reads. Every late record carries
         // `instanceCount = 0`, so this scope issues zero vertex invocations and performs neither
-        // read; declaring them would declare an access the recorder does not perform.
+        // read; declaring them would declare an access the recorder does not perform. VG R3 piece 3
+        // step P3-3 does not change that — it makes `vb_cull_late` the record word's PRODUCER while
+        // the module's phase-1 body is still a bare `return`, so the count is the host's `0` until
+        // the arming step. ⚠️ And when those reads do become real, the second one is
+        // `vb_late_visible`, not `vb_visible_instance`: the late scope binds `vb_set0_late`, which
+        // is `vb_set0` with @11 changed, leaving `vb_raster.vs.hlsl` byte-unchanged.
         pass!("vb_raster_late");
         g.buffer_access(
             vb_indirect_late,
@@ -978,6 +1269,9 @@ fn declare_vb_frame(row: VbRow) -> VbFrame {
         vb_indirect,
         vb_visible_instance,
         vb_indirect_late,
+        vb_late_visible,
+        vb_late_count,
+        vb_cull_uniform,
     }
 }
 
@@ -1115,13 +1409,14 @@ fn layout_expr(layout: i32) -> String {
 ///
 /// `FrameGraph::res_name` PANICS on an out-of-range `ResId`, and the divergence reports label the
 /// EXPECTED side too, whose `ResId` comes from a hand-pasted literal. A panic while formatting a
-/// failure message would replace the diagnosis with its own noise. `vb_indirect_late` is the LAST
-/// resource [`declare_vb_frame`] declares, so its index is the bound.
+/// failure message would replace the diagnosis with its own noise. `vb_cull_uniform` is the LAST
+/// resource [`declare_vb_frame`] declares (it was `vb_indirect_late` until VG R3 piece 3 step
+/// P3-3 appended the split's trio), so its index is the bound.
 fn res_label(f: &VbFrame, res: ResId) -> String {
-    if res.index() <= f.vb_indirect_late.index() {
+    if res.index() <= f.vb_cull_uniform.index() {
         format!("{:?}", f.g.res_name(res))
     } else {
-        format!("<ResId {} is outside this frame's {} resources>", res.0, f.vb_indirect_late.index() + 1)
+        format!("<ResId {} is outside this frame's {} resources>", res.0, f.vb_cull_uniform.index() + 1)
     }
 }
 
@@ -1223,6 +1518,13 @@ fn dump_row(row: VbRow, prefix: &str) {
 ///
 /// `--nocapture` is not optional: without it libtest swallows the output and the run looks like a
 /// silent pass.
+///
+/// ⚠️ It has been run TWICE since the four `U*` rows were authored, and both times the delta was
+/// DERIVED first and written into this module's doc before the generator was invoked: VG R3 P3-0's
+/// pyramid seed, and VG R3 P3-3's unconditional `vb_cull_uniform` pair. Re-running it for any other
+/// reason re-measures the baselines the split is compared against, which is the one thing the
+/// two-generator split exists to prevent — so if the prediction is not already written down, do not
+/// run this.
 #[test]
 #[ignore = "generator, not a gate: prints the four baselines as Rust source; the orchestrator runs it"]
 fn dump_vb_unsplit_barrier_streams() {
@@ -1448,28 +1750,35 @@ const U1_EXPECTED_BUF: &[BufBarrier] = &[
         dst_access: VK_ACCESS_SHADER_READ_BIT,
     },
     BufBarrier {
-        res: ResId(23), // [5] "vb_indirect"
+        res: ResId(31), // [5] "vb_cull_uniform"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(23), // [6] "vb_indirect"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
     },
     BufBarrier {
-        res: ResId(16), // [6] "vb_instance_ring"
+        res: ResId(16), // [7] "vb_instance_ring"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
         src_access: 0,
         dst_access: VK_ACCESS_SHADER_READ_BIT,
     },
     BufBarrier {
-        res: ResId(27), // [7] "vb_visible_instance"
+        res: ResId(27), // [8] "vb_visible_instance"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_SHADER_READ_BIT,
     },
     BufBarrier {
-        res: ResId(15), // [8] "light_table"
+        res: ResId(15), // [9] "light_table"
         src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -1483,10 +1792,10 @@ const U1_EXPECTED_PASS: &[PassBarrierRange] = &[
     PassBarrierRange { img_begin: 1, img_count: 1, buf_begin: 1, buf_count: 0 }, // [2] "atlas_depth"
     PassBarrierRange { img_begin: 2, img_count: 1, buf_begin: 1, buf_count: 0 }, // [3] "vb_sky"
     PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 0 }, // [4] "vb_indirect_upload"
-    PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 4 }, // [5] "vb_batch_cull"
-    PassBarrierRange { img_begin: 3, img_count: 2, buf_begin: 5, buf_count: 3 }, // [6] "vb_raster"
-    PassBarrierRange { img_begin: 5, img_count: 4, buf_begin: 8, buf_count: 1 }, // [7] "vb_resolve"
-    PassBarrierRange { img_begin: 9, img_count: 1, buf_begin: 9, buf_count: 0 }, // [8] "present_sample"
+    PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 5 }, // [5] "vb_batch_cull"
+    PassBarrierRange { img_begin: 3, img_count: 2, buf_begin: 6, buf_count: 3 }, // [6] "vb_raster"
+    PassBarrierRange { img_begin: 5, img_count: 4, buf_begin: 9, buf_count: 1 }, // [7] "vb_resolve"
+    PassBarrierRange { img_begin: 9, img_count: 1, buf_begin: 10, buf_count: 0 }, // [8] "present_sample"
 ];
 
 /// U2's UNFILLED image baseline — see [`U1_EXPECTED_IMG`].
@@ -1670,28 +1979,35 @@ const U2_EXPECTED_BUF: &[BufBarrier] = &[
         dst_access: VK_ACCESS_SHADER_READ_BIT,
     },
     BufBarrier {
-        res: ResId(23), // [5] "vb_indirect"
+        res: ResId(31), // [5] "vb_cull_uniform"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(23), // [6] "vb_indirect"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
     },
     BufBarrier {
-        res: ResId(16), // [6] "vb_instance_ring"
+        res: ResId(16), // [7] "vb_instance_ring"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
         src_access: 0,
         dst_access: VK_ACCESS_SHADER_READ_BIT,
     },
     BufBarrier {
-        res: ResId(27), // [7] "vb_visible_instance"
+        res: ResId(27), // [8] "vb_visible_instance"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_SHADER_READ_BIT,
     },
     BufBarrier {
-        res: ResId(15), // [8] "light_table"
+        res: ResId(15), // [9] "light_table"
         src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -1705,12 +2021,12 @@ const U2_EXPECTED_PASS: &[PassBarrierRange] = &[
     PassBarrierRange { img_begin: 1, img_count: 1, buf_begin: 1, buf_count: 0 }, // [2] "atlas_depth"
     PassBarrierRange { img_begin: 2, img_count: 1, buf_begin: 1, buf_count: 0 }, // [3] "vb_sky"
     PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 0 }, // [4] "vb_indirect_upload"
-    PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 4 }, // [5] "vb_batch_cull"
-    PassBarrierRange { img_begin: 3, img_count: 2, buf_begin: 5, buf_count: 3 }, // [6] "vb_raster"
-    PassBarrierRange { img_begin: 5, img_count: 4, buf_begin: 8, buf_count: 1 }, // [7] "vb_resolve"
-    PassBarrierRange { img_begin: 9, img_count: 2, buf_begin: 9, buf_count: 0 }, // [8] "hzb_build_0"
-    PassBarrierRange { img_begin: 11, img_count: 2, buf_begin: 9, buf_count: 0 }, // [9] "hzb_build_1"
-    PassBarrierRange { img_begin: 13, img_count: 1, buf_begin: 9, buf_count: 0 }, // [10] "present_sample"
+    PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 5 }, // [5] "vb_batch_cull"
+    PassBarrierRange { img_begin: 3, img_count: 2, buf_begin: 6, buf_count: 3 }, // [6] "vb_raster"
+    PassBarrierRange { img_begin: 5, img_count: 4, buf_begin: 9, buf_count: 1 }, // [7] "vb_resolve"
+    PassBarrierRange { img_begin: 9, img_count: 2, buf_begin: 10, buf_count: 0 }, // [8] "hzb_build_0"
+    PassBarrierRange { img_begin: 11, img_count: 2, buf_begin: 10, buf_count: 0 }, // [9] "hzb_build_1"
+    PassBarrierRange { img_begin: 13, img_count: 1, buf_begin: 10, buf_count: 0 }, // [10] "present_sample"
 ];
 
 /// U3's UNFILLED image baseline — see [`U1_EXPECTED_IMG`].
@@ -1944,28 +2260,35 @@ const U3_EXPECTED_BUF: &[BufBarrier] = &[
         dst_access: VK_ACCESS_SHADER_READ_BIT,
     },
     BufBarrier {
-        res: ResId(23), // [5] "vb_indirect"
+        res: ResId(31), // [5] "vb_cull_uniform"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(23), // [6] "vb_indirect"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
     },
     BufBarrier {
-        res: ResId(16), // [6] "vb_instance_ring"
+        res: ResId(16), // [7] "vb_instance_ring"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
         src_access: 0,
         dst_access: VK_ACCESS_SHADER_READ_BIT,
     },
     BufBarrier {
-        res: ResId(27), // [7] "vb_visible_instance"
+        res: ResId(27), // [8] "vb_visible_instance"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_SHADER_READ_BIT,
     },
     BufBarrier {
-        res: ResId(15), // [8] "light_table"
+        res: ResId(15), // [9] "light_table"
         src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -1979,14 +2302,14 @@ const U3_EXPECTED_PASS: &[PassBarrierRange] = &[
     PassBarrierRange { img_begin: 1, img_count: 1, buf_begin: 1, buf_count: 0 }, // [2] "atlas_depth"
     PassBarrierRange { img_begin: 2, img_count: 1, buf_begin: 1, buf_count: 0 }, // [3] "vb_sky"
     PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 0 }, // [4] "vb_indirect_upload"
-    PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 4 }, // [5] "vb_batch_cull"
-    PassBarrierRange { img_begin: 3, img_count: 2, buf_begin: 5, buf_count: 3 }, // [6] "vb_raster"
-    PassBarrierRange { img_begin: 5, img_count: 4, buf_begin: 8, buf_count: 1 }, // [7] "vb_resolve"
-    PassBarrierRange { img_begin: 9, img_count: 1, buf_begin: 9, buf_count: 0 }, // [8] "hzb_poison"
-    PassBarrierRange { img_begin: 10, img_count: 2, buf_begin: 9, buf_count: 0 }, // [9] "hzb_build_0"
-    PassBarrierRange { img_begin: 12, img_count: 2, buf_begin: 9, buf_count: 0 }, // [10] "hzb_build_1"
-    PassBarrierRange { img_begin: 14, img_count: 1, buf_begin: 9, buf_count: 0 }, // [11] "present_sample"
-    PassBarrierRange { img_begin: 15, img_count: 4, buf_begin: 9, buf_count: 0 }, // [12] "hzb_dump"
+    PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 5 }, // [5] "vb_batch_cull"
+    PassBarrierRange { img_begin: 3, img_count: 2, buf_begin: 6, buf_count: 3 }, // [6] "vb_raster"
+    PassBarrierRange { img_begin: 5, img_count: 4, buf_begin: 9, buf_count: 1 }, // [7] "vb_resolve"
+    PassBarrierRange { img_begin: 9, img_count: 1, buf_begin: 10, buf_count: 0 }, // [8] "hzb_poison"
+    PassBarrierRange { img_begin: 10, img_count: 2, buf_begin: 10, buf_count: 0 }, // [9] "hzb_build_0"
+    PassBarrierRange { img_begin: 12, img_count: 2, buf_begin: 10, buf_count: 0 }, // [10] "hzb_build_1"
+    PassBarrierRange { img_begin: 14, img_count: 1, buf_begin: 10, buf_count: 0 }, // [11] "present_sample"
+    PassBarrierRange { img_begin: 15, img_count: 4, buf_begin: 10, buf_count: 0 }, // [12] "hzb_dump"
 ];
 
 /// U4's UNFILLED image baseline — see [`U1_EXPECTED_IMG`].
@@ -2240,28 +2563,35 @@ const U4_EXPECTED_BUF: &[BufBarrier] = &[
         dst_access: VK_ACCESS_SHADER_READ_BIT,
     },
     BufBarrier {
-        res: ResId(23), // [5] "vb_indirect"
+        res: ResId(31), // [5] "vb_cull_uniform"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(23), // [6] "vb_indirect"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
     },
     BufBarrier {
-        res: ResId(16), // [6] "vb_instance_ring"
+        res: ResId(16), // [7] "vb_instance_ring"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
         src_access: 0,
         dst_access: VK_ACCESS_SHADER_READ_BIT,
     },
     BufBarrier {
-        res: ResId(27), // [7] "vb_visible_instance"
+        res: ResId(27), // [8] "vb_visible_instance"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_SHADER_READ_BIT,
     },
     BufBarrier {
-        res: ResId(15), // [8] "light_table"
+        res: ResId(15), // [9] "light_table"
         src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -2275,16 +2605,16 @@ const U4_EXPECTED_PASS: &[PassBarrierRange] = &[
     PassBarrierRange { img_begin: 1, img_count: 1, buf_begin: 1, buf_count: 0 }, // [2] "atlas_depth"
     PassBarrierRange { img_begin: 2, img_count: 1, buf_begin: 1, buf_count: 0 }, // [3] "vb_sky"
     PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 0 }, // [4] "vb_indirect_upload"
-    PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 4 }, // [5] "vb_batch_cull"
-    PassBarrierRange { img_begin: 3, img_count: 2, buf_begin: 5, buf_count: 3 }, // [6] "vb_raster"
-    PassBarrierRange { img_begin: 5, img_count: 2, buf_begin: 8, buf_count: 0 }, // [7] "hzb_build_0"
-    PassBarrierRange { img_begin: 7, img_count: 2, buf_begin: 8, buf_count: 0 }, // [8] "hzb_build_1"
-    PassBarrierRange { img_begin: 9, img_count: 1, buf_begin: 8, buf_count: 0 }, // [9] "vb_viewt"
-    PassBarrierRange { img_begin: 10, img_count: 2, buf_begin: 8, buf_count: 0 }, // [10] "vb_geo"
-    PassBarrierRange { img_begin: 12, img_count: 3, buf_begin: 8, buf_count: 0 }, // [11] "ssao"
-    PassBarrierRange { img_begin: 15, img_count: 4, buf_begin: 8, buf_count: 1 }, // [12] "vb_shade_split"
-    PassBarrierRange { img_begin: 19, img_count: 1, buf_begin: 9, buf_count: 0 }, // [13] "sdf_forward_march"
-    PassBarrierRange { img_begin: 20, img_count: 1, buf_begin: 9, buf_count: 0 }, // [14] "present_sample"
+    PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 5 }, // [5] "vb_batch_cull"
+    PassBarrierRange { img_begin: 3, img_count: 2, buf_begin: 6, buf_count: 3 }, // [6] "vb_raster"
+    PassBarrierRange { img_begin: 5, img_count: 2, buf_begin: 9, buf_count: 0 }, // [7] "hzb_build_0"
+    PassBarrierRange { img_begin: 7, img_count: 2, buf_begin: 9, buf_count: 0 }, // [8] "hzb_build_1"
+    PassBarrierRange { img_begin: 9, img_count: 1, buf_begin: 9, buf_count: 0 }, // [9] "vb_viewt"
+    PassBarrierRange { img_begin: 10, img_count: 2, buf_begin: 9, buf_count: 0 }, // [10] "vb_geo"
+    PassBarrierRange { img_begin: 12, img_count: 3, buf_begin: 9, buf_count: 0 }, // [11] "ssao"
+    PassBarrierRange { img_begin: 15, img_count: 4, buf_begin: 9, buf_count: 1 }, // [12] "vb_shade_split"
+    PassBarrierRange { img_begin: 19, img_count: 1, buf_begin: 10, buf_count: 0 }, // [13] "sdf_forward_march"
+    PassBarrierRange { img_begin: 20, img_count: 1, buf_begin: 10, buf_count: 0 }, // [14] "present_sample"
 ];
 
 /// **S1's image baseline** (VG R3 piece 2 step P2-6). Read off [`dump_vb_split_barrier_streams`]
@@ -2452,35 +2782,70 @@ const S1_EXPECTED_BUF: &[BufBarrier] = &[
         dst_access: VK_ACCESS_SHADER_READ_BIT,
     },
     BufBarrier {
-        res: ResId(23), // [5] "vb_indirect"
+        res: ResId(31), // [5] "vb_cull_uniform"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(23), // [6] "vb_indirect"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
     },
     BufBarrier {
-        res: ResId(16), // [6] "vb_instance_ring"
+        res: ResId(16), // [7] "vb_instance_ring"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
         src_access: 0,
         dst_access: VK_ACCESS_SHADER_READ_BIT,
     },
     BufBarrier {
-        res: ResId(27), // [7] "vb_visible_instance"
+        res: ResId(27), // [8] "vb_visible_instance"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_SHADER_READ_BIT,
     },
     BufBarrier {
-        res: ResId(28), // [8] "vb_indirect_late"
+        res: ResId(30), // [9] "vb_late_count"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(29), // [10] "vb_late_visible"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(29), // [11] "vb_late_visible"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+    },
+    BufBarrier {
+        res: ResId(28), // [12] "vb_indirect_late"
         src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
-        dst_stage: VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+    },
+    BufBarrier {
+        res: ResId(28), // [13] "vb_indirect_late"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
     },
     BufBarrier {
-        res: ResId(15), // [9] "light_table"
+        res: ResId(15), // [14] "light_table"
         src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -2495,11 +2860,12 @@ const S1_EXPECTED_PASS: &[PassBarrierRange] = &[
     PassBarrierRange { img_begin: 2, img_count: 1, buf_begin: 1, buf_count: 0 }, // [3] "vb_sky"
     PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 0 }, // [4] "vb_indirect_upload"
     PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 0 }, // [5] "vb_indirect_late_upload"
-    PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 4 }, // [6] "vb_batch_cull"
-    PassBarrierRange { img_begin: 3, img_count: 2, buf_begin: 5, buf_count: 3 }, // [7] "vb_raster"
-    PassBarrierRange { img_begin: 5, img_count: 2, buf_begin: 8, buf_count: 1 }, // [8] "vb_raster_late"
-    PassBarrierRange { img_begin: 7, img_count: 4, buf_begin: 9, buf_count: 1 }, // [9] "vb_resolve"
-    PassBarrierRange { img_begin: 11, img_count: 1, buf_begin: 10, buf_count: 0 }, // [10] "present_sample"
+    PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 5 }, // [6] "vb_batch_cull"
+    PassBarrierRange { img_begin: 3, img_count: 2, buf_begin: 6, buf_count: 3 }, // [7] "vb_raster"
+    PassBarrierRange { img_begin: 5, img_count: 0, buf_begin: 9, buf_count: 4 }, // [8] "vb_cull_late"
+    PassBarrierRange { img_begin: 5, img_count: 2, buf_begin: 13, buf_count: 1 }, // [9] "vb_raster_late"
+    PassBarrierRange { img_begin: 7, img_count: 4, buf_begin: 14, buf_count: 1 }, // [10] "vb_resolve"
+    PassBarrierRange { img_begin: 11, img_count: 1, buf_begin: 15, buf_count: 0 }, // [11] "present_sample"
 ];
 
 /// S2's image baseline — see [`S1_EXPECTED_IMG`].
@@ -2535,7 +2901,17 @@ const S2_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(1), // [3] "vb_id"
+        res: ResId(14), // [3] "hzb_pyramid"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 10, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(1), // [4] "vb_id"
         src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
         dst_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         src_access: 0,
@@ -2545,7 +2921,7 @@ const S2_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(2), // [4] "vb_depth"
+        res: ResId(2), // [5] "vb_depth"
         src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
         dst_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
         src_access: 0,
@@ -2555,7 +2931,7 @@ const S2_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(2), // [5] "vb_depth"
+        res: ResId(2), // [6] "vb_depth"
         src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
@@ -2565,17 +2941,17 @@ const S2_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(14), // [6] "hzb_pyramid"
+        res: ResId(14), // [7] "hzb_pyramid"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        src_access: 0,
         dst_access: VK_ACCESS_SHADER_WRITE_BIT,
         old_layout: VK_IMAGE_LAYOUT_GENERAL,
         new_layout: VK_IMAGE_LAYOUT_GENERAL,
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 6, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(14), // [7] "hzb_pyramid"
+        res: ResId(14), // [8] "hzb_pyramid"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
@@ -2585,17 +2961,37 @@ const S2_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 5, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(14), // [8] "hzb_pyramid"
+        res: ResId(14), // [9] "hzb_pyramid"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        src_access: 0,
         dst_access: VK_ACCESS_SHADER_WRITE_BIT,
         old_layout: VK_IMAGE_LAYOUT_GENERAL,
         new_layout: VK_IMAGE_LAYOUT_GENERAL,
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 6, mip_count: 4, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(1), // [9] "vb_id"
+        res: ResId(14), // [10] "hzb_pyramid"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 5, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(14), // [11] "hzb_pyramid"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 6, mip_count: 4, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(1), // [12] "vb_id"
         src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         dst_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
@@ -2605,7 +3001,7 @@ const S2_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(2), // [10] "vb_depth"
+        res: ResId(2), // [13] "vb_depth"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
         src_access: 0,
@@ -2615,7 +3011,7 @@ const S2_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(1), // [11] "vb_id"
+        res: ResId(1), // [14] "vb_id"
         src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
@@ -2625,7 +3021,7 @@ const S2_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(0), // [12] "lit"
+        res: ResId(0), // [15] "lit"
         src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
@@ -2635,7 +3031,7 @@ const S2_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(3), // [13] "cascade"
+        res: ResId(3), // [16] "cascade"
         src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
@@ -2645,7 +3041,7 @@ const S2_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 4 },
     },
     ImgBarrier {
-        res: ResId(4), // [14] "atlas"
+        res: ResId(4), // [17] "atlas"
         src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
@@ -2655,7 +3051,7 @@ const S2_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 16 },
     },
     ImgBarrier {
-        res: ResId(0), // [15] "lit"
+        res: ResId(0), // [18] "lit"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
@@ -2703,35 +3099,70 @@ const S2_EXPECTED_BUF: &[BufBarrier] = &[
         dst_access: VK_ACCESS_SHADER_READ_BIT,
     },
     BufBarrier {
-        res: ResId(23), // [5] "vb_indirect"
+        res: ResId(31), // [5] "vb_cull_uniform"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(23), // [6] "vb_indirect"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
     },
     BufBarrier {
-        res: ResId(16), // [6] "vb_instance_ring"
+        res: ResId(16), // [7] "vb_instance_ring"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
         src_access: 0,
         dst_access: VK_ACCESS_SHADER_READ_BIT,
     },
     BufBarrier {
-        res: ResId(27), // [7] "vb_visible_instance"
+        res: ResId(27), // [8] "vb_visible_instance"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_SHADER_READ_BIT,
     },
     BufBarrier {
-        res: ResId(28), // [8] "vb_indirect_late"
+        res: ResId(30), // [9] "vb_late_count"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(29), // [10] "vb_late_visible"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(29), // [11] "vb_late_visible"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+    },
+    BufBarrier {
+        res: ResId(28), // [12] "vb_indirect_late"
         src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
-        dst_stage: VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+    },
+    BufBarrier {
+        res: ResId(28), // [13] "vb_indirect_late"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
     },
     BufBarrier {
-        res: ResId(15), // [9] "light_table"
+        res: ResId(15), // [14] "light_table"
         src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -2746,13 +3177,14 @@ const S2_EXPECTED_PASS: &[PassBarrierRange] = &[
     PassBarrierRange { img_begin: 2, img_count: 1, buf_begin: 1, buf_count: 0 }, // [3] "vb_sky"
     PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 0 }, // [4] "vb_indirect_upload"
     PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 0 }, // [5] "vb_indirect_late_upload"
-    PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 4 }, // [6] "vb_batch_cull"
-    PassBarrierRange { img_begin: 3, img_count: 2, buf_begin: 5, buf_count: 3 }, // [7] "vb_raster"
-    PassBarrierRange { img_begin: 5, img_count: 2, buf_begin: 8, buf_count: 0 }, // [8] "hzb_build_0"
-    PassBarrierRange { img_begin: 7, img_count: 2, buf_begin: 8, buf_count: 0 }, // [9] "hzb_build_1"
-    PassBarrierRange { img_begin: 9, img_count: 2, buf_begin: 8, buf_count: 1 }, // [10] "vb_raster_late"
-    PassBarrierRange { img_begin: 11, img_count: 4, buf_begin: 9, buf_count: 1 }, // [11] "vb_resolve"
-    PassBarrierRange { img_begin: 15, img_count: 1, buf_begin: 10, buf_count: 0 }, // [12] "present_sample"
+    PassBarrierRange { img_begin: 3, img_count: 1, buf_begin: 1, buf_count: 5 }, // [6] "vb_batch_cull"
+    PassBarrierRange { img_begin: 4, img_count: 2, buf_begin: 6, buf_count: 3 }, // [7] "vb_raster"
+    PassBarrierRange { img_begin: 6, img_count: 2, buf_begin: 9, buf_count: 0 }, // [8] "hzb_build_0"
+    PassBarrierRange { img_begin: 8, img_count: 2, buf_begin: 9, buf_count: 0 }, // [9] "hzb_build_1"
+    PassBarrierRange { img_begin: 10, img_count: 2, buf_begin: 9, buf_count: 4 }, // [10] "vb_cull_late"
+    PassBarrierRange { img_begin: 12, img_count: 2, buf_begin: 13, buf_count: 1 }, // [11] "vb_raster_late"
+    PassBarrierRange { img_begin: 14, img_count: 4, buf_begin: 14, buf_count: 1 }, // [12] "vb_resolve"
+    PassBarrierRange { img_begin: 18, img_count: 1, buf_begin: 15, buf_count: 0 }, // [13] "present_sample"
 ];
 
 /// S3's image baseline — see [`S1_EXPECTED_IMG`].
@@ -2788,7 +3220,17 @@ const S3_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(1), // [3] "vb_id"
+        res: ResId(14), // [3] "hzb_pyramid"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 10, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(1), // [4] "vb_id"
         src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
         dst_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         src_access: 0,
@@ -2798,7 +3240,7 @@ const S3_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(2), // [4] "vb_depth"
+        res: ResId(2), // [5] "vb_depth"
         src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
         dst_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
         src_access: 0,
@@ -2808,17 +3250,17 @@ const S3_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(14), // [5] "hzb_pyramid"
+        res: ResId(14), // [6] "hzb_pyramid"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
-        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        src_access: 0,
         dst_access: VK_ACCESS_TRANSFER_WRITE_BIT,
         old_layout: VK_IMAGE_LAYOUT_GENERAL,
         new_layout: VK_IMAGE_LAYOUT_GENERAL,
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 10, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(2), // [6] "vb_depth"
+        res: ResId(2), // [7] "vb_depth"
         src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
@@ -2828,7 +3270,7 @@ const S3_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(14), // [7] "hzb_pyramid"
+        res: ResId(14), // [8] "hzb_pyramid"
         src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -2838,7 +3280,7 @@ const S3_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 6, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(14), // [8] "hzb_pyramid"
+        res: ResId(14), // [9] "hzb_pyramid"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
@@ -2848,7 +3290,7 @@ const S3_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 5, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(14), // [9] "hzb_pyramid"
+        res: ResId(14), // [10] "hzb_pyramid"
         src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -2858,7 +3300,27 @@ const S3_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 6, mip_count: 4, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(1), // [10] "vb_id"
+        res: ResId(14), // [11] "hzb_pyramid"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 5, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(14), // [12] "hzb_pyramid"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 6, mip_count: 4, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(1), // [13] "vb_id"
         src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         dst_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
@@ -2868,7 +3330,7 @@ const S3_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(2), // [11] "vb_depth"
+        res: ResId(2), // [14] "vb_depth"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
         src_access: 0,
@@ -2878,7 +3340,7 @@ const S3_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(1), // [12] "vb_id"
+        res: ResId(1), // [15] "vb_id"
         src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
@@ -2888,7 +3350,7 @@ const S3_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(0), // [13] "lit"
+        res: ResId(0), // [16] "lit"
         src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
@@ -2898,7 +3360,7 @@ const S3_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(3), // [14] "cascade"
+        res: ResId(3), // [17] "cascade"
         src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
@@ -2908,7 +3370,7 @@ const S3_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 4 },
     },
     ImgBarrier {
-        res: ResId(4), // [15] "atlas"
+        res: ResId(4), // [18] "atlas"
         src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
@@ -2918,7 +3380,7 @@ const S3_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 16 },
     },
     ImgBarrier {
-        res: ResId(0), // [16] "lit"
+        res: ResId(0), // [19] "lit"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
@@ -2928,7 +3390,7 @@ const S3_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(2), // [17] "vb_depth"
+        res: ResId(2), // [20] "vb_depth"
         src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
         dst_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
         src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
@@ -2938,34 +3400,14 @@ const S3_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(14), // [18] "hzb_pyramid"
-        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        dst_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
-        src_access: VK_ACCESS_SHADER_WRITE_BIT,
-        dst_access: VK_ACCESS_TRANSFER_READ_BIT,
-        old_layout: VK_IMAGE_LAYOUT_GENERAL,
-        new_layout: VK_IMAGE_LAYOUT_GENERAL,
-        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 5, base_layer: 0, layer_count: 1 },
-    },
-    ImgBarrier {
-        res: ResId(14), // [19] "hzb_pyramid"
+        res: ResId(14), // [21] "hzb_pyramid"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
         src_access: 0,
         dst_access: VK_ACCESS_TRANSFER_READ_BIT,
         old_layout: VK_IMAGE_LAYOUT_GENERAL,
         new_layout: VK_IMAGE_LAYOUT_GENERAL,
-        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 5, mip_count: 1, base_layer: 0, layer_count: 1 },
-    },
-    ImgBarrier {
-        res: ResId(14), // [20] "hzb_pyramid"
-        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        dst_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
-        src_access: VK_ACCESS_SHADER_WRITE_BIT,
-        dst_access: VK_ACCESS_TRANSFER_READ_BIT,
-        old_layout: VK_IMAGE_LAYOUT_GENERAL,
-        new_layout: VK_IMAGE_LAYOUT_GENERAL,
-        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 6, mip_count: 4, base_layer: 0, layer_count: 1 },
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 10, base_layer: 0, layer_count: 1 },
     },
 ];
 /// S3's buffer baseline — see [`S1_EXPECTED_IMG`].
@@ -3006,35 +3448,70 @@ const S3_EXPECTED_BUF: &[BufBarrier] = &[
         dst_access: VK_ACCESS_SHADER_READ_BIT,
     },
     BufBarrier {
-        res: ResId(23), // [5] "vb_indirect"
+        res: ResId(31), // [5] "vb_cull_uniform"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(23), // [6] "vb_indirect"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
     },
     BufBarrier {
-        res: ResId(16), // [6] "vb_instance_ring"
+        res: ResId(16), // [7] "vb_instance_ring"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
         src_access: 0,
         dst_access: VK_ACCESS_SHADER_READ_BIT,
     },
     BufBarrier {
-        res: ResId(27), // [7] "vb_visible_instance"
+        res: ResId(27), // [8] "vb_visible_instance"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_SHADER_READ_BIT,
     },
     BufBarrier {
-        res: ResId(28), // [8] "vb_indirect_late"
+        res: ResId(30), // [9] "vb_late_count"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(29), // [10] "vb_late_visible"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(29), // [11] "vb_late_visible"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+    },
+    BufBarrier {
+        res: ResId(28), // [12] "vb_indirect_late"
         src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
-        dst_stage: VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+    },
+    BufBarrier {
+        res: ResId(28), // [13] "vb_indirect_late"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
     },
     BufBarrier {
-        res: ResId(15), // [9] "light_table"
+        res: ResId(15), // [14] "light_table"
         src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -3049,15 +3526,16 @@ const S3_EXPECTED_PASS: &[PassBarrierRange] = &[
     PassBarrierRange { img_begin: 2, img_count: 1, buf_begin: 1, buf_count: 0 }, // [3] "vb_sky"
     PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 0 }, // [4] "vb_indirect_upload"
     PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 0 }, // [5] "vb_indirect_late_upload"
-    PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 4 }, // [6] "vb_batch_cull"
-    PassBarrierRange { img_begin: 3, img_count: 2, buf_begin: 5, buf_count: 3 }, // [7] "vb_raster"
-    PassBarrierRange { img_begin: 5, img_count: 1, buf_begin: 8, buf_count: 0 }, // [8] "hzb_poison"
-    PassBarrierRange { img_begin: 6, img_count: 2, buf_begin: 8, buf_count: 0 }, // [9] "hzb_build_0"
-    PassBarrierRange { img_begin: 8, img_count: 2, buf_begin: 8, buf_count: 0 }, // [10] "hzb_build_1"
-    PassBarrierRange { img_begin: 10, img_count: 2, buf_begin: 8, buf_count: 1 }, // [11] "vb_raster_late"
-    PassBarrierRange { img_begin: 12, img_count: 4, buf_begin: 9, buf_count: 1 }, // [12] "vb_resolve"
-    PassBarrierRange { img_begin: 16, img_count: 1, buf_begin: 10, buf_count: 0 }, // [13] "present_sample"
-    PassBarrierRange { img_begin: 17, img_count: 4, buf_begin: 10, buf_count: 0 }, // [14] "hzb_dump"
+    PassBarrierRange { img_begin: 3, img_count: 1, buf_begin: 1, buf_count: 5 }, // [6] "vb_batch_cull"
+    PassBarrierRange { img_begin: 4, img_count: 2, buf_begin: 6, buf_count: 3 }, // [7] "vb_raster"
+    PassBarrierRange { img_begin: 6, img_count: 1, buf_begin: 9, buf_count: 0 }, // [8] "hzb_poison"
+    PassBarrierRange { img_begin: 7, img_count: 2, buf_begin: 9, buf_count: 0 }, // [9] "hzb_build_0"
+    PassBarrierRange { img_begin: 9, img_count: 2, buf_begin: 9, buf_count: 0 }, // [10] "hzb_build_1"
+    PassBarrierRange { img_begin: 11, img_count: 2, buf_begin: 9, buf_count: 4 }, // [11] "vb_cull_late"
+    PassBarrierRange { img_begin: 13, img_count: 2, buf_begin: 13, buf_count: 1 }, // [12] "vb_raster_late"
+    PassBarrierRange { img_begin: 15, img_count: 4, buf_begin: 14, buf_count: 1 }, // [13] "vb_resolve"
+    PassBarrierRange { img_begin: 19, img_count: 1, buf_begin: 15, buf_count: 0 }, // [14] "present_sample"
+    PassBarrierRange { img_begin: 20, img_count: 2, buf_begin: 15, buf_count: 0 }, // [15] "hzb_dump"
 ];
 
 /// S4's image baseline — see [`S1_EXPECTED_IMG`].
@@ -3093,7 +3571,17 @@ const S4_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(1), // [3] "vb_id"
+        res: ResId(14), // [3] "hzb_pyramid"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 10, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(1), // [4] "vb_id"
         src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
         dst_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         src_access: 0,
@@ -3103,7 +3591,7 @@ const S4_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(2), // [4] "vb_depth"
+        res: ResId(2), // [5] "vb_depth"
         src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
         dst_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
         src_access: 0,
@@ -3113,7 +3601,7 @@ const S4_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(2), // [5] "vb_depth"
+        res: ResId(2), // [6] "vb_depth"
         src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
@@ -3123,17 +3611,17 @@ const S4_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(14), // [6] "hzb_pyramid"
+        res: ResId(14), // [7] "hzb_pyramid"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        src_access: 0,
         dst_access: VK_ACCESS_SHADER_WRITE_BIT,
         old_layout: VK_IMAGE_LAYOUT_GENERAL,
         new_layout: VK_IMAGE_LAYOUT_GENERAL,
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 6, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(14), // [7] "hzb_pyramid"
+        res: ResId(14), // [8] "hzb_pyramid"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
@@ -3143,17 +3631,37 @@ const S4_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 5, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(14), // [8] "hzb_pyramid"
+        res: ResId(14), // [9] "hzb_pyramid"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        src_access: 0,
         dst_access: VK_ACCESS_SHADER_WRITE_BIT,
         old_layout: VK_IMAGE_LAYOUT_GENERAL,
         new_layout: VK_IMAGE_LAYOUT_GENERAL,
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 6, mip_count: 4, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(1), // [9] "vb_id"
+        res: ResId(14), // [10] "hzb_pyramid"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 5, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(14), // [11] "hzb_pyramid"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+        old_layout: VK_IMAGE_LAYOUT_GENERAL,
+        new_layout: VK_IMAGE_LAYOUT_GENERAL,
+        subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 6, mip_count: 4, base_layer: 0, layer_count: 1 },
+    },
+    ImgBarrier {
+        res: ResId(1), // [12] "vb_id"
         src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         dst_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
@@ -3163,7 +3671,7 @@ const S4_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(2), // [10] "vb_depth"
+        res: ResId(2), // [13] "vb_depth"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
         src_access: 0,
@@ -3173,7 +3681,7 @@ const S4_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(2), // [11] "vb_depth"
+        res: ResId(2), // [14] "vb_depth"
         src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
@@ -3183,7 +3691,7 @@ const S4_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(5), // [12] "viewt"
+        res: ResId(5), // [15] "viewt"
         src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: 0,
@@ -3193,7 +3701,7 @@ const S4_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(1), // [13] "vb_id"
+        res: ResId(1), // [16] "vb_id"
         src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
@@ -3203,7 +3711,7 @@ const S4_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(8), // [14] "thin_normal"
+        res: ResId(8), // [17] "thin_normal"
         src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: 0,
@@ -3213,7 +3721,7 @@ const S4_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(8), // [15] "thin_normal"
+        res: ResId(8), // [18] "thin_normal"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
@@ -3223,7 +3731,7 @@ const S4_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(5), // [16] "viewt"
+        res: ResId(5), // [19] "viewt"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
@@ -3233,7 +3741,7 @@ const S4_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(9), // [17] "ssao"
+        res: ResId(9), // [20] "ssao"
         src_stage: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: 0,
@@ -3243,7 +3751,7 @@ const S4_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(0), // [18] "lit"
+        res: ResId(0), // [21] "lit"
         src_stage: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
@@ -3253,7 +3761,7 @@ const S4_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(3), // [19] "cascade"
+        res: ResId(3), // [22] "cascade"
         src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
@@ -3263,7 +3771,7 @@ const S4_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 4 },
     },
     ImgBarrier {
-        res: ResId(4), // [20] "atlas"
+        res: ResId(4), // [23] "atlas"
         src_stage: VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
@@ -3273,7 +3781,7 @@ const S4_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_DEPTH_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 16 },
     },
     ImgBarrier {
-        res: ResId(9), // [21] "ssao"
+        res: ResId(9), // [24] "ssao"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
@@ -3283,7 +3791,7 @@ const S4_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(0), // [22] "lit"
+        res: ResId(0), // [25] "lit"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
@@ -3293,7 +3801,7 @@ const S4_EXPECTED_IMG: &[ImgBarrier] = &[
         subresource: SubRange { aspect: VK_IMAGE_ASPECT_COLOR_BIT, base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
     },
     ImgBarrier {
-        res: ResId(0), // [23] "lit"
+        res: ResId(0), // [26] "lit"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
@@ -3341,35 +3849,70 @@ const S4_EXPECTED_BUF: &[BufBarrier] = &[
         dst_access: VK_ACCESS_SHADER_READ_BIT,
     },
     BufBarrier {
-        res: ResId(23), // [5] "vb_indirect"
+        res: ResId(31), // [5] "vb_cull_uniform"
+        src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(23), // [6] "vb_indirect"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
     },
     BufBarrier {
-        res: ResId(16), // [6] "vb_instance_ring"
+        res: ResId(16), // [7] "vb_instance_ring"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
         src_access: 0,
         dst_access: VK_ACCESS_SHADER_READ_BIT,
     },
     BufBarrier {
-        res: ResId(27), // [7] "vb_visible_instance"
+        res: ResId(27), // [8] "vb_visible_instance"
         src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         dst_stage: VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
         src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_SHADER_READ_BIT,
     },
     BufBarrier {
-        res: ResId(28), // [8] "vb_indirect_late"
+        res: ResId(30), // [9] "vb_late_count"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(29), // [10] "vb_late_visible"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_READ_BIT,
+    },
+    BufBarrier {
+        res: ResId(29), // [11] "vb_late_visible"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        src_access: 0,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+    },
+    BufBarrier {
+        res: ResId(28), // [12] "vb_indirect_late"
         src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
-        dst_stage: VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+        dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
+        dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+    },
+    BufBarrier {
+        res: ResId(28), // [13] "vb_indirect_late"
+        src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+        src_access: VK_ACCESS_SHADER_WRITE_BIT,
         dst_access: VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
     },
     BufBarrier {
-        res: ResId(15), // [9] "light_table"
+        res: ResId(15), // [14] "light_table"
         src_stage: VK_PIPELINE_STAGE_TRANSFER_BIT,
         dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         src_access: VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -3384,17 +3927,18 @@ const S4_EXPECTED_PASS: &[PassBarrierRange] = &[
     PassBarrierRange { img_begin: 2, img_count: 1, buf_begin: 1, buf_count: 0 }, // [3] "vb_sky"
     PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 0 }, // [4] "vb_indirect_upload"
     PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 0 }, // [5] "vb_indirect_late_upload"
-    PassBarrierRange { img_begin: 3, img_count: 0, buf_begin: 1, buf_count: 4 }, // [6] "vb_batch_cull"
-    PassBarrierRange { img_begin: 3, img_count: 2, buf_begin: 5, buf_count: 3 }, // [7] "vb_raster"
-    PassBarrierRange { img_begin: 5, img_count: 2, buf_begin: 8, buf_count: 0 }, // [8] "hzb_build_0"
-    PassBarrierRange { img_begin: 7, img_count: 2, buf_begin: 8, buf_count: 0 }, // [9] "hzb_build_1"
-    PassBarrierRange { img_begin: 9, img_count: 2, buf_begin: 8, buf_count: 1 }, // [10] "vb_raster_late"
-    PassBarrierRange { img_begin: 11, img_count: 2, buf_begin: 9, buf_count: 0 }, // [11] "vb_viewt"
-    PassBarrierRange { img_begin: 13, img_count: 2, buf_begin: 9, buf_count: 0 }, // [12] "vb_geo"
-    PassBarrierRange { img_begin: 15, img_count: 3, buf_begin: 9, buf_count: 0 }, // [13] "ssao"
-    PassBarrierRange { img_begin: 18, img_count: 4, buf_begin: 9, buf_count: 1 }, // [14] "vb_shade_split"
-    PassBarrierRange { img_begin: 22, img_count: 1, buf_begin: 10, buf_count: 0 }, // [15] "sdf_forward_march"
-    PassBarrierRange { img_begin: 23, img_count: 1, buf_begin: 10, buf_count: 0 }, // [16] "present_sample"
+    PassBarrierRange { img_begin: 3, img_count: 1, buf_begin: 1, buf_count: 5 }, // [6] "vb_batch_cull"
+    PassBarrierRange { img_begin: 4, img_count: 2, buf_begin: 6, buf_count: 3 }, // [7] "vb_raster"
+    PassBarrierRange { img_begin: 6, img_count: 2, buf_begin: 9, buf_count: 0 }, // [8] "hzb_build_0"
+    PassBarrierRange { img_begin: 8, img_count: 2, buf_begin: 9, buf_count: 0 }, // [9] "hzb_build_1"
+    PassBarrierRange { img_begin: 10, img_count: 2, buf_begin: 9, buf_count: 4 }, // [10] "vb_cull_late"
+    PassBarrierRange { img_begin: 12, img_count: 2, buf_begin: 13, buf_count: 1 }, // [11] "vb_raster_late"
+    PassBarrierRange { img_begin: 14, img_count: 2, buf_begin: 14, buf_count: 0 }, // [12] "vb_viewt"
+    PassBarrierRange { img_begin: 16, img_count: 2, buf_begin: 14, buf_count: 0 }, // [13] "vb_geo"
+    PassBarrierRange { img_begin: 18, img_count: 3, buf_begin: 14, buf_count: 0 }, // [14] "ssao"
+    PassBarrierRange { img_begin: 21, img_count: 4, buf_begin: 14, buf_count: 1 }, // [15] "vb_shade_split"
+    PassBarrierRange { img_begin: 25, img_count: 1, buf_begin: 15, buf_count: 0 }, // [16] "sdf_forward_march"
+    PassBarrierRange { img_begin: 26, img_count: 1, buf_begin: 15, buf_count: 0 }, // [17] "present_sample"
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -3605,9 +4149,25 @@ fn pass_divergence_report(f: &VbFrame, actual: &[PassBarrierRange], expected: &[
 ///
 /// Also asserts the one property that separates the two halves of the matrix: `vb_indirect_late`
 /// routes ZERO barriers on an UNSPLIT row (the structural form of "nothing about the split leaks
-/// into the unarmed path") and EXACTLY ONE on a split row. The field values of that one are
-/// [`s1_pins_the_late_boundary_barriers_field_by_field`]'s subject; here only its existence is
-/// claimed, because this is the assertion whose two halves must not be confusable.
+/// into the unarmed path") and, on a split row, the TWO-link chain across its two declared
+/// producers.
+///
+/// # RE-PINNED at VG R3 P3-3, and why the count is no longer the whole assertion
+///
+/// This said *"EXACTLY ONE on a split row … here only its existence is claimed"*. The number moved
+/// because `vb_cull_late` became a second declared producer of the record array (plan D8): the host
+/// upload no longer sources the indirect fetch, the cull does, and the upload now sources the cull.
+/// Two producers, two barriers.
+///
+/// The original claim — *"zero means one of the two halves is undeclared, which is a MISSING
+/// barrier that nothing else on this machine can see"* — is PRESERVED at the new number, because
+/// deleting any one of the three links leaves exactly ONE barrier (a first-touch buffer write emits
+/// none, `framegraph/sync.rs`'s `transition`). What the count can NOT see is an access declared
+/// with the wrong ACCESS MASK: declare the late cull's `vb_indirect_late` access as a
+/// `SHADER_READ` and the count is still two, with `src_access = 0` on the second — an execution-only
+/// edge that orders the stages and flushes nothing. So the four `(stage, access)` pairs are asserted
+/// here as well. They are a restatement of two elements of the whole-stream baseline below, and
+/// they earn it the way every named hazard in this file does: they say WHICH property broke.
 fn assert_row_is_pinned(
     row: VbRow,
     expected_img: &[ImgBarrier],
@@ -3661,15 +4221,58 @@ fn assert_row_is_pinned(
         "configuration {}: the pyramid ResId is named by a pass on an HZB-OFF frame",
         row.id
     );
-    let late_barriers = buf_on(buf, f.vb_indirect_late).len();
+    let late = buf_on(buf, f.vb_indirect_late);
+    let late_barriers = late.len();
     if row.split {
         assert_eq!(
-            late_barriers, 1,
+            late_barriers, 2,
             "configuration {}: `vb_indirect_late` routed {late_barriers} barriers on an ARMED \
-             SPLIT, expected exactly one — `vb_indirect_late_upload`'s TRANSFER write flushed to \
-             `vb_raster_late`'s indirect FETCH. Zero means one of the two halves is undeclared, \
-             which is a MISSING barrier that nothing else on this machine can see.",
+             SPLIT, expected exactly TWO — the links either side of `vb_cull_late`'s COMPUTE write, \
+             which is the second declared producer plan D8 adds to the host upload. ONE means a \
+             link of the chain is undeclared, and each way of getting there is a MISSING barrier: \
+             without `vb_indirect_late_upload`'s TRANSFER write the cull's store is a first touch \
+             and the host fill is never made available; without `vb_cull_late`'s SHADER_WRITE the \
+             fetch is sourced from the host upload and piece 2's obligation 1 is undischarged; \
+             without `vb_raster_late`'s INDIRECT_COMMAND_READ the record array is written and never \
+             ordered against its consumer. ZERO means the whole chain is gone. Nothing else on this \
+             machine can see any of them (P2-0: a genuine missing barrier produced the unchanged \
+             19-message validation baseline and a byte-identical golden).",
             row.id
+        );
+        assert_eq!(
+            (late[0].src_stage, late[0].src_access, late[0].dst_stage, late[0].dst_access),
+            (
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT
+            ),
+            "configuration {}: `vb_indirect_late`'s FIRST barrier must be the host fill flushed to \
+             the late cull's store — `TRANSFER(TRANSFER_WRITE) → COMPUTE_SHADER(SHADER_WRITE)`, the \
+             WAW between the two declared producers. A `dst_access` that is not a WRITE means \
+             `vb_cull_late` declares a READ where it stores `instanceCount`, which keeps the count \
+             at two and is invisible to every other gate.\nGot: {:#?}",
+            row.id,
+            late[0]
+        );
+        assert_eq!(
+            (late[1].src_stage, late[1].src_access, late[1].dst_stage, late[1].dst_access),
+            (
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                VK_ACCESS_INDIRECT_COMMAND_READ_BIT
+            ),
+            "configuration {}: `vb_indirect_late`'s SECOND barrier must be that store made \
+             available to the indirect FETCH — `COMPUTE_SHADER(SHADER_WRITE) → \
+             DRAW_INDIRECT(INDIRECT_COMMAND_READ)`. `src_access = 0` here is the fingerprint of a \
+             producer declared as something other than a write: an execution-only edge that orders \
+             the stages while leaving the `instanceCount` store unflushed, so the fetch may read \
+             the host's `0` and the late scope draws nothing FOREVER. A `src_stage` of TRANSFER \
+             means the cull's write is missing and the fetch fell back to the host upload.\n\
+             Got: {:#?}",
+            row.id,
+            late[1]
         );
     } else {
         assert_eq!(
@@ -3719,8 +4322,8 @@ fn u4_ssao_and_sdf_leg_stream_is_pinned() {
     assert_row_is_pinned(U4, U4_EXPECTED_IMG, U4_EXPECTED_BUF, U4_EXPECTED_PASS);
 }
 
-/// **G4 row S1** — split ON, HZB off, dump off, SSAO off, `VB × Mesh`: the three new barriers at
-/// the late scope's boundary, with nothing else in the frame to hide behind.
+/// **G4 row S1** — split ON, HZB off, dump off, SSAO off, `VB × Mesh`: the new barriers at the late
+/// scope's boundary, with nothing else in the frame to hide behind.
 #[test]
 fn s1_split_boundary_stream_is_pinned() {
     assert_row_is_pinned(S1, S1_EXPECTED_IMG, S1_EXPECTED_BUF, S1_EXPECTED_PASS);
@@ -4251,43 +4854,88 @@ fn u4_pins_the_absent_barriers_on_the_later_depth_readers() {
     );
 }
 
-/// **S1's claim, and it is the load-bearing one of the whole piece.** The THREE barriers at the
-/// late scope's boundary, asserted FIELD BY FIELD.
+/// **S1's claim, and it is the load-bearing one of the whole piece.** The barriers at the late
+/// scope's boundary, asserted FIELD BY FIELD.
 ///
-/// ⚠️ **The count of three is not the claim, and asserting it would certify the defect.** The
-/// read-declared/write-undeclared variant of `vb_indirect_late` yields three as well, differing
-/// only in `src_stage` / `src_access` — round 1 specified this gate as a count, which would have
-/// gone RED on the correct implementation and GREEN on the defective one.
-/// [`a_dropped_late_upload_write_keeps_the_count_and_moves_only_fields`] demonstrates exactly that
-/// on this replica.
+/// ⚠️ **A bare count is not the claim, and asserting only a count would certify the defect.** An
+/// access declared with the wrong mask — a READ where the chain needs a WRITE — yields the same
+/// count, differing only in `src_stage` / `src_access`. Round 1 specified this gate as a count,
+/// which would have gone RED on the correct implementation and GREEN on the defective one.
+///
+/// # RE-PINNED at VG R3 P3-3, and the ONE claim that had to be replaced rather than renumbered
+///
+/// This asserted `vb_indirect_late`'s `TRANSFER(TRANSFER_WRITE) →
+/// DRAW_INDIRECT(INDIRECT_COMMAND_READ)` edge — the host upload flushed straight to the fetch.
+/// **That edge no longer exists.** `vb_cull_late` writes the record array (plan D8), so the fetch is
+/// sourced from the CULL and the upload is sourced to the cull; one barrier became two and neither
+/// is the one this test named.
+///
+/// **What the successor catches, and why the first link is the sharper of the two.** After P3-3 the
+/// upload→cull WAW is the ONLY place in the entire derived stream where `vb_indirect_late_upload`'s
+/// existence is observable at all: delete that declaration and the fetch is still correctly sourced
+/// from the cull, so a gate that looked only at the fetch would be GREEN while the host fill of the
+/// four record words the cull does not write (`indexCount`, `firstIndex`, `vertexOffset`,
+/// `firstInstance`) is neither available to the fetch nor ordered against the cull's own store —
+/// which can therefore be clobbered by a `vkCmdUpdateBuffer` that has not yet run. That is
+/// [`a_dropped_late_upload_write_deletes_the_upload_to_cull_waw`]'s subject, measured on this
+/// replica.
+///
+/// ⚠️ **Weaker in one way, stated:** the old assertion's `(TOP_OF_PIPE, 0)` fingerprint proved "no
+/// producer was declared at all". The first link's source can no longer take that value on a
+/// well-formed frame — the upload is the buffer's first touch, so an undeclared upload deletes the
+/// barrier instead of corrupting it. The count assertion above is what carries that half now.
 ///
 /// The two attachment WAWs are asserted **not to come from `UNDEFINED`**, because a first touch
 /// there would license the driver to DISCARD what the early scope wrote — which is the equivalence
-/// (`LOAD_OP_LOAD` yields what the early scope stored) the whole piece rests on.
+/// (`LOAD_OP_LOAD` yields what the early scope stored) the whole piece rests on. P3-3 moves neither.
 #[test]
 fn s1_pins_the_late_boundary_barriers_field_by_field() {
     let f = declare_vb_frame(S1);
     let img = f.g.img_barriers();
     let buf = f.g.buf_barriers();
 
+    let late = buf_on(buf, f.vb_indirect_late);
+    assert_eq!(
+        late.len(),
+        2,
+        "the late record array carries exactly TWO barriers on a split frame — one per declared \
+         producer boundary. A count of one means a link is undeclared; see \
+         `assert_row_is_pinned` for which deletion yields which.\nGot: {late:#?}"
+    );
     assert!(
         has_buf(
             buf,
             f.vb_indirect_late,
             VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+        ),
+        "the late record array's TRANSFER_WRITE → SHADER_WRITE edge is missing. This is the ONLY \
+         barrier in the whole frame that records that `vb_indirect_late_upload` exists: after P3-3 \
+         the indirect fetch is sourced from `vb_cull_late`, so dropping the upload's declaration \
+         leaves the fetch looking healthy while the host's `vkCmdUpdateBuffer` fill of the four \
+         record words the cull does NOT write is neither ordered against the cull's store nor made \
+         available to the fetch — on frame 1, against freshly allocated device memory, with \
+         `robustBufferAccess` OFF. Nothing else in this repository can see that: it changes no \
+         pixel and emits no validation message (measured — the plan's P2-0 table).\n\
+         Got: {late:#?}"
+    );
+    assert!(
+        has_buf(
+            buf,
+            f.vb_indirect_late,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
             VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
         ),
-        "the late record array's TRANSFER_WRITE → INDIRECT_COMMAND_READ edge is missing or \
-         mis-sourced. `(TOP_OF_PIPE, 0)` here is the fingerprint of an UNDECLARED writer: the \
-         `vkCmdUpdateBuffer` fill would be neither available nor visible to the indirect fetch, \
-         and on frame 1 the scope that must draw NOTHING would fetch freshly allocated device \
-         memory — arbitrary `instanceCount`, arbitrary `firstInstance`, `robustBufferAccess` OFF. \
-         Nothing else in this repository can see that: it changes no pixel and emits no \
-         validation message (measured — the plan's P2-0 table).\n\
-         Got: {:#?}",
-        buf_on(buf, f.vb_indirect_late)
+        "the late record array's SHADER_WRITE → INDIRECT_COMMAND_READ edge is missing or \
+         mis-sourced. A `src_stage` of TRANSFER means `vb_cull_late`'s store of `instanceCount` is \
+         undeclared and the fetch still hangs off the host upload — piece 2's obligation 1 \
+         undischarged, and the barrier COUNT is unchanged by it. A `src_access` of 0 means the cull \
+         declares a non-write access: the stages are ordered and the store is never flushed.\n\
+         Got: {late:#?}"
     );
 
     let id = img_on(img, f.vb_id);
@@ -4356,19 +5004,78 @@ fn s1_pins_the_late_boundary_barriers_field_by_field() {
 /// seed's pending cross-frame write, `old_layout` is the layout the image already holds. The
 /// `GENERAL`-from-birth premise is made true by `HzbTargets::boot_clear_hzb_pyramid`, a real
 /// encoder + submit + fence that clears every mip once per targets generation before any frame is
-/// recorded. `dst_*`, `new_layout`, the subresource span and the position are unmoved.
+/// recorded.
 ///
-/// **The claim the tail assertion makes is unchanged in substance and still load-bearing**: the
-/// poison+build block moved WHOLE, so `hzb_build_0` is still the first pyramid writer, its six
-/// mips are still all in one state, and they must still MERGE into ONE barrier over `[0, 6)`. Only
-/// the state they are all in has a name now. It reds on: an unmerged chain (six single-mip
-/// barriers, none carrying `mip_count == 6`), a block that moved without its clear, a re-based
-/// span, and a lost seed — `(TOP_OF_PIPE, 0, UNDEFINED)` would leave this frame's first pyramid
-/// write unordered against the sibling in-flight frame's, on a NON-RINGED image, with a licensed
-/// content discard on top.
+/// P3-0's tail assertion said `hzb_build_0` was still the first pyramid writer and that the seed
+/// was therefore what sourced ITS write. The seed still sources the frame's first pyramid access —
+/// but on a SPLIT row that access is no longer the build. See the next section, which re-pins it.
 ///
-/// ⚠️ Weaker in the one way `u2`'s doc spells out: `UNDEFINED` proved "untouched this frame",
-/// `GENERAL → GENERAL` does not.
+/// # RE-PINNED AGAIN at VG R3 P3-3 — the build's first write is a WAR now, and the seed is carried
+/// by the barrier AHEAD of it
+///
+/// P3-3 gave the EARLY cull a declared READ of the whole pyramid, gated on `split &&
+/// hzb_levels.is_some()`. It DECLARES the early predicate's INPUT — the pyramid **as the previous
+/// frame left it**, before this frame's build overwrites it (plan D1) — so on a split row it, and
+/// not `hzb_build_0`, is the frame's first pyramid access. Two consequences, and plan D2's hazard
+/// table predicts both by name:
+///
+/// * The **cross-frame RAW** — frame N's last `hzb_build_*` write → frame N+1's early cull read —
+///   is discharged AT THAT READ. It is the barrier that carries the seed now:
+///   `(COMPUTE, SHADER_WRITE) → (COMPUTE, SHADER_READ)`, `GENERAL → GENERAL`, over all ten mips in
+///   ONE run.
+/// * `hzb_build_0`'s write then finds `flush_access == 0` (the read cleared it) and
+///   `visible_stages == COMPUTE`, so `sync::transition` takes its **WAR** arm (`sync.rs:376-379`)
+///   and derives an EXECUTION-only dependency: `src_access` is `0` BY DESIGN, because a read has
+///   no memory to make available. This is the barrier D2 argues the cross-frame WAR away with —
+///   frame N's late-cull read → frame N+1's pyramid write is "subsumed", it says, because frame
+///   N+1 derives an intra-frame WAR against its OWN `vb_batch_cull` read and a barrier recorded
+///   outside a render pass orders against everything earlier in submission order on the single
+///   queue. That barrier is this one, and here it is observed rather than argued.
+///
+/// **The MERGE survives, and is now asserted on a wider span as well.** The build's six mips are
+/// all in ONE state — the state the early read left them in — and still fold into ONE barrier over
+/// `[0, 6)`; the early read's ten fold into one over `[0, 10)`. Unfolded, this row's pyramid would
+/// carry 10 + 6 + 1 + 4 + 9 = 30 barriers instead of SIX, so the census below is a second,
+/// independent statement of the same P1-5a property.
+///
+/// # What the two re-pinned assertions catch
+///
+/// * **A lost or reverted seed** — `(TOP_OF_PIPE, 0, UNDEFINED → GENERAL)` on the early read. On a
+///   split row that read is the first access, so it is the ONLY access the seed can source, and
+///   this is where the D2 claim lives here.
+/// * **A DROPPED early pyramid read** — the declaration disappearing, or being re-gated off the
+///   split. Both assertions red on it: the census falls to five, and the build's write reverts to
+///   the seed FLUSH the unsplit rows carry.
+/// * **A broken merge**, on both halves — the run's own `mip_count` and the census.
+/// * **A re-based or narrowed span**, on either the read or the build.
+/// * **The two ordered the wrong way round** — which is why they are asserted BY POSITION. D1's
+///   whole premise is that the early predicate sees the PREVIOUS frame's pyramid.
+///
+/// ⚠️ **What that dropped read would COST is not yet a soundness defect, and saying otherwise
+/// would be a claim about a shader that does not exist.** `vb_batch_cull.comp.hlsl`'s occlusion
+/// leaf lands at step P3-4; today neither phase samples the pyramid, and P3-3 declares the access
+/// AHEAD of its consumer on purpose. So this pair currently gates the DECLARATION — that the graph
+/// models the early phase's input, in the shape D2's cross-frame argument assumes — and becomes a
+/// gate on a live stale-read hazard the moment P3-4 arms the leaf. That is the same order this
+/// file's other P3-3 rows are in, and it is why the pair is worth pinning now rather than after.
+///
+/// # Where this is WEAKER than what it replaced — stated, not left to be discovered
+///
+/// ⚠️ **The build-write assertion no longer sees the seed at all.** Its `src` is derived from THIS
+/// frame's early read, so a seed reverted to `undefined()` leaves it byte-identical and only the
+/// read assertion moves. The unsplit rows keep the old witness
+/// (`u2_pins_the_pyramid_chain_and_the_depth_handoff`), which is why they were left alone: the
+/// early cull declares no pyramid read there, so `hzb_build_0`'s write is still their frame's
+/// first pyramid access and still flushes the seed. (Their IMAGE streams are unmoved by P3-3;
+/// what P3-3 moves on them is one buffer barrier, argued in the module doc.)
+///
+/// ⚠️ `src_access: 0` is CORRECT here but proves less than a flush does: it says only that SOME
+/// prior COMPUTE read of these mips is ordered ahead of the write, not that it was the early
+/// cull's. Nothing else on this row reads them before the build — the census is what says so —
+/// but this line alone does not separate the two.
+///
+/// ⚠️ And still weaker in the one way `u2`'s doc spells out: `UNDEFINED` proved "untouched this
+/// frame", `GENERAL → GENERAL` does not.
 #[test]
 fn s2_pins_the_depth_round_trip_across_the_moved_block() {
     let f = declare_vb_frame(S2);
@@ -4403,29 +5110,69 @@ fn s2_pins_the_depth_round_trip_across_the_moved_block() {
     assert_eq!(depth[2].dst_stage, FRAG);
     assert_eq!(depth[2].dst_access, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
 
-    // The pyramid's own three barriers are unchanged in CONTENT by the move; their POSITION is
-    // what changed, and `pass_barriers()` in the whole-stream pin is what measures that. P3-0's
-    // seed re-sourced them at BOTH slots alike, which is why U2's and S2's pyramid rows stay
-    // field-for-field identical to each other and differ only in where they sit in the stream.
-    assert!(
-        has_img(
-            img,
-            f.hzb_pyramid,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_ACCESS_SHADER_WRITE_BIT,
-            VK_ACCESS_SHADER_WRITE_BIT,
-            VK_IMAGE_LAYOUT_GENERAL,
-            VK_IMAGE_LAYOUT_GENERAL,
-            hzb_mips(0, HZB_LEVELS_PER_PASS),
-        ),
-        "the pyramid's first WRITE must be unchanged by the slot move: the block moved WHOLE, so \
-         `hzb_build_0` is still the first pyramid writer on an undumped frame, and its six mips — \
-         all in the SEED's state — must still MERGE into ONE barrier over [0, 6).\n\
-         Since P3-0 that write flushes the seed's pending cross-frame write rather than being a \
-         first touch; `(TOP_OF_PIPE, 0, UNDEFINED)` here means the seed was lost, which leaves \
-         this frame unordered against the sibling's pyramid write and licenses a content discard \
-         (plan D2)"
+    // ---- The pyramid, RE-PINNED at VG R3 P3-3 — the argument is in this test's doc ------------
+    //
+    // Asserted BY POSITION, because "the early cull's read comes BEFORE this frame's build" IS the
+    // claim: a membership test goes green on a stream that ordered the two the other way round,
+    // and that order is the one plan D1 forbids.
+    let pyr = img_on(img, f.hzb_pyramid);
+    assert_eq!(
+        pyr.len(),
+        6,
+        "an undumped ARMED-SPLIT frame derives SIX pyramid barriers: the early cull's read over the \
+         whole chain, `hzb_build_0`'s merged write over [0, 6), pass 1's RAW over mip 5 ALONE, pass \
+         1's merged write over [6, 10), and the late cull's read — which arrives as TWO runs, \
+         [0, 5) and [6, 10), because mip 5 is already visible to a COMPUTE read from pass 1's own \
+         reduce. This count IS the merge stated as a census: unfolded, the same accesses would \
+         derive 10 + 6 + 1 + 4 + 9 = 30.\nGot: {pyr:#?}"
+    );
+    assert_eq!(
+        *pyr[0],
+        ImgBarrier {
+            res: f.hzb_pyramid,
+            src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            src_access: VK_ACCESS_SHADER_WRITE_BIT,
+            dst_access: VK_ACCESS_SHADER_READ_BIT,
+            old_layout: VK_IMAGE_LAYOUT_GENERAL,
+            new_layout: VK_IMAGE_LAYOUT_GENERAL,
+            subresource: hzb_mips(0, HZB_LEVELS),
+        },
+        "on a split row the EARLY cull's read is the frame's FIRST pyramid access, and it is the \
+         barrier that discharges plan D2's cross-frame RAW: frame N's last `hzb_build_*` write made \
+         AVAILABLE to frame N+1's early predicate, which by D1 tests against the pyramid as the \
+         PREVIOUS frame left it.\n\
+         `(TOP_OF_PIPE, 0, UNDEFINED)` means the SEED was lost — the read is then unordered against \
+         the sibling in-flight frame's still-pipelined write of this NON-RINGED image, with a \
+         licensed content discard on top. A barrier missing here entirely means the read was \
+         DROPPED or re-gated off the split, which leaves the cross-frame RAW discharged at the \
+         BUILD — after the phase that is supposed to consume it. And the ten mips must arrive as \
+         ONE run"
+    );
+    assert_eq!(
+        *pyr[1],
+        ImgBarrier {
+            res: f.hzb_pyramid,
+            src_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            dst_stage: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            src_access: 0,
+            dst_access: VK_ACCESS_SHADER_WRITE_BIT,
+            old_layout: VK_IMAGE_LAYOUT_GENERAL,
+            new_layout: VK_IMAGE_LAYOUT_GENERAL,
+            subresource: hzb_mips(0, HZB_LEVELS_PER_PASS),
+        },
+        "`hzb_build_0`'s write must be a WAR against the read above — an EXECUTION-only dependency, \
+         `src_access = 0`, because a read has nothing to make available. That is how plan D2's \
+         cross-frame WAR is subsumed: this same barrier orders the write after frame N's late-cull \
+         read through single-queue submission order.\n\
+         A `src_access` of SHADER_WRITE here means the frame's first pyramid access is the BUILD \
+         again — the early cull's read is undeclared and the early predicate has no ordered input; \
+         the row has reverted to the unsplit shape \
+         `u2_pins_the_pyramid_chain_and_the_depth_handoff` pins.\n\
+         Its six mips are all left in ONE state by the read above, so they must still MERGE into \
+         ONE barrier over [0, 6) — six single-mip barriers here is the per-mip state machine having \
+         stopped folding, the whole of what P1-5a shipped. GENERAL → GENERAL is layout-PRESERVING: \
+         `UNDEFINED` would license discarding a pyramid that now carries across frames (plan D2)"
     );
 }
 
@@ -4634,34 +5381,51 @@ fn the_dropped_survivor_write_now_trips_the_framegraph_guard() {
     });
 }
 
-/// **G4's R1 red control** (VG R3 piece 2 step P2-6) — the SAME defect class as the control above,
-/// on the resource piece 2 actually adds, and the one the plan names.
+/// **G4's R1 red control** (VG R3 piece 2 step P2-6, RE-PINNED at piece 3 step P3-3) — the defect on
+/// the resource piece 2 adds, and the one the plan names.
 ///
 /// Drop `vb_indirect_late_upload`'s declared `buffer_access(TRANSFER, TRANSFER_WRITE)` while
-/// leaving `vb_raster_late`'s indirect fetch in place. The stream keeps **exactly three barriers at
-/// the late boundary** and keeps every per-pass attribution; only `src_stage`/`src_access` on ONE
-/// buffer barrier move, to `(TOP_OF_PIPE, 0)`.
+/// leaving `vb_raster_late`'s indirect fetch in place.
 ///
-/// That is the whole reason G4 asserts fields: as round 1 specified it — "exactly two/three new
-/// barriers" — this gate would have gone **red on the correct implementation and green on the
-/// defective one**. And when this control was written nothing else on this machine could see the
-/// defect: it changes no pixel (`instanceCount = 0` draws nothing either way), emits no validation
-/// message (measured: a genuine missing barrier produced the unchanged 19-message baseline and no
-/// `SYNC-HAZARD`), and the framegraph's own unwritten-read backstop was image-only (`!is_image ||
-/// ..`) and debug-only by construction.
+/// # The claim INVERTED at P3-3, which is why the name changed with it
 ///
-/// # What VG R3 P2-8 changed, and why this body is now RELEASE-ONLY
+/// This test was `a_dropped_late_upload_write_keeps_the_count_and_moves_only_fields`, and that name
+/// is now false in both halves. While the upload was `vb_indirect_late`'s ONLY declared producer the
+/// drop was the read-declared/write-undeclared class: the fetch fell to the first-touch arm, the
+/// count was preserved and `src_stage`/`src_access` moved to `(TOP_OF_PIPE, 0)`. `vb_cull_late` is
+/// now a second producer (plan D8), and it sits BETWEEN the upload and the fetch, so:
 ///
-/// P2-8 re-cut that backstop on declared PROVENANCE rather than kind, so a bare `add_buffer` with
-/// a declared reader and no declared writer now fires a `debug_assert!` — the corrupt frame below
-/// cannot be compiled in a dev-profile build. The STREAM claim (count gate green, field gate red)
-/// is a statement about the derived barriers and stays pinned here, on the release leg where the
-/// guard is compiled out. The debug leg gets
-/// `the_dropped_late_upload_write_now_trips_the_framegraph_guard` below, which asserts the
-/// stronger property. CI runs both legs.
-#[cfg(not(debug_assertions))]
+/// * the fetch is sourced from the CULL and is **field-identical** with and without the defect — a
+///   gate that inspects the fetch is GREEN on it;
+/// * the cull's store becomes `vb_indirect_late`'s first touch, and a first-touch buffer write emits
+///   NO barrier (`framegraph/sync.rs`'s `transition`), so the upload→cull WAW is simply **deleted**
+///   — the count drops from two to one.
+///
+/// So the discriminators swapped ends: what used to be visible only in fields is now visible only in
+/// the count. Both halves are asserted below in that new order, because the pair is the claim — a
+/// count that moved with unchanged fields is a DELETED barrier, and this file's whole-stream pins
+/// see it as a shifted `PassBarrierRange` rather than as a differing barrier.
+///
+/// # Why this body is no longer RELEASE-ONLY, and what that costs
+///
+/// P2-8 re-cut the framegraph's unwritten-read backstop on declared PROVENANCE, and while the upload
+/// was the sole producer that made this corrupt frame uncompilable in a dev-profile build — hence
+/// the `#[cfg(not(debug_assertions))]` this test carried and the `should_panic` sibling that held
+/// the debug leg. **P3-3 retires that coverage**: the guard tests reads against "was anything
+/// declared to write this before", `vb_cull_late`'s write satisfies it, and the fetch is no longer a
+/// first-touch read. The frame compiles on both legs now, so this test runs on both legs — which is
+/// strictly more coverage than it had, and is also the honest signal that the stronger property is
+/// gone. Nothing replaces it; plan D8 says so in as many words ("after piece 3, `vb_indirect_late`'s
+/// provenance is covered by nothing"), and
+/// [`the_dropped_early_survivor_write_trips_the_guard_through_the_split_read`] takes the vacated
+/// debug-leg slot on a DIFFERENT resource rather than pretending to fill this one.
+///
+/// When this control was first written nothing else on this machine could see the defect, and that
+/// is still true: it changes no pixel (`instanceCount = 0` draws nothing either way) and emits no
+/// validation message (measured: a genuine missing barrier produced the unchanged 19-message
+/// baseline and no `SYNC-HAZARD`).
 #[test]
-fn a_dropped_late_upload_write_keeps_the_count_and_moves_only_fields() {
+fn a_dropped_late_upload_write_deletes_the_upload_to_cull_waw() {
     let faithful = declare_vb_frame(S1);
     let corrupt = declare_vb_frame(VbRow {
         id: "S1 + RED CONTROL R1 (late upload's transfer write undeclared)",
@@ -4672,74 +5436,157 @@ fn a_dropped_late_upload_write_keeps_the_count_and_moves_only_fields() {
     let f_buf = faithful.g.buf_barriers();
     let c_buf = corrupt.g.buf_barriers();
 
-    // (1) A COUNT gate is GREEN on the defect.
+    // The control must isolate ONE buffer declaration.
     assert_eq!(
         faithful.g.img_barriers(),
         corrupt.g.img_barriers(),
-        "the control must isolate ONE buffer declaration; the image stream moving too would mean \
-         it is testing something else"
+        "the image stream moving too would mean this control is testing something else"
+    );
+
+    // (1) A COUNT gate is RED on the defect — the half that used to be green.
+    let faithful_late = buf_on(f_buf, faithful.vb_indirect_late);
+    let corrupt_late = buf_on(c_buf, corrupt.vb_indirect_late);
+    assert_eq!(
+        faithful_late.len(),
+        2,
+        "the correct frame carries the two-link chain across `vb_cull_late`; if it does not, this \
+         control's premise moved and its conclusion means nothing.\nGot: {faithful_late:#?}"
+    );
+    assert_eq!(
+        corrupt_late.len(),
+        1,
+        "with the upload's write undeclared the cull's store is a FIRST TOUCH, which emits no \
+         barrier — so the upload→cull WAW is deleted rather than mis-sourced.\n\
+         Got: {corrupt_late:#?}"
     );
     assert_eq!(
         f_buf.len(),
-        c_buf.len(),
-        "the point of this control is that the defect PRESERVES the barrier count: a first-touch \
-         read emits one barrier exactly as a RAW does"
-    );
-    assert_eq!(
-        faithful.g.pass_barriers(),
-        corrupt.g.pass_barriers(),
-        "per-pass attribution is identical too — the defect moves no barrier to another pass, so a \
-         gate on attribution is green on it as well"
+        c_buf.len() + 1,
+        "exactly one barrier is lost frame-wide: the defect neither adds nor moves any other"
     );
 
-    // (2) A FIELD gate is RED on the defect.
-    let faithful_late = buf_on(f_buf, faithful.vb_indirect_late);
-    let corrupt_late = buf_on(c_buf, corrupt.vb_indirect_late);
-    assert_eq!(faithful_late.len(), 1, "the late record array carries exactly one barrier when correct");
-    assert_eq!(corrupt_late.len(), 1, "…and exactly one when its writer is undeclared — the SAME count");
+    // The deleted barrier is attributed to `vb_cull_late` — derived from the two frames rather than
+    // pinned as a literal, so a change to the late cull's other accesses does not fake this claim.
+    let cull_late = faithful
+        .pass_names
+        .iter()
+        .position(|n| *n == "vb_cull_late")
+        .expect("invariant: a split row declares the late cull");
     assert_eq!(
-        (faithful_late[0].src_stage, faithful_late[0].src_access),
-        (VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT),
-        "correct: the indirect FETCH is a RAW that makes the `vkCmdUpdateBuffer` fill AVAILABLE"
+        faithful.pass_names, corrupt.pass_names,
+        "the control drops an ACCESS, never a pass — the two frames must declare the same passes \
+         or the index below labels different ones"
     );
     assert_eq!(
-        (corrupt_late[0].src_stage, corrupt_late[0].src_access),
-        (VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0),
-        "defective: with no declared writer the fetch takes the first-touch arm — an execution-only \
-         edge that orders the stages while leaving the update neither available nor visible. On \
-         frame 1, against freshly allocated DEVICE_LOCAL memory, the scope this whole piece claims \
-         draws nothing DRAWS"
+        corrupt.g.pass_barriers()[cull_late].buf_count + 1,
+        faithful.g.pass_barriers()[cull_late].buf_count,
+        "the lost barrier belongs to `vb_cull_late`: it is the flush of the host fill INTO the \
+         cull's store, so its absence is a hazard at that pass and not at the raster"
     );
+
+    // (2) A FIELD gate on the surviving barrier is GREEN on the defect — the half that used to be
+    // red, and the reason (1) is not cosmetic.
     assert_eq!(
-        (corrupt_late[0].dst_stage, corrupt_late[0].dst_access),
-        (faithful_late[0].dst_stage, faithful_late[0].dst_access),
-        "the CONSUMER side is unchanged by the defect — which is why only the source fields can \
-         discriminate it"
+        corrupt_late[0], faithful_late[1],
+        "the indirect FETCH's barrier is field-identical with and without the defect, because \
+         `vb_cull_late` sources it either way. Any gate that inspects the fetch — this file's own \
+         predecessor assertion included — is GREEN on a missing host-fill ordering, and the host \
+         fill supplies the four record words the cull does not write"
     );
 }
 
-/// **The DEBUG-leg half of G4's R1 red control** (VG R3 P2-8), and the closing of the P2-7 hole
-/// this whole step exists for.
+/// **The REPLACEMENT for `the_dropped_late_upload_write_now_trips_the_framegraph_guard`**, which VG
+/// R3 P3-3 made unable to fire — and the demonstration that plan D8's read-then-write SPLIT buys the
+/// coverage it is charged for.
 ///
-/// P2-7 EXECUTED exactly this corruption against the PRODUCTION declarator — deleting
-/// `vb_indirect_late_upload`'s declared `buffer_access(vb_indirect_late, TRANSFER,
-/// TRANSFER_WRITE)` in `declare_vb_graph` while the recorder still filled the buffer and
-/// `vb_raster_late` still fetched from it — and measured all four gates GREEN: the
-/// `[vb_occ_split]` golden, the recorder probe, validation, and this very barrier-stream pin
-/// (green because it is a hand-written REPLICA and cannot see the declarator changing shape).
-/// P2-8 makes the framegraph itself reject it: `vb_indirect_late` is a bare `add_buffer`, so a
-/// declared indirect fetch with no declared writer is a `debug_assert!` fire in every dev-profile
-/// run — and every golden run is one (`scripts/golden.ps1` shells a bare `cargo test`).
+/// # Why the test this replaces cannot fire, and why it was not renumbered
 ///
-/// This fixture asserts it on the REPLICA, which is what a `cargo test` can reach; the production
-/// declarator takes the same guard through the same `compile`.
+/// That control dropped `vb_indirect_late_upload`'s TRANSFER write and asserted that `compile`'s
+/// P2-8 provenance guard rejected the frame. The guard fires on a READ of a resource nothing
+/// declared a write to; `vb_raster_late`'s indirect fetch was that read while the upload was the
+/// buffer's only producer. P3-3 gives `vb_indirect_late` a SECOND producer — `vb_cull_late` — which
+/// is declared BEFORE the fetch, so the fetch is no longer a first-touch read and dropping the
+/// upload leaves nothing for the guard to catch. There is no number to change: the property is gone.
+/// Plan D8 states the consequence without softening it — *"after piece 3, `vb_indirect_late`'s
+/// provenance is covered by nothing"* — and the bounded fix (P2-7's `is_write || res_written ||
+/// res_seeded` for both kinds, plus the 14-site `add_buffer` audit) is a framegraph-core change that
+/// piece 3 does not take. The derived-stream half of that control survives, on both legs, at
+/// [`a_dropped_late_upload_write_deletes_the_upload_to_cull_waw`].
+///
+/// # What this replacement catches
+///
+/// Drop `vb_batch_cull`'s declared `buffer_access(vb_late_visible, COMPUTE, SHADER_WRITE)` — the
+/// EARLY phase's write of the candidate list — while leaving `vb_cull_late`'s read of it in place.
+/// `vb_late_visible` is a bare `add_buffer` (the provenance claim: this graph writes it every frame
+/// it is read) and that early write is its first touch, so the late cull's read becomes a
+/// first-touch read and the guard fires, naming both the pass and the buffer.
+///
+/// **This is not the `vb_late_count` control with a different resource.** `vb_cull_late` declares
+/// `vb_late_visible` as TWO calls — `SHADER_READ`, then `SHADER_WRITE` — precisely so the guard can
+/// test the read half, and D8 pays a second self-WAR execution-only edge for it. Under a combined
+/// `SHADER_READ | SHADER_WRITE` the access would be `is_write`, the guard would never test it, and
+/// this control would go GREEN (i.e. fail to panic) while the early producer was undeclared. That
+/// "simplification" is a one-line edit nothing else in this tree would notice, and this is the test
+/// that notices it. `the_dropped_late_count_write_now_trips_the_framegraph_guard` cannot: its
+/// consumer access is a plain read and would be unaffected by the merge.
+///
+/// # What it does NOT catch
+///
+/// Nothing about `vb_indirect_late`. It is a different resource, and the coverage P3-3 retired there
+/// is retired; this control does not restore it and must not be read as doing so. Nor anything about
+/// `declare_vb_graph`: it fires on the REPLICA, which is what a `cargo test` can reach, and P2-7
+/// measured that a replica pin is green when the PRODUCTION declarator loses an access. What makes
+/// the property hold in production is that the real declarator runs the SAME `compile` on the same
+/// declaration shape in every dev-profile run — and every golden run is one.
+///
+/// The `expected` substring names the PASS and the BUFFER, so neither an unrelated panic nor the
+/// same guard firing on a different resource can satisfy this test.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "pass 'vb_cull_late' reads UNWRITTEN transient buffer 'vb_late_visible'")]
+fn the_dropped_early_survivor_write_trips_the_guard_through_the_split_read() {
+    let _ = declare_vb_frame(VbRow {
+        id: "S1 + RED CONTROL (early cull's vb_late_visible write undeclared)",
+        red_control_drop_cull_late_visible_write: true,
+        ..S1
+    });
+}
+
+/// **G-P3-F's F4 red control** (VG R3 piece 3 step P3-3) — the ONE new provenance coverage this
+/// step buys, demonstrated rather than claimed.
+///
+/// Drop `vb_batch_cull`'s declared `buffer_access(vb_late_count, COMPUTE, SHADER_WRITE)` while
+/// leaving `vb_cull_late`'s `SHADER_READ` of it in place. `vb_late_count` is a bare `add_buffer`
+/// (plan D3/D8: it HAS an in-graph producer every frame it is read), and that write is its FIRST
+/// TOUCH, so the read becomes a first-touch read and `compile`'s P2-8 provenance guard fires.
+///
+/// # Why this control, and not one on `vb_late_visible` or `vb_indirect_late`
+///
+/// * `vb_indirect_late`'s first touch is `vb_indirect_late_upload`'s TRANSFER write, and the guard
+///   tests `is_write || res_written` — a WRITE is never tested. After P3-3 the next declaration in
+///   its list is `vb_cull_late`'s write, so **`vb_indirect_late`'s provenance is covered by
+///   nothing**, and that sentence is the plan's own (D8). This control does not close it.
+/// * `vb_late_visible` is covered too, but only BECAUSE `vb_cull_late` declares its read and its
+///   write as TWO calls. Under a combined `SHADER_READ|SHADER_WRITE` the access would be `is_write`
+///   and the read half would never be tested — which is the reason the declarator splits it and
+///   pays a self-WAR edge for the privilege. That sentence was a CLAIM until the P3-3 re-pin gave
+///   it a fixture: [`the_dropped_early_survivor_write_trips_the_guard_through_the_split_read`] is
+///   the one that goes green if the two calls are ever merged, and this control cannot — its
+///   consumer access is a plain read, unaffected by the merge.
+///
+/// # What this control CANNOT claim
+///
+/// Nothing about `declare_vb_graph`. This fires on the REPLICA, which is what a `cargo test` can
+/// reach; what makes the property hold in production is that the real declarator runs the SAME
+/// `compile` on the same declaration shape, in every dev-profile run — and every golden run is one.
+/// P2-7 measured that a replica pin is green when the PRODUCTION declarator loses an access.
 #[cfg(debug_assertions)]
 #[test]
 #[should_panic(expected = "reads UNWRITTEN transient buffer")]
-fn the_dropped_late_upload_write_now_trips_the_framegraph_guard() {
+fn the_dropped_late_count_write_now_trips_the_framegraph_guard() {
     let _ = declare_vb_frame(VbRow {
-        id: "S1 + RED CONTROL R1 (late upload's transfer write undeclared)",
-        red_control_drop_late_upload_write: true,
+        id: "S1 + RED CONTROL F4 (early cull's vb_late_count write undeclared)",
+        red_control_drop_cull_late_count_write: true,
         ..S1
     });
 }
@@ -4826,16 +5673,23 @@ fn the_eight_rows_are_eight_distinct_configurations() {
         "U4 drops `vb_resolve` for the split trio (vb_geo, ssao, vb_shade_split) and adds \
          `vb_viewt` (pre-tail) and `sdf_forward_march` on top of U2"
     );
-    // The split adds EXACTLY TWO passes — `vb_indirect_late_upload` and `vb_raster_late` — to each
-    // row it arms, and MOVES the poison+build block rather than duplicating it. A `+3` or `+4`
-    // here would mean the block was declared at both slots, which is how a "moved" block quietly
-    // becomes a second one.
+    // The split adds EXACTLY THREE passes — `vb_indirect_late_upload`, `vb_cull_late` and
+    // `vb_raster_late` — to each row it arms, and MOVES the poison+build block rather than
+    // duplicating it. A `+4` or `+5` here would mean the block was declared at both slots, which is
+    // how a "moved" block quietly becomes a second one.
+    //
+    // ⚠️ It was `+2` until VG R3 piece 3 step P3-3 added the late cull. The number is DERIVED — one
+    // `pass!` call, added under the same `row.split` arm as the other two — so a `+2` surviving this
+    // step would mean the late cull was never declared, which is the state in which
+    // `vb_indirect_late`'s writer never moved to COMPUTE and piece 2's obligation 1 is undischarged.
+    // The `vb_cull_readback_late` pass is NOT counted here: the probe is off across this matrix.
     for (u, s) in [(0usize, 4usize), (1, 5), (2, 6), (3, 7)] {
         assert_eq!(
             frames[s].pass_count,
-            frames[u].pass_count + 2,
-            "{} declares {} passes against {}'s {} — the split adds exactly two (the late upload \
-             and the late raster) and MOVES the poison+build block, never duplicates it",
+            frames[u].pass_count + 3,
+            "{} declares {} passes against {}'s {} — the split adds exactly three (the late upload, \
+             the late cull and the late raster) and MOVES the poison+build block, never duplicates \
+             it",
             frames[s].row.id,
             frames[s].pass_count,
             frames[u].row.id,
@@ -4914,6 +5768,19 @@ fn declare_order_invariants_hold_in_the_replica() {
                     "S3: the late scope must write `vb_id` BEFORE the `lit` producer reads it, or \
                      (from piece 3) the late geometry is never shaded. Got late={late}, \
                      lit={lit_producer}"
+                );
+                // VG R3 piece 3 step P3-3: the late cull's two order invariants, the replica half
+                // of the `debug_assert!`s `declare_vb_graph` now carries. Both are load-bearing in
+                // OPPOSITE directions — declared before the builds it would test the PREVIOUS
+                // frame's pyramid (which is the EARLY phase's predicate, not this one's); declared
+                // after the late raster its COMPUTE write would not be the indirect fetch's source
+                // and the derived edge would order nothing.
+                let late_cull =
+                    index_of("vb_cull_late").expect("invariant: a split row declares the late cull");
+                assert!(
+                    build0 < late_cull && late_cull < late,
+                    "S3: the armed order is `hzb_build_* → vb_cull_late → vb_raster_late`. Got \
+                     build0={build0}, late_cull={late_cull}, late={late}"
                 );
             }
             (split, late, upload) => panic!(

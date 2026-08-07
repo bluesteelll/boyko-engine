@@ -1692,13 +1692,21 @@ pub fn cluster_cull_hier_spirv() -> &'static [u32] {
 }
 
 /// The batch-cull pipeline's COMPUTE push range — `vb_batch_cull.comp.hlsl`'s
-/// `VbBatchCullPush { float4 planes[6]; uint batch_count; uint visible_cap; }`.
+/// `VbBatchCullPush { float4 planes[6]; uint batch_count; uint visible_cap; uint phase;
+/// uint occ_flags; }`.
 ///
-/// 96 bytes of planes + 8 of counts. Rung R2c0 shipped this at 8 bytes (counts only); rung R2c
-/// widened it when the decision arrived. Well inside Vulkan's guaranteed 128-byte minimum
+/// 96 bytes of planes + 8 of counts + 8 of VG R3 piece 3 step P3-3's two selector words. Rung R2c0
+/// shipped this at 8 bytes (counts only); rung R2c widened it to 104 when the frustum decision
+/// arrived; P3-3 widens it to 112 for `phase` (which of the two cull phases this dispatch is) and
+/// `occ_flags` (the occlusion decision's arming word — [`super::present::scene_types::VB_CULL_OCC_ARMED`]
+/// and the two FORCE controls). Well inside Vulkan's guaranteed 128-byte minimum
 /// `maxPushConstantsSize`, which is the bound that actually binds here — the raster's own push is
-/// 88 bytes, so the device plainly clears 104.
-pub const VB_BATCH_CULL_PUSH_BYTES: u32 = 104;
+/// 88 bytes, so the device plainly clears 112, and the shared COMPUTE range's own const-assert in
+/// `rhi_impl` is the mechanical gate on the 128.
+///
+/// ⚠️ The remaining headroom is 16 bytes, which is why the occlusion test's `float4x4` travels in a
+/// BUFFER ([`VB_CULL_UNIFORM_BYTES`]) rather than in more push words.
+pub const VB_BATCH_CULL_PUSH_BYTES: u32 = 112;
 
 /// VG R3 piece 3 step P3-2 (plan D6): the byte size of the batch cull's NON-push input block —
 /// `vb_batch_cull.comp.hlsl`'s `VbCullUniform`, a per-FIF `DEVICE_LOCAL` buffer written by

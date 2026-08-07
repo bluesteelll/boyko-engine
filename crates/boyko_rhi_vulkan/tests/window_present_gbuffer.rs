@@ -2601,12 +2601,16 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // pipelines instead of booting `GpuSceneBundles` (which is what allocates these
         // unconditionally in production), and it never resolves VB, so nothing here would
         // bind them. `vb_occ_flags: 0` is the disarmed word — no bit set means the cull may
-        // defer nothing — and it is read by nothing at this step in any case: the push block
-        // still ends at `visible_cap`.
+        // defer nothing.
         vb_late_visible: None,
         vb_late_count: None,
         vb_cull_uniform: None,
         vb_occ_flags: 0,
+        // VG R3 piece 3 step P3-3: the engine frame index. `0` is the honest value for a harness
+        // that renders ONE frame per fixture rather than a stand-in — the counter it mirrors starts
+        // at 0 and this is that frame. Nothing here reads it: it reaches the device only through
+        // `VbCullUniform`, which is filled inside the `vb_batch_cull` arm this harness never takes.
+        engine_frame_index: 0,
     };
 
     // The composite's native size — drives the G-buffer alloc + the 1:1 top-left present.
@@ -3704,12 +3708,16 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         // pipelines instead of booting `GpuSceneBundles` (which is what allocates these
         // unconditionally in production), and it never resolves VB, so nothing here would
         // bind them. `vb_occ_flags: 0` is the disarmed word — no bit set means the cull may
-        // defer nothing — and it is read by nothing at this step in any case: the push block
-        // still ends at `visible_cap`.
+        // defer nothing.
         vb_late_visible: None,
         vb_late_count: None,
         vb_cull_uniform: None,
         vb_occ_flags: 0,
+        // VG R3 piece 3 step P3-3: the engine frame index. `0` is the honest value for a harness
+        // that renders ONE frame per fixture rather than a stand-in — the counter it mirrors starts
+        // at 0 and this is that frame. Nothing here reads it: it reaches the device only through
+        // `VbCullUniform`, which is filled inside the `vb_batch_cull` arm this harness never takes.
+        engine_frame_index: 0,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -8745,12 +8753,16 @@ fn run_showcase_body_ddgi(
         // pipelines instead of booting `GpuSceneBundles` (which is what allocates these
         // unconditionally in production), and it never resolves VB, so nothing here would
         // bind them. `vb_occ_flags: 0` is the disarmed word — no bit set means the cull may
-        // defer nothing — and it is read by nothing at this step in any case: the push block
-        // still ends at `visible_cap`.
+        // defer nothing.
         vb_late_visible: None,
         vb_late_count: None,
         vb_cull_uniform: None,
         vb_occ_flags: 0,
+        // VG R3 piece 3 step P3-3: the engine frame index. `0` is the honest value for a harness
+        // that renders ONE frame per fixture rather than a stand-in — the counter it mirrors starts
+        // at 0 and this is that frame. Nothing here reads it: it reaches the device only through
+        // `VbCullUniform`, which is filled inside the `vb_batch_cull` arm this harness never takes.
+        engine_frame_index: 0,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -10321,12 +10333,16 @@ fn run_showcase_body(
         // pipelines instead of booting `GpuSceneBundles` (which is what allocates these
         // unconditionally in production), and it never resolves VB, so nothing here would
         // bind them. `vb_occ_flags: 0` is the disarmed word — no bit set means the cull may
-        // defer nothing — and it is read by nothing at this step in any case: the push block
-        // still ends at `visible_cap`.
+        // defer nothing.
         vb_late_visible: None,
         vb_late_count: None,
         vb_cull_uniform: None,
         vb_occ_flags: 0,
+        // VG R3 piece 3 step P3-3: the engine frame index. `0` is the honest value for a harness
+        // that renders ONE frame per fixture rather than a stand-in — the counter it mirrors starts
+        // at 0 and this is that frame. Nothing here reads it: it reaches the device only through
+        // `VbCullUniform`, which is filled inside the `vb_batch_cull` arm this harness never takes.
+        engine_frame_index: 0,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };

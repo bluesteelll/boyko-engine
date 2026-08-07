@@ -1,5 +1,18 @@
-// VG rungs R2c0/R2c/R2d-3/R2d-6: the VisibilityBuffer cull compute pass
+// VG rungs R2c0/R2c/R2d-3/R2d-6 + VG R3 piece 3 step P3-3: the VisibilityBuffer cull compute pass
 // (`vb_batch_cull.comp.hlsl`).
+//
+// # TWO PHASES, ONE MODULE (VG R3 piece 3 step P3-3, plan D5)
+//
+// Since P3-3 the host dispatches this module TWICE per armed-split frame and selects the body with
+// the `pc.phase` push word: `VB_CULL_PHASE_EARLY` before the early raster, `VB_CULL_PHASE_LATE`
+// after the depth pyramid this frame's raster fed. The late phase's BODY is not here yet — the fork
+// in `main` is a bare `return`, so a phase-1 dispatch is a no-op by construction — and it lands at
+// step P3-4 together with the occlusion leaf both phases will share.
+//
+// The fork was NOT deferred to that step, deliberately: P3-3 is the step that records the second
+// dispatch, and a second dispatch of a module with no fork re-runs the EARLY body — rewriting the
+// survivor list and every record's `instanceCount` after the early raster has already fetched them,
+// with the same numbers on a static scene and therefore invisibly to every golden.
 //
 // One invocation per `DrawBatch`. There are TWO LEVELS, and they are different tests on different
 // data:
@@ -349,7 +362,16 @@ RWStructuredBuffer<uint> VbVisibleInstance : register(u6);
 // SAME order `boyko_render::frustum::frustum_planes_from_view_proj` emits.
 static const uint FRUSTUM_PLANE_COUNT = 6u;
 
-// The batch-cull push constants. Mirrors the host `VbBatchCullPush` (104 bytes).
+// VG R3 piece 3 step P3-3 (docs/VG-R3-P3-CULL-INTEGRATION-PLAN.md, decision D5): the two values
+// `pc.phase` may take. ONE module, ONE pipeline, ONE entry point, a UNIFORM branch — not a `-D`
+// variant pair, for verbatim the reason `hzb_build.comp.hlsl` forks on `pc.base_level == 0`: the
+// occlusion leaf must be the SAME function in both phases, and two artifacts are two
+// implementations that can drift. Drift in the direction where the LATE test is stricter than the
+// EARLY one deletes geometry from the frame.
+static const uint VB_CULL_PHASE_EARLY = 0u;
+static const uint VB_CULL_PHASE_LATE  = 1u;
+
+// The batch-cull push constants. Mirrors the host `VbBatchCullPush` (112 bytes since P3-3).
 struct VbBatchCullPush {
     // Rung R2c: the six frustum planes as (a, b, c, d), inside => a*x + b*y + c*z + d >= 0.
     // EXTRACTED ON THE HOST from the same 64 push bytes the raster's VS reads as `view_proj`, and
@@ -360,6 +382,20 @@ struct VbBatchCullPush {
     float4 planes[6];
     uint batch_count;  // number of live `DrawBatch` records this frame (the range guard)
     uint visible_cap;  // element capacity of `VbCullVisible` (the clamp-and-drop bound)
+    // VG R3 piece 3 step P3-3: `VB_CULL_PHASE_EARLY` or `VB_CULL_PHASE_LATE`. A PUSH constant, so
+    // the fork below is uniform across the dispatch — which is what makes the two passes' framegraph
+    // declarations sound: a compiler may lower a not-taken `? :` to an eager LOAD plus an
+    // `OpSelect`, but it may not introduce a STORE the source does not perform.
+    uint phase;
+    // VG R3 piece 3 step P3-3 (plan D6): the occlusion decision's arming word — bit 0 ARMED, bit 1
+    // FORCE_LATE, bit 2 FORCE_KEEP; the host folds it ONCE (`GBufferScene::vb_occ_flags`).
+    //
+    // ⚠️ DECLARED, and read by NOTHING in this module at this step. That is the whole inertness
+    // claim of P3-3 and it is structural rather than numeric: the occlusion leaf, the partition and
+    // the compaction do not exist here yet (they land at P3-4), so no value of this word can change
+    // a frame. The word is pushed now so the host push block, the descriptor set and the phase fork
+    // land in ONE commit rather than three.
+    uint occ_flags;
 };
 [[vk::push_constant]] VbBatchCullPush pc;
 
@@ -404,6 +440,31 @@ void main(uint3 tid : SV_DispatchThreadID) {
     // lane can touch a record past the live batch count — `robustBufferAccess` is OFF on this
     // device, so an unguarded lane would be a real out-of-bounds device write.
     if (i >= pc.batch_count) {
+        return;
+    }
+
+    // ==== VG R3 piece 3 step P3-3 (plan D5): THE PHASE FORK. ====
+    //
+    // ⚠️ THIS LINE AND THE HOST'S SECOND DISPATCH ARE ONE CHANGE, and separating them is the defect
+    // this fork exists to foreclose. Step P3-3 records a `vb_cull_late` dispatch of this same module
+    // with `pc.phase == VB_CULL_PHASE_LATE`. Without a fork, that dispatch would re-run the EARLY
+    // body — re-testing every instance against the frustum and REWRITING `VbVisibleInstance` and
+    // every record's `instanceCount` AFTER the early raster had already fetched them. On today's
+    // static corpus it would write the same numbers and be invisible to every golden, which is
+    // exactly the class of silent defect this campaign has shipped six times.
+    //
+    // A BARE `return` rather than a stub body: the late phase's real work (read the candidates,
+    // re-test them against the pyramid this frame's build wrote, compact in place, store the
+    // survivor count) lands at step P3-4 together with the occlusion leaf both phases share. Until
+    // then the late dispatch is a no-op BY CONSTRUCTION — it reads no buffer and writes none — and
+    // that is a property of this statement rather than a property of what the loop below happens to
+    // compute.
+    //
+    // Sited AFTER the tail-lane guard because both phases need it: the late phase is dispatched
+    // over the SAME `batch_count` lanes (plan D4 — the late dispatch is FIXED and HOST-SIZED; the
+    // GPU-only quantity is the per-batch candidate count, not the lane count), so the guard is
+    // shared and the fork below it is the only phase-specific statement in the module today.
+    if (pc.phase != VB_CULL_PHASE_EARLY) {
         return;
     }
 

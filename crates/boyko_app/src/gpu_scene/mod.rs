@@ -6713,6 +6713,16 @@ impl GpuSceneBundles {
             // step and lives HERE beside `vb_cull_planes` when it lands — never in `runner.rs`, and
             // never per frame.
             vb_occ_flags: 0,
+            // VG R3 piece 3 step P3-3 (plan D6): the ENGINE frame index — this call's OWN
+            // `frame_index` argument, the monotonic counter the runner advances once per presented
+            // frame and already threads into the DDGI probe-update UBO. Threaded from HERE rather
+            // than read off `Renderer::frame_index` (which is the round-robin frame-in-flight SLOT
+            // and repeats every other frame) so the cull's record-order control and the pyramid
+            // dump's pairing check compare against ONE clock instead of two that happen to agree.
+            //
+            // The recorder stamps it into `VbCullUniform::frame_index`; nothing reads it back until
+            // step P3-5 wires the probe.
+            engine_frame_index: frame_index,
             vb_cull_readback: self.vb_cull_readback.as_ref(),
             vb_batch_cull_pipeline: Some(&self.vb_batch_cull_pipeline),
             vb_cull_layout: Some(&self.vb_cull_layout),

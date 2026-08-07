@@ -2757,7 +2757,38 @@ pub(crate) struct VbPassPlan {
     /// the probe copies (`vb_cull_count`, `vb_cull_visible`, `vb_indirect`, `vb_visible_instance`),
     /// so the graph derives the `COMPUTE -> TRANSFER` dependency that makes the cull's writes
     /// available to the copies. Unarmed on every golden/interactive boot ⇒ no pass, no commands.
+    ///
+    /// VG R3 piece 3 step P3-3: on a SPLIT frame it also declares `vb_late_visible` and
+    /// `vb_late_count` — the PRE-late snapshot, the only place the early phase's candidate set is
+    /// observable, because the late phase compacts that list in place.
     pub(crate) vb_cull_readback: Option<crate::framegraph::PassId>,
+    /// VG R3 piece 3 step P3-3 (docs/VG-R3-P3-CULL-INTEGRATION-PLAN.md, decisions D4/D5/D8): the
+    /// LATE cull compute pass — the SECOND dispatch of `vb_batch_cull.comp.hlsl`, selected by the
+    /// `pc.phase` push word, declared between the last [`Self::hzb_build`] and
+    /// [`Self::vb_raster_late`].
+    ///
+    /// `Some` iff [`GBufferScene::path_vb_occlusion_split`](super::scene_types::GBufferScene::path_vb_occlusion_split)
+    /// — the SAME single predicate `record_vb` reads.
+    ///
+    /// It is the declared writer of `vb_indirect_late`'s `instanceCount`, which is piece 2's
+    /// obligation 1 discharged: that array's chain becomes
+    /// `vb_indirect_late_upload (TRANSFER_WRITE) → vb_cull_late (SHADER_WRITE) → vb_raster_late
+    /// (INDIRECT_COMMAND_READ)`, plus `vb_cull_readback_late (TRANSFER_READ)` on probe frames.
+    ///
+    /// ⚠️ IT DISPATCHES A NO-OP IN THIS STEP. The module's `pc.phase` fork is a bare `return`, so a
+    /// phase-1 dispatch reads no buffer and writes none; the phase-1 body lands at P3-4. The fork
+    /// and this dispatch are ONE commit deliberately — without the fork, phase 1 would re-run phase
+    /// 0's body and rewrite the early lists after the early raster had fetched them.
+    pub(crate) vb_cull_late: Option<crate::framegraph::PassId>,
+    /// VG R3 piece 3 step P3-3 (plan D8): the POST-late readback snapshot — `vb_late_visible`'s
+    /// compacted prefix, `vb_late_count` again (the no-clobber clause) and `vb_indirect_late`'s
+    /// GPU-written `instanceCount`.
+    ///
+    /// `Some` iff the split is armed AND `scene.vb_cull_readback` is (the `BOYKO_VB_CULL_READBACK`
+    /// probe). Declared AFTER [`Self::vb_raster_late`] so the shipping chain it observes is
+    /// field-identical with and without the probe — sited between the late cull and the late raster
+    /// it would re-source that scope's indirect fetch.
+    pub(crate) vb_cull_readback_late: Option<crate::framegraph::PassId>,
     /// VG R3 piece 1 step P1-5 (docs/VG-R3-P1-PYRAMID-PLAN.md): the HZB depth-pyramid BUILD
     /// chain — `hzb_build_p` writes pyramid mips `[6p, 6p + n)` and, for `p > 0`, reads mip
     /// `6p - 1`. Slot `p` is `Some` iff `p < plan.levels.div_ceil(HZB_LEVELS_PER_PASS)`, the
@@ -2965,7 +2996,11 @@ pub(crate) struct VbBarrierSink<'a> {
     /// is MANDATORY rather than placeholder-backed — `GpuSceneBundles` wires it unconditionally,
     /// exactly like `vb_instance_ring` at index 1. VG R3 piece 2 step P2-3 appends
     /// `vb_indirect_late` after IT, LAST in both `cfg` arms and `.expect()`ed for the same
-    /// mandatory-on-every-VB-boot reason — see [`VB_BUFFER_COUNT`].
+    /// mandatory-on-every-VB-boot reason — see [`VB_BUFFER_COUNT`]. VG R3 piece 3 step P3-3 appends
+    /// the occlusion split's trio `[vb_late_visible, vb_late_count, vb_cull_uniform]` after THAT,
+    /// on the same rule and for the same reason: `GpuSceneBundles::boot` mints all three
+    /// unconditionally, so a placeholder would be strictly worse than a `.expect()` — it resolves to
+    /// a LIVE WRONG buffer with no VUID and no validation message.
     pub(crate) buffers: [VkBuffer; VB_BUFFER_COUNT],
 }
 
@@ -2987,12 +3022,14 @@ pub(crate) struct VbBarrierSink<'a> {
 /// VB-P1a froxel trio to 6/7/8 and every slot after it by one — the two arms share no index past
 /// 4, which is why the count is `cfg`-split rather than derived.
 ///
-/// VG R3 piece 2 step P2-3: 13 → 14 (`vb_indirect_late`), 14 → 15 under `hwrt`.
+/// VG R3 piece 2 step P2-3: 13 → 14 (`vb_indirect_late`), 14 → 15 under `hwrt`. VG R3 piece 3 step
+/// P3-3 appends the occlusion split's THREE buffers after it — `vb_late_visible`, `vb_late_count`,
+/// `vb_cull_uniform` — so 14 → 17 and 15 → 18.
 #[cfg(feature = "hwrt")]
-const VB_BUFFER_COUNT: usize = 15;
-/// See the `hwrt` variant's doc: a `not(hwrt)` build has no `tlas_instances` slot, so 15 - 1 = 14.
+const VB_BUFFER_COUNT: usize = 18;
+/// See the `hwrt` variant's doc: a `not(hwrt)` build has no `tlas_instances` slot, so 18 - 1 = 17.
 #[cfg(not(feature = "hwrt"))]
-const VB_BUFFER_COUNT: usize = 14;
+const VB_BUFFER_COUNT: usize = 17;
 
 /// The number of IMAGE resources [`Renderer::declare_vb_graph`] declares — see
 /// [`VbBarrierSink::images`]'s doc for the fixed order. A PRIVATE, per-frame ResId space (mirrors
@@ -3093,13 +3130,20 @@ fn declare_hzb_poison_build(
     // measured what that costs: 89.3% of the `vb_mesh` pyramid is the far plane `0.0`, levels 6..9
     // entirely so, and a zero-filled image agrees with the oracle there.
     //
-    // The write is `TRANSFER(TRANSFER_WRITE)` at `GENERAL`, so the derived barrier is this
-    // resource's FIRST access of the frame, over mips `[0, levels)`. ⚠️ Since VG R3 piece 3 step
-    // P3-0 that is no longer a first TOUCH: the pyramid is seeded
+    // The write is `TRANSFER(TRANSFER_WRITE)` at `GENERAL`. ⚠️ Since VG R3 piece 3 step P3-0 it is
+    // no longer a first TOUCH: the pyramid is seeded
     // `seeded_writer_at_layout(GENERAL, COMPUTE_SHADER, SHADER_WRITE)` (the cross-frame seed D2
-    // argues for), so the clear derives `COMPUTE(SHADER_WRITE) → TRANSFER(TRANSFER_WRITE)` at
-    // `GENERAL → GENERAL` — a WAW against the PREVIOUS frame's build, rather than an
-    // `UNDEFINED → GENERAL` transition that would have licensed discarding what that build wrote.
+    // argues for), so on an UNSPLIT frame the clear derives
+    // `COMPUTE(SHADER_WRITE) → TRANSFER(TRANSFER_WRITE)` at `GENERAL → GENERAL` — a WAW against the
+    // PREVIOUS frame's build, rather than an `UNDEFINED → GENERAL` transition that would have
+    // licensed discarding what that build wrote.
+    //
+    // ⚠️ AND SINCE STEP P3-3 IT IS NO LONGER THE FRAME'S FIRST ACCESS EITHER, on a SPLIT frame:
+    // `vb_batch_cull` reads the pyramid — as the PREVIOUS frame left it, which is the whole of the
+    // early predicate — before this block runs. The clear then derives a WAR against THAT read
+    // (`COMPUTE → TRANSFER`, `src_access` 0, an execution-only edge) instead of the WAW against the
+    // seed. Strictly weaker in form and exactly right in substance: what must be ordered is the
+    // early cull's read finishing before the clear overwrites what it read.
     // `hzb_build_0` still derives a real WAW flush (`TRANSFER_WRITE → SHADER_WRITE`) off this
     // clear; on an UNDUMPED frame the frame's first access is `hzb_build_0`'s own write and it is
     // sourced from the seed instead. `GENERAL` is one of the two layouts `vkCmdClearColorImage`
@@ -3333,8 +3377,10 @@ impl Renderer<'_> {
     ///   vb_shade | vb_resolve → hzb_poison? → hzb_build_*? → (split arm) → … → present_sample →
     ///   hzb_dump?`, i.e. byte-for-byte the chain that shipped before the split existed;
     /// * **armed split** — `… → vb_indirect_upload? → vb_indirect_late_upload → vb_batch_cull? →
-    ///   vb_raster → hzb_poison? → hzb_build_*? → vb_raster_late → (classify?) → vb_shade |
-    ///   vb_resolve → …`.
+    ///   vb_cull_readback? → vb_raster → hzb_poison? → hzb_build_*? → vb_cull_late →
+    ///   vb_raster_late → vb_cull_readback_late? → (classify?) → vb_shade | vb_resolve → …`
+    ///   (VG R3 piece 3 step P3-3 inserted the two `vb_cull_*late` passes; the four asserts beside
+    ///   the plan construction below pin their neighbours).
     ///
     /// The block moves EARLIER, never later, so the `hzb_poison < hzb_build_* < hzb_dump` chain of
     /// asserts below is preserved (the dump is declared last in the whole graph). The reorder lands
@@ -3678,14 +3724,43 @@ impl Renderer<'_> {
         // declaration that this graph produces the buffer, and separating the two halves again
         // fires `compile`'s `debug_assert!` instead of shipping silently.
         let vb_indirect_late = g.add_buffer("vb_indirect_late");
+        // VG R3 piece 3 step P3-3 (docs/VG-R3-P3-CULL-INTEGRATION-PLAN.md, decisions D3/D6): the
+        // occlusion split's three buffers, appended LAST in that order — the same edit shape every
+        // addition above used, and the only one that cannot re-key an existing barrier.
+        //
+        // ALL THREE ARE BARE `add_buffer`, never `add_buffer_seeded`, and after P2-8 that spelling
+        // IS the provenance claim: each has an IN-GRAPH producer on every frame it is read.
+        //   * `vb_late_visible` — the early phase's candidate list and the late phase's survivor
+        //     list, one region per batch (INVARIANT VG-P3-LATE-REGION: batch `b` owns
+        //     `[base_instance_b, base_instance_b + instance_count_b)` and writes nowhere else — the
+        //     SAME host-established disjointness `vb_visible_instance` has, from the same
+        //     `VbBatchDesc` fields). First touch is `vb_batch_cull`'s COMPUTE write.
+        //   * `vb_late_count` — per-batch `n_defer` plus ONE reserved tail slot for the frame index
+        //     the GPU observed. Its first touch is ALSO `vb_batch_cull`'s COMPUTE write, which is
+        //     what makes the P2-8 provenance guard LIVE on it: deleting that declaration turns
+        //     `vb_cull_late`'s read below into a first-touch read of a bare `add_buffer` and fires
+        //     `compile`'s `debug_assert!` in every dev-profile run — and every golden run is one.
+        //     It is the ONE new buffer in this piece the guard can protect (`vb_indirect_late`'s
+        //     first touch is the upload's TRANSFER write, and a write is never tested).
+        //   * `vb_cull_uniform` — the cull's non-push inputs. Its producer is the
+        //     `vkCmdUpdateBuffer` declared INSIDE `vb_batch_cull` as a TRANSFER write, the same
+        //     intra-pass shape `vb_cull_count`'s own fill uses.
+        //
+        // NAMED BY NO PASS on an unsplit frame — except `vb_cull_uniform`, whose pair is declared on
+        // every frame the cull runs (D6: the shader's `level >= levels ⇒ Keep` early-out reads
+        // `levels` out of this buffer, so a gated fill would leave that read on unwritten allocation
+        // contents on a disarmed boot, with `robustBufferAccess` off).
+        let vb_late_visible = g.add_buffer("vb_late_visible");
+        let vb_late_count = g.add_buffer("vb_late_count");
+        let vb_cull_uniform = g.add_buffer("vb_cull_uniform");
         // The buffer-side sibling of the `hzb_pyramid` assert above, and the buffer side is where
         // it matters more: a mis-keyed buffer barrier names a LIVE WRONG buffer (every sink slot
         // resolves to a real handle) instead of faulting on a NULL. `- VB_IMAGE_COUNT` is exactly
         // the mapping `VbBarrierSink::buffer_barriers` performs.
         debug_assert_eq!(
-            vb_indirect_late.index() + 1 - VB_IMAGE_COUNT,
+            vb_cull_uniform.index() + 1 - VB_IMAGE_COUNT,
             VB_BUFFER_COUNT,
-            "invariant: vb_indirect_late is the LAST buffer ResId declare_vb_graph declares, and \
+            "invariant: vb_cull_uniform is the LAST buffer ResId declare_vb_graph declares, and \
              the buffer ResIds must exactly fill VbBarrierSink::buffers"
         );
 
@@ -3846,6 +3921,12 @@ impl Renderer<'_> {
         // frame is not a special case — it is the predicate being false.
         let mut vb_indirect_late_upload: Option<crate::framegraph::PassId> = None;
         let mut vb_raster_late: Option<crate::framegraph::PassId> = None;
+        // VG R3 piece 3 step P3-3 (plan D8): the LATE cull and the POST-late readback snapshot,
+        // both declared inside the same `if mesh_leg` block — `path_vb_occlusion_split()` already
+        // carries `mesh_leg`, so a `None` on a mesh-less frame is the predicate being false rather
+        // than a special case, exactly as for the two bindings above.
+        let mut vb_cull_late: Option<crate::framegraph::PassId> = None;
+        let mut vb_cull_readback_late: Option<crate::framegraph::PassId> = None;
         let (
             vb_classify_fill,
             vb_classify_count,
@@ -3966,6 +4047,80 @@ impl Renderer<'_> {
                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                     VK_ACCESS_SHADER_WRITE_BIT,
                 );
+                // ==== VG R3 piece 3 step P3-3 (plan D6/D8): the cull's UNIFORM, declared on EVERY
+                // frame the cull runs — the ONE new access here that is NOT gated on the split. ====
+                //
+                // A `vkCmdUpdateBuffer` (TRANSFER) followed by the dispatch's read (COMPUTE), both
+                // inside THIS pass — verbatim the intra-pass shape the counter fill two screens up
+                // uses, and `light_cull`'s `light_index_alloc` before it. No new pass.
+                //
+                // ⚠️ UNCONDITIONAL, and the reason is a per-field validity question the alternative
+                // would have to answer: the module's `level >= levels ⇒ Keep` early-out — the guard
+                // that makes the disarmed `hzb_null` load safe — reads `levels` OUT OF THIS BUFFER.
+                // Gating the fill on the split would leave that read on unwritten allocation
+                // contents on a disarmed boot, and `robustBufferAccess` is off on this device. The
+                // fill is 96 bytes in a pass that already records one.
+                //
+                // ⚠️ AND IT MOVES THE UNSPLIT STREAM. This is the one declaration in P3-3 that a
+                // frame WITHOUT the occlusion split derives a barrier from: every VB frame that
+                // records the cull gains one `TRANSFER(TRANSFER_WRITE) → COMPUTE(SHADER_READ)`
+                // buffer barrier inside this pass. It moves no pixel — the buffer is read by no
+                // shader until P3-4 — so every golden pin is byte-identical; what it moves is
+                // `tests/vb_barrier_stream_baseline.rs`'s U-rows as well as its S-rows.
+                g.buffer_access(
+                    vb_cull_uniform,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT,
+                );
+                g.buffer_access(
+                    vb_cull_uniform,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                );
+                // ==== VG R3 piece 3 step P3-3 (plan D8): the EARLY phase's three split-only
+                // accesses, gated on `path_vb_occlusion_split()` VERBATIM so an unsplit frame's
+                // declared set is bit-unchanged. ====
+                //
+                // The pyramid read is the EARLY predicate's input, and it is the pyramid AS THE
+                // PREVIOUS FRAME LEFT IT — this frame's build has not run yet. That cross-frame RAW
+                // is what `hzb_pyramid`'s `seeded_writer_at_layout(GENERAL, COMPUTE, SHADER_WRITE)`
+                // seed (P3-0, plan D2) exists to order, and `GENERAL` is the layout the image holds
+                // for life, so no transition appears.
+                //
+                // ⚠️ The pyramid access carries the EXTRA `hzb_levels.is_some()` conjunct, and it is
+                // load-bearing until P3-6. `path_vb_occlusion_split()` does NOT yet imply
+                // `scene.hzb.is_some()` (plan D9 adds that conjunct at the arming step), so a
+                // split-armed HZB-off frame is reachable today — and on it the sink's pyramid slot
+                // holds `VkImage::NULL` and the declared image has the disarmed 1-mip shape. A
+                // barrier naming a NULL image is a VUID, not a wasted edge. When D9 lands, this
+                // conjunct becomes redundant rather than wrong.
+                //
+                // The two list writes are declared even though the module cannot yet store to them
+                // (P3-2 bound them unread, P3-4 arms the stores): declaring the WRITE now is what
+                // makes `vb_late_count`'s first touch a write, which is the whole of the P2-8
+                // provenance coverage this piece gains — and what keeps `vb_cull_late`'s reads below
+                // from being first-touch reads of a bare `add_buffer`.
+                if occlusion_split {
+                    if let Some(levels) = hzb_levels {
+                        g.image_access(
+                            hzb_pyramid,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            VK_ACCESS_SHADER_READ_BIT,
+                            VK_IMAGE_LAYOUT_GENERAL,
+                            hzb_mips(0, levels),
+                        );
+                    }
+                    g.buffer_access(
+                        vb_late_visible,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_WRITE_BIT,
+                    );
+                    g.buffer_access(
+                        vb_late_count,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_WRITE_BIT,
+                    );
+                }
                 p
             });
 
@@ -3998,6 +4153,32 @@ impl Renderer<'_> {
                     VK_PIPELINE_STAGE_TRANSFER_BIT,
                     VK_ACCESS_TRANSFER_READ_BIT,
                 );
+                // VG R3 piece 3 step P3-3 (plan D8): the PRE-LATE snapshot's two regions, gated on
+                // the split as well as on the probe. This pass sits BEFORE `vb_cull_late`, so what
+                // it observes is the CANDIDATE list as the early phase wrote it and `n_defer` per
+                // batch — and that is the ONLY place the candidate set is observable at all, because
+                // the late phase compacts `vb_late_visible` IN PLACE (after compaction the region
+                // holds the survivors followed by the original tail, a multiset that is not the
+                // candidate set). The POST-late snapshot is `vb_cull_readback_late`, declared after
+                // the late raster.
+                //
+                // ⚠️ Round 1 of the plan assigned these copies to the recorder alone and declared
+                // neither — shipping undeclared transfer reads, the P2-7 class. They are declared
+                // here; the COPIES themselves land at P3-5 with the probe plumbing, which is the
+                // safe direction of the declare/record asymmetry (a barrier that was not needed,
+                // never a read that was not barriered).
+                if occlusion_split {
+                    g.buffer_access(
+                        vb_late_visible,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_ACCESS_TRANSFER_READ_BIT,
+                    );
+                    g.buffer_access(
+                        vb_late_count,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_ACCESS_TRANSFER_READ_BIT,
+                    );
+                }
                 p
             });
 
@@ -4083,6 +4264,111 @@ impl Renderer<'_> {
                 hzb_build = build;
             }
 
+            // ==== VG R3 piece 3 step P3-3 (plan D4/D5/D8): the LATE cull pass. ====
+            //
+            // Declared immediately after the last `hzb_build_*` and before `vb_raster_late`, which
+            // is the whole of its position argument: it reads the pyramid THIS frame's build wrote,
+            // and it writes the `instanceCount` the late raster fetches. Both neighbours are
+            // asserted below rather than left to this function's layout.
+            //
+            // ONE LANE PER BATCH, `batch_count` of them — the SAME shape and the SAME host-computed
+            // size as the early dispatch (plan D4). The GPU-only quantity is the per-batch candidate
+            // count, which a lane reads from `vb_late_count[i]`; the DOMAIN of the dispatch is
+            // batches, so no `vkCmdDispatchIndirect` and no `vkCmdDrawIndexedIndirectCount` is
+            // needed — and neither is in this device's fn table.
+            //
+            // # WHY THE ACCESS LIST IS ASYMMETRIC WITH `vb_batch_cull`'s, and why that is sound
+            //
+            // `graph_bridge.rs` already records the rule the raster's own survivor read rests on:
+            // DXC may lower a not-taken `? :` to an eager LOAD plus an `OpSelect`, so a not-taken
+            // READ may still issue. No such licence exists for a STORE — a compiler may not
+            // introduce a write the source does not perform. `pc.phase` is a PUSH constant, uniform
+            // across the dispatch, so:
+            //
+            //   * every LOAD either phase can issue is declared on BOTH passes (the ring, the batch
+            //     descriptors, the uniform, the pyramid);
+            //   * `vb_indirect_late`'s store is declared HERE ONLY, because it sits under
+            //     `if (pc.phase == VB_CULL_PHASE_LATE)`;
+            //   * `vb_indirect` / `vb_cull_visible` / `vb_cull_count` / `vb_visible_instance` are
+            //     declared on `vb_batch_cull` ONLY, because their stores sit under phase 0.
+            //
+            // ⚠️ `vb_late_visible` IS DECLARED AS TWO CALLS — a READ, then a WRITE — never as one
+            // combined `SHADER_READ|SHADER_WRITE`. The P2-8 provenance guard tests `is_write ||
+            // res_written`, so a combined access is `is_write` and the READ HALF IS NEVER TESTED.
+            // Split like this, the read is a genuine first-touch test: delete `vb_batch_cull`'s
+            // gated write above and this read fires `compile`'s `debug_assert!` in every dev-profile
+            // run. The cost is stated rather than hidden — the split derives a second, execution-only
+            // self-WAR edge on this pass, which is a NEW row in the barrier-stream pin rather than a
+            // hidden one. `vb_indirect_late` needs no split: the host upload already latched it, so
+            // the extra call would be inert.
+            //
+            // ⚠️ THE C16 RESIDUAL, named because it is reachable until step P3-6. This gate is
+            // `path_vb_occlusion_split()` and NOT `batch_cull_armed`, which is the plan's mandate
+            // (D9's added `vb_mesh_bounds.is_some()` conjunct exists precisely because these two are
+            // gated differently today). On a device WITHOUT
+            // `storage_buffer_array_non_uniform_indexing` the split can arm while the cull is not
+            // recorded at all, and then this pass's `vb_late_visible` READ is a first-touch read of
+            // a bare `add_buffer` — a dev-profile `debug_assert!` here, and a `.expect()` on an
+            // absent `vb_cull_set` in the recorder. Step P3-6 closes it by making
+            // `vb_mesh_bounds.is_some()` a conjunct of the predicate. THIS machine carries the
+            // feature, so the state is unreachable here.
+            vb_cull_late = occlusion_split.then(|| {
+                let p = g.add_pass("vb_cull_late");
+                g.buffer_access(
+                    vb_batch_desc,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                );
+                g.buffer_access(
+                    vb_instance_ring,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                );
+                g.buffer_access(
+                    vb_cull_uniform,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                );
+                // The pyramid THIS frame's build wrote — an intra-frame RAW at `GENERAL` with no
+                // layout change. Carries the same `hzb_levels.is_some()` conjunct the early pass's
+                // read does, for the same C16 reason.
+                if let Some(levels) = hzb_levels {
+                    g.image_access(
+                        hzb_pyramid,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        VK_IMAGE_LAYOUT_GENERAL,
+                        hzb_mips(0, levels),
+                    );
+                }
+                g.buffer_access(
+                    vb_late_count,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                );
+                g.buffer_access(
+                    vb_late_visible,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                );
+                g.buffer_access(
+                    vb_late_visible,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                );
+                // Obligation 1 of piece 2, discharged: `vb_indirect_late`'s declared writer moves
+                // from `(TRANSFER, TRANSFER_WRITE)` to `(COMPUTE_SHADER, SHADER_WRITE)`, and the
+                // writer that changes is THIS pass — never `vb_batch_cull`, which does not touch the
+                // record array at all (plan D3 moved the early phase's `n_defer` into
+                // `vb_late_count` so this word keeps exactly one producer).
+                g.buffer_access(
+                    vb_indirect_late,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                );
+                p
+            });
+
             // ==== VG R3 piece 2 step P2-5 (plan D4): the LATE raster scope. ====
             //
             // Three accesses, and each one is load-bearing:
@@ -4101,14 +4387,31 @@ impl Renderer<'_> {
             //    above) `→ DEPTH_ATTACHMENT_OPTIMAL`. Both are content-preserving, and neither may
             //    become a first touch.
             //
-            // ⚠️ WHAT IS DELIBERATELY *NOT* DECLARED, and what piece 3 must add. The late scope
+            // ⚠️ WHAT IS DELIBERATELY *NOT* DECLARED, and which step must add it. The late scope
             // binds the same pipeline and the same Set-0 as the early one, whose VS reads
-            // `vb_instance_ring` @0 and `vb_visible_instance` @11 — but every late record carries
-            // `instanceCount = 0`, so this scope issues ZERO vertex invocations and performs
+            // `vb_instance_ring` @0 and `vb_visible_instance` @11 — but every late record still
+            // carries `instanceCount = 0`, so this scope issues ZERO vertex invocations and performs
             // neither read. Declaring them now would be declaring an access the recorder does not
-            // perform. The moment piece 3 writes a nonzero count those two reads become real and
-            // must be declared in the SAME change, exactly as rung R2d-3/R2d-4 declared the cull's
-            // pair when it armed them.
+            // perform.
+            //
+            // VG R3 piece 3 step P3-3 does NOT change that, and the distinction is worth stating
+            // because this step DOES declare a compute pass whose stores are equally absent
+            // (`vb_cull_late`, one screen up). The two cases differ in what a declaration would
+            // claim about a WRITER: `vb_cull_late`'s access list is the shipping one and its
+            // dispatch is recorded, so its declared edges order real work the moment the phase-1
+            // body lands, and until then they are conservative edges against a no-op. A
+            // `vb_raster_late` VERTEX read, by contrast, would be a read the raster provably cannot
+            // issue while `instanceCount` is zero — nothing to order, on a resource whose region
+            // this frame does not write.
+            //
+            // ⚠️ THE SUBSTITUTION, so a reviewer finds it here rather than discovering it: when the
+            // count goes nonzero (step P3-6) the reads that become real are `vb_instance_ring` and
+            // **`vb_late_visible`** — NOT `vb_visible_instance`. The late scope binds `vb_set0_late`,
+            // which is `vb_set0` with @11 changed to the late list, so the VS's expression
+            // `visible_instances[pc.base_instance + instance_id]` reads the late list at the
+            // identical base with a BYTE-UNCHANGED `vb_raster.vs.hlsl`. `vb_visible_instance` is not
+            // bound to this scope at all and is therefore not declared on it — the "a bound
+            // descriptor is declared regardless" rule applied correctly, not waived.
             vb_raster_late = occlusion_split.then(|| {
                 let p = g.add_pass("vb_raster_late");
                 g.buffer_access(
@@ -4132,6 +4435,49 @@ impl Renderer<'_> {
                 );
                 p
             });
+
+            // ==== VG R3 piece 3 step P3-3 (plan D8): the POST-LATE readback snapshot. ====
+            //
+            // Declared AFTER `vb_raster_late`, and that position is the decision rather than a
+            // convenience. Sited BETWEEN `vb_cull_late`'s COMPUTE write and the late raster's
+            // DRAW_INDIRECT fetch it would RE-SOURCE that fetch — one `COMPUTE → DRAW_INDIRECT` RAW
+            // becoming `COMPUTE → TRANSFER` plus `TRANSFER → DRAW_INDIRECT`, exactly what the
+            // `vb_cull_readback` block above documents for `vb_indirect`. Sited here it does not:
+            // `vb_raster_late` only READS these three buffers, so the bytes are identical either way
+            // and the SHIPPING chain
+            // `vb_indirect_late_upload → vb_cull_late → vb_raster_late` is field-identical with and
+            // without the probe. The probe still appends one edge, which is why the barrier-stream
+            // pin is per configuration (PROBE-OFF is the normative row set) — but what it certifies
+            // is the shipping chain, not a perturbed one.
+            //
+            // Three regions: `vb_late_visible` (the COMPACTED PREFIX — the same bytes the pre-late
+            // snapshot read, now overwritten in place by the compaction), `vb_late_count` (again, so
+            // the host can assert the late phase did NOT clobber the early phase's `n_defer`), and
+            // `vb_indirect_late` (the `n_keep` the late cull wrote, derived INDEPENDENTLY on the
+            // host from the candidate list and the dumped pyramid).
+            //
+            // ⚠️ Like the pre-late pair above, the COPIES land at P3-5; this step declares the pass
+            // and the recorder records its barriers, so declare/record pass parity holds.
+            vb_cull_readback_late =
+                (occlusion_split && scene.vb_cull_readback.is_some()).then(|| {
+                    let p = g.add_pass("vb_cull_readback_late");
+                    g.buffer_access(
+                        vb_late_visible,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_ACCESS_TRANSFER_READ_BIT,
+                    );
+                    g.buffer_access(
+                        vb_late_count,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_ACCESS_TRANSFER_READ_BIT,
+                    );
+                    g.buffer_access(
+                        vb_indirect_late,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_ACCESS_TRANSFER_READ_BIT,
+                    );
+                    p
+                });
 
             // VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2c: the
             // classify chain `fill -> count -> scan -> scatter`, declared BEFORE the `lit`
@@ -5165,6 +5511,39 @@ impl Renderer<'_> {
              what the early scope stored, and with no early scope there is nothing to load"
         );
 
+        // ==== VG R3 piece 3 step P3-3 (plan D8): the late cull's own four declare-order asserts. ====
+        //
+        // ⚠️ NONE of them equates `hzb_build`'s presence with `vb_cull_late`'s, and that is a
+        // deliberate omission rather than a gap. `[vb_mesh_hzb]` sets `BOYKO_VG_HZB=1` with NO
+        // `BOYKO_VG_OCC` and is the ONLY committed pin that builds a pyramid, so "a pyramid implies a
+        // late cull" is false on a correct configuration — and goldens run the dev profile, so such
+        // an assert would panic on it.
+        debug_assert_eq!(
+            vb_cull_late.is_some(),
+            occlusion_split,
+            "invariant: the late cull is declared on EXACTLY path_vb_occlusion_split() — the same \
+             single predicate record_vb reads, so a declared-but-unrecorded pass (or the reverse) \
+             cannot happen"
+        );
+        debug_assert!(
+            vb_cull_late.is_none_or(|c| hzb_build.iter().flatten().all(|b| b.index() < c.index())),
+            "invariant: the late cull reads the pyramid this frame's build wrote — declared before \
+             the builds, it would test against the PREVIOUS frame's pyramid, which is the EARLY \
+             phase's predicate and not this one's"
+        );
+        debug_assert!(
+            vb_cull_late.is_none_or(|c| vb_raster_late.is_some_and(|l| c.index() < l.index())),
+            "invariant: the late cull writes the count the late raster fetches — reversed, the \
+             COMPUTE write is not the fetch's source and the derived edge orders nothing"
+        );
+        debug_assert!(
+            vb_cull_readback_late
+                .is_none_or(|r| vb_raster_late.is_some_and(|l| l.index() < r.index())),
+            "invariant: the post-late snapshot is declared AFTER the late raster, so it does not \
+             re-source the indirect fetch and the shipping barrier chain the pin certifies is the \
+             one that ships"
+        );
+
         g.compile();
 
         self.vb_pass_plan = Some(VbPassPlan {
@@ -5177,6 +5556,8 @@ impl Renderer<'_> {
             vb_indirect_late_upload,
             vb_batch_cull,
             vb_cull_readback,
+            vb_cull_late,
+            vb_cull_readback_late,
             hzb_build,
             hzb_poison,
             hzb_dump,
@@ -5352,6 +5733,23 @@ impl Renderer<'_> {
                     .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_indirect_late")
                     [fi]
                     .buffer,
+                // VG R3 piece 3 step P3-3: the occlusion split's trio, appended LAST in declaration
+                // order — `.expect()`ed for verbatim the reason the two entries above are.
+                scene
+                    .vb_late_visible
+                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_late_visible")
+                    [fi]
+                    .buffer,
+                scene
+                    .vb_late_count
+                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_late_count")
+                    [fi]
+                    .buffer,
+                scene
+                    .vb_cull_uniform
+                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_cull_uniform")
+                    [fi]
+                    .buffer,
             ],
             // Rung R9d (buffer ResId 5): `tlas_instances` — mirrors [`GbufferBarrierSink`]'s own
             // `scene.tlas.map_or(VkBuffer::NULL, |t| t.instance_array.buffer)` source.
@@ -5405,6 +5803,23 @@ impl Renderer<'_> {
                 scene
                     .vb_indirect_late
                     .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_indirect_late")
+                    [fi]
+                    .buffer,
+                // VG R3 piece 3 step P3-3: the occlusion split's trio — see the `not(hwrt)`
+                // variant's own comment.
+                scene
+                    .vb_late_visible
+                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_late_visible")
+                    [fi]
+                    .buffer,
+                scene
+                    .vb_late_count
+                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_late_count")
+                    [fi]
+                    .buffer,
+                scene
+                    .vb_cull_uniform
+                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_cull_uniform")
                     [fi]
                     .buffer,
             ],
