@@ -57,8 +57,20 @@
 //!   them exactly as it is — measured, on this machine: a genuine missing barrier produced 19
 //!   validation messages, no `SYNC-HAZARD` and a byte-identical image. Gate G4
 //!   (`boyko_rhi_vulkan/tests/vb_barrier_stream_baseline.rs`) is the only leg that can see one.
-//! * **Anything about pixels.** `vb_occ_multi` has no golden, so **no golden covers a multi-BATCH
-//!   late scope.** That is piece 3's first gate.
+//! * **Anything about pixels.** `vb_occ_multi` has no golden — but the multi-BATCH gap this bullet
+//!   used to name (*"no golden covers a multi-BATCH late scope; that is piece 3's first gate"*) is
+//!   CLOSED, and by a different fixture. The `vb_occ_mixed` family — two registered meshes, so
+//!   `BATCH_COUNT == 2` (`vb_occ_mixed_scene/mod.rs:284`) — is pinned in FOUR regimes
+//!   (`[vb_occ_mixed_off]`, `[vb_occ_mixed_keep]`, `[vb_occ_mixed]`, `[vb_occ_mixed_late]`), so a
+//!   multi-BATCH split now renders under a golden. That is the pins' claim **and its limit**: all
+//!   four hashes are ONE literal (`85b7d378…4d2913d9`), including `[vb_occ_mixed_off]`, which never
+//!   splits. They prove a two-batch split reproduces the unsplit pixels; **no hash can show that
+//!   the late scope drew.** The executed evidence is the `multi.late_draws == multi.draw_batches`
+//!   clause in [`vb_occ_split_records_two_scopes`], `draw_batches == BATCH_COUNT`
+//!   (`vb_occ_mixed.rs:505`), `Σ n_defer == MARKED_TOTAL` under FORCE-LATE (G-P3-C,
+//!   `vb_occ_mixed.rs:753`), and — since VG R3 piece 4 rung P4-4 —
+//!   `vb_mesh_occ_pins_actually_split`, which adjudicates the pinned configurations from inside the
+//!   pinned binary.
 //!
 //! # Red controls (executed at P2-7, listed here so a reader can re-run them)
 //!

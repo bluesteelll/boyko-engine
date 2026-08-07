@@ -436,7 +436,29 @@ first (both legs) and verify the other three reproduce the same literal;
 `the_pins_declared_byte_identical_actually_agree` keeps them from drifting afterwards. Until then
 those four gates claim nothing — `PENDING == PENDING` is vacuous, and the guard's own doc now says so.
 
-### 2. Piece 4 has no plan, and its scope is a VALUES call
+### 2. Piece 4 has no plan, and its scope is a VALUES call — **RESOLVED: planned @799db99, shipped P4-1…P4-7**
+
+**Both halves are answered.** `docs/VG-R3-P4-CONFIG-AND-INSTRUMENT-PLAN.md` went through four
+architect × four critic rounds to APPROVED (@799db99) and landed as seven rungs, each committing
+alone and green: `49e5630` · `28c3772` · `85b3313` · `c7465bf` · `58687d3` · `cf2d367` · this one.
+
+- **The config field exists.** `boyko_render::OcclusionConfig { mode: OcclusionMode }` — two
+  variants, `Off` (default) and `TwoPhase` — a Resource on `HzbConfig`'s surface, read live per
+  frame. `BOYKO_VG_OCC_FORCE` and its boot panic left shipping code; the verdict overrides are now
+  `boyko_app::OcclusionForce`, a test instrument. **`FORCE_KEEP` is no longer the disarm route;
+  `OcclusionMode::Off` is**, and unlike `FORCE_KEEP` it suppresses the split predicate, the late
+  passes and the extra descriptor-set bindings.
+- **The number exists, and it says NOT RESOLVED.** Ten timestamp brackets in the shipping recorder,
+  the piece-3 protocol re-run on that channel: `NetRun +10 240 ns` against a band of `49 152 ns`.
+  Every contrast `NOT RESOLVED` — and that is a RESULT, not a failure: the instrument resolves
+  per-pass costs, these fixtures do not separate the arms. **The default stays `Off` as a SCOPE
+  statement**, not as an inconclusive measurement: default-ON would need `NetRun < −band` across ≥3
+  sittings on ≥2 fixtures of differing occlusion density *and* a second consumer for the pyramid, so
+  that `HzbBuild` is not charged to this feature alone. P4-6 is one campaign, two fixtures, one
+  machine, no second consumer.
+- **What is left for the owner is one VALUES call**, recorded in the next item: flipping the default.
+
+The original record follows.
 
 There is no `VG-R3-P4-*.md`. Piece 3's own text assigns piece 4 the **owner-facing config field** —
 occlusion culling as a setting rather than an env var — and until then the supported disarm is
@@ -450,6 +472,60 @@ every contrast**, and the reason is structural rather than statistical: nothing 
 (measured 6.893 ms/frame = 145.1 Hz). The zero control came in at 0.47 % against a resolution band
 of 287.91 %. Adding the bracket touches the shipping recorder, which piece 3's boundary excludes —
 so it is piece 4's first job if piece 4 wants a number.
+
+---
+
+## 2026-08-07 — VG R3 piece 4 is COMPLETE: two VALUES calls, and the dispositions that close the piece
+
+Rungs P4-1…P4-7 all landed. **Nothing here blocks anything** — the piece ships with the default that
+was designed for it. Two items are the owner's to decide, and the rest is recorded so no disposition
+is left implied.
+
+### VALUES 1 — should `OcclusionMode` default to `TwoPhase`?
+
+It is one attribute, and a real behaviour change: with piece 4's host disjunct, any world carrying an
+`OcclusionCulling` marker would then build a depth pyramid by default.
+
+**My position: no, and it is not an inconclusive measurement.** The decision's failure mode is
+DELETED GEOMETRY while its upside is bounded by the early raster's share of a frame — the same
+asymmetry that makes the marker itself opt-in. On this corpus the benefit is provably zero (a
+converged static scene's late scope correctly draws nothing) and the cost is not. The bar for
+flipping it is written down and unmet: `NetRun < −band` across ≥3 sittings on ≥2 fixtures of
+differing occlusion density, **and** a second consumer for the pyramid so `HzbBuild` is not charged
+to occlusion alone. P4-6 is one campaign, two fixtures, one machine, no second consumer.
+
+### VALUES 2 — present mode is a product surface, and nothing owns it
+
+`present/swapchain.rs` creates the swapchain with `VK_PRESENT_MODE_FIFO_KHR` **unconditionally**, so
+every wall-clock measurement in this repository is bounded below by the display refresh, and there is
+no owner-facing way to ask for anything else.
+
+Piece 4 deliberately did **not** fix it (disposition (c1)). The reason is not cost: the channel it
+would have improved — host wall clock — was superseded by the timestamp brackets and is now labelled
+`KNOWN-BLIND`, deciding exactly one thing (*did arming the instrument wreck the frame?*). Present
+mode is vsync, tearing and power: an owner-facing `PresentConfig`, and a product decision, not an
+occlusion piece's business. **Recorded here as a VALUES item rather than silently carried as a
+perf TODO.**
+
+### The dispositions, so none is implied
+
+| item | disposition |
+|---|---|
+| **(c1)** unconditional FIFO present mode | **OUT** — superseded channel + product surface. VALUES 2 above |
+| **(c2)** D8: `vb_indirect_late`'s provenance is covered by nothing | **OUT, BOOKED to framegraph core.** Piece 4 declared no new access, so it neither improved nor worsened it; P4-5 additionally asserts the shipping late chain is field-identical with and without the readback probe. The fix is P2-7's `is_write \|\| res_written \|\| res_seeded` change plus a 14-site audit, whose only gate is a replica this campaign has MEASURED blind to the class it would catch — so that rung needs an instrument before it needs code |
+| **(c3)** PROBE-ON barrier-stream rows | **DONE at P4-5**, as a derived delta. Two findings: the plan's re-sourcing prediction is refuted by the tree, and the probe's perturbation is larger than any doc said — nine declared accesses over two passes on seven buffers, eight derived barriers, five pinned barriers moving |
+| **(c4)** the intra-pass `TRANSFER → COMPUTE` edge on `VbCullUniform` | **DONE at P4-3, the record-order half only** — and it is a COMPILE-time red in both profiles, where the plan's own shape would have stayed green on the very defect it existed to catch. The DECLARATION half stays open (OQ 9): `FrameGraph::pass_access_count` is private and there is no per-pass accessor |
+| **(c5)** the stale future-tense header in `vb_occ_split_gate.rs` | **DONE at P4-7.** It sat in FOUR places, not the two the plan named |
+| **(c6)** `goldens/PINS.toml`'s UTF-8 BOM, which strict TOML rejects | **KNOWINGLY LEFT, and the reason is measured.** `golden.ps1 -Bless` writes the file back with `Set-Content -Encoding UTF8`, and the only PowerShell on this box is 5.1, whose `-Encoding UTF8` is BOM-**ful** — verified by round-tripping a BOM-less file through that exact call and getting `EF BB BF` back. Stripping the BOM alone would be silently undone by the next bless; the fix belongs at the WRITER and lands with a bless run. No impact today: `golden.ps1` parses with line regexes, and every strict-TOML check in this campaign strips the BOM explicitly |
+
+### Two gaps piece 4 opened and could not close, recorded rather than absorbed
+
+- **The pin-binary split gate runs PROBE-ON while the pins run PROBE-OFF.** The gap is small and
+  named: `vb_probe_dump` is a host-side counter sink that records no commands and cannot enter the
+  split predicate. It is still a gap.
+- **The dual-read equality invariant is dev-profile only.** A release bench run does not execute it.
+  If a release-only divergence between the two query readers is ever suspected, the check has to be
+  re-run in the dev profile on the same scene; nothing in the ladder can detect it in release.
 
 ---
 

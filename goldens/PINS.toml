@@ -374,8 +374,14 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 #    was measured on this machine (the plan's "P2-0 RESOLVED" table), so the barrier evidence is
 #    gate G4's field-level assertions in
 #    crates/boyko_rhi_vulkan/tests/vb_barrier_stream_baseline.rs -- not this hash.
-#  * ANYTHING ABOUT A MULTI-BATCH LATE SCOPE. These five spheres share ONE MeshHandle, so the late
-#    loop runs exactly once here. No golden covers draw_batches >= 2; that is piece 3's first gate.
+#  * THAT THIS PIN COVERS A MULTI-BATCH LATE SCOPE. These five spheres share ONE MeshHandle, so the
+#    late loop runs exactly once HERE. ⚠️ This block used to add "no golden covers draw_batches >= 2;
+#    that is piece 3's first gate" -- FALSE since the [vb_occ_mixed*] family below, which registers
+#    TWO meshes (draw_batches == 2) and is pinned in four regimes. A multi-BATCH split DOES render
+#    under a golden now. What no hash can show -- here or there -- is that the late scope DREW; the
+#    executed evidence is gate G2's late_draws == draw_batches
+#    (crates/boyko_app/tests/vb_occ_split_gate.rs) and, since VG R3 piece 4 rung P4-4,
+#    vb_mesh_occ_pins_actually_split, which boots these very [*.env] blocks inside this binary.
 #
 # THE VALIDATION LEG (`scripts\golden.ps1 -Pin vb_occ_split -ValidationOn`) is gate G3, and its
 # claim is bounded by the same measurement: on this machine it sees STATIC legality only -- the
@@ -404,10 +410,16 @@ BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\vb_occ_split.bmp"
 BOYKO_VG_OCC             = "1"
 # VG R3 piece 3 step P3-6 (plan D9): the split gained a `hzb.is_some()` conjunct -- it IS the
-# occlusion test now, and a late scope with no pyramid decides nothing. The fixture makes
-# BOYKO_VG_OCC imply HzbMode::Build, so this line is REDUNDANT with it BY DESIGN: written here so
-# the configuration is legible from the pin file rather than only from crates/boyko_app/tests/
-# vb_mesh.rs. This makes TWO of the 26 pins HZB-armed ([vb_mesh_hzb] is the other).
+# occlusion test now, and a late scope with no pyramid decides nothing. This line is REDUNDANT BY
+# DESIGN, and at VG R3 piece 4 rung P4-4 the REASON moved: until then the FIXTURE made BOYKO_VG_OCC
+# imply HzbMode::Build (a `|| occ_marked()` disjunction in vb_mesh.rs, deleted by that rung); since
+# P4-4 the HOST plans a pyramid iff a PRODUCER asks OR a CONSUMER needs one
+# (boyko_app::hzb_plan::hzb_plan_for), so BOYKO_VG_OCC would arm the pyramid on its own. Written
+# here so the configuration is legible from the pin file rather than only from
+# crates/boyko_app/tests/vb_mesh.rs -- and that redundancy is exactly why NO pin can red the host
+# disjunct; the non-pinned vb_occ_probe_dump_marked_no_hzb leg in vb_occ_split_gate.rs is the only
+# one that can. COUNTED FROM THIS FILE, not copied: SIX of the 30 pins are HZB-armed -- [vb_mesh_hzb],
+# [vb_occ_split] and the four [vb_occ_mixed*].
 BOYKO_VG_HZB             = "1"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 
@@ -420,12 +432,14 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 # same pixels AND the same counts. vb_occ_mixed puts four marked instances wholly inside a near
 # slab's silhouette (crates/boyko_app/tests/vb_occ_mixed_scene/mod.rs).
 #
-# ⚠️ ALL FOUR sha256_* ARE SEEDED "PENDING" AND MUST NOT BE HAND-EDITED. golden.ps1's -Check reports
-# a PENDING leg and exits 2 rather than passing, which is the file header's own documented way to
-# ADD a leg by hand. Blessing requires a VISUAL OWNER SIGN-OFF on the freshly-dumped BMP; nobody
-# else may supply one, and a hand-written hash would convert a gate into a transcription.
+# ⚠️ SOFTWARE LEGS BLESSED, HWRT LEGS STILL "PENDING". The four sha256_software were blessed at
+# commit e160434 after a visual owner sign-off; the four sha256_hwrt are still the PENDING sentinel,
+# and golden.ps1's -Check reports a PENDING leg and exits 2 rather than passing -- the file header's
+# own documented way to ADD a leg by hand. NO sha256_* may be hand-edited on EITHER leg: blessing
+# requires a VISUAL OWNER SIGN-OFF on the freshly-dumped BMP, nobody else may supply one, and a
+# hand-written hash converts a gate into a transcription.
 #
-# ⚠️ WHEN THEY ARE BLESSED, ALL FOUR MUST CARRY THE SAME LITERAL. That equality is the whole gate
+# ⚠️ ALL FOUR CARRY THE SAME LITERAL, PER LEG. That equality is the whole gate
 # (G-P3-A), and it is MACHINE-CHECKED by `the_pins_declared_byte_identical_actually_agree`
 # (crates/boyko_app/tests/vg_density_census.rs), which parses this file and fails if any of the
 # three derived legs ever diverges from [vb_occ_mixed_off]. A lone re-bless would silently convert
@@ -478,7 +492,15 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 # FORCE_KEEP: the split is armed in full -- second scope, late cull dispatch, both extra descriptor
 # sets -- and the early phase defers NOTHING, which is exactly the behaviour that shipped before the
 # cull was armed. It is the ONE-VARIABLE baseline of the decision, the null control the decidability
-# protocol asks for, and the NAMED DISARM ROUTE until piece 4 gives the owner a config field.
+# protocol asks for.
+#
+# ⚠️ NO LONGER THE DISARM ROUTE. Until VG R3 piece 4 this block named FORCE_KEEP as the supported way
+# to turn the feature off; rung P4-4 gave the owner boyko_render::OcclusionConfig, whose default
+# OcclusionMode::Off IS the disarm and suppresses the split predicate, the late passes and the extra
+# descriptor-set bindings -- none of which FORCE_KEEP ever suppressed. FORCE_KEEP is now what it
+# always measured: a DIAGNOSTIC verdict override (boyko_app::OcclusionForce::KeepAll), the
+# every-mechanism-no-decision leg of the ladder below. The pin rendered with the config Off is
+# [vb_occ_mixed_off] -- which also carries no markers, since one env word (BOYKO_VG_OCC) arms both.
 #
 # Round 1 shipped VB_CULL_OCC_FORCE_KEEP as production shader surface that no gate ever set; this
 # pin is what makes it a supported switch rather than untested surface.

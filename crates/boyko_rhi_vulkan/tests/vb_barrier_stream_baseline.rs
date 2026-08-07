@@ -70,7 +70,8 @@
 //! `BOYKO_VB_CULL_READBACK` ARMED. So until this step the barrier stream a *gate* executes was
 //! modelled by nothing, and a defect there makes a gate LIE (a readback of stale bytes) rather than
 //! merely making a diagnostic wrong. The asymmetry is stated from the other side at
-//! `vb_occ_mixed.rs:40-43`.
+//! `vb_occ_mixed.rs:40-53` (re-anchored at rung P4-7, which also replaced that bullet's
+//! "a TRANSFER read to three buffers" with the nine-access delta derived below).
 //!
 //! [`P1`] and [`P3`] are [`S1`] and [`S3`] with `probe: true`. They are deliberately **NOT** pinned
 //! field by field — [`assert_row_is_pinned`] is never called on them, and its

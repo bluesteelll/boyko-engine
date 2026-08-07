@@ -38,9 +38,19 @@
 //! # What these gates CANNOT claim
 //!
 //! * **Anything about the shipping barrier chain.** They run with `BOYKO_VB_CULL_READBACK` armed,
-//!   which appends a TRANSFER read to three buffers. The PROBE-OFF chain is G-P3-F's job
-//!   (`boyko_rhi_vulkan/tests/vb_barrier_stream_baseline.rs`), and that file is a hand-written
-//!   REPLICA by its own admission.
+//!   and VG R3 piece 4 rung P4-5 DERIVED what that perturbs: **nine declared accesses across TWO
+//!   passes on SEVEN buffers** — six in `vb_cull_readback` (between `vb_batch_cull` and `vb_raster`)
+//!   and three in `vb_cull_readback_late` (after the late raster) — yielding EIGHT barriers, since
+//!   `vb_late_count`'s post-late read finds nothing to order and is free. **FIVE pinned barriers
+//!   MOVE**: four downstream readers are re-sourced to `TRANSFER(0)` because the probe's read
+//!   consumed the pending flush (`vb_indirect` and `vb_visible_instance` at `vb_raster`,
+//!   `vb_late_count` and `vb_late_visible` at `vb_cull_late`), and `vb_cull_late`'s self-WAR source
+//!   WIDENS by one bit to `TRANSFER|COMPUTE_SHADER`.
+//!   ⚠️ This bullet used to read *"appends a TRANSFER read to three buffers"* — understating the
+//!   perturbation by a whole pass, four buffers and all five moves. The PROBE-OFF chain is G-P3-F's
+//!   job (`boyko_rhi_vulkan/tests/vb_barrier_stream_baseline.rs`), which since P4-5 carries the
+//!   PROBE-ON delta as a derived expectation beside it; that file is a hand-written REPLICA by its
+//!   own admission, so neither half is evidence about `declare_vb_graph`.
 //! * **The early phase's verdicts UNDER MOTION.** Clause 7 works only because plan D12 makes
 //!   `P_prev == P_cur` bit-for-bit on a converged static frame, so the dumped pyramid IS the one the
 //!   early phase read. Under motion, or under FORCE-LATE, the two genuinely differ and only one is
@@ -505,8 +515,8 @@ fn assert_partition(cap: &Capture, regime: Regime) {
         cap.draw_batches as usize, BATCH_COUNT,
         "`{tag}`: {} draw batches. Batches bucket per `MeshHandle` and this fixture registers TWO \
          meshes; at ONE batch the per-batch record offset, the `batch_count` bound and the late \
-         loop are all unfalsifiable, which is the debt `vb_occ_split_gate.rs` records as piece 3's \
-         first gate.",
+         loop are all unfalsifiable -- the debt `vb_occ_split_gate.rs` records, and this fixture is \
+         what discharges it.",
         cap.draw_batches
     );
     assert_eq!(cap.scopes, 2, "`{tag}`: the recorder reported {} raster scopes", cap.scopes);
@@ -857,8 +867,10 @@ fn vb_occ_mixed_partition_matches_the_oracle() {
 ///    `depth_early ≠ depth_final` BY CONSTRUCTION and G-P3-E's two-sided clause is non-vacuous.
 ///    That clause is asserted in `hzb_engine_pyramid_gate.rs`, over the same regime.
 /// 3. **`late_draws` and `late_cull_dispatches` at `draw_batches == 2`** — the per-batch record
-///    offset evaluated at `i > 0`, which is the debt `vb_occ_split_gate.rs:43-44` records as piece
-///    3's first gate and which no golden covers.
+///    offset evaluated at `i > 0`, the debt `vb_occ_split_gate.rs:60-73` records. ⚠️ This item used
+///    to end *"and which no golden covers"*. For the PIXELS that is false: this fixture's own four
+///    pins render `draw_batches == 2` under a golden. For the COUNTS it stays true — no hash can
+///    show that the late scope DREW, which is why these two are asserts and not a hash.
 ///
 /// ⚠️ **Why the fixture must be MIXED.** With every instance marked, FORCE-LATE empties the early
 /// depth entirely — every texel the reverse-Z far plane — which trips the SHIPPED non-vacuity

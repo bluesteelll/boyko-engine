@@ -135,14 +135,20 @@
 //!   otherwise claim resolution finer than the counter can represent.
 //! * **TWIN** — §C2's drift term, unchanged.
 //!
-//! ⚠️ The lattice is **measured** ([`measured_quantum_ns`], 16 ns on the machine this rung was
-//! authored against) and is **not** `VkPhysicalDeviceLimits::timestampPeriod`, which is the tick→ns
-//! SCALE (`1.0` here) and says nothing about how often the counter increments. Flooring at
-//! `period × 1 tick` would have satisfied every assertion in this file while under-stating the
-//! resolution by 16×: the alarm silenced, the false win intact.
+//! ⚠️ The lattice is **measured** ([`measured_quantum_ns`]) and is **not**
+//! `VkPhysicalDeviceLimits::timestampPeriod`, which is the tick→ns SCALE (`1.0` here) and says
+//! nothing about how often the counter increments. It came back **32 ns** in the sitting this text
+//! describes. An earlier draft of this paragraph said 16 ns: that GCD was taken over medians
+//! produced under an EVEN frame budget, where each median is the mean of the two middle samples and
+//! can land a half-tick off the lattice — which is why [`DEFAULT_BENCH_FRAMES`] is odd. **Neither
+//! number is hard-coded and neither is a constant of the machine**; the harness re-measures the
+//! quantum from the values each sitting publishes. Flooring at `period × 1 tick` instead would have
+//! satisfied every assertion in this file while under-stating the resolution by the whole lattice
+//! factor (32× as measured here): the alarm silenced, the false win intact.
 //!
-//! **Rung P4-7 owns the plan's repair.** This file carries the fix and the finding; it does not
-//! edit the plan.
+//! **Rung P4-7 LANDED the plan's repair.** `docs/VG-R3-P4-CONFIG-AND-INSTRUMENT-PLAN.md` §C2 now
+//! defines `band(Q) = max(FLOOR, TWIN)` and records this finding as the reason, so the plan and this
+//! harness no longer disagree about what a band is.
 //!
 //! A sum's band is that sum's own band; no per-pass band is applied to an aggregate.
 //!
@@ -193,7 +199,12 @@
 //!    shade dispatch separates the stamps). This half carries the "slot 6 left the run" claim;
 //! 5. every `begin_offset_ns < 1e9` — the base-stamp contract (a broken one shows as ~2^36 ticks,
 //!    not as a plausible number);
-//! 6. the zero control is not exactly zero on any published quantity;
+//! 6. every published quantity's **band** is nonzero. ⚠️ Not "the zero control is not exactly
+//!    zero", which is what this list said before rung P4-7 and which the shipped clause has never
+//!    been: a zero TWIN is EXPECTED here (`A0` and `A1` are one configuration on a serialized
+//!    deterministic GPU) and asserting against it would red a healthy run. A zero BAND means the
+//!    resolution FLOOR also came out zero — every worker reported `p95 == median` and the lattice
+//!    measured `0` — i.e. the sitting published no scale at all;
 //! 7. `m_8(A0) < m_8(B)` and `m_7(A0) < m_7(B)` — a zero-width bracket must read smaller than one
 //!    containing real work. If this fails, **every number in the report is noise**;
 //! 8. `|Residual| ≤ band`, `|GapResidual| ≤ band`, `|HzbResidual| ≤ band`;
@@ -204,9 +215,12 @@
 //! # ⚠️ TWO REASONS A STAMP COMPARISON CAN HAVE NO MARGIN — they are different, and both are here
 //!
 //! **(a) The counter's lattice quantum.** Two `BOTTOM_OF_PIPE` stamps with NO GPU command between
-//! them wait on prefixes differing by nothing, so they are only guaranteed to differ by the
-//! timestamp counter's own quantum — measured `0` on this machine, legally non-zero elsewhere
-//! (`vb_bench_totality_gate.rs:88-101` states the same property for its zero-pair bound). Every such
+//! them wait on prefixes differing by nothing, so their readings are only guaranteed to differ by
+//! the timestamp counter's own quantum ([`measured_quantum_ns`] — 32 ns in the sitting this text
+//! describes, re-measured every sitting). Such pairs came back EQUAL here, i.e. the counter did not
+//! tick between them; that difference is `0` on this machine and legally non-zero elsewhere
+//! (`vb_bench_totality_gate.rs:90-101` states the same property, as an observed value under a bound
+//! rather than a pinned literal, for its zero-pair). Every such
 //! pair is asserted `≤`, and `≤` is the TRUE relation, not a relaxed one. Rung P4-6's first sitting
 //! asserted `off(b9) < off(b3)` strictly and both fixtures reported them EQUAL, deterministically:
 //! `vb.rs:1598-1599` stamps the two on adjacent lines of one block. [`BEGIN_CHAIN`] carries the
@@ -878,9 +892,13 @@ fn floor_over(base: &BenchSummary, arm: &BenchSummary, ps: &[usize], q: f64) -> 
 ///
 /// ⚠️ **`VkPhysicalDeviceLimits::timestampPeriod` is NOT this number.** It is the tick→ns SCALE
 /// (`1.0` on the vendor this rung was authored against) and says nothing about how often the
-/// counter increments (measured: 16 ns). Flooring a band at `period × 1 tick` would satisfy every
-/// assertion here while under-stating the instrument's resolution by 16×, which silences the alarm
-/// and leaves the false win — the reason that route was refused.
+/// counter increments — **32 ns** in the sitting this text describes, under the odd
+/// [`DEFAULT_BENCH_FRAMES`]. (An earlier text said 16 ns; that GCD was taken over medians from an
+/// EVEN budget, each the mean of two middle samples, so it could legitimately read `q/2`.) The value
+/// is re-measured every sitting and hard-coded nowhere. Flooring a band at `period × 1 tick` would
+/// satisfy every assertion here while under-stating the instrument's resolution by the whole lattice
+/// factor — 32× as measured — which silences the alarm and leaves the false win, the reason that
+/// route was refused.
 ///
 /// `mean_ns` is deliberately excluded: an arithmetic mean of `n` lattice values is not itself on
 /// the lattice. The medians are only on it because [`DEFAULT_BENCH_FRAMES`] is odd.
@@ -997,8 +1015,9 @@ impl Quantity {
     /// **The zero control is not at fault and is not removed.** It did its job: it proved there is
     /// no process-to-process drift on the GPU channel (channel W's own legs wandered 6–9 % in the
     /// same sitting, which is the clean discriminator). What it structurally cannot supply is
-    /// RESOLUTION — the other half of what a verdict needs. §C2 conflated the two. **Rung P4-7 owns
-    /// the plan's repair**; this file carries the fix and the finding, and does not edit the plan.
+    /// RESOLUTION — the other half of what a verdict needs. §C2 conflated the two. **Rung P4-7
+    /// LANDED the plan's repair**: §C2 now defines `band(Q) = max(FLOOR, TWIN)` and carries this
+    /// finding as the reason, so the plan and this code no longer say different things.
     ///
     /// Both components are published beside every quantity, because a band that is all-floor and a
     /// band that is all-twin mean different things and a future degenerate twin must stay visible.
@@ -1493,11 +1512,14 @@ struct BeginPair {
 /// # Why every row asserts `<=`, and why that is not a tolerance
 ///
 /// A `BOTTOM_OF_PIPE` stamp reports a PREFIX-COMPLETION time. Two such stamps with no command
-/// between them wait on prefixes that differ by nothing, so they are only guaranteed to differ by
-/// the timestamp counter's own **lattice quantum** — measured `0` on this machine, legally non-zero
-/// elsewhere (the same property `vb_bench_totality_gate.rs:88-101` states for its `FALLBACK_MAX_NS`
-/// bound, and for the same reason: pinning one driver's quantum into a gate reds a correct engine
-/// somewhere else). `<=` is therefore the TRUE relation for such a pair, not a relaxed one.
+/// between them wait on prefixes that differ by nothing, so their readings are only guaranteed to
+/// differ by the timestamp counter's own **lattice quantum** ([`measured_quantum_ns`] — 32 ns in the
+/// sitting this text describes, re-measured every sitting). Such pairs came back EQUAL here: the
+/// counter did not tick between them. That observed difference is `0` on this machine and legally
+/// non-zero elsewhere — the same property `vb_bench_totality_gate.rs:90-101` states for its
+/// `FALLBACK_MAX_NS` bound, and for the same reason: pinning one driver's quantum into a gate reds a
+/// correct engine somewhere else. `<=` is therefore the TRUE relation for such a pair, not a relaxed
+/// one.
 ///
 /// ⚠️ Rung P4-6's first sitting asserted `off(b9) < off(b3)` STRICTLY and both fixtures reported
 /// them EQUAL, deterministically, on the disarmed leg — `vb.rs:1598-1599` stamps the two on

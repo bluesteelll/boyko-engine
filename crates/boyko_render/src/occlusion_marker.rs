@@ -7,7 +7,7 @@
 //! is already reviewed — the [`hzb_config`](crate::hzb_config) P1-1 shape (the knob before the
 //! machinery).
 //!
-//! # LIVE since VG R3 piece 3 step P3-6 — the ladder that got it there
+//! # LIVE since VG R3 piece 3 step P3-6, OWNER-GATED since piece 4 rung P4-4 — the ladder
 //!
 //! Piece 2 landed the capability and the visibility-buffer raster split INERT.
 //!
@@ -23,10 +23,27 @@
 //!   **P2-5** the late raster scope — which drew nothing.
 //! * **P3-4** gave `vb_batch_cull.comp.hlsl` the occlusion leaf and the first DEVICE read of the
 //!   flag word, still behind a host-cleared `VB_CULL_OCC_ARMED` bit.
-//! * **P3-6** ARMED it. The marker's meaning is therefore no longer "may be rejected once a later
-//!   piece lands" but **"is tested against the depth pyramid every frame"**: an instance carrying
-//!   it whose world AABB projects wholly behind the pyramid's conservative occluder depth is
-//!   DEFERRED out of the early raster scope and re-tested in the late one.
+//! * **P3-6** ARMED the mechanism. The marker's meaning stopped being "may be rejected once a
+//!   later piece lands": an instance carrying it whose world AABB projects wholly behind the
+//!   pyramid's conservative occluder depth is DEFERRED out of the early raster scope and re-tested
+//!   in the late one.
+//! * **VG R3 piece 4 rung P4-4** added the axis this capability composes WITH, and it changed what
+//!   the marker alone means. Presence is *capability*, never *arming*:
+//!   `GBufferScene::path_vb_occlusion_split()` is
+//!   `vb_occlusion.is_some() ∧ path_is_vb ∧ mesh_leg ∧ vb_occlusion_instances > 0 ∧ hzb.is_some()
+//!   ∧ vb_mesh_bounds.is_some()`, whose FIRST conjunct is the owner's
+//!   [`OcclusionConfig`](crate::occlusion_config::OcclusionConfig) — and its DEFAULT is
+//!   [`OcclusionMode::Off`](crate::occlusion_config::OcclusionMode::Off).
+//!
+//! **So a marked entity is tested every frame on which the owner ARMED the decision, and on no
+//! other.** `EnginePlugins` composes [`OcclusionPlugin`](crate::occlusion_plugin::OcclusionPlugin)
+//! unconditionally, so the Resource is PRESENT in every hosted world — seeded at `Off`, which is the
+//! 0 %-gate and what every shipped world runs today. A marked entity there is gathered and never
+//! tested: `Off` means *do not TEST*, never *do not GATHER*, so this marker's own instance counter
+//! means the same thing regardless of the knob (the cost of a marked-but-disarmed world is one
+//! `u32` read). A world that never inserts the Resource at all behaves identically: the host reads
+//! it through `try_resource` and its arm builder refuses an absent config and an `Off` config by the
+//! same test.
 //!
 //! The opt-IN direction below is what makes that safe: an entity type that never heard of this
 //! feature carries no marker, is never tested, and is always drawn.
@@ -110,9 +127,12 @@
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_macros::Component;
 
-/// The structural occlusion-culling capability: an entity carrying [`OcclusionCulling`] IS tested
-/// against the depth pyramid every frame (VG R3 piece 3 step P3-6) and may be deferred out of the
-/// early raster scope; an entity WITHOUT it is never tested and always drawn.
+/// The structural occlusion-culling capability: an entity carrying [`OcclusionCulling`] is tested
+/// against the depth pyramid on every frame the OWNER armed the decision — VG R3 piece 3 step P3-6
+/// built the test, piece 4 rung P4-4 put it behind
+/// [`OcclusionConfig`](crate::occlusion_config::OcclusionConfig), whose default is
+/// [`Off`](crate::occlusion_config::OcclusionMode::Off) — and may then be deferred out of the early
+/// raster scope. An entity WITHOUT the marker is never tested and always drawn, under any config.
 /// A zero-sized marker (`#[derive(Component)]`, table storage — no `#[component(storage = ...)]`
 /// attribute) — its PRESENCE is the whole datum, exactly as
 /// [`ShadowCaster`](crate::csm_marker::ShadowCaster) and
