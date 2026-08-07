@@ -426,6 +426,47 @@ The output-set equality between the two arms is a `[P1]`-class **theorem** (plan
 not a spec-constant collapse — a `-D` variant here changes the entry point's `numthreads` and
 groupshared declarations, which a specialization constant cannot do.
 
+## `vb_batch_cull.comp.hlsl` — the VisibilityBuffer batch/instance cull (compute)
+
+One source `shaders/vb_batch_cull.comp.hlsl`; VG R3 piece 3 step P3-4 grew an
+`#ifdef VB_CULL_DEBUG_PROBE` seam. The variant exists for ONE reason: the occlusion leaf's
+differential (`crates/boyko_app/tests/hzb_verdict_oracle_gate.rs`) can observe only the PARTITION,
+so a `depth_near` disagreeing with `boyko_render::hzb`'s by one ULP surfaces as a failure on the
+exactly-equal boundary arm and as nothing else. That failure has been MEASURED. The variant adds a
+sink the gate reads the leaf's own intermediates out of.
+
+| Variant | `VB_CULL_DEBUG_PROBE` | `.spv` | dxc `-T` | Interface delta vs base (@0..@11) |
+|---|---|---|---|---|
+| base (shipping) | — | `vb_batch_cull.comp.spv` | `cs_6_0` | none. The ONLY module the engine ever loads. |
+| diagnostic probe | `1` | `vb_batch_cull_debug.comp.spv` | `cs_6_0` | **+ `RWStructuredBuffer<uint> VbCullDebug` @12** — 8 `u32` per INSTANCE slot, written at every one of `occlusion_reject`'s seven exits: `{ stage, asuint(depth_near), asuint(occ), level, tap_x0, tap_x1, tap_y0, tap_y1 }`. No arithmetic differs; the projection fold's text, its `precise` qualifiers and its operation order are the same tokens in both. |
+
+**Frozen-base discipline — a claim about THE SEAM, not a standing promise about the base.** Every
+addition is inside `#ifdef VB_CULL_DEBUG_PROBE`, so with the macro undefined the file preprocesses
+*character-identically* to its pre-diagnostic self: the compiler is handed the same token stream, so
+**adding the probe** cannot move `vb_batch_cull.comp.spv`. That was executed and held — the byte gate
+stayed green across the diagnostic step.
+
+⚠️ It does **not** mean the base artifact never moves. The very measurement this probe produced led to
+a decision change (the division-free verdict), which moved BOTH modules and re-pinned the census in
+`crates/boyko_rhi_vulkan/tests/vb_batch_cull_spv_sync.rs` — including a field that had to be ADDED,
+because `op_ford_less_than` went *down* when the verdict changed opcode and would have absorbed a
+deleted decision silently. `vb_batch_cull_debug_spv_byte_identical` gates the new row the same way.
+
+Word 1 of the record (`asuint(depth_near)`) is **diagnostic-only**: since the verdict became
+division-free, the shipping module does not compute `depth_near` at all.
+
+**Why a `-D` variant and not a runtime `occ_flags` bit.** A runtime-gated sink would have to DECLARE
+@12 in the shipping module, and the engine's set layout has twelve bindings
+(`VB_CULL_LAYOUT_BINDINGS`) — a module declaring a binding its bound layout does not provide is
+invalid usage on EVERY engine frame. It would also add stores to PERFORMED that the framegraph never
+DECLARED.
+
+**Reachability note:** nothing in the engine binds, mints or dispatches this pipeline. Its only
+consumer is the gate, which builds its own thirteen-binding layout
+(`VB_CULL_DEBUG_LAYOUT_BINDINGS`) and dispatches BOTH modules over every boundary probe, asserting
+their partitions agree — so the diagnostic artifact is a *measured* proxy for the shipping one, not
+an assumed one.
+
 ## Cluster-buffer capacity bounds — census, and one TRACKED OPEN GAP
 
 Two device buffers carry the L1 froxel cull's output: `ClusterGrid` (`uint2 {offset, count}` per

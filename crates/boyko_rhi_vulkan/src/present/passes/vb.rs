@@ -381,9 +381,10 @@ impl Renderer<'_> {
     /// The late scope is fully recorded and DRAWS NOTHING: every record it fetches carries
     /// `instanceCount = 0`, both attachments are `LOAD_OP_LOAD`/`STORE_OP_STORE` over the same
     /// `renderArea`, so the framebuffer contents it stores are the ones the early scope stored.
-    /// The late CULL is likewise recorded and DECIDES NOTHING: the module's `pc.phase` fork returns
-    /// immediately on phase 1 until step P3-4 writes that phase's body, so the record word the late
-    /// scope fetches is still the host's `0`.
+    /// The late CULL is likewise recorded and DECIDES NOTHING: since step P3-4 its phase-1 body is
+    /// real, but its loop bound is `VbLateCount[i]`, which the early phase writes only under
+    /// `VB_CULL_OCC_ARMED` and reads as `0` without it — so it compacts nothing and stores the same
+    /// `instanceCount = 0` the host's `vb_indirect_late_upload` already seeded.
     ///
     /// # Safety
     ///
@@ -1453,8 +1454,10 @@ impl Renderer<'_> {
                     // VG R3 piece 3 step P3-3: the EARLY phase. The late dispatch below pushes the
                     // SAME struct with `VB_CULL_PHASE_LATE`, which is the only word that differs.
                     phase: VB_CULL_PHASE_EARLY,
-                    // Read by nothing in the module at this step (the occlusion leaf lands at
-                    // P3-4), and `0` on every configuration until the arming commit folds it.
+                    // Read by the module since step P3-4 — the `defer` guard, the two list stores
+                    // and the pyramid tap's disarmed address mask — and `0` on every configuration
+                    // until the P3-6 arming commit folds it, which is what keeps the frame
+                    // byte-identical while the machinery is present.
                     occ_flags: scene.vb_occ_flags,
                 };
                 let groups = dispatched_batches.div_ceil(VB_BATCH_CULL_LOCAL_SIZE_X);
@@ -1464,13 +1467,16 @@ impl Renderer<'_> {
                 // live on this device (caller contract). `cull_set` binds TWELVE COMPUTE descriptors
                 // against the 12-entry `vb_cull_layout` — eleven storage buffers and, at @9, one
                 // SAMPLED image recorded at `GENERAL` — all written once at `GBufferTargets::sync`.
-                // The module names SEVEN of them: @0..@6, all loaded, stored or atomically updated
-                // since rung R2d-6. The five VG R3 P3-2 added (@7/@8/@9/@10/@11) are
-                // bound-but-unread, and the binding is safe in THIS direction only — a WRITTEN
-                // descriptor a shader never loads from is never dereferenced, so the bound set may
-                // legally exceed what the module declares. (The reverse is undefined with
-                // `robustBufferAccess` off, which is why the set and the layout widened in one
-                // commit while the shader lags.) The dispatch covers `dispatched_batches` lanes and
+                // The module names ALL TWELVE since VG R3 P3-4, which is the step that gave the five
+                // P3-2 added (@7/@8/@9/@10/@11) their loads; @0..@6 have been loaded, stored or
+                // atomically updated since rung R2d-6. Between P3-2 and P3-4 the last five were
+                // bound-but-unread, which is the legal direction — a WRITTEN descriptor a shader
+                // never loads from is never dereferenced, so a bound set may exceed what the module
+                // declares. (The reverse is undefined with `robustBufferAccess` off, which is why
+                // the set and the layout widened in one commit while the shader lagged.) ⚠️ @9 is
+                // `hzb_null` HERE regardless of the HZB arm — `vb_cull_set_hzb` is bound at P3-6 —
+                // and the module's own address mask makes that tap `(0, 0, 0)` while
+                // `VB_CULL_OCC_ARMED` is clear. The dispatch covers `dispatched_batches` lanes and
                 // the shader trims its tail group's out-of-range lanes.
                 // `&cull_set.descriptor_set` and `push` are locals alive for the calls.
                 unsafe {
@@ -1814,12 +1820,15 @@ impl Renderer<'_> {
             // the GPU-only quantity (the per-batch candidate count) is a LOOP BOUND inside a lane,
             // never a dispatch size.
             //
-            // ⚠️ IT IS A NO-OP IN THIS STEP, BY CONSTRUCTION AND NOT BY LUCK. The module's phase
-            // fork (`if (pc.phase != VB_CULL_PHASE_EARLY) return;`) landed in this same commit —
-            // deliberately, because without it this dispatch would re-run the EARLY body and rewrite
-            // `VbVisibleInstance` and every record's `instanceCount` AFTER the early raster had
-            // fetched them. On a static scene it would write the same numbers, so no golden could
-            // see it.
+            // ⚠️ IT WRITES NOTHING BUT ZEROS UNTIL P3-6, BY CONSTRUCTION AND NOT BY LUCK. The
+            // module's phase fork (`if (pc.phase == VB_CULL_PHASE_LATE) { ... return; }`) landed at
+            // step P3-3, in the same commit as this dispatch — deliberately, because without it the
+            // dispatch would re-run the EARLY body and rewrite `VbVisibleInstance` and every
+            // record's `instanceCount` AFTER the early raster had fetched them; on a static scene it
+            // would write the same numbers, so no golden could see it. Step P3-4 gave phase 1 its
+            // real body, and its loop bound `VbLateCount[i]` is read as `0` while
+            // `VB_CULL_OCC_ARMED` is clear — so the compaction runs zero iterations and stores the
+            // `instanceCount = 0` the host fill already wrote.
             //
             // ⚠️ THE GATE IS THE DECLARATOR'S, VERBATIM — `occlusion_split`, not
             // `batch_cull_armed`. A recorder gate NARROWER than `declare_vb_graph`'s would leave
@@ -1834,8 +1843,10 @@ impl Renderer<'_> {
             //
             // ⚠️ IT BINDS `vb_cull_set`, THE SAME SET THE EARLY DISPATCH BOUND, so @9 is `hzb_null`
             // even on an HZB-armed frame. Binding the REAL pyramid is `vb_cull_set_hzb`'s job at
-            // step P3-6, together with the shader code that first loads from @9; a set swap now
-            // would change a descriptor nothing reads.
+            // step P3-6. The module HAS tapped @9 since P3-4, and that is safe here for the reason
+            // its own `hzb_pyramid_load` states: with `VB_CULL_OCC_ARMED` clear every coordinate and
+            // the level are masked to 0, so the address is `(0, 0, 0)` — in range for a 1x1
+            // single-mip image whether or not the tap is dynamically reached.
             if occlusion_split {
                 let pipeline = scene
                     .vb_batch_cull_pipeline
@@ -1873,8 +1884,9 @@ impl Renderer<'_> {
                 // pass writes the same `VB_BATCH_CULL_PUSH_BYTES` = 112 prefix of the shared COMPUTE
                 // push range at offset 0 — both multiples of 4. `cull_set` binds all TWELVE entries
                 // `vb_cull_layout` declares, written once at `GBufferTargets::sync` and untouched
-                // since; the module names seven of them and dereferences none on this phase, since
-                // its `pc.phase` fork returns before the first buffer load. The dispatch covers
+                // since; the module names all twelve since P3-4 and, on this phase, reads the
+                // uniform, the batch descriptors and `VbLateCount` before its loop bound stops it.
+                // The dispatch covers
                 // `dispatched_batches` lanes — the SAME host number the early dispatch used, bounded
                 // by the same three allocation-derived capacities — and the shader's own
                 // `i >= pc.batch_count` guard trims the tail group. `&cull_set.descriptor_set` and

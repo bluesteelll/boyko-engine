@@ -670,10 +670,13 @@ pub struct GBufferTargets {
     /// VG R3 piece 3 step P3-1 (plan D7) — the 1×1 `R32_SFLOAT` placeholder the cull's descriptor
     /// set binds at the pyramid's binding when [`Self::hzb`] is `None`.
     ///
-    /// ⚠️ **BOUND at `vb_cull_layout` @9 since step P3-2, and read by nothing.** The cull module
-    /// still declares seven bindings; step P3-4 gives it the load. It was minted one step earlier
-    /// than the binding, because its transition cannot live in an armed-only builder and because
-    /// the step that MINTS an image is the step that owes it a defined layout.
+    /// ⚠️ **BOUND at `vb_cull_layout` @9 since step P3-2, and TAPPED since P3-4.** The module's
+    /// `hzb_pyramid_load` masks every coordinate and the level to 0 whenever `VB_CULL_OCC_ARMED` is
+    /// clear, so on a disarmed boot the address is `(0, 0, 0)` — in range for this 1×1 single-mip
+    /// image whether or not the load is dynamically reached, which is why the argument is IN-RANGE
+    /// and not REACHABILITY. It was minted one step earlier than the binding, because its transition
+    /// cannot live in an armed-only builder and because the step that MINTS an image is the step
+    /// that owes it a defined layout.
     ///
     /// On an HZB-ARMED boot this image is STILL bound — at @9 of `DeferredSets::vb_cull_set` — and
     /// simply not the set the recorder will pick: `HzbTargets::vb_cull_set_hzb` is the same twelve
@@ -1842,8 +1845,9 @@ const fn hzb_arm_matches_allocation(hzb_arm: bool, allocated: bool) -> bool {
 ///   layout transition leaves the texel's VALUE undefined, and the disarmed path may still ISSUE
 ///   the load (DXC is free to lower a `? :` to an eager fetch plus an `OpSelect`). `0.0` is the
 ///   reverse-Z far plane, so even a value that reaches a verdict provably rejects nothing.
-/// * 1×1 with ONE mip is what makes the disarmed load in RANGE by ADDRESS: the cull's reader (step
-///   P3-4) clamps its four coordinates and its level to 0 unconditionally on the disarmed path, and
+/// * 1×1 with ONE mip is what makes the disarmed load in RANGE by ADDRESS: the cull's reader
+///   (`hzb_pyramid_load`, since step P3-4) masks its four coordinates and its level to 0 out of the
+///   PUSH WORD — unconditionally, on the disarmed path — and
 ///   `(0, 0, 0)` is inside a 1×1 single-mip image. The clamp is structural, never derived from a
 ///   uniform, so this shape is the whole of that argument. `STORAGE` is deliberately absent —
 ///   nothing writes this image after the clear.

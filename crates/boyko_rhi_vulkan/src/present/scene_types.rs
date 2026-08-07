@@ -605,7 +605,8 @@ pub(crate) const VB_CULL_UNIFORM_BYTES: u32 = crate::compute::VB_CULL_UNIFORM_BY
 ///
 /// ⚠️ Since step P3-3 the buffer IS written — by [`Self::for_frame`] through a `vkCmdUpdateBuffer`
 /// recorded at a named site, ahead of `record_vb_pass`, for the intra-pass `TRANSFER → COMPUTE`
-/// edge's sake. NOTHING READS IT YET: the shader-side read lands at P3-4.
+/// edge's sake. Since step P3-4 the module READS it, once per lane, in BOTH phases — the projection
+/// matrix, the two extents and the level count are its whole occlusion input besides the pyramid.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VbCullUniform {
@@ -3375,9 +3376,10 @@ pub struct GBufferScene<'a> {
     /// Minted UNCONDITIONALLY on every VB boot (the [`Self::vb_visible_instance`] rule), hence
     /// `.expect()`ed under [`Self::path_vb_occlusion_split`] and never a conjunct of it.
     ///
-    /// ⚠️ At THIS step it is allocated and bound at `vb_cull_layout` @7 and at `vb_set0_late` @11,
-    /// and NOTHING reads or writes it: the shader still declares seven bindings and the late scope
-    /// still binds `vb_set0`.
+    /// ⚠️ Since step P3-4 the cull module DOES read and write it — the early phase appends its
+    /// deferred instances, the late phase compacts the survivors in place — but only under
+    /// `VB_CULL_OCC_ARMED`, which the host still pushes as `0`. So the payload is still empty on
+    /// every configuration, and the late scope still binds `vb_set0`; the arming commit is P3-6.
     pub vb_late_visible: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
     /// The per-FIF per-batch deferral count `n_defer`, plus ONE reserved tail slot carrying the
     /// frame index the GPU observed in [`VbCullUniform`].
@@ -3392,11 +3394,14 @@ pub struct GBufferScene<'a> {
     /// Indexed by batch id `b`, the SAME index `vb_indirect_late` uses, with no base arithmetic at
     /// all — so its region rule is the trivial one.
     ///
-    /// ⚠️ Allocated and bound at `vb_cull_layout` @11 at this step; written by nothing.
+    /// ⚠️ Written and read by the cull module since step P3-4, but only under
+    /// `VB_CULL_OCC_ARMED` — which the host pushes as `0` until the P3-6 arming commit, so on every
+    /// configuration today the early phase stores nothing here and the late phase reads `0`.
     pub vb_late_count: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
     /// The per-FIF [`VbCullUniform`], bound at `vb_cull_layout` @8 and — since VG R3 piece 3 step
     /// P3-3 — FILLED every frame the cull is recorded, armed or not (plan D6). Same unconditional
-    /// minting rule as the two above. ⚠️ Read by nothing until P3-4.
+    /// minting rule as the two above. ⚠️ Read by the module since P3-4, UNCONDITIONALLY (both
+    /// phases, armed or not), which is exactly why the fill is unconditional too.
     pub vb_cull_uniform: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
     /// The occlusion decision's flag word — [`VB_CULL_OCC_ARMED`] / [`VB_CULL_OCC_FORCE_LATE`] /
     /// [`VB_CULL_OCC_FORCE_KEEP`], folded ONCE on the host so the declarator, the recorder and the
@@ -3915,7 +3920,9 @@ mod tests {
     /// * **Nothing about the matrix being the right one.** It asserts a transposition, not that the
     ///   64 bytes handed in are the bytes the raster draws with — that is byte provenance, and it is
     ///   carried by the call site taking `scene.mvp[0..64]` rather than by this test.
-    /// * **Nothing about the device.** No shader reads this buffer until step P3-4.
+    /// * **Nothing about the device.** It pins the bytes the host writes; whether the module reads
+    ///   them as math rows is `boyko_app/tests/hzb_verdict_oracle_gate.rs`'s question, and that gate
+    ///   hand-serializes its own uniform rather than sharing this one for exactly that reason.
     #[test]
     fn cull_uniform_inverts_the_column_major_push_into_math_rows() {
         let u = VbCullUniform::for_frame(&indexed_push(), [1920, 1080], None, 0);
@@ -3954,7 +3961,8 @@ mod tests {
     /// # What it CANNOT claim
     ///
     /// Nothing about the shader honouring `levels == 0`. The `level >= levels ⇒ Keep` early-out
-    /// lands at step P3-4; this pins only the number the host hands it.
+    /// landed at step P3-4 and is measured by `boyko_app/tests/hzb_verdict_oracle_gate.rs`'s
+    /// truncated-layout case; this pins only the number the host hands it.
     #[test]
     fn cull_uniform_disarmed_levels_are_zero_and_base_is_the_null_image() {
         let disarmed = VbCullUniform::for_frame(&indexed_push(), [640, 480], None, 7);

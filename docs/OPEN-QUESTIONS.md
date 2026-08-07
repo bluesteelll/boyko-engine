@@ -405,6 +405,108 @@ blockers, on a foundation that by then exists.
 
 ---
 
+## 2026-08-07 — RESOLVED — the cull verdict divided, and a division cannot agree with a host oracle
+
+**ANSWERED and implemented in the same session. Kept here in full because the reasoning is the
+transferable part, and because the FIRST reading recorded below was wrong in a way worth preserving:
+it named a direction from a sample of one.**
+
+**Resolution.** The verdict no longer divides. `for all i: cz_i < occ * cw_i` replaced
+`max_i(cz_i/cw_i) < occ` in the shader and in `boyko_render::hzb`'s oracle, `depth_near` moved under
+`#ifdef VB_CULL_DEBUG_PROBE` so the shipping module no longer computes the quantity that used to
+decide, and the boundary corpus was re-derived to plant against the new predicate. Measured after:
+
+    DepthNearCensus { compared: 72, identical: 72, gpu_below: 0, gpu_above: 0, max_ulps: 0 }
+    verdict disagreements: 0 of 72
+    24 EXACT-TIE KEEP probes, 24 strict KEEP probes, 24 strict REJECT probes
+
+The tie arm is what proves `<` is strict, and it is now reachable by construction rather than by
+luck: the plant uses `z = near·2^k` and `occ = 2^-k`, both dyadic, so the tie is exact on both sides.
+
+**One thing the fix cost, and it is the part worth remembering.** Re-pinning the artifact census
+showed `op_ford_less_than` going DOWN by two at the exact step that ADDED a per-corner comparison —
+because `!(cz < bound)` lowers to `OpFUnordGreaterThanEqual`, which the census had no field for. A
+census that counts only the ordered compare would have read a verdict's *deletion* as a small
+decrease and pinned it without comment. The field was added
+(`op_funord_greater_than_equal: 4`, two of them the verdict, one per inlined copy).
+
+---
+
+### The finding as originally recorded
+
+**Not a blocker. Recorded because it is a MEASURED correctness finding, and because the fork it
+opened was mine to decide — the owner should be able to overrule it before it ships.**
+
+VG R3 piece 3 step P3-4 (the occlusion leaf) is in the working tree, uncommitted. Its new gate
+`crates/boyko_app/tests/hzb_verdict_oracle_gate.rs` runs four corpora. Three pass, including the
+131,072-pair random corpus and the sentinel corpus. The fourth — exact tangency — fails on its first
+probe:
+
+    [64x48 boundary probe 0 (equal)] batch 0: the record's instanceCount is 0 but the oracle
+    keeps 1 of 1 instances early. (deferred: gpu 1 / oracle 0)
+
+The GPU **rejects** where the oracle **keeps**. The shader's comparison
+(`vb_batch_cull.comp.hlsl:872`) is `return depth_near < occ;` — strict, and correct: equality must
+keep. So the operator is right and the VALUE differs — the shader's `depth_near` lands below the
+host's. The shader's own comment at `:766-767` named this in advance as *the geometry-deleting
+direction*, and the fixture's comment at `:1309-1313` predicted the exact signature: a 1-ULP
+disagreement "would show up as a failure on the exactly-equal arm and nowhere else."
+
+**Both predictions were written before the run, and both came true.** The gate is working. This is
+the campaign's eighth instance of the pattern — and the first where the instrument caught the defect
+instead of being vacuous over it.
+
+### The measurement, and what it overturned
+
+A `-D VB_CULL_DEBUG_PROBE=1` variant now exports the shader's own `depth_near`, level and taps, so
+the divergence is OBSERVED rather than inferred. The shipping module is untouched: the
+macro-undefined source preprocesses character-identically and `vb_batch_cull_spv_byte_identical`
+stays green, so the numbers describe the module that actually ships. Over 72 boundary probes:
+
+    DepthNearCensus { compared: 72, identical: 66, gpu_below: 3, gpu_above: 3, max_ulps: 1, incomparable: 0 }
+    verdict disagreements: 2 of 72   (one host=Early gpu=Late, one host=Late gpu=Early)
+
+**This overturns the first reading above.** The divergence is NOT in the geometry-deleting
+direction — `gpu_below` and `gpu_above` are 3 and 3, and the two verdict disagreements point
+opposite ways. It is symmetric rounding at 1 ULP, not a bias. The first reading came from a single
+probe, which is exactly the sample size at which a direction claim is worth nothing.
+
+`level` and all four `taps` are IDENTICAL on every one of the 72 probes, so the window rect and the
+level selection already agree exactly and only the depth differs.
+
+### The cause, and why it closes option (A)
+
+Under the corpus matrix, row2 = `[0,0,0,near]` and row3 = `[0,0,1,0]`, so `cz = near` and `cw = z`
+are exact and bit-identical on both sides — corroborated by the identical taps. The only inexact
+step left is the reciprocal. Vulkan's precision appendix specifies `OpFAdd`/`OpFSub`/`OpFMul` as
+correctly rounded but allows **`OpFDiv` 2.5 ULP** at 32-bit; Rust's divide is the IEEE 0.5-ULP one.
+`precise` emits `NoContraction`, which constrains contraction and reassociation and says NOTHING
+about a division's ULP allowance.
+
+So **(A) as originally posed is dead** — not expensive, *impossible*: no amount of tightening the
+existing fold reaches bit-exactness, because the gap is a spec allowance, not a code shape. The
+shader comment at `:909-910`, which claims `precise` "forbids substituting a reciprocal-estimate",
+is a false claim and is being corrected.
+
+**(B) is also wrong now** that the direction is known: rounding UP would trade one arbitrary
+direction for another, and the 1-ULP bound it would lean on is measured on 72 probes on ONE device
+while the spec permits 2.5.
+
+### What is being done instead: remove the division from the DECISION
+
+For `cw_i > 0` — already guarded by the behind-eye early-out —
+
+    max_i (cz_i / cw_i) < occ    <=>    for all i:  cz_i  <  occ * cw_i
+
+The right-hand form is one correctly-rounded multiply under `NoContraction`, so the shader and the
+oracle agree **by construction** rather than within a tolerance, and it is *cheaper* than the divide.
+That is an exact reformulation, not a relaxation and not a bias — which is why it is preferred over
+every option originally listed. The window rect keeps its divide, which is measured to agree exactly.
+
+**(C) — declare tangency untestable and relax the arm — stays rejected**, and is now unnecessary.
+
+---
+
 ## KNOWN FRICTIONS — no decision needed, recorded so they are not rediscovered
 
 - **`target/` grows without bound and silently breaks builds.** It reached 73 GB and hit zero free

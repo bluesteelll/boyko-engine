@@ -566,6 +566,34 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// VG R3 piece 3 step P3-4: the `-D VB_CULL_DEBUG_PROBE=1` DIAGNOSTIC variant of the batch cull
+    /// (`shaders/vb_batch_cull.comp.hlsl`, the SAME source as [`VB_BATCH_CULL_SPV`]).
+    ///
+    /// Identical in every computation, and it declares one binding more: `VbCullDebug` @12, an
+    /// 8-word-per-instance record written at EVERY exit of `occlusion_reject` — the stage that
+    /// fired, `depth_near`, `occ`, the selected level and the four tap coordinates.
+    ///
+    /// It exists because `hzb_verdict_oracle_gate.rs`'s boundary corpus can observe only the
+    /// PARTITION. It was built to diagnose a verdict disagreement whose cause could not be read off
+    /// a partition, and it did: 72 probes, `depth_near` differing by at most 1 ULP in BOTH
+    /// directions, `level` and all four taps identical — which located the divergence at the one
+    /// operation Vulkan does not specify to 0.5 ULP, `OpFDiv`. The verdict no longer divides (see
+    /// the shader's step 6), and the same corpus now reports zero disagreements.
+    ///
+    /// `depth_near` survives HERE and nowhere else: it is computed only under the macro, so the
+    /// shipping module does not spell the quantity that used to decide.
+    ///
+    /// ⚠️ NOTHING IN THE ENGINE BINDS OR DISPATCHES THIS. The only consumer is the gate, which
+    /// builds its own thirteen-binding layout for it. With the macro undefined the source
+    /// preprocesses character-identically, so the seam ITSELF cannot move [`VB_BATCH_CULL_SPV`] —
+    /// which is a property of the token stream, not a standing promise that the base artifact never
+    /// changes: the division-free verdict moved both. `tests/vb_batch_cull_spv_sync.rs` gates both
+    /// against their own re-DXC.
+    VB_BATCH_CULL_DEBUG_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_batch_cull_debug.comp.spv")
+}
+
+embed_spirv! {
     /// VG R3 piece 1 step P1-3: the committed hierarchical-Z depth-pyramid BUILD SPIR-V
     /// (`shaders/hzb_build.comp.hlsl`).
     ///
@@ -1868,6 +1896,32 @@ pub const VB_BATCH_DESC_STRIDE: u32 = 32;
 pub fn vb_batch_cull_spirv() -> &'static [u32] {
     VB_BATCH_CULL_SPV.as_words()
 }
+
+/// VG R3 piece 3 step P3-4: the `-D VB_CULL_DEBUG_PROBE=1` diagnostic batch-cull SPIR-V as a `u32`
+/// word stream. See [`VB_BATCH_CULL_DEBUG_SPV`]'s doc.
+///
+/// Bound to the base twelve-binding cull set PLUS `RWStructuredBuffer<uint> VbCullDebug` @12, sized
+/// [`VB_CULL_DEBUG_RECORD_WORDS`] `u32` per INSTANCE SLOT. Its only caller is
+/// `boyko_app/tests/hzb_verdict_oracle_gate.rs`; no engine path creates a set for it.
+#[inline]
+pub fn vb_batch_cull_debug_spirv() -> &'static [u32] {
+    VB_BATCH_CULL_DEBUG_SPV.as_words()
+}
+
+/// VG R3 piece 3 step P3-4: the ARITY of the DIAGNOSTIC cull variant's descriptor-set layout —
+/// [`VB_CULL_LAYOUT_BINDINGS`] plus the one `VbCullDebug` sink at @12.
+///
+/// Derived from the base arity rather than written as `13`, so widening the base layout moves this
+/// one with it instead of silently aliasing the sink onto a real binding.
+pub const VB_CULL_DEBUG_LAYOUT_BINDINGS: u32 = VB_CULL_LAYOUT_BINDINGS + 1;
+
+/// VG R3 piece 3 step P3-4: the `u32` word count of ONE `VbCullDebug` record — the shader's
+/// `VB_DBG_RECORD_WORDS`.
+///
+/// `{ stage, asuint(depth_near), asuint(occ), level, tap_x0, tap_x1, tap_y0, tap_y1 }`. The two
+/// spellings cannot be one symbol across the language boundary; the gate that reads the records is
+/// what holds them together, by asserting every written record's stage word is a legal stage.
+pub const VB_CULL_DEBUG_RECORD_WORDS: u32 = 8;
 
 /// The committed Render P4b coarse-cull / tile pre-trace SPIR-V as a `u32` word
 /// stream, ready for

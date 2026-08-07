@@ -107,6 +107,10 @@
 //! maximum over a convex polytope is attained at a VERTEX. The `w > 0` guard is what buys that
 //! argument; without it the claim is simply false.
 //!
+//! ⚠️ [`ScreenRect::depth_near`] is REPORTED, NOT DECIDING. It is the hand-computable quantity every
+//! fixture in this module is written against, and it is what the GPU differential's census measures
+//! itself against — but the verdict does not read it. See "The verdict" below for why it cannot.
+//!
 //! ## The guards, each erring toward KEEP
 //!
 //! Every guard below returns a named [`KeepReason`]. There is no clamping, no "best effort": the
@@ -144,9 +148,37 @@
 //!
 //! ## The verdict
 //!
-//! Reject iff `depth_near < occ`, STRICTLY. Equality keeps: the soundness proof yields
-//! `occ ≤ D[p] ≤ d_i(p) ≤ depth_near` for a visible instance, so `depth_near == occ` is a
-//! legitimate visible case and a `<=` here would delete it.
+//! Reject iff **every** projected corner satisfies `clip.z < occ · clip.w`, STRICTLY. Equality
+//! keeps: the soundness proof yields `occ ≤ D[p] ≤ d_i(p) ≤ depth_near` for a visible instance, so
+//! a corner sitting exactly ON `occ` is a legitimate visible case and a `<=` here would delete it.
+//!
+//! ### Why it is not written `depth_near < occ`
+//!
+//! Every corner that reaches the verdict has `clip.w > 0` (that is what the [`KeepReason::BehindEye`]
+//! guard buys), and multiplying a strict inequality through by a POSITIVE denominator is an
+//! equivalence over the reals:
+//!
+//! ```text
+//!     max_i (cz_i / cw_i) < occ    ⟺    ∀i:  cz_i  <  occ · cw_i
+//! ```
+//!
+//! The two forms differ only in FLOATING-POINT, and the difference is the whole reason for the
+//! right-hand one. This oracle has a mirror — `vb_batch_cull.comp.hlsl`'s `occlusion_reject` — whose
+//! verdict must be the same function of the same bits. Vulkan's precision appendix specifies
+//! `OpFAdd`/`OpFSub`/`OpFMul` as CORRECTLY ROUNDED but permits `OpFDiv` 2.5 ULP at 32-bit, while
+//! Rust's `/` is the IEEE 0.5-ULP one; and `precise` in HLSL emits `NoContraction`, which constrains
+//! contraction and reassociation and says NOTHING about a division's accuracy. So the quotient form
+//! cannot be made to agree — not expensively, not at all — and the GPU differential MEASURED the
+//! consequence: over 72 boundary probes the rect, the level and all four pyramid taps were identical
+//! while `depth_near` differed on 6 by one ULP, in both directions, flipping 2 verdicts.
+//!
+//! The multiplied form spends one correctly-rounded product per corner, so the two implementations
+//! agree BY CONSTRUCTION rather than within a tolerance.
+//!
+//! ⚠️ It is a UNIVERSAL test over all eight corners and never a test on the argmax. Reducing to "the
+//! nearest corner" first requires comparing two quotients — the same rounding question, reintroduced
+//! — and the corner not chosen would then never be tested at all. [`ScreenRect::behind_occluder`] has
+//! no selection step to get wrong.
 
 use core::fmt;
 
@@ -598,8 +630,8 @@ pub enum KeepReason {
     /// The selector asked for a level this pyramid does not have. Never produced by
     /// [`project_aabb`].
     LevelUnavailable,
-    /// The test ran to completion and `depth_near >= occ`. Never produced by [`project_aabb`] or
-    /// [`select_texels`].
+    /// The test ran to completion and some corner was NOT strictly behind the occluder
+    /// (`clip.z >= occ · clip.w`). Never produced by [`project_aabb`] or [`select_texels`].
     NotOccluded,
 }
 
@@ -621,8 +653,8 @@ impl OcclusionVerdict {
     }
 }
 
-/// An AABB's screen footprint: an INCLUSIVE pixel rect already clamped to the framebuffer, plus
-/// the bound's nearest depth.
+/// An AABB's screen footprint: an INCLUSIVE pixel rect already clamped to the framebuffer, the
+/// bound's nearest depth, and the eight corners' UNDIVIDED clip depths.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScreenRect {
     /// Inclusive minimum pixel `[x, y]`.
@@ -631,7 +663,44 @@ pub struct ScreenRect {
     pub max: [u32; 2],
     /// The largest `z_ndc` over the eight corners — under reverse-Z, the NEAREST depth the bound
     /// can have.
+    ///
+    /// ⚠️ REPORTED, NOT DECIDING. Every fixture in this module is written against this number
+    /// because it is hand-computable, and the GPU differential's census measures the shader's own
+    /// against it — but [`occlusion_verdict`] does not read it. See the module header's "Why it is
+    /// not written `depth_near < occ`".
     pub depth_near: f32,
+    /// Each corner's `(clip.z, clip.w)`, in [`project_aabb`]'s own corner order
+    /// (`bit0 → x, bit1 → y, bit2 → z`, `0` picks min). Every `clip.w` is `> 0`: a corner that is
+    /// not leaves through [`KeepReason::BehindEye`] before this array is completed.
+    ///
+    /// UNDIVIDED on purpose — this is the pair the verdict multiplies, and the quotient is the one
+    /// step neither implementation can round the same way.
+    pub corner_zw: [[f32; 2]; 8],
+}
+
+impl ScreenRect {
+    /// THE REJECT PREDICATE: `true` iff EVERY projected corner is strictly behind depth `occ`.
+    ///
+    /// `∀i: cz_i < occ · cw_i`, which for `cw_i > 0` is `max_i (cz_i / cw_i) < occ` — the same
+    /// verdict, written so that the mirror in `vb_batch_cull.comp.hlsl` can compute it bit for bit.
+    /// One correctly-rounded multiply per corner, no division, no reduction to an argmax; the module
+    /// header carries the derivation and the measurement that forced it.
+    ///
+    /// STRICT: a corner meeting `occ · cw_i` exactly KEEPS, because the soundness chain
+    /// `occ ≤ D[p] ≤ d_i(p) ≤ depth_near` admits equality and a `<=` would delete a visible bound.
+    ///
+    /// `occ` may legitimately be `f32::NEG_INFINITY` — [`conservative_min`]'s reading of an unknown
+    /// depth. Then `occ · cw_i` is `-∞` for every `cw_i > 0` and no corner is strictly below it, so
+    /// the answer is `false` = KEEP, which is exactly what "unknown depth is infinitely far" must
+    /// mean.
+    #[inline]
+    #[must_use]
+    pub fn behind_occluder(&self, occ: f32) -> bool {
+        // `cz < occ * cw` and never `!(cz >= ...)`: a NaN would make the comparison false and stop
+        // the fold at KEEP. Unreachable here (both finiteness guards have already returned and
+        // `conservative_min` yields no NaN), and stated as unreachable rather than handled.
+        self.corner_zw.iter().all(|&[cz, cw]| cz < occ * cw)
+    }
 }
 
 /// The ≤4 texels the test samples, and the level they live on.
@@ -716,6 +785,12 @@ pub fn project_aabb(
     let mut y_lo = f32::INFINITY;
     let mut y_hi = f32::NEG_INFINITY;
     let mut depth_near = f32::NEG_INFINITY;
+    // The verdict's operands, carried UNDIVIDED. The seed pair is a KEEP under
+    // [`ScreenRect::behind_occluder`] for EVERY `occ`: the test becomes `0 < occ · 0`, i.e. `0 < 0`
+    // for a finite `occ` and `0 < NaN` for an infinite one, and both are false. So a partly filled
+    // array could never read as "behind everything" — and it is in any case filled completely or
+    // never observed, because every guard in this loop RETURNS.
+    let mut corner_zw = [[0.0f32; 2]; 8];
 
     for corner in 0..8u32 {
         let p = [
@@ -752,6 +827,7 @@ pub fn project_aabb(
         y_lo = y_lo.min(y_win);
         y_hi = y_hi.max(y_win);
         depth_near = depth_near.max(z_ndc);
+        corner_zw[corner as usize] = [cz, cw];
     }
 
     // A pixel `i` covers `[i, i+1)`, so the pixels a span touches are `floor(lo) ..= floor(hi)`.
@@ -776,6 +852,7 @@ pub fn project_aabb(
         min: [px0 as u32, py0 as u32],
         max: [px1 as u32, py1 as u32],
         depth_near,
+        corner_zw,
     })
 }
 
@@ -826,8 +903,8 @@ pub fn occluder_depth(layout: &HzbLayout, pyramid: &[f32], selection: &TexelSele
 
 /// THE ORACLE: the late-pass verdict for one instance's world AABB.
 ///
-/// Sentinel → projection guards → level selection → `depth_near < occ`. Every step that cannot
-/// answer confidently returns a named [`KeepReason`]; only the final strict comparison can
+/// Sentinel → projection guards → level selection → [`ScreenRect::behind_occluder`]. Every step that
+/// cannot answer confidently returns a named [`KeepReason`]; only the final strict comparison can
 /// produce [`OcclusionVerdict::Reject`].
 ///
 /// # Panics
@@ -851,8 +928,9 @@ pub fn occlusion_verdict(
         Err(reason) => return OcclusionVerdict::Keep(reason),
     };
     let occ = occluder_depth(layout, pyramid, &selection);
-    // STRICT `<`. Equality is a legitimate visible case — see the module header.
-    if rect.depth_near < occ {
+    // STRICT `<`, over EVERY corner, with no division. Equality is a legitimate visible case, and
+    // the quotient form cannot be made bit-identical to the shader's — see the module header.
+    if rect.behind_occluder(occ) {
         OcclusionVerdict::Reject
     } else {
         OcclusionVerdict::Keep(KeepReason::NotOccluded)
@@ -883,6 +961,14 @@ mod tests {
     /// The anchor source extent: **7 × 3**. Odd on both axes, and `prev_pow2` bites on both.
     const ANCHOR_W: u32 = 7;
     const ANCHOR_H: u32 = 3;
+
+    /// [`ScreenRect::corner_zw`]'s filler for a rect built BY HAND to decide the SELECTOR.
+    ///
+    /// [`select_texels`] reads `min`/`max` and nothing else, so no clip pair reaches any assertion
+    /// in the fixtures that use this. A rect that also has to decide the VERDICT must come out of
+    /// [`project_aabb`] instead — [`ScreenRect::behind_occluder`] would read these zeros, and
+    /// `0 < occ · 0` is false, i.e. an unconditional KEEP.
+    const SELECTOR_ONLY: [[f32; 2]; 8] = [[0.0; 2]; 8];
 
     /// The SECOND anchor extent, **8 × 16**, used by exactly one fixture: the one that must land a
     /// projected window coordinate on an EXACT integer. `7 × 3` cannot — `half_w = 3.5` would need
@@ -1052,12 +1138,14 @@ mod tests {
     fn anchor_selector_and_occluder_depth() {
         let (l, p) = anchor_pyramid();
 
-        let wide = ScreenRect { min: [1, 0], max: [5, 2], depth_near: 0.0 };
+        let wide =
+            ScreenRect { min: [1, 0], max: [5, 2], depth_near: 0.0, corner_zw: SELECTOR_ONLY };
         let s = select_texels(&l, &wide).expect("invariant: level 1 exists in a 3-level pyramid");
         assert_eq!(s, TexelSelection { level: 1, tx: [0, 1], ty: [0, 0] });
         assert_eq!(occluder_depth(&l, &p, &s), 0.05);
 
-        let tight = ScreenRect { min: [3, 1], max: [3, 1], depth_near: 0.0 };
+        let tight =
+            ScreenRect { min: [3, 1], max: [3, 1], depth_near: 0.0, corner_zw: SELECTOR_ONLY };
         let s = select_texels(&l, &tight).expect("invariant: level 0 always exists");
         assert_eq!(s, TexelSelection { level: 0, tx: [1, 1], ty: [0, 0] });
         assert_eq!(occluder_depth(&l, &p, &s), 0.55);
@@ -1093,7 +1181,8 @@ mod tests {
         assert_eq!((l.x().texel_of(0), l.x().texel_of(2)), (0, 1));
         assert_eq!((l.y().texel_of(1), l.y().texel_of(5)), (0, 2));
 
-        let rect = ScreenRect { min: [0, 1], max: [2, 5], depth_near: 0.0 };
+        let rect =
+            ScreenRect { min: [0, 1], max: [2, 5], depth_near: 0.0, corner_zw: SELECTOR_ONLY };
         let s = select_texels(&l, &rect).expect("invariant: a 3-level pyramid has level 1");
         assert_eq!(
             s,
@@ -1392,11 +1481,16 @@ mod tests {
     /// `0.46875`. Every value is dyadic, so both are exact in `f32`.
     ///
     /// Which way does the wrong form err? While every `clip.z > 0` it OVER-states `depth_near`
-    /// (`max z / min w ≥ z_j / w_j` for every corner `j`), and since the predicate is
-    /// `depth_near < occ` that only keeps too much — harmless. The moment one corner has
-    /// `clip.z < 0`, which under reverse-Z is a bound reaching past the far plane, the same
-    /// expression UNDER-states `depth_near` and the error becomes a false REJECT. The oracle has
-    /// to be right, not merely conservative for the matrices it happens to be handed.
+    /// (`max z / min w ≥ z_j / w_j` for every corner `j`), and since a larger `depth_near` only
+    /// makes the reject condition harder to meet, that keeps too much — harmless. The moment one
+    /// corner has `clip.z < 0`, which under reverse-Z is a bound reaching past the far plane, the
+    /// same expression UNDER-states `depth_near` and the error becomes a false REJECT. The oracle
+    /// has to be right, not merely conservative for the matrices it happens to be handed.
+    ///
+    /// The VERDICT no longer folds this quantity at all — [`ScreenRect::behind_occluder`] tests
+    /// every corner and so has no extremum to pick wrongly — but `depth_near` is still reported, and
+    /// a reported number that is silently the wrong function of the corners is worse than one that
+    /// decides, because nothing downstream would catch it. This fixture is what catches it.
     #[test]
     fn depth_near_is_the_max_of_the_quotients_not_the_quotient_of_the_extremes() {
         let mut pv = anchor_view_proj();
@@ -1643,7 +1737,7 @@ mod tests {
             }
 
             for (min, max) in rects {
-                let rect = ScreenRect { min, max, depth_near: 0.0 };
+                let rect = ScreenRect { min, max, depth_near: 0.0, corner_zw: SELECTOR_ONLY };
                 let sel = select_texels(&l, &rect)
                     .expect("invariant: a complete pyramid always has the selected level");
                 if sel.level == 0 {
@@ -1692,7 +1786,12 @@ mod tests {
     #[test]
     fn two_texels_per_axis_stop_covering_below_the_selected_level() {
         let l = HzbLayout::new(1919, 1079).expect("invariant: 1919x1079 is legal");
-        let rect = ScreenRect { min: [0, 0], max: [1918, 1078], depth_near: 0.0 };
+        let rect = ScreenRect {
+            min: [0, 0],
+            max: [1918, 1078],
+            depth_near: 0.0,
+            corner_zw: SELECTOR_ONLY,
+        };
         let sel = select_texels(&l, &rect).expect("invariant: 1919x1079 has 11 levels");
         assert_eq!(sel.level, 9, "the fixture must land on the coarse end of the chain");
         assert_eq!(sel.tx, [0, 1], "at the selected level the two samples are ADJACENT");
@@ -1990,8 +2089,13 @@ mod tests {
         assert_eq!(clamped.tx, [0, 2], "at level 0 the two samples skip texel column 1 entirely");
         let clamped_occ = occluder_depth(&stopped, &stopped_pyramid, &clamped);
         assert_eq!(clamped_occ, 0.10, "min(0.75, 0.35, 0.10, 0.15)");
+        // Run through the SHIPPED PREDICATE, not through `depth_near`: `depth_near` no longer
+        // decides anything, so an assertion on it would state the consequence of a number the cull
+        // does not read. `rect.depth_near < clamped_occ` (0.0625 < 0.10) still holds and is already
+        // asserted above as a property of the FIXTURE's geometry; what has to be executed here is
+        // the VERDICT.
         assert!(
-            rect.depth_near < clamped_occ,
+            rect.behind_occluder(clamped_occ),
             "a clamped-down cull would REJECT box E — that is the deleted geometry the \
              LevelUnavailable KEEP exists to prevent"
         );

@@ -387,11 +387,14 @@ pub(crate) const VB_CULL_HZB_BINDING: u32 = 9;
 /// pixel change until something loaded from the wrong buffer. That is what
 /// [`vb_cull_layout_table_is_well_formed`] exists to make a BUILD error.
 ///
-/// ⚠️ Five of the twelve are bound-but-unread at this step: the shipped `vb_batch_cull.comp.spv`
-/// still declares seven. That direction is legal — a WRITTEN descriptor a shader never loads from
+/// ⚠️ All twelve are read by the module since step P3-4; between P3-2 and P3-4 the last five were
+/// bound-but-unread, which is the legal direction — a WRITTEN descriptor a shader never loads from
 /// is never dereferenced, so the bound set may legally exceed what the module declares. The reverse
 /// is a `debug_assert` in `create_bind_group` (`entries.len() == layout.entry_count`), which is why
-/// the layout and the set move in ONE commit and the shader lags rather than leads.
+/// the layout and the set moved in ONE commit and the shader lagged rather than led.
+/// `tests/vb_batch_cull_spv_sync.rs` asserts each of @7..@11 in its own named assertion, because
+/// DXC STRIPS a declared-but-unloaded resource and their presence is therefore the artifact-level
+/// proof that the load is real.
 const VB_CULL_LAYOUT_ENTRIES: [BindGroupLayoutEntry; VB_CULL_LAYOUT_BINDINGS as usize] = {
     // Every binding in this table is a single COMPUTE storage buffer except @9, so the table is
     // written as a fold over that rule instead of twelve near-identical literals — the shape a
@@ -4096,10 +4099,11 @@ impl GpuSceneBundles {
         // `.expect()`s them under the split predicate rather than carrying three more `Option` arms
         // — the dead-conjunct trap `vb_indirect_late`'s own doc records.
         //
-        // BOUND at `vb_cull_layout` @7/@8/@11 in this same step and READ BY NOTHING: the shipped
-        // cull module still declares seven bindings. That is the `gVbVisibleInstance` @6 pattern
-        // held one step — the descriptor arrives before its consumer, so the consumer step changes
-        // shader code alone.
+        // BOUND at `vb_cull_layout` @7/@8/@11 in this same step, and READ by the cull module since
+        // step P3-4 — which is the `gVbVisibleInstance` @6 pattern completing: the descriptor
+        // arrived one step before its consumer, so the consumer step changed shader code alone. The
+        // uniform @8 is read on EVERY frame; @7 and @11 only under `VB_CULL_OCC_ARMED`, which the
+        // host still pushes as `0` until the P3-6 arming commit.
         //
         // The candidate/survivor list. `TRANSFER_SRC` is what the P3-5 readback probe will copy
         // through; `TRANSFER_DST` is declarative (`create_buffer` already ORs both TRANSFER bits

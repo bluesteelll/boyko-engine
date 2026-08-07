@@ -2775,10 +2775,12 @@ pub(crate) struct VbPassPlan {
     /// `vb_indirect_late_upload (TRANSFER_WRITE) → vb_cull_late (SHADER_WRITE) → vb_raster_late
     /// (INDIRECT_COMMAND_READ)`, plus `vb_cull_readback_late (TRANSFER_READ)` on probe frames.
     ///
-    /// ⚠️ IT DISPATCHES A NO-OP IN THIS STEP. The module's `pc.phase` fork is a bare `return`, so a
-    /// phase-1 dispatch reads no buffer and writes none; the phase-1 body lands at P3-4. The fork
-    /// and this dispatch are ONE commit deliberately — without the fork, phase 1 would re-run phase
-    /// 0's body and rewrite the early lists after the early raster had fetched them.
+    /// ⚠️ ITS PHASE-1 BODY IS REAL SINCE STEP P3-4 AND STILL WRITES ONLY ZEROS. The loop bound is
+    /// `VbLateCount[i]`, which the early phase writes only under `VB_CULL_OCC_ARMED` and which the
+    /// late phase reads as `0` without it — so the compaction runs zero iterations and stores the
+    /// `instanceCount = 0` the host upload already seeded. The fork and this dispatch were ONE
+    /// commit deliberately: without the fork, phase 1 would re-run phase 0's body and rewrite the
+    /// early lists after the early raster had fetched them.
     pub(crate) vb_cull_late: Option<crate::framegraph::PassId>,
     /// VG R3 piece 3 step P3-3 (plan D8): the POST-late readback snapshot — `vb_late_visible`'s
     /// compacted prefix, `vb_late_count` again (the no-clobber clause) and `vb_indirect_late`'s
@@ -4064,8 +4066,10 @@ impl Renderer<'_> {
                 // ⚠️ AND IT MOVES THE UNSPLIT STREAM. This is the one declaration in P3-3 that a
                 // frame WITHOUT the occlusion split derives a barrier from: every VB frame that
                 // records the cull gains one `TRANSFER(TRANSFER_WRITE) → COMPUTE(SHADER_READ)`
-                // buffer barrier inside this pass. It moves no pixel — the buffer is read by no
-                // shader until P3-4 — so every golden pin is byte-identical; what it moves is
+                // buffer barrier inside this pass. It moved no pixel when it landed — the buffer
+                // was read by no shader until P3-4, and since P3-4 the values it carries reach a
+                // verdict only under `VB_CULL_OCC_ARMED`, which the host pushes as `0` until P3-6 —
+                // so every golden pin is byte-identical; what it moves is
                 // `tests/vb_barrier_stream_baseline.rs`'s U-rows as well as its S-rows.
                 g.buffer_access(
                     vb_cull_uniform,
@@ -4095,11 +4099,15 @@ impl Renderer<'_> {
                 // barrier naming a NULL image is a VUID, not a wasted edge. When D9 lands, this
                 // conjunct becomes redundant rather than wrong.
                 //
-                // The two list writes are declared even though the module cannot yet store to them
-                // (P3-2 bound them unread, P3-4 arms the stores): declaring the WRITE now is what
-                // makes `vb_late_count`'s first touch a write, which is the whole of the P2-8
-                // provenance coverage this piece gains — and what keeps `vb_cull_late`'s reads below
-                // from being first-touch reads of a bare `add_buffer`.
+                // The two list writes are declared unconditionally on a split frame while the
+                // module performs them only under `VB_CULL_OCC_ARMED` (P3-4's stores are gated on
+                // that bit). DECLARED is therefore a superset of PERFORMED, which is the safe
+                // direction — a barrier nobody needed, never a write nobody barriered — and it is
+                // what makes `vb_late_count`'s first touch a write, the whole of the P2-8 provenance
+                // coverage this piece gains, and what keeps `vb_cull_late`'s reads below from being
+                // first-touch reads of a bare `add_buffer`. ⚠️ Step P3-6 owes the containment its
+                // other half: `VB_CULL_OCC_ARMED` must imply `path_vb_occlusion_split()`, or the
+                // module would store where nothing declared it.
                 if occlusion_split {
                     if let Some(levels) = hzb_levels {
                         g.image_access(
