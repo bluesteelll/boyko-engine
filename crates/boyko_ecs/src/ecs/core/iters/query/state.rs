@@ -149,6 +149,12 @@ impl<D: QueryData, F: QueryFilter> QueryDataState<D, F> {
     /// (vs table-seeded) additionally requires `is_empty_include()` at runtime
     /// (see [`Self::use_dense_seed`]) — this const is the compile-time upper
     /// bound of the dense-enable shape family (D6 shape table).
+    // Outside `#[cfg(test)]` this const has exactly ONE consumer — the
+    // `#[cfg(debug_assertions)]` desync guard in `enable_driver_ids` — so a release
+    // build sees it as dead. That is the shape, not a defect: it is a compile-time
+    // classification whose whole job is to switch a debug-only invariant check on.
+    // Without this the release `-D warnings` leg reds on a const the debug leg needs.
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
     const IS_DENSE_ENABLE: bool = Self::HAS_DENSE_INCLUDE && Self::HAS_ENABLE_TERM;
 
     /// The shape-assert body (amendment A3 / Step 7a). Called from BOTH the

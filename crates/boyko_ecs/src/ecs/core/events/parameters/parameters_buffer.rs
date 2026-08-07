@@ -30,12 +30,19 @@ mod tests {
 
     /// Same size as `ParamA` (8 bytes) but a distinct type —
     /// exactly the "size match but type mismatch" hazard Q-019 guards against.
+    ///
+    /// Carries its only consumers' `#[cfg(debug_assertions)]` (both Q-019 panic tests
+    /// are gated that way, since `debug_assert!` is what they exercise), so a release
+    /// build has no user for it and `-D warnings` reds. The cfg is structural: a future
+    /// non-debug consumer fails to compile rather than silently reviving dead code.
+    #[cfg(debug_assertions)]
     #[derive(Clone, Copy, PartialEq, Debug)]
     struct ParamB {
         speed: f32,
         friction: f32,
     }
 
+    #[cfg(debug_assertions)]
     impl Parameters for ParamB {}
 
     const DUMMY_EVENT_ID: EventId = 0;

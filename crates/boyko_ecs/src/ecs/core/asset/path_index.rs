@@ -128,6 +128,12 @@ impl PathIndex {
     /// [`lookup`](Self::lookup) — see the module doc's uniqueness invariant.
     /// In a debug build, a hash already stored for a DIFFERENT `path` trips a
     /// `debug_assert!` (see the module doc's collision guard).
+    // `path`'s ONLY consumers are the two `#[cfg(debug_assertions)]` blocks below (the
+    // collision guard and the `debug_paths` push), so a release build genuinely has no
+    // use for it — `-D warnings` on the release leg reds without this. Renaming it
+    // `_path` would be wrong: it is load-bearing in the profile that matters for the
+    // guard, and the underscore would read as "ignored" at every call site.
+    #[cfg_attr(not(debug_assertions), allow(unused_variables))]
     pub(crate) fn insert(&mut self, path: &str, hash: u64, slot: u32, generation: u32) {
         if self.lookup(hash).is_some() {
             // `debug_paths` is `#[cfg(debug_assertions)]`-only, so the whole

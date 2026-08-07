@@ -162,6 +162,12 @@ fn build_baseline_schedule(world: &mut EcsMaster) -> Schedule {
 /// A SEPARATE schedule, so advancing the tick does not run (and thus does not
 /// advance the `last_run` of) the propagation system. See the
 /// `gates_composition_structural` harness doc.
+///
+/// Carries its only caller's `#[cfg(debug_assertions)]` — the gate at `:188` is
+/// debug-only, so a release build has no user for this helper and `-D warnings`
+/// reds on it. Structural rather than `allow(dead_code)`: a future release-profile
+/// caller fails to compile and says so, instead of quietly reviving dead code.
+#[cfg(debug_assertions)]
 fn build_ticker(world: &mut EcsMaster) -> Schedule {
     let pool = ThreadPoolBuilder::new().num_threads(2).build();
     let mut b = ScheduleBuilder::new(pool);
