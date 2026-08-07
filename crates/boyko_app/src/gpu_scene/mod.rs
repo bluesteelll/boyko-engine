@@ -67,11 +67,11 @@ use boyko_rhi_vulkan::memory::BoundBuffer;
 // VG R3 piece 1 step P1-2: the depth pyramid's derived-scalar carrier. Named through
 // `present` (its home) rather than the legacy `swapchain` shim below, which exists only to
 // preserve pre-decomposition paths.
-// VG R3 piece 3 step P3-6: the occlusion flag word's three bits, named from their home so the
-// host fold and the shader's mirrored constants have one spelling between them.
-use boyko_rhi_vulkan::present::{
-    HzbPlan, VB_CULL_OCC_ARMED, VB_CULL_OCC_FORCE_KEEP, VB_CULL_OCC_FORCE_LATE,
-};
+// VG R3 piece 3 step P3-6: the occlusion flag word's ARMED bit, named from its home so the host
+// fold and the shader's mirrored constant have one spelling between them. The two FORCE bits left
+// this file at piece 4 rung P4-4 — they now ride `VbOcclusionArm::force_flags`, minted by
+// `crate::occlusion_arm` from the diagnostic Resource and threaded per frame.
+use boyko_rhi_vulkan::present::{HzbPlan, VB_CULL_OCC_ARMED, VbOcclusionArm};
 use boyko_rhi_vulkan::rhi_impl::{
     ComputePipeline, VulkanBindGroup, VulkanBindGroupLayout, VulkanGraphicsPipeline,
     VulkanQueryPool, VulkanSampler, VulkanShaderModule, rebind_storage_buffer,
@@ -1492,14 +1492,6 @@ pub(crate) struct GpuSceneBundles {
     /// VG rung R2c-tail: the per-FIF host-visible READBACK staging for the cull's outputs —
     /// `Some` only under `BOYKO_VB_CULL_READBACK`. See [`Self::read_vb_cull`].
     pub(crate) vb_cull_readback: Option<[BoundBuffer; FRAMES_IN_FLIGHT]>,
-    /// VG R3 piece 3 step P3-6 (plan D6): the FORCE half of `GBufferScene::vb_occ_flags` —
-    /// `VB_CULL_OCC_FORCE_KEEP`, `VB_CULL_OCC_FORCE_LATE` or `0`, decoded ONCE at boot from
-    /// `BOYKO_VG_OCC_FORCE` (see `boot`'s comment for the regimes and for why it is not per-frame).
-    ///
-    /// `0` on every committed golden pin. `scene()` OR-s it into the word beside
-    /// `VB_CULL_OCC_ARMED`, and only on a frame that takes the split — the FORCE bits are
-    /// meaningless without the ARMED bit, and the shader tests them only inside its guard.
-    pub(crate) vb_occ_force_flags: u32,
     /// VG rung R2c0: the batch cull's own 1-set bind-group layout. Minted together with
     /// [`Self::vb_batch_cull_pipeline`] — the pairing `GBufferTargets` relies on when it builds
     /// the ring under a layout gate that `record_vb` then `.expect()`s under a pipeline gate.
@@ -4311,36 +4303,22 @@ impl GpuSceneBundles {
                 })
             });
 
-        // === VG R3 piece 3 step P3-6 (plan D6/D9): the FORCE selector, read ONCE at boot. ===
+        // === VG R3 piece 4 rung P4-4: the FORCE selector's `BOYKO_VG_OCC_FORCE` boot decode USED
+        // === to sit here, and it is gone.
         //
-        // `BOYKO_VG_OCC_FORCE ∈ {unset, "keep", "late"}` — the two production push bits that make
-        // the split's regimes reachable from a committed pin instead of from a debug build:
+        // It was shipping code — an `env::var` and a boot `panic!` — implementing a MEASUREMENT
+        // instrument, while the ARMING beside it was an ECS-derived per-frame predicate. Two
+        // sources of truth for one decision, and nothing checked them against each other. The
+        // regime is now `boyko_app::OcclusionForce`, a diagnostic Resource the fixtures insert
+        // (`boyko_app/tests/occ_fixture` owns the decode AND the insert, and the panic on an
+        // unknown regime moved with them), threaded per frame into `GBufferScene::vb_occlusion`'s
+        // payload so the arming and the regime travel in ONE `Option`.
         //
-        // * `keep` ⇒ `VB_CULL_OCC_FORCE_KEEP`: the early phase defers NOTHING, so the split runs
-        //   its full machinery over an empty candidate set. It is the one-variable baseline every
-        //   "did the DECISION change anything?" comparison needs, and — until piece 4 ships the
-        //   owner-facing config field — the named DISARM route.
-        // * `late` ⇒ `VB_CULL_OCC_FORCE_LATE`: the early phase defers EVERY marked instance, which
-        //   is the only regime in which a nonzero late-survivor count is reachable on a static
-        //   scene (plan D12's fixed point makes the unforced count correctly zero).
-        //
-        // ⚠️ READ AT BOOT, NEVER PER FRAME, and never in `runner.rs`. A per-frame `env::var` is a
-        // syscall and an allocation on the render path, and a knob that can change mid-run would
-        // make "which regime produced this capture?" unanswerable from the artifact.
-        //
-        // An unrecognised value is a hard panic rather than a silent `0`: a typo'd regime that
-        // renders the DEFAULT while the operator believes it forced one is how a control gets
-        // reported as green.
-        let vb_occ_force_flags = match std::env::var("BOYKO_VG_OCC_FORCE").as_deref() {
-            Ok("keep") => VB_CULL_OCC_FORCE_KEEP,
-            Ok("late") => VB_CULL_OCC_FORCE_LATE,
-            Err(_) => 0,
-            Ok(other) => panic!(
-                "BOYKO_VG_OCC_FORCE={other:?} is not a regime. Valid values are `keep` (defer \
-                 nothing — the zero control and the piece-3 disarm route) and `late` (defer every \
-                 marked instance). Unset selects the real occlusion decision."
-            ),
-        };
+        // The boot read's other rationale — a knob that can change mid-run makes "which regime
+        // produced this capture?" unanswerable from the artifact — is answered by RECORDING rather
+        // than by asserting constancy: `VbRecordProbe::occ_flags` is stamped from the word the
+        // recorder PUSHED, `VbProbeContext` carries the host's independent view beside it, and the
+        // bench summary reports the SET of distinct regime words it observed.
 
         // The batch cull's OWN 1-set layout — TWELVE bindings @0..@11 since VG R3 piece 3 step
         // P3-2 (seven @0..@6 from rung R2d-3). A DEDICATED layout rather than more bindings on
@@ -4657,7 +4635,6 @@ impl GpuSceneBundles {
             vb_late_count,
             vb_cull_uniform,
             vb_cull_readback,
-            vb_occ_force_flags,
             vb_cull_layout,
             vb_batch_cull_pipeline,
             hzb_build_layout,
@@ -6100,6 +6077,18 @@ impl GpuSceneBundles {
         // STRUCTURAL conjunct of `GBufferScene::path_vb_occlusion_split`; `0` on every scene in
         // the tree today (nothing inserts the marker), which is the 0%-gate.
         vb_occlusion_instances: u32,
+        // VG R3 piece 4 rung P4-4: THIS frame's OWNER arming for the occlusion decision, computed
+        // ONCE in `boyko_app::runner` (`crate::occlusion_arm::occlusion_arm_for`) from the live
+        // `boyko_render::OcclusionConfig` and the diagnostic `boyko_app::OcclusionForce`, and
+        // threaded as a plain value — the SAME "host reads the World, threads the plain value"
+        // discipline `hzb` directly above follows, and for the same layering reason (this crate's
+        // callee cannot name `OcclusionMode`).
+        //
+        // `None` (the default `OcclusionMode::Off`, or a host that never composed
+        // `OcclusionPlugin`) ⇒ `GBufferScene::vb_occlusion == None` ⇒
+        // `path_vb_occlusion_split()` is false through its FIRST conjunct ⇒ no late passes, no
+        // second scope, no marked instance tested — the 0%-gate every committed pin renders.
+        vb_occlusion: Option<VbOcclusionArm>,
         // VG R3 piece 3 step P3-5: THIS frame's cull-readback arming, threaded from
         // `boyko_app::runner`'s `VbCullProbe::request` — `false` on every frame but the ONE the
         // probe captures, and on every frame of every non-probe run.
@@ -7010,12 +6999,18 @@ impl GpuSceneBundles {
             // the ONLY per-frame input of `GBufferScene::path_vb_occlusion_split`, so there is
             // one number for declare and record to agree on and no second one to disagree with.
             vb_occlusion_instances,
+            // VG R3 piece 4 rung P4-4: the OWNER's arming, threaded verbatim (see this fn's
+            // `vb_occlusion` param doc). `None` on the default `OcclusionMode::Off` — no split.
+            vb_occlusion,
         };
 
         // === VG R3 piece 3 step P3-6 (plan D9): THE ARMING, and why it is a post-assignment. ===
         //
         // `VB_CULL_OCC_ARMED` is set by CALLING `path_vb_occlusion_split()` on the assembled scene
-        // — never by re-deriving its five conjuncts here. That is the whole design of this line.
+        // — never by re-deriving its conjuncts here. That is the whole design of this line, and VG
+        // R3 piece 4 rung P4-4 adding a SIXTH conjunct (the owner knob) is exactly the edit the
+        // shape exists to survive: the call picks it up with no change here, where a re-derivation
+        // would have had to be found and widened.
         //
         // `declare_vb_graph` declares the cull's `vb_late_visible` / `vb_late_count` WRITES and its
         // `hzb_pyramid` READ under that predicate and under nothing else, while
@@ -7023,13 +7018,26 @@ impl GpuSceneBundles {
         // the obligation: ARMED must imply the split, or the shader stores where nothing declared
         // it and samples an image the graph never named. Two independently-computed booleans can
         // drift into exactly that frame; one predicate, read twice, cannot — which is why this is
-        // an assignment off `scene` rather than a sixth conjunct copied into the literal above.
+        // an assignment off `scene` rather than the predicate's conjuncts copied into the literal
+        // above.
         //
         // The FORCE bits ride along only when ARMED is set: they are read inside the shader's
         // armed guard, so a FORCE bit on an unsplit frame would be a word nobody reads and a
-        // difference between two frames that must be byte-identical.
+        // difference between two frames that must be byte-identical. Since piece 4 rung P4-4 they
+        // come from `scene.vb_occlusion`'s payload — the SAME `Option` whose presence is the
+        // predicate's first conjunct — so "armed" and "which verdict is forced" cannot disagree.
+        let force_flags = scene.vb_occlusion.map_or(0, |a| a.force_flags);
+        // The shader's contradiction, refused at the last host site before the word is pushed:
+        // FORCE_KEEP (defer nothing) and FORCE_LATE (defer everything marked) are opposite
+        // controls and the resolution of "both" would be whichever branch the module tests first.
+        // `OcclusionForce::flags` cannot produce both; this states the property where a future
+        // second producer of the payload would meet it.
+        debug_assert!(
+            force_flags.count_ones() <= 1,
+            "invariant: VbOcclusionArm::force_flags is 0 or exactly one FORCE bit"
+        );
         scene.vb_occ_flags =
-            if scene.path_vb_occlusion_split() { VB_CULL_OCC_ARMED | self.vb_occ_force_flags } else { 0 };
+            if scene.path_vb_occlusion_split() { VB_CULL_OCC_ARMED | force_flags } else { 0 };
         scene
     }
 

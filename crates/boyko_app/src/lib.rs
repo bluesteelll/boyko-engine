@@ -49,6 +49,15 @@ mod hzb_dump;
 // would be dead code on every other target.
 #[cfg(windows)]
 mod hzb_plan;
+// VG R3 piece 4 rung P4-4: the `OcclusionConfig` × `OcclusionForce` → `VbOcclusionArm` seam, the
+// twin of `hzb_plan` above and `#[cfg(windows)]` for the same reason — its only caller is the
+// windowed frame loop.
+#[cfg(windows)]
+mod occlusion_arm;
+// VG R3 piece 4 rung P4-4: the DIAGNOSTIC verdict-override Resource. NOT `#[cfg(windows)]`, unlike
+// `occlusion_arm` above: it is part of the crate's public surface (fixtures insert it), it names no
+// device and no OS, and gating it would make the type invisible to a cross-target doc build.
+pub mod occlusion_force;
 mod runner;
 // VG R3 piece 3 step P3-5: the `BOYKO_VB_CULL_READBACK` capture driver AND the probe line's one
 // serializer.
@@ -80,5 +89,6 @@ pub mod prelude;
 
 pub use device::GpuDevice;
 pub use fly::{FlyAction, FlyCameraPlugin, fly_default_map};
+pub use occlusion_force::OcclusionForce;
 pub use plugins::EnginePlugins;
 pub use window_info::{HostFrameStats, WindowInfo};

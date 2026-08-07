@@ -96,6 +96,7 @@ use boyko_rhi_vulkan::present::{
     HZB_DUMP_SAMPLE_BYTES, HZB_DUMP_WORD_FLAGS, HZB_DUMP_WORD_FRAME_INDEX,
 };
 
+mod occ_fixture;
 mod vb_inst_cull_scene;
 mod vb_occ_mixed_scene;
 
@@ -106,8 +107,15 @@ use vb_occ_mixed_scene::{
     mesh_of_batch, ring_slot_instance, slots_with_role,
 };
 
-/// The worker both drivers re-execute. One worker, two regimes, selected by the env the driver sets
-/// — `BOYKO_VG_OCC_FORCE` is read ONCE at boot by `GpuSceneBundles::boot`, so a regime IS a process.
+/// The worker both drivers re-execute. One worker, two regimes, selected by the env the driver
+/// sets.
+///
+/// ⚠️ Since VG R3 piece 4 rung P4-4 `BOYKO_VG_OCC_FORCE` is decoded by `occ_fixture` at APP SETUP
+/// and inserted as the `OcclusionForce` Resource, where it used to be read once inside
+/// `GpuSceneBundles::boot`. A regime is still a PROCESS here — this worker inserts it once and no
+/// system mutates it — but that is now a property of the fixture rather than of the engine, which
+/// is why the artifact records the regime (`[probe] occ_regime` from the pushed word, `[host]
+/// occ_force` from the live read) instead of the engine asserting it held still.
 const WORKER: &str = "vb_occ_mixed_capture_worker";
 
 /// The engine frame index a capture must be at least at (plan D1's convergence clause: the pyramid's
@@ -171,6 +179,16 @@ fn vb_occ_mixed_capture_worker() {
     // of `path_vb_occlusion_split()` — without it the split disarms and every clause below would
     // adjudicate an unsplit frame.
     app.insert_resource(HzbConfig { mode: HzbMode::Build });
+    // VG R3 piece 4 rung P4-4: the OWNER conjunct, armed through THE single insert site so the
+    // vacuity control's one edit reds G-P3-B here as well as the pin-binary gate.
+    //
+    // The MODE is fixed by the fixture — `spawn_mixed(.., true)` above always marks, so this
+    // worker is always a split worker — while the REGIME comes from the env the driver sets,
+    // because the regime IS this file's one variable (`Regime::Unforced` vs `Regime::ForceLate`).
+    // Until this rung that env was read inside `GpuSceneBundles::boot`; the decode moved to
+    // `occ_fixture` and the pin file did not change.
+    let (_, force) = occ_fixture::occlusion_from_env();
+    occ_fixture::arm_occlusion_with(&mut app, boyko_render::OcclusionMode::TwoPhase, force);
     app.run();
 }
 
@@ -288,7 +306,9 @@ struct Capture {
     late_seed_instances: u32,
 }
 
-/// Which regime the worker was booted in — the value of `BOYKO_VG_OCC_FORCE`, read once at boot.
+/// Which regime the worker was booted in — the value of `BOYKO_VG_OCC_FORCE`, decoded once at app
+/// setup by `occ_fixture` and inserted as the `OcclusionForce` Resource (VG R3 piece 4 rung P4-4;
+/// it was a `GpuSceneBundles::boot` env read before that).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Regime {
     /// No force bit: the early phase decides from the pyramid. Plan D12's converged fixed point

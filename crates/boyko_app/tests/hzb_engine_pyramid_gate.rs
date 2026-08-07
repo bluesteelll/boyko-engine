@@ -124,6 +124,7 @@ use boyko_rhi_vulkan::present::{
     HZB_DUMP_WORD_FRAME_INDEX, HZB_PYRAMID_POISON, MAX_HZB_LEVELS,
 };
 
+mod occ_fixture;
 mod vb_occ_mixed_scene;
 
 /// The env knob that arms `boyko_app::hzb_dump` — the value is the output path.
@@ -409,6 +410,14 @@ fn hzb_engine_pyramid_dump_occ() {
     app.add_startup_system(setup_occ);
     app.insert_resource(VB_MESH_PATH);
     app.insert_resource(HzbConfig { mode: HzbMode::Build });
+    // VG R3 piece 4 rung P4-4: the OWNER conjunct, through THE single insert site. The regime is
+    // fixed by the test (`None` — G5's subject is the poison/build block's POSITION on an armed
+    // split, not a forced verdict), so the direct route rather than the env-driven one.
+    occ_fixture::arm_occlusion_with(
+        &mut app,
+        boyko_render::OcclusionMode::TwoPhase,
+        boyko_app::OcclusionForce::None,
+    );
     app.run();
 }
 
@@ -437,8 +446,10 @@ fn setup_mixed(
 /// `BOYKO_VG_OCC_FORCE=late`, so the early scope draws only the two UNMARKED instances and the LATE
 /// scope draws the two marked survivors.
 ///
-/// The regime comes from the env the driver sets, not from a resource: `GpuSceneBundles::boot` reads
-/// `BOYKO_VG_OCC_FORCE` once and freezes it, so it cannot be toggled inside a running process.
+/// The regime comes from the env the driver sets: `occ_fixture` decodes `BOYKO_VG_OCC_FORCE` at
+/// app setup and inserts it as the `OcclusionForce` Resource, once, before the first frame — so it
+/// is still a property of the PROCESS, and the driver still selects it on the CHILD (VG R3 piece 4
+/// rung P4-4 moved that decode out of `GpuSceneBundles::boot`, where it was shipping code).
 #[test]
 #[ignore = "needs a real windowed GPU device; the G-P3-E driver spawns it with BOYKO_HZB_DUMP and BOYKO_VG_OCC_FORCE=late"]
 fn hzb_engine_pyramid_dump_occ_late() {
@@ -450,6 +461,11 @@ fn hzb_engine_pyramid_dump_occ_late() {
     app.add_startup_system(setup_mixed);
     app.insert_resource(VB_MESH_PATH);
     app.insert_resource(HzbConfig { mode: HzbMode::Build });
+    // The MODE is the fixture's (`setup_mixed` always marks); the REGIME is the driver's env, and
+    // it is G-P3-E's one variable — FORCE-LATE is the only configuration in which the two dumped
+    // depths can differ on a static scene.
+    let (_, force) = occ_fixture::occlusion_from_env();
+    occ_fixture::arm_occlusion_with(&mut app, boyko_render::OcclusionMode::TwoPhase, force);
     app.run();
 }
 

@@ -238,6 +238,16 @@ pub mod motion_cam;
 /// [`VbInstanceRow::flags`](instance_model::VbInstanceRow::flags). Read on the host by both
 /// gathers since P2-2; read by NOTHING on the device until piece 3.
 pub mod occlusion_marker;
+/// VG R3 piece 4 rung P4-4 — the ECS-native occlusion-decision CONSUMER config
+/// ([`OcclusionConfig`](occlusion_config::OcclusionConfig) + its
+/// [`OcclusionMode`](occlusion_config::OcclusionMode) knob), the consumer-side sibling of
+/// [`HzbConfig`](hzb_config::HzbConfig)'s producer knob. Capability is structural (`Off` IS
+/// disabled); default `Off` is the 0%-gate. No derived carrier and no policy system.
+pub mod occlusion_config;
+/// VG R3 piece 4 rung P4-4 — the [`OcclusionPlugin`](occlusion_plugin::OcclusionPlugin) that
+/// seeds the occlusion-decision config substrate. System-less (the
+/// [`HzbPlugin`](hzb_plugin::HzbPlugin) shape).
+pub mod occlusion_plugin;
 /// HW-RT rung R1 — the dormant unified ray / acceleration-structure backend seam:
 /// the [`RayBackendConfig`](ray_backend::RayBackendConfig) derived carrier +
 /// [`RayCaps`](ray_backend::RayCaps) device-tier input Resources, the pure
@@ -455,7 +465,9 @@ pub use hzb::{
 };
 pub use hzb_config::{HzbConfig, HzbMode};
 pub use hzb_plugin::HzbPlugin;
+pub use occlusion_config::{OcclusionConfig, OcclusionMode};
 pub use occlusion_marker::{OcclusionCulling, VB_INST_FLAG_OCCLUSION_CULLING};
+pub use occlusion_plugin::OcclusionPlugin;
 pub use instance_model::{
     INSTANCE_MODEL_COL_BYTES, InstanceModelCol, VB_INSTANCE_ROW_BYTES, VbInstanceRow,
     sync_instance_model_cols,

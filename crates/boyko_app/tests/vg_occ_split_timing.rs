@@ -85,6 +85,7 @@ use boyko_render::{
     GeometryLegs, HzbConfig, HzbMode, Material, MeshGeometryTableSlot, RenderPath, RenderPathConfig,
 };
 
+mod occ_fixture;
 mod vb_occ_mixed_scene;
 
 /// The worker every leg re-executes.
@@ -212,6 +213,7 @@ fn vg_occ_split_timing_worker() {
         );
         return;
     }
+    let leg = Leg::parse(&std::env::var(ENV_LEG).expect("invariant: the leg was just checked"));
     let mut app = App::new();
     app.add_plugins(EnginePlugins::window(
         "boyko_engine vg occ timing",
@@ -227,6 +229,17 @@ fn vg_occ_split_timing_worker() {
     // the comparison rather than a variable of it — the same reason `vb_occ_split_gate.rs` arms it
     // on its unmarked control, and the same reason `[vb_occ_mixed_off]` carries `BOYKO_VG_HZB`.
     app.insert_resource(HzbConfig { mode: HzbMode::Build });
+    // VG R3 piece 4 rung P4-4: the OWNER conjunct, through THE single insert site. The MODE tracks
+    // this leg's marker (the `Disarmed` leg withholds both today — making it `Off`-with-markers is
+    // rung P4-6's protocol change, not this one's), and the REGIME comes from the env the driver
+    // set, decoded where every other fixture decodes it.
+    let (_, force) = occ_fixture::occlusion_from_env();
+    let mode = if leg.marked() {
+        boyko_render::OcclusionMode::TwoPhase
+    } else {
+        boyko_render::OcclusionMode::Off
+    };
+    occ_fixture::arm_occlusion_with(&mut app, mode, force);
     app.run();
 }
 

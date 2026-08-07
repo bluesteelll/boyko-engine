@@ -42,6 +42,10 @@
 
 #![cfg(windows)]
 
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use boyko_app::OcclusionForce;
 use boyko_app::prelude::*;
 use boyko_ecs::ecs::core::system::ResMut;
 use boyko_render::Material;
@@ -49,39 +53,23 @@ use boyko_render::generate_tangents;
 use boyko_render::mesh::Vertex;
 use boyko_render::{
     GeometryLegs, HzbConfig, HzbMode, MeshAssetsVbExt, MeshGeometryTableSlot, OcclusionCulling,
-    RenderPath, RenderPathConfig,
+    OcclusionMode, RenderPath, RenderPathConfig,
 };
 
+mod occ_fixture;
 mod vb_occ_mixed_scene;
 
-/// VG R3 piece 2 step P2-6 (gate G1): `BOYKO_VG_OCC=1` puts [`OcclusionCulling`] in the spawn
-/// bundle of ALL FIVE spheres, which arms `GBufferScene::path_vb_occlusion_split()` and therefore
-/// the late raster scope — on THIS scene, THIS binary and THIS test.
-/// `goldens/PINS.toml`'s `[vb_occ_split]` is that leg.
-///
-/// ⚠️ Since VG R3 piece 3 step P3-6 it ALSO implies the pyramid ([`vb_mesh_screenshot_dump`]'s
-/// `HzbConfig` branch), because the split's new `hzb.is_some()` conjunct would otherwise disarm the
-/// very thing this knob exists to arm.
-///
-/// Read inside [`setup`] rather than turned into a Resource read: the marker has to be in the
-/// BUNDLE (a later `insert` migrates the archetype at the next command flush and arms the split
-/// one frame late), and a startup system reading its own env is the shape
-/// `vg_density_census.rs`'s fixture already uses.
-const ENV_OCC: &str = "BOYKO_VG_OCC";
+use occ_fixture::occ_marked;
 
 /// The env knob that arms the depth pyramid — `[vb_mesh_hzb]`'s own.
-const ENV_HZB: &str = "BOYKO_VG_HZB";
-
-/// `BOYKO_VG_OCC == "1"`, spelled ONCE for its two readers: [`setup`], which puts
-/// [`OcclusionCulling`] in the spawn bundle, and [`vb_mesh_screenshot_dump`], where it implies the
-/// pyramid (VG R3 piece 3 step P3-6, plan D9).
 ///
-/// ⚠️ The predicate is `== "1"` and nothing wider. Any other value — including a plausible-looking
-/// `"true"` or a scene name — is FALSE and marks nothing, which is a fixture that renders the
-/// default scene while the operator believes it armed something.
-fn occ_marked() -> bool {
-    std::env::var(ENV_OCC).is_ok_and(|v| v == "1")
-}
+/// ⚠️ Since VG R3 piece 4 rung P4-4 it is the ONLY route to `HzbConfig` in this fixture. The old
+/// `|| occ_marked()` disjunction is gone: the host now plans a pyramid when a PRODUCER asks **or**
+/// a CONSUMER needs one (`boyko_app::hzb_plan::hzb_plan_for`), so the fixture-local workaround
+/// became a second implementation of a rule that lives in the engine. Every occlusion pin still
+/// carries `BOYKO_VG_HZB="1"` in its own `[*.env]` block, so the pinned configurations reach the
+/// pyramid by the producer route and are unaffected by which of the two routes exists.
+const ENV_HZB: &str = "BOYKO_VG_HZB";
 
 /// The sun direction TO the light (byte-identical to `grand_showcase_2mat.rs`'s /
 /// `forward_mesh.rs`'s).
@@ -304,15 +292,373 @@ fn vb_mesh_screenshot_dump() {
     // views are legal. A byte-identical dump alone would not: an illegal view that nothing binds
     // changes no pixel.
     //
-    // ⚠️ VG R3 piece 3 step P3-6 (plan D9): `BOYKO_VG_OCC` IMPLIES the pyramid. That step added
-    // `hzb.is_some()` to `path_vb_occlusion_split()` — the split IS the occlusion test now, and a
-    // late scope with no pyramid is a second scope that can decide nothing. Without this
-    // disjunction the `[vb_occ_split]` pin, whose entire purpose is to ARM the split, would
-    // silently stop splitting and its green would mean nothing. `BOYKO_VG_HZB="1"` is also written
-    // into `[vb_occ_split.env]` in the same change, so the configuration is legible from the pin
-    // file and not only from this fixture.
-    if std::env::var(ENV_HZB).is_ok_and(|v| v == "1") || occ_marked() {
+    // ⚠️ VG R3 piece 4 rung P4-4 DELETED the `|| occ_marked()` half of this branch. Piece 3 needed
+    // it because `path_vb_occlusion_split()` had gained an `hzb.is_some()` conjunct while nothing
+    // made a consumer's need for a pyramid reach the plan — so a marked run with no `BOYKO_VG_HZB`
+    // would have silently stopped splitting. Piece 4 promotes that rule into the HOST
+    // (`hzb_plan_for` plans a pyramid iff a producer asks OR a consumer needs), so keeping the
+    // fixture-local disjunction would be a second implementation of it, in a fixture, able to
+    // disagree with the engine. All five occlusion pins carry `BOYKO_VG_HZB="1"` in their own
+    // `[*.env]` blocks, so their configuration is unchanged either way — which is also why no pin
+    // can red the host disjunct, and why the non-pinned `vb_occ_probe_dump_marked_no_hzb` leg in
+    // `vb_occ_split_gate.rs` exists.
+    if std::env::var(ENV_HZB).is_ok_and(|v| v == "1") {
         app.insert_resource(HzbConfig { mode: HzbMode::Build });
     }
+    // VG R3 piece 4 rung P4-4: the occlusion CONSUMER knob and its diagnostic regime, from THE
+    // single insert site. `BOYKO_VG_OCC=1` ⇒ `OcclusionMode::TwoPhase`; `BOYKO_VG_OCC_FORCE` ⇒ the
+    // `keep`/`late` override `[vb_occ_mixed_keep]`/`[vb_occ_mixed_late]` name. Unset ⇒ `Off` +
+    // `None`, which is the 0%-gate and what the other twenty-six pins render.
+    //
+    // Until this rung the regime came from a `BOYKO_VG_OCC_FORCE` read inside `GpuSceneBundles::
+    // boot` — shipping code, with a boot panic in it, doing a fixture's job. The pin file did not
+    // change: `[*.env]` still carries the same words, and this fixture translates them, exactly as
+    // it already translates `BOYKO_VG_HZB` into `HzbConfig`.
+    occ_fixture::arm_occlusion(&mut app);
     app.run();
+}
+
+// ===============================================================================================
+// VG R3 piece 4 rung P4-4 — `vb_mesh_occ_pins_actually_split`: the gate INSIDE the pinned binary
+// ===============================================================================================
+//
+// # Why this gate has to live here and nowhere else
+//
+// All five occlusion pins render through THIS binary and THIS test (`test_binary = "vb_mesh"`,
+// `test_name = "vb_mesh_screenshot_dump"`), and four of them declare themselves byte-identical to
+// a pin that never splits. So one edit — deleting the `OcclusionConfig` insert from
+// `occ_fixture::arm_occlusion_with` — can silently disarm the split in all five while every hash,
+// AND `the_pins_declared_byte_identical_actually_agree` (which compares pins to EACH OTHER), stays
+// green. That is not a hypothetical: a scope that draws nothing and a scope that does not exist
+// produce the same pixels, which is what the four-hash equality is FOR.
+//
+// Before this rung the executed evidence lived in other binaries (G2 in `vb_occ_split_gate`,
+// G-P3-A/B/C in `vb_occ_mixed`), so an edit to `vb_mesh.rs` reached no gate that executes. This
+// one adjudicates the PINNED CONFIGURATIONS — each pin's own `[*.env]` block, verbatim from
+// `goldens/PINS.toml`, re-executed through the pin's own binary and test.
+//
+// # What it CANNOT claim
+//
+// * It runs PROBE-ON while the pins are PROBE-OFF. The gap is small and named: `vb_probe_dump` is
+//   a host-side counter sink that records no command, allocates nothing on the device and is not
+//   an input to `path_vb_occlusion_split()`. It is a gap all the same.
+// * It cannot distinguish the two FORCE regimes by EFFECT — `keep` and `late` both record two
+//   scopes. What it checks is that the regime WORD reached the GPU (`[probe] occ_regime`, stamped
+//   from the pushed push-constant) and agrees with the pin's env. Distinguishing them by effect is
+//   G-P3-B/C's job, and it reads GPU counters.
+// * Nothing about pixels. The hashes are the pixel claim; this is the claim they cannot make.
+
+/// The five occlusion pins, with the raster-scope count each pinned configuration must record.
+///
+/// `[vb_occ_mixed_off]` is here as a REQUIRED NEGATIVE, not for symmetry: without a leg that must
+/// report `1`, a gate asserting `scopes == 2` four times is satisfied by a recorder that always
+/// splits, and the four-pin ladder's `off -> keep` step would be unfalsifiable from this side.
+const OCC_PINS: [(&str, u32); 5] = [
+    ("vb_occ_split", 2),
+    ("vb_occ_mixed_off", 1),
+    ("vb_occ_mixed_keep", 2),
+    ("vb_occ_mixed", 2),
+    ("vb_occ_mixed_late", 2),
+];
+
+/// The `[*.env]` key this gate REDIRECTS rather than inherits.
+///
+/// Redirected, never removed: removing it would change the configuration away from the pin's — the
+/// screenshot capture is part of what the pinned run does, and it is what makes the run terminate —
+/// while leaving it pointed at the blessed BMP would have a gate overwrite the artifact it exists
+/// to protect.
+const ENV_HOST_DUMP: &str = "BOYKO_HOST_DUMP";
+
+/// The record probe's own knob; this gate's payload.
+const ENV_PROBE: &str = "BOYKO_VB_PROBE";
+
+/// The pin-file key whose value is the regime word.
+const ENV_OCC_FORCE: &str = "BOYKO_VG_OCC_FORCE";
+
+/// `goldens/PINS.toml`, from this crate's manifest directory.
+fn pins_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../goldens/PINS.toml")
+}
+
+/// Every `KEY = "VALUE"` pair of `[<pin>.env]`, in file order.
+///
+/// A LOCAL reader rather than a borrowed one, for the reason `vb_occ_split_gate.rs` gives about its
+/// own field reader: a gate that borrows another gate's parser inherits that gate's future edits.
+/// It handles the flat, quoted subset `PINS.toml` actually uses, and it UNESCAPES `\\` because the
+/// dump paths are Windows paths written as TOML basic strings (`"D:\\tmp\\x.bmp"`) — a reader that
+/// passed the escaped form through would hand the child a path with doubled separators.
+///
+/// An absent or empty table PANICS: a gate that silently ran a pin with no env would render the
+/// five-sphere default scene and report it as the mixed one.
+fn pin_env(pins: &str, pin: &str) -> Vec<(String, String)> {
+    let want = format!("[{pin}.env]");
+    let mut inside = false;
+    let mut out = Vec::new();
+    for line in pins.lines() {
+        let l = line.split('#').next().unwrap_or("").trim();
+        if l.starts_with('[') && l.ends_with(']') {
+            if inside {
+                break;
+            }
+            inside = l == want;
+            continue;
+        }
+        if inside
+            && let Some((k, v)) = l.split_once('=')
+        {
+            let key = k.trim().to_string();
+            let val = v.trim().trim_matches('"').replace("\\\\", "\\");
+            out.push((key, val));
+        }
+    }
+    assert!(
+        !out.is_empty(),
+        "goldens/PINS.toml has no `{want}` -- this gate adjudicates the PINNED configurations, so \
+         a pin whose env it cannot read is a gate that would render something else and pass"
+    );
+    out
+}
+
+/// The raw right-hand side of `table.key` in the record probe's flat TOML subset. Local, for the
+/// same reason [`pin_env`] is.
+fn probe_field(src: &str, path: &str, file: &Path) -> String {
+    let (table, key) = path.split_once('.').expect("a probe path is `table.key`");
+    let mut inside = false;
+    for line in src.lines() {
+        let l = line.split('#').next().unwrap_or("").trim();
+        if l.starts_with('[') && l.ends_with(']') {
+            inside = l.trim_start_matches('[').trim_end_matches(']') == table;
+            continue;
+        }
+        if inside
+            && let Some((k, v)) = l.split_once('=')
+            && k.trim() == key
+        {
+            return v.trim().trim_matches('"').to_string();
+        }
+    }
+    panic!(
+        "the probe file {} has no `{path}` -- a gate that reads a missing field asserts nothing",
+        file.display()
+    )
+}
+
+fn probe_u32(src: &str, path: &str, file: &Path) -> u32 {
+    probe_field(src, path, file).parse().unwrap_or_else(|_| panic!("`{path}` is not an integer"))
+}
+
+/// Strict: anything that is neither `true` nor `false` PANICS rather than reading as `false`. A
+/// silent `false` here would fire the instrument clause and report "this is not a VB frame" about
+/// a frame that was one.
+fn probe_bool(src: &str, path: &str, file: &Path) -> bool {
+    match probe_field(src, path, file).as_str() {
+        "true" => true,
+        "false" => false,
+        other => panic!("`{path}` is `{other}`, which is not a boolean"),
+    }
+}
+
+/// What one pinned configuration recorded.
+struct PinProbe {
+    scopes: u32,
+    late_draws: u32,
+    late_cull_dispatches: u32,
+    /// `[probe] occ_regime` — decoded from the word the RECORDER pushed.
+    probe_regime: String,
+    draw_batches: u32,
+    occlusion_instances: u32,
+    vb_path: bool,
+    mesh_leg: bool,
+    /// `[host] occ_mode` / `occ_force` — the host's independent derivation, for the cross-check.
+    host_mode: String,
+    host_force: String,
+}
+
+/// Re-executes `vb_mesh_screenshot_dump` under one pin's env and returns what it recorded.
+fn run_pin(pin: &str, pins: &str) -> PinProbe {
+    let exe = std::env::current_exe().expect("invariant: the test binary knows its own path");
+    let probe_out: PathBuf = std::env::temp_dir().join(format!("boyko_pin_split_{pin}.toml"));
+    let bmp_out: PathBuf = std::env::temp_dir().join(format!("boyko_pin_split_{pin}.bmp"));
+    // A stale file from a previous run that this run failed to overwrite would be read as this
+    // run's evidence -- and "the capture never ran" and "the capture left last run's file" are the
+    // same bytes.
+    for p in [&probe_out, &bmp_out] {
+        let _ = std::fs::remove_file(p);
+    }
+
+    let mut cmd = Command::new(&exe);
+    cmd.args(["vb_mesh_screenshot_dump", "--ignored", "--exact", "--test-threads=1", "--nocapture"]);
+    // The pin's own block, VERBATIM -- that is the whole point: this gate adjudicates the
+    // configuration `goldens/PINS.toml` declares, not a lookalike spelled here.
+    for (k, v) in pin_env(pins, pin) {
+        cmd.env(k, v);
+    }
+    // ...with exactly two substitutions, both named above.
+    cmd.env(ENV_HOST_DUMP, &bmp_out).env(ENV_PROBE, &probe_out);
+    // Every UNRELATED capture and bench removed: another armed capture would hold the host loop
+    // open (the exit is a conjunction over all armed drivers) and either bench returns before any
+    // capture completes.
+    cmd.env_remove("BOYKO_VG_CENSUS")
+        .env_remove("BOYKO_HZB_DUMP")
+        .env_remove("BOYKO_VB_CULL_READBACK")
+        .env_remove("BOYKO_VB_BENCH")
+        .env_remove("BOYKO_SV0_BENCH");
+
+    let status = cmd.status().expect("invariant: the worker process spawns");
+    assert!(status.success(), "the `{pin}` pin worker exited {status}");
+
+    let text = std::fs::read_to_string(&probe_out).unwrap_or_else(|e| {
+        panic!(
+            "`{pin}`: the worker wrote no probe at {} ({e}). A worker that renders and produces \
+             nothing is an instrument failure, not an unsplit frame.",
+            probe_out.display()
+        )
+    });
+    PinProbe {
+        scopes: probe_u32(&text, "probe.scopes", &probe_out),
+        late_draws: probe_u32(&text, "probe.late_draws", &probe_out),
+        late_cull_dispatches: probe_u32(&text, "probe.late_cull_dispatches", &probe_out),
+        probe_regime: probe_field(&text, "probe.occ_regime", &probe_out),
+        draw_batches: probe_u32(&text, "host.draw_batches", &probe_out),
+        occlusion_instances: probe_u32(&text, "host.occlusion_instances", &probe_out),
+        vb_path: probe_bool(&text, "host.vb_path", &probe_out),
+        mesh_leg: probe_bool(&text, "host.mesh_leg", &probe_out),
+        host_mode: probe_field(&text, "host.occ_mode", &probe_out),
+        host_force: probe_field(&text, "host.occ_force", &probe_out),
+    }
+}
+
+/// **THE PINNED CONFIGURATIONS ACTUALLY SPLIT** (VG R3 piece 4 rung P4-4).
+///
+/// Boots each of the five occlusion pins with its own `[*.env]` block and asserts, from the
+/// RECORDER's counts, that four of them record two raster scopes and `[vb_occ_mixed_off]` records
+/// one. Read `OCC_PINS`'s doc for why the negative leg is required, and this section's header for
+/// what the gate cannot claim.
+#[test]
+#[ignore = "live GPU gate (spawns five windowed workers); the orchestrator runs it with --test-threads=1"]
+fn vb_mesh_occ_pins_actually_split() {
+    let pins = std::fs::read_to_string(pins_path())
+        .expect("invariant: goldens/PINS.toml is in the repository");
+
+    for (pin, want_scopes) in OCC_PINS {
+        let env = pin_env(&pins, pin);
+        // The pin's own regime word, from the pin FILE -- `none` when the block sets no override.
+        // This is the third derivation the leg cross-checks (pin file, host Resource, recorder
+        // push), and the only one produced outside the process under test.
+        // The default word comes from the SHARED table, not from a literal spelled here: the pin
+        // file, the fixture's decode, the host's `[host] occ_force` and the recorder's
+        // `[probe] occ_regime` must all be the same three words, and a fourth spelling in a gate
+        // is a text that can drift from the thing it adjudicates.
+        let want_regime = env
+            .iter()
+            .find(|(k, _)| k.as_str() == ENV_OCC_FORCE)
+            .map_or_else(|| OcclusionForce::None.as_str().to_string(), |(_, v)| v.clone());
+        let p = run_pin(pin, &pins);
+
+        // ---- the instrument clause, before any count -------------------------------------------
+        assert!(
+            p.vb_path && p.mesh_leg,
+            "{pin}: the probed frame resolved vb_path={} mesh_leg={} -- it is not a \
+             `VisibilityBuffer x Mesh` frame, so its counts say nothing about the split. That is \
+             an instrument failure (a device that failed the VB capability probe degrades to \
+             Deferred), not a gate result.",
+            p.vb_path,
+            p.mesh_leg
+        );
+
+        // ---- the load-bearing clause -----------------------------------------------------------
+        assert_eq!(
+            p.scopes, want_scopes,
+            "{pin}: the recorder reported {} raster scope(s), expected {want_scopes}. This number \
+             is incremented AT the `vkCmdEndRendering` of each scope. The pin's HASH cannot see \
+             it: a late scope that draws nothing and a late scope that does not exist produce the \
+             same pixels, which is exactly why all these pins share one literal.",
+            p.scopes
+        );
+
+        let splits = want_scopes == 2;
+        // ---- the late scope's draws, and the late cull's dispatch ------------------------------
+        if splits {
+            assert_eq!(
+                p.late_draws, p.draw_batches,
+                "{pin}: {} late draws against {} host batches. The two come from different sites \
+                 (the recorder's per-draw counter and `mesh_draw.len()`), so this compares two \
+                 derivations rather than one with itself.",
+                p.late_draws, p.draw_batches
+            );
+            assert_eq!(
+                p.late_cull_dispatches, 1,
+                "{pin}: {} late cull dispatches on a SPLIT frame -- exactly one is recorded per \
+                 split frame, at the `vkCmdDispatch` itself. A 0 means the phase-1 dispatch was \
+                 not recorded, and the late scope would then draw whatever the host seeded \
+                 (nothing), which every image gate reads as green.",
+                p.late_cull_dispatches
+            );
+            assert!(
+                p.occlusion_instances > 0,
+                "{pin}: the split recorded with ZERO marked instances in the ring -- the marker \
+                 never reached the gather, so this leg would be adjudicating a fixture failure"
+            );
+        } else {
+            assert_eq!(
+                p.late_draws, 0,
+                "{pin}: {} late draws recorded with no late scope",
+                p.late_draws
+            );
+            assert_eq!(
+                p.late_cull_dispatches, 0,
+                "{pin}: {} late cull dispatches on the UNSPLIT baseline -- the split arming itself \
+                 on the unarmed path",
+                p.late_cull_dispatches
+            );
+        }
+
+        // ---- the REGIME's provenance, three derivations (VG R3 piece 4 rung P4-4, plan A5) ------
+        //
+        // `[probe] occ_regime` is decoded from the word `record_vb` PUSHED; `[host] occ_force` is
+        // what the runner's live `try_resource` read said on the same frame; `want_regime` is the
+        // pin file's own `BOYKO_VG_OCC_FORCE` value. The regime became a live Resource at this
+        // rung, replacing a boot-time env read whose justification was that a mid-run knob makes
+        // "which regime produced this capture?" unanswerable. Comparing three independently
+        // derived answers is how that is answered without asserting constancy on hosts this
+        // repository does not own.
+        assert_eq!(
+            p.host_force, want_regime,
+            "{pin}: the host read regime `{}` while `[{pin}.env]` sets `{want_regime}`. The \
+             fixture's env decode and the pin file disagree, so the pinned configuration is not \
+             what rendered.",
+            p.host_force
+        );
+        // The recorder's word is the one sourced from the GPU-bound push constant rather than from
+        // a Resource, so it is the one that can catch a regime that never reached the device. On
+        // the unsplit leg no batch-cull push carries a FORCE bit and `none` is the honest word,
+        // which is also what that pin's env declares.
+        assert_eq!(
+            p.probe_regime, want_regime,
+            "{pin}: the RECORDER pushed regime `{}` while the pin declares `{want_regime}`",
+            p.probe_regime
+        );
+        let want_mode =
+            if splits { OcclusionMode::TwoPhase.as_str() } else { OcclusionMode::Off.as_str() };
+        assert_eq!(
+            p.host_mode, want_mode,
+            "{pin}: the host read `OcclusionMode` `{}` where the pinned configuration needs \
+             `{want_mode}`",
+            p.host_mode
+        );
+
+        println!(
+            "vb_mesh occ pin `{pin}`: scopes={} late_draws={} late_cull_dispatches={} \
+             (batches={}, marked={}) regime probe={} host={} pin={} mode={}",
+            p.scopes,
+            p.late_draws,
+            p.late_cull_dispatches,
+            p.draw_batches,
+            p.occlusion_instances,
+            p.probe_regime,
+            p.host_force,
+            want_regime,
+            p.host_mode
+        );
+    }
 }

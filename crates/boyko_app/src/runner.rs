@@ -74,6 +74,11 @@ use crate::device::GpuDevice;
 use crate::host::WindowHost;
 #[cfg(windows)]
 use crate::light_gate::light_upload_due;
+// VG R3 piece 4 rung P4-4: the diagnostic regime, read live per frame beside `HzbConfig` and
+// recorded into both artifacts (the probe dump's `[host]` table and the bench summary's regime
+// line).
+#[cfg(windows)]
+use crate::occlusion_force::OcclusionForce;
 #[cfg(windows)]
 use crate::window_info::{HostFrameStats, WindowInfo};
 
@@ -1044,6 +1049,16 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     // publishes the two bracket masks per frame, so this is structural, not inferred from the
     // numbers.
     let mut vb_bench_labels = [VbPassLabel::Measured; VB_PASS_COUNT as usize];
+    // VG R3 piece 4 rung P4-4: the SET of distinct occlusion regimes observed across the TIMED
+    // frames, as two bitmasks (bit `k` = the variant at index `k` was seen). Rung P4-4 turned the
+    // regime from a boot-time env read into a live Resource, and the boot read's second rationale
+    // was that a mid-run knob makes "which regime produced this capture?" unanswerable. The answer
+    // is RECORDED, never asserted: a flip shows as `n_distinct > 1` in the summary and the harness
+    // rejects that worker, instead of averaging two regimes and attributing them to one.
+    //
+    // Two `u8`s, updated with one shift-or per timed frame. No allocation, no per-frame I/O.
+    let mut vb_bench_force_seen: u8 = 0;
+    let mut vb_bench_mode_seen: u8 = 0;
     let mut vb_bench_seen: u32 = 0;
     if vb_bench {
         // VG R3 piece 4 rung P4-2: the bench and the cull READBACK probe are mutually exclusive,
@@ -1530,6 +1545,17 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // silently reporting a zero the frame never computed. Not `mut` either — with the seed gone
         // the binding is assigned exactly once, which is the shape the value actually has.
         let frame_occlusion_instances: u32;
+        // VG R3 piece 4 rung P4-4: THIS frame's occlusion regime, as the HOST saw it — carried out
+        // of the render block for two readers that are not the renderer: the record probe's
+        // `[host]` table (which is compared against the RECORDER's own stamped word, so the
+        // artifact holds two independent derivations rather than one site agreeing with itself)
+        // and the bench summary's `VB-P4 regime` line.
+        //
+        // DEFINITE-INITIALIZED, not seeded, for the reason the binding above states: every read is
+        // downstream of the block that assigns them, so a seed would be dead and
+        // `unused_assignments` — a `-D warnings` gate — would say so.
+        let frame_occ_mode: boyko_render::OcclusionMode;
+        let frame_occ_force: OcclusionForce;
         // VG R3 piece 3 step P3-5: `true` on the ONE frame the cull-readback probe captures.
         //
         // DEFINITE-INITIALIZED for verbatim the reason the binding above is, and it is not a style
@@ -2352,11 +2378,30 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // every other per-extent target at — the extent whose depth attachment the pyramid
             // reduces, not the window's live client size. Default/absent `HzbMode::Off` ⇒ `None`
             // ⇒ `scene.hzb == None` ⇒ no image, no per-mip views, no build passes (the 0%-gate).
+            //
+            // VG R3 piece 4 rung P4-4: the CONSUMER knob joins the call, and the plan is `Some`
+            // iff a producer asks OR a consumer needs. Read LIVE here beside `HzbConfig`, not
+            // frozen: the split has no light-header term to drift out of lock-step with, and a
+            // flip that changes whether a pyramid exists moves `hzb_arm` and takes the targets
+            // recreate route (`hzb_config.rs`'s repaired "why not RenderPathFrozenConsumers" doc).
+            let occ_config = world.try_resource::<boyko_render::OcclusionConfig>().copied();
+            // The DIAGNOSTIC verdict override, read the same way and inert without the arming
+            // above (`occlusion_arm_for` returns `None`, so the force word never reaches the
+            // scene). `None` — a host that inserts no `OcclusionForce` — IS `OcclusionForce::None`,
+            // which is every shipping run and every golden.
+            let occ_force = world.try_resource::<OcclusionForce>().copied().unwrap_or_default();
+            frame_occ_mode = occ_config.map_or(boyko_render::OcclusionMode::Off, |c| c.mode);
+            frame_occ_force = occ_force;
             let hzb_plan = crate::hzb_plan::hzb_plan_for(
                 world.try_resource::<boyko_render::HzbConfig>().copied(),
+                occ_config,
                 present_extent.width,
                 present_extent.height,
             );
+            // VG R3 piece 4 rung P4-4: the OWNER's arming for THIS frame — presence is the arming,
+            // the payload is the forced verdict. One call, one site, threaded into the scene below
+            // exactly as `hzb_plan` is.
+            let vb_occlusion_arm = crate::occlusion_arm::occlusion_arm_for(occ_config, occ_force);
             // VG R3 piece 1 step P1-6: the dump's own request, sited HERE because it needs
             // `hzb_plan` — the staging is sized from the plan's per-level extents, not from the
             // extent alone, so it cannot be requested beside the census's at the top of the frame.
@@ -2520,6 +2565,10 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 // authoritative. Reading it off anything but this scratch would be a SECOND
                 // frame-level predicate that can disagree with the first.
                 frame_occlusion_instances,
+                // VG R3 piece 4 rung P4-4: this frame's OWNER arming, from the single
+                // `occlusion_arm_for` call above — `None` on the default `OcclusionMode::Off`,
+                // which is every committed pin but the four that arm the split.
+                vb_occlusion_arm,
                 // VG R3 piece 3 step P3-5: this frame's cull-readback arming, from the request just
                 // above — `false` on every frame but the one the probe captures.
                 vb_cull_capture,
@@ -2642,6 +2691,11 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             if let Some(sample) = host.gpu.read_vb_bench_ns(ctx, s) {
                 vb_bench_seen += 1;
                 if vb_bench_seen as usize > VB_BENCH_WARMUP {
+                    // VG R3 piece 4 rung P4-4: this timed frame's regime, folded into the observed
+                    // set. Taken from the SAME per-frame host reads the scene was assembled from,
+                    // so the summary describes the frames it timed rather than the state at exit.
+                    vb_bench_force_seen |= 1u8 << frame_occ_force.slot();
+                    vb_bench_mode_seen |= 1u8 << (frame_occ_mode as u32);
                     for slot in 0..VB_PASS_COUNT as usize {
                         vb_bench_dur_ns[slot].push(sample.dur_ns[slot]);
                         vb_bench_begin_off_ns[slot].push(sample.begin_off_ns[slot]);
@@ -2665,6 +2719,8 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     &vb_bench_dur_ns,
                     &vb_bench_begin_off_ns,
                     &vb_bench_labels,
+                    vb_bench_force_seen,
+                    vb_bench_mode_seen,
                 );
                 return;
             }
@@ -2795,6 +2851,14 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     boyko_render::RenderPath::VisibilityBuffer
                 ),
                 mesh_leg: host.resolved_render_path.mesh_leg,
+                // VG R3 piece 4 rung P4-4: the HOST's own view of this frame's regime, written
+                // into `[host]` beside the RECORDER's stamped `[probe] occ_flags`. The two are
+                // derived at different sites, so a gate comparing them compares two derivations —
+                // `vb_probe_dump`'s stated design principle, applied to provenance instead of
+                // counts. It is what makes a live `OcclusionForce` legible from the artifact
+                // instead of asserted to have held still.
+                occ_mode: frame_occ_mode,
+                occ_force: frame_occ_force,
             };
             vb_probe
                 .take()
@@ -2970,6 +3034,8 @@ fn print_vb_bench_summary(
     dur_ns: &[Vec<f64>; VB_PASS_COUNT as usize],
     begin_off_ns: &[Vec<f64>; VB_PASS_COUNT as usize],
     labels: &[VbPassLabel; VB_PASS_COUNT as usize],
+    force_seen: u8,
+    mode_seen: u8,
 ) {
     let cull_reset_ns: &[f64] = &dur_ns[VbTimedPass::CullReset.slot() as usize];
     let cull_dispatch_ns: &[f64] = &dur_ns[VbTimedPass::CullDispatch.slot() as usize];
@@ -3029,6 +3095,46 @@ fn print_vb_bench_summary(
             labels[slot].suffix()
         );
     }
+
+    // VG R3 piece 4 rung P4-4: the PROVENANCE line. `observed` is the SET of distinct regime words
+    // seen across the timed frames, not the value at exit — rung P4-4 made the regime a live
+    // Resource, and the boot-time env read it replaced justified itself partly by making "which
+    // regime produced this capture?" answerable from the artifact. This is that answer, and it is a
+    // RECORDING: `n_distinct > 1` is printed, never asserted, because a constancy assertion would
+    // have to hold on hosts this repository does not own. The harness rejects a worker whose
+    // `n_distinct` is not 1 rather than averaging two regimes into one number.
+    println!(
+        "VB-P4 regime observed=[{}] n_distinct={} mode=[{}]",
+        word_set(&OcclusionForce::ALL, force_seen, |f| f.as_str()),
+        force_seen.count_ones(),
+        word_set(&boyko_render::OcclusionMode::ALL, mode_seen, |m| m.as_str())
+    );
+}
+
+/// Renders a set-of-variants bitmask as a comma-separated word list, in the variants' own order.
+///
+/// `seen` bit `k` selects `variants[k]`, which is the accumulation site's contract
+/// (`OcclusionForce::slot()` is a pinned bijection onto that range;
+/// [`boyko_render::OcclusionMode`] is `#[repr(u32)]` with `ALL` in discriminant order, pinned by
+/// its own test). An EMPTY set prints `-` rather than an empty bracket pair, so a summary from a
+/// run whose warm-up consumed every frame is legible as "nothing observed" instead of as a
+/// truncated line.
+///
+/// `#[cold]`: called twice, once per process, from the summary print.
+#[cfg(windows)]
+#[cold]
+#[inline(never)]
+fn word_set<T: Copy>(variants: &[T], seen: u8, word: impl Fn(T) -> &'static str) -> String {
+    let mut out = String::new();
+    for (k, v) in variants.iter().enumerate() {
+        if seen & (1u8 << k) != 0 {
+            if !out.is_empty() {
+                out.push(',');
+            }
+            out.push_str(word(*v));
+        }
+    }
+    if out.is_empty() { "-".to_string() } else { out }
 }
 
 /// VG R3 piece 4 rung P4-1: what the recorder's two bracket masks say about one pass on one

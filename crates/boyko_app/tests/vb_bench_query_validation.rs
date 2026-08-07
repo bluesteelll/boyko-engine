@@ -84,6 +84,7 @@ use boyko_render::{
     GeometryLegs, HzbConfig, HzbMode, Material, MeshGeometryTableSlot, RenderPath, RenderPathConfig,
 };
 
+mod occ_fixture;
 mod vb_occ_mixed_scene;
 
 use vb_occ_mixed_scene::EXTENT;
@@ -149,11 +150,17 @@ fn setup(
 /// The configuration both workers share, spelled ONCE.
 ///
 /// `HzbConfig::Build` is load-bearing here in a way it is not in the totality gate: it is what makes
-/// `GBufferScene::hzb` `Some`, hence what arms `path_vb_occlusion_split()` on this marked scene —
-/// and the split is what gives slots 3, 6, 7 and 8 real recorded work to sit around. A worker
-/// without it would still write all ten pairs (the brackets sit outside their units' gates) but
-/// four of them would enclose nothing, and the layer would be adjudicating a command stream this
-/// rung does not care about.
+/// `GBufferScene::hzb` `Some`, hence one conjunct of `path_vb_occlusion_split()` on this marked
+/// scene — and the split is what gives slots 3, 6, 7 and 8 real recorded work to sit around. A
+/// worker without it would still write all ten pairs (the brackets sit outside their units' gates)
+/// but four of them would enclose nothing, and the layer would be adjudicating a command stream
+/// this rung does not care about.
+///
+/// ⚠️ VG R3 piece 4 rung P4-4 made the OWNER's `OcclusionConfig` the split's FIRST conjunct, so
+/// `HzbConfig::Build` and the marker are no longer sufficient. The arming goes through
+/// `occ_fixture` — THE single insert site — for two reasons: the paragraph above stops being true
+/// the moment this worker silently unsplits, and the vacuity control's one edit must red every
+/// gate whose premise is an armed split, this one included.
 fn boot(title: &'static str) -> App {
     let mut app = App::new();
     app.add_plugins(EnginePlugins::window(title, EXTENT, EXTENT));
@@ -163,6 +170,11 @@ fn boot(title: &'static str) -> App {
         legs: GeometryLegs::Mesh,
     });
     app.insert_resource(HzbConfig { mode: HzbMode::Build });
+    occ_fixture::arm_occlusion_with(
+        &mut app,
+        boyko_render::OcclusionMode::TwoPhase,
+        boyko_app::OcclusionForce::None,
+    );
     app
 }
 

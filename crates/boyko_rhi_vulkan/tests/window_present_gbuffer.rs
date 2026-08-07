@@ -2594,8 +2594,12 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // `path_vb_occlusion_split()` is `false` here through its FIRST conjunct already —
         // `vb_occlusion_instances: 0` is the honest value for a fixture with no ECS gather
         // behind it, not a second gate.
+        // VG R3 piece 4 rung P4-4: `vb_occlusion: None` is the OWNER half — this harness boots no
+        // `World` and therefore no `OcclusionConfig`, which is the same answer the default `Off`
+        // gives. It is now the predicate's first conjunct.
         vb_indirect_late: None,
         vb_occlusion_instances: 0,
+        vb_occlusion: None,
         // VG R3 piece 3 step P3-2: the occlusion split's three buffers and its flag word.
         // `None`/`0` for the SAME reason every VB field above is: this harness mints its own
         // pipelines instead of booting `GpuSceneBundles` (which is what allocates these
@@ -3701,8 +3705,12 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         // `path_vb_occlusion_split()` is `false` here through its FIRST conjunct already —
         // `vb_occlusion_instances: 0` is the honest value for a fixture with no ECS gather
         // behind it, not a second gate.
+        // VG R3 piece 4 rung P4-4: `vb_occlusion: None` is the OWNER half — this harness boots no
+        // `World` and therefore no `OcclusionConfig`, which is the same answer the default `Off`
+        // gives. It is now the predicate's first conjunct.
         vb_indirect_late: None,
         vb_occlusion_instances: 0,
+        vb_occlusion: None,
         // VG R3 piece 3 step P3-2: the occlusion split's three buffers and its flag word.
         // `None`/`0` for the SAME reason every VB field above is: this harness mints its own
         // pipelines instead of booting `GpuSceneBundles` (which is what allocates these
@@ -8746,8 +8754,12 @@ fn run_showcase_body_ddgi(
         // `path_vb_occlusion_split()` is `false` here through its FIRST conjunct already —
         // `vb_occlusion_instances: 0` is the honest value for a fixture with no ECS gather
         // behind it, not a second gate.
+        // VG R3 piece 4 rung P4-4: `vb_occlusion: None` is the OWNER half — this harness boots no
+        // `World` and therefore no `OcclusionConfig`, which is the same answer the default `Off`
+        // gives. It is now the predicate's first conjunct.
         vb_indirect_late: None,
         vb_occlusion_instances: 0,
+        vb_occlusion: None,
         // VG R3 piece 3 step P3-2: the occlusion split's three buffers and its flag word.
         // `None`/`0` for the SAME reason every VB field above is: this harness mints its own
         // pipelines instead of booting `GpuSceneBundles` (which is what allocates these
@@ -10325,9 +10337,11 @@ fn run_showcase_body(
         hzb_dump: None,
         // VG R3 piece 2 step P2-3: no LATE indirect record array, no marked instance — see the
         // sibling fixtures. `path_vb_occlusion_split()` is `false` here through `path_is_vb()`
-        // already.
+        // already, and since VG R3 piece 4 rung P4-4 through `vb_occlusion: None` (the OWNER half)
+        // before that — this harness boots no `World` and therefore no `OcclusionConfig`.
         vb_indirect_late: None,
         vb_occlusion_instances: 0,
+        vb_occlusion: None,
         // VG R3 piece 3 step P3-2: the occlusion split's three buffers and its flag word.
         // `None`/`0` for the SAME reason every VB field above is: this harness mints its own
         // pipelines instead of booting `GpuSceneBundles` (which is what allocates these

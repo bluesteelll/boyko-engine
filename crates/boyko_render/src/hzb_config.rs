@@ -44,11 +44,26 @@
 //! [`RenderPathFrozenConsumers`](crate::render_path_config::RenderPathFrozenConsumers) exists
 //! because a runtime SSAO/DDGI flip can make the light header tell the shade to combine a term
 //! whose pass was never armed — a live config drifting away from the boot-shaped framegraph.
-//! The pyramid cannot drift that way: it is read by nothing, and its arming is captured at
-//! `GBufferTargets::create` time ONTO THE TARGETS (the `AaArm::from_scene` /
-//! `TargetsProfile::from_scene` precedent), so the recorder keys off the targets it was handed,
-//! never off the live config. A frozen-consumer field would be a snapshot of a value no
-//! recorder reads.
+//!
+//! ⚠️ The reason USED to be "the pyramid is read by nothing", and that half has been false since
+//! VG R3 piece 3 armed the occlusion cull against it. The surviving reason is OWNERSHIP, not
+//! inertness:
+//!
+//! * The pyramid's arming is captured at `GBufferTargets::create` time ONTO THE TARGETS (the
+//!   `AaArm::from_scene` / `TargetsProfile::from_scene` precedent), so the recorder keys off the
+//!   targets it was handed, never off the live config. A flip that changes whether a pyramid
+//!   exists therefore forces a full targets recreate rather than a mid-flight disagreement.
+//! * The state the OCCLUSION consumer needs across the flip — the late indirect array, the
+//!   survivor list and the per-batch deferral counts — is minted at BOOT by the host's scene
+//!   bundles, not by `GBufferTargets`, so a recreate neither destroys nor reallocates any of it.
+//! * Seeding and consumption are same-frame and co-gated off ONE
+//!   `GBufferScene::path_vb_occlusion_split()` call on one assembled scene: a frame records the
+//!   late fill, the late cull and the late raster, or none of them.
+//!
+//! The targets/config lockstep is CHECKED in-tree by a `debug_assert!` on
+//! `GBufferTargets::hzb_arm_matches_allocation` — a dev-profile check, which is what every golden
+//! and gate run uses, and NOT a release-live guarantee. It is cited here as the check, never as
+//! the reason: the reason is the ownership above.
 //!
 //! # Two variants, permanently
 //!
@@ -77,9 +92,21 @@ use boyko_macros::Resource;
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum HzbMode {
-    /// No pyramid — the 0%-gate: no image, no per-mip views, no descriptor sets, no build
-    /// passes, zero barriers, and not one recorded command. The DEFAULT, so a world that never
-    /// inserts a non-default [`HzbConfig`] is byte-identical to today.
+    /// **This config does not ask for a pyramid.** The DEFAULT, so a world that never inserts a
+    /// non-default [`HzbConfig`] is byte-identical to today.
+    ///
+    /// ⚠️ Since VG R3 piece 4 that is no longer the same statement as "no pyramid exists". A
+    /// pyramid is planned iff a PRODUCER asks for one (this variant's sibling
+    /// [`Build`](HzbMode::Build)) **or** a CONSUMER needs one
+    /// ([`OcclusionMode::TwoPhase`](crate::occlusion_config::OcclusionMode::TwoPhase)) — the
+    /// disjunct lives in `boyko_app::hzb_plan::hzb_plan_for`, because `TwoPhase` over an `Off`
+    /// producer would otherwise arm nothing and say nothing, i.e. ship a silently-dead knob. The
+    /// executed evidence is the unit test `occlusion_alone_plans_a_pyramid` and the non-pinned GPU
+    /// leg `vb_occ_probe_dump_marked_no_hzb` (`boyko_app/tests/vb_occ_split_gate.rs`), which arms
+    /// the consumer WITHOUT inserting this Resource and asserts the split still records.
+    ///
+    /// With BOTH `Off` there is no image, no per-mip views, no descriptor sets, no build passes,
+    /// zero barriers, and not one recorded command.
     ///
     /// The ONE thing this arm does not suppress (VG R3 piece 1 step P1-4) is the `hzb_build`
     /// bind-group LAYOUT and PIPELINE: the backend mints those unconditionally at boot, so that

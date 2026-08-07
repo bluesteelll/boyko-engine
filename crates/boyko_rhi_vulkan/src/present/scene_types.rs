@@ -716,6 +716,32 @@ pub const VB_CULL_OCC_FORCE_LATE: u32 = 1 << 1;
 /// FORCE_KEEP / ARMED / DISARMED timing triple.
 pub const VB_CULL_OCC_FORCE_KEEP: u32 = 1 << 2;
 
+/// VG R3 piece 4 rung P4-4 — **the OWNER's occlusion arming, as a per-frame value.**
+///
+/// PRESENCE IS THE ARMING: `GBufferScene::vb_occlusion == Some(_)` is the owner half of
+/// [`GBufferScene::path_vb_occlusion_split`], threaded by the host from its
+/// `boyko_render::OcclusionConfig` read. The payload is the DIAGNOSTIC half — which verdict, if
+/// any, is forced — because a force word without an arming is a bit nobody reads.
+///
+/// This is the `Option<HzbPlan>` shape, for the same reason: a plain `bool` beside a force word
+/// would be two fields that can disagree about whether the frame is armed, and the host would then
+/// own an invariant instead of a value.
+///
+/// # Why the RHI names an owner concept at all
+///
+/// It does not: it names a plain word. This crate sits BELOW `boyko_render` in the dependency
+/// graph and cannot see `OcclusionMode` — the SAME plain-value boundary crossing
+/// [`GBufferScene::vb_occlusion_instances`] documents. The host maps the enum to presence and the
+/// diagnostic Resource to `force_flags`, and this type is what crosses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VbOcclusionArm {
+    /// `0`, [`VB_CULL_OCC_FORCE_KEEP`] or [`VB_CULL_OCC_FORCE_LATE`] — never both, by construction
+    /// on the host side (the two are opposite controls, and the resolution of "both" would be
+    /// whichever branch the shader tests first). `record_vb`'s existing `debug_assert!` on the
+    /// folded word is the in-tree check.
+    pub force_flags: u32,
+}
+
 /// The [`VbBatchDesc`] byte stride — mirrors `vb_batch_cull.comp.hlsl`'s `VbBatchDescGpu`.
 pub(crate) const VB_BATCH_DESC_STRIDE: u32 = crate::compute::VB_BATCH_DESC_STRIDE;
 
@@ -3470,6 +3496,14 @@ pub struct GBufferScene<'a> {
     /// can arm the split with zero marked instances in the DRAWN set — an armed empty scope,
     /// never the reverse.
     pub vb_occlusion_instances: u32,
+    /// VG R3 piece 4 rung P4-4: the OWNER's arming, threaded from `boyko_render::OcclusionConfig`
+    /// by the host. `None` on the default `OcclusionMode::Off` — no split, no late passes — which
+    /// is the [`Self::hzb`] `Option<HzbPlan>` shape and, like it, the 0%-gate.
+    ///
+    /// It is the FIRST conjunct of [`Self::path_vb_occlusion_split`], prepended to the five
+    /// capability/path conjuncts that already existed: the marker says the geometry CAN be tested,
+    /// this says the owner WANTS it tested, and they are different questions.
+    pub vb_occlusion: Option<VbOcclusionArm>,
 
     // ---- VG R3 piece 3 step P3-2 (plan D3/D6): the cull's three new buffers ----------------
     /// The per-FIF early-reject / late-survivor list — `INSTANCE_CAPACITY` `u32`s, region-addressed
@@ -3538,9 +3572,14 @@ pub struct GBufferScene<'a> {
     /// into a frame that stores where nothing declared it (and reads a resource the graph never
     /// named). One predicate, read twice, cannot.
     ///
-    /// The FORCE bits come from a boot-time `BOYKO_VG_OCC_FORCE` selector and are `0` on every
-    /// committed pin. They are meaningful only beside the ARMED bit, so they too are `0` on an
-    /// unsplit frame.
+    /// The FORCE bits come from [`Self::vb_occlusion`]'s payload — since VG R3 piece 4 rung P4-4 a
+    /// per-frame value threaded from the host's diagnostic `boyko_app::OcclusionForce` Resource,
+    /// where they used to be a boot-time `BOYKO_VG_OCC_FORCE` env read inside the scene bundles.
+    /// One source of truth: the arming and the regime now travel in ONE `Option`, so they cannot
+    /// disagree about whether the frame is armed. They are meaningful only beside the ARMED bit,
+    /// so they too are `0` on an unsplit frame — the fold is
+    /// `if path_vb_occlusion_split() { ARMED | force } else { 0 }`, and the `Some` that carries the
+    /// force is also the predicate's first conjunct.
     pub vb_occ_flags: u32,
     /// VG R3 piece 3 step P3-3 (plan D6): the ENGINE frame index this scene describes — the
     /// monotonic host counter the runner advances once per presented frame, wrapping benignly at
@@ -3906,9 +3945,18 @@ impl GBufferScene<'_> {
     /// disagree — the `boyko_render::hzb_config::HzbConfig::enabled()` discipline (derived from
     /// `mode != Off` rather than kept as a field beside it).
     ///
-    /// Gated on the CAPABILITY ALONE at this piece; piece 4 AND-s in the owner config knob. A
-    /// split nobody can record is a split nobody can prove inert, so gating it on a knob that
-    /// does not exist yet would make every gate for it vacuous by construction.
+    /// # VG R3 piece 4 rung P4-4: the OWNER conjunct, prepended
+    ///
+    /// [`Self::vb_occlusion`] is `Some` iff the world's `boyko_render::OcclusionConfig` is not
+    /// `Off`. Piece 2 gated this on the CAPABILITY ALONE and said so, because a split nobody can
+    /// record is a split nobody can prove inert; piece 4 adds the knob now that the gates exist.
+    /// It is FIRST because it is the cheapest and the most often false — every world that never
+    /// composes the plugin, and every world that leaves the default, stops here.
+    ///
+    /// ⚠️ The default is `Off`, so this conjunct is what keeps all thirty committed golden pins
+    /// byte-identical: the four pinned configurations that DO split arm it through the fixtures'
+    /// single insert site (`boyko_app/tests/occ_fixture`), and `vb_mesh_occ_pins_actually_split`
+    /// is the gate that says so — no hash can.
     ///
     /// The `mesh_leg` conjunct is load-bearing, not defensive: a `VisibilityBuffer × Sdf`
     /// (mesh-less) frame declares no `vb_raster` at all, and a late scope with no early scope
@@ -3941,7 +3989,8 @@ impl GBufferScene<'_> {
     /// `dead_code` under `-D warnings` for that commit.
     #[inline]
     pub fn path_vb_occlusion_split(&self) -> bool {
-        self.path_is_vb()
+        self.vb_occlusion.is_some()
+            && self.path_is_vb()
             && self.resolved_render_path.mesh_leg
             && self.vb_occlusion_instances > 0
             && self.hzb.is_some()

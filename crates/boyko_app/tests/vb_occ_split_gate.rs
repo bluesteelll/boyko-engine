@@ -30,6 +30,14 @@
 //!   blessing ceremony, while G2's counts plus G3 and G4 already cover what the multi-batch case
 //!   adds.
 //!
+//! # A FOURTH worker, for a different question (VG R3 piece 4 rung P4-4)
+//!
+//! [`vb_occ_probe_dump_marked_no_hzb`] is not part of the pair above. It is the only executable
+//! red in the tree for the host's pyramid DISJUNCT — the rule that a pyramid is planned when a
+//! producer asks **or** a consumer needs one — because every configuration a golden pin renders
+//! sets `BOYKO_VG_HZB="1"` and receives the pyramid by the producer route regardless. This binary
+//! is pinned by nothing, which is what makes such a leg free.
+//!
 //! # What this gate CANNOT claim
 //!
 //! * **That the GPU EXECUTED the late scope or the late cull.** It proves the host RECORDED both.
@@ -63,7 +71,7 @@
 //! # Run
 //!
 //! `cargo test -p boyko-app --test vb_occ_split_gate -- --ignored --nocapture --test-threads=1`
-//! with `BOYKO_DISABLE_VALIDATION=1`. The driver spawns the three workers itself; a worker run
+//! with `BOYKO_DISABLE_VALIDATION=1`. The driver spawns the four workers itself; a worker run
 //! directly needs `BOYKO_VB_PROBE=<path.toml>` and SKIPS (rather than looping forever) without it.
 
 #![cfg(windows)]
@@ -71,13 +79,16 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use boyko_app::OcclusionForce;
 use boyko_app::prelude::*;
 use boyko_ecs::ecs::core::system::ResMut;
 use boyko_render::mesh::Vertex;
 use boyko_render::{
     GeometryLegs, HzbConfig, HzbMode, Material, MeshAssetsVbExt, MeshGeometryTableSlot,
-    OcclusionCulling, RenderPath, RenderPathConfig, generate_tangents,
+    OcclusionCulling, OcclusionMode, RenderPath, RenderPathConfig, generate_tangents,
 };
+
+mod occ_fixture;
 
 /// The env knob that arms `boyko_app::vb_probe_dump` — the value is the output path.
 const ENV_PROBE: &str = "BOYKO_VB_PROBE";
@@ -354,6 +365,12 @@ const VB_MESH_PATH: RenderPathConfig =
 const HZB_BUILD: HzbConfig = HzbConfig { mode: HzbMode::Build };
 
 /// **G2 worker — the MARKED single-batch scene** (`vb_occ_split`'s own).
+///
+/// VG R3 piece 4 rung P4-4: the split now also needs the OWNER's `OcclusionConfig`, armed through
+/// `occ_fixture` — THE single insert site, so that the vacuity control's one edit reaches this
+/// gate too. `arm_occlusion_with` rather than the env-driven route: this worker's regime is a
+/// property of the TEST (marked, unforced), not of whatever `BOYKO_VG_OCC` the operator's shell
+/// happens to carry.
 #[test]
 #[ignore = "needs a real windowed GPU device; the G2 driver spawns it with BOYKO_VB_PROBE set"]
 fn vb_occ_probe_dump_marked() {
@@ -365,11 +382,18 @@ fn vb_occ_probe_dump_marked() {
     app.add_startup_system(setup_single_marked);
     app.insert_resource(VB_MESH_PATH);
     app.insert_resource(HZB_BUILD);
+    occ_fixture::arm_occlusion_with(&mut app, OcclusionMode::TwoPhase, OcclusionForce::None);
     app.run();
 }
 
 /// **G2 worker — the UNMARKED single-batch scene.** The control: `scopes == 1` here is what makes
 /// `scopes == 2` on the marked run a measurement rather than a constant.
+///
+/// ⚠️ The occlusion CONFIG is armed here too, and that is deliberate — the same reason
+/// [`HZB_BUILD`] is inserted on this worker. The control's whole value is that the two runs differ
+/// in exactly one thing: the MARKER's presence. Arming the config only where a split is expected
+/// would make the pair differ in two, and `scopes == 1` would then be a statement about the config
+/// rather than about the marker.
 #[test]
 #[ignore = "needs a real windowed GPU device; the G2 driver spawns it with BOYKO_VB_PROBE set"]
 fn vb_occ_probe_dump_unmarked() {
@@ -381,6 +405,7 @@ fn vb_occ_probe_dump_unmarked() {
     app.add_startup_system(setup_single_unmarked);
     app.insert_resource(VB_MESH_PATH);
     app.insert_resource(HZB_BUILD);
+    occ_fixture::arm_occlusion_with(&mut app, OcclusionMode::TwoPhase, OcclusionForce::None);
     app.run();
 }
 
@@ -396,6 +421,41 @@ fn vb_occ_probe_dump_multi() {
     app.add_startup_system(setup_multi);
     app.insert_resource(VB_MESH_PATH);
     app.insert_resource(HZB_BUILD);
+    occ_fixture::arm_occlusion_with(&mut app, OcclusionMode::TwoPhase, OcclusionForce::None);
+    app.run();
+}
+
+/// **The DISJUNCT's worker** (VG R3 piece 4 rung P4-4, plan A3) — the marked single-batch scene
+/// with the occlusion CONSUMER armed and **[`HZB_BUILD`] deliberately NOT inserted.**
+///
+/// # Why this leg exists, and why no golden pin could replace it
+///
+/// Piece 4 promotes into the host the rule that a pyramid is planned iff a PRODUCER asks
+/// (`HzbMode::Build`) **or** a CONSUMER needs one (`OcclusionMode::TwoPhase`). Deleting that
+/// disjunct leaves every PINNED configuration green: all five occlusion pins set
+/// `BOYKO_VG_HZB="1"` in their own `[*.env]` blocks, so they receive the pyramid by the producer
+/// route regardless — and `vb_mesh_occ_pins_actually_split` would stay green with them. The
+/// disjunct can only change a run that arms occlusion WITHOUT the producer knob, and no pin is
+/// one. This binary is pinned by NOTHING, so a leg here costs no blessing.
+///
+/// # It is not the marked/unmarked control's twin, and must not be read as one
+///
+/// Its partner is [`vb_occ_probe_dump_marked`], identical in every respect except the `HzbConfig`
+/// insert. A green PAIR means "the pyramid arrives by either route"; a red on THIS leg alone means
+/// "the consumer route is gone".
+#[test]
+#[ignore = "needs a real windowed GPU device; the G2 driver spawns it with BOYKO_VB_PROBE set"]
+fn vb_occ_probe_dump_marked_no_hzb() {
+    if probe_path_or_skip("vb_occ_probe_dump_marked_no_hzb").is_none() {
+        return;
+    }
+    let mut app = App::new();
+    app.add_plugins(EnginePlugins::window("boyko_engine vb occ no-hzb", EXTENT, EXTENT));
+    app.add_startup_system(setup_single_marked);
+    app.insert_resource(VB_MESH_PATH);
+    // ⚠️ NO `app.insert_resource(HZB_BUILD)`. That absence IS the experiment: the pyramid must
+    // arrive because the CONSUMER asked for it.
+    occ_fixture::arm_occlusion_with(&mut app, OcclusionMode::TwoPhase, OcclusionForce::None);
     app.run();
 }
 
@@ -534,10 +594,16 @@ fn vb_occ_split_records_two_scopes() {
     let marked = run_worker("vb_occ_probe_dump_marked");
     let unmarked = run_worker("vb_occ_probe_dump_unmarked");
     let multi = run_worker("vb_occ_probe_dump_multi");
+    // VG R3 piece 4 rung P4-4: the disjunct's own leg — the same marked scene with `HzbConfig`
+    // withheld, so the pyramid can only arrive because the CONSUMER asked for it.
+    let no_hzb = run_worker("vb_occ_probe_dump_marked_no_hzb");
 
-    for (label, p) in
-        [("marked", &marked), ("unmarked", &unmarked), ("vb_occ_multi", &multi)]
-    {
+    for (label, p) in [
+        ("marked", &marked),
+        ("unmarked", &unmarked),
+        ("vb_occ_multi", &multi),
+        ("marked_no_hzb", &no_hzb),
+    ] {
         assert_is_a_vb_mesh_frame(label, p);
     }
 
@@ -594,6 +660,35 @@ fn vb_occ_split_records_two_scopes() {
         unmarked.scopes
     );
     assert_eq!(multi.scopes, 2, "vb_occ_multi: expected two scopes, got {}", multi.scopes);
+
+    // ---- VG R3 piece 4 rung P4-4: the PYRAMID ARRIVES BY THE CONSUMER ROUTE ---------------------
+    //
+    // The only executable red for `hzb_plan_for`'s disjunct anywhere in the tree. Deleting the
+    // disjunct leaves every golden pin AND `vb_mesh_occ_pins_actually_split` green — all five
+    // occlusion pins set `BOYKO_VG_HZB="1"` and receive the pyramid by the PRODUCER route — so the
+    // pinned corpus is structurally blind here. Read this clause beside its partner
+    // (`marked.scopes == 2`, six lines up): the two runs differ in the `HzbConfig` insert alone.
+    assert_eq!(
+        no_hzb.scopes, 2,
+        "marked_no_hzb: the recorder reported {} raster scope(s) on a scene that armed \
+         `OcclusionMode::TwoPhase` with NO `HzbConfig`. The split carries an `hzb.is_some()` \
+         conjunct, so a 1 here means the host stopped planning a pyramid for a CONSUMER that needs \
+         one -- i.e. `TwoPhase` became a silently-dead knob. No golden pin can see this: every \
+         occlusion pin sets BOYKO_VG_HZB=1 and gets its pyramid by the producer route.",
+        no_hzb.scopes
+    );
+    assert_eq!(
+        no_hzb.late_cull_dispatches, 1,
+        "marked_no_hzb: {} late cull dispatches -- the second half of the same claim, from the \
+         `vkCmdDispatch` rather than from the scope bracket",
+        no_hzb.late_cull_dispatches
+    );
+    assert_eq!(
+        no_hzb.occlusion_instances, SINGLE_SPHERES,
+        "marked_no_hzb: {} marked instances, expected {SINGLE_SPHERES} -- the fixture is \
+         `setup_single_marked`, so a shortfall means this leg is adjudicating a spawn failure",
+        no_hzb.occlusion_instances
+    );
 
     // ---- the LATE CULL was dispatched (VG R3 piece 3 step P3-6) ---------------------------------
     //
@@ -658,9 +753,12 @@ fn vb_occ_split_records_two_scopes() {
     // It is STRUCTURALLY blind to the GPU's word (the recorder sums a host-local array), and that
     // is stated rather than papered over: the GPU's late count is gated by the
     // `BOYKO_VB_CULL_READBACK` corpus's `late_ic=`, never here.
-    for (label, p) in
-        [("marked", &marked), ("unmarked", &unmarked), ("vb_occ_multi", &multi)]
-    {
+    for (label, p) in [
+        ("marked", &marked),
+        ("unmarked", &unmarked),
+        ("vb_occ_multi", &multi),
+        ("marked_no_hzb", &no_hzb),
+    ] {
         assert_eq!(
             p.late_seed_instances, 0,
             "{label}: the host seeded {} late instances. The HOST must seed every late record with \
@@ -674,10 +772,11 @@ fn vb_occ_split_records_two_scopes() {
     println!(
         "vb occlusion split G2: marked scopes={} late_draws={} late_cull_dispatches={} \
          (batches={}), unmarked scopes={} late_cull_dispatches={}, vb_occ_multi scopes={} \
-         late_draws={} late_cull_dispatches={} (batches={}). Every count is the RECORDER's; \
-         `draw_batches` and `occlusion_instances` are the host's, for cross-check. This says the \
-         host RECORDED the scope and the dispatch -- never that the GPU executed either, and on \
-         these static fixtures the correct late instance count is ZERO (plan D12).",
+         late_draws={} late_cull_dispatches={} (batches={}), marked_no_hzb scopes={} \
+         late_cull_dispatches={}. Every count is the RECORDER's; `draw_batches` and \
+         `occlusion_instances` are the host's, for cross-check. This says the host RECORDED the \
+         scope and the dispatch -- never that the GPU executed either, and on these static \
+         fixtures the correct late instance count is ZERO (plan D12).",
         marked.scopes,
         marked.late_draws,
         marked.late_cull_dispatches,
@@ -687,6 +786,8 @@ fn vb_occ_split_records_two_scopes() {
         multi.scopes,
         multi.late_draws,
         multi.late_cull_dispatches,
-        multi.draw_batches
+        multi.draw_batches,
+        no_hzb.scopes,
+        no_hzb.late_cull_dispatches
     );
 }

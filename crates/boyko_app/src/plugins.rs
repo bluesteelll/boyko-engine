@@ -266,6 +266,25 @@ impl Plugin for EnginePlugins {
         // host world byte-identical, exactly as `AaPlugin`'s default `Off` does.
         app.add_plugin(boyko_render::HzbPlugin);
 
+        // VG R3 piece 4 rung P4-4 — `OcclusionPlugin`: seeds the owner-set `OcclusionConfig`
+        // (default `OcclusionMode::Off`, the byte-identity anchor). Immediately after `HzbPlugin`
+        // because the two are the PRODUCER and CONSUMER halves of one feature, and one plugin per
+        // config family is this file's shipped mapping. System-less, for `HzbPlugin`'s own reason:
+        // the map from the knob to downstream state is the identity, so there is no `Resolved*`
+        // carrier to derive.
+        //
+        // Composing it UNCONDITIONALLY is safe and is what makes the split's arming an ECS fact
+        // rather than an env read: the default `Off` makes
+        // `GBufferScene::path_vb_occlusion_split()` false through its FIRST conjunct, so no late
+        // pass is declared or recorded and every host world stays byte-identical.
+        //
+        // ⚠️ Its DIAGNOSTIC sibling `boyko_app::OcclusionForce` is deliberately NOT composed here.
+        // That one is a measurement instrument (defer nothing / defer everything), read through
+        // `try_resource` so absence IS its default — the same treatment an absent `HzbConfig`
+        // gets. Composing an instrument as if it were an owner knob is how a fixture-only control
+        // becomes shipping surface.
+        app.add_plugin(boyko_render::OcclusionPlugin);
+
         // Dev/test launch seam: `BOYKO_RENDER_PATH` / `BOYKO_GEOMETRY_LEGS` override the
         // `Deferred + Both` anchor `RenderPathPlugin` just seeded, so `scripts/run-scene.ps1` can
         // launch ANY windowed example in ANY paradigm without editing the scene. Runs DURING

@@ -137,6 +137,22 @@ pub struct VbRecordProbe {
     ///
     /// It reaches a test only because `boyko_app::vb_probe_dump::write_probe` emits it.
     pub late_cull_dispatches: u32,
+    /// VG R3 piece 4 rung P4-4 — **the occlusion flag word THIS frame PUSHED to the GPU.**
+    ///
+    /// Stamped from the `VbBatchCullPush` literal at the early cull's `vkCmdPushConstants`, never
+    /// from a host Resource. That is the whole point: rung P4-4 moved the FORCE regime from a
+    /// boot-time env read to a Resource that CAN change mid-run, and the boot read's second
+    /// rationale was that a mid-run knob makes *"which regime produced this capture?"*
+    /// unanswerable from the artifact. The answer is not an assertion that the knob held still —
+    /// that would have to hold on hosts this repository does not own — it is this: record the word
+    /// the GPU actually received, on the frame it describes, from the recorder.
+    ///
+    /// A copy stamped from the Resource would agree with the host's own `[host]` table no matter
+    /// what this function pushed, which is the tautology `VbRecordProbe`'s header refuses.
+    ///
+    /// `0` on a frame that records no batch cull at all (nothing was pushed, and zero is the
+    /// honest word for that), which is every non-VB and every mesh-less frame.
+    pub occ_flags: u32,
 }
 
 /// VG R3 piece 4 rung P4-1 — **the bracket witness, and the totality it buys.**
@@ -1924,6 +1940,14 @@ impl Renderer<'_> {
                     // on every other, which is what keeps those frames byte-identical.
                     occ_flags: scene.vb_occ_flags,
                 };
+                // VG R3 piece 4 rung P4-4: the regime's provenance, stamped from the PUSH literal
+                // (`push.occ_flags`) and not from `scene.vb_occ_flags` — the two are the same word
+                // here by the line above, and taking it off the push is what keeps the stamp
+                // recorder-sourced when a future edit makes them differ. The FORCE regime became a
+                // live Resource at this rung, so the artifact has to carry the word the GPU got.
+                if let Some(p) = probe.as_deref_mut() {
+                    p.occ_flags = push.occ_flags;
+                }
                 let groups = dispatched_batches.div_ceil(VB_BATCH_CULL_LOCAL_SIZE_X);
                 // SAFETY: recording is open and outside any render scope; `pipeline` + its layout
                 // (one COMPUTE set + the shared `COMPUTE_PUSH_CONSTANT_RANGE_BYTES` push range,
@@ -2506,6 +2530,15 @@ impl Renderer<'_> {
                     phase: VB_CULL_PHASE_LATE,
                     occ_flags: scene.vb_occ_flags,
                 };
+                // VG R3 piece 4 rung P4-4: the two pushes of one frame carry ONE regime word. The
+                // probe stamped its `occ_flags` off the EARLY push, and `occlusion_split ⇒
+                // batch_cull_armed` (asserted above) is what makes that stamp exist by the time
+                // this runs. A late push carrying a different word would leave the artifact
+                // describing half of the frame it claims to describe.
+                debug_assert!(
+                    probe.as_deref().is_none_or(|p| p.occ_flags == late_push.occ_flags),
+                    "invariant: the probe's stamped occ_flags is the word BOTH cull pushes carry"
+                );
                 let late_groups = dispatched_batches.div_ceil(VB_BATCH_CULL_LOCAL_SIZE_X);
                 // SAFETY: recording is open and outside any render scope. `pipeline` + its layout
                 // are the SAME live objects the early dispatch bound (caller contract), and this

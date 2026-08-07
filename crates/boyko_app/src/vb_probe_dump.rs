@@ -24,7 +24,12 @@
 
 use std::io::Write as _;
 
-use boyko_rhi_vulkan::present::VbRecordProbe;
+use boyko_render::OcclusionMode;
+use boyko_rhi_vulkan::present::{
+    VB_CULL_OCC_ARMED, VB_CULL_OCC_FORCE_KEEP, VB_CULL_OCC_FORCE_LATE, VbRecordProbe,
+};
+
+use crate::occlusion_force::OcclusionForce;
 
 /// Presented frames rendered before the probe frame — the settle window
 /// [`hzb_dump`](crate::hzb_dump) uses, for the same reasons (propagation, light reconcile, the
@@ -61,6 +66,25 @@ pub(crate) struct VbProbeContext {
     /// …and did it resolve a MESH leg? A `VisibilityBuffer × Sdf` frame records no raster scope at
     /// all, which is likewise not a split failure.
     pub(crate) mesh_leg: bool,
+    /// VG R3 piece 4 rung P4-4: the owner's `OcclusionConfig::mode` as the HOST read it on the
+    /// probed frame.
+    pub(crate) occ_mode: OcclusionMode,
+    /// …and the diagnostic `OcclusionForce` beside it.
+    ///
+    /// # Why the artifact carries this at all
+    ///
+    /// Rung P4-4 deleted a boot-time `BOYKO_VG_OCC_FORCE` read from shipping code. That read
+    /// justified itself partly by *"a knob that can change mid-run would make 'which regime
+    /// produced this capture?' unanswerable from the artifact"* — and a live Resource reopens
+    /// exactly that. The answer is not an assertion that the Resource held still (which would have
+    /// to hold on hosts this repository does not own); it is to RECORD the regime, from two
+    /// independent sites, on the frame it describes: this one, and
+    /// [`VbRecordProbe::occ_flags`](boyko_rhi_vulkan::present::VbRecordProbe::occ_flags), which is
+    /// stamped from the word the recorder actually PUSHED. A gate comparing the two compares two
+    /// derivations — this module's stated design principle, applied to provenance instead of
+    /// counts — and a mid-run flip becomes VISIBLE (a `[probe]`/`[host]` disagreement) instead of
+    /// silently attributed.
+    pub(crate) occ_force: OcclusionForce,
 }
 
 /// The probe driver the frame loop threads through its steady path.
@@ -122,15 +146,18 @@ impl VbProbeDump {
         match write_probe(&self.path, &self.probe, cx) {
             Ok(()) => eprintln!(
                 "boyko_app: vb record probe written -> {} (scopes={}, late_draws={}, \
-                 late_cull_dispatches={}, late_seed_instances={}, host draw_batches={}, \
-                 occlusion_instances={})",
+                 late_cull_dispatches={}, late_seed_instances={}, probe occ_regime={}, host \
+                 draw_batches={}, occlusion_instances={}, occ_mode={}, occ_force={})",
                 self.path,
                 self.probe.scopes,
                 self.probe.late_draws,
                 self.probe.late_cull_dispatches,
                 self.probe.late_seed_instances,
+                regime_word(self.probe.occ_flags),
                 cx.draw_batches,
-                cx.occlusion_instances
+                cx.occlusion_instances,
+                cx.occ_mode.as_str(),
+                cx.occ_force.as_str()
             ),
             Err(e) => eprintln!("boyko_app: vb record probe write FAILED ({}): {e}", self.path),
         }
@@ -153,24 +180,99 @@ fn write_probe(path: &str, probe: &VbRecordProbe, cx: &VbProbeContext) -> std::i
     out.push_str("# On a converged static frame the late scope correctly draws ZERO instances, so\n");
     out.push_str("# its execution has no observable consequence and no gate here can see it.\n");
     out.push_str("# The GPU's own numbers come from BOYKO_VB_CULL_READBACK, not from this file.\n");
-    // VG R3 piece 3 step P3-6: schema 2 renames `late_instances` -> `late_seed_instances` and adds
+    // VG R3 piece 3 step P3-6: schema 2 renamed `late_instances` -> `late_seed_instances` and added
     // `late_cull_dispatches`. The version is BUMPED rather than left alone because the rename makes
     // a schema-1 reader's `late_instances` lookup fail loudly (`vb_occ_split_gate.rs`'s `field()`
     // panics on a missing key) instead of reading a field that has changed meaning.
-    out.push_str("schema_version = 2\n\n");
+    //
+    // VG R3 piece 4 rung P4-4: schema 3 adds the REGIME's provenance — `[probe] occ_flags` /
+    // `occ_regime` (the word the RECORDER pushed) and `[host] occ_mode` / `occ_force` (what the
+    // host's live Resource reads said on the same frame). Bumped for the same discipline, and the
+    // failure mode it prevents is specific: a schema-2 artifact read by a schema-3 reader would
+    // find no `occ_regime` key, and a reader that defaulted it would certify the WRONG regime for
+    // the capture — the exact class the deleted boot-time env read existed to rule out.
+    out.push_str("schema_version = 3\n\n");
 
     out.push_str("[probe]\n");
     out.push_str(&format!("scopes = {}\n", probe.scopes));
     out.push_str(&format!("late_draws = {}\n", probe.late_draws));
     out.push_str(&format!("late_cull_dispatches = {}\n", probe.late_cull_dispatches));
-    out.push_str(&format!("late_seed_instances = {}\n\n", probe.late_seed_instances));
+    out.push_str(&format!("late_seed_instances = {}\n", probe.late_seed_instances));
+    // The RECORDER's word, verbatim and then decoded. Both, because the raw word is what was
+    // pushed (a reader can check the ARMED bit itself) while the decode is what a gate compares
+    // against `[host] occ_force` and against the pin's own `BOYKO_VG_OCC_FORCE` value.
+    out.push_str(&format!("occ_flags = {}\n", probe.occ_flags));
+    out.push_str(&format!("occ_regime = \"{}\"\n", regime_word(probe.occ_flags)));
+    out.push_str(&format!("occ_armed = {}\n\n", probe.occ_flags & VB_CULL_OCC_ARMED != 0));
 
     out.push_str("[host]\n");
     out.push_str(&format!("draw_batches = {}\n", cx.draw_batches));
     out.push_str(&format!("occlusion_instances = {}\n", cx.occlusion_instances));
     out.push_str(&format!("vb_path = {}\n", cx.vb_path));
     out.push_str(&format!("mesh_leg = {}\n", cx.mesh_leg));
+    out.push_str(&format!("occ_mode = \"{}\"\n", cx.occ_mode.as_str()));
+    out.push_str(&format!("occ_force = \"{}\"\n", cx.occ_force.as_str()));
 
     let mut f = std::fs::File::create(path)?;
     f.write_all(out.as_bytes())
+}
+
+/// The regime word carried by a RECORDED `occ_flags` value, decoded through the same
+/// [`OcclusionForce`] table the fixtures' env decode uses.
+///
+/// Decoded from the FORCE bits alone: the ARMED bit is reported separately (`occ_armed`), because
+/// "no force" and "not armed" are different facts and folding them into one word would make an
+/// unsplit frame indistinguishable from an armed-and-unforced one — which is precisely the
+/// distinction `[vb_occ_mixed_off]` versus `[vb_occ_mixed]` rests on.
+///
+/// Both bits set is a host-fold bug (`OcclusionForce::flags` cannot produce it, and both
+/// `record_vb` and `GpuSceneBundles::scene` `debug_assert!` against it). It is spelled here rather
+/// than silently reported as one of the two, so an artifact from a release build carrying the
+/// impossible word says so.
+fn regime_word(occ_flags: u32) -> &'static str {
+    let keep = occ_flags & VB_CULL_OCC_FORCE_KEEP != 0;
+    let late = occ_flags & VB_CULL_OCC_FORCE_LATE != 0;
+    match (keep, late) {
+        (false, false) => OcclusionForce::None.as_str(),
+        (true, false) => OcclusionForce::KeepAll.as_str(),
+        (false, true) => OcclusionForce::DeferAll.as_str(),
+        (true, true) => "both",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every regime's own `flags()` decodes back to its own word, beside the ARMED bit and
+    /// without it. This is the artifact's half of the `as_str()` ↔ env round-trip: the recorder
+    /// stamps a WORD-less `u32` and this is the only place that turns it back into the spelling a
+    /// gate compares against `[host] occ_force` and against the pin's `BOYKO_VG_OCC_FORCE`.
+    #[test]
+    fn every_regime_word_round_trips_through_the_pushed_flags() {
+        for force in OcclusionForce::ALL {
+            for armed in [0, VB_CULL_OCC_ARMED] {
+                assert_eq!(
+                    regime_word(armed | force.flags()),
+                    force.as_str(),
+                    "{force:?} (armed bit {armed}): the decoded word must not depend on ARMED"
+                );
+            }
+        }
+    }
+
+    /// The impossible word is spelled, not silently collapsed into one of the two real regimes.
+    #[test]
+    fn both_force_bits_report_as_neither_regime() {
+        let word = regime_word(
+            VB_CULL_OCC_ARMED | VB_CULL_OCC_FORCE_KEEP | VB_CULL_OCC_FORCE_LATE,
+        );
+        assert_eq!(word, "both");
+        assert_eq!(
+            OcclusionForce::from_word(word),
+            None,
+            "`both` must not decode back to a regime -- a reader that accepted it would report a \
+             host-fold bug as a measurement"
+        );
+    }
 }
