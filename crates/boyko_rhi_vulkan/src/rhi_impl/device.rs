@@ -1069,6 +1069,17 @@ impl RhiDevice<Vulkan> for VulkanContext {
         Ok(())
     }
 
+    fn read_query_pool_pairs_ns(
+        &self,
+        pool: &VulkanQueryPool,
+        pair_count: u32,
+        scratch: &mut [u64],
+        out_begin_ns: &mut [f64],
+        out_dur_ns: &mut [f64],
+    ) -> Result<(), VulkanError> {
+        self.fetch_query_pair_stamps(pool, pair_count, scratch, out_begin_ns, out_dur_ns)
+    }
+
     // ===== HW-RT ACCELERATION-STRUCTURE VERBS (rung R2a-1; `feature="hwrt"` overrides) =====
     // Each delegates to a `crate::accel` inherent helper (the real `vkGet*`/`vkCreate*` FFI).
     // Present ONLY under `hwrt`; a default build inherits the `#[cold]` erroring defaults.
@@ -1161,37 +1172,30 @@ impl RhiDevice<Vulkan> for VulkanContext {
 }
 
 impl VulkanContext {
-    /// The shared body of [`RhiDevice::read_query_pool_ns`] and
-    /// [`RhiDevice::read_query_pool_ticks`]: host-waits + reads `2 * pair_count` raw timestamps
-    /// from `pool` and COMPACTS them in place into `scratch[0..pair_count]` as masked tick
-    /// deltas. The two public readers differ only in what they do with those integers (scale to
-    /// ns, or copy out), so the `vkGetQueryPoolResults` FFI call and the mask/wrap arithmetic
-    /// exist exactly once.
+    /// The `vkGetQueryPoolResults` FFI call itself (VG R3 piece 4 rung P4-1), shared by
+    /// [`Self::fetch_query_pair_ticks`] and [`Self::fetch_query_pair_stamps`]: host-waits +
+    /// reads `query_count` raw timestamps from `pool` into `scratch[0..query_count]`, UNMASKED
+    /// and UNCOMPACTED.
     ///
-    /// # Why the in-place compaction is sound
-    ///
-    /// Pair `i` reads `scratch[2i]`/`scratch[2i+1]` and writes `scratch[i]`. Since `i <= 2i` for
-    /// every `i >= 0` and the loop runs in ASCENDING `i`, slot `i` was already consumed at step
-    /// `floor(i/2) <= i` before this step overwrites it. No input is destroyed before it is read,
-    /// so the caller needs no second buffer.
+    /// Extracted so the pair-compacting reader and the begin-offset reader share one FFI call
+    /// and one `is_success()` contract instead of two spellings that can drift.
     ///
     /// # Panics
     ///
-    /// `debug_assert`s that `2 * pair_count` fits both `pool.count` and `scratch`.
-    fn fetch_query_pair_ticks(
+    /// `debug_assert`s that `query_count` fits both `pool.count` and `scratch`.
+    fn fetch_query_raw_ticks(
         &self,
         pool: &VulkanQueryPool,
-        pair_count: u32,
+        query_count: u32,
         scratch: &mut [u64],
     ) -> Result<(), VulkanError> {
-        let query_count = pair_count * 2;
         debug_assert!(
             query_count <= pool.count,
-            "invariant: 2 * pair_count must fit the pool's query count"
+            "invariant: the requested query count must fit the pool's query count"
         );
         debug_assert!(
             scratch.len() >= query_count as usize,
-            "invariant: scratch must hold 2 * pair_count raw timestamps"
+            "invariant: scratch must hold query_count raw timestamps"
         );
 
         // SAFETY: `device` is live; `pool.pool` is a live TIMESTAMP pool whose `[0..query_count)`
@@ -1222,6 +1226,33 @@ impl VulkanContext {
         if !result.is_success() {
             return Err(VulkanError::Vk("vkGetQueryPoolResults", result));
         }
+        Ok(())
+    }
+
+    /// The shared body of [`RhiDevice::read_query_pool_ns`] and
+    /// [`RhiDevice::read_query_pool_ticks`]: host-waits + reads `2 * pair_count` raw timestamps
+    /// from `pool` ([`Self::fetch_query_raw_ticks`]) and COMPACTS them in place into
+    /// `scratch[0..pair_count]` as masked tick deltas. The two public readers differ only in what
+    /// they do with those integers (scale to ns, or copy out), so the `vkGetQueryPoolResults` FFI
+    /// call and the mask/wrap arithmetic exist exactly once.
+    ///
+    /// # Why the in-place compaction is sound
+    ///
+    /// Pair `i` reads `scratch[2i]`/`scratch[2i+1]` and writes `scratch[i]`. Since `i <= 2i` for
+    /// every `i >= 0` and the loop runs in ASCENDING `i`, slot `i` was already consumed at step
+    /// `floor(i/2) <= i` before this step overwrites it. No input is destroyed before it is read,
+    /// so the caller needs no second buffer.
+    ///
+    /// # Panics
+    ///
+    /// `debug_assert`s that `2 * pair_count` fits both `pool.count` and `scratch`.
+    fn fetch_query_pair_ticks(
+        &self,
+        pool: &VulkanQueryPool,
+        pair_count: u32,
+        scratch: &mut [u64],
+    ) -> Result<(), VulkanError> {
+        self.fetch_query_raw_ticks(pool, pair_count * 2, scratch)?;
 
         // Mask each raw timestamp to the queue family's valid bits BEFORE subtracting (high
         // bits above the valid width are hardware garbage). The `wrapping_sub` + post-subtraction
@@ -1231,6 +1262,59 @@ impl VulkanContext {
             let begin = scratch[2 * i] & mask;
             let end = scratch[2 * i + 1] & mask;
             scratch[i] = end.wrapping_sub(begin) & mask;
+        }
+        Ok(())
+    }
+
+    /// The body of [`RhiDevice::read_query_pool_pairs_ns`] (VG R3 piece 4 rung P4-1): the same
+    /// FFI read as [`Self::fetch_query_pair_ticks`], but emitting BOTH halves of each pair into
+    /// two caller-owned slices instead of compacting the deltas over the raw stamps.
+    ///
+    /// `out_dur_ns[i]` is computed from the SAME masked integer delta
+    /// (`(end & mask).wrapping_sub(begin & mask) & mask`) scaled by the SAME `f64`
+    /// `timestampPeriod`, so it is bit-for-bit what [`RhiDevice::read_query_pool_ns`] produces
+    /// for the same pool contents — the property `GpuSceneBundles::read_vb_bench_ns`'s
+    /// dev-profile dual read asserts on every bench frame.
+    ///
+    /// `out_begin_ns[i]` is pair `i`'s begin stamp as an offset from pair 0's begin stamp
+    /// (`base`), under the same mask/wrap arithmetic. Writing into two SEPARATE out slices means
+    /// the in-place aliasing question [`Self::fetch_query_pair_ticks`] has to reason about does
+    /// not arise here at all: `scratch` is read, never written.
+    ///
+    /// # Panics
+    ///
+    /// `debug_assert`s that `pair_count > 0` (pair 0's begin IS the base), that `2 * pair_count`
+    /// fits both `pool.count` and `scratch`, and that both out slices hold `pair_count` values.
+    fn fetch_query_pair_stamps(
+        &self,
+        pool: &VulkanQueryPool,
+        pair_count: u32,
+        scratch: &mut [u64],
+        out_begin_ns: &mut [f64],
+        out_dur_ns: &mut [f64],
+    ) -> Result<(), VulkanError> {
+        debug_assert!(pair_count > 0, "invariant: the base offset is pair 0's begin stamp");
+        debug_assert!(
+            out_begin_ns.len() >= pair_count as usize,
+            "invariant: out_begin_ns must hold pair_count offsets"
+        );
+        debug_assert!(
+            out_dur_ns.len() >= pair_count as usize,
+            "invariant: out_dur_ns must hold pair_count durations"
+        );
+        self.fetch_query_raw_ticks(pool, pair_count * 2, scratch)?;
+
+        let mask = self.device_caps().timestamp_mask();
+        let period = self.device_caps().timestamp_period as f64;
+        // Pair 0's begin is the frame's base stamp (the verb's CALLER CONTRACT: it must be the
+        // earliest-recorded stamp, else its offset wraps to ~2^timestampValidBits rather than
+        // going negative — a caller is expected to reject such a sample, not to scale it).
+        let base = scratch[0] & mask;
+        for i in 0..pair_count as usize {
+            let begin = scratch[2 * i] & mask;
+            let end = scratch[2 * i + 1] & mask;
+            out_begin_ns[i] = (begin.wrapping_sub(base) & mask) as f64 * period;
+            out_dur_ns[i] = (end.wrapping_sub(begin) & mask) as f64 * period;
         }
         Ok(())
     }

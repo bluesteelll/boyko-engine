@@ -81,7 +81,7 @@ use boyko_rhi_vulkan::swapchain::{
     FRAMES_IN_FLIGHT, FrameWriteToken, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES,
     GBufferMeshDraw, GBufferScene, InterpActivation, PunctualDepthActivation, RcasActivation,
     ResolvedRenderPathGpu, SV0_PASS_COUNT, SmaaActivation, SsaaActivation, SsaoActivation,
-    Sv0TimedPass, Sv0TimestampCollector, TaaActivation, VB_PASS_COUNT, VbTimedPass,
+    Sv0TimedPass, Sv0TimestampCollector, TaaActivation, VB_PASS_COUNT,
     VbTimestampCollector, ViewtFromDepthActivation, ViewtFromVbDepthActivation,
 };
 #[cfg(feature = "hwrt")]
@@ -1583,6 +1583,16 @@ pub(crate) struct GpuSceneBundles {
     /// None` into every `GBufferScene` and the `record_vb` command stream stays
     /// byte-identical. See [`Self::vb_bench_armed`] / [`Self::read_vb_bench_ns`].
     vb_bench: Option<VbTimestampCollector>,
+    /// VG R3 piece 4 rung P4-1: set once, at boot, by [`Self::disarm_vb_bench_unless_vb`] when
+    /// the resolved render path is NOT `VisibilityBuffer`. Folded into
+    /// [`Self::vb_timing_for_frame`], through which BOTH [`Self::scene`] and
+    /// [`Self::vb_bench_armed`] read the collector — so the recorder and the runner can never
+    /// disagree about whether this frame carries one.
+    ///
+    /// [`Self::boot`] cannot key the arming on the path directly: `boot` runs FIRST (from
+    /// `WindowHost::boot`) and the path is resolved later, in `boyko_app::runner`. This bool is
+    /// the gate at the earliest instant the answer exists.
+    vb_bench_disarmed: bool,
     /// VB-SV0 rung S1.5: the DEFERRED fine-marcher GPU-timestamp bench collector — a per-FIF
     /// ring of `2 * SV0_PASS_COUNT`-query TIMESTAMP pools. Built at [`Self::boot`] ONLY when the
     /// `BOYKO_SV0_BENCH` env is set AND the device supports timestamps; `None` on every other
@@ -1590,6 +1600,33 @@ pub(crate) struct GpuSceneBundles {
     /// `sv0_gpu_timing: None` into every `GBufferScene` and the `record_gbuffer` command stream
     /// stays byte-identical. See [`Self::sv0_bench_armed`] / [`Self::read_sv0_marcher_ticks`].
     sv0_bench: Option<Sv0TimestampCollector>,
+}
+
+/// VG R3 piece 4 rung P4-1: one bench frame's timestamp readback — `VB_PASS_COUNT` begin OFFSETS,
+/// `VB_PASS_COUNT` DURATIONS, and the recorder's own witness of which brackets executed.
+///
+/// # Why the masks travel beside the numbers
+///
+/// A duration cannot distinguish "this pass cost nothing" from "this pass was never bracketed and
+/// the totality epilogue filled it at the frame end" — both read ~0. Nor, on its own, can the
+/// begin offset: the epilogue's filler stamps are recorded LAST, but a `TOP_OF_PIPE` begin
+/// recorded last may legally report an EARLIER time than a `BOTTOM_OF_PIPE` stamp recorded before
+/// it, so "the largest offset in the frame" is a heuristic and not a proof. The masks are the
+/// recorder's own record of which brackets ran, so the MEASURED/FALLBACK/TORN label is structural.
+/// The offsets stay in the payload because the measurement harness asserts on THEM (record order,
+/// the base-stamp contract), not on the label.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct VbBenchSample {
+    /// Per pass, the begin stamp as an offset from pair 0's begin stamp, in ns.
+    pub(crate) begin_off_ns: [f64; VB_PASS_COUNT as usize],
+    /// Per pass, the bracket's duration in ns — bit-identical to what `read_query_pool_ns`
+    /// returns for the same pool contents (asserted in the dev profile, see
+    /// [`GpuSceneBundles::read_vb_bench_ns`]).
+    pub(crate) dur_ns: [f64; VB_PASS_COUNT as usize],
+    /// Bit `p` set iff the recorder bracketed pass `p`'s BEGIN this frame.
+    pub(crate) begun: u16,
+    /// Bit `p` set iff the recorder bracketed pass `p`'s END this frame.
+    pub(crate) ended: u16,
 }
 
 /// Textured-PBR T6c: the TEXTURED gbuffer producer pipeline resources — see
@@ -4642,6 +4679,10 @@ impl GpuSceneBundles {
             vb_shade_froxel_pipeline: None,
             vb_shade_tex_froxel_pipeline: None,
             vb_bench,
+            // VG R3 piece 4 rung P4-1: the path is not knowable here (this fn runs before
+            // `resolve_render_path`); `boyko_app::runner` calls `disarm_vb_bench_unless_vb` the
+            // instant it is.
+            vb_bench_disarmed: false,
             sv0_bench,
         }
     }
@@ -6642,7 +6683,10 @@ impl GpuSceneBundles {
             // was read at `Self::boot` time AND the device supports timestamps
             // (`Self::vb_bench_armed`'s own doc) — `None` on every other boot (every golden/
             // host/interactive run), so the recorded command stream stays byte-identical.
-            vb_gpu_timing: self.vb_bench.as_ref(),
+            // VG R3 piece 4 rung P4-1: read through `vb_timing_for_frame`, the SAME accessor the
+            // runner's `vb_bench_armed()` reads, so a path-disarmed boot cannot leave the
+            // recorder armed while the readback thinks otherwise (or the reverse).
+            vb_gpu_timing: self.vb_timing_for_frame(),
             // VB-SV0 rung S1.5: the Deferred marcher bench collector, armed ONLY when
             // `BOYKO_SV0_BENCH` was read at `Self::boot` time AND the device supports timestamps
             // (`Self::sv0_bench_armed`'s own doc) — `None` on every other boot, so the recorded
@@ -7285,13 +7329,75 @@ impl GpuSceneBundles {
     /// every non-bench run, so that whole block is dead code there.
     #[inline]
     pub(crate) fn vb_bench_armed(&self) -> bool {
-        self.vb_bench.is_some()
+        self.vb_timing_for_frame().is_some()
     }
 
-    /// VB-P1e H0: reads back frame `fi`'s bench triple — `(cull_reset_ns, cull_dispatch_ns,
-    /// shade_ns)`, masked + period-scaled by `RhiDevice::read_query_pool_ns` — from the armed
-    /// bench collector. `None` iff [`Self::vb_bench_armed`] is `false` (the collector was never
-    /// created; the runner never calls this then). `cull_reset_ns + cull_dispatch_ns` is
+    /// VG R3 piece 4 rung P4-1: THE single predicate [`Self::scene`] and `boyko_app::runner`
+    /// both read for "does this frame carry a bench collector?", so the recorder and the readback
+    /// can never disagree — two spellings of one predicate is how a readback comes to wait on a
+    /// pair no recorder wrote.
+    ///
+    /// Folds [`Self::vb_bench_disarmed`] with the boot-time collector.
+    #[inline]
+    pub(crate) fn vb_timing_for_frame(&self) -> Option<&VbTimestampCollector> {
+        if self.vb_bench_disarmed { None } else { self.vb_bench.as_ref() }
+    }
+
+    /// VG R3 piece 4 rung P4-1: disarms the VB-P1d bench collector unless this boot resolved
+    /// `RenderPath::VisibilityBuffer`. Returns `true` iff it actually disarmed a live collector —
+    /// i.e. iff `BOYKO_VB_BENCH` armed one and the path cannot feed it.
+    ///
+    /// # The hazard this closes
+    ///
+    /// The collector arms on `BOYKO_VB_BENCH` + device timestamp support ALONE, while every
+    /// writer — and `reset_frame` itself — lives inside `record_vb`, which the frame driver calls
+    /// only under `scene.path_is_vb()`. A `Deferred × Both` boot with the knob set therefore
+    /// passes the runner's `mesh_leg` precondition (true on Deferred × Both!), records nothing,
+    /// resets nothing, and reaches a `VK_QUERY_RESULT_WAIT_BIT` readback on a pool that was never
+    /// even reset: a HANG, not a wrong number. `record_vb`'s totality epilogue cannot reach a
+    /// frame that never calls `record_vb`; this can. It is the sibling of the hazard the
+    /// `BOYKO_VB_BENCH ⊥ BOYKO_SV0_BENCH` assertion in `boyko_app::runner` already documents.
+    ///
+    /// # Which half is load-bearing
+    ///
+    /// THE DISARM. The caller additionally panics from a `#[cold]` path so a declined bench is
+    /// not silent — but delete that panic and the hang class stays closed (the collector reads
+    /// `None`, `record_vb` records nothing, the readback is never reached), whereas delete the
+    /// disarm and the panic is again the only thing between the operator and an infinite wait,
+    /// which is precisely the shape this rung removes from the runner. They are ordered
+    /// disarm-then-panic for that reason.
+    ///
+    /// The pools are NOT destroyed: they are boot-time allocations (320 B) on a diagnostic knob,
+    /// off every shipping path, and a mid-run destroy sequence would add a lifetime question for
+    /// nothing.
+    ///
+    /// `#[cold]`: called exactly once per process, before the frame loop.
+    #[cold]
+    pub(crate) fn disarm_vb_bench_unless_vb(
+        &mut self,
+        resolved: &boyko_render::ResolvedRenderPath,
+    ) -> bool {
+        if matches!(resolved.path, boyko_render::RenderPath::VisibilityBuffer) {
+            return false;
+        }
+        self.vb_bench_disarmed = true;
+        let was_armed = self.vb_bench.is_some();
+        if was_armed {
+            // The O2 decline notice, in the ONE place that knows both halves of the gate (the
+            // same discipline as `boot`'s "timestamps unusable" notice).
+            eprintln!(
+                "VB-P1d bench: BOYKO_VB_BENCH set but the resolved render path is {:?} — the \
+                 collector is disarmed (only record_vb writes its timestamps).",
+                resolved.path
+            );
+        }
+        was_armed
+    }
+
+    /// VB-P1e H0: [`Self::read_vb_bench_ns`] reads back frame `fi`'s per-pass samples (masked +
+    /// period-scaled by the RHI's query readers) from the armed bench collector; `None` iff
+    /// [`Self::vb_bench_armed`] is `false` (never created, or path-disarmed — the runner never
+    /// calls it then). `cull_reset_ns + cull_dispatch_ns` is
     /// REPORTED as `froxel_cull_ns` in place of VB-P1d's original single bracket (VB-P1e's H0
     /// split it into `VbTimedPass::CullReset`/`CullDispatch` so the fixed-cost hypothesis in
     /// `VB-P1E-HIERARCHICAL-CULL-PLAN.md` §1.2 could be attributed instead of assumed).
@@ -7302,19 +7408,20 @@ impl GpuSceneBundles {
     /// SMALL — see [`crate::runner`]'s bench-print doc for the numbers and why it no longer
     /// gates anything.
     ///
-    /// All three queries are unconditionally written every bench-armed frame — PROVIDED the
-    /// caller upholds the bench's fused/classified-only precondition (`boyko_app::runner`'s
-    /// VB-P1d block asserts it before ever calling this): `VbTimedPass::CullReset`/
-    /// `CullDispatch` run even when the froxel arm itself is not boot-built (reporting
-    /// near-zero ns); `VbTimedPass::VbShade` brackets whichever of `vb_shade`
-    /// (classified)/`vb_resolve` (fused) this frame's `mesh_leg` + `vb_use_classified` select —
-    /// mutually exclusive, always exactly one, ON A NON-SPLIT FRAME. The VB split lit-producer
-    /// (`vb_shade_split`, armed by `resolved_render_path.mesh_geo_shade_split` — a pre-light
-    /// consumer: SSAO/DDGI/SSR/shadow-denoise/Temporal under `VisibilityBuffer`) is UNBRACKETED
-    /// and OUT OF SCOPE for this bench (`vb.rs`'s own VB-P1d doc on its three-way producer
-    /// choice); a split frame would reset-but-never-write the VbShade pair, hanging the
-    /// `VK_QUERY_RESULT_WAIT_BIT` readback below — this is why the caller MUST assert
-    /// `!mesh_geo_shade_split` first.
+    /// All three queries are written on every bench-armed frame, and since VG R3 piece 4 rung
+    /// P4-1 that is a property of the RECORDER rather than of its caller's preconditions:
+    /// `VbTimedPass::CullReset`/`CullDispatch` are bracketed outside the froxel arm's own gate
+    /// (reporting near-zero ns when it is not boot-built); `VbTimedPass::VbShade` is bracketed in
+    /// ALL THREE lit-producer arms — `vb_shade` (classified), `vb_resolve` (fused) and
+    /// `vb_shade_split` (the pre-light-consumer split, `vb.rs`'s own three-way producer doc);
+    /// and any pair a leg leaves unbracketed is closed by `TsWitness::finish`, the release-live
+    /// totality epilogue, before `vkEndCommandBuffer`.
+    ///
+    /// ⚠️ This paragraph previously said the split producer is "UNBRACKETED" and that a split
+    /// frame would hang the `WAIT_BIT` readback, which is why the caller had to assert
+    /// `!mesh_geo_shade_split`. That was refuted by the split arm's own bracket in `vb.rs`; the
+    /// surviving assertion in `boyko_app::runner` is a SCOPE statement about what VB-P1d's
+    /// published break-even means, not a hang guard (see its site comment).
     ///
     /// VB-SV0 rung S1.5: `true` iff the Deferred marcher bench collector was armed at
     /// [`Self::boot`] (`BOYKO_SV0_BENCH` set AND the device supports timestamps). The runner
@@ -7365,21 +7472,69 @@ impl GpuSceneBundles {
         Some(out_ticks[Sv0TimedPass::Marcher.slot() as usize])
     }
 
+    /// VG R3 piece 4 rung P4-1: reads through [`RhiDevice::read_query_pool_pairs_ns`], so the
+    /// caller gets each pair's begin OFFSET beside its duration, and carries the recorder's
+    /// bracket witness (see [`VbBenchSample`]).
+    ///
+    /// # The dual-read invariant (dev profile only)
+    ///
+    /// `vkGetQueryPoolResults` is idempotent until the pool is reset, so both readers may read
+    /// one pool in one frame. In the dev profile this fn re-reads the SAME pool through the
+    /// shipped `read_query_pool_ns` and asserts bit-for-bit equality with `dur_ns` on every slot,
+    /// every bench frame — the standing proof that routing VB-P1d's published numbers through
+    /// the new seam did not move them, rather than a rung-local ceremony that a later edit to
+    /// either reader could silently diverge from.
+    ///
+    /// Its limit, named: this is an implementation-equality check that runs in the DEV profile.
+    /// A release bench run (the timing worker inherits the driver's profile) does not execute it,
+    /// and nothing else in the instrument depends on it holding at run time.
+    ///
     /// # Panics
     /// Panics (`expect("invariant: ...")`) if the readback fails — a bench-only diagnostic
     /// path (never reached on the shipped default), so a query-pool read failure here is a
     /// setup/driver bug, not a recoverable per-frame condition.
-    pub(crate) fn read_vb_bench_ns(&self, ctx: &VulkanContext, fi: usize) -> Option<(f64, f64, f64)> {
-        let collector = self.vb_bench.as_ref()?;
+    pub(crate) fn read_vb_bench_ns(&self, ctx: &VulkanContext, fi: usize) -> Option<VbBenchSample> {
+        let collector = self.vb_timing_for_frame()?;
         let mut scratch = [0u64; (2 * VB_PASS_COUNT) as usize];
-        let mut out_ns = [0.0f64; VB_PASS_COUNT as usize];
-        RhiDevice::read_query_pool_ns(ctx, collector.pool(fi), VB_PASS_COUNT, &mut scratch, &mut out_ns)
-            .expect("invariant: VB-P1d bench query-pool readback");
-        Some((
-            out_ns[VbTimedPass::CullReset.slot() as usize],
-            out_ns[VbTimedPass::CullDispatch.slot() as usize],
-            out_ns[VbTimedPass::VbShade.slot() as usize],
-        ))
+        let mut begin_off_ns = [0.0f64; VB_PASS_COUNT as usize];
+        let mut dur_ns = [0.0f64; VB_PASS_COUNT as usize];
+        RhiDevice::read_query_pool_pairs_ns(
+            ctx,
+            collector.pool(fi),
+            VB_PASS_COUNT,
+            &mut scratch,
+            &mut begin_off_ns,
+            &mut dur_ns,
+        )
+        .expect("invariant: VB-P1d bench query-pool readback");
+
+        #[cfg(debug_assertions)]
+        {
+            let mut dual_scratch = [0u64; (2 * VB_PASS_COUNT) as usize];
+            let mut dual_ns = [0.0f64; VB_PASS_COUNT as usize];
+            RhiDevice::read_query_pool_ns(
+                ctx,
+                collector.pool(fi),
+                VB_PASS_COUNT,
+                &mut dual_scratch,
+                &mut dual_ns,
+            )
+            .expect("invariant: VB-P1d bench dual-read");
+            for slot in 0..VB_PASS_COUNT as usize {
+                // Bit-for-bit: both sides are `f64` produced from the SAME masked integer delta
+                // times the SAME period, so anything but exact equality means the two readers
+                // stopped computing the same quantity.
+                assert_eq!(
+                    dual_ns[slot].to_bits(),
+                    dur_ns[slot].to_bits(),
+                    "invariant: read_query_pool_pairs_ns duration must be bit-identical to \
+                     read_query_pool_ns on slot {slot}"
+                );
+            }
+        }
+
+        let (begun, ended) = collector.witness(fi);
+        Some(VbBenchSample { begin_off_ns, dur_ns, begun, ended })
     }
 
     /// Tears every bundle down in reverse dependency order — the showcase

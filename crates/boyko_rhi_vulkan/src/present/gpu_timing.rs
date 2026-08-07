@@ -22,6 +22,8 @@
 //! per pass `write_begin(TopOfPipe)` before its first cmd + `write_end(BottomOfPipe)` after
 //! its last → submit(fence) → `wait_fence` → `RhiDevice::read_query_pool_ns`.
 
+use core::sync::atomic::{AtomicU16, Ordering};
+
 use boyko_rhi::TimestampStage;
 
 use crate::device::DeviceFns;
@@ -235,11 +237,62 @@ impl VbTimedPass {
     pub const fn slot(self) -> u32 {
         self as u32
     }
+
+    /// The inverse of [`Self::slot`] (VG R3 piece 4 rung P4-1) — the totality epilogue and the
+    /// host-side summary both iterate `0..VB_PASS_COUNT` and need the member back.
+    ///
+    /// # Panics
+    /// Panics on `slot >= VB_PASS_COUNT`: every caller iterates the range this enum defines, so
+    /// an out-of-range slot is a bug in the iteration, not a runtime condition.
+    #[inline]
+    pub const fn from_slot(slot: u32) -> Self {
+        match slot {
+            0 => Self::CullReset,
+            1 => Self::CullDispatch,
+            2 => Self::VbShade,
+            _ => panic!("invariant: VbTimedPass slot must be < VB_PASS_COUNT"),
+        }
+    }
+
+    /// The pipeline stage this pass's BEGIN stamp is written at (VG R3 piece 4 rung P4-1).
+    ///
+    /// `TOP_OF_PIPE` for all three of today's members, and that is a COMPATIBILITY decision
+    /// rather than a preference:
+    /// VB-P1d's published break-even numbers are defined against a `TOP`/`BOTTOM` bracket
+    /// (`boyko_app::runner`'s `print_vb_bench_summary` doc quantifies the ~3 % bias), and
+    /// redefining the stage would silently change what an already-published number means.
+    ///
+    /// Consulted by [`VbTimestampCollector::write_begin`] rather than hardcoded there, so a pass
+    /// whose stage differs cannot acquire the wrong one by being stamped from a different call
+    /// site — the stage is a property of the PASS, and the table is the single place it lives.
+    #[inline]
+    pub const fn begin_stage(self) -> TimestampStage {
+        match self {
+            Self::CullReset | Self::CullDispatch | Self::VbShade => TimestampStage::TopOfPipe,
+        }
+    }
+
+    /// The printed key for this pass (`boyko_app::runner`'s `VB-P4 pass=<label>` lines).
+    ///
+    /// Table-driven so no summary site can drift from the enum: a new member that forgets its
+    /// label fails to compile here instead of printing a stale neighbour's name.
+    #[inline]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::CullReset => "cull_reset",
+            Self::CullDispatch => "cull_dispatch",
+            Self::VbShade => "vb_shade",
+        }
+    }
 }
 
 /// The number of bracketed VB-P1d/VB-P1e passes (`CullReset`, `CullDispatch`, `VbShade`). Each
 /// needs a begin+end query, so a pool holds `2 * VB_PASS_COUNT` queries.
 pub const VB_PASS_COUNT: u32 = 3;
+
+// The per-frame witness masks ([`VbTimestampCollector::publish_witness`]) are `u16`, one bit per
+// slot, so the pass count may not outgrow that width without widening them too.
+const _: () = assert!(VB_PASS_COUNT <= 16, "the TsWitness masks are u16 — one bit per pass slot");
 
 /// A per-frame-in-flight ring of TIMESTAMP query pools bracketing the VB-P1d froxel
 /// cull/shade cost bench — the `record_vb` sibling of [`TimestampCollector`].
@@ -251,6 +304,13 @@ pub const VB_PASS_COUNT: u32 = 3;
 pub struct VbTimestampCollector {
     /// One `2 * VB_PASS_COUNT`-query TIMESTAMP pool per in-flight frame, indexed by `fi`.
     pools: [VulkanQueryPool; FRAMES_IN_FLIGHT],
+    /// VG R3 piece 4 rung P4-1: per-`fi`, bit `p` set iff pass `p`'s BEGIN was recorded by the
+    /// frame that last used this slot — published by the recorder's totality epilogue BEFORE it
+    /// fills the gaps, so the host reads what the frame BRACKETED, not what the epilogue closed.
+    witness_begun: [AtomicU16; FRAMES_IN_FLIGHT],
+    /// Same, for the END stamps. `(begun, ended)` per pass is the label: `(1,1)` MEASURED,
+    /// `(0,0)` FALLBACK, `(1,0)` TORN.
+    witness_ended: [AtomicU16; FRAMES_IN_FLIGHT],
 }
 
 impl VbTimestampCollector {
@@ -260,7 +320,44 @@ impl VbTimestampCollector {
     /// `wait_idle`.
     #[inline]
     pub fn new(pools: [VulkanQueryPool; FRAMES_IN_FLIGHT]) -> Self {
-        Self { pools }
+        Self {
+            pools,
+            witness_begun: core::array::from_fn(|_| AtomicU16::new(0)),
+            witness_ended: core::array::from_fn(|_| AtomicU16::new(0)),
+        }
+    }
+
+    /// VG R3 piece 4 rung P4-1: publishes frame `fi`'s bracket witness — the two masks the
+    /// recorder's `TsWitness` accumulated, recorded BEFORE the epilogue fills the missing pairs.
+    ///
+    /// # Why the masks cross the seam at all
+    ///
+    /// The readback returns `(begin_offset, duration)` per pair, and neither distinguishes a
+    /// MEASURED pass from one the epilogue filled: a `write_zero_pair` fallback reads ~0 like a
+    /// genuinely free pass, and its begin offset is only *usually* the frame's largest — a
+    /// `TOP_OF_PIPE` stamp recorded last may legally report an EARLY time (the stage rule the
+    /// plan's §B3 derives), so an offset-position rule is a heuristic, not a proof. The masks are
+    /// the recorder's own record of which brackets executed, so the label is structural.
+    ///
+    /// Ordering: `Release` here pairs with the `Acquire` in [`Self::witness`]. Recorder and
+    /// readback are the same thread today (the runner drives `record_vb` and the post-present
+    /// readback in one loop); the pairing states the publication so a future threaded recorder
+    /// is a documented handoff rather than a silent race.
+    #[inline]
+    pub fn publish_witness(&self, fi: usize, begun: u16, ended: u16) {
+        debug_assert!(fi < FRAMES_IN_FLIGHT, "invariant: fi must be a valid frame-in-flight slot");
+        self.witness_begun[fi].store(begun, Ordering::Release);
+        self.witness_ended[fi].store(ended, Ordering::Release);
+    }
+
+    /// VG R3 piece 4 rung P4-1: frame `fi`'s `(begun, ended)` bracket masks, as published by the
+    /// last `record_vb` that used this slot. Read after that frame's GPU work completed.
+    ///
+    /// Ordering: `Acquire` matches the `Release` store in [`Self::publish_witness`].
+    #[inline]
+    pub fn witness(&self, fi: usize) -> (u16, u16) {
+        debug_assert!(fi < FRAMES_IN_FLIGHT, "invariant: fi must be a valid frame-in-flight slot");
+        (self.witness_begun[fi].load(Ordering::Acquire), self.witness_ended[fi].load(Ordering::Acquire))
     }
 
     /// This frame's query pool (indexed by the renderer's frame-in-flight slot `fi`). The
@@ -288,23 +385,61 @@ impl VbTimestampCollector {
     #[inline]
     pub unsafe fn reset_frame(&self, fns: &DeviceFns, cmd: VkCommandBuffer, fi: usize) {
         let pool = self.pool(fi);
+        // VG R3 piece 4 rung P4-1: the reset is the ONLY site that names the full width, and it
+        // names it from the const while the pool was sized at creation. A pool created at an
+        // older width would reset out of range here — before any `write`'s own `index <
+        // pool.count` check could fire, since that one only sees the indices it is handed.
+        debug_assert_eq!(
+            pool.count,
+            2 * VB_PASS_COUNT,
+            "invariant: the VB bench pool was created at the current VB_PASS_COUNT width"
+        );
         // SAFETY: `cmd` is recordable + outside any rendering scope (caller contract); `fns` is
         // the live device fn-table; `pool.pool` is a live TIMESTAMP pool with `pool.count ==
         // 2 * VB_PASS_COUNT` queries, so `[0..2*VB_PASS_COUNT)` is exactly in bounds.
         unsafe { (fns.cmd_reset_query_pool)(cmd, pool.pool, 0, 2 * VB_PASS_COUNT) };
     }
 
-    /// Writes the BEGIN timestamp (`TopOfPipe`) for `pass` into frame `fi`'s pool (query
-    /// `2 * pass.slot()`). Records it before the pass's first command.
+    /// Writes the BEGIN timestamp for `pass` into frame `fi`'s pool (query `2 * pass.slot()`) at
+    /// the stage [`VbTimedPass::begin_stage`] names for it. Records it before the pass's first
+    /// command.
     ///
     /// # Safety
     /// `cmd` must be recordable and `fns` the live device fn-table; the pool's queries were
-    /// reset this frame ([`Self::reset_frame`]). Records `vkCmdWriteTimestamp` at
-    /// `TOP_OF_PIPE`.
+    /// reset this frame ([`Self::reset_frame`]). Records `vkCmdWriteTimestamp`.
     #[inline]
     pub unsafe fn write_begin(&self, fns: &DeviceFns, cmd: VkCommandBuffer, fi: usize, pass: VbTimedPass) {
         // SAFETY: caller contract (recordable `cmd`, live `fns`, pool reset this frame).
-        unsafe { self.write(fns, cmd, fi, TimestampStage::TopOfPipe, 2 * pass.slot()) };
+        unsafe { self.write(fns, cmd, fi, pass.begin_stage(), 2 * pass.slot()) };
+    }
+
+    /// VG R3 piece 4 rung P4-1: writes BOTH of `pass`'s queries at `BOTTOM_OF_PIPE`, back to
+    /// back, with nothing recorded between them — the totality epilogue's filler for a pair this
+    /// frame never bracketed.
+    ///
+    /// # Why not `write_begin` + `write_end`
+    ///
+    /// [`Self::write_begin`] stamps `TOP_OF_PIPE` for every pass that exists today. At the frame
+    /// TOP that is harmless (nothing precedes it). At the frame END it is not: a `TOP_OF_PIPE`
+    /// stamp fires as the command reaches the front of the pipe, a `BOTTOM_OF_PIPE` stamp only
+    /// after the entire preceding frame has completed — so a TOP/BOTTOM filler would report the
+    /// whole frame's drain time as that pass's cost, a large, plausible-looking, fabricated
+    /// number. Two `BOTTOM` stamps wait on prefixes differing by nothing, so their delta is the
+    /// counter's lattice quantisation: a genuine zero.
+    ///
+    /// # Safety
+    /// `cmd` must be recordable, `fns` the live device fn-table, and BOTH of `pass`'s queries
+    /// must still be UNWRITTEN since this frame's [`Self::reset_frame`]
+    /// (`VUID-vkCmdWriteTimestamp`: the query must be unavailable) — the caller's witness masks
+    /// are what establish that. Records two `vkCmdWriteTimestamp` at `BOTTOM_OF_PIPE`.
+    #[inline]
+    pub unsafe fn write_zero_pair(&self, fns: &DeviceFns, cmd: VkCommandBuffer, fi: usize, pass: VbTimedPass) {
+        // SAFETY: caller contract (recordable `cmd`, live `fns`, pool reset this frame, neither
+        // query written since). Both indices are `< 2 * VB_PASS_COUNT`, checked again in `write`.
+        unsafe {
+            self.write(fns, cmd, fi, TimestampStage::BottomOfPipe, 2 * pass.slot());
+            self.write(fns, cmd, fi, TimestampStage::BottomOfPipe, 2 * pass.slot() + 1);
+        }
     }
 
     /// Writes the END timestamp (`BottomOfPipe`) for `pass` into frame `fi`'s pool (query

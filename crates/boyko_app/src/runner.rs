@@ -62,7 +62,7 @@ use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 #[cfg(windows)]
 use boyko_rhi_vulkan::ffi::VkExtent2D;
 #[cfg(windows)]
-use boyko_rhi_vulkan::swapchain::{GBUFFER_PUSH_BYTES, GBufferMeshDraw};
+use boyko_rhi_vulkan::swapchain::{GBUFFER_PUSH_BYTES, GBufferMeshDraw, VB_PASS_COUNT, VbTimedPass};
 #[cfg(windows)]
 use boyko_scene::render_caps::MeshHandle;
 #[cfg(windows)]
@@ -559,6 +559,14 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
         eprintln!("boyko_app: render path degraded ({degrade:?})");
     }
     host.resolved_render_path = resolved_render_path;
+    // VG R3 piece 4 rung P4-1: THE EARLIEST INSTANT the resolved path exists. `GpuSceneBundles::
+    // boot` ran inside `WindowHost::boot` — before `resolve_render_path` above — so it could not
+    // key the VB-P1d collector's arming on the path; this is where the answer first exists, and
+    // where a collector no `record_vb` will ever fill gets disarmed. Disarm THEN panic: the
+    // disarm is the load-bearing half (`disarm_vb_bench_unless_vb`'s own doc says which and why).
+    if host.gpu.disarm_vb_bench_unless_vb(&resolved_render_path) {
+        vb_bench_wrong_path_panic(&resolved_render_path);
+    }
     // OVERRIDE the `RenderPathPlugin`'s default `ResolvedRenderPath` with the real
     // boot-resolved value — the SAME `DdgiCaps`/`RayCaps` post-boot override precedent
     // above (this fn's `DdgiCaps::new(..)`/`RayCaps::new(..)` inserts). Without this, a
@@ -1025,30 +1033,42 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     // once the loop starts. VB-P1e H0 split the single `cull_ns` sample into
     // `cull_reset_ns`/`cull_dispatch_ns` (the `CullReset`/`CullDispatch` bracket pair) so the
     // fixed-cost hypothesis in `VB-P1E-HIERARCHICAL-CULL-PLAN.md` §1.2 can be attributed.
-    let mut vb_bench_cull_reset_ns: Vec<f64> = Vec::with_capacity(vb_bench_frames as usize);
-    let mut vb_bench_cull_dispatch_ns: Vec<f64> = Vec::with_capacity(vb_bench_frames as usize);
-    let mut vb_bench_shade_ns: Vec<f64> = Vec::with_capacity(vb_bench_frames as usize);
+    // VG R3 piece 4 rung P4-1: one table per HALF of the readback — durations (what VB-P1d has
+    // always published) and begin OFFSETS (what tells a measurement from an epilogue fill) —
+    // indexed by `VbTimedPass::slot()`, so a new pass costs a row, not a variable.
+    let mut vb_bench_dur_ns: [Vec<f64>; VB_PASS_COUNT as usize] =
+        core::array::from_fn(|_| Vec::with_capacity(vb_bench_frames as usize));
+    let mut vb_bench_begin_off_ns: [Vec<f64>; VB_PASS_COUNT as usize] =
+        core::array::from_fn(|_| Vec::with_capacity(vb_bench_frames as usize));
+    // Per pass, the worst label observed over the kept frames (see `VbPassLabel`): the recorder
+    // publishes the two bracket masks per frame, so this is structural, not inferred from the
+    // numbers.
+    let mut vb_bench_labels = [VbPassLabel::Measured; VB_PASS_COUNT as usize];
     let mut vb_bench_seen: u32 = 0;
     if vb_bench {
-        // `record_vb`'s VB-P1d brackets write the VbShade pair ONLY on a mesh-leg frame (the
-        // `vb_shade`/`vb_resolve` branch, gated on `scene.resolved_render_path.mesh_leg` —
-        // `vb.rs`'s own doc); an SDF-only VB leg would never write it, and the
-        // `VK_QUERY_RESULT_WAIT_BIT` readback (`GpuSceneBundles::read_vb_bench_ns`) would then
-        // block forever. Fail loudly here instead of hanging on the first bench frame.
-        assert!(
-            host.resolved_render_path.mesh_leg,
-            "invariant: VB-P1d bench requires a mesh-leg render path (else the VbShade \
-             timestamp pair is never written and the WAIT_BIT readback hangs)"
-        );
+        // VG R3 piece 4 rung P4-1: this was a release-live `assert!` on `mesh_leg`, standing in
+        // for a per-frame invariant it could not state — `record_vb`'s VbShade pair is written
+        // only on a mesh-leg frame, so an SDF-only VB leg hung the `WAIT_BIT` readback. The
+        // recorder's totality epilogue (`TsWitness::finish`) now writes EVERY pair on every VB
+        // frame, so the configuration is measurable instead of forbidden, and what remains is a
+        // SCOPE statement: the pass reports as FALLBACK, excluded from every aggregate, rather
+        // than as a fabricated number.
+        if !host.resolved_render_path.mesh_leg {
+            vb_bench_no_mesh_leg_note();
+        }
         // The lit-producer choice under VisibilityBuffer is THREE-way, not two (`vb.rs`'s own
-        // VB-P1d doc on `record_vb`'s producer selection): a split-armed frame
-        // (`vb_shade_split`, DISPLACING both `vb_shade` and `vb_resolve`) leaves the VbShade
-        // pair reset-but-never-written, hanging the WAIT_BIT readback below exactly like an
-        // SDF-only leg would. The split arms ONLY under a pre-light consumer (SSAO/DDGI/SSR/
-        // shadow-denoise/Temporal — `resolve_rules`, `render_path_config.rs:854-855`), so the
-        // bench is fused/classified-only by construction: its scene must never arm one.
-        // `mesh_geo_shade_split` alone is equivalent to the recorder's own `path_vb_split()`
-        // predicate (resolver-set ONLY under `VisibilityBuffer` — `vb.rs`'s
+        // VB-P1d doc on `record_vb`'s producer selection). ⚠️ This block used to claim the split
+        // arm leaves the VbShade pair "reset-but-never-written" and hangs the readback; that has
+        // been FALSE since the split arm gained its own bracket — `vb.rs`'s `vb_shade_split`
+        // producer opens the pair before `record_vb_pass` and closes it after the dispatch, so a
+        // split frame writes it like the other two arms do.
+        //
+        // The assertion below therefore survives for the reason it always really had, stated
+        // here instead of a hang that cannot happen: VB-P1d's published break-even
+        // (`flat_shade_ns` vs `froxel_total_ns`) is DEFINED against the fused/classified tail,
+        // and silently admitting a third producer would change what the number means without
+        // changing its name. `mesh_geo_shade_split` alone is equivalent to the recorder's own
+        // `path_vb_split()` predicate (resolver-set ONLY under `VisibilityBuffer` — `vb.rs`'s
         // `debug_assert!(!mesh_geo_shade_split || path_is_vb())` pins this), so checking this
         // one field is sufficient without needing `RenderPath` in scope here.
         assert!(
@@ -2598,30 +2618,41 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             }
         }
 
-        // VB-P1e H0: accumulate this frame's (cull_reset_ns, cull_dispatch_ns, shade_ns) bench
-        // triple — read ONLY on a frame that actually presented (a resize-skip records no new
-        // `record_vb` work this iteration). GATED on `vb_bench`; dead code on every non-bench
-        // run.
+        // VB-P1e H0: accumulate this frame's per-pass bench samples — read ONLY on a frame that
+        // actually presented (a resize-skip records no new `record_vb` work this iteration).
+        // GATED on `vb_bench`; dead code on every non-bench run. VG R3 piece 4 rung P4-1: one row
+        // per `VbTimedPass`, plus the frame's structural label from the recorder's witness.
         if vb_bench && presented_ok {
             // Offline discipline (mirrors `window_present_gbuffer`'s own R0 harness): wait the
             // device idle so this frame's timestamp writes are complete + readable before the
             // slot is reused two frames on.
             ctx.wait_idle().expect("invariant: VB-P1d bench wait_idle");
-            if let Some((cull_reset_ns, cull_dispatch_ns, shade_ns)) = host.gpu.read_vb_bench_ns(ctx, s) {
+            if let Some(sample) = host.gpu.read_vb_bench_ns(ctx, s) {
                 vb_bench_seen += 1;
                 if vb_bench_seen as usize > VB_BENCH_WARMUP {
-                    vb_bench_cull_reset_ns.push(cull_reset_ns);
-                    vb_bench_cull_dispatch_ns.push(cull_dispatch_ns);
-                    vb_bench_shade_ns.push(shade_ns);
+                    for slot in 0..VB_PASS_COUNT as usize {
+                        vb_bench_dur_ns[slot].push(sample.dur_ns[slot]);
+                        vb_bench_begin_off_ns[slot].push(sample.begin_off_ns[slot]);
+                        let bit = 1u16 << slot;
+                        let label = VbPassLabel::from_witness(
+                            sample.begun & bit != 0,
+                            sample.ended & bit != 0,
+                        );
+                        vb_bench_labels[slot] = vb_bench_labels[slot].worse_of(label);
+                    }
                 }
             }
-            if vb_bench_cull_reset_ns.len() >= vb_bench_frames as usize {
+            // Every row grows together (one push per pass per kept frame), so any one of them
+            // measures the budget; name the row VB-P1d's own budget check always used.
+            if vb_bench_dur_ns[VbTimedPass::CullReset.slot() as usize].len()
+                >= vb_bench_frames as usize
+            {
                 print_vb_bench_summary(
                     host.resolved_render_path.froxel_light_cull,
                     vb_bench_lights,
-                    &vb_bench_cull_reset_ns,
-                    &vb_bench_cull_dispatch_ns,
-                    &vb_bench_shade_ns,
+                    &vb_bench_dur_ns,
+                    &vb_bench_begin_off_ns,
+                    &vb_bench_labels,
                 );
                 return;
             }
@@ -2902,6 +2933,13 @@ fn vb_bench_mean_ns(samples: &[f64]) -> f64 {
 /// for a break-even comparison against `flat_shade_ns` (both sides carry the same bracket
 /// bias), but not a claim of isolated per-pass cost.
 ///
+/// VG R3 piece 4 rung P4-1: the `VB-P1d …` line above is BYTE-IDENTICAL to the pre-P4-1 print —
+/// same keys, same mean reduction, same NOTE — because `vg_occ_split_timing.rs` parses it. The
+/// per-pass `VB-P4 pass=…` lines are printed BESIDE it, carrying each pass's median/mean/p95, its
+/// begin OFFSET (which is what lets a harness check record order at all), and its structural
+/// `FALLBACK`/`TORN` flag from the recorder's bracket witness. A flagged pass measured nothing
+/// and must be excluded from every aggregate; a `TORN` one rejects the run.
+///
 /// `#[cold]`/`#[inline(never)]`: a once-per-process diagnostic print, never on the hot path.
 #[cfg(windows)]
 #[cold]
@@ -2909,10 +2947,13 @@ fn vb_bench_mean_ns(samples: &[f64]) -> f64 {
 fn print_vb_bench_summary(
     froxel_light_cull: bool,
     n_ps: u32,
-    cull_reset_ns: &[f64],
-    cull_dispatch_ns: &[f64],
-    shade_ns: &[f64],
+    dur_ns: &[Vec<f64>; VB_PASS_COUNT as usize],
+    begin_off_ns: &[Vec<f64>; VB_PASS_COUNT as usize],
+    labels: &[VbPassLabel; VB_PASS_COUNT as usize],
 ) {
+    let cull_reset_ns: &[f64] = &dur_ns[VbTimedPass::CullReset.slot() as usize];
+    let cull_dispatch_ns: &[f64] = &dur_ns[VbTimedPass::CullDispatch.slot() as usize];
+    let shade_ns: &[f64] = &dur_ns[VbTimedPass::VbShade.slot() as usize];
     debug_assert_eq!(
         cull_reset_ns.len(),
         shade_ns.len(),
@@ -2952,6 +2993,156 @@ fn print_vb_bench_summary(
          overlap with neighboring work), not isolated kernel time; froxel_total_ns sums three \
          independently-measured brackets. Fine for the CLUSTER_HI break-even comparison, not \
          an isolated-cost claim (mirrors the R0 GPU-pass-cost harness's own methodology note)."
+    );
+
+    // VG R3 piece 4 rung P4-1: the per-pass lines, beside — never instead of — the VB-P1d line
+    // above, which stays byte-identical because `vg_occ_split_timing.rs` parses it.
+    for slot in 0..VB_PASS_COUNT as usize {
+        let pass = VbTimedPass::from_slot(slot as u32);
+        let (median, mean, p95) = vb_bench_stats_ns(&dur_ns[slot]);
+        let (begin_median, _, _) = vb_bench_stats_ns(&begin_off_ns[slot]);
+        println!(
+            "VB-P4 pass={} median_ns={median:.1} mean_ns={mean:.1} p95_ns={p95:.1} \
+             begin_off_ns={begin_median:.1} n={}{}",
+            pass.label(),
+            dur_ns[slot].len(),
+            labels[slot].suffix()
+        );
+    }
+}
+
+/// VG R3 piece 4 rung P4-1: what the recorder's two bracket masks say about one pass on one
+/// frame — the MEASURED / FALLBACK / TORN trichotomy the totality epilogue makes observable.
+///
+/// The label is STRUCTURAL (it comes from the masks `TsWitness::finish` published), not inferred
+/// from the numbers: a delta cannot distinguish a free pass from a filled one — both read ~0 —
+/// and a begin OFFSET only distinguishes them when every stamp in the frame is at the same
+/// pipeline stage, which slots 0..2 (`TOP_OF_PIPE` begins, kept for VB-P1d compatibility) are
+/// not. The offsets are published beside the label for the harness's own order checks.
+#[cfg(windows)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum VbPassLabel {
+    /// The recorder bracketed both ends: a number.
+    Measured,
+    /// Neither end was bracketed on this leg; the epilogue wrote a `BOTTOM`/`BOTTOM` zero pair at
+    /// the frame end. The duration is a genuine ~0 that measures NOTHING — excluded from every
+    /// aggregate rather than averaged in as a small cost.
+    Fallback,
+    /// A begin with no end (the epilogue closed it at the frame end, so the duration runs to
+    /// there), or the reverse. Either is a recorder bug; a run containing one is rejected.
+    Torn,
+}
+
+#[cfg(windows)]
+impl VbPassLabel {
+    /// The trichotomy, from one frame's `(begun, ended)` bits for one pass.
+    ///
+    /// `(false, true)` — an END with no BEGIN — is also `Torn`: the epilogue cannot repair it
+    /// (re-stamping a begin query is the VUID violation), so in practice the `WAIT_BIT` readback
+    /// blocks on the unwritten begin query before any label is printed. It is classified rather
+    /// than ignored so the enum is total.
+    #[inline]
+    fn from_witness(begun: bool, ended: bool) -> Self {
+        match (begun, ended) {
+            (true, true) => Self::Measured,
+            (false, false) => Self::Fallback,
+            _ => Self::Torn,
+        }
+    }
+
+    /// The worse of two labels — `Torn` dominates `Fallback` dominates `Measured`, so a pass that
+    /// was ever torn over the kept frames is reported torn rather than averaged into silence.
+    #[inline]
+    fn worse_of(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Torn, _) | (_, Self::Torn) => Self::Torn,
+            (Self::Fallback, _) | (_, Self::Fallback) => Self::Fallback,
+            _ => Self::Measured,
+        }
+    }
+
+    /// The printed suffix — empty for a real measurement, so a measured line carries no flag at
+    /// all and a harness scanning for `FALLBACK`/`TORN` cannot match one by accident.
+    #[inline]
+    fn suffix(self) -> &'static str {
+        match self {
+            Self::Measured => "",
+            Self::Fallback => " FALLBACK",
+            Self::Torn => " TORN",
+        }
+    }
+}
+
+/// VG R3 piece 4 rung P4-1: `(median, mean, p95)` of one pass's samples, in ns.
+///
+/// The median leads because a single scheduling hiccup moves a mean by more than the quantities
+/// this instrument resolves; the mean is kept because VB-P1d's own published numbers are means
+/// and the two must be comparable on the same line.
+///
+/// Sorts a COPY, so the caller's sample order (which is what makes the per-frame sequence
+/// auditable) survives the call.
+///
+/// # Panics
+/// Panics on an empty slice: the caller has already checked it reached its frame budget, so an
+/// empty sample set here is a harness bug.
+#[cfg(windows)]
+fn vb_bench_stats_ns(samples: &[f64]) -> (f64, f64, f64) {
+    assert!(!samples.is_empty(), "invariant: vb_bench_stats_ns needs at least one sample");
+    let mean = vb_bench_mean_ns(samples);
+    let mut sorted: Vec<f64> = samples.to_vec();
+    // `f64` is only `PartialOrd`; the samples are GPU timestamp deltas — finite and non-NaN by
+    // construction (integer ticks scaled by a finite period) — so `partial_cmp` cannot return
+    // `None` here, but say so rather than `unwrap()`.
+    sorted.sort_unstable_by(|a, b| {
+        a.partial_cmp(b).expect("invariant: GPU timestamp deltas are finite, never NaN")
+    });
+    let n = sorted.len();
+    let median =
+        if n % 2 == 1 { sorted[n / 2] } else { 0.5 * (sorted[n / 2 - 1] + sorted[n / 2]) };
+    let p95 = sorted[((n as f64 * 0.95) as usize).min(n - 1)];
+    (median, mean, p95)
+}
+
+/// VG R3 piece 4 rung P4-1: the boot-time notice that replaced this bench's `mesh_leg`
+/// `assert!`.
+///
+/// It is a NOTE and not a failure because the configuration is now measurable: the recorder's
+/// totality epilogue writes every `VbTimedPass` pair on every VB frame, so a leg that brackets
+/// no lit producer yields a `FALLBACK`-flagged line instead of a `WAIT_BIT` readback that never
+/// returns. What is lost is the pass, not the run — and the note says which.
+///
+/// `#[cold]`/`#[inline(never)]`: once per process, off every shipping path.
+#[cfg(windows)]
+#[cold]
+#[inline(never)]
+fn vb_bench_no_mesh_leg_note() {
+    eprintln!(
+        "VB-P1d bench SCOPE: this render path has no mesh leg, so record_vb brackets no lit \
+         producer — the vb_shade pass will report FALLBACK (a frame-end zero pair written by the \
+         totality epilogue) and must be excluded from every aggregate. The cull_reset/\
+         cull_dispatch pairs are unaffected."
+    );
+}
+
+/// VG R3 piece 4 rung P4-1: the bench was requested on a render path whose recorder never runs.
+///
+/// `BOYKO_VB_BENCH` armed a collector, but the boot resolved a non-`VisibilityBuffer` path, so
+/// `record_vb` — and with it every timestamp write AND the pool reset — is never called. The
+/// collector has already been disarmed by the time this runs (that is the half that closes the
+/// hang class); this panic exists so the decline is not silent, because a silently declined bench
+/// is a windowed run that simply never terminates.
+///
+/// `#[cold]`/`#[inline(never)]`: a boot-time diagnostic that diverges.
+#[cfg(windows)]
+#[cold]
+#[inline(never)]
+fn vb_bench_wrong_path_panic(resolved: &boyko_render::ResolvedRenderPath) -> ! {
+    panic!(
+        "invariant: BOYKO_VB_BENCH requires RenderPath::VisibilityBuffer — this boot resolved \
+         {:?} x {:?}, whose frame driver never calls record_vb, so no timestamp pair is ever \
+         written or even reset (the collector has been disarmed; without that disarm the \
+         WAIT_BIT readback would hang forever)",
+        resolved.path, resolved.legs
     );
 }
 

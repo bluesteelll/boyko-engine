@@ -539,6 +539,31 @@ mod tests {
         fn pipeline_barrier(&mut self, _barrier: &crate::descriptor::BarrierDesc<MockApi>) {}
     }
 
+    // ===== Trait default-body tests =====
+
+    /// VG R3 piece 4 rung P4-1: the crate's FIRST assertion that a deferred-seam default body
+    /// actually errors `Unsupported` on a backend that does not override it.
+    ///
+    /// Stated as new precedent rather than as coverage: `read_query_pool_ns` and
+    /// `read_query_pool_ticks` have no such test, so nothing here proves THEY still degrade
+    /// gracefully. This one pins the verb `boyko_app`'s bench readback now routes through, so a
+    /// future backend that silently returns `Ok` without filling either out slice fails here
+    /// instead of publishing an array of zeros as a measurement.
+    #[test]
+    fn read_query_pool_pairs_ns_default_body_is_unsupported() {
+        let device = MockDevice;
+        let pool: u32 = 0;
+        let mut scratch = [0u64; 2];
+        let mut begin_ns = [0.0f64; 1];
+        let mut dur_ns = [0.0f64; 1];
+        let err = device
+            .read_query_pool_pairs_ns(&pool, 1, &mut scratch, &mut begin_ns, &mut dur_ns)
+            .expect_err(
+                "invariant: MockDevice overrides no reader, so it inherits the default body",
+            );
+        assert_eq!(err, RhiError::Unsupported("read_query_pool_pairs_ns"));
+    }
+
     // ===== Registry behavioral tests =====
 
     #[test]

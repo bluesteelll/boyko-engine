@@ -921,6 +921,51 @@ pub trait RhiDevice<A: RhiApi> {
         Err(RhiError::unsupported("read_query_pool_ticks").into())
     }
 
+    /// [`Self::read_query_pool_ns`]'s UNCOMPACTED sibling (VG R3 piece 4 rung P4-1): the same
+    /// host-wait + read + mask, but returning BOTH halves of each pair — `out_dur_ns[i]` is
+    /// bit-for-bit the value [`Self::read_query_pool_ns`] produces, and `out_begin_ns[i]` is pair
+    /// `i`'s BEGIN stamp expressed as an offset from pair 0's BEGIN stamp.
+    ///
+    /// # Why a caller would want offsets
+    ///
+    /// A pair's DURATION cannot distinguish "this pass cost nothing" from "this pass was never
+    /// bracketed and a totality epilogue filled it at the frame end" — both read ~0. The begin
+    /// OFFSET can: a filled pair's offset is the frame's largest and out of record order. A
+    /// harness that cannot tell those apart reports fabricated zeros as measurements.
+    ///
+    /// # The base, and the wrap rule
+    ///
+    /// `base = scratch[0] & mask` — pair 0's begin stamp. Offsets use the SAME arithmetic as the
+    /// durations: `off_i = (begin_i & mask).wrapping_sub(base) & mask`, scaled by
+    /// `timestampPeriod`.
+    ///
+    /// CALLER CONTRACT: pair 0's begin must be the EARLIEST-recorded stamp of the frame, else
+    /// that pair's offset wraps to ~`2^timestampValidBits` instead of going negative. Vulkan
+    /// guarantees `timestampValidBits >= 36` on any queue that supports timestamps (≈68 s at
+    /// 1 ns/tick), so a genuine counter wrap inside one submitted frame is not reachable; a huge
+    /// offset means the contract was broken, and the caller is expected to reject the sample
+    /// rather than scale it.
+    ///
+    /// Same contract as the siblings otherwise: `WAIT_BIT` semantics (only WRITTEN pairs may be
+    /// requested — an unwritten one blocks forever), `scratch` is caller-owned staging of length
+    /// `>= 2 * pair_count` and is CLOBBERED, both out slices receive `pair_count` values.
+    ///
+    /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; the Vulkan
+    /// backend overrides it (`vkGetQueryPoolResults`). Unlike its two siblings, this default
+    /// body IS pinned by a test (`handle.rs`'s `MockDevice` — the crate's first such test).
+    #[cold]
+    #[inline(never)]
+    fn read_query_pool_pairs_ns(
+        &self,
+        _pool: &A::QueryPool,
+        _pair_count: u32,
+        _scratch: &mut [u64],
+        _out_begin_ns: &mut [f64],
+        _out_dur_ns: &mut [f64],
+    ) -> Result<(), Self::Error> {
+        Err(RhiError::unsupported("read_query_pool_pairs_ns").into())
+    }
+
     // ===== HW-RT ACCELERATION-STRUCTURE SEAM (rung R2a-1; default bodies keep Mock + ABI) =====
     // The verbs are declared UNGATED so the trait surface is stable across phases
     // (mirroring the timestamp seam + the `Texture`/`Surface` seams). Every default
