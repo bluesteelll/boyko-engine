@@ -374,8 +374,8 @@ regression that a rung is failed for.
 
 **Arithmetic correction carried by S10.** The seam record's joint totals — `dev` 9.33 MiB and
 retail 1.95 MiB — are rev 3's, and **all four halves have been recut since**: the profiler to
-6.67 `dev` / 0.89 retail, the logger to 2.90 `dev` / 1.15 retail. Recomputed from this revision's
-own halves, and from nothing else: `dev` = 6.67 + 2.90 = **≈ 9.57 MiB**, retail = 0.89 + 1.15 =
+6.67 `dev` / 0.89 retail, the logger to 2.90 `dev` / 1.19 retail. Recomputed from this revision's
+own halves, and from nothing else: `dev` = 6.67 + 2.90 = **≈ 9.57 MiB**, retail = 0.89 + 1.19 =
 **≈ 2.08 MiB**. **The record's table is not wrong; it is one revision old on BOTH rows** — see
 §*The joint cost* below, where the arithmetic is written out, including why the retail figure moved
 by more than a recut explains.

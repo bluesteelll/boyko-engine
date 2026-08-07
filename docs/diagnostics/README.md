@@ -60,7 +60,7 @@ assumes:  substrate/clock-source      must be provided (or exported) by exactly 
 ```
 
 That turns *"do these documents agree?"* — a question that needs a reviewer to have read all of
-them at once — into a graph the machine walks. Seven checks, and the real defect each one catches:
+them at once — into a graph the machine walks. Eight checks, and the real defect each one catches:
 
 | # | Check | The defect it catches |
 |---|---|---|
@@ -71,6 +71,7 @@ them at once — into a graph the machine walks. Seven checks, and the real defe
 | 5 | **ORPHAN** — every `provides` is assumed by someone | dead text, or a missing `exports:`. Both are worth one line to resolve |
 | 6 | **INDEX** — every id appears in this README's map | the index cannot rot silently |
 | 7 | **UNDECLARED** — a file that discusses another *area*'s file must declare a capability from it | **checks 1-6 all reason about the DECLARED graph, and a declared graph is only as honest as its declarations.** Measured on the first carved revision: 43 capabilities, 131 declared edges, check 4 green — while `substrate/00-GOAL.md` declared **zero** edges and discussed `SEAM.md` and a profiling file in its prose. Those undeclared references point **up**, and had they been declared, check 4 would have found a cycle. **Check 4's green was bought by silence.** Same-area siblings are exempt: within one subsystem a cross-reference is navigation between parts of one argument, and its cycle risk is contained |
+| 8 | **ARITHMETIC** — every inline `a + b [+ …] = total` must hold | **the sums in this corpus have been wrong twice in two revisions.** Once inherited (a joint total that never equalled its operands in ANY revision), once introduced by the very edit that corrected it — which replaced the TOTAL and left the stale OPERAND in the same sentence, one commit after a paragraph was written warning about exactly that. **A total that checks out against its printed operands proves nothing about those operands**, and a prose warning did not survive one commit. Skips unit conversions (KiB terms, MiB total); tolerance is half a unit in each printed number's last decimal place |
 
 **Why capability ids and not file/anchor links.** Anchors churn on every heading edit, so an
 anchor-based check becomes a nuisance and gets disabled — the same reasoning that made

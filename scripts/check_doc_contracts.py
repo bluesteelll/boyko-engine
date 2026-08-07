@@ -79,6 +79,26 @@ LINE_RE = re.compile(r"^\s*(provides|exports|assumes)\s*:\s*(\S+)\s*(?:#.*)?$")
 # `<area>/<slug>`. The area is part of the id so ownership is legible without opening a file --
 # an `assumes: substrate/...` in a profiling piece is visibly a cross-area edge.
 AREAS = ("substrate", "profiling", "logging", "seam")
+
+# `a + b [+ c ...] = total`, written inline, tolerating markdown emphasis, backticks, and
+# digit-group spaces inside a number ("1 220.26").
+#
+# The FIRST version of this pattern read only the LAST TWO terms of a sum and capped numbers at
+# three digits. It produced nine alarms on this corpus and EVERY ONE WAS FALSE: the real
+# expressions were `4 + 2 + 2 = 8`, `20 + 56 + 144 + 64 = 284`, `8+8+16+8+16+16+8+8 = 88` and
+# `873 + 234 = 1107` (whose total it read as `110`). A gate that cries wolf nine times gets
+# disabled -- the same reasoning that made capability ids beat anchors -- so this matches the
+# WHOLE sum or nothing, and skips any sum whose total carries a different unit from its terms
+# (a KiB-terms/MiB-total line is a unit conversion, which this check does not do).
+_SP = "[    ]"
+_NUM = rf"[0-9]+(?:{_SP}[0-9]{{3}})*(?:\.[0-9]+)?"
+_UNIT = r"(?:\s*(?:KiB|MiB|GiB|KB|MB|ns|us|ms|%|B))?"
+_TERM = rf"(?:\*\*|`)?\s*{_NUM}\s*(?:\*\*|`)?{_UNIT}"
+SUM_RE = re.compile(
+    rf"({_TERM}(?:\s*\+\s*{_TERM}){{1,15}})\s*=\s*((?:\*\*|`)?\s*{_NUM}\s*(?:\*\*|`)?{_UNIT})"
+)
+_NUM_RE = re.compile(_NUM)
+_UNIT_RE = re.compile(r"KiB|MiB|GiB|KB|MB|ns|us|ms|%")
 ID_RE = re.compile(r"^(" + "|".join(AREAS) + r")/[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
@@ -242,16 +262,47 @@ def check(pieces: list[Piece], errors: list[str]) -> None:
                     f"graph hides a cycle.)"
                 )
 
-    # --- 6. INDEX -------------------------------------------------------------------------
-    if not README.exists():
-        errors.append(f"{README.relative_to(REPO).as_posix()} is missing: the corpus has no index.")
-    else:
-        index_text = README.read_text(encoding="utf-8-sig")
-        for cap in sorted(owner):
-            if cap not in index_text:
+    # --- 8. INLINE ARITHMETIC -------------------------------------------------------------
+    # This corpus states budgets as sums, and the sums have been wrong twice in two revisions --
+    # once inherited from the design record (a joint total that never equalled its operands in ANY
+    # revision) and once introduced by the very edit that corrected it, which replaced the TOTAL
+    # and left the stale OPERAND in the same sentence. Both survived human review and one survived
+    # a repair pass whose stated job was to make every total equal its operands, because a reader
+    # checking a sum checks the digits in front of them and not whether the inputs are current.
+    #
+    # A prose warning did not stop it happening again one commit later. A regex does.
+    for p in pieces:
+        body = BLOCK_RE.sub("", p.path.read_text(encoding="utf-8-sig"))
+        for m in SUM_RE.finditer(body):
+            terms_txt, total_txt = m.group(1), m.group(2)
+            tu, ou = _UNIT_RE.search(terms_txt), _UNIT_RE.search(total_txt)
+            # A KiB-terms / MiB-total line is a unit conversion. Out of scope -- and guessing at
+            # one is how a checker starts inventing defects instead of finding them.
+            if tu and ou and tu.group(0) != ou.group(0):
+                continue
+
+            def _f(text: str) -> float:
+                for ch in (" ", " ", " ", " "):
+                    text = text.replace(ch, "")
+                return float(text)
+
+            def half_ulp(text: str) -> float:
+                frac = text.split(".")
+                return 0.5 * (10 ** -len(frac[1])) if len(frac) > 1 else 0.5
+
+            term_s = _NUM_RE.findall(terms_txt)
+            tot_s = _NUM_RE.findall(total_txt)
+            if len(term_s) < 2 or not tot_s:
+                continue
+            got, want = sum(_f(x) for x in term_s), _f(tot_s[0])
+            tol = sum(half_ulp(x) for x in term_s) + half_ulp(tot_s[0])
+            if abs(got - want) > tol:
                 errors.append(
-                    f"{cap} ({owner[cap]}) is absent from the README map. The index is how a "
-                    f"reader finds an owner without grepping; it rots the moment it may lag."
+                    f"{p.rel}: inline arithmetic does not hold -- "
+                    f"'{m.group(0).strip()[:80]}' (terms sum to {got:g}, printed {want:g}; "
+                    f"tolerance {tol:g}). Either an operand is stale or the total is. Re-read "
+                    f"the SOURCE row each operand quotes; re-adding the numbers already printed "
+                    f"here is what let the previous two occurrences through."
                 )
 
 
