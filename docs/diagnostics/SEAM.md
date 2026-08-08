@@ -327,9 +327,10 @@ performance argument survives verbatim while the language-level defect disappear
 
 **RED.** The shared fold-exactness gate — profiling **G4b** = logging **G11** = substrate **DG5**,
 one gate for both subsystems: a live producer increments while the consumer folds; the total must
-be exact. *(That gate cannot land until blocker **Q2** is answered — see `substrate/loss-fold`.
-`fold_into`'s producer-side lost-update window is **not** closed by `fetch_sub(observed)`, and D0
-ships `loss.rs` without `fold_into` until an architect resolves it.)*
+be exact. *(**Q2 is RESOLVED (b)**: the cell is monotone and is NEVER cleared, so the producer-side
+window `fetch_sub(observed)` could not close simply does not exist. Each consumer folds
+`cur.wrapping_sub(last_seen)`. The gate's RED becomes "replace the delta with a clear-and-add" —
+see `substrate/loss-fold`.)*
 
 ---
 
@@ -990,7 +991,8 @@ Collected here so neither plan can bury one in a disposition table.
 
 ---
 
-*Three blockers are open and are NOT owner calls — they are architect calls, and they travel with
-their own files: `LANE_COUNT = 32` in shipping (`substrate/02-LANE.md`, Q1), `fold_into`'s
-lost-update window (`substrate/03-LOSS.md`, Q2), and the missing `llvm-tools`
-(`substrate/04-STORAGE.md`).*
+*Two of the three architect calls are now TAKEN and travel with their own files:
+**Q1** — `LANE_COUNT = 80` in every profile, with no profile axis (`substrate/02-LANE.md`); and
+**Q2** — the monotone counter, `fetch_sub` deleted from the design (`substrate/03-LOSS.md`).
+What remains is not an architect call at all: the missing `llvm-tools` component
+(`substrate/04-STORAGE.md`), which is one `rustup component add` and is a D0 line item.*

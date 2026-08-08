@@ -23,7 +23,7 @@ pub const LANE_WORKER_MAX: u16 = 64;      // == boyko_threadpool::MAX_WORKERS
 pub const LANE_DISPATCHER: u16 = 64;
 pub const LANE_HOST:       u16 = 65;
 pub const LANE_SPARE_BASE: u16 = 66;
-pub const LANE_COUNT:      u16 = /* 80 dev / see Q1 below for shipping — BLOCKER */;
+pub const LANE_COUNT:      u16 = 80;   // ALL profiles — Q1 RESOLVED, see below
 pub const LANE_UNCLAIMED:  u16 = u16::MAX;
 
 thread_local! { static LANE: Cell<u16> = const { Cell::new(LANE_UNCLAIMED) }; }  // NO Drop
@@ -184,7 +184,7 @@ So a `shipping` build **on any machine with more than 32 hardware threads produc
 which was safe *there* because those lanes were CAS-claimed and **unanchored**. Anchoring the
 topology to worker ids is what invalidates it.
 
-Three candidate resolutions, **none taken here**:
+Three candidate resolutions were tabled:
 
 | | Resolution | Cost |
 |---|---|---|
@@ -192,4 +192,30 @@ Three candidate resolutions, **none taken here**:
 | **(b)** | `LANE_COUNT = 72` | six spares, ≈ 36 KiB of `LossCell` |
 | **(c)** | make `MAX_WORKERS` profile-dependent in `boyko_threadpool` | the only option that recovers the 32, and a change to the pool's **public API** that this plan does not schedule |
 
-**Architect call.**
+### RESOLVED — `LANE_COUNT = 80`, in EVERY profile, with no profile axis at all
+
+**None of the three, and deliberately so: the defect is the profile axis itself.** Q1 exists
+because `LANE_COUNT` was made profile-dependent while the quantity it indexes — `MAX_WORKERS = 64`
+(`thread_pool.rs:49`) — is unconditional. Any per-profile value re-opens the same class the moment
+someone edits one side; a single const closes it by construction.
+
+80 is not a new number: it is the value S3 already justified for `dev`, and its arithmetic is the
+topology's own — **64 workers (`0..63`) + dispatcher (64) + host (65) = 66, plus 14 spares = 80.**
+
+**(c) is refused on principle, not on cost.** It caps the SHIPPED engine's worker count at 32 to
+save diagnostics memory — inverting the engine's first principle for a subsystem that is OFF by
+default. A 64-thread machine would lose half its workers so that a disabled feature could be
+smaller.
+
+**(a) is refused on a measured need.** Production spawns **zero** threads outside the pool today
+(measured: every `thread::spawn` in `crates/*/src` is under `#[cfg(test)]`), but the corpus
+*plans* at least one — `boyko_log`'s sink thread under `SinkMode::Thread` — and OS/driver
+callbacks (the Vulkan validation messenger, a window proc) arrive on threads the engine never
+created. With zero spares every record from those counts as `Unclaimed`, so the shipping profile
+would lose attribution for the logger's own consumer.
+
+**The cost, stated where a reader meets it: 80 lanes × 8 classes × 64 B = 40 KiB of `LossCell`
+`.bss`, in every profile.** What makes that affordable in `shipping` is S13, not frugality: an
+unclaimed lane is never touched, and an untouched all-zero `.bss` page is reserved address space
+rather than resident memory. **The memory argument that motivated the original 32 does not survive
+S13** — it was trading correctness for bytes a flag-off process never faults in.

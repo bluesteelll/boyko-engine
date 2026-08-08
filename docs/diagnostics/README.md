@@ -5,8 +5,10 @@
 a later step retires them; until then, every file here names the sections it was carved from so a
 reader can diff it against its source.*
 
-**Status:** design, pre-implementation. Nothing in this corpus is implemented. Three blockers are
-open and named (see *Open, and who owns it* below).
+**Status:** design. **Both architect blockers on rung D0 are now RESOLVED** — `LANE_COUNT` (Q1)
+and the loss fold's lost-update window (Q2); see *Open, and who owns it* below. What remains
+there is not a design question at all: one `rustup component add llvm-tools`, a D0 line item.
+**D0 is unblocked.**
 
 ---
 
@@ -175,12 +177,15 @@ and it rots exactly like any other.** Re-read the contracts, do not re-read this
 
 Three blockers travel with specific files and **must not be softened**:
 
-- **`LANE_COUNT = 32` in shipping is unsound against a worker-anchored topology** — the floor is
-  66. *(`substrate/02-LANE.md`, Q1. Architect call; blocks a D0 const.)*
-- **`fold_into`'s lost-update window is not closed by `fetch_sub`** — the consumer side is closed,
-  the producer side is not, and the one loss event is counted twice, which is exactly the
-  double-count S8 exists to remove. *(`substrate/03-LOSS.md`, Q2. Architect call; D0 ships
-  `loss.rs` without `fold_into` until it is answered.)*
+- ~~**`LANE_COUNT = 32` in shipping is unsound against a worker-anchored topology**~~ —
+  **RESOLVED: `LANE_COUNT = 80` in EVERY profile, no profile axis at all.** The defect was the
+  axis itself: the const was profile-dependent while `MAX_WORKERS = 64` is not. 40 KiB of
+  `LossCell` `.bss`, reserved-not-resident under S13. *(`substrate/02-LANE.md`, Q1.)*
+- ~~**`fold_into`'s lost-update window is not closed by `fetch_sub`**~~ — **RESOLVED: (b), the
+  monotone counter.** The cell is never cleared; each consumer folds `cur.wrapping_sub(last_seen)`
+  from its own 5 KiB of `last_seen`. Exactness follows from the shape of the datum rather than
+  from every future producer remembering `fetch_add`, and `fetch_sub` leaves the design.
+  `delta_since` ships at D0; `fold_into` does not exist. *(`substrate/03-LOSS.md`, Q2.)*
 - **`llvm-tools` is not installed on this machine** — MEASURED: no `llvm-readobj` / `objdump` /
   `nm` / `llvm-nm` is on PATH, and the active `stable-x86_64-pc-windows-gnu` toolchain ships only
   `rust-objcopy` and `rust-lld`. The whole `.bss` gate family cannot run as written, and the gate

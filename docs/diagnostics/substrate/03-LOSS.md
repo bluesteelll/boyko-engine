@@ -2,7 +2,7 @@
 
 <!-- CONTRACT
 provides: substrate/loss-vocabulary     # the ONE loss vocabulary + the DiagFlag sticky-bit mechanism
-provides: substrate/loss-fold           # fold_into and the lost-update window fetch_sub does NOT close
+provides: substrate/loss-fold           # the monotone counter + delta_since; Q2 RESOLVED (b)
 assumes:  substrate/mute-leaf-rule      # raise/take_raised IS the mute leaf's report-above mechanism
 assumes:  substrate/lane-registry       # cells are indexed [lane][class]; single-writer BY the topology
 -->
@@ -38,7 +38,8 @@ impl LossClass { pub const COUNT: usize = 8; }
 
 pub enum LossStatus { Measured, Unproven, UnprovenLossy, UnprovenSampled, UnprovenUnsunk }
 
-pub fn fold_into(total: &LossTotal, cell: &LossCell);   // NOT SHIPPED AT D0 — see Q2
+pub fn delta_since(cell: &LossCell, last: &mut LossSeen) -> LossDelta; // Q2(b): monotone,
+                                                        // never clears the cell
 
 #[repr(u32)] pub enum DiagFlag { /* sticky bits */ }
 pub fn raise(f: DiagFlag);
@@ -169,9 +170,47 @@ consumer, not by `boyko_diag`.
 
 (b) is the standard monotone-counter fold and preserves the record's own performance argument.
 
-**Architect call.** DG5's RED is written against whichever lands; **the record's shape as written
-reds on it**, which is why **D0 ships `loss.rs` WITHOUT `fold_into`**. One gate serves both
-subsystems: profiling **G4b** = logging **G11** = substrate **DG5**.
+### RESOLVED — (b), the monotone counter. `fetch_sub` and the clear leave the design entirely.
+
+The cell is **write-only-increasing and is never cleared**. Each consumer keeps its own
+`last_seen: [[u64; 8]; LANE_COUNT]` and folds `cur.wrapping_sub(last_seen)`.
+
+**Why (b) and not (a) — the decisive reason is not performance.** Under (a), exactness holds only
+while *every* producer, at every future call site, remembers to write `fetch_add`. One plain
+`store` silently restores the double-count, and nothing fails until someone reads a loss report
+that is wrong in the direction that hides work. Under (b) exactness follows from the **shape of
+the datum** — a counter that only ever goes up — and there is no discipline left for a caller to
+forget. This campaign's whole recent history is mechanisms that cannot be applied wrongly beating
+rules that must be remembered.
+
+Two supporting reasons:
+
+- **(a)'s "rare by definition" premise is not proved for every class.** It holds for `Overflow`,
+  where a loss IS the counted event. It does not hold for `Late` or `Refused`, which can be
+  *systematically* high under a misconfigured window — precisely when an RMW per event is least
+  welcome.
+- **(b) keeps the leaf smaller**, which is this crate's stated entire value. The
+  `LANE_COUNT × 8 × 8 B` = **5 KiB** of `last_seen` is owned by each consumer, not by
+  `boyko_diag`, and it is per-consumer state that never crosses a thread.
+
+**Ordering, and the one thing that must not be "optimised" later.** The fields stay `AtomicU64`
+with `Relaxed` on both sides. A plain `u64` written by one thread and read by another is a data
+race in Rust **regardless** of x86-64 making an aligned 8-byte access atomic in hardware;
+`AtomicU64` + `Relaxed` lowers to the same `mov` pair with **no `lock` prefix**, so the
+single-writer performance argument survives intact and the UB does not exist. Producer:
+`c.count.store(c.count.load(Relaxed) + 1, Relaxed)`. Consumer:
+`let cur = c.count.load(Relaxed); let delta = cur.wrapping_sub(last); last = cur;`
+
+`wrapping_sub` is exact for as long as fewer than 2⁶⁴ increments separate two folds, and the
+counter never resets, so there is no ABA to reason about.
+
+**Consequence for D0: `fold_into` can now ship**, but its signature changes — it is no longer a
+clear-and-add over a shared cell. The consumer-side reduction belongs to each consumer, so
+`boyko_diag` exposes the cell and the delta helper, not a folding verb that mutates the cell.
+DG5's RED is rewritten against the monotone form: **preset a cell, drop N with a live producer
+thread running, assert the folded total advanced by exactly N and THE CELL WAS NEVER DECREASED.**
+Replacing the delta with a clear-and-add reintroduces the window and reds. One gate still serves
+both subsystems: profiling **G4b** = logging **G11** = substrate **DG5**.
 
 ---
 

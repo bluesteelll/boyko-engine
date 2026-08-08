@@ -10,7 +10,7 @@ assumes:  substrate/clock-source          # DG8's subject; DG12's RED is calibra
 assumes:  substrate/lane-registry         # DG2/DG11's subject; Q1 blocks a D0 const
 assumes:  substrate/lane-write-sites      # D1's edit table; DG3's unwind leg
 assumes:  substrate/loss-vocabulary       # DG5's subject; the Miri data-race leg
-assumes:  substrate/loss-fold             # Q2 blocks fold_into out of D0
+assumes:  substrate/loss-fold             # Q2 RESOLVED (b): monotone counter, delta at the consumer
 assumes:  substrate/never-freed-storage   # DG7's subject
 assumes:  substrate/section-report        # DG6's subject and its RED-not-SKIP rule
 -->
@@ -45,7 +45,7 @@ subsystem plan. Both subsystem ladders wait on them: D0/D1 land **before** loggi
 | `crates/boyko_diag/src/lib.rs` | crate docs; the three `deny(clippy::print_*)`; `pub mod {clock, lane, loss, storage}` |
 | `crates/boyko_diag/src/clock.rs` | [A1](01-CLOCK.md) |
 | `crates/boyko_diag/src/lane.rs` | [A2](02-LANE.md) minus the write sites (D1 supplies the callers) |
-| `crates/boyko_diag/src/loss.rs` | [A3](03-LOSS.md) **minus `fold_into`** (blocked on Q2) |
+| `crates/boyko_diag/src/loss.rs` | [A3](03-LOSS.md) **in full** — Q2 resolved (b): the cell is monotone and never cleared, so `delta_since` ships at D0 and `fold_into` does not exist |
 | `crates/boyko_diag/src/storage.rs` | [A4](04-STORAGE.md); `section_report` behind `section-gate` |
 
 **Edits**: the root `Cargo.toml`'s **`members` (`:2`) AND `default-members` (`:13`)** — *both*
@@ -306,8 +306,8 @@ are explicitly split or deferred to a rung where they can fail.
 
 | Blocker | Blocks | Owner |
 |---|---|---|
-| the shipping `LANE_COUNT` ([Q1](02-LANE.md)) | a D0 const | architect |
-| the fold's lost-update window ([Q2](03-LOSS.md)) | `fold_into` | architect |
+| ~~the shipping `LANE_COUNT`~~ ([Q1](02-LANE.md)) | ~~a D0 const~~ | **RESOLVED — 80 in every profile, no profile axis** |
+| ~~the fold's lost-update window~~ ([Q2](03-LOSS.md)) | ~~`fold_into`~~ | **RESOLVED — (b) monotone counter; `delta_since` ships, `fold_into` deleted** |
 | the `llvm-tools` prerequisite ([F7](04-STORAGE.md)) | DG6, and the whole `.bss` gate family | a D0 line item (`rustup component add llvm-tools`) |
 
 Two further open items are recorded rather than blocking: [Q3](03-LOSS.md) (the `LossCell`
