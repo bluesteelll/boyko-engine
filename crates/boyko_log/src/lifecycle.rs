@@ -257,6 +257,71 @@ pub fn enable() -> bool {
     true
 }
 
+/// What a [`flush`] did.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FlushResult {
+    /// Everything published before the call has been handed to the destinations.
+    Flushed,
+    /// **Nothing consumes the rings**, so there is nothing a flush could do. Returned
+    /// *immediately*: a caller that waits two seconds to learn this has been told the same thing,
+    /// two seconds later, on a path that usually runs while something is already going wrong.
+    NoConsumer,
+    /// A consumer exists but did not complete a pass within the bound. A defect signal, not an
+    /// error to handle — the caller is on its way out either way.
+    TimedOut,
+}
+
+/// Drain everything published before this call.
+///
+/// Two shapes, because there are two kinds of consumer:
+///
+/// - **No sink thread**: this thread claims the role and drains inline. That is the whole flush,
+///   and it is synchronous.
+/// - **Sink thread running**: wait for it to complete **two** passes. One is not enough — a pass
+///   already in flight when `flush` was called may have loaded its horizon before this caller's
+///   last record was published, so it can finish without having seen it. Two passes guarantee one
+///   that started after the call.
+///
+/// The wait is bounded and terminates in a **value**, never in a hang. That matters more here than
+/// almost anywhere: `flush` is on the crash path.
+pub fn flush() -> FlushResult {
+    if state() != SinkState::Enabled {
+        return FlushResult::NoConsumer;
+    }
+
+    if SINK_RUNNING.load(Ordering::Acquire) == 0 {
+        // Inline drain. If another consumer holds the role right now, that consumer is draining
+        // these same rings, so waiting for it is the same answer with more steps.
+        return match crate::drain_owner::try_claim() {
+            Some(t) => {
+                let _ = crate::lane::drain(&t, |site, _tsc, _flags, payload| {
+                    let mut buf = [0u8; 192];
+                    let n = render_record(&mut buf, site, payload.len());
+                    // SAFETY: `render_record` writes only ASCII copied from `&'static str`s and
+                    //   decimal digits.
+                    let text = unsafe { core::str::from_utf8_unchecked(&buf[..n]) };
+                    crate::sync_out::write_oracle_line("boyko-log ", text);
+                });
+                FlushResult::Flushed
+            }
+            None => FlushResult::Flushed,
+        };
+    }
+
+    let start = sink_passes();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        // Wrapping, because the counter is a `u8` that laps every 256 passes and only differences
+        // matter. A subtraction here would be wrong for exactly one window in 256 — the kind of
+        // defect that appears once a session and reproduces never.
+        if sink_passes().wrapping_sub(start) >= 2 {
+            return FlushResult::Flushed;
+        }
+        std::thread::yield_now();
+    }
+    FlushResult::TimedOut
+}
+
 /// Stop the sink thread and wait, bounded, for it to complete one final drain.
 ///
 /// **No join handle is kept, and that is deliberate**: a handle would have to live in a static
@@ -305,6 +370,12 @@ mod tests {
         crate::sync_out::set_console_enabled(false);
         SINK_STATE.store(SinkState::NotBooted as u8, Ordering::Release);
         WANT_CONSOLE.store(0, Ordering::Relaxed);
+        WANT_SINK.store(0, Ordering::Relaxed);
+        // The pass counter is process-global too. `enable` zeroes it only when it spawns, so a
+        // no-thread test that did not reset it here inherits whatever a sink-thread test left --
+        // which is how "no thread was asked for, so no pass may have happened" started failing
+        // deterministically the moment a sink-thread test was added beside it.
+        SINK_PASSES.store(0, Ordering::Release);
     }
 
     #[test]
@@ -397,6 +468,55 @@ mod tests {
         let settled = sink_passes();
         std::thread::sleep(std::time::Duration::from_millis(20));
         assert_eq!(sink_passes(), settled, "a stopped sink must stop counting");
+        reset();
+    }
+
+    #[test]
+    fn flush_without_a_consumer_answers_immediately() {
+        // The property that matters is the LATENCY, not the value: a caller told `NoConsumer`
+        // after two seconds has been told the same thing, two seconds later, on a path that
+        // usually runs while something is already going wrong.
+        let _s = crate::drain_owner::test_serial();
+        reset();
+        let t0 = std::time::Instant::now();
+        assert_eq!(flush(), FlushResult::NoConsumer, "un-booted means nothing consumes");
+        assert!(t0.elapsed() < std::time::Duration::from_millis(50), "must not wait to say no");
+
+        boot(LogConfig { console: false, sink_thread: false });
+        assert_eq!(flush(), FlushResult::NoConsumer, "booted but not enabled is still nothing");
+        reset();
+    }
+
+    #[test]
+    fn flush_drains_inline_when_there_is_no_sink_thread() {
+        let _s = crate::drain_owner::test_serial();
+        reset();
+        boot(LogConfig { console: false, sink_thread: false });
+        assert!(enable());
+        let t0 = std::time::Instant::now();
+        assert_eq!(flush(), FlushResult::Flushed);
+        assert!(
+            t0.elapsed() < std::time::Duration::from_millis(500),
+            "an inline drain is synchronous; it must not fall into the sink-thread wait"
+        );
+        reset();
+    }
+
+    #[test]
+    fn flush_waits_for_two_sink_passes() {
+        // Two, not one: a pass already in flight may have fixed its horizon before this caller's
+        // last record was published, so it can finish without ever having seen it.
+        let _s = crate::drain_owner::test_serial();
+        reset();
+        boot(LogConfig { console: false, sink_thread: true });
+        assert!(enable());
+        let before = sink_passes();
+        assert_eq!(flush(), FlushResult::Flushed);
+        assert!(
+            sink_passes().wrapping_sub(before) >= 2,
+            "flush returned before two passes had completed"
+        );
+        assert!(shutdown());
         reset();
     }
 
