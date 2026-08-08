@@ -384,6 +384,41 @@ assigned at `try_build` and consumed by nothing, which is the "structurally alwa
 step removed. RED, run at implementation: delete the `SystemSpan::open` at the concurrent dispatch
 site ⇒ both systems' cells stay empty at a count the gate expects to be 3.
 
+
+### What rung 3d inherits from 3a/3c — three of its specified structures are no longer needed
+
+Recorded before 3d is written, because each follows from a decision already shipped and
+re-deriving them at implementation time is how a rung ends up building storage nothing reads.
+
+1. **`sys_of` (`[u16; zone_stride]`, 2 KiB, built at arm) is unnecessary.** It exists so the fold
+   can turn a sample's `zone` into a `sys` before appending an interval. But rung 3a put the
+   mapping in `SystemMeta.zone`, and the **schedule** owns it — so zone → system is resolvable at
+   **report** time, by the one party that has the schedule, instead of being denormalised into a
+   side table at arm by a party that does not. `F19c` asked for the table because rev 3's `sys`
+   "was not derivable"; after 3a it is.
+
+2. **The `compat` snapshot (1024×1024 bits = 128 KiB, taken at arm) is unnecessary in this
+   engine.** It protects against the `ConflictGraph` changing under a window. This engine builds
+   each schedule once, at `App::finish`, and never rebuilds it — so the report can read the live
+   graph. **The residual, named rather than hidden:** if a later rung ever makes a schedule
+   rebuildable, the report must either snapshot or refuse, and this paragraph is where that
+   obligation is written down.
+
+3. **`Interval.occ` needs no state of its own.** It is the occurrence index of a span within its
+   frame, and the fold already has exactly that number in hand: `count[f*Z+z]` **before** the
+   increment. Reading it there costs a load the fold performs anyway.
+
+What 3d does still need, whole: the `profiling-analysis` feature, the `intervals` append ring (an
+append and not an assignment — a system running N times per frame contributes N intervals, which
+was `F19b`'s defect), `RoundRecord` (dispatch shape only: rounds per frame, wave width, round span,
+**no membership mask, hence no truncation**), `ConcurrencyReport` and its serialisation index, and
+`G8`.
+
+**3d does not split further, and this is why.** The obvious cut is "land `RoundRecord` first" — but
+`RoundRecord` is read by the report, so landing it alone puts 90.8 KiB of storage in the
+reservation that nothing consumes. That is the shape this campaign refuses everywhere else; it
+would be inconsistent to make an exception for it because the alternative is a larger commit.
+
 ### Two rung-3b decisions
 
 1. **Nothing the zones measure is copied into `FrameRecord`.** The corpus's record carries
