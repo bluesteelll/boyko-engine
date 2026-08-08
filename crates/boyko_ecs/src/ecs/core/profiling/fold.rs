@@ -49,8 +49,12 @@ use boyko_diag::sample::{Region, Sample, SampleKind};
 use boyko_diag::{clock, profiling_abi, sample};
 
 use crate::ecs::core::profiling::diag;
+#[cfg(feature = "profiling-analysis")]
 use crate::ecs::core::profiling::store::{
-    CellLabel, Columns, FRAME_FLAG_CLOCK_UNCALIBRATED, FrameRecord, FrameState,
+    INTERVALS_PER_FRAME, Interval, IntervalRing, OVERLAP_FRAMES,
+};
+use crate::ecs::core::profiling::store::{
+    CellLabel, Columns, DropCounters, FRAME_FLAG_CLOCK_UNCALIBRATED, FrameRecord, FrameState,
     MAX_PLAUSIBLE_FRAME_TICKS, Profiler, WINDOW,
 };
 
@@ -104,6 +108,12 @@ pub fn fold(profiler: &mut Profiler) {
     let live = profiler.frame();
     let floor = live + 1 - u32::min(live + 1, WINDOW as u32);
 
+    // Derived once, beside the columns and for the same reason: the ring's base is a constant for
+    // the whole drain, and re-deriving it per sample would put a load and an add in the inner loop
+    // to recompute a value that cannot change.
+    #[cfg(feature = "profiling-analysis")]
+    let ring = profiler.interval_ring();
+
     // Per-row sample tallies, applied to the frame records once at the end. Accumulating them in
     // the records themselves would put a 32 B record write in the inner loop, on a line the
     // columns are not on.
@@ -123,7 +133,21 @@ pub fn fold(profiler: &mut Profiler) {
                             *state.walk_hint = f;
                             let row = (f % WINDOW as u32) as usize;
                             tally[row] = tally[row].saturating_add(1);
-                            accumulate(&cols, stride, row, &s, state.drops);
+                            let occ = accumulate(&cols, stride, row, &s, state.drops);
+                            #[cfg(feature = "profiling-analysis")]
+                            if let (Some(ring), Some(occ)) = (ring, occ) {
+                                append_interval(
+                                    ring,
+                                    live,
+                                    f,
+                                    &s,
+                                    occ,
+                                    state.interval_len,
+                                    state.drops,
+                                );
+                            }
+                            #[cfg(not(feature = "profiling-analysis"))]
+                            let _ = occ;
                         }
                         None => state.drops.late += 1,
                     }
@@ -212,6 +236,12 @@ fn reopen_after_discard(profiler: &mut Profiler, now: u64, uncalibrated: bool) {
     *state.frame = 0;
     *state.epoch = epoch;
     *state.walk_hint = 0;
+    // The whole ring, not one bank: a discard throws away the window, and seven banks still
+    // holding the discarded epoch's intervals would be read as the new epoch's.
+    #[cfg(feature = "profiling-analysis")]
+    {
+        *state.interval_len = [0; OVERLAP_FRAMES];
+    }
     profiler.write_frame(0, open_record(0, now, epoch, uncalibrated));
     profiler.write_begin(0, now);
 }
@@ -224,6 +254,14 @@ fn open_next_frame(profiler: &mut Profiler, now: u64, uncalibrated: bool) {
     *state.frame += 1;
     *state.epoch = epoch;
     let (row, frame) = (*state.cursor, *state.frame);
+
+    // The bank this frame claims is the one frame `n - OVERLAP_FRAMES` left behind. Emptying it
+    // here is the ring's whole recycle, and it is the same rule as `zero_row`'s: a slot is
+    // recycled when the frame that owns it opens, never lazily on read.
+    #[cfg(feature = "profiling-analysis")]
+    {
+        state.interval_len[frame as usize % OVERLAP_FRAMES] = 0;
+    }
 
     // The recycle is what stops a row from reporting the frame it held `WINDOW` frames ago.
     profiler.zero_row(row);
@@ -304,20 +342,26 @@ fn attribute(
 ///
 /// The kind dispatch happens **after** attribution, on a field that has already been read — see
 /// the module docs on why that order is a rule rather than a preference.
+///
+/// Returns the **occurrence index of a folded `Span`** within its `(frame, zone)` cell — the
+/// cell's `count` as it stood *before* this sample's increment — and `None` for anything else: a
+/// rejected sample, or a `Counter`/`Gauge`, neither of which is an interval. That number is the
+/// interval ring's `occ`, and returning it here is what lets the ring carry no occurrence counter
+/// of its own; the fold has the value in a register either way.
 #[inline]
 fn accumulate(
     cols: &Columns,
     stride: u32,
     row: usize,
     s: &Sample,
-    drops: &mut super::store::DropCounters,
-) {
+    drops: &mut DropCounters,
+) -> Option<u32> {
     if u32::from(s.zone) >= stride {
         // A zone id past the armed geometry. Reachable only by arming a smaller stride than the
         // registry has already minted into, which `E9213` refuses on the arm path — so this is the
         // residual, and dropping the sample is the only attribution that is not a lie.
         drops.late += 1;
-        return;
+        return None;
     }
     let idx = row * stride as usize + s.zone as usize;
     debug_assert!(idx < cols.cells, "invariant: a folded cell is inside the columns");
@@ -327,7 +371,7 @@ fn accumulate(
         // `Span` and nothing else does — so a sample carrying it came from a writer this build
         // does not have. Guessing which kind it meant is how a decoder invents data.
         debug_assert!(false, "invariant: no writer at this rung emits the reserved sample kind");
-        return;
+        return None;
     };
 
     let (clamped, over) = if s.value > u64::from(u32::MAX) {
@@ -340,6 +384,7 @@ fn accumulate(
     //   `cells` initialised elements inside the committed reservation, and this thread holds the
     //   store's `&mut` — clause (a) of `Profiler`'s `Send` impl. The five columns are disjoint
     //   sections, so no two of these accesses alias.
+    let occurrence;
     unsafe {
         let count = cols.count.add(idx);
         let total = cols.total.add(idx);
@@ -348,6 +393,7 @@ fn accumulate(
         let label = cols.label.add(idx);
 
         let n = count.read();
+        occurrence = n;
         match kind {
             // A counter's cell ACCUMULATES: a rate needs the frame's sum, and an assignment
             // cannot support one. A span's does too — the sum of its durations.
@@ -386,6 +432,61 @@ fn accumulate(
         // `OverRange` label reports for all three.
         drops.span_over_range += 1;
     }
+
+    if kind == SampleKind::Span { Some(occurrence) } else { None }
+}
+
+/// Append one span to its frame's bank in the interval ring.
+///
+/// # Two refusals that are not the same thing, and only one of them is a loss
+///
+/// A frame outside the ring's [`OVERLAP_FRAMES`]-frame horizon has no bank, and this returns
+/// without counting: the span's measurement is in its column cell regardless, and the horizon is a
+/// stated bound of the analysis rather than a sample the instrument lost. Counting it would report
+/// one sample under two headings — the double-count `substrate/loss-fold` exists to remove.
+///
+/// A **full** bank is a loss: that span is missing from the overlap analysis and nothing else
+/// records the fact. It increments `intervals_dropped`, and the report carries the figure so a
+/// serialisation index computed over a truncated bank is never handed over as if it were complete.
+#[cfg(feature = "profiling-analysis")]
+#[inline]
+fn append_interval(
+    ring: IntervalRing,
+    live: u32,
+    frame: u32,
+    s: &Sample,
+    occ: u32,
+    lens: &mut [u32; OVERLAP_FRAMES],
+    drops: &mut DropCounters,
+) {
+    if live.wrapping_sub(frame) >= OVERLAP_FRAMES as u32 {
+        return;
+    }
+    let bank = frame as usize % OVERLAP_FRAMES;
+    let len = lens[bank] as usize;
+    if len >= INTERVALS_PER_FRAME {
+        drops.intervals_dropped += 1;
+        return;
+    }
+
+    let dur = if s.value > u64::from(u32::MAX) { u32::MAX } else { s.value as u32 };
+    // A zone opening more than 65 535 times in one frame saturates the occurrence index rather
+    // than wrapping it: a wrapped `occ` would name occurrence 0, and two intervals claiming to be
+    // the same occurrence is a statement no reader can recover from. The cell's `count` stays
+    // exact, so the number of occurrences is never the thing that is lost.
+    let occ = u16::try_from(occ).unwrap_or(u16::MAX);
+
+    // SAFETY: `bank < OVERLAP_FRAMES` (a modulus) and `len < INTERVALS_PER_FRAME` (tested just
+    //   above), so the slot lies inside the ring section, which `Layout::new` sized at
+    //   `OVERLAP_FRAMES * INTERVALS_PER_FRAME` `Interval`s inside the committed reservation. The
+    //   fold holds `&mut Profiler` — clause (a) of `Profiler`'s `Send` impl — and is the ring's
+    //   only writer, so no other thread can be writing this slot.
+    unsafe {
+        ring.base
+            .add(bank * INTERVALS_PER_FRAME + len)
+            .write(Interval { begin: s.stamp, dur, zone: s.zone, occ });
+    }
+    lens[bank] = lens[bank].saturating_add(1);
 }
 
 /// The mask read that fronts the whole subsystem, exposed so `App` does not name

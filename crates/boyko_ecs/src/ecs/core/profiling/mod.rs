@@ -23,16 +23,17 @@
 //!
 //! # What this rung is, and what it is not
 //!
-//! **Profiling rung 2.** What exists: [`Profiler`] on a process-lifetime reservation with an
-//! arm-time [`zone_stride`](Profiler::zone_stride), [`fold`], [`arm`](Profiler::arm) /
-//! [`disarm`](Profiler::disarm), [`ProfilerPlugin`] and its world bind, and the seven `92xx` codes
-//! this rung can emit.
+//! **Profiling rungs 2 and 3.** What exists: [`Profiler`] on a process-lifetime reservation with
+//! an arm-time [`zone_stride`](Profiler::zone_stride), [`fold`], [`arm`](Profiler::arm) /
+//! [`disarm`](Profiler::disarm), [`ProfilerPlugin`] and its world bind, the `92xx` codes this rung
+//! can emit, the engine's own [`zones`] (the four `App` brackets, the fold's own, the per-system
+//! span and the dispatch-round pair), and — behind `feature = "profiling-analysis"` — the interval
+//! ring and the [`analysis`] report that reads it against the schedule's conflict graph.
 //!
 //! What does **not** exist yet, by rung, each absent rather than present-and-zero:
 //!
 //! | Rung | Absent here |
 //! |---|---|
-//! | 3 | `SystemMeta.zone`, tier-gated minting, the four `App` zones, `RoundRecord`, `sys_of` |
 //! | 5–7 | the GPU channel, and with it `FrameState::Partial` and three of the five cell labels |
 //! | 8 | `LegSummary`, the window reducer, `resolve`, the artifact |
 //! | 10 | the dynamic registry, so `ProfilerConfig::user_zone_budget` has nothing to spend itself on |
@@ -43,6 +44,8 @@
 //! A field that is structurally always zero is indistinguishable from a measurement of zero, and a
 //! reader cannot tell the difference. So each arrives with the rung that can make it move.
 
+#[cfg(feature = "profiling-analysis")]
+pub mod analysis;
 pub mod diag;
 pub mod fold;
 pub mod plugin;
@@ -52,9 +55,13 @@ pub mod zones;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "profiling-analysis")]
+pub use analysis::{ConcurrencyReport, PairVerdict, concurrency, pair_overlap};
 pub use diag::{LIVE_CODES, report_count};
 pub use fold::{any_armed, fold};
 pub use plugin::ProfilerPlugin;
+#[cfg(feature = "profiling-analysis")]
+pub use store::{INTERVALS_PER_FRAME, Interval, OVERLAP_FRAMES};
 pub use store::{
     ArmOutcome, Cell, CellLabel, COLUMN_BYTES_PER_ZONE, DropCounters, FOLD_L1D_ZONE_LIMIT,
     FRAME_FLAG_CLOCK_UNCALIBRATED, FrameRecord, FrameState, MAX_PLAUSIBLE_FRAME_TICKS, Profiler,

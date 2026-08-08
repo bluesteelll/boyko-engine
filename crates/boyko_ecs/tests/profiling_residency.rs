@@ -173,6 +173,18 @@ fn the_armed_footprint_is_bounded_and_the_store_never_touches_the_heap() {
          (reservation {reserved}, statics {statics})"
     );
 
+    // DISCLOSURE, not a gate — and labelled so, because the difference matters. The budget above
+    // is one number for two configurations: `profiling-analysis` puts a 256 KiB interval ring
+    // inside the same reservation, and both configurations pass the same 16 MiB test. A reader
+    // handed only "total = N B" cannot tell which one produced it, so the line below says. There
+    // is no assertion attached because the honest one is unavailable here: `Layout` is
+    // `pub(crate)`, so this binary cannot compute what the other configuration's reservation
+    // would have been, and `reserved > 256 KiB` would be a gate that cannot fail dressed as one.
+    println!(
+        "profiling_residency: analysis {}, total {total} B (reservation {reserved}, statics {statics})",
+        if cfg!(feature = "profiling-analysis") { "ON" } else { "OFF" }
+    );
+
     // And it is allocated ONCE: a second arm at the live geometry adds nothing to any domain.
     let before_second = allocated();
     assert_eq!(p.arm(ProfilerConfig::default()), ArmOutcome::Rearmed);

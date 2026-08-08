@@ -14,6 +14,71 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-09 — Rung 3d shipped two zones where the corpus specified a 90.8 KiB `RoundRecord` column. Reversible; the owner should know what it costs.
+
+**A SCOPE call, disclosed rather than asked**, because the fork itself was a perf/architecture one
+and those are mine to decide with numbers. What lands here is the one thing the numbers do not
+settle: a specified public surface (`Profiler::rounds(back) -> &[RoundRecord]`) does not exist, and
+that is the owner's to reverse if the lost quantity matters.
+
+**What the corpus asked for.** `RoundRecord { frame, round, dispatched, begin, end }`, 24 B × 121
+frames × `MAX_ROUNDS_PER_FRAME = 32` = **90.8 KiB** of the reservation, keeping *"dispatch shape
+only: rounds per frame, wave width, round span"*.
+
+**What shipped.** Two zone sites on the dispatcher — `__round` (Span) and `__round_width`
+(Counter) — from which rounds per frame is `__round`'s `count`, round span is its
+`total`/`min`/`max`, and wave width is `__round_width`'s. All three named quantities, per frame,
+with distributions rather than a single row each.
+
+**Why, in the order the reasons actually weigh.**
+
+1. **The write path.** This is the decisive one and it is not an optimisation argument. The
+   dispatcher does **not** hold `&mut EcsMaster` while a round is in flight — the `UnsafeEcsCell` it
+   minted is shared with the workers. Writing a column from there needs either a second published
+   pointer into the reservation, written by a thread the fold's `&mut` does not cover, or a
+   per-schedule scratch buffer flushed after the run — profiling state owned by the scheduler. A
+   lane push has neither problem and is the mechanism rung 3c already blessed for `SystemSpan`.
+2. **No truncation.** `MAX_ROUNDS_PER_FRAME = 32` would have counted the 33rd round of a
+   deep-dependency schedule as *dropped* rather than measured, with its own drop class. Two zones
+   truncate at nothing.
+3. **90.8 KiB and one drop class not spent.**
+
+**What is lost, and it is a real thing.** The **correlation** between one round's width and that
+same round's span — "was the widest round also the longest?" Per-frame aggregates cannot answer it.
+Nothing in the profiling corpus asks that question today, which is why the call went this way.
+
+**To reverse:** restore `RoundRecord` with a scratch-and-flush path in `ExecutorScratch`, accept
+the 32-round truncation and its counter, and keep the two zones or drop them. Say the word.
+
+*(Two smaller departures ride along and need no decision: `Interval.sys` is `Interval.zone`, because
+`sys_of` is gone and zone → system resolves at report time; and `G8` has no SKIP clause, because
+`ThreadPoolBuilder::num_threads(2)` never consults the machine, so fewer than two workers would be a
+threadpool defect rather than an environment to excuse. Both are argued in
+`docs/diagnostics/profiling/05-LADDER-GATES.md`.)*
+
+---
+
+## 2026-08-09 — The dev residency budget has 1.3 MiB of headroom, not the 9 MiB the corpus's table implies. `J1`'s `Z` contradiction, now with a number.
+
+**Recorded, not asked** — it is `J1`'s to settle and was already logged at rung 3a. What is new is a
+measurement, and the measurement changes how urgent it looks.
+
+`profiling_residency` now prints its configuration. On this box, armed, analysis ON:
+**total 14 667 776 B (reservation 14 614 528, statics 53 248)** against a 16 MiB dev budget.
+
+The corpus's own dev rows are **6.67 MiB** (analysis off) and **7.05 MiB** (on) — roughly half. The
+gap is *not* the new interval ring, which is 262 144 B of it. It is `D8`'s `Z = 1024` against the
+shipped `ENGINE_ZONE_SLOTS = 4096`: the five columns come to 21 B × 4096 × 121 = 10 407 936 B where
+the table budgets 21 B × 1024 × 121 = 2 601 984 B.
+
+So the sizing table and the shipped constant have disagreed by a factor of four since rung 2, and
+the consequence is that the dev budget is at **87 % utilisation** rather than the ~44 % the table
+suggests. `J1` owns the fix — either `ENGINE_ZONE_SLOTS` comes down to 1024, or every sizing row
+in `profiling/01-EMISSION-STORAGE.md` is recomputed at 4096 and the retail budget re-derived with
+it. Nothing is blocked today; the headroom is just much thinner than it reads.
+
+---
+
 ## 2026-08-08 — The whole `92xx` code block described the wrong eighteen conditions. Repaired; recorded because of HOW it hid.
 
 **Recorded, not asked.** The repair direction was not a judgement call and it is already committed.

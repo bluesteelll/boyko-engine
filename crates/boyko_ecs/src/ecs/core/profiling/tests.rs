@@ -767,3 +767,444 @@ fn a_system_run_produces_one_span_per_run_in_its_own_zone() {
     assert_eq!(a.label, CellLabel::Measured);
     assert_eq!(p.drops().late, 0, "a span was attributed outside the retained window");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// rung 3d — the dispatch-round pair
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Every dispatching round records **exactly one span and exactly one width**, on the dispatcher's
+/// own lane, and the widths sum to the number of systems the schedule dispatched.
+///
+/// This is the whole of what the corpus's `RoundRecord` column was for — rounds per frame is the
+/// span zone's `count`, round span is its `total`/`min`/`max`, wave width is the counter zone's —
+/// obtained from two cells the store already had instead of 90.8 KiB it did not.
+///
+/// RED: delete the `round.close(dispatched)` call in `executor_main_loop` ⇒ both cells stay empty.
+/// Second RED: drop the `dispatched == 0` guard in `RoundProbe::close` ⇒ the backoff rounds record
+/// too, `__round_width`'s `min` becomes 0, and the width distribution reports a wave this schedule
+/// never dispatched.
+#[test]
+fn every_dispatching_round_records_one_span_and_one_width() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
+
+    use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
+    use crate::ecs::core::profiling::zones::{ROUND, ROUND_WIDTH, ROUND_ZONES_COMPILED};
+    use crate::ecs::core::schedule::schedule_builder::ScheduleBuilder;
+
+    static RUNS: AtomicU32 = AtomicU32::new(0);
+
+    fn r_a() {
+        RUNS.fetch_add(1, Ordering::Relaxed);
+    }
+    fn r_b() {
+        RUNS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let (_g, mut p) = armed();
+    RUNS.store(0, Ordering::Relaxed);
+
+    let z_round = boyko_diag::profiling_abi::zone_id(&ROUND);
+    let z_width = boyko_diag::profiling_abi::zone_id(&ROUND_WIDTH);
+
+    let pool: Arc<ThreadPool> = ThreadPoolBuilder::new().num_threads(2).build();
+    let mut builder = ScheduleBuilder::new(pool);
+    builder.add_system(r_a);
+    builder.add_system(r_b);
+    let mut world = EcsMaster::new();
+    let mut schedule = builder.build(&mut world);
+
+    drain_every_region();
+
+    const FRAMES: u32 = 3;
+    for _ in 0..FRAMES {
+        schedule.run(&mut world);
+    }
+    assert_eq!(RUNS.load(Ordering::Relaxed), FRAMES * 2, "the systems did not run");
+
+    fold(&mut p);
+
+    let round = p.cell(0, z_round).expect("frame 0 row");
+    let width = p.cell(0, z_width).expect("frame 0 row");
+
+    if !ROUND_ZONES_COMPILED {
+        // Not a skip: at a folded tier the correct answer is that the probe was deleted from the
+        // build, and asserting it is what would catch a bracket the `const` gate failed to remove.
+        assert_eq!(round.count, 0, "a folded tier still recorded a round");
+        assert_eq!(width.count, 0);
+        return;
+    }
+
+    assert!(round.count >= FRAMES, "{} rounds for {FRAMES} runs of 2 systems", round.count);
+    assert_eq!(
+        round.count, width.count,
+        "a round recorded a span without a width, or a width without a span"
+    );
+    assert_eq!(
+        width.total,
+        u64::from(FRAMES * 2),
+        "the widths must sum to the systems actually dispatched"
+    );
+    assert!(width.min >= 1, "a recorded round dispatched nothing");
+    assert!(round.total > 0, "a round of zero ticks is not a measurement");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// rung 3d — the interval ring
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// A zone that opens N times inside one frame contributes **N** intervals, with occurrence indices
+/// running `0..N`.
+///
+/// This is `F19b`'s direct red. The design this replaces wrote one slot per `(frame, system)`, so a
+/// `Fixed`-schedule system running eight times per frame overwrote itself seven times and the ring
+/// reported the eighth run as if it were the frame's only one.
+///
+/// RED: make `append_interval` write to slot `bank * INTERVALS_PER_FRAME` without advancing `lens`
+/// ⇒ the length stays 1 and only the last span survives.
+#[cfg(feature = "profiling-analysis")]
+#[test]
+fn a_zone_that_opens_n_times_in_one_frame_contributes_n_intervals() {
+    let (_g, mut p) = armed();
+    let t0 = p.begin_of_row(0);
+
+    for k in 0..5u64 {
+        assert!(sample::push(Region::Engine, span(t0 + k, 100 + k)));
+    }
+    fold(&mut p);
+
+    let ivals = p.intervals_of_frame(0);
+    assert_eq!(ivals.len(), 5, "the ring assigned where it must append");
+    for (k, iv) in ivals.iter().enumerate() {
+        assert_eq!(iv.zone, ZONE);
+        assert_eq!(iv.begin, t0 + k as u64);
+        assert_eq!(u64::from(iv.dur), 100 + k as u64);
+        assert_eq!(
+            usize::from(iv.occ),
+            k,
+            "the occurrence index is the cell's count before the increment"
+        );
+    }
+    // And the cell agrees, because `occ` IS that cell's count — the two are one fact, not two.
+    assert_eq!(p.cell(0, ZONE).expect("frame 0 row").count, 5);
+}
+
+/// Only spans enter the ring. A counter and a gauge have no duration, and an "interval" built from
+/// a payload would be an interval on the number line rather than on the clock.
+#[cfg(feature = "profiling-analysis")]
+#[test]
+fn only_spans_enter_the_interval_ring() {
+    let (_g, mut p) = armed();
+    let t0 = p.begin_of_row(0);
+
+    assert!(sample::push(Region::Engine, counter(t0, 1_000)));
+    assert!(sample::push(Region::Engine, gauge(t0, 2_000)));
+    assert!(sample::push(Region::Engine, span(t0, 42)));
+    fold(&mut p);
+
+    let ivals = p.intervals_of_frame(0);
+    assert_eq!(ivals.len(), 1, "a counter or a gauge was admitted as an interval");
+    assert_eq!(u64::from(ivals[0].dur), 42);
+    assert_eq!(p.cell(0, ZONE).expect("frame 0 row").count, 3, "all three still reached the cell");
+}
+
+/// The ring's horizon is `OVERLAP_FRAMES` frames, and a frame past it gets an EMPTY slice — never
+/// the bank's current owner's intervals under the older frame's number.
+///
+/// RED, MEASURED: increment `intervals_dropped` on `append_interval`'s out-of-horizon return ⇒ the
+/// last clause fails. That is the whole distinction this test exists for — a horizon is a stated
+/// bound and a full bank is a loss, and only one of them may be counted, or a reader subtracting
+/// drops from samples counts the same span twice.
+#[cfg(feature = "profiling-analysis")]
+#[test]
+fn the_ring_forgets_a_frame_older_than_its_horizon() {
+    use crate::ecs::core::profiling::store::OVERLAP_FRAMES;
+
+    let (_g, mut p) = armed();
+    let t0 = p.begin_of_row(0);
+    assert!(sample::push(Region::Engine, span(t0, 11)));
+    fold(&mut p);
+    assert_eq!(p.intervals_of_frame(0).len(), 1);
+
+    // Walk the cursor exactly to the horizon: frame 0 is retained at a distance of
+    // `OVERLAP_FRAMES - 1` and gone at `OVERLAP_FRAMES`. The boundary is asserted on both sides,
+    // because `>` and `>=` differ by precisely this one frame.
+    while p.frame() < OVERLAP_FRAMES as u32 - 1 {
+        fold(&mut p);
+    }
+    assert_eq!(p.intervals_of_frame(0).len(), 1, "the horizon dropped a frame it still covers");
+
+    fold(&mut p);
+    assert_eq!(p.frame(), OVERLAP_FRAMES as u32);
+    assert!(p.intervals_of_frame(0).is_empty(), "a frame past the horizon handed back a bank");
+    // And the bank frame 0 used is now frame 8's, empty rather than inherited.
+    assert!(p.intervals_of_frame(OVERLAP_FRAMES as u32).is_empty());
+    assert_eq!(p.drops().intervals_dropped, 0, "leaving the horizon is not a drop");
+
+    // Now the case the two refusals are actually distinguished on: a span stamped inside a frame
+    // the RING no longer covers but the 121-frame WINDOW still does. The column takes it; the ring
+    // skips it; and `intervals_dropped` must stay at zero, because the measurement was not lost —
+    // it is in the cell, and counting it as a drop would report one sample under two headings.
+    assert!(sample::push(Region::Engine, span(t0, 13)));
+    fold(&mut p);
+    assert_eq!(
+        p.cell(0, ZONE).expect("frame 0 row").count,
+        2,
+        "the column refused a frame it still retains"
+    );
+    assert!(p.intervals_of_frame(0).is_empty());
+    assert_eq!(p.drops().late, 0, "the span was inside the retained window");
+    assert_eq!(
+        p.drops().intervals_dropped,
+        0,
+        "leaving the ring's horizon was counted as a loss"
+    );
+}
+
+/// A **full** bank refuses and counts. The measurement itself is never the thing lost — the cell
+/// took every span — so what the counter reports is precisely "this many spans are missing from
+/// the overlap analysis", and the report carries it beside the index for that reason.
+///
+/// RED, MEASURED: delete the `drops.intervals_dropped += 1` in the full-bank branch ⇒ the ring
+/// silently truncates and a serialisation index computed over 2048 of 2064 spans is handed over as
+/// if it were complete.
+#[cfg(feature = "profiling-analysis")]
+#[test]
+fn a_full_bank_refuses_and_counts_it() {
+    use crate::ecs::core::profiling::store::INTERVALS_PER_FRAME;
+
+    let (_g, mut p) = armed();
+    let t0 = p.begin_of_row(0);
+
+    // Fill the bank exactly. One fold can carry at most `2 * REGION_CAPACITY` samples, so the
+    // number of folds is computed from the geometry rather than assumed — and every stamp is `t0`,
+    // so every one of them attributes to frame 0 however many folds it takes.
+    let mut pushed = 0usize;
+    while pushed < INTERVALS_PER_FRAME {
+        for region in [Region::Engine, Region::User] {
+            for _ in 0..REGION_CAPACITY {
+                if pushed >= INTERVALS_PER_FRAME {
+                    break;
+                }
+                assert!(sample::push(region, span(t0, 7)), "a drained region refused early");
+                pushed += 1;
+            }
+        }
+        fold(&mut p);
+    }
+    assert_eq!(p.intervals_of_frame(0).len(), INTERVALS_PER_FRAME);
+    assert_eq!(p.drops().intervals_dropped, 0, "a bank filled exactly has refused nothing");
+
+    const OVER: u64 = 16;
+    for _ in 0..OVER {
+        assert!(sample::push(Region::Engine, span(t0, 7)));
+    }
+    fold(&mut p);
+
+    assert_eq!(p.intervals_of_frame(0).len(), INTERVALS_PER_FRAME, "the bank grew past capacity");
+    assert_eq!(p.drops().intervals_dropped, OVER, "a full bank refused without counting");
+    // The measurement itself was never lost — the cell counted every one of them.
+    assert_eq!(
+        u64::from(p.cell(0, ZONE).expect("frame 0 row").count),
+        INTERVALS_PER_FRAME as u64 + OVER
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// rung 3d — G8: concurrency computability
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// **G8.** A schedule with a known-compatible pair and a known conflict: `declared` matches the
+/// conflict graph, and `observed` is non-zero.
+///
+/// # Why there is no SKIP clause
+///
+/// The corpus pins the configuration at "a pool with >= 2 workers" and says the gate SKIPS below
+/// that, with CI failing on any non-zero skip count. `ThreadPoolBuilder::num_threads(2)` is clamped
+/// only to `[1, MAX_WORKERS]` (`thread_pool.rs`), so two workers are spawned on a single-core box
+/// as readily as on a sixteen-core one — the pool does not consult the machine. A worker count
+/// below two would therefore be a threadpool defect and not an environment to be excused, so the
+/// clause is an unconditional assertion with the reason printed, which is strictly stronger than a
+/// skip that has to be counted.
+///
+/// # Why the rendezvous
+///
+/// Two systems that merely spin for 100 µs each overlap only if the scheduler happened to start
+/// them together, which makes the gate a coin toss on a loaded machine. The pair here waits for
+/// each other first and *then* spins the pinned 100 µs, so overlap is structural whenever the
+/// executor really did dispatch them concurrently — and the wait is bounded, so an executor that
+/// serialised them fails the assertion instead of hanging.
+///
+/// RED, MEASURED: return immediately from `append_interval` ⇒ this test fails at
+/// `frames_analysed >= 1`. Worth stating exactly, because it is one step earlier than the obvious
+/// guess: with no interval at all the report does not compute a serialisation index of 1.0 for a
+/// frame that ran in parallel — it reports **no frames analysed**, `compatible_co_ran == 0`, and
+/// `serialisation_index() == None`. The corpus's "`observed` unavailable" is the literal outcome.
+#[cfg(feature = "profiling-analysis")]
+#[test]
+fn g8_declared_matches_the_graph_and_observed_overlap_is_non_zero() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+    use std::time::{Duration, Instant};
+
+    use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
+
+    use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
+    use crate::ecs::core::profiling::SYSTEM_ZONES_COMPILED;
+    use crate::ecs::core::profiling::analysis::{concurrency, pair_overlap};
+    use crate::ecs::core::resources::register_new;
+    use crate::ecs::core::resources::resource::Resource;
+    use crate::ecs::core::schedule::schedule_builder::ScheduleBuilder;
+    use crate::ecs::core::system::params::resmut::ResMut;
+    use crate::ecs::identifiers::primitives::ResourceId;
+
+    /// Two resources, so that "compatible" and "conflicting" are properties of declared ACCESS and
+    /// not of an ordering edge this test invented.
+    struct GateA;
+    struct GateB;
+
+    // Hand-written, for the reason `Profiler`'s is: `boyko-macros` is a dev-dependency, so its
+    // derives are reachable from an integration test and not from a unit test in `src/`.
+    impl Resource for GateA {
+        fn resource_id() -> ResourceId {
+            static ID: std::sync::OnceLock<ResourceId> = std::sync::OnceLock::new();
+            *ID.get_or_init(|| ResourceId(register_new::<Self>()))
+        }
+    }
+    impl Resource for GateB {
+        fn resource_id() -> ResourceId {
+            static ID: std::sync::OnceLock<ResourceId> = std::sync::OnceLock::new();
+            *ID.get_or_init(|| ResourceId(register_new::<Self>()))
+        }
+    }
+
+    static ENTERED: AtomicU32 = AtomicU32::new(0);
+    static MET: AtomicU32 = AtomicU32::new(0);
+
+    /// Wait for the other half of the pair, then spin the gate's pinned 100 µs.
+    fn spin_together() {
+        ENTERED.fetch_add(1, AtomicOrdering::SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if ENTERED.load(AtomicOrdering::SeqCst) >= 2 {
+                MET.fetch_add(1, AtomicOrdering::SeqCst);
+                break;
+            }
+            std::hint::spin_loop();
+        }
+        let until = Instant::now() + Duration::from_micros(100);
+        while Instant::now() < until {
+            std::hint::spin_loop();
+        }
+    }
+
+    // The parameter TYPE is what declares the access the conflict graph reads, so these bodies
+    // touch nothing: a write would test the resource plumbing, which is not this gate's subject.
+    fn sys_a(_r: ResMut<GateA>) {
+        spin_together();
+    }
+    fn sys_b(_r: ResMut<GateB>) {
+        spin_together();
+    }
+    // Conflicts with BOTH, so the only compatible pair in the schedule is (A, B) and the aggregate
+    // has exactly one pair in its denominator.
+    fn sys_c(_a: ResMut<GateA>, _b: ResMut<GateB>) {}
+
+    let (_g, mut p) = armed();
+    ENTERED.store(0, AtomicOrdering::SeqCst);
+    MET.store(0, AtomicOrdering::SeqCst);
+
+    let pool: Arc<ThreadPool> = ThreadPoolBuilder::new().num_threads(2).build();
+    assert!(
+        pool.worker_count() >= 2,
+        "G8 needs a pool of at least 2 workers and asked for 2; the pool built {} — \
+         `num_threads` is clamped only to [1, MAX_WORKERS], so this is a threadpool defect",
+        pool.worker_count()
+    );
+
+    let mut builder = ScheduleBuilder::new(pool);
+    builder.add_system(sys_a);
+    builder.add_system(sys_b);
+    builder.add_system(sys_c);
+    let mut world = EcsMaster::new();
+    world.insert_resource(GateA);
+    world.insert_resource(GateB);
+    let mut schedule = builder.build(&mut world);
+
+    if !SYSTEM_ZONES_COMPILED {
+        // At a folded tier no system carries a zone, so every one of them is unanalysed and the
+        // report says so rather than reporting a serialisation index over nothing.
+        drain_every_region();
+        schedule.run(&mut world);
+        fold(&mut p);
+        let r = concurrency(&p, &schedule);
+        assert_eq!(r.systems_unanalysed, 3);
+        assert_eq!(r.compatible_co_ran, 0);
+        assert_eq!(r.serialisation_index(), None, "an index over no data is not a number");
+        return;
+    }
+
+    // The DECLARED half, read from the same bits the executor dispatches on.
+    let compat_ab = !schedule.conflict_graph.conflict_bits[0].contains(1);
+    let compat_ac = !schedule.conflict_graph.conflict_bits[0].contains(2);
+    let compat_bc = !schedule.conflict_graph.conflict_bits[1].contains(2);
+    assert!(compat_ab, "A and B touch disjoint resources and must be declared compatible");
+    assert!(!compat_ac, "C writes A's resource and must be declared conflicting");
+    assert!(!compat_bc, "C writes B's resource and must be declared conflicting");
+
+    drain_every_region();
+    schedule.run(&mut world);
+    fold(&mut p);
+
+    assert_eq!(
+        MET.load(AtomicOrdering::SeqCst),
+        2,
+        "the executor did not run the compatible pair concurrently, so there was no overlap to \
+         observe — this is a dispatch finding, not a measurement one"
+    );
+
+    let report = concurrency(&p, &schedule);
+    assert_eq!(report.systems, 3);
+    assert_eq!(report.systems_unanalysed, 0);
+    assert!(report.frames_analysed >= 1, "the ring covered no frame");
+    assert_eq!(report.intervals_dropped, 0, "a truncated bank makes the index unquotable");
+    assert_eq!(
+        report.compatible_co_ran, 1,
+        "exactly one declared-compatible pair could have overlapped in this schedule"
+    );
+    assert_eq!(
+        report.compatible_overlapped, 1,
+        "the pair that ran on two workers for 100 us each did not read as overlapping"
+    );
+    assert_eq!(report.serialisation_index(), Some(0.0), "a fully realised pair serialises at 0");
+
+    // And the per-pair form the corpus prints.
+    let ab = pair_overlap(&p, &schedule, 0, 1);
+    assert!(ab.declared_compatible);
+    assert_eq!(ab.frames_co_ran, 1);
+    assert_eq!(ab.frames_overlapped, 1);
+    assert_eq!(ab.observed_frac(), Some(1.0));
+
+    let ac = pair_overlap(&p, &schedule, 0, 2);
+    assert!(!ac.declared_compatible, "the per-pair form must read the same graph as the aggregate");
+}
+
+/// An empty window has **no** serialisation index. `1.0` would report perfect serialisation where
+/// the honest answer is that nothing ran.
+#[cfg(feature = "profiling-analysis")]
+#[test]
+fn an_index_over_no_co_running_pair_refuses_rather_than_reading_one() {
+    use crate::ecs::core::profiling::analysis::ConcurrencyReport;
+
+    let empty = ConcurrencyReport::default();
+    assert_eq!(empty.serialisation_index(), None);
+
+    let all_parallel =
+        ConcurrencyReport { compatible_co_ran: 4, compatible_overlapped: 4, ..empty };
+    assert_eq!(all_parallel.serialisation_index(), Some(0.0));
+
+    let all_serial = ConcurrencyReport { compatible_co_ran: 4, compatible_overlapped: 0, ..empty };
+    assert_eq!(all_serial.serialisation_index(), Some(1.0));
+}

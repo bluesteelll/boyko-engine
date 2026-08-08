@@ -51,7 +51,14 @@ libc.workspace = true
 loom.workspace = true
 
 [features]
-default = []
+default = ["profiling-analysis"]
+# Profiling rung 3d — the ANALYSIS half of the profiler: the `intervals` append ring (256 KiB of
+# the reservation) and the `ConcurrencyReport` that reads it against the schedule's own
+# `ConflictGraph`. Default ON because a development build is where the question "did this schedule
+# actually run in parallel?" is asked; a shipping title has no use for either, and rung 14's
+# `BOYKO_PROFILE` axis is what turns it off there. Enabling it costs nothing when the profiler is
+# disarmed — the ring is inside the reservation `arm` commits, and `arm` is the enable path.
+profiling-analysis = []
 # Phase 12.5 Track B I5 — bumps `MAX_QUERY_TYPES` from 1024 to 4096 for
 # projects with an unusually high fan-out of `(D, F)` query shapes. Increases
 # the per-world `query_state_cache` footprint from ≤ 32 KB to ≤ 128 KB.

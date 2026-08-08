@@ -78,6 +78,59 @@ pub const FOLD_L1D_ZONE_LIMIT: u32 = 1024;
 /// Bytes one zone occupies in one frame row, across all five columns: `8 + 4 + 4 + 4 + 1`.
 pub const COLUMN_BYTES_PER_ZONE: u64 = 21;
 
+/// Frames the interval ring retains — far fewer than [`WINDOW`], and deliberately.
+///
+/// An interval is a *per-occurrence* record: a frame contributes one per span, where a column cell
+/// contributes one per `(zone, frame)` however many times the zone opened. Retaining 121 frames of
+/// them would cost 3.8 MiB to answer a question — "did these two systems overlap?" — that is about
+/// the schedule's shape and not about this frame in particular. Eight frames is enough to see the
+/// shape and short enough that the ring stays a fixed 256 KiB.
+#[cfg(feature = "profiling-analysis")]
+pub const OVERLAP_FRAMES: usize = 8;
+
+/// Intervals one frame's bank holds before it refuses and counts.
+#[cfg(feature = "profiling-analysis")]
+pub const INTERVALS_PER_FRAME: usize = 2048;
+
+/// One retained span occurrence, **appended and never assigned**.
+///
+/// # The append is the whole point
+///
+/// An earlier design wrote one slot per `(frame, system)`, which a `Fixed`-schedule system running
+/// N times per frame overwrote N−1 times — so the record of a system that ran eight times was the
+/// eighth run, labelled as if it were the frame's. Appending is what makes "this system ran N times
+/// and here is each one" representable at all.
+///
+/// # `zone`, not `sys`
+///
+/// The corpus names this field `sys`. It holds a **zone id**, because rung 3a put the
+/// system → zone mapping in `SystemMeta.zone`, which the schedule owns — so zone → system is
+/// resolved at report time by the one holder of the schedule, and the fold does not carry a side
+/// table to say a second time what the schedule already says. Calling the field `sys` while it
+/// holds a zone would be the kind of name this campaign exists to catch.
+///
+/// # `occ` costs no state
+///
+/// The occurrence index is `count[frame * stride + zone]` **before** the fold's increment — a value
+/// the fold already has in a register. A counter beside the ring would be a second statement of it.
+#[cfg(feature = "profiling-analysis")]
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Interval {
+    /// The clock at the span's open — the same stamp the fold attributed on.
+    pub begin: u64,
+    /// The span's duration in ticks, clamped to `u32::MAX`. A clamped interval is already labelled
+    /// `OverRange` in its cell and counted in `span_over_range`.
+    pub dur: u32,
+    /// The zone the span was opened on.
+    pub zone: u16,
+    /// Which occurrence of this zone in this frame, counting from 0.
+    pub occ: u16,
+}
+
+#[cfg(feature = "profiling-analysis")]
+const _: () = assert!(size_of::<Interval>() == 16);
+
 /// A tick gap above which the fold treats the clock as having jumped rather than the frame as
 /// having been slow.
 ///
@@ -186,18 +239,30 @@ pub struct DropCounters {
     pub span_over_range: u64,
     /// Windows discarded because the clock's epoch broke under them.
     pub clock_epoch_breaks: u64,
+    /// Spans refused by a full interval bank, so the overlap analysis did not see them.
+    ///
+    /// **Only a full bank counts here.** A span attributed to a frame the ring no longer covers is
+    /// *not* counted: its measurement is in its column cell either way, and the ring's eight-frame
+    /// horizon is a stated bound, not a loss — exactly as a stamp below the 121-frame floor is
+    /// `late` rather than "dropped from the columns". Counting it would report one sample twice.
+    #[cfg(feature = "profiling-analysis")]
+    pub intervals_dropped: u64,
 }
 
 impl DropCounters {
     /// Every class summed — what a frame record carries and what `W9203`'s reader compares.
     #[must_use]
     pub fn total(&self) -> u64 {
-        self.engine_overflow
+        let t = self
+            .engine_overflow
             .saturating_add(self.user_overflow)
             .saturating_add(self.unclaimed)
             .saturating_add(self.late)
             .saturating_add(self.span_over_range)
-            .saturating_add(self.clock_epoch_breaks)
+            .saturating_add(self.clock_epoch_breaks);
+        #[cfg(feature = "profiling-analysis")]
+        let t = t.saturating_add(self.intervals_dropped);
+        t
     }
 }
 
@@ -331,6 +396,9 @@ pub(crate) struct Layout {
     label: usize,
     frames: usize,
     begin: usize,
+    /// The interval ring: `OVERLAP_FRAMES` banks of `INTERVALS_PER_FRAME` slots each.
+    #[cfg(feature = "profiling-analysis")]
+    intervals: usize,
     /// Total bytes, before the reservation's granule rounding.
     bytes: usize,
 }
@@ -354,9 +422,33 @@ impl Layout {
         let label = align_up(max + cells * 4, SECTION_ALIGN);
         let frames = align_up(label + cells, SECTION_ALIGN);
         let begin = align_up(frames + WINDOW * size_of::<FrameRecord>(), SECTION_ALIGN);
+
+        // The ring is the LAST section, so the two builds differ by a suffix and every offset
+        // before it is identical — which is what keeps the feature from moving anything a
+        // feature-off reader already knows the address of.
+        #[cfg(feature = "profiling-analysis")]
+        let intervals = align_up(begin + WINDOW * 8, SECTION_ALIGN);
+        #[cfg(feature = "profiling-analysis")]
+        let bytes = align_up(
+            intervals + OVERLAP_FRAMES * INTERVALS_PER_FRAME * size_of::<Interval>(),
+            SECTION_ALIGN,
+        );
+        #[cfg(not(feature = "profiling-analysis"))]
         let bytes = align_up(begin + WINDOW * 8, SECTION_ALIGN);
 
-        Layout { slab, total, count, min, max, label, frames, begin, bytes }
+        Layout {
+            slab,
+            total,
+            count,
+            min,
+            max,
+            label,
+            frames,
+            begin,
+            #[cfg(feature = "profiling-analysis")]
+            intervals,
+            bytes,
+        }
     }
 
     /// Total bytes this geometry needs, before the reservation rounds to its commit granule.
@@ -401,6 +493,13 @@ pub struct Profiler {
     overflow_seen: [[u64; 2]; LANE_COUNT as usize],
     /// The same, for the substrate's un-laned `Unclaimed` cell.
     unclaimed_seen: LossSeen,
+    /// How many intervals each of the ring's banks holds.
+    ///
+    /// Not derivable from anything already stored: the frame record's `samples` counts every
+    /// sample of every kind, while a bank holds spans only. Reset when the frame that owns the
+    /// bank opens, which is what stops a bank from reporting the frame it held eight frames ago.
+    #[cfg(feature = "profiling-analysis")]
+    interval_len: [u32; OVERLAP_FRAMES],
 }
 
 // SAFETY (manual `Send`/`Sync` for `Profiler` -- `Resource: 'static + Send + Sync` while
@@ -446,6 +545,8 @@ const _: () = {
             drops: _,
             overflow_seen: _,
             unclaimed_seen: _,
+            #[cfg(feature = "profiling-analysis")]
+                interval_len: _,
         } = p;
     }
 };
@@ -488,6 +589,8 @@ impl Profiler {
             drops: DropCounters::default(),
             overflow_seen: [[0; 2]; LANE_COUNT as usize],
             unclaimed_seen: LossSeen::ZERO,
+            #[cfg(feature = "profiling-analysis")]
+            interval_len: [0; OVERLAP_FRAMES],
         }
     }
 
@@ -608,6 +711,13 @@ impl Profiler {
         }
         let cell = loss::cell_at_row(loss::ROW_UNLANED, LossClass::Unclaimed);
         self.unclaimed_seen = LossSeen { count: cell.count(), bytes: cell.bytes() };
+
+        // Every bank, not just frame 0's: a re-arm must not leave seven banks holding the previous
+        // session's intervals for the report to read as this session's.
+        #[cfg(feature = "profiling-analysis")]
+        {
+            self.interval_len = [0; OVERLAP_FRAMES];
+        }
 
         // A new session starts on a clean window. Without this, a re-arm would inherit the rows of
         // the session before it — a frame row is only recycled when the cursor reaches it, so rows
@@ -873,6 +983,54 @@ impl Profiler {
         self.columns()
     }
 
+    /// The interval ring's base, or `None` when the store never armed.
+    #[cfg(feature = "profiling-analysis")]
+    #[inline]
+    pub(crate) fn interval_ring(&self) -> Option<IntervalRing> {
+        let base = self.base?;
+        // SAFETY: `Layout::new` places the ring inside `[0, layout.bytes())`, `SECTION_ALIGN`
+        //   aligned and disjoint from every other section, and the reservation is committed over
+        //   exactly that range and never freed. The base came from `VM_BASE`, published `Release`
+        //   after the commit.
+        unsafe {
+            Some(IntervalRing { base: base.as_ptr().add(self.layout.intervals).cast::<Interval>() })
+        }
+    }
+
+    /// Every interval retained for `frame`, or an empty slice when the ring no longer covers it.
+    ///
+    /// The horizon is [`OVERLAP_FRAMES`] frames, and a frame outside it gets `&[]` rather than a
+    /// stale bank: bank `frame % OVERLAP_FRAMES` belongs to the newest frame that claimed it, and
+    /// handing that back under an older frame's number is how a reader comes to compare two
+    /// different frames' spans as if they were one's.
+    #[cfg(feature = "profiling-analysis")]
+    #[must_use]
+    pub fn intervals_of_frame(&self, frame: u32) -> &[Interval] {
+        let Some(ring) = self.interval_ring() else { return &[] };
+        if frame > self.frame || self.frame - frame >= OVERLAP_FRAMES as u32 {
+            return &[];
+        }
+        let bank = frame as usize % OVERLAP_FRAMES;
+        let len = self.interval_len[bank] as usize;
+        debug_assert!(len <= INTERVALS_PER_FRAME, "invariant: a bank never exceeds its capacity");
+        // SAFETY: `bank < OVERLAP_FRAMES` and `len <= INTERVALS_PER_FRAME`, so the range lies
+        //   inside the ring section; every slot below `len` was written by `append_interval` in a
+        //   previous fold, and the section is committed and zero-filled besides. The returned
+        //   lifetime is `&self`'s, and only `&mut self` can append, so no writer can run while
+        //   this slice is alive.
+        unsafe {
+            core::slice::from_raw_parts(ring.base.add(bank * INTERVALS_PER_FRAME), len)
+        }
+    }
+
+    /// Frames the interval ring currently covers, newest first — what the report iterates.
+    #[cfg(feature = "profiling-analysis")]
+    pub fn interval_frames(&self) -> impl Iterator<Item = u32> + '_ {
+        let live = self.frame;
+        let depth = u32::min(live + 1, OVERLAP_FRAMES as u32);
+        (0..depth).map(move |back| live - back)
+    }
+
     /// Backdate the previous fold's stamp, so the next fold's detector sees a forward jump.
     ///
     /// **Test-only, and it is what makes `G21` showable at all.** The detector's threshold is
@@ -902,8 +1060,17 @@ impl Profiler {
             drops: &mut self.drops,
             overflow_seen: &mut self.overflow_seen,
             unclaimed_seen: &mut self.unclaimed_seen,
+            #[cfg(feature = "profiling-analysis")]
+            interval_len: &mut self.interval_len,
         }
     }
+}
+
+/// The interval ring's base pointer, derived once per fold.
+#[cfg(feature = "profiling-analysis")]
+#[derive(Clone, Copy)]
+pub(crate) struct IntervalRing {
+    pub(crate) base: *mut Interval,
 }
 
 /// The five column base pointers plus the count that bounds them.
@@ -943,6 +1110,8 @@ pub(crate) struct FoldState<'a> {
     pub(crate) drops: &'a mut DropCounters,
     pub(crate) overflow_seen: &'a mut [[u64; 2]; LANE_COUNT as usize],
     pub(crate) unclaimed_seen: &'a mut LossSeen,
+    #[cfg(feature = "profiling-analysis")]
+    pub(crate) interval_len: &'a mut [u32; OVERLAP_FRAMES],
 }
 
 #[cfg(test)]
@@ -966,6 +1135,8 @@ mod tests {
                 (l.label, cells),
                 (l.frames, WINDOW * size_of::<FrameRecord>()),
                 (l.begin, WINDOW * 8),
+                #[cfg(feature = "profiling-analysis")]
+                (l.intervals, OVERLAP_FRAMES * INTERVALS_PER_FRAME * size_of::<Interval>()),
             ];
             for (i, (off, len)) in spans.iter().copied().enumerate() {
                 assert!(off + len <= l.bytes(), "section {i} runs past the reservation");

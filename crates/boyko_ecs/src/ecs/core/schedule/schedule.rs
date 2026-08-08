@@ -571,6 +571,14 @@ impl Schedule {
         let completion = unsafe { CompletionCell::new(self.executor_scratch.completion) };
 
         loop {
+            // Profiling rung 3d — the dispatch-round probe. It opens HERE, at the top of the
+            // iteration, rather than around `try_dispatch_ready` alone: a round as the executor
+            // experiences it is the apply-window drain of the previous wave plus the condition
+            // pass plus this wave's dispatch, and the dispatch scan on its own is the cheapest
+            // part of that. It closes at the bottom with the wave's width, and records nothing
+            // when the iteration dispatched nothing (see `RoundProbe::close`).
+            let round = crate::ecs::core::profiling::zones::RoundProbe::open();
+
             // === Step 1: apply window drain (plan §5.4.5.1 gate). ===
             //
             // Monotonicity note (Round 3 W-NEW-4): the combined check
@@ -644,6 +652,14 @@ impl Schedule {
             // by the SCH7 barrier and the per-round Acquire load above,
             // not by re-minting the cell value).
             let dispatched = self.try_dispatch_ready(scope, cell, completion);
+
+            // Closed BEFORE the backoff park below, deliberately. The park only ever runs on a
+            // round that dispatched nothing — which records nothing — so the two orders are
+            // equivalent in what they store; this one keeps the span's definition free of a sleep
+            // even for a reader who does not know that.
+            if let Some(round) = round {
+                round.close(dispatched);
+            }
 
             // === Step 5: backoff. ===
             //
@@ -1267,9 +1283,6 @@ impl Schedule {
                 //   `*const T` Send-ness).
                 unsafe {
                     let system_slot = ptrs.system_slot(sys_idx.0 as usize);
-                    // The span opens on THIS worker, so the sample is charged to this worker's
-                    // lane -- which is the pair the overlap analysis reads. A span opened on the
-                    // dispatcher and closed here would name a producer that never ran the system.
                     // The span opens on THIS worker, so the sample is charged to this worker's
                     // lane -- which is the pair the overlap analysis reads. A span opened on the
                     // dispatcher and closed here would name a producer that never ran the system.

@@ -134,7 +134,7 @@ flag-off legs on the logging side and by GJ1's control leg here.
 |---|---|---|---|
 | **1** | `boyko_diag::profiling_abi`: `ARM_MASK: AtomicU64`, two-region `ZoneLane`, `REGISTRY`, the 24 B `Sample`, `ZoneTier` + `GLOBAL_TIER` (from `boyko_diag/build.rs`), `profiling_partition!` + `ENGINE_PACKAGES`, macros; `boyko_threadpool → boyko_diag` edge + `set_lane` at `worker_main` / `install` / `InstallGuard::drop`. **Requires `boyko_diag` D0/D1** | **G1, G4a (`overflow > 0`), G7, G22a (`LANES` + `REGISTRY`)**, SPSC unit + property tests, the loom SPSC case | purely additive; `boyko_utils` keeps zero deps (F27: rung 1 no longer commits green with nothing exercising it) |
 | **2** | `boyko_ecs::…::profiling`: `VmReservation`-backed store with an arm-time `zone_stride`, `fold.rs` (two regions, monotone-overflow delta, clock-epoch check, bidirectional walk), `arm`/`disarm`, `ProfilerPlugin`, world-bind check. **Requires `boyko_log` L3.** Flips the `W92xx` registry rows it emits from `Pending` to `Live` with their doc pages | **G4b (the `u64` accumulator + the consumer-side delta, = logging's G11), G21, G23a (`section_report{LANES, REGISTRY}` — the two statics that exist here)** | additive |
-| **3** *(lands in parts: **3a** shipped — the field, the mint, `W9201`/`W9208`; **3b** shipped — the `App` zones; **3c** shipped — the per-system spans; **3d** the analysis half)* | `SystemMeta.zone` + const-assert; tier-gated minting at `try_build` with **non-terminal** refusal; the four `App` zones (`__frame`/`__events`/`__fixed_step`/`__main_run`) at `update_with_delta`; `RoundRecord`; `compat` + `intervals` + `ConcurrencyReport` under `profiling-analysis` | **G8, G9, G11 (engine half)** | one field in tail padding; four zone sites |
+| **3** *(**COMPLETE** — **3a** the field, the mint, `W9201`/`W9208`; **3b** the `App` zones; **3c** the per-system spans; **3d** the analysis half)* | `SystemMeta.zone` + const-assert; tier-gated minting at `try_build` with **non-terminal** refusal; the four `App` zones (`__frame`/`__events`/`__fixed_step`/`__main_run`) at `update_with_delta`; the dispatch-round pair `__round`/`__round_width` **in place of `RoundRecord`**; `intervals` + `ConcurrencyReport` under `profiling-analysis`, **without `compat` and without `sys_of`** — see "What rung 3d SHIPPED" below for all four departures and their arguments | **G8, G9, G11 (engine half)** | one field in tail padding; four zone sites |
 | **4** | RHI seam: three verbs + Vulkan impls + `ffi.rs` constants + `GPU_ZONE_QUERY_FLAGS` const-assert + Mock defaults and their pinning tests. **No consumer.** | **G2a, G2c** | old readers untouched |
 | **5** | `boyko_rhi_vulkan → boyko_diag` edge; `gpu_zone.rs` + `CommandWitness` (`first_pair_of` **and** `stamp_positions`, behind `profiling-census`); VB brackets ported. **Serial A/B against the old collector** (never both armed in one frame — F17) | **G2b, G5, G10** | both collectors exist; every existing test still compiles and passes |
 | **6** | gbuffer + SV0 ported; the R0 harness reads the new channel while the old one still exists | G10 extended to those passes | additive |
@@ -418,6 +418,76 @@ was `F19b`'s defect), `RoundRecord` (dispatch shape only: rounds per frame, wave
 `RoundRecord` is read by the report, so landing it alone puts 90.8 KiB of storage in the
 reservation that nothing consumes. That is the shape this campaign refuses everywhere else; it
 would be inconsistent to make an exception for it because the alternative is a larger commit.
+
+### What rung 3d SHIPPED, and the one place it departs from the corpus
+
+Shipped: the `profiling-analysis` cargo feature (**default ON**), the `intervals` append ring, the
+`ConcurrencyReport` with its serialisation index and per-pair form, and `G8`. The three structures
+the section above ruled unnecessary stayed unbuilt, and one more was replaced.
+
+**`RoundRecord` did not ship. Two zone sites did, and this is the argument.** The corpus specifies
+`RoundRecord { frame, round, dispatched, begin, end }` at 24 B × 121 × 32 = **90.8 KiB** of the
+reservation, to keep *"dispatch shape only: rounds per frame, wave width, round span"*. All three
+are per-frame statistics, and all three are cells the store already had:
+
+| Corpus quantity | Where it is read now |
+|---|---|
+| rounds per frame | `__round`'s `count` |
+| round span | `__round`'s `total` / `min` / `max` |
+| wave width | `__round_width`'s `total` / `min` / `max` — a `Counter`, so `total` is Σ dispatched |
+
+Four things follow, and only the last is a loss:
+
+1. **90.8 KiB of the reservation is not spent**, and neither is the `rounds` drop class.
+2. **`MAX_ROUNDS_PER_FRAME = 32` and its truncation are gone.** A schedule whose dependency chain
+   is 33 rounds deep would have had its 33rd round *counted as dropped* rather than measured; two
+   zones truncate at nothing.
+3. **The write path exists.** This is the decisive half, not the arithmetic. The dispatcher does
+   **not** hold `&mut EcsMaster` while a round is in flight — the cell it minted is shared with the
+   workers — so a column write needs either a second published pointer into the reservation, from a
+   thread the fold's `&mut` does not cover, or a per-schedule scratch buffer flushed later, which is
+   profiling state owned by the scheduler. A lane push has neither problem and is the mechanism
+   rung 3c already blessed for `SystemSpan`, one level down.
+4. **What is lost, named:** the *correlation* between one round's width and that same round's span.
+   Per-frame aggregates cannot answer "was the widest round also the longest one?". Nothing in this
+   corpus asks that question, and the price of being able to is items 1–3. **Raised in
+   `docs/OPEN-QUESTIONS.md` so the owner can reverse it.**
+
+Two smaller departures, both consequences of decisions already shipped:
+
+- **`Interval.sys` is `Interval.zone`.** The field holds a zone id, because `sys_of` is gone and
+  zone → system resolves at report time. Naming it `sys` while it holds a zone is the kind of name
+  this corpus exists to catch.
+- **`G8` has no SKIP clause.** The corpus says the gate skips below two workers and CI fails on any
+  non-zero skip count. `ThreadPoolBuilder::num_threads(2)` is clamped only to `[1, MAX_WORKERS]`
+  (`crates/boyko_threadpool/src/thread_pool.rs`) and never consults the machine, so two workers are
+  spawned on a single-core box as readily as on a sixteen-core one. A worker count below two would
+  be a threadpool defect, not an environment to excuse — so the clause is an unconditional
+  assertion with the reason printed, which is strictly stronger than a skip that has to be counted.
+  The gate additionally **rendezvouses** the pair before the pinned 100 µs spin, so overlap is
+  structural whenever the executor really dispatched them concurrently, rather than a coin toss on
+  a loaded machine; the wait is bounded, so a serialising executor fails an assertion instead of
+  hanging.
+
+**Five REDs, each run rather than asserted.** (a) return immediately from `append_interval` ⇒ `G8`
+fails at `frames_analysed >= 1` — worth stating exactly, because it is one step *earlier* than the
+obvious guess: the report does not compute a serialisation index of 1.0 for a frame that ran in
+parallel, it reports **no frames analysed** and `serialisation_index() == None`, which is the
+corpus's "`observed` unavailable" literally. (b) assign instead of append ⇒ the `F19b` test and
+`G8` both red. (c) delete `round.close(dispatched)` ⇒ the round pair's cells stay empty. (d) count
+`append_interval`'s out-of-horizon return in `intervals_dropped` ⇒ the horizon test reds, which is
+the whole point of separating a stated bound from a loss. (e) drop the full-bank
+`intervals_dropped += 1` ⇒ the truncation test reds.
+
+**A measured figure the ladder should carry.** `profiling_residency` now prints its configuration,
+and on this box it reads **total 14 667 776 B (reservation 14 614 528, statics 53 248)** with
+analysis ON, against the 16 MiB dev budget. The corpus's own dev rows are 6.67 MiB (analysis off)
+and 7.05 MiB (on) — roughly **half** the measured figure, and the gap is **not** the interval ring
+(262 144 B of it). It is `D8`'s `Z = 1024` against the shipped `ENGINE_ZONE_SLOTS = 4096`: the
+columns are 21 B × 4096 × 121 = 10 407 936 B where the table budgets 21 B × 1024 × 121. That
+contradiction was already recorded at rung 3a as `J1`'s to settle; this is the first time it has a
+measured number attached, and the number says the dev budget has 1.3 MiB of headroom rather than
+the 9 MiB the table implies.
 
 ### Two rung-3b decisions
 

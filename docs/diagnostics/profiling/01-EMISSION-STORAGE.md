@@ -476,6 +476,21 @@ All three fixed:
 
 **All of D9 is behind `feature = "profiling-analysis"` (default ON in dev, OFF at retail).** `compat` + `intervals` = 384 KiB, which a shipping title has no use for.
 
+### What D9 SHIPPED at rung 3d, against the four paragraphs above
+
+The four bullets are kept verbatim because their *arguments* are what the implementation followed; what it stored differs in four places, each argued in `profiling/05-LADDER-GATES.md` §"What rung 3d SHIPPED" and each raised in `docs/OPEN-QUESTIONS.md`.
+
+| Specified | Shipped | Why |
+|---|---|---|
+| `compat`, 128 KiB snapshotted at arm | **not built** — the report reads the live `ConflictGraph` | a schedule is built once at `App::finish` and never rebuilt, so the live graph *is* the snapshot. Residual named: a later rung that makes schedules rebuildable must snapshot or refuse |
+| `sys_of`, 2 KiB built at arm; `Interval.sys` | **not built**; the field is `Interval.zone` | rung 3a put system → zone on `SystemMeta.zone`, which the schedule owns, so zone → system resolves at **report** time. A field named `sys` holding a zone is the name this corpus exists to catch |
+| `RoundRecord`, 90.8 KiB, `MAX_ROUNDS_PER_FRAME = 32` | **not built** — two zone sites, `__round` (Span) and `__round_width` (Counter) | rounds/frame is `__round`'s `count`, round span its `total`/`min`/`max`, wave width `__round_width`'s. No storage, no truncation, no `rounds` drop class — and no second write path into the reservation from a dispatcher that does not hold `&mut EcsMaster`. **Lost:** the width↔span correlation within one round |
+| `ConcurrencyReport` prints per compatible pair | aggregate in one pass + a per-pair call | 1024 systems is 523 776 rows to answer an aggregate question. `pair_overlap(a, b)` gives the corpus's `declared=1 observed_frac=x.xx` for the pair a caller names |
+
+`intervals` shipped as specified — an **append** ring, `OVERLAP_FRAMES = 8`, `INTERVALS_PER_FRAME = 2048`, 16 B per record, 256 KiB — and so did `intervals_dropped`, with one distinction the corpus does not state and that the implementation had to make: **a full bank is a loss and is counted; a frame outside the eight-frame horizon is a stated bound and is not.** The measurement of an out-of-horizon span is in its column cell either way, so counting it would report one sample under two headings — the double-count `substrate/loss-fold` exists to remove. Both directions have a run RED.
+
+Two figures the report carries that the corpus does not name: `conflicting_overlapped` (pairs the graph declared incompatible whose intervals nevertheless intersected) is **reported and never asserted on** — two spans measured on two cores are two `rdtsc` readings, and cross-core skew can make an abutting pair read as overlapping by a handful of ticks. And `serialisation_index()` returns `Option<f32>`: `None` when no compatible pair co-ran, because `1.0` would report perfect serialisation where the honest answer is that nothing ran.
+
 ## D7 — The stage table is a per-zone declaration, and partition sums are CHECKED — per frame, never over medians
 
 `ZoneDesc.stage: GpuStage` and `ZoneDesc.group: PartitionGroup`. The window reducer refuses to sum a group unless **every** member declares `BottomOfPipe` and their intervals are non-overlapping and contained in the group's run bracket; otherwise it emits the members individually and writes `sum = NOT_VALID (mixed stage)` — an **artifact field**, not a printed line (S1/S7: the reducer has no console form).
