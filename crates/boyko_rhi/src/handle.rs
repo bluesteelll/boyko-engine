@@ -564,6 +564,54 @@ mod tests {
         assert_eq!(err, RhiError::Unsupported("read_query_pool_pairs_ns"));
     }
 
+    /// Profiling rung 4: the non-blocking seam's two fallible verbs degrade the same way.
+    ///
+    /// A backend that returned `Ok(())` here without filling `out_available` would publish a
+    /// frame's worth of "available, duration 0" pairs — measurements of nothing, indistinguishable
+    /// from a genuinely instantaneous pass. That is the failure this pin exists to catch, and it
+    /// is the reason the seam reports availability as data at all.
+    #[test]
+    fn the_non_blocking_query_seam_default_bodies_are_unsupported() {
+        let device = MockDevice;
+        let pool: u32 = 0;
+        let mut scratch = [0u64; 4];
+        let mut begin_ticks = [0u64; 1];
+        let mut dur_ticks = [0u64; 1];
+        let mut available = [0u8; 1];
+
+        let err = device
+            .read_query_pool_pairs_available(
+                &pool,
+                1,
+                &mut scratch,
+                &mut begin_ticks,
+                &mut dur_ticks,
+                &mut available,
+            )
+            .expect_err("invariant: MockDevice overrides no reader");
+        assert_eq!(err, RhiError::Unsupported("read_query_pool_pairs_available"));
+        assert_eq!(available, [0u8; 1], "a refused read must not claim availability");
+
+        let err = device
+            .reset_query_pool_host(&pool, 0, 2)
+            .expect_err("invariant: MockDevice enables no device feature");
+        assert_eq!(err, RhiError::Unsupported("reset_query_pool_host"));
+    }
+
+    /// And the seam's one INFALLIBLE verb answers `false`, which is what makes the pair safe.
+    ///
+    /// `host_query_reset_supported` returns a bare `bool`, so it has no `Unsupported` to report —
+    /// its default IS its answer. A default of `true` would tell a caller it may call
+    /// [`RhiDevice::reset_query_pool_host`] on a backend that has no device at all, and the
+    /// caller would then treat that verb's refusal as an error instead of as the fallback path.
+    #[test]
+    fn host_query_reset_defaults_to_false_so_the_fallback_is_the_default_path() {
+        assert!(
+            !MockDevice.host_query_reset_supported(),
+            "a backend that enabled no feature must not advertise one"
+        );
+    }
+
     // ===== Registry behavioral tests =====
 
     #[test]

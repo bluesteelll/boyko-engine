@@ -52,6 +52,22 @@ const _: () = assert!(GPU_ZONE_QUERY_FLAGS & VK_QUERY_RESULT_WAIT_BIT == 0);
 availability bits **clear** — a normal outcome, not an error. The availability output is a **byte
 slice, not a `u128`** — no fixed-width wall.
 
+**Rung 4 found that the last sentence is not free.** `VkResult::is_success()` in this tree is
+`self.0 == 0`, i.e. `VK_SUCCESS` alone, so mapping `VK_NOT_READY` to `Ok(())` requires testing it
+**explicitly**. The sibling reader's comment had asserted for four rungs that `is_success()` *"would
+also accept"* `VK_NOT_READY`/`VK_INCOMPLETE`; that was false, harmless where written because
+`WAIT_BIT` makes both codes unreachable there, and it propagated straight into the first
+non-blocking reader — where G2c's first clause failed with
+`Vk("vkGetQueryPoolResults", VK_NOT_READY)` on a poll of a pool nothing had written. **A false
+statement about a branch nothing can take is never contradicted by a test**, and it costs whoever
+copies it next. Both the code and the sentence are corrected.
+
+**And two stamps with nothing between them do not read zero.** MEASURED on this box: an empty
+`TOP_OF_PIPE`/`BOTTOM_OF_PIPE` bracket is **128 ticks at 1 ns/tick**, reproducibly — the hardware
+lattice step `G` that no Vulkan limit reports. So "this pass cost nothing" and "this pass was never
+bracketed" are **not** separable by a near-zero duration here; they are separable by the
+availability byte, which is what the seam is for.
+
 **Why the const-assert and not a source gate (F3).** Rev 2's G2a grepped `gpu_zone.rs` and
 `profiling/**` for `WAIT_BIT`. The verb's *body* must live in
 `crates/boyko_rhi_vulkan/src/rhi_impl/device.rs`, beside its siblings `fetch_query_raw_ticks`,
@@ -330,10 +346,26 @@ Enabling `VkPhysicalDeviceHostQueryResetFeatures` at device creation records **n
 changes no frame; it is a `pNext` bit, and the goldens are unaffected. It is enabled when the
 physical device advertises it.
 
-Nothing establishes that this box's driver does — `crates/boyko_rhi_vulkan/src/ffi.rs:2716` shows
+**MEASURED 2026-08-09 at rung 4: this box's driver DOES advertise it, and it is now enabled.**
+`host_query_reset_supported()` returns `true`, and `crates/boyko_rhi_vulkan/tests/
+gpu_query_availability_truth.rs` exercises the reset end-to-end — after `vkResetQueryPool` every
+pair reads unavailable again. `vkResetQueryPool` is loaded, and the feature is requested through a
+**granular** `VkPhysicalDeviceHostQueryResetFeatures` rather than the `VkPhysicalDeviceVulkan12Features`
+aggregate `ffi.rs` already declared: the aggregate carries descriptor-indexing's bits too, and
+VUID-VkDeviceCreateInfo-pNext-02830 forbids it alongside the granular descriptor-indexing struct
+this chain already has.
+
+*(What this paragraph said before, kept because it is the reason the fallback below was specified
+at all: "Nothing establishes that this box's driver does — `ffi.rs:2716` shows
 `pub host_query_reset: VkBool32` exists as a feature field and it is never enabled, and
-`vkResetQueryPool` is not loaded (the constraint is stated once in
-`profiling/budgets-and-invariants`). **The design does not depend on it.** Fallback, specified rather
+`vkResetQueryPool` is not loaded.")*
+
+**The consequence is that the UNPROVEN half has swapped.** The fallback specified below is the path
+this hardware never takes, so it is unproven *here* — named in the gate rather than claimed. The
+refusal it rests on is pinned where it is reachable: `MockDevice` enables no feature, and
+`boyko_rhi`'s own pin asserts `Unsupported` there.
+
+**The design still does not depend on it.** Fallback, specified rather
 than named: a slot that retires without host reset sets `needs_cmd_reset`; slot recycling refuses
 that slot until an armed frame issues `vkCmdResetQueryPool` for it at the frame top — the exact site
 the current code already uses, outside any render scope, satisfying

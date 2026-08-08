@@ -871,6 +871,11 @@ pub trait RhiDevice<A: RhiApi> {
     ///
     /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; the Vulkan
     /// backend overrides it (`vkGetQueryPoolResults`).
+    ///
+    /// **FROZEN (profiling rung 4) — no new callers.** Its `WAIT_BIT` contract makes an
+    /// unwritten pair a hang rather than an error. New code uses
+    /// [`Self::read_query_pool_pairs_available`], which reports availability instead of waiting
+    /// for it.
     #[cold]
     #[inline(never)]
     fn read_query_pool_ns(
@@ -909,6 +914,9 @@ pub trait RhiDevice<A: RhiApi> {
     ///
     /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; the Vulkan
     /// backend overrides it (`vkGetQueryPoolResults`).
+    ///
+    /// **FROZEN (profiling rung 4) — no new callers**, for
+    /// [`Self::read_query_pool_ns`]'s reason.
     #[cold]
     #[inline(never)]
     fn read_query_pool_ticks(
@@ -953,6 +961,9 @@ pub trait RhiDevice<A: RhiApi> {
     /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; the Vulkan
     /// backend overrides it (`vkGetQueryPoolResults`). Unlike its two siblings, this default
     /// body IS pinned by a test (`handle.rs`'s `MockDevice` — the crate's first such test).
+    ///
+    /// **FROZEN (profiling rung 4) — no new callers**, for
+    /// [`Self::read_query_pool_ns`]'s reason.
     #[cold]
     #[inline(never)]
     fn read_query_pool_pairs_ns(
@@ -964,6 +975,101 @@ pub trait RhiDevice<A: RhiApi> {
         _out_dur_ns: &mut [f64],
     ) -> Result<(), Self::Error> {
         Err(RhiError::unsupported("read_query_pool_pairs_ns").into())
+    }
+
+    // ===== PROFILING RUNG 4 — THE NON-BLOCKING QUERY SEAM (three verbs) =====
+    //
+    // The three readers above are FROZEN: **no new callers.** Every one of them takes
+    // `VK_QUERY_RESULT_WAIT_BIT`, which means the caller must have written every pair it asks
+    // about or the driver blocks forever — and "forever" is not a failure a test can show, it is
+    // a hang. That contract is why this engine grew three separate GPU-timing collectors, each
+    // arranging in its own way to only ever ask about pairs it knew were written.
+    //
+    // The verbs below replace the contract rather than working around it: availability is DATA,
+    // polled and reported per pair, so a pair the recorder never wrote is an answer instead of a
+    // deadlock. The existing three stay for their existing callers and are not deleted here —
+    // that is the single subtractive rung's job.
+
+    /// Reads `pair_count` consecutive `(begin, end)` timestamp pairs from `pool` **without ever
+    /// blocking**, reporting per pair whether both of its queries were actually available.
+    ///
+    /// # There is no flags parameter, and that is the design
+    ///
+    /// A backend's flag word is its own private `const`, const-asserted to exclude
+    /// `VK_QUERY_RESULT_WAIT_BIT`. A blocking read is therefore a **compile error** rather than
+    /// something a reviewer has to notice: no caller can pass the bit because no caller can pass
+    /// flags at all.
+    ///
+    /// # Slice contracts
+    ///
+    /// * `scratch` — caller-owned staging, length `>= 4 * pair_count`. Two `u64` per query
+    ///   (value, then availability) × two queries per pair. **CLOBBERED**, and deliberately not
+    ///   zeroed by the implementation: it is staging, and a memset of it on every read would be
+    ///   paid by every frame to tidy bytes nobody reads.
+    /// * `out_available` — one byte per pair, `1` iff **both** of that pair's queries were
+    ///   available, `0` otherwise.
+    /// * `out_begin_ticks` / `out_dur_ticks` — `pair_count` values each. **A pair whose
+    ///   `out_available` is `0` gets zeros**, never the driver's undefined bytes: an undefined
+    ///   value handed to a caller is how garbage becomes a measurement.
+    ///
+    /// # Not an error
+    ///
+    /// "Some queries are not ready yet" is the normal outcome and returns `Ok(())` with the
+    /// corresponding availability bytes clear (Vulkan's `VK_NOT_READY`).
+    ///
+    /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; the Vulkan
+    /// backend overrides it.
+    #[cold]
+    #[inline(never)]
+    fn read_query_pool_pairs_available(
+        &self,
+        _pool: &A::QueryPool,
+        _pair_count: u32,
+        _scratch: &mut [u64],
+        _out_begin_ticks: &mut [u64],
+        _out_dur_ticks: &mut [u64],
+        _out_available: &mut [u8],
+    ) -> Result<(), Self::Error> {
+        Err(RhiError::unsupported("read_query_pool_pairs_available").into())
+    }
+
+    /// Resets `count` queries from `first` **on the host** — no command buffer, no queue
+    /// submission, no frame.
+    ///
+    /// # Caller obligation
+    ///
+    /// Legal only when [`Self::host_query_reset_supported`] returns `true`, and only while no
+    /// submitted command buffer may still be reading or writing those queries. A backend whose
+    /// device did not enable the feature returns `Unsupported` rather than calling into a driver
+    /// that would reject it.
+    ///
+    /// # Why it is optional rather than required
+    ///
+    /// The alternative is a recorded `vkCmdResetQueryPool` at the top of an armed frame, which
+    /// works everywhere and costs one frame of recycle latency on the pool. Host reset removes
+    /// that latency; nothing depends on it existing.
+    ///
+    /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`.
+    #[cold]
+    #[inline(never)]
+    fn reset_query_pool_host(
+        &self,
+        _pool: &A::QueryPool,
+        _first: u32,
+        _count: u32,
+    ) -> Result<(), Self::Error> {
+        Err(RhiError::unsupported("reset_query_pool_host").into())
+    }
+
+    /// Whether [`Self::reset_query_pool_host`] is callable on this device.
+    ///
+    /// The contract is **enabled**, not "advertised": a backend answers `true` only when the
+    /// feature was turned on at device creation, so a caller reading `true` needs no second
+    /// check. The default is `false`, which is the honest answer for a backend that has no
+    /// device.
+    #[inline]
+    fn host_query_reset_supported(&self) -> bool {
+        false
     }
 
     // ===== HW-RT ACCELERATION-STRUCTURE SEAM (rung R2a-1; default bodies keep Mock + ABI) =====

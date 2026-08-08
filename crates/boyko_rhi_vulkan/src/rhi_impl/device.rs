@@ -1080,6 +1080,62 @@ impl RhiDevice<Vulkan> for VulkanContext {
         self.fetch_query_pair_stamps(pool, pair_count, scratch, out_begin_ns, out_dur_ns)
     }
 
+    // ===== PROFILING RUNG 4 — the non-blocking query seam =====
+
+    fn read_query_pool_pairs_available(
+        &self,
+        pool: &VulkanQueryPool,
+        pair_count: u32,
+        scratch: &mut [u64],
+        out_begin_ticks: &mut [u64],
+        out_dur_ticks: &mut [u64],
+        out_available: &mut [u8],
+    ) -> Result<(), VulkanError> {
+        self.fetch_query_pairs_available(
+            pool,
+            pair_count,
+            scratch,
+            out_begin_ticks,
+            out_dur_ticks,
+            out_available,
+        )
+    }
+
+    fn reset_query_pool_host(
+        &self,
+        pool: &VulkanQueryPool,
+        first: u32,
+        count: u32,
+    ) -> Result<(), VulkanError> {
+        if !self.device_caps().host_query_reset {
+            // The verb's own contract: a backend whose device did not ENABLE the feature refuses
+            // rather than calling a driver entry point that would reject it. The recorder's
+            // fallback (a recorded `vkCmdResetQueryPool`) is what runs instead, and it is fully
+            // specified — this is not a degraded path, it is the other one.
+            return Err(VulkanError::Rhi(boyko_rhi::RhiError::unsupported(
+                "reset_query_pool_host",
+            )));
+        }
+        debug_assert!(
+            first.saturating_add(count) <= pool.count,
+            "invariant: the reset range must fit the pool's query count"
+        );
+        // SAFETY: `device` is live and `pool.pool` is a live pool created on it; the range
+        //   `[first, first + count)` is inside `pool.count` (asserted above). `hostQueryReset` was
+        //   enabled at device creation — `device_caps().host_query_reset` carries the ENABLED
+        //   contract, not an advertised one, checked immediately above — which is what makes this
+        //   entry point legal to call at all. The caller's own contract is that no submitted
+        //   command buffer may still be reading or writing these queries.
+        unsafe {
+            (self.device_fns().reset_query_pool)(self.device(), pool.pool, first, count);
+        }
+        Ok(())
+    }
+
+    fn host_query_reset_supported(&self) -> bool {
+        self.device_caps().host_query_reset
+    }
+
     // ===== HW-RT ACCELERATION-STRUCTURE VERBS (rung R2a-1; `feature="hwrt"` overrides) =====
     // Each delegates to a `crate::accel` inherent helper (the real `vkGet*`/`vkCreate*` FFI).
     // Present ONLY under `hwrt`; a default build inherits the `#[cold]` erroring defaults.
@@ -1171,7 +1227,145 @@ impl RhiDevice<Vulkan> for VulkanContext {
     }
 }
 
+/// The flag word every non-blocking query read uses (profiling rung 4).
+///
+/// # This `const` is the mechanism, not a convention
+///
+/// A blocking reader is the failure this whole seam exists to remove: with
+/// `VK_QUERY_RESULT_WAIT_BIT` set, `vkGetQueryPoolResults` **blocks forever** on any query its
+/// recorder never wrote, and this repository has no kill-after-timeout pattern — so the defect's
+/// symptom is a hang, and a hang is not a red a gate can show.
+///
+/// A source gate cannot close it either: the verb's body has to live here, beside its siblings, and
+/// a grep scoped to the profiling module would structurally exclude this file. That is the exact
+/// shape of a mechanical check whose scope excludes the defect.
+///
+/// So the flag word is a checked `const` and the red is a **build failure**: add the bit and the
+/// assertion below stops the workspace from compiling. There is no flags parameter on the verb, so
+/// no caller can reintroduce it either.
+const GPU_ZONE_QUERY_FLAGS: VkFlags =
+    VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT;
+const _: () = assert!(
+    GPU_ZONE_QUERY_FLAGS & VK_QUERY_RESULT_WAIT_BIT == 0,
+    "G2a: a blocking GPU query reader must be unrepresentable, not merely unwritten"
+);
+// And the availability bit must be PRESENT, or the driver writes no availability word and the
+// reader reports whatever the caller's staging buffer happened to hold. The two halves of the
+// flag word fail in opposite directions, so both are pinned.
+const _: () = assert!(
+    GPU_ZONE_QUERY_FLAGS & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT != 0,
+    "G2c: without the availability bit the reader answers from stale staging bytes"
+);
+
+/// `u64`s of `scratch` each query consumes under [`GPU_ZONE_QUERY_FLAGS`]: the value, then the
+/// availability word (64-bit too, because `VK_QUERY_RESULT_64_BIT` is set).
+const WORDS_PER_QUERY: usize = 2;
+
 impl VulkanContext {
+    /// The body of [`RhiDevice::read_query_pool_pairs_available`] (profiling rung 4): one
+    /// **non-blocking** `vkGetQueryPoolResults` over `2 * pair_count` queries, followed by the
+    /// same mask/wrap arithmetic its blocking siblings use.
+    ///
+    /// # `VK_NOT_READY` is a result, not an error
+    ///
+    /// Without `WAIT_BIT` the driver returns `VK_NOT_READY` when any requested query is
+    /// unavailable, having still written every word it could. That is the *normal* outcome for a
+    /// frame still in flight, so it maps to `Ok(())` with the corresponding availability bytes
+    /// clear. Treating it as an error would make "the GPU has not finished yet" a failure.
+    ///
+    /// # An unavailable pair reads ZERO, not whatever the driver left
+    ///
+    /// Vulkan leaves an unavailable query's value undefined. `scratch` is caller-owned staging
+    /// that this function does not zero, so "undefined" here means "whatever the caller last put
+    /// there" — and handing that to a reader is how a stale byte becomes a measurement. The out
+    /// slices get zeros for any pair whose availability is not `(1, 1)`.
+    ///
+    /// # Panics
+    ///
+    /// `debug_assert`s that `2 * pair_count` fits `pool.count`, that `scratch` holds
+    /// `4 * pair_count` words, and that each out slice holds `pair_count` values.
+    fn fetch_query_pairs_available(
+        &self,
+        pool: &VulkanQueryPool,
+        pair_count: u32,
+        scratch: &mut [u64],
+        out_begin_ticks: &mut [u64],
+        out_dur_ticks: &mut [u64],
+        out_available: &mut [u8],
+    ) -> Result<(), VulkanError> {
+        let query_count = pair_count * 2;
+        debug_assert!(
+            query_count <= pool.count,
+            "invariant: the requested query count must fit the pool's query count"
+        );
+        debug_assert!(
+            scratch.len() >= query_count as usize * WORDS_PER_QUERY,
+            "invariant: scratch must hold value + availability for every query"
+        );
+        debug_assert!(
+            out_begin_ticks.len() >= pair_count as usize
+                && out_dur_ticks.len() >= pair_count as usize
+                && out_available.len() >= pair_count as usize,
+            "invariant: every out slice must hold pair_count values"
+        );
+
+        let stride = (WORDS_PER_QUERY * 8) as VkDeviceSize;
+        // SAFETY: `device` is live; `pool.pool` is a live TIMESTAMP pool and `query_count` fits
+        //   its extent (asserted above); `scratch.as_mut_ptr()` names
+        //   `query_count * WORDS_PER_QUERY` `u64` slots (asserted above) — `data_size` is exactly
+        //   that many bytes and `stride` is the 16 bytes one query occupies under
+        //   `64_BIT | WITH_AVAILABILITY_BIT`. NULL is not passed. The flag word carries NO
+        //   `WAIT_BIT` (const-asserted above), so this call CANNOT block, which is the one
+        //   property that makes it safe to ask about queries the recorder may never have written.
+        let raw = unsafe {
+            (self.device_fns().get_query_pool_results)(
+                self.device(),
+                pool.pool,
+                0,
+                query_count,
+                query_count as usize * WORDS_PER_QUERY * 8,
+                scratch.as_mut_ptr().cast::<c_void>(),
+                stride,
+                GPU_ZONE_QUERY_FLAGS,
+            )
+        };
+        let result = VkResult::from_raw(raw);
+        // `VK_SUCCESS` (every query available) and `VK_NOT_READY` (some are not) are BOTH the
+        // expected outcomes of a poll, so BOTH are accepted here — explicitly, and **not** through
+        // `is_success()`, which is `self.0 == 0` and would reject `VK_NOT_READY` as an error.
+        //
+        // MEASURED, not assumed: writing `!result.is_success()` here made G2c's first clause fail
+        // with `Vk("vkGetQueryPoolResults", VK_NOT_READY)` on the very poll the whole seam exists
+        // to make legal — a poll of a pool nothing has written. The mistake came from the sibling
+        // reader's comment two functions down, which asserted that `is_success()` "would also
+        // accept" `VK_NOT_READY`; that sentence was wrong and is corrected there.
+        //
+        // Anything else — a lost device, an out-of-memory — is a real error and is returned as one.
+        if result != VkResult::SUCCESS && result != VkResult::NOT_READY {
+            return Err(VulkanError::Vk("vkGetQueryPoolResults", result));
+        }
+
+        let mask = self.device_caps().timestamp_mask();
+        for i in 0..pair_count as usize {
+            // Pair `i` is queries `2i` (begin) and `2i + 1` (end); each query is two words.
+            let begin_word = i * 2 * WORDS_PER_QUERY;
+            let end_word = begin_word + WORDS_PER_QUERY;
+            let both_available = scratch[begin_word + 1] != 0 && scratch[end_word + 1] != 0;
+            if !both_available {
+                out_available[i] = 0;
+                out_begin_ticks[i] = 0;
+                out_dur_ticks[i] = 0;
+                continue;
+            }
+            let begin = scratch[begin_word] & mask;
+            let end = scratch[end_word] & mask;
+            out_available[i] = 1;
+            out_begin_ticks[i] = begin;
+            out_dur_ticks[i] = end.wrapping_sub(begin) & mask;
+        }
+        Ok(())
+    }
+
     /// The `vkGetQueryPoolResults` FFI call itself (VG R3 piece 4 rung P4-1), shared by
     /// [`Self::fetch_query_pair_ticks`] and [`Self::fetch_query_pair_stamps`]: host-waits +
     /// reads `query_count` raw timestamps from `pool` into `scratch[0..query_count]`, UNMASKED
@@ -1218,7 +1412,15 @@ impl VulkanContext {
         let result = VkResult::from_raw(raw);
         // `WAIT_BIT` makes the call return ONLY once every requested query is available, so the sole
         // success code here is `VK_SUCCESS`; the positive non-error `VK_NOT_READY`/`VK_INCOMPLETE`
-        // (which `is_success()` would also accept, meaning an unwritten/partial query) cannot occur.
+        // (meaning an unwritten/partial query) cannot occur.
+        //
+        // CORRECTED at profiling rung 4: this comment used to add "which `is_success()` would also
+        // accept" of those two codes. It does not — `VkResult::is_success` is `self.0 == 0`, i.e.
+        // `VK_SUCCESS` alone, and `VK_NOT_READY` is 1. The claim was harmless HERE, because
+        // `WAIT_BIT` makes both codes unreachable, and that is exactly why it survived: a false
+        // statement about a branch nothing can take is never contradicted by a test. It was
+        // contradicted the moment a NON-blocking reader copied it — G2c's first clause failed with
+        // `VK_NOT_READY` treated as an error.
         // Callers MUST read only WRITTEN (begin,end) pairs — an unwritten query would block this call
         // forever and never reach here (the timing harnesses enforce this: the isolated smoke reads 1
         // pair; the combined harness asserts all four passes active). So `is_success()` here is

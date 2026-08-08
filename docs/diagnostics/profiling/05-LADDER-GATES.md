@@ -135,7 +135,7 @@ flag-off legs on the logging side and by GJ1's control leg here.
 | **1** | `boyko_diag::profiling_abi`: `ARM_MASK: AtomicU64`, two-region `ZoneLane`, `REGISTRY`, the 24 B `Sample`, `ZoneTier` + `GLOBAL_TIER` (from `boyko_diag/build.rs`), `profiling_partition!` + `ENGINE_PACKAGES`, macros; `boyko_threadpool → boyko_diag` edge + `set_lane` at `worker_main` / `install` / `InstallGuard::drop`. **Requires `boyko_diag` D0/D1** | **G1, G4a (`overflow > 0`), G7, G22a (`LANES` + `REGISTRY`)**, SPSC unit + property tests, the loom SPSC case | purely additive; `boyko_utils` keeps zero deps (F27: rung 1 no longer commits green with nothing exercising it) |
 | **2** | `boyko_ecs::…::profiling`: `VmReservation`-backed store with an arm-time `zone_stride`, `fold.rs` (two regions, monotone-overflow delta, clock-epoch check, bidirectional walk), `arm`/`disarm`, `ProfilerPlugin`, world-bind check. **Requires `boyko_log` L3.** Flips the `W92xx` registry rows it emits from `Pending` to `Live` with their doc pages | **G4b (the `u64` accumulator + the consumer-side delta, = logging's G11), G21, G23a (`section_report{LANES, REGISTRY}` — the two statics that exist here)** | additive |
 | **3** *(**COMPLETE** — **3a** the field, the mint, `W9201`/`W9208`; **3b** the `App` zones; **3c** the per-system spans; **3d** the analysis half)* | `SystemMeta.zone` + const-assert; tier-gated minting at `try_build` with **non-terminal** refusal; the four `App` zones (`__frame`/`__events`/`__fixed_step`/`__main_run`) at `update_with_delta`; the dispatch-round pair `__round`/`__round_width` **in place of `RoundRecord`**; `intervals` + `ConcurrencyReport` under `profiling-analysis`, **without `compat` and without `sys_of`** — see "What rung 3d SHIPPED" below for all four departures and their arguments | **G8, G9, G11 (engine half)** | one field in tail padding; four zone sites |
-| **4** | RHI seam: three verbs + Vulkan impls + `ffi.rs` constants + `GPU_ZONE_QUERY_FLAGS` const-assert + Mock defaults and their pinning tests. **No consumer.** | **G2a, G2c** | old readers untouched |
+| **4** *(**SHIPPED**)* | RHI seam: three verbs + Vulkan impls + `ffi.rs` constants + `GPU_ZONE_QUERY_FLAGS` const-assert + Mock defaults and their pinning tests. **No consumer.** Plus `VkPhysicalDeviceHostQueryResetFeatures` (granular, for the VUID reason the descriptor-indexing struct already carries) and `DeviceCaps::host_query_reset` — see "What rung 4 SHIPPED" below | **G2a, G2c** | old readers untouched |
 | **5** | `boyko_rhi_vulkan → boyko_diag` edge; `gpu_zone.rs` + `CommandWitness` (`first_pair_of` **and** `stamp_positions`, behind `profiling-census`); VB brackets ported. **Serial A/B against the old collector** (never both armed in one frame — F17) | **G2b, G5, G10** | both collectors exist; every existing test still compiles and passes |
 | **6** | gbuffer + SV0 ported; the R0 harness reads the new channel while the old one still exists | G10 extended to those passes | additive |
 | **7 (the single subtractive rung)** | Delete `gpu_timing.rs`, the runner harness bodies, the statistics helpers **and the four `VB-P1d`/`VB-P4` print sites** (`runner.rs:3089`, `:3096`, `:3121`, `:3137`) — **and migrate all six stdout consumers to the artifact in the same commit** (S1; list below) | the post-rung `rg` gate **plus the S1 stdout gate (G24)** | one commit, workspace green before and after |
@@ -488,6 +488,60 @@ columns are 21 B × 4096 × 121 = 10 407 936 B where the table budgets 21 B × 1
 contradiction was already recorded at rung 3a as `J1`'s to settle; this is the first time it has a
 measured number attached, and the number says the dev budget has 1.3 MiB of headroom rather than
 the 9 MiB the table implies.
+
+### What rung 4 SHIPPED — and the three things measuring it corrected
+
+The seam landed as specified: `read_query_pool_pairs_available` / `reset_query_pool_host` /
+`host_query_reset_supported` on `boyko_rhi::RhiDevice` with `Unsupported` defaults, the Vulkan
+bodies beside `fetch_query_pair_ticks`, `VK_QUERY_RESULT_WITH_AVAILABILITY_BIT = 0x4` and
+`PfnVkResetQueryPool` in `ffi.rs`, `GPU_ZONE_QUERY_FLAGS` with its const-assert, and the Mock pins.
+The three FROZEN readers carry a "no new callers" line each. **No consumer**, as the rung specifies.
+
+**Both halves of the flag word are const-asserted, not one.** The corpus pins
+`GPU_ZONE_QUERY_FLAGS & WAIT_BIT == 0`. A second assert pins
+`& WITH_AVAILABILITY_BIT != 0`, because the two halves fail in **opposite directions**: `WAIT_BIT`
+present turns an unwritten pair into a hang, and the availability bit *absent* turns it into a
+confident wrong answer read out of the caller's own staging buffer. One assert covers one of them.
+
+**Three things the measurement corrected, each found by running the gate rather than by reading:**
+
+1. **`VkResult::is_success()` does NOT accept `VK_NOT_READY`.** It is `self.0 == 0` —
+   `VK_SUCCESS` alone. `fetch_query_raw_ticks`'s comment had asserted for four rungs that
+   `is_success()` *"would also accept"* `VK_NOT_READY`/`VK_INCOMPLETE`. **The claim was harmless
+   where it was written and that is precisely why it survived:** `WAIT_BIT` makes both codes
+   unreachable there, so no test could ever contradict it. It was contradicted the moment a
+   non-blocking reader inherited it — G2c's first clause failed with
+   `Vk("vkGetQueryPoolResults", VK_NOT_READY)` on the one poll the whole seam exists to make legal.
+   The new reader tests `SUCCESS || NOT_READY` explicitly; the stale sentence is corrected in place
+   with the reason it lasted.
+2. **This box's driver DOES advertise `hostQueryReset`.** D18 says *"Nothing establishes that this
+   box's driver does"* — something does now: `host_query_reset_supported = true`, MEASURED
+   2026-08-09, and the host reset was exercised end-to-end (reset ⇒ every pair reads unavailable
+   again). **The consequence is that the UNPROVEN half has swapped.** D18's specified fallback —
+   `needs_cmd_reset` plus a recorded `vkCmdResetQueryPool` at the frame top — is the path this
+   hardware never takes, so the Vulkan body's refusal branch is unproven here and is named as such
+   in the gate. It is pinned where it *is* reachable: `MockDevice` enables no feature, and the
+   `boyko_rhi` pin asserts the `Unsupported` error there.
+3. **An empty GPU bracket on this box measures 128 ticks, not 0.** Two back-to-back
+   `TOP_OF_PIPE`/`BOTTOM_OF_PIPE` stamps with nothing between them read **128 ticks at
+   1 ns/tick**, both pairs, reproducibly. That is the hardware lattice step `G` that
+   `read_query_pool_ticks`'s own doc explains is not reported by any Vulkan limit — and it is the
+   floor under every GPU duration this corpus will publish. A pass that "cost nothing" and a pass
+   that was never bracketed are therefore **not** distinguishable by a near-zero duration on this
+   hardware; they are distinguishable by the availability byte, which is the seam's point.
+
+**G2a's census clause caught a file on its first run.** The pinned list was seeded from a grep over
+the paths I expected; the census — which walks the whole tree — immediately named
+`crates/boyko_rhi_vulkan/tests/software_ray_baseline_cost.rs`, whose module doc describes the
+blocking readback its harness performs. It is a correct use of a FROZEN reader (one bracketed pass,
+one pair, read after the fence), so it is now a `PINNED` row with that reason written in it. The
+episode is the argument for the census's shape: a hand-maintained list of "files I think call this"
+is exactly what it replaces.
+
+**G2c has no SKIP for a missing feature, only for a missing GPU.** The host-reset clause branches
+instead: supported ⇒ exercise it, unsupported ⇒ assert the verb *refuses*. A capability that varies
+by driver cannot be a skip, because a skip on the machine that has the capability and a skip on the
+machine that lacks it are the same green.
 
 ### Two rung-3b decisions
 

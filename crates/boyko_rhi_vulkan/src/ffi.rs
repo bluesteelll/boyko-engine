@@ -583,6 +583,12 @@ pub enum VkStructureType {
     /// struct's aggregate alongside its own granular sub-struct). vulkan_core.h:
     /// `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES = 1000161001`.
     PhysicalDeviceDescriptorIndexingFeatures = 1_000_161_001,
+    /// `VkPhysicalDeviceHostQueryResetFeatures` — the GRANULAR `hostQueryReset` feature
+    /// struct (profiling rung 4), chained into `VkPhysicalDeviceFeatures2` to READ and into
+    /// `VkDeviceCreateInfo` to ENABLE. Granular for the same VUID reason as the sibling
+    /// above. vulkan_core.h:
+    /// `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES = 1000261000`.
+    PhysicalDeviceHostQueryResetFeatures = 1_000_261_000,
     /// `VkDescriptorSetLayoutBindingFlagsCreateInfo` (T4 bindless) — chained into
     /// `VkDescriptorSetLayoutCreateInfo.pNext` to declare the PARTIALLY_BOUND /
     /// UPDATE_AFTER_BIND / VARIABLE_DESCRIPTOR_COUNT flags per binding (the bindless
@@ -847,6 +853,23 @@ pub const VK_QUERY_RESULT_64_BIT: VkFlags = 0x0000_0001;
 /// `VkQueryResultFlagBits::VK_QUERY_RESULT_WAIT_BIT` — block until the results are
 /// available before writing them (paired with the caller's `wait_fence`).
 pub const VK_QUERY_RESULT_WAIT_BIT: VkFlags = 0x0000_0002;
+/// `VkQueryResultFlagBits::VK_QUERY_RESULT_WITH_AVAILABILITY_BIT` — write an extra
+/// availability word after each query's value, non-zero iff that query's result is
+/// ready. **This is the bit that makes a non-blocking reader possible**: without it a
+/// caller can only learn "ready" by asking the driver to block
+/// ([`VK_QUERY_RESULT_WAIT_BIT`]), and a query the recorder never wrote then blocks
+/// forever.
+///
+/// With [`VK_QUERY_RESULT_64_BIT`] also set, the availability word is 64-bit too, so
+/// each query occupies **two** `u64` slots — value then availability — and the stride
+/// is 16 bytes.
+///
+/// vulkan_core.h: `VK_QUERY_RESULT_WITH_AVAILABILITY_BIT = 0x00000004`. (`0x10` is
+/// `VK_QUERY_RESULT_WITH_STATUS_BIT_KHR`, a different extension's bit, and `0x20` is
+/// not defined at all — both are worth naming here because a wrong value does not
+/// fail: the driver writes fewer words and the caller reads whatever was in the
+/// staging buffer, which is how a stale byte becomes an availability answer.)
+pub const VK_QUERY_RESULT_WITH_AVAILABILITY_BIT: VkFlags = 0x0000_0004;
 
 // --- Slice-1 instance / device extension names. ---
 
@@ -2809,6 +2832,24 @@ pub struct VkPhysicalDeviceFeatures {
 /// `buffer_device_address` field (unlike the `Vulkan12Features` aggregate), so it
 /// coexists cleanly with the hwrt arm's standalone
 /// `VkPhysicalDeviceBufferDeviceAddressFeatures` in the same `pNext` chain.
+/// `VkPhysicalDeviceHostQueryResetFeatures` — the GRANULAR `hostQueryReset` feature struct
+/// (profiling rung 4). Chained into `VkPhysicalDeviceFeatures2` to READ whether the device
+/// advertises host query reset, and into `VkDeviceCreateInfo` to ENABLE it when it does.
+///
+/// **Granular, not the aggregate, for exactly the reason the sibling above states.**
+/// `hostQueryReset` also lives in [`VkPhysicalDeviceVulkan12Features`], but that aggregate
+/// carries `descriptorIndexing`'s bits too, and VUID-VkDeviceCreateInfo-pNext-02830 forbids
+/// a promoted struct's aggregate alongside its own granular sub-struct — which this chain
+/// already has.
+///
+/// vulkan_core.h: `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES = 1000261000`.
+#[repr(C)]
+pub struct VkPhysicalDeviceHostQueryResetFeatures {
+    pub s_type: VkStructureType,
+    pub p_next: *mut c_void,
+    pub host_query_reset: VkBool32,
+}
+
 #[repr(C)]
 pub struct VkPhysicalDeviceDescriptorIndexingFeatures {
     pub s_type: VkStructureType,
@@ -2900,6 +2941,11 @@ const _: () = assert!(core::mem::size_of::<VkPhysicalDeviceFeatures>() == 220);
 const _: () = assert!(core::mem::align_of::<VkPhysicalDeviceFeatures>() == 4);
 const _: () = assert!(core::mem::size_of::<VkPhysicalDeviceDescriptorIndexingFeatures>() == 96);
 const _: () = assert!(core::mem::align_of::<VkPhysicalDeviceDescriptorIndexingFeatures>() == 8);
+// Profiling rung 4: the 16-byte sType+pNext head + one `VkBool32` (4 bytes), rounded up to
+// the 8-byte alignment = 24. Written BY the driver on the query pass and READ by it on the
+// enable pass, so the layout is pinned exactly like its siblings above.
+const _: () = assert!(core::mem::size_of::<VkPhysicalDeviceHostQueryResetFeatures>() == 24);
+const _: () = assert!(core::mem::align_of::<VkPhysicalDeviceHostQueryResetFeatures>() == 8);
 // T4 bindless: both `p_next`-chained structs are READ by the driver (we author every
 // byte), but a wrong field ORDER still misfeeds the driver a garbage count/pointer
 // (a real OOB-read hazard, not just a Rust-side type error) — pinned like every other
@@ -3721,6 +3767,21 @@ pub type PfnVkGetQueryPoolResults = unsafe extern "system" fn(
     stride: VkDeviceSize,
     flags: VkFlags,
 ) -> i32;
+
+/// `PFN_vkResetQueryPool` — resets `query_count` queries from `first_query` **on the
+/// host**, with no command buffer and no queue submission.
+///
+/// Vulkan 1.2 core (promoted from `VK_EXT_host_query_reset`), so it loads on this
+/// engine's 1.3 device — but calling it is legal only when the `hostQueryReset`
+/// feature was ENABLED at device creation, which is why
+/// [`VkPhysicalDeviceHostQueryResetFeatures`] exists beside it and why the capability
+/// is recorded rather than assumed.
+pub type PfnVkResetQueryPool = unsafe extern "system" fn(
+    device: VkDevice,
+    query_pool: VkQueryPool,
+    first_query: u32,
+    query_count: u32,
+);
 
 /// `PFN_vkCmdBeginRendering` (Vulkan 1.3 core dynamic rendering).
 pub type PfnVkCmdBeginRendering = unsafe extern "system" fn(

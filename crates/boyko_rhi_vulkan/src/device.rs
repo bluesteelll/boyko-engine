@@ -311,6 +311,14 @@ pub struct DeviceCaps {
     /// is read so a timing harness reporting its own resolution can state which guarantee its
     /// numbers rest on instead of implying the stronger one.
     pub timestamp_compute_and_graphics: bool,
+    /// Profiling rung 4 (D18): whether `hostQueryReset` was **ENABLED** at device creation —
+    /// the contract is "enabled", not "advertised", exactly as [`Self::ray_query`]'s is, so a
+    /// caller reading `true` may call `vkResetQueryPool` without a further check.
+    ///
+    /// RECORDED, never a boot fail-fast. Host reset is an optimisation with a fully specified
+    /// fallback (a recorded `vkCmdResetQueryPool` at the frame top), so a device without it
+    /// costs one frame of query-pool recycle latency and nothing else.
+    pub host_query_reset: bool,
     /// HW-RT rung R1: whether hardware ray query is ENABLED on this device (the
     /// `VK_KHR_ray_query` extension requested + its feature turned on). The
     /// field's contract is "ENABLED", not "present": R1 requests NO RT extension
@@ -580,6 +588,11 @@ pub struct DeviceFns {
     pub cmd_reset_query_pool: PfnVkCmdResetQueryPool,
     pub cmd_write_timestamp: PfnVkCmdWriteTimestamp,
     pub get_query_pool_results: PfnVkGetQueryPoolResults,
+    /// Profiling rung 4: `vkResetQueryPool`, Vulkan 1.2 core, so it LOADS on this engine's
+    /// 1.3 device unconditionally. Loading it is not permission to call it — that needs the
+    /// `hostQueryReset` feature enabled at device creation, which
+    /// [`DeviceCaps::host_query_reset`] records.
+    pub reset_query_pool: PfnVkResetQueryPool,
     // --- Slice-1 core (Vulkan 1.0 / 1.3) commands, always loaded. ---
     pub reset_fences: PfnVkResetFences,
     pub create_image_view: PfnVkCreateImageView,
@@ -1125,6 +1138,14 @@ impl VulkanContext {
         // gate makes that degrade the ONLY behavior change, never a device-create failure).
         let enable_vb_geometry_table = device_caps.storage_buffer_array_non_uniform_indexing_ok;
 
+        // Profiling rung 4 (D18): `hostQueryReset` on the SAME "query before request" precedent.
+        // It is an OPTIMISATION and nothing depends on it — the GPU zone recorder's fallback is a
+        // recorded `vkCmdResetQueryPool` at the frame top, and with `GPU_RING_DEPTH = 4` against
+        // `FRAMES_IN_FLIGHT = 2` there is always a clean slot, so the fallback never stalls. Host
+        // reset only removes the one-frame recycle latency. Recorded in the caps rather than
+        // assumed, because nothing in this tree establishes that this box's driver advertises it.
+        device_caps.host_query_reset = supports_host_query_reset(&instance_fns, physical_device);
+
         // --- 6. Create the logical device + retrieve the queue. ---
         let device = match create_device(
             &instance_fns,
@@ -1133,6 +1154,7 @@ impl VulkanContext {
             config.windowed,
             enable_ray_query,
             enable_vb_geometry_table,
+            device_caps.host_query_reset,
         ) {
             Ok(d) => d,
             Err(e) => fail!(e),
@@ -1985,6 +2007,9 @@ fn load_device_fns(
             cmd_reset_query_pool: load_device_command(gdpa, device, c"vkCmdResetQueryPool")?,
             cmd_write_timestamp: load_device_command(gdpa, device, c"vkCmdWriteTimestamp")?,
             get_query_pool_results: load_device_command(gdpa, device, c"vkGetQueryPoolResults")?,
+            // Profiling rung 4. Vulkan 1.2 core on a 1.3 device ⇒ `?` is safe here for the same
+            // reason it is safe for its five siblings above.
+            reset_query_pool: load_device_command(gdpa, device, c"vkResetQueryPool")?,
             // --- Slice-1 core (Vulkan 1.0 / 1.3) commands. ---
             reset_fences: load_device_command(gdpa, device, c"vkResetFences")?,
             create_image_view: load_device_command(gdpa, device, c"vkCreateImageView")?,
@@ -2710,6 +2735,38 @@ fn supports_dynamic_rendering(fns: &InstanceFns, physical_device: VkPhysicalDevi
     features13.dynamic_rendering == VK_TRUE
 }
 
+/// A zeroed [`VkPhysicalDeviceHostQueryResetFeatures`] except for `s_type` (profiling rung 4) —
+/// the shared template BOTH [`supports_host_query_reset`] and [`create_device`] build on, for the
+/// reason [`zeroed_descriptor_indexing_features`] exists: a query and an enable that spell the
+/// struct twice are two spellings that can drift.
+fn zeroed_host_query_reset_features() -> VkPhysicalDeviceHostQueryResetFeatures {
+    VkPhysicalDeviceHostQueryResetFeatures {
+        s_type: VkStructureType::PhysicalDeviceHostQueryResetFeatures,
+        p_next: ptr::null_mut(),
+        host_query_reset: VK_FALSE,
+    }
+}
+
+/// Whether the GPU advertises `hostQueryReset` (profiling rung 4 / D18).
+///
+/// Mirrors [`supports_dynamic_rendering`] exactly, except that the answer never fails a boot:
+/// the caller records it and passes it to [`create_device`], which requests the bit only when
+/// this returned `true` — the "query before request" precedent, because requesting an
+/// unsupported feature bit is a hard `vkCreateDevice` error rather than a silent no-op.
+fn supports_host_query_reset(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> bool {
+    let mut host_reset = zeroed_host_query_reset_features();
+    let mut features2 = VkPhysicalDeviceFeatures2 {
+        s_type: VkStructureType::PhysicalDeviceFeatures2,
+        p_next: (&mut host_reset as *mut VkPhysicalDeviceHostQueryResetFeatures).cast(),
+        features: [VK_FALSE; 55],
+    };
+    // SAFETY: `physical_device` is a valid enumerated GPU; `features2` is a fully-initialized
+    // `#[repr(C)]` struct whose `p_next` chains the live `host_reset` local (both outlive the
+    // call). The driver writes the supported feature bool through the chained struct.
+    unsafe { (fns.get_physical_device_features2)(physical_device, &mut features2) };
+    host_reset.host_query_reset == VK_TRUE
+}
+
 /// HW-RT rung R2a-1: the ray-query capability + scratch alignment of a device.
 #[cfg(feature = "hwrt")]
 pub(crate) struct RtCaps {
@@ -3212,6 +3269,11 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
         // the two inputs `query_device_caps` does not itself read.
         timestamp_period: 0.0,
         timestamp_valid_bits: 0,
+        // Profiling rung 4: the same placeholder discipline. `query_device_caps` runs BEFORE
+        // `vkCreateDevice`, and this field's contract is "ENABLED", not "advertised" — so the
+        // only honest value here is `false`, and the boot site overwrites it from
+        // `supports_host_query_reset` on the line that feeds `create_device` the same answer.
+        host_query_reset: false,
         // VB-SV0 rung S1.5: same placeholder discipline — the boot site reads it from the
         // limits blob alongside `timestampPeriod`.
         timestamp_compute_and_graphics: false,
@@ -3288,6 +3350,11 @@ fn create_device(
     // `descriptorBindingStorageBufferUpdateAfterBind` on the granular descriptor-indexing
     // struct below — the VB geometry table's (`MeshGeometryTable`) two prerequisite bits.
     enable_vb_geometry_table: bool,
+    // Profiling rung 4 (D18): when `true` (only ever set after the caller queried
+    // `supports_host_query_reset`), chains `VkPhysicalDeviceHostQueryResetFeatures` with the bit
+    // set. Enabling it records NO commands and changes no frame — it is a `pNext` bit, so the
+    // goldens are unaffected — and it is what makes `vkResetQueryPool` legal to call.
+    enable_host_query_reset: bool,
 ) -> Result<VkDevice, BootError> {
     let _ = enable_ray_query; // read only on the hwrt arm below (silences the OFF build).
     // Correction #2 (OQ-6): fail fast with a CLEAR error if the GPU does not
@@ -3411,8 +3478,26 @@ fn create_device(
         descriptor_indexing.shader_storage_buffer_array_non_uniform_indexing = VK_TRUE;
         descriptor_indexing.descriptor_binding_storage_buffer_update_after_bind = VK_TRUE;
     }
-    descriptor_indexing.p_next =
-        (&features13 as *const VkPhysicalDeviceVulkan13Features).cast::<c_void>() as *mut c_void;
+    // Profiling rung 4 (D18): the granular `hostQueryReset` struct, spliced between the
+    // descriptor-indexing head and `features13` when — and only when — the caller's
+    // `supports_host_query_reset` query said yes. Built here, AFTER the hwrt arm has finished
+    // mutating `features13.p_next` and BEFORE `descriptor_indexing` takes its address, so the
+    // chain is still built tail-first with no read-after-mutate hazard. When the flag is false
+    // the local is never chained and the walk order is byte-identical to before this rung.
+    let mut host_query_reset = zeroed_host_query_reset_features();
+    if enable_host_query_reset {
+        host_query_reset.host_query_reset = VK_TRUE;
+        host_query_reset.p_next =
+            (&features13 as *const VkPhysicalDeviceVulkan13Features).cast::<c_void>()
+                as *mut c_void;
+    }
+
+    descriptor_indexing.p_next = if enable_host_query_reset {
+        (&host_query_reset as *const VkPhysicalDeviceHostQueryResetFeatures).cast::<c_void>()
+            as *mut c_void
+    } else {
+        (&features13 as *const VkPhysicalDeviceVulkan13Features).cast::<c_void>() as *mut c_void
+    };
 
     // The p_next chain head is ALWAYS the bindless descriptor-indexing struct:
     // descriptorIndexing → features13 → (hwrt only) rayQuery → accelerationStructure →
@@ -3743,6 +3828,7 @@ mod tests {
             timestamp_period: 1.0,
             timestamp_valid_bits: 64,
             timestamp_compute_and_graphics: true,
+            host_query_reset: false,
             ray_query,
             ray_reorder,
             vendor_id: 0,
