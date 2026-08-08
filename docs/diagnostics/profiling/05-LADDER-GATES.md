@@ -236,6 +236,18 @@ guard) and this one, the **sample transport**.
    path, which is the intended outcome and is proved by `boyko_diag` having to write the line for
    its own tests.
 
+5. **The region's `overflow` is MONOTONE, not `fetch_sub`-cleared** — `substrate/loss-fold`'s
+   Q2(b) shape, applied rather than re-derived. The first version of the transport used
+   `fetch_sub(observed)`. That was not *wrong*: this producer increments with an RMW, so the
+   lost-update window Q2 describes — an owner's `load; add; store` overwriting a consumer's
+   subtract — cannot open here. It was **a second shape for a question the substrate had already
+   answered**, and a reader who had learnt the rule from `boyko_diag::loss` would have had to
+   re-derive it. The counter is now `u64` and never cleared; `overflow_since` puts the delta at the
+   consumer. Widened from `u32` for the same reason the logging plan widened its loss counters: a
+   monotone `u32` has a wrap that is *unlikely*, and "unlikely" is not a statement a loss counter
+   may rest on. **The layout pins caught the repair's own defect** — the padding was recomputed by
+   hand and was wrong by four bytes, and `size_of::<ZoneLane>() == 256` said so at compile time.
+
 **What rung 1 still owes, stated rather than absorbed: `G20`'s two-crate leg.** The transport-level
 isolation is proved here — the `USER` region fills, refuses and counts while `engine_overflow` stays
 0, and a closed engine zone reaches the `ENGINE` region and not the other. What is **not** proved is

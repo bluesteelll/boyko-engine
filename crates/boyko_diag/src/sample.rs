@@ -24,7 +24,7 @@
 //! publishes a buffer, every push is refused and counted — which is the honest state of a process
 //! that has a profiler compiled in and has not armed it.
 
-use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use crate::lane::LANE_COUNT;
 use crate::profile::REGION_CAPACITY;
@@ -220,9 +220,21 @@ struct RegionWriter {
     buf: AtomicPtr<Sample>,
     /// Samples ever published. Read `Relaxed` by the sole owner, `Release`-stored after the bytes.
     write: AtomicU32,
-    /// Samples refused for want of space. Cleared by `fetch_sub(observed)`, never `store(0)`.
-    overflow: AtomicU32,
-    _pad: [u8; 48],
+    /// Samples refused for want of space. **Monotone: never cleared, by anybody.**
+    ///
+    /// This is `substrate/loss-fold`'s Q2(b) shape, and it landed here after the first version of
+    /// this file used `fetch_sub(observed)` instead. That version was not *wrong* — the producer
+    /// here increments with an RMW, so the lost-update window Q2 describes (an owner's
+    /// `load; add; store` overwriting a consumer's subtract) cannot open. It was **a second shape
+    /// for a question the substrate had already answered**, which is the duplication class this
+    /// crate exists to delete: a reader who learnt the rule from `boyko_diag::loss` would have had
+    /// to re-derive it here.
+    ///
+    /// `u64` rather than `u32` for the same reason the logging plan widened its loss counters: a
+    /// monotone `u32` at a region's refusal rate has a wrap that is *unlikely*, and "unlikely" is
+    /// not the kind of statement a loss counter may rest on. At 2^64 it is a proof.
+    overflow: AtomicU64,
+    _pad: [u8; 40],
 }
 
 /// The consumer's half. Its own line, so a drain never invalidates a producer's.
@@ -251,8 +263,8 @@ impl RegionLane {
             w: RegionWriter {
                 buf: AtomicPtr::new(core::ptr::null_mut()),
                 write: AtomicU32::new(0),
-                overflow: AtomicU32::new(0),
-                _pad: [0; 48],
+                overflow: AtomicU64::new(0),
+                _pad: [0; 40],
             },
             r: RegionReader { read: AtomicU32::new(0), _pad: [0; 60] },
         }
@@ -291,9 +303,10 @@ const _: () = assert!(core::mem::offset_of!(RegionLane, r) == 64);
 //   4. `buf` is write-once with a `Release` store and is read with `Acquire`, so a producer that
 //      observes a non-null pointer observes a buffer the publisher had finished preparing. It is
 //      never nulled, so no producer's pointer can be invalidated by a disarm.
-//   5. `overflow` is an RMW from both sides -- `fetch_add` by the producer, `fetch_sub(observed)`
-//      by the consumer -- so the count survives a producer increment that lands between the
-//      consumer's load and its clear. A `store(0)` there would drop it.
+//   5. `overflow` is written by the producer alone and is MONOTONE -- no consumer ever clears it,
+//      so there is no window for a clear to race an increment at all. A reader takes differences
+//      against its own last-seen value, which is `substrate/loss-fold`'s Q2(b) contract and the
+//      same one `crate::loss::delta_since` implements for the per-lane cells.
 unsafe impl Sync for ZoneLane {}
 
 /// The transports. `.bss`, never freed, address-stable for the process.
@@ -423,27 +436,29 @@ pub unsafe fn drain_region(
     moved
 }
 
-/// Take and clear this region's refused-sample count.
+/// Samples this region has refused, **for the life of the process**.
 ///
-/// **`fetch_sub(observed)`, never `store(0)`.** A producer increment landing between the load and
-/// the clear survives — with a store it would be erased, and the one loss event would be the one
-/// nobody ever hears about.
-pub fn take_overflow(lane: u16, region: Region) -> u32 {
-    let Some(l) = LANES.get(lane as usize) else { return 0 };
-    let cell = &l.region(region).w.overflow;
-    let observed = cell.load(Ordering::Relaxed);
-    if observed != 0 {
-        cell.fetch_sub(observed, Ordering::Relaxed);
-    }
-    observed
-}
-
-/// This region's refused-sample count, without clearing it.
+/// Monotone and never cleared. A consumer that wants "since my last fold" keeps its own last-seen
+/// value and subtracts — the delta lives at the consumer, which is what makes a clear, and the
+/// window a clear opens, unnecessary. `substrate/loss-fold`'s Q2 resolution (b), applied here
+/// rather than re-derived.
 #[must_use]
-pub fn overflow(lane: u16, region: Region) -> u32 {
+pub fn overflow(lane: u16, region: Region) -> u64 {
     LANES
         .get(lane as usize)
         .map_or(0, |l| l.region(region).w.overflow.load(Ordering::Relaxed))
+}
+
+/// Refused samples since `last`, advancing `last` to the current total.
+///
+/// The consumer-side delta, in the one shape both subsystems use. Saturating rather than
+/// wrapping: a caller that passes a `last` from a different region gets 0, not a number near 2^64
+/// that would read as a catastrophic loss.
+pub fn overflow_since(lane: u16, region: Region, last: &mut u64) -> u64 {
+    let now = overflow(lane, region);
+    let delta = now.saturating_sub(*last);
+    *last = now;
+    delta
 }
 
 /// Samples this region holds that the consumer has not taken.
@@ -536,10 +551,12 @@ mod tests {
         assert_eq!(seen[0].kind(), Some(SampleKind::Span));
         assert!(push(Region::User, span(7, 999, 1)), "a drained region has room again");
 
-        // `take_overflow` clears exactly what it observed.
-        assert_eq!(take_overflow(LANE_B, Region::User), 1);
-        assert_eq!(overflow(LANE_B, Region::User), 0, "the clear must actually clear");
-        assert_eq!(take_overflow(LANE_B, Region::User), 0);
+        // The counter is MONOTONE and the delta lives at the consumer: a second read of the same
+        // total yields 0 without anything having been cleared.
+        let mut seen_loss = 0u64;
+        assert_eq!(overflow_since(LANE_B, Region::User, &mut seen_loss), 1);
+        assert_eq!(overflow_since(LANE_B, Region::User, &mut seen_loss), 0);
+        assert_eq!(overflow(LANE_B, Region::User), 1, "the total must NOT have been cleared");
 
         core::mem::forget(engine);
         core::mem::forget(user);
