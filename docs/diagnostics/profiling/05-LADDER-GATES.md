@@ -136,7 +136,7 @@ flag-off legs on the logging side and by GJ1's control leg here.
 | **2** | `boyko_ecs::…::profiling`: `VmReservation`-backed store with an arm-time `zone_stride`, `fold.rs` (two regions, monotone-overflow delta, clock-epoch check, bidirectional walk), `arm`/`disarm`, `ProfilerPlugin`, world-bind check. **Requires `boyko_log` L3.** Flips the `W92xx` registry rows it emits from `Pending` to `Live` with their doc pages | **G4b (the `u64` accumulator + the consumer-side delta, = logging's G11), G21, G23a (`section_report{LANES, REGISTRY}` — the two statics that exist here)** | additive |
 | **3** *(**COMPLETE** — **3a** the field, the mint, `W9201`/`W9208`; **3b** the `App` zones; **3c** the per-system spans; **3d** the analysis half)* | `SystemMeta.zone` + const-assert; tier-gated minting at `try_build` with **non-terminal** refusal; the four `App` zones (`__frame`/`__events`/`__fixed_step`/`__main_run`) at `update_with_delta`; the dispatch-round pair `__round`/`__round_width` **in place of `RoundRecord`**; `intervals` + `ConcurrencyReport` under `profiling-analysis`, **without `compat` and without `sys_of`** — see "What rung 3d SHIPPED" below for all four departures and their arguments | **G8, G9, G11 (engine half)** | one field in tail padding; four zone sites |
 | **4** *(**SHIPPED**)* | RHI seam: three verbs + Vulkan impls + `ffi.rs` constants + `GPU_ZONE_QUERY_FLAGS` const-assert + Mock defaults and their pinning tests. **No consumer.** Plus `VkPhysicalDeviceHostQueryResetFeatures` (granular, for the VUID reason the descriptor-indexing struct already carries) and `DeviceCaps::host_query_reset` — see "What rung 4 SHIPPED" below | **G2a, G2c** | old readers untouched |
-| **5** *(lands in parts: **5a** shipped — the edge, `gpu_zone.rs`, the 2×2 label, **G2b**; **5b** `CommandWitness` + **G5**; **5c** the VB port, the serial A/B and **G10**)* | `boyko_rhi_vulkan → boyko_diag` edge; `gpu_zone.rs` + `CommandWitness` (`first_pair_of` **and** `stamp_positions`, behind `profiling-census`); VB brackets ported. **Serial A/B against the old collector** (never both armed in one frame — F17) | **G2b, G5, G10** | both collectors exist; every existing test still compiles and passes |
+| **5** *(lands in parts: **5a** shipped — the edge, `gpu_zone.rs`, the 2×2 label, **G2b**; **5b** shipped — `CommandWitness` behind `profiling-census` + **G5**; **5c** the VB port, the serial A/B and **G10**)* | `boyko_rhi_vulkan → boyko_diag` edge; `gpu_zone.rs` + `CommandWitness` (`first_pair_of` **and** `stamp_positions`, behind `profiling-census`); VB brackets ported. **Serial A/B against the old collector** (never both armed in one frame — F17) | **G2b, G5, G10** | both collectors exist; every existing test still compiles and passes |
 | **6** | gbuffer + SV0 ported; the R0 harness reads the new channel while the old one still exists | G10 extended to those passes | additive |
 | **7 (the single subtractive rung)** | Delete `gpu_timing.rs`, the runner harness bodies, the statistics helpers **and the four `VB-P1d`/`VB-P4` print sites** (`runner.rs:3089`, `:3096`, `:3121`, `:3137`) — **and migrate all six stdout consumers to the artifact in the same commit** (S1; list below) | the post-rung `rg` gate **plus the S1 stdout gate (G24)** | one commit, workspace green before and after |
 | **7b (NEW — S1)** | **Floor re-measurement on the artifact channel.** Re-run A6's protocol (7 processes × 3 repetitions) reading the artifact instead of stdout; publish `docs/PROFILING-FLOOR.md` with the new `WorkloadTag`, all three repetition floors, and `FLOOR_REDUCTION = Max` | **G3a's reduction RED** | needs rung 7's channel; blocks nothing but *licenses* rung 8's verdicts |
@@ -582,6 +582,37 @@ be the recorder's own line, not the interior of an RHI verb — routing it throu
 would put the command and its witness on opposite sides of a call boundary.
 
 Golden `grand_showcase` byte-identical: the module records nothing yet.
+
+### What rung 5b SHIPPED — and G5's disarmed clause needed a control the corpus does not state
+
+`crates/boyko_rhi_vulkan/src/present/command_witness.rs`, behind `feature = "profiling-census"`
+(**default off**): `profiling_cmds` / `query_resets` / `timestamps` / `recorded_pairs`,
+`zone_open_order` (the record-order witness) and `stamp_positions` (the vocabulary-free cross-leg
+witness rung 5c compares). Every counter is incremented **at the `vkCmd*` call site** and never
+derived from the arming predicate — a counter derived from the predicate agrees with the predicate
+by construction, which is the tautology `VbRecordProbe`'s own header names.
+
+**The disarmed clause, as written, is satisfied by a dead instrument.** *"`profiling_cmds == 0` and
+every sub-counter 0"* is equally true of a witness that was never threaded through anything — the
+vacuous-green shape this campaign keeps finding, and the same defect class as G14's missing dev-leg
+control. The gate therefore also asserts **`stream_pos > 0`** on the disarmed leg: the witness saw
+the frame's ordinary commands and reported no profiling ones, which is a different statement from
+"the witness saw nothing". Its own RED — deleting the `witness.command()` call from the scene loop
+— fires with exactly that message.
+
+**Three REDs, run.** (a) record one profiling command on the disarmed path ⇒ *"a disarmed frame
+recorded a profiling command"*. (b) drop one real bracket ⇒ the `recorded_pairs ==
+declared_bracket_count` equality fails. (c) stop threading the witness ⇒ the positive control fires.
+Measured figures from the green run: disarmed `stream_pos = 12, profiling_cmds = 0`; armed
+`pairs = 3, profiling_cmds = 7` (one reset + six stamps) with `stamp_positions =
+[1, 6, 7, 12, 13, 18]` — each bracket spanning exactly the five commands recorded inside it, which
+is the property that makes a bracket shifted by ONE command visible as a shifted position.
+
+**One design change fell out of writing the gate.** `record_reset` took `&mut self` (only to clear
+`needs_cmd_reset`) while every other recording verb takes `&self` — so a caller holding the recorder
+shared for a frame's recording could not call it at the frame top, which is the one place it
+belongs. `needs_cmd_reset` is now an `AtomicBool` and the verb is `&self` like its siblings. The
+gate found it by being the first caller to record a whole frame through one shared borrow.
 
 ### Two rung-3b decisions
 

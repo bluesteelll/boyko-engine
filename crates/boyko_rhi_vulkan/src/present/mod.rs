@@ -37,6 +37,10 @@ use crate::ffi::{
 };
 
 mod frame_driver;
+// Profiling rung 5b -- the command census. Behind `profiling-census` because its stream counter
+// perturbs every recorder it is threaded through.
+#[cfg(feature = "profiling-census")]
+pub mod command_witness;
 pub mod gpu_timing;
 // Profiling rung 5a — the GPU zone recorder that replaces `gpu_timing`'s three collectors.
 pub mod gpu_zone;

@@ -57,7 +57,7 @@
 //! indistinguishable from a measurement of zero.
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicU16, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 
 use boyko_rhi::{RhiDevice, TimestampStage};
 
@@ -238,7 +238,13 @@ struct FrameSlot {
     /// Set when the slot retired without a host query reset, so its pool still holds the previous
     /// frame's results. Slot recycling refuses this slot until an armed frame records a
     /// `vkCmdResetQueryPool` for it.
-    needs_cmd_reset: bool,
+    ///
+    /// Atomic for one reason: **every recording verb takes `&self`**, because recording mutates GPU
+    /// query memory rather than this struct, and the reset is a recording verb like the others. A
+    /// `bool` here would have made `record_reset` the single `&mut self` exception, and a caller
+    /// that holds the recorder shared for a frame's recording could not then call it at the frame
+    /// top — which is the one place it belongs.
+    needs_cmd_reset: AtomicBool,
     /// Whether this slot is recording or awaiting retire.
     in_flight: bool,
 }
@@ -254,7 +260,7 @@ impl FrameSlot {
             submit_epoch: 0,
             record_frame: 0,
             grace: RETIRE_GRACE_FRAMES,
-            needs_cmd_reset: false,
+            needs_cmd_reset: AtomicBool::new(false),
             in_flight: false,
         }
     }
@@ -314,7 +320,7 @@ impl GpuZoneRecorder {
     /// Whether `slot`'s pool still needs a recorded reset before it can be reused.
     #[must_use]
     pub fn needs_cmd_reset(&self, slot: usize) -> bool {
-        self.slots[slot].needs_cmd_reset
+        self.slots[slot].needs_cmd_reset.load(Ordering::Relaxed)
     }
 
     /// Claim a slot for `frame`, or `None` when every slot is still in flight.
@@ -330,7 +336,7 @@ impl GpuZoneRecorder {
     ) -> Option<usize> {
         for step in 0..GPU_RING_DEPTH {
             let idx = (self.next + step) % GPU_RING_DEPTH;
-            if self.slots[idx].in_flight || self.slots[idx].needs_cmd_reset {
+            if self.slots[idx].in_flight || self.needs_cmd_reset(idx) {
                 continue;
             }
             let slot = &mut self.slots[idx];
@@ -383,7 +389,7 @@ impl GpuZoneRecorder {
     /// `cmd` must be a live command buffer in the recording state, outside any render or
     /// dynamic-rendering scope (`VUID-vkCmdResetQueryPool-renderpass`), and `fns` must be this
     /// device's function table.
-    pub unsafe fn record_reset(&mut self, fns: &DeviceFns, cmd: VkCommandBuffer, slot: usize) {
+    pub unsafe fn record_reset(&self, fns: &DeviceFns, cmd: VkCommandBuffer, slot: usize) {
         let pool = &self.pools[slot];
         // SAFETY: the caller's contract, plus `pool.pool` is a live pool of `QUERIES_PER_SLOT`
         //   queries created on this device.
@@ -392,7 +398,7 @@ impl GpuZoneRecorder {
         }
         // The recorded reset is what clears the fallback flag: after this command executes the
         // pool is clean, so the slot may be claimed again.
-        self.slots[slot].needs_cmd_reset = false;
+        self.slots[slot].needs_cmd_reset.store(false, Ordering::Relaxed);
     }
 
     /// Record `pair`'s BEGIN stamp and witness it.
@@ -637,12 +643,12 @@ impl GpuZoneRecorder {
         if device.host_query_reset_supported()
             && device.reset_query_pool_host(&self.pools[idx], 0, QUERIES_PER_SLOT).is_ok()
         {
-            self.slots[idx].needs_cmd_reset = false;
+            self.slots[idx].needs_cmd_reset.store(false, Ordering::Relaxed);
         } else {
             // The fully specified fallback: the slot is unavailable until an armed frame records a
             // `vkCmdResetQueryPool` for it. With `GPU_RING_DEPTH > FRAMES_IN_FLIGHT` there is
             // always a clean slot, so this costs one frame of recycle latency and never a stall.
-            self.slots[idx].needs_cmd_reset = true;
+            self.slots[idx].needs_cmd_reset.store(true, Ordering::Relaxed);
         }
     }
 
