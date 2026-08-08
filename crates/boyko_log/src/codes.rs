@@ -338,6 +338,26 @@ impl Default for OnceSite {
 // space is claimed before that subsystem's rungs need it. Measured first: the `9xxx` band is
 // already occupied by `B9001`/`B9002`/`B9004`/`B9005`/`B9101`, but `92xx` itself is free in
 // source -- zero `92xx` literals under `crates/` or `src/`.
+//
+// THE EIGHTEEN SUMMARIES BELOW WERE INVENTED ONCE AND ARE REPAIRED HERE (profiling rung 2).
+// L2 reserved the block correctly and then wrote eighteen plausible sentences from the code
+// numbers, which is the defect check 4's own message names -- "inventing a summary here is how
+// three rows of this registry came to disagree with the messages the engine prints" -- committed
+// at six times that scale, in the one place no check could see it: a `Pending` row owes no doc
+// page (check 2) and no emitter (check 3a), so nothing compared the sentence against anything.
+//
+// The direction of the repair is not a judgement call. `W9207` is pinned as INVARIANT TSC ABSENT
+// in five documents (`docs/diagnostics/SEAM.md:179`, both plan files, `logging/02-SINK-LIFECYCLE.md`
+// and `logging/05-LADDER-GATES.md`), and logging's own `W0101` was STRUCK in its favour -- so the
+// invented "a GPU query pool returned fewer results than were issued" would have left the engine's
+// only invariant-TSC code naming something else while the condition it was struck for had no code
+// at all. `9213` is `E9213` in the corpus (six mentions, four files) and was seeded `W9213`.
+// Against that, the eighteen rows had zero readers. Repairing them is strictly smaller than
+// repairing the corpus, and the summaries below are now the corpus's own conditions
+// (`docs/diagnostics/profiling/05-LADDER-GATES.md` §Integration), not sentences composed here.
+//
+// The `Pending(<rung>)` annotations were repaired with them, for the same reason: they named the
+// rungs of the invented conditions.
 codes! {
     (2,    B, B0002, RatePolicy::Every, CodeStatus::Pending("L6"),
         "Intra-system access conflict on one resource"),
@@ -363,47 +383,48 @@ codes! {
     (9101, B, B9101, RatePolicy::Every, CodeStatus::Pending("L6"),
         "Schedule::run was called with a different world than the one it was built on"),
 
-    (9201, W, W9201, RatePolicy::Once,  CodeStatus::Pending("profiling 1"),
-        "A profiling zone was opened on a thread holding no lane"),
-    (9202, W, W9202, RatePolicy::Once,  CodeStatus::Pending("profiling 1"),
-        "A profiling zone was closed that was never opened"),
-    (9203, W, W9203, RatePolicy::Once,  CodeStatus::Pending("profiling 1"),
-        "A profiling lane overflowed and samples were discarded"),
+    (9201, W, W9201, RatePolicy::Once,  CodeStatus::Pending("profiling 3"),
+        "The engine zone registry is exhausted; further zones run unregistered"),
+    (9202, W, W9202, RatePolicy::Once,  CodeStatus::Pending("profiling 5"),
+        "The GPU timestamp pair budget is exhausted; further brackets are unrecorded"),
+    (9203, W, W9203, RatePolicy::Once,  CodeStatus::Pending("profiling 2"),
+        "A profiling lane region overflowed, or a sample had no lane to be charged to"),
     // Class `E`, not `W`, and the difference is load-bearing rather than cosmetic: the profiling
     // corpus writes this one as the literal `boyko-E9204`, and check 1 forbids two rows sharing a
     // number EVEN ACROSS CLASSES, because the table is dense with `index == code_idx`. A `W9204`
     // row beside that literal would be both undeclared (check 4) and un-addable (check 1). The
-    // ladder's shorthand says "W9201..W9218"; the literal that actually exists wins.
-    (9204, E, E9204, RatePolicy::Once,  CodeStatus::Pending("profiling 5"),
-        "The profiler was bound to a second world"),
-    (9205, W, W9205, RatePolicy::Once,  CodeStatus::Pending("profiling 2"),
-        "A profiling fold observed a clock epoch break and quarantined its window"),
-    (9206, W, W9206, RatePolicy::Once,  CodeStatus::Pending("profiling 2"),
-        "A profiling window closed with no samples in it"),
-    (9207, W, W9207, RatePolicy::Once,  CodeStatus::Pending("profiling 4"),
-        "A GPU timestamp query pool returned fewer results than were issued"),
-    (9208, W, W9208, RatePolicy::Once,  CodeStatus::Pending("profiling 4"),
-        "A GPU timestamp was rejected because the device reported a zero period"),
-    (9209, W, W9209, RatePolicy::Once,  CodeStatus::Pending("profiling 4"),
-        "A GPU zone was closed on a different command buffer than it was opened on"),
+    // ladder's shorthand says "W9201..W9218"; the literal that actually exists wins. `9213` is the
+    // other row where the shorthand and the corpus disagree, and it resolves the same way.
+    (9204, E, E9204, RatePolicy::Once,  CodeStatus::Pending("profiling 2"),
+        "The profiler is already bound to another world"),
+    (9205, W, W9205, RatePolicy::Once,  CodeStatus::Pending("profiling 8"),
+        "Zones were lost in this window"),
+    (9206, W, W9206, RatePolicy::Once,  CodeStatus::Pending("profiling 8"),
+        "A contrast could not be resolved"),
+    (9207, W, W9207, RatePolicy::Once,  CodeStatus::Pending("profiling 2"),
+        "The CPU advertises no invariant TSC, so tick magnitudes are not trustworthy"),
+    (9208, W, W9208, RatePolicy::Once,  CodeStatus::Pending("profiling 3"),
+        "The engine zone registry is at or past 90 % occupancy"),
+    (9209, W, W9209, RatePolicy::Once,  CodeStatus::Pending("profiling 2"),
+        "Samples arrived after their frame had left the retained window and were dropped"),
     (9210, W, W9210, RatePolicy::Once,  CodeStatus::Pending("profiling 10"),
-        "A dynamic zone name was truncated to fit the name arena"),
-    (9211, W, W9211, RatePolicy::Once,  CodeStatus::Pending("profiling 10"),
-        "The declared user zone budget exceeds the profile's recommended maximum"),
+        "The user zone budget or the dynamic name arena is exhausted"),
+    (9211, W, W9211, RatePolicy::Once,  CodeStatus::Pending("profiling 2"),
+        "The fold's working set exceeds L1d because the zone stride is too large"),
     (9212, W, W9212, RatePolicy::Once,  CodeStatus::Pending("profiling 10"),
-        "The dynamic zone registry is full and further zones are unnamed"),
-    (9213, W, W9213, RatePolicy::Once,  CodeStatus::Pending("profiling 11"),
-        "A retention tier dropped a window before it was read"),
-    (9214, W, W9214, RatePolicy::Once,  CodeStatus::Pending("profiling 12"),
-        "A telemetry window was written while the previous write had not completed"),
-    (9215, W, W9215, RatePolicy::Once,  CodeStatus::Pending("profiling 12"),
-        "A telemetry destination refused a write and the window was dropped"),
-    (9216, W, W9216, RatePolicy::Once,  CodeStatus::Pending("profiling 3"),
-        "A statistics query was asked for a band it has no samples for"),
-    (9217, W, W9217, RatePolicy::Once,  CodeStatus::Pending("profiling 3"),
-        "A contrast query compared two windows taken under different configurations"),
+        "register_zone refused a dynamic zone that asked for an engine scope"),
+    (9213, E, E9213, RatePolicy::Once,  CodeStatus::Pending("profiling 2"),
+        "The profiler was re-armed with a different geometry than the live one"),
+    (9214, W, W9214, RatePolicy::Once,  CodeStatus::Pending("profiling 13"),
+        "The telemetry path is unwritable, so streaming is off for this session"),
+    (9215, W, W9215, RatePolicy::Once,  CodeStatus::Pending("profiling 13"),
+        "A telemetry write failed and streaming was disabled"),
+    (9216, W, W9216, RatePolicy::Once,  CodeStatus::Pending("profiling 2"),
+        "The clock's epoch broke; the in-flight window was discarded and the clock recalibrated"),
+    (9217, W, W9217, RatePolicy::Once,  CodeStatus::Pending("profiling 5"),
+        "GPU timestamp slots were still in flight at teardown and were abandoned"),
     (9218, W, W9218, RatePolicy::Once,  CodeStatus::Pending("profiling 13"),
-        "A profiling scope entity was despawned while its zone was still open"),
+        "A telemetry quantile subscription was refused past the per-session cap"),
 }
 
 #[cfg(test)]

@@ -14,6 +14,53 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-08 — The whole `92xx` code block described the wrong eighteen conditions. Repaired; recorded because of HOW it hid.
+
+**Recorded, not asked.** The repair direction was not a judgement call and it is already committed.
+What belongs here is the mechanism, because it is a hole in this project's own gate design and it
+will recur.
+
+**What was wrong.** L2 reserved eighteen `92xx` rows for the profiler — correctly, and for a good
+reason — and then wrote eighteen plausible summaries composed from the code *numbers*. Sixteen of
+them name conditions the profiling corpus does not have. `W9207` is the sharpest case: the corpus
+pins it as **invariant TSC absent** in five documents, and logging's own `W0101` was **struck in its
+favour**, so the invented summary ("a GPU query pool returned fewer results than were issued") left
+the engine's only invariant-TSC code naming something else while the condition it was struck for had
+no code at all. `9213` is `E9213` in the corpus (six mentions, four files) and was seeded `W9213`.
+
+**Why nothing caught it, and this is the part worth keeping.** The registry has seven checks and all
+seven were green. A `Pending` row owes **no doc page** (check 2 is `Live`-only) and **no emitter**
+(check 3a is `Live`-only) — both narrowings are correct on their own terms, and L2 argued for them
+in writing: *"otherwise L2 would owe eighteen pages for codes with no emitters, which is doc-rot
+manufactured by a gate."* That reasoning is still right. But the two narrowings together mean a
+`Pending` row's summary is compared against **nothing**, by construction — and the registry's own
+check-4 message already names this defect class: *"inventing a summary here is how three rows of
+this registry came to disagree with the messages the engine prints."* The registry documented the
+failure mode, then shipped it at six times the scale, in the one status where no check could look.
+
+**The generalisation, which is not repaired and is the reason this is written down.** A `Pending`
+row is a **promise with no gate on its content**. Today the only thing that will ever check a `92xx`
+summary is the rung that flips it `Live`, i.e. between one and fourteen rungs from now. Rung 2 flips
+seven of them and reads the other eleven; the remaining eleven are still un-compared, and if a later
+rung flips one without re-reading the corpus, the invented sentence ships.
+
+**Two ways to close it, neither taken here** (both are bigger than rung 2 and one is a VALUES call):
+
+* **(a) A check that pins every row's summary against the corpus.** Mechanically: for each `92xx`
+  row, require its condition text to appear in `docs/diagnostics/profiling/05-LADDER-GATES.md`'s
+  §Integration list. Cheap, and it would have caught all sixteen. Cost: it couples the registry's
+  wording to a document's wording, which is a second statement of one fact — the exact shape this
+  corpus deletes elsewhere.
+* **(b) Do not seed summaries at all** — a `Pending` row carries the rung and an empty summary, and
+  the summary is written when the emitter is. Structurally correct, and it is what
+  `FORWARD_DECLARED` already does for the seventeen logging codes. Cost: `explain()` returns nothing
+  useful for a `Pending` code, which is a real loss for anyone reading a corpus document today.
+
+**Blocks nothing.** Rung 2 landed with the summaries repaired and seven rows flipped `Live` with
+their pages. The other eleven are correct as of this commit and un-gated after it.
+
+---
+
 ## 2026-08-08 — L5 shipped, and it weakened a specified latency bound. No decision needed unless you want it back.
 
 **Recorded, not asked.** This is an architecture fork I decided with the tree in front of me; it is
