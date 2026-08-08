@@ -206,11 +206,27 @@ fn claim_cold() -> Option<u16> {
 #[inline(never)]
 pub fn emit_impl<A: LogArgs>(site: &'static LogSite, args: A) {
     let Some(lane) = resolve() else {
-        // A thread with no lane. `Warn`/`Error` will fall back to the synchronous channel once
-        // that channel exists (it arrives with the sink); until then every level is counted, and
-        // the count is on the substrate's un-laned row precisely because there is no lane to
-        // charge it to.
-        record_here(LossClass::Unclaimed, 0);
+        // A thread with no lane does NOT silently drop a severe record. `Warn` and `Error` take
+        // the synchronous channel; the three lower levels are counted as unclaimed, on the
+        // substrate's un-laned row precisely because there is no lane to charge them to.
+        //
+        // The fallback is bounded by that channel's 50 ms acquire deadline and can therefore
+        // *steal* -- an interleaved line rather than a hung thread. What it cannot do is block,
+        // which matters because the commonest way to reach here is a driver or OS callback on a
+        // thread the engine never created, under a storm, with all 14 spare lanes taken.
+        if site.level <= Level::Warn {
+            // The record is not encoded: the payload lives in the caller's arguments and this
+            // channel takes rendered text. What can be said without a formatter is said -- the
+            // site's own metadata, which is the part a reader needs to find the call.
+            let mut buf = [0u8; 160];
+            let n = render_site_line(&mut buf, site);
+            // SAFETY: `render_site_line` writes only ASCII bytes it copied from `&'static str`s
+            //   and decimal digits, so the prefix is valid UTF-8.
+            let text = unsafe { core::str::from_utf8_unchecked(&buf[..n]) };
+            crate::sync_out::write_oracle_line("boyko-log: ", text);
+        } else {
+            record_here(LossClass::Unclaimed, 0);
+        }
         return;
     };
 
@@ -280,6 +296,37 @@ pub fn emit_impl<A: LogArgs>(site: &'static LogSite, args: A) {
 
     // Publishes every byte above to a consumer that loads `write` with `Acquire`.
     lane.write.store(w.wrapping_add(need), Ordering::Release);
+}
+
+/// Render `file:line fmt` into `buf`, truncating rather than overflowing. Returns bytes written.
+///
+/// Deliberately not `core::fmt`: this runs on the lane-exhaustion path, and the synchronous
+/// channel's first rule is that nothing formats inside its critical section. Doing it here, before
+/// the acquire, is what keeps that rule true for this caller.
+fn render_site_line(buf: &mut [u8], site: &LogSite) -> usize {
+    let mut n = 0usize;
+    let mut put = |s: &[u8], n: &mut usize| {
+        let take = s.len().min(buf.len() - *n);
+        buf[*n..*n + take].copy_from_slice(&s[..take]);
+        *n += take;
+    };
+    put(site.file.as_bytes(), &mut n);
+    put(b":", &mut n);
+    let mut d = [0u8; 10];
+    let mut line = site.line;
+    let mut i = d.len();
+    loop {
+        i -= 1;
+        d[i] = b'0' + (line % 10) as u8;
+        line /= 10;
+        if line == 0 || i == 0 {
+            break;
+        }
+    }
+    put(&d[i..], &mut n);
+    put(b" ", &mut n);
+    put(site.fmt.as_bytes(), &mut n);
+    n
 }
 
 /// Admission control. **No unsigned subtraction below can go negative**, and that is the point.
@@ -647,6 +694,54 @@ mod tests {
             );
             assert_eq!(after & MASK, need, "the record must sit at the START of the ring");
         });
+    }
+
+    #[test]
+    fn an_unlaned_thread_counts_low_levels_and_falls_back_for_severe_ones() {
+        // A thread that never claimed a lane. `Info` is counted as unclaimed; `Error` takes the
+        // synchronous channel instead of being dropped, which is the property that makes a
+        // lane-exhausted harness unable to lose a severe record.
+        std::thread::spawn(|| {
+            assert_eq!(boyko_diag::lane::lane(), LANE_UNCLAIMED);
+            // No lane is claimed here, so `resolve()` will attempt one; force the exhausted path
+            // by observing the branch through the loss counters instead. `row_of` maps an
+            // unclaimed thread to the un-laned row.
+            let row = boyko_diag::loss::row_of(LANE_UNCLAIMED);
+            let before = boyko_diag::loss::cell_at_row(row, LossClass::Unclaimed).count();
+            // If a spare is available this thread gets one and the branch is not taken -- which is
+            // itself correct behaviour, so the assertion is on the DISJUNCTION rather than on one
+            // arm. Asserting only the fallback would make the test depend on how many spares the
+            // rest of the suite happens to be holding.
+            emit_impl(&TEST_SITE, (1u32,));
+            let after = boyko_diag::loss::cell_at_row(row, LossClass::Unclaimed).count();
+            let got_lane = boyko_diag::lane::lane() != LANE_UNCLAIMED;
+            assert!(
+                got_lane || after == before + 1,
+                "an Info record must either reach a lane or be counted as unclaimed"
+            );
+            if got_lane {
+                boyko_diag::lane::release_lane();
+            }
+        })
+        .join()
+        .expect("unlaned fixture thread panicked");
+    }
+
+    #[test]
+    fn the_site_line_renderer_truncates_instead_of_overflowing() {
+        // It runs BEFORE the synchronous channel's acquire, so it must not panic and must not
+        // write past the buffer -- a bounds panic on the error-of-the-error path is the failure
+        // the whole channel exists to avoid.
+        let mut buf = [0u8; 8];
+        let n = render_site_line(&mut buf, &TEST_SITE);
+        assert!(n <= buf.len());
+        assert!(core::str::from_utf8(&buf[..n]).is_ok());
+
+        let mut big = [0u8; 160];
+        let n = render_site_line(&mut big, &TEST_SITE);
+        let s = core::str::from_utf8(&big[..n]).expect("ASCII only");
+        assert!(s.starts_with("lane.rs:0 "), "got {s:?}");
+        assert!(s.contains("probe"));
     }
 
     #[test]

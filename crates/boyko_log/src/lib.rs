@@ -54,6 +54,7 @@ pub mod level;
 mod macros;
 pub mod record;
 pub mod site;
+pub mod sync_out;
 pub mod target;
 
 pub use codes::{
