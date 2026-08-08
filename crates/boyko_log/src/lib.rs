@@ -26,11 +26,15 @@
 //!
 //! # State of this crate
 //!
-//! **Rung L0.** What exists: [`Level`], [`LogTarget`], [`TargetId`], [`TargetControl`], the engine
-//! target table, the control array and its epoch counter, and the five macros with their full
-//! three-gate expansion. What does **not** exist yet: the record encoding, the lanes, the sink,
-//! and therefore any output at all. The enabled arm of every macro calls
-//! [`__l0_no_sink_yet`], which evaluates the arguments and drops them.
+//! **Rung L1.** What exists: [`Level`], [`LogTarget`], [`TargetId`], [`TargetControl`], the engine
+//! target table, the control array and its epoch counter, the five macros with their full
+//! three-gate expansion, the per-site `static`, the payload encoding ([`LogValue`], [`LogArgs`],
+//! [`dsp!`]), the per-lane SPSC ring and the producer path [`emit_impl`].
+//!
+//! What does **not** exist yet: a **consumer**. Nothing drains the rings, so a record is written,
+//! published, and then sits there until its lane wraps. Rate policies, sampling and the
+//! synchronous route are likewise later rungs; their steps are absent from the producer path
+//! rather than stubbed inside it.
 //!
 //! **Nothing here runs at process start.** The control array is `.bss`-zero, which already means
 //! "every target off"; no initialiser touches it, no clock is calibrated, no thread is spawned.
@@ -44,11 +48,17 @@
 #![deny(clippy::print_stdout)]
 #![deny(clippy::dbg_macro)]
 
+pub mod lane;
 pub mod level;
 mod macros;
+pub mod record;
+pub mod site;
 pub mod target;
 
+pub use lane::{LANE_ARRAY_LEN, emit_impl};
 pub use level::Level;
+pub use record::{DspBuf, LogArgs, LogValue, MAX_RECORD_BYTES, MAX_STR_BYTES, flags};
+pub use site::{LogFormatter, LogSite, decode_opaque};
 pub use target::{
     DYN_BAND_LEN, DYN_BAND_START, ENGINE_BAND_END, LogTarget, MAX_TARGETS, TargetControl, TargetId,
     control_epoch, runtime_ceiling, set_target_control, set_target_level, target_control,
@@ -75,19 +85,6 @@ pub use target::{
 /// - It is a `const` mapped by a `const fn` from a `const`, so it folds at every call site and
 ///   gate (b) is decided by the compiler.
 pub const GLOBAL_CEILING: Level = Level::from_raw(boyko_diag::profile::LOG_CEILING);
-
-/// Rung L0's stand-in for the emission path: evaluates the arguments, then drops them.
-///
-/// **This is not an API.** It exists so the macros' enabled arm has a body while there is no
-/// record encoding and no sink, and so the side-effect gates can observe that arguments *are*
-/// evaluated when the chain passes and are *not* when it does not. Rung L1 replaces every call
-/// with `emit_impl`, and this function is deleted in the same commit.
-///
-/// The name is deliberately unpleasant. A stub that reads like a finished call is a stub that
-/// ships.
-#[doc(hidden)]
-#[inline]
-pub fn __l0_no_sink_yet<A>(_fmt: &'static str, _args: A) {}
 
 #[cfg(test)]
 mod tests {

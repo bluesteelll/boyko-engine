@@ -117,6 +117,34 @@ subsystem present is not a baseline for the both-present configuration (S10).
    `ENGINE_ZONE_SLOTS`, `MAX_USER_BUDGET` and `DYN_NAME_BYTES` arrive with the rungs that read
    them, because a constant nothing reads is a value nothing can prove wrong.
 
+### Four L1 decisions taken at implementation
+
+1. **`LogArgs::args_flags()` is added.** The spec requires `STR_TRUNCATED` on the record header and
+   gives no mechanism: the header is written **before** `encode` runs, so a flag discovered during
+   encoding arrives too late. `args_flags()` is a second, pure pass over the arguments, run beside
+   `encoded_len()` and constant-folded to `0` for every all-POD tuple. Without it the flag could
+   only have been set by rewriting the header after the payload — a second write into a record the
+   consumer may already be walking.
+
+2. **`&str` truncation cuts on a CHARACTER boundary.** The spec says "capped at
+   `MAX_STR_BYTES = 256`". A byte-wise cut lands inside a multi-byte codepoint one time in ~three
+   and hands the sink invalid UTF-8 — corruption introduced by the logger, on the path that exists
+   to report corruption. `str::floor_char_boundary` is unstable, so the walk is in
+   `record.rs::str_fit` and is tested against a `€` straddling the cap.
+
+3. **`code` lives in the per-site `static`, not in the argument tuple.** It is a constant by
+   construction (the registry mints constants), so carrying it as an argument would evaluate and
+   encode it on every call for a value the sink can already read through the site pointer.
+
+4. **`LogSite::decode` is a single non-generic `decode_opaque` at this rung, and gate G5 moves with
+   the real decoder.** Two reasons, and the second is a language constraint rather than a choice:
+   rendering means interleaving values with the format literal's placeholders, which is the
+   **sink's** policy and the sink does not exist; and the per-argument-tuple instantiation cannot
+   be named at the `static`, because the site is `&'static` and **Rust has no generic statics**.
+   G5 counts distinct `decode` symbols — at this rung there is one by construction, so the census
+   could not go red and would be a gate that cannot fail. It lands with the sink, which is also
+   the first rung at which it can mean anything.
+
 Ordering constraints: **D0/D1 before L0**; L10 before L11a (a dynamic target is the first consumer
 of a downstream code); L12 after L1; L13b after L13a (rotation is shared); L15 after L13a (the
 crash sink shares the file machinery); L16 after L12 and L13a (`TargetStat` carries

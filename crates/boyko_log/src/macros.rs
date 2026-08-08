@@ -25,16 +25,42 @@
 //! entire reason the design keeps two axes instead of one, and why a shipped binary can still be
 //! asked for a log while a compile-only design cannot.
 //!
-//! # This rung has no sink
+//! # The per-site `static`
 //!
-//! The enabled arm calls [`__l0_no_sink_yet`](crate::__l0_no_sink_yet), which evaluates the
-//! arguments and discards them. It is deliberately unpleasant to read: rung L1 replaces it with
-//! `emit_impl`, and a stub that looked like a finished call is a stub that ships.
+//! Each expansion places one `static LogSite` beside the call. The record carries an 8-byte
+//! pointer to it instead of re-carrying file, line, format literal and code — and none of that
+//! data is touched on the emitting thread. `line!()` and `file!()` are expanded at the **call**
+//! site, which is why they are in the macro rather than in `emit_impl`.
+
+/// Build the per-site `static` and hand it to the producer path.
+///
+/// Internal. Kept as one macro so the five level macros cannot drift apart in the shape of the
+/// site they declare — the failure mode being a copy-paste that leaves one level's `class` byte
+/// or `fields` slice stale.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __log_site_emit {
+    ($lvl:expr, $T:ty, $class:expr, $code:expr, $fmt:literal $(, $a:expr)* $(,)?) => {{
+        static __BOYKO_LOG_SITE: $crate::LogSite = $crate::LogSite {
+            target: <$T as $crate::LogTarget>::ID,
+            level: $lvl,
+            class: $class,
+            code: $code,
+            line: ::core::line!(),
+            file: ::core::file!(),
+            fmt: $fmt,
+            fields: &[],
+            prefix: "boyko",
+            decode: $crate::decode_opaque,
+        };
+        $crate::emit_impl(&__BOYKO_LOG_SITE, ($($a,)*));
+    }};
+}
 
 /// `error!(Target, code, "fmt", args…)` — the caller could not do what was asked.
 ///
-/// Carries a diagnostic code; the code registry lands at a later rung, so at this one the code
-/// expression is evaluated and discarded like any other argument.
+/// `code` is placed in the per-site `static`, so it must be a constant expression. It is
+/// therefore **not** an argument and is not evaluated per call.
 #[macro_export]
 macro_rules! error {
     ($T:ty, $code:expr, $fmt:literal $(, $a:expr)* $(,)?) => {
@@ -43,7 +69,9 @@ macro_rules! error {
             && $crate::runtime_ceiling(<$T as $crate::LogTarget>::ID)
                 >= $crate::Level::Error as u8
         {
-            $crate::__l0_no_sink_yet($fmt, ($code, $($a,)*));
+            $crate::__log_site_emit!(
+                $crate::Level::Error, $T, b'E', $code, $fmt $(, $a)*
+            );
         }
     };
 }
@@ -58,7 +86,9 @@ macro_rules! warn {
             && $crate::runtime_ceiling(<$T as $crate::LogTarget>::ID)
                 >= $crate::Level::Warn as u8
         {
-            $crate::__l0_no_sink_yet($fmt, ($code, $($a,)*));
+            $crate::__log_site_emit!(
+                $crate::Level::Warn, $T, b'W', $code, $fmt $(, $a)*
+            );
         }
     };
 }
@@ -72,7 +102,7 @@ macro_rules! info {
             && $crate::runtime_ceiling(<$T as $crate::LogTarget>::ID)
                 >= $crate::Level::Info as u8
         {
-            $crate::__l0_no_sink_yet($fmt, ($($a,)*));
+            $crate::__log_site_emit!($crate::Level::Info, $T, 0u8, 0u16, $fmt $(, $a)*);
         }
     };
 }
@@ -86,7 +116,7 @@ macro_rules! debug {
             && $crate::runtime_ceiling(<$T as $crate::LogTarget>::ID)
                 >= $crate::Level::Debug as u8
         {
-            $crate::__l0_no_sink_yet($fmt, ($($a,)*));
+            $crate::__log_site_emit!($crate::Level::Debug, $T, 0u8, 0u16, $fmt $(, $a)*);
         }
     };
 }
@@ -101,7 +131,7 @@ macro_rules! trace {
             && $crate::runtime_ceiling(<$T as $crate::LogTarget>::ID)
                 >= $crate::Level::Trace as u8
         {
-            $crate::__l0_no_sink_yet($fmt, ($($a,)*));
+            $crate::__log_site_emit!($crate::Level::Trace, $T, 0u8, 0u16, $fmt $(, $a)*);
         }
     };
 }
