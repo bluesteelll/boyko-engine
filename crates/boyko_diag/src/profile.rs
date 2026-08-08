@@ -65,6 +65,20 @@
 /// cost — a runtime flag has to be read in order to be a flag.
 pub const LOG_CEILING: u8 = 5;
 
+/// The profiling tier ceiling for this build, as a raw [`u8`].
+///
+/// `0 = Always, 1 = Dev, 2 = Deep` — the numbering is [`crate::profiling_abi::ZoneTier`]'s, and it
+/// is defined one layer up for the same reason [`LOG_CEILING`] is a `u8`: this module holds
+/// integers, not the consumers' taxonomies. **2 is the `dev` profile's row.**
+///
+/// A zone whose declared tier exceeds this value is deleted **codegen-wise**: the gate is
+/// `const { $h::TIER as u8 <= GLOBAL_TIER as u8 } && …`, and a `const false` in an `&&` chain
+/// removes the arm. Note the asymmetry with the logging ceiling, which matters to anyone reasoning
+/// about typos: the tier fold deletes *codegen*, not *tokens* — the expansion still names its
+/// handle, twice — so a mistyped zone identifier is a hard `E0425` in **every** profile, retail
+/// included, not only in the one whose tier admits it.
+pub const PROFILING_TIER: u8 = 2;
+
 // NO assertion that this value is in range, and NO pin on the number itself. The two are refused
 // for different reasons, and the difference is the one worth keeping:
 //

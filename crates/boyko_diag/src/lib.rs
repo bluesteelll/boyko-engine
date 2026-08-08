@@ -55,4 +55,5 @@ pub mod clock;
 pub mod lane;
 pub mod loss;
 pub mod profile;
+pub mod profiling_abi;
 pub mod storage;
