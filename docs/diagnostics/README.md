@@ -184,10 +184,11 @@ Three blockers travel with specific files and **must not be softened**:
   ⚠️ **It opened a new one, propagated at D1: the shipping budget.** Four cells across the two
   plans were sized by the deleted 32 — profiling's `LANES` and sample slab, logging's `LOG_LANES`
   and `SAMPLE_CTR` — so the retail figures moved 908.2 → **1 208.2 KiB** (profiler) and
-  1 220.26 → **2 012.26 KiB** (logger), joint 2.08 → **3.15 MiB**. **The profiler's "≤ 1 MiB
-  retail" headline is retracted, and G23a/G23b have no green state until the owner answers.**
-  Only 288 KiB of the increase is committed memory (the sample slab); the rest is reserved extent.
-  *(`docs/OPEN-QUESTIONS.md`, 2026-08-08.)*
+  1 220.26 → **2 012.26 KiB** (logger), joint 2.08 → **3.15 MiB**. ✅ **RESOLVED 2026-08-08 — the
+  owner raised the profiler's shipping budget from 1 024 to 1 280 KiB; no source changed and
+  G23a/G23b are unblocked.** The number that alarmed everyone measured a *reservation*: the row is
+  1 208.2 KiB declared, ≈ 1 142 KiB committed **only when diagnostics are armed**, and **≈ 0
+  resident with the flag off** — which is the shipped default. *(`docs/OPEN-QUESTIONS.md`.)*
 - ~~**`fold_into`'s lost-update window is not closed by `fetch_sub`**~~ — **RESOLVED: (b), the
   monotone counter.** The cell is never cleared; each consumer folds `cur.wrapping_sub(last_seen)`
   from its own 5 KiB of `last_seen`. Exactness follows from the shape of the datum rather than

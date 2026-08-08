@@ -14,6 +14,36 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## RESOLVED 2026-08-08 — the owner chose (b): raise the budget. Q1 stands, no code changes.
+
+**Decision:** accept the footprint and raise the gate's shipping budget from **1024 KiB to
+1280 KiB**. `LANE_COUNT` stays 80 in every profile; `REGION_CAPACITY` stays 128; D15 keeps
+committing the sample slab at first `arm`. **No source change of any kind.**
+
+**Why it is the right call, in the owner's own framing.** The alarming number measured a
+*reservation*, not what a machine holds. The row is now printed in three columns instead of one
+that conflated them:
+
+| Column | Shipping profiler | Meaning |
+|---|---|---|
+| declared / reserved | **1 208.2 KiB** | address space; free in any practical sense on 64-bit |
+| committed at `arm` | **≈ 1 142 KiB** | the reservation, taken when diagnostics are turned **on** |
+| resident, flag off | **≈ 0** | nothing armed, no lane claimed, no `.bss` page touched |
+
+The owner asked whether this costs runtime or RAM. It costs neither in the shipped default: with
+the flags off a site pays **one `.bss` byte load and one predicted branch**, and above the compile
+ceiling it pays nothing at all — the site and its argument expressions are deleted. That per-site
+floor is the only thing a runtime flag cannot remove, and no budget choice touches it.
+
+**Consequences applied:** `G23a` and `G23b` are **unblocked** — they assert against 1280 KiB and
+have a reachable green state again. Options (d) `REGION_CAPACITY = 64` and (a) per-lane lazy commit
+are **retained below as levers**, not as work: pull one only if a measurement later says the
+*committed* figure is too high.
+
+*(Original entry follows, unedited — the record of why the call was made outlives the call.)*
+
+---
+
 ## 2026-08-08 — ⚠️ Q1 raised the shipping diagnostics footprint by 1.07 MiB, and the profiler's "≤ 1 MiB retail" headline is now FALSE
 
 **This supersedes the ≈ 2.08 MiB figure in the round-3 entry below.** The correct joint figure is

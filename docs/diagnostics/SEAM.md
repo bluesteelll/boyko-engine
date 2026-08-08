@@ -729,8 +729,10 @@ in every profile — it has no profile-sized table) is attributed to its row **e
 the two subsystems' rows, and double-counting them would **manufacture a footprint regression out
 of a move**.
 
-**The ≈ 3.15 MiB retail figure against the profiling plan's "≤ 1 MiB retail" headline is an
-owner-facing VALUES question**, recorded in §*Open — needs the OWNER* below. **Every correction so
+**The ≈ 3.15 MiB retail figure was an owner-facing VALUES question and is now ANSWERED**
+(2026-08-08, §*Open — needs the OWNER* below): the profiler's budget rose to 1 280 KiB and no
+source changed, because the figure measures a **reservation** — ≈ 0 resident with the flag off,
+which is the shipped default. **Every correction so
 far has made that question larger, not smaller** — 1.95 → 2.04 → 2.08 → 3.15 — which is why the
 number is carried into the open call rather than left to be re-derived there. And the headline it
 is measured against is itself retracted: at 80 lanes the profiler alone is 1.18 MiB, so **"≤ 1 MiB
@@ -1001,7 +1003,24 @@ is **not lost — it is emitted at frame 1**.
 
 Collected here so neither plan can bury one in a disposition table.
 
-1. **VALUES — the shipping diagnostics budget is ≈ 3.15 MiB, not 1, and the "≤ 1 MiB" headline is
+1. ✅ **RESOLVED 2026-08-08 — the owner raised the profiler's shipping budget to 1 280 KiB. No
+   source changed; Q1 stands; G23a/G23b are unblocked.**
+
+   The decision and its reasoning: **the alarming number measured a reservation.** The row is
+   1 208.2 KiB *declared*, ≈ 1 142 KiB *committed only when armed*, and **≈ 0 resident with the
+   flag off**, which is the shipped default. A player who never asks for diagnostics pays one
+   `.bss` byte load and one predicted branch per surviving site — and nothing at all above the
+   compile ceiling, where the site and its operands are deleted. No budget choice touches that
+   floor, which is why the budget was the wrong thing to have been alarmed about.
+
+   Two cheaper-looking levers were **retained rather than pulled**: shipping `REGION_CAPACITY = 64`
+   (slab 480 → 240 KiB, costs sample depth under a burst) and per-lane lazy commit of the slab
+   (≈ 60 KiB for a ~10-lane title, costs a D15 edit, a hot-path branch, and a warm-up-dependent
+   `G23a`). Pull one only if a measurement says the *committed* column is too high.
+
+   *(The original statement of the question follows, unedited.)*
+
+   **VALUES — the shipping diagnostics budget is ≈ 3.15 MiB, not 1, and the "≤ 1 MiB" headline is
    now false for the profiler ALONE.** With `boyko_log` present the joint figure is **≈ 3.15 MiB**
    = 1.18 + 1.97, recomputed from the two halves. The profiler's own half is **1.18 MiB against its
    own ≤ 1 MiB target** — over by 184.2 KiB.
