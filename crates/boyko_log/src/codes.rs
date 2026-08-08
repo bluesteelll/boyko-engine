@@ -364,7 +364,12 @@ codes! {
         "A profiling zone was closed that was never opened"),
     (9203, W, W9203, RatePolicy::Once,  CodeStatus::Pending("profiling 1"),
         "A profiling lane overflowed and samples were discarded"),
-    (9204, W, W9204, RatePolicy::Once,  CodeStatus::Pending("profiling 5"),
+    // Class `E`, not `W`, and the difference is load-bearing rather than cosmetic: the profiling
+    // corpus writes this one as the literal `boyko-E9204`, and check 1 forbids two rows sharing a
+    // number EVEN ACROSS CLASSES, because the table is dense with `index == code_idx`. A `W9204`
+    // row beside that literal would be both undeclared (check 4) and un-addable (check 1). The
+    // ladder's shorthand says "W9201..W9218"; the literal that actually exists wins.
+    (9204, E, E9204, RatePolicy::Once,  CodeStatus::Pending("profiling 5"),
         "The profiler was bound to a second world"),
     (9205, W, W9205, RatePolicy::Once,  CodeStatus::Pending("profiling 2"),
         "A profiling fold observed a clock epoch break and quarantined its window"),
