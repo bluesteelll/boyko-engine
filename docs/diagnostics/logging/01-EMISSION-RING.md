@@ -173,7 +173,19 @@ holding — the pair that matters is (1 220.26 at 32 lanes) and (2 012.26 at 80)
 - The producer caches the opposite cursor. The one published measurement on this question found padding **alone** made a ring *slower* — both threads still read the opposite cursor every operation — and only opposite-cursor caching *plus* padding moved throughput from ~32 to ~440 M ops·s⁻¹. We do both and treat padding as a hypothesis with an ablation bench, matching this repo's own `reference-componentpool-cache-stagger` lesson.
 - Records are POD with no `Drop` and the array is a `static` that never moves, so a retired-undrained lane leaks nothing — which is why reclaim can be lazy and consumer-driven.
 
-**Retire/reclaim, restated against the new owner.** `boyko_diag::release_lane()` marks the substrate's slot `RETIRING`; the consumer, per drain, reads `boyko_diag::lane_state(i)` and calls `boyko_diag::reclaim(i)` only after observing `RETIRING && read == write` for `LOG_LANES[i]`. The ordering argument is unchanged — the producer's last write precedes `release_lane()`, and the reclaim follows a drain to `write` — but the **state now lives in one place**, so the profiler cannot hand the same index to a new thread while this crate still believes it is live.
+**Retire/reclaim: ⚠️ this paragraph specifies an API the substrate deliberately does not have, and after analysis it should NOT be built.** It read: *"`release_lane()` marks the substrate's slot `RETIRING`; the consumer, per drain, reads `lane_state(i)` and calls `reclaim(i)` only after observing `RETIRING && read == write`."* `RETIRING`, `lane_state` and `reclaim` appear **nowhere** in `substrate/lane-registry` and nowhere in the shipped D0 code: `release_lane` clears the TLS slot and then publishes the spare `FREE` immediately, with one `Release` store.
+
+**Why immediate reuse is nevertheless sound here, argued rather than assumed.** The delay existed to stop a new thread taking an index whose ring still holds undrained bytes. Five facts remove the need:
+
+1. **No overlap of producers.** `release_lane`'s `Release` store is ordered after the retiring owner's last ring write, and no claimant can observe `FREE` before that store. There is never an instant with two live producers on one index.
+2. **The handover is synchronised.** `claim_lane`'s `Acquire` on success pairs with that `Release`. The substrate already states this pairing for the loss cells; it covers the ring bytes and cursors verbatim, because it is a synchronizes-with edge over *everything* the retiring owner did.
+3. **The ring is a fixed `static` that never moves and records are POD with no `Drop`.** An undrained record is not a dangling anything — Decision 4's own second bullet says so. There is nothing to *reclaim*.
+4. **A new owner appends rather than resets.** Cursors live in `LogLane`, not in the thread; the new owner loads `w` and continues. `read_cached ≤ read ≤ w` survives the handover because `read` only advances, so Decision 5's induction is untouched.
+5. **The monotone loss counters (Q2) make a change of owner invisible to the fold.** The consumer folds `cur.wrapping_sub(last_seen)` and never clears, so a cell whose writer changed mid-window still yields the exact increment.
+
+**What the `RETIRING` design would have bought is therefore nothing**, and what it would have cost is a three-state protocol and two new public functions **in the bottom crate whose entire value is that it is small** — refused by its own growth rule. The paragraph is retained in this struck form rather than deleted because an implementer meeting `boyko_diag::reclaim` in `Algorithm B` below must find out here that it does not exist and why, instead of adding it. The SAFETY clause 4 on `LogLane` and Algorithm B are re-cut to match.
+
+**What is NOT claimed:** that a *consumer* can tell a retired lane from an idle one. It cannot, and it does not need to — it drains every lane every pass, and an idle lane costs one `Acquire` load of `write`.
 
 **`load`-then-CAS survives, in `boyko_diag`** (M10): the claim path is `if slot.load(Relaxed) == FREE { try CAS }` over the 14 spares. An unconditional `compare_exchange` over the array takes every occupied slot's line exclusive — the exact defect this repo already fixed at `crates/boyko_rhi_vulkan/src/present/passes/gbuffer.rs:36-51` ("load first, store once"; verified this session — `WARNED.load(Relaxed)` at `:41`, `WARNED.store(true, Relaxed)` at `:44`, inside a `#[cold] #[inline(never)]` helper). The `hash(thread_id)` spread is gone with the scan; its cost is bounded and stated in Decision 3.
 
@@ -587,20 +599,26 @@ const _: () = assert!(core::mem::offset_of!(LogLane, loss) == 128,
 //      visible to a thread observing that value via `Acquire`. The consumer
 //      never reads past its observed `w`, AND never advances `read` over bytes
 //      it has not yet copied out (Algorithms C).
-//   4. Retire: `boyko_diag::release_lane()` marks the SUBSTRATE's slot
-//      RETIRING, on the producer thread, after its last write. The consumer
-//      calls `boyko_diag::reclaim(i)` only after observing RETIRING and
-//      `read == write` for THIS lane, so no producer write can follow a
-//      reclaim. The state lives in one place, so the profiler cannot reissue
-//      the index while this crate still holds undrained bytes.
+//   4. Retire: `boyko_diag::release_lane()` publishes the substrate's spare
+//      slot FREE with a `Release` store, on the producer thread, AFTER its
+//      last ring write. A new claimant's `Acquire` on the successful CAS
+//      synchronizes-with that store, so it observes every byte and both
+//      cursors the retiring owner left, and it APPENDS rather than resets.
+//      There is consequently NO instant with two live producers on one index,
+//      and no reclaim step: the ring is a fixed `static` of POD with no
+//      `Drop`, so an undrained record is not a dangling anything. The three-
+//      state RETIRING protocol Decision 4 used to specify is NOT built and
+//      MUST NOT be added -- see that decision for the five-fact argument and
+//      for why the bottom crate refuses the two functions it would need.
 unsafe impl Sync for LogLane {}
 
-/// NOT a constant of this crate any more (S3): 80 in `dev`/`editor`, 32 in
-/// `shipping`/`shipping-min`, from `BOYKO_PROFILE` via `boyko_diag/build.rs`.
-/// v3's `MAX_LANES = 128` is deleted, along with its `option_env!` override.
-/// (The 32 is substrate BLOCKER Q1 — unsound against a worker-anchored
-/// topology whose floor is 66. This crate consumes the resolved value.)
-pub(crate) use boyko_diag::LANE_COUNT;
+/// NOT a constant of this crate any more (S3): **80 in every profile**, a plain
+/// `const` in `boyko_diag::lane` with NO build axis — Q1 RESOLVED. v3's
+/// `MAX_LANES = 128` is deleted, along with its `option_env!` override.
+/// (Q1 removed the shipping 32 outright rather than picking a bigger number:
+/// the constant indexes `MAX_WORKERS`, which is unconditional, so ANY
+/// per-profile value re-opens the unsoundness. This crate consumes it.)
+pub(crate) use boyko_diag::lane::LANE_COUNT;
 pub(crate) const LANE_BYTES: usize = 16 * 1024;  // power of two: MASK arithmetic
 const MASK:          u32   = (LANE_BYTES - 1) as u32;
 /// Usable span. ONE slot reserved so `used == CAPACITY` cannot be confused with
@@ -878,7 +896,7 @@ RESOLVE (hot, one TLS read):
       seed SAMPLE_CTR[id][t] = (id * 0x9E37) as u16 for all t  // phase break (D20)
 
 RETIRE (producer thread, explicitly, after its last write):
-  boyko_diag::release_lane()                    // marks the SUBSTRATE slot RETIRING
+  boyko_diag::release_lane()                    // publishes the SUBSTRATE slot FREE (Release)
   // NOT a `Drop` guard. v3 installed a `thread_local!` with a destructor; that
   // was the mechanism the profiling plan refused AND the sole source of this
   // plan's "<= 1 allocation on first emit" row. Deleting it takes that row to 0
@@ -889,12 +907,15 @@ RETIRE (producer thread, explicitly, after its last write):
   // than in an allocation on every thread's first emit.
 
 RECLAIM (consumer, per drain, after staging):
-  if boyko_diag::lane_state(i) == RETIRING && read == write {
-      boyko_diag::reclaim(i)                    // ONE registry owns the transition
-  }
+  — THERE IS NO RECLAIM STEP, and `boyko_diag::lane_state` / `::reclaim` do not
+    exist. This block used to call them. The consumer drains every lane every
+    pass and cannot distinguish a retired lane from an idle one; it does not
+    need to, because a new owner of a recycled index APPENDS to the same ring
+    and the `release`/`claim` pair orders the handover. Full argument at
+    Decision 4; SAFETY clause 4 on `LogLane` states the same thing in the code.
 ```
 
-**What this crate no longer contains**: `MAX_LANES`, the `hash(thread_id)` spread, the `load`-then-CAS scan over `LANES`, the `owner` field, `MY_LANE`, and the TLS guard type. Five deletions, one dependency.
+**What this crate no longer contains**: `MAX_LANES`, the `hash(thread_id)` spread, the `load`-then-CAS scan over `LANES`, the `owner` field, `MY_LANE`, and the TLS guard type. Five deletions, one dependency. **And what the SUBSTRATE does not contain because of this re-cut**: a `RETIRING` state, `lane_state()` and `reclaim()` — three additions to the crate whose entire value is that it is small, bought for a hazard that the `Release`/`Acquire` handover already excludes.
 
 **S13 note on the "first touch" seeding.** Seeding `SAMPLE_CTR[id][*]` is a **write**, so it commits pages. It happens on the first *emit* through a claimed lane, which cannot occur while the flag is off (gate (c) of Decision 2 fails first). Pre-touching lane buffers on the enable path is admissible and is a rung decision; touching them while the flag is off is **not**.
 
