@@ -679,3 +679,91 @@ fn the_four_app_zones_bracket_the_frame_with_the_right_cardinalities() {
         "__fold must open exactly once per frame"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// per-system spans (rung 3c)
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// A system's run produces a span **in its own zone's cell**, once per run, on **two workers**.
+///
+/// # What each half is for
+///
+/// *Its own zone* is what makes `SystemMeta.zone` a measurement rather than a minted number nobody
+/// reads — the state rung 3a would otherwise have shipped: an id assigned at `try_build` and never
+/// consumed by anything.
+///
+/// *Once per run* is the cardinality the concurrency analysis rests on. A system that runs three
+/// times contributes three intervals; a bracket that fired once per frame instead would report a
+/// serialisation index computed over a third of the data and say nothing about it.
+///
+/// Two workers, so the samples travel the **concurrent** dispatch path and land in the workers'
+/// own lanes rather than the dispatcher's — a span opened on the dispatcher and closed on a worker
+/// would charge the wrong producer, and the overlap analysis reads exactly that pair.
+///
+/// RED: delete the `SystemSpan::open` at `schedule.rs`'s concurrent site ⇒ both cells stay empty.
+/// Second RED: hoist the guard out of the spawned closure so it opens on the dispatcher ⇒ the
+/// samples land in the dispatcher's lane, which this test does not assert on directly — it is the
+/// lane-attribution clause of `G7(b)` and is named here rather than claimed.
+#[test]
+fn a_system_run_produces_one_span_per_run_in_its_own_zone() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
+
+    use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
+    use crate::ecs::core::profiling::SYSTEM_ZONES_COMPILED;
+    use crate::ecs::core::schedule::schedule_builder::ScheduleBuilder;
+
+    static RUNS: AtomicU32 = AtomicU32::new(0);
+
+    fn sys_a() {
+        RUNS.fetch_add(1, Ordering::Relaxed);
+    }
+    fn sys_b() {
+        RUNS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let (_g, mut p) = armed();
+
+    let pool: Arc<ThreadPool> = ThreadPoolBuilder::new().num_threads(2).build();
+    let mut builder = ScheduleBuilder::new(pool);
+    builder.add_system(sys_a);
+    builder.add_system(sys_b);
+    let mut world = EcsMaster::new();
+    let mut schedule = builder.build(&mut world);
+
+    let za = schedule.systems[0].system.meta().zone();
+    let zb = schedule.systems[1].system.meta().zone();
+
+    if !SYSTEM_ZONES_COMPILED {
+        // Not a skip: at a folded tier the correct answer is that no system has a zone and no
+        // span is produced, and asserting it is what would catch a bracket the `const` gate
+        // failed to delete.
+        assert_eq!(za, crate::ecs::core::profiling::ZONE_ID_UNASSIGNED);
+        return;
+    }
+    assert_ne!(za, zb, "two systems share one zone id, so their spans would merge");
+
+    // The rings must be empty, or a sample another test left would be folded into these cells by
+    // its stamp.
+    drain_every_region();
+
+    const RUNS_EXPECTED: u32 = 3;
+    for _ in 0..RUNS_EXPECTED {
+        schedule.run(&mut world);
+    }
+    assert_eq!(RUNS.load(Ordering::Relaxed), RUNS_EXPECTED * 2, "the systems did not run");
+
+    // Every span was stamped after frame 0 opened at `arm` and before this fold opens frame 1, so
+    // they all attribute to row 0.
+    fold(&mut p);
+
+    let a = p.cell(0, za).expect("frame 0 row");
+    let b = p.cell(0, zb).expect("frame 0 row");
+    assert_eq!(a.count, RUNS_EXPECTED, "system A produced {} spans", a.count);
+    assert_eq!(b.count, RUNS_EXPECTED, "system B produced {} spans", b.count);
+    assert!(a.total > 0 && b.total > 0, "a span of zero ticks is not a measurement");
+    assert_eq!(a.label, CellLabel::Measured);
+    assert_eq!(p.drops().late, 0, "a span was attributed outside the retained window");
+}

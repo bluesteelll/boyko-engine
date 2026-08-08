@@ -134,7 +134,7 @@ flag-off legs on the logging side and by GJ1's control leg here.
 |---|---|---|---|
 | **1** | `boyko_diag::profiling_abi`: `ARM_MASK: AtomicU64`, two-region `ZoneLane`, `REGISTRY`, the 24 B `Sample`, `ZoneTier` + `GLOBAL_TIER` (from `boyko_diag/build.rs`), `profiling_partition!` + `ENGINE_PACKAGES`, macros; `boyko_threadpool → boyko_diag` edge + `set_lane` at `worker_main` / `install` / `InstallGuard::drop`. **Requires `boyko_diag` D0/D1** | **G1, G4a (`overflow > 0`), G7, G22a (`LANES` + `REGISTRY`)**, SPSC unit + property tests, the loom SPSC case | purely additive; `boyko_utils` keeps zero deps (F27: rung 1 no longer commits green with nothing exercising it) |
 | **2** | `boyko_ecs::…::profiling`: `VmReservation`-backed store with an arm-time `zone_stride`, `fold.rs` (two regions, monotone-overflow delta, clock-epoch check, bidirectional walk), `arm`/`disarm`, `ProfilerPlugin`, world-bind check. **Requires `boyko_log` L3.** Flips the `W92xx` registry rows it emits from `Pending` to `Live` with their doc pages | **G4b (the `u64` accumulator + the consumer-side delta, = logging's G11), G21, G23a (`section_report{LANES, REGISTRY}` — the two statics that exist here)** | additive |
-| **3** *(lands in parts: **3a** shipped — the field, the mint, `W9201`/`W9208`; **3b** shipped — the `App` zones; **3c** the analysis half)* | `SystemMeta.zone` + const-assert; tier-gated minting at `try_build` with **non-terminal** refusal; the four `App` zones (`__frame`/`__events`/`__fixed_step`/`__main_run`) at `update_with_delta`; `RoundRecord`; `compat` + `intervals` + `ConcurrencyReport` under `profiling-analysis` | **G8, G9, G11 (engine half)** | one field in tail padding; four zone sites |
+| **3** *(lands in parts: **3a** shipped — the field, the mint, `W9201`/`W9208`; **3b** shipped — the `App` zones; **3c** shipped — the per-system spans; **3d** the analysis half)* | `SystemMeta.zone` + const-assert; tier-gated minting at `try_build` with **non-terminal** refusal; the four `App` zones (`__frame`/`__events`/`__fixed_step`/`__main_run`) at `update_with_delta`; `RoundRecord`; `compat` + `intervals` + `ConcurrencyReport` under `profiling-analysis` | **G8, G9, G11 (engine half)** | one field in tail padding; four zone sites |
 | **4** | RHI seam: three verbs + Vulkan impls + `ffi.rs` constants + `GPU_ZONE_QUERY_FLAGS` const-assert + Mock defaults and their pinning tests. **No consumer.** | **G2a, G2c** | old readers untouched |
 | **5** | `boyko_rhi_vulkan → boyko_diag` edge; `gpu_zone.rs` + `CommandWitness` (`first_pair_of` **and** `stamp_positions`, behind `profiling-census`); VB brackets ported. **Serial A/B against the old collector** (never both armed in one frame — F17) | **G2b, G5, G10** | both collectors exist; every existing test still compiles and passes |
 | **6** | gbuffer + SV0 ported; the R0 harness reads the new channel while the old one still exists | G10 extended to those passes | additive |
@@ -361,6 +361,28 @@ crate's full suite. The lesson is not "run more tests": a target filter is a cla
 and this project already carries a standing note that `--test <name>` and `--lib` are different
 worlds. The pin is now updated with all ten rows and the miss is written into the test itself.
 
+
+
+### Rung 3c — the per-system span, and why it is not `zone!`
+
+`zone!` takes a bare identifier and reads a `static ZoneHandle` plus its `mod` companion. A system
+has neither: its id is minted at `try_build` into `SystemMeta.zone`, and its name lives in
+`SystemMeta` rather than in a `&'static ZoneDesc` — rung 3a's decision. So the bracket is written
+out as `SystemSpan`: the tier gate is a `const` read from `SYSTEM_ZONES_COMPILED` instead of from a
+companion module, and the id comes from the meta instead of from a handle. **Everything else is
+A1 verbatim** — the `&&` chain, the runtime scope test, one `rdtsc` at open and one at close, and
+`Drop` as the closing discipline so a panicking system still closes its span.
+
+**The guard opens INSIDE the spawned closure**, on the worker that runs the system, not on the
+dispatcher. That is what charges the sample to the worker's own lane — and the lane is one half of
+the pair the overlap analysis reads, so a span opened on the dispatcher would name a producer that
+never ran the system. It is the same fact `G7(b)` states as a positive control, applied at the one
+site that could get it wrong.
+
+**Without this rung `SystemMeta.zone` would have been a minted number nobody reads** — an id
+assigned at `try_build` and consumed by nothing, which is the "structurally always zero" shape one
+step removed. RED, run at implementation: delete the `SystemSpan::open` at the concurrent dispatch
+site ⇒ both systems' cells stay empty at a count the gate expects to be 3.
 
 ### Two rung-3b decisions
 

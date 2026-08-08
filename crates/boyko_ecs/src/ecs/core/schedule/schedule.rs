@@ -1104,6 +1104,9 @@ impl Schedule {
                 //   requires. The reborrow's `'scope` lifetime outlives the call.
                 let world_ref: &mut EcsMaster = unsafe { cell.world_mut() };
                 let token = unsafe { DispatcherToken::new(world_ref) };
+                let _span = crate::ecs::core::profiling::zones::SystemSpan::open(
+                    self.systems[i].system.meta().zone(),
+                );
                 unsafe {
                     self.systems[i].system.run_dispatcher(token);
                 }
@@ -1264,6 +1267,15 @@ impl Schedule {
                 //   `*const T` Send-ness).
                 unsafe {
                     let system_slot = ptrs.system_slot(sys_idx.0 as usize);
+                    // The span opens on THIS worker, so the sample is charged to this worker's
+                    // lane -- which is the pair the overlap analysis reads. A span opened on the
+                    // dispatcher and closed here would name a producer that never ran the system.
+                    // The span opens on THIS worker, so the sample is charged to this worker's
+                    // lane -- which is the pair the overlap analysis reads. A span opened on the
+                    // dispatcher and closed here would name a producer that never ran the system.
+                    let _span = crate::ecs::core::profiling::zones::SystemSpan::open(
+                        (*system_slot).system.meta().zone(),
+                    );
                     (*system_slot).system.run_unsafe(cell_copy);
                 }
                 // Drop the guard BEFORE publishing completion so a
