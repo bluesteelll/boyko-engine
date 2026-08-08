@@ -614,6 +614,46 @@ shared for a frame's recording could not call it at the frame top, which is the 
 belongs. `needs_cmd_reset` is now an `AtomicBool` and the verb is `&self` like its siblings. The
 gate found it by being the first caller to record a whole frame through one shared borrow.
 
+### What rung 5c inherits, and the two things measuring it settled before it is written
+
+Recorded before 5c starts, for the reason the 3d handoff was: a rung that re-derives these at
+implementation time either guesses at 168 call sites or invents a tolerance.
+
+**1. `G10`'s TIMING clause is not evaluable at rung 5, and must not be approximated.** Its verdict
+is `resolve`'s — *"per pass, `|median_old − median_new| <= band`, where
+`band = max(floor, twin, se_floor, measured quantum)`"* — and `Floor` / `Twin` / `resolve` are
+**rung 8's** content, listed as such in this ladder's own table. There is no band at rung 5.
+Inventing one is the F6 mistake with the sign flipped: F6 killed *"one quantum"* because on this box
+that is a tolerance of **0** and therefore unsatisfiable, and a band picked here to be satisfiable
+would be picked to pass. **G10's own text already resolves this**: *"the witness clause, not the
+timing clause, is what licenses the deletion"*. So 5c lands the witness clause and records the
+timing clause as **deferred to rung 8**, where its band exists.
+
+**2. The witness clause needs `witness.command()` at every recorded `vkCmd*` in the region, and
+`vb.rs` has 168 of them.** MEASURED: 37 `cmd_bind_descriptor_sets`, 26 `cmd_bind_pipeline`, 22
+`cmd_push_constants`, 20 `cmd_dispatch`, and 63 more across sixteen other verbs. This is not an
+afterthought to the port — it *is* the bulk of the rung, and it is load-bearing: if only the
+timestamps increment the counter, `stamp_positions` degenerates to `[0, 1, 2, …]` and carries no
+information at all. The property the clause rests on — *"shifting one bracket by a single command
+changes one entry"* — is exactly the property that dies when the non-profiling commands stop
+counting. **The threading design is a real fork and belongs to 5c**, not to a guess here; the
+candidates are a `&mut CommandWitness` threaded through every helper (invasive, but the counter is
+where the command is), the witness living in the recorder behind the feature (one field, but
+`&self` recording verbs would need interior mutability), or a macro wrapper around each `vkCmd*`
+call (smallest diff, largest amount of magic in a hot recorder).
+
+**3. The serial A/B is cheap, because `TsWitness` already has the shape.** It carries
+`tc: Option<&VbTimestampCollector>` and is a no-op recording zero commands when `None` — which is
+every golden frame. 5c adds a second `Option` for the `GpuZoneRecorder`, and F17's *"never both
+armed in one frame"* becomes a structural property of the constructor rather than a discipline.
+
+**4. And the one thing that makes the comparison non-tautological: BOTH legs feed the SAME
+`CommandWitness`.** The stamp positions are recorded by `TsWitness`'s own `begin`/`end`, at the same
+line, whichever collector is armed underneath. If each leg had its own instrumentation the equality
+would be comparing two instruments; with one, it compares two recorders. That is the same
+distinction `stamp_positions` exists for one level up — it has no vocabulary, so no mapping table
+can be wrong — and it applies to the instrument as well as to the datum.
+
 ### Two rung-3b decisions
 
 1. **Nothing the zones measure is copied into `FrameRecord`.** The corpus's record carries
