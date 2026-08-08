@@ -40,6 +40,16 @@
 //! same axis and arrive with the rungs that read them. A constant nothing reads is a value nothing
 //! can prove wrong.
 //!
+//! **This rule was tested and held.** Profiling rung 1 hosts `profiling_abi` here and wants
+//! `GLOBAL_TIER` — the tier ceiling, `Deep` in `dev`, whose raw form would sit beside
+//! [`LOG_CEILING`] as a second `u8`. Adding it *before* that rung would put a constant here with
+//! no reader, which is the shape this module exists to refuse, and it would not make the rung any
+//! smaller: `profiling_abi` cannot be landed in fragments. Its tier gate is
+//! `const { $h::TIER as u8 <= GLOBAL_TIER as u8 } && ARM_MASK…`, so the const, the `ZoneTier`
+//! enum, `ARM_MASK`, the `ZoneHandle`/`mod`-companion pair that `declare_zone!` emits and the
+//! guard that reads them all arrive together or none of them compiles. The const is the *last*
+//! piece of that rung, not the first.
+//!
 //! `LANE_COUNT` is **deliberately not here and never will be**: it lives in [`crate::lane`] with no
 //! profile axis at all, because it indexes `boyko_threadpool::MAX_WORKERS`, which is
 //! unconditional. Putting it on this axis is the exact unsoundness that was removed.
