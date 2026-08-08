@@ -346,8 +346,11 @@ no gate covers — and it means two CI matrices whose legs do not correspond.
 
 **Cost.** Changing the profile rebuilds the workspace from `boyko_diag` up. CI grows from 1 to
 **5 full-workspace legs (4 net new)** — *shared between the plans, not per-plan*. ~12 KiB of dead
-`.bss` remains for folded `ZoneHandle` statics, and a typo in a `Deep` zone name is invisible in
-the shipping leg.
+`.bss` remains for folded `ZoneHandle` statics. **That is the whole cost on this axis** — this
+line also claimed a typo in a `Deep` zone name is invisible in the shipping leg, and it is not:
+the folded handle survives, `zone!`'s `const { site_tier <= GLOBAL_TIER }` gate still names it,
+so the typo is `E0425` in every feature-on profile. Invisibility is the FEATURE axis's cost, and
+§S13 below states the token/codegen distinction that decides it.
 
 **RED.** `BOYKO_PROFILE=shipping BOYKO_LOG_MAX_LEVEL=trace cargo build` must fail with a named
 message; delete the `compile_error!` ⇒ it builds and the header prints a ceiling the profile does

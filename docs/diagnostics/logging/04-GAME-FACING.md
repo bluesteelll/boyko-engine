@@ -289,7 +289,12 @@ static SAMPLE_CTR: [[Cell<u16>; MAX_TARGETS]; LANE_COUNT as usize];
 /// The durable, displayable log. Backed by the engine's own storage — a
 /// `VmReservation`-backed byte column, NOT a `Box<[u8]>` heap side-store, which
 /// is the shape Principle 0 was re-stated to forbid even inside a `Resource`
-/// (M13). Fixed capacity, reserved at plugin build, never grows.
+/// (M13). Fixed capacity, materialized LAZILY: `LogPlugin::build` performs no
+/// reserve and no commit — it runs before the runtime flag is read, and S13
+/// forbids boot any syscall the flag has not authorised. The one `grow_to` to
+/// the configured capacity runs inside `log_drain_system`'s `ResMut`, on the
+/// first drain that carries a record (SAFETY clause 5 below). Never grows
+/// after that one materialization; head/arena_cursor wrap.
 #[derive(Resource)]
 pub struct LogRing {
     lines: VmColumn<LogLine>,  // engine storage
