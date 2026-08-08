@@ -647,6 +647,27 @@ call (smallest diff, largest amount of magic in a hot recorder).
 every golden frame. 5c adds a second `Option` for the `GpuZoneRecorder`, and F17's *"never both
 armed in one frame"* becomes a structural property of the constructor rather than a discipline.
 
+**5. 5c DOES NOT SPLIT, and this was measured rather than argued.** The obvious cut is "land the
+`TsWitness` extension now, instrument the sites later". It was written and then reverted, because
+the extension has **no caller**: `with_zone_recorder` arms the new leg, and nothing can call it
+until `GBufferScene` carries the recorder and the harness passes one — 5 construction sites and 15
+references to thread. Shipped without that, every new field and method is unarmed scaffolding, and
+clippy says so as `dead_code`. Silencing it with an `#[allow]` would be exactly the shape this
+campaign refuses everywhere else: *a value nothing can make move is indistinguishable from a
+measurement of zero, and an offset nothing reads is an extent nothing can prove wrong.*
+
+Two things the attempt DID settle and that 5c should not re-derive:
+
+- **The pair index in `end` must be DERIVED, not allocated.** The bump allocator hands pairs out in
+  OPEN order, so the k-th pass to open is pair k; `end` computes
+  `(begun & ((1 << slot) - 1)).count_ones()` rather than calling `alloc_pair` a second time, which
+  would allocate a fresh pair and leave the opened one unclosed — a `TORN` label produced by the
+  port itself.
+- **The VB passes have no minted zone ids, and inventing some would be a private vocabulary.** The
+  schedule's mint is for systems; these are not systems. At this rung the zone id IS the
+  `VbTimedPass` slot, which is honest (it names the pass) and is not a claim to be part of the
+  engine-wide zone space.
+
 **4. And the one thing that makes the comparison non-tautological: BOTH legs feed the SAME
 `CommandWitness`.** The stamp positions are recorded by `TsWitness`'s own `begin`/`end`, at the same
 line, whichever collector is armed underneath. If each leg had its own instrumentation the equality
