@@ -573,6 +573,31 @@ injection reds on it. The fourth row, `LOST`, needs a query that never returns a
 constructible on demand against a working driver; it is pinned as a pure table in the module's unit
 test and named as not-exercised-on-hardware in the gate, rather than implied by the three that are.
 
+**The two horns and the `LOST` row are gated too, and `G2b` could not reach either.** `G2b`
+exercises `Complete` alone — every bracketed pair comes back — which leaves the subtlest code in the
+recorder ungated: the two independent deadlines, and the grace decrement between them that an
+earlier form of this design executed as `0u8 - 1`.
+
+`crates/boyko_rhi_vulkan/tests/gpu_zone_deadlines.rs` reaches all three. **`LOST` is constructible
+after all**, one level up from where G2b looked for it: submit the pool **reset** alone and
+fence-wait it, so every query is definitively unavailable, then record the brackets into a second
+command buffer that is **never submitted**. The witness marks say begun-and-ended and the queries
+were never written — which is precisely the state the blocking design could not express, because it
+hung on it. (The reset is submitted rather than merely recorded: Vulkan leaves a never-reset query
+undefined, and a gate reading undefined state is asking the driver a question instead of asking the
+recorder one.)
+
+Three clauses, each with its RED run: horn 1 spends exactly `RETIRE_GRACE_FRAMES` polls and then
+retires `EpochDeadline` with the pair `LOST`; horn 2 fires on a **frozen** epoch, at `>` and not
+`>=` — one frame short must not retire; and a poll below both deadlines with the grace already
+spent must neither retire nor underflow. That last one is checked in the direction that matters:
+after it, ONE epoch-true poll must retire immediately, because a grace wrapped to 255 would need
+255 more — which is what distinguishes *"did not underflow"* from *"underflowed and nobody
+noticed"*. **RED: move the epoch condition out of the `else if` (`} else if true {`) so the
+decrement escapes its arm ⇒ all three fail.** A control was run first — rewriting the guard as an
+equivalent `if grace == 0 { retire } else { decrement }` — and stayed green, so the RED is the
+escape and not the edit.
+
 **Two smaller decisions worth recording.** The retire buffers are one `RetireScratch` type rather
 than five slice parameters — ~9.3 KiB the host holds once beside the recorder, because a retire that
 allocated would be a profiler allocating on the frame path, and five separate slices made the
