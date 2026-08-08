@@ -108,6 +108,13 @@ pub struct ZoneDesc {
     /// Declared tier. Duplicated into the `mod` companion, which is what the gate reads —
     /// see the module docs on why the gate cannot read it from here.
     pub tier: ZoneTier,
+    /// Which lane region this zone's samples go to.
+    ///
+    /// A property of the DECLARING CRATE, not of the site: `declare_zone!` reads
+    /// `crate::__BOYKO_ZONE_PARTITION`, which [`profiling_partition!`](crate::profiling_partition)
+    /// puts at that crate's root. So a game cannot mint one engine zone by accident, and the choice
+    /// is a compile-time constant rather than a branch on the sample path.
+    pub region: crate::sample::Region,
 }
 
 /// A declared zone: its metadata and the id the registry assigns on first use.
@@ -276,6 +283,20 @@ impl Drop for ZoneGuard {
         let elapsed = crate::clock::ticks().wrapping_sub(self.opened);
         self.handle.calls.fetch_add(1, Ordering::Relaxed);
         self.handle.ticks.fetch_add(elapsed, Ordering::Relaxed);
+        // The transport takes the same interval. A refusal here is already counted by the region's
+        // `overflow`, so the return value is dropped rather than escalated -- and the accumulators
+        // above stay, because they are what a caller can read before rung 2's fold exists. When it
+        // does, they become the transport's cross-check rather than its substitute.
+        crate::sample::push(
+            self.handle.desc.region,
+            crate::sample::Sample {
+                stamp: self.opened,
+                value: elapsed,
+                zone: zone_id(self.handle),
+                flags: crate::sample::SampleKind::Span as u16,
+                _pad: 0,
+            },
+        );
     }
 }
 
@@ -347,6 +368,13 @@ pub fn any_armed() -> bool {
 /// The `use super::*;` inside the module is also load-bearing: a macro-emitted `mod` is a fresh
 /// scope that inherits none of the caller's imports, so without it `ZoneTier` is unresolvable at
 /// every expansion site that did not happen to glob-import it.
+// `clippy::crate_in_macro_def` is exactly the behaviour wanted here and nowhere else in this
+// crate: `crate::__BOYKO_ZONE_PARTITION` MUST resolve in the CALLER's crate root, because the
+// partition is a property of the declaring crate. `$crate` would resolve to `boyko_diag` and make
+// every zone in the workspace an engine zone -- silently, and in the one field whose whole job is
+// to isolate a game's samples from the engine's. The lint's usual case is a bug; this is the
+// mechanism.
+#[allow(clippy::crate_in_macro_def)]
 #[macro_export]
 macro_rules! declare_zone {
     ($ident:ident, name = $name:literal, scope = $scope:expr, tier = $tier:expr $(,)?) => {
@@ -356,11 +384,19 @@ macro_rules! declare_zone {
                 name: $name,
                 scope: $scope,
                 tier: $tier,
+                // The DECLARING crate's partition, not this site's. A crate that never wrote
+                // `profiling_partition!` fails here with an unresolved path, which is the intended
+                // outcome: an unpartitioned zone has no region to be isolated in.
+                region: crate::__BOYKO_ZONE_PARTITION,
             });
 
         #[doc = concat!("Compile-time facts about zone `", $name, "`.")]
         #[allow(non_snake_case)]
         pub mod $ident {
+            // Present so `$tier`/`$scope` expressions naming caller-scope items resolve. A caller
+            // that writes two literals does not need it, hence the allow rather than a second
+            // macro arm.
+            #[allow(unused_imports)]
             use super::*;
             /// The declared tier, readable from a `const` block — which the handle static is not.
             pub const TIER: $crate::profiling_abi::ZoneTier = $tier;

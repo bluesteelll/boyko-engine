@@ -56,4 +56,11 @@ pub mod lane;
 pub mod loss;
 pub mod profile;
 pub mod profiling_abi;
+pub mod sample;
 pub mod storage;
+
+// This crate declares zones of its own (its tests do), so it must name its own partition -- the
+// same one line every engine crate writes. It is the mechanism proving itself: without it,
+// `declare_zone!` here fails with an unresolved `__BOYKO_ZONE_PARTITION`, which is exactly what a
+// downstream crate that forgot the line gets.
+crate::profiling_partition!(Engine);

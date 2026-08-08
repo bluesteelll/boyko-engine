@@ -206,6 +206,44 @@ plan's L8b**, whose 20 measurement-migration rows cease to exist because rung 7 
 their producers. Rungs 10-15 do not block 3-9 and may land interleaved; each is independently
 green.
 
+### Four rung-1 decisions taken at implementation, and what rung 1 still owes
+
+Rung 1 landed in two commits: the ABI half (`profiling_abi` — tiers, `ARM_MASK`, the registry, the
+guard) and this one, the **sample transport**.
+
+1. **`push` cannot distinguish its three refusals, and does not try.** No lane, no buffer, no room
+   differ in what a *host* should do about them, and that is a question for the report the fold
+   writes — which has the lane table and the arm state to answer it with. A producer on the hot path
+   has neither, and a discriminating return value would be three branches paid on every sample to
+   carry information nobody reads there. The one refusal the transport genuinely cannot count is
+   "no lane": there is no row to charge it to, so it lands on `boyko_diag::loss`'s un-laned row.
+
+2. **`publish_region` is a CAS, not a store, and refuses a second buffer.** Publication is once.
+   Replacement would strand every producer that had already read the old pointer — the pointer is
+   deliberately never nulled, which is what lets a producer hold it without a lifetime, and that
+   same property makes replacement unsound rather than merely surprising.
+
+3. **`ENGINE_PACKAGES` is a `const` list with a `const fn` membership test**, so
+   `profiling_partition!(Engine)` in a downstream crate is a **compile error** rather than a lint.
+   `str` equality is not `const` on stable, hence the byte loop. Residual, named: a workspace member
+   that lies is one greppable line; there is no per-site escape at all, which was the actual hole.
+
+4. **`declare_zone!` deliberately writes `crate::__BOYKO_ZONE_PARTITION`, not `$crate::…`**, and
+   carries `#[allow(clippy::crate_in_macro_def)]` with the reason. The lint's usual case is a bug;
+   here it is the mechanism — `$crate` would resolve to `boyko_diag` and make every zone in the
+   workspace an engine zone, silently, in the one field whose whole job is to keep a game's samples
+   out of the engine's region. A crate that never wrote the partition line fails with an unresolved
+   path, which is the intended outcome and is proved by `boyko_diag` having to write the line for
+   its own tests.
+
+**What rung 1 still owes, stated rather than absorbed: `G20`'s two-crate leg.** The transport-level
+isolation is proved here — the `USER` region fills, refuses and counts while `engine_overflow` stays
+0, and a closed engine zone reaches the `ENGINE` region and not the other. What is **not** proved is
+the *macro*-level claim: that a zone declared by a `profiling_partition!(User)` crate lands in the
+`USER` region. That needs a second crate in one process, because one crate can only be one
+partition, and it is `G20`'s by construction. Until it exists, the partition constant's route from
+a crate root to a sample's region is argued, not measured.
+
 ---
 
 ## Metrics and validation

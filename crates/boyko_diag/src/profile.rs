@@ -79,6 +79,19 @@ pub const LOG_CEILING: u8 = 5;
 /// included, not only in the one whose tier admits it.
 pub const PROFILING_TIER: u8 = 2;
 
+/// Samples one lane region holds before it starts refusing, for this build.
+///
+/// **1024 is the `dev` profile's row**; the shipping row is 128. Read by the sample transport,
+/// which is why it appears now and not at D0 — a constant nothing reads is a value nothing can
+/// prove wrong.
+///
+/// The figure is burst headroom, not throughput: at ~400 engine samples per frame against a fold
+/// that runs every frame, 1024 is **2.5 frames**. It is down from an earlier 2048 because the slab
+/// is `LANE_COUNT × 2 regions × REGION_CAPACITY × 24 B`, and 2048 would put the `dev` slab at
+/// 7.5 MiB against a 7 MiB budget. A shortfall is visible rather than silent: every refused sample
+/// increments a per-region `overflow` the fold reports.
+pub const REGION_CAPACITY: u32 = 1024;
+
 // NO assertion that this value is in range, and NO pin on the number itself. The two are refused
 // for different reasons, and the difference is the one worth keeping:
 //
