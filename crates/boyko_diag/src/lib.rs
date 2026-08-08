@@ -54,4 +54,5 @@
 pub mod clock;
 pub mod lane;
 pub mod loss;
+pub mod profile;
 pub mod storage;

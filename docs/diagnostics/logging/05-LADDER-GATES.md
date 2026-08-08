@@ -46,7 +46,7 @@ subsystem present is not a baseline for the both-present configuration (S10).
 
 | # | What | Where | Must NOT move |
 |---|---|---|---|
-| **L0** | Skeleton; `Level`, `LogTarget`, `TargetId` (private field), `TargetControl` (**packed byte**), `targets!` table, `CONTROL`, `CONTROL_EPOCH_CTR`, the five macros with the 3-gate expansion, `GLOBAL_CEILING` **re-exported from `boyko_diag`** (S9 — no `boyko_log/build.rs`). **No sink, no `emit_impl`.** **Requires `boyko_diag` D0/D1.** **Nothing in this rung runs at process start**: `CONTROL` is `.bss`-zero, no initialiser touches it, and no `boyko_diag` clock call is made — the substrate's no-boot-work obligation (S13) is inherited, not re-argued | `src/{level,control,target,macros}.rs` | nothing exists yet |
+| **L0** | Skeleton; `Level`, `LogTarget`, `TargetId` (private field), `TargetControl` (**packed byte**), `targets!` table, `CONTROL`, `CONTROL_EPOCH_CTR`, the five macros with the 3-gate expansion, `GLOBAL_CEILING` **re-exported from `boyko_diag`** (S9 — no `boyko_log/build.rs`). **No sink, no `emit_impl`.** **Requires `boyko_diag` D0/D1.** **Nothing in this rung runs at process start**: `CONTROL` is `.bss`-zero, no initialiser touches it, and no `boyko_diag` clock call is made — the substrate's no-boot-work obligation (S13) is inherited, not re-argued | `src/{level,target,macros}.rs` — **there is no `control.rs`**, per `logging/ring-and-statics`' Decision 14: `CONTROL` is declared beside the `TargetId` whose closed constructor set is the only reason its `get_unchecked` is sound. This row said `{level,control,target,macros}` and the argued side won; splitting them puts an unchecked index in one file and its justification in another | nothing exists yet |
 | **L0-gate** | **G4** three-way side-effect probe: (a) compile-ceiling-below with runtime armed to Trace ⇒ 0; (b) both armed ⇒ **1000**; (c) runtime ceiling `Off` ⇒ 0. Debug *and* release. **v3's leg (d) is GONE from this rung** *(B4)*: it asserted 500 for a quantity that is 1000 (arguments evaluate at step 1, before the sample decision at step 4) **and** it needed `SAMPLE_CTR`, the seed and lanes, none of which exist before L1/L12. It reappears as **G10e** at L12-gate, over the right observable. **G2** separate build leg `BOYKO_PROFILE=off`, all three legs with their mechanisms (Decision 3), **legs (b) and (c) additionally run against a flag-off RUN of a normally-built binary** (S13). **G1 is NOT here** — it moves to L1-gate (F19) | `tests/gates_disabled.rs`, CI leg | — |
 | **L1** | `LogLane` (3 partitions + `sampled_out` + `boyko_diag::LossCell`s), layout asserts, lane resolution via `boyko_diag::lane()`, retire/reclaim through the substrate, wrap protocol, **the corrected admission arithmetic (F6)**, `LogValue`/`LogArgs`, `dsp!`, `u64` loss accounting (S8), `MAX_RECORD_BYTES` runtime check, `emit_impl` | `src/{lane,record,site}.rs` | L0's gate expansion |
 | **L1-gate** | **G1** symbol gate (now that `emit_impl` exists). **G17** Error-reserve arithmetic, **three legs at TWO fill levels** (B3). Per-thread zero-alloc gate, leg (b) now asserting **`== 0`** on a fresh thread (S3); loom model of the cursor pair + `boyko_diag` reclaim; wrap-boundary proptest; **cursor-wrap-at-2³² test (E17)**; overflow test asserting `dropped > 0`; **G3** `.bss` section gate **via `boyko_diag::section_report`** (S12); **G5** distinct-`decode`-symbol upper bound (N31) | `tests/` | — |
@@ -85,6 +85,37 @@ subsystem present is not a baseline for the both-present configuration (S10).
 | **L17 → J1** | **Merged with profiling rung 14 into ONE joint rung** (S9): the single `BOYKO_PROFILE` axis, `LogRuntimePreset`, the three header facts, and **5 CI legs** (`dev` existing + 4 net new). One axis cannot be split across two rungs | `crates/boyko_diag/build.rs`, `crates/boyko_app/src/`, CI | G2's `off` leg must still pass unchanged |
 | **J1-gate** | **G16** two-sided symbol gate + the `compile_error!` red + the three-header-fields red (Decision 25) + **P2** soak. G14/G16 cross-profile symbol censuses are CI **steps** over two legs' artifacts, not extra legs | CI legs, `tests/` | — |
 | **J2** | **The joint baseline sitting** (S10). Re-take `P1`, `P2`, `log_*` and the profiler's `zone_cost` **in the both-present configuration, in one sitting**, and stamp every baseline file with `config_tag = {profiler, logger}`. **`GJ1`, the measured off-cost with its control leg (S13), runs in this sitting** — a flag-off number taken without the other subsystem present is not a number about the both-present configuration. Until this rung lands, no revert clause may fail a rung — they record `UNPROVEN` | `benches/`, baselines | — |
+
+### Three L0 decisions taken at implementation, recorded rather than absorbed
+
+1. **Every engine target's `STATIC_CEILING` is `Level::Trace`.** The illustrative rows in
+   `logging/emission-path` show `Ecs = Info`, `Schedule = Info`, `Threadpool = Warn`.
+   `STATIC_CEILING` is the **compile** ceiling, so `Ecs = Info` means no `debug!(Ecs, …)` can exist
+   in **any** build, forever, and un-guessing it is a source edit rather than a config change.
+   Before a single call site exists there is no evidence for lowering any target, and the two axes
+   that should be doing this work already are: `GLOBAL_CEILING` deletes `debug!`/`trace!` from
+   every shipping build, and the runtime byte turns targets off in a dev one. A per-target compile
+   ceiling is for a target **measured** noisy even in dev — a fact this rung cannot have.
+
+2. **The table has 26 rows, one per domain in `logging/code-registry`'s block map**, ids dense and
+   in block order. Deriving them from the block map rather than inventing a list means a reader
+   who knows a code's block knows its target without a second table to consult. Ids are never
+   renumbered; a domain that later splits takes the next free id.
+
+3. **`boyko_diag` hands over a `u8`, not a `Level`.** `substrate/dedup-rationale` §4 explicitly
+   does **not** own "`LogTarget` / `CONTROL` / the level model", so the bottom crate must not name
+   this crate's enum. `boyko_diag::profile::LOG_CEILING` is therefore a plain `u8` and this crate
+   maps it: `pub const GLOBAL_CEILING: Level = Level::from_raw(boyko_diag::profile::LOG_CEILING)`.
+   That is a `const fn` over a `const`, so gate (b) still folds and N27's property is untouched.
+   It also puts the range check where it belongs: `from_raw` `panic!`s outside `0..=5`, and a
+   `panic!` in a `const` initialiser is a **compile error**, so a bad generated ceiling fails the
+   build rather than shipping a wrong one.
+
+   The module is landed in `boyko_diag` **now**, hand-written at the `dev` row, rather than in
+   `boyko_log` to be relocated at J1 — J1 then swaps a module *body* instead of moving a public
+   const between crates. It declares **only** `LOG_CEILING`: `GLOBAL_TIER`, `REGION_CAPACITY`,
+   `ENGINE_ZONE_SLOTS`, `MAX_USER_BUDGET` and `DYN_NAME_BYTES` arrive with the rungs that read
+   them, because a constant nothing reads is a value nothing can prove wrong.
 
 Ordering constraints: **D0/D1 before L0**; L10 before L11a (a dynamic target is the first consumer
 of a downstream code); L12 after L1; L13b after L13a (rotation is shared); L15 after L13a (the

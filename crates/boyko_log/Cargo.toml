@@ -1,0 +1,24 @@
+[package]
+name = "boyko-log"
+version = "0.1.0"
+edition = "2024"
+description = "In-house structured logging for boyko-engine: compile-time ceilings, one packed control byte per target, and no third-party facade"
+
+# The diagnostics substrate, and the ONLY dependency this crate will ever have.
+# It supplies the lane topology both diagnostics subsystems index by, the clock
+# both stamp with, the loss vocabulary both count in, and the build-profile
+# ceiling this crate re-exports as its own `GLOBAL_CEILING`. `boyko_diag` has an
+# empty `[dependencies]`, so this edge adds no third-party crate to any graph
+# that reaches the logger -- which is every crate in the engine.
+#
+# NO third-party logging facade. `log`/`tracing` are banned workspace-wide by a
+# tidy check at L8b; this manifest is the first one that had the opportunity to
+# add one and did not.
+[dependencies]
+boyko-diag = { path = "../boyko_diag" }
+
+[features]
+default = []
+
+[lints]
+workspace = true

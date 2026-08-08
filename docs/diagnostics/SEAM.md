@@ -788,6 +788,16 @@ quantity it indexes (`MAX_WORKERS`) has no profile axis to follow. **`crates/boy
 is NOT created, and neither is `crates/boyko_ecs/build.rs`** (rev 3's integration row is withdrawn);
 both subsystems **re-export** their consts from `boyko_diag`.
 
+**The handoff is by INTEGER, settled at L0.** `boyko_diag` must not name either subsystem's type —
+`substrate/dedup-rationale` §4 explicitly does not own the level model, and the tier model is the
+profiler's — so `crates/boyko_diag/src/profile.rs` holds plain `u8`s and each consumer maps its own
+`const` on top (`pub const GLOBAL_CEILING: Level = Level::from_raw(boyko_diag::profile::LOG_CEILING)`).
+A `const fn` over a `const` folds, so every gate that depends on the constant is still decided by
+the compiler. It also relocates the range check usefully: `from_raw` `panic!`s outside its enum's
+range, and a `panic!` in a `const` initialiser is a **compile error**, so a build script that emits
+a nonsense ceiling fails the build instead of shipping a binary that logs the wrong amount.
+Until J1 the module is hand-written at the `dev` row and declares only what a landed rung reads.
+
 **Verified this session: no `build.rs` exists in any workspace member or at the root.**
 `crates/boyko_diag/build.rs` would therefore be the **first build script in this workspace**, which
 is why it belongs to the joint rung **J1** and explicitly **not** to substrate rung D0.
