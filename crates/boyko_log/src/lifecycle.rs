@@ -237,6 +237,7 @@ pub fn enable() -> bool {
     // The 20 ms calibration window lives here and nowhere else. Doing it at boot would make every
     // process pay it, including one that never asks for a log.
     boyko_diag::clock::calibrate();
+    install_panic_hook();
     SINK_STATE.store(SinkState::Enabled as u8, Ordering::Release);
     if WANT_SINK.load(Ordering::Relaxed) != 0 {
         SINK_RUNNING.store(1, Ordering::Release);
@@ -255,6 +256,66 @@ pub fn enable() -> bool {
             );
     }
     true
+}
+
+/// The hook that was installed before ours, so we chain rather than replace.
+///
+/// **Chaining is not politeness.** The default hook prints the panic message and the backtrace; a
+/// logger that replaced it would silence the one diagnostic that always worked, in exchange for
+/// one that only works when it was enabled. A test harness's hook is what makes `#[should_panic]`
+/// readable. Both must still run, and ours runs *first* so records are out before anything
+/// downstream aborts.
+static PREV_HOOK: std::sync::OnceLock<PanicHook> = std::sync::OnceLock::new();
+
+/// A panic hook, in the shape `std::panic::take_hook` returns it.
+type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send>;
+
+/// Times our hook has run.
+///
+/// Behavioural evidence, because identity is not available: `take_hook` returns a
+/// `Box<dyn Fn>` that cannot be compared, so *"is our hook installed"* is not a question the
+/// standard library can answer. It has to be asked by observing what happens on a panic.
+static HOOK_FIRED: AtomicU8 = AtomicU8::new(0);
+
+/// How many times the panic hook has run, saturating at 255.
+#[must_use]
+pub fn hook_fired() -> u8 {
+    HOOK_FIRED.load(Ordering::Acquire)
+}
+
+/// Install the panic hook, at most once per process.
+///
+/// Called from [`enable`], never from [`boot`]: a process that never asked for diagnostics must
+/// not have its panic behaviour changed. It is **never uninstalled** — `set_hook` offers no
+/// "restore mine only", and a `disable()` that called `set_hook(prev)` would clobber a hook some
+/// other subsystem installed in between.
+///
+/// Because it is permanent, **the hook does nothing unless diagnostics are `Enabled`.** That is
+/// not an optimisation: a hook that drained on every panic would reach into the rings during
+/// unrelated panics — including a test harness's `#[should_panic]` cases — and consume records
+/// their owners were about to inspect. MEASURED: the first version did exactly that and broke
+/// three unrelated tests in this crate.
+fn install_panic_hook() {
+    if PREV_HOOK.get().is_some() {
+        return;
+    }
+    let prev = std::panic::take_hook();
+    if PREV_HOOK.set(prev).is_err() {
+        // Another thread won the race and its `take_hook` already ran, so ours is now the hook it
+        // captured. Putting it back would double-chain; leave the winner's installation alone.
+        return;
+    }
+    std::panic::set_hook(Box::new(|info| {
+        HOOK_FIRED.fetch_add(1, Ordering::Release);
+        if state() == SinkState::Enabled {
+            // Bounded and returns a value, so a stalled sink cannot turn a panic into a hang —
+            // which would replace a diagnosable crash with an undiagnosable one.
+            let _ = flush();
+        }
+        if let Some(prev) = PREV_HOOK.get() {
+            prev(info);
+        }
+    }));
 }
 
 /// What a [`flush`] did.
@@ -517,6 +578,44 @@ mod tests {
             "flush returned before two passes had completed"
         );
         assert!(shutdown());
+        reset();
+    }
+
+    #[test]
+    fn the_hook_runs_ours_and_still_chains_to_the_previous_one() {
+        // Behavioural, because identity is unavailable: `take_hook` returns an uncomparable
+        // `Box<dyn Fn>`. Our counter moving proves ours ran; the panic still being caught and
+        // still reaching stderr proves the previous one did too. Replacing rather than chaining
+        // would silence the one diagnostic that always worked.
+        let _s = crate::drain_owner::test_serial();
+        reset();
+        boot(LogConfig { console: false, sink_thread: false });
+        assert!(enable());
+
+        let before = hook_fired();
+        let caught = std::panic::catch_unwind(|| panic!("deliberate, hook chain"));
+        assert!(caught.is_err(), "the panic must still propagate");
+        assert!(hook_fired() > before, "our hook did not run; records would be lost on a crash");
+        assert!(PREV_HOOK.get().is_some(), "the previous hook must be retained, not discarded");
+        reset();
+    }
+
+    #[test]
+    fn a_panic_while_diagnostics_are_off_does_not_reach_the_rings() {
+        // The hook is permanent by design, so it runs on EVERY panic in the process -- including
+        // a test harness's `#[should_panic]` cases. Draining there would consume records their
+        // owners were about to inspect. MEASURED: the first version did exactly that and broke
+        // three unrelated tests in this crate.
+        let _s = crate::drain_owner::test_serial();
+        reset();
+        let before = crate::lifecycle::sink_passes();
+        let caught = std::panic::catch_unwind(|| panic!("deliberate, diagnostics off"));
+        assert!(caught.is_err());
+        assert_eq!(
+            crate::lifecycle::sink_passes(),
+            before,
+            "a panic with diagnostics off must not touch the rings"
+        );
         reset();
     }
 
