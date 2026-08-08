@@ -22,7 +22,7 @@ fn boot_alone_changes_nothing_a_process_can_observe() {
     assert_eq!(hook_fired(), 0, "no hook may have run before boot");
     assert_eq!(sink_passes(), 0, "no sink pass may have happened before boot");
 
-    boot(LogConfig { console: true, sink_thread: true });
+    boot(LogConfig { console: true, sink_thread: true, ecs_ring: true });
     assert_eq!(state(), SinkState::Booted);
 
     // Both wishes were recorded and NEITHER was acted on.
@@ -33,6 +33,11 @@ fn boot_alone_changes_nothing_a_process_can_observe() {
     );
     std::thread::sleep(std::time::Duration::from_millis(30));
     assert_eq!(sink_passes(), 0, "boot() spawned the sink thread the config asked for");
+    assert_eq!(
+        boyko_log::sink::ecs::published(),
+        0,
+        "boot() touched the ECS handoff ring the config asked for"
+    );
 
     // And the panic behaviour of the process is untouched. This is the assertion that needs its
     // own binary: it is only true in a process where `enable()` has never run.

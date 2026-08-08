@@ -26,19 +26,26 @@
 //!
 //! # State of this crate
 //!
-//! **Rung L1.** What exists: [`Level`], [`LogTarget`], [`TargetId`], [`TargetControl`], the engine
-//! target table, the control array and its epoch counter, the five macros with their full
-//! three-gate expansion, the per-site `static`, the payload encoding ([`LogValue`], [`LogArgs`],
-//! [`dsp!`]), the per-lane SPSC ring and the producer path [`emit_impl`].
+//! **Rungs L0, L1, L2, L3 and L5's producer half.** What exists: [`Level`], [`LogTarget`],
+//! [`TargetId`], [`TargetControl`], the engine target table, the control array and its epoch
+//! counter, the five macros with their full three-gate expansion, the per-site `static`, the
+//! payload encoding ([`LogValue`], [`LogArgs`], [`dsp!`]), the per-lane SPSC ring and the producer
+//! path [`emit_impl`]; the diagnostic-code registry ([`codes`]); the synchronous channel
+//! ([`sync_out`]), the CAS'd consumer role ([`drain_owner`]), the drain walk, the opt-in sink
+//! thread, `flush`/`shutdown`, the chained panic hook and the `boot`/`enable` split
+//! ([`lifecycle`]); and the sink→ECS transport [`sink::ecs`], whose consumer lives in `boyko_ecs`.
 //!
-//! What does **not** exist yet: a **consumer**. Nothing drains the rings, so a record is written,
-//! published, and then sits there until its lane wraps. Rate policies, sampling and the
-//! synchronous route are likewise later rungs; their steps are absent from the producer path
-//! rather than stubbed inside it.
+//! What does **not** exist yet, by rung: the file sink, the rate limiter and `SinkMode::Manual`
+//! are **L4** — which this crate skipped, so `LOG-CENSUS` and `W0103` are absent too; dynamic
+//! targets are L10, `LogPod` L11b, sampling L12, the binary sink L13b, runtime sink control L14,
+//! and the crash path L15. Each is **absent rather than stubbed**: a step that returns without
+//! doing anything is indistinguishable from a working one at every call site, which is the
+//! failure mode this crate's gates exist to make impossible.
 //!
 //! **Nothing here runs at process start.** The control array is `.bss`-zero, which already means
 //! "every target off"; no initialiser touches it, no clock is calibrated, no thread is spawned.
-//! A process that never enables logging never writes a byte of this crate's state.
+//! A process that never enables logging never writes a byte of this crate's state — `boot` records
+//! the configuration and returns, and `enable` is what acts on it.
 
 // The logger must never write to stdout: stdout belongs to the game, or to whatever tool is
 // piping it. The console sink (a later rung) writes to stderr through its own handle. This is a
@@ -55,6 +62,7 @@ pub mod level;
 pub mod lifecycle;
 mod macros;
 pub mod record;
+pub mod sink;
 pub mod site;
 pub mod sync_out;
 pub mod target;

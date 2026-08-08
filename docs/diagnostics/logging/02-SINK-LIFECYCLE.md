@@ -125,7 +125,7 @@ Three consequences, stated rather than implied.
 |---|---|---|
 | `Thread` (default) | the resident sink thread | `Dev`, `Editor`, `Shipping` |
 | `Manual` | an explicit `drain()` call, single-caller | hermetic tests, CLI tools, the zero-alloc gate — **and nothing else** |
-| **`Scheduled`** *(new)* | **`log_drain_system` in `Last`**, which takes `DRAIN_OWNER` and runs Algorithm C itself, once per frame, on the frame thread | **`ShippingMin`** |
+| **`Scheduled`** *(new)* | **`log_drain_system` in `LogSet`**, which takes `DRAIN_OWNER` and runs Algorithm C itself, once per frame, on the frame thread | **`ShippingMin`** |
 
 **Why `Scheduled` had to exist.** v3 gave `shipping-min` `SinkMode::Manual` and a crash sink. Nothing then drains: `flush()` returns `NoConsumer` immediately, admission control **drops new records** rather than overrunning oldest, and within seconds the 80 × 16 KiB of lanes hold nothing but boot-time records while everything up to the crash is refused. The profile whose only product is a crash log was structurally guaranteed **not to contain the crash** — and Decision 25 asserted `Manual` for it while this decision said `Manual` exists "for hermetic tests, CLI tools and the zero-alloc gate, and for nothing else", so the two contradicted each other on the page.
 
@@ -140,7 +140,7 @@ Three consequences, stated rather than implied.
 
 **Throughput, stated rather than deferred** (M19). At the default geometry, a lane holds `16 KiB / ~40 B` ≈ 400 records; with immediate re-drain under load, per-lane sustained capacity is bounded by the sink's formatting rate, not by the park interval. Design number: **≥ 500 K records·s⁻¹ aggregate** with a `core::fmt` cost of ~1-2 µs per formatted record on one thread. Consequence, stated plainly: **a `trace!` inside a per-entity loop is lossy by construction** — at 15 ns/record a single producer can offer 66 M records·s⁻¹ against a consumer two orders of magnitude slower. Gate **`sink_sustained_rate`** at L3 measures the knee and must show a nonzero drop count above it; the plan is not allowed to ship with the knee unmeasured.
 
-**Alternatives rejected.** *Drain from an ECS system at `Last` **as the default*** — ties log liveness to a running schedule, so boot and shutdown diagnostics vanish; admitted for `ShippingMin` only, with that cost written down (`Scheduled`, above). *Drain from the frame loop* — a syscall in the frame. *Making `ShippingMin` overrun-oldest instead* — see Decision 5 (`logging/ring-and-statics`): it destroys the record that reported the cause in favour of the one that reported the consequence, and the profile does not need it once it has a consumer.
+**Alternatives rejected.** *Drain from an ECS system at end-of-frame **as the default*** — ties log liveness to a running schedule, so boot and shutdown diagnostics vanish; admitted for `ShippingMin` only, with that cost written down (`Scheduled`, above). *Drain from the frame loop* — a syscall in the frame. *Making `ShippingMin` overrun-oldest instead* — see Decision 5 (`logging/ring-and-statics`): it destroys the record that reported the cause in favour of the one that reported the consequence, and the profile does not need it once it has a consumer.
 
 ---
 
@@ -253,7 +253,7 @@ Every consumer claims it the same way, and there are exactly four:
 |---|---|---|
 | the sink thread (`SinkMode::Thread`) | at the top of every drain pass | re-park; try next pass |
 | `drain()` (`SinkMode::Manual`) | on entry | return `DrainResult::Busy` — **not** a `debug_assert`, because a second manual caller is a user error, not a bug in this crate |
-| `log_drain_system` (`SinkMode::Scheduled`) | once per frame in `Last` | skip this frame; the records stay in the lanes |
+| `log_drain_system` (`SinkMode::Scheduled`) | once per frame in `LogSet` | skip this frame; the records stay in the lanes |
 | the crash drainer | panic-hook step 3 | **return without draining** |
 
 The panic hook (chained ahead of the existing hook) writes the panic message synchronously, runs the `PRE_FLUSH` callbacks (step 1.5, S5), then `flush()`. If `flush()` cannot succeed it attempts `DRAIN_OWNER.compare_exchange(0, my_token, AcqRel, Acquire)` **once**. Only on success does it run Algorithm C into the `CrashSink` (a file **opened at `enable()`**, because opening a file inside a panic hook is its own failure mode) and emit `boyko-E0109`. On failure it returns: some other thread holds the role and displacing it would put two consumers on one lane. Termination is a single CAS and a bounded drain; **no wait is added**.
@@ -294,7 +294,7 @@ The panic hook (chained ahead of the existing hook) writes the panic message syn
 
 **The transport, which v3 named three times and defined nowhere.** v3 wrote "push formatted lines to the ECS handoff ring" (Algorithm C), "fed by `log_drain_system` in `Last`, from the sink's handoff" and referenced it again in the public API — with **no type, no capacity, no ordering, no overflow accounting, no budget row and no `Send`/`Sync` argument**. Every claim about the reader rests on it, and an undefined cross-thread queue is exactly the object this campaign's defects live in.
 
-*(The reader surface — `LogRing::since`, `RingFilter`, `LogRingIter::skipped`, `log_drain_system` in `Last`, and the property that a record is never visible before the drain that consumed it — is `logging/game-facing-surface`. What is owned here is the ring that feeds it.)*
+*(The reader surface — `LogRing::since`, `RingFilter`, `LogRingIter::skipped`, `log_drain_system` in `LogSet`, and the property that a record is never visible before the drain that consumed it — is `logging/game-facing-surface`. What is owned here is the ring that feeds it.)*
 
 ```rust
 /// SPSC byte ring carrying FORMATTED LINES from the consumer role to the ECS.
@@ -340,7 +340,7 @@ const _: () = assert!(HANDOFF_BYTES.is_power_of_two());
 //      consumer role, so the `LogLane` provenance clause has no analogue here.
 ```
 
-**The stated bound** is "sink park interval + one frame" (≤ 2 frames in practice) under `Thread`, and **one frame** under `Scheduled` (the drain and the ECS copy are the same system). G15 cannot claim tighter. A per-frame **`frame_epoch` record** *(renamed from `EPOCH` — S11, three meanings collided; `seam/vocabulary`)* lets a reader attribute every record to exactly one frame; a record emitted *during* the drain is attributed to the next frame, and test 29 asserts that rather than assuming it.
+**The stated bound** is "sink park interval + one frame" (≤ 2 frames in practice) under `Thread`, and **one frame** under `Scheduled` (the drain and the ECS copy are the same system). G15 cannot claim tighter. **Both figures additionally assume the host orders its emitters `.before(LogSet)`**: this engine has no `Last` schedule, so with no such edge the scheduler may place the drain anywhere in the frame and each figure gains one frame (`logging/ladder-and-gates` L5 decision 1). A per-frame **`frame_epoch` record** *(renamed from `EPOCH` — S11, three meanings collided; `seam/vocabulary`)* lets a reader attribute every record to exactly one frame; a record emitted *during* the drain is attributed to the next frame, and test 29 asserts that rather than assuming it.
 
 ---
 

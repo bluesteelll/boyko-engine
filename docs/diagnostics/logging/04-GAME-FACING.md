@@ -234,7 +234,7 @@ pre-decide it.
 
 `LogRing::since(cursor, &RingFilter) -> LogRingIter` returns records delivered since a monotone
 `seq`, oldest first, with `LogRingIter::skipped` reporting how many the ring wrapped past — **a
-console cannot silently miss lines**. The ring is fed by `log_drain_system` in `Last`, never from
+console cannot silently miss lines**. The ring is fed by `log_drain_system` in `LogSet`, never from
 the emission path: **G15b reds if a record is visible before the drain that consumed it**, which
 is also what keeps the hot path from touching ECS storage.
 
@@ -384,14 +384,14 @@ const _: () = {
 //      read, and S13 forbids boot any syscall the flag has not authorised. The
 //      write-once `base` store happens inside `log_drain_system`'s `ResMut`, on
 //      the first drain that actually carries a record -- `VmColumn` is lazy by
-//      construction (`crates/boyko_ecs/src/ecs/memory/vm_column.rs:437-449`:
+//      construction (`crates/boyko_ecs/src/ecs/memory/vm_column.rs:462-474`:
 //      `self.vm` is `None` until the first growth event, and the reservation
 //      syscall is deferred to it). Only `log_drain_system` ever holds `&mut`
 //      (clause 1) and the scheduler never runs a `Res` reader concurrently with
 //      it (clause 2), so no `&self` reader exists during the store.
 //
 //      WITH THE FLAG OFF, `log_drain_system` RETURNS BEFORE TOUCHING ANYTHING
-//      -- one `Relaxed` load per frame in `Last`, and no column is reached.
+//      -- one `Relaxed` load per frame in `LogSet`, and no column is reached.
 //      That early return is load-bearing, not an optimisation. This system has
 //      THREE duties and only the ring feed consumes `ECS_HANDOFF`: the
 //      `TARGET_STATS` snapshot copies a `.bss` array, and the per-frame
@@ -553,7 +553,7 @@ pub struct RingFilter { pub targets: [u64; 4], pub min_level: Level }
 // ── ECS seam (boyko_ecs) ──────────────────────────────────────────────────────
 pub struct LogPlugin { pub config: LogConfig }
 impl Plugin for LogPlugin { fn build(&self, app: &mut App); }
-// inserts LogRing / LogStats / LogCensus; adds `log_drain_system` to `Last`
+// inserts LogRing / LogStats / LogCensus; adds `log_drain_system` to `LogSet`
 // (ECS ring feed + TARGET_STATS snapshot + one `frame_epoch` record per frame —
 // the sink thread owns the byte sinks). Registers `shutdown` on teardown.
 //

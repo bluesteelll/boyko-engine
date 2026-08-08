@@ -94,6 +94,26 @@ pub struct LogConfig {
     /// Off by default because a thread is the single most expensive thing this subsystem can
     /// create, and the profile that wants a crash file and nothing else must not pay for one.
     pub sink_thread: bool,
+    /// Feed [`ECS_HANDOFF`](crate::sink::ecs) so an ECS reader can see the log in-frame.
+    ///
+    /// `false` by default. A title that never displays its own log pays neither the copy nor the
+    /// `LogRing` columns, and the ring's `.bss` extent stays untouched — reserved address space
+    /// rather than resident memory.
+    pub ecs_ring: bool,
+}
+
+/// Recorded by [`boot`], read by the consumer role on every drain.
+///
+/// A plain `.bss` byte rather than a field threaded through the drain, because the drain's other
+/// two callers — a manual `drain()` and the crash drainer — are not on this path and must observe
+/// the same answer.
+static WANT_ECS_RING: AtomicU8 = AtomicU8::new(0);
+
+/// Whether the consumer role should feed [`ECS_HANDOFF`](crate::sink::ecs).
+#[inline]
+#[must_use]
+pub fn ecs_ring_enabled() -> bool {
+    WANT_ECS_RING.load(Ordering::Relaxed) != 0
 }
 
 /// Set while a sink thread should keep running.
@@ -129,20 +149,7 @@ fn sink_loop() {
     loop {
         let asked_to_stop = SINK_RUNNING.load(Ordering::Acquire) == 0;
 
-        let moved = match crate::drain_owner::try_claim() {
-            Some(token) => {
-                let stats = crate::lane::drain(&token, |site, _tsc, _flags, payload| {
-                    let mut buf = [0u8; 192];
-                    let n = render_record(&mut buf, site, payload.len());
-                    // SAFETY: `render_record` writes only ASCII copied from `&'static str`s and
-                    //   decimal digits.
-                    let text = unsafe { core::str::from_utf8_unchecked(&buf[..n]) };
-                    crate::sync_out::write_oracle_line("boyko-log ", text);
-                });
-                stats.records > 0
-            }
-            None => false,
-        };
+        let moved = drain_once().is_some_and(|stats| stats.records > 0);
 
         SINK_PASSES.fetch_add(1, Ordering::Release);
 
@@ -162,6 +169,42 @@ fn sink_loop() {
             std::thread::sleep(std::time::Duration::from_micros(200u64 << idle));
         }
     }
+}
+
+/// Claim the consumer role, drain every lane once, and route what it finds.
+///
+/// Returns `None` when another consumer already holds the role — a refusal, never a steal, because
+/// stealing would create the second consumer the token exists to prevent.
+///
+/// # Why this is a function rather than the sink loop's body
+///
+/// Three callers need exactly this pass and must not each grow their own: the resident sink
+/// thread, a host draining by hand, and — at L15 — `SinkMode::Scheduled`'s in-frame drain. A pass
+/// that differed between them would make "was the ECS ring fed" depend on which of the three ran,
+/// which is precisely the question the seam's one-frame bound is an answer to.
+pub fn drain_once() -> Option<crate::lane::DrainStats> {
+    let token = crate::drain_owner::try_claim()?;
+    let to_ecs = ecs_ring_enabled();
+    Some(crate::lane::drain(&token, |site, _tsc, flags, payload| {
+        let mut buf = [0u8; 192];
+        let n = render_record(&mut buf, site, payload.len());
+        // SAFETY: `render_record` writes only ASCII copied from `&'static str`s and decimal
+        //   digits.
+        let text = unsafe { core::str::from_utf8_unchecked(&buf[..n]) };
+        crate::sync_out::write_oracle_line("boyko-log ", text);
+        if to_ecs {
+            // The byte channel above already has the record, so a refusal here shortens the
+            // in-frame view and nothing else. That is why the return value is dropped rather than
+            // escalated: `push` has already counted it, on both the ring and the substrate's row.
+            let meta = crate::sink::ecs::FrameMeta {
+                level: site.level,
+                target: site.target.index() as u8,
+                code: site.code,
+                flags,
+            };
+            crate::sink::ecs::push(&token, meta, &buf[..n]);
+        }
+    }))
 }
 
 /// Render `file:line fmt (N B)` into `buf`, truncating rather than overflowing.
@@ -213,6 +256,7 @@ pub fn state() -> SinkState {
 pub fn boot(cfg: LogConfig) {
     WANT_CONSOLE.store(u8::from(cfg.console), Ordering::Relaxed);
     WANT_SINK.store(u8::from(cfg.sink_thread), Ordering::Relaxed);
+    WANT_ECS_RING.store(u8::from(cfg.ecs_ring), Ordering::Relaxed);
     SINK_STATE.store(SinkState::Booted as u8, Ordering::Release);
 }
 
@@ -454,7 +498,7 @@ mod tests {
         // sink thread exists, would also make a flag-off run grow a thread.
         let _s = crate::drain_owner::test_serial();
         reset();
-        boot(LogConfig { console: true, sink_thread: false });
+        boot(LogConfig { console: true, sink_thread: false, ecs_ring: false });
         assert_eq!(state(), SinkState::Booted);
         assert_eq!(
             crate::sync_out::write_oracle_line("boyko: ", "must not be written"),
@@ -470,7 +514,7 @@ mod tests {
         // an enable that also opens nothing.
         let _s = crate::drain_owner::test_serial();
         reset();
-        boot(LogConfig { console: true, sink_thread: false });
+        boot(LogConfig { console: true, sink_thread: false, ecs_ring: false });
         assert!(enable());
         assert_eq!(state(), SinkState::Enabled);
         assert!(
@@ -500,7 +544,7 @@ mod tests {
         // exists to refuse -- a host that wanted a crash file must not get a resident thread.
         let _s = crate::drain_owner::test_serial();
         reset();
-        boot(LogConfig { console: false, sink_thread: false });
+        boot(LogConfig { console: false, sink_thread: false, ecs_ring: false });
         assert!(enable());
         std::thread::sleep(std::time::Duration::from_millis(20));
         assert_eq!(sink_passes(), 0, "no thread was asked for, so no pass may have happened");
@@ -515,7 +559,7 @@ mod tests {
         // thread that had hung on its first drain -- which is the failure with no other symptom.
         let _s = crate::drain_owner::test_serial();
         reset();
-        boot(LogConfig { console: false, sink_thread: true });
+        boot(LogConfig { console: false, sink_thread: true, ecs_ring: false });
         assert!(enable());
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -543,7 +587,7 @@ mod tests {
         assert_eq!(flush(), FlushResult::NoConsumer, "un-booted means nothing consumes");
         assert!(t0.elapsed() < std::time::Duration::from_millis(50), "must not wait to say no");
 
-        boot(LogConfig { console: false, sink_thread: false });
+        boot(LogConfig { console: false, sink_thread: false, ecs_ring: false });
         assert_eq!(flush(), FlushResult::NoConsumer, "booted but not enabled is still nothing");
         reset();
     }
@@ -552,7 +596,7 @@ mod tests {
     fn flush_drains_inline_when_there_is_no_sink_thread() {
         let _s = crate::drain_owner::test_serial();
         reset();
-        boot(LogConfig { console: false, sink_thread: false });
+        boot(LogConfig { console: false, sink_thread: false, ecs_ring: false });
         assert!(enable());
         let t0 = std::time::Instant::now();
         assert_eq!(flush(), FlushResult::Flushed);
@@ -569,7 +613,7 @@ mod tests {
         // last record was published, so it can finish without ever having seen it.
         let _s = crate::drain_owner::test_serial();
         reset();
-        boot(LogConfig { console: false, sink_thread: true });
+        boot(LogConfig { console: false, sink_thread: true, ecs_ring: false });
         assert!(enable());
         let before = sink_passes();
         assert_eq!(flush(), FlushResult::Flushed);
@@ -589,7 +633,7 @@ mod tests {
         // would silence the one diagnostic that always worked.
         let _s = crate::drain_owner::test_serial();
         reset();
-        boot(LogConfig { console: false, sink_thread: false });
+        boot(LogConfig { console: false, sink_thread: false, ecs_ring: false });
         assert!(enable());
 
         let before = hook_fired();
@@ -624,7 +668,7 @@ mod tests {
         let _s = crate::drain_owner::test_serial();
         reset();
         assert!(!enable(), "enable before boot must refuse rather than half-initialise");
-        boot(LogConfig { console: true, sink_thread: false });
+        boot(LogConfig { console: true, sink_thread: false, ecs_ring: false });
         assert!(enable());
         assert!(enable(), "a launch flag parsed twice must not calibrate twice");
         disable();

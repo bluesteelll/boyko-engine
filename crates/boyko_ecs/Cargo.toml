@@ -6,6 +6,12 @@ edition = "2024"
 [dependencies]
 boyko-utils =  { path = "../boyko_utils" }
 boyko-threadpool = { path = "../boyko_threadpool" }
+# The logging seam (rung L5). The edge runs THIS WAY and never back: `boyko_log` knows nothing
+# about the ECS -- it writes formatted lines into a `.bss` byte ring and one system here copies
+# them into `LogRing`, whose `VmColumn` backing is `pub(crate)` to this crate and must stay so.
+# `boyko-log` depends only on `boyko-diag`, which has an empty `[dependencies]`, so this adds no
+# third-party crate to any graph that reaches the ECS.
+boyko-log = { path = "../boyko_log" }
 fixedbitset = "0.5"
 crossbeam-queue = "0.3"
 crossbeam-utils = "0.8"

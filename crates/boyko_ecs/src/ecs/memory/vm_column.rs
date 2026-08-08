@@ -352,6 +352,31 @@ impl<T: Copy> VmColumn<T> {
         unsafe { std::slice::from_raw_parts(self.base.as_ptr(), self.len) }
     }
 
+    /// The live elements as a contiguous **mutable** slice, in index order.
+    ///
+    /// The `&mut self` twin of [`as_slice`](Self::as_slice), for the callers
+    /// that overwrite a RUN of elements rather than one. `set` in a loop pays a
+    /// release bounds check per element, which is the right price for a
+    /// structural-change path and the wrong one for a `copy_from_slice` of a
+    /// formatted log line: the bound is the same for every byte and proving it
+    /// once is exactly what a slice does.
+    ///
+    /// It cannot widen what a caller may reach — the slice is `[0, len)`, the
+    /// same span `as_slice` exposes — and it cannot move the base, because it
+    /// neither grows nor commits.
+    #[inline]
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [T] {
+        // SAFETY: identical to `as_slice`'s, with exclusivity strengthened from
+        //   "no other reference escapes" to `&mut self`. Before materialization
+        //   `base` is `NonNull::dangling()` AND `len == 0` —
+        //   `from_raw_parts_mut(dangling, 0)` is explicitly valid. After it,
+        //   `base` is non-null, `T`-aligned, its provenance spans the whole
+        //   single-object reservation, and `len * SIZE ≤ committed_bytes ≤
+        //   os_len ≤ isize::MAX`; every element in `[0, len)` was initialized by
+        //   `push`/`set`/`extend_exact`, so no uninitialized `T` is exposed.
+        unsafe { std::slice::from_raw_parts_mut(self.base.as_ptr(), self.len) }
+    }
+
     /// Returns the element at `index`, or `None` if `index >= len`.
     #[inline]
     pub(crate) fn get(&self, index: usize) -> Option<T> {

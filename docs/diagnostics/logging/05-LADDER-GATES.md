@@ -56,7 +56,7 @@ subsystem present is not a baseline for the both-present configuration (S10).
 | **L3-gate** | **G18** `OUT_LOCK` **three-sided** (unwind release; re-entrant completion; **durable fan-out with no console sink**). Flush-without-consumer ⇒ `NoConsumer` immediately; flush-timeout ⇒ within 2 s; shutdown detaches; **`sink_sustained_rate`** finds the drop knee (M19); **S5's four reds** (pre-boot `warn!`, post-shutdown `warn!`, `PRE_FLUSH` ordering, deferred `DiagFlag`); **S7's stderr line-integrity red** — 200 `warn!` while the validation callback fires under `cmd /c … > f 2>&1`, every `[vk-validation] ` occurrence must start a line; give `write_oracle_line` a raw fd ⇒ splices ⇒ red. **S13's boot red**: move the sink-thread spawn or the panic-hook install back into `boot()` ⇒ G2 leg (b)'s OS-thread-count probe and leg (c)'s behavioural hook probe both red on the flag-off run. *(v3's test 16, the `report!` concurrency test, is deleted with `report!` — S1.)* | `tests/`, `benches/` | — |
 | **L4** | File sink + cap (`W0103`), rate limiter, `LOG-CENSUS` incl. `UNPROVEN(lossy)`, `SinkMode::Manual` | `src/{sink/file,rate}.rs` | — |
 | **L4-gate** | `Once` steady state performs **no store** (assembly/`perf` check) **and touches no shared line** (per-site latch, F11); census `UNPROVEN` at 0 records **and** at `dropped > 0` | `tests/`, `benches/` | — |
-| **L5** | ECS seam: `LogPlugin`, `LogRing` (16 B `LogLine`) on `VmReservation`, `LogStats`, `log_drain_system`, **`ECS_HANDOFF`** (B2), and the **manual `Send`/`Sync` impls with their `const _` pin** (B1) | `crates/boyko_ecs/.../log/`, `src/sink/ecs.rs` | the `COMMIT_GRANULE` divisibility asserts **and** the `assert_send_sync` pin |
+| **L5** | ECS seam: `LogPlugin`, `LogRing` (16 B `LogLine`) on `VmReservation`, `LogStats`, `log_drain_system`, **`ECS_HANDOFF`** (B2), and the **manual `Send`/`Sync` impls with their `const _` pin** (B1). **`LogCensus` is NOT here** — it needs `TARGET_STATS`, which is L16's, so the pin names `LogRing` and `LogStats` at this rung and gains `LogCensus` at that one. The drain has **one** duty here; its other two arrive with L16 | `crates/boyko_ecs/.../log/`, `src/sink/{mod,ecs}.rs` | the `COMMIT_GRANULE` divisibility asserts **and** the `assert_send_sync` pin |
 | **L5-gate** | **P1, re-specified twice** (F3 → instrument; S10 → leg matrix): a **headless schedule bench**, not windowed frame time, run as a **2×2 of {logger off, on} × {profiler absent, armed}**, ABBA-counterbalanced, interleaved zero control, **one sitting**. The claim it may make is "logger-on vs off **at a fixed profiler state**", reported at both states. Baselines carry `config_tag = {profiler, logger}`; a sitting whose tag differs returns `NotResolved{ConfigMismatch}` rather than a number | `crates/bench_bevy_vs_boyko/benches/` | — |
 | **L6** | Migrate `boyko_ecs` + `boyko_threadpool`; flip those rows `Pending`→`Live`; `W1501`, `B0002` normalisation, `W0701`, `W0501`/`B0502`, `E0201` | as tabled | `#[should_panic]` substrings |
 | **L7** | Migrate `boyko_rhi_vulkan` **except the messenger, which is not touched at all**; `E2101`; `W2102` ungated in release; census wiring | as tabled | `[vk-validation]` line, byte for byte |
@@ -177,6 +177,66 @@ not needing a *migration* rung beside it, and it is unaffected.
    G5 counts distinct `decode` symbols — at this rung there is one by construction, so the census
    could not go red and would be a gate that cannot fail. It lands with the sink, which is also
    the first rung at which it can mean anything.
+
+### Six L5 decisions taken at implementation
+
+1. **There is no `Last` schedule in this engine, so the drain runs in a SET.** This row and
+   Decision 26 both say "`log_drain_system` in `Last`". `crates/boyko_ecs/src/ecs/core/app/app.rs`
+   declares `CoreSchedule` as a **closed set of two** — `Main` and `Fixed` — and its own doc gives
+   the intended answer: *"finer-grained structure WITHIN a schedule is what Phase-15 sets are
+   for."* So the drain is registered in `Main`, `in_set(LogSet)`, and `LogPlugin::build` interns
+   the set with `configure_set` so a host's `.before(LogSet)` resolves regardless of plugin
+   add-order (the `CameraPlugin` idiom). **What that costs, stated:** with no edge the scheduler
+   may place the drain anywhere in the frame, so a record emitted after it lands in the NEXT
+   frame's ring. Decision 26's "one frame under `Scheduled`" bound therefore holds only for hosts
+   that add the edge; without one it is two. That is a real weakening of a specified bound and it
+   is recorded rather than absorbed.
+
+2. **`LogStats` ships ONE field, not eleven.** `logging/game-facing-surface` pins the full
+   eleven-field struct, and ten of them are folds of state this rung does not own — the lane-side
+   loss fold is L13a, `suppressed` is L4, `sampled_out` is L12, `codes_unindexed` is L11a.
+   Declaring them now would put ten fields in a `Resource` that read `0` forever, and **a value
+   that is structurally always zero is indistinguishable from a measurement of zero**: a HUD
+   showing `emitted: 0` while the log streams is worse than one that does not offer the number
+   yet. Each field arrives with the rung that can fill it. Same reasoning excludes `LogCensus`
+   from this rung entirely (it is L16's, with `TARGET_STATS`), so the `assert_send_sync` pin
+   names `LogRing` and `LogStats` here and gains `LogCensus` at L16.
+
+3. **`log_drain_system`'s flag check is present, argued, and NOT verifiable at this rung.**
+   MEASURED: deleting `if !ecs_ring_enabled() { return; }` leaves the L5 gate GREEN, because the
+   system's only duty here is consuming the handoff and an empty ring is a no-op either way. The
+   check is still correct — at L16 the `frame_epoch` record and the `TARGET_STATS` snapshot are
+   written on the system's **own account** and would materialize the columns on frame 1 in a
+   process that never enabled logging. It is written now so the hole is not left for a later rung,
+   and the test says in words that it does not discriminate it. **L16 obligation: delete the check
+   and confirm the flag-off assertion reds.**
+
+4. **`VmColumn` gains `as_mut_slice`.** The drain copies a formatted line as a run; `set` in a
+   loop pays a release bounds check per byte, which is the right price for a structural-change
+   path and the wrong one for a `copy_from_slice`. It exposes exactly `as_slice`'s span with
+   `&mut self` exclusivity, neither grows nor commits, and so cannot move the base.
+
+5. **`ECS_HANDOFF` is zero bytes when the compile ceiling is `Off`**, mirroring `LANE_ARRAY_LEN`.
+   In that build no site survives the const gates, so nothing can be emitted, drained or pushed —
+   reserving 256 KiB of `.bss` for a ring with no reachable producer is a cost with no
+   corresponding capability. `push`/`drain_into` const-fold to a `return` there.
+
+6. **The consumer role's pass is `lifecycle::drain_once`, not the sink loop's body.** Three
+   callers need exactly this pass — the resident sink thread, a host draining by hand, and L15's
+   `SinkMode::Scheduled` — and a pass that differed between them would make "was the ECS ring fed"
+   depend on which of the three ran.
+
+**One defect this rung's gate caught, recorded because the shape recurs.** `LogRing`'s arena wraps
+by abandoning the tail remainder rather than writing it. A line lying wholly inside that abandoned
+tail is therefore never overwritten, so it is never evicted, so it becomes the oldest live line
+**forever** — and the eviction walk stops at the first non-intersecting tail, so from that moment
+on it evicts *nothing*. Observed as `len` climbing past the arena's capacity (1169 → 1650 → 2150 →
+…) while the ring silently handed out slices of other lines' text. The premise "the cursor's next
+span is always the oldest live line's" was true everywhere except at the wrap, which is the one
+place it was not checked. **The first version of the test did not catch it**: 512 B lines from a
+two-symbol alphabet, at an alignment the 512 KiB arena divides exactly, made a corrupted read
+byte-identical to a correct one — it failed only on a tail assertion, i.e. on the wrong claim. The
+repair was to make each line's content and length a function of its own sequence number.
 
 Ordering constraints: **D0/D1 before L0**; L10 before L11a (a dynamic target is the first consumer
 of a downstream code); L12 after L1; L13b after L13a (rotation is shared); L15 after L13a (the

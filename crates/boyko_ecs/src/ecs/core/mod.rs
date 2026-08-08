@@ -11,6 +11,7 @@ pub mod entity;
 pub mod hierarchy;
 pub mod iters;
 pub mod events;
+pub mod log;
 pub mod relationship;
 pub mod resources;
 pub mod schedule;

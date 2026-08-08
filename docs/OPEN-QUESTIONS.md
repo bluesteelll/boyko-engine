@@ -14,6 +14,42 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-08 — L5 shipped, and it weakened a specified latency bound. No decision needed unless you want it back.
+
+**Recorded, not asked.** This is an architecture fork I decided with the tree in front of me; it is
+here because it makes a *specified* number worse, and a number that quietly got worse is the thing
+this file exists to prevent.
+
+**The situation.** The logging corpus says `log_drain_system` runs "in `Last`", and states the
+in-frame latency bound as **one frame** under `Scheduled` / "sink park + one frame" under `Thread`.
+This engine has no `Last`. `CoreSchedule` is a **closed set of two** (`Main`, `Fixed`) and its own
+doc gives the intended answer — *"finer-grained structure WITHIN a schedule is what Phase-15 sets
+are for."*
+
+**What shipped.** The drain runs in `Main`, `in_set(LogSet)`, and `LogPlugin::build` interns the set
+so a host's `.before(LogSet)` resolves regardless of plugin add-order.
+
+**What it costs.** With no ordering edge the scheduler may place the drain anywhere in the frame, so
+a record emitted *after* it appears in the next frame's ring. **Each specified bound gains one
+frame** for a host that does not add the edge. The drain has no data conflict with anything, so
+nothing forces it late on its own.
+
+**Three ways to get the frame back**, none taken, because all three are bigger than L5:
+
+* **(a) Do nothing** — document the edge and let each host add `.before(LogSet)`. What shipped.
+  Costs one line per host; costs a frame if a host forgets, silently.
+* **(b) Add a third `CoreSchedule` variant.** Honest, matches the corpus verbatim, and touches the
+  frame driver, the routing methods and every `add_systems_in` call site. An engine change to serve
+  one subsystem.
+* **(c) Give the engine a standing `EngineSet::Last`** that the app plugins order everything before.
+  Cheaper than (b) and useful beyond logging, but it is a scheduling convention the engine does not
+  have yet, so introducing it from the logging seam is the tail wagging the dog.
+
+**Blocks nothing.** L16's `G15` is where the bound is actually measured, and it must be measured
+against whichever of these is true then.
+
+---
+
 ## RESOLVED 2026-08-08 — the owner chose (b): raise the budget. Q1 stands, no code changes.
 
 **Decision:** accept the footprint and raise the gate's shipping budget from **1024 KiB to
@@ -940,4 +976,15 @@ claim path's Miri and property legs are unaffected and still planned.
   is unlucky dies with a TERMINAL panic naming the cap. Observed once, then 3 consecutive clean runs
   of the same binary. It is order-dependent, not a regression signal — check by re-running before
   bisecting anything.
+- **`boyko-engine --test internal_docs_anchors` is RED on `master`'s content, and has been for a
+  while.** 13 stale line anchors (10 in `docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md`, 3 in
+  `docs/SYSTEMS.md`) plus 8 over-waivers against a cap of 6 in the meshlet plan. **Proved
+  pre-existing at L5** by stashing the whole rung and re-running: byte-identical failure. It makes
+  `cargo test --workspace` red for everyone, so the next person to run it will spend the same
+  fifteen minutes proving it is not theirs — which is the cost of leaving a standing red in place.
+  Re-deriving the anchors is a self-contained chore and belongs in its own commit.
+- **A line inserted into a widely-cited source silently invalidates every doc anchor below it.**
+  L5 added `VmColumn::as_mut_slice` at ~line 355 and shifted `vm_column.rs:437-449` to `462-474` in
+  two corpus files. The anchor test does not cover `docs/diagnostics/**`, so nothing would have
+  said so. Grep `<file>.rs:[0-9]` across `docs/` after any insertion into a kernel primitive.
 - **`.claude/settings.local.json` is dirty** from earlier sessions and is deliberately never staged.
