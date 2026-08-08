@@ -51,6 +51,7 @@
 pub mod codes;
 pub mod lane;
 pub mod level;
+pub mod lifecycle;
 mod macros;
 pub mod record;
 pub mod site;
