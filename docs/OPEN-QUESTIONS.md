@@ -14,6 +14,63 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-08 — ⚠️ Q1 raised the shipping diagnostics footprint by 1.07 MiB, and the profiler's "≤ 1 MiB retail" headline is now FALSE
+
+**This supersedes the ≈ 2.08 MiB figure in the round-3 entry below.** The correct joint figure is
+**≈ 3.15 MiB**.
+
+**What happened.** At rung D0 I resolved architect blocker **Q1** by deleting `LANE_COUNT`'s build
+profile axis — it was 32 in the shipping profiles while the quantity it indexes,
+`boyko_threadpool::MAX_WORKERS = 64`, is unconditional, so 32 was unsound and below the topology's
+own floor of 66. The resolution (80 in every profile, `455c074`) was correct and I stand behind it.
+**What I did not do at the time was propagate its cost**, and four cells across the two plans were
+sized by that constant:
+
+| Cell | Was (32 lanes) | Is (80 lanes) | Kind |
+|---|---|---|---|
+| profiling `LANES` (`.bss`) | 8 KiB | 20 KiB | reserved |
+| profiling **sample slab** | 192 KiB | **480 KiB** | **committed at first `arm`** |
+| logging `LOG_LANES` (`.bss`) | 512 KiB | 1.25 MiB | reserved |
+| logging `SAMPLE_CTR` (`.bss`) | 16 KiB | 40 KiB | reserved |
+
+Profiler half **908.2 → 1 208.2 KiB**; logger half **1 220.26 → 2 012.26 KiB**; joint
+**2.08 → 3.15 MiB**. The `dev` figures did not move at all, because `dev` was already at 80 —
+**which is exactly why nothing caught this: every check that looked at one row looked at the row
+that was still right.**
+
+**Two things follow that are not "the number got bigger".**
+
+1. **The profiler is now over its OWN budget**, not just the joint one: 1.18 MiB against a stated
+   ≤ 1 MiB. Gates **G23a and G23b assert that bound**, so both now fail at the baseline — they have
+   no reachable green state until this is answered.
+2. **Only 288 KiB of the +1.07 MiB is committed memory.** The rest is `.bss` reserved extent whose
+   resident cost is per *touched* lane, which is the property that made 80-everywhere affordable in
+   the first place. The committed part is entirely the profiler's sample slab, which **D15** commits
+   for all `LANE_COUNT` lanes at first arm.
+
+### The call
+
+- **(a) — my recommendation.** Commit sample regions **per lane on first use** instead of all 80 at
+  arm. A shipping title on an 8-core box claims roughly `workers + dispatcher + host ≈ 10` lanes, so
+  ≈ 60 KiB of slab instead of 480 — the profiler is back under 1 MiB **with Q1 intact and no
+  constant changed**. It edits D15 ("committed once at first arm, never freed"), which is a
+  shipped-behaviour decision, which is why it is yours and not mine.
+- **(b)** Accept 3.15 MiB reserved / ~1.2 MiB committed and restate the headline.
+- **(c)** Cut a table instead: logging's `LOG_LANES` (1.25 MiB), `SINK_OUT` (256 KiB), or the
+  profiler's dynamic-zone arenas (96 KiB per the profiling plan, 40 KiB per `SEAM.md` — that
+  divergence is still open and is the profiling plan's to close).
+
+**Blocks:** profiling rungs 2 and 10 (G23a/G23b). Does **not** block logging L0 or anything on the
+substrate ladder.
+
+**The lesson, recorded because it is the fourth time this shape has appeared in this campaign:** a
+total that is a perfect sum of its printed operands proves nothing about whether the *operands* are
+current. 2.08 MiB was correct arithmetic over two halves the substrate had already invalidated. The
+check that would have caught it is not "does the total add up" but "has anything this total depends
+on been decided since it was written".
+
+---
+
 ## 2026-08-06 — ⚠️ MEASURED: synchronization validation is not live, so the `-ValidationOn` leg proves nothing about barriers
 
 **A genuine missing barrier changed no pixel and emitted no message.** Executed while resolving

@@ -179,11 +179,15 @@ The `LANE` TLS `Cell` costs 2 B of TLS per thread and no `.bss`.
 
 ---
 
-## Q1 — `LANE_COUNT = 32` in the shipping profiles is UNSOUND. **BLOCKER for D0.**
+## Q1 — `LANE_COUNT = 32` in the shipping profiles is UNSOUND. **RESOLVED at `455c074`.**
 
-`LANE_COUNT` is a D0 const, so this blocks the rung.
+`LANE_COUNT` is a D0 const, so this blocked the rung. **The answer, in one line: 80 in every
+profile, and the profile axis deleted** — reasoning below, propagated through the rest of the
+corpus at rung D1 (which is when its cost surfaced: the shipping retail figure moved 908.2 →
+1 208.2 KiB for the profiler and 1 220.26 → 2 012.26 KiB for the logger, and the joint number the
+owner is asked about went 2.08 → **3.15 MiB**).
 
-S9's table sets `LANE_COUNT = 80` in `dev`/`editor` and **32** in `shipping`/`shipping-min`, and
+S9's table set `LANE_COUNT = 80` in `dev`/`editor` and **32** in `shipping`/`shipping-min`, and
 S3 justifies the 80 as *"max, not sum: 64 is a hard const, +dispatcher +host +14 claimable
 spares"*. **Measured against the tree, the 32 contradicts that same sentence:**
 

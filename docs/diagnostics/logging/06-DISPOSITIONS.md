@@ -45,7 +45,7 @@ design holes, fixed by structure and not by prose:
   `drain()` and by the crash drainer alike (Decision 24) — and G14 gains the leg that panics with a
   manual drain in flight.
 - **B8** — `shipping-min` was structurally guaranteed to contain the session's *beginning*: `Manual`
-  never drains, admission control drops new records, so 32 × 16 KiB fills with boot records within
+  never drains, admission control drops new records, so 80 × 16 KiB fills with boot records within
   seconds and everything up to the crash is refused. v4 gives the profile a real consumer:
   `log_drain_system` takes `DRAIN_OWNER` and runs the drain itself once per frame, on the frame
   thread, with the cost stated (Decision 10, Decision 25). The retained window is restated **in
@@ -247,15 +247,17 @@ validation migration, N30's honesty about `W0101`, and M23's tidy-test-primary e
    joint retail figure is **`seam/joint-cost`'s to state** and this row no longer restates it or its
    operands. What it carried — 1.95 MiB, "this crate 1.16, the profiler 0.85" — is withdrawn on two
    counts. (i) **1.16 + 0.85 = 2.01, not 1.95**: the figure never equalled the sum of its own
-   operands, in this revision or any earlier one. (ii) This crate's `shipping` half is **1.19 MiB**,
-   re-summed from the `.bss` matrix's own rows in `logging/ring-and-statics` — not 1.16 (rev 3's) and
-   not the 1.15 the owner's table currently sums, which is why that correction is flagged there with
-   its consequence spelled out (`0.89 + 1.19 = 2.08 MiB`). **The VALUES question is unaffected and is
+   operands, in this revision or any earlier one. (ii) This crate's `shipping` half is **1.97 MiB**,
+   re-summed from the `.bss` matrix's own rows in `logging/ring-and-statics` — not 1.16 (rev 3's),
+   not 1.15, and not the **1.19** this row itself carried until Q1 deleted `LANE_COUNT`'s profile
+   axis and took `LOG_LANES` from 512 KiB to 1.25 MiB. The joint sum went `0.89 + 1.19 = 2.08` →
+   **`1.18 + 1.97 = 3.15 MiB`**. **The VALUES question is unaffected and is
    the point of this row**, and the correction makes it larger rather than smaller: the joint retail
    figure, whatever it resolves to, stands against a profiling
    headline of "≤ 1 MiB retail" the owner may have read as the *whole* diagnostics budget. Reducing
-   it means cutting one of: this crate's 32 × 16 KiB lanes (512 KiB), `SINK_OUT` (256 KiB), or the
-   profiler's dynamic-zone arenas (96 KiB). How much does a shipped title pay for diagnostics?
+   it means cutting one of: this crate's **80 × 16 KiB lanes (1.25 MiB — it read 32 × 16 KiB =
+   512 KiB before Q1)**, `SINK_OUT` (256 KiB), or the profiler's dynamic-zone arenas (96 KiB). How
+   much does a shipped title pay for diagnostics?
    **S13 re-cuts what the number IS but not the question**: it is a reserved extent touched only by
    a player who asked for diagnostics, not a resident cost — so the VALUES call is about address
    space and about what a diagnostics-on run costs, not about what every shipped copy pays at idle.
@@ -277,9 +279,10 @@ validation migration, N30's honesty about `W0101`, and M23's tidy-test-primary e
    stays honest partly *because* three consumers read one table; we have two. Does the owner want the
    third?
 3. **`.bss` budget.** Decision 3's matrix: **≈ 2.90 MiB** reserved for `dev` (v3 said ≈ 3.4; S3 cut
-   lanes 128 → 80 and B2 added a 256 KiB handoff), **≈ 1.19 MiB** for `shipping` *(corrected from a
-   carried 1.15: the matrix's `shipping` rows sum to 1 220 KiB, 40 KiB above the printed figure, and
-   the derivation is written out in `logging/ring-and-statics`)*, demand-zero,
+   lanes 128 → 80 and B2 added a 256 KiB handoff), **≈ 1.97 MiB** for `shipping` *(corrected twice:
+   first from a carried 1.15 — the matrix's `shipping` rows summed to 1 220 KiB, 40 KiB above the
+   printed figure — and then by Q1, which put `shipping` on the same 80 lanes as `dev` and took the
+   sum to 2 012 KiB; the derivation is written out in `logging/ring-and-statics`)*, demand-zero,
    resident a small fraction — and **zero** while the runtime flag is off, because no lane is claimed
    and no buffer is touched (S13). Acceptable, or should `dev` default to 64 × 8 KiB lanes? *(See
    also 1b: in isolation this is a small number; the joint total is `seam/joint-cost`'s.)*
@@ -483,7 +486,7 @@ dropping the sequence number that Decision 26's reader cursor needs.
 | **B5** | The crash-drain CAS treats `Manual` as quiescent; it is not | **FOLDED (correctness bug)** | §Decision 24 — `DRAIN_OWNER`, an `AtomicU64` role token CAS'd identically by all **four** consumers (sink thread, `drain()`, `Scheduled`, crash). `SINK_STATE` loses its exclusivity job and `CrashDraining`. `drain()` returns `DrainResult::Busy` rather than asserting, because a second manual caller is a user error and a `debug_assert` is silent in release. §Gates **G14 gains leg (c)** — panic with a manual drain held open by a barrier — with the red state being v3's exact CAS. E26/E27 added; the `DRAIN_OWNER` CAS is **release-live** |
 | **B6** | Registry check 4 cannot be green at L2 — its corpus names ~25 unregistered codes | **FOLDED, with the measurement redone** | §Decision 6 — TEXT becomes an **explicit directory list excluding `docs/archive/**`**; a `Historical` row status is defined for any future re-inclusion; `docs/diagnostics/B9004.md` and `B9005.md` are named as L2 line items (both exist in source and in **no** document); the block map's "occupied today" column is seeded from the measured 9 distinct source codes; `92xx` is reserved at L2 with **18** `Pending` rows (`W9201`..`W9218`; this row said 17 and the count is adjudicated in `seam/diagnostic-code-space`) and its own measured free-band note. **Measured**: 75 occurrences / 13 files, `docs/archive/**` **29** (not 27), and a case the review and the addendum both missed — code **W9003 at `docs/archive/PHASE-15-PLAN.md:471`**, which is *also* this document's own check-4 red-state example, so v3 would have red **on itself**. Every prefixed literal in v4 names a code this plan registers; unregistered codes are named bare |
 | **B7** | The walker's `#[cfg(test)]` rule cannot exclude the files the ledger says it excludes | **FOLDED** | §Decision 6 — the rule is **cross-file** and specified without a Rust parser: a pre-pass collects `#[cfg(test)]` + optional `#[path]` + `mod NAME;` declarations and marks the resolved file test-only. Verified per file: `compute/tests.rs` 16 within-file; `brick/tests.rs` gated at `brick.rs:1829-1830`; `colored_tests.rs` gated at **`colored.rs:3198-3200` through a `#[path]`** — which the review noted was ungated but did not locate, and which is why the rule must follow `#[path]` too. `#[cfg(any(test, …))]` is treated as test-only **and listed by name** in the walker's report. The `179 − 58 − 23` arithmetic is re-derived against the rule that will run |
-| **B8** | `shipping-min`'s crash file structurally contains the session's beginning | **FOLDED** | §Decision 10 (new `SinkMode::Scheduled`, with **both** of v3's rejection grounds addressed — one answered by `DRAIN_OWNER`, the other **conceded and written down as the profile's cost**), §Decision 25 (`ShippingMin` uses it), §Decision 5 (why the answer is not overrun-oldest), C4, E22. **The retained window is restated in RECORDS**: ≈ 13 100 across 32 lanes, ≈ 410 per lane — and under `Scheduled` that ceiling is never approached, so the crash file holds records adjacent to the crash |
+| **B8** | `shipping-min`'s crash file structurally contains the session's beginning | **FOLDED** | §Decision 10 (new `SinkMode::Scheduled`, with **both** of v3's rejection grounds addressed — one answered by `DRAIN_OWNER`, the other **conceded and written down as the profile's cost**), §Decision 25 (`ShippingMin` uses it), §Decision 5 (why the answer is not overrun-oldest), C4, E22. **The retained window is restated in RECORDS**: ≈ 32 800 across 80 lanes, ≈ 410 per lane (it read 13 100 across 32 lanes before Q1; the per-lane depth is unchanged) — and under `Scheduled` that ceiling is never approached, so the crash file holds records adjacent to the crash |
 | **B9** | The sync route, the exhaustion fallback and E22's mitigation all write a stderr a shipped title does not have | **FOLDED, with one premise corrected** | §Decision 9c "the durable fan-out" — `write_oracle_line` writes **every** configured synchronous destination, including the crash file. G18 gains leg (c). Decision 20's cost is restated: **~200 ns is uncontended and console-only**, the contended bound is `OUT_LOCK`'s 50 ms steal deadline, and "durable-on-write" now means a `write_all`, with `fsync` opt-in (`sync_durable`) at ~0.1-10 ms. **Premise corrected**: `grep -rn windows_subsystem crates src` returns nothing, so stderr is a valid handle on this tree *today*; the invalid-handle case is a future shipping configuration. The **durability** defect was real in every profile including `dev`, which is the half that carries the fix |
 | **B10** | `LogPod`'s blanket encode copies padding; the sink materialises `&[u8]` over uninitialised bytes | **FOLDED (correctness bug)** | §Decision 19b — the blanket `copy_nonoverlapping` is **deleted**. The trait requires `unsafe fn encode_pod(&self, dst: *mut u8)`; the derive generates it **field-by-field through `LogValue`** (which it already required), rejects dynamic-length fields so the sum stays a `const`, and emits `const _: () = assert!(POD_LEN == Σ field lengths)`. `POD_LEN` is no longer `size_of::<Self>()`. **G9b's subject changes** to the padded-encode red, and the `debug_assert!` list loses `POD_LEN == size_of::<Self>()` — the assertion that made the UB look checked |
 | **M1** | The census line that fixes F10 is uncomputable after F11 moved the latch per-site | **FOLDED** | §Decision 8 point 2 + §Data structures `OnceSite` — an intrusive, insert-only `ONCE_SITES` list whose **nodes are the per-site statics the macro already expands**; pushed by a `#[cold]` CAS on the site's single fire, so nothing is added to the steady-state path. The census prints **one row per fired site** (three rows for `W2102`, which is the F11 case), and a never-fired site is **absent**, which is itself the datum. **`RateSlot::fired` is deleted** as dead. Test 31 extended |

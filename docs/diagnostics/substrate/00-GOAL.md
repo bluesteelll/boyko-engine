@@ -96,7 +96,8 @@ it is:
   own worker id and `boyko_diag::LANE`. The second exists only because `boyko_diag` sits
   *below* `boyko_threadpool` and therefore cannot call `current_worker_id()`
   ([`02-LANE.md`](02-LANE.md)).
-- `boyko_diag`'s own `.bss` (≈ 42 KiB dev) must be attributed **exactly once**. Those bytes are
+- `boyko_diag`'s own `.bss` (≈ 42 KiB, the same in every profile — nothing here is sized by
+  `BOYKO_PROFILE`) must be attributed **exactly once**. Those bytes are
   already inside the two subsystems' own rows, because the move is where they came from;
   counting them again as a new row manufactures a footprint regression out of a relocation.
 

@@ -77,7 +77,7 @@ if T::STATIC_CEILING as u8 >= LVL as u8            // const: per-target compile 
 
 ## Decision 3: Statics in `.bss`; `Off == 0`; a genuinely-off build *(extends v1, fixes M21; re-specified by F4, F21, F25; lane extent re-sourced by S3/S9; boot/enable split re-cut by S13)*
 
-**What.** `LANE_BYTES = 16 KiB`. The **lane count is no longer this crate's constant**: it is `boyko_diag::LANE_COUNT`, **80** in `dev`/`editor` and **32** in `shipping`/`shipping-min`, selected by `BOYKO_PROFILE` (S3, S9). v3's `MAX_LANES = 128` is deleted. 80 is a *max*, not a sum: 64 workers (a hard const matching `thread_pool.rs:49`) + dispatcher + host + 14 claimable spares, which is ~7× the measured non-pool thread count in this engine. The lane array is a static, sized by that `const`:
+**What.** `LANE_BYTES = 16 KiB`. The **lane count is no longer this crate's constant**: it is `boyko_diag::LANE_COUNT`, **80 in every build profile — Q1 RESOLVED, the profile axis is deleted** (`substrate/lane-registry`). v3's `MAX_LANES = 128` is deleted. 80 is a *max*, not a sum: 64 workers (a hard const matching `thread_pool.rs:49`) + dispatcher + host + 14 claimable spares, which is ~7× the measured non-pool thread count in this engine. The lane array is a static, sized by that `const`:
 
 ```rust
 pub const LANE_ARRAY_LEN: usize =
@@ -85,7 +85,7 @@ pub const LANE_ARRAY_LEN: usize =
 static LOG_LANES: [LogLane; LANE_ARRAY_LEN] = [LogLane::NEW; LANE_ARRAY_LEN];
 ```
 
-> **BLOCKER carried, not softened.** `LANE_COUNT = 32` in `shipping` is **unsound against a worker-anchored topology** — 64 workers alone need 64 indices, and the floor is 66. That is `substrate/lane-registry`'s open **Q1** and it needs an architect call; this file consumes whatever `LANE_COUNT` resolves to and states the dependency rather than assuming the 32.
+> **BLOCKER RESOLVED — and it cost this file 792 KiB it had not been carrying.** `LANE_COUNT = 32` in `shipping` was unsound against a worker-anchored topology: 64 workers alone need 64 indices and the floor is 66. **Q1's answer was to delete the profile axis, not to pick a number** — `LANE_COUNT = 80` everywhere (`substrate/lane-registry`). This file consumed the 32 in two tables. The corrected rows are below and the difference is stated where it lands rather than folded away: `LOG_LANES` 512 KiB → **1.25 MiB** (+768 KiB) and `SAMPLE_CTR` 16 KiB → **40 KiB** (+24 KiB), so the shipping reserved total goes 1 220.26 KiB → **2 012.26 KiB ≈ 1.97 MiB**. Both are `.bss` reserved extents whose resident cost is `claimed_lanes × row`, so **the resident change is bounded by how many lanes a shipped title actually claims, not by the constant** — which is the property that made 80-everywhere affordable in the first place. The joint consequence, which is larger and is **not** confined to reserved extents, is `seam/joint-cost`'s.
 
 **S13 re-cut of the boot line.** v4 wrote: *"`boot()` is a no-op when `GLOBAL_CEILING == Off`: no sink thread, no panic hook, no `RATE` traffic."* That is now the **weaker** half of a stronger rule. **`boot()` spawns nothing and installs nothing in ANY profile**: it is a pure struct-fill. The sink thread, the process-global panic hook and the `PRE_FLUSH` registration move to **`boyko_log::enable()`**, which runs at launch, before the game loop, on the host thread. With the flag off, none of them exists — in `dev` as much as in `off`. The `GLOBAL_CEILING == Off` case remains the *stronger* statement, because there is then nothing to enable and no lane array to enable it into. The lifecycle text this changes is `logging/sink-lifecycle`'s (Decisions 10 and 12); the argument for the move is `seam/free-when-off`'s.
 
@@ -114,20 +114,27 @@ static LOG_LANES: [LogLane; LANE_ARRAY_LEN] = [LogLane::NEW; LANE_ARRAY_LEN];
 
 | Table | `dev` | `shipping` | Note |
 |---|---|---|---|
-| `LOG_LANES` | **80** × 16 KiB = **1.25 MiB** | 32 × 16 KiB = 512 KiB | reserved; resident is `claimed_lanes × 16 KiB`, and **0 with the flag off**. **80/32 from `boyko_diag::LANE_COUNT`** (S3) — v3's 128 saved 768 KiB by going away |
+| `LOG_LANES` | **80** × 16 KiB = **1.25 MiB** | **80** × 16 KiB = **1.25 MiB** | reserved; resident is `claimed_lanes × 16 KiB`, and **0 with the flag off**. **80 in both columns from `boyko_diag::LANE_COUNT` — Q1 deleted the profile axis**; the shipping cell read 512 KiB at 32 lanes until that resolution propagated |
 | `RATE` | 512 × 64 B = 32 KiB | same | per-code; `Once`/`OnceCounted` no longer use it at all (Decision 8) |
-| `SAMPLE_CTR` | `LANE_COUNT` × 256 × 2 B = **40 KiB** | 16 KiB | one row per lane, producer-private (v3: 64 KiB at 128 lanes) |
+| `SAMPLE_CTR` | `LANE_COUNT` × 256 × 2 B = **40 KiB** | **40 KiB** | one row per lane, producer-private (v3: 64 KiB at 128 lanes). Both columns move together with `LANE_COUNT`; the shipping cell read 16 KiB at 32 lanes |
 | `TARGET_STATS` | 256 × 64 B = 16 KiB | same | consumer-written |
 | `CONTROL` + `TARGETS` + `DYN_NAMES` | 256 B + 2 KiB + 2 KiB | same | |
 | `ONCE_SITES` list heads | 8 B | same | one `AtomicPtr`; the nodes are the per-site statics themselves (M1) |
 | `STAGE` | 256 KiB | 256 KiB | **`static STAGE: UnsafeCell<[u8; STAGE_BYTES]>`** — consumer-owned, reused every drain, never allocated |
 | **`ECS_HANDOFF`** | **256 KiB** | **64 KiB** | *(new — B2)* the sink→ECS SPSC byte ring; present only when `ecs_ring` is enabled. Absent in `shipping-min` (no ECS reader) |
 | `SITE_DICT` + `SINK_OUT` | 64 KiB + 1 MiB | 64 KiB + 256 KiB | binary sink only; absent unless `BinarySink` is configured |
-| **Total reserved** | **≈ 2.90 MiB** (2 972 KiB) | **≈ 1.19 MiB** (1 220 KiB) | resident is a small fraction of each **when armed**, and **0 when the flag is off** |
+| **Total reserved** | **≈ 2.90 MiB** (2 972 KiB) | **≈ 1.97 MiB** (2 012 KiB) | resident is a small fraction of each **when armed**, and **0 when the flag is off** |
 
 **The two totals, summed from the rows above so a reader can check them rather than trust them.**
 `dev` = 1280 + 32 + 40 + 16 + 4.25 + 0.008 + 256 + 256 + 1088 = **2 972.26 KiB ≈ 2.90 MiB**.
-`shipping` = 512 + 32 + 16 + 16 + 4.25 + 0.008 + 256 + 64 + 320 = **1 220.26 KiB ≈ 1.19 MiB**
+`shipping` = 1280 + 32 + 40 + 16 + 4.25 + 0.008 + 256 + 64 + 320 = **2 012.26 KiB ≈ 1.97 MiB**
+
+**The `dev` row did not move and the `shipping` row moved by 792 KiB, for one reason: Q1.** `dev`
+was already at 80 lanes, so every `LANE_COUNT`-derived cell there was already correct; `shipping`
+carried 32 in two cells (`LOG_LANES`, `SAMPLE_CTR`) and both had to follow the constant. The old
+sum, `512 + 32 + 16 + … = 1 220.26 KiB`, is kept in this sentence rather than deleted so that a
+reader meeting the older figure elsewhere in the corpus can tell **which** revision they are
+holding — the pair that matters is (1 220.26 at 32 lanes) and (2 012.26 at 80).
 (`CONTROL` + `TARGETS` + `DYN_NAMES` = 0.25 + 2 + 2 KiB; `ONCE_SITES` = 8 B).
 
 > **The `shipping` figure is CORRECTED here, and the correction is stated rather than made quietly.**
@@ -141,7 +148,7 @@ static LOG_LANES: [LogLane; LANE_ARRAY_LEN] = [LogLane::NEW; LANE_ARRAY_LEN];
 > **Consequence for the seam, stated because the owner sums THIS cell.** `seam/joint-cost` takes the
 > logger's `shipping` half straight from this row (it names it "1 180 KiB `shipping`") and computes
 > the joint retail as `0.89 + 1.15 = 2.04 MiB`. With the row corrected the same sum is
-> **`0.89 + 1.19 = 2.08 MiB`**. `logging/dispositions`' owner-facing question separately carried 1.16
+> `0.89 + 1.19 = 2.08 MiB` — **and Q1 then moved BOTH halves**, so the sum the owner now faces is **`1.18 + 1.97 = 3.15 MiB`**. `logging/dispositions`' owner-facing question separately carried 1.16
 > (rev 3's figure). **The joint row is `seam/joint-cost`'s to land** — this file states its own half,
 > shows the arithmetic that produced it, and does not restate the joint one.
 
@@ -673,8 +680,8 @@ static TARGET_STATS: [TargetStatCell; MAX_TARGETS];
 
 /// One u16 row per LANE, one column per target. Written ONLY by the lane's
 /// owner with plain Relaxed load/store, never an RMW (Decision 20, SAFETY 1d).
-/// Row count follows `boyko_diag::LANE_COUNT` (S3): 40 KiB in `dev`, 16 KiB in
-/// `shipping` (v3: 64 KiB at 128 lanes).
+/// Row count follows `boyko_diag::LANE_COUNT`, which is 80 in EVERY profile
+/// (Q1): 40 KiB everywhere (v3: 64 KiB at 128 lanes).
 static SAMPLE_CTR: [[Cell<u16>; MAX_TARGETS]; LANE_COUNT as usize];
 ```
 

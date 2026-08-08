@@ -379,9 +379,10 @@ regression that a rung is failed for.
 
 **Arithmetic correction carried by S10.** The seam record's joint totals — `dev` 9.33 MiB and
 retail 1.95 MiB — are rev 3's, and **all four halves have been recut since**: the profiler to
-6.67 `dev` / 0.89 retail, the logger to 2.90 `dev` / 1.19 retail. Recomputed from this revision's
-own halves, and from nothing else: `dev` = 6.67 + 2.90 = **≈ 9.57 MiB**, retail = 0.89 + 1.19 =
-**≈ 2.08 MiB**. **The record's table is not wrong; it is one revision old on BOTH rows** — see
+6.67 `dev` / **1.18** retail, the logger to 2.90 `dev` / **1.97** retail. Recomputed from this
+revision's own halves, and from nothing else: `dev` = 6.67 + 2.90 = **≈ 9.57 MiB**, retail =
+1.18 + 1.97 = **≈ 3.15 MiB** (the two retail halves were 0.89 and 1.19 until Q1's deletion of
+`LANE_COUNT`'s profile axis propagated). **The record's table is not wrong; it is one revision old on BOTH rows** — see
 §*The joint cost* below, where the arithmetic is written out, including why the retail figure moved
 by more than a recut explains.
 
@@ -643,7 +644,7 @@ exist at this revision the cell says UNKNOWN rather than carrying a number that 
 | | Profiling | Logging | Naive sum (two independent implementations) | With `boyko_diag` | Flag OFF (S13) |
 |---|---|---|---|---|---|
 | **Total, dev** † | 6.67 MiB | 2.90 MiB | **UNKNOWN** | **≈ 9.57 MiB** reserved (= 6.67 + 2.90) | **≈ 0 resident** |
-| **Total, shipping** † | 0.89 MiB | 1.19 MiB | **UNKNOWN** | **≈ 2.08 MiB** reserved (= 0.89 + 1.19) | **≈ 0 resident** |
+| **Total, shipping** † | **1.18 MiB** | **1.97 MiB** | **UNKNOWN** | **≈ 3.15 MiB** reserved (= 1.18 + 1.97) | **≈ 0 resident** |
 | TLS slots (diagnostics) | 1 | 1 (+`Drop`) | 2 | **1**, no `Drop` — but a worker holds **two** `Cell`s, the pool's and `boyko_diag`'s | unchanged |
 | `rdtsc` per {zone + log record} | 2 | 1 | 3 | **3 — sharing does NOT reduce it** | 0 (nothing stamps) |
 | Allocations, first emit | 0 | ≤ 1 | ≤ 1 | **0** | 0 |
@@ -661,11 +662,26 @@ so **there is nothing to add**.
 
 1. **The Totals are sums of the operands printed beside them, and of nothing else.**
    `dev` = 6.67 + 2.90 = **9.57 MiB**; in the KiB the source rows actually state,
-   ≈ 6 831 + 2 972 = **9 803 KiB = 9.57 MiB**. `shipping` = 0.89 + 1.19 = **2.08 MiB**;
-   908 + 1 220.26 = **2 128.26 KiB = 2.08 MiB**. The halves are this revision's: the profiler's
-   sizing rows (≈ 908 KiB `shipping`, ≈ 6.67 MiB `dev`, both **with** its `.bss` statics counted)
-   and the logger's `.bss` budget (1 220 KiB `shipping`, 2 972 KiB `dev`). `boyko_diag`'s own
+   ≈ 6 831 + 2 972 = **9 803 KiB = 9.57 MiB**. `shipping` = 1.18 + 1.97 = **3.15 MiB**;
+   1 208.2 + 2 012.26 = **3 220.46 KiB = 3.15 MiB**. The halves are this revision's: the profiler's
+   sizing rows (≈ 1 208 KiB `shipping`, ≈ 6.67 MiB `dev`, both **with** its `.bss` statics counted)
+   and the logger's `.bss` budget (2 012 KiB `shipping`, 2 972 KiB `dev`). `boyko_diag`'s own
    `.bss` is already inside them and is counted once — qualification (2) below.
+
+   ⚠️ **The `shipping` row moved by 1.07 MiB because of Q1, and the `dev` row did not move at all.**
+   `substrate/lane-registry`'s Q1 deleted `LANE_COUNT`'s profile axis: 32 → 80 in the shipping
+   profiles, 80 → 80 in `dev`. Four cells across the two plans were sized by that constant —
+   profiling's `LANES` (8 → 20 KiB) and sample slab (192 → 480 KiB), logging's `LOG_LANES`
+   (512 KiB → 1.25 MiB) and `SAMPLE_CTR` (16 → 40 KiB) — so the profiler half went 908.2 →
+   **1 208.2 KiB** and the logger half 1 220.26 → **2 012.26 KiB**. **`dev` was already at 80
+   lanes, which is why no `dev` figure needed touching and why the staleness was invisible to
+   anyone who checked one row.** Q1 landed at `455c074`; these numbers followed it only at rung
+   D1, and in between every retail figure in the corpus was one architect decision out of date.
+
+   **Of the +1.07 MiB, +288 KiB is COMMITTED and the rest is reserved extent.** The profiler's
+   sample slab is committed for all `LANE_COUNT` lanes at first arm (D15); `.bss` tables are
+   demand-zero and go resident per touched lane. So the resident consequence of Q1 is the slab and
+   essentially nothing else — which is also where the repair is, if one is wanted.
 
    ⚠️ **The `shipping` operand was stale for one round, and the failure is worth keeping.** This
    table previously printed a logging half of 1 180 KiB and a total of 2.04 MiB. The total was a
@@ -692,7 +708,9 @@ so **there is nothing to add**.
    this file printed `0.89 | 1.15 | naive 1.95` and 0.89 + 1.15 = **2.04**. 1.95 is 0.85 + 1.10 —
    rev 3's *with-substrate* halves — sitting in the naive column, which is also the whole source of
    the "zero saving" that column then claimed. **The joint retail figure at this revision is
-   2.08 MiB**, and it is the number the owner call below is about.
+   3.15 MiB**, and it is the number the owner call below is about. It was 2.08 MiB for exactly one
+   round — a figure that summed correctly over two halves the substrate had already invalidated,
+   which is the same lesson as the 1 180 above wearing different clothes.
 
 **The substrate is bought for CORRECTNESS, not footprint** — one lane number, one epoch, a loss
 report that cannot itself be dropped. **Neither subsystem plan may claim otherwise, and no rung of
@@ -707,15 +725,18 @@ on it.** *(A statement about reserved extents; S13 does not touch it either way.
 slot" row counts *diagnostics* slots; `boyko_threadpool::tls::CURRENT_WORKER_ID` is untouched, so a
 worker holds two `Cell`s after D1 — the second exists only because `boyko_diag` sits *below*
 `boyko_threadpool` and cannot call `current_worker_id()`. (2) `boyko_diag`'s own `.bss` (≈ 42 KiB
-dev) is attributed to its row **exactly once**; the joint table already counts those bytes inside
+in every profile — it has no profile-sized table) is attributed to its row **exactly once**; the joint table already counts those bytes inside
 the two subsystems' rows, and double-counting them would **manufacture a footprint regression out
 of a move**.
 
-**The ≈ 2.08 MiB retail figure against the profiling plan's "≤ 1 MiB retail" headline is an
-owner-facing VALUES question**, recorded in §*Open — needs the OWNER* below. **The correction makes
-that question larger, not smaller**, which is why the number is carried into the open call rather
-than left to be re-derived there: any document still stating the joint retail figure as 1.95 MiB is
-quoting a cell that never summed.
+**The ≈ 3.15 MiB retail figure against the profiling plan's "≤ 1 MiB retail" headline is an
+owner-facing VALUES question**, recorded in §*Open — needs the OWNER* below. **Every correction so
+far has made that question larger, not smaller** — 1.95 → 2.04 → 2.08 → 3.15 — which is why the
+number is carried into the open call rather than left to be re-derived there. And the headline it
+is measured against is itself retracted: at 80 lanes the profiler alone is 1.18 MiB, so **"≤ 1 MiB
+retail" is now false for the profiler in isolation, not only for the shipped pair.** Any document
+still stating the joint retail figure as 1.95 MiB is quoting a cell that never summed; any document
+stating 2.08 is quoting a cell that summed correctly over stale operands.
 
 ---
 
@@ -725,7 +746,7 @@ Owned here so neither ladder can state it differently.
 
 | Rung | Waits for | Because |
 |---|---|---|
-| logging **L0** | substrate **D0** (clock, lane, loss, storage policy, `section_report`) and **D1** (`boyko_threadpool -> boyko_diag`; `set_lane` at its **three** sites) | every lane index the crate uses is minted there (S3), and `GLOBAL_CEILING`/`LANE_COUNT` come from `boyko_diag/build.rs` (S9) |
+| logging **L0** | substrate **D0** (clock, lane, loss, storage policy, `section_report`) and **D1** (`boyko_threadpool -> boyko_diag`; `set_lane` at its **three** sites) | every lane index the crate uses is minted there (S3); `LANE_COUNT` is a plain `boyko_diag` const (Q1) and `GLOBAL_CEILING` is re-exported from `boyko_diag`, where it is a hand-written const until `boyko_diag/build.rs` lands at **J1** (S9) |
 | profiling **rung 1** | substrate **D0** and **D1** | same |
 | profiling **rung 2** | logging **L3** (the sink, `flush`/`shutdown`, `write_oracle_line`, the panic-hook chain and `PRE_FLUSH`) | **the fold is what emits every `W92xx`** — `profiling_abi` emits nothing at all (S5/S6) |
 | logging **L8b** | profiling **rung 7** (the six stdout consumers migrated) **and rung 7b** (floor re-measurement) | S1: L8b's 20 measurement rows **do not exist**, because rung 7 already removed their producers. Running L8b first would leave `report!`-shaped work with no macro to do it |
@@ -759,8 +780,11 @@ profiler absent is a delta in a configuration a shipped frame never runs.
 
 **Exactly one `build.rs` in the workspace reads `BOYKO_PROFILE`: `crates/boyko_diag/build.rs`**, at
 the bottom of the graph, so a change rebuilds every dependent. It emits `GLOBAL_TIER`,
-`GLOBAL_CEILING`, `LANE_COUNT`, `REGION_CAPACITY`, `ENGINE_ZONE_SLOTS`, `MAX_USER_BUDGET`,
-`DYN_NAME_BYTES` and `BOYKO_BUILD_HASH`, plus `cargo:rerun-if-env-changed`. **`crates/boyko_log/build.rs`
+`GLOBAL_CEILING`, `REGION_CAPACITY`, `ENGINE_ZONE_SLOTS`, `MAX_USER_BUDGET`,
+`DYN_NAME_BYTES` and `BOYKO_BUILD_HASH`, plus `cargo:rerun-if-env-changed`. **`LANE_COUNT` is
+deliberately NOT on this list** — Q1 deleted its profile axis, so it is a plain `const` in
+`boyko_diag::lane`; returning it to the build axis re-opens the unsoundness Q1 closed, because the
+quantity it indexes (`MAX_WORKERS`) has no profile axis to follow. **`crates/boyko_log/build.rs`
 is NOT created, and neither is `crates/boyko_ecs/build.rs`** (rev 3's integration row is withdrawn);
 both subsystems **re-export** their consts from `boyko_diag`.
 
@@ -770,13 +794,21 @@ is why it belongs to the joint rung **J1** and explicitly **not** to substrate r
 **Also verified: `BOYKO_PROFILE` appears nowhere in `crates/`, `src/`, `scripts/`, `.github/` or
 `docs/` outside the three plan documents — the name is free.**
 
-| `BOYKO_PROFILE` | `GLOBAL_TIER` | `profiling-analysis` | log `GLOBAL_CEILING` | `LANE_COUNT` | `REGION_CAPACITY` | `ENGINE_ZONE_SLOTS` | `MAX_USER_BUDGET` | default `LogRuntimePreset` |
-|---|---|---|---|---|---|---|---|---|
-| `dev` (default) | `Deep` | on | `Trace` | 80 | 1024 | 4096 | 3072 | `Dev` |
-| `editor` | `Dev` | on | `Debug` | 80 | 1024 | 4096 | 3072 | `Editor` |
-| `shipping` | `Always` | off | `Info` | 32 | 128 | 256 | 512 | `Shipping` |
-| `shipping-min` | `Always` | off | `Warn` | 32 | 128 | 256 | 512 | `ShippingMin` |
-| `off` | feature `profiling` off | off | `Off` | 0 | — | — | — | `Off` |
+| `BOYKO_PROFILE` | `GLOBAL_TIER` | `profiling-analysis` | log `GLOBAL_CEILING` | `REGION_CAPACITY` | `ENGINE_ZONE_SLOTS` | `MAX_USER_BUDGET` | default `LogRuntimePreset` |
+|---|---|---|---|---|---|---|---|
+| `dev` (default) | `Deep` | on | `Trace` | 1024 | 4096 | 3072 | `Dev` |
+| `editor` | `Dev` | on | `Debug` | 1024 | 4096 | 3072 | `Editor` |
+| `shipping` | `Always` | off | `Info` | 128 | 256 | 512 | `Shipping` |
+| `shipping-min` | `Always` | off | `Warn` | 128 | 256 | 512 | `ShippingMin` |
+| `off` | feature `profiling` off | off | `Off` | — | — | — | `Off` |
+
+**The `LANE_COUNT` column was DELETED from this table, not filled in with 80s** *(Q1)*. Leaving a
+column of identical values invites the next editor to differentiate it again, which is precisely
+the edit Q1 forbids: the constant indexes `MAX_WORKERS = 64`, which has no profile axis, so any
+per-profile lane count is unsound rather than merely wasteful. It read 80 / 80 / 32 / 32 / 0 here.
+The `off` row's 0 is covered where it belongs — logging's `LANE_ARRAY_LEN` is
+`if GLOBAL_CEILING == Off { 0 } else { LANE_COUNT }`, an array length in the consuming crate, not
+a change to the topology.
 
 - **`BOYKO_PROFILING_TIER` / `BOYKO_PROFILING_REGION_CAPACITY` / `BOYKO_PROFILING_DYN_CAP` /
   `BOYKO_LOG_MAX_LEVEL` survive ONLY under `BOYKO_PROFILE=custom`.** Setting one beside a named
@@ -959,16 +991,42 @@ is **not lost — it is emitted at frame 1**.
 
 Collected here so neither plan can bury one in a disposition table.
 
-1. **VALUES — the shipping diagnostics budget is ≈ 2 MiB, not 1.** The profiling plan's headline is
-   ≤ 1 MiB and it holds *for the profiler alone*. With `boyko_log` present the joint figure is
-   **≈ 2.08 MiB** — 0.89 + 1.19, recomputed this revision from the two halves; the **1.95** carried
-   here until now was rev 3's *with-substrate* halves (0.85 + 1.10) standing in a column that was
-   supposed to hold the sum of the printed ones, and it equalled 0.89 + 1.15 no better than it
-   equalled 0.85 + 1.16. The owner may have read the 1 MiB row as the whole diagnostics budget.
-   Reducing it means cutting one of: logging's 32 × 16 KiB lanes (**512 KiB**), its `SINK_OUT`
-   (**256 KiB**), or the profiler's non-foldable user-zone arenas (**40 KiB** in `shipping`).
-   *(S13 changes what the number means — reserved address space, not resident RAM — but it does not
-   answer the question, because the reservation is still declared.)*
+1. **VALUES — the shipping diagnostics budget is ≈ 3.15 MiB, not 1, and the "≤ 1 MiB" headline is
+   now false for the profiler ALONE.** With `boyko_log` present the joint figure is **≈ 3.15 MiB**
+   = 1.18 + 1.97, recomputed from the two halves. The profiler's own half is **1.18 MiB against its
+   own ≤ 1 MiB target** — over by 184.2 KiB.
+
+   **What moved it, and when.** `substrate/lane-registry`'s **Q1** (resolved at `455c074`) deleted
+   `LANE_COUNT`'s profile axis: it was 32 in the shipping profiles while the quantity it indexes,
+   `boyko_threadpool::MAX_WORKERS = 64`, is unconditional — unsound, and below the topology's own
+   floor of 66. The resolution was 80 everywhere. Four cells were sized by that constant and none
+   of them followed until rung D1: profiling's `LANES` 8 → 20 KiB and sample slab 192 → 480 KiB,
+   logging's `LOG_LANES` 512 KiB → 1.25 MiB and `SAMPLE_CTR` 16 → 40 KiB. **`dev` did not move at
+   all**, because `dev` was already at 80.
+
+   **The prior figures, so a reader can date what they are holding:** 1.95 (never summed at all),
+   2.04, 2.08 (summed correctly over pre-Q1 halves), and now 3.15.
+
+   **Of the +1.07 MiB, only +288 KiB is committed memory** — the profiler's sample slab, which D15
+   commits for all `LANE_COUNT` lanes at first arm. The other ~792 KiB is `.bss` reserved extent
+   whose resident cost is per *touched* lane, which is the property that made 80-everywhere
+   affordable in the first place. So the choices are no longer symmetric:
+
+   - **(a) Commit sample regions per lane on first use** instead of all 80 at arm. A ~10-lane
+     shipping title then holds ≈ 60 KiB of slab instead of 480, and the profiler is back under
+     1 MiB **with Q1 intact**. This is an edit to **D15**, and it is the option that costs the
+     player nothing. *(Architect's recommendation; it needs the owner only because D15 is a
+     shipped-behaviour decision.)*
+   - **(b) Accept 3.15 MiB reserved / ~1.2 MiB committed** and restate the headline.
+   - **(c) Cut a table**: logging's `LOG_LANES` (now **1.25 MiB** at 80 lanes, was 512 KiB at 32),
+     its `SINK_OUT` (**256 KiB**), or the profiler's non-foldable user-zone arenas (**40 KiB** in
+     `shipping` per `SEAM.md`; the profiling plan says 96 KiB — that divergence is item 1's
+     footnote and is the profiling plan's to close).
+
+   **Gates G23a and G23b are BLOCKED until this is answered**: their bound assertion fails at the
+   baseline, so neither has a reachable green state.
+   *(S13 changes what most of the number means — reserved address space, not resident RAM — but it
+   does not answer the question, and it does not apply to the slab at all.)*
 
 2. **SCOPE — `shipping-min` semantics.** Logging's `shipping-min` disables the resident sink
    *thread*, but the profiler's `Always` tier **still writes a telemetry stream synchronously on the

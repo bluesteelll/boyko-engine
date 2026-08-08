@@ -66,10 +66,10 @@ lane 64       LANE_DISPATCHER (host thread INSIDE ThreadPool::install)
 lane 65       LANE_HOST       (host thread OUTSIDE install; claimed by the runner at boot)
 lane 66..     spares, claim_lane() / release_lane(), #[cold]
 lane 0xFFFF   LANE_UNCLAIMED  (emission is refused and counted)
-LANE_COUNT = 80 in `dev`/`editor`, 32 in `shipping`/`shipping-min`   (BOYKO_PROFILE — S9)
+LANE_COUNT = 80 in EVERY profile — no profile axis (Q1 RESOLVED)
 ```
 
-`LANE_COUNT` is a **max, not a sum**: 64 is a hard const, plus dispatcher, host and 14 claimable spares (7× the measured non-pool thread count in this engine). Rev 3's 68 is superseded. **Open, and not this file's to close:** the substrate records `LANE_COUNT = 32` in shipping as a BLOCKER (Q1) against a worker-anchored topology whose floor is 66 — see `substrate/02-LANE.md`. This plan consumes whatever that call resolves to; it does not carry a second answer.
+`LANE_COUNT` is a **max, not a sum**: 64 is a hard const, plus dispatcher, host and 14 claimable spares (7× the measured non-pool thread count in this engine). Rev 3's 68 is superseded. **Q1 is RESOLVED and it did not pick one of the tabled numbers:** it deleted the profile axis, because `LANE_COUNT` was made per-profile while the quantity it indexes — `MAX_WORKERS = 64` — is unconditional (`substrate/02-LANE.md`). This plan consumed the shipping 32 in four places; all four are corrected below, and the correction **raises the shipping total past the ≤ 1 MiB headline** — the consequence is stated at the sizing table rather than absorbed.
 
 **Rev 2 specified lane resolution twice, incompatibly** (F12): A1 step 4 said "lane from a TLS `Cell<u16>`, one load", rev 2's D2 said "worker id `< 64` → that lane; `WORKER_ID_DISPATCHER` → 64; else the TLS-claimed lane; else drop" — different mechanisms with different costs — and nothing in the integration table set the TLS for workers, so *every worker would have resolved "unclaimed" and dropped*.
 
@@ -358,7 +358,7 @@ pub use boyko_diag::lane::{
     LANE_WORKER_MAX,   // 64 == boyko_threadpool::MAX_WORKERS (thread_pool.rs:49)
     LANE_DISPATCHER,   // 64
     LANE_HOST,         // 65
-    LANE_COUNT,        // 80 in dev/editor, 32 in shipping/shipping-min (BOYKO_PROFILE — S9)
+    LANE_COUNT,        // 80 in EVERY profile — no profile axis (Q1)
     LANE_UNCLAIMED,    // u16::MAX
     lane, set_lane, claim_lane, release_lane,
 };
@@ -366,10 +366,10 @@ pub use boyko_diag::lane::{
 
 pub const REGION_CAPACITY: u32 = /* 1024 dev/editor, 128 shipping — per profile (D19/S9) */;
 // dev:      80 lanes x 2 regions x 1024 x 24 B = 3.75 MiB of sample slab
-// shipping: 32 lanes x 2 regions x  128 x 24 B =  192 KiB
+// shipping: 80 lanes x 2 regions x  128 x 24 B =  480 KiB   (was 192 KiB at 32 lanes — Q1)
 
 static ARM_MASK: CachePadded<AtomicU64>;             // 0 == disarmed. Own line, read-mostly (D20)
-static LANES:    [ZoneLane; LANE_COUNT as usize];    // .bss: 20 KiB dev / 8 KiB shipping
+static LANES:    [ZoneLane; LANE_COUNT as usize];    // .bss: 20 KiB in EVERY profile (Q1)
 static REGISTRY: [AtomicPtr<ZoneDesc>; ZONE_ID_SPACE];   // .bss: 56 KiB dev / 6 KiB shipping
 static DYN_DESCS: SyncCells<ZoneDesc, MAX_USER_BUDGET>;  // .bss: 144 KiB dev / 24 KiB shipping (A7)
 static DYN_NAMES: SyncCells<u8, DYN_NAME_BYTES>;         // .bss:  64 KiB dev / 16 KiB shipping
@@ -431,7 +431,7 @@ The `Profiler` `Resource` then holds a `base: NonNull<u8>` copied from `VM_BASE`
 
 **`Send`/`Sync`, stated rather than assumed (B4).** A `NonNull<u8>` field makes `Profiler` `!Send`/`!Sync` while `Resource: 'static + Send + Sync + Sized` (`crates/boyko_ecs/src/ecs/core/resources/resource.rs:42`), so the type carries an explicit `unsafe impl Send for Profiler {}` / `unsafe impl Sync for Profiler {}` with three clauses: (a) every mutation happens outside the schedule, on the dispatcher/host thread (D16/A3), so there is never a concurrent `&mut`; (b) in-frame access is `Res<Profiler>`, shared-only, and the kernel's own resource borrow rules enforce it; (c) the base is write-once and the region is never resized, never moved and never freed (above), so no pointer derived from it can dangle. **That impl is in the unsafe inventory and on the Miri list — rev 3 had it in neither**, and `VmReservation`'s own doc (`vm.rs:82-84`) demands exactly this: *"owners that are shared across threads opt in with their own `unsafe impl` and their own exclusivity argument"*.
 
-**Transport control blocks.** `static LANES: [ZoneLane; LANE_COUNT]` in `.bss` — 256 B per lane × 80 = **20 KiB** in `dev`, × 32 = **8 KiB** in `shipping` (four distinct lines per lane after the two-region split, D19). Each region's `buf: AtomicPtr<Sample>` is published `Release` once at first arm.
+**Transport control blocks.** `static LANES: [ZoneLane; LANE_COUNT]` in `.bss` — 256 B per lane × 80 = **20 KiB in every profile** (four distinct lines per lane after the two-region split, D19). It read 8 KiB in `shipping` until Q1 deleted the profile axis. Each region's `buf: AtomicPtr<Sample>` is published `Release` once at first arm.
 
 **Multi-world.** The rings are process-global; worlds are not. **v1 binds the profiler to exactly one world**: `ProfilerPlugin::build` records the `WorldId` in a global; a second registration is `boyko-E9204`. Enforced at bind time, not assumed.
 
@@ -586,14 +586,21 @@ pub struct Profiler {
 
 | Configuration | `.bss` statics | Sample slab | Columns | B/C | Analysis | Frames+rounds+legs+cut | GPU host | **Total** |
 |---|---|---|---|---|---|---|---|---|
-| **`shipping`** (`Always`, analysis off, `Z = 256`, `hist_slots = 0`, 32 lanes, `REGION_CAPACITY = 128`) | **54 KiB** | 192 KiB | 636 KiB | 6.8 KiB | — | 11.4 KiB (no rounds, no legs) | 8 KiB | **≈ 908 KiB = 0.89 MiB** |
+| **`shipping`** (`Always`, analysis off, `Z = 256`, `hist_slots = 0`, **80 lanes**, `REGION_CAPACITY = 128`) | **66 KiB** | 480 KiB | 636 KiB | 6.8 KiB | — | 11.4 KiB (no rounds, no legs) | 8 KiB | **≈ 1 208 KiB = 1.18 MiB** ⚠️ |
 | **`dev`, armed, analysis off** (`Z = 1024`, 64 hist slots, 80 lanes, `REGION_CAPACITY = 1024`) | **284 KiB** | 3.75 MiB | 2.48 MiB | 52 KiB | — | 108 KiB | 8 KiB | **≈ 6.67 MiB** |
 | **`dev`, armed, analysis on** | 284 KiB | 3.75 MiB | 2.48 MiB | 52 KiB | 384 KiB | 108 KiB | 8 KiB | **≈ 7.05 MiB** |
 | **`dev`, `user_zone_budget = 3072` (`Z = 7168`)** | 284 KiB | 3.75 MiB | 17.4 MiB | 214 KiB | 384 KiB | 108 KiB | 8 KiB | **≈ 22.1 MiB**, and `W9211` fires |
 
-`.bss` breakdown — the rows M10 found missing: **shipping** = `LANES` 8 KiB + `REGISTRY` (256+512)×8 = 6 KiB + `DYN_DESCS` 512×48 = 24 KiB + `DYN_NAMES` 16 KiB = **54 KiB**. **dev** = `LANES` 20 KiB + `REGISTRY` (4096+3072)×8 = 56 KiB + `DYN_DESCS` 3072×48 = 144 KiB + `DYN_NAMES` 64 KiB = **284 KiB**. Rev 3 carried the dev figures into *both* configurations (234 KiB of them uncounted in the retail row), which alone would have broken the ≤ 1 MiB claim at 873 + 234 = 1107 KiB. The fix is not to stop counting them: `MAX_USER_BUDGET`, `DYN_NAME_BYTES` and `ENGINE_ZONE_SLOTS` are now **per-profile consts** (D6/D21), which is what makes the shipping row 908 KiB *with* the statics counted.
+`.bss` breakdown — the rows M10 found missing: **shipping** = `LANES` **20 KiB** + `REGISTRY` (256+512)×8 = 6 KiB + `DYN_DESCS` 512×48 = 24 KiB + `DYN_NAMES` 16 KiB = **66 KiB** (it read `LANES` 8 KiB / total 54 KiB at 32 lanes). **dev** = `LANES` 20 KiB + `REGISTRY` (4096+3072)×8 = 56 KiB + `DYN_DESCS` 3072×48 = 144 KiB + `DYN_NAMES` 64 KiB = **284 KiB**. Rev 3 carried the dev figures into *both* configurations (234 KiB of them uncounted in the retail row), which alone would have broken the ≤ 1 MiB claim at 873 + 234 = 1107 KiB. The fix is not to stop counting them: `MAX_USER_BUDGET`, `DYN_NAME_BYTES` and `ENGINE_ZONE_SLOTS` are **per-profile consts** (D6/D21), which is what held the shipping row at 908 KiB *with* the statics counted. **`LANE_COUNT` is no longer one of them** — Q1 deleted its profile axis, and the row is now 1 208.2 KiB. `MAX_USER_BUDGET`, `DYN_NAME_BYTES` and `ENGINE_ZONE_SLOTS` remain per-profile; that part of the sentence still holds and is why the `.bss` column is 66 KiB rather than 284.
 
-`shipping` reaches ≤ 1 MiB through five profile consts together — `REGION_CAPACITY = 128`, `LANE_COUNT = 32`, `ENGINE_ZONE_SLOTS = 256`, `MAX_USER_BUDGET = 512`, `hist_slots = 0` — plus the `profiling-analysis` `#[cfg]` removing `compat`, `intervals`, `rounds` and `legs` entirely. **Committed once at first arm, never freed** (D15). And it is ≤ 1 MiB **for the profiler alone**: with `boyko_log` also present the number a shipped title pays is the **joint** one, which `seam/joint-cost` owns and which this file does not restate. (It restated it here as ≈ 1.99 MiB until this repair; that figure was assembled from a logger retail half of 1.10 MiB, against the 1.15 the logger's own files carry, so it was a fourth statement of a one-owner number *and* a wrong one. The 908.2 KiB above is derived in this file's own table and stays.)
+⚠️ **`shipping` NO LONGER reaches ≤ 1 MiB, and the headline is retracted rather than restated.** The row reached 908 KiB through five profile consts together — `REGION_CAPACITY = 128`, **`LANE_COUNT = 32`**, `ENGINE_ZONE_SLOTS = 256`, `MAX_USER_BUDGET = 512`, `hist_slots = 0` — plus the `profiling-analysis` `#[cfg]` removing `compat`, `intervals`, `rounds` and `legs` entirely. **Q1 removed the second of those five**: `LANE_COUNT` is 80 in every profile, so `LANES` grows 8 → 20 KiB and the sample slab 192 → 480 KiB, and the row lands at **1 208.2 KiB — 184.2 KiB over the 1 024 KiB budget.**
+
+**Two things follow, and neither is a rounding argument.**
+
+1. **The overrun is 288 of the 300 KiB in the sample slab, and the slab is the one COMMITTED term.** `.bss` is reserved extent whose resident cost is `touched_lanes × row`; the slab is committed at first arm for all `LANE_COUNT` lanes at once (D15). So the honest split of the +300 KiB is **+288 KiB committed, +12 KiB reserved**, and only the first is memory a player's machine actually holds.
+2. **The repair that keeps both Q1 and the budget is to commit sample regions per lane on first use instead of for all 80 at arm.** A shipped title on an 8-core box claims roughly `workers + dispatcher + host ≈ 10` lanes, i.e. 10 × 2 × 128 × 24 B = **60 KiB** of slab against the 480 reserved — comfortably back under budget with the same constant. That edits **D15**, whose current wording ("committed once at first arm, never freed") is what forbids it, and D15 is not this correction's to rewrite: it belongs to the profiling rung that owns the arm path, and it changes what `G23a` measures.
+
+Until that call is made this row stands at 1.18 MiB and **no document may quote "≤ 1 MiB retail"**. And 1.18 MiB is the figure **for the profiler alone**: with `boyko_log` also present the number a shipped title pays is the **joint** one, which `seam/joint-cost` owns and which this file does not restate. (It restated it as ≈ 1.99 MiB one repair ago; that figure was assembled from a logger retail half of 1.10 MiB against the 1.15 the logger's own files carried, so it was a fourth statement of a one-owner number *and* a wrong one. The **1 208.2 KiB** above is derived in this file's own table and is what stays; the **908.2 KiB** it replaces was correct arithmetic over a `LANE_COUNT` the substrate had already deleted, which is the whole failure mode — a total can be a perfect sum of its operands and still be a stale number.) The owner-facing consequence is raised in `docs/OPEN-QUESTIONS.md`.
 
 **Every row of this table is the ARMED figure** (S13). Each is committed by `arm`, which is the enable path; with the runtime flag off `arm` never runs, the columns are never committed, and the `.bss` column is reserved address space that no page fault has yet made resident. `profiling/00-GOAL-TARGETS.md` carries the flag-off column of the budget table and the gate (`GJ1`) that measures it.
 

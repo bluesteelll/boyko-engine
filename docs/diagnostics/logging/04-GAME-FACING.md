@@ -280,8 +280,8 @@ static TARGET_STATS: [TargetStatCell; MAX_TARGETS];
 
 /// One u16 row per LANE, one column per target. Written ONLY by the lane's
 /// owner with plain Relaxed load/store, never an RMW (Decision 20, LogLane
-/// SAFETY clause 1d). Row count follows `boyko_diag::LANE_COUNT` (S3):
-/// 40 KiB in `dev`, 16 KiB in `shipping` (v3: 64 KiB at 128 lanes).
+/// SAFETY clause 1d). Row count follows `boyko_diag::LANE_COUNT`, which is
+/// 80 in EVERY profile (Q1): 40 KiB everywhere (v3: 64 KiB at 128 lanes).
 static SAMPLE_CTR: [[Cell<u16>; MAX_TARGETS]; LANE_COUNT as usize];
 
 // ─────────────────── boyko_ecs seam: the ECS-visible surface ──────────────────

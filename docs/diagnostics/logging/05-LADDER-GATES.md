@@ -35,7 +35,7 @@ are no longer free-standing:
 
 | This rung | Waits for | Because |
 |---|---|---|
-| **L0** | `boyko_diag` **D0** (clock, lane, loss, storage policy, `section_report`) and **D1** (`boyko_threadpool → boyko_diag`; `set_lane` at `worker_main` / `install` / `InstallGuard::drop`) | every lane index this crate uses is minted there (S3), and `GLOBAL_CEILING`/`LANE_COUNT` come from `boyko_diag/build.rs` (S9) |
+| **L0** | `boyko_diag` **D0** (clock, lane, loss, storage policy, `section_report`) and **D1** (`boyko_threadpool → boyko_diag`; `set_lane` at `worker_main` / `install` / `InstallGuard::drop`) | every lane index this crate uses is minted there (S3); `LANE_COUNT` is a plain `boyko_diag` const with **no profile axis** (Q1), and `GLOBAL_CEILING` is re-exported from `boyko_diag`, where L0 adds it as a **hand-written const at the `dev` value** — `boyko_diag/build.rs` is J1's and D0 explicitly does not create it (S9) |
 | **L8b** | **profiling rung 7** (the six stdout consumers migrated to the artifact) and **7b** (floor re-measurement) | S1: L8b's 20 measurement rows do not exist because rung 7 already removed their producers. Running L8b first would leave `report!`-shaped work with no macro to do it |
 | **L17** | merges with **profiling rung 14** into one joint rung **J1** | S9: one compile axis cannot be split across two rungs, and the 5 CI legs are built once |
 

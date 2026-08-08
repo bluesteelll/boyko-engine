@@ -94,7 +94,9 @@ folds. Cells are indexed `[lane][class]`.
 
 ## Layout arithmetic
 
-`LANE_COUNT × LossClass::COUNT × 64 B` = 80 × 8 × 64 = **40 KiB** in the dev profile.
+`LANE_COUNT × LossClass::COUNT × 64 B` = 80 × 8 × 64 = **40 KiB in every profile** — `LANE_COUNT`
+has no profile axis (Q1), so this figure has no second column. It read "in the dev profile" while
+a shipping value of 32 still existed.
 
 ---
 
@@ -123,13 +125,16 @@ reader touches.
 
 ## `.bss` residency
 
-| Item | Dev |
+| Item | Every profile |
 |---|---|
 | cells (`LANE_COUNT × 8 × 64 B`) | 40 KiB |
 | `DIAG_FLAGS`, padded to a line | 64 B |
 | per-subsystem `LossTotal` arrays (2 × 8 × 64 B) | 1 KiB — **owned by the subsystems, not by this crate** |
 
-**`boyko_diag`'s own total: ≈ 42 KiB in dev.** That figure is attributed to its row exactly once
+**The column is "every profile", not "dev": nothing in this crate is sized by `BOYKO_PROFILE`.**
+`LANE_COUNT` lost its profile axis at Q1 and the other two rows never had one.
+
+**`boyko_diag`'s own total: ≈ 42 KiB, in every profile.** That figure is attributed to its row exactly once
 (see [`00-GOAL.md`](00-GOAL.md)); the joint table already counts those bytes inside the two
 subsystems' rows, and double-counting them would manufacture a footprint regression out of a
 move.
@@ -165,8 +170,8 @@ never about the hot path in the first place.
 consumer keeps a per-`(lane, class)` `last_seen` and folds `cur.wrapping_sub(last_seen)`. The
 owner keeps its plain `Relaxed` load/store pair (one `mov` each, no lock prefix), **exactness is
 unconditional**, and `fetch_sub` disappears from the design entirely. Costs
-`LANE_COUNT × 8 × 8 B` of consumer-side `last_seen` state (**5 KiB dev**) — owned by each
-consumer, not by `boyko_diag`.
+`LANE_COUNT × 8 × 8 B` of consumer-side `last_seen` state (**5 KiB, every profile**) — owned by
+each consumer, not by `boyko_diag`.
 
 (b) is the standard monotone-counter fold and preserves the record's own performance argument.
 
