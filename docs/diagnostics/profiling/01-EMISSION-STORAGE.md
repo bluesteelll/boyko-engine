@@ -120,7 +120,7 @@ cosmetic:
 ```rust
 pub static VB_EARLY_RASTER: ZoneHandle { desc: &'static ZoneDesc, id: AtomicU16 }
 #[allow(non_snake_case)]
-pub mod  VB_EARLY_RASTER { pub const TIER: ZoneTier = /* the declared tier */; }
+pub mod  VB_EARLY_RASTER { use super::*; pub const TIER: ZoneTier = /* the declared tier */; }
 ```
 
 **Why the tier is duplicated into a `mod` companion instead of being read off the handle.**
@@ -133,6 +133,25 @@ module in the TYPE namespace, so the two coexist; a **unit struct does not work*
 collides with the static in the value namespace (`E0428`). The alternative, dropping the
 `AtomicU16` from `ZoneHandle`, also compiles but relocates the mint path (D6) and is the larger
 change, so it is not taken.
+
+⚠️ **The `use super::*;` is load-bearing, not tidiness, and the first probe of this design could
+not have found that out.** A `macro_rules!`-emitted `mod` is a **fresh scope**: it inherits none
+of the caller's imports, and the tier it carries is the **caller's own path token**
+(`ZoneTier::Dev`) relocated into that scope. Without the glob, every `declare_zone!` in the engine
+fails — measured with a MACRO probe, rustc 1.95.0, `--edition 2024`:
+`error[E0433]: cannot find type ``ZoneTier`` in this scope`. **`$crate`-qualifying the const's
+type annotation — the reflex any macro author reaches for first — does not fix it**, because what
+fails to resolve is the caller's `$tier` expression, not the annotation; the probe above was
+already `$crate`-qualified and still failed.
+
+*The earlier "measured on this box … compiles" claim in this section was true of a **hand-written**
+module beside a hand-written static, which resolves its paths in whatever the prober wrote around
+it — and is therefore silent about the one thing this design newly depends on. Proving the wrong
+thing is the failure mode; the fix is to probe the FORM the design uses, not a stand-in for it.*
+
+*Do not substitute `pub struct $name {}` for the module: it trips `non_camel_case_types`, which
+`#[allow(non_snake_case)]` does not cover and which `cargo clippy --all-targets -- -D warnings`
+turns into a hard error at every zone declaration.*
 
 **The typo-catching property survives the companion**, which is the only reason it is acceptable:
 `zone!(VB_EARLY_RASTRE)` fails with `E0425` **and** `E0433` (the value and the module both fail to

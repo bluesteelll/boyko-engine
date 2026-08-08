@@ -168,15 +168,38 @@ llvm-readobj: ABSENT     objdump: ABSENT     nm: ABSENT     llvm-nm: ABSENT     
 active toolchain bin/:  gcc-ld  rust-lld.exe  rust-objcopy.exe  wasm-component-ld.exe  (+2 dlls)
 ```
 
-No `llvm-readobj` / `objdump` / `nm` / `llvm-nm` is on `PATH`, and the active
-`stable-x86_64-pc-windows-gnu` toolchain ships **only** `rust-objcopy` and `rust-lld` — the
-`llvm-tools` component is **not installed**. **The whole `.bss` gate family cannot run on this
-machine as written.**
+**RESOLVED at D0 — the component is installed and the gate family is runnable. The discovery
+rule it forced is the part worth keeping.**
 
-Therefore: **the gate resolves its tool at start and treats absence as a RED, never a SKIP.**
-`rustup component add llvm-tools` is a **D0 line item**. A skip-on-absent gate is green on every
-machine that lacks the tool, which is this one — the exact vacuity this campaign has now caught
-nine times.
+The finding stands as recorded: no `llvm-readobj` / `objdump` / `nm` / `llvm-nm` was on `PATH`,
+and the tools are still not on `PATH` now. `rustup component add llvm-tools --toolchain
+stable-x86_64-pc-windows-gnu` was run and the binaries landed at
+
+    ~/.rustup/toolchains/stable-x86_64-pc-windows-gnu/lib/rustlib/x86_64-pc-windows-gnu/bin/
+
+⚠️ **`section_report` must NOT locate its tool via `rustc --print sysroot`.** Measured on this
+box: the `rustc` on `PATH` is chocolatey's (1.95.0) and its sysroot's `rustlib` bin contains
+**zero** matches for `readobj` — the tools live only under the **rustup** toolchain (1.97.1).
+Two toolchains coexist here, and a gate that compiles with one and inspects with the other is
+comparing artifacts it did not produce. The resolution order is: `PATH`, then the rustup
+toolchain's `rustlib` bin, then RED.
+
+**Output shape, confirmed against a real binary** rather than assumed — this is what the
+residency assertion reads:
+
+    Name: .bss (2E 62 73 73 00 00 00 00)
+    VirtualSize: 0x220
+    VirtualAddress: 0xD0000
+    RawDataSize: 0
+
+`RawDataSize: 0` beside a non-zero `VirtualSize` **is** the "carries a size with no raw data"
+property every `.bss` gate asserts, so the discriminator exists in the tool's own output and
+needs no parsing heuristic.
+
+**The rule that produced this outcome stays**: the gate resolves its tool at start and treats
+absence as a **RED, never a SKIP**. A skip-on-absent gate is green on every machine that lacks
+the tool — which this one did, until D0 — and that is the exact vacuity this campaign has now
+caught nine times.
 
 ---
 

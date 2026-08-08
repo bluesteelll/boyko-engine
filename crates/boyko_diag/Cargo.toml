@@ -1,0 +1,28 @@
+[package]
+name = "boyko-diag"
+version = "0.1.0"
+edition = "2024"
+
+# INVIOLABLE: this crate is the BOTTOM of the workspace graph and depends on `std` ONLY.
+# Zero workspace dependencies, zero third-party dependencies. `boyko_log` depends on it,
+# `boyko_threadpool` depends on it, and `boyko_utils` keeps its own empty table — so a single
+# edge added here would be reachable from every crate in the engine.
+#
+# It exists to REMOVE four duplications, not to add a capability: one clock, one lane topology,
+# one loss vocabulary, one never-freed-storage policy. Two subsystems each minting their own
+# copy is the failure Principle 0 names by name; a shared crate that then accretes is the same
+# failure pointed the other way, which is why the growth rule in
+# docs/diagnostics/substrate/00-GOAL.md is load-bearing.
+[dependencies]
+
+[features]
+default = []
+# `section_report` shells out to `llvm-readobj` to prove `.bss` residency. That is a process
+# spawn and a file read, which the mute-leaf rule forbids the crate to contain by default — so
+# the whole facility is behind this feature and a default build compiles no `std::process` and
+# no `std::fs` reference at all. Consumers switch it on through their own dev-dependency, the
+# same shape `boyko_rhi_vulkan`'s `goldens` and `boyko_render`'s `test-readback` already use.
+section-gate = []
+
+[lints]
+workspace = true
