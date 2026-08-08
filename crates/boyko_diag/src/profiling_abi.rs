@@ -149,6 +149,91 @@ impl ZoneHandle {
     }
 }
 
+/// Engine zone slots. Sized here rather than per profile at this rung: nothing reads a profile
+/// value for it yet, and a constant nothing reads is a value nothing can prove wrong.
+pub const ENGINE_ZONE_SLOTS: usize = 4096;
+
+/// The id a zone gets when the registry is full.
+///
+/// **Not a panic and not a silent alias.** A profiler that aborts a shipped title because it ran
+/// out of name slots has become the failure it exists to report; a profiler that hands out a
+/// duplicate id merges two zones' numbers, which is worse than losing one because the result still
+/// looks like data. The zone runs unregistered, its interval still accumulates on its own handle,
+/// and the exhaustion is counted.
+pub const ZONE_ID_EXHAUSTED: u16 = u16::MAX;
+
+/// Next free slot. `.bss`-zero, so slot 0 is the first minted and an un-minted handle's `id` of 0
+/// is distinguishable only by the claimed flag below — which is why minting uses a CAS on the
+/// handle's own id rather than a bare "is it zero" test.
+static NEXT_SLOT: AtomicU16 = AtomicU16::new(1);
+
+/// Registered descriptors, indexed by zone id. `.bss`, never freed, address-stable.
+static REGISTRY: [core::sync::atomic::AtomicPtr<ZoneDesc>; ENGINE_ZONE_SLOTS] =
+    [const { core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()) }; ENGINE_ZONE_SLOTS];
+
+/// This zone's registry id, minting one on first use.
+///
+/// Ids start at **1**: zero is the un-minted state of the handle's own field, so using it as a
+/// valid id would make "never minted" and "minted first" indistinguishable without a second flag.
+///
+/// Concurrent first uses race on one `compare_exchange`; the loser adopts the winner's id rather
+/// than minting a second. Two ids for one zone would split its samples across two rows, and the
+/// split would look like two quiet zones instead of one busy one.
+pub fn zone_id(handle: &'static ZoneHandle) -> u16 {
+    let cur = handle.id.load(Ordering::Acquire);
+    if cur != 0 {
+        return cur;
+    }
+    mint_cold(handle)
+}
+
+/// The once-per-zone mint, out of line so the hot path is a load and a compare.
+#[cold]
+#[inline(never)]
+fn mint_cold(handle: &'static ZoneHandle) -> u16 {
+    let slot = NEXT_SLOT.fetch_add(1, Ordering::Relaxed);
+    if slot == 0 || (slot as usize) >= ENGINE_ZONE_SLOTS {
+        // Wrapped or past the end. Count it and give every later caller the same answer, so the
+        // exhaustion is reported once per zone rather than once per call.
+        crate::loss::record_here(crate::loss::LossClass::Refused, 0);
+        let _ = handle.id.compare_exchange(
+            0,
+            ZONE_ID_EXHAUSTED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        return handle.id.load(Ordering::Acquire);
+    }
+    match handle.id.compare_exchange(0, slot, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => {
+            REGISTRY[slot as usize].store(
+                core::ptr::from_ref(handle.desc).cast_mut(),
+                Ordering::Release,
+            );
+            slot
+        }
+        // Another thread minted first. Its id is the zone's; ours is simply abandoned, which costs
+        // one slot out of `ENGINE_ZONE_SLOTS` and is bounded by the number of zones times the
+        // number of threads that raced on their first use.
+        Err(won) => won,
+    }
+}
+
+/// The descriptor registered under `id`, if any.
+#[must_use]
+pub fn zone_desc(id: u16) -> Option<&'static ZoneDesc> {
+    let p = REGISTRY.get(id as usize)?.load(Ordering::Acquire);
+    if p.is_null() {
+        None
+    } else {
+        // SAFETY: only `mint_cold` writes this slot, and it writes a pointer derived from a
+        //   `&'static ZoneDesc` reached through a `&'static ZoneHandle`. The store is `Release`
+        //   and this load is `Acquire`, so a non-null observation sees a fully published pointer.
+        //   Descriptors are `'static` and never freed, so the reference cannot dangle.
+        Some(unsafe { &*p })
+    }
+}
+
 /// An open zone. Closes on `Drop`, **including the unwinder's**.
 ///
 /// # Why the guard, and not `open()`/`close()`
@@ -420,6 +505,64 @@ mod tests {
         assert!(caught.is_err());
         assert_eq!(TEST_UNWIND.calls(), before + 1, "the unwinder must still close the zone");
         disarm_scope(31);
+    }
+
+    declare_zone!(TEST_ID_A, name = "t.id.a", scope = 40, tier = ZoneTier::Always);
+    declare_zone!(TEST_ID_B, name = "t.id.b", scope = 41, tier = ZoneTier::Always);
+
+    #[test]
+    fn minting_is_idempotent_and_distinct_zones_get_distinct_ids() {
+        let a1 = zone_id(&TEST_ID_A);
+        let a2 = zone_id(&TEST_ID_A);
+        let b = zone_id(&TEST_ID_B);
+
+        assert_ne!(a1, 0, "ids start at 1; zero is the un-minted state of the handle's field");
+        assert_eq!(a1, a2, "a second use must adopt the first id, not mint another");
+        assert_ne!(a1, b, "two zones sharing an id would merge their numbers");
+
+        assert_eq!(zone_desc(a1).map(|d| d.name), Some("t.id.a"));
+        assert_eq!(zone_desc(b).map(|d| d.name), Some("t.id.b"));
+        assert!(zone_desc(0).is_none(), "slot 0 is never minted into");
+
+        // Minting is INDEPENDENT of the gate: a zone gets its id whether or not its scope is
+        // armed, because the id is identity and the gate is admission. Asserting it here also
+        // keeps the module companion's consts live, which clippy noticed were otherwise unread by
+        // these three zones -- a fair observation, since nothing but `zone!` reads them.
+        disarm_scope(40);
+        disarm_scope(41);
+        assert!(!zone_enabled!(TEST_ID_A), "a disarmed zone is still registrable");
+        assert!(!zone_enabled!(TEST_ID_B));
+        assert_eq!(zone_id(&TEST_ID_A), a1, "arming state must not change identity");
+        assert_eq!(zone_id(&TEST_ID_B), b);
+    }
+
+    #[test]
+    fn racing_first_uses_agree_on_one_id() {
+        // Two ids for one zone would split its samples across two rows, and the split reads as two
+        // quiet zones rather than one busy one -- a wrong picture, not a missing one.
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicU32;
+
+        declare_zone!(TEST_ID_RACE, name = "t.id.race", scope = 42, tier = ZoneTier::Always);
+
+        let seen = Arc::new([const { AtomicU32::new(0) }; 8]);
+        let mut hs = Vec::new();
+        for k in 0..8usize {
+            let s = Arc::clone(&seen);
+            hs.push(std::thread::spawn(move || {
+                s[k].store(u32::from(zone_id(&TEST_ID_RACE)), Ordering::SeqCst);
+            }));
+        }
+        for h in hs {
+            h.join().expect("minting thread panicked");
+        }
+        let first = seen[0].load(Ordering::SeqCst);
+        assert_ne!(first, 0);
+        disarm_scope(42);
+        assert!(!zone_enabled!(TEST_ID_RACE));
+        for k in 1..8 {
+            assert_eq!(seen[k].load(Ordering::SeqCst), first, "racing minters disagreed");
+        }
     }
 
     #[test]
