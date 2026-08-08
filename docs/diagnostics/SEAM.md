@@ -348,8 +348,9 @@ no gate covers — and it means two CI matrices whose legs do not correspond.
 **5 full-workspace legs (4 net new)** — *shared between the plans, not per-plan*. ~12 KiB of dead
 `.bss` remains for folded `ZoneHandle` statics. **That is the whole cost on this axis** — this
 line also claimed a typo in a `Deep` zone name is invisible in the shipping leg, and it is not:
-the folded handle survives, `zone!`'s `const { site_tier <= GLOBAL_TIER }` gate still names it,
-so the typo is `E0425` in every feature-on profile. Invisibility is the FEATURE axis's cost, and
+`zone!`'s expansion names the identifier in both the gate (`const { $h::TIER <= GLOBAL_TIER }`,
+read from the `mod` companion `declare_zone!` emits — reading it through the handle static is
+`E0080`, measured) and the guard body, so the typo is `E0425` in every feature-on profile. Invisibility is the FEATURE axis's cost, and
 §S13 below states the token/codegen distinction that decides it.
 
 **RED.** `BOYKO_PROFILE=shipping BOYKO_LOG_MAX_LEVEL=trace cargo build` must fail with a named

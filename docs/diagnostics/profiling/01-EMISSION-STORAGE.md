@@ -28,7 +28,7 @@ Two halves live here, on opposite sides of the crate graph: **the emission ABI i
 
 ## D1 — Emission: two gates, no allocation, no lock, one 24 B store
 
-`zone!(HANDLE)` expands (feature on, site tier ≤ `GLOBAL_TIER`) to `let _z = ZoneGuard::open(&HANDLE);` — one `Acquire` load of a `CachePadded` global `ARM_MASK`, one statically-predicted-not-taken `bt`, one `rdtsc`; on `Drop`, one branch, one `rdtsc`, one **24 B** store (one 16 B + one 8 B), one `Release` cursor store. **The two off-axes do NOT expand alike, and this sentence conflated them until now.** With the FEATURE off, `#[cfg]` deletes the macro definition before name resolution, so there is no expansion and the argument is never named. **Above the tier ceiling the macro still expands and still NAMES its argument** — `const { site_tier as u8 <= GLOBAL_TIER as u8 } && …` has to, in order to read `site_tier` — and the `const false` then deletes the *codegen*, not the tokens. Zero instructions either way; an undeclared identifier is `E0425` only in the second case.
+`zone!(HANDLE)` expands (feature on, site tier ≤ `GLOBAL_TIER`) to `let _z = ZoneGuard::open(&HANDLE);` — one `Acquire` load of a `CachePadded` global `ARM_MASK`, one statically-predicted-not-taken `bt`, one `rdtsc`; on `Drop`, one branch, one `rdtsc`, one **24 B** store (one 16 B + one 8 B), one `Release` cursor store. **The two off-axes do NOT expand alike, and this sentence conflated them until now.** With the FEATURE off, `#[cfg]` deletes the macro definition before name resolution, so there is no expansion and the argument is never named. **Above the tier ceiling the macro still expands and still NAMES its argument** — twice over: the gate reads `const { $h::TIER as u8 <= GLOBAL_TIER as u8 }` from the `mod` companion, and the guard body is `ZoneGuard::open(&$h)`. The `const false` then deletes the *codegen*, not the tokens. Zero instructions either way; an undeclared identifier is `E0425` only in the second case.
 
 **Why 24 B and not rev 3's 16 B (B1), and what it costs.** Rev 3 used one 16 B record for all three kinds, with `begin` meaning *TSC at open* for a `Span`, *the value* for a `Counter`/`Gauge`, and *the high 32 bits of `dur`* for an `Extension`. The fold reads that field **before** the kind dispatch — for the live-frame cut and for the frame walk — so a counter's payload was consumed as a timestamp: a typical count (10³-10⁹) sits far below the cut (a TSC ~10¹³-10¹⁷) and every counter sample landed in `drops.late`, while a large one (a byte count, a handle) exceeded the cut and truncated the whole region's fold for that frame. The same defect hit the `Extension` record, which the review did not name: its dur-high-bits were also read as a TSC, so a span longer than `u32::MAX` ticks — *the hitch most worth recording* — silently lost its high word **and** was mis-attributed. One record shape for three meanings was the root cause, not the counter kind.
 
@@ -52,7 +52,7 @@ The record therefore gains a field that means "when" for **every** kind, and the
 
 **Trade-off.** A `mem::forget`ed guard loses its sample silently in release; `ZoneGuard` is `#[must_use]` and a debug-only TLS depth counter (D3a) catches it in debug.
 
-**Correction, not a trade-off — the zero-instruction fix (F8) costs nothing on this axis, and this line asserted the opposite for four revisions.** The TIER fold deletes codegen, not tokens: `zone!`'s first gate is `const { site_tier as u8 <= GLOBAL_TIER as u8 } && …`, an expression that must NAME the handle to read `site_tier`, and D21 books ~12 KiB of dead `.bss` precisely because the `ZoneHandle` static survives the fold. So a typo'd zone identifier at a `Deep` site is a hard `E0425` in **every** feature-on profile, retail included — **rung 14's `Deep` leg is not "the one that catches it"; every feature-on leg does.** The only leg that cannot see it is the FEATURE-off one, where `#[cfg]` deletes the macro definition before name resolution, and that leg is G1(a)'s subject, not this one's.
+**Correction, not a trade-off — the zero-instruction fix (F8) costs nothing on this axis, and this line asserted the opposite for four revisions.** The TIER fold deletes codegen, not tokens. The expansion names the identifier twice — `const { $h::TIER as u8 <= GLOBAL_TIER as u8 }` in the gate and `ZoneGuard::open(&$h)` in the body — and name resolution runs on both regardless of which way the `const` folds. *(The ~12 KiB of dead `.bss` D21 books for folded `ZoneHandle` statics is a true and adjacent fact, but it licenses nothing about naming: a `pub static` is emitted because `declare_zone!` declared it, not because anything reads it. An earlier revision of this line inferred one from the other.)* So a typo'd zone identifier at a `Deep` site is a hard `E0425` in **every** feature-on profile, retail included — **rung 14's `Deep` leg is not "the one that catches it"; every feature-on leg does.** The only leg that cannot see it is the FEATURE-off one, where `#[cfg]` deletes the macro definition before name resolution, and that leg is G1(a)'s subject, not this one's.
 
 **The two gates are the two axes of S13** (`seam/free-when-off`). Gate 0 is the **compile-time ceiling** and is the only one that reaches zero: a `const false` deletes the arm and its operands, leaving no branch, no symbol and no `.bss` row. Gate 1 is the **runtime flag** (`ARM_MASK`), default 0 because `.bss` is zero, and it is what lets a shipped binary be asked for a measurement after the fact. **Gate 1 cannot be driven to zero cost** — one `.bss` load plus one predicted branch per surviving site, in every frame, forever — and this plan does not claim otherwise.
 
@@ -114,7 +114,29 @@ declare_zone!(VB_EARLY_RASTER,
     scope = Scope::Render, tier = ZoneTier::Dev);
 ```
 
-expands to `pub static VB_EARLY_RASTER: ZoneHandle { desc: &'static ZoneDesc, id: AtomicU16 }`.
+expands to **two** items under one identifier, and the second one is load-bearing rather than
+cosmetic:
+
+```rust
+pub static VB_EARLY_RASTER: ZoneHandle { desc: &'static ZoneDesc, id: AtomicU16 }
+#[allow(non_snake_case)]
+pub mod  VB_EARLY_RASTER { pub const TIER: ZoneTier = /* the declared tier */; }
+```
+
+**Why the tier is duplicated into a `mod` companion instead of being read off the handle.**
+`zone!`'s first gate is a `const` block, and a `const` block **cannot read through
+`VB_EARLY_RASTER`**: the handle carries an `AtomicU16`, so `const { VB_EARLY_RASTER.desc.tier … }`
+is `error[E0080]: constant accesses mutable global memory` — **measured on this box**, rustc
+1.95.0, `--edition 2024`, and it fails identically whether the comparison would fold true or
+false. A `mod` with the same name is legal because a static lives in the VALUE namespace and a
+module in the TYPE namespace, so the two coexist; a **unit struct does not work** here — it
+collides with the static in the value namespace (`E0428`). The alternative, dropping the
+`AtomicU16` from `ZoneHandle`, also compiles but relocates the mint path (D6) and is the larger
+change, so it is not taken.
+
+**The typo-catching property survives the companion**, which is the only reason it is acceptable:
+`zone!(VB_EARLY_RASTRE)` fails with `E0425` **and** `E0433` (the value and the module both fail to
+resolve), measured with the same toolchain.
 
 **Which partition a site mints from is a property of the DECLARING CRATE, not of the macro it used (B3).** Rev 3 keyed the partition on the macro — `declare_zone!` → engine, `register_zone` → dynamic — and then recommended `declare_zone!` as the game path ("X1 needs no new mechanism at all"). Those two statements together put the recommended game path *inside* the partition the design exists to protect: a plugin with 3000 static zones would exhaust the engine id range and a plugin looping a static zone would overflow the engine ring — the exact two failures G11 and G20 are written to exclude, while both gates passed, because both exercised only `register_zone`. That is the vacuous-gate shape: the gate's input class excludes the defect.
 
@@ -213,7 +235,7 @@ Cost, stated: lane control blocks 256 B/lane (20 KiB `.bss` dev, 8 KiB shipping)
 pub const GLOBAL_TIER: ZoneTier = /* from boyko_diag's build.rs, per BOYKO_PROFILE */;
 ```
 
-The macro's first gate is `const { site_tier as u8 <= GLOBAL_TIER as u8 } && ARM_MASK…`. **A short-circuit `&&` over a `const false` deletes the arm and its operands**, which is the `log!` property D1 relies on and the only mechanism in this design that reaches literal zero per site.
+The macro's first gate is `const { $handle::TIER as u8 <= GLOBAL_TIER as u8 } && ARM_MASK…` — **read from the `mod` companion `declare_zone!` emits, never through the handle static.** Reading it through the static is `E0080: constant accesses mutable global memory`, because the handle carries an `AtomicU16`; that form was specified here for four revisions and does not compile (measured, rustc 1.95.0). See §`declare_zone!` for the two-item expansion and the probe results. **A short-circuit `&&` over a `const false` deletes the arm and its operands**, which is the `log!` property D1 relies on and the only mechanism in this design that reaches literal zero per site.
 
 | Tier | Contents | Shipping |
 |---|---|---|
@@ -225,7 +247,7 @@ The macro's first gate is `const { site_tier as u8 <= GLOBAL_TIER as u8 } && ARM
 
 Orthogonally, `feature = "profiling-analysis"` gates the `compat` matrix, the `intervals` ring, `ConcurrencyReport`, the contrast machinery and the TOML writer — the parts a shipping title never runs.
 
-**One cost belongs to the emission path and is stated here.** ~12 KiB of dead `.bss` remains for folded `ZoneHandle` statics — and that surviving static is exactly why the *second* cost this line used to claim does not exist: because the handle is still emitted, `zone!`'s `const { site_tier <= GLOBAL_TIER }` gate still NAMES it, so a typo in a `Deep` zone name is a hard `E0425` in **every feature-on profile including shipping**, not invisible in one. The invisibility cost belongs to the FEATURE axis alone (G1(a)), where `#[cfg]` deletes the macro before name resolution. **G14 is re-specified in rev 4 (B5):** rev 3's version asked a per-binary object-symbol census to report the recorder symbol **absent** (clause 1) and **present** (clause 2) at once; a census answers "is symbol S referenced in this object", per binary, and cannot attribute a reference to a site, so the two clauses contradicted each other and no RED existed. It is replaced by a per-site mechanism plus a behavioural one (`profiling/05-LADDER-GATES.md`).
+**One cost belongs to the emission path and is stated here.** ~12 KiB of dead `.bss` remains for folded `ZoneHandle` statics. **The *second* cost this line used to claim does not exist**, and the reason is name resolution rather than that `.bss` fact: `zone!`'s expansion names the identifier in both the gate (`const { $h::TIER <= GLOBAL_TIER }`, read from the `mod` companion) and the body (`ZoneGuard::open(&$h)`), so a typo in a `Deep` zone name is a hard `E0425` in **every feature-on profile including shipping**, not invisible in one. The invisibility cost belongs to the FEATURE axis alone (G1(a)), where `#[cfg]` deletes the macro before name resolution. **G14 is re-specified in rev 4 (B5):** rev 3's version asked a per-binary object-symbol census to report the recorder symbol **absent** (clause 1) and **present** (clause 2) at once; a census answers "is symbol S referenced in this object", per binary, and cannot attribute a reference to a site, so the two clauses contradicted each other and no RED existed. It is replaced by a per-site mechanism plus a behavioural one (`profiling/05-LADDER-GATES.md`).
 
 ## D15 — Lane buffers are allocated once and NEVER freed; disarm is a mask store
 
@@ -636,7 +658,8 @@ The kind-specific window types (`SpanWindow`/`CounterWindow`/`GaugeWindow`), the
 ### A1 — `ZoneGuard::open` / `Drop`
 
 ```
-open:  0. const { SITE_TIER <= GLOBAL_TIER }        -- compile-time; false => nothing is emitted
+open:  0. const { $h::TIER <= GLOBAL_TIER }         -- compile-time; false => nothing is emitted
+          (from the `mod` companion; through the handle it is E0080 -- see declare_zone!)
        1. ARM_MASK.load(Acquire) -> bt scope_bit; not taken -> NULL guard, return      (D1/F11)
        2. HANDLE.id.load(Relaxed); UNASSIGNED/RESERVED -> #[cold] register (D6)
        3. rdtsc
