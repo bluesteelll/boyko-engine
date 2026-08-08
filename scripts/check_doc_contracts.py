@@ -318,7 +318,25 @@ def main() -> int:
         )
         return 1
 
-    files = sorted(CORPUS.rglob("*.md"))
+    # `docs/diagnostics/` holds TWO kinds of document and only one of them is this gate's subject.
+    #
+    #   design corpus  -- README.md, SEAM.md, substrate/, profiling/, logging/. These form one
+    #                     argument, so each declares what it provides and assumes, and this gate
+    #                     walks the resulting graph.
+    #   code pages     -- `B9004.md`, `W1501.md`, ... one per Live diagnostic code, user-facing
+    #                     reference for somebody who just hit that code in a log. They participate
+    #                     in no capability graph and have nothing to declare.
+    #
+    # The exclusion is by EXACT FILENAME SHAPE, never by a glob over the directory, for the same
+    # reason the registry's own doc-page check resolves its target that way: a shape test cannot
+    # be widened by accident, whereas "anything that looks like a code page" eventually swallows a
+    # design file. The corpus split anticipated this collision for the registry check and it lands
+    # here first, because this gate was armed earlier.
+    CODE_PAGE = re.compile(r"^[BEW][0-9]{4}\.md$")
+    files = sorted(
+        f for f in CORPUS.rglob("*.md")
+        if not (f.parent == CORPUS and CODE_PAGE.match(f.name))
+    )
     if not files:
         fail(f"{CORPUS.relative_to(REPO).as_posix()} contains no Markdown files.")
         return 1

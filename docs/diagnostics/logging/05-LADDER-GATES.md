@@ -117,6 +117,39 @@ subsystem present is not a baseline for the both-present configuration (S10).
    `ENGINE_ZONE_SLOTS`, `MAX_USER_BUDGET` and `DYN_NAME_BYTES` arrive with the rungs that read
    them, because a constant nothing reads is a value nothing can prove wrong.
 
+### L2 lands in TWO commits, and three findings from its first half
+
+**The split.** L2's row is "the registry **and** the eight mechanical checks". The registry is a
+table plus a macro; the checks are a source walker with a cross-file `#[cfg(test)]` pre-pass, three
+disjoint streams and eight red states to demonstrate. Landing them together means one commit in
+which the walker's own defects and the registry's are indistinguishable. **L2a** is the registry,
+green and alone; **L2b** is the walker and its checks. The rung's "commits alone" property is about
+not needing a *migration* rung beside it, and it is unaffected.
+
+1. **All nine grandfathered codes are `Pending`, including `B9004` and `B9005`.**
+   `logging/registry-and-walker` says of those two that "both are `Live` from L2 (they have
+   emitters today), so both pages land **at L2**". That contradicts its own check 3: a `Live` row
+   requires the **identifier** `codes::B9004` to appear in CODE, and today's occurrences are string
+   literals and doc comments — the identifiers arrive at L6. A `Live` row here would red a correct
+   registry. The check semantics win; the two pages are written anyway, since a page for a
+   `Pending` row is permitted and the debt was already identified.
+
+2. **Three registry summaries were invented and had to be corrected against the tree.** The first
+   draft described `B0002` as "a system parameter the world cannot supply" (it is an *intra-system
+   access conflict on one resource*), `B9002` as "conflicting access to one resource" (it is a cycle
+   in the **set** hierarchy) and `B9004` as "a set that was never registered" (it is *two ordered
+   sets sharing a member*). Every summary is now read out of the message the engine actually
+   prints. **Nothing downstream would have caught this** — a summary that disagrees with the panic
+   text is wrong in the one place a reader looks after seeing the code.
+
+3. **The contract gate had to learn that `docs/diagnostics/` holds two kinds of document.** Adding
+   `B9004.md` reddened it: code pages are user-facing reference and participate in no capability
+   graph, but the walker took every `*.md` under the directory as design corpus. Excluded by
+   **exact filename shape** (`^[BEW][0-9]{4}\.md$`, top level only), never by a glob — the same rule
+   the registry's own page check uses, and for the same reason: a shape test cannot be widened by
+   accident. The corpus anticipated this collision for the registry check; it arrived at the
+   contract gate first, because that gate was armed earlier.
+
 ### Four L1 decisions taken at implementation
 
 1. **`LogArgs::args_flags()` is added.** The spec requires `STR_TRUNCATED` on the record header and

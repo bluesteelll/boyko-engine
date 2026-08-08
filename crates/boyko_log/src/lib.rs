@@ -48,6 +48,7 @@
 #![deny(clippy::print_stdout)]
 #![deny(clippy::dbg_macro)]
 
+pub mod codes;
 pub mod lane;
 pub mod level;
 mod macros;
@@ -55,6 +56,10 @@ pub mod record;
 pub mod site;
 pub mod target;
 
+pub use codes::{
+    CODE_IDX_EXHAUSTED, CodeStatus, DIAGNOSTICS, DiagInfo, ErrorCode, OnceSite, PanicCode,
+    RatePolicy, WarnCode, explain,
+};
 pub use lane::{LANE_ARRAY_LEN, emit_impl};
 pub use level::Level;
 pub use record::{DspBuf, LogArgs, LogValue, MAX_RECORD_BYTES, MAX_STR_BYTES, flags};
