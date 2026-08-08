@@ -50,8 +50,55 @@ that was still right.**
 
 ### The call
 
-- **(a) — my recommendation.** Commit sample regions **per lane on first use** instead of all 80 at
-  arm. A shipping title on an 8-core box claims roughly `workers + dispatcher + host ≈ 10` lanes, so
+> **RECOMMENDATION, final: (b) — raise the budget and restate the row honestly.** The owner asked
+> the right question: *is 3.15 MiB actually a lot?* It is not, and more importantly **the figure
+> measures the wrong thing.** It is a **reservation**. What a machine actually holds is:
+>
+> | Configuration | Resident |
+> |---|---|
+> | shipped title, diagnostics flag OFF (the default) | **~0** — every table is demand-zero `.bss` that nothing touches, nothing is armed, nothing is committed |
+> | shipped title, diagnostics ON | the profiler's sample slab (480 KiB, committed at `arm`) plus the logger's *touched* lanes and staging — order of **1 MiB**, not 3.15 |
+>
+> Address space on 64-bit is free in any practical sense, and 1 MiB resident against a single
+> 2048² RGBA8 texture at 16 MiB is not a trade worth buying with code. So the cheapest fix of all
+> is the one that changes no code and no constant: **raise the gate's shipping budget** (1024 →
+> 1280 KiB covers 1208.2 with headroom) and print the row in three columns — reserved,
+> committed-when-armed, resident-when-off — instead of one number that conflates them.
+>
+> That also unblocks G23a/G23b immediately, which (d) and (a) do only after a code change.
+> **(d) and (a) below are kept as the levers to pull if a measurement later says the committed
+> figure is too high**, not as things to do now.
+
+- **(d) — kept as the cheap lever, no longer the recommendation.** Set `REGION_CAPACITY = 64` in the shipping
+  profiles instead of 128. The slab is `LANE_COUNT × 2 regions × REGION_CAPACITY × 24 B`, so
+  `80 × 2 × 64 × 24` = **240 KiB** instead of 480, and the row lands at
+  `66 + 240 + 636 + 6.8 + 11.4 + 8` = **968.2 KiB — under the 1024 KiB budget**, with Q1 intact.
+
+  **Cost:** a region holds 64 samples instead of 128 before the fold must drain it, so a shipping
+  build drops samples earlier under a burst. In shipping the tier is `Always` only, so the sample
+  stream there is already an order of magnitude thinner than in `dev`.
+
+  **What it does not cost:** not one line of code, not one branch on the hot path, not one gate
+  re-specified. `REGION_CAPACITY` is *already* a per-profile constant — unlike `LANE_COUNT`, whose
+  axis Q1 deleted as unsound — so this is the knob doing the job it exists for.
+
+  *I proposed (a) first because I was looking at where the bytes are rather than at what is
+  cheapest to remove. The order is the other way round: the constant that exists for this, then
+  code.*
+
+- **(a) — now the fallback, if measurement later shows 64 samples per region is too shallow.**
+  Commit sample regions **per lane on first use** instead of all 80 at
+  arm.
+
+  **Performance is not the problem with (a); the gate is.** The hot path already loads
+  `buf: AtomicPtr<Sample>` on every sample, so a null test is one `test`+`jz`, predicted
+  not-taken after a lane's first sample — call it zero. The commit itself is one syscall per lane
+  on a `#[cold]` path, ten of them over a process. Two real costs, though: the syscall lands
+  **inside a frame** (a worker's first zone, during the first frames, where frame times are
+  already noisy — mitigable by committing at `arm()` for lanes that already exist, since the pool
+  is built before `arm`), and it adds unsafe surface to the profiler's hottest path. The one that
+  matters most: **G23a/G23b stop being able to assert a single armed total.** The figure becomes
+  warm-up-dependent, and a crisp gate becomes a "after N frames" gate. A shipping title on an 8-core box claims roughly `workers + dispatcher + host ≈ 10` lanes, so
   ≈ 60 KiB of slab instead of 480 — the profiler is back under 1 MiB **with Q1 intact and no
   constant changed**. It edits D15 ("committed once at first arm, never freed"), which is a
   shipped-behaviour decision, which is why it is yours and not mine.
