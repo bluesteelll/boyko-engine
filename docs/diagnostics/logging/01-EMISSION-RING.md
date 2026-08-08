@@ -529,7 +529,23 @@ pub(crate) struct LogLane {
     /// The consumer folds into a `LossTotal` with `fetch_sub(observed)`, never
     /// `store(0)`: a `store` loses any increment landing between load and clear.
     /// (Producer-side lost updates are substrate Q2, still OPEN.)
-    loss:          [LossCell; LOSS_CLASSES],   // Overflow | Unclaimed | Refused | Sink
+    // ⚠️ REMOVED at L1, and the removal is the point. This field was
+    //    `loss: [LossCell; LOSS_CLASSES]`, an INLINE copy of cells the
+    //    substrate already owns: `boyko_diag::loss` holds a process-global
+    //    `CELLS[row][class]` indexed BY LANE, with `record_here(class, bytes)`
+    //    writing the caller's own row and `cell(lane, class)` reading it. Two
+    //    copies of one datum, in a crate pair whose stated reason to exist is
+    //    that "the profiler reports its own drops THROUGH the logger" must stop
+    //    being possible -- A3, the third of the four duplications `boyko_diag`
+    //    was created to delete, reintroduced one layer up.
+    //    The emission path calls `boyko_diag::loss::record_here(class, bytes)`
+    //    and the lane carries no loss state at all. Everything the doc comment
+    //    above argued -- single writer, no lock prefix, `AtomicU64` not plain
+    //    `u64` because Miri is right about the UB, `u64` so `SATURATED` stops
+    //    existing -- is TRUE and is the substrate's, stated once in
+    //    `substrate/loss-vocabulary`. Q2's `fetch_sub` window is closed there
+    //    too: the counter is monotone and the consumer folds
+    //    `cur.wrapping_sub(last_seen)` without ever clearing.
     /// Deliberately NOT emitted (Decision 20). NOT a loss, so NOT a LossClass —
     /// counted separately so conflating the two cannot make either number a
     /// liar. The property `emitted == drained + dropped + sampled_out` depends
@@ -542,8 +558,14 @@ pub(crate) struct LogLane {
 }
 const _: () = assert!(core::mem::align_of::<LogLane>() == 64);
 const _: () = assert!(core::mem::offset_of!(LogLane, read) == 64);
-const _: () = assert!(core::mem::offset_of!(LogLane, loss) == 128,
+const _: () = assert!(core::mem::offset_of!(LogLane, sampled_out) == 128,
     "statistics are a third partition: producer writes, consumer folds");
+// The assert named `loss` until that field was removed as a duplicate of the
+// substrate's cells. It is re-pointed rather than deleted: what it pins is the
+// THREE-PARTITION shape -- producer line, consumer line, statistics line -- and
+// that shape is the reason the lane does not false-share, which survived the
+// field's removal. An assert deleted alongside the field it happened to name is
+// how a layout invariant quietly stops being checked.
 
 // SAFETY (manual Sync for LogLane):
 //   1. WRITE side: exactly one thread ever writes `buf` or `write` — the one
