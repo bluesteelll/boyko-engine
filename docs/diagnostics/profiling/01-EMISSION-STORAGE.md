@@ -52,7 +52,7 @@ The record therefore gains a field that means "when" for **every** kind, and the
 
 **Trade-off.** A `mem::forget`ed guard loses its sample silently in release; `ZoneGuard` is `#[must_use]` and a debug-only TLS depth counter (D3a) catches it in debug.
 
-**Second trade-off, from the zero-instruction fix (F8).** Because the folded expansion names nothing, a typo'd zone identifier at a `Deep` site is invisible in a retail build. CI builds **both** tiers (rung 14), so the `Deep` leg is the one that catches it; the retail leg cannot and does not claim to.
+**Second trade-off, from the zero-instruction fix (F8) — and it is the OPPOSITE of what this line said until now.** The TIER fold deletes codegen, not tokens: the expansion still *names* the identifier in every profile, so a typo'd zone identifier at a `Deep` site is a hard `E0425` in **every** profile, retail included — not invisible in one. (Only the FEATURE axis, which is `#[cfg]` and therefore runs before expansion, can make an identifier disappear.) CI builds **both** tiers (rung 14), so the `Deep` leg is the one that catches it; the retail leg cannot and does not claim to.
 
 **The two gates are the two axes of S13** (`seam/free-when-off`). Gate 0 is the **compile-time ceiling** and is the only one that reaches zero: a `const false` deletes the arm and its operands, leaving no branch, no symbol and no `.bss` row. Gate 1 is the **runtime flag** (`ARM_MASK`), default 0 because `.bss` is zero, and it is what lets a shipped binary be asked for a measurement after the fact. **Gate 1 cannot be driven to zero cost** — one `.bss` load plus one predicted branch per surviving site, in every frame, forever — and this plan does not claim otherwise.
 
@@ -333,7 +333,7 @@ static REGISTRY: [AtomicPtr<ZoneDesc>; ZONE_ID_SPACE];   // .bss: 56 KiB dev / 6
 static DYN_DESCS: SyncCells<ZoneDesc, MAX_USER_BUDGET>;  // .bss: 144 KiB dev / 24 KiB shipping (A7)
 static DYN_NAMES: SyncCells<u8, DYN_NAME_BYTES>;         // .bss:  64 KiB dev / 16 KiB shipping
 // SyncCells<T, N> is boyko_diag::storage's ONE shared never-freed shape (S12), used by both
-// subsystems and proved by ONE gate (`boyko_diag::storage::section_report` — G22).
+// subsystems and proved by ONE gate (`boyko_diag::storage::section_report` — G22a/G22b).
 // Every extent above is a compile-time const, which is exactly why they are .bss and not VM.
 ```
 
@@ -386,7 +386,7 @@ first arm:  vm = VmReservation::reserve(total_bytes)   // vm.rs:109
                               //   space is leaked on purpose; this is the one deliberate leak.
 ```
 
-The `Profiler` `Resource` then holds a `base: NonNull<u8>` copied from `VM_BASE` plus **byte offsets** — never `&'static mut [T]` slices — and hands columns out through accessors that reconstitute a slice for the duration of the call. Rev 3's eleven `&'static mut` fields aliasing memory the same struct owned are two mutable paths to the same bytes; Tree Borrows flags exactly that, and the kernel's own precedent already avoids it (`VmColumn` keeps `base: NonNull<T>` + accessors, `crates/boyko_ecs/src/ecs/memory/vm_column.rs:88`). **No `Box<[T]>`, no `Vec`, no `&'static mut`** (F7 + B4). `Profiler::reserved_bytes()` returns `VM_LEN`, which is what G23 measures.
+The `Profiler` `Resource` then holds a `base: NonNull<u8>` copied from `VM_BASE` plus **byte offsets** — never `&'static mut [T]` slices — and hands columns out through accessors that reconstitute a slice for the duration of the call. Rev 3's eleven `&'static mut` fields aliasing memory the same struct owned are two mutable paths to the same bytes; Tree Borrows flags exactly that, and the kernel's own precedent already avoids it (`VmColumn` keeps `base: NonNull<T>` + accessors, `crates/boyko_ecs/src/ecs/memory/vm_column.rs:88`). **No `Box<[T]>`, no `Vec`, no `&'static mut`** (F7 + B4). `Profiler::reserved_bytes()` returns `VM_LEN`, which is what G23a/G23b measures.
 
 **`Send`/`Sync`, stated rather than assumed (B4).** A `NonNull<u8>` field makes `Profiler` `!Send`/`!Sync` while `Resource: 'static + Send + Sync + Sized` (`crates/boyko_ecs/src/ecs/core/resources/resource.rs:42`), so the type carries an explicit `unsafe impl Send for Profiler {}` / `unsafe impl Sync for Profiler {}` with three clauses: (a) every mutation happens outside the schedule, on the dispatcher/host thread (D16/A3), so there is never a concurrent `&mut`; (b) in-frame access is `Res<Profiler>`, shared-only, and the kernel's own resource borrow rules enforce it; (c) the base is write-once and the region is never resized, never moved and never freed (above), so no pointer derived from it can dangle. **That impl is in the unsafe inventory and on the Miri list — rev 3 had it in neither**, and `VmReservation`'s own doc (`vm.rs:82-84`) demands exactly this: *"owners that are shared across threads opt in with their own `unsafe impl` and their own exclusivity argument"*.
 
@@ -617,7 +617,7 @@ impl Profiler {
     pub fn clock(&self)               -> ClockCalibration;
     pub fn zone_tier(&self)           -> ZoneTier;                 // vs retention_tier (S11)
     pub fn clock_epoch(&self)         -> u32;                      // boyko_diag::clock's (S4)
-    pub fn reserved_bytes(&self)      -> usize;                    // VM_LEN; G23's domain 2 (M10)
+    pub fn reserved_bytes(&self)      -> usize;                    // VM_LEN; G23a/G23b's domain 2 (M10)
     pub fn latency(&self)             -> LatencyTable;             // the published table (D25)
 }
 
@@ -763,7 +763,7 @@ This table is **one object with one ordering rationale**, and it is carried whol
 | `FrameSlot.marks` | 1W/1R | recorder (plain stores) | retire, gated by `seal` |
 | `FrameSlot.seal` | 1W/1R | recorder (`Release`) | retire (`Acquire`) |
 | telemetry encode buffers (`.bss` static, S5) | dispatcher-only | dispatcher, and `flush_on_panic` on the panicking thread | `write_all` (OS buffer — named FFI exception) |
-| `VM_BASE` / `VM_LEN` | shared, write-once | first `arm` (`Release`) | `Profiler`, `G23` (`Acquire`) |
+| `VM_BASE` / `VM_LEN` | shared, write-once | first `arm` (`Release`) | `Profiler`, `G23a/G23b` (`Acquire`) |
 | `boyko_diag::clock` `TICKS_PER_NS` / `CLOCK_EPOCH` | shared, read-mostly | `calibrate` / `note_forward_jump` (`Release`) | profiler fold **and** logger sink (`Acquire`) |
 | `boyko_diag::loss` `LossCell` | lane-owned, no lock prefix on the owner's path | the lane owner | its subsystem's consumer, via `fold_into` |
 

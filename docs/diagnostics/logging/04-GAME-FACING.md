@@ -311,14 +311,44 @@ pub struct LogRing {
 // compile. `LogStats` is `Copy` POD and derives both; the other two need the
 // impl below.
 //
-// COMPILE-TIME PIN — this is the F7 treatment applied to `Send`/`Sync` instead
-// of to size. A future field that is not `Send`/`Sync` fails HERE, not in
-// `LogPlugin::build`:
+// COMPILE-TIME PIN — the BOUND only, and NOT the F7 treatment. For `LogRing`
+// and `LogCensus` the manual `unsafe impl`s below are unconditional and
+// non-generic, so they forge exactly the property asserted here: this block
+// CANNOT red on a future `!Send`/`!Sync` field, for any field set whatsoever.
+// That is the difference from the `size_of::<LogLine>()` assert further down —
+// `size_of` is a property no impl can forge, `Send + Sync` is precisely the
+// property the impl does forge. Nor is it the localizer an earlier revision
+// claimed ("fails HERE, not in `LogPlugin::build`"): the error already lands on
+// `#[derive(Resource)]` without it, because the derive emits `impl Resource for
+// LogRing` (`crates/boyko_macros/src/resource.rs:13`) and `Resource: 'static +
+// Send + Sync + Sized` (`crates/boyko_ecs/src/ecs/core/resources/resource.rs:42`).
+// It reds on exactly one edit: deleting the impls. It is kept for that, and
+// because on `LogStats` — which DERIVES both, so nothing forges the bound — the
+// third line is not a tautology:
 const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<LogRing>();
     assert_send_sync::<LogCensus>();
     assert_send_sync::<LogStats>();
+};
+
+// WHAT DOES RED ON A NEW FIELD — an exhaustive-destructuring witness, and the
+// only mechanical part of B1's answer. A struct pattern that omits a field is
+// `error[E0027]: pattern does not mention field`, so adding a field to either
+// type breaks THIS, at compile time, in this file, immediately above the five
+// SAFETY clauses that adding it obliges a human to re-read. `field: _` counts as
+// mentioning the field, so the witness costs nothing at runtime and warns
+// nothing. What it cannot do is assert `Send`/`Sync` per field: the fields are
+// deliberately `!Send` (`VmColumn`), which is the entire reason the manual impls
+// exist. So the witness forces the re-read; the re-read is what decides whether
+// clauses 1-5 still hold. Placed here rather than beside the impls so the
+// `// SAFETY:` block stays adjacent to the `unsafe impl`s it justifies:
+const _: () = {
+    #[allow(dead_code)] // never called; it exists to be type-checked
+    fn field_witness(r: &LogRing, c: &LogCensus) {
+        let LogRing { lines: _, arena: _, head: _, len: _, arena_cursor: _, seq: _ } = r;
+        let LogCensus { per_target: _, session: _, lossy: _, control_epoch: _ } = c;
+    }
 };
 
 // SAFETY (SEND10-shaped, for `LogRing` and `LogCensus`):
@@ -343,10 +373,41 @@ const _: () = {
 //      committed plain-old-data below `len` with no interior mutability.
 //      `LogLine`, `u8` and `TargetStat` are all POD, so clause 4 holds for
 //      every element type used here.
-//   5. MATERIALIZATION IS NOT LAZY IN PRACTICE: `LogPlugin::build` calls
-//      `grow_to` to the configured capacity BEFORE the schedule ever runs, so
-//      the write-once `base` store happens once, single-threaded, at plugin
-//      build. No `&self` reader can observe a partially materialized column.
+//   5. MATERIALIZATION STAYS LAZY, and clauses 1-2 -- not pre-materialization --
+//      are what exclude a partially-materialized observation. `LogPlugin::build`
+//      performs NO `VmReservation` reserve or commit: it runs BEFORE the flag is
+//      read, and S13 forbids boot any syscall the flag has not authorised. The
+//      write-once `base` store happens inside `log_drain_system`'s `ResMut`, on
+//      the first drain that actually carries a record -- `VmColumn` is lazy by
+//      construction (`crates/boyko_ecs/src/ecs/memory/vm_column.rs:437-449`:
+//      `self.vm` is `None` until the first growth event, and the reservation
+//      syscall is deferred to it). Only `log_drain_system` ever holds `&mut`
+//      (clause 1) and the scheduler never runs a `Res` reader concurrently with
+//      it (clause 2), so no `&self` reader exists during the store.
+//
+//      WITH THE FLAG OFF, `log_drain_system` RETURNS BEFORE TOUCHING ANYTHING
+//      -- one `Relaxed` load per frame in `Last`, and no column is reached.
+//      That early return is load-bearing, not an optimisation. This system has
+//      THREE duties and only the ring feed consumes `ECS_HANDOFF`: the
+//      `TARGET_STATS` snapshot copies a `.bss` array, and the per-frame
+//      `frame_epoch` record is written BY THE DRAIN ITSELF, not by the
+//      emission path (see `LogPlugin`'s duty list at the end of this file, and
+//      the `frame_epoch` attribution rule above). So "the flag is off, so no
+//      record exists, so `grow_to` is never called" is FALSE without it: the
+//      drain would write a `frame_epoch` record on frame 1 with every
+//      `CONTROL` byte still `Off`, and the column would grow anyway.
+//
+//      An earlier revision of THIS clause asserted exactly that false chain
+//      while repairing a different S13 violation one layer above it. Recorded
+//      because the shape recurs: a property proved at the emission path does
+//      not hold for a system that also writes on its own account. An earlier
+//      revision of this clause claimed the opposite -- that `LogPlugin::build`
+//      pre-grew to the configured capacity, "so the write-once store happens
+//      once, single-threaded, at plugin build". That bought a soundness
+//      argument clauses 1-2 already supply, and paid for it with the ONE
+//      boot-time reservation left in the corpus, which is exactly what S13
+//      exists to forbid. It is also unnecessary at the tree level: growth is
+//      `#[cold]`/`#[inline(never)]` and deferred off construction by design.
 unsafe impl Send for LogRing {}   unsafe impl Sync for LogRing {}
 unsafe impl Send for LogCensus {} unsafe impl Sync for LogCensus {}
 
@@ -490,6 +551,15 @@ impl Plugin for LogPlugin { fn build(&self, app: &mut App); }
 // inserts LogRing / LogStats / LogCensus; adds `log_drain_system` to `Last`
 // (ECS ring feed + TARGET_STATS snapshot + one `frame_epoch` record per frame —
 // the sink thread owns the byte sinks). Registers `shutdown` on teardown.
+//
+// S13: `log_drain_system` FIRST-STATEMENT-CHECKS the runtime flag and returns
+// before touching any column. Two of its three duties do not consume
+// `ECS_HANDOFF` — the TARGET_STATS snapshot and the `frame_epoch` record are
+// written on the system's OWN account — so without that check the drain grows
+// `LogRing`'s VmColumn on frame 1 with every CONTROL byte still `Off`, and the
+// "flag off touches nothing" property fails below the emission path where it
+// is usually argued. `build` itself performs no reserve and no commit: it runs
+// before the flag is read, and VmColumn is lazy by construction.
 ```
 
 No `Vec`, `Box<dyn>`, `HashMap` or internal type appears in any signature.

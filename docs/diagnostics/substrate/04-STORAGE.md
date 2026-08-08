@@ -145,11 +145,17 @@ inspector — it opens a process and reads a file, which is precisely what the l
 | `boyko_render` | `default = []` / `test-readback = []` at `Cargo.toml:17-27` | in the same manifest's `[dev-dependencies]` |
 
 `section-gate` is declared the same way, is **`default = []`**, and is switched on by **each
-consumer's dev-dependency**. A default build compiles **no `std::process` and no `std::fs`
-reference at all**, which is what DG9 asserts.
+consumer's dev-dependency**. A default build therefore compiles **no `std::process` and no
+`std::fs` reference at all** — and that property is established by the
+`#[cfg(feature = "section-gate")]` guard **itself**, not by any byte scan. **DG9 is not its
+proof and must not be cited as one:** DG9 is a text grep, it excludes `storage.rs` by path so
+that it can be honest about the gated half, and a `std::fs` use added to the *ungated* part of
+that one file falls outside every leg of it. Reviewing that file is a human obligation the gate
+does not discharge. What DG9 does cover is the ungated half of the mute-leaf rule — no print, no
+`boyko-####` literal, no `thread::spawn`.
 
 **One implementation for both plans.** `boyko_diag::section_report` is the ONE implementation of
-the `llvm-readobj`/`objdump` section probe for **substrate DG6, profiling G22a/G22b/G23 and
+the `llvm-readobj`/`objdump` section probe for **substrate DG6, profiling G22a/G22b/G23a/G23b and
 logging G3**, so a PE/COFF toolchain change **reds one gate rather than splitting two that
 disagree about which is authoritative.**
 

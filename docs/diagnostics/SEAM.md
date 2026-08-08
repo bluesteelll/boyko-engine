@@ -413,7 +413,7 @@ one-line check, and logging's `print_census.rs` covers `report!`'s half.
 > `VmReservation`, and the owner must therefore sit at or above `boyko_ecs`.**
 
 `boyko_diag::section_report` is the **ONE** implementation of the `llvm-readobj`/`objdump` section
-probe for both plans (substrate DG6, profiling G22a/G22b/G23, logging G3).
+probe for both plans (substrate DG6, profiling G22a/G22b/G23a/G23b, logging G3).
 
 **Because.** Two residency proofs over two statics with two demand-zero arguments means a toolchain
 change reds one gate and not the other, and **the reader cannot tell which is authoritative**. And
@@ -467,9 +467,20 @@ bug.
   initialiser having run. This is the property logging's Decision 3 already rests on; S13 does not
   invent it, it extends it to the profiler and makes it a joint obligation.
 - **A shipping build drops `Trace`/`Deep` entirely.** The short-circuit `&&` over a `const false`
-  deletes the arm **and its operands** — which is why `zone!(NEVER_DECLARED_IDENT)` must COMPILE
-  under a ceiling that folds it, and must FAIL to compile under one that does not. That two-sided
-  token-level test is the only proof that the deletion is per-SITE (profiling G1/G14a, logging G16).
+  deletes the arm **and its operands**. **The two axes are NOT proved the same way, and an earlier
+  revision of this bullet claimed they were:**
+  - The **FEATURE** axis deletes TOKENS, because `#[cfg]` runs before expansion. So
+    `zone!(NEVER_DECLARED_IDENT)` compiling with the feature off and failing with it on is a
+    sound two-sided test, and profiling **G1(a)** keeps that token form.
+  - The **TIER** axis cannot be tested that way, and no gate may claim it is. A `macro_rules!`
+    expansion is a function of its invocation token stream alone, so *"does the expansion name
+    its argument"* is **uniform over every site in one build configuration** — a token test
+    therefore cannot separate two sites at different tiers. `const { false } && …` deletes
+    CODEGEN, not tokens; `if false { UNDECLARED; }` is still `E0425`. Profiling **G14(a)** is
+    consequently a per-site-BY-CONSTRUCTION symbol census over a single-site fixture bin, not a
+    token test, and logging **G16** was never a token test either — it is a four-sided **symbol**
+    gate on `emit_impl` monomorphisation. This bullet previously cited both as proof of a test
+    neither performs.
 - **The runtime axis is the only thing that can be asked for after the binary shipped.** A player
   reports a bug, support asks them to relaunch with the flag, and *the same binary* produces a log.
   A design with only the compile axis answers that request with "ship them a different build",
@@ -525,6 +536,7 @@ mechanisms changes; only their call site does.
 | The process-global panic hook and the `PRE_FLUSH` registration | `boyko_log::boot()` | `boyko_log::enable()` | With the flag off there is no hook at all, which is exactly what G2 leg (c) observes behaviourally. The profiler's `flush_on_panic` registration rides the same move (§*S5 expanded*). |
 | First touch of the `LOG_LANES` / `LANES` lane buffers | first emit | the enable path may pre-touch, or may leave it to first emit | Either is admissible and the choice is a rung decision. What is **NOT** admissible is touching them while the flag is off. |
 | Dynamic-target interning, `RATE` slot minting, scope registration | boot / plugin build | enable, or first use after enable | All are `#[cold]`, all are already idempotent, and none may run under a flag that is off. |
+| The `LogRing` / `LogCensus` `VmColumn::grow_to` — reserve + commit | `LogPlugin::build` | **first drain that carries a record**, under `log_drain_system`'s `ResMut` | **This row was missing, and its absence left the ONE boot-time reservation the corpus still had.** The destination is deliberately *not* `enable()`: `boyko_log` has no dependency edge to `boyko_ecs`, so it cannot reach an ECS resource — see `substrate/crate-graph`. It needs no move mechanism at all, because `VmColumn` is lazy **by construction** (`crates/boyko_ecs/src/ecs/memory/vm_column.rs:437-449`: `self.vm` is `None` until the first growth event and the reservation syscall is deferred to it). What had to go was an EXPLICIT pre-grow in `LogPlugin::build`, added to buy a soundness argument that `LogRing`'s clauses 1-2 already supply. **With the flag off, `log_drain_system` returns before touching anything**, and that early return is load-bearing rather than an optimisation: the system has THREE duties and only one of them consumes `ECS_HANDOFF`. The `TARGET_STATS` snapshot copies a `.bss` array and the per-frame `frame_epoch` record is written **by the drain itself, not by the emission path** — so without the early return, `LogRing`'s column grows on frame 1 with every `CONTROL` byte still `Off`, and S13's property is false one layer below where it looks true. Cost when off: one `Relaxed` load per frame in `Last`. |
 
 ### Consequence for the joint retail figure, stated where a reader meets the number
 

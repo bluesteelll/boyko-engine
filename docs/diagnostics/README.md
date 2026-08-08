@@ -73,6 +73,26 @@ them at once — into a graph the machine walks. Eight checks, and the real defe
 | 7 | **UNDECLARED** — a file that discusses another *area*'s file must declare a capability from it | **checks 1-6 all reason about the DECLARED graph, and a declared graph is only as honest as its declarations.** Measured on the first carved revision: 43 capabilities, 131 declared edges, check 4 green — while `substrate/00-GOAL.md` declared **zero** edges and discussed `SEAM.md` and a profiling file in its prose. Those undeclared references point **up**, and had they been declared, check 4 would have found a cycle. **Check 4's green was bought by silence.** Same-area siblings are exempt: within one subsystem a cross-reference is navigation between parts of one argument, and its cycle risk is contained |
 | 8 | **ARITHMETIC** — every inline `a + b [+ …] = total` must hold | **the sums in this corpus have been wrong twice in two revisions.** Once inherited (a joint total that never equalled its operands in ANY revision), once introduced by the very edit that corrected it — which replaced the TOTAL and left the stale OPERAND in the same sentence, one commit after a paragraph was written warning about exactly that. **A total that checks out against its printed operands proves nothing about those operands**, and a prose warning did not survive one commit. Skips unit conversions (KiB terms, MiB total); tolerance is half a unit in each printed number's last decimal place |
 
+⚠️ **What the gate does NOT check, measured and left unchecked on purpose: GATE IDS.** It walks
+capability ids and area-qualified file paths. It does not know that `G23` was split into
+`G23a`/`G23b`, so a re-specified gate leaves stale citations across the corpus and the gate stays
+green — **four of the five findings in one post-repair sweep survived it exactly that way.**
+
+A checker for it was written and **withdrawn on its own evidence**, which is worth recording so
+nobody rebuilds it the same way. Gate ids in this corpus are **area-local and they collide**:
+`G1`, `G4`, `G8`–`G18` and `GJ1` are each defined in *both* `logging/` and `profiling/` as
+**different gates**. A corpus-wide id check is therefore unsound by construction — it would
+silently identify logging's `G14` with profiling's `G14`, which is the very conflation this
+corpus exists to prevent. An area-scoped version is sound but fired **36 times**, of which the
+majority were false: ids are declared in more than one textual form, and a shared implementation
+legitimately names its consumers' gates across areas. A gate needing human adjudication on every
+row is noise, and noise gets switched off.
+
+⇒ **A gate split or rename must be propagated by grep, deliberately, in the same commit.** The
+real stale citations that check found before it was withdrawn (`G22`, `G23`, `G4`, `G2`, `G3`
+cited bare where only split forms exist) are repaired; the historical ones — text describing the
+*pre-split* gate as the defect being recorded — are deliberately left.
+
 **Why capability ids and not file/anchor links.** Anchors churn on every heading edit, so an
 anchor-based check becomes a nuisance and gets disabled — the same reasoning that made
 `check_hotpath_exceptions.py` match on `(file, count)` rather than line numbers. A capability id

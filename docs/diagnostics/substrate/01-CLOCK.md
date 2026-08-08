@@ -50,12 +50,20 @@ struct ClockGlobals {
     epoch: AtomicU32,
     state: AtomicU32,               // UNCALIBRATED | RUNNING | DONE
     invariant: AtomicU32,           // UNPROBED | NO | YES
-    _pad: [u8; 28],
+    session_state: AtomicU32,       // UNMINTED | MINTING | DONE
+    _pad: [u8; 24],
 }
 static CLOCK: ClockGlobals = /* all-zero const init */;
 ```
 
-64 B, one line, read-mostly. **`DIAG_FLAGS` ([`03-LOSS.md`](03-LOSS.md)) is deliberately *not*
+64 B, one line, read-mostly — 8 + 8 + 8 + 4 + 4 + 4 + 4 = 40 B of state, and 40 + 24 = 64 with the
+pad. **`session_state` is the session pair's publication word**, exactly as `state` is
+`ticks_per_ns_bits`'s: `session_lo`/`session_hi` are two independent atomics, so without a third
+word there is nothing for a reader to acquire against and a half-written id is observable (see
+§"Memory ordering" below). It is paid for out of the padding that was already there — no second
+word of state crosses the line, and the struct is still exactly one line.
+
+**`DIAG_FLAGS` ([`03-LOSS.md`](03-LOSS.md)) is deliberately *not*
 in this struct:** `raise` dirties it, and a dirtied line shared with the clock would invalidate
 a line every hot reader touches.
 
@@ -66,7 +74,7 @@ a line every hot reader touches.
 | Datum | Writer | Thread | When |
 |---|---|---|---|
 | `ticks_per_ns_bits`, `state` | `calibrate()` | whichever thread calls first — `boyko_log::enable` or `Profiler::arm`, both idempotent | **the ENABLE path. NOT boot.** See below |
-| `session_lo/hi` | `session_id()` on first touch | any | first touch, once |
+| `session_lo/hi`, `session_state` | `session_id()` on first touch | any | first touch, once |
 | `epoch` | `note_forward_jump()` | the detecting thread (profiling's fold, on the dispatcher) | rare |
 | `invariant` | `invariant_tsc()` on first call | any | once |
 
@@ -97,6 +105,21 @@ placement.
   `DONE`. **The `Release` here matches the `Acquire` in `ticks_per_ns()`** — it is what makes the
   probed scale visible to every later reader. **No `Mutex`** (clippy `disallowed-types`); a CAS +
   bounded spin on an enable-path-only routine is the compliant shape.
+- **`session_id()`**: `session_state.compare_exchange(UNMINTED, MINTING, AcqRel, Acquire)`. The
+  winner stores `session_lo`/`session_hi` `Relaxed`, then `session_state.store(DONE, Release)`; a
+  loser spins `session_state.load(Acquire)` until `DONE`, with the same bounded spin as
+  `calibrate()` and for the same reason no `Mutex`. Every reader — winner or loser — loads the two
+  halves `Relaxed` **after** that `Acquire`. **The `Release` here matches the `Acquire` every
+  reader takes before loading the two halves** — without it the pair has no publication word and a
+  reader concurrent with the mint can observe a half-written id `(lo, 0)`, which is a 128-bit value
+  equal to no mint; the two artifact headers then identify different sessions, and this module
+  publishes nothing that would let either side detect that. "Minted once" — on `session_id()` in
+  §API, in §API's prose, and again in the writers table above — binds the COUNT, not the
+  publication: a `session_lo` CAS alone satisfies "once" and still leaves `session_hi` unordered
+  with respect to it.
+  **`invariant` needs no such clause, and the asymmetry is principled:** it is one word, so it
+  cannot tear, and CPUID is deterministic, so a lost race stores the value the loser would have
+  stored. Neither property holds for a 128-bit id split across two words.
 - **`ticks_per_ns()`**: `state.load(Acquire)`; if not `DONE`, return `1.0` and
   `raise(DiagFlag::ClockUncalibrated)`. Otherwise
   `f64::from_bits(ticks_per_ns_bits.load(Relaxed))` — `Relaxed` suffices **because the `Acquire`

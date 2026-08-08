@@ -172,12 +172,12 @@ rung P1.
    data." Verified present, verbatim, and verified false the moment L8b adds `boyko_log`. The
    description is edited in the same commit as the edge, by the logging plan, not here.
 2. `crates/boyko_rhi_vulkan/Cargo.toml` — its INVIOLABLE no-third-party rationale is at
-   **`:7-13`** (**not** `:44-49`, which is the `boyko_sdf_math` *precedent* block). The
-   `boyko_diag` row is added at `:7-13` citing the `:44-49` precedent: an in-house, zero-dep
+   **`:7-12`** (**not** `:44-49`, which is the `boyko_sdf_math` *precedent* block). The
+   `boyko_diag` row is added at `:7-12` citing the `:44-49` precedent: an in-house, zero-dep
    sibling workspace leaf does not breach "no ash / vulkano / windows-sys / libc".
-   *Correction against the record and against the source plan, verified this session: the
-   rationale block runs `:7-13`, not `:7-12` — line 13, "it adds no third-party dependency.",
-   is the clause that carries the argument and an insertion at `:12` lands mid-sentence.*
+   *The new rationale row goes **after** `:12` and before the `[features]` header at `:13`;
+   an insertion **at** `:12` would land between `:11` and `:12` and split the sentence that
+   spans `:10-12`. Block extent and insertion index are two different numbers.*
 
 **Not an edge, and must not become one:** `boyko_utils` does not gain `boyko_log`. The logging
 plan's Decision 15 sentence "`boyko_utils` depends on `boyko_log`, not the reverse" is struck.
