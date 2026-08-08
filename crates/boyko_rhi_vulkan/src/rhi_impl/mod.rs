@@ -823,6 +823,23 @@ pub struct VulkanCommandEncoder {
 // The raw pointer makes the type `!Send + !Sync` by default (no auto-impl), which
 // is the discipline we want — no explicit `unsafe impl` is added.
 
+impl VulkanCommandEncoder {
+    /// The raw command buffer this encoder records into.
+    ///
+    /// Exposed for the GPU zone recorder ([`crate::present::gpu_zone`]), whose verbs take a raw
+    /// [`VkCommandBuffer`] exactly as [`gpu_timing`](crate::present::gpu_timing)'s collectors do.
+    /// A timestamp is a **witnessed** command: the recorder increments its host-side witness on the
+    /// same line that records the `vkCmd*`, so the site has to be the recorder's, not an RHI verb's
+    /// interior. Routing it through the encoder's typed surface would put the command and its
+    /// witness on opposite sides of a call boundary, which is the arrangement the witness exists to
+    /// avoid.
+    #[inline]
+    #[must_use]
+    pub fn raw_command_buffer(&self) -> VkCommandBuffer {
+        self.command_buffer
+    }
+}
+
 impl VulkanQueue {
     /// Wraps a context's queue + device fn-table into the thin RHI queue.
     ///

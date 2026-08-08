@@ -63,10 +63,17 @@ statement about a branch nothing can take is never contradicted by a test**, and
 copies it next. Both the code and the sentence are corrected.
 
 **And two stamps with nothing between them do not read zero.** MEASURED on this box: an empty
-`TOP_OF_PIPE`/`BOTTOM_OF_PIPE` bracket is **128 ticks at 1 ns/tick**, reproducibly — the hardware
-lattice step `G` that no Vulkan limit reports. So "this pass cost nothing" and "this pass was never
-bracketed" are **not** separable by a near-zero duration here; they are separable by the
-availability byte, which is what the seam is for.
+`TOP_OF_PIPE`/`BOTTOM_OF_PIPE` bracket read **128 ticks at 1 ns/tick** at rung 4 (both pairs) and
+**96** at rung 5a. So "this pass cost nothing" and "this pass was never bracketed" are **not**
+separable by a near-zero duration here; they are separable by the availability byte, which is what
+the seam is for.
+
+*(Rung 4 called 128 "the hardware lattice step `G`". **It over-claimed**, and rung 5a's 96
+contradicted it one rung later. Two identical readings establish a common multiple of the step, not
+the step — `gcd(128, 96) = 32` is as far as two observations reach, and
+`read_query_pool_ticks`'s own doc says `G` comes from observing that *every* raw delta shares a
+common factor. The claim that survives is the one nothing was pinned to: an empty bracket is not
+zero.)*
 
 **Why the const-assert and not a source gate (F3).** Rev 2's G2a grepped `gpu_zone.rs` and
 `profiling/**` for `WAIT_BIT`. The verb's *body* must live in

@@ -38,6 +38,8 @@ use crate::ffi::{
 
 mod frame_driver;
 pub mod gpu_timing;
+// Profiling rung 5a — the GPU zone recorder that replaces `gpu_timing`'s three collectors.
+pub mod gpu_zone;
 mod graph_bridge;
 mod passes;
 mod scene_types;

@@ -136,7 +136,7 @@ flag-off legs on the logging side and by GJ1's control leg here.
 | **2** | `boyko_ecs::…::profiling`: `VmReservation`-backed store with an arm-time `zone_stride`, `fold.rs` (two regions, monotone-overflow delta, clock-epoch check, bidirectional walk), `arm`/`disarm`, `ProfilerPlugin`, world-bind check. **Requires `boyko_log` L3.** Flips the `W92xx` registry rows it emits from `Pending` to `Live` with their doc pages | **G4b (the `u64` accumulator + the consumer-side delta, = logging's G11), G21, G23a (`section_report{LANES, REGISTRY}` — the two statics that exist here)** | additive |
 | **3** *(**COMPLETE** — **3a** the field, the mint, `W9201`/`W9208`; **3b** the `App` zones; **3c** the per-system spans; **3d** the analysis half)* | `SystemMeta.zone` + const-assert; tier-gated minting at `try_build` with **non-terminal** refusal; the four `App` zones (`__frame`/`__events`/`__fixed_step`/`__main_run`) at `update_with_delta`; the dispatch-round pair `__round`/`__round_width` **in place of `RoundRecord`**; `intervals` + `ConcurrencyReport` under `profiling-analysis`, **without `compat` and without `sys_of`** — see "What rung 3d SHIPPED" below for all four departures and their arguments | **G8, G9, G11 (engine half)** | one field in tail padding; four zone sites |
 | **4** *(**SHIPPED**)* | RHI seam: three verbs + Vulkan impls + `ffi.rs` constants + `GPU_ZONE_QUERY_FLAGS` const-assert + Mock defaults and their pinning tests. **No consumer.** Plus `VkPhysicalDeviceHostQueryResetFeatures` (granular, for the VUID reason the descriptor-indexing struct already carries) and `DeviceCaps::host_query_reset` — see "What rung 4 SHIPPED" below | **G2a, G2c** | old readers untouched |
-| **5** | `boyko_rhi_vulkan → boyko_diag` edge; `gpu_zone.rs` + `CommandWitness` (`first_pair_of` **and** `stamp_positions`, behind `profiling-census`); VB brackets ported. **Serial A/B against the old collector** (never both armed in one frame — F17) | **G2b, G5, G10** | both collectors exist; every existing test still compiles and passes |
+| **5** *(lands in parts: **5a** shipped — the edge, `gpu_zone.rs`, the 2×2 label, **G2b**; **5b** `CommandWitness` + **G5**; **5c** the VB port, the serial A/B and **G10**)* | `boyko_rhi_vulkan → boyko_diag` edge; `gpu_zone.rs` + `CommandWitness` (`first_pair_of` **and** `stamp_positions`, behind `profiling-census`); VB brackets ported. **Serial A/B against the old collector** (never both armed in one frame — F17) | **G2b, G5, G10** | both collectors exist; every existing test still compiles and passes |
 | **6** | gbuffer + SV0 ported; the R0 harness reads the new channel while the old one still exists | G10 extended to those passes | additive |
 | **7 (the single subtractive rung)** | Delete `gpu_timing.rs`, the runner harness bodies, the statistics helpers **and the four `VB-P1d`/`VB-P4` print sites** (`runner.rs:3089`, `:3096`, `:3121`, `:3137`) — **and migrate all six stdout consumers to the artifact in the same commit** (S1; list below) | the post-rung `rg` gate **plus the S1 stdout gate (G24)** | one commit, workspace green before and after |
 | **7b (NEW — S1)** | **Floor re-measurement on the artifact channel.** Re-run A6's protocol (7 processes × 3 repetitions) reading the artifact instead of stdout; publish `docs/PROFILING-FLOOR.md` with the new `WorkloadTag`, all three repetition floors, and `FLOOR_REDUCTION = Max` | **G3a's reduction RED** | needs rung 7's channel; blocks nothing but *licenses* rung 8's verdicts |
@@ -522,13 +522,19 @@ confident wrong answer read out of the caller's own staging buffer. One assert c
    hardware never takes, so the Vulkan body's refusal branch is unproven here and is named as such
    in the gate. It is pinned where it *is* reachable: `MockDevice` enables no feature, and the
    `boyko_rhi` pin asserts the `Unsupported` error there.
-3. **An empty GPU bracket on this box measures 128 ticks, not 0.** Two back-to-back
+3. **An empty GPU bracket on this box does not measure 0.** Two back-to-back
    `TOP_OF_PIPE`/`BOTTOM_OF_PIPE` stamps with nothing between them read **128 ticks at
-   1 ns/tick**, both pairs, reproducibly. That is the hardware lattice step `G` that
-   `read_query_pool_ticks`'s own doc explains is not reported by any Vulkan limit — and it is the
-   floor under every GPU duration this corpus will publish. A pass that "cost nothing" and a pass
-   that was never bracketed are therefore **not** distinguishable by a near-zero duration on this
-   hardware; they are distinguishable by the availability byte, which is the seam's point.
+   1 ns/tick**, both pairs. A pass that "cost nothing" and a pass that was never bracketed are
+   therefore **not** distinguishable by a near-zero duration on this hardware; they are
+   distinguishable by the availability byte, which is the seam's point.
+
+   **CORRECTED at rung 5a, and the correction is the lesson.** This row originally called 128 *"the
+   hardware lattice step `G`"*. It is not established to be: rung 5a's own empty bracket read
+   **96**. Two identical readings do not establish a step — they establish a common multiple of
+   one, and `gcd(128, 96) = 32` is as far as two observations take it. `read_query_pool_ticks`'s
+   doc says exactly how `G` is obtained (*"observe that every raw delta shares a common factor"*),
+   and two samples is not that observation. **The load-bearing half survives untouched: an empty
+   bracket does not read zero.** The number does not, and no gate rests on it.
 
 **G2a's census clause caught a file on its first run.** The pinned list was seeded from a grep over
 the paths I expected; the census — which walks the whole tree — immediately named
@@ -542,6 +548,40 @@ is exactly what it replaces.
 instead: supported ⇒ exercise it, unsupported ⇒ assert the verb *refuses*. A capability that varies
 by driver cannot be a skip, because a skip on the machine that has the capability and a skip on the
 machine that lacks it are the same green.
+
+### What rung 5a SHIPPED — and G2b as the corpus states it could not fail
+
+`crates/boyko_rhi_vulkan/src/present/gpu_zone.rs`: the slot ring, the per-pair marks with their one
+`Release` seal, the bump allocator, the two-horned retire with the **guarded** grace decrement, the
+host-reset close with its `needs_cmd_reset` fallback, `flush` for teardown, and the 2×2 label. No
+`CommandWitness`, no VB port, no ECS write — those are 5b and 5c.
+
+**G2b, as the corpus writes it, is satisfied by a label that never reads the witness. MEASURED.**
+The two specified clauses are *"an unbracketed pass yields `NOT_BRACKETED`"* and *"a bracketed pass
+yields `MEASURED` with a non-zero duration"*. Replacing `begun` with `available` in the label match
+— deleting the witness from the decision entirely — left the two-clause gate **green**, because on
+those two inputs the witness and availability agree: a bracketed pair is available and an
+unbracketed one is not. A gate whose entire subject is the difference between the two was testing
+nothing.
+
+**The third clause, and it is constructible.** On a working driver the witness and availability
+disagree in exactly one reachable place: a pair whose BEGIN was recorded and whose END was not. Its
+begin query is written, its end query is not, so availability reports `0` — the *same answer it
+gives for a pass that never ran* — while the marks say `begun && !ended`, which is `TORN`. The gate
+now records such a pair and asserts `TORN` plus `RetiredFrame.torn == 1`, and the availability
+injection reds on it. The fourth row, `LOST`, needs a query that never returns and is **not**
+constructible on demand against a working driver; it is pinned as a pure table in the module's unit
+test and named as not-exercised-on-hardware in the gate, rather than implied by the three that are.
+
+**Two smaller decisions worth recording.** The retire buffers are one `RetireScratch` type rather
+than five slice parameters — ~9.3 KiB the host holds once beside the recorder, because a retire that
+allocated would be a profiler allocating on the frame path, and five separate slices made the
+verb's length contract five preconditions instead of one type. And `VulkanCommandEncoder` gained a
+`raw_command_buffer()` accessor: a timestamp is a **witnessed** command, so its `vkCmd*` site has to
+be the recorder's own line, not the interior of an RHI verb — routing it through the typed surface
+would put the command and its witness on opposite sides of a call boundary.
+
+Golden `grand_showcase` byte-identical: the module records nothing yet.
 
 ### Two rung-3b decisions
 
