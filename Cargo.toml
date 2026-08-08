@@ -78,5 +78,13 @@ edition = "2024"
 
 [dependencies]
 
+[dev-dependencies]
+# The root package is where this workspace puts SOURCE-TREE censuses (internal_docs_anchors,
+# vg_symbol_reachability, gpu_blocking_reader_census), because CARGO_MANIFEST_DIR IS the
+# repository root here and no "../.." walking can point a scan at the wrong tree.
+# engine_packages_census needs the constant it pins; boyko-diag has an empty [dependencies]
+# table, so this adds nothing to any graph.
+boyko-diag = { path = "crates/boyko_diag" }
+
 [lints]
 workspace = true

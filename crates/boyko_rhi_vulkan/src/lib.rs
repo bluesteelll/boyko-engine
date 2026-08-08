@@ -82,6 +82,12 @@
 //! # let _ = bound;
 //! ```
 
+// Profiling rung 5: this crate's lane region, declared ONCE at the root. `declare_zone!` reads the
+// constant it defines for both the id counter and the ring region, so no zone site chooses — a
+// crate is one partition for all of its zones, which is what makes a game's runaway scope cost a
+// game's samples and not the renderer's.
+boyko_diag::profiling_partition!(Engine);
+
 pub mod abi_guard;
 /// HW-RT rung R2a-1: the `BoundAccelStruct` + the Vulkan acceleration-structure verb
 /// impls. Gated `hwrt` — absent from the default/golden build (byte-identical).

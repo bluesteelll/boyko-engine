@@ -125,30 +125,51 @@ pub enum Region {
 /// **fails to compile** outside it — the const assert compares `CARGO_PKG_NAME` against this array.
 /// An out-of-workspace crate can still write the line; it just does not build.
 ///
-/// Residual, named rather than hidden: a workspace member that lies is one greppable line, and a
-/// tidy test pins this list against the actual member set. What there is **no** escape from is the
-/// per-site level — a crate is one partition for all of its zones.
+/// Residual, named rather than hidden: a workspace member that lies is one greppable line. What
+/// there is **no** escape from is the per-site level — a crate is one partition for all of its
+/// zones.
+///
+/// # These are `CARGO_PKG_NAME`s, and five of them used to be guesses
+///
+/// The const assert compares against `env!("CARGO_PKG_NAME")`, which is the **exact** string in
+/// the member's `[package] name`. This workspace does not spell those uniformly: most members are
+/// hyphenated (`boyko-ecs`), but `boyko_rhi`, `boyko_rhi_vulkan`, `boyko_image`, `boyko_sdf_math`
+/// and `boyko_shaderdsl` carry underscores. Rung 1 wrote all twenty rows hyphenated, so **those
+/// five crates were structurally unable to declare an `Engine` zone** — the assert would have
+/// refused them.
+///
+/// Nothing caught it for four rungs because nothing had tried: the first four crates to write
+/// `profiling_partition!(Engine)` were `boyko_ecs`, `boyko_log`, `boyko_diag` and `boyko_app`, all
+/// four of them hyphenated and all four correct. It surfaced at profiling rung 5, whose whole
+/// subject is the GPU zone recorder in `boyko_rhi_vulkan`.
+///
+/// This row used to promise that "a tidy test pins this list against the actual member set". **No
+/// such test existed** — the promise is what `tests/engine_packages_census.rs` now keeps, and the
+/// gap between the two is the reason five wrong rows survived in a `const` that exists to be
+/// checked.
 pub const ENGINE_PACKAGES: &[&str] = &[
     "boyko-app",
     "boyko-diag",
     "boyko-ecs",
     "boyko-fontbake",
-    "boyko-image",
     "boyko-input",
     "boyko-log",
     "boyko-macros",
     "boyko-math",
     "boyko-physics",
     "boyko-render",
-    "boyko-rhi",
-    "boyko-rhi-vulkan",
     "boyko-scene",
-    "boyko-sdf-math",
     "boyko-serialize",
-    "boyko-shaderdsl",
     "boyko-threadpool",
     "boyko-ui",
     "boyko-utils",
+    // The five underscore-named members. Spelled as their manifests spell them, not as the
+    // pattern above would suggest.
+    "boyko_image",
+    "boyko_rhi",
+    "boyko_rhi_vulkan",
+    "boyko_sdf_math",
+    "boyko_shaderdsl",
 ];
 
 /// `true` when `name` is an engine package. A `const fn` so the check is a compile error.

@@ -48,6 +48,13 @@ boyko_rhi = { path = "../boyko_rhi" }
 # (W5) reuses for CPU SDF-collision queries WITHOUT depending on this crate.
 boyko_sdf_math = { path = "../boyko_sdf_math" }
 
+# The profiling substrate (profiling rung 5). The SECOND new edge in this campaign, and the
+# rationale is the `boyko_sdf_math` block above's: a `no_std`, graphics-free leaf with ZERO
+# third-party deps, so it breaches no constraint this crate holds itself to. The GPU zone recorder
+# needs the zone vocabulary (`declare_zone!` + the crate-root partition) and the loss counters; the
+# edge runs THIS WAY and never back -- `boyko_diag` knows nothing about Vulkan.
+boyko-diag = { path = "../boyko_diag" }
+
 # Win32 INPUT FFI (I6 / I6b) — the OFFICIAL Microsoft-maintained raw bindings,
 # explicitly approved for the OS layer. SCOPE: the windowing + Raw-Input FFI ONLY
 # (SetWindowLongPtrW / GetWindowLongPtrW / RegisterRawInputDevices /
