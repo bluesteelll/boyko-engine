@@ -329,6 +329,83 @@ fn render_site_line(buf: &mut [u8], site: &LogSite) -> usize {
     n
 }
 
+/// What one drain pass moved.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DrainStats {
+    /// Records handed to the callback. PADs are not records and are not counted.
+    pub records: u64,
+    /// Payload bytes handed over, excluding headers and PADs.
+    pub bytes: u64,
+    /// Lanes that had at least one byte to stage.
+    pub lanes_touched: u32,
+}
+
+/// Walk every lane and hand each published record to `on_record`.
+///
+/// # The two properties this function exists to uphold
+///
+/// 1. **It never reads past its observed `write`.** One `Acquire` load per lane fixes the horizon
+///    for that pass; a record published after it waits for the next pass, which is what "eventual"
+///    means here.
+/// 2. **It never advances `read` over bytes it has not consumed.** The cursor moves once, at the
+///    end, to the value the walk actually reached.
+///
+/// Taking `&DrainToken` rather than checking a state is the whole exclusivity argument: the token
+/// is unforgeable and there is exactly one.
+pub fn drain(
+    _token: &crate::drain_owner::DrainToken,
+    mut on_record: impl FnMut(&'static LogSite, u64, u8, &[u8]),
+) -> DrainStats {
+    let mut stats = DrainStats::default();
+
+    for lane in LOG_LANES.iter() {
+        let w = lane.write.load(Ordering::Acquire);
+        let mut r = lane.read.load(Ordering::Relaxed);
+        if r == w {
+            continue;
+        }
+        stats.lanes_touched += 1;
+        lane.write_cached.set(w);
+
+        while r != w {
+            let off = (r & MASK) as usize;
+            // SAFETY: the producer never publishes a record that would straddle the end of the
+            //   ring -- a tail too short for one carries a PAD instead -- so a header at `off` is
+            //   wholly inside the buffer whenever `r != w`. This thread is the only consumer (the
+            //   token), and the `Acquire` on `write` above makes every byte written before that
+            //   publication visible here.
+            let hdr: RecordHeader = unsafe {
+                lane.buf.0.get().cast::<u8>().add(off).cast::<RecordHeader>().read_unaligned()
+            };
+            let len = u32::from(hdr.len);
+            debug_assert!(len as usize >= HEADER_BYTES, "invariant: a record includes its header");
+            debug_assert!(len <= w.wrapping_sub(r), "invariant: a record ends at or before the horizon");
+
+            if !hdr.site.is_null() {
+                let payload_len = len as usize - HEADER_BYTES;
+                // SAFETY: the payload follows its header contiguously for `len - HEADER_BYTES`
+                //   bytes, inside the same non-straddling span. `site` is non-null, and the PAD
+                //   sentinel is the only null this field ever takes, so it is the `&'static
+                //   LogSite` the producer wrote.
+                let (site, payload) = unsafe {
+                    let base = lane.buf.0.get().cast::<u8>().add(off + HEADER_BYTES);
+                    (&*hdr.site, core::slice::from_raw_parts(base, payload_len))
+                };
+                on_record(site, hdr.tsc, hdr.flags, payload);
+                stats.records += 1;
+                stats.bytes += payload_len as u64;
+            }
+            r = r.wrapping_add(len);
+        }
+
+        // Published only after every byte above has been consumed. Moving this inside the loop
+        // would let the producer overwrite a record between the callback and the store.
+        lane.read.store(r, Ordering::Release);
+    }
+
+    stats
+}
+
 /// Admission control. **No unsigned subtraction below can go negative**, and that is the point.
 ///
 /// The predecessor computed `LANE_BYTES - ERROR_RESERVE - used` in `u32`. In exactly the state
@@ -508,6 +585,12 @@ mod tests {
     fn on_own_lane<R: Send + 'static>(
         f: impl FnOnce(u16, &'static LogLane) -> R + Send + 'static,
     ) -> R {
+        // The ring array and the drain role are BOTH process-global, and they are one resource for
+        // locking purposes: a drain walks every lane, so per-lane ownership does not scope it.
+        // The lock lives in `drain_owner` because there is exactly one drain token and therefore
+        // must be exactly one lock over it -- two domains over one resource is not serialization,
+        // which was measured the hard way.
+        let _serial = crate::drain_owner::test_serial();
         std::thread::spawn(move || {
             let id = boyko_diag::lane::claim_lane()
                 .expect("a spare lane; 14 exist and this suite does not hold that many at once");
@@ -742,6 +825,113 @@ mod tests {
         let s = core::str::from_utf8(&big[..n]).expect("ASCII only");
         assert!(s.starts_with("lane.rs:0 "), "got {s:?}");
         assert!(s.contains("probe"));
+    }
+
+    /// Empty every lane, so a following assertion on GLOBAL drain stats is this test's alone.
+    ///
+    /// `drain` walks all lanes; owning one does not scope it. MEASURED: without this, a test that
+    /// published 200 records observed **1068**.
+    fn drain_everything() {
+        let t = crate::drain_owner::try_claim().expect("the ring lock excludes other consumers");
+        let _ = drain(&t, |_, _, _, _| {});
+    }
+
+    #[test]
+    fn a_drain_sees_every_published_record_and_then_the_lane_is_empty() {
+        on_own_lane(|_, lane| {
+            drain_everything();
+            const N: u32 = 200;
+            for i in 0..N {
+                emit_impl(&TEST_SITE, (i, "p"));
+            }
+            let w = lane.write.load(Ordering::Relaxed);
+
+            let token = crate::drain_owner::try_claim().expect("free");
+            let mut seen = Vec::new();
+            let stats = drain(&token, |site, _tsc, _flags, payload| {
+                assert!(core::ptr::eq(site, &TEST_SITE), "the site pointer must round-trip");
+                seen.push(payload.len());
+            });
+            drop(token);
+
+            assert_eq!(seen.len() as u32, N, "every published record must be handed over");
+            assert_eq!(stats.records, u64::from(N));
+            // 4 (u32) + 2 (str len) + 1 ("p")
+            assert!(seen.iter().all(|n| *n == 7), "payload lengths: {seen:?}");
+            assert_eq!(stats.bytes, u64::from(N) * 7);
+            assert_eq!(
+                lane.read.load(Ordering::Acquire),
+                w,
+                "read must reach the horizon the walk consumed"
+            );
+
+            // A second pass must move nothing. Delivering a record twice is worse than losing it:
+            // it invents an event.
+            let token = crate::drain_owner::try_claim().expect("released");
+            let again = drain(&token, |_, _, _, _| panic!("a drained lane must yield nothing"));
+            drop(token);
+            assert_eq!(again.records, 0);
+        });
+    }
+
+    #[test]
+    fn a_pad_is_skipped_and_not_counted_as_a_record() {
+        // The wrap path's other half: the consumer steps over a PAD by `len` like any record while
+        // NOT reporting it. Counting PADs would inflate every record count by how often the ring
+        // happened to wrap.
+        on_own_lane(|_, lane| {
+            drain_everything();
+            let need = (HEADER_BYTES + 4) as u32;
+            let start = LANE_BYTES as u32 - need + 4;
+            lane.write.store(start, Ordering::Release);
+            lane.read.store(start, Ordering::Release);
+            lane.read_cached.set(start);
+
+            emit_impl(&TEST_SITE, (1u32,));
+
+            let token = crate::drain_owner::try_claim().expect("free");
+            let stats = drain(&token, |_, _, _, payload| assert_eq!(payload.len(), 4));
+            drop(token);
+
+            assert_eq!(stats.records, 1, "the PAD must not be reported as a record");
+            assert_eq!(stats.bytes, 4, "the PAD's bytes are not payload");
+            assert_eq!(lane.read.load(Ordering::Acquire), lane.write.load(Ordering::Relaxed));
+        });
+    }
+
+    #[test]
+    fn a_drain_frees_space_the_producer_can_then_use() {
+        // The end-to-end reason the read half exists: without it a lane fills once and refuses
+        // forever. A stubbed consumer fails this silently.
+        on_own_lane(|id, lane| {
+            drain_everything();
+            let before = boyko_diag::loss::cell(id, LossClass::Overflow).count();
+            for i in 0..4096u32 {
+                emit_impl(&TEST_SITE, (i, "payload"));
+            }
+            assert!(
+                boyko_diag::loss::cell(id, LossClass::Overflow).count() > before,
+                "the fixture must actually fill the lane"
+            );
+
+            let token = crate::drain_owner::try_claim().expect("free");
+            let stats = drain(&token, |_, _, _, _| {});
+            drop(token);
+            assert!(stats.records > 0);
+
+            let mid = boyko_diag::loss::cell(id, LossClass::Overflow).count();
+            let w = lane.write.load(Ordering::Relaxed);
+            emit_impl(&TEST_SITE, (0u32, "payload"));
+            assert!(
+                lane.write.load(Ordering::Relaxed) > w,
+                "a drained lane must accept records again"
+            );
+            assert_eq!(
+                boyko_diag::loss::cell(id, LossClass::Overflow).count(),
+                mid,
+                "and must not count that acceptance as a drop"
+            );
+        });
     }
 
     #[test]

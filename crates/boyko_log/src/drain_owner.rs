@@ -97,6 +97,24 @@ pub fn drain_contended() -> u32 {
     DRAIN_CONTENDED.load(Ordering::Relaxed)
 }
 
+/// The ONE serialization point for tests that claim the drain role.
+///
+/// **There is exactly one drain token in the process, so there must be exactly one test lock over
+/// it.** MEASURED: an earlier attempt had `drain_owner`'s tests and `lane`'s ring tests each
+/// holding their *own* mutex, which serializes each module against itself and neither against the
+/// other — six tests failed in a full run and every one of them passed alone. Two independent
+/// serialization domains over one global resource is not serialization.
+#[cfg(test)]
+#[allow(clippy::disallowed_types)]
+pub(crate) static TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Take the process-wide test lock, ignoring poisoning — a test that panicked while holding it has
+/// already reported, and refusing every later test would turn one failure into a cascade.
+#[cfg(test)]
+pub(crate) fn test_serial() -> std::sync::MutexGuard<'static, ()> {
+    TEST_SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,12 +122,10 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
 
-    #[allow(clippy::disallowed_types)]
-    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn the_role_is_taken_once_and_released_by_drop() {
-        let _s = SERIAL.lock().expect("serial");
+        let _s = super::test_serial();
         {
             let _t = try_claim().expect("a free role must be claimable");
             assert!(is_claimed());
@@ -121,7 +137,7 @@ mod tests {
     fn a_second_claim_refuses_rather_than_stealing() {
         // The sharp contrast with OUT_LOCK. Stealing here would CREATE the second consumer the
         // token exists to prevent, so "not this time" is the correct and complete answer.
-        let _s = SERIAL.lock().expect("serial");
+        let _s = super::test_serial();
         let held = try_claim().expect("free");
         let before = drain_contended();
 
@@ -138,7 +154,7 @@ mod tests {
         // Two consumers over one ring one stack frame apart is still two consumers. `OUT_LOCK`
         // permits re-entry because writing a line twice is harmless; staging the same bytes twice
         // is not.
-        let _s = SERIAL.lock().expect("serial");
+        let _s = super::test_serial();
         let outer = try_claim().expect("free");
         assert!(try_claim().is_none(), "a re-entrant drain must be refused");
         drop(outer);
@@ -147,7 +163,7 @@ mod tests {
 
     #[test]
     fn release_happens_on_the_unwinding_path() {
-        let _s = SERIAL.lock().expect("serial");
+        let _s = super::test_serial();
         let caught = catch_unwind(AssertUnwindSafe(|| {
             let _t = try_claim().expect("free");
             panic!("a drain that panics mid-stage");
@@ -164,7 +180,7 @@ mod tests {
         // The property the SPSC read side rests on, asserted against a real race rather than
         // argued. A `SINK_STATE`-shaped check passes this test only by accident of timing; a CAS
         // on the role passes it by construction.
-        let _s = SERIAL.lock().expect("serial");
+        let _s = super::test_serial();
         let concurrent = Arc::new(AtomicUsize::new(0));
         let max_seen = Arc::new(AtomicUsize::new(0));
         let mut hs = Vec::new();
