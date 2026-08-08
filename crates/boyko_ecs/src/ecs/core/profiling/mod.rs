@@ -62,6 +62,30 @@ pub use store::{
 
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 
+/// The zone id of something that has none.
+///
+/// **`0`, and that is not an arbitrary sentinel.** `boyko_diag`'s registry starts minting at 1
+/// precisely because zero is the un-minted state of a `ZoneHandle`'s own `id` field, so the two
+/// meanings coincide by construction instead of by a second convention somebody has to keep. A
+/// `SystemMeta` whose `zone` is 0 was never minted, and a sample carrying zone 0 came from
+/// nothing this engine registered.
+pub const ZONE_ID_UNASSIGNED: u16 = 0;
+
+/// The tier a per-system zone is declared at.
+///
+/// `Deep`: a span around every system, every run, is per-frame detail a shipped title does not
+/// pay for. The gate is `const`, so at a ceiling below this the minting loop, the `zone` writes
+/// and the id space they consume are all deleted from the build.
+pub const SYSTEM_ZONE_TIER: boyko_diag::profiling_abi::ZoneTier =
+    boyko_diag::profiling_abi::ZoneTier::Deep;
+
+/// Whether this build mints zones for systems at all.
+///
+/// Read as a `const` at the one site that mints, so a folded tier costs the builder nothing —
+/// not a branch, not a counter, not an id.
+pub const SYSTEM_ZONES_COMPILED: bool =
+    (SYSTEM_ZONE_TIER as u8) <= (boyko_diag::profiling_abi::GLOBAL_TIER as u8);
+
 /// Run the fold for `world`, if it has a profiler and the profiler is armed.
 ///
 /// **The mask read comes first**, before the resource lookup, so a process with profiling off pays

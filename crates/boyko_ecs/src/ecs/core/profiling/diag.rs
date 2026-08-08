@@ -1,4 +1,4 @@
-//! The profiler's diagnostic channel: the `DiagFlag` -> code table, the seven emitters, and the
+//! The profiler's diagnostic channel: the `DiagFlag` -> code table, the nine emitters, and the
 //! census that makes an emission observable by a test.
 //!
 //! # This module is the substrate's mouth
@@ -20,7 +20,14 @@
 //! |---|---|---|
 //! | `ClockEpochBreak` | `W9216` | Ticks either side are incomparable; the window is discarded |
 //! | `LaneExhausted` | `W9203` | A producer runs unlaned, so its samples are refused and land on the substrate's un-laned row — the same condition `W9203`'s second half names |
+//! | `ZoneRegistryExhausted` | `W9201` | A zone runs unregistered; its samples carry no resolvable id |
+//! | `ZoneRegistryNearFull` | `W9208` | Nothing is lost yet, and this is what stops exhaustion being the first news of it |
 //! | `ClockUncalibrated` | **none, deliberately** | see below |
+//!
+//! The `match` in [`flag_code`] is deliberately not `_`-terminated. Adding a variant to
+//! `DiagFlag` therefore **fails to compile** here, in the emitter, which is what makes "every flag
+//! has exactly one paired report" a property of the build rather than of somebody's diligence.
+//! Measured: the two rows above were added by a compile error, not by remembering.
 //!
 //! **`ClockUncalibrated` gets no code, and that is a decision rather than an omission.** The
 //! `92xx` block is exactly eighteen rows, dense and consecutive, and check 1 of the code registry
@@ -51,19 +58,23 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use boyko_diag::loss::DiagFlag;
-use boyko_log::codes::{E9204, E9213, OnceSite, W9203, W9207, W9209, W9211, W9216};
+use boyko_log::codes::{
+    E9204, E9213, OnceSite, W9201, W9203, W9207, W9208, W9209, W9211, W9216,
+};
 use boyko_log::target::Profiling;
 use boyko_log::{error, warn};
 
 /// The codes this rung emits, in registry order. The census is indexed by position here.
 ///
-/// A slice rather than a range: the seven are not consecutive, and a reader who has to compute
+/// A slice rather than a range: they are not consecutive, and a reader who has to compute
 /// which of `9201..=9218` are live from a pair of bounds has been handed arithmetic instead of a
 /// list.
-pub const LIVE_CODES: [u16; 7] = [
+pub const LIVE_CODES: [u16; 9] = [
+    9201, // engine zone registry exhausted
     9203, // region overflow / unclaimed drops
     9204, // profiler already bound to another world
     9207, // invariant TSC absent
+    9208, // engine zone registry at 90 % occupancy
     9209, // late samples dropped
     9211, // fold working set exceeds L1d
     9213, // re-arm with a different geometry
@@ -147,6 +158,8 @@ pub const fn flag_code(flag: DiagFlag) -> Option<u16> {
     match flag {
         DiagFlag::ClockEpochBreak => Some(W9216.number()),
         DiagFlag::LaneExhausted => Some(W9203.number()),
+        DiagFlag::ZoneRegistryExhausted => Some(W9201.number()),
+        DiagFlag::ZoneRegistryNearFull => Some(W9208.number()),
         DiagFlag::ClockUncalibrated => None,
     }
 }
@@ -170,6 +183,8 @@ pub(crate) fn report_raised(bits: u32) {
         DiagFlag::ClockEpochBreak,
         DiagFlag::ClockUncalibrated,
         DiagFlag::LaneExhausted,
+        DiagFlag::ZoneRegistryExhausted,
+        DiagFlag::ZoneRegistryNearFull,
     ] {
         if bits & flag.as_bits() == 0 {
             continue;
@@ -181,6 +196,8 @@ pub(crate) fn report_raised(bits: u32) {
         match flag {
             DiagFlag::ClockEpochBreak => report_epoch_break(),
             DiagFlag::LaneExhausted => report_lane_exhausted(),
+            DiagFlag::ZoneRegistryExhausted => report_registry_exhausted(),
+            DiagFlag::ZoneRegistryNearFull => report_registry_near_full(),
             DiagFlag::ClockUncalibrated => {
                 debug_assert!(false, "invariant: flag_code(ClockUncalibrated) is None");
             }
@@ -232,6 +249,44 @@ pub(crate) fn report_overflow(engine: u64, user: u64) {
             "a profiling lane region overflowed: {} engine and {} user samples discarded so far",
             engine,
             user
+        );
+    }
+}
+
+/// `W9201` — the engine zone registry is exhausted; further zones run unregistered.
+///
+/// **A warning, not an error, and not a panic.** A missing zone is a missing *measurement*, not a
+/// wrong *answer* — and a profiler that aborts a build because a legal app has more systems than
+/// it has slots has become the failure it exists to report.
+#[cold]
+#[inline(never)]
+pub(crate) fn report_registry_exhausted() {
+    debug_assert_eq!(flag_code(DiagFlag::ZoneRegistryExhausted), Some(W9201.number()));
+    if claim(W9201.number()) {
+        warn!(
+            Profiling,
+            W9201.number(),
+            "the engine zone registry is exhausted at {} slots; further zones run unregistered",
+            boyko_diag::profiling_abi::minted_zones()
+        );
+    }
+}
+
+/// `W9208` — the engine zone registry crossed 90 % occupancy.
+///
+/// Nothing is lost yet. This code exists so that exhaustion is not the first news of it: by the
+/// time `W9201` fires, the zones that would have explained the problem are the ones missing.
+#[cold]
+#[inline(never)]
+pub(crate) fn report_registry_near_full() {
+    debug_assert_eq!(flag_code(DiagFlag::ZoneRegistryNearFull), Some(W9208.number()));
+    if claim(W9208.number()) {
+        warn!(
+            Profiling,
+            W9208.number(),
+            "the engine zone registry is at {} of {} slots",
+            boyko_diag::profiling_abi::minted_zones(),
+            boyko_diag::profiling_abi::ENGINE_ZONE_SLOTS as u64
         );
     }
 }
@@ -322,6 +377,8 @@ mod tests {
     fn the_flag_to_code_table_is_the_one_stated_in_the_module_docs() {
         assert_eq!(flag_code(DiagFlag::ClockEpochBreak), Some(9216));
         assert_eq!(flag_code(DiagFlag::LaneExhausted), Some(9203));
+        assert_eq!(flag_code(DiagFlag::ZoneRegistryExhausted), Some(9201));
+        assert_eq!(flag_code(DiagFlag::ZoneRegistryNearFull), Some(9208));
         // A POSITIVE answer, not a gap: the condition is reported as a frame flag, because its
         // consequence is a status on the data rather than an event.
         assert_eq!(flag_code(DiagFlag::ClockUncalibrated), None);
@@ -343,7 +400,7 @@ mod tests {
         for (i, n) in LIVE_CODES.iter().copied().enumerate() {
             assert_eq!(slot_of(n), Some(i));
         }
-        assert_eq!(slot_of(9201), None, "a code this rung does not emit must have no slot");
+        assert_eq!(slot_of(9202), None, "a code this rung does not emit must have no slot");
         // A duplicate would make two codes share a latch, so one would silence the other.
         for (i, a) in LIVE_CODES.iter().copied().enumerate() {
             for b in LIVE_CODES.iter().copied().skip(i + 1) {

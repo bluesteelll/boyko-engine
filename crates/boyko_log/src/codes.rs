@@ -383,7 +383,7 @@ codes! {
     (9101, B, B9101, RatePolicy::Every, CodeStatus::Pending("L6"),
         "Schedule::run was called with a different world than the one it was built on"),
 
-    (9201, W, W9201, RatePolicy::Once,  CodeStatus::Pending("profiling 3"),
+    (9201, W, W9201, RatePolicy::Once,  CodeStatus::Live          ,
         "The engine zone registry is exhausted; further zones run unregistered"),
     (9202, W, W9202, RatePolicy::Once,  CodeStatus::Pending("profiling 5"),
         "The GPU timestamp pair budget is exhausted; further brackets are unrecorded"),
@@ -403,7 +403,7 @@ codes! {
         "A contrast could not be resolved"),
     (9207, W, W9207, RatePolicy::Once,  CodeStatus::Live          ,
         "The CPU advertises no invariant TSC, so tick magnitudes are not trustworthy"),
-    (9208, W, W9208, RatePolicy::Once,  CodeStatus::Pending("profiling 3"),
+    (9208, W, W9208, RatePolicy::Once,  CodeStatus::Live          ,
         "The engine zone registry is at or past 90 % occupancy"),
     (9209, W, W9209, RatePolicy::Once,  CodeStatus::Live          ,
         "Samples arrived after their frame had left the retained window and were dropped"),
@@ -471,7 +471,25 @@ mod tests {
         // alone. L4 lands the first `Live` row, so the claim moves rather than loosens: a Pending
         // row must still name its rung, and the Live set is enumerated here so a row that goes
         // Live without its emitter, or an emitter that lands without flipping its row, reds.
-        const LIVE: &[(u8, u16)] = &[(b'W', 103)];
+        //
+        // IT DID RED, and the miss is worth recording where it happened. Profiling rung 2 flipped
+        // seven rows and was verified with `cargo test -p boyko-log --test code_registry` -- which
+        // selects ONE integration target and does not build this lib test at all. The pin was red
+        // for a whole rung. The lesson is not "run more tests": it is that a target filter is a
+        // claim about coverage, and this project has a standing note that `--test <name>` and
+        // `--lib` are different worlds.
+        const LIVE: &[(u8, u16)] = &[
+            (b'W', 103),  // L4  -- the file sink's byte cap
+            (b'W', 9201), // P3  -- engine zone registry exhausted
+            (b'W', 9203), // P2  -- region overflow / unclaimed drops
+            (b'E', 9204), // P2  -- profiler already bound to another world
+            (b'W', 9207), // P2  -- invariant TSC absent
+            (b'W', 9208), // P3  -- engine zone registry at 90 %
+            (b'W', 9209), // P2  -- late samples dropped
+            (b'W', 9211), // P2  -- fold working set exceeds L1d
+            (b'E', 9213), // P2  -- re-arm with a different geometry
+            (b'W', 9216), // P2  -- clock epoch break
+        ];
         for row in DIAGNOSTICS {
             match row.status {
                 CodeStatus::Pending(rung) => {

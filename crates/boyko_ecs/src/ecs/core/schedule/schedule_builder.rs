@@ -448,6 +448,36 @@ impl ScheduleBuilder {
             });
         }
 
+        // Step 1.5 (profiling rung 3) — mint one zone id per system.
+        //
+        // Here rather than at construction because THIS is where the system set is final: a
+        // descriptor added later would have minted an id for a schedule it never joined, and the
+        // id space is a fixed 4096.
+        //
+        // `SYSTEM_ZONES_COMPILED` is a `const`, so at a ceiling below `Deep` the whole loop --
+        // the mint, the write, and the ids they would have consumed -- is deleted from the build.
+        //
+        // Exhaustion is NON-TERMINAL and that is a reversal taken deliberately. The obvious
+        // precedent (`query_type_registry.rs`'s terminal exhaustion) does not transfer: a
+        // query-shape registry answers a SEMANTIC question, where a missing entry is a wrong
+        // answer; a zone registry answers a MEASUREMENT question, where a missing entry is a
+        // missing measurement. And the arithmetic makes the terminal form dangerous -- an `App`
+        // runs at least `Startup` + `Fixed` + `Main`, the cap is 1024 systems per schedule, and
+        // minting is unconditional at this tier, so a legal app that never asked to profile could
+        // panic at build time.
+        if crate::ecs::core::profiling::SYSTEM_ZONES_COMPILED {
+            for d in &mut descriptors {
+                let id = boyko_diag::profiling_abi::mint_id();
+                if id == boyko_diag::profiling_abi::ZONE_ID_EXHAUSTED {
+                    // Counted and raised inside `mint_id`; the profiling fold turns both into
+                    // `boyko-W9201`. The system runs, unprofiled, with the unassigned id it was
+                    // constructed with.
+                    continue;
+                }
+                d.system_box.system.set_zone(id);
+            }
+        }
+
         // Step 2 — capture names BEFORE the descriptors move into later
         // phases. Diagnostics in `cycle_in_before_after_panics` rely on
         // this snapshot.
@@ -1747,6 +1777,80 @@ mod tests {
             1,
             "configure_set(S).run_if stores one set condition under S's id"
         );
+    }
+
+    /// Profiling rung 3 — every real system in a built schedule carries a **distinct, assigned**
+    /// zone id, and only under a tier that admits system zones.
+    ///
+    /// The two halves matter separately. *Assigned* is what makes the system's samples land in a
+    /// column at all; *distinct* is what keeps two systems from merging into one row — a merge
+    /// that would look like one busy system rather than like a bug, which is the failure mode the
+    /// registry's own mint is built to avoid for static zones.
+    ///
+    /// RED: delete the `set_zone` override from `FunctionSystem` ⇒ the trait's no-op default takes
+    /// over ⇒ every zone reads `ZONE_ID_UNASSIGNED` ⇒ the first assertion reds. Run at
+    /// implementation.
+    #[test]
+    fn every_real_system_gets_its_own_zone_id() {
+        use crate::ecs::core::profiling::{SYSTEM_ZONES_COMPILED, ZONE_ID_UNASSIGNED};
+
+        fn sys_a() {}
+        fn sys_b() {}
+        fn sys_c() {}
+
+        let pool = fresh_pool();
+        let mut builder = ScheduleBuilder::new(pool);
+        builder.add_system(sys_a);
+        builder.add_system(sys_b);
+        builder.add_system(sys_c);
+
+        let mut world = EcsMaster::new();
+        let schedule = builder.build(&mut world);
+        let zones: Vec<u16> = schedule
+            .systems
+            .iter()
+            .map(|sb| sb.system.meta().zone())
+            .collect();
+
+        if !SYSTEM_ZONES_COMPILED {
+            // Not a skip: at a folded tier the correct answer is that NO system has a zone, and
+            // asserting it is what would catch a minting loop the `const` gate failed to delete.
+            assert!(
+                zones.iter().all(|z| *z == ZONE_ID_UNASSIGNED),
+                "the compile tier folds system zones out, yet ids were minted: {zones:?}"
+            );
+            return;
+        }
+
+        assert!(
+            zones.iter().all(|z| *z != ZONE_ID_UNASSIGNED),
+            "a real system was left unassigned: {zones:?}"
+        );
+        for (i, a) in zones.iter().enumerate() {
+            for b in zones.iter().skip(i + 1) {
+                assert_ne!(a, b, "two systems share one zone id, so their rows would merge");
+            }
+        }
+    }
+
+    /// A test stub that never overrides `set_zone` keeps `ZONE_ID_UNASSIGNED` — the residual named
+    /// on the trait method, asserted rather than left to be discovered.
+    ///
+    /// This is not a defect being blessed: a type with no zone produces no row, which the artifact
+    /// shows as an **absent** system rather than as a wrong number. It is here so that a future
+    /// reader who finds a system missing from a profile has somewhere to find out why.
+    #[test]
+    fn a_system_that_does_not_take_a_zone_stays_unassigned() {
+        use crate::ecs::core::profiling::ZONE_ID_UNASSIGNED;
+
+        let pool = fresh_pool();
+        let mut builder = ScheduleBuilder::new(pool);
+        let init = Arc::new(AtomicUsize::new(0));
+        add_counting(&mut builder, "stub", Arc::clone(&init));
+
+        let mut world = EcsMaster::new();
+        let schedule = builder.build(&mut world);
+        assert_eq!(schedule.systems[0].system.meta().zone(), ZONE_ID_UNASSIGNED);
     }
 
     /// A schedule with NO `.run_if` anywhere builds with an all-zero

@@ -181,6 +181,32 @@ pub unsafe trait System: Send + Sync + 'static {
     /// getter").
     fn meta(&self) -> &SystemMeta;
 
+    /// Profiling rung 3 — record this system's zone id.
+    ///
+    /// Called once, from `ScheduleBuilder::try_build`, and only when the compile tier admits
+    /// system zones. Implementations write it into their cached [`SystemMeta`]; they must not
+    /// allocate, lock, or re-enter the scheduler.
+    ///
+    /// # Why a no-op default instead of `meta_mut`
+    ///
+    /// A `fn meta_mut(&mut self) -> &mut SystemMeta` would oblige **every** implementor to
+    /// provide one — including the ten test stubs in this crate, which have a `SystemMeta` only
+    /// because the trait's field surface requires one. This method names exactly what the
+    /// scheduler needs to do and nothing else, so a type that has no zone to record simply does
+    /// not override it.
+    ///
+    /// The residual is named rather than hidden: a *real* system type that forgets to override
+    /// this silently has no zone. There are two such types in the engine and both override it;
+    /// what makes the silence acceptable is that the failure is "one system is missing from the
+    /// profile", which the artifact shows as an absent row, not as a wrong number.
+    ///
+    /// An `Option<&mut SystemMeta>` was the alternative and is worse for the same reason in the
+    /// opposite direction: it hands every caller a `None` arm to get wrong.
+    #[inline]
+    fn set_zone(&mut self, zone: u16) {
+        let _ = zone;
+    }
+
     /// Phase 10 Round 2 C1 — single dispatcher→system channel for tick
     /// snapshot writes.
     ///

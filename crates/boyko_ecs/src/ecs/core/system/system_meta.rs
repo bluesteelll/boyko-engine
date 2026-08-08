@@ -53,6 +53,18 @@ const _: () = assert!(
      reduce SystemMeta size or revisit PHASE-12.5-QUERY-OPTIMIZATIONS-PLAN.md §10.5"
 );
 
+/// The 256 B pin, as a `const` assert rather than only as a test.
+///
+/// There has been a `#[test]` for this since Phase 8a, and it is kept — but a test can be
+/// filtered out, and the field that broke the pin would then be discovered by whatever read the
+/// binary next. Profiling rung 3 appends `zone: u16` into the tail padding, which is exactly the
+/// edit that makes the difference between the two matter: a build that violates this must not
+/// produce a binary a test could be skipped on.
+const _: () = assert!(
+    core::mem::size_of::<SystemMeta>() == 256,
+    "SystemMeta must stay 4 cache lines exactly; a new field has outgrown the tail padding"
+);
+
 /// Per-system context carried alongside the system body.
 ///
 /// Holds the declared [`Access`] surface, a diagnostic name, the
@@ -139,6 +151,27 @@ pub struct SystemMeta {
     /// `false` for every existing system (the 0%-gate). Fits the same tail
     /// padding as `gpu_intent`.
     pub(crate) requires_dispatcher: bool,
+
+    /// Profiling rung 3 — this system's zone id, or
+    /// [`ZONE_ID_UNASSIGNED`](crate::ecs::core::profiling::ZONE_ID_UNASSIGNED).
+    ///
+    /// **Unconditional in both build axes**, deliberately. The alternative — a `#[cfg]` field —
+    /// makes `size_of::<SystemMeta>()` differ between profiles, so the 256 B pin would have to
+    /// become two pins and every offset argument in this file two arguments. Two bytes of tail
+    /// padding is cheaper than a layout that depends on a feature.
+    ///
+    /// Written once, at `ScheduleBuilder::try_build`, through
+    /// [`System::set_zone`](super::system::System::set_zone), and only when the compile tier
+    /// admits system zones at all. Read-only thereafter.
+    ///
+    /// **There is no `ZoneDesc` for it, and that is the design rather than a gap.** A
+    /// `declare_zone!` site registers a `&'static ZoneDesc` because it has one; a system's name
+    /// lives in [`name`](Self::name), right here, and the window reducer walks the schedule it
+    /// already holds. Registering a second copy would be a parallel store of a string this struct
+    /// owns.
+    ///
+    /// Fits the same tail padding as `gpu_intent` and `requires_dispatcher`: 241 + 2 = 243 <= 256.
+    pub(crate) zone: u16,
 }
 
 impl SystemMeta {
@@ -184,6 +217,10 @@ impl SystemMeta {
             // (the 0%-gate: every CPU system starts here).
             gpu_intent: None,
             requires_dispatcher: false,
+            // No zone until `try_build` mints one, and none at all when the compile tier folds
+            // system zones out. `ZONE_ID_UNASSIGNED` is 0, which is also the registry's un-minted
+            // state, so the two agree by construction rather than by a second convention.
+            zone: crate::ecs::core::profiling::ZONE_ID_UNASSIGNED,
         }
     }
 
@@ -232,6 +269,19 @@ impl SystemMeta {
     #[inline]
     pub fn this_run(&self) -> Tick {
         self.this_run
+    }
+
+    /// Profiling rung 3 — this system's zone id, or
+    /// [`ZONE_ID_UNASSIGNED`](crate::ecs::core::profiling::ZONE_ID_UNASSIGNED).
+    ///
+    /// Unassigned in three cases a reader should not conflate: the compile tier folded system
+    /// zones out, the schedule was built before the builder minted (there is no such path today),
+    /// or the engine zone registry was exhausted — the last of which is counted and reported as
+    /// `boyko-W9201` rather than being inferred from this value.
+    #[inline]
+    #[must_use]
+    pub fn zone(&self) -> u16 {
+        self.zone
     }
 
     /// Writes both change-detection tick snapshots in place (Phase 5 MF-5
@@ -346,6 +396,7 @@ impl SystemMeta {
             this_run: Tick::ZERO,
             gpu_intent: None,
             requires_dispatcher: false,
+            zone: crate::ecs::core::profiling::ZONE_ID_UNASSIGNED,
         })
     }
 }

@@ -134,7 +134,7 @@ flag-off legs on the logging side and by GJ1's control leg here.
 |---|---|---|---|
 | **1** | `boyko_diag::profiling_abi`: `ARM_MASK: AtomicU64`, two-region `ZoneLane`, `REGISTRY`, the 24 B `Sample`, `ZoneTier` + `GLOBAL_TIER` (from `boyko_diag/build.rs`), `profiling_partition!` + `ENGINE_PACKAGES`, macros; `boyko_threadpool → boyko_diag` edge + `set_lane` at `worker_main` / `install` / `InstallGuard::drop`. **Requires `boyko_diag` D0/D1** | **G1, G4a (`overflow > 0`), G7, G22a (`LANES` + `REGISTRY`)**, SPSC unit + property tests, the loom SPSC case | purely additive; `boyko_utils` keeps zero deps (F27: rung 1 no longer commits green with nothing exercising it) |
 | **2** | `boyko_ecs::…::profiling`: `VmReservation`-backed store with an arm-time `zone_stride`, `fold.rs` (two regions, monotone-overflow delta, clock-epoch check, bidirectional walk), `arm`/`disarm`, `ProfilerPlugin`, world-bind check. **Requires `boyko_log` L3.** Flips the `W92xx` registry rows it emits from `Pending` to `Live` with their doc pages | **G4b (the `u64` accumulator + the consumer-side delta, = logging's G11), G21, G23a (`section_report{LANES, REGISTRY}` — the two statics that exist here)** | additive |
-| **3** | `SystemMeta.zone` + const-assert; tier-gated minting at `try_build` with **non-terminal** refusal; the four `App` zones (`__frame`/`__events`/`__fixed_step`/`__main_run`) at `update_with_delta`; `RoundRecord`; `compat` + `intervals` + `ConcurrencyReport` under `profiling-analysis` | **G8, G9, G11 (engine half)** | one field in tail padding; four zone sites |
+| **3** *(lands in parts: **3a** shipped — the field, the mint, `W9201`/`W9208`; **3b** the `App` zones; **3c** the analysis half)* | `SystemMeta.zone` + const-assert; tier-gated minting at `try_build` with **non-terminal** refusal; the four `App` zones (`__frame`/`__events`/`__fixed_step`/`__main_run`) at `update_with_delta`; `RoundRecord`; `compat` + `intervals` + `ConcurrencyReport` under `profiling-analysis` | **G8, G9, G11 (engine half)** | one field in tail padding; four zone sites |
 | **4** | RHI seam: three verbs + Vulkan impls + `ffi.rs` constants + `GPU_ZONE_QUERY_FLAGS` const-assert + Mock defaults and their pinning tests. **No consumer.** | **G2a, G2c** | old readers untouched |
 | **5** | `boyko_rhi_vulkan → boyko_diag` edge; `gpu_zone.rs` + `CommandWitness` (`first_pair_of` **and** `stamp_positions`, behind `profiling-census`); VB brackets ported. **Serial A/B against the old collector** (never both armed in one frame — F17) | **G2b, G5, G10** | both collectors exist; every existing test still compiles and passes |
 | **6** | gbuffer + SV0 ported; the R0 harness reads the new channel while the old one still exists | G10 extended to those passes | additive |
@@ -322,6 +322,44 @@ Also unshipped and named: **`W9207`'s emission has no reachable state on this bo
 *selection* (`diag::clock_code(false) == Some(9207)`, which reds if the mapping is deleted) and not
 the emission. The code is `Live` because it has an emitter and a page; its firing is **UNPROVEN
 here** and is stated as such at the site, in its doc page and in this row.
+
+
+### Four rung-3a decisions taken at implementation
+
+1. **A system zone has NO `ZoneDesc`, and that is the design.** A `declare_zone!` site registers a
+   `&'static ZoneDesc` because it has one; a system's name lives in `SystemMeta.name`, and the
+   window reducer walks the schedule it already holds. The alternative — a
+   `SyncCells<ZoneDesc, ENGINE_ZONE_SLOTS>` arena, the twin of rung 10's `DYN_DESCS` — would be
+   +96 KiB of `.bss` storing a copy of a string the struct already owns, which is the parallel-store
+   shape Principle 0 refuses. Consequence, stated: `zone_desc(id)` is not total over ids. It never
+   was — an un-minted id already answers `None`.
+
+2. **The builder writes the id through a no-op-default `System::set_zone`, not through a
+   `meta_mut`.** A `fn meta_mut(&mut self) -> &mut SystemMeta` obliges **every** implementor to
+   provide one, including the ten test stubs in `boyko_ecs` that carry a `SystemMeta` only because
+   the trait's field surface demands it. `set_zone` names exactly what the scheduler needs. The
+   residual is named on the method and asserted by a test: a type that does not override it stays
+   `ZONE_ID_UNASSIGNED`, which the artifact shows as an **absent** system rather than as a wrong
+   number.
+
+3. **Two `DiagFlag` bits were added, and the emitter's non-`_` `match` is what made it safe.**
+   `ZoneRegistryExhausted` → `W9201`, `ZoneRegistryNearFull` → `W9208`, extending Q4's table in the
+   one function that states it. Measured: the two rows were added **by a compile error**, not by
+   remembering — `flag_code`'s exhaustive match refused to build the moment the variants appeared.
+   That is what makes "every flag has exactly one paired report" a property of the build.
+
+4. **`W9208`'s threshold is an exact equality, not a range.** `NEXT_SLOT` is monotone, so the mint
+   that lands *on* 90 % is the one and only crossing; `slot == NEAR_FULL_SLOT` therefore fires once
+   by construction, with no second piece of state remembering whether it already warned and nothing
+   to get wrong when two threads mint concurrently.
+
+**And one miss, recorded where it happened.** Rung 2 flipped seven registry rows to `Live` and was
+verified with `cargo test -p boyko-log --test code_registry`, which selects ONE integration target
+and does not build `codes.rs`'s **lib** tests at all. `every_pending_row_names_its_rung_and_the_live_set_is_pinned`
+pins the `Live` set and was therefore **red for a whole rung**, found only when rung 3a ran the
+crate's full suite. The lesson is not "run more tests": a target filter is a claim about coverage,
+and this project already carries a standing note that `--test <name>` and `--lib` are different
+worlds. The pin is now updated with all ten rows and the miss is written into the test itself.
 
 ---
 

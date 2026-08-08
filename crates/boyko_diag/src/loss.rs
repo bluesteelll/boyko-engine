@@ -483,9 +483,13 @@ pub fn delta_since(cell: &LossCell, last: &mut LossSeen) -> LossDelta {
 /// says *how many times*, and an emitter that prints one without the other has thrown away the
 /// magnitude.
 ///
-/// Only the substrate's own three conditions are assigned here. The consumers' bits and the
-/// flag-to-counter pairing table are open question Q4 and are owed by whichever plan lands its
-/// emitter first; the remaining 29 bits are unassigned and must stay so until that table exists.
+/// **Q4 — the flag-to-code table — is RESOLVED**, and it lives in
+/// `boyko_ecs::ecs::core::profiling::diag`, which is the only caller of [`take_raised`] in the
+/// tree. Bits are assigned here as the emitter gains a row for them and **not before**: an
+/// unreported flag is a condition the system observes and cannot say, which is the failure the
+/// mute-leaf rule accepts once, at the leaf, and must not accumulate above it.
+///
+/// Five assigned, 27 unassigned.
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DiagFlag {
@@ -497,6 +501,12 @@ pub enum DiagFlag {
     /// `claim_lane` found every spare taken; the caller runs unlaned and its losses land in
     /// [`ROW_UNLANED`].
     LaneExhausted = 1 << 2,
+    /// The engine zone registry handed out its last slot; further zones run unregistered, and
+    /// their samples carry no id a reader can resolve to a name.
+    ZoneRegistryExhausted = 1 << 3,
+    /// The engine zone registry crossed 90 % occupancy. Nothing is lost yet — this is the warning
+    /// that exists so exhaustion is not the first news of it.
+    ZoneRegistryNearFull = 1 << 4,
 }
 
 impl DiagFlag {

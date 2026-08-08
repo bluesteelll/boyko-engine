@@ -203,15 +203,59 @@ pub fn zone_id(handle: &'static ZoneHandle) -> u16 {
     mint_cold(handle)
 }
 
+/// Occupancy at which the registry warns that it is filling. Exact rather than a range: the
+/// counter is monotone, so the mint that lands on this value is the one and only crossing, and
+/// raising there needs no second piece of state to remember whether it already did.
+const NEAR_FULL_SLOT: u16 = (ENGINE_ZONE_SLOTS as u16) / 10 * 9;
+
+/// Reserve one registry slot, or [`ZONE_ID_EXHAUSTED`] when there are none left.
+///
+/// **The bare mint, with no handle.** Two callers need an id and only one of them has a static:
+/// [`zone_id`] mints for a `declare_zone!` site, and the scheduler mints one per system at
+/// `try_build`, where the "zone" is a system whose name lives in its own `SystemMeta` and which has
+/// no `'static` descriptor to register. Both must draw from **this** counter, or a system id would
+/// collide with a static zone's and merge two rows into one.
+///
+/// Exhaustion is **non-terminal**. A profiler that aborts a shipped title because it ran out of
+/// name slots has become the failure it exists to report, and the arithmetic makes the terminal
+/// form dangerous: a legal app with a thousand systems across three schedules would panic at build
+/// time on a default-on feature. The refusal is counted ([`LossClass::Refused`]) and raised
+/// ([`DiagFlag::ZoneRegistryExhausted`]) instead; the profiling fold turns both into `W9201`.
+///
+/// [`LossClass::Refused`]: crate::loss::LossClass::Refused
+/// [`DiagFlag::ZoneRegistryExhausted`]: crate::loss::DiagFlag::ZoneRegistryExhausted
+pub fn mint_id() -> u16 {
+    let slot = NEXT_SLOT.fetch_add(1, Ordering::Relaxed);
+    if slot == 0 || (slot as usize) >= ENGINE_ZONE_SLOTS {
+        crate::loss::record_here(crate::loss::LossClass::Refused, 0);
+        crate::loss::raise(crate::loss::DiagFlag::ZoneRegistryExhausted);
+        return ZONE_ID_EXHAUSTED;
+    }
+    if slot == NEAR_FULL_SLOT {
+        crate::loss::raise(crate::loss::DiagFlag::ZoneRegistryNearFull);
+    }
+    slot
+}
+
+/// Slots handed out so far, for a consumer reporting occupancy.
+///
+/// Saturating rather than wrapping at the top: past `ENGINE_ZONE_SLOTS` the counter keeps climbing
+/// (every refused mint still does its `fetch_add`), and a reader wants "full", not a number above
+/// the capacity it is being compared against.
+#[must_use]
+pub fn minted_zones() -> u16 {
+    NEXT_SLOT.load(Ordering::Relaxed).min(ENGINE_ZONE_SLOTS as u16)
+}
+
 /// The once-per-zone mint, out of line so the hot path is a load and a compare.
 #[cold]
 #[inline(never)]
 fn mint_cold(handle: &'static ZoneHandle) -> u16 {
-    let slot = NEXT_SLOT.fetch_add(1, Ordering::Relaxed);
-    if slot == 0 || (slot as usize) >= ENGINE_ZONE_SLOTS {
-        // Wrapped or past the end. Count it and give every later caller the same answer, so the
-        // exhaustion is reported once per zone rather than once per call.
-        crate::loss::record_here(crate::loss::LossClass::Refused, 0);
+    let slot = mint_id();
+    if slot == ZONE_ID_EXHAUSTED {
+        // Give every later caller the same answer, so the exhaustion is one refusal per zone
+        // rather than one per call. The zone still runs; its interval still accumulates on its own
+        // handle, and only the registry entry is missing.
         let _ = handle.id.compare_exchange(
             0,
             ZONE_ID_EXHAUSTED,

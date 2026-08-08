@@ -285,6 +285,12 @@ where
         &self.meta
     }
 
+    /// Profiling rung 3 — the builder's one write of this system's zone id.
+    #[inline]
+    fn set_zone(&mut self, zone: u16) {
+        self.meta.zone = zone;
+    }
+
     /// Phase 10 Round 2 C1 — dispatcher-only tick snapshot write.
     ///
     /// Writes `last_run` and `this_run` into the cached [`SystemMeta`].
