@@ -133,7 +133,7 @@ flag-off legs on the logging side and by GJ1's control leg here.
 | Rung | Content | Gate(s) landing with it | Compiles alone because |
 |---|---|---|---|
 | **1** | `boyko_diag::profiling_abi`: `ARM_MASK: AtomicU64`, two-region `ZoneLane`, `REGISTRY`, the 24 B `Sample`, `ZoneTier` + `GLOBAL_TIER` (from `boyko_diag/build.rs`), `profiling_partition!` + `ENGINE_PACKAGES`, macros; `boyko_threadpool → boyko_diag` edge + `set_lane` at `worker_main` / `install` / `InstallGuard::drop`. **Requires `boyko_diag` D0/D1** | **G1, G4a (`overflow > 0`), G7, G22a (`LANES` + `REGISTRY`)**, SPSC unit + property tests, the loom SPSC case | purely additive; `boyko_utils` keeps zero deps (F27: rung 1 no longer commits green with nothing exercising it) |
-| **2** | `boyko_ecs::…::profiling`: `VmReservation`-backed store with an arm-time `zone_stride`, `fold.rs` (two regions, `fetch_sub` clear, clock-epoch check, bidirectional walk), `arm`/`disarm`, `ProfilerPlugin`, world-bind check. **Requires `boyko_log` L3.** Flips the `W92xx` registry rows it emits from `Pending` to `Live` with their doc pages | **G4b (the `u64` accumulator + `fetch_sub`, = logging's G11), G21, G23a (`section_report{LANES, REGISTRY}` — the two statics that exist here)** | additive |
+| **2** | `boyko_ecs::…::profiling`: `VmReservation`-backed store with an arm-time `zone_stride`, `fold.rs` (two regions, monotone-overflow delta, clock-epoch check, bidirectional walk), `arm`/`disarm`, `ProfilerPlugin`, world-bind check. **Requires `boyko_log` L3.** Flips the `W92xx` registry rows it emits from `Pending` to `Live` with their doc pages | **G4b (the `u64` accumulator + the consumer-side delta, = logging's G11), G21, G23a (`section_report{LANES, REGISTRY}` — the two statics that exist here)** | additive |
 | **3** | `SystemMeta.zone` + const-assert; tier-gated minting at `try_build` with **non-terminal** refusal; the four `App` zones (`__frame`/`__events`/`__fixed_step`/`__main_run`) at `update_with_delta`; `RoundRecord`; `compat` + `intervals` + `ConcurrencyReport` under `profiling-analysis` | **G8, G9, G11 (engine half)** | one field in tail padding; four zone sites |
 | **4** | RHI seam: three verbs + Vulkan impls + `ffi.rs` constants + `GPU_ZONE_QUERY_FLAGS` const-assert + Mock defaults and their pinning tests. **No consumer.** | **G2a, G2c** | old readers untouched |
 | **5** | `boyko_rhi_vulkan → boyko_diag` edge; `gpu_zone.rs` + `CommandWitness` (`first_pair_of` **and** `stamp_positions`, behind `profiling-census`); VB brackets ported. **Serial A/B against the old collector** (never both armed in one frame — F17) | **G2b, G5, G10** | both collectors exist; every existing test still compiles and passes |
@@ -256,6 +256,73 @@ the *macro*-level claim: that a zone declared by a `profiling_partition!(User)` 
 partition, and it is `G20`'s by construction. Until it exists, the partition constant's route from
 a crate root to a sample's region is argued, not measured.
 
+
+### Six rung-2 decisions taken at implementation, and what rung 2 still owes
+
+1. **The fold DRAINS THE WHOLE REGION instead of stopping at the cut, and nothing is deferred.**
+   A2 step 3 stops a region at the first sample with `stamp >= cut`, and states the cost: a long
+   outer span written after a short inner one that opened past the cut waits a fold. That stop
+   exists because A2 opens the new frame **after** the drain, so a sample past the cut belongs to a
+   frame that does not exist yet. The implementation opens the frame **first**, so the live frame is
+   open with `cpu_begin == cut` and a sample past the cut is attributed to it by the same walk on
+   the same rule. Attribution is identical either way — a sample lands in the frame containing its
+   stamp — and a slot is freed one fold earlier, which is strictly less overflow pressure. **The
+   deferred-outer-span cost A2 states does not exist in this implementation.**
+
+2. **`Q4`'s flag-to-code table is landed here, because this rung is the first `take_raised` caller**
+   (measured: zero callers outside the substrate's own docs). `ClockEpochBreak` -> `W9216`,
+   `LaneExhausted` -> `W9203`, and **`ClockUncalibrated` -> no code at all**. The third is a
+   decision, not a gap: the `92xx` block is exactly eighteen dense rows and a nineteenth is
+   un-addable without moving it, and the condition does not want a code anyway — its consequence is
+   that the window's magnitudes are unscaled, which is a **status on the data**, reported as
+   `FRAME_FLAG_CLOCK_UNCALIBRATED` on every frame record of the affected window. *Not every raised
+   flag deserves a code; a flag whose consequence is a status on the data is reported as that
+   status.*
+
+3. **`G23a`'s domain 1 asserts ZERO, not `> 0`.** The gate's "each domain > 0" is the right instinct
+   applied to the wrong domain: the std-allocator domain exists to catch the profiler reaching for
+   the heap, and the design's whole claim is that it never does, so `> 0` would demand an allocation
+   in order to prove there are none. The two-sidedness is kept and moved to domains 2 and 3, where a
+   stub that reserves nothing and links no static still fails.
+
+4. **`G23a`'s domain 3 is measured with `size_of`, not with `section_report`.** The tool proves
+   **`.bss` residency** — no raw data in the image — while this gate needs the symbol's **bytes**,
+   which for a `static` array are a compile-time constant. Re-measured this rung: no `llvm-readobj`,
+   `objdump` or `nm` on `PATH` under the active toolchain, so under the literal reading the row
+   could not be green on this box at all. Splitting them makes the bound exact and toolchain-free;
+   the residency claim is **not made here** and stays `G22a`'s, where it remains RED for want of the
+   tool. That RED is pre-existing — `rustup component add llvm-tools` is a D0 line item never taken.
+
+5. **`FrameRecord` is 32 B here, not the corpus's pinned 88.** Every omitted field (`run_gross`,
+   `fixed_total`, `main_total`, `instrument_*`, `gpu_total`, `fixed_steps`, `rounds`) is filled by
+   the four `App` zones at rung 3 or by the GPU channel at rung 5. Same rule for the absent offsets
+   (`lifetime`, `hist_of`, `hists`, `sys_of`, `rounds`, `legs`, `compat`, `intervals`), for
+   `FrameState::Partial`, and for three of the five `CellLabel` variants: **a value that is
+   structurally always zero is indistinguishable from a measurement of zero**, and a reader cannot
+   tell the difference. The pin moves as each lands.
+
+6. **The residency gate's own instrument was defective first, and it is the finding worth keeping.**
+   The counting allocator counted into a process-wide `AtomicUsize`. Both tests failed, reporting
+   136 B for `Profiler::new()` and 11 753 B for `arm` — figures with nothing to do with the
+   profiler: `libtest` runs tests on separate threads, and a global counter read before and after a
+   call reports whatever the *whole process* allocated in that interval. A direct probe measured
+   `Profiler::new()`, `calibrate()`, a first `warn!`, a second `warn!` and `arm` at **exactly 0**
+   each. The red was not the problem. **The same instrument would have gone GREEN BY LUCK had the
+   scheduler placed the two tests further apart** — a gate whose verdict depends on thread timing is
+   not measuring its subject. The counter is now per-thread.
+
+**What rung 2 still owes.** `G7`'s clause (c), the JOIN — one fixture emitting one `warn!` and
+opening one zone on the same worker, asserting the log record's `lane` field and the sample's lane
+index are the same integer — is listed as landing at "profiling rung 2 / logging L5". It does not
+land here: the log **record** carries no reader-visible `lane` field until the ring is read back at
+L16, so the two halves of the equality cannot both be observed yet. Named rather than absorbed.
+
+Also unshipped and named: **`W9207`'s emission has no reachable state on this box.**
+`invariant_tsc()` is `true` on every x86-64 machine this project targets, so what is tested is the
+*selection* (`diag::clock_code(false) == Some(9207)`, which reds if the mapping is deleted) and not
+the emission. The code is `Live` because it has an emitter and a page; its firing is **UNPROVEN
+here** and is stated as such at the site, in its doc page and in this row.
+
 ---
 
 ## Metrics and validation
@@ -291,7 +358,7 @@ hand-written table to compare its two sides (G10 / M12).
 | **G3a** **[F-fix]** | A delta below the band cannot return `Resolved` | A/A contrast (same code both legs) ⇒ `NotResolved { BelowBand }`. Shrink the band to a quantum ⇒ `Resolved` appears ⇒ gate fails. **Now unescapable in production too:** `Floor` has exactly one constructor (`from_session_file`), `FLOOR_SIGMA` is a `const`, and `resolve` checks `floor.workload == a.workload`. **Reduction RED (M11, lands at 7b):** a pinned three-floor fixture whose `min` is below and whose `max` is above an injected delta; with `Reduction::Max` the contrast is `NotResolved { BelowBand }`, with `Reduction::Min` it becomes `Resolved`. No other input moves | It cannot claim the *floor file* was measured honestly — only that the API cannot manufacture one. Rev 2 exported `Floor::from_aa_control(control, sigma)`, so production could hand `resolve` a one-sitting, caller-sigma floor and G3a constrained only the floor **the test** built (F4) |
 | **G3b** | `Resolved` positive control | Contrast between a calibrated spin of K and 3K ticks ⇒ `Resolved`, `median_delta` within tolerance of 2K. `fn resolve(..) -> NotResolved{..}` fails here | It cannot claim `resolve` is right on *real* workloads; it is a synthetic with a known answer |
 | **G4a** (rung 1) **[B6-split]** | A full region refuses and counts | Fill a region past capacity ⇒ `overflow > 0` and no sample is written past the cursor. Remove the capacity test ⇒ the producer overwrites unread slots ⇒ the SPSC property test reds | At rung 1 there is no fold and no artifact, so this clause claims **only** that the refusal is counted in the region — it is *not* the accumulator claim, and rev 3's single G4 silently reduced to exactly this at rung 1 |
-| **G4b** (rung 2) **[B6-split]** — **the same gate as the logging plan's G11** (S8) | The fold's accumulation is lossless | Preset a lane's cell, drop N, assert the folded `u64` global advanced by **exactly** N and the cell was cleared by `fetch_sub`. Replace `fetch_sub(observed)` with `store(0)` and run a live producer ⇒ an increment between load and clear is lost ⇒ the global lags the injected count ⇒ red | It cannot claim samples were *not* lost — it claims the loss is counted exactly. One gate serves both subsystems because the counter lives in `boyko_diag`. **It also cannot claim the PRODUCER-side window is closed** — that is `substrate/loss-fold`'s open BLOCKER Q2, and `fold_into` does not ship at D0 until it is answered |
+| **G4b** (rung 2) **[B6-split]** — **the same gate as the logging plan's G11** (S8) | The fold's accumulation is lossless | Preset a lane's cell, drop N, assert the folded `u64` global advanced by **exactly** N, and that a **second** fold with no new drops advances it by **0**. **RED, rewritten at rung 2 with the mechanism it tests:** replace `overflow_since(lane, region, seen)` with `overflow(lane, region)` in `fold.rs` — fold the monotone total instead of the consumer-side delta ⇒ every fold re-adds every earlier refusal ⇒ the counter runs away. MEASURED: an injected 5 read 10 on the second fold. *(The row said "replace `fetch_sub(observed)` with `store(0)`" until `substrate/loss-fold`'s Q2 resolved to **(b)**, monotone counters with the delta at the consumer. There is no clear to replace: `loss.rs` ships with no `fold_into`, no `store(0)` and no `fetch_sub`, and their absence IS the argument. The claim is untouched; only its mechanism moved.)* | It cannot claim samples were *not* lost — it claims the loss is counted exactly. One gate serves both subsystems because the counter lives in `boyko_diag`. **The producer-side window it used to disclaim no longer exists**: `substrate/loss-fold`'s Q2 resolved to (b), the consumer never writes the cell, and there is therefore no interleaving between a clear and an increment to reason about. What it still cannot claim is that a *reader* acts on the figure, which is `G4c`'s |
 | **G4c** (rung 8) **[B6-split]** | The loss reaches the reader | The artifact names every non-zero drop class with its `LossClass` and its count; zero a class in the writer ⇒ the artifact and the `DiagCensus` disagree ⇒ red | It cannot claim a *reader* acts on it |
 | **G5** **[F-fix]** | Command census, two-sided | Disarmed ⇒ `profiling_cmds == 0` and every sub-counter 0. Armed ⇒ **`timestamps == 2 × recorded_pairs` and `recorded_pairs == declared_bracket_count`**. Record one profiling command on the disarmed path ⇒ clause 1 fails; drop one real bracket ⇒ clause 2 fails | It cannot claim the *pixels* are unchanged (golden pins do that, secondarily) — and golden pins cannot claim the *commands* are unchanged, because `PINS.toml:3` is a BMP SHA-256 (verified: *"Each pin records the SHA-256 of a dumped BMP plus the exact pipeline it was blessed under"*). Rev 2's armed clause `timestamps >= 2` was satisfied **by the instrument's own `__gpu_null` probe alone**, so a recorder that dropped every real bracket passed |
 | **G6** | Partition check | A `PartitionGroup` containing a `TopOfPipe` member refuses to sum: declare a TOP zone into `PartitionGroup::VbRun` ⇒ the window reducer prints `sum = NOT_VALID` and the test asserts it. **Second clause (S5):** the window reducer has no API that adds two reduced values — a test that tries to must fail to compile | It cannot claim a `BottomOfPipe`-only sum is *complete*; a pass nobody bracketed is `NOT_BRACKETED`, not missing |
@@ -373,7 +440,8 @@ bidirectional walk** · **one zone receiving 100 000 samples in one frame keeps 
 `total` consistent (M9's boundary)** · a sample older than the window increments `late` · sealing
 with `GpuPass` disarmed · `WINDOW % 2 == 1` · `zone_stride` arithmetic at
 `user_zone_budget ∈ {0, 1, 256, MAX}` and the `W9211` threshold · `arm` twice with a different
-geometry ⇒ `E9213` · the `fetch_sub(observed)` clear survives a concurrent increment.
+geometry ⇒ `E9213` · a region's refusals are folded **exactly once** and a second fold with no new
+refusals adds nothing.
 
 **Rung 3:** tier folding — a `Deep` zone's `ZoneId` is never minted at `GLOBAL_TIER = Always` ·
 `FrameRecord.fixed_steps` equals the substep count for a 0-, 1- and 3-substep frame · `__frame`

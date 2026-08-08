@@ -366,7 +366,7 @@ are explicitly split or deferred to a rung where they can fail.
 | the `llvm-tools` prerequisite ([F7](04-STORAGE.md)) | DG6, and the whole `.bss` gate family | a D0 line item (`rustup component add llvm-tools`) |
 
 Two further open items are recorded rather than blocking: [Q3](03-LOSS.md) (the `LossCell`
-padding, cheap to take) and [Q4](03-LOSS.md) (the `DiagFlag` ↔ counter pairing table, owed by
+padding, cheap to take) and [Q4](03-LOSS.md) (the `DiagFlag` ↔ counter pairing table — **RESOLVED at profiling rung 2**; it was owed by
 whichever plan lands its emitter first). One SCOPE call goes to the owner: [Q5](#4--q5--boyko_demos-third-party-logging-is-larger-than-the-ledger-says-f2).
 
 **None of them is a design disagreement**; each is a value or a mechanism the decision record did

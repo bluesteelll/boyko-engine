@@ -12,6 +12,12 @@ boyko-threadpool = { path = "../boyko_threadpool" }
 # `boyko-log` depends only on `boyko-diag`, which has an empty `[dependencies]`, so this adds no
 # third-party crate to any graph that reaches the ECS.
 boyko-log = { path = "../boyko_log" }
+# The profiling seam (profiling rung 2). Already in the graph transitively through `boyko-log`;
+# named directly because this crate is now a FIRST-PARTY reader of it -- the fold consumes
+# `boyko_diag::sample`'s lane transport, `boyko_diag::clock`'s epoch and `boyko_diag::loss`'s
+# cells. A transitive path is not an API contract, and depending on one is how a crate's public
+# surface comes to rest on somebody else's dependency choice.
+boyko-diag = { path = "../boyko_diag" }
 fixedbitset = "0.5"
 crossbeam-queue = "0.3"
 crossbeam-utils = "0.8"

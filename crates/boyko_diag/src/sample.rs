@@ -315,6 +315,20 @@ unsafe impl Sync for ZoneLane {}
 /// is demand-zero, and a process that never arms writes no page of it.
 static LANES: [ZoneLane; LANE_COUNT as usize] = [const { ZoneLane::new() }; LANE_COUNT as usize];
 
+/// Bytes [`LANES`] occupies.
+///
+/// A `const fn` over `size_of`, not a hand-written product: the residency bound is summed from
+/// three domains and this is one of them, so a figure typed into the consumer would be a second
+/// statement of a number the type system already knows.
+///
+/// **What this is not:** a claim that the extent is `.bss`. That is `section_report`'s, and it
+/// needs a tool this box does not have. The bound needs the *bytes*, which `size_of` gives exactly
+/// and without a toolchain.
+#[must_use]
+pub const fn lanes_bytes() -> usize {
+    size_of::<[ZoneLane; LANE_COUNT as usize]>()
+}
+
 /// Publish a region's buffer. Called once per lane per region, at arm.
 ///
 /// # Safety

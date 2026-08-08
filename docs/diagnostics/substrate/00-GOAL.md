@@ -302,7 +302,7 @@ hidden:
   lives in the paired `LossCell`, and an emitter that prints the code without the counter is
   reporting "it happened" when it could report "it happened N times". Every `DiagFlag` therefore
   has exactly one paired counter, and **that pairing is a table in the emitter, not a
-  convention** — the table itself is still unassigned, and is open question Q4 in
+  convention** — the table was open question Q4 and is **RESOLVED at profiling rung 2**, in
   [`03-LOSS.md`](03-LOSS.md).
 
 **Enforcement** is gate **DG9** (grep + the three `deny(clippy::print_*)` lints at the crate

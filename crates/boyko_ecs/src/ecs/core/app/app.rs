@@ -672,6 +672,18 @@ impl App {
         #[cfg(debug_assertions)]
         let frame_start_tick = self.world.current_tick().get();
 
+        // ⓪ Profiling fold (profiling A2/D16), BEFORE step ①.
+        //
+        // This is the single funnel both frame entry points share: the windowed host calls
+        // `update_with_delta` directly and never touches `update`, so a fold placed there would
+        // never run in the one configuration that has a GPU channel. It is also what puts the
+        // instrument outside its own primary number — the frame time the profiler reports does
+        // not include the cost of reporting it.
+        //
+        // With profiling off this is one `.bss` load and one predicted branch; the resource is not
+        // touched, and a world without a `Profiler` is a supported state.
+        crate::ecs::core::profiling::fold_frame(&mut self.world);
+
         // ① Advance the virtual clock (clamp → scale → pause, plan D4/★m5).
         self.world.resource_mut::<Time>().advance_with(raw);
 

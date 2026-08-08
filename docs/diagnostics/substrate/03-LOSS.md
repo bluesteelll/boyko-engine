@@ -233,15 +233,35 @@ the architect.
 
 ---
 
-## Q4 — the paired-counter table for `DiagFlag` is UNASSIGNED
+## Q4 — the paired-counter table for `DiagFlag` — **RESOLVED at profiling rung 2**
 
 The mute-leaf rule ([`00-GOAL.md`](00-GOAL.md)) requires **every flag to have exactly one paired
-counter**, so an emitter can print "N times" rather than "it happened". **The record specifies
-neither the flag set nor the pairing.**
+counter**, so an emitter can print "N times" rather than "it happened". The record specified
+neither the flag set nor the pairing, and the table was owed by whichever plan landed its emitter
+first.
 
-The **18** `W92xx` rows (`W9201`..`W9218` — consecutive, no gaps, so the count is the range) fix
-the *profiling* half at logging L2. The **logging half** and **the
-substrate's own flags** — `ClockEpochBreak`, `ClockUncalibrated`, `LaneExhausted` — are
-unassigned.
+**Profiling rung 2 is that plan** — measured: it is the first and only caller of
+[`take_raised`](take_raised) anywhere in the tree — so the table lives in
+`boyko_ecs::ecs::core::profiling::diag`, as one `const fn` over the flag:
 
-**Needs a table before any emitter is written; owed by whichever plan lands its emitter first.**
+| `DiagFlag` | Code | Why |
+|---|---|---|
+| `ClockEpochBreak` | `W9216` | Ticks either side are incomparable; the in-flight window is discarded |
+| `LaneExhausted` | `W9203` | A producer runs unlaned, so its samples are refused and land on `ROW_UNLANED` — the same condition `W9203`'s second half names |
+| `ClockUncalibrated` | **none** | see below |
+
+**`ClockUncalibrated` gets no code, and that is a positive answer rather than a gap.** The `92xx`
+block is exactly eighteen rows, dense and consecutive, and the registry's check 1 makes a
+nineteenth un-addable without moving the block — so inventing one is not free. More to the point it
+does not want one: the condition is *"a tick was read before the scale was probed"*, whose
+consequence is that the window's magnitudes are unscaled. That is a **status on the data**, and
+this file already owns the vocabulary for exactly that ([`LossStatus::Unproven`](#)). It is
+reported as `FRAME_FLAG_CLOCK_UNCALIBRATED` on every frame record of the affected window, where a
+reader about to compare two numbers can see it.
+
+**The rule the table generalises, stated because the next flag will need it:** *not every raised
+flag deserves a code; a flag whose consequence is a status on the data is reported as that status.*
+
+**Still open, and narrowed rather than closed:** the **logging half**. `boyko_log` raises no
+`DiagFlag` of its own today; the day it does, its rows join the table above — in that same one
+function, not in a second one.

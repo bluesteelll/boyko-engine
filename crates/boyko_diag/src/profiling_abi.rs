@@ -178,6 +178,15 @@ static NEXT_SLOT: AtomicU16 = AtomicU16::new(1);
 static REGISTRY: [core::sync::atomic::AtomicPtr<ZoneDesc>; ENGINE_ZONE_SLOTS] =
     [const { core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()) }; ENGINE_ZONE_SLOTS];
 
+/// Bytes [`REGISTRY`] occupies — the second `.bss` domain of the residency bound.
+///
+/// See [`crate::sample::lanes_bytes`] on why this is a `size_of` rather than a product typed into
+/// the consumer, and on what it does and does not claim.
+#[must_use]
+pub const fn registry_bytes() -> usize {
+    size_of::<[core::sync::atomic::AtomicPtr<ZoneDesc>; ENGINE_ZONE_SLOTS]>()
+}
+
 /// This zone's registry id, minting one on first use.
 ///
 /// Ids start at **1**: zero is the un-minted state of the handle's own field, so using it as a
