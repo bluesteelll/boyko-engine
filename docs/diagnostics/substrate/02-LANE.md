@@ -75,7 +75,25 @@ thread that panics inside `install` stays labelled `LANE_DISPATCHER` for the res
 and **every later diagnostic from that thread is misattributed**.
 
 `InstallGuard` already carries `prev_worker_id: Option<u32>` (`thread_pool.rs:272`, set at
-`:202`, consumed at `:278`); **the lane rides the same `Option` rather than a fourth field.**
+`:202`, consumed at `:278`); **the lane rides the same `Option` rather than a fourth field** — it
+became `Option<(u32, u16)>` at D1, a shape in which "restored the id but not the lane" is not
+expressible.
+
+**Saved, not derived.** The obvious economy is to reconstruct the lane on exit from
+`prev_worker_id` (worker `k` ↦ `k`, dispatcher ↦ `LANE_DISPATCHER`, unattached ↦
+`LANE_UNCLAIMED`) and store nothing. It is wrong on two live cases. The host thread carries
+`LANE_HOST` while its worker id is `WORKER_ID_UNATTACHED`; a thread holding a spare from
+`claim_lane` carries a lane the pool never wrote at all. Both leave `install`
+labelled `LANE_UNCLAIMED`, and the spare case is the worse one — `release_lane` reads the TLS to
+find the slot to free, so the spare is stranded for the process and the loss is silent. D1 gates
+this with a dedicated leg and the leg reds on exactly this shortcut.
+
+**The dispatcher is not idle while it waits.** `Scope::drop` blocks by *work stealing*, not by
+parking: it takes from the injector and the sibling stealers and runs the tasks **inline on the
+calling thread**. So real work is attributed to `LANE_DISPATCHER`, and a consumer that treats that
+lane as bookkeeping-only drops samples. Discovered by a D1 gate that asserted `lane as u32 ==
+current_worker_id()`, passed, and then failed once — detail and the measured rate in
+[`05-LADDER-GATES.md`](05-LADDER-GATES.md).
 
 A **fourth latent site**, `tls::clear_current_worker_id` (`tls.rs:101`, `#[allow(dead_code)]` at
 `:100`, test teardown only), gets the same treatment for symmetry; **it is not on any production

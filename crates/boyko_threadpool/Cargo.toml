@@ -5,6 +5,13 @@ edition = "2024"
 description = "Custom Chase-Lev work-stealing thread pool for boyko-engine Phase 9 scheduler"
 
 [dependencies]
+# The diagnostics substrate. This crate owns the ONE per-thread lane integer
+# that the profiler and the logger both index by; the pool is the only code
+# that knows which thread is which, so the pool is what writes it (D1). The
+# edge is in-house and zero-dependency: `boyko_diag` has an empty
+# `[dependencies]`, so `cargo tree -p boyko-diag -e normal,build` is one node
+# and the pool's third-party graph is unchanged by this line.
+boyko-diag = { path = "../boyko_diag" }
 crossbeam-deque = "0.8"
 crossbeam-utils = "0.8"
 

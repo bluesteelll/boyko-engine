@@ -92,14 +92,32 @@ pub(crate) fn set_current_worker_id(id: u32) {
 }
 
 /// Clear the worker id on the current thread back to
-/// [`WORKER_ID_UNATTACHED`]. Reserved for use by code paths that must
-/// detach a thread from the pool (e.g. test teardown); production
-/// `install` restores the previous value via `set_current_worker_id` so
-/// it does not call this directly.
+/// [`WORKER_ID_UNATTACHED`], and the `boyko_diag` lane with it.
+///
+/// Reserved for use by code paths that must detach a thread from the pool
+/// (e.g. test teardown); production `install` restores the previous value via
+/// `set_current_worker_id` so it does not call this directly.
+///
+/// This clears the diagnostics lane while its sibling
+/// [`set_current_worker_id`] deliberately does not write one. The asymmetry is
+/// the honest shape: "detached" has exactly one lane answer
+/// (`LANE_UNCLAIMED`), while "attached" has several — worker `k` on
+/// `worker_main`, `LANE_DISPATCHER` inside `install` — which is why the
+/// attaching sites each write their own lane beside the id rather than through
+/// this module.
+///
+/// **Precondition**: the caller is detaching a thread whose lane the *pool*
+/// wrote. A thread holding a spare from `boyko_diag::lane::claim_lane` must
+/// call `release_lane` instead; clearing the TLS here would strand that spare
+/// for the process, because `release_lane` reads the TLS to find the slot to
+/// free. No production path can reach this — the function is `pub(crate)` with
+/// zero callers today — but the precondition is what a future caller must
+/// check.
 #[inline]
 #[allow(dead_code)]
 pub(crate) fn clear_current_worker_id() {
     CURRENT_WORKER_ID.with(|c| c.set(WORKER_ID_UNATTACHED));
+    boyko_diag::lane::set_lane(boyko_diag::lane::LANE_UNCLAIMED);
 }
 
 /// Replace the active-pool pointer; returns the previous value (so the

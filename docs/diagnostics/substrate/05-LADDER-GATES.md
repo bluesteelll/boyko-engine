@@ -80,6 +80,22 @@ under all 21 default members **before anything reads its output**.
 | `crates/boyko_threadpool/src/tls.rs:101` | `clear_current_worker_id` also clears the lane to `LANE_UNCLAIMED` |
 | `crates/boyko_threadpool/src/thread_pool.rs` (near `:49`) | `const _: () = assert!(boyko_diag::lane::LANE_WORKER_MAX as usize == MAX_WORKERS);` |
 
+**Creates**: `crates/boyko_threadpool/tests/diag_lane.rs` — DG2/DG3's runnable legs. It lives in
+`boyko_threadpool`, not in `boyko_diag`, because the property under test is a property of the
+*edge*: `boyko_diag` cannot name a worker, and a gate placed in the bottom crate could only
+re-read the slot it just wrote. `boyko_diag` is a normal dependency of the package, so a `tests/`
+target names it directly with no dev-dependency added.
+
+**The lane is SAVED into the guard, never derived from `prev_worker_id` on the way out.** The
+derivation looks total — worker `k` ↦ `k`, `WORKER_ID_DISPATCHER` ↦ `LANE_DISPATCHER`,
+`WORKER_ID_UNATTACHED` ↦ `LANE_UNCLAIMED` — and it is wrong on two live cases: the host thread
+carries `LANE_HOST` while its worker id is `WORKER_ID_UNATTACHED`, and a thread holding a spare
+from `claim_lane` carries a lane the pool never wrote. Both come out of `install` as
+`LANE_UNCLAIMED`, and the spare case is worse than a mislabel: `release_lane` reads the TLS to
+find the slot to free, so the spare is stranded for the process. `InstallGuard` therefore carries
+**one `Option<(u32, u16)>`** rather than an `Option<u32>` beside an `Option<u16>` — a shape in
+which "restored the id but not the lane" is not expressible.
+
 **The const-assert lives HERE, not in `boyko_diag`:** the bottom crate cannot name
 `MAX_WORKERS`. The record states the equality as a *comment*; **a comment is not a gate** (DG4).
 
@@ -104,9 +120,9 @@ nothing.
 | # | Gate | Showable RED |
 |---|---|---|
 | **DG1** | Tidy: `crates/boyko_utils/Cargo.toml` has an empty `[dependencies]`, and `crates/boyko_diag/Cargo.toml` has one too. `cargo tree -p boyko_diag -e normal,build` lists exactly one node. | Add any dep — e.g. `libc` — to either manifest ⇒ both legs red. **`-e normal,build` is explicit** because `boyko_diag` gains a `build.rs` at J1 and a build-dependency must not slip past a `normal`-only tree. *(S2)* |
-| **DG2** | Lane placement: a fixture running on worker *k* reads `lane() == k`; an unattached thread reads `LANE_UNCLAIMED`. | Delete the `set_lane` call in `worker_main` ⇒ every worker reads `LANE_UNCLAIMED` ⇒ red. *(S3a)* |
-| **DG3** | Lane/worker-id agreement, **including unwind**: on every thread, `lane()` maps 1:1 onto `current_worker_id()` under the documented map — before, during and after an `install`, **and after an `install` whose body panicked and was caught**. | Move the lane restore out of `InstallGuard::drop` into the normal-return path ⇒ the panicking leg leaves `lane() == LANE_DISPATCHER` on a thread whose `current_worker_id()` is back to its previous value ⇒ **red on the unwind leg only**. *(added by this plan — the third write site, F1)* |
-| **DG4** | `const _: () = assert!(LANE_WORKER_MAX as usize == MAX_WORKERS)` in `boyko_threadpool`. | Change `MAX_WORKERS` to 32 ⇒ compile error at `thread_pool.rs:49`. Costs one line and turns a comment into a build failure. *(added)* |
+| **DG2** | Lane placement: a task body running on worker *k* reads `lane() == k`; an unattached thread reads `LANE_UNCLAIMED`. **Assert the documented MAP, not raw equality** — see the dispatcher note below the table. | **MEASURED RED (D1):** delete the `set_lane` call in `worker_main` ⇒ 4096 of 4096 task bodies disagree, first offender `worker_id=0 lane=65535`, and exactly one test of the six fails. *(S3a)* |
+| **DG3** | Lane/worker-id agreement, **including unwind**: `lane()` maps onto `current_worker_id()` under the documented map — before, during and after an `install`, **after an `install` whose body panicked and was caught**, and **for a thread that entered `install` holding a claimed spare**. | **Two MEASURED REDs (D1), each hitting one leg and only that leg.** (a) Move the lane restore out of `InstallGuard::drop` into the normal-return path ⇒ the panicking leg finds `lane() == 64` (`LANE_DISPATCHER`) where it must be `65535`, while the normal-return leg stays **green** — the split the gate exists to make. (b) Derive the restored lane from `prev_worker_id` instead of saving it ⇒ the spare leg finds `65535` where it must be `66`, and nothing else moves. *(added by this plan — the third write site, F1; leg (b) added at implementation)* |
+| **DG4** | `const _: () = assert!(LANE_WORKER_MAX as usize == MAX_WORKERS)` in `boyko_threadpool`. | **MEASURED RED (D1):** set `MAX_WORKERS = 32` ⇒ `error[E0080]: evaluation panicked: assertion failed: boyko_diag::lane::LANE_WORKER_MAX as usize == MAX_WORKERS` at `thread_pool.rs:58`. One line, and the comment became a build failure. *(added)* |
 | **DG5** | **Loss fold exactness**: preset a lane's cell, drop N with a **live producer thread running**, assert the folded global advanced by **exactly** N and the cell was cleared without loss. | Replace the clearing operation with `store(0)` ⇒ an increment between load and clear is lost ⇒ the global lags the injected count ⇒ red. **One gate serves both subsystems** (profiling G4b = logging G11). **Blocked on Q2**: the gate as written *also* reds on the **record's own `fetch_sub` shape** under a producer whose increment is a non-atomic RMW — which is the point of Q2. *(S8)* |
 | **DG6** | **`.bss` residency**: `section_report` over the test binary asserts every named `boyko_diag` static's section carries a virtual size with **no raw data**. | Initialise one element non-zero ⇒ raw data appears ⇒ red. **Tooling prerequisite, MEASURED:** no `llvm-readobj` / `objdump` / `nm` / `llvm-nm` is on PATH, and the active `stable-x86_64-pc-windows-gnu` toolchain ships only `rust-objcopy` / `rust-lld` — `llvm-tools` is **not installed**. The gate **resolves its tool at start and treats absence as a RED, never a SKIP**; `rustup component add llvm-tools` is a D0 line item. A skip-on-absent gate is green on every machine that lacks the tool, **which is this one**. **CANNOT CLAIM:** that the OS leaves those pages uncommitted — the image proves absence of raw data and nothing more. *(S12)* |
 | **DG7** | `assert_zero_init_eligible` **compile-fail**: a `trybuild` `compile_fail` case declaring `SyncCells<NonZeroU32, 4>` (or any `Drop` type) fails to compile with the `ZeroInit` bound error. | Remove the `T: ZeroInit` bound ⇒ it compiles ⇒ red. **Mechanism note (F8):** the record specifies "a `#[test]` that must fail at compile time"; a `#[test]` that fails to compile fails the whole test binary's build, so it cannot be a *passing* gate. `trybuild` is the workspace's existing mechanism (dev-dep of `boyko_ecs:55`, `boyko_rhi_vulkan:82`, `boyko_ui:45`). **The "extent is a const" half is NOT gated** — Rust array lengths are const by construction, so there is no broken input to construct and **no assertion is made**. *(S12, refined)* |
@@ -115,6 +131,28 @@ nothing.
 | **DG10** | **`boyko_log` never names layer B**: `rg 'ZoneId\|ZoneLane\|ARM_MASK\|declare_zone\|profiling_abi' crates/boyko_log/src` returns zero. | Add one `use boyko_diag::profiling_abi::ZoneId;` to `boyko_log` ⇒ red. **Runs from the rung that creates `boyko_log`, not from D0.** *(added)* |
 | **DG11** | **Claim-path distinctness**: `LANE_COUNT - LANE_SPARE_BASE` threads each get a distinct spare; the next gets `None`, and `LossClass::Unclaimed` is 1. | Replace the CAS with a load-then-store ⇒ two threads claim the same spare. **The wall-clock form is FLAKY BY CONSTRUCTION** (it needs a specific interleaving); the reliable form is the **loom model** below. The wall-clock leg asserts only the deterministic half — **exhaustion returns `None` without panicking or blocking** — and says so. *(S3, split)* |
 | **DG12** | **No boot work** (added at the split): with both runtime flags off, a process that starts, runs N frames and exits has (a) never entered `calibrate()`, (b) never written a `SPARE_OWNER`/`LossCell`/`DIAG_FLAGS` byte — i.e. no `boyko_diag` **shared static**; the TLS `LANE` `Cell` is **excluded and must be**, because it is the one write D1 does mandate (`worker.rs:24`, `:77` above) and DG2/DG3 assert it has happened, and it costs 2 B of per-thread TLS and no `.bss` ([`02-LANE.md`](02-LANE.md) `:29`, `:160`). D1's own no-boot-work line item (`:86-88` above) already states the predicate this way; only this enumeration disagreed with it, and at D1 it could not have been green on the implementation D1 prescribes. (c) minted no `SessionId`. Observed by a `#[cfg(test)]` counter on each entry point plus DG6's image probe over the same binary. | Call `calibrate()` from a static initialiser, or from D1's `set_lane` path ⇒ leg (a) reds on the first worker spawn. **Second:** pre-touch the lane buffers in `lib.rs` ⇒ leg (b) reds. **CANNOT CLAIM** that the pages are physically uncommitted — DG12 proves *nothing wrote them*, DG6 proves *nothing is in the image*; **whether the loader commits an untouched page is UNPROVEN in this corpus** and is not asserted by either. |
+
+### The dispatcher executes tasks — DG2/DG3 assert the MAP, and a raw-equality form is flaky
+
+Found by building D1, not by reading the plan. `Scope::drop` does **not** park: it blocks by work
+stealing, taking from the injector and the sibling stealers and running what it takes **inline on
+the calling thread** (`crates/boyko_threadpool/src/scope.rs`, "Work-stealing wait", and
+`worker::run_task` is `pub(crate)` precisely so that path can reuse it). A task that lands there
+executes with `current_worker_id() == WORKER_ID_DISPATCHER` and `lane() == LANE_DISPATCHER` — a
+**correct** pairing that `lane as u32 == id` reports as a defect, because the sentinel is
+`u32::MAX - 1` and the lane is 64.
+
+**MEASURED, and this is the part worth keeping:** the first draft of the gate asserted raw
+equality, ran **green with zero disagreements**, and reported exactly one on a later run. It was
+flaky by construction and its own first result said otherwise. Across ~24 further runs of the same
+binary the dispatcher executed **zero** of the 4096 tasks, so the honest statement is that the
+path is *documented and reachable*, **not** that it is *covered* — and the gate's failure message
+now carries the offending `(worker_id, lane)` pair rather than a bare count, so the next
+occurrence explains itself instead of being re-derived.
+
+Consequence for every later consumer, not just this gate: **the dispatcher's lane is not a
+"nothing happens here" lane.** Work is attributed to it, so a reader that treats `LANE_DISPATCHER`
+as bookkeeping-only will silently drop real samples.
 
 ### Gates deferred to a rung where they can fail
 
@@ -148,6 +186,23 @@ Release/Acquire pairing in [`02-LANE.md`](02-LANE.md)). Loom is already wired wo
 `[target.'cfg(loom)'.dependencies]` with a `sync.rs` shim. `boyko_diag` follows the same shape.
 **Run the loom leg in debug**: loom release binaries crash at startup on this machine
 (pre-existing, unrelated to this crate).
+
+> ⚠️ **The cited precedent does not compile, MEASURED at D1.** `RUSTFLAGS=--cfg loom cargo check
+> -p boyko-threadpool --lib` fails with `error[E0599]: no method named get_mut found for struct
+> loom::sync::atomic::AtomicPtr<T>` at `crates/boyko_threadpool/src/scope.rs:185`; loom 0.7.2
+> offers `with_mut`, not `get_mut`. `-p boyko-ecs` fails on the **same** error, because it reaches
+> the same lib — so **both** precedents this paragraph names are dead, and `rg loom
+> .github/workflows` returns **nothing**, so no CI leg would ever have said so. Verified not to be
+> a D1 regression by `git stash`-ing the D1 diff and reproducing the identical error at `93dbcf8`.
+>
+> What this costs the paragraph above: the sentence "loom is already wired workspace-wide" is true
+> of the **manifests** and false of the **build**. `boyko_diag` may still copy the manifest shape —
+> that part is verified — but it must not inherit the claim that a working model runs beside it.
+> Whoever writes the `claim_lane` model is the first person in this workspace to compile a loom
+> leg since it broke, and should expect to fix `scope.rs:185` first. Raised with the owner in
+> [`docs/OPEN-QUESTIONS.md`](../../OPEN-QUESTIONS.md); **not repaired here** — it is outside D1's
+> subject, it sits in an `unsafe` `Drop`, and a green `cargo check` under `--cfg loom` would still
+> not be a *run* model.
 
 **Loom — NOT for the loss fold.** The fold's question is not "which interleaving is reachable"
 but "is this operation atomic at all", **which loom answers trivially and misleadingly**. Once

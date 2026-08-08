@@ -48,6 +48,15 @@ use crate::worker::worker_main;
 /// (deferred — see plan §4.6 future work).
 pub const MAX_WORKERS: usize = 64;
 
+// Gate DG4. `boyko_diag::lane` reserves `0..LANE_WORKER_MAX` for pool workers
+// and gives lane `LANE_WORKER_MAX` itself to the dispatcher, so raising
+// `MAX_WORKERS` here without raising `LANE_WORKER_MAX` there would place
+// worker 64 on the dispatcher's lane and silently merge two threads'
+// diagnostics. The assert lives on THIS side because `boyko_diag` sits below
+// this crate and cannot name `MAX_WORKERS`. A comment on either side would
+// record the equality; only this makes breaking it a build failure.
+const _: () = assert!(boyko_diag::lane::LANE_WORKER_MAX as usize == MAX_WORKERS);
+
 /// One unit of work submitted to the pool. `body` is the actual closure;
 /// it is heap-allocated so that the deque entries remain word-sized.
 ///
@@ -185,9 +194,16 @@ impl PoolInner {
         self.active_scopes.fetch_add(1, Ordering::AcqRel);
 
         let prev_pool = tls::swap_active_pool(self as *const PoolInner);
-        let prev_worker_id = {
-            let cur = tls::current_worker_id();
+        // D1 lane write site 2 of 3. The previous lane is SAVED, never derived
+        // from `prev_worker_id` on the way out: a host thread carries
+        // `LANE_HOST` while its worker id is `WORKER_ID_UNATTACHED`, and a
+        // thread holding a claimed spare carries a lane the pool never wrote at
+        // all. Deriving would restore `LANE_UNCLAIMED` on both and mislabel
+        // every later diagnostic from that thread for the rest of the process.
+        let prev_labels = {
+            let cur = (tls::current_worker_id(), boyko_diag::lane::lane());
             tls::set_current_worker_id(tls::WORKER_ID_DISPATCHER);
+            boyko_diag::lane::set_lane(boyko_diag::lane::LANE_DISPATCHER);
             cur
         };
 
@@ -199,7 +215,7 @@ impl PoolInner {
         let _frame = InstallGuard {
             inner: self,
             prev_pool: Some(prev_pool),
-            prev_worker_id: Some(prev_worker_id),
+            prev_labels: Some(prev_labels),
         };
 
         // `crate::sync::thread::current()` so the captured waker `Thread`
@@ -245,7 +261,7 @@ impl PoolInner {
         let _frame = InstallGuard {
             inner: self,
             prev_pool: None,
-            prev_worker_id: None,
+            prev_labels: None,
         };
 
         // See `install`: shimmed `current()` so the waker `Thread` type matches
@@ -265,18 +281,34 @@ impl PoolInner {
 /// normal return and the unwinding path (O4).
 ///
 /// For [`PoolInner::scope`] there is no TLS to restore, so `prev_pool` /
-/// `prev_worker_id` are `None`; only the `active_scopes` decrement runs.
+/// `prev_labels` are `None`; only the `active_scopes` decrement runs.
 struct InstallGuard<'a> {
     inner: &'a PoolInner,
     prev_pool: Option<*const PoolInner>,
-    prev_worker_id: Option<u32>,
+    /// The frame's saved thread labels: `(pool worker id, boyko_diag lane)`.
+    ///
+    /// One `Option` over a pair rather than two `Option`s, because the two are
+    /// written together at the `install` entry and are only ever restored
+    /// together — a shape in which "restored the id but not the lane" is not
+    /// expressible. That half-restore is exactly the D1 defect this guard
+    /// exists to prevent, and `Option<u32>` beside `Option<u16>` would leave it
+    /// one edit away.
+    prev_labels: Option<(u32, u16)>,
 }
 
 impl Drop for InstallGuard<'_> {
     #[inline]
     fn drop(&mut self) {
-        if let Some(id) = self.prev_worker_id {
+        // D1 lane write site 3 of 3, and the one an implementer working from
+        // the decision record's "two sites" misses. This runs on the UNWINDING
+        // path as well as the normal return: without the lane half, a
+        // dispatcher thread that panics inside `install` stays labelled
+        // `LANE_DISPATCHER` for the rest of the process while its worker id is
+        // correctly restored — the two slots disagree, and every later
+        // diagnostic from that thread is attributed to the dispatcher.
+        if let Some((id, lane)) = self.prev_labels {
             tls::set_current_worker_id(id);
+            boyko_diag::lane::set_lane(lane);
         }
         if let Some(p) = self.prev_pool {
             tls::swap_active_pool(p);

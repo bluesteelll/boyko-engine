@@ -22,6 +22,14 @@ pub(crate) fn worker_main(inner: Arc<PoolInner>, worker_id: u32, deque: Worker<T
     debug_assert!((worker_id as usize) < inner.workers.len());
 
     tls::set_current_worker_id(worker_id);
+    // D1 lane write site 1 of 3, deliberately co-located with the pool's own
+    // TLS write: the two slots hold the same fact for two different crates, and
+    // co-location is what makes an edit that moves one and not the other a
+    // two-line diff rather than a silent divergence. The cast is exact —
+    // `worker_id < MAX_WORKERS` (clamped at build) and `LANE_WORKER_MAX ==
+    // MAX_WORKERS` is a const assert in `thread_pool.rs` — so a worker can
+    // never land on the dispatcher's lane.
+    boyko_diag::lane::set_lane(worker_id as u16);
     // Deposit the worker-shared state pointer (decision E): the worker holds
     // `Arc<PoolInner>` for its whole life, so `Arc::as_ptr` is valid for the
     // duration of the deposit. The handle joins this worker before dropping

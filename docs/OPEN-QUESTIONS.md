@@ -745,6 +745,40 @@ measured, with telemetry, retention and the game-facing API returning afterwards
 foundation. Stated here as an option; **the owner decides the scope, not me.** Work continues on
 the full revision 4 unless told otherwise.
 
+### SCOPE 3 — the workspace's `--cfg loom` leg has not compiled, and nothing said so
+
+Found at rung D1, 2026-08-08, while checking that the new `boyko_threadpool -> boyko_diag` edge
+did not disturb the loom build. It did not. The loom build was **already broken**:
+
+```
+RUSTFLAGS=--cfg loom cargo check -p boyko-threadpool --lib
+error[E0599]: no method named `get_mut` found for struct `loom::sync::atomic::AtomicPtr<T>`
+  --> crates/boyko_threadpool/src/scope.rs:185:39
+```
+
+loom 0.7.2 offers `with_mut`, not `get_mut`. `-p boyko-ecs` fails on the **same** error because it
+reaches the same lib, so **both** crates that carry a `[target.'cfg(loom)'.dependencies]` block are
+dead, not one. `rg loom .github/workflows` returns nothing — no CI leg passes `--cfg loom`, which
+is why this has been invisible. Confirmed not to be a D1 regression: `git stash`-ing the D1 diff
+reproduces the identical error at `93dbcf8`.
+
+Why it needs a decision rather than a quiet fix:
+
+1. The substrate plan cites these two crates as the working precedent `boyko_diag`'s `claim_lane`
+   loom model will copy. The **manifest** shape is a valid precedent; the claim that a model *runs*
+   beside it is not. The plan text is now qualified — the citation is not silently left standing.
+2. The fix at `scope.rs:185` is one line inside an `unsafe` `Drop` on the scope-teardown path, and
+   a green `cargo check` under `--cfg loom` is **not** a run model. Making the leg mean something
+   means running the models, and this machine crashes loom **release** binaries at startup
+   (recorded previously, unrelated).
+3. So the real question is scope: (a) repair `scope.rs:185`, run the existing models in debug, and
+   add a CI leg that keeps them compiling; (b) repair it and add no CI leg, accepting the same
+   silent rot later; or (c) leave it, and land `boyko_diag`'s concurrency evidence as the
+   proptest + Miri legs only, stating in the plan that no loom model backs `claim_lane`.
+
+**Not repaired at D1** — it is outside D1's subject and the choice above is not mine. The lane
+claim path's Miri and property legs are unaffected and still planned.
+
 ---
 
 ## KNOWN FRICTIONS — no decision needed, recorded so they are not rediscovered
