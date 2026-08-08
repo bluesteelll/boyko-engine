@@ -118,14 +118,101 @@ pub struct ZoneHandle {
     /// handle**: an `AtomicU16` makes the whole static mutable global memory, and a `const` block
     /// that reads through it is `E0080`.
     pub id: AtomicU16,
+    /// Closed intervals. See [`ZoneGuard`] on why the accumulators live here at this rung.
+    calls: AtomicU64,
+    /// Raw clock ticks accumulated across those intervals.
+    ticks: AtomicU64,
 }
 
 impl ZoneHandle {
     /// Declare a handle. `const`, so the static costs no initialiser.
     #[must_use]
     pub const fn new(desc: &'static ZoneDesc) -> ZoneHandle {
-        ZoneHandle { desc, id: AtomicU16::new(0) }
+        ZoneHandle {
+            desc,
+            id: AtomicU16::new(0),
+            calls: AtomicU64::new(0),
+            ticks: AtomicU64::new(0),
+        }
     }
+
+    /// Closed intervals recorded on this zone.
+    #[must_use]
+    pub fn calls(&self) -> u64 {
+        self.calls.load(Ordering::Relaxed)
+    }
+
+    /// Raw clock ticks accumulated across those intervals. Scaled by a reader, never here.
+    #[must_use]
+    pub fn ticks(&self) -> u64 {
+        self.ticks.load(Ordering::Relaxed)
+    }
+}
+
+/// An open zone. Closes on `Drop`, **including the unwinder's**.
+///
+/// # Why the guard, and not `open()`/`close()`
+///
+/// A zone that a panic unwinds through must still close, or its interval is lost and — worse —
+/// every enclosing zone's interval silently absorbs it. `Drop` is the only closing discipline the
+/// language enforces.
+///
+/// # Where the sample goes at this rung
+///
+/// Into the handle's own two atomics. **The lane-based sample transport is the larger half of the
+/// profiler's own rung**, and until it exists a zone that accumulated nowhere would make the gate
+/// and the guard untestable — a measured interval with no observable effect is indistinguishable
+/// from a guard that measures nothing. The accumulators are `Relaxed` adds on a cold-ish path and
+/// are **not** the design's final storage; they are what makes this rung provable on its own.
+pub struct ZoneGuard {
+    handle: &'static ZoneHandle,
+    opened: u64,
+}
+
+impl ZoneGuard {
+    /// Open a zone. One clock read.
+    ///
+    /// Callers reach this through [`zone!`](crate::zone), which puts both gates in front of it —
+    /// so by the time this runs, the tier admitted the site and the scope is armed.
+    #[inline]
+    #[must_use]
+    pub fn open(handle: &'static ZoneHandle) -> ZoneGuard {
+        ZoneGuard { handle, opened: crate::clock::ticks() }
+    }
+}
+
+impl Drop for ZoneGuard {
+    #[inline]
+    fn drop(&mut self) {
+        // `wrapping_sub`, because the clock is a raw counter and a wrap must yield the interval
+        // rather than a number near 2^64. A plain subtraction would panic in debug and produce a
+        // nonsense total in release -- once per counter lap, which is to say never during a test
+        // and eventually in a session.
+        let elapsed = crate::clock::ticks().wrapping_sub(self.opened);
+        self.handle.calls.fetch_add(1, Ordering::Relaxed);
+        self.handle.ticks.fetch_add(elapsed, Ordering::Relaxed);
+    }
+}
+
+/// Open a zone if both gates admit it.
+///
+/// ```ignore
+/// let _z = zone!(VB_EARLY_RASTER);
+/// ```
+///
+/// Expands to an `Option<ZoneGuard>`: `None` when either gate refuses. **This is the second place
+/// the expansion names the handle identifier** — the first is the gate's `const` block — which is
+/// why a mistyped zone is `E0425` in every feature-on profile, retail included, whichever way the
+/// tier folds.
+#[macro_export]
+macro_rules! zone {
+    ($handle:ident) => {
+        if $crate::zone_enabled!($handle) {
+            Some($crate::profiling_abi::ZoneGuard::open(&$handle))
+        } else {
+            None
+        }
+    };
 }
 
 /// Whether scope `s` is armed. One `Acquire` load and one bit test.
@@ -284,6 +371,55 @@ mod tests {
         assert!(any_armed());
         disarm_scope(20);
         assert_eq!(!any_armed(), quiet || !any_armed());
+    }
+
+    // One zone and one scope PER TEST. Both are process-global, and two tests sharing either one
+    // arm and disarm each other's gate while reading each other's counters -- measured: the first
+    // draft shared `TEST_GUARD` between the two tests below and failed on the second run of the
+    // suite, not the first.
+    declare_zone!(TEST_GUARD, name = "t.guard", scope = 30, tier = ZoneTier::Always);
+    declare_zone!(TEST_UNWIND, name = "t.unwind", scope = 31, tier = ZoneTier::Always);
+
+    #[test]
+    fn an_armed_zone_records_an_interval_and_a_disarmed_one_records_nothing() {
+        disarm_scope(30);
+        let before = (TEST_GUARD.calls(), TEST_GUARD.ticks());
+        {
+            let _z = zone!(TEST_GUARD);
+            std::hint::spin_loop();
+        }
+        assert_eq!(
+            (TEST_GUARD.calls(), TEST_GUARD.ticks()),
+            before,
+            "a disarmed zone must not open a guard, so nothing may accumulate"
+        );
+
+        arm_scope(30);
+        {
+            let z = zone!(TEST_GUARD);
+            assert!(z.is_some(), "an armed zone in an admitting tier must open");
+            for _ in 0..2000 {
+                std::hint::spin_loop();
+            }
+        }
+        assert_eq!(TEST_GUARD.calls(), before.0 + 1, "exactly one interval must be recorded");
+        assert!(TEST_GUARD.ticks() > before.1, "the interval must have a positive duration");
+        disarm_scope(30);
+    }
+
+    #[test]
+    fn a_zone_closes_on_the_unwinding_path() {
+        // A zone a panic unwinds through must still close, or its interval is lost AND every
+        // enclosing zone silently absorbs it -- a wrong number rather than a missing one.
+        arm_scope(31);
+        let before = TEST_UNWIND.calls();
+        let caught = std::panic::catch_unwind(|| {
+            let _z = zone!(TEST_UNWIND);
+            panic!("deliberate, inside a zone");
+        });
+        assert!(caught.is_err());
+        assert_eq!(TEST_UNWIND.calls(), before + 1, "the unwinder must still close the zone");
+        disarm_scope(31);
     }
 
     #[test]
