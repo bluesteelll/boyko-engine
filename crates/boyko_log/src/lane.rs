@@ -224,8 +224,14 @@ pub fn emit_impl<A: LogArgs>(site: &'static LogSite, args: A) {
             //   and decimal digits, so the prefix is valid UTF-8.
             let text = unsafe { core::str::from_utf8_unchecked(&buf[..n]) };
             crate::sync_out::write_oracle_line("boyko-log: ", text);
+            crate::target::count_sync_routed(site.target);
         } else {
             record_here(LossClass::Unclaimed, 0);
+            // Charged to the TARGET as well as to the substrate's un-laned row. The two answer
+            // different questions -- "which thread lost records" and "which category is
+            // incomplete" -- and a census that read only the first could call a target clean while
+            // every one of its records went missing on a driver callback thread.
+            crate::target::count_dropped(site.target);
         }
         return;
     };
@@ -235,6 +241,7 @@ pub fn emit_impl<A: LogArgs>(site: &'static LogSite, args: A) {
         // Checked at RUNTIME, in every profile. Twelve arguments of 256 bytes exceed the cap, so
         // "unreachable" would have described a debug-build panic reachable from safe user code.
         record_here(LossClass::Refused, need as u64);
+        crate::target::count_dropped(site.target);
         return;
     }
     let need = need as u32;
@@ -250,6 +257,7 @@ pub fn emit_impl<A: LogArgs>(site: &'static LogSite, args: A) {
 
     if !admit(lane, w, pad, need, site.level) {
         record_here(LossClass::Overflow, u64::from(need));
+        crate::target::count_dropped(site.target);
         return;
     }
 
@@ -369,6 +377,26 @@ pub fn drain(
 
         while r != w {
             let off = (r & MASK) as usize;
+            // THE MIRROR OF THE PRODUCER'S *IMPLICIT* WRAP, and its absence was a real defect.
+            //
+            // The producer's rule has two arms: a tail long enough for a header but too short for
+            // the record carries an explicit PAD, and **a tail shorter than a header carries
+            // nothing at all** -- there is no room for a PAD header, so the producer simply
+            // advances `write` past those bytes. The consumer had only the first arm: it read a
+            // "header" out of the 1..HEADER_BYTES-1 bytes the producer had skipped and never
+            // written, took `len` from uninitialised memory, and walked off into the ring.
+            //
+            // MEASURED, single-threaded, with the producer and the consumer strictly alternating:
+            // `debug_assert!(len >= HEADER_BYTES)` fires once the cursor happens to land in that
+            // window, which needs a specific run of record lengths and is why the L1 gate's fixed
+            // sizes never reached it. In release, with the assert compiled out, this is a torn
+            // read through a corrupted `&'static LogSite` -- the same use-after-free class the
+            // admission arithmetic (F6) produced, entered through the wrap instead.
+            let tail = LANE_BYTES - off;
+            if tail < HEADER_BYTES {
+                r = r.wrapping_add(tail as u32);
+                continue;
+            }
             // SAFETY: the producer never publishes a record that would straddle the end of the
             //   ring -- a tail too short for one carries a PAD instead -- so a header at `off` is
             //   wholly inside the buffer whenever `r != w`. This thread is the only consumer (the

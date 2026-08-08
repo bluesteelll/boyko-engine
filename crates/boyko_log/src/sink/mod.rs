@@ -13,3 +13,4 @@
 //! call site, which is the failure mode this crate's gates exist to make impossible.
 
 pub mod ecs;
+pub mod file;

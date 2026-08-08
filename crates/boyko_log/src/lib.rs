@@ -55,12 +55,14 @@
 #![deny(clippy::print_stdout)]
 #![deny(clippy::dbg_macro)]
 
+pub mod census;
 pub mod codes;
 pub mod drain_owner;
 pub mod lane;
 pub mod level;
 pub mod lifecycle;
 mod macros;
+pub mod rate;
 pub mod record;
 pub mod sink;
 pub mod site;

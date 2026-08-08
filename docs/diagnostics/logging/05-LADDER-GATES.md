@@ -54,7 +54,7 @@ subsystem present is not a baseline for the both-present configuration (S10).
 | **L2-gate** | The **eight** registry checks (integration test) over the specified three-stream walker, with **TEXT's explicit directory list excluding `docs/archive/**`** (B6) and the **cross-file `#[cfg(test)]` rule** (B7). Check 2 is `Live`-only (S6); check 3c stays disarmed until L8c. Each check **shown red once** against a deliberately broken registry; the observed failure text recorded in the gate log. **This rung commits alone** because the grandfathered codes are `Pending`, check 3b requires them to have no emitters yet (F20), and the corpus no longer contains codes nothing will ever emit | `tests/code_registry.rs` | — |
 | **L3** | `sync_out.rs` (`OUT_LOCK` per Decision 9c, `write_oracle_line` **with the durable fan-out** — B9; **no `report!`** — S1), sink thread with adaptive park, **`DRAIN_OWNER`** (B5), staged drain, console sink → `stderr()`'s own handle, `flush`/`shutdown` with `SINK_STATE`, **`PRE_FLUSH` + `sink_can_accept()`** (S5), panic-hook chaining. Timestamps come from `boyko_diag::clock`; **`RecordHeader.clock_epoch_lo` is chosen here** (S4 left the 4-byte-vs-4-bit choice to this rung; Decision 11 takes the `_pad` byte). **S13's split lands with the mechanisms it moves**: `boot(cfg)` becomes a pure struct-fill that **spawns no thread, installs no hook and calls no `calibrate()`**; `enable(spec)` does all three, and is what a launch flag calls before the game loop | `src/{sync_out,sink/*}.rs` | the 20 B header assert; **`boot()` must stay side-effect-free** |
 | **L3-gate** | **G18** `OUT_LOCK` **three-sided** (unwind release; re-entrant completion; **durable fan-out with no console sink**). Flush-without-consumer ⇒ `NoConsumer` immediately; flush-timeout ⇒ within 2 s; shutdown detaches; **`sink_sustained_rate`** finds the drop knee (M19); **S5's four reds** (pre-boot `warn!`, post-shutdown `warn!`, `PRE_FLUSH` ordering, deferred `DiagFlag`); **S7's stderr line-integrity red** — 200 `warn!` while the validation callback fires under `cmd /c … > f 2>&1`, every `[vk-validation] ` occurrence must start a line; give `write_oracle_line` a raw fd ⇒ splices ⇒ red. **S13's boot red**: move the sink-thread spawn or the panic-hook install back into `boot()` ⇒ G2 leg (b)'s OS-thread-count probe and leg (c)'s behavioural hook probe both red on the flag-off run. *(v3's test 16, the `report!` concurrency test, is deleted with `report!` — S1.)* | `tests/`, `benches/` | — |
-| **L4** | File sink + cap (`W0103`), rate limiter, `LOG-CENSUS` incl. `UNPROVEN(lossy)`, `SinkMode::Manual` | `src/{sink/file,rate}.rs` | — |
+| **L4** | File sink + cap (`W0103`), rate limiter, `LOG-CENSUS` incl. `UNPROVEN(lossy)`, `SinkMode::Manual`. **`TARGET_STATS` lands here rather than at L16** — the census's rows are per target and cannot be built from process-wide counters (decision 1 below). `W0103` is the registry's **first `Live` row**, which arms checks 2 and 3a | `src/{sink/file,rate,census}.rs`, `src/target.rs` | — |
 | **L4-gate** | `Once` steady state performs **no store** (assembly/`perf` check) **and touches no shared line** (per-site latch, F11); census `UNPROVEN` at 0 records **and** at `dropped > 0` | `tests/`, `benches/` | — |
 | **L5** | ECS seam: `LogPlugin`, `LogRing` (16 B `LogLine`) on `VmReservation`, `LogStats`, `log_drain_system`, **`ECS_HANDOFF`** (B2), and the **manual `Send`/`Sync` impls with their `const _` pin** (B1). **`LogCensus` is NOT here** — it needs `TARGET_STATS`, which is L16's, so the pin names `LogRing` and `LogStats` at this rung and gains `LogCensus` at that one. The drain has **one** duty here; its other two arrive with L16 | `crates/boyko_ecs/.../log/`, `src/sink/{mod,ecs}.rs` | the `COMMIT_GRANULE` divisibility asserts **and** the `assert_send_sync` pin |
 | **L5-gate** | **P1, re-specified twice** (F3 → instrument; S10 → leg matrix): a **headless schedule bench**, not windowed frame time, run as a **2×2 of {logger off, on} × {profiler absent, armed}**, ABBA-counterbalanced, interleaved zero control, **one sitting**. The claim it may make is "logger-on vs off **at a fixed profiler state**", reported at both states. Baselines carry `config_tag = {profiler, logger}`; a sitting whose tag differs returns `NotResolved{ConfigMismatch}` rather than a number | `crates/bench_bevy_vs_boyko/benches/` | — |
@@ -80,7 +80,7 @@ subsystem present is not a baseline for the both-present configuration (S10).
 | **L14-gate** | **G13** (a-c) | `tests/` | — |
 | **L15** | **Crash path.** `CrashSink` opened **on the enable path** (S13 — it was "at boot"; the file is opened when diagnostics are turned on, which is still before the first frame and still not inside the panic hook), `SINK_STATE::Exiting`, the panic-hook protocol **with step 1.5 (`PRE_FLUSH`)**, the `DRAIN_OWNER` claim (B5), `E0109`, `E0118`. **`SinkMode::Scheduled`** and its `DRAIN_OWNER` participation (B8) | `src/sink/crash.rs`, `src/sink/mod.rs` | Decision 12's flush semantics; no new unbounded wait; **`SINK_STATE` must NOT regain an exclusivity role**; **the open must NOT move into the hook** |
 | **L15-gate** | **G14**, **three-sided** — the third leg panics while a **manual `drain()` is in flight** (B5) | `tests/` | — |
-| **L16** | **Game consumption.** `TARGET_STATS`, `LogCensus`, `DiagCensus`, `LogRing::since` + `RingFilter` + `skipped`, the per-frame **`frame_epoch`** record (S11 rename), `boyko_diag::SessionId` in every header, the `ONCE_SITES` census walk (M1) | `src/target.rs`, `crates/boyko_ecs/.../log/` | the drain stays off the frame thread **except under `Scheduled`, where it is on it by design** |
+| **L16** | **Game consumption.** ~~`TARGET_STATS`~~ *(landed at L4 — see that row)*, `LogCensus`, `DiagCensus`, `LogRing::since` + `RingFilter` + `skipped`, the per-frame **`frame_epoch`** record (S11 rename), `boyko_diag::SessionId` in every header, the `ONCE_SITES` census walk (M1) | `src/target.rs`, `crates/boyko_ecs/.../log/` | the drain stays off the frame thread **except under `Scheduled`, where it is on it by design** |
 | **L16-gate** | **G15**, two-sided, plus the `ECS_HANDOFF` overflow leg (`W0117` fires, `lossy` set, no silent loss) | `crates/boyko_app/tests/` | — |
 | **L17 → J1** | **Merged with profiling rung 14 into ONE joint rung** (S9): the single `BOYKO_PROFILE` axis, `LogRuntimePreset`, the three header facts, and **5 CI legs** (`dev` existing + 4 net new). One axis cannot be split across two rungs | `crates/boyko_diag/build.rs`, `crates/boyko_app/src/`, CI | G2's `off` leg must still pass unchanged |
 | **J1-gate** | **G16** two-sided symbol gate + the `compile_error!` red + the three-header-fields red (Decision 25) + **P2** soak. G14/G16 cross-profile symbol censuses are CI **steps** over two legs' artifacts, not extra legs | CI legs, `tests/` | — |
@@ -177,6 +177,49 @@ not needing a *migration* rung beside it, and it is unaffected.
    G5 counts distinct `decode` symbols — at this rung there is one by construction, so the census
    could not go red and would be a gate that cannot fail. It lands with the sink, which is also
    the first rung at which it can mean anything.
+
+### Five L4 decisions taken at implementation, and the L1 defect its gate found
+
+1. **`TARGET_STATS` moves here from L16.** The L4 row owes a `LOG-CENSUS` with `UNPROVEN(lossy)`,
+   and the L4-gate owes "`UNPROVEN` at 0 records **and** at `dropped > 0`" — neither is expressible
+   over process-wide counters, because the census's whole claim is *per target*. Shipping a census
+   whose rows could not distinguish two targets would be the vacuous artifact this vocabulary was
+   invented against. L16 keeps `LogCensus`/`DiagCensus` (the ECS `Resource`s) and the ring reader;
+   the `.bss` array and its two writers land with the report that reads them.
+
+2. **`dropped` is charged to the target as well as to the substrate's lane row.** The two answer
+   different questions — "which thread lost records" and "which category is incomplete" — and a
+   census reading only the first would call a target clean while every one of its records went
+   missing on a driver-callback thread. The RMW is on the cold path only.
+
+3. **The census is printed by `shutdown` and `disable`, through one `close_out`.** Two copies would
+   be how the two came to disagree about whether a session's last lines reached the disk.
+
+4. **`LogConfig.file` is a `bool` and the path is recorded separately.** A configuration that owned
+   a path could not be recorded without allocating, and `boot` is a pure struct-fill. A path longer
+   than the buffer is **refused, not truncated** — a truncated path names a different file.
+
+5. **Checks 2 and 3a are ARMED**, by the mechanism L2b left for exactly this moment: a test asserted
+   that no row was `Live` so that the first flip would red and force the real checks to be written.
+   `W0103` flipped and it did. The vacuity test is deleted rather than kept — a precondition
+   assertion and the check it stood in for cannot both be true. The codes test's claim moved with
+   it: "every row is `Pending`" became "every `Pending` row names its rung **and** the `Live` set is
+   pinned", so a row that goes `Live` without its emitter, or an emitter that lands without
+   flipping its row, still reds.
+
+**The defect this rung's gate found is L1's, not L4's, and it was a use-after-free in release.** The
+producer's wrap rule has two arms: a tail long enough for a header but too short for the record
+carries an explicit PAD, and **a tail shorter than a header carries nothing at all** — there is no
+room for a PAD header, so the producer simply advances `write` past those bytes. *The consumer had
+only the first arm.* It read a "header" out of the 1..`HEADER_BYTES`−1 bytes the producer had
+skipped and never written, took `len` from uninitialised memory, and walked off into the ring —
+`debug_assert!(len >= HEADER_BYTES)` in a test build, a torn read through a corrupted
+`&'static LogSite` in release. Same class as the F6 admission arithmetic, entered through the wrap
+instead. It needs the cursor to land in a 19-byte window out of 16 384, so L1's fixed-size gate
+either hits it every lap or never; the regression test cycles the payload length so the cursor
+sweeps every residue class. **It surfaced by accident**, while a `RED` probe for the file-sink cap
+left the drain loop running far longer than the gate normally does — which is an argument for
+running a probe's consequences out rather than reverting at the first red line.
 
 ### Six L5 decisions taken at implementation
 

@@ -514,24 +514,51 @@ fn check_3b_no_pending_code_has_an_emitter_yet() {
     );
 }
 
-/// **Check 3** and **check 2**, stated so their absence is visible.
+/// **Check 2** — every `Live` row has a `docs/diagnostics/<CODE>.md` page.
 ///
-/// Both apply to `Live` rows and there are none at this rung, so both are **vacuous** — they
-/// cannot fail, and a green from either would mean nothing. This test asserts the precondition
-/// instead: that there really are no `Live` rows. When the first row flips at L6, this fails and
-/// the person flipping it arms the real checks.
+/// ARMED AT L4, by the mechanism L2b left for exactly this moment: a test asserted that no row was
+/// `Live`, so that the first flip would red and force this check to be written. `W0103` flipped and
+/// it did. The vacuity test is deleted rather than kept — a precondition assertion and the check it
+/// stood in for cannot both be true.
+///
+/// `Pending` and `Historical` rows are out of scope on purpose. A page for a row with no emitter
+/// describes a message nobody has written, which is how three rows of this registry's first draft
+/// came to disagree with what the engine prints.
 #[test]
-fn checks_2_and_3_are_vacuous_until_the_first_row_goes_live() {
-    let live: Vec<String> = DIAGNOSTICS
+fn check_2_every_live_row_has_a_doc_page() {
+    let dir = repo().join("docs").join("diagnostics");
+    let missing: Vec<String> = DIAGNOSTICS
         .iter()
         .filter(|r| r.status.requires_emitter())
         .map(|r| ident_of(r.class, r.number))
+        .filter(|id| !dir.join(format!("{id}.md")).is_file())
         .collect();
     assert!(
-        live.is_empty(),
-        "rows {live:?} are now Live, so checks 2 (doc page) and 3 (>=1 identifier use) are no \
-         longer vacuous and MUST be implemented in this file before this row lands. Delete this \
-         test when you do."
+        missing.is_empty(),
+        "these rows are Live but have no docs/diagnostics/<CODE>.md page: {missing:?}. A Live row \
+         owes a page; write it from the emitter's own message, not from the code's name."
+    );
+}
+
+/// **Check 3a** — every `Live` row is actually emitted.
+///
+/// The mirror of check 3b: 3b reds when a `Pending` row acquires an identifier use, this reds when
+/// a `Live` row has none. Together they make the status field a claim about the tree rather than a
+/// label, so a row cannot be flipped early and cannot be left behind.
+#[test]
+fn check_3a_every_live_row_has_at_least_one_emitter() {
+    let c = gather();
+    let orphans: Vec<String> = DIAGNOSTICS
+        .iter()
+        .filter(|r| r.status.requires_emitter())
+        .map(|r| ident_of(r.class, r.number))
+        .filter(|id| !has_token(&c.code, id))
+        .collect();
+    assert!(
+        orphans.is_empty(),
+        "these rows are Live but their identifiers appear nowhere in CODE: {orphans:?}. Either the \
+         emitter was not written, or it names the code as a literal instead of the constant -- \
+         which is the thing this registry exists to stop."
     );
 }
 
@@ -598,7 +625,6 @@ fn check_4_every_prefixed_literal_resolves_to_a_registry_row() {
 /// rows. Each lands with the rung that writes its emitter, where the message text exists to read.
 const FORWARD_DECLARED: &[(&str, &str)] = &[
     ("W0102", "L3 — the aggregated per-drain drop report"),
-    ("W0103", "L4 — file sink size cap reached"),
     ("E0104", "L10 — downstream target id collision at boot"),
     ("E0105", "L10 — dynamic target name arena exhausted"),
     ("E0106", "L10 — dynamic target registration refused"),

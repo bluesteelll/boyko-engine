@@ -22,7 +22,7 @@ fn boot_alone_changes_nothing_a_process_can_observe() {
     assert_eq!(hook_fired(), 0, "no hook may have run before boot");
     assert_eq!(sink_passes(), 0, "no sink pass may have happened before boot");
 
-    boot(LogConfig { console: true, sink_thread: true, ecs_ring: true });
+    boot(LogConfig { console: true, sink_thread: true, ecs_ring: true, ..LogConfig::default() });
     assert_eq!(state(), SinkState::Booted);
 
     // Both wishes were recorded and NEITHER was acted on.

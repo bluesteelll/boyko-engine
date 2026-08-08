@@ -22,7 +22,7 @@
 //! it will eventually have. A safety argument that names constructors which do not exist yet is a
 //! safety argument nobody can check.
 
-use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use crate::level::Level;
 
@@ -202,6 +202,96 @@ static CONTROL: [AtomicU8; MAX_TARGETS] = [const { AtomicU8::new(0) }; MAX_TARGE
 /// without a lock. It carries no state of its own, so it cannot diverge from [`CONTROL`]; it can
 /// only be stale, and a stale poll costs one redundant repaint.
 static CONTROL_EPOCH_CTR: AtomicU32 = AtomicU32::new(0);
+
+/// Per-target counts. One 64-byte cell per target, 16 KiB of `.bss`.
+///
+/// **Not a mirror of anything**: this is the only place delivered-per-target counts exist. The
+/// lanes count records, the substrate's loss cells count losses per *lane*, and neither can answer
+/// "did target `rhi` ever deliver anything", which is the one question a census exists to ask.
+///
+/// A full cache line per target because `delivered` is written by the consumer role while
+/// `dropped` is written by producers, and putting them on one line would make every drop storm
+/// contend with the drain that is trying to report it.
+#[repr(C, align(64))]
+struct TargetStatCell {
+    /// Records handed to a sink for this target. Written by the consumer role.
+    delivered: AtomicU64,
+    /// Records the emission path refused for this target. Written by producers.
+    dropped: AtomicU64,
+    /// Records the sampler chose not to deliver. Reserved for L12; always 0 here.
+    sampled_out: AtomicU64,
+    /// Records that took the synchronous channel instead of a lane.
+    sync_routed: AtomicU64,
+    _pad: [u8; 32],
+}
+
+impl TargetStatCell {
+    const fn new() -> TargetStatCell {
+        TargetStatCell {
+            delivered: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
+            sampled_out: AtomicU64::new(0),
+            sync_routed: AtomicU64::new(0),
+            _pad: [0; 32],
+        }
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<TargetStatCell>() == 64);
+
+static TARGET_STATS: [TargetStatCell; MAX_TARGETS] =
+    [const { TargetStatCell::new() }; MAX_TARGETS];
+
+/// One target's counts: `delivered`, `dropped`, `sampled_out`, `sync_routed`.
+///
+/// A snapshot, not a view — the four loads are independent, so a reader can observe a delivery
+/// that happened after the drop it is compared against. That is inherent to counting without a
+/// lock and it is why the census reports a *status* rather than an arithmetic identity.
+#[must_use]
+pub fn target_stats(id: TargetId) -> (u64, u64, u64, u64) {
+    let c = &TARGET_STATS[id.index() as usize];
+    (
+        c.delivered.load(Ordering::Relaxed),
+        c.dropped.load(Ordering::Relaxed),
+        c.sampled_out.load(Ordering::Relaxed),
+        c.sync_routed.load(Ordering::Relaxed),
+    )
+}
+
+/// Count one record handed to a sink. Called by the consumer role, once per record.
+#[inline]
+pub(crate) fn count_delivered(id: TargetId) {
+    TARGET_STATS[id.index() as usize].delivered.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Count one record the emission path refused.
+///
+/// On the **cold** path only — a record that was admitted never reaches this — so the RMW is paid
+/// exactly when something has already gone wrong.
+#[cold]
+#[inline(never)]
+pub(crate) fn count_dropped(id: TargetId) {
+    TARGET_STATS[id.index() as usize].dropped.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Count one record that took the synchronous channel instead of a lane.
+#[cold]
+#[inline(never)]
+pub(crate) fn count_sync_routed(id: TargetId) {
+    TARGET_STATS[id.index() as usize].sync_routed.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Every engine target, in declaration order, as `(id, name)`.
+///
+/// The census's enumeration. Dynamic targets are L10's and are absent here rather than reported as
+/// zero — a census row for a target that cannot exist yet is the vacuous row this vocabulary was
+/// invented to prevent.
+pub fn engine_targets() -> impl Iterator<Item = (TargetId, &'static str)> {
+    ENGINE_TARGET_IDS
+        .iter()
+        .zip(ENGINE_TARGET_NAMES.iter())
+        .map(|(&id, &name)| (TargetId(id), name))
+}
 
 /// A log target: a compile-time-unique id, a name, and a compile-time ceiling.
 ///

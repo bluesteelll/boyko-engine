@@ -60,7 +60,7 @@ fn the_seam_carries_a_record_and_costs_nothing_until_it_does() {
     );
 
     // ── 3. Turn it on, and emit exactly one record ───────────────────────────────────────────
-    boot(LogConfig { console: false, sink_thread: false, ecs_ring: true });
+    boot(LogConfig { console: false, sink_thread: false, ecs_ring: true, ..LogConfig::default() });
     assert!(enable(), "enable() refused a freshly booted process");
     set_target_control(<Ecs as LogTarget>::ID, TargetControl::new(Level::Trace, 0, false));
 

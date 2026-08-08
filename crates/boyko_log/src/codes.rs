@@ -341,6 +341,11 @@ impl Default for OnceSite {
 codes! {
     (2,    B, B0002, RatePolicy::Every, CodeStatus::Pending("L6"),
         "Intra-system access conflict on one resource"),
+    // The FIRST `Live` row in this registry. Its summary is read from the emitter
+    // (`sink/file.rs::render_cap`) rather than composed from the code's name -- which is the rule
+    // three rows of this registry's first draft broke.
+    (103,  W, W0103, RatePolicy::Once,  CodeStatus::Live,
+        "The file sink reached its byte cap and stopped writing"),
     (1501, W, W1501, RatePolicy::Once,  CodeStatus::Pending("L6"),
         "Ordering references a system set that has no members"),
     (1801, B, B1801, RatePolicy::Every, CodeStatus::Pending("L8b"),
@@ -440,16 +445,31 @@ mod tests {
     }
 
     #[test]
-    fn every_row_is_pending_at_this_rung_and_names_its_rung() {
-        // The property that lets L2 land alone: a `Live` row would demand an identifier use that
-        // no migration rung has written yet, and the orphan check would red on a correct registry.
+    fn every_pending_row_names_its_rung_and_the_live_set_is_pinned() {
+        // At L2 this asserted that EVERY row was `Pending` -- the property that let that rung land
+        // alone. L4 lands the first `Live` row, so the claim moves rather than loosens: a Pending
+        // row must still name its rung, and the Live set is enumerated here so a row that goes
+        // Live without its emitter, or an emitter that lands without flipping its row, reds.
+        const LIVE: &[(u8, u16)] = &[(b'W', 103)];
         for row in DIAGNOSTICS {
             match row.status {
                 CodeStatus::Pending(rung) => {
-                    assert!(!rung.is_empty(), "a Pending row must name the rung that lands it")
+                    assert!(!rung.is_empty(), "a Pending row must name the rung that lands it");
+                    assert!(
+                        !LIVE.contains(&(row.class, row.number)),
+                        "row {}{} is in the pinned Live set but its status is Pending",
+                        row.class as char,
+                        row.number
+                    );
                 }
+                CodeStatus::Live => assert!(
+                    LIVE.contains(&(row.class, row.number)),
+                    "row {}{} went Live without being added to this test's pinned set",
+                    row.class as char,
+                    row.number
+                ),
                 other => panic!(
-                    "row {}{} is {other:?}; every row at this rung is Pending",
+                    "row {}{} is {other:?}; only Pending and Live exist at this rung",
                     row.class as char, row.number
                 ),
             }

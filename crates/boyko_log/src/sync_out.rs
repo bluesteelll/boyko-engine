@@ -219,11 +219,10 @@ mod tests {
     // alternative -- letting them race -- would make a steal test pass by stealing from a sibling
     // test rather than from the thread it set up, which is a green for the wrong reason.
     #[allow(clippy::disallowed_types)]
-    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn a_free_lock_is_taken_and_released() {
-        let _s = SERIAL.lock().expect("serial");
+        let _s = crate::drain_owner::test_serial();
         {
             let g = acquire();
             assert_eq!(g.mode(), OutMode::Held);
@@ -236,7 +235,7 @@ mod tests {
     fn release_happens_on_the_unwinding_path_too() {
         // The third of the three hangs the protocol replaced: a `Display` that panicked mid-format
         // leaked the lock permanently, and the panic hook's flush then hung the process.
-        let _s = SERIAL.lock().expect("serial");
+        let _s = crate::drain_owner::test_serial();
         let caught = catch_unwind(AssertUnwindSafe(|| {
             let _g = acquire();
             panic!("deliberate");
@@ -252,7 +251,7 @@ mod tests {
     #[test]
     fn re_entry_is_detected_and_completes_instead_of_deadlocking() {
         // The panic-inside-the-sink case: the sink holds the lock, catches, and direct-writes.
-        let _s = SERIAL.lock().expect("serial");
+        let _s = crate::drain_owner::test_serial();
         let before = out_reentrant();
         let outer = acquire();
         assert_eq!(outer.mode(), OutMode::Held);
@@ -271,7 +270,7 @@ mod tests {
 
     #[test]
     fn a_held_lock_is_stolen_rather_than_waited_on_forever() {
-        let _s = SERIAL.lock().expect("serial");
+        let _s = crate::drain_owner::test_serial();
         let before = out_steals();
 
         // A foreign thread holds the lock for longer than the deadline.
@@ -310,9 +309,14 @@ mod tests {
     fn with_no_destination_configured_the_write_is_a_no_op() {
         // The flag-off property: no synchronous destination, so nothing is written and no lock is
         // taken. A caller cannot tell the difference from a successful write, and must not need to.
-        let _s = SERIAL.lock().expect("serial");
-        assert!(!CONSOLE_ENABLED.load(Ordering::Relaxed), "the .bss default is off");
+        let _s = crate::drain_owner::test_serial();
+        // The precondition is SET, not asserted. `CONSOLE_ENABLED` is process-global and another
+        // test in this binary legitimately turns it on; asserting the `.bss` default here would
+        // make this a test of scheduling order rather than of the no-destination behaviour.
+        let was = CONSOLE_ENABLED.load(Ordering::Relaxed);
+        set_console_enabled(false);
         assert_eq!(write_oracle_line("boyko: ", "nothing should be written"), None);
         assert_eq!(OUT_OWNER.load(Ordering::Relaxed), 0, "a no-op must not acquire");
+        set_console_enabled(was);
     }
 }
