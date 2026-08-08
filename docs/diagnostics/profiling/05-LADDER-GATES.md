@@ -134,7 +134,7 @@ flag-off legs on the logging side and by GJ1's control leg here.
 |---|---|---|---|
 | **1** | `boyko_diag::profiling_abi`: `ARM_MASK: AtomicU64`, two-region `ZoneLane`, `REGISTRY`, the 24 B `Sample`, `ZoneTier` + `GLOBAL_TIER` (from `boyko_diag/build.rs`), `profiling_partition!` + `ENGINE_PACKAGES`, macros; `boyko_threadpool → boyko_diag` edge + `set_lane` at `worker_main` / `install` / `InstallGuard::drop`. **Requires `boyko_diag` D0/D1** | **G1, G4a (`overflow > 0`), G7, G22a (`LANES` + `REGISTRY`)**, SPSC unit + property tests, the loom SPSC case | purely additive; `boyko_utils` keeps zero deps (F27: rung 1 no longer commits green with nothing exercising it) |
 | **2** | `boyko_ecs::…::profiling`: `VmReservation`-backed store with an arm-time `zone_stride`, `fold.rs` (two regions, monotone-overflow delta, clock-epoch check, bidirectional walk), `arm`/`disarm`, `ProfilerPlugin`, world-bind check. **Requires `boyko_log` L3.** Flips the `W92xx` registry rows it emits from `Pending` to `Live` with their doc pages | **G4b (the `u64` accumulator + the consumer-side delta, = logging's G11), G21, G23a (`section_report{LANES, REGISTRY}` — the two statics that exist here)** | additive |
-| **3** *(lands in parts: **3a** shipped — the field, the mint, `W9201`/`W9208`; **3b** the `App` zones; **3c** the analysis half)* | `SystemMeta.zone` + const-assert; tier-gated minting at `try_build` with **non-terminal** refusal; the four `App` zones (`__frame`/`__events`/`__fixed_step`/`__main_run`) at `update_with_delta`; `RoundRecord`; `compat` + `intervals` + `ConcurrencyReport` under `profiling-analysis` | **G8, G9, G11 (engine half)** | one field in tail padding; four zone sites |
+| **3** *(lands in parts: **3a** shipped — the field, the mint, `W9201`/`W9208`; **3b** shipped — the `App` zones; **3c** the analysis half)* | `SystemMeta.zone` + const-assert; tier-gated minting at `try_build` with **non-terminal** refusal; the four `App` zones (`__frame`/`__events`/`__fixed_step`/`__main_run`) at `update_with_delta`; `RoundRecord`; `compat` + `intervals` + `ConcurrencyReport` under `profiling-analysis` | **G8, G9, G11 (engine half)** | one field in tail padding; four zone sites |
 | **4** | RHI seam: three verbs + Vulkan impls + `ffi.rs` constants + `GPU_ZONE_QUERY_FLAGS` const-assert + Mock defaults and their pinning tests. **No consumer.** | **G2a, G2c** | old readers untouched |
 | **5** | `boyko_rhi_vulkan → boyko_diag` edge; `gpu_zone.rs` + `CommandWitness` (`first_pair_of` **and** `stamp_positions`, behind `profiling-census`); VB brackets ported. **Serial A/B against the old collector** (never both armed in one frame — F17) | **G2b, G5, G10** | both collectors exist; every existing test still compiles and passes |
 | **6** | gbuffer + SV0 ported; the R0 harness reads the new channel while the old one still exists | G10 extended to those passes | additive |
@@ -360,6 +360,30 @@ pins the `Live` set and was therefore **red for a whole rung**, found only when 
 crate's full suite. The lesson is not "run more tests": a target filter is a claim about coverage,
 and this project already carries a standing note that `--test <name>` and `--lib` are different
 worlds. The pin is now updated with all ten rows and the miss is written into the test itself.
+
+
+### Two rung-3b decisions
+
+1. **Nothing the zones measure is copied into `FrameRecord`.** The corpus's record carries
+   `run_gross`, `fixed_total`, `main_total`, `instrument_measured` and `fixed_steps`. Every one is
+   **already in a cell**: `run_gross` is `__frame`'s `total` for that frame row, `fixed_total` is
+   `__fixed_step`'s, `instrument_measured` is `__fold`'s — and `fixed_steps`, the substep count N,
+   is `__fixed_step`'s **`count`**, because a zone that opens N times per frame counts N. Copying
+   them would be a second statement of five facts the store already holds, written by a different
+   code path, which is how two numbers for one quantity come to disagree. `FrameRecord` therefore
+   does not grow at this rung and stays 32 B.
+
+2. **`__fold`'s sample is always one fold further behind than `__frame`'s, structurally.** Its
+   guard must close *after* the drain — otherwise the sample it produces is taken by the very drain
+   it is measuring and attributed to the frame it was measuring. So it is pushed after that fold's
+   drain has finished and waits for the next one. A reader comparing `__frame` and `__fold` in the
+   same row would be comparing two different frames; the gate reads `__fold` one row further back
+   and says why.
+
+RED for the containment claim, run at implementation: move the `__frame` guard **above** the
+`fold_frame` call in `App::update_with_delta` ⇒ the fold's span falls inside the frame's ⇒
+`__frame` no longer opens once per frame in the row the gate reads ⇒ red. The instrument being
+outside its own primary number is then a property of the call order, not an approximation.
 
 ---
 

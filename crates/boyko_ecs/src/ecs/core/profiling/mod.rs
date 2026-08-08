@@ -47,6 +47,7 @@ pub mod diag;
 pub mod fold;
 pub mod plugin;
 pub mod store;
+pub mod zones;
 
 #[cfg(test)]
 mod tests;
@@ -61,6 +62,7 @@ pub use store::{
 };
 
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
+use crate::ecs::core::profiling::zones::FOLD;
 
 /// The zone id of something that has none.
 ///
@@ -112,5 +114,10 @@ fn fold_frame_cold(world: &mut EcsMaster) {
         // process-global so it reads armed here regardless.
         return;
     }
+    // The instrument measures itself, and the bracket is here rather than inside `fold` for one
+    // reason: `__fold`'s own sample is pushed by the guard's `Drop`, so it must close AFTER the
+    // fold has finished draining — otherwise the sample it produces would be drained by the same
+    // fold that produced it and attributed to the frame it was measuring.
+    let _z = boyko_diag::zone!(FOLD);
     fold(world.resource_mut::<Profiler>());
 }

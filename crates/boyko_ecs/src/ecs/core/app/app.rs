@@ -29,6 +29,10 @@ use crate::ecs::core::change_detection::{
     CHECK_TICK_PREEMPT_MARGIN, CHECK_TICK_THRESHOLD, MAX_CHANGE_AGE, run_check_ticks_scan,
 };
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
+// The frame driver's four zone sites. `zone!` matches a bare `ident` -- deliberately, so a site
+// cannot name a handle it did not import -- and one `use` brings in both items a `declare_zone!`
+// emits: the `static` in the value namespace and the `mod` companion in the type namespace.
+use crate::ecs::core::profiling::zones::{EVENTS, FIXED_STEP, FRAME, MAIN_RUN};
 use crate::ecs::core::resources::resource::Resource;
 use crate::ecs::core::schedule::schedule::Schedule;
 use crate::ecs::core::schedule::schedule_builder::ScheduleBuilder;
@@ -684,6 +688,11 @@ impl App {
         // touched, and a world without a `Profiler` is a supported state.
         crate::ecs::core::profiling::fold_frame(&mut self.world);
 
+        // `__frame` opens HERE, after the fold has returned — which is what puts the instrument
+        // outside its own primary number. Its guard lives to the end of this function, so the
+        // bracket is the frame minus the fold, by construction rather than by subtraction.
+        let _z_frame = boyko_diag::zone!(FRAME);
+
         // ① Advance the virtual clock (clamp → scale → pause, plan D4/★m5).
         self.world.resource_mut::<Time>().advance_with(raw);
 
@@ -704,6 +713,7 @@ impl App {
             || self.fixed.is_none()
             || self.fixed_steps_since_swap > 0
         {
+            let _z = boyko_diag::zone!(EVENTS);
             self.world.update_events();
             self.fixed_steps_since_swap = 0;
         }
@@ -712,15 +722,25 @@ impl App {
         // borrows `self.fixed`, the driver passes `self.world` — the same
         // dance `finish` uses.
         if let Some(fixed) = self.fixed.as_mut() {
-            let steps = fixed_advance(&mut self.world, |w| fixed.run(w));
+            // The bracket is around ONE substep, inside the catch-up loop, so a frame that runs N
+            // of them produces N samples. A bracket around the loop would produce one span whose
+            // `count` could never report N — and N is the number a reader needs to tell a slow
+            // substep from a frame that ran three of them.
+            let steps = fixed_advance(&mut self.world, |w| {
+                let _z = boyko_diag::zone!(FIXED_STEP);
+                fixed.run(w);
+            });
             self.fixed_steps_since_swap = self.fixed_steps_since_swap.saturating_add(steps);
         }
 
         // ⑤ Main run (the pre-Phase-20 frame body, unchanged).
-        self.schedule
-            .as_mut()
-            .expect("invariant: schedule is Some after finish()")
-            .run(&mut self.world);
+        {
+            let _z = boyko_diag::zone!(MAIN_RUN);
+            self.schedule
+                .as_mut()
+                .expect("invariant: schedule is Some after finish()")
+                .run(&mut self.world);
+        }
 
         #[cfg(debug_assertions)]
         {

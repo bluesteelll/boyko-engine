@@ -578,3 +578,104 @@ fn a_frame_record_counts_the_samples_folded_into_it() {
     fold(&mut p);
     assert_eq!(p.frame_record(0).expect("row").samples, 4);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// the frame driver's four zones (rung 3b)
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// The four `App` zones bracket what they say they bracket, with the cardinalities that make the
+/// frame definable across `Fixed×N + Main`.
+///
+/// # What each assertion is for
+///
+/// `__frame` once per frame is the primary CPU number. `__main_run` once is step ⑤.
+/// **`__fixed_step` N times is the one that was undefined before**: an earlier definition called
+/// the primary number "the `Schedule::run` span", but the host frame is `Time → events → Fixed×N →
+/// Main` — two schedules, one of which runs N times — so that phrase named no single interval.
+/// Bracketing one substep inside the catch-up loop is what makes N a `count` a reader can read.
+///
+/// `__fold` is asserted **non-zero and outside `__frame`**: the instrument's own cost is disclosed
+/// rather than hidden, and it is not inside the number it is disclosing.
+///
+/// RED: move the `__frame` guard above the `fold_frame` call in `App::update_with_delta` ⇒ the
+/// fold's span falls inside the frame's ⇒ `__frame`'s total swallows `__fold`'s and the instrument
+/// is inside its own primary number. Caught by the last assertion. Run at implementation.
+#[test]
+fn the_four_app_zones_bracket_the_frame_with_the_right_cardinalities() {
+    use std::time::Duration;
+
+    use super::zones::{FIXED_STEP, FOLD, FRAME, MAIN_RUN};
+    use crate::ecs::core::app::{App, CoreSchedule};
+    use crate::ecs::core::profiling::plugin::ProfilerPlugin;
+    use crate::ecs::core::profiling::store::unbind_world;
+
+    let _guard = test_serial();
+    set_lane(TEST_LANE);
+    unbind_world();
+    drain_every_region();
+
+    fn noop() {}
+
+    let mut app = App::new();
+    app.set_fixed_timestep(Duration::from_millis(10));
+    app.add_systems_in(CoreSchedule::Fixed, noop);
+    app.add_plugin(ProfilerPlugin);
+    app.finish();
+
+    // Arm through the App's own resource: the fold the frame driver runs is that store's.
+    let outcome = app.world_mut().resource_mut::<Profiler>().arm(ProfilerConfig::default());
+    assert!(matches!(outcome, ArmOutcome::Armed | ArmOutcome::Rearmed), "{outcome:?}");
+    drain_every_region();
+
+    // A 10 ms timestep and a 30 ms delta is three substeps per frame, chosen so the count is
+    // neither 0 nor 1 — the two values a broken bracket is most likely to produce by accident.
+    const FRAMES: u64 = 6;
+    const SUBSTEPS: u32 = 3;
+    app.run_n_with_delta(FRAMES, Duration::from_millis(30));
+
+    let frame_z = profiling_abi::zone_id(&FRAME);
+    let fixed_z = profiling_abi::zone_id(&FIXED_STEP);
+    let main_z = profiling_abi::zone_id(&MAIN_RUN);
+    let fold_z = profiling_abi::zone_id(&FOLD);
+
+    let p = app.world().resource::<Profiler>();
+    // The LAST frame's samples are still in the rings: a span closes at the end of its frame and is
+    // folded at the top of the next one. So the frame examined is the one before the live cursor.
+    let row = (p.cursor() + WINDOW as u32 - 1) % WINDOW as u32;
+
+    let frame = p.cell(row, frame_z).expect("frame row");
+    let main = p.cell(row, main_z).expect("frame row");
+    let fixed = p.cell(row, fixed_z).expect("frame row");
+    // `__fold` is read one row FURTHER back, and the reason is structural rather than an
+    // off-by-one. Its guard must close AFTER the drain — otherwise the sample it produces would be
+    // taken by the very drain it is measuring and attributed to the frame it was measuring. So its
+    // sample is always pushed after that fold's drain has finished, and it waits for the NEXT one.
+    // The instrument's own cost is therefore always one fold further behind than the frame's, and
+    // a reader comparing them in the same row would be comparing two different frames.
+    let fold_row = (p.cursor() + WINDOW as u32 - 2) % WINDOW as u32;
+    let fold_cell = p.cell(fold_row, fold_z).expect("frame row");
+
+    assert_eq!(frame.count, 1, "__frame must open exactly once per frame");
+    assert_eq!(main.count, 1, "__main_run must open exactly once per frame");
+    assert_eq!(
+        fixed.count, SUBSTEPS,
+        "__fixed_step must open once per SUBSTEP; a bracket around the catch-up loop would read 1"
+    );
+    assert!(fold_cell.count >= 1, "__fold produced nothing, so the instrument is undisclosed");
+
+    // The instrument is OUTSIDE its own primary number. Not an approximation: `__fold` brackets a
+    // call that has already returned when `__frame` opens, so the frame's span cannot contain it.
+    assert!(
+        frame.total > 0 && fold_cell.total > 0,
+        "both spans must be non-zero for the containment claim to mean anything"
+    );
+    assert!(
+        fixed.total <= frame.total,
+        "the substeps are inside the frame, so their sum cannot exceed it"
+    );
+    assert_eq!(
+        p.cell(fold_row, fold_z).expect("frame row").count,
+        1,
+        "__fold must open exactly once per frame"
+    );
+}
