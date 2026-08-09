@@ -18,3 +18,4 @@
 //! costs nothing.
 
 pub mod artifact;
+pub mod reduce;

@@ -54,6 +54,7 @@
 use std::process::Command;
 
 use boyko_app::prelude::*;
+use boyko_app::profiling::artifact::Artifact;
 use boyko_ecs::ecs::core::system::ResMut;
 use boyko_render::mesh::Vertex;
 use boyko_render::{
@@ -375,10 +376,12 @@ fn the_ported_gbuffer_brackets_execute_and_carry_their_own_family_ids() {
 // G10's witness clause, for the gbuffer + SV0 families
 // ===============================================================================================
 
+#[cfg(feature = "profiling-census")]
 /// The first frame index the comparison trusts — `vb_zone_ab_witness_gate.rs`'s constant and its
 /// reason: the earliest frames have no previous depth pyramid and record a different pass set.
 const FIRST_STEADY_FRAME: u32 = 4;
 
+#[cfg(feature = "profiling-census")]
 /// One leg's census, keyed by frame.
 struct Leg {
     name: &'static str,
@@ -388,6 +391,7 @@ struct Leg {
     resets: Vec<(u32, u32)>,
 }
 
+#[cfg(feature = "profiling-census")]
 /// `key=<value>` on `line`, anchored to a whole TOKEN.
 ///
 /// Token-anchored for the reason `vb_zone_ab_witness_gate.rs` records against itself: a
@@ -396,6 +400,7 @@ fn key_u32(line: &str, key: &str) -> Option<u32> {
     line.split_whitespace().find_map(|t| t.strip_prefix(key)).and_then(|v| v.parse().ok())
 }
 
+#[cfg(feature = "profiling-census")]
 /// Parses every `VB-CENSUS` line, strictly: an unreadable list is a PARSE failure, not an empty
 /// frame — silently treating it as empty is how two legs come to "agree".
 fn parse_leg(name: &'static str, output: String) -> Leg {
@@ -431,6 +436,7 @@ fn parse_leg(name: &'static str, output: String) -> Leg {
     Leg { name, output, frames, stream_pos, resets }
 }
 
+#[cfg(feature = "profiling-census")]
 /// Spawns the Deferred worker with one leg's knobs set.
 ///
 /// `knobs` is a LIST because leg A is two collectors: the zone recorder brackets every family
@@ -475,6 +481,7 @@ fn spawn_leg(name: &'static str, knobs: &[&str]) -> Leg {
     parse_leg(name, merged)
 }
 
+#[cfg(feature = "profiling-census")]
 /// **G10's witness clause, extended to the gbuffer + SV0 passes.**
 ///
 /// Same claim as rung 5c's for the VB passes: the old collectors and the `GpuZoneRecorder` put
@@ -618,4 +625,136 @@ fn the_gbuffer_collectors_put_their_brackets_at_the_same_stream_positions() {
          the zone side records one for the frame, and that difference is asserted to be the WHOLE \
          of the offset. The TIMING clause is deferred to rung 8."
     );
+}
+
+/// **Profiling rung 7 — a real run writes an artifact, and its census agrees with the runner's.**
+///
+/// The reducer and the runner's own per-frame counters are **two independent accumulations over the
+/// same retired pairs**: one folds `PairResult`s into `LabelCensus`, the other increments four
+/// `u64`s in the retire sink and prints them as `VB-ZONE summary`. They must agree. If they do not,
+/// one of them is wrong and neither can say which -- which is the point of checking, and is the
+/// same discipline `G10` applies across two collectors, here applied across two paths in one run.
+///
+/// It also closes the loop the artifact was built for: written by a real `Deferred x Both` run,
+/// read back by a parent that named the run token in advance, rows carrying the port's family ids.
+///
+/// # What it cannot claim
+///
+/// Nothing about the numbers being RIGHT -- both folds could be wrong together, and the clause that
+/// would catch that is rung 8's band. And nothing about the printed `VB-P4` channel, which this
+/// configuration does not arm: comparing artifact against print needs both channels live in one
+/// process, and boot refuses that.
+#[test]
+#[ignore = "live GPU gate (spawns one windowed worker); run with --test-threads=1"]
+fn a_real_run_writes_an_artifact_whose_census_agrees_with_the_runners_own_count() {
+    let mut path = std::env::temp_dir();
+    path.push("boyko_rung7_artifact_gate.toml");
+    // A leftover from an earlier run must not be able to green this gate.
+    let _ = std::fs::remove_file(&path);
+
+    const TOKEN: &str = "rung7-gate-run-1";
+    let exe = std::env::current_exe().expect("invariant: the test binary knows its own path");
+    let out = Command::new(&exe)
+        .args([WORKER, "--ignored", "--exact", "--test-threads=1", "--nocapture"])
+        .env(DRIVER_MARKER, "1")
+        .env("BOYKO_VB_ZONE", "1")
+        .env("BOYKO_PROFILE_ARTIFACT", &path)
+        .env("BOYKO_PROFILE_RUN_TOKEN", TOKEN)
+        .env("BOYKO_VB_BENCH_FRAMES", BENCH_FRAMES)
+        .env("BOYKO_WINDOW_FRAMES", FRAME_CAP)
+        .env("BOYKO_DISABLE_VALIDATION", "1")
+        .env_remove("BOYKO_VB_BENCH")
+        .env_remove("BOYKO_SV0_BENCH")
+        .env_remove("BOYKO_HOST_DUMP")
+        .env_remove("BOYKO_VG_SCENE")
+        .env_remove("BOYKO_VG_OCC")
+        .env_remove("BOYKO_VG_HZB")
+        .output()
+        .expect("invariant: the artifact worker process spawns");
+    let mut output = String::from_utf8_lossy(&out.stdout).into_owned();
+    output.push_str(&String::from_utf8_lossy(&out.stderr));
+
+    if output.contains(NO_TIMESTAMPS) {
+        eprintln!("rung 7 artifact gate: INSTRUMENT-DEAD -- unusable timestamps, not a finding.");
+        return;
+    }
+
+    // ---- clause 1: the file exists and parses UNDER THE TOKEN THE PARENT CHOSE ----------------
+    let art = Artifact::read(&path, TOKEN).unwrap_or_else(|e| {
+        panic!(
+            "the run left no readable artifact at {}: {e}
+---- worker output ----
+{output}",
+            path.display()
+        )
+    });
+
+    // ---- clause 2: NON-VACUITY ---------------------------------------------------------------
+    assert!(
+        !art.zones.is_empty(),
+        "the artifact carries no zone row. An empty file satisfies clause 3's equality perfectly          (0 == 0), which is what this clause stops from being the gate.
+         ---- worker output ----
+{output}"
+    );
+    assert!(
+        art.census.measured > 0,
+        "no pair in the whole window came back MEASURED, so the rows are not measurements.
+         ---- worker output ----
+{output}"
+    );
+
+    // ---- clause 3: THE CLAIM. Two independent accumulations agree -----------------------------
+    let summary = output
+        .lines()
+        .find(|l| l.contains("VB-ZONE summary "))
+        .unwrap_or_else(|| panic!("no VB-ZONE summary line
+---- output ----
+{output}"));
+    let field = |k: &str| -> u64 {
+        summary
+            .split_whitespace()
+            .find_map(|t| t.strip_prefix(k))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| panic!("the summary carries no {k}:
+  {summary}"))
+    };
+    for (name, from_artifact, from_runner) in [
+        ("measured", u64::from(art.census.measured), field("measured=")),
+        ("lost", u64::from(art.census.lost), field("lost=")),
+        ("torn", u64::from(art.census.torn), field("torn=")),
+        ("not_bracketed", u64::from(art.census.not_bracketed), field("not_bracketed=")),
+    ] {
+        assert_eq!(
+            from_artifact, from_runner,
+            "the artifact's `{name}` census and the runner's own count of the SAME retired pairs              disagree ({from_artifact} vs {from_runner}). They are two independent folds over one              stream of `PairResult`s; a disagreement means one is wrong and neither says              which.
+  summary: {summary}"
+        );
+    }
+
+    // ---- clause 4: family ids, precision, token, workload -------------------------------------
+    for z in &art.zones {
+        assert!(
+            family_of(z.zone).is_some_and(|f| f != "vb"),
+            "zone id {} in an artifact from a DEFERRED run belongs to no gbuffer/SV0 family range",
+            z.zone
+        );
+    }
+    assert_eq!(art.header.precision_decimals, 1);
+    assert_eq!(art.header.run_token, TOKEN);
+    assert!(
+        art.header.workload_tag.contains("deferred"),
+        "the workload tag {:?} does not name the path this run resolved -- a floor measured here          could then be applied to a workload it never bounded",
+        art.header.workload_tag
+    );
+
+    println!(
+        "rung 7 artifact gate: {} zone row(s), census measured={} not_bracketed={} lost={} torn={}          agreeing with the runner's own count, workload={:?}.",
+        art.zones.len(),
+        art.census.measured,
+        art.census.not_bracketed,
+        art.census.lost,
+        art.census.torn,
+        art.header.workload_tag
+    );
+    let _ = std::fs::remove_file(&path);
 }

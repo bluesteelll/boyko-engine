@@ -25,6 +25,15 @@ boyko-math = { path = "../boyko_math" }
 # mirrors from the showcase, + the derives (`Resource` for `WindowInfo`).
 boyko_sdf_math = { path = "../boyko_sdf_math" }
 boyko-macros = { path = "../boyko_macros" }
+# Profiling rung 7: `clock::session_id`, stamped into the measurement artifact's header so a reader
+# can prove which process wrote a file.
+#
+# NOT a new node in the graph — `boyko-ecs` above already depends on `boyko_diag`, so it is compiled
+# into every `boyko_app` build today; this edge makes it VISIBLE here rather than adding it. The
+# crate is std-only with zero deps of its own (a tidy test pins `cargo tree -p boyko_diag` to
+# exactly one node), so the edge costs a `use` and nothing else. Stated because the two edges this
+# campaign added before it each carry the same justification in-file.
+boyko-diag = { path = "../boyko_diag" }
 
 [features]
 # HW-RT rung R2a-3: forwards to `boyko-render/hwrt` (→ `boyko_rhi_vulkan/hwrt`) so the host

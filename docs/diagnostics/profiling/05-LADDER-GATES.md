@@ -971,6 +971,39 @@ now observed with a file whose header is well formed and whose rows are not — 
 returns `TokenMismatch`, a rows-first reader returns `Malformed`. Under that RED the original clause
 stayed **green**, which is precisely why it was not enough.
 
+#### What rung 7's SECOND half shipped — the reducer and a real producer
+
+`profiling/reduce.rs`'s `WindowReducer` folds the retired `PairResult`s into the artifact's rows, and
+the runner writes one file at the end of a zone window under `BOYKO_PROFILE_ARTIFACT` +
+`BOYKO_PROFILE_RUN_TOKEN`. **MEASURED on a real `Deferred × Both` run: 2 zone rows, 60 measured
+pairs, workload `deferred_both`.** Three goldens byte-identical; both feature legs clippy-clean.
+
+**The statistics are the shipped ones on purpose.** `stats_ns` is `runner.rs`'s `vb_bench_stats_ns`
+convention for convention — even-count median averaging the two central values, p95 at
+`sorted[(n * 0.95) as usize]` clamped. Rung 7a's justification for one decimal was that the figures
+stay *directly comparable with the printed lines*; a different median convention would make them
+incomparable for a reason that has nothing to do with the channel.
+
+**Offsets are taken from each frame's OWN base** before they are folded. Reducing raw `begin_ticks`
+across a window reduces the GPU clock, which drifts and means nothing — the unit test constructs two
+frames whose bases are a million ticks apart and requires the second zone's offset to come back as
+`500` in both.
+
+**The gate is an agreement between two independent folds in ONE run.** The reducer's `LabelCensus`
+and the runner's own four counters walk the same `PairResult` stream by different code; the artifact
+gate requires them to match. RED, run: count the window's FRAMES instead of its PAIRS — a plausible
+confusion this campaign has hit before — ⇒ *"disagree (30 vs 60)"*, both numbers named.
+
+**And the A/B test had to be feature-gated per test, not per file.** Running the whole gate file
+without `profiling-census` made the cross-leg clause red on `stream_pos=0` — a true statement about
+the *command line* rather than about the port. The census clause keeps its meaning (it fires when
+the feature reached `boyko-app` but not the recorder, which is 5c's cross-crate hazard); the test is
+simply absent when the feature is off, while the port and artifact gates still run.
+
+**Still open on this rung:** the deletions (713 + 1381 + 465 lines), the five consumer migrations,
+and 7b's floor re-measurement. The producer writes **beside** the printed channel, deliberately —
+that overlap is the only window in which the two can be compared at all.
+
 ### Two rung-3b decisions
 
 1. **Nothing the zones measure is copied into `FrameRecord`.** The corpus's record carries

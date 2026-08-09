@@ -1063,6 +1063,18 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     let mut vb_zone_pairs_lost: u64 = 0;
     let mut vb_zone_pairs_torn: u64 = 0;
     let mut vb_zone_pairs_unbracketed: u64 = 0;
+    // Profiling rung 7: the reducer that fills the measurement artifact. Built only when the zone
+    // leg is armed AND a path was named, so a run without `BOYKO_PROFILE_ARTIFACT` accumulates
+    // nothing -- the artifact is opt-in for the same reason the collectors are.
+    let vb_zone_artifact_path: Option<std::path::PathBuf> =
+        std::env::var_os("BOYKO_PROFILE_ARTIFACT").map(std::path::PathBuf::from);
+    // THE STALENESS DISCRIMINATOR, chosen by the parent BEFORE this process started. See
+    // `profiling::artifact`'s Decision 4: it is the only header field a parent can predict.
+    let vb_zone_run_token: String =
+        std::env::var("BOYKO_PROFILE_RUN_TOKEN").unwrap_or_default();
+    let mut vb_zone_reducer = (vb_zone && vb_zone_artifact_path.is_some()).then(|| {
+        crate::profiling::reduce::WindowReducer::new(f64::from(ctx.device_caps().timestamp_period))
+    });
     // Preallocated ONCE at their final capacity (Principle 5) — the bench never reallocates
     // once the loop starts. VB-P1e H0 split the single `cull_ns` sample into
     // `cull_reset_ns`/`cull_dispatch_ns` (the `CullReset`/`CullDispatch` bracket pair) so the
@@ -2783,6 +2795,9 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     }
                     println!("VB-ZONE zones frame={} ids=[{zones}]", frame.frame);
                 }
+                if let Some(r) = vb_zone_reducer.as_mut() {
+                    r.observe_frame(pairs);
+                }
                 for p in pairs {
                     match p.label {
                         boyko_rhi_vulkan::present::gpu_zone::GpuLabel::Measured => measured += 1,
@@ -2817,6 +2832,54 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                      lost={vb_zone_pairs_lost} torn={vb_zone_pairs_torn} \
                      not_bracketed={vb_zone_pairs_unbracketed}"
                 );
+                // Profiling rung 7: the measurement artifact, written ONCE at the end of the window
+                // and OFF-FRAME — the last thing this run does before it exits. The reducer has no
+                // console form, which is what lets rung 7 delete the printed channel, so this write
+                // is the only way its numbers leave the process.
+                if let (Some(r), Some(path)) = (vb_zone_reducer.take(), vb_zone_artifact_path.as_ref())
+                {
+                    let frames = r.frames();
+                    let (zones, census) = r.finish();
+                    let session = boyko_diag::clock::session_id();
+                    let art = crate::profiling::artifact::Artifact {
+                        header: crate::profiling::artifact::ArtifactHeader {
+                            schema_version: crate::profiling::artifact::ARTIFACT_SCHEMA_VERSION,
+                            session_lo: session.0,
+                            session_hi: session.1,
+                            run_token: vb_zone_run_token.clone(),
+                            // The WORKLOAD is the resolved path × legs: a floor measured on one
+                            // cannot bound the other, which is why `resolve` refuses a `Floor`
+                            // whose tag does not match.
+                            workload_tag: format!(
+                                "{:?}_{:?}",
+                                host.resolved_render_path.path, host.resolved_render_path.legs
+                            )
+                            .to_lowercase(),
+                            instrument: if ctx.device_caps().timestamps_usable() {
+                                crate::profiling::artifact::Instrument::Live
+                            } else {
+                                crate::profiling::artifact::Instrument::NoTimestamps
+                            },
+                            precision_decimals: crate::profiling::artifact::PRECISION_DECIMALS,
+                        },
+                        zones,
+                        census,
+                    };
+                    match art.write(path) {
+                        Ok(()) => println!(
+                            "VB-ZONE artifact path={} frames={frames} zones={} measured={}",
+                            path.display(),
+                            art.zones.len(),
+                            art.census.measured
+                        ),
+                        // LOUD, and not a panic: the measurement is over by the time this runs, and
+                        // a run that rendered correctly should not be reported as a crash because a
+                        // path was unwritable. The gate that reads the file reds on its absence.
+                        Err(e) => {
+                            eprintln!("VB-ZONE artifact: could not write {}: {e}", path.display());
+                        }
+                    }
+                }
                 return;
             }
         }
