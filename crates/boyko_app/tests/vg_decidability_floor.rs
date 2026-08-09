@@ -29,6 +29,40 @@
 //! (`vb_p1d_cull_shade_bench`'s VB froxel cull/shade GPU timestamps) rather than a synthetic
 //! stand-in, because a floor established on a different instrument bounds nothing about this one.
 //!
+//! # Profiling rung 7 — MIGRATED to the artifact, and that changes three things
+//!
+//! This file used to parse the shipped bench's own stdout (`VB-P1d …`). Rung 7 deletes that channel,
+//! so the sessions now run the **zone recorder** (`BOYKO_VB_ZONE`) and read
+//! `boyko_app::profiling::artifact` files the parent names, stamps and deletes. By this rung's own
+//! rule — *"a floor established on a different instrument bounds nothing about this one"* — **every
+//! number in `docs/VG-DECIDABILITY-FLOOR.md` published before this migration is invalidated**, which
+//! is exactly why rung 7b re-measures rather than re-uses.
+//!
+//! **1. `froxel_total_ns` is GONE, and dropping it was decided by measurement.** It was a per-frame
+//! SUM of three brackets, averaged; the artifact reduces each zone independently, and composing
+//! after reduction is the mistake `VbBenchTables::end_off_ns` already records ("a harness cannot get
+//! one by adding the other two after they are reduced"). The alternative was a composite zone in the
+//! reducer, built solely to reproduce it. MEASURED against the committed floor's own table: its CV
+//! was **2.9 %**, below `froxel_shade_ns` (3.0 %) in its own leg and well below the worst,
+//! `flat_shade_ns` (3.4 %), which is what the floor is actually built from. It has never been the
+//! binding statistic, and structurally it will not be — a sum of three partly-independent noise
+//! sources lands *between* their relative spreads, never above. So the mechanism was not built.
+//!
+//! **2. The legs are told apart by the PARENT, not by a missing key.** The old parser distinguished
+//! flat from froxel by the absence of the `froxel_*` keys. The recorder brackets `CullReset` and
+//! `CullDispatch` unconditionally, so both legs now write zones 0/1/2 and the flat leg simply reads
+//! near-zero on the first two. The parent knows which child it spawned; that is a stronger witness
+//! than an absence, and it is checked — rung 7c's `config_tag` covers `froxel_light_cull`, so the
+//! two legs' artifacts carry **different `workload_tag`s**, and this file asserts they differ. A
+//! `BOYKO_VB_FROXEL_FORCE_OFF` that silently did nothing was invisible to the printed channel and is
+//! a red here.
+//!
+//! **3. The statistic is the MEDIAN, where the printed channel published means.** VB-P1d predates
+//! the reducer; the artifact's headline is the median, and the deltas later rungs will compare
+//! against this floor are medians. A floor over means would bound a different quantity than the one
+//! being bounded. Stated rather than inherited, because either is defensible and only one can be
+//! used by both sides.
+//!
 //! # Two statistics, and which one the floor is built from
 //!
 //! * **Peak-to-peak** `(max − min) / median` — the definition `sv0_deferred_term_bench` already uses
@@ -52,6 +86,8 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+
+use boyko_app::profiling::artifact::{Artifact, Instrument, ZoneLabel};
 
 /// Sessions per configuration within ONE repetition. More than `[census].cross_run_sessions = 3` on
 /// purpose: three samples estimate a spread very poorly, and this rung's output is a BOUND that
@@ -130,36 +166,51 @@ fn summarise(label: &str, samples: &[f64]) -> Spread {
 }
 
 // ===============================================================================================
-// Parsing the shipped bench's own output
+// Reading the session's artifact
 // ===============================================================================================
 
-/// Pulls `key=<f64>` out of a `VB-P1d …` line. Returns `None` when the key is absent, which is how
-/// the flat leg (no `froxel_*` keys) is distinguished from the froxel leg without a second parser.
-fn field_after(line: &str, key: &str) -> Option<f64> {
-    let at = line.find(key)?;
-    line[at + key.len()..]
-        .split_whitespace()
-        .next()?
-        .trim_end_matches(|c: char| !c.is_ascii_digit() && c != '.')
-        .parse()
-        .ok()
+/// The zone ids this rung reads, and the name each one is published under.
+///
+/// `ZONE_BASE_VB` is `0`, so a `VbTimedPass` slot IS its zone id. Named here rather than imported
+/// because rung 7 deletes `VbTimedPass` with the collector, and a floor instrument that stops
+/// compiling when an enum is retired is a floor instrument nobody can re-run.
+const ZONE_CULL_RESET: u16 = 0;
+const ZONE_CULL_DISPATCH: u16 = 1;
+const ZONE_SHADE: u16 = 2;
+
+/// One statistic pulled out of a session's artifact: a zone id and the label it is published under.
+struct Reading {
+    zone: u16,
+    label: &'static str,
 }
 
-/// Every `key=value` this rung reads out of one session's stdout, in report order.
+/// The froxel leg's three, in report order — the whole-pass sum the printed channel published is
+/// deliberately absent (module doc, point 1).
+const FROXEL_READINGS: [Reading; 3] = [
+    Reading { zone: ZONE_CULL_RESET, label: "cull_reset_ns" },
+    Reading { zone: ZONE_CULL_DISPATCH, label: "cull_dispatch_ns" },
+    Reading { zone: ZONE_SHADE, label: "froxel_shade_ns" },
+];
+
+/// The flat leg's one. The SAME zone as the froxel leg's shade — the legs differ by configuration,
+/// not by which bracket runs, which is why the parent has to know which child it spawned.
+const FLAT_READINGS: [Reading; 1] = [Reading { zone: ZONE_SHADE, label: "flat_shade_ns" }];
+
+/// The MEDIAN of `zone`'s window, or `None` when the run did not measure it.
 ///
-/// ⚠️ The marker is matched ANYWHERE in the line, not at its start, and that is a measured
-/// correction rather than defensive coding. Under `--nocapture` libtest writes its progress without
-/// a trailing newline, so the bench's own `println!` lands on the SAME line:
-/// `test vb_p1d_cull_shade_bench ... VB-P1d N_ps=0 config=froxel …`. The first draft anchored on
-/// `starts_with`, found nothing across all fourteen sessions, and the rung's own
-/// "every session must report" assertion is what caught it — a floor computed from the survivors
-/// would have been computed from none.
-fn extract(stdout: &str, keys: &[&str]) -> Vec<Option<f64>> {
-    let line = stdout.lines().find(|l| l.contains("VB-P1d "));
-    match line {
-        Some(l) => keys.iter().map(|k| field_after(l, k)).collect(),
-        None => vec![None; keys.len()],
+/// `None` on a missing row, on a non-`Measured` label, and on a dead instrument — three different
+/// reasons a session has no number, all of which must keep it OUT of the pool rather than
+/// contribute a zero. A floor pooled from zeros understates the spread, which is the one direction
+/// this rung exists to prevent.
+fn zone_median(art: &Artifact, zone: u16) -> Option<f64> {
+    if art.header.instrument != Instrument::Live {
+        return None;
     }
+    art.zones
+        .iter()
+        .find(|z| z.zone == zone)
+        .filter(|z| z.label == ZoneLabel::Measured)
+        .map(|z| z.median_ns)
 }
 
 // ===============================================================================================
@@ -186,12 +237,39 @@ fn bench_binary() -> Option<PathBuf> {
     best.map(|(_, p)| p)
 }
 
-/// Runs ONE session of the shipped bench and returns its stdout.
-fn run_session(exe: &PathBuf, froxel: bool) -> String {
+/// The light rig every session runs, declared ONCE and used twice — to configure the child and to
+/// name the workload in its artifact. A floor is a property of its content as much as of the box
+/// (rung 7c), and two spellings of "fourteen lights" is how the tag comes to describe another run.
+const N_PS: &str = "14";
+/// `BOYKO_VB_BENCH_RIG`'s default. Named for the same one-source-of-truth reason.
+const RIG: &str = "kronecker";
+
+/// Runs ONE session and returns the artifact it wrote, or `None` when it wrote none.
+///
+/// The parent chooses the path AND the run token, then deletes the file first: with 42 sequential
+/// children a fixed path is a stale-read generator, and a token the child merely echoes is the only
+/// field that can catch staleness *within* one run (`artifact.rs`'s Decision 4).
+fn run_session(exe: &PathBuf, froxel: bool, tag: &str) -> Option<Artifact> {
+    let mut path = std::env::temp_dir();
+    path.push(format!("boyko_vg_floor_{tag}.toml"));
+    let _ = std::fs::remove_file(&path);
+    let token = format!("vg-floor-{tag}");
+
     let mut cmd = Command::new(exe);
     cmd.args(["--ignored", "--test-threads=1", "--nocapture"])
         .env("BOYKO_DISABLE_VALIDATION", "1")
-        .env("BOYKO_VB_BENCH", "1")
+        // The ZONE recorder, not the retired collector. `GpuSceneBundles::boot` refuses the two
+        // together, so the removal below is not defensive: an operator with the old knob exported
+        // would otherwise fail every session at boot.
+        .env("BOYKO_VB_ZONE", "1")
+        .env_remove("BOYKO_VB_BENCH")
+        .env("BOYKO_PROFILE_ARTIFACT", &path)
+        .env("BOYKO_PROFILE_RUN_TOKEN", &token)
+        // Rung 7c: what the engine cannot derive. Without it the artifact refuses to be a floor
+        // source at all, which is the whole point of that rung's strict rule.
+        .env("BOYKO_PROFILE_WORKLOAD", format!("n{N_PS}_{RIG}"))
+        .env("BOYKO_VB_BENCH_LIGHTS", N_PS)
+        .env("BOYKO_VB_BENCH_RIG", RIG)
         .env_remove("BOYKO_HOST_DUMP")
         .env_remove("BOYKO_VG_CENSUS");
     if froxel {
@@ -200,7 +278,30 @@ fn run_session(exe: &PathBuf, froxel: bool) -> String {
         cmd.env("BOYKO_VB_FROXEL_FORCE_OFF", "1");
     }
     let out = cmd.output().expect("the bench binary runs");
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    if !path.is_file() {
+        eprintln!(
+            "VG-floor: session {tag} wrote no artifact at {}. stdout tail:\n{}",
+            path.display(),
+            String::from_utf8_lossy(&out.stdout).lines().rev().take(6).collect::<Vec<_>>().join("\n")
+        );
+        return None;
+    }
+    // Read with the token the parent chose: a leftover from an earlier child is refused on the
+    // header rather than pooled as this session's reading.
+    let art = match Artifact::read(&path, &token) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("VG-floor: session {tag}'s artifact is unusable: {e}");
+            return None;
+        }
+    };
+    // ...and it must be usable AS A FLOOR, which is a stronger statement than "it parsed".
+    if let Err(e) = art.floor_source() {
+        eprintln!("VG-floor: session {tag}'s artifact cannot serve as a floor: {e}");
+        return None;
+    }
+    let _ = std::fs::remove_file(&path);
+    Some(art)
 }
 
 // ===============================================================================================
@@ -231,63 +332,96 @@ fn vg_decidability_floor_measure() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_REPEATS);
 
-    // The froxel leg reports four statistics of very different magnitudes; the fixed-cost ones are
-    // expected to be the tightest and the whole-pass ones the loosest, and a floor quoted from only
-    // one of them would be a floor for one statistic quoted as if it were the instrument's.
-    let froxel_keys = ["cull_reset_ns=", "cull_dispatch_ns=", "froxel_shade_ns=", "froxel_total_ns="];
-    let flat_keys = ["flat_shade_ns="];
+    // Statistics of very different magnitudes on purpose: the fixed-cost brackets are expected to
+    // be the tightest and the whole-shade one the loosest, and a floor quoted from only one of them
+    // would be a floor for one statistic quoted as if it were the instrument's. The printed
+    // channel's fourth froxel figure (`froxel_total_ns`) is deliberately absent — see the module
+    // doc's point 1 for the measurement that says dropping it costs nothing.
 
     // Per REPETITION: an independent run of the whole session set. Repetition floors are what say
     // whether one floor number can be trusted at all.
     let mut per_repeat: Vec<Vec<Spread>> = Vec::with_capacity(repeats);
     // Pooled across every repetition: the estimate that actually gets more sessions behind it.
-    let mut pooled_froxel: Vec<Vec<f64>> = vec![Vec::new(); froxel_keys.len()];
-    let mut pooled_flat: Vec<Vec<f64>> = vec![Vec::new(); flat_keys.len()];
+    let mut pooled_froxel: Vec<Vec<f64>> = vec![Vec::new(); FROXEL_READINGS.len()];
+    let mut pooled_flat: Vec<Vec<f64>> = vec![Vec::new(); FLAT_READINGS.len()];
+    // The two legs' DERIVED workload tags, collected to be compared. Rung 7c's `config_tag` covers
+    // `froxel_light_cull`, so a `BOYKO_VB_FROXEL_FORCE_OFF` that silently did nothing shows up as
+    // ONE tag on both legs — a state the printed channel could not observe at all.
+    let mut froxel_tag: Option<String> = None;
+    let mut flat_tag: Option<String> = None;
 
     for r in 0..repeats {
-        let mut froxel: Vec<Vec<f64>> = vec![Vec::new(); froxel_keys.len()];
-        let mut flat: Vec<Vec<f64>> = vec![Vec::new(); flat_keys.len()];
-        for _ in 0..sessions {
-            let out = run_session(&exe, true);
-            for (i, v) in extract(&out, &froxel_keys).into_iter().enumerate() {
-                if let Some(v) = v {
-                    froxel[i].push(v);
+        let mut froxel: Vec<Vec<f64>> = vec![Vec::new(); FROXEL_READINGS.len()];
+        let mut flat: Vec<Vec<f64>> = vec![Vec::new(); FLAT_READINGS.len()];
+        for k in 0..sessions {
+            if let Some(art) = run_session(&exe, true, &format!("r{r}s{k}froxel")) {
+                froxel_tag.get_or_insert_with(|| art.header.workload_tag.clone());
+                for (i, rd) in FROXEL_READINGS.iter().enumerate() {
+                    if let Some(v) = zone_median(&art, rd.zone) {
+                        froxel[i].push(v);
+                    }
                 }
             }
-            let out = run_session(&exe, false);
-            for (i, v) in extract(&out, &flat_keys).into_iter().enumerate() {
-                if let Some(v) = v {
-                    flat[i].push(v);
+            if let Some(art) = run_session(&exe, false, &format!("r{r}s{k}flat")) {
+                flat_tag.get_or_insert_with(|| art.header.workload_tag.clone());
+                for (i, rd) in FLAT_READINGS.iter().enumerate() {
+                    if let Some(v) = zone_median(&art, rd.zone) {
+                        flat[i].push(v);
+                    }
                 }
             }
         }
         let mut rep: Vec<Spread> = Vec::new();
-        for (i, k) in froxel_keys.iter().enumerate() {
+        for (i, rd) in FROXEL_READINGS.iter().enumerate() {
             assert_eq!(
                 froxel[i].len(),
                 sessions,
-                "repetition {r}: the froxel leg reported `{k}` on {} of {sessions} sessions -- a                  session that printed no bench line measured nothing, and pooling only the                  survivors would UNDERSTATE the spread",
+                "repetition {r}: the froxel leg measured `{}` on {} of {sessions} sessions -- a \
+                 session whose artifact was missing, unreadable or not `Measured` measured \
+                 NOTHING, and pooling only the survivors would UNDERSTATE the spread",
+                rd.label,
                 froxel[i].len()
             );
             pooled_froxel[i].extend_from_slice(&froxel[i]);
-            rep.push(summarise(k.trim_end_matches('='), &froxel[i]));
+            rep.push(summarise(rd.label, &froxel[i]));
         }
-        for (i, k) in flat_keys.iter().enumerate() {
-            assert_eq!(flat[i].len(), sessions, "repetition {r}: the flat leg reported `{k}` on too few sessions");
+        for (i, rd) in FLAT_READINGS.iter().enumerate() {
+            assert_eq!(
+                flat[i].len(),
+                sessions,
+                "repetition {r}: the flat leg measured `{}` on {} of {sessions} sessions",
+                rd.label,
+                flat[i].len()
+            );
             pooled_flat[i].extend_from_slice(&flat[i]);
-            rep.push(summarise(k.trim_end_matches('='), &flat[i]));
+            rep.push(summarise(rd.label, &flat[i]));
         }
         let rf = FLOOR_SIGMA * rep.iter().map(|x| x.cv).fold(0.0_f64, f64::max);
         eprintln!("VG-floor: repetition {} of {repeats} done -- its floor = {:.1}%", r + 1, 100.0 * rf);
         per_repeat.push(rep);
     }
 
+    // THE TWO LEGS MUST BE TWO WORKLOADS, not one condition measured twice. This is the clause the
+    // stdout channel had no way to state: it told the legs apart by WHICH KEYS WERE PRINTED, so a
+    // force-off knob that did nothing produced a froxel line from the "flat" session and the
+    // absence-based parser would have read it as the flat leg reporting nothing.
+    let (ft, lt) = (
+        froxel_tag.expect("invariant: the froxel leg produced at least one artifact"),
+        flat_tag.expect("invariant: the flat leg produced at least one artifact"),
+    );
+    assert_ne!(
+        ft, lt,
+        "both legs reported the SAME derived workload tag ({ft}), so BOYKO_VB_FROXEL_FORCE_OFF did \
+         not change the boot-resolved configuration -- this rung measured ONE condition twice and \
+         would have published it as a null experiment across two"
+    );
+
     let mut spreads: Vec<Spread> = Vec::new();
-    for (i, k) in froxel_keys.iter().enumerate() {
-        spreads.push(summarise(k.trim_end_matches('='), &pooled_froxel[i]));
+    for (i, rd) in FROXEL_READINGS.iter().enumerate() {
+        spreads.push(summarise(rd.label, &pooled_froxel[i]));
     }
-    for (i, k) in flat_keys.iter().enumerate() {
-        spreads.push(summarise(k.trim_end_matches('='), &pooled_flat[i]));
+    for (i, rd) in FLAT_READINGS.iter().enumerate() {
+        spreads.push(summarise(rd.label, &pooled_flat[i]));
     }
 
     // THE FLOOR is CV-DERIVED, and that is a correction this rung MEASURED against its own first
@@ -307,7 +441,7 @@ fn vg_decidability_floor_measure() {
         .expect("at least one statistic");
     let floor = FLOOR_SIGMA * worst.cv;
 
-    write_floor_doc(&spreads, floor, worst, sessions, repeats, &per_repeat);
+    write_floor_doc(&spreads, floor, worst, sessions, repeats, &per_repeat, &ft, &lt);
 
     for s in &spreads {
         eprintln!(
@@ -340,27 +474,63 @@ fn write_floor_doc(
     sessions: usize,
     repeats: usize,
     per_repeat: &[Vec<Spread>],
+    froxel_tag: &str,
+    flat_tag: &str,
 ) {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(4096);
     out.push_str("# VG — the decidability floor — MACHINE-WRITTEN by `vg_decidability_floor_measure`\n\n");
+    // ONE emission PER OUTPUT LINE. `\`-continued literals carry the source's indentation into the
+    // file and four spaces is a markdown code block; that defect shipped once in this function and
+    // was re-introduced in the very edit that fixed it elsewhere, which is what "avoidable" buys
+    // you. This shape has nowhere for the indentation to come from.
     let _ = writeln!(
         out,
-        "**This run measured a floor of {:.1} %** — three sigma on a single-session reading, from a \
-         worst-statistic CV of {:.1} % (`{}`).\n\n\
-         ⚠️ **Do not read that as \"the floor\".** Repeated runs of this SAME protocol on this same \
-         box span roughly **5 %–15 %**. The defensible output of this rung is the RULE in the next \
-         section, not the number in this one.\n",
+        "**This run measured a floor of {:.1} %** — three sigma on a single-session reading, from a worst-statistic CV of {:.1} % (`{}`).\n",
         100.0 * floor,
         100.0 * worst.cv,
         worst.label
     );
+    // ⚠️ NO SERIES LITERAL HERE. An earlier draft hardcoded "the first two protocols returned
+    // 6.5 % and 17.7 %", and a third sitting made that sentence false the day it was written — a
+    // self-rotting number inside a MACHINE-WRITTEN file, which is the worst place for one. The
+    // cross-sitting series lives in `docs/diagnostics/profiling/05-LADDER-GATES.md`, where a human
+    // appends to it; this file states the rule and this run's own repetition span, both of which it
+    // can compute.
+    out.push_str("⚠️ **Do not read that as \"the floor\".** The estimator moves — by a factor of several between IDENTICAL protocols on this box, measured on both the retired stdout channel and the artifact channel that replaced it. The cross-sitting series is kept in `docs/diagnostics/profiling/05-LADDER-GATES.md` (profiling rung 7b); this run's own repetition span is tabulated below. **The migration did not make the instrument quieter.** The defensible output of this rung is the RULE in the next section, not the number in this one.\n\n");
     out.push_str(
         "Measured as a **NULL EXPERIMENT**: the shipped `vb_p1d_cull_shade_bench` class, same scene, \
          same configuration, run in separate processes. Nothing differs between sessions, so every \
          difference below is instrument plus environment. **A delta smaller than this is not \
          resolvable by construction** — no statistical treatment recovers a signal from beneath the \
          noise of the thing measuring it.\n\n",
+    );
+    // ⚠️ THE CHANNEL AND THE WORKLOAD, IN THE DOCUMENT. A floor bounds the instrument AND the
+    // workload it was taken on; a reader who cannot tell which of either produced these numbers
+    // cannot tell whether the floor applies to what they are about to claim. Profiling rung 7
+    // replaced the instrument (stdout -> artifact) and rung 7c made the workload nameable, so both
+    // are stamped here rather than left to the reader to infer from a filename.
+    //
+    // Emitted ONE `writeln!` PER LINE, with no `\`-continuations. Markdown treats a four-space
+    // indent as a code block, and a continued Rust string literal carries the source's own
+    // indentation into the file — measured: the first draft of this block rendered as four fenced
+    // paragraphs. A doc generator that cannot be read is a doc generator that will be ignored.
+    out.push_str("## The channel and the workload these numbers belong to\n\n");
+    out.push_str(
+        "Read through the **profiling artifact** (`BOYKO_VB_ZONE` + \
+         `boyko_app::profiling::artifact`), NOT the retired `VB-P1d` stdout line — profiling \
+         rung 7. The statistic is each zone's **median**, where the printed channel published \
+         means.\n\n",
+    );
+    out.push_str("| leg | derived `workload_tag` | declared `content_tag` |\n|---|---|---|\n");
+    let _ = writeln!(out, "| froxel | `{froxel_tag}` | `n{N_PS}_{RIG}` |");
+    let _ = writeln!(out, "| flat | `{flat_tag}` | `n{N_PS}_{RIG}` |");
+    out.push_str(
+        "\n⚠️ **The two tags differ, and that is asserted rather than assumed.** They are derived \
+         from the whole boot-resolved render path, so a `BOYKO_VB_FROXEL_FORCE_OFF` that changed \
+         nothing would give one tag on both rows and fail the run — a null experiment across two \
+         conditions that were secretly one. **Any floor published before rung 7 was taken on a \
+         different instrument and bounds nothing about this one**, by this rung's own rule.\n\n",
     );
     let _ = writeln!(
         out,
@@ -373,6 +543,12 @@ fn write_floor_doc(
     // bounds how much the headline above is worth.
     out.push_str(
         "## ⚠️ THE FLOOR IS NOT A CONSTANT — and that, not any single number, is this rung's result\n\n\
+         ⚠️ The four runs below were taken on the **RETIRED stdout channel** (means over `VB-P1d` \
+         lines), before profiling rung 7 moved this rung to the artifact and to medians. They are \
+         kept because the FINDING they establish is about the estimator and the box, not about the \
+         channel — but their numbers are not comparable with the table further down, and nothing \
+         here claims the new channel is quieter: that would need this same repeated protocol run \
+         on both, which no sitting has done.\n\n\
          This protocol was run four times while it was being built. The floors it reported, in \
          order, with what changed between them:\n\n\
          | run | protocol | floor | note |\n|---|---|---|---|\n\
@@ -530,25 +706,94 @@ fn a_single_session_cannot_certify_an_instrument() {
     assert!(r.is_err(), "one session must be refused, not summarised as a perfect instrument");
 }
 
-#[test]
-fn the_bench_line_parser_reads_both_legs() {
-    let froxel = "VB-P1d N_ps=14 config=froxel cull_reset_ns=13939.0 cull_dispatch_ns=204.5 \
-                  froxel_cull_ns=14143.5 froxel_shade_ns=51200.2 froxel_total_ns=65343.7 (kept 200 frames)";
-    assert_eq!(field_after(froxel, "cull_reset_ns="), Some(13939.0));
-    assert_eq!(field_after(froxel, "froxel_total_ns="), Some(65343.7));
-    // The flat leg carries none of the froxel keys — that absence is how the legs are told apart,
-    // so it must read as `None` rather than as a zero.
-    let flat = "VB-P1d N_ps=14 config=flat flat_shade_ns=48001.3 (kept 200 frames)";
-    assert_eq!(field_after(flat, "flat_shade_ns="), Some(48001.3));
-    assert_eq!(field_after(flat, "froxel_total_ns="), None);
-    // A run that printed no bench line at all must yield nothing, never a default.
-    assert_eq!(extract("boot failed\n", &["flat_shade_ns="]), vec![None]);
+/// Builds an artifact the way a session would, so the reader below has something with the real
+/// shape rather than a hand-rolled stand-in.
+fn artifact_with(zones: &[(u16, ZoneLabel, f64)], instrument: Instrument) -> Artifact {
+    use boyko_app::profiling::artifact::{
+        ARTIFACT_SCHEMA_VERSION, ArtifactHeader, LabelCensus, PRECISION_DECIMALS, ZoneRow,
+    };
+    Artifact {
+        header: ArtifactHeader {
+            schema_version: ARTIFACT_SCHEMA_VERSION,
+            session_lo: 1,
+            session_hi: 2,
+            run_token: "t".into(),
+            workload_tag: "visibilitybuffer_mesh#deadbeef".into(),
+            content_tag: format!("n{N_PS}_{RIG}"),
+            instrument,
+            precision_decimals: PRECISION_DECIMALS,
+        },
+        zones: zones
+            .iter()
+            .map(|(zone, label, median)| ZoneRow {
+                zone: *zone,
+                label: *label,
+                n: 30,
+                median_ns: *median,
+                mean_ns: *median,
+                p95_ns: *median,
+                begin_off_ns: 0.0,
+                end_off_ns: *median,
+            })
+            .collect(),
+        census: LabelCensus { measured: 30, ..LabelCensus::default() },
+    }
+}
 
-    // ⚠️ THE SHAPE THE FIRST DRAFT GOT WRONG, pinned as a fixture. Under `--nocapture` libtest
-    // writes its progress line WITHOUT a trailing newline, so the bench's own `println!` lands on
-    // the same line. Anchoring on `starts_with` found nothing in fourteen consecutive sessions.
-    let real = "test vb_p1d_cull_shade_bench ... VB-P1d N_ps=0 config=froxel cull_reset_ns=575.0 \
-                cull_dispatch_ns=12677.5 froxel_cull_ns=13252.5 froxel_shade_ns=26349.4 \
-                froxel_total_ns=39601.9 (kept 220 frames)";
-    assert_eq!(extract(real, &["cull_reset_ns=", "froxel_total_ns="]), vec![Some(575.0), Some(39601.9)]);
+/// **The reader takes a number only when the run actually measured one**, and the three ways it
+/// must refuse are three different things a session can be.
+///
+/// This replaces the stdout parser the printed channel needed. That parser's own hard-won lesson —
+/// libtest writes its progress line without a trailing newline, so `starts_with` found nothing in
+/// fourteen consecutive sessions — dies with the channel: an artifact is a file with a header, not
+/// a line that shares its row with whatever else was printing.
+#[test]
+fn a_reading_is_taken_only_from_a_measured_zone() {
+    let good = artifact_with(
+        &[
+            (ZONE_CULL_RESET, ZoneLabel::Measured, 575.0),
+            (ZONE_CULL_DISPATCH, ZoneLabel::Measured, 12677.5),
+            (ZONE_SHADE, ZoneLabel::Measured, 26349.4),
+        ],
+        Instrument::Live,
+    );
+    assert_eq!(zone_median(&good, ZONE_CULL_RESET), Some(575.0));
+    assert_eq!(zone_median(&good, ZONE_SHADE), Some(26349.4));
+
+    // 1. A zone the window never bracketed. `NotBracketed` reads ~0 like a genuinely free pass, so
+    //    taking its median would pool a zero and UNDERSTATE the spread — the one direction this
+    //    rung exists to prevent.
+    let unbracketed =
+        artifact_with(&[(ZONE_SHADE, ZoneLabel::NotBracketed, 0.0)], Instrument::Live);
+    assert_eq!(zone_median(&unbracketed, ZONE_SHADE), None);
+
+    // 2. A zone whose row is absent entirely.
+    let missing = artifact_with(&[(ZONE_CULL_RESET, ZoneLabel::Measured, 1.0)], Instrument::Live);
+    assert_eq!(zone_median(&missing, ZONE_SHADE), None);
+
+    // 3. A DEAD INSTRUMENT. The rows may carry numbers; they are not measurements, and a floor
+    //    pooled from them would be a floor for a device that declined to time anything.
+    let dead =
+        artifact_with(&[(ZONE_SHADE, ZoneLabel::Measured, 26349.4)], Instrument::NoTimestamps);
+    assert_eq!(zone_median(&dead, ZONE_SHADE), None);
+}
+
+/// The two legs read the SAME zone, which is why the parent has to know which child it spawned.
+///
+/// The printed channel told them apart by key absence; the recorder brackets `CullReset` and
+/// `CullDispatch` unconditionally, so an artifact alone cannot say which leg produced it. This
+/// pins that the tables agree on the zone rather than leaving it to two hand-written lists.
+#[test]
+fn both_legs_read_the_same_shade_zone() {
+    assert_eq!(FLAT_READINGS[0].zone, ZONE_SHADE);
+    assert_eq!(
+        FROXEL_READINGS[2].zone, FLAT_READINGS[0].zone,
+        "the flat leg stopped reading the same bracket as the froxel leg, so the two legs are no \
+         longer a null experiment over one measurement"
+    );
+    assert_ne!(
+        FROXEL_READINGS[2].label, FLAT_READINGS[0].label,
+        "one zone published under one name from both legs would make the floor table report a \
+         single statistic where it means two conditions"
+    );
 }

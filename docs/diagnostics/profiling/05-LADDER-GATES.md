@@ -180,7 +180,7 @@ has six consumers, not one:
 | `crates/boyko_app/tests/vg_occ_split_timing.rs` | `VB-P4 pass=…`, `VB-P4 regime …` | reads the artifact's per-zone rows |
 | `crates/boyko_app/tests/vb_bench_totality_gate.rs` | printed totality lines | reads the artifact; its own mechanism is retired (replaced by G2a/G2b) |
 | `crates/boyko_app/tests/vb_bench_query_validation.rs` | the printed line as a **liveness witness** that the reset and every timestamp write executed | the witness becomes `CommandWitness` + the artifact's label census — a *stronger* witness than a line's existence |
-| `crates/boyko_app/tests/vg_decidability_floor.rs` | **the shipped bench's own stdout** (`:133-160`, `field_after`/`extract` over a `VB-P1d ` line) | reads the artifact. **This is why rung 7b exists**: it is the floor instrument, and its output is the input to D11's band |
+| `crates/boyko_app/tests/vg_decidability_floor.rs` | **the shipped bench's own stdout** (`field_after`/`extract` over a `VB-P1d ` line) | ✅ **MIGRATED.** Runs `BOYKO_VB_ZONE`, reads per-session artifacts the parent names/stamps/deletes, takes each zone's MEDIAN. **This is why rung 7b exists**: it is the floor instrument, and its output is the input to D11's band |
 | `crates/boyko_app/tests/vb_p1d_cull_shade_bench.rs` | the `VB-P1d` protocol it documents and drives | drives the artifact channel |
 | `crates/boyko_app/tests/sv0_deferred_term_bench.rs` | printed lines transcribed into test source | reads the artifact |
 
@@ -1064,6 +1064,119 @@ clippy-clean.
 nothing today**, because both collectors and the zone leg open at `TOP` there, so both sequences are
 `T,B,T,B,…`. It is present so that a future pass on that family cannot acquire a different stage
 under a green position equality — the failure that just happened once.
+
+#### Rung 7's first consumer migration — the floor instrument, and one statistic that could not come
+
+`vg_decidability_floor.rs` no longer parses `VB-P1d …`. Each of its 42 sessions runs the zone
+recorder and writes an artifact the parent names, stamps with its own run token, reads and deletes;
+the reading is each zone's **median**, where the printed channel published means (VB-P1d predates
+the reducer, and the deltas later rungs compare against this floor are medians).
+
+**`froxel_total_ns` did not survive, and the decision was made by measurement rather than by
+argument.** It was a per-frame SUM of three brackets, averaged — and the artifact reduces each zone
+independently, so reproducing it would mean composing after reduction, the mistake
+`VbBenchTables::end_off_ns` already records in its own words. The alternative was a composite zone
+in the reducer, built for one consumer. **MEASURED against the committed floor's own table: its CV
+was 2.9 %, below `froxel_shade_ns` (3.0 %) in its own leg and below the worst statistic
+`flat_shade_ns` (3.4 %) that the floor is actually built from.** It has never been the binding
+number, and structurally it will not be — a sum of partly-independent noise sources lands *between*
+their relative spreads, never above. So the mechanism was not built, and the reason is on the page.
+
+**The migration also bought a clause the printed channel could not state.** That channel told the
+two legs apart by *which keys were printed*, so a `BOYKO_VB_FROXEL_FORCE_OFF` that silently did
+nothing would have produced a froxel line from the "flat" session and read as a flat leg reporting
+nothing. Rung 7c's `config_tag` covers `froxel_light_cull`, so the two legs' artifacts now carry
+**different `workload_tag`s** — and the run asserts they differ. One tag on both rows means the null
+experiment was one condition measured twice, which is the failure this whole rung exists to prevent
+one level up. The written document stamps both tags, the declared `content_tag` and the channel,
+because a floor that does not say what instrument and what workload produced it cannot be checked
+for applicability by the rung that cites it.
+
+**Smoke-measured before the full protocol** (2 sessions × 1 repetition, 4 processes): all four
+statistics read from artifacts, leg tags distinct, document written. `flat_shade_ns` reported
+CV 0.0 % on `n = 2` — two identical readings, which this campaign has already recorded as a common
+multiple rather than a lattice step, and exactly why the real protocol is 7 × 3.
+
+#### Rung 7b — the floor RE-MEASURED on the artifact channel, TWICE, and the second run refuted the first
+
+**Two full protocols, 42 windowed processes each, identical in every respect:**
+
+| sitting | repetition floors | pooled FLOOR | worst statistic |
+|---|---|---|---|
+| 1 | 6.3 %, 8.6 %, 4.7 % | **6.5 %** | `flat_shade_ns` (CV 2.2 %) |
+| 2 | 28.0 %, 8.3 %, 13.6 % | **17.7 %** | `flat_shade_ns` |
+| 3 | 39.4 %, 27.5 %, 3.3 % | **36.1 %** | `flat_shade_ns` |
+| 4 | 25.0 %, 7.0 %, 21.6 % | **21.2 %** | **`froxel_shade_ns`** |
+
+**5.6× between sitting 1 and sitting 3, and the twelve repetitions span 3.3 %–39.4 % — a factor of
+twelve.** Every one of those is the same protocol, the same scene, the same binary, on the same box.
+
+⚠️ **Sitting 4 refuted two things this section said one sitting earlier, and both retractions are
+kept visible.** After sitting 3 the text read *"the three sittings rose monotonically … consistent
+with the thermal drift this file's rule already names"* and *"`flat_shade_ns` binds on all three
+sittings — the one thing four independent measurements agree on"*. Sitting 4 came in at 21.2 %, so
+**there is no monotone trend**, and its worst statistic was **`froxel_shade_ns`**, so **which
+statistic binds is not stable either**. A rung whose subject is an unstable estimator should show
+its own claims being unstable; each of those sentences was written from exactly as many
+measurements as the sentence before it. What survives all four is the magnitude: on this channel the estimator is far less stable than the retired
+channel's historical 5 %–15 % suggested, and the published rule *"a claimed delta below ~15 % is not
+defensible without a NULL CONTROL measured in the same sitting"* is if anything **optimistic** under
+load. The clause that matters is *in the same sitting*, and these numbers are what it is for.
+
+**`docs/VG-DECIDABILITY-FLOOR.md` holds the LAST sitting**, because it is machine-written by one
+run and cannot accumulate a series it was never asked to keep. The series lives here. A reader who
+compares the two and finds different headline numbers is seeing that, not a contradiction. After sitting 1 the honest-looking write-up was *"6.5 %, and the repetition
+span is tighter than the old channel's"*. That paragraph was drafted. It was wrong, and the only
+reason it did not ship is that a **markdown defect in my own document generator forced a second
+run** — the replication happened by accident, which is the least defensible way to acquire one.
+
+So the rung's result on the new channel is the same result it had on the old, now established
+rather than inherited: **the floor is not a constant, and the estimator's instability survives the
+change of instrument.** The artifact-plus-median reading is **not** quieter than
+stdout-plus-mean — four sittings say 6.5 %, 17.7 %, 36.1 % and 21.2 %, which bracket the old
+channel's 10.3 % and then leave it far behind, with no ordering to read into them. Any claim either way needs more sittings than a migration rung has any business
+spending, and the operational rule the file already publishes — *"a claimed delta below ~15 % is not
+defensible without a NULL CONTROL measured in the same sitting"* — is unchanged by the migration and
+is the number a later rung should carry.
+
+**The binding statistic is one of the two SHADE figures on every sitting** — `flat_shade_ns` on
+three, `froxel_shade_ns` on the fourth — and never one of the two cull brackets, which are an order
+of magnitude tighter. That is weaker than the *"`flat_shade_ns` always binds"* this section claimed
+before sitting 4, and it is still enough for what it was cited for: **`froxel_total_ns` bound no
+sitting**, so dropping it changed no floor.
+
+⚠️ **The generator defect that produced the replication is worth its own line.** The channel/workload
+block was emitted through `\`-continued Rust string literals, and the edit that introduced it came
+through a non-raw Python string — so the `\` was consumed as a *Python* continuation, never reached
+the Rust source, and the literal carried the source file's own indentation into the document. Four
+spaces is a code block in markdown, so four paragraphs rendered as code. **The compiler cannot see
+this**: the literal is valid either way. Repaired by emitting one `writeln!` per line, where the
+indentation has physically nowhere to come from. The historical four-run table is now labelled as
+the **retired stdout channel's**, because an unlabelled table beside a new one invites exactly the
+cross-instrument comparison the paragraph above refuses to make.
+
+#### Two things measured while opening the SECOND consumer migration, before a line was changed
+
+`vg_occ_split_timing.rs` is 2401 lines and the second list says it *"reads the artifact's per-zone
+rows"*. Two of its needs have no artifact counterpart, and both are better found now than half way
+through the edit.
+
+**1. The artifact carries no REGIME PROVENANCE, and cannot derive one.** That file's clause 2
+requires every worker's `VB-P4 regime observed=[…] n_distinct=… mode=[…]` line, and rejects a worker
+whose `n_distinct != 1` *"rather than averaging two regimes into one number"*. Rung P4-4 made the
+occlusion regime a **live Resource**, so it is not boot-frozen: `workload_tag` is derived from
+`ResolvedRenderPath` and cannot see it. What the artifact needs is a **regime census** shaped like
+the label census it already has — the SET observed across the window plus its cardinality — because
+the question *"did this window time one regime or two?"* is a per-window observation, exactly like
+*"how many pairs came back `Measured`"*. Small, and it belongs to rung 7 because a consumer needs it.
+
+**2. Its clause 9 is DELETED, not migrated — its subject is the two printers.** The clause asserts
+that *"the `VB-P1d …` line's shade mean and the `VB-P4 pass=vb_shade` line's `mean_ns` are the same
+number"*, and says why in its own words: rung P4-1's byte-identity claim for the `VB-P1d` line *"is
+only worth something if something still reads it"*. Both lines die at this rung, so the clause has
+nothing left to compare — the same disposition `vb_bench_totality_gate.rs` already carries, reached
+for the same reason, and it means the second list's blanket *"reads the artifact's per-zone rows"*
+was true of eight clauses out of nine.
 
 #### Rung 7c, second half — the workload tag, and a mechanism the corpus described as if it existed
 

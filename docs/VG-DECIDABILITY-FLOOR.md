@@ -1,14 +1,27 @@
 # VG — the decidability floor — MACHINE-WRITTEN by `vg_decidability_floor_measure`
 
-**This run measured a floor of 10.3 %** — three sigma on a single-session reading, from a worst-statistic CV of 3.4 % (`flat_shade_ns`).
+**This run measured a floor of 21.2 %** — three sigma on a single-session reading, from a worst-statistic CV of 7.1 % (`froxel_shade_ns`).
 
-⚠️ **Do not read that as "the floor".** Repeated runs of this SAME protocol on this same box span roughly **5 %–15 %**. The defensible output of this rung is the RULE in the next section, not the number in this one.
+⚠️ **Do not read that as "the floor".** The estimator moves — by a factor of several between IDENTICAL protocols on this box, measured on both the retired stdout channel and the artifact channel that replaced it. The cross-sitting series is kept in `docs/diagnostics/profiling/05-LADDER-GATES.md` (profiling rung 7b); this run's own repetition span is tabulated below. **The migration did not make the instrument quieter.** The defensible output of this rung is the RULE in the next section, not the number in this one.
 
 Measured as a **NULL EXPERIMENT**: the shipped `vb_p1d_cull_shade_bench` class, same scene, same configuration, run in separate processes. Nothing differs between sessions, so every difference below is instrument plus environment. **A delta smaller than this is not resolvable by construction** — no statistical treatment recovers a signal from beneath the noise of the thing measuring it.
+
+## The channel and the workload these numbers belong to
+
+Read through the **profiling artifact** (`BOYKO_VB_ZONE` + `boyko_app::profiling::artifact`), NOT the retired `VB-P1d` stdout line — profiling rung 7. The statistic is each zone's **median**, where the printed channel published means.
+
+| leg | derived `workload_tag` | declared `content_tag` |
+|---|---|---|
+| froxel | `visibilitybuffer_mesh#605f3da8` | `n14_kronecker` |
+| flat | `visibilitybuffer_mesh#2cf8fcbd` | `n14_kronecker` |
+
+⚠️ **The two tags differ, and that is asserted rather than assumed.** They are derived from the whole boot-resolved render path, so a `BOYKO_VB_FROXEL_FORCE_OFF` that changed nothing would give one tag on both rows and fail the run — a null experiment across two conditions that were secretly one. **Any floor published before rung 7 was taken on a different instrument and bounds nothing about this one**, by this rung's own rule.
 
 Protocol: **3 independent repetitions × 7 sessions** per configuration (42 bench processes in total).
 
 ## ⚠️ THE FLOOR IS NOT A CONSTANT — and that, not any single number, is this rung's result
+
+⚠️ The four runs below were taken on the **RETIRED stdout channel** (means over `VB-P1d` lines), before profiling rung 7 moved this rung to the artifact and to medians. They are kept because the FINDING they establish is about the estimator and the box, not about the channel — but their numbers are not comparable with the table further down, and nothing here claims the new channel is quieter: that would need this same repeated protocol run on both, which no sitting has done.
 
 This protocol was run four times while it was being built. The floors it reported, in order, with what changed between them:
 
@@ -31,21 +44,20 @@ The single run that produced the table below repeats the whole experiment and pu
 
 | repetition | floor (worst peak-to-peak) |
 |---|---|
-| 1 | 17.8 % |
-| 2 | 5.3 % |
-| 3 | 5.8 % |
+| 1 | 25.0 % |
+| 2 | 7.0 % |
+| 3 | 21.6 % |
 
-**Repetition floors span 5.3 %–17.8 %, a factor of 3.35.** Read the headline as an order of magnitude, never as a constant. The table below pools every session, which is the estimate with the most evidence behind it.
+**Repetition floors span 7.0 %–25.0 %, a factor of 3.56.** Read the headline as an order of magnitude, never as a constant. The table below pools every session, which is the estimate with the most evidence behind it.
 
 | statistic | median (ns) | mean (ns) | peak-to-peak | CV | samples |
 |---|---|---|---|---|---|
-| `cull_reset_ns` | 577.2 | 577.0 | **4.9 %** | 1.0 % | [556, 571, 573, 573, 574, 574, 575, 575, 576, 577, 577, 577, 579, 579, 579, 579, 581, 581, 583, 584, 585] |
-| `cull_dispatch_ns` | 13262.5 | 13188.7 | **11.5 %** | 2.9 % | [12210, 12434, 12504, 13032, 13095, 13153, 13174, 13195, 13244, 13254, 13262, 13272, 13292, 13348, 13391, 13392, 13420, 13437, 13509, 13594, 13742] |
-| `froxel_shade_ns` | 28276.4 | 28077.1 | **13.3 %** | 3.0 % | [25646, 26498, 27015, 27634, 27708, 28029, 28039, 28099, 28160, 28257, 28276, 28299, 28336, 28341, 28374, 28471, 28588, 28644, 28695, 29090, 29412] |
-| `froxel_total_ns` | 42088.4 | 41842.9 | **12.3 %** | 2.9 % | [38430, 39582, 40031, 41310, 41312, 41870, 41871, 42028, 42052, 42084, 42088, 42142, 42165, 42212, 42223, 42321, 42587, 42787, 42943, 43063, 43591] |
-| `flat_shade_ns` | 41853.7 | 41615.6 | **16.3 %** | 3.4 % | [37497, 38525, 40666, 40852, 41434, 41490, 41616, 41630, 41653, 41695, 41853, 41900, 41998, 42025, 42081, 42263, 42272, 42361, 42677, 43096, 44334] |
+| `cull_reset_ns` | 512.0 | 509.0 | **12.5 %** | 4.4 % | [480, 480, 480, 480, 480, 480, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 544, 544, 544, 544] |
+| `cull_dispatch_ns` | 13872.0 | 13861.3 | **10.7 %** | 3.0 % | [13024, 13280, 13376, 13408, 13520, 13552, 13600, 13632, 13776, 13792, 13872, 13952, 13952, 13984, 14112, 14272, 14304, 14368, 14400, 14400, 14512] |
+| `froxel_shade_ns` | 25600.0 | 25843.8 | **24.0 %** | 7.1 % | [23552, 23552, 23552, 24576, 24576, 24576, 24576, 25600, 25600, 25600, 25600, 25600, 25600, 25600, 25600, 25600, 27648, 27648, 28672, 29696, 29696] |
+| `flat_shade_ns` | 40960.0 | 41239.6 | **12.5 %** | 2.8 % | [38912, 39936, 39936, 39936, 39936, 40960, 40960, 40960, 40960, 40960, 40960, 41200, 41472, 41984, 41984, 41984, 41984, 41984, 41984, 43008, 44032] |
 
-**The floor is 3 sigma × the WORST statistic's CV — `flat_shade_ns` at 3.4 %, giving 10.3 %** — worst rather than best or average, because a campaign quoting its tightest statistic as "the floor" would be certifying deltas it cannot resolve on any other one.
+**The floor is 3 sigma × the WORST statistic's CV — `froxel_shade_ns` at 7.1 %, giving 21.2 %** — worst rather than best or average, because a campaign quoting its tightest statistic as "the floor" would be certifying deltas it cannot resolve on any other one.
 
 ## What this decides
 
