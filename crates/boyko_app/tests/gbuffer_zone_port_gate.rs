@@ -6,19 +6,24 @@
 //! marcher (`Sv0TimedPass::Marcher`). This file is the gate that those brackets **run**, on a real
 //! `Deferred × Both` frame, and land where the id scheme says they should.
 //!
-//! # Why this is not "G10 for the gbuffer passes", and what is missing
+//! # Two gates here, and the fork the second one resolved
 //!
-//! G10's shape is a cross-leg comparison, and the gbuffer family has **no host arming path for its
-//! old leg**: `TimestampCollector` is constructed in exactly two places in the whole tree
-//! (`boyko_rhi_vulkan/tests/software_ray_baseline_cost.rs` and
-//! `.../tests/window_present_gbuffer.rs`), never from `boyko_app`. There is therefore no
-//! `boyko_app` worker that can play leg A for `TimedPass`, and the two-process A/B that rung 5c
-//! settled on has nothing to put on the other side. Extending G10 to these passes needs either a
-//! host arming path for the R0 collector or the A/B moved into the RHI test that already owns one —
-//! a scope fork, recorded in `docs/OPEN-QUESTIONS.md` rather than guessed at here.
+//! G10's shape is a cross-leg comparison, and when the port landed the gbuffer family had **no host
+//! arming path for its old leg**: `TimestampCollector` was constructed in exactly two RHI *test*
+//! files and never from `boyko_app`, so there was no worker to play leg A. The two branches were
+//! (a) give the R0 collector a host knob, or (b) move the A/B into the RHI test that owns it.
 //!
-//! What this gate DOES claim is the half that has no fork: the ported brackets execute, retire
-//! `Measured`, and carry ids in their own family's range.
+//! **(a), chosen on performance.** (b) needs the scene to hold `&GpuZoneRecorder` across 220 frames
+//! while the ring slot changes per frame, so `open_frame` — and with it `retire` — would have to
+//! take `&self`. That deletes clause (c) of `FrameSlot`'s `Sync` argument (*"`retire` takes
+//! `&mut self`, so no recording call can be in flight against the same slot"*) **permanently, in
+//! shipped code**, and pushes `set_mark` toward a locked read-modify-write in a hot recorder — a
+//! cost paid by the engine to serve a test's borrow shape. (a) costs one boot-time `Option` that is
+//! `None` in every shipped run and one predicate in `GpuSceneBundles::scene`, which is exactly what
+//! the two existing bench knobs already are; and rung 7 deletes the collector and the knob together.
+//!
+//! So this file carries both halves: the PORT gate (ids in their own family range, nothing lost or
+//! torn) and the WITNESS clause of G10 for these passes (same brackets, same stream positions).
 //!
 //! # The id ranges are the subject, not a detail
 //!
@@ -363,5 +368,254 @@ fn the_ported_gbuffer_brackets_execute_and_carry_their_own_family_ids() {
         "rung 6 port gate: {} retired frame(s), {seen_gbuffer} gbuffer-family and {seen_sv0} \
          SV0-family bracket(s), every id inside its own base range, no LOST and no TORN.",
         rows.len()
+    );
+}
+
+// ===============================================================================================
+// G10's witness clause, for the gbuffer + SV0 families
+// ===============================================================================================
+
+/// The first frame index the comparison trusts — `vb_zone_ab_witness_gate.rs`'s constant and its
+/// reason: the earliest frames have no previous depth pyramid and record a different pass set.
+const FIRST_STEADY_FRAME: u32 = 4;
+
+/// One leg's census, keyed by frame.
+struct Leg {
+    name: &'static str,
+    output: String,
+    frames: Vec<(u32, Vec<u32>)>,
+    stream_pos: Vec<(u32, u32)>,
+    resets: Vec<(u32, u32)>,
+}
+
+/// `key=<value>` on `line`, anchored to a whole TOKEN.
+///
+/// Token-anchored for the reason `vb_zone_ab_witness_gate.rs` records against itself: a
+/// `find("pairs=")` matches inside `repairs=0` and reads the repair count as the pair count.
+fn key_u32(line: &str, key: &str) -> Option<u32> {
+    line.split_whitespace().find_map(|t| t.strip_prefix(key)).and_then(|v| v.parse().ok())
+}
+
+/// Parses every `VB-CENSUS` line, strictly: an unreadable list is a PARSE failure, not an empty
+/// frame — silently treating it as empty is how two legs come to "agree".
+fn parse_leg(name: &'static str, output: String) -> Leg {
+    let mut frames = Vec::new();
+    let mut stream_pos = Vec::new();
+    let mut resets = Vec::new();
+    for line in output.lines().filter(|l| l.contains("VB-CENSUS ")) {
+        let frame = key_u32(line, "frame=")
+            .unwrap_or_else(|| panic!("{name}: a VB-CENSUS line carries no frame=:\n  {line}"));
+        let open = line
+            .find("positions=[")
+            .unwrap_or_else(|| panic!("{name}: a VB-CENSUS line carries no positions=[:\n  {line}"));
+        let rest = &line[open + "positions=[".len()..];
+        let close = rest
+            .find(']')
+            .unwrap_or_else(|| panic!("{name}: an unterminated positions= list:\n  {line}"));
+        let body = &rest[..close];
+        let positions: Vec<u32> = if body.is_empty() {
+            Vec::new()
+        } else {
+            body.split(',')
+                .map(|t| {
+                    t.trim().parse().unwrap_or_else(|_| {
+                        panic!("{name}: an unparseable stream position {t:?}:\n  {line}")
+                    })
+                })
+                .collect()
+        };
+        frames.push((frame, positions));
+        stream_pos.push((frame, key_u32(line, "stream_pos=").unwrap_or(0)));
+        resets.push((frame, key_u32(line, "resets=").unwrap_or(0)));
+    }
+    Leg { name, output, frames, stream_pos, resets }
+}
+
+/// Spawns the Deferred worker with one leg's knobs set.
+///
+/// `knobs` is a LIST because leg A is two collectors: the zone recorder brackets every family
+/// `record_gbuffer` records, so a leg-A worker arming only the R0 collector would record one bracket
+/// against leg B's two and the comparison would red on the arming rather than on the port.
+fn spawn_leg(name: &'static str, knobs: &[&str]) -> Leg {
+    let exe = std::env::current_exe().expect("invariant: the test binary knows its own path");
+    let mut cmd = Command::new(&exe);
+    cmd.args([WORKER, "--ignored", "--exact", "--test-threads=1", "--nocapture"])
+        .env(DRIVER_MARKER, "1")
+        .env("BOYKO_VB_BENCH_FRAMES", BENCH_FRAMES)
+        .env("BOYKO_WINDOW_FRAMES", FRAME_CAP)
+        // The SV0 bench asserts, BEFORE the first frame, that the frame cap is at least
+        // `20 + 4 * quads`; at its 200-quad default that is 820 frames, well past this gate's cap.
+        // Lowering the quad count is the knob its own message names, and this gate reads a CENSUS
+        // rather than the bench's statistics, so five quadruples is plenty: they exist to give the
+        // A/B enough presented frames, not to measure anything.
+        .env("BOYKO_SV0_BENCH_QUADS", "5")
+        .env("BOYKO_DISABLE_VALIDATION", "1")
+        // Start from a clean slate and set only this leg's knobs, so an operator's shell cannot
+        // arm the other side — `GpuSceneBundles::boot` refuses zone-plus-old with an assert, and a
+        // gate that failed at boot would look exactly like a gate that failed at its claim.
+        .env_remove("BOYKO_VB_ZONE")
+        .env_remove("BOYKO_GBUF_BENCH")
+        .env_remove("BOYKO_SV0_BENCH")
+        .env_remove("BOYKO_SV0_BENCH_NULL")
+        .env_remove("BOYKO_VB_BENCH")
+        .env_remove("BOYKO_HOST_DUMP")
+        .env_remove("BOYKO_HZB_DUMP")
+        .env_remove("BOYKO_VB_PROBE")
+        .env_remove("BOYKO_VB_CULL_READBACK")
+        .env_remove("BOYKO_VG_CENSUS")
+        .env_remove("BOYKO_VG_SCENE")
+        .env_remove("BOYKO_VG_OCC")
+        .env_remove("BOYKO_VG_HZB");
+    for k in knobs {
+        cmd.env(k, "1");
+    }
+    let out = cmd.output().expect("invariant: the A/B worker process spawns");
+    let mut merged = String::from_utf8_lossy(&out.stdout).into_owned();
+    merged.push_str(&String::from_utf8_lossy(&out.stderr));
+    parse_leg(name, merged)
+}
+
+/// **G10's witness clause, extended to the gbuffer + SV0 passes.**
+///
+/// Same claim as rung 5c's for the VB passes: the old collectors and the `GpuZoneRecorder` put
+/// their brackets at the same positions in the same recorded command stream. The TIMING clause
+/// stays deferred to rung 8, where its band exists.
+#[test]
+#[ignore = "live GPU gate (spawns two windowed workers); run with --test-threads=1"]
+fn the_gbuffer_collectors_put_their_brackets_at_the_same_stream_positions() {
+    // Leg A is BOTH old collectors — see `spawn_leg`.
+    let a = spawn_leg("leg A (TimestampCollector + Sv0TimestampCollector)", &[
+        "BOYKO_GBUF_BENCH",
+        "BOYKO_SV0_BENCH",
+    ]);
+    if a.output.contains(NO_TIMESTAMPS) {
+        eprintln!(
+            "G10 (gbuffer): INSTRUMENT-DEAD -- this device reports unusable timestamps, so neither \
+             leg arms a collector and the comparison is not a finding about rung 6."
+        );
+        return;
+    }
+    let b = spawn_leg("leg B (GpuZoneRecorder)", &["BOYKO_VB_ZONE"]);
+
+    // ---- clause 1: both legs produced a census -------------------------------------------------
+    for leg in [&a, &b] {
+        assert!(
+            !leg.frames.is_empty(),
+            "{} printed no VB-CENSUS line. Either the worker never reached a presented frame, or \
+             the census was not threaded into `record_gbuffer` on this leg -- and two legs that \
+             printed nothing would agree perfectly.\n---- worker output ----\n{}",
+            leg.name,
+            leg.output
+        );
+    }
+
+    // ---- clause 2: the census was COMPILED IN --------------------------------------------------
+    for leg in [&a, &b] {
+        assert!(
+            leg.stream_pos.iter().any(|(_, p)| *p > 0),
+            "{}: every VB-CENSUS line reports stream_pos=0, so the 125 increments at \
+             `gbuffer.rs`'s record sites compiled to nothing -- `profiling-census` did not reach \
+             the recorder, and the positions below would all be [] and compare EQUAL.\n\
+             ---- worker output ----\n{}",
+            leg.name,
+            leg.output
+        );
+    }
+
+    // ---- clause 3: NON-VACUITY --------------------------------------------------------------
+    for leg in [&a, &b] {
+        let bracketed = leg
+            .frames
+            .iter()
+            .filter(|(f, _)| *f >= FIRST_STEADY_FRAME)
+            .filter(|(_, p)| !p.is_empty())
+            .count();
+        assert!(
+            bracketed > 0,
+            "{}: not one steady frame recorded a bracket. An equality over empty streams is not \
+             evidence.\n---- worker output ----\n{}",
+            leg.name,
+            leg.output
+        );
+    }
+
+    // ---- clause 4: THE CLAIM, with the ONE difference the port actually makes ------------------
+    //
+    // MEASURED on the first live run: leg A's positions were each EXACTLY ONE higher than leg B's.
+    // Not a port defect — a true difference in the recorded stream, and precisely the one this rung
+    // exists to make. The old side records TWO `vkCmdResetQueryPool`s per frame, one per collector
+    // (`TimestampCollector` and `Sv0TimestampCollector` own separate pools); the zone side records
+    // ONE, because it is one recorder with one pool. The census counts a reset as the recorded
+    // command it is, so every later position shifts by the difference.
+    //
+    // A plain equality reds on that, which is why rung 5c's VB gate never saw it: there the old
+    // side is one collector against one recorder, one reset each.
+    //
+    // The honest form is TWO clauses, and neither hides anything:
+    //   (i) the per-frame offset is CONSTANT across the frame's brackets — no bracket moved
+    //       relative to its neighbours, which is the port claim;
+    //  (ii) that constant EQUALS `resets_A - resets_B`, taken from the census's own counters — the
+    //       prologue is the whole of the difference, and nothing else moved.
+    // Comparing `p[i] - p[0]` would have satisfied (i) alone and quietly accepted any prologue
+    // difference at all, including one nobody intended.
+    let mut compared = 0usize;
+    let mut stamps_seen = 0usize;
+    for (frame, pa) in a.frames.iter().filter(|(f, _)| *f >= FIRST_STEADY_FRAME) {
+        let Some((_, pb)) = b.frames.iter().find(|(f, _)| f == frame) else { continue };
+        assert_eq!(
+            pa.len(),
+            pb.len(),
+            "frame {frame}: leg A recorded {} bracket timestamps and leg B recorded {}. The two \
+             sides bracket a DIFFERENT NUMBER of passes -- and note leg A arms BOTH old collectors \
+             precisely so this cannot differ because of the arming.\n  A: {pa:?}\n  B: {pb:?}",
+            pa.len(),
+            pb.len()
+        );
+        if pa.is_empty() {
+            continue;
+        }
+        // (i) one offset for the whole frame.
+        let offset = pa[0] as i64 - pb[0] as i64;
+        for (i, (x, y)) in pa.iter().zip(pb.iter()).enumerate() {
+            assert_eq!(
+                *x as i64 - *y as i64,
+                offset,
+                "frame {frame}: bracket timestamp {i} sits {} record site(s) apart between the two \
+                 sides while the frame's other brackets sit {offset} apart. A bracket moved \
+                 RELATIVE to its neighbours, which no difference in the frame prologue can \
+                 explain.\n  A: {pa:?}\n  B: {pb:?}",
+                *x as i64 - *y as i64
+            );
+        }
+        // (ii) and that offset is the reset-count difference, from the instrument's own counters.
+        let ra = a.resets.iter().find(|(f, _)| f == frame).map(|(_, r)| *r).unwrap_or(0) as i64;
+        let rb = b.resets.iter().find(|(f, _)| f == frame).map(|(_, r)| *r).unwrap_or(0) as i64;
+        assert_eq!(
+            offset,
+            ra - rb,
+            "frame {frame}: the two sides' brackets are {offset} record site(s) apart, but their \
+             query-pool resets differ by {} ({ra} on the old side, {rb} on the zone side). The \
+             prologue is supposed to be the WHOLE of the difference; an offset larger than the \
+             reset delta means something else was recorded on one side and not the other.\n  \
+             A: {pa:?}\n  B: {pb:?}",
+            ra - rb
+        );
+        compared += 1;
+        stamps_seen += pa.len();
+    }
+    assert!(
+        compared > 0,
+        "the two legs share no steady frame index (A: {} frames, B: {} frames). With nothing \
+         compared, clause 4 is vacuous.",
+        a.frames.len(),
+        b.frames.len()
+    );
+
+    println!(
+        "G10 witness clause (gbuffer + SV0): {compared} frame(s) compared, {stamps_seen} bracket \
+         timestamp(s). Every bracket sits at the same position on both sides once the frame \
+         prologue is accounted for -- the old side records one query-pool reset per collector and \
+         the zone side records one for the frame, and that difference is asserted to be the WHOLE \
+         of the offset. The TIMING clause is deferred to rung 8."
     );
 }

@@ -137,7 +137,7 @@ flag-off legs on the logging side and by GJ1's control leg here.
 | **3** *(**COMPLETE** — **3a** the field, the mint, `W9201`/`W9208`; **3b** the `App` zones; **3c** the per-system spans; **3d** the analysis half)* | `SystemMeta.zone` + const-assert; tier-gated minting at `try_build` with **non-terminal** refusal; the four `App` zones (`__frame`/`__events`/`__fixed_step`/`__main_run`) at `update_with_delta`; the dispatch-round pair `__round`/`__round_width` **in place of `RoundRecord`**; `intervals` + `ConcurrencyReport` under `profiling-analysis`, **without `compat` and without `sys_of`** — see "What rung 3d SHIPPED" below for all four departures and their arguments | **G8, G9, G11 (engine half)** | one field in tail padding; four zone sites |
 | **4** *(**SHIPPED**)* | RHI seam: three verbs + Vulkan impls + `ffi.rs` constants + `GPU_ZONE_QUERY_FLAGS` const-assert + Mock defaults and their pinning tests. **No consumer.** Plus `VkPhysicalDeviceHostQueryResetFeatures` (granular, for the VUID reason the descriptor-indexing struct already carries) and `DeviceCaps::host_query_reset` — see "What rung 4 SHIPPED" below | **G2a, G2c** | old readers untouched |
 | **5** *(**COMPLETE** — **5a** the edge, `gpu_zone.rs`, the 2×2 label, **G2b**; **5b** `CommandWitness` behind `profiling-census` + **G5**; **5c** the VB port, the A/B and **G10**'s witness clause — see "What rung 5c SHIPPED" below for the four departures)* | `boyko_rhi_vulkan → boyko_diag` edge; `gpu_zone.rs` + `CommandWitness` (`zone_open_order` **and** `stamp_positions`, behind `profiling-census`); VB brackets ported. **Serial A/B against the old collector** (never both armed in one frame — F17) | **G2b, G5, G10** | both collectors exist; every existing test still compiles and passes |
-| **6** *(**PORT SHIPPED**; the G10 extension is FORKED — see "What rung 6 SHIPPED" below)* | gbuffer + SV0 ported through `GbufWitness`, the sibling `record_gbuffer` never had; `ZONE_BASE_VB`/`_GBUFFER`/`_SV0` const-asserted disjoint; `gbuffer_zone_port_gate.rs` **| the port gate (ids in their own family range, no LOST/TORN) — G10 extended to these passes needs an arming path for the R0 collector that does not exist | additive |
+| **6** *(**COMPLETE** — see "What rung 6 SHIPPED" below)* | gbuffer + SV0 ported through `GbufWitness`, the sibling `record_gbuffer` never had; `ZONE_BASE_VB`/`_GBUFFER`/`_SV0` const-asserted disjoint; the R0 collector given the host arming path it never had (`BOYKO_GBUF_BENCH`), which is what let G10's witness clause extend to these passes | **the port gate (ids in their own family range, no LOST/TORN) + G10's witness clause for the gbuffer/SV0 families**, both in `gbuffer_zone_port_gate.rs`, each with a run RED | additive |
 | **7 (the single subtractive rung)** | Delete `gpu_timing.rs`, the runner harness bodies, the statistics helpers **and the four `VB-P1d`/`VB-P4` print sites** (`runner.rs:3089`, `:3096`, `:3121`, `:3137`) — **and migrate all six stdout consumers to the artifact in the same commit** (S1; list below) | the post-rung `rg` gate **plus the S1 stdout gate (G24)** | one commit, workspace green before and after |
 | **7b (NEW — S1)** | **Floor re-measurement on the artifact channel.** Re-run A6's protocol (7 processes × 3 repetitions) reading the artifact instead of stdout; publish `docs/PROFILING-FLOOR.md` with the new `WorkloadTag`, all three repetition floors, and `FLOOR_REDUCTION = Max` | **G3a's reduction RED** | needs rung 7's channel; blocks nothing but *licenses* rung 8's verdicts |
 | **8** | `Floor`/`Twin`/`resolve` + `NotResolvedReason`, `WindowReducer`, TOML artifact, present mode (**labelling only if `Immediate` is unsupported — D12**), counters at `vkCmd*` sites, optional `profiling-alloc` | **G3a, G3b, G6, G13, G4c (the artifact clause), G25** | additive |
@@ -838,25 +838,59 @@ it. The zone leg has no epilogue because it needs none — an unwritten pair ret
 `Marcher` opens FIRST here, at the marcher dispatch, before every `TimedPass` — so `count_ones` of
 the bits below a slot is not that slot's open index in `record_gbuffer` either. `pair_of` remembers.
 
-#### The fork rung 6 did NOT decide: G10 has no leg A for the gbuffer family
+#### The fork G10's extension turned on, and why it went the way it did (owner: *"whichever is more
+#### performant and optimal"*)
 
-`TimestampCollector` is constructed in exactly **two** places in the tree —
+`TimestampCollector` was constructed in exactly **two** places in the tree —
 `boyko_rhi_vulkan/tests/software_ray_baseline_cost.rs:367` and
-`.../tests/window_present_gbuffer.rs:9259` — and **never from `boyko_app`**. Rung 5c's A/B is two
-processes because leg A's `WAIT_BIT` readback cannot meet a frame the other leg recorded; that shape
-needs a `boyko_app` worker per leg, and for `TimedPass` there is no such worker to write. The two
-candidates are visible and neither is free:
+`.../tests/window_present_gbuffer.rs:9259` — and **never from `boyko_app`**, so the two-process A/B
+had no worker to play leg A for the software-ray family. Two branches:
 
-- **give the R0 collector a host arming path** (a `BOYKO_GBUF_BENCH` knob mirroring the other two),
-  which adds a bench to the host for a collector rung 7 deletes; or
-- **move the gbuffer A/B into `window_present_gbuffer.rs`**, which already owns the collector — but
-  its scene is built ONCE for 220 frames while the zone leg's slot changes per frame, so the
-  recorder's slot would have to become its own state (`open_frame` taking `&self`), which weakens
-  clause (c) of `FrameSlot`'s `Sync` argument (*"`retire` takes `&mut self`, so no recording call can
-  be in flight"*).
+- **(a) give the R0 collector a host arming path** — one boot-time `Option` that is `None` in every
+  shipped run, and one predicate in `GpuSceneBundles::scene`, which is exactly what `vb_bench` and
+  `sv0_bench` already are. Zero hot-path cost, zero recorded commands, and it **sunsets itself**:
+  rung 7 deletes the collector and takes `BOYKO_GBUF_BENCH` with it.
+- **(b) move the A/B into the RHI test that owns the collector** — that test builds its scene ONCE
+  for 220 frames while the zone ring slot changes per frame, so the scene would hold
+  `&GpuZoneRecorder` across the loop and `open_frame` would have to take `&self`. `retire` would
+  follow, because `&mut self` is unexpressible while that shared borrow lives. **That deletes clause
+  (c) of `FrameSlot`'s `Sync` argument** — *"`retire` takes `&mut self`, so no recording call can be
+  in flight against the same slot"* — permanently, in shipped code, and pushes `set_mark` toward a
+  locked read-modify-write in a hot recorder (principle 4's ban, in the one place the campaign has
+  been most careful about).
 
-Recorded in `docs/OPEN-QUESTIONS.md` rather than picked here: it is a scope call about what rung 6
-costs, and both branches change what rung 7 inherits.
+**(a).** The decisive asymmetry is *where the cost lands*: (b) charges the shipped recorder for a
+test's borrow shape, and charges it forever; (a) charges boot-time state that is `None` in every run
+that is not the gate, and expires one rung later.
+
+**And the witness clause needs no readback at all**, which removes (a)'s only real hazard: the R0
+collector's `read_query_pool_ns` waits with `VK_QUERY_RESULT_WAIT_BIT`, and three of the four
+software-ray passes are bracketed inside their own `if let` arms — a frame without DDGI or without a
+spot light leaves those queries unwritten and the read would hang. G10's witness clause compares
+stream POSITIONS; the timing clause is rung 8's. So the leg is **armed and never read**. Rung 8's
+reader must consult the witness masks before it waits on anything.
+
+**Two things the extension measured that rung 5c's A/B could not have.**
+
+- **The old side records TWO pool resets per frame and the zone side records ONE**, so every bracket
+  position on leg A sits exactly one record site higher. Not a defect — it is the difference the
+  port *makes*, one recorder with one pool replacing two collectors with two. A plain position
+  equality reds on it, and rung 5c never saw it because there one collector faces one recorder. The
+  gate's clauses are therefore (i) the per-frame offset is CONSTANT across the frame's brackets — no
+  bracket moved relative to its neighbours — and (ii) that constant EQUALS `resets_A − resets_B`,
+  read from the census's own counters. Comparing `p[i] − p[0]` would have satisfied (i) alone and
+  accepted any prologue difference at all.
+- **The OLD knobs are not exclusive with each other, and being stricter than the truth broke the
+  gate.** The first form of `boot`'s assert refused `BOYKO_GBUF_BENCH` alongside `BOYKO_SV0_BENCH`.
+  But the zone leg brackets *every* family `record_gbuffer` records, so a leg-A worker arming only
+  one old collector records fewer brackets and the comparison reds on the ARMING rather than on the
+  port. The real exclusivity is zone-versus-old, which is what `GbufWitness::open` already says in
+  code (`old_armed = tc.is_some() || sv0.is_some()`, not an exclusive-or).
+
+**RED, run:** one `ts.cmd()` inside `begin`'s zone arm, gbuffer family only ⇒ *"bracket timestamp 2
+sits 0 record site(s) apart while the frame's other brackets sit 1 apart"* — the gate names the
+timestamp that moved and the family it belongs to, and the SV0 brackets in the same frame stay put.
+**GREEN:** 28 frames compared, 112 bracket timestamps.
 
 ### Two rung-3b decisions
 

@@ -1039,6 +1039,11 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     // is two processes, one leg each, which is also what keeps the OLD collector's
     // `VK_QUERY_RESULT_WAIT_BIT` readback from ever meeting a frame the zone leg recorded instead.
     let vb_zone = host.gpu.vb_zone_armed();
+    // Profiling rung 6: the R0 software-ray collector's leg. Exclusive with the other two by
+    // `GpuSceneBundles::boot`'s assert, and ARMED-NEVER-READ: the witness clause it serves needs no
+    // timings, and a `WAIT_BIT` readback on a frame that skipped a pass would hang. Its run ends on
+    // `BOYKO_WINDOW_FRAMES`, which is why the gate sets one.
+    let gbuf_bench = host.gpu.gbuf_bench_armed();
     // Its own timed-frame budget, on the SAME knob shape and the SAME default as the bench's, so
     // the two legs of one A/B run the same number of frames without the driver stating it twice.
     let vb_zone_frames: u32 = if vb_zone {
@@ -2725,7 +2730,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // ~200 increments at `vb.rs`'s record sites compile to nothing. The line prints anyway, and
         // says `stream_pos=0`, because a gate that silently saw no line could not tell a census
         // build from a run that never reached a frame.
-        if (vb_bench || vb_zone)
+        if (vb_bench || vb_zone || gbuf_bench)
             && presented_ok
             && let Some(w) = host.gpu.vb_census()
         {
@@ -2738,7 +2743,13 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             println!(
                 "VB-CENSUS leg={} frame={frame_index} stream_pos={} profiling_cmds={} \
                  resets={} stamps={} repairs={} pairs={} positions=[{positions}]",
-                if vb_zone { "zone" } else { "bench" },
+                if vb_zone {
+                    "zone"
+                } else if gbuf_bench {
+                    "gbuf"
+                } else {
+                    "bench"
+                },
                 w.stream_pos(),
                 w.profiling_cmds(),
                 w.query_resets(),

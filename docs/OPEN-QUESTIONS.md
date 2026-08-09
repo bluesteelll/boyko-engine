@@ -1115,12 +1115,13 @@ claim path's Miri and property legs are unaffected and still planned.
   so a single process alternating legs would reach it on a frame leg B recorded — the hang class
   P4-1 removed. If a future rung wants the corpus's literal shape, it must first make leg A's
   readback non-blocking, which is rung 7's deletion anyway.
-- **OWNER DECISION NEEDED — profiling rung 6: G10 has no leg A for the gbuffer passes.** The port
-  shipped and is gated (`gbuffer_zone_port_gate.rs`), but the cross-leg comparison cannot be
-  extended, because `TimestampCollector` is constructed only in two RHI **test** files and never
-  from `boyko_app`, so there is no host worker to play the old leg. Two branches, both with a cost:
-  (a) add a host arming knob for a collector rung 7 deletes; (b) move the gbuffer A/B into
-  `window_present_gbuffer.rs`, which owns the collector but builds its scene ONCE for 220 frames —
-  the zone slot changes per frame, so `open_frame` would have to take `&self`, weakening clause (c)
-  of `FrameSlot`'s `Sync` argument. Rung 7 inherits a different tree either way.
+- **RESOLVED (owner: "whichever is more performant") — profiling rung 6's G10 fork went to the host
+  arming knob.** `BOYKO_GBUF_BENCH` costs one boot-time `Option` that is `None` in every shipped run
+  and expires with rung 7; the alternative would have forced `GpuZoneRecorder::open_frame` and
+  `retire` to `&self`, deleting clause (c) of `FrameSlot`'s `Sync` argument permanently and pushing
+  `set_mark` toward a locked RMW in a hot recorder. **The leg is armed and never read** — the witness
+  clause needs no timings, and `read_query_pool_ns` would hang on a frame that skipped a pass.
+  ⚠️ **Rung 8's reader must consult the witness masks before it waits on anything**: three of the
+  four software-ray passes are bracketed inside their own `if let` arms, and neither old gbuffer
+  collector has a totality epilogue.
 - **`.claude/settings.local.json` is dirty** from earlier sessions and is deliberately never staged.
