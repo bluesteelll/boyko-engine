@@ -85,6 +85,8 @@ mod window_info;
 /// the runner drives its staging-ring rewrites with.
 pub mod light_gate;
 pub mod plugins;
+/// Profiling rung 7: the measurement artifact that replaces the stdout channel.
+pub mod profiling;
 pub mod prelude;
 
 pub use device::GpuDevice;

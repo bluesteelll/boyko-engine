@@ -945,9 +945,31 @@ artifact field at all — `resolve` checks it, 7b publishes it into markdown, no
 file carries it; (vi) what the artifact records when the device declines timestamps, which today is
 an `eprintln!` three consumers key their third outcome on.
 
-**These are VALUES calls, not perf forks, and they are the owner's** — see
-`docs/OPEN-QUESTIONS.md`. A format guessed here would be a format the six consumers are then
-rewritten against, and (i) alone can make every band gate pass while measuring nothing.
+**DECIDED** (owner: *"decide yourself what is optimal"*), and each answer with its cost is in
+`crates/boyko_app/src/profiling/artifact.rs`'s module doc: one decimal place; one process, one file,
+truncated at open, path chosen by the parent; a **parent-supplied run token** as the staleness
+discriminator; `WorkloadTag` as a field; a declined instrument as a header field. `build_hash` is
+**not** a field — it does not exist (`crates/boyko_diag/` has no `build.rs`, and `BUILD_HASH` appears
+nowhere in the workspace), and a header field that is always absent is indistinguishable from one
+that is broken.
+
+**⚠️ And (i)'s reasoning was WRONG, corrected by insisting on its RED.** Injecting full precision
+into the writer left the gate GREEN: `vg_occ_split_timing.rs:916`'s `(v * 10.0).round()` **is** a
+rounding to tenths, so it absorbs whatever extra digits the file carries — identical reconstruction
+across `128.0`, `268.8`, `163.2`, `128.04`, `128.06`, `12.85`, `1234.567`. The 32× under-statement
+that file measures belongs to choosing the FLOOR term as `period × 1 tick`, a rung-8 decision. One
+decimal is still correct, for the smaller reason that the figures stay directly comparable with the
+printed lines — which is what makes the next step's A/B possible at all — and the gate now discloses
+that its widening RED is not producible instead of implying a protection it does not provide.
+
+**Two further things the gate's first runs measured.** A **mean is not a lattice point**: folding
+`mean_ns` into the GCD reconstruction returned 32 tenths against a hardware lattice of 128, from
+data that was otherwise perfectly quantised — order statistics only. And the stale-artifact clause
+**could not see its own subject** until a second clause was added: it asserted the error's *type*,
+which a reader that parsed every row and then compared the token would also satisfy. The ordering is
+now observed with a file whose header is well formed and whose rows are not — a header-first reader
+returns `TokenMismatch`, a rows-first reader returns `Malformed`. Under that RED the original clause
+stayed **green**, which is precisely why it was not enough.
 
 ### Two rung-3b decisions
 

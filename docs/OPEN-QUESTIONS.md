@@ -1124,11 +1124,14 @@ claim path's Miri and property legs are unaffected and still planned.
   ⚠️ **Rung 8's reader must consult the witness masks before it waits on anything**: three of the
   four software-ray passes are bracketed inside their own `if let` arms, and neither old gbuffer
   collector has a totality epilogue.
-- **OWNER DECISION NEEDED — profiling rung 7 cannot start: the artifact format is unspecified, and
-  guessing one field wrong makes every band gate pass while measuring nothing.** The rung's own row
-  was wrong about its shape and is amended in `05-LADDER-GATES.md` (the writer moves from rung 8 to
-  rung 7; the print sites are eleven, not four; `vb_bench_totality_gate.rs` is deleted, not
-  migrated). What remains is not a fork I can settle with numbers — it is six values:
+- **RESOLVED (owner: "decide yourself what is optimal") — profiling rung 7's artifact format is
+  decided and its writer/reader/gate have shipped.** See `profiling/artifact.rs`'s module doc for
+  each decision and what it costs to get wrong. ⚠️ **One of the six answers turned out to be wrong in
+  its REASONING and was corrected by insisting on a RED**: the fear that a wider file collapses
+  `vg_occ_split_timing.rs:916`'s GCD is false — that consumer's own `(v * 10.0).round()` absorbs the
+  extra digits, measured across seven values. One decimal is still right, for smaller reasons
+  (direct comparability with the printed lines, which is what makes the next step's A/B possible).
+  The six values, as decided:
   1. **Numeric precision in the artifact.** `vg_occ_split_timing.rs:916` reconstructs the GPU tick
      lattice by GCD over **tenths**, because that is the precision the summary prints. Full-precision
      `f64` collapses the GCD and sub-floors every band; the file's own doc measures the error at
@@ -1145,10 +1148,18 @@ claim path's Miri and property legs are unaffected and still planned.
      markdown, nothing says the session file carries it.
   6. **What the artifact records when the device declines timestamps** — today an `eprintln!` that
      three consumers key their third outcome on.
-  ⚠️ Separately: **`G24`'s reverse RED has a hole no format choice fixes.** `SessionId` is minted
-  inside the child, so a parent can only check `build_hash`, which is constant across a session — as
-  written the gate detects an artifact from a different BUILD, never a stale one from the previous
-  child of the same run.
-  Scale, measured, for whenever it does start: **713** lines deleted from `gpu_timing.rs`, **1381**
-  from `runner.rs` (31 % of the file), **465** from `gpu_scene/mod.rs`, plus the consumer migrations.
+  ⚠️ **`G24`'s reverse RED named two fields that cannot do the job, and one of them does not exist.**
+  `crates/boyko_diag/` has **no `build.rs`** and `BUILD_HASH` appears nowhere in the workspace — a
+  planned rung-0 artifact that never landed. `SessionId` exists but is minted INSIDE the child, so a
+  parent cannot predict it. The discriminator is therefore a **parent-supplied run token**, the only
+  field that can catch staleness within one run.
+  Rung 7's remaining halves, in order: the reducer that fills the artifact, the producer wiring
+  (verified by A/B against the still-printing channel while BOTH are live), 7b's floor
+  re-measurement, then the deletions — **713** lines from `gpu_timing.rs`, **1381** from `runner.rs`
+  (31 % of the file), **465** from `gpu_scene/mod.rs`, plus five consumer migrations.
+- **`boyko-ecs --lib`'s `one_zone_taking_a_hundred_thousand_samples_keeps_count_exact` is an
+  ORDER-DEPENDENT FLAKE.** Observed failing once in a full `--workspace --all-targets` run, then
+  passing in isolation and in two consecutive full lib runs (915/915). Same class as the
+  `MAX_QUERY_TYPES` note above: process-global profiling state (lanes, zone slots) against 915
+  tests in parallel. Re-run before bisecting.
 - **`.claude/settings.local.json` is dirty** from earlier sessions and is deliberately never staged.
