@@ -86,7 +86,7 @@ out; SSR = ROUGHNESS lane shape only; shipped shader files are never renamed.
 ## 2. gViewT producers + O1 predicates (each read at BOTH declare and record, parity `debug_assert!`)
 
 All on `GBufferScene` (crates/boyko_rhi_vulkan/src/present/scene_types.rs), from the threaded
-`ResolvedRenderPathGpu` (scene_types.rs:1076) + activation fields:
+`ResolvedRenderPathGpu` (scene_types.rs:1078) + activation fields:
 
 - `path_vb_split()` = `path_is_vb() && resolved_render_path.mesh_geo_shade_split` â€” gates the `vb_geo` +
   `vb_shade_split` pair (they arm/disarm together).
@@ -100,7 +100,7 @@ All on `GBufferScene` (crates/boyko_rhi_vulkan/src/present/scene_types.rs), from
   gates `ddgi_update` in the VB graph AND the shade's conditional atlas reads (R9c; `ddgi_update` arming already
   carries the `sdf_leg` AND from gpu_scene, so this is reachable only VBÃ—Both).
 - **gViewT producer widening â€” critic-fix (CRITICAL): `path_sdf_forward_writes_viewt()` is NOT touched.** It stays
-  `path_has_sdf_forward() && taa.is_some()` (scene_types.rs:2550). Widening it was path-blind: `scene.ssao` is armed
+  `path_has_sdf_forward() && taa.is_some()` (scene_types.rs:2552). Widening it was path-blind: `scene.ssao` is armed
   per-frame from ResolvedSsao with NO path gating, so SsaoConfig under ForwardÃ—Both would (a) fire the Forward
   declarator's tripwire `debug_assert!(!scene.path_sdf_forward_writes_viewt())` (graph_bridge.rs:2322-2326) every
   debug frame and (b) in release select the VIEWT marcher variant storage-writing a gViewT lane the Forward path

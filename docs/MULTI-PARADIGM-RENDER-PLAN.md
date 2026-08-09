@@ -31,7 +31,7 @@ Zero-cost leg toggle: a mesh-only app commits **0 bytes** of SDF VRAM and **0** 
 
 **Target metrics:** default path 0 added cost (byte-identical); disabled leg 0 VRAM/0 dispatch/0 extra usage bits; VB attribute reconstruction **bit-exact/pinned-ULP** against a host oracle (like `sdf_field_edsl_sync`); every descriptor set ≤ `MAX_BIND_GROUP_BINDINGS`(24) **per set per path** (worst set = 13, proven §G), never growing the deferred set.
 
-**Correction to orchestrator input.** The constraints doc line 61 ("Uber vertex/index/transform/material SSBO mirrors ALREADY exist → VB attribute re-fetch is already served") is **false for vertex/index**: `MeshGpu` owns its own per-mesh `vertex_buffer`/`index_buffer` (mesh.rs:137-147, `VERTEX`/`INDEX` usage, no STORAGE bit), a draw binds them per-batch (gbuffer.rs:800/805), and there is **no** `vertex_base`/`index_base`/`mesh_id` addressing lane. Transform (`InstanceModelCol`) and material (`MaterialTable` SSBO + `PerInstanceMaterial(Tex)` ring) **are** id-addressable; textures are bindless (`BindlessTextureTable`, set 1). Therefore VB material/texture re-fetch is served, but **geometry re-fetch is not** — Decision 0 builds it as a scheduled foundation rung.
+**Correction to orchestrator input.** The constraints doc line 61 ("Uber vertex/index/transform/material SSBO mirrors ALREADY exist → VB attribute re-fetch is already served") is **false for vertex/index**: `MeshGpu` owns its own per-mesh `vertex_buffer`/`index_buffer` (mesh.rs:137-147, `VERTEX`/`INDEX` usage, no STORAGE bit), a draw binds them per-batch (gbuffer.rs:1118/805), and there is **no** `vertex_base`/`index_base`/`mesh_id` addressing lane. Transform (`InstanceModelCol`) and material (`MaterialTable` SSBO + `PerInstanceMaterial(Tex)` ring) **are** id-addressable; textures are bindless (`BindlessTextureTable`, set 1). Therefore VB material/texture re-fetch is served, but **geometry re-fetch is not** — Decision 0 builds it as a scheduled foundation rung.
 
 ---
 
@@ -416,7 +416,7 @@ Depth = (`depth` D32 for mesh pixels; `gViewT` for SDF pixels) — always presen
 - **SDF-only:** skip raster leg entirely (0 vertex pipelines/rings/VB image/geometry table/STORAGE bit). `sdf_forward_march`/`sdf_geo`+`sdf_shade` (non-deferred) or the marcher (Deferred) owns every hit. Forward/FwdPlus/VB × Sdf all resolve to one identical `sdf_forward_only` plan (O3) → one golden.
 - **Fused `sdf_gbuffer_composite` (Deferred)** gains `#ifdef HAS_MESH` variants (compiled-variant idiom, like `TEXTURED`).
 
-**Mask-routing for mesh-only Deferred (O2 — verified):** mesh raster FS **already writes `mask = 1`** (`gbuffer_mrt.fs.hlsl:5,295`), gbuffer **clears `mask = 0`** (`gbuffer.rs:386`, `material clear=(1,1,0,1)`, bit-identical to the marcher's neutral background). Therefore mesh-only Deferred = **skip the marcher pass only**; existing resolve routes on `mask` exactly as today. **No `RESOLVE_MESH_ONLY` variant, no FS change.**
+**Mask-routing for mesh-only Deferred (O2 — verified):** mesh raster FS **already writes `mask = 1`** (`gbuffer_mrt.fs.hlsl:5,295`), gbuffer **clears `mask = 0`** (`gbuffer.rs:697`, `material clear=(1,1,0,1)`, bit-identical to the marcher's neutral background). Therefore mesh-only Deferred = **skip the marcher pass only**; existing resolve routes on `mask` exactly as today. **No `RESOLVE_MESH_ONLY` variant, no FS change.**
 
 ---
 

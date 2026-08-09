@@ -47,7 +47,7 @@ and read by nothing (`docs/VG-R3-P1-PYRAMID-PLAN.md`); the capability, the per-i
 
 ### Anchors that MOVED since round 2, all fixed below
 
-`vb_batch_cull` pass `graph_bridge.rs:3881`→**`:3881`** (fill shape `:3882-3886`) · `vb_raster_late` `:4057`→**`:4058`** · `hzb_dump` pass `:4971-4973` · dev-profile note `:5071-5076` · `record_vb_pass` **`:5172-5353`** · P2-8 guard assert `graph.rs:703-704`→**`:703-720`**, latch `:721-723`→**`:722`** · `compile` reseed `:591`→**`:588-594`** · seed comment quote `sync.rs:308-310`→**`:309-310`** · last-writer branch `:373-383`→**`:372-383`** · `BindGroupEntry` enum `boyko_rhi/src/device.rs:346-405`, doc `:343-345`, `StorageImageView` doc `:355-357` · Vulkan arms `rhi_impl/device.rs:520` / `:533` / `:541` (round 2's `:426` and `:537-541` were wrong), entry-count assert `:345-348`, single `vkUpdateDescriptorSets` `:641` · push const-assert `rhi_impl/mod.rs:227-232`, "no device-limit query" `:205`, `VULKAN_MIN_MAX_PUSH_CONSTANTS_SIZE` `:221` · size-assert `scene_types.rs:547-549` · `cmd_draw_indexed_indirect` (late) `vb.rs:1821-1826` · late-array capacity assert `vb.rs:1189-1192`, its reason `:1186` · `renderArea` assert `:1746-1753` · `first_instance` asserts `:1065-1068` AND `:1220-1223` · three `.expect()`s `vb.rs:3439` / `:3783` / `:3841` · cull-readback block `runner.rs:2601-2621` (round 2 wrote `:2591-2621`), return at `:2619` · `frame_index` decl `runner.rs:987`, increment `:2790` · `late_instances == 0` clause `vb_occ_split_gate.rs:592-604` · survivor-ascending clause `vb_inst_cull_corpus.rs:411-419` · non-vacuity `hzb_engine_pyramid_gate.rs:559-573` · `a_dropped_writer_…` `vb_barrier_stream_baseline.rs:4356-4421`, its debug twin `:4434-4443`, the 19-message header note `:18-26`.
+`vb_batch_cull` pass `graph_bridge.rs:3881`→**`:3881`** (fill shape `:3882-3886`) · `vb_raster_late` `:4057`→**`:4058`** · `hzb_dump` pass `:4971-4973` · dev-profile note `:5071-5076` · `record_vb_pass` **`:5172-5353`** · P2-8 guard assert `graph.rs:703-704`→**`:703-720`**, latch `:721-723`→**`:722`** · `compile` reseed `:591`→**`:588-594`** · seed comment quote `sync.rs:308-310`→**`:309-310`** · last-writer branch `:373-383`→**`:372-383`** · `BindGroupEntry` enum `boyko_rhi/src/device.rs:346-405`, doc `:343-345`, `StorageImageView` doc `:355-357` · Vulkan arms `rhi_impl/device.rs:520` / `:533` / `:541` (round 2's `:426` and `:537-541` were wrong), entry-count assert `:345-348`, single `vkUpdateDescriptorSets` `:641` · push const-assert `rhi_impl/mod.rs:227-232`, "no device-limit query" `:205`, `VULKAN_MIN_MAX_PUSH_CONSTANTS_SIZE` `:221` · size-assert `scene_types.rs:549-551` · `cmd_draw_indexed_indirect` (late) `vb.rs:1821-1826` · late-array capacity assert `vb.rs:1189-1192`, its reason `:1186` · `renderArea` assert `:1746-1753` · `first_instance` asserts `:1065-1068` AND `:1220-1223` · three `.expect()`s `vb.rs:3439` / `:3783` / `:3841` · cull-readback block `runner.rs:2601-2621` (round 2 wrote `:2591-2621`), return at `:2619` · `frame_index` decl `runner.rs:987`, increment `:2790` · `late_instances == 0` clause `vb_occ_split_gate.rs:592-604` · survivor-ascending clause `vb_inst_cull_corpus.rs:411-419` · non-vacuity `hzb_engine_pyramid_gate.rs:559-573` · `a_dropped_writer_…` `vb_barrier_stream_baseline.rs:4356-4421`, its debug twin `:4434-4443`, the 19-message header note `:18-26`.
 
 ---
 
@@ -99,7 +99,7 @@ regime this piece lands in, and D12 explains why that is a *gate* problem before
 
 | # | obligation | where it is written | discharged by |
 |---|---|---|---|
-| 1 | `vb_indirect_late`'s declared writer changes from `(TRANSFER, TRANSFER_WRITE)` to `(COMPUTE_SHADER, SHADER_WRITE)` | `scene_types.rs:3157-3159`; the P2-8 provenance guard at `graph.rs:692-724` | **D8** — and the writer that changes is `vb_cull_late`, NOT `vb_batch_cull` (change 1) |
+| 1 | `vb_indirect_late`'s declared writer changes from `(TRANSFER, TRANSFER_WRITE)` to `(COMPUTE_SHADER, SHADER_WRITE)` | `scene_types.rs:3204-3206`; the P2-8 provenance guard at `graph.rs:692-724` | **D8** — and the writer that changes is `vb_cull_late`, NOT `vb_batch_cull` (change 1) |
 | 2 | the late scope must declare `vb_instance_ring` and `vb_visible_instance` | `graph_bridge.rs:4049-4056` ("WHAT IS DELIBERATELY *NOT* DECLARED, and what piece 3 must add") | **D5 + D8** — with a SUBSTITUTION: the late scope binds `vb_late_visible`, not `vb_visible_instance` |
 | 3 | two "PIECE 2 ONLY" tripwires deleted deliberately | `vb.rs:1224-1230` (`instance_count == 0`), `vb.rs:1802-1806` (indirection bit clear) | **D9** |
 | 4 | the pyramid's cross-frame hazard, **re-labelled**: it is a cross-frame RAW with the WAR subsumed, not a WAR | `graph_bridge.rs:3497-3507` — which **prescribes the OPPOSITE seed** and is rewritten by this piece | **D2** |
@@ -112,7 +112,7 @@ regime this piece lands in, and D12 explains why that is a *gate* problem before
 |---|---|---|
 | C1 | **`vkCmdDrawIndexedIndirectCount` is not in the device fn table**, and adding it is a `VkPhysicalDeviceVulkan12Features` chain edit | `device.rs:615-618` |
 | C2 | **`multiDrawIndirect` is off** ⇒ `draw_count ∈ {0,1}`; the only GPU-writable knob per draw is `instanceCount` | `vb.rs:1817-1820` |
-| C3 | **The shared compute push range is const-asserted ≤ 128 B** and `VB_BATCH_CULL_PUSH_BYTES` is **104**. **24 bytes of headroom. A `float4x4` does not fit.** | `rhi_impl/mod.rs:202-232`, `compute.rs:1701`, size-assert `scene_types.rs:547-549` |
+| C3 | **The shared compute push range is const-asserted ≤ 128 B** and `VB_BATCH_CULL_PUSH_BYTES` is **104**. **24 bytes of headroom. A `float4x4` does not fit.** | `rhi_impl/mod.rs:202-232`, `compute.rs:1701`, size-assert `scene_types.rs:549-551` |
 | C4 | **`robustBufferAccess` is OFF**; an out-of-bounds buffer read is silent corruption, and a GPU-written count word is the ONLY bound on the late draw and on the VS dereference | `gpu_scene/mod.rs:280`, inside the R2d-6 doc `:264-281` |
 | C5 | **One device queue, one queue family**; no async compute exists | `device.rs:1160`, `:3261` |
 | C6 | **The cull dispatches ONE LANE PER BATCH**, looping over that batch's instances serially | `vb_batch_cull.comp.hlsl:400-408`, `:441-466`; `groups` at `vb.rs:1329` |
@@ -125,7 +125,7 @@ regime this piece lands in, and D12 explains why that is a *gate* problem before
 | C13 | **The VB ring index is NOT stable across frames** — the gather is rebuilt from scratch every frame, so a mesh leaving `Loaded` shifts every later slot. ⚠️ Round 2 cited `mesh_draw.rs:1246-1249` as "already warns in those words"; **no such warning exists**. The property is anchored on the gather's own doc instead | `archetype.rs:1019-1057`; `boyko_render/src/mesh_draw.rs:657-666` (*"recomputed from scratch (never accumulated across frames)"*), gather `:672-956` |
 | C14 | **`HzbTargets::build` issues NO layout transition** — `create_texture` + views + sets only, no encoder, no barrier, no submit. The pyramid's only layout producer is the framegraph first touch. | `targets.rs:1252-1423`; the doc says so in words at `:1147-1149` and `:1202-1204` |
 | C15 | **`BindGroupEntry::SampledImage` hard-writes `VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL`**; `StorageImage`/`StorageImageView` write `GENERAL`. The kind implies the layout | `boyko_rhi/src/device.rs:343-345` (the contract in words), enum `:346-405`, `StorageImageView` doc `:355-357`; Vulkan arms `rhi_impl/device.rs:520` / `:533` / `:541` |
-| C16 | **`occlusion_split && !batch_cull_armed` is REACHABLE** on a device without `storage_buffer_array_non_uniform_indexing` | `runner.rs:551`, `render_path_config.rs:952-954`, `runner.rs:607`/`:630-631`/`:2355-2356`, `vb.rs:964-969` vs `scene_types.rs:3540-3544` |
+| C16 | **`occlusion_split && !batch_cull_armed` is REACHABLE** on a device without `storage_buffer_array_non_uniform_indexing` | `runner.rs:551`, `render_path_config.rs:952-954`, `runner.rs:607`/`:630-631`/`:2355-2356`, `vb.rs:964-969` vs `scene_types.rs:3587-3591` |
 | C17 | **A pass's ENTIRE barrier set emits at ONE site.** There is no comment saying so; the mechanism is `graph.rs:621-623` + `:913-918` (`PassBarrierRange`) + `record.rs:50-56`. | those three |
 | C18 | **The P2-8 provenance guard is first-touch and `is_write`-latching**: `debug_assert!(is_write \|\| self.res_written[..])` at `graph.rs:703-704`, latch at `:721-723`. A combined `SHADER_READ\|SHADER_WRITE` never tests the read half. | `graph.rs:692-724` |
 | C19 | **`HzbTargets::build`'s ONLY `Ok(None)` is the 0%-gate, and it is the FIRST statement** — before any encoder, fence or barrier exists. Any helper folded into that function is **armed-only by construction**. The body contains no `create_command_encoder`, no `create_fence`, no `queue.submit`, no barrier | `targets.rs:1252-1257` (signature, `-> Result<Option<Self>, SwapchainError>`), `:1258-1262` (the gate), `:1252-1423` (the whole body) |
@@ -701,7 +701,7 @@ nothing and creates a per-field validity question the plan would have to answer 
 
 **Push grows 104 → 112**: `phase: u32`, `occ_flags: u32`. Still inside the 128-byte floor
 (`VULKAN_MIN_MAX_PUSH_CONSTANTS_SIZE = 128` at `rhi_impl/mod.rs:221`); `rhi_impl/mod.rs:227-232`'s
-const-assert is the mechanical gate, and `scene_types.rs:547-549`'s size-assert — whose message
+const-assert is the mechanical gate, and `scene_types.rs:549-551`'s size-assert — whose message
 literally names 104 — moves with it, as does `compute.rs:1701`.
 
 **The matrix is uploaded in MATH-ROW form** — `pv[row][col]`, `clip = pv · world` — which is exactly
@@ -1121,14 +1121,14 @@ theorem, which is why G-P3-E is split in two.
 
 **Shape.** `HzbDumpLayout` grows a second depth region. The header becomes
 `[magic, source_w, source_h, levels, flags, frame_index]` + the per-level extents, and
-**`HZB_DUMP_MAGIC` is bumped** (`scene_types.rs:1415`) so a stale dump file cannot be silently decoded
+**`HZB_DUMP_MAGIC` is bumped** (`scene_types.rs:1417`) so a stale dump file cannot be silently decoded
 against the new offsets. `flags` bit 0 = "the early-depth region is live", set iff the frame armed the
 split. `frame_index` is the engine frame the capture came from — the other half of B2's pairing check.
 The staging grows by one depth image on dump frames only.
 
 ⚠️ **The header-drift guard cannot fire on this change, and that is a defect in the guard.**
 `hzb_engine_pyramid_gate.rs:133-134` asserts `(HZB_DUMP_HEADER_WORDS - 4) / 2 == MAX_HZB_LEVELS`.
-`HZB_DUMP_HEADER_WORDS` is `4 + 2 * MAX_HZB_LEVELS` (`scene_types.rs:1422`, = 38 with
+`HZB_DUMP_HEADER_WORDS` is `4 + 2 * MAX_HZB_LEVELS` (`scene_types.rs:1424`, = 38 with
 `MAX_HZB_LEVELS = 17` at `:1362`). Going to 6 scalar words gives `(40 - 4) / 2 = 18 ≠ 17` and reds —
 but going to any ODD count truncates and passes silently. ⇒ **export
 `HZB_DUMP_HEADER_SCALAR_WORDS`** (today 4, becomes 6), define
@@ -1446,7 +1446,7 @@ pub struct VbCullUniform {
 const _: () = assert!(core::mem::size_of::<VbCullUniform>() == 96);
 
 /// 104 -> 112. Still inside `VULKAN_MIN_MAX_PUSH_CONSTANTS_SIZE`; `rhi_impl/mod.rs:227-232` is
-/// the mechanical gate and `scene_types.rs:547-549`'s size-assert message moves with it.
+/// the mechanical gate and `scene_types.rs:549-551`'s size-assert message moves with it.
 #[repr(C)]
 pub struct VbBatchCullPush {
     pub planes: [[f32; 4]; 6],   // 0..96   unchanged
@@ -2008,7 +2008,7 @@ the gates it is expected to move.
   *Gates:* the full G-P3 set except G-P3-E (needs P3-7) and the mixed fixture (P3-8).
 
 - **P3-7 — the two-depth dump.** `HzbDumpLayout`, `HZB_DUMP_HEADER_SCALAR_WORDS`
-  (`scene_types.rs:1422`, bytes `:1430`), the magic bump (`:1415`), `frame_index` in the header —
+  (`scene_types.rs:1424`, bytes `:1430`), the magic bump (`:1415`), `frame_index` in the header —
   stamped by the RECORDER inside the copy frame's command buffer (`vb.rs:3488-3507`), not by the host
   (`hzb_dump.rs:188-219`, the verbatim write at `:201`) — `hzb_dump_depth_early`, and G-P3-E's split
   clauses. The gate's derived offsets move with it: `hzb_engine_pyramid_gate.rs:133-134`, `:426`,
@@ -2501,7 +2501,7 @@ its own admission.
 - `VbCullUniform` size/offset const-asserts; `VB_LATE_VISIBLE_ELEMS == VB_VISIBLE_INSTANCE_ELEMS`;
   `VB_LATE_COUNT_ELEMS == VB_INDIRECT_LATE_RECORDS + 1`.
 - `VB_BATCH_CULL_PUSH_BYTES == 112`, the `rhi_impl/mod.rs:227-232` const-assert verified still live,
-  and `scene_types.rs:547-549`'s message updated off 104.
+  and `scene_types.rs:549-551`'s message updated off 104.
 - `vb_cull_layout`'s entry-array length const-asserted against the derived binding count (the "7 → 12,
   not 7 → 10" defect, mechanically).
 - The math-row inversion: `view_proj_rows` built from the push bytes equals the matrix
@@ -2839,7 +2839,7 @@ P3-0's gate set cannot see it: goldens (measured blind), G-P3-F U-rows re-pinned
 9. `targets.rs:6687-6773` (`boot_clear_shadow_temporal_hist`; the `:6743` comment states the framegraph-seed motive), `targets.rs:6236-6249`/`:6279-6366` (`build_taa_hist_ring`, incl. the "NOT a boot-only one-shot — `sync_gbuffer`'s resize path rebuilds targets" note), `csm.rs:351-365`/`:394-417` (`seed_boot_layouts`, which transitions the 1×1×1 dummy because the resolve `.spv` statically references it on the OFF path). `VulkanTexture::create` takes no queue and cannot transition (`texture.rs:206-211`, `:287`).
 
 **Depth / verdict semantics**
-10. `VK_COMPARE_OP_GREATER`, strict, depth-write ON (`device.rs:1806-1813`, `scene_types.rs:2722`); `vb_raster.fs.hlsl:3` — no `SV_Depth`, no `discard`, no UAV. A redraw at identical depth is **pixel-invisible** (`vb_occ_split_gate.rs:50`), and the committed fixtures contain no coincident geometry, so the early/late reorder is byte-safe on them. `vb_mesh.rs:127-136` already constrains marking "all five or none" for exactly this reason.
+10. `VK_COMPARE_OP_GREATER`, strict, depth-write ON (`device.rs:1806-1813`, `scene_types.rs:2769`); `vb_raster.fs.hlsl:3` — no `SV_Depth`, no `discard`, no UAV. A redraw at identical depth is **pixel-invisible** (`vb_occ_split_gate.rs:50`), and the committed fixtures contain no coincident geometry, so the early/late reorder is byte-safe on them. `vb_mesh.rs:127-136` already constrains marking "all five or none" for exactly this reason.
 11. `hzb.rs:855` is strict `<` with equality KEEPing. `hzb.rs:698-709` guards with `!(min <= max)` — NaN-aware; `any(mn > mx)` is not.
 12. `cluster_cull.hlsl:127-141` is this repo's own reasoned rejection of `dot()` for host-oracle agreement (`OpDot` is "inherited from a formula", transformable by associativity); the implemented remedy is `:142-143`. `precise` ⇒ `NoContraction` ⇒ forbids contraction, **not** reassociation.
 
@@ -2850,7 +2850,7 @@ P3-0's gate set cannot see it: goldens (measured blind), G-P3-F U-rows re-pinned
 16. `vb_probe_dump.rs::write_probe` (`:144-168`) is the **only** serializer of `VbRecordProbe`; `vb_occ_split_gate.rs:414-417` `field()` **panics** on a missing key.
 17. Goldens run **dev profile** (`graph_bridge.rs:5071-5072`) — every `debug_assert` is live in a golden run. `[vb_mesh_hzb]` (`PINS.toml:335-341`) sets `BOYKO_VG_HZB=1` with **no** `BOYKO_VG_OCC`, so any assert equating `hzb_build` presence with `vb_cull_late` presence panics on a correct configuration.
 18. `vg_density_census.rs`: `VB_PINS` (`:59`) and `DECLARED_IDENTICAL_PINS` (`:238`) are **separate** arrays; a new byte-identical pair must land in both.
-19. `mesh_leg == false` ⇒ `MeshGeometryTableSlot(None)` ⇒ `vb_mesh_bounds: None` ⇒ `batch_cull_armed == false` (`mesh_geometry_table.rs:19-27`, `runner.rs:2352-2356`, `vb.rs:964-969`) — the early cull is not recorded at all. `vb_occlusion_instances` and the `OCCLUSION_CULLING` flag lane are written as one branchless pair (`mesh_draw.rs:804-806`), so `== 0` iff no ring slot carries the bit; the over-approximation is one-directional (`scene_types.rs:3172-3175`). **But** `render_path_config.rs:952-954` + `runner.rs:607-631` make `occlusion_split && !batch_cull_armed` reachable on a device without `storage_buffer_array_non_uniform_indexing` — under the plan's record-parity mandate that hits a `.expect()` on the absent `vb_cull_set`/pipeline (`targets.rs:4617-4645`). Add the conjunct at the dispatch site.
+19. `mesh_leg == false` ⇒ `MeshGeometryTableSlot(None)` ⇒ `vb_mesh_bounds: None` ⇒ `batch_cull_armed == false` (`mesh_geometry_table.rs:19-27`, `runner.rs:2352-2356`, `vb.rs:964-969`) — the early cull is not recorded at all. `vb_occlusion_instances` and the `OCCLUSION_CULLING` flag lane are written as one branchless pair (`mesh_draw.rs:804-806`), so `== 0` iff no ring slot carries the bit; the over-approximation is one-directional (`scene_types.rs:3219-3222`). **But** `render_path_config.rs:952-954` + `runner.rs:607-631` make `occlusion_split && !batch_cull_armed` reachable on a device without `storage_buffer_array_non_uniform_indexing` — under the plan's record-parity mandate that hits a `.expect()` on the absent `vb_cull_set`/pipeline (`targets.rs:4617-4645`). Add the conjunct at the dispatch site.
 20. `VbCullReadbackLayout` **exists** (`vb.rs:260`, impl `:272`, ctor `:328-355`) and lives in `boyko_rhi_vulkan`, not `scene_types.rs` and not `boyko_app`; the layout is deliberately two-sided (`gpu_scene/mod.rs:197-199` ↔ `vb.rs:318-320`). The plan's `:971` row files it under the wrong file but `:973` carries the same work correctly.
 21. `MeshGeometryTable::register` (`mesh_geometry_table.rs:577-589`) writes geometry and bounds together, and an unregistered slot resolves to the zero-triangle `VB_GEOMETRY_RESERVED_SLOT` (`mesh_draw.rs:513-517`). That coupling makes B4's sentinel case invisible **today** — it is incidental and guaranteed by nothing. Do not lean on it.
 
@@ -2907,7 +2907,7 @@ Round 3 is required because **both remaining blockers live in material round 2 A
 
 Re-anchored this session. `:7718` is `hzb_arm: scene.hzb.is_some()`; `:7780-7784` is `debug_assert_eq!(targets.hzb_arm, targets.hzb.is_some(), "invariant: the stored HZB arm and the pyramid allocation move in lockstep")`. A second `Ok(None)` producer whose precondition is `scene.hzb == Some` makes those two disagree — the assert the plan cites as the thing that "keeps the graph, the sets and the arming predicate consistent" is the thing that **fires**. The comment three lines above it states the shipped contract: *"the stored bit and the allocation can only disagree if the build fails — which returns."*
 
-Release is worse than debug. `vb.rs:3746-3747` reads *"a create failure returns `Err` rather than a silent `None`"*, and `vb.rs:3837-3841` is a release-live, per-frame, unconditional `.expect("invariant: scene.hzb armed => targets.hzb")`. So the degraded generation panics every frame in **every profile**, at **P3-0** — before D9's conjunct or D5's selector exist. `GBufferScene::hzb` is the host `Option<HzbPlan>` (`scene_types.rs:3089`), computed once in the runner: no runtime failure can change it, so D9's new `hzb.is_some()` conjunct disarms nothing and the `GENERAL` seed stands over `VkImage::NULL`. The plan's closing sentence at `:337` — "No path exists in which the seed is `GENERAL` and the clear did not run" — is false as written.
+Release is worse than debug. `vb.rs:3746-3747` reads *"a create failure returns `Err` rather than a silent `None`"*, and `vb.rs:3837-3841` is a release-live, per-frame, unconditional `.expect("invariant: scene.hzb armed => targets.hzb")`. So the degraded generation panics every frame in **every profile**, at **P3-0** — before D9's conjunct or D5's selector exist. `GBufferScene::hzb` is the host `Option<HzbPlan>` (`scene_types.rs:3136`), computed once in the runner: no runtime failure can change it, so D9's new `hzb.is_some()` conjunct disarms nothing and the `GENERAL` seed stands over `VkImage::NULL`. The plan's closing sentence at `:337` — "No path exists in which the seed is `GENERAL` and the clear did not run" — is false as written.
 
 **Plan-text change.** Replace `:332-337` with the `Err` branch round 1 also offered:
 
@@ -2955,7 +2955,7 @@ Anchored, re-verified this session. These are transferable beyond this piece.
 
 1. **`HzbTargets::build`'s only `Ok(None)` is the 0%-gate**, and it is the *first statement* — before any encoder, fence or barrier (`targets.rs:1258-1261`). Any helper folded into that function is armed-only by construction.
 2. **The lockstep pair is `hzb_arm` (from the scene) vs `hzb` (the allocation)** (`targets.rs:7718`, `:7780-7784`), and three shipped `.expect()`s gate on the *scene* side (`vb.rs:3432-3439`, `:3779-3783`, `:3837-3841`). A silent `None` is a release panic, not a degrade. `vb.rs:3746-3747` states this contract in prose.
-3. **`GBufferScene::hzb` is the host PLAN, not the allocation** (`scene_types.rs:3089`), computed once in the runner (`gpu_scene/mod.rs:5690-5697`). No runtime failure can flip it, so no predicate derived from it can disarm anything in response to one.
+3. **`GBufferScene::hzb` is the host PLAN, not the allocation** (`scene_types.rs:3136`), computed once in the runner (`gpu_scene/mod.rs:5690-5697`). No runtime failure can flip it, so no predicate derived from it can disarm anything in response to one.
 4. **`boot_clear_taa_hist` (`targets.rs:6279`) is an UNCONDITIONAL twin** of the `hwrt`-gated `boot_clear_shadow_temporal_hist`; the tree cross-references the cfg difference itself at `:6277` and `:6236-6238`. The `#[cfg]` is an item attribute, not part of the copied shape.
 5. **`csm.rs::seed_boot_layouts` (`crates/boyko_app/src/gpu_scene/csm.rs:394`, called unconditionally at `:365`) is the precedent for an unconditional boot layout transition** — no cfg gates in that file.
 6. **DXC inlines every helper into `%main`: exactly one `OpFunction` in the committed `vb_batch_cull.comp.spv`.** There is no artifact-level function range to scope a SPIR-V census to, on this or any comparable module.

@@ -74,7 +74,7 @@ change** (round 1 did not know either):
    late scope's record storage is a decision this plan makes explicitly** — see D4.
 2. **The engine already sits in the per-entry-empty-draws configuration** that vkguide and pcwalton
    warn about: a fixed-length `VkDrawIndexedIndirectCommand` array where a culled entry gets
-   `instanceCount = 0` (`scene_types.rs:462-464`, *"A culled batch gets `0` written over it"*), drawn
+   `instanceCount = 0` (`scene_types.rs:464-466`, *"A culled batch gets `0` written over it"*), drawn
    with `vkCmdDrawIndexedIndirect`. It is a **PREFIX, not a mask** — the early loop is already bounded
    by a hoisted `draw_batches` local (`vb.rs:935-940`), not by the 1024 allocation. ⇒ the late loop
    **must use the same hoisted bound**, not `record_capacity_late`. That is a change from round 1 and
@@ -188,9 +188,9 @@ the minting site. Piece 2 reproduces that seam exactly:
 | ECS | `OcclusionCulling` on entities, table ZST | `ShadowCaster`, `csm_marker.rs:25-26` |
 | gather | a parallel `ScratchColumn<u32>` **flags** lane scattered in lock-step with `ring`, **fused into the primary scatter** (zero extra query walks) | the `material_ids` lane's own fused shape: `build_view().clear()` at `mesh_draw.rs:646`, store at `:702`, inside the primary loop `:671-708`. ⚠️ **Round 1 cited `mesh_draw.rs:1179-1185` for this; that is the comment introducing `gather_material_tex_into`'s SECOND, non-fused walk** — the exact anchor collision the critique flagged. The non-fused walk is the *contrast*, not the precedent. |
 | per-instance GPU datum | folded into `VbInstanceRow._pad[0]` → `flags` by `sync_vb_instance_ring` | `VbBatchDesc::base_instance` occupying R2c0's reserved `pad`, `scene_types.rs:468-476` |
-| frame-level predicate | `GBufferScene::vb_occlusion_instances: u32` (a plain `u32` — this crate cannot depend on `boyko_render`) | `vb_classify_material_count`, a plain `u32` field at `scene_types.rs:2909-2925` |
-| the single source read by declare AND record | `GBufferScene::path_vb_occlusion_split()`, a **derived predicate, not stored state** | `HzbConfig::enabled()` is derived from `mode != Off` rather than stored (`hzb_config.rs:16-22`, `:128`). ⚠️ note `vb_use_classified` (`scene_types.rs:2926-2947`) is a **FIELD**, not a method — round 1 cited it as the method precedent; the derived-predicate precedent is `HzbConfig::enabled`. |
-| boot | `vb_indirect_late` minted **unconditionally**; no pipeline, no layout, no set is added at all | `vb_visible_instance` — "MANDATORY, deliberately NOT part of the R2c0 all-or-nothing arm", `scene_types.rs:2809-2812` |
+| frame-level predicate | `GBufferScene::vb_occlusion_instances: u32` (a plain `u32` — this crate cannot depend on `boyko_render`) | `vb_classify_material_count`, a plain `u32` field at `scene_types.rs:2956-2972` |
+| the single source read by declare AND record | `GBufferScene::path_vb_occlusion_split()`, a **derived predicate, not stored state** | `HzbConfig::enabled()` is derived from `mode != Off` rather than stored (`hzb_config.rs:16-22`, `:128`). ⚠️ note `vb_use_classified` (`scene_types.rs:2973-2994`) is a **FIELD**, not a method — round 1 cited it as the method precedent; the derived-predicate precedent is `HzbConfig::enabled`. |
+| boot | `vb_indirect_late` minted **unconditionally**; no pipeline, no layout, no set is added at all | `vb_visible_instance` — "MANDATORY, deliberately NOT part of the R2c0 all-or-nothing arm", `scene_types.rs:2856-2859` |
 
 **Why the P1-4/§9 "arm lives on the TARGETS" shape does NOT transfer here, and this is a deliberate
 divergence.** §9's shape works because the pyramid *is* a target: `HzbTargets` is `None` when
@@ -388,7 +388,7 @@ The usage bit is minted now (below); the access change is piece 3's and is named
 inherited as a requirement rather than discovered as a bug.
 
 **The late push carries the indirection bit CLEAR.** The per-batch push at `vb.rs:1407-1414` is two
-words — `base_instance` at `GBUFFER_PUSH_BASE_INSTANCE_OFFSET` (= 80, `scene_types.rs:325`) and a
+words — `base_instance` at `GBUFFER_PUSH_BASE_INSTANCE_OFFSET` (= 80, `scene_types.rs:327`) and a
 flags word at `FLAGS_OFFSET` (= 84, `vb.rs:1330`) — and bit 1 of that flags word is what selects the
 survivor indirection in `vb_raster.vs.hlsl:194-196`
 (`((pc.use_model_matrix & 2u) != 0u) ? visible_instances[base + id] : (base + id)`). With
@@ -672,7 +672,7 @@ pub(crate) const VB_INDIRECT_LATE_BYTES: u64 =
     (VB_INDIRECT_LATE_RECORDS as u64) * u64::from(DRAW_INDEXED_INDIRECT_STRIDE);   // 20 KiB
 // per-FIF, DEVICE_LOCAL, usage = the SAME set as `vb_indirect` (`:3757-3760`):
 //   BufferUsage::INDIRECT | TRANSFER_DST | STORAGE | TRANSFER_SRC
-// Minted UNCONDITIONALLY (the `vb_visible_instance` rule, scene_types.rs:2809-2812).
+// Minted UNCONDITIONALLY (the `vb_visible_instance` rule, scene_types.rs:2856-2859).
 // Destroyed beside `vb_indirect` (`:7042-7044`).
 
 // ── crates/boyko_rhi_vulkan/src/present/scene_types.rs (EDIT) ────────────────────────
@@ -681,12 +681,12 @@ pub struct GBufferScene<'a> {                                   // defined at :1
     /// The per-FIF LATE indirect record array. `Some` on every VB boot (minted
     /// unconditionally); `None` only in the four hand-written test literals, exactly as
     /// `vb_indirect` is. It is `.expect()`ed under `path_vb_occlusion_split()` and is NOT a
-    /// conjunct of that predicate — a dead conjunct is what `scene_types.rs:2809-2812` exists
+    /// conjunct of that predicate — a dead conjunct is what `scene_types.rs:2856-2859` exists
     /// to avoid.
     pub vb_indirect_late: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
     /// Instances in this frame's ring carrying `OcclusionCulling`. A plain `u32` because this
     /// crate cannot depend on `boyko_render` (the `vb_classify_material_count` boundary,
-    /// `scene_types.rs:2909-2925`).
+    /// `scene_types.rs:2956-2972`).
     pub vb_occlusion_instances: u32,
 }
 
@@ -991,7 +991,7 @@ claim.
    was `0.0`, levels 6..9 entirely so**, i.e. *"a pyramid image that a driver zero-filled and NOBODY
    WROTE would match the oracle at every one of those texels"*
    (`VG-R3-P1-PYRAMID-PLAN.md:607-651`). The green was nearly meaningless until §14 replaced the
-   coverage argument with a `-1.0` poison (`HZB_PYRAMID_POISON`, `scene_types.rs:1454`).
+   coverage argument with a `-1.0` poison (`HZB_PYRAMID_POISON`, `scene_types.rs:1456`).
 2. **Anything at all about the split, on the 25 pins as they stand.** No existing pin, example or
    default world marks anything, so `path_vb_occlusion_split()` is **false on every one of them** and
    the late scope is never recorded. A green 25/25 on this piece is evidence about the *untouched*
@@ -1247,7 +1247,7 @@ not, and now does.
 
 - **What it proves:** the slot move did not hand `hzb_build_0` a wrong or untransitioned image — the
   pyramid the engine builds from the *earlier* slot is still bit-exact against `boyko_render::hzb`
-  over the dumped depth, with the `-1.0` poison (`HZB_PYRAMID_POISON`, `scene_types.rs:1454`;
+  over the dumped depth, with the `-1.0` poison (`HZB_PYRAMID_POISON`, `scene_types.rs:1456`;
   `poison_bits` at `:485`) and all five non-vacuity clauses intact.
 - **Red control:** R5 above (move the build without the poison) reds clause 1 at every texel in
   release, and fires the declare assert in dev.
@@ -1309,7 +1309,7 @@ The review rounds got value from this list, so it is explicit and it is long.
 whose `.spv`-neutrality is gated by the `*_spv_sync` re-DXC tests (Integration). `VbInstanceRow::flags`
 is written by the host and read by nothing on the device — the R2d-2/R2d-3 rule: *"the descriptor
 arrives before its consumer so the consumer rung changes only shader code"*
-(`scene_types.rs:2814-2816`).
+(`scene_types.rs:2861-2863`).
 
 **No late cull pass.** No second compute dispatch, no `vb_cull_layout` widening, no new
 descriptor-set layout, no new descriptor set, no new pipeline. Piece 2 mints **zero** boot objects
@@ -1519,7 +1519,7 @@ PassId is strictly monotonic declare order (`graph.rs:441-451`) and `compile()` 
 
 - **M-a — `:41`'s bitset-vs-table rationale does not distinguish the two.** "the consumer is a per-instance *test*… not an archetype filter that materialises rows" is a false dichotomy: `Option<&T>` is the non-filtering per-row read for table storage (`option.rs:56`; `data_is_enabled.rs:3-4` calls `IsEnabled<T>` "the order-preserving twin of `Option<&T>`"). `With<ShadowCaster>` is filtering because *that gather wants only casters* (`csm_caster.rs:168-170`), not because table storage forces it. Both cited bitset precedents are Axis-2 toggles in the tree's own words (`light.rs:230` section header; `snap_interpolation.rs:79-83`, a one-frame bit that disables itself). Replace with the real trade-off once B1 is decided. The one genuinely distinguishing cost — a table ZST on a subset fragments the mesh archetype and shortens per-archetype runs — appears nowhere in the plan.
 - **M-b — `:228` mints `vb_indirect_late` without `STORAGE`, so D4's "Nothing structural" (`:100`) is false about the buffer piece 2 itself mints.** The early array carries STORAGE for precisely the reason piece 3 will need it (`gpu_scene/mod.rs:3747-3759`); `create_buffer` ORs only the TRANSFER bits (`device.rs:50-54`); the write is descriptor-bound, not a transfer (`vb_batch_cull.comp.hlsl:253` `RWByteAddressBuffer VbIndirect : register(u0)`, store at `:473-475`). Mint it with `BufferUsage::STORAGE` now — legal and inert on a buffer nothing binds — and note that piece 3 adds the binding and the `vb_cull_layout` slot. (Unlike the R2d-5 `TRANSFER_SRC` case the plan cites elsewhere, this bit is *enabling*, not redundant.)
-- **M-c — delete `:234-237`'s degradation sentence.** "`None` degrades the late scope to 'not recorded at all', exactly as `vb_indirect: None` degrades the early scope" is a false analogy: `vb_indirect: None` keeps `vb_raster` recorded and swaps only the draw call (`vb.rs:1428-1446`, gate at `graph_bridge.rs:3517`). The state is unreachable (`:73`/`:229` mint unconditionally), so this is not a live defect — but the sentence positively licenses a nested `if let Some(late) = …` gate around the late scope, which is the declared-but-unrecorded failure `graph_bridge.rs:3510-3516` and `vb.rs:1069-1076` forbid by name. Replace with the `vb_visible_instance` wording: mandatory, `.expect()`ed under `path_vb_occlusion_split()`. Do **not** add `vb_indirect_late.is_some()` to the predicate — that is a dead conjunct of exactly the kind `scene_types.rs:2809-2812` exists to avoid.
+- **M-c — delete `:234-237`'s degradation sentence.** "`None` degrades the late scope to 'not recorded at all', exactly as `vb_indirect: None` degrades the early scope" is a false analogy: `vb_indirect: None` keeps `vb_raster` recorded and swaps only the draw call (`vb.rs:1428-1446`, gate at `graph_bridge.rs:3517`). The state is unreachable (`:73`/`:229` mint unconditionally), so this is not a live defect — but the sentence positively licenses a nested `if let Some(late) = …` gate around the late scope, which is the declared-but-unrecorded failure `graph_bridge.rs:3510-3516` and `vb.rs:1069-1076` forbid by name. Replace with the `vb_visible_instance` wording: mandatory, `.expect()`ed under `path_vb_occlusion_split()`. Do **not** add `vb_indirect_late.is_some()` to the predicate — that is a dead conjunct of exactly the kind `scene_types.rs:2856-2859` exists to avoid.
 - **M-d — two of D7's five rows name functions that do not exist.** `screen_rect` (`:176`, repeated at `:410`) — the fence is in `pub fn project_aabb`, `hzb.rs:687`, short-circuit at `:704-709`. `MeshLocalBounds::from_aabb` (`:174`) — a repo-wide grep returns only this plan; the real choke point is `MeshLocalBounds::new`, `mesh_geometry_table.rs:236` (doc at `:219-234` is the text the plan paraphrases). Two consumers are also missing from the "complete list" piece 3 inherits: `gpu_upload.rs:235-236` (into `MeshGeometryTable::register` → `new`) and `csm_caster.rs:448` (into `reduce_bounds_into`, fenced at `:348-350` — a *different* block from the `:297-300` one the table cites — and wired in production at `plugins.rs:338`). D7's conclusion survives; the enumeration does not.
 - **M-e — mirror the image-side sink assert on the buffer side.** `graph_bridge.rs:3272-3276` guards the image order with `debug_assert_eq!(hzb_pyramid.index() + 1, VB_IMAGE_COUNT)`; there is no `VB_BUFFER_COUNT` anywhere and the `[VkBuffer; 13]`/`[14]` lengths are hand-written literals. The buffer side is *less* guarded on both axes: every buffer sink slot resolves to a valid handle (placeholder-backed at `:4874-4892`), so a mis-indexed buffer barrier names a live wrong buffer with **no VUID**, whereas the image array holds `VkImage::NULL` on unarmed slots. `:318` states the rule in prose and adds no guard. Add `VB_BUFFER_COUNT` + the assert in both `cfg` arms.
 - **M-f — close open questions 3 and 5 with anchors** (see F-6, F-7); delete the "which I did not read" hedges.

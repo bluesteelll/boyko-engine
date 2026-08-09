@@ -32,7 +32,7 @@ mesh registration.
 
 The renderer records EVERY barrier via `record_graph_pass` (framegraph-derived); a hand
 `cmd_pipeline_barrier` next to an RDG-tracked resource double-transitions
-(`present/passes/gbuffer.rs:800-801`). So the pack + build are **first-class framegraph
+(`present/passes/gbuffer.rs:1118-1120`). So the pack + build are **first-class framegraph
 passes**, exactly like the interp / DDGI compute pre-passes.
 
 **No sync-engine change is required.** `FrameGraph::buffer_access(res, stage: u32,
@@ -104,7 +104,7 @@ if let Some(t) = &scene.tlas {                       // armed only under hwrt + 
 ```
 
 The **barriers** are graph-emitted; only the **GPU work** (dispatch, build) is raw — the
-DDGI-update discipline (`gbuffer.rs:802`). No hand `cmd_pipeline_barrier` next to a tracked
+DDGI-update discipline (`gbuffer.rs:1121`). No hand `cmd_pipeline_barrier` next to a tracked
 resource.
 
 ## Data structures

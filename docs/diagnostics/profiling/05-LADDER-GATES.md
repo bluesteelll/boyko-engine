@@ -843,7 +843,7 @@ the bits below a slot is not that slot's open index in `record_gbuffer` either. 
 
 `TimestampCollector` was constructed in exactly **two** places in the tree —
 `boyko_rhi_vulkan/tests/software_ray_baseline_cost.rs:367` and
-`.../tests/window_present_gbuffer.rs:9259` — and **never from `boyko_app`**, so the two-process A/B
+`.../tests/window_present_gbuffer.rs:9265` — and **never from `boyko_app`**, so the two-process A/B
 had no worker to play leg A for the software-ray family. Two branches:
 
 - **(a) give the R0 collector a host arming path** — one boot-time `Option` that is `None` in every

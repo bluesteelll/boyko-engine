@@ -1484,7 +1484,7 @@ comparisons on a path whose cost model is "(froxel, light) pair tests and nothin
   (`:5237`, `:5307`). **The `cluster_count` local at `:4317` is the single mint point** — the buffer
   size, `h.groups` and `push.cluster_capacity` all read that one binding, which is what makes the
   invariant checkable by inspection of ten adjacent lines.
-* Record sites (`vb.rs:215`, `gbuffer.rs:1583`, `forward.rs:359`) — **one `match`**, so the group
+* Record sites (`vb.rs:215`, `gbuffer.rs:1932`, `forward.rs:359`) — **one `match`**, so the group
   count, push pointer and push length can never be mixed across arms:
   ```rust
   let (cull_groups, push_ptr, push_len) = match scene.cluster_cull_hier.as_ref() {
@@ -1517,7 +1517,7 @@ host-authoritative-lock pattern the SSAA arm uses twelve lines above (`runner.rs
 > test can silently run skewed.
 
 **The `// SAFETY:` comment at the VB record site must be rewritten.** Today it reads (verbatim,
-`vb.rs:216-221`, and byte-for-byte identically at `gbuffer.rs:1587-1588` and `forward.rs:363-364`):
+`vb.rs:216-221`, and byte-for-byte identically at `gbuffer.rs:1936-1937` and `forward.rs:363-364`):
 
 ```
 // SAFETY: recording is open; the cull pipeline + its layout (declaring `cull_layout`
@@ -1699,13 +1699,13 @@ phase −1 substitutes `bdx/bdy/bdz` for `cp.dim_x/…`, which is *value*-identi
 not identical (D3 trade-off 3).
 
 **Host side.** `GBufferScene` carries `cluster_count: u32` and **no dims**
-(`present/scene_types.rs:1409-1411`), and `ClusterConfig` is a `boyko_render` Resource not reachable
+(`present/scene_types.rs:1411-1413`), and `ClusterConfig` is a `boyko_render` Resource not reachable
 from the RHI crate — so "the three record sites dispatch `hier_group_count()`" could not be written.
 The replacement is D11's plumbing in full: `ClusterConfig::hier_group_threads()/hier_group_count()`
 beside `cluster_count()` (`light.rs:728`); one `GBufferScene` field
 `cluster_cull_hier: Option<ClusterCullHierDispatch>`; written **only** in `build_froxel_light_cull`
 (`gpu_scene/mod.rs:4241`, beside `:4346`); consumed by one `match` at each of `vb.rs:215`,
-`gbuffer.rs:1583`, `forward.rs:359`; four test literals updated. The host-to-shader pin test is a
+`gbuffer.rs:1932`, `forward.rs:359`; four test literals updated. The host-to-shader pin test is a
 **pure-arithmetic CPU test** (H1 assertion 7) — and it is a **Rust re-implementation of the shader's
 walk, not a pin on the HLSL**: if the shader and the mirror drift, only H3 (device) sees it. Rev 4
 labels it that way rather than letting §9 imply the HLSL is pinned.
@@ -2986,7 +2986,7 @@ revision is about.
      > and the number is **16**, not 138. Its dispatch is boot-sourced exactly as the shipped record
      > sites compute it — `scene.cluster_count.div_ceil(LIGHT_CULL_LOCAL_SIZE_X)`,
      > `crates/boyko_rhi_vulkan/src/present/passes/vb.rs:215`, with `LIGHT_CULL_LOCAL_SIZE_X = 64`
-     > (`src/present/scene_types.rs:415`) — so boot `16x9x23 = 3312` gives
+     > (`src/present/scene_types.rs:417`) — so boot `16x9x23 = 3312` gives
      > `ceil(3312/64) = 52` groups = **3328 threads**, while the base module's own guard is
      > `if (fi >= cluster_count) return;` over **LIVE** dims (`shaders/cluster_cull.hlsl:109-114`,
      > `3456`) and so admits every one of them. Threads `3312..3327` write **16** cells past the
@@ -3076,7 +3076,7 @@ revision is about.
 
 ### 8.12 H5 — (conditional on H4) migrate Deferred + ForwardPlus to the hierarchical arm
 
-* **Files:** `present/passes/gbuffer.rs:1583`, `present/passes/forward.rs:359` (the `match` + the
+* **Files:** `present/passes/gbuffer.rs:1932`, `present/passes/forward.rs:359` (the `match` + the
   `// SAFETY:` clause, which is byte-for-byte the same text as `vb.rs`'s and must get the same
   rewrite), `gpu_scene/mod.rs`. Retire the flat arm to test-only status (it remains the equality
   oracle's reference forever).
@@ -3445,8 +3445,8 @@ marked **[fixed]**.
 | Host cull oracle | `crates/boyko_rhi_vulkan/src/goldens.rs:3510` (+ `GoldenClusterConfig` `:3398`, `golden_cluster_index` `:3437`, `golden_sq_dist_point_aabb` `:3491-3498`) |
 | "Bit-exact" claims that D10 makes structural | `crates/boyko_rhi_vulkan/tests/sdf_gbuffer_hybrid.rs:5187-5188`, `:5199-5202`, `:6291-6293`; the DDGI precedent `crates/boyko_rhi_vulkan/shaders/ddgi_resolve.hlsli:136-143` |
 | VB framegraph declaration (seeded trio, `5e07936`) | `crates/boyko_rhi_vulkan/src/present/graph_bridge.rs:3179-3190`; the `light_cull` pass `:3212-3242`; barrier derivation `crates/boyko_rhi_vulkan/src/framegraph/sync.rs:157-169` (`seeded_readers`), `:198-208` (`seeded_writer`), `:266-330` (`transition`, flush branch `:288-296`) |
-| VB record site (fill, barrier, dispatch, timestamps) — **⚠ RE-ANCHOR AFTER H0 LANDS: every line number in this row is exact against `git show dc0684e:` and H0 inserts two timestamp brackets into this exact span (Rev 5 P2, §8.5)** | `crates/boyko_rhi_vulkan/src/present/passes/vb.rs:140-247` — timestamp open `:146-150`, the `if let` gate `:157`, fill `:170-174`, `record_vb_pass` `:180`, group count `:184`, `// SAFETY:` `:185-190`, dispatch `:211`, timestamp close `:216-219`. Siblings: `gbuffer.rs:1583` (`// SAFETY:` `:1587-1588`), `forward.rs:359` (`:363-364`) |
-| Scene plumbing (D11) | `crates/boyko_rhi_vulkan/src/present/scene_types.rs:415` (`LIGHT_CULL_LOCAL_SIZE_X`), `:438` (`BrickActivation`, the activation idiom), `:1409-1411` (`cluster_count`, and no dims); push mirrors `crates/boyko_rhi_vulkan/src/compute.rs:3447-3496` (struct `:3453-3462`, `CLUSTER_CULL_PUSH_BYTES` `:3465`, const-asserts `:3467-3471`, `ClusterCullPush::new` `:3473-3483`), the shared COMPUTE push budget `COMPOSITE_PUSH_CONSTANT_BYTES == 80` `:2941, :2956` and `rhi_impl/mod.rs:201`, `cluster_cull_spirv()` `:1610`, camera push `:3005-3015`; test literals `crates/boyko_rhi_vulkan/tests/window_present_gbuffer.rs:2387, 3434, 8420, 9905` |
+| VB record site (fill, barrier, dispatch, timestamps) — **⚠ RE-ANCHOR AFTER H0 LANDS: every line number in this row is exact against `git show dc0684e:` and H0 inserts two timestamp brackets into this exact span (Rev 5 P2, §8.5)** | `crates/boyko_rhi_vulkan/src/present/passes/vb.rs:140-247` — timestamp open `:146-150`, the `if let` gate `:157`, fill `:170-174`, `record_vb_pass` `:180`, group count `:184`, `// SAFETY:` `:185-190`, dispatch `:211`, timestamp close `:216-219`. Siblings: `gbuffer.rs:1932` (`// SAFETY:` `:1587-1588`), `forward.rs:359` (`:363-364`) |
+| Scene plumbing (D11) | `crates/boyko_rhi_vulkan/src/present/scene_types.rs:417` (`LIGHT_CULL_LOCAL_SIZE_X`), `:438` (`BrickActivation`, the activation idiom), `:1409-1411` (`cluster_count`, and no dims); push mirrors `crates/boyko_rhi_vulkan/src/compute.rs:3447-3496` (struct `:3453-3462`, `CLUSTER_CULL_PUSH_BYTES` `:3465`, const-asserts `:3467-3471`, `ClusterCullPush::new` `:3473-3483`), the shared COMPUTE push budget `COMPOSITE_PUSH_CONSTANT_BYTES == 80` `:2941, :2956` and `rhi_impl/mod.rs:201`, `cluster_cull_spirv()` `:1610`, camera push `:3005-3015`; test literals `crates/boyko_rhi_vulkan/tests/window_present_gbuffer.rs:2387, 3434, 8420, 9905` |
 | Existing ORTHO-only cull oracle + readback idioms | `crates/boyko_rhi_vulkan/tests/sdf_gbuffer_hybrid.rs:6432` (fixture `:5215`, cap `:5230`, driver `:5276`, ORTHO `:6455`); **host zero-write BEFORE submit `:5415-5426` [fixed in Rev 5 — the `write_words(mapped, &[0u32])` is on `:5426`, so Rev 4's range stopped one line short]; the POST-FENCE mapped reads `:6202-6211` (ClusterGrid) and `:6219-6228` (LightIndexList) [fixed — Rev 3 cited `:5415-5425` for the post-fence read]** |
 | Bench-armed capability whose absence is byte-identical | `crates/boyko_rhi_vulkan/src/present/gpu_timing.rs:232-240`; boot gate `crates/boyko_app/src/gpu_scene/mod.rs:3554-3571`, consumed `:5938-5949`; `Option`-gated readback precedent `crates/boyko_rhi_vulkan/src/present/passes/present_blit.rs:335-400`; `TRANSFER_SRC\|DST` OR `crates/boyko_rhi_vulkan/src/rhi_impl/device.rs:52-58` |
 | **Validation features actually enabled (P0-1's basis)** | `crates/boyko_rhi_vulkan/src/device.rs:2087` — `[VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT]`, one element, chained at `:2088-2095`. Repo-wide grep for `GPU_ASSISTED` / `debug_printf`: **zero hits**. `robustBufferAccess` bit `ffi.rs:2718` (declared, never enabled) |

@@ -22,9 +22,9 @@ Every P0/P1 folded or refuted with a code-grounded reason. P2 folded or noted.
 - **P2-1/P2-2/P2-3 — FOLDED** into §2.5 boot-barrier pin, §2.3 I4-margin note, §5 (bench on the actual 3060, no cross-class scalar).
 
 **Critic B (principle-0 + byte-identity + frozen-eDSL):**
-- **P0-1 (barrier is RDG-derived, not hand-written) — FOLDED.** Confirmed at gbuffer.rs:700-773: SSAO registers a framegraph pass (`record_graph_pass`), the RDG derives the store→load barrier at the reader, images stay GENERAL→GENERAL. §2.5 rewritten entirely in terms of the RDG seam: the update pass is a **declared framegraph pass** writing the atlas image resources; the RDG derives the update-write→resolve-read barrier at the resolve. The boot `SHADER_READ_ONLY_OPTIMAL` layout is reconciled via a graph resource seed (§2.5).
+- **P0-1 (barrier is RDG-derived, not hand-written) — FOLDED.** Confirmed at gbuffer.rs:1012-1088: SSAO registers a framegraph pass (`record_graph_pass`), the RDG derives the store→load barrier at the reader, images stay GENERAL→GENERAL. §2.5 rewritten entirely in terms of the RDG seam: the update pass is a **declared framegraph pass** writing the atlas image resources; the RDG derives the update-write→resolve-read barrier at the resolve. The boot `SHADER_READ_ONLY_OPTIMAL` layout is reconciled via a graph resource seed (§2.5).
 - **P0-2 (no DDGI oct_decode HLSL exists to pin against) — FOLDED.** Confirmed oct.rs has only `oct_encode_body`; goldens.rs states there is no eDSL decode. **I2 now AUTHORS the DDGI-tile `oct_decode` as a new eDSL body `oct_decode_body` in oct.rs** — host-mirrorable, the single source both I2's write-iteration and I3's read decode against. The phantom "copy the G-buffer normal decode + sync-pin against resolve" is removed.
-- **P0-3 (inputs may be ringed) — REFUTED with code.** scene_types.rs:670 (`edit_list: &'a BoundBuffer`, "host-seeded ONCE before the loop") and :795 (`light_table: &'a BoundBuffer`, device-local, in-place barriered copy) confirm **neither the edit-list nor the light table is per-FIF ringed** — only the camera UBO is (`camera_ring[slot]`). The update pass binds neither the camera UBO nor any ringed input, so the single-write bind group is correct. Kept, with the per-binding ring audit table added to §7.
+- **P0-3 (inputs may be ringed) — REFUTED with code.** scene_types.rs:672 (`edit_list: &'a BoundBuffer`, "host-seeded ONCE before the loop") and :795 (`light_table: &'a BoundBuffer`, device-local, in-place barriered copy) confirm **neither the edit-list nor the light table is per-FIF ringed** — only the camera UBO is (`camera_ring[slot]`). The update pass binds neither the camera UBO nor any ringed input, so the single-write bind group is correct. Kept, with the per-binding ring audit table added to §7.
 - **P1-1 (WAR proof overclaims uniformity under round-robin) — FOLDED.** §2.5 proof restated: invariant is *single-writer-per-tile-per-scheduled-frame* + *the RDG update→resolve barrier orders that frame's subset writes before that frame's resolve reads* + *prior-frame writes already visible via prior frames' barrier+fence chain*.
 - **P1-2 (classification byte-write race) — FOLDED.** Confirmed ddgi.rs:230-232 rounds a **1-byte/probe** buffer to u32 multiples → 4 probes share a u32 → non-atomic byte stores race. Changed the classification buffer to **1 u32/probe** (8 KB, races-free); ddgi.rs sizing updated.
 - **P1-3 (cross-class scalar) — FOLDED.** Derivation runs **on the actual 3060 the golden runs on**; the 3060 measurement is the binding ceiling; "2080Ti ~3 ms" is the design target, not a scaled projection. No cross-class scalar.
@@ -175,12 +175,12 @@ push).
 
 | reg | HLSL decl | kind | access | source | ringed? |
 |-----|-----------|------|--------|--------|---------|
-| t0 | `StructuredBuffer<uint> Buf` | Storage (RO) | read | `scene.edit_list` (`sdf_field.hlsli` contract) | **NO** (scene_types.rs:670, host-seeded once) |
+| t0 | `StructuredBuffer<uint> Buf` | Storage (RO) | read | `scene.edit_list` (`sdf_field.hlsli` contract) | **NO** (scene_types.rs:672, host-seeded once) |
 | u1 | `[[vk::image_format("<B10G11R11 spelling>")]] RWTexture2DArray<float4> gIrrOut` | Storage image (RW) | write | `DdgiAtlas::irradiance()` | NO (D1) |
 | u2 | `[[vk::image_format("rg16f")]] RWTexture2DArray<float2> gDepthOut` | Storage image (RW) | write | `DdgiAtlas::depth()` | NO (D1) |
 | t3 | `RWStructuredBuffer<uint> Classification` | Storage (RW) | read+write | `DdgiAtlas::classification()` (now **u32/probe**, P1-2) | NO |
 | t4 | `StructuredBuffer<float4> RayTable` | Storage (RO) | read | Fibonacci ray-table device buffer (§2.3) | NO (boot-static) |
-| t5 | `StructuredBuffer<uint> LightBuf` | Storage (RO) | read | `scene.light_table` | **NO** (scene_types.rs:795, device-local in-place) |
+| t5 | `StructuredBuffer<uint> LightBuf` | Storage (RO) | read | `scene.light_table` | **NO** (scene_types.rs:797, device-local in-place) |
 | b6 | `cbuffer DdgiUpdate` | Uniform | read | dedicated update UBO (§2.3) | NO (I2 static; see §7) |
 
 **One bind group, written ONCE (no per-FIF ring).** The per-binding audit (rightmost column)
@@ -238,7 +238,7 @@ streaming over the warm edit-list SSBO per march step.
 ### 2.5 The RDG-declared update→resolve barrier (P0-1 + P1-1 fix)
 
 **What (on the real mechanism).** The engine does NOT hand-write `cmd_pipeline_barrier` for compute
-passes — confirmed at gbuffer.rs:700-773, where SSAO registers a framegraph pass
+passes — confirmed at gbuffer.rs:1012-1088, where SSAO registers a framegraph pass
 (`record_graph_pass(ssao_pass, …)`) and the RDG derives the store→load barrier at the reader, keeping
 images GENERAL→GENERAL. The update pass follows this exactly:
 
@@ -399,8 +399,8 @@ the proven 0%-gate.
 
 | binding | source | ringed in current wiring? | evidence |
 |---------|--------|---------------------------|----------|
-| t0 edit-list | `scene.edit_list` | NO | scene_types.rs:670, `&'a BoundBuffer`, "host-seeded ONCE before the loop" |
-| t5 light-table | `scene.light_table` | NO | scene_types.rs:795, device-local, in-place barriered copy (graph_bridge light_upload) |
+| t0 edit-list | `scene.edit_list` | NO | scene_types.rs:672, `&'a BoundBuffer`, "host-seeded ONCE before the loop" |
+| t5 light-table | `scene.light_table` | NO | scene_types.rs:797, device-local, in-place barriered copy (graph_bridge light_upload) |
 | u1/u2 atlas | `DdgiAtlas` | NO | D1 world-fixed, single-atlas |
 | t3 classification | `DdgiAtlas` | NO | single device buffer |
 | t4 ray-table | `DdgiUpdateResources` | NO | boot-static |

@@ -216,7 +216,7 @@ split(frame) = owner asked        (OcclusionConfig::enabled)
 /// default `OcclusionMode::Off` — no split, no late passes (the `hzb: Option<HzbPlan>` shape).
 pub vb_occlusion: Option<VbOcclusionArm>,
 
-// scene_types.rs:3943 — the conjunct is PREPENDED to the five that exist
+// scene_types.rs:3990 — the conjunct is PREPENDED to the five that exist
 pub fn path_vb_occlusion_split(&self) -> bool {
     self.vb_occlusion.is_some()          // NEW — the owner knob
         && self.path_is_vb()
@@ -748,7 +748,7 @@ pub fn arm_occlusion(app: &mut App);
 
 `vb_mesh.rs:314`'s `|| occ_marked()` HzbConfig workaround is deleted in this commit (A3's host disjunct replaces it).
 
-**Moves:** `occlusion_config.rs` + `occlusion_plugin.rs` (new, `boyko_render`), `lib.rs` exports, `plugins.rs:267` registration; `occlusion_force.rs` (new, `boyko_app`); `VbOcclusionArm` + `GBufferScene::vb_occlusion` + the conjunct at `scene_types.rs:3943`; `occlusion_arm.rs` (new, `boyko_app`, the `hzb_plan.rs` shape with its own unit tests); `hzb_plan_for`'s second parameter and disjunct; the runner's two reads + threading; **deletion** of `gpu_scene/mod.rs:4297-4306` and `:1495-1502`; the fold at `:6988`; the regime provenance of A5 (`VbRecordProbe::occ_flags`, `VbProbeContext::occ_mode/occ_force`, `schema_version = 3`, the `VB-P4 regime` line); `occ_fixture/` and its five call sites; four `GBufferScene` literals in `window_present_gbuffer.rs` gain `vb_occlusion: None`; **the four doc repairs of A3**.
+**Moves:** `occlusion_config.rs` + `occlusion_plugin.rs` (new, `boyko_render`), `lib.rs` exports, `plugins.rs:267` registration; `occlusion_force.rs` (new, `boyko_app`); `VbOcclusionArm` + `GBufferScene::vb_occlusion` + the conjunct at `scene_types.rs:3990`; `occlusion_arm.rs` (new, `boyko_app`, the `hzb_plan.rs` shape with its own unit tests); `hzb_plan_for`'s second parameter and disjunct; the runner's two reads + threading; **deletion** of `gpu_scene/mod.rs:4297-4306` and `:1495-1502`; the fold at `:6988`; the regime provenance of A5 (`VbRecordProbe::occ_flags`, `VbProbeContext::occ_mode/occ_force`, `schema_version = 3`, the `VB-P4 regime` line); `occ_fixture/` and its five call sites; four `GBufferScene` literals in `window_present_gbuffer.rs` gain `vb_occlusion: None`; **the four doc repairs of A3**.
 
 **Must not move:** all 30 pins **and** the five occlusion pins must still SPLIT — which no hash can show, and which this rung now covers directly:
 

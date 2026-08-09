@@ -970,7 +970,7 @@ assumed the opposite.** Textured-ness is entirely in-test: two extra system para
 `vb_mesh_tex.rs:98-99`), one `load_material_folder` call (`:156-157`), and `Material::with_textures`
 (`:167-170`) — the **only** constructor that can set `MATERIAL_FLAG_TEXTURED`
 (`boyko_render/src/material.rs:225-233`). That flag OR-reduces over mesh draws
-(`mesh_draw.rs:1011`) into `vb_tex_active` (`present/scene_types.rs:2538-2543`), which is what
+(`mesh_draw.rs:1011`) into `vb_tex_active` (`present/scene_types.rs:2540-2545`), which is what
 auto-selects the classified `vb_shade_tex` row — no `RenderPathConfig` field, no env knob. The
 textures are **committed** files (`crates/boyko_app/assets/pbr_fixtures/synth_bumps/`, four PNGs,
 path compiled in at `vb_mesh_tex.rs:47-48`).
@@ -1451,7 +1451,7 @@ hardcoded; every `defines` element is `-D`-prefixed) · other `cs_6_5` recipes, 
 *Fixture (S1):* `vb_mesh_tex.rs:47-48` (asset path), `:98-99` (the two params), `:156-157`
 (`load_material_folder`), `:167-170` (`with_textures`) · `material.rs:225-233` (the only constructor
 setting `MATERIAL_FLAG_TEXTURED`) · `mesh_draw.rs:1011` (OR-reduce) ·
-`present/scene_types.rs:2538-2543` (`vb_tex_active`) · `sdf_edit.rs:115-129` (`collect_sdf_edits` —
+`present/scene_types.rs:2540-2545` (`vb_tex_active`) · `sdf_edit.rs:115-129` (`collect_sdf_edits` —
 a pure `Query<&SdfPrimitive>`) · `runner.rs:238-242` (default material lane 0), `:442` (`ssao_on`),
 `:589` (the gather site) · `sdf_gbuffer_composite.hlsl:1799-1800` (SDF reads `base_color` only) ·
 `vb_mesh_ssao.rs:190` (the `SsaoConfig` knob) · `taa_jitter_eval.rs:305` (a `legs: Both` scene with
@@ -1499,7 +1499,7 @@ free"), **`:218-220` (`load_ssao_mode` reads `LightBuf[11]` — NOT word 7)** ·
 
 **Producer selection:** `crates/boyko_rhi_vulkan/src/present/passes/vb.rs:883-900` (the THREE-way
 lit-producer choice), `:950-980` (the `(textured, froxel)` pipeline match), `:767-778` (classify
-count dispatch) · `present/scene_types.rs:2329-2350` (`vb_use_classified = force ||
+count dispatch) · `present/scene_types.rs:2331-2352` (`vb_use_classified = force ||
 vb_tex_active_this_frame`; `BOYKO_VB_FORCE_CLASSIFIED` at `:2336`), `:2538-2543` (`vb_tex_active`),
 `:2715-2722` (`path_vb_split`).
 
@@ -1561,7 +1561,7 @@ a future rung ever lets the two co-occur without the TLAS work.
 
 **Q4 — `vb_resolve.comp.hlsl` has no TEXTURED variant. Which tail does the shipping textured
 configuration actually use?**
-**`vb_shade_tex.comp.spv`, automatically.** `present/scene_types.rs:2329-2350`:
+**`vb_shade_tex.comp.spv`, automatically.** `present/scene_types.rs:2331-2352`:
 `vb_use_classified = force || vb_tex_active_this_frame`, and `vb.rs:896-900` makes the choice
 three-way — so under VB a textured material *forces* the classified tail; `vb_resolve` never runs
 textured. If a pre-light consumer (`ssao_on`, `ddgi_on`, `shadow_temporal_on`, or the hwrt carrier)
