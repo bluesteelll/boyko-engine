@@ -62,12 +62,52 @@
 //! refuses anything else. `SessionId` is still carried — it is what proves two files came from one
 //! process, which is its stated job — but it is not the discriminator.
 //!
-//! # Decision 5 — `WorkloadTag` IS a field
+//! # Decision 5 — the workload tag is TWO fields, and an UNDECLARED one is not a floor
 //!
-//! `resolve` refuses a `Floor` whose workload tag does not match, and rung 7b builds
-//! `docs/PROFILING-FLOOR.md` out of per-session artifacts. A session file that did not carry its own
-//! tag would force the aggregator to infer it, and an inference is exactly what the tag exists to
-//! prevent.
+//! ⚠️ **First, a correction to what this section used to say.** It read *"`resolve` refuses a
+//! `Floor` whose workload tag does not match"* as if that were shipped code. MEASURED: `Floor`,
+//! `resolve`, `FloorWorkloadMismatch` and `NotResolved` appear **only in the corpus documents** —
+//! `rg` over `crates/` returns nothing for any of them. They are rung 8's content and are unwritten.
+//! So the tag is not feeding a live comparator today; it is the INPUT to one that does not exist
+//! yet, which is exactly why what it must name has to be settled before rung 7b publishes a floor
+//! that later rungs will cite.
+//!
+//! **The hole this closes, measured.** The tag was `format!("{path:?}_{legs:?}")`.
+//! `vg_decidability_floor.rs` measures the floor with 42 processes across **two configurations** —
+//! `BOYKO_VB_FROXEL_FORCE_OFF` set and unset — and neither `path` nor `legs` changes between them,
+//! because `froxel_light_cull` is a *different field of the same struct*. The same bench sweeps
+//! `N_ps ∈ {8, 64, 256, 512}`, which the engine cannot see at all: the test's own setup spawns
+//! those lights. Two things a floor must never be shared across, sharing one tag.
+//!
+//! **So the tag is split by who can know it, and the split is not cosmetic.**
+//!
+//! * [`ArtifactHeader::workload_tag`] — **DERIVED, unforgeable.** Built by [`config_tag`] from the
+//!   WHOLE of `ResolvedRenderPath`: a readable `path_legs` prefix a human can grep, plus a hash over
+//!   the struct's every field. Exhaustive rather than a hand-picked subset **because a hand-picked
+//!   subset is how `froxel_light_cull` was left out in the first place** — the mistake is not that
+//!   the wrong field was chosen, it is that fields were chosen. A field added to
+//!   `ResolvedRenderPath` therefore invalidates prior floors, deliberately: floors on this box drift
+//!   on a timescale shorter than the gap between two measurements anyway
+//!   (`vg_decidability_floor.rs`'s own finding), so re-measuring is cheap and a wrong bound is not.
+//! * [`ArtifactHeader::content_tag`] — **DECLARED, and empty is a real state.** Light count, scene,
+//!   rig: nothing in the engine can derive them. The measuring test declares them
+//!   (`BOYKO_PROFILE_WORKLOAD`, set in the spawner's own code where the value already lives, not in
+//!   an operator's shell where it can be forgotten per-run).
+//!
+//! **An artifact whose `content_tag` is empty CANNOT serve as a floor** — [`Artifact::floor_source`]
+//! refuses it with [`ArtifactError::UndeclaredContent`]. Owner's call, taken as the strict option of
+//! three. The reason it is enforced here rather than promised to rung 8: this campaign has already
+//! measured that a clause whose subject does not exist yet is a promise, not a gate, and that
+//! **absence reads as a passing state** unless something refuses it. An undeclared content tag is a
+//! value nothing can make move.
+//!
+//! It is a SEPARATE field rather than an empty suffix on the derived one for the same reason: a
+//! composite string cannot distinguish *"declared nothing"* from *"declared, and it happened to be
+//! short"*, and that distinction is the whole of the refusal.
+//!
+//! The check is scoped to *being a floor*. An artifact without a content tag is still perfectly
+//! readable and still gates liveness — `gbuffer_zone_port_gate.rs`'s census-agreement clause reads
+//! one and has no business declaring a workload.
 //!
 //! # Decision 6 — a declined instrument is a HEADER FIELD, not a line on stderr
 //!
@@ -89,7 +129,35 @@ use std::io;
 use std::path::Path;
 
 /// The artifact's format version. A reader refuses anything else **before parsing a row**.
-pub const ARTIFACT_SCHEMA_VERSION: u32 = 1;
+///
+/// `2` since rung 7c's tag split: a v1 file carries no `content_tag`, and reading one as if the
+/// field were merely empty would hand a floor exactly the "declared nothing" state
+/// [`Artifact::floor_source`] exists to refuse.
+pub const ARTIFACT_SCHEMA_VERSION: u32 = 2;
+
+/// The **derived, unforgeable** half of a workload tag: everything about the boot-resolved
+/// configuration that the engine itself knows.
+///
+/// `"<path>_<legs>#<hash>"` — a prefix a human can read and grep, and eight hex digits of FNV-1a
+/// over the `Debug` rendering of the WHOLE [`ResolvedRenderPath`]. The hash covers every field
+/// rather than a chosen few; see the module doc's Decision 5 for why choosing is the bug.
+///
+/// Hashing `Debug` rather than the struct's bytes is deliberate: `ResolvedRenderPath` is `repr(C)`
+/// and `Copy`, but reading it as bytes would fold in padding this code does not control, and a tag
+/// that changes with uninitialised padding is worse than no tag.
+#[must_use]
+pub fn config_tag(resolved: &boyko_render::ResolvedRenderPath) -> String {
+    // FNV-1a/64. Chosen because it is four lines and has no dependency; this is a discriminator,
+    // not a security primitive, and collisions between two configurations of one struct are not a
+    // threat model.
+    let rendered = format!("{resolved:?}");
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in rendered.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{:?}_{:?}#{:08x}", resolved.path, resolved.legs, (h >> 32) as u32).to_lowercase()
+}
 
 /// Decimal places every nanosecond figure carries. See the module doc's Decision 1 — this is a
 /// property of the instrument, not a formatting preference.
@@ -170,8 +238,14 @@ pub struct ArtifactHeader {
     /// doc's Decision 4. Empty when no parent supplied one, in which case a reader that passes a
     /// non-empty expectation refuses — an unstamped file cannot prove it is this run's.
     pub run_token: String,
-    /// What was measured, so a `Floor` cannot be applied across workloads.
+    /// The DERIVED half of what was measured — [`config_tag`] over the whole boot-resolved path.
+    /// Cannot be forged by a caller, and covers every configuration bit the engine knows.
     pub workload_tag: String,
+    /// The DECLARED half — the content the engine cannot see (light count, scene, rig), named by
+    /// whoever measured. **Empty means "nobody declared"**, which is a state
+    /// [`Artifact::floor_source`] refuses rather than a short string. See the module doc's
+    /// Decision 5.
+    pub content_tag: String,
     /// Whether the timestamp instrument was alive.
     pub instrument: Instrument,
     /// [`PRECISION_DECIMALS`] at write time, stated so a reader never has to assume it.
@@ -254,6 +328,15 @@ pub enum ArtifactError {
         /// What was wrong.
         why: &'static str,
     },
+    /// The file is well-formed but its `content_tag` is EMPTY, so it does not say what workload it
+    /// measured — and a floor is a property of the workload as much as of the box. Returned only by
+    /// [`Artifact::floor_source`]; every other reader is unaffected. See the module doc's
+    /// Decision 5.
+    UndeclaredContent {
+        /// The derived half, which the engine always knows — quoted so the message names the file
+        /// rather than describing a category.
+        workload_tag: String,
+    },
 }
 
 impl core::fmt::Display for ArtifactError {
@@ -273,6 +356,10 @@ impl core::fmt::Display for ArtifactError {
             ArtifactError::Malformed { line, why } => {
                 write!(f, "artifact line {line}: {why}")
             }
+            ArtifactError::UndeclaredContent { workload_tag } => write!(
+                f,
+                "artifact {workload_tag:?} declares no content_tag, so it cannot serve as a FLOOR:                  a floor bounds the workload it was measured on, and this file does not say which                  one that was. The measuring test must set BOYKO_PROFILE_WORKLOAD (light count,                  scene, rig) where it spawns its children"
+            ),
         }
     }
 }
@@ -298,6 +385,9 @@ impl Artifact {
         let _ = writeln!(s, "session_hi = {}", h.session_hi);
         let _ = writeln!(s, "run_token = \"{}\"", h.run_token);
         let _ = writeln!(s, "workload_tag = \"{}\"", h.workload_tag);
+        // Written even when empty. An ABSENT key would make "nobody declared" and "an older
+        // writer" the same observation, and the refusal below has to tell them apart.
+        let _ = writeln!(s, "content_tag = \"{}\"", h.content_tag);
         let _ = writeln!(s, "instrument = \"{}\"", h.instrument.as_str());
         let _ = writeln!(s, "precision_decimals = {}", h.precision_decimals);
         let c = &self.census;
@@ -317,6 +407,31 @@ impl Artifact {
             let _ = writeln!(s, "end_off_ns = {}", ns(z.end_off_ns));
         }
         s
+    }
+
+    /// **The floor gate.** Returns this artifact only if it says what workload it measured.
+    ///
+    /// Rung 8's `Floor` does not exist yet; this is the refusal it will call, shipped now and gated
+    /// now, because a clause whose subject is unwritten is a promise rather than a gate — a thing
+    /// this campaign has measured more than once. `resolve` comparing tags is a SEPARATE check and
+    /// stays rung 8's: this one asks only whether there is anything to compare.
+    ///
+    /// Deliberately NOT folded into [`Self::read`]. Most readers of an artifact are not looking for
+    /// a floor — `gbuffer_zone_port_gate.rs` reads one to check a label census — and refusing them
+    /// would make the strict rule cost work it was never meant to gate.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::UndeclaredContent`] when `content_tag` is empty or blank.
+    pub fn floor_source(&self) -> Result<&Artifact, ArtifactError> {
+        // Trimmed, so a tag of spaces is the same refusal as no tag at all: whitespace declares no
+        // more about a workload than emptiness does, and the two must not be different outcomes.
+        if self.header.content_tag.trim().is_empty() {
+            return Err(ArtifactError::UndeclaredContent {
+                workload_tag: self.header.workload_tag.clone(),
+            });
+        }
+        Ok(self)
     }
 
     /// Writes the artifact to `path`, **truncating** — one process, one file (Decision 2/3).
@@ -394,6 +509,7 @@ impl Artifact {
         let mut session_lo = None;
         let mut session_hi = None;
         let mut workload_tag = None;
+        let mut content_tag = None;
         let mut instrument = None;
         let mut precision_decimals = None;
         let mut census = LabelCensus::default();
@@ -438,6 +554,7 @@ impl Artifact {
                 "session_lo" => session_lo = Some(v.parse().map_err(|_| bad("session_lo"))?),
                 "session_hi" => session_hi = Some(v.parse().map_err(|_| bad("session_hi"))?),
                 "workload_tag" => workload_tag = Some(unquote(v).to_owned()),
+                "content_tag" => content_tag = Some(unquote(v).to_owned()),
                 "instrument" => {
                     instrument =
                         Some(Instrument::parse(unquote(v)).ok_or_else(|| bad("unknown instrument"))?);
@@ -465,6 +582,9 @@ impl Artifact {
                 session_hi: session_hi.ok_or(ArtifactError::BadHeader("session_hi"))?,
                 run_token,
                 workload_tag: workload_tag.ok_or(ArtifactError::BadHeader("workload_tag"))?,
+                // Required, not defaulted: a missing key is a MALFORMED header, while a present
+                // empty one is an honest "nobody declared". Defaulting would erase that.
+                content_tag: content_tag.ok_or(ArtifactError::BadHeader("content_tag"))?,
                 instrument: instrument.ok_or(ArtifactError::BadHeader("instrument"))?,
                 precision_decimals: precision_decimals
                     .ok_or(ArtifactError::BadHeader("precision_decimals"))?,

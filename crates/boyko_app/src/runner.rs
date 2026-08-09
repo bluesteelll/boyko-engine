@@ -2861,14 +2861,18 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                             session_lo: session.0,
                             session_hi: session.1,
                             run_token: vb_zone_run_token.clone(),
-                            // The WORKLOAD is the resolved path × legs: a floor measured on one
-                            // cannot bound the other, which is why `resolve` refuses a `Floor`
-                            // whose tag does not match.
-                            workload_tag: format!(
-                                "{:?}_{:?}",
-                                host.resolved_render_path.path, host.resolved_render_path.legs
-                            )
-                            .to_lowercase(),
+                            // Rung 7c: the tag is TWO halves split by who can know it. This one is
+                            // DERIVED from the WHOLE boot-resolved path — `path × legs` alone let
+                            // the froxel-cull leg share a tag with the flat leg, which are the two
+                            // sides of the floor experiment (`artifact.rs`'s Decision 5).
+                            workload_tag: crate::profiling::artifact::config_tag(
+                                &host.resolved_render_path,
+                            ),
+                            // And this one is DECLARED, because nothing here can derive a light
+                            // count or a scene. Empty when nobody said, which `floor_source`
+                            // refuses — the strict option, owner's call.
+                            content_tag: std::env::var("BOYKO_PROFILE_WORKLOAD")
+                                .unwrap_or_default(),
                             instrument: if ctx.device_caps().timestamps_usable() {
                                 crate::profiling::artifact::Instrument::Live
                             } else {

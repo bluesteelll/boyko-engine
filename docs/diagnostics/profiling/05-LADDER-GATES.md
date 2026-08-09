@@ -1065,6 +1065,64 @@ nothing today**, because both collectors and the zone leg open at `TOP` there, s
 `T,B,T,B,…`. It is present so that a future pass on that family cannot acquire a different stage
 under a green position equality — the failure that just happened once.
 
+#### Rung 7c, second half — the workload tag, and a mechanism the corpus described as if it existed
+
+⚠️ **`Floor`, `resolve`, `FloorWorkloadMismatch` and `NotResolved` are not code.** `rg` over
+`crates/` returns nothing for any of them; they live only in these documents and are rung 8's
+content. This section, `artifact.rs`'s Decision 5 and `docs/OPEN-QUESTIONS.md` all previously wrote
+*"`resolve` refuses a `Floor` whose workload tag does not match"* in the present tense. Nothing was
+silently wrong — but the tag is the **input** to a comparator that does not exist, which is exactly
+why what it must name had to be settled **before rung 7b publishes a floor** that later rungs cite.
+
+**The hole, measured.** The tag was `format!("{path:?}_{legs:?}")`.
+`vg_decidability_floor.rs` measures its NULL experiment across two configurations —
+`BOYKO_VB_FROXEL_FORCE_OFF` set and unset — and **neither `path` nor `legs` changes between them**,
+because `froxel_light_cull` is a different field of the same struct. The same bench sweeps
+`N_ps ∈ {8, 64, 256, 512}`, invisible to the engine entirely: the test's own setup spawns those
+lights. Two things a floor must never be shared across, sharing one tag.
+
+**Owner's call, taken as the strict option of three: an artifact that does not say what workload it
+measured cannot serve as a floor.** Shipped as two fields split by who can know the value:
+
+* `workload_tag` — **derived, unforgeable.** `config_tag` over the WHOLE `ResolvedRenderPath`: a
+  readable `path_legs` prefix plus eight hex of FNV-1a over every field. Exhaustive rather than a
+  hand-picked subset **because a hand-picked subset is how `froxel_light_cull` was left out** — the
+  mistake was not choosing the wrong field, it was choosing fields. A field added to that struct
+  therefore invalidates prior floors, deliberately: this box's floors drift on a timescale shorter
+  than the gap between two measurements anyway, so re-measuring is cheap and a wrong bound is not.
+* `content_tag` — **declared, and empty is a real state.** Set by the measuring test in its own
+  spawner code (`BOYKO_PROFILE_WORKLOAD`), where the value already lives — not in an operator's
+  shell, where it can be forgotten per run.
+
+**The refusal is enforced now rather than promised to rung 8.** `Artifact::floor_source` returns
+`UndeclaredContent` on an empty or blank content tag. A clause whose subject does not exist yet is a
+promise, not a gate, and this campaign has already measured that **absence reads as a passing
+state** unless something refuses it. Scoped to *being a floor*: an artifact without a content tag is
+still readable and still gates liveness — the census-agreement clause reads one and has no business
+declaring a workload. A **missing key** is a malformed header, kept distinct from a **present empty**
+one; that distinction is the whole of the refusal, so defaulting it away would delete the rule.
+
+**RED, run:** revert the derivation to `path × legs` ⇒ *"the flat and froxel legs of the floor
+experiment produced the SAME workload tag … flat: `deferred_both`, froxel: `deferred_both`"*.
+**MEASURED on a live run:** `workload_tag = "deferred_both#99f4482e"`, `content_tag = "n14_kronecker"`,
+`schema_version = 2`.
+
+⚠️ **And the schema bump found two frozen literals in the gate's own fixtures.** Both hand-written
+TOML headers said `schema_version = 1`, so after the bump they refused on the SCHEMA — the right
+outcome for the wrong reason, and had either clause expected `SchemaMismatch` it would have read as
+passing while testing nothing about its subject. Both now build the header from
+`ARTIFACT_SCHEMA_VERSION`, so the next bump cannot rot them the same way.
+
+**Owner's ordering decision, recorded because later rungs are held to it:** the ladder runs **in the
+specified order** — 7 → 8 → 9 → 10–14 → 15 — rather than cutting a short path to the frame viewer.
+The capability the owner named for it is *"break a frame down by system and pass, find the
+bottleneck, and catch per-frame spikes"*, which is `00-GOAL-TARGETS.md`'s own *"Where did the frame
+go?"* row. Two things that row's later rungs must actually deliver, noted here so they are not
+discovered late: **rung 9** is what puts CPU and GPU on one axis (`cpu_gpu_offset` stops being
+`UNCORRELATED`), and **the GPU channel currently discards its per-frame data** — `WindowReducer`
+folds every frame into medians, so a per-frame GPU view needs a channel that does not reduce, plus a
+spike trigger, since the frame ring is 121 frames ≈ 2 s at 60 fps.
+
 ### Two rung-3b decisions
 
 1. **Nothing the zones measure is copied into `FrameRecord`.** The corpus's record carries

@@ -1157,8 +1157,8 @@ claim path's Miri and property legs are unaffected and still planned.
   (verified by A/B against the still-printing channel while BOTH are live), 7b's floor
   re-measurement, then the deletions — **713** lines from `gpu_timing.rs`, **1381** from `runner.rs`
   (31 % of the file), **465** from `gpu_scene/mod.rs`, plus five consumer migrations.
-- **OPEN (VALUES/SCOPE — owner's call) — the artifact's `workload_tag` cannot distinguish the two
-  legs of the floor experiment.** Measured while opening rung 7's consumer migrations. The tag is
+- **RESOLVED (owner: the STRICT option of three) — the workload tag is two halves, and an
+  undeclared one is not a floor.** Measured while opening rung 7's consumer migrations. The tag is
   `format!("{path:?}_{legs:?}")` over `ResolvedRenderPath` — `deferred_both`, `visibilitybuffer_mesh`
   and so on. `vg_decidability_floor.rs` runs its NULL experiment twice per repetition, once with
   `BOYKO_VB_FROXEL_FORCE_OFF` and once without, and **neither `path` nor `legs` changes between
@@ -1171,17 +1171,33 @@ claim path's Miri and property legs are unaffected and still planned.
   silently bounds a froxel-leg claim — which `vg_decidability_floor.rs`'s own "What this does NOT
   decide" forbids in words (*"It is one CONFIGURATION"*, *"a rung that measures at a different scale
   must re-measure its own floor rather than cite this one"*).
-  Two halves, and the second is the owner's call:
-  * **Derived** (mine to decide, and I lean to doing it at 7b): the tag names every boot-frozen arm
-    bit that changes which GPU work the zones bracket — at minimum `froxel_light_cull`, and the tag
-    becomes e.g. `visibilitybuffer_mesh+froxel`. Cannot be forged; costs a longer string.
-  * **Declared** (VALUES): the CONTENT dimensions the engine cannot see — light count, scene, rig —
-    need an operator-supplied suffix (`BOYKO_PROFILE_WORKLOAD`) that a consumer can simply forget to
-    set, in which case two different workloads share a tag again. The alternative is to accept that
-    the tag guards configuration and not content, and to say so where the floor is published.
-  Nothing is enforced either way today, and no rung fails on it before 7b publishes a floor.
-- **`boyko-ecs --lib`'s `one_zone_taking_a_hundred_thousand_samples_keeps_count_exact` is an
-  ORDER-DEPENDENT FLAKE.** Observed failing once in a full `--workspace --all-targets` run, then
+  ⚠️ **And a correction to this entry's own first sentence about the mechanism.** It said `resolve`
+  refuses a mismatched `Floor` as if that were shipped code. MEASURED: `Floor`, `resolve`,
+  `FloorWorkloadMismatch` and `NotResolved` exist **only in the corpus documents** — `rg` over
+  `crates/` returns nothing. They are rung 8's content and are unwritten. So nothing was silently
+  wrong; the tag is the INPUT to a comparator that does not exist yet, which is why what it names
+  had to be settled before 7b publishes a floor that later rungs cite.
+  **Shipped as decided:**
+  * **Derived** — [`config_tag`] over the WHOLE `ResolvedRenderPath` (readable `path_legs` prefix +
+    8 hex of FNV-1a over every field), not a hand-picked subset: the bug was not that the wrong
+    field was chosen, it was that fields were chosen. A field added to that struct invalidates prior
+    floors deliberately — floors on this box drift faster than that anyway.
+  * **Declared** — `content_tag`, from `BOYKO_PROFILE_WORKLOAD`, set by the measuring test in its
+    own spawner code where the value already lives, not in an operator's shell.
+  * **The refusal is enforced NOW, not promised to rung 8**: `Artifact::floor_source` returns
+    `UndeclaredContent` on an empty or blank content tag, because a clause whose subject does not
+    exist yet is a promise rather than a gate. A missing KEY is a malformed header, kept distinct
+    from a present-but-empty one — the whole of the refusal is that distinction.
+  RED run: revert the derivation to `path × legs` ⇒ *"the flat and froxel legs produced the SAME
+  workload tag ... flat: deferred_both, froxel: deferred_both"*. Measured on a live run:
+  `workload_tag = "deferred_both#99f4482e"`.
+- **`boyko-ecs --lib`'s profiling tests are ORDER-DEPENDENT FLAKES — now TWO of them.**
+  `every_dispatching_round_records_one_span_and_one_width` joined
+  `one_zone_taking_a_hundred_thousand_samples_keeps_count_exact` on 2026-08-10: observed failing
+  once in a full `--workspace --all-targets` run, then passing in isolation and in two consecutive
+  full lib runs (915/915 each). **A second name in the same class raises the priority**: this is
+  no longer one unlucky test but a property of the module, and a real regression here would be
+  indistinguishable from the flake. Original entry follows. Observed failing once in a full `--workspace --all-targets` run, then
   passing in isolation and in two consecutive full lib runs (915/915). Same class as the
   `MAX_QUERY_TYPES` note above: process-global profiling state (lanes, zone slots) against 915
   tests in parallel. Re-run before bisecting.

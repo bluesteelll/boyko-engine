@@ -55,6 +55,7 @@ fn fixture(run_token: &str) -> Artifact {
             session_hi: 0xfedc_ba98_7654_3211,
             run_token: run_token.to_owned(),
             workload_tag: "vb_mesh_512".to_owned(),
+            content_tag: "n14_kronecker".into(),
             instrument: Instrument::Live,
             precision_decimals: PRECISION_DECIMALS,
         },
@@ -151,12 +152,18 @@ fn a_stale_artifact_is_refused_on_the_header_instead_of_being_parsed() {
 /// two orderings are now distinguishable by the error alone.
 #[test]
 fn the_header_refusal_happens_before_any_row_is_parsed() {
-    let text = "\
-schema_version = 1
+    // ⚠️ Built from `ARTIFACT_SCHEMA_VERSION`, never from a literal. Rung 7c's bump to 2 made this
+    // fixture refuse on the SCHEMA — the right outcome for the wrong reason, and had the expected
+    // variant happened to be `SchemaMismatch` the clause would have read as passing while testing
+    // nothing about ordering at all.
+    let text = format!(
+        "\
+schema_version = {ARTIFACT_SCHEMA_VERSION}
 session_lo = 1
 session_hi = 2
 run_token = \"run-A\"
 workload_tag = \"t\"
+content_tag = \"c\"
 instrument = \"live\"
 precision_decimals = 1
 census_measured = 0
@@ -166,8 +173,9 @@ census_torn = 0
 
 [[zone]]
 id = not-a-number
-";
-    let err = Artifact::parse(text, "run-B").expect_err("a stale artifact must be refused");
+"
+    );
+    let err = Artifact::parse(&text, "run-B").expect_err("a stale artifact must be refused");
     assert!(
         matches!(err, ArtifactError::TokenMismatch { .. }),
         "the reader reached a malformed ROW before it checked the header, so its refusal is an \
@@ -268,12 +276,15 @@ fn a_tenth_is_the_instruments_resolution_and_survives_the_file() {
 /// this campaign has found at every rung.
 #[test]
 fn a_row_missing_a_field_is_malformed_rather_than_defaulted() {
-    let text = "\
-schema_version = 1
+    // Built from the constant, for the reason the ordering clause above records.
+    let text = format!(
+        "\
+schema_version = {ARTIFACT_SCHEMA_VERSION}
 session_lo = 1
 session_hi = 2
 run_token = \"run-A\"
 workload_tag = \"t\"
+content_tag = \"c\"
 instrument = \"live\"
 precision_decimals = 1
 census_measured = 0
@@ -289,8 +300,10 @@ median_ns = 128.0
 mean_ns = 163.2
 p95_ns = 288.0
 begin_off_ns = 0.0
-";
-    let err = Artifact::parse(text, "run-A").expect_err("a row without `end_off_ns` must not parse");
+"
+    );
+    let err =
+        Artifact::parse(&text, "run-A").expect_err("a row without `end_off_ns` must not parse");
     match err {
         ArtifactError::Malformed { why, .. } => {
             assert!(why.contains("end_off_ns"), "wrong field named: {why}");
@@ -313,4 +326,113 @@ fn an_empty_expectation_waives_the_token_check() {
 /// Euclid, for the lattice reconstruction.
 fn gcd(a: u64, b: u64) -> u64 {
     if b == 0 { a } else { gcd(b, a % b) }
+}
+
+// ===================================================================================================
+// Rung 7c — the workload tag is two halves, and an undeclared one is not a floor
+// ===================================================================================================
+
+/// **The hole this closes, as a test.** `vg_decidability_floor.rs` measures its NULL experiment
+/// across two configurations — `BOYKO_VB_FROXEL_FORCE_OFF` set and unset — and the old tag
+/// (`path × legs`) was IDENTICAL for both, because `froxel_light_cull` is a different field of the
+/// same struct.
+///
+/// RED, run: revert `config_tag` to `format!("{path:?}_{legs:?}")` ⇒ the two tags compare equal and
+/// this clause fails naming both. It is the whole reason the derivation hashes the WHOLE struct
+/// rather than a chosen subset — the bug was not that the wrong field was chosen, it was that
+/// fields were chosen at all.
+#[test]
+fn the_config_tag_separates_the_two_legs_of_the_floor_experiment() {
+    use boyko_app::profiling::artifact::config_tag;
+    use boyko_render::ResolvedRenderPath;
+
+    let flat = ResolvedRenderPath { froxel_light_cull: false, ..ResolvedRenderPath::default() };
+    let froxel = ResolvedRenderPath { froxel_light_cull: true, ..ResolvedRenderPath::default() };
+    assert_ne!(
+        flat, froxel,
+        "the fixture must differ, or it proves nothing about the tag"
+    );
+    assert_ne!(
+        config_tag(&flat),
+        config_tag(&froxel),
+        "the flat and froxel legs of the floor experiment produced the SAME workload tag, so a \
+         floor measured on one would be accepted as bounding a delta measured on the other — the \
+         exact confusion the tag exists to prevent.\n  flat:   {}\n  froxel: {}",
+        config_tag(&flat),
+        config_tag(&froxel)
+    );
+    // ...and the same input twice is the same tag, or the tag is noise rather than an identity.
+    assert_eq!(config_tag(&flat), config_tag(&flat), "the derivation is not deterministic");
+}
+
+/// The tag stays GREPPABLE. A pure hash would satisfy the clause above and leave a human unable to
+/// tell `visibilitybuffer_mesh` from `deferred_both` without running the engine.
+#[test]
+fn the_config_tag_keeps_a_readable_prefix() {
+    use boyko_app::profiling::artifact::config_tag;
+    use boyko_render::{GeometryLegs, RenderPath, ResolvedRenderPath};
+
+    let r = ResolvedRenderPath {
+        path: RenderPath::VisibilityBuffer,
+        legs: GeometryLegs::Mesh,
+        ..ResolvedRenderPath::default()
+    };
+    let tag = config_tag(&r);
+    assert!(
+        tag.starts_with("visibilitybuffer_mesh#"),
+        "the tag lost its readable prefix and is now only a hash: {tag}"
+    );
+    assert_eq!(tag.len(), "visibilitybuffer_mesh#".len() + 8, "eight hex digits, no more: {tag}");
+}
+
+/// **The owner's strict rule, enforced:** an artifact that does not say what workload it measured
+/// cannot serve as a floor.
+///
+/// Whitespace is the SAME refusal as emptiness — a tag of spaces declares no more about a workload
+/// than no tag does, and two spellings of "nothing" must not be two outcomes.
+#[test]
+fn an_undeclared_content_tag_cannot_serve_as_a_floor() {
+    for (case, declared) in [("empty", ""), ("blank", "   \t ")] {
+        let mut a = fixture("tok");
+        a.header.content_tag = declared.to_owned();
+        match a.floor_source() {
+            Err(ArtifactError::UndeclaredContent { workload_tag }) => {
+                assert_eq!(workload_tag, a.header.workload_tag, "{case}: the refusal must name the file");
+            }
+            Err(e) => panic!("{case}: refused for the wrong reason: {e}"),
+            Ok(_) => panic!(
+                "{case}: an artifact declaring no content was accepted as a floor source. A floor \
+                 bounds the workload it was measured on; this file does not say which one that was."
+            ),
+        }
+    }
+}
+
+/// The green leg of the same rule — without it the refusal above would be satisfied by a
+/// `floor_source` that refuses everything.
+#[test]
+fn a_declared_content_tag_is_accepted_as_a_floor() {
+    let a = fixture("tok");
+    assert!(!a.header.content_tag.is_empty(), "the fixture must declare, or this proves nothing");
+    let got = a.floor_source().expect("a declared artifact is a floor source");
+    assert_eq!(got.header.content_tag, a.header.content_tag);
+}
+
+/// **"Nobody declared" and "an older writer" are different observations, and the parser keeps them
+/// apart.** A MISSING `content_tag` key is a malformed header; a PRESENT empty one is an honest
+/// declaration of nothing, which `floor_source` refuses. Defaulting the missing key to `""` would
+/// collapse the two and turn a v1 file into a silently-undeclared v2 one.
+#[test]
+fn a_missing_content_tag_key_is_malformed_not_an_empty_declaration() {
+    let text = fixture("tok").render();
+    let stripped: String =
+        text.lines().filter(|l| !l.starts_with("content_tag")).collect::<Vec<_>>().join("\n");
+    match Artifact::parse(&stripped, "tok") {
+        Err(ArtifactError::BadHeader("content_tag")) => {}
+        other => panic!(
+            "a header with no `content_tag` key at all parsed as {other:?} instead of a malformed \
+             header. Read as an empty declaration it would be indistinguishable from a writer that \
+             declared nothing, and only one of those is a file this build wrote."
+        ),
+    }
 }
