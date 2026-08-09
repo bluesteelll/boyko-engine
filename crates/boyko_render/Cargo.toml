@@ -29,6 +29,11 @@ test-readback = []
 # into the hardware ray-tracing FFI surface. OFF by default â†’ the shipped/golden
 # render path is byte-identical to R1 (the RT FFI compiles to nothing downstream).
 hwrt = ["boyko_rhi_vulkan/hwrt"]
+# Profiling rung 5c: forwards to `boyko_rhi_vulkan/profiling-census` so a host build can turn on
+# the ~200 command-census increments at `present/passes/vb.rs`'s record sites. OFF by default -->
+# the shipped/golden render path records exactly the commands it did before (the increments are
+# host-side `Cell<u32>` adds that compile to nothing here). Enabled only by G10's A/B gate.
+profiling-census = ["boyko_rhi_vulkan/profiling-census"]
 
 [dependencies]
 boyko-ecs = { path = "../boyko_ecs" }

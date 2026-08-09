@@ -8,24 +8,31 @@
 //! "record one profiling command on the disarmed path and the pins move" — is false as written.
 //! The pins stay exactly where they were, and the frame is not byte-identical at all.
 //!
-//! The claim has to be about **commands**, so it is measured where the commands are: a `&mut`
-//! counter incremented **at the `vkCmd*` call site**, exactly as [`VbRecordProbe`] is. Incremented
-//! at the site and never derived from the arming predicate — *"the difference between a gate and a
+//! The claim has to be about **commands**, so it is measured where the commands are: a counter
+//! incremented **at the `vkCmd*` call site**, exactly as [`VbRecordProbe`] is. Incremented at the
+//! site and never derived from the arming predicate — *"the difference between a gate and a
 //! tautology"*, in that struct's own words.
 //!
 //! [`VbRecordProbe`]: super::VbRecordProbe
 //!
-//! # The whole struct is behind `feature = "profiling-census"`, default OFF
+//! # The counting is behind `feature = "profiling-census"`, default OFF
 //!
-//! [`stream_pos`](CommandWitness::stream_pos) counts **every** recorded command in the witnessed
-//! region, not only the profiling ones — that is what makes it a position rather than a tally, and
-//! it is a perturbation of every recorder it is threaded through. So it is compiled only into the
-//! gate binaries that read it.
+//! [`stream_pos`](CommandWitness::stream_pos) counts **every** witnessed record site, not only the
+//! profiling ones — that is what makes it a position rather than a tally, and it is a perturbation
+//! of every recorder it is threaded through. So the ~200 increments at `vb.rs`'s record sites are
+//! compiled only into the gate binaries that read them.
 //!
-//! The increments are host-side `u32` adds that record no command and change no device state.
-//! **That is why a census build records the same command stream as a non-census build**, and
-//! therefore why a census measurement speaks about the shipped configuration rather than about
-//! itself.
+//! The **type** is unconditional, and rung 5c made it so deliberately. `GBufferScene` must carry an
+//! `Option<&CommandWitness>` for the witness to reach the recorder; features unify per PACKAGE, so
+//! a `#[cfg]`'d field is present or absent for `boyko_app`'s construction site depending on a flag
+//! no `boyko_app` source names — a build that enables this feature from anywhere would stop
+//! compiling for a reason no crate shows. A type nobody constructs costs nothing; a field whose
+//! existence depends on someone else's feature costs a build.
+//!
+//! The increments are host-side `u32` adds ([`Cell`], which compiles to the same store a plain
+//! field would) that record no command and change no device state. **That is why a census build
+//! records the same command stream as a non-census build**, and therefore why a census measurement
+//! speaks about the shipped configuration rather than about itself.
 //!
 //! # `stamp_positions` exists because `zone_open_order` cannot cross a leg boundary
 //!
@@ -36,12 +43,44 @@
 //! tautology: it agrees with itself.
 //!
 //! [`stamp_positions`](CommandWitness::stamp_positions) has **no vocabulary**. It is the value of a
-//! monotone "commands recorded so far in this region" counter at the moment each timestamp is
+//! monotone "record sites passed so far in this region" counter at the moment each timestamp is
 //! recorded. Both collectors produce it from the *same* instrumentation, so the cross-leg claim
 //! becomes "same number of timestamps, each at the same position in the recorded stream" — and
 //! shifting one bracket by a single command changes one entry. **No mapping table exists, so none
-//! can be wrong.** That comparison is rung 5c's; this rung builds the instrument and gates its
-//! two-sided arithmetic.
+//! can be wrong.**
+//!
+//! # Rung 5c: three things the port settled, recorded here because they are the type's contract
+//!
+//! **1. The verbs take `&self`.** A frame's recording holds the instrument shared: `record_vb`
+//! reaches it through `&GBufferScene`, and every recording verb below it therefore has a shared
+//! borrow and nothing else. This is 5b's own `GpuZoneRecorder::record_reset` finding one rung
+//! later and for the same reason — the first caller to record a *whole frame* through one borrow
+//! is what exposes a `&mut self` verb as unreachable. The counters are [`Cell`], not atomics:
+//! a command buffer is recorded by one thread, and an atomic here would be a claim about a
+//! concurrency this type never has.
+//!
+//! **2. What `stream_pos` counts, stated exactly, because rung 5b's doc claimed more than the
+//! instrument delivers.** It counts **record sites in `vb.rs`**: every `vkCmd*` recorded there
+//! directly (MEASURED: 167 through `self.fns.cmd_*` plus 2 through `crate::accel::cmd_*`) *and*
+//! every call to a helper that records commands elsewhere (`record_vb_pass`, the AA/post chain),
+//! which counts as **one** whatever it records inside. It is therefore a position in `vb.rs`'s
+//! record stream, not a count of `vkCmd` calls, and the resolution of the cross-leg claim is
+//! exactly that: a bracket that moves across any witnessed site moves a position, and a bracket
+//! that moves *within* one delegate's body does not. Rung 5b's *"every recorded command in the
+//! witnessed region"* was wider than any instrument that does not also thread through the shared
+//! post-process recorders.
+//!
+//! **3. A repair is not a bracket.** The old `VbTimestampCollector` closes every pair the frame
+//! did not bracket, because its readback uses `VK_QUERY_RESULT_WAIT_BIT` and would block on an
+//! unwritten query; the new `GpuZoneRecorder` labels that pair `NotBracketed` and records nothing.
+//! So the two legs' *total* timestamp counts differ **by design**, and a cross-leg equality over
+//! all of them would red on the very difference the port exists to make. [`Self::repair`] is the
+//! epilogue's verb: it moves the stream position (the commands are real) and counts into
+//! [`Self::profiling_cmds`], but it is not a bracket stamp and does not enter
+//! [`Self::stamp_positions`]. The comparison is over brackets, and it compares their **count**
+//! as well as their positions, so a port that dropped a bracket entirely still reds.
+
+use core::cell::Cell;
 
 use super::gpu_zone::MAX_GPU_PAIRS;
 
@@ -51,16 +90,18 @@ use super::gpu_zone::MAX_GPU_PAIRS;
 /// derived: it holds two kilobyte-scale arrays, and a silent copy of those in a recorder's inner
 /// loop is exactly the cost this struct is supposed to be too cheap to have.
 pub struct CommandWitness {
-    profiling_cmds: u32,
-    query_resets: u32,
-    timestamps: u32,
-    recorded_pairs: u16,
-    stream_pos: u32,
+    profiling_cmds: Cell<u32>,
+    query_resets: Cell<u32>,
+    timestamps: Cell<u32>,
+    repairs: Cell<u32>,
+    recorded_pairs: Cell<u16>,
+    stream_pos: Cell<u32>,
     /// Zone ids in the order their pairs were OPENED. `zone_open_order[k]` is the zone of the
     /// `k`-th pair to be opened, which is a statement about RECORD order and nothing else.
-    zone_open_order: [u16; MAX_GPU_PAIRS],
-    /// `stream_pos` at each recorded timestamp, in record order.
-    stamp_positions: [u32; 2 * MAX_GPU_PAIRS],
+    zone_open_order: [Cell<u16>; MAX_GPU_PAIRS],
+    /// `stream_pos` at each recorded BRACKET timestamp, in record order. Repairs are absent by
+    /// construction — see the module doc's point 3.
+    stamp_positions: [Cell<u32>; 2 * MAX_GPU_PAIRS],
 }
 
 impl Default for CommandWitness {
@@ -74,48 +115,80 @@ impl CommandWitness {
     #[must_use]
     pub fn new() -> CommandWitness {
         CommandWitness {
-            profiling_cmds: 0,
-            query_resets: 0,
-            timestamps: 0,
-            recorded_pairs: 0,
-            stream_pos: 0,
-            zone_open_order: [0; MAX_GPU_PAIRS],
-            stamp_positions: [0; 2 * MAX_GPU_PAIRS],
+            profiling_cmds: Cell::new(0),
+            query_resets: Cell::new(0),
+            timestamps: Cell::new(0),
+            repairs: Cell::new(0),
+            recorded_pairs: Cell::new(0),
+            stream_pos: Cell::new(0),
+            zone_open_order: core::array::from_fn(|_| Cell::new(0)),
+            stamp_positions: core::array::from_fn(|_| Cell::new(0)),
         }
     }
 
-    /// One recorded command that is **not** the profiler's.
+    /// Forget every frame but the next one.
     ///
-    /// Called at every `vkCmd*` in the witnessed region. Without these the positions below would
-    /// be a timestamp index rather than a stream position, and two legs whose brackets sit at
-    /// different points in the same command stream would be indistinguishable.
+    /// A stream position is a statement about ONE frame's recording. Left to accumulate over a
+    /// leg's K frames, the two legs' positions would still be comparable — and would agree for the
+    /// wrong reason, because a K-frame total is insensitive to a bracket that moved earlier in one
+    /// frame and later in another. Called at the top of the witnessed region, so what the reader
+    /// sees after a frame is that frame.
+    pub fn begin_frame(&self) {
+        self.profiling_cmds.set(0);
+        self.query_resets.set(0);
+        self.timestamps.set(0);
+        self.repairs.set(0);
+        self.recorded_pairs.set(0);
+        self.stream_pos.set(0);
+    }
+
+    /// One witnessed record site that is **not** the profiler's.
+    ///
+    /// Called at every `vkCmd*` in the region and at every call to a helper that records commands
+    /// elsewhere. Without these the positions below would be a timestamp index rather than a
+    /// stream position, and two legs whose brackets sit at different points in the same command
+    /// stream would be indistinguishable.
     #[inline]
-    pub fn command(&mut self) {
-        self.stream_pos = self.stream_pos.saturating_add(1);
+    pub fn command(&self) {
+        self.stream_pos.set(self.stream_pos.get().saturating_add(1));
     }
 
     /// One `vkCmdResetQueryPool` recorded by the profiler.
     #[inline]
-    pub fn query_reset(&mut self) {
-        self.query_resets = self.query_resets.saturating_add(1);
-        self.profiling_cmds = self.profiling_cmds.saturating_add(1);
-        self.stream_pos = self.stream_pos.saturating_add(1);
+    pub fn query_reset(&self) {
+        self.query_resets.set(self.query_resets.get().saturating_add(1));
+        self.profiling_cmds.set(self.profiling_cmds.get().saturating_add(1));
+        self.stream_pos.set(self.stream_pos.get().saturating_add(1));
     }
 
-    /// One `vkCmdWriteTimestamp` recorded by the profiler, at the current stream position.
+    /// One `vkCmdWriteTimestamp` recorded by the profiler **as a bracket**, at the current stream
+    /// position.
     ///
     /// The position is recorded **before** the increment, so it is the position *of* this command
     /// rather than of the one after it. That is the convention the cross-leg comparison rests on,
     /// and it is stated because either choice is defensible and only one can be used by both legs.
     #[inline]
-    pub fn timestamp(&mut self) {
-        let slot = self.timestamps as usize;
+    pub fn timestamp(&self) {
+        let slot = self.timestamps.get() as usize;
         if slot < self.stamp_positions.len() {
-            self.stamp_positions[slot] = self.stream_pos;
+            self.stamp_positions[slot].set(self.stream_pos.get());
         }
-        self.timestamps = self.timestamps.saturating_add(1);
-        self.profiling_cmds = self.profiling_cmds.saturating_add(1);
-        self.stream_pos = self.stream_pos.saturating_add(1);
+        self.timestamps.set(self.timestamps.get().saturating_add(1));
+        self.profiling_cmds.set(self.profiling_cmds.get().saturating_add(1));
+        self.stream_pos.set(self.stream_pos.get().saturating_add(1));
+    }
+
+    /// One `vkCmdWriteTimestamp` recorded by a totality **epilogue** rather than by a bracket.
+    ///
+    /// It is a real command — it moves the stream position and it is the profiler's — but it is
+    /// not a bracket, so it does not enter [`Self::stamp_positions`]. A collector whose readback
+    /// cannot tolerate an unwritten query has these; one that labels the pair instead does not,
+    /// and that difference must not read as a disagreement about where the brackets are.
+    #[inline]
+    pub fn repair(&self) {
+        self.repairs.set(self.repairs.get().saturating_add(1));
+        self.profiling_cmds.set(self.profiling_cmds.get().saturating_add(1));
+        self.stream_pos.set(self.stream_pos.get().saturating_add(1));
     }
 
     /// One pair OPENED for `zone` — the record-order witness.
@@ -124,43 +197,51 @@ impl CommandWitness {
     /// the bump allocator's business, and the question this answers is which bracket the recorder
     /// reached first.
     #[inline]
-    pub fn open_pair(&mut self, zone: u16) {
-        let slot = self.recorded_pairs as usize;
+    pub fn open_pair(&self, zone: u16) {
+        let slot = self.recorded_pairs.get() as usize;
         if slot < self.zone_open_order.len() {
-            self.zone_open_order[slot] = zone;
+            self.zone_open_order[slot].set(zone);
         }
-        self.recorded_pairs = self.recorded_pairs.saturating_add(1);
+        self.recorded_pairs.set(self.recorded_pairs.get().saturating_add(1));
     }
 
-    /// Every command the profiler recorded: resets plus timestamps.
+    /// Every command the profiler recorded: resets plus bracket timestamps plus repairs.
     #[must_use]
     #[inline]
     pub fn profiling_cmds(&self) -> u32 {
-        self.profiling_cmds
+        self.profiling_cmds.get()
     }
 
     /// `vkCmdResetQueryPool` calls the profiler recorded.
     #[must_use]
     #[inline]
     pub fn query_resets(&self) -> u32 {
-        self.query_resets
+        self.query_resets.get()
     }
 
-    /// `vkCmdWriteTimestamp` calls the profiler recorded.
+    /// `vkCmdWriteTimestamp` calls the profiler recorded **as brackets**.
     #[must_use]
     #[inline]
     pub fn timestamps(&self) -> u32 {
-        self.timestamps
+        self.timestamps.get()
+    }
+
+    /// `vkCmdWriteTimestamp` calls a totality epilogue recorded to close pairs the frame never
+    /// bracketed.
+    #[must_use]
+    #[inline]
+    pub fn repairs(&self) -> u32 {
+        self.repairs.get()
     }
 
     /// Pairs the recorder OPENED.
     #[must_use]
     #[inline]
     pub fn recorded_pairs(&self) -> u16 {
-        self.recorded_pairs
+        self.recorded_pairs.get()
     }
 
-    /// Commands recorded in the witnessed region, profiling and otherwise.
+    /// Record sites passed in the witnessed region, profiling and otherwise.
     ///
     /// **The instrument's own positive control.** A disarmed leg must show every profiling counter
     /// at zero — and so would a witness that was never threaded through anything. A non-zero
@@ -169,34 +250,38 @@ impl CommandWitness {
     #[must_use]
     #[inline]
     pub fn stream_pos(&self) -> u32 {
-        self.stream_pos
+        self.stream_pos.get()
     }
 
     /// Zone ids in the order their pairs were opened.
-    #[must_use]
-    #[inline]
-    pub fn zone_open_order(&self) -> &[u16] {
-        &self.zone_open_order[..self.recorded_pairs.min(MAX_GPU_PAIRS as u16) as usize]
+    ///
+    /// An iterator rather than a slice because the cells cannot be reborrowed as one, and every
+    /// use is a comparison: `w.zone_open_order().eq([30, 10, 20])`.
+    pub fn zone_open_order(&self) -> impl Iterator<Item = u16> + '_ {
+        let n = (self.recorded_pairs.get() as usize).min(self.zone_open_order.len());
+        self.zone_open_order[..n].iter().map(Cell::get)
     }
 
-    /// The stream position of each recorded timestamp, in record order.
-    #[must_use]
-    #[inline]
-    pub fn stamp_positions(&self) -> &[u32] {
-        let n = (self.timestamps as usize).min(self.stamp_positions.len());
-        &self.stamp_positions[..n]
+    /// The stream position of each recorded bracket timestamp, in record order.
+    ///
+    /// An iterator, for [`Self::zone_open_order`]'s reason. The cross-leg comparison is
+    /// `a.stamp_positions().eq(b.stamp_positions())`, which compares length as well as contents —
+    /// so a port that dropped a bracket reds here and not only in the arithmetic below.
+    pub fn stamp_positions(&self) -> impl Iterator<Item = u32> + '_ {
+        let n = (self.timestamps.get() as usize).min(self.stamp_positions.len());
+        self.stamp_positions[..n].iter().map(Cell::get)
     }
 
-    /// Whether the arithmetic the census exists to assert holds: **two timestamps per opened
-    /// pair**, and every one of them positioned.
+    /// Whether the arithmetic the census exists to assert holds: **two bracket timestamps per
+    /// opened pair**, and every one of them positioned.
     ///
     /// A method rather than a gate-local expression because both the G5 gate and rung 5c's
     /// cross-leg comparison need the same predicate, and two spellings of one equality are two
     /// things that can drift.
     #[must_use]
     pub fn timestamps_pair_up(&self) -> bool {
-        self.timestamps == u32::from(self.recorded_pairs) * 2
-            && self.stamp_positions().len() == self.timestamps as usize
+        self.timestamps.get() == u32::from(self.recorded_pairs.get()) * 2
+            && self.stamp_positions().count() == self.timestamps.get() as usize
     }
 }
 
@@ -211,10 +296,11 @@ mod tests {
         assert_eq!(w.profiling_cmds(), 0);
         assert_eq!(w.query_resets(), 0);
         assert_eq!(w.timestamps(), 0);
+        assert_eq!(w.repairs(), 0);
         assert_eq!(w.recorded_pairs(), 0);
         assert_eq!(w.stream_pos(), 0);
-        assert!(w.zone_open_order().is_empty());
-        assert!(w.stamp_positions().is_empty());
+        assert_eq!(w.zone_open_order().count(), 0);
+        assert_eq!(w.stamp_positions().count(), 0);
         // Vacuously true, and that is the point of stating it: the equality alone is not a gate.
         assert!(w.timestamps_pair_up());
     }
@@ -223,7 +309,7 @@ mod tests {
     /// and non-profiling commands move it.
     #[test]
     fn a_stamp_position_is_the_position_of_its_own_command() {
-        let mut w = CommandWitness::new();
+        let w = CommandWitness::new();
         w.command(); // stream_pos 0 -> 1
         w.command(); // 1 -> 2
         w.open_pair(9);
@@ -231,7 +317,7 @@ mod tests {
         w.command(); // 3 -> 4
         w.timestamp(); // recorded AT 4, then 4 -> 5
 
-        assert_eq!(w.stamp_positions(), &[2, 4]);
+        assert!(w.stamp_positions().eq([2, 4]));
         assert_eq!(w.stream_pos(), 5);
         assert_eq!(w.profiling_cmds(), 2, "a timestamp is itself a recorded command");
         assert_eq!(w.timestamps(), 2);
@@ -243,23 +329,24 @@ mod tests {
     /// cross-leg comparison rests on.
     #[test]
     fn moving_a_bracket_by_one_command_moves_one_position() {
-        let mut a = CommandWitness::new();
+        let a = CommandWitness::new();
         a.open_pair(1);
         a.timestamp();
         a.command();
         a.timestamp();
 
-        let mut b = CommandWitness::new();
+        let b = CommandWitness::new();
         b.open_pair(1);
         b.timestamp();
         b.command();
         b.command(); // one extra command before the closing stamp
         b.timestamp();
 
-        assert_eq!(a.stamp_positions()[0], b.stamp_positions()[0], "the open stamp did not move");
+        let (pa, pb): (Vec<u32>, Vec<u32>) =
+            (a.stamp_positions().collect(), b.stamp_positions().collect());
+        assert_eq!(pa[0], pb[0], "the open stamp did not move");
         assert_ne!(
-            a.stamp_positions()[1],
-            b.stamp_positions()[1],
+            pa[1], pb[1],
             "a bracket that closed one command later reported the same position, so the witness \
              cannot see a shifted bracket at all"
         );
@@ -269,7 +356,7 @@ mod tests {
     /// armed clause of G5 asserts.
     #[test]
     fn a_half_recorded_bracket_breaks_the_pairing_equality() {
-        let mut w = CommandWitness::new();
+        let w = CommandWitness::new();
         w.open_pair(1);
         w.timestamp();
         w.timestamp();
@@ -286,12 +373,71 @@ mod tests {
     /// The record-order witness records ORDER, not allocation index.
     #[test]
     fn the_open_order_is_the_order_pairs_were_opened() {
-        let mut w = CommandWitness::new();
+        let w = CommandWitness::new();
         // Opened in an order that is not the zone ids' order, so a witness that sorted or indexed
         // by zone would disagree.
         w.open_pair(30);
         w.open_pair(10);
         w.open_pair(20);
-        assert_eq!(w.zone_open_order(), &[30, 10, 20]);
+        assert!(w.zone_open_order().eq([30, 10, 20]));
+    }
+
+    /// A repair moves the stream and counts as the profiler's, but is not a bracket — the property
+    /// that lets a leg WITH a totality epilogue be compared against a leg without one.
+    #[test]
+    fn a_repair_is_a_command_but_not_a_bracket() {
+        let bracketed = CommandWitness::new();
+        bracketed.open_pair(1);
+        bracketed.timestamp();
+        bracketed.command();
+        bracketed.timestamp();
+        // ...and the epilogue closes a pass this frame never bracketed.
+        bracketed.repair();
+        bracketed.repair();
+
+        let labelled = CommandWitness::new();
+        labelled.open_pair(1);
+        labelled.timestamp();
+        labelled.command();
+        labelled.timestamp();
+
+        assert!(
+            bracketed.stamp_positions().eq(labelled.stamp_positions()),
+            "the epilogue's fillers entered the bracket positions, so a collector that repairs \
+             can never be compared against one that labels"
+        );
+        assert_eq!(bracketed.repairs(), 2);
+        assert_eq!(labelled.repairs(), 0);
+        assert_ne!(
+            bracketed.profiling_cmds(),
+            labelled.profiling_cmds(),
+            "a repair is a real recorded command and must be counted as one"
+        );
+        assert!(bracketed.timestamps_pair_up() && labelled.timestamps_pair_up());
+    }
+
+    /// `begin_frame` makes the witness a statement about ONE frame.
+    #[test]
+    fn begin_frame_forgets_the_previous_frame() {
+        let w = CommandWitness::new();
+        w.command();
+        w.open_pair(4);
+        w.timestamp();
+        w.timestamp();
+        assert_eq!(w.stream_pos(), 3);
+
+        w.begin_frame();
+        assert_eq!(w.stream_pos(), 0);
+        assert_eq!(w.timestamps(), 0);
+        assert_eq!(w.recorded_pairs(), 0);
+        assert_eq!(w.stamp_positions().count(), 0);
+
+        w.command();
+        w.open_pair(4);
+        w.timestamp();
+        assert!(
+            w.stamp_positions().eq([1]),
+            "the second frame's first stamp carried the first frame's offset"
+        );
     }
 }

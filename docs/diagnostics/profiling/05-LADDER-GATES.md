@@ -55,7 +55,7 @@ against the tree; it is marked where it appears. Diff against that document unti
 | `crates/boyko_rhi_vulkan/src/device.rs` | enable `hostQueryReset` when advertised; load `vkResetQueryPool`; expose the capability |
 | `crates/boyko_rhi_vulkan/src/rhi_impl/device.rs` | the three verb bodies, beside `fetch_query_pair_ticks` (`:1249`); `GPU_ZONE_QUERY_FLAGS` + its `const _` WAIT_BIT assert (G2a) |
 | `crates/boyko_rhi_vulkan/src/present/gpu_zone.rs` | **new** — `GpuZoneRecorder`, slot ring, marks+seal, 2×2 label, `submit_epoch` |
-| `crates/boyko_rhi_vulkan/src/present/passes/vb.rs` | `TsWitness` → `GpuZoneWitness`; `write_zero_pair` + epilogue gap-fill deleted at the retirement rung; `CommandWitness` counters + `first_pair_of` at the `vkCmd*` sites (`:107-156`'s pattern) |
+| `crates/boyko_rhi_vulkan/src/present/passes/vb.rs` | `TsWitness` → `GpuZoneWitness`; `write_zero_pair` + epilogue gap-fill deleted at the retirement rung; `CommandWitness` counters + `zone_open_order` at the `vkCmd*` sites (`:107-156`'s pattern) |
 | `crates/boyko_rhi_vulkan/src/present/passes/gbuffer.rs` | 4 + 1 brackets ported |
 | `crates/boyko_rhi_vulkan/src/present/swapchain.rs` | `PresentModeConfig`; `:199` becomes a probed choice with a loud fallback |
 | `crates/boyko_rhi_vulkan/src/present/gpu_timing.rs` | **retired at rung 7**, not before |
@@ -136,7 +136,7 @@ flag-off legs on the logging side and by GJ1's control leg here.
 | **2** | `boyko_ecs::…::profiling`: `VmReservation`-backed store with an arm-time `zone_stride`, `fold.rs` (two regions, monotone-overflow delta, clock-epoch check, bidirectional walk), `arm`/`disarm`, `ProfilerPlugin`, world-bind check. **Requires `boyko_log` L3.** Flips the `W92xx` registry rows it emits from `Pending` to `Live` with their doc pages | **G4b (the `u64` accumulator + the consumer-side delta, = logging's G11), G21, G23a (`section_report{LANES, REGISTRY}` — the two statics that exist here)** | additive |
 | **3** *(**COMPLETE** — **3a** the field, the mint, `W9201`/`W9208`; **3b** the `App` zones; **3c** the per-system spans; **3d** the analysis half)* | `SystemMeta.zone` + const-assert; tier-gated minting at `try_build` with **non-terminal** refusal; the four `App` zones (`__frame`/`__events`/`__fixed_step`/`__main_run`) at `update_with_delta`; the dispatch-round pair `__round`/`__round_width` **in place of `RoundRecord`**; `intervals` + `ConcurrencyReport` under `profiling-analysis`, **without `compat` and without `sys_of`** — see "What rung 3d SHIPPED" below for all four departures and their arguments | **G8, G9, G11 (engine half)** | one field in tail padding; four zone sites |
 | **4** *(**SHIPPED**)* | RHI seam: three verbs + Vulkan impls + `ffi.rs` constants + `GPU_ZONE_QUERY_FLAGS` const-assert + Mock defaults and their pinning tests. **No consumer.** Plus `VkPhysicalDeviceHostQueryResetFeatures` (granular, for the VUID reason the descriptor-indexing struct already carries) and `DeviceCaps::host_query_reset` — see "What rung 4 SHIPPED" below | **G2a, G2c** | old readers untouched |
-| **5** *(lands in parts: **5a** shipped — the edge, `gpu_zone.rs`, the 2×2 label, **G2b**; **5b** shipped — `CommandWitness` behind `profiling-census` + **G5**; **5c** the VB port, the serial A/B and **G10**)* | `boyko_rhi_vulkan → boyko_diag` edge; `gpu_zone.rs` + `CommandWitness` (`first_pair_of` **and** `stamp_positions`, behind `profiling-census`); VB brackets ported. **Serial A/B against the old collector** (never both armed in one frame — F17) | **G2b, G5, G10** | both collectors exist; every existing test still compiles and passes |
+| **5** *(**COMPLETE** — **5a** the edge, `gpu_zone.rs`, the 2×2 label, **G2b**; **5b** `CommandWitness` behind `profiling-census` + **G5**; **5c** the VB port, the A/B and **G10**'s witness clause — see "What rung 5c SHIPPED" below for the four departures)* | `boyko_rhi_vulkan → boyko_diag` edge; `gpu_zone.rs` + `CommandWitness` (`zone_open_order` **and** `stamp_positions`, behind `profiling-census`); VB brackets ported. **Serial A/B against the old collector** (never both armed in one frame — F17) | **G2b, G5, G10** | both collectors exist; every existing test still compiles and passes |
 | **6** | gbuffer + SV0 ported; the R0 harness reads the new channel while the old one still exists | G10 extended to those passes | additive |
 | **7 (the single subtractive rung)** | Delete `gpu_timing.rs`, the runner harness bodies, the statistics helpers **and the four `VB-P1d`/`VB-P4` print sites** (`runner.rs:3089`, `:3096`, `:3121`, `:3137`) — **and migrate all six stdout consumers to the artifact in the same commit** (S1; list below) | the post-rung `rg` gate **plus the S1 stdout gate (G24)** | one commit, workspace green before and after |
 | **7b (NEW — S1)** | **Floor re-measurement on the artifact channel.** Re-run A6's protocol (7 processes × 3 repetitions) reading the artifact instead of stdout; publish `docs/PROFILING-FLOOR.md` with the new `WorkloadTag`, all three repetition floors, and `FLOOR_REDUCTION = Max` | **G3a's reduction RED** | needs rung 7's channel; blocks nothing but *licenses* rung 8's verdicts |
@@ -165,7 +165,7 @@ names and omitted three production sites (F16):
 | `crates/boyko_rhi_vulkan/src/present/gpu_timing.rs` | **deleted** |
 | `crates/boyko_rhi_vulkan/src/present/mod.rs` | **re-export at `:52-56`** — unlisted by rev 2 |
 | `crates/boyko_rhi_vulkan/src/present/passes/vb.rs` | recorder |
-| `crates/boyko_rhi_vulkan/src/present/scene_types.rs` | **`use` at `:21`; three public `Option<&'a …Collector>` fields at `:2631`, `:2643`, `:2655`** — unlisted by rev 2. **(Anchor corrected at the split: rev 4 wrote `:2645`; the field `vb_gpu_timing: Option<&'a VbTimestampCollector>` is at `:2643` and `:2645` is a doc-comment line. Re-verified against HEAD.)** |
+| `crates/boyko_rhi_vulkan/src/present/scene_types.rs` | **`use` at `:21`; the three public `Option<&'a …Collector>` fields, now at `:2633`, `:2645`, `:2696`, plus rung 5c's two — `vb_gpu_zone` at `:2665` and `vb_cmd_witness` at `:2684`** — unlisted by rev 2. **(Anchor corrected twice, and the second time by an edit of my own: rev 4 wrote `:2645` for `vb_gpu_timing`, which was then `:2643` with `:2645` a doc-comment line; rung 5c inserted two fields between `vb_gpu_timing` and `sv0_gpu_timing` and moved all three. Re-verified against HEAD. A row that cites five line numbers in one file is a row that goes stale every time that file grows — it is kept because the FIELD NAMES beside the numbers are what a reader searches for when the numbers rot.)** |
 | `crates/boyko_rhi_vulkan/src/swapchain.rs` | **re-export at `:14-16`** — unlisted by rev 2 |
 | `crates/boyko_rhi_vulkan/tests/software_ray_baseline_cost.rs` | migrates to zones |
 | `crates/boyko_rhi_vulkan/tests/window_present_gbuffer.rs` | migrates to zones |
@@ -700,6 +700,94 @@ would be comparing two instruments; with one, it compares two recorders. That is
 distinction `stamp_positions` exists for one level up — it has no vocabulary, so no mapping table
 can be wrong — and it applies to the instrument as well as to the datum.
 
+### What rung 5c SHIPPED, and the five things measuring it refuted
+
+`TsWitness` now carries both collectors and picks exactly one (`vb.rs`, `TsWitness::open`); the VB
+brackets record through whichever is armed; `CommandWitness` counts **211 record sites** in `vb.rs`;
+`GpuSceneBundles` owns the recorder behind `BOYKO_VB_ZONE`; and
+`crates/boyko_app/tests/vb_zone_ab_witness_gate.rs` is G10's witness clause with a run RED.
+
+**GREEN, measured:** 26 frames compared, 520 bracket timestamps, every position identical.
+A steady `VisibilityBuffer × Mesh` frame reads
+`stream_pos=68 profiling_cmds=21 resets=1 stamps=20 repairs=0 pairs=10`, positions
+`[1,2,3,4,16,17,18,19,27,28,41,42,43,44,45,46,47,55,56,57]` — **the same list on both legs** — and the
+zone leg retires every frame `cause=Complete lost=0 torn=0`. Four goldens (`vb_mesh`, `vb_mesh_tex`,
+`vb_both_sdf`, `grand_showcase`) byte-identical after the port.
+
+**1. The prescribed pair-index DERIVATION is WRONG, and would have swapped every END.** The 5c
+handoff recorded as settled that `end` should compute `(begun & ((1 << slot) - 1)).count_ones()`,
+because the bump allocator hands pairs out in open order. The premise is true; the formula does not
+follow — it counts begun passes with a *lower slot number*, which equals the open index only if the
+passes open in increasing slot order. **MEASURED: `record_vb` opens `0, 1, 9, 3, 4, 5, 6, 7, 8, 2`**
+(`VbRun` third, `VbShade` last — `VbTimedPass`'s own leg table says so). For `VbRun` the derivation
+yields **8** where the pair is **2**. Nothing at rung 5 reads a duration, so every END written into
+another pass's query would have been invisible until rung 8 read numbers that were never anyone's.
+`TsWitness::pair_of` REMEMBERS the index instead; remembering has no ordering premise.
+
+**2. `G10`'s prescribed RED is not producible, because the port did not duplicate its sites.**
+*"Shift a bracket by one command"* injected at a bracket site shifts **both** legs equally and stays
+green: `TsWitness::begin`/`end` are one call each and dispatch to whichever collector is armed. That
+shared site is the design's strength (the corpus's own point 4 — one instrument, two recorders) and
+it makes the RED necessarily **leg-specific**. RUN: one `ts.cmd()` inside `begin`'s `zr` arm only ⇒
+leg B reads `[2,3,5,6,19,21,22,24,32,34,47,49,50,52,53,54,56,64,66,67]` against leg A's list ⇒ red at
+frame 4 with both streams printed. A control preceded it: the same file with no injection is green.
+
+**3. `168` command sites was wrong in both of its numbers.** MEASURED at HEAD: **167** through
+`self.fns.cmd_*` across **19** verbs (37/26/22/20 for the four the corpus names, then 15 more
+summing to 62 — the corpus says "63 more across sixteen other verbs"), **plus 2** through
+`crate::accel::cmd_*` helpers the `fns.cmd_` grep cannot see. Neither 167 nor 169 is 168. And the
+instrumented total is **211**, not 169, because 42 more sites are calls to helpers that record
+elsewhere (`record_vb_pass` ×34, the AA/post chain ×5, the 2 accel helpers, ×1 more) — a delegate
+counts as ONE whatever it records inside, so `stream_pos` is a position in `vb.rs`'s record stream
+and not a count of `vkCmd` calls. Rung 5b's *"every recorded command in the witnessed region"* was
+wider than any instrument that does not also thread through the shared post-process recorders; the
+doc now states the bound instead of the claim.
+
+**4. The threading "fork" has a measured cheapest branch, and it is one parameter.** The handoff
+called the choice between a threaded `&mut CommandWitness`, a witness in the recorder, and a macro
+wrapper *"a real fork"*. Attributed to their enclosing functions, **all 167 direct sites live in
+THREE functions** — `record_vb` (158), `record_hzb_poison_build` (5), `record_vb_viewt_dispatch` (4)
+— and the first two already have the witness in scope. Exactly one function needed a new parameter.
+
+**5. `first_pair_of` never existed.** Rung 5b shipped the member as `zone_open_order`; the corpus
+named `first_pair_of` in 11 places across three files (`02-GPU.md`, `03-STATISTICS.md`, this file's
+rung-5 row, `G10`'s row, and the touched-files table), and a `rg` for it returns nothing in any
+`.rs`. Renamed here, and the sketch's `[ZoneId; …]` corrected to `[u16; …]` — `ZoneId` is not the
+type either.
+
+**And one gate that had been RED for five commits without anyone asking it.** `G2a`'s second clause
+— the census of files naming `vkGetQueryPoolResults` — went red the moment rung 5a landed
+`gpu_zone.rs`, whose module doc explains what the BLOCK cost. It stayed red through `ee9196b6`,
+`cb54752d`, `8ca4e05b`, `cf8ffd20` and `7ae9162a`, three of which reported the workspace green. The
+row is added with that history written into it: *an enumeration that is not executed is a list, not
+a gate.* The mechanism was right; the running of it was the gap, and no gate can close that one.
+
+#### What rung 5c did NOT do, stated so rung 6 does not re-derive it
+
+- **The A/B is TWO PROCESSES, where G10's row says "in one process".** Not a shortcut: leg A's
+  readback is `read_vb_bench_ns`, which waits with `VK_QUERY_RESULT_WAIT_BIT`. A single process
+  alternating legs would reach it on a frame whose pool leg B recorded instead — **the hang class
+  P4-1 removed**, and the one failure `vb_bench_totality_gate.rs` says it cannot convert into a red.
+  One boot, one leg, makes it unreachable; `GpuSceneBundles::boot` asserts the two knobs apart.
+  The **ABBA** ordering cancels temporal drift between the two legs' *timings*, and the timing clause
+  is deferred (below), so there is nothing here for it to cancel.
+- **`G10`'s TIMING clause stays deferred to rung 8**, exactly as the pre-5c note argued: its band is
+  `resolve`'s and `Floor`/`Twin`/`resolve` are rung 8's content. The witness clause is what G10's own
+  text says licenses the deletion.
+- **The frames the comparison trusts start at 4.** MEASURED: frames 0–2 read `stream_pos=70` with
+  positions starting at 3, frames 3+ read `68` starting at 1 — the first frames have no previous
+  depth pyramid and record a different set of passes. Identical on both legs, but comparing them
+  would make the gate's subject "does frame 0 look like frame 0".
+- **The `profiling-census` feature moved what it gates.** It now covers the ~211 increments, not the
+  `CommandWitness` type or `GBufferScene`'s `Option<&CommandWitness>` field. Features unify per
+  PACKAGE: a `#[cfg]`'d field appears or vanishes for `boyko_app`'s construction site depending on a
+  flag no `boyko_app` source names, and the workspace then stops compiling for a reason no crate
+  shows. `boyko-app` and `boyko-render` gained forwarding features so the gate can turn it on.
+- **The gate's own first live run was a false red, from its own parser.** `line.find("pairs=")`
+  matches inside `repairs=0` and read the repair count as the pair count, reporting "every `pairs=`
+  is 0" against a line printing `pairs=10`. `key_u32` is token-anchored now. Recorded because it is
+  the census's own defect class one level up: an instrument wrong about which number it was reading.
+
 ### Two rung-3b decisions
 
 1. **Nothing the zones measure is copied into `FrameRecord`.** The corpus's record carries
@@ -765,7 +853,7 @@ hand-written table to compare its two sides (G10 / M12).
 | **G7** **[F-fix]** | Unclaimed refusal **and correct lane attribution** | (a) Emit from an unclaimed `std::thread` ⇒ `unclaimed_drops > 0` **and** no lane cursor moved; routing unclaimed threads to lane 0 fails clause (a). (b) **Positive control:** a zone emitted on worker `k` lands in `LANES[k]` and nowhere else — deleting the `set_lane` call in `worker_main` makes every worker read `LANE_UNCLAIMED` and fails (b). (c) **JOIN clause, new in rev 4 (S3):** one fixture emits one `warn!` and opens one zone on the same worker; the log record's `lane` field and the sample's lane index must be the **same integer**. Give the logger its own registry back ⇒ they differ ⇒ red. (d) 200 short-lived threads ⇒ per-thread allocations on first emit == **0**; reinstate a `Drop`-guarded TLS ⇒ 1 ⇒ red | It cannot claim the *host* lane is claimed in every host configuration — a host that never calls `claim_lane` drops, which is (a)'s behaviour and is counted. Clause (b) is what would have caught rev 2's contradiction between A1 step 4 and D2 (F12); clause (c) is what would catch two registries diverging. **Clause (c) lands at profiling rung 2 / logging L5, not at rung 1** — a JOIN needs both emitters to exist (`substrate/gates-dg`'s deferred list) |
 | **G8** **[F-fix]** | Concurrency computability | A two-system schedule with a known conflict and a known-compatible pair ⇒ `declared` matches the conflict graph and `observed` is non-zero. **Configuration pinned:** the gate builds a pool with ≥ 2 workers and both systems spin a calibrated ≥ 100 µs, so the overlap is not marginal. If the pool has < 2 workers the gate **SKIPS with a printed reason, and CI fails on any nonzero skip count**. Discard intervals at fold ⇒ `observed` unavailable ⇒ red | It cannot claim the *serialisation index* of a real frame is accurate: `intervals` is an 8-frame ring with `INTERVALS_PER_FRAME = 2048` and an `intervals_dropped` counter, and it covers **one** schedule (`analysed_schedule`), with the rest in `systems_unanalysed`. Rev 2's version could be flaky-red on a small pool and self-overwrote a `Fixed` system N−1 times per frame (F19) |
 | **G9** **[F-fix]** | Instrument disclosure, with **magnitude** | (a) `instrument_measured > 0` when armed; (b) `run_net < run_gross`; (c) **`instrument_measured >= instrument_zone_count × __cpu_null_median`** — a constant stub of `1` fails this; (d) a frame carrying a telemetry write has strictly larger `instrument_measured` than **both** neighbours by more than the band | It cannot claim the profiler's *total* perturbation is known. `instrument_estimated` (`zone_count × zone_cost`) comes from a different binary and is **printed, never subtracted** (F18). Rev 2 had only (a) and (b), which a constant `1` satisfied |
-| **G10** **[F-fix]** | The old and new GPU collectors agree well enough to license the deletion | **Serial, not simultaneous** (F17): K frames with only `VbTimestampCollector` armed, then K frames with only `GpuZoneRecorder` armed, in one process, ABBA-ordered. Verdict is `resolve`'s: per pass, `\|median_old − median_new\| <= band`, where `band = max(floor, twin, se_floor, measured quantum)` — **not "one quantum"**, which on this box is a tolerance of **0** and therefore unsatisfiable (F6). Plus **`CommandWitness::stamp_positions` must be identical between the two legs** — same timestamp count, each at the same position in the recorded command stream (D17/M12). RED: shift a bracket by one command ⇒ one position differs ⇒ red before any timing is consulted | It cannot claim the two collectors are *bit-equal*: they write different queries in different pools, and the P4-6 lesson is that timestamps cannot license record-order conclusions. **The witness clause, not the timing clause, is what licenses the deletion**; the timing clause is a magnitude sanity check with a band. **Rev 3's witness could not have been compared at all:** `first_pair_of` is `[ZoneId; …]` and the old collector has only `VbTimedPass` slots (`gpu_timing.rs:229`, `VB_PASS_COUNT = 10` at `:391` — both verified), so the equality needed exactly the hand-maintained mapping table D6 rejects — and a table written alongside the port makes the equality a tautology. `stamp_positions` has no vocabulary, so no mapping exists to be wrong |
+| **G10** **[F-fix]** | The old and new GPU collectors agree well enough to license the deletion | **Serial, not simultaneous** (F17): K frames with only `VbTimestampCollector` armed, then K frames with only `GpuZoneRecorder` armed, in one process, ABBA-ordered. Verdict is `resolve`'s: per pass, `\|median_old − median_new\| <= band`, where `band = max(floor, twin, se_floor, measured quantum)` — **not "one quantum"**, which on this box is a tolerance of **0** and therefore unsatisfiable (F6). Plus **`CommandWitness::stamp_positions` must be identical between the two legs** — same timestamp count, each at the same position in the recorded command stream (D17/M12). RED: shift a bracket by one command ⇒ one position differs ⇒ red before any timing is consulted. **⚠️ AS WRITTEN THIS RED IS NOT PRODUCIBLE, measured at rung 5c:** the port did not duplicate the bracket sites — `TsWitness::begin`/`end` are one call each, dispatching to whichever collector is armed — so a shift injected at a site moves BOTH legs and stays green. The RED must be LEG-SPECIFIC (one extra witnessed site inside `begin`'s zone arm only), which is what `vb_zone_ab_witness_gate.rs` runs | It cannot claim the two collectors are *bit-equal*: they write different queries in different pools, and the P4-6 lesson is that timestamps cannot license record-order conclusions. **The witness clause, not the timing clause, is what licenses the deletion**; the timing clause is a magnitude sanity check with a band. **Rev 3's witness could not have been compared at all:** `zone_open_order` is `[ZoneId; …]` and the old collector has only `VbTimedPass` slots (`gpu_timing.rs:229`, `VB_PASS_COUNT = 10` at `:391` — both verified), so the equality needed exactly the hand-maintained mapping table D6 rejects — and a table written alongside the port makes the equality a tautology. `stamp_positions` has no vocabulary, so no mapping exists to be wrong |
 | **G11** **[B3-fix]** | A game cannot starve the engine — **id space**, with the RED produced by the **recommended** game path | The exhausting leg is a **static `declare_zone!` in a crate whose root says `profiling_partition!(User)`** (rev 3's leg used `register_zone`, which is not the path the plan recommends — so the gate's input class excluded the defect). Exhaust `user_zone_budget` until `W9210`, **then** mint a fresh engine `declare_zone!` from `boyko_ecs` and assert it succeeds with an id `< ENGINE_ZONE_SLOTS` and its samples land in the window. Key the partition on the macro instead of the crate ⇒ the user crate's static zones mint from `ENGINE_ID_NEXT` ⇒ the engine mint is refused ⇒ red. Second RED: delete the `profiling_partition!` line ⇒ the user crate does not compile (no default). **Third clause (C-III):** exhausting the *engine* range must **not panic** — it must return `DISABLED`, bump `zones_refused` and emit `W9201` once | It cannot claim a game gets the zones it asked for — only that its refusal is counted and does not propagate. It cannot bind an out-of-workspace crate that writes `profiling_partition!(Engine)`; that crate fails the `ENGINE_PACKAGES` const-assert instead (D6) |
 | **G12** **[B2-fix]** | Scope toggle round-trip, two-sided, **through the path a game actually has** | With scopes A and B armed, an ordinary **parallel** system issues `commands.entity(a).disable::<ProfilingScopeEnabled>()` ⇒ **the next** frame has zero A samples **and** a non-zero count of B samples; re-enable ⇒ A returns. Clause 2: the same assertions through the direct `world.disable::<ProfilingScopeEnabled>(a)` path. Clause 3 **(the B2 red)**: make `ProfilingScope` itself the enable tag ⇒ it does not compile (`boyko_macros` rejects a fielded bitset tag); force the id through anyway ⇒ `is_enabled` returns `false` for every scope ⇒ the projected mask is 0 ⇒ **no samples of any scope** ⇒ red. An implementation that clears the whole mask passes clause 1 and fails clause 2; one that writes the wrong bit fails clause 1 | It cannot claim the toggle is *instantaneous*. The projection runs at the next fold, so the gate asserts the **next** frame, never the same one (D20) — which is true of **both** write paths, because the command applies inside the same schedule run. Stated in the API doc |
 | **G13** | `resolve` refuses an incomplete window | Force a region overflow inside leg A ⇒ `NotResolved { WindowIncomplete }` with the delta fields still populated. Remove the refusal ⇒ `Resolved` on a truncated window ⇒ red. Sibling clauses: differing `epoch` ⇒ `EpochBreak`; a `LOST` label ⇒ `LabelNotMeasured`; a foreign `WorkloadTag` ⇒ `FloorWorkloadMismatch` | It cannot claim a *complete* window is trustworthy — completeness is necessary, not sufficient |
@@ -851,7 +939,7 @@ excludes `__fold`.
 availability (Mock) · a slot retires on the epoch deadline with an unwritten pair · **a slot
 retires on the FRAME deadline with `render_epoch` frozen, and `grace` never underflows from 0
 (M13)** · `flush_gpu` at teardown labels every in-flight pair and bumps `gpu_slots_abandoned` ·
-`CommandWitness::first_pair_of` records the recording order, not the timestamp order ·
+`CommandWitness::zone_open_order` records the recording order, not the timestamp order ·
 **`stamp_positions` is identical across two recordings of the same pass list and differs when one
 bracket moves by one command (M12)**.
 

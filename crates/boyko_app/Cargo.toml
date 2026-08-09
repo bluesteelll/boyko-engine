@@ -31,6 +31,11 @@ boyko-macros = { path = "../boyko_macros" }
 # can opt into the GPU-resident per-frame TLAS build. Default OFF: a `not(hwrt)` host build is
 # TEXTUALLY the pre-R2a-3 code (every RT item is `#[cfg(feature = "hwrt")]`-gated).
 hwrt = ["boyko-render/hwrt"]
+# Profiling rung 5c: forwards to `boyko-render/profiling-census` (-> `boyko_rhi_vulkan/
+# profiling-census`) so G10's A/B workers count the commands `record_vb` records. Default OFF: a
+# host build without it threads the same `Option<&CommandWitness>` and every increment at the
+# record sites compiles to nothing, so the census cannot perturb a shipped or golden frame.
+profiling-census = ["boyko-render/profiling-census"]
 
 [dev-dependencies]
 # The zero-alloc gate reads the uploaded instance bytes back via `bytes_of`.

@@ -71,6 +71,10 @@ use boyko_rhi_vulkan::memory::BoundBuffer;
 // fold and the shader's mirrored constant have one spelling between them. The two FORCE bits left
 // this file at piece 4 rung P4-4 — they now ride `VbOcclusionArm::force_flags`, minted by
 // `crate::occlusion_arm` from the diagnostic Resource and threaded per frame.
+use boyko_rhi_vulkan::present::command_witness::CommandWitness;
+use boyko_rhi_vulkan::present::gpu_zone::{
+    GPU_RING_DEPTH, GpuZoneRecorder, PairResult, QUERIES_PER_SLOT, RetireScratch, RetiredFrame,
+};
 use boyko_rhi_vulkan::present::{HzbPlan, VB_CULL_OCC_ARMED, VbOcclusionArm};
 use boyko_rhi_vulkan::rhi_impl::{
     ComputePipeline, VulkanBindGroup, VulkanBindGroupLayout, VulkanGraphicsPipeline,
@@ -1592,6 +1596,27 @@ pub(crate) struct GpuSceneBundles {
     /// `sv0_gpu_timing: None` into every `GBufferScene` and the `record_gbuffer` command stream
     /// stays byte-identical. See [`Self::sv0_bench_armed`] / [`Self::read_sv0_marcher_ticks`].
     sv0_bench: Option<Sv0TimestampCollector>,
+    /// Profiling rung 5c: the GPU **zone** recorder — leg B of G10's A/B, and the replacement
+    /// rung 7 deletes [`Self::vb_bench`] in favour of. Built at [`Self::boot`] only under
+    /// `BOYKO_VB_ZONE` + device timestamp support, and REFUSED alongside `BOYKO_VB_BENCH`: the two
+    /// legs are compared, so a boot that armed both would compare a stream to itself.
+    ///
+    /// Its own ring is `GPU_RING_DEPTH` deep and independent of `FRAMES_IN_FLIGHT`, so unlike the
+    /// collector above it never needs the frame slot `s` — [`Self::vb_zone_slot`] carries the slot
+    /// its own `open_frame` claimed.
+    vb_zone: Option<GpuZoneRecorder>,
+    /// The ring slot [`Self::open_vb_zone_frame`] claimed for the frame being recorded, or `None`
+    /// when every slot was still in flight (a stated refusal: the honest response is to record no
+    /// zones this frame rather than to overwrite unread results).
+    vb_zone_slot: Option<usize>,
+    /// [`Self::vb_bench_disarmed`]'s sibling for the zone leg, set by the same boot-time path
+    /// predicate and for the same reason: every writer lives inside `record_vb`.
+    vb_zone_disarmed: bool,
+    /// Profiling rung 5c: the command census both A/B legs feed, through the SAME `TsWitness` call
+    /// sites. Built whenever either leg is armed. Without `boyko_rhi_vulkan/profiling-census` its
+    /// verbs are compiled out at those sites, so it stays at zero and the per-frame line says so —
+    /// which is why the gate that reads it enables the feature rather than trusting the default.
+    vb_census: Option<CommandWitness>,
 }
 
 /// VG R3 piece 4 rung P4-1: one bench frame's timestamp readback — `VB_PASS_COUNT` begin OFFSETS,
@@ -4505,6 +4530,38 @@ impl GpuSceneBundles {
             Sv0TimestampCollector::new(pools)
         });
 
+        // Profiling rung 5c: the GPU zone recorder — leg B of G10's A/B. The SAME presence-gate +
+        // device-cap shape as the two benches above, on its own knob.
+        //
+        // The two legs are REFUSED TOGETHER rather than resolved by precedence. G10 compares one
+        // against the other, and a boot that armed both would have `TsWitness` pick one and the
+        // operator read the result as a comparison — a green that compared a stream to itself. The
+        // refusal is here, at the one place that knows both halves, and not in the recorder, which
+        // sees only what it was handed.
+        let vb_zone_requested = std::env::var("BOYKO_VB_ZONE").is_ok();
+        assert!(
+            !(vb_zone_requested && vb_bench_requested),
+            "invariant: BOYKO_VB_ZONE and BOYKO_VB_BENCH are mutually exclusive. They are the two \
+             LEGS of the profiling rung 5c A/B (G10) — one process arms exactly one, and the gate \
+             spawns two processes. Arming both would let one boot report a comparison it never made."
+        );
+        if vb_zone_requested && !vb_bench_timestamps_usable {
+            eprintln!(
+                "profiling rung 5c: BOYKO_VB_ZONE set but device timestamps are unusable — zone recorder disabled."
+            );
+        }
+        let vb_zone = (vb_zone_requested && vb_bench_timestamps_usable).then(|| {
+            let pools: [VulkanQueryPool; GPU_RING_DEPTH] = core::array::from_fn(|_| {
+                RhiDevice::create_query_pool(ctx, &QueryPoolDesc { count: QUERIES_PER_SLOT })
+                    .expect("invariant: profiling rung 5c zone query-pool create")
+            });
+            GpuZoneRecorder::new(pools)
+        });
+        // One census for whichever leg this boot armed. Built from the REQUEST rather than from the
+        // collector, so a device that declined timestamps still prints a census line saying the
+        // stream had commands and no brackets — which is a different report from silence.
+        let vb_census = (vb_zone_requested || vb_bench_requested).then(CommandWitness::new);
+
         Self {
             raster_pipeline,
             instance_layout,
@@ -4661,6 +4718,11 @@ impl GpuSceneBundles {
             // instant it is.
             vb_bench_disarmed: false,
             sv0_bench,
+            vb_zone,
+            vb_zone_slot: None,
+            // Same reason as `vb_bench_disarmed` directly above: the path is resolved later.
+            vb_zone_disarmed: false,
+            vb_census,
         }
     }
 
@@ -6676,6 +6738,12 @@ impl GpuSceneBundles {
             // runner's `vb_bench_armed()` reads, so a path-disarmed boot cannot leave the
             // recorder armed while the readback thinks otherwise (or the reverse).
             vb_gpu_timing: self.vb_timing_for_frame(),
+            // Profiling rung 5c: read through `vb_zone_for_frame`, the SAME accessor the runner
+            // reads — and structurally exclusive with `vb_gpu_timing` above, because `boot` refuses
+            // the two knobs together. `None` on every golden/host/interactive frame.
+            vb_gpu_zone: self.vb_zone_for_frame(),
+            // The census both legs feed, through the same `TsWitness` sites.
+            vb_cmd_witness: self.vb_census(),
             // VB-SV0 rung S1.5: the Deferred marcher bench collector, armed ONLY when
             // `BOYKO_SV0_BENCH` was read at `Self::boot` time AND the device supports timestamps
             // (`Self::sv0_bench_armed`'s own doc) — `None` on every other boot, so the recorded
@@ -7351,6 +7419,82 @@ impl GpuSceneBundles {
         if self.vb_bench_disarmed { None } else { self.vb_bench.as_ref() }
     }
 
+    /// Profiling rung 5c: [`Self::vb_timing_for_frame`]'s sibling for leg B — THE single predicate
+    /// `Self::scene` and the runner both read, for the reason stated there.
+    ///
+    /// `None` when the leg is disarmed, when no recorder was built, **or when this frame claimed no
+    /// ring slot**. The third is a real outcome and not an error: every slot still in flight means
+    /// the GPU is more than `GPU_RING_DEPTH` frames behind, and recording no zones is the honest
+    /// response to that — overwriting a slot whose results were never read would report one frame's
+    /// timings as another's.
+    #[inline]
+    pub(crate) fn vb_zone_for_frame(&self) -> Option<(&GpuZoneRecorder, usize)> {
+        if self.vb_zone_disarmed {
+            return None;
+        }
+        Some((self.vb_zone.as_ref()?, self.vb_zone_slot?))
+    }
+
+    /// Profiling rung 5c: the command census, if either A/B leg armed one.
+    #[inline]
+    pub(crate) fn vb_census(&self) -> Option<&CommandWitness> {
+        self.vb_census.as_ref()
+    }
+
+    /// Profiling rung 5c: claim this frame's ring slot, BEFORE `Self::scene` reads it.
+    ///
+    /// Separate from `scene` because claiming needs `&mut self` (the ring's cursor and the slot's
+    /// marks) while `scene` hands out shared borrows for the whole frame. A no-op when the leg is
+    /// not armed, so the frame loop calls it unconditionally rather than behind a predicate that
+    /// could drift from `vb_zone_for_frame`'s.
+    pub(crate) fn open_vb_zone_frame(&mut self, frame: u32, submit_epoch: u64, frame_now: u64) {
+        if self.vb_zone_disarmed {
+            return;
+        }
+        self.vb_zone_slot = self
+            .vb_zone
+            .as_mut()
+            .and_then(|rec| rec.open_frame(frame, submit_epoch, frame_now));
+    }
+
+    /// Profiling rung 5c: poll the ring and hand every retired frame to `sink`.
+    ///
+    /// A no-op without an armed recorder. `scratch` is the caller's, because it is ~9 KiB and a
+    /// per-frame temporary of that size is exactly the allocation this engine preallocates away.
+    pub(crate) fn retire_vb_zone(
+        &mut self,
+        ctx: &VulkanContext,
+        render_epoch: u64,
+        frame_now: u64,
+        scratch: &mut RetireScratch,
+        sink: impl FnMut(RetiredFrame, &[PairResult]),
+    ) {
+        let Some(rec) = self.vb_zone.as_mut() else { return };
+        rec.retire(ctx, render_epoch, frame_now, scratch, sink)
+            .expect("invariant: profiling rung 5c zone retire reads its own pools");
+    }
+
+    /// Profiling rung 5c: force-retire every in-flight slot at teardown.
+    ///
+    /// Frames stop at shutdown, so neither deadline horn can fire; without this the last
+    /// `GPU_RING_DEPTH` frames would be dropped silently — the loss a profiler exists to report.
+    pub(crate) fn flush_vb_zone(
+        &mut self,
+        ctx: &VulkanContext,
+        scratch: &mut RetireScratch,
+        sink: impl FnMut(RetiredFrame, &[PairResult]),
+    ) {
+        let Some(rec) = self.vb_zone.as_mut() else { return };
+        rec.flush(ctx, scratch, sink).expect("invariant: profiling rung 5c zone flush");
+    }
+
+    /// Profiling rung 5c: `true` iff this boot built a zone recorder — the boot-time question,
+    /// distinct from [`Self::vb_zone_for_frame`]'s per-frame one.
+    #[inline]
+    pub(crate) fn vb_zone_armed(&self) -> bool {
+        !self.vb_zone_disarmed && self.vb_zone.is_some()
+    }
+
     /// VG R3 piece 4 rung P4-1: disarms the VB-P1d bench collector unless this boot resolved
     /// `RenderPath::VisibilityBuffer`. Returns `true` iff it actually disarmed a live collector —
     /// i.e. iff `BOYKO_VB_BENCH` armed one and the path cannot feed it.
@@ -7384,13 +7528,25 @@ impl GpuSceneBundles {
     pub(crate) fn disarm_vb_bench_unless_vb(
         &mut self,
         resolved: &boyko_render::ResolvedRenderPath,
-    ) -> bool {
+    ) -> Option<&'static str> {
         if matches!(resolved.path, boyko_render::RenderPath::VisibilityBuffer) {
-            return false;
+            return None;
         }
         self.vb_bench_disarmed = true;
-        let was_armed = self.vb_bench.is_some();
-        if was_armed {
+        // Profiling rung 5c: the zone leg inherits the disarm, and inherits it HERE rather than
+        // through its own predicate. Its writers are the same `record_vb` brackets, so the path
+        // that cannot feed the collector cannot feed the recorder either — and a second copy of
+        // this condition is how the two legs come to disagree about which frames they recorded.
+        self.vb_zone_disarmed = true;
+        let zone_was_armed = self.vb_zone.is_some();
+        if zone_was_armed {
+            eprintln!(
+                "profiling rung 5c: BOYKO_VB_ZONE set but the resolved render path is {:?} — the \
+                 zone recorder is disarmed (only record_vb records its brackets).",
+                resolved.path
+            );
+        }
+        if self.vb_bench.is_some() {
             // The O2 decline notice, in the ONE place that knows both halves of the gate (the
             // same discipline as `boot`'s "timestamps unusable" notice).
             eprintln!(
@@ -7399,7 +7555,16 @@ impl GpuSceneBundles {
                 resolved.path
             );
         }
-        was_armed
+        // The KNOB that was actually set, so the caller's panic names it. `boot` refuses the two
+        // together, so at most one of these is `Some` — a returned `bool` would have made the
+        // panic say `BOYKO_VB_BENCH` on a boot that only ever set `BOYKO_VB_ZONE`.
+        if self.vb_bench.is_some() {
+            Some("BOYKO_VB_BENCH")
+        } else if zone_was_armed {
+            Some("BOYKO_VB_ZONE")
+        } else {
+            None
+        }
     }
 
     /// VB-P1e H0: [`Self::read_vb_bench_ns`] reads back frame `fi`'s per-pass samples (masked +

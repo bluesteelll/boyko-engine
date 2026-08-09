@@ -19,6 +19,8 @@ use crate::rhi_impl::{
 use crate::texture::{MAX_CASCADES, MAX_TEXTURE_LAYERS, VulkanTexture};
 
 use super::gpu_timing::{Sv0TimestampCollector, TimestampCollector, VbTimestampCollector};
+use super::command_witness::CommandWitness;
+use super::gpu_zone::GpuZoneRecorder;
 use super::{FRAMES_IN_FLIGHT, SwapchainError};
 
 // Doc-link scope: types referenced only from doc-comments in this module (the render
@@ -2641,6 +2643,45 @@ pub struct GBufferScene<'a> {
     /// [`Self::gpu_timing`] (not a shared enlarged `PASS_COUNT`) — see
     /// [`super::gpu_timing::VbTimestampCollector`]'s own doc for why.
     pub vb_gpu_timing: Option<&'a VbTimestampCollector>,
+    /// Profiling rung 5c: the optional GPU **zone** recorder and the ring slot it opened for this
+    /// frame — the replacement [`Self::vb_gpu_timing`] is measured against, and the leg rung 7
+    /// deletes the old collector in favour of.
+    ///
+    /// `None` on EVERY golden/host/interactive frame (the DEFAULT — the same capability-as-presence
+    /// discipline the three collectors above use) ⇒ `record_vb` records ZERO reset/write commands
+    /// for it and the stream is byte-identical.
+    ///
+    /// # Structurally exclusive with [`Self::vb_gpu_timing`], not exclusive by discipline
+    ///
+    /// G10's A/B is **serial, never simultaneous** (F17): two collectors armed in one frame would
+    /// each perturb the other's command stream, and the positions the comparison rests on would be
+    /// measured against a stream neither leg ships. The exclusivity is enforced where the witness
+    /// is built (`TsWitness::new`), not asked of the caller — a rule the caller must remember is a
+    /// rule some caller will not.
+    ///
+    /// The slot travels WITH the recorder because a recorder without its frame's slot cannot record
+    /// anything, and a slot without its recorder names nothing; a pair makes the invalid state
+    /// unrepresentable rather than documented.
+    pub vb_gpu_zone: Option<(&'a GpuZoneRecorder, usize)>,
+    /// Profiling rung 5c: the optional command census witness for this frame's `record_vb`.
+    ///
+    /// `None` everywhere but the G10 gate. Read by BOTH legs of the A/B, through the same
+    /// `TsWitness` call sites, so the cross-leg equality compares two recorders rather than two
+    /// instruments.
+    ///
+    /// # The FIELD is unconditional; the counting is not
+    ///
+    /// The perturbation `profiling-census` exists to keep out of a shipped build is the ~200
+    /// counter increments at `vb.rs`'s record sites, and those are what the feature gates. A
+    /// `#[cfg]` on the field itself would buy nothing more and would cost a cross-crate hazard
+    /// this tree cannot check: features unify per PACKAGE, so a build that enables
+    /// `boyko_rhi_vulkan/profiling-census` from anywhere gives this struct a field that
+    /// `boyko_app`'s construction site — compiled against ITS own feature set, where the flag is
+    /// absent — does not initialize, and the workspace stops compiling for a reason no crate's
+    /// source shows. `Self::tlas` can be `#[cfg]`-gated because `hwrt` is forwarded package by
+    /// package all the way to the host; nothing forwards this one, and adding two forwarding
+    /// features to carry a `None` would be the more elaborate way to be more fragile.
+    pub vb_cmd_witness: Option<&'a CommandWitness>,
     /// VB-SV0 rung S1.5: the optional DEFERRED fine-marcher GPU-timestamp bench collector.
     /// `None` on EVERY golden/host/interactive frame (the DEFAULT — the SAME capability-as-
     /// presence discipline [`Self::gpu_timing`] uses) ⇒ the recorder emits ZERO reset/write

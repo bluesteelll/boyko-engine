@@ -1099,4 +1099,20 @@ claim path's Miri and property legs are unaffected and still planned.
   L5 added `VmColumn::as_mut_slice` at ~line 355 and shifted `vm_column.rs:437-449` to `462-474` in
   two corpus files. The anchor test does not cover `docs/diagnostics/**`, so nothing would have
   said so. Grep `<file>.rs:[0-9]` across `docs/` after any insertion into a kernel primitive.
+- **A gate can be RED for five commits because nobody runs it, and no gate can close that.**
+  `G2a`'s file census (`tests/gpu_blocking_reader_census.rs`) went red the instant rung 5a landed
+  `present/gpu_zone.rs`, whose module doc names `vkGetQueryPoolResults` while explaining what the
+  BLOCK cost. It stayed red across `ee9196b6`, `cb54752d`, `8ca4e05b`, `cf8ffd20`, `7ae9162a` —
+  three of which reported "workspace green". Found at 5c only because a full `--workspace` run
+  finally happened. The mechanism worked perfectly; the *asking* was the gap. Practical rule:
+  **a rung that adds a file must run the census gates, not only its own.**
+- **The disk fills to zero and it looks like a mingw linker bug.** Second occurrence (see the
+  2026-07-23 audit note). `target/` reached 72 GB with 8 KB free on `D:`, and the symptom was a wall
+  of `linking with x86_64-w64-mingw32-gcc failed` across a dozen unrelated targets. Cure:
+  `rm -rf target/debug/incremental` (12 GB here). Check `df -h /d` BEFORE reading a linker error.
+- **G10's A/B runs as two processes and the corpus says one; the reason is in the docs but it is a
+  deviation an auditor should see.** Leg A's `read_vb_bench_ns` waits with `VK_QUERY_RESULT_WAIT_BIT`,
+  so a single process alternating legs would reach it on a frame leg B recorded — the hang class
+  P4-1 removed. If a future rung wants the corpus's literal shape, it must first make leg A's
+  readback non-blocking, which is rung 7's deletion anyway.
 - **`.claude/settings.local.json` is dirty** from earlier sessions and is deliberately never staged.

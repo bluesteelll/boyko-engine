@@ -34,7 +34,7 @@ than summarised into rules.
    **0**, every time. (`profiling/gpu-zone-seam` owns the deletion; this file owns the consequence
    for the band.)
 2. **Equal timestamps cannot license a conclusion about RECORD ORDER.** Record order is a *host*
-   property and must be witnessed host-side — `CommandWitness::first_pair_of`
+   property and must be witnessed host-side — `CommandWitness::zone_open_order`
    (`profiling/gpu-zone-seam`). No claim about record order in this system reads a timestamp.
 3. **`median(off) + median(dur) ≠ median(off + dur)`** — composing medians crossed a true inequality
    by **144-240 ns** on a real reading.
@@ -93,7 +93,7 @@ not advice in a paragraph**.
 | **S3** | **The instrument's quantum is measured per sitting, never hard-coded**, and `timestampPeriod` is not it. | `measured_quantum_ns` in the window reducer (`vg_occ_split_timing.rs:887-910`); **the plan contains no numeric GPU quantum** |
 | **S4** | **Every reduced window has an ODD sample count**, so its median is an actual sample and sits on the lattice. | `WINDOW = 121`; `debug_assert!(WINDOW % 2 == 1)`; means are excluded from the quantum GCD |
 | **S5** | **Never compose reduced statistics.** `median(a) + median(b) ≠ median(a+b)` — crossed by 144-240 ns in P4-6. | **No window reducer API adds two reduced values.** Partition sums are formed per frame in the frame-major row, then reduced (D7) |
-| **S6** | **Two adjacent stamps cannot establish an order**, and **equal timestamps cannot license a record-order conclusion**. | `__gpu_null` deleted (D5); record order is witnessed host-side by `CommandWitness::first_pair_of` (D17) |
+| **S6** | **Two adjacent stamps cannot establish an order**, and **equal timestamps cannot license a record-order conclusion**. | `__gpu_null` deleted (D5); record order is witnessed host-side by `CommandWitness::zone_open_order` (D17) |
 | **S7** | **A number whose own resolution is unknown is not printed.** | Quantum `UNKNOWN` ⇒ every GPU number in that report is `NOT RESOLVED` (D11a) |
 | **S8** | **An incomplete window produces no verdict.** | `NotResolvedReason::{WindowIncomplete, EpochBreak, LabelNotMeasured}` (D11) |
 

@@ -12,11 +12,16 @@ description = "Raw hand-FFI Vulkan backend for boyko-engine (Slice 0 foundation:
 # it adds no third-party dependency.
 [features]
 # Profiling rung 5b -- the command census. OFF by default and enabled only in the G5/G10 gate
-# binaries: `CommandWitness::stream_pos` counts EVERY recorded command in the witnessed region,
-# not only the profiling ones, so threading it through a recorder perturbs that recorder. The
-# increments are host-side u32 adds that record no command and change no device state, which is
-# why a census build records the SAME command stream as a non-census build -- and therefore why
-# a census measurement speaks about the shipped configuration rather than about itself.
+# binaries: `CommandWitness::stream_pos` counts every witnessed RECORD SITE, not only the profiling
+# ones, so threading it through a recorder perturbs that recorder. The increments are host-side u32
+# adds that record no command and change no device state, which is why a census build records the
+# SAME command stream as a non-census build -- and therefore why a census measurement speaks about
+# the shipped configuration rather than about itself.
+#
+# Rung 5c narrowed WHAT it gates: the ~200 increments at `present/passes/vb.rs`'s record sites. The
+# `CommandWitness` type and `GBufferScene`'s `Option<&CommandWitness>` field are unconditional,
+# because features unify per PACKAGE and a `#[cfg]`'d field on a struct `boyko_app` constructs
+# appears or vanishes for that crate depending on a flag none of its own source names.
 profiling-census = []
 # The CPU golden-reference oracles (`crate::goldens`) — host mirrors of the
 # marcher / lighting / SSAO / cluster-cull shader math. Audit W3/R-2: split out of

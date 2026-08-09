@@ -55,6 +55,16 @@ const PINNED: &[&str] = &[
     // enumeration is for: the row exists because somebody looked, not because a grep was tuned
     // until it went quiet.
     "crates/boyko_rhi_vulkan/tests/software_ray_baseline_cost.rs",
+    // The replacement's own module doc, explaining what the BLOCK cost — the three collectors it
+    // replaces are separate *because* `VK_QUERY_RESULT_WAIT_BIT` makes this call wait forever on a
+    // query nobody wrote. It calls nothing; it reads through `read_query_pool_pairs_available`,
+    // rung 4's non-blocking verb, whose flag word is const-asserted free of `WAIT_BIT`.
+    //
+    // ⚠️ THE ROW IS LATE, AND THAT IS THE FINDING. The mention landed with the module at rung 5a
+    // (`ee9196b6`) and this gate has been RED from that commit through `7ae9162a` — five commits,
+    // three of which certified "workspace green" without ever running it. The gate was right the
+    // whole time; nobody asked it. An enumeration that is not executed is a list, not a gate.
+    "crates/boyko_rhi_vulkan/src/present/gpu_zone.rs",
     // This gate itself, which names the symbol in order to look for it.
     "tests/gpu_blocking_reader_census.rs",
 ];

@@ -569,8 +569,8 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // key the VB-P1d collector's arming on the path; this is where the answer first exists, and
     // where a collector no `record_vb` will ever fill gets disarmed. Disarm THEN panic: the
     // disarm is the load-bearing half (`disarm_vb_bench_unless_vb`'s own doc says which and why).
-    if host.gpu.disarm_vb_bench_unless_vb(&resolved_render_path) {
-        vb_bench_wrong_path_panic(&resolved_render_path);
+    if let Some(knob) = host.gpu.disarm_vb_bench_unless_vb(&resolved_render_path) {
+        vb_bench_wrong_path_panic(&resolved_render_path, knob);
     }
     // OVERRIDE the `RenderPathPlugin`'s default `ResolvedRenderPath` with the real
     // boot-resolved value — the SAME `DdgiCaps`/`RayCaps` post-boot override precedent
@@ -1034,6 +1034,30 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     };
     let vb_bench_lights: u32 =
         std::env::var("BOYKO_VB_BENCH_LIGHTS").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    // Profiling rung 5c: leg B. `GpuSceneBundles::boot` refuses `BOYKO_VB_ZONE` alongside
+    // `BOYKO_VB_BENCH`, so at most one of `vb_bench`/`vb_zone` is true in any process — the A/B
+    // is two processes, one leg each, which is also what keeps the OLD collector's
+    // `VK_QUERY_RESULT_WAIT_BIT` readback from ever meeting a frame the zone leg recorded instead.
+    let vb_zone = host.gpu.vb_zone_armed();
+    // Its own timed-frame budget, on the SAME knob shape and the SAME default as the bench's, so
+    // the two legs of one A/B run the same number of frames without the driver stating it twice.
+    let vb_zone_frames: u32 = if vb_zone {
+        std::env::var("BOYKO_VB_BENCH_FRAMES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(VB_BENCH_DEFAULT_FRAMES)
+            .max(1)
+    } else {
+        0
+    };
+    // Preallocated ONCE (Principle 5): ~9 KiB of readback scratch the retire path fills every
+    // frame. A per-frame temporary of that size is exactly the allocation this engine removes.
+    let mut vb_zone_scratch = boyko_rhi_vulkan::present::gpu_zone::RetireScratch::new();
+    let mut vb_zone_seen: u32 = 0;
+    let mut vb_zone_pairs_measured: u64 = 0;
+    let mut vb_zone_pairs_lost: u64 = 0;
+    let mut vb_zone_pairs_torn: u64 = 0;
+    let mut vb_zone_pairs_unbracketed: u64 = 0;
     // Preallocated ONCE at their final capacity (Principle 5) — the bench never reallocates
     // once the loop starts. VB-P1e H0 split the single `cull_ns` sample into
     // `cull_reset_ns`/`cull_dispatch_ns` (the `CullReset`/`CullDispatch` bracket pair) so the
@@ -2491,6 +2515,12 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // into the scene (where it is the split's structural conjunct) and carried out to
             // gate G2's artifact. Two calls would be two chances to read a different scratch.
             frame_occlusion_instances = scratch.occlusion_instances();
+            // Profiling rung 5c: claim this frame's zone ring slot BEFORE `scene` reads it — a
+            // `&mut` call that must end before `scene` hands out shared borrows for the frame. The
+            // epoch is read into a local first for the same borrow reason. A no-op unless leg B is
+            // armed, so it sits outside any predicate that could drift from `vb_zone_for_frame`'s.
+            let vb_zone_epoch = host.renderer.submission_epoch();
+            host.gpu.open_vb_zone_frame(frame_index, vb_zone_epoch, u64::from(frame_index));
             let scene = host.gpu.scene(
                 mvp,
                 s,
@@ -2686,6 +2716,87 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // actually presented (a resize-skip records no new `record_vb` work this iteration).
         // GATED on `vb_bench`; dead code on every non-bench run. VG R3 piece 4 rung P4-1: one row
         // per `VbTimedPass`, plus the frame's structural label from the recorder's witness.
+        // Profiling rung 5c: the command census, printed by BOTH A/B legs from the SAME place and
+        // in the SAME format. It is what G10's witness clause compares — "same number of bracket
+        // timestamps, each at the same position in the recorded stream" — and it has no vocabulary,
+        // so no `pass -> zone` table exists to be written wrong.
+        //
+        // The counters are zero unless `boyko_rhi_vulkan/profiling-census` is on: without it the
+        // ~200 increments at `vb.rs`'s record sites compile to nothing. The line prints anyway, and
+        // says `stream_pos=0`, because a gate that silently saw no line could not tell a census
+        // build from a run that never reached a frame.
+        if (vb_bench || vb_zone)
+            && presented_ok
+            && let Some(w) = host.gpu.vb_census()
+        {
+            use core::fmt::Write as _;
+            let mut positions = String::with_capacity(160);
+            for (k, p) in w.stamp_positions().enumerate() {
+                let sep = if k > 0 { "," } else { "" };
+                let _ = write!(positions, "{sep}{p}");
+            }
+            println!(
+                "VB-CENSUS leg={} frame={frame_index} stream_pos={} profiling_cmds={} \
+                 resets={} stamps={} repairs={} pairs={} positions=[{positions}]",
+                if vb_zone { "zone" } else { "bench" },
+                w.stream_pos(),
+                w.profiling_cmds(),
+                w.query_resets(),
+                w.timestamps(),
+                w.repairs(),
+                w.recorded_pairs(),
+            );
+        }
+
+        // Profiling rung 5c: poll the zone ring and report every retired frame. The recorder is
+        // NON-BLOCKING by construction (G2a's const-assert), so a frame whose results are not back
+        // yet is simply not retired this iteration — there is no wait here and no `wait_idle`, the
+        // difference from the bench leg directly below.
+        if vb_zone && presented_ok {
+            let epoch = host.renderer.submission_epoch();
+            let now = u64::from(frame_index);
+            let (mut measured, mut lost, mut torn, mut unbracketed) = (0u64, 0u64, 0u64, 0u64);
+            let mut retired_frames = 0u32;
+            host.gpu.retire_vb_zone(ctx, epoch, now, &mut vb_zone_scratch, |frame, pairs| {
+                retired_frames += 1;
+                for p in pairs {
+                    match p.label {
+                        boyko_rhi_vulkan::present::gpu_zone::GpuLabel::Measured => measured += 1,
+                        boyko_rhi_vulkan::present::gpu_zone::GpuLabel::Lost => lost += 1,
+                        boyko_rhi_vulkan::present::gpu_zone::GpuLabel::Torn => torn += 1,
+                        boyko_rhi_vulkan::present::gpu_zone::GpuLabel::NotBracketed => {
+                            unbracketed += 1;
+                        }
+                    }
+                }
+                println!(
+                    "VB-ZONE retired frame={} pairs={} cause={:?} lost={} torn={}",
+                    frame.frame, frame.pairs, frame.cause, frame.lost, frame.torn
+                );
+            });
+            vb_zone_pairs_measured += measured;
+            vb_zone_pairs_lost += lost;
+            vb_zone_pairs_torn += torn;
+            vb_zone_pairs_unbracketed += unbracketed;
+            vb_zone_seen += retired_frames;
+            if vb_zone_seen >= VB_BENCH_WARMUP as u32 + vb_zone_frames {
+                // Teardown's own clause: frames stop here, so neither deadline horn can fire and
+                // the last `GPU_RING_DEPTH` slots would otherwise be dropped silently.
+                host.gpu.flush_vb_zone(ctx, &mut vb_zone_scratch, |frame, _pairs| {
+                    println!(
+                        "VB-ZONE flushed frame={} pairs={} cause={:?}",
+                        frame.frame, frame.pairs, frame.cause
+                    );
+                });
+                println!(
+                    "VB-ZONE summary frames={vb_zone_seen} measured={vb_zone_pairs_measured} \
+                     lost={vb_zone_pairs_lost} torn={vb_zone_pairs_torn} \
+                     not_bracketed={vb_zone_pairs_unbracketed}"
+                );
+                return;
+            }
+        }
+
         if vb_bench && presented_ok {
             // Offline discipline (mirrors `window_present_gbuffer`'s own R0 harness): wait the
             // device idle so this frame's timestamp writes are complete + readable before the
@@ -3351,9 +3462,9 @@ fn vb_bench_readback_exclusivity_panic() -> ! {
 #[cfg(windows)]
 #[cold]
 #[inline(never)]
-fn vb_bench_wrong_path_panic(resolved: &boyko_render::ResolvedRenderPath) -> ! {
+fn vb_bench_wrong_path_panic(resolved: &boyko_render::ResolvedRenderPath, knob: &str) -> ! {
     panic!(
-        "invariant: BOYKO_VB_BENCH requires RenderPath::VisibilityBuffer — this boot resolved \
+        "invariant: {knob} requires RenderPath::VisibilityBuffer — this boot resolved \
          {:?} x {:?}, whose frame driver never calls record_vb, so no timestamp pair is ever \
          written or even reset (the collector has been disarmed; without that disarm the \
          WAIT_BIT readback would hang forever)",

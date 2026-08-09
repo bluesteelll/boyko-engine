@@ -37,9 +37,14 @@ use crate::ffi::{
 };
 
 mod frame_driver;
-// Profiling rung 5b -- the command census. Behind `profiling-census` because its stream counter
-// perturbs every recorder it is threaded through.
-#[cfg(feature = "profiling-census")]
+// Profiling rung 5b -- the command census.
+//
+// Rung 5c moved the module OUT of `#[cfg(feature = "profiling-census")]` and left the feature on
+// the ~200 counter increments at `vb.rs`'s record sites, which are the actual perturbation. The
+// type existing costs nothing (it is instantiated only where a gate constructs one), and gating it
+// cost a cross-crate hazard: `GBufferScene` must carry an `Option<&CommandWitness>`, features unify
+// per PACKAGE, and a `#[cfg]`'d field appears or vanishes for `boyko_app`'s construction site
+// depending on a flag no `boyko_app` source names. See that field's doc.
 pub mod command_witness;
 pub mod gpu_timing;
 // Profiling rung 5a — the GPU zone recorder that replaces `gpu_timing`'s three collectors.

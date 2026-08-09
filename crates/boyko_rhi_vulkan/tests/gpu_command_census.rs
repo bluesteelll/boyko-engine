@@ -90,7 +90,7 @@ unsafe fn record_scene(
     device: &VulkanContext,
     encoder: &mut VulkanCommandEncoder,
     scratch_pool: &VulkanQueryPool,
-    witness: &mut CommandWitness,
+    witness: &CommandWitness,
     recorder: Option<(&GpuZoneRecorder, usize)>,
 ) {
     let fns = device.device_fns();
@@ -151,7 +151,7 @@ fn the_disarmed_frame_records_no_profiling_command_and_the_armed_one_records_exa
     let mut recorder = GpuZoneRecorder::new(pools);
 
     // ── Leg 1: DISARMED. Same function, no recorder. ──
-    let mut disarmed = CommandWitness::new();
+    let disarmed = CommandWitness::new();
     {
         let fence = device.create_fence(false).expect("fence");
         let mut encoder = device.create_command_encoder().expect("encoder");
@@ -159,7 +159,7 @@ fn the_disarmed_frame_records_no_profiling_command_and_the_armed_one_records_exa
         // SAFETY: the encoder is between `begin` and `end`, so `cmd` is recording; `scratch_pool`
         //   is live on this device; no render scope is open.
         unsafe {
-            record_scene(device, &mut encoder, &scratch_pool, &mut disarmed, None);
+            record_scene(device, &mut encoder, &scratch_pool, &disarmed, None);
         }
         encoder.end().expect("end");
         queue.submit(&encoder, &fence).expect("submit");
@@ -175,8 +175,9 @@ fn the_disarmed_frame_records_no_profiling_command_and_the_armed_one_records_exa
     assert_eq!(disarmed.query_resets(), 0);
     assert_eq!(disarmed.timestamps(), 0);
     assert_eq!(disarmed.recorded_pairs(), 0);
-    assert!(disarmed.stamp_positions().is_empty());
-    assert!(disarmed.zone_open_order().is_empty());
+    assert_eq!(disarmed.repairs(), 0);
+    assert_eq!(disarmed.stamp_positions().count(), 0);
+    assert_eq!(disarmed.zone_open_order().count(), 0);
     // THE POSITIVE CONTROL. Without this, a witness that was never threaded through anything would
     // satisfy every line above.
     assert_eq!(
@@ -188,14 +189,14 @@ fn the_disarmed_frame_records_no_profiling_command_and_the_armed_one_records_exa
 
     // ── Leg 2: ARMED. The same function, with a recorder. ──
     let slot = recorder.open_frame(0, 0, 0).expect("a fresh ring slot");
-    let mut armed = CommandWitness::new();
+    let armed = CommandWitness::new();
     {
         let fence = device.create_fence(false).expect("fence");
         let mut encoder = device.create_command_encoder().expect("encoder");
         encoder.begin().expect("begin");
         // SAFETY: as leg 1, plus `slot` was just opened on `recorder`.
         unsafe {
-            record_scene(device, &mut encoder, &scratch_pool, &mut armed, Some((&recorder, slot)));
+            record_scene(device, &mut encoder, &scratch_pool, &armed, Some((&recorder, slot)));
         }
         encoder.end().expect("end");
         recorder.seal(slot);
@@ -231,15 +232,14 @@ fn the_disarmed_frame_records_no_profiling_command_and_the_armed_one_records_exa
         armed.query_resets() + armed.timestamps(),
         "profiling_cmds must be exactly the resets plus the timestamps it counted"
     );
-    assert_eq!(
-        armed.zone_open_order(),
-        &ZONES,
+    assert!(
+        armed.zone_open_order().eq(ZONES),
         "the record-order witness disagrees with the order the recorder opened the pairs in"
     );
 
     // The stream positions are strictly increasing, and each bracket's close is `SCENE_COMMANDS`
     // past its open — the property that makes a bracket shifted by one command visible.
-    let positions = armed.stamp_positions();
+    let positions: Vec<u32> = armed.stamp_positions().collect();
     assert_eq!(positions.len(), usize::from(declared_brackets) * 2);
     for w in positions.windows(2) {
         assert!(w[0] < w[1], "stream positions must be strictly increasing: {positions:?}");

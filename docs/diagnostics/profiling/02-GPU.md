@@ -298,8 +298,8 @@ pins move") was **false as written**.
 pub struct CommandWitness {
     profiling_cmds: u32, query_resets: u32, timestamps: u32,
     recorded_pairs: u16,
-    first_pair_of: [ZoneId; MAX_GPU_PAIRS],   // pair -> zone, in the order pairs were OPENED
-    stream_pos: u32,                          // every recorded vkCmd* in the witnessed region
+    zone_open_order: [u16; MAX_GPU_PAIRS],     // pair -> zone, in the order pairs were OPENED
+    stream_pos: u32,                          // every witnessed RECORD SITE in the region
     stamp_positions: [u32; 2 * MAX_GPU_PAIRS],// stream_pos at each timestamp, in record order
 }
 ```
@@ -315,15 +315,15 @@ satisfied by itself** — a recorder that dropped every real bracket passed. `__
 deleted (D5) and the clause is an equality, so the only way to pass is to record exactly the declared
 brackets.
 
-**`first_pair_of` is the RECORD-ORDER WITNESS *within* the new vocabulary** (P4-6 fact 2). Timestamps
+**`zone_open_order` is the RECORD-ORDER WITNESS *within* the new vocabulary** (P4-6 fact 2). Timestamps
 cannot license a conclusion about record order — two stamps that resolve on the same tick say nothing
 about which `vkCmd*` came first. The witness records, host-side at the call site, the order in which
-pairs were opened. **Every claim in this system about *record order* reads `first_pair_of`; no claim
+pairs were opened. **Every claim in this system about *record order* reads `zone_open_order`; no claim
 about record order reads a timestamp.**
 
-**`stamp_positions` is the CROSS-LEG witness, and it exists because `first_pair_of` cannot be one
-(M12).** G10 licenses deleting the old collector by comparing the two legs — but `first_pair_of` is
-`[ZoneId; …]` and the old collector has no `ZoneId`, only `VbTimedPass` slots
+**`stamp_positions` is the CROSS-LEG witness, and it exists because `zone_open_order` cannot be one
+(M12).** G10 licenses deleting the old collector by comparing the two legs — but `zone_open_order` is
+a list of ZONE IDS and the old collector has none, only `VbTimedPass` slots
 (`gpu_timing.rs:229` declares the enum; `VB_PASS_COUNT = 10` at `:391`; the hand-maintained
 slot→member table is `from_slot` at `:311-329`). Comparing them therefore needs exactly the
 `VbTimedPass → ZoneId` table D6 rejects, and a table written by hand *alongside* the ported brackets
