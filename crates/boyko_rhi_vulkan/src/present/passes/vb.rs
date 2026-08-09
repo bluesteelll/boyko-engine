@@ -33,7 +33,15 @@ use crate::texture::{MAX_CASCADES, MAX_TEXTURE_LAYERS};
 
 use super::super::frame_driver::Renderer;
 use super::super::gpu_timing::{VB_PASS_COUNT, VbTimedPass, VbTimestampCollector};
-use super::super::gpu_zone::GpuZoneRecorder;
+use super::super::gpu_zone::{GpuZoneRecorder, ZONE_BASE_VB, ZONE_FAMILY_WIDTH};
+
+// Profiling rung 6: the family's ids are `ZONE_BASE_VB + slot`, so a `VbTimedPass` that grew past
+// the reserved width would start naming another family's passes. A build failure, here, beside the
+// count it constrains — rung 7 deletes the enum and this assert goes with it.
+const _: () = assert!(
+    VB_PASS_COUNT <= ZONE_FAMILY_WIDTH as u32,
+    "VbTimedPass no longer fits its reserved zone-id range"
+);
 
 #[cfg(feature = "profiling-census")]
 use super::super::command_witness::CommandWitness;
@@ -267,12 +275,12 @@ impl<'a> TsWitness<'a> {
     ) -> TsWitness<'a> {
         let tc = scene.vb_gpu_timing;
         debug_assert!(
-            !(tc.is_some() && scene.vb_gpu_zone.is_some()),
+            !(tc.is_some() && scene.gpu_zone.is_some()),
             "invariant: at most one VB GPU collector is armed per frame (F17: the A/B is serial)"
         );
         let ts = TsWitness {
             tc,
-            zr: if tc.is_some() { None } else { scene.vb_gpu_zone },
+            zr: if tc.is_some() { None } else { scene.gpu_zone },
             #[cfg(feature = "profiling-census")]
             cw: scene.vb_cmd_witness,
             begun: 0,
@@ -380,7 +388,7 @@ impl<'a> TsWitness<'a> {
             // `begun` bit stays clear, and `end` finds `NO_PAIR` and records nothing either — so
             // the pair is never half-written. `MAX_GPU_PAIRS` is 128 against this frame's ten, so
             // reaching it means a caller reused a sealed slot, which the recorder counts.
-            let Some(pair) = rec.alloc_pair(ring, slot as u16) else { return };
+            let Some(pair) = rec.alloc_pair(ring, ZONE_BASE_VB + slot as u16) else { return };
             self.pair_of[slot as usize] = pair;
             // SAFETY: caller contract; `pair` came from `alloc_pair` on this slot immediately
             // above, and the pool was reset this frame (this witness's construction site).

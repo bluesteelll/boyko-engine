@@ -15,7 +15,315 @@ use crate::memory::BoundBuffer;
 use crate::texture::{MAX_CASCADES, MAX_TEXTURE_LAYERS};
 
 use super::super::frame_driver::Renderer;
-use super::super::gpu_timing::{Sv0TimedPass, TimedPass};
+use super::super::gpu_timing::{
+    PASS_COUNT, SV0_PASS_COUNT, Sv0TimedPass, Sv0TimestampCollector, TimedPass, TimestampCollector,
+};
+use super::super::gpu_zone::{
+    GpuZoneRecorder, ZONE_BASE_GBUFFER, ZONE_BASE_SV0, ZONE_FAMILY_WIDTH,
+};
+
+#[cfg(feature = "profiling-census")]
+use super::super::command_witness::CommandWitness;
+
+// Profiling rung 6: each family's ids are `base + slot`, so a family that outgrew its reserved
+// width would start naming another family's passes. A build failure, beside the counts it
+// constrains — rung 7 deletes both enums and takes these with them.
+// TWO asserts and not one conjunction: the families have independent widths and independent bases,
+// so an `&&` would let the wider one imply the narrower and clippy is right to call the second
+// conjunct dead. Two items are two claims, and each reds for its own family.
+const _: () = assert!(
+    PASS_COUNT <= ZONE_FAMILY_WIDTH as u32,
+    "TimedPass no longer fits its reserved zone-id range"
+);
+const _: () = assert!(
+    SV0_PASS_COUNT <= ZONE_FAMILY_WIDTH as u32,
+    "Sv0TimedPass no longer fits its reserved zone-id range"
+);
+
+/// Slots [`GbufWitness`] tracks: the four software-ray passes, then the SV0 marcher.
+const GBUF_SLOTS: usize = (PASS_COUNT + SV0_PASS_COUNT) as usize;
+
+/// Profiling rung 6 — `record_gbuffer`'s bracket carrier, the sibling of `vb.rs`'s `TsWitness`.
+///
+/// # What it replaces, and why the shape is worth copying rather than the sites
+///
+/// Before this rung `record_gbuffer` had **no carrier at all**: ten bare
+/// `if let Some(tc) = scene.gpu_timing` / `scene.sv0_gpu_timing` sites, each opening or closing one
+/// pair, with nothing that could answer *"which pairs did this frame bracket?"*. `vb.rs` grew
+/// `TsWitness` at VG R3 P4-1 for exactly the reason that absence causes, and the reason is written
+/// into `Sv0TimedPass::Marcher`'s own doc: *"A render path that does not dispatch the marcher
+/// therefore leaves this pair UNWRITTEN, which would hang the `WAIT`-bit readback — the caller must
+/// only arm this collector on a marcher-carrying path."* The same is true of `TimedPass::DdgiUpdate`
+/// (bracketed inside `scene.ddgi_update`'s arm) and of `CsmDepth`/`PunctualDepth` (inside theirs):
+/// **a frame without DDGI, or without shadows, resets those queries and never writes them.** The
+/// old collectors have no totality epilogue — `write_zero_pair` appears nowhere in this file — so
+/// what stands between the R0 harness and an infinite wait is the harness's own configuration.
+///
+/// The zone leg deletes that premise instead of restating it: an unwritten pair retires
+/// `NotBracketed`, because the recorder polls with `WITH_AVAILABILITY` and never waits.
+///
+/// # Three collectors, one armed
+///
+/// `gpu_timing` and `sv0_gpu_timing` are independent (different pools, different harnesses) and can
+/// both be armed; the zone recorder replaces BOTH, so it arms only when neither does — F17's
+/// *"never both armed in one frame"*, applied to a leg that is two collectors wide.
+struct GbufWitness<'a> {
+    /// The four software-ray passes' collector. `None` on every golden/host/interactive frame.
+    tc: Option<&'a TimestampCollector>,
+    /// The SV0 marcher's collector, armed by its own knob and independent of [`Self::tc`].
+    sv0: Option<&'a Sv0TimestampCollector>,
+    /// The NEW leg — the frame's zone recorder and the ring slot it opened.
+    zr: Option<(&'a GpuZoneRecorder, usize)>,
+    /// The command census, fed by every leg through these same call sites.
+    #[cfg(feature = "profiling-census")]
+    cw: Option<&'a CommandWitness>,
+    /// Bit `k` set when slot `k`'s BEGIN was recorded (`0..PASS_COUNT` = [`TimedPass`], then
+    /// [`Sv0TimedPass`]).
+    begun: u16,
+    /// Bit `k` set when slot `k`'s END was recorded.
+    ended: u16,
+    /// Zone leg only: the pair index `alloc_pair` handed slot `k`, or [`Self::NO_PAIR`].
+    ///
+    /// REMEMBERED, not derived — rung 5c measured why: the open order is not the slot order (here
+    /// `Marcher` opens FIRST, at `:1236`, before every `TimedPass`), so a `count_ones` of the bits
+    /// below a slot is not that slot's open index.
+    pair_of: [u16; GBUF_SLOTS],
+}
+
+impl<'a> GbufWitness<'a> {
+    /// A slot that never opened a pair on the zone leg.
+    const NO_PAIR: u16 = u16::MAX;
+
+    /// Opens the frame's witness: picks the armed leg(s), clears the census, and **records their
+    /// pool resets**.
+    ///
+    /// The resets moved inside for `TsWitness::open`'s reason — with three legs there would be
+    /// three adjacencies to keep at the frame top, and the frame top is where edits land.
+    ///
+    /// # Safety
+    ///
+    /// Recording must be open on `cmd`, OUTSIDE any render or dynamic-rendering scope
+    /// (`VUID-vkCmdResetQueryPool-renderpass`), `fns` must be the live device fn-table, and `fi`
+    /// must be this present's in-flight slot.
+    #[inline]
+    unsafe fn open<'s>(
+        scene: &'s GBufferScene<'a>,
+        fns: &crate::device::DeviceFns,
+        cmd: VkCommandBuffer,
+        fi: usize,
+    ) -> GbufWitness<'a> {
+        let tc = scene.gpu_timing;
+        let sv0 = scene.sv0_gpu_timing;
+        let old_armed = tc.is_some() || sv0.is_some();
+        debug_assert!(
+            !(old_armed && scene.gpu_zone.is_some()),
+            "invariant: at most one GPU collector leg is armed per frame (F17: the A/B is serial)"
+        );
+        let ts = GbufWitness {
+            tc,
+            sv0,
+            zr: if old_armed { None } else { scene.gpu_zone },
+            #[cfg(feature = "profiling-census")]
+            cw: scene.vb_cmd_witness,
+            begun: 0,
+            ended: 0,
+            pair_of: [Self::NO_PAIR; GBUF_SLOTS],
+        };
+        #[cfg(feature = "profiling-census")]
+        if let Some(w) = ts.cw {
+            w.begin_frame();
+        }
+        // HW-RT rung R0 / VB-SV0 S1.5: a TIMESTAMP query is undefined until reset, so this precedes
+        // every stamp below it. The two old collectors own different pools and are reset
+        // independently; the zone leg resets one pool for the whole frame.
+        //
+        // SAFETY (all three): caller contract — recording open, outside any render scope, live
+        // `fns`, valid `fi` / a slot `open_frame` claimed.
+        if let Some(tc) = ts.tc {
+            unsafe { tc.reset_frame(fns, cmd, fi) };
+            ts.mark_query_reset();
+        }
+        if let Some(sv0) = ts.sv0 {
+            unsafe { sv0.reset_frame(fns, cmd, fi) };
+            ts.mark_query_reset();
+        }
+        if let Some((rec, ring)) = ts.zr {
+            unsafe { rec.record_reset(fns, cmd, ring) };
+            ts.mark_query_reset();
+        }
+        ts
+    }
+
+    /// One witnessed record site that is not the profiler's. Compiles to nothing without
+    /// `profiling-census`.
+    #[inline]
+    fn cmd(&self) {
+        #[cfg(feature = "profiling-census")]
+        if let Some(w) = self.cw {
+            w.command();
+        }
+    }
+
+    /// The frame's `vkCmdResetQueryPool`s, in the census.
+    #[inline]
+    fn mark_query_reset(&self) {
+        #[cfg(feature = "profiling-census")]
+        if let Some(w) = self.cw {
+            w.query_reset();
+        }
+    }
+
+    /// The bookkeeping every leg shares at a BEGIN.
+    #[inline]
+    fn mark_begin(&mut self, slot: usize) {
+        self.begun |= 1u16 << slot;
+        #[cfg(feature = "profiling-census")]
+        if let Some(w) = self.cw {
+            w.open_pair(slot as u16);
+            w.timestamp();
+        }
+    }
+
+    /// [`Self::mark_begin`]'s counterpart at an END.
+    #[inline]
+    fn mark_end(&mut self, slot: usize) {
+        self.ended |= 1u16 << slot;
+        #[cfg(feature = "profiling-census")]
+        if let Some(w) = self.cw {
+            w.timestamp();
+        }
+    }
+
+    /// Records the four-software-ray-pass family's BEGIN.
+    ///
+    /// # Safety
+    /// Recording must be open on `cmd`, `fns` must be the live device fn-table, `fi` must be this
+    /// present's in-flight slot, and this pass's begin query must not already have been written
+    /// since this frame's reset.
+    #[inline]
+    unsafe fn begin(
+        &mut self,
+        fns: &crate::device::DeviceFns,
+        cmd: VkCommandBuffer,
+        fi: usize,
+        pass: TimedPass,
+    ) {
+        let slot = pass.slot() as usize;
+        if let Some(tc) = self.tc {
+            // SAFETY: caller contract; the pool was reset by this witness's own `open`.
+            unsafe { tc.write_begin(fns, cmd, fi, pass) };
+            self.mark_begin(slot);
+        } else if let Some((rec, ring)) = self.zr {
+            let Some(pair) = rec.alloc_pair(ring, ZONE_BASE_GBUFFER + slot as u16) else { return };
+            self.pair_of[slot] = pair;
+            // SAFETY: caller contract; `pair` came from `alloc_pair` on this slot just above.
+            unsafe { rec.record_begin(fns, cmd, ring, pair) };
+            self.mark_begin(slot);
+        }
+    }
+
+    /// [`Self::begin`]'s counterpart.
+    ///
+    /// # Safety
+    /// As [`Self::begin`], for this pass's end query.
+    #[inline]
+    unsafe fn end(
+        &mut self,
+        fns: &crate::device::DeviceFns,
+        cmd: VkCommandBuffer,
+        fi: usize,
+        pass: TimedPass,
+    ) {
+        let slot = pass.slot() as usize;
+        if let Some(tc) = self.tc {
+            // SAFETY: caller contract.
+            unsafe { tc.write_end(fns, cmd, fi, pass) };
+            self.mark_end(slot);
+        } else if let Some((rec, ring)) = self.zr {
+            let pair = self.pair_of[slot];
+            if pair == Self::NO_PAIR {
+                return;
+            }
+            // SAFETY: caller contract; `pair` is the index this pass's BEGIN remembered.
+            unsafe { rec.record_end(fns, cmd, ring, pair) };
+            self.mark_end(slot);
+        }
+    }
+
+    /// The SV0 family's BEGIN. A separate verb, not a widened `begin`, because the two families are
+    /// two enums with independent widths and independent bases.
+    ///
+    /// # Safety
+    /// As [`Self::begin`].
+    #[inline]
+    unsafe fn sv0_begin(
+        &mut self,
+        fns: &crate::device::DeviceFns,
+        cmd: VkCommandBuffer,
+        fi: usize,
+        pass: Sv0TimedPass,
+    ) {
+        let slot = PASS_COUNT as usize + pass.slot() as usize;
+        if let Some(sv0) = self.sv0 {
+            // SAFETY: caller contract.
+            unsafe { sv0.write_begin(fns, cmd, fi, pass) };
+            self.mark_begin(slot);
+        } else if let Some((rec, ring)) = self.zr {
+            let zone = ZONE_BASE_SV0 + pass.slot() as u16;
+            let Some(pair) = rec.alloc_pair(ring, zone) else { return };
+            self.pair_of[slot] = pair;
+            // SAFETY: caller contract.
+            unsafe { rec.record_begin(fns, cmd, ring, pair) };
+            self.mark_begin(slot);
+        }
+    }
+
+    /// [`Self::sv0_begin`]'s counterpart.
+    ///
+    /// # Safety
+    /// As [`Self::begin`].
+    #[inline]
+    unsafe fn sv0_end(
+        &mut self,
+        fns: &crate::device::DeviceFns,
+        cmd: VkCommandBuffer,
+        fi: usize,
+        pass: Sv0TimedPass,
+    ) {
+        let slot = PASS_COUNT as usize + pass.slot() as usize;
+        if let Some(sv0) = self.sv0 {
+            // SAFETY: caller contract.
+            unsafe { sv0.write_end(fns, cmd, fi, pass) };
+            self.mark_end(slot);
+        } else if let Some((rec, ring)) = self.zr {
+            let pair = self.pair_of[slot];
+            if pair == Self::NO_PAIR {
+                return;
+            }
+            // SAFETY: caller contract.
+            unsafe { rec.record_end(fns, cmd, ring, pair) };
+            self.mark_end(slot);
+        }
+    }
+
+    /// Closes the frame.
+    ///
+    /// The zone leg seals — the release edge `retire`'s `Acquire` pairs with. The OLD legs get no
+    /// epilogue here, deliberately: they never had one, and inventing a totality fill for them at
+    /// the rung that replaces them would repair the very hazard the replacement exists to delete,
+    /// hiding it from the gate that is supposed to show it. What the masks buy instead is a
+    /// dev-profile statement of what the frame actually bracketed.
+    fn finish(self) {
+        debug_assert_eq!(
+            self.begun & !self.ended,
+            0,
+            "invariant: no gbuffer timestamp pair is left torn (a begin whose end never recorded)"
+        );
+        if let Some((rec, ring)) = self.zr {
+            rec.seal(ring);
+        }
+    }
+}
 use super::super::scene_types::{
     CLUSTER_CULL_HIER_PUSH_BYTES, CLUSTER_CULL_PUSH_BYTES, GBUFFER_MARCHER_PUSH_BYTES,
     GBUFFER_PUSH_BASE_INSTANCE_OFFSET, GBufferScene, LIGHT_CULL_LOCAL_SIZE_X,
@@ -147,28 +455,18 @@ impl Renderer<'_> {
         // images, so no new wait is introduced. Index every image barrier / attachment by `[fi]`.
         let fi = self.frame_index;
 
-        // HW-RT rung R0: reset ALL `2 * PASS_COUNT` timestamp queries at the frame top —
-        // OUTSIDE any render / dynamic-rendering scope (recording is open but no
-        // `begin_rendering` has run yet), before the frame's first `write_timestamp`. GATED
-        // on `scene.gpu_timing`: `None` (every golden/host frame) records NOTHING, so the
-        // command stream is byte-identical. A TIMESTAMP query is undefined until reset.
-        if let Some(tc) = scene.gpu_timing {
-            // SAFETY: recording is open; `self.fns` is the live device fn-table; the reset is
-            // recorded before any `begin_rendering` (outside a render pass, per
-            // `VUID-vkCmdResetQueryPool-renderpass`); `fi` is this present's in-flight slot.
-            unsafe { tc.reset_frame(self.fns, cmd, fi) };
-        }
-
-        // VB-SV0 rung S1.5: the SAME frame-top reset for the marcher bench collector, under its
-        // own `None`-by-default gate (`scene.sv0_gpu_timing`), so an unarmed frame records
-        // NOTHING and the command stream stays byte-identical. Independent of the R0 collector
-        // above: the two own different pools and are armed by different harnesses.
-        if let Some(tc) = scene.sv0_gpu_timing {
-            // SAFETY: recording is open; `self.fns` is the live device fn-table; the reset is
-            // recorded before any `begin_rendering` (outside a render pass, per
-            // `VUID-vkCmdResetQueryPool-renderpass`); `fi` is this present's in-flight slot.
-            unsafe { tc.reset_frame(self.fns, cmd, fi) };
-        }
+        // HW-RT rung R0 / VB-SV0 S1.5 / profiling rung 6: every armed collector's frame-top pool
+        // reset AND the witness that owns every stamp below, in one call — OUTSIDE any render /
+        // dynamic-rendering scope (recording is open but no `begin_rendering` has run yet), before
+        // the frame's first `write_timestamp`. Unarmed (no collector on `scene`, which is every
+        // golden/host/interactive frame) it records NOTHING, so the command stream is
+        // byte-identical. A TIMESTAMP query is undefined until reset, which is why the resets moved
+        // INSIDE the constructor: see `GbufWitness::open`.
+        //
+        // SAFETY: recording is open; `self.fns` is the live device fn-table; no `begin_rendering`
+        // has run yet, so every reset is outside a render pass
+        // (`VUID-vkCmdResetQueryPool-renderpass`); `fi` is this present's in-flight slot.
+        let mut ts = unsafe { GbufWitness::open(scene, self.fns, cmd, fi) };
 
         // === Pass A (Render P5-r0): rasterize the mesh quad as a 3-MRT G-buffer PRODUCER
         // (albedo@0, normal@1, material@2) + the D32 depth. The marcher's attribute
@@ -231,6 +529,7 @@ impl Renderer<'_> {
             // every other pass and future-proofs an added interp input hazard.
             // SAFETY: recording is open; `record_graph_pass` records the graph's derived
             // input barriers (currently none) for the "interp" pass into `cmd`.
+            ts.cmd();
             self.record_graph_pass(interp_pass, cmd, targets, scene, fi);
             let groups = interp.instance_count.div_ceil(LOCAL_SIZE_X);
             let mut push = [0u8; INTERP_INSTANCES_PUSH_BYTES as usize];
@@ -248,11 +547,13 @@ impl Renderer<'_> {
             // interp pass reads frame-private pair + out-slot slots (first touches — the graph
             // derives NO input barrier), so no barrier is recorded before this dispatch.
             unsafe {
+                ts.cmd();
                 (self.fns.cmd_bind_pipeline)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
                     interp.pipeline.pipeline,
                 );
+                ts.cmd();
                 (self.fns.cmd_bind_descriptor_sets)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -263,6 +564,7 @@ impl Renderer<'_> {
                     0,
                     ptr::null(),
                 );
+                ts.cmd();
                 (self.fns.cmd_push_constants)(
                     cmd,
                     interp.pipeline.layout,
@@ -271,6 +573,7 @@ impl Renderer<'_> {
                     INTERP_INSTANCES_PUSH_BYTES,
                     push.as_ptr().cast(),
                 );
+                ts.cmd();
                 (self.fns.cmd_dispatch)(cmd, groups, 1, 1);
             }
             // The interp pass's model-out WRITES (COMPUTE/SHADER_WRITE, the dynamic slots of
@@ -303,6 +606,7 @@ impl Renderer<'_> {
             // interp ran; else none), then bind the packer + dispatch `ceil(count / LOCAL_SIZE_X)`.
             // SAFETY: recording is open; `record_graph_pass` records the "tlas_pack" pass's derived
             // barriers into `cmd` against the live scene buffers.
+            ts.cmd();
             self.record_graph_pass(pack_pass, cmd, targets, scene, fi);
             let groups = t.count.div_ceil(LOCAL_SIZE_X);
             let push = t.count.to_le_bytes();
@@ -314,7 +618,9 @@ impl Renderer<'_> {
             // (first_set 0, count 1, zero dynamic offsets); the push is exactly
             // `BUILD_TLAS_INSTANCES_PUSH_BYTES` (4) at offset 0 and `push` outlives the call.
             unsafe {
+                ts.cmd();
                 (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, t.pipeline.pipeline);
+                ts.cmd();
                 (self.fns.cmd_bind_descriptor_sets)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -325,6 +631,7 @@ impl Renderer<'_> {
                     0,
                     ptr::null(),
                 );
+                ts.cmd();
                 (self.fns.cmd_push_constants)(
                     cmd,
                     t.pipeline.layout,
@@ -333,6 +640,7 @@ impl Renderer<'_> {
                     crate::compute::BUILD_TLAS_INSTANCES_PUSH_BYTES,
                     push.as_ptr().cast(),
                 );
+                ts.cmd();
                 (self.fns.cmd_dispatch)(cmd, groups, 1, 1);
             }
             // Build: emit the graph's derived pack-WRITE → build-READ barrier on the instance
@@ -340,6 +648,7 @@ impl Renderer<'_> {
             // discipline — the BARRIER is graph-emitted, only the GPU work is raw).
             // SAFETY: recording is open; `record_graph_pass` records the "tlas_build" pass's derived
             // barrier (pack COMPUTE/SHADER_WRITE → build AS_BUILD/SHADER_READ on `tlas_instances`).
+            ts.cmd();
             self.record_graph_pass(build_pass, cmd, targets, scene, fi);
             let entry = boyko_rhi::AsBuildEntry {
                 kind: boyko_rhi::AsKind::Tlas,
@@ -361,6 +670,7 @@ impl Renderer<'_> {
             // resources; the pack→build barrier just recorded orders the instance-array write before
             // this build's read; `entry`/`dest` are 1-element slices that outlive the call.
             unsafe {
+                ts.cmd();
                 crate::accel::cmd_build_acceleration_structures(
                     fns,
                     cmd,
@@ -378,6 +688,7 @@ impl Renderer<'_> {
             // same table the pack bind/dispatch above used). The barrier touches no resource beyond
             // the execution/memory dependency (AS_BUILD stage → COMPUTE_SHADER stage).
             unsafe {
+                ts.cmd();
                 crate::accel::cmd_acceleration_structure_barrier(self.fns, cmd);
             }
         }
@@ -393,6 +704,7 @@ impl Renderer<'_> {
         // currently reachable frame, so the `if let` is byte-identical to the pre-R2
         // unconditional call there.
         if let Some(raster_pass) = plan.raster {
+            ts.cmd();
             self.record_graph_pass(raster_pass, cmd, targets, scene, fi);
         }
 
@@ -746,7 +1058,9 @@ impl Renderer<'_> {
         // byte-identical to the pre-R2 unconditional block.
         if plan.raster.is_some() {
             unsafe {
+                ts.cmd();
                 (self.fns.cmd_begin_rendering)(cmd, &raster_rendering);
+                ts.cmd();
                 (self.fns.cmd_bind_pipeline)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -758,6 +1072,7 @@ impl Renderer<'_> {
                 // reference is satisfied. The shared SSBO is `scene.instance_bind_group` for
                 // both arms (M3 repurposed it as the gather-filled N-instance ring on the
                 // instanced path); every batch indexes it by `base_instance + SV_InstanceID`.
+                ts.cmd();
                 (self.fns.cmd_bind_descriptor_sets)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -778,6 +1093,7 @@ impl Renderer<'_> {
                     let bindless_set = scene
                         .bindless_set
                         .expect("invariant: tex_active implies bindless_set is Some");
+                    ts.cmd();
                     (self.fns.cmd_bind_descriptor_sets)(
                         cmd,
                         VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -789,6 +1105,7 @@ impl Renderer<'_> {
                         ptr::null(),
                     );
                 }
+                ts.cmd();
                 (self.fns.cmd_push_constants)(
                     cmd,
                     raster_pipeline.layout,
@@ -797,13 +1114,16 @@ impl Renderer<'_> {
                     scene.mvp.len() as u32,
                     scene.mvp.as_ptr().cast(),
                 );
+                ts.cmd();
                 (self.fns.cmd_set_viewport)(cmd, 0, 1, &raster_viewport);
+                ts.cmd();
                 (self.fns.cmd_set_scissor)(cmd, 0, 1, &raster_area);
                 if scene.mesh_draw.is_empty() {
                     // LEGACY arm: byte-identical to the pre-M2 stream — a non-indexed,
                     // single-instance draw over the scene's merged vertex buffer. The shared
                     // set 0 + the `use_model_matrix == 0` push (caller contract) make the bound
                     // SSBO bound-but-unread.
+                    ts.cmd();
                     (self.fns.cmd_bind_vertex_buffers)(
                         cmd,
                         0,
@@ -811,6 +1131,7 @@ impl Renderer<'_> {
                         &scene.vertex_buffer.buffer,
                         &vertex_offset,
                     );
+                    ts.cmd();
                     (self.fns.cmd_draw)(cmd, scene.vertex_count, 1, 0, 0);
                 } else {
                     // M3 INSTANCED batch loop: one indexed draw per registered mesh. `scene.
@@ -822,6 +1143,7 @@ impl Renderer<'_> {
                     // its instance bucket.
                     for batch in scene.mesh_draw {
                         let base = batch.base_instance;
+                        ts.cmd();
                         (self.fns.cmd_push_constants)(
                             cmd,
                             raster_pipeline.layout,
@@ -830,6 +1152,7 @@ impl Renderer<'_> {
                             4,
                             (&base as *const u32).cast(),
                         );
+                        ts.cmd();
                         (self.fns.cmd_bind_vertex_buffers)(
                             cmd,
                             0,
@@ -837,12 +1160,14 @@ impl Renderer<'_> {
                             &batch.vertex_buffer.buffer,
                             &vertex_offset,
                         );
+                        ts.cmd();
                         (self.fns.cmd_bind_index_buffer)(
                             cmd,
                             batch.index_buffer.buffer,
                             0,
                             batch.index_type,
                         );
+                        ts.cmd();
                         (self.fns.cmd_draw_indexed)(
                             cmd,
                             batch.index_count,
@@ -853,6 +1178,7 @@ impl Renderer<'_> {
                         );
                     }
                 }
+                ts.cmd();
                 (self.fns.cmd_end_rendering)(cmd);
             }
         }
@@ -869,6 +1195,7 @@ impl Renderer<'_> {
             "W1: declare/record predicate desync (mesh_depth_neutral_clear)"
         );
         if let Some(depth_clear_pass) = plan.mesh_depth_neutral_clear {
+            ts.cmd();
             self.record_graph_pass(depth_clear_pass, cmd, targets, scene, fi);
             let depth_only_attachment = VkRenderingAttachmentInfo {
                 s_type: VkStructureType::RenderingAttachmentInfo,
@@ -912,7 +1239,9 @@ impl Renderer<'_> {
             // clear value exactly (`MESH_DEPTH_CLEAR` / `DEPTH_CLEAR` == 1.0), so the
             // byte-UNCHANGED marcher reads "no mesh" for every pixel this frame.
             unsafe {
+                ts.cmd();
                 (self.fns.cmd_begin_rendering)(cmd, &depth_only_rendering);
+                ts.cmd();
                 (self.fns.cmd_end_rendering)(cmd);
             }
         }
@@ -931,6 +1260,7 @@ impl Renderer<'_> {
             "W1: declare/record predicate desync (viewt_from_depth)"
         );
         if let Some(viewt_from_depth_pass) = plan.viewt_from_depth {
+            ts.cmd();
             self.record_graph_pass(viewt_from_depth_pass, cmd, targets, scene, fi);
             let activation = scene
                 .viewt_from_depth
@@ -960,11 +1290,13 @@ impl Renderer<'_> {
             // `VIEWT_FROM_DEPTH_PUSH_BYTES` (12) bytes at offset 0, exactly the declared push
             // range, and the backing `push` local outlives the call.
             unsafe {
+                ts.cmd();
                 (self.fns.cmd_bind_pipeline)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
                     activation.pipeline.pipeline,
                 );
+                ts.cmd();
                 (self.fns.cmd_bind_descriptor_sets)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -975,6 +1307,7 @@ impl Renderer<'_> {
                     0,
                     ptr::null(),
                 );
+                ts.cmd();
                 (self.fns.cmd_push_constants)(
                     cmd,
                     activation.pipeline.layout,
@@ -983,6 +1316,7 @@ impl Renderer<'_> {
                     VIEWT_FROM_DEPTH_PUSH_BYTES,
                     push_bytes.as_ptr().cast(),
                 );
+                ts.cmd();
                 (self.fns.cmd_dispatch)(cmd, group_x, group_y, 1);
             }
         }
@@ -1031,6 +1365,7 @@ impl Renderer<'_> {
             let light_upload = plan
                 .light_upload
                 .expect("invariant: light_dirty ⇒ light_upload pass declared");
+            ts.cmd();
             self.record_graph_pass(light_upload, cmd, targets, scene, fi);
 
             let region = VkBufferCopy {
@@ -1045,6 +1380,7 @@ impl Renderer<'_> {
             // sibling frame's pipelined table reads; the readers' own graph passes order
             // the marcher/resolve reads after this write. `&region` outlives the call.
             unsafe {
+                ts.cmd();
                 (self.fns.cmd_copy_buffer)(
                     cmd,
                     scene.light_staging.buffer,
@@ -1088,6 +1424,7 @@ impl Renderer<'_> {
                 .expect("invariant: declare_frame_graph ran before record_gbuffer")
                 .coarse
                 .expect("invariant: scene.coarse.is_some() ⇒ coarse pass declared");
+            ts.cmd();
             self.record_graph_pass(coarse, cmd, targets, scene, fi);
             // SAFETY: recording is open; the coarse pipeline + its layout (declaring
             // `vocab_layout` at set 0 + the shared COMPUTE push range) are live on this device
@@ -1099,11 +1436,13 @@ impl Renderer<'_> {
             // (first_set 0, count 1, zero dynamic offsets). The cull declares no push it reads,
             // but the layout's push range matches the marcher's, so no constant is pushed here.
             unsafe {
+                ts.cmd();
                 (self.fns.cmd_bind_pipeline)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
                     coarse_pipeline.pipeline,
                 );
+                ts.cmd();
                 (self.fns.cmd_bind_descriptor_sets)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -1114,6 +1453,7 @@ impl Renderer<'_> {
                     0,
                     ptr::null(),
                 );
+                ts.cmd();
                 (self.fns.cmd_dispatch)(cmd, coarse_groups, 1, 1);
             }
 
@@ -1224,23 +1564,23 @@ impl Renderer<'_> {
             "W1: declare/record predicate desync (marcher)"
         );
         if let Some(marcher_pass) = marcher_plan {
+            ts.cmd();
             self.record_graph_pass(marcher_pass, cmd, targets, scene, fi);
             // VB-SV0 rung S1.5: bracket the marcher dispatch itself. The BEGIN is written AFTER
             // `record_graph_pass` so the bracket excludes the graph's derived input barriers —
             // those are identical on both A/B phases (`lighting_flags` is a push constant, not a
             // resource), so including them would only add un-cancelled noise to the paired delta.
-            if let Some(tc) = scene.sv0_gpu_timing {
-                // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool's
-                // queries were reset at this frame's top (the `sv0_gpu_timing` reset above runs
-                // under the same `Some` gate, so an armed frame is always reset first).
-                unsafe { tc.write_begin(self.fns, cmd, fi, Sv0TimedPass::Marcher) };
-            }
+            // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+            // reset by this witness's own `open`; `fi` is this present's in-flight slot.
+            unsafe { ts.sv0_begin(self.fns, cmd, fi, Sv0TimedPass::Marcher) };
             unsafe {
+                ts.cmd();
                 (self.fns.cmd_bind_pipeline)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
                     scene.marcher.pipeline,
                 );
+                ts.cmd();
                 (self.fns.cmd_bind_descriptor_sets)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -1251,6 +1591,7 @@ impl Renderer<'_> {
                     0,
                     ptr::null(),
                 );
+                ts.cmd();
                 (self.fns.cmd_push_constants)(
                     cmd,
                     scene.marcher.layout,
@@ -1259,16 +1600,14 @@ impl Renderer<'_> {
                     GBUFFER_MARCHER_PUSH_BYTES,
                     marcher_push_bytes.as_ptr().cast(),
                 );
+                ts.cmd();
                 (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
             }
             // VB-SV0 rung S1.5: close the marcher bracket (`BOTTOM_OF_PIPE`, so it waits on the
             // dispatch this pair exists to time).
-            if let Some(tc) = scene.sv0_gpu_timing {
-                // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool's
-                // queries were reset at this frame's top, and the matching BEGIN was written just
-                // above under the identical `Some` gate.
-                unsafe { tc.write_end(self.fns, cmd, fi, Sv0TimedPass::Marcher) };
-            }
+            // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+            // reset by this witness's own `open`; `fi` is this present's in-flight slot.
+            unsafe { ts.sv0_end(self.fns, cmd, fi, Sv0TimedPass::Marcher) };
         }
 
         // (5a) PBR MVP-2: make the marcher's gAlbedo + gNormal + gMaterial STORES available
@@ -1320,6 +1659,7 @@ impl Renderer<'_> {
                 .expect("invariant: declare_frame_graph ran before record_gbuffer")
                 .ssao
                 .expect("invariant: scene.ssao.is_some() ⇒ ssao pass declared");
+            ts.cmd();
             self.record_graph_pass(ssao_pass, cmd, targets, scene, fi);
             // SAFETY: recording is open; the SSAO pipeline + its layout (declaring the SSAO set
             // layout at set 0 + the shared 80-byte COMPUTE push range) are live on this device
@@ -1330,11 +1670,13 @@ impl Renderer<'_> {
             // for the call (first_set 0, count 1, zero dynamic offsets). The SSAO shader reads its
             // camera from the UBO @4, so no push constant is recorded.
             unsafe {
+                ts.cmd();
                 (self.fns.cmd_bind_pipeline)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
                     activation.pipeline.pipeline,
                 );
+                ts.cmd();
                 (self.fns.cmd_bind_descriptor_sets)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -1345,6 +1687,7 @@ impl Renderer<'_> {
                     0,
                     ptr::null(),
                 );
+                ts.cmd();
                 (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
             }
 
@@ -1427,6 +1770,7 @@ impl Renderer<'_> {
                 // derived RAW barriers (the gather-write → level-0-read on the first iteration,
                 // the ring ping-pong on every iteration, the last level's write → resolve-read
                 // implicitly ordering before the resolve's later `image_access`) into `cmd`.
+                ts.cmd();
                 self.record_graph_pass(atrous_pass, cmd, targets, scene, fi);
                 let (pipeline, set) = match crate::present::ssao_atrous_step(level, atrous_levels) {
                     crate::present::AtrousStepRole::Read8 => {
@@ -1453,11 +1797,13 @@ impl Renderer<'_> {
                 // `dispatch_group_count_x` covers the pixel count; `&set.descriptor_set` is a
                 // single-element local alive for the call.
                 unsafe {
+                    ts.cmd();
                     (self.fns.cmd_bind_pipeline)(
                         cmd,
                         VK_PIPELINE_BIND_POINT_COMPUTE,
                         pipeline.pipeline,
                     );
+                    ts.cmd();
                     (self.fns.cmd_bind_descriptor_sets)(
                         cmd,
                         VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -1468,6 +1814,7 @@ impl Renderer<'_> {
                         0,
                         ptr::null(),
                     );
+                    ts.cmd();
                     (self.fns.cmd_push_constants)(
                         cmd,
                         pipeline.layout,
@@ -1476,6 +1823,7 @@ impl Renderer<'_> {
                         4,
                         (&step as *const u32).cast(),
                     );
+                    ts.cmd();
                     (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
                 }
             }
@@ -1515,11 +1863,10 @@ impl Renderer<'_> {
                 .expect("invariant: scene.ddgi_update.is_some() ⇒ ddgi_update pass declared");
             // HW-RT rung R0: open the DdgiUpdate bracket BEFORE the pass's input barriers +
             // dispatch. GATED — `None` records nothing (byte-identical).
-            if let Some(tc) = scene.gpu_timing {
-                // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
-                // reset at the frame top; `fi` is this present's in-flight slot.
-                unsafe { tc.write_begin(self.fns, cmd, fi, TimedPass::DdgiUpdate) };
-            }
+            // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+            // reset by this witness's own `open`; `fi` is this present's in-flight slot.
+            unsafe { ts.begin(self.fns, cmd, fi, TimedPass::DdgiUpdate) };
+            ts.cmd();
             self.record_graph_pass(ddgi_update_pass, cmd, targets, scene, fi);
             // SAFETY: recording is open; the update pipeline + its layout (declaring the 7-binding
             // update set layout at set 0, NO push range) are live on this device (caller contract);
@@ -1531,11 +1878,13 @@ impl Renderer<'_> {
             // `&ddgi_update_set.descriptor_set` is a single-element local alive for the call
             // (first_set 0, count 1, zero dynamic offsets).
             unsafe {
+                ts.cmd();
                 (self.fns.cmd_bind_pipeline)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
                     activation.pipeline.pipeline,
                 );
+                ts.cmd();
                 (self.fns.cmd_bind_descriptor_sets)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -1546,13 +1895,13 @@ impl Renderer<'_> {
                     0,
                     ptr::null(),
                 );
+                ts.cmd();
                 (self.fns.cmd_dispatch)(cmd, activation.dispatch_group_count_x, 1, 1);
             }
             // HW-RT rung R0: close the DdgiUpdate bracket AFTER the dispatch. GATED.
-            if let Some(tc) = scene.gpu_timing {
-                // SAFETY: recording is open; the pool was reset this frame; `fi` is this slot.
-                unsafe { tc.write_end(self.fns, cmd, fi, TimedPass::DdgiUpdate) };
-            }
+            // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+            // reset by this witness's own `open`; `fi` is this present's in-flight slot.
+            unsafe { ts.end(self.fns, cmd, fi, TimedPass::DdgiUpdate) };
 
             // The update pass's atlas WRITES (COMPUTE/SHADER_WRITE, GENERAL) are ordered before the
             // resolve's atlas READS (COMPUTE/SHADER_READ) by the graph: it derives the
@@ -1607,6 +1956,7 @@ impl Renderer<'_> {
             // FILL is GPU work (not a barrier), so it runs unconditionally — only the
             // following barrier is graph-driven when the flag is ON.
             unsafe {
+                ts.cmd();
                 (self.fns.cmd_fill_buffer)(cmd, alloc.buffer, 0, VK_WHOLE_SIZE, 0);
             }
             // The alloc TRANSFER→COMPUTE(RW) barrier (+ the light-table TRANSFER→COMPUTE
@@ -1623,6 +1973,7 @@ impl Renderer<'_> {
                 .expect("invariant: declare_frame_graph ran before record_gbuffer")
                 .light_cull
                 .expect("invariant: cull wired ⇒ light_cull pass declared");
+            ts.cmd();
             self.record_graph_pass(light_cull, cmd, targets, scene, fi);
 
             // (L1-1) Bind the cull pipeline + the cull set (written ONCE at sync_gbuffer), push
@@ -1685,11 +2036,13 @@ impl Renderer<'_> {
             // `&cull_set.descriptor_set` is a single-element local alive for the call
             // (first_set 0, count 1).
             unsafe {
+                ts.cmd();
                 (self.fns.cmd_bind_pipeline)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
                     cull_pipeline.pipeline,
                 );
+                ts.cmd();
                 (self.fns.cmd_bind_descriptor_sets)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -1700,6 +2053,7 @@ impl Renderer<'_> {
                     0,
                     ptr::null(),
                 );
+                ts.cmd();
                 (self.fns.cmd_push_constants)(
                     cmd,
                     cull_pipeline.layout,
@@ -1708,6 +2062,7 @@ impl Renderer<'_> {
                     push_len,
                     push_ptr.cast(),
                 );
+                ts.cmd();
                 (self.fns.cmd_dispatch)(cmd, cull_groups, 1, 1);
             }
 
@@ -1757,12 +2112,10 @@ impl Renderer<'_> {
             // cascade depth loop (the reset MUST have run before `begin_rendering`, so the
             // begin write is still legal here — it is outside the per-cascade rendering scope,
             // which opens below inside the loop). GATED — `None` records nothing.
-            if let Some(tc) = scene.gpu_timing {
-                // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
-                // reset at the frame top; this write is outside any `begin_rendering` scope; `fi`
-                // is this present's in-flight slot.
-                unsafe { tc.write_begin(self.fns, cmd, fi, TimedPass::CsmDepth) };
-            }
+            // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+            // reset by this witness's own `open`; `fi` is this present's in-flight slot.
+            unsafe { ts.begin(self.fns, cmd, fi, TimedPass::CsmDepth) };
+            ts.cmd();
             self.record_graph_pass(csm_pass, cmd, targets, scene, fi);
 
             // (CSM-1) Depth-only dynamic rendering, LOOPED over the `[0..active)` cascades (Rung B).
@@ -1839,12 +2192,15 @@ impl Renderer<'_> {
                 // batch's bound vertex+index buffers (created on this device with VERTEX/INDEX
                 // usage). The locals outlive the bracketed calls. Begin/End bracket each cascade.
                 unsafe {
+                    ts.cmd();
                     (self.fns.cmd_begin_rendering)(cmd, &csm_rendering);
+                    ts.cmd();
                     (self.fns.cmd_bind_pipeline)(
                         cmd,
                         VK_PIPELINE_BIND_POINT_GRAPHICS,
                         csm.pipeline.pipeline,
                     );
+                    ts.cmd();
                     (self.fns.cmd_bind_descriptor_sets)(
                         cmd,
                         VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1855,6 +2211,7 @@ impl Renderer<'_> {
                         0,
                         ptr::null(),
                     );
+                    ts.cmd();
                     (self.fns.cmd_push_constants)(
                         cmd,
                         csm.pipeline.layout,
@@ -1863,7 +2220,9 @@ impl Renderer<'_> {
                         csm_push.len() as u32,
                         csm_push.as_ptr().cast(),
                     );
+                    ts.cmd();
                     (self.fns.cmd_set_viewport)(cmd, 0, 1, &csm_viewport);
+                    ts.cmd();
                     (self.fns.cmd_set_scissor)(cmd, 0, 1, &csm_area);
                     // The caster batches: the instanced mesh draws the main pass rasterizes,
                     // FILTERED to `casts_shadow` (the `With<ShadowCaster>` subset). A RECEIVER-only
@@ -1879,6 +2238,7 @@ impl Renderer<'_> {
                         csm_push[GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize
                             ..GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize + 4]
                             .copy_from_slice(&base.to_le_bytes());
+                        ts.cmd();
                         (self.fns.cmd_push_constants)(
                             cmd,
                             csm.pipeline.layout,
@@ -1887,6 +2247,7 @@ impl Renderer<'_> {
                             4,
                             (&base as *const u32).cast(),
                         );
+                        ts.cmd();
                         (self.fns.cmd_bind_vertex_buffers)(
                             cmd,
                             0,
@@ -1894,12 +2255,14 @@ impl Renderer<'_> {
                             &batch.vertex_buffer.buffer,
                             &vertex_offset,
                         );
+                        ts.cmd();
                         (self.fns.cmd_bind_index_buffer)(
                             cmd,
                             batch.index_buffer.buffer,
                             0,
                             batch.index_type,
                         );
+                        ts.cmd();
                         (self.fns.cmd_draw_indexed)(
                             cmd,
                             batch.index_count,
@@ -1909,16 +2272,15 @@ impl Renderer<'_> {
                             0,
                         );
                     }
+                    ts.cmd();
                     (self.fns.cmd_end_rendering)(cmd);
                 }
             }
             // HW-RT rung R0: close the CsmDepth bracket AFTER the cascade depth loop (all
             // `end_rendering`s recorded — this write is outside any rendering scope). GATED.
-            if let Some(tc) = scene.gpu_timing {
-                // SAFETY: recording is open; the pool was reset this frame; the per-cascade
-                // rendering scopes are all closed; `fi` is this slot.
-                unsafe { tc.write_end(self.fns, cmd, fi, TimedPass::CsmDepth) };
-            }
+            // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+            // reset by this witness's own `open`; `fi` is this present's in-flight slot.
+            unsafe { ts.end(self.fns, cmd, fi, TimedPass::CsmDepth) };
 
             // (CSM-2) The dual-use depth barrier: DEPTH_ATTACHMENT_OPTIMAL →
             // SHADER_READ_ONLY_OPTIMAL (reusing the marcher's depth-barrier shape) over ALL
@@ -1968,12 +2330,10 @@ impl Renderer<'_> {
             // HW-RT rung R0: open the PunctualDepth bracket BEFORE the pass's barrier-in +
             // atlas depth loop (outside the per-slot rendering scope, which opens below inside
             // the loop). GATED — `None` records nothing.
-            if let Some(tc) = scene.gpu_timing {
-                // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
-                // reset at the frame top; this write is outside any `begin_rendering` scope; `fi`
-                // is this present's in-flight slot.
-                unsafe { tc.write_begin(self.fns, cmd, fi, TimedPass::PunctualDepth) };
-            }
+            // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+            // reset by this witness's own `open`; `fi` is this present's in-flight slot.
+            unsafe { ts.begin(self.fns, cmd, fi, TimedPass::PunctualDepth) };
+            ts.cmd();
             self.record_graph_pass(atlas_pass, cmd, targets, scene, fi);
 
             // Depth-only dynamic rendering, LOOPED over the `[0..active)` atlas slots. The render
@@ -2075,13 +2435,16 @@ impl Renderer<'_> {
                 // re-stamped every slot (the per-slot `view_proj` differs). The locals outlive the
                 // bracketed calls. Begin/End bracket each slot.
                 unsafe {
+                    ts.cmd();
                     (self.fns.cmd_begin_rendering)(cmd, &atlas_rendering);
                     if bound_point != Some(is_point) {
+                        ts.cmd();
                         (self.fns.cmd_bind_pipeline)(
                             cmd,
                             VK_PIPELINE_BIND_POINT_GRAPHICS,
                             face_pipeline.pipeline,
                         );
+                        ts.cmd();
                         (self.fns.cmd_bind_descriptor_sets)(
                             cmd,
                             VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -2094,6 +2457,7 @@ impl Renderer<'_> {
                         );
                         bound_point = Some(is_point);
                     }
+                    ts.cmd();
                     (self.fns.cmd_push_constants)(
                         cmd,
                         face_pipeline.layout,
@@ -2102,7 +2466,9 @@ impl Renderer<'_> {
                         atlas_push.len() as u32,
                         atlas_push.as_ptr().cast(),
                     );
+                    ts.cmd();
                     (self.fns.cmd_set_viewport)(cmd, 0, 1, &atlas_viewport);
+                    ts.cmd();
                     (self.fns.cmd_set_scissor)(cmd, 0, 1, &atlas_area);
                     // The caster batches: the instanced mesh draws the main pass rasterizes,
                     // FILTERED to `casts_shadow` (the `With<ShadowCaster>` subset). A RECEIVER-only
@@ -2123,6 +2489,7 @@ impl Renderer<'_> {
                         // include ALL stages of every overlapping range — a subset is invalid.
                         // Both pipelines share the SAME layout, so `face_pipeline.layout` is correct
                         // for either face type.
+                        ts.cmd();
                         (self.fns.cmd_push_constants)(
                             cmd,
                             face_pipeline.layout,
@@ -2131,6 +2498,7 @@ impl Renderer<'_> {
                             4,
                             (&base as *const u32).cast(),
                         );
+                        ts.cmd();
                         (self.fns.cmd_bind_vertex_buffers)(
                             cmd,
                             0,
@@ -2138,12 +2506,14 @@ impl Renderer<'_> {
                             &batch.vertex_buffer.buffer,
                             &vertex_offset,
                         );
+                        ts.cmd();
                         (self.fns.cmd_bind_index_buffer)(
                             cmd,
                             batch.index_buffer.buffer,
                             0,
                             batch.index_type,
                         );
+                        ts.cmd();
                         (self.fns.cmd_draw_indexed)(
                             cmd,
                             batch.index_count,
@@ -2153,16 +2523,15 @@ impl Renderer<'_> {
                             0,
                         );
                     }
+                    ts.cmd();
                     (self.fns.cmd_end_rendering)(cmd);
                 }
             }
             // HW-RT rung R0: close the PunctualDepth bracket AFTER the atlas depth loop (all
             // `end_rendering`s recorded — outside any rendering scope). GATED.
-            if let Some(tc) = scene.gpu_timing {
-                // SAFETY: recording is open; the pool was reset this frame; the per-slot
-                // rendering scopes are all closed; `fi` is this slot.
-                unsafe { tc.write_end(self.fns, cmd, fi, TimedPass::PunctualDepth) };
-            }
+            // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+            // reset by this witness's own `open`; `fi` is this present's in-flight slot.
+            unsafe { ts.end(self.fns, cmd, fi, TimedPass::PunctualDepth) };
 
             // The graph derives the dual-use depth barrier-out
             // (DEPTH_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL over ALL `[0..active)`
@@ -2234,6 +2603,7 @@ impl Renderer<'_> {
             };
             // SAFETY: recording is open; `record_graph_pass` records the graph's derived input
             // barriers for the "shadow_vis" pass into `cmd`.
+            ts.cmd();
             self.record_graph_pass(vis_pass, cmd, targets, scene, fi);
             // SAFETY: recording is open; the selected VIS pipeline + its layout (22-binding base or
             // 24-binding VIS-MV) are live on this device (caller contract); `vis_set` binds the
@@ -2244,11 +2614,13 @@ impl Renderer<'_> {
             // the bound UBOs; the resolve's 80-byte push range is declared-but-unread here (no push
             // recorded).
             unsafe {
+                ts.cmd();
                 (self.fns.cmd_bind_pipeline)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
                     vis_pipeline.pipeline,
                 );
+                ts.cmd();
                 (self.fns.cmd_bind_descriptor_sets)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -2259,6 +2631,7 @@ impl Renderer<'_> {
                     0,
                     ptr::null(),
                 );
+                ts.cmd();
                 (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
             }
             // (b) The `levels` à-trous passes. Each pushes `step = 1 << level`, binds the level's
@@ -2302,6 +2675,7 @@ impl Renderer<'_> {
                 let step: u32 = 1u32 << level;
                 // SAFETY: recording is open; `record_graph_pass` records the "shadow_atrous" pass's
                 // derived RAW barriers on the ping-pong pair into `cmd`.
+                ts.cmd();
                 self.record_graph_pass(atrous_pass, cmd, targets, scene, fi);
                 let atrous_set = &level_ring[self.frame_index];
                 // SAFETY: recording is open; the à-trous pipeline + its 6-binding layout are live on
@@ -2311,11 +2685,13 @@ impl Renderer<'_> {
                 // `dispatch_group_count_x` covers the pixel count; `&atrous_set.descriptor_set` is a
                 // single-element local alive for the call.
                 unsafe {
+                    ts.cmd();
                     (self.fns.cmd_bind_pipeline)(
                         cmd,
                         VK_PIPELINE_BIND_POINT_COMPUTE,
                         sh.atrous_pipeline.pipeline,
                     );
+                    ts.cmd();
                     (self.fns.cmd_bind_descriptor_sets)(
                         cmd,
                         VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -2326,6 +2702,7 @@ impl Renderer<'_> {
                         0,
                         ptr::null(),
                     );
+                    ts.cmd();
                     (self.fns.cmd_push_constants)(
                         cmd,
                         sh.atrous_pipeline.layout,
@@ -2334,6 +2711,7 @@ impl Renderer<'_> {
                         4,
                         (&step as *const u32).cast(),
                     );
+                    ts.cmd();
                     (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
                 }
             }
@@ -2371,6 +2749,7 @@ impl Renderer<'_> {
             // SAFETY: recording is open; `record_graph_pass` records the "shadow_temporal" pass's
             // derived input/RAW barriers (final-vis/motion_vec/viewt → read, hist[fi]/temporal_out
             // first-touch/RAW) into `cmd`.
+            ts.cmd();
             self.record_graph_pass(temporal_pass, cmd, targets, scene, fi);
             let temporal_set = &temporal_sets[self.frame_index];
             // SAFETY: recording is open; the temporal pipeline + its 8-binding layout are live on this
@@ -2381,11 +2760,13 @@ impl Renderer<'_> {
             // shader reads NO push (its params ride the b6 UBO); the pipeline's declared 4-byte COMPUTE
             // range is bound-but-unread (no push recorded).
             unsafe {
+                ts.cmd();
                 (self.fns.cmd_bind_pipeline)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
                     temporal_pipeline.pipeline,
                 );
+                ts.cmd();
                 (self.fns.cmd_bind_descriptor_sets)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -2396,6 +2777,7 @@ impl Renderer<'_> {
                     0,
                     ptr::null(),
                 );
+                ts.cmd();
                 (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
             }
         }
@@ -2418,12 +2800,10 @@ impl Renderer<'_> {
         // + dispatch. This spans the WHOLE resolve dispatch, INCLUDING the inline SDF
         // soft-shadow march (R0 brackets passes, not shader sections). GATED — `None` records
         // nothing.
-        if let Some(tc) = scene.gpu_timing {
-            // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
-            // reset at the frame top; this write is outside any rendering scope (the resolve is a
-            // compute dispatch); `fi` is this present's in-flight slot.
-            unsafe { tc.write_begin(self.fns, cmd, fi, TimedPass::DeferredResolve) };
-        }
+        // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+        // reset by this witness's own `open`; `fi` is this present's in-flight slot.
+        unsafe { ts.begin(self.fns, cmd, fi, TimedPass::DeferredResolve) };
+        ts.cmd();
         self.record_graph_pass(resolve, cmd, targets, scene, fi);
 
         // (5b) Deferred RESOLVE pass: bind the resolve pipeline + the resolve set (gAlbedo
@@ -2534,7 +2914,9 @@ impl Renderer<'_> {
         // is a single-element local alive for the call (first_set 0, count 1, zero dynamic offsets).
         // The resolve pushes NO constants.
         unsafe {
+            ts.cmd();
             (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, resolve_pipeline_h);
+            ts.cmd();
             (self.fns.cmd_bind_descriptor_sets)(
                 cmd,
                 VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -2545,14 +2927,13 @@ impl Renderer<'_> {
                 0,
                 ptr::null(),
             );
+            ts.cmd();
             (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
         }
         // HW-RT rung R0: close the DeferredResolve bracket AFTER the resolve dispatch. GATED.
-        if let Some(tc) = scene.gpu_timing {
-            // SAFETY: recording is open; the pool was reset this frame; the resolve dispatch is
-            // recorded; `fi` is this slot.
-            unsafe { tc.write_end(self.fns, cmd, fi, TimedPass::DeferredResolve) };
-        }
+        // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+        // reset by this witness's own `open`; `fi` is this present's in-flight slot.
+        unsafe { ts.end(self.fns, cmd, fi, TimedPass::DeferredResolve) };
 
         // Anti-aliasing Stage 4 (TAA W5): the temporal-resolve pass — recorded HERE, BEFORE
         // `present_sample`'s `lit` GENERAL→SHADER_READ_ONLY_OPTIMAL transition below. TAA is a
@@ -2574,6 +2955,7 @@ impl Renderer<'_> {
             // SAFETY: recording is open; `aa_out`/`taa_hist`/`taa_resolve_set` were built by
             // `create()` under the same `scene.taa` that gates this branch; `taa_pass` was
             // declared this frame under the same gate (the invariant above).
+            ts.cmd();
             unsafe { self.record_taa(cmd, targets, taa, taa_pass, scene, fi) };
 
             // TAA rung T3: the post-resolve RCAS sharpen pass — recorded IMMEDIATELY after
@@ -2592,6 +2974,7 @@ impl Renderer<'_> {
                 // were built by `create()` under the same `scene.rcas` that gates this branch;
                 // `present_extent` sizes both `taa_resolved` and `aa_out` (the SAME extent the
                 // resolve dispatched over).
+                ts.cmd();
                 unsafe { self.record_rcas(cmd, targets, rcas, present_extent, scene, fi) };
             }
         }
@@ -2612,6 +2995,7 @@ impl Renderer<'_> {
             .as_ref()
             .expect("invariant: declare_frame_graph ran before record_gbuffer")
             .present_sample;
+        ts.cmd();
         self.record_graph_pass(present_sample, cmd, targets, scene, fi);
 
         // Anti-aliasing Stage 1 (FXAA) / Stage 2 (SMAA) / Stage 3 (SSAA). Stage 4 (TAA) was
@@ -2636,12 +3020,14 @@ impl Renderer<'_> {
                 // SHADER_READ_ONLY_OPTIMAL; `aa_out`/`fxaa_set` were built by `create()`
                 // under the same `scene.aa` that gates this branch; `present_extent` sizes
                 // `aa_out`.
+                ts.cmd();
                 unsafe { self.record_fxaa(cmd, targets, fxaa, present_extent, fi) };
             } else if let Some(smaa) = scene.smaa.as_ref() {
                 // SAFETY: recording is open; `present_sample` above left `lit` in
                 // SHADER_READ_ONLY_OPTIMAL; `aa_out`/`smaa_edges`/`smaa_weights`/the three
                 // `smaa_*_set` rings were built by `create()` under the same `scene.smaa`
                 // that gates this branch; `present_extent` sizes every SMAA target.
+                ts.cmd();
                 unsafe { self.record_smaa(cmd, targets, smaa, present_extent, fi) };
             } else if let Some(ssaa) = scene.ssaa.as_ref() {
                 debug_assert!(targets.aa_out.is_some() && targets.downsample_set.is_some());
@@ -2650,6 +3036,7 @@ impl Renderer<'_> {
                 // `create()` under the same `scene.ssaa` that gates this branch, sized to
                 // `aa_extent` (the BOOT-FIXED native size, NOT `present_extent`, which is 2×
                 // under SSAA, and NOT the live `extent`, which tracks window resizes).
+                ts.cmd();
                 unsafe { self.record_ssaa(cmd, targets, ssaa, aa_extent, fi) };
             } else {
                 // `aa_out.is_some()` with none of aa/smaa/ssaa matched ⇒ TAA is the reason
@@ -2682,6 +3069,7 @@ impl Renderer<'_> {
         // TOP_OF_PIPE→COLOR_ATTACHMENT_OUTPUT with UNDEFINED→COLOR is the
         // superset-correct acquire→render transition; `&to_color` outlives the call.
         unsafe {
+            ts.cmd();
             (self.fns.cmd_pipeline_barrier)(
                 cmd,
                 VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
@@ -2759,12 +3147,15 @@ impl Renderer<'_> {
         // is the `SV_VertexID` fullscreen triangle (no vertex buffer). Begin/End bracket
         // pass C exactly.
         unsafe {
+            ts.cmd();
             (self.fns.cmd_begin_rendering)(cmd, &present_rendering);
+            ts.cmd();
             (self.fns.cmd_bind_pipeline)(
                 cmd,
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
                 scene.present_pipeline.pipeline,
             );
+            ts.cmd();
             (self.fns.cmd_bind_descriptor_sets)(
                 cmd,
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -2775,9 +3166,13 @@ impl Renderer<'_> {
                 0,
                 ptr::null(),
             );
+            ts.cmd();
             (self.fns.cmd_set_viewport)(cmd, 0, 1, &blit_viewport);
+            ts.cmd();
             (self.fns.cmd_set_scissor)(cmd, 0, 1, &blit_scissor);
+            ts.cmd();
             (self.fns.cmd_draw)(cmd, 3, 1, 0, 0);
+            ts.cmd();
             (self.fns.cmd_end_rendering)(cmd);
         }
 
@@ -2803,6 +3198,7 @@ impl Renderer<'_> {
                 // COLOR→PRESENT makes the blit's writes visible to the present engine;
                 // `&to_present` outlives the call.
                 unsafe {
+                    ts.cmd();
                     (self.fns.cmd_pipeline_barrier)(
                         cmd,
                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -2834,6 +3230,7 @@ impl Renderer<'_> {
                 // COLOR→TRANSFER_SRC makes the blit's writes available to the copy;
                 // `&to_transfer` outlives the call.
                 unsafe {
+                    ts.cmd();
                     (self.fns.cmd_pipeline_barrier)(
                         cmd,
                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -2872,6 +3269,7 @@ impl Renderer<'_> {
                 // the SWAPCHAIN image (the on-screen golden) — NOT the depth (the depth
                 // copy is the deletion target this path proves absent).
                 unsafe {
+                    ts.cmd();
                     (self.fns.cmd_copy_image_to_buffer)(
                         cmd,
                         image,
@@ -2898,6 +3296,7 @@ impl Renderer<'_> {
                 // TRANSFER_SRC→PRESENT releases the image to the present engine after the
                 // readback copy; `&to_present` outlives the call.
                 unsafe {
+                    ts.cmd();
                     (self.fns.cmd_pipeline_barrier)(
                         cmd,
                         VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -2913,6 +3312,11 @@ impl Renderer<'_> {
                 }
             }
         }
+
+        // Profiling rung 6: close the frame's witness. The one path that does not reach this line
+        // is the `vkBeginCommandBuffer` failure above, which returns BEFORE the witness exists —
+        // that frame resets nothing, writes nothing, and its caller never reaches a readback.
+        ts.finish();
 
         // SAFETY: recording is open; ending it matches the `begin` above.
         let raw = unsafe { (self.fns.end_command_buffer)(cmd) };

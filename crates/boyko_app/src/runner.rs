@@ -2759,6 +2759,19 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             let mut retired_frames = 0u32;
             host.gpu.retire_vb_zone(ctx, epoch, now, &mut vb_zone_scratch, |frame, pairs| {
                 retired_frames += 1;
+                // Profiling rung 6: the ZONE IDS, printed. They are `family base + pass slot`, and
+                // printing them is what lets a gate assert that a Deferred frame's brackets landed
+                // in the gbuffer/SV0 ranges rather than colliding with VB's at slot 0 — the whole
+                // reason the bases exist. A count alone cannot say that.
+                {
+                    use core::fmt::Write as _;
+                    let mut zones = String::with_capacity(64);
+                    for (k, p) in pairs.iter().enumerate() {
+                        let sep = if k > 0 { "," } else { "" };
+                        let _ = write!(zones, "{sep}{}", p.zone);
+                    }
+                    println!("VB-ZONE zones frame={} ids=[{zones}]", frame.frame);
+                }
                 for p in pairs {
                     match p.label {
                         boyko_rhi_vulkan::present::gpu_zone::GpuLabel::Measured => measured += 1,

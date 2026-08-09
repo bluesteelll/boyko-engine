@@ -1609,9 +1609,6 @@ pub(crate) struct GpuSceneBundles {
     /// when every slot was still in flight (a stated refusal: the honest response is to record no
     /// zones this frame rather than to overwrite unread results).
     vb_zone_slot: Option<usize>,
-    /// [`Self::vb_bench_disarmed`]'s sibling for the zone leg, set by the same boot-time path
-    /// predicate and for the same reason: every writer lives inside `record_vb`.
-    vb_zone_disarmed: bool,
     /// Profiling rung 5c: the command census both A/B legs feed, through the SAME `TsWitness` call
     /// sites. Built whenever either leg is armed. Without `boyko_rhi_vulkan/profiling-census` its
     /// verbs are compiled out at those sites, so it stays at zero and the per-frame line says so —
@@ -4720,8 +4717,6 @@ impl GpuSceneBundles {
             sv0_bench,
             vb_zone,
             vb_zone_slot: None,
-            // Same reason as `vb_bench_disarmed` directly above: the path is resolved later.
-            vb_zone_disarmed: false,
             vb_census,
         }
     }
@@ -6741,7 +6736,7 @@ impl GpuSceneBundles {
             // Profiling rung 5c: read through `vb_zone_for_frame`, the SAME accessor the runner
             // reads — and structurally exclusive with `vb_gpu_timing` above, because `boot` refuses
             // the two knobs together. `None` on every golden/host/interactive frame.
-            vb_gpu_zone: self.vb_zone_for_frame(),
+            gpu_zone: self.vb_zone_for_frame(),
             // The census both legs feed, through the same `TsWitness` sites.
             vb_cmd_witness: self.vb_census(),
             // VB-SV0 rung S1.5: the Deferred marcher bench collector, armed ONLY when
@@ -7429,9 +7424,6 @@ impl GpuSceneBundles {
     /// timings as another's.
     #[inline]
     pub(crate) fn vb_zone_for_frame(&self) -> Option<(&GpuZoneRecorder, usize)> {
-        if self.vb_zone_disarmed {
-            return None;
-        }
         Some((self.vb_zone.as_ref()?, self.vb_zone_slot?))
     }
 
@@ -7448,9 +7440,6 @@ impl GpuSceneBundles {
     /// not armed, so the frame loop calls it unconditionally rather than behind a predicate that
     /// could drift from `vb_zone_for_frame`'s.
     pub(crate) fn open_vb_zone_frame(&mut self, frame: u32, submit_epoch: u64, frame_now: u64) {
-        if self.vb_zone_disarmed {
-            return;
-        }
         self.vb_zone_slot = self
             .vb_zone
             .as_mut()
@@ -7492,7 +7481,7 @@ impl GpuSceneBundles {
     /// distinct from [`Self::vb_zone_for_frame`]'s per-frame one.
     #[inline]
     pub(crate) fn vb_zone_armed(&self) -> bool {
-        !self.vb_zone_disarmed && self.vb_zone.is_some()
+        self.vb_zone.is_some()
     }
 
     /// VG R3 piece 4 rung P4-1: disarms the VB-P1d bench collector unless this boot resolved
@@ -7533,19 +7522,18 @@ impl GpuSceneBundles {
             return None;
         }
         self.vb_bench_disarmed = true;
-        // Profiling rung 5c: the zone leg inherits the disarm, and inherits it HERE rather than
-        // through its own predicate. Its writers are the same `record_vb` brackets, so the path
-        // that cannot feed the collector cannot feed the recorder either — and a second copy of
-        // this condition is how the two legs come to disagree about which frames they recorded.
-        self.vb_zone_disarmed = true;
-        let zone_was_armed = self.vb_zone.is_some();
-        if zone_was_armed {
-            eprintln!(
-                "profiling rung 5c: BOYKO_VB_ZONE set but the resolved render path is {:?} — the \
-                 zone recorder is disarmed (only record_vb records its brackets).",
-                resolved.path
-            );
-        }
+        // ⚠️ Profiling rung 6 REMOVED the zone leg's disarm, and the removal is the finding.
+        //
+        // Rung 5c inherited it from `vb_bench` on the argument that "its writers are the same
+        // `record_vb` brackets, so a path that cannot feed the collector cannot feed the recorder
+        // either". That was true of a recorder only `record_vb` wrote. Rung 6 ported
+        // `record_gbuffer`'s brackets too — the four software-ray passes and the SV0 marcher — so
+        // the zone recorder is now fed by BOTH recorders and there is no render path that fails to
+        // feed it. Keeping the disarm here would have left the whole rung-6 port unreachable on
+        // every path that can reach it, which is the same shape as scaffolding with no caller.
+        //
+        // The knob is still spelled `BOYKO_VB_ZONE` because G10's A/B names it; rung 7, which
+        // deletes the three collectors, is where the name stops being about VB.
         if self.vb_bench.is_some() {
             // The O2 decline notice, in the ONE place that knows both halves of the gate (the
             // same discipline as `boot`'s "timestamps unusable" notice).
@@ -7555,16 +7543,10 @@ impl GpuSceneBundles {
                 resolved.path
             );
         }
-        // The KNOB that was actually set, so the caller's panic names it. `boot` refuses the two
-        // together, so at most one of these is `Some` — a returned `bool` would have made the
-        // panic say `BOYKO_VB_BENCH` on a boot that only ever set `BOYKO_VB_ZONE`.
-        if self.vb_bench.is_some() {
-            Some("BOYKO_VB_BENCH")
-        } else if zone_was_armed {
-            Some("BOYKO_VB_ZONE")
-        } else {
-            None
-        }
+        // The KNOB whose collector this path cannot feed, so the caller's panic names it. Only the
+        // VB bench qualifies now: rung 6's port means `BOYKO_VB_ZONE` is feedable on every path,
+        // so refusing it here would refuse a configuration that works.
+        if self.vb_bench.is_some() { Some("BOYKO_VB_BENCH") } else { None }
     }
 
     /// VB-P1e H0: [`Self::read_vb_bench_ns`] reads back frame `fi`'s per-pass samples (masked +

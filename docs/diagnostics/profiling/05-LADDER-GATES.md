@@ -137,7 +137,7 @@ flag-off legs on the logging side and by GJ1's control leg here.
 | **3** *(**COMPLETE** — **3a** the field, the mint, `W9201`/`W9208`; **3b** the `App` zones; **3c** the per-system spans; **3d** the analysis half)* | `SystemMeta.zone` + const-assert; tier-gated minting at `try_build` with **non-terminal** refusal; the four `App` zones (`__frame`/`__events`/`__fixed_step`/`__main_run`) at `update_with_delta`; the dispatch-round pair `__round`/`__round_width` **in place of `RoundRecord`**; `intervals` + `ConcurrencyReport` under `profiling-analysis`, **without `compat` and without `sys_of`** — see "What rung 3d SHIPPED" below for all four departures and their arguments | **G8, G9, G11 (engine half)** | one field in tail padding; four zone sites |
 | **4** *(**SHIPPED**)* | RHI seam: three verbs + Vulkan impls + `ffi.rs` constants + `GPU_ZONE_QUERY_FLAGS` const-assert + Mock defaults and their pinning tests. **No consumer.** Plus `VkPhysicalDeviceHostQueryResetFeatures` (granular, for the VUID reason the descriptor-indexing struct already carries) and `DeviceCaps::host_query_reset` — see "What rung 4 SHIPPED" below | **G2a, G2c** | old readers untouched |
 | **5** *(**COMPLETE** — **5a** the edge, `gpu_zone.rs`, the 2×2 label, **G2b**; **5b** `CommandWitness` behind `profiling-census` + **G5**; **5c** the VB port, the A/B and **G10**'s witness clause — see "What rung 5c SHIPPED" below for the four departures)* | `boyko_rhi_vulkan → boyko_diag` edge; `gpu_zone.rs` + `CommandWitness` (`zone_open_order` **and** `stamp_positions`, behind `profiling-census`); VB brackets ported. **Serial A/B against the old collector** (never both armed in one frame — F17) | **G2b, G5, G10** | both collectors exist; every existing test still compiles and passes |
-| **6** | gbuffer + SV0 ported; the R0 harness reads the new channel while the old one still exists | G10 extended to those passes | additive |
+| **6** *(**PORT SHIPPED**; the G10 extension is FORKED — see "What rung 6 SHIPPED" below)* | gbuffer + SV0 ported through `GbufWitness`, the sibling `record_gbuffer` never had; `ZONE_BASE_VB`/`_GBUFFER`/`_SV0` const-asserted disjoint; `gbuffer_zone_port_gate.rs` **| the port gate (ids in their own family range, no LOST/TORN) — G10 extended to these passes needs an arming path for the R0 collector that does not exist | additive |
 | **7 (the single subtractive rung)** | Delete `gpu_timing.rs`, the runner harness bodies, the statistics helpers **and the four `VB-P1d`/`VB-P4` print sites** (`runner.rs:3089`, `:3096`, `:3121`, `:3137`) — **and migrate all six stdout consumers to the artifact in the same commit** (S1; list below) | the post-rung `rg` gate **plus the S1 stdout gate (G24)** | one commit, workspace green before and after |
 | **7b (NEW — S1)** | **Floor re-measurement on the artifact channel.** Re-run A6's protocol (7 processes × 3 repetitions) reading the artifact instead of stdout; publish `docs/PROFILING-FLOOR.md` with the new `WorkloadTag`, all three repetition floors, and `FLOOR_REDUCTION = Max` | **G3a's reduction RED** | needs rung 7's channel; blocks nothing but *licenses* rung 8's verdicts |
 | **8** | `Floor`/`Twin`/`resolve` + `NotResolvedReason`, `WindowReducer`, TOML artifact, present mode (**labelling only if `Immediate` is unsupported — D12**), counters at `vkCmd*` sites, optional `profiling-alloc` | **G3a, G3b, G6, G13, G4c (the artifact clause), G25** | additive |
@@ -165,7 +165,7 @@ names and omitted three production sites (F16):
 | `crates/boyko_rhi_vulkan/src/present/gpu_timing.rs` | **deleted** |
 | `crates/boyko_rhi_vulkan/src/present/mod.rs` | **re-export at `:52-56`** — unlisted by rev 2 |
 | `crates/boyko_rhi_vulkan/src/present/passes/vb.rs` | recorder |
-| `crates/boyko_rhi_vulkan/src/present/scene_types.rs` | **`use` at `:21`; the three public `Option<&'a …Collector>` fields, now at `:2633`, `:2645`, `:2696`, plus rung 5c's two — `vb_gpu_zone` at `:2665` and `vb_cmd_witness` at `:2684`** — unlisted by rev 2. **(Anchor corrected twice, and the second time by an edit of my own: rev 4 wrote `:2645` for `vb_gpu_timing`, which was then `:2643` with `:2645` a doc-comment line; rung 5c inserted two fields between `vb_gpu_timing` and `sv0_gpu_timing` and moved all three. Re-verified against HEAD. A row that cites five line numbers in one file is a row that goes stale every time that file grows — it is kept because the FIELD NAMES beside the numbers are what a reader searches for when the numbers rot.)** |
+| `crates/boyko_rhi_vulkan/src/present/scene_types.rs` | **`use` at `:21`; the three public `Option<&'a …Collector>` fields, now at `:2633`, `:2645`, `:2702`, plus rung 5c's two — `gpu_zone` at `:2671` and `vb_cmd_witness` at `:2690`** — unlisted by rev 2. **(Anchor corrected twice, and the second time by an edit of my own: rev 4 wrote `:2645` for `vb_gpu_timing`, which was then `:2643` with `:2645` a doc-comment line; rung 5c inserted two fields between `vb_gpu_timing` and `sv0_gpu_timing` and moved all three. Re-verified against HEAD. A row that cites five line numbers in one file is a row that goes stale every time that file grows — it is kept because the FIELD NAMES beside the numbers are what a reader searches for when the numbers rot.)** |
 | `crates/boyko_rhi_vulkan/src/swapchain.rs` | **re-export at `:14-16`** — unlisted by rev 2 |
 | `crates/boyko_rhi_vulkan/tests/software_ray_baseline_cost.rs` | migrates to zones |
 | `crates/boyko_rhi_vulkan/tests/window_present_gbuffer.rs` | migrates to zones |
@@ -787,6 +787,76 @@ a gate.* The mechanism was right; the running of it was the gap, and no gate can
   matches inside `repairs=0` and read the repair count as the pair count, reporting "every `pairs=`
   is 0" against a line printing `pairs=10`. `key_u32` is token-anchored now. Recorded because it is
   the census's own defect class one level up: an instrument wrong about which number it was reading.
+
+### What rung 6 SHIPPED, and the one thing it could not do without a scope decision
+
+`record_gbuffer`'s ten bracket sites now record through `GbufWitness` — the carrier that file never
+had — so the four software-ray passes and the SV0 marcher reach the `GpuZoneRecorder` on the same
+terms `record_vb`'s ten do. `gbuffer.rs` counts **125 record sites** (98 `fns.cmd_*`, 25 delegates,
+2 `crate::accel::*`), all in `record_gbuffer`. `crates/boyko_app/tests/gbuffer_zone_port_gate.rs`
+gates it with a run RED.
+
+**GREEN, measured:** 30 retired frames on `Deferred × Both`, 30 gbuffer-family and 30 SV0-family
+brackets, every id inside its own base range, no `LOST` and no `TORN`. Five goldens across three
+render paths (`grand_showcase`, `deferred_mesh_only`, `forward_mesh`, `vb_mesh`, `vb_both_sdf`)
+byte-identical, and rung 5c's G10 still green at 26 frames / 520 timestamps.
+
+**1. Zone ids needed FAMILY BASES, and the reason is a collision that already existed.**
+`TimedPass::DdgiUpdate`, `Sv0TimedPass::Marcher` and `VbTimedPass::CullReset` are **all slot 0**, and
+the first two are recorded into the SAME frame's ring slot by the same `record_gbuffer`. Rung 5c's
+*"the zone id IS the `VbTimedPass` slot"* is complete for one family and stops naming a pass at two.
+`ZONE_BASE_VB` / `ZONE_BASE_GBUFFER` / `ZONE_BASE_SV0` are const-asserted disjoint, and each family's
+width is const-asserted at the seam beside the enum it constrains — two separate assert items, not
+one conjunction, because `SV0_PASS_COUNT <= PASS_COUNT` makes a conjunction's second half dead and
+clippy says so. **RED, run:** drop `ZONE_BASE_GBUFFER` from the alloc ⇒ ids appear in the VB range on
+a Deferred frame ⇒ the gate names the id and the family.
+
+**2. One recorder and one slot per FRAME — so `vb_gpu_zone` lost its prefix.** A frame records either
+`record_vb`'s brackets or `record_gbuffer`'s, and inside the latter two families share the slot. The
+field is `GBufferScene::gpu_zone`.
+
+**3. The disarm had to be REMOVED, and its removal is the finding.** Rung 5c gave the zone leg
+`vb_bench`'s boot-time disarm, on the argument that *"its writers are the same `record_vb` brackets,
+so a path that cannot feed the collector cannot feed the recorder either"*. True of a recorder only
+`record_vb` wrote; false the moment rung 6 ported `record_gbuffer`. Left in place it would have made
+the entire rung-6 port unreachable on every path that can reach it — scaffolding with no caller,
+wearing a predicate that looked like a safety property. `vb_zone_disarmed` is deleted rather than
+left `false`: *a field nothing can make move is indistinguishable from a measurement of zero.*
+
+**4. `record_gbuffer` had no carrier at all, and `Sv0TimedPass`'s own doc says what that costs.**
+Ten bare `if let Some(tc) = scene.gpu_timing` sites, no witness, and — verified — **no
+`write_zero_pair` anywhere in the file**, so no totality epilogue. `Sv0TimedPass::Marcher`'s doc:
+*"A render path that does not dispatch the marcher therefore leaves this pair UNWRITTEN, which would
+hang the `WAIT`-bit readback — the caller must only arm this collector on a marcher-carrying path."*
+The same holds for `DdgiUpdate` (bracketed inside `scene.ddgi_update`'s arm) and for
+`CsmDepth`/`PunctualDepth`. What stood between the R0 harness and an infinite wait was the harness's
+own configuration. `GbufWitness::finish` deliberately does **not** invent a totality fill for the old
+legs: repairing that hazard at the rung that replaces it would hide it from the gate meant to show
+it. The zone leg has no epilogue because it needs none — an unwritten pair retires `NotBracketed`.
+
+**5. The 5c pair-index lesson transferred, and this file is where it would have bitten again.**
+`Marcher` opens FIRST here, at the marcher dispatch, before every `TimedPass` — so `count_ones` of
+the bits below a slot is not that slot's open index in `record_gbuffer` either. `pair_of` remembers.
+
+#### The fork rung 6 did NOT decide: G10 has no leg A for the gbuffer family
+
+`TimestampCollector` is constructed in exactly **two** places in the tree —
+`boyko_rhi_vulkan/tests/software_ray_baseline_cost.rs:367` and
+`.../tests/window_present_gbuffer.rs:9259` — and **never from `boyko_app`**. Rung 5c's A/B is two
+processes because leg A's `WAIT_BIT` readback cannot meet a frame the other leg recorded; that shape
+needs a `boyko_app` worker per leg, and for `TimedPass` there is no such worker to write. The two
+candidates are visible and neither is free:
+
+- **give the R0 collector a host arming path** (a `BOYKO_GBUF_BENCH` knob mirroring the other two),
+  which adds a bench to the host for a collector rung 7 deletes; or
+- **move the gbuffer A/B into `window_present_gbuffer.rs`**, which already owns the collector — but
+  its scene is built ONCE for 220 frames while the zone leg's slot changes per frame, so the
+  recorder's slot would have to become its own state (`open_frame` taking `&self`), which weakens
+  clause (c) of `FrameSlot`'s `Sync` argument (*"`retire` takes `&mut self`, so no recording call can
+  be in flight"*).
+
+Recorded in `docs/OPEN-QUESTIONS.md` rather than picked here: it is a scope call about what rung 6
+costs, and both branches change what rung 7 inherits.
 
 ### Two rung-3b decisions
 

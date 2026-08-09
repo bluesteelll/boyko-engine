@@ -99,6 +99,38 @@ pub const GPU_FRAME_DEADLINE: u64 =
 /// Queries one slot's pool holds.
 pub const QUERIES_PER_SLOT: u32 = (MAX_GPU_PAIRS * 2) as u32;
 
+/// Zone ids reserved to one recorded pass FAMILY.
+///
+/// # Why bases exist at all, and why they are not the engine zone space
+///
+/// Rung 5c set the zone id of a ported VB bracket to its `VbTimedPass` slot: honest, because it
+/// names the pass, and not a claim to be part of the engine-wide zone space (that space is minted by
+/// the schedule, for systems, and these are not systems). With ONE family that is complete.
+///
+/// Rung 6 ports two more, and slot-alone stops naming a pass: `TimedPass::DdgiUpdate` and
+/// `Sv0TimedPass::Marcher` are both slot 0 and **both can be recorded into one frame's slot** —
+/// `record_gbuffer` holds the brackets for both. A base per family is the smallest thing that keeps
+/// the id a name. It is const-asserted disjoint at the seam that uses it, next to the enum whose
+/// width it must exceed, so a family that grows past [`ZONE_FAMILY_WIDTH`] is a **build failure**
+/// rather than two families quietly sharing an id.
+///
+/// It is still not the engine zone space, and the distance is the point: these ids live in one
+/// recorder, mean nothing outside it, and rung 7 deletes the enums they are derived from.
+pub const ZONE_FAMILY_WIDTH: u16 = 16;
+
+/// Base for `VbTimedPass`-derived ids (`record_vb`).
+pub const ZONE_BASE_VB: u16 = 0;
+/// Base for `TimedPass`-derived ids — the four software-ray passes in `record_gbuffer`.
+pub const ZONE_BASE_GBUFFER: u16 = ZONE_FAMILY_WIDTH;
+/// Base for `Sv0TimedPass`-derived ids — the Deferred fine-marcher dispatch.
+pub const ZONE_BASE_SV0: u16 = 2 * ZONE_FAMILY_WIDTH;
+
+const _: () = assert!(
+    ZONE_BASE_VB + ZONE_FAMILY_WIDTH <= ZONE_BASE_GBUFFER
+        && ZONE_BASE_GBUFFER + ZONE_FAMILY_WIDTH <= ZONE_BASE_SV0,
+    "zone family ranges overlap, so one id would name two passes"
+);
+
 /// The witness bit set when a pair's BEGIN timestamp is recorded.
 const MARK_BEGUN: u8 = 1 << 0;
 /// The witness bit set when a pair's END timestamp is recorded.

@@ -2644,8 +2644,14 @@ pub struct GBufferScene<'a> {
     /// [`super::gpu_timing::VbTimestampCollector`]'s own doc for why.
     pub vb_gpu_timing: Option<&'a VbTimestampCollector>,
     /// Profiling rung 5c: the optional GPU **zone** recorder and the ring slot it opened for this
-    /// frame — the replacement [`Self::vb_gpu_timing`] is measured against, and the leg rung 7
-    /// deletes the old collector in favour of.
+    /// frame — the replacement the three collectors above are measured against, and the leg rung 7
+    /// deletes them in favour of.
+    ///
+    /// **One recorder and one slot per FRAME**, not per pass family — which is why rung 6 dropped
+    /// the `vb_` from its name. A frame records either `record_vb`'s brackets or `record_gbuffer`'s
+    /// (the paths are exclusive), and inside `record_gbuffer` the software-ray and SV0 families
+    /// share the slot. Their ids stay distinct through [`ZONE_BASE_VB`]/[`ZONE_BASE_GBUFFER`]/
+    /// [`ZONE_BASE_SV0`], const-asserted disjoint.
     ///
     /// `None` on EVERY golden/host/interactive frame (the DEFAULT — the same capability-as-presence
     /// discipline the three collectors above use) ⇒ `record_vb` records ZERO reset/write commands
@@ -2662,7 +2668,7 @@ pub struct GBufferScene<'a> {
     /// The slot travels WITH the recorder because a recorder without its frame's slot cannot record
     /// anything, and a slot without its recorder names nothing; a pair makes the invalid state
     /// unrepresentable rather than documented.
-    pub vb_gpu_zone: Option<(&'a GpuZoneRecorder, usize)>,
+    pub gpu_zone: Option<(&'a GpuZoneRecorder, usize)>,
     /// Profiling rung 5c: the optional command census witness for this frame's `record_vb`.
     ///
     /// `None` everywhere but the G10 gate. Read by BOTH legs of the A/B, through the same
