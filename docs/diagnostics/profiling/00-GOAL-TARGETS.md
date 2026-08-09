@@ -38,7 +38,7 @@ A fifth input arrived when this corpus was split: **S13, the owner's free-when-o
 **Supersedes:**
 
 - `crates/boyko_rhi_vulkan/src/present/gpu_timing.rs` (all three collectors);
-- the `BOYKO_VB_BENCH` / `BOYKO_SV0_BENCH` harness bodies and the private statistics helpers in `crates/boyko_app/src/runner.rs` — the producers of the `VB-P1d …` / `VB-P4 pass=…` / `VB-P4 regime …` stdout lines (`runner.rs:3089`, `:3096`, `:3121`, `:3137`);
+- the `BOYKO_VB_BENCH` / `BOYKO_SV0_BENCH` harness bodies and the private statistics helpers in `crates/boyko_app/src/runner.rs` — the producers of the `VB-P1d …` / `VB-P4 pass=…` / `VB-P4 regime …` stdout lines (`runner.rs:3224`, `:3231`, `:3256`, `:3272`);
 - **and therefore the stdout measurement channel itself.** Six files consume those lines today and all six migrate to the artifact in one commit at rung 7 (S1): `crates/boyko_app/tests/vg_occ_split_timing.rs`, `vb_bench_totality_gate.rs`, `vb_bench_query_validation.rs`, `vg_decidability_floor.rs`, `vb_p1d_cull_shade_bench.rs`, `sv0_deferred_term_bench.rs`. `vg_decidability_floor.rs` is decisive rather than incidental: it parses the shipped bench's own stdout (`:133-160`, *"Parsing the shipped bench's own output"*) and it is the instrument that produces the `Floor` this plan's own band consumes. **Rung 7 therefore breaks rung 8's input, and every published floor number is invalidated until rung 7b re-measures it** — enforced with no new mechanism, because the new channel carries a new `WorkloadTag` and `resolve` already refuses a `Floor` whose tag does not match (`FloorWorkloadMismatch`).
 
 **Module paths, stated once** (rev 2 gave three, all wrong — F24; rev 3's leaf moved again in rev 4 — S2):

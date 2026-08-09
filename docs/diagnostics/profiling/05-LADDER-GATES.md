@@ -4,6 +4,7 @@
 provides: profiling/ladder
 exports: profiling/gates
 assumes: substrate/loss-fold
+assumes: substrate/clock-source
 assumes: substrate/section-report
 assumes: substrate/lane-write-sites
 assumes: substrate/ladder-d0-d1
@@ -60,9 +61,9 @@ against the tree; it is marked where it appears. Diff against that document unti
 | `crates/boyko_rhi_vulkan/src/present/swapchain.rs` | `PresentModeConfig`; `:199` becomes a probed choice with a loud fallback |
 | `crates/boyko_rhi_vulkan/src/present/gpu_timing.rs` | **retired at rung 7**, not before |
 | `crates/boyko_render/src/profiling_bridge.rs` | **new** — `retire_gpu(world, recorder, render_epoch, frame_now)`, a host-called function (**not** a system — F14); `frame_now` is M13's second horn |
-| `crates/boyko_app/src/runner.rs` | call `retire_gpu` at `:1320`, beside the `RenderEpoch` publication and **before** the 0x0 `continue` at `:1328` (M13b); `flush_gpu` on the teardown path (`:261`); `claim_lane()` -> `LANE_HOST` at boot; **the `VB-P1d` / `VB-P4` print sites (`:3089`, `:3096`, `:3121`, `:3137`), the harness bodies and the statistics helpers deleted at rung 7** (S1) |
+| `crates/boyko_app/src/runner.rs` | call `retire_gpu` at `:1320`, beside the `RenderEpoch` publication and **before** the 0x0 `continue` at `:1328` (M13b); `flush_gpu` on the teardown path (`:261`); `claim_lane()` -> `LANE_HOST` at boot; **the `VB-P1d` / `VB-P4` print sites (`:3224`, `:3231`, `:3256`, `:3272`), the harness bodies and the statistics helpers deleted at rung 7** (S1) |
 | `crates/boyko_app/src/gpu_scene/mod.rs` | env arming → `ProfilerConfig`; the `vb_timing_for_frame`-shaped predicate becomes a scope test |
-| `crates/boyko_app/src/profiling/{reduce,artifact,stream}.rs` | **new** — `WindowReducer` (no console form), TOML artifact (analysis feature), framed binary stream writer + its `.bss` double buffer and file handle (S5/M8) |
+| `crates/boyko_app/src/profiling/{reduce,artifact,stream}.rs` | **new, and this row is a MULTI-RUNG UNION — annotated per third at rung 7's re-measurement**: `reduce.rs` (`WindowReducer`, no console form) and `artifact.rs` (TOML, analysis feature) are **rung 7**, because rung 7 cannot migrate six consumers onto a file nothing writes; `stream.rs` (framed binary + its `.bss` double buffer and file handle, S5/M8) is **rung 13** (`:148` assigns it there). The row carried no rung at all while its neighbours did — `:61` "retired at rung 7", `:66` "new, rung 15" — which is how the writer came to be read off rung 8's row instead |
 | `crates/boyko_ui/src/profiling_overlay.rs` | **new, rung 15** — reference overlay over `Res<Profiler>` + `ProfiledZone` |
 | `crates/boyko_demo` | `profiling_partition!(User)` at the crate root (it is a GAME, B3); overlay wiring + a console command driving `commands.entity(e).enable::<ProfilingScopeEnabled>()` (the game-facing acceptance path) |
 | `tools/prof_decode` | **new** — the telemetry stream decoder; the only reader of the binary format |
@@ -138,9 +139,9 @@ flag-off legs on the logging side and by GJ1's control leg here.
 | **4** *(**SHIPPED**)* | RHI seam: three verbs + Vulkan impls + `ffi.rs` constants + `GPU_ZONE_QUERY_FLAGS` const-assert + Mock defaults and their pinning tests. **No consumer.** Plus `VkPhysicalDeviceHostQueryResetFeatures` (granular, for the VUID reason the descriptor-indexing struct already carries) and `DeviceCaps::host_query_reset` — see "What rung 4 SHIPPED" below | **G2a, G2c** | old readers untouched |
 | **5** *(**COMPLETE** — **5a** the edge, `gpu_zone.rs`, the 2×2 label, **G2b**; **5b** `CommandWitness` behind `profiling-census` + **G5**; **5c** the VB port, the A/B and **G10**'s witness clause — see "What rung 5c SHIPPED" below for the four departures)* | `boyko_rhi_vulkan → boyko_diag` edge; `gpu_zone.rs` + `CommandWitness` (`zone_open_order` **and** `stamp_positions`, behind `profiling-census`); VB brackets ported. **Serial A/B against the old collector** (never both armed in one frame — F17) | **G2b, G5, G10** | both collectors exist; every existing test still compiles and passes |
 | **6** *(**COMPLETE** — see "What rung 6 SHIPPED" below)* | gbuffer + SV0 ported through `GbufWitness`, the sibling `record_gbuffer` never had; `ZONE_BASE_VB`/`_GBUFFER`/`_SV0` const-asserted disjoint; the R0 collector given the host arming path it never had (`BOYKO_GBUF_BENCH`), which is what let G10's witness clause extend to these passes | **the port gate (ids in their own family range, no LOST/TORN) + G10's witness clause for the gbuffer/SV0 families**, both in `gbuffer_zone_port_gate.rs`, each with a run RED | additive |
-| **7 (the single subtractive rung)** | Delete `gpu_timing.rs`, the runner harness bodies, the statistics helpers **and the four `VB-P1d`/`VB-P4` print sites** (`runner.rs:3089`, `:3096`, `:3121`, `:3137`) — **and migrate all six stdout consumers to the artifact in the same commit** (S1; list below) | the post-rung `rg` gate **plus the S1 stdout gate (G24)** | one commit, workspace green before and after |
+| **7 (NOT purely subtractive — MEASURED; see "What rung 7 must BUILD before it can subtract")** | **First: `reduce.rs` + `artifact.rs` + a reader** (moved here from `:143`). Then delete `gpu_timing.rs` (713 lines), the runner harness bodies and the statistics helpers (**1381 lines, 31 % of `runner.rs`**) and the `VB-P1d`/`VB-P4` print sites — **ELEVEN `println!`s, not four**: five in `print_vb_bench_summary` (`runner.rs:3224`, `:3231`, `:3236`, `:3256`, `:3272`) and six in `print_sv0_bench_summary` (`:3837`, `:3850`, `:3862`, `:3871`, `:3879`, `:3885`). Four is right as a WORK ITEM only because both functions are deleted whole; it is wrong as a census, and a census is what `G24`'s grep performs. **And migrate the surviving five stdout consumers to the artifact** (S1; list below — `vb_bench_totality_gate.rs` is deleted, not migrated, see the list's note) | the post-rung `rg` gate **plus the S1 stdout gate (G24)** | **NOT "one commit, green before and after" as written** — the build half has no caller until the reader's round-trip test exists, so the rung lands as build-then-subtract |
 | **7b (NEW — S1)** | **Floor re-measurement on the artifact channel.** Re-run A6's protocol (7 processes × 3 repetitions) reading the artifact instead of stdout; publish `docs/PROFILING-FLOOR.md` with the new `WorkloadTag`, all three repetition floors, and `FLOOR_REDUCTION = Max` | **G3a's reduction RED** | needs rung 7's channel; blocks nothing but *licenses* rung 8's verdicts |
-| **8** | `Floor`/`Twin`/`resolve` + `NotResolvedReason`, `WindowReducer`, TOML artifact, present mode (**labelling only if `Immediate` is unsupported — D12**), counters at `vkCmd*` sites, optional `profiling-alloc` | **G3a, G3b, G6, G13, G4c (the artifact clause), G25** | additive |
+| **8** | `Floor`/`Twin`/`resolve` + `NotResolvedReason`, present mode (**labelling only if `Immediate` is unsupported — D12**), counters at `vkCmd*` sites, optional `profiling-alloc`. ⚠️ **`WindowReducer` and the TOML artifact MOVED TO RUNG 7** — `03:477-478` says so in the reducer's own words (*"it is what lets rung 7 delete the stdout measurement channel, and it is why `vg_decidability_floor.rs` and its five siblings must be migrated in the same commit"*), `:142` calls the channel "rung 7's", and `G24` is annotated rung 7 while requiring a reader that refuses a stale artifact — a green leg that needs a writer. This row was the ONLY line assigning them to rung 8. `G4c` and the `NotResolvedReason` round-trip therefore become additions to an existing writer rather than its first caller | **G3a, G3b, G6, G13, G4c (the artifact clause), G25** | additive |
 | **9 (v1.1)** | `VK_EXT_calibrated_timestamps` + rejection sampler; `cpu_gpu_offset` becomes a number with `max_deviation_ns` | — | additive |
 | **10** | `dyn_registry.rs`: `DYN_DESCS`/`DYN_NAMES` static arenas + `SyncCells`, `USER_ID_NEXT`, `register_zone`, `DynZoneHandle`, `zone_dyn!`/`counter_dyn!`/`gauge_dyn!`, `zone_dyn_open`/`close` | **G11 (user half), G17, G20, G22b (`DYN_DESCS`/`DYN_NAMES`), G23b (the same two statics added to the residency sum — and the `MAX_USER_BUDGET` RED, which is not showable before this rung)** | purely additive; fold/store already index by `ZoneId` |
 | **11** | `ecs_control.rs`: `ProfilingScopeEnabled` + `ProfilingScope`, `register_scope`, the **fold-step projection** (A8), the `Commands` write path, `ProfiledZone`, the `latency()` table | **G12** | additive; the mask exists from rung 1 |
@@ -160,7 +161,7 @@ names and omitted three production sites (F16):
 | `crates/boyko_app/src/occlusion_force.rs` | pass enum |
 | `crates/boyko_app/src/runner.rs` | the two env-var harnesses + statistics helpers |
 | `crates/boyko_app/tests/sv0_deferred_term_bench.rs` | reads stdout |
-| `crates/boyko_app/tests/vb_bench_totality_gate.rs` | **retired** — its mechanism is gone; replaced by G2a/G2b |
+| `crates/boyko_app/tests/vb_bench_totality_gate.rs` | **retired — DELETED, not migrated.** ⚠️ This contradicted the second list, which said it "reads the artifact". Resolved in favour of deletion, and the reason is that BOTH its gates lose their subject: gate A tests the totality epilogue, which rung 7 deletes with the collector, and gate B tests `disarm_vb_bench_unless_vb`, which rung 7 deletes with the bench. A file whose every gate has lost its subject has nothing to migrate |
 | `crates/boyko_app/tests/vg_occ_split_timing.rs` | reads stdout; migrates to the artifact |
 | `crates/boyko_rhi_vulkan/src/present/gpu_timing.rs` | **deleted** |
 | `crates/boyko_rhi_vulkan/src/present/mod.rs` | **re-export at `:52-56`** — unlisted by rev 2 |
@@ -891,6 +892,62 @@ reader must consult the witness masks before it waits on anything.
 sits 0 record site(s) apart while the frame's other brackets sit 1 apart"* — the gate names the
 timestamp that moved and the family it belongs to, and the SV0 brackets in the same frame stay put.
 **GREEN:** 28 frames compared, 112 bracket timestamps.
+
+### What rung 7 must BUILD before it can subtract, and the format nobody wrote
+
+Measured at rung 7's opening, before a line was deleted, because the rung's own row was wrong about
+its own shape.
+
+**1. The ordering defect, verified from primary sources.** Rung 7 must *"migrate all six stdout
+consumers to the artifact in the same commit"* and be *"green before and after"*. **No artifact
+writer exists in this tree** — `crates/boyko_app/src/profiling/` is absent and no TOML writer exists
+anywhere. Six tests reading a file nothing writes is not green. Four lines put the writer at rung 7
+(`:142` calls the channel *"rung 7's"*; `G24` is annotated rung 7 and its reverse RED needs a reader
+that refuses a **stale** artifact, whose green leg needs a fresh one; the six migration cells all say
+*"reads the artifact"*; and `03:477-478` says it outright). **One** line put it at rung 8 — that row
+— and its own file table did not corroborate it: the `{reduce,artifact,stream}.rs` row carried no
+rung while its neighbours did, and it is a multi-rung union whose `stream.rs` third belongs to rung
+13. The rows are amended above.
+
+**2. The corpus never writes one line of TOML.** MEASURED: `rg '\[\[[a-z_]+\]\]|^\[[a-z_]+\]'` over
+`docs/diagnostics/profiling/` + `SEAM.md` returns **zero**. What is actually specified is:
+`schema_version` on a *"flat TOML"* (`03:144-145`), `p95_lo`/`p95_hi` (`03:484-485`), the measured
+quantum trio (`03:165`, `03:283-285`), `sum = NOT_VALID (mixed stage)` (`01:496`),
+`cpu_gpu_offset = UNCORRELATED` (`02:259-260`), *"per-zone rows"* (`:179`) and *"the artifact's label
+census"* (`:181`). Everything else a consumer needs — median/mean/p95 as named fields, `n`,
+`begin_off_ns`/`end_off_ns`, the per-zone label, the VB-P1d leg fields, the regime provenance, the
+whole SV0 S1.5 block — is **SILENT**. So is the reader: no parser is named, placed, or given a
+signature anywhere.
+
+**3. `build_hash` and `SessionId` are a FORMAT gap, not a symbol gap.** Both ship at rung 0
+(`boyko_diag/build.rs`'s `BOYKO_BUILD_HASH`; `SessionId` in `clock.rs`). What is missing is a layout
+that places them — and `substrate/01-CLOCK.md:33`'s *"joins the two artifact headers"* resolves to
+the binary stream's header and the **logger's**, not to this TOML.
+
+**4. And `G24`'s reverse RED has a hole that is not a format question.** `SessionId` is *"minted once
+at first touch"* **inside the child process**, so a parent test cannot know it in advance. The only
+header field a parent can check is `build_hash` — constant across a whole session — so as written the
+reverse RED detects an artifact from a **different build**, never a stale one from the previous child
+of the same run. `vg_decidability_floor.rs` spawns 42 sequential children. Whatever the format
+decision is, the staleness the gate claims to catch needs a per-run discriminator the corpus has not
+specified.
+
+**5. Ranked by blast radius, the judgement calls rung 7 cannot avoid** — recorded so the rung does
+not make them silently: (i) **numeric precision**, because `vg_occ_split_timing.rs:916` reconstructs
+the GPU tick lattice by GCD over *tenths* and full-precision `f64` collapses that GCD, sub-flooring
+every band — its own doc measures the error at **32×** and calls it *"satisfying every assertion here
+while under-stating the instrument's resolution by the whole lattice factor"*, which is a silent
+false-win rather than a red; (ii) **file path and per-run uniqueness**, with 42 sequential children in
+one test and no `BOYKO_*_FILE`-shaped knob anywhere; (iii) **one file = one sitting, one process, or
+many appended runs**, which `G24`'s RED is *defined on*; (iv) who aggregates the 21 per-session
+artifacts into `docs/PROFILING-FLOOR.md`, which 7b depends on; (v) whether `WorkloadTag` is an
+artifact field at all — `resolve` checks it, 7b publishes it into markdown, nothing says the session
+file carries it; (vi) what the artifact records when the device declines timestamps, which today is
+an `eprintln!` three consumers key their third outcome on.
+
+**These are VALUES calls, not perf forks, and they are the owner's** — see
+`docs/OPEN-QUESTIONS.md`. A format guessed here would be a format the six consumers are then
+rewritten against, and (i) alone can make every band gate pass while measuring nothing.
 
 ### Two rung-3b decisions
 

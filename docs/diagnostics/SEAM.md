@@ -68,7 +68,7 @@ to the profiler's artifact in one commit at **profiling rung 7**.
 contract* — a gate parses them and a floor is derived from them — and putting a measurement
 contract behind a transport that has its own drop policy, its own rate policy and its own
 sampling means a bench can silently lose the number it exists to produce. The producers
-(`runner.rs:3089`, `:3096`, `:3121`, `:3137`) and the consumers move together or not at all.
+(`runner.rs:3224`, `:3231`, `:3256`, `:3272`) and the consumers move together or not at all.
 
 **Cost to the losing side (logging).** `report!` is struck from the public API, from
 `sync_out.rs`'s file list, from the `OUT_LOCK` row of the multithreading model, from the migration

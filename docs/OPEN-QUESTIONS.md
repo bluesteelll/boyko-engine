@@ -1124,4 +1124,31 @@ claim path's Miri and property legs are unaffected and still planned.
   ⚠️ **Rung 8's reader must consult the witness masks before it waits on anything**: three of the
   four software-ray passes are bracketed inside their own `if let` arms, and neither old gbuffer
   collector has a totality epilogue.
+- **OWNER DECISION NEEDED — profiling rung 7 cannot start: the artifact format is unspecified, and
+  guessing one field wrong makes every band gate pass while measuring nothing.** The rung's own row
+  was wrong about its shape and is amended in `05-LADDER-GATES.md` (the writer moves from rung 8 to
+  rung 7; the print sites are eleven, not four; `vb_bench_totality_gate.rs` is deleted, not
+  migrated). What remains is not a fork I can settle with numbers — it is six values:
+  1. **Numeric precision in the artifact.** `vg_occ_split_timing.rs:916` reconstructs the GPU tick
+     lattice by GCD over **tenths**, because that is the precision the summary prints. Full-precision
+     `f64` collapses the GCD and sub-floors every band; the file's own doc measures the error at
+     **32×** and says such a choice *"would satisfy every assertion here while under-stating the
+     instrument's resolution by the whole lattice factor"*. **A silent false-win, not a red test.**
+  2. **File path, per-run uniqueness, truncation.** `append_artifact(p, path)` takes a caller path
+     and nothing else — no default, no rotation, no env knob. `vg_decidability_floor.rs` spawns 42
+     sequential children; a fixed path is a stale-read generator.
+  3. **One file = one sitting, one process, or many appended runs.** `G24`'s reverse RED is *defined*
+     on staleness and cannot be written until this is chosen.
+  4. **Who aggregates the 21 per-session artifacts into `docs/PROFILING-FLOOR.md`** — rung 7b
+     depends on it and no line assigns it.
+  5. **Whether `WorkloadTag` is an artifact field.** `resolve` checks it, 7b publishes it into
+     markdown, nothing says the session file carries it.
+  6. **What the artifact records when the device declines timestamps** — today an `eprintln!` that
+     three consumers key their third outcome on.
+  ⚠️ Separately: **`G24`'s reverse RED has a hole no format choice fixes.** `SessionId` is minted
+  inside the child, so a parent can only check `build_hash`, which is constant across a session — as
+  written the gate detects an artifact from a different BUILD, never a stale one from the previous
+  child of the same run.
+  Scale, measured, for whenever it does start: **713** lines deleted from `gpu_timing.rs`, **1381**
+  from `runner.rs` (31 % of the file), **465** from `gpu_scene/mod.rs`, plus the consumer migrations.
 - **`.claude/settings.local.json` is dirty** from earlier sessions and is deliberately never staged.
