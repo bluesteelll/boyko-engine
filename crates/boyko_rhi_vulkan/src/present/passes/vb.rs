@@ -23,6 +23,8 @@
 
 use core::ptr;
 
+use boyko_rhi::TimestampStage;
+
 #[cfg(feature = "hwrt")]
 use crate::compute::LOCAL_SIZE_X;
 use crate::compute::{HZB_BUILD_PUSH_BYTES, HZB_BUILD_TILE, HZB_LEVELS_PER_PASS};
@@ -330,8 +332,12 @@ impl<'a> TsWitness<'a> {
     /// The bookkeeping both legs share at a BEGIN: the mask bit, the dev write counter, and the
     /// census. Shared so the two legs cannot come to disagree about what a bracket costs the
     /// witness — the equality G10 checks is only meaningful if one instrument saw both.
+    ///
+    /// `stage` is what the RECORDER returned, never `pass.begin_stage()` read again here: both legs
+    /// reach that same table, so a re-read would agree with itself across the very difference rung
+    /// 7c found (`command_witness`'s module doc).
     #[inline]
-    fn mark_begin(&mut self, slot: u32) {
+    fn mark_begin(&mut self, slot: u32, stage: TimestampStage) {
         self.begun |= 1u16 << slot;
         #[cfg(debug_assertions)]
         {
@@ -340,13 +346,16 @@ impl<'a> TsWitness<'a> {
         #[cfg(feature = "profiling-census")]
         if let Some(w) = self.cw {
             w.open_pair(slot as u16);
-            w.timestamp();
+            w.timestamp(stage);
         }
+        // Without the census the stage is recorded nowhere, and the recorder already consumed it.
+        #[cfg(not(feature = "profiling-census"))]
+        let _ = stage;
     }
 
     /// [`Self::mark_begin`]'s counterpart at an END.
     #[inline]
-    fn mark_end(&mut self, slot: u32) {
+    fn mark_end(&mut self, slot: u32, stage: TimestampStage) {
         self.ended |= 1u16 << slot;
         #[cfg(debug_assertions)]
         {
@@ -354,8 +363,10 @@ impl<'a> TsWitness<'a> {
         }
         #[cfg(feature = "profiling-census")]
         if let Some(w) = self.cw {
-            w.timestamp();
+            w.timestamp(stage);
         }
+        #[cfg(not(feature = "profiling-census"))]
+        let _ = stage;
     }
 
     /// A timestamp recorded by the totality epilogue rather than by a bracket — see
@@ -381,8 +392,8 @@ impl<'a> TsWitness<'a> {
             // SAFETY: caller contract (recording open, live `fns`, valid `fi`); the pool was reset
             // this frame — implied by this witness's construction site, immediately after
             // `reset_frame`.
-            unsafe { tc.write_begin(fns, cmd, fi, pass) };
-            self.mark_begin(slot);
+            let stage = unsafe { tc.write_begin(fns, cmd, fi, pass) };
+            self.mark_begin(slot, stage);
         } else if let Some((rec, ring)) = self.zr {
             // A full ring slot is a stated refusal, not a loss: the pass records no bracket, its
             // `begun` bit stays clear, and `end` finds `NO_PAIR` and records nothing either — so
@@ -390,10 +401,14 @@ impl<'a> TsWitness<'a> {
             // reaching it means a caller reused a sealed slot, which the recorder counts.
             let Some(pair) = rec.alloc_pair(ring, ZONE_BASE_VB + slot as u16) else { return };
             self.pair_of[slot as usize] = pair;
+            // THE STAGE IS THE PASS'S, not the recorder's default. `GpuZoneRecorder` opened every
+            // zone at `TOP_OF_PIPE` from rung 5c to 7c, which for the seven P4-2 slots is not the
+            // bracket the old collector recorded and not the one whose intervals partition
+            // `VbRun` — the same commands, in the same places, measuring something else.
             // SAFETY: caller contract; `pair` came from `alloc_pair` on this slot immediately
             // above, and the pool was reset this frame (this witness's construction site).
-            unsafe { rec.record_begin(fns, cmd, ring, pair) };
-            self.mark_begin(slot);
+            let stage = unsafe { rec.record_begin(fns, cmd, ring, pair, pass.begin_stage()) };
+            self.mark_begin(slot, stage);
         }
     }
 
@@ -407,8 +422,8 @@ impl<'a> TsWitness<'a> {
         if let Some(tc) = self.tc {
             // SAFETY: caller contract (recording open, live `fns`, valid `fi`); the pool was reset
             // this frame — implied by this witness's construction site.
-            unsafe { tc.write_end(fns, cmd, fi, pass) };
-            self.mark_end(slot);
+            let stage = unsafe { tc.write_end(fns, cmd, fi, pass) };
+            self.mark_end(slot, stage);
         } else if let Some((rec, ring)) = self.zr {
             let pair = self.pair_of[slot as usize];
             if pair == Self::NO_PAIR {
@@ -416,8 +431,8 @@ impl<'a> TsWitness<'a> {
             }
             // SAFETY: caller contract; `pair` is the index `alloc_pair` returned for THIS pass at
             // its begin — remembered rather than recomputed, see `pair_of`'s doc.
-            unsafe { rec.record_end(fns, cmd, ring, pair) };
-            self.mark_end(slot);
+            let stage = unsafe { rec.record_end(fns, cmd, ring, pair) };
+            self.mark_end(slot, stage);
         }
     }
 

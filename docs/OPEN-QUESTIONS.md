@@ -1157,6 +1157,29 @@ claim path's Miri and property legs are unaffected and still planned.
   (verified by A/B against the still-printing channel while BOTH are live), 7b's floor
   re-measurement, then the deletions — **713** lines from `gpu_timing.rs`, **1381** from `runner.rs`
   (31 % of the file), **465** from `gpu_scene/mod.rs`, plus five consumer migrations.
+- **OPEN (VALUES/SCOPE — owner's call) — the artifact's `workload_tag` cannot distinguish the two
+  legs of the floor experiment.** Measured while opening rung 7's consumer migrations. The tag is
+  `format!("{path:?}_{legs:?}")` over `ResolvedRenderPath` — `deferred_both`, `visibilitybuffer_mesh`
+  and so on. `vg_decidability_floor.rs` runs its NULL experiment twice per repetition, once with
+  `BOYKO_VB_FROXEL_FORCE_OFF` and once without, and **neither `path` nor `legs` changes between
+  them**: `froxel_light_cull` is a separate field of the same struct and the tag does not read it.
+  `BOYKO_VB_BENCH_LIGHTS` (`N_ps`) is invisible to the engine entirely.
+  The migration itself is not blocked — the floor test writes each leg to its own file path and
+  never reads the tag to separate them. What the hole costs is **downstream**: `resolve` refuses a
+  `Floor` whose `workload` differs, and that refusal is the ONLY mechanism keeping a floor measured
+  on one configuration from bounding a delta measured on another. With this tag, a flat-leg floor
+  silently bounds a froxel-leg claim — which `vg_decidability_floor.rs`'s own "What this does NOT
+  decide" forbids in words (*"It is one CONFIGURATION"*, *"a rung that measures at a different scale
+  must re-measure its own floor rather than cite this one"*).
+  Two halves, and the second is the owner's call:
+  * **Derived** (mine to decide, and I lean to doing it at 7b): the tag names every boot-frozen arm
+    bit that changes which GPU work the zones bracket — at minimum `froxel_light_cull`, and the tag
+    becomes e.g. `visibilitybuffer_mesh+froxel`. Cannot be forged; costs a longer string.
+  * **Declared** (VALUES): the CONTENT dimensions the engine cannot see — light count, scene, rig —
+    need an operator-supplied suffix (`BOYKO_PROFILE_WORKLOAD`) that a consumer can simply forget to
+    set, in which case two different workloads share a tag again. The alternative is to accept that
+    the tag guards configuration and not content, and to say so where the floor is published.
+  Nothing is enforced either way today, and no rung fails on it before 7b publishes a floor.
 - **`boyko-ecs --lib`'s `one_zone_taking_a_hundred_thousand_samples_keeps_count_exact` is an
   ORDER-DEPENDENT FLAKE.** Observed failing once in a full `--workspace --all-targets` run, then
   passing in isolation and in two consecutive full lib runs (915/915). Same class as the

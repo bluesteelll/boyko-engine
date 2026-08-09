@@ -387,6 +387,8 @@ struct Leg {
     name: &'static str,
     output: String,
     frames: Vec<(u32, Vec<u32>)>,
+    /// Rung 7c: the pipeline stage of each stamp, same index, same order as `frames`.
+    stages: Vec<(u32, Vec<char>)>,
     stream_pos: Vec<(u32, u32)>,
     resets: Vec<(u32, u32)>,
 }
@@ -405,6 +407,7 @@ fn key_u32(line: &str, key: &str) -> Option<u32> {
 /// frame — silently treating it as empty is how two legs come to "agree".
 fn parse_leg(name: &'static str, output: String) -> Leg {
     let mut frames = Vec::new();
+    let mut stages = Vec::new();
     let mut stream_pos = Vec::new();
     let mut resets = Vec::new();
     for line in output.lines().filter(|l| l.contains("VB-CENSUS ")) {
@@ -429,11 +432,37 @@ fn parse_leg(name: &'static str, output: String) -> Leg {
                 })
                 .collect()
         };
+        // Rung 7c: the stage of each stamp. Absent `stages=[` is a build that predates the clause,
+        // and an empty list read from it would compare equal to another empty list.
+        let sopen = line.find("stages=[").unwrap_or_else(|| {
+            panic!("{name}: a VB-CENSUS line carries no stages=[:\n  {line}")
+        }) + "stages=[".len();
+        let srest = &line[sopen..];
+        let sclose = srest
+            .find(']')
+            .unwrap_or_else(|| panic!("{name}: an unterminated stages= list:\n  {line}"));
+        let sbody = &srest[..sclose];
+        let stage_chars: Vec<char> = if sbody.is_empty() {
+            Vec::new()
+        } else {
+            sbody
+                .split(',')
+                .map(|t| {
+                    let t = t.trim();
+                    let mut it = t.chars();
+                    match (it.next(), it.next()) {
+                        (Some(c @ ('T' | 'B')), None) => c,
+                        _ => panic!("{name}: an unreadable stage token {t:?}:\n  {line}"),
+                    }
+                })
+                .collect()
+        };
         frames.push((frame, positions));
+        stages.push((frame, stage_chars));
         stream_pos.push((frame, key_u32(line, "stream_pos=").unwrap_or(0)));
         resets.push((frame, key_u32(line, "resets=").unwrap_or(0)));
     }
-    Leg { name, output, frames, stream_pos, resets }
+    Leg { name, output, frames, stages, stream_pos, resets }
 }
 
 #[cfg(feature = "profiling-census")]
@@ -606,6 +635,22 @@ fn the_gbuffer_collectors_put_their_brackets_at_the_same_stream_positions() {
              reset delta means something else was recorded on one side and not the other.\n  \
              A: {pa:?}\n  B: {pb:?}",
             ra - rb
+        );
+        // (iii) rung 7c: the same STAGES, not only the same places. ⚠️ Stated with its resolution:
+        // `TimestampCollector::write_begin` and `Sv0TimestampCollector::write_begin` both open at
+        // `TOP_OF_PIPE`, which is also what the zone leg passes, so on THIS family both sequences
+        // are `T,B,T,B,…` and the comparison distinguishes nothing today. It is here because the VB
+        // family's port silently changed seven stages under an identical position equality
+        // (`vb_zone_ab_witness_gate.rs`'s clause 5), and a future pass on this family that wants a
+        // BOTTOM open would otherwise change what is measured with every gate still green.
+        let sa = a.stages.iter().find(|(f, _)| f == frame).map(|(_, s)| s);
+        let sb = b.stages.iter().find(|(f, _)| f == frame).map(|(_, s)| s);
+        assert_eq!(
+            sa, sb,
+            "frame {frame}: the two sides stamped at different PIPELINE STAGES. Positions agreeing \
+             does not make these the same brackets: a TOP_OF_PIPE stamp fires when prior work \
+             reaches the pipe, a BOTTOM_OF_PIPE one only when it has completed.\n  A: {sa:?}\n  \
+             B: {sb:?}"
         );
         compared += 1;
         stamps_seen += pa.len();

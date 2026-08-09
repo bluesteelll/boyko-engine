@@ -433,7 +433,21 @@ impl GpuZoneRecorder {
         self.slots[slot].needs_cmd_reset.store(false, Ordering::Relaxed);
     }
 
-    /// Record `pair`'s BEGIN stamp and witness it.
+    /// Record `pair`'s BEGIN stamp at `stage` and witness it. **Returns the stage it wrote at**,
+    /// so the caller's census records what this function did rather than what the caller expected.
+    ///
+    /// # The recorder does not choose the stage, and rung 7c is why
+    ///
+    /// This hardcoded [`TimestampStage::TopOfPipe`] until rung 7c. The generic reading is
+    /// defensible — [`TimestampStage`]'s own doc says a bracket *"opens at `TopOfPipe`"* — but it
+    /// is not universal, and the brackets rung 5c ported through here are the counterexample:
+    /// `VbTimedPass::begin_stage` opens the seven P4-2 passes at `BOTTOM_OF_PIPE` precisely so that
+    /// consecutive stamps are prefix-completion times and their intervals **partition** the run.
+    /// A `TOP_OF_PIPE` open destroys that property, silently, while changing no command count and
+    /// no stream position — so `G10` stayed green across it for five commits.
+    ///
+    /// The stage is a property of the BRACKET, and the bracket belongs to the caller. A recorder
+    /// that picks one is a recorder that can be wrong about a pass it has never heard of.
     ///
     /// # Safety
     ///
@@ -445,15 +459,22 @@ impl GpuZoneRecorder {
         cmd: VkCommandBuffer,
         slot: usize,
         pair: u16,
-    ) {
+        stage: TimestampStage,
+    ) -> TimestampStage {
         // SAFETY: caller contract.
         unsafe {
-            self.write_timestamp(fns, cmd, slot, u32::from(pair) * 2, TimestampStage::TopOfPipe);
+            self.write_timestamp(fns, cmd, slot, u32::from(pair) * 2, stage);
             self.set_mark(slot, pair, MARK_BEGUN);
         }
+        stage
     }
 
-    /// Record `pair`'s END stamp and witness it.
+    /// Record `pair`'s END stamp and witness it. **Returns the stage it wrote at.**
+    ///
+    /// `BOTTOM_OF_PIPE` is not a caller choice here, unlike [`Self::record_begin`]'s: a close that
+    /// fired before the bracketed work retired would measure a prefix of it, and no pass in this
+    /// tree closes at any other stage. Returned rather than assumed so the census witnesses it from
+    /// the same place both legs do.
     ///
     /// # Safety
     ///
@@ -464,7 +485,7 @@ impl GpuZoneRecorder {
         cmd: VkCommandBuffer,
         slot: usize,
         pair: u16,
-    ) {
+    ) -> TimestampStage {
         // SAFETY: caller contract.
         unsafe {
             self.write_timestamp(
@@ -476,6 +497,7 @@ impl GpuZoneRecorder {
             );
             self.set_mark(slot, pair, MARK_ENDED);
         }
+        TimestampStage::BottomOfPipe
     }
 
     /// Publish `slot`'s marks. **Called once, after the last bracket of the frame is recorded.**

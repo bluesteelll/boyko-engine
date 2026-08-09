@@ -6,6 +6,8 @@
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use boyko_rhi::TimestampStage;
+
 use crate::compute::{
     CoarseMode, DEFAULT_MARCHER_OMEGA, FineMarcherPush, INTERP_INSTANCES_PUSH_BYTES, LOCAL_SIZE_X,
     VIEWT_FROM_DEPTH_PUSH_BYTES, ViewtFromDepthPush, tile_grid_extent,
@@ -174,24 +176,31 @@ impl<'a> GbufWitness<'a> {
     }
 
     /// The bookkeeping every leg shares at a BEGIN.
+    ///
+    /// `stage` is what the RECORDER returned, never a stage re-derived here — `vb.rs`'s
+    /// `TsWitness::mark_begin` states why at length, and it is the same reason on both families.
     #[inline]
-    fn mark_begin(&mut self, slot: usize) {
+    fn mark_begin(&mut self, slot: usize, stage: TimestampStage) {
         self.begun |= 1u16 << slot;
         #[cfg(feature = "profiling-census")]
         if let Some(w) = self.cw {
             w.open_pair(slot as u16);
-            w.timestamp();
+            w.timestamp(stage);
         }
+        #[cfg(not(feature = "profiling-census"))]
+        let _ = stage;
     }
 
     /// [`Self::mark_begin`]'s counterpart at an END.
     #[inline]
-    fn mark_end(&mut self, slot: usize) {
+    fn mark_end(&mut self, slot: usize, stage: TimestampStage) {
         self.ended |= 1u16 << slot;
         #[cfg(feature = "profiling-census")]
         if let Some(w) = self.cw {
-            w.timestamp();
+            w.timestamp(stage);
         }
+        #[cfg(not(feature = "profiling-census"))]
+        let _ = stage;
     }
 
     /// Records the four-software-ray-pass family's BEGIN.
@@ -211,14 +220,18 @@ impl<'a> GbufWitness<'a> {
         let slot = pass.slot() as usize;
         if let Some(tc) = self.tc {
             // SAFETY: caller contract; the pool was reset by this witness's own `open`.
-            unsafe { tc.write_begin(fns, cmd, fi, pass) };
-            self.mark_begin(slot);
+            let stage = unsafe { tc.write_begin(fns, cmd, fi, pass) };
+            self.mark_begin(slot, stage);
         } else if let Some((rec, ring)) = self.zr {
             let Some(pair) = rec.alloc_pair(ring, ZONE_BASE_GBUFFER + slot as u16) else { return };
             self.pair_of[slot] = pair;
+            // `TimestampCollector::write_begin` opens at `TOP_OF_PIPE` for every `TimedPass`, so
+            // unlike the VB family (rung 7c) this port is faithful with the recorder's old default
+            // -- stated as the stage rather than relied on as one, because the default is gone.
             // SAFETY: caller contract; `pair` came from `alloc_pair` on this slot just above.
-            unsafe { rec.record_begin(fns, cmd, ring, pair) };
-            self.mark_begin(slot);
+            let stage =
+                unsafe { rec.record_begin(fns, cmd, ring, pair, TimestampStage::TopOfPipe) };
+            self.mark_begin(slot, stage);
         }
     }
 
@@ -237,16 +250,16 @@ impl<'a> GbufWitness<'a> {
         let slot = pass.slot() as usize;
         if let Some(tc) = self.tc {
             // SAFETY: caller contract.
-            unsafe { tc.write_end(fns, cmd, fi, pass) };
-            self.mark_end(slot);
+            let stage = unsafe { tc.write_end(fns, cmd, fi, pass) };
+            self.mark_end(slot, stage);
         } else if let Some((rec, ring)) = self.zr {
             let pair = self.pair_of[slot];
             if pair == Self::NO_PAIR {
                 return;
             }
             // SAFETY: caller contract; `pair` is the index this pass's BEGIN remembered.
-            unsafe { rec.record_end(fns, cmd, ring, pair) };
-            self.mark_end(slot);
+            let stage = unsafe { rec.record_end(fns, cmd, ring, pair) };
+            self.mark_end(slot, stage);
         }
     }
 
@@ -266,15 +279,17 @@ impl<'a> GbufWitness<'a> {
         let slot = PASS_COUNT as usize + pass.slot() as usize;
         if let Some(sv0) = self.sv0 {
             // SAFETY: caller contract.
-            unsafe { sv0.write_begin(fns, cmd, fi, pass) };
-            self.mark_begin(slot);
+            let stage = unsafe { sv0.write_begin(fns, cmd, fi, pass) };
+            self.mark_begin(slot, stage);
         } else if let Some((rec, ring)) = self.zr {
             let zone = ZONE_BASE_SV0 + pass.slot() as u16;
             let Some(pair) = rec.alloc_pair(ring, zone) else { return };
             self.pair_of[slot] = pair;
+            // `Sv0TimestampCollector::write_begin` opens at `TOP_OF_PIPE`; see `begin`.
             // SAFETY: caller contract.
-            unsafe { rec.record_begin(fns, cmd, ring, pair) };
-            self.mark_begin(slot);
+            let stage =
+                unsafe { rec.record_begin(fns, cmd, ring, pair, TimestampStage::TopOfPipe) };
+            self.mark_begin(slot, stage);
         }
     }
 
@@ -293,16 +308,16 @@ impl<'a> GbufWitness<'a> {
         let slot = PASS_COUNT as usize + pass.slot() as usize;
         if let Some(sv0) = self.sv0 {
             // SAFETY: caller contract.
-            unsafe { sv0.write_end(fns, cmd, fi, pass) };
-            self.mark_end(slot);
+            let stage = unsafe { sv0.write_end(fns, cmd, fi, pass) };
+            self.mark_end(slot, stage);
         } else if let Some((rec, ring)) = self.zr {
             let pair = self.pair_of[slot];
             if pair == Self::NO_PAIR {
                 return;
             }
             // SAFETY: caller contract.
-            unsafe { rec.record_end(fns, cmd, ring, pair) };
-            self.mark_end(slot);
+            let stage = unsafe { rec.record_end(fns, cmd, ring, pair) };
+            self.mark_end(slot, stage);
         }
     }
 

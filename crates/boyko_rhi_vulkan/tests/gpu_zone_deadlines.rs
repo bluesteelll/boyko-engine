@@ -20,7 +20,7 @@
 //! state undefined, and a gate reading undefined state is asking the driver a question instead of
 //! asking the recorder one.
 
-use boyko_rhi::{QueryPoolDesc, RhiCommandEncoder, RhiDevice, RhiQueue};
+use boyko_rhi::{QueryPoolDesc, RhiCommandEncoder, RhiDevice, RhiQueue, TimestampStage};
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 use boyko_rhi_vulkan::present::FRAMES_IN_FLIGHT;
 use boyko_rhi_vulkan::present::gpu_zone::{
@@ -72,7 +72,7 @@ fn bracket_without_submitting(device: &VulkanContext, recorder: &GpuZoneRecorder
     // SAFETY: the encoder is recording; `pair` came from `alloc_pair` on this slot, whose pool was
     //   reset and fence-waited above.
     unsafe {
-        recorder.record_begin(device.device_fns(), cmd, slot, pair);
+        recorder.record_begin(device.device_fns(), cmd, slot, pair, TimestampStage::TopOfPipe);
         recorder.record_end(device.device_fns(), cmd, slot, pair);
     }
     encoder.end().expect("end");

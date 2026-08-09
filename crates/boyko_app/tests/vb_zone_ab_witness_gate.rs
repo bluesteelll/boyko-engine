@@ -7,12 +7,22 @@
 //! | A | `BOYKO_VB_BENCH` | `VbTimestampCollector` (the one rung 7 deletes) | `VK_QUERY_RESULT_WAIT_BIT`, plus a totality epilogue |
 //! | B | `BOYKO_VB_ZONE` | `GpuZoneRecorder` (the replacement) | `WITH_AVAILABILITY`, no wait, `NotBracketed` labels |
 //!
-//! The claim: **the two collectors put their brackets in the same places.** Measured as
+//! The claim: **the two collectors record the same brackets.** Measured as
 //! `CommandWitness::stamp_positions` — the value of a monotone "record sites passed so far in
 //! `record_vb`" counter at each bracket timestamp. It has **no vocabulary**, so unlike the record
 //! order witness (`zone_open_order`, zone ids) it needs no hand-written `pass → zone` table to be
 //! compared against a collector that has only `VbTimedPass` slots — and a table written alongside
 //! the port would have made the comparison agree with itself.
+//!
+//! # Rung 7c: the claim used to be about PLACES, and that was not enough
+//!
+//! A position says where a `vkCmdWriteTimestamp` was recorded. It says nothing about the pipeline
+//! stage argument, and `VbTimedPass::begin_stage` gives the seven P4-2 passes `BOTTOM_OF_PIPE`
+//! begins precisely so their intervals **partition** `VbRun` — while `GpuZoneRecorder::record_begin`
+//! hardcoded `TOP_OF_PIPE` for every zone. Same commands, same count, same positions; a different
+//! quantity measured on seven of ten passes. **This gate was green across that for five commits.**
+//! Clause 5 is the half that was missing, and clause 5a is what keeps it from being an equality
+//! between two constant sequences.
 //!
 //! # Why TWO PROCESSES, where the corpus says "in one process"
 //!
@@ -245,6 +255,8 @@ struct Leg {
     name: &'static str,
     output: String,
     frames: Vec<(u32, Vec<u32>)>,
+    /// Rung 7c: `frame → the pipeline stage of each of those stamps`, same index, same order.
+    stages: Vec<(u32, Vec<char>)>,
     pairs: Vec<(u32, u32)>,
     stream_pos: Vec<(u32, u32)>,
 }
@@ -266,6 +278,7 @@ fn key_u32(line: &str, key: &str) -> Option<u32> {
 /// failure, not an empty frame. Silently treating it as empty is how two legs come to "agree".
 fn parse_leg(name: &'static str, output: String) -> Leg {
     let mut frames = Vec::new();
+    let mut stages = Vec::new();
     let mut pairs = Vec::new();
     let mut stream_pos = Vec::new();
     for line in output.lines().filter(|l| l.contains("VB-CENSUS ")) {
@@ -292,11 +305,40 @@ fn parse_leg(name: &'static str, output: String) -> Leg {
                 })
                 .collect()
         };
+        // Rung 7c. A line WITHOUT `stages=[` is a census from a build that predates this clause,
+        // and reading it as an empty list would let clause 5 compare `[]` against `[]` and pass.
+        let sopen = line.find("stages=[").unwrap_or_else(|| {
+            panic!(
+                "{name}: a VB-CENSUS line carries no stages=[ — rung 7c's clause cannot run \
+                 against this build:\n  {line}"
+            )
+        }) + "stages=[".len();
+        let srest = &line[sopen..];
+        let sclose = srest
+            .find(']')
+            .unwrap_or_else(|| panic!("{name}: an unterminated stages= list:\n  {line}"));
+        let sbody = &srest[..sclose];
+        let stage_chars: Vec<char> = if sbody.is_empty() {
+            Vec::new()
+        } else {
+            sbody
+                .split(',')
+                .map(|t| {
+                    let t = t.trim();
+                    let mut it = t.chars();
+                    match (it.next(), it.next()) {
+                        (Some(c @ ('T' | 'B')), None) => c,
+                        _ => panic!("{name}: an unreadable stage token {t:?}:\n  {line}"),
+                    }
+                })
+                .collect()
+        };
         frames.push((frame, positions));
+        stages.push((frame, stage_chars));
         pairs.push((frame, key_u32(line, "pairs=").unwrap_or(0)));
         stream_pos.push((frame, key_u32(line, "stream_pos=").unwrap_or(0)));
     }
-    Leg { name, output, frames, pairs, stream_pos }
+    Leg { name, output, frames, stages, pairs, stream_pos }
 }
 
 /// Spawns the worker with exactly one leg knob set.
@@ -438,9 +480,66 @@ fn the_two_collectors_put_their_brackets_at_the_same_stream_positions() {
         b.frames.len()
     );
 
+    // ---- clause 5a: SOME bracket in this fixture opens at BOTTOM_OF_PIPE -----------------------
+    //
+    // Rung 7c's non-vacuity, and it is arithmetic rather than a magic number. Every END stamp is
+    // `BOTTOM_OF_PIPE` on both legs, so a frame with `p` pairs contributes exactly `p` B's from its
+    // closes. More than `p` means at least one bracket OPENED at bottom — which is the property
+    // `VbTimedPass::begin_stage` gives the seven P4-2 passes and the one the port dropped. Without
+    // this, clause 5b would be an equality between two constant sequences on a fixture where every
+    // pass happens to open at TOP, and it would hold no matter what either recorder did.
+    for leg in [&a, &b] {
+        let has_bottom_open =
+            leg.stages.iter().filter(|(f, _)| *f >= FIRST_STEADY_FRAME).any(|(frame, st)| {
+                // Looked up by FRAME, not zipped by index: two lists filtered separately stay
+                // aligned only while they are built from the same lines in the same order, which
+                // is true today and is not something this clause should depend on.
+                let Some((_, p)) = leg.pairs.iter().find(|(f, _)| f == frame) else { return false };
+                st.iter().filter(|c| **c == 'B').count() > *p as usize
+            });
+        assert!(
+            has_bottom_open,
+            "{}: no steady frame recorded more `B` stamps than it opened pairs, so every bracket \
+             on this leg opened at TOP_OF_PIPE. Either the fixture stopped reaching the seven \
+             P4-2 passes — whose begins are BOTTOM by `VbTimedPass::begin_stage`, which is what \
+             makes their intervals partition `VbRun` — or a recorder went back to choosing the \
+             stage itself. Clause 5b cannot resolve anything from here.\n\
+             ---- worker output ----\n{}",
+            leg.name,
+            leg.output
+        );
+    }
+
+    // ---- clause 5b: THE CLAIM, second half. Same brackets, not just the same PLACES -------------
+    //
+    // A stream position says WHERE a `vkCmdWriteTimestamp` was recorded and nothing about WHAT it
+    // recorded. Clause 4 was green from rung 5c to 7c while `GpuZoneRecorder::record_begin`
+    // hardcoded `TOP_OF_PIPE` and `VbTimestampCollector::write_begin` opened seven of the ten
+    // passes at `BOTTOM_OF_PIPE`: identical counts, identical positions, a different quantity
+    // measured. This is that difference, and it is where the RED for this rung lands.
+    let mut stages_compared = 0usize;
+    for (frame, sa) in a.stages.iter().filter(|(f, _)| *f >= FIRST_STEADY_FRAME) {
+        let Some((_, sb)) = b.stages.iter().find(|(f, _)| f == frame) else { continue };
+        assert_eq!(
+            sa, sb,
+            "frame {frame}: the two collectors stamped the same places at DIFFERENT PIPELINE \
+             STAGES. A `TOP_OF_PIPE` stamp fires when prior work REACHES the pipe; a \
+             `BOTTOM_OF_PIPE` one only when prior work has COMPLETED — so consecutive BOTTOM \
+             stamps partition their span and a TOP open does not. `T`/`B` in record order:\n  \
+             A: {sa:?}\n  B: {sb:?}"
+        );
+        stages_compared += 1;
+    }
+    assert_eq!(
+        stages_compared, compared,
+        "clause 5b compared {stages_compared} frames where clause 4 compared {compared}. The two \
+         walk the same census lines, so a difference means one of the two lists is missing from \
+         some line and that line's brackets were checked for position only."
+    );
+
     println!(
         "G10 witness clause: {compared} frame(s) compared, {stamps_seen} bracket timestamp(s), \
-         every position identical between VbTimestampCollector and GpuZoneRecorder. \
-         The TIMING clause is deferred to rung 8, where its band exists."
+         every position AND every pipeline stage identical between VbTimestampCollector and \
+         GpuZoneRecorder. The TIMING clause is deferred to rung 8, where its band exists."
     );
 }

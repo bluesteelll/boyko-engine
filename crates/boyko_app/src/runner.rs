@@ -2752,9 +2752,23 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 let sep = if k > 0 { "," } else { "" };
                 let _ = write!(positions, "{sep}{p}");
             }
+            // Profiling rung 7c: WHAT was stamped, beside WHERE. A position is blind to the
+            // pipeline stage, and that blindness is what let the zone recorder open seven of the
+            // ten VB brackets at `TOP_OF_PIPE` where the collector opened them at `BOTTOM_OF_PIPE`
+            // — same commands, same positions, a different quantity — with G10 green throughout.
+            // `T`/`B` rather than the enum's `Debug`, so the list stays one short token per stamp.
+            let mut stages = String::with_capacity(80);
+            for (k, s) in w.stamp_stages().enumerate() {
+                let sep = if k > 0 { "," } else { "" };
+                let c = match s {
+                    boyko_rhi::TimestampStage::TopOfPipe => 'T',
+                    boyko_rhi::TimestampStage::BottomOfPipe => 'B',
+                };
+                let _ = write!(stages, "{sep}{c}");
+            }
             println!(
                 "VB-CENSUS leg={} frame={frame_index} stream_pos={} profiling_cmds={} \
-                 resets={} stamps={} repairs={} pairs={} positions=[{positions}]",
+                 resets={} stamps={} repairs={} pairs={} positions=[{positions}] stages=[{stages}]",
                 if vb_zone {
                     "zone"
                 } else if gbuf_bench {

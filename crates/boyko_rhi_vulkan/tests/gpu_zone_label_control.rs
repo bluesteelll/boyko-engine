@@ -47,7 +47,7 @@
 //! is reachable, and named here as **not exercised on hardware** rather than implied by the three
 //! that are.
 
-use boyko_rhi::{QueryPoolDesc, RhiCommandEncoder, RhiDevice, RhiQueue};
+use boyko_rhi::{QueryPoolDesc, RhiCommandEncoder, RhiDevice, RhiQueue, TimestampStage};
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 use boyko_rhi_vulkan::present::gpu_zone::{
     GPU_RING_DEPTH, GpuLabel, GpuZoneRecorder, QUERIES_PER_SLOT, RetireCause, RetireScratch,
@@ -120,13 +120,13 @@ fn a_bracketed_pair_measures_and_an_unbracketed_one_says_so_in_the_same_frame() 
     //   from `alloc_pair` on this slot.
     unsafe {
         recorder.record_reset(device.device_fns(), cmd, slot);
-        recorder.record_begin(device.device_fns(), cmd, slot, bracketed);
+        recorder.record_begin(device.device_fns(), cmd, slot, bracketed, TimestampStage::TopOfPipe);
         recorder.record_end(device.device_fns(), cmd, slot, bracketed);
         // The discriminating input: a BEGIN with no END. Its begin query is written and its end
         // query is not, so availability reports `0` for the pair — the same answer it gives for
         // `silent`, and the reason a label computed from availability alone cannot tell a recorder
         // bug from a pass that does not run.
-        recorder.record_begin(device.device_fns(), cmd, slot, torn);
+        recorder.record_begin(device.device_fns(), cmd, slot, torn, TimestampStage::TopOfPipe);
     }
     // `silent` is deliberately never recorded. It is ALLOCATED — the recorder knows its zone — and
     // that is exactly the state a leg that does not run a pass leaves behind.

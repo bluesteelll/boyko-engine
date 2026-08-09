@@ -132,9 +132,10 @@ impl TimestampCollector {
         cmd: VkCommandBuffer,
         fi: usize,
         pass: TimedPass,
-    ) {
+    ) -> TimestampStage {
         // SAFETY: caller contract (recordable `cmd`, live `fns`, pool reset this frame).
         unsafe { self.write(fns, cmd, fi, TimestampStage::TopOfPipe, 2 * pass.slot()) };
+        TimestampStage::TopOfPipe
     }
 
     /// Writes the END timestamp (`BottomOfPipe`) for `pass` into frame `fi`'s pool (query
@@ -151,9 +152,10 @@ impl TimestampCollector {
         cmd: VkCommandBuffer,
         fi: usize,
         pass: TimedPass,
-    ) {
+    ) -> TimestampStage {
         // SAFETY: caller contract (recordable `cmd`, live `fns`, pool reset this frame).
         unsafe { self.write(fns, cmd, fi, TimestampStage::BottomOfPipe, 2 * pass.slot() + 1) };
+        TimestampStage::BottomOfPipe
     }
 
     /// The shared `vkCmdWriteTimestamp` helper: writes query `index` of frame `fi`'s pool at
@@ -504,13 +506,27 @@ impl VbTimestampCollector {
     /// the stage [`VbTimedPass::begin_stage`] names for it. Records it before the pass's first
     /// command.
     ///
+    /// **Returns the stage it wrote at** (rung 7c). The census witnesses the returned value rather
+    /// than consulting `begin_stage` a second time: a caller that re-derives the stage records its
+    /// own prediction of what this function did, and a prediction agrees with itself even when the
+    /// two collectors do not — which is how the zone recorder came to open seven of these brackets
+    /// at the wrong stage with `G10` green.
+    ///
     /// # Safety
     /// `cmd` must be recordable and `fns` the live device fn-table; the pool's queries were
     /// reset this frame ([`Self::reset_frame`]). Records `vkCmdWriteTimestamp`.
     #[inline]
-    pub unsafe fn write_begin(&self, fns: &DeviceFns, cmd: VkCommandBuffer, fi: usize, pass: VbTimedPass) {
+    pub unsafe fn write_begin(
+        &self,
+        fns: &DeviceFns,
+        cmd: VkCommandBuffer,
+        fi: usize,
+        pass: VbTimedPass,
+    ) -> TimestampStage {
+        let stage = pass.begin_stage();
         // SAFETY: caller contract (recordable `cmd`, live `fns`, pool reset this frame).
-        unsafe { self.write(fns, cmd, fi, pass.begin_stage(), 2 * pass.slot()) };
+        unsafe { self.write(fns, cmd, fi, stage, 2 * pass.slot()) };
+        stage
     }
 
     /// VG R3 piece 4 rung P4-1: writes BOTH of `pass`'s queries at `BOTTOM_OF_PIPE`, back to
@@ -519,8 +535,12 @@ impl VbTimestampCollector {
     ///
     /// # Why not `write_begin` + `write_end`
     ///
-    /// [`Self::write_begin`] stamps `TOP_OF_PIPE` for every pass that exists today. At the frame
-    /// TOP that is harmless (nothing precedes it). At the frame END it is not: a `TOP_OF_PIPE`
+    /// [`Self::write_begin`] stamps `TOP_OF_PIPE` for slots 0..2 — ⚠️ this sentence said *"for
+    /// every pass that exists today"* until rung 7c, which was true when it was written and false
+    /// from P4-2 on, since the seven partitioning brackets opened at `BOTTOM_OF_PIPE`. The argument
+    /// below is therefore live for three of the ten passes and vacuous (already BOTTOM/BOTTOM) for
+    /// the other seven; the function is unchanged either way. At the frame
+    /// TOP a TOP stamp is harmless (nothing precedes it). At the frame END it is not: a `TOP_OF_PIPE`
     /// stamp fires as the command reaches the front of the pipe, a `BOTTOM_OF_PIPE` stamp only
     /// after the entire preceding frame has completed — so a TOP/BOTTOM filler would report the
     /// whole frame's drain time as that pass's cost, a large, plausible-looking, fabricated
@@ -550,9 +570,16 @@ impl VbTimestampCollector {
     /// reset this frame ([`Self::reset_frame`]). Records `vkCmdWriteTimestamp` at
     /// `BOTTOM_OF_PIPE`.
     #[inline]
-    pub unsafe fn write_end(&self, fns: &DeviceFns, cmd: VkCommandBuffer, fi: usize, pass: VbTimedPass) {
+    pub unsafe fn write_end(
+        &self,
+        fns: &DeviceFns,
+        cmd: VkCommandBuffer,
+        fi: usize,
+        pass: VbTimedPass,
+    ) -> TimestampStage {
         // SAFETY: caller contract (recordable `cmd`, live `fns`, pool reset this frame).
         unsafe { self.write(fns, cmd, fi, TimestampStage::BottomOfPipe, 2 * pass.slot() + 1) };
+        TimestampStage::BottomOfPipe
     }
 
     /// The shared `vkCmdWriteTimestamp` helper: writes query `index` of frame `fi`'s pool at
@@ -677,9 +704,16 @@ impl Sv0TimestampCollector {
     /// reset this frame ([`Self::reset_frame`]). Records `vkCmdWriteTimestamp` at
     /// `TOP_OF_PIPE`.
     #[inline]
-    pub unsafe fn write_begin(&self, fns: &DeviceFns, cmd: VkCommandBuffer, fi: usize, pass: Sv0TimedPass) {
+    pub unsafe fn write_begin(
+        &self,
+        fns: &DeviceFns,
+        cmd: VkCommandBuffer,
+        fi: usize,
+        pass: Sv0TimedPass,
+    ) -> TimestampStage {
         // SAFETY: caller contract (recordable `cmd`, live `fns`, pool reset this frame).
         unsafe { self.write(fns, cmd, fi, TimestampStage::TopOfPipe, 2 * pass.slot()) };
+        TimestampStage::TopOfPipe
     }
 
     /// Writes the END timestamp (`BottomOfPipe`) for `pass` into frame `fi`'s pool (query
@@ -690,9 +724,16 @@ impl Sv0TimestampCollector {
     /// reset this frame ([`Self::reset_frame`]). Records `vkCmdWriteTimestamp` at
     /// `BOTTOM_OF_PIPE`.
     #[inline]
-    pub unsafe fn write_end(&self, fns: &DeviceFns, cmd: VkCommandBuffer, fi: usize, pass: Sv0TimedPass) {
+    pub unsafe fn write_end(
+        &self,
+        fns: &DeviceFns,
+        cmd: VkCommandBuffer,
+        fi: usize,
+        pass: Sv0TimedPass,
+    ) -> TimestampStage {
         // SAFETY: caller contract (recordable `cmd`, live `fns`, pool reset this frame).
         unsafe { self.write(fns, cmd, fi, TimestampStage::BottomOfPipe, 2 * pass.slot() + 1) };
+        TimestampStage::BottomOfPipe
     }
 
     /// The shared `vkCmdWriteTimestamp` helper: writes query `index` of frame `fi`'s pool at

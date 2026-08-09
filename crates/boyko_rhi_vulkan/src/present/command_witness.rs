@@ -70,6 +70,23 @@
 //! witnessed region"* was wider than any instrument that does not also thread through the shared
 //! post-process recorders.
 //!
+//! # Rung 7c: a position says WHERE a stamp was recorded and nothing about WHAT was recorded
+//!
+//! [`stamp_positions`](CommandWitness::stamp_positions) is blind to every argument of the
+//! `vkCmdWriteTimestamp` it witnesses. That blindness is what let rungs 5c/6 port the VB brackets
+//! while **silently changing the pipeline stage of seven of the ten begin stamps**:
+//! `VbTimestampCollector::write_begin` consults `VbTimedPass::begin_stage` — `TOP_OF_PIPE` for slots
+//! 0..2 and `BOTTOM_OF_PIPE` for the seven P4-2 partitioning brackets — while
+//! `GpuZoneRecorder::record_begin` hardcoded `TOP_OF_PIPE` for all of them. Same commands, same
+//! positions, same count; a different quantity measured, by the old collector's own argument that
+//! *"only BOTTOM-vs-BOTTOM comparisons carry the partition property"*.
+//!
+//! G10 was green throughout, because a stage is not a position. So the witness now records the
+//! stage each bracket stamp was written at ([`stamp_stages`](CommandWitness::stamp_stages)),
+//! **taken from the value the recorder was handed at its own call site** rather than from the pass
+//! table — a stage read back out of the table on both legs would agree with itself, which is the
+//! same tautology `stamp_positions` exists to avoid.
+//!
 //! **3. A repair is not a bracket.** The old `VbTimestampCollector` closes every pair the frame
 //! did not bracket, because its readback uses `VK_QUERY_RESULT_WAIT_BIT` and would block on an
 //! unwritten query; the new `GpuZoneRecorder` labels that pair `NotBracketed` and records nothing.
@@ -81,6 +98,8 @@
 //! as well as their positions, so a port that dropped a bracket entirely still reds.
 
 use core::cell::Cell;
+
+use boyko_rhi::TimestampStage;
 
 use super::gpu_zone::MAX_GPU_PAIRS;
 
@@ -102,6 +121,10 @@ pub struct CommandWitness {
     /// `stream_pos` at each recorded BRACKET timestamp, in record order. Repairs are absent by
     /// construction — see the module doc's point 3.
     stamp_positions: [Cell<u32>; 2 * MAX_GPU_PAIRS],
+    /// The pipeline stage each of those stamps was written at, same index, same order — rung 7c.
+    /// Parallel to [`Self::stamp_positions`] rather than folded into it because the two answer
+    /// different questions and a reader comparing one must be able to compare the other alone.
+    stamp_stages: [Cell<TimestampStage>; 2 * MAX_GPU_PAIRS],
 }
 
 impl Default for CommandWitness {
@@ -123,6 +146,7 @@ impl CommandWitness {
             stream_pos: Cell::new(0),
             zone_open_order: core::array::from_fn(|_| Cell::new(0)),
             stamp_positions: core::array::from_fn(|_| Cell::new(0)),
+            stamp_stages: core::array::from_fn(|_| Cell::new(TimestampStage::TopOfPipe)),
         }
     }
 
@@ -162,16 +186,22 @@ impl CommandWitness {
     }
 
     /// One `vkCmdWriteTimestamp` recorded by the profiler **as a bracket**, at the current stream
-    /// position.
+    /// position and at `stage`.
     ///
     /// The position is recorded **before** the increment, so it is the position *of* this command
     /// rather than of the one after it. That is the convention the cross-leg comparison rests on,
     /// and it is stated because either choice is defensible and only one can be used by both legs.
+    ///
+    /// `stage` must be the stage the caller handed the RECORDER for this very command, never one
+    /// looked up again from a pass table: the two legs consult the same table, so a witness that
+    /// re-read it would agree with itself while the recorders disagreed — which is exactly what
+    /// happened for seven passes between rungs 5c and 7c (module doc).
     #[inline]
-    pub fn timestamp(&self) {
+    pub fn timestamp(&self, stage: TimestampStage) {
         let slot = self.timestamps.get() as usize;
         if slot < self.stamp_positions.len() {
             self.stamp_positions[slot].set(self.stream_pos.get());
+            self.stamp_stages[slot].set(stage);
         }
         self.timestamps.set(self.timestamps.get().saturating_add(1));
         self.profiling_cmds.set(self.profiling_cmds.get().saturating_add(1));
@@ -272,6 +302,19 @@ impl CommandWitness {
         self.stamp_positions[..n].iter().map(Cell::get)
     }
 
+    /// The pipeline stage of each recorded bracket timestamp, in the same order as
+    /// [`Self::stamp_positions`] — rung 7c.
+    ///
+    /// A bracket is *(where, what)*: two collectors that stamp at identical stream positions can
+    /// still be measuring different quantities, because a `TOP_OF_PIPE` stamp fires when prior work
+    /// REACHES the pipe and a `BOTTOM_OF_PIPE` one only when prior work has COMPLETED. Comparing
+    /// this beside the positions is what makes the port's claim *"the same brackets"* rather than
+    /// *"brackets in the same places"*.
+    pub fn stamp_stages(&self) -> impl Iterator<Item = TimestampStage> + '_ {
+        let n = (self.timestamps.get() as usize).min(self.stamp_stages.len());
+        self.stamp_stages[..n].iter().map(Cell::get)
+    }
+
     /// Whether the arithmetic the census exists to assert holds: **two bracket timestamps per
     /// opened pair**, and every one of them positioned.
     ///
@@ -301,6 +344,7 @@ mod tests {
         assert_eq!(w.stream_pos(), 0);
         assert_eq!(w.zone_open_order().count(), 0);
         assert_eq!(w.stamp_positions().count(), 0);
+        assert_eq!(w.stamp_stages().count(), 0);
         // Vacuously true, and that is the point of stating it: the equality alone is not a gate.
         assert!(w.timestamps_pair_up());
     }
@@ -313,11 +357,12 @@ mod tests {
         w.command(); // stream_pos 0 -> 1
         w.command(); // 1 -> 2
         w.open_pair(9);
-        w.timestamp(); // recorded AT 2, then 2 -> 3
+        w.timestamp(TimestampStage::TopOfPipe); // recorded AT 2, then 2 -> 3
         w.command(); // 3 -> 4
-        w.timestamp(); // recorded AT 4, then 4 -> 5
+        w.timestamp(TimestampStage::BottomOfPipe); // recorded AT 4, then 4 -> 5
 
         assert!(w.stamp_positions().eq([2, 4]));
+        assert!(w.stamp_stages().eq([TimestampStage::TopOfPipe, TimestampStage::BottomOfPipe]));
         assert_eq!(w.stream_pos(), 5);
         assert_eq!(w.profiling_cmds(), 2, "a timestamp is itself a recorded command");
         assert_eq!(w.timestamps(), 2);
@@ -331,16 +376,16 @@ mod tests {
     fn moving_a_bracket_by_one_command_moves_one_position() {
         let a = CommandWitness::new();
         a.open_pair(1);
-        a.timestamp();
+        a.timestamp(TimestampStage::TopOfPipe);
         a.command();
-        a.timestamp();
+        a.timestamp(TimestampStage::BottomOfPipe);
 
         let b = CommandWitness::new();
         b.open_pair(1);
-        b.timestamp();
+        b.timestamp(TimestampStage::TopOfPipe);
         b.command();
         b.command(); // one extra command before the closing stamp
-        b.timestamp();
+        b.timestamp(TimestampStage::BottomOfPipe);
 
         let (pa, pb): (Vec<u32>, Vec<u32>) =
             (a.stamp_positions().collect(), b.stamp_positions().collect());
@@ -358,12 +403,12 @@ mod tests {
     fn a_half_recorded_bracket_breaks_the_pairing_equality() {
         let w = CommandWitness::new();
         w.open_pair(1);
-        w.timestamp();
-        w.timestamp();
+        w.timestamp(TimestampStage::TopOfPipe);
+        w.timestamp(TimestampStage::BottomOfPipe);
         assert!(w.timestamps_pair_up());
 
         w.open_pair(2);
-        w.timestamp(); // and no closing stamp
+        w.timestamp(TimestampStage::TopOfPipe); // and no closing stamp
         assert!(
             !w.timestamps_pair_up(),
             "three timestamps over two pairs must not read as paired up"
@@ -388,18 +433,18 @@ mod tests {
     fn a_repair_is_a_command_but_not_a_bracket() {
         let bracketed = CommandWitness::new();
         bracketed.open_pair(1);
-        bracketed.timestamp();
+        bracketed.timestamp(TimestampStage::TopOfPipe);
         bracketed.command();
-        bracketed.timestamp();
+        bracketed.timestamp(TimestampStage::BottomOfPipe);
         // ...and the epilogue closes a pass this frame never bracketed.
         bracketed.repair();
         bracketed.repair();
 
         let labelled = CommandWitness::new();
         labelled.open_pair(1);
-        labelled.timestamp();
+        labelled.timestamp(TimestampStage::TopOfPipe);
         labelled.command();
-        labelled.timestamp();
+        labelled.timestamp(TimestampStage::BottomOfPipe);
 
         assert!(
             bracketed.stamp_positions().eq(labelled.stamp_positions()),
@@ -422,8 +467,8 @@ mod tests {
         let w = CommandWitness::new();
         w.command();
         w.open_pair(4);
-        w.timestamp();
-        w.timestamp();
+        w.timestamp(TimestampStage::TopOfPipe);
+        w.timestamp(TimestampStage::BottomOfPipe);
         assert_eq!(w.stream_pos(), 3);
 
         w.begin_frame();
@@ -431,13 +476,73 @@ mod tests {
         assert_eq!(w.timestamps(), 0);
         assert_eq!(w.recorded_pairs(), 0);
         assert_eq!(w.stamp_positions().count(), 0);
+        assert_eq!(w.stamp_stages().count(), 0);
 
         w.command();
         w.open_pair(4);
-        w.timestamp();
+        w.timestamp(TimestampStage::TopOfPipe);
         assert!(
             w.stamp_positions().eq([1]),
             "the second frame's first stamp carried the first frame's offset"
+        );
+    }
+
+    /// **Rung 7c's property, and the one rungs 5c/6 shipped without.** Two legs can agree on every
+    /// stream position and still be measuring different things, because a `TOP_OF_PIPE` stamp and a
+    /// `BOTTOM_OF_PIPE` stamp at the same point in the stream fire at different moments.
+    ///
+    /// This is the shape of the real defect, in miniature: `VbTimestampCollector` opened the seven
+    /// P4-2 brackets at `BOTTOM_OF_PIPE` and `GpuZoneRecorder` opened them at `TOP_OF_PIPE`, and
+    /// G10's position equality was green for five commits across the difference.
+    #[test]
+    fn equal_positions_do_not_imply_equal_brackets() {
+        let bottom_open = CommandWitness::new();
+        bottom_open.open_pair(3);
+        bottom_open.timestamp(TimestampStage::BottomOfPipe);
+        bottom_open.command();
+        bottom_open.timestamp(TimestampStage::BottomOfPipe);
+
+        let top_open = CommandWitness::new();
+        top_open.open_pair(3);
+        top_open.timestamp(TimestampStage::TopOfPipe);
+        top_open.command();
+        top_open.timestamp(TimestampStage::BottomOfPipe);
+
+        assert!(
+            bottom_open.stamp_positions().eq(top_open.stamp_positions()),
+            "the fixture must agree on positions, or it is not showing what positions miss"
+        );
+        assert!(
+            !bottom_open.stamp_stages().eq(top_open.stamp_stages()),
+            "a bracket opened at BOTTOM_OF_PIPE compared equal to one opened at TOP_OF_PIPE, so \
+             the witness still cannot see the difference between the two collectors"
+        );
+    }
+
+    /// A stage is recorded in RECORD order and paired with its own position, so a reader zipping
+    /// the two iterators gets `(where, what)` for one command rather than two commands' halves.
+    #[test]
+    fn stages_and_positions_are_the_same_stamps_in_the_same_order() {
+        let w = CommandWitness::new();
+        w.open_pair(1);
+        w.timestamp(TimestampStage::BottomOfPipe);
+        w.command();
+        w.command();
+        w.timestamp(TimestampStage::BottomOfPipe);
+        w.open_pair(2);
+        w.timestamp(TimestampStage::TopOfPipe);
+        w.timestamp(TimestampStage::BottomOfPipe);
+
+        let zipped: Vec<(u32, TimestampStage)> =
+            w.stamp_positions().zip(w.stamp_stages()).collect();
+        assert_eq!(
+            zipped,
+            vec![
+                (0, TimestampStage::BottomOfPipe),
+                (3, TimestampStage::BottomOfPipe),
+                (4, TimestampStage::TopOfPipe),
+                (5, TimestampStage::BottomOfPipe),
+            ]
         );
     }
 }

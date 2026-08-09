@@ -35,7 +35,7 @@
 
 #![cfg(feature = "profiling-census")]
 
-use boyko_rhi::{QueryPoolDesc, RhiCommandEncoder, RhiDevice, RhiQueue};
+use boyko_rhi::{QueryPoolDesc, RhiCommandEncoder, RhiDevice, RhiQueue, TimestampStage};
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 use boyko_rhi_vulkan::present::command_witness::CommandWitness;
 use boyko_rhi_vulkan::present::gpu_zone::{
@@ -107,9 +107,10 @@ unsafe fn record_scene(
         let pair = recorder.map(|(rec, slot)| {
             let pair = rec.alloc_pair(slot, zone).expect("a pair");
             // SAFETY: caller contract; `pair` came from `alloc_pair` on this slot.
-            unsafe { rec.record_begin(fns, cmd, slot, pair) };
+            let stage =
+                unsafe { rec.record_begin(fns, cmd, slot, pair, TimestampStage::TopOfPipe) };
             witness.open_pair(zone);
-            witness.timestamp();
+            witness.timestamp(stage);
             pair
         });
 
@@ -123,8 +124,8 @@ unsafe fn record_scene(
 
         if let (Some((rec, slot)), Some(pair)) = (recorder, pair) {
             // SAFETY: caller contract; `pair` was allocated for this slot immediately above.
-            unsafe { rec.record_end(fns, cmd, slot, pair) };
-            witness.timestamp();
+            let stage = unsafe { rec.record_end(fns, cmd, slot, pair) };
+            witness.timestamp(stage);
         }
     }
 }
