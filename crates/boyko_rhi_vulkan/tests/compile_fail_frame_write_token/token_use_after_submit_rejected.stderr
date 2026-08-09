@@ -1,5 +1,5 @@
 error[E0382]: borrow of moved value: `token`
-  --> tests/compile_fail_frame_write_token/token_use_after_submit_rejected.rs:41:5
+  --> tests/compile_fail_frame_write_token/token_use_after_submit_rejected.rs:42:5
    |
 21 |     token: FrameWriteToken,
    |     ----- move occurs because `token` has type `FrameWriteToken`, which does not implement the `Copy` trait
@@ -7,5 +7,5 @@ error[E0382]: borrow of moved value: `token`
 37 |             token, ctx, surface, swapchain, scene, frame, 64, 64, [0.0; 4], extent, extent, None,
    |             ----- value moved here
 ...
-41 |     token.slot()
+42 |     token.slot()
    |     ^^^^^ value borrowed here after move

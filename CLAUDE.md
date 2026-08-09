@@ -30,13 +30,26 @@ Full subsystem map → [docs/FEATURE_MAP.md](docs/FEATURE_MAP.md) (first point o
 ## Build commands
 
 ```powershell
-cargo check --all-targets                          # fast type check
-cargo build --release                              # release build
-cargo clippy --all-targets -- -D warnings          # linter
-cargo test --all-targets                           # tests
-cargo bench                                        # benchmarks
-cargo +nightly miri test                           # UB detector (if nightly is installed)
+cargo check --workspace --all-targets                            # fast type check
+cargo build --release                                            # release build
+cargo clippy --workspace --all-targets -- -D warnings            # linter
+cargo test --workspace --all-targets --no-fail-fast              # tests
+cargo bench                                                      # benchmarks
+cargo +nightly miri test                                         # UB detector (if nightly is installed)
 ```
+
+⚠️ **`--workspace` and `--no-fail-fast` are both load-bearing, and each was added after a
+measurement, not for tidiness.**
+
+- **`--workspace`**: without it the virtual manifest at the repo root type-checks a subset and
+  reports success — the 2026-07-23 audit found the whole CI vacuum-green this way.
+- **`--no-fail-fast`**: `cargo test` **stops at the first failing target**, so one known-red target
+  *shadows* every target ordered behind it. MEASURED 2026-08-10: the workspace had **three** red
+  targets while every report said "green except the known `internal_docs_anchors`" — the trybuild
+  fixture `token_use_after_submit_rejected` had been red for 87 commits (a line added, its `.stderr`
+  never re-blessed) and `cluster_bound_arraylength`'s shader set had been stale since VG R3's batch
+  cull gained a bound query. Neither was visible until the flag was passed. **"Green" without this
+  flag means "green up to the first thing already known to be red".**
 
 ## Target platform
 

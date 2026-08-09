@@ -1201,4 +1201,49 @@ claim path's Miri and property legs are unaffected and still planned.
   passing in isolation and in two consecutive full lib runs (915/915). Same class as the
   `MAX_QUERY_TYPES` note above: process-global profiling state (lanes, zone slots) against 915
   tests in parallel. Re-run before bisecting.
+- **⚠️ A KNOWN-RED TARGET IS A SHADOW — the workspace gate must run `--no-fail-fast`.**
+  MEASURED 2026-08-10. `cargo test --workspace --all-targets` **stops at the first failing target**,
+  so `internal_docs_anchors` — red for everyone, long known — had been hiding every target ordered
+  behind it. Every "workspace suite green except the pre-existing anchors failure" reported during
+  the diagnostics campaign was a claim about **what cargo reached**, not about the workspace. Run
+  with the flag, there were **three** red targets, both of the others older than the session that
+  found them:
+  * `boyko_rhi_vulkan --test compile_fail_frame_write_token` — `26b385eb` (2026-08-06) added one
+    line to `token_use_after_submit_rejected.rs` and never re-blessed its `.stderr`; the entire diff
+    was `41:5` vs `42:5`. **Red for the 87 commits since.** FIXED by hand-editing the two line
+    numbers rather than `TRYBUILD=overwrite`, because that fixture's own comment warns that blessing
+    can turn a right-for-the-wrong-reason red into a wrong green — the error kind, the moved value
+    and the move site were all verified unchanged first.
+  * `boyko_rhi_vulkan --test cluster_bound_arraylength` — VG R3's `vb_batch_cull` (+ its `-D DEBUG`
+    sibling) gained an `OpArrayLength` and `BOUND_BY_ARRAYLENGTH` was not updated in that commit,
+    which is what the gate's own message instructs. FIXED, and the pin **widened to carry each
+    entry's SUBJECT**: the set no longer has one, since those two bound `VbLateCount`'s reserved
+    tail slot rather than a froxel light walk, and the old failure text would have given a reader
+    advice about a `use_clusters` guard those shaders do not have.
+  * `boyko-ui --test p3_watch_zero_alloc` — `watch_nochange_path_is_tiny_and_far_below_reload`
+    reported `nochange 1, reload 1`: the "reconciling" tick was reporting the no-change path's cost
+    because it WAS the no-change path. The watcher's signature is `(mtime, size)` and the fixture
+    rewrote `Px(77)` over `Px(40)` — **the same byte length** — so detection rested entirely on the
+    filesystem clock, and this box's mtime granularity swallows the fixture's 3 ms sleep. `4956420c`
+    had already diagnosed this class once ("the hot-reload flake was the FILESYSTEM CLOCK, not
+    shared state") and answered it with longer sleeps, which buys margin against a granularity
+    nobody measured. FIXED by making the rewrite change the SIZE, which removes the dependence
+    instead of widening it: `nochange=1 reload=53` after.
+  ⚠️ **And my own reporting of this finding was truncated the first time.** The first sweep's
+  failure list was piped through `head -10` and I read the truncation as the total — "three red
+  targets" when the honest count was six. The same mistake one level up from the one being
+  reported. The full picture, measured:
+  * **Genuinely red, now FIXED**: `compile_fail_frame_write_token`, `cluster_bound_arraylength`,
+    `p3_watch_zero_alloc`.
+  * **Genuinely red, NOT fixed**: `internal_docs_anchors` — 25 stale anchors across three internal
+    docs plus an over-waiver count above its cap. Pre-existing, unrelated to any campaign here, and
+    large enough to be its own unit of work.
+  * **Not red at all, but FAILING UNDER THE FULL PARALLEL SWEEP**: `boyko-log --lib` (84/85 in the
+    sweep, **85/85** in isolation), `boyko_rhi_vulkan --test sdf_gbuffer_hybrid` (**43/43** in
+    isolation, 54 s), and the two `boyko-ecs --lib` profiling tests recorded above. Four targets in
+    one class. **The workspace suite is therefore not deterministic**, and a real regression in any
+    of them would be indistinguishable from the noise. Every one touches process-global or
+    device-global state — profiling lanes and zone slots, logging sinks, the GPU device — which is
+    what a `--test-threads` bound or a per-target serial marker would address.
+  `CLAUDE.md`'s build-command block now carries the flag and the reason.
 - **`.claude/settings.local.json` is dirty** from earlier sessions and is deliberately never staged.

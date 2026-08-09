@@ -26,12 +26,22 @@
 //!
 //! # The measured answer
 //!
-//! Nine committed variants carry an `OpArrayLength`, **exactly one each**, and in every one it
-//! sits **outside every structured loop** — so it is one query per invocation, never per light and
-//! never per loop iteration. That is the property worth defending: moving the `GetDimensions` call
-//! inside the light loop, or adding a second query, would cost real work per iteration and no
+//! **Eleven** committed variants carry an `OpArrayLength`, **exactly one each**, and in every one
+//! it sits **outside every structured loop** — so it is one query per invocation, never per light
+//! and never per loop iteration. That is the property worth defending: moving the `GetDimensions`
+//! call inside the light loop, or adding a second query, would cost real work per iteration and no
 //! existing gate would notice. Byte-identity gates would not: they pin the `.spv` against a re-DXC
 //! of the *current* source, so a source change that moves the query is re-blessed and stays green.
+//!
+//! ⚠️ **It was nine, and two of the eleven are not froxel readers at all.** VG R3's
+//! `vb_batch_cull` (and its `-D DEBUG` sibling) query `VbLateCount`'s length to find the RESERVED
+//! TAIL SLOT it stamps the observed frame index into — deriving that index from the descriptor
+//! rather than mirroring the host's `VB_LATE_COUNT_FRAME_SLOT`, which is the same
+//! allocation-derived discipline this file defends applied to a different buffer. The pin was not
+//! updated in the commit that added them, so this gate was RED — and it stayed red unnoticed
+//! because `cargo test --workspace` stops at the first failing target and an older red one
+//! (`internal_docs_anchors`) sits ahead of it. **A known-red target is a shadow**; the workspace
+//! gate has to run `--no-fail-fast` or "green" only means "green up to the first known failure".
 //!
 //! # How "inside a loop" is decided
 //!
@@ -46,21 +56,39 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Shaders that must carry exactly one `OpArrayLength`, outside every loop.
+/// Shaders that must carry exactly one `OpArrayLength`, outside every loop, **and what each one's
+/// query is FOR**.
 ///
 /// Pinned as an exact set, in both directions, for the same reason the campaign's other baselines
 /// are: a variant that GAINS the query is a new hot-path cost to account for, and one that LOSES
 /// it has lost the allocation-derived guard and is now bounded by arithmetic alone.
-const BOUND_BY_ARRAYLENGTH: [&str; 9] = [
-    "cluster_cull.comp.spv",
-    "deferred_pbr.comp.spv",
-    "deferred_pbr_hwrt.comp.spv",
-    "deferred_pbr_hwrt_denoised.comp.spv",
-    "deferred_pbr_wrap.comp.spv",
-    "forward_opaque_froxel.fs.spv",
-    "vb_resolve_froxel.comp.spv",
-    "vb_shade_froxel.comp.spv",
-    "vb_shade_tex_froxel.comp.spv",
+///
+/// ⚠️ **The second column exists because the set stopped having one subject.** It was nine froxel
+/// readers; VG R3's batch cull added two members whose query bounds something else entirely, and a
+/// bare name list made the failure messages give the wrong advice about them — *"its `use_clusters`
+/// guard is no longer allocation-derived"* is simply false of a shader that has no `use_clusters`.
+/// The purpose now travels with the name, so the message can be right about both.
+const BOUND_BY_ARRAYLENGTH: [(&str, &str); 11] = [
+    ("cluster_cull.comp.spv", "the froxel light-index list's own capacity"),
+    ("deferred_pbr.comp.spv", "the froxel light walk's `use_clusters` guard"),
+    ("deferred_pbr_hwrt.comp.spv", "the froxel light walk's `use_clusters` guard"),
+    ("deferred_pbr_hwrt_denoised.comp.spv", "the froxel light walk's `use_clusters` guard"),
+    ("deferred_pbr_wrap.comp.spv", "the froxel light walk's `use_clusters` guard"),
+    ("forward_opaque_froxel.fs.spv", "the froxel light walk's `use_clusters` guard"),
+    (
+        "vb_batch_cull.comp.spv",
+        "`VbLateCount`'s RESERVED TAIL SLOT — VG R3 stamps the observed frame index into the last \
+         element and reads that index off the DESCRIPTOR's range rather than mirroring the host's \
+         `VB_LATE_COUNT_FRAME_SLOT`. Not a froxel query at all; that shader's own comment argues \
+         why the index is derived rather than mirrored",
+    ),
+    (
+        "vb_batch_cull_debug.comp.spv",
+        "as `vb_batch_cull.comp.spv` — the `-D DEBUG` variant of one source",
+    ),
+    ("vb_resolve_froxel.comp.spv", "the froxel light walk's `use_clusters` guard"),
+    ("vb_shade_froxel.comp.spv", "the froxel light walk's `use_clusters` guard"),
+    ("vb_shade_tex_froxel.comp.spv", "the froxel light walk's `use_clusters` guard"),
 ];
 
 /// Locates `spirv-dis`: the pinned Vulkan-SDK path first (the repo's offline recipe), then
@@ -209,22 +237,27 @@ fn the_froxel_bound_query_is_one_per_invocation_and_outside_every_loop() {
         "the froxel bound query moved onto the per-iteration path.\n{report}"
     );
 
-    let expected: Vec<String> = BOUND_BY_ARRAYLENGTH.iter().map(|s| (*s).to_string()).collect();
+    let expected: Vec<String> =
+        BOUND_BY_ARRAYLENGTH.iter().map(|(name, _)| (*name).to_string()).collect();
     assert_eq!(
         carriers, expected,
         "the set of shaders carrying an allocation-derived bound query moved.\n\
          GAINED one: a new hot-path descriptor query to account for — add it to \
-         BOUND_BY_ARRAYLENGTH in the same commit.\n\
-         LOST one: that shader's `use_clusters` guard is no longer derived from the bound \
-         descriptor's own length, so its `ClusterGrid`/`LightIndexList` reads are bounded by \
-         arithmetic alone — and `robustBufferAccess` is OFF, so an out-of-range read returns \
-         garbage silently."
+         BOUND_BY_ARRAYLENGTH **with what it bounds**, in the same commit. This is exactly how \
+         the pin went stale once: VG R3's batch cull gained one, the pin was not updated in that \
+         commit, and the gate then sat red behind an earlier failing target for 87 commits.\n\
+         LOST one: read the second column for what that shader's query was FOR. On a froxel \
+         reader it means `use_clusters` is no longer derived from the bound descriptor's own \
+         length, so its `ClusterGrid`/`LightIndexList` reads are bounded by arithmetic alone — \
+         and `robustBufferAccess` is OFF, so an out-of-range read returns garbage silently. On \
+         `vb_batch_cull` it means the reserved-tail index went back to a host constant mirrored \
+         into the shader with nothing holding the two spellings together."
     );
 }
 
 /// Sensitivity control: the containment test must actually detect a query inside a loop.
 ///
-/// The live run above is green on all nine shaders, so it never exercises the failing branch —
+/// The live run above is green on all eleven shaders, so it never exercises the failing branch —
 /// exactly the shape that let a dead range check sit in this repository's anchors gate for a whole
 /// revision while its own recorded measurement was true. This drives `parse_asm` with synthetic
 /// disassembly in three arrangements and checks the verdict flips where it must.

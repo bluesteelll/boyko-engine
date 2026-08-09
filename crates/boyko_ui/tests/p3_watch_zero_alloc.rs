@@ -148,10 +148,22 @@ fn watch_nochange_path_is_tiny_and_far_below_reload() {
     let (mut app2, temp2) = build("reload_witness", DOC);
     ui_hot_reload_system(app2.world_mut());
     // Change the file, then settle (two observations of the new signature).
+    // ⚠️ THE REWRITE MUST CHANGE THE FILE'S **SIZE**, NOT ONLY ITS BYTES. The watcher's signature
+    // is `(mtime, size)`, and the previous fixture wrote `Px(77)` over `Px(40)` — the same byte
+    // length, so detection rested entirely on the filesystem clock. MEASURED: on this box the
+    // 3 ms sleep is inside the mtime granularity, so the second tick saw an unchanged signature,
+    // never reconciled, and the test failed with `nochange 1, reload 1` — the reconcile path
+    // reporting the no-change path's cost because it WAS the no-change path.
+    //
+    // `4956420c` already diagnosed this class once ("the hot-reload flake was the FILESYSTEM
+    // CLOCK, not shared state") and lengthened the sleeps. A longer sleep buys margin against a
+    // granularity nobody measured; a different SIZE removes the dependence on it, so the detect
+    // step is deterministic on any filesystem. Four extra digits, chosen to be visibly not a
+    // typo of the original.
     temp2.write("\
 version=1
 #root  UiLayout { layout_type: Column, width: Px(100), height: Px(100) }
-    #a  UiLayout { layout_type: Column, width: Px(77), height: Px(40) }
+    #a  UiLayout { layout_type: Column, width: Px(777777), height: Px(40) }
     #b  UiLayout { layout_type: Column, width: Px(40), height: Px(40) }
 ");
     std::thread::sleep(Duration::from_millis(3));
