@@ -722,10 +722,10 @@ PHASE-2 / `fire_enable_column_alloc_bookkeeping` :162 O2), each gated by
   one predicted-not-taken branch (bench-flat).
 - **The `(D, F)` seam** —
   [query/state.rs](../crates/boyko_ecs/src/ecs/core/iters/query/state.rs):
-  `assert_query_shape` const-asserts (state.rs:205) reject an enable tuple with no
+  `assert_query_shape` const-asserts (state.rs:211) reject an enable tuple with no
   positive bound (must be paired with a `With<_>` or be a SOLE single leaf;
   `CONTAINS_ENABLE_TERM && CONTAINS_CHANGE_DETECTION` is also rejected,
-  state.rs:205). `HAS_ENABLE_TERM = F::CONTAINS_ENABLE_TERM` (state.rs:103) gates
+  state.rs:211). `HAS_ENABLE_TERM = F::CONTAINS_ENABLE_TERM` (state.rs:103) gates
   the whole enable machinery off for non-enable `(D, F)`. The candidate-seeded
   branch `IS_CANDIDATE_SEEDED` (state.rs:119 — sole single-enable, no data
   component, no positive archetypal) seeds the matched set from the bounded
@@ -735,7 +735,7 @@ PHASE-2 / `fire_enable_column_alloc_bookkeeping` :162 O2), each gated by
   global scan of enabled/disabled entities"). On `update`, the
   `last_observed_enable_generation` slot ([state.rs](../crates/boyko_ecs/src/ecs/core/iters/query/state.rs):68~) is re-checked against
   `ArchetypeMaster::enable_generation`: a bump means "an archetype gained a
-  column" ⇒ re-snapshot + re-cull, inside `update` (state.rs:429).
+  column" ⇒ re-snapshot + re-cull, inside `update` (state.rs:429~).
 
 **Derive (Wave 5)** — `#[component(storage = "bitset")]`
 ([boyko_macros/src/component.rs](../crates/boyko_macros/src/component.rs):71~/:84~/:178~/:315~):
@@ -1277,7 +1277,7 @@ pub unsafe trait System: Send + Sync + 'static {
     fn access(&self) -> &Access;                           // :70
     unsafe fn run_unsafe(&mut self, world: UnsafeEcsCell<'_>) -> Self::Out;  // :95
     fn apply(&mut self, _world: &mut EcsMaster) {}         // :165 (safe; flushes deferred state)
-    fn set_change_ticks(&mut self, last_run: Tick, this_run: Tick);  // :214 (Phase 10 C1)
+    fn set_change_ticks(&mut self, last_run: Tick, this_run: Tick);  // :240 (Phase 10 C1)
     fn check_change_tick(&mut self, current: Tick);        // Phase 16.1 Gap #2 (no default body)
 }
 ```
@@ -1304,7 +1304,7 @@ pub unsafe trait System: Send + Sync + 'static {
 > ([ecs_master/system_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/system_api.rs):111/:142).
 > Both tick snapshots therefore stay at the `SystemMeta::new` pre-first-run
 > sentinel `current_tick - MAX_CHANGE_AGE`
-> ([system_meta.rs](../crates/boyko_ecs/src/ecs/core/system/system_meta.rs):172-188).
+> ([system_meta.rs](../crates/boyko_ecs/src/ecs/core/system/system_meta.rs):172~-188).
 > A one-shot system's `Added<T>`/`Changed<T>` observation window is the full
 > clamped `MAX_CHANGE_AGE` span — "everything recently stamped" — NOT
 > "since this system's previous run"; the narrowing `set_change_ticks`

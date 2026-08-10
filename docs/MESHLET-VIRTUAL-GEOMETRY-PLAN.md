@@ -681,12 +681,21 @@ clone. §11 records the measured sizes that make this decisive.
 ### 5.1 Counters that exist today
 
 * **Submitted triangles, host side.** `DrawBatch { mesh_id, index_count, index_type, base_instance,
-  instance_count }` ([`mesh_draw.rs`](../crates/boyko_render/src/mesh_draw.rs):80-98) is gathered per frame; `index_count / 3 *
+  instance_count }` ([`mesh_draw.rs`](../crates/boyko_render/src/mesh_draw.rs):81-98) is gathered per frame; `index_count / 3 *
   instance_count` is the submitted-triangle count with no new plumbing.
-* **Per-pass GPU time, partially.** `VbTimedPass` ([`gpu_timing.rs`](../crates/boyko_rhi_vulkan/src/present/gpu_timing.rs):203) brackets **three** passes:
-  `CullReset` (`:211~`), `CullDispatch` (`:214~`), `VbShade` (`:229~`); `VB_PASS_COUNT = 3` (`:242`).
-  **The VB raster pass, the `vb_geo` pass and the classify chain are NOT bracketed.** A per-pass
-  table comparable to a Nanite capture therefore requires extending this enum — §14's rung, not R0.
+* **Per-pass GPU time.** `VbTimedPass` ([`gpu_timing.rs`](../crates/boyko_rhi_vulkan/src/present/gpu_timing.rs):231) brackets **ten**
+  passes: `CullReset` (`:239~`), `CullDispatch` (`:242~`), `VbShade` (`:257~`), and the seven VG R3
+  P4-2 added — `VbLateUpload`, `VbEarlyCull`, `VbEarlyRaster`, `VbHzbBuild`, `VbLateCull`,
+  `VbLateRaster` and the `VbRun` span bracket; `VB_PASS_COUNT = 10` (`:393`).
+  ⚠️ **This paragraph said "three" and `VB_PASS_COUNT = 3` until 2026-08-10**, which was true when
+  §5.1 was written and false from P4-2 on — including its conclusion that *"the VB raster pass … is
+  NOT bracketed"*, which `VbEarlyRaster` and `VbLateRaster` have contradicted since. The stale
+  ANCHORS were caught by `internal_docs_anchors`; the stale CLAIM was not, because renumbering an
+  anchor makes that gate green over a sentence it never reads. **The `vb_geo` pass and the classify
+  chain remain unbracketed**, so a per-pass table comparable to a Nanite capture still needs those
+  two — a smaller gap than this section used to describe.
+  ⚠️ Profiling rung 7 **deletes this enum** with the collector it belongs to; the zone recorder's
+  ids are `ZONE_BASE_VB + slot`, so the passes survive the deletion and the vocabulary does not.
 * **A CPU coverage rasterizer.** `crates/boyko_app/tests/sv0_oracle/mod.rs` ships `rasterize`
   (`:279~`) producing a `Coverage` (`:211~`) of `CoveredPixel` (`:193~`) with `covered_count`
   (`:253`), plus `changed_covered_pixels` (`:798`). It is perspective-correct and supports
@@ -2420,11 +2429,11 @@ rows) · `crates/boyko_rhi_vulkan/tests/vb_raster_geo_classify_spv_sync.rs`'s
 **Timing — RE-VERIFIED at Rev 3; Rev 1 and Rev 2 both carried a consistent ~10-line drift here,
 i.e. anchors read from a pre-VB-P1e-H0 tree.** `crates/boyko_rhi_vulkan/src/present/gpu_timing.rs`:
 `:188~-194` (why collectors are separate — and the `PASS_COUNT` note), `:229~` (**`VbShade = 2`**,
-not `:219~`), **`:242` (`VB_PASS_COUNT: u32 = 3`, not `:232`)**, `:281~`/`:293~-294` (the pool reset),
+not `:219~`), **`:393` (`VB_PASS_COUNT: u32 = 10` — ⚠️ this read `:242~` and `= 3` until 2026-08-10, true when written and false from P4-2 on; not `:232~`)**, `:281~`/`:293~-294` (the pool reset),
 **`:344~` (`WAIT_BIT` BLOCKS FOREVER on a pair its recorder never wrote, not `:334~`)** — this one is
 cited by §7's non-negotiable implementer trap and by risk R4, so the stale anchor was the most
-expensive of the set — `:357` (`Sv0TimedPass`, not `:347~`), **`:381` (`SV0_PASS_COUNT = 1`, not
-`:371`)**.
+expensive of the set — `:619` (`Sv0TimedPass` — was `:357~`, not `:347~`), **`:643` (`SV0_PASS_COUNT = 1` — was `:381~`, not
+`:371~`)**.
 
 **Harness precedent:** `crates/boyko_app/tests/sv0_deferred_term_bench.rs:20~-51` (ABAB refuted by
 its own null control), `:34~` and `:58~-62` (**the ABBA algebra — the model `m_k = μ + τ·armed + γ(fi)
@@ -2435,7 +2444,7 @@ its own null control), `:34~` and `:58~-62` (**the ABBA algebra — the model `m
 block and `:350`/`:378` in another; **the `350`/`366`/`378` set is the correct one**, and the
 contradiction is direct evidence that the older block was never re-verified ·
 `crates/boyko_render/src/ui/mod.rs:87` (`FRAMES_IN_FLIGHT = 2`) ·
-`crates/boyko_render/src/mesh_draw.rs:80-98` (`DrawBatch`) ·
+`crates/boyko_render/src/mesh_draw.rs:81-98` (`DrawBatch`) ·
 `crates/boyko_rhi_vulkan/src/window.rs:252` (`Window::open`), `:310~` (`AdjustWindowRectEx`),
 `:342~-352` (`BOYKO_WIN_HIDDEN` — hidden, but still created at the requested size).
 
@@ -2460,7 +2469,7 @@ correct) · `crates/boyko_app/tests/sv0_scene/mod.rs:162` (`DUMP_EXTENT = 512`) 
 `crates/boyko_app/tests/sv0_oracle/mod.rs:279-287` (**`rasterize` takes ONE indexed mesh and
 `instances: &[[f32; 3]]` — translation-only**, which is why R0c gate (c) is scoped to the procedural
 fixture and cannot reach the corpus at any ladder rung) ·
-`crates/boyko_render/src/mesh_draw.rs:80-98` (`DrawBatch` — the source of the report-only
+`crates/boyko_render/src/mesh_draw.rs:81-98` (`DrawBatch` — the source of the report-only
 `submitted_per_covered_pixel`) · `crates/boyko_rhi_vulkan/shaders/vb_pack.hlsli:15-16`, `:19`
 (`VB_ID_SENTINEL` marks a pixel the mesh raster leg never covered — the census's denominator is
 mesh-covered pixels, not all pixels) ·
