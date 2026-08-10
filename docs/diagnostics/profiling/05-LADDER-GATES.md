@@ -1161,6 +1161,17 @@ cross-instrument comparison the paragraph above refuses to make.
 rows"*. Two of its needs have no artifact counterpart, and both are better found now than half way
 through the edit.
 
+**0. The migration is DESIGNED, and it is one function.** Measured against the file: 2401 lines,
+but the whole stdout surface is a single `Worker::parse(output, who)`. Its struct maps 1:1 onto
+`ZoneRow` — `median_ns`, `mean_ns`, `p95_ns`, `begin_off_ns`, `end_off_ns` and `n` are fields of
+both, and `flag: Option<"FALLBACK"|"TORN">` is `ZoneLabel` under two names. The regime triple
+(`force_words`, `mode_words`, `n_distinct`) is now the header's regime census, built for exactly
+this. The only thing the migration must ADD is a `pass label → zone id` table, which rung 7's
+deletion of `VbTimedPass` makes the consumer's own — and that is not the tautology D6 warns about,
+because it is a consumer naming what it wants rather than two channels being compared through a
+table written alongside them. `p1d_shade_ns` has no counterpart and needs none: it belongs to
+clause 9, which is deleted (point 2).
+
 **1. The artifact carried no REGIME PROVENANCE, and could not derive one — now BUILT (schema 3).** That file's clause 2
 requires every worker's `VB-P4 regime observed=[…] n_distinct=… mode=[…]` line, and rejects a worker
 whose `n_distinct != 1` *"rather than averaging two regimes into one number"*. Rung P4-4 made the
