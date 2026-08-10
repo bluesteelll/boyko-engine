@@ -1316,13 +1316,34 @@ exactly how the seven brackets acquired the wrong stage in the first place.
    trap), and all six golden pins byte-identical (`grand_showcase a5ad662d…`, `vb_mesh f4719cbf…`,
    `vb_mesh_tex 5d8f8854…`, `vb_both_sdf 88522c5a…`, `deferred_mesh_only 65cb2004…`,
    `forward_mesh f93b5aad…`).
-6. **REMAINING — the gbuffer/SV0 half.** `TimestampCollector`, `TimedPass`, `PASS_COUNT`,
+6. **IN PROGRESS — the gbuffer/SV0 half.** `TimestampCollector`, `TimedPass`, `PASS_COUNT`,
    `Sv0TimestampCollector`, `Sv0TimedPass`, `SV0_PASS_COUNT`, their two scene fields, their two
-   host arming paths and their two consumers (`window_present_gbuffer.rs`, which constructs one at
-   `:9256`, and `software_ray_baseline_cost.rs` at `:367`). ⚠️ **`gbuffer_zone_port_gate.rs` dies
-   with them**, and for the reason `vb_zone_ab_witness_gate.rs` already did: its leg A *is* those
-   two collectors. Rung 7 therefore ends with **no** A/B gate on either family — which is correct
-   (there is nothing left to compare) and is the whole of what rung 8's verdicts inherit.
+   host arming paths and their two consumers. ⚠️ **`gbuffer_zone_port_gate.rs` dies with them**, and
+   for the reason `vb_zone_ab_witness_gate.rs` already did: its leg A *is* those two collectors.
+   Rung 7 therefore ends with **no** A/B gate on either family — which is correct (there is nothing
+   left to compare) and is the whole of what rung 8's verdicts inherit.
+
+   ✅ **`software_ray_baseline_cost.rs` MIGRATED, and it needed no port at all.** MEASURED: it
+   stamps its one bracket through the RHI encoder directly and never runs `record_gbuffer`, so it
+   held a `TimestampCollector` purely as a `[VulkanQueryPool; FRAMES_IN_FLIGHT]` newtype — `new` and
+   `pool` were the only methods it called. The array is what is left. Its pool also shrank from four
+   pairs to the **one** it writes, which retires the standing `WAIT_BIT` trap the old sizing forced
+   the readback comment to carry: three reset-but-never-written pairs that would have blocked
+   forever had anyone asked for them.
+
+   ⛔ **`window_present_gbuffer.rs`'s `engine_grand_showcase_512_gpu_pass_cost` is BLOCKED on a
+   borrow, and the obstacle is structural rather than a matter of effort.** Recorded in full so the
+   next sitting does not rediscover it:
+
+   * `run_showcase_body_ddgi` builds ONE `GBufferScene` literal (~230 lines, `window_present_gbuffer.rs:8450`) and holds it across every frame of the timing loop.
+   * The zone leg needs, per frame: `GpuZoneRecorder::open_frame` (`&mut self`) → `scene.gpu_zone = Some((&*rec, ring))` (a shared borrow that lives in `scene`) → present → `retire` (`&mut self`).
+   * `scene` is `GBufferScene<'a>` and its `gpu_zone` borrow is tied to `'a`, which outlives the loop body. Assigning `None` between frames does not shorten it — the lifetime is in the type. So the `&mut` and the `&` cannot alternate. `boyko_app`'s runner is unaffected because it **rebuilds the scene every frame** from `GpuSceneBundles::scene(&self)`; this fixture cannot without moving a 230-line literal into the loop.
+   * The three ways out, none of them free: **(a)** rebuild the literal per frame; **(b)** give `GpuZoneRecorder` the interior mutability that would make `open_frame`/`retire` take `&self` — `FrameSlot` already holds two atomics and an `UnsafeCell`, so this is the rung-5c `CommandWitness` change one level down, and it widens who may claim a ring slot; **(c)** retire the harness, on the grounds that the zone artifact carries the same four brackets and this is an `#[ignore]`d offline printer whose numbers are already transcribed into the HW-RT plan.
+
+   **(c) is a SCOPE call and is with the owner** (`docs/OPEN-QUESTIONS.md`). Until it is answered
+   the two gbuffer collectors cannot be deleted, because this harness reads their durations — and
+   the mechanical gate stays unsatisfiable for reasons that have nothing to do with the tree being
+   one file short.
 
 #### Rung 7c, second half — the workload tag, and a mechanism the corpus described as if it existed
 

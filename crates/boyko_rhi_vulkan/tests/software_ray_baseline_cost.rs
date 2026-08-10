@@ -46,7 +46,21 @@ use boyko_rhi_vulkan::compute::{
 };
 use boyko_rhi_vulkan::ddgi::{DDGI_GRID_DIM_X, DDGI_GRID_DIM_Y, DDGI_GRID_DIM_Z, DDGI_PROBE_COUNT, DdgiAtlas};
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
-use boyko_rhi_vulkan::present::{FRAMES_IN_FLIGHT, PASS_COUNT, TimedPass, TimestampCollector};
+use boyko_rhi_vulkan::present::FRAMES_IN_FLIGHT;
+
+/// How many `(begin, end)` pairs this harness's own query pools hold.
+///
+/// **One**, because this harness brackets exactly one dispatch and stamps it through the RHI
+/// encoder directly — it never runs `record_gbuffer`, so it never needed the four `PASS_COUNT`
+/// pairs it used to allocate. It held a `TimestampCollector` purely as a
+/// `[VulkanQueryPool; FRAMES_IN_FLIGHT]` newtype, calling only `new` and `pool`; profiling rung 7
+/// step 6 deleted that type and the array is what is left. Sizing the pool at what is written also
+/// removes the three reset-but-never-written pairs the readback comment below had to warn about.
+const R0_PAIRS: u32 = 1;
+
+/// The one bracketed pass's pair slot — `TimedPass::DdgiUpdate.slot()` before rung 7 retired the
+/// enum. The begin query is `2 * slot`, the end query `2 * slot + 1`.
+const R0_DDGI_UPDATE_SLOT: u32 = 0;
 use boyko_rhi_vulkan::rhi_impl::VulkanQueryPool;
 
 // ---- the b6 update UBO byte-mirror (the harness does not depend on boyko_render) ----------
@@ -358,48 +372,48 @@ fn run(ctx: &VulkanContext) {
         })
         .expect("probe-update compute pipeline");
 
-    // The R0 collector: one `2 * PASS_COUNT`-query TIMESTAMP pool per in-flight frame.
+    // The R0 pools: one `2 * R0_PAIRS`-query TIMESTAMP pool per in-flight frame, owned here.
     let pools: [VulkanQueryPool; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
         device
-            .create_query_pool(&QueryPoolDesc { count: 2 * PASS_COUNT })
+            .create_query_pool(&QueryPoolDesc { count: 2 * R0_PAIRS })
             .expect("timestamp query pool")
     });
-    let collector = TimestampCollector::new(pools);
 
     // The DDGI-update dispatch is `DDGI_PROBE_COUNT / subset_n` blocks (subset_n = 1 → one
     // `[numthreads(64,1,1)]` block per probe).
     let groups = DDGI_PROBE_COUNT;
 
-    let mut scratch = [0u64; (2 * PASS_COUNT) as usize];
-    let mut out_ns = [0.0f64; PASS_COUNT as usize];
+    let mut scratch = [0u64; (2 * R0_PAIRS) as usize];
+    let mut out_ns = [0.0f64; R0_PAIRS as usize];
     let mut samples: Vec<f64> = Vec::with_capacity(FRAMES);
 
     for frame in 0..FRAMES {
         // Ring the query pool by the frame's in-flight slot (matches the renderer's `fi`).
         let fi = frame % FRAMES_IN_FLIGHT;
-        let pool = collector.pool(fi);
+        let pool = &pools[fi];
 
         let fence = device.create_fence(false).expect("fence");
         let mut encoder = device.create_command_encoder().expect("encoder");
         encoder.begin().expect("begin");
         // R0: reset ALL queries at the frame top (a compute-only prologue — trivially outside
         // any render pass), then bracket the DDGI-update dispatch TOP..BOTTOM.
-        encoder.reset_query_pool(pool, 0, 2 * PASS_COUNT);
-        encoder.write_timestamp(pool, TimestampStage::TopOfPipe, 2 * TimedPass::DdgiUpdate.slot());
+        encoder.reset_query_pool(pool, 0, 2 * R0_PAIRS);
+        encoder.write_timestamp(pool, TimestampStage::TopOfPipe, 2 * R0_DDGI_UPDATE_SLOT);
         encoder.bind_compute_pipeline(&pipeline);
         encoder.bind_descriptor_set_compute(&bind_group, &pipeline);
         encoder.dispatch(groups, 1, 1);
-        encoder.write_timestamp(pool, TimestampStage::BottomOfPipe, 2 * TimedPass::DdgiUpdate.slot() + 1);
+        encoder.write_timestamp(pool, TimestampStage::BottomOfPipe, 2 * R0_DDGI_UPDATE_SLOT + 1);
         encoder.end().expect("end");
 
         queue.submit(&encoder, &fence).expect("submit");
         device.wait_fence(&fence, u64::MAX).expect("wait_fence");
 
-        // R0: read back the masked/period-scaled ns for the ONE written pair (DdgiUpdate, queries
-        // 0,1). This harness brackets ONLY the DDGI-update dispatch, so only pair 0 is written; the
-        // other 6 queries were reset-but-never-written. Reading them with `VK_QUERY_RESULT_WAIT_BIT`
-        // would BLOCK FOREVER (an unwritten query never becomes available) — so read exactly
-        // `pair_count = 1`, not `PASS_COUNT`. `out_ns[0]` is the DdgiUpdate duration.
+        // R0: read back the masked/period-scaled ns for the ONE written pair (queries 0,1).
+        // ⚠️ The `pair_count` argument is still load-bearing even now that the pool holds exactly
+        // what is written: `read_query_pool_ns` reads with `VK_QUERY_RESULT_WAIT_BIT`, and an
+        // unwritten query never becomes available, so asking for one BLOCKS FOREVER. Before rung 7
+        // the pool held four pairs and three were reset-but-never-written, which made this a
+        // standing trap rather than a note.
         device
             .read_query_pool_ns(pool, 1, &mut scratch, &mut out_ns)
             .expect("read_query_pool_ns");
@@ -446,11 +460,10 @@ fn run(ctx: &VulkanContext) {
     // order (the last submission fence-waited, so nothing is GPU-referenced).
     device.wait_idle().expect("wait_idle");
     // SAFETY: `wait_idle` above completed every submission; each resource was created on
-    // `device` and is destroyed exactly once. The collector's pools are moved out for
-    // destruction (the collector is dropped first, releasing its borrow of the pools' data —
-    // it owns no GPU objects itself, only the `VulkanQueryPool` values it now yields back).
+    // `device` and is destroyed exactly once. The pools are consumed by value here, which is why
+    // the loop above borrows them (`&pools[fi]`) rather than moving.
     unsafe {
-        for pool in collector.into_pools() {
+        for pool in pools {
             device.destroy_query_pool(pool);
         }
         device.destroy_compute_pipeline(pipeline);

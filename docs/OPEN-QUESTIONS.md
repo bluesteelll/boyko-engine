@@ -14,6 +14,42 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-10 — Rung 7 step 6 is blocked on a SCOPE call: does `engine_grand_showcase_512_gpu_pass_cost` get ported, or retired?
+
+The last two GPU collectors (`TimestampCollector`, `Sv0TimestampCollector`) cannot be deleted while
+something reads their durations, and one thing does: the `#[ignore]`d offline printer
+`engine_grand_showcase_512_gpu_pass_cost` in `crates/boyko_rhi_vulkan/tests/window_present_gbuffer.rs`.
+Its sibling, `software_ray_baseline_cost.rs`, migrated in ten minutes — it turned out to be using the
+collector as a plain array of query pools. This one genuinely reads per-pass timings.
+
+**Why it is not simply a port.** `run_showcase_body_ddgi` builds ONE `GBufferScene` literal (~230
+lines) and holds it across the whole timing loop. The zone leg needs `open_frame` (`&mut`) → a
+shared borrow parked in `scene.gpu_zone` → present → `retire` (`&mut`), every frame. The shared
+borrow's lifetime is in `GBufferScene<'a>`'s type, so setting the field to `None` between frames does
+not release it and the `&mut`/`&` cannot alternate. `boyko_app`'s runner never hits this because it
+rebuilds the scene every frame; this fixture would have to move a 230-line literal into the loop.
+
+**Three ways out.**
+
+1. **Rebuild the literal per frame.** Mechanical, contained, and makes a 230-line construction run
+   200+ times where it now runs once. Nothing measures that construction, so the cost is unknown
+   rather than negligible.
+2. **Give `GpuZoneRecorder` interior mutability** so `open_frame`/`retire` take `&self`. `FrameSlot`
+   already holds two atomics and an `UnsafeCell`, so this is the same change rung 5c made to
+   `CommandWitness`, one level down. It is the most reusable answer and the one that widens the
+   kernel's surface: anyone holding a `&GpuZoneRecorder` could then claim a ring slot.
+3. **Retire the harness.** It is an `#[ignore]`d printer; the zone artifact carries the same four
+   brackets; its numbers are already transcribed into the HW-RT plan. This is the option the corpus's
+   own precedent points at — `vb_bench_totality_gate.rs` and `vb_zone_ab_witness_gate.rs` were both
+   deleted rather than migrated once their subject moved.
+
+**This is a SCOPE call, so it is yours.** My recommendation is **3**, and the reason is that 2 buys a
+kernel capability for one caller that a per-frame scene rebuild already gives that caller for free —
+but the harness is a published measurement channel for HW-RT R0, and deleting a channel is not mine
+to decide. **Until it is answered, rung 7 step 6 stops** and the mechanical gate stays unsatisfiable.
+
+---
+
 ## 2026-08-10 — Rung 7's mechanical gate would be satisfied by deleting the record of what it gated. Corrected in the corpus; disclosed here because it is a SPEC change.
 
 The corpus gates rung 7 on `rg 'TimestampCollector|VbTimedPass|Sv0TimedPass' crates/` returning zero
