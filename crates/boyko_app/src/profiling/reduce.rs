@@ -162,9 +162,9 @@ impl WindowReducer {
             .zones
             .iter()
             .map(|z| {
-                let (median_ns, mean_ns, p95_ns) = stats_ns(&z.dur_ns);
-                let (begin_off_ns, _, _) = stats_ns(&z.begin_off_ns);
-                let (end_off_ns, _, _) = stats_ns(&z.end_off_ns);
+                let (median_ns, mean_ns, p95_ns, stddev_ns) = stats_ns(&z.dur_ns);
+                let (begin_off_ns, ..) = stats_ns(&z.begin_off_ns);
+                let (end_off_ns, ..) = stats_ns(&z.end_off_ns);
                 ZoneRow {
                     zone: z.zone,
                     label: z.worst,
@@ -174,6 +174,7 @@ impl WindowReducer {
                     median_ns,
                     mean_ns,
                     p95_ns,
+                    stddev_ns,
                     begin_off_ns,
                     end_off_ns,
                 }
@@ -183,16 +184,27 @@ impl WindowReducer {
     }
 }
 
-/// `(median, mean, p95)`, ns — `runner.rs`'s `vb_bench_stats_ns`, convention for convention.
+/// `(median, mean, p95, stddev)`, ns — `runner.rs`'s `vb_bench_stats_ns`, convention for
+/// convention, plus the population standard deviation rung 8 needs.
+///
+/// # Why the stddev is MEASURED and not derived from `p95 - median`
+///
+/// Rung 8's `se_floor` term is the propagated standard error of the medians a contrast is built
+/// from, and an SE needs a spread. The three fields this reducer already published do not carry
+/// one: recovering `sigma` from `(p95 - median) / 1.6449` assumes the samples are normal, which GPU
+/// frame times are not — they are right-skewed with a hard floor at the hardware quantum. That
+/// estimator would have made one of the band's four terms an assumption wearing a measurement's
+/// name, which is this campaign's own most-repeated defect. Carrying the real second moment costs
+/// one pass over a slice that is already in cache.
 ///
 /// Returns zeros on an empty slice rather than asserting, because a zone the recorder never
 /// measured is a normal outcome here: its row carries its label, and the label is what says the
 /// numbers are not measurements. The shipped helper asserts instead because its caller could never
 /// reach it empty.
 #[must_use]
-pub fn stats_ns(samples: &[f64]) -> (f64, f64, f64) {
+pub fn stats_ns(samples: &[f64]) -> (f64, f64, f64, f64) {
     if samples.is_empty() {
-        return (0.0, 0.0, 0.0);
+        return (0.0, 0.0, 0.0, 0.0);
     }
     let mean = samples.iter().sum::<f64>() / samples.len() as f64;
     let mut sorted: Vec<f64> = samples.to_vec();
@@ -204,7 +216,12 @@ pub fn stats_ns(samples: &[f64]) -> (f64, f64, f64) {
     let n = sorted.len();
     let median = if n % 2 == 1 { sorted[n / 2] } else { 0.5 * (sorted[n / 2 - 1] + sorted[n / 2]) };
     let p95 = sorted[((n as f64 * 0.95) as usize).min(n - 1)];
-    (median, mean, p95)
+    // POPULATION sigma (divide by `n`), not the sample estimator (`n - 1`): the window is not a
+    // sample drawn from a larger population of frames -- it IS every frame the sitting measured,
+    // and the SE below is about the median of exactly these. A single-sample window gets `0.0`,
+    // which is the true spread of one number rather than a division by zero.
+    let var = sorted.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n as f64;
+    (median, mean, p95, var.sqrt())
 }
 
 #[cfg(test)]
@@ -216,21 +233,25 @@ mod tests {
     #[test]
     fn the_statistics_match_the_shipped_conventions() {
         // Even count: the median is the average of the two central values, not either of them.
-        let (median, mean, p95) = stats_ns(&[10.0, 20.0, 30.0, 40.0]);
+        let (median, mean, p95, stddev) = stats_ns(&[10.0, 20.0, 30.0, 40.0]);
         assert!((median - 25.0).abs() < f64::EPSILON, "even-count median must average the centre");
         assert!((mean - 25.0).abs() < f64::EPSILON);
         // (4 * 0.95) as usize == 3 -> the last element.
         assert!((p95 - 40.0).abs() < f64::EPSILON);
+        // POPULATION sigma of {10,20,30,40} about a mean of 25 is sqrt(500/4) = 11.18..., not the
+        // sample estimator's sqrt(500/3) = 12.90. The distinction is asserted rather than left to
+        // the implementation, because rung 8's `se_floor` divides by it.
+        assert!((stddev - 125.0f64.sqrt()).abs() < 1e-12, "stddev must be the POPULATION sigma");
 
         // Odd count: the middle element itself.
-        let (median, _, _) = stats_ns(&[10.0, 20.0, 30.0]);
+        let (median, ..) = stats_ns(&[10.0, 20.0, 30.0]);
         assert!((median - 20.0).abs() < f64::EPSILON);
     }
 
     /// An empty zone reduces to zeros rather than panicking, and its ROW still carries a label.
     #[test]
     fn a_zone_with_no_measured_sample_reduces_to_zeros() {
-        assert_eq!(stats_ns(&[]), (0.0, 0.0, 0.0));
+        assert_eq!(stats_ns(&[]), (0.0, 0.0, 0.0, 0.0));
     }
 
     /// Offsets are relative to each frame's OWN base, so a drifting GPU clock does not leak in.

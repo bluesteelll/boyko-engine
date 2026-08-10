@@ -88,6 +88,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use boyko_app::profiling::artifact::{Artifact, Instrument, ZoneLabel};
+use boyko_app::profiling::contrast::{Floor, WorkloadTag};
 
 /// Sessions per configuration within ONE repetition. More than `[census].cross_run_sessions = 3` on
 /// purpose: three samples estimate a spread very poorly, and this rung's output is a BOUND that
@@ -110,6 +111,14 @@ const FLOOR_SIGMA: f64 = 3.0;
 
 /// Where the floor is written.
 const FLOOR_DOC: &str = "../../docs/VG-DECIDABILITY-FLOOR.md";
+
+/// The MACHINE-READABLE floor, beside the markdown one — profiling rung 8's input.
+///
+/// Two files and not one, because they answer to different readers and a single file would have to
+/// serve both badly: the markdown carries the finding (*"the floor is not a constant"*), which no
+/// parser needs, and this one carries the three repetition floors and the workload tag, which no
+/// human reads. `Floor::from_session_file` is the only constructor and this is its only producer.
+const FLOOR_SESSION_FILE: &str = "../../docs/PROFILING-FLOOR.toml";
 
 fn repo_path(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel)
@@ -348,6 +357,7 @@ fn vg_decidability_floor_measure() {
     // `froxel_light_cull`, so a `BOYKO_VB_FROXEL_FORCE_OFF` that silently did nothing shows up as
     // ONE tag on both legs — a state the printed channel could not observe at all.
     let mut froxel_tag: Option<String> = None;
+    let mut floor_workload_tag: Option<WorkloadTag> = None;
     let mut flat_tag: Option<String> = None;
 
     for r in 0..repeats {
@@ -356,6 +366,12 @@ fn vg_decidability_floor_measure() {
         for k in 0..sessions {
             if let Some(art) = run_session(&exe, true, &format!("r{r}s{k}froxel")) {
                 froxel_tag.get_or_insert_with(|| art.header.workload_tag.clone());
+                // Rung 8: the same artifact yields the hashed tag the session file carries. Taken
+                // from the FROXEL leg because that is the configuration whose noise this floor
+                // bounds -- see the session-file write below.
+                floor_workload_tag.get_or_insert_with(|| {
+                    WorkloadTag::of(&art, &FROXEL_READINGS.map(|rd| rd.zone))
+                });
                 for (i, rd) in FROXEL_READINGS.iter().enumerate() {
                     if let Some(v) = zone_median(&art, rd.zone) {
                         froxel[i].push(v);
@@ -442,6 +458,42 @@ fn vg_decidability_floor_measure() {
     let floor = FLOOR_SIGMA * worst.cv;
 
     write_floor_doc(&spreads, floor, worst, sessions, repeats, &per_repeat, &ft, &lt);
+
+    // Profiling rung 8: the MACHINE-READABLE half, beside the markdown one. This is what makes
+    // `Floor::from_session_file` reachable at all -- and the point of the seam is that it is the
+    // ONLY thing that makes it reachable, so a `Floor` can only exist where this protocol ran.
+    //
+    // The per-repetition floors go in RAW: `Floor` applies `FLOOR_REDUCTION` itself, and handing it
+    // a pre-reduced scalar would move the const-driven step to the writer, where a caller could
+    // choose it. That is the exact defect M11 names.
+    //
+    // The tag is derived from the FROXEL leg's last artifact and the zone set this rung subscribed
+    // to. The flat leg has a DIFFERENT tag by construction (the two are asserted distinct above),
+    // which is correct and is why a floor licenses a contrast on ONE workload: a floor is a claim
+    // about the noise of a configuration, not about the difference between two.
+    let rel_all: Vec<f64> = per_repeat
+        .iter()
+        .map(|rep| FLOOR_SIGMA * rep.iter().map(|x| x.cv).fold(0.0_f64, f64::max))
+        .collect();
+    let session_path = repo_path(FLOOR_SESSION_FILE);
+    match std::fs::write(
+        &session_path,
+        Floor::render_session_file(
+            &rel_all,
+            floor_workload_tag.expect("invariant: the froxel leg produced at least one artifact"),
+            sessions as u32,
+        ),
+    ) {
+        Ok(()) => eprintln!(
+            "VG-floor: session file written to {} ({} repetition floors)",
+            session_path.display(),
+            rel_all.len()
+        ),
+        // LOUD, not a panic: the measurement is over by the time this runs, and the markdown
+        // document beside it already carries the same numbers for a human. The gate that consumes
+        // the session file reds on its absence.
+        Err(e) => eprintln!("VG-floor: could not write {}: {e}", session_path.display()),
+    }
 
     for s in &spreads {
         eprintln!(
@@ -737,6 +789,7 @@ fn artifact_with(zones: &[(u16, ZoneLabel, f64)], instrument: Instrument) -> Art
                 median_ns: *median,
                 mean_ns: *median,
                 p95_ns: *median,
+                stddev_ns: 0.0,
                 begin_off_ns: 0.0,
                 end_off_ns: *median,
             })

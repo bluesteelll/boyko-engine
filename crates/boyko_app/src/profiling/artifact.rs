@@ -150,7 +150,7 @@ use std::path::Path;
 /// `2` since rung 7c's tag split: a v1 file carries no `content_tag`, and reading one as if the
 /// field were merely empty would hand a floor exactly the "declared nothing" state
 /// [`Artifact::floor_source`] exists to refuse.
-pub const ARTIFACT_SCHEMA_VERSION: u32 = 3;
+pub const ARTIFACT_SCHEMA_VERSION: u32 = 4;
 
 /// The **derived, unforgeable** half of a workload tag: everything about the boot-resolved
 /// configuration that the engine itself knows.
@@ -293,6 +293,10 @@ pub struct ZoneRow {
     pub mean_ns: f64,
     /// 95th percentile duration, ns.
     pub p95_ns: f64,
+    /// Population standard deviation of the durations, ns — schema 4, added for rung 8's
+    /// `se_floor` band term. MEASURED rather than recovered from `p95 - median`, which would have
+    /// assumed a normality GPU frame times do not have; see [`super::reduce::stats_ns`].
+    pub stddev_ns: f64,
     /// Offset of this zone's begin from the window's base, ns.
     pub begin_off_ns: f64,
     /// Offset of its end, ns. Carried rather than derived: `begin + median` is not a time any frame
@@ -432,6 +436,7 @@ impl Artifact {
             let _ = writeln!(s, "median_ns = {}", ns(z.median_ns));
             let _ = writeln!(s, "mean_ns = {}", ns(z.mean_ns));
             let _ = writeln!(s, "p95_ns = {}", ns(z.p95_ns));
+            let _ = writeln!(s, "stddev_ns = {}", ns(z.stddev_ns));
             let _ = writeln!(s, "begin_off_ns = {}", ns(z.begin_off_ns));
             let _ = writeln!(s, "end_off_ns = {}", ns(z.end_off_ns));
         }
@@ -576,6 +581,7 @@ impl Artifact {
                     "median_ns" => z.median = Some(v.parse().map_err(|_| bad("median_ns"))?),
                     "mean_ns" => z.mean = Some(v.parse().map_err(|_| bad("mean_ns"))?),
                     "p95_ns" => z.p95 = Some(v.parse().map_err(|_| bad("p95_ns"))?),
+                    "stddev_ns" => z.stddev = Some(v.parse().map_err(|_| bad("stddev_ns"))?),
                     "begin_off_ns" => z.begin = Some(v.parse().map_err(|_| bad("begin_off_ns"))?),
                     "end_off_ns" => z.end = Some(v.parse().map_err(|_| bad("end_off_ns"))?),
                     _ => {}
@@ -643,6 +649,7 @@ struct PartialZone {
     median: Option<f64>,
     mean: Option<f64>,
     p95: Option<f64>,
+    stddev: Option<f64>,
     begin: Option<f64>,
     end: Option<f64>,
 }
@@ -660,6 +667,7 @@ impl PartialZone {
             median_ns: self.median.ok_or_else(|| bad("zone row has no `median_ns`"))?,
             mean_ns: self.mean.ok_or_else(|| bad("zone row has no `mean_ns`"))?,
             p95_ns: self.p95.ok_or_else(|| bad("zone row has no `p95_ns`"))?,
+            stddev_ns: self.stddev.ok_or_else(|| bad("zone row has no `stddev_ns`"))?,
             begin_off_ns: self.begin.ok_or_else(|| bad("zone row has no `begin_off_ns`"))?,
             end_off_ns: self.end.ok_or_else(|| bad("zone row has no `end_off_ns`"))?,
         })

@@ -1393,6 +1393,71 @@ exactly how the seven brackets acquired the wrong stage in the first place.
    `profiling-census` legs (sources touched first); all six golden pins byte-identical; the anchors
    and blocking-reader-census gates green; `check_doc_contracts.py` OK on 22 corpus files.
 
+### Rung 8 — the comparator, and where it was built
+
+✅ **SHIPPED (first unit): `Floor`, `Twin`, `LegSummary`, `resolve`, `Contrast`, `NotResolvedReason`,
+`BandTerm`, `se_floor`.** `crates/boyko_app/src/profiling/contrast.rs`.
+
+**⚠️ NOT in `boyko_ecs::…::profiling::floor`, and the departure is deliberate.** The corpus places
+`Floor` there in the same breath as `WindowReducer` and the TOML artifact. Rung 7 moved those two to
+`boyko_app` and its reasoning transfers unchanged: a `Floor` is read from a file the artifact writer
+produced, and a `LegSummary` is built from an `Artifact` whose header carries a `workload_tag`
+derived from `boyko_render::ResolvedRenderPath` — a type the kernel cannot see and must not learn
+to. Recorded in the module's own doc, so a reader looking for `boyko_ecs::profiling::floor` finds
+out where it went from the place it is not.
+
+**The schema went to 4, and `se_floor` is why.** `ZoneRow` gained `stddev_ns`, measured by the
+reducer, because the band's SE term needs a spread and the three fields already published carry
+none. Recovering σ from `(p95 − median) / 1.6449` assumes a normal sample; GPU frame times are
+right-skewed with a hard floor at the hardware quantum. That estimator would have made one of the
+band's four terms **an assumption wearing a measurement's name**, which is this campaign's most
+repeated defect. The real second moment costs one pass over a slice already in cache. The sigma is
+the POPULATION one (÷`n`, not `n−1`): the window is not a sample from a larger population of frames,
+it IS every frame the sitting measured.
+
+**`Floor::from_session_file` has a producer, and it is the only one.**
+`vg_decidability_floor_measure` now writes `docs/PROFILING-FLOOR.toml` beside its markdown — the
+three repetition floors RAW, the hashed `WorkloadTag`, the session count. Raw and not reduced: a
+pre-reduced scalar would move the `const`-driven step to the writer, where a caller could choose it,
+which is exactly the defect M11 names. Two files rather than one because they answer to different
+readers — the markdown carries the finding (*"the floor is not a constant"*), which no parser needs;
+the TOML carries the numbers, which no human reads.
+
+**Naming settled in code, recorded as arbitrary:** `EpochBreak`, not `ClockEpochBreak`. The corpus
+uses both — its D11 table one way, its own `enum` and its S8 row the other — and two of three
+source sites spell it this way. Also `NotResolvedReason::from_wire`, not `from_str`: clippy refuses
+an inherent `from_str` because it reads as `std::str::FromStr` at the call site while obeying none
+of that trait's contract.
+
+**Gates, with their REDs actually RUN:**
+
+| gate | clause | RED produced |
+|---|---|---|
+| **G3a** | an A/A contrast is never `Resolved` | a zero delta returns `NotResolved { BelowBand }` with its numbers still populated |
+| **G3a reduction RED (M11)** | the reduction ALONE decides | same three repetition floors (`4.7 / 14.3 / 6.3 %`), same 8 % delta, same everything: `Reduction::Max` refuses, `Reduction::Min` **resolves**. No other input moves |
+| **G3b** | positive control | a 200 % delta resolves, reports 2000 ns, binds on `Floor` |
+| — | each of the four band terms can bind | all four demonstrated; none is decoration |
+| — | every licensing refusal is reachable | `EpochBreak`, `WindowIncomplete`, `LabelNotMeasured`, `TwinWorkloadMismatch` each fired on its own condition |
+| **API shape** | one `Floor` constructor | ⚠️ RED RUN: added `Floor::from_quantum` — the gate named both offenders |
+| **API shape** | no caller-supplied sigma | ⚠️ RED RUN: added `sigma: f64` to `resolve` — the gate named the signature and its use |
+| **API shape** | `Contrast` has two variants | ⚠️ **RED RUN, AND IT LANDED SOMEWHERE ELSE.** A third variant fails the COMPILER first: `median_delta_ns`/`band_ns` match exhaustively, so `BareDelta` is `non-exhaustive patterns` before any test runs. Stronger than the assertion — and it means the test catches a narrower thing than its name says: a variant added *together with* its match arms. **The predicted RED and the measured one are different objects.** Recorded at the test |
+
+⚠️ **A THIRD red, and its cause was the instrument's checkout rather than the code.** Two of the
+shape gates scan the module's source for a closing brace between two newlines to find where an
+`enum` ends. They went red on a file **whose content had not changed at all**: a Python edit had
+rewritten it with CRLF (`pathlib.write_text` translates newlines by default on Windows) and the
+scan's `
+}
+` stopped matching. The gate is normalised to LF now, and the lesson is the same
+shape as the anchors gate's: **a gate whose verdict depends on how the file was checked out is
+measuring its checkout, not the code.** The full sweep caught it; two targeted runs before it had
+not, because they ran before the rewrite.
+
+**What rung 8 still owes:** present mode (D12 — labelling only if `Immediate` is unsupported),
+counters at `vkCmd*` sites, the optional `profiling-alloc` feature, and `G4c`'s artifact clause —
+writing a `NotResolvedReason` into an artifact and reading it back. The round-trip through the wire
+words is gated; the artifact field is not written yet.
+
 #### Rung 7c, second half — the workload tag, and a mechanism the corpus described as if it existed
 
 ⚠️ **`Floor`, `resolve`, `FloorWorkloadMismatch` and `NotResolved` are not code.** `rg` over

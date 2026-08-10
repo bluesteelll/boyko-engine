@@ -77,6 +77,7 @@ fn fixture(run_token: &str) -> Artifact {
                 median_ns: 128.0,
                 mean_ns: 163.2,
                 p95_ns: 268.8,
+                stddev_ns: 0.0,
                 begin_off_ns: 0.0,
                 end_off_ns: 128.0,
             },
@@ -87,6 +88,7 @@ fn fixture(run_token: &str) -> Artifact {
                 median_ns: 0.0,
                 mean_ns: 0.0,
                 p95_ns: 0.0,
+                stddev_ns: 0.0,
                 begin_off_ns: 25_584.0,
                 end_off_ns: 25_584.0,
             },
@@ -311,6 +313,7 @@ n = 10
 median_ns = 128.0
 mean_ns = 163.2
 p95_ns = 288.0
+stddev_ns = 40.0
 begin_off_ns = 0.0
 "
     );
