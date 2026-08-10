@@ -53,6 +53,8 @@ use boyko_diag::{clock, loss, profiling_abi, sample};
 
 use crate::ecs::core::profiling::diag;
 use crate::ecs::core::profiling::ecs_control::LatencyTable;
+use crate::ecs::core::profiling::hist::{HistSlot, HistView};
+use crate::ecs::core::profiling::lifetime::LifetimeAcc;
 use crate::ecs::core::resources::register_new;
 use crate::ecs::core::resources::resource::Resource;
 use crate::ecs::identifiers::primitives::ResourceId;
@@ -257,6 +259,13 @@ pub struct DropCounters {
     pub span_over_range: u64,
     /// Windows discarded because the clock's epoch broke under them.
     pub clock_epoch_breaks: u64,
+    /// Tier-C bucket increments refused because a `u16` bucket was already at 65 535 (D22).
+    ///
+    /// **Counted rather than wrapped.** A wrapped bucket makes the distribution look like a
+    /// different one — the shape stays plausible and is wrong. A saturated bucket plus this figure
+    /// says exactly what is missing. `total` and `count` stay exact through it, so the mean survives
+    /// saturation and only the quantiles degrade.
+    pub hist_saturations: u64,
     /// Spans refused by a full interval bank, so the overlap analysis did not see them.
     ///
     /// **Only a full bank counts here.** A span attributed to a frame the ring no longer covers is
@@ -277,21 +286,38 @@ impl DropCounters {
             .saturating_add(self.unclaimed)
             .saturating_add(self.late)
             .saturating_add(self.span_over_range)
-            .saturating_add(self.clock_epoch_breaks);
+            .saturating_add(self.clock_epoch_breaks)
+            .saturating_add(self.hist_saturations);
         #[cfg(feature = "profiling-analysis")]
         let t = t.saturating_add(self.intervals_dropped);
         t
     }
 }
 
-/// How a session is sized. One knob at this rung, because one knob is what the store reads.
+/// How a session is sized.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct ProfilerConfig {
     /// Zone slots reserved above [`ENGINE_ZONE_SLOTS`] for a game's own zones. `0` at the default:
     /// the dynamic registry that spends them is rung 10, and a budget nothing can claim is an
     /// extent nothing can prove wrong.
     pub user_zone_budget: u32,
+    /// Retention-tier-C histogram slots (D22) — profiling rung 12. **`0` at the default, and that
+    /// is what "opt-in" means**: tier C costs 400 B per slot and answers a question (session tail
+    /// shape) that most sessions never ask. Capped at [`MAX_HIST_SLOTS`]; a larger request is
+    /// clamped there and reported, never silently honoured.
+    ///
+    /// Tier B has no knob because it has no choice: 24 B per zone, always on when armed, exactly as
+    /// D22 specifies.
+    pub hist_slots: u32,
 }
+
+/// Histogram slots a session may commit (D22's own 64-slot figure).
+///
+/// A cap rather than a free knob because the map that finds a slot is one byte per zone: past 254
+/// slots the map would need widening, and 64 × 400 B = 25 KiB is the cost D22 costed.
+pub const MAX_HIST_SLOTS: u32 = 64;
+
+const _: () = assert!(MAX_HIST_SLOTS < 255, "the hist_of map is one byte per zone, 0 = unsubscribed");
 
 /// What an [`Profiler::arm`] call did.
 ///
@@ -309,6 +335,19 @@ pub enum ArmOutcome {
         /// The stride the live session was armed with.
         live: u32,
         /// The stride this call asked for.
+        asked: u32,
+    },
+    /// The live session committed a different number of tier-C slots (profiling rung 12).
+    ///
+    /// A **separate** variant rather than a reuse of [`GeometryMismatch`](Self::GeometryMismatch),
+    /// whose two fields are strides: reporting a stride pair for a slot mismatch would name two
+    /// numbers that are equal and call them the reason. The reservation is published once and never
+    /// resized, so a re-arm asking for more slots than the live one committed would hand out
+    /// pointers past the committed range — this refusal is a soundness guard, not a preference.
+    HistGeometryMismatch {
+        /// The tier-C slot count the live session committed.
+        live: u32,
+        /// The count this call asked for, after the [`MAX_HIST_SLOTS`] clamp.
         asked: u32,
     },
 }
@@ -329,6 +368,14 @@ static VM_LEN: AtomicUsize = AtomicUsize::new(0);
 /// The live session's `zone_stride`. `0` means "never armed", which is why a stride of 0 is
 /// impossible by construction: [`ENGINE_ZONE_SLOTS`] is non-zero.
 static ARMED_STRIDE: AtomicU32 = AtomicU32::new(0);
+
+/// Tier-C slots the live geometry committed — the second dimension of `ARMED_STRIDE`'s claim
+/// (profiling rung 12).
+///
+/// Separate from `ARMED_STRIDE` rather than packed with it because `0` is a legal value here (tier
+/// C is opt-in) while `0` in `ARMED_STRIDE` means "never armed". One word carrying both would need
+/// a sentinel for a state that already has a natural encoding.
+static ARMED_HIST_SLOTS: AtomicU32 = AtomicU32::new(0);
 
 /// The world the profiler is bound to, or [`UNBOUND`].
 static BOUND_WORLD: AtomicU64 = AtomicU64::new(UNBOUND);
@@ -414,6 +461,13 @@ pub(crate) struct Layout {
     label: usize,
     frames: usize,
     begin: usize,
+    /// Retention tier B (rung 12): one [`LifetimeAcc`] per zone, `24 × zone_stride`.
+    lifetime: usize,
+    /// Retention tier C's subscription map (rung 12): one byte per zone, `0` = unsubscribed,
+    /// `n` = slot `n - 1`. `zone_stride` bytes, L1-resident at every stride this tree can arm.
+    hist_of: usize,
+    /// Retention tier C (rung 12): `hist_slots` × 400 B. Zero-sized when nothing subscribed.
+    hist: usize,
     /// The interval ring: `OVERLAP_FRAMES` banks of `INTERVALS_PER_FRAME` slots each.
     #[cfg(feature = "profiling-analysis")]
     intervals: usize,
@@ -426,8 +480,8 @@ const fn align_up(x: usize, a: usize) -> usize {
 }
 
 impl Layout {
-    /// The layout for `zone_stride` zones.
-    pub(crate) const fn new(zone_stride: u32) -> Layout {
+    /// The layout for `zone_stride` zones and `hist_slots` tier-C slots.
+    pub(crate) const fn new(zone_stride: u32, hist_slots: u32) -> Layout {
         let cells = zone_stride as usize * WINDOW;
         let slab = 0usize;
         let slab_bytes =
@@ -441,18 +495,27 @@ impl Layout {
         let frames = align_up(label + cells, SECTION_ALIGN);
         let begin = align_up(frames + WINDOW * size_of::<FrameRecord>(), SECTION_ALIGN);
 
+        // Tiers B and C sit BEFORE the ring, so the ring stays the last section and the
+        // feature-on/off builds still differ only by a suffix. They are in both builds, so every
+        // offset up to `intervals` remains identical between them.
+        let lifetime = align_up(begin + WINDOW * 8, SECTION_ALIGN);
+        let hist_of =
+            align_up(lifetime + zone_stride as usize * size_of::<LifetimeAcc>(), SECTION_ALIGN);
+        let hist = align_up(hist_of + zone_stride as usize, SECTION_ALIGN);
+        let after_hist = hist + hist_slots as usize * size_of::<HistSlot>();
+
         // The ring is the LAST section, so the two builds differ by a suffix and every offset
         // before it is identical — which is what keeps the feature from moving anything a
         // feature-off reader already knows the address of.
         #[cfg(feature = "profiling-analysis")]
-        let intervals = align_up(begin + WINDOW * 8, SECTION_ALIGN);
+        let intervals = align_up(after_hist, SECTION_ALIGN);
         #[cfg(feature = "profiling-analysis")]
         let bytes = align_up(
             intervals + OVERLAP_FRAMES * INTERVALS_PER_FRAME * size_of::<Interval>(),
             SECTION_ALIGN,
         );
         #[cfg(not(feature = "profiling-analysis"))]
-        let bytes = align_up(begin + WINDOW * 8, SECTION_ALIGN);
+        let bytes = align_up(after_hist, SECTION_ALIGN);
 
         Layout {
             slab,
@@ -463,6 +526,9 @@ impl Layout {
             label,
             frames,
             begin,
+            lifetime,
+            hist_of,
+            hist,
             #[cfg(feature = "profiling-analysis")]
             intervals,
             bytes,
@@ -486,6 +552,10 @@ pub struct Profiler {
     base: Option<core::ptr::NonNull<u8>>,
     /// `ENGINE_ZONE_SLOTS + user_zone_budget`, fixed at arm and const for the session.
     zone_stride: u32,
+    /// Tier-C slots this session committed, after the [`MAX_HIST_SLOTS`] clamp. `0` = tier C off.
+    hist_slots: u32,
+    /// Slots handed out by [`subscribe_histogram`](Self::subscribe_histogram) so far.
+    hist_next: u32,
     /// Section offsets for [`zone_stride`](Self::zone_stride).
     layout: Layout,
     /// The live frame's row index, in `0..WINDOW`.
@@ -553,6 +623,12 @@ const _: () = {
         let Profiler {
             base: _,
             zone_stride: _,
+            // Rung 12's two: both plain `u32` session constants written only under `&mut self`, so
+            // clauses (a), (b) and (c) are untouched — they add no pointer, no interior mutability
+            // and no thread affinity. The tier SECTIONS they describe live in the same reservation
+            // `base` already covers, and are reached only through it.
+            hist_slots: _,
+            hist_next: _,
             layout: _,
             cursor: _,
             frame: _,
@@ -597,7 +673,9 @@ impl Profiler {
         Profiler {
             base: None,
             zone_stride: 0,
-            layout: Layout::new(0),
+            hist_slots: 0,
+            hist_next: 0,
+            layout: Layout::new(0, 0),
             cursor: 0,
             frame: 0,
             epoch: 0,
@@ -668,13 +746,29 @@ impl Profiler {
         );
 
         let stride = ENGINE_ZONE_SLOTS as u32 + cfg.user_zone_budget;
+        // Clamped, not refused: a host asking for more tail detail than the map can address is
+        // asking for something reasonable, and the cap is the engine's choice rather than a
+        // mistake in the request. Silently honouring it would be the defect — the clamp is
+        // observable through `hist_slots()`.
+        let slots = cfg.hist_slots.min(MAX_HIST_SLOTS);
+
         let live = ARMED_STRIDE.load(Ordering::Acquire);
         if live != 0 && live != stride {
             diag::report_geometry_mismatch(live, stride);
             return ArmOutcome::GeometryMismatch { live, asked: stride };
         }
+        // The SECOND dimension of the geometry, and it is a soundness guard rather than tidiness:
+        // the reservation is published once and never resized, so a re-arm asking for more slots
+        // than the live one committed would hand out `hist_slot_mut` pointers past the committed
+        // range. Rung 12 is the rung that gives the geometry a second dimension, so it is also the
+        // rung that has to widen the check that guards it.
+        let live_slots = ARMED_HIST_SLOTS.load(Ordering::Acquire);
+        if live != 0 && live_slots != slots {
+            diag::report_geometry_mismatch(live_slots, slots);
+            return ArmOutcome::HistGeometryMismatch { live: live_slots, asked: slots };
+        }
 
-        let layout = Layout::new(stride);
+        let layout = Layout::new(stride, slots);
 
         // The clock's scale is probed on the enable path, never at process start.
         clock::calibrate();
@@ -737,6 +831,16 @@ impl Profiler {
             self.interval_len = [0; OVERLAP_FRAMES];
         }
 
+        self.hist_slots = slots;
+        self.hist_next = 0;
+
+        // ⚠️ Tier B's identity is NOT the all-zero bit pattern: `min` starts at `u32::MAX`. The
+        // reservation is committed zero-filled, so without this seeding pass every zone would
+        // report its fastest run as 0 ticks — a plausible number, which is the worst kind of wrong.
+        // `LifetimeAcc::EMPTY` is the one place that value is written, so the two cannot diverge.
+        self.reset_lifetime(stride);
+        self.reset_hist(stride, slots);
+
         // A new session starts on a clean window. Without this, a re-arm would inherit the rows of
         // the session before it — a frame row is only recycled when the cursor reaches it, so rows
         // the old session never wrapped past would keep answering `frame_record` with figures from
@@ -760,6 +864,7 @@ impl Profiler {
         // ── publication order, step 2: the mask, LAST, always ──
         profiling_abi::arm_scope(ROOT_SCOPE);
         ARMED_STRIDE.store(stride, Ordering::Release);
+        ARMED_HIST_SLOTS.store(slots, Ordering::Release);
         self.armed = true;
 
         // Reported after arming, not before: the session is running either way, and a host that
@@ -916,6 +1021,156 @@ impl Profiler {
         self.cursor
     }
 
+    // ── retention tiers B and C (D22, profiling rung 12) ────────────────────────────────────
+
+    /// Tier-C slots this session committed, after the [`MAX_HIST_SLOTS`] clamp.
+    ///
+    /// Published so a host can see the clamp: asking for 256 and getting 64 is a fact about the
+    /// session, and a caller that never learns it would compute a residency figure from a number
+    /// the store did not use.
+    #[must_use]
+    pub fn hist_slots(&self) -> u32 {
+        self.hist_slots
+    }
+
+    /// Tier-C slots handed out so far.
+    #[must_use]
+    pub fn hist_subscribed(&self) -> u32 {
+        self.hist_next
+    }
+
+    /// One zone's whole-session accumulator (retention tier B), or `None` outside the geometry.
+    ///
+    /// Always available while armed — tier B has no subscription, by D22.
+    #[must_use]
+    pub fn lifetime(&self, zone: u16) -> Option<LifetimeAcc> {
+        let base = self.base?;
+        if u32::from(zone) >= self.zone_stride {
+            return None;
+        }
+        // SAFETY: `zone < zone_stride` (tested) and `Layout::new` sized the lifetime section at
+        //   `zone_stride` accumulators inside the committed range, which `arm` seeded to
+        //   `LifetimeAcc::EMPTY` before publishing the mask. `LifetimeAcc` is `Copy` POD.
+        unsafe {
+            Some(
+                base.as_ptr()
+                    .add(self.layout.lifetime)
+                    .cast::<LifetimeAcc>()
+                    .add(zone as usize)
+                    .read(),
+            )
+        }
+    }
+
+    /// Give `zone` a tier-C histogram slot, or refuse.
+    ///
+    /// Returns the slot index. Idempotent per zone: a second subscription returns the first slot
+    /// rather than spending another, because two slots for one zone would split its distribution
+    /// and the split reads as two quieter zones instead of one.
+    ///
+    /// `None` when the store is unarmed, the zone is outside the geometry, or every slot is taken.
+    /// **Refused, not clamped onto somebody else's slot** — a zone silently sharing a histogram
+    /// would produce a shape that is a sum of two distributions and looks like neither.
+    #[cold]
+    pub fn subscribe_histogram(&mut self, zone: u16) -> Option<u32> {
+        let base = self.base?;
+        if u32::from(zone) >= self.zone_stride {
+            return None;
+        }
+        // SAFETY: `zone < zone_stride` and the map section holds `zone_stride` bytes inside the
+        //   committed range; `&mut self` is the store's exclusivity.
+        let cell = unsafe { base.as_ptr().add(self.layout.hist_of).add(zone as usize) };
+        // SAFETY: as above — one initialised byte, zero-filled by the commit and reset at `arm`.
+        let live = unsafe { cell.read() };
+        if live != 0 {
+            return Some(u32::from(live) - 1);
+        }
+        if self.hist_next >= self.hist_slots {
+            return None;
+        }
+        let slot = self.hist_next;
+        self.hist_next += 1;
+        // SAFETY: as above. `slot < hist_slots <= MAX_HIST_SLOTS < 255`, so `slot + 1` fits a `u8`
+        //   and `0` stays reserved for "unsubscribed".
+        unsafe {
+            cell.write((slot + 1) as u8);
+        }
+        Some(slot)
+    }
+
+    /// One zone's session histogram (retention tier C), or `None` when it has no slot.
+    #[must_use]
+    pub fn histogram(&self, zone: u16) -> Option<HistView<'_>> {
+        let base = self.base?;
+        if u32::from(zone) >= self.zone_stride {
+            return None;
+        }
+        // SAFETY: `zone < zone_stride` and the map holds `zone_stride` initialised bytes inside the
+        //   committed range.
+        let mapped = unsafe { base.as_ptr().add(self.layout.hist_of).add(zone as usize).read() };
+        if mapped == 0 {
+            return None;
+        }
+        let slot = u32::from(mapped) - 1;
+        debug_assert!(slot < self.hist_slots, "invariant: a mapped slot is inside the geometry");
+        // SAFETY: `slot < hist_slots` (the map is only ever written by `subscribe_histogram`, which
+        //   bounds it), and the hist section holds `hist_slots` slots inside the committed range,
+        //   reset to `HistSlot::ZERO` at `arm`. The borrow is tied to `&self`.
+        unsafe {
+            Some(HistView::new(
+                &*base.as_ptr().add(self.layout.hist).cast::<HistSlot>().add(slot as usize),
+            ))
+        }
+    }
+
+    /// The raw tier pointers the fold writes through, derived once per fold beside [`Columns`].
+    #[inline]
+    fn tiers(&self) -> Option<Tiers> {
+        let base = self.base?;
+        // SAFETY: `Layout::new` places the three sections inside `[0, layout.bytes())`, pairwise
+        //   disjoint and `SECTION_ALIGN`-aligned, over a committed reservation that is never freed.
+        unsafe {
+            Some(Tiers {
+                lifetime: base.as_ptr().add(self.layout.lifetime).cast::<LifetimeAcc>(),
+                hist_of: base.as_ptr().add(self.layout.hist_of),
+                hist: base.as_ptr().add(self.layout.hist).cast::<HistSlot>(),
+                zones: self.zone_stride as usize,
+            })
+        }
+    }
+
+    /// Seed every accumulator to [`LifetimeAcc::EMPTY`] — see the field's own docs on why the
+    /// zero-filled commit is not enough.
+    fn reset_lifetime(&mut self, stride: u32) {
+        let Some(base) = self.base else { return };
+        // SAFETY: the section holds `stride` accumulators inside the committed range, and `stride`
+        //   is the value `layout` was built from; `&mut self` is the exclusivity.
+        unsafe {
+            let p = base.as_ptr().add(self.layout.lifetime).cast::<LifetimeAcc>();
+            for z in 0..stride as usize {
+                p.add(z).write(LifetimeAcc::EMPTY);
+            }
+        }
+    }
+
+    /// Clear the tier-C map and every committed slot.
+    ///
+    /// A re-arm that inherited the previous session's subscriptions would report one session's tail
+    /// under the next session's name.
+    fn reset_hist(&mut self, stride: u32, slots: u32) {
+        let Some(base) = self.base else { return };
+        // SAFETY: both sections are sized from the same `stride`/`slots` this call was given, lie
+        //   inside the committed range, and `&mut self` is the exclusivity.
+        unsafe {
+            let map = base.as_ptr().add(self.layout.hist_of);
+            core::ptr::write_bytes(map, 0, stride as usize);
+            let h = base.as_ptr().add(self.layout.hist).cast::<HistSlot>();
+            for s in 0..slots as usize {
+                h.add(s).write(HistSlot::ZERO);
+            }
+        }
+    }
+
     /// The published lag table (D25) — profiling rung 11.
     ///
     /// A `Res<Profiler>` reader driving LOD, dynamic resolution or quality scaling is looking at a
@@ -1013,6 +1268,12 @@ impl Profiler {
     #[inline]
     pub(crate) fn columns_for_fold(&self) -> Option<Columns> {
         self.columns()
+    }
+
+    /// The retention-tier bases the fold writes through (profiling rung 12).
+    #[inline]
+    pub(crate) fn tiers_for_fold(&self) -> Option<Tiers> {
+        self.tiers()
     }
 
     /// The interval ring's base, or `None` when the store never armed.
@@ -1116,6 +1377,22 @@ pub(crate) struct Columns {
     pub(crate) cells: usize,
 }
 
+/// The retention-tier pointers the fold writes through (profiling rung 12).
+///
+/// Derived once per fold beside [`Columns`] and for the same reason: three bases that cannot change
+/// during a drain have no business being re-derived per sample.
+#[derive(Clone, Copy)]
+pub(crate) struct Tiers {
+    /// Tier B: `zones` accumulators, one per zone id.
+    pub(crate) lifetime: *mut LifetimeAcc,
+    /// Tier C's subscription map: `zones` bytes, `0` = unsubscribed, `n` = slot `n - 1`.
+    pub(crate) hist_of: *mut u8,
+    /// Tier C: the committed slots. Indexed only through `hist_of`, never directly by zone.
+    pub(crate) hist: *mut HistSlot,
+    /// `zone_stride` — the bound both `lifetime` and `hist_of` are indexed under.
+    pub(crate) zones: usize,
+}
+
 /// One `(frame, zone)` cell, as a reader sees it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Cell {
@@ -1154,31 +1431,82 @@ mod tests {
     /// and the corruption would look like data.
     #[test]
     fn the_layout_sections_are_disjoint_and_inside_the_total() {
+        // Both dimensions of the geometry are swept, and the second one is rung 12's: a tier-C
+        // section sized `0` is trivially disjoint from everything, so a sweep at `hist_slots = 0`
+        // alone would certify an overlap it never built.
         for stride in [1u32, 256, 1024, ENGINE_ZONE_SLOTS as u32] {
-            let l = Layout::new(stride);
-            let cells = stride as usize * WINDOW;
-            let slab = LANE_COUNT as usize * 2 * REGION_CAPACITY as usize * size_of::<Sample>();
-            let spans = [
-                (l.slab, slab),
-                (l.total, cells * 8),
-                (l.count, cells * 4),
-                (l.min, cells * 4),
-                (l.max, cells * 4),
-                (l.label, cells),
-                (l.frames, WINDOW * size_of::<FrameRecord>()),
-                (l.begin, WINDOW * 8),
-                #[cfg(feature = "profiling-analysis")]
-                (l.intervals, OVERLAP_FRAMES * INTERVALS_PER_FRAME * size_of::<Interval>()),
-            ];
-            for (i, (off, len)) in spans.iter().copied().enumerate() {
-                assert!(off + len <= l.bytes(), "section {i} runs past the reservation");
-                assert!(off.is_multiple_of(SECTION_ALIGN), "section {i} is not line aligned");
-                for (j, (off2, len2)) in spans.iter().copied().enumerate().skip(i + 1) {
+            for slots in [0u32, 1, MAX_HIST_SLOTS] {
+                let l = Layout::new(stride, slots);
+                let cells = stride as usize * WINDOW;
+                let slab =
+                    LANE_COUNT as usize * 2 * REGION_CAPACITY as usize * size_of::<Sample>();
+                let spans = [
+                    (l.slab, slab),
+                    (l.total, cells * 8),
+                    (l.count, cells * 4),
+                    (l.min, cells * 4),
+                    (l.max, cells * 4),
+                    (l.label, cells),
+                    (l.frames, WINDOW * size_of::<FrameRecord>()),
+                    (l.begin, WINDOW * 8),
+                    (l.lifetime, stride as usize * size_of::<LifetimeAcc>()),
+                    (l.hist_of, stride as usize),
+                    (l.hist, slots as usize * size_of::<HistSlot>()),
+                    #[cfg(feature = "profiling-analysis")]
+                    (l.intervals, OVERLAP_FRAMES * INTERVALS_PER_FRAME * size_of::<Interval>()),
+                ];
+                for (i, (off, len)) in spans.iter().copied().enumerate() {
                     assert!(
-                        off + len <= off2 || off2 + len2 <= off,
-                        "sections {i} and {j} overlap at stride {stride}"
+                        off + len <= l.bytes(),
+                        "section {i} runs past the reservation at stride {stride}, slots {slots}"
                     );
+                    assert!(off.is_multiple_of(SECTION_ALIGN), "section {i} is not line aligned");
+                    for (j, (off2, len2)) in spans.iter().copied().enumerate().skip(i + 1) {
+                        // A zero-length section cannot overlap anything, and pairing two of them
+                        // at the same offset would otherwise read as an overlap.
+                        if len == 0 || len2 == 0 {
+                            continue;
+                        }
+                        assert!(
+                            off + len <= off2 || off2 + len2 <= off,
+                            "sections {i} and {j} overlap at stride {stride}, slots {slots}"
+                        );
+                    }
                 }
+            }
+        }
+    }
+
+    /// **Rung 12's residency arithmetic, MEASURED from the store rather than restated.**
+    ///
+    /// The reservation grows by exactly the three sections this rung added, and by nothing else.
+    /// A composition identity rather than an absolute figure: an absolute would need re-blessing
+    /// on every unrelated section change, and would not say *which* term moved.
+    ///
+    /// RED: drop `hist_of` from the sum ⇒ `left` is 4 096 short of `right`.
+    #[test]
+    fn the_retention_tiers_grew_the_reservation_by_exactly_their_own_bytes() {
+        for stride in [256u32, 1024, ENGINE_ZONE_SLOTS as u32] {
+            for slots in [0u32, 1, MAX_HIST_SLOTS] {
+                let with = Layout::new(stride, slots);
+                let tier_b = stride as usize * size_of::<LifetimeAcc>();
+                let map = stride as usize;
+                let tier_c = slots as usize * size_of::<HistSlot>();
+
+                // The three sections start where tier B does and end where tier C does, each
+                // `SECTION_ALIGN`-padded — so the span they occupy is at least their own bytes and
+                // less than their bytes plus three alignment gaps.
+                let span = with.hist + tier_c - with.lifetime;
+                assert!(
+                    span >= tier_b + map + tier_c,
+                    "the tier span at stride {stride}, slots {slots} is smaller than the three \
+                     sections it contains"
+                );
+                assert!(
+                    span < tier_b + map + tier_c + 3 * SECTION_ALIGN,
+                    "the tier span at stride {stride}, slots {slots} carries more than three \
+                     alignment gaps, so something else is inside it"
+                );
             }
         }
     }

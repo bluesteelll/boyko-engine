@@ -40,6 +40,19 @@ const TEST_LANE: u16 = 3;
 /// A zone id inside every geometry this file arms.
 const ZONE: u16 = 7;
 
+/// **The one geometry this whole test binary arms with.**
+///
+/// The reservation, `ARMED_STRIDE` and `ARMED_HIST_SLOTS` are process-global and published ONCE, so
+/// the geometry is a property of the process rather than of a test. Two fixtures asking for
+/// different tier-C slot counts is not a race — it is one of them being refused with
+/// `HistGeometryMismatch`, which is the store behaving correctly and the fixture being wrong.
+/// Measured at rung 12: three tier-C tests failed in their own `arm` before this const existed.
+///
+/// `MAX_HIST_SLOTS` rather than the 4 the tier-C tests need, so the refusal test can exhaust it
+/// without a second geometry.
+const TEST_GEOMETRY: ProfilerConfig =
+    ProfilerConfig { user_zone_budget: 0, hist_slots: crate::ecs::core::profiling::store::MAX_HIST_SLOTS };
+
 /// Take the lock, arm a fresh store on [`TEST_LANE`], and leave the rings empty.
 ///
 /// The drain is not tidiness: `arm` resets the **overflow** deltas but cannot reset the rings,
@@ -48,7 +61,7 @@ fn armed() -> (MutexGuard<'static, ()>, Profiler) {
     let guard = test_serial();
     set_lane(TEST_LANE);
     let mut p = Profiler::new();
-    let outcome = p.arm(ProfilerConfig::default());
+    let outcome = p.arm(TEST_GEOMETRY);
     assert!(
         matches!(outcome, ArmOutcome::Armed | ArmOutcome::Rearmed),
         "the canonical geometry must always arm: {outcome:?}"
@@ -118,7 +131,7 @@ fn arm_publishes_every_region_and_then_the_mask() {
 fn a_second_arm_reserves_nothing_further() {
     let (_g, mut p) = armed();
     let before = Profiler::reserved_bytes();
-    let outcome = p.arm(ProfilerConfig::default());
+    let outcome = p.arm(TEST_GEOMETRY);
     assert_eq!(outcome, ArmOutcome::Rearmed);
     assert_eq!(Profiler::reserved_bytes(), before, "a re-arm reserved more address space");
 }
@@ -131,7 +144,7 @@ fn re_arming_with_a_different_geometry_is_refused_with_e9213() {
     let (_g, p) = armed();
     let live = p.zone_stride();
     let mut other = Profiler::new();
-    let outcome = other.arm(ProfilerConfig { user_zone_budget: 64 });
+    let outcome = other.arm(ProfilerConfig { user_zone_budget: 64, hist_slots: 0 });
     assert_eq!(outcome, ArmOutcome::GeometryMismatch { live, asked: live + 64 });
     assert!(!other.is_armed(), "a refused arm must not leave a store thinking it armed");
     assert_eq!(other.zone_stride(), 0);
@@ -623,7 +636,7 @@ fn the_four_app_zones_bracket_the_frame_with_the_right_cardinalities() {
     app.finish();
 
     // Arm through the App's own resource: the fold the frame driver runs is that store's.
-    let outcome = app.world_mut().resource_mut::<Profiler>().arm(ProfilerConfig::default());
+    let outcome = app.world_mut().resource_mut::<Profiler>().arm(TEST_GEOMETRY);
     assert!(matches!(outcome, ArmOutcome::Armed | ArmOutcome::Rearmed), "{outcome:?}");
     drain_every_region();
 
@@ -1340,7 +1353,7 @@ fn g12_app() -> (crate::ecs::core::app::App, [crate::ecs::core::entity::entity::
     app.add_plugin(ProfilerPlugin);
     app.finish();
 
-    let outcome = app.world_mut().resource_mut::<Profiler>().arm(ProfilerConfig::default());
+    let outcome = app.world_mut().resource_mut::<Profiler>().arm(TEST_GEOMETRY);
     assert!(matches!(outcome, ArmOutcome::Armed | ArmOutcome::Rearmed), "{outcome:?}");
     drain_every_region();
 
@@ -1565,4 +1578,371 @@ fn register_scope_mints_in_the_game_range_and_refuses_past_the_word() {
         "the 33rd game scope must be refused; a wrap would hand out a bit that is already live"
     );
     assert!(register_scope("g12.after").is_err(), "the refusal must be sticky, not one-shot");
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// G18 / G16 (profiling rung 12) — retention tiers B and C.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+boyko_diag::declare_zone!(
+    TIER_TEST_ZONE,
+    name = "t.tier",
+    scope = ROOT_SCOPE,
+    tier = boyko_diag::profiling_abi::ZoneTier::Always,
+);
+
+/// The zone the tier tests own — **MINTED, never a hand-picked number**.
+///
+/// # Why a raw id is unsound here, measured
+///
+/// The first draft used `const tier_zone(): u16 = 11`, chosen to be distinct from [`ZONE`]. `G18`
+/// then counted **20 013 of 20 000** samples in a full-workspace sweep: thirteen it never pushed.
+///
+/// The module lock does not prevent this and cannot. `ARM_MASK` is process-global, so while ANY
+/// profiling test holds the profiler armed, **every other test in this binary that runs a schedule
+/// emits `SystemSpan` samples** (`zones.rs:193`) into the shared lane rings — on its own thread, in
+/// its own lane, which the fold drains along with everything else. Those samples carry per-system
+/// zone ids minted at `try_build` out of the same monotone `ENGINE_ID_NEXT`. A hand-picked id is
+/// therefore a bet that no system in the whole crate's test suite lands on it, and the bet is
+/// re-rolled by every change to test execution order.
+///
+/// Minting removes the bet: the counter is monotone and shared, so an id this handle owns is one no
+/// `SystemMeta` can ever be given.
+///
+/// ⚠️ [`ZONE`] is still a raw `7` and carries the same latent hazard. It is left alone here because
+/// it is pre-existing and its tests assert on single cells rather than on exact session totals, so
+/// they are far less sensitive — but it is recorded in `docs/OPEN-QUESTIONS.md` rather than left to
+/// be rediscovered.
+fn tier_zone() -> u16 {
+    profiling_abi::zone_id(&TIER_TEST_ZONE)
+}
+
+/// Arm with tier C committed, and leave the rings empty.
+///
+/// A wrapper rather than a second geometry, and that is the whole lesson: `hist_slots` is the
+/// SECOND DIMENSION of a geometry the process publishes once, so a fixture that armed with its own
+/// slot count would be refused by `HistGeometryMismatch` rather than getting one. See
+/// [`TEST_GEOMETRY`].
+fn armed_with_hist() -> (MutexGuard<'static, ()>, Profiler) {
+    armed()
+}
+
+/// Push one span and fold it, returning nothing — the fixture for driving many frames cheaply.
+fn push_span_at(zone: u16, stamp: u64, value: u64) {
+    let s = Sample { stamp, value, zone, flags: SampleKind::Span as u16, _pad: 0 };
+    assert!(sample::push(Region::Engine, s), "the region must accept a lone test sample");
+}
+
+/// **G18** — the lifetime accumulator agrees with the ring, over more frames than the ring retains.
+///
+/// `lifetime[z].count` equals Σ per-frame `count[z]`, and `lifetime[z].max` equals the max per-frame
+/// `max[z]`. Driven over **10 000 frames**, which is 82 windows: the accumulator is the only thing
+/// that still remembers frame 0, so an implementation that read the ring would fail on scale alone.
+///
+/// # Why the sum is taken as the samples are FED, not by walking the ring
+///
+/// Walking the ring at the end would only see the last 121 frames — the very limitation tier B
+/// exists to remove — so the oracle is accumulated in the test's own two variables at push time.
+/// That also makes the oracle independent of every store mechanism the gate is judging.
+///
+/// # ⚠️ This clause DOES NOT catch the corpus's own row-pass defect — MEASURED
+///
+/// The RED was run: tier B restricted to samples landing in the row about to be sealed, which is
+/// what a sweep of the sealed row is equivalent to. **This test stayed GREEN.** Every sample it
+/// feeds is stamped and folded inside one frame, so nothing ever crosses a boundary and the row
+/// pass loses nothing to lose.
+///
+/// So `G18` **as the corpus states it** — *"`lifetime[z].count` equals Σ per-frame `count[z]`"* —
+/// would have certified the defective implementation. The clause that actually catches it is the
+/// next test, and it exists because this one was measured not to.
+#[test]
+fn g18_the_lifetime_accumulator_agrees_with_every_frame_the_ring_forgot() {
+    let (_g, mut p) = armed();
+
+    const FRAMES: u64 = 10_000;
+    let mut oracle_count = 0u64;
+    let mut oracle_max = 0u32;
+    let mut oracle_total = 0u64;
+    let mut oracle_min = u32::MAX;
+
+    for f in 0..FRAMES {
+        // Two samples per frame, one of them varying, so `max` has something to track and `count`
+        // is not merely the frame number.
+        let a = 100 + (f % 97) * 13;
+        let b = 50 + (f % 31);
+        let now = boyko_diag::clock::ticks();
+        push_span_at(tier_zone(), now, a);
+        push_span_at(tier_zone(), now, b);
+        oracle_count += 2;
+        oracle_total += a + b;
+        oracle_max = oracle_max.max(a as u32).max(b as u32);
+        oracle_min = oracle_min.min(a as u32).min(b as u32);
+        fold(&mut p);
+    }
+    // One more fold: the last frame's samples are drained at the top of the frame after it.
+    fold(&mut p);
+
+    let life = p.lifetime(tier_zone()).expect("an armed store has an accumulator for every zone");
+    assert_eq!(
+        life.count, oracle_count,
+        "tier B counted {} of {oracle_count} samples over {FRAMES} frames",
+        life.count
+    );
+    assert_eq!(life.total, oracle_total, "tier B's sum diverged from the fed sum");
+    assert_eq!(life.max_ticks(), Some(oracle_max), "tier B's maximum is not the maximum fed");
+    assert_eq!(life.min_ticks(), Some(oracle_min), "tier B's minimum is not the minimum fed");
+
+    // The claim that makes this gate worth more than a counter test: the ring cannot answer it.
+    // Frame 0 left the window 82 windows ago, and its samples are still in the total above.
+    assert!(
+        FRAMES > WINDOW as u64,
+        "the gate must outrun the ring, or it is not testing retention at all"
+    );
+    let oldest_retained = p.frame().saturating_sub(WINDOW as u32 - 1);
+    assert!(
+        oldest_retained > 0,
+        "the ring still holds frame 0, so this gate has not yet proved tier B remembers anything \
+         the ring forgot"
+    );
+}
+
+/// **G18's second half** — a span that CROSSES a frame boundary still reaches the accumulator.
+///
+/// This is the case the corpus's row-pass loses. A span stamped in frame `F` but written during
+/// `F+1` is drained by the fold at the top of `F+2`; a sweep of `F`'s row at seal already ran one
+/// fold earlier, so the sample would land in `F`'s cell and never in tier B.
+///
+/// MEASURED as the difference between the two designs: the cell and the accumulator must agree.
+///
+/// # RED, run at implementation
+///
+/// Restrict tier B to samples landing in the row about to be sealed — the row pass, expressed as a
+/// one-line filter. This test reds with `left: 0, right: 1`: the span reached its CELL and not the
+/// accumulator. Its sibling above, which is `G18` as the corpus writes it, stayed **green** through
+/// the same injection.
+#[test]
+fn g18_a_span_written_a_frame_after_it_was_stamped_still_reaches_tier_b() {
+    let (_g, mut p) = armed();
+
+    // Frame A opens.
+    fold(&mut p);
+    let stamp_in_a = boyko_diag::clock::ticks();
+    let frame_a = p.frame();
+
+    // Frame B opens WITHOUT the span having been written yet — this is the boundary crossing.
+    fold(&mut p);
+    assert_eq!(p.frame(), frame_a + 1, "the fixture must actually have opened a second frame");
+
+    // Now the span closes: stamped in A, pushed during B.
+    push_span_at(tier_zone(), stamp_in_a, 4242);
+
+    // The fold at the top of frame C drains it and attributes it to A.
+    fold(&mut p);
+
+    let row_a = p.row_of(frame_a).expect("frame A is still inside the window");
+    let cell = p.cell(row_a, tier_zone()).expect("a retained row");
+    assert_eq!(cell.count, 1, "the crossing span did not land in the frame it was stamped in");
+
+    let life = p.lifetime(tier_zone()).expect("an armed store has an accumulator");
+    assert_eq!(
+        life.count, 1,
+        "the crossing span reached the CELL but not the accumulator -- which is exactly what a \
+         sweep of the sealed row produces, and why tier B folds per sample instead"
+    );
+    assert_eq!(life.max_ticks(), Some(4242));
+}
+
+/// **G16** — the histogram's bucket edges bracket a sorted oracle's p99, and it counts what it was
+/// fed.
+///
+/// 100 000 synthetic durations from a known, skewed distribution. The oracle is the sorted array's
+/// p99 — computed by the test, from the same values, with no reference to the bucket grid.
+///
+/// # Why the assertion is a BRACKET and not an equality
+///
+/// A histogram knows which bucket the answer is in and nothing finer. `quantile` returns the
+/// bucket's `[lo, hi)`, and the claim is `lo <= oracle < hi`. An equality would demand precision the
+/// structure does not have, and a point estimate would *manufacture* it.
+///
+/// # RED, run at implementation
+///
+/// An off-by-one in the bucket index (`bucket_of` returning `idx + 1`) ⇒ the oracle falls outside
+/// the returned edges ⇒ red.
+#[test]
+fn g16_the_histogram_edges_bracket_the_sorted_oracle_p99() {
+    use crate::ecs::core::profiling::hist::HistView;
+
+    let (_g, mut p) = armed_with_hist();
+    let slot = p.subscribe_histogram(tier_zone()).expect("a fresh subscription gets a slot");
+    assert_eq!(slot, 0, "the first subscription takes the first slot");
+
+    const N: usize = 100_000;
+    let mut fed: Vec<u64> = Vec::with_capacity(N);
+    // A skewed, deterministic distribution: mostly cheap, with a heavy tail — the shape a frame
+    // profiler actually sees, and the one where a p99 is worth asking for. No RNG crate: an LCG
+    // keeps the gate reproducible and `boyko_ecs`'s dev-dependencies unchanged.
+    let mut x = 0x2545_F491_4F6C_DD1Du64;
+    for _ in 0..N {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        let v = if x % 100 < 99 { 200 + (x >> 40) % 800 } else { 50_000 + (x >> 40) % 400_000 };
+        fed.push(v);
+    }
+
+    for (i, &v) in fed.iter().enumerate() {
+        // The stamp is re-read per sample, and that is not tidiness either. The first draft hoisted
+        // one `ticks()` out of the loop; after `WINDOW` folds that stamp is below the retained
+        // floor, so `attribute` returns `None` and every later sample is counted `late` instead of
+        // folded. MEASURED: the histogram received 30 720 of 100 000 — exactly 120 batches, one per
+        // retained frame. A sample must be stamped in the frame it is going to be folded into.
+        let now = boyko_diag::clock::ticks();
+        push_span_at(tier_zone(), now, v);
+        // Fold in batches so the region never overflows: `REGION_CAPACITY` is finite, and a refused
+        // push would silently shrink the fed set and make the count assertion below vacuous. The
+        // batch is the LOOP INDEX, not `fed.len()` -- the first draft used the latter, which is
+        // constant inside the loop, so it never folded at all and the region filled on push 1025.
+        // `push_span_at`'s own assertion is what caught it, which is why that assertion is there.
+        if i % 256 == 255 {
+            fold(&mut p);
+        }
+    }
+    fold(&mut p);
+    fold(&mut p);
+
+    let view = p.histogram(tier_zone()).expect("a subscribed zone has a histogram");
+    assert_eq!(
+        view.count(),
+        N as u64,
+        "the histogram counted {} of the {N} values fed -- a short count makes every quantile \
+         below it a statement about a different sample",
+        view.count()
+    );
+
+    let mut sorted = fed.clone();
+    sorted.sort_unstable();
+    // 1-based rank, matching `HistView::quantile`'s own definition, so the two agree about WHICH
+    // sample p99 names before they are compared about where it is.
+    let rank = ((0.99f64) * N as f64).ceil().max(1.0) as usize;
+    let oracle = sorted[rank - 1];
+
+    let (lo, hi) = view.quantile(0.99).expect("a non-empty histogram has a p99");
+    assert!(
+        lo <= oracle && oracle < hi,
+        "p99 bucket [{lo}, {hi}) does not bracket the sorted oracle {oracle}"
+    );
+
+    // And the same for the median, so the gate is not a statement about one tail bucket.
+    let med_rank = ((0.50f64) * N as f64).ceil().max(1.0) as usize;
+    let med_oracle = sorted[med_rank - 1];
+    let (mlo, mhi) = view.quantile(0.50).expect("a non-empty histogram has a median");
+    assert!(
+        mlo <= med_oracle && med_oracle < mhi,
+        "median bucket [{mlo}, {mhi}) does not bracket the sorted oracle {med_oracle}"
+    );
+
+    // The un-quantised figures survive the grid exactly -- this is what lets a reader trust the
+    // mean even where the quantiles are only bracketed.
+    let fed_total: u64 = fed.iter().sum();
+    assert_eq!(view.total(), fed_total, "the histogram's total must be exact, not bucketed");
+
+    // Non-vacuity: an unsubscribed zone has no histogram at all, so the assertions above are about
+    // a slot that had to be granted rather than one that exists for every zone.
+    assert!(
+        p.histogram(tier_zone() + 1).is_none(),
+        "an unsubscribed zone must have no histogram, or the subscription mechanism is not gating \
+         anything"
+    );
+    let _ = HistView::new(&crate::ecs::core::profiling::hist::HistSlot::ZERO);
+}
+
+/// Tier C refuses past its committed slots rather than sharing one.
+///
+/// Two zones on one slot would sum two distributions into a shape that is neither.
+#[test]
+fn g16_tier_c_refuses_past_its_slots_and_is_idempotent_per_zone() {
+    use crate::ecs::core::profiling::store::MAX_HIST_SLOTS;
+
+    let (_g, mut p) = armed_with_hist();
+
+    let a = p.subscribe_histogram(100).expect("the first zone gets a slot");
+    let b = p.subscribe_histogram(101).expect("the second zone gets a different slot");
+    assert_ne!(a, b, "two zones must not share a slot");
+
+    assert_eq!(
+        p.subscribe_histogram(100),
+        Some(a),
+        "a second subscription for one zone must return its FIRST slot, not spend another -- two          slots for one zone would split its distribution, and the split reads as two quieter zones"
+    );
+    assert_eq!(p.hist_subscribed(), 2, "the idempotent call must not have consumed a slot");
+
+    // Exhaust the rest, then prove the refusal. Distinct zone ids throughout, so nothing is
+    // refused for being a repeat.
+    for z in 0..MAX_HIST_SLOTS - 2 {
+        assert!(
+            p.subscribe_histogram(200 + z as u16).is_some(),
+            "slot {z} of the committed {MAX_HIST_SLOTS} was refused early"
+        );
+    }
+    assert_eq!(p.hist_subscribed(), MAX_HIST_SLOTS, "every committed slot must be claimable");
+
+    assert_eq!(
+        p.subscribe_histogram(999),
+        None,
+        "the zone past the last slot must be REFUSED, not folded onto somebody else's"
+    );
+    assert!(p.histogram(999).is_none(), "a refused zone must have no histogram at all");
+}
+
+/// The `hist_slots` request is clamped at [`MAX_HIST_SLOTS`] and the clamp is OBSERVABLE.
+///
+/// A host that asked for 4096 and silently got 64 would compute a residency figure from a number
+/// the store never used.
+#[test]
+fn tier_c_clamps_its_slot_request_and_says_so() {
+    use crate::ecs::core::profiling::store::MAX_HIST_SLOTS;
+
+    let _g = test_serial();
+    set_lane(TEST_LANE);
+    let mut p = Profiler::new();
+
+    // Ask for far more than the cap. The clamp is what makes this an ACCEPTED re-arm: without it,
+    // `slots` would be `MAX_HIST_SLOTS + 9000`, which does not equal the geometry this process
+    // published, and the arm would come back `HistGeometryMismatch`. So the outcome below IS the
+    // measurement of the clamp, not merely a reading of it.
+    let outcome = p.arm(ProfilerConfig {
+        user_zone_budget: 0,
+        hist_slots: MAX_HIST_SLOTS + 9000,
+    });
+    assert!(
+        matches!(outcome, ArmOutcome::Armed | ArmOutcome::Rearmed),
+        "an over-large slot request must be CLAMPED, not refused as a geometry mismatch: {outcome:?}"
+    );
+    assert_eq!(
+        p.hist_slots(),
+        MAX_HIST_SLOTS,
+        "the clamp must be readable; a caller cannot budget against a number the store discarded"
+    );
+    drain_every_region();
+}
+/// Rung 12's residency figures, MEASURED from the store.
+///
+/// A print rather than an assertion, deliberately and narrowly: the *composition* is gated by
+/// `store::tests::the_retention_tiers_grew_the_reservation_by_exactly_their_own_bytes`, and an
+/// absolute byte count asserted here would need re-blessing every time an unrelated section moved
+/// while saying nothing about which term did. What this leaves behind is the figure the corpus
+/// quotes, taken from the store instead of from arithmetic.
+#[test]
+fn rung12_tier_costs_measured() {
+    let (_g, p) = armed();
+    let stride = p.zone_stride();
+    let slots = p.hist_slots();
+    println!(
+        "RUNG12 stride={stride} hist_slots={slots}          tierB={} B  hist_of={} B  tierC={} B  reserved_total={} B",
+        stride as usize * 24,
+        stride as usize,
+        slots as usize * 400,
+        Profiler::reserved_bytes()
+    );
+    assert!(Profiler::reserved_bytes() > 0, "an armed store has a reservation to report");
 }

@@ -183,6 +183,25 @@ game wanting hierarchy composes bits itself, in its own code, visibly.
 
 ## D22 — Retention: three RETENTION TIERS, because a fixed ring cannot hold an hour (C-I)
 
+> **Tiers B and C SHIPPED at profiling rung 12** (`profiling/lifetime.rs`, `profiling/hist.rs`), with
+> three corrections to what is written below:
+>
+> 1. **Neither tier folds "in one sequential pass over the current frame's row".** That pass loses
+>    every span that crosses a frame boundary — it reaches the cell and not the accumulator, and the
+>    longer the span the likelier the crossing. Both tiers fold **per sample**. MEASURED: the RED for
+>    the row pass leaves `G18` *as stated in this corpus* **green**, which is why a crossing-span
+>    clause ships beside it.
+> 2. **"3 mantissa bits ⇒ 6.25 % bucket width" is the HALF-width.** 8 buckets per octave means
+>    12.5 % relative at the bottom of an octave and 6.25 % at the top; 6.25 % is the error of a
+>    *midpoint*, and this implementation reports **edges**, never midpoints. The conclusion —
+>    a bucket is the same order as the floor, so `resolve` must not consume one — is untouched.
+> 3. **`hist_slots` is a second dimension of the arm-time geometry**, not just a cost. The
+>    reservation is published once, so a re-arm with a different slot count is refused
+>    (`ArmOutcome::HistGeometryMismatch`) rather than handing out pointers past the committed range.
+>
+> Measured cost at `Z = 4096`, 64 slots: tier B **98 304 B**, the subscription map **4 096 B**, tier
+> C **25 600 B**.
+
 (`retention_tier`, never bare "tier" — `ZoneTier` is the other one, and S11 forbids the collision.)
 
 | `retention_tier` | Structure | Horizon | Cost | Always on? |

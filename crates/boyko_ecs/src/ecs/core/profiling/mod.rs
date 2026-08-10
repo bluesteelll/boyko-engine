@@ -36,7 +36,6 @@
 //! |---|---|
 //! | 5–7 | the GPU channel, and with it `FrameState::Partial` and three of the five cell labels |
 //! | 8 | `LegSummary`, the window reducer, `resolve`, the artifact |
-//! | 12 | the lifetime accumulators and the histograms |
 //! | 13 | telemetry |
 //!
 //! A field that is structurally always zero is indistinguishable from a measurement of zero, and a
@@ -47,6 +46,8 @@ pub mod analysis;
 pub mod diag;
 pub mod ecs_control;
 pub mod fold;
+pub mod hist;
+pub mod lifetime;
 pub mod plugin;
 pub mod store;
 pub mod zones;
@@ -62,11 +63,14 @@ pub use ecs_control::{
     ScopeError, minted_game_scopes, register_scope,
 };
 pub use fold::{any_armed, fold};
+pub use hist::{HIST_BUCKETS, HistSlot, HistView, bucket_edges, bucket_of};
+pub use lifetime::LifetimeAcc;
 pub use plugin::ProfilerPlugin;
 #[cfg(feature = "profiling-analysis")]
 pub use store::{INTERVALS_PER_FRAME, Interval, OVERLAP_FRAMES};
 pub use store::{
     ArmOutcome, Cell, CellLabel, COLUMN_BYTES_PER_ZONE, DropCounters, FOLD_L1D_ZONE_LIMIT,
+    MAX_HIST_SLOTS,
     FRAME_FLAG_CLOCK_UNCALIBRATED, FrameRecord, FrameState, MAX_PLAUSIBLE_FRAME_TICKS, Profiler,
     ProfilerConfig, ROOT_SCOPE, UNBOUND, WINDOW, bind_world, bound_world,
 };

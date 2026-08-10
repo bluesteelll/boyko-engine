@@ -145,7 +145,7 @@ flag-off legs on the logging side and by GJ1's control leg here.
 | **9 (v1.1)** *(**SHIPPED**)* | `VK_EXT_calibrated_timestamps` + rejection sampler; `cpu_gpu_offset` becomes a number with `max_deviation_ns`. **Plus what the row did not anticipate:** tier 1's field had never been written at all, the host time domain cannot be used (this engine's CPU axis is `rdtsc`, not QPC), the driver's `maxDeviation` is informational at one domain, and one fold is not enough — the offset drifts 173 ppm, so a second correlation at window end publishes it. Schema 7 → 8 | **the sampler's own five REDs** (acceptance arm, offset sign, seam-failure count, unknown wire word, drift-free bound); no corpus gate was specified | additive; goldens untouched (a `pNext`-free extension string records no commands) |
 | **10** *(**SHIPPED**)* | `dyn_registry.rs`: `DYN_DESCS`/`DYN_NAMES` static arenas + `SyncCells`, `USER_ID_NEXT`, `register_zone`, `DynZoneHandle`, `zone_dyn!`/`counter_dyn!`/`gauge_dyn!`, `zone_dyn_open`/`close`. **Plus what the row did not anticipate:** `SyncCells` already existed, the id space was **not** split (one `NEXT_SLOT` served both partitions, so `REGISTRY` also had to grow to `ZONE_ID_SPACE`), `ZoneDesc` can never be `ZeroInit` so `DYN_DESCS` holds `MaybeUninit`, and the User-partition crate three gates need is **one line in an integration test** rather than a new workspace member | **G11 (user half), G17, G20, G22b (second clause), G23b** — four of five run with their REDs; **G22b clause 1 is BLOCKED by the same missing `llvm-readobj` that keeps `G22a` red** | purely additive AT THE CONSUMER: fold/store already index by `ZoneId` and `arm` already sizes `zone_stride` from `user_zone_budget`. Not additive in `profiling_abi`, which had one counter and now has two |
 | **11** *(**SHIPPED**)* | `ecs_control.rs`: `ProfilingScopeEnabled` + `ProfilingScope`, `register_scope`, the **fold-step projection** (A8), the `Commands` write path, `ProfiledZone`, the `latency()` table. **Plus what the row did not anticipate:** the projection may own only bits `8..64` — projecting the whole word makes the toggle **one-way**, because the fold's entry gate is `any_armed()` and the projection is a step of the fold; A8's `scope_entity[b]` table is not needed and should not exist (the kernel's own `Enabled<T>` filter *is* the projection); `register_scope` returns the **component**, not a bare bit; and the `latency()` table can carry only its CPU row | **G12** (three clauses, four measured REDs) + a four-test mask-split gate in `boyko_diag` | additive; the mask exists from rung 1, and every engine zone is on `ROOT_SCOPE`, which the projection does not touch |
-| **12** | `lifetime.rs` + `hist.rs`: retention-tier-B accumulators (always on when armed) and retention-tier-C histograms (opt-in) | **G16, G18** | additive; both fold at the end of an existing fold pass |
+| **12** *(**SHIPPED**)* | `lifetime.rs` + `hist.rs`: retention-tier-B accumulators (always on when armed) and retention-tier-C histograms (opt-in). **Plus what the row did not anticipate:** *"both fold at the end of an existing fold pass"* is the one thing that must NOT happen — a sealed-row sweep loses every span that crosses a frame boundary, so both tiers fold **per sample**; `hist_slots` gives the geometry a **second dimension**, which the arm-time guard had to grow to cover; and the corpus's 6.25 % bucket width is the HALF-width | **G16, G18** (+ a crossing-span clause `G18` as written does not catch, measured) | additive at every reader; NOT additive in `accumulate`, which gained four operations per sample, or in `ArmOutcome`, which gained a variant |
 | **13** | `stream.rs` framed binary telemetry + header/block/`ZoneRow`/`WindowRec`, `__telemetry_reduce` with its quantile cap, rotation, failure handling; `tools/prof_decode`; session identity + `fixed_elapsed_ns` | **G15 (incl. the torn-write clause), G9 (telemetry clause), G26** | additive; the decoder is a separate binary |
 | **14 (= joint rung J1, merged with logging L17 — S9)** | The **single `BOYKO_PROFILE` axis**: 5 CI legs (`dev`/`editor`/`shipping`/`shipping-min`/`off`), per-profile sizing consts, the `profiling-analysis` `#[cfg]` split, the `compile_error!` on a stray per-knob override | **G14** — whose clause (a) is, like logging's G16, a cross-profile census run as a CI *step* over the `shipping` and `dev` legs' artifacts, not a sixth leg | a build-configuration rung; the workspace must be green in **all five** profiles. One axis cannot be split across two rungs, so this rung is shared |
 | **15** | `boyko_ui/profiling_overlay.rs` + `boyko_demo` wiring (`profiling_partition!(User)`) + a console command calling `commands.entity(e).enable::<ProfilingScopeEnabled>()` | **G19** | additive; the acceptance path for the whole game-facing half |
@@ -1919,6 +1919,115 @@ entity. `ProfilingScope`, `ProfilingScopeEnabled`, `register_scope` and `Profile
 are gated, and every engine zone stays on `ROOT_SCOPE` — the acceptance path that spawns scopes from
 a game is rung 15's `boyko_demo` wiring. `ProfiledZone` has no production reader for the same
 reason: its reader is the overlay.
+
+### Rung 12 — SHIPPED. What the row did not anticipate
+
+**1. "Both fold at the end of an existing fold pass" is the one thing that must NOT happen, and the
+defect it causes is invisible to `G18` as the corpus states it.** D22 folds tier B *"in one
+sequential pass over the current frame's row, which the fold just touched, so it is L1-warm"*. A
+span **stamps at open and is written at close**, so one that opens in frame `F` and closes in `F+1`
+is drained by the fold at the top of `F+2` and attributed — correctly — to `F`. But `F`'s row was
+swept one fold earlier, when `F` sealed. The sample reaches `F`'s **cell** and never the
+accumulator, and the longer a span is the likelier it is to cross a boundary: **the row pass
+under-counts exactly the expensive zones tier B exists to total.**
+
+Both tiers therefore fold **per sample**, at the one site that already holds the value in a register.
+The cost is four operations on one cache line per sample, inside `__fold` and therefore disclosed
+(D16); the row pass would have walked `Z` cells per frame whether or not any zone ran, which at
+`Z = 4096` is not obviously cheaper.
+
+**MEASURED, and this is the part worth keeping:** the RED for the row pass was injected (tier B
+restricted to samples landing in the row about to be sealed) and **`G18` as the corpus writes it
+stayed GREEN.** Its clause — *"`lifetime[z].count` equals Σ per-frame `count[z]`"* — feeds every
+sample inside one frame, so nothing crosses and the row pass loses nothing to lose. The corpus's own
+gate would have certified the defective implementation. A second clause ships beside it, and it reds
+with `left: 0, right: 1`: the crossing span reached its cell and not its accumulator.
+
+**2. `hist_slots` gives the geometry a SECOND DIMENSION, and the arm-time guard had to grow to cover
+it.** `ARMED_STRIDE` refuses a re-arm whose stride differs, because the reservation is published
+once and never resized. Tier C's extent is `hist_slots × 400 B` in that same reservation, so a
+re-arm asking for more slots than the live one committed would hand out `histogram()` pointers past
+the committed range — a soundness hole, not an untidiness. `ARMED_HIST_SLOTS` plus a new
+`ArmOutcome::HistGeometryMismatch` closes it.
+
+The variant is separate from `GeometryMismatch` rather than a reuse of it: that one's two fields are
+**strides**, and reporting a stride pair for a slot mismatch would name two numbers that are equal
+and call them the reason.
+
+⚠️ **Consequence for every test binary, measured the hard way.** The geometry is a property of the
+PROCESS. Three tier-C tests failed inside their own `arm` before this was understood — not a race,
+just the store correctly refusing a second geometry. `profiling/tests.rs` now has one
+`TEST_GEOMETRY` const and every fixture arms with it.
+
+**3. The corpus's "6.25 % bucket width" is the HALF-width.** With 3 mantissa bits there are 8
+buckets per octave, so a bucket spans `2^e / 8` inside `[2^e, 2^(e+1))` — **12.5 % relative at the
+bottom of the octave, 6.25 % at the top**. 6.25 % is the error of reporting a bucket's *midpoint*.
+This implementation never reports a midpoint (`HistView` yields **edges**), so the figure that bounds
+an edge pair is **≤ 12.5 %**, and it is asserted rather than left in prose. The corpus's conclusion
+is untouched: a bucket is still the same order as the measured floor, and `resolve` still must not
+consume one.
+
+Two further geometry decisions the corpus leaves open, taken here with the reason:
+
+* **A 16-bucket linear head.** `v < 16` maps to bucket `v`, exactly. A log grid over the first
+  octave would quantise the *cheapest* zones hardest — the ones whose cost is actually being argued
+  about.
+* **The top bucket is OPEN-ENDED**, `hi = u64::MAX` rather than `2^26`. A closed top edge would be
+  an edge a sample had exceeded, which is the one thing an edge pair must never do.
+
+**4. Tier B's identity is NOT the all-zero bit pattern.** `min` starts at `u32::MAX`, so the
+committed, zero-filled section is *wrong* rather than empty: without the seeding pass at `arm` every
+zone would report its fastest run as **0 ticks** — a plausible number, which is the worst kind. The
+value lives in exactly one place, `LifetimeAcc::EMPTY`, and `min_ticks()` returns `None` on
+`count == 0` so "never ran" is never returned as a measurement.
+
+MEASURED, this box, dev profile (`stride = 4096`, `hist_slots = 64`):
+
+    tier B (LifetimeAcc)   98 304 B      24 B x 4096 zones
+    tier C map (hist_of)    4 096 B      1 B per zone, 0 = unsubscribed
+    tier C (HistSlot)      25 600 B      400 B x 64 slots
+    reservation total  14 745 600 B      up from 14 614 528 B -- +131 072 B, one granule over
+                                         the 128 000 B the three sections add
+
+**Four REDs, run at implementation:**
+
+| Injected defect | Where it fired |
+|---|---|
+| `bucket_of` returns `idx + 1` | `G16`: *"p99 bucket [73728, 81920) does not bracket the sorted oracle 72258"* |
+| tier B folded from the sealed row | the crossing-span clause, `left: 0, right: 1` — **and `G18` as the corpus writes it stayed green** |
+| `hist_of` dropped from the section-span sum | *"the tier span at stride 256, slots 0 is smaller than the three sections it contains"* |
+| — | *(the fourth is the fixture's own: `push_span_at`'s refusal assertion caught a batching bug that had silently fed 1 024 of 100 000 values)* |
+
+**Two fixture defects the gates caught before they became green lies**, both worth recording because
+both produce a *plausible* number:
+
+* The `G16` feed batched on `fed.len() % 256`, which is **constant inside the loop**, so it never
+  folded and the region filled. `push_span_at`'s own `assert!` on the push is what caught it — a
+  fixture that had ignored the return value would have fed 1 024 samples and asserted a p99 over
+  them.
+* The feed then hoisted one `clock::ticks()` out of the loop. After `WINDOW` folds that stamp is
+  below the retained floor, so `attribute` returns `None` and every later sample is counted `late`.
+  MEASURED: the histogram received **30 720 of 100 000** — exactly 120 batches, one per retained
+  frame. **A sample must be stamped in the frame it is going to be folded into.**
+
+⚠️ **A THIRD fixture defect, and this one is a hazard rather than a slip.** `G18` first used
+`const TIER_ZONE: u16 = 11`, a hand-picked id. In a full-workspace sweep it counted **20 013 of
+20 000** samples. The module lock does not prevent that and cannot: `ARM_MASK` is process-global, so
+while any profiling test holds the profiler armed, **every other test in the binary that runs a
+schedule emits `SystemSpan` samples** (`zones.rs:193`) into the shared lane rings, carrying
+per-system ids minted out of the same monotone counter. A hand-picked id is a bet that no system in
+the crate's whole suite lands on it, re-rolled by every change in test order. The tier zone is now
+`declare_zone!`-minted, which makes the collision unrepresentable rather than unlikely. **`ZONE = 7`
+still carries the same hazard** and is recorded in `docs/OPEN-QUESTIONS.md`. The general form:
+**a profiling gate that asserts a TOTAL must own an id nothing else can be given** — and every gate
+from this rung on asserts totals.
+
+**What rung 12 does NOT deliver, stated so it is not assumed:** no engine zone subscribes to tier C,
+so `hist_slots` defaults to `0` and a default-configured session commits neither slot nor byte of it.
+`Profiler::latency()` still publishes one row of D25's three — the lifetime row it could now fill is
+deliberately left for the rung that has a reader for it, because the table's own doc lists what is
+absent and adding a row nothing consumes would make that list wrong in the other direction.
+
 
 
 

@@ -53,9 +53,10 @@ use crate::ecs::core::profiling::diag;
 use crate::ecs::core::profiling::store::{
     INTERVALS_PER_FRAME, Interval, IntervalRing, OVERLAP_FRAMES,
 };
+use crate::ecs::core::profiling::hist;
 use crate::ecs::core::profiling::store::{
     CellLabel, Columns, DropCounters, FRAME_FLAG_CLOCK_UNCALIBRATED, FrameRecord, FrameState,
-    MAX_PLAUSIBLE_FRAME_TICKS, Profiler, WINDOW,
+    MAX_PLAUSIBLE_FRAME_TICKS, Profiler, Tiers, WINDOW,
 };
 
 /// Run one fold.
@@ -104,6 +105,10 @@ pub fn fold(profiler: &mut Profiler) {
         debug_assert!(false, "invariant: an armed store has columns");
         return;
     };
+    let Some(tiers) = profiler.tiers_for_fold() else {
+        debug_assert!(false, "invariant: an armed store has retention tiers");
+        return;
+    };
     let stride = profiler.zone_stride();
     let live = profiler.frame();
     let floor = live + 1 - u32::min(live + 1, WINDOW as u32);
@@ -133,7 +138,7 @@ pub fn fold(profiler: &mut Profiler) {
                             *state.walk_hint = f;
                             let row = (f % WINDOW as u32) as usize;
                             tally[row] = tally[row].saturating_add(1);
-                            let occ = accumulate(&cols, stride, row, &s, state.drops);
+                            let occ = accumulate(&cols, &tiers, stride, row, &s, state.drops);
                             #[cfg(feature = "profiling-analysis")]
                             if let (Some(ring), Some(occ)) = (ring, occ) {
                                 append_interval(
@@ -351,6 +356,7 @@ fn attribute(
 #[inline]
 fn accumulate(
     cols: &Columns,
+    tiers: &Tiers,
     stride: u32,
     row: usize,
     s: &Sample,
@@ -423,6 +429,45 @@ fn accumulate(
             label.write(CellLabel::OverRange as u8);
         } else if label.read() == CellLabel::Empty as u8 {
             label.write(CellLabel::Measured as u8);
+        }
+    }
+
+    // ── retention tiers B and C (D22, rung 12) ──────────────────────────────────────────────
+    //
+    // PER SAMPLE, not per sealed row, and the difference is a defect rather than a preference. A
+    // span stamps at OPEN and is written at CLOSE, so one crossing a frame boundary is drained a
+    // fold later than the frame it belongs to — after that frame's row was sealed. A pass over the
+    // sealed row would therefore miss it, and it misses longest spans most often, which are the
+    // ones tier B exists to total. Here the sample reaches both tiers exactly once, by construction.
+    //
+    // SAFETY: `s.zone < stride == tiers.zones` (tested at the top of this function, and both come
+    //   from the same `arm`), so the accumulator and the map byte are inside their sections, which
+    //   `Layout::new` sized at `zone_stride` elements each inside the committed reservation. `arm`
+    //   seeded every accumulator to `LifetimeAcc::EMPTY` and zeroed the map before publishing the
+    //   mask. The fold holds `&mut Profiler` — clause (a) of `Profiler`'s `Send` impl — so no other
+    //   thread writes these. The three sections are disjoint from each other and from the columns.
+    unsafe {
+        debug_assert!((s.zone as usize) < tiers.zones, "invariant: a folded zone is inside the tiers");
+        (*tiers.lifetime.add(s.zone as usize)).push(s.value, clamped);
+
+        let mapped = tiers.hist_of.add(s.zone as usize).read();
+        if mapped != 0 {
+            let slot = &mut *tiers.hist.add(mapped as usize - 1);
+            let b = hist::bucket_of(s.value);
+            let cell = &mut slot.buckets[b];
+            if *cell == u16::MAX {
+                // A `u16` bucket at 65 535 is ~18 minutes of a once-per-frame zone in one bucket.
+                // Counted rather than wrapped: a wrapped bucket makes the shape LOOK like a
+                // different distribution, where a saturated one plus this counter says exactly what
+                // is missing and where.
+                drops.hist_saturations += 1;
+            } else {
+                *cell += 1;
+            }
+            // `total` and `count` stay EXACT regardless of the bucket, so a saturated histogram
+            // still reports a true mean — the quantiles are what degrade, and only they.
+            slot.total = slot.total.wrapping_add(s.value);
+            slot.count += 1;
         }
     }
 

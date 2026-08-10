@@ -14,6 +14,48 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-11 — ⚠️ A profiling test's HAND-PICKED zone id is a bet against every schedule the rest of the crate runs. `ZONE = 7` still is one.
+
+Found by rung 12's `G18`, which is the first profiling gate to assert an **exact session total** rather
+than a single cell. In a full-workspace sweep it counted **20 013 of 20 000** samples: thirteen it
+never pushed.
+
+**The mechanism, and why the module lock cannot help.** `profiling/tests.rs` serialises every test
+that arms, on one `test_serial()` lock — which is correct and insufficient. `ARM_MASK` is
+**process-global**, so while any profiling test holds the profiler armed, **every other test in the
+`boyko-ecs` binary that runs a schedule emits `SystemSpan` samples** (`profiling/zones.rs:193`) —
+on its own thread, into its own lane, which the fold drains along with everything else. Those samples
+carry per-system zone ids minted at `try_build` out of the same monotone `ENGINE_ID_NEXT` the static
+zones use.
+
+A hand-picked `const ZONE: u16 = 7` is therefore a bet that no system anywhere in the crate's test
+suite lands on id 7 — and the bet is **re-rolled by every change to test execution order**, which is
+why it had never fired before.
+
+**Fixed for rung 12's own zone:** the tier tests now use a `declare_zone!`-minted handle. The counter
+is monotone and shared, so an id that handle owns is one no `SystemMeta` can ever be given. Not a
+mitigation — the collision becomes unrepresentable.
+
+**NOT fixed, and this is what the owner may want to decide.** `const ZONE: u16 = 7` at
+`profiling/tests.rs:41` is still a raw number, used by roughly thirty assertions across the rung-2
+and rung-3 suites. They are far less sensitive — they read one `(frame, zone)` cell after a drain
+they control, rather than a session total — so a stray sample would have to land in the same frame
+*and* the same cell to be seen at all. But the hazard is the same one, and it is the kind that
+surfaces as an inexplicable off-by-N years later.
+
+Two ways to close it, neither urgent:
+
+1. **Mint it too** (`declare_zone!` + a `fn zone()`), mechanical but touches ~30 assertions in tests
+   that currently pass — a diff whose risk is entirely in the churn.
+2. **Leave it and rely on the insensitivity**, with the hazard recorded here, which is the state
+   today.
+
+⚠️ **The general form is worth more than the instance:** *any* test that arms the process-global
+profiler is measuring a channel the rest of the test binary is also writing to. A profiling gate that
+asserts a total — as every rung-12-and-later gate does — must own an id nothing else can be given.
+
+---
+
 ## 2026-08-11 — ⚠️ The `trybuild` corpus is blessed for a DIFFERENT rustc than the toolchain the project mandates. 23 fixtures were red at `3163078f`.
 
 Found while sweeping rung 11, and **proved not to be rung 11's** with `git stash`: with the whole
@@ -68,15 +110,44 @@ green certification did not cover them.**
 Both causes are re-blessed here in one pass, under 1.97.1, and are listed separately above so the
 diff is reviewable rather than a wall.
 
-**Two things the owner may want to decide.**
+**RESOLVED 2026-08-11 (owner: "реши сам"). Both decided; shipped as
+`tests/trybuild_corpus_compiler_witness.rs`.**
 
-1. **Should the toolchain be pinned?** A `rust-toolchain.toml` at the repo root would make the
-   shadowing impossible and would pin the `.stderr` corpus to one renderer. MEASURED: there is **no
-   `rust-toolchain.toml` anywhere in this workspace**, so which rustc runs is whatever `PATH`
-   happens to resolve — and this repository pins byte-exact compiler output in 24 files.
-2. **A `.stderr` corpus is a hostage to the compiler's prose.** Every rustc release can red 20+
-   fixtures for reasons that have nothing to do with this engine. That is the price of `trybuild`
-   and it may be worth paying; it should be a decision rather than a recurring surprise.
+**1. NO `rust-toolchain.toml`. A COMPILER WITNESS instead — and the reason is that a
+`rust-toolchain.toml` would not have caught this.** The shadowing binary is a **standalone**
+`cargo.exe`/`rustc.exe` from chocolatey, not a rustup proxy; a standalone cargo ignores
+`rust-toolchain.toml` outright, so the file would have looked like protection while providing none.
+Worse, the only form of it that would fix the *other* half — pinning the host triple, `channel =
+"stable-x86_64-pc-windows-gnu"` — breaks every non-Windows build of a workspace whose stated targets
+are *"Windows / Linux (x86_64)"*.
+
+What ships reads the compiler's own version string and compares it to a `BLESSED_RUSTC` const
+updated **in the same commit as any re-bless**. It catches a toolchain update *and* the shadow, on
+any host, and it fails with both versions named plus what to do about it. **Its two REDs were run:**
+naming a compiler that is not running prints `blessed: 1.98.0 … running: 1.97.1 …`; raising the
+fixture floor prints `claims to speak for at least 9999 … and found 90`.
+
+**The precedent decides the shape.** This repository already freezes a compiler for a byte-exact
+corpus: every committed `.spv` is gated against a **frozen `dxc` recipe in the shader's own header**,
+so a compiler change cannot silently redefine the artifact. A `.stderr` corpus is that shape with a
+different compiler and had no freeze. Now it does.
+
+**MEASURED while writing it, and it corrected the entry above:** the corpus is **90 `.stderr`
+files**, not the 24 this section first said. 24 was the number of files rung 11's *diff* touched. **A
+count taken from a diff is a count of what changed, not of what exists**, and the two are equal only
+by accident.
+
+**2. `trybuild` STAYS.** A compile-fail fixture proves a property no runtime test can reach — that
+the type system *rejects* a shape — and this rung leaned on exactly that for `G12` clause 3 and rung
+10 for `G22b`. The price is real and is now **visible instead of silent**: when rustc changes, one
+named gate fires and says so, rather than 23 fixtures mismatching under a green-looking sweep.
+
+⚠️ **One coupling the witness does NOT remove, recorded because it is the surprising one.** A
+`.stderr` corpus is coupled to the engine's **impl count**, not only to the compiler: past five
+implementors rustc switches the *"other types implement trait …"* block from spans to an inline
+list. Adding one trait impl anywhere can therefore re-render a pinned diagnostic in a crate that has
+nothing to do with it. No gate can prevent that; the witness at least stops it being confused with
+compiler drift, which is exactly the confusion it caused here.
 
 ---
 
