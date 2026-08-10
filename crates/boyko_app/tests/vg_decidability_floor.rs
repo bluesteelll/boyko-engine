@@ -784,6 +784,12 @@ fn artifact_with(zones: &[(u16, ZoneLabel, f64)], instrument: Instrument) -> Art
             alloc_bytes: 0,
             instrument,
             precision_decimals: PRECISION_DECIMALS,
+            // Rung 9: a floor session says nothing about the CPU↔GPU offset — its whole subject is
+            // the GPU axis's own repeatability — so the honest fixture value is the refusal, not a
+            // number this harness never measured.
+            correlation: boyko_app::profiling::correlate::Correlation::Uncorrelated(
+                boyko_app::profiling::correlate::Uncorrelated::Unsupported,
+            ),
         },
         zones: zones
             .iter()

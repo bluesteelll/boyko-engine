@@ -63,7 +63,7 @@ Replace three hard-coded GPU timestamp enums, two env-var bench harnesses and ~6
 | Which systems actually ran concurrently? | engine | `SchedulerCpu` + retained intervals | **static compatibility** (from `ConflictGraph`) vs **observed interval overlap** |
 | What did GPU pass `P` cost? | engine | `GpuPass` | median / p95 device ticks, per-pair `MEASURED / NOT_BRACKETED / TORN / LOST` |
 | How many draws / culled instances / bytes? | both | `Counter` / `Gauge` | rate-per-frame (counter) or level (gauge) — typed, never interchangeable |
-| Where did the frame go? | both | `Frame` | two lanes (CPU TSC, GPU device ticks), `cpu_gpu_offset = UNCORRELATED` in v1 |
+| Where did the frame go? | both | `Frame` | two lanes (CPU TSC, GPU device ticks). `cpu_gpu_offset = UNCORRELATED` in v1 — ⚠️ **specified but never written until rung 9**, which ships the field in both shapes: a refusal word, or a measured offset with its bracket, its accepted/rejected probe counts and its drift (D14) |
 | **What did this *player's* session cost, over hours?** | **game** | lifetime accumulators + histograms + a window-granular stream | session count / total / max, log-linear quantiles |
 | Is `A` faster than `B` by `Δ`? | engine | contrast API | `Resolved { … }` **or** `NotResolved { reason, … }` — no third return, no bare-delta constructor |
 

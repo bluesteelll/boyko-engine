@@ -9,8 +9,8 @@
 
 use crate::api::RhiApi;
 use crate::descriptor::{
-    AsBuildSizes, AsGeometryDesc, AsKind, BufferDesc, ComputePipelineDesc, GraphicsPipelineDesc,
-    QueryPoolDesc,
+    AsBuildSizes, AsGeometryDesc, AsKind, BufferDesc, ComputePipelineDesc, DeviceClockSample,
+    GraphicsPipelineDesc, QueryPoolDesc,
 };
 use crate::enums::{
     AddressMode, CompareOp, DescriptorKind, Filter, Format, ImageUsage, ShaderStage,
@@ -1070,6 +1070,59 @@ pub trait RhiDevice<A: RhiApi> {
     #[inline]
     fn host_query_reset_supported(&self) -> bool {
         false
+    }
+
+    // ===== PROFILING RUNG 9 — THE CROSS-DOMAIN CLOCK SEAM (two verbs) =====
+    //
+    // Every GPU number this engine produces lives on the device tick axis, and every CPU number on
+    // `boyko_diag::clock`'s. D14 tier 1 declares the offset between them UNMEASURED and prints
+    // `cpu_gpu_offset = UNCORRELATED` rather than guessing, for a reason Khronos states plainly:
+    // core Vulkan timestamps "cannot be compared even across separate submits within the same run
+    // of an application, as power management events can reset the timer." An uncalibrated
+    // cross-domain offset is not an approximation, it is a fabrication.
+    //
+    // These two verbs are what make the offset measurable. Nothing else changes: a backend
+    // without the capability answers `false` and `Unsupported`, and the profiler keeps printing
+    // `UNCORRELATED`.
+
+    /// Whether [`Self::sample_device_clock`] is callable on this device.
+    ///
+    /// The contract is **enabled**, not "advertised" — [`Self::host_query_reset_supported`]'s
+    /// contract exactly. A backend answers `true` only when the capability was turned on at
+    /// device creation AND the device can sample its own clock domain, so a caller reading `true`
+    /// needs no second check. The default is `false`, the honest answer for a backend with no
+    /// device.
+    #[inline]
+    fn calibrated_timestamps_supported(&self) -> bool {
+        false
+    }
+
+    /// Samples the GPU's timestamp counter from the HOST, with the CPU clock read on both sides
+    /// of the sample, and reports all four numbers ([`DeviceClockSample`]).
+    ///
+    /// # This is not a query-pool read
+    ///
+    /// No command buffer, no submit, no fence — and that is the entire point. A timestamp written
+    /// by [`crate::encoder::RhiCommandEncoder::write_timestamp`] tells you when the GPU reached a
+    /// pipeline stage, on the GPU's axis; it can never tell you where that instant sits on the
+    /// CPU's, because everything between recording and retirement is unmeasured latency. This
+    /// verb reads the same counter *now*, next to a CPU reading, which is the only way to relate
+    /// the two axes without inventing the relation.
+    ///
+    /// # What the caller must still do
+    ///
+    /// One sample is not a calibration. The bracket `cpu_ticks_after - cpu_ticks_before` includes
+    /// any preemption that happened inside it, so a single wide sample is indistinguishable from
+    /// a bad clock. The consumer takes many and REJECTS the wide ones (D14 tier 2: 32 probes at
+    /// arm, acceptance threshold `min_deviation × 3/2`), and re-samples every fold, because two
+    /// free-running counters drift.
+    ///
+    /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; the Vulkan
+    /// backend overrides it (`vkGetCalibratedTimestampsEXT`).
+    #[cold]
+    #[inline(never)]
+    fn sample_device_clock(&self) -> Result<DeviceClockSample, Self::Error> {
+        Err(RhiError::unsupported("sample_device_clock").into())
     }
 
     // ===== HW-RT ACCELERATION-STRUCTURE SEAM (rung R2a-1; default bodies keep Mock + ABI) =====

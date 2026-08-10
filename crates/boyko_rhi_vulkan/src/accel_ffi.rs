@@ -582,14 +582,13 @@ pub type PfnVkGetPhysicalDeviceProperties2 = unsafe extern "system" fn(
     p_properties: *mut VkPhysicalDeviceProperties2,
 );
 
-/// `PFN_vkEnumerateDeviceExtensionProperties` — the RT device-extension presence query
-/// (Vulkan 1.0 core; `p_layer_name` null to query the device's own extensions).
-pub type PfnVkEnumerateDeviceExtensionProperties = unsafe extern "system" fn(
-    physical_device: crate::ffi::VkPhysicalDevice,
-    p_layer_name: *const core::ffi::c_char,
-    p_count: *mut u32,
-    p_properties: *mut crate::ffi::VkExtensionProperties,
-) -> i32;
+/// `PFN_vkEnumerateDeviceExtensionProperties` — MOVED to [`crate::ffi`] at profiling rung 9.
+///
+/// It lived here while ray query was its only caller. Rung 9's `VK_EXT_calibrated_timestamps`
+/// probe is a second caller present in every build, and this module compiles to nothing without
+/// `hwrt` — so the declaration moved rather than being copied. Re-exported under its old path so
+/// no `hwrt` caller changes.
+pub use crate::ffi::PfnVkEnumerateDeviceExtensionProperties;
 
 const _: () = assert!(size_of::<VkPhysicalDeviceProperties2>() == 840);
 const _: () = assert!(align_of::<VkPhysicalDeviceProperties2>() == 8);

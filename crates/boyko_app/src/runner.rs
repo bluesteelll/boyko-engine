@@ -988,6 +988,21 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     let mut vb_zone_reducer = (vb_zone && vb_zone_artifact_path.is_some()).then(|| {
         crate::profiling::reduce::WindowReducer::new(f64::from(ctx.device_caps().timestamp_period))
     });
+    // Profiling rung 9: the ARM-time correlation between the CPU tick axis and the device tick
+    // axis, plus the tick it was taken at so the window's span can be measured.
+    //
+    // Gated on the SAME condition as the reducer, and not computed unconditionally, for a reason
+    // that is measured rather than stylistic: `correlate` calls `boyko_diag::clock::calibrate()`,
+    // whose probe costs ~20 ms of wall time on the thread that wins its CAS. Paying that at every
+    // boot — including every golden dump and every windowed test — to fill a field nobody is going
+    // to write would be the profiler perturbing runs it is not even measuring.
+    let vb_zone_correlation_arm = vb_zone_reducer.is_some().then(|| {
+        let c = crate::profiling::correlate::correlate::<boyko_rhi_vulkan::rhi_impl::Vulkan, _>(
+            ctx,
+            f64::from(ctx.device_caps().timestamp_period),
+        );
+        (c, boyko_diag::clock::ticks())
+    });
     // Preallocated ONCE at their final capacity (Principle 5) — the bench never reallocates
     // once the loop starts. VB-P1e H0 split the single `cull_ns` sample into
     // `cull_reset_ns`/`cull_dispatch_ns` (the `CullReset`/`CullDispatch` bracket pair) so the
@@ -2553,6 +2568,38 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     // from one read, or a concurrent allocation could land between two of them and
                     // publish an `allocs` that its own `bytes` is missing from.
                     let alloc = crate::profiling::alloc_shim::snapshot();
+                    // Profiling rung 9: the SECOND correlation, taken here at the end of the
+                    // window, folded into the arm-time one as a measured DRIFT.
+                    //
+                    // D14 says "recalibration each fold". This artifact has exactly one window and
+                    // therefore exactly one fold, which would make "recalibrate each fold" and
+                    // "correlate once at arm" the same act — and would leave the offset's validity
+                    // across hundreds of frames unstated. Two counters free-running for seconds do
+                    // drift; publishing how far they drifted is what turns that from an assumption
+                    // into a number.
+                    //
+                    // The `map_or` default is unreachable — this arm runs only when
+                    // `vb_zone_reducer` was `Some`, which is the same condition that built the
+                    // arm-time correlation — and it is a REFUSAL rather than a zero for the reason
+                    // the whole rung exists: a fabricated correlation is worse than an admitted
+                    // absence.
+                    let correlation = vb_zone_correlation_arm.map_or(
+                        crate::profiling::correlate::Correlation::Uncorrelated(
+                            crate::profiling::correlate::Uncorrelated::Unsupported,
+                        ),
+                        |(early, t0)| {
+                            let late = crate::profiling::correlate::correlate::<
+                                boyko_rhi_vulkan::rhi_impl::Vulkan,
+                                _,
+                            >(
+                                ctx, f64::from(ctx.device_caps().timestamp_period)
+                            );
+                            let span_ticks = boyko_diag::clock::ticks().saturating_sub(t0);
+                            let span_ns =
+                                (span_ticks as f64 / boyko_diag::clock::ticks_per_ns()) as u64;
+                            crate::profiling::correlate::with_drift(early, late, span_ns)
+                        },
+                    );
                     let art = crate::profiling::artifact::Artifact {
                         header: crate::profiling::artifact::ArtifactHeader {
                             schema_version: crate::profiling::artifact::ARTIFACT_SCHEMA_VERSION,
@@ -2599,6 +2646,10 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                             alloc_allocs: alloc.allocs,
                             alloc_deallocs: alloc.deallocs,
                             alloc_bytes: alloc.bytes,
+                            // Rung 9: either the measured relation between the two axes, or the
+                            // stated reason there is none. Before this rung the artifact said
+                            // NOTHING about it, in either case.
+                            correlation,
                         },
                         zones,
                         census,

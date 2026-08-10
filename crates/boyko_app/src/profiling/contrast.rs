@@ -425,8 +425,16 @@ pub struct LegSummary {
     pub n: u32,
     /// The instrument's own resolution for this leg, ns.
     pub quantum_ns: f64,
-    /// The process this leg came from, so a contrast can refuse two legs from different clocks.
-    pub clock_epoch: (u64, u64),
+    /// The `SessionId` halves of the process this leg came from, so a contrast can refuse two legs
+    /// from different clocks.
+    ///
+    /// ⚠️ **Renamed at rung 9, and the old name was a defect.** It was called `clock_epoch` while
+    /// carrying `session_lo`/`session_hi` — a session id, not
+    /// `boyko_diag::clock::clock_epoch()`. Rung 9 puts the real epoch in the artifact
+    /// (`ArtifactHeader::correlation`), so two different things would have shared one name in one
+    /// module; a stale name that answers the question it is asked is the shape this campaign has
+    /// already been bitten by. What the field proves is stated where it is USED, below.
+    pub session: (u64, u64),
     /// `true` when every subscribed zone came back `Measured`.
     pub all_measured: bool,
     /// `true` when the window recorded no drop of any class.
@@ -489,7 +497,7 @@ impl LegSummary {
             stddev_ns: var_ns.sqrt(),
             n: if n == u32::MAX { 0 } else { n },
             quantum_ns,
-            clock_epoch: (artifact.header.session_lo, artifact.header.session_hi),
+            session: (artifact.header.session_lo, artifact.header.session_hi),
             all_measured,
             window_complete: c.lost == 0 && c.torn == 0,
         })
@@ -679,7 +687,18 @@ pub fn resolve(a: &LegSummary, b: &LegSummary, floor: &Floor, twin: &Twin) -> Co
     if twin.workload != a.workload {
         return refuse(NotResolvedReason::TwinWorkloadMismatch);
     }
-    if a.clock_epoch != b.clock_epoch {
+    // ⚠️ What this proves, stated exactly, because the field's old name overstated it: the two legs
+    // came from ONE process. It is a PROXY for epoch comparability, not a test of it —
+    // `clock_epoch()` is a per-process counter, so "both at epoch 0" from two processes compares
+    // two numbers that mean nothing to each other, while one process's two readings are genuinely
+    // comparable. Same session is therefore necessary; it is not sufficient, and this check does
+    // not claim to be.
+    //
+    // ⚠️ AND it is untested against real inputs. `resolve` still has no production caller (rung 8
+    // shipped the comparator to LICENSE later verdicts, not to serve one), and every leg pair a
+    // real harness would build today comes from two spawned child processes — whose sessions
+    // differ by construction. See `docs/OPEN-QUESTIONS.md`.
+    if a.session != b.session {
         return refuse(NotResolvedReason::EpochBreak);
     }
     if !a.window_complete || !b.window_complete {
@@ -729,7 +748,7 @@ mod tests {
             stddev_ns: 0.0,
             n: 100,
             quantum_ns: 0.0,
-            clock_epoch: (1, 2),
+            session: (1, 2),
             all_measured: true,
             window_complete: true,
         }
@@ -835,7 +854,7 @@ mod tests {
         let base = leg(1000.0, w);
 
         let mut other_epoch = leg(9000.0, w);
-        other_epoch.clock_epoch = (99, 99);
+        other_epoch.session = (99, 99);
         assert!(matches!(
             resolve(&base, &other_epoch, &floor, &twin),
             Contrast::NotResolved { reason: NotResolvedReason::EpochBreak, .. }
@@ -943,6 +962,9 @@ mod tests {
                 alloc_allocs: 0,
                 alloc_deallocs: 0,
                 alloc_bytes: 0,
+                correlation: super::super::correlate::Correlation::Uncorrelated(
+                    super::super::correlate::Uncorrelated::Unsupported,
+                ),
             },
             zones: Vec::new(),
             census: LabelCensus::default(),

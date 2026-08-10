@@ -145,12 +145,21 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use crate::profiling::correlate::{Correlated, Correlation, Uncorrelated};
+
 /// The artifact's format version. A reader refuses anything else **before parsing a row**.
 ///
-/// `2` since rung 7c's tag split: a v1 file carries no `content_tag`, and reading one as if the
-/// field were merely empty would hand a floor exactly the "declared nothing" state
-/// [`Artifact::floor_source`] exists to refuse.
-pub const ARTIFACT_SCHEMA_VERSION: u32 = 7;
+/// It is bumped whenever a key is added, removed or given a new meaning, because every refusal in
+/// [`Artifact::parse`] is written against one key set. The reason a *strict* equality is right —
+/// rather than "at least" — is rung 7c's tag split: a file from before it carries no
+/// `content_tag`, and reading one as if the field were merely empty would hand a floor exactly the
+/// "declared nothing" state [`Artifact::floor_source`] exists to refuse.
+///
+/// The history, because this constant's own doc said `2` for five bumps and nobody noticed until
+/// the sixth: `2` rung 7c (the tag split) · `3` the reducer's rows · `4` `stddev_ns` · `5`
+/// `[[loss]]` · `6` `present_mode` · `7` the `alloc_shim` block · **`8` rung 9's
+/// `cpu_gpu_offset`.**
+pub const ARTIFACT_SCHEMA_VERSION: u32 = 8;
 
 /// The **derived, unforgeable** half of a workload tag: everything about the boot-resolved
 /// configuration that the engine itself knows.
@@ -305,6 +314,19 @@ pub struct ArtifactHeader {
     /// needs one regime per capture rejects a window with more, which is its rule and not this
     /// file's — a constancy assertion here would have to hold on hosts this repository does not own.
     pub regime_n_distinct: u32,
+    /// **The CPU↔GPU clock relation** — profiling rung 9, D14.
+    ///
+    /// One FIELD, not eight, and the type is the one that knows how to combine its own terms
+    /// ([`Correlated::max_deviation_ns`]). The wire form is eight keys because a flat TOML has no
+    /// other shape, but nothing outside [`Artifact::render`] and [`Artifact::parse`] ever sees
+    /// them separately — which is what keeps a reader from taking the bracket for the bound.
+    ///
+    /// ⚠️ Before this rung the field did not exist at all, in any form. D14 specifies
+    /// `cpu_gpu_offset = UNCORRELATED` as a v1 deliverable and `00-GOAL-TARGETS.md` repeats it,
+    /// but a repo-wide grep found the string only in prose: every artifact written before rung 9
+    /// stated nothing about the two axes, so a reader had no way to learn that the GPU numbers
+    /// and the CPU numbers were unrelated. The refusal is now written down.
+    pub correlation: Correlation,
 }
 
 /// One zone's window, as the reducer produced it.
@@ -481,6 +503,34 @@ impl Artifact {
         let _ = writeln!(s, "alloc_allocs = {}", h.alloc_allocs);
         let _ = writeln!(s, "alloc_deallocs = {}", h.alloc_deallocs);
         let _ = writeln!(s, "alloc_bytes = {}", h.alloc_bytes);
+        // Profiling rung 9. Quoted, always, because the ONE key carries both cases — a decimal
+        // offset or `UNCORRELATED(<REASON>)` — and a key whose TOML type changed with the outcome
+        // would make every reader parse twice. The reason word is the discriminator, and the
+        // seven numeric keys below are meaningful only when it is absent.
+        let _ = writeln!(s, "cpu_gpu_offset = \"{}\"", h.correlation.render());
+        let (bracket, driver, probes, rejected, epoch, drift, span) = match h.correlation {
+            // The two DEVIATION TERMS are written, and their maximum — D14's `max_deviation_ns` —
+            // is not. A third key equal to the max of two others is a value obliged to agree with
+            // them, which this campaign has already paid to learn. The derivation lives in
+            // `Correlated::max_deviation_ns`, where there is exactly one of it.
+            Correlation::Correlated(c) => (
+                c.bracket_ns,
+                c.driver_ns,
+                c.accepted,
+                c.rejected,
+                c.epoch,
+                c.drift_ns,
+                c.span_ns,
+            ),
+            Correlation::Uncorrelated(_) => (0, 0, 0, 0, 0, 0, 0),
+        };
+        let _ = writeln!(s, "cpu_gpu_bracket_ns = {bracket}");
+        let _ = writeln!(s, "cpu_gpu_driver_ns = {driver}");
+        let _ = writeln!(s, "cpu_gpu_probes = {probes}");
+        let _ = writeln!(s, "cpu_gpu_rejected = {rejected}");
+        let _ = writeln!(s, "cpu_gpu_epoch = {epoch}");
+        let _ = writeln!(s, "cpu_gpu_drift_ns = {drift}");
+        let _ = writeln!(s, "cpu_gpu_span_ns = {span}");
         let c = &self.census;
         let _ = writeln!(s, "census_measured = {}", c.measured);
         let _ = writeln!(s, "census_not_bracketed = {}", c.not_bracketed);
@@ -664,6 +714,18 @@ impl Artifact {
         let mut alloc_allocs: Option<u64> = None;
         let mut alloc_deallocs: Option<u64> = None;
         let mut alloc_bytes: Option<u64> = None;
+        // Profiling rung 9. Only the discriminating key is `Option` — the seven numbers default,
+        // because the word already says whether they mean anything.
+        // Carries its LINE as well as its value: the refusal below is a `Malformed`, and a
+        // `Malformed` that reported line 0 would name a line no file has.
+        let mut cpu_gpu_offset: Option<(String, usize)> = None;
+        let mut cpu_gpu_bracket_ns: u64 = 0;
+        let mut cpu_gpu_driver_ns: u64 = 0;
+        let mut cpu_gpu_probes: u32 = 0;
+        let mut cpu_gpu_rejected: u32 = 0;
+        let mut cpu_gpu_epoch: u32 = 0;
+        let mut cpu_gpu_drift_ns: i64 = 0;
+        let mut cpu_gpu_span_ns: u64 = 0;
         let mut census = LabelCensus::default();
         let mut zones: Vec<ZoneRow> = Vec::new();
         let mut cur: Option<PartialZone> = None;
@@ -745,6 +807,14 @@ impl Artifact {
                 "alloc_allocs" => alloc_allocs = v.trim().parse().ok(),
                 "alloc_deallocs" => alloc_deallocs = v.trim().parse().ok(),
                 "alloc_bytes" => alloc_bytes = v.trim().parse().ok(),
+                "cpu_gpu_offset" => cpu_gpu_offset = Some((unquote(v).to_owned(), i + 1)),
+                "cpu_gpu_bracket_ns" => cpu_gpu_bracket_ns = v.trim().parse().unwrap_or(0),
+                "cpu_gpu_driver_ns" => cpu_gpu_driver_ns = v.trim().parse().unwrap_or(0),
+                "cpu_gpu_probes" => cpu_gpu_probes = v.trim().parse().unwrap_or(0),
+                "cpu_gpu_rejected" => cpu_gpu_rejected = v.trim().parse().unwrap_or(0),
+                "cpu_gpu_epoch" => cpu_gpu_epoch = v.trim().parse().unwrap_or(0),
+                "cpu_gpu_drift_ns" => cpu_gpu_drift_ns = v.trim().parse().unwrap_or(0),
+                "cpu_gpu_span_ns" => cpu_gpu_span_ns = v.trim().parse().unwrap_or(0),
                 "instrument" => {
                     instrument =
                         Some(Instrument::parse(unquote(v)).ok_or_else(|| bad("unknown instrument"))?);
@@ -768,6 +838,32 @@ impl Artifact {
         if let Some(p) = cur_loss.take() {
             losses.push(p.finish(text.lines().count())?);
         }
+
+        // Profiling rung 9: the one key decides which shape the seven numbers belong to. Required
+        // for `content_tag`'s reason and one more: an absent key would have to default to
+        // *something*, and both candidates are wrong — defaulting to a refusal invents a device
+        // capability answer, and defaulting to a correlation of zero invents a MEASUREMENT.
+        let (cpu_gpu_offset, cpu_gpu_line) =
+            cpu_gpu_offset.ok_or(ArtifactError::BadHeader("cpu_gpu_offset"))?;
+        let correlation = parse_correlation(
+            &cpu_gpu_offset,
+            Correlated {
+                // Overwritten below from the parsed word; present here so the record is built once.
+                offset_ns: 0,
+                bracket_ns: cpu_gpu_bracket_ns,
+                driver_ns: cpu_gpu_driver_ns,
+                accepted: cpu_gpu_probes,
+                rejected: cpu_gpu_rejected,
+                epoch: cpu_gpu_epoch,
+                drift_ns: cpu_gpu_drift_ns,
+                span_ns: cpu_gpu_span_ns,
+            },
+        )
+        .ok_or(ArtifactError::Malformed {
+            line: cpu_gpu_line,
+            why: "cpu_gpu_offset is neither a decimal offset nor UNCORRELATED(<REASON>)",
+        })?;
+
         Ok(Artifact {
             header: ArtifactHeader {
                 schema_version,
@@ -797,12 +893,31 @@ impl Artifact {
                 alloc_allocs: alloc_allocs.unwrap_or(0),
                 alloc_deallocs: alloc_deallocs.unwrap_or(0),
                 alloc_bytes: alloc_bytes.unwrap_or(0),
+                correlation,
             },
             zones,
             census,
             losses,
         })
     }
+}
+
+/// Parses `cpu_gpu_offset`'s value back into a [`Correlation`], filling `terms` with the offset
+/// when it is a measurement. `None` when the word is neither shape.
+///
+/// Separated out because it is the one place a REFUSAL and a MEASUREMENT are told apart, and that
+/// decision should be readable on its own rather than nested three levels inside the parser.
+fn parse_correlation(word: &str, terms: Correlated) -> Option<Correlation> {
+    let w = word.trim();
+    if let Some(inner) = w.strip_prefix("UNCORRELATED(").and_then(|r| r.strip_suffix(')')) {
+        // An unknown reason is a REFUSAL of the file, not an unknown-mapped-to-known: a writer
+        // this reader does not understand is exactly the case the schema version exists to catch,
+        // and letting it through under a neighbouring reason would hide that.
+        return Uncorrelated::from_wire(inner).map(Correlation::Uncorrelated);
+    }
+    w.parse::<i64>()
+        .ok()
+        .map(|offset_ns| Correlation::Correlated(Correlated { offset_ns, ..terms }))
 }
 
 /// A zone row under construction.

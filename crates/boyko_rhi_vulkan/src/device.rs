@@ -319,6 +319,16 @@ pub struct DeviceCaps {
     /// fallback (a recorded `vkCmdResetQueryPool` at the frame top), so a device without it
     /// costs one frame of query-pool recycle latency and nothing else.
     pub host_query_reset: bool,
+    /// Profiling rung 9 (D14 tier 2): whether `VK_EXT_calibrated_timestamps` was **ENABLED** at
+    /// device creation AND the device advertises [`crate::ffi::VK_TIME_DOMAIN_DEVICE_EXT`] among
+    /// its calibrateable domains — the same "enabled, not advertised" contract
+    /// [`Self::host_query_reset`] carries, so a caller reading `true` may call
+    /// `vkGetCalibratedTimestampsEXT` without a second check.
+    ///
+    /// RECORDED, never a boot fail-fast. Without it the profiler's `cpu_gpu_offset` stays
+    /// `UNCORRELATED`, which is a stated status on the data rather than a degraded number — D14's
+    /// rule is that an uncalibrated cross-domain offset is a fabrication, not an approximation.
+    pub calibrated_timestamps: bool,
     /// HW-RT rung R1: whether hardware ray query is ENABLED on this device (the
     /// `VK_KHR_ray_query` extension requested + its feature turned on). The
     /// field's contract is "ENABLED", not "present": R1 requests NO RT extension
@@ -593,6 +603,14 @@ pub struct DeviceFns {
     /// `hostQueryReset` feature enabled at device creation, which
     /// [`DeviceCaps::host_query_reset`] records.
     pub reset_query_pool: PfnVkResetQueryPool,
+    /// Profiling rung 9: `vkGetCalibratedTimestampsEXT`.
+    ///
+    /// `Option`, unlike every sibling above, because it is an EXTENSION command: it resolves only
+    /// when `VK_EXT_calibrated_timestamps` was enabled at device creation. A `?`-load would turn a
+    /// device without the extension — a perfectly ordinary device — into a boot failure. `None`
+    /// and [`DeviceCaps::calibrated_timestamps`] `false` are set from the one probe, so they
+    /// cannot disagree.
+    pub get_calibrated_timestamps: Option<PfnVkGetCalibratedTimestampsExt>,
     // --- Slice-1 core (Vulkan 1.0 / 1.3) commands, always loaded. ---
     pub reset_fences: PfnVkResetFences,
     pub create_image_view: PfnVkCreateImageView,
@@ -1146,15 +1164,25 @@ impl VulkanContext {
         // assumed, because nothing in this tree establishes that this box's driver advertises it.
         device_caps.host_query_reset = supports_host_query_reset(&instance_fns, physical_device);
 
+        // Profiling rung 9 (D14 tier 2): the SAME "query before request" precedent once more.
+        // Requesting an unadvertised extension string is a hard `vkCreateDevice` failure, so the
+        // probe runs first and its answer is what both `create_device` and the device-command
+        // loader are handed — one query, one answer, no second spelling that could drift.
+        device_caps.calibrated_timestamps =
+            supports_calibrated_timestamps(gipa, instance, physical_device);
+
         // --- 6. Create the logical device + retrieve the queue. ---
         let device = match create_device(
             &instance_fns,
             physical_device,
             queue_family_index,
             config.windowed,
-            enable_ray_query,
-            enable_vb_geometry_table,
-            device_caps.host_query_reset,
+            DeviceEnables {
+                enable_ray_query,
+                enable_vb_geometry_table,
+                enable_host_query_reset: device_caps.host_query_reset,
+                enable_calibrated_timestamps: device_caps.calibrated_timestamps,
+            },
         ) {
             Ok(d) => d,
             Err(e) => fail!(e),
@@ -1164,6 +1192,7 @@ impl VulkanContext {
             instance_fns.get_device_proc_addr,
             device,
             config.windowed,
+            device_caps.calibrated_timestamps,
         ) {
             Ok(f) => f,
             Err(e) => {
@@ -1896,6 +1925,7 @@ fn load_device_fns(
     gdpa: PfnVkGetDeviceProcAddr,
     device: VkDevice,
     windowed: bool,
+    calibrated_timestamps: bool,
 ) -> Result<DeviceFns, BootError> {
     // SAFETY: device commands resolve with the live `device`; each `T` matches
     // its command's PFN typedef.
@@ -2010,6 +2040,15 @@ fn load_device_fns(
             // Profiling rung 4. Vulkan 1.2 core on a 1.3 device ⇒ `?` is safe here for the same
             // reason it is safe for its five siblings above.
             reset_query_pool: load_device_command(gdpa, device, c"vkResetQueryPool")?,
+            // Profiling rung 9. `?`-free on purpose: the caller passed the SAME probe result that
+            // decided whether `create_device` appended the extension string, so an unresolvable
+            // pointer here would mean the loader contradicted the driver — `.ok()` records that as
+            // "no correlation" rather than failing a boot over it.
+            get_calibrated_timestamps: if calibrated_timestamps {
+                load_device_command(gdpa, device, c"vkGetCalibratedTimestampsEXT").ok()
+            } else {
+                None
+            },
             // --- Slice-1 core (Vulkan 1.0 / 1.3) commands. ---
             reset_fences: load_device_command(gdpa, device, c"vkResetFences")?,
             create_image_view: load_device_command(gdpa, device, c"vkCreateImageView")?,
@@ -2767,6 +2806,93 @@ fn supports_host_query_reset(fns: &InstanceFns, physical_device: VkPhysicalDevic
     host_reset.host_query_reset == VK_TRUE
 }
 
+/// Whether this device can sample its GPU timestamp counter on demand from the host
+/// (profiling rung 9 / D14 tier 2).
+///
+/// Two conditions, and BOTH are load-bearing:
+///
+/// 1. `VK_EXT_calibrated_timestamps` is advertised as a device extension. Unlike `hostQueryReset`
+///    this one was never promoted to core, so the string must be enabled at device creation and
+///    the entry point resolved — the same shape as the `hwrt` extensions, not the `pNext`-bit
+///    shape.
+/// 2. [`VK_TIME_DOMAIN_DEVICE_EXT`] is among the domains
+///    `vkGetPhysicalDeviceCalibrateableTimeDomainsEXT` reports. **Presence of the extension does
+///    not imply presence of that domain** — the extension is defined over a *set* of domains, and
+///    a driver that advertised only host domains would satisfy condition 1 while making the one
+///    call this engine wants (`timestampCount = 1`, `VK_TIME_DOMAIN_DEVICE_EXT`) invalid usage.
+///
+/// Never fails a boot: `false` leaves the profiler's `cpu_gpu_offset` at `UNCORRELATED`.
+fn supports_calibrated_timestamps(
+    gipa: PfnVkGetInstanceProcAddr,
+    instance: VkInstance,
+    physical_device: VkPhysicalDevice,
+) -> bool {
+    // Resolve the two instance-scope queries ad hoc, exactly as `supports_ray_query` does — the
+    // standing `InstanceFns` table carries neither, and both are needed once, before the logical
+    // device exists.
+    //
+    // SAFETY: `gipa` is the live instance's `vkGetInstanceProcAddr`.
+    // `vkEnumerateDeviceExtensionProperties` is Vulkan 1.0 core and always resolves;
+    // `vkGetPhysicalDeviceCalibrateableTimeDomainsEXT` is an EXTENSION command and resolves only
+    // when the loader can see the extension — which is why its `None` arm is a normal answer here
+    // rather than a `BootError`. Each is reinterpreted as its ABI-matched PFN typedef.
+    let (enum_ext, get_domains): (
+        crate::ffi::PfnVkEnumerateDeviceExtensionProperties,
+        crate::ffi::PfnVkGetPhysicalDeviceCalibrateableTimeDomainsExt,
+    ) = unsafe {
+        let e = (gipa)(instance, c"vkEnumerateDeviceExtensionProperties".as_ptr());
+        let d = (gipa)(
+            instance,
+            c"vkGetPhysicalDeviceCalibrateableTimeDomainsEXT".as_ptr(),
+        );
+        match (e, d) {
+            (Some(e), Some(d)) => (
+                mem::transmute::<PfnVkVoidFunction, crate::ffi::PfnVkEnumerateDeviceExtensionProperties>(
+                    Some(e),
+                ),
+                mem::transmute::<
+                    PfnVkVoidFunction,
+                    crate::ffi::PfnVkGetPhysicalDeviceCalibrateableTimeDomainsExt,
+                >(Some(d)),
+            ),
+            _ => return false,
+        }
+    };
+
+    if !is_device_extension_present(
+        enum_ext,
+        physical_device,
+        VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME,
+    ) {
+        return false;
+    }
+
+    // Condition 2. The two-call idiom: count, then fill. A stack array rather than a `Vec` —
+    // `VkTimeDomainEXT` has exactly four values in the base extension, so eight slots cannot be
+    // outgrown by a conformant driver, and the count is clamped rather than trusted.
+    let mut count: u32 = 0;
+    // SAFETY: a null `p_time_domains` is the spec's count query; `&mut count` is a valid
+    // out-pointer for one `u32`.
+    let raw = unsafe { (get_domains)(physical_device, &mut count, ptr::null_mut()) };
+    let result = VkResult::from_raw(raw);
+    if (!result.is_success() && result != VkResult::INCOMPLETE) || count == 0 {
+        return false;
+    }
+    let mut domains = [0i32; 8];
+    // Clamped, not asserted: a driver reporting more domains than the extension defines is not a
+    // reason to fail a boot, and a truncated read still answers the only question asked — is the
+    // DEVICE domain in there. `INCOMPLETE` is the driver's own word for that truncation.
+    let mut fill = count.min(domains.len() as u32);
+    // SAFETY: `domains` has `fill <= 8` slots and `fill` is what the driver is told it may write;
+    // both pointers are valid for the call's duration.
+    let raw = unsafe { (get_domains)(physical_device, &mut fill, domains.as_mut_ptr()) };
+    let result = VkResult::from_raw(raw);
+    if !result.is_success() && result != VkResult::INCOMPLETE {
+        return false;
+    }
+    domains[..fill as usize].contains(&VK_TIME_DOMAIN_DEVICE_EXT)
+}
+
 /// HW-RT rung R2a-1: the ray-query capability + scratch alignment of a device.
 #[cfg(feature = "hwrt")]
 pub(crate) struct RtCaps {
@@ -2909,12 +3035,15 @@ fn supports_ray_query(
     }
 }
 
-/// HW-RT rung R2a-1: whether the named DEVICE extension is advertised (queried via
+/// Whether the named DEVICE extension is advertised (queried via
 /// `vkEnumerateDeviceExtensionProperties` with a null layer). Alloc-light: a count query
-/// then a fill. Gated `hwrt`.
-#[cfg(feature = "hwrt")]
+/// then a fill.
+///
+/// HW-RT rung R2a-1 wrote it and was its only caller, so it was `hwrt`-gated. **Profiling rung 9
+/// un-gated it**: `VK_EXT_calibrated_timestamps` is probed in every build, and a second copy of
+/// the same enumerate-and-compare would be two things obliged to agree.
 fn is_device_extension_present(
-    enum_ext: crate::accel_ffi::PfnVkEnumerateDeviceExtensionProperties,
+    enum_ext: crate::ffi::PfnVkEnumerateDeviceExtensionProperties,
     physical_device: VkPhysicalDevice,
     want: &CStr,
 ) -> bool {
@@ -3274,6 +3403,10 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
         // only honest value here is `false`, and the boot site overwrites it from
         // `supports_host_query_reset` on the line that feeds `create_device` the same answer.
         host_query_reset: false,
+        // Profiling rung 9: same placeholder discipline, same reason — the contract is "ENABLED",
+        // and `vkCreateDevice` has not run yet. The boot site overwrites it from
+        // `supports_calibrated_timestamps` on the line that feeds `create_device` the same answer.
+        calibrated_timestamps: false,
         // VB-SV0 rung S1.5: same placeholder discipline — the boot site reads it from the
         // limits blob alongside `timestampPeriod`.
         timestamp_compute_and_graphics: false,
@@ -3333,29 +3466,52 @@ fn max_device_local_heap_bytes(mem_props: &VkPhysicalDeviceMemoryProperties) -> 
 /// aniso-sampler prerequisite) and the 5-bit bindless `descriptorIndexing` granular
 /// struct (via `p_next`, the T4 bindless prerequisite) on BOTH the default and hwrt
 /// builds — device-state only, no pipeline/shader/descriptor change.
+/// The optional device capabilities [`create_device`] may request, as one named record.
+///
+/// A struct rather than four trailing `bool` parameters, and profiling rung 9 is when it became
+/// one: four same-typed arguments in a row is precisely where a transposition hides, and this
+/// campaign has already paid for exactly that shape once (a slot index passed where a zone id was
+/// expected, live for two rungs because both were `u16`). Named fields make the call site say what
+/// it is enabling.
+///
+/// **Every field carries the "query before request" contract.** Requesting an unsupported feature
+/// bit or extension string is a hard `vkCreateDevice` failure, not a silent no-op, so each is
+/// `true` only after the corresponding `supports_*` probe returned `true`.
+struct DeviceEnables {
+    /// HW-RT rung R2a-1: appends the 3 RT extension strings and chains the RT feature structs off
+    /// `features13.p_next`. HARD `false` on every non-hwrt build (the caller passes
+    /// `RT_ENABLE_DEFAULT`), so the RT arm below is dead and gated.
+    enable_ray_query: bool,
+    /// Multi-paradigm render-path plan, rung R8 (Decision 0 / R-VBGEO's documented device-create
+    /// gap, now closed): enables `shaderStorageBufferArrayNonUniformIndexing` +
+    /// `descriptorBindingStorageBufferUpdateAfterBind` on the granular descriptor-indexing struct
+    /// — the VB geometry table's (`MeshGeometryTable`) two prerequisite bits.
+    enable_vb_geometry_table: bool,
+    /// Profiling rung 4 (D18): chains `VkPhysicalDeviceHostQueryResetFeatures` with the bit set.
+    /// Enabling it records NO commands and changes no frame — it is a `pNext` bit, so the goldens
+    /// are unaffected — and it is what makes `vkResetQueryPool` legal to call.
+    enable_host_query_reset: bool,
+    /// Profiling rung 9 (D14 tier 2): appends the `VK_EXT_calibrated_timestamps` extension string.
+    /// It has NO feature struct — the extension is entirely a pair of entry points — so unlike
+    /// [`Self::enable_host_query_reset`] this arm touches no `pNext` chain and cannot change the
+    /// walk order. Enabling it records no commands and changes no frame; the goldens are
+    /// unaffected.
+    enable_calibrated_timestamps: bool,
+}
+
 fn create_device(
     fns: &InstanceFns,
     physical_device: VkPhysicalDevice,
     queue_family_index: u32,
     windowed: bool,
-    // HW-RT rung R2a-1: when `true` (only ever set under `feature="hwrt"` after
-    // `supports_ray_query` returned true), the 3 RT extension strings are appended + the RT
-    // feature structs are chained off `features13.p_next`. HARD `false` on every non-hwrt
-    // build (the caller passes `RT_ENABLE_DEFAULT`), so the RT arm below is dead + gated.
-    enable_ray_query: bool,
-    // Multi-paradigm render-path plan, rung R8 (Decision 0 / R-VBGEO's documented device-create
-    // gap, now closed): when `true` (only ever set after the caller queried
-    // `DeviceCaps::storage_buffer_array_non_uniform_indexing_ok`), enables
-    // `shaderStorageBufferArrayNonUniformIndexing` +
-    // `descriptorBindingStorageBufferUpdateAfterBind` on the granular descriptor-indexing
-    // struct below — the VB geometry table's (`MeshGeometryTable`) two prerequisite bits.
-    enable_vb_geometry_table: bool,
-    // Profiling rung 4 (D18): when `true` (only ever set after the caller queried
-    // `supports_host_query_reset`), chains `VkPhysicalDeviceHostQueryResetFeatures` with the bit
-    // set. Enabling it records NO commands and changes no frame — it is a `pNext` bit, so the
-    // goldens are unaffected — and it is what makes `vkResetQueryPool` legal to call.
-    enable_host_query_reset: bool,
+    enables: DeviceEnables,
 ) -> Result<VkDevice, BootError> {
+    let DeviceEnables {
+        enable_ray_query,
+        enable_vb_geometry_table,
+        enable_host_query_reset,
+        enable_calibrated_timestamps,
+    } = enables;
     let _ = enable_ray_query; // read only on the hwrt arm below (silences the OFF build).
     // Correction #2 (OQ-6): fail fast with a CLEAR error if the GPU does not
     // support dynamic rendering, rather than letting `vkCreateDevice` fail opaquely
@@ -3385,12 +3541,29 @@ fn create_device(
     features13.dynamic_rendering = VK_TRUE;
 
     // The extension name pointers this device enables. The base set is the windowed-only
-    // `VK_KHR_swapchain`; the hwrt arm appends the 3 RT strings when `enable_ray_query`.
-    // A fixed-capacity stack array (no heap) sized to the maximum (1 swapchain + 3 RT).
-    let mut ext_ptrs: [*const c_char; 4] = [ptr::null(); 4];
+    // `VK_KHR_swapchain`; the hwrt arm appends the 3 RT strings when `enable_ray_query`; profiling
+    // rung 9 appends `VK_EXT_calibrated_timestamps` when `enable_calibrated_timestamps`.
+    // A fixed-capacity stack array (no heap) sized to the maximum (1 swapchain + 3 RT + 1
+    // calibrated timestamps). The capacity is CHECKED by the const-assert below rather than by a
+    // comment: there is no bounds check on the appends, so an array outgrown by a new extension is
+    // an index panic at boot on exactly the machines that support the most.
+    /// 1 swapchain + 3 RT + 1 calibrated timestamps. Every arm below indexes without a bounds
+    /// check, so this sum is the load-bearing part: an array outgrown by a new extension is an
+    /// index panic at boot on exactly the machines that support the most.
+    const MAX_DEVICE_EXTENSIONS: usize = 1 + 3 + 1;
+    let mut ext_ptrs: [*const c_char; MAX_DEVICE_EXTENSIONS] =
+        [ptr::null(); MAX_DEVICE_EXTENSIONS];
     let mut ext_count: usize = 0;
     if windowed {
         ext_ptrs[ext_count] = VK_KHR_SWAPCHAIN_EXTENSION_NAME.as_ptr();
+        ext_count += 1;
+    }
+
+    // Profiling rung 9. Appended BEFORE the hwrt arm so the `hwrt`-off and `hwrt`-on builds put
+    // this string at the same index — the array is order-insensitive to Vulkan, but a stable
+    // index is what lets a boot dump be compared across the two builds.
+    if enable_calibrated_timestamps {
+        ext_ptrs[ext_count] = VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME.as_ptr();
         ext_count += 1;
     }
 
@@ -3829,6 +4002,7 @@ mod tests {
             timestamp_valid_bits: 64,
             timestamp_compute_and_graphics: true,
             host_query_reset: false,
+            calibrated_timestamps: false,
             ray_query,
             ray_reorder,
             vendor_id: 0,

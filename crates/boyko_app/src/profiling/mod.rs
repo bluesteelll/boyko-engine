@@ -17,6 +17,10 @@
 //! header whose `workload_tag` is derived from `boyko_render::ResolvedRenderPath`, a type the
 //! kernel cannot see and must not learn to.
 //!
+//! [`correlate`] is rung 9's half: the rejection sampler that turns `cpu_gpu_offset` from a word
+//! into a number with a measured bound. It lives beside [`contrast`] for the same reason — it
+//! needs the artifact header, and the kernel cannot see one.
+//!
 //! [`alloc_shim`] is rung 8's opt-in allocation counter — the one place the profiler installs a
 //! `#[global_allocator]`, and only when `profiling-alloc` asks. Its module doc states what a
 //! process-wide counter cannot claim.
@@ -30,4 +34,5 @@
 pub mod alloc_shim;
 pub mod artifact;
 pub mod contrast;
+pub mod correlate;
 pub mod reduce;

@@ -162,10 +162,14 @@ Two consequences, both applied:
    artifact-labelled as a diagnostic mode whose numbers are not comparable to an unarmed run.**
 2. **Artifact granularity.** The binary stream covers the "long capture" case, so the TOML can stay a
    document. Remains open only for a dev workflow that wants human-readable per-frame rows.
-3. **v1.1 calibrated timestamps.** Deferred by D14. Two triggers now: a concrete cross-domain
-   question ("is the CPU recording the frame, or waiting for the GPU to finish it?"), and an in-game
-   overlay showing two axes, which will make users ask. Either must be answered with v1.1 or with a
-   refusal, never with an uncalibrated offset.
+3. **v1.1 calibrated timestamps. ✅ CLOSED at rung 9** — see D14's SHIPPED block in
+   `02-GPU.md`. It was deferred with two triggers (a concrete cross-domain question, and the
+   two-axis overlay), and the ladder's specified order reached it before either fired. What the
+   deferral did not foresee: **tier 1's `cpu_gpu_offset = UNCORRELATED` had never been written
+   either**, so the "answer with v1.1 or with a refusal" rule had no way to express the refusal.
+   Both halves exist now. Measured on this box: `VK_EXT_calibrated_timestamps` is enabled,
+   the sampling bound is 11 ns, 17 of 32 probes are rejected as preempted, and the two axes drift
+   173 ppm.
 4. **`Immediate` support on this box is unproven.** The design probes and records the resolved mode.
    If unsupported, rung 8's present-mode work reduces to labelling — **now stated in the rung table
    (D12), not only here.**

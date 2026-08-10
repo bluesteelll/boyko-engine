@@ -38,6 +38,7 @@ use boyko_app::profiling::artifact::{
     ARTIFACT_SCHEMA_VERSION, Artifact, ArtifactError, ArtifactHeader, Instrument, LabelCensus,
     PRECISION_DECIMALS, ZoneLabel, ZoneRow,
 };
+use boyko_app::profiling::correlate::{Correlated, Correlation, Uncorrelated};
 
 /// A scratch path unique to this test binary and case name.
 fn scratch(case: &str) -> PathBuf {
@@ -70,6 +71,20 @@ fn fixture(run_token: &str) -> Artifact {
             alloc_bytes: 0,
             instrument: Instrument::Live,
             precision_decimals: PRECISION_DECIMALS,
+            // Rung 9. The fixture carries a MEASURED correlation, not a refusal: the round-trip
+            // is the one test that has to prove a number survives the file, and every field is
+            // given a distinct value so a writer that transposed two of them reds here. The
+            // refusal shape has its own case below.
+            correlation: Correlation::Correlated(Correlated {
+                offset_ns: -1_234_567_890_123,
+                bracket_ns: 141,
+                driver_ns: 88,
+                accepted: 29,
+                rejected: 3,
+                epoch: 1,
+                drift_ns: -57,
+                span_ns: 2_016_000_000,
+            }),
         },
         zones: vec![
             ZoneRow {
@@ -122,6 +137,91 @@ fn a_fresh_artifact_round_trips_through_the_file() {
         assert_eq!(a, b, "a zone row did not survive the round trip");
     }
 
+    let _ = std::fs::remove_file(&path);
+}
+
+/// **Rung 9.** The correlation survives the file in BOTH shapes, and the refusal keeps D14's own
+/// literal in the value.
+///
+/// Two claims a single equality assert would not separate. The green fixture above already proves
+/// a `Correlated` round-trips inside the whole-header comparison; what this adds is (1) the
+/// REFUSAL shape, which has no numbers to carry and must therefore be legible from the word alone,
+/// and (2) that the word `UNCORRELATED` is textually in the file — a reader or a grep looking for
+/// D14's spelling has to find it.
+#[test]
+fn the_correlation_survives_the_file_in_both_shapes() {
+    for reason in [
+        Uncorrelated::Unsupported,
+        Uncorrelated::NoProbeSurvived,
+        Uncorrelated::EpochBreak,
+        Uncorrelated::CpuUnscaled,
+        Uncorrelated::DeviceUnscaled,
+    ] {
+        let path = scratch(&format!("corr_{}", reason.as_str()));
+        let mut written = fixture("run-C");
+        written.header.correlation = Correlation::Uncorrelated(reason);
+        written.write(&path).expect("invariant: the artifact writes");
+
+        let text = std::fs::read_to_string(&path).expect("the file is readable");
+        assert!(
+            text.contains(&format!("cpu_gpu_offset = \"UNCORRELATED({})\"", reason.as_str())),
+            "D14's own word must be in the file verbatim; got:\n{text}"
+        );
+
+        let read = Artifact::read(&path, "run-C").expect("the refusal parses");
+        assert_eq!(
+            read.header.correlation,
+            Correlation::Uncorrelated(reason),
+            "a refusal must come back as the SAME refusal, not as a neighbouring one"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // And the measured shape's terms are each carried separately, so a reader can see which one
+    // produced the bound rather than being handed the bound alone.
+    let path = scratch("corr_measured");
+    let written = fixture("run-C");
+    written.write(&path).expect("invariant: the artifact writes");
+    let read = Artifact::read(&path, "run-C").expect("the measurement parses");
+    let Correlation::Correlated(c) = read.header.correlation else {
+        panic!("the fixture's measured correlation came back as a refusal");
+    };
+    assert_eq!(c.offset_ns, -1_234_567_890_123, "a large negative offset must survive");
+    assert_eq!((c.bracket_ns, c.driver_ns), (141, 88));
+    assert_eq!((c.accepted, c.rejected, c.epoch), (29, 3, 1));
+    assert_eq!((c.drift_ns, c.span_ns), (-57, 2_016_000_000));
+    assert_eq!(c.max_deviation_ns(), 141, "the bound is the max of the two terms");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// **Rung 9, the RED.** A `cpu_gpu_offset` this reader does not understand is a MALFORMED file,
+/// never a neighbouring reason and never a silent zero.
+///
+/// The concrete trap: `UNCORRELATED` on its own — D14's prose spelling, without the parenthesised
+/// reason this writer emits — is exactly what a hand-written or older file would carry, and
+/// mapping it onto `Unsupported` would report a device capability nobody probed.
+#[test]
+fn an_unreadable_correlation_word_is_malformed_not_a_guess() {
+    let path = scratch("corr_bad");
+    let written = fixture("run-D");
+    let text = written.render().replace(
+        "cpu_gpu_offset = \"-1234567890123\"",
+        "cpu_gpu_offset = \"UNCORRELATED\"",
+    );
+    std::fs::write(&path, text).expect("the scratch file is writable");
+
+    match Artifact::read(&path, "run-D") {
+        Err(ArtifactError::Malformed { why, .. }) => {
+            assert!(
+                why.contains("cpu_gpu_offset"),
+                "the refusal must name the key it refused, got {why:?}"
+            );
+        }
+        other => panic!(
+            "a bare `UNCORRELATED` must be refused, not interpreted. Got {other:?} -- which means \
+             an unknown word reached a reader as if it were a known one."
+        ),
+    }
     let _ = std::fs::remove_file(&path);
 }
 

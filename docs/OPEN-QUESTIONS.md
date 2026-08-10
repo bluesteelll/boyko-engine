@@ -1373,3 +1373,72 @@ claim path's Miri and property legs are unaffected and still planned.
     what a `--test-threads` bound or a per-target serial marker would address.
   `CLAUDE.md`'s build-command block now carries the flag and the reason.
 - **`.claude/settings.local.json` is dirty** from earlier sessions and is deliberately never staged.
+
+## Rung 9 — `resolve`'s session check refuses every real leg pair, and reports it as `EpochBreak`
+
+**Found while wiring rung 9's correlation, which gives `clock_epoch` a real meaning in this tree for
+the first time. Not introduced by rung 9 — surfaced by it.**
+
+`crates/boyko_app/src/profiling/contrast.rs`'s `LegSummary` carried a field named `clock_epoch`
+holding `(header.session_lo, header.session_hi)` — a `SessionId`, not
+`boyko_diag::clock::clock_epoch()`. Rung 9 renamed it to `session`, because the artifact now carries
+a real `cpu_gpu_epoch` and two different things would otherwise have shared one name in one module.
+The rename is done. **Two things about the check it feeds are not, and both are the owner's call:**
+
+1. **The refusal reports `NotResolvedReason::EpochBreak` for a SESSION difference.** That is
+   defensible in spirit — `clock_epoch()` is a per-process counter, so "both at epoch 0" from two
+   processes compares two numbers that mean nothing to each other — but the reason word names
+   something the check does not test. `G13`'s sibling clause pins the word `EpochBreak`, so
+   renaming it is corpus surface, not a local edit.
+
+2. ⚠️ **On real inputs the check refuses unconditionally.** MEASURED: `resolve` and
+   `LegSummary::from_artifact` have **no caller outside `contrast.rs`'s own tests** — rung 8 shipped
+   the comparator to *license* later verdicts, not to serve one — and every leg pair a real harness
+   would build today comes from two spawned child processes (`vg_decidability_floor.rs`'s protocol
+   is seven processes per condition). Two processes have two session ids by construction, so the
+   first production consumer of `resolve` will find that it returns `NotResolved { EpochBreak }` for
+   every pair it is ever given. The existing tests do not catch this because both legs are hand-set
+   to the same value.
+
+**What a fix would have to decide** (not decided here): whether cross-process legs are comparable at
+all. If they are — and the whole floor protocol assumes so, since it pools seven sessions — then the
+check is wrong as written and the real guard is something else (same `workload_tag`, same box, same
+`clock_epoch` *within* each artifact). If they are not, then the floor protocol and this check
+contradict each other and one of them is the error.
+
+## Rung 9 — the per-frame ring is now TWO deferrals pointing at one mechanism
+
+The correlation is published once per window with a measured 173 ppm drift across it
+(`Correlated::deviation_at_ns` interpolates). Rung 8's per-zone `vkCmd*` counters reach the printed
+census but not the artifact, for a structural reason of the same shape (the witness resets each
+frame while `retire` yields a frame recorded ~4 frames earlier). Both want a per-frame channel that
+does not reduce to medians — which is also what the owner's original ask needs ("break a frame down
+by system and pass, catch per-frame spikes"). Recorded so it is built once rather than twice.
+
+## The `hwrt` feature leg does not COMPILE — pre-existing, found by rung 9's clippy sweep
+
+**MEASURED, and proved not to be this campaign's:** `cargo clippy -p boyko-app --lib --features
+boyko_rhi_vulkan/hwrt` fails with
+
+```
+error[E0063]: missing fields `atrous_layout_denoise_hwrt`, `motion_cam_ubo_ring`, `mv_bind_group`
+and 21 other fields in initializer of `boyko_rhi_vulkan::present::GBufferScene<'_>`
+    --> crates\boyko_app\src\gpu_scene\mod.rs:6298:25
+```
+
+Twenty-four missing fields. Confirmed pre-existing by `git stash`ing every rung-9 source change and
+re-running: **identical error on the untouched tree at `71085737`.**
+
+**Why nothing caught it.** `hwrt` is `default = false`, and every gate in this tree —
+`cargo check --workspace --all-targets`, the clippy gate, the test sweep — runs the DEFAULT feature
+set. The leg is never built, so it can rot without turning anything red. This is the same shape as
+the two findings already recorded above (a target ordered behind a known-red one; a virtual manifest
+type-checking a subset): **a configuration nothing builds is a configuration nothing gates.** Rung 8
+recorded that lesson for `profiling-alloc` and fixed it by making both configurations buildable;
+`hwrt` is the larger instance of it and has been un-built for long enough that the drift is
+twenty-four fields wide.
+
+**Not fixed here.** It is unrelated to rung 9, it needs `GBufferScene`'s twenty-four `hwrt` fields
+understood one at a time, and guessing at them would be worse than the current honest break. **Owner
+call:** repair the leg and add it to the gate set, or state that `hwrt` is dormant and stop
+implying otherwise.

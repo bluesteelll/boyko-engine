@@ -1136,6 +1136,74 @@ impl RhiDevice<Vulkan> for VulkanContext {
         self.device_caps().host_query_reset
     }
 
+    fn calibrated_timestamps_supported(&self) -> bool {
+        // The ENABLED contract, carried by the ONE boot probe that also decided whether the
+        // extension string went into `VkDeviceCreateInfo` and whether the entry point was loaded.
+        // Reading the cap rather than `device_fns().get_calibrated_timestamps.is_some()` would be
+        // a second source for one fact; `sample_device_clock` below checks the pointer because it
+        // needs the pointer, not because it doubts the cap.
+        self.device_caps().calibrated_timestamps
+    }
+
+    fn sample_device_clock(&self) -> Result<boyko_rhi::DeviceClockSample, VulkanError> {
+        let Some(get_calibrated) = self.device_fns().get_calibrated_timestamps else {
+            return Err(VulkanError::Rhi(boyko_rhi::RhiError::unsupported(
+                "sample_device_clock",
+            )));
+        };
+
+        let info = crate::ffi::VkCalibratedTimestampInfoExt {
+            s_type: crate::ffi::VkStructureType::CalibratedTimestampInfoExt,
+            p_next: core::ptr::null(),
+            // The DEVICE domain alone. The host domains are declared in `ffi.rs` and never
+            // requested: this engine's CPU axis is `rdtsc`, not `CLOCK_MONOTONIC` or QPC, so a
+            // host-domain stamp would need a second, uncalibrated conversion to reach the axis the
+            // offset is expressed in. Bracketing with our own clock measures that relation
+            // directly instead of estimating it twice.
+            time_domain: crate::ffi::VK_TIME_DOMAIN_DEVICE_EXT,
+        };
+        let mut device_ticks: u64 = 0;
+        let mut driver_max_deviation_ns: u64 = 0;
+
+        // The bracket. Nothing may sit between these reads and the call but the call — no
+        // allocation, no logging, no `Result` mapping — because everything that does widens the
+        // interval this rung publishes as its own uncertainty. The error mapping is deliberately
+        // AFTER `cpu_ticks_after`.
+        let cpu_ticks_before = boyko_diag::clock::ticks();
+        // SAFETY: `get_calibrated` is `vkGetCalibratedTimestampsEXT` resolved from THIS device
+        //   (`load_device_fns`), and it is `Some` only when the extension was enabled at device
+        //   creation — the same single probe gates both. `info` is one fully-initialised
+        //   `#[repr(C)]` element whose size/align are const-asserted against the C ABI, and the
+        //   count passed is exactly 1, so the driver reads one element and never strides past it.
+        //   `device_ticks` and `driver_max_deviation_ns` are valid out-pointers for one `u64`
+        //   each; all three locals outlive the call.
+        let raw = unsafe {
+            (get_calibrated)(
+                self.device(),
+                1,
+                &info,
+                &mut device_ticks,
+                &mut driver_max_deviation_ns,
+            )
+        };
+        let cpu_ticks_after = boyko_diag::clock::ticks();
+
+        let result = crate::ffi::VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(VulkanError::Vk("vkGetCalibratedTimestampsEXT", result));
+        }
+
+        Ok(boyko_rhi::DeviceClockSample {
+            cpu_ticks_before,
+            cpu_ticks_after,
+            // Masked HERE, so this value and a zone's `begin_ticks` come off the seam on the same
+            // axis. A caller that had to remember to mask one of two device-tick sources would
+            // eventually not.
+            device_ticks: device_ticks & self.device_caps().timestamp_mask(),
+            driver_max_deviation_ns,
+        })
+    }
+
     // ===== HW-RT ACCELERATION-STRUCTURE VERBS (rung R2a-1; `feature="hwrt"` overrides) =====
     // Each delegates to a `crate::accel` inherent helper (the real `vkGet*`/`vkCreate*` FFI).
     // Present ONLY under `hwrt`; a default build inherits the `#[cold]` erroring defaults.

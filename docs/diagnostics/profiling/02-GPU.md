@@ -277,6 +277,64 @@ unmeasured offset, artifact field `cpu_gpu_offset = UNCORRELATED`.
 `min_deviation × 3/2`, recalibration each fold, `max_deviation_ns` published with every correlated
 number.
 
+### ✅ SHIPPED at rung 9 — and four things this specification did not anticipate
+
+`crates/boyko_app/src/profiling/correlate.rs` is the sampler;
+`crates/boyko_rhi/src/device.rs`'s `sample_device_clock` + `calibrated_timestamps_supported` are the
+seam; `DeviceCaps::calibrated_timestamps` carries the ENABLED-not-advertised contract;
+`crates/boyko_rhi_vulkan/tests/calibrated_timestamp_probe.rs` is the hardware probe.
+
+**1. ⚠️ Tier 1 was never actually shipped.** This section, and `00-GOAL-TARGETS.md`'s "Where did the
+frame go?" row, both specify the v1 artifact field `cpu_gpu_offset = UNCORRELATED`. **MEASURED
+before rung 9 began: no such field existed.** A repo-wide grep for `cpu_gpu_offset` returned four
+documentation lines and one module-doc mention, and no key, no writer, no reader. Every artifact
+written between rung 7 and rung 9 was silent about the two axes — so the declaration that was
+supposed to stop a reader from mixing them was prose only. Rung 9 ships both tiers: the field exists
+now in every artifact, and it states either the refusal or the number.
+
+**2. The host time domain is NOT requested, and that is what makes the number honest.** The
+extension offers `VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_EXT` on Windows, and pairing it with the
+device domain is the textbook use. This engine cannot: `boyko_diag::clock::ticks()` is **`rdtsc`**,
+not QPC, so a QPC stamp would need a second conversion to reach the axis the offset is expressed in
+— and by this section's own rule that second conversion would be a fabrication. The sampler
+therefore requests `VK_TIME_DOMAIN_DEVICE_EXT` **alone** and brackets the call between two
+`clock::ticks()` reads. The bracket's width IS the uncertainty, on the axis actually used, measured
+rather than claimed.
+
+**3. The driver's own `maxDeviation` is informational, and MEASURED to be so.** With a single
+requested domain it bounds the spread of one sample against itself. On this box it comes back as
+**1 ns** on every probe while the real brackets are hundreds to thousands of times wider. It is
+carried in the artifact as `cpu_gpu_driver_ns` beside `cpu_gpu_bracket_ns`, and D14's
+`max_deviation_ns` is the **max of the two**, derived in `Correlated::max_deviation_ns` and
+deliberately NOT written as a third key — a stored maximum is a value obliged to agree with two
+others.
+
+**4. "Recalibration each fold" is not enough for a one-fold artifact — and the gap is 27 000×.**
+This artifact has exactly one window, so "recalibrate each fold" and "correlate once at arm" are the
+same act, which would leave the offset's validity across hundreds of frames unstated. Rung 9
+therefore correlates a **second** time at window end and publishes the difference. The first real
+240-frame window on this box:
+
+```
+cpu_gpu_offset     = "-1785343230668569088"
+cpu_gpu_bracket_ns = 11              <- the sampling bound
+cpu_gpu_driver_ns  = 1
+cpu_gpu_probes     = 15              <- accepted
+cpu_gpu_rejected   = 17              <- MORE THAN HALF the probes were preempted
+cpu_gpu_epoch      = 0
+cpu_gpu_drift_ns   = 299776          <- over
+cpu_gpu_span_ns    = 1731151495         = 173 ppm
+```
+
+The sampling bound is **11 ns**; the two axes moved **300 µs** apart over 1.73 s. A consumer placing
+a zone from the end of that window using the sampling bound alone would have been wrong by four
+orders of magnitude — and 300 µs is ~2 % of a 60 Hz frame, so it is not a rounding matter.
+`Correlated::deviation_at_ns` is the one interpolation, so there is one place to get it wrong.
+
+The **17-of-32 rejection rate** is the second measured vindication: on an ordinary desktop, over
+half the probes are interrupted. A sampler that averaged all thirty-two — the obvious
+implementation — would have published an offset built mostly from preempted samples.
+
 **Why defer.** Every question the audit found being asked is within-domain. The Khronos problem
 statement is why it cannot be faked: core Vulkan timestamps *"cannot be compared even across
 separate submits within the same run of an application, as power management events can reset the
@@ -290,7 +348,10 @@ cross-domain correlation v1 offers.** Because `boyko_diag::clock` is one counter
 `clock_epoch` for both subsystems, a log record and a CPU zone are on the *same* axis — a reader can
 place a log line inside the zone it happened in, exactly, with no offset and no estimate. That is a
 genuine v1 capability and it costs nothing beyond the shared crate. It does **not** extend to the
-GPU axis, which stays `UNCORRELATED` until v1.1.
+GPU axis, which stayed `UNCORRELATED` until v1.1 — shipped at rung 9, above. The contrast between
+the two remains instructive: the CPU↔log correlation is exact and free because one crate owns one
+counter, while the CPU↔GPU one needs a device extension, thirty-two probes, a rejection threshold
+and a drift term to reach a bound of eleven nanoseconds.
 
 ---
 

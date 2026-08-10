@@ -589,6 +589,13 @@ pub enum VkStructureType {
     /// above. vulkan_core.h:
     /// `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES = 1000261000`.
     PhysicalDeviceHostQueryResetFeatures = 1_000_261_000,
+    /// `VkCalibratedTimestampInfoEXT` — one entry of the domain array
+    /// `vkGetCalibratedTimestampsEXT` reads (profiling rung 9). Unlike the two feature structs
+    /// above it is never chained into a `pNext`: it is an ARRAY element, one per requested time
+    /// domain, and the driver only reads it. vulkan_core.h:
+    /// `VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT = 1000184000` (extension 185, so the
+    /// block base is `1000000000 + 184 * 1000`).
+    CalibratedTimestampInfoExt = 1_000_184_000,
     /// `VkDescriptorSetLayoutBindingFlagsCreateInfo` (T4 bindless) — chained into
     /// `VkDescriptorSetLayoutCreateInfo.pNext` to declare the PARTIALLY_BOUND /
     /// UPDATE_AFTER_BIND / VARIABLE_DESCRIPTOR_COUNT flags per binding (the bindless
@@ -871,6 +878,34 @@ pub const VK_QUERY_RESULT_WAIT_BIT: VkFlags = 0x0000_0002;
 /// staging buffer, which is how a stale byte becomes an availability answer.)
 pub const VK_QUERY_RESULT_WITH_AVAILABILITY_BIT: VkFlags = 0x0000_0004;
 
+// --- Profiling rung 9 — `VK_EXT_calibrated_timestamps` time domains. ---
+//
+// `VkTimeDomainEXT` is a plain C enum; this file's idiom for one is a named `i32` const with the
+// consuming field typed `i32` (see `VK_PRESENT_MODE_*` / `VK_QUERY_TYPE_TIMESTAMP` above), NOT a
+// Rust `enum`. That is deliberate here as well as elsewhere: the driver WRITES a domain array
+// through `vkGetPhysicalDeviceCalibrateableTimeDomainsEXT`'s out-pointer, and a Rust `enum` whose
+// variants do not cover every value the driver may write would make that write UB. An `i32`
+// cannot be given an invalid value.
+
+/// `VK_TIME_DOMAIN_DEVICE_EXT` — the GPU's own timestamp counter, the SAME axis
+/// `vkCmdWriteTimestamp` writes into a query pool. The only domain this engine ever requests.
+pub const VK_TIME_DOMAIN_DEVICE_EXT: i32 = 0;
+/// `VK_TIME_DOMAIN_CLOCK_MONOTONIC_EXT` — POSIX `CLOCK_MONOTONIC`. Named for completeness;
+/// **never requested** (see [`VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_EXT`]).
+pub const VK_TIME_DOMAIN_CLOCK_MONOTONIC_EXT: i32 = 1;
+/// `VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_EXT` — POSIX `CLOCK_MONOTONIC_RAW`. Named for
+/// completeness; never requested.
+pub const VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_EXT: i32 = 2;
+/// `VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_EXT` — Windows' `QueryPerformanceCounter`.
+///
+/// **Named, and deliberately never requested.** This engine's CPU axis is `rdtsc`
+/// (`boyko_diag::clock::ticks`), not QPC, so a QPC stamp would have to be converted to the TSC
+/// axis by a second, uncalibrated correlation — and D14's own rule is that an uncalibrated
+/// cross-domain offset "is not an approximation; it is a fabrication". The rung-9 sampler
+/// requests [`VK_TIME_DOMAIN_DEVICE_EXT`] alone and brackets the call with its own clock, so the
+/// deviation it publishes is one it measured on the axis it actually uses.
+pub const VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_EXT: i32 = 3;
+
 // --- Slice-1 instance / device extension names. ---
 
 /// `VK_KHR_surface` instance-extension name.
@@ -879,6 +914,14 @@ pub const VK_KHR_SURFACE_EXTENSION_NAME: &core::ffi::CStr = c"VK_KHR_surface";
 pub const VK_KHR_WIN32_SURFACE_EXTENSION_NAME: &core::ffi::CStr = c"VK_KHR_win32_surface";
 /// `VK_KHR_swapchain` device-extension name.
 pub const VK_KHR_SWAPCHAIN_EXTENSION_NAME: &core::ffi::CStr = c"VK_KHR_swapchain";
+/// `VK_EXT_calibrated_timestamps` device-extension name (profiling rung 9).
+///
+/// **Never promoted to core** — unlike `hostQueryReset` (rung 4), which is a Vulkan 1.2 feature
+/// bit and therefore needs no extension string. This one is the `hwrt` shape: a string in
+/// `VkDeviceCreateInfo` *and* a `vkGetDeviceProcAddr` entry point, both conditional on the
+/// device advertising it.
+pub const VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME: &core::ffi::CStr =
+    c"VK_EXT_calibrated_timestamps";
 
 // --- HW-RT rung R2a-1 — ray-query device-extension names + AS buffer-usage /
 //     build-barrier constants (gated `hwrt`: absent from the default/golden build). ---
@@ -2856,6 +2899,19 @@ pub struct VkPhysicalDeviceHostQueryResetFeatures {
     pub host_query_reset: VkBool32,
 }
 
+/// `VkCalibratedTimestampInfoEXT` — one requested time domain (profiling rung 9).
+///
+/// Passed as an ARRAY to `vkGetCalibratedTimestampsEXT`, one element per domain, and READ by the
+/// driver only. `p_next` is `*const c_void` (not `*mut`) because this struct is input-only —
+/// unlike the two feature structs above, which the driver also writes through on the query pass.
+#[repr(C)]
+pub struct VkCalibratedTimestampInfoExt {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    /// A `VkTimeDomainEXT` — see the `VK_TIME_DOMAIN_*_EXT` constants.
+    pub time_domain: i32,
+}
+
 #[repr(C)]
 pub struct VkPhysicalDeviceDescriptorIndexingFeatures {
     pub s_type: VkStructureType,
@@ -2952,6 +3008,12 @@ const _: () = assert!(core::mem::align_of::<VkPhysicalDeviceDescriptorIndexingFe
 // enable pass, so the layout is pinned exactly like its siblings above.
 const _: () = assert!(core::mem::size_of::<VkPhysicalDeviceHostQueryResetFeatures>() == 24);
 const _: () = assert!(core::mem::align_of::<VkPhysicalDeviceHostQueryResetFeatures>() == 8);
+// Profiling rung 9: the same 16-byte sType+pNext head + one `i32` domain (4 bytes), rounded up to
+// the 8-byte alignment = 24. READ by the driver as an array element, so a wrong SIZE is worse than
+// a wrong field: the driver strides by `sizeof(VkCalibratedTimestampInfoEXT)` across OUR array and
+// would read the second element from the wrong offset — a garbage domain enum, not a Rust error.
+const _: () = assert!(core::mem::size_of::<VkCalibratedTimestampInfoExt>() == 24);
+const _: () = assert!(core::mem::align_of::<VkCalibratedTimestampInfoExt>() == 8);
 // T4 bindless: both `p_next`-chained structs are READ by the driver (we author every
 // byte), but a wrong field ORDER still misfeeds the driver a garbage count/pointer
 // (a real OOB-read hazard, not just a Rust-side type error) — pinned like every other
@@ -3788,6 +3850,54 @@ pub type PfnVkResetQueryPool = unsafe extern "system" fn(
     first_query: u32,
     query_count: u32,
 );
+
+/// `PFN_vkEnumerateDeviceExtensionProperties` — the device-extension presence query
+/// (Vulkan 1.0 core; `p_layer_name` null to query the device's own extensions).
+///
+/// **UNGATED, and that is the point.** It was declared inside the `hwrt`-only `accel_ffi`
+/// module while ray query was its only caller; profiling rung 9 is a second caller that exists
+/// in every build, and two declarations of one ABI is the shape this tree has already paid for
+/// elsewhere. One declaration, two callers.
+pub type PfnVkEnumerateDeviceExtensionProperties = unsafe extern "system" fn(
+    physical_device: VkPhysicalDevice,
+    p_layer_name: *const core::ffi::c_char,
+    p_count: *mut u32,
+    p_properties: *mut VkExtensionProperties,
+) -> i32;
+
+/// `PFN_vkGetPhysicalDeviceCalibrateableTimeDomainsEXT` (profiling rung 9) — which time domains
+/// this physical device can sample together.
+///
+/// INSTANCE scope (`vkGetInstanceProcAddr`), so it resolves *before* the logical device exists —
+/// which is what makes the "query before request" precedent applicable: the extension string is
+/// only appended to `VkDeviceCreateInfo` after this call has confirmed
+/// [`VK_TIME_DOMAIN_DEVICE_EXT`] is among the answers.
+///
+/// Two-call idiom: `p_time_domains` null to get the count, then a second call to fill.
+pub type PfnVkGetPhysicalDeviceCalibrateableTimeDomainsExt = unsafe extern "system" fn(
+    physical_device: VkPhysicalDevice,
+    p_time_domain_count: *mut u32,
+    p_time_domains: *mut i32,
+) -> i32;
+
+/// `PFN_vkGetCalibratedTimestampsEXT` (profiling rung 9) — samples `timestamp_count` clocks
+/// "as close together as the implementation can", and reports how close that was.
+///
+/// DEVICE scope, and resolvable **only** when `VK_EXT_calibrated_timestamps` was enabled at
+/// device creation — which is why the loaded pointer is an `Option` on the device command table
+/// rather than a `?`-loaded required entry like its timestamp-query siblings.
+///
+/// `p_timestamps` receives `timestamp_count` values, one per element of `p_timestamp_infos`.
+/// `p_max_deviation` receives the driver's own bound, in NANOSECONDS, on how far apart the
+/// samples were taken. With a single requested domain that bound says nothing cross-domain — the
+/// rung-9 sampler therefore treats it as informational and publishes its own measured bracket.
+pub type PfnVkGetCalibratedTimestampsExt = unsafe extern "system" fn(
+    device: VkDevice,
+    timestamp_count: u32,
+    p_timestamp_infos: *const VkCalibratedTimestampInfoExt,
+    p_timestamps: *mut u64,
+    p_max_deviation: *mut u64,
+) -> i32;
 
 /// `PFN_vkCmdBeginRendering` (Vulkan 1.3 core dynamic rendering).
 pub type PfnVkCmdBeginRendering = unsafe extern "system" fn(

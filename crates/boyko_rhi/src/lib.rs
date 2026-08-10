@@ -44,6 +44,7 @@ pub use descriptor::{
     AsBuildEntry, AsBuildSizes, AsGeometryDesc, AsIndexType, AsKind, BarrierDesc, BufferBarrier,
     BufferCopy,
     BufferDesc, BufferImageCopy, ComputePipelineDesc, DepthAttachment, DepthBias,
+    DeviceClockSample,
     GraphicsPipelineDesc, ImageBarrierDesc, ImageBlitDesc, ImageSubresourceRange, QueryPoolDesc,
     RenderArea, RenderingAttachment, RenderingDesc, SpecConstant, VertexAttribute,
     VertexBufferLayout, Viewport,

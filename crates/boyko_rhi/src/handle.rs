@@ -612,6 +612,26 @@ mod tests {
         );
     }
 
+    /// Profiling rung 9: the cross-domain clock seam's two verbs, pinned to their refusing
+    /// defaults.
+    ///
+    /// The `bool` half matters more here than it does for `host_query_reset`. That one's `true`
+    /// would send a caller down a path that then *errors*; this one's `true` would send a caller
+    /// down a path that then errors AND make the profiler print a correlated `cpu_gpu_offset` for
+    /// a device it never sampled — a fabricated cross-domain number, which is the exact thing
+    /// D14 refuses to produce. The default is the refusal.
+    #[test]
+    fn the_clock_seam_defaults_to_uncorrelated_rather_than_to_a_number() {
+        assert!(
+            !MockDevice.calibrated_timestamps_supported(),
+            "a backend with no device must not claim it can sample one's clock"
+        );
+        let err = MockDevice
+            .sample_device_clock()
+            .expect_err("invariant: MockDevice overrides no sampler");
+        assert_eq!(err, RhiError::Unsupported("sample_device_clock"));
+    }
+
     // ===== Registry behavioral tests =====
 
     #[test]

@@ -142,7 +142,7 @@ flag-off legs on the logging side and by GJ1's control leg here.
 | **7 (NOT purely subtractive — MEASURED; see "What rung 7 must BUILD before it can subtract")** | **First: `reduce.rs` + `artifact.rs` + a reader** (moved here from `:143`). Then delete `gpu_timing.rs` (713 lines), the runner harness bodies and the statistics helpers (**1381 lines, 31 % of `runner.rs`**) and the `VB-P1d`/`VB-P4` print sites — **ELEVEN `println!`s, not four**: five in `print_vb_bench_summary` (`runner.rs:3224`, `:3231`, `:3236`, `:3256`, `:3272`) and six in `print_sv0_bench_summary` (`:3837`, `:3850`, `:3862`, `:3871`, `:3879`, `:3885`). Four is right as a WORK ITEM only because both functions are deleted whole; it is wrong as a census, and a census is what `G24`'s grep performs. **And migrate the surviving five stdout consumers to the artifact** (S1; list below — `vb_bench_totality_gate.rs` is deleted, not migrated, see the list's note) | the post-rung `rg` gate **plus the S1 stdout gate (G24)** | **NOT "one commit, green before and after" as written** — the build half has no caller until the reader's round-trip test exists, so the rung lands as build-then-subtract |
 | **7b (NEW — S1)** | **Floor re-measurement on the artifact channel.** Re-run A6's protocol (7 processes × 3 repetitions) reading the artifact instead of stdout; publish `docs/PROFILING-FLOOR.md` with the new `WorkloadTag`, all three repetition floors, and `FLOOR_REDUCTION = Max` | **G3a's reduction RED** | needs rung 7's channel; blocks nothing but *licenses* rung 8's verdicts |
 | **8** | `Floor`/`Twin`/`resolve` + `NotResolvedReason`, present mode (**labelling only if `Immediate` is unsupported — D12**), counters at `vkCmd*` sites, optional `profiling-alloc`. ⚠️ **`WindowReducer` and the TOML artifact MOVED TO RUNG 7** — `03:477-478` says so in the reducer's own words (*"it is what lets rung 7 delete the stdout measurement channel, and it is why `vg_decidability_floor.rs` and its five siblings must be migrated in the same commit"*), `:142` calls the channel "rung 7's", and `G24` is annotated rung 7 while requiring a reader that refuses a stale artifact — a green leg that needs a writer. This row was the ONLY line assigning them to rung 8. `G4c` and the `NotResolvedReason` round-trip therefore become additions to an existing writer rather than its first caller | **G3a, G3b, G6, G13, G4c (the artifact clause), G25** | additive |
-| **9 (v1.1)** | `VK_EXT_calibrated_timestamps` + rejection sampler; `cpu_gpu_offset` becomes a number with `max_deviation_ns` | — | additive |
+| **9 (v1.1)** *(**SHIPPED**)* | `VK_EXT_calibrated_timestamps` + rejection sampler; `cpu_gpu_offset` becomes a number with `max_deviation_ns`. **Plus what the row did not anticipate:** tier 1's field had never been written at all, the host time domain cannot be used (this engine's CPU axis is `rdtsc`, not QPC), the driver's `maxDeviation` is informational at one domain, and one fold is not enough — the offset drifts 173 ppm, so a second correlation at window end publishes it. Schema 7 → 8 | **the sampler's own five REDs** (acceptance arm, offset sign, seam-failure count, unknown wire word, drift-free bound); no corpus gate was specified | additive; goldens untouched (a `pNext`-free extension string records no commands) |
 | **10** | `dyn_registry.rs`: `DYN_DESCS`/`DYN_NAMES` static arenas + `SyncCells`, `USER_ID_NEXT`, `register_zone`, `DynZoneHandle`, `zone_dyn!`/`counter_dyn!`/`gauge_dyn!`, `zone_dyn_open`/`close` | **G11 (user half), G17, G20, G22b (`DYN_DESCS`/`DYN_NAMES`), G23b (the same two statics added to the residency sum — and the `MAX_USER_BUDGET` RED, which is not showable before this rung)** | purely additive; fold/store already index by `ZoneId` |
 | **11** | `ecs_control.rs`: `ProfilingScopeEnabled` + `ProfilingScope`, `register_scope`, the **fold-step projection** (A8), the `Commands` write path, `ProfiledZone`, the `latency()` table | **G12** | additive; the mask exists from rung 1 |
 | **12** | `lifetime.rs` + `hist.rs`: retention-tier-B accumulators (always on when armed) and retention-tier-C histograms (opt-in) | **G16, G18** | additive; both fold at the end of an existing fold pass |
@@ -924,8 +924,9 @@ rung while its neighbours did, and it is a multi-rung union whose `stream.rs` th
 `docs/diagnostics/profiling/` + `SEAM.md` returns **zero**. What is actually specified is:
 `schema_version` on a *"flat TOML"* (`03:144-145`), `p95_lo`/`p95_hi` (`03:484-485`), the measured
 quantum trio (`03:165`, `03:283-285`), `sum = NOT_VALID (mixed stage)` (`01:496`),
-`cpu_gpu_offset = UNCORRELATED` (`02:259-260`), *"per-zone rows"* (`:179`) and *"the artifact's label
-census"* (`:181`). Everything else a consumer needs — median/mean/p95 as named fields, `n`,
+`cpu_gpu_offset = UNCORRELATED` (in `02-GPU.md`'s D14 — ⚠️ **and this one was specified and never
+built**: the key did not exist in any artifact until rung 9, which shipped both the refusal and the
+number), *"per-zone rows"* (`:179`) and *"the artifact's label census"* (`:181`). Everything else a consumer needs — median/mean/p95 as named fields, `n`,
 `begin_off_ns`/`end_off_ns`, the per-zone label, the VB-P1d leg fields, the regime provenance, the
 whole SV0 S1.5 block — is **SILENT**. So is the reader: no parser is named, placed, or given a
 signature anywhere.
@@ -1638,7 +1639,12 @@ one; that distinction is the whole of the refusal, so defaulting it away would d
 **RED, run:** revert the derivation to `path × legs` ⇒ *"the flat and froxel legs of the floor
 experiment produced the SAME workload tag … flat: `deferred_both`, froxel: `deferred_both`"*.
 **MEASURED on a live run:** `workload_tag = "deferred_both#99f4482e"`, `content_tag = "n14_kronecker"`,
-`schema_version = 2`.
+`schema_version = 2` **at the time of that run — the constant has since reached 8** (`3` the
+reducer's rows · `4` `stddev_ns` · `5` `[[loss]]` · `6` `present_mode` · `7` the `alloc_shim` block ·
+`8` rung 9's `cpu_gpu_offset`). The tag halves above are what this paragraph pins; the version is
+recorded as OBSERVED-THEN, not as current, because a measured line that silently ages into a claim
+about today is the failure this corpus keeps finding. `ARTIFACT_SCHEMA_VERSION`'s own doc comment
+carried exactly that rot — it said `2` for five bumps — and now carries the history instead.
 
 ⚠️ **And the schema bump found two frozen literals in the gate's own fixtures.** Both hand-written
 TOML headers said `schema_version = 1`, so after the bump they refused on the SCHEMA — the right
@@ -1655,6 +1661,15 @@ discovered late: **rung 9** is what puts CPU and GPU on one axis (`cpu_gpu_offse
 `UNCORRELATED`), and **the GPU channel currently discards its per-frame data** — `WindowReducer`
 folds every frame into medians, so a per-frame GPU view needs a channel that does not reduce, plus a
 spike trigger, since the frame ring is 121 frames ≈ 2 s at 60 fps.
+
+**Rung 9 is now done, and it sharpened the second of those two.** The per-frame channel is no longer
+only the frame viewer's prerequisite — it is also what the correlation needs to be spent well. The
+artifact publishes ONE offset per window with a measured 173 ppm drift across it, which is the
+honest thing a one-window artifact can say; a per-frame channel could carry a per-frame offset and
+retire the interpolation entirely. Two deferrals now point at the same missing mechanism: this one
+and rung 8's per-zone `vkCmd*` counters, which reach the printed census but not the artifact for the
+same structural reason (the witness resets each frame while `retire` yields a frame recorded ~4
+frames earlier). **Both are one ring, and it should be built once.**
 
 ### Two rung-3b decisions
 

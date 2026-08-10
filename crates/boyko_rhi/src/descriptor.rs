@@ -41,6 +41,53 @@ pub struct QueryPoolDesc {
     pub count: u32,
 }
 
+/// One host-initiated sample of the GPU's timestamp counter, taken with the CPU clock bracketed
+/// around it (profiling rung 9 —
+/// [`crate::device::RhiDevice::sample_device_clock`]).
+///
+/// # Why both ends of the bracket, and not a midpoint
+///
+/// A midpoint is an ESTIMATOR, and choosing one is the sampler's decision, not the seam's. What
+/// the seam observed is two CPU readings straddling one device reading; `after - before` is the
+/// uncertainty in placing that device reading on the CPU axis, and a caller that wants the
+/// midpoint can take it while a caller that wants to REJECT a wide bracket still can. Collapsing
+/// to a midpoint here would publish an estimate and discard the only evidence of how good it is.
+///
+/// # The clock is named, though this crate does not link it
+///
+/// [`Self::cpu_ticks_before`] / [`Self::cpu_ticks_after`] are `boyko_diag::clock::ticks()` — the
+/// engine's ONE CPU tick counter, `rdtsc` on x86-64. This crate depends on neither `boyko_diag`
+/// nor Vulkan, and names both in contracts for the same reason: a seam defines what a value
+/// MEANS, and a `u64` whose clock is unstated is a number two subsystems can read differently.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceClockSample {
+    /// `boyko_diag::clock::ticks()` read immediately BEFORE the device sample.
+    pub cpu_ticks_before: u64,
+    /// `boyko_diag::clock::ticks()` read immediately AFTER it.
+    ///
+    /// A backend guarantees `cpu_ticks_after >= cpu_ticks_before` only within one
+    /// `boyko_diag::clock::clock_epoch()`; across an epoch bump the two are incomparable and the
+    /// caller is expected to discard the sample rather than scale it.
+    pub cpu_ticks_after: u64,
+    /// The device timestamp counter, **masked to `timestampValidBits`** — the same axis and the
+    /// same masking [`crate::device::RhiDevice::read_query_pool_pairs_available`] applies, so a
+    /// zone's begin tick and this sample can be differenced directly.
+    ///
+    /// Masked means WRAPPING: differences must use `wrapping_sub` and re-mask, exactly as the
+    /// pair readers do. Vulkan guarantees at least 36 valid bits (≈68 s at 1 ns/tick), so a wrap
+    /// between a calibration and a frame that follows it inside one fold window is not reachable.
+    pub device_ticks: u64,
+    /// The implementation's own `maxDeviation`, in nanoseconds.
+    ///
+    /// **Informational, and deliberately not the published bound.** With a single requested time
+    /// domain it says nothing cross-domain: it bounds how far apart the samples of the requested
+    /// domains were, and there is only one. The bound a caller should publish is the bracket
+    /// `cpu_ticks_after - cpu_ticks_before`, which is measured on the axis the correlation is
+    /// actually expressed in.
+    pub driver_max_deviation_ns: u64,
+}
+
 // ===========================================================================
 // HW-RT rung R2a-1 — acceleration-structure POD descriptors.
 //
