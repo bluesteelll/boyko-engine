@@ -1442,3 +1442,54 @@ twenty-four fields wide.
 understood one at a time, and guessing at them would be worse than the current honest break. **Owner
 call:** repair the leg and add it to the gate set, or state that `hwrt` is dormant and stop
 implying otherwise.
+
+## Rung 10 — two corpus gates could not run as written, for two different reasons
+
+Both are recorded in `docs/diagnostics/profiling/05-LADDER-GATES.md`'s rung-10 record with their
+arithmetic. Surfaced here because each is a **decision the owner may want to take differently**, not
+merely a note.
+
+**1. `G17`'s absolute nanosecond thresholds were replaced by an A/B ratio.** The row asks for five ns
+budgets in one sitting, the tightest pair being "static-armed ≤ 12 ns" against "dyn-armed ≤ 14 ns" —
+two nanoseconds of headroom. This campaign measured its own artifact-channel floor at **6.5 %**,
+with repetitions spanning 4.7–14.3 %, on GPU passes costing microseconds. A 2 ns budget is inside
+that noise by an order of magnitude. What ships instead implements **both** variants — the shipped
+gate and the `REGISTRY[id]`-dereferencing one the row names as its RED — and interleaves them in one
+process, asserting the shipped one is not slower. MEASURED (debug): 10.89 vs 22.01 ns/iter, 2.02×.
+**If the owner wants the absolute thresholds, they need a release-profile bench harness and a
+recorded per-box floor for the ns scale** — neither exists, and inventing a threshold without one is
+how a gate comes to fail for a background process.
+
+**2. `G22b` clause 2 names a symbol that does not exist and a failure that cannot be written.** The
+clause says *"a `#[test]` declaring a `.bss` array sized from a `ProfilerConfig` value must fail
+`assert_bss_eligible` at compile time; remove the const-assert ⇒ it compiles ⇒ red."* MEASURED:
+`assert_bss_eligible` has **zero hits** in `crates/` (the symbol is `assert_zero_init_eligible`), and
+the failure it describes is impossible here — `SyncCells<T, N>` takes its extent as a **const
+generic**, so a run-time `ProfilerConfig` value cannot size one whatever any assertion says. There
+is no const-assert to remove because nothing needs one. A `trybuild` case gating the property rung 10
+DID introduce ships instead (deleting `DYN_DESCS`'s `MaybeUninit` wrapper must be `E0277`). **Owner
+call: rewrite the clause against the real symbol, or delete it as satisfied by the type system.**
+
+**And `G22b` clause 1 remains BLOCKED on the same missing tool as `G22a`** — no
+`llvm-readobj`/`objdump`/`nm` under the active `stable-x86_64-pc-windows-gnu` toolchain. Rung 10
+added two more symbols (`DYN_DESCS`, `DYN_NAMES`) to the set that probe must cover when
+`rustup component add llvm-tools` lands, so the D0 line item now unblocks four names rather than two.
+
+## Rung 10 — `G23b`'s literal RED is not producible, and no setting of the constant makes it so
+
+The row's RED: raise `MAX_USER_BUDGET` in the **shipping** profile from 512 to 3072 ⇒ +20 KiB
+`REGISTRY` and +120 KiB `DYN_DESCS` ⇒ 1 348.2 KiB crosses the 1 280 KiB budget.
+
+There is no shipping profile: the `BOYKO_PROFILE` axis is rung 14, and MEASURED, **no `build.rs`
+exists anywhere in this workspace**. So the residency gate runs at the dev row against a **16 MiB**
+budget. And the constant has a hard ceiling that is not a policy choice: zone ids are `u16`, so
+`ENGINE_ZONE_SLOTS + MAX_USER_BUDGET` must stay under `u16::MAX`, capping `MAX_USER_BUDGET` at
+~61 439. At 8 B/id in `REGISTRY` plus 24 B/id in `DYN_DESCS` that is **~1.9 MiB of growth against a
+16 MiB budget** — it does not cross, and nothing a caller can set makes it cross.
+
+An upper bound nothing can push past is a gate that cannot fail. What ships is a **composition
+identity** — domain 3 must equal the four `.bss` terms, computed independently — whose RED *is*
+producible: dropping `dyn_descs_bytes()` from the sum gives `left: 143360, right: 217088`. That is
+the claim the row's own title makes (*"this row is what puts their bytes inside the budget sum"*),
+and it is gated. **The budget clause itself stays honest but toothless until rung 14 gives it a
+shipping row to be tight against.**

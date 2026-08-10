@@ -407,11 +407,11 @@ codes! {
         "The engine zone registry is at or past 90 % occupancy"),
     (9209, W, W9209, RatePolicy::Once,  CodeStatus::Live          ,
         "Samples arrived after their frame had left the retained window and were dropped"),
-    (9210, W, W9210, RatePolicy::Once,  CodeStatus::Pending("profiling 10"),
+    (9210, W, W9210, RatePolicy::Once,  CodeStatus::Live          ,
         "The user zone budget or the dynamic name arena is exhausted"),
     (9211, W, W9211, RatePolicy::Once,  CodeStatus::Live          ,
         "The fold's working set exceeds L1d because the zone stride is too large"),
-    (9212, W, W9212, RatePolicy::Once,  CodeStatus::Pending("profiling 10"),
+    (9212, W, W9212, RatePolicy::Once,  CodeStatus::Live          ,
         "register_zone refused a dynamic zone that asked for an engine scope"),
     (9213, E, E9213, RatePolicy::Once,  CodeStatus::Live          ,
         "The profiler was re-armed with a different geometry than the live one"),
@@ -486,7 +486,9 @@ mod tests {
             (b'W', 9207), // P2  -- invariant TSC absent
             (b'W', 9208), // P3  -- engine zone registry at 90 %
             (b'W', 9209), // P2  -- late samples dropped
+            (b'W', 9210), // P10 -- user zone budget / dyn name arena exhausted
             (b'W', 9211), // P2  -- fold working set exceeds L1d
+            (b'W', 9212), // P10 -- register_zone refused an engine scope
             (b'E', 9213), // P2  -- re-arm with a different geometry
             (b'W', 9216), // P2  -- clock epoch break
         ];

@@ -143,7 +143,7 @@ flag-off legs on the logging side and by GJ1's control leg here.
 | **7b (NEW — S1)** | **Floor re-measurement on the artifact channel.** Re-run A6's protocol (7 processes × 3 repetitions) reading the artifact instead of stdout; publish `docs/PROFILING-FLOOR.md` with the new `WorkloadTag`, all three repetition floors, and `FLOOR_REDUCTION = Max` | **G3a's reduction RED** | needs rung 7's channel; blocks nothing but *licenses* rung 8's verdicts |
 | **8** | `Floor`/`Twin`/`resolve` + `NotResolvedReason`, present mode (**labelling only if `Immediate` is unsupported — D12**), counters at `vkCmd*` sites, optional `profiling-alloc`. ⚠️ **`WindowReducer` and the TOML artifact MOVED TO RUNG 7** — `03:477-478` says so in the reducer's own words (*"it is what lets rung 7 delete the stdout measurement channel, and it is why `vg_decidability_floor.rs` and its five siblings must be migrated in the same commit"*), `:142` calls the channel "rung 7's", and `G24` is annotated rung 7 while requiring a reader that refuses a stale artifact — a green leg that needs a writer. This row was the ONLY line assigning them to rung 8. `G4c` and the `NotResolvedReason` round-trip therefore become additions to an existing writer rather than its first caller | **G3a, G3b, G6, G13, G4c (the artifact clause), G25** | additive |
 | **9 (v1.1)** *(**SHIPPED**)* | `VK_EXT_calibrated_timestamps` + rejection sampler; `cpu_gpu_offset` becomes a number with `max_deviation_ns`. **Plus what the row did not anticipate:** tier 1's field had never been written at all, the host time domain cannot be used (this engine's CPU axis is `rdtsc`, not QPC), the driver's `maxDeviation` is informational at one domain, and one fold is not enough — the offset drifts 173 ppm, so a second correlation at window end publishes it. Schema 7 → 8 | **the sampler's own five REDs** (acceptance arm, offset sign, seam-failure count, unknown wire word, drift-free bound); no corpus gate was specified | additive; goldens untouched (a `pNext`-free extension string records no commands) |
-| **10** | `dyn_registry.rs`: `DYN_DESCS`/`DYN_NAMES` static arenas + `SyncCells`, `USER_ID_NEXT`, `register_zone`, `DynZoneHandle`, `zone_dyn!`/`counter_dyn!`/`gauge_dyn!`, `zone_dyn_open`/`close` | **G11 (user half), G17, G20, G22b (`DYN_DESCS`/`DYN_NAMES`), G23b (the same two statics added to the residency sum — and the `MAX_USER_BUDGET` RED, which is not showable before this rung)** | purely additive; fold/store already index by `ZoneId` |
+| **10** *(**SHIPPED**)* | `dyn_registry.rs`: `DYN_DESCS`/`DYN_NAMES` static arenas + `SyncCells`, `USER_ID_NEXT`, `register_zone`, `DynZoneHandle`, `zone_dyn!`/`counter_dyn!`/`gauge_dyn!`, `zone_dyn_open`/`close`. **Plus what the row did not anticipate:** `SyncCells` already existed, the id space was **not** split (one `NEXT_SLOT` served both partitions, so `REGISTRY` also had to grow to `ZONE_ID_SPACE`), `ZoneDesc` can never be `ZeroInit` so `DYN_DESCS` holds `MaybeUninit`, and the User-partition crate three gates need is **one line in an integration test** rather than a new workspace member | **G11 (user half), G17, G20, G22b (second clause), G23b** — four of five run with their REDs; **G22b clause 1 is BLOCKED by the same missing `llvm-readobj` that keeps `G22a` red** | purely additive AT THE CONSUMER: fold/store already index by `ZoneId` and `arm` already sizes `zone_stride` from `user_zone_budget`. Not additive in `profiling_abi`, which had one counter and now has two |
 | **11** | `ecs_control.rs`: `ProfilingScopeEnabled` + `ProfilingScope`, `register_scope`, the **fold-step projection** (A8), the `Commands` write path, `ProfiledZone`, the `latency()` table | **G12** | additive; the mask exists from rung 1 |
 | **12** | `lifetime.rs` + `hist.rs`: retention-tier-B accumulators (always on when armed) and retention-tier-C histograms (opt-in) | **G16, G18** | additive; both fold at the end of an existing fold pass |
 | **13** | `stream.rs` framed binary telemetry + header/block/`ZoneRow`/`WindowRec`, `__telemetry_reduce` with its quantile cap, rotation, failure handling; `tools/prof_decode`; session identity + `fixed_elapsed_ns` | **G15 (incl. the torn-write clause), G9 (telemetry clause), G26** | additive; the decoder is a separate binary |
@@ -360,7 +360,8 @@ here** and is stated as such at the site, in its doc page and in this row.
    remembering — `flag_code`'s exhaustive match refused to build the moment the variants appeared.
    That is what makes "every flag has exactly one paired report" a property of the build.
 
-4. **`W9208`'s threshold is an exact equality, not a range.** `NEXT_SLOT` is monotone, so the mint
+4. **`W9208`'s threshold is an exact equality, not a range.** `ENGINE_ID_NEXT` (named `NEXT_SLOT`
+   until profiling rung 10 split the id space) is monotone, so the mint
    that lands *on* 90 % is the one and only crossing; `slot == NEAR_FULL_SLOT` therefore fires once
    by construction, with no second piece of state remembering whether it already warned and nothing
    to get wrong when two threads mint concurrently.
@@ -1670,6 +1671,114 @@ retire the interpolation entirely. Two deferrals now point at the same missing m
 and rung 8's per-zone `vkCmd*` counters, which reach the printed census but not the artifact for the
 same structural reason (the witness resets each frame while `retire` yields a frame recorded ~4
 frames earlier). **Both are one ring, and it should be built once.**
+
+
+### Rung 10 SHIPPED — the dynamic registry, and four corrections the row did not anticipate
+
+`crates/boyko_diag/src/profiling_abi/dyn_registry.rs` is the registry; the id-space split is in
+`profiling_abi.rs`; `G11`'s user half is
+`crates/boyko_diag/tests/profiling_user_id_space.rs`, `G20`'s authorship half is
+`crates/boyko_ecs/tests/profiling_user_region_isolation.rs`, `G17` is
+`crates/boyko_diag/tests/profiling_dyn_zone_cost.rs`, `G22b`'s second clause is
+`crates/boyko_ecs/tests/compile_fail_zero_init/`, and `G23b` is the widened
+`crates/boyko_ecs/tests/profiling_residency.rs`.
+
+**1. `SyncCells` already existed; the id space did NOT.** The row lists `SyncCells` as rung 10's to
+build — it has been in `boyko_diag::storage` since the substrate rung, together with `ZeroInit`,
+`assert_zero_init_eligible`, `section_report` and `symbol_report`. What the row does *not* list is
+the thing that actually had to be built: **there was one counter.** `NEXT_SLOT` served both
+partitions over one 4096-slot range, so `Region` picked the ring but not the id range, and D6's
+"separate counters over disjoint ranges" existed only in prose. Rung 10 split it into
+`ENGINE_ID_NEXT` / `USER_ID_NEXT` and grew `REGISTRY` from `ENGINE_ZONE_SLOTS` to
+`ZONE_ID_SPACE = ENGINE_ZONE_SLOTS + MAX_USER_BUDGET` = 7168 entries, because user ids resolve out
+of the same table. That is why the row's "purely additive" holds at the CONSUMER — `fold`/`store`
+already index by `ZoneId`, and `arm` already computed `zone_stride` from `user_zone_budget` — and
+does not hold inside `profiling_abi`.
+
+**2. `ZoneDesc` can never be `ZeroInit`, so `DYN_DESCS` holds `MaybeUninit`.** A `ZoneDesc` carries
+a `&'static str`; all-zero bytes decode to a null reference, which is not a valid `&str`. A
+`SyncCells<ZoneDesc, N>` therefore cannot be `zeroed()` and the arena could not have been `.bss` at
+all as specified. `MaybeUninit<ZoneDesc>` can: every bit pattern is a valid `MaybeUninit<T>`. The
+obligation does not disappear, it MOVES — from the static to the writer — and the registry can
+discharge it there, because a slot is written once by the thread that reserved it and becomes
+readable only through `REGISTRY`'s `Release` store. `unsafe impl<T> ZeroInit for MaybeUninit<T>` is
+rung 10's one addition to `storage.rs`, and it carries that argument in its SAFETY comment.
+
+**3. The `User`-partition crate three gates need is ONE LINE, not a workspace member.** `G11`'s
+`[B3-fix]` and `G20`'s authorship half both require the exhausting leg to be a static
+`declare_zone!` in a crate whose root says `profiling_partition!(User)`. **An integration test IS
+its own crate root**, so `boyko_diag::profiling_partition!(User);` at the top of a `tests/*.rs` file
+makes it a real User crate — real macro, real `crate::__BOYKO_ZONE_PARTITION`, real mint. No new
+member, no test-only crate in the workspace graph. Both REDs were produced from that shape:
+
+* **`G11`** — make `mint_cold` call `mint_id()` instead of `mint_id_in(handle.desc.region)` (key the
+  partition on the macro, rev 3's defect) ⇒ *"a static `declare_zone!` in a
+  `profiling_partition!(User)` crate minted id **1**, which is inside the ENGINE range"*.
+* **`G20`** — make `ZoneGuard`'s `Drop` push to `Region::Engine` ⇒ printed evidence
+  *"4096 game zone closes, **0/64** engine samples accepted; user_overflow +0, engine_overflow
+  +3136"*. The game's runaway filled the engine's ring and the engine lost every sample it recorded.
+  ⚠️ The **measured** failure is the non-vacuity assertion, not the `engine_overflow` one — the
+  predicted-versus-measured RED location diverging for the fifth time this campaign.
+
+**4. Two of the five gates could not run as written, for two different reasons, and both are
+recorded rather than faked.**
+
+* **`G17`'s absolute nanosecond thresholds measure the box.** The row asks for five ns budgets in
+  one sitting, the tightest being "dyn-armed ≤ 14 ns" against "static-armed ≤ 12 ns" — two
+  nanoseconds of headroom, on a machine whose own artifact-channel floor this campaign measured at
+  **6.5 %** with repetitions spanning 4.7–14.3 %, on GPU passes costing *microseconds*. What runs
+  instead is the same RED as an **A/B in one sitting**: both variants implemented, interleaved over
+  eight rounds on one thread, compared against each other. MEASURED (debug profile, and the print
+  says so): shipped gate **10.89 ns/iter**, the `REGISTRY[id]`-dereferencing RED variant **22.01
+  ns/iter**, ratio **2.02×**; armed open/close 78.52 ns/iter against disarmed 16.65. A ratio is
+  robust to a box that is slow today; an absolute is not.
+* **`G22b` clause 1 is BLOCKED, clause 2 was written against symbols that do not exist.** Clause 1
+  needs the image probe, and `substrate/section-report` already MEASURED that no
+  `llvm-readobj`/`objdump`/`nm` is on PATH under the active toolchain — so it is RED for exactly
+  the reason `G22a` is, and `rustup component add llvm-tools` remains the D0 line item that unblocks
+  both. Clause 2 says *"must fail `assert_bss_eligible` at compile time; remove the const-assert ⇒
+  it compiles"*, and **two of those three things are wrong**: `assert_bss_eligible` has zero hits
+  anywhere in `crates/` (the symbol is `assert_zero_init_eligible`), and the failure it describes —
+  a `.bss` array sized from a `ProfilerConfig` value — is impossible to write here at all, because
+  `SyncCells<T, N>` takes its extent as a **const generic** and a run-time value cannot be one. The
+  clause's premise is a const-assert that does not exist because nothing needs one. What ships in
+  its place gates the property rung 10 actually introduced: the `MaybeUninit` wrapper on
+  `DYN_DESCS`, whose deletion must be a compile error (`E0277: the trait bound ZoneDesc: ZeroInit is
+  not satisfied`), as a blessed `trybuild` case.
+
+**`G23b`'s literal RED is NOT PRODUCIBLE, and the arithmetic is why.** The row says: raise
+`MAX_USER_BUDGET` in the shipping profile from 512 to 3072 ⇒ +20 KiB of `REGISTRY` and +120 KiB of
+`DYN_DESCS` ⇒ 1 348.2 KiB crosses the 1 280 KiB budget. There is no shipping profile — the
+`BOYKO_PROFILE` axis is rung 14 — so the residency gate runs at the **dev** row against a **16 MiB**
+budget, and the constant is bounded by the id space being `u16`: `MAX_USER_BUDGET` cannot exceed
+~61 439, which at 8 B/id in `REGISTRY` plus 24 B/id in `DYN_DESCS` is ~1.9 MiB of growth. **No
+setting of that constant crosses 16 MiB.** An upper bound nothing can push past is a gate that
+cannot fail, so the claim `G23b` actually adds — *"this row is what puts their bytes inside the
+budget sum"* — is asserted directly as a composition identity, and THAT red is producible: dropping
+`dyn_descs_bytes()` from the sum yields `left: 143360, right: 217088`.
+
+MEASURED, this box, dev profile: `statics` moved from **53 248 B to 217 088 B** (`LANES` 20 480 +
+`REGISTRY` 57 344 + `DYN_DESCS` 73 728 + `DYN_NAMES` 65 536 — the four terms sum exactly), and the
+armed total is **14 831 616 B** against the 16 MiB budget. `DYN_DESCS` is 24 B per descriptor here,
+not the corpus's 48: this tree's `ZoneDesc` is `&'static str` + `u32` + two `u8`s.
+
+**Two constants landed at the DEV row, on `ENGINE_ZONE_SLOTS`'s precedent:** `MAX_USER_BUDGET =
+3072` and `DYN_NAME_BYTES = 64 KiB`, both plain `const`s. The corpus's dev/shipping split
+(3072/512, 64/16 KiB) needs `crates/boyko_diag/build.rs`, which does not exist — MEASURED: there is
+**no `build.rs` anywhere in this workspace**, and `BOYKO_PROFILE` appears in `crates/` only in
+comments. One profile spelled consistently beats two spelled half each.
+
+**`W9210` and `W9212` are now `Live`**, both promoted from `Pending("profiling 10")` with emitters
+in `boyko_ecs::…::profiling::diag`. They are two codes rather than one because they carry different
+advice: `W9201` is the engine running out of slots it chose, `W9210` is a game meeting a budget the
+**host** chose, and `W9212` is a game asking for a scope it may not have — refused, never clamped.
+
+**What rung 10 does NOT deliver, stated so it is not assumed:** nothing in this engine emits a
+dynamic zone. `zone_dyn!`/`counter_dyn!`/`gauge_dyn!`/`zone_dyn_open`/`zone_dyn_close` compile and
+are gated, but the acceptance path that uses them is rung 15's overlay. And `zone_desc` still has no
+production reader — it did not before this rung either; the readers that will use it are the
+telemetry decoder (rung 13) and the overlay (rung 15).
+
 
 ### Two rung-3b decisions
 

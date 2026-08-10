@@ -3,7 +3,7 @@
 //!
 //! # Why this is its own binary, and it is not a style choice
 //!
-//! `NEXT_SLOT` is process-global and monotone: there is no way to exhaust the registry and then
+//! `ENGINE_ID_NEXT` is process-global and monotone: there is no way to exhaust the registry and then
 //! give the slots back. Run inside the crate's own test binary, this file would leave every later
 //! `declare_zone!` and every later `try_build` in that process unable to mint — nine hundred tests
 //! downstream of one that "just checks a warning". An integration test is a separate process, so

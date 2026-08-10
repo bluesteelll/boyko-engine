@@ -114,6 +114,24 @@ unsafe impl<T: ZeroInit, const N: usize> ZeroInit for [T; N] {}
 // of its own — it only removes the compiler's no-aliasing-through-shared-reference guarantee.
 unsafe impl<T: ZeroInit> ZeroInit for UnsafeCell<T> {}
 
+// SAFETY: `MaybeUninit<T>` has **no validity invariant at all** — every bit pattern, including
+// all-zero, is a valid `MaybeUninit<T>` for every `T` whatsoever. That is the type's defining
+// property, which is why this impl carries no bound on `T` while every other one above does.
+//
+// Profiling rung 10 is what needed it and is worth naming, because the need is not an
+// optimisation. `ZoneDesc` carries a `&'static str`, and a null reference is not a valid `&str`,
+// so `ZoneDesc` can never be `ZeroInit` and a `SyncCells<ZoneDesc, N>` can never be `zeroed()` —
+// the dynamic descriptor arena would have had to leave `.bss` and carry raw data in the image,
+// breaking the storage policy for a table whose whole point is to obey it. Wrapping the element
+// moves the initialisation obligation from the STATIC to the WRITER, which is where the dynamic
+// registry can actually discharge it: the slot is written once by the thread that reserved it and
+// becomes readable only through a `Release` store, so no reader can reach an uninitialised one.
+//
+// ⚠️ The obligation does not disappear, it moves. Reading a `MaybeUninit` slot that was never
+// written is UB, and nothing in this type prevents it — the argument that it cannot happen is the
+// registry's publication edge, and it lives at that call site, not here.
+unsafe impl<T> ZeroInit for core::mem::MaybeUninit<T> {}
+
 /// Reports whether `T` may back a zero-initialised `.bss` static under the storage policy.
 ///
 /// The answer is always `true` — **the assertion is the `T: ZeroInit` bound**, which is checked

@@ -507,6 +507,20 @@ pub enum DiagFlag {
     /// The engine zone registry crossed 90 % occupancy. Nothing is lost yet — this is the warning
     /// that exists so exhaustion is not the first news of it.
     ZoneRegistryNearFull = 1 << 4,
+    /// A `User`-partition crate asked for a zone id past `MAX_USER_BUDGET`, or `register_zone`
+    /// found the dynamic name arena full — profiling rung 10.
+    ///
+    /// Separate from [`Self::ZoneRegistryExhausted`] because it is a different event with a
+    /// different owner: that one is the engine running out of its own slots, which is an engine
+    /// defect; this one is a game meeting a budget the host set for it, which is a configuration
+    /// fact. Reporting both as one code would tell a host to raise a limit it does not control.
+    UserZoneBudgetExhausted = 1 << 5,
+    /// `register_zone` was handed a scope inside the engine's reserved range and refused it —
+    /// profiling rung 10.
+    ///
+    /// Not a silent clamp: a game whose zone quietly moved to another scope would be armed and
+    /// disarmed by a knob it never asked for, and the samples would look like the engine's.
+    EngineScopeRefused = 1 << 6,
 }
 
 impl DiagFlag {

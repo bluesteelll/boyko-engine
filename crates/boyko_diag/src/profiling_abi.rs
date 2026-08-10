@@ -82,6 +82,31 @@ pub const GLOBAL_TIER: ZoneTier = ZoneTier::from_raw(crate::profile::PROFILING_T
 /// Number of scopes a build can arm independently.
 pub const SCOPE_COUNT: u32 = 64;
 
+/// The first scope a `User`-partition crate may arm — profiling rung 10.
+///
+/// Scopes `0..USER_SCOPE_BASE` are the engine's. [`dyn_registry::register_zone`] **refuses** a spec
+/// below it (`W9212`) rather than clamping: a game zone quietly moved to a neighbouring scope would
+/// be armed and disarmed by a knob nobody pointed at it, and its samples would arrive interleaved
+/// with the engine's under a scope name describing neither.
+///
+/// ⚠️ **A convention for the STATIC path, an enforced rule for the dynamic one.** `declare_zone!`
+/// takes a scope *expression*, and no macro in this crate can evaluate it — so a `User` crate can
+/// still declare a static zone on scope 3. What the design's isolation actually rests on is the id
+/// space and the ring region (D6), both keyed on the declaring crate and both structural. The scope
+/// split is the narrower property that a game's arming knob does not also arm the engine's zones,
+/// and it is enforced at the one entry point that takes a scope as a run-time value. Stated rather
+/// than implied, because "scopes below 32 are the engine's" reads like a guarantee and is one only
+/// on the dynamic path.
+pub const USER_SCOPE_BASE: u32 = 32;
+
+const _: () = assert!(
+    USER_SCOPE_BASE < SCOPE_COUNT,
+    "the engine's scope range must leave a user range to refuse into"
+);
+
+/// Zones whose names come from data rather than from a macro at a call site — profiling rung 10.
+pub mod dyn_registry;
+
 /// The runtime flag word: bit *s* set means scope *s* is armed.
 ///
 /// **Its own cache line.** It is read by every surviving site on every frame and written only when
@@ -160,6 +185,34 @@ impl ZoneHandle {
 /// value for it yet, and a constant nothing reads is a value nothing can prove wrong.
 pub const ENGINE_ZONE_SLOTS: usize = 4096;
 
+/// The ceiling on ids a `User`-partition crate may mint — profiling rung 10.
+///
+/// **A cap, not a reservation.** What a session actually spends is `ProfilerConfig::user_zone_budget`
+/// (default `0`), which sizes the store's columns; this constant sizes the two `.bss` arenas and the
+/// upper half of [`REGISTRY`], and it is what a game cannot exceed no matter how it is configured.
+///
+/// Sized here rather than per profile, on [`ENGINE_ZONE_SLOTS`]'s precedent and for its reason: the
+/// `BOYKO_PROFILE` axis with its five legs is rung 14, and the corpus's dev/shipping split (3072 /
+/// 512) needs a build script that does not exist. **3072 is the DEV figure**, chosen to match
+/// `ENGINE_ZONE_SLOTS = 4096` also being the dev figure — one profile spelled consistently beats two
+/// spelled half each.
+pub const MAX_USER_BUDGET: usize = 3072;
+
+/// The whole id space: engine ids below [`ENGINE_ZONE_SLOTS`], user ids above it.
+///
+/// [`REGISTRY`]'s extent, and the reason it can stay `.bss`: both halves are compile-time constants,
+/// so no run-time value sizes it (the storage policy's rule — see [`crate::storage`]).
+pub const ZONE_ID_SPACE: usize = ENGINE_ZONE_SLOTS + MAX_USER_BUDGET;
+
+// Ids are `u16` and [`ZONE_ID_EXHAUSTED`] is `u16::MAX`, so the space must leave that value
+// unreachable. Checked rather than commented: a future budget that quietly reached it would make
+// "exhausted" and "the last user zone" the same id, and every reader downstream would resolve one
+// to the other.
+const _: () = assert!(
+    ZONE_ID_SPACE < ZONE_ID_EXHAUSTED as usize,
+    "the id space must not reach ZONE_ID_EXHAUSTED, or exhaustion aliases a real zone"
+);
+
 /// The id a zone gets when the registry is full.
 ///
 /// **Not a panic and not a silent alias.** A profiler that aborts a shipped title because it ran
@@ -169,14 +222,39 @@ pub const ENGINE_ZONE_SLOTS: usize = 4096;
 /// and the exhaustion is counted.
 pub const ZONE_ID_EXHAUSTED: u16 = u16::MAX;
 
-/// Next free slot. `.bss`-zero, so slot 0 is the first minted and an un-minted handle's `id` of 0
-/// is distinguishable only by the claimed flag below — which is why minting uses a CAS on the
-/// handle's own id rather than a bare "is it zero" test.
-static NEXT_SLOT: AtomicU16 = AtomicU16::new(1);
+/// Next free ENGINE slot, over `1..ENGINE_ZONE_SLOTS`.
+///
+/// Starts at **1**, not 0: zero is the un-minted state of a handle's own `id` field, so handing it
+/// out would make "never minted" and "minted first" indistinguishable without a second flag. That
+/// is also why minting CASes the handle's id rather than testing it against zero.
+///
+/// **Renamed from `NEXT_SLOT` at profiling rung 10**, when the user counter arrived beside it. A
+/// counter called "next" while a second one also hands out ids names nothing.
+static ENGINE_ID_NEXT: AtomicU16 = AtomicU16::new(1);
+
+/// Next free USER slot, over `ENGINE_ZONE_SLOTS..ZONE_ID_SPACE` — profiling rung 10.
+///
+/// # Why a second counter and not a second range on one counter
+///
+/// This is the whole of D6: a game exhausting its zones must not consume an id the engine was
+/// going to use. With one counter that property does not exist — the ranges would be disjoint but
+/// the *supply* would be shared, so a plugin looping `register_zone` would walk the counter past
+/// the engine's range and the engine's next `declare_zone!` would be refused. Two counters make
+/// the isolation structural rather than a matter of how far each side counts.
+///
+/// It is **one counter for both user authoring paths** (D19): a game's static `declare_zone!` and
+/// its dynamic `register_zone` draw from the same range and the same budget, because from the id
+/// space's point of view they are the same traffic. Keying on the macro instead — which rev 3 of
+/// the corpus did — puts the *recommended* game path inside the partition the design exists to
+/// protect, and is the defect `G11`'s second RED reproduces.
+static USER_ID_NEXT: AtomicU16 = AtomicU16::new(ENGINE_ZONE_SLOTS as u16);
 
 /// Registered descriptors, indexed by zone id. `.bss`, never freed, address-stable.
-static REGISTRY: [core::sync::atomic::AtomicPtr<ZoneDesc>; ENGINE_ZONE_SLOTS] =
-    [const { core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()) }; ENGINE_ZONE_SLOTS];
+///
+/// Spans the WHOLE id space, engine and user alike, so one `zone_desc(id)` resolves either without
+/// a caller having to know which half it holds. Grown from `ENGINE_ZONE_SLOTS` at profiling rung 10.
+static REGISTRY: [core::sync::atomic::AtomicPtr<ZoneDesc>; ZONE_ID_SPACE] =
+    [const { core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()) }; ZONE_ID_SPACE];
 
 /// Bytes [`REGISTRY`] occupies — the second `.bss` domain of the residency bound.
 ///
@@ -184,7 +262,7 @@ static REGISTRY: [core::sync::atomic::AtomicPtr<ZoneDesc>; ENGINE_ZONE_SLOTS] =
 /// the consumer, and on what it does and does not claim.
 #[must_use]
 pub const fn registry_bytes() -> usize {
-    size_of::<[core::sync::atomic::AtomicPtr<ZoneDesc>; ENGINE_ZONE_SLOTS]>()
+    size_of::<[core::sync::atomic::AtomicPtr<ZoneDesc>; ZONE_ID_SPACE]>()
 }
 
 /// This zone's registry id, minting one on first use.
@@ -225,33 +303,83 @@ const NEAR_FULL_SLOT: u16 = (ENGINE_ZONE_SLOTS as u16) / 10 * 9;
 /// [`LossClass::Refused`]: crate::loss::LossClass::Refused
 /// [`DiagFlag::ZoneRegistryExhausted`]: crate::loss::DiagFlag::ZoneRegistryExhausted
 pub fn mint_id() -> u16 {
-    let slot = NEXT_SLOT.fetch_add(1, Ordering::Relaxed);
-    if slot == 0 || (slot as usize) >= ENGINE_ZONE_SLOTS {
+    mint_id_in(crate::sample::Region::Engine)
+}
+
+/// The bare mint, told which half of the id space to draw from — profiling rung 10.
+///
+/// [`mint_id`] is this with `Engine` fixed, kept as the name the scheduler's per-system path
+/// already calls. A caller that has a [`ZoneDesc`] does not choose: the region is the declaring
+/// crate's, and [`zone_id`] reads it off the descriptor rather than accepting it as an argument —
+/// a partition a caller may pass is a partition a caller may get wrong.
+///
+/// Exhaustion is **non-terminal in both halves**, and the two report differently because they are
+/// different failures: an engine range that fills is an engine defect (`W9201` via
+/// [`DiagFlag::ZoneRegistryExhausted`]), while a user range that fills is a game exceeding a budget
+/// the host chose for it (`W9210` via [`DiagFlag::UserZoneBudgetExhausted`]).
+///
+/// [`DiagFlag::ZoneRegistryExhausted`]: crate::loss::DiagFlag::ZoneRegistryExhausted
+/// [`DiagFlag::UserZoneBudgetExhausted`]: crate::loss::DiagFlag::UserZoneBudgetExhausted
+pub fn mint_id_in(region: crate::sample::Region) -> u16 {
+    let (counter, limit, flag) = match region {
+        crate::sample::Region::Engine => (
+            &ENGINE_ID_NEXT,
+            ENGINE_ZONE_SLOTS,
+            crate::loss::DiagFlag::ZoneRegistryExhausted,
+        ),
+        crate::sample::Region::User => (
+            &USER_ID_NEXT,
+            ZONE_ID_SPACE,
+            crate::loss::DiagFlag::UserZoneBudgetExhausted,
+        ),
+    };
+    let slot = counter.fetch_add(1, Ordering::Relaxed);
+    if slot == 0 || (slot as usize) >= limit {
         crate::loss::record_here(crate::loss::LossClass::Refused, 0);
-        crate::loss::raise(crate::loss::DiagFlag::ZoneRegistryExhausted);
+        crate::loss::raise(flag);
         return ZONE_ID_EXHAUSTED;
     }
-    if slot == NEAR_FULL_SLOT {
+    // The near-full warning is the ENGINE range's only. The user range's exhaustion is already a
+    // configured budget being met rather than a resource quietly running out, and a second warning
+    // ahead of an expected event is noise a host cannot act on.
+    if region == crate::sample::Region::Engine && slot == NEAR_FULL_SLOT {
         crate::loss::raise(crate::loss::DiagFlag::ZoneRegistryNearFull);
     }
     slot
 }
 
-/// Slots handed out so far, for a consumer reporting occupancy.
+/// Engine slots handed out so far, for a consumer reporting occupancy.
 ///
 /// Saturating rather than wrapping at the top: past `ENGINE_ZONE_SLOTS` the counter keeps climbing
 /// (every refused mint still does its `fetch_add`), and a reader wants "full", not a number above
 /// the capacity it is being compared against.
 #[must_use]
 pub fn minted_zones() -> u16 {
-    NEXT_SLOT.load(Ordering::Relaxed).min(ENGINE_ZONE_SLOTS as u16)
+    ENGINE_ID_NEXT.load(Ordering::Relaxed).min(ENGINE_ZONE_SLOTS as u16)
+}
+
+/// User slots handed out so far — profiling rung 10.
+///
+/// Counted from the base rather than reported as a raw id, so a reader comparing it against
+/// `MAX_USER_BUDGET` does not have to know where the range starts. Saturating for
+/// [`minted_zones`]'s reason.
+#[must_use]
+pub fn minted_user_zones() -> u16 {
+    USER_ID_NEXT
+        .load(Ordering::Relaxed)
+        .min(ZONE_ID_SPACE as u16)
+        .saturating_sub(ENGINE_ZONE_SLOTS as u16)
 }
 
 /// The once-per-zone mint, out of line so the hot path is a load and a compare.
 #[cold]
 #[inline(never)]
 fn mint_cold(handle: &'static ZoneHandle) -> u16 {
-    let slot = mint_id();
+    // The DECLARING crate's region, read off the descriptor the macro built. This one line is what
+    // makes `G11`'s and `G20`'s REDs reproducible from the recommended game path: a static
+    // `declare_zone!` in a `profiling_partition!(User)` crate mints from the user counter because
+    // its descriptor says `User`, not because it used a different macro.
+    let slot = mint_id_in(handle.desc.region);
     if slot == ZONE_ID_EXHAUSTED {
         // Give every later caller the same answer, so the exhaustion is one refusal per zone
         // rather than one per call. The zone still runs; its interval still accumulates on its own
@@ -383,6 +511,17 @@ macro_rules! zone {
 pub fn scope_armed(scope: u32) -> bool {
     debug_assert!(scope < SCOPE_COUNT, "invariant: a scope index is below SCOPE_COUNT");
     ARM_MASK.bits.load(Ordering::Acquire) & (1u64 << (scope % SCOPE_COUNT)) != 0
+}
+
+/// The whole arm mask as one word — profiling rung 10.
+///
+/// [`scope_armed`] takes an index and shifts; a [`dyn_registry::DynZoneHandle`] already holds its
+/// bit, so it needs the word and not the shift. Both readers go through the same `Acquire` load, so
+/// there is one publication edge for the mask and not two.
+#[must_use]
+#[inline]
+pub fn arm_mask_bits() -> u64 {
+    ARM_MASK.bits.load(Ordering::Acquire)
 }
 
 /// Arm a scope. Runs on the enable path, never at process start.

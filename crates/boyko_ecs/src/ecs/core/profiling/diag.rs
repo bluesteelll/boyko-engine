@@ -59,7 +59,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use boyko_diag::loss::DiagFlag;
 use boyko_log::codes::{
-    E9204, E9213, OnceSite, W9201, W9203, W9207, W9208, W9209, W9211, W9216,
+    E9204, E9213, OnceSite, W9201, W9203, W9207, W9208, W9209, W9210, W9211, W9212, W9216,
 };
 use boyko_log::target::Profiling;
 use boyko_log::{error, warn};
@@ -160,6 +160,11 @@ pub const fn flag_code(flag: DiagFlag) -> Option<u16> {
         DiagFlag::LaneExhausted => Some(W9203.number()),
         DiagFlag::ZoneRegistryExhausted => Some(W9201.number()),
         DiagFlag::ZoneRegistryNearFull => Some(W9208.number()),
+        // Profiling rung 10. Two codes rather than one for a reason the corpus states as the
+        // difference between an engine defect and a configuration fact: `W9210` is a game meeting
+        // a budget the host chose, `W9212` is a game asking for a scope it may not have.
+        DiagFlag::UserZoneBudgetExhausted => Some(W9210.number()),
+        DiagFlag::EngineScopeRefused => Some(W9212.number()),
         DiagFlag::ClockUncalibrated => None,
     }
 }
@@ -185,6 +190,8 @@ pub(crate) fn report_raised(bits: u32) {
         DiagFlag::LaneExhausted,
         DiagFlag::ZoneRegistryExhausted,
         DiagFlag::ZoneRegistryNearFull,
+        DiagFlag::UserZoneBudgetExhausted,
+        DiagFlag::EngineScopeRefused,
     ] {
         if bits & flag.as_bits() == 0 {
             continue;
@@ -198,6 +205,8 @@ pub(crate) fn report_raised(bits: u32) {
             DiagFlag::LaneExhausted => report_lane_exhausted(),
             DiagFlag::ZoneRegistryExhausted => report_registry_exhausted(),
             DiagFlag::ZoneRegistryNearFull => report_registry_near_full(),
+            DiagFlag::UserZoneBudgetExhausted => report_user_budget_exhausted(),
+            DiagFlag::EngineScopeRefused => report_engine_scope_refused(),
             DiagFlag::ClockUncalibrated => {
                 debug_assert!(false, "invariant: flag_code(ClockUncalibrated) is None");
             }
@@ -287,6 +296,54 @@ pub(crate) fn report_registry_near_full() {
             "the engine zone registry is at {} of {} slots",
             boyko_diag::profiling_abi::minted_zones(),
             boyko_diag::profiling_abi::ENGINE_ZONE_SLOTS as u64
+        );
+    }
+}
+
+/// `W9210` — a `User`-partition crate's zone budget or the dynamic name arena is exhausted.
+///
+/// **The other side of `W9201`, and deliberately not the same code.** `W9201` says the ENGINE ran
+/// out of its own slots, which a host cannot act on because it does not choose that number.
+/// `W9210` says a GAME met `MAX_USER_BUDGET`, which is a number the host does choose — so the two
+/// carry different advice and reporting them as one would give a host the wrong one.
+///
+/// Profiling rung 10.
+#[cold]
+#[inline(never)]
+pub(crate) fn report_user_budget_exhausted() {
+    debug_assert_eq!(
+        flag_code(DiagFlag::UserZoneBudgetExhausted),
+        Some(W9210.number())
+    );
+    if claim(W9210.number()) {
+        warn!(
+            Profiling,
+            W9210.number(),
+            "the user zone budget or name arena is exhausted at {} of {} slots; further game \
+             zones run unregistered",
+            boyko_diag::profiling_abi::minted_user_zones(),
+            boyko_diag::profiling_abi::MAX_USER_BUDGET as u64
+        );
+    }
+}
+
+/// `W9212` — `register_zone` was asked for a scope inside the engine's reserved range.
+///
+/// The registration is **refused**, not clamped. A game whose zone silently moved to a neighbouring
+/// scope would be armed and disarmed by a knob it never asked for, and its samples would arrive
+/// interleaved with the engine's under a scope name that describes neither.
+///
+/// Profiling rung 10.
+#[cold]
+#[inline(never)]
+pub(crate) fn report_engine_scope_refused() {
+    debug_assert_eq!(flag_code(DiagFlag::EngineScopeRefused), Some(W9212.number()));
+    if claim(W9212.number()) {
+        warn!(
+            Profiling,
+            W9212.number(),
+            "register_zone refused a scope below {}; scopes under that are the engine's",
+            boyko_diag::profiling_abi::USER_SCOPE_BASE as u64
         );
     }
 }

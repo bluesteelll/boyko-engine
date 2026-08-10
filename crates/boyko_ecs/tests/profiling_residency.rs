@@ -120,8 +120,15 @@ static ALLOC: Counting = Counting;
 /// | `count` + `min` + `max` `3 × 4096 × 121 × 4` | 5 947 392 |
 /// | `label` `4096 × 121 × 1` | 495 616 |
 /// | frames + begins `121 × 32 + 121 × 8` | 4 840 |
-/// | `LANES` `80 × 256` + `REGISTRY` `4096 × 8` | 53 248 |
-/// | **total** | **≈ 14.7 MiB** |
+/// | `LANES` `80 × 256` + `REGISTRY` `7168 × 8` | 77 824 |
+/// | `DYN_DESCS` `3072 × 24` + `DYN_NAMES` `65 536` | 139 264 |
+/// | **total** | **≈ 14.9 MiB** |
+///
+/// **Profiling rung 10 moved two of those rows and added one.** `REGISTRY` grew from
+/// `ENGINE_ZONE_SLOTS` to `ZONE_ID_SPACE = ENGINE_ZONE_SLOTS + MAX_USER_BUDGET` = 7168 entries,
+/// because user ids live in the same table; and the two dynamic arenas are new. Measured, not
+/// projected: `dyn_descs_bytes()` is 73 728 (24 B/descriptor × 3072) and `dyn_names_bytes()` is
+/// 65 536.
 ///
 /// 16 MiB leaves ~1.3 MiB of headroom for the section padding and the reservation's granule
 /// rounding. It is a `dev` figure and says nothing about a shipped title: the shipping row is
@@ -151,12 +158,52 @@ fn the_armed_footprint_is_bounded_and_the_store_never_touches_the_heap() {
     assert_eq!(outcome, ArmOutcome::Armed, "this binary's first arm must create the reservation");
 
     let reserved = Profiler::reserved_bytes();
-    let statics = boyko_diag::sample::lanes_bytes() + boyko_diag::profiling_abi::registry_bytes();
+    // **G23b (profiling rung 10): domain 3 is now the COMPLETE `.bss` set.** Until rung 10 it was
+    // two symbols, because the other two did not exist to be linked — `DYN_DESCS`/`DYN_NAMES`
+    // arrive with `dyn_registry.rs`, which is exactly why `G22b`/`G23b` are separate rows from
+    // `G22a`/`G23a` rather than a wider claim bolted onto them.
+    let statics = boyko_diag::sample::lanes_bytes()
+        + boyko_diag::profiling_abi::registry_bytes()
+        + boyko_diag::profiling_abi::dyn_registry::dyn_descs_bytes()
+        + boyko_diag::profiling_abi::dyn_registry::dyn_names_bytes();
 
     // Domain 2 and domain 3 are the two-sided half: a stub that reserves nothing, or one that
     // links no static, fails here.
     assert!(reserved > 0, "domain 2 measured nothing — was anything reserved at all?");
     assert!(statics > 0, "domain 3 measured nothing — are the transports linked?");
+
+    // **The COMPOSITION clause, and the reason it exists.**
+    //
+    // `G23b`'s literal RED — "raise `MAX_USER_BUDGET` in the shipping profile from 512 to 3072" —
+    // is NOT PRODUCIBLE here, and the arithmetic says why rather than the absence being noticed
+    // later. There is no shipping profile (the `BOYKO_PROFILE` axis is rung 14), so the RED becomes
+    // "raise the constant"; and the constant is bounded by the id space being `u16`, so
+    // `MAX_USER_BUDGET` cannot exceed ~61 439. At 8 B/id in `REGISTRY` plus 24 B/id in `DYN_DESCS`
+    // that is ~1.9 MiB of growth against a 16 MiB dev budget — it does not cross, and no setting of
+    // that constant makes it cross.
+    //
+    // An upper bound nothing can push past is a gate that cannot fail. So the claim `G23b` actually
+    // adds — "these two arenas are INSIDE the sum" — is asserted directly: domain 3 equals the four
+    // terms, computed independently of the expression above. Dropping a term from that expression
+    // reds here, which is the RED that IS producible and the one that matches the row's own title
+    // ("this row is what puts their bytes inside the budget sum").
+    let four_terms = boyko_diag::sample::lanes_bytes()
+        + boyko_diag::profiling_abi::registry_bytes()
+        + boyko_diag::profiling_abi::dyn_registry::dyn_descs_bytes()
+        + boyko_diag::profiling_abi::dyn_registry::dyn_names_bytes();
+    assert_eq!(
+        statics, four_terms,
+        "domain 3 is not the four-symbol `.bss` set G23b names. If a term went missing from the \
+         sum, the bound below is being taken over fewer bytes than the process actually holds — \
+         which is the failure mode B6 split this row out to prevent, one gate to the right."
+    );
+    assert!(
+        boyko_diag::profiling_abi::dyn_registry::dyn_descs_bytes() > 0
+            && boyko_diag::profiling_abi::dyn_registry::dyn_names_bytes() > 0,
+        "the two dynamic arenas measured zero bytes — they are `MAX_USER_BUDGET` and \
+         `DYN_NAME_BYTES` wide, so a zero means one of those constants is 0 and the registry can \
+         hold nothing"
+    );
 
     // Domain 1, asserted in the only direction it can be wrong in. See the module docs.
     assert_eq!(

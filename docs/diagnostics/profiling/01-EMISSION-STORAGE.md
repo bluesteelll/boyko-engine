@@ -199,6 +199,16 @@ boyko_diag::profiling_partition!(User);     // games, plugins, mods, tools, benc
 5. handle.id.store(BASE + n, Release)           // the id is published LAST
 ```
 
+✅ **SHIPPED at rung 10 — and the split did not exist before it.** MEASURED at rung 10's opening:
+`crates/boyko_diag/src/profiling_abi.rs` had ONE counter, `NEXT_SLOT`, serving both partitions over
+one 4096-slot range. `Region` picked the ring but not the id range, so everything this section says
+about separate counters was true of the design and not of the code — a `User` crate's static zone
+minted an ENGINE id, which is precisely the defect `G11`'s `[B3-fix]` was rewritten to catch and
+which its RED now reproduces (id **1** for a `profiling_partition!(User)` crate's zone). The
+counters are now `ENGINE_ID_NEXT` and `USER_ID_NEXT`, `REGISTRY` spans
+`ZONE_ID_SPACE = ENGINE_ZONE_SLOTS + MAX_USER_BUDGET`, and `mint_cold` routes on
+`handle.desc.region` — the descriptor field the macro already filled from the declaring crate.
+
 **`USER_ID_NEXT` is one counter for both user authoring paths** — a game's static `declare_zone!` and its dynamic `register_zone` draw from the same range and the same budget, because they are the same traffic from the id space's point of view. Rev 3's `DYN_ID_NEXT` is renamed to it, and `ProfilerConfig::dyn_zone_budget` becomes `user_zone_budget`.
 
 Rev 1's reserve-then-CAS leaked a counter value per lost race, making the id space sparse and firing exhaustion early; that fix is retained, now in an executable order.
