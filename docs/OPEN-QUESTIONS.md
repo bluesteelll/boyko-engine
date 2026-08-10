@@ -14,6 +14,35 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-10 — Rung 7's mechanical gate would be satisfied by deleting the record of what it gated. Corrected in the corpus; disclosed here because it is a SPEC change.
+
+The corpus gates rung 7 on `rg 'TimestampCollector|VbTimedPass|Sv0TimedPass' crates/` returning zero
+matches. After the VB family's half of the deletion the tree has **zero code references and roughly
+a dozen prose ones** — `gpu_zone.rs` explaining what its ten `ZONE_VB_*` constants are what remains
+of, `command_witness.rs` reconstructing the rung-7c stage defect from the collector that carried it,
+`vg_occ_split_timing.rs` naming the channel its table used to read.
+
+`rg` cannot tell a surviving CONSUMER from a comment that records what was deleted and why.
+Satisfying the gate literally means erasing exactly the measured history the campaign exists to
+keep. **I scoped it to CODE** and wrote the reasoning at the gate — the same scoping the second
+mechanical gate already has (`crates/*/src`). Recorded here rather than decided silently because it
+narrows a specified gate, and a narrowed gate is the owner's to widen back.
+
+## 2026-08-10 — Deleting the old VB collector deleted the only gate on the stage table. Stated, not repaired.
+
+`zone_begin_stage` says which pipeline stage each VB zone opens at. It had a real gate while
+`VbTimedPass::begin_stage` existed as an independently-written second copy: `G10`'s stage clause
+compared the two stamp for stamp — 26 frames, 520 timestamps, all identical. That clause is what
+caught rung 7c's silently-changed stages after five green commits.
+
+Rung 7 step 5 deletes leg A, so the comparison has no second side. What replaces it is a `const`
+block pinning each of the ten ids to the stage both tables agreed on. **It catches a row edited by
+hand and cannot catch a bracket moved to a site where the other stage is the right one** — that
+question is a measurement, and after this rung it belongs to rung 8. No action is requested; the
+loss is named at the function it guards so nobody re-derives the table believing it is checked.
+
+---
+
 ## 2026-08-09 — Rung 3d shipped two zones where the corpus specified a 90.8 KiB `RoundRecord` column. Reversible; the owner should know what it costs.
 
 **A SCOPE call, disclosed rather than asked**, because the fork itself was a perf/architecture one

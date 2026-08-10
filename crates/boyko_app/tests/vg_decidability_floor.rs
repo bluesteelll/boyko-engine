@@ -171,8 +171,8 @@ fn summarise(label: &str, samples: &[f64]) -> Spread {
 
 /// The zone ids this rung reads, and the name each one is published under.
 ///
-/// `ZONE_BASE_VB` is `0`, so a `VbTimedPass` slot IS its zone id. Named here rather than imported
-/// because rung 7 deletes `VbTimedPass` with the collector, and a floor instrument that stops
+/// `ZONE_BASE_VB` is `0`, so a VB pass's slot IS its zone id. Named here rather than imported
+/// because rung 7 step 5 DID delete `VbTimedPass` with its collector, and a floor instrument that stops
 /// compiling when an enum is retired is a floor instrument nobody can re-run.
 const ZONE_CULL_RESET: u16 = 0;
 const ZONE_CULL_DISPATCH: u16 = 1;

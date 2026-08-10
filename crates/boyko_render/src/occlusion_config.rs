@@ -87,7 +87,8 @@ impl OcclusionMode {
     ///
     /// One table, because two artifacts already print this mode and a second spelling would be a
     /// second text that can disagree with the first: the `BOYKO_VB_PROBE` dump's `[host]` table,
-    /// and the `BOYKO_VB_BENCH` summary's `VB-P4 regime … mode=[…]` line. Both exist because rung
+    /// and the retired `BOYKO_VB_BENCH` summary's `VB-P4 regime … mode=[…]` line (profiling rung 7
+    /// deleted that printer; the artifact header carries the same census). Both exist because rung
     /// P4-4 made the arming a LIVE Resource, so "which configuration produced this capture?" has
     /// to be answerable from the artifact rather than from a knob that was read once at boot.
     #[inline]

@@ -62,7 +62,6 @@ pub use frame_driver::{FrameWriteToken, Renderer};
 pub use passes::vb::VbRecordProbe;
 pub use gpu_timing::{
     PASS_COUNT, SV0_PASS_COUNT, Sv0TimedPass, Sv0TimestampCollector, TimedPass, TimestampCollector,
-    VB_PASS_COUNT, VbTimedPass, VbTimestampCollector,
 };
 pub use scene_types::{
     AaActivation, BrickActivation, ClusterCullHierDispatch, CsmDepthActivation, DdgiUpdateActivation,

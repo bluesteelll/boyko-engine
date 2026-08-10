@@ -3,7 +3,7 @@
 //! five-sphere `grand_showcase_2mat` scene, verbatim, PLUS a PROCEDURALLY-generated
 //! `N_ps`-light rig (`BOYKO_VB_BENCH_LIGHTS`) instead of that file's fixed 14-light row —
 //! rendered through `RenderPath::VisibilityBuffer × GeometryLegs::Mesh`, with the runner's
-//! VB-P1d bench collector (`BOYKO_VB_BENCH`) bracketing the froxel cull dispatch and the
+//! VB-P1d timing channel (`BOYKO_VB_ZONE` since rung 7) bracketing the froxel cull dispatch and the
 //! `vb_shade`/`vb_resolve` lit-producer dispatch so `boyko_app::runner` can print their
 //! averaged GPU wall-clock cost.
 //!
@@ -24,9 +24,11 @@
 //!   spawns (default 14, matching [`vb_mesh_froxel.rs`](vb_mesh_froxel.rs)'s own base rig).
 //!   Read TWICE, independently, by this file's [`setup`] (to spawn the lights) and by
 //!   `boyko_app::runner`'s frame loop (as a print label only) — a single source of truth.
-//! - `BOYKO_VB_BENCH=1` (any value) — arms the runner's timestamp collector + the bench
-//!   accumulation/print loop (`boyko_app::runner`). Unset ⇒ this test behaves exactly like an
-//!   ordinary windowed dump (no bench print, no query pools — byte-identical command stream).
+//! - `BOYKO_VB_ZONE=1` (any value) — arms the runner's GPU zone recorder and its retire loop
+//!   (`boyko_app::runner`), and is what ENDS the run: without it (or another exit knob) `app.run()`
+//!   never returns. Unset ⇒ this test behaves exactly like an ordinary windowed dump (no query
+//!   pools, byte-identical command stream). ⚠️ Was `BOYKO_VB_BENCH` until profiling rung 7 step 5
+//!   deleted the collector that knob armed; the name still parses and now arms nothing at all.
 //! - `BOYKO_VB_BENCH_FRAMES=<n>` — the TIMED frame budget (default 220, `VB_BENCH_DEFAULT_FRAMES`
 //!   in `runner.rs`); the first 20 (`VB_BENCH_WARMUP`) are discarded as warm-up.
 //! - `BOYKO_VB_FROXEL_FORCE_OFF` (any value; presence is the trigger) forces
@@ -84,11 +86,13 @@
 //! whichever knob the caller exported**. So the body is already channel-agnostic and needs no edit;
 //! what was stale is the recipes below, which named the retired collector.
 //!
-//! Every recipe now arms `BOYKO_VB_ZONE` and names an artifact. `GpuSceneBundles::boot` refuses
-//! `BOYKO_VB_ZONE` alongside `BOYKO_VB_BENCH`, so an operator with the old knob still exported gets
-//! a loud boot failure rather than a silently different channel — which is why the recipes remove
-//! it rather than assuming it is unset. `vg_decidability_floor.rs` already drives this binary
-//! exactly this way, 42 times per sitting.
+//! Every recipe now arms `BOYKO_VB_ZONE` and names an artifact. `vg_decidability_floor.rs` already
+//! drives this binary exactly this way, 42 times per sitting.
+//!
+//! ⚠️ At rung 7c the recipes removed `BOYKO_VB_BENCH` because `GpuSceneBundles::boot` REFUSED the
+//! two knobs together, turning a stale export into a loud boot failure. Step 5 deleted the
+//! collector, so that refusal is gone and the knob is inert: a stale export is now silent. The
+//! recipes still remove it, but what they buy is tidiness, not a diagnostic.
 //!
 //! ⚠️ **The printed `VB-P1d …` line these recipes used to quote is deleted at this rung**, together
 //! with the runner harness that produced it. The artifact carries the same brackets as per-zone
@@ -570,11 +574,11 @@ fn setup(
 /// `N_ps`, and (VB-P1e H1.5) how `BOYKO_VB_BENCH_GRID` sweeps the froxel-grid dimensions.
 ///
 /// `#[ignore]`: needs a real windowed GPU device. Run with `BOYKO_DISABLE_VALIDATION=1`,
-/// `BOYKO_VB_BENCH=1`, `BOYKO_VB_BENCH_LIGHTS=<n>`, optionally `BOYKO_VB_FROXEL_FORCE_OFF` and/or
+/// `BOYKO_VB_ZONE=1`, `BOYKO_VB_BENCH_LIGHTS=<n>`, optionally `BOYKO_VB_FROXEL_FORCE_OFF` and/or
 /// `BOYKO_VB_BENCH_GRID=<dim_x>x<dim_y>x<dim_z>`; the orchestrator sweeps `N_ps ∈ {8, 64, 256,
 /// 1024}` × `{froxel, flat}`, and separately (H1.5) the four grids at fixed `N_ps = 512`.
 #[test]
-#[ignore = "needs a real windowed GPU device; BOYKO_VB_BENCH=1 BOYKO_VB_BENCH_LIGHTS=<n> \
+#[ignore = "needs a real windowed GPU device; BOYKO_VB_ZONE=1 BOYKO_VB_BENCH_LIGHTS=<n> \
             [BOYKO_VB_FROXEL_FORCE_OFF=1] [BOYKO_VB_BENCH_GRID=<x>x<y>x<z>] \
             BOYKO_DISABLE_VALIDATION=1 -- --ignored --nocapture --test-threads=1; the \
             orchestrator sweeps N_ps, both legs, and (H1.5) the froxel grid"]

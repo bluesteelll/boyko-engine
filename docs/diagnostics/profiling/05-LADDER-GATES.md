@@ -185,11 +185,22 @@ has six consumers, not one:
 | `crates/boyko_app/tests/sv0_deferred_term_bench.rs` | printed lines transcribed into test source | ✅ **RELABELLED, not re-pointed.** MEASURED: the file contains **zero** `Command::new`/`.output()`/`stdout` — it never reads a child at runtime, so there is nothing to migrate. Rung 7 retires the PRODUCER it documents, which makes its transcriptions a record of a retired instrument. Same disposition as `vb_bench_totality_gate.rs`: **the second list described what these files are ABOUT, not what they DO** |
 
 **Both lists are LOWER BOUNDS, and the rung rests on neither.** Two mechanical gates: after rung 7,
-`rg 'TimestampCollector|VbTimedPass|Sv0TimedPass' crates/` must return **zero matches**, and
+`rg 'TimestampCollector|VbTimedPass|Sv0TimedPass' crates/` must return **zero matches in CODE**, and
 `rg 'VB-P1d |VB-P4 pass=|VB-P4 regime|VB-SV0-S1\.5 ' crates/*/src` must return **zero**; the
 workspace must be green with `--workspace --all-targets`. A list one file short fails a gate rather
 than shipping. RED for the second: leave one `println!("VB-P4 pass=…")` in `runner.rs` — caught by
 that grep and again by the logging plan's `print_census.rs`.
+
+⚠️ **"in CODE" is a correction made at step 5, not a softening.** As written the first gate is over
+identifiers, and `rg` cannot tell a surviving CONSUMER from a comment that RECORDS what was deleted
+and why. After the VB half the tree has zero code references and roughly a dozen prose ones —
+`gpu_zone.rs` explaining what its ten constants are what is left of, `command_witness.rs`'s module
+doc reconstructing the 7c stage defect from the collector that had it, `vg_occ_split_timing.rs`
+naming the channel its table used to read. Satisfying the gate literally means deleting exactly the
+measured history this campaign exists to keep. The gate's subject is *"no consumer is left behind"*;
+its instrument has to be scoped the way the second gate's already is (`crates/*/src`, and for this
+one: outside comments). A gate that would be satisfied by erasing the record of what it gated is
+mis-specified, and the mis-specification is in the instrument, not in the requirement.
 
 **And the consequence rung 7 has on numbers already published, stated where it happens:** the new
 channel carries a new `WorkloadTag`, `Floor::from_session_file` is the only constructor, and
@@ -1260,11 +1271,58 @@ exactly how the seven brackets acquired the wrong stage in the first place.
    (three collapsed dispatch sites), `mark_repair`, and **the totality epilogue** — which existed
    only because `VK_QUERY_RESULT_WAIT_BIT` blocks forever on a pair its recorder never wrote. The
    zone recorder LABELS such a pair and reads with availability, so there is nothing to repair;
-   `finish` is now a single `seal`. **Still to cut:** `gpu_timing.rs`'s `VbTimestampCollector`
-   itself and the two re-exports — dead but not yet deleted, since nothing references them.
+   `finish` is now a single `seal`.
 4. ✅ **DONE.** `vb_bench_totality_gate.rs` deleted, **last**, exactly as the order required: gate A
    tested the totality epilogue and gate B `disarm_vb_bench_unless_vb`, and both subjects went in
    steps 2–3. Deleting it earlier would have dropped live coverage of code still shipping.
+5. ✅ **DONE — the VB family's half.** ⚠️ **Step 3's closing sentence was WRONG, and its shape is the
+   one this campaign keeps re-learning.** It read *"still to cut: `VbTimestampCollector` itself and
+   the two re-exports — dead but not yet deleted, since nothing references them."* Two greps refuted
+   both halves: the collector was still CONSTRUCTED (`gpu_scene/mod.rs:4478`, under a live
+   `BOYKO_VB_BENCH` arming block that created four query pools every armed boot) and still CONSUMED
+   (the teardown arm at `:7833`, which is why clippy never called the field dead). "Dead" was
+   inferred from *"the recorder no longer reads it"* and stated as if it had been measured. **A type
+   with no reader is not a type with no references** — and the difference is the one the deletion
+   trips over.
+
+   Cut in this step: the ten `VbTimedPass` variants and their `slot`/`from_slot`/`begin_stage`/
+   `label` impls, `VbTimestampCollector`, `VB_PASS_COUNT` (414 lines of `gpu_timing.rs`), the two
+   re-exports, the host field + boot arming + teardown arm, and the `BOYKO_VB_BENCH` leg of `boot`'s
+   exclusivity assert. `vb.rs`'s 24 bracket sites now name `gpu_zone`'s ten `ZONE_VB_*` constants
+   directly, and `TsWitness::begin`/`end` take a `u16` zone — one vocabulary, keyed the same way
+   `zone_begin_stage` already was.
+
+   **What the deletion cost, stated rather than absorbed:** `zone_begin_stage` had a gate while
+   `VbTimedPass::begin_stage` existed to disagree with it — `G10`'s stage clause compared the two
+   stamp for stamp, 26 frames, 520 timestamps. Deleting leg A deletes that comparison. The
+   replacement is a `const` block pinning each of the ten ids to the stage both tables agreed on:
+   it catches a row edited by hand and cannot catch a bracket moved to a site where the other stage
+   is right. Weaker, and named as weaker at the function it guards.
+
+   **Two live defects found by doing it, neither visible to any gate:**
+   * `vg_occ_split_timing.rs`'s worker listed `BOYKO_VB_BENCH` among its exit conditions. Step 2
+     deleted the readback loop that made that knob terminate, so the guard would PASS on a knob that
+     no longer exits and `app.run()` would render forever — the exact hang the guard exists to
+     prevent. **A stale name in a liveness check is worse than no check, because it answers the
+     question it was asked.**
+   * `gpu_scene/mod.rs` — step 3 deleted `read_vb_bench_ns`'s body and left its **31-line doc block**
+     attached to the next item, so `sv0_bench_armed` shipped documented as a function that reads VB
+     per-pass samples. A doc comment compiles; nothing could have caught it. Same class in
+     `vb_bench_query_validation.rs`, where rung 7's own migration edit truncated a module-doc bullet
+     mid-sentence and it read as an unfinished thought for two commits.
+
+   **Verified:** `cargo clippy --workspace --all-targets -D warnings` green on both the default and
+   the `profiling-census` legs (sources touched first — this repository has a recorded false-fresh
+   trap), and all six golden pins byte-identical (`grand_showcase a5ad662d…`, `vb_mesh f4719cbf…`,
+   `vb_mesh_tex 5d8f8854…`, `vb_both_sdf 88522c5a…`, `deferred_mesh_only 65cb2004…`,
+   `forward_mesh f93b5aad…`).
+6. **REMAINING — the gbuffer/SV0 half.** `TimestampCollector`, `TimedPass`, `PASS_COUNT`,
+   `Sv0TimestampCollector`, `Sv0TimedPass`, `SV0_PASS_COUNT`, their two scene fields, their two
+   host arming paths and their two consumers (`window_present_gbuffer.rs`, which constructs one at
+   `:9256`, and `software_ray_baseline_cost.rs` at `:367`). ⚠️ **`gbuffer_zone_port_gate.rs` dies
+   with them**, and for the reason `vb_zone_ab_witness_gate.rs` already did: its leg A *is* those
+   two collectors. Rung 7 therefore ends with **no** A/B gate on either family — which is correct
+   (there is nothing left to compare) and is the whole of what rung 8's verdicts inherit.
 
 #### Rung 7c, second half — the workload tag, and a mechanism the corpus described as if it existed
 

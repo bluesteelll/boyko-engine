@@ -4,7 +4,8 @@
 //! # What this replaces, and why three collectors existed
 //!
 //! [`gpu_timing`](super::gpu_timing) holds **three** collectors — `TimestampCollector`,
-//! `VbTimestampCollector`, `Sv0TimestampCollector` — identical but for their pass enum and pool
+//! `VbTimestampCollector` (deleted at rung 7), `Sv0TimestampCollector` — identical but for their
+//! pass enum and pool
 //! width. They are separate because their reader blocks: `VK_QUERY_RESULT_WAIT_BIT` makes
 //! `vkGetQueryPoolResults` wait forever on any query its recorder never wrote, so every harness had
 //! to arrange, in its own way, to only ever ask about pairs it *knew* were written. A vocabulary
@@ -118,7 +119,8 @@ pub const QUERIES_PER_SLOT: u32 = (MAX_GPU_PAIRS * 2) as u32;
 /// recorder, mean nothing outside it, and rung 7 deletes the enums they are derived from.
 pub const ZONE_FAMILY_WIDTH: u16 = 16;
 
-/// Base for `VbTimedPass`-derived ids (`record_vb`).
+/// Base for the ten `record_vb` ids below. Named `VbTimedPass`-derived until rung 7 step 5 deleted
+/// that enum; the derivation is now this base plus a literal offset per id.
 pub const ZONE_BASE_VB: u16 = 0;
 /// Base for `TimedPass`-derived ids — the four software-ray passes in `record_gbuffer`.
 pub const ZONE_BASE_GBUFFER: u16 = ZONE_FAMILY_WIDTH;
@@ -130,6 +132,180 @@ const _: () = assert!(
         && ZONE_BASE_GBUFFER + ZONE_FAMILY_WIDTH <= ZONE_BASE_SV0,
     "zone family ranges overlap, so one id would name two passes"
 );
+
+// === The VB family's ten zone ids — profiling rung 7, step 5. ===
+//
+// These constants are what is LEFT of `VbTimedPass` after rung 7 deleted the collector that enum
+// existed to index. The enum's per-variant documentation is migrated here rather than summarised,
+// because it is the only written record of WHY each bracket sits where it sits — placement
+// decisions taken under VB-P1e H0 and VG R3 piece 4 rung P4-2, each of which cost a measurement.
+// What is NOT migrated is every claim about the readback: `VK_QUERY_RESULT_WAIT_BIT`, the pairs
+// that had to be written whether or not the frame bracketed them, and the hang that made those
+// fills mandatory. `GpuZoneRecorder` reads `WITH_AVAILABILITY` and labels an unwritten pair
+// `NotBracketed`, so those sentences describe a hazard that no longer has a mechanism.
+//
+// They are plain `u16` and not a new enum ON PURPOSE. An enum brings back a hand-maintained
+// slot→id table — the exact property D6 rejects — and `zone_begin_stage` below is already keyed by
+// ZONE ID, so a second vocabulary would have to be kept in agreement with it. Here the id IS the
+// name.
+
+/// VB-P1e H0: the light-cull's alloc-counter `cmd_fill_buffer` plus its graph-derived
+/// TRANSFER→COMPUTE barrier — the FIRST HALF of what VB-P1d bracketed as one `LightCull` pair.
+///
+/// Bracketed even on a frame where the froxel arm is not boot-built (`scene.cluster_cull.is_none()`),
+/// reporting near-zero ns then. Exists to attribute §1.2's ~13.9 µs fixed cull cost (fill+barrier vs
+/// dispatch ramp) instead of assuming it.
+pub const ZONE_VB_CULL_RESET: u16 = ZONE_BASE_VB;
+/// VB-P1e H0: the cull dispatch itself (`cluster_cull.comp.hlsl`) — the SECOND HALF of VB-P1d's
+/// `LightCull` pair.
+pub const ZONE_VB_CULL_DISPATCH: u16 = ZONE_BASE_VB + 1;
+/// The `record_vb` lit-producer dispatch — whichever of the THREE mutually-exclusive producers this
+/// frame selects: `vb_shade_split` (when `scene.path_vb_split()`, which DISPLACES both others), else
+/// `vb_shade` (material-classified, when `scene.vb_use_classified`), else the fused `vb_resolve`.
+///
+/// Bracketed identically in all three branches — the same "derived barriers + bind + dispatch"
+/// extent — so exactly one pair is opened per mesh-leg frame whichever branch runs. VB-P1d's
+/// assertion survives as a SCOPE statement (its break-even number is defined against the fused /
+/// classified tail), which is all it ever was once the split arm gained its own bracket.
+pub const ZONE_VB_SHADE: u16 = ZONE_BASE_VB + 2;
+/// VG R3 piece 4 rung P4-2: the LATE indirect-record fill — the host `vkCmdUpdateBuffer` chunks that
+/// seed `vb_indirect_late` with `instanceCount = 0`, plus the pass's derived barriers.
+///
+/// The bracket sits OUTSIDE `if occlusion_split`, so a disarmed frame brackets a block that records
+/// nothing and reports a near-zero MEASURED cost. Moving it inside would make the disarmed leg
+/// report `FALLBACK` instead — the plan's control (ii), and the reason the placement is stated here
+/// rather than left to the recorder's indentation.
+pub const ZONE_VB_LATE_UPLOAD: u16 = ZONE_BASE_VB + 3;
+/// VG R3 piece 4 rung P4-2: the EARLY batch-cull dispatch — `vb_batch_cull.comp` at `phase = EARLY`,
+/// its derived barriers, its descriptor bind and (under `BOYKO_VB_CULL_READBACK`) its pre-snapshot
+/// copies. Bracketed outside `if batch_cull_armed` for [`ZONE_VB_LATE_UPLOAD`]'s reason.
+pub const ZONE_VB_EARLY_CULL: u16 = ZONE_BASE_VB + 4;
+/// VG R3 piece 4 rung P4-2: the EARLY raster scope — `vb_raster`'s derived barriers, the
+/// `cmd_begin_rendering`/`cmd_end_rendering` pair and every indirect draw between them. THE pass the
+/// occlusion split exists to shrink, so `-Δ5` is the plan's `Saving` term.
+pub const ZONE_VB_EARLY_RASTER: u16 = ZONE_BASE_VB + 5;
+/// VG R3 piece 4 rung P4-2: the `[hzb_poison, hzb_build_*]` block — bracketed INSIDE
+/// `record_hzb_poison_build`, at its first and last statements, so ONE bracket site serves both of
+/// that function's mutually-exclusive call sites.
+///
+/// ⚠️ Its POSITION is leg-dependent (see [`VB_ZONE_COUNT`]'s leg table) and its magnitude is
+/// therefore NOT comparable across an armed/disarmed pair. Bracketing inside the function rather
+/// than at the call sites is what makes the witness a record of what executed instead of a caller's
+/// prediction about a body it cannot see.
+pub const ZONE_VB_HZB_BUILD: u16 = ZONE_BASE_VB + 6;
+/// VG R3 piece 4 rung P4-2: the LATE batch-cull dispatch — the second `vb_batch_cull.comp` dispatch
+/// at `phase = LATE`, reading the pyramid this frame's [`ZONE_VB_HZB_BUILD`] wrote. Bracketed
+/// outside `if occlusion_split`.
+pub const ZONE_VB_LATE_CULL: u16 = ZONE_BASE_VB + 7;
+/// VG R3 piece 4 rung P4-2: the LATE raster scope — the second `begin/endRendering` bracket over the
+/// same two views, drawing whatever `instanceCount` the late cull wrote. Bracketed outside
+/// `if occlusion_split`, and closed AFTER the host-side probe counter that follows the scope, so the
+/// pair covers the whole recorded unit rather than the scope alone.
+pub const ZONE_VB_LATE_RASTER: u16 = ZONE_BASE_VB + 8;
+/// VG R3 piece 4 rung P4-2: **the run bracket** — opens immediately before [`ZONE_VB_LATE_UPLOAD`]'s
+/// begin and closes immediately after [`ZONE_VB_LATE_RASTER`]'s end.
+///
+/// THE headline interval, and the only aggregate that is migration-immune: all eight stamps
+/// `b9 … e9` are `BOTTOM_OF_PIPE`, so the intervals between consecutive ones exactly PARTITION
+/// `[t(b9), t(e9)]` — work that migrates between ids 3..8 is zero-sum inside it and cancels in a
+/// paired difference of two structurally identical runs. Its span is identical on every leg (unlike
+/// ids 2 and 6), which is why a record-order clause is scoped to it.
+pub const ZONE_VB_RUN: u16 = ZONE_BASE_VB + 9;
+
+/// How many zone ids the VB family uses — the count [`super::passes`]'s witness masks are sized by.
+///
+/// # Record order is LEG-DEPENDENT, and two ids are the ones that move
+///
+/// | leg | order of BEGIN stamps |
+/// |---|---|
+/// | armed split | `0 1` ‖ `9b 3 4 5 6 7 8 9e` ‖ `2` |
+/// | disarmed | `0 1` ‖ `9b 3 4 5 7 8 9e` ‖ `2` ‖ `6` |
+///
+/// [`ZONE_VB_HZB_BUILD`] moves because `record_hzb_poison_build` has two mutually-exclusive call
+/// sites on opposite sides of the lit producer; [`ZONE_VB_SHADE`] moves between its own three
+/// producer arms. The `9b … 9e` span is identical on every leg.
+///
+/// This table is why `TsWitness::pair_of` REMEMBERS each id's pair index instead of deriving it
+/// from the count of lower-numbered opens: the ids do not open in increasing order, so the
+/// derivation gives `VbRun` pair 8 where it is 2.
+pub const VB_ZONE_COUNT: u16 = 10;
+
+// The per-frame witness masks in `passes::vb` are `u16`, one bit per id, so the family may not
+// outgrow that width without widening them too — and it may not outgrow its base spacing either.
+const _: () = assert!(
+    VB_ZONE_COUNT <= 16 && VB_ZONE_COUNT <= ZONE_FAMILY_WIDTH,
+    "the VB witness masks are u16 — one bit per zone id — and the family must fit its base spacing"
+);
+
+/// **The BEGIN stage of a zone, keyed by ZONE ID.** Rung 7's home for the table that lived on
+/// `VbTimedPass::begin_stage`.
+///
+/// The enum is deleted with its collector, and `ZONE_BASE_VB + slot` is the only vocabulary left
+/// afterwards — so the table has to move BEFORE the deletion, not be re-derived after it. Rung 7c
+/// is why: the port carried the brackets and not their stages, and seven VB passes measured a
+/// different quantity under a green `G10` for five commits. Re-deriving this under deadline
+/// pressure is that failure's exact shape.
+///
+/// `BOTTOM_OF_PIPE` for the seven P4-2 partitioning brackets (`ZONE_BASE_VB + 3 ..= +9`), because a
+/// bottom stamp is a prefix-completion time and consecutive ones exactly partition their span.
+/// `TOP_OF_PIPE` everywhere else: VB slots 0..2 keep it for compatibility with published VB-P1d
+/// numbers, and both gbuffer families' collectors always opened there.
+///
+/// # What gates this table now — stated, because the answer changed
+///
+/// While `VbTimedPass` existed, `G10`'s stage clause WAS the gate: leg A read the enum, leg B read
+/// this, and the two were compared stamp for stamp on every steady frame — 26 frames, 520
+/// timestamps, all identical. Rung 7 step 5 deleted leg A, so that comparison has no second side
+/// and the gate is gone with it. Nothing measures this table against an independent copy any more,
+/// **because there is no independent copy left to measure against.**
+///
+/// What replaces it is weaker and is named as weaker: the `const` block below pins each of the ten
+/// VB ids to the stage it had when both tables agreed. That catches a row edited by hand; it cannot
+/// catch a bracket moved to a site where the other stage is the right one. That question is a
+/// measurement, and after this rung it is rung 8's.
+#[must_use]
+pub const fn zone_begin_stage(zone: u16) -> TimestampStage {
+    // Written against the NAMED ids rather than `3..=9`: the range is the P4-2 partitioning span,
+    // and spelling it as two endpoints that move with the constants is what keeps it that span when
+    // the family grows. No `>= ZONE_BASE_VB` guard is possible — that base is 0, so the comparison
+    // is tautological on a `u16` and clippy refuses it; the other families' bases (gbuffer's 16,
+    // SV0's 32) fall outside this range on their own.
+    if matches!(zone, ZONE_VB_LATE_UPLOAD..=ZONE_VB_RUN) {
+        TimestampStage::BottomOfPipe
+    } else {
+        TimestampStage::TopOfPipe
+    }
+}
+
+// The stage each VB id carried while `VbTimedPass::begin_stage` was the second, independently
+// written copy of this table and `G10` compared the two stamp for stamp. Pinned id by id rather
+// than as a range so that a row cannot be changed without changing the line that states it.
+const _: () = {
+    const fn tops(zone: u16) -> bool {
+        matches!(zone_begin_stage(zone), TimestampStage::TopOfPipe)
+    }
+    const fn bottoms(zone: u16) -> bool {
+        matches!(zone_begin_stage(zone), TimestampStage::BottomOfPipe)
+    }
+    assert!(
+        tops(ZONE_VB_CULL_RESET)
+            && tops(ZONE_VB_CULL_DISPATCH)
+            && tops(ZONE_VB_SHADE)
+            && bottoms(ZONE_VB_LATE_UPLOAD)
+            && bottoms(ZONE_VB_EARLY_CULL)
+            && bottoms(ZONE_VB_EARLY_RASTER)
+            && bottoms(ZONE_VB_HZB_BUILD)
+            && bottoms(ZONE_VB_LATE_CULL)
+            && bottoms(ZONE_VB_LATE_RASTER)
+            && bottoms(ZONE_VB_RUN),
+        "a VB zone's BEGIN stage differs from the one G10 measured while both tables existed"
+    );
+    // The other two families opened at TOP on both legs, per their collectors' `write_begin`.
+    assert!(
+        tops(ZONE_BASE_GBUFFER) && tops(ZONE_BASE_SV0),
+        "the gbuffer and SV0 families open at TOP_OF_PIPE"
+    );
+};
 
 /// The witness bit set when a pair's BEGIN timestamp is recorded.
 const MARK_BEGUN: u8 = 1 << 0;
@@ -432,36 +608,6 @@ impl GpuZoneRecorder {
         // pool is clean, so the slot may be claimed again.
         self.slots[slot].needs_cmd_reset.store(false, Ordering::Relaxed);
     }
-
-/// **The BEGIN stage of a zone, keyed by ZONE ID.** Rung 7's home for the table that lived on
-/// `VbTimedPass::begin_stage`.
-///
-/// The enum is deleted with its collector, and `ZONE_BASE_VB + slot` is the only vocabulary left
-/// afterwards — so the table has to move BEFORE the deletion, not be re-derived after it. Rung 7c
-/// is why: the port carried the brackets and not their stages, and seven VB passes measured a
-/// different quantity under a green `G10` for five commits. Re-deriving this under deadline
-/// pressure is that failure's exact shape.
-///
-/// `BOTTOM_OF_PIPE` for the seven P4-2 partitioning brackets (`ZONE_BASE_VB + 3 ..= +9`), because a
-/// bottom stamp is a prefix-completion time and consecutive ones exactly partition their span.
-/// `TOP_OF_PIPE` everywhere else: VB slots 0..2 keep it for compatibility with published VB-P1d
-/// numbers, and both gbuffer families' collectors always opened there.
-///
-/// **While `VbTimedPass` still exists, `G10`'s stage clause is the gate on this table** — leg A
-/// reads the enum, leg B reads this, and the two are compared stamp for stamp on every steady
-/// frame. A move that got a row wrong reds before the enum is gone.
-#[must_use]
-pub const fn zone_begin_stage(zone: u16) -> TimestampStage {
-    // `wrapping_sub` alone, with no `zone >= ZONE_BASE_VB` guard: that base is 0, so the guard is
-    // tautologically true for a `u16` and clippy refuses it. The wrap is what carries the other
-    // families out of range anyway — gbuffer's 16 and SV0's 32 both land outside 3..=9.
-    let vb_slot = zone.wrapping_sub(ZONE_BASE_VB);
-    if matches!(vb_slot, 3..=9) {
-        TimestampStage::BottomOfPipe
-    } else {
-        TimestampStage::TopOfPipe
-    }
-}
 
     /// Record `pair`'s BEGIN stamp at `stage` and witness it. **Returns the stage it wrote at**,
     /// so the caller's census records what this function did rather than what the caller expected.

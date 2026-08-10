@@ -36,7 +36,7 @@
 //!
 //! | channel | what it is | status |
 //! |---|---|---|
-//! | **G** | the ten `VbTimedPass` timestamp brackets, read through the shipped `BOYKO_VB_BENCH` collector | **the deciding channel** |
+//! | **G** | the ten VB timestamp brackets, read through the `BOYKO_VB_ZONE` recorder's artifact rows (they were the `BOYKO_VB_BENCH` collector's until rung 7) | **the deciding channel** |
 //! | **W** | host wall clock across the frame loop, two-point subtracted | **`KNOWN-BLIND`** |
 //!
 //! **Channel W decides nothing, and that is a measured conclusion rather than a caution.** The
@@ -347,7 +347,9 @@ const WRECK_THRESHOLD: f64 = 0.20;
 /// collector makes this whole rung unmeasurable — reported loudly, never as a red.
 const NO_TIMESTAMPS: &str = "device timestamps are unusable";
 
-/// `VbTimedPass`'s ten `label()` strings, in slot order.
+/// The ten VB zone ids' names, in id order -- what `VbTimedPass::label()` returned before rung 7
+/// deleted it. Named here rather than imported: production keys its rows by NUMERIC zone id, and a
+/// name table shipped for one harness's benefit is the hand-maintained mapping D6 rejects.
 ///
 /// ⚠️ This array is the harness's copy of `gpu_timing.rs`'s table. It is not a duplicate that can
 /// drift silently: every label is looked up by name in the worker's output, so a label the recorder
@@ -365,7 +367,7 @@ const PASS_LABELS: [&str; PASS_COUNT] = [
     "vb_run",
 ];
 
-/// `VB_PASS_COUNT` as this harness sees it (rung P4-2 took it 3 → 10).
+/// The VB zone count as this harness sees it (rung P4-2 took it 3 → 10).
 const PASS_COUNT: usize = 10;
 
 const P_CULL_RESET: usize = 0;
@@ -579,7 +581,7 @@ fn setup(
 
 /// **THE WORKER** — one `VisibilityBuffer × Mesh` boot in the leg and the fixture the driver names.
 ///
-/// It serves BOTH drivers: the timing protocol (which arms `BOYKO_VB_BENCH`, or a frame cap for
+/// It serves BOTH drivers: the timing protocol (which arms `BOYKO_VB_ZONE`, or a frame cap for
 /// channel W) and the dense oracle gate (which arms the three capture knobs). One worker, because
 /// two would be two texts that can disagree about what "the armed leg" boots.
 ///
@@ -598,12 +600,17 @@ fn vg_occ_split_timing_worker() {
     // Every driver arms exactly one exit condition. Booted without any, `app.run()` never returns —
     // a hang, the worst failure mode a sweep can have, and the one failure this file's own workers
     // are otherwise structurally exposed to (they arm no capture of their own).
+    // WARNING: the ZONE knob, not `BOYKO_VB_BENCH`. Profiling rung 7 step 2 deleted the readback
+    // loop that made the bench knob terminate and step 5 deleted its collector, so `BOYKO_VB_BENCH`
+    // became an exit condition that does not exit: this guard would pass and `app.run()` would
+    // render forever, which is precisely the hang the guard exists to prevent. A stale name in a
+    // liveness check is worse than no check, because it answers the question it was asked.
     let has_exit = std::env::var("BOYKO_WINDOW_FRAMES").is_ok()
-        || std::env::var("BOYKO_VB_BENCH").is_ok()
+        || std::env::var("BOYKO_VB_ZONE").is_ok()
         || std::env::var("BOYKO_VB_CULL_READBACK").is_ok();
     if !has_exit {
         eprintln!(
-            "{WORKER}: no exit condition is armed (none of BOYKO_WINDOW_FRAMES, BOYKO_VB_BENCH, \
+            "{WORKER}: no exit condition is armed (none of BOYKO_WINDOW_FRAMES, BOYKO_VB_ZONE, \
              BOYKO_VB_CULL_READBACK) -- SKIPPED rather than rendering forever."
         );
         return;
@@ -639,7 +646,7 @@ fn vg_occ_split_timing_worker() {
 // One worker's channel-G summary, parsed
 // ===============================================================================================
 
-/// What one `BOYKO_VB_BENCH` worker published about its timed frames.
+/// What one `BOYKO_VB_ZONE` worker published about its timed frames.
 #[derive(Clone, Debug)]
 struct BenchSummary {
     /// Per pass: the worker's own median over its timed frames, in ns.
@@ -707,7 +714,7 @@ impl BenchSummary {
 
         // Profiling rung 7: the six per-pass figures come from the artifact's zone rows.
         //
-        // `ZONE_BASE_VB` is 0, so a `VbTimedPass` slot IS its zone id -- and `PASS_LABELS` was
+        // `ZONE_BASE_VB` is 0, so a VB pass's slot IS its zone id -- and `PASS_LABELS` was
         // already indexed by slot, so the `pass label -> zone` table this migration was expected to
         // need turned out to be the loop counter it already had. The labels stay, demoted from
         // lookup keys to error-message text.
@@ -1092,7 +1099,7 @@ fn per_frame_us(fixture: Fixture, leg: Leg, k: u32, long_frames: u32) -> f64 {
         / span
 }
 
-/// Runs ONE worker process with the shipped `BOYKO_VB_BENCH` collector armed and returns its
+/// Runs ONE worker process with the shipped `BOYKO_VB_ZONE` recorder armed and returns its
 /// ten-pass summary, or `None` if this device serves no timestamps at all.
 ///
 /// The bench returns on its own once it reaches its frame budget, so no frame cap is set. Both
@@ -1108,7 +1115,7 @@ fn bench_summary(fixture: Fixture, leg: Leg, k: u32, bench_frames: u32) -> Optio
     let mut cmd = base_worker_cmd(fixture, leg, k);
     cmd.args(["--nocapture"])
         // Profiling rung 7: the ZONE recorder, and a per-worker artifact the parent names and
-        // stamps. `boot` refuses this knob beside `BOYKO_VB_BENCH`, so the old one is removed
+        // stamps. The retired knob is removed
         // rather than assumed unset -- an operator's stale shell variable would otherwise fail
         // every worker at boot with a message about a configuration this driver never asked for.
         .env("BOYKO_VB_ZONE", "1")
@@ -1198,7 +1205,7 @@ fn run_protocol(fixture: Fixture) {
                 None => {
                     eprintln!(
                         "VG R3 P4-6: INSTRUMENT-DEAD -- this device reports unusable timestamps, \
-                         so BOYKO_VB_BENCH arms no collector and channel G does not exist here. \
+                         so BOYKO_VB_ZONE arms no recorder and channel G does not exist here. \
                          Channel W is KNOWN-BLIND by itself, so this sitting produces no number. \
                          Re-run on a timestamp-capable device."
                     );
@@ -1781,7 +1788,7 @@ fn print_channel_w(fixture: Fixture, wall: &[Vec<f64>; 4], long_frames: u32, rou
 /// Channel G: the ten passes, four legs, medians over rounds of each worker's own median.
 fn print_channel_g(fixture: Fixture, gpu: &[Vec<BenchSummary>; 4], rounds: usize) {
     println!(
-        "CHANNEL G (ns) -- the ten VbTimedPass brackets on `{}`, {rounds} rounds. Each cell is the \
+        "CHANNEL G (ns) -- the ten VB zone brackets on `{}`, {rounds} rounds. Each cell is the \
          median over rounds of that worker's median over its timed frames.",
         fixture.name()
     );

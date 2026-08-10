@@ -117,7 +117,8 @@ impl OcclusionForce {
     /// It exists so an observer can accumulate the SET of regimes it saw as a bitmask (`1 << slot`)
     /// with no allocation and no scan: the bench summary's `VB-P4 regime observed=[…]` line does
     /// exactly that, once per timed frame, on the frame loop. The
-    /// `VbTimedPass::slot()` precedent — a table-driven index, pinned by a bijection test, so no
+    /// `VbTimedPass::slot()` precedent (retired at profiling rung 7, its ids now `gpu_zone`'s
+    /// `ZONE_VB_*` constants) — a table-driven index, pinned by a bijection test, so no
     /// call site re-derives one.
     #[inline]
     pub const fn slot(self) -> u8 {

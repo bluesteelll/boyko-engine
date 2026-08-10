@@ -86,8 +86,7 @@ use boyko_rhi_vulkan::swapchain::{
     GBufferMeshDraw, GBufferScene, InterpActivation, PunctualDepthActivation, RcasActivation,
     ResolvedRenderPathGpu, SV0_PASS_COUNT, SmaaActivation, SsaaActivation, SsaoActivation,
     PASS_COUNT, Sv0TimedPass, Sv0TimestampCollector, TaaActivation, TimestampCollector,
-    VB_PASS_COUNT,
-    VbTimestampCollector, ViewtFromDepthActivation, ViewtFromVbDepthActivation,
+    ViewtFromDepthActivation, ViewtFromVbDepthActivation,
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::accel::BoundAccelStruct;
@@ -1572,14 +1571,6 @@ pub(crate) struct GpuSceneBundles {
     /// TEXTURED=1 -D FROXEL=1`) — the SAME 4-set shape as [`Self::vb_shade_tex_pipeline`], built
     /// against [`Self::vb_layout0_froxel`]. `None` unless the froxel arm is built.
     vb_shade_tex_froxel_pipeline: Option<ComputePipeline>,
-    /// VB-P1d: the froxel cull/shade GPU-timestamp bench collector — a per-FIF ring of
-    /// `2 * VB_PASS_COUNT`-query TIMESTAMP pools. Built at [`Self::boot`] ONLY when the
-    /// `BOYKO_VB_BENCH` env is set AND the device supports timestamps
-    /// (`VulkanContext::device_caps().timestamps_usable()`); `None` on every other boot (every
-    /// golden/host/interactive run — the DEFAULT), so [`Self::scene`] threads `vb_gpu_timing:
-    /// None` into every `GBufferScene` and the `record_vb` command stream stays
-    /// byte-identical. See [`Self::vb_bench_armed`] / [`Self::read_vb_bench_ns`].
-    vb_bench: Option<VbTimestampCollector>,
     /// VB-SV0 rung S1.5: the DEFERRED fine-marcher GPU-timestamp bench collector — a per-FIF
     /// ring of `2 * SV0_PASS_COUNT`-query TIMESTAMP pools. Built at [`Self::boot`] ONLY when the
     /// `BOYKO_SV0_BENCH` env is set AND the device supports timestamps; `None` on every other
@@ -1595,14 +1586,15 @@ pub(crate) struct GpuSceneBundles {
     /// **Armed, never read.** See the boot block's comment: the witness clause needs no timings,
     /// and reading with `VK_QUERY_RESULT_WAIT_BIT` on a frame that skipped a pass would hang.
     gbuf_bench: Option<TimestampCollector>,
-    /// Profiling rung 5c: the GPU **zone** recorder — leg B of G10's A/B, and the replacement
-    /// rung 7 deletes [`Self::vb_bench`] in favour of. Built at [`Self::boot`] only under
-    /// `BOYKO_VB_ZONE` + device timestamp support, and REFUSED alongside `BOYKO_VB_BENCH`: the two
-    /// legs are compared, so a boot that armed both would compare a stream to itself.
+    /// Profiling rung 5c: the GPU **zone** recorder — leg B of G10's A/B while there was an A,
+    /// and since rung 7 step 5 the ONLY GPU timing instrument the VB family has. Built at
+    /// [`Self::boot`] only under `BOYKO_VB_ZONE` + device timestamp support, and still refused
+    /// alongside the two surviving old knobs (`BOYKO_SV0_BENCH`, `BOYKO_GBUF_BENCH`), which are
+    /// their families' leg A.
     ///
     /// Its own ring is `GPU_RING_DEPTH` deep and independent of `FRAMES_IN_FLIGHT`, so unlike the
-    /// collector above it never needs the frame slot `s` — [`Self::vb_zone_slot`] carries the slot
-    /// its own `open_frame` claimed.
+    /// collectors it never needs the frame slot `s` — [`Self::vb_zone_slot`] carries the slot its
+    /// own `open_frame` claimed.
     vb_zone: Option<GpuZoneRecorder>,
     /// The ring slot [`Self::open_vb_zone_frame`] claimed for the frame being recorded, or `None`
     /// when every slot was still in flight (a stated refusal: the honest response is to record no
@@ -4452,46 +4444,23 @@ impl GpuSceneBundles {
             "invariant: dispatch grid covers composite pixel count at any SSAA scale"
         );
 
-        // VB-P1d: the froxel cull/shade GPU-timestamp bench collector — armed ONLY when
-        // `BOYKO_VB_BENCH` (presence-gate; any value) is set AND the device supports
-        // timestamps. Unset (every golden/host/interactive boot, the DEFAULT) ⇒ `None` ⇒
-        // `Self::scene` threads `vb_gpu_timing: None` ⇒ the `record_vb` command stream is
-        // byte-identical to the pre-VB-P1d path. This is the SOLE env read this fn performs
-        // (every other input is a plain fn parameter, `boot`'s own doc's discipline) — kept
-        // isolated to this one bench-only capability so the rest of `boot` stays untouched.
-        let vb_bench_requested = std::env::var("BOYKO_VB_BENCH").is_ok();
-        let vb_bench_timestamps_usable = ctx.device_caps().timestamps_usable();
-        // O2: a requested-but-declined bench is otherwise SILENT — `vb_bench` stays `None`,
-        // `vb_bench_armed()` reads `false`, and the runner's whole bench loop never arms, never
-        // prints, never returns (the windowed test just runs indefinitely). Diagnose it loudly
-        // here, the ONE place that knows both halves of the gate.
-        if vb_bench_requested && !vb_bench_timestamps_usable {
-            eprintln!(
-                "VB-P1d bench: BOYKO_VB_BENCH set but device timestamps are unusable — bench disabled."
-            );
-        }
-        let vb_bench = (vb_bench_requested && vb_bench_timestamps_usable).then(|| {
-            let pools: [VulkanQueryPool; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
-                RhiDevice::create_query_pool(ctx, &QueryPoolDesc { count: 2 * VB_PASS_COUNT })
-                    .expect("invariant: VB-P1d bench query-pool create")
-            });
-            VbTimestampCollector::new(pools)
-        });
-
-        // VB-SV0 rung S1.5: the Deferred marcher bench collector — the SAME presence-gate +
-        // device-cap shape as `vb_bench` above, on its own env knob so the two benches can never
-        // arm each other by accident. Unset (every golden/host/interactive boot, the DEFAULT) ⇒
+        // The device-capability half of every bench gate below. This was the sole env read
+        // `boot` performed until profiling rung 6 added two more; profiling rung 7 step 5
+        // deleted the VB one it was introduced for.
+        let bench_timestamps_usable = ctx.device_caps().timestamps_usable();
+        // VB-SV0 rung S1.5: the Deferred marcher bench collector — a presence-gate + device-cap
+        // pair on its own env knob, so no two benches can arm each other by accident. Unset (every golden/host/interactive boot, the DEFAULT) ⇒
         // `None` ⇒ `Self::scene` threads `sv0_gpu_timing: None` ⇒ byte-identical stream.
         let sv0_bench_requested = std::env::var("BOYKO_SV0_BENCH").is_ok();
-        // Same O2 reasoning as the VB-P1d gate: a requested-but-declined bench would otherwise be
-        // silent (the windowed test just runs forever with no print), so say so here — the one
-        // place that knows both halves of the gate.
-        if sv0_bench_requested && !vb_bench_timestamps_usable {
+        // O2: a requested-but-declined bench would otherwise be SILENT — the collector stays
+        // `None`, `sv0_bench_armed()` reads `false`, and the windowed test just runs forever with
+        // no print. Say so here, the one place that knows both halves of the gate.
+        if sv0_bench_requested && !bench_timestamps_usable {
             eprintln!(
                 "VB-SV0 S1.5 bench: BOYKO_SV0_BENCH set but device timestamps are unusable — bench disabled."
             );
         }
-        let sv0_bench = (sv0_bench_requested && vb_bench_timestamps_usable).then(|| {
+        let sv0_bench = (sv0_bench_requested && bench_timestamps_usable).then(|| {
             let pools: [VulkanQueryPool; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
                 RhiDevice::create_query_pool(ctx, &QueryPoolDesc { count: 2 * SV0_PASS_COUNT })
                     .expect("invariant: VB-SV0 S1.5 bench query-pool create")
@@ -4526,12 +4495,12 @@ impl GpuSceneBundles {
         // without a spot light leaves those queries unwritten. Arming without reading cannot hang;
         // rung 8's reader must consult the witness masks first.
         let gbuf_bench_requested = std::env::var("BOYKO_GBUF_BENCH").is_ok();
-        if gbuf_bench_requested && !vb_bench_timestamps_usable {
+        if gbuf_bench_requested && !bench_timestamps_usable {
             eprintln!(
                 "profiling rung 6: BOYKO_GBUF_BENCH set but device timestamps are unusable — R0 collector disabled."
             );
         }
-        let gbuf_bench = (gbuf_bench_requested && vb_bench_timestamps_usable).then(|| {
+        let gbuf_bench = (gbuf_bench_requested && bench_timestamps_usable).then(|| {
             let pools: [VulkanQueryPool; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
                 RhiDevice::create_query_pool(ctx, &QueryPoolDesc { count: 2 * PASS_COUNT })
                     .expect("invariant: profiling rung 6 R0 collector query-pool create")
@@ -4549,23 +4518,25 @@ impl GpuSceneBundles {
         // sees only what it was handed.
         let vb_zone_requested = std::env::var("BOYKO_VB_ZONE").is_ok();
         assert!(
-            !(vb_zone_requested && (vb_bench_requested || sv0_bench_requested || gbuf_bench_requested)),
-            "invariant: BOYKO_VB_ZONE is exclusive with every OLD collector knob (BOYKO_VB_BENCH, \
-             BOYKO_SV0_BENCH, BOYKO_GBUF_BENCH). They are the two LEGS of G10's A/B — one process \
-             arms one side, the gate spawns two processes, and arming both would let a boot report \
-             a comparison it never made.\n\
+            !(vb_zone_requested && (sv0_bench_requested || gbuf_bench_requested)),
+            "invariant: BOYKO_VB_ZONE is exclusive with every OLD collector knob (BOYKO_SV0_BENCH, \
+             BOYKO_GBUF_BENCH). They are the two LEGS of G10's A/B — one process arms one side, the \
+             gate spawns two processes, and arming both would let a boot report a comparison it \
+             never made.\n\
              The OLD knobs are NOT exclusive with each other, and rung 6 measured why that matters: \
              the zone leg brackets every family `record_gbuffer` records, so a leg-A worker that \
              armed only ONE old collector would record fewer brackets and the comparison would red \
              on the ARMING rather than on the port. `GbufWitness` says the same in code — its \
-             `old_armed` is `tc.is_some() || sv0.is_some()`, not an exclusive-or."
+             `old_armed` is `tc.is_some() || sv0.is_some()`, not an exclusive-or.\n\
+             BOYKO_VB_BENCH is NOT in this list any more: profiling rung 7 step 5 deleted the VB \
+             collector, so that knob names nothing and setting it is now silently inert."
         );
-        if vb_zone_requested && !vb_bench_timestamps_usable {
+        if vb_zone_requested && !bench_timestamps_usable {
             eprintln!(
                 "profiling rung 5c: BOYKO_VB_ZONE set but device timestamps are unusable — zone recorder disabled."
             );
         }
-        let vb_zone = (vb_zone_requested && vb_bench_timestamps_usable).then(|| {
+        let vb_zone = (vb_zone_requested && bench_timestamps_usable).then(|| {
             let pools: [VulkanQueryPool; GPU_RING_DEPTH] = core::array::from_fn(|_| {
                 RhiDevice::create_query_pool(ctx, &QueryPoolDesc { count: QUERIES_PER_SLOT })
                     .expect("invariant: profiling rung 5c zone query-pool create")
@@ -4575,8 +4546,7 @@ impl GpuSceneBundles {
         // One census for whichever leg this boot armed. Built from the REQUEST rather than from the
         // collector, so a device that declined timestamps still prints a census line saying the
         // stream had commands and no brackets — which is a different report from silence.
-        let vb_census =
-            (vb_zone_requested || vb_bench_requested || gbuf_bench_requested).then(CommandWitness::new);
+        let vb_census = (vb_zone_requested || gbuf_bench_requested).then(CommandWitness::new);
 
         Self {
             raster_pipeline,
@@ -4728,10 +4698,6 @@ impl GpuSceneBundles {
             vb_resolve_froxel_pipeline: None,
             vb_shade_froxel_pipeline: None,
             vb_shade_tex_froxel_pipeline: None,
-            vb_bench,
-            // VG R3 piece 4 rung P4-1: the path is not knowable here (this fn runs before
-            // `resolve_render_path`); `boyko_app::runner` calls `disarm_vb_bench_unless_vb` the
-            // instant it is.
             sv0_bench,
             gbuf_bench,
             vb_zone,
@@ -6744,16 +6710,10 @@ impl GpuSceneBundles {
             // identical command stream — the offline `software_ray_baseline_cost` harness is
             // the only `Some` caller).
             gpu_timing: self.gbuf_timing_for_frame(),
-            // VB-P1d: the froxel cull/shade bench collector, armed ONLY when `BOYKO_VB_BENCH`
-            // was read at `Self::boot` time AND the device supports timestamps
-            // (`Self::vb_bench_armed`'s own doc) — `None` on every other boot (every golden/
-            // host/interactive run), so the recorded command stream stays byte-identical.
-            // VG R3 piece 4 rung P4-1: read through `vb_timing_for_frame`, the SAME accessor the
-            // runner's `vb_bench_armed()` reads, so a path-disarmed boot cannot leave the
-            // recorder armed while the readback thinks otherwise (or the reverse).
             // Profiling rung 5c: read through `vb_zone_for_frame`, the SAME accessor the runner
-            // reads — and structurally exclusive with `vb_gpu_timing` above, because `boot` refuses
-            // the two knobs together. `None` on every golden/host/interactive frame.
+            // reads. `None` on every golden/host/interactive frame, so the recorded command stream
+            // stays byte-identical there — which is what rung 7 step 5 left as the VB family's only
+            // timing instrument once `vb_gpu_timing` and its collector were deleted.
             gpu_zone: self.vb_zone_for_frame(),
             // The census both legs feed, through the same `TsWitness` sites.
             vb_cmd_witness: self.vb_census(),
@@ -7248,7 +7208,7 @@ impl GpuSceneBundles {
 
     /// `true` iff [`Self::build_froxel_light_cull`] actually ran and populated
     /// [`Self::cluster_boot_packed_dims`] — the SAME `#[inline] fn ... .is_some()` idiom
-    /// [`Self::vb_bench_armed`] uses. `boyko_app::runner`'s per-frame boot/live dims
+    /// [`Self::sv0_bench_armed`] uses. `boyko_app::runner`'s per-frame boot/live dims
     /// `debug_assert_eq!` must gate on THIS, not on `ResolvedRenderPath::froxel_light_cull`
     /// alone (P1-2, adversarial review): `froxel_light_cull` is strictly WIDER than the
     /// condition that actually built the snapshot (`build_froxel_light_cull` additionally
@@ -7500,37 +7460,6 @@ impl GpuSceneBundles {
         self.vb_zone.is_some()
     }
 
-    /// VB-P1e H0: [`Self::read_vb_bench_ns`] reads back frame `fi`'s per-pass samples (masked +
-    /// period-scaled by the RHI's query readers) from the armed bench collector; `None` iff
-    /// [`Self::vb_bench_armed`] is `false` (never created, or path-disarmed — the runner never
-    /// calls it then). `cull_reset_ns + cull_dispatch_ns` is
-    /// REPORTED as `froxel_cull_ns` in place of VB-P1d's original single bracket (VB-P1e's H0
-    /// split it into `VbTimedPass::CullReset`/`CullDispatch` so the fixed-cost hypothesis in
-    /// `VB-P1E-HIERARCHICAL-CULL-PLAN.md` §1.2 could be attributed instead of assumed).
-    ///
-    /// The sum is NOT claimed to reproduce the pre-split bracket exactly: `CullDispatch`'s begin
-    /// is a `TOP_OF_PIPE` write recorded after a `dstStage = COMPUTE` barrier, which does not
-    /// order it, so the sum may double-count up to `cull_reset_ns`. That was measured and is
-    /// SMALL — see [`crate::runner`]'s bench-print doc for the numbers and why it no longer
-    /// gates anything.
-    ///
-    /// All `VB_PASS_COUNT` queries are written on every bench-armed frame, and since VG R3 piece 4
-    /// rung P4-1 that is a property of the RECORDER rather than of its caller's preconditions:
-    /// `VbTimedPass::CullReset`/`CullDispatch` are bracketed outside the froxel arm's own gate
-    /// (reporting near-zero ns when it is not boot-built); `VbTimedPass::VbShade` is bracketed in
-    /// ALL THREE lit-producer arms — `vb_shade` (classified), `vb_resolve` (fused) and
-    /// `vb_shade_split` (the pre-light-consumer split, `vb.rs`'s own three-way producer doc);
-    /// rung P4-2's seven brackets each sit OUTSIDE their own unit's gate (`if occlusion_split`,
-    /// `if batch_cull_armed`), so a disarmed leg writes them around blocks that record nothing;
-    /// and any pair a leg leaves unbracketed is closed by `TsWitness::finish`, the release-live
-    /// totality epilogue, before `vkEndCommandBuffer`.
-    ///
-    /// ⚠️ This paragraph previously said the split producer is "UNBRACKETED" and that a split
-    /// frame would hang the `WAIT_BIT` readback, which is why the caller had to assert
-    /// `!mesh_geo_shade_split`. That was refuted by the split arm's own bracket in `vb.rs`; the
-    /// surviving assertion in `boyko_app::runner` is a SCOPE statement about what VB-P1d's
-    /// published break-even means, not a hang guard (see its site comment).
-    ///
     /// VB-SV0 rung S1.5: `true` iff the Deferred marcher bench collector was armed at
     /// [`Self::boot`] (`BOYKO_SV0_BENCH` set AND the device supports timestamps). The runner
     /// reads this ONCE, before the frame loop starts, to decide whether to drive the paired A/B
@@ -7558,8 +7487,8 @@ impl GpuSceneBundles {
     /// dispatches the marcher, so the caller MUST hold the marcher-carrying-path precondition
     /// (`boyko_app::runner`'s S1.5 block asserts `RenderPath::Deferred` + a marching leg before
     /// ever calling this) — otherwise the `VK_QUERY_RESULT_WAIT_BIT` readback below waits on a
-    /// query this frame never wrote and hangs, the same hazard `read_vb_bench_ns` documents for
-    /// the VB split producer.
+    /// query this frame never wrote and hangs. ⚠️ That hazard is why the VB family was ported to
+    /// `GpuZoneRecorder` and its collector deleted at profiling rung 7; this one still has it.
     ///
     /// # Panics
     /// Panics (`expect("invariant: ...")`) if the readback fails — a bench-only diagnostic path
@@ -7827,17 +7756,9 @@ impl GpuSceneBundles {
             RhiDevice::destroy_graphics_pipeline(ctx, self.vb_sky_pipeline);
             RhiDevice::destroy_graphics_pipeline(ctx, self.vb_raster_pipeline);
             RhiDevice::destroy_bind_group_layout(ctx, self.vb_layout0);
-            // VB-P1d: the froxel cull/shade bench query pools, `Option`-guarded (built only
-            // under `BOYKO_VB_BENCH` + a timestamp-capable device — every other boot leaves
+            // VB-SV0 rung S1.5: the Deferred marcher bench query pools, `Option`-guarded (built
+            // only under `BOYKO_SV0_BENCH` + a timestamp-capable device — every other boot leaves
             // this `None`, a no-op here).
-            if let Some(collector) = self.vb_bench {
-                for pool in collector.into_pools() {
-                    RhiDevice::destroy_query_pool(ctx, pool);
-                }
-            }
-            // VB-SV0 rung S1.5: the Deferred marcher bench query pools, `Option`-guarded exactly
-            // like `vb_bench` above (built only under `BOYKO_SV0_BENCH` + a timestamp-capable
-            // device — every other boot leaves this `None`, a no-op here).
             if let Some(collector) = self.sv0_bench {
                 for pool in collector.into_pools() {
                     RhiDevice::destroy_query_pool(ctx, pool);

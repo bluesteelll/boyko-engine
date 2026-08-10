@@ -1005,10 +1005,11 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     // subset phase is `frame_index % subset_n`).
     let mut frame_index: u32 = 0;
 
-    // Profiling rung 5c: leg B. `GpuSceneBundles::boot` refuses `BOYKO_VB_ZONE` alongside
-    // `BOYKO_VB_BENCH`, so at most one of `vb_bench`/`vb_zone` is true in any process — the A/B
-    // is two processes, one leg each, which is also what keeps the OLD collector's
-    // `VK_QUERY_RESULT_WAIT_BIT` readback from ever meeting a frame the zone leg recorded instead.
+    // Profiling rung 5c: leg B, and since rung 7 step 5 the VB family's only GPU timing leg —
+    // `BOYKO_VB_BENCH`'s collector is deleted, so there is no longer a VB A/B to keep apart.
+    // `GpuSceneBundles::boot` still refuses `BOYKO_VB_ZONE` beside the two surviving old knobs
+    // (`BOYKO_SV0_BENCH`, `BOYKO_GBUF_BENCH`), whose `VK_QUERY_RESULT_WAIT_BIT` readbacks must
+    // never meet a frame the zone leg recorded instead.
     let vb_zone = host.gpu.vb_zone_armed();
     // Profiling rung 6: the R0 software-ray collector's leg. Exclusive with the other two by
     // `GpuSceneBundles::boot`'s assert, and ARMED-NEVER-READ: the witness clause it serves needs no
@@ -2644,7 +2645,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // VB-P1e H0: accumulate this frame's per-pass bench samples — read ONLY on a frame that
         // actually presented (a resize-skip records no new `record_vb` work this iteration).
         // GATED on `vb_bench`; dead code on every non-bench run. VG R3 piece 4 rung P4-1: one row
-        // per `VbTimedPass`, plus the frame's structural label from the recorder's witness.
+        // per VB zone id, plus the frame's structural label from the recorder's witness.
         // Profiling rung 5c: the command census, printed by BOTH A/B legs from the SAME place and
         // in the SAME format. It is what G10's witness clause compares — "same number of bracket
         // timestamps, each at the same position in the recorded stream" — and it has no vocabulary,

@@ -683,10 +683,16 @@ clone. §11 records the measured sizes that make this decisive.
 * **Submitted triangles, host side.** `DrawBatch { mesh_id, index_count, index_type, base_instance,
   instance_count }` ([`mesh_draw.rs`](../crates/boyko_render/src/mesh_draw.rs):81-98) is gathered per frame; `index_count / 3 *
   instance_count` is the submitted-triangle count with no new plumbing.
-* **Per-pass GPU time.** `VbTimedPass` ([`gpu_timing.rs`](../crates/boyko_rhi_vulkan/src/present/gpu_timing.rs):231) brackets **ten**
-  passes: `CullReset` (`:239~`), `CullDispatch` (`:242~`), `VbShade` (`:257~`), and the seven VG R3
+* **Per-pass GPU time.** ⚠️ **This bullet's subject was DELETED at profiling rung 7 step 5**, and
+  its four anchors are struck rather than re-derived: `VbTimedPass`, its ten variants and
+  `VB_PASS_COUNT` no longer exist in `gpu_timing.rs`. The same ten brackets are recorded by
+  `GpuZoneRecorder` under [`gpu_zone.rs`](../crates/boyko_rhi_vulkan/src/present/gpu_zone.rs)'s
+  `ZONE_VB_*` constants, at the same sites in `record_vb`. Re-pointing the numbers at whatever now
+  occupies those lines is how a stale anchor becomes an invisible falsehood; the reader needs to
+  know the type is gone. What it said, and what remains true of the measurement: **ten**
+  passes: `CullReset`, `CullDispatch`, `VbShade`, and the seven VG R3
   P4-2 added — `VbLateUpload`, `VbEarlyCull`, `VbEarlyRaster`, `VbHzbBuild`, `VbLateCull`,
-  `VbLateRaster` and the `VbRun` span bracket; `VB_PASS_COUNT = 10` (`:393`).
+  `VbLateRaster` and the `VbRun` span bracket; ten of them, now `VB_ZONE_COUNT` in `gpu_zone.rs`.
   ⚠️ **This paragraph said "three" and `VB_PASS_COUNT = 3` until 2026-08-10**, which was true when
   §5.1 was written and false from P4-2 on — including its conclusion that *"the VB raster pass … is
   NOT bracketed"*, which `VbEarlyRaster` and `VbLateRaster` have contradicted since. The stale
@@ -1120,7 +1126,7 @@ that R0's harness must be built to avoid:
 
 1. counterbalance (ABBA), and **report** the order-bias residual with its own band;
 2. carry a **null control** — two identical configurations — with a **pre-registered** maximum, as
-   `SV0_NULL_CONTROL_MAX_FRACTION` (`:378`) does, fixed before the run and never widened;
+   `SV0_NULL_CONTROL_MAX_FRACTION` (`:388`) does, fixed before the run and never widened;
 3. **measure** the counter quantum by tick GCD and report it alongside `timestampPeriod`
    (`:94~-96` the RESOLUTION field list, `:448~`/`:463~` the transcribed bounds, `:751~-772` the consistency check);
 4. state the **resolvable delta with confidence intervals**, and make the effective spread gate
@@ -1130,9 +1136,9 @@ that R0's harness must be built to avoid:
    this campaign's own #1 named defect, introduced in the clause written against it. The sibling
    does **not** grant the widening by default: [`sv0_deferred_term_bench.rs`](../crates/boyko_app/tests/sv0_deferred_term_bench.rs):805~-807 reads
    `if may_widen { SV0_SESSION_SPREAD_MAX.max(lattice_floor) } else { SV0_SESSION_SPREAD_MAX }`,
-   where `may_widen` requires at least `SV0_LATTICE_MIN_DISTINCT_TICKS = 7` (`:399`) distinct
-   observed tick values (`:680-681`), *"licensed by EVIDENCE … rather than granted by default"*
-   (`:798~`). A **separate, non-waivable** test asserts `lattice_floor <= SV0_SESSION_SPREAD_MAX`
+   where `may_widen` requires at least `SV0_LATTICE_MIN_DISTINCT_TICKS = 7` (`:409`) distinct
+   observed tick values (`:682~`, a struct field), *"licensed by EVIDENCE … rather than granted by default"*
+   (`:817~`). A **separate, non-waivable** test asserts `lattice_floor <= SV0_SESSION_SPREAD_MAX`
    unconditionally, *"so it can never silently widen the gate"*. §14's rung lands **all three** — the
    `max()`, the distinct-tick evidence floor, and the non-waivable assertion — or none of them.
    This is R16 (*a literal transferred without its denominator*) one level up: **a gate transferred
@@ -1142,8 +1148,11 @@ that R0's harness must be built to avoid:
 
 **One trap §14's implementer will otherwise hit.** Every `read_query_pool_ns` reader requests all
 of its collector's `(begin,end)` pairs with `VK_QUERY_RESULT_WAIT_BIT`, which **blocks forever** on a
-pair its recorder never wrote that frame — [`gpu_timing.rs`](../crates/boyko_rhi_vulkan/src/present/gpu_timing.rs):344~ states this, and it is why three
-separate collectors exist rather than one widened `PASS_COUNT`. Extending `VbTimedPass` to cover
+pair its recorder never wrote that frame — [`gpu_timing.rs`](../crates/boyko_rhi_vulkan/src/present/gpu_timing.rs):189~ states this, and it is why three
+separate collectors existed rather than one widened `PASS_COUNT`. ⚠️ **Two, since profiling rung 7
+step 5**: the VB family's went to `GpuZoneRecorder`, which reads `WITH_AVAILABILITY` and labels an
+unwritten pair rather than waiting on it — under that reader the trap below does not exist at all,
+which is why the port happened. Extending `VbTimedPass` to cover
 raster/geo/classify means **every added pair must be written unconditionally on every armed frame**.
 That rung therefore also lands a **written-pair bitmask asserted before the read**, so a conditional
 bracket fails as a red assertion instead of hanging the test binary — a hang is not a gate.
@@ -2243,7 +2252,7 @@ headline was false as written. Rather than a headline and a retraction, the limi
 | R1 | **Vacuously-green gate** — an assertion quantified over an empty or self-referential selection. | The campaign's #1 recurring defect; found five times in the sibling plan alone. | Every rung names a mutation and the commit records its output; R0c(b)/(c) are deliberately paired so neither can pass alone. |
 | R2 | **A procedural corpus makes K1 untestable.** | New, and it is why §4.2 rejects the cheapest corpus option. | The corpus is fetched real content; procedural geometry is confined to R0c's sensitivity control. |
 | R3 | **The harness measures its own resolution, or its A/B rides the ring.** | MEASURED in the sibling rung, both of them: a "spread" that was one median lattice step, and an ABAB phase perfectly aliased with `FRAMES_IN_FLIGHT == 2`. | §7 clauses 1, 3–4: ABBA with the residual reported; the quantum measured by tick GCD and the spread gate read against it. |
-| R4 | **`WAIT_BIT` readback hangs instead of failing.** | [`gpu_timing.rs`](../crates/boyko_rhi_vulkan/src/present/gpu_timing.rs):344~ documents the deadlock; three separate collectors exist because of it. | §7's written-pair bitmask, asserted before the read — binding on §14's rung, which is the one that brackets passes. Not an R0 risk any more. |
+| R4 | **`WAIT_BIT` readback hangs instead of failing.** | [`gpu_timing.rs`](../crates/boyko_rhi_vulkan/src/present/gpu_timing.rs):189~ documents the deadlock; three separate collectors existed because of it — two since profiling rung 7 step 5 moved the VB family to a non-waiting reader. | §7's written-pair bitmask, asserted before the read — binding on §14's rung, which is the one that brackets passes. Not an R0 risk any more. |
 | R5 | **Stale doc sends the importer down the `None` path.** | Was verified at authoring time (≥6 comments then claimed `VB_IMPLEMENTED == false` against [`render_path_config.rs`](../crates/boyko_render/src/render_path_config.rs):130~'s `true`); ⚠️ Rev 33: **repaired since** — a grep now returns ZERO `== false` claims, every site says `true` (rung R8). | R0b's second red mutation targets exactly this class; the separate comment-fix commit the mitigation predicted has landed, and the row stays as the record of the class. |
 | R6 | **Host-visible residency ceiling.** | [`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):320~: every mesh buffer is `HostVisibleCoherent`; §3.4 derived a 64 MiB sum ceiling. | ✅ **CLOSED at Rev 35 by R0-S1** — the pools grow, so neither location caps at 64 MiB and the sum constraint is gone (gate: `vg_block_pool_growth.rs`, with the pre-S1 refusal executed beside the pooled success). Residual, recorded not mitigated: mesh geometry is still host-visible, a throughput question the census does not measure. |
 | R7 | **The `vb_id` usage widening perturbs a golden.** | New. | R0c gate (a) over every VB pin. ⚠️ The mitigation cell read *"with a demonstrated red (record the copy unconditionally)"* — that mutation was retired at Rev 18 for not firing, and the cell claiming a demonstrated red is the risk register asserting the very thing the rung had lost. **(a) has no AVAILABLE red**: four sitings failed for four distinct reasons and the axis R0c changes is representation-invariant for R32G32_UINT, so (a) is recorded as an assertion whose red is structurally unavailable rather than one awaiting a mutation; §8's standing rule is that a mutation which is only argued does not count. |
@@ -2429,19 +2438,32 @@ rows) · `crates/boyko_rhi_vulkan/tests/vb_raster_geo_classify_spv_sync.rs`'s
 **Timing — RE-VERIFIED at Rev 3; Rev 1 and Rev 2 both carried a consistent ~10-line drift here,
 i.e. anchors read from a pre-VB-P1e-H0 tree.** `crates/boyko_rhi_vulkan/src/present/gpu_timing.rs`:
 `:188~-194` (why collectors are separate — and the `PASS_COUNT` note), `:229~` (**`VbShade = 2`**,
-not `:219~`), **`:393` (`VB_PASS_COUNT: u32 = 10` — ⚠️ this read `:242~` and `= 3` until 2026-08-10, true when written and false from P4-2 on; not `:232~`)**, `:281~`/`:293~-294` (the pool reset),
-**`:344~` (`WAIT_BIT` BLOCKS FOREVER on a pair its recorder never wrote, not `:334~`)** — this one is
+not `:219~`), **`VB_PASS_COUNT` — ⚠️ this read `:242~` and `= 3` until 2026-08-10, true when
+written and false from P4-2 on, then line 393 and `= 10`, and since profiling rung 7 step 5 the
+constant is DELETED: it is `VB_ZONE_COUNT` in `gpu_zone.rs` and carries no anchor here**,
+`:111`/`:127-128` (the pool reset),
+**`:189~` (`WAIT_BIT` BLOCKS FOREVER on a pair its recorder never wrote — was line 344, and before the audit line 334)** — this one is
 cited by §7's non-negotiable implementer trap and by risk R4, so the stale anchor was the most
-expensive of the set — `:619` (`Sv0TimedPass` — was `:357~`, not `:347~`), **`:643` (`SV0_PASS_COUNT = 1` — was `:381~`, not
-`:371~`)**.
+expensive of the set — `:206` (`Sv0TimedPass` — was line 619, and before the audit line 357, not
+347), **`:230` (`SV0_PASS_COUNT = 1` — was line 643, and before the audit line 381, not 371)**.
+⚠️ **Every `gpu_timing.rs` number in this paragraph moved twice**, the second time because profiling
+rung 7 step 5 cut 414 lines from the top of the file. Two things were learned re-deriving them.
+An anchor audit in a file under active subtraction records one moment, which is why the file's own
+gate exists rather than the audit standing in for it — and **a historical line number written in
+anchor notation IS an anchor**. A phrase of the form *"was"* followed by a backticked colon-number
+is checked against today's file exactly like a live citation, so half of this paragraph's own reds
+were its record of the reds it had already fixed. Hence the prose form above — and the sentence you
+are reading spells the shape out instead of quoting it, because quoting it reds too.
 
 **Harness precedent:** `crates/boyko_app/tests/sv0_deferred_term_bench.rs:20~-51` (ABAB refuted by
 its own null control), `:34~` and `:58~-62` (**the ABBA algebra — the model `m_k = μ + τ·armed + γ(fi)
 + β·k + ε` and the cancellation that makes absolute readings unavailable**, §14.2), `:83~-129`
-(the quantisation finding), `:297~-299` (**the OS-clamped-extent check**, §5.4), **`:350`
-(`SV0_BENCH_SESSIONS = 3`), `:366` (`SV0_SESSION_SPREAD_MAX = 0.10`), `:378`
+(the quantisation finding), `:297~-299` (**the OS-clamped-extent check**, §5.4), **`:360`
+(`SV0_BENCH_SESSIONS = 3`), `:376` (`SV0_SESSION_SPREAD_MAX = 0.10`), `:388`
 (`SV0_NULL_CONTROL_MAX_FRACTION = 0.10`)** — Rev 2 cited `:284~` and `:312~` for two of these in one
-block and `:350`/`:378` in another; **the `350`/`366`/`378` set is the correct one**, and the
+block and lines 350/378 in another; **the `360`/`376`/`388` set is the correct one** (it read
+`350`/`366`/`378` until 2026-08-10, when rung 7's relabelling of that file's header moved all three
+down by ten lines), and the
 contradiction is direct evidence that the older block was never re-verified ·
 `crates/boyko_render/src/ui/mod.rs:87` (`FRAMES_IN_FLIGHT = 2`) ·
 `crates/boyko_render/src/mesh_draw.rs:81-98` (`DrawBatch`) ·

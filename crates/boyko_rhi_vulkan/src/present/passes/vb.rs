@@ -34,16 +34,13 @@ use crate::memory::BoundBuffer;
 use crate::texture::{MAX_CASCADES, MAX_TEXTURE_LAYERS};
 
 use super::super::frame_driver::Renderer;
-use super::super::gpu_timing::{VB_PASS_COUNT, VbTimedPass};
-use super::super::gpu_zone::{GpuZoneRecorder, ZONE_BASE_VB, ZONE_FAMILY_WIDTH};
-
-// Profiling rung 6: the family's ids are `ZONE_BASE_VB + slot`, so a `VbTimedPass` that grew past
-// the reserved width would start naming another family's passes. A build failure, here, beside the
-// count it constrains — rung 7 deletes the enum and this assert goes with it.
-const _: () = assert!(
-    VB_PASS_COUNT <= ZONE_FAMILY_WIDTH as u32,
-    "VbTimedPass no longer fits its reserved zone-id range"
-);
+// Profiling rung 7 step 5: the ten ids and their count now come from `gpu_zone`, where
+// `zone_begin_stage` is keyed by the same id — one vocabulary, not a pass enum and a mapping.
+use super::super::gpu_zone::{
+    GpuZoneRecorder, VB_ZONE_COUNT, ZONE_BASE_VB, ZONE_VB_CULL_DISPATCH, ZONE_VB_CULL_RESET,
+    ZONE_VB_EARLY_CULL, ZONE_VB_EARLY_RASTER, ZONE_VB_HZB_BUILD, ZONE_VB_LATE_CULL,
+    ZONE_VB_LATE_RASTER, ZONE_VB_LATE_UPLOAD, ZONE_VB_RUN, ZONE_VB_SHADE, zone_begin_stage,
+};
 
 #[cfg(feature = "profiling-census")]
 use super::super::command_witness::CommandWitness;
@@ -195,7 +192,7 @@ pub struct VbRecordProbe {
 /// # It crosses a function boundary, deliberately (VG R3 piece 4 rung P4-2)
 ///
 /// [`Renderer::record_hzb_poison_build`] takes `&mut TsWitness` and stamps
-/// [`VbTimedPass::VbHzbBuild`] at its own first and last statements. The alternative — setting that
+/// [`ZONE_VB_HZB_BUILD`] at its own first and last statements. The alternative — setting that
 /// slot's bits at the two call sites — would make the mask a claim about a body the caller cannot
 /// see, which is the premise-shaped guarantee this type exists to delete: delete the stamp inside
 /// the function and the masks would still read "complete" while one query stayed unwritten, and the
@@ -222,17 +219,17 @@ struct TsWitness<'a> {
     /// the k-th pass to open is pair k. The first half is true and the second does not follow:
     /// that expression counts begun passes with a *lower slot number*, which is the open index
     /// only if the passes open in increasing slot order, and MEASURED they do not. `record_vb`
-    /// opens `0, 1, 9, 3, 4, 5, 6, 7, 8, 2` (`VbRun` third, `VbShade` last — see
-    /// [`VbTimedPass`]'s own leg table). For `VbRun` the derivation yields **8** where the pair
-    /// is **2**: every END would have been written into another pass's query, and nothing at this
-    /// rung reads durations, so the swap would have been invisible until rung 8 read numbers that
-    /// were never anyone's. Remembering the index has no ordering premise at all.
-    pair_of: [u16; VB_PASS_COUNT as usize],
+    /// opens `0, 1, 9, 3, 4, 5, 6, 7, 8, 2` ([`ZONE_VB_RUN`] third, [`ZONE_VB_SHADE`] last — see
+    /// [`VB_ZONE_COUNT`]'s own leg table). For [`ZONE_VB_RUN`] the derivation yields **8** where the
+    /// pair is **2**: every END would have been written into another pass's query, and nothing at
+    /// this rung reads durations, so the swap would have been invisible until rung 8 read numbers
+    /// that were never anyone's. Remembering the index has no ordering premise at all.
+    pair_of: [u16; VB_ZONE_COUNT as usize],
     /// Dev-profile only: writes per QUERY index (`2 * slot`, `2 * slot + 1`). A slot written
     /// twice after one reset is a `VUID-vkCmdWriteTimestamp` violation and a silently wrong
     /// delta — not a hang, so neither the epilogue nor the readback can catch it.
     #[cfg(debug_assertions)]
-    writes: [u8; 2 * VB_PASS_COUNT as usize],
+    writes: [u8; 2 * VB_ZONE_COUNT as usize],
 }
 
 impl<'a> TsWitness<'a> {
@@ -280,9 +277,9 @@ impl<'a> TsWitness<'a> {
             cw: scene.vb_cmd_witness,
             begun: 0,
             ended: 0,
-            pair_of: [Self::NO_PAIR; VB_PASS_COUNT as usize],
+            pair_of: [Self::NO_PAIR; VB_ZONE_COUNT as usize],
             #[cfg(debug_assertions)]
-            writes: [0; 2 * VB_PASS_COUNT as usize],
+            writes: [0; 2 * VB_ZONE_COUNT as usize],
         };
         #[cfg(feature = "profiling-census")]
         if let Some(w) = ts.cw {
@@ -357,48 +354,52 @@ impl<'a> TsWitness<'a> {
     }
 
 
-    /// Records `pass`'s BEGIN stamp and witnesses it. No-op (and no command) when unarmed.
+    /// The witness's own index for `zone` — its bit in the two masks and its entry in `pair_of`.
+    ///
+    /// # Panics
+    /// On a zone outside the VB family. Every caller passes one of the ten `ZONE_VB_*` constants
+    /// literally, so an out-of-range id is a mis-typed call site, not a runtime condition — and a
+    /// wrong-family id would otherwise silently index another pass's bit.
+    #[inline]
+    fn slot_of(zone: u16) -> u32 {
+        let slot = zone.wrapping_sub(ZONE_BASE_VB);
+        assert!(slot < VB_ZONE_COUNT, "invariant: zone id is not in the VB family");
+        slot as u32
+    }
+
+    /// Records `zone`'s BEGIN stamp and witnesses it. No-op (and no command) when unarmed.
     ///
     /// # Safety
-    /// Recording must be open on `cmd`, `fns` must be the live device fn-table, `fi` must be this
-    /// present's in-flight slot, and this pass's begin query must not already have been written
-    /// since this frame's `reset_frame`.
+    /// Recording must be open on `cmd`, `fns` must be the live device fn-table, and this zone's
+    /// begin query must not already have been written since this frame's pool reset.
     #[inline]
-    unsafe fn begin(&mut self, fns: &DeviceFns, cmd: VkCommandBuffer, _fi: usize, pass: VbTimedPass) {
-        let slot = pass.slot();
+    unsafe fn begin(&mut self, fns: &DeviceFns, cmd: VkCommandBuffer, zone: u16) {
+        let slot = Self::slot_of(zone);
         if let Some((rec, ring)) = self.zr {
             // A full ring slot is a stated refusal, not a loss: the pass records no bracket, its
             // `begun` bit stays clear, and `end` finds `NO_PAIR` and records nothing either — so
             // the pair is never half-written. `MAX_GPU_PAIRS` is 128 against this frame's ten, so
             // reaching it means a caller reused a sealed slot, which the recorder counts.
-            let Some(pair) = rec.alloc_pair(ring, ZONE_BASE_VB + slot as u16) else { return };
+            let Some(pair) = rec.alloc_pair(ring, zone) else { return };
             self.pair_of[slot as usize] = pair;
-            // THE STAGE IS THE PASS'S, not the recorder's default. `GpuZoneRecorder` opened every
-            // zone at `TOP_OF_PIPE` from rung 5c to 7c, which for the seven P4-2 slots is not the
+            // THE STAGE IS THE ZONE'S, not the recorder's default. `GpuZoneRecorder` opened every
+            // zone at `TOP_OF_PIPE` from rung 5c to 7c, which for the seven P4-2 ids is not the
             // bracket the old collector recorded and not the one whose intervals partition
-            // `VbRun` — the same commands, in the same places, measuring something else.
+            // `ZONE_VB_RUN` — the same commands, in the same places, measuring something else.
             // SAFETY: caller contract; `pair` came from `alloc_pair` on this slot immediately
             // above, and the pool was reset this frame (this witness's construction site).
-            let stage = unsafe {
-                rec.record_begin(
-                    fns,
-                    cmd,
-                    ring,
-                    pair,
-                    GpuZoneRecorder::zone_begin_stage(ZONE_BASE_VB + slot as u16),
-                )
-            };
+            let stage = unsafe { rec.record_begin(fns, cmd, ring, pair, zone_begin_stage(zone)) };
             self.mark_begin(slot, stage);
         }
     }
 
-    /// Records `pass`'s END stamp and witnesses it. No-op (and no command) when unarmed.
+    /// Records `zone`'s END stamp and witnesses it. No-op (and no command) when unarmed.
     ///
     /// # Safety
-    /// Same contract as [`Self::begin`], for this pass's end query.
+    /// Same contract as [`Self::begin`], for this zone's end query.
     #[inline]
-    unsafe fn end(&mut self, fns: &DeviceFns, cmd: VkCommandBuffer, _fi: usize, pass: VbTimedPass) {
-        let slot = pass.slot();
+    unsafe fn end(&mut self, fns: &DeviceFns, cmd: VkCommandBuffer, zone: u16) {
+        let slot = Self::slot_of(zone);
         if let Some((rec, ring)) = self.zr {
             let pair = self.pair_of[slot as usize];
             if pair == Self::NO_PAIR {
@@ -411,48 +412,22 @@ impl<'a> TsWitness<'a> {
         }
     }
 
-    /// **The totality epilogue.** Publishes the masks to the collector, then closes every pair
-    /// this frame left open, so that on every frame reaching it with a live witness EVERY
-    /// `VbTimedPass` pair is written exactly once.
+    /// Closes the frame: seals this frame's ring slot, publishing every mark byte the brackets
+    /// above wrote.
     ///
-    /// It keys on BOTH masks rather than one: re-stamping an already-written begin query after a
-    /// single reset is itself invalid (`VUID-vkCmdWriteTimestamp`: the query must be
-    /// unavailable), so a torn pair must be CLOSED, never re-opened. Torn is unreachable under
-    /// `record_vb`'s single-exit shape today — and that is exactly the premise-shaped guarantee
-    /// this epilogue exists to stop relying on, so it is handled rather than asserted away in
-    /// release.
+    /// # It records no command, and that is what rung 7 changed
     ///
-    /// The `(false, true)` corner (an END with no BEGIN) is a recorder bug the epilogue CANNOT
-    /// repair: the begin query stays unwritten and the `WAIT_BIT` readback will block. It reds
-    /// here in the dev profile through the completeness assert below.
+    /// Until rung 7 this was **the totality epilogue** — it filled every pair the frame had not
+    /// bracketed, with `vkCmdWriteTimestamp` pairs of its own, because `read_vb_bench_ns` read with
+    /// `VK_QUERY_RESULT_WAIT_BIT` and would block FOREVER on a query no one wrote. Totality was not
+    /// a property anyone wanted; it was the price of that reader.
     ///
-    /// # The zone leg has no epilogue, and that is the point of the port
-    ///
-    /// Profiling rung 5c. This whole repair exists because `read_vb_bench_ns` reads with
-    /// `VK_QUERY_RESULT_WAIT_BIT` and would block forever on a query no one wrote. The
-    /// [`GpuZoneRecorder`] reads with `WITH_AVAILABILITY` and no wait, so an unwritten pair is a
-    /// `NotBracketed` label rather than a hang — there is nothing to fill. Its `finish` is a
-    /// [`GpuZoneRecorder::seal`], the release edge its retire path pairs with.
-    ///
-    /// So the two legs record a DIFFERENT number of timestamps on the same frame, by design, and
-    /// G10's cross-leg equality is over BRACKETS: the fills below go through
-    /// [`Self::mark_repair`], which counts them as the profiler's commands and moves the census
-    /// stream position — they are real recorded commands — without entering the bracket positions
-    /// the comparison reads.
-    ///
-    /// # Safety
-    /// Recording must still be open on `cmd`, `fns` must be the live device fn-table, `fi` must
-    /// be this present's in-flight slot, and no rendering scope may be active (this is recorded
-    /// immediately before `vkEndCommandBuffer`).
-    // `mut self` exists for the dev-profile write counter below; a release build mutates nothing
-    // here, and the counter is the only reason the receiver is `mut` at all.
-    #[cfg_attr(not(debug_assertions), allow(unused_mut))]
-    unsafe fn finish(self, _fns: &DeviceFns, _cmd: VkCommandBuffer, _fi: usize) {
-        // Profiling rung 7 deleted the totality epilogue with the collector that needed it. That
-        // epilogue existed because `VK_QUERY_RESULT_WAIT_BIT` blocks forever on a pair its
-        // recorder never wrote, so every pair had to be filled whether the frame bracketed it or
-        // not. The zone recorder LABELS such a pair `NotBracketed` and reads with availability, so
-        // there is nothing to repair — which is the difference the port existed to make.
+    /// [`GpuZoneRecorder`] reads `WITH_AVAILABILITY` and does not wait, so an unwritten pair comes
+    /// back labelled `NotBracketed` — a stated absence instead of a hang. With the collector deleted
+    /// there is nothing left to fill, so this is a `seal` and nothing else. **A frame may now
+    /// legitimately leave pairs unopened**, which is why the labels exist.
+    #[inline]
+    fn finish(self) {
         if let Some((rec, ring)) = self.zr {
             // The release edge: every plain mark byte written above becomes visible to `retire`'s
             // `Acquire` load through this one store, and nothing else publishes them.
@@ -1044,7 +1019,7 @@ impl Renderer<'_> {
         // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
         // reset at the frame top; this write is outside any rendering scope; `fi` is this
         // present's in-flight slot.
-        unsafe { ts.begin(self.fns, cmd, fi, VbTimedPass::CullReset) };
+        unsafe { ts.begin(self.fns, cmd, ZONE_VB_CULL_RESET) };
         // === VB-P1a ("dark infra"): the L1 clustered froxel light-cull RESET — byte-for-byte
         // port of `record_forward`'s own `light_cull` fill+barrier. Recorded ONLY when
         // `scene.cluster_cull.is_some()` (⚠️ default-OFF via the owner's
@@ -1081,14 +1056,14 @@ impl Renderer<'_> {
         }
         // VB-P1e H0: close the CullReset bracket. GATED (unarmed ⇒ no command).
         // SAFETY: recording is open; the pool was reset this frame; `fi` is this slot.
-        unsafe { ts.end(self.fns, cmd, fi, VbTimedPass::CullReset) };
+        unsafe { ts.end(self.fns, cmd, ZONE_VB_CULL_RESET) };
 
         // VB-P1e H0: open the CullDispatch bracket — same unconditional-write shape as
         // `CullReset` above, and for the same hang-avoidance reason.
         // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
         // reset at the frame top; this write is outside any rendering scope; `fi` is this
         // present's in-flight slot.
-        unsafe { ts.begin(self.fns, cmd, fi, VbTimedPass::CullDispatch) };
+        unsafe { ts.begin(self.fns, cmd, ZONE_VB_CULL_DISPATCH) };
         if let (Some(cull_pipeline), Some(cull_set), Some(_grid), Some(_index), Some(_alloc)) = (
             scene.cluster_cull,
             targets.cull_set.as_ref().map(|s| &s[fi]),
@@ -1174,7 +1149,7 @@ impl Renderer<'_> {
         }
         // VB-P1e H0: close the CullDispatch bracket. GATED (unarmed ⇒ no command).
         // SAFETY: recording is open; the pool was reset this frame; `fi` is this slot.
-        unsafe { ts.end(self.fns, cmd, fi, VbTimedPass::CullDispatch) };
+        unsafe { ts.end(self.fns, cmd, ZONE_VB_CULL_DISPATCH) };
 
         // === CSM cascade DEPTH pass — byte-for-byte port of `record_forward`'s own `csm` block.
         // Recorded ONLY when `scene.csm.is_some()`; runs BEFORE `vb_resolve` (which samples the
@@ -1760,8 +1735,8 @@ impl Renderer<'_> {
             // `fi` is this present's in-flight slot; neither query has been written since that
             // reset — `TsWitness`'s masks are the record, and every stamp in this fn goes through
             // them.
-            unsafe { ts.begin(self.fns, cmd, fi, VbTimedPass::VbRun) };
-            unsafe { ts.begin(self.fns, cmd, fi, VbTimedPass::VbLateUpload) };
+            unsafe { ts.begin(self.fns, cmd, ZONE_VB_RUN) };
+            unsafe { ts.begin(self.fns, cmd, ZONE_VB_LATE_UPLOAD) };
 
             // === VG R3 piece 2 step P2-5 (plan D4): the LATE indirect record fill. ===
             //
@@ -1907,8 +1882,8 @@ impl Renderer<'_> {
             // SAFETY (both stamps): as at `b9`/`b3` above — recording is open, the pool was reset
             // this frame, `fi` is this present's slot, and neither query has been written since
             // (slot 3's end and slot 4's begin are each stamped exactly once, here).
-            unsafe { ts.end(self.fns, cmd, fi, VbTimedPass::VbLateUpload) };
-            unsafe { ts.begin(self.fns, cmd, fi, VbTimedPass::VbEarlyCull) };
+            unsafe { ts.end(self.fns, cmd, ZONE_VB_LATE_UPLOAD) };
+            unsafe { ts.begin(self.fns, cmd, ZONE_VB_EARLY_CULL) };
 
             // === Rung R2c0: the per-BATCH draw-record cull dispatch. ===
             //
@@ -2282,8 +2257,8 @@ impl Renderer<'_> {
             // transitions this scope needs to whatever precedes it.
             // SAFETY (both stamps): recording is open, the pool was reset this frame, `fi` is this
             // present's slot, and neither query has been written since (each is stamped once).
-            unsafe { ts.end(self.fns, cmd, fi, VbTimedPass::VbEarlyCull) };
-            unsafe { ts.begin(self.fns, cmd, fi, VbTimedPass::VbEarlyRaster) };
+            unsafe { ts.end(self.fns, cmd, ZONE_VB_EARLY_CULL) };
+            unsafe { ts.begin(self.fns, cmd, ZONE_VB_EARLY_RASTER) };
 
             // SAFETY: recording is open; `record_vb_pass` records the graph's derived
             // UNDEFINED→COLOR_ATTACHMENT_OPTIMAL (`vb_id`) + UNDEFINED→DEPTH_ATTACHMENT_OPTIMAL
@@ -2494,7 +2469,7 @@ impl Renderer<'_> {
             // SAFETY: recording is open (the scope was closed by the `cmd_end_rendering` above, so
             // no rendering instance is active either); the pool was reset this frame; `fi` is this
             // present's in-flight slot; this query has not been written since that reset.
-            unsafe { ts.end(self.fns, cmd, fi, VbTimedPass::VbEarlyRaster) };
+            unsafe { ts.end(self.fns, cmd, ZONE_VB_EARLY_RASTER) };
 
             // Gate G2's `scopes`, counted AT the bracket that closes the EARLY scope rather than
             // derived from the arming predicate — the difference between a gate and a tautology.
@@ -2644,7 +2619,7 @@ impl Renderer<'_> {
             // SAFETY: recording is open and no rendering scope is active (the early scope's
             // `cmd_end_rendering` is above, the late scope's `cmd_begin_rendering` below); the pool
             // was reset this frame; `fi` is this present's slot; this query is unwritten since.
-            unsafe { ts.begin(self.fns, cmd, fi, VbTimedPass::VbLateCull) };
+            unsafe { ts.begin(self.fns, cmd, ZONE_VB_LATE_CULL) };
 
             // === VG R3 piece 3 step P3-3 (plan D4/D5): the LATE cull dispatch. ===
             //
@@ -2784,8 +2759,8 @@ impl Renderer<'_> {
             // gap holds the host-side `late_cull_dispatches` probe counter only.
             // SAFETY (both stamps): recording is open and no rendering scope is active; the pool
             // was reset this frame; `fi` is this present's slot; each query is stamped once here.
-            unsafe { ts.end(self.fns, cmd, fi, VbTimedPass::VbLateCull) };
-            unsafe { ts.begin(self.fns, cmd, fi, VbTimedPass::VbLateRaster) };
+            unsafe { ts.end(self.fns, cmd, ZONE_VB_LATE_CULL) };
+            unsafe { ts.begin(self.fns, cmd, ZONE_VB_LATE_RASTER) };
 
             // === VG R3 piece 2 step P2-5 (plan D4): the LATE raster scope. ===
             //
@@ -3026,8 +3001,8 @@ impl Renderer<'_> {
             // scope's `cmd_end_rendering` is above, inside the block that just closed); the pool
             // was reset this frame; `fi` is this present's in-flight slot; slot 8's end and slot
             // 9's end are each stamped exactly once, here.
-            unsafe { ts.end(self.fns, cmd, fi, VbTimedPass::VbLateRaster) };
-            unsafe { ts.end(self.fns, cmd, fi, VbTimedPass::VbRun) };
+            unsafe { ts.end(self.fns, cmd, ZONE_VB_LATE_RASTER) };
+            unsafe { ts.end(self.fns, cmd, ZONE_VB_RUN) };
 
             // === VG R3 piece 3 steps P3-3/P3-5 (plan D8): the POST-LATE readback snapshot. ===
             //
@@ -3321,13 +3296,13 @@ impl Renderer<'_> {
             // THIS PAIR runs whenever `!scene.path_vb_split()`), but NEITHER runs on a split
             // frame — mirrors `declare_vb_graph`'s matching branch.
             //
-            // VB-P1d: this three-way split is why the bench's `VbTimedPass::VbShade` bracket
+            // VB-P1d: this three-way split is why the bench's `ZONE_VB_SHADE` bracket
             // used to be recorded in ONLY the classified/fused arms (below) — a split frame RESET
             // a query pair it then never WROTE, and the `VK_QUERY_RESULT_WAIT_BIT` readback would
             // block forever on it. That hazard was held off by a caller-side precondition alone.
             //
             // It is now closed AT THE RECORDER: the split arm (further down, at the
-            // `vb_shade_split` dispatch) carries the SAME `VbTimedPass::VbShade` pair, so the
+            // `vb_shade_split` dispatch) carries the SAME `ZONE_VB_SHADE` pair, so the
             // bracket covers whichever of the THREE lit producers a frame selects and exactly one
             // begin/end pair is written per mesh-leg frame in every branch. A precondition on one
             // caller cannot protect a second one; writing the pair in every arm can.
@@ -3341,15 +3316,15 @@ impl Renderer<'_> {
                 // Rung R9b: the split DISPLACES the fused lit producer — `vb_shade_split`
                 // (recorded in the split arm after this block) is the sole lit producer;
                 // neither `vb_shade` nor `vb_resolve` records (mirrors the declarator). Its
-                // `VbTimedPass::VbShade` bracket is recorded THERE, not here.
+                // `ZONE_VB_SHADE` bracket is recorded THERE, not here.
             } else if scene.vb_use_classified {
                 // VB-P1d: open the VbShade bracket — this branch is the classified lit
                 // producer, mutually exclusive with the fused `vb_resolve` branch below (exactly
-                // one of the two ever records per frame), so the SAME `VbTimedPass::VbShade`
+                // one of the two ever records per frame), so the SAME `ZONE_VB_SHADE`
                 // pair is written by whichever runs. GATED (unarmed ⇒ no command).
                 // SAFETY: recording is open; `self.fns` is the live device fn-table; the
                 // pool was reset at the frame top; `fi` is this present's in-flight slot.
-                unsafe { ts.begin(self.fns, cmd, fi, VbTimedPass::VbShade) };
+                unsafe { ts.begin(self.fns, cmd, ZONE_VB_SHADE) };
                 // === Pass `vb_shade`: the material-classified shading compute pass (VB-P2
                 // classification plan rung P2c) — re-fetches geometry via the Decision-0 table
                 // (Set 2) for each classify-table pixel, shades, writes `lit` (STORAGE, extending
@@ -3518,13 +3493,13 @@ impl Renderer<'_> {
                 }
                 // VB-P1d: close the VbShade bracket. GATED (unarmed ⇒ no command).
                 // SAFETY: recording is open; the pool was reset this frame; `fi` is this slot.
-                unsafe { ts.end(self.fns, cmd, fi, VbTimedPass::VbShade) };
+                unsafe { ts.end(self.fns, cmd, ZONE_VB_SHADE) };
             } else {
                 // VB-P1d: open the VbShade bracket — the fused lit producer, mutually exclusive
                 // with the classified branch above (see that branch's own VB-P1d comment). GATED.
                 // SAFETY: recording is open; `self.fns` is the live device fn-table; the
                 // pool was reset at the frame top; `fi` is this present's in-flight slot.
-                unsafe { ts.begin(self.fns, cmd, fi, VbTimedPass::VbShade) };
+                unsafe { ts.begin(self.fns, cmd, ZONE_VB_SHADE) };
                 // === Pass `vb_resolve`: the FUSED resolve compute pass (Decision 5) — reads `vb_id`,
                 // re-fetches geometry via the Decision-0 table (Set 2), shades, writes `lit` (STORAGE,
                 // extending `vb_sky`'s COLOR write, C5). ===
@@ -3633,7 +3608,7 @@ impl Renderer<'_> {
                 }
                 // VB-P1d: close the VbShade bracket. GATED (unarmed ⇒ no command).
                 // SAFETY: recording is open; the pool was reset this frame; `fi` is this slot.
-                unsafe { ts.end(self.fns, cmd, fi, VbTimedPass::VbShade) };
+                unsafe { ts.end(self.fns, cmd, ZONE_VB_SHADE) };
             }
         }
 
@@ -4210,7 +4185,7 @@ impl Renderer<'_> {
             // byte-identical to the path that had no bracket here.
             // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
             // reset at the frame top (`reset_frame`); `fi` is this present's in-flight slot.
-            unsafe { ts.begin(self.fns, cmd, fi, VbTimedPass::VbShade) };
+            unsafe { ts.begin(self.fns, cmd, ZONE_VB_SHADE) };
             // SAFETY: recording is open; `record_vb_pass` records the `lit`
             // COLOR_ATTACHMENT→GENERAL + cascade/atlas + `ssao` GENERAL-read barriers for the
             // "vb_shade_split" pass into `cmd`.
@@ -4375,7 +4350,7 @@ impl Renderer<'_> {
             }
             // Close the SPLIT lit producer's VbShade bracket. GATED (unarmed ⇒ no command).
             // SAFETY: recording is open; the pool was reset this frame; `fi` is this slot.
-            unsafe { ts.end(self.fns, cmd, fi, VbTimedPass::VbShade) };
+            unsafe { ts.end(self.fns, cmd, ZONE_VB_SHADE) };
         }
 
         // === Pass `sdf_forward_march` — rung R10: the fused SDF march-then-shade COMPUTE pass,
@@ -5126,17 +5101,12 @@ impl Renderer<'_> {
             }
         }
 
-        // VG R3 piece 4 rung P4-1: THE TOTALITY EPILOGUE. Every `VbTimedPass` pair this frame did
-        // not bracket is closed here, so the `VK_QUERY_RESULT_WAIT_BIT` readback can never block
-        // on an unwritten query whatever leg this boot resolved. The one path that does not reach
-        // this line is the `vkBeginCommandBuffer` failure above, which returns BEFORE
-        // `reset_frame` — that frame resets nothing, writes nothing, returns `Err`, and its caller
-        // never reaches the readback. There is no third exit.
-        // SAFETY: recording is open (the `end_command_buffer` below is the first thing that
-        // closes it); no rendering scope is active here (the last `cmd_end_rendering` is far
-        // above, and the present-blit barriers just recorded are outside one); `self.fns` is the
-        // live device fn-table; `fi` is this present's in-flight slot.
-        unsafe { ts.finish(self.fns, cmd, fi) };
+        // The frame's seal. Until rung 7 this line was the totality epilogue and its placement was
+        // load-bearing — every unbracketed pair had to be filled before the `WAIT_BIT` readback
+        // could run. It records no command now, so the only thing left to say about the site is
+        // that a frame which returns early (the `vkBeginCommandBuffer` failure above, which returns
+        // BEFORE the pool reset) never claimed a ring slot and so has none to seal.
+        ts.finish();
 
         // SAFETY: recording is open; ending it matches the `begin` above.
         let raw = unsafe { (self.fns.end_command_buffer)(cmd) };
@@ -5189,7 +5159,7 @@ impl Renderer<'_> {
     ///
     /// # The timestamp bracket is INSIDE, and that is the point (VG R3 piece 4 rung P4-2)
     ///
-    /// [`VbTimedPass::VbHzbBuild`]'s pair is stamped at this fn's first and last statements, from
+    /// [`ZONE_VB_HZB_BUILD`]'s pair is stamped at this fn's first and last statements, from
     /// the `ts` the caller threads in. Setting the bits at the CALL SITES instead would restore
     /// exactly the premise-shaped guarantee rung P4-1 exists to delete: the mask would be a claim
     /// about this body made from outside it, and deleting a stamp in here would leave the witness
@@ -5222,7 +5192,7 @@ impl Renderer<'_> {
         // pool was reset at the frame top (`ts` was constructed after `reset_frame`, and it is the
         // caller's own witness); `fi` is this present's in-flight slot; this query is unwritten
         // since that reset — the two call sites are mutually exclusive, so this fn runs once.
-        unsafe { ts.begin(self.fns, cmd, fi, VbTimedPass::VbHzbBuild) };
+        unsafe { ts.begin(self.fns, cmd, ZONE_VB_HZB_BUILD) };
 
         // === VG R3 piece 1 step P1-8 (plan §5/§13, gate G8): the pyramid POISON clear. ===
         //
@@ -5422,7 +5392,7 @@ impl Renderer<'_> {
         // SAFETY: recording is open and no render-pass instance is active (nothing above opened
         // one); the pool was reset this frame; `fi` is this present's in-flight slot; this query is
         // unwritten since that reset (the begin above wrote the OTHER query of the pair).
-        unsafe { ts.end(self.fns, cmd, fi, VbTimedPass::VbHzbBuild) };
+        unsafe { ts.end(self.fns, cmd, ZONE_VB_HZB_BUILD) };
     }
 
     /// Rung R9b: the `vb_viewt` (viewt_from_depth_rz) pass-barriers + dispatch body, extracted

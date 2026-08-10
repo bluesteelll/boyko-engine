@@ -47,8 +47,21 @@ const PINNED: &[&str] = &[
     "crates/boyko_rhi_vulkan/src/rhi_impl/device.rs",
     // Documentation-only mentions of the blocking contract. They call nothing.
     "crates/boyko_rhi/src/device.rs",
-    "crates/boyko_app/src/gpu_scene/mod.rs",
-    "crates/boyko_app/tests/vb_bench_totality_gate.rs",
+    //
+    // ⚠️ TWO ROWS SHRANK HERE, and the pair is worth reading together. Both were doc-only mentions
+    // deleted by profiling rung 7, and the gate's `gone` clause is what noticed — deliberately, so
+    // that a list cannot keep reading as coverage it no longer has:
+    //   * `crates/boyko_app/tests/vb_bench_totality_gate.rs` — the FILE went at rung 7 step 3, and
+    //     this gate has been RED from that commit (`29b9b57e`) until step 5 asked it. That is the
+    //     SECOND time this same gate sat red across commits certified green (the `gpu_zone.rs` row
+    //     below records the first, five commits long). A gate is only as live as the sweep that
+    //     runs it, and `cargo test` stops at the first failing target unless `--no-fail-fast` is
+    //     passed — which is exactly how a red stays invisible while reports say otherwise.
+    //   * `crates/boyko_app/src/gpu_scene/mod.rs` — the mention lived in `read_vb_bench_ns`'s doc,
+    //     and rung 7 step 5 deleted the 31-line block step 3 had orphaned onto `sv0_bench_armed`.
+    //     `read_sv0_marcher_ticks` still BLOCKS, but it reaches the call through
+    //     `read_query_pool_ticks` and never names the entry point, so it is invisible to this
+    //     census — which is a limit of the instrument, recorded rather than papered over.
     // A module doc naming the FFI call its harness reaches THROUGH `read_query_pool_ns` — a
     // FROZEN blocking reader used correctly (it brackets exactly one pass and reads exactly that
     // pair, after the fence). Found by this gate on its first run, which is the behaviour the

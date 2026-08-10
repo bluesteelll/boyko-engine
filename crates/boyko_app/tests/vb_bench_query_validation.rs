@@ -1,10 +1,11 @@
 //! **VG R3 piece 4 rung P4-2 — the query-pool commands, adjudicated by the validation layer.**
 //!
 //! Rung P4-2 put seven new `vkCmdWriteTimestamp` brackets into the shipping VB recorder and grew
-//! the query pool 3 → 10 pairs. Every one of those commands is recorded ONLY under
-//! `BOYKO_VB_BENCH`, so **the bench-armed run is the only configuration in this repository that
+//! the query pool 3 → 10 pairs. Every one of those commands is recorded ONLY under the profiler's
+//! own knob — `BOYKO_VB_BENCH` when this file was written, `BOYKO_VB_ZONE` since profiling rung 7
+//! deleted that collector — so **the armed run is the only configuration in this repository that
 //! executes `vkCmdResetQueryPool` / `vkCmdWriteTimestamp` on the VB path at all**. Nothing else can
-//! see them: no golden pin arms the bench (the collector is `None` on every pinned frame, which
+//! see them: no golden pin arms the profiler (the recorder is `None` on every pinned frame, which
 //! records zero commands), and the barrier-stream baseline is a REPLICA of the declarator, blind to
 //! timestamps by construction.
 //!
@@ -14,7 +15,7 @@
 //!
 //! Two workers boot the SAME `vb_occ_mixed` scene, the SAME `VisibilityBuffer × Mesh` path and the
 //! SAME `HzbConfig::Build`, with validation **ON** (this gate removes `BOYKO_DISABLE_VALIDATION`
-//! from the child environment). They differ in exactly one variable: one has `BOYKO_VB_BENCH=1`.
+//! from the child environment). They differ in exactly one variable: one has `BOYKO_VB_ZONE=1`.
 //!
 //! | outcome | condition | verdict |
 //! |---|---|---|
@@ -47,7 +48,11 @@
 //!   between a timestamp and the work it brackets would be invisible here.
 //! * **Nothing about the NUMBERS.** It never reads a duration or an offset. Whether a bracket spans
 //!   the right commands is `vg_occ_split_timing.rs`'s question, from rung P4-6.
-//! * **Nothing on a golden frame.** No pin sets `BOYKO_VB_BENCH`, so on every pinned run the
+//! * **Nothing on a golden frame.** No pin arms the profiler, so on every pinned run the recorder
+//!   is `None`, zero query commands are recorded, and this gate's subject does not exist there.
+//!   ⚠️ This bullet was TRUNCATED mid-sentence by rung 7's own migration edit and read as an
+//!   unfinished thought for two commits — a doc defect no gate can see, because a comment compiles.
+//!
 //! # Profiling rung 7 — the ARMED LEG IS THE ZONE RECORDER, and the witness got stronger
 //!
 //! This gate used to arm `BOYKO_VB_BENCH` and take *"a `VB-P4 pass=` line exists"* as proof that the
@@ -104,7 +109,7 @@ mod vb_occ_mixed_scene;
 
 use vb_occ_mixed_scene::EXTENT;
 
-/// The `BOYKO_VB_BENCH=1` worker — the only configuration in the tree that records
+/// The `BOYKO_VB_ZONE=1` worker — the only configuration in the tree that records
 /// `vkCmdResetQueryPool` / `vkCmdWriteTimestamp` on the VB path.
 const WORKER_BENCH: &str = "vb_bench_query_validation_bench_worker";
 
@@ -133,7 +138,7 @@ const BENCH_FRAME_CAP: &str = "400";
 const VALIDATION_PREFIX: &str = "[vk-validation] ";
 
 /// The boot notice the `O2` decline path prints when the DEVICE cannot serve timestamps at all —
-/// then `BOYKO_VB_BENCH` arms no collector and the armed worker is not armed. INSTRUMENT-DEAD.
+/// then `BOYKO_VB_ZONE` arms no recorder and the armed worker is not armed. INSTRUMENT-DEAD.
 /// The run token the parent stamps into the armed worker's artifact, so a leftover from an
 /// earlier run is refused on the header rather than read as this run's witness.
 const RUN_TOKEN: &str = "vb-query-validation-1";
@@ -141,7 +146,7 @@ const RUN_TOKEN: &str = "vb-query-validation-1";
 const NO_TIMESTAMPS: &str = "device timestamps are unusable";
 
 /// The driver's private marker: how a worker tells "my driver spawned me" from "an `--ignored`
-/// sweep reached me". Keying on `BOYKO_VB_BENCH` alone would not do — the operator running these
+/// sweep reached me". Keying on `BOYKO_VB_ZONE` alone would not do — the operator running these
 /// gates has that variable in their shell, and the CONTROL worker must skip even then.
 const DRIVER_MARKER: &str = "BOYKO_VB_QUERY_VALIDATION_DRIVEN";
 
@@ -252,8 +257,8 @@ fn vb_bench_query_validation_control_worker() {
 /// **`BOYKO_DISABLE_VALIDATION` is REMOVED**, and that removal is this gate's whole subject. Every
 /// other GPU gate in this tree sets it (the layer is crash-prone here); this one must not, because
 /// the layer IS the oracle. The other removals keep the two workers one variable apart: a capture
-/// knob or the sibling bench would change the recorded stream, or refuse the boot outright — since
-/// rung P4-2 `BOYKO_VB_CULL_READBACK` and `BOYKO_VB_BENCH` are mutually exclusive and the armed
+/// knob or a sibling bench would change the recorded stream, or refuse the boot outright — since
+/// rung P4-2 `BOYKO_VB_CULL_READBACK` and the profiler's knob are mutually exclusive and the armed
 /// worker would panic at boot with an inherited one.
 fn spawn_worker(worker: &str, extra: &[(&str, &str)]) -> (String, bool) {
     let exe = std::env::current_exe().expect("invariant: the test binary knows its own path");
@@ -411,7 +416,7 @@ fn the_bench_armed_query_commands_add_no_validation_message() {
     // is not actually armed), never about this rung.
     if !bench_ok && !control_ok {
         let why = if bench_out.contains(NO_TIMESTAMPS) || control_out.contains(NO_TIMESTAMPS) {
-            "the device reports unusable timestamps, so BOYKO_VB_BENCH arms no collector"
+            "the device reports unusable timestamps, so BOYKO_VB_ZONE arms no recorder"
         } else {
             "both workers died with validation ON -- the standing note for this machine is that \
              the layer is crash-prone, and a boot on a host WITHOUT the layer fails with \
@@ -437,7 +442,7 @@ fn the_bench_armed_query_commands_add_no_validation_message() {
          identical to a flaky layer here: an abort reachable only from the ten-pair reset and the \
          twenty timestamp writes would take the armed worker down alone. Read both outputs below \
          and decide; do not re-run until it passes.\n\
-         ---- bench worker (BOYKO_VB_BENCH=1) ----\n{bench_out}\n\
+         ---- armed worker (BOYKO_VB_ZONE=1) ----\n{bench_out}\n\
          ---- control worker ----\n{control_out}"
     );
 

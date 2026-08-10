@@ -12,8 +12,8 @@ pub use crate::present::{
     InterpActivation, PASS_COUNT, PunctualDepthActivation, RcasActivation, Renderer,
     ResolvedRenderPathGpu, SCENE_MVP_BYTES, SV0_PASS_COUNT, SampledComposite, Scene,
     SmaaActivation, SsaaActivation, SsaoActivation, Surface, Sv0TimedPass, Sv0TimestampCollector,
-    Swapchain, SwapchainError, TaaActivation, TimedPass, TimestampCollector, UiPass, VB_PASS_COUNT,
-    VbTimedPass, VbTimestampCollector, ViewtFromDepthActivation, ViewtFromVbDepthActivation,
+    Swapchain, SwapchainError, TaaActivation, TimedPass, TimestampCollector, UiPass,
+    ViewtFromDepthActivation, ViewtFromVbDepthActivation,
 };
 #[cfg(feature = "hwrt")]
 pub use crate::present::{ShadowVisActivation, TlasBuildActivation};
