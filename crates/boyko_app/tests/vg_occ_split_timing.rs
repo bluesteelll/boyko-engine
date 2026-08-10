@@ -266,6 +266,8 @@
 #![cfg(windows)]
 
 use std::path::{Path, PathBuf};
+
+use boyko_app::profiling::artifact::{Artifact, ZoneLabel};
 use std::process::Command;
 use std::time::Instant;
 
@@ -686,24 +688,6 @@ fn key_f64(line: &str, key: &str) -> Option<f64> {
         .ok()
 }
 
-/// The `usize` after `key` on `line`.
-fn key_usize(line: &str, key: &str) -> Option<usize> {
-    let at = line.find(key)? + key.len();
-    line[at..]
-        .split_whitespace()
-        .next()?
-        .trim_end_matches(|c: char| !c.is_ascii_digit())
-        .parse()
-        .ok()
-}
-
-/// The text between `key`'s `[` and the next `]`.
-fn key_bracketed(line: &str, key: &str) -> Option<String> {
-    let at = line.find(key)? + key.len();
-    let close = line[at..].find(']')?;
-    Some(line[at..at + close].to_string())
-}
-
 impl BenchSummary {
     /// Parses one worker's merged stdout+stderr.
     ///
@@ -712,7 +696,7 @@ impl BenchSummary {
     /// On any missing line, naming the pass or the key and echoing the worker's whole output. A
     /// worker that completed and published nothing is an instrument failure, not a measurement, and
     /// there is no reduction that can recover from it.
-    fn parse(output: &str, who: &str) -> Self {
+    fn parse(art: &Artifact, output: &str, who: &str) -> Self {
         let mut median_ns = [0.0; PASS_COUNT];
         let mut mean_ns = [0.0; PASS_COUNT];
         let mut p95_ns = [0.0; PASS_COUNT];
@@ -721,55 +705,44 @@ impl BenchSummary {
         let mut flag: [Option<&'static str>; PASS_COUNT] = [None; PASS_COUNT];
         let mut n = [0usize; PASS_COUNT];
 
+        // Profiling rung 7: the six per-pass figures come from the artifact's zone rows.
+        //
+        // `ZONE_BASE_VB` is 0, so a `VbTimedPass` slot IS its zone id -- and `PASS_LABELS` was
+        // already indexed by slot, so the `pass label -> zone` table this migration was expected to
+        // need turned out to be the loop counter it already had. The labels stay, demoted from
+        // lookup keys to error-message text.
         for (slot, label) in PASS_LABELS.iter().enumerate() {
-            let needle = format!("VB-P4 pass={label} ");
-            let line = output.lines().find(|l| l.contains(&needle)).unwrap_or_else(|| {
+            let row = art.zones.iter().find(|z| z.zone as usize == slot).unwrap_or_else(|| {
                 panic!(
-                    "{who}: the worker printed no `{needle}` line. Either the bench never reached \
-                     its frame budget, or `VbTimedPass::label()` renamed slot {slot} and this \
-                     harness's PASS_LABELS went stale.\n---- worker output ----\n{output}"
+                    "{who}: the artifact carries no row for zone {slot} (`{label}`). Either the \
+                     window never reached its frame budget, or the recorder never bracketed that \
+                     pass.\n---- worker output ----\n{output}"
                 )
             });
-            median_ns[slot] = key_f64(line, "median_ns=")
-                .unwrap_or_else(|| panic!("{who}: `{label}` carries no median_ns=:\n  {line}"));
-            mean_ns[slot] = key_f64(line, "mean_ns=")
-                .unwrap_or_else(|| panic!("{who}: `{label}` carries no mean_ns=:\n  {line}"));
-            p95_ns[slot] = key_f64(line, "p95_ns=")
-                .unwrap_or_else(|| panic!("{who}: `{label}` carries no p95_ns=:\n  {line}"));
-            begin_off_ns[slot] = key_f64(line, "begin_off_ns=")
-                .unwrap_or_else(|| panic!("{who}: `{label}` carries no begin_off_ns=:\n  {line}"));
-            end_off_ns[slot] = key_f64(line, "end_off_ns=").unwrap_or_else(|| {
-                panic!(
-                    "{who}: `{label}` carries no end_off_ns=. That key is rung P4-6's fix for the \
-                     median-composition defect: a harness cannot reconstruct an END time by adding \
-                     the two medians beside it. A worker without it is pre-P4-6 shipping code, and \
-                     every end-time clause below would be reading a quantity no frame had.\n  {line}"
-                )
-            });
-            n[slot] = key_usize(line, "n=")
-                .unwrap_or_else(|| panic!("{who}: `{label}` carries no n=:\n  {line}"));
-            // TORN first: it dominates, and a line can only carry one suffix anyway.
-            flag[slot] = if line.contains(" TORN") {
-                Some("TORN")
-            } else if line.contains(" FALLBACK") {
-                Some("FALLBACK")
-            } else {
-                None
+            median_ns[slot] = row.median_ns;
+            mean_ns[slot] = row.mean_ns;
+            p95_ns[slot] = row.p95_ns;
+            begin_off_ns[slot] = row.begin_off_ns;
+            // `end_off_ns` is CARRIED, never `begin + median`: rung P4-6 measured that
+            // `median(off) + median(dur) != median(off + dur)` whenever the begin offset jitters,
+            // and it does. The artifact carries it for the same reason the printed line did.
+            end_off_ns[slot] = row.end_off_ns;
+            n[slot] = row.n as usize;
+            // The 2x2 label under the two names this harness already knows. `Lost` joins `Torn` on the
+            // dominating side: both mean "this row is not a number", which is what the clauses ask.
+            flag[slot] = match row.label {
+                ZoneLabel::Torn | ZoneLabel::Lost => Some("TORN"),
+                ZoneLabel::NotBracketed => Some("FALLBACK"),
+                ZoneLabel::Measured => None,
             };
         }
 
-        let regime = output.lines().find(|l| l.contains("VB-P4 regime ")).unwrap_or_else(|| {
-            panic!(
-                "{who}: the worker printed no `VB-P4 regime` line. Its provenance is what makes a \
-                 mid-run regime flip visible instead of averaged.\n---- worker output ----\n{output}"
-            )
-        });
-        let force_words = key_bracketed(regime, "observed=[")
-            .unwrap_or_else(|| panic!("{who}: the regime line has no observed=[..]:\n  {regime}"));
-        let mode_words = key_bracketed(regime, "mode=[")
-            .unwrap_or_else(|| panic!("{who}: the regime line has no mode=[..]:\n  {regime}"));
-        let n_distinct = key_usize(regime, "n_distinct=")
-            .unwrap_or_else(|| panic!("{who}: the regime line has no n_distinct=:\n  {regime}"));
+        // The regime provenance is the artifact's header census (rung 7, schema 3). It could not
+        // be derived from `workload_tag`: P4-4 made the regime a LIVE Resource, so a boot-frozen
+        // value cannot see a mid-run flip, which is the whole thing this triple exists to expose.
+        let force_words = art.header.regimes.clone();
+        let mode_words = art.header.modes.clone();
+        let n_distinct = art.header.regime_n_distinct as usize;
 
         // Clause 9's other operand. Parsed — not ignored — because rung P4-1's guarantee that this
         // line stays BYTE-IDENTICAL is only worth something while something still reads it.
@@ -1126,9 +1099,23 @@ fn per_frame_us(fixture: Fixture, leg: Leg, k: u32, long_frames: u32) -> f64 {
 /// output streams are merged: the `VB-P4`/`VB-P1d` lines are `println!` while the runner's scope
 /// notes and panics are `eprintln!`, and no clause below cares which stream carried its evidence.
 fn bench_summary(fixture: Fixture, leg: Leg, k: u32, bench_frames: u32) -> Option<BenchSummary> {
+    // One file per worker, chosen and deleted by the PARENT: this driver spawns many children and
+    // a shared path is a stale-read generator (`artifact.rs`'s Decision 2/3).
+    let mut artifact = std::env::temp_dir();
+    artifact.push(format!("boyko_vg_occ_{}_{}_k{k}.toml", fixture.name(), leg.name()));
+    let _ = std::fs::remove_file(&artifact);
+    let token = format!("vg-occ-{}-{}-k{k}", fixture.name(), leg.name());
     let mut cmd = base_worker_cmd(fixture, leg, k);
     cmd.args(["--nocapture"])
-        .env("BOYKO_VB_BENCH", "1")
+        // Profiling rung 7: the ZONE recorder, and a per-worker artifact the parent names and
+        // stamps. `boot` refuses this knob beside `BOYKO_VB_BENCH`, so the old one is removed
+        // rather than assumed unset -- an operator's stale shell variable would otherwise fail
+        // every worker at boot with a message about a configuration this driver never asked for.
+        .env("BOYKO_VB_ZONE", "1")
+        .env_remove("BOYKO_VB_BENCH")
+        .env("BOYKO_PROFILE_ARTIFACT", &artifact)
+        .env("BOYKO_PROFILE_RUN_TOKEN", &token)
+        .env("BOYKO_PROFILE_WORKLOAD", format!("{}_{}_k{k}", fixture.name(), leg.name()))
         .env("BOYKO_VB_BENCH_FRAMES", bench_frames.to_string())
         .env_remove("BOYKO_WINDOW_FRAMES");
     let out = cmd.output().expect("invariant: the timing worker spawns");
@@ -1143,7 +1130,15 @@ fn bench_summary(fixture: Fixture, leg: Leg, k: u32, bench_frames: u32) -> Optio
         "{who}: the bench worker exited {}.\n---- worker output ----\n{merged}",
         out.status
     );
-    Some(BenchSummary::parse(&merged, &who))
+    // Read with the token the parent chose: a leftover from an earlier worker is refused on the
+    // header rather than folded into this one's numbers.
+    let art = Artifact::read(&artifact, &token).unwrap_or_else(|e| {
+        panic!("{who}: the worker completed but its artifact is unusable: {e}
+---- worker output ----
+{merged}")
+    });
+    let _ = std::fs::remove_file(&artifact);
+    Some(BenchSummary::parse(&art, &merged, &who))
 }
 
 // ===============================================================================================

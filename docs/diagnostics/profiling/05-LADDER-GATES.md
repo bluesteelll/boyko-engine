@@ -177,7 +177,7 @@ has six consumers, not one:
 
 | File | What it consumes | Migration |
 |---|---|---|
-| `crates/boyko_app/tests/vg_occ_split_timing.rs` | `VB-P4 pass=…`, `VB-P4 regime …` | reads the artifact's per-zone rows |
+| `crates/boyko_app/tests/vg_occ_split_timing.rs` | `VB-P4 pass=…`, `VB-P4 regime …` | ✅ **MIGRATED.** Per-pass figures from the zone rows (slot IS the zone id, so the mapping was already the loop counter), regime triple from the header census. The driver arms `BOYKO_VB_ZONE`, names and stamps one artifact per worker, and deletes it. Two stdout parsers (`key_usize`, `key_bracketed`) lost their last caller and are DELETED — rung 7's subtraction arriving on its own |
 | `crates/boyko_app/tests/vb_bench_totality_gate.rs` | printed totality lines | reads the artifact; its own mechanism is retired (replaced by G2a/G2b) |
 | `crates/boyko_app/tests/vb_bench_query_validation.rs` | the printed line as a **liveness witness** that the reset and every timestamp write executed | ✅ **MIGRATED.** Armed leg is `BOYKO_VB_ZONE` (the gate's subject is the profiler's query commands, and after this rung the profiler IS the zone recorder); liveness is the artifact's label census. MEASURED: **280 measured pairs / 560 timestamp writes**, where the old witness proved only that one summary line existed |
 | `crates/boyko_app/tests/vg_decidability_floor.rs` | **the shipped bench's own stdout** (`field_after`/`extract` over a `VB-P1d ` line) | ✅ **MIGRATED.** Runs `BOYKO_VB_ZONE`, reads per-session artifacts the parent names/stamps/deletes, takes each zone's MEDIAN. **This is why rung 7b exists**: it is the floor instrument, and its output is the input to D11's band |
