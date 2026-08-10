@@ -45,6 +45,11 @@ hwrt = ["boyko-render/hwrt"]
 # host build without it threads the same `Option<&CommandWitness>` and every increment at the
 # record sites compiles to nothing, so the census cannot perturb a shipped or golden frame.
 profiling-census = ["boyko-render/profiling-census"]
+# Profiling rung 8: installs a counting `#[global_allocator]` (`profiling::alloc_shim`) and states
+# its presence in the artifact. Default OFF, and it MUST stay off in any sweep: a binary may declare
+# only one global allocator, so this conflicts with every test binary that installs its own -- the
+# nineteen zero-alloc gates and `runner.rs`'s own test module. MEASURED, not predicted.
+profiling-alloc = []
 
 [dev-dependencies]
 # The zero-alloc gate reads the uploaded instance bytes back via `bytes_of`.

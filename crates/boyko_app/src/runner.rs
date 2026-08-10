@@ -2549,6 +2549,10 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     let frames = r.frames();
                     let (zones, census) = r.finish();
                     let session = boyko_diag::clock::session_id();
+                    // Snapshotted HERE and not inside the literal: the three counts must come
+                    // from one read, or a concurrent allocation could land between two of them and
+                    // publish an `allocs` that its own `bytes` is missing from.
+                    let alloc = crate::profiling::alloc_shim::snapshot();
                     let art = crate::profiling::artifact::Artifact {
                         header: crate::profiling::artifact::ArtifactHeader {
                             schema_version: crate::profiling::artifact::ARTIFACT_SCHEMA_VERSION,
@@ -2588,6 +2592,13 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                             // request -- a file recording what was asked for would attribute a
                             // refresh-bounded frame time to a tearing present.
                             present_mode: host.swapchain.present_mode().as_str().to_owned(),
+                            // Rung 8: the allocation shim's own statement. `armed` is false in
+                            // every shipped build, and it is what tells a zero count from an
+                            // absent counter.
+                            alloc_shim: alloc.armed,
+                            alloc_allocs: alloc.allocs,
+                            alloc_deallocs: alloc.deallocs,
+                            alloc_bytes: alloc.bytes,
                         },
                         zones,
                         census,
@@ -3098,7 +3109,9 @@ mod tests {
     //! window, no device — asserting the drained messages land in the queue via
     //! `translate_win32*`, and that a warm ingest allocates nothing.
 
+    #[cfg(not(feature = "profiling-alloc"))]
     use std::alloc::{GlobalAlloc, Layout, System};
+    #[cfg(not(feature = "profiling-alloc"))]
     use std::cell::Cell;
 
     use boyko_input::win32::{WM_KEYDOWN, WM_KEYUP};
@@ -3163,13 +3176,16 @@ mod tests {
     // therefore THREAD-LOCAL: only the measuring thread's allocations count, so
     // the assertion is robust to concurrent siblings without `--test-threads=1`.
 
+    #[cfg(not(feature = "profiling-alloc"))]
     thread_local! {
         static COUNTING: Cell<bool> = const { Cell::new(false) };
         static ACQUISITIONS: Cell<usize> = const { Cell::new(0) };
     }
 
+    #[cfg(not(feature = "profiling-alloc"))]
     struct CountingAlloc;
 
+    #[cfg(not(feature = "profiling-alloc"))]
     #[inline]
     fn note_alloc() {
         // `try_with`: during thread teardown the TLS may be gone — then skip
@@ -3183,6 +3199,7 @@ mod tests {
 
     // SAFETY: pure delegation to `System` with a thread-local counter side-effect;
     // the layout/pointer contracts are forwarded unchanged.
+    #[cfg(not(feature = "profiling-alloc"))]
     unsafe impl GlobalAlloc for CountingAlloc {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             note_alloc();
@@ -3205,12 +3222,27 @@ mod tests {
         }
     }
 
+    // ⚠️ A binary may declare exactly ONE global allocator, and profiling rung 8's
+    // `profiling::alloc_shim` declares one under `profiling-alloc`. Without this `cfg` the two
+    // collide and `cargo check -p boyko-app --features profiling-alloc --all-targets` is a HARD
+    // BUILD FAILURE -- measured, with the error naming this very line.
+    //
+    // Excluding this one under that feature is better than leaving the feature un-checkable: the
+    // production shim is a perfectly good counter, it is just PROCESS-global where this one is
+    // THREAD-local, so the test below cannot use it and is excluded with it. What is lost in that
+    // configuration is the zero-alloc assertion, not its subject -- the default build, which is
+    // every sweep and every CI leg, still runs it.
+    #[cfg(not(feature = "profiling-alloc"))]
     #[global_allocator]
     static ALLOC: CountingAlloc = CountingAlloc;
 
     /// A warm bridge (queue preallocated) ingesting a mixed key + mouse batch
     /// allocates ZERO heap (`push_raw` writes the existing ring; the pure
     /// translate is stack POD).
+    /// ⚠️ Excluded under `profiling-alloc`, with the thread-local shim it measures through — see
+    /// that shim's `cfg`. The assertion is unchanged in every other configuration, which is every
+    /// sweep and every CI leg.
+    #[cfg(not(feature = "profiling-alloc"))]
     #[test]
     fn ingest_captured_is_alloc_free_when_warm() {
         let mut queue = RawInputQueue::with_capacity(64);

@@ -1556,11 +1556,45 @@ the slot from the zone two lines earlier, so the assert compared `slot_of(zone)`
 by trying to produce its RED. **The fix for two values that must agree is not to check them, it is
 to have one**: `mark_begin`/`mark_end` now take the zone alone and derive the slot themselves.
 
-**What rung 8 still owes:** the optional `profiling-alloc` feature. The per-zone counts reach the
-printed census line today; carrying them into the ARTIFACT needs a per-frame ring, because the
-witness is reset each frame while `retire` yields a frame recorded ~4 frames earlier. That ring is
-the same mechanism the owner's per-frame view needs (a channel that does not reduce to medians), and
-it belongs with that work rather than being built twice. The `NotResolvedReason`
+✅ **`profiling-alloc` SHIPPED — and the artifact STATES the perturbation, which is the whole of
+what the disposition asked for.**
+
+`boyko_app::profiling::alloc_shim`, default off. Under the feature it installs a counting
+`#[global_allocator]`; `snapshot()` compiles in both configurations and carries an **`armed` flag**,
+so a zero is never ambiguous between *"this build has no counter"* and *"this run allocated
+nothing"* — one is a claim about the build, the other about the engine. **Schema 7** carries
+`alloc_shim` plus three counts. **Measured on two real runs:**
+
+| run | `alloc_shim` | allocs | deallocs | bytes |
+|---|---|---|---|---|
+| `--features profiling-alloc` | `true` | 2797 | 1976 | 12 231 783 |
+| default | `false` | 0 | 0 | 0 |
+
+⚠️ **THE COLLISION WAS MEASURED, NOT PREDICTED, AND THE FIRST FIX WAS THE WRONG ONE.** A binary may
+declare exactly ONE `#[global_allocator]`, and `runner.rs`'s own `#[cfg(test)]` module declares a
+thread-local counting shim. With the feature on, `cargo check -p boyko-app --features
+profiling-alloc --all-targets` was a **hard build failure** naming both lines. The reflex was to
+document it — *"never add this to a sweep's flag set"* — which leaves the feature permanently
+un-checkable with `--all-targets`, i.e. a configuration nothing can build. The fix is to make the
+test shim `#[cfg(not(feature = "profiling-alloc"))]` along with the one test that measures through
+it: **both configurations now build and lint clean**, and what the armed one loses is that single
+zero-alloc assertion, not its subject.
+
+**What the shim cannot claim, in the module's own doc rather than a report:** the counters are
+process totals from start-up, so an allocation by the window pump, a driver thread or the artifact
+writer itself is in them; the numbers are not comparable with an unarmed run's; and `WorkloadTag`
+does not cover the flag, so a floor and a leg that disagreed about it would compare as though they
+agreed. **`#[cfg]`-exclusion at the retail tier is NOT implemented** — the tier axis is rung 14, so
+today the exclusion is the feature being off, which is weaker. Recorded rather than claimed.
+
+**RUNG 8 IS COMPLETE.** `Floor`/`Twin`/`resolve`/`Contrast`, `G4c`, D12's present mode, the
+per-zone `vkCmd*` counters and `profiling-alloc` have all landed, with their REDs run.
+
+⚠️ **One deliverable is deliberately deferred rather than done:** the per-zone command counts reach
+the printed census today but not the ARTIFACT, because the witness resets each frame while `retire`
+yields a frame recorded ~4 frames earlier — carrying them needs a per-frame ring. That ring is the
+same mechanism a per-frame view needs (a channel that does not reduce to medians), and it belongs
+with that work rather than being built twice. The `NotResolvedReason`
 round-trip through the wire words is gated; a verdict is not yet written into an artifact, which is
 a separate seam from `G4c`'s drop census and belongs with whatever first publishes one.
 

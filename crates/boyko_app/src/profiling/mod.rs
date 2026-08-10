@@ -17,12 +17,17 @@
 //! header whose `workload_tag` is derived from `boyko_render::ResolvedRenderPath`, a type the
 //! kernel cannot see and must not learn to.
 //!
+//! [`alloc_shim`] is rung 8's opt-in allocation counter — the one place the profiler installs a
+//! `#[global_allocator]`, and only when `profiling-alloc` asks. Its module doc states what a
+//! process-wide counter cannot claim.
+//!
 //! Compiled unconditionally rather than behind `profiling-analysis`. Rung 5c measured why: features
 //! unify per PACKAGE, and a `#[cfg]` on a type that another crate's construction site names makes
 //! the workspace stop compiling for a reason no crate's source shows. What the feature gates is the
 //! *cost* — the counter increments at the recorders' record sites — and a type nobody constructs
 //! costs nothing.
 
+pub mod alloc_shim;
 pub mod artifact;
 pub mod contrast;
 pub mod reduce;

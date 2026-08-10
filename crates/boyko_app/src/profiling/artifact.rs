@@ -150,7 +150,7 @@ use std::path::Path;
 /// `2` since rung 7c's tag split: a v1 file carries no `content_tag`, and reading one as if the
 /// field were merely empty would hand a floor exactly the "declared nothing" state
 /// [`Artifact::floor_source`] exists to refuse.
-pub const ARTIFACT_SCHEMA_VERSION: u32 = 6;
+pub const ARTIFACT_SCHEMA_VERSION: u32 = 7;
 
 /// The **derived, unforgeable** half of a workload tag: everything about the boot-resolved
 /// configuration that the engine itself knows.
@@ -272,6 +272,25 @@ pub struct ArtifactHeader {
     pub regimes: String,
     /// The same for the occlusion MODE words.
     pub modes: String,
+    /// **Whether the allocation-counting shim was installed** — profiling rung 8's
+    /// `profiling-alloc`, and the corpus's *"its perturbation is stated in the artifact when on"*.
+    ///
+    /// The FLAG and not only the counts, for the reason the label census carries labels: a zero
+    /// count under `false` means this build has no counter, and under `true` it means the run
+    /// allocated nothing. One is a claim about the build and the other about the engine.
+    ///
+    /// ⚠️ **`true` marks the whole artifact as a DIAGNOSTIC-MODE reading.** The shim adds two
+    /// atomic read-modify-writes per allocation, process-wide; its timings are not comparable with
+    /// an unarmed run's, and `WorkloadTag` does not cover it, so a floor and a leg that disagree
+    /// here would compare as if they agreed.
+    pub alloc_shim: bool,
+    /// Allocations since process start, or `0` when [`Self::alloc_shim`] is `false`.
+    pub alloc_allocs: u64,
+    /// Deallocations, same condition.
+    pub alloc_deallocs: u64,
+    /// Bytes REQUESTED by those allocations — not what the allocator reserved, which this shim
+    /// cannot see.
+    pub alloc_bytes: u64,
     /// **The present mode this boot RESOLVED to** — profiling rung 8, D12. The wire word from
     /// `PresentModeConfig::as_str`.
     ///
@@ -458,6 +477,10 @@ impl Artifact {
         let _ = writeln!(s, "modes = \"{}\"", h.modes);
         let _ = writeln!(s, "regime_n_distinct = {}", h.regime_n_distinct);
         let _ = writeln!(s, "present_mode = \"{}\"", h.present_mode);
+        let _ = writeln!(s, "alloc_shim = {}", h.alloc_shim);
+        let _ = writeln!(s, "alloc_allocs = {}", h.alloc_allocs);
+        let _ = writeln!(s, "alloc_deallocs = {}", h.alloc_deallocs);
+        let _ = writeln!(s, "alloc_bytes = {}", h.alloc_bytes);
         let c = &self.census;
         let _ = writeln!(s, "census_measured = {}", c.measured);
         let _ = writeln!(s, "census_not_bracketed = {}", c.not_bracketed);
@@ -637,6 +660,10 @@ impl Artifact {
         let mut instrument = None;
         let mut precision_decimals = None;
         let mut present_mode: Option<String> = None;
+        let mut alloc_shim: Option<bool> = None;
+        let mut alloc_allocs: Option<u64> = None;
+        let mut alloc_deallocs: Option<u64> = None;
+        let mut alloc_bytes: Option<u64> = None;
         let mut census = LabelCensus::default();
         let mut zones: Vec<ZoneRow> = Vec::new();
         let mut cur: Option<PartialZone> = None;
@@ -714,6 +741,10 @@ impl Artifact {
                 "modes" => modes = Some(unquote(v).to_owned()),
                 "regime_n_distinct" => regime_n_distinct = v.trim().parse().ok(),
                 "present_mode" => present_mode = Some(unquote(v).to_owned()),
+                "alloc_shim" => alloc_shim = Some(v.trim() == "true"),
+                "alloc_allocs" => alloc_allocs = v.trim().parse().ok(),
+                "alloc_deallocs" => alloc_deallocs = v.trim().parse().ok(),
+                "alloc_bytes" => alloc_bytes = v.trim().parse().ok(),
                 "instrument" => {
                     instrument =
                         Some(Instrument::parse(unquote(v)).ok_or_else(|| bad("unknown instrument"))?);
@@ -758,6 +789,14 @@ impl Artifact {
                 // writer, and defaulting it to `fifo` would invent the one value that makes a
                 // refresh-bounded wall clock look explicable.
                 present_mode: present_mode.ok_or(ArtifactError::BadHeader("present_mode"))?,
+                // The FLAG is required for `content_tag`'s reason -- an absent key would default to
+                // "no shim", the one value that makes a diagnostic-mode artifact look like a clean
+                // one. The three COUNTS default to zero, because a `false` flag already says they
+                // mean nothing and requiring them would refuse a writer that had nothing to say.
+                alloc_shim: alloc_shim.ok_or(ArtifactError::BadHeader("alloc_shim"))?,
+                alloc_allocs: alloc_allocs.unwrap_or(0),
+                alloc_deallocs: alloc_deallocs.unwrap_or(0),
+                alloc_bytes: alloc_bytes.unwrap_or(0),
             },
             zones,
             census,
