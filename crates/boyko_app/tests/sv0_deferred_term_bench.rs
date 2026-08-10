@@ -1,3 +1,13 @@
+//! ⚠️ **Profiling rung 7 — this file's migration is a RELABELLING, not a re-pointing.** The corpus's
+//! consumer list says it *"reads stdout"* and must be migrated to read the artifact. MEASURED
+//! before a line was changed: it contains **zero** `Command::new`, `.output()` or `stdout` — it
+//! never reads a child at runtime at all. What it holds are TRANSCRIPTIONS of lines the harness
+//! printed, checked by device-free arithmetic. So rung 7 does not re-point it; rung 7 retires the
+//! producer it documents, which makes its numbers a record of a retired instrument and its
+//! invocation recipe below obsolete at the deletion commit. Same disposition as
+//! `vb_bench_totality_gate.rs`, reached for the same reason and by the same measurement: the second
+//! consumer list described what these files were ABOUT rather than what they DO.
+//!
 //! **VB-SV0 rung S1.5 — the cost falsifier** (`docs/VB-SV0-SDF-SHADOW-PLAN.md` §6 "S1.5"): a
 //! COUNTERBALANCED interleaved A/B of the SHIPPED Deferred SDF soft-shadow + contact-AO term, on
 //! S1's fixture scene, with ZERO new shader code.
@@ -403,6 +413,15 @@ const SV0_LATTICE_MIN_DISTINCT_TICKS: usize = 7;
 // ===========================================================================================
 //
 // Every literal in this block is a TRANSCRIPTION of a `VB-SV0-S1.5 …` line the harness printed.
+//
+// ⚠️ PROFILING RUNG 7 RETIRES THE HARNESS THAT PRINTED THEM. These numbers therefore become a
+// record of a measurement taken on an instrument this tree no longer contains — the runner's
+// `BOYKO_SV0_BENCH` ABBA loop and its stdout line. They are kept because the FINDINGS they support
+// (the quantisation floor, the order-bias bound, the confound set) are about the GPU and the
+// protocol rather than about the printer, and because the arithmetic gates below are device-free
+// and still run. But by this repository's own rule — a result established on a different instrument
+// bounds nothing about this one — **a re-measurement on the artifact channel would produce new
+// numbers, not a confirmation of these**, and any rung that needs a CURRENT figure must take one.
 // The standing discipline: a measured literal may be RE-measured, never adjusted. If a gate below
 // fails, the finding is that the gate failed — the remedy is the fixture, the protocol or an
 // abort under §7, never the number.
