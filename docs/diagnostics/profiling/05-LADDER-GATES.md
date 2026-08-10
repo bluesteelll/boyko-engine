@@ -1202,6 +1202,30 @@ nothing left to compare — the same disposition `vb_bench_totality_gate.rs` alr
 for the same reason, and it means the second list's blanket *"reads the artifact's per-zone rows"*
 was true of eight clauses out of nine.
 
+#### The deletion order rung 7c CHANGED, found on opening the subtraction
+
+All six consumers are migrated, so the printed channel has no reader and the deletions are
+unblocked — **except in one place the corpus's plan does not have, because rung 7c created it.**
+
+`gpu_timing.rs`'s 713 lines are to be deleted with `VbTimedPass`. But rung 7c made the **zone leg**
+consult `VbTimedPass::begin_stage()` — `vb.rs:410`, and the file names the enum 40 times. That call
+is the fix for the port's silently-changed pipeline stages, so it cannot simply go: **the stage
+table must MOVE before the enum can die**, and it must land wherever the zone ids are defined, since
+after the deletion `ZONE_BASE_VB + slot` is the only vocabulary left.
+
+This is a genuine ordering constraint and it did not exist when the deletion was planned. Recorded
+before any line was cut, because the cheap-looking order — delete the collector, then discover the
+recorder needed one of its methods — ends with the stage table re-derived under pressure, which is
+exactly how the seven brackets acquired the wrong stage in the first place.
+
+**Order, corrected:**
+1. Move `begin_stage`'s table to the zone-id module (`gpu_zone.rs`), keyed by zone id rather than by
+   pass — one const array, and `G10`'s stage clause is already the gate on it.
+2. Delete the runner harness (1381 lines) and the print sites; the `rg` gates then pass.
+3. Delete `gpu_timing.rs` (713) and `gpu_scene/mod.rs`'s arming (465).
+4. Delete `vb_bench_totality_gate.rs` **last** — both its gates lose their subject in step 2/3, and
+   deleting it before them would drop live coverage of code still shipping.
+
 #### Rung 7c, second half — the workload tag, and a mechanism the corpus described as if it existed
 
 ⚠️ **`Floor`, `resolve`, `FloorWorkloadMismatch` and `NotResolved` are not code.** `rg` over
