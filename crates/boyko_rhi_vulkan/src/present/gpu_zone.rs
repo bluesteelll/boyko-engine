@@ -237,6 +237,47 @@ const _: () = assert!(
     "the VB witness masks are u16 — one bit per zone id — and the family must fit its base spacing"
 );
 
+// === The gbuffer and SV0 families — profiling rung 7, step 6c. ===
+//
+// What is left of `TimedPass` and `Sv0TimedPass`, on the terms the VB block above records. Both
+// families open at `TOP_OF_PIPE`, which is what their collectors' `write_begin` always did.
+
+/// HW-RT rung R0: the DDGI probe-update dispatch.
+pub const ZONE_GBUF_DDGI_UPDATE: u16 = ZONE_BASE_GBUFFER;
+/// HW-RT rung R0: the deferred resolve dispatch, INCLUDING its inline SDF soft-shadow march — R0
+/// brackets passes, not shader sections.
+pub const ZONE_GBUF_DEFERRED_RESOLVE: u16 = ZONE_BASE_GBUFFER + 1;
+/// HW-RT rung R0: the CSM cascade depth pass. Mesh-leg-owned, so a `Deferred × Sdf` frame never
+/// records it — under the zone recorder that is a `NotBracketed` label rather than a hang.
+pub const ZONE_GBUF_CSM_DEPTH: u16 = ZONE_BASE_GBUFFER + 2;
+/// HW-RT rung R0: the punctual spot/point atlas depth pass. Mesh-leg-owned, like the cascade above.
+pub const ZONE_GBUF_PUNCTUAL_DEPTH: u16 = ZONE_BASE_GBUFFER + 3;
+
+/// How many zone ids the gbuffer family uses.
+pub const GBUF_ZONE_COUNT: u16 = 4;
+
+/// VB-SV0 rung S1.5: the Deferred fine-marcher dispatch (`sdf_gbuffer_composite.hlsl`).
+///
+/// Bracketed inside the recorder's `if let Some(marcher_pass)` arm, i.e. on exactly the frames the
+/// dispatch is recorded. ⚠️ A render path that does not dispatch the marcher therefore leaves this
+/// pair UNWRITTEN. That used to be a caller precondition, because the collector's readback waited on
+/// it forever; the zone recorder labels it and moves on, which is what the port bought.
+pub const ZONE_SV0_MARCHER: u16 = ZONE_BASE_SV0;
+
+/// How many zone ids the SV0 family uses.
+pub const SV0_ZONE_COUNT: u16 = 1;
+
+// One assert per family and not a conjunction: the widths are independent, so an `&&` would let the
+// wider one imply the narrower and clippy is right to call the second conjunct dead.
+const _: () = assert!(
+    GBUF_ZONE_COUNT <= ZONE_FAMILY_WIDTH,
+    "the gbuffer family no longer fits its reserved zone-id range"
+);
+const _: () = assert!(
+    SV0_ZONE_COUNT <= ZONE_FAMILY_WIDTH,
+    "the SV0 family no longer fits its reserved zone-id range"
+);
+
 /// **The BEGIN stage of a zone, keyed by ZONE ID.** Rung 7's home for the table that lived on
 /// `VbTimedPass::begin_stage`.
 ///

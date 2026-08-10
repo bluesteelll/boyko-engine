@@ -17,33 +17,21 @@ use crate::memory::BoundBuffer;
 use crate::texture::{MAX_CASCADES, MAX_TEXTURE_LAYERS};
 
 use super::super::frame_driver::Renderer;
-use super::super::gpu_timing::{
-    PASS_COUNT, SV0_PASS_COUNT, Sv0TimedPass, Sv0TimestampCollector, TimedPass, TimestampCollector,
-};
+// Profiling rung 7 step 6c: the two families' ids and their counts now come from `gpu_zone`, where
+// `zone_begin_stage` is keyed by the same id — one vocabulary, not two pass enums and a mapping.
+// The reserved-width asserts moved there too, beside the counts they constrain.
 use super::super::gpu_zone::{
-    GpuZoneRecorder, ZONE_BASE_GBUFFER, ZONE_BASE_SV0, ZONE_FAMILY_WIDTH,
+    GBUF_ZONE_COUNT, GpuZoneRecorder, SV0_ZONE_COUNT, ZONE_BASE_GBUFFER, ZONE_BASE_SV0,
+    ZONE_GBUF_CSM_DEPTH, ZONE_GBUF_DDGI_UPDATE, ZONE_GBUF_DEFERRED_RESOLVE,
+    ZONE_GBUF_PUNCTUAL_DEPTH, ZONE_SV0_MARCHER, zone_begin_stage,
 };
 
 #[cfg(feature = "profiling-census")]
 use super::super::command_witness::CommandWitness;
 
-// Profiling rung 6: each family's ids are `base + slot`, so a family that outgrew its reserved
-// width would start naming another family's passes. A build failure, beside the counts it
-// constrains — rung 7 deletes both enums and takes these with them.
-// TWO asserts and not one conjunction: the families have independent widths and independent bases,
-// so an `&&` would let the wider one imply the narrower and clippy is right to call the second
-// conjunct dead. Two items are two claims, and each reds for its own family.
-const _: () = assert!(
-    PASS_COUNT <= ZONE_FAMILY_WIDTH as u32,
-    "TimedPass no longer fits its reserved zone-id range"
-);
-const _: () = assert!(
-    SV0_PASS_COUNT <= ZONE_FAMILY_WIDTH as u32,
-    "Sv0TimedPass no longer fits its reserved zone-id range"
-);
 
 /// Slots [`GbufWitness`] tracks: the four software-ray passes, then the SV0 marcher.
-const GBUF_SLOTS: usize = (PASS_COUNT + SV0_PASS_COUNT) as usize;
+const GBUF_SLOTS: usize = (GBUF_ZONE_COUNT + SV0_ZONE_COUNT) as usize;
 
 /// Profiling rung 6 — `record_gbuffer`'s bracket carrier, the sibling of `vb.rs`'s `TsWitness`.
 ///
@@ -70,25 +58,21 @@ const GBUF_SLOTS: usize = (PASS_COUNT + SV0_PASS_COUNT) as usize;
 /// both be armed; the zone recorder replaces BOTH, so it arms only when neither does — F17's
 /// *"never both armed in one frame"*, applied to a leg that is two collectors wide.
 struct GbufWitness<'a> {
-    /// The four software-ray passes' collector. `None` on every golden/host/interactive frame.
-    tc: Option<&'a TimestampCollector>,
-    /// The SV0 marcher's collector, armed by its own knob and independent of [`Self::tc`].
-    sv0: Option<&'a Sv0TimestampCollector>,
-    /// The NEW leg — the frame's zone recorder and the ring slot it opened.
+    /// The frame's zone recorder and the ring slot it opened — since rung 7 step 6c the only leg.
     zr: Option<(&'a GpuZoneRecorder, usize)>,
     /// The command census, fed by every leg through these same call sites.
     #[cfg(feature = "profiling-census")]
     cw: Option<&'a CommandWitness>,
-    /// Bit `k` set when slot `k`'s BEGIN was recorded (`0..PASS_COUNT` = [`TimedPass`], then
-    /// [`Sv0TimedPass`]).
+    /// Bit `k` set when slot `k`'s BEGIN was recorded: `0..GBUF_ZONE_COUNT` is the gbuffer family,
+    /// then the SV0 one.
     begun: u16,
     /// Bit `k` set when slot `k`'s END was recorded.
     ended: u16,
     /// Zone leg only: the pair index `alloc_pair` handed slot `k`, or [`Self::NO_PAIR`].
     ///
     /// REMEMBERED, not derived — rung 5c measured why: the open order is not the slot order (here
-    /// `Marcher` opens FIRST, at `:1236`, before every `TimedPass`), so a `count_ones` of the bits
-    /// below a slot is not that slot's open index.
+    /// the marcher opens FIRST, before every gbuffer pass), so a `count_ones` of the bits below a
+    /// slot is not that slot's open index.
     pair_of: [u16; GBUF_SLOTS],
 }
 
@@ -112,19 +96,12 @@ impl<'a> GbufWitness<'a> {
         scene: &'s GBufferScene<'a>,
         fns: &crate::device::DeviceFns,
         cmd: VkCommandBuffer,
-        fi: usize,
+        _fi: usize,
     ) -> GbufWitness<'a> {
-        let tc = scene.gpu_timing;
-        let sv0 = scene.sv0_gpu_timing;
-        let old_armed = tc.is_some() || sv0.is_some();
-        debug_assert!(
-            !(old_armed && scene.gpu_zone.is_some()),
-            "invariant: at most one GPU collector leg is armed per frame (F17: the A/B is serial)"
-        );
+        // Profiling rung 7 step 6c deleted both old collectors, so there is one leg left and no
+        // exclusivity to assert — the same subtraction step 5 made in `vb.rs`.
         let ts = GbufWitness {
-            tc,
-            sv0,
-            zr: if old_armed { None } else { scene.gpu_zone },
+            zr: scene.gpu_zone,
             #[cfg(feature = "profiling-census")]
             cw: scene.vb_cmd_witness,
             begun: 0,
@@ -141,14 +118,6 @@ impl<'a> GbufWitness<'a> {
         //
         // SAFETY (all three): caller contract — recording open, outside any render scope, live
         // `fns`, valid `fi` / a slot `open_frame` claimed.
-        if let Some(tc) = ts.tc {
-            unsafe { tc.reset_frame(fns, cmd, fi) };
-            ts.mark_query_reset();
-        }
-        if let Some(sv0) = ts.sv0 {
-            unsafe { sv0.reset_frame(fns, cmd, fi) };
-            ts.mark_query_reset();
-        }
         if let Some((rec, ring)) = ts.zr {
             unsafe { rec.record_reset(fns, cmd, ring) };
             ts.mark_query_reset();
@@ -203,34 +172,47 @@ impl<'a> GbufWitness<'a> {
         let _ = stage;
     }
 
-    /// Records the four-software-ray-pass family's BEGIN.
+    /// The witness's own slot index for `zone` — its bit in the two masks and its `pair_of` entry.
+    ///
+    /// The two families share one mask, so the SV0 ids sit ABOVE the gbuffer ones rather than at
+    /// their own base: the witness indexes what it tracks, and the zone id names what it names.
+    ///
+    /// # Panics
+    /// On a zone outside both families. Every caller passes one of the five `ZONE_*` constants
+    /// literally, so an out-of-range id is a mis-typed call site, not a runtime condition — and a
+    /// wrong-family id would otherwise silently index another pass's bit.
+    #[inline]
+    fn slot_of(zone: u16) -> usize {
+        let gbuf = zone.wrapping_sub(ZONE_BASE_GBUFFER);
+        if gbuf < GBUF_ZONE_COUNT {
+            return gbuf as usize;
+        }
+        let sv0 = zone.wrapping_sub(ZONE_BASE_SV0);
+        assert!(sv0 < SV0_ZONE_COUNT, "invariant: zone id is in neither record_gbuffer family");
+        GBUF_ZONE_COUNT as usize + sv0 as usize
+    }
+
+    /// Records `zone`'s BEGIN stamp and witnesses it. No-op (and no command) when unarmed.
+    ///
+    /// **One verb for both families since rung 7 step 6c.** There were two — `begin` and
+    /// `sv0_begin` — because the families were two enums with independent widths, and the split
+    /// cost a duplicated body per collector leg. With one leg and one `u16` vocabulary the only
+    /// difference left is [`Self::slot_of`]'s arithmetic.
     ///
     /// # Safety
-    /// Recording must be open on `cmd`, `fns` must be the live device fn-table, `fi` must be this
-    /// present's in-flight slot, and this pass's begin query must not already have been written
-    /// since this frame's reset.
+    /// Recording must be open on `cmd`, `fns` must be the live device fn-table, and this zone's
+    /// begin query must not already have been written since this frame's pool reset.
     #[inline]
-    unsafe fn begin(
-        &mut self,
-        fns: &crate::device::DeviceFns,
-        cmd: VkCommandBuffer,
-        fi: usize,
-        pass: TimedPass,
-    ) {
-        let slot = pass.slot() as usize;
-        if let Some(tc) = self.tc {
-            // SAFETY: caller contract; the pool was reset by this witness's own `open`.
-            let stage = unsafe { tc.write_begin(fns, cmd, fi, pass) };
-            self.mark_begin(slot, stage);
-        } else if let Some((rec, ring)) = self.zr {
-            let Some(pair) = rec.alloc_pair(ring, ZONE_BASE_GBUFFER + slot as u16) else { return };
+    unsafe fn begin(&mut self, fns: &crate::device::DeviceFns, cmd: VkCommandBuffer, zone: u16) {
+        let slot = Self::slot_of(zone);
+        if let Some((rec, ring)) = self.zr {
+            let Some(pair) = rec.alloc_pair(ring, zone) else { return };
             self.pair_of[slot] = pair;
-            // `TimestampCollector::write_begin` opens at `TOP_OF_PIPE` for every `TimedPass`, so
-            // unlike the VB family (rung 7c) this port is faithful with the recorder's old default
-            // -- stated as the stage rather than relied on as one, because the default is gone.
+            // Both collectors always opened at `TOP_OF_PIPE`, and `zone_begin_stage` says so for
+            // these ids — READ FROM THE TABLE rather than written here, because rung 7c's defect
+            // was exactly a stage decided at the recorder instead of looked up per zone.
             // SAFETY: caller contract; `pair` came from `alloc_pair` on this slot just above.
-            let stage =
-                unsafe { rec.record_begin(fns, cmd, ring, pair, TimestampStage::TopOfPipe) };
+            let stage = unsafe { rec.record_begin(fns, cmd, ring, pair, zone_begin_stage(zone)) };
             self.mark_begin(slot, stage);
         }
     }
@@ -238,88 +220,21 @@ impl<'a> GbufWitness<'a> {
     /// [`Self::begin`]'s counterpart.
     ///
     /// # Safety
-    /// As [`Self::begin`], for this pass's end query.
+    /// As [`Self::begin`], for this zone's end query.
     #[inline]
-    unsafe fn end(
-        &mut self,
-        fns: &crate::device::DeviceFns,
-        cmd: VkCommandBuffer,
-        fi: usize,
-        pass: TimedPass,
-    ) {
-        let slot = pass.slot() as usize;
-        if let Some(tc) = self.tc {
-            // SAFETY: caller contract.
-            let stage = unsafe { tc.write_end(fns, cmd, fi, pass) };
-            self.mark_end(slot, stage);
-        } else if let Some((rec, ring)) = self.zr {
+    unsafe fn end(&mut self, fns: &crate::device::DeviceFns, cmd: VkCommandBuffer, zone: u16) {
+        let slot = Self::slot_of(zone);
+        if let Some((rec, ring)) = self.zr {
             let pair = self.pair_of[slot];
             if pair == Self::NO_PAIR {
                 return;
             }
-            // SAFETY: caller contract; `pair` is the index this pass's BEGIN remembered.
+            // SAFETY: caller contract; `pair` is the index this zone's BEGIN remembered.
             let stage = unsafe { rec.record_end(fns, cmd, ring, pair) };
             self.mark_end(slot, stage);
         }
     }
 
-    /// The SV0 family's BEGIN. A separate verb, not a widened `begin`, because the two families are
-    /// two enums with independent widths and independent bases.
-    ///
-    /// # Safety
-    /// As [`Self::begin`].
-    #[inline]
-    unsafe fn sv0_begin(
-        &mut self,
-        fns: &crate::device::DeviceFns,
-        cmd: VkCommandBuffer,
-        fi: usize,
-        pass: Sv0TimedPass,
-    ) {
-        let slot = PASS_COUNT as usize + pass.slot() as usize;
-        if let Some(sv0) = self.sv0 {
-            // SAFETY: caller contract.
-            let stage = unsafe { sv0.write_begin(fns, cmd, fi, pass) };
-            self.mark_begin(slot, stage);
-        } else if let Some((rec, ring)) = self.zr {
-            let zone = ZONE_BASE_SV0 + pass.slot() as u16;
-            let Some(pair) = rec.alloc_pair(ring, zone) else { return };
-            self.pair_of[slot] = pair;
-            // `Sv0TimestampCollector::write_begin` opens at `TOP_OF_PIPE`; see `begin`.
-            // SAFETY: caller contract.
-            let stage =
-                unsafe { rec.record_begin(fns, cmd, ring, pair, TimestampStage::TopOfPipe) };
-            self.mark_begin(slot, stage);
-        }
-    }
-
-    /// [`Self::sv0_begin`]'s counterpart.
-    ///
-    /// # Safety
-    /// As [`Self::begin`].
-    #[inline]
-    unsafe fn sv0_end(
-        &mut self,
-        fns: &crate::device::DeviceFns,
-        cmd: VkCommandBuffer,
-        fi: usize,
-        pass: Sv0TimedPass,
-    ) {
-        let slot = PASS_COUNT as usize + pass.slot() as usize;
-        if let Some(sv0) = self.sv0 {
-            // SAFETY: caller contract.
-            let stage = unsafe { sv0.write_end(fns, cmd, fi, pass) };
-            self.mark_end(slot, stage);
-        } else if let Some((rec, ring)) = self.zr {
-            let pair = self.pair_of[slot];
-            if pair == Self::NO_PAIR {
-                return;
-            }
-            // SAFETY: caller contract.
-            let stage = unsafe { rec.record_end(fns, cmd, ring, pair) };
-            self.mark_end(slot, stage);
-        }
-    }
 
     /// Closes the frame.
     ///
@@ -1587,7 +1502,7 @@ impl Renderer<'_> {
             // resource), so including them would only add un-cancelled noise to the paired delta.
             // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
             // reset by this witness's own `open`; `fi` is this present's in-flight slot.
-            unsafe { ts.sv0_begin(self.fns, cmd, fi, Sv0TimedPass::Marcher) };
+            unsafe { ts.begin(self.fns, cmd, ZONE_SV0_MARCHER) };
             unsafe {
                 ts.cmd();
                 (self.fns.cmd_bind_pipeline)(
@@ -1622,7 +1537,7 @@ impl Renderer<'_> {
             // dispatch this pair exists to time).
             // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
             // reset by this witness's own `open`; `fi` is this present's in-flight slot.
-            unsafe { ts.sv0_end(self.fns, cmd, fi, Sv0TimedPass::Marcher) };
+            unsafe { ts.end(self.fns, cmd, ZONE_SV0_MARCHER) };
         }
 
         // (5a) PBR MVP-2: make the marcher's gAlbedo + gNormal + gMaterial STORES available
@@ -1880,7 +1795,7 @@ impl Renderer<'_> {
             // dispatch. GATED — `None` records nothing (byte-identical).
             // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
             // reset by this witness's own `open`; `fi` is this present's in-flight slot.
-            unsafe { ts.begin(self.fns, cmd, fi, TimedPass::DdgiUpdate) };
+            unsafe { ts.begin(self.fns, cmd, ZONE_GBUF_DDGI_UPDATE) };
             ts.cmd();
             self.record_graph_pass(ddgi_update_pass, cmd, targets, scene, fi);
             // SAFETY: recording is open; the update pipeline + its layout (declaring the 7-binding
@@ -1916,7 +1831,7 @@ impl Renderer<'_> {
             // HW-RT rung R0: close the DdgiUpdate bracket AFTER the dispatch. GATED.
             // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
             // reset by this witness's own `open`; `fi` is this present's in-flight slot.
-            unsafe { ts.end(self.fns, cmd, fi, TimedPass::DdgiUpdate) };
+            unsafe { ts.end(self.fns, cmd, ZONE_GBUF_DDGI_UPDATE) };
 
             // The update pass's atlas WRITES (COMPUTE/SHADER_WRITE, GENERAL) are ordered before the
             // resolve's atlas READS (COMPUTE/SHADER_READ) by the graph: it derives the
@@ -2129,7 +2044,7 @@ impl Renderer<'_> {
             // which opens below inside the loop). GATED — `None` records nothing.
             // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
             // reset by this witness's own `open`; `fi` is this present's in-flight slot.
-            unsafe { ts.begin(self.fns, cmd, fi, TimedPass::CsmDepth) };
+            unsafe { ts.begin(self.fns, cmd, ZONE_GBUF_CSM_DEPTH) };
             ts.cmd();
             self.record_graph_pass(csm_pass, cmd, targets, scene, fi);
 
@@ -2295,7 +2210,7 @@ impl Renderer<'_> {
             // `end_rendering`s recorded — this write is outside any rendering scope). GATED.
             // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
             // reset by this witness's own `open`; `fi` is this present's in-flight slot.
-            unsafe { ts.end(self.fns, cmd, fi, TimedPass::CsmDepth) };
+            unsafe { ts.end(self.fns, cmd, ZONE_GBUF_CSM_DEPTH) };
 
             // (CSM-2) The dual-use depth barrier: DEPTH_ATTACHMENT_OPTIMAL →
             // SHADER_READ_ONLY_OPTIMAL (reusing the marcher's depth-barrier shape) over ALL
@@ -2347,7 +2262,7 @@ impl Renderer<'_> {
             // the loop). GATED — `None` records nothing.
             // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
             // reset by this witness's own `open`; `fi` is this present's in-flight slot.
-            unsafe { ts.begin(self.fns, cmd, fi, TimedPass::PunctualDepth) };
+            unsafe { ts.begin(self.fns, cmd, ZONE_GBUF_PUNCTUAL_DEPTH) };
             ts.cmd();
             self.record_graph_pass(atlas_pass, cmd, targets, scene, fi);
 
@@ -2546,7 +2461,7 @@ impl Renderer<'_> {
             // `end_rendering`s recorded — outside any rendering scope). GATED.
             // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
             // reset by this witness's own `open`; `fi` is this present's in-flight slot.
-            unsafe { ts.end(self.fns, cmd, fi, TimedPass::PunctualDepth) };
+            unsafe { ts.end(self.fns, cmd, ZONE_GBUF_PUNCTUAL_DEPTH) };
 
             // The graph derives the dual-use depth barrier-out
             // (DEPTH_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL over ALL `[0..active)`
@@ -2817,7 +2732,7 @@ impl Renderer<'_> {
         // nothing.
         // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
         // reset by this witness's own `open`; `fi` is this present's in-flight slot.
-        unsafe { ts.begin(self.fns, cmd, fi, TimedPass::DeferredResolve) };
+        unsafe { ts.begin(self.fns, cmd, ZONE_GBUF_DEFERRED_RESOLVE) };
         ts.cmd();
         self.record_graph_pass(resolve, cmd, targets, scene, fi);
 
@@ -2948,7 +2863,7 @@ impl Renderer<'_> {
         // HW-RT rung R0: close the DeferredResolve bracket AFTER the resolve dispatch. GATED.
         // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
         // reset by this witness's own `open`; `fi` is this present's in-flight slot.
-        unsafe { ts.end(self.fns, cmd, fi, TimedPass::DeferredResolve) };
+        unsafe { ts.end(self.fns, cmd, ZONE_GBUF_DEFERRED_RESOLVE) };
 
         // Anti-aliasing Stage 4 (TAA W5): the temporal-resolve pass — recorded HERE, BEFORE
         // `present_sample`'s `lit` GENERAL→SHADER_READ_ONLY_OPTIMAL transition below. TAA is a

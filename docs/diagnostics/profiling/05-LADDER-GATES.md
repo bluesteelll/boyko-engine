@@ -1340,30 +1340,58 @@ exactly how the seven brackets acquired the wrong stage in the first place.
    * `scene` is `GBufferScene<'a>` and its `gpu_zone` borrow is tied to `'a`, which outlives the loop body. Assigning `None` between frames does not shorten it — the lifetime is in the type. So the `&mut` and the `&` cannot alternate. `boyko_app`'s runner is unaffected because it **rebuilds the scene every frame** from `GpuSceneBundles::scene(&self)`; this fixture cannot without moving a 230-line literal into the loop.
    * The three ways out, none of them free: **(a)** rebuild the literal per frame; **(b)** give `GpuZoneRecorder` the interior mutability that would make `open_frame`/`retire` take `&self` — `FrameSlot` already holds two atomics and an `UnsafeCell`, so this is the rung-5c `CommandWitness` change one level down, and it widens who may claim a ring slot; **(c)** retire the harness, on the grounds that the zone artifact carries the same four brackets and this is an `#[ignore]`d offline printer whose numbers are already transcribed into the HW-RT plan.
 
-   ✅ **OWNER ANSWERED 2026-08-10: (c), retire it.** Recorded here rather than in the commit that
-   acts on it, because the next obstacle turned up before the deletion could land.
+   ✅ **OWNER ANSWERED 2026-08-10: (c), retire it** — and, after the second obstacle below,
+   **(c) again for the SV0 half: retire the whole S1.5 harness, phase driver included.**
 
-   ⛔ **AND THE DELETION STILL DID NOT LAND, for a reason nobody had looked for.** Step 6c was
-   attempted and REVERTED — the tree is back at the last green commit. What it measured:
+   ⛔ **The first attempt was REVERTED, and what it measured is why.** `runner.rs`'s SV0 S1.5
+   harness is **not a printed measurement channel**, which is how the corpus's own step-2 title
+   described it. `sv0_bench_lighting_flags` is computed from an ABBA phase counter and threaded into
+   the scene every frame: the harness does not merely REPORT the interleaved A/B, it **drives** it,
+   by clearing `SHADOWS|AO` on two frames in four. Deleting the timing channel therefore deleted a
+   **render-path input**. The owner's answer settled that too, and the deletion then landed.
 
-   * The `window_present_gbuffer.rs` retirement and the `gbuffer.rs` port are straightforward. The
-     witness's four verbs (`begin`/`end`/`sv0_begin`/`sv0_end`) collapse to two taking a `u16` zone,
-     exactly as `vb.rs`'s did, once the five `ZONE_GBUF_*`/`ZONE_SV0_MARCHER` constants exist.
-   * **`runner.rs`'s SV0 S1.5 harness is NOT a printed measurement channel, and that is the finding.**
-     Step 2 deleted the VB printer as a pure output; this one is entangled with a scene INPUT.
-     `sv0_bench_lighting_flags` is computed from an ABBA phase counter and threaded into the scene
-     each frame — the harness does not merely *report* the interleaved A/B, it *drives* it by
-     changing what the marcher shades. Deleting the timing channel therefore deletes a render-path
-     input, which is a different question from deleting a printer, and it needs its own answer
-     before the code moves.
-   * Concretely blocked on: seven non-contiguous spans in `runner.rs` (the arming + locals, the
-     phase counter, the scene field, the readback, the summary printer, a lattice helper, and a
-     unit test), plus `sv0_deferred_term_bench.rs`'s transcriptions of what that printer emitted.
+   ✅ **DONE. `rg 'TimestampCollector|VbTimedPass|Sv0TimedPass' crates/` returns ZERO CODE matches
+   — the rung's mechanical gate is CLOSED.** Cut in this step:
 
-   **The lesson is the one step 5 already paid for once, in a new place:** *"the second list
-   described what these files are ABOUT, not what they DO."* Here the corpus's own step-2 framing —
-   *"the printed measurement channel is deleted"* — described the VB half accurately and the SV0
-   half not at all, and the difference was invisible until the deletion was attempted.
+   * `gpu_timing.rs` **deleted outright** (340 lines): `TimedPass`, `PASS_COUNT`,
+     `TimestampCollector`, `Sv0TimedPass`, `SV0_PASS_COUNT`, `Sv0TimestampCollector`, plus the
+     module declaration and both re-exports.
+   * `scene_types.rs`'s `gpu_timing` and `sv0_gpu_timing` fields, and every construction site.
+   * `gbuffer.rs`: `GbufWitness`'s two collector legs, its exclusivity `debug_assert`, and **its four
+     verbs collapsed to two** taking a `u16` zone — the split existed only because the families were
+     two enums with independent widths, and cost a duplicated body per collector leg.
+   * `gpu_scene/mod.rs`: the `sv0_bench`/`gbuf_bench` fields, both arming blocks, four accessors
+     (`gbuf_timing_for_frame`, `gbuf_bench_armed`, `sv0_bench_armed`, `read_sv0_marcher_ticks`), the
+     teardown arm, the `sv0_bench_lighting_flags` parameter, and the exclusivity assert.
+   * `runner.rs`: the gbuffer leg, the S1.5 harness in full — four consts, the ABBA phase counter,
+     the locals, the preconditions, the readback, `print_sv0_bench_summary`, seven statistics
+     helpers, `TickEvidence`, and the `sv0_stats_tests` module (**577 lines of statistics code**).
+   * `window_present_gbuffer.rs`: `engine_grand_showcase_512_gpu_pass_cost` and its 205-line timing
+     loop, per the owner's first answer.
+   * `gbuffer_zone_port_gate.rs` **deleted** — its leg A *was* those two collectors, the disposition
+     `vb_zone_ab_witness_gate.rs` already had. **Rung 7 ends with no A/B gate on any family**, which
+     is correct: there is nothing left to compare.
+   * `sv0_deferred_term_bench.rs`'s windowed driver **deleted**. ⚠️ It called `app.run()` and relied
+     on the retired S1.5 loop to return, so it would have rendered FOREVER — an `#[ignore]`d hang
+     nothing in CI would notice, and **the second hang this rung produced by the same mechanism**
+     (`vg_occ_split_timing.rs`'s worker listed a knob that had stopped exiting). *A test whose exit
+     condition lives in the code being deleted is deleted with it.* Its device-free arithmetic gates
+     over the transcribed numbers survive.
+
+   ⚠️ **The five new zone ids carry the gbuffer/SV0 vocabulary** (`ZONE_GBUF_*`, `ZONE_SV0_MARCHER`)
+   and their stage comes from `zone_begin_stage`, read from the table rather than written at the
+   recorder — rung 7c's defect was exactly a stage decided at the recorder.
+
+   ⚠️ **A SECOND anchors-gate property, measured here: a bare `:N` binds to the LAST FILE NAMED.**
+   Deleting `gpu_timing.rs` removed its link from `MESHLET-VIRTUAL-GEOMETRY-PLAN.md`'s audit
+   paragraph, and five bare anchors that had cited it silently began asserting things about
+   `host_dump.rs` — same notation, same numbers, a different subject, reported as ordinary
+   staleness. Nothing was edited to make that happen. The file-scoped twin of *"a historical line
+   number written in anchor notation IS an anchor"*.
+
+   **Verified:** `cargo clippy --workspace --all-targets -D warnings` green on the default and
+   `profiling-census` legs (sources touched first); all six golden pins byte-identical; the anchors
+   and blocking-reader-census gates green; `check_doc_contracts.py` OK on 22 corpus files.
 
 #### Rung 7c, second half — the workload tag, and a mechanism the corpus described as if it existed
 

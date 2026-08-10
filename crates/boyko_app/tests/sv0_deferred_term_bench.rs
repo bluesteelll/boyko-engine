@@ -23,8 +23,8 @@
 //! states this property; this bench is the first consumer to depend on it.)
 //!
 //! The marcher dispatch is bracketed by a dedicated one-pass GPU-timestamp collector
-//! (`boyko_rhi_vulkan::present::gpu_timing::Sv0TimestampCollector`, armed only under
-//! `BOYKO_SV0_BENCH`), so the reported number is GPU wall-clock for that dispatch, and the PAIRED
+//! (`Sv0TimestampCollector`, armed only under `BOYKO_SV0_BENCH` — both DELETED at profiling rung 7
+//! step 6c), so the reported number was GPU wall-clock for that dispatch, and the PAIRED
 //! difference is what cancels the bracket's own drain/overlap bias.
 //!
 //! # ⚠️ The ABAB design was REFUTED by its own null control — read this before the numbers
@@ -323,13 +323,10 @@
 
 #![cfg(windows)]
 
-use boyko_app::prelude::*;
-use boyko_ecs::ecs::core::system::ResMut;
-use boyko_render::Material;
+// Profiling rung 7 step 6c deleted this file's windowed driver, so nothing here boots an engine
+// any more. What is left is arithmetic over transcribed numbers plus the coverage oracle those
+// numbers' confound analysis rests on — the imports shrank to match.
 use boyko_render::mesh::Vertex;
-use boyko_render::{
-    GeometryLegs, MeshAssetsVbExt, MeshGeometryTableSlot, RenderPath, RenderPathConfig,
-};
 use boyko_scene::ViewUniform;
 
 mod sv0_oracle;
@@ -414,7 +411,7 @@ const SV0_LATTICE_MIN_DISTINCT_TICKS: usize = 7;
 //
 // Every literal in this block is a TRANSCRIPTION of a `VB-SV0-S1.5 …` line the harness printed.
 //
-// ⚠️ PROFILING RUNG 7 RETIRES THE HARNESS THAT PRINTED THEM. These numbers therefore become a
+// ⚠️ PROFILING RUNG 7 STEP 6c RETIRED THE HARNESS THAT PRINTED THEM. These numbers therefore become a
 // record of a measurement taken on an instrument this tree no longer contains — the runner's
 // `BOYKO_SV0_BENCH` ABBA loop and its stdout line. They are kept because the FINDINGS they support
 // (the quantisation floor, the order-bias bound, the confound set) are about the GPU and the
@@ -545,77 +542,16 @@ const MARCHER_T_MAX: f32 = 10.0;
 // The fixture
 // ===========================================================================================
 
-/// `vb_both_sdf.rs::setup` verbatim — the S1 scene through its ONE shared entry point.
-///
-/// Deliberately identical to the flat S1 fixture's setup rather than a variant of it: the whole
-/// point of S1.5 is to measure the term on the scene S1's adequacy oracle certified, so anything
-/// this file changed about the scene would measure something the oracle never quantified over.
-/// The ONLY difference between this test and `vb_both_sdf.rs` is the `RenderPathConfig` — this
-/// one renders Deferred, because the term being measured is Deferred's.
-fn setup(
-    mut commands: Commands,
-    mut meshes: NonSendResMut<Assets<MeshGpu>>,
-    mut materials: ResMut<Assets<Material>>,
-    mut geo_table: NonSendResMut<MeshGeometryTableSlot>,
-    dev: NonSendRes<GpuDevice>,
-) {
-    let (verts, idx) = sv0_scene::scene_sphere_mesh();
-    let sphere = match geo_table.0.as_mut() {
-        Some(table) => meshes.register_mesh_vb(dev.get(), &verts, &idx, table),
-        None => meshes.register_mesh(dev.get(), &verts, &idx),
-    };
+// ⚠️ **The `#[ignore]`d driver `sv0_deferred_term_bench()` is DELETED (profiling rung 7 step 6c).**
+// It booted the fixture and called `app.run()`, relying on the runner's S1.5 loop to print a summary
+// and return. That loop is retired with the harness, so the test would have rendered FOREVER: an
+// `#[ignore]`d hang nothing in CI would ever notice, and the second time this rung has produced one
+// (`vg_occ_split_timing.rs`'s worker listed a knob that no longer exits). **A test whose exit
+// condition lived in the code being deleted is deleted with it.**
+//
+// What survives below is everything that was ever device-free: the arithmetic gates over the
+// transcribed numbers. They still assert what the protocol requires of the figures on record.
 
-    let red = materials.add(Material::new([0.72, 0.04, 0.04, 1.0], 0.0, 0.38, 0.5, [0.0; 3], 0));
-    let green = materials.add(Material::new([0.05, 0.46, 0.10, 1.0], 0.0, 0.38, 0.5, [0.0; 3], 0));
-    let gold = materials.add(Material::new([1.0, 0.71, 0.29, 1.0], 1.0, 0.13, 0.5, [0.0; 3], 0));
-    let blue = materials.add(Material::new([0.20, 0.38, 0.92, 1.0], 1.0, 0.42, 0.5, [0.0; 3], 0));
-
-    let materials_row: [Option<u16>; sv0_scene::MESH_ROW_COUNT] = [
-        None,
-        Some(red.index() as u16),
-        Some(green.index() as u16),
-        Some(gold.index() as u16),
-        Some(blue.index() as u16),
-    ];
-
-    sv0_scene::spawn_scene(&mut commands, sphere, &materials_row);
-}
-
-/// **The S1.5 counterbalanced (ABBA) A/B bench** (one session per process).
-///
-/// Renders S1's fixture through `Deferred × Both` — the shipped path that already computes the
-/// visual SV0 proposes, and the only path whose recorder brackets the marcher dispatch. `legs:
-/// Both` (not `Mesh`) is REQUIRED, not incidental: under `GeometryLegs::Mesh` the marcher is not
-/// dispatched at all, so there is no term to measure and the timestamp pair is never written.
-///
-/// The window extent is `sv0_scene::DUMP_EXTENT` — the CERTIFIED extent, deliberately not a knob.
-/// The marcher's cost is per-pixel, so raising it would raise the signal against the instrument's
-/// quantum; the module doc explains why that lever was rejected in favour of two changes that
-/// leave the measured scene untouched.
-///
-/// `#[ignore]`: needs a real windowed GPU device. See this file's module doc for the runbook and
-/// for what the printed lines mean; see [`sv0_s1_5_measurement_meets_its_gates`] for where the
-/// printed numbers land.
-#[test]
-#[ignore = "needs a real windowed GPU device; BOYKO_SV0_BENCH=1 [BOYKO_SV0_BENCH_NULL=1] \
-            [BOYKO_SV0_BENCH_QUADS=<n>] BOYKO_DISABLE_VALIDATION=1 -- --ignored --nocapture \
-            --test-threads=1; the orchestrator runs 3 armed sessions + 1 null session"]
-fn sv0_deferred_term_bench() {
-    let mut app = App::new();
-    let plugins = EnginePlugins::window(
-        "boyko_engine vb-sv0 s1.5 deferred term bench",
-        sv0_scene::DUMP_EXTENT,
-        sv0_scene::DUMP_EXTENT,
-    );
-    app.add_plugins(plugins);
-    app.add_startup_system(setup);
-    // Requested AFTER `add_plugins` so this override wins over `RenderPathPlugin`'s default —
-    // `vb_both_sdf.rs`'s own post-plugins insert. `Deferred` is the plan's choice: the term under
-    // measurement is Deferred's `sdf_gbuffer_composite.hlsl` arm, and only `record_gbuffer`
-    // brackets the marcher dispatch.
-    app.insert_resource(RenderPathConfig { path: RenderPath::Deferred, legs: GeometryLegs::Both });
-    app.run();
-}
 
 // ===========================================================================================
 // The gates over the transcribed numbers

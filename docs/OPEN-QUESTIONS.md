@@ -14,6 +14,28 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-10 — RESOLVED: retire the whole S1.5 harness, phase driver included. Rung 7's mechanical gate is CLOSED.
+
+Owner's answer to both scope questions was the same: retire. Shipped. `rg
+'TimestampCollector|VbTimedPass|Sv0TimedPass' crates/` now returns **zero code matches** — the rung's
+gate, open since the campaign began, is closed.
+
+Two things worth knowing about what the deletion cost, neither of them a decision to make:
+
+**The S1.5 A/B is gone as an experiment, not only as a printer.** `sv0_bench_lighting_flags` drove
+`SHADOWS|AO` off on two frames in four; every frame now pushes what every non-bench frame always
+pushed. The transcribed numbers stay in `sv0_deferred_term_bench.rs` with its device-free arithmetic
+gates, and this repository's own rule applies to them: a result established on a retired instrument
+bounds nothing about the current one. Any rung needing a CURRENT Deferred-marcher figure takes a new
+measurement on the zone artifact.
+
+**Rung 7 ends with no A/B gate on any GPU family.** `gbuffer_zone_port_gate.rs` went with its leg A,
+as `vb_zone_ab_witness_gate.rs` did. That is correct — there is nothing left to compare — and it
+means the stage tables under `zone_begin_stage` are pinned by `const` blocks rather than measured
+against an independent copy. Named at the function, not left to be discovered.
+
+---
+
 ## 2026-08-10 — Rung 7 step 6c attempted and REVERTED: the SV0 bench is not a printer, it DRIVES the A/B it reports.
 
 You answered the previous item with "retire the harness", and that part is settled — the

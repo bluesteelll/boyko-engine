@@ -46,8 +46,8 @@ mod frame_driver;
 // per PACKAGE, and a `#[cfg]`'d field appears or vanishes for `boyko_app`'s construction site
 // depending on a flag no `boyko_app` source names. See that field's doc.
 pub mod command_witness;
-pub mod gpu_timing;
-// Profiling rung 5a — the GPU zone recorder that replaces `gpu_timing`'s three collectors.
+// Profiling rung 5a — the GPU zone recorder. Rung 7 finished replacing the three
+// per-harness collectors it was written against; `gpu_timing.rs` is deleted.
 pub mod gpu_zone;
 mod graph_bridge;
 mod passes;
@@ -60,9 +60,6 @@ pub use frame_driver::{FrameWriteToken, Renderer};
 /// VG R3 piece 2 step P2-6: gate G2's recorder-authored count sink, threaded into
 /// [`Renderer::render_gbuffer_frame`] as `Option<&mut VbRecordProbe>`.
 pub use passes::vb::VbRecordProbe;
-pub use gpu_timing::{
-    PASS_COUNT, SV0_PASS_COUNT, Sv0TimedPass, Sv0TimestampCollector, TimedPass, TimestampCollector,
-};
 pub use scene_types::{
     AaActivation, BrickActivation, ClusterCullHierDispatch, CsmDepthActivation, DdgiUpdateActivation,
     GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES,
