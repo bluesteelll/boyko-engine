@@ -34,7 +34,7 @@ use crate::memory::BoundBuffer;
 use crate::texture::{MAX_CASCADES, MAX_TEXTURE_LAYERS};
 
 use super::super::frame_driver::Renderer;
-use super::super::gpu_timing::{VB_PASS_COUNT, VbTimedPass, VbTimestampCollector};
+use super::super::gpu_timing::{VB_PASS_COUNT, VbTimedPass};
 use super::super::gpu_zone::{GpuZoneRecorder, ZONE_BASE_VB, ZONE_FAMILY_WIDTH};
 
 // Profiling rung 6: the family's ids are `ZONE_BASE_VB + slot`, so a `VbTimedPass` that grew past
@@ -201,9 +201,6 @@ pub struct VbRecordProbe {
 /// the function and the masks would still read "complete" while one query stayed unwritten, and the
 /// `WAIT_BIT` readback would block forever with nothing to red.
 struct TsWitness<'a> {
-    /// `None` ⇒ this leg records nothing (every golden/host/interactive frame,
-    /// `GBufferScene::vb_gpu_timing`'s own doc).
-    tc: Option<&'a VbTimestampCollector>,
     /// Profiling rung 5c: the NEW leg — the GPU zone recorder and the ring slot this frame opened.
     /// Mutually exclusive with [`Self::tc`], enforced in [`Self::new`].
     zr: Option<(&'a GpuZoneRecorder, usize)>,
@@ -273,16 +270,12 @@ impl<'a> TsWitness<'a> {
         scene: &'s GBufferScene<'a>,
         fns: &DeviceFns,
         cmd: VkCommandBuffer,
-        fi: usize,
+        _fi: usize,
     ) -> TsWitness<'a> {
-        let tc = scene.vb_gpu_timing;
-        debug_assert!(
-            !(tc.is_some() && scene.gpu_zone.is_some()),
-            "invariant: at most one VB GPU collector is armed per frame (F17: the A/B is serial)"
-        );
+        // Profiling rung 7 deleted the old collector, so there is one leg left and no
+        // exclusivity to assert: the zone recorder is the instrument.
         let ts = TsWitness {
-            tc,
-            zr: if tc.is_some() { None } else { scene.gpu_zone },
+            zr: scene.gpu_zone,
             #[cfg(feature = "profiling-census")]
             cw: scene.vb_cmd_witness,
             begun: 0,
@@ -295,13 +288,7 @@ impl<'a> TsWitness<'a> {
         if let Some(w) = ts.cw {
             w.begin_frame();
         }
-        if let Some(tc) = ts.tc {
-            // SAFETY: caller contract — recording open, outside any render scope, live `fns`,
-            // valid `fi`. A TIMESTAMP query is undefined until reset, so this precedes every
-            // stamp below it.
-            unsafe { tc.reset_frame(fns, cmd, fi) };
-            ts.mark_query_reset();
-        } else if let Some((rec, ring)) = ts.zr {
+        if let Some((rec, ring)) = ts.zr {
             // SAFETY: as above; `ring` is the slot `open_frame` claimed for this frame, so its
             // pool is not in flight.
             unsafe { rec.record_reset(fns, cmd, ring) };
@@ -369,15 +356,6 @@ impl<'a> TsWitness<'a> {
         let _ = stage;
     }
 
-    /// A timestamp recorded by the totality epilogue rather than by a bracket — see
-    /// [`CommandWitness::repair`] for why the census counts it apart.
-    #[inline]
-    fn mark_repair(&self) {
-        #[cfg(feature = "profiling-census")]
-        if let Some(w) = self.cw {
-            w.repair();
-        }
-    }
 
     /// Records `pass`'s BEGIN stamp and witnesses it. No-op (and no command) when unarmed.
     ///
@@ -386,15 +364,9 @@ impl<'a> TsWitness<'a> {
     /// present's in-flight slot, and this pass's begin query must not already have been written
     /// since this frame's `reset_frame`.
     #[inline]
-    unsafe fn begin(&mut self, fns: &DeviceFns, cmd: VkCommandBuffer, fi: usize, pass: VbTimedPass) {
+    unsafe fn begin(&mut self, fns: &DeviceFns, cmd: VkCommandBuffer, _fi: usize, pass: VbTimedPass) {
         let slot = pass.slot();
-        if let Some(tc) = self.tc {
-            // SAFETY: caller contract (recording open, live `fns`, valid `fi`); the pool was reset
-            // this frame — implied by this witness's construction site, immediately after
-            // `reset_frame`.
-            let stage = unsafe { tc.write_begin(fns, cmd, fi, pass) };
-            self.mark_begin(slot, stage);
-        } else if let Some((rec, ring)) = self.zr {
+        if let Some((rec, ring)) = self.zr {
             // A full ring slot is a stated refusal, not a loss: the pass records no bracket, its
             // `begun` bit stays clear, and `end` finds `NO_PAIR` and records nothing either — so
             // the pair is never half-written. `MAX_GPU_PAIRS` is 128 against this frame's ten, so
@@ -425,14 +397,9 @@ impl<'a> TsWitness<'a> {
     /// # Safety
     /// Same contract as [`Self::begin`], for this pass's end query.
     #[inline]
-    unsafe fn end(&mut self, fns: &DeviceFns, cmd: VkCommandBuffer, fi: usize, pass: VbTimedPass) {
+    unsafe fn end(&mut self, fns: &DeviceFns, cmd: VkCommandBuffer, _fi: usize, pass: VbTimedPass) {
         let slot = pass.slot();
-        if let Some(tc) = self.tc {
-            // SAFETY: caller contract (recording open, live `fns`, valid `fi`); the pool was reset
-            // this frame — implied by this witness's construction site.
-            let stage = unsafe { tc.write_end(fns, cmd, fi, pass) };
-            self.mark_end(slot, stage);
-        } else if let Some((rec, ring)) = self.zr {
+        if let Some((rec, ring)) = self.zr {
             let pair = self.pair_of[slot as usize];
             if pair == Self::NO_PAIR {
                 return;
@@ -480,76 +447,16 @@ impl<'a> TsWitness<'a> {
     // `mut self` exists for the dev-profile write counter below; a release build mutates nothing
     // here, and the counter is the only reason the receiver is `mut` at all.
     #[cfg_attr(not(debug_assertions), allow(unused_mut))]
-    unsafe fn finish(mut self, fns: &DeviceFns, cmd: VkCommandBuffer, fi: usize) {
-        let Some(tc) = self.tc else {
-            if let Some((rec, ring)) = self.zr {
-                // The release edge: every plain mark byte written above becomes visible to
-                // `retire`'s `Acquire` load through this one store, and nothing else publishes it.
-                rec.seal(ring);
-            }
-            return;
-        };
-        // Publish the masks AS THE FRAME BRACKETED THEM, before the fills below close the gaps:
-        // the host's MEASURED/FALLBACK/TORN label is a statement about what the recorder did, not
-        // about what the epilogue repaired.
-        tc.publish_witness(fi, self.begun, self.ended);
-        debug_assert_eq!(
-            self.begun & !self.ended,
-            0,
-            "invariant: no VB timestamp pair is left torn (a begin whose end never recorded)"
-        );
-
-        let mut complete: u16 = 0;
-        for p in 0..VB_PASS_COUNT {
-            let bit = 1u16 << p;
-            let pass = VbTimedPass::from_slot(p);
-            match (self.begun & bit != 0, self.ended & bit != 0) {
-                (true, true) => complete |= bit,
-                (false, false) => {
-                    #[cfg(debug_assertions)]
-                    {
-                        self.writes[2 * p as usize] += 1;
-                        self.writes[2 * p as usize + 1] += 1;
-                    }
-                    // SAFETY: recording is open and no rendering scope is active (caller
-                    // contract); the pool was reset this frame (the witness's construction site);
-                    // `fi` is this present's in-flight slot; `p < VB_PASS_COUNT` so both query
-                    // indices are in bounds; NEITHER query has been written since the reset —
-                    // the masks are the witness, and every stamp goes through them.
-                    unsafe { tc.write_zero_pair(fns, cmd, fi, pass) };
-                    self.mark_repair();
-                    self.mark_repair();
-                    complete |= bit;
-                }
-                (true, false) => {
-                    #[cfg(debug_assertions)]
-                    {
-                        self.writes[2 * p as usize + 1] += 1;
-                    }
-                    // SAFETY: as above, for the END query alone — bit `p` of `ended` is clear, so
-                    // that query has not been written since the reset. The begin query is left
-                    // untouched precisely because re-stamping it would be the VUID violation.
-                    unsafe { tc.write_end(fns, cmd, fi, pass) };
-                    self.mark_repair();
-                    complete |= bit;
-                }
-                (false, true) => {}
-            }
-        }
-        debug_assert_eq!(
-            complete,
-            (1u16 << VB_PASS_COUNT) - 1,
-            "invariant: every VB timestamp pair is written exactly once on an armed frame"
-        );
-
-        #[cfg(debug_assertions)]
-        for (index, count) in self.writes.iter().enumerate() {
-            debug_assert!(
-                *count <= 1,
-                "invariant: VB timestamp query {index} (pass {}) written {count} times after one \
-                 reset — a VUID violation and a silently wrong delta",
-                VbTimedPass::from_slot(index as u32 / 2).label()
-            );
+    unsafe fn finish(self, _fns: &DeviceFns, _cmd: VkCommandBuffer, _fi: usize) {
+        // Profiling rung 7 deleted the totality epilogue with the collector that needed it. That
+        // epilogue existed because `VK_QUERY_RESULT_WAIT_BIT` blocks forever on a pair its
+        // recorder never wrote, so every pair had to be filled whether the frame bracketed it or
+        // not. The zone recorder LABELS such a pair `NotBracketed` and reads with availability, so
+        // there is nothing to repair — which is the difference the port existed to make.
+        if let Some((rec, ring)) = self.zr {
+            // The release edge: every plain mark byte written above becomes visible to `retire`'s
+            // `Acquire` load through this one store, and nothing else publishes them.
+            rec.seal(ring);
         }
     }
 }

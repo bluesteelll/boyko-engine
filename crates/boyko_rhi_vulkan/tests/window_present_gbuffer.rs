@@ -2518,7 +2518,6 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // HW-RT rung R0: GPU timing OFF (byte-identical command stream).
         gpu_timing: None,
         // VB-P1d: this harness never resolves `VisibilityBuffer` (byte-identical command stream).
-        vb_gpu_timing: None,
         gpu_zone: None,
         vb_cmd_witness: None,
         // VB-SV0 rung S1.5: the marcher bench collector, unarmed here (byte-identical stream).
@@ -3631,7 +3630,6 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         // HW-RT rung R0: GPU timing OFF (byte-identical command stream).
         gpu_timing: None,
         // VB-P1d: this harness never resolves `VisibilityBuffer` (byte-identical command stream).
-        vb_gpu_timing: None,
         gpu_zone: None,
         vb_cmd_witness: None,
         // VB-SV0 rung S1.5: the marcher bench collector, unarmed here (byte-identical stream).
@@ -8682,7 +8680,6 @@ fn run_showcase_body_ddgi(
         // software-ray passes on this real combined frame.
         gpu_timing,
         // VB-P1d: this harness never resolves `VisibilityBuffer` (byte-identical command stream).
-        vb_gpu_timing: None,
         gpu_zone: None,
         vb_cmd_witness: None,
         // VB-SV0 rung S1.5: the marcher bench collector, unarmed here (byte-identical stream).
@@ -10274,7 +10271,6 @@ fn run_showcase_body(
         // HW-RT rung R0: GPU timing OFF (the golden/interactive showcase; byte-identical).
         gpu_timing: None,
         // VB-P1d: this harness never resolves `VisibilityBuffer` (byte-identical command stream).
-        vb_gpu_timing: None,
         gpu_zone: None,
         vb_cmd_witness: None,
         // VB-SV0 rung S1.5: the marcher bench collector, unarmed here (byte-identical stream).

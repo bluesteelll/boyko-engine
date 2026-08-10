@@ -1256,10 +1256,15 @@ exactly how the seven brackets acquired the wrong stage in the first place.
    a bracket"*) exactly as designed. `vb_zone_ab_witness_gate.rs` is **DELETED**: a gate whose leg
    ceased to exist is the disposition the corpus already assigned it. The gbuffer G10 is untouched
    and green at 4/4 — its leg A is the R0 `TimestampCollector`, which step 3 has not reached.
-   **Still to cut:** `gpu_timing.rs` itself, `vb.rs`'s `tc` arm and totality epilogue,
-   `scene_types.rs`'s fields, and the two re-exports.
-4. Delete `vb_bench_totality_gate.rs` **last** — both its gates lose their subject in step 2/3, and
-   deleting it before them would drop live coverage of code still shipping.
+   ✅ **The recorder side too:** `scene_types.rs`'s `vb_gpu_timing` field, `TsWitness`'s `tc` arm
+   (three collapsed dispatch sites), `mark_repair`, and **the totality epilogue** — which existed
+   only because `VK_QUERY_RESULT_WAIT_BIT` blocks forever on a pair its recorder never wrote. The
+   zone recorder LABELS such a pair and reads with availability, so there is nothing to repair;
+   `finish` is now a single `seal`. **Still to cut:** `gpu_timing.rs`'s `VbTimestampCollector`
+   itself and the two re-exports — dead but not yet deleted, since nothing references them.
+4. ✅ **DONE.** `vb_bench_totality_gate.rs` deleted, **last**, exactly as the order required: gate A
+   tested the totality epilogue and gate B `disarm_vb_bench_unless_vb`, and both subjects went in
+   steps 2–3. Deleting it earlier would have dropped live coverage of code still shipping.
 
 #### Rung 7c, second half — the workload tag, and a mechanism the corpus described as if it existed
 

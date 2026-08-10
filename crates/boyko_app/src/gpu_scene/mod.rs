@@ -6751,7 +6751,6 @@ impl GpuSceneBundles {
             // VG R3 piece 4 rung P4-1: read through `vb_timing_for_frame`, the SAME accessor the
             // runner's `vb_bench_armed()` reads, so a path-disarmed boot cannot leave the
             // recorder armed while the readback thinks otherwise (or the reverse).
-            vb_gpu_timing: None,
             // Profiling rung 5c: read through `vb_zone_for_frame`, the SAME accessor the runner
             // reads — and structurally exclusive with `vb_gpu_timing` above, because `boot` refuses
             // the two knobs together. `None` on every golden/host/interactive frame.
