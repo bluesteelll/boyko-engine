@@ -1191,6 +1191,16 @@ claim path's Miri and property legs are unaffected and still planned.
   RED run: revert the derivation to `path × legs` ⇒ *"the flat and froxel legs produced the SAME
   workload tag ... flat: deferred_both, froxel: deferred_both"*. Measured on a live run:
   `workload_tag = "deferred_both#99f4482e"`.
+  ⚠️ **Narrowed 2026-08-10, and the obvious cause is ruled OUT.** The module already serialises
+  itself: `armed()` takes `test_serial()` and hands the `MutexGuard` back to the caller, so every
+  test that arms a store holds the module's one lock, and a second explicit site covers the
+  plugin test. So the contention is **not** profiling test against profiling test. What remains is
+  state global to the PROCESS rather than to the module — `boyko_diag::profiling_abi`'s zone
+  `REGISTRY`/`NEXT_SLOT` (slots are minted lazily by `declare_zone!` and never returned) and the
+  store's `bind_world` — which any of the other ~880 tests in the same binary can move. Both flakes
+  pass 915/915 in isolation and in repeated full-lib runs; they fail only under the full workspace
+  sweep. **Next step is to identify which non-profiling test touches the registry**, not to widen
+  the module's lock, which is already as wide as the module.
 - **`boyko-ecs --lib`'s profiling tests are ORDER-DEPENDENT FLAKES — now TWO of them.**
   `every_dispatching_round_records_one_span_and_one_width` joined
   `one_zone_taking_a_hundred_thousand_samples_keeps_count_exact` on 2026-08-10: observed failing
