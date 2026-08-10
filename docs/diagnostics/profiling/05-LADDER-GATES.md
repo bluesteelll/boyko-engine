@@ -1226,7 +1226,13 @@ exactly how the seven brackets acquired the wrong stage in the first place.
    which is the whole reason this step goes first. ⚠️ The obvious guard `zone >= ZONE_BASE_VB` is
    dead — that base is `0`, so it is tautological on a `u16` and clippy refuses it; the
    `wrapping_sub` alone carries gbuffer's 16 and SV0's 32 out of the `3..=9` range.
-2. Delete the runner harness (1381 lines) and the print sites; the `rg` gates then pass.
+2. ✅ **DONE — 463 lines.** The readback block, the accumulation, `VbBenchTables`, `VbPassLabel`
+   and its impl, `print_vb_bench_summary`, `vb_bench_mean_ns`, `vb_bench_stats_ns`, the five arming
+   locals, `read_vb_bench_ns` and `VbBenchSample`. **Every MEASUREMENT print is gone**; the three
+   surviving `VB-P1d` strings are diagnostics about the bench's arming and die in step 3 with it.
+   The cascade ran in four rounds, each named by clippy rather than found by reading — and the
+   count is 463, not the 1381 the plan carried: that figure counted the whole harness including the
+   arming and collector that belong to step 3.
    ⚠️ **RUN, not argued: the cascade was produced and reverted.** Deleting the print site and its
    89-line function turned **eight** items dead at the first order — `vb_bench_lights`,
    `vb_bench_force_seen`, `vb_bench_mode_seen` (and both of their assignments), `vb_bench_mean_ns`,

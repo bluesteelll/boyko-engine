@@ -1625,33 +1625,6 @@ pub(crate) struct GpuSceneBundles {
     vb_census: Option<CommandWitness>,
 }
 
-/// VG R3 piece 4 rung P4-1: one bench frame's timestamp readback — `VB_PASS_COUNT` begin OFFSETS,
-/// `VB_PASS_COUNT` DURATIONS, and the recorder's own witness of which brackets executed.
-///
-/// # Why the masks travel beside the numbers
-///
-/// A duration cannot distinguish "this pass cost nothing" from "this pass was never bracketed and
-/// the totality epilogue filled it at the frame end" — both read ~0. Nor, on its own, can the
-/// begin offset: the epilogue's filler stamps are recorded LAST, but a `TOP_OF_PIPE` begin
-/// recorded last may legally report an EARLIER time than a `BOTTOM_OF_PIPE` stamp recorded before
-/// it, so "the largest offset in the frame" is a heuristic and not a proof. The masks are the
-/// recorder's own record of which brackets ran, so the MEASURED/FALLBACK/TORN label is structural.
-/// The offsets stay in the payload because the measurement harness asserts on THEM (record order,
-/// the base-stamp contract), not on the label.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct VbBenchSample {
-    /// Per pass, the begin stamp as an offset from pair 0's begin stamp, in ns.
-    pub(crate) begin_off_ns: [f64; VB_PASS_COUNT as usize],
-    /// Per pass, the bracket's duration in ns — bit-identical to what `read_query_pool_ns`
-    /// returns for the same pool contents (asserted in the dev profile, see
-    /// [`GpuSceneBundles::read_vb_bench_ns`]).
-    pub(crate) dur_ns: [f64; VB_PASS_COUNT as usize],
-    /// Bit `p` set iff the recorder bracketed pass `p`'s BEGIN this frame.
-    pub(crate) begun: u16,
-    /// Bit `p` set iff the recorder bracketed pass `p`'s END this frame.
-    pub(crate) ended: u16,
-}
-
 /// Textured-PBR T6c: the TEXTURED gbuffer producer pipeline resources — see
 /// [`GpuSceneBundles::tex`] / [`GpuSceneBundles::build_textured_resources`] for the
 /// lazy-build rationale (the bindless texture-array table's descriptor-set LAYOUT, a
@@ -7703,71 +7676,6 @@ impl GpuSceneBundles {
         )
         .expect("invariant: VB-SV0 S1.5 bench query-pool readback");
         Some(out_ticks[Sv0TimedPass::Marcher.slot() as usize])
-    }
-
-    /// VG R3 piece 4 rung P4-1: reads through [`RhiDevice::read_query_pool_pairs_ns`], so the
-    /// caller gets each pair's begin OFFSET beside its duration, and carries the recorder's
-    /// bracket witness (see [`VbBenchSample`]).
-    ///
-    /// # The dual-read invariant (dev profile only)
-    ///
-    /// `vkGetQueryPoolResults` is idempotent until the pool is reset, so both readers may read
-    /// one pool in one frame. In the dev profile this fn re-reads the SAME pool through the
-    /// shipped `read_query_pool_ns` and asserts bit-for-bit equality with `dur_ns` on every slot,
-    /// every bench frame — the standing proof that routing VB-P1d's published numbers through
-    /// the new seam did not move them, rather than a rung-local ceremony that a later edit to
-    /// either reader could silently diverge from.
-    ///
-    /// Its limit, named: this is an implementation-equality check that runs in the DEV profile.
-    /// A release bench run (the timing worker inherits the driver's profile) does not execute it,
-    /// and nothing else in the instrument depends on it holding at run time.
-    ///
-    /// # Panics
-    /// Panics (`expect("invariant: ...")`) if the readback fails — a bench-only diagnostic
-    /// path (never reached on the shipped default), so a query-pool read failure here is a
-    /// setup/driver bug, not a recoverable per-frame condition.
-    pub(crate) fn read_vb_bench_ns(&self, ctx: &VulkanContext, fi: usize) -> Option<VbBenchSample> {
-        let collector = self.vb_timing_for_frame()?;
-        let mut scratch = [0u64; (2 * VB_PASS_COUNT) as usize];
-        let mut begin_off_ns = [0.0f64; VB_PASS_COUNT as usize];
-        let mut dur_ns = [0.0f64; VB_PASS_COUNT as usize];
-        RhiDevice::read_query_pool_pairs_ns(
-            ctx,
-            collector.pool(fi),
-            VB_PASS_COUNT,
-            &mut scratch,
-            &mut begin_off_ns,
-            &mut dur_ns,
-        )
-        .expect("invariant: VB-P1d bench query-pool readback");
-
-        #[cfg(debug_assertions)]
-        {
-            let mut dual_scratch = [0u64; (2 * VB_PASS_COUNT) as usize];
-            let mut dual_ns = [0.0f64; VB_PASS_COUNT as usize];
-            RhiDevice::read_query_pool_ns(
-                ctx,
-                collector.pool(fi),
-                VB_PASS_COUNT,
-                &mut dual_scratch,
-                &mut dual_ns,
-            )
-            .expect("invariant: VB-P1d bench dual-read");
-            for slot in 0..VB_PASS_COUNT as usize {
-                // Bit-for-bit: both sides are `f64` produced from the SAME masked integer delta
-                // times the SAME period, so anything but exact equality means the two readers
-                // stopped computing the same quantity.
-                assert_eq!(
-                    dual_ns[slot].to_bits(),
-                    dur_ns[slot].to_bits(),
-                    "invariant: read_query_pool_pairs_ns duration must be bit-identical to \
-                     read_query_pool_ns on slot {slot}"
-                );
-            }
-        }
-
-        let (begun, ended) = collector.witness(fi);
-        Some(VbBenchSample { begin_off_ns, dur_ns, begun, ended })
     }
 
     /// Tears every bundle down in reverse dependency order — the showcase

@@ -62,7 +62,7 @@ use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 #[cfg(windows)]
 use boyko_rhi_vulkan::ffi::VkExtent2D;
 #[cfg(windows)]
-use boyko_rhi_vulkan::swapchain::{GBUFFER_PUSH_BYTES, GBufferMeshDraw, VB_PASS_COUNT, VbTimedPass};
+use boyko_rhi_vulkan::swapchain::{GBUFFER_PUSH_BYTES, GBufferMeshDraw};
 #[cfg(windows)]
 use boyko_scene::render_caps::MeshHandle;
 #[cfg(windows)]
@@ -1019,21 +1019,6 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     // line gated on `vb_bench` below is dead code there and this loop stays byte-identical to
     // the pre-VB-P1d path.
     let vb_bench = host.gpu.vb_bench_armed();
-    // The bench's own TIMED-frame budget — decoupled from `BOYKO_WINDOW_FRAMES` (kept free for
-    // its existing automated-run-cap role). `BOYKO_VB_BENCH_LIGHTS` is read here ONLY as a print
-    // label — the bench scene's own setup system reads the SAME env independently to spawn the
-    // lights (`vb_p1d_cull_shade_bench.rs`), so there is one source of truth for "how many".
-    let vb_bench_frames: u32 = if vb_bench {
-        std::env::var("BOYKO_VB_BENCH_FRAMES")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(VB_BENCH_DEFAULT_FRAMES)
-            .max(1)
-    } else {
-        0
-    };
-    let vb_bench_lights: u32 =
-        std::env::var("BOYKO_VB_BENCH_LIGHTS").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
     // Profiling rung 5c: leg B. `GpuSceneBundles::boot` refuses `BOYKO_VB_ZONE` alongside
     // `BOYKO_VB_BENCH`, so at most one of `vb_bench`/`vb_zone` is true in any process — the A/B
     // is two processes, one leg each, which is also what keeps the OLD collector's
@@ -1087,20 +1072,6 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     // once the loop starts. VB-P1e H0 split the single `cull_ns` sample into
     // `cull_reset_ns`/`cull_dispatch_ns` (the `CullReset`/`CullDispatch` bracket pair) so the
     // fixed-cost hypothesis in `VB-P1E-HIERARCHICAL-CULL-PLAN.md` §1.2 can be attributed.
-    // VG R3 piece 4 rung P4-1: one table per HALF of the readback — durations (what VB-P1d has
-    // always published) and begin OFFSETS (what tells a measurement from an epilogue fill) —
-    // indexed by `VbTimedPass::slot()`, so a new pass costs a row, not a variable.
-    // VG R3 piece 4 rung P4-6 adds a THIRD: end OFFSETS. See `VbBenchTables::end_off_ns` for why a
-    // harness cannot get one by adding the other two after they are reduced.
-    let mut vb_bench_tables = VbBenchTables {
-        dur_ns: core::array::from_fn(|_| Vec::with_capacity(vb_bench_frames as usize)),
-        begin_off_ns: core::array::from_fn(|_| Vec::with_capacity(vb_bench_frames as usize)),
-        end_off_ns: core::array::from_fn(|_| Vec::with_capacity(vb_bench_frames as usize)),
-    };
-    // Per pass, the worst label observed over the kept frames (see `VbPassLabel`): the recorder
-    // publishes the two bracket masks per frame, so this is structural, not inferred from the
-    // numbers.
-    let mut vb_bench_labels = [VbPassLabel::Measured; VB_PASS_COUNT as usize];
     // VG R3 piece 4 rung P4-4: the SET of distinct occlusion regimes observed across the TIMED
     // frames, as two bitmasks (bit `k` = the variant at index `k` was seen). Rung P4-4 turned the
     // regime from a boot-time env read into a live Resource, and the boot read's second rationale
@@ -1109,9 +1080,6 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     // rejects that worker, instead of averaging two regimes and attributing them to one.
     //
     // Two `u8`s, updated with one shift-or per timed frame. No allocation, no per-frame I/O.
-    let mut vb_bench_force_seen: u8 = 0;
-    let mut vb_bench_mode_seen: u8 = 0;
-    let mut vb_bench_seen: u32 = 0;
     if vb_bench {
         // VG R3 piece 4 rung P4-2: the bench and the cull READBACK probe are mutually exclusive,
         // and the reason is that the probe records commands INSIDE the timed brackets. Under
@@ -2923,54 +2891,6 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             }
         }
 
-        if vb_bench && presented_ok {
-            // Offline discipline (mirrors `window_present_gbuffer`'s own R0 harness): wait the
-            // device idle so this frame's timestamp writes are complete + readable before the
-            // slot is reused two frames on.
-            ctx.wait_idle().expect("invariant: VB-P1d bench wait_idle");
-            if let Some(sample) = host.gpu.read_vb_bench_ns(ctx, s) {
-                vb_bench_seen += 1;
-                if vb_bench_seen as usize > VB_BENCH_WARMUP {
-                    // VG R3 piece 4 rung P4-4: this timed frame's regime, folded into the observed
-                    // set. Taken from the SAME per-frame host reads the scene was assembled from,
-                    // so the summary describes the frames it timed rather than the state at exit.
-                    vb_bench_force_seen |= 1u8 << frame_occ_force.slot();
-                    vb_bench_mode_seen |= 1u8 << (frame_occ_mode as u32);
-                    for (slot, worst) in vb_bench_labels.iter_mut().enumerate() {
-                        vb_bench_tables.dur_ns[slot].push(sample.dur_ns[slot]);
-                        vb_bench_tables.begin_off_ns[slot].push(sample.begin_off_ns[slot]);
-                        // VG R3 piece 4 rung P4-6: the END offset is formed HERE, from THIS frame's
-                        // two halves, and only then reduced. Both terms come from one readback of
-                        // one frame's pool, so the sum is that frame's `end − base` — the quantity
-                        // a reader wants — whereas adding the two published MEDIANS afterwards is
-                        // not a time any frame had.
-                        vb_bench_tables.end_off_ns[slot]
-                            .push(sample.begin_off_ns[slot] + sample.dur_ns[slot]);
-                        let bit = 1u16 << slot;
-                        let label = VbPassLabel::from_witness(
-                            sample.begun & bit != 0,
-                            sample.ended & bit != 0,
-                        );
-                        *worst = worst.worse_of(label);
-                    }
-                }
-            }
-            // Every row grows together (one push per pass per kept frame), so any one of them
-            // measures the budget; name the row VB-P1d's own budget check always used.
-            if vb_bench_tables.dur_ns[VbTimedPass::CullReset.slot() as usize].len()
-                >= vb_bench_frames as usize
-            {
-                print_vb_bench_summary(
-                    host.resolved_render_path.froxel_light_cull,
-                    vb_bench_lights,
-                    &vb_bench_tables,
-                    &vb_bench_labels,
-                    vb_bench_force_seen,
-                    vb_bench_mode_seen,
-                );
-                return;
-            }
-        }
 
         // VB-SV0 rung S1.5: accumulate this frame's marcher-dispatch cost in RAW TICKS, tagged
         // with the ABBA cycle counter it was recorded under — read ONLY on a frame that actually
@@ -3208,176 +3128,6 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     }
 }
 
-/// VB-P1d: the arithmetic mean of `samples` (ns) — average over N frames so the reported
-/// number reflects steady-state cost, not single-frame noise (`samples` must be non-empty).
-#[cfg(windows)]
-fn vb_bench_mean_ns(samples: &[f64]) -> f64 {
-    debug_assert!(!samples.is_empty(), "invariant: vb_bench_mean_ns needs at least one sample");
-    samples.iter().sum::<f64>() / samples.len() as f64
-}
-
-/// VB-P1d/VB-P1e: prints this run's froxel cull/shade bench summary.
-///
-/// `froxel_light_cull` (`ResolvedRenderPath`'s own boot-frozen decision — resolved ONCE,
-/// never re-derived per frame) means a SINGLE process can only ever measure ONE leg (flat or
-/// froxel) of a given `N_ps`: the froxel arm's GPU pipelines simply do not exist on a
-/// flat-boot process, so there is no in-process way to toggle it mid-run. The orchestrator
-/// runs this bench TWICE per `N_ps` (`BOYKO_VB_FROXEL_FORCE_OFF` unset, then set — the SAME
-/// knob `vb_mesh_froxel.rs` uses) and combines the two printed lines to read the break-even
-/// (`froxel_total_ns` crossing below `flat_shade_ns`).
-///
-/// VB-P1e H0 split the single `LightCull` bracket into `cull_reset_ns` (the alloc-counter fill
-/// plus its TRANSFER→COMPUTE barrier) and `cull_dispatch_ns` (the dispatch alone) — see
-/// `VB-P1E-HIERARCHICAL-CULL-PLAN.md` §8.5. `froxel_cull_ns` is their sum, printed alongside
-/// the two components so the fixed-cost hypothesis in §1.2 could be attributed rather than
-/// assumed.
-///
-/// **The measurement REFUTED that hypothesis** (RTX 3060, release, 220 timed frames). §1.2 had
-/// attributed the cull's ~13.9 us `N`-independent fixed cost to "fill + pipeline barrier +
-/// dispatch ramp". Measured `cull_reset_ns` is **553-795 ns at EVERY `N_ps`** — flat in `N`, as
-/// a one-`u32` fill must be, and ~23x smaller than the hypothesis. The fixed cost is therefore
-/// DISPATCH-INTRINSIC (launch ramp / occupancy), not fill or barrier. Consequence for the plan:
-/// its VB-P1g follow-up — delete the `cmd_fill_buffer` + TRANSFER→COMPUTE barrier to recover the
-/// fixed cost — is worth at most ~0.6 us, not ~14 us. §7.1's break-even floor is unchanged (the
-/// cost is still there); only the route named to attack it was wrong.
-///
-/// Corollary about this split's own known defect: `CullDispatch`'s begin is a `TOP_OF_PIPE`
-/// write recorded after a `dstStage = COMPUTE` barrier that does not order it, so the sum can
-/// over-count by at most `cull_reset_ns`. Sized against the ASSUMED 13.9 us that would have been
-/// ~70% at `N_ps=8`; against the MEASURED 0.6 us it is ~3%, i.e. below this bench's own
-/// run-to-run spread. Worth fixing for correctness, not worth gating on.
-///
-/// O4 (measurement methodology, mirrors the R0 harness's own NOTE): each of `cull_reset_ns`/
-/// `cull_dispatch_ns`/`shade_ns` is a `TOP_OF_PIPE`/`BOTTOM_OF_PIPE` bracket around a
-/// NON-ADJACENT pass pair, so the reported number is GPU wall-clock INCLUSIVE of pipeline
-/// drain and any overlap with neighboring work, not isolated kernel time — and
-/// `froxel_total_ns` sums three INDEPENDENTLY measured brackets, not one continuous span. Fine
-/// for a break-even comparison against `flat_shade_ns` (both sides carry the same bracket
-/// bias), but not a claim of isolated per-pass cost.
-///
-/// VG R3 piece 4 rung P4-1: the `VB-P1d …` line above is BYTE-IDENTICAL to the pre-P4-1 print —
-/// same keys, same mean reduction, same NOTE — because `vg_occ_split_timing.rs` parses it. The
-/// per-pass `VB-P4 pass=…` lines are printed BESIDE it, carrying each pass's median/mean/p95, its
-/// begin OFFSET (which is what lets a harness check record order at all), and its structural
-/// `FALLBACK`/`TORN` flag from the recorder's bracket witness. A flagged pass measured nothing
-/// and must be excluded from every aggregate; a `TORN` one rejects the run.
-///
-/// VG R3 piece 4 rung P4-2: there are now TEN such lines, and their RECORD ORDER is leg-dependent.
-/// `vb_run` (slot 9) spans `[b3, e8]` identically on every leg and is the only interval whose
-/// begin-offset ordering a harness may assert across legs; `vb_hzb_build` (slot 6) and `vb_shade`
-/// (slot 2) each move between two mutually-exclusive recorder sites, so neither is comparable
-/// across an armed/disarmed pair. `vb_shade`'s begin is additionally `TOP_OF_PIPE` (kept for
-/// VB-P1d compatibility), so comparing its offset with any other slot's is an OBSERVATION and not
-/// an ordering — a TOP stamp recorded later may legally report an earlier time.
-///
-/// # VG R3 piece 4 rung P4-6: the ELEVENTH key, `end_off_ns`, and why it is published rather than
-/// derived
-///
-/// **Two independently reduced medians cannot be added.** `median(begin_off) + median(dur)` is not
-/// `median(begin_off + dur)` unless the begin offset is constant across frames, and it is not: the
-/// pre-run work a stamp waits on jitters frame to frame. P4-6's first sitting measured the
-/// consequence — on the disarmed leg, `off(vb_late_raster) + dur` exceeded
-/// `off(vb_run) + dur(vb_run)` by 144 ns on a 47 µs run (`vb_occ_mixed`) and by 240 ns on a 691 µs
-/// run (`vb_occ_dense`), while the per-frame relation `e8 ≤ e9` holds ALWAYS: there is no GPU
-/// command between those two stamps. The property was true; the reduction could not express it.
-///
-/// So a clause that needs an END TIME gets one reduced WHOLE, from per-frame sums formed at the
-/// accumulation site. `begin_off_ns` and the duration statistics are unchanged — they are correct
-/// for what they report, and VB-P1d's and P4-2's published numbers stay comparable.
-///
-/// `#[cold]`/`#[inline(never)]`: a once-per-process diagnostic print, never on the hot path.
-#[cfg(windows)]
-#[cold]
-#[inline(never)]
-fn print_vb_bench_summary(
-    froxel_light_cull: bool,
-    n_ps: u32,
-    tables: &VbBenchTables,
-    labels: &[VbPassLabel; VB_PASS_COUNT as usize],
-    force_seen: u8,
-    mode_seen: u8,
-) {
-    let dur_ns = &tables.dur_ns;
-    let cull_reset_ns: &[f64] = &dur_ns[VbTimedPass::CullReset.slot() as usize];
-    let cull_dispatch_ns: &[f64] = &dur_ns[VbTimedPass::CullDispatch.slot() as usize];
-    let shade_ns: &[f64] = &dur_ns[VbTimedPass::VbShade.slot() as usize];
-    debug_assert_eq!(
-        cull_reset_ns.len(),
-        shade_ns.len(),
-        "invariant: one (cull_reset, cull_dispatch, shade) triple per frame"
-    );
-    debug_assert_eq!(
-        cull_dispatch_ns.len(),
-        shade_ns.len(),
-        "invariant: one (cull_reset, cull_dispatch, shade) triple per frame"
-    );
-    let shade_mean = vb_bench_mean_ns(shade_ns);
-    if froxel_light_cull {
-        let cull_reset_mean = vb_bench_mean_ns(cull_reset_ns);
-        let cull_dispatch_mean = vb_bench_mean_ns(cull_dispatch_ns);
-        let cull_mean = cull_reset_mean + cull_dispatch_mean;
-        let total_mean = cull_reset_ns
-            .iter()
-            .zip(cull_dispatch_ns)
-            .zip(shade_ns)
-            .map(|((r, d), s)| r + d + s)
-            .sum::<f64>()
-            / cull_reset_ns.len() as f64;
-        println!(
-            "VB-P1d N_ps={n_ps} config=froxel cull_reset_ns={cull_reset_mean:.1} \
-             cull_dispatch_ns={cull_dispatch_mean:.1} froxel_cull_ns={cull_mean:.1} \
-             froxel_shade_ns={shade_mean:.1} froxel_total_ns={total_mean:.1} (kept {} frames)",
-            cull_reset_ns.len()
-        );
-    } else {
-        println!(
-            "VB-P1d N_ps={n_ps} config=flat flat_shade_ns={shade_mean:.1} (kept {} frames)",
-            shade_ns.len()
-        );
-    }
-    println!(
-        "  NOTE: TOP/BOTTOM brackets each pass's wall-clock (inclusive of pipeline drain + \
-         overlap with neighboring work), not isolated kernel time; froxel_total_ns sums three \
-         independently-measured brackets. Fine for the CLUSTER_HI break-even comparison, not \
-         an isolated-cost claim (mirrors the R0 GPU-pass-cost harness's own methodology note)."
-    );
-
-    // VG R3 piece 4 rung P4-1: the per-pass lines, beside — never instead of — the VB-P1d line
-    // above, which stays byte-identical because `vg_occ_split_timing.rs` parses it.
-    //
-    // ⚠️ Rung P4-6's `end_off_ns` is inserted BEFORE `n=`, so the `FALLBACK`/`TORN` suffix stays the
-    // last token on the line: every existing reader matches its keys by name
-    // (`vb_bench_totality_gate.rs`'s `key_f64`) or scans for the suffix, and both survive a key
-    // added in the middle. `n=` remains the first literal `n=` on the line — every other key ends
-    // `_ns=`, which contains no `n=` — so a `find("n=")` reader is unaffected too.
-    for slot in 0..VB_PASS_COUNT as usize {
-        let pass = VbTimedPass::from_slot(slot as u32);
-        let (median, mean, p95) = vb_bench_stats_ns(&dur_ns[slot]);
-        let (begin_median, _, _) = vb_bench_stats_ns(&tables.begin_off_ns[slot]);
-        let (end_median, _, _) = vb_bench_stats_ns(&tables.end_off_ns[slot]);
-        println!(
-            "VB-P4 pass={} median_ns={median:.1} mean_ns={mean:.1} p95_ns={p95:.1} \
-             begin_off_ns={begin_median:.1} end_off_ns={end_median:.1} n={}{}",
-            pass.label(),
-            dur_ns[slot].len(),
-            labels[slot].suffix()
-        );
-    }
-
-    // VG R3 piece 4 rung P4-4: the PROVENANCE line. `observed` is the SET of distinct regime words
-    // seen across the timed frames, not the value at exit — rung P4-4 made the regime a live
-    // Resource, and the boot-time env read it replaced justified itself partly by making "which
-    // regime produced this capture?" answerable from the artifact. This is that answer, and it is a
-    // RECORDING: `n_distinct > 1` is printed, never asserted, because a constancy assertion would
-    // have to hold on hosts this repository does not own. The harness rejects a worker whose
-    // `n_distinct` is not 1 rather than averaging two regimes into one number.
-    println!(
-        "VB-P4 regime observed=[{}] n_distinct={} mode=[{}]",
-        word_set(&OcclusionForce::ALL, force_seen, |f| f.as_str()),
-        force_seen.count_ones(),
-        word_set(&boyko_render::OcclusionMode::ALL, mode_seen, |m| m.as_str())
-    );
-}
 
 /// Renders a set-of-variants bitmask as a comma-separated word list, in the variants' own order.
 ///
@@ -3405,127 +3155,8 @@ fn word_set<T: Copy>(variants: &[T], seen: u8, word: impl Fn(T) -> &'static str)
     if out.is_empty() { "-".to_string() } else { out }
 }
 
-/// VG R3 piece 4 rung P4-6: the bench's three per-pass sample tables, one row per
-/// `VbTimedPass::slot()`.
-///
-/// Grouped into one type rather than threaded as three parameters so that adding a fourth reduction
-/// costs a field instead of a signature, and so the "reduce whole, never compose" rule below has a
-/// single place to live.
-///
-/// Every row is preallocated ONCE at the bench's final frame budget (Principle 5) and never
-/// reallocates during the run. On a non-bench boot the budget is `0`, so all thirty rows are
-/// zero-capacity `Vec`s that allocate nothing.
-#[cfg(windows)]
-struct VbBenchTables {
-    /// Per pass, per kept frame: the bracket's duration in ns. VB-P1d's published means and
-    /// P4-2's per-pass medians both reduce this row.
-    dur_ns: [Vec<f64>; VB_PASS_COUNT as usize],
-    /// Per pass, per kept frame: the BEGIN stamp as an offset from pair 0's begin.
-    begin_off_ns: [Vec<f64>; VB_PASS_COUNT as usize],
-    /// Per pass, per kept frame: the END stamp as an offset from pair 0's begin — **formed per
-    /// frame at the accumulation site, then reduced whole.**
-    ///
-    /// ⚠️ **A consumer must never reconstruct this by adding the two published medians.**
-    /// `median(begin_off) + median(dur)` equals `median(begin_off + dur)` only when the begin
-    /// offset is constant across frames, and it is not — the pre-run work a `BOTTOM_OF_PIPE` stamp
-    /// waits on jitters frame to frame. Rung P4-6's first sitting measured the size of the error
-    /// (144 ns on a 47 µs run; 240 ns on a 691 µs run) against a relation whose true per-frame
-    /// margin is zero, and the composed form reported the inequality backwards. See
-    /// [`print_vb_bench_summary`]'s doc for the full derivation.
-    end_off_ns: [Vec<f64>; VB_PASS_COUNT as usize],
-}
 
-/// VG R3 piece 4 rung P4-1: what the recorder's two bracket masks say about one pass on one
-/// frame — the MEASURED / FALLBACK / TORN trichotomy the totality epilogue makes observable.
-///
-/// The label is STRUCTURAL (it comes from the masks `TsWitness::finish` published), not inferred
-/// from the numbers: a delta cannot distinguish a free pass from a filled one — both read ~0 —
-/// and a begin OFFSET only distinguishes them when every stamp in the frame is at the same
-/// pipeline stage, which slots 0..2 (`TOP_OF_PIPE` begins, kept for VB-P1d compatibility) are
-/// not. The offsets are published beside the label for the harness's own order checks.
-#[cfg(windows)]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum VbPassLabel {
-    /// The recorder bracketed both ends: a number.
-    Measured,
-    /// Neither end was bracketed on this leg; the epilogue wrote a `BOTTOM`/`BOTTOM` zero pair at
-    /// the frame end. The duration is a genuine ~0 that measures NOTHING — excluded from every
-    /// aggregate rather than averaged in as a small cost.
-    Fallback,
-    /// A begin with no end (the epilogue closed it at the frame end, so the duration runs to
-    /// there), or the reverse. Either is a recorder bug; a run containing one is rejected.
-    Torn,
-}
 
-#[cfg(windows)]
-impl VbPassLabel {
-    /// The trichotomy, from one frame's `(begun, ended)` bits for one pass.
-    ///
-    /// `(false, true)` — an END with no BEGIN — is also `Torn`: the epilogue cannot repair it
-    /// (re-stamping a begin query is the VUID violation), so in practice the `WAIT_BIT` readback
-    /// blocks on the unwritten begin query before any label is printed. It is classified rather
-    /// than ignored so the enum is total.
-    #[inline]
-    fn from_witness(begun: bool, ended: bool) -> Self {
-        match (begun, ended) {
-            (true, true) => Self::Measured,
-            (false, false) => Self::Fallback,
-            _ => Self::Torn,
-        }
-    }
-
-    /// The worse of two labels — `Torn` dominates `Fallback` dominates `Measured`, so a pass that
-    /// was ever torn over the kept frames is reported torn rather than averaged into silence.
-    #[inline]
-    fn worse_of(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Torn, _) | (_, Self::Torn) => Self::Torn,
-            (Self::Fallback, _) | (_, Self::Fallback) => Self::Fallback,
-            _ => Self::Measured,
-        }
-    }
-
-    /// The printed suffix — empty for a real measurement, so a measured line carries no flag at
-    /// all and a harness scanning for `FALLBACK`/`TORN` cannot match one by accident.
-    #[inline]
-    fn suffix(self) -> &'static str {
-        match self {
-            Self::Measured => "",
-            Self::Fallback => " FALLBACK",
-            Self::Torn => " TORN",
-        }
-    }
-}
-
-/// VG R3 piece 4 rung P4-1: `(median, mean, p95)` of one pass's samples, in ns.
-///
-/// The median leads because a single scheduling hiccup moves a mean by more than the quantities
-/// this instrument resolves; the mean is kept because VB-P1d's own published numbers are means
-/// and the two must be comparable on the same line.
-///
-/// Sorts a COPY, so the caller's sample order (which is what makes the per-frame sequence
-/// auditable) survives the call.
-///
-/// # Panics
-/// Panics on an empty slice: the caller has already checked it reached its frame budget, so an
-/// empty sample set here is a harness bug.
-#[cfg(windows)]
-fn vb_bench_stats_ns(samples: &[f64]) -> (f64, f64, f64) {
-    assert!(!samples.is_empty(), "invariant: vb_bench_stats_ns needs at least one sample");
-    let mean = vb_bench_mean_ns(samples);
-    let mut sorted: Vec<f64> = samples.to_vec();
-    // `f64` is only `PartialOrd`; the samples are GPU timestamp deltas — finite and non-NaN by
-    // construction (integer ticks scaled by a finite period) — so `partial_cmp` cannot return
-    // `None` here, but say so rather than `unwrap()`.
-    sorted.sort_unstable_by(|a, b| {
-        a.partial_cmp(b).expect("invariant: GPU timestamp deltas are finite, never NaN")
-    });
-    let n = sorted.len();
-    let median =
-        if n % 2 == 1 { sorted[n / 2] } else { 0.5 * (sorted[n / 2 - 1] + sorted[n / 2]) };
-    let p95 = sorted[((n as f64 * 0.95) as usize).min(n - 1)];
-    (median, mean, p95)
-}
 
 /// VG R3 piece 4 rung P4-1: the boot-time notice that replaced this bench's `mesh_leg`
 /// `assert!`.
