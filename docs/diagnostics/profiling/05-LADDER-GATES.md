@@ -1340,10 +1340,30 @@ exactly how the seven brackets acquired the wrong stage in the first place.
    * `scene` is `GBufferScene<'a>` and its `gpu_zone` borrow is tied to `'a`, which outlives the loop body. Assigning `None` between frames does not shorten it — the lifetime is in the type. So the `&mut` and the `&` cannot alternate. `boyko_app`'s runner is unaffected because it **rebuilds the scene every frame** from `GpuSceneBundles::scene(&self)`; this fixture cannot without moving a 230-line literal into the loop.
    * The three ways out, none of them free: **(a)** rebuild the literal per frame; **(b)** give `GpuZoneRecorder` the interior mutability that would make `open_frame`/`retire` take `&self` — `FrameSlot` already holds two atomics and an `UnsafeCell`, so this is the rung-5c `CommandWitness` change one level down, and it widens who may claim a ring slot; **(c)** retire the harness, on the grounds that the zone artifact carries the same four brackets and this is an `#[ignore]`d offline printer whose numbers are already transcribed into the HW-RT plan.
 
-   **(c) is a SCOPE call and is with the owner** (`docs/OPEN-QUESTIONS.md`). Until it is answered
-   the two gbuffer collectors cannot be deleted, because this harness reads their durations — and
-   the mechanical gate stays unsatisfiable for reasons that have nothing to do with the tree being
-   one file short.
+   ✅ **OWNER ANSWERED 2026-08-10: (c), retire it.** Recorded here rather than in the commit that
+   acts on it, because the next obstacle turned up before the deletion could land.
+
+   ⛔ **AND THE DELETION STILL DID NOT LAND, for a reason nobody had looked for.** Step 6c was
+   attempted and REVERTED — the tree is back at the last green commit. What it measured:
+
+   * The `window_present_gbuffer.rs` retirement and the `gbuffer.rs` port are straightforward. The
+     witness's four verbs (`begin`/`end`/`sv0_begin`/`sv0_end`) collapse to two taking a `u16` zone,
+     exactly as `vb.rs`'s did, once the five `ZONE_GBUF_*`/`ZONE_SV0_MARCHER` constants exist.
+   * **`runner.rs`'s SV0 S1.5 harness is NOT a printed measurement channel, and that is the finding.**
+     Step 2 deleted the VB printer as a pure output; this one is entangled with a scene INPUT.
+     `sv0_bench_lighting_flags` is computed from an ABBA phase counter and threaded into the scene
+     each frame — the harness does not merely *report* the interleaved A/B, it *drives* it by
+     changing what the marcher shades. Deleting the timing channel therefore deletes a render-path
+     input, which is a different question from deleting a printer, and it needs its own answer
+     before the code moves.
+   * Concretely blocked on: seven non-contiguous spans in `runner.rs` (the arming + locals, the
+     phase counter, the scene field, the readback, the summary printer, a lattice helper, and a
+     unit test), plus `sv0_deferred_term_bench.rs`'s transcriptions of what that printer emitted.
+
+   **The lesson is the one step 5 already paid for once, in a new place:** *"the second list
+   described what these files are ABOUT, not what they DO."* Here the corpus's own step-2 framing —
+   *"the printed measurement channel is deleted"* — described the VB half accurately and the SV0
+   half not at all, and the difference was invisible until the deletion was attempted.
 
 #### Rung 7c, second half — the workload tag, and a mechanism the corpus described as if it existed
 

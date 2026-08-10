@@ -14,6 +14,35 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-10 — Rung 7 step 6c attempted and REVERTED: the SV0 bench is not a printer, it DRIVES the A/B it reports.
+
+You answered the previous item with "retire the harness", and that part is settled — the
+`window_present_gbuffer.rs` timing leg goes. The deletion still did not land, and the obstacle is a
+new one that only surfaced by attempting it. **The tree is back at the last green commit; nothing is
+half-finished in it.**
+
+Rung 7 step 2 deleted the VB *printed measurement channel* as pure output. The corpus carries that
+same framing forward to the SV0 half, and it is wrong there. `runner.rs`'s S1.5 harness computes
+`sv0_bench_lighting_flags` from an ABBA phase counter and threads it into the scene every frame — it
+does not merely REPORT the interleaved A/B, it DRIVES it, by changing what the marcher shades.
+Deleting the timing channel therefore deletes a **render-path input**, which is a different act from
+deleting a printer.
+
+So there is a second question, and it is yours for the same reason the first was:
+
+* **Retire the whole S1.5 harness** — the phase driver with the printer. Its transcribed numbers stay
+  in the plan; nothing in the tree reproduces them afterwards.
+* **Keep the phase driver, delete only the timing** — the A/B still runs and still changes the
+  frame, but nothing measures it. That is a scene input with no consumer, which this campaign has a
+  name for: a value nothing can make move.
+
+My recommendation is the first. The second leaves a mechanism whose only purpose was to be measured.
+
+**This blocks the last two collectors and the rung's mechanical gate.** Everything upstream of it is
+shipped and green.
+
+---
+
 ## 2026-08-10 — Rung 7 step 6 is blocked on a SCOPE call: does `engine_grand_showcase_512_gpu_pass_cost` get ported, or retired?
 
 The last two GPU collectors (`TimestampCollector`, `Sv0TimestampCollector`) cannot be deleted while
