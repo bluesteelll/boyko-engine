@@ -407,7 +407,15 @@ impl<'a> TsWitness<'a> {
             // `VbRun` — the same commands, in the same places, measuring something else.
             // SAFETY: caller contract; `pair` came from `alloc_pair` on this slot immediately
             // above, and the pool was reset this frame (this witness's construction site).
-            let stage = unsafe { rec.record_begin(fns, cmd, ring, pair, pass.begin_stage()) };
+            let stage = unsafe {
+                rec.record_begin(
+                    fns,
+                    cmd,
+                    ring,
+                    pair,
+                    GpuZoneRecorder::zone_begin_stage(ZONE_BASE_VB + slot as u16),
+                )
+            };
             self.mark_begin(slot, stage);
         }
     }

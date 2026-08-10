@@ -433,6 +433,36 @@ impl GpuZoneRecorder {
         self.slots[slot].needs_cmd_reset.store(false, Ordering::Relaxed);
     }
 
+/// **The BEGIN stage of a zone, keyed by ZONE ID.** Rung 7's home for the table that lived on
+/// `VbTimedPass::begin_stage`.
+///
+/// The enum is deleted with its collector, and `ZONE_BASE_VB + slot` is the only vocabulary left
+/// afterwards — so the table has to move BEFORE the deletion, not be re-derived after it. Rung 7c
+/// is why: the port carried the brackets and not their stages, and seven VB passes measured a
+/// different quantity under a green `G10` for five commits. Re-deriving this under deadline
+/// pressure is that failure's exact shape.
+///
+/// `BOTTOM_OF_PIPE` for the seven P4-2 partitioning brackets (`ZONE_BASE_VB + 3 ..= +9`), because a
+/// bottom stamp is a prefix-completion time and consecutive ones exactly partition their span.
+/// `TOP_OF_PIPE` everywhere else: VB slots 0..2 keep it for compatibility with published VB-P1d
+/// numbers, and both gbuffer families' collectors always opened there.
+///
+/// **While `VbTimedPass` still exists, `G10`'s stage clause is the gate on this table** — leg A
+/// reads the enum, leg B reads this, and the two are compared stamp for stamp on every steady
+/// frame. A move that got a row wrong reds before the enum is gone.
+#[must_use]
+pub const fn zone_begin_stage(zone: u16) -> TimestampStage {
+    // `wrapping_sub` alone, with no `zone >= ZONE_BASE_VB` guard: that base is 0, so the guard is
+    // tautologically true for a `u16` and clippy refuses it. The wrap is what carries the other
+    // families out of range anyway — gbuffer's 16 and SV0's 32 both land outside 3..=9.
+    let vb_slot = zone.wrapping_sub(ZONE_BASE_VB);
+    if matches!(vb_slot, 3..=9) {
+        TimestampStage::BottomOfPipe
+    } else {
+        TimestampStage::TopOfPipe
+    }
+}
+
     /// Record `pair`'s BEGIN stamp at `stage` and witness it. **Returns the stage it wrote at**,
     /// so the caller's census records what this function did rather than what the caller expected.
     ///

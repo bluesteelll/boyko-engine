@@ -1219,8 +1219,13 @@ recorder needed one of its methods — ends with the stage table re-derived unde
 exactly how the seven brackets acquired the wrong stage in the first place.
 
 **Order, corrected:**
-1. Move `begin_stage`'s table to the zone-id module (`gpu_zone.rs`), keyed by zone id rather than by
-   pass — one const array, and `G10`'s stage clause is already the gate on it.
+1. ✅ **DONE.** `begin_stage`'s table now lives in `gpu_zone.rs` as `zone_begin_stage(zone)`, keyed by
+   ZONE ID. `vb.rs`'s zone leg reads it; `VbTimedPass::begin_stage` still feeds the collector leg,
+   and **`G10`'s stage clause compares the two stamp for stamp** — 26 frames, 520 timestamps, every
+   position and every stage identical. A move that got a row wrong reds while both tables exist,
+   which is the whole reason this step goes first. ⚠️ The obvious guard `zone >= ZONE_BASE_VB` is
+   dead — that base is `0`, so it is tautological on a `u16` and clippy refuses it; the
+   `wrapping_sub` alone carries gbuffer's 16 and SV0's 32 out of the `3..=9` range.
 2. Delete the runner harness (1381 lines) and the print sites; the `rg` gates then pass.
 3. Delete `gpu_timing.rs` (713) and `gpu_scene/mod.rs`'s arming (465).
 4. Delete `vb_bench_totality_gate.rs` **last** — both its gates lose their subject in step 2/3, and
