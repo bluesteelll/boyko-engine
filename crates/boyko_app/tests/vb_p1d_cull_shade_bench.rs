@@ -76,23 +76,43 @@
 //! Windowed-test conventions (mirrors `vb_mesh_froxel.rs`): `#[ignore]` (needs a real windowed
 //! GPU device), run with `BOYKO_DISABLE_VALIDATION=1` and `--test-threads=1`.
 //!
+//! # Profiling rung 7 — THIS FILE IS A WORKER, and its channel is its DRIVER's choice
+//!
+//! The consumer list says it *"drives the `VB-P1d` protocol"* and must be migrated to drive the
+//! artifact. MEASURED: the test body arms nothing — it reads `BOYKO_VB_FROXEL_FORCE_OFF` to pick a
+//! leg and `BOYKO_VB_BENCH_LIGHTS`/`_GRID`/`_RIG` to shape the scene, and **the timing channel is
+//! whichever knob the caller exported**. So the body is already channel-agnostic and needs no edit;
+//! what was stale is the recipes below, which named the retired collector.
+//!
+//! Every recipe now arms `BOYKO_VB_ZONE` and names an artifact. `GpuSceneBundles::boot` refuses
+//! `BOYKO_VB_ZONE` alongside `BOYKO_VB_BENCH`, so an operator with the old knob still exported gets
+//! a loud boot failure rather than a silently different channel — which is why the recipes remove
+//! it rather than assuming it is unset. `vg_decidability_floor.rs` already drives this binary
+//! exactly this way, 42 times per sitting.
+//!
+//! ⚠️ **The printed `VB-P1d …` line these recipes used to quote is deleted at this rung**, together
+//! with the runner harness that produced it. The artifact carries the same brackets as per-zone
+//! rows: `cull_reset_ns` is zone 0, `cull_dispatch_ns` zone 1, the shade bracket zone 2. There is
+//! no `froxel_total_ns` row and there will not be one — it was a per-frame SUM of three brackets,
+//! and composing after reduction is the mistake `VbBenchTables::end_off_ns` records; see
+//! `vg_decidability_floor.rs` for the measurement that says dropping it costs no floor.
+//!
 //! Invoke (one leg, one `N_ps`):
 //! ```text
-//! BOYKO_DISABLE_VALIDATION=1 BOYKO_VB_BENCH=1 BOYKO_VB_BENCH_LIGHTS=64 \
+//! BOYKO_DISABLE_VALIDATION=1 BOYKO_VB_ZONE=1 BOYKO_PROFILE_ARTIFACT=out.toml BOYKO_PROFILE_RUN_TOKEN=r1 BOYKO_PROFILE_WORKLOAD=n64 \n//!   BOYKO_VB_BENCH_LIGHTS=64 \
 //!   cargo test -p boyko-app --test vb_p1d_cull_shade_bench -- --ignored --nocapture --test-threads=1
-//! BOYKO_DISABLE_VALIDATION=1 BOYKO_VB_BENCH=1 BOYKO_VB_BENCH_LIGHTS=64 BOYKO_VB_FROXEL_FORCE_OFF=1 \
+//! BOYKO_DISABLE_VALIDATION=1 BOYKO_VB_ZONE=1 BOYKO_PROFILE_ARTIFACT=out.toml BOYKO_PROFILE_RUN_TOKEN=r1 BOYKO_PROFILE_WORKLOAD=n64 \n//!   BOYKO_VB_BENCH_LIGHTS=64 BOYKO_VB_FROXEL_FORCE_OFF=1 \
 //!   cargo test -p boyko-app --test vb_p1d_cull_shade_bench -- --ignored --nocapture --test-threads=1
 //! ```
-//! prints one `VB-P1d N_ps=64 config=froxel cull_reset_ns=.. cull_dispatch_ns=..
-//! froxel_cull_ns=.. froxel_shade_ns=.. froxel_total_ns=..` line and one
-//! `VB-P1d N_ps=64 config=flat flat_shade_ns=..` line respectively. (VB-P1e's rung H0 split the
-//! cull bracket in two; `froxel_cull_ns` is now the sum of the first two fields.)
+//! writes one artifact per run — the froxel leg and the flat leg carry DIFFERENT derived
+//! `workload_tag`s (rung 7c's `config_tag` covers `froxel_light_cull`), so the two files can be told
+//! apart by their headers instead of by which keys a printed line happened to carry.
 //!
 //! Invoke (H1.5's dispatch-shape sweep, one grid, `N_ps = 512` — `BOYKO_VB_FROXEL_FORCE_OFF`
 //! stays UNSET: §8.7 measures `froxel_cull_ns`, which the cull dispatch only emits on the
 //! froxel/clustered leg):
 //! ```text
-//! BOYKO_DISABLE_VALIDATION=1 BOYKO_VB_BENCH=1 BOYKO_VB_BENCH_LIGHTS=512 \
+//! BOYKO_DISABLE_VALIDATION=1 BOYKO_VB_ZONE=1 BOYKO_PROFILE_ARTIFACT=out.toml BOYKO_PROFILE_RUN_TOKEN=r1 BOYKO_PROFILE_WORKLOAD=n64 \n//!   BOYKO_VB_BENCH_LIGHTS=512 \
 //!   BOYKO_VB_BENCH_GRID=32x18x24 \
 //!   cargo test -p boyko-app --test vb_p1d_cull_shade_bench -- --ignored --nocapture --test-threads=1
 //! ```
@@ -101,7 +121,7 @@
 //! Invoke (VB-P1e H4's rig sweep, one rig, `N_ps = 512`, froxel leg, BASE arm — `BOYKO_VB_HIER_CULL`
 //! stays UNSET):
 //! ```text
-//! BOYKO_DISABLE_VALIDATION=1 BOYKO_VB_BENCH=1 BOYKO_VB_BENCH_LIGHTS=512 BOYKO_VB_BENCH_RIG=r3 \
+//! BOYKO_DISABLE_VALIDATION=1 BOYKO_VB_ZONE=1 BOYKO_PROFILE_ARTIFACT=out.toml BOYKO_PROFILE_RUN_TOKEN=r1 BOYKO_PROFILE_WORKLOAD=n64 \n//!   BOYKO_VB_BENCH_LIGHTS=512 BOYKO_VB_BENCH_RIG=r3 \
 //!   cargo test -p boyko-app --test vb_p1d_cull_shade_bench -- --ignored --nocapture --test-threads=1
 //! ```
 //! the orchestrator repeats this for `BOYKO_VB_BENCH_RIG=infrustum` and for the unset (`kronecker`)
