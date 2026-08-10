@@ -1248,7 +1248,16 @@ exactly how the seven brackets acquired the wrong stage in the first place.
    tables cannot go without the readback, and the readback is what the collector exists for. A
    session that starts this without budget to finish it leaves `runner.rs` non-compiling, and this
    repository's rule is that a broken tree is never committed. Treat 2–4 as one sitting.
-3. Delete `gpu_timing.rs` (713) and `gpu_scene/mod.rs`'s arming (465).
+3. **PARTLY DONE.** The collector's HOST SIDE is gone: `vb_bench_armed`, `vb_timing_for_frame`,
+   `disarm_vb_bench_unless_vb`, the `vb_bench` local and its three precondition blocks, the three
+   `vb_bench_*` panic/note helpers, the `vb_bench_disarmed` field, and `scene()` now threads
+   `vb_gpu_timing: None` unconditionally. ⚠️ **That last line is what killed `G10`'s VB leg A** — it
+   records no bracket, so the gate's own non-vacuity clause 3 fired (*"not one steady frame recorded
+   a bracket"*) exactly as designed. `vb_zone_ab_witness_gate.rs` is **DELETED**: a gate whose leg
+   ceased to exist is the disposition the corpus already assigned it. The gbuffer G10 is untouched
+   and green at 4/4 — its leg A is the R0 `TimestampCollector`, which step 3 has not reached.
+   **Still to cut:** `gpu_timing.rs` itself, `vb.rs`'s `tc` arm and totality epilogue,
+   `scene_types.rs`'s fields, and the two re-exports.
 4. Delete `vb_bench_totality_gate.rs` **last** — both its gates lose their subject in step 2/3, and
    deleting it before them would drop live coverage of code still shipping.
 

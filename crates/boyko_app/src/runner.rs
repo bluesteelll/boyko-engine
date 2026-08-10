@@ -564,14 +564,6 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
         eprintln!("boyko_app: render path degraded ({degrade:?})");
     }
     host.resolved_render_path = resolved_render_path;
-    // VG R3 piece 4 rung P4-1: THE EARLIEST INSTANT the resolved path exists. `GpuSceneBundles::
-    // boot` ran inside `WindowHost::boot` — before `resolve_render_path` above — so it could not
-    // key the VB-P1d collector's arming on the path; this is where the answer first exists, and
-    // where a collector no `record_vb` will ever fill gets disarmed. Disarm THEN panic: the
-    // disarm is the load-bearing half (`disarm_vb_bench_unless_vb`'s own doc says which and why).
-    if let Some(knob) = host.gpu.disarm_vb_bench_unless_vb(&resolved_render_path) {
-        vb_bench_wrong_path_panic(&resolved_render_path, knob);
-    }
     // OVERRIDE the `RenderPathPlugin`'s default `ResolvedRenderPath` with the real
     // boot-resolved value — the SAME `DdgiCaps`/`RayCaps` post-boot override precedent
     // above (this fn's `DdgiCaps::new(..)`/`RayCaps::new(..)` inserts). Without this, a
@@ -1013,12 +1005,6 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     // subset phase is `frame_index % subset_n`).
     let mut frame_index: u32 = 0;
 
-    // VB-P1d: the froxel cull/shade GPU-timestamp bench. Armed ONLY when `BOYKO_VB_BENCH` was
-    // read at `GpuSceneBundles::boot` time AND the device supports timestamps
-    // (`GpuSceneBundles::vb_bench_armed`'s own doc) — `false` on EVERY non-bench run, so every
-    // line gated on `vb_bench` below is dead code there and this loop stays byte-identical to
-    // the pre-VB-P1d path.
-    let vb_bench = host.gpu.vb_bench_armed();
     // Profiling rung 5c: leg B. `GpuSceneBundles::boot` refuses `BOYKO_VB_ZONE` alongside
     // `BOYKO_VB_BENCH`, so at most one of `vb_bench`/`vb_zone` is true in any process — the A/B
     // is two processes, one leg each, which is also what keeps the OLD collector's
@@ -1080,51 +1066,6 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     // rejects that worker, instead of averaging two regimes and attributing them to one.
     //
     // Two `u8`s, updated with one shift-or per timed frame. No allocation, no per-frame I/O.
-    if vb_bench {
-        // VG R3 piece 4 rung P4-2: the bench and the cull READBACK probe are mutually exclusive,
-        // and the reason is that the probe records commands INSIDE the timed brackets. Under
-        // `BOYKO_VB_CULL_READBACK` the recorder issues copies in TWO places: a pre-snapshot inside
-        // `VbEarlyCull`'s extent, and a post-late block that sits after `VbLateRaster`'s end AND
-        // after `VbRun`'s. Stretching the run bracket over a diagnostic would make the shipped
-        // headline interval depend on whether a probe was armed; qualifying the numbers afterwards
-        // would leave a reader to discover it in prose. Refusing the combination at boot is what
-        // makes "no published timestamp number contains any part of the probe's cost" a structural
-        // statement. Same shape and same reason as the `BOYKO_SV0_BENCH` exclusion below.
-        if host.gpu.vb_cull_readback.is_some() {
-            vb_bench_readback_exclusivity_panic();
-        }
-        // VG R3 piece 4 rung P4-1: this was a release-live `assert!` on `mesh_leg`, standing in
-        // for a per-frame invariant it could not state — `record_vb`'s VbShade pair is written
-        // only on a mesh-leg frame, so an SDF-only VB leg hung the `WAIT_BIT` readback. The
-        // recorder's totality epilogue (`TsWitness::finish`) now writes EVERY pair on every VB
-        // frame, so the configuration is measurable instead of forbidden, and what remains is a
-        // SCOPE statement: the pass reports as FALLBACK, excluded from every aggregate, rather
-        // than as a fabricated number.
-        if !host.resolved_render_path.mesh_leg {
-            vb_bench_no_mesh_leg_note();
-        }
-        // The lit-producer choice under VisibilityBuffer is THREE-way, not two (`vb.rs`'s own
-        // VB-P1d doc on `record_vb`'s producer selection). ⚠️ This block used to claim the split
-        // arm leaves the VbShade pair "reset-but-never-written" and hangs the readback; that has
-        // been FALSE since the split arm gained its own bracket — `vb.rs`'s `vb_shade_split`
-        // producer opens the pair before `record_vb_pass` and closes it after the dispatch, so a
-        // split frame writes it like the other two arms do.
-        //
-        // The assertion below therefore survives for the reason it always really had, stated
-        // here instead of a hang that cannot happen: VB-P1d's published break-even
-        // (`flat_shade_ns` vs `froxel_total_ns`) is DEFINED against the fused/classified tail,
-        // and silently admitting a third producer would change what the number means without
-        // changing its name. `mesh_geo_shade_split` alone is equivalent to the recorder's own
-        // `path_vb_split()` predicate (resolver-set ONLY under `VisibilityBuffer` — `vb.rs`'s
-        // `debug_assert!(!mesh_geo_shade_split || path_is_vb())` pins this), so checking this
-        // one field is sufficient without needing `RenderPath` in scope here.
-        assert!(
-            !host.resolved_render_path.mesh_geo_shade_split,
-            "invariant: VB-P1d bench does not support the VB split lit-producer \
-             (vb_shade_split); the bench scene must not arm a pre-light consumer \
-             (SSAO/DDGI/SSR/shadow-denoise/Temporal)"
-        );
-    }
 
     // === VB-SV0 rung S1.5 — the Deferred SDF shadow/AO term cost falsifier. ===
     //
@@ -1237,11 +1178,6 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // `record_vb`'s three timestamp pairs, which a Deferred frame — the only kind this bench
         // permits — never writes. Its `mesh_leg` / `!mesh_geo_shade_split` preconditions are both
         // satisfied on `Deferred × Both`, so they do NOT catch this; say it here explicitly.
-        assert!(
-            !vb_bench,
-            "invariant: BOYKO_VB_BENCH and BOYKO_SV0_BENCH are mutually exclusive (the VB-P1d \
-             readback waits on record_vb timestamp pairs a Deferred frame never writes)"
-        );
         // The `Sv0TimedPass::Marcher` pair is written inside `record_gbuffer`'s
         // `if let Some(marcher_pass)` arm, i.e. only on a Deferred-family frame that actually
         // dispatches the marcher (`GBufferScene::path_has_marcher() == sdf_leg`). On any other
@@ -2718,7 +2654,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // ~200 increments at `vb.rs`'s record sites compile to nothing. The line prints anyway, and
         // says `stream_pos=0`, because a gate that silently saw no line could not tell a census
         // build from a run that never reached a frame.
-        if (vb_bench || vb_zone || gbuf_bench)
+        if (vb_zone || gbuf_bench)
             && presented_ok
             && let Some(w) = host.gpu.vb_census()
         {
@@ -2745,13 +2681,9 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             println!(
                 "VB-CENSUS leg={} frame={frame_index} stream_pos={} profiling_cmds={} \
                  resets={} stamps={} repairs={} pairs={} positions=[{positions}] stages=[{stages}]",
-                if vb_zone {
-                    "zone"
-                } else if gbuf_bench {
-                    "gbuf"
-                } else {
-                    "bench"
-                },
+                // Rung 7 deleted the collector leg, so the only two legs left are the
+                // zone recorder and the R0 gbuffer collector.
+                if vb_zone { "zone" } else { "gbuf" },
                 w.stream_pos(),
                 w.profiling_cmds(),
                 w.query_resets(),
@@ -3157,77 +3089,6 @@ fn word_set<T: Copy>(variants: &[T], seen: u8, word: impl Fn(T) -> &'static str)
 
 
 
-
-/// VG R3 piece 4 rung P4-1: the boot-time notice that replaced this bench's `mesh_leg`
-/// `assert!`.
-///
-/// It is a NOTE and not a failure because the configuration is now measurable: the recorder's
-/// totality epilogue writes every `VbTimedPass` pair on every VB frame, so a leg that brackets
-/// no lit producer yields a `FALLBACK`-flagged line instead of a `WAIT_BIT` readback that never
-/// returns. What is lost is the pass, not the run — and the note says which.
-///
-/// `#[cold]`/`#[inline(never)]`: once per process, off every shipping path.
-#[cfg(windows)]
-#[cold]
-#[inline(never)]
-fn vb_bench_no_mesh_leg_note() {
-    eprintln!(
-        "VB-P1d bench SCOPE: this render path has no mesh leg, so record_vb never enters the \
-         mesh-leg block — SEVEN of the ten passes will report FALLBACK (a frame-end zero pair \
-         written by the totality epilogue) and must be excluded from every aggregate: vb_shade, \
-         vb_late_upload, vb_early_cull, vb_early_raster, vb_late_cull, vb_late_raster and vb_run. \
-         The cull_reset/cull_dispatch pairs are unaffected — they are bracketed above that block. \
-         ⚠️ vb_hzb_build reports MEASURED at ~0 and that is NOT a fallback: without the split its \
-         call site sits outside the mesh-leg block, so the bracket genuinely executes, around a \
-         body that records nothing on this leg. A near-zero MEASURED number here says the block \
-         was empty, never that a pyramid build is free."
-    );
-}
-
-/// VG R3 piece 4 rung P4-2: `BOYKO_VB_BENCH` and `BOYKO_VB_CULL_READBACK` were both set.
-///
-/// The cull readback probe records `vkCmdCopyBuffer` work at two sites the timestamp brackets
-/// enclose — a pre-snapshot inside `VbEarlyCull`, and a post-late block after both `VbLateRaster`'s
-/// and `VbRun`'s end stamps. A run with both armed would publish per-pass numbers containing a
-/// diagnostic's cost under names that do not mention it, and would make the run bracket's meaning
-/// depend on an env var. The combination is refused rather than annotated, for the reason the
-/// `BOYKO_SV0_BENCH` exclusion is refused: a measurement whose scope depends on the ambient
-/// environment is not a measurement.
-///
-/// `#[cold]`/`#[inline(never)]`: a boot-time diagnostic that diverges.
-#[cfg(windows)]
-#[cold]
-#[inline(never)]
-fn vb_bench_readback_exclusivity_panic() -> ! {
-    panic!(
-        "invariant: BOYKO_VB_BENCH and BOYKO_VB_CULL_READBACK are mutually exclusive. The cull \
-         readback probe records buffer copies INSIDE the VbEarlyCull bracket and immediately after \
-         the VbLateRaster/VbRun end stamps, so every published VB-P4 number would silently include \
-         a diagnostic's cost. Run the bench without the probe, or the probe without the bench."
-    );
-}
-
-/// VG R3 piece 4 rung P4-1: the bench was requested on a render path whose recorder never runs.
-///
-/// `BOYKO_VB_BENCH` armed a collector, but the boot resolved a non-`VisibilityBuffer` path, so
-/// `record_vb` — and with it every timestamp write AND the pool reset — is never called. The
-/// collector has already been disarmed by the time this runs (that is the half that closes the
-/// hang class); this panic exists so the decline is not silent, because a silently declined bench
-/// is a windowed run that simply never terminates.
-///
-/// `#[cold]`/`#[inline(never)]`: a boot-time diagnostic that diverges.
-#[cfg(windows)]
-#[cold]
-#[inline(never)]
-fn vb_bench_wrong_path_panic(resolved: &boyko_render::ResolvedRenderPath, knob: &str) -> ! {
-    panic!(
-        "invariant: {knob} requires RenderPath::VisibilityBuffer — this boot resolved \
-         {:?} x {:?}, whose frame driver never calls record_vb, so no timestamp pair is ever \
-         written or even reset (the collector has been disarmed; without that disarm the \
-         WAIT_BIT readback would hang forever)",
-        resolved.path, resolved.legs
-    );
-}
 
 /// VB-SV0 rung S1.5: the MEDIAN of `samples` (ns).
 ///

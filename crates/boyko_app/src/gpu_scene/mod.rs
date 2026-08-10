@@ -1580,16 +1580,6 @@ pub(crate) struct GpuSceneBundles {
     /// None` into every `GBufferScene` and the `record_vb` command stream stays
     /// byte-identical. See [`Self::vb_bench_armed`] / [`Self::read_vb_bench_ns`].
     vb_bench: Option<VbTimestampCollector>,
-    /// VG R3 piece 4 rung P4-1: set once, at boot, by [`Self::disarm_vb_bench_unless_vb`] when
-    /// the resolved render path is NOT `VisibilityBuffer`. Folded into
-    /// [`Self::vb_timing_for_frame`], through which BOTH [`Self::scene`] and
-    /// [`Self::vb_bench_armed`] read the collector — so the recorder and the runner can never
-    /// disagree about whether this frame carries one.
-    ///
-    /// [`Self::boot`] cannot key the arming on the path directly: `boot` runs FIRST (from
-    /// `WindowHost::boot`) and the path is resolved later, in `boyko_app::runner`. This bool is
-    /// the gate at the earliest instant the answer exists.
-    vb_bench_disarmed: bool,
     /// VB-SV0 rung S1.5: the DEFERRED fine-marcher GPU-timestamp bench collector — a per-FIF
     /// ring of `2 * SV0_PASS_COUNT`-query TIMESTAMP pools. Built at [`Self::boot`] ONLY when the
     /// `BOYKO_SV0_BENCH` env is set AND the device supports timestamps; `None` on every other
@@ -4742,7 +4732,6 @@ impl GpuSceneBundles {
             // VG R3 piece 4 rung P4-1: the path is not knowable here (this fn runs before
             // `resolve_render_path`); `boyko_app::runner` calls `disarm_vb_bench_unless_vb` the
             // instant it is.
-            vb_bench_disarmed: false,
             sv0_bench,
             gbuf_bench,
             vb_zone,
@@ -6762,7 +6751,7 @@ impl GpuSceneBundles {
             // VG R3 piece 4 rung P4-1: read through `vb_timing_for_frame`, the SAME accessor the
             // runner's `vb_bench_armed()` reads, so a path-disarmed boot cannot leave the
             // recorder armed while the readback thinks otherwise (or the reverse).
-            vb_gpu_timing: self.vb_timing_for_frame(),
+            vb_gpu_timing: None,
             // Profiling rung 5c: read through `vb_zone_for_frame`, the SAME accessor the runner
             // reads — and structurally exclusive with `vb_gpu_timing` above, because `boot` refuses
             // the two knobs together. `None` on every golden/host/interactive frame.
@@ -7423,27 +7412,6 @@ impl GpuSceneBundles {
         }
     }
 
-    /// VB-P1d: `true` iff the froxel cull/shade GPU-timestamp bench collector was armed at
-    /// [`Self::boot`] (`BOYKO_VB_BENCH` set AND the device supports timestamps). The runner
-    /// reads this ONCE, before the frame loop starts, to decide whether to drive the bench
-    /// accumulation + summary print (see `boyko_app::runner`'s VB-P1d block) — `false` on
-    /// every non-bench run, so that whole block is dead code there.
-    #[inline]
-    pub(crate) fn vb_bench_armed(&self) -> bool {
-        self.vb_timing_for_frame().is_some()
-    }
-
-    /// VG R3 piece 4 rung P4-1: THE single predicate [`Self::scene`] and `boyko_app::runner`
-    /// both read for "does this frame carry a bench collector?", so the recorder and the readback
-    /// can never disagree — two spellings of one predicate is how a readback comes to wait on a
-    /// pair no recorder wrote.
-    ///
-    /// Folds [`Self::vb_bench_disarmed`] with the boot-time collector.
-    #[inline]
-    pub(crate) fn vb_timing_for_frame(&self) -> Option<&VbTimestampCollector> {
-        if self.vb_bench_disarmed { None } else { self.vb_bench.as_ref() }
-    }
-
     /// Profiling rung 5c: [`Self::vb_timing_for_frame`]'s sibling for leg B — THE single predicate
     /// `Self::scene` and the runner both read, for the reason stated there.
     ///
@@ -7531,71 +7499,6 @@ impl GpuSceneBundles {
     #[inline]
     pub(crate) fn vb_zone_armed(&self) -> bool {
         self.vb_zone.is_some()
-    }
-
-    /// VG R3 piece 4 rung P4-1: disarms the VB-P1d bench collector unless this boot resolved
-    /// `RenderPath::VisibilityBuffer`. Returns `true` iff it actually disarmed a live collector —
-    /// i.e. iff `BOYKO_VB_BENCH` armed one and the path cannot feed it.
-    ///
-    /// # The hazard this closes
-    ///
-    /// The collector arms on `BOYKO_VB_BENCH` + device timestamp support ALONE, while every
-    /// writer — and `reset_frame` itself — lives inside `record_vb`, which the frame driver calls
-    /// only under `scene.path_is_vb()`. A `Deferred × Both` boot with the knob set therefore
-    /// passes the runner's `mesh_leg` precondition (true on Deferred × Both!), records nothing,
-    /// resets nothing, and reaches a `VK_QUERY_RESULT_WAIT_BIT` readback on a pool that was never
-    /// even reset: a HANG, not a wrong number. `record_vb`'s totality epilogue cannot reach a
-    /// frame that never calls `record_vb`; this can. It is the sibling of the hazard the
-    /// `BOYKO_VB_BENCH ⊥ BOYKO_SV0_BENCH` assertion in `boyko_app::runner` already documents.
-    ///
-    /// # Which half is load-bearing
-    ///
-    /// THE DISARM. The caller additionally panics from a `#[cold]` path so a declined bench is
-    /// not silent — but delete that panic and the hang class stays closed (the collector reads
-    /// `None`, `record_vb` records nothing, the readback is never reached), whereas delete the
-    /// disarm and the panic is again the only thing between the operator and an infinite wait,
-    /// which is precisely the shape this rung removes from the runner. They are ordered
-    /// disarm-then-panic for that reason.
-    ///
-    /// The pools are NOT destroyed: they are boot-time allocations (320 B) on a diagnostic knob,
-    /// off every shipping path, and a mid-run destroy sequence would add a lifetime question for
-    /// nothing.
-    ///
-    /// `#[cold]`: called exactly once per process, before the frame loop.
-    #[cold]
-    pub(crate) fn disarm_vb_bench_unless_vb(
-        &mut self,
-        resolved: &boyko_render::ResolvedRenderPath,
-    ) -> Option<&'static str> {
-        if matches!(resolved.path, boyko_render::RenderPath::VisibilityBuffer) {
-            return None;
-        }
-        self.vb_bench_disarmed = true;
-        // ⚠️ Profiling rung 6 REMOVED the zone leg's disarm, and the removal is the finding.
-        //
-        // Rung 5c inherited it from `vb_bench` on the argument that "its writers are the same
-        // `record_vb` brackets, so a path that cannot feed the collector cannot feed the recorder
-        // either". That was true of a recorder only `record_vb` wrote. Rung 6 ported
-        // `record_gbuffer`'s brackets too — the four software-ray passes and the SV0 marcher — so
-        // the zone recorder is now fed by BOTH recorders and there is no render path that fails to
-        // feed it. Keeping the disarm here would have left the whole rung-6 port unreachable on
-        // every path that can reach it, which is the same shape as scaffolding with no caller.
-        //
-        // The knob is still spelled `BOYKO_VB_ZONE` because G10's A/B names it; rung 7, which
-        // deletes the three collectors, is where the name stops being about VB.
-        if self.vb_bench.is_some() {
-            // The O2 decline notice, in the ONE place that knows both halves of the gate (the
-            // same discipline as `boot`'s "timestamps unusable" notice).
-            eprintln!(
-                "VB-P1d bench: BOYKO_VB_BENCH set but the resolved render path is {:?} — the \
-                 collector is disarmed (only record_vb writes its timestamps).",
-                resolved.path
-            );
-        }
-        // The KNOB whose collector this path cannot feed, so the caller's panic names it. Only the
-        // VB bench qualifies now: rung 6's port means `BOYKO_VB_ZONE` is feedable on every path,
-        // so refusing it here would refuse a configuration that works.
-        if self.vb_bench.is_some() { Some("BOYKO_VB_BENCH") } else { None }
     }
 
     /// VB-P1e H0: [`Self::read_vb_bench_ns`] reads back frame `fi`'s per-pass samples (masked +
