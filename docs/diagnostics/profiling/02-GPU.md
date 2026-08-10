@@ -246,10 +246,24 @@ GPU-side work, and this project treats a gate that cannot fail as a defect — t
 being `-ValidationOn` reporting *"clean, 0 messages"* for all 22 pins while an illegal
 `mip_levels: 12` drew zero.
 
-**Honest scope note, promoted out of the open questions (F-rung-8).** `Immediate` support on this
-box is **unproven**. If it is unsupported, rung 8's present-mode work reduces to *labelling* — the
-frame channel stays FIFO-bounded and non-decidable, and no new wall-clock gate becomes showable. The
-rung table (`profiling/ladder`) says so, not only an open question.
+**Honest scope note, promoted out of the open questions (F-rung-8) — ✅ NOW MEASURED, and it did
+not reduce.** The note said `Immediate` support on this box was **unproven**, and that if it were
+unsupported the rung's present-mode work would reduce to *labelling*: the frame channel would stay
+FIFO-bounded and non-decidable, and no new wall-clock gate would become showable.
+
+**Probed 2026-08-10 by `crates/boyko_rhi_vulkan/tests/present_mode_probe.rs`, on the real surface:**
+
+```
+PRESENT-MODE PROBE: requested `immediate` -> resolved `immediate` (SUPPORTED on this box)
+PRESENT-MODE PROBE: requested `mailbox`   -> resolved `mailbox`   (SUPPORTED on this box)
+```
+
+Both optional modes are advertised. The reduction does **not** apply: a wall-clock gate for
+GPU-side work is showable here, and the frame channel can be run unbounded when a harness asks for
+it. What the probe asserts is the RESOLUTION rather than the support — a requested mode comes back
+as itself or as `Fifo` and never as a third thing — because asserting support would be a gate about
+the hardware, red on the first box without it. The support figures are PRINTED, and this paragraph
+is where they are recorded.
 
 ---
 

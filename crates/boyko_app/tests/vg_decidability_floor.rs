@@ -777,6 +777,7 @@ fn artifact_with(zones: &[(u16, ZoneLabel, f64)], instrument: Instrument) -> Art
             regimes: "none".into(),
             modes: "off".into(),
             regime_n_distinct: 1,
+            present_mode: "fifo".to_owned(),
             instrument,
             precision_decimals: PRECISION_DECIMALS,
         },

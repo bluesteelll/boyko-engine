@@ -150,7 +150,7 @@ use std::path::Path;
 /// `2` since rung 7c's tag split: a v1 file carries no `content_tag`, and reading one as if the
 /// field were merely empty would hand a floor exactly the "declared nothing" state
 /// [`Artifact::floor_source`] exists to refuse.
-pub const ARTIFACT_SCHEMA_VERSION: u32 = 5;
+pub const ARTIFACT_SCHEMA_VERSION: u32 = 6;
 
 /// The **derived, unforgeable** half of a workload tag: everything about the boot-resolved
 /// configuration that the engine itself knows.
@@ -272,6 +272,16 @@ pub struct ArtifactHeader {
     pub regimes: String,
     /// The same for the occlusion MODE words.
     pub modes: String,
+    /// **The present mode this boot RESOLVED to** — profiling rung 8, D12. The wire word from
+    /// `PresentModeConfig::as_str`.
+    ///
+    /// The RESOLVED mode, never the requested one: only `fifo` is spec-guaranteed, and a file that
+    /// recorded what was asked for would attribute a refresh-bounded frame time to a tearing
+    /// present. It is here because a frame's wall clock means different things under different
+    /// modes — under `fifo` it is bounded below by the refresh interval, so a GPU regression can be
+    /// entirely invisible in it — and a reader comparing two artifacts has to be able to see that
+    /// they are not comparable.
+    pub present_mode: String,
     /// How many distinct regimes the window observed. **Recorded, never asserted**: a consumer that
     /// needs one regime per capture rejects a window with more, which is its rule and not this
     /// file's — a constancy assertion here would have to hold on hosts this repository does not own.
@@ -447,6 +457,7 @@ impl Artifact {
         let _ = writeln!(s, "regimes = \"{}\"", h.regimes);
         let _ = writeln!(s, "modes = \"{}\"", h.modes);
         let _ = writeln!(s, "regime_n_distinct = {}", h.regime_n_distinct);
+        let _ = writeln!(s, "present_mode = \"{}\"", h.present_mode);
         let c = &self.census;
         let _ = writeln!(s, "census_measured = {}", c.measured);
         let _ = writeln!(s, "census_not_bracketed = {}", c.not_bracketed);
@@ -625,6 +636,7 @@ impl Artifact {
         let mut regime_n_distinct = None;
         let mut instrument = None;
         let mut precision_decimals = None;
+        let mut present_mode: Option<String> = None;
         let mut census = LabelCensus::default();
         let mut zones: Vec<ZoneRow> = Vec::new();
         let mut cur: Option<PartialZone> = None;
@@ -701,6 +713,7 @@ impl Artifact {
                 "regimes" => regimes = Some(unquote(v).to_owned()),
                 "modes" => modes = Some(unquote(v).to_owned()),
                 "regime_n_distinct" => regime_n_distinct = v.trim().parse().ok(),
+                "present_mode" => present_mode = Some(unquote(v).to_owned()),
                 "instrument" => {
                     instrument =
                         Some(Instrument::parse(unquote(v)).ok_or_else(|| bad("unknown instrument"))?);
@@ -741,6 +754,10 @@ impl Artifact {
                 modes: modes.ok_or(ArtifactError::BadHeader("modes"))?,
                 regime_n_distinct: regime_n_distinct
                     .ok_or(ArtifactError::BadHeader("regime_n_distinct"))?,
+                // Required, not defaulted, for `content_tag`'s reason: an absent key means an older
+                // writer, and defaulting it to `fifo` would invent the one value that makes a
+                // refresh-bounded wall clock look explicable.
+                present_mode: present_mode.ok_or(ArtifactError::BadHeader("present_mode"))?,
             },
             zones,
             census,

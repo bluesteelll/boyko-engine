@@ -1486,8 +1486,40 @@ and its doc says why the table exists: *"the value of the vocabulary is that two
 joins use the same eight words."* A ninth spelling of one of them is invisible to every other check:
 the artifact would have parsed, round-tripped and read fine **while joining against nothing**.
 
-**What rung 8 still owes:** present mode (D12 — labelling only if `Immediate` is unsupported),
-counters at `vkCmd*` sites, and the optional `profiling-alloc` feature. The `NotResolvedReason`
+✅ **D12 SHIPPED — present mode is configurable, probed, and RECORDED.**
+`PresentModeConfig { Fifo, Immediate, Mailbox }`, default `Fifo`, resolved against the surface and
+carried in the artifact header as schema 6's `present_mode`.
+
+**⚠️ The rung's own reduction clause is now MEASURED, and it does not apply.** D12 said `Immediate`
+support on this box was *unproven*, and that if unsupported the work reduced to labelling. Probed on
+the real surface: **`immediate` → `immediate`, `mailbox` → `mailbox` — both SUPPORTED.** A
+wall-clock gate for GPU-side work is showable here. That matters because while FIFO was hard-coded
+**no such gate could fail**: every frame is bounded below by the refresh interval, so a change that
+made the GPU twice as slow reported the same 16.67 ms — a gate that cannot fail, which this
+repository treats as a defect.
+
+**Three decisions worth their lines:**
+
+* **`new` keeps its signature; `new_with_present_mode` is the new door.** Nine call sites across
+  five crates build a swapchain, every one wants FIFO, and every golden pin was blessed under it.
+  Threading a parameter through all nine to have them all pass the same value would put a knob in
+  front of every caller that must never touch it. `new` IS the default, structurally — and the three
+  pins re-run after the change are byte-identical.
+* **The RESOLVED mode is recorded, never the request.** A file recording what was asked for would
+  attribute a refresh-bounded frame time to a tearing present.
+* **`recreate` re-requests what was GRANTED**, not the original request: re-probing a refused
+  `Immediate` would print the fallback notice on every resize, and dropping to `Fifo` unconditionally
+  would silently change what the frames after a resize measure.
+* **`Mailbox` takes the same code path as the other two.** The corpus says it *"returns `Unsupported`
+  until a harness needs it — one code path, not three"*; what makes that true is that nothing
+  special-cases it. A separate "not implemented" arm would be a second path pretending to be an
+  absence.
+
+**The probe asserts the RESOLUTION, not the support** — a requested mode comes back as itself or as
+`Fifo`, never a third thing. Asserting support would be a gate about the hardware, red on the first
+box without it. The support figures are printed and recorded in `02-GPU.md`'s D12.
+
+**What rung 8 still owes:** counters at `vkCmd*` sites, and the optional `profiling-alloc` feature. The `NotResolvedReason`
 round-trip through the wire words is gated; a verdict is not yet written into an artifact, which is
 a separate seam from `G4c`'s drop census and belongs with whatever first publishes one.
 

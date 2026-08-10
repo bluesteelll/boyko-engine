@@ -11,7 +11,8 @@ pub use crate::present::{
     GBUFFER_PUSH_BYTES, GBufferFrame, GBufferMeshDraw, GBufferScene, GBufferTargets,
     InterpActivation, PunctualDepthActivation, RcasActivation, Renderer,
     ResolvedRenderPathGpu, SCENE_MVP_BYTES, SampledComposite, Scene,
-    SmaaActivation, SsaaActivation, SsaoActivation, Surface, Swapchain, SwapchainError,
+    PresentModeConfig, SmaaActivation, SsaaActivation, SsaoActivation, Surface, Swapchain,
+    SwapchainError,
     TaaActivation, UiPass,
     ViewtFromDepthActivation, ViewtFromVbDepthActivation,
 };

@@ -1117,6 +1117,12 @@ const _: () = assert!(
 /// `VkColorSpaceKHR::VK_COLOR_SPACE_SRGB_NONLINEAR_KHR` — the always-present space.
 pub const VK_COLOR_SPACE_SRGB_NONLINEAR_KHR: i32 = 0;
 
+/// `VkPresentModeKHR::VK_PRESENT_MODE_IMMEDIATE_KHR` — present as soon as submitted, tearing
+/// allowed. **Optional**: profiling rung 8 D12 probes it and falls back to FIFO with a notice.
+pub const VK_PRESENT_MODE_IMMEDIATE_KHR: i32 = 0;
+/// `VkPresentModeKHR::VK_PRESENT_MODE_MAILBOX_KHR` — one queued image, replaced rather than
+/// blocked. Optional; declared for the probe's vocabulary.
+pub const VK_PRESENT_MODE_MAILBOX_KHR: i32 = 1;
 /// `VkPresentModeKHR::VK_PRESENT_MODE_FIFO_KHR` — the only mode the spec guarantees.
 pub const VK_PRESENT_MODE_FIFO_KHR: i32 = 2;
 

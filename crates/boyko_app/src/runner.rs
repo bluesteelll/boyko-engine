@@ -2566,6 +2566,10 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                                 |m| m.as_str(),
                             ),
                             regime_n_distinct: vb_zone_force_seen.count_ones(),
+                            // D12: the RESOLVED mode, read off the swapchain that got it. Not the
+                            // request -- a file recording what was asked for would attribute a
+                            // refresh-bounded frame time to a tearing present.
+                            present_mode: host.swapchain.present_mode().as_str().to_owned(),
                         },
                         zones,
                         census,

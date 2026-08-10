@@ -938,6 +938,7 @@ mod tests {
                 regimes: "-".into(),
                 modes: "-".into(),
                 regime_n_distinct: 0,
+                present_mode: "fifo".into(),
             },
             zones: Vec::new(),
             census: LabelCensus::default(),

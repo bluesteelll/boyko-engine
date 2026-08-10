@@ -77,7 +77,7 @@ pub use scene_types::{
 #[cfg(feature = "hwrt")]
 pub use scene_types::{ShadowVisActivation, TlasBuildActivation};
 pub use surface::Surface;
-pub use swapchain::Swapchain;
+pub use swapchain::{PresentModeConfig, Swapchain};
 pub use targets::{GBufferFrame, GBufferTargets};
 
 /// The number of frames the [`Renderer`] keeps in flight (double-buffered CPU↔GPU

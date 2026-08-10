@@ -63,6 +63,7 @@ fn fixture(run_token: &str) -> Artifact {
             regimes: "off,forced_on".into(),
             modes: "off".into(),
             regime_n_distinct: 2,
+            present_mode: "immediate".to_owned(),
             instrument: Instrument::Live,
             precision_decimals: PRECISION_DECIMALS,
         },
