@@ -118,8 +118,14 @@ impl WindowReducer {
             match label {
                 ZoneLabel::Measured => self.census.measured += 1,
                 ZoneLabel::NotBracketed => self.census.not_bracketed += 1,
-                ZoneLabel::Lost => self.census.lost += 1,
-                ZoneLabel::Torn => self.census.torn += 1,
+                ZoneLabel::Lost => {
+                    self.census.lost += 1;
+                    Self::record_device_loss();
+                }
+                ZoneLabel::Torn => {
+                    self.census.torn += 1;
+                    Self::record_device_loss();
+                }
             }
 
             let idx = match self.zones.iter().position(|z| z.zone == p.zone) {
@@ -148,6 +154,34 @@ impl WindowReducer {
             acc.begin_off_ns.push(begin_off);
             acc.end_off_ns.push(begin_off + dur);
         }
+    }
+
+    /// Records one dropped pair against `boyko_diag`'s process-wide loss counter — **profiling
+    /// rung 8, `G4c`: the loss has to reach the reader.**
+    ///
+    /// # Why HERE, and why only two of the four labels
+    ///
+    /// D13's rule is that counts originate AT the operation they count, and this is the one place
+    /// in the tree that sees every retired pair's label. Recording it at the artifact writer instead
+    /// would count what the writer was handed, not what the recorder observed.
+    ///
+    /// [`ZoneLabel::Lost`] and [`ZoneLabel::Torn`] are losses. **[`ZoneLabel::NotBracketed`] is
+    /// NOT**, and the distinction is the whole reason the 2x2 label exists: a pair the recorder
+    /// never opened is a STATED ABSENCE — this leg does not run that pass — while a lost pair is a
+    /// bracket whose numbers went missing. Counting the first as loss would make "the VB family
+    /// does not run on a Deferred frame" indistinguishable from "the query results never came
+    /// back", and every artifact from every non-VB path would report drops it never had.
+    ///
+    /// The class is [`LossClass::Device`], whose own doc says why: *"the loss happened off-CPU (a
+    /// GPU query pool, a driver ring) and the host learnt of it only afterwards, so the count is
+    /// reconstructed rather than observed at the drop."* That is exactly what a retired pair is.
+    ///
+    /// `bytes = 0`: a lost timestamp pair has no payload figure that means anything. The field is
+    /// documented as `0` for such classes rather than filled with the 16 bytes of query storage,
+    /// which would be a number about the pool rather than about the loss.
+    #[inline]
+    fn record_device_loss() {
+        boyko_diag::loss::record_here(boyko_diag::loss::LossClass::Device, 0);
     }
 
     /// Reduces the window.

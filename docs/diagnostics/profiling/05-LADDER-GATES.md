@@ -1453,10 +1453,43 @@ shape as the anchors gate's: **a gate whose verdict depends on how the file was 
 measuring its checkout, not the code.** The full sweep caught it; two targeted runs before it had
 not, because they ran before the rewrite.
 
+✅ **`G4c` SHIPPED — the loss reaches the reader.** Schema 5: the artifact carries a `[[loss]]`
+block per NON-ZERO `LossClass`, filled by `Artifact::collect_losses` from `boyko_diag`'s own cells
+at write time.
+
+**The recording site is `WindowReducer::observe_frame`**, per D13's *"counts originate AT the
+operation they count"* — the one place in the tree that sees every retired pair's label. Recording
+at the writer instead would count what the writer was handed, not what the recorder observed.
+
+⚠️ **`Lost` and `Torn` are losses; `NotBracketed` is NOT**, and the line matters more than it looks.
+A pair the recorder never opened is a **stated absence** — this leg does not run that pass — while a
+lost pair is a bracket whose numbers went missing. Counting the first as loss would make *"the VB
+family does not run on a Deferred frame"* indistinguishable from *"the query results never came
+back"*, and every artifact from every non-VB path would report drops it never had. The class is
+`Device`, whose own doc describes exactly a retired GPU pair: *"the loss happened off-CPU … the host
+learnt of it only afterwards, so the count is reconstructed rather than observed at the drop."*
+
+**Why the gate is not a tautology.** A dropped pair is now counted TWICE by two independent
+mechanisms — the reducer's `LabelCensus` (a `u32` per label, in the reducer) and `boyko_diag`'s
+process-wide `Device` cell. The artifact carries both, so the gate compares two tallies of one fact
+rather than a number with itself.
+
+⚠️ **The RED was RUN, and its number is not the one predicted.** Deleting the recording from the
+`Lost` arm fails with **`left: 1, right: 3`**, not the `2 != 3` first written down: the fixture
+folds two `Lost` and one `Torn`, so removing the `Lost` recording leaves the cell counting one. A
+second test reds at `0 != 1`. **Fourth time this campaign that a predicted RED and a measured one
+turned out to be different objects**; the measured figures are what the test now documents.
+
+⚠️ **And the gate caught a defect in its own author.** The first draft looked for the wire word
+`"device"`. It is `"Device"` — `boyko_diag`'s `as_str` table is the vocabulary's single spelling,
+and its doc says why the table exists: *"the value of the vocabulary is that two artifacts a reader
+joins use the same eight words."* A ninth spelling of one of them is invisible to every other check:
+the artifact would have parsed, round-tripped and read fine **while joining against nothing**.
+
 **What rung 8 still owes:** present mode (D12 — labelling only if `Immediate` is unsupported),
-counters at `vkCmd*` sites, the optional `profiling-alloc` feature, and `G4c`'s artifact clause —
-writing a `NotResolvedReason` into an artifact and reading it back. The round-trip through the wire
-words is gated; the artifact field is not written yet.
+counters at `vkCmd*` sites, and the optional `profiling-alloc` feature. The `NotResolvedReason`
+round-trip through the wire words is gated; a verdict is not yet written into an artifact, which is
+a separate seam from `G4c`'s drop census and belongs with whatever first publishes one.
 
 #### Rung 7c, second half — the workload tag, and a mechanism the corpus described as if it existed
 

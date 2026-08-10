@@ -795,6 +795,9 @@ fn artifact_with(zones: &[(u16, ZoneLabel, f64)], instrument: Instrument) -> Art
             })
             .collect(),
         census: LabelCensus { measured: 30, ..LabelCensus::default() },
+        // No drops in this fixture, so no `[[loss]]` rows: an absent class means zero, stated once
+        // at `Artifact::loss_count` rather than at every reader.
+        losses: Vec::new(),
     }
 }
 

@@ -2569,6 +2569,11 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                         },
                         zones,
                         census,
+                        // Profiling rung 8, `G4c`: the drop counters reach the reader. Read at
+                        // write time, from `boyko_diag`'s own cells -- not from the label census
+                        // beside it, which is a different tally of the same events and would make
+                        // the cross-check below compare a number with itself.
+                        losses: crate::profiling::artifact::Artifact::collect_losses(),
                     };
                     match art.write(path) {
                         Ok(()) => println!(

@@ -34,6 +34,7 @@
 use std::path::PathBuf;
 
 use boyko_app::profiling::artifact::{
+    LossRow,
     ARTIFACT_SCHEMA_VERSION, Artifact, ArtifactError, ArtifactHeader, Instrument, LabelCensus,
     PRECISION_DECIMALS, ZoneLabel, ZoneRow,
 };
@@ -93,7 +94,11 @@ fn fixture(run_token: &str) -> Artifact {
                 end_off_ns: 25_584.0,
             },
         ],
-        census: LabelCensus { measured: 10, not_bracketed: 10, lost: 0, torn: 0 },
+        census: LabelCensus { measured: 10, not_bracketed: 10, lost: 2, torn: 1 },
+        // Profiling rung 8, `G4c`: three drops, and the `Device` row that must accompany them.
+        // `lost + torn == 3` is the label census's count of the SAME events -- two tallies of one
+        // fact, which is what the cross-check gate below compares.
+        losses: vec![LossRow { class: "Device".to_owned(), count: 3, bytes: 0 }],
     }
 }
 

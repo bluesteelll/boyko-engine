@@ -941,6 +941,7 @@ mod tests {
             },
             zones: Vec::new(),
             census: LabelCensus::default(),
+            losses: Vec::new(),
         };
         assert_eq!(WorkloadTag::of(&art, &[2, 0, 1]), WorkloadTag::of(&art, &[0, 1, 2]));
         assert_ne!(WorkloadTag::of(&art, &[0, 1, 2]), WorkloadTag::of(&art, &[0, 1, 2, 9]));

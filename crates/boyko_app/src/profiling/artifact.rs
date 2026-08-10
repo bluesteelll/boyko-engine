@@ -150,7 +150,7 @@ use std::path::Path;
 /// `2` since rung 7c's tag split: a v1 file carries no `content_tag`, and reading one as if the
 /// field were merely empty would hand a floor exactly the "declared nothing" state
 /// [`Artifact::floor_source`] exists to refuse.
-pub const ARTIFACT_SCHEMA_VERSION: u32 = 4;
+pub const ARTIFACT_SCHEMA_VERSION: u32 = 5;
 
 /// The **derived, unforgeable** half of a workload tag: everything about the boot-resolved
 /// configuration that the engine itself knows.
@@ -318,7 +318,22 @@ pub struct LabelCensus {
     pub torn: u32,
 }
 
-/// A whole artifact: header, per-zone rows, label census.
+/// One drop class the window observed, with what it cost — **profiling rung 8, `G4c`**.
+///
+/// Only NON-ZERO classes get a row. A class with no drops is absent rather than present-and-zero,
+/// so a reader scanning the file sees exactly the classes that happened; the eight-word vocabulary
+/// is in `boyko_diag::loss::LossClass` and is not repeated here.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct LossRow {
+    /// The class's wire word — `LossClass::as_str`.
+    pub class: String,
+    /// How many events were lost.
+    pub count: u64,
+    /// Their payload cost, where the class has one. `0` for classes that do not.
+    pub bytes: u64,
+}
+
+/// A whole artifact: header, per-zone rows, label census, drop census.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Artifact {
     /// The header, checked before any row is parsed.
@@ -327,6 +342,15 @@ pub struct Artifact {
     pub zones: Vec<ZoneRow>,
     /// The label census for the same window.
     pub census: LabelCensus,
+    /// **Every non-zero drop class this process accrued, with its count** — `G4c`'s clause: the
+    /// loss has to reach the reader, not only the counter.
+    ///
+    /// Process-wide and not window-scoped, and that is stated rather than glossed: `boyko_diag`'s
+    /// cells are monotone totals for the process, and the artifact is written once at the end of a
+    /// measured run. A run that measured two windows would attribute both windows' drops to the
+    /// file it wrote; no caller does that today, and the day one does, the fix is a
+    /// `LossSeen` snapshot at window open — not a re-interpretation of this field.
+    pub losses: Vec<LossRow>,
 }
 
 /// Why a read refused.
@@ -428,6 +452,13 @@ impl Artifact {
         let _ = writeln!(s, "census_not_bracketed = {}", c.not_bracketed);
         let _ = writeln!(s, "census_lost = {}", c.lost);
         let _ = writeln!(s, "census_torn = {}", c.torn);
+        for l in &self.losses {
+            let _ = writeln!(s);
+            let _ = writeln!(s, "[[loss]]");
+            let _ = writeln!(s, "class = \"{}\"", l.class);
+            let _ = writeln!(s, "count = {}", l.count);
+            let _ = writeln!(s, "bytes = {}", l.bytes);
+        }
         for z in &self.zones {
             let _ = writeln!(s, "\n[[zone]]");
             let _ = writeln!(s, "id = {}", z.zone);
@@ -441,6 +472,51 @@ impl Artifact {
             let _ = writeln!(s, "end_off_ns = {}", ns(z.end_off_ns));
         }
         s
+    }
+
+    /// **`G4c`'s producer** — reads `boyko_diag`'s process-wide loss cells and returns one row per
+    /// NON-ZERO class.
+    ///
+    /// # Why it reads every row, and why zero classes are absent
+    ///
+    /// `boyko_diag` keeps one cell per (lane, class); the losses this artifact reports can be
+    /// recorded from any thread that folded a window, so summing across every lane row is the only
+    /// reading that cannot miss one. A class with no drops gets NO ROW rather than a row of zeros:
+    /// a reader scanning the file then sees exactly what happened, and *"the file says nothing
+    /// about `Rotation`"* and *"the file says `Rotation` was zero"* are the same statement here,
+    /// unlike the header's `content_tag` where they are not.
+    ///
+    /// **This is a TOTAL, not a window delta**, and [`Self::losses`]' own doc says what that costs.
+    /// It uses the raw cell rather than `delta_since` deliberately: a delta needs a `LossSeen`
+    /// snapshot taken at window open, and there is no window-open hook to take it in. Adding one
+    /// would be the correct fix the day a process writes two artifacts; inventing a snapshot here
+    /// would make the number look window-scoped while being process-scoped.
+    #[must_use]
+    pub fn collect_losses() -> Vec<LossRow> {
+        use boyko_diag::loss::{LOSS_ROW_COUNT, LossClass, cell_at_row};
+        let mut out = Vec::new();
+        for class in LossClass::ALL {
+            let mut count = 0u64;
+            let mut bytes = 0u64;
+            for row in 0..LOSS_ROW_COUNT {
+                let c = cell_at_row(row, class);
+                count += c.count();
+                bytes += c.bytes();
+            }
+            if count != 0 || bytes != 0 {
+                out.push(LossRow { class: class.as_str().to_owned(), count, bytes });
+            }
+        }
+        out
+    }
+
+    /// The count this artifact reports for one class, or `0` when it reports no row for it.
+    ///
+    /// The accessor exists so a consumer never has to decide what an ABSENT row means: it means
+    /// zero, stated once here rather than at every reader.
+    #[must_use]
+    pub fn loss_count(&self, class: &str) -> u64 {
+        self.losses.iter().find(|l| l.class == class).map_or(0, |l| l.count)
     }
 
     /// **The floor gate.** Returns this artifact only if it says what workload it measured.
@@ -552,17 +628,46 @@ impl Artifact {
         let mut census = LabelCensus::default();
         let mut zones: Vec<ZoneRow> = Vec::new();
         let mut cur: Option<PartialZone> = None;
+        let mut losses: Vec<LossRow> = Vec::new();
+        let mut cur_loss: Option<PartialLoss> = None;
 
         for (i, raw) in text.lines().enumerate() {
             let line = raw.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
+            if line == "[[loss]]" {
+                if let Some(p) = cur_loss.take() {
+                    losses.push(p.finish(i + 1)?);
+                }
+                cur_loss = Some(PartialLoss::default());
+                continue;
+            }
             if line == "[[zone]]" {
+                // The loss blocks come first in the rendered order, so the first `[[zone]]` closes
+                // whichever loss block was open. Written as a close-on-transition rather than as
+                // two passes because a second pass would have to agree with this one about where
+                // the sections are, and two parsers of one file is how they come to disagree.
+                if let Some(p) = cur_loss.take() {
+                    losses.push(p.finish(i + 1)?);
+                }
                 if let Some(p) = cur.take() {
                     zones.push(p.finish(i + 1)?);
                 }
                 cur = Some(PartialZone::default());
+                continue;
+            }
+            if let Some(l) = cur_loss.as_mut() {
+                let bad = |why| ArtifactError::Malformed { line: i + 1, why };
+                let Some((k, v)) = split_kv(line) else {
+                    return Err(bad("not a `key = value` line"));
+                };
+                match k {
+                    "class" => l.class = Some(unquote(v).to_owned()),
+                    "count" => l.count = Some(v.parse().map_err(|_| bad("count is not a u64"))?),
+                    "bytes" => l.bytes = Some(v.parse().map_err(|_| bad("bytes is not a u64"))?),
+                    _ => {}
+                }
                 continue;
             }
             let Some((k, v)) = split_kv(line) else {
@@ -616,6 +721,9 @@ impl Artifact {
             zones.push(p.finish(text.lines().count())?);
         }
 
+        if let Some(p) = cur_loss.take() {
+            losses.push(p.finish(text.lines().count())?);
+        }
         Ok(Artifact {
             header: ArtifactHeader {
                 schema_version,
@@ -636,6 +744,7 @@ impl Artifact {
             },
             zones,
             census,
+            losses,
         })
     }
 }
@@ -652,6 +761,27 @@ struct PartialZone {
     stddev: Option<f64>,
     begin: Option<f64>,
     end: Option<f64>,
+}
+
+/// A `[[loss]]` block while its keys are still arriving.
+#[derive(Default)]
+struct PartialLoss {
+    class: Option<String>,
+    count: Option<u64>,
+    bytes: Option<u64>,
+}
+
+impl PartialLoss {
+    /// Every field required, for [`PartialZone::finish`]'s reason: a defaulted `count = 0` is a
+    /// measurement of zero drops, which is the confusion this file exists to prevent.
+    fn finish(self, line: usize) -> Result<LossRow, ArtifactError> {
+        let bad = |why| ArtifactError::Malformed { line, why };
+        Ok(LossRow {
+            class: self.class.ok_or_else(|| bad("loss row has no `class`"))?,
+            count: self.count.ok_or_else(|| bad("loss row has no `count`"))?,
+            bytes: self.bytes.ok_or_else(|| bad("loss row has no `bytes`"))?,
+        })
+    }
 }
 
 impl PartialZone {
