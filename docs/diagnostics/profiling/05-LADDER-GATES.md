@@ -1227,6 +1227,14 @@ exactly how the seven brackets acquired the wrong stage in the first place.
    dead — that base is `0`, so it is tautological on a `u16` and clippy refuses it; the
    `wrapping_sub` alone carries gbuffer's 16 and SV0's 32 out of the `3..=9` range.
 2. Delete the runner harness (1381 lines) and the print sites; the `rg` gates then pass.
+   ⚠️ **MEASURED to be ATOMIC, not merely large.** `print_vb_bench_summary` is one 89-line function
+   with exactly ONE call site (`runner.rs:2963`, inside the `vb_bench` block) and one doc reference.
+   Removing the call leaves `VbBenchTables`' thirty rows accumulated and never read, so
+   `-D warnings` fails on dead code and the fix is to delete the accumulation — which is the
+   harness. **There is no smaller complete slice**: the print cannot go without the tables, the
+   tables cannot go without the readback, and the readback is what the collector exists for. A
+   session that starts this without budget to finish it leaves `runner.rs` non-compiling, and this
+   repository's rule is that a broken tree is never committed. Treat 2–4 as one sitting.
 3. Delete `gpu_timing.rs` (713) and `gpu_scene/mod.rs`'s arming (465).
 4. Delete `vb_bench_totality_gate.rs` **last** — both its gates lose their subject in step 2/3, and
    deleting it before them would drop live coverage of code still shipping.
