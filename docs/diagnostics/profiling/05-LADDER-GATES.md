@@ -1161,14 +1161,21 @@ cross-instrument comparison the paragraph above refuses to make.
 rows"*. Two of its needs have no artifact counterpart, and both are better found now than half way
 through the edit.
 
-**1. The artifact carries no REGIME PROVENANCE, and cannot derive one.** That file's clause 2
+**1. The artifact carried no REGIME PROVENANCE, and could not derive one — now BUILT (schema 3).** That file's clause 2
 requires every worker's `VB-P4 regime observed=[…] n_distinct=… mode=[…]` line, and rejects a worker
 whose `n_distinct != 1` *"rather than averaging two regimes into one number"*. Rung P4-4 made the
 occlusion regime a **live Resource**, so it is not boot-frozen: `workload_tag` is derived from
 `ResolvedRenderPath` and cannot see it. What the artifact needs is a **regime census** shaped like
 the label census it already has — the SET observed across the window plus its cardinality — because
 the question *"did this window time one regime or two?"* is a per-window observation, exactly like
-*"how many pairs came back `Measured`"*. Small, and it belongs to rung 7 because a consumer needs it.
+*"how many pairs came back `Measured`"*. Small, and it belongs to rung 7 because a consumer needs it. **Shipped:** `regimes`, `modes` and
+`regime_n_distinct` are header fields, accumulated on the zone leg from the same per-frame values
+the scene was assembled from, and rendered by the same `word_set` helper the printed provenance
+line uses so the two spellings cannot drift. **Recorded, never asserted** — the printed line's own
+rule, quoted: `n_distinct > 1` *"is printed, never asserted, because a constancy assertion would
+have to hold on hosts this repository does not own"*. The consumer rejects; the file reports.
+MEASURED on a live run: `regimes = "none"`, `modes = "off"`, `regime_n_distinct = 1`. The field
+moves, which is the only thing that separates it from a measurement of zero.
 
 **2. Its clause 9 is DELETED, not migrated — its subject is the two printers.** The clause asserts
 that *"the `VB-P1d …` line's shade mean and the `VB-P4 pass=vb_shade` line's `mean_ns` are the same

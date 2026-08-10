@@ -109,6 +109,23 @@
 //! readable and still gates liveness — `gbuffer_zone_port_gate.rs`'s census-agreement clause reads
 //! one and has no business declaring a workload.
 //!
+//! # Decision 7 — the REGIME is a census, because it is a per-window observation
+//!
+//! `vg_occ_split_timing.rs` requires every worker's occlusion regime and rejects one whose
+//! `n_distinct != 1` *"rather than averaging two regimes into one number"*. Nothing already in this
+//! header can answer that. [`ArtifactHeader::workload_tag`] is derived from the boot-frozen
+//! `ResolvedRenderPath`, and VG R3 rung P4-4 made the regime a **live `Resource`** — it can change
+//! between frames of one window, so no boot-time value can see it.
+//!
+//! So it is shaped like [`LabelCensus`]: the SET observed across the window plus its cardinality.
+//! *"How many regimes did this window time?"* and *"how many pairs came back `Measured`?"* are the
+//! same kind of question, and the answer to both is an observation over frames rather than a
+//! property of the configuration.
+//!
+//! **Recorded, never asserted.** The printed channel's own line says why: `n_distinct > 1` *"is
+//! printed, never asserted, because a constancy assertion would have to hold on hosts this
+//! repository does not own"*. The consumer rejects; the file reports.
+//!
 //! # Decision 6 — a declined instrument is a HEADER FIELD, not a line on stderr
 //!
 //! Three consumers key their third outcome ("neither green nor red") on the `eprintln!` that says
@@ -133,7 +150,7 @@ use std::path::Path;
 /// `2` since rung 7c's tag split: a v1 file carries no `content_tag`, and reading one as if the
 /// field were merely empty would hand a floor exactly the "declared nothing" state
 /// [`Artifact::floor_source`] exists to refuse.
-pub const ARTIFACT_SCHEMA_VERSION: u32 = 2;
+pub const ARTIFACT_SCHEMA_VERSION: u32 = 3;
 
 /// The **derived, unforgeable** half of a workload tag: everything about the boot-resolved
 /// configuration that the engine itself knows.
@@ -250,6 +267,15 @@ pub struct ArtifactHeader {
     pub instrument: Instrument,
     /// [`PRECISION_DECIMALS`] at write time, stated so a reader never has to assume it.
     pub precision_decimals: u8,
+    /// **The regime census** — the SET of distinct occlusion-force words the window observed, in
+    /// the variants' own order, or `-` for none. See the module doc's Decision 7.
+    pub regimes: String,
+    /// The same for the occlusion MODE words.
+    pub modes: String,
+    /// How many distinct regimes the window observed. **Recorded, never asserted**: a consumer that
+    /// needs one regime per capture rejects a window with more, which is its rule and not this
+    /// file's — a constancy assertion here would have to hold on hosts this repository does not own.
+    pub regime_n_distinct: u32,
 }
 
 /// One zone's window, as the reducer produced it.
@@ -390,6 +416,9 @@ impl Artifact {
         let _ = writeln!(s, "content_tag = \"{}\"", h.content_tag);
         let _ = writeln!(s, "instrument = \"{}\"", h.instrument.as_str());
         let _ = writeln!(s, "precision_decimals = {}", h.precision_decimals);
+        let _ = writeln!(s, "regimes = \"{}\"", h.regimes);
+        let _ = writeln!(s, "modes = \"{}\"", h.modes);
+        let _ = writeln!(s, "regime_n_distinct = {}", h.regime_n_distinct);
         let c = &self.census;
         let _ = writeln!(s, "census_measured = {}", c.measured);
         let _ = writeln!(s, "census_not_bracketed = {}", c.not_bracketed);
@@ -510,6 +539,9 @@ impl Artifact {
         let mut session_hi = None;
         let mut workload_tag = None;
         let mut content_tag = None;
+        let mut regimes = None;
+        let mut modes = None;
+        let mut regime_n_distinct = None;
         let mut instrument = None;
         let mut precision_decimals = None;
         let mut census = LabelCensus::default();
@@ -555,6 +587,9 @@ impl Artifact {
                 "session_hi" => session_hi = Some(v.parse().map_err(|_| bad("session_hi"))?),
                 "workload_tag" => workload_tag = Some(unquote(v).to_owned()),
                 "content_tag" => content_tag = Some(unquote(v).to_owned()),
+                "regimes" => regimes = Some(unquote(v).to_owned()),
+                "modes" => modes = Some(unquote(v).to_owned()),
+                "regime_n_distinct" => regime_n_distinct = v.trim().parse().ok(),
                 "instrument" => {
                     instrument =
                         Some(Instrument::parse(unquote(v)).ok_or_else(|| bad("unknown instrument"))?);
@@ -588,6 +623,10 @@ impl Artifact {
                 instrument: instrument.ok_or(ArtifactError::BadHeader("instrument"))?,
                 precision_decimals: precision_decimals
                     .ok_or(ArtifactError::BadHeader("precision_decimals"))?,
+                regimes: regimes.ok_or(ArtifactError::BadHeader("regimes"))?,
+                modes: modes.ok_or(ArtifactError::BadHeader("modes"))?,
+                regime_n_distinct: regime_n_distinct
+                    .ok_or(ArtifactError::BadHeader("regime_n_distinct"))?,
             },
             zones,
             census,

@@ -720,6 +720,11 @@ fn artifact_with(zones: &[(u16, ZoneLabel, f64)], instrument: Instrument) -> Art
             run_token: "t".into(),
             workload_tag: "visibilitybuffer_mesh#deadbeef".into(),
             content_tag: format!("n{N_PS}_{RIG}"),
+            // Decision 7: a floor session is one regime by construction; a worker that saw two
+            // is what `vg_occ_split_timing.rs` rejects, and this rung's sessions never force one.
+            regimes: "none".into(),
+            modes: "off".into(),
+            regime_n_distinct: 1,
             instrument,
             precision_decimals: PRECISION_DECIMALS,
         },

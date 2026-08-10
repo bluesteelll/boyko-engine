@@ -56,6 +56,12 @@ fn fixture(run_token: &str) -> Artifact {
             run_token: run_token.to_owned(),
             workload_tag: "vb_mesh_512".to_owned(),
             content_tag: "n14_kronecker".into(),
+            // Decision 7: a real window's regime census. `off,forced_on` is two distinct
+            // regimes in one window -- the state `vg_occ_split_timing.rs` rejects a worker for,
+            // and therefore the one a fixture must be able to represent.
+            regimes: "off,forced_on".into(),
+            modes: "off".into(),
+            regime_n_distinct: 2,
             instrument: Instrument::Live,
             precision_decimals: PRECISION_DECIMALS,
         },
@@ -164,6 +170,9 @@ session_hi = 2
 run_token = \"run-A\"
 workload_tag = \"t\"
 content_tag = \"c\"
+regimes = \"off\"
+modes = \"off\"
+regime_n_distinct = 1
 instrument = \"live\"
 precision_decimals = 1
 census_measured = 0
@@ -285,6 +294,9 @@ session_hi = 2
 run_token = \"run-A\"
 workload_tag = \"t\"
 content_tag = \"c\"
+regimes = \"off\"
+modes = \"off\"
+regime_n_distinct = 1
 instrument = \"live\"
 precision_decimals = 1
 census_measured = 0
@@ -331,6 +343,19 @@ fn gcd(a: u64, b: u64) -> u64 {
 // ===================================================================================================
 // Rung 7c — the workload tag is two halves, and an undeclared one is not a floor
 // ===================================================================================================
+
+/// **Decision 7's census survives the file.** Without this the three new header fields would be
+/// written and never read back by anything — decoration that a reader cannot rely on. The fixture
+/// carries TWO distinct regimes on purpose: `n_distinct == 1` is the state a consumer accepts, so a
+/// round-trip that only ever saw `1` could not tell a carried value from a hardcoded one.
+#[test]
+fn the_regime_census_survives_the_file() {
+    let a = fixture("tok");
+    let back = Artifact::parse(&a.render(), "tok").expect("the fixture round-trips");
+    assert_eq!(back.header.regimes, "off,forced_on");
+    assert_eq!(back.header.modes, "off");
+    assert_eq!(back.header.regime_n_distinct, 2, "the cardinality is carried, not re-derived");
+}
 
 /// **The hole this closes, as a test.** `vg_decidability_floor.rs` measures its NULL experiment
 /// across two configurations — `BOYKO_VB_FROXEL_FORCE_OFF` set and unset — and the old tag

@@ -1070,6 +1070,14 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         std::env::var_os("BOYKO_PROFILE_ARTIFACT").map(std::path::PathBuf::from);
     // THE STALENESS DISCRIMINATOR, chosen by the parent BEFORE this process started. See
     // `profiling::artifact`'s Decision 4: it is the only header field a parent can predict.
+    // Profiling rung 7: the ZONE leg's own regime census. The bench leg has carried
+    // `vb_bench_force_seen`/`vb_bench_mode_seen` since P4-4 for its printed provenance line; the
+    // artifact needs the same observation, and it cannot be derived from `ResolvedRenderPath`
+    // because P4-4 made the regime a LIVE Resource (`artifact.rs`'s Decision 7). Accumulated from
+    // the SAME per-frame values the scene was assembled from, so the census describes the frames
+    // this window timed rather than the state at exit.
+    let mut vb_zone_force_seen: u8 = 0;
+    let mut vb_zone_mode_seen: u8 = 0;
     let vb_zone_run_token: String =
         std::env::var("BOYKO_PROFILE_RUN_TOKEN").unwrap_or_default();
     let mut vb_zone_reducer = (vb_zone && vb_zone_artifact_path.is_some()).then(|| {
@@ -2790,6 +2798,8 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // yet is simply not retired this iteration — there is no wait here and no `wait_idle`, the
         // difference from the bench leg directly below.
         if vb_zone && presented_ok {
+            vb_zone_force_seen |= 1u8 << frame_occ_force.slot();
+            vb_zone_mode_seen |= 1u8 << (frame_occ_mode as u32);
             let epoch = host.renderer.submission_epoch();
             let now = u64::from(frame_index);
             let (mut measured, mut lost, mut torn, mut unbracketed) = (0u64, 0u64, 0u64, 0u64);
@@ -2879,6 +2889,17 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                                 crate::profiling::artifact::Instrument::NoTimestamps
                             },
                             precision_decimals: crate::profiling::artifact::PRECISION_DECIMALS,
+                            // The SET, not the value at exit — rendered by the same helper the
+                            // printed provenance line uses, so the two spellings cannot drift.
+                            regimes: word_set(&OcclusionForce::ALL, vb_zone_force_seen, |f| {
+                                f.as_str()
+                            }),
+                            modes: word_set(
+                                &boyko_render::OcclusionMode::ALL,
+                                vb_zone_mode_seen,
+                                |m| m.as_str(),
+                            ),
+                            regime_n_distinct: vb_zone_force_seen.count_ones(),
                         },
                         zones,
                         census,
