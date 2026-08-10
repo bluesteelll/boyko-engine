@@ -18,7 +18,7 @@
 //!
 //! | outcome | condition | verdict |
 //! |---|---|---|
-//! | **GREEN** | both completed, the bench worker printed ≥1 `VB-P4 pass=` line, the normalized message sets are EQUAL | pass |
+//! | **GREEN** | both completed, the armed worker's artifact counts ≥1 MEASURED pair, the normalized message sets are EQUAL | pass |
 //! | **RED** | both completed and the message sets DIFFER | fail — the only failure this gate claims |
 //! | **INSTRUMENT-DEAD** | *neither* completed | printed loudly, **not asserted** |
 //! | **INCONCLUSIVE** | exactly ONE completed | printed and **failed** — escalation, not classification |
@@ -48,6 +48,21 @@
 //! * **Nothing about the NUMBERS.** It never reads a duration or an offset. Whether a bracket spans
 //!   the right commands is `vg_occ_split_timing.rs`'s question, from rung P4-6.
 //! * **Nothing on a golden frame.** No pin sets `BOYKO_VB_BENCH`, so on every pinned run the
+//! # Profiling rung 7 — the ARMED LEG IS THE ZONE RECORDER, and the witness got stronger
+//!
+//! This gate used to arm `BOYKO_VB_BENCH` and take *"a `VB-P4 pass=` line exists"* as proof that the
+//! instrument ran. Rung 7 deletes both. The armed leg is now `BOYKO_VB_ZONE`, because the gate's
+//! subject is *the profiler's query commands are VUID-clean* and after this rung the profiler IS
+//! `GpuZoneRecorder` — leaving it pointed at the retired collector would have kept it green about
+//! code nobody ships.
+//!
+//! The liveness witness is the artifact's **label census**, and it is strictly stronger than the
+//! line it replaces: a printed line proved a SUMMARY was produced, while `measured > 0` proves pairs
+//! were bracketed **and their results came back** — which is exactly the property this gate needs,
+//! a pool that was reset and timestamps that executed. The parent stamps its own run token, so a
+//! leftover artifact from an earlier run is refused on the header instead of being read as this
+//! run's evidence.
+//!
 //!   witness is `None` and every site added by P4-1/P4-2 records zero commands. The pins cannot
 //!   observe this instrument at all — which is the reason this gate exists.
 //! * **It cannot prove the layer would have spoken.** Two EMPTY message sets compare equal. The
@@ -119,6 +134,10 @@ const VALIDATION_PREFIX: &str = "[vk-validation] ";
 
 /// The boot notice the `O2` decline path prints when the DEVICE cannot serve timestamps at all —
 /// then `BOYKO_VB_BENCH` arms no collector and the armed worker is not armed. INSTRUMENT-DEAD.
+/// The run token the parent stamps into the armed worker's artifact, so a leftover from an
+/// earlier run is refused on the header rather than read as this run's witness.
+const RUN_TOKEN: &str = "vb-query-validation-1";
+
 const NO_TIMESTAMPS: &str = "device timestamps are unusable";
 
 /// The driver's private marker: how a worker tells "my driver spawned me" from "an `--ignored`
@@ -193,12 +212,16 @@ fn skip_unless_driven(worker: &str, terminating_knob: &str) -> bool {
     true
 }
 
-/// **THE ARMED WORKER** — `BOYKO_VB_BENCH=1`, so `record_vb` resets the ten-pair pool at the frame
-/// top and writes all twenty queries, and the runner reads them back after every presented frame.
+/// **THE ARMED WORKER** — `BOYKO_VB_ZONE=1`, so `record_vb` resets the ring slot's pool at the frame
+/// top and writes all twenty queries, and the runner retires them without blocking.
+///
+/// ⚠️ The terminating knob is the ZONE one. It read `BOYKO_VB_BENCH` for one commit after the
+/// driver had moved, and the worker then SKIPPED silently while the driver waited for an artifact
+/// nobody wrote — a green worker and a red gate, which is the shape a skip always takes.
 #[test]
 #[ignore = "needs a real windowed GPU device with the validation layer; the driver spawns it"]
 fn vb_bench_query_validation_bench_worker() {
-    if skip_unless_driven(WORKER_BENCH, "BOYKO_VB_BENCH") {
+    if skip_unless_driven(WORKER_BENCH, "BOYKO_VB_ZONE") {
         return;
     }
     let mut app = boot("boyko_engine vb query validation (bench armed)");
@@ -356,10 +379,21 @@ fn validation_messages(output: &str) -> (BTreeSet<String>, usize) {
 #[test]
 #[ignore = "live GPU gate with the validation layer ON (spawns two windowed workers); run with --test-threads=1"]
 fn the_bench_armed_query_commands_add_no_validation_message() {
+    // Profiling rung 7: the armed leg is the ZONE RECORDER, not the collector rung 7 deletes. The
+    // gate's subject is "the profiler's query commands are VUID-clean", and after this rung the
+    // profiler IS `GpuZoneRecorder` — pointing the gate at the retired collector would have left it
+    // green about code nobody ships.
+    let mut artifact = std::env::temp_dir();
+    artifact.push("boyko_vb_query_validation.toml");
+    let _ = std::fs::remove_file(&artifact);
+    let artifact_s = artifact.to_string_lossy().into_owned();
     let (bench_out, bench_ok) = spawn_worker(
         WORKER_BENCH,
         &[
-            ("BOYKO_VB_BENCH", "1"),
+            ("BOYKO_VB_ZONE", "1"),
+            ("BOYKO_PROFILE_ARTIFACT", &artifact_s),
+            ("BOYKO_PROFILE_RUN_TOKEN", RUN_TOKEN),
+            ("BOYKO_PROFILE_WORKLOAD", "query_validation"),
             ("BOYKO_VB_BENCH_FRAMES", BENCH_FRAMES),
             ("BOYKO_WINDOW_FRAMES", BENCH_FRAME_CAP),
         ],
@@ -411,16 +445,32 @@ fn the_bench_armed_query_commands_add_no_validation_message() {
     //
     // Without this clause, two workers that both recorded ZERO query commands agree trivially --
     // and the gate would be green for a run in which the thing under test never executed.
-    let pass_lines: Vec<&str> =
-        bench_out.lines().filter(|l| l.contains("VB-P4 pass=")).collect();
+    // THE WITNESS IS THE ARTIFACT'S LABEL CENSUS, and it is strictly stronger than the printed
+    // line it replaces. "A `VB-P4 pass=` line exists" proved a SUMMARY was printed; `measured > 0`
+    // proves pairs were bracketed AND their results came back, which is the property this gate
+    // needs — a pool that was reset and timestamps that executed.
+    let art = boyko_app::profiling::artifact::Artifact::read(&artifact, RUN_TOKEN)
+        .unwrap_or_else(|e| {
+            panic!(
+                "the armed worker completed but its artifact is unusable: {e}. Nothing then proves \
+                 it reset a pool or wrote a timestamp, and two workers that both recorded nothing \
+                 agree trivially.\n---- bench worker ----\n{bench_out}"
+            )
+        });
+    let measured = art.census.measured;
     assert!(
-        !pass_lines.is_empty(),
-        "the bench-armed worker completed but printed NO `VB-P4 pass=` line, so nothing proves it \
-         reset a pool or wrote a timestamp -- and two workers that both recorded nothing agree \
-         trivially. Either the bench never reached its {BENCH_FRAMES}-frame budget (the \
-         BOYKO_WINDOW_FRAMES={BENCH_FRAME_CAP} cap fired first), or the collector was disarmed, or \
-         the per-pass summary is gone.\n---- bench worker ----\n{bench_out}"
+        measured > 0,
+        "the armed worker wrote an artifact whose census counts ZERO measured pairs, so nothing \
+         proves it reset a pool or wrote a timestamp -- and two workers that both recorded nothing \
+         agree trivially. Either the window never reached its {BENCH_FRAMES}-frame budget (the \
+         BOYKO_WINDOW_FRAMES={BENCH_FRAME_CAP} cap fired first), or the recorder was disarmed. \
+         Census: measured={} not_bracketed={} lost={} torn={}.\n---- bench worker ----\n{bench_out}",
+        art.census.measured,
+        art.census.not_bracketed,
+        art.census.lost,
+        art.census.torn
     );
+    let _ = std::fs::remove_file(&artifact);
 
     // ---- RED: the message sets differ ---------------------------------------------------------
     let only_bench: Vec<&String> = bench_keys.difference(&control_keys).collect();
@@ -446,11 +496,11 @@ fn the_bench_armed_query_commands_add_no_validation_message() {
     // the same things" from "the layer said nothing at all", and only the numbers can say which.
     println!(
         "VG R3 P4-2 query-validation gate: GREEN. Both workers completed; the bench-armed one \
-         printed {} `VB-P4 pass=` line(s) (so the reset and all {} timestamp writes executed), and \
-         the two normalized validation message sets are equal at {} key(s). Raw message counts: \
-         bench={bench_count}, control={control_count}{}.",
-        pass_lines.len(),
-        pass_lines.len() * 2,
+         wrote an artifact counting {} MEASURED pair(s) (so the reset and all {} timestamp writes \
+         executed and their results came back), and the two normalized validation message sets are \
+         equal at {} key(s). Raw message counts: bench={bench_count}, control={control_count}{}.",
+        measured,
+        measured * 2,
         bench_keys.len(),
         if bench_count == 0 && control_count == 0 {
             " -- ZERO on both sides, so this run shows the armed stream added nothing, NOT that \
