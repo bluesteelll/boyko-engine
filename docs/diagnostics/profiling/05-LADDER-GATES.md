@@ -1227,6 +1227,13 @@ exactly how the seven brackets acquired the wrong stage in the first place.
    dead — that base is `0`, so it is tautological on a `u16` and clippy refuses it; the
    `wrapping_sub` alone carries gbuffer's 16 and SV0's 32 out of the `3..=9` range.
 2. Delete the runner harness (1381 lines) and the print sites; the `rg` gates then pass.
+   ⚠️ **RUN, not argued: the cascade was produced and reverted.** Deleting the print site and its
+   89-line function turned **eight** items dead at the first order — `vb_bench_lights`,
+   `vb_bench_force_seen`, `vb_bench_mode_seen` (and both of their assignments), `vb_bench_mean_ns`,
+   `vb_bench_stats_ns`, and `VbPassLabel::suffix` — with `VbBenchTables`, the accumulation, the
+   readback and the collector's arming behind them. 35 references across `runner.rs`. Reverted
+   rather than left half-done: an uncommitted non-compiling `runner.rs` costs the next sitting more
+   than the attempt saved.
    ⚠️ **MEASURED to be ATOMIC, not merely large.** `print_vb_bench_summary` is one 89-line function
    with exactly ONE call site (`runner.rs:2963`, inside the `vb_bench` block) and one doc reference.
    Removing the call leaves `VbBenchTables`' thirty rows accumulated and never read, so
