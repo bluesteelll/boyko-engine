@@ -101,7 +101,7 @@ use core::cell::Cell;
 
 use boyko_rhi::TimestampStage;
 
-use super::gpu_zone::MAX_GPU_PAIRS;
+use super::gpu_zone::{MAX_GPU_PAIRS, ZONE_ID_SPAN};
 
 /// What the recorder recorded, counted at the `vkCmd*` sites.
 ///
@@ -125,6 +125,23 @@ pub struct CommandWitness {
     /// Parallel to [`Self::stamp_positions`] rather than folded into it because the two answer
     /// different questions and a reader comparing one must be able to compare the other alone.
     stamp_stages: [Cell<TimestampStage>; 2 * MAX_GPU_PAIRS],
+    /// **Profiling rung 8 — per-zone command attribution.** `stream_pos` when zone `z`'s BEGIN was
+    /// recorded, or [`Self::NO_POS`] when it did not open this frame.
+    ///
+    /// # Why positions and not a counter
+    ///
+    /// A per-zone counter would need every `command()` to know which zones are open and bump each
+    /// of them — a loop at ~200 record sites, and the zones NEST (`ZONE_VB_RUN`'s span contains
+    /// seven others), so it would be a loop and not an add. Differencing the stream position at the
+    /// two ends is exact, handles nesting for free — an inner zone's commands are inside the outer
+    /// one's span, which is what its DURATION already says — and costs **nothing per command**.
+    /// `stream_pos` was already there for `stamp_positions`; this reads it twice more per bracket.
+    ///
+    /// Indexed by ZONE ID, not by open order: open order is the bump allocator's, and this question
+    /// is about a named pass.
+    zone_cmd_open: [Cell<u32>; ZONE_ID_SPAN],
+    /// The same at the END. Their difference is the count.
+    zone_cmd_close: [Cell<u32>; ZONE_ID_SPAN],
 }
 
 impl Default for CommandWitness {
@@ -134,6 +151,10 @@ impl Default for CommandWitness {
 }
 
 impl CommandWitness {
+    /// A zone that did not bracket this frame. `u32::MAX` rather than `0`, because `0` is a real
+    /// stream position — the frame's very first command.
+    pub const NO_POS: u32 = u32::MAX;
+
     /// A witness that has seen nothing.
     #[must_use]
     pub fn new() -> CommandWitness {
@@ -146,6 +167,8 @@ impl CommandWitness {
             stream_pos: Cell::new(0),
             zone_open_order: core::array::from_fn(|_| Cell::new(0)),
             stamp_positions: core::array::from_fn(|_| Cell::new(0)),
+            zone_cmd_open: core::array::from_fn(|_| Cell::new(Self::NO_POS)),
+            zone_cmd_close: core::array::from_fn(|_| Cell::new(Self::NO_POS)),
             stamp_stages: core::array::from_fn(|_| Cell::new(TimestampStage::TopOfPipe)),
         }
     }
@@ -233,6 +256,43 @@ impl CommandWitness {
             self.zone_open_order[slot].set(zone);
         }
         self.recorded_pairs.set(self.recorded_pairs.get().saturating_add(1));
+        if let Some(c) = self.zone_cmd_open.get(zone as usize) {
+            c.set(self.stream_pos.get());
+        }
+    }
+
+    /// Profiling rung 8: zone `z`'s END was recorded here. Pairs with [`Self::open_pair`].
+    ///
+    /// A separate verb rather than a flag on `timestamp`, because `timestamp` deliberately knows
+    /// nothing about which pass it belongs to — that is what makes `stamp_positions` a witness with
+    /// no vocabulary, and G10 rested on exactly that. This one has a vocabulary and says so.
+    #[inline]
+    pub fn close_pair(&self, zone: u16) {
+        if let Some(c) = self.zone_cmd_close.get(zone as usize) {
+            c.set(self.stream_pos.get());
+        }
+    }
+
+    /// How many recorded commands fell inside zone `z`'s bracket this frame, or `None` when the
+    /// zone did not open and close.
+    ///
+    /// ⚠️ **The count INCLUDES nested zones' commands**, exactly as this zone's duration includes
+    /// their time. A caller wanting a partition subtracts the children itself — and has to know
+    /// which they are, which is a property of the recorder rather than of this witness.
+    ///
+    /// ⚠️ **And it includes the profiler's own bracket commands** for any zone nested inside this
+    /// one: an inner `vkCmdWriteTimestamp` moves `stream_pos`. On the shipped default there are
+    /// none of these at all, because the recorder is unarmed; under a census build the figure is
+    /// about the census build.
+    #[must_use]
+    #[inline]
+    pub fn zone_commands(&self, zone: u16) -> Option<u32> {
+        let open = self.zone_cmd_open.get(zone as usize)?.get();
+        let close = self.zone_cmd_close.get(zone as usize)?.get();
+        if open == Self::NO_POS || close == Self::NO_POS || close < open {
+            return None;
+        }
+        Some(close - open)
     }
 
     /// Every command the profiler recorded: resets plus bracket timestamps plus repairs.
@@ -543,6 +603,71 @@ mod tests {
                 (4, TimestampStage::TopOfPipe),
                 (5, TimestampStage::BottomOfPipe),
             ]
+        );
+    }
+
+    /// **Profiling rung 8.** A zone's command count is the stream-position difference across its
+    /// bracket, it includes nested zones, and a zone that never bracketed reports `None` rather
+    /// than `0`.
+    #[test]
+    fn a_zones_command_count_is_its_stream_span() {
+        use super::super::gpu_zone::{ZONE_SV0_MARCHER, ZONE_VB_EARLY_RASTER, ZONE_VB_RUN};
+
+        let w = CommandWitness::new();
+        w.begin_frame();
+
+        w.command(); // one command before anything opens -- outside every bracket
+        w.open_pair(ZONE_VB_RUN);
+        w.command();
+        w.open_pair(ZONE_VB_EARLY_RASTER);
+        w.command();
+        w.command();
+        w.close_pair(ZONE_VB_EARLY_RASTER);
+        w.command();
+        w.close_pair(ZONE_VB_RUN);
+        w.command(); // and one after -- also outside
+
+        assert_eq!(
+            w.zone_commands(ZONE_VB_EARLY_RASTER),
+            Some(2),
+            "the inner zone spans exactly the two commands between its own ends"
+        );
+        assert_eq!(
+            w.zone_commands(ZONE_VB_RUN),
+            Some(4),
+            "the outer zone INCLUDES the inner one's commands, exactly as its duration includes              the inner one's time -- a partition would be a different quantity"
+        );
+        assert_eq!(
+            w.zone_commands(ZONE_SV0_MARCHER),
+            None,
+            "a zone that never bracketed reports None, not a measurement of zero commands"
+        );
+    }
+
+    /// **The regression this rung found.** `open_pair` records what it is GIVEN, so a caller that
+    /// hands it a witness slot instead of a zone id poisons `zone_open_order` and every zone-keyed
+    /// count — which is what `gbuffer.rs` did from rung 6 until rung 8.
+    ///
+    /// This pins the witness's half of the contract. The caller's half cannot be pinned from here
+    /// (it is an argument, and both are `u16`), so it is pinned at the call site instead, by a
+    /// `debug_assert_eq!` that makes the slot and the zone check each other.
+    #[test]
+    fn the_witness_records_zone_ids_verbatim() {
+        use super::super::gpu_zone::{ZONE_BASE_GBUFFER, ZONE_SV0_MARCHER};
+
+        let w = CommandWitness::new();
+        w.begin_frame();
+        w.open_pair(ZONE_BASE_GBUFFER);
+        w.open_pair(ZONE_SV0_MARCHER);
+        let seen: Vec<u16> = w.zone_open_order().collect();
+        assert_eq!(
+            seen,
+            vec![ZONE_BASE_GBUFFER, ZONE_SV0_MARCHER],
+            "the order must carry ZONE IDS (16, 32) -- the slots (0, 4) it carried before rung 8              name a different bracket in every family whose base is not zero"
+        );
+        assert!(
+            seen.iter().all(|z| *z >= ZONE_BASE_GBUFFER),
+            "no gbuffer/SV0 id is below its family base; a value in 0..4 here IS the old defect"
         );
     }
 }

@@ -2444,9 +2444,27 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 };
                 let _ = write!(stages, "{sep}{c}");
             }
+            // Profiling rung 8 — the `vkCmd*` counters, ATTRIBUTED PER ZONE.
+            //
+            // `zone_commands` differences the command-stream position at a zone's two ends, so a
+            // count costs NOTHING per command and handles nesting exactly the way the DURATIONS
+            // do: `ZONE_VB_RUN`'s figure includes the seven zones inside it, because its span
+            // does. That is what turns *"this pass took 3.1 ms"* into *"3.1 ms across 412 recorded
+            // commands"* — draw-bound and per-draw-cost-bound stop looking the same number.
+            //
+            // Only zones that BRACKETED this frame appear. A zone this leg does not run is ABSENT
+            // rather than `0`, for the same reason its `NotBracketed` label exists.
+            let mut zone_cmds = String::with_capacity(120);
+            for zone in w.zone_open_order() {
+                if let Some(n) = w.zone_commands(zone) {
+                    let sep = if zone_cmds.is_empty() { "" } else { "," };
+                    let _ = write!(zone_cmds, "{sep}{zone}:{n}");
+                }
+            }
             println!(
                 "VB-CENSUS leg={} frame={frame_index} stream_pos={} profiling_cmds={} \
-                 resets={} stamps={} repairs={} pairs={} positions=[{positions}] stages=[{stages}]",
+                 resets={} stamps={} repairs={} pairs={} positions=[{positions}] stages=[{stages}] \
+                 zone_cmds=[{zone_cmds}]",
                 // Rung 7 deleted the collector leg, so the only two legs left are the
                 // zone recorder and the R0 gbuffer collector.
                 if vb_zone { "zone" } else { "gbuf" },

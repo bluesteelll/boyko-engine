@@ -321,7 +321,11 @@ impl<'a> TsWitness<'a> {
     /// reach that same table, so a re-read would agree with itself across the very difference rung
     /// 7c found (`command_witness`'s module doc).
     #[inline]
-    fn mark_begin(&mut self, slot: u32, stage: TimestampStage) {
+    fn mark_begin(&mut self, zone: u16, stage: TimestampStage) {
+        // ONE argument -- see `gbuffer.rs`'s note. It matters MORE in this family, not less: its
+        // base is 0, so a slot and a zone are numerically equal here and a confusion between them
+        // is invisible by inspection. That is exactly how the sibling file's survived two rungs.
+        let slot = Self::slot_of(zone);
         self.begun |= 1u16 << slot;
         #[cfg(debug_assertions)]
         {
@@ -329,17 +333,21 @@ impl<'a> TsWitness<'a> {
         }
         #[cfg(feature = "profiling-census")]
         if let Some(w) = self.cw {
-            w.open_pair(slot as u16);
+            // THE ZONE, not the slot. They are equal in this family only because `ZONE_BASE_VB`
+            // is 0 -- which is exactly the coincidence that hid the confusion in `gbuffer.rs`,
+            // where they are not (see rung 8's note there).
+            w.open_pair(zone);
             w.timestamp(stage);
         }
         // Without the census the stage is recorded nowhere, and the recorder already consumed it.
         #[cfg(not(feature = "profiling-census"))]
-        let _ = stage;
+        let _ = (zone, stage);
     }
 
     /// [`Self::mark_begin`]'s counterpart at an END.
     #[inline]
-    fn mark_end(&mut self, slot: u32, stage: TimestampStage) {
+    fn mark_end(&mut self, zone: u16, stage: TimestampStage) {
+        let slot = Self::slot_of(zone);
         self.ended |= 1u16 << slot;
         #[cfg(debug_assertions)]
         {
@@ -348,9 +356,11 @@ impl<'a> TsWitness<'a> {
         #[cfg(feature = "profiling-census")]
         if let Some(w) = self.cw {
             w.timestamp(stage);
+            // Profiling rung 8: the second stream position this zone's command count needs.
+            w.close_pair(zone);
         }
         #[cfg(not(feature = "profiling-census"))]
-        let _ = stage;
+        let _ = (zone, stage);
     }
 
 
@@ -389,7 +399,7 @@ impl<'a> TsWitness<'a> {
             // SAFETY: caller contract; `pair` came from `alloc_pair` on this slot immediately
             // above, and the pool was reset this frame (this witness's construction site).
             let stage = unsafe { rec.record_begin(fns, cmd, ring, pair, zone_begin_stage(zone)) };
-            self.mark_begin(slot, stage);
+            self.mark_begin(zone, stage);
         }
     }
 
@@ -408,7 +418,7 @@ impl<'a> TsWitness<'a> {
             // SAFETY: caller contract; `pair` is the index `alloc_pair` returned for THIS pass at
             // its begin — remembered rather than recomputed, see `pair_of`'s doc.
             let stage = unsafe { rec.record_end(fns, cmd, ring, pair) };
-            self.mark_end(slot, stage);
+            self.mark_end(zone, stage);
         }
     }
 

@@ -278,6 +278,17 @@ const _: () = assert!(
     "the SV0 family no longer fits its reserved zone-id range"
 );
 
+/// One past the highest zone id any family can mint — the width a zone-KEYED array needs.
+///
+/// Three families at [`ZONE_FAMILY_WIDTH`] apiece. Derived rather than written, so a fourth family
+/// widens every zone-keyed array by changing one base.
+pub const ZONE_ID_SPAN: usize = (ZONE_BASE_SV0 + ZONE_FAMILY_WIDTH) as usize;
+
+const _: () = assert!(
+    ZONE_ID_SPAN > (ZONE_BASE_SV0 + SV0_ZONE_COUNT - 1) as usize,
+    "a zone-keyed array sized by ZONE_ID_SPAN must hold the highest id any family mints"
+);
+
 /// **The BEGIN stage of a zone, keyed by ZONE ID.** Rung 7's home for the table that lived on
 /// `VbTimedPass::begin_stage`.
 ///

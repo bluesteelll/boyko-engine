@@ -149,27 +149,46 @@ impl<'a> GbufWitness<'a> {
     /// `stage` is what the RECORDER returned, never a stage re-derived here — `vb.rs`'s
     /// `TsWitness::mark_begin` states why at length, and it is the same reason on both families.
     #[inline]
-    fn mark_begin(&mut self, slot: usize, stage: TimestampStage) {
+    fn mark_begin(&mut self, zone: u16, stage: TimestampStage) {
+        // ONE argument, and the slot is derived here. The first draft of this rung took BOTH and
+        // cross-checked them with a `debug_assert_eq!` -- which was TAUTOLOGICAL: every caller
+        // derives the slot from the zone two lines earlier, so the assert compared `slot_of(zone)`
+        // with itself and could never fire. A gate that cannot fail is a defect in this repository,
+        // and the fix for two values that must agree is not to check them, it is to have one.
+        let slot = Self::slot_of(zone);
         self.begun |= 1u16 << slot;
         #[cfg(feature = "profiling-census")]
         if let Some(w) = self.cw {
-            w.open_pair(slot as u16);
+            // ⚠️ **THE ZONE, and this line used to pass `slot as u16`** -- profiling rung 8 found
+            // it. `open_pair` names its parameter `zone`, both are `u16`, and in THIS file the two
+            // differ: the witness slot is `0..4` for the gbuffer family and `4` for the marcher,
+            // while the zone ids are `16..19` and `32`. So `zone_open_order` recorded `0,1,2,3,4`
+            // for two of the three families and had done since rung 6 ported them.
+            //
+            // It went unnoticed because its only consumer was `G10`'s cross-leg witness comparison,
+            // which rung 7 deleted with leg A -- and because `vb.rs` passes the same expression
+            // CORRECTLY, its base being 0. **A coincidence in the family that was ported first hid
+            // a confusion in the two that followed.**
+            w.open_pair(zone);
             w.timestamp(stage);
         }
         #[cfg(not(feature = "profiling-census"))]
-        let _ = stage;
+        let _ = (zone, stage);
     }
 
     /// [`Self::mark_begin`]'s counterpart at an END.
     #[inline]
-    fn mark_end(&mut self, slot: usize, stage: TimestampStage) {
+    fn mark_end(&mut self, zone: u16, stage: TimestampStage) {
+        let slot = Self::slot_of(zone);
         self.ended |= 1u16 << slot;
         #[cfg(feature = "profiling-census")]
         if let Some(w) = self.cw {
             w.timestamp(stage);
+            // Profiling rung 8: the second stream position this zone's command count needs.
+            w.close_pair(zone);
         }
         #[cfg(not(feature = "profiling-census"))]
-        let _ = stage;
+        let _ = (zone, stage);
     }
 
     /// The witness's own slot index for `zone` — its bit in the two masks and its `pair_of` entry.
@@ -213,7 +232,7 @@ impl<'a> GbufWitness<'a> {
             // was exactly a stage decided at the recorder instead of looked up per zone.
             // SAFETY: caller contract; `pair` came from `alloc_pair` on this slot just above.
             let stage = unsafe { rec.record_begin(fns, cmd, ring, pair, zone_begin_stage(zone)) };
-            self.mark_begin(slot, stage);
+            self.mark_begin(zone, stage);
         }
     }
 
@@ -231,7 +250,7 @@ impl<'a> GbufWitness<'a> {
             }
             // SAFETY: caller contract; `pair` is the index this zone's BEGIN remembered.
             let stage = unsafe { rec.record_end(fns, cmd, ring, pair) };
-            self.mark_end(slot, stage);
+            self.mark_end(zone, stage);
         }
     }
 

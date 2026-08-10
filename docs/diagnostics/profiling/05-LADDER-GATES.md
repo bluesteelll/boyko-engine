@@ -1519,7 +1519,48 @@ repository treats as a defect.
 `Fifo`, never a third thing. Asserting support would be a gate about the hardware, red on the first
 box without it. The support figures are printed and recorded in `02-GPU.md`'s D12.
 
-**What rung 8 still owes:** counters at `vkCmd*` sites, and the optional `profiling-alloc` feature. The `NotResolvedReason`
+✅ **The `vkCmd*` counters SHIPPED — and they are attributed PER ZONE.**
+
+`CommandWitness::zone_commands(zone)` differences the command-stream position at a zone's two ends.
+**A count therefore costs NOTHING per command**: `stream_pos` was already incremented at every
+witnessed record site for `stamp_positions`, and this reads it twice more per bracket. The
+alternative — a per-zone counter bumped at each `command()` — would have had to know which zones are
+open and bump each, and the zones NEST, so it would be a loop at ~200 record sites rather than an
+add.
+
+Nesting is handled by construction and exactly as the DURATIONS handle it: an inner zone's commands
+are inside the outer zone's span. **Measured on a real `VisibilityBuffer × Mesh` frame:**
+
+| zone | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | **9 `vb_run`** |
+|---|---|---|---|---|---|---|---|---|---|---|
+| commands | 4 | 6 | 9 | 2 | 9 | 14 | 2 | 2 | 2 | **31** |
+
+`2+9+14+2+2+2 = 31` — `ZONE_VB_RUN`'s count is EXACTLY the sum of the seven it contains, on this
+leg. Recorded rather than asserted: the corpus's own leg table says `ZONE_VB_HZB_BUILD` and
+`ZONE_VB_SHADE` MOVE between legs, so a partition that holds here is a property of this leg, not of
+the family.
+
+⚠️ **AND THE PORT FOUND A DEFECT THAT HAD BEEN LIVE SINCE RUNG 6.** `gbuffer.rs`'s `mark_begin`
+called `w.open_pair(slot as u16)` where the parameter is named `zone`. In that file the two differ —
+the witness slot is `0..4` for the gbuffer family and `4` for the marcher, while the ids are `16..19`
+and `32` — so **`zone_open_order` recorded `0,1,2,3,4` for two of the three families**. Both are
+`u16`, so nothing complained.
+
+It survived because its only consumer was `G10`'s cross-leg witness comparison, which rung 7 deleted
+with leg A — and because `vb.rs` passes the same expression CORRECTLY, its base being `0`. **A
+coincidence in the family that was ported first hid a confusion in the two that followed.**
+
+⚠️ **The first fix for it was a gate that COULD NOT FAIL.** `mark_*` was given both `slot` and
+`zone` with a `debug_assert_eq!(Self::slot_of(zone), slot)` between them — and every caller derives
+the slot from the zone two lines earlier, so the assert compared `slot_of(zone)` with itself. Found
+by trying to produce its RED. **The fix for two values that must agree is not to check them, it is
+to have one**: `mark_begin`/`mark_end` now take the zone alone and derive the slot themselves.
+
+**What rung 8 still owes:** the optional `profiling-alloc` feature. The per-zone counts reach the
+printed census line today; carrying them into the ARTIFACT needs a per-frame ring, because the
+witness is reset each frame while `retire` yields a frame recorded ~4 frames earlier. That ring is
+the same mechanism the owner's per-frame view needs (a channel that does not reduce to medians), and
+it belongs with that work rather than being built twice. The `NotResolvedReason`
 round-trip through the wire words is gated; a verdict is not yet written into an artifact, which is
 a separate seam from `G4c`'s drop census and belongs with whatever first publishes one.
 
