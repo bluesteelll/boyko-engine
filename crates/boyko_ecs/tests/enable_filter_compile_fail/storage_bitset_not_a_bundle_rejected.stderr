@@ -17,6 +17,8 @@ help: the following other types implement trait `Bundle`
    |         |
    |         `ChildOf`
    |         `Children`
+   |         `ProfiledZone`
+   |         `ProfilingScope`
    |
   ::: src/ecs/core/hierarchy/bundles.rs
    |
@@ -24,6 +26,13 @@ help: the following other types implement trait `Bundle`
    | -------------------------- in this macro invocation
    | impl_self_bundle!(Children);
    | --------------------------- in this macro invocation
+   |
+  ::: src/ecs/core/profiling/ecs_control.rs
+   |
+   | impl_self_bundle!(ProfilingScope);
+   | --------------------------------- in this macro invocation
+   | impl_self_bundle!(ProfiledZone);
+   | ------------------------------- in this macro invocation
 note: required by a bound in `requires_bundle`
   --> tests/enable_filter_compile_fail/storage_bitset_not_a_bundle_rejected.rs:15:23
    |

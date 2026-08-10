@@ -1208,3 +1208,361 @@ fn an_index_over_no_co_running_pair_refuses_rather_than_reading_one() {
     let all_serial = ConcurrencyReport { compatible_co_ran: 4, compatible_overlapped: 0, ..empty };
     assert_eq!(all_serial.serialisation_index(), Some(1.0));
 }
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// G12 (profiling rung 11) — the scope toggle, two-sided, through the path a game actually has.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+/// The first of the two scope bits this gate owns.
+///
+/// The **top** two, and that is not decoration: `register_scope` mints upward from
+/// `USER_SCOPE_BASE`, so a colliding mint would have to be the 31st in the process. `g12_app`
+/// asserts the range is still clear rather than trusting the arithmetic — a latent collision would
+/// show up as a scope somebody else armed, which reads exactly like the bug this gate exists to
+/// catch.
+const G12_BIT_A: u8 = 62;
+/// The second scope bit — the control. Its samples must keep arriving while A's stop.
+const G12_BIT_B: u8 = 63;
+
+boyko_diag::declare_zone!(
+    G12_ZONE_A,
+    name = "g12.zone.a",
+    scope = G12_BIT_A as u32,
+    tier = boyko_diag::profiling_abi::ZoneTier::Always,
+);
+
+boyko_diag::declare_zone!(
+    G12_ZONE_B,
+    name = "g12.zone.b",
+    scope = G12_BIT_B as u32,
+    tier = boyko_diag::profiling_abi::ZoneTier::Always,
+);
+
+/// No entity — the resting value of the two toggle mailboxes below.
+///
+/// `u64::MAX` is not a packable `(EntityId, generation)` pair: it would need generation
+/// `u32::MAX`, which the entity master never mints. So "no target" and "some target" cannot be
+/// confused, which a plain `0` — entity 0, generation 0, a real spawnable handle — would.
+const G12_NO_TARGET: u64 = u64::MAX;
+
+/// The entity the next frame's parallel system must **disable**, packed.
+static G12_DISABLE: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(G12_NO_TARGET);
+/// The entity the next frame's parallel system must **enable**, packed.
+static G12_ENABLE: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(G12_NO_TARGET);
+
+fn g12_pack(e: crate::ecs::core::entity::entity::Entity) -> u64 {
+    // `EntityId` is a `usize`; the low half of the word is where it goes, so the pack is only
+    // lossless while an id fits 32 bits. A test spawning four entities is nowhere near it, and the
+    // assertion says so rather than leaving the truncation to be discovered by a wrong toggle.
+    debug_assert!(e.id().0 <= u32::MAX as usize, "invariant: the packed entity id fits 32 bits");
+    (u64::from(e.generation()) << 32) | (e.id().0 as u64)
+}
+
+fn g12_unpack(bits: u64) -> crate::ecs::core::entity::entity::Entity {
+    crate::ecs::core::entity::entity::Entity::new(
+        crate::ecs::identifiers::primitives::EntityId((bits & 0xFFFF_FFFF) as usize),
+        (bits >> 32) as u32,
+    )
+}
+
+/// The emitting system: one span on each scope, every frame it runs.
+fn g12_emit() {
+    let _a = boyko_diag::zone!(G12_ZONE_A);
+    let _b = boyko_diag::zone!(G12_ZONE_B);
+}
+
+/// **The write path a game actually has** — an ordinary parallel system holding `Commands`.
+///
+/// Not an exclusive system and not the host: `EcsMaster::enable`/`disable` take `&mut self`, which
+/// no parallel system can hold, and rev 3's design named no alternative — so its "only switch" had
+/// no caller. This is the caller the tree already supplied
+/// (`system/params/entity_commands.rs:220`, `:236`), and the command applies at this system's
+/// `apply`, inside the same schedule run.
+///
+/// `swap` rather than `load`: the mailbox fires exactly once, so a test that ran four more frames
+/// cannot re-issue the toggle and mask an implementation that only worked because it was told
+/// repeatedly.
+fn g12_toggle(mut commands: crate::ecs::core::system::Commands) {
+    let off = G12_DISABLE.swap(G12_NO_TARGET, core::sync::atomic::Ordering::Relaxed);
+    if off != G12_NO_TARGET {
+        commands
+            .entity(g12_unpack(off))
+            .disable::<crate::ecs::core::profiling::ecs_control::ProfilingScopeEnabled>();
+    }
+    let on = G12_ENABLE.swap(G12_NO_TARGET, core::sync::atomic::Ordering::Relaxed);
+    if on != G12_NO_TARGET {
+        commands
+            .entity(g12_unpack(on))
+            .enable::<crate::ecs::core::profiling::ecs_control::ProfilingScopeEnabled>();
+    }
+}
+
+/// Samples folded into the newest **complete** frame, for the two scope zones.
+///
+/// `frame() - 1`, not `frame()`: a span closes at the end of its frame and is drained at the top of
+/// the next one, so the live frame's row is still filling. Reading the live row would report zero
+/// for every zone and pass the disable clause for the wrong reason.
+fn g12_counts(p: &Profiler) -> (u32, u32) {
+    let f = p.frame().saturating_sub(1);
+    let row = p.row_of(f).expect("the previous frame is inside the retained window");
+    let a = p.cell(row, profiling_abi::zone_id(&G12_ZONE_A)).expect("a retained row");
+    let b = p.cell(row, profiling_abi::zone_id(&G12_ZONE_B)).expect("a retained row");
+    (a.count, b.count)
+}
+
+/// Build an armed `App` with two scope entities, both enabled, and the emit/toggle systems.
+///
+/// Returns the app and the two scope entities, A first.
+fn g12_app() -> (crate::ecs::core::app::App, [crate::ecs::core::entity::entity::Entity; 2]) {
+    use crate::ecs::core::app::{App, CoreSchedule};
+    use crate::ecs::core::component::component::Component;
+    use crate::ecs::core::profiling::ecs_control::{
+        ProfilingScope, ProfilingScopeEnabled, minted_game_scopes,
+    };
+    use crate::ecs::core::profiling::plugin::ProfilerPlugin;
+    use crate::ecs::core::profiling::store::unbind_world;
+    use crate::ecs::core::system::Commands;
+
+    set_lane(TEST_LANE);
+    unbind_world();
+    drain_every_region();
+
+    assert!(
+        boyko_diag::profiling_abi::USER_SCOPE_BASE + minted_game_scopes() <= u32::from(G12_BIT_A),
+        "a register_scope mint has reached this gate's own bits; the two would toggle each other"
+    );
+
+    let mut app = App::new();
+    app.add_systems_in(CoreSchedule::Main, g12_toggle);
+    app.add_systems_in(CoreSchedule::Main, g12_emit);
+    app.add_plugin(ProfilerPlugin);
+    app.finish();
+
+    let outcome = app.world_mut().resource_mut::<Profiler>().arm(ProfilerConfig::default());
+    assert!(matches!(outcome, ArmOutcome::Armed | ArmOutcome::Rearmed), "{outcome:?}");
+    drain_every_region();
+
+    app.world_mut().run_system(|mut cmds: Commands| {
+        cmds.spawn(ProfilingScope { bit: G12_BIT_A, name: "g12.a" });
+        cmds.spawn(ProfilingScope { bit: G12_BIT_B, name: "g12.b" });
+    });
+
+    let spawned = app.world().query_entities(&[ProfilingScope::component_id()]);
+    let mut found: [Option<crate::ecs::core::entity::entity::Entity>; 2] = [None, None];
+    for e in spawned {
+        let bit = app
+            .world_mut()
+            .query::<&ProfilingScope, ()>()
+            .get(e)
+            .expect("the entity was just spawned with the component queried for")
+            .bit;
+        match bit {
+            G12_BIT_A => found[0] = Some(e),
+            G12_BIT_B => found[1] = Some(e),
+            other => panic!("an unexpected ProfilingScope on bit {other} shares this world"),
+        }
+    }
+    let ents = [found[0].expect("scope A was spawned"), found[1].expect("scope B was spawned")];
+
+    // The host path, used here for SETUP only — the direct-path clause is what tests it as a write
+    // path.
+    app.world_mut().enable::<ProfilingScopeEnabled>(ents[0]);
+    app.world_mut().enable::<ProfilingScopeEnabled>(ents[1]);
+
+    (app, ents)
+}
+
+/// **G12 clause 1** — the toggle through `Commands`, from an ordinary parallel system.
+///
+/// With scopes A and B armed, a parallel system issues
+/// `commands.entity(a).disable::<ProfilingScopeEnabled>()` ⇒ the **next** frame has zero A samples
+/// **and** a non-zero count of B samples; re-enabling brings A back.
+///
+/// # What each half catches
+///
+/// One that projects on the same frame rather than the next would make the latency claim false,
+/// which is why the disable is issued a frame before the count is read rather than in the same one.
+///
+/// # Four REDs, run at implementation, each landing somewhere different
+///
+/// | Injected defect | Where it actually fired |
+/// |---|---|
+/// | delete `ecs_control::project(world)` from `fold_frame_cold` | the **warm-up**: nothing measured at all (`0/0`) |
+/// | `arm_bit()` returns `1 << (bit - 1)` — the wrong bit | the warm-up here; **the clause-3 control** named the exact words, `left: 0x6000…`, `right: 0xC000…` |
+/// | `project_scopes` ORs instead of replacing | the zero-A assertion, `left: 1, right: 0`, in **both** clauses |
+/// | the projection publishes `0` when any scope is disabled | *"disabling A silenced B as well"* |
+///
+/// **The first two land on the warm-up, and that is not a weakness of the gate — it is what a
+/// scope-projected mask means.** `arm` sets only `ROOT_SCOPE`; every bit above
+/// `PROJECTED_SCOPE_BASE` exists *because* the projection put it there. So a projection that is
+/// missing or wrong does not leave the previous behaviour standing, it leaves the two zones
+/// unarmed — and the assertion that catches it is the one asserting the gate is not vacuous.
+///
+/// The corpus's limits column says a whole-mask clear *"passes clause 1 and fails clause 2"*.
+/// **MEASURED: it fails clause 1**, on the B half — which the clause column itself demands
+/// (*"zero A samples **and** a non-zero count of B samples"*). The two columns disagreed; the
+/// clause column is the one that is implemented.
+#[test]
+fn g12_a_parallel_system_toggles_a_scope_and_only_that_scope() {
+    use std::time::Duration;
+
+    let _guard = test_serial();
+    let (mut app, ents) = g12_app();
+    const DT: Duration = Duration::from_millis(16);
+
+    // Warm-up: both scopes armed, both zones measuring.
+    app.run_n_with_delta(4, DT);
+    let (a0, b0) = g12_counts(app.world().resource::<Profiler>());
+    assert!(
+        a0 > 0 && b0 > 0,
+        "both scopes must measure before a toggle can mean anything: {a0}/{b0}"
+    );
+
+    // The command is issued during the first of these frames and applies inside that schedule run;
+    // the mask is projected at the top of the NEXT frame, so the count read below is the frame
+    // after the projection — which is what "the next frame" means for both write paths.
+    G12_DISABLE.store(g12_pack(ents[0]), core::sync::atomic::Ordering::Relaxed);
+    app.run_n_with_delta(3, DT);
+    let (a1, b1) = g12_counts(app.world().resource::<Profiler>());
+    assert_eq!(a1, 0, "the frame after the disable still measured scope A {a1} times");
+    assert!(b1 > 0, "disabling A silenced B as well — the projection cleared the whole mask");
+
+    // Two-sided: the switch comes back.
+    G12_ENABLE.store(g12_pack(ents[0]), core::sync::atomic::Ordering::Relaxed);
+    app.run_n_with_delta(3, DT);
+    let (a2, b2) = g12_counts(app.world().resource::<Profiler>());
+    assert!(a2 > 0, "re-enabling scope A did not bring it back — the toggle is one-way");
+    assert!(b2 > 0, "B stopped measuring across a toggle of A");
+}
+
+/// **G12 clause 2** — the same assertions through the direct `world.disable::<T>(e)` path.
+///
+/// The host, or an exclusive system already holding `&mut EcsMaster`, has this path and no queue.
+/// It lands immediately; the projection still runs at the next fold, so the observable latency is
+/// the same one — which is the point of asserting it twice rather than assuming the two paths
+/// agree.
+#[test]
+fn g12_the_direct_world_path_toggles_the_same_scope_with_the_same_latency() {
+    use std::time::Duration;
+
+    use crate::ecs::core::profiling::ecs_control::ProfilingScopeEnabled;
+
+    let _guard = test_serial();
+    let (mut app, ents) = g12_app();
+    const DT: Duration = Duration::from_millis(16);
+
+    app.run_n_with_delta(4, DT);
+    let (a0, b0) = g12_counts(app.world().resource::<Profiler>());
+    assert!(a0 > 0 && b0 > 0, "both scopes must measure first: {a0}/{b0}");
+
+    app.world_mut().disable::<ProfilingScopeEnabled>(ents[0]);
+    app.run_n_with_delta(3, DT);
+    let (a1, b1) = g12_counts(app.world().resource::<Profiler>());
+    assert_eq!(a1, 0, "the direct disable left scope A measuring {a1} times");
+    assert!(b1 > 0, "the direct disable silenced B as well");
+
+    app.world_mut().enable::<ProfilingScopeEnabled>(ents[0]);
+    app.run_n_with_delta(3, DT);
+    let (a2, b2) = g12_counts(app.world().resource::<Profiler>());
+    assert!(a2 > 0, "the direct re-enable did not bring scope A back");
+    assert!(b2 > 0, "B stopped measuring across a direct toggle of A");
+}
+
+/// **G12 clause 3, the measurable half** — a fielded tag forced through would project ZERO,
+/// silently.
+///
+/// The compile half is a `trybuild` fixture
+/// (`tests/enable_filter_compile_fail/profiling_scope_as_enable_tag_rejected.rs`, which names B2's
+/// refuted type verbatim): the derive refuses a fielded bitset tag outright — and adding it
+/// re-blessed a *neighbouring* fixture, because the compiler's "other types implement `Bundle`"
+/// list now carries this rung's two self-bundles. This is the half that matters more, because it
+/// is the one
+/// a `debug_assert` would not have caught: the **read** path (`enable_tag_api.rs:201-215`) has no
+/// storage-kind assert, so pushing a table-storage id through it does not panic — it finds no
+/// enable column, answers `false` for every entity, and the projection collapses to an all-zero
+/// scope half. A profiler permanently disarmed, in every build, with no diagnostic.
+///
+/// RED: give `test_enable_bit` the assert the write path has, and this test panics instead of
+/// measuring — which is the outcome B2 argues for and the tree does not currently have.
+#[test]
+fn g12_a_table_storage_id_forced_through_the_enable_path_projects_zero() {
+    use crate::ecs::core::component::component::Component;
+    use crate::ecs::core::component::component_registry::EnableTagId;
+    use crate::ecs::core::profiling::ecs_control::{
+        ProfilingScope, ProfilingScopeEnabled, projected_bits,
+    };
+
+    let _guard = test_serial();
+    let (mut app, ents) = g12_app();
+
+    // The shipped path, as the control: with the real tag, both bits project.
+    assert_eq!(
+        projected_bits(app.world_mut()),
+        (1u64 << G12_BIT_A) | (1u64 << G12_BIT_B),
+        "the control failed: the real bitset tag must project both scopes"
+    );
+
+    // Now B2's design: `ProfilingScope` — a FIELDED, table-storage component — as the enable tag.
+    // `EnableTagId`'s field is crate-private precisely because the public surface treats
+    // `ComponentId -> EnableTagId` as a proof of mint; constructing one here is what "force the id
+    // through anyway" means, and it is only writable from inside this crate.
+    let forced = EnableTagId(ProfilingScope::component_id());
+    assert_ne!(
+        forced.component_id(),
+        ProfilingScopeEnabled::component_id(),
+        "the two components must be distinct ids, or this test is asserting about the real tag"
+    );
+    for e in ents {
+        assert!(
+            !app.world().is_enabled_id(e, forced),
+            "a table-storage id read as an enable bit answered TRUE; the silent-zero argument for \
+             splitting capability from state rests on it answering false"
+        );
+    }
+}
+
+/// `register_scope` mints inside the game range, carries the name it was given, and refuses rather
+/// than wrapping when the word is full.
+///
+/// Not a `G12` clause — the corpus states `register_scope`'s range in prose. It is gated here
+/// because "32..63 for games" is exactly the kind of range that is true until somebody changes a
+/// constant, and because the refusal is the only failure a legal call can reach.
+///
+/// **This test saturates the process's scope counter by design**, which is why the `g12_app` helper
+/// asserts the mint has not reached bits 62/63 rather than assuming it: under the module lock the
+/// two orders are both legal, and only the assertion tells them apart.
+#[test]
+fn register_scope_mints_in_the_game_range_and_refuses_past_the_word() {
+    use boyko_diag::profiling_abi::{SCOPE_COUNT, USER_SCOPE_BASE};
+
+    use crate::ecs::core::profiling::ecs_control::{ScopeError, register_scope};
+
+    let _guard = test_serial();
+
+    // The mint is process-global and other tests in this binary may have taken bits, so the claim
+    // is about the RANGE and the name, not about a particular number.
+    let s = register_scope("g12.registered").expect("a fresh mint inside the range succeeds");
+    assert!(
+        (USER_SCOPE_BASE..SCOPE_COUNT).contains(&u32::from(s.bit)),
+        "register_scope minted {} — outside the game range {USER_SCOPE_BASE}..{SCOPE_COUNT}",
+        s.bit
+    );
+    assert_eq!(s.name, "g12.registered", "the name the caller gave must reach the component");
+    assert_ne!(s.arm_bit(), 0, "a minted scope must contribute a projectable bit");
+
+    let mut refused = None;
+    for _ in 0..=SCOPE_COUNT {
+        if let Err(e) = register_scope("g12.drain") {
+            refused = Some(e);
+            break;
+        }
+    }
+    assert_eq!(
+        refused,
+        Some(ScopeError::Exhausted),
+        "the 33rd game scope must be refused; a wrap would hand out a bit that is already live"
+    );
+    assert!(register_scope("g12.after").is_err(), "the refusal must be sticky, not one-shot");
+}

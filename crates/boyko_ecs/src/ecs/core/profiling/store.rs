@@ -52,6 +52,7 @@ use boyko_diag::sample::{Region, Sample};
 use boyko_diag::{clock, loss, profiling_abi, sample};
 
 use crate::ecs::core::profiling::diag;
+use crate::ecs::core::profiling::ecs_control::LatencyTable;
 use crate::ecs::core::resources::register_new;
 use crate::ecs::core::resources::resource::Resource;
 use crate::ecs::identifiers::primitives::ResourceId;
@@ -65,8 +66,25 @@ use crate::ecs::memory::vm::VmReservation;
 pub const WINDOW: usize = 121;
 const _: () = assert!(WINDOW % 2 == 1, "an even window medians a value no frame produced");
 
-/// The scope bit `arm` sets. Rung 11 replaces this with the ECS-driven scope projection; until
-/// then the profiler is armed as a whole or not at all, which is what `arm`/`disarm` mean here.
+/// The scope bit `arm` sets — the engine's own zones, and the profiler's master switch.
+///
+/// # Rung 11 did NOT replace this, and the reason is a trap it would otherwise have walked into
+///
+/// The row read *"the mask exists from rung 1"*, and the plan was for the ECS projection to take
+/// the mask over. It takes over **bits 8..63** only
+/// ([`PROJECTED_SCOPE_BASE`](boyko_diag::profiling_abi::PROJECTED_SCOPE_BASE)), and this bit stays
+/// `arm`'s.
+///
+/// With the whole word projectable, disabling every scope clears the mask; the fold's entry gate is
+/// [`any_armed`](crate::ecs::core::profiling::any_armed), so the fold would stop running — and the
+/// projection **is a step of the fold**. Re-enabling a scope would then write a bit nothing reads,
+/// and the toggle a game just used would be one-way, permanently, with no diagnostic. `G12`'s
+/// re-enable clause is what asserts it is not.
+///
+/// So `arm` / `disarm` mean what they always meant — the profiler is on or off as a whole — and a
+/// scope is the finer switch inside an armed session. Every engine zone is declared on this bit, so
+/// rung 11 is purely additive at every existing site: nothing the engine already measures is behind
+/// a scope entity that has to exist for it to be measured.
 pub const ROOT_SCOPE: u32 = 0;
 
 /// Zones whose per-frame column row still fits L1d, from the corpus's own arithmetic: 21 B per
@@ -896,6 +914,20 @@ impl Profiler {
     #[must_use]
     pub fn cursor(&self) -> u32 {
         self.cursor
+    }
+
+    /// The published lag table (D25) — profiling rung 11.
+    ///
+    /// A `Res<Profiler>` reader driving LOD, dynamic resolution or quality scaling is looking at a
+    /// **windowed, lagged** picture, and the lag is structural: the fold folds closed frames only
+    /// (A2's live-frame cut), so the freshest complete frame is the one before the live one.
+    ///
+    /// Published as a value rather than documented as a sentence because a controller has to
+    /// *compute* with it — and because S1 forbids printing it. What the table deliberately omits,
+    /// and the measurement behind each omission, is [`LatencyTable`]'s own doc.
+    #[must_use]
+    pub fn latency(&self) -> LatencyTable {
+        LatencyTable { live_frame: self.frame, cpu_frames_behind: 1 }
     }
 
     /// The row an absolute frame number occupies, if it is still retained.

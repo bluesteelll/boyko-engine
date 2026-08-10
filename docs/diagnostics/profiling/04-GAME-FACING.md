@@ -56,6 +56,22 @@ those three facts force.
 
 ## D20 — Runtime toggling: `ProfilingScope` is an ECS entity with an `IsEnabled` bit — projected by the FOLD, because the kernel fires no observer
 
+> **SHIPPED at profiling rung 11** (`crates/boyko_ecs/src/ecs/core/profiling/ecs_control.rs`), with
+> four corrections to what is written below. They are folded into the text at each point and
+> collected here so a reader meets them before the prose that predates them:
+>
+> 1. **The projection owns bits `8..64`, not the whole word.** `PROJECTED_SCOPE_BASE = 8`; `arm` /
+>    `disarm` keep the channel half, `ROOT_SCOPE` included. The fold's entry gate is `any_armed()`
+>    and the projection is a step of the fold, so a projection able to clear the last bit would stop
+>    the fold and, with it, itself — a one-way switch with no diagnostic. `G12`'s re-enable clause
+>    is the assertion that it is two-sided.
+> 2. **There is no `scope_entity[b]` table and there should not be** — A8's loop is a query under
+>    `Enabled<ProfilingScopeEnabled>`, so the bit → entity association *is* the component. See A8.
+> 3. **`register_scope` returns the `ProfilingScope`**, not a bare `u8`. See the API section.
+> 4. **`Profiler::latency()` publishes D25's CPU row only.** MEASURED: nothing outside `boyko_ecs`
+>    pushes a sample, and `arm` has no non-test caller, so this store holds no GPU spans to have a
+>    GPU lag about. See D25.
+
 **`ARM_MASK: AtomicU64`** replaces rev 2's `CHANNEL_MASK: AtomicU32`. Identical instruction count
 on the hot path (a `bt` against a 64-bit word). Bit layout:
 
@@ -112,6 +128,27 @@ fold(world: &mut EcsMaster, ...):
        if bits != ARM_MASK { ARM_MASK.store(bits, Release) }      // one store only on change
     1. .. the sample fold ..
 ```
+
+**⚠️ SHIPPED DIFFERENTLY, in two ways that matter.** The pseudocode above is kept because its
+*claims* are the shipped ones — one store only on change, `Release`, step 0 of the fold — but
+neither of its two mechanisms survived:
+
+```rust
+// rung 11, ecs_control::project — the whole of A8
+let mut bits = 0u64;
+for scope in world.query::<&ProfilingScope, Enabled<ProfilingScopeEnabled>>().iter() {
+    bits |= scope.arm_bit();
+}
+profiling_abi::project_scopes(bits)      // writes bits 8..64; fetch_update, no store if unchanged
+```
+
+* **No `scope_entity[]`.** The loop above is over the *search space* and needs a bit → entity table
+  kept in step with the world. The query is over the *answer* — it yields exactly the enabled
+  scopes — and the association it needs is the component itself. A `[Entity; 64]` beside it would be
+  the mirror this decision forbids two paragraphs below.
+* **`ARM_MASK.store(bits)` would clear the channel half**, including the bit `arm` holds. See the
+  boxed note at the top of this decision: that store is a one-way switch. `project_scopes` writes
+  bits `8..64` through a `fetch_update` and returns whether anything changed.
 
 **The write path a game system actually uses, with its cost (B2).** `EcsMaster::enable`/`disable`
 take **`&mut self`** (`enable_tag_api.rs:87`, `:95`), which no parallel system can hold, and rev 3
@@ -270,11 +307,20 @@ with a replay at 8 B per record (X18).
 - **A published latency table** (`Profiler::latency()`, and an artifact field — not a printed
   line, S1), because the lag is structural, not incidental:
 
-| Datum | Freshest available | Why |
-|---|---|---|
-| CPU spans, counters, gauges | frame **N−1** | the fold folds closed frames only (A2's live-frame cut) |
-| GPU spans | frame **N−4 … N−2** | availability polling + `GPU_RING_DEPTH` + `RETIRE_GRACE_FRAMES` (D4) |
-| lifetime / histogram | through N−1 | folded at the same fold |
+| Datum | Freshest available | Why | Published by `latency()`? |
+|---|---|---|---|
+| CPU spans, counters, gauges | frame **N−1** | the fold folds closed frames only (A2's live-frame cut) | **yes**, rung 11 |
+| GPU spans | frame **N−4 … N−2** | availability polling + `GPU_RING_DEPTH` + `RETIRE_GRACE_FRAMES` (D4) | **no — not this store's to publish** |
+| lifetime / histogram | through N−1 | folded at the same fold | not yet — rung 12 builds the accumulators |
+
+**Why the GPU row is absent rather than zero.** MEASURED at rung 11: `boyko_diag::sample::push` has
+**zero callers outside `boyko_ecs`** (checked across `boyko_app`, `boyko_render` and
+`boyko_rhi_vulkan`), and `Profiler::arm` has **no non-test caller**. The host's GPU channel folds
+into the artifact reducer, not into this `Profiler`. A GPU row on this table would therefore describe
+a lag this store's data cannot have — computed from `GPU_RING_DEPTH` and `RETIRE_GRACE_FRAMES`, two
+constants living in a crate `boyko_ecs` does not depend on and must not. A field that is structurally
+always the same value is indistinguishable from a measurement of that value, which is the rule this
+module group has applied since rung 2.
 
 **Ordering.** The retire step and the fold both run **outside the schedule** (D16, D4a), before any
 system executes, so every `Res<Profiler>` reader in the frame sees the same consistent snapshot
@@ -419,7 +465,11 @@ pub fn zone_dyn_open(h: DynZoneHandle) -> u64;      // FFI/script seam: an opaqu
 pub fn zone_dyn_close(h: DynZoneHandle, token: u64);
 
 // ── scopes (the ONLY runtime switch; no public mask setter) ──
-pub fn register_scope(name: &'static str) -> Result<u8, ScopeError>;   // #[cold], 32..63 for games
+// SHIPPED at rung 11 returning the COMPONENT, not the bare bit: with a `u8` the caller must write
+// `ProfilingScope { bit, name }` itself, naming the scope a second time, and nothing checks the two
+// names agree. A component saying "ai" whose bit was minted for "audio" is a mislabelled
+// measurement no gate downstream can detect. `scope.bit` is still there for anyone who wants it.
+pub fn register_scope(name: &'static str) -> Result<ProfilingScope, ScopeError>;  // #[cold], 32..63
 //     commands.entity(e).enable::<ProfilingScopeEnabled>()   // entity_commands.rs:220
 //     commands.entity(e).disable::<ProfilingScopeEnabled>()  // entity_commands.rs:236
 //   …or, where `&mut EcsMaster` is already held (host / exclusive system):
@@ -450,8 +500,19 @@ also no point-estimate quantile from a histogram: `HistView` yields edges.
 ### A8 — Scope projection
 
 Not an observer (there is none — `enable_tag_api.rs:77-88`) and not a system. It is **step 0 of
-A2**. ≤ 5 ns × `scope_count`, one `Release` store only when the value changes, `#[cold]`-free
+A2**. ~~≤ 5 ns × `scope_count`~~, one `Release` store only when the value changes, `#[cold]`-free
 because it is already off the hot path. `ARM_MASK` toggling has no other public writer.
+
+**SHIPPED at rung 11, and the cost claim changed shape with the mechanism.** The projection is one
+cached-query lookup (`EcsMaster::query`'s own documented `~5 ns` warm) plus one archetype walk over
+the scope entities — not `scope_count` separate `is_enabled` calls, because there is no
+`scope_entity[]` table to index. The **first** call per world pays `query_cold_init`'s one-time
+~1 µs, on the first armed frame; a process that never arms never folds and never reaches it. It runs
+inside `__fold`, i.e. inside `instrument_measured` and outside `__frame` (D16), so it is disclosed.
+
+"No other public writer" is now exact rather than aspirational: `project_scopes` can only write bits
+`8..64`, so the channel half is unreachable through it, and the scope half it writes comes from the
+ECS by construction — its one caller reads the enable bits and hands the result straight in.
 
 ### A10 — Telemetry window: `__telemetry_reduce` then `__telemetry_write` (dispatcher, `#[cold]`)
 

@@ -104,6 +104,30 @@ const _: () = assert!(
     "the engine's scope range must leave a user range to refuse into"
 );
 
+/// The lowest bit [`project_scopes`] owns — profiling rung 11.
+///
+/// Bits `0..PROJECTED_SCOPE_BASE` are the **channels** (`SchedulerCpu`, `GpuPass`, `Counter`,
+/// `Frame`, `User0..3`), written by [`arm_scope`] / [`disarm_scope`] and by nothing else. Bits
+/// `PROJECTED_SCOPE_BASE..SCOPE_COUNT` are the **scopes** — engine scopes below
+/// [`USER_SCOPE_BASE`], a game's above it — and they are the ECS's, projected once per fold from
+/// the enable bits of the entities that carry them.
+///
+/// **The split exists so the projection cannot switch the instrument off.** The fold's own entry
+/// gate is [`any_armed`]: with the whole mask projectable, disabling every scope would clear the
+/// mask, the fold would stop running, and the projection — which *is* a step of the fold — would
+/// never run again. Re-enabling a scope would then be a write nothing reads. Reserving the channel
+/// bits for `arm`/`disarm` is what makes the toggle two-sided rather than one-way, and `G12`'s
+/// re-enable clause is the assertion that it is.
+pub const PROJECTED_SCOPE_BASE: u32 = 8;
+
+const _: () = assert!(
+    PROJECTED_SCOPE_BASE < USER_SCOPE_BASE,
+    "a game's scopes must lie inside the projected half, or a game could not toggle its own"
+);
+
+/// The bits [`project_scopes`] writes: `PROJECTED_SCOPE_BASE..SCOPE_COUNT`.
+pub const PROJECTED_SCOPE_MASK: u64 = !((1u64 << PROJECTED_SCOPE_BASE) - 1);
+
 /// Zones whose names come from data rather than from a macro at a call site — profiling rung 10.
 pub mod dyn_registry;
 
@@ -522,6 +546,41 @@ pub fn scope_armed(scope: u32) -> bool {
 #[inline]
 pub fn arm_mask_bits() -> u64 {
     ARM_MASK.bits.load(Ordering::Acquire)
+}
+
+/// Publish the **projected half** of the mask — profiling rung 11's A8, and its only writer.
+///
+/// `bits` is the whole projection: bit *s* set means scope *s* is enabled in the ECS. Everything
+/// outside [`PROJECTED_SCOPE_MASK`] in `bits` is **ignored**, and everything outside it in the live
+/// mask is **preserved** — so a projection can neither set a channel bit nor clear the one `arm`
+/// holds. Returns whether the mask changed.
+///
+/// # Why this is not the public mask setter D20 forbids
+///
+/// It cannot express an arbitrary mask: the channel half is unreachable through it, and the scope
+/// half it does write comes from the ECS by construction — its one caller reads the enable bits and
+/// hands the result straight here. A game reaches it only by toggling
+/// `ProfilingScopeEnabled` on an entity, which is the switch, not a second one.
+///
+/// # One store, and only on change
+///
+/// A `fetch_update` returning `None` performs **no store at all**, so a frame in which nothing was
+/// toggled costs one `Acquire` load and leaves the line clean for every emitter reading it. That is
+/// the corpus's *"one store only on change"*, expressed as the absence of a write rather than as a
+/// comparison a caller has to remember to make.
+///
+/// The read-modify-write is atomic rather than a load followed by a store because [`arm_scope`] and
+/// [`disarm_scope`] write the same word: a plain store would drop a channel bit set between this
+/// call's load and its store.
+pub fn project_scopes(bits: u64) -> bool {
+    let scopes = bits & PROJECTED_SCOPE_MASK;
+    ARM_MASK
+        .bits
+        .fetch_update(Ordering::Release, Ordering::Acquire, |live| {
+            let next = (live & !PROJECTED_SCOPE_MASK) | scopes;
+            if next == live { None } else { Some(next) }
+        })
+        .is_ok()
 }
 
 /// Arm a scope. Runs on the enable path, never at process start.

@@ -12,8 +12,7 @@ note: inside `QueryDataState::<&P, (Changed<P>, Enabled<A>)>::assert_query_shape
 note: inside `QueryDataState::<&P, (Changed<P>, Enabled<A>)>::eval_shape_asserts`
   --> $RUST/core/src/panic.rs
    |
-   |           $crate::panicking::panic_fmt($crate::const_format_args!($($t)+));
-   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the failure occurred here
+   = note: the failure occurred here
    |
   ::: src/ecs/core/iters/query/state.rs
    |

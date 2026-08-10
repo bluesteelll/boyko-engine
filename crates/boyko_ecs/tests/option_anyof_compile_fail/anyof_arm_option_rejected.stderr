@@ -36,11 +36,6 @@ error[E0599]: the method `iter` exists for struct `Query<'_, '_, AnyOf<(&A, Opti
    | pub struct AnyOf<T>(PhantomData<fn() -> T>);
    | ------------------- doesn't satisfy `AnyOf<(&A, Option<&B>)>: QueryData`
    |
-  ::: $RUST/core/src/option.rs
-   |
-   | pub enum Option<T> {
-   | ------------------ doesn't satisfy `Option<&B>: AnyOfArm`
-   |
    = note: the following trait bounds were not satisfied:
            `Option<&B>: AnyOfArm`
            which is required by `AnyOf<(&A, Option<&B>)>: QueryData`

@@ -14,6 +14,121 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-11 — ⚠️ The `trybuild` corpus is blessed for a DIFFERENT rustc than the toolchain the project mandates. 23 fixtures were red at `3163078f`.
+
+Found while sweeping rung 11, and **proved not to be rung 11's** with `git stash`: with the whole
+working tree stashed, `cargo test --no-fail-fast` over the eight `compile_fail` suites at
+`3163078f` reds **seven of them, 23 fixtures**, under
+`RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu` (rustc **1.97.1**, installed 2026-08-04).
+
+**The diff has TWO causes, and my first diagnosis of it was WRONG — recorded that way because the
+wrong one is the plausible one.** I wrote "compiler rendering drift between rustc 1.95 and 1.97.1"
+and then tested it. Both claims below are probe results, not inference.
+
+**Cause 1 — RUNG 11'S OWN, and it is not drift at all: `impl_self_bundle!` crossed a rustc
+rendering THRESHOLD.** `compile_fail_relations/relationship_hook_collision.stderr` changed from a
+span-based `help:` block into an inline `= help:` list of bare names. That looks exactly like a
+compiler-version change and is not one. MEASURED with a five-line probe compiled by both binaries:
+**rustc 1.95.0 and 1.97.1 render the identical trait-bound error identically**, and **rustc switches
+from spans to the compact list at FIVE candidate impls**:
+
+```text
+3 impls -> help: … --> probe.rs:2:12  |  2 | struct T1; impl Marker for T1 {}      (spans)
+4 impls -> spans
+5 impls ->   = help: the following other types implement trait `Marker`:  T1 T2 T3  (list)
+```
+
+The `Component` list held **three** entries (`ChildOf`, `Children`, `LikedBy`) and rung 11 added
+**three more** (`ProfilingScope`, `ProfilingScopeEnabled`, `ProfiledZone`) — six, past the threshold,
+so the whole block re-rendered. `compile_fail_relations` was **green on the clean tree and red with
+the change**: that suite is entirely mine. The same two `impl_self_bundle!` lines also appear inside
+several other fixtures' `Bundle` lists without flipping their format.
+
+⚠️ **The general lesson, which is worth more than this instance: adding ONE trait impl anywhere in
+the engine can re-render every pinned diagnostic that lists that trait's implementors — and past the
+fifth impl it changes the FORMAT, not just the contents.** A `.stderr` corpus is coupled to the
+engine's impl *count*, invisibly.
+
+**Cause 2 — INHERITED, 23 fixtures across 7 suites, and its origin is UNDETERMINED.** Proved not to
+be mine by `git stash`, above. The signatures are additions and substitutions the blessed files do
+not carry — e.g. `compile_fail_chunk/mut_data_rejected.stderr` gains an entire
+`note: required by a bound in Query::<'w, 's, D, F>::for_each_chunk` block; elsewhere
+`\| $crate::panicking::panic_fmt(…)` collapses to `= note: the failure occurred here`, and `AtomicIN`
+becomes `Atomic<iN>`.
+
+**I could not determine what produced them, and I am not guessing in this file.** The hypothesis I
+had — that rung 10's *"543 targets ok, 0 failed"* was measured under the chocolatey `cargo`/`rustc`
+1.95.0 that shadows `~/.cargo/bin` on `PATH` (real, found in this session, and the cause of a phantom
+`E0133` on `__cpuid` plus a wall of MSVC `link.exe` failures) — is **not supported** by the probe:
+the two compilers agree on the renderings I could test. The remaining candidates are a stale bless
+predating an unrelated signature change in `query.rs`, or a rustc I no longer have. **What is
+measured and certain: 23 fixtures were red at `3163078f` under the mandated toolchain, and rung 10's
+green certification did not cover them.**
+
+Both causes are re-blessed here in one pass, under 1.97.1, and are listed separately above so the
+diff is reviewable rather than a wall.
+
+**Two things the owner may want to decide.**
+
+1. **Should the toolchain be pinned?** A `rust-toolchain.toml` at the repo root would make the
+   shadowing impossible and would pin the `.stderr` corpus to one renderer. MEASURED: there is **no
+   `rust-toolchain.toml` anywhere in this workspace**, so which rustc runs is whatever `PATH`
+   happens to resolve — and this repository pins byte-exact compiler output in 24 files.
+2. **A `.stderr` corpus is a hostage to the compiler's prose.** Every rustc release can red 20+
+   fixtures for reasons that have nothing to do with this engine. That is the price of `trybuild`
+   and it may be worth paying; it should be a decision rather than a recurring surprise.
+
+---
+
+## 2026-08-10 — RESOLVED (owner: "реши сам"): both rung-10 gate questions, decided and closed
+
+The owner delegated these two rather than deciding them. Both are decided below, with the reason
+each way was taken, and both entries in `05-LADDER-GATES.md` are updated to match.
+
+### `G17` keeps the A/B ratio. No release-profile absolute-nanosecond gate.
+
+**Decision: keep what ships.** The question was whether to build a release bench harness and pin a
+per-box nanosecond floor so the corpus's literal thresholds (`static-armed ≤ 12 ns`,
+`dyn-armed ≤ 14 ns`, …) could run.
+
+An absolute-ns threshold is a claim about the **machine**, not about the code. The property the row
+is actually protecting is *"the handle carries its arm bit, so the emission path never dereferences
+`REGISTRY`"* — a structural property of the implementation, and one that holds or fails identically
+on a 2 GHz laptop and a 5 GHz desktop. The A/B measures exactly that: both variants, interleaved,
+one thread, one sitting, and a machine that is slow today is slow for both legs. A 2 ns budget over
+12 would additionally have to be re-blessed on every box the repository is ever built on, and would
+red-light on a busy CI runner for a reason having nothing to do with this code — which is the
+failure mode a gate exists to *avoid*, not to demonstrate.
+
+What is kept from the corpus's intent: the absolute figures **are printed**, with the build profile
+named beside them, so a human can compare them to the row's numbers whenever they want to. What is
+refused is *asserting* on them.
+
+The one caveat that survives is stated at the file: the ratio was measured in `debug` (2.02×).
+`cargo test --release` runs the same test and prints the release pair; nothing in the assertion
+depends on which profile it ran under, so there is no separate release leg to build.
+
+### `G22b` clause 2 is REWRITTEN against the real symbol, not deleted
+
+**Decision: rewrite, narrowed to the property that can actually fail.**
+
+Deleting it was the tempting option — the clause as written describes a failure the type system
+makes unwriteable (`SyncCells<T, N>` takes its extent as a const generic, so no run-time
+`ProfilerConfig` value can size one), so the claim is vacuously true. But deleting leaves the corpus
+with **no clause naming `assert_zero_init_eligible` at all**, and rung 10 measured that this is
+precisely the property that breaks: `ZoneDesc` carries a `&'static str`, cannot be `ZeroInit`, and
+`DYN_DESCS` needed a `MaybeUninit` wrapper that reads like ceremony and is easy to delete.
+
+So the clause now reads: *a `.bss` arena declared over a type whose all-zero bit pattern is not a
+valid value must fail at compile time; delete `DYN_DESCS`'s `MaybeUninit` wrapper ⇒ `E0277` ⇒ red* —
+which is the `trybuild` case already shipped at rung 10 and already blessed. The old sentence's
+claim is kept as a **recorded impossibility** with the const-generic argument beside it, so a future
+revision does not re-add a gate that cannot fail.
+
+`G22b` clause 1 is untouched and remains BLOCKED on `rustup component add llvm-tools`.
+
+---
+
 ## 2026-08-10 — RESOLVED: retire the whole S1.5 harness, phase driver included. Rung 7's mechanical gate is CLOSED.
 
 Owner's answer to both scope questions was the same: retire. Shipped. `rg
@@ -1443,7 +1558,7 @@ understood one at a time, and guessing at them would be worse than the current h
 call:** repair the leg and add it to the gate set, or state that `hwrt` is dormant and stop
 implying otherwise.
 
-## Rung 10 — two corpus gates could not run as written, for two different reasons
+## Rung 10 — two corpus gates could not run as written, for two different reasons — **RESOLVED 2026-08-10, see the top of this file**
 
 Both are recorded in `docs/diagnostics/profiling/05-LADDER-GATES.md`'s rung-10 record with their
 arithmetic. Surfaced here because each is a **decision the owner may want to take differently**, not

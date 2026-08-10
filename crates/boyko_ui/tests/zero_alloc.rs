@@ -219,8 +219,24 @@ fn unchanged_frame_layout_pair_allocates_zero_over_baseline() {
     let mut sp = build_pair_schedule(&mut wp);
     let pair = warmed_idle_allocs(&mut wp, &mut sp);
 
-    assert_eq!(
-        pair, base,
+    // Non-vacuity first. The whole method is a SUBTRACTION, and it only means anything while the
+    // baseline is actually allocating: this module's own header measures the parallel executor at
+    // ~7 allocations per frame, so a baseline of 0 would mean the schedule never ran and every
+    // delta below it would be trivially satisfied.
+    assert!(
+        base > 0,
+        "the baseline schedule allocated nothing, so the subtraction has no subtrahend and the \
+         delta below would be vacuous"
+    );
+    // `<=`, not `==`, and this was MEASURED rather than tidied: the sweep of 2026-08-11 caught this
+    // firing with `baseline 6, pair 5` — the pair allocating one FEWER than the baseline, which the
+    // assertion's own message calls acceptable ("no more than") and which its two sibling tests in
+    // this file already spell `assert!(pair <= base)`. `warmed_idle_allocs` takes the MAX of four
+    // samples on each side independently, so the baseline's max drifting one above the pair's is an
+    // ordinary outcome under load, not a regression. An `assert_eq!` here is a claim the file does
+    // not make anywhere else, and it reds the workspace at random.
+    assert!(
+        pair <= base,
         "steady-state: layout pair must allocate no more than the scheduler baseline \
          (baseline {base}, pair {pair}; the layout pair's own per-frame allocs = {})",
         pair as i64 - base as i64

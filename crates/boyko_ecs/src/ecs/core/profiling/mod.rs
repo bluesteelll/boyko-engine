@@ -36,8 +36,6 @@
 //! |---|---|
 //! | 5–7 | the GPU channel, and with it `FrameState::Partial` and three of the five cell labels |
 //! | 8 | `LegSummary`, the window reducer, `resolve`, the artifact |
-//! | 10 | the dynamic registry, so `ProfilerConfig::user_zone_budget` has nothing to spend itself on |
-//! | 11 | the scope projection — [`ROOT_SCOPE`] stands in, so the profiler arms as a whole |
 //! | 12 | the lifetime accumulators and the histograms |
 //! | 13 | telemetry |
 //!
@@ -47,6 +45,7 @@
 #[cfg(feature = "profiling-analysis")]
 pub mod analysis;
 pub mod diag;
+pub mod ecs_control;
 pub mod fold;
 pub mod plugin;
 pub mod store;
@@ -58,6 +57,10 @@ mod tests;
 #[cfg(feature = "profiling-analysis")]
 pub use analysis::{ConcurrencyReport, PairVerdict, concurrency, pair_overlap};
 pub use diag::{LIVE_CODES, report_count};
+pub use ecs_control::{
+    ENGINE_SCOPE_BASE, LatencyTable, ProfiledZone, ProfilingScope, ProfilingScopeEnabled,
+    ScopeError, minted_game_scopes, register_scope,
+};
 pub use fold::{any_armed, fold};
 pub use plugin::ProfilerPlugin;
 #[cfg(feature = "profiling-analysis")]
@@ -126,5 +129,15 @@ fn fold_frame_cold(world: &mut EcsMaster) {
     // fold has finished draining — otherwise the sample it produces would be drained by the same
     // fold that produced it and attributed to the frame it was measuring.
     let _z = boyko_diag::zone!(FOLD);
+
+    // Step 0 (A8): publish the scope half of the mask from the ECS, BEFORE the drain. Inside the
+    // `__fold` bracket deliberately — D16 says the instrument's own cost is disclosed rather than
+    // hidden, and the projection is part of that cost.
+    //
+    // Before rather than after, because the two orders differ by a frame: a toggle projected after
+    // the drain would gate the samples of the frame that is only just opening, so the gate a
+    // reader sees would be one the previous frame's samples never passed through.
+    ecs_control::project(world);
+
     fold(world.resource_mut::<Profiler>());
 }
