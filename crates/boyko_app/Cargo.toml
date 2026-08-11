@@ -34,6 +34,12 @@ boyko-macros = { path = "../boyko_macros" }
 # exactly one node), so the edge costs a `use` and nothing else. Stated because the two edges this
 # campaign added before it each carry the same justification in-file.
 boyko-diag = { path = "../boyko_diag" }
+# The logging seam's ENABLE path (L7's reachability fix, L8b's row pulled forward for it). This
+# crate is the host, and `boot`/`enable` are the host's to call -- until this edge existed, every
+# emitter L5 and L6 wired up wrote into a ring with no consumer in any shipped run. Already in the
+# graph transitively through `boyko-ecs`; named directly because this crate is now a FIRST-PARTY
+# caller of its lifecycle, and a transitive path is not an API contract.
+boyko-log = { path = "../boyko_log" }
 
 [features]
 # HW-RT rung R2a-3: forwards to `boyko-render/hwrt` (→ `boyko_rhi_vulkan/hwrt`) so the host

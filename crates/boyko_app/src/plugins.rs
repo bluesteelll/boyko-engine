@@ -160,6 +160,82 @@ impl EnginePlugins {
 /// A refusal is reported, not panicked on. `ArmOutcome` distinguishes a first arm from a re-arm and
 /// from a geometry the reservation cannot hold; a host that cannot profile is a host that runs
 /// without a profiler, which is a state the fold call site already handles.
+/// Maps a `BOYKO_LOG` value to a level. `None` when the value names none.
+fn parse_log_level(spec: &str) -> Option<boyko_log::Level> {
+    use boyko_log::Level;
+    Some(match spec.trim().to_ascii_lowercase().as_str() {
+        "off" => Level::Off,
+        "error" => Level::Error,
+        "warn" => Level::Warn,
+        "info" => Level::Info,
+        "debug" => Level::Debug,
+        "trace" => Level::Trace,
+        _ => return None,
+    })
+}
+
+/// Records the logging configuration always, and turns it on when `BOYKO_LOG` names a level.
+///
+/// `SEAM.md` §507 picks the delivery mechanism and names this variable: `BOYKO_LOG=debug`, matching
+/// the 28 existing `BOYKO_*` switches, against an argv parser that would be the first in the
+/// workspace and would owe a specification of its own.
+///
+/// # `boot` is unconditional, and that is a contract rather than a hope
+///
+/// L3 specifies it as a pure struct-fill that **spawns no thread, installs no hook and calls no
+/// `calibrate()`** — the same property that makes `ProfilerPlugin` safe to add unconditionally
+/// above. Without it `SinkState` stays `NotBooted`, so `enable()` has nothing to act on and
+/// `flush()` answers `NoConsumer` — which is precisely why `boyko_threadpool`'s abort path prints
+/// for itself, and precisely the state the whole subsystem was in through L6.
+///
+/// # What "on" costs, and what "off" costs
+///
+/// **Off** (variable unset): one `AtomicU8` store at startup and nothing else. The control array
+/// stays `.bss`-zero, so every site is one predicted branch, no thread exists and no destination
+/// is opened. **On**: one sink thread, a console destination on `stderr`'s own handle, and the
+/// records the levels admit.
+///
+/// # An unrecognised value is not silent
+///
+/// It enables at `Info` rather than refusing, because a typo that produced NO log and no
+/// explanation is worse than one that produced the default. Either way the first line the enabled
+/// logger emits says which level was applied and what the variable held, so the operator never has
+/// to infer it from the absence of output.
+fn boot_and_enable_logging_from_env() {
+    use boyko_log::lifecycle::{LogConfig, SinkMode, boot, enable};
+
+    boot(LogConfig {
+        console: true,
+        sink_thread: true,
+        // The in-frame `LogRing` is a READER's convenience and its consumer (the console widget)
+        // is deferred to the UI plan. Asking the drain to feed a ring nothing displays would copy
+        // every line into ECS storage for no reader.
+        ecs_ring: false,
+        file: false,
+        file_cap_bytes: 0,
+        sink_mode: SinkMode::Thread,
+    });
+
+    let Some(raw) = std::env::var_os("BOYKO_LOG") else {
+        return;
+    };
+    let raw = raw.to_string_lossy().into_owned();
+    let level = parse_log_level(&raw).unwrap_or(boyko_log::Level::Info);
+
+    if !enable() {
+        return;
+    }
+    for (id, _name) in boyko_log::target::engine_targets() {
+        boyko_log::target::set_target_level(id, level);
+    }
+    boyko_log::info!(
+        boyko_log::App,
+        "logging enabled at {} for every engine target (BOYKO_LOG={})",
+        level.as_str(),
+        boyko_log::dsp!(raw, 64)
+    );
+}
+
 fn arm_profiler_from_env(app: &mut App) {
     if std::env::var_os("BOYKO_PROFILE_ON").is_none() {
         return;
@@ -205,6 +281,21 @@ impl Plugin for EnginePlugins {
         // downstream can assume the store is there.
         app.add_plugin(ProfilerPlugin);
         arm_profiler_from_env(app);
+
+        // ── The logger, made REACHABLE — the SAME defect, two rungs later ───────────────────────
+        //
+        // MEASURED at the opening of logging rung L7: `boyko_log::lifecycle::boot` and `enable`
+        // were called from NOWHERE outside tests. L5 landed the ECS seam, L6 landed the engine's
+        // own emitters — twelve `Live` codes across `boyko_ecs` and `boyko_threadpool` — and in a
+        // shipped run every one of them wrote into a `.bss` lane ring with no consumer: refused on
+        // overflow, counted, and never read. Not one byte reached anyone.
+        //
+        // It is the same shape as the `ProfilerPlugin` line above, in the same campaign, and it
+        // hid the same way: EVERY logging gate boots and enables the logger ITSELF before asking
+        // whether a record arrived, so none of them can observe that no host does. The hole lies
+        // BETWEEN the gates. `crates/boyko_app/tests/log_host_*.rs` are the two that look at a
+        // real host instead of building their own world.
+        boot_and_enable_logging_from_env();
 
         // Scene stack: propagation + camera resolve + visibility bridge
         // (CameraPlugin SUPERSEDES TransformPlugin — adding both would
