@@ -665,7 +665,6 @@ const FORWARD_DECLARED: &[(&str, &str)] = &[
     ("W0116", "L13b — binary sink site dictionary full"),
     ("W0117", "L16 — the ECS handoff ring overflowed"),
     ("E0118", "L15 — the panic hook could not complete a flush"),
-    ("E2101", "L7 — a Vulkan validation error was reported"),
 ];
 
 // ────────────────────────────── checks 5 and 6, armed at L6 ───────────────────────────────

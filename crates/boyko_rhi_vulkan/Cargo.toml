@@ -66,6 +66,11 @@ boyko_sdf_math = { path = "../boyko_sdf_math" }
 # needs the zone vocabulary (`declare_zone!` + the crate-root partition) and the loss counters; the
 # edge runs THIS WAY and never back -- `boyko_diag` knows nothing about Vulkan.
 boyko-diag = { path = "../boyko_diag" }
+# The logging seam (rung L7). `boyko-E2101` is this crate's report that the validation it was asked
+# for is not what this process got -- the condition every golden leg creates and nothing said out
+# loud until now. Adds no third-party crate: `boyko_log` depends on `boyko_diag` (already here) and
+# `boyko_macros`.
+boyko-log = { path = "../boyko_log" }
 
 # Win32 INPUT FFI (I6 / I6b) — the OFFICIAL Microsoft-maintained raw bindings,
 # explicitly approved for the OS layer. SCOPE: the windowing + Raw-Input FFI ONLY

@@ -34,6 +34,8 @@ use core::mem;
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
+use boyko_log::codes::{E2101, OnceSite};
+
 use crate::debug::{self, DebugMessengerState};
 use crate::ffi::*;
 use crate::memory::{BlockPool, DeviceLocalBlock, HostVisibleBlock};
@@ -797,10 +799,14 @@ impl VulkanContext {
         //
         // DEFAULT (env unset): `validation_requested` returns `config.enable_validation`
         // unchanged — byte-identical to prior behavior; this is a pure opt-in.
+        let requested_by_caller = config.enable_validation;
         let config = InstanceConfig {
             enable_validation: validation_requested(&config),
             ..config
         };
+        if requested_by_caller && !config.enable_validation {
+            report_validation_withheld_by_env();
+        }
 
         // --- 1. Load the loader DLL + vkGetInstanceProcAddr. ---
         let module = load_vulkan_loader().ok_or(BootError::LoaderUnavailable)?;
@@ -2112,6 +2118,49 @@ fn load_device_fns(
 /// `VK_LAYER_KHRONOS_validation`, as a static NUL-terminated name.
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 
+/// `boyko-E2101`, arm 1 — the `BOYKO_DISABLE_VALIDATION` escape hatch took what the caller asked
+/// for.
+///
+/// **Both arms of this code say one thing to a reader: this run's validation is WEAKER than the
+/// caller requested, so a clean run is not a proof.** That is the condition this repository has
+/// been burned by twice; every golden leg sets the hatch, and until L7 nothing said so.
+///
+/// `RatePolicy::Once`, honoured by this site's own latch: the answer is a property of the process,
+/// not of the boot, so a host that boots several contexts needs it once.
+#[cold]
+#[inline(never)]
+fn report_validation_withheld_by_env() {
+    static FIRED: OnceSite = OnceSite::new();
+    if FIRED.claim() {
+        boyko_log::error!(
+            boyko_log::RhiVulkan,
+            E2101.number(),
+            "validation was requested but BOYKO_DISABLE_VALIDATION withheld it; no messenger is              created and no validation message can be produced -- a clean run proves nothing"
+        );
+    }
+}
+
+/// `boyko-E2101`, arm 2 — the layer is on but `VK_EXT_validation_features` is absent, so the
+/// chained `VkValidationFeaturesEXT` (synchronization validation) is not recognised.
+///
+/// **What this cannot claim, and it is why the code is an `error!` about the INSTRUMENT rather
+/// than about barriers**: the extension being present does not make the layer sensitive. This
+/// crate's own `tests/compute.rs::negative_chained_barrier_hazard` documents, in the tree, that
+/// sync-validation is enabled here and still does not flag a compute→compute RAW hazard. Presence
+/// and sensitivity are two questions; only the first is observable from inside the engine.
+#[cold]
+#[inline(never)]
+fn report_sync_validation_absent() {
+    static FIRED: OnceSite = OnceSite::new();
+    if FIRED.claim() {
+        boyko_log::error!(
+            boyko_log::RhiVulkan,
+            E2101.number(),
+            "validation is on but VK_EXT_validation_features is absent, so synchronization              validation is NOT enabled; this run cannot flag a missing or wrong barrier"
+        );
+    }
+}
+
 fn create_instance(
     global: &GlobalFns,
     _gipa: PfnVkGetInstanceProcAddr,
@@ -2173,6 +2222,9 @@ fn create_instance(
     // validation rather than crashing on an unrecognized chained struct.
     let sync_validation_available =
         config.enable_validation && is_instance_extension_present(global, VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME)?;
+    if config.enable_validation && !sync_validation_available {
+        report_sync_validation_absent();
+    }
 
     let mut ext_ptrs: [*const c_char; 4] = [ptr::null(); 4];
     let mut ext_count: u32 = 0;

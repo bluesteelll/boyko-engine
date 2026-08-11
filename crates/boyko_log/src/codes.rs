@@ -416,6 +416,13 @@ codes! {
         "A plugin was added more than once"),
     (1802, B, B1802, RatePolicy::Every, CodeStatus::Pending("L8b"),
         "An App method was called after finish(), in the run phase"),
+    // L7. Its condition is "validation was requested and this process is NOT getting it" -- the
+    // escape hatch took it, or `VK_EXT_validation_features` is absent. NOT "the node was not
+    // chained", which the corpus's L7 row implies and which the tree refutes: the node IS chained
+    // and works here. See `logging/ladder`'s L7 block for the measurement that forced the re-cut.
+    (2101, E, E2101, RatePolicy::Once,  CodeStatus::Live,
+        "Validation was requested but this process is not getting it"),
+
     (9001, B, B9001, RatePolicy::Every, CodeStatus::Live,
         "The schedule contains a cycle of systems"),
     (9002, B, B9002, RatePolicy::Every, CodeStatus::Live,
@@ -541,6 +548,7 @@ mod tests {
             (b'W', 701),  // L6  -- an event lane was full, the send was refused
             (b'E', 801),  // L6  -- an asset failed to load
             (b'W', 1501), // L6  -- ordering references an empty system set
+            (b'E', 2101), // L7  -- validation requested but not delivered
             (b'B', 9001), // L6  -- schedule cycle
             (b'B', 9002), // L6  -- set-hierarchy cycle
             (b'B', 9004), // L6  -- two ordered sets share a member
