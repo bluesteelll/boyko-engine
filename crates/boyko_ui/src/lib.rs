@@ -37,6 +37,7 @@ pub mod components;
 pub mod interaction;
 pub mod layout;
 pub mod plugin;
+pub mod profiling_overlay;
 pub mod reload;
 pub mod resources;
 pub mod text;

@@ -11,6 +11,11 @@ path = "src/lib.rs"
 [dependencies]
 boyko-ecs    = { path = "../boyko_ecs" }
 boyko-macros = { path = "../boyko_macros" }
+# Profiling rung 15 (`profiling_overlay.rs`). NOT a new node in the graph — `boyko-ecs` above
+# already depends on `boyko_diag`, so it is compiled either way; the edge only lets the overlay
+# name `zone_desc` and `SampleKind` directly instead of routing a re-export through `boyko_ecs`
+# for one reader. Same shape and same reason as `boyko_app`'s own `boyko-diag` line.
+boyko-diag   = { path = "../boyko_diag" }
 # P4: UI is a symmetric ACTION SOURCE (`ActionState::ui_press`) â€” `ui_dispatch`
 # lowers an Interaction edge into an action. Acyclic: boyko-input does NOT depend
 # on boyko-ui. The OS focus/cursor-inside flags on `PhysicalInput` are also read

@@ -15,6 +15,11 @@ path = "src/main.rs"
 # the native work-stealing pool that `Schedule::run` fans `par_iter_mut` across.
 boyko-ecs = { path = "../boyko_ecs" }
 boyko-macros = { path = "../boyko_macros" }
+# Profiling rung 15 — the game side of the two-region split. NOT a new node in the graph:
+# `boyko-ecs` above already depends on `boyko_diag`, so it is compiled either way. The edge exists
+# so this crate can write `profiling_partition!(User)` at its root and declare its own zones, which
+# is exactly what a title does.
+boyko-diag = { path = "../boyko_diag" }
 boyko-threadpool = { path = "../boyko_threadpool" }
 
 # eframe brings egui + winit + wgpu integration in one versioned bundle. Reach

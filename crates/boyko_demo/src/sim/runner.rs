@@ -106,6 +106,22 @@ use boyko_ecs::ecs::core::time::{FixedTime, Time, fixed_advance};
 // Native dispatch: real multi-threaded Schedule + thread pool.
 // ═══════════════════════════════════════════════════════════════════════════
 
+// The demo's own profiling zone — profiling rung 15, the game side.
+//
+// `USER_SCOPE_BASE` rather than an engine scope: a game arms its own scope bit and toggles it at
+// run time through `ProfilingScopeEnabled`, without touching the engine's. `ZoneTier::Always` so
+// the site survives a `shipping` build — a title that ships wants its own frame cost, which is
+// exactly the tier the compile ceiling keeps.
+//
+// `//` and not `///`: `declare_zone!` emits its own `#[doc]` on both items it expands to, so a doc
+// comment here is an `unused_doc_comments` warning rather than documentation.
+boyko_diag::declare_zone!(
+    SIM_STEP,
+    name = "demo.sim.step",
+    scope = boyko_diag::profiling_abi::USER_SCOPE_BASE,
+    tier = boyko_diag::profiling_abi::ZoneTier::Always,
+);
+
 /// Owns the fixed schedule; the accumulator lives in the engine's
 /// [`FixedTime`] resource (Phase 20 — no demo-local rhythm state).
 #[cfg(not(target_arch = "wasm32"))]
@@ -327,6 +343,7 @@ impl SimRunner {
         Self { schedule }
     }
 
+
     /// Advances the simulation by `frame_dt` seconds of display time through
     /// the ENGINE's fixed-timestep loop (Phase 20 `fixed_advance`): inflow
     /// clamp + pause live in [`Time`], the overstep accumulator in
@@ -337,6 +354,16 @@ impl SimRunner {
     /// and accumulates no backlog. A mode switch queued while paused applies
     /// on the first substep after unpausing, exactly as before.
     pub fn step(&mut self, world: &mut EcsMaster, frame_dt: f32) -> u32 {
+        // Profiling rung 15 — a GAME's own zone, in the USER partition, around the work a game
+        // actually wants a number for. It is one line and it is the whole of what a title has to
+        // write; the id is minted on first use and everything downstream (the store column, the
+        // overlay row, the telemetry record) follows from it.
+        //
+        // `zone!` yields an `Option<ZoneGuard>` that must be BOUND, not dropped at the end of the
+        // statement: `let _ = zone!(..)` would close the zone immediately and time nothing. The
+        // binding's name is `_sim_zone` rather than `_` for the same reason.
+        let _sim_zone = boyko_diag::zone!(SIM_STEP);
+
         let paused = world.resource::<SimParams>().paused;
         let time = world.resource_mut::<Time>();
         if paused != time.is_paused() {
