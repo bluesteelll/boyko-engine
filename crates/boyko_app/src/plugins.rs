@@ -6,6 +6,7 @@
 //! D4 `FixedSet` ordering seam, and the windowed G-buffer runner.
 
 use boyko_ecs::ecs::core::app::CoreSchedule;
+use boyko_ecs::ecs::core::profiling::{ArmOutcome, Profiler, ProfilerConfig, ProfilerPlugin};
 use boyko_ecs::{App, Plugin};
 use boyko_render::instance_model::sync_instance_model_cols;
 // HW-RT rung 3b: the prev-frame model-affine copy system (temporal motion vectors), ordered
@@ -138,12 +139,73 @@ impl EnginePlugins {
     }
 }
 
+/// Arms the profiler when `BOYKO_PROFILE_ON` is set — **the enable path, and the only one**.
+///
+/// # Why an environment variable and not a flag parser
+///
+/// `SEAM.md` weighs the two and takes this one: an env var matches the **28 existing `BOYKO_*`
+/// switches** in this workspace, adds zero new mechanism and zero new parse surface, and is
+/// something a support desk can already ask a player to do. The alternative — a real argv reader in
+/// `boyko_app` — would be the **first** in the workspace and would owe a specification for
+/// unknown-flag behaviour, precedence against the env vars that already exist, and the `--`
+/// convention. It is not free and it is not one line.
+///
+/// # What "on" costs, stated
+///
+/// `arm` is where every one-time cost of the profiler lives: it commits the reservation, calibrates
+/// the clock and publishes each lane's slab. That is the whole point of splitting `new` from `arm` —
+/// the plugin above can be added unconditionally precisely because this function is the only thing
+/// that spends anything.
+///
+/// A refusal is reported, not panicked on. `ArmOutcome` distinguishes a first arm from a re-arm and
+/// from a geometry the reservation cannot hold; a host that cannot profile is a host that runs
+/// without a profiler, which is a state the fold call site already handles.
+fn arm_profiler_from_env(app: &mut App) {
+    if std::env::var_os("BOYKO_PROFILE_ON").is_none() {
+        return;
+    }
+    // The resource is absent in a SECOND world: `ProfilerPlugin::build` refuses to bind there and
+    // inserts nothing, because the lane rings are process-global and two worlds folding them would
+    // each take half the samples. `try_resource_mut` rather than `resource_mut` so that host is a
+    // host without a profiler rather than a panic at startup.
+    let Some(profiler) = app.world_mut().try_resource_mut::<Profiler>() else {
+        return;
+    };
+    let outcome = profiler.arm(ProfilerConfig::default());
+    debug_assert!(
+        matches!(outcome, ArmOutcome::Armed | ArmOutcome::Rearmed),
+        "BOYKO_PROFILE_ON was set but the profiler refused to arm: {outcome:?}"
+    );
+}
+
 impl Plugin for EnginePlugins {
     /// Composes the frame systems + the D4 seam, then installs the windowed
     /// runner. `App::run` hands the runner control BEFORE `finish()`; the
     /// runner owns the app lifecycle from there (its own `finish()` call,
     /// `AppExit` policy, and teardown — see `runner.rs`).
     fn build(&self, app: &mut App) {
+        // ── The profiler, made REACHABLE ────────────────────────────────────────────────────────
+        //
+        // MEASURED after profiling rung 15, and it is the reason this line exists: `ProfilerPlugin`
+        // was added NOWHERE outside tests. Fifteen rungs of profiler — the store, the fold, the GPU
+        // channel, the retention tiers, the telemetry writer, the overlay — sat complete and
+        // unreachable from any host, because the resource they all read was never inserted. The
+        // fold was already being called every frame (`App::update_with_delta`, `app.rs:689`); it
+        // found no `Profiler` and returned.
+        //
+        // Unconditional, and that is safe by the store's own design rather than by hope:
+        // `Profiler::new()` *"reserves nothing, commits nothing, calibrates nothing"* — the plugin
+        // runs before a host has read its launch flag, and a diagnostics subsystem may not make a
+        // syscall the flag has not authorised. Every one-time cost is in `arm`, and `arm` IS the
+        // enable path. A host that never sets the flag pays one disarmed resource and a
+        // `frame == 0` early return per frame.
+        //
+        // Added FIRST so `arm_profiler_from_env` below finds the resource, and so a second world —
+        // where `ProfilerPlugin` refuses to bind and inserts nothing — is refused before anything
+        // downstream can assume the store is there.
+        app.add_plugin(ProfilerPlugin);
+        arm_profiler_from_env(app);
+
         // Scene stack: propagation + camera resolve + visibility bridge
         // (CameraPlugin SUPERSEDES TransformPlugin — adding both would
         // double-register propagation), then the S4 3D instance pack.

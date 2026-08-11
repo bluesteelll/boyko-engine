@@ -1889,7 +1889,28 @@ measured against a baseline taken without it"* — is exactly the rule being obe
    measure the cost of.
 2. Logging **L6–L8** — the migration that gives the engine emission sites at all. Today it has none,
    so "logger on" and "logger off" are the same binary doing the same work.
-3. A **non-test arm path** for the profiler, so "profiler armed" is a state a shipped frame reaches.
+3. ~~A **non-test arm path** for the profiler, so "profiler armed" is a state a shipped frame
+   reaches.~~ **DONE, and the note above UNDERSTATED the problem.** It said `Profiler::arm` had no
+   non-test caller. Measured immediately afterwards: **`ProfilerPlugin` was added nowhere outside
+   tests either** — so the store was not merely unarmed, it was never *inserted*, and fifteen rungs
+   of profiler were unreachable from any host. `App::update_with_delta` had been calling
+   `fold_frame` all along; it found no `Profiler` and returned. `EnginePlugins` now adds the plugin
+   unconditionally — safe by the store's own design, `Profiler::new` *"reserves nothing, commits
+   nothing, calibrates nothing"* — and `BOYKO_PROFILE_ON` arms it, which is `SEAM.md`'s route (a).
+   Gated by `crates/boyko_app/tests/profiling_host_reachable.rs` (installed + disarmed) and
+   `profiling_host_arm_flag.rs` (the flag arms it), both REDs shown.
+
+   **The shape is worth keeping separately from the fix.** Every one of those fifteen rungs was
+   green, and none of them could see this: each gate builds its own world and inserts its own store,
+   so "does a HOST have one?" was a question no test in the campaign was asking. A subsystem can be
+   fully gated and entirely unreachable at the same time.
+
+   **And a second constraint fell out of writing the gate:** `EnginePlugins` **cannot be built twice
+   in one process** — the second build panics in
+   `register_component_hooks::<boyko_render::light::DirectionalLight>`, because component hooks are
+   process-global and the derive's installation is not idempotent. That is why the two legs are two
+   test *binaries*. It is pre-existing, it belongs to the render plugins rather than the profiler,
+   and it is invisible until something builds the host twice.
 
 **And one defect to fix before the rung, not during it: `config_tag` is already taken.**
 `boyko_app::profiling::artifact::config_tag` exists and returns a `String` FNV-1a hash of
