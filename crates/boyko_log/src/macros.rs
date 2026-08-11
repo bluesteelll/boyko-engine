@@ -51,7 +51,6 @@ macro_rules! __log_site_emit {
             fmt: $fmt,
             fields: &[],
             prefix: "boyko",
-            decode: $crate::decode_opaque,
         };
         $crate::emit_impl(&__BOYKO_LOG_SITE, ($($a,)*));
     }};

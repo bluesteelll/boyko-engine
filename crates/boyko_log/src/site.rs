@@ -34,16 +34,6 @@ pub struct LogSite {
     pub fields: &'static [&'static str],
     /// `"boyko"` for the engine; a game declares its own.
     pub prefix: &'static str,
-    /// Monomorphised **per argument-tuple type**; identical tuples share one instantiation.
-    ///
-    /// Cold: called on the sink thread, from the staging arena, never on the emitting thread.
-    ///
-    /// # Safety
-    ///
-    /// The caller passes a pointer to `len` bytes produced by `LogArgs::encode` for the **same**
-    /// tuple type this pointer was monomorphised from. Pairing a payload with the wrong decoder
-    /// reads a differently-shaped record.
-    pub decode: unsafe fn(*const u8, usize, &mut LogFormatter),
 }
 
 // `LogSite` is immutable `'static` data reachable from every thread through a record header, so
@@ -55,23 +45,25 @@ const _: () = {
     assert_send_sync::<&'static LogSite>();
 };
 
-/// Rung L1's decoder: reports the payload size and nothing else.
-///
-/// **The monomorphised-per-tuple decoder is NOT here, and is not silently missing.** Rendering a
-/// payload means interleaving values with the format literal's placeholders, and that policy —
-/// timestamps, level names, code prefixes, field labels, what a `{}` means — belongs to the sink,
-/// which does not exist until a later rung. Naming the argument-tuple type at the `static` is
-/// also not expressible today: the site is `&'static` and Rust has no generic statics, so the
-/// per-`(site, tuple)` instantiation arrives with the same rung that gives it something to
-/// render. Gate **G5**, the distinct-decode-symbol census, lands there for the same reason: at
-/// this rung there is one symbol by construction, so the census could not go red.
-///
-/// # Safety
-///
-/// Matches the [`LogSite::decode`] contract; this implementation reads nothing through `src`.
-pub unsafe fn decode_opaque(_src: *const u8, len: usize, f: &mut LogFormatter) {
-    f.write_fmt(format_args!("<{len} payload bytes; decoder arrives with the sink>"));
-}
+// **There is no per-site `decode` field, and its removal is a measurement, not a simplification.**
+//
+// L1 gave `LogSite` a `decode: unsafe fn(*const u8, usize, &mut LogFormatter)` described as
+// "monomorphised per argument-tuple type", and its own doc comment recorded why it was filled with
+// a placeholder instead: the site is a `static` and Rust has no generic statics, so the tuple type
+// cannot be named at the initialiser. It was never filled with anything else, **and no drain path
+// ever called it** — every sink printed `site.fmt` with its placeholders intact, so a `warn!`
+// carrying a set name rendered the literal `{}`. Measured at L6, which is the first rung whose
+// whole content is call sites whose value IS their arguments.
+//
+// The replacement is `record::ValueTag`: one tag byte per value, one non-generic
+// `record::render_payload`. See that module's header for the two facts that decided it — a
+// per-site pointer can only be installed by publishing it at run time into a mutable site (atomics
+// on the path the emitting thread is specified never to touch), and it cannot decode a `.blog`
+// file in another process, which is `logdec`'s whole job at L13b.
+//
+// Gate **G5** — "distinct `decode` symbol upper bound" — loses its subject here and is STRUCK in
+// the corpus rather than restated over the walker: there is exactly one, by construction, so a
+// census over it could never go red.
 
 /// Where a decoder writes its rendered output.
 ///

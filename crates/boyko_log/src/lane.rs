@@ -32,6 +32,7 @@
 //! `emitted == drained + dropped + sampled_out` depends on the separation being exact.
 
 use core::cell::Cell;
+use core::fmt::Write as _;
 use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -215,16 +216,7 @@ pub fn emit_impl<A: LogArgs>(site: &'static LogSite, args: A) {
         // which matters because the commonest way to reach here is a driver or OS callback on a
         // thread the engine never created, under a storm, with all 14 spare lanes taken.
         if site.level <= Level::Warn {
-            // The record is not encoded: the payload lives in the caller's arguments and this
-            // channel takes rendered text. What can be said without a formatter is said -- the
-            // site's own metadata, which is the part a reader needs to find the call.
-            let mut buf = [0u8; 160];
-            let n = render_site_line(&mut buf, site);
-            // SAFETY: `render_site_line` writes only ASCII bytes it copied from `&'static str`s
-            //   and decimal digits, so the prefix is valid UTF-8.
-            let text = unsafe { core::str::from_utf8_unchecked(&buf[..n]) };
-            crate::sync_out::write_oracle_line("boyko-log: ", text);
-            crate::target::count_sync_routed(site.target);
+            emit_unlaned(site, &args);
         } else {
             record_here(LossClass::Unclaimed, 0);
             // Charged to the TARGET as well as to the substrate's un-laned row. The two answer
@@ -306,35 +298,60 @@ pub fn emit_impl<A: LogArgs>(site: &'static LogSite, args: A) {
     lane.write.store(w.wrapping_add(need), Ordering::Release);
 }
 
-/// Render `file:line fmt` into `buf`, truncating rather than overflowing. Returns bytes written.
+/// Scratch for encoding an un-laned record's payload.
 ///
-/// Deliberately not `core::fmt`: this runs on the lane-exhaustion path, and the synchronous
-/// channel's first rule is that nothing formats inside its critical section. Doing it here, before
-/// the acquire, is what keeps that rule true for this caller.
-fn render_site_line(buf: &mut [u8], site: &LogSite) -> usize {
-    let mut n = 0usize;
-    let mut put = |s: &[u8], n: &mut usize| {
-        let take = s.len().min(buf.len() - *n);
-        buf[*n..*n + take].copy_from_slice(&s[..take]);
-        *n += take;
+/// Sized so that **anything the ring would have accepted fits here too**: a record that passes
+/// `MAX_RECORD_BYTES` has at most this much payload, so the fallback below can never be the reason
+/// a value is missing from a line the laned path would have rendered in full.
+const UNLANED_SCRATCH: usize = MAX_RECORD_BYTES - HEADER_BYTES;
+
+/// The un-laned `Warn`/`Error` fallback: encode, render, and take the synchronous channel.
+///
+/// `#[cold]` + `#[inline(never)]`, and split from [`emit_unlaned_line`] below, for a reason that
+/// is about **stack** rather than about I-cache: the renderer needs `MAX_RENDERED_BYTES` of frame
+/// and this needs `UNLANED_SCRATCH`, and a compiler is free to reserve a callee's frame in its
+/// caller when it inlines. Left inside `emit_impl` they would have put five kilobytes on the
+/// prologue of every emission in the engine, on a branch almost none of them take.
+///
+/// **The arguments are rendered here, not dropped.** Until L6 this path wrote the site's metadata
+/// and the format literal — so a `warn!` that reached it lost exactly the values it existed to
+/// report, on the path taken by driver and OS callback threads, which is where the engine has the
+/// least other information.
+#[cold]
+#[inline(never)]
+fn emit_unlaned<A: LogArgs>(site: &'static LogSite, args: &A) {
+    let need = args.encoded_len();
+    let mut scratch = [0u8; UNLANED_SCRATCH];
+    let n = if need <= scratch.len() {
+        // SAFETY: `encode` writes exactly `encoded_len()` bytes, which the branch has just
+        //   checked fits in `scratch`. The buffer is a fresh local, so it cannot alias the
+        //   arguments.
+        unsafe { args.encode(scratch.as_mut_ptr()) }
+    } else {
+        // Over `MAX_RECORD_BYTES`: the laned path would have refused this record too. Rendering
+        // the literal with `{missing}` placeholders is strictly more than the old behaviour and
+        // says which site produced it.
+        0
     };
-    put(site.file.as_bytes(), &mut n);
-    put(b":", &mut n);
-    let mut d = [0u8; 10];
-    let mut line = site.line;
-    let mut i = d.len();
-    loop {
-        i -= 1;
-        d[i] = b'0' + (line % 10) as u8;
-        line /= 10;
-        if line == 0 || i == 0 {
-            break;
-        }
-    }
-    put(&d[i..], &mut n);
-    put(b" ", &mut n);
-    put(site.fmt.as_bytes(), &mut n);
-    n
+    emit_unlaned_line(site, &scratch[..n]);
+}
+
+/// Render one un-laned record and write it to the synchronous channel.
+///
+/// Non-generic on purpose: it holds the large frame, and one copy serves every argument tuple.
+///
+/// `core::fmt` here is not a violation of the channel's first rule — that rule forbids formatting
+/// **inside** the critical section, and this runs to completion before `write_oracle_line`
+/// acquires it.
+#[cold]
+#[inline(never)]
+fn emit_unlaned_line(site: &'static LogSite, payload: &[u8]) {
+    let mut line = crate::record::DspBuf::<{ crate::record::MAX_RENDERED_BYTES }>::new();
+    let _ = write!(line, "{}:{} ", site.file, site.line);
+    let mut f = crate::site::LogFormatter::new(&mut line);
+    crate::record::render_payload(payload, site.fmt, &mut f);
+    crate::sync_out::write_oracle_line("boyko-log: ", line.as_str());
+    crate::target::count_sync_routed(site.target);
 }
 
 /// What one drain pass moved.
@@ -644,7 +661,6 @@ mod tests {
         fmt: "probe {}",
         fields: &[],
         prefix: "boyko",
-        decode: crate::site::decode_opaque,
     };
 
     #[test]
@@ -653,8 +669,8 @@ mod tests {
             let before = lane.write.load(Ordering::Relaxed);
             emit_impl(&TEST_SITE, (7u32, "ab"));
             let after = lane.write.load(Ordering::Relaxed);
-            // 20 header + 4 (u32) + 2 (len) + 2 ("ab")
-            assert_eq!(after.wrapping_sub(before), (HEADER_BYTES + 8) as u32);
+            // 20 header + 5 (tag + u32) + 5 (tag + len + "ab")
+            assert_eq!(after.wrapping_sub(before), (HEADER_BYTES + 10) as u32);
         });
     }
 
@@ -666,7 +682,7 @@ mod tests {
             let before_n =
                 boyko_diag::loss::cell(id, LossClass::Refused).count();
 
-            // Twelve maximal strings: 12 * 258 + 20 = 3116 > MAX_RECORD_BYTES.
+            // Twelve maximal strings: 12 * 259 + 20 = 3128 > MAX_RECORD_BYTES.
             let a = s.as_str();
             emit_impl(&TEST_SITE, (a, a, a, a, a, a, a, a, a, a, a, a));
 
@@ -723,7 +739,6 @@ mod tests {
         fmt: "probe {}",
         fields: &[],
         prefix: "boyko",
-        decode: crate::site::decode_opaque,
     };
 
     /// **The F6 regression, end to end.**
@@ -784,7 +799,8 @@ mod tests {
         on_own_lane(|_, lane| {
             // Drive the cursor to just short of the end, then emit one record that cannot fit in
             // the tail. The producer must lay a PAD and restart at offset 0.
-            let need = (HEADER_BYTES + 4) as u32;
+            // A `u32` argument is 5 payload bytes: one tag plus four little-endian.
+            let need = (HEADER_BYTES + 5) as u32;
             let start = LANE_BYTES as u32 - need + 4;
             // `read` follows `write`, so the ring is EMPTY at that offset. Setting only `write`
             // would leave `used == start`, the budget would be zero and the record would be
@@ -839,20 +855,31 @@ mod tests {
     }
 
     #[test]
-    fn the_site_line_renderer_truncates_instead_of_overflowing() {
-        // It runs BEFORE the synchronous channel's acquire, so it must not panic and must not
-        // write past the buffer -- a bounds panic on the error-of-the-error path is the failure
-        // the whole channel exists to avoid.
-        let mut buf = [0u8; 8];
-        let n = render_site_line(&mut buf, &TEST_SITE);
-        assert!(n <= buf.len());
-        assert!(core::str::from_utf8(&buf[..n]).is_ok());
+    fn the_unlaned_renderer_carries_the_arguments_and_never_overflows() {
+        // Two properties in one test because they are one claim: the fallback line must contain
+        // the VALUES (until L6 it contained the format literal, placeholders and all), and it must
+        // reach that answer without panicking -- a bounds panic on the error-of-the-error path is
+        // the failure the whole synchronous channel exists to avoid.
+        let mut line = crate::record::DspBuf::<{ crate::record::MAX_RENDERED_BYTES }>::new();
+        let _ = write!(line, "{}:{} ", TEST_SITE.file, TEST_SITE.line);
+        let args = (7u32,);
+        let mut scratch = [0u8; 64];
+        // SAFETY: the tuple's `encoded_len()` is 5, well inside `scratch`.
+        let n = unsafe { args.encode(scratch.as_mut_ptr()) };
+        let mut f = crate::site::LogFormatter::new(&mut line);
+        crate::record::render_payload(&scratch[..n], TEST_SITE.fmt, &mut f);
+        let s = line.as_str();
+        // `assert!(s.contains("probe"))` was the first form of this line and it was VACUOUS: the
+        // site's literal is `"probe {}"`, so "probe" survives the broken renderer too. Measured by
+        // running this rung's RED, which reddened four tests in `record` and left this one green.
+        // The claim has to name the VALUE.
+        assert_eq!(s, "lane.rs:0 probe 7", "the argument must reach the rendered line");
 
-        let mut big = [0u8; 160];
-        let n = render_site_line(&mut big, &TEST_SITE);
-        let s = core::str::from_utf8(&big[..n]).expect("ASCII only");
-        assert!(s.starts_with("lane.rs:0 "), "got {s:?}");
-        assert!(s.contains("probe"));
+        // A buffer far too small must truncate at a character boundary, not panic.
+        let mut tiny = crate::record::DspBuf::<8>::new();
+        let mut f = crate::site::LogFormatter::new(&mut tiny);
+        crate::record::render_payload(&scratch[..n], TEST_SITE.fmt, &mut f);
+        assert!(tiny.as_str().len() <= 8);
     }
 
     /// Empty every lane, so a following assertion on GLOBAL drain stats is this test's alone.
@@ -884,9 +911,9 @@ mod tests {
 
             assert_eq!(seen.len() as u32, N, "every published record must be handed over");
             assert_eq!(stats.records, u64::from(N));
-            // 4 (u32) + 2 (str len) + 1 ("p")
-            assert!(seen.iter().all(|n| *n == 7), "payload lengths: {seen:?}");
-            assert_eq!(stats.bytes, u64::from(N) * 7);
+            // 5 (tag + u32) + 4 (tag + str len + "p")
+            assert!(seen.iter().all(|n| *n == 9), "payload lengths: {seen:?}");
+            assert_eq!(stats.bytes, u64::from(N) * 9);
             assert_eq!(
                 lane.read.load(Ordering::Acquire),
                 w,
@@ -909,7 +936,8 @@ mod tests {
         // happened to wrap.
         on_own_lane(|_, lane| {
             drain_everything();
-            let need = (HEADER_BYTES + 4) as u32;
+            // A `u32` argument is 5 payload bytes: one tag plus four little-endian.
+            let need = (HEADER_BYTES + 5) as u32;
             let start = LANE_BYTES as u32 - need + 4;
             lane.write.store(start, Ordering::Release);
             lane.read.store(start, Ordering::Release);
@@ -918,11 +946,11 @@ mod tests {
             emit_impl(&TEST_SITE, (1u32,));
 
             let token = crate::drain_owner::try_claim().expect("free");
-            let stats = drain(&token, |_, _, _, payload| assert_eq!(payload.len(), 4));
+            let stats = drain(&token, |_, _, _, payload| assert_eq!(payload.len(), 5));
             drop(token);
 
             assert_eq!(stats.records, 1, "the PAD must not be reported as a record");
-            assert_eq!(stats.bytes, 4, "the PAD's bytes are not payload");
+            assert_eq!(stats.bytes, 5, "the PAD's bytes are not payload");
             assert_eq!(lane.read.load(Ordering::Acquire), lane.write.load(Ordering::Relaxed));
         });
     }

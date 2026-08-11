@@ -36,6 +36,7 @@
 //! own rather than in passing. What is asserted instead, below, is behavioural: the sink makes
 //! progress when asked for and none when not.
 
+use core::fmt::Write as _;
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use crate::site::LogSite;
@@ -237,14 +238,15 @@ fn sink_loop() {
 pub fn drain_once() -> Option<crate::lane::DrainStats> {
     let token = crate::drain_owner::try_claim()?;
     let to_ecs = ecs_ring_enabled();
+    // ONE buffer for the whole pass, hoisted out of the per-record closure: `MAX_RENDERED_BYTES`
+    // of stack zeroed once instead of once per record.
+    let mut line = crate::record::DspBuf::<{ crate::record::MAX_RENDERED_BYTES }>::new();
     Some(crate::lane::drain(&token, |site, _tsc, flags, payload| {
-        let mut buf = [0u8; 192];
-        let n = render_record(&mut buf, site, payload.len());
-        // SAFETY: `render_record` writes only ASCII copied from `&'static str`s and decimal
-        //   digits.
-        let text = unsafe { core::str::from_utf8_unchecked(&buf[..n]) };
+        line.clear();
+        render_record(&mut line, site, payload);
+        let text = line.as_str();
         crate::sync_out::write_oracle_line("boyko-log ", text);
-        crate::sink::file::write_line(&token, &buf[..n]);
+        crate::sink::file::write_line(&token, text.as_bytes());
         // Counted once per record, HERE and not per destination: `delivered` answers "did this
         // target ever produce anything", and a record that reached two sinks did not happen twice.
         crate::target::count_delivered(site.target);
@@ -258,44 +260,35 @@ pub fn drain_once() -> Option<crate::lane::DrainStats> {
                 code: site.code,
                 flags,
             };
-            crate::sink::ecs::push(&token, meta, &buf[..n]);
+            crate::sink::ecs::push(&token, meta, text.as_bytes());
         }
     }))
 }
 
-/// Render `file:line fmt (N B)` into `buf`, truncating rather than overflowing.
-fn render_record(buf: &mut [u8], site: &LogSite, payload_len: usize) -> usize {
-    let mut n = 0usize;
-    let mut put = |s: &[u8], n: &mut usize| {
-        let take = s.len().min(buf.len() - *n);
-        buf[*n..*n + take].copy_from_slice(&s[..take]);
-        *n += take;
-    };
-    let dec = |v: u64, n: &mut usize, put: &mut dyn FnMut(&[u8], &mut usize)| {
-        let mut d = [0u8; 20];
-        let mut v = v;
-        let mut i = d.len();
-        loop {
-            i -= 1;
-            d[i] = b'0' + (v % 10) as u8;
-            v /= 10;
-            if v == 0 || i == 0 {
-                break;
-            }
-        }
-        put(&d[i..], n);
-    };
-    put(site.level.as_str().as_bytes(), &mut n);
-    put(b" ", &mut n);
-    put(site.file.as_bytes(), &mut n);
-    put(b":", &mut n);
-    dec(u64::from(site.line), &mut n, &mut put);
-    put(b" ", &mut n);
-    put(site.fmt.as_bytes(), &mut n);
-    put(b" (", &mut n);
-    dec(payload_len as u64, &mut n, &mut put);
-    put(b" B)", &mut n);
-    n
+/// Render one record: `LEVEL [boyko-Cnnnn ]file:line message`.
+///
+/// **The message is the format literal with its values interleaved**, which until L6 it was not:
+/// this function printed `site.fmt` verbatim and appended a byte count, so every argument any call
+/// site ever passed was transported across the ring and thrown away here. See `record.rs`'s header
+/// for the measurement and for why the payload became self-describing instead of the site gaining
+/// a decoder it could never be given.
+///
+/// The code is printed **only when the level carries one** — `Info`/`Debug`/`Trace` have none by
+/// Decision 7, and a `boyko-B0000` on every third line would be noise that reads like a code.
+fn render_record<const N: usize>(
+    out: &mut crate::record::DspBuf<N>,
+    site: &LogSite,
+    payload: &[u8],
+) {
+    let _ = write!(out, "{} ", site.level.as_str());
+    if site.class != 0 {
+        // Byte-for-byte the shape the pre-migration `eprintln!`s wrote (`boyko-W1501`), so a
+        // reader's grep and this repository's own gates keep matching after the migration.
+        let _ = write!(out, "{}-{}{:04} ", site.prefix, site.class as char, site.code);
+    }
+    let _ = write!(out, "{}:{} ", site.file, site.line);
+    let mut f = crate::site::LogFormatter::new(out);
+    crate::record::render_payload(payload, site.fmt, &mut f);
 }
 
 /// The current lifecycle state.
@@ -491,13 +484,11 @@ pub fn flush() -> FlushResult {
         // these same rings, so waiting for it is the same answer with more steps.
         return match crate::drain_owner::try_claim() {
             Some(t) => {
+                let mut line = crate::record::DspBuf::<{ crate::record::MAX_RENDERED_BYTES }>::new();
                 let _ = crate::lane::drain(&t, |site, _tsc, _flags, payload| {
-                    let mut buf = [0u8; 192];
-                    let n = render_record(&mut buf, site, payload.len());
-                    // SAFETY: `render_record` writes only ASCII copied from `&'static str`s and
-                    //   decimal digits.
-                    let text = unsafe { core::str::from_utf8_unchecked(&buf[..n]) };
-                    crate::sync_out::write_oracle_line("boyko-log ", text);
+                    line.clear();
+                    render_record(&mut line, site, payload);
+                    crate::sync_out::write_oracle_line("boyko-log ", line.as_str());
                 });
                 FlushResult::Flushed
             }

@@ -419,7 +419,7 @@ measurement rather than letting it report a number** ✔
 | **N28** | `AtomicPtr<u8>` loses the `&str` length | **FOLDED** | §Data structures — `AtomicPtr<TargetInfo>` publishes name+len with one pointer |
 | **N29** | `MAX_RECORD_BYTES` reachable from safe code | **FOLDED** | §Data structures / E3 — raised to 2048 **and** checked at runtime in every profile; dropped + `TOO_LARGE` + counted, not a debug panic |
 | **N30** | `W0101` has no showable red state | **FOLDED** | §Decision 11 — written down as uncontrolled and listed in `tests/untested_codes.txt` with that reason. *(v4: the code is **deleted** outright by S4 — see the seam table in `../SEAM.md`.)* |
-| **N31** | `decode` monomorphisation count is an unmeasured claim | **FOLDED** | §L1-gate G5 — distinct-`decode`-symbol count asserted against an upper bound; the prose claim is removed |
+| **N31** | `decode` monomorphisation count is an unmeasured claim | **MOOT at L6** *(was FOLDED into G5)* | The claim had no subject: `decode` was never monomorphised, could not be (no generic statics — L1 Decision 4), and **was never called by any drain path**. L6 deleted the field for a tagged payload with **one** walker, so the count is 1 by construction and **G5 is struck** rather than relocated. The prose claim stays removed; what replaced it is `record::ValueTag`'s pinned wire discriminants, which a gate CAN fail |
 | **N32** | Header duplicates `code`/`level` | **FOLDED** | §Data structures — header shrunk 24 → **20 B packed**; `code`, `level` and `lane` removed (site holds two, the drain knows the third) |
 
 **Refuted: none** (of B1-N32). Every one was either a defect in v1's own pseudocode, a gate that

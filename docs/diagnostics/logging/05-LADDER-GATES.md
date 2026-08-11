@@ -49,7 +49,7 @@ subsystem present is not a baseline for the both-present configuration (S10).
 | **L0** | Skeleton; `Level`, `LogTarget`, `TargetId` (private field), `TargetControl` (**packed byte**), `targets!` table, `CONTROL`, `CONTROL_EPOCH_CTR`, the five macros with the 3-gate expansion, `GLOBAL_CEILING` **re-exported from `boyko_diag`** (S9 — no `boyko_log/build.rs`). **No sink, no `emit_impl`.** **Requires `boyko_diag` D0/D1.** **Nothing in this rung runs at process start**: `CONTROL` is `.bss`-zero, no initialiser touches it, and no `boyko_diag` clock call is made — the substrate's no-boot-work obligation (S13) is inherited, not re-argued | `src/{level,target,macros}.rs` — **there is no `control.rs`**, per `logging/ring-and-statics`' Decision 14: `CONTROL` is declared beside the `TargetId` whose closed constructor set is the only reason its `get_unchecked` is sound. This row said `{level,control,target,macros}` and the argued side won; splitting them puts an unchecked index in one file and its justification in another | nothing exists yet |
 | **L0-gate** | **G4** three-way side-effect probe: (a) compile-ceiling-below with runtime armed to Trace ⇒ 0; (b) both armed ⇒ **1000**; (c) runtime ceiling `Off` ⇒ 0. Debug *and* release. **v3's leg (d) is GONE from this rung** *(B4)*: it asserted 500 for a quantity that is 1000 (arguments evaluate at step 1, before the sample decision at step 4) **and** it needed `SAMPLE_CTR`, the seed and lanes, none of which exist before L1/L12. It reappears as **G10e** at L12-gate, over the right observable. **G2** separate build leg `BOYKO_PROFILE=off`, all three legs with their mechanisms (Decision 3), **legs (b) and (c) additionally run against a flag-off RUN of a normally-built binary** (S13). **G1 is NOT here** — it moves to L1-gate (F19) | `tests/gates_disabled.rs`, CI leg | — |
 | **L1** | `LogLane` (3 partitions + `sampled_out`; **NO inline loss cells** — the substrate's `CELLS[row][class]` is indexed by lane and `record_here` writes the caller's row, so an inline copy is duplication A3 reintroduced one layer up), layout asserts, lane resolution via `boyko_diag::lane()`, retire/reclaim through the substrate, wrap protocol, **the corrected admission arithmetic (F6)**, `LogValue`/`LogArgs`, `dsp!`, `u64` loss accounting (S8), `MAX_RECORD_BYTES` runtime check, `emit_impl` | `src/{lane,record,site}.rs` | L0's gate expansion |
-| **L1-gate** | **G1** symbol gate (now that `emit_impl` exists). **G17** Error-reserve arithmetic, **three legs at TWO fill levels** (B3). Per-thread zero-alloc gate, leg (b) now asserting **`== 0`** on a fresh thread (S3); loom model of the cursor pair + `boyko_diag` reclaim; wrap-boundary proptest; **cursor-wrap-at-2³² test (E17)**; overflow test asserting `dropped > 0`; **G3** `.bss` section gate **via `boyko_diag::section_report`** (S12); **G5** distinct-`decode`-symbol upper bound (N31) | `tests/` | — |
+| **L1-gate** | **G1** symbol gate (now that `emit_impl` exists). **G17** Error-reserve arithmetic, **three legs at TWO fill levels** (B3). Per-thread zero-alloc gate, leg (b) now asserting **`== 0`** on a fresh thread (S3); loom model of the cursor pair + `boyko_diag` reclaim; wrap-boundary proptest; **cursor-wrap-at-2³² test (E17)**; overflow test asserting `dropped > 0`; **G3** `.bss` section gate **via `boyko_diag::section_report`** (S12); ~~**G5** distinct-`decode`-symbol upper bound (N31)~~ **G5 is STRUCK — see the L6 decisions below.** The per-site `decode` field it counted does not exist: it could never be filled with a per-tuple monomorphisation (no generic statics) and it could never decode a `.blog` in another process, so L6 replaced it with a tagged payload and **one** walker. A census over a symbol count of one, forever, is a gate that cannot fail | `tests/` | — |
 | **L2** | `codes!` (with `prefix`, `status ∈ {Live, Pending, Historical}`), `DiagInfo`, dense `code_idx` + `CODE_IDX_EXHAUSTED`, the three code newtypes, power-of-two `EveryN` assert, per-site `Once` latch + `ONCE_SITES` push, `explain()`. **Registry seeding, itemised**: the **9 measured** grandfathered codes (`B0002`, `B1802`, `B9001`, `B9101`, `B9005`, `B9004`, `B9002`, `B1801`, `W1501`) as `Pending`; the `B9003` gap note; **`docs/diagnostics/B9004.md` and `B9005.md`, which exist in source and in NO document today** (B6); and **18 `92xx` rows as `Pending(<profiling rung>)`** (`W9201`..`W9218`, consecutive; the count is adjudicated in `seam/diagnostic-code-space` and this row previously said 17) so check 4 does not red on the already-committed `docs/PROFILING-SYSTEM-PLAN.md` literals (S6) | `src/codes.rs`, `docs/diagnostics/` | code numbers |
 | **L2-gate** | The **eight** registry checks (integration test) over the specified three-stream walker, with **TEXT's explicit directory list excluding `docs/archive/**`** (B6) and the **cross-file `#[cfg(test)]` rule** (B7). Check 2 is `Live`-only (S6); check 3c stays disarmed until L8c. Each check **shown red once** against a deliberately broken registry; the observed failure text recorded in the gate log. **This rung commits alone** because the grandfathered codes are `Pending`, check 3b requires them to have no emitters yet (F20), and the corpus no longer contains codes nothing will ever emit | `tests/code_registry.rs` | — |
 | **L3** | `sync_out.rs` (`OUT_LOCK` per Decision 9c, `write_oracle_line` **with the durable fan-out** — B9; **no `report!`** — S1), sink thread with adaptive park, **`DRAIN_OWNER`** (B5), staged drain, console sink → `stderr()`'s own handle, `flush`/`shutdown` with `SINK_STATE`, **`PRE_FLUSH` + `sink_can_accept()`** (S5), panic-hook chaining. Timestamps come from `boyko_diag::clock`; **`RecordHeader.clock_epoch_lo` is chosen here** (S4 left the 4-byte-vs-4-bit choice to this rung; Decision 11 takes the `_pad` byte). **S13's split lands with the mechanisms it moves**: `boot(cfg)` becomes a pure struct-fill that **spawns no thread, installs no hook and calls no `calibrate()`**; `enable(spec)` does all three, and is what a launch flag calls before the game loop | `src/{sync_out,sink/*}.rs` | the 20 B header assert; **`boot()` must stay side-effect-free** |
@@ -177,6 +177,51 @@ not needing a *migration* rung beside it, and it is unaffected.
    G5 counts distinct `decode` symbols — at this rung there is one by construction, so the census
    could not go red and would be a gate that cannot fail. It lands with the sink, which is also
    the first rung at which it can mean anything.
+
+   > ⚠️ **SUPERSEDED AT L6, and the second reason above is exactly why.** "It lands with the sink"
+   > was wrong, because the language constraint this decision names **does not expire**: the tuple
+   > type cannot be named at a `static` at L3 either. L3 landed the sink; the decoder did not
+   > arrive with it, and nothing noticed for three rungs — **no drain path ever called `decode`**,
+   > and every sink printed `site.fmt` with its placeholders intact. L6 replaced the field with a
+   > tagged payload and one walker; **G5 is struck**, not relocated. Full record below.
+
+### The L6 decoder, which was L3's and was measured missing at L6
+
+**MEASURED, at the opening of L6.** `site.decode` was called from **nowhere** in the workspace
+(`grep` over `crates/` and `src/`: `LogFormatter` was constructed only inside `site.rs`, and every
+drain path rendered `LEVEL file:line <fmt> (N B)`). So a `warn!(Schedule, W1501, "…set '{}'…",
+name)` would have rendered the literal `{}` and thrown `name` away — after transporting it across
+the ring. **L6's whole content is call sites whose value IS their arguments**, so this was not a
+gap the rung could route around, and it is the reason L6 lands in two commits.
+
+**The replacement is a tagged payload, and two facts decided it rather than a preference:**
+
+1. A per-site `fn` pointer **cannot be installed**. Decision 4 above says why and the reason is
+   permanent. The only mechanism that would work is publishing it at run time into a mutable site
+   — atomics plus a transmuted `fn` pointer on the emission path, to carry data the emitting
+   thread is specified never to touch.
+2. A per-site `fn` pointer **cannot decode a file**. `logdec` (L13b) reads a `.blog` written by
+   another process, where a pointer into the producing binary means nothing. That rung would have
+   had to introduce tags or a shape table anyway, so the fn-pointer design was never going to
+   survive it.
+
+One tag byte per value (`record::ValueTag`, discriminants **pinned as a wire format**) costs a
+store adjacent to the value it describes, serves both consumers, and leaves `LogSite` a pure
+immutable `'static`. `record::render_payload` is the one walker: `{}` consumes the next value,
+`{{`/`}}` are literal braces, and **any other `{…}` group also consumes the next value with its
+format spec ignored** — a real limitation, written down rather than discovered at a call site.
+Neither direction of disagreement is silent: a placeholder with no value renders `{missing}`,
+leftover values are appended as `[+ …]`, a corrupt tag or a truncated value **ends the walk**
+rather than resuming mid-value and rendering ring bytes as data.
+
+**Two things this rung's own RED found, in the order it found them.** Reverting `render_payload`
+to "write `fmt`, return" reddened four `record` tests — and left `lane`'s green. That test asserted
+`s.contains("probe")` against the site literal `"probe {}"`, which survives the broken renderer:
+**a vacuous assertion in the very test written to prove the fix**. It now asserts the whole line,
+`"lane.rs:0 probe 7"`, and the RED reddens five. The second is that the **un-laned** `Warn`/`Error`
+fallback had the same defect independently — it rendered site metadata and the literal — so a
+severe record on a driver or OS callback thread lost precisely the values it existed to report,
+on the path where the engine has the least other information. Both paths now render arguments.
 
 ### Five L4 decisions taken at implementation, and the L1 defect its gate found
 

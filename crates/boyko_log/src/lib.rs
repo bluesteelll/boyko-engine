@@ -26,21 +26,28 @@
 //!
 //! # State of this crate
 //!
-//! **Rungs L0, L1, L2, L3 and L5's producer half.** What exists: [`Level`], [`LogTarget`],
-//! [`TargetId`], [`TargetControl`], the engine target table, the control array and its epoch
-//! counter, the five macros with their full three-gate expansion, the per-site `static`, the
-//! payload encoding ([`LogValue`], [`LogArgs`], [`dsp!`]), the per-lane SPSC ring and the producer
-//! path [`emit_impl`]; the diagnostic-code registry ([`codes`]); the synchronous channel
-//! ([`sync_out`]), the CAS'd consumer role ([`drain_owner`]), the drain walk, the opt-in sink
-//! thread, `flush`/`shutdown`, the chained panic hook and the `boot`/`enable` split
-//! ([`lifecycle`]); and the sink→ECS transport [`sink::ecs`], whose consumer lives in `boyko_ecs`.
+//! **Rungs L0 through L6**, and the list is re-measured against the tree at each rung rather than
+//! carried forward — this paragraph claimed "L4 … which this crate skipped" while `sink/file.rs`,
+//! `rate.rs` and `census.rs` were all in the directory beside it.
 //!
-//! What does **not** exist yet, by rung: the file sink, the rate limiter and `SinkMode::Manual`
-//! are **L4** — which this crate skipped, so `LOG-CENSUS` and `W0103` are absent too; dynamic
-//! targets are L10, `LogPod` L11b, sampling L12, the binary sink L13b, runtime sink control L14,
-//! and the crash path L15. Each is **absent rather than stubbed**: a step that returns without
-//! doing anything is indistinguishable from a working one at every call site, which is the
-//! failure mode this crate's gates exist to make impossible.
+//! What exists: [`Level`], [`LogTarget`], [`TargetId`], [`TargetControl`], the engine target
+//! table, the control array and its epoch counter, the five macros with their full three-gate
+//! expansion, the per-site `static`, the **tagged** payload encoding ([`LogValue`], [`ValueTag`],
+//! [`LogArgs`], [`dsp!`]) and its one walker [`render_payload`], the per-lane SPSC ring and the
+//! producer path [`emit_impl`] (L0/L1); the diagnostic-code registry ([`codes`]) (L2); the
+//! synchronous channel ([`sync_out`]), the CAS'd consumer role ([`drain_owner`]), the drain walk,
+//! the opt-in sink thread, `flush`/`shutdown`, the chained panic hook and the `boot`/`enable`
+//! split ([`lifecycle`]) (L3); the file sink and its byte cap, the rate limiter and the
+//! `LOG-CENSUS` ([`sink::file`], [`rate`], [`census`]) (L4); the sink→ECS transport [`sink::ecs`],
+//! whose consumer lives in `boyko_ecs` (L5); and the engine's own emitters, in `boyko_ecs` and
+//! `boyko_threadpool` rather than here (L6).
+//!
+//! What does **not** exist yet, by rung: dynamic targets are L10, `LogPod` L11b, sampling L12, the
+//! binary sink and `logdec` L13b, runtime sink control L14, and the crash path L15. Each is
+//! **absent rather than stubbed**: a step that returns without doing anything is indistinguishable
+//! from a working one at every call site, which is the failure mode this crate's gates exist to
+//! make impossible — and which this crate nevertheless shipped once, in the record decoder that
+//! L6 replaced. See `record.rs`'s header.
 //!
 //! **Nothing here runs at process start.** The control array is `.bss`-zero, which already means
 //! "every target off"; no initialiser touches it, no clock is calibrated, no thread is spawned.
@@ -75,8 +82,10 @@ pub use codes::{
 };
 pub use lane::{LANE_ARRAY_LEN, emit_impl};
 pub use level::Level;
-pub use record::{DspBuf, LogArgs, LogValue, MAX_RECORD_BYTES, MAX_STR_BYTES, flags};
-pub use site::{LogFormatter, LogSite, decode_opaque};
+pub use record::{
+    DspBuf, LogArgs, LogValue, MAX_RECORD_BYTES, MAX_STR_BYTES, ValueTag, flags, render_payload,
+};
+pub use site::{LogFormatter, LogSite};
 pub use target::{
     DYN_BAND_LEN, DYN_BAND_START, ENGINE_BAND_END, LogTarget, MAX_TARGETS, TargetControl, TargetId,
     control_epoch, runtime_ceiling, set_target_control, set_target_level, target_control,
