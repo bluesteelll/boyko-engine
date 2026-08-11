@@ -26,13 +26,18 @@
 //! - [`CodeStatus::Historical`] — zero emitters permitted, no page required, never becomes `Live`.
 //!   For codes that exist only in frozen artifacts this repository will not edit.
 //!
-//! **All nine grandfathered codes are `Pending` at this rung**, which is what lets it land alone.
-//! The registry corpus file says of `B9004`/`B9005` that "both are `Live` from L2 (they have
-//! emitters today)"; that contradicts its own orphan rule, because *today's* occurrences are
+//! At L2 **all nine grandfathered codes were `Pending`**, which is what let that rung land alone.
+//! The registry corpus file said of `B9004`/`B9005` that "both are `Live` from L2 (they have
+//! emitters today)"; that contradicted its own orphan rule, because *those* occurrences were
 //! literals and comments, not identifiers, and a `Live` row with no identifier use reds
-//! immediately. The check semantics win. Their doc pages are written now anyway — a page for a
-//! `Pending` row is permitted and the debt was already identified, so discharging it early costs
-//! nothing and removes a thing to forget.
+//! immediately. The check semantics won. Their doc pages were written anyway — a page for a
+//! `Pending` row is permitted and the debt was already identified.
+//!
+//! **L6 flipped seven of the nine**, by giving [`PanicCode`] a `Display` and rewriting each panic
+//! message to carry the *constant* rather than the literal. The rendered text is byte-identical,
+//! so every `#[should_panic(expected = "boyko-B…")]` in the engine still matches; what changed is
+//! that the identifier now exists in source, which is the only thing the orphan check can see.
+//! `B1801`/`B1802` stay `Pending("L8b")` — they are `boyko_app`'s, and that is L8b's rung.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -148,6 +153,31 @@ macro_rules! code_newtype {
 code_newtype!(WarnCode, b'W');
 code_newtype!(ErrorCode, b'E');
 code_newtype!(PanicCode, b'B');
+
+/// Prints `boyko-Bnnnn` — byte for byte the prefix every `B`-class panic message carried as a
+/// string literal before L6.
+///
+/// **Only `PanicCode` has one, and the asymmetry is the point.** `W`/`E` codes reach their sites
+/// through the emission macros, which take `.number()` and let the sink print the prefix from the
+/// site's own `prefix`/`class`/`code`; a `Display` for those two would be public surface with no
+/// caller, and a value nothing reads is a value nothing can prove wrong. A `B` code has no macro —
+/// its site is a `panic!` and the message body is the only place the code can appear — so this is
+/// what lets the migration replace the literal `"boyko-B9001: …"` with the **identifier**, which
+/// is what the registry's orphan check scans for.
+///
+/// **The prefix is hard-coded.** Downstream tables (L11a) mint codes with their own prefix through
+/// the exported `codes!`, and that rung owns giving them a prefix-carrying `Display`. Threading a
+/// prefix through this impl for a table that does not exist yet would be a second answer to a
+/// question nobody has asked.
+///
+/// A caller must write it **positionally** — `panic!("{}: …", B9001)`, never `panic!("{B9001}: …")`.
+/// An inline format argument lives inside the string literal, so the walker's LIT stream sees it
+/// and its CODE stream does not, and the row would still read as an orphan.
+impl core::fmt::Display for PanicCode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "boyko-B{:04}", self.0)
+    }
+}
 
 /// The index a code gets when no rate slot could be assigned.
 ///
@@ -359,28 +389,42 @@ impl Default for OnceSite {
 // The `Pending(<rung>)` annotations were repaired with them, for the same reason: they named the
 // rungs of the invented conditions.
 codes! {
-    (2,    B, B0002, RatePolicy::Every, CodeStatus::Pending("L6"),
+    (2,    B, B0002, RatePolicy::Every, CodeStatus::Live,
         "Intra-system access conflict on one resource"),
     // The FIRST `Live` row in this registry. Its summary is read from the emitter
     // (`sink/file.rs::render_cap`) rather than composed from the code's name -- which is the rule
     // three rows of this registry's first draft broke.
     (103,  W, W0103, RatePolicy::Once,  CodeStatus::Live,
         "The file sink reached its byte cap and stopped writing"),
-    (1501, W, W1501, RatePolicy::Once,  CodeStatus::Pending("L6"),
+    // ── L6's five new rows ──────────────────────────────────────────────────────────────────
+    // Every summary below is read out of the message its emitter actually prints. `E0201` is the
+    // pool's only diagnostic; `W0501`/`B0502` are the two halves of one table filling up, and the
+    // warning exists because the panic alone reported 1023 silent mints and then a process kill.
+    (201,  E, E0201, RatePolicy::Every, CodeStatus::Live,
+        "A fire-and-forget task panicked, so the process is aborting"),
+    (501,  W, W0501, RatePolicy::Once,  CodeStatus::Live,
+        "The query-type table is three quarters full"),
+    (502,  B, B0502, RatePolicy::Every, CodeStatus::Live,
+        "The query-type table is exhausted; no id is left to mint"),
+    (701,  W, W0701, RatePolicy::Once,  CodeStatus::Live,
+        "An event lane was full, so the send was refused"),
+    (801,  E, E0801, RatePolicy::Every, CodeStatus::Live,
+        "An asset failed to load and its handle was marked failed"),
+    (1501, W, W1501, RatePolicy::Once,  CodeStatus::Live,
         "Ordering references a system set that has no members"),
     (1801, B, B1801, RatePolicy::Every, CodeStatus::Pending("L8b"),
         "A plugin was added more than once"),
     (1802, B, B1802, RatePolicy::Every, CodeStatus::Pending("L8b"),
         "An App method was called after finish(), in the run phase"),
-    (9001, B, B9001, RatePolicy::Every, CodeStatus::Pending("L6"),
+    (9001, B, B9001, RatePolicy::Every, CodeStatus::Live,
         "The schedule contains a cycle of systems"),
-    (9002, B, B9002, RatePolicy::Every, CodeStatus::Pending("L6"),
+    (9002, B, B9002, RatePolicy::Every, CodeStatus::Live,
         "The set hierarchy contains a cycle of sets"),
-    (9004, B, B9004, RatePolicy::Every, CodeStatus::Pending("L6"),
+    (9004, B, B9004, RatePolicy::Every, CodeStatus::Live,
         "Two ordered sets share a member, so a system would run both before and after itself"),
-    (9005, B, B9005, RatePolicy::Every, CodeStatus::Pending("L6"),
+    (9005, B, B9005, RatePolicy::Every, CodeStatus::Live,
         "Ordering references a system key that is not in this schedule"),
-    (9101, B, B9101, RatePolicy::Every, CodeStatus::Pending("L6"),
+    (9101, B, B9101, RatePolicy::Every, CodeStatus::Live,
         "Schedule::run was called with a different world than the one it was built on"),
 
     (9201, W, W9201, RatePolicy::Once,  CodeStatus::Live          ,
@@ -489,7 +533,19 @@ mod tests {
         // running the unfiltered form. Every flip of a `CodeStatus` owes one `--workspace` sweep
         // before it is called verified, and no amount of care about the filter substitutes for it.
         const LIVE: &[(u8, u16)] = &[
+            (b'B', 2),    // L6  -- intra-system access conflict on one resource
             (b'W', 103),  // L4  -- the file sink's byte cap
+            (b'E', 201),  // L6  -- a fire-and-forget task panicked, process aborting
+            (b'W', 501),  // L6  -- query-type table at 75 %
+            (b'B', 502),  // L6  -- query-type table exhausted
+            (b'W', 701),  // L6  -- an event lane was full, the send was refused
+            (b'E', 801),  // L6  -- an asset failed to load
+            (b'W', 1501), // L6  -- ordering references an empty system set
+            (b'B', 9001), // L6  -- schedule cycle
+            (b'B', 9002), // L6  -- set-hierarchy cycle
+            (b'B', 9004), // L6  -- two ordered sets share a member
+            (b'B', 9005), // L6  -- ordering references an unknown system key
+            (b'B', 9101), // L6  -- Schedule::run against a different world
             (b'W', 9201), // P3  -- engine zone registry exhausted
             (b'W', 9203), // P2  -- region overflow / unclaimed drops
             (b'E', 9204), // P2  -- profiler already bound to another world

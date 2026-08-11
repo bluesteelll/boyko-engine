@@ -40,6 +40,7 @@ use std::sync::atomic::Ordering;
 #[cfg(not(miri))]
 use std::time::Duration;
 
+use boyko_log::codes::B9101;
 use boyko_threadpool::{Scope, ThreadPool};
 use fixedbitset::FixedBitSet;
 
@@ -1470,10 +1471,15 @@ impl<'a> SpawnPointers<'a> {
 #[cold]
 #[inline(never)]
 fn schedule_world_mismatch_panic(built: WorldId, got: WorldId) -> ! {
+    // POSITIONAL, never `{B9101}`: an inline format argument lives inside the string literal,
+    // where the registry walker's LIT stream sees it and its CODE stream does not -- so the row
+    // would still read as an orphan while looking migrated. `PanicCode`'s `Display` prints
+    // `boyko-B9101`, so the rendered message is byte-identical to the pre-L6 one.
     panic!(
-        "boyko-B9101: Schedule::run called with a different world than the one it was \
+        "{}: Schedule::run called with a different world than the one it was \
          built on (built on {built}, got {got}) — a Schedule is bound to the world it \
-         was built on; build a separate Schedule per world"
+         was built on; build a separate Schedule per world",
+        B9101
     );
 }
 

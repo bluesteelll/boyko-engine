@@ -1,0 +1,32 @@
+# Live W/E codes that NO test names, one per line as `CODE  reason`.
+#
+# A LEDGER, not an allowlist, and the distinction is the whole design. Check 5 asserts it in BOTH
+# directions: an unlisted unnamed code reds, and a listed code that has since acquired a test also
+# reds. The list can therefore only shrink, and every row names why it is here rather than what it
+# excuses.
+#
+# This is a `.txt` on purpose: the walker's corpus is `.rs` files, so the ledger cannot satisfy its
+# own check. v1's check 5 kept the allowlist inside the file being scanned and was self-defeating.
+#
+# Written at L6, when check 5 first armed and could count. It found eight unnamed rows out of
+# twenty; five were L6's own and got observing tests instead of a row here.
+
+E0201  the next statement at the site is `std::process::abort()`, so a test that reached it would
+       take the harness process with it. Reachable only from a fire-and-forget task panic, which
+       the pool catches precisely in order to abort. Removing this row needs an out-of-process
+       fixture (spawn a child, assert its exit code and its stderr), which is a test-harness
+       capability this repository does not have yet.
+
+W9203  profiling rung 2's lane-exhaustion / region-overflow report. Reaching it needs either all
+       lanes claimed by live threads or a region filled to refusal, and the rung that landed it
+       owed "one observing test (check 5)" as a line item at a time when check 5 did not exist to
+       collect the debt. Its two halves share one latch, so one test could discharge both.
+
+W9210  profiling rung 10's user-zone-budget / dynamic-name-arena exhaustion. Same shape as W9203:
+       the condition is an exhausted process-global arena, and exhausting it inside a shared test
+       binary poisons every sibling that later registers a dynamic zone -- so it needs its own
+       integration binary, exactly as L6's `l6_query_table_exhaustion.rs` does.
+
+W9216  profiling rung 2's clock-epoch break. The corpus's own test 32 specifies injecting a
+       synthetic forward jump into `boyko_diag::clock`; the injection seam does not exist, and
+       waiting for a real suspend is not a test.

@@ -58,7 +58,7 @@ subsystem present is not a baseline for the both-present configuration (S10).
 | **L4-gate** | `Once` steady state performs **no store** (assembly/`perf` check) **and touches no shared line** (per-site latch, F11); census `UNPROVEN` at 0 records **and** at `dropped > 0` | `tests/`, `benches/` | — |
 | **L5** | ECS seam: `LogPlugin`, `LogRing` (16 B `LogLine`) on `VmReservation`, `LogStats`, `log_drain_system`, **`ECS_HANDOFF`** (B2), and the **manual `Send`/`Sync` impls with their `const _` pin** (B1). **`LogCensus` is NOT here** — it needs `TARGET_STATS`, which is L16's, so the pin names `LogRing` and `LogStats` at this rung and gains `LogCensus` at that one. The drain has **one** duty here; its other two arrive with L16 | `crates/boyko_ecs/.../log/`, `src/sink/{mod,ecs}.rs` | the `COMMIT_GRANULE` divisibility asserts **and** the `assert_send_sync` pin |
 | **L5-gate** | **P1, re-specified twice** (F3 → instrument; S10 → leg matrix): a **headless schedule bench**, not windowed frame time, run as a **2×2 of {logger off, on} × {profiler absent, armed}**, ABBA-counterbalanced, interleaved zero control, **one sitting**. The claim it may make is "logger-on vs off **at a fixed profiler state**", reported at both states. Baselines carry `config_tag = {profiler, logger}`; a sitting whose tag differs returns `NotResolved{ConfigMismatch}` rather than a number | `crates/bench_bevy_vs_boyko/benches/` | — |
-| **L6** | Migrate `boyko_ecs` + `boyko_threadpool`; flip those rows `Pending`→`Live`; `W1501`, `B0002` normalisation, `W0701`, `W0501`/`B0502`, `E0201` | as tabled | `#[should_panic]` substrings |
+| **L6** *(**SHIPPED**, in two commits — see the two decision blocks below)* | Migrate `boyko_ecs` + `boyko_threadpool`; flip those rows `Pending`→`Live`; `W1501`, `B0002` normalisation, `W0701`, `W0501`/`B0502`, `E0201`. **Landed beyond the row**: `E0801` (the asset server's `eprintln!`, which the ledger's file list covers and the row's code list did not name), `PanicCode`'s `Display` — the mechanism that lets a `B` code reach source as an *identifier* — and checks **5** and **6**, which the check table always said arm here. **Landed first, alone**: the record decoder L3 owed, without which every migrated site would have rendered its format literal and discarded its arguments | as tabled | `#[should_panic]` substrings |
 | **L7** | Migrate `boyko_rhi_vulkan` **except the messenger, which is not touched at all**; `E2101`; `W2102` ungated in release; census wiring | as tabled | `[vk-validation]` line, byte for byte |
 | **L7-gate** | **G7, re-cut two-sided** (F2): `E2101` fires on a validation-**on** run and is absent on a validation-**off** run (`BOYKO_DISABLE_VALIDATION=1`). Channel liveness is proved separately by an **ordinary validation error from a deliberately invalid call** — the historical `mip_levels: 12` on a 512×512 image — with the **baseline of 19 messages accounted for**. A forced *hazard* is explicitly **not** the control: this machine has been measured unable to produce `SYNC-HAZARD` (M25) | `crates/boyko_rhi_vulkan/tests/` | — |
 | **L8a** | Migrate `boyko_render`, `boyko_image`, `boyko_serialize`, `boyko_physics`. **Edit `boyko_image/Cargo.toml:5`'s description in the same commit** — it stops being true here | ledger | goldens |
@@ -222,6 +222,78 @@ to "write `fmt`, return" reddened four `record` tests — and left `lane`'s gree
 fallback had the same defect independently — it rendered site metadata and the literal — so a
 severe record on a driver or OS callback thread lost precisely the values it existed to report,
 on the path where the engine has the least other information. Both paths now render arguments.
+
+### Six L6 decisions taken at implementation, and the three things arming its checks found
+
+1. **A `B` code reaches source through `PanicCode`'s `Display`, positionally.** A `Live` row needs
+   its *identifier* in the CODE stream, and a `B` code has no macro — its site is a `panic!`, where
+   the code has only ever been a string literal. `impl Display for PanicCode` prints
+   `boyko-Bnnnn`, so `panic!("{}: …", B9001)` renders **byte-identically** to the literal it
+   replaced and every `#[should_panic(expected = "boyko-B…")]` in the engine keeps matching.
+   **`{B9001}` would not work and the difference is invisible**: an inline format argument lives
+   inside the string literal, so the walker's LIT stream sees it and its CODE stream does not — the
+   row would read as an orphan while looking migrated. Written into the impl's own doc and into
+   every site's comment. `WarnCode`/`ErrorCode` get **no** `Display`: they reach their sites through
+   the macros as `.number()`, so one would be surface with no caller.
+
+2. **Check 6 is re-specified, because the corpus's form is false of a correct tree.** "Panic-class
+   `B` codes appear only inside a `#[cold] fn … -> !` or a `panic!`" cannot hold here:
+   `ScheduleBuildError` is deliberately dual-purpose — `build` panics with `e.formatted()` while
+   `try_build` returns the same value as an `Err` — so `B9001`/`B9002`/`B9004`/`B9005` necessarily
+   live in a `String`-returning method that also feeds `Display`. Enforcing the literal rule would
+   have required deleting the recoverable API. What the rule is **for** survives whole, and it is
+   the corpus's own red state: *a `B` code is never an argument to an emission macro*. That has a
+   demonstrable failure and it was demonstrated. What it cannot claim — that every `B` code reaches
+   a panic — is in the check's own doc.
+
+3. **Check 5's corpus is all test code, and "named" is a stated proxy for "observed".** The corpus
+   names `crates/**/tests/**` plus `#[should_panic(expected=`; measured against the tree that
+   would have called thirteen genuinely-tested profiling codes untested, because their tests are
+   `#[cfg(test)] mod tests` blocks inside `src/`. The corpus is therefore the walker's own
+   test-only set **plus** each production file's tail from its first `#[cfg(test)]` — an
+   approximation whose error direction is one-way and written down: too large a corpus can only
+   make the check permissive, never falsely red. `codes.rs` and `code_registry.rs` are excluded,
+   because the first defines every identifier and the second names them as *data* — check 0's
+   sentinel is `boyko-W1501`, which would have silently satisfied that row's claim. A code counts
+   as named by its identifier **or** by its prefixed literal, and the second is the stronger form:
+   a test asserting the emitted text beats one naming the constant.
+
+4. **`E0201` keeps a last-resort `eprintln!`, and only in the configuration where nothing else
+   will.** The ledger prescribes `error!` + `flush()` before `abort()`. Measured: with diagnostics
+   never enabled, the record sits in a ring nothing will ever read, `flush()` answers `NoConsumer`,
+   `abort()` runs no destructor — and the abort decision becomes **invisible**, strictly worse than
+   the unconditional `eprintln!` it replaced, on the one path where the message matters most. The
+   site therefore prints for itself **iff** `flush()` returned `NoConsumer`. Exactly one line in
+   either configuration. **L8c owes it a `print_allowlist.txt` row** naming that reason.
+
+5. **`W0701` latches per CALL SITE, through a `static` in a generic body.** `send_one` and
+   `send_many` pass their own `OnceSite` to one shared `#[cold]` reporter, so a storm through one
+   cannot silence the other (F11). A `static` inside a generic function is shared across every
+   instantiation, which is exactly the granularity wanted: one report per *source site*, not one
+   per event type. **The rate limiter is still not the mechanism** — `rate::admit` has zero
+   production callers in the workspace, because every engine row declares `Every` or `Once` and
+   both are answered by a site-local latch. Recorded rather than "fixed": reaching for
+   `MinIntervalMs` here would have dragged a clock read onto a cold ECS path and put the rate
+   decision *ahead* of the macro's own runtime gate.
+
+6. **`E0801` is L6's, though the row's code list does not name it.** The ledger's file table covers
+   `ecs/asset/server.rs (1)`, and its disposition class is "everything else → `error!`/`warn!` with
+   codes". Block `08xx` is assets by the block map's own six-domain split of `04xx`–`09xx`, so the
+   code is `E0801`. A migration rung that left one `eprintln!` in the crate it migrated because a
+   summary table did not enumerate it would be the "green up to the first thing already known"
+   failure, one level up.
+
+**Three things arming the checks found, none of them predicted.** (a) Check 2 shipped at L4 as
+`is_file()` alone — an empty page satisfied it — and tightening it to the specified three sections
+found `W9212.md` with no `## Why` at all; its argument lived under `## Refused, not clamped`, a
+fine subtitle and not a section a reader can look for. (b) Check 5's first run: **eight of twenty**
+`Live` `W`/`E` rows were named by no test. Five were L6's own and got observing tests; three
+profiling rows and `E0201` are in `tests/untested_codes.txt`, each naming why, asserted in both
+directions so the list can only shrink. (c) `W0103` was the interesting one: its condition **is**
+tested — `file_sink_and_census.rs` asserts the cap behaviourally — but the test never names the
+code, so the check would have called a tested row untested. The fix is one assertion naming
+`boyko-W0103` beside the ones that observe it, not a ledger row. That is the clearest possible
+statement of what this check does and does not see.
 
 ### Five L4 decisions taken at implementation, and the L1 defect its gate found
 

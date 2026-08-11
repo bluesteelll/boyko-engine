@@ -12,6 +12,12 @@ description = "Custom Chase-Lev work-stealing thread pool for boyko-engine Phase
 # `[dependencies]`, so `cargo tree -p boyko-diag -e normal,build` is one node
 # and the pool's third-party graph is unchanged by this line.
 boyko-diag = { path = "../boyko_diag" }
+# The logging seam (rung L6). ONE call site: `abort_on_task_panic`, which is the pool's only
+# diagnostic and is on the process-death path. The edge adds no third-party crate -- `boyko_log`
+# depends on `boyko_diag` (empty `[dependencies]`) and `boyko_macros` -- and it cannot cycle:
+# nothing in the logger names this crate, because the lane identity the logger indexes by is
+# `boyko_diag`'s and is written HERE (D1).
+boyko-log = { path = "../boyko_log" }
 crossbeam-deque = "0.8"
 crossbeam-utils = "0.8"
 

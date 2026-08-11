@@ -117,6 +117,17 @@ fn the_file_sink_writes_caps_and_the_census_tells_the_two_silences_apart() {
     let on_disk = std::fs::read_to_string(&path).expect("readable");
     assert!(!on_disk.contains("post-cap probe"), "a capped sink kept writing to the file");
 
+    // The condition this file's sections 5 asserts behaviourally IS `boyko-W0103`, and until L6
+    // nothing said so in words. Check 5 scans test code for the code a `Live` row claims to have,
+    // and a gate that reads "the cap stopped the sink" cannot know which row that is -- so the
+    // name is written here, beside the assertions that observe it, rather than allowlisted as
+    // untested. Naming is the check's proxy for observing, and this is the one place the two are
+    // reconciled by hand.
+    assert!(
+        file::state().1,
+        "the boyko-W0103 cap latch must be set once the sink has stopped writing"
+    );
+
     // ── 6. A drop makes the target's counts a LOWER BOUND, and the census says so ─────────────
     //
     // The lane is 16 KiB and nothing drains here, so this overflows it. `UNPROVEN(lossy)` is what

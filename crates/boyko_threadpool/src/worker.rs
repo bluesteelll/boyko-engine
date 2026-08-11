@@ -167,11 +167,26 @@ pub(crate) fn run_task(t: TaskHandle) {
 fn abort_on_task_panic() -> ! {
     // The payload has already been printed by the default panic hook (which
     // runs at the unwind's origin, before it reaches this catch). This line
-    // records the abort decision so the cause is unambiguous in logs.
-    eprintln!(
-        "boyko_threadpool: a fire-and-forget task (ThreadPool::spawn) panicked; \
-         aborting the process (no joiner can receive the payload)"
+    // records the abort DECISION so the cause is unambiguous in logs.
+    boyko_log::error!(
+        boyko_log::Threadpool,
+        boyko_log::codes::E0201.number(),
+        "a fire-and-forget task (ThreadPool::spawn) panicked; aborting the process \
+         (no joiner can receive the payload)"
     );
+    // BEFORE `abort`, because `abort` runs no destructor, no `atexit` handler and no sink
+    // shutdown: a record still sitting in its lane ring at that instant dies with the process.
+    if boyko_log::lifecycle::flush() == boyko_log::lifecycle::FlushResult::NoConsumer {
+        // Diagnostics were never enabled, so the record above is in a ring nothing will ever
+        // read and the abort decision would be INVISIBLE -- strictly worse than the
+        // unconditional `eprintln!` this replaced. This is the only configuration in which the
+        // pool writes for itself, and it is the configuration in which nothing else will.
+        // L8c owes it a row in `print_allowlist.txt` naming exactly that reason.
+        eprintln!(
+            "boyko-E0201: a fire-and-forget task (ThreadPool::spawn) panicked; \
+             aborting the process (no joiner can receive the payload)"
+        );
+    }
     std::process::abort();
 }
 

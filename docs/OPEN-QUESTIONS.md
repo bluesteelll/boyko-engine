@@ -14,6 +14,46 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-11 — L6 found three mechanisms that exist and are unreachable, and left them that way on purpose
+
+Logging rung L6 migrated `boyko_ecs` and `boyko_threadpool`. Three things it touched are **built,
+correct, and consumed by nobody**. None of them blocks the rung; each is recorded here because
+"reached for it and decided not to" is the only thing that distinguishes a deliberate gap from an
+oversight, and because two of them are the same shape as the defect L6 opened with.
+
+**1. `TargetControl`'s sync-route bit has no reader.** `target.rs` packs `bit [7] sync route —
+format on the caller, write synchronously`, with a constructor, an accessor, a CAS that preserves
+it and its own unit tests. `grep sync_route` over `crates/boyko_log/src` returns **`target.rs` and
+nothing else**: `emit_impl` never consults it. A target with the bit set behaves exactly like one
+without. Its intended writer is `apply_control_spec` (L14, the `net=debug/6!` form), so the bit is
+early rather than wrong — but a *control* nobody reads is exactly what `site.decode` was, and that
+one went three rungs unnoticed. **Not implemented at L6** because honouring it means a second
+emission path (render on the caller, take `OUT_LOCK`) which is L14's row and needs L14's gates.
+
+**2. `rate::admit` has zero production callers.** The rate limiter is complete and unit-tested —
+`EveryN`, `MinIntervalMs`, the 512 cache-line slots, the suppressed counter. Every engine registry
+row declares `Every` or `Once`, and both are answered by a **site-local latch** by design (F11), so
+`RATE` is never touched. L6 considered `MinIntervalMs(1024)` for `W0701` — an event lane that
+refuses every frame is exactly what a per-second cap is for — and **refused**: it drags a clock read
+onto a cold ECS path and puts the rate decision *ahead* of the macro's own runtime gate, so a
+disabled target would pay for a policy on a record it will not emit. The honest statement is that
+`RATE`'s 32 KiB of `.bss` is reserved for a policy no engine row currently declares.
+
+**3. `E0201`'s stderr fallback owes a `print_allowlist.txt` row at L8c.** `abort_on_task_panic`
+prints for itself **iff** `flush()` answered `NoConsumer` — see the L6 decision block for why the
+ledger's `error!` + `flush()` alone would have made the abort decision invisible in a
+diagnostics-off process. L8c's `print_census.rs` bans `eprintln!` in production; this site needs a
+row naming that reason. Flagged now because L8c is four rungs away and an unexplained allowlist
+entry written then would read as laundering.
+
+**What the owner may want to decide**: nothing is blocked. If (1) or (2) should be *deleted* rather
+than left for L14/L11a — a bit and an array that cost `.bss` and reader attention — that is a
+values call, and it is the opposite of the call this campaign has been making (absent rather than
+stubbed). My own reading is that both are fine to keep, because both have a named consumer at a
+named rung, which `site.decode` never did.
+
+---
+
 ## 2026-08-11 — ⚠️ A profiling test's HAND-PICKED zone id is a bet against every schedule the rest of the crate runs. `ZONE = 7` still is one.
 
 Found by rung 12's `G18`, which is the first profiling gate to assert an **exact session total** rather

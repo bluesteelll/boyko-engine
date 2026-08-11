@@ -25,26 +25,26 @@
 //!
 //! # Which checks are ARMED here, and which are not
 //!
-//! Every row of the registry is `Pending` at this rung, by design — the identifiers do not exist
-//! until the migration rungs rewrite the call sites. That makes several of the eight checks
-//! **vacuous today**, and this file arms only the ones that can actually go red:
+//! At L2 every row was `Pending`, which made four of the eight checks vacuous; each was named with
+//! the rung it would become real at rather than shipped green. **L6 is that rung for the last
+//! three**, and arming them found what a first run is for — see checks 2, 5 and 6 below.
 //!
-//! | # | Check | State here |
+//! | # | Check | State |
 //! |---|---|---|
 //! | 0 | corpus non-empty + pinned sentinel | **ARMED** |
 //! | 1 | numbers strictly increasing, table dense | **ARMED** (also a `const` assert in `codes.rs`) |
-//! | 2 | `Live` rows have a doc page | **vacuous — zero `Live` rows.** Arms at L6 |
-//! | 3 | `Live` rows have ≥1 identifier use | **vacuous — zero `Live` rows.** Arms at L6 |
-//! | 3b | `Pending`/`Historical` rows have 0 identifier uses | **ARMED** — all 27 rows |
+//! | 2 | `Live` rows have a doc page **with its three sections** | **ARMED** at L4, TIGHTENED at L6 — the L4 form was `is_file()` alone, so an empty page satisfied it |
+//! | 3a | `Live` rows have ≥1 identifier use | **ARMED** at L4 |
+//! | 3b | `Pending`/`Historical` rows have 0 identifier uses | **ARMED** — all 32 rows |
 //! | 3c | `Pending` count == 0 | disarmed until L8c by design |
 //! | 4 | every prefixed literal resolves to a row | **ARMED** |
-//! | 5 | every `Live` W/E code is observed by a test | **vacuous — zero `Live` rows.** Arms at L6 |
-//! | 6 | `B` codes appear only in a panic context | **vacuous — zero `B` identifier uses.** Arms at L6 |
+//! | 5 | every `Live` W/E code is named by a test, or is in the ledger | **ARMED at L6** — first run: 8 of 20 rows unnamed |
+//! | 6 | a `B` code is never an argument to an emission macro | **ARMED at L6**, re-specified against the tree |
 //! | 7 | every `LogTarget` impl resolves to the table | **ARMED** |
 //!
-//! Naming the vacuous ones is the point. A gate that cannot fail, shipped as one, is this
-//! campaign's signature defect; the rows above say which rung each becomes real at instead of
-//! letting four green checks imply four proofs.
+//! Naming the vacuous ones was the point. A gate that cannot fail, shipped as one, is this
+//! campaign's signature defect; the table said which rung each became real at instead of letting
+//! four green checks imply four proofs — and when they armed, three of them reported real debt.
 
 // `BTreeMap`, not `HashMap`: the workspace bans the latter outright, and a gate wants its failure
 // message in a deterministic order anyway -- an unordered list of offending codes reads
@@ -514,29 +514,54 @@ fn check_3b_no_pending_code_has_an_emitter_yet() {
     );
 }
 
-/// **Check 2** — every `Live` row has a `docs/diagnostics/<CODE>.md` page.
+/// **Check 2** — every `Live` row has a `docs/diagnostics/<CODE>.md` page **with its three
+/// sections**.
 ///
 /// ARMED AT L4, by the mechanism L2b left for exactly this moment: a test asserted that no row was
 /// `Live`, so that the first flip would red and force this check to be written. `W0103` flipped and
 /// it did. The vacuity test is deleted rather than kept — a precondition assertion and the check it
 /// stood in for cannot both be true.
 ///
+/// **TIGHTENED AT L6 to the form the corpus always specified** — "exists, non-empty, has
+/// `## What happened` / `## Why` / `## How to fix`". What shipped at L4 was `is_file()` alone, so
+/// an empty file satisfied it, and this rung was the first to add pages in bulk (ten of them) —
+/// the moment at which a page check that only counts files stops being worth having. MEASURED on
+/// arming: one existing page, `W9212.md`, had no `## Why` section at all; its argument lived under
+/// `## Refused, not clamped`, which is a fine subtitle and not a section a reader can look for.
+///
+/// The match is a **prefix**, not an equality: fourteen of the profiling pages write
+/// `## Why it fires once`, `## Why it is a warning and not an error`, and so on. Requiring the
+/// bare heading would have forced fourteen pages to say *less*.
+///
 /// `Pending` and `Historical` rows are out of scope on purpose. A page for a row with no emitter
 /// describes a message nobody has written, which is how three rows of this registry's first draft
 /// came to disagree with what the engine prints.
 #[test]
 fn check_2_every_live_row_has_a_doc_page() {
+    const SECTIONS: [&str; 3] = ["## What happened", "## Why", "## How to fix"];
     let dir = repo().join("docs").join("diagnostics");
-    let missing: Vec<String> = DIAGNOSTICS
-        .iter()
-        .filter(|r| r.status.requires_emitter())
-        .map(|r| ident_of(r.class, r.number))
-        .filter(|id| !dir.join(format!("{id}.md")).is_file())
-        .collect();
+    let mut problems = Vec::new();
+    for row in DIAGNOSTICS.iter().filter(|r| r.status.requires_emitter()) {
+        let id = ident_of(row.class, row.number);
+        let Ok(text) = std::fs::read_to_string(dir.join(format!("{id}.md"))) else {
+            problems.push(format!("{id}: no docs/diagnostics/{id}.md"));
+            continue;
+        };
+        if text.trim().is_empty() {
+            problems.push(format!("{id}: the page is empty"));
+            continue;
+        }
+        for section in SECTIONS {
+            if !text.lines().any(|l| l.starts_with(section)) {
+                problems.push(format!("{id}: no `{section}` section"));
+            }
+        }
+    }
     assert!(
-        missing.is_empty(),
-        "these rows are Live but have no docs/diagnostics/<CODE>.md page: {missing:?}. A Live row \
-         owes a page; write it from the emitter's own message, not from the code's name."
+        problems.is_empty(),
+        "these Live rows owe a complete page: {problems:?}. Write it from the emitter's own \
+         message, not from the code's name -- three rows of this registry's first draft were \
+         written the other way and disagreed with what the engine prints."
     );
 }
 
@@ -642,6 +667,191 @@ const FORWARD_DECLARED: &[(&str, &str)] = &[
     ("E0118", "L15 — the panic hook could not complete a flush"),
     ("E2101", "L7 — a Vulkan validation error was reported"),
 ];
+
+// ────────────────────────────── checks 5 and 6, armed at L6 ───────────────────────────────
+
+/// Everything that counts as **test code**, as `(path, text)`.
+///
+/// Two sources, and the second is an approximation stated rather than hidden:
+///
+/// 1. Files the walker already marks test-only — `tests/`, `benches/`, and the cross-file
+///    `#[cfg(test)] mod` targets. `src/bin/` is excluded here although the walker marks it: a CLI
+///    entry point is production code that happens to print, and letting it satisfy an
+///    observed-by-a-test claim would be a hole.
+/// 2. The tail of every other `.rs` file from its first `#[cfg(test)]` line. In this repository a
+///    `#[cfg(test)] mod tests` is the last item in its file; where it is not, production text after
+///    it joins the corpus. **The error direction is one-way**: a too-large corpus can only make
+///    this check more permissive, never falsely red, so the approximation cannot manufacture a
+///    failure — it can only fail to catch one, and it says so here.
+///
+/// Two files are excluded whatever they contain. `codes.rs` DEFINES every identifier and its own
+/// test module asserts their classes, so including it would make every row observed by
+/// construction. `code_registry.rs` — this file — names codes as **data**: check 0's sentinel is
+/// `boyko-W1501`, which would silently satisfy the claim for that row. Both are the same exclusion
+/// the CODE stream already makes, for the same reason.
+fn test_corpus(root: &Path) -> Vec<(PathBuf, String)> {
+    let files = rust_files(root);
+    let marked = test_only_files(root, &files);
+    let mut out = Vec::new();
+    for f in &files {
+        let s = f.to_string_lossy().replace('\\', "/");
+        if s.contains("/src/bin/") || s.ends_with("/code_registry.rs") {
+            continue;
+        }
+        if f.file_name().is_some_and(|n| n == "codes.rs") {
+            continue;
+        }
+        let Ok(src) = std::fs::read_to_string(f) else { continue };
+        if marked.contains(f) {
+            out.push((f.clone(), src));
+        } else if let Some(at) = src.find("#[cfg(test)]") {
+            out.push((f.clone(), src[at..].to_string()));
+        }
+    }
+    out
+}
+
+/// Codes with no observing test, each naming why. A **data file**, so it is `.txt` and the `.rs`
+/// scan cannot reach it — the self-referential trap v1's check 5 fell into.
+const UNTESTED_LEDGER: &str = "tests/untested_codes.txt";
+
+/// Parse the ledger into `(code, reason)`; `#` starts a comment.
+fn untested_ledger() -> Vec<(String, String)> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(UNTESTED_LEDGER);
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("{} is a required data file: {e}", path.display()));
+    let mut out: Vec<(String, String)> = Vec::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        // An indented line CONTINUES the previous reason. Without this rule the parser would read
+        // the second line of a wrapped reason as a code named "take" -- and the both-directions
+        // assertions would then red on a ledger that is perfectly well formed.
+        if line.starts_with(char::is_whitespace) {
+            if let Some((_, reason)) = out.last_mut() {
+                reason.push(' ');
+                reason.push_str(t);
+            }
+            continue;
+        }
+        let (code, reason) = t.split_once(char::is_whitespace).unwrap_or((t, ""));
+        out.push((code.to_string(), reason.trim().to_string()));
+    }
+    out
+}
+
+/// **Check 5** — every `Live` `W`/`E` code is named by a test, or is in the ledger with a reason.
+///
+/// ARMED AT L6, which is where its header table said it would arm, and its first run found what a
+/// first run is for: of twenty `Live` `W`/`E` rows, eight were named by no test at all. Five of
+/// those were this rung's own and got observing tests; the rest are in the ledger.
+///
+/// **A code counts as named** if its identifier appears as a standalone token *or* its prefixed
+/// literal (`boyko-W0103`) appears. The second form matters and is the stronger one: a test that
+/// asserts the emitted TEXT is a better observation than one that names the constant, and
+/// `file_sink_and_census.rs` is exactly that shape.
+///
+/// **What this check CANNOT claim, and it is in the failure text too**: naming is a proxy for
+/// observing. It cannot tell a test that drives the condition and asserts the record from one that
+/// mentions the code in a comment. It is the cheapest gate that makes an unobserved code
+/// *countable*, and the ledger is what keeps the count honest — asserted in both directions, so it
+/// can only shrink.
+#[test]
+fn check_5_every_live_warn_or_error_code_is_named_by_a_test() {
+    let corpus = test_corpus(&repo());
+    assert!(corpus.len() > 100, "only {} test files found; the corpus is not resolving", corpus.len());
+
+    let named = |id: &str| {
+        let literal = format!("boyko-{id}");
+        corpus.iter().any(|(_, t)| has_token(t, id) || t.contains(&literal))
+    };
+
+    let live: Vec<String> = DIAGNOSTICS
+        .iter()
+        .filter(|r| r.status.requires_emitter() && matches!(r.class, b'W' | b'E'))
+        .map(|r| ident_of(r.class, r.number))
+        .collect();
+
+    let ledger = untested_ledger();
+    let listed: BTreeSet<&str> = ledger.iter().map(|(c, _)| c.as_str()).collect();
+
+    let unlisted: Vec<&String> = live.iter().filter(|id| !named(id) && !listed.contains(id.as_str())).collect();
+    assert!(
+        unlisted.is_empty(),
+        "these Live W/E codes are named by no test and are not in {UNTESTED_LEDGER}: {unlisted:?}. \
+         Write a test that drives the condition and observes the record -- or, if the site cannot \
+         be reached from a test, add a row naming exactly why. NAMING IS A PROXY FOR OBSERVING: \
+         this check cannot tell a test that asserts the record from one that mentions the code."
+    );
+
+    // The ledger must SHRINK. A row whose code has since acquired a test is stale, and a stale row
+    // silently re-opens the hole it was carved to keep visible -- the same both-directions rule
+    // FORWARD_DECLARED carries, for the same reason.
+    let stale: Vec<&String> = ledger
+        .iter()
+        .filter(|(c, _)| named(c))
+        .map(|(c, _)| c)
+        .collect();
+    assert!(stale.is_empty(), "these codes are now named by a test and must be REMOVED from {UNTESTED_LEDGER}: {stale:?}");
+
+    let unknown: Vec<&String> = ledger
+        .iter()
+        .filter(|(c, _)| !live.contains(c))
+        .map(|(c, _)| c)
+        .collect();
+    assert!(unknown.is_empty(), "{UNTESTED_LEDGER} lists codes that are not Live W/E rows: {unknown:?}");
+
+    for (code, reason) in &ledger {
+        assert!(!reason.is_empty(), "{code} is in {UNTESTED_LEDGER} with no reason");
+    }
+}
+
+/// **Check 6** — a `B` code is never an argument to an emission macro.
+///
+/// ARMED AT L6, and **re-specified against the tree at the same time.** The corpus says "panic-class
+/// `B` codes appear only inside a `#[cold] fn … -> !` or a `panic!`". MEASURED: that is false of a
+/// correct tree. `ScheduleBuildError` is deliberately dual-purpose — `ScheduleBuilder::build`
+/// panics with `e.formatted()` while `try_build` returns the same error as an `Err` for a tool or
+/// library caller — so `B9001`/`B9002`/`B9004`/`B9005` necessarily live in a `String`-returning
+/// method that also feeds `Display`. Enforcing the literal rule would have required either deleting
+/// the recoverable API or moving the codes back to string literals.
+///
+/// What the rule is *for* survives intact, and it is the corpus's own red state: **"emit a `B` code
+/// from a `warn!`"**. A `B` code is a broken invariant; routing one through the emission macros
+/// would make it a line in a log that the process then continued past.
+///
+/// **What this check CANNOT claim**: that every `B` code reaches a panic. It bounds the class of
+/// site a `B` code may NOT appear in, which is the half that has a demonstrable failure.
+#[test]
+fn check_6_no_panic_code_is_an_argument_to_an_emission_macro() {
+    const MACROS: [&str; 5] = ["warn!", "error!", "info!", "debug!", "trace!"];
+    let c = gather();
+    let mut offenders = Vec::new();
+    for row in DIAGNOSTICS.iter().filter(|r| r.class == b'B') {
+        let id = ident_of(row.class, row.number);
+        let mut from = 0usize;
+        while let Some(rel) = c.code[from..].find(&id) {
+            let at = from + rel;
+            from = at + 1;
+            // Statement scope: from the last separator before the occurrence. A macro invocation
+            // that has not been closed by then is the one this identifier sits inside.
+            let start = c.code[..at].rfind([';', '{', '}']).map_or(0, |i| i + 1);
+            let segment = &c.code[start..at];
+            if MACROS.iter().any(|m| segment.contains(m)) {
+                offenders.push(id.clone());
+                break;
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these B codes are passed to an emission macro: {offenders:?}. A B code is a broken \
+         invariant -- routing one through warn!/error! makes it a line in a log that the process \
+         then continues past. Its site is a panic."
+    );
+}
 
 /// **Check 7** — every `LogTarget` impl resolves to the engine table.
 ///

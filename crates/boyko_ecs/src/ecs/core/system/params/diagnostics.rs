@@ -5,6 +5,8 @@
 //! `#[cold]` + `#[inline(never)]` so they live outside the hot path's
 //! L1i footprint (principle 3 / I-cache discipline).
 
+use boyko_log::codes::B0002;
+
 use crate::ecs::core::events::event::Event;
 use crate::ecs::core::resources::resource::{NonSendResource, Resource};
 use crate::ecs::core::system::filtered_access_set::AccessConflict;
@@ -43,19 +45,30 @@ pub(crate) fn missing_non_send_resource_panic<R: NonSendResource>() -> ! {
 /// detects an intra-system aliasing conflict against a sibling param's
 /// already-registered access.
 ///
-/// Diagnostic code: `boyko-B0002`. Surfaces the conflicting `AccessConflict`
+/// Diagnostic code: [`B0002`]. Surfaces the conflicting `AccessConflict`
 /// fields verbatim so the user sees both the offending pair of param names
 /// and the resource id.
+///
+/// The code arrives through the **registry constant** rather than as a string
+/// literal (L6). `PanicCode`'s `Display` prints `boyko-B0002`, so the message
+/// keeps the substring every `#[should_panic(expected = …)]` in this crate
+/// matches on, while the identifier now appears in source — which is what the
+/// registry's orphan check scans for, and what makes a code that loses its
+/// emitter fail a test instead of rotting.
+///
+/// The `error[…]:` wrapper is gone with it. Two prefixes for one code — a
+/// rustc-shaped one here and a bare one everywhere else — is one spelling too
+/// many for a reader who greps.
 #[cold]
 #[inline(never)]
 pub(crate) fn intra_system_conflict_panic(conflict: AccessConflict) -> ! {
     panic!(
-        "error[boyko-B0002]: intra-system access conflict on resource id {}.\n\
+        "{}: intra-system access conflict on resource id {}.\n\
          Existing param: {}\n\
          Conflicting param: {}\n\
          Kind: {:?}\n\
          This would be UB at runtime. Remove one of the accesses or use the same mutability.",
-        conflict.id, conflict.existing_param, conflict.new_param, conflict.kind
+        B0002, conflict.id, conflict.existing_param, conflict.new_param, conflict.kind
     );
 }
 

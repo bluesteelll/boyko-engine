@@ -163,7 +163,16 @@ fn extension_of(path: &str) -> String {
 #[cold]
 #[inline(never)]
 fn reserve_failed<A: Asset + AssetBacking>(assets: &mut Assets<A>, path: &str, err: AssetError) -> Handle<A> {
-    eprintln!("boyko_ecs: asset load failed for '{path}': {err}");
+    // `RatePolicy::Every`, deliberately: each failed load is a distinct fact about a distinct
+    // path, and a title that fails forty textures needs forty lines. That is also what the
+    // `eprintln!` this replaced did, so the migration changes the channel and not the volume.
+    boyko_log::error!(
+        boyko_log::Assets,
+        boyko_log::codes::E0801.number(),
+        "asset load failed for '{}': {}",
+        path,
+        boyko_log::dsp!(err)
+    );
     let handle = assets.reserve();
     assets.fail(handle);
     handle
@@ -305,6 +314,51 @@ mod tests {
         assert_eq!(assets.state(handle), Some(AssetLoadState::Failed));
         assert!(assets.get(handle).is_none());
         assert!(staging.is_empty(), "a failed load must not queue a staged entry");
+    }
+
+    /// L6 check 5 — `boyko-E0801` reaches the log, not only the handle.
+    ///
+    /// The handle's `Failed` state is asserted above and says *that* a load failed; it cannot say
+    /// **which path or why**, which is the whole content of the record. This drives the same
+    /// failure and observes the emission from the target's own counters.
+    ///
+    /// `delivered + sync_routed`, because a test thread may or may not hold a diagnostics lane:
+    /// with one the record lands in the ring and the drain counts it, without one an `Error` takes
+    /// the synchronous channel and is counted there instead. Asserting only `delivered` would
+    /// therefore be green or red depending on which harness thread ran it — the shape of vacuity
+    /// this campaign has hit twice, from the other side.
+    #[test]
+    fn e0801_reaches_the_log_and_not_only_the_handle() {
+        use boyko_log::level::Level;
+        use boyko_log::target::{LogTarget, set_target_level, target_stats};
+
+        let id = <boyko_log::Assets as LogTarget>::ID;
+        set_target_level(id, Level::Trace);
+        let before = {
+            let s = target_stats(id);
+            s.0 + s.3
+        };
+
+        let server = AssetServer::new();
+        let mut assets = Assets::<Dummy>::with_reserved(4);
+        let mut staging = AssetStaging::<Dummy>::default();
+        let mut paths = AssetPaths::<Dummy>::default();
+        let _ = server.load::<Dummy>("e0801/probe.bin", &mut assets, &mut staging, &mut paths);
+
+        // The drain may be held by a sibling test's consumer; a refusal is not a failure of this
+        // claim, so retry rather than assert on the first attempt.
+        for _ in 0..64 {
+            if boyko_log::lifecycle::drain_once().is_some() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+
+        let after = {
+            let s = target_stats(id);
+            s.0 + s.3
+        };
+        assert!(after > before, "boyko-E0801 was never delivered: {before} -> {after}");
     }
 
     /// A successful decode reserves the row (still `Loading` — GPU upload,

@@ -124,7 +124,7 @@ Subsystem-local dense-table sizing newtypes live next to their owners, NOT in
 `primitives.rs`:
 - `ResourceId` — [resources/resource_registry.rs](../crates/boyko_ecs/src/ecs/core/resources/resource_registry.rs)
 - `BundleTypeId` — [bundle/bundle_type_registry.rs](../crates/boyko_ecs/src/ecs/core/bundle/bundle_type_registry.rs)
-- `QueryTypeId` — [iters/query/query_type_registry.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query_type_registry.rs):76
+- `QueryTypeId` — [iters/query/query_type_registry.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query_type_registry.rs):77
 - `ObserverId` — [component/observers/mod.rs](../crates/boyko_ecs/src/ecs/core/component/observers/mod.rs):59
 - `SystemSetId` — [schedule/system_set.rs](../crates/boyko_ecs/src/ecs/core/schedule/system_set.rs)
 
@@ -1420,7 +1420,7 @@ topo + apply-window barrier. Module: [core/schedule/](../crates/boyko_ecs/src/ec
 ### 11.1. Schedule + ScheduleBuilder
 
 ```rust
-// schedule/schedule.rs:92
+// schedule/schedule.rs:93
 pub struct Schedule {
     pool: Arc<ThreadPool>,
     systems: Vec<SystemBox>,                  // topo order, stable addresses
@@ -1434,12 +1434,12 @@ pub struct Schedule {
 }
 ```
 
-- `ScheduleBuilder::new(Arc<ThreadPool>)` ([schedule_builder.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs):149);
-  `add_system(system) -> SystemConfig` (176);
-  `build(&mut world) -> Schedule` (323) / `try_build(...)` (349, returns
+- `ScheduleBuilder::new(Arc<ThreadPool>)` ([schedule_builder.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs):150);
+  `add_system(system) -> SystemConfig` (177);
+  `build(&mut world) -> Schedule` (324) / `try_build(...)` (350, returns
   `Result<_, ScheduleBuildError>`).
 - `Schedule::run(&mut world)`
-  ([schedule.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule.rs):231) —
+  ([schedule.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule.rs):232) —
   bumps the change tick, runs the state-transition pass, then dispatches.
 - Uses external dep `fixedbitset` for the conflict/condition bitsets.
 
@@ -1469,7 +1469,7 @@ stays restricted to the dispatcher + build via the ALLOC1 TLS discipline. See
 
 - `SystemConfig::{in_set, before, after, before_set, after_set}` (value-based) +
   `ScheduleBuilder::configure_set(set) -> ConfigureSet`
-  ([schedule_builder.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs):216)
+  ([schedule_builder.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs):217)
   (`.before`/`.after`/`.in_set` + set hierarchy).
 - `SystemSetId` (`#[repr(transparent)] usize`) is interned from `(TypeId,
   discriminant())` via a single `set_id_of_value` path so config and membership
@@ -1587,7 +1587,7 @@ Application/game states layered on the single `Schedule` (Phase 17). Module:
   composing with Phase 16 `.run_if`. The initial `OnEnter(initial)` is
   synthesized once on frame 1.
 - Builder entry — [schedule_builder.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs):
-  `insert_state` (247) / `init_state` (283).
+  `insert_state` (248) / `init_state` (284).
 - World entry — [core/ecs_master/state_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/state_api.rs):
   `insert_state` (33) / `init_state` (51) / `state` (62) / `set_next_state` (85).
 - `StateEntry` (type-erased) + `StateTransitionSet` (opt-in ordering hook,
@@ -1878,7 +1878,7 @@ Bundle, SystemSet};`.
 | `MAX_EVENTS` | 256 | [events/event_registry.rs](../crates/boyko_ecs/src/ecs/core/events/event_registry.rs):51 |
 | `MAX_ARCHETYPES` | 1024 | [iters/archetype_bit_set.rs](../crates/boyko_ecs/src/ecs/core/iters/archetype_bit_set.rs):7 |
 | `RESOURCE_SLOT_COUNT` | 256 | [resources/resource_registry.rs](../crates/boyko_ecs/src/ecs/core/resources/resource_registry.rs):51 |
-| `MAX_QUERY_TYPES` | 1024 (4096 with `big_query_table`) | [iters/query/query_type_registry.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query_type_registry.rs):84/:89 |
+| `MAX_QUERY_TYPES` | 1024 (4096 with `big_query_table`) | [iters/query/query_type_registry.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query_type_registry.rs):85/:90 |
 | `MAX_BUNDLE_TYPES` | 1024 | [bundle/bundle_type_registry.rs](../crates/boyko_ecs/src/ecs/core/bundle/bundle_type_registry.rs):84 |
 | `MAX_CHANGE_AGE` / `CHECK_TICK_THRESHOLD` | ~3/4·u32::MAX / 518_400_000 | [change_detection/tick.rs](../crates/boyko_ecs/src/ecs/core/change_detection/tick.rs) |
 | `MAX_WORKERS` | (pool cap) | [boyko_threadpool/thread_pool.rs](../crates/boyko_threadpool/src/thread_pool.rs) |

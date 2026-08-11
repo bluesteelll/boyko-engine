@@ -37,6 +37,7 @@ use std::any::TypeId;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use boyko_log::codes::{B9001, B9002, B9004, B9005, OnceSite, W1501};
 use boyko_threadpool::ThreadPool;
 use fixedbitset::FixedBitSet;
 
@@ -1110,26 +1111,38 @@ impl ScheduleBuildError {
     /// Renders the error as a `boyko-B900x: …` string — the message body of
     /// the panic raised by [`ScheduleBuilder::build`].
     pub(crate) fn formatted(&self) -> String {
+        // The codes arrive through the registry CONSTANTS (L6), not as string literals:
+        // `PanicCode`'s `Display` prints `boyko-B900x`, so every rendered message is byte-identical
+        // to what this function produced before, while the identifiers now appear in source. That
+        // is what the registry's orphan check scans for -- a code whose emitter is deleted then
+        // fails a test instead of leaving a row nothing produces.
+        //
+        // POSITIONAL, never `{B9001}`: an inline format argument lives inside the string literal,
+        // where the walker's LIT stream sees it and its CODE stream does not, and the row would
+        // still read as an orphan.
         match self {
             ScheduleBuildError::OrderingCycle { systems } => format!(
-                "boyko-B9001: schedule contains a cycle of {} systems: {:?}",
+                "{}: schedule contains a cycle of {} systems: {:?}",
+                B9001,
                 systems.len(),
                 systems
             ),
             ScheduleBuildError::SetHierarchyCycle { sets } => format!(
-                "boyko-B9002: set hierarchy contains a cycle of {} sets: {:?}",
+                "{}: set hierarchy contains a cycle of {} sets: {:?}",
+                B9002,
                 sets.len(),
                 sets
             ),
             ScheduleBuildError::SetsOrderedButIntersect { a, b, shared } => format!(
-                "boyko-B9004: sets '{a}' and '{b}' are ordered relative to each \
+                "{}: sets '{a}' and '{b}' are ordered relative to each \
                  other but share member '{shared}' (a system cannot run both \
-                 before and after itself)"
+                 before and after itself)",
+                B9004
             ),
             ScheduleBuildError::UnknownSystemKey { key, n } => format!(
-                "boyko-B9005: ordering references SystemKey({}) which is not in \
+                "{}: ordering references SystemKey({}) which is not in \
                  this schedule (it has {} systems); the key is foreign or stale",
-                key.0, n
+                B9005, key.0, n
             ),
         }
     }
@@ -1362,8 +1375,17 @@ fn first_shared(a: &[SystemKey], b: &[SystemKey]) -> Option<SystemKey> {
 }
 
 /// Emits the empty-set build warning (§6.4 / §13.1 R3-B) when an ordering
-/// edge references a set with no (transitive) members. Build-time and cold,
-/// so `eprintln!` is acceptable (no logging dependency in the ECS crate).
+/// edge references a set with no (transitive) members.
+///
+/// L6: was an `eprintln!` whose comment read "no logging dependency in the ECS
+/// crate" — true when it was written, false since L5 put the seam in. The code
+/// is no longer in the message body: the sink prints it from the site's own
+/// metadata, so the rendered line still carries `boyko-W1501` and a reader's
+/// grep is unaffected.
+///
+/// `RatePolicy::Once`, honoured by this site's own latch, because the build
+/// walks every ordering edge and a schedule with one misspelled set name has as
+/// many of them as it has systems.
 #[cold]
 fn warn_if_empty(
     members: &[SystemKey],
@@ -1371,11 +1393,16 @@ fn warn_if_empty(
     set_names: &HashMap<SystemSetId, &'static str>,
 ) {
     if members.is_empty() {
-        eprintln!(
-            "boyko-W1501: ordering references set '{}' which has no members \
-             (no system joined it via in_set); the ordering has no effect",
-            set_name_or_default(set, set_names)
-        );
+        static FIRED: OnceSite = OnceSite::new();
+        if FIRED.claim() {
+            boyko_log::warn!(
+                boyko_log::Schedule,
+                W1501.number(),
+                "ordering references set '{}' which has no members (no system joined it via \
+                 in_set); the ordering has no effect",
+                set_name_or_default(set, set_names)
+            );
+        }
     }
 }
 

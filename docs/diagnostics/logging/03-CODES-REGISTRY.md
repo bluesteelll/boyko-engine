@@ -106,9 +106,19 @@ Numbered **0 through 7**. Checks `3b` and `3c` are legs of check 3, not addition
 | 3b | **No premature emitters**: every `Pending` **or `Historical`** code's identifier appears **0×** | CODE | emit a `Pending` code without flipping its row |
 | 3c | **Migration complete** (armed at L8c): `Pending` count == 0. `Historical` excluded | registry | leave one row `Pending` |
 | 4 | **No undeclared**: every `boyko-[BEW]\d{4}` literal resolves to a registry entry | LIT ∪ TEXT (the explicit directory list; **`docs/archive/**` excluded**) | write the literal form of `W9003` into a scratch file inside the corpus. *(The full literal is deliberately not written in this committed document: it is a real archive code with no registry row, so carrying it here would red check 4 permanently — the self-referential failure v3 shipped.)* |
-| 5 | Every `Live` `W`/`E` code is observed by ≥1 test, with `tests/untested_codes.txt` (a **data file**, excluded from its own scan) checked **in both directions** | `crates/**/tests/**`, `#[should_panic(expected=` | allowlist a code that has a test |
-| 6 | Panic-class `B` codes appear only inside a `#[cold] fn … -> !` or a `panic!` | CODE | emit a `B` code from a `warn!` |
+| 5 | Every `Live` `W`/`E` code is **named by** ≥1 test, with `tests/untested_codes.txt` (a **data file**, excluded from its own scan) checked **in both directions** | ~~`crates/**/tests/**`, `#[should_panic(expected=`~~ **ALL test code** — the walker's test-only set plus each production file's tail from its first `#[cfg(test)]`, minus `codes.rs` and `code_registry.rs`. **Re-specified at L6 against the tree**: the narrow corpus would have called thirteen genuinely-tested profiling codes untested, because their tests are `#[cfg(test)] mod tests` blocks inside `src/`. And "observed" is written as **named**, because a text scan cannot tell a test that drives the condition from one that mentions the code — the proxy is stated in the check's own failure message | allowlist a code that has a test |
+| 6 | ~~Panic-class `B` codes appear only inside a `#[cold] fn … -> !` or a `panic!`~~ **A `B` code is never an argument to an emission macro** | CODE | emit a `B` code from a `warn!` |
 | 7 | Every `LogTarget` impl in the workspace resolves to a `targets!` row or a `define_target!` expansion | CODE | hand-write a `LogTarget` impl |
+
+> **Check 6's form is FALSE of a correct tree, and L6 measured it.** `ScheduleBuildError` is
+> deliberately dual-purpose — `ScheduleBuilder::build` panics with `e.formatted()` while
+> `try_build` returns the same value as an `Err` for a tool or library caller — so
+> `B9001`/`B9002`/`B9004`/`B9005` necessarily live in a `String`-returning method that also feeds
+> `Display`. Enforcing "only inside a `panic!`" would have required deleting the recoverable API or
+> reverting the codes to string literals. What the rule is **for** survives whole, and it is this
+> row's own red state: a `B` code is a broken invariant, and routing one through an emission macro
+> makes it a line in a log the process then continues past. What the narrowed check cannot claim —
+> that every `B` code reaches a panic — is written into the check itself.
 
 **Why the corpus rules changed.** v1's check #3 was vacuous because check #2 *mandates* a doc file naming the code and v1's scan included `.md`. v2 narrowed the corpus to `.rs` and reintroduced the same vacuity through comments. v1's check #5 was self-defeating: the allowlist named identifiers and lived inside the file being scanned. Check #0 closes the third failure in the same family — a walker that resolves its root badly scans zero files and reports zero orphans, green. rustc's tidy pins a sentinel for exactly this reason.
 
@@ -123,10 +133,10 @@ Defined *around* **measured** existing occupancy, because codes are never renumb
 | Block | Domain | Occupied today |
 |---|---|---|
 | `00xx` | ECS core / system params | `B0002` |
-| `01xx` | `boyko_log` itself | new |
-| `02xx` | `boyko_threadpool` | new |
+| `01xx` | `boyko_log` itself | `W0103` (L4) |
+| `02xx` | `boyko_threadpool` | `E0201` (L6) |
 | `03xx` | memory (`VmReservation`, `ComponentPool`) | new |
-| `04xx`–`09xx` | components, query, change detection, events, assets, serialize | new |
+| `04xx`–`09xx` | components, query, change detection, events, assets, serialize — **one block each, in that order**, which is what fixes `05xx`=query, `07xx`=events, `08xx`=assets | `W0501`, `B0502` (query, L6) · `W0701` (events, L6) · `E0801` (assets, L6) |
 | `11xx`–`14xx` | input, scene, physics, math/sdf | new |
 | `15xx` | schedule sets & ordering | `W1501` |
 | `18xx` | app / plugins | `B1801`, `B1802` |

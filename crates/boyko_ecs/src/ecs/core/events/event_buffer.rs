@@ -2,6 +2,7 @@ use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
+use boyko_log::codes::{OnceSite, W0701};
 use crossbeam_utils::CachePadded;
 
 use crate::ecs::core::events::event::Event;
@@ -57,6 +58,46 @@ const _: () = assert!(core::mem::align_of::<ThreadLaneReader<LayoutAssertEvent>>
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(core::mem::size_of::<ThreadLanePair<LayoutAssertEvent>>() == 128);
 const _: () = assert!(core::mem::align_of::<ThreadLanePair<LayoutAssertEvent>>() == 64);
+
+/// `boyko-W0701` — a write lane was full, so the send was refused.
+///
+/// **The condition was already fully instrumented and completely invisible.** `send_one` and
+/// `send_many` return `EcsError::EventBufferFull` carrying the type name, the lane and both
+/// counts, and they bump the lane's `overflow_count` — and nothing reads either. Almost every
+/// call site discards the `Result`, because a gameplay system writing an event has no recovery to
+/// offer, and the counter is a number nobody prints. The four fields below are those four fields.
+///
+/// **The `Result` is unchanged**: a caller that does check it sees exactly what it saw before.
+///
+/// `latch` is the CALLER's, not this function's, so `send_one` and `send_many` report
+/// independently — `RatePolicy::Once` is per site (F11), and two unrelated sites sharing a code
+/// must not silence each other. The magnitudes stay in `overflow_count`, which is what a reader
+/// compares; repeating this line every frame would bury the frame that mattered.
+///
+/// `#[cold]` + `#[inline(never)]`: the branch that reaches it is the refusal, and keeping the
+/// formatting arguments out of `send_one`'s body is what keeps the admitted path compact.
+#[cold]
+#[inline(never)]
+fn report_lane_full(
+    latch: &OnceSite,
+    type_name: &'static str,
+    thread_index: u32,
+    attempted: u32,
+    dropped: u32,
+) {
+    if latch.claim() {
+        boyko_log::warn!(
+            boyko_log::Events,
+            W0701.number(),
+            "event buffer full for '{}' on lane {}: {} attempted, {} dropped; raise \
+             EventConfig's capacity_per_lane or drain the reader more often",
+            type_name,
+            thread_index,
+            attempted,
+            dropped
+        );
+    }
+}
 
 // ── ThreadLaneWriter ─────────────────────────────────────────────────────────
 
@@ -309,6 +350,11 @@ impl<E: Event> EventBuffer<E> {
         let len = lane.write_len.load(Ordering::Relaxed);
         if len >= lane.capacity {
             lane.overflow_count.fetch_add(1, Ordering::Relaxed);
+            // Per-SITE latch: `send_one` and `send_many` must not silence each other. A `static`
+            // in a generic function body is shared across every instantiation, which is exactly
+            // the granularity wanted here -- one report per SOURCE SITE, not one per event type.
+            static SEND_ONE_FULL: OnceSite = OnceSite::new();
+            report_lane_full(&SEND_ONE_FULL, core::any::type_name::<E>(), thread_index, 1, 1);
             return Err(EcsError::EventBufferFull {
                 type_name: core::any::type_name::<E>(),
                 thread_index,
@@ -378,6 +424,8 @@ impl<E: Event> EventBuffer<E> {
         let remaining = lane.capacity.saturating_sub(len);
         if n > remaining {
             lane.overflow_count.fetch_add(1, Ordering::Relaxed);
+            static SEND_MANY_FULL: OnceSite = OnceSite::new();
+            report_lane_full(&SEND_MANY_FULL, core::any::type_name::<E>(), thread_index, n, n);
             return Err(EcsError::EventBufferFull {
                 type_name: core::any::type_name::<E>(),
                 thread_index,
@@ -443,5 +491,56 @@ impl<E: Event> Drop for EventBuffer<E> {
             }
         }
         // Box<[MaybeUninit<E>]>s drop here naturally → frees allocations.
+    }
+}
+
+#[cfg(test)]
+mod l6_overflow_diagnostic {
+    use super::*;
+    use crate::ecs::core::events::event_config::EventConfig;
+
+    /// L6 check 5 — `boyko-W0701` reaches the log when a lane refuses a send.
+    ///
+    /// **Before L6 this condition was fully instrumented and completely invisible.** The refusal
+    /// returned `EventBufferFull` carrying all four fields and bumped `overflow_count`; nothing
+    /// read either, because the `Result` is discarded at almost every call site and the counter is
+    /// a number nobody prints. This drives the real overflow -- a one-slot lane, two sends -- and
+    /// observes the emission from the target's own counters.
+    ///
+    /// `delivered + sync_routed`, because a test thread may or may not hold a diagnostics lane:
+    /// with one the record lands in the ring and the drain counts it, without one a `Warn` takes
+    /// the synchronous channel and is counted there. Asserting only `delivered` would be green or
+    /// red depending on which harness thread ran it.
+    #[test]
+    fn w0701_reaches_the_log_when_a_lane_refuses_a_send() {
+        use boyko_log::level::Level;
+        use boyko_log::target::{LogTarget, set_target_level, target_stats};
+
+        let id = <boyko_log::Events as LogTarget>::ID;
+        set_target_level(id, Level::Trace);
+        let observed = || {
+            let s = target_stats(id);
+            s.0 + s.3
+        };
+        let before = observed();
+
+        let cfg = EventConfig::new(1, 1).expect("a one-slot single-lane config is legal");
+        let buf = EventBuffer::<LayoutAssertEvent>::new(cfg).expect("allocation");
+        assert!(buf.send_one(0, LayoutAssertEvent { _data: 1 }).is_ok(), "the first send fits");
+        let refused = buf.send_one(0, LayoutAssertEvent { _data: 2 });
+        assert!(
+            matches!(refused, Err(EcsError::EventBufferFull { attempted: 1, dropped: 1, .. })),
+            "the second send must be refused all-or-nothing, got {refused:?}"
+        );
+
+        // The drain may be held by a sibling test's consumer; a refusal there is not a failure of
+        // this claim, so retry rather than assert on the first attempt.
+        for _ in 0..64 {
+            if boyko_log::lifecycle::drain_once().is_some() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(observed() > before, "boyko-W0701 was never delivered");
     }
 }

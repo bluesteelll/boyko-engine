@@ -566,7 +566,7 @@ barrier.
 
 | What you want | Where | Method (line) |
 |---------------|-------|---------------|
-| Build a schedule | [schedule/schedule_builder.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs) ✅ | `ScheduleBuilder::new(Arc<ThreadPool>)` (149); `add_system(system) -> SystemConfig` (176); `build(&mut world) -> Schedule` (323) / `try_build(...)` (349, diagnostics) |
+| Build a schedule | [schedule/schedule_builder.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs) ✅ | `ScheduleBuilder::new(Arc<ThreadPool>)` (150); `add_system(system) -> SystemConfig` (177); `build(&mut world) -> Schedule` (324) / `try_build(...)` (350, diagnostics) |
 | Run a frame | [schedule/schedule.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule.rs):? ✅ | `Schedule::run(&mut world)` — bumps tick, runs state pass, dispatches |
 | Conflict bitsets + DAG | [schedule/conflict_graph.rs](../crates/boyko_ecs/src/ecs/core/schedule/conflict_graph.rs) ✅ | `ConflictGraph` |
 | Per-frame scratch | [schedule/executor_scratch.rs](../crates/boyko_ecs/src/ecs/core/schedule/executor_scratch.rs) ✅ | `ExecutorScratch` (`pred_remaining`, `running`, `completed`, out-of-line completion channel — Phase 9.3c) |
@@ -584,9 +584,9 @@ See [PHASE-9.2-RESULTS.md](archive/PHASE-9.2-RESULTS.md), [PHASE-9.3c-RESULTS.md
 | What | Where | Method |
 |------|-------|--------|
 | Order one system | [schedule/system_config.rs](../crates/boyko_ecs/src/ecs/core/schedule/system_config.rs) ✅ | `.before(set)` / `.after(set)` / `.in_set(set)` (value-based) |
-| Configure a set | [schedule/schedule_builder.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs):216 ✅ | `configure_set(set) -> ConfigureSet` (`.before`/`.after`/`.in_set` + hierarchy) |
+| Configure a set | [schedule/schedule_builder.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs):217 ✅ | `configure_set(set) -> ConfigureSet` (`.before`/`.after`/`.in_set` + hierarchy) |
 | Set ids / derive | [schedule/system_set.rs](../crates/boyko_ecs/src/ecs/core/schedule/system_set.rs) ✅ | `SystemSetId` (interned from `(TypeId, discriminant)`); `#[derive(SystemSet)]` on fieldless enums |
-| Build diagnostics | [schedule/schedule_builder.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs):349 ✅ | `try_build()` → `ScheduleBuildError` (`OrderingCycle` B9001, `SetHierarchyCycle` B9002, …) |
+| Build diagnostics | [schedule/schedule_builder.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs):350 ✅ | `try_build()` → `ScheduleBuildError` (`OrderingCycle` B9001, `SetHierarchyCycle` B9002, …) |
 | Topo / Tarjan plumbing | [schedule/ordering.rs](../crates/boyko_ecs/src/ecs/core/schedule/ordering.rs) ✅ | `OrderingEdge` / `SystemKey` (Phase 9 scaffold completed in Phase 15) |
 
 See [PHASE-15-RESULTS.md](archive/PHASE-15-RESULTS.md).

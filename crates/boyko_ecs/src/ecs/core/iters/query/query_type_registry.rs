@@ -55,6 +55,7 @@
 use std::any::TypeId;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use boyko_log::codes::{B0502, OnceSite, W0501};
 use boyko_utils::type_intern::TypeIntern;
 
 use crate::ecs::core::iters::query::data::QueryData;
@@ -132,15 +133,55 @@ pub fn register_new() -> QueryTypeId {
     if id >= MAX_QUERY_TYPES {
         // Saturate so re-entries cannot push past the cap.
         QUERY_NEXT_ID.store(MAX_QUERY_TYPES, Ordering::Relaxed);
+        // POSITIONAL, never `{B0502}`: an inline format argument lives inside the string
+        // literal, which the registry walker's LIT stream sees and its CODE stream does not.
         panic!(
-            "QueryTypeId exhaustion: MAX_QUERY_TYPES = {} reached. \
+            "{}: QueryTypeId exhaustion: MAX_QUERY_TYPES = {} reached. \
              This is a terminal panic — the process must restart. \
              Enable the `big_query_table` cargo feature on boyko_ecs \
              (raises the cap to 4096) or consolidate query shapes.",
+            B0502, MAX_QUERY_TYPES
+        );
+    }
+    // `id + 1` is the occupancy AFTER this mint, so the equality fires exactly once, on the mint
+    // that crossed the line -- and the number in the message is a measurement rather than the
+    // threshold restated.
+    if id + 1 == QUERY_TABLE_HIGH_WATER {
+        report_query_table_filling(id + 1);
+    }
+    QueryTypeId(id)
+}
+
+/// 75 % of the query-type table.
+///
+/// A fraction rather than a fixed remaining count, because what matters is the **rate** relative
+/// to the cap: a codebase at 768 of 1024 is one refactor from the wall whether the cap is 1024 or
+/// the `big_query_table` 4096.
+const QUERY_TABLE_HIGH_WATER: usize = MAX_QUERY_TYPES / 4 * 3;
+
+/// `boyko-W0501` — the query-type table crossed 75 % occupancy.
+///
+/// **Without this the table's only observable behaviour was 1023 silent mints and then a process
+/// kill.** `boyko-B0502` is correct and unhelpful alone: by the time it fires it names the shape
+/// that happened to be last, and not the ones that filled the table. A title that grows its query
+/// surface gradually crosses this line long before the other, and the gap is where the cheap fix
+/// lives.
+#[cold]
+#[inline(never)]
+fn report_query_table_filling(used: usize) {
+    static FIRED: OnceSite = OnceSite::new();
+    if FIRED.claim() {
+        boyko_log::warn!(
+            boyko_log::Query,
+            W0501.number(),
+            "the query-type table is {} of {} slots used (75 %); at {} the next distinct \
+             Query<D, F> shape is a terminal panic (boyko-B0502) -- enable the \
+             `big_query_table` feature or consolidate query shapes",
+            used,
+            MAX_QUERY_TYPES,
             MAX_QUERY_TYPES
         );
     }
-    QueryTypeId(id)
 }
 
 /// Table size backing [`REGISTRY`] — twice [`MAX_QUERY_TYPES`], the load factor
