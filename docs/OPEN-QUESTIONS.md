@@ -46,10 +46,40 @@ documents in the tree that sync-validation is enabled and still does **not** fla
 RAW hazard on this path. The layer being *present* and the layer being *sensitive* are two
 questions; L7 can gate the first and nothing gates the second.
 
-**One thing the owner may want to weigh**: every golden runs under `BOYKO_DISABLE_VALIDATION=1`, so
-after L7 every golden run emits one `boyko-E2101` line saying its validation was disabled. That is
-the point — but it is new output on a channel some tooling greps, and if it should be suppressed for
-the golden legs specifically, say so.
+> ⚠️ **A question I asked here and then measured, and it should not have been asked.** The first
+> version of this entry offered the owner a choice: every golden runs under
+> `BOYKO_DISABLE_VALIDATION=1`, so after L7 each one emits a `boyko-E2101` line — *"should it be
+> suppressed for the golden legs?"* **Both halves of the premise are false**, and the question's
+> shape was worse than either: it invited weakening a diagnostic to protect a channel, when
+> **saying that a golden run's validation was disabled is the entire reason the code exists.**
+> Suppressing it there would deliberately rebuild the defect the 2026-08-06 entry below describes.
+>
+> 1. **No collision is possible.** `scripts/golden.ps1:226` scans with the literal pattern
+>    `\[vk-validation\]`. `boyko-E2101` cannot match it.
+> 2. **In a golden run the line does not exist at all.** Measured: **no host calls
+>    `boyko_log::lifecycle::boot` or `enable`** — the only callers anywhere are `boyko_log`'s own
+>    tests and `boyko_ecs/tests/log_seam.rs`, and `crates/boyko_ecs/src/ecs/core/log/plugin.rs:40`
+>    says so in its own doc comment. So the `error!` goes into a `.bss` lane ring nothing drains,
+>    and not one byte is printed.
+
+### And (2) is the finding that matters more than the question it answers
+
+**The logger is in exactly the state the profiler was in at `e0160555`: complete, gated, and
+unreachable from every host.** L5 landed the ECS seam, L6 landed the engine's emitters, and nothing
+turns it on — so every record L6 just wired up is written into a ring with no consumer. Twelve
+`Live` rows, five new codes, ten doc pages, and in a shipped run the whole apparatus is silent for a
+reason no gate reports.
+
+It is not a defect *of* L5 or L6 — `boot`/`enable` belong to `boyko_app`, which is **L8b's** row, and
+`plugin.rs` was written knowing it. What is worth the owner's attention is that this is the **same
+shape, in the same campaign, two rungs after it was found the first time**: every gate builds its own
+world, enables logging itself, and asks whether the record arrived — so none of them can see that no
+host ever does. I am recording it now rather than at L8b because the last time this shape appeared,
+fifteen green rungs had passed over it.
+
+**Nothing is blocked and no decision is needed**; L8b closes it by construction. If the owner wants
+it closed *earlier* — a host that boots the logger before L7's migration lands, so L7's own sites are
+observable in a real run rather than only in tests — that is a scope call and the only one here.
 
 ---
 
