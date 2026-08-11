@@ -14,6 +14,45 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-11 — ⚠️ MEASURED: validation DOES run on this box, and the 2026-08-06 entry below is narrower than it reads
+
+Opening logging rung L7 (migrate `boyko_rhi_vulkan`) started by re-deriving the site list, because
+the rung's row cites line numbers that have drifted. It also had to establish what `E2101` — "add
+an `error!` when validation is requested but the node was not chained" — can actually observe here.
+Two measurements, both against HEAD, **before any L7 code was written**:
+
+1. **A validation-ON boot works.** With `BOYKO_DISABLE_VALIDATION` **unset** and
+   `enable_validation: true`, `cargo test -p boyko_rhi_vulkan --test compute` boots and passes
+   **4 of 4**. The standing note that the SDK's MSVC-built `VkLayer_khronos_validation.dll` crashes
+   this MinGW process on load is not true of the **headless compute path**. Whatever it describes —
+   most likely the windowed/golden path — it is narrower than "validation cannot run here", and I
+   have been treating it as the wider claim.
+2. **The chained validation-features node is built, not unbuildable.** `create_instance` enables
+   `VK_EXT_validation_features` when present and chains `VkValidationFeaturesEXT` with
+   synchronization validation as the head of the instance `p_next`. Disposition **F2** ("a chained
+   validation-features node is unbuildable here") is refuted by the tree.
+
+**What that costs the plan.** G7's first clause — "`E2101` fires on a validation-**on** run" — holds
+only if the node can never be chained. It can, so on a correct box a validation-on run must be
+**silent**, and the gate as specified would be red against a working engine. I have re-cut `E2101`
+to mean *validation was requested and this process is not getting it* (the escape hatch took it, or
+the extension is absent), which makes G7 two-sided and runnable here: positive = escape hatch set,
+negative = unset. The full argument is in the corpus (`logging/ladder`, the L7 block).
+
+**This is an architecture call and I made it** rather than waiting — it is a gate's polarity, not a
+value. It is here because it **contradicts a disposition the owner may have relied on**, and because
+of what it does NOT change: `M25` stands. `compute.rs`'s own `negative_chained_barrier_hazard`
+documents in the tree that sync-validation is enabled and still does **not** flag a compute→compute
+RAW hazard on this path. The layer being *present* and the layer being *sensitive* are two
+questions; L7 can gate the first and nothing gates the second.
+
+**One thing the owner may want to weigh**: every golden runs under `BOYKO_DISABLE_VALIDATION=1`, so
+after L7 every golden run emits one `boyko-E2101` line saying its validation was disabled. That is
+the point — but it is new output on a channel some tooling greps, and if it should be suppressed for
+the golden legs specifically, say so.
+
+---
+
 ## 2026-08-11 — L6 found three mechanisms that exist and are unreachable, and left them that way on purpose
 
 Logging rung L6 migrated `boyko_ecs` and `boyko_threadpool`. Three things it touched are **built,

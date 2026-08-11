@@ -60,7 +60,7 @@ subsystem present is not a baseline for the both-present configuration (S10).
 | **L5-gate** | **P1, re-specified twice** (F3 → instrument; S10 → leg matrix): a **headless schedule bench**, not windowed frame time, run as a **2×2 of {logger off, on} × {profiler absent, armed}**, ABBA-counterbalanced, interleaved zero control, **one sitting**. The claim it may make is "logger-on vs off **at a fixed profiler state**", reported at both states. Baselines carry `config_tag = {profiler, logger}`; a sitting whose tag differs returns `NotResolved{ConfigMismatch}` rather than a number | `crates/bench_bevy_vs_boyko/benches/` | — |
 | **L6** *(**SHIPPED**, in two commits — see the two decision blocks below)* | Migrate `boyko_ecs` + `boyko_threadpool`; flip those rows `Pending`→`Live`; `W1501`, `B0002` normalisation, `W0701`, `W0501`/`B0502`, `E0201`. **Landed beyond the row**: `E0801` (the asset server's `eprintln!`, which the ledger's file list covers and the row's code list did not name), `PanicCode`'s `Display` — the mechanism that lets a `B` code reach source as an *identifier* — and checks **5** and **6**, which the check table always said arm here. **Landed first, alone**: the record decoder L3 owed, without which every migrated site would have rendered its format literal and discarded its arguments | as tabled | `#[should_panic]` substrings |
 | **L7** | Migrate `boyko_rhi_vulkan` **except the messenger, which is not touched at all**; `E2101`; `W2102` ungated in release; census wiring | as tabled | `[vk-validation]` line, byte for byte |
-| **L7-gate** | **G7, re-cut two-sided** (F2): `E2101` fires on a validation-**on** run and is absent on a validation-**off** run (`BOYKO_DISABLE_VALIDATION=1`). Channel liveness is proved separately by an **ordinary validation error from a deliberately invalid call** — the historical `mip_levels: 12` on a 512×512 image — with the **baseline of 19 messages accounted for**. A forced *hazard* is explicitly **not** the control: this machine has been measured unable to produce `SYNC-HAZARD` (M25) | `crates/boyko_rhi_vulkan/tests/` | — |
+| **L7-gate** *(⚠️ **F2's PREMISE IS REFUTED BY THE TREE — measured 2026-08-11, before any L7 code was written.** See the block below the table; the polarity of the first clause is wrong as written and the row is left verbatim so the correction is legible)* | **G7, re-cut two-sided** (F2): `E2101` fires on a validation-**on** run and is absent on a validation-**off** run (`BOYKO_DISABLE_VALIDATION=1`). Channel liveness is proved separately by an **ordinary validation error from a deliberately invalid call** — the historical `mip_levels: 12` on a 512×512 image — with the **baseline of 19 messages accounted for**. A forced *hazard* is explicitly **not** the control: this machine has been measured unable to produce `SYNC-HAZARD` (M25) | `crates/boyko_rhi_vulkan/tests/` | — |
 | **L8a** | Migrate `boyko_render`, `boyko_image`, `boyko_serialize`, `boyko_physics`. **Edit `boyko_image/Cargo.toml:5`'s description in the same commit** — it stops being true here | ledger | goldens |
 | **L8b** | Migrate `boyko_app`; **zero measurement rows** (S1 — profiling rung 7 removed the producers already). Delete `boyko_demo`'s third-party `log = "0.4"` and migrate `main.rs:113`; add the tidy check banning third-party `log`/`tracing` in any workspace manifest. **MUST LAND AFTER profiling rung 7 and 7b** | ledger, `crates/boyko_demo/` | — |
 | **L8c** | Check 3c armed: `Pending` == 0 (`Historical` excluded). Walker's unclassified-site count == 0 over the **≤ 78** denominator; enable `print_census.rs`; run the clippy `disallowed-macros` canary and record the result | `tests/`, `clippy.toml` | — |
@@ -222,6 +222,59 @@ to "write `fmt`, return" reddened four `record` tests — and left `lane`'s gree
 fallback had the same defect independently — it rendered site metadata and the literal — so a
 severe record on a driver or OS callback thread lost precisely the values it existed to report,
 on the path where the engine has the least other information. Both paths now render arguments.
+
+### L7 opened with a measurement that refutes F2, and G7's polarity does not survive it
+
+**Measured at HEAD, before a line of L7 was written**, because L7's row cites line numbers that have
+drifted (`device.rs:2110` / `3100,3158,3189`) and a rung that migrates a crate has to re-derive its
+own site list.
+
+**1. The site census, re-derived.** 30 print matches under `crates/boyko_rhi_vulkan/src`:
+**16** in `compute/tests.rs` (test-only, keep — the corpus's own count, reproduced exactly), **1**
+in `debug.rs:114` (the messenger, **NOT TOUCHED AT ALL**), **1** at `device.rs:3788` inside a
+*within-file* `#[cfg(test)] mod tests` opening at `:3732`, and **13 production sites**:
+`device.rs` ×3 (the `#[cfg(debug_assertions)]` degradation trio — `W2102`'s subjects, still the
+same three by content: DDGI storage, shadow-denoise RG16, SSAO R16), `present/passes/gbuffer.rs` ×1
+(a hand-rolled `AtomicBool` latch, the shape the ledger deletes elsewhere), `present/swapchain.rs`
+×1 (present-mode fallback), `present/targets.rs` ×7 (**the ledger's count, exact**) — all seven the
+same degrade-to-`None` build failure.
+
+> **The ledger's denominator misses within-file `#[cfg(test)] mod tests` blocks.** Its test-only
+> class is "16 within-file + 7 cross-file = 23", which counts whole FILES; `device.rs:3788` is a
+> test's SKIP line inside a production file and is in neither class. The walker's CODE stream does
+> not strip within-file `#[cfg(test)]` regions either, so **L8c's "zero unclassified sites" cannot
+> be reached without a rule for them.** Recorded here rather than fixed at L7: it is L8c's gate.
+
+**2. `E2101`'s condition, and the premise that failed.** F2 says "a *chained* validation-features
+node is unbuildable here". **It is built and it works.** `create_instance` enables
+`VK_EXT_validation_features` when present and chains `VkValidationFeaturesEXT`
+(`VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT`) as the head of the instance
+`p_next`, with the create-time messenger behind it. Measured by running it: with
+`BOYKO_DISABLE_VALIDATION` **unset** and `enable_validation: true`,
+`cargo test -p boyko_rhi_vulkan --test compute` boots and passes **4 of 4** (`test result: ok`).
+The standing environment note that the validation layer crashes this MinGW process is therefore
+**not true of the headless compute path** — whatever it describes, it is narrower than "validation
+cannot run here".
+
+**3. So G7's first clause is backwards.** "`E2101` fires on a validation-**on** run" holds only if
+the node can never be chained. It can, so on a correct box a validation-on run must be **silent**,
+and a gate asserting the opposite would be red against a working engine.
+
+**The decision, taken here with the measurement rather than deferred**: `E2101` means *validation
+was requested and this process is not getting it* — `enable_validation` was true in the config the
+caller wrote, **and** either the `BOYKO_DISABLE_VALIDATION` escape hatch took it away or
+`VK_EXT_validation_features` is absent. Both arms say one thing to a reader: **this run's validation
+is weaker than the caller asked for, so a clean run is not a proof.** That is the condition this
+repository has been burned by twice and which stands in `docs/OPEN-QUESTIONS.md` from 2026-08-06 —
+every golden runs under `BOYKO_DISABLE_VALIDATION=1`, and until now nothing said so.
+
+G7 becomes two-sided **and runnable on this box**, which the specified polarity was not:
+**positive** — `enable_validation: true` with the escape hatch set ⇒ `E2101` fires; **negative** —
+escape hatch unset ⇒ absent, and the context reports sync-validation live. What it still **cannot**
+claim is that a live layer *catches* anything: `compute.rs`'s own `negative_chained_barrier_hazard`
+documents, in the tree, that sync-validation is enabled and does **not** flag a compute→compute RAW
+hazard on this path. `M25` stands; the instrument's presence and its sensitivity are two questions
+and only the first is gateable.
 
 ### Six L6 decisions taken at implementation, and the three things arming its checks found
 
