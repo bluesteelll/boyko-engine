@@ -60,7 +60,7 @@ subsystem present is not a baseline for the both-present configuration (S10).
 | **L5-gate** | **P1, re-specified twice** (F3 → instrument; S10 → leg matrix): a **headless schedule bench**, not windowed frame time, run as a **2×2 of {logger off, on} × {profiler absent, armed}**, ABBA-counterbalanced, interleaved zero control, **one sitting**. The claim it may make is "logger-on vs off **at a fixed profiler state**", reported at both states. Baselines carry `config_tag = {profiler, logger}`; a sitting whose tag differs returns `NotResolved{ConfigMismatch}` rather than a number | `crates/bench_bevy_vs_boyko/benches/` | — |
 | **L6** *(**SHIPPED**, in two commits — see the two decision blocks below)* | Migrate `boyko_ecs` + `boyko_threadpool`; flip those rows `Pending`→`Live`; `W1501`, `B0002` normalisation, `W0701`, `W0501`/`B0502`, `E0201`. **Landed beyond the row**: `E0801` (the asset server's `eprintln!`, which the ledger's file list covers and the row's code list did not name), `PanicCode`'s `Display` — the mechanism that lets a `B` code reach source as an *identifier* — and checks **5** and **6**, which the check table always said arm here. **Landed first, alone**: the record decoder L3 owed, without which every migrated site would have rendered its format literal and discarded its arguments | as tabled | `#[should_panic]` substrings |
 | **L7a** *(**SHIPPED**)* | `E2101` and **G7**, the rung's named gate, landed alone because the measurement that re-cut them is the rung's whole design work. Two emission sites, one code, `Once` per site: the escape hatch withheld what the caller asked for, and the extension that carries the sync-validation node is absent. The host-reachability fix landed with it — until then every emitter L5 and L6 wired up wrote into a ring with no consumer in any shipped run | `device.rs`, `tests/g7_validation_reporting.rs`, `boyko_app` | `[vk-validation]` line, byte for byte |
-| **L7b** *(OWED)* | The remaining **11** production sites, re-derived against HEAD: `device.rs` ×3 (`W2102`, ungated in release — the `#[cfg(debug_assertions)]` trio), `present/passes/gbuffer.rs` ×1 (`W2104`, deleting its hand-rolled `AtomicBool` latch), `present/swapchain.rs` ×1 (`W2105`), `present/targets.rs` ×7 (`E2103`, the degrade-to-`None` build failures). Plus census wiring. **The messenger is not touched at all** | as tabled | same |
+| **L7b** *(**SHIPPED**)* | The remaining **11** production sites: `device.rs` ×3 (`W2102`, ungated in release — the `#[cfg(debug_assertions)]` trio), `present/passes/gbuffer.rs` ×1 (`W2104`, deleting its hand-rolled `AtomicBool` latch), `present/swapchain.rs` ×1 (`W2105`), `present/targets.rs` ×7 — **not one code but two**, `E2103` ×4 and `W2106` ×3, split by what `record_vb` does with each `None` (see the block below). Five doc pages, five observing tests, five REDs. **The messenger is not touched at all** | `device.rs`, `gbuffer.rs`, `swapchain.rs`, `targets.rs`, `log_probe.rs` | same |
 | **L7-gate** *(⚠️ **F2's PREMISE IS REFUTED BY THE TREE — measured 2026-08-11, before any L7 code was written.** See the block below the table; the polarity of the first clause is wrong as written and the row is left verbatim so the correction is legible)* | **G7, re-cut two-sided** (F2): `E2101` fires on a validation-**on** run and is absent on a validation-**off** run (`BOYKO_DISABLE_VALIDATION=1`). Channel liveness is proved separately by an **ordinary validation error from a deliberately invalid call** — the historical `mip_levels: 12` on a 512×512 image — with the **baseline of 19 messages accounted for**. A forced *hazard* is explicitly **not** the control: this machine has been measured unable to produce `SYNC-HAZARD` (M25) | `crates/boyko_rhi_vulkan/tests/` | — |
 | **L8a** | Migrate `boyko_render`, `boyko_image`, `boyko_serialize`, `boyko_physics`. **Edit `boyko_image/Cargo.toml:5`'s description in the same commit** — it stops being true here | ledger | goldens |
 | **L8b** | Migrate `boyko_app`; **zero measurement rows** (S1 — profiling rung 7 removed the producers already). Delete `boyko_demo`'s third-party `log = "0.4"` and migrate `main.rs:113`; add the tidy check banning third-party `log`/`tracing` in any workspace manifest. **MUST LAND AFTER profiling rung 7 and 7b** | ledger, `crates/boyko_demo/` | — |
@@ -276,6 +276,71 @@ claim is that a live layer *catches* anything: `compute.rs`'s own `negative_chai
 documents, in the tree, that sync-validation is enabled and does **not** flag a compute→compute RAW
 hazard on this path. `M25` stands; the instrument's presence and its sensitivity are two questions
 and only the first is gateable.
+
+### L7b: the seven-site code became two, and the reachability gate turned out not to be a test
+
+**1. `E2103` ×7 is `E2103` ×4 + `W2106` ×3, and the split is a measurement.** The ledger assigns one
+code to all seven degrade-to-`None` builders in `present/targets.rs`. Read against `record_vb`, the
+seven are not one thing: **four** are consumed with `.expect(..)`
+(`present/passes/vb.rs:3706`, `:3776`, `:4291`, and `thin_normal` through the two match arms that
+require it) and **three** with `if let Some(..)` (`:3988-3990`, `:4088`). The first group kills the
+frame; the second loses an opt-in effect and renders. The file's own comment already says so —
+*"opt-in, no dependents: `record_vb` GRACEFULLY skips … UNLIKE `vb_geo_aux_set`/`vb_ssao_set`/
+`vb_split_set1`, which are the split's own mandatory core and `.expect()`-panic if missing"* — so a
+single code would have erased a distinction the code beneath it states explicitly. **In this
+registry the class letter IS the level**, so one row could not have carried both. `W2106` is the new
+number; `E2103` keeps the four fatal ones.
+
+**2. `RatePolicy::Every` for both, and the reason is frequency, not severity.** They run at target
+build and at each resize, never per frame. A `Once` would report the first resize that ran out of
+device memory and stay silent through every one after it — precisely when a reader needs the repeat.
+The `W2102` trio keeps `Once` **per site** (F11), and the test that pins it trips all three and
+counts: with one shared latch it reads `1 != 2` on a `not(hwrt)` build and `1 != 3` with `hwrt`.
+
+**3. The wiring is gated by the COMPILER, not by any of these tests — found by a RED that refused to
+redden.** Deleting the `report_present_mode_fallback` **call** from `Swapchain::new_with_present_mode`
+left `w2105_announces_the_fallback_once_not_once_per_resize` **green**: the test calls the reporter
+directly, so it can only ever prove the reporter behaves, never that production still reaches it.
+What actually reddened was `cargo clippy --all-targets -- -D warnings`, with
+`error: function report_present_mode_fallback is never used` and exit 101.
+
+> That gate exists **because the reporters are private**. Had they been made `pub` so an integration
+> test in `tests/` could call them — the obvious first design, and the one this rung nearly took —
+> `dead_code` would not fire and the wiring would have had no gate at all, while every test stayed
+> green. The compiler proves reachability; the tests prove behaviour; neither substitutes for the
+> other. Written into `log_probe.rs`'s header so the next person to widen a reporter's visibility
+> reads why not.
+
+**4. The emission order was checked against the host, because L7a's own fix made it a live question.**
+Every `21xx` code except `W2104` fires during boot — `E2101`/`W2102` inside `VulkanContext::boot`,
+`W2105`/`E2103`/`W2106` in the window→surface→swapchain→targets chain — so if the device booted
+before the logger was enabled they would all be written into a ring with no consumer, which is
+precisely the defect `db197537` closed one rung earlier. **Verified at HEAD**: the logger is booted
+and enabled in `EnginePlugins::build` (`plugins.rs:298`), which runs when the app is *constructed*;
+`VulkanContext::boot_singleton` is `runner.rs:160`, reached from `app.run()`. The device boots
+after. No test pins that ordering, and one is not owed here — `boyko_app/tests/log_host_*.rs` prove
+the host enables the logger at all, and the ordering claim is a two-line read of the same file —
+but it is written down so a reordering has somewhere to be checked against.
+
+> **The `hwrt` clippy leg has exactly one correct incantation, and it is not the obvious one.**
+> `cargo clippy --workspace --all-targets --features boyko_rhi_vulkan/hwrt` **fails to compile**
+> `boyko_app` — `error[E0063]: missing fields ... in initializer of GBufferScene` — because it turns
+> on the backend's `#[cfg]`'d fields without turning on the `#[cfg(feature = "hwrt")]` initializers
+> in the crate that constructs the struct. `boyko_rhi_vulkan/Cargo.toml` states the mechanism in its
+> own `[features]` comment: *features unify per PACKAGE*, so a flag no source in `boyko_app` names
+> still changes what `boyko_app` must write. The leg that works is the forwarding chain,
+> `--features boyko-app/hwrt` (`boyko-app` → `boyko-render` → `boyko_rhi_vulkan`). Recorded because
+> "clippy clean in both configurations" is a per-rung claim and the wrong spelling makes it a claim
+> about a tree that does not build.
+
+**5. The new tests were each other's interference, and the argument that they were not was wrong.**
+`log_probe`'s first header reasoned that an exact `assert_eq!` on a per-target counter is sound here
+because the only `VulkanContext::boot*` in the `--lib` binary passes `enable_validation: false`, so
+no `E2101` arm can fire. **That argument counted the emitters that existed before the rung and
+missed the ones the rung was adding.** A filtered `--lib w2106` run showed `left: 2, right: 1` — the
+extra record was the sibling `e2103` test's, landing inside the window while the two ran on
+different harness threads. The full run had passed on scheduling luck. The four observers now
+serialize on one `OBSERVE_LOCK`, and the exact run that was red is green.
 
 ### Six L6 decisions taken at implementation, and the three things arming its checks found
 

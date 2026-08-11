@@ -422,6 +422,28 @@ codes! {
     // and works here. See `logging/ladder`'s L7 block for the measurement that forced the re-cut.
     (2101, E, E2101, RatePolicy::Once,  CodeStatus::Live,
         "Validation was requested but this process is not getting it"),
+    // L7b. `Once` is per SITE (F11), and this is the code F11 was raised for: three independent
+    // capability degradations share this number, and a code-scoped latch would have reported one
+    // and silently lost two. Each site owns its own `OnceSite`.
+    (2102, W, W2102, RatePolicy::Once,  CodeStatus::Live,
+        "A device format feature is missing, so an optional render feature is disabled"),
+    // `Every`, not `Once`, and the reason is the call frequency rather than the severity: these
+    // fire from the render-target builder, which runs at boot and at each resize -- not per frame.
+    // A `Once` here would report the first resize that ran out of device memory and stay silent
+    // through every later one, which is the failure mode the operator most needs to see repeated.
+    (2103, E, E2103, RatePolicy::Every, CodeStatus::Live,
+        "A mandatory render target or descriptor set failed to build; the frame will be refused"),
+    (2104, W, W2104, RatePolicy::Once,  CodeStatus::Live,
+        "A textured material is suppressed by the motion-vector pipeline this frame"),
+    (2105, W, W2105, RatePolicy::Once,  CodeStatus::Live,
+        "The requested present mode is not advertised, so the swapchain fell back to fifo"),
+    // Split from `E2103` by a MEASUREMENT, not by taste: `record_vb` consumes the four `E2103`
+    // subjects with `.expect(..)` (`present/passes/vb.rs:3706,3776,4291`, and `thin_normal` via the
+    // two match arms that require it), and the three subjects here with `if let Some(..)`
+    // (`:3988-3990`, `:4088`). One group kills the frame; the other loses an opt-in effect and
+    // renders. The class letter IS the level in this registry, so one code could not carry both.
+    (2106, W, W2106, RatePolicy::Every, CodeStatus::Live,
+        "An optional shadow chain's sets failed to build, so the chain is skipped this frame"),
 
     (9001, B, B9001, RatePolicy::Every, CodeStatus::Live,
         "The schedule contains a cycle of systems"),
@@ -548,7 +570,12 @@ mod tests {
             (b'W', 701),  // L6  -- an event lane was full, the send was refused
             (b'E', 801),  // L6  -- an asset failed to load
             (b'W', 1501), // L6  -- ordering references an empty system set
-            (b'E', 2101), // L7  -- validation requested but not delivered
+            (b'E', 2101), // L7a -- validation requested but not delivered
+            (b'W', 2102), // L7b -- a device format feature is missing (three sites, one code)
+            (b'E', 2103), // L7b -- a mandatory target/set failed to build
+            (b'W', 2104), // L7b -- textured material suppressed by motion vectors
+            (b'W', 2105), // L7b -- present mode not advertised, fell back to fifo
+            (b'W', 2106), // L7b -- an optional shadow chain's sets failed to build
             (b'B', 9001), // L6  -- schedule cycle
             (b'B', 9002), // L6  -- set-hierarchy cycle
             (b'B', 9004), // L6  -- two ordered sets share a member

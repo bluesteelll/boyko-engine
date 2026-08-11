@@ -34,7 +34,7 @@ use core::mem;
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-use boyko_log::codes::{E2101, OnceSite};
+use boyko_log::codes::{E2101, OnceSite, W2102};
 
 use crate::debug::{self, DebugMessengerState};
 use crate::ffi::*;
@@ -2135,7 +2135,8 @@ fn report_validation_withheld_by_env() {
         boyko_log::error!(
             boyko_log::RhiVulkan,
             E2101.number(),
-            "validation was requested but BOYKO_DISABLE_VALIDATION withheld it; no messenger is              created and no validation message can be produced -- a clean run proves nothing"
+            "validation was requested but BOYKO_DISABLE_VALIDATION withheld it; no messenger is \
+             created and no validation message can be produced -- a clean run proves nothing"
         );
     }
 }
@@ -2156,7 +2157,8 @@ fn report_sync_validation_absent() {
         boyko_log::error!(
             boyko_log::RhiVulkan,
             E2101.number(),
-            "validation is on but VK_EXT_validation_features is absent, so synchronization              validation is NOT enabled; this run cannot flag a missing or wrong barrier"
+            "validation is on but VK_EXT_validation_features is absent, so synchronization \
+             validation is NOT enabled; this run cannot flag a missing or wrong barrier"
         );
     }
 }
@@ -3129,6 +3131,73 @@ fn is_device_extension_present(
     exts.iter().any(|e| cstr_array_eq(&e.extension_name, want))
 }
 
+// ── `boyko-W2102` — the three device-capability degradations ────────────────────────────────────
+//
+// **Three functions, not one with an argument, and that is the whole point of this code.** `W2102`
+// is the case `logging/emission-path`'s F11 was raised for: one code covers three independent
+// degradations, so a code-scoped `Once` would report whichever fired first and lose the other two
+// silently -- and `Once` deliberately does not count its suppressions, so the loss would not even
+// appear as a number. The latch is therefore per SITE: each reporter below owns its own `OnceSite`,
+// and a device missing all three formats produces three lines.
+//
+// **They are no longer `#[cfg(debug_assertions)]`, which is the behaviour change.** Each of these
+// three was a debug-only `eprintln!`, so the shipping build degraded a render feature to disabled
+// and said nothing at all. That is the state `boyko_app/src/host.rs`'s own comment argues against
+// in writing -- "Emitted UNCONDITIONALLY (not `#[cfg(debug_assertions)]`): a RELEASE-build
+// degrade-to-Off must be observable" -- and this rung settles the two-doctrine conflict its way.
+// The cost of doing so is one `Relaxed` load from a private line, once per boot, off the hot path.
+
+/// `boyko-W2102`, site 1 — the SDFDDGI probe atlases have no storage-image support.
+#[cold]
+#[inline(never)]
+fn report_ddgi_storage_unsupported(irr_ok: bool, depth_ok: bool) {
+    static FIRED: OnceSite = OnceSite::new();
+    if FIRED.claim() {
+        boyko_log::warn!(
+            boyko_log::RhiVulkan,
+            W2102.number(),
+            "DDGI disabled: B10G11R11/RG16F storage unsupported (irr_ok={}, depth_ok={})",
+            irr_ok,
+            depth_ok
+        );
+    }
+}
+
+/// `boyko-W2102`, site 2 — the RT soft-shadow à-trous denoise has no `R16G16_UNORM` storage.
+///
+/// `rg8_ok` is carried for context only: both ping-pong rings are `R16G16_UNORM` since the
+/// uniform-RG16 design, so `rg16_ok` is the sole precondition and `rg8_ok` merely says whether the
+/// narrower format would have worked.
+#[cfg(feature = "hwrt")]
+#[cold]
+#[inline(never)]
+fn report_shadow_denoise_storage_unsupported(rg16_ok: bool, rg8_ok: bool) {
+    static FIRED: OnceSite = OnceSite::new();
+    if FIRED.claim() {
+        boyko_log::warn!(
+            boyko_log::RhiVulkan,
+            W2102.number(),
+            "shadow denoise disabled: RG16 UNORM storage unsupported (rg16_ok={}, rg8_ok={})",
+            rg16_ok,
+            rg8_ok
+        );
+    }
+}
+
+/// `boyko-W2102`, site 3 — the SSAO à-trous denoise has no `R16_UNORM` storage.
+#[cold]
+#[inline(never)]
+fn report_ssao_denoise_storage_unsupported() {
+    static FIRED: OnceSite = OnceSite::new();
+    if FIRED.claim() {
+        boyko_log::warn!(
+            boyko_log::RhiVulkan,
+            W2102.number(),
+            "SSAO a-trous denoise disabled: R16 UNORM storage unsupported"
+        );
+    }
+}
+
 /// Queries the minimal Render P1b [`DeviceCaps`]: whether the GPU advertises (T-dev)
 /// the 5 bindless-prerequisite `VkPhysicalDeviceDescriptorIndexingFeatures` bits
 /// (chained into `vkGetPhysicalDeviceFeatures2` — the SAME granular struct
@@ -3331,14 +3400,11 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
     let ddgi_depth_storage_ok =
         (ddgi_depth_props.optimal_tiling_features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
 
-    // A debug-log line only when a supported feature is missing (NO boot fail-fast — DDGI is
-    // opt-in; the resolve clamp + the no-storage atlas fallback handle it, plan §3).
-    #[cfg(debug_assertions)]
+    // `boyko-W2102` when a supported feature is missing (NO boot fail-fast — DDGI is opt-in; the
+    // resolve clamp + the no-storage atlas fallback handle it, plan §3). L7b: this was
+    // `#[cfg(debug_assertions)]`, so a shipping build turned DDGI off in silence.
     if !(ddgi_irr_storage_ok && ddgi_depth_storage_ok) {
-        eprintln!(
-            "DDGI disabled: B10G11R11/RG16F storage unsupported (irr_ok={ddgi_irr_storage_ok}, \
-             depth_ok={ddgi_depth_storage_ok})"
-        );
+        report_ddgi_storage_unsupported(ddgi_irr_storage_ok, ddgi_depth_storage_ok);
     }
 
     // --- rg8_unorm_storage_ok / rg16_unorm_storage_ok (Rung 3a): STORAGE_IMAGE on R8G8_UNORM +
@@ -3388,15 +3454,11 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
         let rg16_ok =
             (rg16_props.optimal_tiling_features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
 
-        // A debug-log line only when the denoise storage format (RG16 — the sole precondition now
-        // both rings are R16G16_UNORM) is missing (NO boot fail-fast — the denoise is opt-in; the
-        // target-allocation + activation gate handle it). `rg8_ok` is logged for context only.
-        #[cfg(debug_assertions)]
+        // `boyko-W2102` when the denoise storage format (RG16 — the sole precondition now both
+        // rings are R16G16_UNORM) is missing (NO boot fail-fast — the denoise is opt-in; the
+        // target-allocation + activation gate handle it). L7b: was `#[cfg(debug_assertions)]`.
         if !rg16_ok {
-            eprintln!(
-                "shadow denoise disabled: RG16 UNORM storage unsupported \
-                 (rg16_ok={rg16_ok}, rg8_ok={rg8_ok})"
-            );
+            report_shadow_denoise_storage_unsupported(rg16_ok, rg8_ok);
         }
         (rg8_ok, rg16_ok)
     };
@@ -3422,9 +3484,9 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
             )
         };
         let ok = (r16_props.optimal_tiling_features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
-        #[cfg(debug_assertions)]
+        // L7b: `boyko-W2102`, previously a `#[cfg(debug_assertions)]` `eprintln!`.
         if !ok {
-            eprintln!("SSAO à-trous denoise disabled: R16 UNORM storage unsupported");
+            report_ssao_denoise_storage_unsupported();
         }
         ok
     };
@@ -3792,6 +3854,7 @@ mod tests {
 
     use super::{InstanceConfig, VulkanContext, validation_requested};
     use crate::error::VulkanError;
+    use crate::log_probe::{arm, drain, observe_lock, observed};
 
     /// Serializes the two tests that interact through PROCESS-GLOBAL state:
     /// `validation_requested_env_gate` mutates `BOYKO_DISABLE_VALIDATION` via
@@ -4077,5 +4140,58 @@ mod tests {
         // (the R2a arms, unreachable in R1 but pinned here).
         assert_eq!(rt_caps(true, false).rt_tier(), RtTier::Weak);
         assert_eq!(rt_caps(true, true).rt_tier(), RtTier::Strong);
+    }
+
+    /// **`boyko-W2102`: three sites, one code, and all three must report.**
+    ///
+    /// This is the test for the claim `logging/emission-path`'s F11 exists to make: `RatePolicy`
+    /// is indexed by code, so a code-scoped `Once` would fire for whichever of the three device
+    /// degradations happened first and drop the other two -- uncounted, because `Once` deliberately
+    /// does not count its suppressions. The latch is per SITE instead, and the way to show that is
+    /// to trip all three and count.
+    ///
+    /// The RED that earned it: give the three reporters one shared `static FIRED` and this asserts
+    /// `1 == 3`.
+    ///
+    /// The exact delta is sound rather than hopeful -- see `crate::log_probe`'s header for the
+    /// measurement that no other `RhiVulkan` record can appear in this binary. The lock is held for
+    /// the same reason the two tests above hold it: it is this module's serializer against the one
+    /// device boot, which is the only other thing in the crate that could reach a reporter.
+    #[test]
+    fn w2102_reports_every_degradation_not_just_the_first() {
+        let _guard = ENV_AND_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _observe = observe_lock();
+        arm();
+
+        // `hwrt` off compiles the shadow-denoise probe -- and therefore its reporter -- out of the
+        // crate entirely, so the expected count is a property of the build, not a magic number.
+        #[cfg(feature = "hwrt")]
+        const SITES: u64 = 3;
+        #[cfg(not(feature = "hwrt"))]
+        const SITES: u64 = 2;
+
+        let before = observed();
+        super::report_ddgi_storage_unsupported(false, false);
+        super::report_ssao_denoise_storage_unsupported();
+        #[cfg(feature = "hwrt")]
+        super::report_shadow_denoise_storage_unsupported(false, true);
+        drain();
+        assert_eq!(
+            observed() - before,
+            SITES,
+            "boyko-W2102 must report EVERY degradation; a code-scoped latch reports one and \
+             loses the rest in silence"
+        );
+
+        // Second round: every site's latch is spent, so the whole round is silent. This is the
+        // clause that would catch a `RatePolicy::Every` slipping in and turning a boot-time notice
+        // into per-boot noise.
+        let after_first = observed();
+        super::report_ddgi_storage_unsupported(false, false);
+        super::report_ssao_denoise_storage_unsupported();
+        #[cfg(feature = "hwrt")]
+        super::report_shadow_denoise_storage_unsupported(false, true);
+        drain();
+        assert_eq!(observed(), after_first, "a spent Once site let a second W2102 through");
     }
 }

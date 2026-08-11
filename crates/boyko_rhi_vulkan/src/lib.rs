@@ -131,6 +131,9 @@ pub mod framegraph;
 /// ([`geometry_bindless::write_geometry_buffer_slot`]). A sibling of, not a reuse of,
 /// [`bindless::VulkanBindlessSet`] — see the module doc for why.
 pub mod geometry_bindless;
+/// Test-only: the two helpers the four `boyko-2xxx` observing tests share (L7b).
+#[cfg(test)]
+pub(crate) mod log_probe;
 pub mod memory;
 pub mod mesh_sdf_texture;
 pub mod present;

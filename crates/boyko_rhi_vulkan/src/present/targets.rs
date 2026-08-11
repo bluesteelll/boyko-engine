@@ -28,6 +28,57 @@ use super::frame_driver::Renderer;
 #[allow(unused_imports)]
 use super::scene_types::{DepthImage, Scene};
 
+// ── `boyko-E2103` / `boyko-W2106` — the degrade-to-`None` builders ───────────────────────────────
+//
+// Seven sites in this file drain a partially-built ring and yield `None`. **They are two codes, and
+// the split is a measurement rather than a taste**: `record_vb` consumes four of the seven with
+// `.expect(..)` (`present/passes/vb.rs:3706`, `:3776`, `:4291`, plus `thin_normal`, which the
+// `vb_geo_aux_set`/`vb_ssao_set` match arms require), and the other three with `if let Some(..)`
+// (`:3988-3990`, `:4088`). The first group kills the frame; the second loses an opt-in effect and
+// renders. The class letter IS the level in this registry, so one code could not have carried both,
+// and one code would have told the operator that losing a shadow denoise and losing the frame are
+// the same event.
+//
+// `RatePolicy::Every` for both, and the reason is call frequency, not severity: these run at target
+// build and at every resize, never per frame. A `Once` would report the first resize that ran out
+// of device memory and stay silent through every one after it.
+
+/// `boyko-E2103` — a **mandatory** target or descriptor ring failed to build, so `record_vb` will
+/// refuse (in fact `.expect`-panic on) the next frame it is asked to record under an armed split.
+///
+/// `what` names the ring: one code, seven call sites across two functions, and the argument is what
+/// keeps them apart in the artifact. That is exactly what L6-A's tagged payload bought — before it,
+/// every sink printed the format literal and an argument like this one was transported across the
+/// ring and thrown away.
+#[cold]
+#[inline(never)]
+fn report_mandatory_target_build_failed(what: &str) {
+    boyko_log::error!(
+        boyko_log::RhiVulkan,
+        boyko_log::codes::E2103.number(),
+        "{} build failed under an armed VB split (OOM-class) -- record_vb will refuse the frame",
+        what
+    );
+}
+
+/// `boyko-W2106` — an **optional** chain's descriptor sets failed to build, so `record_vb` skips
+/// that chain and the frame still renders without it.
+///
+/// `#[cfg(feature = "hwrt")]`: all three of its call sites are the hardware shadow chain's, and
+/// their builders carry the same gate.
+#[cfg(feature = "hwrt")]
+#[cold]
+#[inline(never)]
+fn report_optional_chain_build_failed(what: &str, effect: &str) {
+    boyko_log::warn!(
+        boyko_log::RhiVulkan,
+        boyko_log::codes::W2106.number(),
+        "{} build failed (OOM-class) -- record_vb will skip {} this frame; the frame still renders",
+        what,
+        effect
+    );
+}
+
 /// The per-extent on-screen G-buffer targets for [`Renderer::render_gbuffer_frame`]:
 /// the D32 depth image (rasterize into + sample), the MRT storage G-buffer (albedo /
 /// normal / material), and the two descriptor sets bound against them (the marcher
@@ -6406,8 +6457,9 @@ impl GBufferTargets {
                             }
                         }
                     }
-                    eprintln!(
-                        "boyko_rhi_vulkan: vb_shadow_vis_set build failed — record_vb will skip the VB hwrt shadow chain this frame"
+                    report_optional_chain_build_failed(
+                        "vb_shadow_vis_set",
+                        "the VB hwrt shadow chain",
                     );
                     return None;
                 }
@@ -6475,8 +6527,9 @@ impl GBufferTargets {
                                 }
                             }
                         }
-                        eprintln!(
-                            "boyko_rhi_vulkan: vb_shadow_atrous_sets build failed — record_vb will skip the VB hwrt shadow chain this frame"
+                        report_optional_chain_build_failed(
+                            "vb_shadow_atrous_sets",
+                            "the VB hwrt shadow chain",
                         );
                         return None;
                     }
@@ -6551,8 +6604,9 @@ impl GBufferTargets {
                             }
                         }
                     }
-                    eprintln!(
-                        "boyko_rhi_vulkan: vb_shadow_temporal_set build failed — record_vb will skip the VB temporal reproject this frame"
+                    report_optional_chain_build_failed(
+                        "vb_shadow_temporal_set",
+                        "the VB temporal reproject",
                     );
                     return None;
                 }
@@ -8218,10 +8272,7 @@ impl GBufferTargets {
                             }
                         }
                     }
-                    eprintln!(
-                        "boyko_rhi_vulkan: thin_normal ring allocation failed under an armed \
-                         VB split (OOM-class) — record_vb will refuse the frame"
-                    );
+                    report_mandatory_target_build_failed("thin_normal ring allocation");
                     None
                 }
             } else {
@@ -8288,7 +8339,7 @@ impl GBufferTargets {
                             }
                         }
                     }
-                    eprintln!("boyko_rhi_vulkan: vb_geo_aux_set build failed — record_vb will refuse the frame");
+                    report_mandatory_target_build_failed("vb_geo_aux_set");
                     None
                 }
             }
@@ -8329,7 +8380,7 @@ impl GBufferTargets {
                             }
                         }
                     }
-                    eprintln!("boyko_rhi_vulkan: vb_ssao_set build failed — record_vb will refuse the frame");
+                    report_mandatory_target_build_failed("vb_ssao_set");
                     None
                 }
             }
@@ -8422,7 +8473,7 @@ impl GBufferTargets {
                                 }
                             }
                         }
-                        eprintln!("boyko_rhi_vulkan: vb_split_set1 build failed — record_vb will refuse the frame");
+                        report_mandatory_target_build_failed("vb_split_set1");
                         None
                     }
                 }
@@ -9742,3 +9793,64 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod l7b_e2103_w2106 {
+    use crate::log_probe::{arm, drain, observe_lock, observed};
+
+    /// **The seven degrade-to-`None` sites are two codes, and `Every` is deliberate.**
+    ///
+    /// Clause 1 pins that a mandatory ring's failure reports **every time**. `RatePolicy::Every`
+    /// is the choice here and it is about call frequency, not severity: these run at target build
+    /// and at each resize, never per frame, so a `Once` would report the first resize that ran out
+    /// of device memory and stay silent through every one after it -- exactly when a reader most
+    /// needs to see it repeat.
+    ///
+    /// Clause 2 pins the split itself. `record_vb` consumes four of the seven with `.expect(..)`
+    /// and three with `if let Some(..)`; one group kills the frame and the other loses an opt-in
+    /// effect. The class letter IS the level in this registry, so the two groups could not have
+    /// shared a code without telling an operator that those are the same event.
+    ///
+    /// The RED that earned it: give `report_mandatory_target_build_failed` a `Once` latch and
+    /// clause 1 reads `1 != 2`.
+    ///
+    /// The exact delta is sound -- see `crate::log_probe`'s header.
+    #[test]
+    fn e2103_repeats_because_a_resize_can_fail_again() {
+        let _observe = observe_lock();
+        arm();
+        let before = observed();
+        for _ in 0..2 {
+            super::report_mandatory_target_build_failed("vb_geo_aux_set");
+        }
+        drain();
+        assert_eq!(
+            observed() - before,
+            2,
+            "boyko-E2103 is RatePolicy::Every: the second resize that runs out of device memory \
+             must report as loudly as the first"
+        );
+    }
+
+    /// The `W2106` half of the split -- see [`e2103_repeats_because_a_resize_can_fail_again`].
+    ///
+    /// `hwrt`-only, because all three of its call sites are the hardware shadow chain's and the
+    /// reporter carries that gate. A `not(hwrt)` build has no `W2106` emitter at all, which is why
+    /// this test is gated rather than made conditional inside: a test that silently did nothing
+    /// would be a green that means "not compiled".
+    #[cfg(feature = "hwrt")]
+    #[test]
+    fn w2106_is_a_warn_because_the_frame_still_renders() {
+        let _observe = observe_lock();
+        arm();
+        let before = observed();
+        super::report_optional_chain_build_failed("vb_shadow_vis_set", "the VB hwrt shadow chain");
+        drain();
+        assert_eq!(
+            observed() - before,
+            1,
+            "boyko-W2106 must report the skipped chain; the frame renders without it, which is \
+             precisely why nothing else would ever tell anyone"
+        );
+    }
+}

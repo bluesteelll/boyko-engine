@@ -4,6 +4,8 @@
 
 use core::ptr;
 
+use boyko_log::codes::{OnceSite, W2105};
+
 use crate::device::{DeviceFns, SwapchainDeviceFns, VulkanContext};
 use crate::ffi::*;
 
@@ -14,6 +16,33 @@ use super::{COLOR_SUBRESOURCE_RANGE, Surface, SwapchainError};
 // swapchain documents that the owning `Renderer` waits the device idle before drop).
 #[allow(unused_imports)]
 use super::frame_driver::Renderer;
+
+/// `boyko-W2105` — the surface does not advertise the requested present mode, so the swapchain was
+/// created with `fifo` instead.
+///
+/// **ANNOUNCE, NEVER SILENTLY DEGRADE** — the `BootError::ValidationUnavailable` precedent, and the
+/// reason this is a diagnostic rather than a comment: a silent fallback leaves the artifact
+/// recording `fifo` while the operator believes they measured an unbounded frame, and every number
+/// is then off by a refresh interval they had already decided to eliminate.
+///
+/// `RatePolicy::Once`, honoured by this site's own latch. Swapchain creation reruns on every
+/// resize, and the answer cannot change between them: it is a property of the surface and the
+/// driver, not of the extent.
+#[cold]
+#[inline(never)]
+fn report_present_mode_fallback(requested: &str) {
+    static FIRED: OnceSite = OnceSite::new();
+    if FIRED.claim() {
+        boyko_log::warn!(
+            boyko_log::RhiVulkan,
+            W2105.number(),
+            "present mode: `{}` is NOT advertised by this surface -- falling back to `fifo`. Frame \
+             wall clock stays bounded below by the refresh interval, so a wall-clock comparison \
+             across this boot and one that got the mode it asked for is not a comparison",
+            requested
+        );
+    }
+}
 
 /// A `VkSwapchainKHR` plus its color images, one `VkImageView` per image, and the
 /// chosen extent — recreatable on resize / out-of-date.
@@ -288,11 +317,7 @@ impl<'ctx> Swapchain<'ctx> {
             )? {
             requested
         } else {
-            eprintln!(
-                "present mode: `{}` is NOT advertised by this surface -- falling back to `fifo`.                  Frame wall clock stays bounded below by the refresh interval, so a wall-clock                  comparison across this boot and one that got `{}` is not a comparison.",
-                requested.as_str(),
-                requested.as_str()
-            );
+            report_present_mode_fallback(requested.as_str());
             PresentModeConfig::Fifo
         };
 
@@ -464,4 +489,43 @@ impl Drop for Swapchain<'_> {
 pub(crate) fn swapchain_image_for(swapchain: &Swapchain<'_>, index: usize) -> VkImage {
     debug_assert!(index < swapchain.images.len(), "image index out of range");
     swapchain.images[index]
+}
+
+#[cfg(test)]
+mod l7b_w2105 {
+    use crate::log_probe::{arm, drain, observe_lock, observed};
+
+    /// **`boyko-W2105` announces the present-mode fallback exactly once.**
+    ///
+    /// `Once` is right here and the second clause is what pins it: swapchain creation reruns on
+    /// every resize, and the answer cannot change between them -- whether the surface advertises a
+    /// mode is a property of the surface and the driver, not of the extent. A `RatePolicy::Every`
+    /// would put one line in the artifact per window drag.
+    ///
+    /// The first clause is the one that matters for the reason the code exists: a silent fallback
+    /// leaves an artifact recording `fifo` while the operator believes they measured an unbounded
+    /// frame, and every number is then off by a refresh interval they had decided to eliminate.
+    ///
+    /// The RED that earned it: delete the `report_present_mode_fallback` call from the `else` arm
+    /// and the first clause reads `0 != 1`.
+    #[test]
+    fn w2105_announces_the_fallback_once_not_once_per_resize() {
+        let _observe = observe_lock();
+        arm();
+        let before = observed();
+        super::report_present_mode_fallback("mailbox");
+        drain();
+        assert_eq!(
+            observed() - before,
+            1,
+            "boyko-W2105 must announce that the requested present mode was not honoured"
+        );
+
+        let after_first = observed();
+        for _ in 0..4 {
+            super::report_present_mode_fallback("mailbox");
+        }
+        drain();
+        assert_eq!(observed(), after_first, "one line per resize is noise, not a diagnostic");
+    }
 }

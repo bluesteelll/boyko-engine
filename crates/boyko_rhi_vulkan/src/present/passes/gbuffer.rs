@@ -4,8 +4,8 @@
 //! [`GbufferBarrierSink`](super::super::graph_bridge::GbufferBarrierSink).
 
 use core::ptr;
-use core::sync::atomic::{AtomicBool, Ordering};
 
+use boyko_log::codes::{OnceSite, W2104};
 use boyko_rhi::TimestampStage;
 
 use crate::compute::{
@@ -280,31 +280,33 @@ use super::super::scene_types::{
 use super::super::targets::GBufferTargets;
 use super::super::{COLOR_SUBRESOURCE_RANGE, SwapchainError};
 
-/// Textured-PBR T6c (plan Decision D4): prints a ONE-TIME diagnostic when a textured
-/// material is active on a frame that also has the temporal motion-vector pipeline
-/// active — TEXTURED is never compiled with MOTION_VECTORS, so that frame renders the
-/// material's `base_color`/scalar `mrr` instead of sampled textures (the MV/mvpm arm
-/// takes priority). A process-wide latch keeps this off the steady-state hot path
-/// (Principle 1: no per-frame `AtomicBool` load cost beyond the one `swap` on the FIRST
-/// occurrence — every subsequent call short-circuits `WARNED.load` first) and avoids
-/// spamming stderr every frame the two features overlap.
+/// `boyko-W2104` — textured-PBR T6c (plan Decision D4): a textured material is active on a frame
+/// that also has the temporal motion-vector pipeline active. TEXTURED is never compiled with
+/// MOTION_VECTORS, so that frame renders the material's `base_color`/scalar `mrr` instead of
+/// sampled textures (the MV/mvpm arm takes priority).
+///
+/// **L7b deleted the hand-rolled latch this used to carry, and the latch was not what its own
+/// comment said it was.** The comment claimed "no per-frame `AtomicBool` load cost beyond the one
+/// `swap` on the FIRST occurrence"; the code did a `load` and then a separate `store`, which is not
+/// a `swap` and does not exclude anything — two threads arriving together both saw `false` and both
+/// printed. `OnceSite::claim` is a single CAS, so exactly one caller wins, and the site enrols
+/// itself in `ONCE_SITES` so the `LOG-ONCE` census can report that it fired at all. The
+/// steady-state cost is unchanged: one `Relaxed` load from a private line, off the hot path behind
+/// `#[cold]`.
 #[cold]
 #[inline(never)]
 fn warn_textured_suppressed_by_motion_vectors() {
-    static WARNED: AtomicBool = AtomicBool::new(false);
-    // Relaxed: a diagnostic latch, not a cross-thread synchronization point — the render
-    // loop is single-threaded through this call site, and a racing double-print (were this
-    // ever called from multiple threads) would be a harmless cosmetic duplicate, not UB.
-    if WARNED.load(Ordering::Relaxed) {
-        return;
+    static FIRED: OnceSite = OnceSite::new();
+    if FIRED.claim() {
+        boyko_log::warn!(
+            boyko_log::RhiVulkan,
+            W2104.number(),
+            "a textured material is active while the temporal motion-vector gbuffer pipeline is \
+             also active this frame -- TEXTURED is never compiled with MOTION_VECTORS \
+             (textured-PBR T6c plan Decision D4), so textured material(s) render base_color/scalar \
+             mrr instead of sampled textures until temporal denoise is off"
+        );
     }
-    WARNED.store(true, Ordering::Relaxed);
-    eprintln!(
-        "boyko_rhi_vulkan: a textured material is active while the temporal motion-vector \
-         gbuffer pipeline is also active this frame — TEXTURED is never compiled with \
-         MOTION_VECTORS (textured-PBR T6c plan Decision D4), so textured material(s) render \
-         base_color/scalar mrr instead of sampled textures until temporal denoise is off."
-    );
 }
 
 impl Renderer<'_> {
@@ -3276,4 +3278,49 @@ impl Renderer<'_> {
         Ok(())
     }
 
+}
+
+#[cfg(test)]
+mod l7b_w2104 {
+    use crate::log_probe::{arm, drain, observe_lock, observed};
+
+    /// **`boyko-W2104` fires once, and the latch it now uses actually excludes.**
+    ///
+    /// The latch this replaced was a `load` followed by a separate `store` under a doc-comment
+    /// claiming a `swap`: two callers arriving together both read `false` and both printed. That
+    /// defect is not observable from a test -- it needs two threads inside a two-instruction
+    /// window -- so what this pins is the property that survives it: the first call reports, and
+    /// every call after it is silent, which is what `RatePolicy::Once` promises for a site that
+    /// sits on the per-frame path.
+    ///
+    /// The RED that earned it: drop the `if FIRED.claim()` guard and the second clause reads
+    /// `2 != 1`; delete the whole emission and the first reads `0 != 1`.
+    ///
+    /// The exact delta is sound -- see `crate::log_probe`'s header.
+    #[test]
+    fn w2104_reports_the_suppression_once_and_then_stays_quiet() {
+        let _observe = observe_lock();
+        arm();
+        let before = observed();
+        super::warn_textured_suppressed_by_motion_vectors();
+        drain();
+        assert_eq!(
+            observed() - before,
+            1,
+            "boyko-W2104 must report that a textured material rendered untextured; before L7b \
+             this went to stderr, which no host reads and no artifact keeps"
+        );
+
+        let after_first = observed();
+        for _ in 0..8 {
+            super::warn_textured_suppressed_by_motion_vectors();
+        }
+        drain();
+        assert_eq!(
+            observed(),
+            after_first,
+            "W2104 sits on the per-frame path: a second line means every frame the two features \
+             overlap writes one"
+        );
+    }
 }
