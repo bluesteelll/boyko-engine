@@ -1855,3 +1855,47 @@ All four need a sink header to print into. MEASURED: `boyko_log` has `census`, `
 This is not a defect in the axis and not a shortcut taken: the axis is the indivisible part and it
 landed indivisibly. It is a scheduling fact, recorded so nobody reads "J1 shipped" as "the logging
 plan reached L17".
+
+## Rung 16 (J2) — REFUSED ON THE MEASUREMENT: the "both-present" configuration does not exist
+
+J2 is the joint baseline sitting: re-take `zone_cost`, `fold_cost`, `P1` and `P2` **with the profiler
+and the logger both present**, in one sitting, and run `GJ1` (the measured off-cost) there. Attempted
+after rung 15 and **refused**, because the configuration it is supposed to baseline is not one this
+workspace can currently be in. MEASURED:
+
+| | measurement |
+|---|---|
+| `boyko_log::{error,warn,info,debug,trace}!` across every crate's `src/` | **2 hits, neither an emission site** — a *comment* in `boyko_log/src/lib.rs:86` and rung 15's own `profile_fixture_log` |
+| callers of `boyko_log::enable` / `boot` | **none** — no sink thread, no consumer, no panic hook |
+| manifests depending on `boyko-log` | **two** (`boyko_ecs`, `profile_fixture_log`); absent from `boyko_app`, `boyko_render`, everything that runs a frame |
+| non-test callers of `Profiler::arm` | **none** — rung 11 measured this and it is unchanged |
+
+So `GJ1`'s leg **A** — *"profiler armed, logger enabled, at the shipping ceiling"* — cannot be built,
+and legs B and C are defined relative to it.
+
+**Why this is a refusal and not a deferral.** The tempting move is to take the sitting anyway and
+stamp the files `both-present`. That is strictly worse than having no baseline: every later
+regression gate compares against these files, `config_tag` is what tells a reader the comparison is
+legitimate, and a tag that says `both-present` on a run with neither present makes every one of those
+gates confidently wrong. The corpus's own rule — *"whichever subsystem landed second must not be
+measured against a baseline taken without it"* — is exactly the rule being obeyed here.
+
+**Consequence, stated so it is not read as progress:** the `UNPROVEN` state REMAINS IN FORCE. The
++25 % gate, the revert clauses and `GJ1` still record `UNPROVEN` and still may not fail a rung.
+
+**Preconditions, so the rung can be re-entered rather than re-argued:**
+
+1. Logging **L3** — the sink thread, `enable`, the drain. Without a consumer there is nothing to
+   measure the cost of.
+2. Logging **L6–L8** — the migration that gives the engine emission sites at all. Today it has none,
+   so "logger on" and "logger off" are the same binary doing the same work.
+3. A **non-test arm path** for the profiler, so "profiler armed" is a state a shipped frame reaches.
+
+**And one defect to fix before the rung, not during it: `config_tag` is already taken.**
+`boyko_app::profiling::artifact::config_tag` exists and returns a `String` FNV-1a hash of
+`boyko_render::ResolvedRenderPath`'s `Debug` — it identifies the **render path** (Deferred/Forward/VB
+× Both/Mesh/Sdf), and `ArtifactHeader::workload_tag` is built from it. S10 asks for a field of the
+same name meaning `{profiler, logger}`, in the same crate. Landing it under that name would put two
+facts under one identifier, and the failure mode is specific: a reader compares a VB baseline against
+a Deferred one, the tag matches, and the difference is reported as a regression. The J2 field needs a
+different name (`diag_tag`, say) or the render one does.
