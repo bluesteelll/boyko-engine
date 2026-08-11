@@ -48,7 +48,7 @@ use boyko_diag::lane::LANE_COUNT;
 use boyko_diag::loss::{LossClass, LossSeen};
 use boyko_diag::profile::REGION_CAPACITY;
 use boyko_diag::profiling_abi::ENGINE_ZONE_SLOTS;
-use boyko_diag::sample::{Region, Sample};
+use boyko_diag::sample::{Region, Sample, SampleKind};
 use boyko_diag::{clock, loss, profiling_abi, sample};
 
 use crate::ecs::core::profiling::diag;
@@ -466,6 +466,9 @@ pub(crate) struct Layout {
     /// Retention tier C's subscription map (rung 12): one byte per zone, `0` = unsubscribed,
     /// `n` = slot `n - 1`. `zone_stride` bytes, L1-resident at every stride this tree can arm.
     hist_of: usize,
+    /// The OBSERVED sample kind per zone (rung 13): `boyko_diag::telemetry::kind_byte` of the
+    /// last kind folded, `0` = never observed. `zone_stride` bytes.
+    kind_of: usize,
     /// Retention tier C (rung 12): `hist_slots` × 400 B. Zero-sized when nothing subscribed.
     hist: usize,
     /// The interval ring: `OVERLAP_FRAMES` banks of `INTERVALS_PER_FRAME` slots each.
@@ -501,7 +504,8 @@ impl Layout {
         let lifetime = align_up(begin + WINDOW * 8, SECTION_ALIGN);
         let hist_of =
             align_up(lifetime + zone_stride as usize * size_of::<LifetimeAcc>(), SECTION_ALIGN);
-        let hist = align_up(hist_of + zone_stride as usize, SECTION_ALIGN);
+        let kind_of = align_up(hist_of + zone_stride as usize, SECTION_ALIGN);
+        let hist = align_up(kind_of + zone_stride as usize, SECTION_ALIGN);
         let after_hist = hist + hist_slots as usize * size_of::<HistSlot>();
 
         // The ring is the LAST section, so the two builds differ by a suffix and every offset
@@ -528,6 +532,7 @@ impl Layout {
             begin,
             lifetime,
             hist_of,
+            kind_of,
             hist,
             #[cfg(feature = "profiling-analysis")]
             intervals,
@@ -1123,16 +1128,45 @@ impl Profiler {
         }
     }
 
+    /// The kind the fold has OBSERVED for `zone`, or `None` for a zone nothing has been folded for.
+    ///
+    /// # Why this is observed rather than read off the descriptor
+    ///
+    /// MEASURED at rung 13: `boyko_diag::profiling_abi::ZoneDesc` carries `name`, `scope`, `tier`
+    /// and `region` and **no kind**, and there is no static `counter!` / `gauge!` macro at all —
+    /// only the dynamic registry's `counter_dyn!` / `gauge_dyn!`, plus one hand-built counter
+    /// sample in [`zones`](super::zones). The kind lives in the sample's flag bits, so the only
+    /// party that can state it is the fold, and the only honest form is an observation.
+    ///
+    /// It matters because `Cell::total` means **ticks** for a span and **increments** for a
+    /// counter. A telemetry reader handed `total = 5000` with no kind has a number with no unit.
+    ///
+    /// `None` on a never-folded zone is structural: the section is zero-filled by the commit and
+    /// `SampleKind::Span` is discriminant `0`, so the wire encoding shifts by one
+    /// (`boyko_diag::telemetry::kind_byte`) and zero stays free to mean *"never observed"*.
+    #[must_use]
+    pub fn observed_kind(&self, zone: u16) -> Option<SampleKind> {
+        let base = self.base?;
+        if u32::from(zone) >= self.zone_stride {
+            return None;
+        }
+        // SAFETY: `zone < zone_stride` (tested) and `Layout::new` sized the map at `zone_stride`
+        //   bytes inside the committed range, zero-filled by the commit and reset at `arm`.
+        let raw = unsafe { base.as_ptr().add(self.layout.kind_of).add(zone as usize).read() };
+        boyko_diag::telemetry::kind_of_byte(raw)
+    }
+
     /// The raw tier pointers the fold writes through, derived once per fold beside [`Columns`].
     #[inline]
     fn tiers(&self) -> Option<Tiers> {
         let base = self.base?;
-        // SAFETY: `Layout::new` places the three sections inside `[0, layout.bytes())`, pairwise
+        // SAFETY: `Layout::new` places the four sections inside `[0, layout.bytes())`, pairwise
         //   disjoint and `SECTION_ALIGN`-aligned, over a committed reservation that is never freed.
         unsafe {
             Some(Tiers {
                 lifetime: base.as_ptr().add(self.layout.lifetime).cast::<LifetimeAcc>(),
                 hist_of: base.as_ptr().add(self.layout.hist_of),
+                kind_of: base.as_ptr().add(self.layout.kind_of),
                 hist: base.as_ptr().add(self.layout.hist).cast::<HistSlot>(),
                 zones: self.zone_stride as usize,
             })
@@ -1164,6 +1198,10 @@ impl Profiler {
         unsafe {
             let map = base.as_ptr().add(self.layout.hist_of);
             core::ptr::write_bytes(map, 0, stride as usize);
+            // The observed-kind map is cleared on the same pass and for the same reason: a re-arm
+            // that inherited it would label the new session's zones with the previous session's
+            // kinds, and a wrong unit is worse than an absent one.
+            core::ptr::write_bytes(base.as_ptr().add(self.layout.kind_of), 0, stride as usize);
             let h = base.as_ptr().add(self.layout.hist).cast::<HistSlot>();
             for s in 0..slots as usize {
                 h.add(s).write(HistSlot::ZERO);
@@ -1387,6 +1425,8 @@ pub(crate) struct Tiers {
     pub(crate) lifetime: *mut LifetimeAcc,
     /// Tier C's subscription map: `zones` bytes, `0` = unsubscribed, `n` = slot `n - 1`.
     pub(crate) hist_of: *mut u8,
+    /// The observed-kind map (rung 13): `zones` bytes, `0` = never observed.
+    pub(crate) kind_of: *mut u8,
     /// Tier C: the committed slots. Indexed only through `hist_of`, never directly by zone.
     pub(crate) hist: *mut HistSlot,
     /// `zone_stride` — the bound both `lifetime` and `hist_of` are indexed under.
@@ -1451,6 +1491,7 @@ mod tests {
                     (l.begin, WINDOW * 8),
                     (l.lifetime, stride as usize * size_of::<LifetimeAcc>()),
                     (l.hist_of, stride as usize),
+                    (l.kind_of, stride as usize),
                     (l.hist, slots as usize * size_of::<HistSlot>()),
                     #[cfg(feature = "profiling-analysis")]
                     (l.intervals, OVERLAP_FRAMES * INTERVALS_PER_FRAME * size_of::<Interval>()),
@@ -1477,34 +1518,42 @@ mod tests {
         }
     }
 
-    /// **Rung 12's residency arithmetic, MEASURED from the store rather than restated.**
+    /// **The retention tiers' residency arithmetic, MEASURED from the store rather than restated.**
     ///
-    /// The reservation grows by exactly the three sections this rung added, and by nothing else.
-    /// A composition identity rather than an absolute figure: an absolute would need re-blessing
-    /// on every unrelated section change, and would not say *which* term moved.
+    /// The reservation grows by exactly the sections these rungs added, and by nothing else. A
+    /// composition identity rather than an absolute figure: an absolute would need re-blessing on
+    /// every unrelated section change, and would not say *which* term moved.
     ///
-    /// RED: drop `hist_of` from the sum ⇒ `left` is 4 096 short of `right`.
+    /// ⚠️ **This gate did its job on the rung after the one that wrote it.** Rung 12 stated the
+    /// span as three sections and three alignment gaps. Rung 13 added the observed-kind map inside
+    /// the same span, and the upper bound RED-ed **without anyone pointing it at the new
+    /// section** — which is what an upper bound is for and what a lower bound alone could never
+    /// have caught. The count is now four, and the same thing will happen to rung 14.
+    ///
+    /// RED: drop `hist_of` (or `kind_of`) from the sum ⇒ `left` is 4 096 short of `right`.
     #[test]
     fn the_retention_tiers_grew_the_reservation_by_exactly_their_own_bytes() {
         for stride in [256u32, 1024, ENGINE_ZONE_SLOTS as u32] {
             for slots in [0u32, 1, MAX_HIST_SLOTS] {
                 let with = Layout::new(stride, slots);
                 let tier_b = stride as usize * size_of::<LifetimeAcc>();
-                let map = stride as usize;
+                let hist_map = stride as usize;
+                let kind_map = stride as usize;
                 let tier_c = slots as usize * size_of::<HistSlot>();
+                let sections = tier_b + hist_map + kind_map + tier_c;
 
-                // The three sections start where tier B does and end where tier C does, each
+                // The four sections start where tier B does and end where tier C does, each
                 // `SECTION_ALIGN`-padded — so the span they occupy is at least their own bytes and
-                // less than their bytes plus three alignment gaps.
+                // less than their bytes plus four alignment gaps.
                 let span = with.hist + tier_c - with.lifetime;
                 assert!(
-                    span >= tier_b + map + tier_c,
-                    "the tier span at stride {stride}, slots {slots} is smaller than the three \
+                    span >= sections,
+                    "the tier span at stride {stride}, slots {slots} is smaller than the four \
                      sections it contains"
                 );
                 assert!(
-                    span < tier_b + map + tier_c + 3 * SECTION_ALIGN,
-                    "the tier span at stride {stride}, slots {slots} carries more than three \
+                    span < sections + 4 * SECTION_ALIGN,
+                    "the tier span at stride {stride}, slots {slots} carries more than four \
                      alignment gaps, so something else is inside it"
                 );
             }

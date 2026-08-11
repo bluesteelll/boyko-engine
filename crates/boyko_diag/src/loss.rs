@@ -489,7 +489,7 @@ pub fn delta_since(cell: &LossCell, last: &mut LossSeen) -> LossDelta {
 /// unreported flag is a condition the system observes and cannot say, which is the failure the
 /// mute-leaf rule accepts once, at the leaf, and must not accumulate above it.
 ///
-/// Five assigned, 27 unassigned.
+/// Ten assigned, 22 unassigned.
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DiagFlag {
@@ -521,6 +521,24 @@ pub enum DiagFlag {
     /// Not a silent clamp: a game whose zone quietly moved to another scope would be armed and
     /// disarmed by a knob it never asked for, and the samples would look like the engine's.
     EngineScopeRefused = 1 << 6,
+    /// The telemetry path could not be opened, so the session streams nothing — profiling rung 13.
+    ///
+    /// Raised on the ENABLE path, never at process start: a run that does not arm the profiler with
+    /// a telemetry config opens no file and cannot raise this.
+    TelemetryPathUnwritable = 1 << 7,
+    /// A telemetry write failed and streaming was disabled for the rest of the session — rung 13.
+    ///
+    /// Separate from [`Self::TelemetryPathUnwritable`] because the two states differ in what a
+    /// reader has: an unwritable path leaves **no file**, while a failed write leaves a file with a
+    /// **stated end**. Reporting both as one code would tell an operator to check permissions on a
+    /// disk that was simply full halfway through a session.
+    TelemetryWriteFailed = 1 << 8,
+    /// A telemetry quantile subscription was refused past `MAX_TELEMETRY_QUANTILE_ZONES` — rung 13.
+    ///
+    /// Not a loss and not a failure: the zone still streams `count`/`total`/`min`/`max`, and only
+    /// its median and p95 are absent. The cap exists because those two are the reduction's whole
+    /// cost (M7), so this is the one condition in the group that names a BUDGET rather than a fault.
+    TelemetryZonesRefused = 1 << 9,
 }
 
 impl DiagFlag {

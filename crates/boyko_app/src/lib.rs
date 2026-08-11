@@ -89,6 +89,13 @@ pub mod plugins;
 pub mod profiling;
 pub mod prelude;
 
+// Profiling rung 13: this crate declares zones of its own (`__telemetry_reduce` and
+// `__telemetry_write`), so it must name its partition — the same one line every engine crate that
+// declares a zone writes. Without it `declare_zone!` fails on an unresolved
+// `__BOYKO_ZONE_PARTITION`, which is the mechanism refusing an unpartitioned zone rather than
+// silently filing it under the engine's.
+boyko_diag::profiling_partition!(Engine);
+
 pub use device::GpuDevice;
 pub use fly::{FlyAction, FlyCameraPlugin, fly_default_map};
 pub use occlusion_force::OcclusionForce;

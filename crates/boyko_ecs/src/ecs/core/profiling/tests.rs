@@ -1946,3 +1946,109 @@ fn rung12_tier_costs_measured() {
     );
     assert!(Profiler::reserved_bytes() > 0, "an armed store has a reservation to report");
 }
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// Profiling rung 13 — the OBSERVED sample kind.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+boyko_diag::declare_zone!(
+    KIND_TEST_ZONE,
+    name = "t.kind",
+    scope = ROOT_SCOPE,
+    tier = boyko_diag::profiling_abi::ZoneTier::Always,
+);
+
+/// Minted, for the reason [`tier_zone`] states at length: a gate that asserts what a zone IS must
+/// own an id nothing else can be given.
+fn kind_zone() -> u16 {
+    profiling_abi::zone_id(&KIND_TEST_ZONE)
+}
+
+/// **Rung 13** — a zone's kind is what the fold OBSERVED, and an unobserved zone reports absence.
+///
+/// # What this is for
+///
+/// A telemetry `ZoneRow` has to say whether `total` is ticks or increments, and MEASURED at this
+/// rung there is nowhere else to learn it: `ZoneDesc` carries `name`, `scope`, `tier` and `region`
+/// and no kind, and there is no static `counter!` / `gauge!` macro in the tree at all — only the
+/// dynamic registry's. So the kind is an observation, and this gate is what makes it one.
+///
+/// # The clause that matters is the FIRST one
+///
+/// `SampleKind::Span` is discriminant `0` and the reservation is zero-filled, so a raw cast would
+/// report *every zone in the geometry* as a span — including the thousands that never ran. A
+/// decoder would then label a row of absent zones "spans, total 0 ticks", which is a measurement.
+///
+/// # Two REDs, and the FIRST one landed off the prediction
+///
+/// * Drop the `+ 1` from `kind_byte` **alone** ⇒ the failure is not "everything is a span", it is
+///   `left: None, right: Some(Span)` on the zone a span was actually pushed to: the encoder now
+///   writes `0` and the decoder still reads `0` as unknown, so **spans become invisible**. Half the
+///   shift is a different defect from none of it.
+/// * Drop it from `kind_byte` **and** `kind_of_byte` — the honest raw-discriminant cast — ⇒
+///   `left: Some(Span), right: None` on the untouched zone, which is the defect the shift exists
+///   for: every zone in the geometry, including the thousands that never ran, reported as a span.
+#[test]
+fn rung13_a_zones_kind_is_observed_and_absence_is_reported_as_absence() {
+    let (_g, mut p) = armed();
+
+    // A zone inside the geometry that nothing has ever pushed to.
+    let untouched = kind_zone() + 1;
+    assert!(u32::from(untouched) < p.zone_stride(), "the probe zone must be inside the geometry");
+    assert_eq!(
+        p.observed_kind(untouched),
+        None,
+        "a zone nothing was folded for must report NO kind — a zero-filled map plus a raw \
+         discriminant cast would call it a span"
+    );
+
+    // A span, observed.
+    push_span_at(kind_zone(), boyko_diag::clock::ticks(), 700);
+    fold(&mut p);
+    fold(&mut p);
+    assert_eq!(p.observed_kind(kind_zone()), Some(SampleKind::Span));
+
+    // A counter on the SAME zone: the map holds one byte, so the last kind folded is what it says,
+    // and that is the honest reading of a byte that cannot hold two.
+    let s = Sample {
+        stamp: boyko_diag::clock::ticks(),
+        value: 3,
+        zone: kind_zone(),
+        flags: SampleKind::Counter as u16,
+        _pad: 0,
+    };
+    assert!(sample::push(Region::Engine, s), "the region must accept a lone test sample");
+    fold(&mut p);
+    fold(&mut p);
+    assert_eq!(p.observed_kind(kind_zone()), Some(SampleKind::Counter));
+
+    // Outside the geometry is `None` rather than a read past the section.
+    assert_eq!(p.observed_kind(u16::MAX), None);
+}
+
+/// A re-arm does not inherit the previous session's kinds.
+///
+/// The map is cleared on the same pass as tier C's, and for the same reason: a wrong unit on a
+/// number is worse than an absent one, and an inherited kind is a wrong unit that looks measured.
+#[test]
+fn rung13_a_re_arm_forgets_what_the_previous_session_observed() {
+    let (_g, mut p) = armed();
+    push_span_at(kind_zone(), boyko_diag::clock::ticks(), 500);
+    fold(&mut p);
+    fold(&mut p);
+    assert_eq!(p.observed_kind(kind_zone()), Some(SampleKind::Span));
+
+    p.disarm();
+    let outcome = p.arm(TEST_GEOMETRY);
+    // `Rearmed`, not `Armed`: the reservation is process-lifetime, so only the FIRST arm in a
+    // process creates it and every later one adopts it. Both are success.
+    assert!(
+        matches!(outcome, ArmOutcome::Armed | ArmOutcome::Rearmed),
+        "re-arm at the live geometry must succeed, got {outcome:?}"
+    );
+    assert_eq!(
+        p.observed_kind(kind_zone()),
+        None,
+        "a re-armed session must not report the previous session's kind"
+    );
+}

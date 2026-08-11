@@ -36,10 +36,15 @@
 //! |---|---|
 //! | 5–7 | the GPU channel, and with it `FrameState::Partial` and three of the five cell labels |
 //! | 8 | `LegSummary`, the window reducer, `resolve`, the artifact |
-//! | 13 | telemetry |
 //!
 //! A field that is structurally always zero is indistinguishable from a measurement of zero, and a
 //! reader cannot tell the difference. So each arrives with the rung that can make it move.
+//!
+//! **Telemetry (rung 13) is no longer on that list, and it did not land here.** The wire format is
+//! `boyko_diag::telemetry` and the writer is `boyko_app::profiling::stream`; what rung 13 added to
+//! *this* store is one section — the observed-kind map, `Profiler::observed_kind` — because a
+//! `ZoneDesc` carries no kind and the fold is the only party that can state whether a cell's `total`
+//! is ticks or increments.
 
 #[cfg(feature = "profiling-analysis")]
 pub mod analysis;

@@ -415,15 +415,15 @@ codes! {
         "register_zone refused a dynamic zone that asked for an engine scope"),
     (9213, E, E9213, RatePolicy::Once,  CodeStatus::Live          ,
         "The profiler was re-armed with a different geometry than the live one"),
-    (9214, W, W9214, RatePolicy::Once,  CodeStatus::Pending("profiling 13"),
+    (9214, W, W9214, RatePolicy::Once,  CodeStatus::Live          ,
         "The telemetry path is unwritable, so streaming is off for this session"),
-    (9215, W, W9215, RatePolicy::Once,  CodeStatus::Pending("profiling 13"),
+    (9215, W, W9215, RatePolicy::Once,  CodeStatus::Live          ,
         "A telemetry write failed and streaming was disabled"),
     (9216, W, W9216, RatePolicy::Once,  CodeStatus::Live          ,
         "The clock's epoch broke; the in-flight window was discarded and the clock recalibrated"),
     (9217, W, W9217, RatePolicy::Once,  CodeStatus::Pending("profiling 5"),
         "GPU timestamp slots were still in flight at teardown and were abandoned"),
-    (9218, W, W9218, RatePolicy::Once,  CodeStatus::Pending("profiling 13"),
+    (9218, W, W9218, RatePolicy::Once,  CodeStatus::Live          ,
         "A telemetry quantile subscription was refused past the per-session cap"),
 }
 
@@ -478,6 +478,16 @@ mod tests {
         // for a whole rung. The lesson is not "run more tests": it is that a target filter is a
         // claim about coverage, and this project has a standing note that `--test <name>` and
         // `--lib` are different worlds.
+        //
+        // ⚠️ IT HAPPENED AGAIN AT RUNG 13, THE SAME WAY, TO SOMEONE WHO HAD READ THE PARAGRAPH
+        // ABOVE. Three rows were flipped and verified with `cargo test -p boyko-log --test
+        // code_registry`; all twelve checks in THAT target passed, and this pin -- five feet away
+        // in `src/` -- was never built. It reds only in the full `--workspace --all-targets` sweep.
+        //
+        // The note is therefore not "remember the lesson". It is that A TARGET FILTER CANNOT BE
+        // CHECKED BY THINKING ABOUT IT: the only thing that establishes what a filter covered is
+        // running the unfiltered form. Every flip of a `CodeStatus` owes one `--workspace` sweep
+        // before it is called verified, and no amount of care about the filter substitutes for it.
         const LIVE: &[(u8, u16)] = &[
             (b'W', 103),  // L4  -- the file sink's byte cap
             (b'W', 9201), // P3  -- engine zone registry exhausted
@@ -490,7 +500,10 @@ mod tests {
             (b'W', 9211), // P2  -- fold working set exceeds L1d
             (b'W', 9212), // P10 -- register_zone refused an engine scope
             (b'E', 9213), // P2  -- re-arm with a different geometry
+            (b'W', 9214), // P13 -- telemetry path unwritable
+            (b'W', 9215), // P13 -- telemetry write failed, streaming disabled
             (b'W', 9216), // P2  -- clock epoch break
+            (b'W', 9218), // P13 -- telemetry quantile subscription refused past the cap
         ];
         for row in DIAGNOSTICS {
             match row.status {

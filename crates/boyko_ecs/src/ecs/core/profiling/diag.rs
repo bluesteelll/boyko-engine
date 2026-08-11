@@ -59,7 +59,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use boyko_diag::loss::DiagFlag;
 use boyko_log::codes::{
-    E9204, E9213, OnceSite, W9201, W9203, W9207, W9208, W9209, W9210, W9211, W9212, W9216,
+    E9204, E9213, OnceSite, W9201, W9203, W9207, W9208, W9209, W9210, W9211, W9212, W9214, W9215,
+    W9216, W9218,
 };
 use boyko_log::target::Profiling;
 use boyko_log::{error, warn};
@@ -69,7 +70,7 @@ use boyko_log::{error, warn};
 /// A slice rather than a range: they are not consecutive, and a reader who has to compute
 /// which of `9201..=9218` are live from a pair of bounds has been handed arithmetic instead of a
 /// list.
-pub const LIVE_CODES: [u16; 9] = [
+pub const LIVE_CODES: [u16; 12] = [
     9201, // engine zone registry exhausted
     9203, // region overflow / unclaimed drops
     9204, // profiler already bound to another world
@@ -78,7 +79,10 @@ pub const LIVE_CODES: [u16; 9] = [
     9209, // late samples dropped
     9211, // fold working set exceeds L1d
     9213, // re-arm with a different geometry
+    9214, // the telemetry path is unwritable
+    9215, // a telemetry write failed and streaming was disabled
     9216, // clock epoch break
+    9218, // a telemetry quantile subscription was refused past the cap
 ];
 
 /// One counter per [`LIVE_CODES`] entry. `.bss`, so a process that emits nothing writes no page.
@@ -165,6 +169,13 @@ pub const fn flag_code(flag: DiagFlag) -> Option<u16> {
         // a budget the host chose, `W9212` is a game asking for a scope it may not have.
         DiagFlag::UserZoneBudgetExhausted => Some(W9210.number()),
         DiagFlag::EngineScopeRefused => Some(W9212.number()),
+        // Profiling rung 13. Three codes rather than one, and the split is the same kind the rung
+        // 10 pair above makes: `W9214` leaves NO file, `W9215` leaves a file with a stated end, and
+        // `W9218` is not a fault at all — it is a budget, and the zone still streams everything
+        // except its two quantiles.
+        DiagFlag::TelemetryPathUnwritable => Some(W9214.number()),
+        DiagFlag::TelemetryWriteFailed => Some(W9215.number()),
+        DiagFlag::TelemetryZonesRefused => Some(W9218.number()),
         DiagFlag::ClockUncalibrated => None,
     }
 }
@@ -192,6 +203,9 @@ pub(crate) fn report_raised(bits: u32) {
         DiagFlag::ZoneRegistryNearFull,
         DiagFlag::UserZoneBudgetExhausted,
         DiagFlag::EngineScopeRefused,
+        DiagFlag::TelemetryPathUnwritable,
+        DiagFlag::TelemetryWriteFailed,
+        DiagFlag::TelemetryZonesRefused,
     ] {
         if bits & flag.as_bits() == 0 {
             continue;
@@ -207,10 +221,71 @@ pub(crate) fn report_raised(bits: u32) {
             DiagFlag::ZoneRegistryNearFull => report_registry_near_full(),
             DiagFlag::UserZoneBudgetExhausted => report_user_budget_exhausted(),
             DiagFlag::EngineScopeRefused => report_engine_scope_refused(),
+            DiagFlag::TelemetryPathUnwritable => report_telemetry_path_unwritable(),
+            DiagFlag::TelemetryWriteFailed => report_telemetry_write_failed(),
+            DiagFlag::TelemetryZonesRefused => report_telemetry_zones_refused(),
             DiagFlag::ClockUncalibrated => {
                 debug_assert!(false, "invariant: flag_code(ClockUncalibrated) is None");
             }
         }
+    }
+}
+
+/// `W9214` — the telemetry path could not be opened, so this session streams nothing.
+///
+/// **Raised where the path is first opened, which is inside `arm` with a telemetry config**, so a
+/// run that never arms the profiler opens no file and can never reach this. The message names the
+/// consequence rather than the errno: an operator who sees it wants to know that the session has no
+/// stream, and the `io::Error` that produced it is the caller's to log with its own context.
+#[cold]
+#[inline(never)]
+pub(crate) fn report_telemetry_path_unwritable() {
+    debug_assert_eq!(flag_code(DiagFlag::TelemetryPathUnwritable), Some(W9214.number()));
+    if claim(W9214.number()) {
+        warn!(
+            Profiling,
+            W9214.number(),
+            "the telemetry path could not be opened; this session streams nothing"
+        );
+    }
+}
+
+/// `W9215` — a telemetry write failed, so streaming is off for the rest of the session.
+///
+/// **Never a retry and never a panic.** A write that failed once inside a frame will fail again
+/// inside the next one, and retrying would put an unbounded number of failing syscalls on the
+/// dispatcher at exactly the moment the machine is in trouble. The file keeps every whole block
+/// written before the failure, which is what makes the loss bound "one window" true here too.
+#[cold]
+#[inline(never)]
+pub(crate) fn report_telemetry_write_failed() {
+    debug_assert_eq!(flag_code(DiagFlag::TelemetryWriteFailed), Some(W9215.number()));
+    if claim(W9215.number()) {
+        warn!(
+            Profiling,
+            W9215.number(),
+            "a telemetry write failed; streaming is disabled for the rest of this session"
+        );
+    }
+}
+
+/// `W9218` — a quantile subscription was refused past the per-session cap.
+///
+/// The one condition in this group that is **not** a fault. `median` and `p95` cost a strided
+/// gather of the whole retained window plus a sort, per zone, and the cap is what keeps the window
+/// reduction inside its budget (M7). A refused zone still streams `count`, `total`, `min` and
+/// `max`; only its two quantile fields are absent, and the record says so with a flag rather than
+/// with a zero.
+#[cold]
+#[inline(never)]
+pub(crate) fn report_telemetry_zones_refused() {
+    debug_assert_eq!(flag_code(DiagFlag::TelemetryZonesRefused), Some(W9218.number()));
+    if claim(W9218.number()) {
+        warn!(
+            Profiling,
+            W9218.number(),
+            "a telemetry quantile subscription was refused past the per-session cap; the zone              streams without a median or a p95"
+        );
     }
 }
 

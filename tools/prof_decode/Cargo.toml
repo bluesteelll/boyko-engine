@@ -1,0 +1,25 @@
+[package]
+name = "prof_decode"
+version = "0.1.0"
+edition = "2024"
+description = "Profiling rung 13 — the only reader of the telemetry stream format."
+
+# ONE dependency, and that is the whole reason this crate exists rather than a `[[bin]]` somewhere
+# convenient. MEASURED with `cargo tree --edges normal`: rooted here the decoder builds 2 crates;
+# rooted at `boyko_ecs` it would build 12; rooted at `boyko_app`, where the WRITER lives, 45 —
+# the Vulkan FFI, every shader and the whole render stack, in order to print a table. It would also
+# inherit that stack's build state, and this tree currently has a `boyko_app` feature leg that does
+# not compile.
+#
+# It is a separate crate rather than a `[[bin]]` inside `boyko_diag` because this binary writes
+# STDOUT and reads FILES, and `boyko_diag`'s mute-leaf rule keeps `std::process` and `std::fs` out
+# of that crate by default (its `section-gate` feature exists for exactly that reason).
+[dependencies]
+boyko-diag = { path = "../../crates/boyko_diag" }
+
+[[bin]]
+name = "prof_decode"
+path = "src/main.rs"
+
+[lints]
+workspace = true

@@ -1679,3 +1679,65 @@ producible: dropping `dyn_descs_bytes()` from the sum gives `left: 143360, right
 the claim the row's own title makes (*"this row is what puts their bytes inside the budget sum"*),
 and it is gated. **The budget clause itself stays honest but toothless until rung 14 gives it a
 shipping row to be tight against.**
+
+---
+
+## Rung 13 — a second CRC-32 table, and the graph edge that would remove it
+
+**Recorded rather than decided, because both options cost something real and neither is urgent.**
+
+`boyko_diag::telemetry` computes the block CRC with its own 256-entry const table (1 KiB of
+`.rodata`). `boyko_image::png` already has one — same polynomial, IEEE 802.3, private, and shaped
+for PNG chunks (`crc32_chunk` takes the chunk kind and prepends it).
+
+The duplication cannot be removed by using `boyko_image`'s: `boyko_diag` must keep an **empty
+`[dependencies]`**, which is the property that makes it the bottom of the graph. The only direction
+that works is the other one — hoist a shared CRC-32 *into* `boyko_diag` and have `boyko_image`
+depend on it. That is refused here for now, on the crate's own rule: a checksum is not a diagnostics
+primitive, and §4's growth checklist admits a module only when **both** subsystems write it and a
+disagreement between two copies would be observable in a joined artifact. Two CRCs over two
+different byte streams cannot disagree with each other about anything.
+
+**Cost of leaving it:** 1 KiB of `.rodata` and six lines, twice.
+**Cost of hoisting it:** the bottom crate gains a general-purpose utility, `boyko_image` gains an
+edge into the diagnostics substrate, and the growth rule loses the property that makes it hard to
+satisfy.
+
+Owner's call if the second one is ever preferred. Nothing is blocked either way.
+
+## Rung 13 — `G26`'s budget is a RELEASE claim, and the gate says so instead of pretending
+
+`G26`'s figures (`__telemetry_reduce` p95 ≤ 150 µs, `__telemetry_write` ≤ 200 µs, sum ≤ 350 µs) are
+asserted only under `not(debug_assertions)`. MEASURED, this box, 64 quantile zones, p95 over 32
+runs:
+
+| | debug | release |
+|---|---|---|
+| `__telemetry_reduce` | 5 820.8 µs | **128.0 µs** |
+| `__telemetry_write` | 163.1 µs | **11.2 µs** |
+| **sum** | 5 983.9 µs | **139.2 µs** |
+
+A debug build is **43× over** the total budget. Asserting the budget there would red on every
+developer's machine and prove nothing about the shipped one, so what the gate asserts in *every*
+profile is the property the budget encodes and a profile cannot change: the reduce dominates, and it
+is the term that scales with the quantile count.
+
+**The open half:** the release leg is not in CI today. `scripts/` has no release test step, and the
+five-profile CI matrix is rung 14's content. Until rung 14 lands, **the budget clause runs only when
+somebody runs `cargo test --release`**, and this note is the record that it is not automatic. It is
+the same shape as rung 10's `G17` and is expected to be resolved by the same rung.
+
+## Rung 13 — `W9214` has an emitter and a doc page, but no test observes it
+
+`W9214` (telemetry path unwritable) is `Live` in the registry, is raised by `TelemetryStream::open`
+and has a `docs/diagnostics/W9214.md` page. Checks 2, 3a and 3b all pass. What does **not** exist is
+a test that observes it being emitted, which is the obligation every `Live` row owes.
+
+The reason is that producing it needs an unwritable path, and the ways to get one are all
+platform-specific and flaky in CI: a directory that does not exist works on both platforms but is
+the least interesting case; a read-only file needs `chmod`/`icacls`; an open-without-sharing needs a
+second handle and is Windows-only.
+
+`W9215` and `W9218` **are** observed (`crates/boyko_app/tests/profiling_telemetry_stream.rs`), so
+this is one row rather than three. Recorded rather than papered over with a
+directory-does-not-exist test that would pass on a typo.

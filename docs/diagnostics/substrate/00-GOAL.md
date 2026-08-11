@@ -266,6 +266,35 @@ profiling plan and are not restated, cited or depended on here**; this file owns
 *address* — that `boyko_diag` is where it sits, and the graph reason why. Nothing in the
 substrate reads layer B, so nothing in the substrate changes if its contents change.
 
+### 5a. A SECOND hosted module — `telemetry`, at profiling rung 13
+
+The telemetry **wire format** is hosted here on exactly the same terms, and it is recorded so that
+"hosted" stays a door with a lock on it rather than a precedent anyone can walk through.
+
+It is **not shared**: the profiler writes it and one tool reads it, so §4's two-question checklist
+refuses it as a shared primitive, and it enters — like `profiling_abi` — through the graph.
+
+**The graph reason, MEASURED** (`cargo tree --edges normal`, at that rung):
+
+| A `prof_decode` rooted at | Crates it must build |
+|---|---|
+| `boyko_diag` | **2** |
+| `boyko_ecs` | 12 |
+| `boyko_app` — where the WRITER lives | **45** |
+
+The decoder is a leaf binary whose whole job is to read a file and print a table. Rooting it at the
+writer's crate makes it build the Vulkan FFI, every shader and the render stack, and inherit that
+stack's build state — which at rung 13 included a feature leg that did not compile.
+
+**It does not touch §6.** Encoding is into a caller-supplied `&mut [u8]` and decoding is over a
+`&[u8]`: no file, no print, no thread, no `core::fmt`. `std::fs` and stdout live in
+`tools/prof_decode`, which is a separate crate for precisely that reason rather than a `[[bin]]`
+here.
+
+**Consequence, and the same one as above:** two of `boyko_diag`'s public modules are hosted rather
+than shared. The count is **two**, and a third needs its own measured graph argument in this
+section — not an appeal to these.
+
 ---
 
 ## 6. The mute-leaf rule

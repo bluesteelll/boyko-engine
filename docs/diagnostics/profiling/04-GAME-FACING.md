@@ -239,6 +239,39 @@ samples, which for a per-frame zone is ~18 minutes in one bucket.
 **Every record is inside a self-delimiting BLOCK, because an unframed stream cannot survive a real
 disk (M8).**
 
+> ### ⚠️ SHIPPED at rung 13, and the layout below is the design, not the result
+>
+> Five things in this section did not survive contact with the tree. Each is corrected in
+> [`05-LADDER-GATES.md`](05-LADDER-GATES.md)'s rung-13 row and implemented in
+> `boyko_diag::telemetry`, whose module doc carries the argument in full.
+>
+> 1. **The `WindowRec`'s ten fields do not fit its stated 40 B**, and two of them are properties of
+>    the WINDOW rather than of the zone. `clock_epoch` and `fixed_elapsed_ns` moved into a 32 B
+>    `WindowHead` written once per block; the record is 32 B. At 64 zones that is 2 080 B instead of
+>    2 560 — but the size is the smaller half of the reason. Sixty-four copies of one value are
+>    sixty-four chances to disagree, and A10's pseudocode reads `FixedTime::elapsed()` *inside* the
+>    record loop, where successive reads legitimately differ.
+> 2. **`WindowRec::drops` had no per-zone source.** `boyko_diag::loss` is process-wide and
+>    `FrameRecord::drops` is per frame; the honest figure is Σ over the window's frames, which is one
+>    number for the window. It is a `WindowHead` field.
+> 3. **`build_hash` and `calib_cv` are ABSENT.** Neither exists in this tree — re-measured at rung
+>    13, and it is rung 7's finding verbatim: *a header field that is always absent is
+>    indistinguishable from one that is broken*. `HEADER_FLAG_INVARIANT_TSC` ships in their place,
+>    because it exists and it is what decides whether the tick magnitudes mean anything.
+> 4. **`build_profile` is three integers, not a name.** There is no `BOYKO_PROFILE` constant and no
+>    build script; `LOG_CEILING`, `PROFILING_TIER` and `REGION_CAPACITY` are what the profile
+>    materially is. Rung 14 lands the axis, and a named byte can join them there.
+> 5. **`NO_QUANTILE` is a FLAG, not a sentinel value.** `u32::MAX` is REACHABLE — the store clamps a
+>    cell's extrema to it and labels the cell `OverRange` — so using it would make *"nobody
+>    subscribed"* indistinguishable from *"this zone ran longer than a `u32` of ticks"*.
+>
+> A sixth is about the *writer* rather than the format: **the file handle cannot be `.bss`**.
+> `ZeroInit`'s premise is that the all-zero bit pattern is a valid value, and `Option<File>` has no
+> such guarantee on either target platform. The double buffer is `.bss` as specified; the handle
+> lives in the host-owned stream struct, which is not the `World` either — which is what the rule
+> actually requires. MEASURED while implementing it: **`flush_on_panic`, the mechanism this rule is
+> justified by, does not exist in `crates/` at all.**
+
 ```
 file        := header, block*
 header  (128 B, once per file): magic, schema_version, boyko_diag::SessionId, run_id, build_hash,
@@ -540,6 +573,11 @@ __telemetry_reduce:                        // THE DOMINANT TERM (M7) — its own
  0. for each subscribed zone: count/total/min/max  <- O(1) folds already in the row
  1. for each zone in cfg.telemetry.quantiles (<= MAX_TELEMETRY_QUANTILE_ZONES = 64):
         gather 121 strided values; sort; median; p95      // A4; one sort per zone
+    // ⚠️ SHIPPED ROW-MAJOR, NOT ZONE-MAJOR. Steps 0 and 1 are one walk over the SEALED ROWS,
+    //    reading every subscribed zone inside each row, with the quantile values landing in a
+    //    64x121 scratch. MEASURED release p95 at the cap: zone-major 168.1 us -- OVER the 150 us
+    //    budget below -- against row-major 128.0 us. The columns are frame-major, so 'strided'
+    //    means one cache line per cell; row-major takes sixteen u64s out of each line it touches.
     every other subscribed zone writes NO_QUANTILE in both fields
 
 __telemetry_write:

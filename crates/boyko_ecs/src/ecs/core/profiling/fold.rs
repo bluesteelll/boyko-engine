@@ -450,6 +450,17 @@ fn accumulate(
         debug_assert!((s.zone as usize) < tiers.zones, "invariant: a folded zone is inside the tiers");
         (*tiers.lifetime.add(s.zone as usize)).push(s.value, clamped);
 
+        // The OBSERVED kind (rung 13). Written here because this is the only place in the tree
+        // that holds a zone id and its kind at the same time: a `ZoneDesc` carries no kind, so a
+        // telemetry `ZoneRow` that named one would be stating a unit for `total` that nothing
+        // measured. Shifted by one so the zero-filled commit still means "never observed" —
+        // `SampleKind::Span` is discriminant `0`, and a raw cast would make the two the same byte.
+        //
+        // Unconditional rather than write-once-if-zero: a compare would cost a load and a branch
+        // per sample to save a store to a line this sample's neighbours are already touching, and
+        // "the last kind folded" is the honest reading of a byte that can only hold one.
+        tiers.kind_of.add(s.zone as usize).write(boyko_diag::telemetry::kind_byte(kind));
+
         let mapped = tiers.hist_of.add(s.zone as usize).read();
         if mapped != 0 {
             let slot = &mut *tiers.hist.add(mapped as usize - 1);

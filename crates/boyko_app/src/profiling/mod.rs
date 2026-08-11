@@ -21,6 +21,11 @@
 //! into a number with a measured bound. It lives beside [`contrast`] for the same reason — it
 //! needs the artifact header, and the kernel cannot see one.
 //!
+//! [`stream`] is rung 13's half: the telemetry writer -- the window reduction, the block encode and
+//! the one `write_all` per window. The FORMAT it writes lives in `boyko_diag::telemetry`, hosted
+//! there for a measured graph reason: a `prof_decode` rooted at `boyko_diag` builds one crate and
+//! one rooted here builds forty-four.
+//!
 //! [`alloc_shim`] is rung 8's opt-in allocation counter — the one place the profiler installs a
 //! `#[global_allocator]`, and only when `profiling-alloc` asks. Its module doc states what a
 //! process-wide counter cannot claim.
@@ -36,3 +41,4 @@ pub mod artifact;
 pub mod contrast;
 pub mod correlate;
 pub mod reduce;
+pub mod stream;

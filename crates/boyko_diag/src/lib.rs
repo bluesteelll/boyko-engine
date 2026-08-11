@@ -58,6 +58,7 @@ pub mod profile;
 pub mod profiling_abi;
 pub mod sample;
 pub mod storage;
+pub mod telemetry;
 
 // This crate declares zones of its own (its tests do), so it must name its own partition -- the
 // same one line every engine crate writes. It is the mechanism proving itself: without it,
