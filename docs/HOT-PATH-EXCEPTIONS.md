@@ -45,6 +45,31 @@ The class column is a closed vocabulary of *provably cold* classes. There is del
 
 [rust#22991]: https://github.com/rust-lang/rust/issues/22991
 
+## What is not an exception, and the false positive that taught it
+
+**An item carrying `#[cfg(test)]` is not registered here, because it does not exist in a shipping
+build.** A `static` or `fn` the library never compiles cannot be on a hot path — there is nothing to
+justify.
+
+The scanner did not know that. `cfg_test_spans` recognises `#[cfg(test)] mod name { .. }` blocks and
+nothing else, so a `#[cfg(test)]` on a single item was invisible and its `#[allow]` counted as a
+production exception. **MEASURED 2026-08-12**: three such sites —
+`boyko_ecs`'s `profiling::store::{TEST_SERIAL, test_serial}` and `boyko_log`'s
+`drain_owner::TEST_SERIAL`, every one a test-harness serialization lock whose own doc-comment calls
+itself "the sanctioned exception shape — a `#[cfg(test)]` fixture, never on any engine path" — held
+this gate **RED**, exit 1.
+
+**And the red was invisible for as long as it existed**, because the script prints its summary line
+("… exception(s) across … file(s)") on *both* verdicts. A report that quoted that line read like a
+pass. The lesson is the campaign's own, arriving this time in the certification rather than in the
+engine: **a count is not a verdict, and the only thing that establishes a gate's colour is its exit
+code.** `scripts/check_hotpath_exceptions.py::item_is_cfg_test` closes the classification hole; the
+fix was shown red twice — once by stripping a `#[cfg(test)]` off one of the three (the lock becomes
+real production state, gate red again) and once by planting a genuinely production
+`#[allow(clippy::disallowed_types)]` in `lifecycle.rs` (caught, so the new rule does not over-reach).
+
+Registered count after the fix: **32 across 11 files**.
+
 ## Exceptions
 
 | file | symbol | type | class | why this is cold and why a boyko-native structure cannot serve |

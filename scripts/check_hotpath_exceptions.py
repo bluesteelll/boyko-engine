@@ -201,6 +201,41 @@ def cfg_test_spans(lines: list[str]) -> list[tuple[int, int]]:
     return spans
 
 
+def item_is_cfg_test(lines: list[str], allow_idx: int) -> bool:
+    """Whether the item carrying the `#[allow]` at `allow_idx` is itself `#[cfg(test)]`.
+
+    `cfg_test_spans` only sees `#[cfg(test)] mod name { .. }` blocks, so a `#[cfg(test)]` on a
+    single `static` or `fn` was invisible and its `#[allow]` counted as a production exception.
+    **MEASURED 2026-08-12**: three such sites — `boyko_ecs`'s `profiling::store::{TEST_SERIAL,
+    test_serial}` and `boyko_log`'s `drain_owner::TEST_SERIAL` — held this gate RED, and the
+    failure was invisible in every report because the summary line ("35 exception(s) across 13
+    file(s)") prints on both verdicts and reads like a pass.
+
+    All three carry the shape the registry calls sanctioned in its own prose: a `#[cfg(test)]`
+    fixture that does not exist in a shipping build. An item that is not compiled into the library
+    cannot be on a hot path, so it is not an exception to register — it is not there.
+
+    The scan is the same contiguous attribute run the caller already walks: backwards over
+    attributes and doc comments, forwards over attributes, stopping at the item.
+    """
+    i = allow_idx - 1
+    while i >= 0:
+        s = lines[i].strip()
+        if not s or s.startswith(("#[", "///", "//!", "//")):
+            if CFG_TEST_RE.match(lines[i]):
+                return True
+            i -= 1
+            continue
+        break
+    for nxt in lines[allow_idx + 1 : allow_idx + 12]:
+        s = nxt.strip()
+        if not s.startswith("#["):
+            break
+        if CFG_TEST_RE.match(nxt):
+            return True
+    return False
+
+
 def production_sources() -> list[Path]:
     srcs = _all_sources()
     skip = test_only_files(srcs)
@@ -229,6 +264,8 @@ def scan_sources() -> tuple[dict[str, int], list[tuple[str, int, str]]]:
                 continue
             if any(lo <= i <= hi for lo, hi in spans):
                 continue  # inside an inline #[cfg(test)] module — not production
+            if item_is_cfg_test(lines, i):
+                continue  # the ITEM is #[cfg(test)] — it does not exist in a shipping build
             if INNER_RE.search(line):
                 blanket.append((rel, i + 1, "crate/module-level `#![allow]`"))
                 continue
