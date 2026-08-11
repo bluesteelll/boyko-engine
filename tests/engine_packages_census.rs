@@ -41,6 +41,16 @@ const USER_PACKAGES: &[&str] = &[
     "boyko_demo",
     // The Bevy comparison harness.
     "bench-bevy-vs-boyko",
+    // Profiling rung 14. `profile-fixture` is G14(a)'s subject: two binaries, one zone site each,
+    // `boyko_diag` their only dependency. It is `User` because the gate SPECIFIES it as `User` — the
+    // census argument needs the fixture to be a stand-in for a game's own crate, not for the engine.
+    "profile-fixture",
+    // G16(a)/(b)'s subject: one `debug!` site. It declares no partition at all, having no zones, so
+    // strictly it belongs to neither region — but this gate requires a DECISION rather than an
+    // omission, and the honest one is that if it ever grows a zone it is a game-shaped crate, not an
+    // engine one. Recording it here is what stops that being discovered as a surprise `E0425` in a
+    // crate nobody was working on, which is the failure mode the gate's own message names.
+    "profile-fixture-log",
 ];
 
 fn repo_root() -> PathBuf {

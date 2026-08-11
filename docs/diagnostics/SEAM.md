@@ -806,6 +806,40 @@ is why it belongs to the joint rung **J1** and explicitly **not** to substrate r
 **Also verified: `BOYKO_PROFILE` appears nowhere in `crates/`, `src/`, `scripts/`, `.github/` or
 `docs/` outside the three plan documents — the name is free.**
 
+> **LANDED at profiling rung 14, 2026-08-11, with four corrections to the paragraphs below.** Each is
+> a measurement, and three of them are things this section asserts that turned out not to hold.
+>
+> 1. **The name is free but it is not unambiguous.** Three environment variables already begin with
+>    it — `BOYKO_PROFILE_ARTIFACT`, `BOYKO_PROFILE_RUN_TOKEN`, `BOYKO_PROFILE_WORKLOAD`, all of them
+>    the *profiling artifact's*, none of them this axis's. `std::env::var("BOYKO_PROFILE")` and
+>    `rerun-if-env-changed=BOYKO_PROFILE` both match the exact name only, so nothing is broken; a
+>    reader scanning for the axis is not so lucky.
+> 2. **The `profiling-analysis` column cannot be a column.** Cargo resolves features before any
+>    build script runs and `cargo::rustc-cfg` reaches only the emitting crate, so this axis can
+>    never *set* it. Worse, while it was `default = ["profiling-analysis"]` **no command line could
+>    clear it**: nine sibling manifests depend on `boyko-ecs` without `default-features = false`, so
+>    unification restored it under `--no-default-features`, and an explicit `features = [...]` on an
+>    edge survives that flag by design. The feature became **opt-in**, and the axis emits
+>    `ANALYSIS_ADMITTED` for `boyko_ecs` to refuse a disagreement against. The column now reads
+>    "admitted / refused", not "on / off".
+> 3. **The `off` row's tier cell names something that does not exist.** It reads *"feature
+>    `profiling` off"*; there is **no `profiling` cargo feature anywhere in this workspace**, and
+>    `ZoneTier` has no position below `Always`. `BOYKO_PROFILE=off` is therefore a real off switch
+>    for the **logger** — `LOG_CEILING = 0`, `LANE_ARRAY_LEN` becomes zero-length, which is `G2`'s
+>    subject and works — and leaves the profiler at its floor. The compile-time off switch for the
+>    profiler is the FEATURE axis (`G1`); the runtime one is `ARM_MASK` (`GJ1`).
+> 4. **`BOYKO_BUILD_HASH` is not emitted.** Nothing reads it — rung 7 measured its absence, rung 13
+>    re-measured it and shipped `HEADER_FLAG_INVARIANT_TSC` instead — and `profile.rs`'s standing
+>    rule refuses a constant with no reader. Emitting one would also make every build depend on a
+>    `git` spawn whose result cargo cannot invalidate on.
+>
+> `PROFILE_NAME` **is** emitted, and it is not on the list above: it has exactly one reader, J1's own
+> gate, which asks whether all eight constants come from one row. The half that paragraph could not
+> check — *did the script produce the row that was requested?* — is the census harness's, because it
+> spawns the build and therefore knows its own input. A test in `boyko_diag` could not: its
+> `option_env!("BOYKO_PROFILE")` carries no rerun directive and can go stale against the very table
+> it checks.
+
 | `BOYKO_PROFILE` | `GLOBAL_TIER` | `profiling-analysis` | log `GLOBAL_CEILING` | `REGION_CAPACITY` | `ENGINE_ZONE_SLOTS` | `MAX_USER_BUDGET` | default `LogRuntimePreset` |
 |---|---|---|---|---|---|---|---|
 | `dev` (default) | `Deep` | on | `Trace` | 1024 | 4096 | 3072 | `Dev` |

@@ -56,15 +56,18 @@ use crate::storage::SyncCells;
 
 /// Bytes of name text the dynamic registry may hand out, in total.
 ///
-/// Sized here rather than per profile, on [`MAX_USER_BUDGET`]'s precedent and for its reason (the
-/// `BOYKO_PROFILE` axis is rung 14). 64 KiB is the corpus's **dev** figure, which is the row every
-/// other constant in this crate is currently written at.
+/// **On the `BOYKO_PROFILE` axis since J1**: `dev` / `editor` 64 KiB, the three others 8 KiB.
+///
+/// Rung 10 landed it as a literal on [`MAX_USER_BUDGET`]'s precedent and for its reason — the axis
+/// was rung 14's — at the dev figure, the row every other constant in this crate was written at.
 ///
 /// It is deliberately not `MAX_USER_BUDGET × some_max_name_len`: names are wildly uneven — a
 /// generated `"mod.blade_runner.tick.phase3"` beside a `"ai"` — and a per-zone cap large enough for
 /// the long one would reserve that much for the short one. One shared arena spends the bytes where
-/// they are actually used, at the cost stated in the module docs.
-pub const DYN_NAME_BYTES: usize = 64 * 1024;
+/// they are actually used, at the cost stated in the module docs. That shape is what lets the two
+/// arenas shrink by different factors across the axis (descriptors 6×, names 8×) without either
+/// figure needing to justify itself against the other.
+pub const DYN_NAME_BYTES: usize = crate::profile::DYN_NAME_BYTES;
 
 /// The name arena. One shared byte range, carved by [`DYN_NAME_NEXT`].
 static DYN_NAMES: SyncCells<u8, DYN_NAME_BYTES> = SyncCells::zeroed();

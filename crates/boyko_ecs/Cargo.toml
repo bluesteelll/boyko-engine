@@ -51,13 +51,30 @@ libc.workspace = true
 loom.workspace = true
 
 [features]
-default = ["profiling-analysis"]
+default = []
 # Profiling rung 3d — the ANALYSIS half of the profiler: the `intervals` append ring (256 KiB of
 # the reservation) and the `ConcurrencyReport` that reads it against the schedule's own
-# `ConflictGraph`. Default ON because a development build is where the question "did this schedule
-# actually run in parallel?" is asked; a shipping title has no use for either, and rung 14's
-# `BOYKO_PROFILE` axis is what turns it off there. Enabling it costs nothing when the profiler is
-# disarmed — the ring is inside the reservation `arm` commits, and `arm` is the enable path.
+# `ConflictGraph`. Enabling it costs nothing when the profiler is disarmed — the ring is inside the
+# reservation `arm` commits, and `arm` is the enable path.
+#
+# OPT-IN since profiling rung 14, and the change is forced rather than chosen. This was
+# `default = ["profiling-analysis"]`, on the reasoning that a development build is where the
+# question "did this schedule actually run in parallel?" is asked and that rung 14's `BOYKO_PROFILE`
+# axis would turn it off for a shipping title. MEASURED at that rung: it cannot.
+#
+#   * `cargo tree --workspace -e features --no-default-features` still reported the feature
+#     ENABLED. Nine sibling manifests depend on `boyko-ecs` and not one says
+#     `default-features = false`, so unification puts the default straight back.
+#   * Moving the request onto a dependency edge does not help either: an explicit `features = [...]`
+#     survives `--no-default-features` by design.
+#   * And an environment variable cannot set a cargo feature at all — cargo resolves features
+#     before any build script runs.
+#
+# So while it was default-on there was NO command line that could turn it off, and the axis's
+# `shipping` row would have been a claim nothing could honour. Opt-in is the only shape in which the
+# flag means what it says. Enable it the same way `hwrt` and `bench-alloc` are enabled:
+# `--features boyko-ecs/profiling-analysis`. A build that enables it under a profile that refuses it
+# fails at a `const` assertion in `src/ecs/core/profiling/mod.rs` naming both sides.
 profiling-analysis = []
 # Phase 12.5 Track B I5 — bumps `MAX_QUERY_TYPES` from 1024 to 4096 for
 # projects with an unusually high fan-out of `(D, F)` query shapes. Increases

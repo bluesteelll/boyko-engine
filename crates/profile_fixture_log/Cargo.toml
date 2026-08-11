@@ -1,0 +1,16 @@
+[package]
+name = "profile-fixture-log"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# The logging half of the axis needs `boyko_log`, and that is exactly why it is a SEPARATE package
+# from `profile-fixture`. G14(a)'s argument is that the profiling fixture's image can contain no
+# emitter other than its own single zone site, which rests on `boyko_diag` having out-degree 0.
+# Putting a `boyko-log` edge in that manifest would not change the census's number today, and that
+# is the trap: the number would still look right while the reason it means anything had gone.
+[dependencies]
+boyko-log = { path = "../boyko_log" }
+
+[lints]
+workspace = true

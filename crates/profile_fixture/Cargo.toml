@@ -1,0 +1,18 @@
+[package]
+name = "profile-fixture"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# G14(a)'s whole argument is this dependency table, so it is INVIOLABLE in the same sense
+# `boyko_diag`'s is. A symbol census answers "is symbol S referenced in this object?" — per BINARY,
+# never per site — so it can only answer a per-SITE question when the binary holds exactly one site.
+# `boyko_diag` has out-degree 0, and each bin below carries exactly one `declare_zone!` and exactly
+# one `zone!`, so nothing else in the image can reference the emission path and be mistaken for it.
+# Adding any second dependency here does not weaken the gate's number: it destroys the gate's
+# ARGUMENT, which is worse, because the number would still look right.
+[dependencies]
+boyko-diag = { path = "../boyko_diag" }
+
+[lints]
+workspace = true

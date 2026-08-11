@@ -1722,10 +1722,26 @@ developer's machine and prove nothing about the shipped one, so what the gate as
 profile is the property the budget encodes and a profile cannot change: the reduce dominates, and it
 is the term that scales with the quantile count.
 
-**The open half:** the release leg is not in CI today. `scripts/` has no release test step, and the
+~~**The open half:** the release leg is not in CI today. `scripts/` has no release test step, and the
 five-profile CI matrix is rung 14's content. Until rung 14 lands, **the budget clause runs only when
 somebody runs `cargo test --release`**, and this note is the record that it is not automatic. It is
-the same shape as rung 10's `G17` and is expected to be resolved by the same rung.
+the same shape as rung 10's `G17` and is expected to be resolved by the same rung.~~
+
+**CORRECTED at rung 14, 2026-08-11: THAT PARAGRAPH WAS FALSE WHEN IT WAS WRITTEN.**
+`.github/workflows/ci.yml`'s `test` job is a `matrix: profile: [debug, release]`, and its release
+arm has run `cargo test --workspace --all-targets --release` since long before rung 13. A second
+job, `force-alloc-panic`, runs the release suite again under `--cfg force_alloc_panic`. Neither
+excludes `boyko_app`, so `G26`'s budget clause has been running in CI on every push the whole time.
+
+The defect is not the conclusion, it is **where I looked**: I checked `scripts/` for a release step,
+found none, and reasoned from that to a claim about CI — without opening the CI file. That is the
+root cause this corpus has already written down in as many words: *verification is an ACTION, not an
+understanding*, and errors land exactly where checking something would have meant doing something.
+`scripts/` and `.github/workflows/` are two different places and only one of them was read.
+
+The note is struck through rather than deleted because the false claim is the useful half. Rung 14's
+`profile-legs` matrix is still net new and still worth having; what it does **not** do is close a gap
+that was never open.
 
 ## Rung 13 — `W9214` has an emitter and a doc page, but no test observes it
 
@@ -1741,3 +1757,101 @@ second handle and is Windows-only.
 `W9215` and `W9218` **are** observed (`crates/boyko_app/tests/profiling_telemetry_stream.rs`), so
 this is one row rather than three. Recorded rather than papered over with a
 directory-does-not-exist test that would pass on a typo.
+
+## Rung 14 — `profiling-analysis` is now OPT-IN, and that changes what a plain `cargo build` gives you
+
+**This one is a behaviour change and the owner should know about it before it surprises him.**
+
+`boyko_ecs` used to declare `default = ["profiling-analysis"]`, so every build carried the interval
+ring and `ConcurrencyReport` — the "did this schedule actually run in parallel?" answer. It is now
+`default = []`, and that answer requires `--features boyko-ecs/profiling-analysis`.
+
+**Why it had to move**, measured rather than argued:
+
+- An environment variable cannot set a cargo feature. Cargo resolves features before any build
+  script runs, and `cargo::rustc-cfg` reaches only the crate that emitted it. So `BOYKO_PROFILE`
+  could never have switched it, whatever the corpus's table says.
+- While it was default-on, **no command line could turn it off**. `cargo tree --workspace -e
+  features --no-default-features` still reported it enabled: **nine** sibling manifests depend on
+  `boyko-ecs` and not one says `default-features = false`, so unification restored it. Moving the
+  request onto a dependency edge would not have helped either — an explicit `features = [...]`
+  survives `--no-default-features` by design.
+- So the axis's `shipping` row would have been a claim nothing could honour, and `G14(c)` would have
+  been a gate with no reachable state.
+
+**What replaces it:** the axis emits `ANALYSIS_ADMITTED`, and `boyko_ecs` refuses at compile time to
+be built with the feature on under a profile that does not admit it. The refusal is one-way on
+purpose — analysis missing from a `dev` build is a developer who passed fewer flags than they meant
+to; analysis present in a `shipping` build is the profile being a lie.
+
+**A coverage consequence, found by asking rather than by a gate.** Six tests in `boyko_ecs`'s
+profiling suite are `#[cfg(feature = "profiling-analysis")]`. Opt-in means a bare
+`cargo test --workspace --all-targets` no longer compiles or runs them — and a sweep that silently
+stops running six tests looks exactly like a sweep that passes. Every CI leg that used to get the
+feature from the default list now names it explicitly (`check`, both `test` arms, `clippy`,
+`force-alloc-panic`), and the feature-OFF side is covered by the four `profile-legs` builds that
+refuse it outright. **A local sweep must pass `--features boyko-ecs/profiling-analysis` too, or those
+six do not run.**
+
+**The owner's call, if he wants one:** whether a plain local `cargo build` should carry it. The only
+way to have both is to accept that no flag can remove it, which is the state we just left.
+
+## Rung 14 — the symbol census needs `lto = "fat"`, and that raises a separate question about the shipped profile
+
+`G14(a)` is only decidable under LTO. MEASURED on this box, `deep_zone` (one `Deep` zone site,
+`boyko_diag` its only dependency):
+
+| link configuration | `dev` | `shipping` | can the gate fail? |
+|---|---|---|---|
+| default release | `mint_cold` = 1 | 1 | **no** |
+| `-C link-arg=-Wl,--gc-sections` | 1 | 1 | **no** — no effect at all |
+| `lto = "fat"`, `codegen-units = 1` | 1 | **0** | yes |
+
+The default-release image contains `drop_glue::<boyko_diag::telemetry::Block>` in a binary whose
+source never mentions telemetry: the whole rlib rides in and nothing collects it, so a whole-image
+census answers "was this codegen'd on the way here?" rather than "can this program reach it?".
+
+The gate passes LTO through `--config` for its own two builds only, so nothing else in the
+repository changed. **The open question is a different one:** `[profile.release]` here sets
+`codegen-units = 1` for benches and no LTO anywhere. A shipped title almost certainly wants
+`lto = "fat"` — it is the difference between `deep_zone` at 1433 symbols and at 4647. That is a
+build-configuration decision with compile-time cost, and it belongs to the owner rather than to a
+diagnostics rung.
+
+## Rung 14 — `BOYKO_PROFILE=off` does not turn the profiler off, and the thing that would does not exist
+
+`SEAM.md` §S9's table gives the `off` row the tier-column entry *"feature `profiling` off"*.
+MEASURED at this rung: **there is no `profiling` cargo feature anywhere in this workspace.**
+`boyko_diag` declares `section-gate`; `boyko_ecs` declares `profiling-analysis`, `big_query_table`
+and `bench-alloc`; no crate gates `zone!` or `declare_zone!` on a feature at all. And `ZoneTier`'s
+three values are `Always`, `Dev` and `Deep` — there is no position below `Always`, so the lowest
+compile ceiling the profiler has still admits every `Always` site.
+
+`off` therefore ships as a **logging** off switch: `LOG_CEILING = 0`, `LANE_ARRAY_LEN` becomes
+zero-length, which is `G2`'s subject and works. The profiler stays at its floor.
+
+Two ways to close it, both out of this rung's scope: land the FEATURE axis (`G1`) so a `profiling`
+feature exists and `#[cfg]` can delete the macro definitions before name resolution; or accept that
+"off" means the runtime axis (`ARM_MASK`, `GJ1`) and rename the row. Nothing is blocked either way —
+the row is honest as built, and it is written down here because "off" is a word a reader will trust.
+
+## Rung 14 — J1's logging half is owed, and it is owed to rungs that have not landed
+
+`J1` is one rung by construction (S9: one compile axis cannot be split across two rungs), and the
+axis is now whole. `L17`'s **other** content is not:
+
+- `LogRuntimePreset` — the five-preset runtime axis.
+- The three header facts: `build_profile`, `runtime_preset` and `ceiling` printed as three
+  independent values, plus a fixture proving the first two can differ in one binary.
+- `G16(d)`, which is the gate over those three fields.
+- A **dynamic** logging site in the census fixture. `dyn_debug!` is `L10`'s and does not exist, so
+  `G16(a)/(b)` covers the static path only.
+
+All four need a sink header to print into. MEASURED: `boyko_log` has `census`, `codes`,
+`drain_owner`, `lane`, `level`, `lifecycle`, `macros`, `rate`, `record`, `site`, `sync_out`,
+`target` and `sink/{ecs,file,mod}` — and **no** `sample.rs`, `sink/binary.rs`, `sink/request.rs`,
+`sink/crash.rs` or `bin/logdec.rs`. The logging ladder stands at roughly L5 of 17.
+
+This is not a defect in the axis and not a shortcut taken: the axis is the indivisible part and it
+landed indivisibly. It is a scheduling fact, recorded so nobody reads "J1 shipped" as "the logging
+plan reached L17".

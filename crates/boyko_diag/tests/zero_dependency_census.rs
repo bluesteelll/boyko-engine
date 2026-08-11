@@ -35,10 +35,17 @@
 
 /// Every table Cargo will take a dependency from. All four must be empty here.
 ///
-/// `build-dependencies` is in the list even though this crate has no `build.rs` — MEASURED, there
-/// is no build script anywhere in this workspace — because "there is no build script" is exactly
-/// the kind of fact that stops being true quietly, and rung 14's `BOYKO_PROFILE` axis is scheduled
-/// to add one *to this crate*.
+/// `build-dependencies` was in the list before this crate had a `build.rs`, on the grounds that
+/// *"there is no build script anywhere in this workspace"* is exactly the kind of fact that stops
+/// being true quietly and that rung 14's `BOYKO_PROFILE` axis was scheduled to add one here.
+///
+/// **Rung 14 landed it, and the entry earned its keep on the same day.** `crates/boyko_diag/build.rs`
+/// now exists and is the workspace's only build script; it is written against `std` alone, so this
+/// table stays empty. A build-dependency would be the easiest edge in the workspace to add without
+/// noticing — it does not appear in a consumer's source, it does not change any public path, and it
+/// would be reached for the first time somebody wants to parse something in that script. It is also
+/// the one edge `cargo tree -e normal` would not show, which is why the two manifests that state
+/// this property say `-e normal,build` explicitly.
 const DEPENDENCY_TABLES: &[&str] = &[
     "[dependencies]",
     "[dev-dependencies]",

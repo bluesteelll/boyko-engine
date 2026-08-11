@@ -46,6 +46,31 @@
 //! `ZoneDesc` carries no kind and the fold is the only party that can state whether a cell's `total`
 //! is ticks or increments.
 
+// ---------------------------------------------------------------------------------------------
+// The one place the two halves of the build axis are made to agree — profiling rung 14 (J1)
+// ---------------------------------------------------------------------------------------------
+//
+// `BOYKO_PROFILE` is an environment variable read by `crates/boyko_diag/build.rs`;
+// `profiling-analysis` is a cargo FEATURE of this crate. Cargo resolves features before any build
+// script runs, and `cargo::rustc-cfg` applies only to the crate that emitted it, so **no value the
+// axis emits can switch this feature**. The axis publishes what the profile ADMITS and this line
+// refuses a disagreement — which is the whole of it: a `shipping` build that still carries
+// `ConcurrencyReport`, `resolve` and the TOML writer fails to build here, rather than shipping
+// symbols its own profile says are absent and being caught (or not) by a symbol census afterwards.
+//
+// The direction is one-way on purpose. Analysis compiled OUT of a `dev` build is a developer who
+// passed fewer flags than they meant to; analysis compiled INTO a `shipping` build is the profile
+// being a lie. Only the second is an error.
+const _: () = assert!(
+    !(cfg!(feature = "profiling-analysis") && !boyko_diag::profile::ANALYSIS_ADMITTED),
+    "this build selected a BOYKO_PROFILE that does not admit the analysis half of the profiler \
+     (shipping, shipping-min or off), but the `profiling-analysis` cargo feature is enabled. The \
+     axis cannot switch a cargo feature -- drop `--features boyko-ecs/profiling-analysis`. Note \
+     that `--no-default-features` is NOT the answer and never was: nine sibling manifests depend \
+     on boyko-ecs without `default-features = false`, so a default-on feature is re-enabled by \
+     unification no matter what the command line says. That is why this feature is opt-in."
+);
+
 #[cfg(feature = "profiling-analysis")]
 pub mod analysis;
 pub mod diag;

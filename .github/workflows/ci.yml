@@ -59,8 +59,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace --all-targets --exclude boyko_demo --exclude bench-bevy-vs-boyko
+      - run: cargo check --workspace --all-targets --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
 
+  # `--features boyko-ecs/profiling-analysis` is on every leg below that used to get it from
+  # `boyko_ecs`'s default list. Profiling rung 14 made that feature OPT-IN — measured: while it was
+  # default-on, no command line could turn it off, because nine sibling manifests depend on
+  # `boyko-ecs` without `default-features = false` and unification restored it, so the axis's
+  # `shipping` row would have been unenforceable.
+  #
+  # Passing it here is not a formality: SIX tests in `boyko_ecs`'s profiling suite are
+  # `#[cfg(feature = "profiling-analysis")]`, and without the flag they are not compiled and not
+  # run — a coverage loss that looks exactly like a green sweep. The feature-OFF side is covered by
+  # the `profile-legs` matrix below, which builds four profiles that refuse it outright.
   test:
     name: cargo test (${{ matrix.profile }})
     runs-on: ubuntu-latest
@@ -74,10 +84,73 @@ jobs:
       - name: cargo test (${{ matrix.profile }})
         run: |
           if [ "${{ matrix.profile }}" = "release" ]; then
-            cargo test --workspace --all-targets --release --exclude boyko_demo --exclude bench-bevy-vs-boyko
+            cargo test --workspace --all-targets --release --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
           else
-            cargo test --workspace --all-targets --exclude boyko_demo --exclude bench-bevy-vs-boyko
+            cargo test --workspace --all-targets --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
           fi
+
+  # ---------------------------------------------------------------------------------------------
+  # The BOYKO_PROFILE axis — profiling rung 14 / logging L17, the joint rung J1
+  # ---------------------------------------------------------------------------------------------
+  #
+  # `crates/boyko_diag/build.rs` is the ONE build script in this workspace and the ONE reader of
+  # `BOYKO_PROFILE`. It sits at the bottom of the graph, so the variable changes the constants every
+  # crate above compiles against: the logging ceiling, the profiling tier, the sample-region
+  # capacity, the zone id space and the dynamic name arena. Five named profiles, of which `dev` is
+  # what every OTHER job in this file already builds (the variable is unset there, and unset means
+  # `dev`) — so this matrix is the **4 net new legs** `SEAM.md` §S9's arithmetic asks for, not five.
+  #
+  # `check` rather than `test`: the property these legs establish is that the workspace COMPILES in
+  # every profile, and that is where the axis's failures live — a `const` assertion whose two sides
+  # come from different rows, a `debug!` whose arguments go unused once the ceiling deletes it, a
+  # store stride that no longer fits its own bound. Running the suite four more times would not test
+  # the axis; it would test everything else four more times, and several suites assert `dev` values
+  # by design (`boyko_log`'s `the_dev_profile_admits_every_level` is named for it).
+  #
+  # `fail-fast: false` because a profile-specific break tells you WHICH profile, and killing the
+  # matrix at the first one throws that away. Per-leg `CARGO_TARGET_DIR` because two profiles in one
+  # directory rebuild each other on every alternation.
+  profile-legs:
+    name: cargo check (BOYKO_PROFILE=${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [editor, shipping, shipping-min, off]
+    env:
+      BOYKO_PROFILE: ${{ matrix.profile }}
+      CARGO_TARGET_DIR: target-${{ matrix.profile }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: profile-${{ matrix.profile }}
+      - run: cargo check --workspace --all-targets --exclude boyko_demo --exclude bench-bevy-vs-boyko
+
+  # G14(a)/(b)/(c) and G16(a)/(b)/(c): the cross-profile symbol census and the two refusals.
+  #
+  # `SEAM.md` specifies these as a CI **step over two legs' artifacts, not a sixth leg**, and this is
+  # that step — with one deviation, taken because the alternative is worse. GitHub jobs do not share
+  # a filesystem, so "consume the other legs' artifacts" means uploading and downloading them, which
+  # makes the census depend on four jobs succeeding and on an artifact round-trip. The harness builds
+  # its own two legs instead: a 2-crate graph per leg, ~13 s for all five clauses on the author's
+  # box, hermetic, and runnable locally — which matters, because a gate only CI can run is a gate
+  # whose RED nobody has seen.
+  #
+  # `components: llvm-tools` is load-bearing and its absence is a RED, not a skip: without `llvm-nm`
+  # the census cannot tell a folded site from a present one, and a gate that passes on every machine
+  # lacking its tool is a gate that passes.
+  profile-census:
+    name: cross-profile symbol census (G14/G16)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p profile-fixture --test profile_axis_census
 
   clippy:
     name: cargo clippy
@@ -91,7 +164,7 @@ jobs:
       - name: cargo clippy
         # Phase 5a cleared boyko_utils (13 warnings); Phase 5d cleared boyko_ecs
         # (~43 warnings). Workspace is now clean: no || true workaround needed.
-        run: cargo clippy --workspace --all-targets --exclude boyko_demo --exclude bench-bevy-vs-boyko -- -D warnings
+        run: cargo clippy --workspace --all-targets --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko -- -D warnings
 
   bench-compile:
     name: cargo bench --no-run
@@ -115,7 +188,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --all-targets --release --exclude boyko_demo --exclude bench-bevy-vs-boyko
+      - run: cargo test --workspace --all-targets --release --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
 
   miri:
     name: Miri

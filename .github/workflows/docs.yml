@@ -72,11 +72,16 @@ jobs:
         #   - boyko_demo / bench_bevy_vs_boyko are excluded: they are the app/bench
         #     harnesses (wgpu/winit/eframe, bevy), not the engine's public API, and
         #     winit's linux backend trips "platform not supported" in this CI image.
+        #   - profile-fixture / profile-fixture-log are excluded (profiling rung 14):
+        #     they are single-site binaries that exist only so G14/G16's cross-profile
+        #     symbol census has something one-site-shaped to take a census OF. They have
+        #     no lib target and no public API; publishing them would put two throwaway
+        #     test fixtures in the engine's API index.
         #   - --enable-index-page is omitted; the /api/ landing page is the manual
         #     redirect written in "Assemble site".
         #   - RUSTDOCFLAGS=-D warnings is intentionally NOT set.
         continue-on-error: true
-        run: cargo doc --no-deps --workspace --exclude boyko_demo --exclude bench_bevy_vs_boyko
+        run: cargo doc --no-deps --workspace --exclude boyko_demo --exclude bench_bevy_vs_boyko --exclude profile-fixture --exclude profile-fixture-log
 
       - name: Assemble site
         run: |

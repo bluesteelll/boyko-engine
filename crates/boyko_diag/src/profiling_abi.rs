@@ -205,9 +205,18 @@ impl ZoneHandle {
     }
 }
 
-/// Engine zone slots. Sized here rather than per profile at this rung: nothing reads a profile
-/// value for it yet, and a constant nothing reads is a value nothing can prove wrong.
-pub const ENGINE_ZONE_SLOTS: usize = 4096;
+/// Engine zone slots — **on the `BOYKO_PROFILE` axis since J1**.
+///
+/// `dev` / `editor` 4096, `shipping` / `shipping-min` / `off` 256. Until J1 this was a literal
+/// here, and its comment said why: *"sized here rather than per profile at this rung: nothing reads
+/// a profile value for it yet"*. J1 is the rung that made a profile value exist, so the literal
+/// became a re-export and every consumer's import path stayed exactly where it was.
+///
+/// The re-export is deliberate rather than a courtesy. This constant is the profiling store's zone
+/// **stride**, and [`ZONE_ID_SPACE`] below is built from it plus [`MAX_USER_BUDGET`]; both must move
+/// together or the id-space assertion beneath them stops meaning anything. Keeping the name here
+/// keeps that arithmetic in one file.
+pub const ENGINE_ZONE_SLOTS: usize = crate::profile::ENGINE_ZONE_SLOTS;
 
 /// The ceiling on ids a `User`-partition crate may mint — profiling rung 10.
 ///
@@ -215,12 +224,14 @@ pub const ENGINE_ZONE_SLOTS: usize = 4096;
 /// (default `0`), which sizes the store's columns; this constant sizes the two `.bss` arenas and the
 /// upper half of [`REGISTRY`], and it is what a game cannot exceed no matter how it is configured.
 ///
-/// Sized here rather than per profile, on [`ENGINE_ZONE_SLOTS`]'s precedent and for its reason: the
-/// `BOYKO_PROFILE` axis with its five legs is rung 14, and the corpus's dev/shipping split (3072 /
-/// 512) needs a build script that does not exist. **3072 is the DEV figure**, chosen to match
-/// `ENGINE_ZONE_SLOTS = 4096` also being the dev figure — one profile spelled consistently beats two
-/// spelled half each.
-pub const MAX_USER_BUDGET: usize = 3072;
+/// **On the `BOYKO_PROFILE` axis since J1**: `dev` / `editor` 3072, the three others 512.
+///
+/// Rung 10 landed it as a literal at the dev figure, on [`ENGINE_ZONE_SLOTS`]'s precedent and for
+/// its reason — *"the `BOYKO_PROFILE` axis with its five legs is rung 14, and the corpus's
+/// dev/shipping split needs a build script that does not exist"* — and chose 3072 specifically so
+/// that one profile was spelled consistently rather than two spelled half each. Rung 14 built the
+/// script; both halves moved in the same commit, which is what that choice was for.
+pub const MAX_USER_BUDGET: usize = crate::profile::MAX_USER_BUDGET;
 
 /// The whole id space: engine ids below [`ENGINE_ZONE_SLOTS`], user ids above it.
 ///
