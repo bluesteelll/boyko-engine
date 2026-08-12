@@ -2080,3 +2080,95 @@ same name meaning `{profiler, logger}`, in the same crate. Landing it under that
 facts under one identifier, and the failure mode is specific: a reader compares a VB baseline against
 a Deferred one, the tag matches, and the difference is reported as a regression. The J2 field needs a
 different name (`diag_tag`, say) or the render one does.
+
+---
+
+## L8b — VALUES: L6/L7/L8a silenced 31 diagnostics that used to print unconditionally, and no document says so
+
+**This is not a bug report.** The behaviour is specified and it is gated. It is an owner call about
+what a default run of this engine tells its operator, and it is raised here because the migration
+rungs took the decision as a side effect of a cost argument rather than as a decision.
+
+**Measured, in this order:**
+
+1. `boyko_app::plugins::boot_and_enable_logging_from_env` calls `boot()` unconditionally and then
+   **returns before `enable()`** when `BOYKO_LOG` is unset. `CONTROL` stays `.bss`-zero, so every
+   target's runtime ceiling is `Off`.
+2. So a migrated `warn!`/`error!` in a default run produces **nothing** — not a dropped record, not
+   a counted loss. The macro's third gate is false and the site is one predicted branch.
+3. `git show` on the three migration commits: **31 `println!`/`eprintln!` lines were removed from
+   production sources** — 3 at L6 (`49cf2230`), 12 at L7b (`b30fa810`), 16 at L8a (`1a76e4a9`).
+   Spot-checked against the parent commit, `boyko_render`'s `W2201` site was an **unconditional**
+   `eprintln!` behind a one-shot latch, not an env-gated or `debug_assertions`-gated one.
+4. The silence is **deliberate and pinned**: `logging/sink-lifecycle` Decision 25 states *"a
+   flag-off run of any other preset configures nothing either, because `enable()` never ran and no
+   sink slot was ever opened"*, and `crates/boyko_app/tests/log_host_reachable.rs` asserts
+   `flush() == NoConsumer` after a full `EnginePlugins` build, calling it *"the half that makes the
+   cost claim true rather than merely stated"*.
+
+**What no document in the corpus says** is what (4) does to (3). The plan gated the *cost* — one
+sink thread, a 20 ms clock calibration in `enable()`, a panic hook — and in doing so gated the
+*diagnostics*, and the migration rungs then converted 31 unconditional prints into records behind
+that gate without the trade being written down anywhere.
+
+**The question, stated as a fork:**
+
+* **(A) Diagnostics stay opt-in** (today's behaviour). A shipped run is silent until an operator
+  sets `BOYKO_LOG`. Cost: nothing. Consequence: a `Warn` nobody sees is a `Warn` that does not
+  exist, and the engine's 24 Live `W`/`E` codes are documentation rather than diagnostics.
+* **(B) The host enables at a `Warn` floor unconditionally**, and `BOYKO_LOG` raises it. Cost:
+  ~20 ms of clock calibration and one sleeping thread per process — including every child process
+  the test suite spawns. Consequence: the pre-migration behaviour is restored and the codes become
+  reachable without foreknowledge.
+* **(C) Wire the synchronous route.** `TargetControl::SYNC_BIT` is declared, `sync_out` exists, and
+  `emit_unlaned_line` already renders and writes through it — but the bit **has no reader**:
+  `lane.rs`'s only synchronous path is the no-lane fallback, not a route the control byte can
+  select. Wiring it would let `error!` reach `stderr` with no thread and no calibration. This is
+  the architecturally right answer and it is L12-shaped work, not L8b's.
+
+**L8b did not wait on this.** The three terminal-exit codes (`E3002`/`E3003`/`E3004`) fall back to
+`eprintln!` when `flush()` answers `NoConsumer`, on `boyko_threadpool::worker`'s already-blessed
+precedent — so the host cannot exit silently under any of the three answers. The degrade codes and
+the thirty `info!` sites follow (A) as specified. **The 31 already-silenced sites from L6/L7b/L8a
+are untouched and remain silent**, which is what this entry is about.
+
+---
+
+## L8b — `boyko_app` never calls `flush()` or `shutdown()`, so SEAM S5's teardown half does not exist
+
+Measured: `boyko_app` names `boyko_log::lifecycle` in exactly one place, `plugins.rs`, and calls
+`boot` and `enable`. There is no `flush()` and no `shutdown()` anywhere in the crate.
+`SEAM.md`'s S5 gives `boyko_app` *"the boot and teardown order, `flush_gpu` ahead of `flush`"*; the
+boot half landed at L7 and the teardown half never did.
+
+The consequence is not theoretical. `lifecycle::enable` spawns the sink thread and **drops its
+`JoinHandle`** (`.spawn(sink_loop).map_or_else(…, drop)`), so nothing joins it. A record emitted
+just before `return AppExit(true)` races the drain and loses more often than not — and the sites
+L8b migrates are exactly the print-then-exit ones.
+
+L8b's three terminal reporters call `flush()` themselves, so those records leave. **Every other
+record emitted late in a run is still exposed**, including the `VB-ZONE summary` and artifact lines
+that a measurement run ends with. The fix is a `flush()` on the normal teardown path and a
+`shutdown()` after it, and it wants doing with the rung that owns the lifecycle rather than bolted
+onto this one.
+
+---
+
+## L8b — deleting `boyko_demo`'s `log` facade left two channels with no replacement
+
+The ledger specifies the deletion of `log = "0.4"`, `env_logger` and `console_log` from
+`boyko_demo`, and L8b did it. Two things went with them:
+
+* **Native**: `env_logger` was the only subscriber for the `log` facade in that binary, and
+  `eframe`/`egui`/`wgpu`/`naga` all emit through it. **wgpu adapter selection and validation
+  messages now go nowhere.** The replacement is a `log`-facade bridge feeding `boyko_log`, which no
+  rung owns.
+* **wasm**: `console_log` was the only channel reaching the browser console, and `boyko_log`'s
+  console sink writes to `stderr`, which is a no-op on `wasm32-unknown-unknown`. So `E3001` — the
+  record whose entire purpose is to explain a blank canvas — is emitted and unreachable there.
+  It costs nothing **today**, because the wasm build is blocked upstream in `boyko_ecs` (the layout
+  asserts fail 32-bit const-eval) and its CI leg is explicitly non-fatal. Whoever unblocks wasm
+  owes the console sink a `web_sys::console` arm, or the failure goes back to being silent.
+
+Both are recorded in `crates/boyko_demo/Cargo.toml` beside the dependency, so the next reader of
+that manifest finds them without finding this file.

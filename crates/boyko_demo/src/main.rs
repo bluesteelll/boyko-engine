@@ -26,14 +26,11 @@ const APP_NAME: &str = "boyko_demo";
 /// [`DemoApp`].
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
-    // `env_logger` surfaces wgpu/winit diagnostics (adapter selection, validation
-    // errors). Controlled via `RUST_LOG`; the wgpu backends are noisy at `info`,
-    // so they are clamped to `warn` by default.
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info,wgpu_core=warn,wgpu_hal=warn"),
-    )
-    .init();
-
+    // L8b deleted the `env_logger` init that stood here with the third-party `log` facade it
+    // backed. It surfaced wgpu/winit diagnostics (adapter selection, validation errors) via
+    // `RUST_LOG`, and nothing routes those today -- eframe's dependencies still emit through
+    // `log 0.4`, which now has no subscriber in this binary. The manifest records that debt
+    // beside the `boyko-log` dependency; it is a facade bridge, not a demo change.
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title(APP_NAME)
@@ -81,10 +78,11 @@ fn main() {}
 pub fn wasm_start() {
     // Forward Rust panics to the browser console with a readable backtrace.
     console_error_panic_hook::set_once();
-    // Route `log::*` records to the browser console (info-level default; wgpu
-    // backends are clamped to `warn` to match the native filter).
-    let _ = console_log::init_with_level(log::Level::Info);
-
+    // The `console_log` init that routed `log::*` to the browser console went with the facade at
+    // L8b. `boyko_log`'s console sink writes to `stderr`, which does nothing on
+    // `wasm32-unknown-unknown`, so the record below is emitted and currently unreachable here --
+    // stated in the manifest, and owed a `web_sys::console` sink arm by whoever unblocks the wasm
+    // build (which is blocked upstream in `boyko_ecs` today).
     let web_options = eframe::WebOptions::default();
 
     wasm_bindgen_futures::spawn_local(async {
@@ -108,9 +106,16 @@ pub fn wasm_start() {
             .await;
 
         if let Err(err) = result {
-            // No window to fall back to on the web — surface the failure in the
-            // console so a blank canvas is diagnosable.
-            log::error!("boyko_demo failed to start: {err:?}");
+            // No window to fall back to on the web — a blank canvas is the only symptom, so this
+            // record is the whole diagnosis.
+            let mut detail = boyko_log::DspBuf::<192>::new();
+            let _ = core::fmt::Write::write_fmt(&mut detail, format_args!("{err:?}"));
+            boyko_log::error!(
+                boyko_log::Demo,
+                boyko_log::codes::E3001.number(),
+                "boyko_demo failed to start: {}",
+                detail.as_str()
+            );
         }
     });
 }

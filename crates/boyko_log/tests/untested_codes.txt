@@ -30,3 +30,16 @@ W9210  profiling rung 10's user-zone-budget / dynamic-name-arena exhaustion. Sam
 W9216  profiling rung 2's clock-epoch break. The corpus's own test 32 specifies injecting a
        synthetic forward jump into `boyko_diag::clock`; the injection seam does not exist, and
        waiting for a real suspend is not a test.
+
+E3001  `boyko_demo`'s web entry, inside `#[cfg(target_arch = "wasm32")] fn wasm_start`. The
+       function does not EXIST in a native build, so no test on the platform the gates run on can
+       name it, let alone drive it. Removing this row needs a wasm test harness -- and the wasm
+       build is itself blocked upstream in `boyko_ecs` (the layout asserts fail 32-bit const-eval),
+       with a CI leg that is explicitly non-fatal. Two things have to land before this row can go.
+
+E3004  `boyko_app::diag::report_windowing_unsupported`, inside `#[cfg(not(windows))]`. Same shape
+       as E3001 and the mirror image of it: the reporter is compiled out on the platform the gates
+       run on, so an observer here would not compile, and one written under
+       `#[cfg(not(windows))]` would never execute. Its two siblings E3002/E3003 ARE observed
+       (`diag.rs`'s `#[cfg(test)] mod tests`), which is what makes this row a platform statement
+       rather than an admission that the shape was not tested.

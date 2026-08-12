@@ -95,7 +95,11 @@ impl VbCullProbe {
     /// the staging with no capture to end the run, i.e. a process that never exits.
     pub(crate) fn from_env() -> Option<Self> {
         let path = std::env::var("BOYKO_VB_CULL_READBACK").ok()?;
-        eprintln!("boyko_app: BOYKO_VB_CULL_READBACK armed -> {path}");
+        boyko_log::info!(
+            boyko_log::Host,
+            "BOYKO_VB_CULL_READBACK armed -> {}",
+            boyko_log::dsp!(path, 192)
+        );
         Some(Self {
             path,
             state: ProbeState::Settle(SETTLE_FRAMES),
@@ -187,7 +191,13 @@ impl VbCullProbe {
     /// shape the previous block used, kept because a run that arms the variable with no value still
     /// allocates the staging and must still terminate.
     pub(crate) fn finish(self, line: &str) {
-        println!("{line}");
+        // The FILE is the contract — every consumer of this probe reads `self.path`, and none has
+        // ever parsed this line off stdout (measured across `crates/*/tests` and `scripts/` at
+        // L8b: zero readers). So the record is a convenience for a human watching the run, and
+        // bounding it at 1536 B costs that reader nothing the file does not still hold in full.
+        // `MAX_RECORD_BYTES` is 2048 including the header and the tag bytes, so a larger bound
+        // would make a long batch list REFUSE the record outright instead of truncating it.
+        boyko_log::info!(boyko_log::Profiling, "{}", boyko_log::dsp!(line, 1536));
         if self.path.is_empty() {
             return;
         }

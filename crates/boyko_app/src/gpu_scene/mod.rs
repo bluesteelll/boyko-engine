@@ -4439,8 +4439,9 @@ impl GpuSceneBundles {
         // an operator read a comparison it never made. It has no subject left.
         let vb_zone_requested = std::env::var("BOYKO_VB_ZONE").is_ok();
         if vb_zone_requested && !bench_timestamps_usable {
-            eprintln!(
-                "profiling rung 5c: BOYKO_VB_ZONE set but device timestamps are unusable — zone recorder disabled."
+            crate::diag::report_profiling_knob_unserviceable(
+                "BOYKO_VB_ZONE",
+                "this device's timestamps are unusable",
             );
         }
         let vb_zone = (vb_zone_requested && bench_timestamps_usable).then(|| {

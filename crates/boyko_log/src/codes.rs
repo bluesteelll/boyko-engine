@@ -483,9 +483,14 @@ codes! {
         "The self-collision spatial hash is overloaded, so bucket chains are long"),
     (1501, W, W1501, RatePolicy::Once,  CodeStatus::Live,
         "Ordering references a system set that has no members"),
-    (1801, B, B1801, RatePolicy::Every, CodeStatus::Pending("L8b"),
+    // L8b flipped both. They are **`boyko_ecs`'s**, not `boyko_app`'s -- this block's header calls
+    // `18xx` the app block and the ledger reads that as the `boyko_app` crate, but the two panic
+    // sites measure at `ecs/core/app/app.rs:887` and `:899`. The block is about `App`, the type,
+    // which lives in the kernel. Recorded because "L8b migrates `boyko_app`" and "L8b flips
+    // B1801/B1802" are two true statements about two different crates.
+    (1801, B, B1801, RatePolicy::Every, CodeStatus::Live,
         "A plugin was added more than once"),
-    (1802, B, B1802, RatePolicy::Every, CodeStatus::Pending("L8b"),
+    (1802, B, B1802, RatePolicy::Every, CodeStatus::Live,
         "An App method was called after finish(), in the run phase"),
     // L7. Its condition is "validation was requested and this process is NOT getting it" -- the
     // escape hatch took it, or `VK_EXT_validation_features` is absent. NOT "the node was not
@@ -562,6 +567,58 @@ codes! {
         "A PNG chunk's CRC-32 does not match, and decoding continued anyway"),
     (2602, W, W2602, RatePolicy::Every, CodeStatus::Live,
         "A zlib stream's Adler-32 does not match, and the decoded pixels were kept"),
+    // ── L8b: `boyko_app` (the host) and `boyko_demo` ────────────────────────────────────────
+    //
+    // Ten rows over 15 of the crate's 45 print sites; the other 30 are `info!` with no code
+    // (Decision 7). The grouping is by CONDITION, because check 2 makes a code a page with ONE
+    // `## How to fix` -- so the three boot stages share `E3002` with the stage as an ARGUMENT
+    // (`E2103`'s precedent, where four ring failures share one code and name the ring), while the
+    // five degradations do NOT share one, because "lower the SSAA scale" is not "install a driver
+    // that reports usable timestamps".
+    //
+    // `E3001` is `boyko_demo`'s, pinned by the ledger before this block was written, which is why
+    // the host's own codes start at `3002` rather than at the top of its block.
+    //
+    // THE THREE `E` ROWS BELOW ARE THE ONLY CODES IN THIS REGISTRY WHOSE SITES ALSO WRITE TO
+    // STDERR DIRECTLY, and the reason is measured rather than stylistic. With `BOYKO_LOG` unset
+    // every target is `Off`, so a migrated `error!` produces nothing at all -- not a dropped
+    // record, not a counted loss; the macro's gate folds and the site is one predicted branch.
+    // That is SPECIFIED (`logging/sink-lifecycle` Decision 25: *"a flag-off run of any other
+    // preset configures nothing either"*) and GATED (`log_host_reachable.rs` pins
+    // `flush() == NoConsumer`), so it is not a defect -- but these three sites are the process
+    // telling an operator why it is exiting, and an engine that exits silently because diagnostics
+    // were not requested is strictly worse than the unconditional `eprintln!` each replaced. Each
+    // therefore follows `boyko_threadpool::worker::abort_on_task_panic`'s already-blessed shape:
+    // emit, and if `flush()` answers `NoConsumer`, write the same text to `stderr`. The DEGRADE
+    // rows do not, because a degrade is a diagnostic and diagnostics are opt-in by design.
+    (3001, E, E3001, RatePolicy::Every, CodeStatus::Live,
+        "The demo could not start, so the process is exiting"),
+    (3002, E, E3002, RatePolicy::Every, CodeStatus::Live,
+        "A host boot stage failed, so the process is exiting without entering the frame loop"),
+    (3003, E, E3003, RatePolicy::Every, CodeStatus::Live,
+        "The frame loop hit a terminal device error, so the renderer is torn down and the host exits"),
+    (3004, E, E3004, RatePolicy::Every, CodeStatus::Live,
+        "Windowing is not implemented for this platform, so the windowed runner exits at once"),
+    // `Once` per site: the two SSAA refusals are different conditions of one knob (the extent or
+    // VRAM probe failed / the scale is not one this build offers) and each owns its latch.
+    (3005, W, W3005, RatePolicy::Once,  CodeStatus::Live,
+        "The requested SSAA scale is unavailable on this device, so supersampling is off"),
+    // `Every`, and NOT `Once`, for the reason `W2102` records at F11 in its own shape: the emitter
+    // is a `for degrade in reasons()` loop over a SET, so one latch would report the first reason
+    // and silently lose every other one -- the failure mode that made `Once` per-site in the first
+    // place, here reached through iteration rather than through separate sites.
+    (3006, W, W3006, RatePolicy::Every, CodeStatus::Live,
+        "The requested render path was degraded because a consumer or a device capability is missing"),
+    (3007, W, W3007, RatePolicy::Once,  CodeStatus::Live,
+        "The VB geometry table could not be created, so the visibility-buffer geometry leg is off"),
+    (3008, W, W3008, RatePolicy::Once,  CodeStatus::Live,
+        "A profiling knob was set but the device cannot serve it, so the instrument stays disabled"),
+    (3009, W, W3009, RatePolicy::Once,  CodeStatus::Live,
+        "An environment override names a value this build does not recognise, so the default is used"),
+    // `Every`: five call sites, one per dump kind, and each names a different path. A run that
+    // armed three dumps and could write none of them has three things to report, not one.
+    (3010, E, E3010, RatePolicy::Every, CodeStatus::Live,
+        "A diagnostic dump or artifact could not be written, and the run continued"),
 
     (9001, B, B9001, RatePolicy::Every, CodeStatus::Live,
         "The schedule contains a cycle of systems"),
@@ -692,6 +749,8 @@ mod tests {
             (b'W', 1302), // L8a -- self-collision cell size exceeds the smallest rest length
             (b'W', 1303), // L8a -- self-collision spatial hash overloaded
             (b'W', 1501), // L6  -- ordering references an empty system set
+            (b'B', 1801), // L8b -- a plugin was added more than once (boyko_ecs's, not the host's)
+            (b'B', 1802), // L8b -- an App config method called after finish()
             (b'E', 2101), // L7a -- validation requested but not delivered
             (b'W', 2102), // L7b -- a device format feature is missing (three sites, one code)
             (b'E', 2103), // L7b -- a mandatory target/set failed to build
@@ -706,6 +765,16 @@ mod tests {
             (b'W', 2206), // L8a -- a material texture failed to decode
             (b'W', 2601), // L8a -- PNG chunk CRC-32 mismatch
             (b'W', 2602), // L8a -- zlib Adler-32 mismatch
+            (b'E', 3001), // L8b -- boyko_demo could not start
+            (b'E', 3002), // L8b -- a host boot stage failed (three sites, the stage is an argument)
+            (b'E', 3003), // L8b -- a terminal device error in the frame loop
+            (b'E', 3004), // L8b -- windowing unimplemented for this platform
+            (b'W', 3005), // L8b -- the requested SSAA scale is unavailable (two sites)
+            (b'W', 3006), // L8b -- the render path was degraded (once per REASON, hence `Every`)
+            (b'W', 3007), // L8b -- the VB geometry table could not be created
+            (b'W', 3008), // L8b -- a profiling knob the device cannot serve
+            (b'W', 3009), // L8b -- an unrecognised environment override value (two sites)
+            (b'E', 3010), // L8b -- a diagnostic dump could not be written (five sites)
             (b'B', 9001), // L6  -- schedule cycle
             (b'B', 9002), // L6  -- set-hierarchy cycle
             (b'B', 9004), // L6  -- two ordered sets share a member

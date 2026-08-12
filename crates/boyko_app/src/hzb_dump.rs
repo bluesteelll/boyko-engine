@@ -84,7 +84,7 @@ impl HzbDump {
     /// before the frame loop.
     pub(crate) fn from_env() -> Option<Self> {
         let path = std::env::var("BOYKO_HZB_DUMP").ok()?;
-        eprintln!("boyko_app: BOYKO_HZB_DUMP armed -> {path}");
+        boyko_log::info!(boyko_log::Host, "BOYKO_HZB_DUMP armed -> {}", boyko_log::dsp!(path, 192));
         Some(Self {
             path,
             state: DumpState::Settle(SETTLE_FRAMES),
@@ -230,13 +230,21 @@ impl HzbDump {
 
         let [sw, sh] = layout.source();
         match write_result {
-            Ok(()) => eprintln!(
-                "boyko_app: HZB dump written -> {} ({sw}x{sh}, levels={}, {byte_len} B, \
-                 engine frame {stamped_frame} per the recorder's own stamp)",
-                self.path,
-                layout.plan().levels
+            Ok(()) => boyko_log::info!(
+                boyko_log::Host,
+                "HZB dump written -> {} ({}x{}, levels={}, {} B, engine frame {} per the \
+                 recorder's own stamp)",
+                boyko_log::dsp!(self.path, 192),
+                sw,
+                sh,
+                layout.plan().levels,
+                byte_len,
+                stamped_frame
             ),
-            Err(e) => eprintln!("boyko_app: HZB dump write FAILED ({e}) -> {}", self.path),
+            Err(e) => {
+                let err = crate::diag::debug_into(&e);
+                crate::diag::report_dump_write_failed("HZB dump", &self.path, err.as_str());
+            }
         }
     }
 }

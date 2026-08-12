@@ -160,7 +160,7 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     let ctx = match VulkanContext::boot_singleton(config) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("boyko_app: Vulkan device boot failed - exiting ({e:?})");
+            crate::diag::report_boot_stage_failed("vulkan device", &e);
             return AppExit(true);
         }
     };
@@ -170,7 +170,7 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     let mut host = match WindowHost::boot(ctx, &desc) {
         Ok(h) => h,
         Err(e) => {
-            eprintln!("boyko_app: window host boot failed - exiting ({e})");
+            crate::diag::report_boot_stage_failed("window host", &e);
             // SAFETY: the `boot_singleton` above succeeded and its singleton
             // is still live (the null-swap tripwire would catch a violation);
             // the device is idle (no GPU work was ever submitted); and no
@@ -208,7 +208,7 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     let bindless_texture_table = match BindlessTextureTable::new(ctx) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("boyko_app: bindless texture table creation failed - exiting ({e:?})");
+            crate::diag::report_boot_stage_failed("bindless texture table", &e);
             // SAFETY: `host` was just booted on `ctx` above; no GPU work was ever
             // submitted (the frame loop has not started, nothing was drawn); no
             // World resident references any host/device resource yet (nothing was
@@ -384,8 +384,10 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
             app.world_mut()
                 .resource_mut::<RayBackendPolicy>()
                 .force_software = true;
-            eprintln!(
-                "boyko_app: BOYKO_FORCE_SOFTWARE={v} - forcing the SOFTWARE ray-shadow backend"
+            boyko_log::info!(
+                boyko_log::App,
+                "BOYKO_FORCE_SOFTWARE={} - forcing the SOFTWARE ray-shadow backend",
+                boyko_log::dsp!(v, 32)
             );
         }
     }
@@ -422,8 +424,13 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
                 cfg.levels = levels;
             }
             let clamped = cfg.clamped_levels();
-            eprintln!(
-                "boyko_app: BOYKO_SHADOW_DENOISE={v} - enabling the {mode:?} shadow denoise (à-trous levels={clamped})"
+            let mode_name = crate::diag::debug_into(&mode);
+            boyko_log::info!(
+                boyko_log::App,
+                "BOYKO_SHADOW_DENOISE={} - enabling the {} shadow denoise (à-trous levels={})",
+                boyko_log::dsp!(v, 32),
+                mode_name.as_str(),
+                clamped
             );
         }
     }
@@ -496,11 +503,16 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     );
     let (resolved_render_path, render_path_degrades) =
         boyko_render::resolve_render_path(&render_path_cfg, render_path_consumers, render_path_caps);
-    // Warn-once boot diagnostics (mirrors `WindowHost::boot`'s SSAA degrade `eprintln!` —
-    // no logging crate is wired into this workspace, so `eprintln!` is the established
-    // boot-diagnostic channel). Never a panic — degrade-not-panic by construction.
+    // Boot diagnostics. Never a panic — degrade-not-panic by construction.
+    //
+    // `RatePolicy::Every` and NOT `Once`, which is the opposite of what "warn-once boot
+    // diagnostics" said here before L8b, and the difference is not stylistic: this walks a SET of
+    // reasons, so a single latch would report the first degrade and silently drop every other one.
+    // That is `W2102`'s F11 failure mode reached through iteration instead of through separate
+    // sites — the reader would learn that the path degraded and never learn it degraded twice.
     for degrade in render_path_degrades.reasons() {
-        eprintln!("boyko_app: render path degraded ({degrade:?})");
+        let reason = crate::diag::debug_into(&degrade);
+        crate::diag::report_render_path_degraded(reason.as_str());
     }
     host.resolved_render_path = resolved_render_path;
     // OVERRIDE the `RenderPathPlugin`'s default `ResolvedRenderPath` with the real
@@ -565,9 +577,8 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
                 boyko_render::MeshGeometryTableSlot(Some(table))
             }
             Err(e) => {
-                eprintln!(
-                    "boyko_app: MeshGeometryTable::new failed ({e:?}) - VB geometry table disabled"
-                );
+                let err = crate::diag::debug_into(&e);
+                crate::diag::report_geometry_table_failed(err.as_str());
                 boyko_render::MeshGeometryTableSlot(None)
             }
         }
@@ -702,8 +713,9 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
             // Self-identifying boot log (P1-1): every bench/host log names the arm actually
             // selected, so a mis-set knob is visible after the fact rather than reading as a
             // silent "no win, no regression" from an accidental self-comparison.
-            eprintln!(
-                "boyko_app: VB-P1e froxel cull arm = {} (BOYKO_VB_HIER_CULL)",
+            boyko_log::info!(
+                boyko_log::App,
+                "VB-P1e froxel cull arm = {} (BOYKO_VB_HIER_CULL)",
                 if hier_cull {
                     "HIER (-D HIER=1, 256-wide, default)"
                 } else {
@@ -819,7 +831,7 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
 /// the windowed runner exits gracefully, mirroring the boot-failure path.
 #[cfg(not(windows))]
 pub(crate) fn run_windowed(_app: &mut App, _desc: WindowDesc) -> AppExit {
-    eprintln!("boyko_app: windowing is not supported on this platform - exiting");
+    crate::diag::report_windowing_unsupported();
     AppExit(true)
 }
 
@@ -1094,7 +1106,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         let token = match host.renderer.wait_frame_in_flight() {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("boyko_app: frame fence wait failed - exiting ({e:?})");
+                crate::diag::report_terminal_device_error("frame fence wait", &e);
                 return;
             }
         };
@@ -2417,7 +2429,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // Terminal: the renderer must not be reused after a post-acquire
             // failure (`frame_driver` contract) — exit and tear down.
             Err(e) => {
-                eprintln!("boyko_app: terminal render error - exiting ({e:?})");
+                crate::diag::report_terminal_device_error("render", &e);
                 return;
             }
         }
@@ -2476,19 +2488,37 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     let _ = write!(zone_cmds, "{sep}{zone}:{n}");
                 }
             }
-            println!(
-                "VB-CENSUS leg={} frame={frame_index} stream_pos={} profiling_cmds={} \
-                 resets={} stamps={} repairs={} pairs={} positions=[{positions}] stages=[{stages}] \
-                 zone_cmds=[{zone_cmds}]",
+            // L8b: the ledger says *"by L8b there is nothing measurement-shaped left in
+            // `runner.rs` for this ledger to disposition"*. That is FALSE at HEAD and this line is
+            // one of seven that refute it. Rung 7 retired the channel that had PARSE CONTRACTS
+            // (`VB-P1d`, `VB-P4`, `VB-SV0-S1.5`) and moved those figures to the artifact; the
+            // `VB-CENSUS`/`VB-ZONE` lines never had a contract, so nothing carried them along and
+            // nothing noticed. Measured at L8b: zero readers across `crates/*/tests` and
+            // `scripts/`.
+            //
+            // They are NOT deleted, because the artifact does not carry them: `LabelCensus` holds
+            // `measured`/`not_bracketed`/`lost`/`torn`, and the command-stream figures below —
+            // `stream_pos`, `profiling_cmds`, the reset/stamp/repair tallies, the stamp positions
+            // and stages, the per-zone command counts — exist nowhere else. Deleting a producer
+            // whose numbers have no other home is not a migration.
+            boyko_log::info!(
+                boyko_log::Profiling,
+                "VB-CENSUS leg={} frame={} stream_pos={} profiling_cmds={} \
+                 resets={} stamps={} repairs={} pairs={} positions=[{}] stages=[{}] \
+                 zone_cmds=[{}]",
                 // Rung 7 deleted the collector leg, so the only two legs left are the
                 // zone recorder and the R0 gbuffer collector.
                 if vb_zone { "zone" } else { "gbuf" },
+                frame_index,
                 w.stream_pos(),
                 w.profiling_cmds(),
                 w.query_resets(),
                 w.timestamps(),
                 w.repairs(),
                 w.recorded_pairs(),
+                boyko_log::dsp!(positions, 256),
+                boyko_log::dsp!(stages, 128),
+                boyko_log::dsp!(zone_cmds, 256)
             );
         }
 
@@ -2516,7 +2546,12 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                         let sep = if k > 0 { "," } else { "" };
                         let _ = write!(zones, "{sep}{}", p.zone);
                     }
-                    println!("VB-ZONE zones frame={} ids=[{zones}]", frame.frame);
+                    boyko_log::info!(
+                        boyko_log::Profiling,
+                        "VB-ZONE zones frame={} ids=[{}]",
+                        frame.frame,
+                        boyko_log::dsp!(zones, 256)
+                    );
                 }
                 if let Some(r) = vb_zone_reducer.as_mut() {
                     r.observe_frame(pairs);
@@ -2531,9 +2566,15 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                         }
                     }
                 }
-                println!(
-                    "VB-ZONE retired frame={} pairs={} cause={:?} lost={} torn={}",
-                    frame.frame, frame.pairs, frame.cause, frame.lost, frame.torn
+                let cause = crate::diag::debug_into(&frame.cause);
+                boyko_log::info!(
+                    boyko_log::Profiling,
+                    "VB-ZONE retired frame={} pairs={} cause={} lost={} torn={}",
+                    frame.frame,
+                    frame.pairs,
+                    cause.as_str(),
+                    frame.lost,
+                    frame.torn
                 );
             });
             vb_zone_pairs_measured += measured;
@@ -2545,15 +2586,23 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 // Teardown's own clause: frames stop here, so neither deadline horn can fire and
                 // the last `GPU_RING_DEPTH` slots would otherwise be dropped silently.
                 host.gpu.flush_vb_zone(ctx, &mut vb_zone_scratch, |frame, _pairs| {
-                    println!(
-                        "VB-ZONE flushed frame={} pairs={} cause={:?}",
-                        frame.frame, frame.pairs, frame.cause
+                    let cause = crate::diag::debug_into(&frame.cause);
+                    boyko_log::info!(
+                        boyko_log::Profiling,
+                        "VB-ZONE flushed frame={} pairs={} cause={}",
+                        frame.frame,
+                        frame.pairs,
+                        cause.as_str()
                     );
                 });
-                println!(
-                    "VB-ZONE summary frames={vb_zone_seen} measured={vb_zone_pairs_measured} \
-                     lost={vb_zone_pairs_lost} torn={vb_zone_pairs_torn} \
-                     not_bracketed={vb_zone_pairs_unbracketed}"
+                boyko_log::info!(
+                    boyko_log::Profiling,
+                    "VB-ZONE summary frames={} measured={} lost={} torn={} not_bracketed={}",
+                    vb_zone_seen,
+                    vb_zone_pairs_measured,
+                    vb_zone_pairs_lost,
+                    vb_zone_pairs_torn,
+                    vb_zone_pairs_unbracketed
                 );
                 // Profiling rung 7: the measurement artifact, written ONCE at the end of the window
                 // and OFF-FRAME — the last thing this run does before it exits. The reducer has no
@@ -2660,9 +2709,11 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                         losses: crate::profiling::artifact::Artifact::collect_losses(),
                     };
                     match art.write(path) {
-                        Ok(()) => println!(
-                            "VB-ZONE artifact path={} frames={frames} zones={} measured={}",
-                            path.display(),
+                        Ok(()) => boyko_log::info!(
+                            boyko_log::Profiling,
+                            "VB-ZONE artifact path={} frames={} zones={} measured={}",
+                            boyko_log::dsp!(path.display(), 192),
+                            frames,
                             art.zones.len(),
                             art.census.measured
                         ),
@@ -2670,7 +2721,13 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                         // a run that rendered correctly should not be reported as a crash because a
                         // path was unwritable. The gate that reads the file reds on its absence.
                         Err(e) => {
-                            eprintln!("VB-ZONE artifact: could not write {}: {e}", path.display());
+                            let err = crate::diag::debug_into(&e);
+                            let p = crate::diag::debug_into(&path.display());
+                            crate::diag::report_dump_write_failed(
+                                "VB-ZONE artifact",
+                                p.as_str(),
+                                err.as_str(),
+                            );
                         }
                     }
                 }
@@ -2903,11 +2960,15 @@ fn word_set<T: Copy>(variants: &[T], seen: u8, word: impl Fn(T) -> &'static str)
 fn dump_diagnostics(app: &App) {
     let world = app.world();
 
+    // Every line here is rendered BEFORE it enters the record — see `diag::line`. The record
+    // renderer ignores `{:.3}` and `{:#06x}`, and this dump's only purpose is a human comparing
+    // two runs by eye, for which full-precision `f32` columns are useless.
     let csm = world.resource::<ResolvedCsm>();
-    eprintln!(
-        "boyko_app: dump csm_mode={} active={}",
+    let l = crate::diag::line(format_args!(
+        "dump csm_mode={} active={}",
         csm.csm_mode_word, csm.active_count
-    );
+    ));
+    boyko_log::info!(boyko_log::Host, "{}", l.as_str());
     for (c, data) in csm
         .cascades
         .iter()
@@ -2915,20 +2976,22 @@ fn dump_diagnostics(app: &App) {
         .take(csm.active_count as usize)
     {
         let m = &data.view_proj;
-        eprintln!(
-            "boyko_app: dump cascade[{c}] split_far={:.3} texel={:.4} col3=[{:.3}, {:.3}, {:.3}, {:.3}]",
+        let l = crate::diag::line(format_args!(
+            "dump cascade[{c}] split_far={:.3} texel={:.4} col3=[{:.3}, {:.3}, {:.3}, {:.3}]",
             data.split_far, data.texel_size, m[3][0], m[3][1], m[3][2], m[3][3]
-        );
+        ));
+        boyko_log::info!(boyko_log::Host, "{}", l.as_str());
     }
 
     // The punctual shadow-atlas selection consumed on the captured frame stream (mirrors the
     // cascade dump): the mode word, active layer count, the per-slot spot/point tag, and each
     // active face's `light_pos`/`inv_range` (POINT lanes; benign for SPOT).
     let atlas = world.resource::<ResolvedShadowAtlas>();
-    eprintln!(
-        "boyko_app: dump atlas mode={} active_layers={} face_point_mask={:#06x}",
+    let l = crate::diag::line(format_args!(
+        "dump atlas mode={} active_layers={} face_point_mask={:#06x}",
         atlas.mode_word, atlas.active_layers, atlas.face_point_mask
-    );
+    ));
+    boyko_log::info!(boyko_log::Host, "{}", l.as_str());
     for (s, face) in atlas
         .faces
         .iter()
@@ -2937,10 +3000,11 @@ fn dump_diagnostics(app: &App) {
     {
         let is_point = (atlas.face_point_mask >> s) & 1 != 0;
         let kind = if is_point { "point" } else { "spot " };
-        eprintln!(
-            "boyko_app: dump atlas[{s}] kind={kind} light_pos=[{:.2}, {:.2}, {:.2}] inv_range={:.4}",
+        let l = crate::diag::line(format_args!(
+            "dump atlas[{s}] kind={kind} light_pos=[{:.2}, {:.2}, {:.2}] inv_range={:.4}",
             face.light_pos[0], face.light_pos[1], face.light_pos[2], face.inv_range
-        );
+        ));
+        boyko_log::info!(boyko_log::Host, "{}", l.as_str());
     }
 
     let staged = world.resource::<LightTableStaging>();
@@ -2955,25 +3019,28 @@ fn dump_diagnostics(app: &App) {
     let lane = |i: usize| f32::from_bits(word(i));
     // Header: counts_exposure (words 0..4), the word-7 gate lane, and the sky
     // lanes (words 4..12).
-    eprintln!(
-        "boyko_app: dump header counts_exposure=[{:.3}, {:.3}, {:.3}, {:.3}] word7={:#010x}",
+    let l = crate::diag::line(format_args!(
+        "dump header counts_exposure=[{:.3}, {:.3}, {:.3}, {:.3}] word7={:#010x}",
         lane(0), lane(1), lane(2), lane(3), word(7)
-    );
+    ));
+    boyko_log::info!(boyko_log::Host, "{}", l.as_str());
     // 16 header words, then 12-word GpuLight rows: dir_kind | pos_range | color_cone.
     let rows = (bytes.len().saturating_sub(64)) / 48;
     for r in 0..rows {
         let base = 16 + r * 12;
-        eprintln!(
-            "boyko_app: dump light[{r}] dir_kind=[{:.3}, {:.3}, {:.3}, {:.3}] pos_range=[{:.2}, {:.2}, {:.2}, {:.2}] color_cone=[{:.2}, {:.2}, {:.2}, {:.2}]",
+        let l = crate::diag::line(format_args!(
+            "dump light[{r}] dir_kind=[{:.3}, {:.3}, {:.3}, {:.3}] pos_range=[{:.2}, {:.2}, {:.2}, {:.2}] color_cone=[{:.2}, {:.2}, {:.2}, {:.2}]",
             lane(base), lane(base + 1), lane(base + 2), lane(base + 3),
             lane(base + 4), lane(base + 5), lane(base + 6), lane(base + 7),
             lane(base + 8), lane(base + 9), lane(base + 10), lane(base + 11)
-        );
+        ));
+        boyko_log::info!(boyko_log::Host, "{}", l.as_str());
     }
 
     let stats = world.resource::<HostFrameStats>();
-    eprintln!(
-        "boyko_app: dump stats frames={} light_uploads={} csm_armed={} punctual_armed={} interp_armed={}",
+    boyko_log::info!(
+        boyko_log::Host,
+        "dump stats frames={} light_uploads={} csm_armed={} punctual_armed={} interp_armed={}",
         stats.frames,
         stats.light_uploads,
         stats.csm_armed_frames,

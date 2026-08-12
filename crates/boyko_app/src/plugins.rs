@@ -632,8 +632,16 @@ fn render_path_config_from_env() -> Option<boyko_render::RenderPathConfig> {
             RenderPath::VisibilityBuffer
         }
         Some(other) => {
-            eprintln!(
-                "[boyko] BOYKO_RENDER_PATH='{other}' unrecognized -> Deferred (valid: deferred|forward|forwardplus|vb)"
+            // Two sites, one code, one latch EACH — the latch is declared here rather than inside
+            // the reporter so that a mistyped `BOYKO_RENDER_PATH` cannot silence a mistyped
+            // `BOYKO_GEOMETRY_LEGS`, and so the property is visible at the site that needs it.
+            static W3009_PATH: boyko_log::codes::OnceSite = boyko_log::codes::OnceSite::new();
+            crate::diag::report_unrecognized_env_value(
+                &W3009_PATH,
+                "BOYKO_RENDER_PATH",
+                other,
+                "Deferred",
+                "deferred|forward|forwardplus|vb",
             );
             RenderPath::Deferred
         }
@@ -644,11 +652,25 @@ fn render_path_config_from_env() -> Option<boyko_render::RenderPathConfig> {
         Some("mesh") => GeometryLegs::Mesh,
         Some("sdf") => GeometryLegs::Sdf,
         Some(other) => {
-            eprintln!("[boyko] BOYKO_GEOMETRY_LEGS='{other}' unrecognized -> Both (valid: both|mesh|sdf)");
+            static W3009_LEGS: boyko_log::codes::OnceSite = boyko_log::codes::OnceSite::new();
+            crate::diag::report_unrecognized_env_value(
+                &W3009_LEGS,
+                "BOYKO_GEOMETRY_LEGS",
+                other,
+                "Both",
+                "both|mesh|sdf",
+            );
             GeometryLegs::Both
         }
     };
 
-    eprintln!("[boyko] render-path override from env: {path:?} x {legs:?}");
+    let path_name = crate::diag::debug_into(&path);
+    let legs_name = crate::diag::debug_into(&legs);
+    boyko_log::info!(
+        boyko_log::App,
+        "render-path override from env: {} x {}",
+        path_name.as_str(),
+        legs_name.as_str()
+    );
     Some(boyko_render::RenderPathConfig { path, legs })
 }

@@ -232,14 +232,23 @@ impl WindowHost {
         // (not `#[cfg(debug_assertions)]`): a RELEASE-build degrade-to-Off must be observable,
         // else an owner requesting `BOYKO_AA=ssaa` on a device that fails the dims/VRAM probe
         // silently gets no supersampling with zero explanation (spec B11).
+        //
+        // TWO sites, TWO latches, ONE code (`W3005`). They are the same condition — "the SSAA the
+        // operator asked for is not happening" — with one fix, so check 2 makes them one page; but
+        // `Once` is per SITE (F11), and a shared latch would let a probe refusal silence the
+        // "that scale does not exist in this build" line for the rest of the process.
         if admitted && !ssaa_armed {
-            eprintln!(
-                "SSAA {want}x unavailable (dims_ok={dims_ok} vram_ok={vram_ok} est={est} heap={}) -> Off",
-                caps.device_local_heap_bytes
+            crate::diag::report_ssaa_probe_refused(
+                want,
+                dims_ok,
+                vram_ok,
+                est,
+                caps.device_local_heap_bytes,
             );
         }
         if want != 0 && want != 1 && !admitted {
-            eprintln!("SSAA scale {want} unsupported (admitted: {SSAA_SCALES:?}) -> Off");
+            let admitted_scales = crate::diag::debug_into(&SSAA_SCALES);
+            crate::diag::report_ssaa_scale_unsupported(want, admitted_scales.as_str());
         }
         let composite_extent = (native_extent.0 * ssaa_scale, native_extent.1 * ssaa_scale);
 

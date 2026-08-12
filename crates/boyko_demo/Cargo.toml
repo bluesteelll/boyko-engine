@@ -30,11 +30,25 @@ boyko-threadpool = { path = "../boyko_threadpool" }
 # keep `wgpu` + `default_fonts`.
 eframe = { version = "0.34", default-features = false, features = ["wgpu", "default_fonts"] }
 bytemuck.workspace = true
-log = "0.4"
+# L8b: the engine's own logger replaces the third-party `log = "0.4"` facade that stood here, with
+# `env_logger` (native) and `console_log` (wasm) as its two backends. A tidy check now refuses any
+# DIRECT `log`/`tracing` declaration in a workspace manifest; it cannot refuse a transitive one,
+# and `log 0.4` is still in this crate's build graph through eframe/egui/wgpu regardless.
+#
+# TWO CONSEQUENCES, recorded rather than glossed:
+#
+# * NATIVE: wgpu and winit emit through the `log` facade, and `env_logger` was the only thing
+#   routing it anywhere. Adapter selection and wgpu validation messages now go nowhere. That is a
+#   real loss on the platform that works, and the replacement -- a `log`-facade bridge feeding
+#   `boyko_log` -- is not this rung's and does not exist yet.
+# * WASM: `console_log` was the only channel that reached the browser console, and `boyko_log`'s
+#   console sink writes to `stderr`, which is a no-op on `wasm32-unknown-unknown`. So `E3001` is
+#   emitted and unreachable there. It costs nothing TODAY because the wasm build is blocked
+#   upstream in `boyko_ecs` (32-bit const-eval on the layout asserts) and its CI leg is explicitly
+#   non-fatal -- but whoever unblocks wasm owes the console sink a `web_sys::console` arm, or the
+#   blank-canvas failure this site exists to explain goes back to being silent.
+boyko-log = { path = "../boyko_log" }
 rand = "0.9"
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-env_logger = "0.11"
 
 # Native-only test/bench tooling (Phase 20.1 W4). Target-gated so the wasm32
 # check graph never resolves them: criterion drives `benches/gpu_pack.rs` (the
@@ -61,8 +75,9 @@ harness = false
 #   eframe 0.34.3 re-exports `wasm_bindgen` + `web_sys` but NOT
 #   `wasm_bindgen_futures`, so it is declared here, pinned to eframe's `0.4`
 #   minor to keep a single version in the graph.
-# * `console_error_panic_hook` + `console_log` surface panics/logs in the
-#   browser devtools.
+# * `console_error_panic_hook` surfaces panics in the browser devtools.
+#   `console_log` went with the `log` facade at L8b -- see the note beside
+#   `boyko-log` above for what that costs and who owes the replacement.
 # * `getrandom`'s `wasm_js` feature wires `rand`'s entropy to the Web Crypto API.
 #   getrandom 0.3 ALSO requires the `--cfg getrandom_backend="wasm_js"` rustflag
 #   (set in `.cargo/config.toml`) — the feature alone is insufficient (it emits a
@@ -71,7 +86,6 @@ harness = false
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 console_error_panic_hook = "0.1"
-console_log = "1"
 getrandom = { version = "0.3", features = ["wasm_js"] }
 
 [lints]

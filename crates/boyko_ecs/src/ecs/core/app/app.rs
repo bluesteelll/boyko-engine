@@ -21,6 +21,7 @@ use std::any::TypeId;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use boyko_log::codes::{B1801, B1802};
 use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
 
 use crate::ecs::core::app::app_exit::AppExit;
@@ -884,7 +885,13 @@ impl Default for App {
 #[cold]
 #[inline(never)]
 fn duplicate_plugin_panic(name: &'static str) -> ! {
-    panic!("boyko-B1801: plugin '{name}' added more than once");
+    // L8b: the code is the IDENTIFIER, positionally. The rendered text is byte-identical to the
+    // literal it replaces (`PanicCode`'s `Display` prints `boyko-B1801`), which is what keeps
+    // every `#[should_panic(expected = ..)]` matching; what changed is that the registry's orphan
+    // check can now SEE the row, because it scans identifiers and a literal is invisible to it.
+    // Positional and never inline (`{B1801}`) -- an inline argument lives inside the string
+    // literal, so the walker's LIT stream would see it and its CODE stream would not.
+    panic!("{}: plugin '{}' added more than once", B1801, name);
 }
 
 /// Cold run-phase config panic: [`App::finish`] consumes the staged builders,
@@ -895,9 +902,13 @@ fn duplicate_plugin_panic(name: &'static str) -> ! {
 #[cold]
 #[inline(never)]
 fn config_after_finish_panic(method: &'static str) -> ! {
+    // As `duplicate_plugin_panic` above: the identifier, positionally, and the rendered bytes are
+    // unchanged -- five `#[should_panic(expected = "boyko-B1802: App::…")]` cases below depend on
+    // exactly that.
     panic!(
-        "boyko-B1802: App::{method} called after finish() — the App is in the run phase; \
-         perform all configuration before the first finish()/update()/run() call"
+        "{}: App::{} called after finish() — the App is in the run phase; \
+         perform all configuration before the first finish()/update()/run() call",
+        B1802, method
     );
 }
 

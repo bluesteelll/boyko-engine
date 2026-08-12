@@ -99,7 +99,7 @@ impl VgCensusDump {
     /// once before the frame loop.
     pub(crate) fn from_env() -> Option<Self> {
         let path = std::env::var("BOYKO_VG_CENSUS").ok()?;
-        eprintln!("boyko_app: BOYKO_VG_CENSUS armed -> {path}");
+        boyko_log::info!(boyko_log::Host, "BOYKO_VG_CENSUS armed -> {}", boyko_log::dsp!(path, 192));
         Some(Self {
             path,
             state: CensusState::Settle(SETTLE_FRAMES),
@@ -231,11 +231,19 @@ impl VgCensusDump {
         }
 
         match write_row(&self.path, &row, cx, (w, h), byte_len, &readback_sha256) {
-            Ok(()) => eprintln!(
-                "boyko_app: census row written -> {} ({w}x{h}, covered={}, visible_tris={})",
-                self.path, row.covered_pixels, row.visible_tris
+            Ok(()) => boyko_log::info!(
+                boyko_log::Host,
+                "census row written -> {} ({}x{}, covered={}, visible_tris={})",
+                boyko_log::dsp!(self.path, 192),
+                w,
+                h,
+                row.covered_pixels,
+                row.visible_tris
             ),
-            Err(e) => eprintln!("boyko_app: census row write FAILED ({e}) -> {}", self.path),
+            Err(e) => {
+                let err = crate::diag::debug_into(&e);
+                crate::diag::report_dump_write_failed("census row", &self.path, err.as_str());
+            }
         }
     }
 }

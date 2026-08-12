@@ -262,12 +262,12 @@ at the crate root: `boyko_ecs::{App, Plugin, Plugins, AppExit}`.
 
 | What you want to do | Where | Method (line) |
 |---------------------|-------|---------------|
-| Construct an app | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `App::new()` (200) / `with_threads(n)` (207) / `with_pool(Arc<ThreadPool>)` (213) |
-| Add a plugin / plugin tuple | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `add_plugin::<P>` (549); `add_plugins((A, B, ..))` via the sealed `Plugins` trait ([plugins.rs](../crates/boyko_ecs/src/ecs/core/app/plugins.rs), 1..=12 + nesting) |
-| Insert a resource / state | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `insert_resource` (260) / `init_state` (272) / `insert_state` (288) |
-| Add systems (ordered) | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `add_systems_cfg(\|b: &mut ScheduleBuilder\| …)` (317) — full Phase-15/16/17 chaining |
-| Add a system (unordered) | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `add_systems(system)` (338) |
-| Add a one-shot startup system | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `add_startup_system(system)` (507) — runs once before the loop |
+| Construct an app | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `App::new()` (201) / `with_threads(n)` (208) / `with_pool(Arc<ThreadPool>)` (214) |
+| Add a plugin / plugin tuple | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `add_plugin::<P>` (550); `add_plugins((A, B, ..))` via the sealed `Plugins` trait ([plugins.rs](../crates/boyko_ecs/src/ecs/core/app/plugins.rs), 1..=12 + nesting) |
+| Insert a resource / state | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `insert_resource` (261) / `init_state` (273) / `insert_state` (289) |
+| Add systems (ordered) | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `add_systems_cfg(\|b: &mut ScheduleBuilder\| …)` (318) — full Phase-15/16/17 chaining |
+| Add a system (unordered) | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `add_systems(system)` (339) |
+| Add a one-shot startup system | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `add_startup_system(system)` (508) — runs once before the loop |
 | Run the loop | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `run() -> AppExit` (dispatches to an installed runner first, else loops until `AppExit(true)`), `run_n(frames)`, `update()` (self-clocked via `Instant`) |
 | Hand the loop to a host (windowed runner) | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `set_runner(Box<dyn FnOnce(&mut App) -> AppExit>)` — `run()` hands control to it BEFORE `finish()`; the runner owns `finish()`, the `AppExit` policy, and teardown (APP-HOST-PLAN rung R1) |
 | Run one frame with an external clock | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `update_with_delta(raw)` — the Phase-20 frame driver (① Time → ② check-ticks → ③ event swap → ④ fixed loop → ⑤ Main); `run_n_with_delta(frames, delta)` — the deterministic loop for tests/benches |

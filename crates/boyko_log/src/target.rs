@@ -523,6 +523,16 @@ targets! {
     (23, GpuColumns,   "gpucolumns",   Level::Trace),
     (24, Host,         "host",         Level::Trace),
     (25, Profiling,    "profiling",    Level::Trace),
+    // L8b, and the one row in this table that is NOT an engine domain.
+    //
+    // `boyko_demo` is a downstream application, so its natural home is the DOWNSTREAM band
+    // (`96..=223`, `define_target!`) described at the top of this file. That band does not exist
+    // yet -- it is L11a's -- and the ledger pins `boyko_demo`'s one migrated site as
+    // `error!(Demo, codes::E3001, ..)`, which needs a target today. It takes the next engine id
+    // and MOVES when the band lands; recorded here rather than left for a later reader to
+    // discover, because an engine-band row for a non-engine crate is exactly the kind of thing
+    // that stops looking like a deviation once it has sat in a table for a while.
+    (26, Demo,         "demo",         Level::Trace),
 }
 
 #[cfg(test)]

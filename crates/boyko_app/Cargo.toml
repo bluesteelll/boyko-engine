@@ -58,6 +58,11 @@ profiling-census = ["boyko-render/profiling-census"]
 profiling-alloc = []
 
 [dev-dependencies]
+# Rung L8b: `boyko_log::probe`'s record observers, for the `#[cfg(test)] mod` block in `diag.rs`
+# that asserts each migrated reporter emits, emits ONCE where its row says `Once`, and carries its
+# arguments. A dev-dependency, so the feature reaches this crate's test targets and never a
+# shipping build.
+boyko-log = { path = "../boyko_log", features = ["test-probe"] }
 # The zero-alloc gate reads the uploaded instance bytes back via `bytes_of`.
 bytemuck.workspace = true
 # VB-SV0 rung S1: the adequacy oracle (`tests/sv0_oracle`) runs the SHIPPED soft-shadow leaf on

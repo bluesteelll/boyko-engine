@@ -102,7 +102,7 @@ impl VbProbeDump {
     /// once before the frame loop.
     pub(crate) fn from_env() -> Option<Self> {
         let path = std::env::var("BOYKO_VB_PROBE").ok()?;
-        eprintln!("boyko_app: BOYKO_VB_PROBE armed -> {path}");
+        boyko_log::info!(boyko_log::Host, "BOYKO_VB_PROBE armed -> {}", boyko_log::dsp!(path, 192));
         Some(Self { path, state: ProbeState::Settle(SETTLE_FRAMES), probe: VbRecordProbe::default() })
     }
 
@@ -144,11 +144,12 @@ impl VbProbeDump {
     /// write of the same run is not expressible.
     pub(crate) fn finish(self, cx: &VbProbeContext) {
         match write_probe(&self.path, &self.probe, cx) {
-            Ok(()) => eprintln!(
-                "boyko_app: vb record probe written -> {} (scopes={}, late_draws={}, \
+            Ok(()) => boyko_log::info!(
+                boyko_log::Host,
+                "vb record probe written -> {} (scopes={}, late_draws={}, \
                  late_cull_dispatches={}, late_seed_instances={}, probe occ_regime={}, host \
                  draw_batches={}, occlusion_instances={}, occ_mode={}, occ_force={})",
-                self.path,
+                boyko_log::dsp!(self.path, 192),
                 self.probe.scopes,
                 self.probe.late_draws,
                 self.probe.late_cull_dispatches,
@@ -159,7 +160,10 @@ impl VbProbeDump {
                 cx.occ_mode.as_str(),
                 cx.occ_force.as_str()
             ),
-            Err(e) => eprintln!("boyko_app: vb record probe write FAILED ({}): {e}", self.path),
+            Err(e) => {
+                let err = crate::diag::debug_into(&e);
+                crate::diag::report_dump_write_failed("vb record probe", &self.path, err.as_str());
+            }
         }
     }
 }

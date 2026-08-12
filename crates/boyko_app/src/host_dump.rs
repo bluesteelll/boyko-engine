@@ -65,7 +65,7 @@ impl HostDump {
     /// once before the frame loop.
     pub(crate) fn from_env(vk_format: i32) -> Option<Self> {
         let path = std::env::var("BOYKO_HOST_DUMP").ok()?;
-        eprintln!("boyko_app: BOYKO_HOST_DUMP armed -> {path}");
+        boyko_log::info!(boyko_log::Host, "BOYKO_HOST_DUMP armed -> {}", boyko_log::dsp!(path, 192));
         Some(Self {
             path,
             state: DumpState::Settle(SETTLE_FRAMES),
@@ -184,8 +184,17 @@ impl HostDump {
         }
 
         match write_bmp(&self.path, &pixels, w, h, self.rgba_source) {
-            Ok(()) => eprintln!("boyko_app: frame dump written -> {} ({w}x{h})", self.path),
-            Err(e) => eprintln!("boyko_app: frame dump write FAILED ({e}) -> {}", self.path),
+            Ok(()) => boyko_log::info!(
+                boyko_log::Host,
+                "frame dump written -> {} ({}x{})",
+                boyko_log::dsp!(self.path, 192),
+                w,
+                h
+            ),
+            Err(e) => {
+                let err = crate::diag::debug_into(&e);
+                crate::diag::report_dump_write_failed("frame dump", &self.path, err.as_str());
+            }
         }
     }
 }

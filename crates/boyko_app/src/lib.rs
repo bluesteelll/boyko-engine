@@ -32,6 +32,10 @@
 //! evicted.
 
 mod device;
+// L8b's three terminal-exit reporters. NOT `#[cfg(windows)]`: `report_windowing_unsupported` is
+// the non-Windows runner arm's only statement, so gating this module on Windows would delete the
+// one platform that needs it.
+mod diag;
 mod fly;
 #[cfg(windows)]
 mod gpu_scene;
