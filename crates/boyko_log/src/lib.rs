@@ -69,6 +69,13 @@ pub mod lane;
 pub mod level;
 pub mod lifecycle;
 mod macros;
+/// Test-only record observation for the crates that emit into this logger.
+///
+/// Behind the `test-probe` feature, which emitting crates enable in `[dev-dependencies]` only —
+/// so it reaches their test targets and never a shipping build. See the module header for why a
+/// `#[cfg(test)]` module could not have served, and for what an observer does and does not prove.
+#[cfg(feature = "test-probe")]
+pub mod probe;
 pub mod rate;
 pub mod record;
 pub mod sink;

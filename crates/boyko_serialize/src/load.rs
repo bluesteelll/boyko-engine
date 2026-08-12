@@ -57,6 +57,7 @@ use boyko_ecs::ecs::core::serialize::{
     remap_loaded_entities, required_ctor_in_set,
 };
 use boyko_ecs::ecs::identifiers::primitives::{ComponentId, EntityId};
+use boyko_log::codes::W0901;
 
 use crate::error::LoadError;
 use crate::format::{
@@ -122,8 +123,9 @@ pub struct LoadReport {
     ///
     /// An OWNING (`SerializeViaFn`) dense block WITH a decoder is now DECODED (the
     /// v1.1 per-member ViaFn dense path — counted in [`Self::dense_stores_loaded`] /
-    /// [`Self::dense_members_loaded`]), not skipped. This counter (+ a debug-only
-    /// warning) makes a genuine skip OBSERVABLE rather than silent data loss.
+    /// [`Self::dense_members_loaded`]), not skipped. This counter (+ `boyko-W0901`,
+    /// emitted in every profile since rung L8a) makes a genuine skip OBSERVABLE
+    /// rather than silent data loss.
     /// Mirrors `types_skipped` / `types_bitset_skipped` on the table side.
     pub dense_stores_skipped: u32,
     /// Dense plan D4 — total dense memberships dropped by the undecodable dense
@@ -589,7 +591,7 @@ fn load_one_archetype(
 /// `SerializeViaFn` block with NO decoder (the S1 memberships-only boundary) or an
 /// `Ignore` block carries no decodable data and stays an OBSERVABLE skip, recorded
 /// in [`LoadReport::dense_stores_skipped`] / [`LoadReport::dense_members_skipped`]
-/// (plus a debug-only warning), NOT silently dropped. Runs zero turns for a
+/// (plus `boyko-W0901`, in every profile), NOT silently dropped. Runs zero turns for a
 /// `dense_store_count == 0` file (the 0%-gate).
 ///
 /// # Duplicate `type_index` hardening
@@ -723,7 +725,7 @@ fn load_dense_region(
                 // An `Ignore` dense block carries memberships but no decodable data
                 // (its contract — not serializable). It stays an OBSERVABLE skip: the
                 // owning entity stays valid without the dense membership, and the
-                // counters (+ a debug-only warning) make the drop visible instead of a
+                // counters (+ `boyko-W0901`) make the drop visible instead of a
                 // silent data loss. Mirrors the table-side `types_skipped` /
                 // `types_bitset_skipped` counters.
                 report.dense_stores_skipped += 1;
@@ -736,28 +738,40 @@ fn load_dense_region(
     Ok(())
 }
 
-/// Debug-only tripwire for a genuinely-undecodable dense block (an `Ignore` type,
-/// or a `SerializeViaFn` type with no installed `deserialize_fn`): names the
-/// component + dropped member count so a dense store's memberships do not vanish
-/// without a trace during development. No-op in release (the `LoadReport` counters
-/// carry the signal there); no log-crate dependency — a bare `eprintln!`, matching
-/// the project's existing diagnostic pattern (`boyko_rhi`). An OWNING dense block
-/// WITH a decoder is decoded, not warned about.
-#[cfg(debug_assertions)]
+/// Reports `boyko-W0901` for a genuinely-undecodable dense block (an `Ignore` type, or a
+/// `SerializeViaFn` type with no installed `deserialize_fn`): names the component + dropped
+/// member count so a dense store's memberships do not vanish without a trace. An OWNING dense
+/// block WITH a decoder is decoded, not warned about.
+///
+/// # Two things about this function changed at rung L8a, and both were arguments the tree settled
+///
+/// It **was `#[cfg(debug_assertions)]`**, with a release no-op beside it and a doc line saying
+/// "the `LoadReport` counters carry the signal there". They do not carry it far: `LoadReport` is a
+/// return value, and a host that drops it — or logs only its totals — turns a save that silently
+/// lost a component's data into a save that loaded fine. The gate is dropped because the condition
+/// is already fully computed in release: `report.dense_stores_skipped += 1` sits on the line above
+/// each call site, in every profile. Un-gating costs the release build one `#[cold]` call on a
+/// path that was already writing to memory.
+///
+/// It also **no longer says "no log-crate dependency"**. That comment cited "the project's
+/// existing diagnostic pattern (`boyko_rhi`)" — a pattern this campaign is retiring — and the
+/// dependency it refused was a third-party facade, which `boyko_log` is not.
+///
+/// `RatePolicy::Every`: the subject is a component type, and a save carrying three undecodable
+/// dense stores has three different things to say.
 #[cold]
 #[inline(never)]
 fn warn_dense_viafn_skipped(name: &str, member_count: usize) {
-    eprintln!(
-        "boyko_serialize: dense store for component `{name}` carries no decodable \
-         data (Ignore, or SerializeViaFn with no installed deserialize_fn); skipped \
-         {member_count} member(s) (recorded in LoadReport::dense_stores_skipped)"
+    boyko_log::warn!(
+        boyko_log::Serialize,
+        W0901.number(),
+        "dense store for component `{}` carries no decodable data (Ignore, or SerializeViaFn \
+         with no installed deserialize_fn); skipped {} member(s) (recorded in \
+         LoadReport::dense_stores_skipped)",
+        name,
+        member_count
     );
 }
-
-/// Release no-op: the `LoadReport::dense_stores_skipped` counter carries the signal.
-#[cfg(not(debug_assertions))]
-#[inline]
-fn warn_dense_viafn_skipped(_name: &str, _member_count: usize) {}
 
 /// Reads one [`DenseStoreBlock`] header from its 40-byte image at `off`.
 fn read_dense_store_block(bytes: &[u8], off: usize) -> Result<DenseStoreBlock, LoadError> {
@@ -1031,5 +1045,30 @@ fn serializability_from_u8(value: u8) -> Option<Serializability> {
         1 => Some(Serializability::SerializeViaFn),
         2 => Some(Serializability::Ignore),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod l8a_w0901 {
+    use super::*;
+    use boyko_log::probe::{arm, watch, watched};
+
+    #[test]
+    fn w0901_reports_each_skipped_component_because_the_subject_is_a_type() {
+        // `Every`, and this is the assertion that makes the choice mean something: a save
+        // carrying three undecodable dense stores has three different things to say, and a
+        // `Once` here would name one component and drop the other two names on the floor.
+        //
+        // It also pins the un-gating. This reporter was `#[cfg(debug_assertions)]` with a release
+        // no-op beside it, on the argument that `LoadReport`'s counters carried the signal --
+        // they carry a NUMBER, and a host that logs only totals cannot tell which component's
+        // data vanished. The test runs in every profile now because the function does.
+        arm::<boyko_log::Serialize>();
+
+        watch(b'W', W0901.number());
+        warn_dense_viafn_skipped("Velocity", 12);
+        warn_dense_viafn_skipped("Health", 3);
+        warn_dense_viafn_skipped("Inventory", 0);
+        assert_eq!(watched(), 3, "one record per skipped component type");
     }
 }

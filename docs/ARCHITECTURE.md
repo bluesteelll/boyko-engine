@@ -161,9 +161,9 @@ boyko_math       ──→ (leaf: no workspace deps)
 boyko_sdf_math   ──→ boyko_shaderdsl               (no_std leaf; delegates f32 field bodies)
 boyko_scene      ──→ boyko_ecs, boyko_math, boyko_macros, boyko_utils
 boyko_input      ──→ boyko_ecs, boyko_macros, boyko_utils
-boyko_serialize  ──→ boyko_ecs
+boyko_serialize  ──→ boyko_ecs, boyko_log
 boyko_physics    ──→ boyko_ecs, boyko_macros, boyko_utils, boyko_threadpool,
-                     boyko_math, boyko_scene, boyko_sdf_math
+                     boyko_math, boyko_scene, boyko_sdf_math, boyko_log
 ```
 
 ### Render / UI / shaders
@@ -177,14 +177,16 @@ dependency.
 
 ```
 boyko_rhi         ──→ boyko_utils                          (FFI-free trait surface)
-boyko_rhi_vulkan  ──→ boyko_rhi, boyko_sdf_math            (raw hand-FFI Vulkan; framegraph RDG)
+boyko_rhi_vulkan  ──→ boyko_rhi, boyko_sdf_math,            (raw hand-FFI Vulkan; framegraph RDG)
+                      boyko_diag, boyko_log
 boyko_shaderdsl   ──→ (leaf: no workspace deps)
 boyko_fontbake    ──→ boyko_math, boyko_threadpool         (load-time tool)
-boyko_image       ──→ (leaf: no workspace deps)            (load-time PNG decode)
+boyko_image       ──→ boyko_log                            (load-time PNG decode; `boyko_log` is
+                                                           its ONLY workspace edge, added at L8a)
 boyko_render      ──→ boyko_ecs, boyko_macros,
                       boyko_rhi, boyko_rhi_vulkan, boyko_sdf_math,
                       boyko_scene, boyko_math, boyko_fontbake,
-                      boyko_image
+                      boyko_image, boyko_log
 boyko_ui          ──→ boyko_ecs, boyko_macros,
                       boyko_input, boyko_scene, boyko_math, boyko_fontbake
 ```

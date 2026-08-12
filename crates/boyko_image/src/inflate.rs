@@ -27,6 +27,8 @@
 //! extra bits MSB-first would be unable to decode output from any real-world
 //! DEFLATE encoder.
 
+use boyko_log::codes::W2602;
+
 use crate::error::PngError;
 
 /// Root-table width for the canonical-Huffman fast decode table. Codes up to
@@ -586,7 +588,30 @@ pub(crate) fn inflate_into(data: &[u8], max_len: usize, out: &mut Vec<u8>) -> Re
 const ADLER_MOD: u32 = 65521;
 
 /// RFC 1950 §9's Adler-32 checksum, computed over the decompressed bytes.
-fn adler32(data: &[u8]) -> u32 {
+/// Reports `boyko-W2602`: the zlib trailer's Adler-32 does not match the inflated bytes, and
+/// this decoder keeps them anyway.
+///
+/// `#[cold]` + `#[inline(never)]`: [`zlib_decompress`] is the entry point for every PNG the
+/// engine loads, and the mismatch is the rare arm.
+///
+/// **Not an `Err`, and that is the pre-existing behaviour this rung preserves.** The checksum
+/// covers the whole stream, so a mismatch says "some byte in this image is wrong" without saying
+/// which — and refusing the image outright would turn a possibly-cosmetic corruption into a
+/// missing texture. What changes here is only that the report now carries a code.
+#[cold]
+#[inline(never)]
+fn report_adler_mismatch(expected: u32, actual: u32) {
+    boyko_log::warn!(
+        boyko_log::Image,
+        W2602.number(),
+        "zlib Adler-32 mismatch (expected {:#010x}, got {:#010x}); decoded pixel data may still \
+         be usable, continuing",
+        expected,
+        actual
+    );
+}
+
+pub(crate) fn adler32(data: &[u8]) -> u32 {
     let mut a: u32 = 1;
     let mut b: u32 = 0;
     // NMAX = 5552 is the largest chunk size for which `b` cannot overflow a
@@ -653,10 +678,7 @@ pub(crate) fn zlib_decompress(data: &[u8], expected_len: usize) -> Result<Vec<u8
     let expected_adler = u32::from_be_bytes([trailer[0], trailer[1], trailer[2], trailer[3]]);
     let actual_adler = adler32(&out);
     if expected_adler != actual_adler {
-        eprintln!(
-            "boyko_image: zlib Adler-32 mismatch (expected {expected_adler:#010x}, got \
-             {actual_adler:#010x}); decoded pixel data may still be usable, continuing"
-        );
+        report_adler_mismatch(expected_adler, actual_adler);
     }
 
     Ok(out)
@@ -795,5 +817,46 @@ mod tests {
             }
             self.bytes
         }
+    }
+}
+
+#[cfg(test)]
+mod l8a_w2602 {
+    use super::*;
+    use boyko_log::probe::{arm, watch, watched};
+
+    /// A minimal zlib stream: `78 01` header, one BFINAL stored block carrying the single
+    /// byte `0x41`, then a four-byte Adler-32 the caller supplies.
+    fn zlib_one_byte(adler: u32) -> Vec<u8> {
+        let mut v = vec![0x78, 0x01, 0x01, 0x01, 0x00, 0xFE, 0xFF, 0x41];
+        v.extend_from_slice(&adler.to_be_bytes());
+        v
+    }
+
+    #[test]
+    fn w2602_reports_the_mismatch_and_still_returns_the_bytes() {
+        // Both halves matter and only the real `zlib_decompress` shows both: the checksum covers
+        // the WHOLE stream, so a mismatch says "some byte is wrong" without saying which --
+        // refusing the image outright would turn a possibly-cosmetic corruption into a missing
+        // texture. So the bytes come back AND the condition is reported.
+        arm::<boyko_log::Image>();
+
+        watch(b'W', W2602.number());
+        let out = zlib_decompress(&zlib_one_byte(0x0000_0000), 1)
+            .expect("an Adler mismatch must not fail the decode");
+        assert_eq!(out, vec![0x41], "the decoded bytes are kept");
+        assert_eq!(watched(), 1, "the mismatch is reported");
+    }
+
+    #[test]
+    fn a_matching_adler_reports_nothing() {
+        // The positive control.
+        arm::<boyko_log::Image>();
+
+        watch(b'W', W2602.number());
+        let out =
+            zlib_decompress(&zlib_one_byte(adler32(&[0x41])), 1).expect("a clean stream decodes");
+        assert_eq!(out, vec![0x41]);
+        assert_eq!(watched(), 0, "a matching Adler is silent");
     }
 }

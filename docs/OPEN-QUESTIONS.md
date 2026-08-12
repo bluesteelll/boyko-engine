@@ -14,6 +14,57 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-12 — L8a: two SCOPE calls I made narrowly, and one I did not make at all
+
+Rung L8a migrated `boyko_render` / `boyko_image` / `boyko_serialize` / `boyko_physics` (16 sites,
+twelve codes). Three things sat on the boundary between "decide it yourself with numbers" and "this
+is the owner's". I decided two and am recording them for review; the third I am not deciding.
+
+**1. `resolve_candidate` conflates an ABSENT optional texture with an UNREADABLE one, and I left it
+conflated.** `crates/boyko_render/src/texture.rs`'s `load_slot` has two arms: a file that decodes
+wrong is now `boyko-W2206` (a `Warn`), and a file that does not resolve is an `info!` with no code,
+because all five material-folder slots are documented as optional and warning on absence would put
+a `Warn` in the log of every material that ships four maps instead of five.
+
+The problem is that the second arm also covers a file that *exists and cannot be read* — a
+permissions fault, a locked file, a bad mount — because `resolve_candidate` discards the
+`io::Error` with `.ok()`. So a real fault is reported at `info` level, indistinguishable from a map
+somebody simply chose not to author.
+
+**The cost of splitting it**, measured: `resolve_candidate` returns
+`Option<(PathBuf, Vec<u8>)>` and would have to return the reason, which means re-blessing the three
+tests that pin its `Option` signature (`resolve_candidate_prefers_the_first_existing_candidate_in_order`,
+`..._falls_back_to_a_later_alias_when_the_first_is_absent`, `..._returns_none_when_no_candidate_resolves`).
+That is a signature change to a helper in the asset load path, inside a rung whose scope is
+"replace `eprintln!` with a coded emitter". I kept the rung's scope and recorded the hole rather
+than widening quietly. **If you want it split, it is a small, self-contained change and I will do
+it in its own commit.**
+
+**2. `RatePolicy` is declared on every registry row and applied by nothing.** Measured by reading
+the expansion, not the design: `warn!`/`error!` gate on the three ceilings and call `emit_impl`;
+neither reaches `rate::admit`, which still has zero production callers. Every `Once` in this
+registry works because a human placed an `OnceSite` at the emitter.
+
+That is not itself a defect — `Once` and `Every` need no machinery. What it means is that a row
+declaring `EveryN` or `MinIntervalMs` would be a **promise with nothing behind it**, and no check
+would notice. I added `no_live_row_declares_a_policy_the_emission_path_cannot_honour` to `codes.rs`,
+which reds on exactly that. It cannot prove a declared `Once` has an `OnceSite`; its failure text
+says so.
+
+**The question is what happens to `rate::admit`.** It has been carried for several rungs with no
+caller. Either L11a/L14 wire it into the emission path — which puts a rate check on the enabled
+path of every `Warn`/`Error` — or it is deleted and the registry column narrows to the three
+policies the engine can actually honour. I have no measurement that favours either, and it is a
+scope call.
+
+**3. `E2203` floods, and I did not damp it.** `GpuSystem::run_unsafe` has no `Result` channel, so a
+device fault that recurs reaches an operator only as a record per frame. I declared `Every`,
+matching the `eprintln!` it replaced, on the reasoning that a `Once` would report the first bad
+frame of a session and let an hour of broken frames look identical to a good one. The flood is
+bounded by the ring, which drops and counts. If you would rather see one line per second than one
+per frame, that needs item 2 resolved first — there is no mechanism today that could deliver it.
+
+
 ## 2026-08-11 — ⚠️ MEASURED: validation DOES run on this box, and the 2026-08-06 entry below is narrower than it reads
 
 Opening logging rung L7 (migrate `boyko_rhi_vulkan`) started by re-deriving the site list, because

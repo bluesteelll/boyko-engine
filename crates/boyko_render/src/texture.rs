@@ -45,6 +45,7 @@ use boyko_ecs::ecs::core::asset::{
 };
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 use boyko_ecs::ecs::core::resources::resource::NonSendResource;
+use boyko_log::codes::{OnceSite, W2206};
 use boyko_rhi::enums::{BarrierAccess, BarrierStage, Format, ImageAspect, ImageLayout, ImageUsage, TextureDimension};
 use boyko_rhi::{
     BufferDesc, BufferImageCopy, BufferUsage, ImageBarrierDesc, ImageBlitDesc,
@@ -761,6 +762,37 @@ const FOLDER_SLOT_EMISSIVE: FolderSlotSpec = FolderSlotSpec {
     label: "emissive",
 };
 
+/// A `Once` latch is PROCESS state, so it is a named module-level `static` rather than one
+/// tucked inside the reporter: an observer must be able to reset it, or its green only means
+/// "nothing else in this binary tripped this condition first". See `OnceSite::reset`.
+pub(crate) static W2206_SITE: OnceSite = OnceSite::new();
+
+/// Reports `boyko-W2206`: a material texture file that EXISTS and could not be decoded.
+///
+/// **This arm warns and the missing-file arm does not**, which is the whole distinction the two
+/// carry. All five folder slots are documented as optional, so an absent map is the normal case
+/// and gets an `info!`; a present-but-undecodable one means somebody put a file there intending it
+/// to be used, and it silently is not.
+///
+/// `#[cold]` + `#[inline(never)]`, and a separate function rather than an inline block, for two
+/// reasons: it keeps the decode success path free of the emission body, and it gives the observer
+/// below something to call — a code whose only emitter is buried inside a function that needs a
+/// live `VulkanContext` is a code no unit test can watch.
+#[cold]
+#[inline(never)]
+fn report_material_texture_undecodable(label: &str, path: &Path, err: &impl core::fmt::Display) {
+    if W2206_SITE.claim() {
+        boyko_log::warn!(
+            boyko_log::Render,
+            W2206.number(),
+            "load_material_folder: {} at {} failed to decode ({}), using the material fallback",
+            label,
+            boyko_log::dsp!(path.display()),
+            boyko_log::dsp!(err)
+        );
+    }
+}
+
 /// Tries each `<dir>/<candidate>` in `candidates`' order (later entries are filename
 /// aliases), returning the first `(path, bytes)` pair `read` resolves successfully.
 ///
@@ -794,12 +826,23 @@ fn load_slot(
     bindless: &mut BindlessTextureTable,
 ) -> u32 {
     let Some((path, bytes)) = resolve_candidate(dir, spec.candidates, |p| std::fs::read(p)) else {
-        eprintln!(
-            "load_material_folder: {}.png not found in {} (tried {:?}), using the material \
-             fallback",
+        // `info!`, and NOT a coded `warn!`. Every one of the five folder slots is documented as
+        // optional and a missing file is the normal case, so warning here would put a `Warn` in
+        // the log of every material that ships four maps instead of five — noise that trains a
+        // reader to ignore the level.
+        //
+        // KNOWN LIMIT, recorded rather than guessed at: this arm also covers an UNREADABLE file,
+        // because `resolve_candidate` discards the `io::Error` with `.ok()`. A permissions fault
+        // is therefore reported at the same level as an absent optional map. Splitting them means
+        // returning the reason from `resolve_candidate` and re-blessing the three tests that pin
+        // its `Option` signature; it is in `docs/OPEN-QUESTIONS.md` with that cost, not silently
+        // folded into this rung.
+        boyko_log::info!(
+            boyko_log::Render,
+            "load_material_folder: {} not found in {} (tried {}), using the material fallback",
             spec.label,
-            dir.display(),
-            spec.candidates
+            boyko_log::dsp!(dir.display()),
+            boyko_log::dsp!(format_args!("{:?}", spec.candidates))
         );
         return 0;
     };
@@ -816,16 +859,19 @@ fn load_slot(
             // See that script + `gbuffer_mrt.fs.hlsl`'s GREEN-CHANNEL CONVENTION block.
             let handle = textures.register_texture(ctx, bindless, &data);
             let slot = textures.texture(handle).bindless_slot;
-            println!("load_material_folder: loaded {} <- {}", spec.label, path.display());
+            // The one `println!` in this crate, and the only site in the whole L8a set that wrote
+            // to STDOUT rather than stderr. It is a lifecycle fact with no condition behind it,
+            // so by Decision 7 it carries no code.
+            boyko_log::info!(
+                boyko_log::Render,
+                "load_material_folder: loaded {} <- {}",
+                spec.label,
+                boyko_log::dsp!(path.display())
+            );
             slot
         }
         Err(e) => {
-            eprintln!(
-                "load_material_folder: {} at {} failed to decode ({e}), using the material \
-                 fallback",
-                spec.label,
-                path.display()
-            );
+            report_material_texture_undecodable(spec.label, &path, &e);
             0
         }
     }
@@ -1044,4 +1090,31 @@ mod tests {
     // `OrphanedMeshGpu`, which carries no unit test for the identical reason. The
     // `#[ignore]` GPU integration test (`tests/texture_upload_smoke.rs`) exercises
     // the real device path this module's device-facing functions run.
+}
+
+#[cfg(test)]
+mod l8a_w2206 {
+    use super::*;
+    use boyko_log::probe::{watch, watched};
+
+    use crate::log_probe::arm;
+
+    #[test]
+    fn w2206_warns_for_an_undecodable_file_and_the_absent_case_does_not() {
+        // The distinction this rung drew, asserted rather than asserted-about: a file that EXISTS
+        // and fails to decode is a `Warn` with a code, and it reports once. The absent-file arm
+        // that sits three lines above the emitter in `load_slot` is an `info!` with no code,
+        // because every slot in a material folder is documented as optional -- warning there
+        // would put a `Warn` in the log of every material that ships four maps instead of five.
+        arm();
+        W2206_SITE.reset();
+
+        watch(b'W', W2206.number());
+        report_material_texture_undecodable("albedo", Path::new("/fixture/albedo.png"), &"bad CRC");
+        assert_eq!(watched(), 1, "a present-but-undecodable file warns");
+
+        watch(b'W', W2206.number());
+        report_material_texture_undecodable("normal", Path::new("/fixture/normal.png"), &"bad CRC");
+        assert_eq!(watched(), 0, "Once: the second undecodable file is silent");
+    }
 }

@@ -98,6 +98,10 @@ windows-sys = { workspace = true, features = [
 # for the Vulkan path (the "no ash/vulkano" constraint above governs the GPU FFI,
 # not the host test harness). proptest pulls only host-side, graphics-free crates.
 [dev-dependencies]
+# Rung L8a: `boyko_log::probe`'s record observers, for the `#[cfg(test)] mod` blocks that assert
+# a migrated site reports ONCE and not once per frame. A dev-dependency, so the feature reaches
+# this crate's test and bench targets and never a shipping build.
+boyko-log = { path = "../boyko_log", features = ["test-probe"] }
 proptest = "1"
 # Test-only. Drives the R0b `FrameWriteToken` compile-fail acceptance cases
 # (`tests/compile_fail_frame_write_token/`) — the affine-move / no-Clone /

@@ -93,6 +93,7 @@
 //! yet" for several rungs after R2 landed.) The [`ResolvedRenderPath`] **Resource** is a separate
 //! question, and there the R1 answer still holds — see that type's own doc.
 
+use boyko_log::codes::{OnceSite, W2205};
 use boyko_macros::Resource;
 
 // ---- rung-staged implementation flags (plan §H) ---------------------------------------
@@ -277,9 +278,21 @@ pub struct RenderPathFrozenConsumers {
     /// default is `false`.
     pub non_deferred: bool,
     /// Warn-once latch (interior mutability: every reader holds a shared `Res` borrow).
-    warned_ssao: core::sync::atomic::AtomicBool,
+    ///
+    /// Rung L8a replaced the hand-rolled `AtomicBool` with [`OnceSite`], and the reason is a
+    /// **per-frame RMW**, not tidiness. The old form was `!latch.swap(true, Relaxed)`, which is
+    /// unconditional: once the config had actually diverged, the `&&`'s left side stayed true
+    /// forever, so every per-frame reader stored `true` over `true` on a shared line for the rest
+    /// of the session — from inside an `#[inline]` function whose whole purpose is to be cheap.
+    /// [`OnceSite::claim`] loads first and short-circuits, so the steady state after the first
+    /// warning is one `Relaxed` load of a line nobody writes.
+    ///
+    /// It stays a FIELD rather than becoming a `static`: the snapshot is per World, and a
+    /// process-global latch would let the first world to diverge silence every other world's
+    /// first divergence.
+    warned_ssao: OnceSite,
     /// Rung R9c: the DDGI warn-once latch (the SAME discipline as `warned_ssao`).
-    warned_ddgi: core::sync::atomic::AtomicBool,
+    warned_ddgi: OnceSite,
 }
 
 impl RenderPathFrozenConsumers {
@@ -292,8 +305,8 @@ impl RenderPathFrozenConsumers {
             ssao,
             ddgi_on,
             non_deferred,
-            warned_ssao: core::sync::atomic::AtomicBool::new(false),
-            warned_ddgi: core::sync::atomic::AtomicBool::new(false),
+            warned_ssao: OnceSite::new(),
+            warned_ddgi: OnceSite::new(),
         }
     }
 }
@@ -307,14 +320,8 @@ pub fn effective_ddgi_enabled(live: bool, frozen: &RenderPathFrozenConsumers) ->
     if !frozen.non_deferred {
         return live;
     }
-    if live != frozen.ddgi_on
-        && !frozen.warned_ddgi.swap(true, core::sync::atomic::Ordering::Relaxed)
-    {
-        eprintln!(
-            "boyko_render: DdgiConfig changed at runtime, but the pre-light consumer set is \
-             FROZEN under a non-Deferred render path — the boot value stays in effect \
-             (set the config before boot to change it)"
-        );
+    if live != frozen.ddgi_on && frozen.warned_ddgi.claim() {
+        report_frozen_config_divergence("DdgiConfig");
     }
     frozen.ddgi_on
 }
@@ -332,15 +339,29 @@ pub fn effective_ssao_config<'a>(
         return cfg;
     }
     if (cfg.quality != frozen.ssao.quality || cfg.atrous_levels != frozen.ssao.atrous_levels)
-        && !frozen.warned_ssao.swap(true, core::sync::atomic::Ordering::Relaxed)
+        && frozen.warned_ssao.claim()
     {
-        eprintln!(
-            "boyko_render: SsaoConfig changed at runtime, but the pre-light consumer set is \
-             FROZEN under a non-Deferred render path — the boot value stays in effect \
-             (set the config before boot to change it)"
-        );
+        report_frozen_config_divergence("SsaoConfig");
     }
     &frozen.ssao
+}
+
+/// Reports `boyko-W2205` — a config the caller changed after boot that the frozen consumer set
+/// will not act on, so the change silently does nothing.
+///
+/// `#[cold]` + `#[inline(never)]` because both callers are `#[inline]` per-frame readers whose
+/// straight-line code must stay the two compares and a return: the whole emission body, including
+/// the format arguments, lives out of line behind a branch the predictor never takes twice.
+#[cold]
+#[inline(never)]
+fn report_frozen_config_divergence(what: &str) {
+    boyko_log::warn!(
+        boyko_log::Render,
+        W2205.number(),
+        "{} changed at runtime, but the pre-light consumer set is FROZEN under a non-Deferred \
+         render path -- the boot value stays in effect (set the config before boot to change it)",
+        what
+    );
 }
 
 // ---- RenderPathConfig (the owner-set Resource — mirrors AaConfig/SsaoConfig) ----------
@@ -2350,11 +2371,46 @@ mod tests {
             quality: crate::ssao_config::SsaoQuality::Low,
             atrous_levels: 0,
         };
-        assert!(!frozen.warned_ssao.load(core::sync::atomic::Ordering::Relaxed));
+        assert!(!frozen.warned_ssao.has_fired());
         let _ = effective_ssao_config(&live, &frozen);
-        assert!(frozen.warned_ssao.load(core::sync::atomic::Ordering::Relaxed), "first divergence latches");
+        assert!(frozen.warned_ssao.has_fired(), "first divergence latches");
         let _ = effective_ssao_config(&live, &frozen);
-        assert!(frozen.warned_ssao.load(core::sync::atomic::Ordering::Relaxed), "stays latched");
+        assert!(frozen.warned_ssao.has_fired(), "stays latched");
+    }
+
+    #[test]
+    fn w2205_reports_each_frozen_consumer_once_and_the_latches_are_independent() {
+        // Rung L8a. The claim under test is the one the hand-rolled latch could not make: the
+        // SECOND reader of a diverged config emits nothing, and the DDGI latch does not spend the
+        // SSAO one. The old code passed the sibling test above while performing an unconditional
+        // `swap` on every diverged frame -- `has_fired()` was true either way, so a per-frame
+        // store was invisible to it. Counting the RECORDS is what makes the difference visible.
+        crate::log_probe::arm();
+
+        let frozen =
+            RenderPathFrozenConsumers::new(crate::ssao_config::SsaoConfig::default(), false, true);
+        let live = crate::ssao_config::SsaoConfig {
+            quality: crate::ssao_config::SsaoQuality::Low,
+            atrous_levels: 0,
+        };
+
+        // Four diverged reads across the two consumers: two records, not four.
+        boyko_log::probe::watch(b'W', W2205.number());
+        let _ = effective_ssao_config(&live, &frozen);
+        let _ = effective_ssao_config(&live, &frozen);
+        let _ = effective_ddgi_enabled(true, &frozen);
+        let _ = effective_ddgi_enabled(true, &frozen);
+        assert_eq!(
+            boyko_log::probe::watched(),
+            2,
+            "each frozen consumer reports once; a shared latch would give 1 and no latch 4"
+        );
+
+        // Both latches spent -- further divergence is silent.
+        boyko_log::probe::watch(b'W', W2205.number());
+        let _ = effective_ssao_config(&live, &frozen);
+        let _ = effective_ddgi_enabled(true, &frozen);
+        assert_eq!(boyko_log::probe::watched(), 0, "a spent latch emits nothing");
     }
 
     #[test]

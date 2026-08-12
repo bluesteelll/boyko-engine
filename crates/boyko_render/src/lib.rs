@@ -174,6 +174,9 @@ pub mod light_system;
 /// → [`Material`](material::Material)). In-house, no `ron`/`serde`
 /// dependency.
 pub mod loaders;
+/// Test-only: this crate's binding of `boyko_log::probe` to the `Render` target.
+#[cfg(test)]
+pub(crate) mod log_probe;
 pub mod material;
 /// Asset-system rung A1 — the GPU-resident mirror of `Assets<Material>`
 /// ([`MaterialTable`](material_table::MaterialTable)): a `MeshRegistry`-shaped device

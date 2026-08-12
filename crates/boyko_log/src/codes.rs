@@ -46,6 +46,24 @@ use core::sync::atomic::{AtomicBool, Ordering};
 /// Declared **on the code**, applied **per site**. Declaring it on the code is what makes the
 /// policy visible in the registry — a reader can see that `W2102` is `Once` without finding every
 /// emitter — while applying it per site keeps two unrelated call sites from silencing each other.
+///
+/// # What "applied per site" means today, measured rather than assumed *(L8a)*
+///
+/// **The emission macros do not read this column.** `warn!`/`error!` gate on the three ceilings
+/// and call `emit_impl`; neither calls [`rate::admit`](crate::rate::admit), which still has zero
+/// production callers. So a row declaring [`Once`](RatePolicy::Once) is honoured only because a
+/// human placed an [`OnceSite`] at each emitter, and a row declaring [`Every`](RatePolicy::Every)
+/// is honest only because nothing damps it.
+///
+/// The consequence that matters is not the missing plumbing — it is that a row declaring
+/// [`EveryN`](RatePolicy::EveryN) or [`MinIntervalMs`](RatePolicy::MinIntervalMs) would be a
+/// **declaration with no effect**: the registry would promise damping, the site would emit every
+/// occurrence, and no check would notice. `L8a` therefore adds
+/// `no_live_row_declares_a_policy_the_emission_path_cannot_honour`, which reds the day such a row
+/// is added. It proves what it can — that no row promises machinery that does not exist — and its
+/// failure text says so, because it cannot prove that a declared `Once` has an `OnceSite` behind
+/// it. Deleting the gate when `rate::admit` acquires its first caller is the correct move; leaving
+/// a row that lies is not.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RatePolicy {
     /// Every occurrence.
@@ -306,6 +324,12 @@ pub fn explain(class: u8, number: u16) -> Option<&'static DiagInfo> {
 /// `true` is one instruction and touches no line any other thread writes. A shared rate slot would
 /// have put every `Once` site of one code on the same cache line, contended precisely during the
 /// storm the policy exists to damp.
+///
+/// **Usually a `static` beside the emitter, but not always a `static`.** L8a's `W2205` puts two
+/// of these in a `Resource` instead, because the thing that must warn once there is a per-World
+/// boot snapshot: a `static` would let one world's first divergence silence another's. "Per site"
+/// is about not sharing a latch with an unrelated site — it does not require file scope.
+#[derive(Debug)]
 pub struct OnceSite {
     fired: AtomicBool,
 }
@@ -335,6 +359,28 @@ impl OnceSite {
     #[must_use]
     pub fn has_fired(&self) -> bool {
         self.fired.load(Ordering::Relaxed)
+    }
+
+    /// Un-fire this latch. **Test builds only** — behind the `test-probe` feature, so it does not
+    /// exist in a shipping binary and cannot be reached from one.
+    ///
+    /// # Why this has to exist *(L8a)*
+    ///
+    /// A `Once` latch is **process** state, and a test binary is one process. An observer that
+    /// asserts "the first occurrence reports" is asserting about a latch some *other* test may
+    /// already have spent — `boyko_render`'s light-table observer failed `left: 0, right: 1` on
+    /// every run because four sibling tests fold NaN lights for entirely unrelated reasons, and
+    /// they had every right to. No amount of locking fixes that: the latch cannot be un-spent by
+    /// waiting.
+    ///
+    /// So an observer resets the latch it is about to test, which makes it independent of what
+    /// ran before it. That is why each of this migration's reporters keeps its latch as a NAMED
+    /// module-level `static` rather than a `static` inside the function: state a test cannot name
+    /// is state a test cannot control, and an observer that cannot control its preconditions is
+    /// one whose green means "in this order, this time".
+    #[cfg(feature = "test-probe")]
+    pub fn reset(&self) {
+        self.fired.store(false, Ordering::Relaxed);
     }
 }
 
@@ -410,6 +456,31 @@ codes! {
         "An event lane was full, so the send was refused"),
     (801,  E, E0801, RatePolicy::Every, CodeStatus::Live,
         "An asset failed to load and its handle was marked failed"),
+    // ── L8a: `boyko_serialize` ───────────────────────────────────────────────────────────────
+    // `Every`, because the subject is a COMPONENT TYPE: a save carrying three undecodable dense
+    // stores has three different things to tell the reader, and `Once` would name one of them.
+    // The emitter loses its `#[cfg(debug_assertions)]` here -- `LoadReport::dense_stores_skipped`
+    // is already incremented on the line above the call in every profile, so the condition costs
+    // release nothing it was not already paying.
+    (901,  W, W0901, RatePolicy::Every, CodeStatus::Live,
+        "A dense store carried no decodable data, so its members were skipped"),
+    // ── L8a: `boyko_physics` ────────────────────────────────────────────────────────────────
+    // Three sites in `soft/self_collision.rs`, and the `#[cfg(debug_assertions)]` question was
+    // decided PER SITE by measuring what release already computes -- not by applying L7b's
+    // un-gating uniformly:
+    //   W1301  the `radius <= 0.0` test is the release guard that disables the pass  -> un-gated
+    //   W1303  `table != 0 && n > 4 * table` is two compares, once per resolve call  -> un-gated
+    //   W1302  needs `min(body.c_rest)` -- an O(constraints) scan release does NOT
+    //          otherwise perform, per resolve call, per body                         -> STAYS
+    //          `#[cfg(debug_assertions)]`
+    // L7b's rule is "a release-build degrade-to-disabled must be observable"; it is not "delete
+    // every debug gate", and the third site is what tells the two apart.
+    (1301, W, W1301, RatePolicy::Once,  CodeStatus::Live,
+        "Self-collision is skipped because the particle radius is not positive"),
+    (1302, W, W1302, RatePolicy::Once,  CodeStatus::Live,
+        "The self-collision cell size exceeds the smallest constraint rest length"),
+    (1303, W, W1303, RatePolicy::Once,  CodeStatus::Live,
+        "The self-collision spatial hash is overloaded, so bucket chains are long"),
     (1501, W, W1501, RatePolicy::Once,  CodeStatus::Live,
         "Ordering references a system set that has no members"),
     (1801, B, B1801, RatePolicy::Every, CodeStatus::Pending("L8b"),
@@ -444,6 +515,53 @@ codes! {
     // renders. The class letter IS the level in this registry, so one code could not carry both.
     (2106, W, W2106, RatePolicy::Every, CodeStatus::Live,
         "An optional shadow chain's sets failed to build, so the chain is skipped this frame"),
+    // ── L8a: `boyko_render` ─────────────────────────────────────────────────────────────────
+    // The ledger gave `light_system.rs`'s TWO sites one code, `W2201`, with a `dropped_count`
+    // argument. Measuring the fold refuted both halves of that row:
+    //
+    //   * The two sites are not one condition. `finish_folded_overflow` fires because the scene
+    //     has more lights than the table holds; `report_dropped_non_finite_light` fires because a
+    //     light carries a NaN. Same class, same level -- but check 2 makes a code a page with ONE
+    //     `## How to fix`, and "reduce the light count" is not "find the NaN". So `W2201` keeps
+    //     the capacity condition and `W2204` takes the data one.
+    //   * `dropped_count` is not knowable at the capacity site. The fold takes `impl Iterator`s,
+    //     its doc pins "walked exactly once each", and on overflow it RETURNS -- so nothing has
+    //     seen the remainder and counting it would mean draining iterators the contract says are
+    //     not drained. `W2201` reports the cap and the rows that made it, which is what the site
+    //     actually knows. The count IS real at the `W2204` site and is now carried there.
+    (2201, W, W2201, RatePolicy::Once,  CodeStatus::Live,
+        "More lights are enabled than the GPU light table holds, so the extras are dropped"),
+    // Two sites (`bindless.rs`, `mesh_geometry_table.rs`) with the same shape and a different
+    // table named -- the `W2102` argument, not the `E2103` one: one condition, one fix, one page.
+    (2202, W, W2202, RatePolicy::Once,  CodeStatus::Live,
+        "A bindless table exhausted its slots and aliased its reserved fallback slot"),
+    // `Every`, and it is a deliberate flood. `run_unsafe` has no `Result` channel, so a device
+    // fault that recurs every frame can only reach the operator as a record per frame; the ring
+    // damps it by dropping and counting, which is the damping this design has. It is NOT damped
+    // by this column -- see the note on `RatePolicy` above.
+    (2203, E, E2203, RatePolicy::Every, CodeStatus::Live,
+        "A GPU dispatch failed inside a system that has no error channel"),
+    (2204, W, W2204, RatePolicy::Once,  CodeStatus::Live,
+        "Lights with a non-finite position or range were dropped from the GPU light table"),
+    // Two sites, one per frozen consumer (DDGI and SSAO). The latch each replaces was an
+    // UNCONDITIONAL `swap` on the divergent path: once the config had diverged, every per-frame
+    // reader stored `true` over `true` forever, dirtying a shared line from an `#[inline]` hot
+    // reader. `OnceSite::claim` short-circuits on a `Relaxed` load, so the steady state is a load.
+    (2205, W, W2205, RatePolicy::Once,  CodeStatus::Live,
+        "A render-path config changed after boot, but the frozen consumer set keeps the boot value"),
+    // The DECODE failure only. A material folder's five slots are all optional and a missing file
+    // is the documented normal case, so absence is an `info!` with no code -- warning on it would
+    // put a `Warn` in every log for every folder that ships four maps instead of five.
+    (2206, W, W2206, RatePolicy::Once,  CodeStatus::Live,
+        "A material texture file exists but failed to decode, so the scalar fallback is used"),
+    // ── L8a: `boyko_image` ──────────────────────────────────────────────────────────────────
+    // `Every` for both: each occurrence names a different chunk or a different stream, the decode
+    // CONTINUES past them, and a file with two corrupt chunks is a different report from a file
+    // with one. Neither is per-frame -- they run once per decode.
+    (2601, W, W2601, RatePolicy::Every, CodeStatus::Live,
+        "A PNG chunk's CRC-32 does not match, and decoding continued anyway"),
+    (2602, W, W2602, RatePolicy::Every, CodeStatus::Live,
+        "A zlib stream's Adler-32 does not match, and the decoded pixels were kept"),
 
     (9001, B, B9001, RatePolicy::Every, CodeStatus::Live,
         "The schedule contains a cycle of systems"),
@@ -569,6 +687,10 @@ mod tests {
             (b'B', 502),  // L6  -- query-type table exhausted
             (b'W', 701),  // L6  -- an event lane was full, the send was refused
             (b'E', 801),  // L6  -- an asset failed to load
+            (b'W', 901),  // L8a -- a dense store carried no decodable data
+            (b'W', 1301), // L8a -- self-collision skipped, radius not positive
+            (b'W', 1302), // L8a -- self-collision cell size exceeds the smallest rest length
+            (b'W', 1303), // L8a -- self-collision spatial hash overloaded
             (b'W', 1501), // L6  -- ordering references an empty system set
             (b'E', 2101), // L7a -- validation requested but not delivered
             (b'W', 2102), // L7b -- a device format feature is missing (three sites, one code)
@@ -576,6 +698,14 @@ mod tests {
             (b'W', 2104), // L7b -- textured material suppressed by motion vectors
             (b'W', 2105), // L7b -- present mode not advertised, fell back to fifo
             (b'W', 2106), // L7b -- an optional shadow chain's sets failed to build
+            (b'W', 2201), // L8a -- more lights than the GPU table holds
+            (b'W', 2202), // L8a -- a bindless table exhausted its slots (two sites, one code)
+            (b'E', 2203), // L8a -- a GPU dispatch failed with no error channel to report it
+            (b'W', 2204), // L8a -- non-finite lights dropped from the GPU table
+            (b'W', 2205), // L8a -- a render-path config changed after the consumer set froze
+            (b'W', 2206), // L8a -- a material texture failed to decode
+            (b'W', 2601), // L8a -- PNG chunk CRC-32 mismatch
+            (b'W', 2602), // L8a -- zlib Adler-32 mismatch
             (b'B', 9001), // L6  -- schedule cycle
             (b'B', 9002), // L6  -- set-hierarchy cycle
             (b'B', 9004), // L6  -- two ordered sets share a member
@@ -618,6 +748,43 @@ mod tests {
                     row.class as char, row.number
                 ),
             }
+        }
+    }
+
+    #[test]
+    fn no_live_row_declares_a_policy_the_emission_path_cannot_honour() {
+        // MEASURED at L8a, by reading the expansion rather than the design: `warn!`/`error!`
+        // gate on the three ceilings and call `emit_impl`. Neither reaches `rate::admit`, which
+        // still has no production caller. So the only policies the engine can actually apply are
+        // the two that need no rate state -- `Every` (do nothing) and `Once`/`OnceCounted` (an
+        // `OnceSite` a human placed at the emitter).
+        //
+        // A row declaring `EveryN` or `MinIntervalMs` would therefore be a promise with no
+        // machinery behind it: the registry would say "damped", the site would emit every
+        // occurrence, and nothing in this crate would disagree. That is the exact defect shape
+        // this campaign keeps finding -- a declaration nothing applies -- so it gets a check.
+        //
+        // WHAT THIS CANNOT CLAIM, and the assertion message says it too: it does not prove that a
+        // row declaring `Once` has an `OnceSite` behind it. That link is still a human one. When
+        // `rate::admit` acquires its first production caller this test should be DELETED rather
+        // than loosened, because at that point the declaration means something again.
+        for row in DIAGNOSTICS {
+            if !matches!(row.status, CodeStatus::Live) {
+                continue;
+            }
+            assert!(
+                matches!(
+                    row.rate,
+                    RatePolicy::Every | RatePolicy::Once | RatePolicy::OnceCounted
+                ),
+                "row {}{} declares {:?}, but the emission macros never call `rate::admit`, so \
+                 that policy is a declaration with no effect -- either wire the policy into the \
+                 emission path or declare what the site actually does. (This check does NOT \
+                 prove that a `Once` row has an `OnceSite` behind it; that link is still human.)",
+                row.class as char,
+                row.number,
+                row.rate
+            );
         }
     }
 

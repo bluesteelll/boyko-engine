@@ -4,14 +4,25 @@ version = "0.1.0"
 edition = "2024"
 
 # Phase S1 — custom binary save format + two-pass save. The crate-boundary
-# decision (SERIALIZATION-PLAN.md §3.2): depends on `boyko_ecs` + `std` ONLY,
-# never `boyko_reflect` (the codegen-not-reflection invariant) and no
-# third-party crate. The cursor / error / entity-map types it drives live in
-# `boyko_ecs::ecs::core::serialize` (the registry's fn-ptr aliases name them).
+# decision (SERIALIZATION-PLAN.md §3.2): depends on `boyko_ecs`, the diagnostic
+# seam and `std` ONLY, never `boyko_reflect` (the codegen-not-reflection
+# invariant) and no third-party crate. The cursor / error / entity-map types it
+# drives live in `boyko_ecs::ecs::core::serialize` (the registry's fn-ptr aliases
+# name them).
 [dependencies]
 boyko-ecs = { path = "../boyko_ecs" }
+# Rung L8a. `boyko-W0901` is this crate's report that a dense store arrived with no decodable
+# data and its members were dropped; `LoadReport::dense_stores_skipped` already counted it, but a
+# counter nobody prints is a signal nobody reads. Adds no third-party crate: `boyko_log` depends
+# only on `boyko_diag`, whose `[dependencies]` is empty. `boyko_ecs` already pulls it in, so this
+# edge changes the build graph not at all -- it only makes the dependency DECLARED where it is used.
+boyko-log = { path = "../boyko_log" }
 
 [dev-dependencies]
+# Rung L8a: `boyko_log::probe`'s record observers, for the `#[cfg(test)] mod` blocks that assert
+# a migrated site reports ONCE and not once per frame. A dev-dependency, so the feature reaches
+# this crate's test and bench targets and never a shipping build.
+boyko-log = { path = "../boyko_log", features = ["test-probe"] }
 boyko-macros = { path = "../boyko_macros" }
 # Workspace-pinned criterion 0.5 (same major as every other crate's bench).
 criterion.workspace = true

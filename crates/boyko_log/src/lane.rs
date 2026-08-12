@@ -206,6 +206,11 @@ fn claim_cold() -> Option<u16> {
 /// and the `Release` store.
 #[inline(never)]
 pub fn emit_impl<A: LogArgs>(site: &'static LogSite, args: A) {
+    // Test-only, and OFF in every build that does not enable `test-probe` — see `probe.rs` for
+    // why an observer counts emission HERE rather than delivery at the far end of the ring.
+    #[cfg(feature = "test-probe")]
+    crate::probe::note_emission(site, &args);
+
     let Some(lane) = resolve() else {
         // A thread with no lane does NOT silently drop a severe record. `Warn` and `Error` take
         // the synchronous channel; the three lower levels are counted as unclaimed, on the

@@ -62,7 +62,7 @@ subsystem present is not a baseline for the both-present configuration (S10).
 | **L7a** *(**SHIPPED**)* | `E2101` and **G7**, the rung's named gate, landed alone because the measurement that re-cut them is the rung's whole design work. Two emission sites, one code, `Once` per site: the escape hatch withheld what the caller asked for, and the extension that carries the sync-validation node is absent. The host-reachability fix landed with it — until then every emitter L5 and L6 wired up wrote into a ring with no consumer in any shipped run | `device.rs`, `tests/g7_validation_reporting.rs`, `boyko_app` | `[vk-validation]` line, byte for byte |
 | **L7b** *(**SHIPPED**)* | The remaining **11** production sites: `device.rs` ×3 (`W2102`, ungated in release — the `#[cfg(debug_assertions)]` trio), `present/passes/gbuffer.rs` ×1 (`W2104`, deleting its hand-rolled `AtomicBool` latch), `present/swapchain.rs` ×1 (`W2105`), `present/targets.rs` ×7 — **not one code but two**, `E2103` ×4 and `W2106` ×3, split by what `record_vb` does with each `None` (see the block below). Five doc pages, five observing tests, five REDs. **The messenger is not touched at all** | `device.rs`, `gbuffer.rs`, `swapchain.rs`, `targets.rs`, `log_probe.rs` | same |
 | **L7-gate** *(⚠️ **F2's PREMISE IS REFUTED BY THE TREE — measured 2026-08-11, before any L7 code was written.** See the block below the table; the polarity of the first clause is wrong as written and the row is left verbatim so the correction is legible)* | **G7, re-cut two-sided** (F2): `E2101` fires on a validation-**on** run and is absent on a validation-**off** run (`BOYKO_DISABLE_VALIDATION=1`). Channel liveness is proved separately by an **ordinary validation error from a deliberately invalid call** — the historical `mip_levels: 12` on a 512×512 image — with the **baseline of 19 messages accounted for**. A forced *hazard* is explicitly **not** the control: this machine has been measured unable to produce `SYNC-HAZARD` (M25) | `crates/boyko_rhi_vulkan/tests/` | — |
-| **L8a** | Migrate `boyko_render`, `boyko_image`, `boyko_serialize`, `boyko_physics`. **Edit `boyko_image/Cargo.toml:5`'s description in the same commit** — it stops being true here | ledger | goldens |
+| **L8a** *(**SHIPPED**)* | Migrate `boyko_render` (10 sites / 6 files), `boyko_image` (2), `boyko_serialize` (1), `boyko_physics` (3) — **16 production sites, twelve codes**: `W0901` · `W1301`/`W1302`/`W1303` · `W2201`/`W2202`/`E2203`/`W2204`/`W2205`/`W2206` · `W2601`/`W2602`. Twelve doc pages, twelve observing tests, four REDs. **`boyko_image/Cargo.toml:5`'s description edited in the same commit** — and four MORE stale claims the plan did not name (see the block below) | ledger, `probe.rs` | goldens |
 | **L8b** | Migrate `boyko_app`; **zero measurement rows** (S1 — profiling rung 7 removed the producers already). Delete `boyko_demo`'s third-party `log = "0.4"` and migrate `main.rs:113`; add the tidy check banning third-party `log`/`tracing` in any workspace manifest. **MUST LAND AFTER profiling rung 7 and 7b** | ledger, `crates/boyko_demo/` | — |
 | **L8c** | Check 3c armed: `Pending` == 0 (`Historical` excluded). Walker's unclassified-site count == 0 over the **≤ 78** denominator; enable `print_census.rs`; run the clippy `disallowed-macros` canary and record the result | `tests/`, `clippy.toml` | — |
 | **L9** | `boyko_ui` console widget over `LogRing`. **Deferred to the UI plan** — L16 fixes the whole contract it consumes, so nothing logging-shaped remains in it (open question 12) | `crates/boyko_ui/` | — |
@@ -276,6 +276,113 @@ claim is that a live layer *catches* anything: `compute.rs`'s own `negative_chai
 documents, in the tree, that sync-validation is enabled and does **not** flag a compute→compute RAW
 hazard on this path. `M25` stands; the instrument's presence and its sensitivity are two questions
 and only the first is gateable.
+
+---
+
+### L8a: a count-based observer cannot see a payload, and four other things the rung measured
+
+**Sixteen production sites, twelve codes, four crates.** The census that drove it is the walker's
+rule, not the raw grep: `boyko_render` shows 15 grep hits across six files and **10** of them are
+calls (five are prose in doc comments, which the ledger's own "prose mentions" row excludes);
+`boyko_serialize`'s "(2)" is one call and one doc mention; `boyko_image`'s 2 and `boyko_physics`'s 3
+are exact. One of `boyko_render`'s ten is the workspace's only non-`bin` `println!`, and it became
+an `info!` with no code, by Decision 7.
+
+**1. The observer this campaign has been using could not gate its own rung's claim.**
+
+The migration ledger's row for `light_system.rs` promised "the dropped count is now reported, which
+the one-shot latch never did". The implementation delivers it — the fold tallies drops and reports
+once at the end instead of calling a `#[cold]` reporter per dropped light. But when the fix was
+**reverted to prove the gate**, every assertion stayed green: the observer counted *records*, and
+"one record saying three" and "one record saying one" are both one record. The claim is about the
+**payload**, and nothing in the probe could see a payload.
+
+`boyko_log::probe` now renders the record's arguments at the emission site and keeps the text
+per-thread, so an observer can assert on the message. Re-running the same revert then produced
+
+```text
+the record must carry the tally, not merely exist: dropped 1 point/spot light(s) ...
+```
+
+Every value-carrying record this campaign has migrated since L6-A was, until this rung, gated only
+by its own existence. **This is the second time L6-A's payload work turned out to be ungated at the
+call site** — the first was L6 itself, where the renderer printed the format literal and threw every
+argument away.
+
+**2. A record observer needs three independent things, and each fixes a different failure.** Written
+into `probe.rs`'s header because it cost three separate reddenings:
+
+| Failure | Fix | What it looked like |
+|---|---|---|
+| another emitter's records inflate the count | count **per thread, per code** at emission | `left: 7, right: 1`, nondeterministic |
+| an EARLIER test already spent the `Once` latch | `OnceSite::reset` before the emission | `left: 0, right: 1`, every run |
+| a CONCURRENT test spends it mid-window | `observe_lock`, taken by every test that *drives* the site | `left: 0, right: 1`, one run in ten |
+
+L7b's mechanism — a process-global delivery counter under a lock — was sound **in
+`boyko_rhi_vulkan`**, whose only emitters are that rung's own tests. It does not survive contact
+with `boyko_render`: 468 lib tests, many of which legitimately fold a NaN light or read a diverged
+frozen config. Locking them one at a time would have worked until the next test anyone wrote. So
+the *observable* changed rather than the world.
+
+**3. `RatePolicy` is declared and never applied, and now something says so.** Measured by reading
+the expansion: `warn!`/`error!` gate on the three ceilings and call `emit_impl`; **neither reaches
+`rate::admit`**, which still has no production caller. Every `Once` in this registry is honoured by
+a hand-placed `OnceSite`; every `Every` is honest because nothing damps it. A row declaring
+`EveryN` or `MinIntervalMs` would be a promise with no machinery — so `E2203`, whose site genuinely
+wants per-second damping, declares `Every` and says in its own comment that the ring is what bounds
+the flood. `codes.rs` gained
+`no_live_row_declares_a_policy_the_emission_path_cannot_honour`, shown red by declaring
+`MinIntervalMs(1000)` on `E2203`. It proves what it can and its failure text says what it cannot:
+**it does not prove that a declared `Once` has an `OnceSite` behind it.**
+
+**4. The `#[cfg(debug_assertions)]` question is per SITE, and L7b's rule is not "delete every
+gate".** `boyko_physics/src/soft/self_collision.rs` had three debug-only warnings. Two lost the
+gate: `W1301`'s condition (`radius <= 0.0`) **is** the release guard one line above the call, and
+`W1303`'s is two compares once per call. The third kept it: deciding `W1302` needs
+`min(body.c_rest)` — a scan of every distance constraint, per `resolve_self_collision` call, per
+body — which a release build does not otherwise perform. L7b's rule is about conditions release
+*already computes*; it is not a licence to add an O(constraints) pass for a diagnostic. The fork is
+visible in the test list itself:
+
+```text
+cargo test --release -p boyko-physics --lib l8a_self_collision   ->  2 passed
+cargo test           -p boyko-physics --lib l8a_self_collision   ->  3 passed
+```
+
+`boyko_serialize`'s `warn_dense_viafn_skipped` lost its gate on the same test: `report
+.dense_stores_skipped += 1` runs on the line above the call in every profile.
+
+**5. The doc-rot blast radius was thirteen sites, not two — and five of those were the ones a
+reader could find.** The plan named
+`crates/boyko_image/Cargo.toml:5` and called it "doc-rot with a two-line blast radius". Measured,
+the claim "`boyko_image` is a workspace leaf" is also written in `crates/boyko_render/Cargo.toml`'s
+dependency comment, `docs/ARCHITECTURE.md:183` and `docs/SYSTEMS.md` twice — and
+`crates/boyko_serialize/Cargo.toml`'s "depends on `boyko_ecs` + `std` ONLY" becomes false in the
+same commit. All five are repaired here. **A sixth was already stale and is repaired with them**:
+`ARCHITECTURE.md`'s `boyko_rhi_vulkan ──→ boyko_rhi, boyko_sdf_math` row lost `boyko_diag` and
+`boyko_log` at profiling rung 5 and L7 respectively, and nobody updated it — which is the same
+defect this rung was warned about, one rung earlier, in the same file.
+
+**The other eight were LINE ANCHORS, and only the sweep could have found them.** One added `use`
+line in `mesh_geometry_table.rs` moved every definition below it by one, and
+`docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md` cites eight of them —
+`internal_docs_line_anchors_land_on_definitions` named all eight with the wrong line's text beside
+each. Re-derived; every one moved by exactly `+1`. This is the half of doc-rot that reading cannot
+catch and the reason that gate exists: the five prose claims above were found by grepping for a
+sentence, and no grep would have found these.
+
+**6. `boyko_image`'s own test fixtures were built wrong on purpose, and it mattered.** `wrap_zlib`
+wrote a dummy Adler-32 trailer, documented as "tests need not duplicate the checksum algorithm" —
+so roughly twenty decode tests silently exercised the corrupt-stream path. Invisible while the
+warning was an `eprintln!` nobody counted; measurable interference the moment it became a record.
+The fixtures now carry real checksums and exactly one test builds a mismatching stream on purpose.
+
+**7. A process note, because it cost work.** `git checkout -- <file>` was used to undo a
+deliberately-broken RED edit. That file also held the rung's unstaged work, all of which it
+discarded; the recovery was a copy taken before the edit. **A RED is reverted from a backup copy,
+never from the index.**
+
+---
 
 ### L7b: the seven-site code became two, and the reachability gate turned out not to be a test
 

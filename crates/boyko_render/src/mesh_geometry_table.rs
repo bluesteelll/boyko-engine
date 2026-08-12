@@ -54,6 +54,7 @@
 use bytemuck::{Pod, Zeroable};
 
 use boyko_ecs::ecs::core::resources::resource::NonSendResource;
+use boyko_log::codes::{OnceSite, W2202};
 use boyko_rhi::enums::IndexType;
 use boyko_rhi::{BufferDesc, BufferUsage, MemoryLocation, RhiDevice};
 use boyko_rhi_vulkan::device::VulkanContext;
@@ -370,11 +371,37 @@ pub const fn mesh_buffer_usage(vb_geometry_table: bool) -> BufferUsage {
 #[cold]
 fn exhausted_slot_fallback(capacity: u32) -> u32 {
     debug_assert!(false, "invariant: MeshGeometryTable exhausted its {capacity} slots");
-    eprintln!(
-        "WARN: MeshGeometryTable exhausted its {capacity} slots - aliasing the reserved \
-         degenerate slot 0 instead of an out-of-range write"
-    );
+    report_bindless_table_exhausted("MeshGeometryTable", capacity, VB_GEOMETRY_RESERVED_SLOT);
     VB_GEOMETRY_RESERVED_SLOT
+}
+
+/// A `Once` latch is PROCESS state, so it is a named module-level `static` rather than one
+/// tucked inside the reporter: an observer must be able to reset it, or its green only means
+/// "nothing else in this binary tripped this condition first". See `OnceSite::reset`.
+pub(crate) static W2202_SITE: OnceSite = OnceSite::new();
+
+/// Reports `boyko-W2202` for THIS table — the sibling of
+/// [`crate::bindless`]'s function of the same name, deliberately not shared.
+///
+/// The two sites share a code and a message shape (the table's name is the argument that tells
+/// them apart in a log) but each needs its **own** `static FIRED`, which is the whole per-SITE
+/// argument: a single shared latch would let whichever table exhausted first silence the other's
+/// only report. Two functions is what "per site" costs, and one `pub(crate)` helper taking a
+/// `&OnceSite` would cost the same while reading as if the latch were shared.
+#[cold]
+#[inline(never)]
+fn report_bindless_table_exhausted(table: &str, capacity: u32, fallback: u32) {
+    if W2202_SITE.claim() {
+        boyko_log::warn!(
+            boyko_log::Render,
+            W2202.number(),
+            "bindless table `{}` exhausted its {} slots -- aliasing reserved fallback slot {} \
+             instead of writing out of range",
+            table,
+            capacity,
+            fallback
+        );
+    }
 }
 
 /// The bindless per-mesh geometry table (Decision 0 / rung R-VBGEO): owns the VB-only
@@ -935,5 +962,34 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod l8a_w2202 {
+    use super::*;
+    use boyko_log::probe::{watch, watched};
+
+    use crate::log_probe::arm;
+
+    #[test]
+    fn w2202s_second_site_has_its_own_latch() {
+        // The point of a per-SITE `Once`: this site's first report must survive even if the
+        // `bindless.rs` site has already spent its own latch in the same process. Both live in
+        // this crate's `--lib` test binary, so a code-scoped latch would make exactly one of the
+        // two tests fail depending on the order the harness picked.
+        arm();
+        // Resets THIS module's latch and not `crate::bindless`'s -- which is the claim: the two
+        // sites share code `boyko-W2202` and do not share a latch, so the sibling having already
+        // fired (it has, in its own test) cannot silence this one.
+        W2202_SITE.reset();
+
+        watch(b'W', W2202.number());
+        report_bindless_table_exhausted("MeshGeometryTable", 1024, VB_GEOMETRY_RESERVED_SLOT);
+        assert_eq!(watched(), 1, "this site reports even after the sibling has fired");
+
+        watch(b'W', W2202.number());
+        report_bindless_table_exhausted("MeshGeometryTable", 1024, VB_GEOMETRY_RESERVED_SLOT);
+        assert_eq!(watched(), 0, "and its own latch then holds");
     }
 }

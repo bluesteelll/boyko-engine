@@ -24,6 +24,7 @@
 //! side store of durable per-entity state.
 
 use boyko_ecs::ecs::core::resources::resource::NonSendResource;
+use boyko_log::codes::{OnceSite, W2202};
 use boyko_rhi::enums::{
     BarrierAccess, BarrierStage, Format, ImageAspect, ImageLayout, ImageUsage, TextureDimension,
 };
@@ -149,16 +150,50 @@ impl BindlessSlotAllocator {
 /// (practically unreachable at
 /// [`boyko_rhi_vulkan::bindless::BINDLESS_TEXTURE_CAPACITY`] — see that fn's doc):
 /// `debug_assert!`s the invariant violation and, in release (where the assert
-/// compiles out), `eprintln!`s a warning so an exhausted table is visible in the log
+/// compiles out), reports `boyko-W2202` so an exhausted table is visible in the log
 /// instead of silently aliasing the error-texture slot with no trace.
+///
+/// The ad-hoc `"WARN: "` prefix this used to print is gone with the `eprintln!`. It was a
+/// hand-written severity on a channel that carried no severity — and `mesh_geometry_table.rs`
+/// wrote the same prefix for the same condition, which is why one code covers both sites with the
+/// table named as an argument.
 #[cold]
 fn exhausted_slot_fallback(capacity: u32) -> u32 {
     debug_assert!(false, "invariant: BindlessTextureTable exhausted its {capacity} slots");
-    eprintln!(
-        "WARN: BindlessTextureTable exhausted its {capacity} slots — aliasing the \
-         reserved error-texture slot 0 instead of an out-of-range write"
-    );
+    report_bindless_table_exhausted("BindlessTextureTable", capacity, RESERVED_SLOT);
     RESERVED_SLOT
+}
+
+/// A `Once` latch is PROCESS state, so it is a named module-level `static` rather than one
+/// tucked inside the reporter: an observer must be able to reset it, or its green only means
+/// "nothing else in this binary tripped this condition first". See `OnceSite::reset`.
+pub(crate) static W2202_SITE: OnceSite = OnceSite::new();
+
+/// Reports `boyko-W2202`: a bindless slot allocator that ran out and aliased its reserved slot.
+///
+/// **Separate from [`exhausted_slot_fallback`] so it is reachable without the `debug_assert!`.**
+/// The assert above is the invariant's gate and fires first in a debug build — which would make
+/// any test of the reporting half a `#[should_panic]` that can observe nothing after the panic.
+/// Splitting them lets the observer drive *this function*, the one a release build actually runs,
+/// instead of re-emitting the same `warn!` beside it and proving only that the macro works.
+///
+/// Its `static FIRED` is what makes `Once` per SITE: `mesh_geometry_table.rs` shares this code
+/// through its own copy of this function, and one exhausted table must not silence the other's
+/// first report.
+#[cold]
+#[inline(never)]
+fn report_bindless_table_exhausted(table: &str, capacity: u32, fallback: u32) {
+    if W2202_SITE.claim() {
+        boyko_log::warn!(
+            boyko_log::Render,
+            W2202.number(),
+            "bindless table `{}` exhausted its {} slots -- aliasing reserved fallback slot {} \
+             instead of writing out of range",
+            table,
+            capacity,
+            fallback
+        );
+    }
 }
 
 /// The render-side bindless texture table (T4): owns the device descriptor set,
@@ -633,5 +668,33 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod l8a_w2202 {
+    use super::*;
+    use boyko_log::probe::{watch, watched};
+
+    use crate::log_probe::arm;
+
+    #[test]
+    fn w2202_reports_the_exhausted_table_once_and_names_which_one() {
+        // The sibling emitter in `mesh_geometry_table` shares this code. What must NOT happen is
+        // that one exhausted table silences the other's first report, which is what a code-scoped
+        // latch would have done -- so each site owns an `OnceSite` and this test pins the first
+        // of the two. The `debug_assert!` in the fallback fires before the emission in a debug
+        // build, so the reporter is exercised here through a direct call, exactly as the
+        // production `register` path reaches it.
+        arm();
+        W2202_SITE.reset();
+
+        watch(b'W', W2202.number());
+        report_bindless_table_exhausted("BindlessTextureTable", 4096, RESERVED_SLOT);
+        assert_eq!(watched(), 1, "the first exhaustion reports");
+
+        watch(b'W', W2202.number());
+        report_bindless_table_exhausted("BindlessTextureTable", 4096, RESERVED_SLOT);
+        assert_eq!(watched(), 0, "later exhaustions are silent at the same site");
     }
 }

@@ -51,6 +51,7 @@ use boyko_ecs::ecs::core::system::system::System;
 use boyko_ecs::ecs::core::system::system_meta::SystemMeta;
 use boyko_ecs::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
 use boyko_ecs::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
+use boyko_log::codes::E2203;
 
 use boyko_rhi::ComputePipelineHandle;
 
@@ -394,10 +395,60 @@ unsafe impl System for GpuSystem {
 /// an RHI failure during the GPU dispatch is reported here. Pulled out `#[cold]
 /// #[inline(never)]` so the error path never bloats the hot `run_unsafe` body's
 /// I-cache. In debug it panics (the validation oracle would already have flagged a
-/// device fault); in release it logs loudly without aborting the frame.
+/// device fault); in release it reports `boyko-E2203` without aborting the frame.
+///
+/// **No latch, deliberately.** A device fault that recurs is reported every frame it recurs,
+/// which is what the missing `Result` channel costs: this is the only way the condition reaches
+/// anyone, and a `Once` here would report the first bad frame of a session and then let an hour
+/// of broken frames look identical to a good one. The flood is bounded by the ring, which drops
+/// and counts — not by the registry's rate column, which the emission macros do not read.
 #[cold]
 #[inline(never)]
 fn gpu_dispatch_failed(error: &crate::error::GpuColumnError) {
     debug_assert!(false, "GpuSystem::run_unsafe: GPU dispatch failed: {error}");
-    eprintln!("boyko_render: GpuSystem dispatch failed: {error}");
+    report_gpu_dispatch_failed(error);
+}
+
+/// Reports `boyko-E2203`, split out of [`gpu_dispatch_failed`] so it is reachable past that
+/// function's `debug_assert!` — the same split `crate::bindless` makes, for the same reason: an
+/// observer must be able to drive the function a release build runs, not a copy of its body.
+///
+/// Generic over `Display` rather than taking `&GpuColumnError`, so the observer can hand it a
+/// synthetic failure without constructing a device error whose variants have nothing to do with
+/// what is under test.
+#[cold]
+#[inline(never)]
+fn report_gpu_dispatch_failed(error: &impl core::fmt::Display) {
+    boyko_log::error!(
+        boyko_log::Render,
+        E2203.number(),
+        "GpuSystem dispatch failed: {}",
+        boyko_log::dsp!(error)
+    );
+}
+
+#[cfg(test)]
+mod l8a_e2203 {
+    use super::*;
+    use boyko_log::probe::{watch, watched};
+
+    use crate::log_probe::arm;
+
+    #[test]
+    fn e2203_reports_every_dispatch_failure_because_there_is_no_other_channel() {
+        // `Every`, not `Once`, and the assertion is what makes the choice visible: three failures
+        // must produce three records. `run_unsafe` returns `()`, so this is the ONLY way a device
+        // fault reaches anyone -- a latch would report the first bad frame of a session and let an
+        // hour of broken frames look identical to a good one.
+        //
+        // The reporter's `debug_assert!(false, ..)` fires first in a debug build, so what is
+        // driven here is the emission the release build performs.
+        arm();
+
+        watch(b'E', E2203.number());
+        for _ in 0..3 {
+            report_gpu_dispatch_failed(&"a synthetic device fault");
+        }
+        assert_eq!(watched(), 3, "an Every code must not be damped");
+    }
 }

@@ -2,15 +2,27 @@
 name = "boyko_image"
 version = "0.1.0"
 edition = "2024"
-description = "In-house PNG decoder (RFC 1950/1951 zlib+DEFLATE, PNG container). Zero third-party dependencies, `std` only. Decoupled leaf utility crate — no dependency on any other workspace crate, mirrors boyko_utils' role for image data."
+description = "In-house PNG decoder (RFC 1950/1951 zlib+DEFLATE, PNG container). Zero third-party dependencies, `std` only. Its ONLY workspace edge is the diagnostic seam (`boyko_log`), which is itself in-house and third-party-free; it takes no other workspace crate."
 
 # INVIOLABLE: ZERO third-party deps. The engine is fully in-house; a codec is
 # exactly the kind of surface that would normally reach for `png`/`flate2`/
 # `image`, but the owner's explicit decision is to author the zlib/DEFLATE
 # decompressor and PNG container parser from the RFC/spec text ourselves.
+#
+# This crate WAS a workspace leaf, and the description above said so until rung L8a. The one
+# edge below is the diagnostic seam, and it does not breach the INVIOLABLE rule: `boyko_log`
+# depends on `boyko_diag`, which has an empty `[dependencies]`, so the whole added subtree is
+# in-house. What it bought is that a CRC-32 or Adler-32 mismatch -- a corrupt asset the decoder
+# deliberately continues past -- is now a code an operator can grep for instead of a line on a
+# stderr nothing reads.
 [dependencies]
+boyko-log = { path = "../boyko_log" }
 
 [dev-dependencies]
+# Rung L8a: `boyko_log::probe`'s record observers, for the `#[cfg(test)] mod` blocks that assert
+# a migrated site reports ONCE and not once per frame. A dev-dependency, so the feature reaches
+# this crate's test and bench targets and never a shipping build.
+boyko-log = { path = "../boyko_log", features = ["test-probe"] }
 # Workspace-pinned criterion 0.5 (same major as every other crate's bench) —
 # drives the inflate fast-table-vs-naive throughput bench.
 criterion.workspace = true

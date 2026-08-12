@@ -97,7 +97,7 @@ for cross-crate architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
 30. [boyko_render](#30-boyko_render-) — GPU-resident columns, lighting, shadows, SDF
 31. [boyko_shaderdsl](#31-boyko_shaderdsl-) — in-house Rust shader eDSL
 32. [boyko_fontbake](#32-boyko_fontbake-) — load-time MTSDF font baker
-32b. [boyko_image](#32b-boyko_image-) — in-house PNG/zlib/DEFLATE decoder (leaf, load-time)
+32b. [boyko_image](#32b-boyko_image-) — in-house PNG/zlib/DEFLATE decoder (one workspace edge, load-time)
 33. [boyko_ui](#33-boyko_ui-) — ECS-native UI
 
 ---
@@ -2137,9 +2137,12 @@ Depends on `boyko_math` + `boyko_threadpool` only (off the hot path).
 
 **Crate:** [crates/boyko_image/](../crates/boyko_image/) — the in-house PNG decoder,
 written from the spec text with **zero third-party dependencies** (`std` only): RFC 1950
-(zlib) + RFC 1951 (DEFLATE) decompression plus the PNG container. A pure-CPU, `Send`
-LEAF crate (no workspace dependencies at all — `boyko_utils`'s decoupled role, mirrored
-for image data); a **load-time** path, never per-frame.
+(zlib) + RFC 1951 (DEFLATE) decompression plus the PNG container. A pure-CPU, `Send` crate with
+exactly ONE workspace edge — `boyko_log`, added at rung L8a so a CRC-32 or Adler-32 mismatch
+is a code an operator can grep for rather than a line on a stderr nobody reads. It was a true
+leaf until then, and `boyko_log` breaches nothing it holds itself to: that crate depends only on
+`boyko_diag`, whose `[dependencies]` is empty, so the zero-third-party rule stands. A
+**load-time** path, never per-frame.
 
 **Scope:** color types 0/2/4/6 (grayscale, RGB, grayscale+alpha, RGBA), bit depths 8 and
 16, all five PNG filter types, non-interlaced. Single entry point: `decode_png`.

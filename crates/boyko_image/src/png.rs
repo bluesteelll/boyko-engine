@@ -10,6 +10,8 @@
 //! (the material slot that consumes a decoded texture decides gamma/color
 //! space); this decoder hands back raw sample bytes only.
 
+use boyko_log::codes::W2601;
+
 use crate::error::PngError;
 use crate::inflate;
 
@@ -203,11 +205,7 @@ fn read_chunk<'a>(bytes: &'a [u8], pos: &mut usize) -> Result<RawChunk<'a>, PngE
     ]);
     let computed_crc = crc32_chunk(&kind, data);
     if stored_crc != computed_crc {
-        eprintln!(
-            "boyko_image: chunk '{}' CRC-32 mismatch (expected {computed_crc:#010x}, got \
-             {stored_crc:#010x}); continuing",
-            String::from_utf8_lossy(&kind)
-        );
+        report_chunk_crc_mismatch(&kind, computed_crc, stored_crc);
     }
 
     *pos = crc_end;
@@ -228,6 +226,29 @@ const fn crc32_table() -> [u32; 256] {
         n += 1;
     }
     table
+}
+
+/// Reports `boyko-W2601`: a chunk whose stored CRC-32 disagrees with the one computed over its
+/// bytes, which this decoder deliberately continues past.
+///
+/// `#[cold]` + `#[inline(never)]` because [`read_chunk`] runs once per chunk of every PNG the
+/// engine loads and a corrupt chunk is the rare case: the whole emission, including rendering the
+/// chunk's four type bytes, stays out of the reader's straight-line code.
+///
+/// `RatePolicy::Every`, and it is not an oversight. Each occurrence names a *different chunk*, a
+/// file with two bad chunks is a different report from a file with one, and the site runs at load
+/// time and not per frame — so there is nothing here for a latch to protect.
+#[cold]
+#[inline(never)]
+fn report_chunk_crc_mismatch(kind: &[u8; 4], computed: u32, stored: u32) {
+    boyko_log::warn!(
+        boyko_log::Image,
+        W2601.number(),
+        "chunk '{}' CRC-32 mismatch (expected {:#010x}, got {:#010x}); continuing",
+        boyko_log::dsp!(String::from_utf8_lossy(kind), 8),
+        computed,
+        stored
+    );
 }
 
 /// PNG spec Annex D's CRC-32 table (reflected, polynomial `0xEDB88320`),
@@ -481,15 +502,34 @@ mod tests {
         chunk(b"IHDR", &d)
     }
 
-    /// Wraps an already-complete raw DEFLATE bitstream in RFC 1950 zlib
-    /// framing. The Adler-32 trailer is deliberately a dummy value — a
-    /// mismatch is a non-fatal warning by design (see
-    /// `adler32_mismatch_warns_but_still_decodes`), so tests need not
-    /// duplicate the checksum algorithm to construct valid fixtures.
-    fn wrap_zlib(deflate_payload: &[u8]) -> Vec<u8> {
+    /// Wraps an already-complete raw DEFLATE bitstream in RFC 1950 zlib framing, with the
+    /// **correct** Adler-32 of `decoded` (the bytes the payload inflates to) as the trailer.
+    ///
+    /// # The trailer used to be a dummy, and rung L8a had to stop that
+    ///
+    /// This helper wrote `[0, 0, 0, 0]` and its doc said so proudly: "a mismatch is a non-fatal
+    /// warning by design, so tests need not duplicate the checksum algorithm". The consequence
+    /// was that **every fixture-decoding test in this module silently exercised the corrupt-stream
+    /// path**, which was invisible while the warning was an `eprintln!` nobody counted. The moment
+    /// `boyko-W2602` became a counted record, those twenty-odd tests started injecting records
+    /// into any concurrent observer's window — measured as a flaky `left: 7, right: 1` with the
+    /// stat tuple showing every one of them delivered on the `Image` target.
+    ///
+    /// A fixture whose checksum is deliberately wrong is a fixture that tests something other than
+    /// what its name says. One test still builds a mismatching stream on purpose
+    /// (`adler32_mismatch_warns_but_still_decodes`); the rest are now clean.
+    fn wrap_zlib(deflate_payload: &[u8], decoded: &[u8]) -> Vec<u8> {
         let mut out = vec![0x78, 0x01]; // CMF=8(deflate)/CINFO=7, FLG s.t. header%31==0, FDICT=0
         out.extend_from_slice(deflate_payload);
-        out.extend_from_slice(&[0, 0, 0, 0]); // dummy Adler-32
+        out.extend_from_slice(&crate::inflate::adler32(decoded).to_be_bytes());
+        out
+    }
+
+    /// [`wrap_zlib`] with a deliberately wrong trailer — the one fixture shape that must keep it.
+    fn wrap_zlib_bad_adler(deflate_payload: &[u8]) -> Vec<u8> {
+        let mut out = vec![0x78, 0x01];
+        out.extend_from_slice(deflate_payload);
+        out.extend_from_slice(&[0, 0, 0, 0]);
         out
     }
 
@@ -503,7 +543,7 @@ mod tests {
         deflate.extend_from_slice(&len.to_le_bytes());
         deflate.extend_from_slice(&(!len).to_le_bytes());
         deflate.extend_from_slice(raw);
-        wrap_zlib(&deflate)
+        wrap_zlib(&deflate, raw)
     }
 
     fn assemble_png(width: u32, height: u32, bit_depth: u8, color_type: u8, zlib_bytes: &[u8]) -> Vec<u8> {
@@ -678,11 +718,17 @@ mod tests {
 
     #[test]
     fn adler32_mismatch_warns_but_still_decodes() {
-        // Every `wrap_zlib`-built fixture already carries a dummy (wrong)
-        // Adler-32 trailer; every other test in this module implicitly
-        // exercises the "warns but decodes" contract. This test asserts it
-        // explicitly.
-        let bytes = build_stored_png(1, 1, 8, 0, &[0, 42]);
+        // Rung L8a: this test now builds its own mismatching stream instead of relying on every
+        // OTHER fixture in the module being wrong. The old comment here read "every other test in
+        // this module implicitly exercises the warns-but-decodes contract" — which was true, and
+        // was the defect: twenty tests were quietly driving the corrupt path, and once the warning
+        // became a counted `boyko-W2602` record they became a source of interference for anything
+        // that measured delivery. See `wrap_zlib`'s doc for the measurement.
+        let mut deflate = vec![0b0000_0001u8];
+        deflate.extend_from_slice(&2u16.to_le_bytes());
+        deflate.extend_from_slice(&(!2u16).to_le_bytes());
+        deflate.extend_from_slice(&[0, 42]);
+        let bytes = assemble_png(1, 1, 8, 0, &wrap_zlib_bad_adler(&deflate));
         let img = decode_png(&bytes).expect("Adler-32 mismatch must not fail the decode");
         assert_eq!(img.pixels, vec![42, 42, 42, 255]);
     }
@@ -779,7 +825,7 @@ mod tests {
     #[test]
     fn fixed_huffman_literal_only_grayscale() {
         let deflate = deflate_fixed_literals(&[0, 77]); // filter=None, gray=77
-        let bytes = assemble_png(1, 1, 8, 0, &wrap_zlib(&deflate));
+        let bytes = assemble_png(1, 1, 8, 0, &wrap_zlib(&deflate, &[0, 77]));
         let img = decode_png(&bytes).expect("fixed-Huffman grayscale PNG should decode");
         assert_eq!(img.pixels, vec![77, 77, 77, 255]);
     }
@@ -848,7 +894,7 @@ mod tests {
         w.put_huffman_msb(eob_code, eob_len as u32);
 
         let deflate_bytes = w.finish();
-        let bytes = assemble_png(4, 1, 8, 0, &wrap_zlib(&deflate_bytes));
+        let bytes = assemble_png(4, 1, 8, 0, &wrap_zlib(&deflate_bytes, &raw_scanline));
         let img = decode_png(&bytes).expect("dynamic-Huffman grayscale PNG should decode");
         assert_eq!(
             img.pixels,
@@ -859,5 +905,52 @@ mod tests {
                 30, 30, 30, 255, //
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod l8a_w2601 {
+    use super::*;
+    use boyko_log::probe::{arm, watch, watched};
+
+    /// A well-formed zero-length `IEND` chunk whose stored CRC is deliberately wrong.
+    /// (The real one is `0xAE42_6082`.)
+    const IEND_BAD_CRC: [u8; 12] = [0, 0, 0, 0, b'I', b'E', b'N', b'D', 0, 0, 0, 0];
+
+    #[test]
+    fn w2601_reports_every_bad_chunk_because_each_names_a_different_one() {
+        // Driven through `read_chunk`, the production parser, not through the reporter: the
+        // claim under test is that a corrupt chunk still DECODES (`Ok`, "continuing") while
+        // being reported, and only the real parser can show both at once.
+        arm::<boyko_log::Image>();
+
+        watch(b'W', W2601.number());
+        for _ in 0..3 {
+            let mut pos = 0usize;
+            let chunk =
+                read_chunk(&IEND_BAD_CRC, &mut pos).expect("a bad CRC must not fail the read");
+            assert_eq!(&chunk.kind, b"IEND");
+        }
+        assert_eq!(
+            watched(),
+            3,
+            "`Every`: three corrupt chunks are three reports, because each names a different one"
+        );
+    }
+
+    #[test]
+    fn a_good_crc_reports_nothing() {
+        // The positive control. Without it, a `read_chunk` that reported unconditionally would
+        // pass the test above, and every PNG the engine loads would warn on every chunk.
+        arm::<boyko_log::Image>();
+
+        let mut good = IEND_BAD_CRC;
+        let real = crc32_chunk(b"IEND", &[]);
+        good[8..12].copy_from_slice(&real.to_be_bytes());
+
+        watch(b'W', W2601.number());
+        let mut pos = 0usize;
+        let _ = read_chunk(&good, &mut pos).expect("a valid chunk reads");
+        assert_eq!(watched(), 0, "a matching CRC is silent");
     }
 }

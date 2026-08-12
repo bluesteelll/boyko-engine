@@ -19,6 +19,13 @@ boyko-diag = { path = "../boyko_diag" }
 
 [features]
 default = []
+# Rung L8a: the record-observation helpers in `src/probe.rs`, for crates whose `#[cfg(test)] mod`
+# blocks need to assert that a site reported once and not once per frame. Emitting crates enable
+# it in `[dev-dependencies]` ONLY, so it never reaches a shipping build. It is a feature rather
+# than a `#[cfg(test)]` module because a downstream crate links this library compiled WITHOUT
+# `cfg(test)` and cannot see one -- the wall rung L7b hit and answered with a private copy, which
+# this replaces.
+test-probe = []
 
 [lints]
 workspace = true

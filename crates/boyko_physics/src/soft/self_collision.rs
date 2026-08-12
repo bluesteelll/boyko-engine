@@ -34,6 +34,10 @@
 //! deterministic CSR scan of its 27-cell neighbourhood with the de-dup rules below,
 //! so the per-substep result is bit-stable.
 
+#[cfg(debug_assertions)]
+use boyko_log::codes::W1302;
+use boyko_log::codes::{OnceSite, W1301, W1303};
+
 use crate::math::Vec3;
 use crate::soft::component::SoftBody;
 use crate::soft::solver::{LEN_EPS, SoftCols};
@@ -449,11 +453,12 @@ fn particle_bucket(body: &SoftBody, i: usize, inv_cell: f32, table: usize) -> us
     cell_hash(ix, iy, iz, table)
 }
 
-/// Debug-only warning when the `cell = 2·radius <= L0` precondition (architect N) is
-/// violated — a neighbour one cell away could be a genuine distance-constraint partner
-/// the bucketing misses. Release-safe (a missed pair only under-resolves), so this
-/// only warns; it never aborts. No `log` crate dependency (architect SCOPE call);
-/// compiled out in release.
+/// Debug-only check of the `cell = 2·radius <= L0` precondition (architect N) — a neighbour one
+/// cell away could be a genuine distance-constraint partner the bucketing misses. Release-safe
+/// (a missed pair only under-resolves), so a violation reports `boyko-W1302`; it never aborts.
+///
+/// Stays `#[cfg(debug_assertions)]` — see the release arm below for the measurement that decided
+/// it, and for why the other two warnings in this file lost their gate at the same rung.
 #[cfg(debug_assertions)]
 fn rest_len_warn(body: &SoftBody, cell: f32) {
     let l0 = body
@@ -469,42 +474,77 @@ fn rest_len_warn(body: &SoftBody, cell: f32) {
     }
 }
 
-/// The cold print arm of [`rest_len_warn`] (kept off the hot inline path).
+/// A `Once` latch is PROCESS state, so it is a named module-level `static` rather than one
+/// tucked inside the reporter: an observer must be able to reset it, or its green only means
+/// "nothing else in this binary tripped this condition first". See `OnceSite::reset`.
+#[cfg(debug_assertions)]
+pub(crate) static W1302_SITE: OnceSite = OnceSite::new();
+
+/// The cold arm of [`rest_len_warn`] — reports `boyko-W1302` once (kept off the hot inline path).
 #[cfg(debug_assertions)]
 #[cold]
 fn rest_len_warn_cold(cell: f32, l0: f32) {
-    eprintln!(
-        "boyko_physics: SP3 self-collision precondition violated — cell size 2*radius \
-         ({cell}) exceeds the smallest distance-constraint rest length L0 ({l0}); a \
-         genuine one-cell-away constraint partner may be missed (under-resolved, not unsafe)"
-    );
+    if W1302_SITE.claim() {
+        boyko_log::warn!(
+            boyko_log::Physics,
+            W1302.number(),
+            "SP3 self-collision precondition violated -- cell size 2*radius ({}) exceeds the \
+             smallest distance-constraint rest length L0 ({}); a genuine one-cell-away \
+             constraint partner may be missed (under-resolved, not unsafe)",
+            cell,
+            l0
+        );
+    }
 }
 
 /// Release build: the precondition warning is compiled out.
+///
+/// **This is the ONE of this file's three warnings that keeps its `#[cfg]`, and the reason is
+/// measured, not inherited** *(rung L8a)*. L7b's rule — a release-build degrade must be
+/// observable — applies to a condition release has already computed. The other two here qualify:
+/// [`radius_warn`]'s test IS the release guard that disables the pass, and
+/// [`load_factor_warn`]'s is two compares once per call. This one is not: deciding whether the
+/// precondition holds requires `min(body.c_rest)`, a full scan of every distance constraint, per
+/// [`resolve_self_collision`] call, per body — work a release build does not otherwise do at all.
+/// Un-gating it would buy a warning nobody has asked for with an O(constraints) pass on the
+/// solver's hot path, which principle 1 does not permit without a measurement saying otherwise.
 #[cfg(not(debug_assertions))]
 #[inline]
 fn rest_len_warn(_body: &SoftBody, _cell: f32) {}
 
-/// Debug-only warning when `radius <= 0` disables the self-collision pass (no `log`
-/// crate dependency — architect SCOPE call). Compiled out in release.
-#[cfg(debug_assertions)]
+/// A `Once` latch is PROCESS state, so it is a named module-level `static` rather than one
+/// tucked inside the reporter: an observer must be able to reset it, or its green only means
+/// "nothing else in this binary tripped this condition first". See `OnceSite::reset`.
+pub(crate) static W1301_SITE: OnceSite = OnceSite::new();
+
+/// Reports `boyko-W1301` once when `radius <= 0` disables the self-collision pass.
+///
+/// **No longer `#[cfg(debug_assertions)]`** *(rung L8a)*: the whole condition is the release
+/// guard one line up in [`resolve_self_collision`], so the report costs a release build a single
+/// `#[cold]` call on the path that already decided to skip the pass. A silently-disabled physics
+/// feature is exactly the release-visible degradation the campaign exists to surface — the old
+/// comment's "no `log` crate dependency (architect SCOPE call)" refused a *third-party facade*,
+/// which `boyko_log` is not.
 #[cold]
 fn radius_warn(radius: f32) {
-    eprintln!(
-        "boyko_physics: SP3 self-collision skipped — particle_radius ({radius}) <= 0 \
-         (a non-positive radius would form a degenerate cell size)"
-    );
+    if W1301_SITE.claim() {
+        boyko_log::warn!(
+            boyko_log::Physics,
+            W1301.number(),
+            "SP3 self-collision skipped -- particle_radius ({}) <= 0 (a non-positive radius \
+             would form a degenerate cell size)",
+            radius
+        );
+    }
 }
 
-/// Release build: the radius warning is compiled out.
-#[cfg(not(debug_assertions))]
-#[inline]
-fn radius_warn(_radius: f32) {}
-
-/// Debug-only warning when the spatial-hash load factor is pathological — far more
-/// particles than buckets means long bucket chains (quadratic candidate scans). No
-/// `log` crate dependency (architect SCOPE call); compiled out in release.
-#[cfg(debug_assertions)]
+/// Reports `boyko-W1303` when the spatial-hash load factor is pathological — far more particles
+/// than buckets means long bucket chains (quadratic candidate scans).
+///
+/// **No longer `#[cfg(debug_assertions)]`** *(rung L8a)*: the test below is
+/// `table != 0 && n > 4 * table` — two compares, evaluated once per [`resolve_self_collision`]
+/// call and not per particle, on a path that has just run `next_pow2` and built the whole hash.
+/// See [`rest_len_warn`]'s release arm for the site where that argument does NOT hold.
 fn load_factor_warn(n: usize, table: usize) {
     // `table == next_pow2(2n)` ⇒ load factor ~0.5; this fires only if the invariant
     // is somehow violated (e.g. a hand-built body with mismatched scratch).
@@ -513,17 +553,97 @@ fn load_factor_warn(n: usize, table: usize) {
     }
 }
 
-/// The cold print arm of [`load_factor_warn`] (kept off the hot inline path).
-#[cfg(debug_assertions)]
+/// A `Once` latch is PROCESS state, so it is a named module-level `static` rather than one
+/// tucked inside the reporter: an observer must be able to reset it, or its green only means
+/// "nothing else in this binary tripped this condition first". See `OnceSite::reset`.
+pub(crate) static W1303_SITE: OnceSite = OnceSite::new();
+
+/// The cold arm of [`load_factor_warn`] — reports `boyko-W1303` once (kept off the hot path).
 #[cold]
 fn load_factor_warn_cold(n: usize, table: usize) {
-    eprintln!(
-        "boyko_physics: SP3 self-collision load factor pathological — {n} particles \
-         in {table} buckets (expected ~0.5; bucket chains will be long)"
-    );
+    if W1303_SITE.claim() {
+        boyko_log::warn!(
+            boyko_log::Physics,
+            W1303.number(),
+            "SP3 self-collision load factor pathological -- {} particles in {} buckets \
+             (expected ~0.5; bucket chains will be long)",
+            n,
+            table
+        );
+    }
 }
 
-/// Release build: the load-factor warning is compiled out.
-#[cfg(not(debug_assertions))]
-#[inline]
-fn load_factor_warn(_n: usize, _table: usize) {}
+#[cfg(test)]
+mod l8a_self_collision_codes {
+    use super::*;
+    use boyko_log::probe::{arm, watch, watched};
+
+    /// Two particles a tenth of a unit apart, joined by one distance constraint.
+    fn two_particle_body(radius: f32) -> SoftBody {
+        SoftBody::from_mesh(
+            &[[0.0, 0.0, 0.0], [0.1, 0.0, 0.0]],
+            &[1.0, 1.0],
+            &[(0, 1)],
+            None,
+            0.0,
+            radius.max(0.0),
+        )
+        .expect("a two-particle body is valid")
+    }
+
+    #[test]
+    fn w1301_reports_a_silently_disabled_pass_in_every_profile() {
+        // The un-gating claim, driven through `resolve_self_collision` itself. A non-positive
+        // radius turns the whole self-collision pass OFF and returns; before this rung a release
+        // build said nothing at all, so a cloth that had quietly stopped self-colliding looked
+        // exactly like one that never needed to.
+        arm::<boyko_log::Physics>();
+        W1301_SITE.reset();
+
+        let mut body = two_particle_body(0.0);
+        watch(b'W', W1301.number());
+        resolve_self_collision(&mut body, 1, -1.0);
+        assert_eq!(watched(), 1, "the disabled pass reports");
+
+        watch(b'W', W1301.number());
+        resolve_self_collision(&mut body, 1, -1.0);
+        assert_eq!(watched(), 0, "Once: the second call is silent");
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn w1302_stays_debug_only_and_still_reports_there() {
+        // The site whose `#[cfg(debug_assertions)]` SURVIVED this rung, and the test is gated the
+        // same way for the same reason: deciding the precondition needs `min(body.c_rest)`, a
+        // scan of every distance constraint per call, which a release build does not perform.
+        // Un-gating it would buy this warning with an O(constraints) pass on the solver's hot
+        // path. Here the rest length is 0.1 and the cell is 2*0.5 = 1.0, so it is violated.
+        arm::<boyko_log::Physics>();
+        W1302_SITE.reset();
+
+        let mut body = two_particle_body(0.5);
+        watch(b'W', W1302.number());
+        resolve_self_collision(&mut body, 1, 0.5);
+        assert_eq!(watched(), 1, "cell 1.0 exceeds rest length 0.1, so the precondition reports");
+    }
+
+    #[test]
+    fn w1303_reports_a_pathological_load_factor() {
+        // `load_factor_warn` is the production function and it is driven here with the numbers
+        // that trip it. A healthy body cannot produce them -- `table == next_pow2(2n)` puts the
+        // load factor near 0.5 by construction -- so the condition exists for a hand-built body
+        // with mismatched scratch, and synthetic arguments are the only way to reach it.
+        arm::<boyko_log::Physics>();
+        W1303_SITE.reset();
+
+        watch(b'W', W1303.number());
+        load_factor_warn(0, 8);
+        load_factor_warn(8, 8);
+        assert_eq!(watched(), 0, "a healthy load factor must be silent -- the positive control");
+
+        W1303_SITE.reset();
+        watch(b'W', W1303.number());
+        load_factor_warn(1024, 8);
+        assert_eq!(watched(), 1, "1024 in 8 buckets reports");
+    }
+}

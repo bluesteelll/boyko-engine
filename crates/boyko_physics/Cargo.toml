@@ -28,6 +28,13 @@ boyko_sdf_math = { path = "../boyko_sdf_math" }
 # exact sqrt, no FMA), and `boyko_physics::math` now re-exports them so the
 # public API and every `crate::math::{..}` call site stay UNCHANGED.
 boyko-math = { path = "../boyko_math" }
+# Rung L8a: the diagnostic seam. `soft/self_collision.rs` had three `eprintln!`s whose comments
+# each read "no `log` crate dependency (architect SCOPE call)" -- a call made when the only
+# alternative was a third-party facade. `boyko_log` is neither third-party nor a facade, and it is
+# already in this graph through `boyko_ecs`, so the SCOPE call's premise no longer holds. Two of
+# the three conditions also stop being debug-only here; the third stays gated, because its
+# condition needs an O(constraints) scan a release build does not otherwise perform.
+boyko-log = { path = "../boyko_log" }
 # S5: the spatial vocabulary. The physics ⇄ Transform pose-sync systems
 # (`sync_transform_to_body` / `sync_body_to_transform`) read/write the engine's
 # canonical `Transform` component, so the world pose lives in ONE datum
@@ -37,6 +44,10 @@ boyko-math = { path = "../boyko_math" }
 boyko-scene = { path = "../boyko_scene" }
 
 [dev-dependencies]
+# Rung L8a: `boyko_log::probe`'s record observers, for the `#[cfg(test)] mod` blocks that assert
+# a migrated site reports ONCE and not once per frame. A dev-dependency, so the feature reaches
+# this crate's test and bench targets and never a shipping build.
+boyko-log = { path = "../boyko_log", features = ["test-probe"] }
 proptest.workspace = true
 # Workspace-pinned criterion 0.5 (same major as every other crate's bench).
 criterion.workspace = true

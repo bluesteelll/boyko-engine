@@ -62,14 +62,24 @@ boyko-math = { path = "../boyko_math" }
 boyko-fontbake = { path = "../boyko_fontbake" }
 # Textured-PBR T2: the in-house, zero-third-party-dependency PNG decoder
 # (`decode_png`) the `PngTextureLoader` asset loader decodes raw texture bytes
-# through. A true leaf (depends on nothing in the workspace).
+# through. It was a true workspace leaf until rung L8a, which gave it the one
+# edge every crate in this engine now has: `boyko_log`.
 boyko_image = { path = "../boyko_image" }
+# Rung L8a: the diagnostic seam. Ten sites across six files -- two hand-rolled `AtomicBool`
+# latches (one of which stored `true` over `true` from a per-frame `#[inline]` reader, forever,
+# once its condition had diverged), a GPU dispatch failure a `System` body has no `Result` channel
+# to report, and the material loader's fallback notes. Already in the graph through `boyko_ecs`.
+boyko-log = { path = "../boyko_log" }
 # S4: the 3D GPU instance (`Gpu3dInstance`) is a `bytemuck::Pod` component whose
 # column uploads zero-copy via `cast_slice` (same discipline as the demo's 2D
 # `GpuInstance`). The `derive` feature gives the `Pod` / `Zeroable` derives.
 bytemuck.workspace = true
 
 [dev-dependencies]
+# Rung L8a: `boyko_log::probe`'s record observers, for the `#[cfg(test)] mod` blocks that assert
+# a migrated site reports ONCE and not once per frame. A dev-dependency, so the feature reaches
+# this crate's test and bench targets and never a shipping build.
+boyko-log = { path = "../boyko_log", features = ["test-probe"] }
 # W2: self-referential dev-dependency that turns the `test-readback` feature ON
 # for THIS crate's integration tests (now that it is OFF by default). The
 # integration tests in `tests/*.rs` compile against `boyko_render` as an external

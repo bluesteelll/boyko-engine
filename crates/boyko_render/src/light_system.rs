@@ -29,6 +29,7 @@ use boyko_ecs::ecs::core::system::into_system::IntoSystem;
 use boyko_ecs::ecs::core::system::system::System;
 use boyko_ecs::ecs::core::system::{Res, ResMut};
 use boyko_ecs::ecs::identifiers::primitives::EntityId;
+use boyko_log::codes::{OnceSite, W2201, W2204};
 use boyko_macros::{Resource, SystemSet};
 
 use crate::light::{
@@ -41,6 +42,19 @@ use crate::shadow_atlas::{PunctualSlotAssignment, SLOT_NONE, pack_atlas_slot};
 pub const LIGHT_HEADER_BYTES: usize = core::mem::size_of::<LightHeaderGpu>();
 /// The byte size of one `GpuLight` table element (48 B).
 pub const GPU_LIGHT_BYTES: usize = core::mem::size_of::<GpuLight>();
+
+/// `boyko-W2201`'s per-site `Once` latch — the light-table overflow report.
+///
+/// A `Once` latch is PROCESS state, so both of this module's latches are named module-level
+/// `static`s rather than `static`s tucked inside their reporters: an observer must be able to
+/// reset one, or its green only means "nothing else in this binary tripped this condition first".
+/// Four sibling tests here fold NaN lights for reasons of their own, and they measurably did.
+/// See [`boyko_log::codes::OnceSite::reset`].
+pub(crate) static W2201_SITE: OnceSite = OnceSite::new();
+
+/// `boyko-W2204`'s per-site `Once` latch — the non-finite-light drop report. Separate from
+/// [`W2201_SITE`] because the two are separate codes; see that static's doc.
+pub(crate) static W2204_SITE: OnceSite = OnceSite::new();
 
 /// The staged-light-table WRITE GENERATION (host plan D5) — a monotonic counter
 /// bumped by [`collect_lights`] exactly once per ACTUAL staging rewrite (the rebuild is
@@ -245,7 +259,10 @@ pub fn fold_light_table<'a>(
 /// # Punctual validity gate (release-safe)
 ///
 /// Every point/spot row is checked by [`punctual_row_is_cullable`] BEFORE it is written; a row
-/// that fails is DROPPED (not written, not counted) and the first drop logs once. This is the
+/// that fails is DROPPED (not written, and not counted in the header's `point_spot_count`) but it
+/// IS tallied, and the first fold that drops anything reports `boyko-W2204` with the tally. This
+/// sentence used to end "and the first drop logs once", which was true and useless: the count the
+/// one report carried was always one, because the reporter ran per drop. This is the
 /// second release-visible gate on this path, and it exists for the same reason as the
 /// `written == MAX_LIGHTS` one: the value it rejects would otherwise reach a consumer that
 /// cannot defend itself. See that predicate's doc for what a non-finite centre does to the
@@ -287,12 +304,20 @@ pub fn fold_light_table_slotted<'a>(
         l0a_count += 1;
     }
     let mut point_spot_count: u32 = 0;
+    // Rung L8a: the non-finite drops are COUNTED here and reported once at the end of the fold,
+    // rather than each calling a `#[cold]` reporter that a latch then threw away. The increment
+    // sits on the `continue` arm the row was already taking, so the straight-line cost of a fold
+    // that drops nothing is one `u32` compare after the loops.
+    let mut dropped: u32 = 0;
     for (base, p) in points {
         if written == MAX_LIGHTS {
+            if dropped != 0 {
+                report_dropped_non_finite_lights(dropped);
+            }
             return finish_folded_overflow(dst, l0a_count, point_spot_count, off, cfg);
         }
         if !punctual_row_is_cullable(p.position, p.range) {
-            report_dropped_non_finite_light();
+            dropped += 1;
             continue;
         }
         write_pod(dst, off, &slot_pack(GpuLight::from_point(p), base));
@@ -302,16 +327,22 @@ pub fn fold_light_table_slotted<'a>(
     }
     for (base, s) in spots {
         if written == MAX_LIGHTS {
+            if dropped != 0 {
+                report_dropped_non_finite_lights(dropped);
+            }
             return finish_folded_overflow(dst, l0a_count, point_spot_count, off, cfg);
         }
         if !punctual_row_is_cullable(s.position, s.range) {
-            report_dropped_non_finite_light();
+            dropped += 1;
             continue;
         }
         write_pod(dst, off, &slot_pack(GpuLight::from_spot(s), base));
         off += GPU_LIGHT_BYTES;
         written += 1;
         point_spot_count += 1;
+    }
+    if dropped != 0 {
+        report_dropped_non_finite_lights(dropped);
     }
     debug_assert!(
         l0a_count + point_spot_count <= MAX_LIGHTS,
@@ -361,7 +392,9 @@ pub fn fold_light_table_slotted<'a>(
 /// `GlobalTransform`, one divide-by-zero in a gameplay curve), not a build-time configuration
 /// invariant. Killing the process on a transient data glitch is not a policy this path takes
 /// anywhere else; the SAME function already answers its other release-visible gate — the
-/// `MAX_LIGHTS` overflow — with drop-and-log-once, and this matches it exactly.
+/// `MAX_LIGHTS` overflow — with drop-and-report-once (`boyko-W2201`), and this matches it in
+/// shape. The two carry DIFFERENT codes because they need different fixes: one says the scene
+/// has too many lights, the other says one of them has a NaN.
 ///
 /// # Cost
 ///
@@ -382,22 +415,29 @@ fn punctual_row_is_cullable(position: [f32; 3], range: f32) -> bool {
         && !range.is_nan()
 }
 
-/// Logs the first dropped non-finite punctual light and nothing thereafter.
+/// Reports `boyko-W2204` once: how many punctual lights this fold dropped for carrying a
+/// non-finite position or a NaN range.
+///
+/// **The count is the point, and it is why this moved to the END of the fold.** The migration
+/// ledger's row for these sites promised "the dropped count is now reported, which the one-shot
+/// latch never did", and the old shape could not deliver it: the reporter was called once per
+/// dropped light, so the first call — the only one the latch let through — always meant "one".
+/// Accumulating a `u32` in the fold and reporting after the loops costs one increment on a branch
+/// that was already taken and one compare per fold call, instead of one `#[cold]` call per
+/// dropped light, so it is cheaper on the path that actually drops.
 ///
 /// `#[cold]` + `#[inline(never)]` for the same reason as [`finish_folded_overflow`]: only the
 /// four compares of [`punctual_row_is_cullable`] stay on the hot fold's straight-line code.
 #[cold]
 #[inline(never)]
-fn report_dropped_non_finite_light() {
-    use core::sync::atomic::{AtomicBool, Ordering};
-    static LOGGED: AtomicBool = AtomicBool::new(false);
-    // Relaxed: a best-effort one-shot log guard, not a synchronization edge — a rare
-    // double-log under a race is harmless and no data is published through this flag.
-    if !LOGGED.swap(true, Ordering::Relaxed) {
-        eprintln!(
-            "boyko_render: dropped a point/spot light with a non-finite position (or a NaN \
-             range) from the GPU light table; a NaN centre would otherwise be culled INTO \
-             every froxel"
+fn report_dropped_non_finite_lights(dropped: u32) {
+    if W2204_SITE.claim() {
+        boyko_log::warn!(
+            boyko_log::Render,
+            W2204.number(),
+            "dropped {} point/spot light(s) with a non-finite position (or a NaN range) from \
+             the GPU light table; a NaN centre would otherwise be culled INTO every froxel",
+            dropped
         );
     }
 }
@@ -448,14 +488,22 @@ fn finish_folded_overflow(
     off: usize,
     cfg: &LightingConfig,
 ) -> usize {
-    use core::sync::atomic::{AtomicBool, Ordering};
-    static LOGGED: AtomicBool = AtomicBool::new(false);
-    // Relaxed: this is a best-effort one-shot log guard, not a synchronization edge — a
-    // rare double-log under a race is harmless and no data is published through this flag.
-    if !LOGGED.swap(true, Ordering::Relaxed) {
-        eprintln!(
-            "boyko_render: light table overflow — more than MAX_LIGHTS ({MAX_LIGHTS}) \
-             enabled lights; extras are dropped from the GPU table"
+    if W2201_SITE.claim() {
+        // WHAT THIS CANNOT SAY, and why it does not try. The ledger's row for this site asked for
+        // a dropped count. There is none to give: `fold_light_table_slotted` takes `impl
+        // Iterator`s, its doc pins "walked exactly once each", and this function is reached by an
+        // early `return` — so at the moment of the report nothing has looked at the remainder, and
+        // producing a count would mean draining iterators the contract says are not drained, on
+        // the overflow path, purely to make a number. What the site DOES know is the cap it hit
+        // and the rows that made it, so that is what it reports. `boyko-W2204` carries a real
+        // count because at that site one exists.
+        boyko_log::warn!(
+            boyko_log::Render,
+            W2201.number(),
+            "light table overflow -- more than MAX_LIGHTS ({}) enabled lights; the {} rows \
+             already written are kept and every later light is dropped from the GPU table",
+            MAX_LIGHTS,
+            l0a_count + point_spot_count
         );
     }
     finish_folded(dst, l0a_count, point_spot_count, off, cfg)
@@ -1024,6 +1072,11 @@ mod tests {
 
     #[test]
     fn overflow_of_a_single_kind_clamps_to_max_lights_without_writing_past_scratch() {
+        // Drives an emitting fold, so it joins this module's serialized set: `boyko-W2201`
+        // and `boyko-W2204` are per-SITE `Once` latches, which is PROCESS state, and a
+        // sibling that spends one inside the observer's window makes the observer read zero.
+        // Resetting fixes ORDER; the lock fixes CONCURRENCY; both are needed.
+        let _observe = boyko_log::probe::observe_lock();
         // `MAX_LIGHTS + 1` enabled point lights folded into the exact `Default`-sized
         // scratch: the +1 light must be dropped, and no byte may be written past the cap.
         let over = (MAX_LIGHTS as usize) + 1;
@@ -1053,6 +1106,11 @@ mod tests {
 
     #[test]
     fn overflow_across_kinds_gates_on_the_running_total_not_per_kind() {
+        // Drives an emitting fold, so it joins this module's serialized set: `boyko-W2201`
+        // and `boyko-W2204` are per-SITE `Once` latches, which is PROCESS state, and a
+        // sibling that spends one inside the observer's window makes the observer read zero.
+        // Resetting fixes ORDER; the lock fixes CONCURRENCY; both are needed.
+        let _observe = boyko_log::probe::observe_lock();
         // The cap gates on the running total across all four kinds: MAX_LIGHTS directionals
         // fill the table, then a sky, points, and spots must ALL be dropped — proving the
         // gate is a single cross-kind counter, not a per-loop reset.
@@ -1268,6 +1326,11 @@ mod tests {
     /// NaN in row 1's position — the very row that, uploaded, is culled INTO every froxel.
     #[test]
     fn a_nan_positioned_point_is_dropped_and_the_finite_rows_close_up() {
+        // Drives an emitting fold, so it joins this module's serialized set: `boyko-W2201`
+        // and `boyko-W2204` are per-SITE `Once` latches, which is PROCESS state, and a
+        // sibling that spends one inside the observer's window makes the observer read zero.
+        // Resetting fixes ORDER; the lock fixes CONCURRENCY; both are needed.
+        let _observe = boyko_log::probe::observe_lock();
         let good_a = point_at_x(1.0);
         let bad = PointLight::new([f32::NAN, 0.0, 0.0], [1.0, 1.0, 1.0], 300.0, 9.0);
         let good_b = point_at_x(3.0);
@@ -1300,6 +1363,11 @@ mod tests {
     /// and a NaN radius — on both punctual kinds.
     #[test]
     fn infinite_positions_and_a_nan_range_are_dropped_on_both_punctual_kinds() {
+        // Drives an emitting fold, so it joins this module's serialized set: `boyko-W2201`
+        // and `boyko-W2204` are per-SITE `Once` latches, which is PROCESS state, and a
+        // sibling that spends one inside the observer's window makes the observer read zero.
+        // Resetting fixes ORDER; the lock fixes CONCURRENCY; both are needed.
+        let _observe = boyko_log::probe::observe_lock();
         let cfg = LightingConfig::default();
         let keep_pt = point_at_x(1.0);
         let keep_sp =
@@ -1387,6 +1455,11 @@ mod tests {
     /// gates compose, they do not shadow each other.
     #[test]
     fn a_dropped_row_does_not_spend_the_max_lights_budget() {
+        // Drives an emitting fold, so it joins this module's serialized set: `boyko-W2201`
+        // and `boyko-W2204` are per-SITE `Once` latches, which is PROCESS state, and a
+        // sibling that spends one inside the observer's window makes the observer read zero.
+        // Resetting fixes ORDER; the lock fixes CONCURRENCY; both are needed.
+        let _observe = boyko_log::probe::observe_lock();
         let cfg = LightingConfig::default();
         let bad = PointLight::new([f32::NAN; 3], [1.0; 3], 300.0, 9.0);
         let mut points = vec![bad];
@@ -1400,5 +1473,120 @@ mod tests {
         assert_eq!(used, LIGHT_HEADER_BYTES + MAX_LIGHTS as usize * GPU_LIGHT_BYTES);
         assert_eq!(read_header(&scratch).point_spot_count(), MAX_LIGHTS);
         assert_eq!(row_pos(&scratch, 0)[0], 0.0, "the first survivor is the first VALID light");
+    }
+}
+
+#[cfg(test)]
+mod l8a_light_codes {
+    use super::*;
+    use boyko_log::probe::{watch, watch_any, watched};
+
+    use crate::log_probe::arm;
+
+    /// A punctual light the validity gate must reject.
+    fn nan_point() -> PointLight {
+        PointLight {
+            position: [f32::NAN, 0.0, 0.0],
+            color: [1.0, 1.0, 1.0],
+            power: 100.0,
+            range: 1.0,
+        }
+    }
+
+    fn good_point() -> PointLight {
+        PointLight {
+            position: [0.0, 0.0, 0.0],
+            color: [1.0, 1.0, 1.0],
+            power: 100.0,
+            range: 1.0,
+        }
+    }
+
+    fn scratch() -> Vec<u8> {
+        vec![0u8; LIGHT_HEADER_BYTES + (MAX_LIGHTS as usize) * GPU_LIGHT_BYTES]
+    }
+
+    fn fold(points: &[PointLight]) -> usize {
+        let mut dst = scratch();
+        fold_light_table_slotted(
+            &mut dst,
+            core::iter::empty(),
+            core::iter::empty(),
+            points.iter().map(|p| (SLOT_NONE, p)),
+            core::iter::empty::<(u32, &SpotLight)>(),
+            &LightingConfig::default(),
+        )
+    }
+
+    /// The two light-table codes, in ONE test, because a `Once` latch is process state.
+    ///
+    /// This began as two tests and they failed each other: the overflow case's fixture also
+    /// contains a NaN light, so whichever ran first spent BOTH latches and the other observed
+    /// zero. Resetting fixes that between tests — but not *within* a sequence, because a fold that
+    /// overflows spends `W2201` whether or not anyone is watching. So the only sound way to assert
+    /// on a sequence of first-occurrences is to own the whole sequence; splitting it into two
+    /// `#[test]` fns hands the ordering to the harness, which is not a thing a test may assume.
+    #[test]
+    fn w2201_and_w2204_are_separate_codes_and_each_fires_once() {
+        let _observe = boyko_log::probe::observe_lock();
+        arm();
+        // Both latches are PROCESS state and four sibling tests in this binary fold NaN lights
+        // for reasons of their own. Resetting is what makes this test independent of whatever ran
+        // before it -- without it the first assertion below observed `left: 0, right: 1` on every
+        // run, and the fix is not "lock harder": a spent latch cannot be un-spent by waiting.
+        W2204_SITE.reset();
+        W2201_SITE.reset();
+
+        // 1. Three NaN lights in ONE fold: one record carrying THREE, not three records carrying
+        //    one. This is the claim the migration ledger asked for and the old shape could not
+        //    make -- its reporter ran per dropped light, so the single record a latch let through
+        //    always described exactly one drop.
+        watch(b'W', W2204.number());
+        let _ = fold(&[nan_point(), nan_point(), nan_point()]);
+        assert_eq!(watched(), 1, "one W2204 record per fold, not one per dropped light");
+        //    AND the record says THREE. The count assertion above cannot see that: reverting this
+        //    site to its pre-migration shape -- a reporter called once per dropped light behind
+        //    the same latch -- leaves it green, because "one record saying three" and "one record
+        //    saying one" are both one record. The ledger's claim is about the PAYLOAD, so the
+        //    payload is what this line reads.
+        let msg = boyko_log::probe::last_message();
+        assert!(
+            msg.contains("dropped 3 point/spot light(s)"),
+            "the record must carry the tally, not merely exist: {msg}"
+        );
+
+        // 2. ONE fold that both overflows AND drops a NaN. `boyko-W2204`'s latch is spent by step
+        //    1, so the drop is silent; `boyko-W2201` has its own latch and fires. Watching W2201
+        //    across this fold therefore counts exactly one record, and THAT is the separation:
+        //    under a single code covering both conditions this count would be zero, because the
+        //    latch step 1 spent would be the same latch.
+        //
+        //    The two must be observed in the SAME fold, not in two. A fold that overflows spends
+        //    W2201 whether or not anyone is watching, so a first pass "to check W2204 is quiet"
+        //    would consume the very occurrence the next assertion is about -- which is exactly how
+        //    the first draft of this test failed, `left: 0, right: 1`, deterministically.
+        let mut lights: Vec<PointLight> = (0..MAX_LIGHTS + 4).map(|_| good_point()).collect();
+        lights[0] = nan_point();
+        watch(b'W', W2201.number());
+        let _ = fold(&lights);
+        assert_eq!(watched(), 1, "W2201 has its own latch and fires on its first overflow");
+
+        // 3. Both spent: silence, and `watch_any` means silence about EVERY code, so a third
+        //    reporter appearing on this path would redden this line rather than hide behind it.
+        watch_any();
+        let _ = fold(&lights);
+        assert_eq!(watched(), 0, "both Once latches are spent");
+    }
+
+    #[test]
+    fn a_clean_fold_reports_nothing() {
+        // The positive control: a fold with no NaN and no overflow must be silent, whatever the
+        // latches' state. Without it, a fold that reported unconditionally would satisfy the
+        // assertions above.
+        arm();
+
+        watch_any();
+        let _ = fold(&[good_point(), good_point()]);
+        assert_eq!(watched(), 0, "a clean fold is silent");
     }
 }
