@@ -208,9 +208,13 @@
 //! 7. `m_8(A0) < m_8(B)` and `m_7(A0) < m_7(B)` — a zero-width bracket must read smaller than one
 //!    containing real work. If this fails, **every number in the report is noise**;
 //! 8. `|Residual| ≤ band`, `|GapResidual| ≤ band`, `|HzbResidual| ≤ band`;
-//! 9. the `VB-P1d …` line's shade mean and the `VB-P4 pass=vb_shade` line's `mean_ns` are the same
-//!    number — the two printers reduce one sample set, and rung P4-1's byte-identity claim for the
-//!    `VB-P1d` line is only worth something if something still reads it.
+//! 9. ~~the `VB-P1d …` line's shade mean and the `VB-P4 pass=vb_shade` line's `mean_ns` are the
+//!    same number~~ — **STRUCK: profiling rung 7 deleted both printers.** The clause compared two
+//!    channels reducing one sample row; every figure this file reads now comes from the artifact,
+//!    so the comparison has one operand and is not a weaker clause but no clause. Struck rather
+//!    than renumbered — the numbers are cited from the assertion bodies below, and a renumber
+//!    would silently repoint them. Its `mean_ns` column and the `key_f64` parser went with it,
+//!    each having had exactly one reader.
 //!
 //! # ⚠️ TWO REASONS A STAMP COMPARISON CAN HAVE NO MARGIN — they are different, and both are here
 //!
@@ -651,9 +655,6 @@ fn vg_occ_split_timing_worker() {
 struct BenchSummary {
     /// Per pass: the worker's own median over its timed frames, in ns.
     median_ns: [f64; PASS_COUNT],
-    /// Per pass: the arithmetic mean, kept because the `VB-P1d` line publishes means and clause 9
-    /// compares the two printers on one sample set.
-    mean_ns: [f64; PASS_COUNT],
     /// Per pass: the 95th percentile over this worker's timed frames.
     ///
     /// Read for exactly one purpose — [`resolution_of`] turns `p95 − median` into a dispersion and
@@ -680,19 +681,6 @@ struct BenchSummary {
     mode_words: String,
     /// The `VB-P4 regime` line's `n_distinct=`.
     n_distinct: usize,
-    /// The `VB-P1d …` line's `flat_shade_ns=` / `froxel_shade_ns=`.
-    p1d_shade_ns: f64,
-}
-
-/// The `f64` after `key` on `line`.
-fn key_f64(line: &str, key: &str) -> Option<f64> {
-    let at = line.find(key)? + key.len();
-    line[at..]
-        .split_whitespace()
-        .next()?
-        .trim_end_matches(|c: char| !c.is_ascii_digit() && c != '.')
-        .parse()
-        .ok()
 }
 
 impl BenchSummary {
@@ -705,7 +693,6 @@ impl BenchSummary {
     /// there is no reduction that can recover from it.
     fn parse(art: &Artifact, output: &str, who: &str) -> Self {
         let mut median_ns = [0.0; PASS_COUNT];
-        let mut mean_ns = [0.0; PASS_COUNT];
         let mut p95_ns = [0.0; PASS_COUNT];
         let mut begin_off_ns = [0.0; PASS_COUNT];
         let mut end_off_ns = [0.0; PASS_COUNT];
@@ -727,7 +714,6 @@ impl BenchSummary {
                 )
             });
             median_ns[slot] = row.median_ns;
-            mean_ns[slot] = row.mean_ns;
             p95_ns[slot] = row.p95_ns;
             begin_off_ns[slot] = row.begin_off_ns;
             // `end_off_ns` is CARRIED, never `begin + median`: rung P4-6 measured that
@@ -751,23 +737,8 @@ impl BenchSummary {
         let mode_words = art.header.modes.clone();
         let n_distinct = art.header.regime_n_distinct as usize;
 
-        // Clause 9's other operand. Parsed — not ignored — because rung P4-1's guarantee that this
-        // line stays BYTE-IDENTICAL is only worth something while something still reads it.
-        let p1d = output.lines().find(|l| l.contains("VB-P1d ")).unwrap_or_else(|| {
-            panic!(
-                "{who}: the worker printed no `VB-P1d ` line beside its ten per-pass lines.\n\
-                 ---- worker output ----\n{output}"
-            )
-        });
-        let p1d_shade_ns = key_f64(p1d, "flat_shade_ns=")
-            .or_else(|| key_f64(p1d, "froxel_shade_ns="))
-            .unwrap_or_else(|| {
-                panic!("{who}: the VB-P1d line carries neither shade key:\n  {p1d}")
-            });
-
         Self {
             median_ns,
-            mean_ns,
             p95_ns,
             begin_off_ns,
             end_off_ns,
@@ -776,7 +747,6 @@ impl BenchSummary {
             force_words,
             mode_words,
             n_distinct,
-            p1d_shade_ns,
         }
     }
 }
@@ -1305,20 +1275,27 @@ fn run_protocol(fixture: Fixture) {
                 row.mode_words,
                 slot.leg().expected_mode_word()
             );
-            // ---- clauses 3, 4 and 9 -----------------------------------------------------------
+            // ---- clauses 3 and 4 ---------------------------------------------------------------
+            //
+            // CLAUSE 9 WAS HERE AND IS DELETED, because profiling rung 7 deleted its subject.
+            //
+            // It compared the `VB-P1d` line's shade mean against `VB-P4 pass=vb_shade`'s — TWO
+            // PRINTERS over one sample row — so that P4-1's byte-identity guarantee for the VB-P1d
+            // line kept meaning something "while something still reads it". Rung 7 deleted both
+            // printers and moved every figure here onto the artifact. One operand of the
+            // comparison no longer exists, and a clause with one operand is not a weaker clause,
+            // it is not a clause.
+            //
+            // This is the disposition rung 7 already recorded for `vb_bench_totality_gate.rs` —
+            // "a file whose every gate has lost its subject has nothing to migrate" — applied to
+            // one clause instead of a whole file.
+            //
+            // ⚠️ It survived rung 7 because the corpus marked THIS FILE "MIGRATED" on the strength
+            // of its other clauses, and because both tests that reach this code are `#[ignore]`d
+            // GPU orchestrators, so no sweep has ever run it. The failure it would have produced
+            // blames the worker — "the worker printed no `VB-P1d ` line" — for something rung 7
+            // did to that worker on purpose.
             assert_record_order(row, slot, r + 1);
-            assert!(
-                (row.p1d_shade_ns - row.mean_ns[P_VB_SHADE]).abs() < f64::EPSILON,
-                "`{}` round {}: the `VB-P1d` line reports shade {:.1} ns while `VB-P4 pass=vb_shade` \
-                 reports mean {:.1}. Both are `vb_bench_mean_ns` over the SAME sample row, printed \
-                 with the same `{{:.1}}`, so they cannot differ unless one printer stopped reading \
-                 the collector -- and rung P4-1's byte-identity guarantee for the VB-P1d line is \
-                 only worth something while something reads it.",
-                slot.label(),
-                r + 1,
-                row.p1d_shade_ns,
-                row.mean_ns[P_VB_SHADE]
-            );
         }
     }
 

@@ -179,7 +179,7 @@ has six consumers, not one:
 
 | File | What it consumes | Migration |
 |---|---|---|
-| `crates/boyko_app/tests/vg_occ_split_timing.rs` | `VB-P4 pass=…`, `VB-P4 regime …` | ✅ **MIGRATED.** Per-pass figures from the zone rows (slot IS the zone id, so the mapping was already the loop counter), regime triple from the header census. The driver arms `BOYKO_VB_ZONE`, names and stamps one artifact per worker, and deletes it. Two stdout parsers (`key_usize`, `key_bracketed`) lost their last caller and are DELETED — rung 7's subtraction arriving on its own |
+| `crates/boyko_app/tests/vg_occ_split_timing.rs` | `VB-P4 pass=…`, `VB-P4 regime …` | ✅ **MIGRATED — with one clause stranded until 2026-08-12; see "Certifying rung 7" below.** Per-pass figures from the zone rows (slot IS the zone id, so the mapping was already the loop counter), regime triple from the header census. The driver arms `BOYKO_VB_ZONE`, names and stamps one artifact per worker, and deletes it. Two stdout parsers (`key_usize`, `key_bracketed`) lost their last caller and are DELETED — rung 7's subtraction arriving on its own |
 | `crates/boyko_app/tests/vb_bench_totality_gate.rs` | printed totality lines | reads the artifact; its own mechanism is retired (replaced by G2a/G2b) |
 | `crates/boyko_app/tests/vb_bench_query_validation.rs` | the printed line as a **liveness witness** that the reset and every timestamp write executed | ✅ **MIGRATED.** Armed leg is `BOYKO_VB_ZONE` (the gate's subject is the profiler's query commands, and after this rung the profiler IS the zone recorder); liveness is the artifact's label census. MEASURED: **280 measured pairs / 560 timestamp writes**, where the old witness proved only that one summary line existed |
 | `crates/boyko_app/tests/vg_decidability_floor.rs` | **the shipped bench's own stdout** (`field_after`/`extract` over a `VB-P1d ` line) | ✅ **MIGRATED.** Runs `BOYKO_VB_ZONE`, reads per-session artifacts the parent names/stamps/deletes, takes each zone's MEDIAN. **This is why rung 7b exists**: it is the floor instrument, and its output is the input to D11's band |
@@ -946,6 +946,42 @@ record, a pattern in a literal is a producer, and telling those apart is the who
 
 The third is not decoration. A census that walks an empty directory reports zero producers and looks
 exactly like a clean tree.
+
+**And the census's scope is also its blind spot, which certifying it immediately proved.** The gate
+hunts PRODUCERS in `crates/*/src`, because that is what its requirement is about. It cannot see a
+stranded CONSUMER in `crates/*/tests` — and there was one.
+`vg_occ_split_timing.rs` is marked **✅ MIGRATED** in the consumer list above, and it was, for every
+figure but one: `BenchSummary::parse` still did
+
+```rust
+let p1d = output.lines().find(|l| l.contains("VB-P1d ")).unwrap_or_else(|| panic!(…));
+```
+
+and clause 9 compared that line's shade mean against `VB-P4 pass=vb_shade`'s — **two printers over
+one sample row**, which is precisely the thing rung 7 deleted. The clause's own comment said it was
+*"Parsed — not ignored — because rung P4-1's guarantee that this line stays BYTE-IDENTICAL is only
+worth something while something still reads it."* Rung 7 removed what it read.
+
+**Nothing caught it, and the reasons are worth naming separately:** the file was marked MIGRATED on
+the strength of its other clauses; both tests that reach the code are `#[ignore]`d GPU
+orchestrators, so no sweep has ever executed it; and the failure it would eventually produce blames
+the worker — *"the worker printed no `VB-P1d ` line"* — for something rung 7 did to that worker
+deliberately. A false accusation of the right component is worse than a crash.
+
+Clause 9 is **deleted**, on the disposition rung 7 already recorded for `vb_bench_totality_gate.rs`
+— *"a file whose every gate has lost its subject has nothing to migrate"* — applied to one clause
+rather than a whole file. `-D warnings` then found the rest of the subject on its own: the
+`mean_ns` column (whose field doc said in as many words that it was *"kept because the `VB-P1d`
+line publishes means and clause 9 compares the two printers"*) and the `key_f64` parser had one
+reader each, and it was that clause. **The consumer list records that `key_usize` and
+`key_bracketed` "lost their last caller and are DELETED — rung 7's subtraction arriving on its
+own". There were three parsers, not two.** The third outlived the subtraction because clause 9 was
+still calling it.
+
+**This narrows the certification above rather than voiding it.** Rung 7's subtraction of producers
+is complete and now mechanically gated. Its migration of consumers was complete for everything a
+sweep runs, and carried one stranded clause in a path nothing runs — which is the honest form of
+the claim, and is what "certified" should have meant the first time.
 
 ---
 
