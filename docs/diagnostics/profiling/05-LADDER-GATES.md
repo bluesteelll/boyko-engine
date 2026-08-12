@@ -141,8 +141,8 @@ flag-off legs on the logging side and by GJ1's control leg here.
 | **4** *(**SHIPPED**)* | RHI seam: three verbs + Vulkan impls + `ffi.rs` constants + `GPU_ZONE_QUERY_FLAGS` const-assert + Mock defaults and their pinning tests. **No consumer.** Plus `VkPhysicalDeviceHostQueryResetFeatures` (granular, for the VUID reason the descriptor-indexing struct already carries) and `DeviceCaps::host_query_reset` — see "What rung 4 SHIPPED" below | **G2a, G2c** | old readers untouched |
 | **5** *(**COMPLETE** — **5a** the edge, `gpu_zone.rs`, the 2×2 label, **G2b**; **5b** `CommandWitness` behind `profiling-census` + **G5**; **5c** the VB port, the A/B and **G10**'s witness clause — see "What rung 5c SHIPPED" below for the four departures)* | `boyko_rhi_vulkan → boyko_diag` edge; `gpu_zone.rs` + `CommandWitness` (`zone_open_order` **and** `stamp_positions`, behind `profiling-census`); VB brackets ported. **Serial A/B against the old collector** (never both armed in one frame — F17) | **G2b, G5, G10** | both collectors exist; every existing test still compiles and passes. ⚠️ **The VB port was INCOMPLETE and stayed so through rung 7b**: it carried the brackets but not their BEGIN STAGES, so seven of ten passes measured a different quantity under a green `G10` — see "Rung 7c" below |
 | **6** *(**COMPLETE** — see "What rung 6 SHIPPED" below)* | gbuffer + SV0 ported through `GbufWitness`, the sibling `record_gbuffer` never had; `ZONE_BASE_VB`/`_GBUFFER`/`_SV0` const-asserted disjoint; the R0 collector given the host arming path it never had (`BOYKO_GBUF_BENCH`), which is what let G10's witness clause extend to these passes | **the port gate (ids in their own family range, no LOST/TORN) + G10's witness clause for the gbuffer/SV0 families**, both in `gbuffer_zone_port_gate.rs`, each with a run RED | additive. This family's port was faithful on stages (both sides open at `TOP_OF_PIPE`) — unlike the VB family's, see "Rung 7c" |
-| **7 (NOT purely subtractive — MEASURED; see "What rung 7 must BUILD before it can subtract")** | **First: `reduce.rs` + `artifact.rs` + a reader** (moved here from `:143`). Then delete `gpu_timing.rs` (713 lines), the runner harness bodies and the statistics helpers (**1381 lines, 31 % of `runner.rs`**) and the `VB-P1d`/`VB-P4` print sites — **ELEVEN `println!`s, not four**: five in `print_vb_bench_summary` (`runner.rs:3224`, `:3231`, `:3236`, `:3256`, `:3272`) and six in `print_sv0_bench_summary` (`:3837`, `:3850`, `:3862`, `:3871`, `:3879`, `:3885`). Four is right as a WORK ITEM only because both functions are deleted whole; it is wrong as a census, and a census is what `G24`'s grep performs. **And migrate the surviving five stdout consumers to the artifact** (S1; list below — `vb_bench_totality_gate.rs` is deleted, not migrated, see the list's note) | the post-rung `rg` gate **plus the S1 stdout gate (G24)** | **NOT "one commit, green before and after" as written** — the build half has no caller until the reader's round-trip test exists, so the rung lands as build-then-subtract |
-| **7b (NEW — S1)** | **Floor re-measurement on the artifact channel.** Re-run A6's protocol (7 processes × 3 repetitions) reading the artifact instead of stdout; publish `docs/PROFILING-FLOOR.md` with the new `WorkloadTag`, all three repetition floors, and `FLOOR_REDUCTION = Max` | **G3a's reduction RED** | needs rung 7's channel; blocks nothing but *licenses* rung 8's verdicts |
+| **7** *(**SHIPPED** — certified 2026-08-12 against both mechanical gates; see "Certifying rung 7" below. **NOT purely subtractive — MEASURED; see "What rung 7 must BUILD before it can subtract"**)* | **First: `reduce.rs` + `artifact.rs` + a reader** (moved here from `:143`). Then delete `gpu_timing.rs` (713 lines), the runner harness bodies and the statistics helpers (**1381 lines, 31 % of `runner.rs`**) and the `VB-P1d`/`VB-P4` print sites — **ELEVEN `println!`s, not four**: five in `print_vb_bench_summary` (`runner.rs:3224`, `:3231`, `:3236`, `:3256`, `:3272`) and six in `print_sv0_bench_summary` (`:3837`, `:3850`, `:3862`, `:3871`, `:3879`, `:3885`). Four is right as a WORK ITEM only because both functions are deleted whole; it is wrong as a census, and a census is what `G24`'s grep performs. **And migrate the surviving five stdout consumers to the artifact** (S1; list below — `vb_bench_totality_gate.rs` is deleted, not migrated, see the list's note) | the post-rung `rg` gate **plus the S1 stdout gate (G24)** | **NOT "one commit, green before and after" as written** — the build half has no caller until the reader's round-trip test exists, so the rung lands as build-then-subtract |
+| **7b** *(**SHIPPED** — three sittings on the artifact channel, tabulated below)* | **Floor re-measurement on the artifact channel.** Re-run A6's protocol (7 processes × 3 repetitions) reading the artifact instead of stdout; publish the new `WorkloadTag`, all three repetition floors, and `FLOOR_REDUCTION = Max`. ⚠️ **The row said `docs/PROFILING-FLOOR.md`; the instrument writes TWO files and neither is that.** `docs/VG-DECIDABILITY-FLOOR.md` is the human report and `docs/PROFILING-FLOOR.toml` is the machine session file `Floor::from_session_file` reads — a `.md`/`.toml` slip that hid a real question, answered below | **G3a's reduction RED** | needs rung 7's channel; blocks nothing but *licenses* rung 8's verdicts |
 | **8** | `Floor`/`Twin`/`resolve` + `NotResolvedReason`, present mode (**labelling only if `Immediate` is unsupported — D12**), counters at `vkCmd*` sites, optional `profiling-alloc`. ⚠️ **`WindowReducer` and the TOML artifact MOVED TO RUNG 7** — `03:477-478` says so in the reducer's own words (*"it is what lets rung 7 delete the stdout measurement channel, and it is why `vg_decidability_floor.rs` and its five siblings must be migrated in the same commit"*), `:142` calls the channel "rung 7's", and `G24` is annotated rung 7 while requiring a reader that refuses a stale artifact — a green leg that needs a writer. This row was the ONLY line assigning them to rung 8. `G4c` and the `NotResolvedReason` round-trip therefore become additions to an existing writer rather than its first caller | **G3a, G3b, G6, G13, G4c (the artifact clause), G25** | additive |
 | **9 (v1.1)** *(**SHIPPED**)* | `VK_EXT_calibrated_timestamps` + rejection sampler; `cpu_gpu_offset` becomes a number with `max_deviation_ns`. **Plus what the row did not anticipate:** tier 1's field had never been written at all, the host time domain cannot be used (this engine's CPU axis is `rdtsc`, not QPC), the driver's `maxDeviation` is informational at one domain, and one fold is not enough — the offset drifts 173 ppm, so a second correlation at window end publishes it. Schema 7 → 8 | **the sampler's own five REDs** (acceptance arm, offset sign, seam-failure count, unknown wire word, drift-free bound); no corpus gate was specified | additive; goldens untouched (a `pNext`-free extension string records no commands) |
 | **10** *(**SHIPPED**)* | `dyn_registry.rs`: `DYN_DESCS`/`DYN_NAMES` static arenas + `SyncCells`, `USER_ID_NEXT`, `register_zone`, `DynZoneHandle`, `zone_dyn!`/`counter_dyn!`/`gauge_dyn!`, `zone_dyn_open`/`close`. **Plus what the row did not anticipate:** `SyncCells` already existed, the id space was **not** split (one `NEXT_SLOT` served both partitions, so `REGISTRY` also had to grow to `ZONE_ID_SPACE`), `ZoneDesc` can never be `ZeroInit` so `DYN_DESCS` holds `MaybeUninit`, and the User-partition crate three gates need is **one line in an integration test** rather than a new workspace member | **G11 (user half), G17, G20, G22b (second clause), G23b** — four of five run with their REDs; **G22b clause 1 is BLOCKED by the same missing `llvm-readobj` that keeps `G22a` red** | purely additive AT THE CONSUMER: fold/store already index by `ZoneId` and `arm` already sizes `zone_stride` from `user_zone_budget`. Not additive in `profiling_abi`, which had one counter and now has two |
@@ -906,6 +906,110 @@ reader must consult the witness masks before it waits on anything.
 sits 0 record site(s) apart while the frame's other brackets sit 1 apart"* — the gate names the
 timestamp that moved and the family it belongs to, and the SV0 brackets in the same frame stay put.
 **GREEN:** 28 frames compared, 112 bracket timestamps.
+
+---
+
+### Certifying rung 7, and the gate that was specified and never armed
+
+Rung 7's work was complete before this certification and its row carried no `SHIPPED` marker, which
+is how it came to be read as pending by the logging plan's L8a. Measured against HEAD on 2026-08-12:
+`gpu_timing.rs` gone, `vb_bench_totality_gate.rs` gone, `print_vb_bench_summary` and
+`print_sv0_bench_summary` both gone whole, `reduce.rs` + `artifact.rs` present, and **zero producers
+of the retired channel**.
+
+**`G24` has two legs and only one was ever built.** The round-trip and the stale-artifact refusal
+live in `crates/boyko_app/tests/profiling_artifact_roundtrip.rs` and have been green since the rung
+landed. The census leg — *"`rg 'VB-P1d |VB-P4 pass=|VB-P4 regime|VB-SV0-S1.5 ' crates/*/src` returns
+**zero**"* — was prose that nothing ran.
+
+**And run literally it cannot pass.** Against a tree where the subtraction is complete it returns
+**eight**, every one a comment recording what was deleted and why: `gpu_zone.rs` naming which half
+of a retired bracket its constants are what is left of, `occlusion_config.rs` naming the summary
+line its enum used to feed, `light_policy.rs` citing the bench its thresholds were measured on.
+
+This is the same defect this file already diagnosed for the sibling gate — *"a gate that would be
+satisfied by erasing the record of what it gated is mis-specified, and the mis-specification is in
+the instrument, not in the requirement"* — and then explicitly cleared this one, on the grounds that
+its instrument *"has to be scoped the way the second gate's already is (`crates/*/src`…)"*. **A
+directory scope does not exclude comments.** The correction was made on one gate, reasoned about the
+other, and applied to neither, and because neither was armed nothing disagreed.
+
+`g24_census_the_retired_stdout_channel_has_no_producers` now runs it, over `crates/*/src`, with
+comments stripped and **string literals deliberately not stripped** — a pattern in a comment is a
+record, a pattern in a literal is a producer, and telling those apart is the whole job. Three REDs:
+
+| RED | result |
+|---|---|
+| one surviving `println!("VB-P4 pass=…")` in `runner.rs` — the gate's own specified red | named with `file:line` |
+| the gate **as literally written** (no comment stripping) | **8 producers** — the mis-specification, measured |
+| a mis-resolved root, so the walker reads nothing | the `> 200 files` vacuity guard fires |
+
+The third is not decoration. A census that walks an empty directory reports zero producers and looks
+exactly like a clean tree.
+
+---
+
+### Rung 7b: three sittings on the artifact channel, and the statistic itself moves
+
+The floor doc promised its reader a cross-sitting series *"kept in
+`docs/diagnostics/profiling/05-LADDER-GATES.md` (profiling rung 7b)"*. **No such series existed.**
+It does now, and this is it. `docs/VG-DECIDABILITY-FLOOR.md` is machine-written and holds only the
+newest sitting, so without this table each run silently erased the evidence for the finding the run
+was making.
+
+All three ran the identical protocol — 3 repetitions × 7 sessions, 42 bench processes — through the
+artifact channel, on this box:
+
+| sitting | headline floor | worst statistic | its CV | the three repetition floors | within-sitting factor |
+|---|---|---|---|---|---|
+| A · 2026-08-10 | 21.2 % | `froxel_shade_ns` | 7.1 % | 25.0 / 7.0 / 21.6 % | **3.6×** |
+| B · 2026-08-12 21:22 | 16.5 % | `cull_reset_ns` | 5.5 % | 16.2 / 15.1 / 19.1 % | 1.26× |
+| C · 2026-08-12 21:27 | 20.8 % | `froxel_shade_ns` | 6.9 % | 28.2 / 23.7 / 14.7 % | 1.92× |
+
+**B and C were taken about five minutes apart**, and that is what makes this series say something
+the older stdout-channel one could not. The four historical runs were spread across a rebuild and
+were explained by drift on a timescale of days — thermal state, driver residency, background load.
+B and C leave no room for that explanation, and they still disagree:
+
+1. **The headline moves 1.26×** between back-to-back sittings.
+2. **The binding statistic CHANGES.** B is limited by `cull_reset_ns`, C by `froxel_shade_ns`. Two
+   runs minutes apart do not agree on *which quantity is noisiest* — so a floor is not merely an
+   imprecise number, it is a number whose SUBJECT is unstable. Any gate that quoted "the floor" and
+   then compared a `froxel_shade_ns` delta against it would, on sitting B, be comparing against a
+   bound established by an unrelated bracket.
+3. **The within-sitting spread is itself unstable** — 3.6×, then 1.26×, then 1.92×. The spread
+   cannot be characterised by one sitting either.
+
+Across all three artifact-channel sittings the repetition floors span **7.0 % – 28.2 %**. The rule
+this rung publishes is unchanged by the new data and is now better supported than when it was
+written:
+
+> **On this box, a claimed GPU-timing delta below ~15 % is not defensible without a NULL CONTROL
+> measured in the same sitting.** The two lowest repetition floors ever observed here are 7.0 % and
+> 14.7 %, from sittings whose headlines were 21.2 % and 20.8 % — so even "quote the sitting's own
+> floor" is not safe unless the control is the one the claim is compared against.
+
+**What 7b was still missing, and what fixed it.** `FLOOR_REDUCTION = Max` is one of the row's three
+specified contents and no artifact-channel run had ever published it. It is not decoration:
+`Floor::from_session_file` takes the repetition floors RAW and applies this reduction **itself**,
+with no caller-supplied parameter, so which of the three columns above bounds a later verdict is
+decided by that constant and not by whoever reads the table. `contrast.rs:812` pins it in production
+(*"production must ship the honest reduction"*), and under `Min` a reader would take this document
+as licensing roughly a third of the delta it actually licenses. **The fix went into the WRITER**, not
+into the machine-written document: patching the output would have been erased by the next run, which
+is the same class of defect as the missing series above.
+
+**And the session file is deliberately untracked, which was an accident until now.**
+`docs/PROFILING-FLOOR.toml` — the file `Floor::from_session_file` reads — was never committed and
+was not ignored either; it was simply absent from git and nobody had decided that. It is now in
+`.gitignore` **with the reason**, which is the instrument's own rule: *"a floor established on a
+different instrument bounds nothing about this one"*. A committed floor would let a fresh clone on
+another box resolve verdicts against a number that bounds nothing there; with the file absent,
+`resolve` returns `NotResolved` until someone re-measures on the machine making the claim. That is
+the honest answer, and it is what this rung's protocol exists to produce — but "absent by decision"
+and "absent because nobody noticed" are different states, and only one of them survives a reader.
+
+---
 
 ### What rung 7 must BUILD before it can subtract, and the format nobody wrote
 

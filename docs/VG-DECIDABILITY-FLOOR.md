@@ -1,6 +1,6 @@
 # VG — the decidability floor — MACHINE-WRITTEN by `vg_decidability_floor_measure`
 
-**This run measured a floor of 21.2 %** — three sigma on a single-session reading, from a worst-statistic CV of 7.1 % (`froxel_shade_ns`).
+**This run measured a floor of 20.8 %** — three sigma on a single-session reading, from a worst-statistic CV of 6.9 % (`froxel_shade_ns`).
 
 ⚠️ **Do not read that as "the floor".** The estimator moves — by a factor of several between IDENTICAL protocols on this box, measured on both the retired stdout channel and the artifact channel that replaced it. The cross-sitting series is kept in `docs/diagnostics/profiling/05-LADDER-GATES.md` (profiling rung 7b); this run's own repetition span is tabulated below. **The migration did not make the instrument quieter.** The defensible output of this rung is the RULE in the next section, not the number in this one.
 
@@ -44,20 +44,22 @@ The single run that produced the table below repeats the whole experiment and pu
 
 | repetition | floor (worst peak-to-peak) |
 |---|---|
-| 1 | 25.0 % |
-| 2 | 7.0 % |
-| 3 | 21.6 % |
+| 1 | 28.2 % |
+| 2 | 23.7 % |
+| 3 | 14.7 % |
+**`FLOOR_REDUCTION = Max`** — the reduction `Floor` applies over the repetition floors above, with no caller-supplied parameter. It is what turns that column into the single bound a later contrast is resolved against, so it is published beside the column rather than left in `contrast.rs` for a reader to go and find.
 
-**Repetition floors span 7.0 %–25.0 %, a factor of 3.56.** Read the headline as an order of magnitude, never as a constant. The table below pools every session, which is the estimate with the most evidence behind it.
+
+**Repetition floors span 14.7 %–28.2 %, a factor of 1.92.** Read the headline as an order of magnitude, never as a constant. The table below pools every session, which is the estimate with the most evidence behind it.
 
 | statistic | median (ns) | mean (ns) | peak-to-peak | CV | samples |
 |---|---|---|---|---|---|
-| `cull_reset_ns` | 512.0 | 509.0 | **12.5 %** | 4.4 % | [480, 480, 480, 480, 480, 480, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 544, 544, 544, 544] |
-| `cull_dispatch_ns` | 13872.0 | 13861.3 | **10.7 %** | 3.0 % | [13024, 13280, 13376, 13408, 13520, 13552, 13600, 13632, 13776, 13792, 13872, 13952, 13952, 13984, 14112, 14272, 14304, 14368, 14400, 14400, 14512] |
-| `froxel_shade_ns` | 25600.0 | 25843.8 | **24.0 %** | 7.1 % | [23552, 23552, 23552, 24576, 24576, 24576, 24576, 25600, 25600, 25600, 25600, 25600, 25600, 25600, 25600, 25600, 27648, 27648, 28672, 29696, 29696] |
-| `flat_shade_ns` | 40960.0 | 41239.6 | **12.5 %** | 2.8 % | [38912, 39936, 39936, 39936, 39936, 40960, 40960, 40960, 40960, 40960, 40960, 41200, 41472, 41984, 41984, 41984, 41984, 41984, 41984, 43008, 44032] |
+| `cull_reset_ns` | 448.0 | 448.8 | **17.9 %** | 4.0 % | [400, 416, 448, 448, 448, 448, 448, 448, 448, 448, 448, 448, 448, 448, 448, 448, 448, 448, 480, 480, 480] |
+| `cull_dispatch_ns` | 12096.0 | 12109.0 | **2.6 %** | 0.8 % | [12000, 12000, 12000, 12016, 12032, 12064, 12064, 12064, 12064, 12096, 12096, 12112, 12112, 12112, 12128, 12144, 12160, 12160, 12224, 12320, 12320] |
+| `froxel_shade_ns` | 22528.0 | 23283.8 | **27.3 %** | 6.9 % | [21504, 22528, 22528, 22528, 22528, 22528, 22528, 22528, 22528, 22528, 22528, 22528, 22528, 22528, 22528, 23040, 23552, 25600, 25600, 26624, 27648] |
+| `flat_shade_ns` | 37376.0 | 37936.8 | **19.2 %** | 5.1 % | [36864, 36864, 36864, 36864, 36864, 36864, 36864, 36864, 36864, 37376, 37376, 37888, 37888, 37888, 37888, 37888, 37888, 37888, 37888, 43008, 44032] |
 
-**The floor is 3 sigma × the WORST statistic's CV — `froxel_shade_ns` at 7.1 %, giving 21.2 %** — worst rather than best or average, because a campaign quoting its tightest statistic as "the floor" would be certifying deltas it cannot resolve on any other one.
+**The floor is 3 sigma × the WORST statistic's CV — `froxel_shade_ns` at 6.9 %, giving 20.8 %** — worst rather than best or average, because a campaign quoting its tightest statistic as "the floor" would be certifying deltas it cannot resolve on any other one.
 
 ## What this decides
 

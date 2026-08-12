@@ -43,3 +43,16 @@ graphify-out/
 # Local drop folder for third-party reference material (papers, vendor sample code).
 # Externally copyrighted and large — cite these from docs/ instead of vendoring them.
 /info/
+
+# The decidability floor's SESSION FILE, written by `vg_decidability_floor_measure` and read by
+# `Floor::from_session_file` -- deliberately NOT committed, and the reason is the instrument's own
+# rule rather than tidiness. `docs/VG-DECIDABILITY-FLOOR.md` states it twice: "a floor established
+# on a different instrument bounds nothing about this one", and "a floor measured yesterday does
+# not bound a delta measured today". A committed floor would let a fresh clone on another box
+# resolve verdicts against a number that bounds nothing there. With the file absent, `resolve`
+# returns `NotResolved` until someone re-measures on the machine making the claim -- which is the
+# honest answer, and it is what rung 7b's protocol exists to produce.
+#
+# It was already untracked before this line existed; the line is here so that "absent" is a
+# DECISION with a reason rather than an omission nobody noticed.
+/docs/PROFILING-FLOOR.toml

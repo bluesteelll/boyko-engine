@@ -88,7 +88,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use boyko_app::profiling::artifact::{Artifact, Instrument, ZoneLabel};
-use boyko_app::profiling::contrast::{Floor, WorkloadTag};
+use boyko_app::profiling::contrast::{FLOOR_REDUCTION, Floor, WorkloadTag};
 
 /// Sessions per configuration within ONE repetition. More than `[census].cross_run_sessions = 3` on
 /// purpose: three samples estimate a spread very poorly, and this rung's output is a BOUND that
@@ -632,6 +632,22 @@ fn write_floor_doc(
         .iter()
         .map(|r| FLOOR_SIGMA * r.iter().map(|x| x.cv).fold(0.0_f64, f64::max))
         .collect();
+    // Rung 7b's third specified content, and it was missing from every artifact-channel run before
+    // this one. It is not decoration: `Floor::from_session_file` takes the per-repetition floors RAW
+    // and applies this reduction ITSELF, with no caller-supplied parameter -- so which of the
+    // repetition floors above actually bounds a later verdict is decided HERE, not by whoever reads
+    // the table. `Max` is the honest one and `contrast.rs`'s own test pins it in production; a
+    // reader who assumed `Min` would read this document as licensing roughly a third of the delta
+    // it actually licenses.
+    let _ = writeln!(
+        out,
+        "**`FLOOR_REDUCTION = {:?}`** — the reduction `Floor` applies over the repetition floors \
+         above, with no caller-supplied parameter. It is what turns that column into the single \
+         bound a later contrast is resolved against, so it is published beside the column rather \
+         than left in `contrast.rs` for a reader to go and find.\n",
+        FLOOR_REDUCTION
+    );
+
     if reps.len() >= 2 {
         let lo = reps.iter().cloned().fold(f64::INFINITY, f64::min);
         let hi = reps.iter().cloned().fold(0.0_f64, f64::max);

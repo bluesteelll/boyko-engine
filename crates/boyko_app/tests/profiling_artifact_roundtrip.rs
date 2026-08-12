@@ -574,3 +574,147 @@ fn a_missing_content_tag_key_is_malformed_not_an_empty_declaration() {
         ),
     }
 }
+
+// ===================================================================================================
+// G24's OTHER half: the census
+// ===================================================================================================
+
+/// The four literals that were the stdout measurement channel's whole vocabulary.
+///
+/// Written as split string pieces so this file's own source does not match the census it performs —
+/// the self-reference `logging/registry-and-walker` had to fix for its check 4, arriving here for
+/// the same structural reason.
+const RETIRED_CHANNEL: [&str; 4] = [
+    concat!("VB-", "P1d "),
+    concat!("VB-", "P4 pass="),
+    concat!("VB-", "P4 regime"),
+    concat!("VB-", "SV0-S1.5 "),
+];
+
+/// Strip `//`-style comments from one line, **without** touching string literals.
+///
+/// The distinction is the entire point. A pattern inside a comment is a RECORD of the retired
+/// channel; a pattern inside a string literal is a producer of it, and those are the things this
+/// census exists to find. A naive "cut at the first `//`" would also truncate at a `//` inside a
+/// literal — `"http://…"` — and could hide a real producer sitting after it on the same line.
+///
+/// Block comments are not handled, and that is a measured decision rather than an omission: all
+/// eight prose mentions in this tree are `//` / `///` lines, and a `/* */` walker cannot be written
+/// line-by-line. `scripts/check_hotpath_exceptions.py` documents and accepts the same limit for the
+/// same reason.
+fn strip_line_comment(line: &str) -> &str {
+    let b = line.as_bytes();
+    let mut in_str = false;
+    let mut escaped = false;
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        if in_str {
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_str = false;
+            }
+        } else if c == b'"' {
+            in_str = true;
+        } else if c == b'/' && i + 1 < b.len() && b[i + 1] == b'/' {
+            return &line[..i];
+        }
+        i += 1;
+    }
+    line
+}
+
+/// Every `.rs` file under `crates/*/src`, the scope the gate names.
+fn crate_sources() -> Vec<PathBuf> {
+    let crates = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut out = Vec::new();
+    let mut stack: Vec<PathBuf> = Vec::new();
+    let entries = std::fs::read_dir(&crates).expect("invariant: the crates directory is readable");
+    for e in entries.flatten() {
+        let src = e.path().join("src");
+        if src.is_dir() {
+            stack.push(src);
+        }
+    }
+    while let Some(dir) = stack.pop() {
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+    assert!(
+        out.len() > 200,
+        "the census walked {} files, which is too few to be the workspace -- a mis-resolved root \
+         would make this gate pass by scanning nothing, which is the one way it must not pass",
+        out.len()
+    );
+    out
+}
+
+/// **G24's census leg: the stdout measurement channel has no producers left.**
+///
+/// # The gate as written cannot pass, and that is a defect in the instrument
+///
+/// `05-LADDER-GATES.md` specifies this as *"`rg 'VB-P1d |VB-P4 pass=|VB-P4 regime|VB-SV0-S1.5 '
+/// crates/*/src` returns **zero**"*. Run literally, against a tree where rung 7's subtraction is
+/// complete, it returns **eight** — every one of them a comment recording what was deleted and why:
+/// `gpu_zone.rs` explaining which half of a retired bracket its constants are what is left of,
+/// `occlusion_config.rs` naming the summary line its enum used to feed, `light_policy.rs` citing the
+/// bench its thresholds were measured on.
+///
+/// The corpus already diagnosed exactly this for the SIBLING gate — *"a gate that would be satisfied
+/// by erasing the record of what it gated is mis-specified, and the mis-specification is in the
+/// instrument, not in the requirement"* — and then said this gate was fine because it is scoped to
+/// `crates/*/src`. A directory scope does not exclude comments. The correction was made on one gate
+/// and not carried to its twin, and neither was ever armed, so nothing noticed.
+///
+/// What the requirement means is *no site PRODUCES those lines*. That is what runs here.
+#[test]
+fn g24_census_the_retired_stdout_channel_has_no_producers() {
+    let mut producers: Vec<String> = Vec::new();
+    let mut prose = 0usize;
+
+    for path in crate_sources() {
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        for (n, line) in text.lines().enumerate() {
+            let hit = RETIRED_CHANNEL.iter().any(|p| line.contains(p));
+            if !hit {
+                continue;
+            }
+            let code = strip_line_comment(line);
+            if RETIRED_CHANNEL.iter().any(|p| code.contains(p)) {
+                producers.push(format!("{}:{}  {}", path.display(), n + 1, line.trim()));
+            } else {
+                prose += 1;
+            }
+        }
+    }
+
+    assert!(
+        producers.is_empty(),
+        "the retired stdout measurement channel still has {} producer(s):\n{}\n\nRung 7 deleted \
+         this channel; a surviving producer means a consumer somewhere is still being fed by it, \
+         and the artifact it was migrated to is not the only source of those numbers.",
+        producers.len(),
+        producers.join("\n")
+    );
+
+    // Anti-vacuity, and it is load-bearing here in a way it usually is not: this census would pass
+    // trivially against an empty walk, a wrong root, or a `strip_line_comment` that ate whole lines.
+    // The prose mentions are the positive control -- the tree DOES contain these literals, and the
+    // gate finds them and correctly classifies them as records rather than producers.
+    assert!(
+        prose >= 5,
+        "the census found only {prose} prose mention(s) of the retired channel. It should find \
+         several: this campaign keeps the record of what it deleted. Too few means the walker is \
+         not seeing the files it thinks it is, and a green from a walker that reads nothing is the \
+         failure mode this assertion exists to catch."
+    );
+}
