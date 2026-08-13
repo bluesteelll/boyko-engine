@@ -7352,6 +7352,27 @@ impl GpuSceneBundles {
     /// exactly once (the by-value `self` enforces it); `ctx` is the live
     /// context they were created on.
     pub(crate) unsafe fn destroy(self, ctx: &VulkanContext) {
+        // `boyko-W9217`, landed at logging rung L8c. Profiling rung 5 reserved the code for
+        // "GPU timestamp slots were still in flight at teardown and were abandoned" and never
+        // emitted it.
+        //
+        // `GpuZoneRecorder::flush` exists so this is NOT true — it force-retires every in-flight
+        // slot, and its own doc says the alternative is "the loss a profiler exists to report
+        // rather than to commit". The recorder is correct; the hole was the PATH. `runner.rs`
+        // calls `flush_vb_zone` only inside `vb_zone_seen >= WARMUP + frames`, so a run that ends
+        // earlier — a window closed by hand, or `E3003`'s terminal return — reaches here with
+        // slots still holding results, and until now did so in silence.
+        //
+        // Checked FIRST, before anything is destroyed: the report reads the recorder's state, and
+        // reading it after the teardown below would be reading a corpse. A DIRECT call rather than
+        // `loss::raise`, because the frame loop has stopped by now and `fold.rs` — the flag word's
+        // only consumer — will never run again.
+        if let Some(rec) = self.vb_zone.as_ref() {
+            let abandoned = rec.in_flight_slots();
+            if abandoned > 0 {
+                boyko_ecs::ecs::core::profiling::report_gpu_slots_abandoned(abandoned);
+            }
+        }
         // SAFETY: per the contract the device is idle and `ctx` is live; each
         // resource is destroyed exactly once, in reverse dependency order
         // (mirrors the showcase teardown at window_present_gbuffer ~8504..8551).

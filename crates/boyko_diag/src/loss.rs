@@ -539,6 +539,19 @@ pub enum DiagFlag {
     /// its median and p95 are absent. The cap exists because those two are the reduction's whole
     /// cost (M7), so this is the one condition in the group that names a BUDGET rather than a fault.
     TelemetryZonesRefused = 1 << 9,
+    /// A GPU timestamp slot ran out of pair budget, so further brackets in that frame are
+    /// unrecorded — logging rung L8c, for the condition `W9202` reserved a code for at profiling
+    /// rung 5 and never emitted.
+    ///
+    /// **This one MUST take the flag route and the other three L8c conditions must not**, which is
+    /// the whole reason it is the only variant that rung adds. Its site is
+    /// `boyko_rhi_vulkan::present::gpu_zone::alloc_pair`, and `boyko_rhi_vulkan` neither depends on
+    /// `boyko_ecs` nor is depended on by it — so the emitter is unreachable from there by any route
+    /// except this word, which is exactly the seam `boyko_diag` sits below both crates to provide.
+    /// It is also the only one of the four raised **under load**, per frame, which is the case the
+    /// "report a drop as a counter read, not as a log record that can itself be dropped" argument
+    /// was made for.
+    GpuPairBudgetExhausted = 1 << 10,
 }
 
 impl DiagFlag {

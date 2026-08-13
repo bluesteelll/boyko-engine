@@ -643,7 +643,7 @@ codes! {
 
     (9201, W, W9201, RatePolicy::Once,  CodeStatus::Live          ,
         "The engine zone registry is exhausted; further zones run unregistered"),
-    (9202, W, W9202, RatePolicy::Once,  CodeStatus::Pending("profiling 5"),
+    (9202, W, W9202, RatePolicy::Once,  CodeStatus::Live          ,
         "The GPU timestamp pair budget is exhausted; further brackets are unrecorded"),
     (9203, W, W9203, RatePolicy::Once,  CodeStatus::Live          ,
         "A profiling lane region overflowed, or a sample had no lane to be charged to"),
@@ -655,9 +655,9 @@ codes! {
     // other row where the shorthand and the corpus disagree, and it resolves the same way.
     (9204, E, E9204, RatePolicy::Once,  CodeStatus::Live          ,
         "The profiler is already bound to another world"),
-    (9205, W, W9205, RatePolicy::Once,  CodeStatus::Pending("profiling 8"),
+    (9205, W, W9205, RatePolicy::Once,  CodeStatus::Live          ,
         "Zones were lost in this window"),
-    (9206, W, W9206, RatePolicy::Once,  CodeStatus::Pending("profiling 8"),
+    (9206, W, W9206, RatePolicy::Once,  CodeStatus::Live          ,
         "A contrast could not be resolved"),
     (9207, W, W9207, RatePolicy::Once,  CodeStatus::Live          ,
         "The CPU advertises no invariant TSC, so tick magnitudes are not trustworthy"),
@@ -679,7 +679,7 @@ codes! {
         "A telemetry write failed and streaming was disabled"),
     (9216, W, W9216, RatePolicy::Once,  CodeStatus::Live          ,
         "The clock's epoch broke; the in-flight window was discarded and the clock recalibrated"),
-    (9217, W, W9217, RatePolicy::Once,  CodeStatus::Pending("profiling 5"),
+    (9217, W, W9217, RatePolicy::Once,  CodeStatus::Live          ,
         "GPU timestamp slots were still in flight at teardown and were abandoned"),
     (9218, W, W9218, RatePolicy::Once,  CodeStatus::Live          ,
         "A telemetry quantile subscription was refused past the per-session cap"),
@@ -792,8 +792,11 @@ mod tests {
             (b'B', 9005), // L6  -- ordering references an unknown system key
             (b'B', 9101), // L6  -- Schedule::run against a different world
             (b'W', 9201), // P3  -- engine zone registry exhausted
+            (b'W', 9202), // L8c -- GPU timestamp pair budget exhausted (flag route)
             (b'W', 9203), // P2  -- region overflow / unclaimed drops
             (b'E', 9204), // P2  -- profiler already bound to another world
+            (b'W', 9205), // L8c -- zones lost in this window (direct call, post-fold)
+            (b'W', 9206), // L8c -- a contrast could not be resolved (direct call, post-fold)
             (b'W', 9207), // P2  -- invariant TSC absent
             (b'W', 9208), // P3  -- engine zone registry at 90 %
             (b'W', 9209), // P2  -- late samples dropped
@@ -804,6 +807,7 @@ mod tests {
             (b'W', 9214), // P13 -- telemetry path unwritable
             (b'W', 9215), // P13 -- telemetry write failed, streaming disabled
             (b'W', 9216), // P2  -- clock epoch break
+            (b'W', 9217), // L8c -- GPU slots abandoned at teardown (direct call, post-fold)
             (b'W', 9218), // P13 -- telemetry quantile subscription refused past the cap
         ];
         for row in DIAGNOSTICS {

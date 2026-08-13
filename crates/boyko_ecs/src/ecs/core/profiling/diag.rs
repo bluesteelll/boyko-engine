@@ -59,30 +59,50 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use boyko_diag::loss::DiagFlag;
 use boyko_log::codes::{
-    E9204, E9213, OnceSite, W9201, W9203, W9207, W9208, W9209, W9210, W9211, W9212, W9214, W9215,
-    W9216, W9218,
+    E9204, E9213, OnceSite, W9201, W9202, W9203, W9205, W9206, W9207, W9208, W9209, W9210, W9211,
+    W9212, W9214, W9215, W9216, W9217, W9218,
 };
 use boyko_log::target::Profiling;
 use boyko_log::{error, warn};
 
 /// The codes this rung emits, in registry order. The census is indexed by position here.
 ///
-/// A slice rather than a range: they are not consecutive, and a reader who has to compute
-/// which of `9201..=9218` are live from a pair of bounds has been handed arithmetic instead of a
-/// list.
-pub const LIVE_CODES: [u16; 12] = [
-    9201, // engine zone registry exhausted
-    9203, // region overflow / unclaimed drops
-    9204, // profiler already bound to another world
-    9207, // invariant TSC absent
-    9208, // engine zone registry at 90 % occupancy
-    9209, // late samples dropped
-    9211, // fold working set exceeds L1d
-    9213, // re-arm with a different geometry
-    9214, // the telemetry path is unwritable
-    9215, // a telemetry write failed and streaming was disabled
-    9216, // clock epoch break
-    9218, // a telemetry quantile subscription was refused past the cap
+/// A slice rather than a range: a reader who has to compute which of `9201..=9218` are live from a
+/// pair of bounds has been handed arithmetic instead of a list.
+///
+/// # TWO REPORTERS COULD NOT EMIT, and this list is why *(found at L8c)*
+///
+/// `claim` resolves a code to its slot here and returns `false` when there is none — after firing
+/// a `debug_assert`. Profiling rung 10 added `report_user_budget_exhausted` and
+/// `report_engine_scope_refused`, gave them `flag_code` arms, `Live` registry rows and doc pages,
+/// and **did not add `W9210` or `W9212` here**. So both were complete-looking emitters that
+/// panicked in debug and emitted nothing in release, for three rungs.
+///
+/// Nothing could see it. The registry's orphan check found their identifiers; its doc-page check
+/// found their pages; `flag_code`'s table test did not cover their arms (it asserted four of nine
+/// rows until L8c); and no test drove either condition. It surfaced only because L8c added four
+/// codes to this array and the length pin moved.
+///
+/// The list is now the whole block: every `92xx` code that has an emitter has a slot.
+pub const LIVE_CODES: [u16; 18] = [
+    W9201.number(), // engine zone registry exhausted
+    W9202.number(), // GPU timestamp pair budget exhausted            (L8c)
+    W9203.number(), // region overflow / unclaimed drops
+    E9204.number(), // profiler already bound to another world
+    W9205.number(), // zones lost in this window                      (L8c)
+    W9206.number(), // a contrast could not be resolved               (L8c)
+    W9207.number(), // invariant TSC absent
+    W9208.number(), // engine zone registry at 90 % occupancy
+    W9209.number(), // late samples dropped
+    W9210.number(), // user zone budget / dynamic name arena exhausted
+    W9211.number(), // fold working set exceeds L1d
+    W9212.number(), // register_zone refused an engine scope
+    E9213.number(), // re-arm with a different geometry
+    W9214.number(), // the telemetry path is unwritable
+    W9215.number(), // a telemetry write failed and streaming was disabled
+    W9216.number(), // clock epoch break
+    W9217.number(), // GPU slots abandoned at teardown                (L8c)
+    W9218.number(), // a telemetry quantile subscription was refused past the cap
 ];
 
 /// One counter per [`LIVE_CODES`] entry. `.bss`, so a process that emits nothing writes no page.
@@ -176,6 +196,9 @@ pub const fn flag_code(flag: DiagFlag) -> Option<u16> {
         DiagFlag::TelemetryPathUnwritable => Some(W9214.number()),
         DiagFlag::TelemetryWriteFailed => Some(W9215.number()),
         DiagFlag::TelemetryZonesRefused => Some(W9218.number()),
+        // L8c. The only one of that rung's four conditions that RAISES a flag rather than calling
+        // its reporter directly -- see the variant's own doc for why this one has no other route.
+        DiagFlag::GpuPairBudgetExhausted => Some(W9202.number()),
         DiagFlag::ClockUncalibrated => None,
     }
 }
@@ -206,6 +229,7 @@ pub(crate) fn report_raised(bits: u32) {
         DiagFlag::TelemetryPathUnwritable,
         DiagFlag::TelemetryWriteFailed,
         DiagFlag::TelemetryZonesRefused,
+        DiagFlag::GpuPairBudgetExhausted,
     ] {
         if bits & flag.as_bits() == 0 {
             continue;
@@ -224,6 +248,7 @@ pub(crate) fn report_raised(bits: u32) {
             DiagFlag::TelemetryPathUnwritable => report_telemetry_path_unwritable(),
             DiagFlag::TelemetryWriteFailed => report_telemetry_write_failed(),
             DiagFlag::TelemetryZonesRefused => report_telemetry_zones_refused(),
+            DiagFlag::GpuPairBudgetExhausted => report_gpu_pair_budget_exhausted(),
             DiagFlag::ClockUncalibrated => {
                 debug_assert!(false, "invariant: flag_code(ClockUncalibrated) is None");
             }
@@ -285,6 +310,118 @@ pub(crate) fn report_telemetry_zones_refused() {
             Profiling,
             W9218.number(),
             "a telemetry quantile subscription was refused past the per-session cap; the zone              streams without a median or a p95"
+        );
+    }
+}
+
+// ───────────────────── L8c: four conditions that reserved codes and emitted nothing ─────────────
+//
+// All four were `CodeStatus::Pending` naming profiling rungs 5 and 8, both SHIPPED, and all four
+// conditions were measured present in the tree and silent. What L8c had to decide was not whether
+// to report them but HOW, and the answer is not uniform:
+//
+// * `W9202` RAISES a flag. Its site is `boyko_rhi_vulkan::present::gpu_zone::alloc_pair`, and that
+//   crate neither depends on this one nor is depended on by it -- the flag word in `boyko_diag`,
+//   which sits below both, is the ONLY route. It is also the only one raised under load, per
+//   frame, which is the case the word's "a drop reported as a counter read cannot itself be
+//   dropped" argument was made for.
+//
+// * `W9205`, `W9206` and `W9217` CALL THEIR REPORTER DIRECTLY, and that is a correctness
+//   requirement rather than a shortcut. `fold.rs` is the single consumer of the flag word: it
+//   calls `take_raised` once per fold. A contrast resolved after the run, or a teardown that
+//   happens once the frame loop has stopped, would raise a bit NO FOLD EVER TAKES -- a report that
+//   exists in the source and reaches nobody, which is the exact defect shape this campaign keeps
+//   finding. Their sites are in `boyko_app`, which depends on this crate, so the call is available.
+//
+// The module stays the SOLE EMITTER of the `92xx` block either way: the rule is about which module
+// emits, not about the flag word being the only door into it. Two doors, one room, and each
+// condition takes the one its position in the graph and its frequency allow.
+
+/// `W9202` — a GPU timestamp slot ran out of pair budget; further brackets are unrecorded.
+///
+/// Reached from the fold, via [`DiagFlag::GpuPairBudgetExhausted`]. The slot keeps every pair it
+/// already allocated, so the frame's earlier zones are intact and its later ones are ABSENT rather
+/// than wrong — which is why this is a `Warn` and why a reader needs it: an absent zone and a zone
+/// that did not run are indistinguishable in the artifact without it.
+#[cold]
+#[inline(never)]
+pub(crate) fn report_gpu_pair_budget_exhausted() {
+    debug_assert_eq!(flag_code(DiagFlag::GpuPairBudgetExhausted), Some(W9202.number()));
+    if claim(W9202.number()) {
+        warn!(
+            Profiling,
+            W9202.number(),
+            "a GPU timestamp slot exhausted its pair budget; further brackets in that frame are \
+             unrecorded"
+        );
+    }
+}
+
+/// `W9205` — pairs were lost in this window, so its figures are folded from fewer samples.
+///
+/// **`pub`, and called directly by `boyko_app`'s reducer** — see the block above. A lost pair is
+/// one the recorder bracketed and whose results never came back, which is a different statement
+/// from `NotBracketed` (a leg that does not run that pass) and is why the label census carries
+/// them apart.
+#[cold]
+#[inline(never)]
+pub fn report_window_zones_lost(lost: u32, torn: u32, measured: u32) {
+    if claim(W9205.number()) {
+        warn!(
+            Profiling,
+            W9205.number(),
+            "zones were lost in this window: {} lost, {} torn, {} measured -- the figures are \
+             folded from fewer samples than the window ran",
+            lost,
+            torn,
+            measured
+        );
+    }
+}
+
+/// `W9206` — a contrast could not be resolved, so the comparison has no verdict.
+///
+/// **`pub`, and called directly by `boyko_app`'s comparator.** `resolve` runs after a measurement,
+/// often after the frame loop has stopped, so a raised flag would wait for a fold that never
+/// comes.
+///
+/// The reason is an ARGUMENT rather than part of the message literal: `NotResolvedReason` is a
+/// closed enum with a wire word apiece, and a reader who gets `floor_workload_mismatch` needs a
+/// different thing from one who gets `below_band` — the first is a measurement that compared two
+/// configurations, the second is a real result meaning "the difference is inside the band".
+#[cold]
+#[inline(never)]
+pub fn report_contrast_not_resolved(reason: &str) {
+    if claim(W9206.number()) {
+        warn!(
+            Profiling,
+            W9206.number(),
+            "a contrast could not be resolved ({}); the comparison carries no verdict",
+            reason
+        );
+    }
+}
+
+/// `W9217` — GPU timestamp slots were still in flight at teardown and were abandoned.
+///
+/// **`pub`, and called directly by `boyko_app`'s teardown**, which is the clearest case of the
+/// block above: by the time this is true the frame loop has stopped, so nothing will ever fold
+/// again and a raised flag would be a report that cannot arrive.
+///
+/// `GpuZoneRecorder::flush` exists precisely to make this NOT happen — it force-retires every
+/// in-flight slot as `Flushed` — so reaching this means the teardown path did not call it. The
+/// commonest way is a run that ends before its measurement window completes: a closed window, or a
+/// terminal device error.
+#[cold]
+#[inline(never)]
+pub fn report_gpu_slots_abandoned(slots: u32) {
+    if claim(W9217.number()) {
+        warn!(
+            Profiling,
+            W9217.number(),
+            "{} GPU timestamp slot(s) were still in flight at teardown and were abandoned; their \
+             brackets are absent from this run's artifact",
+            slots
         );
     }
 }
@@ -536,6 +673,9 @@ mod tests {
         assert_eq!(flag_code(DiagFlag::TelemetryPathUnwritable), Some(W9214.number()));
         assert_eq!(flag_code(DiagFlag::TelemetryWriteFailed), Some(W9215.number()));
         assert_eq!(flag_code(DiagFlag::TelemetryZonesRefused), Some(W9218.number()));
+        // L8c's one flag-routed condition. The other three of that rung call their
+        // reporters directly and so have no arm here -- see the block above them.
+        assert_eq!(flag_code(DiagFlag::GpuPairBudgetExhausted), Some(W9202.number()));
         // A POSITIVE answer, not a gap: the condition is reported as a frame flag, because its
         // consequence is a status on the data rather than an event.
         assert_eq!(flag_code(DiagFlag::ClockUncalibrated), None);
@@ -549,7 +689,7 @@ mod tests {
     /// and every individual `assert_eq!` above would still pass.
     #[test]
     fn no_two_flags_share_a_code() {
-        const FLAGS: [DiagFlag; 9] = [
+        const FLAGS: [DiagFlag; 11] = [
             DiagFlag::ClockEpochBreak,
             DiagFlag::ClockUncalibrated,
             DiagFlag::LaneExhausted,
@@ -559,6 +699,8 @@ mod tests {
             DiagFlag::EngineScopeRefused,
             DiagFlag::TelemetryPathUnwritable,
             DiagFlag::TelemetryWriteFailed,
+            DiagFlag::TelemetryZonesRefused,
+            DiagFlag::GpuPairBudgetExhausted,
         ];
         let mut seen: Vec<u16> = Vec::new();
         for f in FLAGS {
@@ -567,7 +709,7 @@ mod tests {
                 seen.push(c);
             }
         }
-        assert_eq!(seen.len(), 8, "eight of the nine flags carry a code; ClockUncalibrated does not");
+        assert_eq!(seen.len(), 10, "ten of the eleven flags carry a code; ClockUncalibrated does not");
     }
 
     /// `W9207`'s selection is measured here because its emission cannot be: `invariant_tsc()` is
@@ -591,12 +733,103 @@ mod tests {
         // ZERO identifier uses. Importing it to write `W9202.number()` here would put the
         // identifier in a `use` line outside any `#[cfg(test)]`, which is exactly what that check
         // is looking for. Every other number in this module became its constant at L8c.
-        assert_eq!(slot_of(9202), None, "a code this rung does not emit must have no slot");
+        // The negative control moved at L8c: `9202` used to be the code "this rung does not
+        // emit", and it now does. Every `92xx` code with an emitter has a slot, so the
+        // subject has to come from outside the block -- `W0103` is the file sink's and this
+        // module will never emit it. A negative control whose subject became positive is a
+        // control that stopped controlling.
+        assert_eq!(slot_of(103), None, "a code this rung does not emit must have no slot");
         // A duplicate would make two codes share a latch, so one would silence the other.
         for (i, a) in LIVE_CODES.iter().copied().enumerate() {
             for b in LIVE_CODES.iter().copied().skip(i + 1) {
                 assert_ne!(a, b);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod l8c_emitter_tests {
+    use super::*;
+
+    /// The four conditions logging rung L8c gave emitters, observed through the census that
+    /// [`report_count`] exposes.
+    ///
+    /// **`>= 1`, not `== 1`**, and the module header already states why: the latches are process
+    /// state and a sibling test in the same binary may have claimed one first. What the census can
+    /// prove is that the emit path was TAKEN, which is the claim each of these rows owed.
+    ///
+    /// Each drives the PRODUCTION reporter — the same function its site calls — rather than a
+    /// `warn!` written beside it. L8a paid for that lesson three times in one rung.
+    #[test]
+    fn the_four_l8c_conditions_all_reach_the_emit_path() {
+        // `W9202` goes through the flag word, so it is driven the way the fold drives it: bits in,
+        // report out. That also exercises the `report_raised` dispatch arm, which a direct call to
+        // the reporter would skip.
+        report_raised(DiagFlag::GpuPairBudgetExhausted.as_bits());
+        assert!(report_count(W9202.number()) >= 1, "the pair-budget overflow was silent");
+
+        report_window_zones_lost(7, 2, 51);
+        assert!(report_count(W9205.number()) >= 1, "the lost window was silent");
+
+        report_contrast_not_resolved("floor_workload_mismatch");
+        assert!(report_count(W9206.number()) >= 1, "the refused contrast was silent");
+
+        report_gpu_slots_abandoned(3);
+        assert!(report_count(W9217.number()) >= 1, "the abandoned slots were silent");
+    }
+
+    /// **THE GATE THAT WOULD HAVE CAUGHT RUNG 10**: every code `flag_code` can produce has a
+    /// census slot.
+    ///
+    /// `claim` resolves a code through `slot_of` and returns `false` when there is none, so a
+    /// reporter whose code is missing from `LIVE_CODES` fires a `debug_assert` and then emits
+    /// NOTHING — in release, silently. That is what `W9210` and `W9212` did for three rungs: two
+    /// complete emitters with `flag_code` arms, `Live` registry rows and doc pages, structurally
+    /// incapable of emitting.
+    ///
+    /// Nothing in the workspace could see it. The orphan check found their identifiers, the
+    /// doc-page check found their pages, the flag table asserted four of nine rows, and no test
+    /// drove either condition. It surfaced only because L8c changed this array's length and a pin
+    /// moved. **This is the check that makes the link mechanical instead of incidental.**
+    #[test]
+    fn every_code_the_flag_table_can_produce_has_a_census_slot() {
+        for f in [
+            DiagFlag::ClockEpochBreak,
+            DiagFlag::ClockUncalibrated,
+            DiagFlag::LaneExhausted,
+            DiagFlag::ZoneRegistryExhausted,
+            DiagFlag::ZoneRegistryNearFull,
+            DiagFlag::UserZoneBudgetExhausted,
+            DiagFlag::EngineScopeRefused,
+            DiagFlag::TelemetryPathUnwritable,
+            DiagFlag::TelemetryWriteFailed,
+            DiagFlag::TelemetryZonesRefused,
+            DiagFlag::GpuPairBudgetExhausted,
+        ] {
+            let Some(code) = flag_code(f) else { continue };
+            assert!(
+                slot_of(code).is_some(),
+                "the flag with bits {:#x} maps to code {code}, which has no LIVE_CODES slot --                  `claim` will refuse it and its reporter will emit nothing, in release without a                  sound",
+                f.as_bits()
+            );
+        }
+    }
+
+    /// Every code L8c added has a census slot, and `LIVE_CODES` grew to match.
+    ///
+    /// Without a slot `claim` fires its `debug_assert` and the reporter emits NOTHING in release —
+    /// a code that is `Live`, documented, called, and silent. The four are asserted by identifier
+    /// so the registry's check 5 can see them.
+    #[test]
+    fn the_four_l8c_codes_have_census_slots() {
+        for c in [W9202.number(), W9205.number(), W9206.number(), W9217.number()] {
+            assert!(slot_of(c).is_some(), "code {c} has no census slot, so its reporter is silent");
+        }
+        assert_eq!(
+            LIVE_CODES.len(),
+            18,
+            "twelve before L8c; four added for its own codes, and TWO for rung 10's reporters that \n             had no slot and therefore could not emit"
+        );
     }
 }

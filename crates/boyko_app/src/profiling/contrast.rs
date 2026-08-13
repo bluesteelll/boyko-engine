@@ -674,11 +674,27 @@ pub fn se_floor(a: &LegSummary, b: &LegSummary) -> f64 {
 #[must_use]
 pub fn resolve(a: &LegSummary, b: &LegSummary, floor: &Floor, twin: &Twin) -> Contrast {
     let median_delta_ns = b.median_ns - a.median_ns;
-    let refuse = |reason| Contrast::NotResolved {
-        reason,
-        median_delta_ns,
-        band_ns: 0.0,
-        binding: BandTerm::Floor,
+    // `boyko-W9206`, landed at logging rung L8c. Profiling rung 8 reserved the code and never
+    // emitted it, so every refusal below was a value returned to a caller and nothing else — and a
+    // `NotResolved` that a caller pattern-matches away is a measurement silently deciding it has no
+    // verdict.
+    //
+    // In the CLOSURE, so every refusal reports and a new one cannot be added without a report.
+    //
+    // **`BelowBand` is deliberately NOT reported, and the enum says why in its own words: "the
+    // common case, and not an error."** It is reached by the open-coded `NotResolved` below rather
+    // than through this closure, and that separation is now load-bearing. The other five reasons
+    // mean the comparison COULD NOT BE MADE — a floor measured on another workload, legs from two
+    // processes, a window over an unknown subset. Below-band means it WAS made and the difference
+    // is inside the band, which is the expected outcome of every null experiment. Warning on it
+    // would put a `Warn` in the log of every run that correctly found no change.
+    //
+    // A DIRECT CALL and not `loss::raise`: `resolve` runs after a measurement, typically after the
+    // frame loop has stopped, and `fold.rs` is the flag word's only consumer. A bit raised here
+    // would wait for a fold that never comes.
+    let refuse = |reason: NotResolvedReason| {
+        boyko_ecs::ecs::core::profiling::report_contrast_not_resolved(reason.as_str());
+        Contrast::NotResolved { reason, median_delta_ns, band_ns: 0.0, binding: BandTerm::Floor }
     };
 
     if floor.workload != a.workload || floor.workload != b.workload {

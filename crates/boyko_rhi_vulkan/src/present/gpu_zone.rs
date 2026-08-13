@@ -577,6 +577,17 @@ impl GpuZoneRecorder {
         self.slots[slot].in_flight
     }
 
+    /// How many slots are still in flight — the teardown question, `boyko-W9217`'s subject.
+    ///
+    /// Distinct from [`in_flight`](Self::in_flight), which answers it for one slot: a caller at
+    /// teardown wants the COUNT, and asking it slot by slot would put the ring's depth in the
+    /// caller instead of here. Added at logging rung L8c, because the condition had a reserved code
+    /// and no way for anyone above to see it.
+    #[must_use]
+    pub fn in_flight_slots(&self) -> u32 {
+        self.slots.iter().filter(|s| s.in_flight).count() as u32
+    }
+
     /// Whether `slot`'s pool still needs a recorded reset before it can be reused.
     #[must_use]
     pub fn needs_cmd_reset(&self, slot: usize) -> bool {
@@ -632,6 +643,18 @@ impl GpuZoneRecorder {
         if pair as usize >= MAX_GPU_PAIRS {
             // Undo, so a slot that overflows once does not keep climbing and wrap the counter.
             s.used_pairs.store(MAX_GPU_PAIRS as u16, Ordering::Relaxed);
+            // `boyko-W9202`, landed at logging rung L8c. Profiling rung 5 reserved the code for
+            // exactly this and never emitted it, so until now a frame whose later brackets fell off
+            // the end produced an artifact indistinguishable from one whose zones did not run.
+            //
+            // A RAISED FLAG rather than a `warn!`, and the reason is structural rather than
+            // stylistic: this crate cannot reach the `92xx` emitter (`boyko_ecs`'s profiling
+            // `diag`) — the two do not depend on each other in either direction — and `boyko_diag`
+            // sits below both precisely to carry conditions across that gap. It is also the only
+            // one of L8c's four conditions raised UNDER LOAD, per frame, which is the case the
+            // sticky bit was designed for: one `fetch_or` here, one report at the next fold, and a
+            // storm cannot drown its own diagnostic.
+            boyko_diag::loss::raise(boyko_diag::loss::DiagFlag::GpuPairBudgetExhausted);
             return None;
         }
         // SAFETY: single producer (clause (a) of the `Sync` impl); `pair < MAX_GPU_PAIRS`, tested

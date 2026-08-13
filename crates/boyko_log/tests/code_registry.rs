@@ -36,7 +36,7 @@
 //! | 2 | `Live` rows have a doc page **with its three sections** | **ARMED** at L4, TIGHTENED at L6 — the L4 form was `is_file()` alone, so an empty page satisfied it |
 //! | 3a | `Live` rows have ≥1 identifier use | **ARMED** at L4 |
 //! | 3b | `Pending`/`Historical` rows have 0 identifier uses | **ARMED** — all 32 rows |
-//! | 3c | `Pending` count == 0 | disarmed until L8c by design |
+//! | 3c | `Pending` count == 0 | **ARMED at L8c** — first run required flipping four rows whose named rungs had already shipped |
 //! | 4 | every prefixed literal resolves to a row | **ARMED** |
 //! | 5 | every `Live` W/E code is named by a test, or is in the ledger | **ARMED at L6** — first run: 8 of 20 rows unnamed |
 //! | 6 | a `B` code is never an argument to an emission macro | **ARMED at L6**, re-specified against the tree |
@@ -53,6 +53,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use boyko_log::DIAGNOSTICS;
+use boyko_log::codes::CodeStatus;
 
 mod walker;
 
@@ -268,6 +269,37 @@ fn check_3b_no_pending_code_has_an_emitter_yet() {
 /// `Pending` and `Historical` rows are out of scope on purpose. A page for a row with no emitter
 /// describes a message nobody has written, which is how three rows of this registry's first draft
 /// came to disagree with what the engine prints.
+#[test]
+fn check_3c_no_row_is_still_pending() {
+    // ARMED AT L8c, and it is the rung's closing claim: `Pending` is a PROMISE -- "this code is
+    // reserved for a named rung and has no emitter yet" -- and a promise with no expiry is a
+    // reservation. `Historical` is excluded by design (it promises no emitter, ever).
+    //
+    // It could not be armed until L8c because four rows were still `Pending`, and every one of
+    // them named a profiling rung that had SHIPPED: `W9202`/`W9217` said "profiling 5",
+    // `W9205`/`W9206` said "profiling 8". All four conditions were measured present in the tree
+    // and silent -- `alloc_pair` returning `None`, a teardown that never flushed, a window's lost
+    // pairs, a refused contrast. The rows were not waiting for work; the work had shipped without
+    // them.
+    //
+    // What this check buys from here on is that the state cannot recur: a row reserved for a rung
+    // reds the moment that rung is called done, because "done" and "a row still says Pending" have
+    // stopped being compatible.
+    let pending: Vec<String> = DIAGNOSTICS
+        .iter()
+        .filter_map(|r| match r.status {
+            CodeStatus::Pending(rung) => {
+                Some(format!("{}{} (reserved for {rung})", r.class as char, r.number))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        pending.is_empty(),
+        "these rows are still Pending: {pending:?}. A Pending row is a reservation with a named          rung; if that rung has landed, the row owes an emitter, a doc page and an observing test,          and if it has not, the rung owes this row. Neither state survives a rung being called          done -- which is exactly what L8c found when it armed this check and all four remaining          rows named rungs that had shipped."
+    );
+}
+
 #[test]
 fn check_2_every_live_row_has_a_doc_page() {
     const SECTIONS: [&str; 3] = ["## What happened", "## Why", "## How to fix"];

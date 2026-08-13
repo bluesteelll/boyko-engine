@@ -214,6 +214,25 @@ impl WindowReducer {
                 }
             })
             .collect();
+        // `boyko-W9205`, landed at logging rung L8c. Profiling rung 8 reserved the code for this
+        // and never emitted it, so a window that lost half its pairs produced rows whose `n` was
+        // simply smaller — a reader comparing two windows had no way to tell "this leg is faster"
+        // from "this leg's results did not come back".
+        //
+        // Reported at `finish` rather than at the increment in `observe_frame`, because the claim
+        // is about the WINDOW: one report carrying the window's totals is the statement a reader
+        // acts on, where a report per lost pair would be a storm describing itself.
+        //
+        // A DIRECT CALL and not `loss::raise`: `fold.rs` is the flag word's single consumer, and a
+        // window that finishes at the end of a measured run is finishing after the last fold. A
+        // raised bit there is a report nobody takes.
+        if self.census.lost > 0 || self.census.torn > 0 {
+            boyko_ecs::ecs::core::profiling::report_window_zones_lost(
+                self.census.lost,
+                self.census.torn,
+                self.census.measured,
+            );
+        }
         (rows, self.census)
     }
 }
