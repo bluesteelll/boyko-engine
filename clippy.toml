@@ -28,3 +28,36 @@ disallowed-types = [
     { path = "hashbrown::HashMap", reason = "same hot-path ban as std::collections::HashMap - std's HashMap IS hashbrown" },
     { path = "hashbrown::HashSet", reason = "same hot-path ban as std::collections::HashSet" },
 ]
+
+# ── `disallowed-macros` was MEASURED and REJECTED at logging rung L8c. Do not re-add it blind. ──
+#
+# The logging corpus specifies it as the SECONDARY enforcement for the print ban, "added only after
+# a shown-red canary", and anticipated one way it could fail: the note above records that clippy
+# silently ignores a config path it cannot resolve, so the key might be inert. **It is not.** The
+# canary was run:
+#
+#     disallowed-macros = [{ path = "std::println", .. }, { path = "std::eprintln", .. }]
+#     + a deliberate `println!` in `boyko_utils/src/lib.rs`
+#     -> clippy 0.1.97 (rustc 1.97.1): "warning: use of a disallowed macro `std::println`"
+#
+# It was rejected on a SECOND measurement the corpus did not anticipate. The lint has no notion of
+# test code, and `cargo clippy --all-targets` compiles all of it:
+#
+#     crates/*/tests    697 print sites
+#     crates/*/benches   66
+#     crates/*/src/bin   60
+#     tools/             31
+#     in-`src` #[cfg(test)] regions   ~197
+#     ------------------------------------
+#     ~1051 sites that would each need `#[allow(clippy::disallowed_macros)]`
+#
+# against SIX production exceptions. The whole value of the `#[allow(..)]` + rationale discipline
+# is that "one grep enumerates every exception"; a thousand allows in test code destroys exactly
+# that property and buries the six the ban is about. `print_census.rs` already refuses those six by
+# name with a reason apiece, and it does so on the walker's own test-code rule -- which is the
+# distinction clippy structurally cannot make.
+#
+# The corpus's fallback ("the entry is dropped and the tidy test stands alone") is therefore the
+# right outcome by the wrong route, and the route is recorded because it changes what a future
+# reader should try: not "check whether clippy resolves the path" (it does), but "check whether the
+# lint can be scoped to production code" (it cannot).
