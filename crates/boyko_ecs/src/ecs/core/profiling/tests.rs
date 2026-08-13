@@ -149,7 +149,7 @@ fn re_arming_with_a_different_geometry_is_refused_with_e9213() {
     assert!(!other.is_armed(), "a refused arm must not leave a store thinking it armed");
     assert_eq!(other.zone_stride(), 0);
     // `>= 1`: `E9213` is `Once` and another test in this process may have claimed it first.
-    assert!(diag::report_count(9213) >= 1, "the refusal was silent");
+    assert!(diag::report_count(boyko_log::codes::E9213.number()) >= 1, "the refusal was silent");
     // The live session is untouched.
     assert_eq!(p.zone_stride(), live);
 }
@@ -164,13 +164,13 @@ fn a_stride_over_the_l1d_limit_is_reported_and_still_arms() {
     assert!(p.is_armed(), "W9211 reports; it must never refuse");
     if p.zone_stride() > FOLD_L1D_ZONE_LIMIT {
         assert!(
-            diag::report_count(9211) >= 1,
+            diag::report_count(boyko_log::codes::W9211.number()) >= 1,
             "the live stride is over the L1d limit and nothing said so"
         );
     } else {
         // Not a skip: at or under the limit there is nothing to report, and asserting the code
         // fired would be asserting a warning about a configuration that does not warrant one.
-        assert_eq!(diag::report_count(9211), 0);
+        assert_eq!(diag::report_count(boyko_log::codes::W9211.number()), 0);
     }
 }
 
@@ -261,7 +261,7 @@ fn a_sample_older_than_the_window_is_late() {
     fold(&mut p);
 
     assert_eq!(p.drops().late, before + 1, "a sample below the floor was silently attributed");
-    assert!(diag::report_count(9209) >= 1, "the late drop was not reported");
+    assert!(diag::report_count(boyko_log::codes::W9209.number()) >= 1, "the late drop was not reported");
 }
 
 /// One zone taking 100 000 samples in one frame keeps `count` exact and `total` consistent.
@@ -423,7 +423,7 @@ fn a_regions_refusals_are_counted_exactly_once() {
     // monotone total instead of the delta fails.
     fold(&mut p);
     assert_eq!(p.drops().engine_overflow, before + REFUSED, "the fold re-counted old refusals");
-    assert!(diag::report_count(9203) >= 1, "the overflow was silent");
+    assert!(diag::report_count(boyko_log::codes::W9203.number()) >= 1, "the overflow was silent");
 }
 
 /// The engine and user regions lose independently — a game's runaway scope costs a game's samples.
@@ -521,7 +521,7 @@ fn a_forward_clock_jump_discards_the_window_and_recalibrates() {
 
     assert_eq!(p.drops().clock_epoch_breaks, breaks_before + 1, "the jump was not detected");
     assert!(clock::clock_epoch() > epoch_before, "the epoch did not advance");
-    assert!(diag::report_count(9216) >= 1, "the epoch break was silent");
+    assert!(diag::report_count(boyko_log::codes::W9216.number()) >= 1, "the epoch break was silent");
     let c = p.cell(0, ZONE).expect("row");
     assert_eq!((c.total, c.count), (0, 0), "the in-flight window survived the jump");
     assert_eq!(p.frame(), 0, "the discard did not restart the window");

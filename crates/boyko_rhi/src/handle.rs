@@ -157,8 +157,10 @@ impl<U> Kind<U> {
 /// be destroyed), so the owner **MUST** call [`ResourceRegistry::destroy_all`]
 /// before dropping the registry — a structural, release-present teardown step
 /// (plan W4). Dropping a non-empty registry leaks **every** live GPU resource.
-/// `Drop` enforces this with a release-surviving `eprintln!` hard-error
-/// diagnostic (plan E1) plus a `debug_assert!` that fails tests; both are
+/// `Drop` enforces this with a release-surviving hard-error diagnostic (plan E1)
+/// — `boyko-E2001` since L8c, with an `eprintln!` fallback for the case where no
+/// log consumer exists, so the property the plan asked for survives the
+/// migration — plus a `debug_assert!` that fails tests; both are
 /// tripwires, not the primary guard (which is the required `destroy_all` call).
 /// The originating device/context must still be alive when `destroy_all` runs
 /// (see its docs).
@@ -353,6 +355,52 @@ impl<A: RhiApi> ResourceRegistry<A> {
     }
 }
 
+/// Reports `boyko-E2001`: a registry dropped while it still owned live resources.
+///
+/// # Why this is a module-level function and not a closure inside `drop`
+///
+/// It was one, until L8c. Two reasons moved it out, and they are the two this campaign keeps
+/// running into: a `#[cold] fn` nested in `Drop` is unreachable from any test, so the report could
+/// only ever be verified by reading it; and the `debug_assert!` below the call site fires FIRST in
+/// a debug build, which would make any test of the reporting half a `#[should_panic]` that can
+/// observe nothing after the panic. Split, an observer drives *this function* — the one a release
+/// build actually runs.
+///
+/// # The `stderr` fallback, and why this site earns one
+///
+/// With `BOYKO_LOG` unset every target's runtime ceiling is `Off`, so the `error!` below is never
+/// constructed. The comment this migration replaced said the diagnostic *"survives in RELEASE (a
+/// bare `debug_assert!` would vanish, making the leak silent)"* — and a migration that made it
+/// vanish for a different reason would have honoured the letter of the plan and reversed its
+/// point. So it follows `boyko_threadpool::worker::abort_on_task_panic`'s shape: emit, `flush()`,
+/// and print only when that answers `NoConsumer`. Its `print_allowlist.txt` row says so.
+///
+/// `Drop` runs at teardown, which is exactly when a sink is most likely to be gone already — the
+/// fallback is not a formality here.
+#[cold]
+#[inline(never)]
+pub(crate) fn report_registry_leak(buffers: usize, pipelines: usize, shaders: usize, fences: usize) {
+    let total = buffers + pipelines + shaders + fences;
+    boyko_log::error!(
+        boyko_log::Rhi,
+        boyko_log::codes::E2001.number(),
+        "ResourceRegistry dropped with {} live resource(s) (buffers={}, pipelines={}, \
+         shaders={}, fences={}) - destroy_all was not called (LEAK)",
+        total,
+        buffers,
+        pipelines,
+        shaders,
+        fences
+    );
+    if boyko_log::lifecycle::flush() == boyko_log::lifecycle::FlushResult::NoConsumer {
+        eprintln!(
+            "boyko-E2001: ResourceRegistry dropped with {total} live resource(s) \
+             (buffers={buffers}, pipelines={pipelines}, shaders={shaders}, fences={fences}) \
+             - destroy_all was not called (LEAK)"
+        );
+    }
+}
+
 impl<A: RhiApi> Drop for ResourceRegistry<A> {
     fn drop(&mut self) {
         // Leak guard (plan E1 / RL-3): a non-empty map on drop means the owner
@@ -360,21 +408,7 @@ impl<A: RhiApi> Drop for ResourceRegistry<A> {
         // (they need `&Device`), so EVERY live GPU resource leaks. The structural
         // guard is the required `destroy_all` call; this is the tripwire.
         if !self.is_fully_drained() {
-            // Hard, best-effort diagnostic that survives in RELEASE (a bare
-            // `debug_assert!` would vanish, making the leak silent). We do not
-            // panic in `Drop` (a double-panic would abort), but we make the leak
-            // loud on stderr with the live counts.
-            #[cold]
-            #[inline(never)]
-            fn report_leak(buffers: usize, pipelines: usize, shaders: usize, fences: usize) {
-                eprintln!(
-                    "boyko_rhi: ResourceRegistry dropped with {} live resource(s) \
-                     (buffers={buffers}, pipelines={pipelines}, shaders={shaders}, \
-                     fences={fences}) — destroy_all was not called (LEAK)",
-                    buffers + pipelines + shaders + fences
-                );
-            }
-            report_leak(
+            report_registry_leak(
                 self.buffers.live_count(),
                 self.pipelines.live_count(),
                 self.shaders.live_count(),
@@ -734,5 +768,53 @@ mod tests {
         // Tear down whatever survived.
         let device = MockDevice;
         reg.destroy_all(&device);
+    }
+}
+
+#[cfg(test)]
+mod leak_report_tests {
+    use super::*;
+    use boyko_log::codes::E2001;
+    use boyko_log::probe::{last_message, observe_lock, watch, watched};
+
+    /// `boyko-E2001` reports, and carries the four counts a reader needs.
+    ///
+    /// Drives the PRODUCTION reporter rather than re-emitting an `error!` beside it — the vacuity
+    /// L8a paid for three times. It cannot be reached through an actual leaking `Drop`, because
+    /// the `debug_assert!` two lines below the call site fires first in a debug build and a
+    /// `#[should_panic]` can observe nothing after the panic; splitting the function out is what
+    /// makes this test possible at all.
+    #[test]
+    fn e2001_reports_the_leak_with_its_per_kind_counts() {
+        let _lock = observe_lock();
+        boyko_log::probe::arm::<boyko_log::Rhi>();
+        watch(b'E', E2001.number());
+
+        report_registry_leak(3, 1, 0, 2);
+
+        assert_eq!(watched(), 1, "a dropped registry with live resources must report exactly once");
+        let msg = last_message();
+        assert!(msg.contains("6 live resource(s)"), "the TOTAL must be carried: {msg}");
+        assert!(msg.contains("buffers=3"), "the per-kind split is the actionable half: {msg}");
+        assert!(msg.contains("pipelines=1"), "{msg}");
+        assert!(msg.contains("shaders=0"), "a zero kind must still print: {msg}");
+        assert!(msg.contains("fences=2"), "{msg}");
+        assert!(msg.contains("destroy_all"), "the record must name the call that was skipped: {msg}");
+    }
+
+    /// `RatePolicy::Every`, observed rather than asserted about.
+    ///
+    /// Two registries leaking is two leaks. A latch here would report the first and leave the
+    /// second invisible — and a process that leaks two registries is exactly the one where the
+    /// second matters.
+    #[test]
+    fn a_second_leaking_registry_reports_too() {
+        let _lock = observe_lock();
+        boyko_log::probe::arm::<boyko_log::Rhi>();
+        watch(b'E', E2001.number());
+        report_registry_leak(1, 0, 0, 0);
+        report_registry_leak(0, 0, 4, 0);
+        assert_eq!(watched(), 2, "`Every` means every registry, not the first one");
+        assert!(last_message().contains("shaders=4"), "{}", last_message());
     }
 }

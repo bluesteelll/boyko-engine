@@ -1,0 +1,59 @@
+# Production sources permitted to print, one per line as `path  reason`.
+#
+# A LEDGER, not an allowlist, and `print_census.rs` checks it in BOTH directions: an unlisted
+# print reds, and a listed file that stopped printing reds too. So the list can only shrink
+# without a deliberate edit, and every row has to say WHY rather than WHAT.
+#
+# There is exactly one admissible reason, and every row below is an instance of it: **the record
+# would otherwise be invisible in the configuration where it matters most.** With `BOYKO_LOG`
+# unset every target's runtime ceiling is `Off`, so a `warn!`/`error!` is not merely undelivered --
+# it is never constructed. For a site whose next statement ends the process, that turns "the engine
+# told you why it stopped" into silence. See `docs/OPEN-QUESTIONS.md`'s L8b entry for the fork this
+# rests on; if the owner takes option (B) or (C) there, every row below except the last is
+# deletable, and this file is where that will be visible.
+#
+# NOT an admissible reason: "it is only a debug path", "it is behind a flag", "it is cheaper".
+
+crates/boyko_threadpool/src/worker.rs  `boyko-E0201`, and the FIRST row of this ledger because L6
+    wrote the argument the others inherit: the next statement at the site is `std::process::abort()`,
+    which runs no destructor and no sink shutdown, so a record still in its lane ring dies with the
+    process. The site emits, calls `flush()`, and prints ONLY when that answers `NoConsumer` --
+    "strictly worse than the unconditional `eprintln!` this replaced" were it silent. L6 named this
+    row as owed; L8c is the rung that could finally write it, because until now there was no file.
+
+crates/boyko_app/src/diag.rs  `boyko-E3002` / `boyko-E3003` / `boyko-E3004` -- the host's three
+    terminal-exit reporters, in ONE file precisely so the engine carries one copy of the pattern
+    rather than a fourth, fifth and sixth. Each emits, calls `flush()`, and prints only on
+    `NoConsumer`. They are not diagnostics: they are the process saying why it is about to stop,
+    and the run that needed the explanation is the one that is now over. The degrade reporters in
+    the same file (`W3005`..`W3009`) do NOT print, which is what keeps this row about exits.
+
+crates/boyko_rhi_vulkan/src/debug.rs  The `[vk-validation]` messenger callback, and the ONLY row
+    here that is not about the logger being off. It is a BYTE-FROZEN oracle channel: `golden.ps1`
+    greps `[vk-validation]` and `boyko_app/tests/vb_bench_query_validation.rs` greps `VUID-`, so
+    the emitted bytes are a contract two gates read. Decision 9b and F12 settled that it is NOT
+    TOUCHED AT ALL -- v2's `to_string_lossy()` removal was withdrawn because writing raw `CStr`
+    bytes would change what those gates see in the invalid-UTF-8 case. It also runs on driver
+    callback threads that the engine never created, where `resolve()` may find no lane at all.
+
+crates/profile_fixture_log/src/main.rs  A `[[bin]]` whose PRODUCT is the print. Profiling rung 14's
+    build-axis fixture exists to answer "what did `BOYKO_PROFILE` compile this build's ceiling to?",
+    and it answers by printing `ceiling=<n>` for `G16` to parse -- a byte-frozen contract in the
+    same class as `debug.rs`'s `[vk-validation]`, not a diagnostic that should have been a record.
+    Routing it through `boyko_log` would make the fixture's own answer depend on the subsystem
+    whose configuration it is measuring.
+
+src/main.rs  The workspace's `[[bin]]` placeholder, whose entire body is one line pointing a reader
+    at `crates/boyko_ecs`. It is not an engine path: nothing links it, no test runs it, and it holds
+    no logic to migrate. Excluded by ROW rather than by a `src/main.rs` walker rule, because that
+    rule was tried at L8c and swallowed `boyko_demo/src/main.rs` -- a `[[bin]]` root that is also
+    the only source file of its crate and holds `E3001`'s emitter. See `walker/mod.rs`.
+
+crates/boyko_rhi/src/handle.rs  `boyko-E2001`, and the row this census EARNED: five migration rungs
+    named their crates and none of them named `boyko_rhi`, so `ResourceRegistry::drop`'s leak
+    tripwire was still on `stderr` when this gate first ran. Migrated at L8c, and it keeps the
+    `flush() == NoConsumer` fallback for the reason its own comment gave before the migration --
+    the diagnostic "survives in RELEASE (a bare `debug_assert!` would vanish, making the leak
+    silent)", and a migration that made it vanish for a different reason would have honoured the
+    letter of the plan and reversed its point. `Drop` runs at teardown, which is exactly when a
+    sink is most likely to be gone.

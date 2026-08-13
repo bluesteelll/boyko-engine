@@ -17,19 +17,8 @@ E0201  the next statement at the site is `std::process::abort()`, so a test that
        fixture (spawn a child, assert its exit code and its stderr), which is a test-harness
        capability this repository does not have yet.
 
-W9203  profiling rung 2's lane-exhaustion / region-overflow report. Reaching it needs either all
-       lanes claimed by live threads or a region filled to refusal, and the rung that landed it
-       owed "one observing test (check 5)" as a line item at a time when check 5 did not exist to
-       collect the debt. Its two halves share one latch, so one test could discharge both.
 
-W9210  profiling rung 10's user-zone-budget / dynamic-name-arena exhaustion. Same shape as W9203:
-       the condition is an exhausted process-global arena, and exhausting it inside a shared test
-       binary poisons every sibling that later registers a dynamic zone -- so it needs its own
-       integration binary, exactly as L6's `l6_query_table_exhaustion.rs` does.
 
-W9216  profiling rung 2's clock-epoch break. The corpus's own test 32 specifies injecting a
-       synthetic forward jump into `boyko_diag::clock`; the injection seam does not exist, and
-       waiting for a real suspend is not a test.
 
 E3001  `boyko_demo`'s web entry, inside `#[cfg(target_arch = "wasm32")] fn wasm_start`. The
        function does not EXIST in a native build, so no test on the platform the gates run on can
@@ -43,3 +32,22 @@ E3004  `boyko_app::diag::report_windowing_unsupported`, inside `#[cfg(not(window
        `#[cfg(not(windows))]` would never execute. Its two siblings E3002/E3003 ARE observed
        (`diag.rs`'s `#[cfg(test)] mod tests`), which is what makes this row a platform statement
        rather than an admission that the shape was not tested.
+
+# THREE ROWS WERE DELETED AT L8c, and the reason is worth more than the rows were.
+#
+# `W9203` and `W9216` were **stale, and had been for rungs**. Both rows said their emission could
+# not be reached -- W9203's "needs all lanes claimed by live threads", W9216's "the injection seam
+# does not exist" -- while `boyko_ecs`'s own profiling tests were driving each condition and
+# asserting `report_count(..) >= 1` on it. The rows survived because those assertions named a BARE
+# NUMBER (`report_count(9203)`), and check 5 scans for the IDENTIFIER. Two true tests and two rows
+# saying they did not exist, coexisting because nothing compared them.
+#
+# `W9210`'s row was true about its EMISSION and is deleted anyway, because check 5's rule is about
+# NAMING and L8c's `flag_code` table test now names it. What the row said is not lost -- it moved
+# into that test's doc comment, where it is still true: exhausting the user-zone arena inside a
+# shared test binary poisons every sibling that later registers a dynamic zone, so provoking it
+# needs its own integration binary.
+#
+# The shape to remember: this ledger records "no test NAMES this code". It cannot record "no test
+# PROVOKES this condition", and the two were being conflated. Where the second is what matters, it
+# belongs beside the test that would have to change.

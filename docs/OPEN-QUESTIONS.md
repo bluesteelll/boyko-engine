@@ -2172,3 +2172,38 @@ The ledger specifies the deletion of `log = "0.4"`, `env_logger` and `console_lo
 
 Both are recorded in `crates/boyko_demo/Cargo.toml` beside the dependency, so the next reader of
 that manifest finds them without finding this file.
+
+---
+
+## L8c — four `Pending` code rows name profiling rungs that have SHIPPED, and all four conditions exist and are silent
+
+Check 3c (`Pending == 0`) is L8c's, and it cannot arm while these four rows stand. Measured against
+HEAD, each condition **exists in the tree and reports nothing**:
+
+| row | condition, located | state |
+|---|---|---|
+| `W9202` `Pending("profiling 5")` | `boyko_rhi_vulkan::present::gpu_zone::alloc_pair` returns `None` once `used_pairs >= MAX_GPU_PAIRS` (128) | the bracket is simply unrecorded; nothing reports it |
+| `W9217` `Pending("profiling 5")` | `runner.rs` calls `flush_vb_zone` **only** inside `vb_zone_seen >= WARMUP + frames` | a run that ends earlier — window closed, or `E3003`'s terminal `return` — leaves slots in flight, unflushed, unreported |
+| `W9205` `Pending("profiling 8")` | `reduce.rs` increments `census.lost`; `contrast.rs` reads it as `window_complete` | counted, carried into the artifact, never warned about |
+| `W9206` `Pending("profiling 8")` | `contrast.rs` has `NotResolved` + `NotResolvedReason` fully built | a refusal is returned; nothing warns |
+
+**`GpuZoneRecorder::flush` itself is correct** and labels every in-flight slot `Flushed` — its own
+doc says it exists so *"the last `GPU_RING_DEPTH` slots would [not] be dropped silently, which is
+the loss a profiler exists to report rather than to commit"*. `W9217`'s hole is not in `flush`; it
+is in the one path that never calls it.
+
+**Also measured, and it is the shape of the thing:** `boyko_app::profiling` contains **zero**
+`warn!`/`error!` calls across fifteen shipped rungs. The `92xx` emitters all live in
+`boyko_ecs::…::profiling::diag`, which its own header names as the **sole** emitter of the block —
+*"which is what keeps a profiler drop reported as a counter read rather than as a log record that
+can itself be dropped under exactly the load that produced the drop"*. So these four do not become
+`warn!` at the condition site: they route through `boyko_diag::loss::raise(DiagFlag::…)` sticky
+bits that `diag.rs` reads. `flag_code`'s `match` is deliberately not `_`-terminated, so a new
+`DiagFlag` variant **fails to compile** until it is paired with a code — the mechanism is already
+built and simply has four unused inputs.
+
+**The question for the owner is not how, it is whether these belong to L8c at all.** They are
+profiling conditions, in profiling crates, whose rungs are marked shipped. L8c inherits them only
+because `Pending == 0` is its gate. Either the profiling ladder reopens rungs 5 and 8 to land the
+emitters it reserved codes for, or the four rows are re-dispositioned. Recorded rather than decided
+because it moves work between two ladders.

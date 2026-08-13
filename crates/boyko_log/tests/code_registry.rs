@@ -54,281 +54,9 @@ use std::path::{Path, PathBuf};
 
 use boyko_log::DIAGNOSTICS;
 
-/// Repository root, from this crate's manifest directory.
-fn repo() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("crates/<pkg> is two levels below the repo root")
-        .to_path_buf()
-}
+mod walker;
 
-/// Every `.rs` file under `crates/` and `src/`, sorted.
-fn rust_files(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    for base in ["crates", "src"] {
-        collect(&root.join(base), "rs", &mut out);
-    }
-    out.sort();
-    out
-}
-
-fn collect(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
-    for e in rd.flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            // `target/` is build output, not source, and it is enormous.
-            if p.file_name().is_some_and(|n| n == "target") {
-                continue;
-            }
-            collect(&p, ext, out);
-        } else if p.extension().is_some_and(|x| x == ext) {
-            out.push(p);
-        }
-    }
-}
-
-/// The documentation corpus check 4 scans.
-///
-/// An **explicit list**, not a glob over `docs/`. Two exclusions carry reasons:
-///
-/// - **`docs/archive/**` is out.** It holds completed-phase planning documents that must never be
-///   edited again, and it contributes three codes (`B9000`, `B9003`, `W9003`) that exist in no
-///   source file and no current document. Seeding those as `Pending` would promise emitters that
-///   will never arrive.
-/// - **`docs/*.md` at top level is out at THIS rung**, and that is a real weakening stated rather
-///   than hidden. The two superseded monoliths (`docs/LOGGING-SYSTEM-PLAN.md`,
-///   `docs/PROFILING-SYSTEM-PLAN.md`) carry 65 prefixed literals for codes this registry does not
-///   yet contain — they are the documents the corpus was carved *from*, and they are slated for
-///   retirement. Arming check 4 over them today reds on documents nobody will fix. The corpus
-///   directory obeys the bare-number rule and is scanned in full. When the monoliths are retired,
-///   `docs/*.md` joins this list, and that is a one-line change.
-fn doc_files(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    collect(&root.join("docs").join("diagnostics"), "md", &mut out);
-    out.sort();
-    out
-}
-
-/// One file, split into the streams the checks consume.
-struct Streams {
-    /// Source with comments, literals and test-only files removed.
-    code: String,
-    /// The contents of string and char literals only.
-    lit: String,
-}
-
-/// Split one Rust source file into CODE and LIT.
-///
-/// Handles `//`/`///`/`//!` line comments, `/* */` block comments (nested, as Rust allows),
-/// `"…"` strings with backslash escapes, `r#"…"#` raw strings, and `'…'` char literals. Lifetime
-/// ticks (`'a`) are distinguished from char literals by looking ahead for the closing quote.
-fn split_streams(src: &str) -> Streams {
-    let b = src.as_bytes();
-    let mut code = String::with_capacity(src.len());
-    let mut lit = String::new();
-    let mut i = 0;
-
-    while i < b.len() {
-        // Line comment.
-        if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'/' {
-            while i < b.len() && b[i] != b'\n' {
-                i += 1;
-            }
-            continue;
-        }
-        // Block comment, nested.
-        if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
-            let mut depth = 1usize;
-            i += 2;
-            while i < b.len() && depth > 0 {
-                if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
-                    depth += 1;
-                    i += 2;
-                } else if b[i] == b'*' && i + 1 < b.len() && b[i + 1] == b'/' {
-                    depth -= 1;
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            code.push(' ');
-            continue;
-        }
-        // Raw string: r"…", r#"…"#, r##"…"##
-        if b[i] == b'r' {
-            let mut j = i + 1;
-            let mut hashes = 0usize;
-            while j < b.len() && b[j] == b'#' {
-                hashes += 1;
-                j += 1;
-            }
-            if j < b.len() && b[j] == b'"' {
-                j += 1;
-                let start = j;
-                loop {
-                    if j >= b.len() {
-                        break;
-                    }
-                    if b[j] == b'"' {
-                        let mut k = j + 1;
-                        let mut seen = 0usize;
-                        while k < b.len() && b[k] == b'#' && seen < hashes {
-                            seen += 1;
-                            k += 1;
-                        }
-                        if seen == hashes {
-                            lit.push_str(&src[start..j]);
-                            lit.push('\n');
-                            i = k;
-                            break;
-                        }
-                    }
-                    j += 1;
-                }
-                if j >= b.len() {
-                    i = b.len();
-                }
-                code.push(' ');
-                continue;
-            }
-        }
-        // Normal string.
-        if b[i] == b'"' {
-            i += 1;
-            let start = i;
-            while i < b.len() {
-                if b[i] == b'\\' {
-                    i += 2;
-                    continue;
-                }
-                if b[i] == b'"' {
-                    break;
-                }
-                i += 1;
-            }
-            lit.push_str(&src[start..i.min(b.len())]);
-            lit.push('\n');
-            i = (i + 1).min(b.len());
-            code.push(' ');
-            continue;
-        }
-        // Char literal, distinguished from a lifetime by the closing quote.
-        if b[i] == b'\'' {
-            let close = if i + 2 < b.len() && b[i + 1] == b'\\' {
-                (i + 2..b.len().min(i + 8)).find(|&k| b[k] == b'\'')
-            } else if i + 2 < b.len() && b[i + 2] == b'\'' {
-                Some(i + 2)
-            } else {
-                None
-            };
-            if let Some(k) = close {
-                lit.push_str(&src[i + 1..k]);
-                lit.push('\n');
-                i = k + 1;
-                code.push(' ');
-                continue;
-            }
-        }
-        code.push(b[i] as char);
-        i += 1;
-    }
-
-    Streams { code, lit }
-}
-
-/// Files that contribute nothing to CODE.
-///
-/// Three classes, and the second is the one a within-file rule misses:
-///
-/// 1. **`tests/` and `benches/`** under a crate. Wholly test code by construction; no attribute
-///    marks them and none is needed. This crate's own gate fixtures declare `LogTarget` impls that
-///    check 7 would otherwise report as hand-written — a legitimate probe failing a gate that is
-///    supposed to catch illegitimate ones.
-/// 2. **Files reached by a `#[cfg(test)]`-gated `mod` declaration in ANOTHER file.** Measured in
-///    this tree: 7 such files exist (`boyko_sdf_math/src/brick/tests.rs`,
-///    `boyko_physics/src/solver/colored_tests.rs`, …) and a within-file rule classifies all of
-///    them as production. This is the cross-file pre-pass.
-/// 3. **`src/bin/`** — CLI entry points, which print by design.
-fn test_only_files(root: &Path, files: &[PathBuf]) -> BTreeSet<PathBuf> {
-    let mut marked = BTreeSet::new();
-
-    for f in files {
-        let s = f.to_string_lossy().replace('\\', "/");
-        if s.contains("/tests/") || s.contains("/benches/") || s.contains("/src/bin/") {
-            marked.insert(f.clone());
-        }
-    }
-
-    // Cross-file pre-pass: `#[cfg(test)]` [`#[path = "…"]`] `mod NAME;`
-    for f in files {
-        let Ok(src) = std::fs::read_to_string(f) else { continue };
-        let lines: Vec<&str> = src.lines().collect();
-        for (i, line) in lines.iter().enumerate() {
-            let t = line.trim();
-            if !(t.starts_with("#[cfg(test)]")
-                || t.starts_with("#[cfg(all(test")
-                || t.starts_with("#[cfg(any(test"))
-            {
-                continue;
-            }
-            let mut path_override: Option<String> = None;
-            for probe in lines.iter().take((i + 4).min(lines.len())).skip(i + 1) {
-                let p = probe.trim();
-                if p.is_empty() {
-                    continue;
-                }
-                if let Some(rest) = p.strip_prefix("#[path = \"") {
-                    if let Some(end) = rest.find('"') {
-                        path_override = Some(rest[..end].to_string());
-                    }
-                    continue;
-                }
-                if p.starts_with("#[") {
-                    continue;
-                }
-                // `mod NAME;` -- a declaration, not `mod NAME {`.
-                let decl = p.strip_prefix("pub ").unwrap_or(p);
-                if let Some(rest) = decl.strip_prefix("mod ")
-                    && let Some(name) = rest.strip_suffix(';')
-                {
-                    let dir = f.parent().unwrap_or(root);
-                    let name = name.trim();
-                    // Three resolutions, and the third is the one a naive rule misses. A module
-                    // declared in `src/brick.rs` lives in `src/brick/`, not in `src/` -- the
-                    // 2018-edition non-`mod.rs` form. Omitting it left
-                    // `boyko_sdf_math/src/brick/tests.rs` classified as production, which is one
-                    // of the very files the cross-file rule exists to catch.
-                    let stem_dir = f.file_stem().map(|s| dir.join(s));
-                    let candidates = match &path_override {
-                        Some(rel) => vec![dir.join(rel)],
-                        None => {
-                            let mut v = vec![
-                                dir.join(format!("{name}.rs")),
-                                dir.join(name).join("mod.rs"),
-                            ];
-                            if let Some(sd) = stem_dir {
-                                v.push(sd.join(format!("{name}.rs")));
-                                v.push(sd.join(name).join("mod.rs"));
-                            }
-                            v
-                        }
-                    };
-                    for c in candidates {
-                        if c.is_file() {
-                            marked.insert(c);
-                        }
-                    }
-                }
-                break;
-            }
-        }
-    }
-
-    marked
-}
-
+use walker::{doc_files, production_code, repo, rust_files, split_streams, test_only_files};
 /// A registered code's identifier, e.g. `B1802`.
 fn ident_of(class: u8, number: u16) -> String {
     format!("{}{number:04}", class as char)
@@ -425,7 +153,11 @@ fn gather() -> Corpus {
         // check's own specification requires.
         let is_registry = f.file_name().is_some_and(|n| n == "codes.rs");
         if !excluded.contains(f) && !is_registry {
-            code.push_str(&s.code);
+            // `production_code`, not `s.code`: the corpus defines CODE as excluding in-`src`
+            // `#[cfg(test)]` regions too, and until L8c nothing implemented that half. It matters
+            // to check 3a — an identifier whose ONLY use is inside a test module is not an
+            // emitter, and counting it would let a `Live` row be satisfied by its own observer.
+            code.push_str(&production_code(&src));
             code.push('\n');
         }
     }
@@ -688,6 +420,24 @@ const FORWARD_DECLARED: &[(&str, &str)] = &[
 /// construction. `code_registry.rs` — this file — names codes as **data**: check 0's sentinel is
 /// `boyko-W1501`, which would silently satisfy the claim for that row. Both are the same exclusion
 /// the CODE stream already makes, for the same reason.
+///
+/// # COMMENTS ARE STRIPPED, and that is a repair *(L8c)*
+///
+/// Until L8c this returned **raw text**, so a code named in a *comment* inside any test file
+/// satisfied check 5. It was found the way these things are found: L8c wrote a comment in the
+/// shared `tests/walker/` module explaining why `E3001` could not be excluded by a path rule, and
+/// check 5 immediately reported that `E3001` *"is now named by a test and must be REMOVED from
+/// untested_codes.txt"*. Nothing had tested it. A sentence about it existed.
+///
+/// The check's own failure text already concedes that **naming is a proxy for observing** — it
+/// cannot tell an assertion from a mention. That is a stated weakness and an acceptable one. Being
+/// satisfiable by *prose* is a different and worse thing: it means a gate about test coverage can
+/// be discharged by documentation, in a file no test even runs.
+///
+/// So each file contributes `CODE ∪ LIT` rather than its raw bytes. LIT is kept deliberately: the
+/// literal route (`#[should_panic(expected = "boyko-E…")]`, and a `watch(b'W', …)` beside a
+/// message assertion) is a real observation, and dropping it would swap one false answer for
+/// another.
 fn test_corpus(root: &Path) -> Vec<(PathBuf, String)> {
     let files = rust_files(root);
     let marked = test_only_files(root, &files);
@@ -701,10 +451,30 @@ fn test_corpus(root: &Path) -> Vec<(PathBuf, String)> {
             continue;
         }
         let Ok(src) = std::fs::read_to_string(f) else { continue };
+        // Strip comments before deciding what the file "names" -- see the doc above. The two
+        // streams are concatenated because both routes to an observation are legitimate: the
+        // identifier (`codes::E3001`) lives in CODE, the frozen literal (`"boyko-E3001"`) in LIT.
+        //
+        // NOTE the interaction with `split_streams`' own `#[cfg(test)]` stripping: for a file the
+        // walker already MARKED test-only, that stripping would delete the very thing being looked
+        // for, so the raw text is split but the region rule is irrelevant there -- a marked file is
+        // test code in its entirety. For an unmarked file only the tail from its first
+        // `#[cfg(test)]` is taken, and that tail is split the same way.
+        // `split_streams`, NOT `production_code`: this corpus's SUBJECT is the test regions, and
+        // the production rule would delete exactly what is being looked for. See
+        // `walker::production_code` for the run where folding the two together reported 23 Live
+        // codes as unobserved.
+        let of = |text: &str| {
+            let s = split_streams(text);
+            let mut both = s.code;
+            both.push('\n');
+            both.push_str(&s.lit);
+            both
+        };
         if marked.contains(f) {
-            out.push((f.clone(), src));
+            out.push((f.clone(), of(&src)));
         } else if let Some(at) = src.find("#[cfg(test)]") {
-            out.push((f.clone(), src[at..].to_string()));
+            out.push((f.clone(), of(&src[at..])));
         }
     }
     out

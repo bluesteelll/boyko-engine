@@ -71,11 +71,11 @@ fn the_registry_refuses_without_taking_the_process_down() {
     //       `take_raised`.
     fold(&mut profiler);
     assert!(
-        report_count(9201) >= 1,
+        report_count(boyko_log::codes::W9201.number()) >= 1,
         "the registry was exhausted and boyko-W9201 was never emitted"
     );
     assert!(
-        report_count(9208) >= 1,
+        report_count(boyko_log::codes::W9208.number()) >= 1,
         "the registry crossed 90 % occupancy and boyko-W9208 was never emitted — which is the \
          whole point of that code: exhaustion must not be the first news of it"
     );

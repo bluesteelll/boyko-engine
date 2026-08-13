@@ -89,7 +89,7 @@ mod tests {
             "a refused world was handed a store it must never fold with"
         );
         // `>= 1`: `E9204` is `Once` and another test in this process may have claimed it first.
-        assert!(diag::report_count(9204) >= 1, "the refusal was silent");
+        assert!(diag::report_count(boyko_log::codes::E9204.number()) >= 1, "the refusal was silent");
     }
 
     /// The same world twice is a host's duplicate plugin registration, not a second world.

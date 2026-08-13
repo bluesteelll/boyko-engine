@@ -8,6 +8,17 @@ description = "Backend-agnostic RHI trait surface for boyko-engine. Pure trait +
 # The package is named `boyko-utils`; rename it to the underscore crate name the
 # source imports (`use boyko_utils::...`). Provides Slot, SparseSlotMap, Generation.
 boyko_utils = { package = "boyko-utils", path = "../boyko_utils" }
+# L8c. NOT a new node at the bottom of the graph: `boyko_log` depends only on `boyko_diag`, so
+# this edge introduces no cycle and no third-party crate. It exists because `print_census.rs`
+# found the one production `eprintln!` in this crate -- a `Drop` leak tripwire that five migration
+# rungs' crate lists never mentioned -- and a leak report belongs on the engine's own diagnostic
+# channel rather than on a raw handle. See `boyko-E2001`.
+boyko-log = { path = "../boyko_log" }
+
+[dev-dependencies]
+# The `boyko_log::probe` observer for `E2001` -- a dev-dependency, so the feature reaches this
+# crate's test targets and never a shipping build.
+boyko-log = { path = "../boyko_log", features = ["test-probe"] }
 
 [lints]
 workspace = true

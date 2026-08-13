@@ -236,7 +236,7 @@ fn g15b_a_short_write_tears_exactly_one_block_and_the_decoder_says_so() {
         "exactly one write error: the fourth window must not even be attempted"
     );
     assert!(
-        diag::report_count(9215) >= 1,
+        diag::report_count(boyko_log::codes::W9215.number()) >= 1,
         "the write failure was silent — W9215 owes a reader the fact that the stream stops here"
     );
 
@@ -348,7 +348,7 @@ fn g26_the_sixty_fifth_quantile_subscription_is_refused_counted_and_reported() {
          filled with something, and whatever that is gets read as a measurement"
     );
     assert!(
-        diag::report_count(9218) >= 1,
+        diag::report_count(boyko_log::codes::W9218.number()) >= 1,
         "the refusal was silent — W9218 owes a reader the difference between a p95 that was \
          REFUSED and one that is absent because the zone never ran"
     );

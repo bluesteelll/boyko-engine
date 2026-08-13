@@ -505,15 +505,69 @@ mod tests {
 
     /// The whole of Q4's table, asserted as a table. Deleting an arm reds here before it reds
     /// anywhere a condition has to be provoked.
+    ///
+    /// # It asserted FOUR of nine rows until L8c, and the gap was invisible
+    ///
+    /// `flag_code`'s `match` covers all nine `DiagFlag` variants — the module doc explains at
+    /// length that it is deliberately not `_`-terminated so a new variant fails to compile. This
+    /// test covered the four in the doc's illustrative table and stopped there, so `W9210`,
+    /// `W9212`, `W9214`, `W9215` and `W9218` had their mapping asserted **nowhere**.
+    ///
+    /// Two of them were also observed nowhere else, and the registry's check 5 did not say so
+    /// because it read the raw text of test files: a *doc comment* naming `W9212` counted as a
+    /// test naming it. L8c stripped comments from that corpus, and `W9212`/`W9214` fell out
+    /// immediately. The mapping is what is falsifiable for both — an unwritable telemetry path and
+    /// an engine-scope refusal are provoked by state this binary does not have — so this is where
+    /// they are asserted, on the same argument `W9207`'s row below already carries.
     #[test]
     fn the_flag_to_code_table_is_the_one_stated_in_the_module_docs() {
-        assert_eq!(flag_code(DiagFlag::ClockEpochBreak), Some(9216));
-        assert_eq!(flag_code(DiagFlag::LaneExhausted), Some(9203));
-        assert_eq!(flag_code(DiagFlag::ZoneRegistryExhausted), Some(9201));
-        assert_eq!(flag_code(DiagFlag::ZoneRegistryNearFull), Some(9208));
+        assert_eq!(flag_code(DiagFlag::ClockEpochBreak), Some(W9216.number()));
+        assert_eq!(flag_code(DiagFlag::LaneExhausted), Some(W9203.number()));
+        assert_eq!(flag_code(DiagFlag::ZoneRegistryExhausted), Some(W9201.number()));
+        assert_eq!(flag_code(DiagFlag::ZoneRegistryNearFull), Some(W9208.number()));
+        // Rung 10's pair. The split is the corpus's own: a budget the HOST set versus a scope the
+        // game may not have, and reporting both as one code would tell a host to raise a limit it
+        // does not control.
+        assert_eq!(flag_code(DiagFlag::UserZoneBudgetExhausted), Some(W9210.number()));
+        assert_eq!(flag_code(DiagFlag::EngineScopeRefused), Some(W9212.number()));
+        // Rung 13's three. `W9214` leaves NO file, `W9215` leaves a file with a stated end, and
+        // `W9218` is a budget rather than a fault -- three states a reader can act on differently,
+        // which is why they are not one code.
+        assert_eq!(flag_code(DiagFlag::TelemetryPathUnwritable), Some(W9214.number()));
+        assert_eq!(flag_code(DiagFlag::TelemetryWriteFailed), Some(W9215.number()));
+        assert_eq!(flag_code(DiagFlag::TelemetryZonesRefused), Some(W9218.number()));
         // A POSITIVE answer, not a gap: the condition is reported as a frame flag, because its
         // consequence is a status on the data rather than an event.
         assert_eq!(flag_code(DiagFlag::ClockUncalibrated), None);
+    }
+
+    /// Every code the table can produce is DISTINCT, which the row-by-row assertions above cannot
+    /// say on their own.
+    ///
+    /// Two flags mapped to one code would make an engine defect and a configuration fact arrive as
+    /// the same record — the exact confusion the rung-10 and rung-13 splits were made to prevent —
+    /// and every individual `assert_eq!` above would still pass.
+    #[test]
+    fn no_two_flags_share_a_code() {
+        const FLAGS: [DiagFlag; 9] = [
+            DiagFlag::ClockEpochBreak,
+            DiagFlag::ClockUncalibrated,
+            DiagFlag::LaneExhausted,
+            DiagFlag::ZoneRegistryExhausted,
+            DiagFlag::ZoneRegistryNearFull,
+            DiagFlag::UserZoneBudgetExhausted,
+            DiagFlag::EngineScopeRefused,
+            DiagFlag::TelemetryPathUnwritable,
+            DiagFlag::TelemetryWriteFailed,
+        ];
+        let mut seen: Vec<u16> = Vec::new();
+        for f in FLAGS {
+            if let Some(c) = flag_code(f) {
+                assert!(!seen.contains(&c), "two flags map to code {c}");
+                seen.push(c);
+            }
+        }
+        assert_eq!(seen.len(), 8, "eight of the nine flags carry a code; ClockUncalibrated does not");
     }
 
     /// `W9207`'s selection is measured here because its emission cannot be: `invariant_tsc()` is
@@ -521,7 +575,7 @@ mod tests {
     /// gate over the emission would be green forever.
     #[test]
     fn the_clock_code_is_selected_only_when_the_tsc_is_not_invariant() {
-        assert_eq!(clock_code(false), Some(9207));
+        assert_eq!(clock_code(false), Some(W9207.number()));
         assert_eq!(clock_code(true), None);
     }
 
@@ -532,6 +586,11 @@ mod tests {
         for (i, n) in LIVE_CODES.iter().copied().enumerate() {
             assert_eq!(slot_of(n), Some(i));
         }
+        // The one place in this module a code stays a BARE NUMBER, and deliberately: `W9202` is
+        // still `CodeStatus::Pending`, and the registry's check 3b requires a `Pending` row to have
+        // ZERO identifier uses. Importing it to write `W9202.number()` here would put the
+        // identifier in a `use` line outside any `#[cfg(test)]`, which is exactly what that check
+        // is looking for. Every other number in this module became its constant at L8c.
         assert_eq!(slot_of(9202), None, "a code this rung does not emit must have no slot");
         // A duplicate would make two codes share a latch, so one would silence the other.
         for (i, a) in LIVE_CODES.iter().copied().enumerate() {

@@ -492,6 +492,16 @@ codes! {
         "A plugin was added more than once"),
     (1802, B, B1802, RatePolicy::Every, CodeStatus::Live,
         "An App method was called after finish(), in the run phase"),
+    // ── L8c: `boyko_rhi` ────────────────────────────────────────────────────────────────────
+    // The FIRST code in the `20xx` band proper, and the crate is here because `print_census.rs`
+    // found it -- not because any ledger row named it. Five migration rungs each reported a
+    // complete crate list; `boyko_rhi` was in none of them, and its one print sat in a `Drop`
+    // tripwire that its own comment says must "survive in RELEASE".
+    //
+    // `Every`, and it cannot be otherwise: the site is `ResourceRegistry::drop`, which runs at most
+    // once per registry, and a process with two leaking registries has two leaks to report.
+    (2001, E, E2001, RatePolicy::Every, CodeStatus::Live,
+        "A resource registry was dropped with live resources, so every one of them leaked"),
     // L7. Its condition is "validation was requested and this process is NOT getting it" -- the
     // escape hatch took it, or `VK_EXT_validation_features` is absent. NOT "the node was not
     // chained", which the corpus's L7 row implies and which the tree refutes: the node IS chained
@@ -751,6 +761,7 @@ mod tests {
             (b'W', 1501), // L6  -- ordering references an empty system set
             (b'B', 1801), // L8b -- a plugin was added more than once (boyko_ecs's, not the host's)
             (b'B', 1802), // L8b -- an App config method called after finish()
+            (b'E', 2001), // L8c -- a resource registry dropped with live resources (found by the census)
             (b'E', 2101), // L7a -- validation requested but not delivered
             (b'W', 2102), // L7b -- a device format feature is missing (three sites, one code)
             (b'E', 2103), // L7b -- a mandatory target/set failed to build
