@@ -237,6 +237,15 @@ fn sink_loop() {
 /// which is precisely the question the seam's one-frame bound is an answer to.
 pub fn drain_once() -> Option<crate::lane::DrainStats> {
     let token = crate::drain_owner::try_claim()?;
+    // Sink lifecycle runs HERE, on the draining thread, before any record moves (L14). The
+    // requesting thread posted a byte and returned; the `open` -- a syscall -- happens under the
+    // token, which is the process-wide proof that nobody else is writing into the sink being
+    // opened or closed.
+    //
+    // Before the records and not after: a file opened by this pass must receive this pass's
+    // output. Starting one pass late is what an operator typing `open` and finding an empty file
+    // would report as a bug.
+    crate::sink::request::pump(&token, FILE_CAP.load(Ordering::Relaxed));
     let to_ecs = ecs_ring_enabled();
     // ONE buffer for the whole pass, hoisted out of the per-record closure: `MAX_RENDERED_BYTES`
     // of stack zeroed once instead of once per record.

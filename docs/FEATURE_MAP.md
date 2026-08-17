@@ -943,7 +943,7 @@ nothing more. Verified the same way — repointing it stays green.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Ask whether anything is actually consuming records — the answer every stderr fallback is written against | `flush` (524) |
+| Ask whether anything is actually consuming records — the answer every stderr fallback is written against | `flush` (533) |
 
 **File:** [crates/boyko_log/src/sync_out.rs](../crates/boyko_log/src/sync_out.rs) — the synchronous route.
 

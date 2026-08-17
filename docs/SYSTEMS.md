@@ -2249,7 +2249,7 @@ deletes the never-evaluated guarantee, and no test of the output would notice.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Ask whether anything is actually consuming records — what every stderr fallback is written against | `flush` (524) |
+| Ask whether anything is actually consuming records — what every stderr fallback is written against | `flush` (533) |
 
 **File:** [crates/boyko_log/src/sync_out.rs](../crates/boyko_log/src/sync_out.rs) — the synchronous route.
 

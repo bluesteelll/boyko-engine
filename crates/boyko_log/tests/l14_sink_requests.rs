@@ -65,10 +65,14 @@ fn requests_round_trip_in_order_and_a_full_ring_is_refused_not_dropped() {
     assert!(enable(), "enable() refused a freshly booted process");
     set_target_control(<Log as LogTarget>::ID, TargetControl::new(Level::Trace, 0, false));
 
+    // Filled with `ApplyControl`, which the pump treats as a no-op. MEASURED: filling with
+    // `CloseFile` made the next drain CLOSE THE FILE SINK before this leg's own record reached it,
+    // and the observer read `""` -- indistinguishable from "the report was never emitted". The
+    // ring having a real consumer is what makes a test's queue contents a side effect.
     for slot in 0..SINK_REQ_LEN {
-        post(SinkReq { slot: slot as u8, verb: SinkVerb::CloseFile }).expect("within capacity");
+        post(SinkReq { slot: slot as u8, verb: SinkVerb::ApplyControl }).expect("within capacity");
     }
-    let verb = SinkVerb::ApplyControl;
+    let verb = SinkVerb::OpenFile;
     assert!(post(SinkReq { slot: 7, verb }).is_err(), "the ring is full again");
     report_refused(verb, 7);
 
@@ -83,6 +87,8 @@ fn requests_round_trip_in_order_and_a_full_ring_is_refused_not_dropped() {
 
     clear();
     assert_eq!(depth(), 0);
+
+    a_posted_open_takes_effect_and_earlier_records_are_not_retrofitted();
 }
 
 #[test]
@@ -100,4 +106,64 @@ fn every_verb_has_a_name_and_the_names_are_distinct() {
         assert_ne!(a, b, "two sink verbs share a name: {names:?}");
     });
     assert!(names.iter().all(|n| !n.is_empty()));
+}
+
+/// G13(a): a file sink enabled MID-RUN from a non-draining thread. Records before it are absent,
+/// records after it are present.
+///
+/// NOT a `#[test]` of its own: there is exactly ONE drain role per process, and two `#[test]`
+/// functions that both drain race for it -- measured, as `try_claim` returning `None` in whichever
+/// lost. Sequenced from the test above instead, so it still runs in an ordinary sweep rather than
+/// being hidden behind `--ignored`.
+fn a_posted_open_takes_effect_and_earlier_records_are_not_retrofitted() {
+    use boyko_log::lifecycle::{DrainResult, LogConfig, SinkMode, boot, drain, enable};
+    use boyko_log::sink::request::request_open_file;
+    use boyko_log::target::{LogTarget, TargetControl, set_target_control};
+    use boyko_log::{Level, Log, info};
+
+    let path = std::env::temp_dir().join("boyko_l14_midrun.log");
+    let _ = std::fs::remove_file(&path);
+    // Booted with NO file sink: this test's subject is the transition, so starting with the file
+    // already open would prove nothing that `boot` did not already do.
+    boot(LogConfig {
+        console: false,
+        sink_thread: false,
+        ecs_ring: false,
+        file: false,
+        file_cap_bytes: 0,
+        sink_mode: SinkMode::Manual,
+    });
+    assert!(enable(), "enable() refused a freshly booted process");
+    set_target_control(<Log as LogTarget>::ID, TargetControl::new(Level::Trace, 0, false));
+    boyko_log::sink::slot::reset();
+    clear();
+
+    info!(Log, "before-the-open");
+    let DrainResult::Ran(_) = drain() else { panic!("the drain role is free in this process") };
+    assert!(!path.exists(), "a file existed before anything asked for one");
+
+    // The request is posted from THIS thread, which never opens anything. The `open` happens
+    // inside the next drain, under the drain token.
+    assert!(boyko_log::sink::file::set_path(path.to_str().expect("a UTF-8 temp path")));
+    request_open_file().expect("a fresh ring has room");
+    assert_eq!(depth(), 1, "the request was executed on the posting thread");
+    assert!(!path.exists(), "the file was opened by the REQUESTING thread, not the sink");
+
+    info!(Log, "after-the-open");
+    let DrainResult::Ran(_) = drain() else { panic!("the drain role is free in this process") };
+    assert_eq!(depth(), 0, "the drain did not consume the request");
+
+    let text = std::fs::read_to_string(&path).expect("the sink opened the file");
+    assert!(
+        text.contains("after-the-open"),
+        "a file opened by this pass must receive THIS pass's output, not start one pass late:          {text:?}"
+    );
+    assert!(
+        !text.contains("before-the-open"),
+        "a record that predates the sink appeared in it -- capture that reaches backwards is a          file whose contents cannot be dated: {text:?}"
+    );
+
+    boyko_log::sink::request::request_close_file().expect("room for one more");
+    let DrainResult::Ran(_) = drain() else { panic!("the drain role is free") };
+    let _ = std::fs::remove_file(&path);
 }

@@ -159,3 +159,59 @@ pub fn report_refused(verb: SinkVerb, slot: u8) {
         depth()
     );
 }
+
+/// Ask the sink to open the file recorded by [`crate::sink::file::set_path`] *(L14)*.
+///
+/// Returns immediately. **The `open` happens on the draining thread, not this one** -- that is the
+/// entire contract of this module, and the reason a console command binding to it cannot stall a
+/// frame. `Err(RingFull)` means the request was refused, reported as `boyko-E0107`, and did NOT
+/// happen; nothing about the current sinks changed.
+pub fn request_open_file() -> Result<(), RingFull> {
+    let r = post(SinkReq { slot: crate::sink::slot::SLOT_FILE as u8, verb: SinkVerb::OpenFile });
+    if r.is_err() {
+        report_refused(SinkVerb::OpenFile, crate::sink::slot::SLOT_FILE as u8);
+    }
+    r
+}
+
+/// Ask the sink to close the file sink.
+///
+/// Same contract as [`request_open_file`]: the `close` -- a flush and a handle release, both
+/// syscalls -- runs on the draining thread.
+pub fn request_close_file() -> Result<(), RingFull> {
+    let r = post(SinkReq { slot: crate::sink::slot::SLOT_FILE as u8, verb: SinkVerb::CloseFile });
+    if r.is_err() {
+        report_refused(SinkVerb::CloseFile, crate::sink::slot::SLOT_FILE as u8);
+    }
+    r
+}
+
+/// Execute every queued request. **Called by the drain owner and by nobody else.**
+///
+/// The `DrainToken` is the argument and not a formality: opening or closing a sink while another
+/// thread is writing records into it is the race this whole indirection exists to remove, and the
+/// token is the process-wide proof that no one else is draining. Requests run BEFORE the records
+/// in the same pass, so a freshly-opened file receives that pass's output rather than starting one
+/// pass late -- which is what an operator typing `open` and seeing an empty file would report as a
+/// bug.
+///
+/// Returns how many requests ran, so a caller can tell "nothing queued" from "the ring is stuck".
+pub fn pump(token: &crate::drain_owner::DrainToken, cap_bytes: u64) -> usize {
+    let mut ran = 0;
+    while let Some(req) = take() {
+        match req.verb {
+            // `open` reports its own failure through `W0102`; a second report here would name the
+            // same fact twice with different codes.
+            SinkVerb::OpenFile => {
+                let _ = crate::sink::file::open(cap_bytes);
+            }
+            SinkVerb::CloseFile => crate::sink::file::close(token),
+            // The control spec is applied by the poster, which is a plain `CONTROL` byte write and
+            // needs no thread of its own (L14-B). The verb stays in the vocabulary because a
+            // FILE-sourced spec is read by whoever owns the file, and that is the sink.
+            SinkVerb::ApplyControl => {}
+        }
+        ran += 1;
+    }
+    ran
+}
