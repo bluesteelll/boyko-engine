@@ -2134,7 +2134,7 @@ fn report_validation_withheld_by_env() {
     if FIRED.claim() {
         boyko_log::error!(
             boyko_log::RhiVulkan,
-            E2101.number(),
+            E2101,
             "validation was requested but BOYKO_DISABLE_VALIDATION withheld it; no messenger is \
              created and no validation message can be produced -- a clean run proves nothing"
         );
@@ -2156,7 +2156,7 @@ fn report_sync_validation_absent() {
     if FIRED.claim() {
         boyko_log::error!(
             boyko_log::RhiVulkan,
-            E2101.number(),
+            E2101,
             "validation is on but VK_EXT_validation_features is absent, so synchronization \
              validation is NOT enabled; this run cannot flag a missing or wrong barrier"
         );
@@ -3155,7 +3155,7 @@ fn report_ddgi_storage_unsupported(irr_ok: bool, depth_ok: bool) {
     if FIRED.claim() {
         boyko_log::warn!(
             boyko_log::RhiVulkan,
-            W2102.number(),
+            W2102,
             "DDGI disabled: B10G11R11/RG16F storage unsupported (irr_ok={}, depth_ok={})",
             irr_ok,
             depth_ok
@@ -3192,7 +3192,7 @@ fn report_ssao_denoise_storage_unsupported() {
     if FIRED.claim() {
         boyko_log::warn!(
             boyko_log::RhiVulkan,
-            W2102.number(),
+            W2102,
             "SSAO a-trous denoise disabled: R16 UNORM storage unsupported"
         );
     }

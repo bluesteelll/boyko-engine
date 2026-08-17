@@ -764,7 +764,7 @@ fn load_dense_region(
 fn warn_dense_viafn_skipped(name: &str, member_count: usize) {
     boyko_log::warn!(
         boyko_log::Serialize,
-        W0901.number(),
+        W0901,
         "dense store for component `{}` carries no decodable data (Ignore, or SerializeViaFn \
          with no installed deserialize_fn); skipped {} member(s) (recorded in \
          LoadReport::dense_stores_skipped)",

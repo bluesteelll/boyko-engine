@@ -186,7 +186,7 @@ fn report_bindless_table_exhausted(table: &str, capacity: u32, fallback: u32) {
     if W2202_SITE.claim() {
         boyko_log::warn!(
             boyko_log::Render,
-            W2202.number(),
+            W2202,
             "bindless table `{}` exhausted its {} slots -- aliasing reserved fallback slot {} \
              instead of writing out of range",
             table,

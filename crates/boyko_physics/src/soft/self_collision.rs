@@ -487,7 +487,7 @@ fn rest_len_warn_cold(cell: f32, l0: f32) {
     if W1302_SITE.claim() {
         boyko_log::warn!(
             boyko_log::Physics,
-            W1302.number(),
+            W1302,
             "SP3 self-collision precondition violated -- cell size 2*radius ({}) exceeds the \
              smallest distance-constraint rest length L0 ({}); a genuine one-cell-away \
              constraint partner may be missed (under-resolved, not unsafe)",
@@ -530,7 +530,7 @@ fn radius_warn(radius: f32) {
     if W1301_SITE.claim() {
         boyko_log::warn!(
             boyko_log::Physics,
-            W1301.number(),
+            W1301,
             "SP3 self-collision skipped -- particle_radius ({}) <= 0 (a non-positive radius \
              would form a degenerate cell size)",
             radius
@@ -564,7 +564,7 @@ fn load_factor_warn_cold(n: usize, table: usize) {
     if W1303_SITE.claim() {
         boyko_log::warn!(
             boyko_log::Physics,
-            W1303.number(),
+            W1303,
             "SP3 self-collision load factor pathological -- {} particles in {} buckets \
              (expected ~0.5; bucket chains will be long)",
             n,

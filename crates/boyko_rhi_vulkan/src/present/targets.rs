@@ -55,7 +55,7 @@ use super::scene_types::{DepthImage, Scene};
 fn report_mandatory_target_build_failed(what: &str) {
     boyko_log::error!(
         boyko_log::RhiVulkan,
-        boyko_log::codes::E2103.number(),
+        boyko_log::codes::E2103,
         "{} build failed under an armed VB split (OOM-class) -- record_vb will refuse the frame",
         what
     );

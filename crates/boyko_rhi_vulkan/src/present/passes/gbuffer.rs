@@ -300,7 +300,7 @@ fn warn_textured_suppressed_by_motion_vectors() {
     if FIRED.claim() {
         boyko_log::warn!(
             boyko_log::RhiVulkan,
-            W2104.number(),
+            W2104,
             "a textured material is active while the temporal motion-vector gbuffer pipeline is \
              also active this frame -- TEXTURED is never compiled with MOTION_VECTORS \
              (textured-PBR T6c plan Decision D4), so textured material(s) render base_color/scalar \

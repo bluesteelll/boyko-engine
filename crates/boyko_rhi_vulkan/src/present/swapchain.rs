@@ -35,7 +35,7 @@ fn report_present_mode_fallback(requested: &str) {
     if FIRED.claim() {
         boyko_log::warn!(
             boyko_log::RhiVulkan,
-            W2105.number(),
+            W2105,
             "present mode: `{}` is NOT advertised by this surface -- falling back to `fifo`. Frame \
              wall clock stays bounded below by the refresh interval, so a wall-clock comparison \
              across this boot and one that got the mode it asked for is not a comparison",

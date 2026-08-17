@@ -146,6 +146,52 @@ Defined *around* **measured** existing occupancy, because codes are never renumb
 | `91xx` | world binding | `B9101` |
 | **`92xx`** | **profiling** — reserved at **L2** *(S6)* | none. **Measured**: the `9xxx` band is already occupied by `B9001`/`B9002`/`B9004`/`B9005`/`B9101`, but `92xx` itself is free **in source** — zero `92xx` literals under `crates/` or `src/`. The profiling plan asserted availability without checking; this row records the check |
 
+### The class and the number were never paired — and Decision 6 SPECIFIED that they were *(L10-B follow-up)*
+
+**The specification above is not new and was not wrong.** Decision 6's own opening paragraph says,
+in as many words: *"Class is a **type** property: `warn!` takes `WarnCode`, `error!` takes
+`ErrorCode`, `PanicCode` is distinct — a class mismatch does not compile."* The implementation did
+not do that, and had not since L0.
+
+The emission macros took `$code:expr` into `LogSite.code: u16` while the **class byte came from the
+macro's own name**. Nothing joined them, so this compiled and printed a `W`-class line carrying an
+`E` code's number:
+
+```rust
+warn!(Render, codes::E2103.number(), "…")     // was legal
+```
+
+**No check in this registry could see it.** Check 3's orphan scan finds the identifier `E2103` in
+source; check 2 finds `E2103.md`; check 5 finds a test naming `E2103`. Every one of them is
+satisfied by a site that prints something else, because all of them key on **the identifier in
+source rather than on what the sink emits** — and the sink's class comes from a macro name no check
+reads.
+
+`codes.rs`'s own test asserted the property was already held, in as many words: the newtypes are
+*"what makes `warn!(…, B1802)` a type error rather than a wrong line in a log"*. So the divergence
+was covered at both ends — the design said the property held, and a test said it held — while the
+macro in between did not provide it. A type error did occur, but not
+for that reason and not doing that work: `warn!(…, W1501)` was **equally** an error, because no
+code newtype was accepted at all — and `.number()` defeated the whole thing in four characters,
+which is what all 62 production sites wrote.
+
+**Found by reading a RED's output**, not by any gate: an L10-B failure message printed a `W`-class
+line carrying `0106`. **Measured before it was named: 62 of 62 production invocations paired
+correctly**, so the hole was latent and not live.
+
+**The fix makes the pairing the compiler's.** `warn!` takes a `WarnCode`, `error!` an `ErrorCode`,
+and each calls `number()` itself. 56 call arguments across 25 files dropped their `.number()`;
+`watch(b'W', …)`, `report_count(…)` and `flag_code`'s returns keep theirs, because those take a
+class and a number as *data* and are not emission sites. The discriminator was **rustc's own error
+span** — a first attempt with a regex over whole files stripped all three of those too, which is
+the measurement that says a span is not something a pattern can approximate.
+
+The gate is `crates/boyko_log/tests/compile_fail_codes/`, three cases with pinned diagnostics: a
+`warn!` given an `ErrorCode`, an `error!` given a `WarnCode`, and — the one that matters — a `warn!`
+given a bare `2103u16`, because refusing only the wrong-class newtype would leave the
+four-character bypass open. Its own RED was shown by pointing a fixture at a correctly-classed
+code: *"Expected test case to fail to compile, but it succeeded."*
+
 The `15xx`/`90xx` split is a historical artifact, documented as such, and **must not be tidied**: renumbering would break the book, the `#[should_panic]` assertions and the never-reuse rule simultaneously.
 
 ### The `92xx` reservation, and why it lands at L2 and not later *(S6)*

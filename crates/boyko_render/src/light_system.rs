@@ -434,7 +434,7 @@ fn report_dropped_non_finite_lights(dropped: u32) {
     if W2204_SITE.claim() {
         boyko_log::warn!(
             boyko_log::Render,
-            W2204.number(),
+            W2204,
             "dropped {} point/spot light(s) with a non-finite position (or a NaN range) from \
              the GPU light table; a NaN centre would otherwise be culled INTO every froxel",
             dropped
@@ -499,7 +499,7 @@ fn finish_folded_overflow(
         // count because at that site one exists.
         boyko_log::warn!(
             boyko_log::Render,
-            W2201.number(),
+            W2201,
             "light table overflow -- more than MAX_LIGHTS ({}) enabled lights; the {} rows \
              already written are kept and every later light is dropped from the GPU table",
             MAX_LIGHTS,

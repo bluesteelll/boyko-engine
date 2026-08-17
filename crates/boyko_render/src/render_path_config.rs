@@ -357,7 +357,7 @@ pub fn effective_ssao_config<'a>(
 fn report_frozen_config_divergence(what: &str) {
     boyko_log::warn!(
         boyko_log::Render,
-        W2205.number(),
+        W2205,
         "{} changed at runtime, but the pre-light consumer set is FROZEN under a non-Deferred \
          render path -- the boot value stays in effect (set the config before boot to change it)",
         what

@@ -243,7 +243,7 @@ const fn crc32_table() -> [u32; 256] {
 fn report_chunk_crc_mismatch(kind: &[u8; 4], computed: u32, stored: u32) {
     boyko_log::warn!(
         boyko_log::Image,
-        W2601.number(),
+        W2601,
         "chunk '{}' CRC-32 mismatch (expected {:#010x}, got {:#010x}); continuing",
         boyko_log::dsp!(String::from_utf8_lossy(kind), 8),
         computed,

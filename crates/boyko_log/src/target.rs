@@ -761,7 +761,7 @@ pub fn register_dynamic_target(name: &str, initial: TargetControl) -> Option<Tar
         };
         crate::error!(
             crate::Log,
-            crate::codes::E0106.number(),
+            crate::codes::E0106,
             "dynamic target {} refused: {}",
             name,
             why
@@ -807,7 +807,7 @@ pub fn register_dynamic_target(name: &str, initial: TargetControl) -> Option<Tar
     // Every slot walked, none free, none holding this name.
     crate::error!(
         crate::Log,
-        crate::codes::E0106.number(),
+        crate::codes::E0106,
         "dynamic target {} refused: {}",
         name,
         "the 32-slot band is full"

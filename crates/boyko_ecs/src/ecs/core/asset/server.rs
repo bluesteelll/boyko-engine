@@ -168,7 +168,7 @@ fn reserve_failed<A: Asset + AssetBacking>(assets: &mut Assets<A>, path: &str, e
     // `eprintln!` this replaced did, so the migration changes the channel and not the volume.
     boyko_log::error!(
         boyko_log::Assets,
-        boyko_log::codes::E0801.number(),
+        boyko_log::codes::E0801,
         "asset load failed for '{}': {}",
         path,
         boyko_log::dsp!(err)

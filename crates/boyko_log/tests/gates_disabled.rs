@@ -171,8 +171,13 @@ fn every_level_macro_gates_on_its_own_level() {
     );
 
     // A `Warn` compile ceiling admits error! and warn!, and deletes info!/debug!/trace!.
-    boyko_log::error!(WarnCeiling, 1u16, "e {}", bump(&HITS));
-    boyko_log::warn!(WarnCeiling, 2u16, "w {}", bump(&HITS));
+    //
+    // Real registry codes rather than the bare `1u16`/`2u16` this line carried until the macros
+    // began taking the TYPED newtype. The numbers were arbitrary and unregistered, which is the
+    // shape that let a class and a number drift apart in the first place; a gate about the CEILING
+    // has no reason to be the last place in the tree emitting a code that resolves to nothing.
+    boyko_log::error!(WarnCeiling, boyko_log::codes::E2001, "e {}", bump(&HITS));
+    boyko_log::warn!(WarnCeiling, boyko_log::codes::W0103, "w {}", bump(&HITS));
     boyko_log::info!(WarnCeiling, "i {}", bump(&HITS));
     debug!(WarnCeiling, "d {}", bump(&HITS));
     boyko_log::trace!(WarnCeiling, "t {}", bump(&HITS));

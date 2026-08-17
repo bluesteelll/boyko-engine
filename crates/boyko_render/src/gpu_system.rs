@@ -421,7 +421,7 @@ fn gpu_dispatch_failed(error: &crate::error::GpuColumnError) {
 fn report_gpu_dispatch_failed(error: &impl core::fmt::Display) {
     boyko_log::error!(
         boyko_log::Render,
-        E2203.number(),
+        E2203,
         "GpuSystem dispatch failed: {}",
         boyko_log::dsp!(error)
     );

@@ -603,7 +603,7 @@ const ADLER_MOD: u32 = 65521;
 fn report_adler_mismatch(expected: u32, actual: u32) {
     boyko_log::warn!(
         boyko_log::Image,
-        W2602.number(),
+        W2602,
         "zlib Adler-32 mismatch (expected {:#010x}, got {:#010x}); decoded pixel data may still \
          be usable, continuing",
         expected,

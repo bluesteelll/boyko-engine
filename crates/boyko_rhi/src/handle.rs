@@ -383,7 +383,7 @@ pub(crate) fn report_registry_leak(buffers: usize, pipelines: usize, shaders: us
     let total = buffers + pipelines + shaders + fences;
     boyko_log::error!(
         boyko_log::Rhi,
-        boyko_log::codes::E2001.number(),
+        boyko_log::codes::E2001,
         "ResourceRegistry dropped with {} live resource(s) (buffers={}, pipelines={}, \
          shaders={}, fences={}) - destroy_all was not called (LEAK)",
         total,

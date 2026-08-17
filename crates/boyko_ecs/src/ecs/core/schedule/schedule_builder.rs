@@ -1397,7 +1397,7 @@ fn warn_if_empty(
         if FIRED.claim() {
             boyko_log::warn!(
                 boyko_log::Schedule,
-                W1501.number(),
+                W1501,
                 "ordering references set '{}' which has no members (no system joined it via \
                  in_set); the ordering has no effect",
                 set_name_or_default(set, set_names)

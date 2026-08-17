@@ -269,7 +269,7 @@ pub(crate) fn report_telemetry_path_unwritable() {
     if claim(W9214.number()) {
         warn!(
             Profiling,
-            W9214.number(),
+            W9214,
             "the telemetry path could not be opened; this session streams nothing"
         );
     }
@@ -288,7 +288,7 @@ pub(crate) fn report_telemetry_write_failed() {
     if claim(W9215.number()) {
         warn!(
             Profiling,
-            W9215.number(),
+            W9215,
             "a telemetry write failed; streaming is disabled for the rest of this session"
         );
     }
@@ -308,7 +308,7 @@ pub(crate) fn report_telemetry_zones_refused() {
     if claim(W9218.number()) {
         warn!(
             Profiling,
-            W9218.number(),
+            W9218,
             "a telemetry quantile subscription was refused past the per-session cap; the zone              streams without a median or a p95"
         );
     }
@@ -350,7 +350,7 @@ pub(crate) fn report_gpu_pair_budget_exhausted() {
     if claim(W9202.number()) {
         warn!(
             Profiling,
-            W9202.number(),
+            W9202,
             "a GPU timestamp slot exhausted its pair budget; further brackets in that frame are \
              unrecorded"
         );
@@ -369,7 +369,7 @@ pub fn report_window_zones_lost(lost: u32, torn: u32, measured: u32) {
     if claim(W9205.number()) {
         warn!(
             Profiling,
-            W9205.number(),
+            W9205,
             "zones were lost in this window: {} lost, {} torn, {} measured -- the figures are \
              folded from fewer samples than the window ran",
             lost,
@@ -395,7 +395,7 @@ pub fn report_contrast_not_resolved(reason: &str) {
     if claim(W9206.number()) {
         warn!(
             Profiling,
-            W9206.number(),
+            W9206,
             "a contrast could not be resolved ({}); the comparison carries no verdict",
             reason
         );
@@ -418,7 +418,7 @@ pub fn report_gpu_slots_abandoned(slots: u32) {
     if claim(W9217.number()) {
         warn!(
             Profiling,
-            W9217.number(),
+            W9217,
             "{} GPU timestamp slot(s) were still in flight at teardown and were abandoned; their \
              brackets are absent from this run's artifact",
             slots
@@ -434,7 +434,7 @@ pub(crate) fn report_epoch_break() {
     if claim(W9216.number()) {
         warn!(
             Profiling,
-            W9216.number(),
+            W9216,
             "clock epoch break: the in-flight profiling window was discarded and the clock recalibrated"
         );
     }
@@ -448,7 +448,7 @@ pub(crate) fn report_lane_exhausted() {
     if claim(W9203.number()) {
         warn!(
             Profiling,
-            W9203.number(),
+            W9203,
             "a profiling producer holds no lane; its samples are refused and counted on the un-laned row"
         );
     }
@@ -466,7 +466,7 @@ pub(crate) fn report_overflow(engine: u64, user: u64) {
     if claim(W9203.number()) {
         warn!(
             Profiling,
-            W9203.number(),
+            W9203,
             "a profiling lane region overflowed: {} engine and {} user samples discarded so far",
             engine,
             user
@@ -486,7 +486,7 @@ pub(crate) fn report_registry_exhausted() {
     if claim(W9201.number()) {
         warn!(
             Profiling,
-            W9201.number(),
+            W9201,
             "the engine zone registry is exhausted at {} slots; further zones run unregistered",
             boyko_diag::profiling_abi::minted_zones()
         );
@@ -504,7 +504,7 @@ pub(crate) fn report_registry_near_full() {
     if claim(W9208.number()) {
         warn!(
             Profiling,
-            W9208.number(),
+            W9208,
             "the engine zone registry is at {} of {} slots",
             boyko_diag::profiling_abi::minted_zones(),
             boyko_diag::profiling_abi::ENGINE_ZONE_SLOTS as u64
@@ -530,7 +530,7 @@ pub(crate) fn report_user_budget_exhausted() {
     if claim(W9210.number()) {
         warn!(
             Profiling,
-            W9210.number(),
+            W9210,
             "the user zone budget or name arena is exhausted at {} of {} slots; further game \
              zones run unregistered",
             boyko_diag::profiling_abi::minted_user_zones(),
@@ -553,7 +553,7 @@ pub(crate) fn report_engine_scope_refused() {
     if claim(W9212.number()) {
         warn!(
             Profiling,
-            W9212.number(),
+            W9212,
             "register_zone refused a scope below {}; scopes under that are the engine's",
             boyko_diag::profiling_abi::USER_SCOPE_BASE as u64
         );
@@ -567,7 +567,7 @@ pub(crate) fn report_late(late: u64) {
     if claim(W9209.number()) {
         warn!(
             Profiling,
-            W9209.number(),
+            W9209,
             "{} profiling samples arrived after their frame had left the retained window",
             late
         );
@@ -585,7 +585,7 @@ pub(crate) fn report_working_set(bytes: u64, stride: u32) {
     if claim(W9211.number()) {
         warn!(
             Profiling,
-            W9211.number(),
+            W9211,
             "the profiling fold's column row is {} B at a zone stride of {}, over the L1d budget",
             bytes,
             stride
@@ -600,7 +600,7 @@ pub(crate) fn report_no_invariant_tsc() {
     if claim(W9207.number()) {
         warn!(
             Profiling,
-            W9207.number(),
+            W9207,
             "no invariant TSC: profiling tick magnitudes are not trustworthy across cores or power states"
         );
     }
@@ -613,7 +613,7 @@ pub(crate) fn report_geometry_mismatch(live: u32, asked: u32) {
     if claim(E9213.number()) {
         error!(
             Profiling,
-            E9213.number(),
+            E9213,
             "profiler re-armed with zone stride {} while the live session is {}; the arm was refused",
             asked,
             live
@@ -628,7 +628,7 @@ pub(crate) fn report_second_world(live: u64, asked: u64) {
     if claim(E9204.number()) {
         error!(
             Profiling,
-            E9204.number(),
+            E9204,
             "the profiler is already bound to world {}; world {} was refused",
             live,
             asked

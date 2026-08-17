@@ -784,7 +784,7 @@ fn report_material_texture_undecodable(label: &str, path: &Path, err: &impl core
     if W2206_SITE.claim() {
         boyko_log::warn!(
             boyko_log::Render,
-            W2206.number(),
+            W2206,
             "load_material_folder: {} at {} failed to decode ({}), using the material fallback",
             label,
             boyko_log::dsp!(path.display()),

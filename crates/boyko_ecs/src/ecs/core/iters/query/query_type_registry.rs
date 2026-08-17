@@ -173,7 +173,7 @@ fn report_query_table_filling(used: usize) {
     if FIRED.claim() {
         boyko_log::warn!(
             boyko_log::Query,
-            W0501.number(),
+            W0501,
             "the query-type table is {} of {} slots used (75 %); at {} the next distinct \
              Query<D, F> shape is a terminal panic (boyko-B0502) -- enable the \
              `big_query_table` feature or consolidate query shapes",

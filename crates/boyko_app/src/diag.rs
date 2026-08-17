@@ -129,7 +129,7 @@ pub(crate) fn report_boot_stage_failed<E: core::fmt::Debug>(stage: &str, err: &E
     let e = rendered.as_str();
     boyko_log::error!(
         boyko_log::App,
-        codes::E3002.number(),
+        codes::E3002,
         "host boot failed at the {} stage ({}) - exiting",
         stage,
         e
@@ -152,7 +152,7 @@ pub(crate) fn report_terminal_device_error<E: core::fmt::Debug>(site: &str, err:
     let e = rendered.as_str();
     boyko_log::error!(
         boyko_log::App,
-        codes::E3003.number(),
+        codes::E3003,
         "terminal device error at {} ({}) - exiting",
         site,
         e
@@ -222,7 +222,7 @@ pub(crate) fn report_ssaa_probe_refused(
     }
     boyko_log::warn!(
         boyko_log::App,
-        codes::W3005.number(),
+        codes::W3005,
         "SSAA {}x unavailable (dims_ok={} vram_ok={} est={} heap={}) -> Off",
         want,
         dims_ok,
@@ -252,7 +252,7 @@ pub(crate) fn report_ssaa_scale_unsupported(want: u32, admitted: &str) {
     }
     boyko_log::warn!(
         boyko_log::App,
-        codes::W3005.number(),
+        codes::W3005,
         "SSAA scale {} unsupported (admitted: {}) -> Off",
         want,
         admitted
@@ -269,7 +269,7 @@ pub(crate) fn report_ssaa_scale_unsupported(want: u32, admitted: &str) {
 pub(crate) fn report_render_path_degraded(reason: &str) {
     boyko_log::warn!(
         boyko_log::App,
-        codes::W3006.number(),
+        codes::W3006,
         "render path degraded ({})",
         reason
     );
@@ -289,7 +289,7 @@ pub(crate) fn report_geometry_table_failed(err: &str) {
     }
     boyko_log::warn!(
         boyko_log::App,
-        codes::W3007.number(),
+        codes::W3007,
         "MeshGeometryTable::new failed ({}) - the VB geometry table is disabled",
         err
     );
@@ -307,7 +307,7 @@ pub(crate) fn report_profiling_knob_unserviceable(knob: &str, why: &str) {
     }
     boyko_log::warn!(
         boyko_log::App,
-        codes::W3008.number(),
+        codes::W3008,
         "{} is set but {} - the instrument stays disabled",
         knob,
         why
@@ -327,7 +327,7 @@ pub(crate) fn report_profiling_knob_unserviceable(knob: &str, why: &str) {
 pub(crate) fn report_dump_write_failed(kind: &str, path: &str, err: &str) {
     boyko_log::error!(
         boyko_log::Host,
-        codes::E3010.number(),
+        codes::E3010,
         "{} write FAILED ({}) -> {}",
         kind,
         err,
@@ -355,7 +355,7 @@ pub(crate) fn report_unrecognized_env_value(
     }
     boyko_log::warn!(
         boyko_log::App,
-        codes::W3009.number(),
+        codes::W3009,
         "{}='{}' unrecognized -> {} (valid: {})",
         var,
         value,

@@ -170,7 +170,7 @@ fn abort_on_task_panic() -> ! {
     // records the abort DECISION so the cause is unambiguous in logs.
     boyko_log::error!(
         boyko_log::Threadpool,
-        boyko_log::codes::E0201.number(),
+        boyko_log::codes::E0201,
         "a fire-and-forget task (ThreadPool::spawn) panicked; aborting the process \
          (no joiner can receive the payload)"
     );

@@ -17,6 +17,15 @@ description = "In-house structured logging for boyko-engine: compile-time ceilin
 [dependencies]
 boyko-diag = { path = "../boyko_diag" }
 
+# The compile-fail gate for the code/class pairing (`tests/compile_fail_codes/`). `boyko_ecs`
+# already carries this dependency for its own `compile_fail_*` suites; the pattern, the driver
+# shape and the `TRYBUILD=overwrite` regeneration recipe are all theirs.
+#
+# A dev-dependency, so it reaches no shipping graph -- the same rule the `test-probe` feature below
+# is written to, and the reason this crate can gate itself without widening what it links.
+[dev-dependencies]
+trybuild = "1"
+
 [features]
 default = []
 # Rung L8a: the record-observation helpers in `src/probe.rs`, for crates whose `#[cfg(test)] mod`

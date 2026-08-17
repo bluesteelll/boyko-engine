@@ -58,8 +58,15 @@ macro_rules! __log_site_emit {
 
 /// `error!(Target, code, "fmt", args…)` — the caller could not do what was asked.
 ///
-/// `code` is placed in the per-site `static`, so it must be a constant expression. It is
-/// therefore **not** an argument and is not evaluated per call.
+/// `code` is an [`ErrorCode`](crate::codes::ErrorCode) — the **typed newtype**, not its number —
+/// and that is what pairs the class byte with the number. Until this was so, the class came from
+/// this macro's NAME and the number from an arbitrary `u16`, so `error!(T, codes::W2102.number(),
+/// …)` compiled and printed an `E`-class line carrying a `W` code's number, which `explain` cannot
+/// resolve. Every registry check stayed green throughout, because all of them key on the
+/// identifier in source rather than on what the sink prints.
+///
+/// It is placed in the per-site `static`, so it must be a constant expression: **not** an argument,
+/// and not evaluated per call.
 #[macro_export]
 macro_rules! error {
     ($T:ty, $code:expr, $fmt:literal $(, $a:expr)* $(,)?) => {
@@ -69,7 +76,11 @@ macro_rules! error {
                 >= $crate::Level::Error as u8
         {
             $crate::__log_site_emit!(
-                $crate::Level::Error, $T, b'E', $code, $fmt $(, $a)*
+                $crate::Level::Error,
+                $T,
+                b'E',
+                $crate::codes::ErrorCode::number($code),
+                $fmt $(, $a)*
             );
         }
     };
@@ -77,6 +88,9 @@ macro_rules! error {
 
 /// `warn!(Target, code, "fmt", args…)` — the engine did something the caller probably did not
 /// intend.
+///
+/// `code` is a [`WarnCode`](crate::codes::WarnCode); see [`error!`] for why the typed newtype
+/// rather than its number.
 #[macro_export]
 macro_rules! warn {
     ($T:ty, $code:expr, $fmt:literal $(, $a:expr)* $(,)?) => {
@@ -86,7 +100,11 @@ macro_rules! warn {
                 >= $crate::Level::Warn as u8
         {
             $crate::__log_site_emit!(
-                $crate::Level::Warn, $T, b'W', $code, $fmt $(, $a)*
+                $crate::Level::Warn,
+                $T,
+                b'W',
+                $crate::codes::WarnCode::number($code),
+                $fmt $(, $a)*
             );
         }
     };

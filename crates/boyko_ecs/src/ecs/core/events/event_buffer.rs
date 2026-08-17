@@ -88,7 +88,7 @@ fn report_lane_full(
     if latch.claim() {
         boyko_log::warn!(
             boyko_log::Events,
-            W0701.number(),
+            W0701,
             "event buffer full for '{}' on lane {}: {} attempted, {} dropped; raise \
              EventConfig's capacity_per_lane or drain the reader more often",
             type_name,
