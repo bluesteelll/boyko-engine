@@ -122,19 +122,46 @@ pub struct DiagInfo {
 }
 
 /// A `W`-class code: a condition the caller probably did not intend.
-#[repr(transparent)]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct WarnCode(u16);
+#[derive(Clone, Copy, Debug)]
+pub struct WarnCode {
+    num: u16,
+    idx: CodeIdx,
+}
 
 /// An `E`-class code: the engine could not do what was asked.
-#[repr(transparent)]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct ErrorCode(u16);
+#[derive(Clone, Copy, Debug)]
+pub struct ErrorCode {
+    num: u16,
+    idx: CodeIdx,
+}
 
 /// A `B`-class code: a broken invariant. Appears only inside a `#[cold] fn … -> !` or a `panic!`.
-#[repr(transparent)]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct PanicCode(u16);
+#[derive(Clone, Copy, Debug)]
+pub struct PanicCode {
+    num: u16,
+    idx: CodeIdx,
+}
+
+/// Equality is by **number**, for all three classes.
+///
+/// Not derived, and it could not be: [`CodeIdx::Dynamic`] holds a `&'static AtomicU16`, so a
+/// derived `PartialEq` would compare *cells* — making a code unequal to itself across two
+/// declarations and equal to another only by pointer accident. The class is already a *type*, so
+/// comparing numbers within one type compares the whole identity.
+macro_rules! code_eq {
+    ($T:ident) => {
+        impl PartialEq for $T {
+            #[inline]
+            fn eq(&self, other: &Self) -> bool {
+                self.num == other.num
+            }
+        }
+        impl Eq for $T {}
+    };
+}
+code_eq!(WarnCode);
+code_eq!(ErrorCode);
+code_eq!(PanicCode);
 
 macro_rules! code_newtype {
     ($T:ident, $class:expr) => {
@@ -143,7 +170,15 @@ macro_rules! code_newtype {
             #[inline]
             #[must_use]
             pub const fn number(self) -> u16 {
-                self.0
+                self.num
+            }
+
+            /// Where this code's rate slot lives: `Static` for an engine row, `Dynamic` for a
+            /// downstream one that mints on first use (Decision 19).
+            #[inline]
+            #[must_use]
+            pub const fn idx(self) -> CodeIdx {
+                self.idx
             }
 
             /// The class byte.
@@ -162,7 +197,7 @@ macro_rules! code_newtype {
             #[inline]
             #[must_use]
             pub fn code_idx(self) -> u32 {
-                code_idx_of($class, self.0)
+                resolve_idx(self.idx)
             }
         }
     };
@@ -193,7 +228,7 @@ code_newtype!(PanicCode, b'B');
 /// and its CODE stream does not, and the row would still read as an orphan.
 impl core::fmt::Display for PanicCode {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "boyko-B{:04}", self.0)
+        write!(f, "boyko-B{:04}", self.num)
     }
 }
 
@@ -217,11 +252,27 @@ macro_rules! codes {
     ),* $(,)?) => {
         $(
             #[doc = concat!("`boyko-", stringify!($class), stringify!($num), "` — ", $summary, ".")]
-            pub const $Ident: code_class_ty!($class) = code_class_ty!($class)($num);
+            pub const $Ident: code_class_ty!($class) = code_class_new!(
+                $class,
+                $num,
+                // The row's own position, resolved when the table compiles -- which is what makes
+                // "an engine `code_idx` is a compile-time constant" structural rather than a
+                // promise: nothing a downstream crate mints can move it.
+                CodeIdx::Static(const_row_of(
+                    &DIAGNOSTICS_TABLE,
+                    stringify!($class).as_bytes()[0],
+                    $num,
+                ))
+            );
         )*
 
         /// Every row, sorted by number. `index == code_idx`.
-        pub static DIAGNOSTICS: &[DiagInfo] = &[$(
+        ///
+        /// A `const` array with a `static` slice view below it, and the split is load-bearing:
+        /// const evaluation may read a `const` and may NOT read a `static`, and each code's index
+        /// is computed by a `const fn` scan over this table when the table compiles. The form the
+        /// macro reaches for first -- `${index()}` -- is an unstable meta-variable expression.
+        pub const DIAGNOSTICS_TABLE: [DiagInfo; [$($num),*].len()] = [$(
             DiagInfo {
                 number: $num,
                 class: stringify!($class).as_bytes()[0],
@@ -230,6 +281,9 @@ macro_rules! codes {
                 status: $status,
             },
         )*];
+
+        /// The slice view every reader uses. Same data, one indirection, no second source of truth.
+        pub static DIAGNOSTICS: &[DiagInfo] = &DIAGNOSTICS_TABLE;
 
         const _: () = assert!(
             numbers_strictly_increasing(&[$($num),*]),
@@ -245,12 +299,41 @@ macro_rules! codes {
     };
 }
 
+/// The row position of `(class, number)` in a code table, at COMPILE time.
+///
+/// A `const fn`, so the engine's indices are constants rather than a startup scan. It takes the
+/// table by reference because a `const fn` may read a `const` and may not read a `static` -- which
+/// is why [`codes!`] emits `DIAGNOSTICS_TABLE` as a `const` with a slice view beside it.
+///
+/// Panics at COMPILE time on a row the table does not carry, which is unreachable by construction:
+/// the only caller is the macro that generated the row it is looking for.
+#[must_use]
+pub const fn const_row_of(table: &[DiagInfo], class: u8, number: u16) -> u16 {
+    let mut i = 0;
+    while i < table.len() {
+        if table[i].class == class && table[i].number == number {
+            return i as u16;
+        }
+        i += 1;
+    }
+    panic!("invariant: codes! generated a const for a row it did not put in the table")
+}
+
 /// Maps a class token in [`codes!`] to its newtype.
 ///
 /// `macro_rules!` is textually scoped, and what has to be in scope is the **invocation** site,
 /// not the other macro's definition — both are defined above the single `codes! { … }` call at
 /// the bottom of this file, which is where expansion happens. No `use` is needed and one was
 /// removed: it was an unused import that `-D warnings` correctly refused.
+/// Build the newtype for a class token. Separate from [`code_class_ty!`] because a macro call may
+/// not stand where a struct literal's PATH goes -- `code_class_ty!(W) { num: .. }` is a parse
+/// error, which is the entire reason this exists.
+macro_rules! code_class_new {
+    (B, $num:expr, $idx:expr) => { PanicCode { num: $num, idx: $idx } };
+    (E, $num:expr, $idx:expr) => { ErrorCode { num: $num, idx: $idx } };
+    (W, $num:expr, $idx:expr) => { WarnCode { num: $num, idx: $idx } };
+}
+
 macro_rules! code_class_ty {
     (B) => {
         PanicCode

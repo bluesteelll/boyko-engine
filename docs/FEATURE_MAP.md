@@ -931,7 +931,7 @@ nothing more. Verified the same way — repointing it stays green.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Turn a class byte and a number into its registry row | `explain` (315) |
+| Turn a class byte and a number into its registry row | `explain` (398) |
 
 **File:** [crates/boyko_log/src/rate.rs](../crates/boyko_log/src/rate.rs) — per-code rate limiting.
 

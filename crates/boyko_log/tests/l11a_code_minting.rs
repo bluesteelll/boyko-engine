@@ -44,6 +44,20 @@ fn the_mint_hands_out_one_index_per_code_and_never_aliases() {
     assert_eq!(resolve_idx(CodeIdx::Static(7)), 7);
     assert_eq!(code_occupancy(), before, "a Static arm must not spend downstream budget");
 
+    // A REAL engine code carries its row as a `Static`, and the value is a compile-time constant:
+    // it is `const`-evaluable, which is the only form of "cannot be perturbed at run time" that is
+    // a property rather than a hope.
+    const W0103_IDX: u32 = match boyko_log::codes::W0103.idx() {
+        CodeIdx::Static(i) => i as u32,
+        CodeIdx::Dynamic(_) => panic!("an engine row must be Static"),
+    };
+    assert_eq!(boyko_log::codes::W0103.code_idx(), W0103_IDX);
+    assert_eq!(
+        boyko_log::explain(b'W', 103).map(|r| r.number),
+        Some(103),
+        "the index must address the row it names -- an off-by-one here is a code reporting as          another code's neighbour, silently"
+    );
+
     // ── SIXTEEN THREADS, ONE CODE: exactly one index, and NONE LEAKED ────────────────────────
     //
     // The leak half is what a `fetch_add`-per-caller design fails silently: every racer takes a
@@ -74,6 +88,10 @@ fn the_mint_hands_out_one_index_per_code_and_never_aliases() {
     static B: AtomicU16 = AtomicU16::new(0);
     let ib = resolve_idx(CodeIdx::Dynamic(&B));
     assert_ne!(ib, first, "two codes resolved to one rate slot");
+
+    // AND NO AMOUNT OF DOWNSTREAM MINTING MOVES AN ENGINE INDEX. The whole point of the two
+    // variants: an engine code never consults the counter every mint above just advanced.
+    assert_eq!(boyko_log::codes::W0103.code_idx(), W0103_IDX, "a mint moved an ENGINE index");
     assert_eq!(resolve_idx(CodeIdx::Dynamic(&CELL)), first, "re-resolving must not mint again");
 
     // ── EXHAUSTION returns the sentinel, and the sentinel is NEVER an index ──────────────────
