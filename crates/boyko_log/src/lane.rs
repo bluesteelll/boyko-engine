@@ -178,12 +178,16 @@ static LOG_LANES: [LogLane; LANE_ARRAY_LEN] = [const { LogLane::new() }; LANE_AR
 /// Returns `None` when the thread has no lane and none can be claimed, or when the array is
 /// empty because the compile ceiling is `Off`.
 #[inline]
-fn resolve() -> Option<&'static LogLane> {
+fn resolve() -> Option<(u16, &'static LogLane)> {
     let mut id = boyko_diag::lane::lane();
     if id == LANE_UNCLAIMED {
         id = claim_cold()?;
     }
-    LOG_LANES.get(id as usize)
+    // The INDEX travels with the lane (L12). Re-querying `lane()` at the sampling decision would
+    // be a second read that can disagree with this one -- `claim_cold` may have just assigned it --
+    // and a counter indexed by a different lane than the record is written to is a counter for
+    // somebody else's traffic.
+    LOG_LANES.get(id as usize).map(|l| (id, l))
 }
 
 /// The once-per-thread claim, kept out of line so the hot path is a TLS read and a compare.
@@ -245,7 +249,7 @@ fn emit_to<A: LogArgs>(site: &'static LogSite, target: TargetId, args: A) {
     // for every static site, so no existing record grows by a byte.
     let prefix = if site.target.is_none() { DYN_PREFIX_BYTES } else { 0 };
 
-    let Some(lane) = resolve() else {
+    let Some((lane_idx, lane)) = resolve() else {
         // A thread with no lane does NOT silently drop a severe record. `Warn` and `Error` take
         // the synchronous channel; the three lower levels are counted as unclaimed, on the
         // substrate's un-laned row precisely because there is no lane to charge them to.
@@ -266,6 +270,24 @@ fn emit_to<A: LogArgs>(site: &'static LogSite, target: TargetId, args: A) {
         }
         return;
     };
+
+    // ── SAMPLING (L12), after the lane and before the space ──────────────────────────────────
+    //
+    // Here and not in the macro: the decision needs the target's control byte AND a per-lane
+    // counter, and hoisting either into the expansion would put a load and an RMW at every site in
+    // the engine -- including the ones the compile ceiling deletes entirely.
+    //
+    // The consequence is a user-visible property rather than an implementation detail: the
+    // arguments were evaluated by the caller to build `args`, so SAMPLING SUPPRESSES DELIVERY AND
+    // NEVER EVALUATION. `G10(e)` asserts both numbers together for exactly this reason.
+    let shift = crate::target::target_control(target).sample_shift();
+    if !crate::sample::admits(lane_idx, target.index(), shift) {
+        // Counted, never silent -- and on its own column, because a sampled-out record is not a
+        // LOSS. The census renders the two as `UNPROVEN(sampled)` and `UNPROVEN(lossy)`, and
+        // collapsing them would let an operator read their own sampling as data loss.
+        crate::target::count_sampled_out(target);
+        return;
+    }
 
     let need = HEADER_BYTES + prefix + args.encoded_len();
     if need > MAX_RECORD_BYTES {

@@ -909,17 +909,17 @@ nothing more. Verified the same way — repointing it stays green.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Read the engine target table (ids 0..=95; a collision is a const assert, so it does not compile) | `targets!` (486) |
-| Read a target's runtime ceiling — the third gate, one Relaxed byte load behind an unchecked index | `runtime_ceiling` (385) |
-| Register a target from data: cold, setup-time, idempotent by name; refuses with boyko-E0106 naming which of three reasons | `register_dynamic_target` (774) |
-| Resolve a name in EITHER band — a console user does not know which band a target is in | `find_target` (1003) |
-| List every target that exists; an unregistered dynamic slot is absent, never listed blank | `targets` (1020) |
+| Read the engine target table (ids 0..=95; a collision is a const assert, so it does not compile) | `targets!` (497) |
+| Read a target's runtime ceiling — the third gate, one Relaxed byte load behind an unchecked index | `runtime_ceiling` (396) |
+| Register a target from data: cold, setup-time, idempotent by name; refuses with boyko-E0106 naming which of three reasons | `register_dynamic_target` (785) |
+| Resolve a name in EITHER band — a console user does not know which band a target is in | `find_target` (1014) |
+| List every target that exists; an unregistered dynamic slot is absent, never listed blank | `targets` (1031) |
 
 **File:** [crates/boyko_log/src/lane.rs](../crates/boyko_log/src/lane.rs) — the producer path.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Follow a record from the call site into the ring: admission, encode, publish — never formatted on the caller thread | `emit_impl` (209) |
+| Follow a record from the call site into the ring: admission, encode, publish — never formatted on the caller thread | `emit_impl` (213) |
 
 **File:** [crates/boyko_log/src/record.rs](../crates/boyko_log/src/record.rs) — the self-describing payload.
 

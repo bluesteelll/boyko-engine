@@ -196,6 +196,15 @@ fn the_dynamic_band_interns_idempotently_and_then_refuses() {
     //
     // `mod:acme` was registered at `Level::Debug`, which is what makes the three claims below
     // separable: `dyn_info!` and `dyn_warn!` pass gate (c), `dyn_trace!` does not.
+    // ⚠️ SHIFT 0 BEFORE EMITTING, AND L12 IS WHY. This target was registered with
+    // `TargetControl::new(Level::Debug, 2, false)` -- a sample shift of 2, chosen above to prove
+    // the control byte carries all THREE fields. That shift was inert until L12 wired sampling into
+    // the emission path, and the moment it was live this test went red: `dyn_info!` arrived and
+    // `dyn_warn!` was sampled out, correctly, 1 in 4.
+    //
+    // The claim here is about the DYNAMIC BAND, not about sampling, so the shift is cleared for the
+    // emission block rather than the assertions being loosened. Sampling has its own gate.
+    set_target_control(id, TargetControl::new(Level::Debug, 0, false));
     let other = find_target("fill:0").expect("the fill registered it");
     boyko_log::dyn_info!(id, "acme fired {} times", 3u32);
     // The code is passed as its TYPED newtype, so a `dyn_warn!` handed an `ErrorCode` does not

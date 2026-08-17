@@ -2224,14 +2224,14 @@ deletes the never-evaluated guarantee, and no test of the output would notice.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Read the engine target table; a collision is a const assert, so it does not compile | `targets` (1020) |
-| Intern a target named from data: cold, setup-time, idempotent by name | `register_dynamic_target` (774) |
+| Read the engine target table; a collision is a const assert, so it does not compile | `targets` (1031) |
+| Intern a target named from data: cold, setup-time, idempotent by name | `register_dynamic_target` (785) |
 
 **File:** [crates/boyko_log/src/lane.rs](../crates/boyko_log/src/lane.rs) — the producer path.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Follow a record from the call site into the ring; never formatted on the caller thread | `emit_impl` (209) |
+| Follow a record from the call site into the ring; never formatted on the caller thread | `emit_impl` (213) |
 
 **File:** [crates/boyko_log/src/record.rs](../crates/boyko_log/src/record.rs) — the payload.
 

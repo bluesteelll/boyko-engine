@@ -78,6 +78,7 @@ mod macros;
 pub mod probe;
 pub mod rate;
 pub mod record;
+pub mod sample;
 pub mod sink;
 pub mod site;
 pub mod sync_out;

@@ -339,6 +339,17 @@ pub(crate) fn count_delivered(id: TargetId) {
 /// exactly when something has already gone wrong.
 #[cold]
 #[inline(never)]
+/// Charge one record to this target's `sampled_out` column *(L12)*.
+///
+/// Separate from `dropped` because the two are different verdicts a census must not collapse: a
+/// dropped record is a LOSS, a sampled-out one is a record the operator asked not to be delivered.
+/// The census renders them as `UNPROVEN(lossy)` and `UNPROVEN(sampled)` for exactly that reason.
+pub(crate) fn count_sampled_out(id: TargetId) {
+    // SAFETY: as `runtime_ceiling` -- the same closed constructor set bounds the index.
+    let cell = unsafe { TARGET_STATS.get_unchecked(id.0 as usize) };
+    cell.sampled_out.fetch_add(1, Ordering::Relaxed);
+}
+
 pub(crate) fn count_dropped(id: TargetId) {
     TARGET_STATS[id.index() as usize].dropped.fetch_add(1, Ordering::Relaxed);
 }
