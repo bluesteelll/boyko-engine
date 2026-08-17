@@ -440,10 +440,21 @@ pub fn target_control(id: TargetId) -> TargetControl {
 /// [`set_target_level`] when only the level is meant to move.
 #[inline]
 pub fn set_target_control(id: TargetId, ctl: TargetControl) {
+    set_target_control_quiet(id, ctl);
+    bump_control_epoch();
+}
+
+/// Write a target's control byte WITHOUT bumping the epoch.
+///
+/// For a writer that changes several targets as ONE operation and bumps once at the end
+/// ([`crate::control::apply_control_spec`]). `pub(crate)`, and deliberately not public: a caller
+/// who forgets the bump leaves every poller acting on a stale table, with nothing to observe that
+/// it happened -- silence in exactly the shape this subsystem exists to eliminate.
+#[inline]
+pub(crate) fn set_target_control_quiet(id: TargetId, ctl: TargetControl) {
     // SAFETY: as `runtime_ceiling`.
     let cell = unsafe { CONTROL.get_unchecked(id.0 as usize) };
     cell.store(ctl.raw(), Ordering::Relaxed);
-    bump_control_epoch();
 }
 
 /// Move this target's level, preserving the sample shift and the sync route.
@@ -482,8 +493,12 @@ pub fn control_epoch() -> u32 {
 /// `Release` so a poller that observes the new epoch also observes the `CONTROL` write that
 /// caused it. Wrapping at 2³² is fine and is the reason the API is "different, therefore repaint"
 /// rather than "greater, therefore newer".
+///
+/// `pub(crate)` since L14: [`crate::control::apply_control_spec`] writes several targets and bumps
+/// ONCE at the end, because a poller sampling between two clauses of one command would act on half
+/// of it. Every other writer bumps its own.
 #[inline]
-fn bump_control_epoch() {
+pub(crate) fn bump_control_epoch() {
     CONTROL_EPOCH_CTR.fetch_add(1, Ordering::Release);
 }
 

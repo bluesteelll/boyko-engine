@@ -2224,8 +2224,8 @@ deletes the never-evaluated guarantee, and no test of the output would notice.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Read the engine target table; a collision is a const assert, so it does not compile | `targets` (1031) |
-| Intern a target named from data: cold, setup-time, idempotent by name | `register_dynamic_target` (785) |
+| Read the engine target table; a collision is a const assert, so it does not compile | `targets` (1046) |
+| Intern a target named from data: cold, setup-time, idempotent by name | `register_dynamic_target` (800) |
 
 **File:** [crates/boyko_log/src/lane.rs](../crates/boyko_log/src/lane.rs) — the producer path.
 

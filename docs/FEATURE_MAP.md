@@ -909,11 +909,11 @@ nothing more. Verified the same way — repointing it stays green.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Read the engine target table (ids 0..=95; a collision is a const assert, so it does not compile) | `targets!` (497) |
+| Read the engine target table (ids 0..=95; a collision is a const assert, so it does not compile) | `targets!` (512) |
 | Read a target's runtime ceiling — the third gate, one Relaxed byte load behind an unchecked index | `runtime_ceiling` (396) |
-| Register a target from data: cold, setup-time, idempotent by name; refuses with boyko-E0106 naming which of three reasons | `register_dynamic_target` (785) |
-| Resolve a name in EITHER band — a console user does not know which band a target is in | `find_target` (1014) |
-| List every target that exists; an unregistered dynamic slot is absent, never listed blank | `targets` (1031) |
+| Register a target from data: cold, setup-time, idempotent by name; refuses with boyko-E0106 naming which of three reasons | `register_dynamic_target` (800) |
+| Resolve a name in EITHER band — a console user does not know which band a target is in | `find_target` (1029) |
+| List every target that exists; an unregistered dynamic slot is absent, never listed blank | `targets` (1046) |
 
 **File:** [crates/boyko_log/src/lane.rs](../crates/boyko_log/src/lane.rs) — the producer path.
 

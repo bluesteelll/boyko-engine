@@ -63,6 +63,7 @@
 #![deny(clippy::dbg_macro)]
 
 pub mod census;
+pub mod control;
 pub mod codes;
 pub mod drain_owner;
 pub mod lane;
