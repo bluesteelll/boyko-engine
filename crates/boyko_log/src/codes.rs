@@ -411,11 +411,14 @@ fn mint(cell: &'static AtomicU16) -> u32 {
                         idx
                     };
                     cell.store(published, Ordering::Release);
-                    return if published == u16::MAX {
-                        CODE_IDX_EXHAUSTED
-                    } else {
-                        u32::from(published)
-                    };
+                    if published == u16::MAX {
+                        crate::rate::report_space_exhausted();
+                        return CODE_IDX_EXHAUSTED;
+                    }
+                    if code_space_nearly_full() {
+                        crate::rate::report_space_nearly_full();
+                    }
+                    return u32::from(published);
                 }
             }
             // A racer holds the claim; its publish is one `fetch_add` away.
@@ -581,6 +584,15 @@ codes! {
     // tells the two apart.
     (106,  E, E0106, RatePolicy::Every, CodeStatus::Live,
         "A dynamic target could not be registered, and the reason names which refusal"),
+    // ── L11a: the downstream index space's two reports ───────────────────────────────────────
+    // Both `Once`, and for the same reason the condition is a THRESHOLD rather than an event: past
+    // 90 % every later mint is also past 90 %, and past exhaustion every later mint also fails.
+    // `Every` here would turn one budget problem into a storm of reports about it -- the shape
+    // `W0501` already rejected for the query-type table.
+    (114,  W, W0114, RatePolicy::Once,  CodeStatus::Live,
+        "The downstream diagnostic-code index space is nine tenths spent"),
+    (115,  E, E0115, RatePolicy::Once,  CodeStatus::Live,
+        "The downstream diagnostic-code index space is exhausted; a code has no rate slot"),
     // ── L6's five new rows ──────────────────────────────────────────────────────────────────
     // Every summary below is read out of the message its emitter actually prints. `E0201` is the
     // pool's only diagnostic; `W0501`/`B0502` are the two halves of one table filling up, and the
@@ -889,6 +901,8 @@ mod tests {
             (b'B', 2),    // L6  -- intra-system access conflict on one resource
             (b'W', 103),  // L4  -- the file sink's byte cap
             (b'E', 106),  // L10 -- a dynamic target could not be registered (all three refusals)
+            (b'W', 114),  // L11a -- downstream code index space at 90 %
+            (b'E', 115),  // L11a -- downstream code index space exhausted
             (b'E', 201),  // L6  -- a fire-and-forget task panicked, process aborting
             (b'W', 501),  // L6  -- query-type table at 75 %
             (b'B', 502),  // L6  -- query-type table exhausted

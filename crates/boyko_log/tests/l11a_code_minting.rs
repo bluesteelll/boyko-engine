@@ -10,12 +10,32 @@
 use std::sync::atomic::AtomicU16;
 
 use boyko_log::codes::{
-    CODE_IDX_EXHAUSTED, CodeIdx, DOWNSTREAM_IDX_BASE, MAX_CODES, code_occupancy, resolve_idx,
+    CODE_IDX_EXHAUSTED, CodeIdx, DOWNSTREAM_IDX_BASE, E0115, MAX_CODES, W0114, code_occupancy,
+    code_space_nearly_full, resolve_idx,
 };
+use boyko_log::lifecycle::{DrainResult, LogConfig, SinkMode, boot, drain, enable};
+use boyko_log::target::{LogTarget, TargetControl, set_target_control};
+use boyko_log::{Level, Log};
 
 /// One `#[test]`, for the reason the module header gives: every claim reads one global counter.
 #[test]
 fn the_mint_hands_out_one_index_per_code_and_never_aliases() {
+    // A real manual file sink, because `W0114`/`E0115` are asserted off DISK below and a default
+    // run leaves every ceiling `Off` -- which is exactly why this is a test and not a run.
+    let path = std::env::temp_dir().join("boyko_l11a_code_minting.log");
+    let _ = std::fs::remove_file(&path);
+    assert!(boyko_log::sink::file::set_path(path.to_str().expect("a UTF-8 temp path")));
+    boot(LogConfig {
+        console: false,
+        sink_thread: false,
+        ecs_ring: false,
+        file: true,
+        file_cap_bytes: 0,
+        sink_mode: SinkMode::Manual,
+    });
+    assert!(enable(), "enable() refused a freshly booted process");
+    set_target_control(<Log as LogTarget>::ID, TargetControl::new(Level::Trace, 0, false));
+
     // ── an engine index is its ROW, and costs no mint ────────────────────────────────────────
     //
     // The L11a invariant in one line: nothing a downstream crate does can move an engine code's
@@ -77,10 +97,45 @@ fn the_mint_hands_out_one_index_per_code_and_never_aliases() {
     sorted.dedup();
     assert_eq!(sorted.len(), handed.len(), "the mint handed the same slot to two codes");
 
+    // ── W0114 AND E0115 REACH A READER ───────────────────────────────────────────────────────
+    //
+    // The observers, and they are not an extra: the exhaustion above already drives both
+    // conditions, and a code whose emission nothing reads is this campaign's signature defect.
+    // Read back off a real manual file sink rather than inferred from the sentinel.
+    assert!(code_space_nearly_full(), "the fill above must have crossed the 90 % threshold");
+    let text = sink_text(&path);
+    let w0114 = format!("boyko-W{:04}", W0114.number());
+    assert!(
+        text.contains(&w0114),
+        "crossing 90 % emitted no {w0114} -- the threshold report nobody reads: {text:?}"
+    );
+
+    // THREE failed mints, not one. `Once` suppresses the SECOND and later reports, so a test that
+    // exhausts the space exactly once cannot tell a latch from no latch -- the first draft of this
+    // block did exactly that, and deleting the latch left it green.
     static PAST: AtomicU16 = AtomicU16::new(0);
+    static PAST2: AtomicU16 = AtomicU16::new(0);
+    static PAST3: AtomicU16 = AtomicU16::new(0);
+    assert_eq!(resolve_idx(CodeIdx::Dynamic(&PAST2)), CODE_IDX_EXHAUSTED);
+    assert_eq!(resolve_idx(CodeIdx::Dynamic(&PAST3)), CODE_IDX_EXHAUSTED);
     assert_eq!(
         resolve_idx(CodeIdx::Dynamic(&PAST)),
         CODE_IDX_EXHAUSTED,
         "past the space the mint must return the SENTINEL, never wrap into an occupied slot"
     );
+
+    let text = sink_text(&path);
+    let e0115 = format!("boyko-E{:04}", E0115.number());
+    assert!(text.contains(&e0115), "exhaustion emitted no {e0115}: {text:?}");
+    assert_eq!(
+        text.matches(&e0115).count(),
+        1,
+        "{e0115} is `Once`; past exhaustion EVERY later mint fails, and reporting each one turns          one budget problem into a storm of reports about it"
+    );
+}
+
+/// Everything the sink has been given so far, drained and read back off disk.
+fn sink_text(path: &std::path::Path) -> String {
+    let DrainResult::Ran(_) = drain() else { panic!("the drain role is free in this process") };
+    std::fs::read_to_string(path).expect("the sink's file is readable")
 }

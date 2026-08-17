@@ -156,6 +156,59 @@ pub fn unindexed() -> u64 {
     UNINDEXED.load(Ordering::Relaxed)
 }
 
+// ── L11a: the index space's two reports ──────────────────────────────────────────────────────
+//
+// THEY LIVE HERE AND NOT IN `codes.rs`, AND THE GATE IS WHY. `code_registry.rs` excludes `codes.rs`
+// from its CODE stream on purpose -- that file DEFINES every identifier, so including it would make
+// every row "observed by an emitter" by construction. A reporter written there is therefore a
+// reporter check 3a cannot see, and the check said so the moment these two rows went `Live`.
+//
+// The layering it forces is the better one anyway: this module owns the slots, so this module
+// reports on their exhaustion. `codes.rs` hands out indices INTO the array declared here.
+
+/// `boyko-W0114`, once: the downstream index space is nine tenths spent.
+///
+/// # Why emitting from inside the mint cannot recurse
+///
+/// This is a `warn!` raised on the path that hands out indices, which looks circular and is not:
+/// `W0114` is an **engine** code, so its own `CodeIdx` is `Static` and resolving it never enters
+/// `codes::mint`. The recursion would exist only if the engine's indices were minted too — which is the
+/// second thing `CodeIdx`'s two variants buy, after the compile-time-constant invariant.
+#[cold]
+#[inline(never)]
+pub(crate) fn report_space_nearly_full() {
+    static SITE: crate::codes::OnceSite = crate::codes::OnceSite::new();
+    if SITE.claim() {
+        crate::warn!(
+            crate::Log,
+            crate::codes::W0114,
+            "downstream diagnostic-code index space is {}/{} spent",
+            crate::codes::code_occupancy(),
+            crate::codes::MAX_CODES - crate::codes::DOWNSTREAM_IDX_BASE
+        );
+    }
+}
+
+/// `boyko-E0115`, once: the space is gone and this code has no rate slot.
+///
+/// The record still arrives — only its *rate state* is missing, and the site degrades to
+/// [`RatePolicy::Every`] semantics. Reporting once and continuing is the whole design: the
+/// alternative a table like this invites is aliasing a slot, which throttles an unrelated code's
+/// storm and reports nothing at all.
+#[cold]
+#[inline(never)]
+pub(crate) fn report_space_exhausted() {
+    static SITE: crate::codes::OnceSite = crate::codes::OnceSite::new();
+    if SITE.claim() {
+        crate::error!(
+            crate::Log,
+            crate::codes::E0115,
+            "downstream diagnostic-code index space exhausted at {} slots; later codes emit with              no rate state and are counted",
+            crate::codes::MAX_CODES
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

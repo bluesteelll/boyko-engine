@@ -440,8 +440,6 @@ const FORWARD_DECLARED: &[(&str, &str)] = &[
     ("W0111", "L14 — census reports unsunk records"),
     ("W0112", "L13a — file rotation dropped records"),
     ("W0113", "L12 — sampling discarded records"),
-    ("W0114", "L11a — downstream code table occupancy warning"),
-    ("E0115", "L11a — downstream code index space exhausted"),
     ("W0116", "L13b — binary sink site dictionary full"),
     ("W0117", "L16 — the ECS handoff ring overflowed"),
     ("E0118", "L15 — the panic hook could not complete a flush"),
