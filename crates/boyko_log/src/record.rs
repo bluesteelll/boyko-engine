@@ -69,6 +69,44 @@ pub const MAX_STR_BYTES: usize = 256;
 /// corrupting, but a truncated diagnostic is still a diagnostic that lost its tail.
 pub const MAX_RENDERED_BYTES: usize = 3072;
 
+/// Bytes a **dynamic** record carries ahead of its values: the target id, little-endian *(L10)*.
+///
+/// A `dyn_*!` site has no compile-time target — the id is an argument, and the same site may be
+/// reached with a different one on every call — so the id has to travel with the record. It goes
+/// here rather than in [`RecordHeader`] because the header is exactly 20 bytes and pinned as such,
+/// and adding a field would charge **every** record two bytes to describe a case almost none of
+/// them are in. Static records carry zero of these.
+pub const DYN_PREFIX_BYTES: usize = 2;
+
+/// Split a payload into its dynamic-target prefix and the values behind it.
+///
+/// `site_target` is the emitting site's own `target` field, and it is the whole discriminant:
+/// `Some` means the site named its target at compile time and the payload is values from byte
+/// zero; `None` means the first [`DYN_PREFIX_BYTES`] are the id. The caller passes the field
+/// rather than a flag so that the writer and the reader cannot disagree — there is one fact and
+/// one place it lives.
+///
+/// A prefix that is short or names an id outside the dynamic band yields `(None, values)`: the
+/// record still renders, and only its *attribution* is lost. That direction is deliberate. A torn
+/// or truncated prefix is a symptom of something already wrong, and the reader's best outcome is
+/// the message it was carrying — not a panic inside the drain, and not a fabricated `TargetId`,
+/// which is the hazard the closed constructor set exists to prevent.
+#[must_use]
+pub fn split_dynamic_target(
+    site_target: Option<crate::target::TargetId>,
+    payload: &[u8],
+) -> (Option<crate::target::TargetId>, &[u8]) {
+    if let Some(t) = site_target {
+        return (Some(t), payload);
+    }
+    if payload.len() < DYN_PREFIX_BYTES {
+        return (None, payload);
+    }
+    let (head, rest) = payload.split_at(DYN_PREFIX_BYTES);
+    let raw = u16::from_le_bytes([head[0], head[1]]);
+    (crate::target::TargetId::from_dynamic_raw(raw), rest)
+}
+
 /// Record header flags.
 pub mod flags {
     /// At least one `&str` argument was truncated at [`super::MAX_STR_BYTES`].

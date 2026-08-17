@@ -429,7 +429,10 @@ No `Fatal`: a fatal condition panics through an existing `#[cold] fn … -> !` h
 /// referenced by pointer, so the record pays 8 B instead of re-carrying
 /// file/line/fmt/code. Dereferenced ONLY by the sink.
 pub struct LogSite {
-    pub target:   TargetId,     // 2
+    /// ⚠️ `Option<TargetId>` AS BUILT (L10-B). `None` is a DYNAMIC site — see
+    /// the block below this listing for why, and for what it obliges the
+    /// payload to carry.
+    pub target:   Option<TargetId>,
     pub level:    Level,        // 1
     pub class:    u8,           // 1  b'B' | b'E' | b'W' | 0
     pub code:     u16,          // 2  printed number; 0 when the level has none
@@ -485,6 +488,11 @@ const _: () = assert!(core::mem::size_of::<RecordHeader>() == HEADER_BYTES);
 /// DROPPED with the `TOO_LARGE` flag and counted, in every profile.
 const MAX_RECORD_BYTES: usize = 2048;
 const MAX_STR_BYTES:    usize = 256;
+
+/// ✚ L10-B. Bytes a DYNAMIC record carries ahead of its values: the target id,
+/// little-endian. Static records carry ZERO of these and the 20-byte header is
+/// untouched. See the block below.
+const DYN_PREFIX_BYTES: usize = 2;
 
 // ─────────────────────────── boyko_log/src/lane.rs ────────────────────────────
 
@@ -993,3 +1001,41 @@ Three places where the source contradicted itself. None is silently "fixed" and 
 3. **`OnceSite` carried TWO latch bits for one site.** The monolith states the `Once` latch as a standalone sibling static in four places — `docs/LOGGING-SYSTEM-PLAN.md:419` ("a macro-generated `static FIRED: AtomicBool` **beside** the call site's `LogSite`"), `:426` ("Cost: 1 byte of `.bss` per `Once` site"), `:429-430` (the two-line pseudocode) and `:1008-1010` ("The per-SITE `Once` latch is NOT a field here … The macro expands a sibling `static FIRED: AtomicBool` beside each `Once` site — per-site, private line, **1 byte**") — and then **also** puts `fired: AtomicBool` inside `OnceSite` at `:1312`. Those are two latch bits for one site and both cannot be the single latch; the 1-byte cost claim is only true of the standalone form. **This file keeps Decision 8's version and drops the duplicate field**, which is why the struct above has three fields and not four. The consequence is written into the code, not left to inference: the SAFETY block's publication clause names `site`/`suppressed`, and the `ONCE_SITES` row of the multithreading table says in terms that the node carries no `fired` — so an implementer reading either one cannot restore the duplicate by accident. **The six-line SAFETY block itself was lost at the carve and is restored above**, verbatim except for that one word; it is the publication-before-CAS argument, and without it the table's `AcqRel` is a bare assertion.
 
 **One citation repair** carried from `logging/budgets-and-invariants`' repair pass, because it is cited by Decision 8 above: `host.rs`'s "a RELEASE-build degrade-to-Off must be observable" is at **`:230-234`**, not `:228-233`. The argument is unchanged; only its address was wrong.
+
+---
+
+## A fourth divergence, found by building L10-B: where a DYNAMIC target's id travels
+
+**This file specifies the site, the header and the record, and never says.** `LogSite.target` is a
+compile-time `TargetId`; `RecordHeader` is twenty bytes with a `const` assert pinning it; and
+`logging/game-facing-surface` Decision 18 specifies `dyn_info!(id, …)` taking its target as a
+**runtime argument**. Nothing joins those. A `dyn_*!` site has no compile-time target, and the same
+site may be reached with a **different id on every call** — a loop over loaded mods does exactly
+that — so the id cannot live in the site and has to travel with the *record*.
+
+Three routes were available. The decision, and why:
+
+| route | verdict |
+|---|---|
+| A placeholder `TargetId` in the site | **Refused.** It is a lie a reader prints, and there is no honest value to use — Decision 15 deletes `TargetId::INVALID` precisely so that no in-band sentinel exists |
+| A `DYNAMIC` bit in `RecordHeader::flags` (five bits free) | **Refused.** It works and costs nothing per record, but it spends a header bit on a fact the **site already knows**. Decision 21 records `clock_epoch_lo` spending the header's last pad byte; that budget is not for things that fit elsewhere |
+| **`LogSite.target: Option<TargetId>`** | **Taken.** The site is cold `'static` data, never read on the emitting thread except on the loss paths, so two bytes there are free in the sense that matters — and *"this site has no compile-time target"* is **structurally** the same statement as Decision 15's own rule that target absence is `Option<TargetId>` |
+
+`None` is therefore the discriminant, and it obliges the payload: a dynamic record carries its
+target as `DYN_PREFIX_BYTES` little-endian bytes **ahead of its values**, written by
+`emit_impl_dyn` and stripped by the drain. One writer, one reader, and what selects between them is
+a *field* rather than a bit somebody has to remember to set. **Static records grow by nothing** and
+the twenty-byte header is untouched.
+
+Two consequences are written into the code rather than left to inference:
+
+- **`TargetId::from_dynamic_raw` is a third constructor** — the only route from a `u16` back to a
+  `TargetId` — and it **validates the band and returns `None`** rather than clamping. Decision 15's
+  closed-constructor-set argument is what `runtime_ceiling`'s `get_unchecked` rests on, so the
+  SAFETY comment there enumerates all three and names the argument bounding each. That comment was
+  written at L10-A demanding exactly this of any third constructor, and it collected one rung later.
+- **An unattributable record is not filed under a guess.** It still reaches every byte sink —
+  losing the message as well as the attribution would be strictly worse — but it is charged to no
+  target and skips the ECS in-frame view entirely, because `FrameMeta.target` is a `u8` over a
+  256-id space in which **every value is a real target**. There is no sentinel to spend, which is
+  the same fact that killed the placeholder route above.

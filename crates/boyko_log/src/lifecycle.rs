@@ -242,6 +242,10 @@ pub fn drain_once() -> Option<crate::lane::DrainStats> {
     // of stack zeroed once instead of once per record.
     let mut line = crate::record::DspBuf::<{ crate::record::MAX_RENDERED_BYTES }>::new();
     Some(crate::lane::drain(&token, |site, _tsc, flags, payload| {
+        // A dynamic record carries its target ahead of its values, because a `dyn_*!` site has
+        // none at compile time (L10-B). The site's own `target` field is the discriminant, so the
+        // split is done once here and everything below reads the resolved pair.
+        let (target, payload) = crate::record::split_dynamic_target(site.target, payload);
         line.clear();
         render_record(&mut line, site, payload);
         let text = line.as_str();
@@ -249,14 +253,25 @@ pub fn drain_once() -> Option<crate::lane::DrainStats> {
         crate::sink::file::write_line(&token, text.as_bytes());
         // Counted once per record, HERE and not per destination: `delivered` answers "did this
         // target ever produce anything", and a record that reached two sinks did not happen twice.
-        crate::target::count_delivered(site.target);
-        if to_ecs {
+        //
+        // `None` is a record whose prefix did not survive the ring. It still reaches every sink --
+        // losing the message as well as the attribution would be strictly worse -- but it is not
+        // charged to a target, because charging it to a guess is how a census starts lying.
+        if let Some(t) = target {
+            crate::target::count_delivered(t);
+        }
+        // `to_ecs && target.is_some()`, and the second half is NOT a tidy-up. `FrameMeta.target`
+        // is a `u8` over a 256-id space, so EVERY value is a real target and there is no sentinel
+        // to spend on "unattributable" -- the same reason `TargetId::INVALID` does not exist. An
+        // unattributable record therefore skips the in-frame view, having already reached every
+        // byte sink above, rather than being filed under whichever target `255` happens to name.
+        if to_ecs && let Some(t) = target {
             // The byte channel above already has the record, so a refusal here shortens the
             // in-frame view and nothing else. That is why the return value is dropped rather than
             // escalated: `push` has already counted it, on both the ring and the substrate's row.
             let meta = crate::sink::ecs::FrameMeta {
                 level: site.level,
-                target: site.target.index() as u8,
+                target: t.index() as u8,
                 code: site.code,
                 flags,
             };

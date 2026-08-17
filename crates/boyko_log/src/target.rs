@@ -97,8 +97,30 @@ impl TargetId {
         TargetId((DYN_BAND_START + slot) as u16)
     }
 
+    /// Rebuild a dynamic-band id from a raw `u16` **that this crate itself wrote** *(L10-B)*.
+    ///
+    /// The one caller is `record::split_dynamic_target`, reading the two-byte prefix a dynamic
+    /// record carries. That is the only place a `TargetId` has to survive a round trip through
+    /// bytes, and it exists because the record header is full.
+    ///
+    /// **Validated, not trusted, and `None` rather than a clamp.** The bytes came off a shared
+    /// ring; a torn or truncated prefix is a symptom of something already wrong, and the two wrong
+    /// answers here are a panic in the drain and a fabricated in-band id. Refusing gives the reader
+    /// the record's *message* and costs it only the record's *attribution* — see the caller for why
+    /// that direction is the deliberate one.
+    ///
+    /// Restricted to the dynamic band on purpose: a static site never takes this path, so a raw
+    /// value naming an engine id did not come from where it claims to.
+    #[inline]
+    #[must_use]
+    pub(crate) fn from_dynamic_raw(raw: u16) -> Option<TargetId> {
+        let slot = (raw as usize).checked_sub(DYN_BAND_START)?;
+        (slot < DYN_BAND_LEN).then_some(TargetId(raw))
+    }
+
     /// The raw index. Useful to artifact writers and to tests; it cannot be turned back into a
-    /// `TargetId`, so handing it out does not widen the constructor set.
+    /// `TargetId` **except** through [`TargetId::from_dynamic_raw`], which validates the band, so
+    /// handing it out does not widen the constructor set with an unchecked route.
     #[inline]
     #[must_use]
     pub const fn index(self) -> u16 {
@@ -350,13 +372,20 @@ pub fn runtime_ceiling(id: TargetId) -> u8 {
     //       constant), so `DYN_BAND_START + DYN_BAND_LEN == MAX_TARGETS` -- the third `const`
     //       assert above -- is what bounds it. That equality is pinned rather than trusted
     //       precisely because it is load-bearing HERE and nowhere near this line.
-    //   There is no `INVALID` sentinel and no public constructor, so safe code cannot produce an
-    //   out-of-range value. A THIRD constructor (the downstream band, L11a) MUST re-establish the
-    //   bound and be named here -- this comment names two because there are two.
+    //     * `from_dynamic_raw(raw)` rebuilds an id from bytes off the ring and is the only route
+    //       from a `u16` back to a `TargetId`. It subtracts `DYN_BAND_START` and REFUSES anything
+    //       whose slot is not below `DYN_BAND_LEN`, returning `None` -- so the same equality that
+    //       bounds `new_dynamic` bounds this, and an out-of-band value produces no id at all
+    //       rather than an id that indexes past the array.
+    //   There is no `INVALID` sentinel and no public unchecked constructor, so safe code cannot
+    //   produce an out-of-range value. A FOURTH constructor (the downstream band, L11a) MUST
+    //   re-establish the bound and be named here -- this comment names three because there are
+    //   three.
     //
-    //   L10 widened the set, and the widening is what this comment is now for: the version that
-    //   said "`new_engine` is its ONLY constructor" was true when written and would have gone on
-    //   reading like a proof after it stopped being one.
+    //   L10-A widened the set to two and L10-B to three, one rung apart, which is the argument for
+    //   this comment enumerating rather than gesturing: the version that said "`new_engine` is its
+    //   ONLY constructor" was true when written and would have gone on reading like a proof after
+    //   it stopped being one -- twice, within two commits.
     let cell = unsafe { CONTROL.get_unchecked(id.0 as usize) };
     cell.load(Ordering::Relaxed) & TargetControl::LEVEL_MASK
 }

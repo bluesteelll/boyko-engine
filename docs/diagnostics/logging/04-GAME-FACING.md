@@ -122,6 +122,31 @@ reserved `.bss` extent that a flag-off run never touches. The rule this follows,
 table, belong to the seam; the fact that this table is reserved rather than resident is stated
 where the number lives, in `01-EMISSION-RING.md`'s `.bss` budget matrix.
 
+#### What L10-B added to this decision
+
+**The five macros exist and the missing gate is stated at the macro, not only here.** `dyn_error!`
+/ `dyn_warn!` / `dyn_info!` / `dyn_debug!` / `dyn_trace!` gate on `GLOBAL_CEILING` and
+`runtime_ceiling($id)` and nothing else — gate (a) is a `const` on a trait impl and a dynamic
+target is a *value*, so there is no impl to read one from.
+
+**The id is evaluated exactly once**, into a binding between the two gates. Both alternatives are
+worse: evaluating `$id` twice would gate on one target and emit on another if the expression is not
+pure, and hoisting it above `GLOBAL_CEILING` would make a compiled-out site still run its argument.
+The consequence a caller must know is that `$id` **is** evaluated when the profile permits the
+level and the target is `Off` — you cannot gate on a target without computing which target.
+
+**`dyn_warn!` and `dyn_error!` take the TYPED code newtype** (`WarnCode` / `ErrorCode`) and call
+`number()` themselves, so a `dyn_warn!` handed an `ErrorCode` does not compile. The static macros
+take a bare `u16` and therefore do **not** have that property — see `05-LADDER-GATES.md`'s L10 row
+for the measurement, and for why this rung declined to widen the hole while leaving it open.
+
+**Where the runtime id travels** is `01-EMISSION-RING.md`'s fourth divergence: this corpus never
+said, and the answer is `LogSite.target: Option<TargetId>` plus a two-byte payload prefix.
+
+**Registered dynamic targets appear in the census under their interned names.** Without that a
+mod's records would arrive, be counted, and be invisible in the one place a reader looks to find
+out what was and was not measured — which is Decision 17's whole subject.
+
 #### Two corrections measured at L10-A, where the table was built
 
 **(1) The publication order specified here cannot hold as written.** This section's slot contract

@@ -19,7 +19,7 @@
 use boyko_diag::loss::LossStatus;
 
 use crate::level::Level;
-use crate::target::{TargetId, engine_targets, target_control, target_stats};
+use crate::target::{TargetId, target_control, target_stats};
 
 /// One target's census row.
 #[derive(Clone, Copy)]
@@ -55,13 +55,20 @@ impl CensusRow {
     }
 }
 
-/// Take one row per engine target.
+/// Take one row per target that exists — every engine row, then every REGISTERED dynamic one.
 ///
 /// **Every** engine target appears, not only the armed ones: a target a host forgot to arm is
 /// exactly the case the census exists to make visible, and omitting it would let "no row" read as
 /// "nothing to report".
+///
+/// **Dynamic targets appear too, under their interned names** *(L10-B)*. Without this a mod's
+/// records would arrive, be counted in `TARGET_STATS`, and be invisible in the one place a reader
+/// looks to find out what was and was not measured — delivered to a row nobody prints, which is
+/// this campaign's signature defect. Unregistered slots are absent rather than blank, which is
+/// `targets()`'s rule and not a second one: a row for a target that does not exist is the vacuous
+/// row this vocabulary was invented to prevent.
 pub fn rows() -> impl Iterator<Item = CensusRow> {
-    engine_targets().map(|(id, name)| {
+    crate::target::targets().map(|(id, name)| {
         let (delivered, dropped, sampled_out, _sync) = target_stats(id);
         let status = if dropped > 0 {
             // Lossy wins over everything else it could be: a count that is a lower bound must
@@ -176,11 +183,24 @@ mod tests {
     }
 
     /// Every engine target gets a row — a missing row would read as "nothing to report".
+    ///
+    /// **The count is engine + REGISTERED DYNAMIC since L10-B**, and writing it that way is not
+    /// pedantry. The previous form asserted `rows().count() == engine_targets().count()`, which
+    /// after L10-B is true here only because this binary registers no dynamic target — an
+    /// assertion that passes for a reason unrelated to what it claims, and one that would have
+    /// gone red the first time a `#[cfg(test)]` neighbour registered one.
     #[test]
-    fn the_census_covers_every_engine_target() {
+    fn the_census_covers_every_engine_target_and_every_registered_dynamic_one() {
         let n = rows().count();
-        assert_eq!(n, engine_targets().count());
+        let engine = crate::target::engine_targets().count();
+        assert_eq!(n, engine + crate::target::dyn_registered());
         assert!(n >= 26, "the engine table has at least 26 rows; saw {n}");
+
+        // The claim the count alone does not make: each engine row is PRESENT, by id.
+        for (id, name) in crate::target::engine_targets() {
+            let row = rows().find(|r| r.id == id);
+            assert!(row.is_some(), "engine target {name} has no census row");
+        }
     }
 
     /// A row renders to the exact shape a reader greps for.

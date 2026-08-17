@@ -13,8 +13,33 @@ use crate::target::TargetId;
 /// and a rate latch is mutable per-site state. The macro expands a sibling `static` beside each
 /// rate-limited site instead, on its own line.
 pub struct LogSite {
-    /// Which target's control byte gated this site.
-    pub target: TargetId,
+    /// Which target's control byte gated this site — or `None` at a **dynamic** site *(L10)*.
+    ///
+    /// # Why absence, and not a sentinel or a flag bit
+    ///
+    /// A `dyn_warn!(id, …)` site takes its target as a **runtime argument**, and the same site may
+    /// be reached with a different id on every call — a loop over loaded mods is the ordinary case.
+    /// So a dynamic site cannot carry its target here, and the question is where the reader learns
+    /// that. Three answers were available and this is why the third won:
+    ///
+    /// * **A placeholder `TargetId`** (say the `log` row) would be a *lie a reader prints*. The
+    ///   type deliberately has no `INVALID` — `01-EMISSION-RING.md` deletes it, because an in-band
+    ///   sentinel that indexes an array is the same hazard in a nicer coat — so there is no honest
+    ///   value to put here.
+    /// * **A `DYNAMIC` bit in `RecordHeader::flags`** would work and costs nothing per record, but
+    ///   it couples this decision to a byte with five bits left and spends one on a fact the site
+    ///   already knows. The corpus records `clock_epoch_lo` *spending* the header's last pad byte;
+    ///   the header is not the place to put things that fit elsewhere.
+    /// * **`Option<TargetId>` here.** The site is cold `'static` data, never read on the emitting
+    ///   thread except on the loss paths, so two bytes here are free in the sense that matters.
+    ///   And "this site has no compile-time target" is *structurally* the same statement as
+    ///   "absence is `Option<TargetId>`", which is already this crate's rule for target absence.
+    ///
+    /// The consequence is the contract: **when this is `None` the record's payload is prefixed
+    /// with the target id as two little-endian bytes**, written by `emit_impl_dyn` and stripped by
+    /// the drain. One reader, one writer, and the discriminant that selects between them is this
+    /// field rather than a bit somebody has to remember to set.
+    pub target: Option<TargetId>,
     /// The site's severity.
     pub level: Level,
     /// `b'B'`, `b'E'`, `b'W'`, or `0` when the level carries no code.

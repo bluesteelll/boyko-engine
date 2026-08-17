@@ -909,23 +909,23 @@ nothing more. Verified the same way — repointing it stays green.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Read the engine target table (ids 0..=95; a collision is a const assert, so it does not compile) | `targets!` (434) |
-| Read a target's runtime ceiling — the third gate, one Relaxed byte load behind an unchecked index | `runtime_ceiling` (343) |
-| Register a target from data: cold, setup-time, idempotent by name; refuses with boyko-E0106 naming which of three reasons | `register_dynamic_target` (722) |
-| Resolve a name in EITHER band — a console user does not know which band a target is in | `find_target` (801) |
-| List every target that exists; an unregistered dynamic slot is absent, never listed blank | `targets` (818) |
+| Read the engine target table (ids 0..=95; a collision is a const assert, so it does not compile) | `targets!` (463) |
+| Read a target's runtime ceiling — the third gate, one Relaxed byte load behind an unchecked index | `runtime_ceiling` (365) |
+| Register a target from data: cold, setup-time, idempotent by name; refuses with boyko-E0106 naming which of three reasons | `register_dynamic_target` (751) |
+| Resolve a name in EITHER band — a console user does not know which band a target is in | `find_target` (830) |
+| List every target that exists; an unregistered dynamic slot is absent, never listed blank | `targets` (847) |
 
 **File:** [crates/boyko_log/src/lane.rs](../crates/boyko_log/src/lane.rs) — the producer path.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Follow a record from the call site into the ring: admission, encode, publish — never formatted on the caller thread | `emit_impl` (208) |
+| Follow a record from the call site into the ring: admission, encode, publish — never formatted on the caller thread | `emit_impl` (209) |
 
 **File:** [crates/boyko_log/src/record.rs](../crates/boyko_log/src/record.rs) — the self-describing payload.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Decode a payload against its format literal. ⚠️ It scans brace to brace WITHOUT reading between them, so a precision spec reaches a reader as full f32 precision | `render_payload` (581) |
+| Decode a payload against its format literal. ⚠️ It scans brace to brace WITHOUT reading between them, so a precision spec reaches a reader as full f32 precision | `render_payload` (619) |
 
 **File:** [crates/boyko_log/src/codes.rs](../crates/boyko_log/src/codes.rs) — the one registry.
 
@@ -943,7 +943,7 @@ nothing more. Verified the same way — repointing it stays green.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Ask whether anything is actually consuming records — the answer every stderr fallback is written against | `flush` (477) |
+| Ask whether anything is actually consuming records — the answer every stderr fallback is written against | `flush` (492) |
 
 **File:** [crates/boyko_log/src/sync_out.rs](../crates/boyko_log/src/sync_out.rs) — the synchronous route.
 
@@ -955,7 +955,7 @@ nothing more. Verified the same way — repointing it stays green.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Print the per-target census that tells a clean target from a switched-off one | `print` (101) |
+| Print the per-target census that tells a clean target from a switched-off one | `print` (108) |
 
 ### The gates that keep this honest
 

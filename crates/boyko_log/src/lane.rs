@@ -41,8 +41,9 @@ use boyko_diag::loss::{LossClass, record_here};
 
 use crate::GLOBAL_CEILING;
 use crate::level::Level;
-use crate::record::{HEADER_BYTES, LogArgs, MAX_RECORD_BYTES, RecordHeader};
+use crate::record::{DYN_PREFIX_BYTES, HEADER_BYTES, LogArgs, MAX_RECORD_BYTES, RecordHeader};
 use crate::site::LogSite;
+use crate::target::TargetId;
 
 /// Bytes per lane ring. A power of two, so the wrap is a mask.
 pub(crate) const LANE_BYTES: usize = 16 * 1024;
@@ -206,10 +207,43 @@ fn claim_cold() -> Option<u16> {
 /// and the `Release` store.
 #[inline(never)]
 pub fn emit_impl<A: LogArgs>(site: &'static LogSite, args: A) {
+    let Some(target) = site.target else {
+        // Unreachable by construction: `__log_site_emit!` writes `Some(..)`, and a `None` site
+        // reaches the producer only through `emit_impl_dyn`, which carries its target separately.
+        // Returning rather than unwrapping keeps a hypothetical future mis-wiring to "this record
+        // is missing" instead of "the process died inside a log statement".
+        debug_assert!(false, "invariant: a static site carries Some(target)");
+        return;
+    };
+    emit_to(site, target, args);
+}
+
+/// The producer path for a **dynamic** site, whose target is a runtime value *(L10)*.
+///
+/// Identical to [`emit_impl`] once the target is known; the difference is that this one writes the
+/// id into the record, because the header has no room and the site has no field for it. See
+/// [`LogSite::target`](crate::LogSite) for why the site's `None` is the discriminant.
+#[inline(never)]
+pub fn emit_impl_dyn<A: LogArgs>(site: &'static LogSite, target: TargetId, args: A) {
+    debug_assert!(
+        site.target.is_none(),
+        "invariant: a dynamic emission uses a site built by __log_site_emit_dyn!"
+    );
+    emit_to(site, target, args);
+}
+
+/// The shared body. `target` is resolved; whether the payload carries an id prefix is read from
+/// the **site**, so the two entry points cannot disagree about the record's shape.
+#[inline(never)]
+fn emit_to<A: LogArgs>(site: &'static LogSite, target: TargetId, args: A) {
     // Test-only, and OFF in every build that does not enable `test-probe` — see `probe.rs` for
     // why an observer counts emission HERE rather than delivery at the far end of the ring.
     #[cfg(feature = "test-probe")]
     crate::probe::note_emission(site, &args);
+
+    // Two little-endian bytes ahead of the values when the site has no compile-time target. Zero
+    // for every static site, so no existing record grows by a byte.
+    let prefix = if site.target.is_none() { DYN_PREFIX_BYTES } else { 0 };
 
     let Some(lane) = resolve() else {
         // A thread with no lane does NOT silently drop a severe record. `Warn` and `Error` take
@@ -221,24 +255,24 @@ pub fn emit_impl<A: LogArgs>(site: &'static LogSite, args: A) {
         // which matters because the commonest way to reach here is a driver or OS callback on a
         // thread the engine never created, under a storm, with all 14 spare lanes taken.
         if site.level <= Level::Warn {
-            emit_unlaned(site, &args);
+            emit_unlaned(site, target, &args);
         } else {
             record_here(LossClass::Unclaimed, 0);
             // Charged to the TARGET as well as to the substrate's un-laned row. The two answer
             // different questions -- "which thread lost records" and "which category is
             // incomplete" -- and a census that read only the first could call a target clean while
             // every one of its records went missing on a driver callback thread.
-            crate::target::count_dropped(site.target);
+            crate::target::count_dropped(target);
         }
         return;
     };
 
-    let need = HEADER_BYTES + args.encoded_len();
+    let need = HEADER_BYTES + prefix + args.encoded_len();
     if need > MAX_RECORD_BYTES {
         // Checked at RUNTIME, in every profile. Twelve arguments of 256 bytes exceed the cap, so
         // "unreachable" would have described a debug-build panic reachable from safe user code.
         record_here(LossClass::Refused, need as u64);
-        crate::target::count_dropped(site.target);
+        crate::target::count_dropped(target);
         return;
     }
     let need = need as u32;
@@ -254,7 +288,7 @@ pub fn emit_impl<A: LogArgs>(site: &'static LogSite, args: A) {
 
     if !admit(lane, w, pad, need, site.level) {
         record_here(LossClass::Overflow, u64::from(need));
-        crate::target::count_dropped(site.target);
+        crate::target::count_dropped(target);
         return;
     }
 
@@ -290,11 +324,18 @@ pub fn emit_impl<A: LogArgs>(site: &'static LogSite, args: A) {
     //   producer (`Sync` clause 1).
     unsafe {
         write_header(lane, off, &hdr);
-        let dst = lane.buf.0.get().cast::<u8>().add((off as usize) + HEADER_BYTES);
-        let written = args.encode(dst);
+        let base = lane.buf.0.get().cast::<u8>().add((off as usize) + HEADER_BYTES);
+        if prefix != 0 {
+            // The dynamic target, ahead of the values. `to_le_bytes` rather than a `write` of the
+            // `u16` itself: the ring is byte-oriented and records are never aligned, so an aligned
+            // store here would be unsound on the very first odd offset.
+            let id = target.index().to_le_bytes();
+            core::ptr::copy_nonoverlapping(id.as_ptr(), base, DYN_PREFIX_BYTES);
+        }
+        let written = args.encode(base.add(prefix));
         debug_assert_eq!(
             written,
-            need as usize - HEADER_BYTES,
+            need as usize - HEADER_BYTES - prefix,
             "invariant: LogArgs::encode writes exactly encoded_len bytes"
         );
     }
@@ -324,7 +365,7 @@ const UNLANED_SCRATCH: usize = MAX_RECORD_BYTES - HEADER_BYTES;
 /// least other information.
 #[cold]
 #[inline(never)]
-fn emit_unlaned<A: LogArgs>(site: &'static LogSite, args: &A) {
+fn emit_unlaned<A: LogArgs>(site: &'static LogSite, target: TargetId, args: &A) {
     let need = args.encoded_len();
     let mut scratch = [0u8; UNLANED_SCRATCH];
     let n = if need <= scratch.len() {
@@ -338,7 +379,7 @@ fn emit_unlaned<A: LogArgs>(site: &'static LogSite, args: &A) {
         // says which site produced it.
         0
     };
-    emit_unlaned_line(site, &scratch[..n]);
+    emit_unlaned_line(site, target, &scratch[..n]);
 }
 
 /// Render one un-laned record and write it to the synchronous channel.
@@ -350,13 +391,13 @@ fn emit_unlaned<A: LogArgs>(site: &'static LogSite, args: &A) {
 /// acquires it.
 #[cold]
 #[inline(never)]
-fn emit_unlaned_line(site: &'static LogSite, payload: &[u8]) {
+fn emit_unlaned_line(site: &'static LogSite, target: TargetId, payload: &[u8]) {
     let mut line = crate::record::DspBuf::<{ crate::record::MAX_RENDERED_BYTES }>::new();
     let _ = write!(line, "{}:{} ", site.file, site.line);
     let mut f = crate::site::LogFormatter::new(&mut line);
     crate::record::render_payload(payload, site.fmt, &mut f);
     crate::sync_out::write_oracle_line("boyko-log: ", line.as_str());
-    crate::target::count_sync_routed(site.target);
+    crate::target::count_sync_routed(target);
 }
 
 /// What one drain pass moved.
@@ -657,7 +698,7 @@ mod tests {
     }
 
     static TEST_SITE: LogSite = LogSite {
-        target: crate::TargetId::new_engine(1),
+        target: Some(crate::TargetId::new_engine(1)),
         level: Level::Info,
         class: 0,
         code: 0,
@@ -735,7 +776,7 @@ mod tests {
     }
 
     static TEST_SITE_ERROR: LogSite = LogSite {
-        target: crate::TargetId::new_engine(1),
+        target: Some(crate::TargetId::new_engine(1)),
         level: Level::Error,
         class: b'E',
         code: 1,

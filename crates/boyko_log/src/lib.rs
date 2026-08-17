@@ -87,7 +87,7 @@ pub use codes::{
     CODE_IDX_EXHAUSTED, CodeStatus, DIAGNOSTICS, DiagInfo, ErrorCode, OnceSite, PanicCode,
     RatePolicy, WarnCode, explain,
 };
-pub use lane::{LANE_ARRAY_LEN, emit_impl};
+pub use lane::{LANE_ARRAY_LEN, emit_impl, emit_impl_dyn};
 pub use level::Level;
 pub use record::{
     DspBuf, LogArgs, LogValue, MAX_RECORD_BYTES, MAX_STR_BYTES, ValueTag, flags, render_payload,

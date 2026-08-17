@@ -192,5 +192,65 @@ fn the_dynamic_band_interns_idempotently_and_then_refuses() {
         "the record does not name the string that was rejected: {text:?}"
     );
 
+    // ── the dyn_*! macros: a record on a runtime target reaches a reader ─────────────────────
+    //
+    // `mod:acme` was registered at `Level::Debug`, which is what makes the three claims below
+    // separable: `dyn_info!` and `dyn_warn!` pass gate (c), `dyn_trace!` does not.
+    let other = find_target("fill:0").expect("the fill registered it");
+    boyko_log::dyn_info!(id, "acme fired {} times", 3u32);
+    // The code is passed as its TYPED newtype, so a `dyn_warn!` handed an `ErrorCode` does not
+    // compile. `W0103` rather than `E0106`: the first draft of this line passed
+    // `E0106.number()` and the sink printed a W-class line carrying 0106 -- an E code's number under a W class,
+    // which `explain(b'W', 106)` cannot resolve. See the commit message; the STATIC macros still
+    // accept that and it is recorded as a defect rather than fixed here.
+    boyko_log::dyn_warn!(id, boyko_log::codes::W0103, "acme warned about {}", "a thing");
+    boyko_log::dyn_trace!(id, "THIS MUST NOT APPEAR: {}", 1u32);
+
+    let text = sink_text(&path);
+    assert!(
+        text.contains("acme fired 3 times"),
+        "a dyn_info! record did not reach the sink WITH ITS ARGUMENTS -- if the line is present but
+         the values are missing, the dynamic payload prefix was not stripped: {text:?}"
+    );
+    assert!(text.contains("acme warned about a thing"), "dyn_warn! did not arrive: {text:?}");
+    assert!(
+        !text.contains("THIS MUST NOT APPEAR"),
+        "dyn_trace! emitted through a Debug ceiling -- gate (c) is not reading the RUNTIME target"
+    );
+
+    // ── the record is attributed to the DYNAMIC target, under its interned name ───────────────
+    //
+    // The claim the prefix exists for. Without it the drain would charge these to whatever the
+    // site's field said, and a mod's records would be counted against somebody else's row.
+    let row = census_row("mod:acme").expect("a registered dynamic target has a census row");
+    assert!(row.records >= 2, "dyn records were not charged to their target: {} ", row.records);
+    assert_eq!(row.status_str(), "MEASURED");
+    assert_eq!(row.level, Level::Debug, "the census reports the target's own ceiling");
+
+    // ── ONE call site, TWO targets — the property that forced the payload prefix ──────────────
+    //
+    // A per-site `static` target could not express this: the site below is one `static LogSite`
+    // and it is reached with two different ids. If the target travelled in the site rather than
+    // in the record, the second call would be filed under the first call's target.
+    let before = census_row("fill:0").map_or(0, |r| r.records);
+    set_target_control(other, TargetControl::new(Level::Info, 0, false));
+    for t in [id, other] {
+        boyko_log::dyn_info!(t, "one site, two targets");
+    }
+    let _ = sink_text(&path);
+    let after = census_row("fill:0").map_or(0, |r| r.records);
+    assert_eq!(
+        after,
+        before + 1,
+        "the second target got {} of the two records from one site; a site-carried target would \
+         give it 0 and charge both to the first",
+        after - before
+    );
+
     shutdown();
+}
+
+/// The census row for an interned dynamic name, or `None` if the census does not list it.
+fn census_row(name: &str) -> Option<boyko_log::census::CensusRow> {
+    boyko_log::census::rows().find(|r| r.name == name)
 }
