@@ -360,6 +360,16 @@ macro_rules! code_class_ty {
 }
 
 /// `true` when every number is greater than the one before it.
+/// Whether ONE row's policy is representable. The slice form is a `const` assert at declaration;
+/// this is its per-row companion, for a downstream table checking itself at run time.
+#[must_use]
+pub const fn rate_policy_is_representable(rate: RatePolicy) -> bool {
+    match rate {
+        RatePolicy::EveryN(n) => n != 0 && n.is_power_of_two(),
+        _ => true,
+    }
+}
+
 pub const fn numbers_strictly_increasing(nums: &[u16]) -> bool {
     let mut i = 1;
     while i < nums.len() {
@@ -1006,6 +1016,113 @@ macro_rules! declare_codes {
             $crate::codes::numbers_strictly_increasing(&[$($num),*]),
             "downstream registry rows must be in strictly increasing number order"
         );
+    };
+}
+
+/// Generate a downstream table's own tidy checks *(Decision 19)*.
+///
+/// ```ignore
+/// mod acme { boyko_log::declare_codes! { prefix = "acme", … } }
+///
+/// boyko_log::codes_tidy!(table = acme::DIAGNOSTICS, prefix = acme::PREFIX, doc_root = "docs/diag");
+/// ```
+///
+/// # WHAT IT GENERATES, AND WHAT IT CANNOT — stated because the difference is the whole value
+///
+/// The engine's registry runs **eight** checks. This macro generates the five that are decidable
+/// from the table and the filesystem, and it **does not pretend to the other three**:
+///
+/// | Engine check | Here |
+/// |---|---|
+/// | 0 rows present / non-vacuous | **generated** — and it is the guard, see below |
+/// | 1 numbers strictly increasing, no duplicates | **generated** (also a `const` assert at declaration) |
+/// | 2 every `Live` row has a doc page | **generated**, against the caller's `doc_root` |
+/// | 4 summaries are non-empty and rate policies representable | **generated** |
+/// | 7 class byte is one of `B`/`E`/`W` | **generated** |
+/// | 3 every row has an emitter naming it as an IDENTIFIER | **not generated** |
+/// | 5 every `Warn`/`Error` row is named by a test | **not generated** |
+/// | 6 `B`-class codes appear only in panic position | **not generated** |
+///
+/// The three absent ones all need a **source walker** over the caller's own crate — comment and
+/// literal stripping, the cross-file `#[cfg(test)] mod` rule, the `src/bin/` exclusion. The engine's
+/// walker is a test-only module and shipping it through a macro would make every downstream crate
+/// depend on this crate's test layout. Claiming those three anyway would be worse than omitting
+/// them: a caller would read "tidy" and believe their codes were checked for emitters when nothing
+/// had looked.
+///
+/// **The vacuity guard is check 0 and it is not decoration.** A table that declares no rows passes
+/// every other check trivially, which is precisely how a tidy gate comes to certify nothing —
+/// the failure this corpus has found at five separate rungs.
+#[macro_export]
+macro_rules! codes_tidy {
+    (table = $table:expr, prefix = $prefix:expr, doc_root = $doc_root:expr $(,)?) => {
+        /// The downstream registry's own tidy checks. Named so a failure says whose table it was.
+        #[test]
+        fn codes_tidy_downstream_registry() {
+            let table: &[$crate::codes::DiagInfo] = $table;
+            let prefix: &str = $prefix;
+
+            // ── check 0: NON-VACUOUS ─────────────────────────────────────────────────────────
+            assert!(
+                !table.is_empty(),
+                "the {prefix} code table is EMPTY, so every check below passes without looking at \
+                 anything -- which is how a tidy gate comes to certify nothing"
+            );
+            assert!(!prefix.is_empty(), "a table's prefix is what makes its codes ITS codes");
+
+            // ── check 1: strictly increasing, therefore no duplicates ────────────────────────
+            for w in table.windows(2) {
+                assert!(
+                    w[0].number < w[1].number,
+                    "{prefix} rows must be in strictly increasing number order; {} then {} is a \
+                     duplicate or an out-of-order row, and two rows sharing a number share a mint \
+                     cell",
+                    w[0].number,
+                    w[1].number
+                );
+            }
+
+            // ── checks 4 and 7: the row's own contents ───────────────────────────────────────
+            for row in table {
+                assert!(
+                    matches!(row.class, b'B' | b'E' | b'W'),
+                    "{prefix}-{}{:04}: class byte {:?} is not one of B/E/W",
+                    row.class as char,
+                    row.number,
+                    row.class as char
+                );
+                assert!(
+                    !row.summary.is_empty(),
+                    "{prefix}-{}{:04} has an empty summary -- a code with no sentence is a code \
+                     nobody can act on",
+                    row.class as char,
+                    row.number
+                );
+                assert!(
+                    $crate::codes::rate_policy_is_representable(row.rate),
+                    "{prefix}-{}{:04}: EveryN(n) requires a power of two, or the `count & (n-1)` \
+                     test mis-samples across the counter wrap",
+                    row.class as char,
+                    row.number
+                );
+            }
+
+            // ── check 2: every row has a documented page ─────────────────────────────────────
+            let root = ::std::path::Path::new($doc_root);
+            let mut missing: Vec<String> = Vec::new();
+            for row in table {
+                let name = format!("{}{:04}.md", row.class as char, row.number);
+                if !root.join(&name).exists() {
+                    missing.push(name);
+                }
+            }
+            assert!(
+                missing.is_empty(),
+                "these {prefix} codes have no page under {}: {missing:?}. A code is a PROMISE of a \
+                 documented page -- Decision 7 is not relaxed for downstream tables.",
+                root.display()
+            );
+        }
     };
 }
 

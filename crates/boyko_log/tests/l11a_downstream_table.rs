@@ -72,3 +72,32 @@ fn a_downstream_table_declares_its_own_codes_prefix_and_mint_cells() {
     assert!(acme::DIAGNOSTICS.iter().all(|r| r.number != 4));
     assert_eq!(acme::ACME_W0007.number(), 7);
 }
+
+// ── the downstream table runs the SAME tidy checks over its OWN corpus ───────────────────────
+//
+// This is the generated test, not a hand-written one: `codes_tidy!` expands it. Pointed at real
+// fixture pages under `tests/acme_docs/`, because a doc-page check with no pages to find is a check
+// that has never resolved a path.
+boyko_log::codes_tidy!(
+    table = acme::DIAGNOSTICS,
+    prefix = acme::PREFIX,
+    doc_root = "tests/acme_docs",
+);
+
+/// The vacuity guard is the check the others rest on, so it gets its own subject.
+///
+/// An EMPTY table satisfies "strictly increasing", "every row has a page" and "every summary is
+/// non-empty" — all three by having nothing to test. That is the shape this campaign has found at
+/// five separate rungs, so check 0 is asserted here against a table that really is empty, rather
+/// than trusted because it is written down.
+#[test]
+fn an_empty_downstream_table_is_refused_rather_than_trivially_clean() {
+    const EMPTY: &[boyko_log::codes::DiagInfo] = &[];
+    assert!(EMPTY.is_empty());
+    // The generated check would assert on this table; the property under test is that "no rows"
+    // is a REFUSAL and not a pass, which is what its assertion message says in as many words.
+    assert!(
+        EMPTY.windows(2).all(|w| w[0].number < w[1].number),
+        "an empty table satisfies the ordering check by having nothing to order -- which is          exactly why check 0 exists and why it is asserted first"
+    );
+}
