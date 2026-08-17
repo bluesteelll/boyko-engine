@@ -310,6 +310,28 @@ pub struct Frame<'a> {
 ///
 /// Cumulative for the process. A reader takes differences; storing a difference here would make
 /// two consumers disagree, and there is deliberately only ever one.
+/// `boyko-W0117`: this drain pass refused frames to the in-frame view.
+///
+/// **One per DRAIN, carrying the pass's count** -- not one per refusal. A formatting storm refuses
+/// thousands, and a report per refusal would be the storm again in a second channel. The count is
+/// the delta over the pass, so consecutive reports add up to the total rather than each restating
+/// it.
+///
+/// The byte sinks already have every one of these records: only the IN-FRAME view is short. That
+/// is why this is a `W` and not an `E`, and why it says so -- a reader who sees a gap in a console
+/// widget needs to know the file is complete.
+#[cold]
+#[inline(never)]
+pub fn report_overflow(frames: u64, bytes: u64) {
+    crate::warn!(
+        crate::Log,
+        crate::codes::W0117,
+        "the ECS handoff refused {} frames ({} bytes) this pass; the in-frame view is short and          the byte sinks are not",
+        frames,
+        bytes
+    );
+}
+
 #[must_use]
 pub fn lost() -> (u64, u64) {
     (ECS_HANDOFF.lost.load(Ordering::Relaxed), ECS_HANDOFF.lost_bytes.load(Ordering::Relaxed))

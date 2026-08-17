@@ -247,10 +247,14 @@ pub fn drain_once() -> Option<crate::lane::DrainStats> {
     // would report as a bug.
     crate::sink::request::pump(&token, FILE_CAP.load(Ordering::Relaxed));
     let to_ecs = ecs_ring_enabled();
+    // Snapshotted so the report below carries THIS PASS's refusals. A report of the running total
+    // would restate the same thousands every pass, and a reader could not tell a storm that has
+    // stopped from one that has not.
+    let (lost_before, bytes_before) = crate::sink::ecs::lost();
     // ONE buffer for the whole pass, hoisted out of the per-record closure: `MAX_RENDERED_BYTES`
     // of stack zeroed once instead of once per record.
     let mut line = crate::record::DspBuf::<{ crate::record::MAX_RENDERED_BYTES }>::new();
-    Some(crate::lane::drain(&token, |site, _tsc, flags, payload| {
+    let stats = crate::lane::drain(&token, |site, _tsc, flags, payload| {
         // A dynamic record carries its target ahead of its values, because a `dyn_*!` site has
         // none at compile time (L10-B). The site's own `target` field is the discriminant, so the
         // split is done once here and everything below reads the resolved pair.
@@ -305,7 +309,12 @@ pub fn drain_once() -> Option<crate::lane::DrainStats> {
             };
             crate::sink::ecs::push(&token, meta, text.as_bytes());
         }
-    }))
+    });
+    let (lost_after, bytes_after) = crate::sink::ecs::lost();
+    if lost_after > lost_before {
+        crate::sink::ecs::report_overflow(lost_after - lost_before, bytes_after - bytes_before);
+    }
+    Some(stats)
 }
 
 /// Render one record: `LEVEL [boyko-Cnnnn ]file:line message`.

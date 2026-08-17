@@ -736,6 +736,11 @@ codes! {
     // rest of the run. The records are larger and none is lost, which is one fact.
     (116,  W, W0116, RatePolicy::Once,  CodeStatus::Live,
         "The binary sink's site dictionary is full; later sites are written inline"),
+    // ── L16: the ECS handoff's refusals ──────────────────────────────────────────────────────
+    // `Every` -- but every DRAIN, not every refusal: the count is the pass's delta, so consecutive
+    // reports sum to the total instead of each restating it.
+    (117,  W, W0117, RatePolicy::Every, CodeStatus::Live,
+        "The ECS handoff refused frames this pass; the in-frame view is short"),
     // ── L15: the panic hook's own failure ────────────────────────────────────────────────────
     // `Every`: two threads panicking are two facts, and a latch would report one of them.
     (118,  E, E0118, RatePolicy::Every, CodeStatus::Live,
@@ -1246,6 +1251,7 @@ mod tests {
             (b'E', 109),  // L15  -- the crash file could not be opened
             (b'W', 111),  // L14  -- a target is armed but no active sink accepts it
             (b'W', 112),  // L13a -- rotation discarded part of the session
+            (b'W', 117),  // L16  -- the ECS handoff refused frames this pass
             (b'E', 118),  // L15  -- the panic hook could not claim the drain role
             (b'W', 113),  // L12  -- sampling is discarding records
             (b'W', 116),  // L13b -- binary site dictionary full, sites written inline

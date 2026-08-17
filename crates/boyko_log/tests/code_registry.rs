@@ -434,7 +434,6 @@ const FORWARD_DECLARED: &[(&str, &str)] = &[
     // (`02-SINK-LIFECYCLE.md`, `06-DISPOSITIONS.md` M16), not the control spec. The rung was right.
     ("E0108", "L14 — shutdown timed out and detached the sink thread"),
     ("W0110", "L14 — sink filter rejected every destination"),
-    ("W0117", "L16 — the ECS handoff ring overflowed"),
 ];
 
 // ────────────────────────────── checks 5 and 6, armed at L6 ───────────────────────────────
