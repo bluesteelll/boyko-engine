@@ -700,6 +700,11 @@ codes! {
     // two, and a latch would name one of them.
     (107,  E, E0107, RatePolicy::Every, CodeStatus::Live,
         "A sink control request was refused because the request ring is full"),
+    // ── L14: the census's unsunk report ──────────────────────────────────────────────────────
+    // `Once`: the condition is a CONFIGURATION, not an event -- every later unsunk row has the
+    // same cause, and one misconfiguration must not become a storm of reports about it.
+    (111,  W, W0111, RatePolicy::Once,  CodeStatus::Live,
+        "A target is armed but no active sink accepts it; its silence is not evidence"),
     // ── L13a: rotation's one report ───────────────────────────────────────────────────────────
     // `Once`: a session that rotates a hundred times has ONE fact to report -- the file holds
     // the tail and not the whole run -- and repeating it per rotation would bury it.
@@ -1229,6 +1234,7 @@ mod tests {
             (b'E', 106),  // L10 -- a dynamic target could not be registered (all three refusals)
             (b'E', 104),  // L11a -- two downstream targets claim one id
             (b'E', 107),  // L14  -- sink control request ring full
+            (b'W', 111),  // L14  -- a target is armed but no active sink accepts it
             (b'W', 112),  // L13a -- rotation discarded part of the session
             (b'W', 113),  // L12  -- sampling is discarding records
             (b'W', 116),  // L13b -- binary site dictionary full, sites written inline

@@ -435,7 +435,6 @@ const FORWARD_DECLARED: &[(&str, &str)] = &[
     ("E0108", "L14 — shutdown timed out and detached the sink thread"),
     ("E0109", "L15 — crash sink could not be opened"),
     ("W0110", "L14 — sink filter rejected every destination"),
-    ("W0111", "L14 — census reports unsunk records"),
     ("W0117", "L16 — the ECS handoff ring overflowed"),
     ("E0118", "L15 — the panic hook could not complete a flush"),
 ];

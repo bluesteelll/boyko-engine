@@ -77,7 +77,23 @@ pub fn rows() -> impl Iterator<Item = CensusRow> {
         } else if sampled_out > 0 {
             LossStatus::UnprovenSampled
         } else if delivered == 0 {
-            LossStatus::Unproven
+            // AN ARMED TARGET THAT NO SINK ACCEPTS IS NOT "NOTHING HAPPENED" (disposition E20).
+            // A game enables a category, sees an empty log, and concludes clean -- the vacuous
+            // gate in a new costume. The two silences are indistinguishable in the file and are
+            // told apart here, where the policy table can still be asked.
+            //
+            // Checked at the target's OWN ceiling, not at a fixed level: a target armed at `Warn`
+            // whose sink floor is `Warn` is perfectly sunk, and testing it at `Trace` would report
+            // every correctly-configured pair as unsunk.
+            let ceiling = target_control(id).level();
+            if ceiling != crate::Level::Off
+                && !crate::sink::slot::any_sink_accepts(id, ceiling)
+            {
+                report_unsunk(id, name);
+                LossStatus::UnprovenUnsunk
+            } else {
+                LossStatus::Unproven
+            }
         } else {
             LossStatus::Measured
         };
@@ -90,6 +106,27 @@ pub fn rows() -> impl Iterator<Item = CensusRow> {
             status,
         }
     })
+}
+
+/// `boyko-W0111`: a target is armed and **no `Active` sink accepts it**.
+///
+/// `Once`, because the condition is a CONFIGURATION and not an event: every later row with the
+/// same policy is also unsunk, and reporting each would turn one misconfiguration into a storm of
+/// reports about it -- the argument `W0501` records for the query-type table and `W0114` for the
+/// index budget.
+///
+/// It names the target, because "something was unsunk" leaves a reader diffing a census against a
+/// sink policy by hand, which is the state a code exists to replace.
+#[cold]
+#[inline(never)]
+fn report_unsunk(id: crate::TargetId, name: &str) {
+    crate::warn!(
+        crate::Log,
+        crate::codes::W0111,
+        "target {} is armed at {} but no active sink accepts it: its silence is not evidence",
+        name,
+        target_control(id).level().as_str()
+    );
 }
 
 /// `true` when any target's counts are a lower bound rather than a total.

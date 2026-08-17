@@ -96,3 +96,57 @@ fn state_floor_and_filter_each_decide_delivery_on_their_own() {
     reset();
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+#[ignore = "drives every sink Off; run alone -- `--ignored --test-threads=1`"]
+fn an_armed_target_no_sink_accepts_is_unsunk_and_says_so() {
+    // Runs `#[ignore]`d and alone because its condition is EVERY SINK OFF, which is a process-wide
+    // state: any other test in this binary emitting while it holds that state would have its
+    // records discarded, and would then measure this test's setup instead of its own.
+    let path = std::env::temp_dir().join("boyko_l14_unsunk.log");
+    let _ = std::fs::remove_file(&path);
+    assert!(boyko_log::sink::file::set_path(path.to_str().expect("a UTF-8 temp path")));
+    boot(LogConfig {
+        console: false,
+        sink_thread: false,
+        ecs_ring: false,
+        file: true,
+        file_cap_bytes: 0,
+        sink_mode: SinkMode::Manual,
+    });
+    assert!(enable(), "enable() refused a freshly booted process");
+    set_target_control(<Ecs as LogTarget>::ID, TargetControl::new(Level::Info, 0, false));
+    set_target_control(<Log as LogTarget>::ID, TargetControl::new(Level::Trace, 0, false));
+    reset();
+
+    // Armed, delivered nothing, and every sink refuses it: the row must NOT read plain `UNPROVEN`,
+    // which a reader is entitled to interpret as "that subsystem had nothing to say".
+    set_target(SLOT_FILE, <Ecs as LogTarget>::ID, false);
+    set_target(SLOT_CONSOLE, <Ecs as LogTarget>::ID, false);
+    set_target(SLOT_ECS, <Ecs as LogTarget>::ID, false);
+    set_target(3, <Ecs as LogTarget>::ID, false);
+
+    let row = boyko_log::census::rows()
+        .find(|r| r.id == <Ecs as LogTarget>::ID)
+        .expect("every engine target has a census row");
+    // Asserted on `status_str` and not the enum: that string is the stable surface a support
+    // ticket quotes, and it is what a reader greps for.
+    assert_eq!(
+        row.status_str(),
+        "UNPROVEN(unsunk)",
+        "an armed target no sink accepts reported as {} -- indistinguishable from a clean run",
+        row.status_str()
+    );
+
+    // The record reaches a reader. `Log` is still sunk, which is why the report about `Ecs` being
+    // unsunk is not itself unsunk -- a report that shared its subject's fate would be unreadable
+    // exactly when it mattered.
+    let DrainResult::Ran(_) = drain() else { panic!("the drain role is free in this process") };
+    let text = std::fs::read_to_string(&path).expect("the sink's file is readable");
+    let code = format!("boyko-W{:04}", boyko_log::codes::W0111.number());
+    assert!(text.contains(&code), "an unsunk target emitted no {code}: {text:?}");
+    assert!(text.contains("ecs"), "W0111 must NAME the target: {text:?}");
+
+    reset();
+    let _ = std::fs::remove_file(&path);
+}

@@ -955,7 +955,7 @@ nothing more. Verified the same way — repointing it stays green.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Print the per-target census that tells a clean target from a switched-off one | `print` (108) |
+| Print the per-target census that tells a clean target from a switched-off one | `print` (145) |
 
 ### The gates that keep this honest
 
