@@ -73,6 +73,7 @@ pub fn intern_site(_site: *const crate::LogSite) -> Option<(u16, bool)> {
     if n as usize >= SITE_DICT_LEN {
         // Undo, so a full table does not keep climbing and the census reports the real occupancy.
         SITE_DICT_NEXT.fetch_sub(1, Ordering::Relaxed);
+        report_dict_full();
         return None;
     }
     Some((n as u16, true))
@@ -152,4 +153,27 @@ pub fn decode_record(buf: &[u8]) -> Option<(RecordFrame<'_>, usize)> {
         },
         end,
     ))
+}
+
+/// `boyko-W0116`, once: the site dictionary is full and later sites are written inline.
+///
+/// **Nothing is lost and nothing is wrong** — the records are simply larger, because each carries
+/// its own file, line and format instead of a two-byte reference. That is the whole report, and it
+/// is why this is a `Warn` and not an `Error`.
+///
+/// `Once`: past a full table **every** later site writes inline, so the condition holds for the
+/// rest of the run. One line stating that the stream has grown is the fact; one per site would be a
+/// storm made of the very records it is warning about.
+#[cold]
+#[inline(never)]
+fn report_dict_full() {
+    static SITE: crate::codes::OnceSite = crate::codes::OnceSite::new();
+    if SITE.claim() {
+        crate::warn!(
+            crate::Log,
+            crate::codes::W0116,
+            "binary site dictionary is full at {} entries; later sites are written INLINE -- the              stream grows, no record is lost, and no id is reused",
+            SITE_DICT_LEN
+        );
+    }
 }

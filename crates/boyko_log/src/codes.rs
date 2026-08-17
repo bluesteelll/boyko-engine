@@ -716,6 +716,11 @@ codes! {
         "The downstream diagnostic-code index space is nine tenths spent"),
     (115,  E, E0115, RatePolicy::Once,  CodeStatus::Live,
         "The downstream diagnostic-code index space is exhausted; a code has no rate slot"),
+    // ── L13b: the binary sink's site dictionary ──────────────────────────────────────────────
+    // `Once`: past a full table EVERY later site writes inline, so the condition holds for the
+    // rest of the run. The records are larger and none is lost, which is one fact.
+    (116,  W, W0116, RatePolicy::Once,  CodeStatus::Live,
+        "The binary sink's site dictionary is full; later sites are written inline"),
     // ── L6's five new rows ──────────────────────────────────────────────────────────────────
     // Every summary below is read out of the message its emitter actually prints. `E0201` is the
     // pool's only diagnostic; `W0501`/`B0502` are the two halves of one table filling up, and the
@@ -1220,6 +1225,7 @@ mod tests {
             (b'E', 104),  // L11a -- two downstream targets claim one id
             (b'W', 112),  // L13a -- rotation discarded part of the session
             (b'W', 113),  // L12  -- sampling is discarding records
+            (b'W', 116),  // L13b -- binary site dictionary full, sites written inline
             (b'W', 114),  // L11a -- downstream code index space at 90 %
             (b'E', 115),  // L11a -- downstream code index space exhausted
             (b'E', 201),  // L6  -- a fire-and-forget task panicked, process aborting
