@@ -2237,7 +2237,7 @@ deletes the never-evaluated guarantee, and no test of the output would notice.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Decode a payload against its format literal. ⚠️ It scans brace to brace WITHOUT reading between them, so a precision spec reaches a reader as full f32 precision | `render_payload` (643) |
+| Decode a payload against its format literal. ⚠️ It scans brace to brace WITHOUT reading between them, so a precision spec reaches a reader as full f32 precision | `render_payload` (755) |
 
 **File:** [crates/boyko_log/src/codes.rs](../crates/boyko_log/src/codes.rs) — the one registry.
 

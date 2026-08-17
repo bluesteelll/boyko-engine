@@ -925,7 +925,7 @@ nothing more. Verified the same way — repointing it stays green.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Decode a payload against its format literal. ⚠️ It scans brace to brace WITHOUT reading between them, so a precision spec reaches a reader as full f32 precision | `render_payload` (643) |
+| Decode a payload against its format literal. ⚠️ It scans brace to brace WITHOUT reading between them, so a precision spec reaches a reader as full f32 precision | `render_payload` (755) |
 
 **File:** [crates/boyko_log/src/codes.rs](../crates/boyko_log/src/codes.rs) — the one registry. *(This file changes every logging rung, so its anchor has been re-derived four times; that is the gate working, and the churn is the price of a citation a reader can trust.)*
 

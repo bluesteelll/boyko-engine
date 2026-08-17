@@ -69,6 +69,118 @@ pub const MAX_STR_BYTES: usize = 256;
 /// corrupting, but a truncated diagnostic is still a diagnostic that lost its tail.
 pub const MAX_RENDERED_BYTES: usize = 3072;
 
+/// A game type that can be a log argument, encoded **field by field** *(L11b, B10)*.
+///
+/// # Why there is no blanket `copy_nonoverlapping` of `size_of::<Self>()`
+///
+/// The design this replaces had one, and it was **UB independent of whether `POD_LEN` was honest**.
+/// A `#[repr(C)]` struct has padding; `size_of::<Self>()` includes it; padding bytes are
+/// **uninitialised**, and copying them onto the wire lets the sink materialise a `&[u8]` over
+/// uninitialised memory. No amount of care about the length fixes that — the bytes are wrong before
+/// the length is consulted.
+///
+/// So the contract is: [`POD_LEN`](Self::POD_LEN) is the **sum of the field encoded lengths**, not
+/// `size_of`, and [`encode_pod`](Self::encode_pod) writes exactly those fields in order. Use
+/// [`impl_log_pod!`](crate::impl_log_pod), which generates both from one field list and asserts
+/// they agree — the two cannot drift, because one macro writes both.
+///
+/// # Safety
+///
+/// An implementor must write **exactly `POD_LEN` initialised bytes** to `dst`, and must not read
+/// beyond its own value. A shorter write leaves the sink decoding a neighbour's bytes; a longer one
+/// overruns the record the producer sized from `POD_LEN`.
+///
+/// `Send + Sync` is required so a game type cannot smuggle a thread-affine value onto the sink
+/// thread, and `Copy` so encoding cannot run a destructor inside the open-record window.
+pub unsafe trait LogPod: Copy + Send + Sync + 'static {
+    /// The sum of this type's field encoded lengths. **Never `size_of::<Self>()`.**
+    const POD_LEN: usize;
+
+    /// Write exactly [`POD_LEN`](Self::POD_LEN) initialised bytes to `dst`.
+    ///
+    /// # Safety
+    /// `dst` must be valid for `POD_LEN` writes and must not overlap `self`.
+    unsafe fn encode_pod(&self, dst: *mut u8);
+
+    /// Render this type's bytes on the **sink**, never on the emitting thread.
+    fn fmt_pod(bytes: &[u8], f: &mut crate::site::LogFormatter);
+}
+
+/// Implement [`LogPod`] for a `#[repr(C)]` struct, field by field.
+///
+/// ```ignore
+/// #[repr(C)] #[derive(Clone, Copy)]
+/// struct Hit { dmg: u32, target: u32 }
+/// boyko_log::impl_log_pod!(Hit { dmg: u32, target: u32 });
+/// ```
+///
+/// One macro generates `POD_LEN`, `encode_pod` and `fmt_pod` from ONE field list, so the length and
+/// the writes cannot disagree — the failure a hand-written impl invites and that `POD_LEN`'s
+/// `const` assert alone cannot catch, because a wrong constant and a matching wrong write agree
+/// with each other.
+///
+/// **Dynamic-length fields are rejected structurally**: every field type must be a fixed-width
+/// [`LogValue`], and `&str` is not one of those in this position — its encoding is length-prefixed
+/// and would make `POD_LEN` a runtime quantity, which the producer sizes the record from before it
+/// has the value.
+#[macro_export]
+macro_rules! impl_log_pod {
+    ($T:ty { $($field:ident : $FT:ty),+ $(,)? }) => {
+        // SAFETY: `POD_LEN` is the SUM of the field widths below and `encode_pod` writes exactly
+        //   those fields, in the same order, from one field list -- so the two cannot drift. Every
+        //   field type is a fixed-width POD whose `encode_at` writes its full width initialised;
+        //   no padding byte of `$T` is ever read, which is B10's whole point.
+        unsafe impl $crate::record::LogPod for $T {
+            const POD_LEN: usize = 0 $(+ ::core::mem::size_of::<$FT>())+;
+
+            unsafe fn encode_pod(&self, dst: *mut u8) {
+                let mut at = 0usize;
+                $(
+                    let bytes = self.$field.to_le_bytes();
+                    // SAFETY: the caller guarantees `dst` is valid for `POD_LEN` writes, and `at`
+                    //   advances by exactly the widths `POD_LEN` sums, so this stays in bounds.
+                    unsafe {
+                        ::core::ptr::copy_nonoverlapping(
+                            bytes.as_ptr(),
+                            dst.add(at),
+                            ::core::mem::size_of::<$FT>(),
+                        );
+                    }
+                    at += ::core::mem::size_of::<$FT>();
+                )+
+                debug_assert_eq!(at, <$T as $crate::record::LogPod>::POD_LEN);
+            }
+
+            fn fmt_pod(bytes: &[u8], f: &mut $crate::LogFormatter) {
+                let mut at = 0usize;
+                let mut first = true;
+                f.write_str("{");
+                $(
+                    if !first {
+                        f.write_str(", ");
+                    }
+                    first = false;
+                    f.write_str(concat!(stringify!($field), ": "));
+                    let w = ::core::mem::size_of::<$FT>();
+                    if at + w <= bytes.len() {
+                        let mut raw = [0u8; ::core::mem::size_of::<$FT>()];
+                        raw.copy_from_slice(&bytes[at..at + w]);
+                        let v = <$FT>::from_le_bytes(raw);
+                        let d = $crate::record::DspBuf::<32>::render(&v);
+                        f.write_str(d.as_str());
+                    } else {
+                        // Short input renders a marker rather than reading past the slice: the
+                        // sink is decoding bytes off a shared ring and must not trust the length.
+                        f.write_str("{truncated}");
+                    }
+                    at += w;
+                )+
+                f.write_str("}");
+            }
+        }
+    };
+}
+
 /// Bytes a **dynamic** record carries ahead of its values: the target id, little-endian *(L10)*.
 ///
 /// A `dyn_*!` site has no compile-time target — the id is an argument, and the same site may be
