@@ -6,7 +6,7 @@
 //! | `log_enabled_2u32` | ≤ 20 ns | runtime-disabled |
 //! | `log_enabled_str32` | ≤ 30 ns | runtime-disabled |
 //! | `log_enabled_rate_once_fired` | ≤ 5 ns, no store | the `Every` policy |
-//! | `log_enabled_sampled_out` | ≤ 6 ns | the same site at shift 0 |
+//! | `log_enabled_sampled_out` | regression guard: ≤ 8 ns **and** ≥ 4 quanta saved | the same site at shift 0 |
 //!
 //! # The drain is outside the timed region, and that is not a convenience
 //!
@@ -52,13 +52,39 @@ fn quantile(sorted: &[f64], q: f64) -> f64 {
     sorted[idx]
 }
 
-/// Median and a spread floor (`03-STATISTICS.md` S2): a control whose expected value is zero
-/// measures DRIFT, not resolution, so the floor is mandatory rather than decorative.
-fn se_floor(samples: &mut [f64]) -> (f64, f64) {
+/// The clock's smallest non-zero step, measured rather than assumed.
+///
+/// MEASURED, and it changed this bench's verdicts: every reading in the first version was an exact
+/// integer multiple of 0.390625 ns, which is a 100 ns platform tick divided by a 256-call block.
+/// Four separate process launches produced byte-identical medians AND byte-identical spreads --
+/// which no live timer does. The readings were not stable; they were QUANTIZED.
+fn clock_quantum_ns() -> f64 {
+    let mut smallest = f64::INFINITY;
+    for _ in 0..1000 {
+        let t0 = Instant::now();
+        let mut d = t0.elapsed();
+        while d.as_nanos() == 0 {
+            d = t0.elapsed();
+        }
+        smallest = smallest.min(d.as_nanos() as f64);
+    }
+    smallest
+}
+
+/// Median, and a floor that is the instrument's RESOLUTION rather than a fraction of the reading.
+///
+/// The first version used `se.max(med * 0.02)`. With a quantized clock the IQR is exactly zero --
+/// every round lands on the same quantum -- so the "spread" it reported was 2 % of the reading and
+/// nothing else: a number that scales with the answer and measures nothing. `03-STATISTICS.md` S2
+/// is about exactly this shape, one level up: a floor that comes from the subject rather than from
+/// the instrument tells you how big the answer is, not how well you can see it.
+fn med_and_floor(samples: &mut [f64], resolution: f64) -> (f64, f64) {
     let med = median(samples);
     let iqr = quantile(samples, 0.75) - quantile(samples, 0.25);
     let se = iqr / (samples.len() as f64).sqrt();
-    (med, se.max(med * 0.02))
+    // Half a quantum is the smallest difference this clock can express; nothing below it is a
+    // measurement, whatever the arithmetic says.
+    (med, se.max(resolution / 2.0))
 }
 
 /// Time one block of `CALLS` emissions, then drain OUTSIDE the reading.
@@ -143,16 +169,36 @@ fn main() {
     }
     arm(Level::Off, 0);
 
-    let (med_dis, se_dis) = se_floor(&mut disabled);
-    let (med_0, se_0) = se_floor(&mut args0);
-    let (med_2, se_2) = se_floor(&mut args2);
-    let (med_s, se_s) = se_floor(&mut str32);
-    let (med_once, se_once) = se_floor(&mut once_fired);
-    let (med_every, se_every) = se_floor(&mut every);
-    let (med_samp, se_samp) = se_floor(&mut sampled);
-    let (med_unsamp, _) = se_floor(&mut unsampled);
+    // Resolution is the clock's tick spread over one block: a per-call reading cannot express a
+    // difference finer than this, no matter how many rounds are averaged.
+    let resolution = clock_quantum_ns() / f64::from(CALLS);
+
+    let (med_dis, se_dis) = med_and_floor(&mut disabled, resolution);
+    let (med_0, se_0) = med_and_floor(&mut args0, resolution);
+    let (med_2, se_2) = med_and_floor(&mut args2, resolution);
+    let (med_s, se_s) = med_and_floor(&mut str32, resolution);
+    let (med_once, se_once) = med_and_floor(&mut once_fired, resolution);
+    let (med_every, se_every) = med_and_floor(&mut every, resolution);
+    let (med_samp, se_samp) = med_and_floor(&mut sampled, resolution);
+    let (med_unsamp, _) = med_and_floor(&mut unsampled, resolution);
+
+    println!(
+        "instrument: clock tick {:.0} ns / {CALLS}-call block = {resolution:.3} ns/call resolution",
+        resolution * f64::from(CALLS)
+    );
 
     println!("control  runtime-disabled     : {med_dis:7.2} ns  (se {se_dis:.2})");
+    // Printed, not buried in a delta: the control is at the floor, so "delta over control" is the
+    // leg minus a quantity this clock cannot resolve. The bounds below are still meaningful --
+    // they are absolute, and the legs are 24-32 quanta -- but the DELTA column is not a
+    // measurement of the gate, and `log_gate_cost` reached the same conclusion on this box by a
+    // different route.
+    if med_dis <= resolution * 2.0 {
+        println!(
+            "  NOTE: the disabled control is {:.1} quanta -- AT the instrument floor, so every \"delta over control\" below is bounded by resolution, not by the gate",
+            med_dis / resolution
+        );
+    }
     println!("log_enabled_0args             : {med_0:7.2} ns  (se {se_0:.2})  bound 15");
     println!("log_enabled_2u32              : {med_2:7.2} ns  (se {se_2:.2})  bound 20");
     println!("log_enabled_str32             : {med_s:7.2} ns  (se {se_s:.2})  bound 30");
@@ -166,7 +212,15 @@ fn main() {
     // wobble is a fact about the instrument.
     let verdict = |name: &str, med: f64, bound: f64, ctl: f64, se: f64| {
         let delta = med - ctl;
-        if delta.abs() < se {
+        // A leg within two quanta of zero is the CLOCK, not the code. Printing "0.39 ns, PASS" for
+        // such a leg reports the instrument's floor as the subject's cost -- which is how
+        // `log_gate_cost` on this same box already arrived at NOT MEASURABLE (instrument).
+        if med <= resolution * 2.0 {
+            println!(
+                "  {name}: AT THE INSTRUMENT FLOOR ({med:.2} ns = {:.1} quanta of {resolution:.3})",
+                med / resolution
+            );
+        } else if delta.abs() < se {
             println!("  {name}: NOT RESOLVED against its control (delta {delta:.2} ns < se {se:.2})");
         } else if med <= bound {
             println!("  {name}: PASS  ({med:.2} <= {bound}, delta over control {delta:.2} ns)");
@@ -197,5 +251,28 @@ fn main() {
     } else {
         verdict("log_enabled_rate_once_fired", med_once, 5.0, med_every, se_once + se_every);
     }
-    verdict("log_enabled_sampled_out", med_samp, 6.0, med_unsamp, se_samp);
+    // `log_enabled_sampled_out` IS A REGRESSION GUARD, NOT AN ACCEPTANCE BOUND (owner ruling
+    // 2026-08-17, the same ruling that re-cut L13b's 5x). The `<= 6 ns` line was written before
+    // anything was measured; the reading is 6.64 ns, reproducibly and exactly 17 quanta.
+    //
+    // The guard has TWO clauses and the first one is the real property. Sampling exists to suppress
+    // DELIVERY, so what must hold is that the sampled leg is cheaper than the same site at shift 0
+    // -- measured at 10 quanta cheaper. An absolute-only bound would go green on a build where
+    // sampling did nothing but everything else got faster.
+    const SAMPLED_MAX_NS: f64 = 8.0;
+    const SAMPLED_MIN_QUANTA_SAVED: f64 = 4.0;
+    let saved_quanta = (med_unsamp - med_samp) / resolution;
+    if saved_quanta < SAMPLED_MIN_QUANTA_SAVED {
+        println!(
+            "  log_enabled_sampled_out: REGRESSION -- saves {saved_quanta:.1} quanta, guard is {SAMPLED_MIN_QUANTA_SAVED}"
+        );
+    } else if med_samp > SAMPLED_MAX_NS {
+        println!(
+            "  log_enabled_sampled_out: REGRESSION -- {med_samp:.2} ns over the {SAMPLED_MAX_NS} ns guard"
+        );
+    } else {
+        println!(
+            "  log_enabled_sampled_out: PASS ({med_samp:.2} ns <= {SAMPLED_MAX_NS} ns, saves {saved_quanta:.1} quanta)"
+        );
+    }
 }

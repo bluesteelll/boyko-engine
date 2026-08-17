@@ -662,13 +662,13 @@ both-present configuration. The tags become uniform at **J2**, the joint baselin
 |---|---|---|
 | `log_disabled_runtime` *(**BUILT** L10-C)* | ≤ 3 ns | the same site enabled; **and the v2-shaped unpacked gate, which must be NOT RESOLVED** (G10d) |
 | `log_disabled_warn` | ≤ 4 ns | `log_disabled_runtime` (an `info!`, untouched by `sink_can_accept`) in the same sitting — the delta **is** S5's added load + branch |
-| `log_enabled_0args` / `_2u32` / `_str32` | ≤ 15 / 20 / 30 ns | runtime-disabled |
-| `log_enabled_rate_once_fired` | ≤ 5 ns, **no store, no shared line** | `Every` policy |
+| `log_enabled_0args` / `_2u32` / `_str32` *(**BUILT**; 9.38 / 10.94 / 12.50 ns, all PASS)* | ≤ 15 / 20 / 30 ns | runtime-disabled — **which measures AT the instrument floor on this box** (2 quanta of 0.391 ns), so the *delta* column is bounded by resolution and only the absolutes carry a verdict |
+| `log_enabled_rate_once_fired` *(**BUILT**; returns **NO SUBJECT**)* | ≤ 5 ns, **no store, no shared line** | `Every` policy — measured delta **0.00 ns**, because the emission macros never call `rate::admit` (stated in `codes.rs`'s header and gated there). The row bounds a short-circuit this tree does not have; it is not NOT-RESOLVED, it has no subject |
 | `sink_sustained_rate` | finds the drop knee; reports records·s⁻¹ | zero-record idle sink |
 | `lane_padding_ablation` | padded+cached vs padded-only vs neither | — |
 | `sched_cpu_logger_on_off` (gate **P1**, re-specified) | not resolvable above the floor, **at each of the two profiler states** | interleaved zero control, ABBA, **2×2 with {profiler absent, armed}** (S10) |
 | `log_dyn_disabled` *(**BUILT** L10-C; returns **NOT MEASURABLE** on this box — see Decision 18)* | ≤ 4 ns, **and the delta vs `log_disabled_runtime` must RESOLVE** | `log_disabled_runtime`, same sitting, plus an A-vs-A' twin and an empty-loop control |
-| `log_enabled_sampled_out` | ≤ 6 ns | the same site with shift = 0 |
+| `log_enabled_sampled_out` *(**BUILT**; bound RE-CUT as a regression guard, owner ruling 2026-08-17 — same ruling as L13b's `5×`)* | **≤ 8 ns AND ≥ 4 quanta cheaper** than shift 0 | the same site with shift = 0 |
 | `log_enabled_0args_sampling` | NOT RESOLVED vs the pre-L12 baseline | pre-L12 baseline, same sitting |
 | `log_pod_12b` | ≤ 20 ns | `dsp!` of the same value, which must be ≥ 5× slower |
 | `sink_sustained_rate_binary` | ≥ 3 M rec·s⁻¹ **and ≥ 5× the text sink** | the text sink, same sitting |
