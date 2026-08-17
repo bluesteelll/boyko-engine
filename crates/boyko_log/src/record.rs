@@ -107,6 +107,30 @@ pub fn split_dynamic_target(
     (crate::target::TargetId::from_dynamic_raw(raw), rest)
 }
 
+/// Render a payload as ` name=value` pairs, for the `*_kv!` forms *(L11b)*.
+///
+/// Walks the same self-describing tag stream [`render_payload`] does — one decoder, not two — and
+/// pairs each value with its name positionally. A value with no name still prints, under `?`: the
+/// alternative is dropping it, and a renderer that silently discards a value it was handed is the
+/// defect L6 spent a whole rung removing.
+pub fn render_named(payload: &[u8], fields: &[&'static str], f: &mut crate::site::LogFormatter) {
+    let mut cur = 0usize;
+    let mut i = 0usize;
+    while cur < payload.len() {
+        f.write_str(" ");
+        f.write_str(fields.get(i).copied().unwrap_or("?"));
+        f.write_str("=");
+        // `write_value` IS the decoder `render_payload` uses -- one tag walk, not two. A second
+        // implementation of one wire format is one more than can be kept in agreement, which is
+        // the objection `find_target` records against re-deriving the dynamic band's probe.
+        if !write_value(payload, &mut cur, f) {
+            f.write_str("{corrupt}");
+            break;
+        }
+        i += 1;
+    }
+}
+
 /// Record header flags.
 pub mod flags {
     /// At least one `&str` argument was truncated at [`super::MAX_STR_BYTES`].

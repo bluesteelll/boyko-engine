@@ -302,8 +302,21 @@ fn render_record<const N: usize>(
         let _ = write!(out, "{}-{}{:04} ", site.prefix, site.class as char, site.code);
     }
     let _ = write!(out, "{}:{} ", site.file, site.line);
-    let mut f = crate::site::LogFormatter::new(out);
-    crate::record::render_payload(payload, site.fmt, &mut f);
+    if site.fields.is_empty() {
+        let mut f = crate::site::LogFormatter::new(out);
+        crate::record::render_payload(payload, site.fmt, &mut f);
+    } else {
+        // The `*_kv!` form (L11b). `fmt` is the whole message and carries no placeholders; the
+        // values follow as `name=value`, in declaration order.
+        //
+        // ⚠️ `LogSite.fields` EXISTED FROM L1 AND NOTHING READ IT. It was written `&[]` by every
+        // expansion and consumed by no renderer -- the same shape as `site.decode`, which L6 found
+        // carrying a placeholder no drain ever called. A field with a writer and no reader is a
+        // feature that cannot be observed to be missing.
+        let _ = write!(out, "{}", site.fmt);
+        let mut f = crate::site::LogFormatter::new(out);
+        crate::record::render_named(payload, site.fields, &mut f);
+    }
 }
 
 /// The current lifecycle state.

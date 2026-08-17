@@ -285,3 +285,123 @@ macro_rules! dyn_trace {
         }
     };
 }
+
+// ───────────────────────── L11b: the `*_kv!` field-name forms ─────────────────────────
+//
+// `info_kv!(Combat, "hit", dmg = d, target = t)` renders `hit dmg=12 target=7`.
+//
+// # The names are `&'static str` in the COLD site, never in the record
+//
+// That is the whole reason structured output costs the same as positional output: `fields` is a
+// `&'static [&'static str]` in the per-site `static`, and the emitting thread never touches it.
+// The record carries values only, exactly as the positional form does, and the sink pairs them
+// with names it reads from the site it already holds.
+//
+// ⚠️ `LogSite.fields` HAS EXISTED SINCE L1 AND NOTHING READ IT. Every expansion wrote `&[]` and no
+// renderer consumed it -- the same shape as `site.decode`, which L6 found holding a placeholder no
+// drain ever called. These macros give it a writer; `record::render_named` gives it a reader.
+
+/// Build a per-site `static` carrying FIELD NAMES, and hand the values to the producer path.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __log_site_emit_kv {
+    ($lvl:expr, $T:ty, $class:expr, $code:expr, $fmt:literal $(, $name:ident = $val:expr)* $(,)?) => {{
+        static __BOYKO_LOG_SITE_KV: $crate::LogSite = $crate::LogSite {
+            target: ::core::option::Option::Some(<$T as $crate::LogTarget>::ID),
+            level: $lvl,
+            class: $class,
+            code: $code,
+            line: ::core::line!(),
+            file: ::core::file!(),
+            fmt: $fmt,
+            fields: &[$(stringify!($name)),*],
+            prefix: "boyko",
+        };
+        $crate::emit_impl(&__BOYKO_LOG_SITE_KV, ($($val,)*));
+    }};
+}
+
+/// `info_kv!(Target, "message", name = value, …)` — the named form of [`info!`].
+#[macro_export]
+macro_rules! info_kv {
+    ($T:ty, $fmt:literal $(, $name:ident = $val:expr)* $(,)?) => {
+        if <$T as $crate::LogTarget>::STATIC_CEILING as u8 >= $crate::Level::Info as u8
+            && $crate::GLOBAL_CEILING as u8 >= $crate::Level::Info as u8
+            && $crate::runtime_ceiling(<$T as $crate::LogTarget>::ID) >= $crate::Level::Info as u8
+        {
+            $crate::__log_site_emit_kv!(
+                $crate::Level::Info, $T, 0u8, 0u16, $fmt $(, $name = $val)*
+            );
+        }
+    };
+}
+
+/// `debug_kv!(Target, "message", name = value, …)` — the named form of [`debug!`].
+#[macro_export]
+macro_rules! debug_kv {
+    ($T:ty, $fmt:literal $(, $name:ident = $val:expr)* $(,)?) => {
+        if <$T as $crate::LogTarget>::STATIC_CEILING as u8 >= $crate::Level::Debug as u8
+            && $crate::GLOBAL_CEILING as u8 >= $crate::Level::Debug as u8
+            && $crate::runtime_ceiling(<$T as $crate::LogTarget>::ID) >= $crate::Level::Debug as u8
+        {
+            $crate::__log_site_emit_kv!(
+                $crate::Level::Debug, $T, 0u8, 0u16, $fmt $(, $name = $val)*
+            );
+        }
+    };
+}
+
+/// `trace_kv!(Target, "message", name = value, …)` — the named form of [`trace!`].
+#[macro_export]
+macro_rules! trace_kv {
+    ($T:ty, $fmt:literal $(, $name:ident = $val:expr)* $(,)?) => {
+        if <$T as $crate::LogTarget>::STATIC_CEILING as u8 >= $crate::Level::Trace as u8
+            && $crate::GLOBAL_CEILING as u8 >= $crate::Level::Trace as u8
+            && $crate::runtime_ceiling(<$T as $crate::LogTarget>::ID) >= $crate::Level::Trace as u8
+        {
+            $crate::__log_site_emit_kv!(
+                $crate::Level::Trace, $T, 0u8, 0u16, $fmt $(, $name = $val)*
+            );
+        }
+    };
+}
+
+/// `warn_kv!(Target, code, "message", name = value, …)` — the named form of [`warn!`].
+///
+/// `code` is a [`WarnCode`](crate::codes::WarnCode), for the reason [`warn!`] gives.
+#[macro_export]
+macro_rules! warn_kv {
+    ($T:ty, $code:expr, $fmt:literal $(, $name:ident = $val:expr)* $(,)?) => {
+        if <$T as $crate::LogTarget>::STATIC_CEILING as u8 >= $crate::Level::Warn as u8
+            && $crate::GLOBAL_CEILING as u8 >= $crate::Level::Warn as u8
+            && $crate::runtime_ceiling(<$T as $crate::LogTarget>::ID) >= $crate::Level::Warn as u8
+        {
+            $crate::__log_site_emit_kv!(
+                $crate::Level::Warn,
+                $T,
+                b'W',
+                $crate::codes::WarnCode::number($code),
+                $fmt $(, $name = $val)*
+            );
+        }
+    };
+}
+
+/// `error_kv!(Target, code, "message", name = value, …)` — the named form of [`error!`].
+#[macro_export]
+macro_rules! error_kv {
+    ($T:ty, $code:expr, $fmt:literal $(, $name:ident = $val:expr)* $(,)?) => {
+        if <$T as $crate::LogTarget>::STATIC_CEILING as u8 >= $crate::Level::Error as u8
+            && $crate::GLOBAL_CEILING as u8 >= $crate::Level::Error as u8
+            && $crate::runtime_ceiling(<$T as $crate::LogTarget>::ID) >= $crate::Level::Error as u8
+        {
+            $crate::__log_site_emit_kv!(
+                $crate::Level::Error,
+                $T,
+                b'E',
+                $crate::codes::ErrorCode::number($code),
+                $fmt $(, $name = $val)*
+            );
+        }
+    };
+}
