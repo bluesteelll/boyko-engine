@@ -430,7 +430,6 @@ const FORWARD_DECLARED: &[(&str, &str)] = &[
     // code becomes REGISTERED, and `E0105` is not going to be registered by the rung it named. It
     // would have sat here indefinitely, reading like debt.
     ("E0105", "L14 — flush() timed out waiting for the sink"),
-    ("E0107", "L14 — sink open/close request refused"),
     // Likewise mis-summarised: the corpus's `E0108` is shutdown DETACHING after its bounded spin
     // (`02-SINK-LIFECYCLE.md`, `06-DISPOSITIONS.md` M16), not the control spec. The rung was right.
     ("E0108", "L14 — shutdown timed out and detached the sink thread"),

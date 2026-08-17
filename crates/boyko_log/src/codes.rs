@@ -695,6 +695,11 @@ codes! {
     // tells the two apart.
     (106,  E, E0106, RatePolicy::Every, CodeStatus::Live,
         "A dynamic target could not be registered, and the reason names which refusal"),
+    // ── L14: runtime sink control's one report ───────────────────────────────────────────────
+    // `Every`: an operator who types three commands and has two refused needs to know WHICH
+    // two, and a latch would name one of them.
+    (107,  E, E0107, RatePolicy::Every, CodeStatus::Live,
+        "A sink control request was refused because the request ring is full"),
     // ── L13a: rotation's one report ───────────────────────────────────────────────────────────
     // `Once`: a session that rotates a hundred times has ONE fact to report -- the file holds
     // the tail and not the whole run -- and repeating it per rotation would bury it.
@@ -1223,6 +1228,7 @@ mod tests {
             (b'W', 103),  // L4  -- the file sink's byte cap
             (b'E', 106),  // L10 -- a dynamic target could not be registered (all three refusals)
             (b'E', 104),  // L11a -- two downstream targets claim one id
+            (b'E', 107),  // L14  -- sink control request ring full
             (b'W', 112),  // L13a -- rotation discarded part of the session
             (b'W', 113),  // L12  -- sampling is discarding records
             (b'W', 116),  // L13b -- binary site dictionary full, sites written inline
