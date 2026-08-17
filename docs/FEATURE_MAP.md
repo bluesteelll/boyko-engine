@@ -883,7 +883,7 @@ stderr only when that answers `NoConsumer`; every such site is a row in
 | Register a target from **data** (a mod, a script namespace, a save field) | `boyko_log` — [target.rs](../crates/boyko_log/src/target.rs) (`register_dynamic_target`, `find_target`, `targets`) — 32 interned `.bss` slots, idempotent by name |
 | Mint or look up a diagnostic code | `boyko_log` — [codes.rs](../crates/boyko_log/src/codes.rs) — one `codes!` table, rows in strictly increasing order (a duplicate **does not compile**), plus per-code doc pages under [docs/diagnostics/](diagnostics/) |
 | Understand a `boyko-Cnnnn` a run printed | [docs/diagnostics/](diagnostics/) — one page per `Live` code, gated by `code_registry.rs` |
-| Configure sinks / boot / drain / teardown | `boyko_log` — [lifecycle.rs](../crates/boyko_log/src/lifecycle.rs) · [sink/](../crates/boyko_log/src/sink/) (`file.rs`, `ecs.rs`) |
+| Configure sinks / boot / drain / teardown | `boyko_log` — [lifecycle.rs](../crates/boyko_log/src/lifecycle.rs) · [sink/](../crates/boyko_log/src/sink/) (`file.rs`, `ecs.rs`, `binary.rs`, `request.rs`, `slot.rs`) |
 | Find out whether a quiet target was **clean** or **switched off** | `boyko_log` — [census.rs](../crates/boyko_log/src/census.rs) — `MEASURED` vs `UNPROVEN`; a silent target is never reported clean |
 | Profile a zone / counter / gauge, and read the fold | `boyko_diag` + `boyko_ecs` — [crates/boyko_diag/src/](../crates/boyko_diag/src/) · [profiling/](../crates/boyko_ecs/src/ecs/core/profiling/) |
 | Decode a binary telemetry stream | [tools/prof_decode/](../tools/prof_decode/) — the only reader of that format |
@@ -943,7 +943,7 @@ nothing more. Verified the same way — repointing it stays green.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Ask whether anything is actually consuming records — the answer every stderr fallback is written against | `flush` (505) |
+| Ask whether anything is actually consuming records — the answer every stderr fallback is written against | `flush` (524) |
 
 **File:** [crates/boyko_log/src/sync_out.rs](../crates/boyko_log/src/sync_out.rs) — the synchronous route.
 

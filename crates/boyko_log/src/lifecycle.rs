@@ -249,8 +249,27 @@ pub fn drain_once() -> Option<crate::lane::DrainStats> {
         line.clear();
         render_record(&mut line, site, payload);
         let text = line.as_str();
-        crate::sync_out::write_oracle_line("boyko-log ", text);
-        crate::sink::file::write_line(&token, text.as_bytes());
+        // Per-sink policy, read ONCE per record and applied per destination (L14). A file
+        // capturing everything while a console shows only warnings is the ordinary case, and
+        // without a per-sink floor it takes two target ceilings that fight each other.
+        //
+        // A record with no resolvable target is admitted on state and floor alone: filtering on a
+        // target you do not have is filtering on a GUESS, and this record already survived the
+        // decision two comments below that losing the message is strictly worse than losing the
+        // attribution.
+        let admits = |slot: usize| match target {
+            Some(t) => crate::sink::slot::accepts(slot, t, site.level),
+            None => {
+                crate::sink::slot::state(slot) == crate::sink::slot::SinkState::Active
+                    && site.level <= crate::sink::slot::floor(slot)
+            }
+        };
+        if admits(crate::sink::slot::SLOT_CONSOLE) {
+            crate::sync_out::write_oracle_line("boyko-log ", text);
+        }
+        if admits(crate::sink::slot::SLOT_FILE) {
+            crate::sink::file::write_line(&token, text.as_bytes());
+        }
         // Counted once per record, HERE and not per destination: `delivered` answers "did this
         // target ever produce anything", and a record that reached two sinks did not happen twice.
         //
@@ -265,7 +284,7 @@ pub fn drain_once() -> Option<crate::lane::DrainStats> {
         // to spend on "unattributable" -- the same reason `TargetId::INVALID` does not exist. An
         // unattributable record therefore skips the in-frame view, having already reached every
         // byte sink above, rather than being filed under whichever target `255` happens to name.
-        if to_ecs && let Some(t) = target {
+        if to_ecs && admits(crate::sink::slot::SLOT_ECS) && let Some(t) = target {
             // The byte channel above already has the record, so a refusal here shortens the
             // in-frame view and nothing else. That is why the return value is dropped rather than
             // escalated: `push` has already counted it, on both the ring and the substrate's row.
