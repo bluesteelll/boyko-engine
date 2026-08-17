@@ -63,6 +63,21 @@ fn an_unknown_frame_kind_is_not_guessed_at() {
     );
 }
 
+/// A distinct `LogSite` value; the dictionary keys on the ADDRESS, so every box is a new site.
+fn probe_site() -> boyko_log::LogSite {
+    boyko_log::LogSite {
+        target: Some(<Log as LogTarget>::ID),
+        level: Level::Info,
+        class: 0,
+        code: 0,
+        line: 0,
+        file: "l13b_binary_format.rs",
+        fmt: "probe",
+        fields: &[],
+        prefix: "boyko",
+    }
+}
+
 #[test]
 fn a_full_site_dictionary_refuses_rather_than_reusing_an_id() {
     // THE SINK COMES UP FIRST, and that ordering is the test's own precondition. `W0116` is `Once`
@@ -84,17 +99,41 @@ fn a_full_site_dictionary_refuses_rather_than_reusing_an_id() {
     set_target_control(<Log as LogTarget>::ID, TargetControl::new(Level::Trace, 0, false));
 
     reset_site_dict();
-    let site = core::ptr::null::<boyko_log::LogSite>();
+
+    // DISTINCT pointers, one per slot. The dictionary is keyed on the site ADDRESS, so filling it
+    // needs `SITE_DICT_LEN` different sites.
+    //
+    // MEASURED: this loop used one null pointer `SITE_DICT_LEN` times and passed, because
+    // `intern_site` ignored its argument and minted a fresh id per CALL. The test could only be
+    // green while the thing it tested was absent -- it asserted "ids are unique" against an
+    // implementation that could not do anything else, and would have gone red the moment the
+    // dictionary started working. Which it did.
+    let sites: Vec<Box<boyko_log::LogSite>> =
+        (0..SITE_DICT_LEN).map(|_| Box::new(probe_site())).collect();
 
     let mut seen = std::collections::BTreeSet::new();
-    for _ in 0..SITE_DICT_LEN {
-        let (id, _) = intern_site(site).expect("the table holds SITE_DICT_LEN entries");
+    for site in &sites {
+        let ptr: *const boyko_log::LogSite = &**site;
+        let (id, is_new) = intern_site(ptr).expect("the table holds SITE_DICT_LEN entries");
+        assert!(is_new, "a site seen for the first time must be reported as new");
         assert!(seen.insert(id), "the dictionary handed out id {id} twice");
     }
     assert_eq!(site_dict_used(), SITE_DICT_LEN);
 
+    // THE POINT OF A DICTIONARY: a repeat visit costs no id and is reported as NOT new, so the
+    // caller writes no `SiteDef` frame. Without this the format is a file/line pair per record
+    // wearing a dictionary's name.
+    let first: *const boyko_log::LogSite = &*sites[0];
+    let (again, is_new) = intern_site(first).expect("an interned site is always findable");
+    assert!(!is_new, "a second visit to one site must not be reported as new");
+    assert_eq!(again, 0, "a site's id must be stable across visits");
+    assert_eq!(site_dict_used(), SITE_DICT_LEN, "a repeat visit consumed a slot");
+
     // THE PROPERTY. A reused id decodes a later record under an EARLIER site's file and line -- a
     // log that lies about where it came from, which is worse than one larger than it needed to be.
+    // A site the table has never seen, so the refusal is exhaustion and not a repeat visit.
+    let overflow = Box::new(probe_site());
+    let site: *const boyko_log::LogSite = &*overflow;
     assert!(
         intern_site(site).is_none(),
         "a full dictionary must REFUSE, so the caller writes an inline site record and reports \

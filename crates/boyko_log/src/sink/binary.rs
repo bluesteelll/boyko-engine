@@ -23,7 +23,7 @@
 //! decode a later record under an earlier site's file and line: a log that lies about where it came
 //! from, which is worse than a log that is larger than it needed to be.
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Frame kinds. One byte, first in every frame, so a decoder can skip what it does not understand.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -61,22 +61,105 @@ pub const SITE_DICT_LEN: usize = 4096;
 /// Ids handed out so far.
 static SITE_DICT_NEXT: AtomicU32 = AtomicU32::new(0);
 
+/// One dictionary slot: the site pointer that claimed it, and the id it was given.
+///
+/// `id` is published **after** `ptr`, and a reader that finds its pointer waits for the id. A slot
+/// observed mid-claim is still a claim; treating it as free would hand the same site two ids, and
+/// two ids for one site is a dictionary that disagrees with itself about where a record came from.
+struct SiteSlot {
+    ptr: AtomicU64,
+    id: AtomicU32,
+}
+
+impl SiteSlot {
+    const fn new() -> SiteSlot {
+        SiteSlot { ptr: AtomicU64::new(0), id: AtomicU32::new(u32::MAX) }
+    }
+}
+
+// SAFETY: every field is an atomic and the only transition is 0 -> a `&'static LogSite` pointer,
+//   won by one `compare_exchange`. `&'static LogSite` never dangles and no slot is ever released,
+//   so a published pointer stays valid and comparable for the process lifetime.
+unsafe impl Sync for SiteSlot {}
+
+/// The dictionary. `.bss` — 4096 x 16 B = 64 KiB of zero pages an unenabled process never touches.
+static SITE_DICT: [SiteSlot; SITE_DICT_LEN] = [const { SiteSlot::new() }; SITE_DICT_LEN];
+
+/// Fibonacci-hash a site pointer to a starting probe index.
+///
+/// Sites are `static`s, so their addresses share low bits (alignment) AND high bits (one image).
+/// A mask of the raw pointer would cluster every site in one region of the table; the multiply
+/// mixes the middle bits, which are the ones that actually differ.
+#[inline]
+const fn probe_start(ptr: u64) -> usize {
+    ((ptr.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as usize) & (SITE_DICT_LEN - 1)
+}
+
+const _: () = assert!(
+    SITE_DICT_LEN.is_power_of_two(),
+    "probe_start masks with SITE_DICT_LEN - 1, which is only a modulo for a power of two"
+);
+
 /// Intern a site pointer, returning `(id, is_new)`, or `None` when the table is full.
 ///
-/// `None` is the caller's cue to write an [`FrameKind::InlineSite`] frame and report `W0116` once.
-/// It is deliberately not a fallback id: an id reused across two sites decodes later records under
-/// an earlier site's file and line, and a log that lies about its own origin is worse than a large
-/// one.
+/// `is_new` is the caller's cue to emit a `SiteDef` frame; a repeat visit costs one probe and no
+/// bytes, which is the entire reason a dictionary exists rather than a file/line pair per record.
+///
+/// `None` means the table is full. It is deliberately **not** a fallback id: an id reused across
+/// two sites decodes later records under an earlier site's file and line, and a log that lies about
+/// its own origin is worse than a large one. The caller writes an [`FrameKind::InlineSite`] frame
+/// and `W0116` is reported once.
 #[must_use]
-pub fn intern_site(_site: *const crate::LogSite) -> Option<(u16, bool)> {
-    let n = SITE_DICT_NEXT.fetch_add(1, Ordering::Relaxed);
-    if n as usize >= SITE_DICT_LEN {
-        // Undo, so a full table does not keep climbing and the census reports the real occupancy.
-        SITE_DICT_NEXT.fetch_sub(1, Ordering::Relaxed);
-        report_dict_full();
+pub fn intern_site(site: *const crate::LogSite) -> Option<(u16, bool)> {
+    let key = site as u64;
+    if key == 0 {
         return None;
     }
-    Some((n as u16, true))
+    let start = probe_start(key);
+    // Linear probing over the WHOLE table: a full pass is what proves the table is full, and that
+    // is the only condition allowed to report `W0116`. Stopping early would report a full table
+    // that is not full -- a false report in the module whose subject is silent failure.
+    for step in 0..SITE_DICT_LEN {
+        let slot = &SITE_DICT[(start + step) & (SITE_DICT_LEN - 1)];
+        let seen = slot.ptr.load(Ordering::Acquire);
+        if seen == key {
+            return Some((wait_for_id(slot), false));
+        }
+        if seen == 0 {
+            match slot.ptr.compare_exchange(0, key, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => {
+                    let n = SITE_DICT_NEXT.fetch_add(1, Ordering::Relaxed);
+                    debug_assert!(
+                        (n as usize) < SITE_DICT_LEN,
+                        "invariant: one id per claimed slot, and slots are never released"
+                    );
+                    slot.id.store(n, Ordering::Release);
+                    return Some((n as u16, true));
+                }
+                // Lost the race. If the winner was THIS site, the id is ours too: one site reaching
+                // the dictionary from two threads is one entry, not two.
+                Err(actual) if actual == key => return Some((wait_for_id(slot), false)),
+                Err(_) => continue,
+            }
+        }
+    }
+    report_dict_full();
+    None
+}
+
+/// Wait for a claimed slot's id to be published.
+///
+/// Bounded by one store on the claiming thread. It spins rather than blocking because this runs on
+/// the drain, and a lock here would be the one thing this crate refuses.
+#[inline]
+fn wait_for_id(slot: &SiteSlot) -> u16 {
+    loop {
+        let id = slot.id.load(Ordering::Acquire);
+        if id != u32::MAX {
+            return id as u16;
+        }
+        core::hint::spin_loop();
+    }
 }
 
 /// Dictionary ids handed out. The census's question and `W0116`'s subject.
@@ -87,6 +170,10 @@ pub fn site_dict_used() -> usize {
 
 /// Reset the dictionary. Test and console surface, `pub` for the reason `sample::reset_counters` is.
 pub fn reset_site_dict() {
+    for slot in &SITE_DICT {
+        slot.id.store(u32::MAX, Ordering::Relaxed);
+        slot.ptr.store(0, Ordering::Release);
+    }
     SITE_DICT_NEXT.store(0, Ordering::Relaxed);
 }
 

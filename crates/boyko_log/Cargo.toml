@@ -47,3 +47,7 @@ workspace = true
 [[bench]]
 name = "log_gate_cost"
 harness = false
+
+[[bench]]
+name = "sink_sustained_rate"
+harness = false

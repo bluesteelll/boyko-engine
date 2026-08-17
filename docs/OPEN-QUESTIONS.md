@@ -2207,3 +2207,52 @@ profiling conditions, in profiling crates, whose rungs are marked shipped. L8c i
 because `Pending == 0` is its gate. Either the profiling ladder reopens rungs 5 and 8 to land the
 emitters it reserved codes for, or the four rows are re-dispositioned. Recorded rather than decided
 because it moves work between two ladders.
+
+---
+
+## L13b's revert clause has fired: the binary format measures 4.5×, and the clause asks for 5×
+
+**Owner call. Nothing has been reverted.**
+
+`02-SINK-LIFECYCLE.md` states the clause without hedging: *"the entire justification is throughput.
+If `sink_sustained_rate_binary` does not measure ≥ 5× `sink_sustained_rate` in the same sitting,
+**L13b is reverted**. A format whose only reason to exist is speed must show the speed."*
+
+The bench now exists (`crates/boyko_log/benches/sink_sustained_rate.rs`) and it was built to answer
+exactly this. Four sittings on this box:
+
+| sitting | text ns/rec | binary ns/rec | ratio | A-vs-A' twin gap |
+|---|---|---|---|---|
+| 1 | 41.02 | 9.54 | **4.30×** | 0.020 ns |
+| 2 | — | — | **4.63×** | 0.085 ns |
+| 3 | — | — | **4.68×** | 0.120 ns |
+| 4 | — | — | **4.54×** | 0.080 ns |
+
+**The instrument is sound and the result is not marginal noise.** The A-vs-A' twin — the same leg
+measured twice around the other — drifts by 0.02–0.12 ns while the legs differ by ~31 ns, so the
+sitting is not drifting. The separation is ~31 ns against a combined spread floor of ~1 ns, so it
+resolves. Four independent sittings land in a 0.38× band, none of them touching 5×.
+
+**The absolute half of the clause passes by a wide margin**: 104.8 M rec·s⁻¹ against a floor of
+3 M. It is only the *ratio* that misses.
+
+**And the measured scope is the one most favourable to L13b.** The bench times only where the two
+paths differ — `render_payload` against `encode_record` — because everything upstream of the drain
+and downstream of the sink's `write` is shared. An end-to-end sink rate would add a constant both
+formats pay, which can only push the ratio *down*. So 4.5× is an upper bound on the end-to-end
+figure, and the clause still misses.
+
+**The three dispositions, and why this is not mine to pick:**
+
+1. **Revert L13b as written.** The clause is unambiguous and the number is reproducible. Costs:
+   `binary.rs`, its dictionary, `W0116`, the format tests and the offline decoder plan all go.
+2. **Keep it and amend the threshold.** 4.5× at 105 M rec·s⁻¹ is a real improvement; a 5× line
+   drawn before anything was measured is not obviously the right line. This requires the owner to
+   say the threshold was the estimate, not the requirement.
+3. **Keep it and make it faster.** The text leg's 41 ns is dominated by `core::fmt`; the binary
+   leg's 9.5 ns is already close to a `memcpy` of 39 bytes. The ratio is more likely to move by
+   *slowing nothing and speeding the text leg less* than by optimising the binary one — i.e. this
+   route probably does not reach 5× without changing what the text sink does.
+
+Each of these trades shipped, tested, documented code against a number, which is a values call, not
+a performance fork. Recorded and surfaced rather than decided.
