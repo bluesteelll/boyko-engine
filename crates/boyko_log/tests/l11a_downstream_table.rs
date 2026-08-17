@@ -7,6 +7,9 @@
 //! that cannot see the thing the macro is for.
 
 use boyko_log::codes::{CodeIdx, code_occupancy};
+use boyko_log::lifecycle::{DrainResult, LogConfig, SinkMode, boot, drain, enable};
+use boyko_log::target::{TargetControl, set_target_control};
+use boyko_log::Level;
 
 mod acme {
     use boyko_log::RatePolicy;
@@ -99,5 +102,73 @@ fn an_empty_downstream_table_is_refused_rather_than_trivially_clean() {
     assert!(
         EMPTY.windows(2).all(|w| w[0].number < w[1].number),
         "an empty table satisfies the ordering check by having nothing to order -- which is          exactly why check 0 exists and why it is asserted first"
+    );
+}
+
+// ── the downstream TARGET band, and E0104's only reachable condition ─────────────────────────
+
+boyko_log::define_target!(pub Combat, name = "combat", id = 96, ceiling = boyko_log::Level::Trace);
+boyko_log::define_target!(pub Inventory, name = "inventory", id = 97, ceiling = boyko_log::Level::Warn);
+// Declared ON PURPOSE at 96, which `Combat` already holds. A collision cannot be produced any other
+// way: the band check is a `const` assert, so an out-of-band id does not compile, and same-name
+// re-registration is defined as idempotent. This is the one state `E0104` exists for.
+boyko_log::define_target!(pub Clasher, name = "clasher", id = 96, ceiling = boyko_log::Level::Trace);
+
+#[test]
+fn the_downstream_target_band_claims_ids_and_names_both_colliders() {
+    use boyko_log::target::LogTarget;
+
+    // ── ids land in 96..=223, and the ceiling is the caller's ────────────────────────────────
+    assert_eq!(<Combat as LogTarget>::ID.index(), 96);
+    assert_eq!(<Inventory as LogTarget>::ID.index(), 97);
+    assert_eq!(<Combat as LogTarget>::NAME, "combat");
+    assert_eq!(<Inventory as LogTarget>::STATIC_CEILING, boyko_log::Level::Warn);
+
+    // ── first claim wins; re-registering the SAME name is not a collision ────────────────────
+    assert!(Combat::register(), "a free id must be claimable");
+    assert!(Inventory::register(), "a different id must not collide");
+    assert!(Combat::register(), "re-registering ONE name is idempotent, not a collision");
+
+    // ── and a DIFFERENT name on a taken id is refused, naming both ───────────────────────────
+    assert!(
+        !Clasher::register(),
+        "a second name on a claimed id must be REFUSED -- otherwise two categories share one \
+         control byte and turning one on turns both on"
+    );
+
+    // The refusal is stable: asking again does not silently succeed once the report has fired.
+    assert!(!Clasher::register(), "a collision does not resolve itself on a second attempt");
+
+    // ── AND E0104 REACHES A READER ───────────────────────────────────────────────────────────
+    //
+    // Driving the collision is not the same as observing its record, which is exactly what check 5
+    // says when it refuses a code no test names: "NAMING IS A PROXY FOR OBSERVING". So the record
+    // is read back off a real manual file sink, and both collider names are asserted -- the half
+    // that makes the report actionable, since the id alone does not say which two declarations to
+    // reconcile.
+    let path = std::env::temp_dir().join("boyko_l11a_downstream_targets.log");
+    let _ = std::fs::remove_file(&path);
+    assert!(boyko_log::sink::file::set_path(path.to_str().expect("a UTF-8 temp path")));
+    boot(LogConfig {
+        console: false,
+        sink_thread: false,
+        ecs_ring: false,
+        file: true,
+        file_cap_bytes: 0,
+        sink_mode: SinkMode::Manual,
+    });
+    assert!(enable(), "enable() refused a freshly booted process");
+    set_target_control(<boyko_log::Log as LogTarget>::ID, TargetControl::new(Level::Trace, 0, false));
+
+    assert!(!Clasher::register(), "the collision still stands with a sink listening");
+    let DrainResult::Ran(_) = drain() else { panic!("the drain role is free in this process") };
+    let text = std::fs::read_to_string(&path).expect("the sink's file is readable");
+
+    let code = format!("boyko-E{:04}", boyko_log::codes::E0104.number());
+    assert!(text.contains(&code), "the collision emitted no {code}: {text:?}");
+    assert!(text.contains("combat"), "E0104 must name the INCUMBENT: {text:?}");
+    assert!(
+        text.contains("clasher"),
+        "E0104 must name the NEWCOMER too -- a report that says only 'id 96 is taken' leaves a          reader grepping two crates by hand, which is the report the code replaces: {text:?}"
     );
 }

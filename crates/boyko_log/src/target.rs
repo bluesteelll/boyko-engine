@@ -14,12 +14,12 @@
 //! | Band | Ids | How uniqueness is proven |
 //! |---|---|---|
 //! | Engine | `0..=95` | one [`targets!`] table with a strictly-increasing `const` assert — collisions **do not compile** |
-//! | Downstream source | `96..=223` | `define_target!` plus a boot check naming both colliders (a later rung) |
+//! | Downstream source | `96..=223` | `define_target!` plus a boot check naming both colliders |
 //! | Dynamic | `224..=255` | minted at run time from a name; the mint **is** the proof |
 //!
-//! **Two of the three exist** — the engine table and, since L10, the dynamic band. So
-//! [`TargetId`]'s constructor set is exactly two functions, and the SAFETY comment on the hot-path
-//! index names both and the argument that bounds each. It describes the set that exists, never the
+//! **All three exist** — the engine table, the dynamic band (L10) and the downstream band (L11a).
+//! [`TargetId`]'s constructor set is exactly four functions, and the SAFETY comment on the hot-path
+//! index names every one and the argument that bounds each. It describes the set that exists, never the
 //! one this file will eventually have: a safety argument that names constructors which do not
 //! exist yet is a safety argument nobody can check, and one that *stops* naming a constructor that
 //! has since appeared is worse — it still reads like a proof.
@@ -95,6 +95,26 @@ impl TargetId {
     fn new_dynamic(slot: usize) -> TargetId {
         debug_assert!(slot < DYN_BAND_LEN, "invariant: a dynamic slot indexes DYN_NAMES");
         TargetId((DYN_BAND_START + slot) as u16)
+    }
+
+    /// Mint a DOWNSTREAM-band id — the fourth constructor *(L11a)*.
+    ///
+    /// `const`, and the bound is a `const` assert at every call site, so an out-of-band literal in
+    /// a [`define_target!`] invocation is a **compile error** rather than a boot check that only
+    /// fires when both colliders happen to be registered — which is the defect Decision 15 records
+    /// against v1's hand-assigned ids.
+    ///
+    /// `pub` because [`define_target!`] expands in another crate. Unlike the dynamic band's raw
+    /// rebuild this takes a literal the caller wrote, so the band check is the whole guard and it
+    /// is a `const` one.
+    #[inline]
+    #[must_use]
+    pub const fn new_downstream(id: u16) -> TargetId {
+        assert!(
+            id >= ENGINE_BAND_END && (id as usize) < DYN_BAND_START,
+            "invariant: a downstream target id is in 96..=223 -- below is the engine's table,              above is the dynamic band's to mint"
+        );
+        TargetId(id)
     }
 
     /// Rebuild a dynamic-band id from a raw `u16` **that this crate itself wrote** *(L10-B)*.
@@ -377,10 +397,13 @@ pub fn runtime_ceiling(id: TargetId) -> u8 {
     //       whose slot is not below `DYN_BAND_LEN`, returning `None` -- so the same equality that
     //       bounds `new_dynamic` bounds this, and an out-of-band value produces no id at all
     //       rather than an id that indexes past the array.
-    //   There is no `INVALID` sentinel and no public unchecked constructor, so safe code cannot
-    //   produce an out-of-range value. A FOURTH constructor (the downstream band, L11a) MUST
-    //   re-establish the bound and be named here -- this comment names three because there are
-    //   three.
+    //     * `new_downstream(id)` is `const` and carries `assert!(id >= ENGINE_BAND_END && id <
+    //       DYN_BAND_START)`, so its ids land strictly between the engine table and the dynamic
+    //       band, and `DYN_BAND_START < MAX_TARGETS` is the `const` assert above.
+    //   There is no `INVALID` sentinel and no public UNCHECKED constructor -- `new_downstream` is
+    //   `pub` but its bound is a `const` assert, so an out-of-band literal does not compile. Safe
+    //   code cannot produce an out-of-range value. A FIFTH constructor MUST re-establish the bound
+    //   and be named here -- this comment names four because there are four.
     //
     //   L10-A widened the set to two and L10-B to three, one rung apart, which is the argument for
     //   this comment enumerating rather than gesturing: the version that said "`new_engine` is its
@@ -813,6 +836,156 @@ pub fn register_dynamic_target(name: &str, initial: TargetControl) -> Option<Tar
         "the 32-slot band is full"
     );
     None
+}
+
+// ─────────────────── L11a: the downstream target band, 96..=223 ───────────────────
+
+/// Number of downstream ids: everything between the engine table and the dynamic band.
+pub const DOWNSTREAM_BAND_LEN: usize = DYN_BAND_START - ENGINE_BAND_END as usize;
+
+/// One claimed downstream id: the name that took it.
+///
+/// **A claim table and not a bitmap**, because `boyko-E0104`'s whole job is to name BOTH colliders.
+/// A bit says the id is taken; a reader needs to know by whom, or the report is "something
+/// collided" and they go looking by hand — which is the state the code was invented to replace.
+struct DownstreamClaim {
+    /// The claiming name's pointer, published after `len` is won.
+    ptr: AtomicU64,
+    /// The claim word. Non-zero means claimed.
+    len: AtomicU32,
+}
+
+// SAFETY: `len` is the claim -- exactly one thread wins its `compare_exchange` from 0, and only
+//   that thread stores `ptr`, before publishing. A reader that observes a non-zero `ptr` with
+//   `Acquire` has observed the store that preceded it. The pointer always comes from a
+//   `&'static str`, so it never dangles, and no claim is ever released.
+unsafe impl Sync for DownstreamClaim {}
+
+impl DownstreamClaim {
+    const fn new() -> DownstreamClaim {
+        DownstreamClaim { ptr: AtomicU64::new(0), len: AtomicU32::new(0) }
+    }
+}
+
+static DOWNSTREAM_CLAIMS: [DownstreamClaim; DOWNSTREAM_BAND_LEN] =
+    [const { DownstreamClaim::new() }; DOWNSTREAM_BAND_LEN];
+
+/// Claim a downstream id for `name`, returning the INCUMBENT's name on collision.
+///
+/// Called by [`define_target!`]'s generated registrar. **Idempotent for one name**: re-registering
+/// the same `(id, name)` is not a collision, because a registrar reached from two entry points is
+/// not a design error. `Some(incumbent)` is returned only when a DIFFERENT name already holds the
+/// id — the one thing this band cannot resolve for itself, and therefore the only thing it reports.
+#[cold]
+#[inline(never)]
+pub fn claim_downstream(id: TargetId, name: &'static str) -> Option<&'static str> {
+    let slot = (id.index() as usize).checked_sub(ENGINE_BAND_END as usize)?;
+    let cell = DOWNSTREAM_CLAIMS.get(slot)?;
+    let n = name.len() as u32;
+    if n == 0 {
+        return None;
+    }
+    if cell.len.compare_exchange(0, n, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+        cell.ptr.store(name.as_ptr() as u64, Ordering::Release);
+        return None;
+    }
+    // Occupied. Wait for the incumbent's pointer to land, for the same reason the dynamic band's
+    // probe waits: a claim seen before its publication is still a claim, and treating it as free
+    // would report "no collision" for an id somebody is registering right now.
+    loop {
+        let ptr = cell.ptr.load(Ordering::Acquire);
+        if ptr != 0 {
+            let len = cell.len.load(Ordering::Acquire) as usize;
+            // SAFETY: the claimant stored `ptr` with `Release` after winning `len`, and this
+            //   `Acquire` observed it, so the bytes are visible here. The pointer came from a
+            //   `&'static str` of exactly `len` bytes, valid for the process lifetime and already
+            //   known to be UTF-8.
+            let incumbent = unsafe {
+                core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr as *const u8, len))
+            };
+            return if incumbent == name { None } else { Some(incumbent) };
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// How many downstream ids are claimed. The census's question.
+#[must_use]
+pub fn downstream_claimed() -> usize {
+    DOWNSTREAM_CLAIMS.iter().filter(|c| c.len.load(Ordering::Acquire) != 0).count()
+}
+
+/// `boyko-E0104`: two downstream targets claim one id, and **both** are named.
+///
+/// `Every`, not `Once`: a binary with three colliding pairs has three different things to tell the
+/// reader, and a latch would name one of them — the argument `W0901` records for its component
+/// types and `E0106` for its refused names.
+#[cold]
+#[inline(never)]
+pub fn report_downstream_collision(id: u16, incumbent: &str, newcomer: &str) {
+    crate::error!(
+        crate::Log,
+        crate::codes::E0104,
+        "downstream target id {} is claimed by {} and cannot also be {}",
+        id,
+        incumbent,
+        newcomer
+    );
+}
+
+/// Declare a **downstream** log target: a game's, a mod's, or a tool's *(L11a)*.
+///
+/// ```ignore
+/// boyko_log::define_target!(pub Combat, name = "combat", id = 96, ceiling = Level::Trace);
+/// Combat::register();   // once at boot
+/// ```
+///
+/// Ids are `96..=223`, checked by the `const` assert in
+/// [`TargetId::new_downstream`](crate::TargetId::new_downstream) — so an out-of-band literal **does
+/// not compile**, rather than becoming a boot check that only fires when both colliders happen to
+/// be registered. That failure mode is what Decision 15 records against the hand-assigned ids this
+/// band replaces.
+///
+/// Two targets claiming ONE id is the case a `const` assert cannot catch: they may live in crates
+/// that never see each other. The generated `register()` reports `boyko-E0104` naming **both**, and
+/// returns `false`, so a host that wants to refuse to start can.
+///
+/// **`register()` is not automatic, deliberately.** This crate has no constructor-registration
+/// mechanism, and inventing one — a linker section, an `inventory`-style registry — would add a
+/// runtime facility the engine does not otherwise have, for a check the caller can make in one
+/// line at boot.
+#[macro_export]
+macro_rules! define_target {
+    ($vis:vis $Ty:ident, name = $name:literal, id = $id:literal, ceiling = $ceiling:expr $(,)?) => {
+        #[doc = concat!("Downstream log target `", $name, "`, id ", stringify!($id), ".")]
+        #[derive(Clone, Copy, Debug)]
+        $vis struct $Ty;
+
+        impl $crate::target::LogTarget for $Ty {
+            const NAME: &'static str = $name;
+            const ID: $crate::TargetId = $crate::TargetId::new_downstream($id);
+            const STATIC_CEILING: $crate::Level = $ceiling;
+        }
+
+        impl $Ty {
+            /// Claim this target's id, reporting `boyko-E0104` if another name already holds it.
+            ///
+            /// Call once at boot. Idempotent for this name; `false` means a real collision.
+            #[must_use]
+            $vis fn register() -> bool {
+                match $crate::target::claim_downstream(
+                    <$Ty as $crate::target::LogTarget>::ID,
+                    $name,
+                ) {
+                    ::core::option::Option::None => true,
+                    ::core::option::Option::Some(incumbent) => {
+                        $crate::target::report_downstream_collision($id, incumbent, $name);
+                        false
+                    }
+                }
+            }
+        }
+    };
 }
 
 /// The id registered for `name`, dynamic or engine, or `None`.

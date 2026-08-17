@@ -419,7 +419,6 @@ const FORWARD_DECLARED: &[(&str, &str)] = &[
     // collision check — `define_target!`, which is L11a's. The ladder's "a later rung" and this
     // ledger's "L10" disagreed; the ladder is the one with the file list, so this row now names the
     // rung that actually builds the thing it reports on.
-    ("E0104", "L11a — downstream target id collision at boot"),
     // ⚠️ REPAIRED AT L10-A, and the repair is the point. This row read
     // *"L10 — dynamic target name arena exhausted"*, which is `E0106`'s condition wearing `E0105`'s
     // number: the corpus assigns `E0105` to `flush()`'s 2 s timeout in FOUR places

@@ -677,6 +677,11 @@ codes! {
     // three rows of this registry's first draft broke.
     (103,  W, W0103, RatePolicy::Once,  CodeStatus::Live,
         "The file sink reached its byte cap and stopped writing"),
+    // ── L11a: the downstream TARGET band's one report ─────────────────────────
+    // `Every`, not `Once`: a binary with three colliding pairs has three different things to
+    // tell the reader, and a latch would name one of them.
+    (104,  E, E0104, RatePolicy::Every, CodeStatus::Live,
+        "Two downstream log targets claim one id, and both are named"),
     // ── L10: the dynamic band's one diagnostic ───────────────────────────────────────────────
     // `Every`, and the reason is the same one `W0901` records: the subject is a NAME. Past
     // exhaustion every later registration fails, and each failure is a different mod whose logging
@@ -1200,6 +1205,7 @@ mod tests {
             (b'B', 2),    // L6  -- intra-system access conflict on one resource
             (b'W', 103),  // L4  -- the file sink's byte cap
             (b'E', 106),  // L10 -- a dynamic target could not be registered (all three refusals)
+            (b'E', 104),  // L11a -- two downstream targets claim one id
             (b'W', 114),  // L11a -- downstream code index space at 90 %
             (b'E', 115),  // L11a -- downstream code index space exhausted
             (b'E', 201),  // L6  -- a fire-and-forget task panicked, process aborting
