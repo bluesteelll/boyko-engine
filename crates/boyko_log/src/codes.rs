@@ -700,6 +700,11 @@ codes! {
     // two, and a latch would name one of them.
     (107,  E, E0107, RatePolicy::Every, CodeStatus::Live,
         "A sink control request was refused because the request ring is full"),
+    // ── L15: the crash path ──────────────────────────────────────────────────────────────────
+    // `Once`: one process has one crash destination, and a second attempt fails for the same
+    // reason. Reported at ENABLE, where there is still a healthy process to receive it.
+    (109,  E, E0109, RatePolicy::Once,  CodeStatus::Live,
+        "The crash file could not be opened; a panic will leave no record"),
     // ── L14: the census's unsunk report ──────────────────────────────────────────────────────
     // `Once`: the condition is a CONFIGURATION, not an event -- every later unsunk row has the
     // same cause, and one misconfiguration must not become a storm of reports about it.
@@ -731,6 +736,10 @@ codes! {
     // rest of the run. The records are larger and none is lost, which is one fact.
     (116,  W, W0116, RatePolicy::Once,  CodeStatus::Live,
         "The binary sink's site dictionary is full; later sites are written inline"),
+    // ── L15: the panic hook's own failure ────────────────────────────────────────────────────
+    // `Every`: two threads panicking are two facts, and a latch would report one of them.
+    (118,  E, E0118, RatePolicy::Every, CodeStatus::Live,
+        "The panic hook could not claim the drain role; the crash file is short"),
     // ── L6's five new rows ──────────────────────────────────────────────────────────────────
     // Every summary below is read out of the message its emitter actually prints. `E0201` is the
     // pool's only diagnostic; `W0501`/`B0502` are the two halves of one table filling up, and the
@@ -1234,8 +1243,10 @@ mod tests {
             (b'E', 106),  // L10 -- a dynamic target could not be registered (all three refusals)
             (b'E', 104),  // L11a -- two downstream targets claim one id
             (b'E', 107),  // L14  -- sink control request ring full
+            (b'E', 109),  // L15  -- the crash file could not be opened
             (b'W', 111),  // L14  -- a target is armed but no active sink accepts it
             (b'W', 112),  // L13a -- rotation discarded part of the session
+            (b'E', 118),  // L15  -- the panic hook could not claim the drain role
             (b'W', 113),  // L12  -- sampling is discarding records
             (b'W', 116),  // L13b -- binary site dictionary full, sites written inline
             (b'W', 114),  // L11a -- downstream code index space at 90 %

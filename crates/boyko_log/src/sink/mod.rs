@@ -16,4 +16,5 @@ pub mod ecs;
 pub mod binary;
 pub mod file;
 pub mod request;
+pub mod crash;
 pub mod slot;
