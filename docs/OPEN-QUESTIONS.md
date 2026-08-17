@@ -2210,9 +2210,23 @@ because it moves work between two ladders.
 
 ---
 
-## L13b's revert clause has fired: the binary format measures 4.5×, and the clause asks for 5×
+## ~~L13b's revert clause has fired~~ — RESOLVED 2026-08-17: keep L13b, the 5× was an estimate
 
-**Owner call. Nothing has been reverted.**
+**OWNER RULING: keep L13b. The `5×` was an estimate, not a requirement.** Recorded below as it was
+asked, because the measurement is the reason the threshold moved and a resolved question that
+deletes its own evidence teaches nothing.
+
+**What changed in the tree**: `02-SINK-LIFECYCLE.md`'s clause is re-cut from an acceptance
+threshold into a **regression guard** at `≥ 4.0×` and `≥ 3 M rec·s⁻¹`, set from the four readings
+and deliberately below the observed minimum rather than pinned to it — a bound at today's number
+reds on ordinary variance, and a gate that cries wolf gets ignored. The bench prints `PASS` /
+`REGRESSION` instead of `PASS` / `FAIL (revert clause)`, and its RED was shown by raising the guard
+to `6×`.
+
+**The lesson the corpus keeps**: the `5×` was written before anything was measured and nothing was
+ever measured against it until the bench existed. A number invented in advance is a guess about the
+answer; this corpus does not get to hold a guess and a measurement in one sentence and call the
+guess the requirement.
 
 `02-SINK-LIFECYCLE.md` states the clause without hedging: *"the entire justification is throughput.
 If `sink_sustained_rate_binary` does not measure ≥ 5× `sink_sustained_rate` in the same sitting,

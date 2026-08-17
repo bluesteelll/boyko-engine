@@ -216,7 +216,33 @@ The sink writes `{site_id: u16, tsc_delta: u32, len: u16, flags: u8, clock_epoch
 
 The decoder **refuses** a `schema_version` mismatch rather than best-efforting it. Every rotated file re-emits the anchor and the dictionary so it decodes standalone.
 
-**Revert clause (G12c)**: the entire justification is throughput. If `sink_sustained_rate_binary` does not measure ≥ 5× `sink_sustained_rate` in the same sitting, **L13b is reverted**. A format whose only reason to exist is speed must show the speed.
+**Throughput clause (G12c) — RE-CUT AGAINST A MEASUREMENT, owner ruling 2026-08-17.** The
+justification is throughput, and the format must still show it. What changed is where the line sits
+and what kind of line it is.
+
+*The clause as written was `≥ 5×` and it fired.* `sink_sustained_rate_binary` measures
+**4.30× / 4.63× / 4.68× / 4.54×** across four sittings — sound instrument (the A-vs-A' twin
+drifts 0.02–0.12 ns against a ~31 ns separation; the separation is ~31× the combined spread floor),
+reproducible, and short of the threshold on every run. The **absolute** half passes by 35×:
+104.8 M rec·s⁻¹ against a 3 M floor.
+
+*The owner's ruling: keep L13b; the `5×` was an estimate, not a requirement.* It was written before
+anything was measured, and nothing was ever measured against it until the bench existed. A number
+invented in advance is a guess about the answer, and this corpus does not get to keep a guess and a
+measurement in the same sentence and call the guess the requirement.
+
+*So the line is now a **regression guard**, not an acceptance threshold:* **≥ 4.0× and
+≥ 3 M rec·s⁻¹**, both in one sitting. `4.0×` sits below the observed minimum of `4.30×` with
+margin for a slower box — it is set from the four readings, and its job is to catch the format
+LOSING what it has, not to re-litigate whether it earned its place. **It is deliberately not set to
+the measured value**: a bound pinned to today's number reds on ordinary variance, and a gate that
+cries wolf is a gate that gets ignored.
+
+*What the bench measures is narrower than this row's name, and that is stated in the bench itself*:
+only `render_payload` against `encode_record`, because everything above the drain and below the
+sink's `write` is shared. That scope is the one most FAVOURABLE to the binary format — an
+end-to-end figure can only be lower — so the guard is read as an upper bound, not a promise about
+a wired sink.
 
 ---
 

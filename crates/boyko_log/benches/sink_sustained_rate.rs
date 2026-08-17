@@ -1,8 +1,13 @@
 //! `sink_sustained_rate` vs `sink_sustained_rate_binary` — **the revert clause's own instrument**.
 //!
-//! `02-SINK-LIFECYCLE.md`: *"the entire justification is throughput. If `sink_sustained_rate_binary`
-//! does not measure ≥ 5× `sink_sustained_rate` in the same sitting, L13b is reverted. A format
-//! whose only reason to exist is speed must show the speed."*
+//! The clause it was built to answer read `≥ 5×`, and it FIRED: four sittings measured
+//! 4.30× / 4.63× / 4.68× / 4.54×. The owner ruled (2026-08-17) that the `5×` was an estimate
+//! written before anything was measured, not a requirement, and kept L13b.
+//!
+//! **So the bound below is a REGRESSION GUARD, not an acceptance threshold.** `≥ 4.0×` sits below
+//! the observed minimum of `4.30×` with margin for a slower box; its job is to catch the format
+//! losing what it has. It is deliberately NOT pinned to the measured value: a bound set to today's
+//! number reds on ordinary variance, and a gate that cries wolf is a gate that gets ignored.
 //!
 //! # What is measured, stated exactly, because the honest scope is narrower than the row's name
 //!
@@ -33,6 +38,12 @@ use boyko_log::site::LogFormatter;
 /// Records per timed leg. Large enough that the clock's own resolution is far below the reading,
 /// small enough that a round is short against a scheduler slice.
 const CALLS: u32 = 20_000;
+
+/// The regression guard, set from four measured sittings (4.30-4.68x) rather than estimated.
+///
+/// Below the observed MINIMUM, with margin, because a slower box shifts both legs and a bound
+/// pinned to the fastest reading would red on a machine that is merely different.
+const MIN_RATIO: f64 = 4.0;
 
 /// Rounds in the sitting. Legs are interleaved, never blocked, so a thermal or frequency drift
 /// lands on both and cancels in the ratio.
@@ -138,7 +149,7 @@ fn main() {
     println!("sink_sustained_rate_binary  : {med_bin:8.2} ns/rec  ({rate_bin:>12.0} rec/s)");
     println!("  se(text)={se_text:.3} ns  se(binary)={se_bin:.3} ns  A-vs-A' gap={twin_gap:.3} ns");
     println!("  frame header = {RECORD_HEADER_BYTES} B, payload = {} B", payload.len());
-    println!("  ratio text/binary = {ratio:.2}x   (clause: >= 5x, and >= 3 M rec/s absolute)");
+    println!("  ratio text/binary = {ratio:.2}x   (guard: >= {MIN_RATIO}x, and >= 3 M rec/s)");
 
     // The twin decides whether the instrument measured anything. If A and A' differ by more than
     // the difference under test, the sitting drifted and the ratio is a fact about the machine's
@@ -148,10 +159,10 @@ fn main() {
         "NOT MEASURABLE (instrument): the A-vs-A' twin drifted further than the legs differ"
     } else if separation < (se_text + se_bin) {
         "NOT RESOLVED: the legs are within their combined spread floor"
-    } else if ratio >= 5.0 && rate_bin >= 3e6 {
-        "PASS: the binary format shows the speed that is its only justification"
+    } else if ratio >= MIN_RATIO && rate_bin >= 3e6 {
+        "PASS: the binary format still shows the speed that justifies it"
     } else {
-        "FAIL (revert clause): L13b's justification is throughput and it is not present"
+        "REGRESSION: the binary format has lost throughput it previously had"
     };
     println!("  verdict: {verdict}");
 }
