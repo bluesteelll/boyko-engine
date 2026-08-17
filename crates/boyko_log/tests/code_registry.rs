@@ -414,11 +414,27 @@ fn check_4_every_prefixed_literal_resolves_to_a_registry_row() {
 /// rows. Each lands with the rung that writes its emitter, where the message text exists to read.
 const FORWARD_DECLARED: &[(&str, &str)] = &[
     ("W0102", "L3 — the aggregated per-drain drop report"),
-    ("E0104", "L10 — downstream target id collision at boot"),
-    ("E0105", "L10 — dynamic target name arena exhausted"),
-    ("E0106", "L10 — dynamic target registration refused"),
+    // ⚠️ `E0104` says L10 and L10-A did NOT land it. That is correct rather than overdue: L10's row
+    // in the ladder scopes the rung to the DYNAMIC band, and `E0104` is the DOWNSTREAM band's boot
+    // collision check — `define_target!`, which is L11a's. The ladder's "a later rung" and this
+    // ledger's "L10" disagreed; the ladder is the one with the file list, so this row now names the
+    // rung that actually builds the thing it reports on.
+    ("E0104", "L11a — downstream target id collision at boot"),
+    // ⚠️ REPAIRED AT L10-A, and the repair is the point. This row read
+    // *"L10 — dynamic target name arena exhausted"*, which is `E0106`'s condition wearing `E0105`'s
+    // number: the corpus assigns `E0105` to `flush()`'s 2 s timeout in FOUR places
+    // (`02-SINK-LIFECYCLE.md` ×4, `05-LADDER-GATES.md` §Integration 9) and never to the band.
+    //
+    // Left alone it would have been the L8c-C defect in the ledger next door: a row reserved for a
+    // rung that has SHIPPED, describing work that rung never owed. And unlike a `Pending` registry
+    // row, nothing here could have caught it — this ledger's shrink-only check fires when a listed
+    // code becomes REGISTERED, and `E0105` is not going to be registered by the rung it named. It
+    // would have sat here indefinitely, reading like debt.
+    ("E0105", "L14 — flush() timed out waiting for the sink"),
     ("E0107", "L14 — sink open/close request refused"),
-    ("E0108", "L14 — control spec could not be applied"),
+    // Likewise mis-summarised: the corpus's `E0108` is shutdown DETACHING after its bounded spin
+    // (`02-SINK-LIFECYCLE.md`, `06-DISPOSITIONS.md` M16), not the control spec. The rung was right.
+    ("E0108", "L14 — shutdown timed out and detached the sink thread"),
     ("E0109", "L15 — crash sink could not be opened"),
     ("W0110", "L14 — sink filter rejected every destination"),
     ("W0111", "L14 — census reports unsunk records"),

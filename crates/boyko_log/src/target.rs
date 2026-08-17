@@ -15,13 +15,16 @@
 //! |---|---|---|
 //! | Engine | `0..=95` | one [`targets!`] table with a strictly-increasing `const` assert — collisions **do not compile** |
 //! | Downstream source | `96..=223` | `define_target!` plus a boot check naming both colliders (a later rung) |
-//! | Dynamic | `224..=255` | minted at run time from a name; the mint **is** the proof (a later rung) |
+//! | Dynamic | `224..=255` | minted at run time from a name; the mint **is** the proof |
 //!
-//! **At this rung only the first band exists**, so [`TargetId`]'s constructor set is exactly one
-//! function, and the SAFETY comment on the hot-path index says so rather than describing the set
-//! it will eventually have. A safety argument that names constructors which do not exist yet is a
-//! safety argument nobody can check.
+//! **Two of the three exist** — the engine table and, since L10, the dynamic band. So
+//! [`TargetId`]'s constructor set is exactly two functions, and the SAFETY comment on the hot-path
+//! index names both and the argument that bounds each. It describes the set that exists, never the
+//! one this file will eventually have: a safety argument that names constructors which do not
+//! exist yet is a safety argument nobody can check, and one that *stops* naming a constructor that
+//! has since appeared is worse — it still reads like a proof.
 
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use crate::level::Level;
@@ -41,6 +44,11 @@ pub const DYN_BAND_LEN: usize = MAX_TARGETS - DYN_BAND_START;
 
 const _: () = assert!((ENGINE_BAND_END as usize) < DYN_BAND_START);
 const _: () = assert!(DYN_BAND_START < MAX_TARGETS);
+// L10's arithmetic, pinned rather than trusted: `TargetId::new_dynamic` maps a `DYN_NAMES` slot to
+// `DYN_BAND_START + slot`, and this is what makes "slot < DYN_BAND_LEN" imply "id < MAX_TARGETS" —
+// the bound `runtime_ceiling`'s `get_unchecked` rests on. Widening the band by editing one constant
+// and not the other would be a soundness change with no compile error behind it.
+const _: () = assert!(DYN_BAND_START + DYN_BAND_LEN == MAX_TARGETS);
 
 /// A target's index into [`CONTROL`].
 ///
@@ -68,6 +76,25 @@ impl TargetId {
     pub(crate) const fn new_engine(id: u16) -> TargetId {
         assert!(id < ENGINE_BAND_END, "invariant: an engine target id is below ENGINE_BAND_END");
         TargetId(id)
+    }
+
+    /// Mint a dynamic-band id — the SECOND constructor, and the first to widen the set *(L10)*.
+    ///
+    /// `slot` is an index into [`DYN_NAMES`], so the bound is `slot < DYN_BAND_LEN` and the id is
+    /// `DYN_BAND_START + slot`. The `debug_assert` is not the safety argument: the argument is that
+    /// the only caller is [`register_dynamic_target`], which obtains `slot` from a bounded loop
+    /// over `DYN_NAMES` and can therefore produce nothing else. The `const` assert below pins the
+    /// arithmetic — `DYN_BAND_START + DYN_BAND_LEN == MAX_TARGETS` — so the widening cannot move
+    /// the bound `runtime_ceiling` relies on.
+    ///
+    /// Not `pub`, for the same reason `new_engine` is not: a public constructor taking a raw index
+    /// is a public way to make an out-of-range `TargetId`, which is the hazard the private field
+    /// exists to prevent.
+    #[inline]
+    #[must_use]
+    fn new_dynamic(slot: usize) -> TargetId {
+        debug_assert!(slot < DYN_BAND_LEN, "invariant: a dynamic slot indexes DYN_NAMES");
+        TargetId((DYN_BAND_START + slot) as u16)
     }
 
     /// The raw index. Useful to artifact writers and to tests; it cannot be turned back into a
@@ -314,13 +341,22 @@ pub trait LogTarget: 'static {
 #[inline]
 #[must_use]
 pub fn runtime_ceiling(id: TargetId) -> u8 {
-    // SAFETY: `TargetId`'s field is private and `TargetId::new_engine` is its ONLY constructor at
-    //   this rung. That constructor is `const` and carries `assert!(id < ENGINE_BAND_END)`, and
-    //   `ENGINE_BAND_END < MAX_TARGETS` is a `const` assert above, so every `TargetId` that can
-    //   exist indexes inside `CONTROL`. There is no `INVALID` sentinel and no public constructor,
-    //   so safe code cannot produce an out-of-range value. Widening the constructor set (the
-    //   downstream and dynamic bands, later rungs) MUST re-establish the bound at each new
-    //   constructor -- this comment names one because there is one.
+    // SAFETY: `TargetId`'s field is private and its constructor set is closed at TWO functions,
+    //   each of which establishes `.0 < MAX_TARGETS` by its own argument:
+    //     * `new_engine(id)` is `const` and carries `assert!(id < ENGINE_BAND_END)`, and
+    //       `ENGINE_BAND_END < MAX_TARGETS` is a `const` assert above.
+    //     * `new_dynamic(slot)` maps `slot` to `DYN_BAND_START + slot` and is called only with a
+    //       `slot < DYN_BAND_LEN` (every caller indexes `DYN_NAMES`, whose length IS that
+    //       constant), so `DYN_BAND_START + DYN_BAND_LEN == MAX_TARGETS` -- the third `const`
+    //       assert above -- is what bounds it. That equality is pinned rather than trusted
+    //       precisely because it is load-bearing HERE and nowhere near this line.
+    //   There is no `INVALID` sentinel and no public constructor, so safe code cannot produce an
+    //   out-of-range value. A THIRD constructor (the downstream band, L11a) MUST re-establish the
+    //   bound and be named here -- this comment names two because there are two.
+    //
+    //   L10 widened the set, and the widening is what this comment is now for: the version that
+    //   said "`new_engine` is its ONLY constructor" was true when written and would have gone on
+    //   reading like a proof after it stopped being one.
     let cell = unsafe { CONTROL.get_unchecked(id.0 as usize) };
     cell.load(Ordering::Relaxed) & TargetControl::LEVEL_MASK
 }
@@ -533,6 +569,263 @@ targets! {
     // discover, because an engine-band row for a non-engine crate is exactly the kind of thing
     // that stops looking like a deviation once it has sat in a table for a while.
     (26, Demo,         "demo",         Level::Trace),
+}
+
+// ─────────────────────────── L10: the dynamic band ───────────────────────────
+
+/// Longest dynamic target name, in bytes.
+///
+/// Not a taste decision: [`DynSlot`] is one cache line, and 64 − 8 (`hash`) − 1 (`len`) leaves
+/// exactly this. A name is a category like `"mod:acme_weapons"`; 47 bytes is generous for that, and
+/// the alternative — a heap string — would put an allocation on a table whose whole point is that
+/// it makes none.
+pub const MAX_DYN_NAME: usize = 47;
+
+/// One interned dynamic-target name. **One cache line, `.bss`, never freed.**
+///
+/// # The publication order, and the contradiction in the specification it resolves
+///
+/// The corpus states two things about this slot that cannot both hold as written:
+///
+/// 1. *"`bytes`/`len` are written before `hash.store(h, Release)`; a reader that observes a
+///    non-zero hash via `Acquire` observes the completed name."*
+/// 2. *"A slot's hash transitions `0 -> h` exactly once, by CAS."*
+///
+/// If the CAS is on `hash`, a writer cannot have written the bytes first — it has not yet claimed
+/// the slot, so writing them would race another claimant. The two clauses describe different
+/// mechanisms and the file has to pick one.
+///
+/// **The claim moves to `len`.** A writer knows the name's length before it starts, so
+/// `len.compare_exchange(0, n)` is a claim that carries information rather than a bare flag. Then:
+/// bytes are written under that exclusive claim, and `hash.store(h, Release)` publishes. Clause 1
+/// holds exactly; clause 2 holds in substance — only the claimant ever stores the hash, so the
+/// transition still happens once — and the CAS that guarantees it has moved one field over. Written
+/// down here rather than silently reinterpreted.
+///
+/// `len == 0` therefore means "free", which is why an empty name is refused: it could not claim.
+#[repr(C, align(64))]
+struct DynSlot {
+    /// The name's hash, or `0` for "not published yet". Published `Release`, read `Acquire`.
+    hash: AtomicU64,
+    /// The name's length in bytes, or `0` for "unclaimed". **The claim word.**
+    len: AtomicU8,
+    /// The name. Valid for `len` bytes once `hash` is non-zero.
+    bytes: UnsafeCell<[u8; MAX_DYN_NAME]>,
+}
+
+// SAFETY: every field is either an atomic or is protected by one.
+//   * `len` is the claim: exactly one thread wins its `compare_exchange` from 0, and only that
+//     thread writes `bytes`. No slot is ever released, so the claim is permanent and there is no
+//     ABA to consider.
+//   * `bytes` is written ONLY by the claimant, and only before its `hash.store(.., Release)`. A
+//     reader that observes a non-zero `hash` with `Acquire` has therefore observed those writes.
+//   * A reader that observes `hash == 0` treats the slot as absent and never reads `bytes`.
+//   * Nothing is ever freed, so no reader can observe a dangling name.
+unsafe impl Sync for DynSlot {}
+
+impl DynSlot {
+    const fn new() -> DynSlot {
+        DynSlot {
+            hash: AtomicU64::new(0),
+            len: AtomicU8::new(0),
+            bytes: UnsafeCell::new([0; MAX_DYN_NAME]),
+        }
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<DynSlot>() == 64);
+
+/// The interning table: 32 slots, 2 KiB of `.bss`.
+///
+/// **Not a map.** No rehash, no growth, no allocation — and the emission path never touches it:
+/// a site carries a [`TargetId`], and the name is resolved by the sink. A flag-off run never reads
+/// or writes a byte of this.
+static DYN_NAMES: [DynSlot; DYN_BAND_LEN] = [const { DynSlot::new() }; DYN_BAND_LEN];
+
+/// FNV-1a over the name, never zero.
+///
+/// Zero is the "unpublished" sentinel, so a name that hashes to it must not be storable as itself.
+/// Forcing the low bit is one instruction and biases nothing that matters here — the table is
+/// open-addressed over 32 slots, and the hash is a probe seed, not a distribution guarantee.
+fn dyn_hash(name: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in name.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h | 1
+}
+
+/// The name in `slot`, or `None` if it is unpublished.
+///
+/// Reads `hash` with `Acquire` FIRST — that load is the whole synchronisation, and touching `len`
+/// or `bytes` before it would be reading memory the writer may still be filling.
+fn dyn_name_of(slot: usize) -> Option<&'static str> {
+    let s = &DYN_NAMES[slot];
+    if s.hash.load(Ordering::Acquire) == 0 {
+        return None;
+    }
+    let n = (s.len.load(Ordering::Relaxed) as usize).min(MAX_DYN_NAME);
+    // SAFETY: the `Acquire` above observed a non-zero hash, which the claimant stored with
+    //   `Release` AFTER writing `len` and the first `n` bytes — so those writes are visible here.
+    //   A slot is claimed once and never released, so no writer can be active now and the slice
+    //   cannot alias one. `n` is clamped to the array's length above, and `get()` is a valid
+    //   pointer to a live `.bss` array for the process lifetime.
+    //
+    //   `from_raw_parts` over a `*const u8` rather than `&(*get())[..n]`: the latter takes an
+    //   implicit reference to the WHOLE array through the raw pointer, which asserts validity and
+    //   aliasing over all 47 bytes including the ones past `n` that no writer ever touched.
+    let bytes = unsafe { core::slice::from_raw_parts(s.bytes.get().cast::<u8>(), n) };
+    core::str::from_utf8(bytes).ok()
+}
+
+/// Register a dynamic target by name, or `None` when the band is full.
+///
+/// **Cold, setup-time, and idempotent by name**: registering `"mod:acme"` twice returns the same
+/// [`TargetId`], which is what lets two independently-loaded mods name one category without
+/// coordinating. `initial` is applied only on the FIRST registration — a second caller does not get
+/// to re-open a target the first one configured.
+///
+/// # `None` has THREE meanings, and the corpus documents one
+///
+/// There is no in-band sentinel to hand back — absence is the `Option` — but the corpus's signature
+/// comment reads *"`None` => band exhausted"*, and this function returns `None` for three different
+/// reasons: the band is full, the name is empty, or the name is longer than [`MAX_DYN_NAME`]. A
+/// caller who read only that comment would see a rejected 60-byte name and conclude the band was
+/// gone, stop registering, and lose every target after it.
+///
+/// So **`boyko-E0106` covers all three and carries the reason as an argument.** One code rather
+/// than three, because they are one function's one failure return and a caller cannot act
+/// differently on them; the reason string is what tells a reader which one happened. The registry
+/// summary is read from the message this function actually prints, per the registry's own rule.
+///
+/// `RatePolicy::Every`, not `Once`: past exhaustion *every* later registration fails, and each
+/// failure is a different mod whose logging is now silently absent. `Once` would name the first
+/// victim and hide the rest — the same argument `W0901` records for its component types.
+///
+/// This function EMITS, which is unusual for `boyko_log`'s own internals — `W0103` writes through
+/// `sync_out` because the file sink cannot log into itself. Nothing like that applies here: the
+/// dynamic band sits beside the emission path, not underneath it, and the target it emits on
+/// (`Log`) is a static engine row whose ceiling this call cannot have disturbed. A default run
+/// still shows nothing, exactly as every other migrated site does.
+///
+/// # Why it waits on a claimed-but-unpublished slot
+///
+/// The probe walks `len` (the claim), not `hash` (the publication), because a slot that is claimed
+/// and not yet published is **occupied** — and a prober that skipped it would walk past a name
+/// being written and mint a SECOND id for it, breaking the one property this function sells. So on
+/// meeting a claimed slot whose hash has not landed, it waits. The wait is bounded by one `memcpy`
+/// of at most 47 bytes on another core; this function is `#[cold]`, runs at setup, and the
+/// alternative — a lock — would be the allocation-free table's first.
+#[cold]
+#[inline(never)]
+pub fn register_dynamic_target(name: &str, initial: TargetControl) -> Option<TargetId> {
+    let n = name.len();
+    if n == 0 || n > MAX_DYN_NAME {
+        // A zero-length name could not claim a slot (`len == 0` IS the free marker), and an
+        // over-long one does not fit the line. Both are caller errors, refused the way exhaustion
+        // is — `None`, with no partial state written.
+        let why = if n == 0 {
+            "the name is empty"
+        } else {
+            "the name is longer than 47 bytes"
+        };
+        crate::error!(
+            crate::Log,
+            crate::codes::E0106.number(),
+            "dynamic target {} refused: {}",
+            name,
+            why
+        );
+        return None;
+    }
+    let h = dyn_hash(name);
+    let start = (h as usize) % DYN_BAND_LEN;
+
+    for probe in 0..DYN_BAND_LEN {
+        let slot = (start + probe) % DYN_BAND_LEN;
+        let s = &DYN_NAMES[slot];
+
+        if s.len.compare_exchange(0, n as u8, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            // SAFETY: the CAS above is the exclusive claim on this slot, and a slot is never
+            //   released, so this thread is its only writer for the process lifetime. `n` was
+            //   bounded by `MAX_DYN_NAME` before the claim, so the destination range is inside the
+            //   array. Source and destination cannot overlap: one is the caller's `&str`, the other
+            //   is this crate's `.bss`.
+            //
+            //   `copy_nonoverlapping` rather than `(*get())[..n].copy_from_slice(..)`, which would
+            //   take an implicit reference to the whole array through the raw pointer.
+            unsafe {
+                core::ptr::copy_nonoverlapping(name.as_ptr(), s.bytes.get().cast::<u8>(), n);
+            }
+            // Publishes `len` and `bytes` to every `Acquire` reader of `hash`.
+            s.hash.store(h, Ordering::Release);
+            let id = TargetId::new_dynamic(slot);
+            set_target_control(id, initial);
+            return Some(id);
+        }
+
+        // Occupied. Wait for its name to land, then compare — see the doc above for why skipping a
+        // claimed-but-unpublished slot would break idempotency.
+        loop {
+            match dyn_name_of(slot) {
+                Some(existing) if existing == name => return Some(TargetId::new_dynamic(slot)),
+                Some(_) => break,
+                None => core::hint::spin_loop(),
+            }
+        }
+    }
+    // Every slot walked, none free, none holding this name.
+    crate::error!(
+        crate::Log,
+        crate::codes::E0106.number(),
+        "dynamic target {} refused: {}",
+        name,
+        "the 32-slot band is full"
+    );
+    None
+}
+
+/// The id registered for `name`, dynamic or engine, or `None`.
+///
+/// A linear scan rather than a probe, and the difference is deliberate: a probe would have to
+/// reproduce the insert path's collision walk exactly, and two implementations of one addressing
+/// scheme is one more than can be kept in agreement. `#[cold]`, over 32 slots, from settings
+/// screens and console commands.
+///
+/// Engine names are searched too, because a console command's user does not know which band a
+/// target lives in and should not have to.
+#[cold]
+#[inline(never)]
+#[must_use]
+pub fn find_target(name: &str) -> Option<TargetId> {
+    for slot in 0..DYN_BAND_LEN {
+        if dyn_name_of(slot) == Some(name) {
+            return Some(TargetId::new_dynamic(slot));
+        }
+    }
+    engine_targets().find(|(_, n)| *n == name).map(|(id, _)| id)
+}
+
+/// Every target that exists right now — engine rows first, then registered dynamic ones.
+///
+/// For a settings screen or a console `targets` command: the caller wants one list, and which band
+/// an id came from is not a distinction a player has any use for. Unregistered dynamic slots are
+/// **absent** rather than listed blank — a row for a target that does not exist is the vacuous row
+/// this vocabulary was invented to prevent.
+#[cold]
+#[inline(never)]
+pub fn targets() -> impl Iterator<Item = (TargetId, &'static str)> {
+    engine_targets().chain(
+        (0..DYN_BAND_LEN)
+            .filter_map(|slot| dyn_name_of(slot).map(|n| (TargetId::new_dynamic(slot), n))),
+    )
+}
+
+/// How many dynamic slots are taken — the census's question, and `boyko-E0106`'s subject.
+#[must_use]
+pub fn dyn_registered() -> usize {
+    (0..DYN_BAND_LEN).filter(|&s| dyn_name_of(s).is_some()).count()
 }
 
 #[cfg(test)]

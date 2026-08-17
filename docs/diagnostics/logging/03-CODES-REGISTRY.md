@@ -133,7 +133,7 @@ Defined *around* **measured** existing occupancy, because codes are never renumb
 | Block | Domain | Occupied today |
 |---|---|---|
 | `00xx` | ECS core / system params | `B0002` |
-| `01xx` | `boyko_log` itself | `W0103` (L4) |
+| `01xx` | `boyko_log` itself | `W0103` (L4) · `E0106` (L10) — the dynamic band's one diagnostic, and one of only two places this crate logs about itself. `W0103` writes through `sync_out` because the file sink cannot log into itself; `E0106` uses `error!(Log, …)` normally, because the target band sits **beside** the emission path rather than underneath it. The distinction is worth keeping: `sync_out` is for reporters the transport cannot carry, not for "internal" as a category |
 | `02xx` | `boyko_threadpool` | `E0201` (L6) |
 | `03xx` | memory (`VmReservation`, `ComponentPool`) | new |
 | `04xx`–`09xx` | components, query, change detection, events, assets, serialize — **one block each, in that order**, which is what fixes `05xx`=query, `07xx`=events, `08xx`=assets | `W0501`, `B0502` (query, L6) · `W0701` (events, L6) · `E0801` (assets, L6) · `W0901` (serialize, L8a) |

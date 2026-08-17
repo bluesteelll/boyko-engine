@@ -442,6 +442,19 @@ codes! {
     // three rows of this registry's first draft broke.
     (103,  W, W0103, RatePolicy::Once,  CodeStatus::Live,
         "The file sink reached its byte cap and stopped writing"),
+    // ── L10: the dynamic band's one diagnostic ───────────────────────────────────────────────
+    // `Every`, and the reason is the same one `W0901` records: the subject is a NAME. Past
+    // exhaustion every later registration fails, and each failure is a different mod whose logging
+    // is now silently absent -- `Once` would name the first victim and hide the rest.
+    //
+    // This code covers ALL THREE of `register_dynamic_target`'s refusals (band full, empty name,
+    // over-long name), with the reason as an argument. The corpus documents only the first
+    // (`04-GAME-FACING.md`: "`None` => band exhausted"), which is narrower than the function it
+    // annotates -- a caller acting on that comment would read a rejected 60-byte name as a lost
+    // band. One code because they are one function's one failure return; the argument is what
+    // tells the two apart.
+    (106,  E, E0106, RatePolicy::Every, CodeStatus::Live,
+        "A dynamic target could not be registered, and the reason names which refusal"),
     // ── L6's five new rows ──────────────────────────────────────────────────────────────────
     // Every summary below is read out of the message its emitter actually prints. `E0201` is the
     // pool's only diagnostic; `W0501`/`B0502` are the two halves of one table filling up, and the
@@ -749,6 +762,7 @@ mod tests {
         const LIVE: &[(u8, u16)] = &[
             (b'B', 2),    // L6  -- intra-system access conflict on one resource
             (b'W', 103),  // L4  -- the file sink's byte cap
+            (b'E', 106),  // L10 -- a dynamic target could not be registered (all three refusals)
             (b'E', 201),  // L6  -- a fire-and-forget task panicked, process aborting
             (b'W', 501),  // L6  -- query-type table at 75 %
             (b'B', 502),  // L6  -- query-type table exhausted

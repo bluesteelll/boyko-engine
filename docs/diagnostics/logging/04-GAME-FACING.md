@@ -122,6 +122,30 @@ reserved `.bss` extent that a flag-off run never touches. The rule this follows,
 table, belong to the seam; the fact that this table is reserved rather than resident is stated
 where the number lives, in `01-EMISSION-RING.md`'s `.bss` budget matrix.
 
+#### Two corrections measured at L10-A, where the table was built
+
+**(1) The publication order specified here cannot hold as written.** This section's slot contract
+says both *"`bytes`/`len` are written **before** `hash.store(h, Release)`"* and *"a slot's hash
+transitions `0 -> h` exactly once, **by CAS**"*. If the CAS is on `hash`, the writer has not yet
+claimed the slot when it writes the bytes, so the two clauses describe different mechanisms and an
+implementation has to pick one. **The claim moved to `len`**: `len.compare_exchange(0, n)` is the
+claim (a writer knows the length up front, so the claim carries information instead of being a bare
+flag), bytes are written under it, and `hash.store(h, Release)` publishes. Clause 1 holds exactly;
+clause 2 holds in substance, since only the claimant ever stores the hash.
+
+Its consequence is the part worth carrying: **the insert probe walks `len`, not `hash`.** A slot
+that is claimed and not yet published is *occupied*, and a prober that skipped it would walk past a
+name being written and mint a **second id for it** — breaking the one property this function sells.
+So the probe waits, bounded by one ≤47-byte `memcpy` on another core, in a `#[cold]` setup-time
+function.
+
+**(2) `None` had one documented meaning and three real ones.** The API block below read *"`None`
+=> band exhausted"*, and the function returns `None` for a full band, an empty name, **and** a name
+past `MAX_DYN_NAME`. A caller acting on the documented reading would see a rejected 60-byte name,
+conclude the band was gone, and stop registering — losing every target after it. `boyko-E0106`
+therefore covers all three and **carries the reason as an argument**; the comment is corrected in
+place below.
+
 ---
 
 ### Decision 19b: `LogPod` — game types as arguments, encoded FIELD BY FIELD *(re-cut by B10)*
@@ -504,7 +528,9 @@ the reserved-vs-resident distinction, live in `01-EMISSION-RING.md`.
 ```rust
 // ── dynamic targets ───────────────────────────────────────────────────────────
 /// DYNAMIC targets: IDs 224..=255, minted from data/mod/script names.
-/// COLD, setup-time, idempotent by name. `None` => band exhausted (`boyko-E0106`).
+/// COLD, setup-time, idempotent by name.
+/// `None` => refused, and `boyko-E0106` says WHICH of the three:  <-- corrected at L10-A
+///   band full | name empty | name longer than MAX_DYN_NAME (47).
 pub fn register_dynamic_target(name: &str, initial: TargetControl) -> Option<TargetId>;
 pub fn find_target(name: &str) -> Option<TargetId>;         // #[cold], linear scan
 pub fn targets() -> TargetIter<'static>;                    // #[cold], settings screens
