@@ -173,6 +173,19 @@ macro_rules! code_newtype {
                 self.num
             }
 
+            /// Build a **downstream** code: a number and the cell its index mints into.
+            ///
+            /// `pub` because [`declare_codes!`](crate::declare_codes) expands in another crate and
+            /// must construct these from outside this module. There is deliberately no public
+            /// constructor taking a raw `CodeIdx::Static`: an engine row's index is the position
+            /// [`codes!`] computed for it, and a caller who could forge one could point a code at
+            /// another code's rate slot — the aliasing the whole mint exists to prevent.
+            #[inline]
+            #[must_use]
+            pub const fn downstream(number: u16, cell: &'static AtomicU16) -> Self {
+                Self { num: number, idx: CodeIdx::Dynamic(cell) }
+            }
+
             /// Where this code's rate slot lives: `Static` for an engine row, `Dynamic` for a
             /// downstream one that mints on first use (Decision 19).
             #[inline]
@@ -347,7 +360,7 @@ macro_rules! code_class_ty {
 }
 
 /// `true` when every number is greater than the one before it.
-const fn numbers_strictly_increasing(nums: &[u16]) -> bool {
+pub const fn numbers_strictly_increasing(nums: &[u16]) -> bool {
     let mut i = 1;
     while i < nums.len() {
         if nums[i - 1] >= nums[i] {
@@ -917,6 +930,92 @@ codes! {
         "GPU timestamp slots were still in flight at teardown and were abandoned"),
     (9218, W, W9218, RatePolicy::Once,  CodeStatus::Live          ,
         "A telemetry quantile subscription was refused past the per-session cap"),
+}
+
+/// Declare a **downstream** diagnostic-code table: a game's, a mod's, or a tool's *(Decision 19)*.
+///
+/// ```ignore
+/// boyko_log::declare_codes! {
+///     prefix = "acme",
+///     (1, W, ACME_W0001, RatePolicy::Once,  "the widget budget is nearly spent"),
+///     (2, E, ACME_E0002, RatePolicy::Every, "a widget could not be built"),
+/// }
+/// ```
+///
+/// # What a downstream table gets, and what it does not
+///
+/// It gets its own `pub const` per code, its own `DiagInfo` table, and its own **prefix** — so its
+/// records print `acme-W0001` and never `boyko-W0001`. Codes from two tables with the same number
+/// are different codes, which is the point of the prefix being a table property rather than a
+/// global.
+///
+/// Every code is a [`CodeIdx::Dynamic`], minted on first use out of the shared 512-slot space. The
+/// cells live in one array per table, indexed by the same compile-time row the engine uses, so a
+/// table costs `2 × rows` bytes of `.bss` and no allocation.
+///
+/// **Decision 7 is not relaxed here.** A `Warn`/`Error` still MUST carry a code, and a code is
+/// still a promise of a documented page — which is why `codes_tidy!` exists to run the same eight
+/// checks over a caller's own corpus, and why the engine's own checks say in their failure text
+/// that they prove nothing about a downstream registry.
+#[macro_export]
+macro_rules! declare_codes {
+    (
+        prefix = $prefix:literal,
+        $(($num:expr, $class:ident, $Ident:ident, $rate:expr, $summary:literal)),* $(,)?
+    ) => {
+        /// This table's rows, sorted by number.
+        pub const DIAGNOSTICS_TABLE: [$crate::codes::DiagInfo; [$($num),*].len()] = [$(
+            $crate::codes::DiagInfo {
+                number: $num,
+                class: stringify!($class).as_bytes()[0],
+                summary: $summary,
+                rate: $rate,
+                status: $crate::codes::CodeStatus::Live,
+            },
+        )*];
+
+        /// The slice view. Same data, one indirection, no second source of truth.
+        pub static DIAGNOSTICS: &[$crate::codes::DiagInfo] = &DIAGNOSTICS_TABLE;
+
+        /// This table's printed prefix. Carried so a sink renders `acme-W0001`, never `boyko-`.
+        pub const PREFIX: &str = $prefix;
+
+        /// One mint cell per row. `.bss`, two bytes each, zero until a code is first used.
+        static CODE_CELLS: [::core::sync::atomic::AtomicU16; [$($num),*].len()] =
+            [const { ::core::sync::atomic::AtomicU16::new(0) }; [$($num),*].len()];
+
+        $(
+            #[doc = concat!("`", $prefix, "-", stringify!($class), stringify!($num), "` — ", $summary, ".")]
+            pub const $Ident: $crate::code_class_ty_pub!($class) =
+                <$crate::code_class_ty_pub!($class)>::downstream(
+                    $num,
+                    // The row's own position, resolved when this table compiles -- the same
+                    // const scan the engine table uses, so a downstream code's cell is as
+                    // statically placed as an engine code's index.
+                    &CODE_CELLS[$crate::codes::const_row_of(
+                        &DIAGNOSTICS_TABLE,
+                        stringify!($class).as_bytes()[0],
+                        $num,
+                    ) as usize],
+                );
+        )*
+
+        // Same rule as the engine table, and for the same reason: two rows sharing a number would
+        // share a `const_row_of` answer and therefore a mint cell.
+        const _: () = assert!(
+            $crate::codes::numbers_strictly_increasing(&[$($num),*]),
+            "downstream registry rows must be in strictly increasing number order"
+        );
+    };
+}
+
+/// [`code_class_ty!`] in a form an exported macro can name. Same mapping, `$crate`-qualified.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! code_class_ty_pub {
+    (B) => { $crate::codes::PanicCode };
+    (E) => { $crate::codes::ErrorCode };
+    (W) => { $crate::codes::WarnCode };
 }
 
 #[cfg(test)]

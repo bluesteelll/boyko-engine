@@ -2243,7 +2243,7 @@ deletes the never-evaluated guarantee, and no test of the output would notice.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Turn a class byte and a number into its registry row | `explain` (398) |
+| Turn a class byte and a number into its registry row | `explain` (411) |
 
 **File:** [crates/boyko_log/src/lifecycle.rs](../crates/boyko_log/src/lifecycle.rs) — boot, drain, teardown.
 
