@@ -96,6 +96,7 @@ piece of functionality lives, start here, then go to
 | Shared global data | [Resources](#resources) |
 | Low-level component byte storage | [Type-erased component storage](#type-erased-component-storage) |
 | Reserve/commit raw memory | [Memory and allocation](#memory-and-allocation) |
+| Log something, mint a diagnostic code, or read a `boyko-Cnnnn` | [Diagnostics](#diagnostics--logging-boyko_log-and-profiling-boyko_diag) |
 
 ### Std-lib / simulation subsystems
 
@@ -841,6 +842,132 @@ Newer dense-table sizing newtypes (`ResourceId`, `BundleTypeId`, `QueryTypeId`,
 | Bitset (generic word size) | [boyko_utils/bit_mask/bit_set.rs](../crates/boyko_utils/src/bit_mask/bit_set.rs) ✅ | `BitSet<T: BitInteger>` |
 | Fixed 256-bit set | [boyko_utils/bit_mask/bit_set_256.rs](../crates/boyko_utils/src/bit_mask/bit_set_256.rs) ✅ | `BitSet256` (+ `pop_lowest_set_bit`) — Phase 6, backs resource/event lane masks |
 | Identifier primitives | [boyko_utils/identifiers/](../crates/boyko_utils/src/identifiers/) ✅ | `Generation`, `Slot` |
+
+---
+
+## Diagnostics — logging (`boyko_log`) and profiling (`boyko_diag`)
+
+**This section was missing until 2026-08-17**, and its absence is worth stating rather than
+quietly repaired: `CLAUDE.md` names this document the **first point of contact** for "where is X?",
+and eighteen rungs of a logging ladder plus fifteen of a profiling one had built two crates that
+every other crate now depends on — while the only mention of either here was a dependency edge in
+[ARCHITECTURE.md](ARCHITECTURE.md). A subsystem nothing in the index names is a subsystem a reader
+finds by grep, which is the failure this file exists to prevent.
+
+### The cost model, because it is the reason for every structural choice below
+
+| Configuration | What a call site costs |
+|---|---|
+| above the compile ceiling (`GLOBAL_CEILING`, or the target's `STATIC_CEILING`) | **nothing** — the site *and its argument expressions* are deleted |
+| under the ceiling, target `Off` | one `.bss` byte load and one predicted branch |
+| enabled | the load, the branch, and the record |
+
+The middle row is why there are two axes and not one: a runtime flag has to be **read** to be a
+flag, so no runtime setting reaches zero per-site cost — only removing the site does. Keeping both
+means a *shipped* binary can still be asked for a log.
+
+⚠️ **A default run of this engine emits nothing.** With `BOYKO_LOG` unset, `CONTROL` stays
+`.bss`-zero, every target's runtime ceiling is `Off`, and a `warn!`/`error!`'s third gate folds —
+not a dropped record, *nothing*. This is specified (`02-SINK-LIFECYCLE.md` Decision 25) and gated
+(`log_host_reachable.rs` pins `flush() == NoConsumer`). Sites that must survive it — the ones where
+the process is stopping and the record **is** the reason — emit, call `flush()`, and print to
+stderr only when that answers `NoConsumer`; every such site is a row in
+[print_allowlist.txt](../crates/boyko_log/tests/print_allowlist.txt) with its reason.
+
+### Quick index
+
+| I want to … | Crate + key files |
+|-------------|-------------------|
+| Emit a log record (`error!` / `warn!` / `info!` / `debug!` / `trace!`) | `boyko_log` — [macros.rs](../crates/boyko_log/src/macros.rs) — the three-gate expansion and the per-site `static LogSite`; arguments sit **inside** the `if`, never in a `let` above it |
+| Name a target, or read and set its runtime ceiling | `boyko_log` — [target.rs](../crates/boyko_log/src/target.rs) — the engine table, the packed `TargetControl` byte, and the three id bands |
+| Register a target from **data** (a mod, a script namespace, a save field) | `boyko_log` — [target.rs](../crates/boyko_log/src/target.rs) (`register_dynamic_target`, `find_target`, `targets`) — 32 interned `.bss` slots, idempotent by name |
+| Mint or look up a diagnostic code | `boyko_log` — [codes.rs](../crates/boyko_log/src/codes.rs) — one `codes!` table, rows in strictly increasing order (a duplicate **does not compile**), plus per-code doc pages under [docs/diagnostics/](diagnostics/) |
+| Understand a `boyko-Cnnnn` a run printed | [docs/diagnostics/](diagnostics/) — one page per `Live` code, gated by `code_registry.rs` |
+| Configure sinks / boot / drain / teardown | `boyko_log` — [lifecycle.rs](../crates/boyko_log/src/lifecycle.rs) · [sink/](../crates/boyko_log/src/sink/) (`file.rs`, `ecs.rs`) |
+| Find out whether a quiet target was **clean** or **switched off** | `boyko_log` — [census.rs](../crates/boyko_log/src/census.rs) — `MEASURED` vs `UNPROVEN`; a silent target is never reported clean |
+| Profile a zone / counter / gauge, and read the fold | `boyko_diag` + `boyko_ecs` — [crates/boyko_diag/src/](../crates/boyko_diag/src/) · [profiling/](../crates/boyko_ecs/src/ecs/core/profiling/) |
+| Decode a binary telemetry stream | [tools/prof_decode/](../tools/prof_decode/) — the only reader of that format |
+
+### `boyko_log` internals
+
+Every row below pairs **one** backticked member with **one** line anchor, and the prose carries no
+backticks. That is not a style choice: `internal_docs_anchors` asserts *identity* — that the cited
+line defines the symbol named beside it — only where a line's backticked symbols pair one-to-one
+with its anchors. The first draft of these tables put explanatory prose with backticks in the same
+row, and **7 of its 12 anchors silently degraded to shape-only** — measured by repointing
+`register_dynamic_target`'s anchor at a different function in the same file and watching the suite
+stay green. After the rewrite the same edit fails with
+``does not define `register_dynamic_target` ``, and the document's identity-asserted count moves
+119 → 130.
+
+**One row here is shape-only and it is named rather than hidden:** the `targets!` anchor. A macro's
+symbol carries a `!` that its `macro_rules! targets {` definition line does not, so the identity
+clause cannot pair them; that anchor is checked for being a definition inside the right file and
+nothing more. Verified the same way — repointing it stays green.
+
+**File:** [crates/boyko_log/src/target.rs](../crates/boyko_log/src/target.rs) — targets, the packed control byte, and the dynamic band.
+
+| What you want to do | Member (line) |
+|---------------------|---------------|
+| Read the engine target table (ids 0..=95; a collision is a const assert, so it does not compile) | `targets!` (434) |
+| Read a target's runtime ceiling — the third gate, one Relaxed byte load behind an unchecked index | `runtime_ceiling` (343) |
+| Register a target from data: cold, setup-time, idempotent by name; refuses with boyko-E0106 naming which of three reasons | `register_dynamic_target` (722) |
+| Resolve a name in EITHER band — a console user does not know which band a target is in | `find_target` (801) |
+| List every target that exists; an unregistered dynamic slot is absent, never listed blank | `targets` (818) |
+
+**File:** [crates/boyko_log/src/lane.rs](../crates/boyko_log/src/lane.rs) — the producer path.
+
+| What you want to do | Member (line) |
+|---------------------|---------------|
+| Follow a record from the call site into the ring: admission, encode, publish — never formatted on the caller thread | `emit_impl` (208) |
+
+**File:** [crates/boyko_log/src/record.rs](../crates/boyko_log/src/record.rs) — the self-describing payload.
+
+| What you want to do | Member (line) |
+|---------------------|---------------|
+| Decode a payload against its format literal. ⚠️ It scans brace to brace WITHOUT reading between them, so a precision spec reaches a reader as full f32 precision | `render_payload` (581) |
+
+**File:** [crates/boyko_log/src/codes.rs](../crates/boyko_log/src/codes.rs) — the one registry.
+
+| What you want to do | Member (line) |
+|---------------------|---------------|
+| Turn a class byte and a number into its registry row | `explain` (315) |
+
+**File:** [crates/boyko_log/src/rate.rs](../crates/boyko_log/src/rate.rs) — per-code rate limiting.
+
+| What you want to do | Member (line) |
+|---------------------|---------------|
+| Apply a code's rate policy (Once / Every / EveryN / MinInterval) | `admit` (88) |
+
+**File:** [crates/boyko_log/src/lifecycle.rs](../crates/boyko_log/src/lifecycle.rs) — boot, drain, teardown.
+
+| What you want to do | Member (line) |
+|---------------------|---------------|
+| Ask whether anything is actually consuming records — the answer every stderr fallback is written against | `flush` (477) |
+
+**File:** [crates/boyko_log/src/sync_out.rs](../crates/boyko_log/src/sync_out.rs) — the synchronous route.
+
+| What you want to do | Member (line) |
+|---------------------|---------------|
+| Report a condition the transport itself cannot carry, such as the file sink hitting its own cap | `write_oracle_line` (173) |
+
+**File:** [crates/boyko_log/src/census.rs](../crates/boyko_log/src/census.rs) — the end-of-run verdict per target.
+
+| What you want to do | Member (line) |
+|---------------------|---------------|
+| Print the per-target census that tells a clean target from a switched-off one | `print` (101) |
+
+### The gates that keep this honest
+
+| Gate | What it refuses |
+|---|---|
+| [code_registry.rs](../crates/boyko_log/tests/code_registry.rs) | a code with no row, no doc page, or no observing test; a `Pending` row naming a shipped rung; a forward-declared code that has since been registered |
+| [print_census.rs](../crates/boyko_log/tests/print_census.rs) | any `println!`/`eprintln!` in `crates/*/src/**.rs` outside the allowlist — **checked in both directions**, so a stale allowlist row reds too |
+| [manifest_no_third_party_log.rs](../crates/boyko_log/tests/manifest_no_third_party_log.rs) | a direct `log`/`tracing`/`env_logger` dependency in any workspace manifest |
+| [internal_docs_anchors.rs](../tests/internal_docs_anchors.rs) | every `file.rs:N` in this document that does not land on the definition it names |
+
+Design corpus: [docs/diagnostics/logging/](diagnostics/logging/) (emission ring, sink lifecycle,
+code registry, game-facing surface, ladder + gates, dispositions).
 
 ---
 
