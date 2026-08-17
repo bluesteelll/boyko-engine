@@ -39,7 +39,7 @@
 //! that the identifier now exists in source, which is the only thing the orphan check can see.
 //! `B1801`/`B1802` stay `Pending("L8b")` — they are `boyko_app`'s, and that is L8b's rung.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 
 /// How often a `W`/`E` code may be delivered.
 ///
@@ -315,6 +315,132 @@ pub fn code_idx_of(class: u8, number: u16) -> u32 {
 pub fn explain(class: u8, number: u16) -> Option<&'static DiagInfo> {
     let idx = code_idx_of(class, number);
     if idx == CODE_IDX_EXHAUSTED { None } else { Some(&DIAGNOSTICS[idx as usize]) }
+}
+
+// ─────────────────── L11a: the dynamic half of the index space ───────────────────
+
+/// Dense rate-slot indices. Must equal [`crate::rate::MAX_RATE_SLOTS`], and the `const` assert
+/// below is what keeps the two from drifting: this module hands out indices, that one allocates
+/// the slots they name, and a mint past the array's end is an aliased slot or an out-of-bounds
+/// read depending on which side is larger.
+pub const MAX_CODES: u16 = crate::rate::MAX_RATE_SLOTS as u16;
+const _: () = assert!(MAX_CODES as usize == crate::rate::MAX_RATE_SLOTS);
+
+/// Engine rows occupy the low indices densely, so downstream minting starts above them.
+///
+/// Not a runtime read: the engine table is a `const` table, so where downstream space begins is a
+/// compile-time fact — which is the L11a invariant that an engine `code_idx` **remains a
+/// compile-time constant** and cannot be perturbed by anything a downstream crate does.
+pub const DOWNSTREAM_IDX_BASE: u16 = DIAGNOSTICS.len() as u16;
+const _: () = assert!(DOWNSTREAM_IDX_BASE < MAX_CODES);
+// The sentinel must lie outside every representable index, or it IS an index -- the exact hazard
+// `TargetId::INVALID`'s deletion avoids one module over. A COMPILE-TIME claim, so it is asserted
+// here rather than at run time: clippy correctly refused the runtime form in
+// `tests/l11a_code_minting.rs` as always-true, which is what a check that cannot fail looks like.
+const _: () = assert!((MAX_CODES as u32) < CODE_IDX_EXHAUSTED);
+
+/// The un-minted state of a downstream code's index cell. Zero, so a `static` costs `.bss` only.
+const UNASSIGNED: u16 = 0;
+/// The claim a racing minter sees while the winner is publishing. Never an index.
+const RESERVED: u16 = u16::MAX - 1;
+
+/// How many downstream indices have been handed out.
+static CODE_OCCUPANCY: AtomicU16 = AtomicU16::new(0);
+
+/// Where a code's rate slot lives.
+///
+/// **Two variants and not one, because the two halves are known at different times.** An engine
+/// code's index is its row in the `const` table; a downstream code's is minted on first use, so it
+/// needs a cell to be minted *into*. Collapsing them into a runtime lookup would put a scan on the
+/// path that the `Static` arm resolves at compile time.
+#[derive(Clone, Copy, Debug)]
+pub enum CodeIdx {
+    /// An engine row: the index IS the row, fixed when the table compiled.
+    Static(u16),
+    /// A downstream code: `UNASSIGNED` until first use, then a dense index, forever.
+    Dynamic(&'static AtomicU16),
+}
+
+/// Resolve a code's dense index, minting one on first use for the downstream half.
+///
+/// # The reserve-then-publish protocol, and what it is defending
+///
+/// Sixteen threads reaching one un-minted code must produce **exactly one** index and leak none.
+/// A bare `fetch_add` per caller leaks: every racer takes a slot and all but one are abandoned. A
+/// bare `compare_exchange` on the index itself cannot work either — the winner does not yet know
+/// what value to publish, because obtaining it is the very thing being serialised.
+///
+/// So: `CAS UNASSIGNED -> RESERVED` picks the winner, the winner alone does `fetch_add` on
+/// [`CODE_OCCUPANCY`], and it publishes with `Release`. Losers spin on the cell until it stops
+/// reading `RESERVED`, which is bounded by one `fetch_add` on another core.
+///
+/// # Exhaustion never aliases
+///
+/// Past [`MAX_CODES`] the mint returns [`CODE_IDX_EXHAUSTED`], **a reserved sentinel and never an
+/// index**, and the caller degrades to `RatePolicy::Every` semantics with no rate state. The
+/// alternative a first draft of this design is always tempted by — `fetch_add(1) % MAX_CODES` —
+/// silently gives two codes one slot, which is a rate limiter throttling an unrelated code's
+/// storm. `E0115` fires once and `LogStats.codes_unindexed` counts every later emission.
+#[inline]
+#[must_use]
+pub fn resolve_idx(idx: CodeIdx) -> u32 {
+    match idx {
+        CodeIdx::Static(i) => u32::from(i),
+        CodeIdx::Dynamic(cell) => mint(cell),
+    }
+}
+
+/// The cold half of [`resolve_idx`], out of line so the `Static` arm stays a move.
+#[cold]
+#[inline(never)]
+fn mint(cell: &'static AtomicU16) -> u32 {
+    loop {
+        match cell.load(Ordering::Acquire) {
+            UNASSIGNED => {
+                if cell
+                    .compare_exchange(UNASSIGNED, RESERVED, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    let next = CODE_OCCUPANCY.fetch_add(1, Ordering::AcqRel);
+                    let idx = DOWNSTREAM_IDX_BASE.saturating_add(next);
+                    let published = if next >= MAX_CODES - DOWNSTREAM_IDX_BASE || idx >= MAX_CODES {
+                        // Exhausted. The sentinel is published so later callers stop re-minting,
+                        // and it is NOT an index -- see this function's exhaustion clause.
+                        u16::MAX
+                    } else {
+                        idx
+                    };
+                    cell.store(published, Ordering::Release);
+                    return if published == u16::MAX {
+                        CODE_IDX_EXHAUSTED
+                    } else {
+                        u32::from(published)
+                    };
+                }
+            }
+            // A racer holds the claim; its publish is one `fetch_add` away.
+            RESERVED => core::hint::spin_loop(),
+            u16::MAX => return CODE_IDX_EXHAUSTED,
+            already => return u32::from(already),
+        }
+    }
+}
+
+/// Downstream indices handed out so far. The census's question, and `W0114`'s subject.
+#[must_use]
+pub fn code_occupancy() -> u16 {
+    CODE_OCCUPANCY.load(Ordering::Relaxed)
+}
+
+/// `true` once the downstream index space is at least nine tenths spent — `W0114`'s condition.
+///
+/// Computed against the DOWNSTREAM capacity rather than [`MAX_CODES`], because the engine rows are
+/// not a downstream crate's to spend and a warning about a budget somebody else already used would
+/// fire on an empty table.
+#[must_use]
+pub fn code_space_nearly_full() -> bool {
+    let capacity = u32::from(MAX_CODES - DOWNSTREAM_IDX_BASE);
+    u32::from(code_occupancy()) * 10 >= capacity * 9
 }
 
 /// A per-site `Once` latch.
