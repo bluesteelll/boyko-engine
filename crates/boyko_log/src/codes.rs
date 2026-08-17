@@ -695,6 +695,13 @@ codes! {
     // tells the two apart.
     (106,  E, E0106, RatePolicy::Every, CodeStatus::Live,
         "A dynamic target could not be registered, and the reason names which refusal"),
+    // ── L12: sampling's one report ────────────────────────────────────────────────────────────
+    // `Once` PER PROCESS, not per target: the condition is "an operator's own shift is now
+    // discarding records", and they configured it deliberately. One line telling them the
+    // census counts are no longer totals is the whole job; one per target would be a storm
+    // about a setting they chose.
+    (113,  W, W0113, RatePolicy::Once,  CodeStatus::Live,
+        "Sampling is discarding records, so delivered counts are no longer totals"),
     // ── L11a: the downstream index space's two reports ───────────────────────────────────────
     // Both `Once`, and for the same reason the condition is a THRESHOLD rather than an event: past
     // 90 % every later mint is also past 90 %, and past exhaustion every later mint also fails.
@@ -1206,6 +1213,7 @@ mod tests {
             (b'W', 103),  // L4  -- the file sink's byte cap
             (b'E', 106),  // L10 -- a dynamic target could not be registered (all three refusals)
             (b'E', 104),  // L11a -- two downstream targets claim one id
+            (b'W', 113),  // L12  -- sampling is discarding records
             (b'W', 114),  // L11a -- downstream code index space at 90 %
             (b'E', 115),  // L11a -- downstream code index space exhausted
             (b'E', 201),  // L6  -- a fire-and-forget task panicked, process aborting

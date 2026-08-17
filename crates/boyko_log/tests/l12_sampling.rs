@@ -39,6 +39,12 @@ fn sampling_is_exact_counted_separately_and_never_suppresses_argument_evaluation
     });
     assert!(enable(), "enable() refused a freshly booted process");
 
+    // `W0113` emits on the ENGINE `log` row, so that row must be open or the observer below
+    // would be asserting against a target that is off -- an observer that cannot observe.
+    set_target_control(
+        <boyko_log::Log as LogTarget>::ID,
+        TargetControl::new(Level::Trace, 0, false),
+    );
     let id = <Ecs as LogTarget>::ID;
     const N: u32 = 1000;
 
@@ -106,6 +112,30 @@ fn sampling_is_exact_counted_separately_and_never_suppresses_argument_evaluation
     // cannot fail.
     let on_disk = text.matches("half ").count();
     assert_eq!(on_disk as u64, delivered, "the census and the file must agree on what arrived");
+
+    // ── W0113 REACHES A READER, ONCE ────────────────────────────────────────────────────────
+    //
+    // Driven by the sampling above; asserted off disk rather than inferred from `sampled_out`
+    // being non-zero. The count matters as much as the presence: `Once` PER PROCESS is the claim,
+    // and 500 discarded records would otherwise be 500 lines about a setting the operator chose.
+    let code = format!("boyko-W{:04}", boyko_log::codes::W0113.number());
+    assert!(
+        text.contains(&code),
+        "sampling discarded {sampled_out} records and said nothing -- a reader comparing this          target's `delivered` with an unsampled target's is comparing different quantities:          {text:?}"
+    );
+    assert_eq!(
+        text.matches(&code).count(),
+        1,
+        "{code} is `Once` PER PROCESS; one line per discarded record is a storm about a setting          the operator chose deliberately"
+    );
+
+    // The `log` target had to be open for that to arrive at all -- if it were `Off` the assertion
+    // above would be testing the sink, not the report. Stated because a silent target is exactly
+    // how this campaign's earlier rungs produced observers that observed nothing.
+    assert!(
+        boyko_log::target_control(<boyko_log::Log as LogTarget>::ID).level() >= Level::Warn,
+        "the `log` target must be open, or the W0113 assertion above proves nothing"
+    );
 
     set_target_control(id, TargetControl::OFF);
 }

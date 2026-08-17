@@ -59,7 +59,34 @@ pub fn admits(lane: u16, target: u16, shift: u8) -> bool {
     };
     let n = cell.fetch_add(1, Ordering::Relaxed);
     let mask = (1u16 << shift.min(15)) - 1;
-    n & mask == 0
+    let deliver = n & mask == 0;
+    if !deliver {
+        report_sampling_active();
+    }
+    deliver
+}
+
+/// `boyko-W0113`, once per process: sampling is discarding records.
+///
+/// **The point is not that sampling happened** — an operator who set a shift knows they set one.
+/// It is that from here on **`delivered` is no longer a total**, so a reader comparing counts
+/// across targets is comparing a sampled number with an unsampled one unless they know. The census
+/// says the same thing structurally with `UNPROVEN(sampled)`; this is the line that reaches a log
+/// nobody is reading the census of.
+///
+/// `Once` per PROCESS rather than per target: one line stating that counts have stopped being
+/// totals is the whole job, and one per target would be a storm about a setting the operator chose.
+#[cold]
+#[inline(never)]
+fn report_sampling_active() {
+    static SITE: crate::codes::OnceSite = crate::codes::OnceSite::new();
+    if SITE.claim() {
+        crate::warn!(
+            crate::Log,
+            crate::codes::W0113,
+            "sampling is discarding records; delivered counts are no longer totals -- read the              census `sampled_out` column beside every `delivered`"
+        );
+    }
 }
 
 /// Reset one target's counters across every lane.
