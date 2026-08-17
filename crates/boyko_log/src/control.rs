@@ -129,3 +129,58 @@ pub fn apply_control_spec(spec: &str) -> Result<u32, ControlSpecError> {
     }
     Ok(n as u32)
 }
+
+/// Where a control spec came from.
+///
+/// One grammar, three deliveries. The variants exist so a host can *say* which it used and a
+/// census reader can be told -- "logging is off" and "logging is off because the control file the
+/// operator edited has a typo in line one" are different answers, and only one of them is useful.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ControlSource {
+    /// Nothing was applied. The `.bss`-zero default: every target `Off`.
+    None,
+    /// The `BOYKO_LOG` environment variable, matching the 28 existing `BOYKO_*` switches.
+    Env,
+    /// A file whose entire contents are one spec.
+    File(&'static str),
+}
+
+/// Read a control spec from `source` and apply it.
+///
+/// **Boot-time, and deliberately allowed to touch the filesystem** -- unlike everything on the
+/// emission path. A host calls this once before `enable()`; it is not reachable from a record.
+///
+/// A missing file or an unset variable is `Ok(0)`, not an error: "no control file" is the ordinary
+/// case, and a host that must distinguish it can check the path itself. A file that EXISTS and does
+/// not parse is refused, because that is an operator's typo and silence about it is the failure
+/// this subsystem exists to remove.
+///
+/// Comments: a line whose first non-space character is `#` is dropped before parsing, so an
+/// operator can leave themselves a note in a file they will next read in six months.
+pub fn load_control(source: ControlSource) -> Result<u32, ControlSpecError> {
+    let text = match source {
+        ControlSource::None => return Ok(0),
+        ControlSource::Env => match std::env::var("BOYKO_LOG") {
+            Ok(v) => v,
+            Err(_) => return Ok(0),
+        },
+        ControlSource::File(path) => match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(_) => return Ok(0),
+        },
+    };
+    // Newlines are clause separators too: a control FILE is naturally written one clause per line,
+    // and requiring commas in it would make the file format a worse version of the console's.
+    let mut spec = String::with_capacity(text.len());
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if !spec.is_empty() {
+            spec.push(',');
+        }
+        spec.push_str(line);
+    }
+    apply_control_spec(&spec)
+}

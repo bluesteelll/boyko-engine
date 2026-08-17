@@ -1,6 +1,6 @@
 //! L14: `apply_control_spec` -- unnamed targets untouched, bad specs refused whole, one epoch bump.
 
-use boyko_log::control::{ControlSpecError, apply_control_spec};
+use boyko_log::control::{ControlSource, ControlSpecError, apply_control_spec, load_control};
 use boyko_log::target::{LogTarget, TargetControl, control_epoch, set_target_control, target_control};
 use boyko_log::{Ecs, Level, Log, Render};
 
@@ -29,6 +29,51 @@ fn a_spec_writes_what_it_names_and_leaves_everything_else_bit_identical() {
 
     an_unknown_name_refuses_the_whole_spec_including_the_clauses_that_parsed();
     one_bump_per_spec_and_applying_it_twice_is_idempotent();
+    a_control_file_is_one_clause_per_line_and_a_missing_one_is_not_an_error();
+}
+
+/// A control FILE: one clause per line, `#` comments, and the same parser as the console.
+fn a_control_file_is_one_clause_per_line_and_a_missing_one_is_not_an_error() {
+    let ecs = <Ecs as LogTarget>::ID;
+    let render = <Render as LogTarget>::ID;
+
+    // ABSENT IS NOT AN ERROR. "No control file" is the ordinary case; a host that must tell it
+    // from an empty one can check the path itself.
+    let missing = std::env::temp_dir().join("boyko_l14_no_such_control.txt");
+    let _ = std::fs::remove_file(&missing);
+    assert_eq!(load_control(ControlSource::File(Box::leak(
+        missing.to_str().expect("a UTF-8 temp path").to_string().into_boxed_str()
+    ))).expect("a missing file is not an error"), 0);
+    assert_eq!(load_control(ControlSource::None).expect("None applies nothing"), 0);
+
+    // ONE CLAUSE PER LINE, because that is how an operator writes a file. Requiring commas in it
+    // would make the file format a worse version of the console's.
+    let path = std::env::temp_dir().join("boyko_l14_control.txt");
+    std::fs::write(&path, "# what I am chasing
+ecs=trace/2
+
+render=off
+")
+        .expect("the temp dir is writable");
+    let leaked: &'static str =
+        Box::leak(path.to_str().expect("a UTF-8 temp path").to_string().into_boxed_str());
+    assert_eq!(load_control(ControlSource::File(leaked)).expect("a well-formed file"), 2);
+    assert_eq!(target_control(ecs).level(), Level::Trace);
+    assert_eq!(target_control(ecs).sample_shift(), 2);
+    assert_eq!(target_control(render).level(), Level::Off);
+
+    // A FILE THAT EXISTS AND DOES NOT PARSE IS REFUSED. That is an operator's typo, and silence
+    // about it is the failure this subsystem exists to remove -- so the good line before it is
+    // NOT applied either.
+    set_target_control(ecs, TargetControl::new(Level::Info, 0, false));
+    let before = target_control(ecs).raw();
+    std::fs::write(&path, "ecs=trace
+nosuchtarget=info
+").expect("writable");
+    assert_eq!(load_control(ControlSource::File(leaked)), Err(ControlSpecError::UnknownTarget));
+    assert_eq!(target_control(ecs).raw(), before, "a refused control file applied its first line");
+
+    let _ = std::fs::remove_file(&path);
 }
 
 // NOT `#[test]`s of their own: all three mutate the ONE process-wide `CONTROL` table and read the
