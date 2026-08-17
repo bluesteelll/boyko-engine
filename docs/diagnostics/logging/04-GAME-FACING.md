@@ -111,6 +111,38 @@ be withdrawn**: if `log_dyn_disabled − log_disabled_runtime` does **not** reso
 sitting's floor, then the per-target `const` ceiling's benefit is unproven on this box and
 Decision 2's claim about gate (a) is **struck from this corpus** rather than restated.
 
+#### G8(d) was measured at L10-C, and the answer is NOT MEASURABLE — not struck
+
+This decision says the bench `log_dyn_disabled` bounds the dynamic path at ≤ 4 ns, and G8(d) makes
+the comparison a claim that can be withdrawn. **Both halves rested on a bench that did not exist.**
+Measured at L10-C: *not one of the twelve rows in `05-LADDER-GATES.md`'s bench table had ever been
+built* — `boyko_log` had no `benches/` directory at all.
+
+The bench exists now, and what it returns is that **the question is not decidable by it on this
+box**. The evidence is not a wide band; it is an impossible reading: with the target `Off`, a leg
+measures *faster than an empty loop*. Adding a call cannot make a loop quicker, so what separates
+the legs at this scale is the shape their bodies compile to, not the gates they evaluate.
+
+It took two false verdicts to see that, and both said **RESOLVED**:
+
+1. **Without an opacity barrier**, `runtime_ceiling`'s `Relaxed` load hoisted out of the loop (LICM
+   hoists monotonic loads), the static leg emptied to 0.0008 ns above the control, and the dynamic
+   leg — which hoisted less well — produced a +0.22 ns "difference". A verdict about which form the
+   optimizer prefers in a tight loop, wearing the words of a verdict about gate (a).
+2. **With the barrier**, the sign *flipped*: the dynamic leg came out 0.22 ns **faster** than the
+   static one, still `RESOLVED`, on a band of 0.04 ns. The band was tight because the sitting is
+   highly **repeatable** — and repeatability is not accuracy.
+
+So the instrument gained a positive control: **if any leg's net cost is negative, it reports
+`NOT MEASURABLE (instrument)` instead of a verdict.** This is `03-STATISTICS.md`'s S2 with the sign
+flipped — there, a control that could not move reported a false RESOLVED; here, an instrument that
+cannot attribute reported a confident verdict on an impossible number.
+
+**Decision 2's claim about gate (a) is therefore UNPROVEN on this box, and NOT struck.** The corpus
+strikes it when the comparison *is made* and resolves apart without finding anything. It has not
+been made. Recording it as struck would be the same error in the other direction: acting on a
+measurement that did not happen.
+
 **Why 32 and not "unbounded"** — see `logging/dispositions` open question 8. Every slot comes out of
 the 256-target space that `CONTROL`, the sink filters (`[u64; 4]`) and `TARGET_STATS` are all
 sized by; past 256 those three arrays become two-level structures. 32 data-defined categories is a

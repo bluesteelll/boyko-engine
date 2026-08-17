@@ -38,3 +38,12 @@ test-probe = []
 
 [lints]
 workspace = true
+
+# L10-C. `harness = false` and NOT criterion: the verdict this bench reports is the corpus's own
+# band (`03-STATISTICS.md`) -- a per-leg `se_floor` plus an interleaved twin -- and criterion's
+# confidence interval is a different statistic answering a different question. It is a bench rather
+# than a test because it is a MEASUREMENT: it reports numbers and a verdict, and no rung passes or
+# fails on a timing taken on one box.
+[[bench]]
+name = "log_gate_cost"
+harness = false
