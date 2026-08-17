@@ -2172,6 +2172,111 @@ render-agnostic glyph-quad / instance descriptors). Plugin: `UiPlugin`; macro: `
 
 ---
 
+## 34. boyko_log ✅ · boyko_diag ✅ — the diagnostics substrate
+
+**Absent from this catalogue until 2026-08-17**, which is worth stating rather than quietly
+repaired: eighteen ladder rungs had built the crate that every other crate now depends on for
+diagnostics, and its only mention here was as somebody else's dependency edge (§32b).
+
+**Crates:** [crates/boyko_log/](../crates/boyko_log/) — in-house structured logging.
+[crates/boyko_diag/](../crates/boyko_diag/) — the substrate below it: the lane topology both
+diagnostics subsystems index by, the clock they stamp with, the loss vocabulary they count in, and
+the build-profile ceiling. `boyko_diag` has an **empty `[dependencies]`**, and `boyko_log` depends
+on nothing else, so this edge adds no third-party crate to any graph that reaches the logger —
+which is every crate in the engine. **No third-party facade:** `log`/`tracing` are banned
+workspace-wide by a manifest tidy check.
+
+### The cost model, which decides every structural choice
+
+| Configuration | What a call site costs |
+|---|---|
+| above the compile ceiling | **nothing** — the site *and its argument expressions* are deleted |
+| under the ceiling, target `Off` | one `.bss` byte load and one predicted branch |
+| enabled | the load, the branch, and the record |
+
+Two axes and not one, because a runtime flag must be **read** to be a flag: no runtime setting
+reaches zero per-site cost, only removing the site does. Keeping both means a *shipped* binary can
+still be asked for a log.
+
+⚠️ **A default run emits nothing.** With `BOYKO_LOG` unset, `CONTROL` stays `.bss`-zero, every
+target's runtime ceiling is `Off`, and a `warn!`/`error!`'s third gate folds — not a dropped
+record, *nothing*. Sites that must survive that (the process is stopping and the record **is** the
+reason) emit, call `flush()`, and print to stderr only when it answers `NoConsumer`; each is a row
+in [print_allowlist.txt](../crates/boyko_log/tests/print_allowlist.txt) with its reason.
+
+**Areas** (file links only — the line anchors are in the member table below, where each one pairs
+with exactly one symbol and is therefore *identity*-checked rather than merely shape-checked):
+[macros.rs](../crates/boyko_log/src/macros.rs) the three-gate expansion ·
+[target.rs](../crates/boyko_log/src/target.rs) the engine table, the packed control byte, the
+dynamic band · [lane.rs](../crates/boyko_log/src/lane.rs) the producer path ·
+[record.rs](../crates/boyko_log/src/record.rs) the self-describing payload ·
+[codes.rs](../crates/boyko_log/src/codes.rs) the one registry ·
+[lifecycle.rs](../crates/boyko_log/src/lifecycle.rs) + [sink/](../crates/boyko_log/src/sink/)
+boot, drain, teardown · [sync_out.rs](../crates/boyko_log/src/sync_out.rs) the synchronous route ·
+[census.rs](../crates/boyko_log/src/census.rs) the per-target verdict.
+
+Two properties that decide how the rest reads. The `dyn_*!` forms have **two** gates, not three: a
+dynamic target is a value, so there is no trait impl to read a `const` ceiling from. And arguments
+sit **inside** the gate's `if`, never in a `let` above it — hoisting them is not a style change, it
+deletes the never-evaluated guarantee, and no test of the output would notice.
+
+**File:** [crates/boyko_log/src/target.rs](../crates/boyko_log/src/target.rs) — targets, the packed control byte, the dynamic band.
+
+| What you want to do | Member (line) |
+|---------------------|---------------|
+| Read the engine target table; a collision is a const assert, so it does not compile | `targets` (463) |
+| Intern a target named from data: cold, setup-time, idempotent by name | `register_dynamic_target` (751) |
+
+**File:** [crates/boyko_log/src/lane.rs](../crates/boyko_log/src/lane.rs) — the producer path.
+
+| What you want to do | Member (line) |
+|---------------------|---------------|
+| Follow a record from the call site into the ring; never formatted on the caller thread | `emit_impl` (209) |
+
+**File:** [crates/boyko_log/src/record.rs](../crates/boyko_log/src/record.rs) — the payload.
+
+| What you want to do | Member (line) |
+|---------------------|---------------|
+| Decode a payload against its format literal. ⚠️ It scans brace to brace WITHOUT reading between them, so a precision spec reaches a reader as full f32 precision | `render_payload` (619) |
+
+**File:** [crates/boyko_log/src/codes.rs](../crates/boyko_log/src/codes.rs) — the one registry.
+
+| What you want to do | Member (line) |
+|---------------------|---------------|
+| Turn a class byte and a number into its registry row | `explain` (315) |
+
+**File:** [crates/boyko_log/src/lifecycle.rs](../crates/boyko_log/src/lifecycle.rs) — boot, drain, teardown.
+
+| What you want to do | Member (line) |
+|---------------------|---------------|
+| Ask whether anything is actually consuming records — what every stderr fallback is written against | `flush` (492) |
+
+**File:** [crates/boyko_log/src/sync_out.rs](../crates/boyko_log/src/sync_out.rs) — the synchronous route.
+
+| What you want to do | Member (line) |
+|---------------------|---------------|
+| Report a condition the transport itself cannot carry, such as the file sink hitting its own cap | `write_oracle_line` (173) |
+
+**File:** [crates/boyko_log/src/census.rs](../crates/boyko_log/src/census.rs) — the end-of-run verdict per target.
+
+| What you want to do | Member (line) |
+|---------------------|---------------|
+| Print the per-target census that tells a clean target from a switched-off one | `print` (108) |
+
+**Gates:** [code_registry.rs](../crates/boyko_log/tests/code_registry.rs) (a code with no row, no
+page, or no observing test) · [print_census.rs](../crates/boyko_log/tests/print_census.rs) (any
+print outside the allowlist, checked **both** directions) ·
+[compile_fail_codes/](../crates/boyko_log/tests/compile_fail_codes/) (a code's class and number
+paired by the compiler) ·
+[manifest_no_third_party_log.rs](../crates/boyko_log/tests/manifest_no_third_party_log.rs).
+
+⚠️ **The bench table in the design corpus is ten rows short of built.**
+[benches/log_gate_cost.rs](../crates/boyko_log/benches/log_gate_cost.rs) is the first and so far
+one of two; it returns `NOT MEASURABLE (instrument)` for G8(d) on this box and says why. Design
+corpus: [docs/diagnostics/logging/](diagnostics/logging/).
+
+---
+
 ## Build / verification state
 
 The cumulative suite is ~1,064 passing (`cargo test --workspace --all-targets`
