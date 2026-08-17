@@ -695,6 +695,11 @@ codes! {
     // tells the two apart.
     (106,  E, E0106, RatePolicy::Every, CodeStatus::Live,
         "A dynamic target could not be registered, and the reason names which refusal"),
+    // ── L13a: rotation's one report ───────────────────────────────────────────────────────────
+    // `Once`: a session that rotates a hundred times has ONE fact to report -- the file holds
+    // the tail and not the whole run -- and repeating it per rotation would bury it.
+    (112,  W, W0112, RatePolicy::Once,  CodeStatus::Live,
+        "File rotation discarded part of this session; the file holds the tail, not the run"),
     // ── L12: sampling's one report ────────────────────────────────────────────────────────────
     // `Once` PER PROCESS, not per target: the condition is "an operator's own shift is now
     // discarding records", and they configured it deliberately. One line telling them the
@@ -1213,6 +1218,7 @@ mod tests {
             (b'W', 103),  // L4  -- the file sink's byte cap
             (b'E', 106),  // L10 -- a dynamic target could not be registered (all three refusals)
             (b'E', 104),  // L11a -- two downstream targets claim one id
+            (b'W', 112),  // L13a -- rotation discarded part of the session
             (b'W', 113),  // L12  -- sampling is discarding records
             (b'W', 114),  // L11a -- downstream code index space at 90 %
             (b'E', 115),  // L11a -- downstream code index space exhausted
