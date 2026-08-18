@@ -53,5 +53,9 @@ name = "sink_sustained_rate"
 harness = false
 
 [[bench]]
+name = "log_disabled_cost"
+harness = false
+
+[[bench]]
 name = "log_enabled_cost"
 harness = false
