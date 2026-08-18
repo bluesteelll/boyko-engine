@@ -44,6 +44,21 @@ const CALLS: u32 = 256;
 const ROUNDS: usize = 41;
 
 /// A 32-byte string, the `_str32` row's subject.
+/// A DOWNSTREAM code table, declared here exactly as a game or a mod declares one.
+///
+/// The point of the row it feeds: a downstream code's index is `CodeIdx::Dynamic`, so its `warn!`
+/// pays one `AtomicU16` load that an engine code -- whose index is `CodeIdx::Static`, resolved when
+/// the table compiles -- does not. The delta IS that load, and nothing else differs between the
+/// two legs: same target, same level, same argument shapes, same rate policy.
+mod acme {
+    use boyko_log::RatePolicy;
+
+    boyko_log::declare_codes! {
+        prefix = "acme",
+        (1, W, ACME_W0001, RatePolicy::Every, "a downstream warning, for the bench"),
+    }
+}
+
 const S32: &str = "0123456789abcdef0123456789abcde";
 
 
@@ -96,6 +111,8 @@ fn main() {
     let mut once_fired = Vec::with_capacity(ROUNDS);
     let mut every = Vec::with_capacity(ROUNDS);
     let mut sampled = Vec::with_capacity(ROUNDS);
+    let mut down = Vec::with_capacity(ROUNDS);
+    let mut engine_w = Vec::with_capacity(ROUNDS);
     let mut unsampled = Vec::with_capacity(ROUNDS);
 
     // The `Once` latch has to be spent BEFORE it is timed: the row is
@@ -127,6 +144,18 @@ fn main() {
         sampled.push(time_block(|| info!(Log, "sampled {}", black_box(7u32))));
         arm(Level::Trace, 0);
         unsampled.push(time_block(|| info!(Log, "sampled {}", black_box(7u32))));
+
+        // `downstream_code_warn` against the engine-code `warn!`. Everything but the code's ORIGIN
+        // is held identical: same MACRO (`warn!`, so the same level and the same expansion), same
+        // target, same one `u32` argument, same `Every` rate policy.
+        //
+        // A first draft used `error!` for the control and claimed the legs were identical anyway.
+        // They were not -- a different macro is a different expansion, and a delta between two
+        // different expansions cannot be attributed to the one field that also differs.
+        down.push(time_block(|| warn!(Log, acme::ACME_W0001, "downstream {}", black_box(7u32))));
+        engine_w.push(time_block(|| {
+            warn!(Log, boyko_log::codes::W0117, "downstream {}", black_box(7u32));
+        }));
     }
     arm(Level::Off, 0);
 
@@ -142,6 +171,8 @@ fn main() {
     let (med_every, se_every) = med_and_floor(&mut every, resolution);
     let (med_samp, se_samp) = med_and_floor(&mut sampled, resolution);
     let (med_unsamp, _) = med_and_floor(&mut unsampled, resolution);
+    let (med_down, se_down) = med_and_floor(&mut down, resolution);
+    let (med_engw, se_engw) = med_and_floor(&mut engine_w, resolution);
 
     println!(
         "instrument: clock tick {:.0} ns / {CALLS}-call block = {resolution:.3} ns/call resolution",
@@ -212,6 +243,36 @@ fn main() {
     } else {
         verdict("log_enabled_rate_once_fired", med_once, 5.0, med_every, se_once + se_every);
     }
+    // ── downstream_code_warn ────────────────────────────────────────────────────────────────
+    //
+    // The ABSOLUTE bound is measured here and stays as specified -- it has never been measured, so
+    // there is nothing to re-cut it from.
+    //
+    // THE DELTA HAS NO SUBJECT ON THIS PATH, and the reason is structural rather than statistical.
+    // `resolve_idx` -- the `idx_cell` load the row names -- is called from exactly ONE place in the
+    // crate: `CodeNewtype::code_idx`, which exists to address the RATE array. No emission macro
+    // calls it. So a downstream code and an engine code reach the ring by the same instructions,
+    // and the delta is zero because there is no load, not because the clock cannot see one.
+    //
+    // This is the same root cause as `log_enabled_rate_once_fired`'s NO SUBJECT: the macros do not
+    // consult the rate machinery, and the index exists to index it.
+    //
+    // What the load WOULD cost is measured in `code_idx_cost`, where it resolves cleanly at
+    // ~1.35 ns -- the number this row will need on the day `rate::admit` is wired into emission.
+    const DOWNSTREAM_BOUND_NS: f64 = 18.0;
+    let idx_cost = med_down - med_engw;
+    println!("downstream_code_warn          : {med_down:7.2} ns  (se {se_down:.2})  bound {DOWNSTREAM_BOUND_NS}");
+    println!("control  engine-code warn     : {med_engw:7.2} ns  (se {se_engw:.2})");
+    let abs = if med_down <= DOWNSTREAM_BOUND_NS { "PASS" } else { "OVER BOUND" };
+    println!("  downstream_code_warn: absolute {abs} ({med_down:.2} vs {DOWNSTREAM_BOUND_NS} ns)");
+    println!(
+        "    delta = {idx_cost:.2} ns -- NO SUBJECT: no emission macro calls `resolve_idx`, so a"
+    );
+    println!(
+        "    downstream code and an engine code reach the ring by the same instructions. See"
+    );
+    println!("    `code_idx_cost` for what the load costs where it is actually performed.");
+
     // `log_enabled_sampled_out` IS A REGRESSION GUARD, NOT AN ACCEPTANCE BOUND (owner ruling
     // 2026-08-17, the same ruling that re-cut L13b's 5x). The `<= 6 ns` line was written before
     // anything was measured; the reading is 6.64 ns, reproducibly and exactly 17 quanta.
