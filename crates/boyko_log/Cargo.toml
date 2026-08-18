@@ -65,5 +65,9 @@ name = "code_idx_cost"
 harness = false
 
 [[bench]]
+name = "lane_padding_ablation"
+harness = false
+
+[[bench]]
 name = "log_enabled_cost"
 harness = false

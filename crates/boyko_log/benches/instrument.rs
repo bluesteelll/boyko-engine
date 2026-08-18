@@ -24,6 +24,12 @@
 //! which is the only thing a floor is for. `03-STATISTICS.md` S2 is this argument one level up: a
 //! zero-expectation control measures DRIFT, not resolution.
 
+// Every bench compiles this module separately and takes only what it needs: a leg at 1-2 ns has no
+// use for `at_floor`, and a leg at 0.5 ns has no use for a ratio helper. Dead code HERE is the
+// shared module working as intended, not an unused item -- so the allow carries the reason rather
+// than the alternative, which is one near-duplicate instrument per bench.
+#![allow(dead_code)]
+
 use std::time::Instant;
 
 /// The clock's smallest non-zero step, in nanoseconds. **Measured, never assumed.**
