@@ -31,6 +31,10 @@
 use std::hint::black_box;
 use std::time::Instant;
 
+#[path = "instrument.rs"]
+mod instrument;
+use instrument::{at_floor, med_and_floor, resolution_ns};
+
 use boyko_log::record::DspBuf;
 use boyko_log::sink::binary::{RECORD_HEADER_BYTES, RecordFrame, encode_record};
 use boyko_log::site::LogFormatter;
@@ -63,27 +67,6 @@ fn payload_bytes() -> Vec<u8> {
     v
 }
 
-fn median(v: &mut [f64]) -> f64 {
-    v.sort_by(|a, b| a.partial_cmp(b).expect("no NaN in a timing sample"));
-    v[v.len() / 2]
-}
-
-fn quantile(sorted: &[f64], q: f64) -> f64 {
-    let idx = ((sorted.len() - 1) as f64 * q).round() as usize;
-    sorted[idx]
-}
-
-/// Median and a spread floor, per `03-STATISTICS.md` S2.
-///
-/// The floor is mandatory and not decoration: a control whose expected value is exactly zero
-/// measures DRIFT, not RESOLUTION, and a verdict drawn from the raw spread of such a control
-/// reports the instrument's own wobble as a result.
-fn se_floor(samples: &mut [f64]) -> (f64, f64) {
-    let med = median(samples);
-    let iqr = quantile(samples, 0.75) - quantile(samples, 0.25);
-    let se = iqr / (samples.len() as f64).sqrt();
-    (med, se.max(med * 0.02))
-}
 
 #[inline(never)]
 fn time<F: FnMut()>(mut f: F) -> f64 {
@@ -136,9 +119,13 @@ fn main() {
         }));
     }
 
-    let (med_text, se_text) = se_floor(&mut text);
-    let (med_bin, se_bin) = se_floor(&mut binary);
-    let (med_text2, _) = se_floor(&mut text2);
+    // MEASURED, not assumed. Both legs' `se` were previously exactly 2 % of their medians --
+    // 0.820 of 41.02 and 0.191 of 9.54 -- because the IQR is zero: 41 rounds landed on the same
+    // tick count every time. The floor was the fallback, not a spread. See `instrument.rs`.
+    let resolution = resolution_ns(CALLS);
+    let (med_text, se_text) = med_and_floor(&mut text, resolution);
+    let (med_bin, se_bin) = med_and_floor(&mut binary, resolution);
+    let (med_text2, _) = med_and_floor(&mut text2, resolution);
 
     let twin_gap = (med_text - med_text2).abs();
     let ratio = med_text / med_bin;
@@ -147,16 +134,24 @@ fn main() {
 
     println!("sink_sustained_rate         : {med_text:8.2} ns/rec  ({rate_text:>12.0} rec/s)");
     println!("sink_sustained_rate_binary  : {med_bin:8.2} ns/rec  ({rate_bin:>12.0} rec/s)");
-    println!("  se(text)={se_text:.3} ns  se(binary)={se_bin:.3} ns  A-vs-A' gap={twin_gap:.3} ns");
+    println!("  resolution={resolution:.4} ns/call  se(text)={se_text:.4}  se(binary)={se_bin:.4}  A-vs-A' gap={twin_gap:.3} ns");
     println!("  frame header = {RECORD_HEADER_BYTES} B, payload = {} B", payload.len());
     println!("  ratio text/binary = {ratio:.2}x   (guard: >= {MIN_RATIO}x, and >= 3 M rec/s)");
 
-    // The twin decides whether the instrument measured anything. If A and A' differ by more than
-    // the difference under test, the sitting drifted and the ratio is a fact about the machine's
-    // clock, not about the formats.
+    // The twin decides whether the sitting measured anything, and the test is PROPORTIONAL to the
+    // leg rather than to the separation.
+    //
+    // MEASURED: a sitting drifted 3.445 ns on a 41 ns leg -- 8 % -- and the old test passed it,
+    // because 3.445 is far below the ~32 ns separation. But an 8 % drift moves the reported ratio
+    // by ~0.35, which is WIDER THAN THE WHOLE BAND the eleven sittings occupy (4.30-4.68). A test
+    // that admits a sitting whose drift exceeds the spread it is used to characterise is not
+    // guarding the number it prints.
+    const MAX_TWIN_DRIFT: f64 = 0.02;
     let separation = (med_text - med_bin).abs();
-    let verdict = if twin_gap > separation {
-        "NOT MEASURABLE (instrument): the A-vs-A' twin drifted further than the legs differ"
+    let verdict = if at_floor(med_bin, resolution) {
+        "NOT MEASURABLE (instrument): the binary leg is at the clock's floor"
+    } else if twin_gap > med_text * MAX_TWIN_DRIFT {
+        "NOT MEASURABLE (instrument): the A-vs-A' twin drifted more than 2% of the leg"
     } else if separation < (se_text + se_bin) {
         "NOT RESOLVED: the legs are within their combined spread floor"
     } else if ratio >= MIN_RATIO && rate_bin >= 3e6 {

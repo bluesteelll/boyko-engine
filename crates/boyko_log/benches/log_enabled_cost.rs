@@ -29,6 +29,10 @@
 use std::hint::black_box;
 use std::time::Instant;
 
+#[path = "instrument.rs"]
+mod instrument;
+use instrument::{at_floor, med_and_floor, resolution_ns};
+
 use boyko_log::lifecycle::{DrainResult, LogConfig, SinkMode, boot, drain, enable};
 use boyko_log::target::{LogTarget, TargetControl, set_target_control};
 use boyko_log::{Level, Log, info, warn};
@@ -42,50 +46,7 @@ const ROUNDS: usize = 41;
 /// A 32-byte string, the `_str32` row's subject.
 const S32: &str = "0123456789abcdef0123456789abcde";
 
-fn median(v: &mut [f64]) -> f64 {
-    v.sort_by(|a, b| a.partial_cmp(b).expect("no NaN in a timing sample"));
-    v[v.len() / 2]
-}
 
-fn quantile(sorted: &[f64], q: f64) -> f64 {
-    let idx = ((sorted.len() - 1) as f64 * q).round() as usize;
-    sorted[idx]
-}
-
-/// The clock's smallest non-zero step, measured rather than assumed.
-///
-/// MEASURED, and it changed this bench's verdicts: every reading in the first version was an exact
-/// integer multiple of 0.390625 ns, which is a 100 ns platform tick divided by a 256-call block.
-/// Four separate process launches produced byte-identical medians AND byte-identical spreads --
-/// which no live timer does. The readings were not stable; they were QUANTIZED.
-fn clock_quantum_ns() -> f64 {
-    let mut smallest = f64::INFINITY;
-    for _ in 0..1000 {
-        let t0 = Instant::now();
-        let mut d = t0.elapsed();
-        while d.as_nanos() == 0 {
-            d = t0.elapsed();
-        }
-        smallest = smallest.min(d.as_nanos() as f64);
-    }
-    smallest
-}
-
-/// Median, and a floor that is the instrument's RESOLUTION rather than a fraction of the reading.
-///
-/// The first version used `se.max(med * 0.02)`. With a quantized clock the IQR is exactly zero --
-/// every round lands on the same quantum -- so the "spread" it reported was 2 % of the reading and
-/// nothing else: a number that scales with the answer and measures nothing. `03-STATISTICS.md` S2
-/// is about exactly this shape, one level up: a floor that comes from the subject rather than from
-/// the instrument tells you how big the answer is, not how well you can see it.
-fn med_and_floor(samples: &mut [f64], resolution: f64) -> (f64, f64) {
-    let med = median(samples);
-    let iqr = quantile(samples, 0.75) - quantile(samples, 0.25);
-    let se = iqr / (samples.len() as f64).sqrt();
-    // Half a quantum is the smallest difference this clock can express; nothing below it is a
-    // measurement, whatever the arithmetic says.
-    (med, se.max(resolution / 2.0))
-}
 
 /// Time one block of `CALLS` emissions, then drain OUTSIDE the reading.
 ///
@@ -171,7 +132,7 @@ fn main() {
 
     // Resolution is the clock's tick spread over one block: a per-call reading cannot express a
     // difference finer than this, no matter how many rounds are averaged.
-    let resolution = clock_quantum_ns() / f64::from(CALLS);
+    let resolution = resolution_ns(CALLS);
 
     let (med_dis, se_dis) = med_and_floor(&mut disabled, resolution);
     let (med_0, se_0) = med_and_floor(&mut args0, resolution);
@@ -193,7 +154,7 @@ fn main() {
     // they are absolute, and the legs are 24-32 quanta -- but the DELTA column is not a
     // measurement of the gate, and `log_gate_cost` reached the same conclusion on this box by a
     // different route.
-    if med_dis <= resolution * 2.0 {
+    if at_floor(med_dis, resolution) {
         println!(
             "  NOTE: the disabled control is {:.1} quanta -- AT the instrument floor, so every \"delta over control\" below is bounded by resolution, not by the gate",
             med_dis / resolution
@@ -215,7 +176,7 @@ fn main() {
         // A leg within two quanta of zero is the CLOCK, not the code. Printing "0.39 ns, PASS" for
         // such a leg reports the instrument's floor as the subject's cost -- which is how
         // `log_gate_cost` on this same box already arrived at NOT MEASURABLE (instrument).
-        if med <= resolution * 2.0 {
+        if at_floor(med, resolution) {
             println!(
                 "  {name}: AT THE INSTRUMENT FLOOR ({med:.2} ns = {:.1} quanta of {resolution:.3})",
                 med / resolution

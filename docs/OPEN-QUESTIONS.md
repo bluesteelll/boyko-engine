@@ -2270,3 +2270,26 @@ figure, and the clause still misses.
 
 Each of these trades shipped, tested, documented code against a number, which is a values call, not
 a performance fork. Recorded and surfaced rather than decided.
+
+### Correction to the readings above, made after the instrument was fixed
+
+The four sittings quoted in the table were taken with a spread floor that was **2 % of the reading
+and nothing else** — the IQR was exactly zero, so `se.max(med * 0.02)` reported the subject's size,
+not the clock's resolution. Fixing that (`benches/instrument.rs`) and re-measuring gives a fuller
+picture:
+
+* **Eleven sittings on an idle box: 4.29× – 4.68×.** The original four sit inside that band, so the
+  ruling rests on the same evidence it always did, and the `4.0×` guard keeps its margin.
+* **One sitting read 5.94×**, taken immediately after a build with the machine still busy. It is
+  not a contradiction: the TEXT leg is the load-sensitive one, so load inflates the ratio.
+* **The A-vs-A' twin test was too lax and has been re-cut.** It compared the twin gap against the
+  ~32 ns *separation*, which admitted a sitting that drifted 3.4 ns on a 41 ns leg — 8 %, enough to
+  move the reported ratio by ~0.35, wider than the entire band. It is now proportional: the twin
+  must agree to within 2 % of the leg.
+* **That change caught a false red.** A drifted sitting produced `2.61×`, which under the old test
+  would have been reported as `REGRESSION` — an accusation against a format that had lost nothing.
+  It is now correctly `NOT MEASURABLE (instrument)`.
+
+The direction of the ruling is unaffected. What changed is that "reproducible" is now a claim about
+an idle box with a drift-rejecting twin, rather than a claim resting on byte-identical numbers that
+were byte-identical because the floor was fictional.
