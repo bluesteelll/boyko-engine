@@ -544,7 +544,11 @@ impl Artifact {
         let _ = writeln!(s, "modes = \"{}\"", h.modes);
         let _ = writeln!(s, "regime_n_distinct = {}", h.regime_n_distinct);
         let _ = writeln!(s, "present_mode = \"{}\"", h.present_mode);
-        let _ = writeln!(s, "subsystems_tag = {}", h.subsystems_tag);
+        // Quoted like every other string field. This one shipped BARE — found by reading an
+        // artifact a real windowed run produced: `subsystems_tag = neither`, which any actual
+        // TOML parser refuses while the shipped reader tolerated its own dialect. The reader
+        // unquotes tolerantly, so files written before this line still parse.
+        let _ = writeln!(s, "subsystems_tag = \"{}\"", h.subsystems_tag);
         let _ = writeln!(s, "alloc_shim = {}", h.alloc_shim);
         let _ = writeln!(s, "alloc_allocs = {}", h.alloc_allocs);
         let _ = writeln!(s, "alloc_deallocs = {}", h.alloc_deallocs);
@@ -850,7 +854,7 @@ impl Artifact {
                 "modes" => modes = Some(unquote(v).to_owned()),
                 "regime_n_distinct" => regime_n_distinct = v.trim().parse().ok(),
                 "present_mode" => present_mode = Some(unquote(v).to_owned()),
-                "subsystems_tag" => subsystems_tag = Some(v.trim().to_owned()),
+                "subsystems_tag" => subsystems_tag = Some(unquote(v.trim()).to_owned()),
                 "alloc_shim" => alloc_shim = Some(v.trim() == "true"),
                 "alloc_allocs" => alloc_allocs = v.trim().parse().ok(),
                 "alloc_deallocs" => alloc_deallocs = v.trim().parse().ok(),

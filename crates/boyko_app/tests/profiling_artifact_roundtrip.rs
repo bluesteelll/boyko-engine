@@ -734,8 +734,17 @@ fn the_subsystems_tag_survives_the_file_and_is_derived_from_the_live_state() {
     let _ = std::fs::remove_file(&path);
     let a = fixture("tok-subsys");
     a.write(&path).expect("the fixture writes");
-    let back = Artifact::parse(&std::fs::read_to_string(&path).expect("readable"), "tok-subsys")
-        .expect("the fixture parses");
+    let raw = std::fs::read_to_string(&path).expect("readable");
+    // The file claims `.toml`, and this was the ONE string field written bare — found by reading
+    // an artifact a real windowed run produced (`subsystems_tag = neither`, no quotes), which any
+    // actual TOML parser refuses. The shipped reader tolerated its own dialect, so only a textual
+    // pin can hold the format to its name.
+    assert!(
+        raw.contains("subsystems_tag = \"profiler+logger\""),
+        "subsystems_tag must be QUOTED like every other string field, or the file is not TOML: \
+         {raw:?}"
+    );
+    let back = Artifact::parse(&raw, "tok-subsys").expect("the fixture parses");
     assert_eq!(
         back.header.subsystems_tag, "profiler+logger",
         "the tag did not survive the file, so a baseline cannot say which subsystems produced it"
