@@ -31,7 +31,7 @@ sittings: `render_payload` against `encode_record`, same payload, interleaved �
 |---|---|---|
 | `1` | `Dictionary` | first time a site is written to this file |
 | `2` | `Record` | the common case |
-| `3` | `Anchor` | at `open`, and (owed) whenever a delta would overflow |
+| `3` | `Anchor` | at `open`, and whenever a delta would overflow or go backwards |
 | `4` | `InlineSite` | the dictionary is full; the site travels with the record |
 
 ### `Anchor` — 17 bytes, fixed
@@ -86,9 +86,23 @@ implementation wrote the low 32 bits of the *absolute* counter into this field, 
 `+425.840ms` for three records emitted microseconds apart. Every frame round-tripped byte for byte,
 because the bytes were faithfully the wrong number.
 
-**`u32` spans ~1.4 s at 3 GHz.** A file that runs longer needs a re-anchor. ⚠️ **The re-anchor is
-NOT implemented** — the anchor is written at `open` and never again. Recorded here rather than left
-for a reader to discover from a stamp that wraps.
+**`u32` spans ~1.4 s at 3 GHz**, so a file re-anchors before a delta could reach it. The bound is
+`u32::MAX / 2` **ticks** — expressed in ticks, not seconds, so the write path needs no clock scale;
+that is roughly 0.7 s at 3 GHz and 2.1 s at 1 GHz, and it is exact against the wire width on every
+machine.
+
+**A delta also re-anchors when it would go BACKWARDS.** The drain walks lanes in index order and a
+lane is per thread, so `tsc` is *not* monotone across records within one pass: a record from lane 5
+may be older than one from lane 2. Subtracting a later anchor would underflow into a wrapped `u32`
+— about four billion ticks of nothing.
+
+**A re-anchor is stamped at the triggering record's own tick**, so that record's delta is exactly
+zero. Stamping it at a fresh clock reading would put the anchor *after* the record it was written
+for, and the record's own delta would underflow — the bug the rule exists to avoid, reintroduced by
+the fix for it.
+
+The cost is bounded and worth naming: a pass whose lanes interleave badly can emit one anchor per
+lane transition, 17 bytes each. A wrong stamp is silent; a few extra anchors are not.
 
 ### `InlineSite` — variable
 
@@ -133,7 +147,6 @@ decoder broke, and the test that proved the decoder would go on passing after th
 
 ## What this format does not do yet
 
-* **No re-anchor.** See `Record` above.
 * **No rotation.** `02-SINK-LIFECYCLE.md` specifies a retained-file set and `logdec --merge`;
   neither exists.
 * **No `SessionId` in the file.** Two files from one run cannot yet be proved to belong together,

@@ -395,8 +395,25 @@ fn write_raw(bytes: &[u8]) -> bool {
 ///
 /// Eight bytes, once per file, for the difference between a tick count and a time.
 fn write_anchor() -> bool {
+    write_anchor_at(boyko_diag::clock::ticks())
+}
+
+/// Largest delta a record may carry before the file re-anchors.
+///
+/// **Expressed in ticks, not in seconds, so it needs no clock scale.** Half of `u32::MAX` leaves
+/// 2x headroom over the wire width -- roughly 0.7 s at 3 GHz and 2.1 s at 1 GHz. The corpus asks
+/// for "1 s or `u32` overflow"; the overflow half is the one that must be exact, and this is exact
+/// on every machine without reading a scale on the write path.
+const MAX_DELTA_TICKS: u64 = (u32::MAX / 2) as u64;
+
+/// Emit an anchor stamped at `now`, and make it the base for what follows.
+///
+/// Stamped at the CALLER's tick rather than at a fresh reading, and that is what makes the
+/// re-anchor correct: the record that triggered it then has a delta of exactly zero. A fresh
+/// reading would be LATER than the record being written, so the record's own delta would underflow
+/// into a wrapped `u32` -- a number in the file that looks like 4 billion ticks of nothing.
+fn write_anchor_at(now: u64) -> bool {
     let mut buf = [0u8; 1 + 8 + 8];
-    let now = boyko_diag::clock::ticks();
     ANCHOR_TICKS.store(now, Ordering::Relaxed);
     buf[0] = FrameKind::Anchor as u8;
     buf[1..9].copy_from_slice(&now.to_le_bytes());
@@ -430,6 +447,37 @@ fn write_dictionary(site_id: u16, site: &crate::LogSite) -> bool {
     write_raw(&buf[..at])
 }
 
+/// This record's delta from the file's anchor, **re-anchoring when one would not be honest**.
+///
+/// # Two ways a delta goes wrong, and both are handled here rather than clamped
+///
+/// * **Too large.** A `u32` of ticks spans ~1.4 s at 3 GHz, so every session longer than a couple
+///   of seconds would wrap -- which is to say every real session. A file whose stamps wrap is
+///   worse than one with no stamps, because the wrapped values are small and plausible.
+/// * **Negative.** The drain walks lanes in index order and a lane is per thread, so `tsc` is
+///   **not** monotone across records within one pass: a record from lane 5 may be older than one
+///   from lane 2. Subtracting a later anchor would underflow into a wrapped `u32`.
+///
+/// Both are answered the same way: emit a fresh anchor stamped at THIS record's tick, so its delta
+/// is exactly zero and everything after it is measured from a base it actually follows.
+///
+/// # The cost, stated rather than discovered
+///
+/// A pass whose lanes interleave badly can emit one anchor per lane transition -- bounded by the
+/// lane count, 17 bytes each. That is the price of never writing a delta that is wrong, and the
+/// trade is not close: a wrong stamp is silent and a few extra anchors are not.
+fn delta_from_anchor(tsc: u64) -> u32 {
+    let anchor = ANCHOR_TICKS.load(Ordering::Relaxed);
+    if tsc >= anchor {
+        let d = tsc - anchor;
+        if d <= MAX_DELTA_TICKS {
+            return d as u32;
+        }
+    }
+    write_anchor_at(tsc);
+    0
+}
+
 /// Write one record to the binary sink, interning its site first.
 ///
 /// **The whole point of the format lives in the two returns of `intern_site`**: a site seen before
@@ -444,6 +492,7 @@ pub(crate) fn write_record(
     payload: &[u8],
 ) -> bool {
     let mut buf = [0u8; 1024];
+    let delta = delta_from_anchor(tsc);
     match intern_site(core::ptr::from_ref(site)) {
         Some((id, is_new)) => {
             if is_new && !write_dictionary(id, site) {
@@ -451,15 +500,7 @@ pub(crate) fn write_record(
             }
             let frame = RecordFrame {
                 site_id: id,
-                // FROM THE ANCHOR, not the raw counter. `wrapping_sub` because a record staged
-                // before this file's anchor -- possible when a drain pass straddles an `open` --
-                // must not underflow; it wraps to a huge delta, which reads as obviously wrong
-                // rather than as a small plausible time.
-                //
-                // Truncated to `u32` deliberately: a `u32` of ticks spans ~1.4 s at 3 GHz, and a
-                // file that runs longer needs a re-anchor, which this rung does not do -- recorded
-                // as owed rather than hidden.
-                tsc_delta: tsc.wrapping_sub(ANCHOR_TICKS.load(Ordering::Relaxed)) as u32,
+                tsc_delta: delta,
                 flags,
                 epoch_lo: 0,
                 payload,
@@ -668,5 +709,61 @@ impl<'a> Iterator for Frames<'a> {
         let (frame, n) = decode_frame(&self.buf[self.at..])?;
         self.at += n;
         Some(frame)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The delta is honest in both directions a delta can be dishonest.
+    ///
+    /// A UNIT test rather than an integration one because the two conditions cannot be produced
+    /// through the public path: `write_record`'s `tsc` comes from the ring, and a test cannot make
+    /// a ring hand out a tick two seconds in the future or one in the past. Driving the arithmetic
+    /// directly is the only way to reach the branch, and the frames it writes are still read back
+    /// off a real file so the test is not just checking a return value.
+    ///
+    /// Safe as a unit test in this binary specifically: nothing else in `boyko_log`'s lib tests
+    /// opens the binary sink -- `request.rs` has no `#[test]` at all and this module had none until
+    /// now -- so `ANCHOR_TICKS` and the file are this test's alone. Checked, not assumed.
+    #[test]
+    fn a_delta_that_would_overflow_or_go_backwards_re_anchors_instead() {
+        let path = std::env::temp_dir().join("boyko_reanchor_unit.blog");
+        let _ = std::fs::remove_file(&path);
+        assert!(set_path(path.to_str().expect("a UTF-8 temp path")));
+        assert!(open(), "the temp path is openable");
+        let base = ANCHOR_TICKS.load(Ordering::Relaxed);
+
+        // ── an ordinary delta passes straight through ────────────────────────────────────────
+        assert_eq!(delta_from_anchor(base + 100), 100, "an in-range delta must not re-anchor");
+
+        // ── too large: a `u32` of ticks spans ~1.4 s at 3 GHz, so every real session overflows ─
+        let far = base + MAX_DELTA_TICKS + 1;
+        assert_eq!(delta_from_anchor(far), 0, "an overflowing delta must re-anchor to zero");
+        assert_eq!(ANCHOR_TICKS.load(Ordering::Relaxed), far, "the new anchor is THIS record's tick");
+
+        // ── backwards: the drain walks lanes in index order and a lane is per THREAD ─────────
+        //
+        // So `tsc` is not monotone across records in one pass. Without this branch the subtraction
+        // underflows and the file carries a wrapped `u32` -- about four billion ticks of nothing.
+        assert_eq!(delta_from_anchor(far - 500), 0, "a backwards delta must re-anchor, not wrap");
+        assert_eq!(ANCHOR_TICKS.load(Ordering::Relaxed), far - 500);
+
+        // ── and the anchors are IN THE FILE, not merely in the counter ───────────────────────
+        let bytes = std::fs::read(&path).expect("the sink created its file");
+        let anchors: Vec<u64> = frames(&bytes)
+            .filter_map(|f| match f {
+                Frame::Anchor { ticks, .. } => Some(ticks),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            anchors,
+            vec![base, far, far - 500],
+            "the file must carry the opening anchor and both re-anchors, in order"
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 }
