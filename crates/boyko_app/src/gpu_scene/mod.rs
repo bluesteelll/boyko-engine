@@ -57,7 +57,8 @@ use boyko_rhi_vulkan::compute::{
     VB_BATCH_DESC_STRIDE, VB_CULL_LAYOUT_BINDINGS, VB_CULL_UNIFORM_BYTES, vb_batch_cull_spirv,
     VIEWT_FROM_DEPTH_PUSH_BYTES, VIEWT_FROM_DEPTH_RZ_PUSH_BYTES,
     vb_classify_count_spirv, vb_classify_scan_spirv, vb_classify_scatter_spirv,
-    vb_geo_spirv, vb_raster_fs_spirv, vb_raster_vs_spirv, vb_resolve_spirv, vb_resolve_froxel_spirv,
+    sdf_mesh_shadow_spirv, vb_geo_spirv, vb_raster_fs_spirv, vb_raster_vs_spirv, vb_resolve_spirv,
+    vb_resolve_froxel_spirv,
     sdf_ssao_vb_spirv, vb_shade_spirv, vb_shade_froxel_spirv, vb_shade_split_spirv, vb_shade_split_tex_spirv,
     vb_shade_tex_spirv, vb_shade_tex_froxel_spirv, viewt_from_depth_spirv, viewt_from_depth_rz_spirv,
 };
@@ -1383,6 +1384,23 @@ pub(crate) struct GpuSceneBundles {
     /// constructed by `boyko_app::runner` only on a `VisibilityBuffer`-resolved boot). `None` on
     /// every OTHER boot (the 0%-gate).
     vb_resolve_pipeline: Option<ComputePipeline>,
+    /// VB-SV0 DP1 (docs/VB-SV0-SDF-SHADOW-PLAN.md Rev 10, dark infra — unwired until DP2/DP3):
+    /// the dedicated `sdf_mesh_shadow.comp` prepass's own Set-0 layout — `gVbInstances`@0,
+    /// Camera@2, `LightBuf`@3, `gVbId`@5 (sampled), `gSdfTerm`@6 (rg8 storage image), the SDF
+    /// edit-list `Buf`@10. Its own layout and NOT `vb_layout0`: the pass neither reads the
+    /// material tables (1/4) nor writes `lit` (6 means a DIFFERENT image here), and sharing a
+    /// layout across two binding vocabularies is how a wrong-slot write survives review.
+    /// Built at boot (device-only inputs), unconditionally — the same zero-cost-when-unused
+    /// argument as `vb_layout0` itself.
+    sdf_mesh_shadow_layout0: VulkanBindGroupLayout,
+    /// VB-SV0 DP1: the dedicated prepass pipeline — a 3-set shape via
+    /// [`VulkanContext::create_compute_pipeline_vb`] (Set 1 = the forward shadow layout,
+    /// DECLARED for layout compatibility and never bound: the shader statically uses only
+    /// Sets 0 and 2, and Vulkan requires binding only what a pipeline statically uses). Built
+    /// LAZILY inside [`Self::build_vb_resolve_pipeline`] — the same Set-2 existence argument —
+    /// and `None` on every non-VB boot. NOTHING records it at DP1: recording arrives with DP3's
+    /// arming, and the descriptor sets with DP2's target.
+    sdf_mesh_shadow_pipeline: Option<ComputePipeline>,
     // ── VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2a (dark infra,
     // unwired): the four classify/shade pipelines. Built LAZILY by
     // [`Self::build_vb_classify_pipelines`], the SAME deferred-build shape as
@@ -3963,6 +3981,54 @@ impl GpuSceneBundles {
         )
         .expect("invariant: VB Set-0 bind-group layout create");
 
+        // VB-SV0 DP1: the dedicated prepass's OWN Set-0 layout — see the field's doc for why it
+        // is not `vb_layout0`. Binding numbers mirror the tails' where the resource is shared
+        // (0/2/3/5) so a reader diffing the two vocabularies sees the pass's own surface (6, 10).
+        let sdf_mesh_shadow_layout0 = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        count: 1,
+                        kind: DescriptorKind::UniformBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 3,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 5,
+                        count: 1,
+                        kind: DescriptorKind::SampledImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 6,
+                        count: 1,
+                        kind: DescriptorKind::StorageImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 10,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                ],
+            },
+        )
+        .expect("invariant: VB-SV0 sdf_mesh_shadow Set-0 bind-group layout create");
+
         let vb_raster_vs = RhiDevice::create_shader_module(device, vb_raster_vs_spirv())
             .expect("invariant: VB raster vertex shader module create");
         let vb_raster_fs = RhiDevice::create_shader_module(device, vb_raster_fs_spirv())
@@ -4560,10 +4626,13 @@ impl GpuSceneBundles {
             sdf_forward_march_layout,
             dispatch_group_count_x,
             vb_layout0,
+            sdf_mesh_shadow_layout0,
             vb_raster_pipeline,
             vb_sky_pipeline,
             // Built LAZILY — see `Self::vb_resolve_pipeline`'s doc.
             vb_resolve_pipeline: None,
+            // Built LAZILY beside `vb_resolve_pipeline` — see the field's doc (VB-SV0 DP1).
+            sdf_mesh_shadow_pipeline: None,
             // VB-P2 classification plan, rung P2a: built LAZILY by
             // `Self::build_vb_classify_pipelines` — see that fn's doc.
             vb_classify_count_pipeline: None,
@@ -4792,6 +4861,36 @@ impl GpuSceneBundles {
             RhiDevice::destroy_shader_module(device, vb_resolve_cs);
         }
         self.vb_resolve_pipeline = Some(vb_resolve_pipeline);
+
+        // VB-SV0 DP1 (dark infra): the dedicated `sdf_mesh_shadow.comp` prepass pipeline, built
+        // HERE because it has the same Set-2 existence precondition and the same once-per-VB-boot
+        // lifetime. Set 1 is the forward shadow layout — DECLARED for pipeline-layout shape
+        // compatibility with `create_compute_pipeline_vb` and never bound: the shader statically
+        // uses only Sets 0 and 2. Nothing records this pipeline at DP1; DP2 adds the term target
+        // and descriptor sets, DP3 the arming.
+        let sdf_mesh_shadow_cs = RhiDevice::create_shader_module(device, sdf_mesh_shadow_spirv())
+            .expect("invariant: VB-SV0 sdf_mesh_shadow compute shader module create");
+        let sdf_mesh_shadow_pipeline = ctx
+            .create_compute_pipeline_vb(
+                &ComputePipelineDesc {
+                    module: &sdf_mesh_shadow_cs,
+                    entry: c"main",
+                    // The 64-byte push constant (`sdf_mesh_shadow.comp.hlsl`'s `PushConstants`:
+                    // one `float4x4 view_proj` — the geometry-fetch reprojection matrix).
+                    push_constant_bytes: 64,
+                    bind_group_layout: Some(&self.sdf_mesh_shadow_layout0),
+                    spec_constants: &[],
+                },
+                self.forward_layout1.set_layout(),
+                geometry_set.set_layout(),
+            )
+            .expect("invariant: VB-SV0 sdf_mesh_shadow compute pipeline create");
+        // SAFETY: same argument as `vb_resolve_cs` above — created on `device`, consumed by the
+        // pipeline create, destroyed once, no GPU work in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, sdf_mesh_shadow_cs);
+        }
+        self.sdf_mesh_shadow_pipeline = Some(sdf_mesh_shadow_pipeline);
     }
 
     /// VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2a (dark infra,
@@ -7487,6 +7586,12 @@ impl GpuSceneBundles {
             if let Some(p) = self.vb_resolve_pipeline {
                 RhiDevice::destroy_compute_pipeline(ctx, p);
             }
+            // VB-SV0 DP1: built beside `vb_resolve_pipeline` (same lazy site), destroyed beside
+            // it — the f4d0c504 audit found nine unfreed VB objects, and a pipeline added without
+            // its teardown line is how the tenth happens.
+            if let Some(p) = self.sdf_mesh_shadow_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
             // Rung R9d: the hwrt shadow-chain split siblings — `Option`-guarded (present only on
             // an RT device), destroyed in the SAME reverse-creation order as their software twins.
             #[cfg(feature = "hwrt")]
@@ -7609,6 +7714,10 @@ impl GpuSceneBundles {
             RhiDevice::destroy_graphics_pipeline(ctx, self.vb_sky_pipeline);
             RhiDevice::destroy_graphics_pipeline(ctx, self.vb_raster_pipeline);
             RhiDevice::destroy_bind_group_layout(ctx, self.vb_layout0);
+            // VB-SV0 DP1: the prepass's own Set-0 layout — created at boot right after
+            // `vb_layout0`, destroyed beside it under the same reverse-acquisition rule (its one
+            // pipeline was destroyed above with the other Option-guarded VB pipelines).
+            RhiDevice::destroy_bind_group_layout(ctx, self.sdf_mesh_shadow_layout0);
             let [vb_ssao_low, vb_ssao_medium, vb_ssao_high] = self.ssao_vb_pipelines;
             RhiDevice::destroy_compute_pipeline(ctx, vb_ssao_low);
             RhiDevice::destroy_compute_pipeline(ctx, vb_ssao_medium);

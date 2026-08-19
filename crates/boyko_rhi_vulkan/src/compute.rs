@@ -850,6 +850,21 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// VB-SV0 DP1 (docs/VB-SV0-SDF-SHADOW-PLAN.md Rev 10, dark infra — unwired until DP2/DP3):
+    /// the DEDICATED SDF-on-mesh shadow + contact-AO prepass SPIR-V
+    /// (`shaders/sdf_mesh_shadow.comp.hlsl`). Per covered pixel: re-fetch via the Decision-0
+    /// table, march `sdf_soft_shadow_ranged` for the PRIMARY directional from the geometric face
+    /// normal's lifted origin, run the 5-tap `sdf_ao`, write the R8G8 term the lit-producer
+    /// tails `min`-combine. A 3-set pipeline layout with an EMPTY Set 1: Set 0 = its own
+    /// vocabulary (`gVbInstances`@0, Camera@2, `LightBuf`@3, `gVbId`@5, `gSdfTerm`@6, SDF
+    /// `Buf`@10), Set 2 = the geometry table's own Set — `vb_geom_fetch.hlsli` hardcodes
+    /// `space2`, and an empty middle layout is cheaper than a set-index fork of the one shared
+    /// fetch header every VB consumer pins byte-identically.
+    SDF_MESH_SHADOW_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/sdf_mesh_shadow.comp.spv")
+}
+
+embed_spirv! {
     /// VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2a (dark infra,
     /// unwired): the `count` classify compute SPIR-V (`shaders/vb_classify_count.comp.hlsl`) —
     /// one thread per composite pixel, `InterlockedAdd(counts[mat], 1)` for every mesh-covered
@@ -2075,6 +2090,13 @@ pub fn vb_raster_fs_spirv() -> &'static [u32] {
 #[inline]
 pub fn vb_resolve_spirv() -> &'static [u32] {
     VB_RESOLVE_SPV.as_words()
+}
+
+/// VB-SV0 DP1: the dedicated SDF-on-mesh shadow + contact-AO prepass SPIR-V as a `u32` word
+/// stream, ready for [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+#[inline]
+pub fn sdf_mesh_shadow_spirv() -> &'static [u32] {
+    SDF_MESH_SHADOW_SPV.as_words()
 }
 
 /// VB-P2 classification plan, rung P2a: the `count` classify compute SPIR-V as a `u32` word
