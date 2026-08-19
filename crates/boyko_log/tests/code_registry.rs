@@ -747,3 +747,101 @@ fn the_cross_file_test_only_rule_marks_files_a_within_file_rule_misses() {
         }
     }
 }
+
+/// **Check 8** — every file that EMITS a `Once`/`OnceCounted` code contains a latch.
+///
+/// # The one link the registry could never prove, until the search got sharper
+///
+/// `Once` is the single policy the emission macros deliberately do not apply: the latch is a named
+/// [`OnceSite`](boyko_log::codes::OnceSite) the site declares, because a `static` inside a macro
+/// expansion cannot be named and an observer must be able to reset the latch it is about to test.
+/// So a row declaring `Once` was honoured by human diligence, and the gate that used to stand here
+/// said so in its own failure text: *"this check does NOT prove that a `Once` row has an
+/// `OnceSite` behind it; that link is still human."*
+///
+/// # Two earlier searches, and why each was wrong in a different direction
+///
+/// **Too loose.** A grep for identifier USES in a file returned 39 (identifier, file) pairs with no
+/// `OnceSite` — an upper bound with no way to tighten it, because it cannot tell an emitter from a
+/// `use`, a doc link or a test assertion.
+///
+/// **Too tight.** Requiring the latch inside the emitting FUNCTION returned 21, of which 19 were
+/// correct code: `boyko_ecs::…::profiling::diag` holds one `OnceSite` per live code in a `LATCHES`
+/// array behind a `claim(number)` helper, so no emitter names `.claim()` itself. A gate written
+/// that way would have accused nineteen sites that latch properly, and the two it had a point about
+/// were already fixed. Measuring before writing the check is what caught it.
+///
+/// # What this checks, and what it still cannot
+///
+/// A file whose PRODUCTION code invokes an emission macro naming a `Once` code must contain a
+/// `claim(` somewhere. The latch may sit in the function, in a helper beside it, or in a table —
+/// all three shapes exist in this tree and all three are correct.
+///
+/// It cannot prove the latch guards THAT emission rather than another in the same file. That
+/// residue is what `boyko_log::once_sites` answers at run time, where a `Once` row reading
+/// `fired > 1` is the defect stated as a number.
+#[test]
+fn check_8_every_file_emitting_a_once_code_has_a_latch() {
+    let root = repo();
+    let rs = rust_files(&root);
+    let excluded = test_only_files(&root, &rs);
+
+    let once: BTreeSet<String> = DIAGNOSTICS
+        .iter()
+        .filter(|r| {
+            matches!(r.status, CodeStatus::Live)
+                && matches!(
+                    r.rate,
+                    boyko_log::RatePolicy::Once | boyko_log::RatePolicy::OnceCounted
+                )
+        })
+        .map(|r| ident_of(r.class, r.number))
+        .collect();
+    assert!(!once.is_empty(), "no Live row declares Once; this check would be vacuous");
+
+    let mut emitting = 0usize;
+    let mut unlatched: Vec<String> = Vec::new();
+    for f in &rs {
+        if excluded.contains(f) || f.file_name().is_some_and(|n| n == "codes.rs") {
+            continue;
+        }
+        let Ok(src) = std::fs::read_to_string(f) else { continue };
+        // PRODUCTION code only, so a doc comment naming a code is not an emission. Measured: the
+        // first draft of this check scanned raw text and flagged `macros.rs`, whose `warn!` doc
+        // explains the class/number pairing using `W2102` as its example.
+        let code = production_code(&src);
+        let named: Vec<&String> = once.iter().filter(|id| has_token(&code, id)).collect();
+        if named.is_empty() || !code.contains('!') {
+            continue;
+        }
+        // A file that names a `Once` code in production code and invokes an emission macro at all
+        // is treated as an emitter of it. Tighter attribution would need to parse the macro's
+        // argument list, and the run-time register is the sharper instrument for that.
+        let emits = ["error!", "warn!", "error_kv!", "warn_kv!", "dyn_error!", "dyn_warn!"]
+            .iter()
+            .any(|m| code.contains(m));
+        if !emits {
+            continue;
+        }
+        emitting += 1;
+        if !code.contains("claim(") {
+            unlatched.push(format!(
+                "{} names {:?} and invokes an emission macro, with no latch in the file",
+                f.display(),
+                named
+            ));
+        }
+    }
+
+    assert!(
+        emitting >= 10,
+        "only {emitting} files were found to emit a Once code; a check that finds nothing passes \
+         for the wrong reason"
+    );
+    assert!(
+        unlatched.is_empty(),
+        "a `Once` row is emitted from a file with no latch, so the registry's policy column is a \
+         promise the site does not keep:\n  {}",
+        unlatched.join("\n  ")
+    );
+}

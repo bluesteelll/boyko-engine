@@ -2428,3 +2428,43 @@ for a new and wrong reason, which is worse than one that does not run.
    leaves a written reason? That is the same rule as the mandatory `// SAFETY:` comment and the
    `#[allow(clippy::disallowed_types)]` rationale, applied to the third way to make a check
    disappear.
+
+---
+
+## RESOLVED: the 39 was an upper bound, and the sharpened count is 19 latched of 20
+
+**Status:** CLOSED 2026-08-19 — the residue is named below and is small.
+
+The entry above reported "39 (identifier, file) pairs carry no `OnceSite`" and said in the same
+breath that it was an upper bound with no way to tighten it, because a grep for identifier USES
+cannot tell an emitter from a `use`, a doc link or a test assertion. It has now been tightened, and
+the answer is different in kind:
+
+**Emission-aware, production-code-only: 20 files emit a `Once`/`OnceCounted` code. 19 hold a latch.
+The one flagged was `boyko_log/src/macros.rs`, whose `warn!` DOC COMMENT explains the class/number
+pairing using `W2102` as its example** — not an emission at all, and gone once the scan reads the
+production stream instead of raw text.
+
+**A middle draft was wrong in the other direction and is worth recording.** Requiring the latch
+inside the emitting FUNCTION returned 21 — of which **19 were correct code**:
+`boyko_ecs::…::profiling::diag` holds one `OnceSite` per live code in a `LATCHES` array behind a
+`claim(number)` helper, so no emitter there names `.claim()` itself. A gate written that way would
+have accused nineteen sites that latch properly. Measuring before writing the check is what caught
+it.
+
+**Two real defects came out of this and are fixed**, both found by the run-time register rather than
+by either grep: `W0111` emitting from inside `census::rows()`, a public iterator a host may walk
+every frame; and `E0109`, whose `Once` was honoured by the call structure rather than by anything at
+the site.
+
+**The gate is `check_8_every_file_emitting_a_once_code_has_a_latch`** in
+`crates/boyko_log/tests/code_registry.rs`, with an anti-vacuity floor (a scan finding fewer than ten
+emitting files fails rather than passes) and two REDs shown.
+
+**What it still cannot prove**, stated in the check's own doc: that the latch guards THAT emission
+rather than another in the same file. That residue is `boyko_log::once_sites`' at run time, where a
+`Once` row reading `fired > 1` is the defect stated as a number.
+
+**Disposition 2 above — placing the latch in the macro — is therefore NOT needed** and is withdrawn
+as a question. The human link is now checked mechanically at build time and observably at run time,
+which is what auto-latching was going to buy, without making all 45 rows untestable in isolation.
