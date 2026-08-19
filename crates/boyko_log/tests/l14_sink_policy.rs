@@ -138,6 +138,23 @@ fn an_armed_target_no_sink_accepts_is_unsunk_and_says_so() {
         row.status_str()
     );
 
+    // ── THE REPORT COMES FROM `print`, NOT FROM THE QUERY ───────────────────────────────────
+    //
+    // It used to come from `rows()`, and that was the defect the `Once` register found first:
+    // `rows()` is a public iterator a host may walk every frame, so `W0111` -- a row declaring
+    // `Once` -- emitted once per unsunk target per frame. The report now lives in `print()`, which
+    // runs at flush and at shutdown, behind a named latch.
+    //
+    // WALKED TWICE ON PURPOSE. The first walk is above and emitted nothing; the second is
+    // `print`'s own. A test that only ever called `print` could not tell "the query stopped
+    // emitting" from "the report moved", and this rung changed both.
+    //
+    // ⚠️ THIS IS THE ONLY OBSERVER OF THAT LATCH IN THIS BINARY, and it has to stay that way: the
+    // latch is process state and `OnceSite::reset` is behind `test-probe`, which this crate does
+    // not enable for its own tests. A second test here that drove an unsunk target would spend the
+    // latch and this one would read an empty file -- which is exactly the failure mode below.
+    boyko_log::census::print();
+
     // The record reaches a reader. `Log` is still sunk, which is why the report about `Ecs` being
     // unsunk is not itself unsunk -- a report that shared its subject's fate would be unreadable
     // exactly when it mattered.

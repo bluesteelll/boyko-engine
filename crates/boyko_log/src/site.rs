@@ -59,6 +59,18 @@ pub struct LogSite {
     pub fields: &'static [&'static str],
     /// `"boyko"` for the engine; a game declares its own.
     pub prefix: &'static str,
+    /// The delivery policy this site's code declares. `Every` at a site with no code.
+    ///
+    /// # It is here so the DRAIN can do the accounting, not the emitting thread
+    ///
+    /// The census owes one `LOG-ONCE` row per fired `Once` site. Deciding "is this record from a
+    /// `Once` site" needs the policy, and the two other places it could come from are both worse:
+    /// a registry lookup is a scan over 74 rows, and doing it in the emission macro puts a hash and
+    /// an RMW on the emitting thread for a fact the consumer could work out at leisure.
+    ///
+    /// Cold `'static` data, like everything else here: the record carries an 8-byte pointer, and
+    /// nothing on the emission path reads this field.
+    pub rate: crate::codes::RatePolicy,
 }
 
 // `LogSite` is immutable `'static` data reachable from every thread through a record header, so

@@ -293,11 +293,11 @@ use super::super::{COLOR_SUBRESOURCE_RANGE, SwapchainError};
 /// one caller observes the `false` and wins. The steady-state cost is one `Relaxed` load from a
 /// private line, off the hot path behind `#[cold]`.
 ///
-/// ⚠️ **This paragraph used to claim the site "enrols itself in `ONCE_SITES` so the `LOG-ONCE`
-/// census can report that it fired at all". It does not, and no site does: `ONCE_SITES` and the
-/// `LOG-ONCE` rows are specified by the corpus and NOT BUILT.** Corrected rather than deleted,
-/// because a comment asserting an accounting mechanism that does not exist is how 39 `Once` sites
-/// came to have no latch with nothing noticing — see `docs/OPEN-QUESTIONS.md`.
+/// The `LOG-ONCE` census row for this site is real, and it is **not** produced by the site: this
+/// paragraph used to claim the site "enrols itself in `ONCE_SITES`", which was wrong twice over —
+/// no such register existed, and the enrolling is the DRAIN's, from `LogSite::rate`, off the
+/// emitting thread. `boyko_log::once_sites` now holds it, and a row here reading `fired > 1` would
+/// mean this latch had stopped working.
 #[cold]
 #[inline(never)]
 fn warn_textured_suppressed_by_motion_vectors() {

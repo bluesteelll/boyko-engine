@@ -77,12 +77,17 @@ static RATE: [RateSlot; MAX_RATE_SLOTS] = [const { RateSlot::new() }; MAX_RATE_S
 /// One counter rather than one per code, because the per-code breakdown a reader wants is the
 /// per-**site** one — which the corpus assigns to an `ONCE_SITES` walk printing `LOG-ONCE` rows.
 ///
-/// ⚠️ **`ONCE_SITES` DOES NOT EXIST.** This sentence used to name it as though it did, and so did a
-/// doc comment in `boyko_rhi_vulkan`'s gbuffer pass, which went further and claimed a site enrols
-/// itself in it. The aggregate below is therefore the ONLY accounting the limiter has, and it is
-/// printed by [`crate::census`]'s limiter line. Recorded in `docs/OPEN-QUESTIONS.md` beside the 39
-/// `Once` sites that have no latch — the two findings are one: nothing enumerates `Once` sites, so
-/// nothing could notice.
+/// That register is [`crate::once_sites`], and it is **built** — the drain notes every emission
+/// from a site whose policy is `Once`/`OnceCounted`, and the census prints one `LOG-ONCE` row per
+/// fired site. It did not exist when this sentence was first written, and this comment named it
+/// anyway; so did one in `boyko_rhi_vulkan`'s gbuffer pass, which went further and claimed a site
+/// *enrols itself*. Neither was true then and the second is still not: **the DRAIN does the
+/// enrolling**, off the emitting thread, from `LogSite::rate`.
+///
+/// The aggregate below stays the limiter's own accounting, printed by [`crate::census`]'s limiter
+/// line. It answers "how many occurrences did the rate policies refuse"; `once_sites` answers
+/// "which sites fired, and how often" — and `fired > 1` on a `Once` row is a site not keeping its
+/// declaration.
 static SUPPRESSED: AtomicU64 = AtomicU64::new(0);
 
 /// Occurrences that ran with no rate state because the code index space was exhausted.

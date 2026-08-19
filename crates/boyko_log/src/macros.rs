@@ -105,7 +105,7 @@ macro_rules! __log_rate_admits {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __log_site_emit {
-    ($lvl:expr, $T:ty, $class:expr, $code:expr, $fmt:literal $(, $a:expr)* $(,)?) => {{
+    ($lvl:expr, $T:ty, $class:expr, $code:expr, $rate:expr, $fmt:literal $(, $a:expr)* $(,)?) => {{
         static __BOYKO_LOG_SITE: $crate::LogSite = $crate::LogSite {
             target: ::core::option::Option::Some(<$T as $crate::LogTarget>::ID),
             level: $lvl,
@@ -116,6 +116,7 @@ macro_rules! __log_site_emit {
             fmt: $fmt,
             fields: &[],
             prefix: "boyko",
+            rate: $rate,
         };
         $crate::emit_impl(&__BOYKO_LOG_SITE, ($($a,)*));
     }};
@@ -146,6 +147,7 @@ macro_rules! error {
                 $T,
                 b'E',
                 $crate::codes::ErrorCode::number($code),
+                $crate::codes::ErrorCode::policy($code),
                 $fmt $(, $a)*
             );
         }
@@ -171,6 +173,7 @@ macro_rules! warn {
                 $T,
                 b'W',
                 $crate::codes::WarnCode::number($code),
+                $crate::codes::WarnCode::policy($code),
                 $fmt $(, $a)*
             );
         }
@@ -186,7 +189,7 @@ macro_rules! info {
             && $crate::runtime_ceiling(<$T as $crate::LogTarget>::ID)
                 >= $crate::Level::Info as u8
         {
-            $crate::__log_site_emit!($crate::Level::Info, $T, 0u8, 0u16, $fmt $(, $a)*);
+            $crate::__log_site_emit!($crate::Level::Info, $T, 0u8, 0u16, $crate::codes::RatePolicy::Every, $fmt $(, $a)*);
         }
     };
 }
@@ -200,7 +203,7 @@ macro_rules! debug {
             && $crate::runtime_ceiling(<$T as $crate::LogTarget>::ID)
                 >= $crate::Level::Debug as u8
         {
-            $crate::__log_site_emit!($crate::Level::Debug, $T, 0u8, 0u16, $fmt $(, $a)*);
+            $crate::__log_site_emit!($crate::Level::Debug, $T, 0u8, 0u16, $crate::codes::RatePolicy::Every, $fmt $(, $a)*);
         }
     };
 }
@@ -215,7 +218,7 @@ macro_rules! trace {
             && $crate::runtime_ceiling(<$T as $crate::LogTarget>::ID)
                 >= $crate::Level::Trace as u8
         {
-            $crate::__log_site_emit!($crate::Level::Trace, $T, 0u8, 0u16, $fmt $(, $a)*);
+            $crate::__log_site_emit!($crate::Level::Trace, $T, 0u8, 0u16, $crate::codes::RatePolicy::Every, $fmt $(, $a)*);
         }
     };
 }
@@ -247,7 +250,7 @@ macro_rules! trace {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __log_site_emit_dyn {
-    ($lvl:expr, $id:expr, $class:expr, $code:expr, $fmt:literal $(, $a:expr)* $(,)?) => {{
+    ($lvl:expr, $id:expr, $class:expr, $code:expr, $rate:expr, $fmt:literal $(, $a:expr)* $(,)?) => {{
         static __BOYKO_LOG_SITE_DYN: $crate::LogSite = $crate::LogSite {
             target: ::core::option::Option::None,
             level: $lvl,
@@ -258,6 +261,7 @@ macro_rules! __log_site_emit_dyn {
             fmt: $fmt,
             fields: &[],
             prefix: "boyko",
+            rate: $rate,
         };
         $crate::emit_impl_dyn(&__BOYKO_LOG_SITE_DYN, $id, ($($a,)*));
     }};
@@ -283,6 +287,7 @@ macro_rules! dyn_error {
                     __boyko_id,
                     b'E',
                     $crate::codes::ErrorCode::number($code),
+                    $crate::codes::ErrorCode::policy($code),
                     $fmt $(, $a)*
                 );
             }
@@ -305,6 +310,7 @@ macro_rules! dyn_warn {
                     __boyko_id,
                     b'W',
                     $crate::codes::WarnCode::number($code),
+                    $crate::codes::WarnCode::policy($code),
                     $fmt $(, $a)*
                 );
             }
@@ -320,7 +326,7 @@ macro_rules! dyn_info {
             let __boyko_id = $id;
             if $crate::runtime_ceiling(__boyko_id) >= $crate::Level::Info as u8 {
                 $crate::__log_site_emit_dyn!(
-                    $crate::Level::Info, __boyko_id, 0u8, 0u16, $fmt $(, $a)*
+                    $crate::Level::Info, __boyko_id, 0u8, 0u16, $crate::codes::RatePolicy::Every, $fmt $(, $a)*
                 );
             }
         }
@@ -335,7 +341,7 @@ macro_rules! dyn_debug {
             let __boyko_id = $id;
             if $crate::runtime_ceiling(__boyko_id) >= $crate::Level::Debug as u8 {
                 $crate::__log_site_emit_dyn!(
-                    $crate::Level::Debug, __boyko_id, 0u8, 0u16, $fmt $(, $a)*
+                    $crate::Level::Debug, __boyko_id, 0u8, 0u16, $crate::codes::RatePolicy::Every, $fmt $(, $a)*
                 );
             }
         }
@@ -350,7 +356,7 @@ macro_rules! dyn_trace {
             let __boyko_id = $id;
             if $crate::runtime_ceiling(__boyko_id) >= $crate::Level::Trace as u8 {
                 $crate::__log_site_emit_dyn!(
-                    $crate::Level::Trace, __boyko_id, 0u8, 0u16, $fmt $(, $a)*
+                    $crate::Level::Trace, __boyko_id, 0u8, 0u16, $crate::codes::RatePolicy::Every, $fmt $(, $a)*
                 );
             }
         }
@@ -376,7 +382,7 @@ macro_rules! dyn_trace {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __log_site_emit_kv {
-    ($lvl:expr, $T:ty, $class:expr, $code:expr, $fmt:literal $(, $name:ident = $val:expr)* $(,)?) => {{
+    ($lvl:expr, $T:ty, $class:expr, $code:expr, $rate:expr, $fmt:literal $(, $name:ident = $val:expr)* $(,)?) => {{
         static __BOYKO_LOG_SITE_KV: $crate::LogSite = $crate::LogSite {
             target: ::core::option::Option::Some(<$T as $crate::LogTarget>::ID),
             level: $lvl,
@@ -387,6 +393,7 @@ macro_rules! __log_site_emit_kv {
             fmt: $fmt,
             fields: &[$(stringify!($name)),*],
             prefix: "boyko",
+            rate: $rate,
         };
         $crate::emit_impl(&__BOYKO_LOG_SITE_KV, ($($val,)*));
     }};
@@ -401,7 +408,7 @@ macro_rules! info_kv {
             && $crate::runtime_ceiling(<$T as $crate::LogTarget>::ID) >= $crate::Level::Info as u8
         {
             $crate::__log_site_emit_kv!(
-                $crate::Level::Info, $T, 0u8, 0u16, $fmt $(, $name = $val)*
+                $crate::Level::Info, $T, 0u8, 0u16, $crate::codes::RatePolicy::Every, $fmt $(, $name = $val)*
             );
         }
     };
@@ -416,7 +423,7 @@ macro_rules! debug_kv {
             && $crate::runtime_ceiling(<$T as $crate::LogTarget>::ID) >= $crate::Level::Debug as u8
         {
             $crate::__log_site_emit_kv!(
-                $crate::Level::Debug, $T, 0u8, 0u16, $fmt $(, $name = $val)*
+                $crate::Level::Debug, $T, 0u8, 0u16, $crate::codes::RatePolicy::Every, $fmt $(, $name = $val)*
             );
         }
     };
@@ -431,7 +438,7 @@ macro_rules! trace_kv {
             && $crate::runtime_ceiling(<$T as $crate::LogTarget>::ID) >= $crate::Level::Trace as u8
         {
             $crate::__log_site_emit_kv!(
-                $crate::Level::Trace, $T, 0u8, 0u16, $fmt $(, $name = $val)*
+                $crate::Level::Trace, $T, 0u8, 0u16, $crate::codes::RatePolicy::Every, $fmt $(, $name = $val)*
             );
         }
     };
@@ -453,6 +460,7 @@ macro_rules! warn_kv {
                 $T,
                 b'W',
                 $crate::codes::WarnCode::number($code),
+                $crate::codes::WarnCode::policy($code),
                 $fmt $(, $name = $val)*
             );
         }
@@ -473,6 +481,7 @@ macro_rules! error_kv {
                 $T,
                 b'E',
                 $crate::codes::ErrorCode::number($code),
+                $crate::codes::ErrorCode::policy($code),
                 $fmt $(, $name = $val)*
             );
         }

@@ -400,6 +400,32 @@ the flood. `codes.rs` gained
 > test in this crate green** — the registry printing one policy while every call site folded
 > another, visible only to a behavioural test of a damped code.
 >
+> **THE `Once` REGISTER IS BUILT, AND IT FOUND ITS FIRST DEFECT IMMEDIATELY.** `ONCE_SITES` and the
+> `LOG-ONCE` rows — specified in `00-GOAL-TARGETS.md:37`, `01-EMISSION-RING.md:273` and this
+> document — now exist as `crates/boyko_log/src/once_sites.rs`. `LogSite` gained a `rate` field
+> (cold `'static` data, never read on the emission path) so the **DRAIN** can do the accounting:
+> the hash, the probe and the counter all run on the consumer, and the emitting thread pays
+> nothing. `census::print` emits
+> `LOG-ONCE code=W2102 site=<file>:<line> fired=N suppressed=UNCOUNTED(by policy)`, with the full
+> path rather than the corpus's `device.rs` basename because twenty directories here hold a
+> `mod.rs`. Counted at EMISSION, before the per-sink filters — a register that counted delivered
+> records would read `fired=0` for every site in a process whose sinks are off, which is the
+> silence `W0111` exists to refuse, reproduced inside the mechanism meant to expose it.
+>
+> **`fired > 1` IS the defect**, and the row says so in words: `<-- DECLARES Once AND HAS NO LATCH`.
+>
+> **`W0111` was emitting from inside a public ITERATOR.** `report_unsunk` was called from
+> `census::rows()`, which a host may walk every frame — so a row declaring `Once` produced one
+> record per unsunk target per frame. Reverting the fix and walking `rows()` ten times makes the
+> register read `fired: 10`. The report moved to `census::print()` behind a named
+> `UNSUNK_REPORTED` latch. The general form: **a query must not have a diagnostic as a side
+> effect.** `E0109` is the same class one file over — `report_unopenable` had no latch, and its
+> `Once` was honoured by the call structure rather than by anything at the site.
+>
+> **AND THE FIRST DRAFT OF THAT LEG WAS A CONTROL THAT COULD NOT FIRE.** It left the `Log` target
+> Off from the test's own setup, so gate (c) refused `W0111` and BOTH legs read an empty register —
+> leg D passing not because the query had stopped emitting but because nothing could emit at all.
+>
 > **FIVE REDs.** (1) Unwire `dyn_warn!`'s fourth gate ⇒ `left: 16, right: 4`, the pre-commit state
 > exactly. (2) Flip the `Every` arm to `false` ⇒ `left: 0, right: 8` on leg 1 — the control catches
 > a gate closed too hard, which is what makes legs 2 and 3 mean "the declared policy" rather than
@@ -407,6 +433,13 @@ the flood. `codes.rs` gained
 > limiter line from `print` ⇒ `left: 27, right: 28`, which is the check that `render_limiter` is
 > not itself a function nothing reaches. (5) Hard-code a policy in `code_class_new!` ⇒ `E0080` at
 > `W0103`, `W0111`, `W0112`, … , one per row that disagrees.
+>
+> **FOUR MORE for the register.** (6) Drop the drain's `note` call ⇒ the latched site is absent,
+> `left: 0, right: 1`. (7) Let the register record every policy ⇒ leg C reds, and `fired` is
+> revealed as a per-site record count wearing a policy's name. (8) Pin `fired` at 1 instead of
+> counting ⇒ `left: 1, right: 5`, the unlatched site made to look disciplined. (9) Put
+> `report_unsunk` back inside `rows()` ⇒ `fired: 10` for `census.rs`, which is the defect the
+> register was built to name.
 
 **4. The `#[cfg(debug_assertions)]` question is per SITE, and L7b's rule is not "delete every
 gate".** `boyko_physics/src/soft/self_collision.rs` had three debug-only warnings. Two lost the

@@ -77,9 +77,20 @@ pub fn arm(path: &str) -> bool {
 /// `boyko-E0109`: the crash file could not be opened.
 ///
 /// `Once`: one process has one crash destination, and a second attempt fails for the same reason.
+/// The `E0109` latch, a NAMED module-level `static` so an observer can control it.
+///
+/// Without it this site's `Once` was honoured by the CALL STRUCTURE -- `arm` runs once on the
+/// enable path -- rather than by anything at the site. A process that disables and re-enables
+/// calls `arm` again, and a row declaring `Once` would have reported again. Found by the `Once`
+/// register (`crate::once_sites`), which is the first thing in this crate able to see it.
+static UNOPENABLE_REPORTED: crate::codes::OnceSite = crate::codes::OnceSite::new();
+
 #[cold]
 #[inline(never)]
 fn report_unopenable(path: &str) {
+    if !UNOPENABLE_REPORTED.claim() {
+        return;
+    }
     crate::error!(
         crate::Log,
         crate::codes::E0109,

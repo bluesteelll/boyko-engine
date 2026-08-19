@@ -259,6 +259,14 @@ pub fn drain_once() -> Option<crate::lane::DrainStats> {
         // none at compile time (L10-B). The site's own `target` field is the discriminant, so the
         // split is done once here and everything below reads the resolved pair.
         let (target, payload) = crate::record::split_dynamic_target(site.target, payload);
+        // The `Once` register, BEFORE the per-sink filters: a latch is spent when the site emits,
+        // whatever a sink then does with the record. Counting delivered records instead would read
+        // `fired=0` for every site in a process whose sinks are all off -- the exact silence
+        // `W0111` exists to refuse, reproduced inside the mechanism meant to expose it.
+        //
+        // A no-op for the 29 `Every` rows: the branch is on cold `'static` data this thread
+        // already holds, and the emitting thread never sees any of it (L8a-once).
+        crate::once_sites::note(site);
         line.clear();
         render_record(&mut line, site, payload);
         let text = line.as_str();

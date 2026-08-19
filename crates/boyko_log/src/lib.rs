@@ -71,6 +71,7 @@ pub mod lane;
 pub mod level;
 pub mod lifecycle;
 mod macros;
+pub mod once_sites;
 /// Test-only record observation for the crates that emit into this logger.
 ///
 /// Behind the `test-probe` feature, which emitting crates enable in `[dev-dependencies]` only —

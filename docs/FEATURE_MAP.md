@@ -937,13 +937,13 @@ nothing more. Verified the same way — repointing it stays green.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Apply a code's rate policy (EveryN / MinInterval; Once is the site's own latch) | `admit` (138), called from `__log_rate_admits!` |
+| Apply a code's rate policy (EveryN / MinInterval; Once is the site's own latch) | `admit` (143), called from `__log_rate_admits!` |
 
 **File:** [crates/boyko_log/src/lifecycle.rs](../crates/boyko_log/src/lifecycle.rs) — boot, drain, teardown.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Ask whether anything is actually consuming records — the answer every stderr fallback is written against | `flush` (550) |
+| Ask whether anything is actually consuming records — the answer every stderr fallback is written against | `flush` (558) |
 
 **File:** [crates/boyko_log/src/sync_out.rs](../crates/boyko_log/src/sync_out.rs) — the synchronous route.
 
@@ -951,11 +951,18 @@ nothing more. Verified the same way — repointing it stays green.
 |---------------------|---------------|
 | Report a condition the transport itself cannot carry, such as the file sink hitting its own cap | `write_oracle_line` (173) |
 
+**File:** [crates/boyko_log/src/once_sites.rs](../crates/boyko_log/src/once_sites.rs) — which `Once` sites actually fired, and how often.
+
+| What you want to do | Member (line) |
+|---------------------|---------------|
+| Record that a `Once` site emitted (called by the DRAIN, never the emitting thread) | `note` (82) |
+| Find a site whose registry row promises `Once` and whose code delivers more — `fired > 1` | `walk` (136) |
+
 **File:** [crates/boyko_log/src/census.rs](../crates/boyko_log/src/census.rs) — the end-of-run verdict per target.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Print the per-target census that tells a clean target from a switched-off one | `print` (145) |
+| Print the per-target census that tells a clean target from a switched-off one | `print` (153) |
 
 ### The gates that keep this honest
 

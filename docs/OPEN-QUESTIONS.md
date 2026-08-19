@@ -2350,3 +2350,81 @@ This is the same finding as the 39 latch-less sites, from the other end: **nothi
 `Once` sites, so nothing could notice.** Building `ONCE_SITES` + the `LOG-ONCE` rows is the natural
 pair to disposition 1 above — the audit needs the enumeration, and the enumeration makes the audit
 mechanical instead of a grep.
+
+---
+
+## UPDATE (same day): the enumeration is BUILT, two of the sites are fixed, and the audit is now a number
+
+`crates/boyko_log/src/once_sites.rs` is the register the corpus specified. The drain notes every
+emission from a site whose `LogSite::rate` is `Once`/`OnceCounted` — off the emitting thread, from
+cold `'static` data — and `census::print` emits one row per fired site:
+
+```
+LOG-ONCE code=W2102 site=crates/boyko_rhi_vulkan/src/device.rs:3100 fired=1 suppressed=UNCOUNTED(by policy)
+```
+
+**`fired > 1` is the defect, stated as a number.** The row even says so:
+`  <-- DECLARES Once AND HAS NO LATCH`. The 39-pair grep was an upper bound with no way to tighten
+it — it cannot tell an emitter from a `use` or a doc link — and this replaces it with a per-site
+run-time count.
+
+**Two engine sites are fixed with it, and the first was found BY it:**
+
+* **`W0111`** — `report_unsunk` was called from inside `census::rows()`, a **public iterator** a
+  host may walk every frame. Reverting the fix and walking `rows()` ten times makes the register
+  read `fired: 10` for `census.rs`. The report moved to `census::print()` (flush and shutdown)
+  behind a named `UNSUNK_REPORTED` latch. **A query must not have a diagnostic as a side effect**,
+  which is the general form of this defect.
+* **`E0109`** — `report_unopenable` had no latch; its `Once` was honoured by the call structure
+  (`arm` runs once on the enable path), so a process that disabled and re-enabled would report
+  again. It has a named `UNOPENABLE_REPORTED` latch now.
+
+**What is still open.** The remaining ~37 pairs are not audited: the register only reports sites
+that FIRE, and a site that never fires in a test run leaves no row. Reading it properly means
+running the engine and reading the census, which is the next step rather than a grep. The
+macro-auto-latch question (disposition 2 above) is untouched and still needs a scope call.
+
+---
+
+## The certification recipe never runs 311 tests, and 177 of them do not say why
+
+**Status:** OPEN — measured 2026-08-19. Surfaced rather than half-fixed, because the fix is a
+policy call.
+
+The two-half recipe in `CLAUDE.md` reports green without running a single `#[ignore]`d test:
+
+```
+cargo test --workspace --exclude boyko_rhi_vulkan --all-targets --no-fail-fast
+cargo test -p boyko_rhi_vulkan --all-targets --no-fail-fast -- --test-threads=1
+```
+
+Measured across `crates/`, `src/` and `tests/`: **311 `#[ignore]` sites in 90 files.**
+
+**Do not read that as 311 defects.** Of the 134 that state a reason, 122 name a GPU, device,
+window or swapchain requirement, 3 name process-wide state and 2 name a dump or golden — all
+legitimate reasons for a test to be driven by hand. The number worth acting on is the other one:
+
+**177 sites carry `#[ignore]` with NO reason at all.** They sit in 78 files, mostly windowed/GPU
+suites whose module docs do explain the requirement — so 177 is an upper bound on "silenced with
+no record", not a defect count. But a bare `#[ignore]` cannot be told apart from a test that went
+red once and was quieted, and that is precisely the distinction this campaign exists to make
+mechanical.
+
+**One instance is verified and load-bearing right now.**
+`crates/boyko_log/tests/l14_sink_policy.rs`'s `an_armed_target_no_sink_accepts_is_unsunk_and_says_so`
+is the **only** observer of the `W0111` latch this rung introduced, and the recipe does not run it.
+It was run by hand for this commit (`-- --ignored --test-threads=1`, green) and that is a process
+step, not a gate.
+
+I did not merge it into its sibling: the second test re-`boot`s and re-`enable`s, and `enable()`
+on an already-enabled process is a different code path — a merge could produce a test that passes
+for a new and wrong reason, which is worse than one that does not run.
+
+**Two questions for the owner:**
+
+1. Should the recipe gain a third leg, `-- --ignored --test-threads=1` per crate — accepting that
+   the GPU/windowed suites will then need a device present?
+2. Should a bare `#[ignore]` become a tidy-check failure, so that switching a gate off always
+   leaves a written reason? That is the same rule as the mandatory `// SAFETY:` comment and the
+   `#[allow(clippy::disallowed_types)]` rationale, applied to the third way to make a check
+   disappear.

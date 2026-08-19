@@ -730,6 +730,7 @@ mod tests {
         fmt: "probe {}",
         fields: &[],
         prefix: "boyko",
+        rate: crate::codes::RatePolicy::Every,
     };
 
     static TEST_SITE: LogSite = LogSite {
@@ -742,6 +743,7 @@ mod tests {
         fmt: "probe {}",
         fields: &[],
         prefix: "boyko",
+        rate: crate::codes::RatePolicy::Every,
     };
 
     #[test]
@@ -820,6 +822,7 @@ mod tests {
         fmt: "probe {}",
         fields: &[],
         prefix: "boyko",
+        rate: crate::codes::RatePolicy::Every,
     };
 
     /// **The F6 regression, end to end.**

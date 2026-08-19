@@ -75,6 +75,7 @@ fn probe_site() -> boyko_log::LogSite {
         fmt: "probe",
         fields: &[],
         prefix: "boyko",
+        rate: boyko_log::codes::RatePolicy::Every,
     }
 }
 

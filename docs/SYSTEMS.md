@@ -2249,7 +2249,7 @@ deletes the never-evaluated guarantee, and no test of the output would notice.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Ask whether anything is actually consuming records — what every stderr fallback is written against | `flush` (550) |
+| Ask whether anything is actually consuming records — what every stderr fallback is written against | `flush` (558) |
 
 **File:** [crates/boyko_log/src/sync_out.rs](../crates/boyko_log/src/sync_out.rs) — the synchronous route.
 
@@ -2261,7 +2261,7 @@ deletes the never-evaluated guarantee, and no test of the output would notice.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Print the per-target census that tells a clean target from a switched-off one | `print` (145) |
+| Print the per-target census that tells a clean target from a switched-off one | `print` (153) |
 
 **Gates:** [code_registry.rs](../crates/boyko_log/tests/code_registry.rs) (a code with no row, no
 page, or no observing test) · [print_census.rs](../crates/boyko_log/tests/print_census.rs) (any

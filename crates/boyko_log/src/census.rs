@@ -89,7 +89,11 @@ pub fn rows() -> impl Iterator<Item = CensusRow> {
             if ceiling != crate::Level::Off
                 && !crate::sink::slot::any_sink_accepts(id, ceiling)
             {
-                report_unsunk(id, name);
+                // NO REPORT HERE. `rows()` is a public ITERATOR: a host rendering a census overlay
+                // walks it every frame, and a `warn!` on that path made `W0111` -- a row declaring
+                // `Once` -- emit once per unsunk target per frame. The report moved to `print()`,
+                // which runs at flush and at shutdown. Found by the `Once` register, which is the
+                // first thing in this crate able to see a `Once` row firing more than once.
                 LossStatus::UnprovenUnsunk
             } else {
                 LossStatus::Unproven
@@ -107,6 +111,10 @@ pub fn rows() -> impl Iterator<Item = CensusRow> {
         }
     })
 }
+
+/// The `W0111` latch. **A named module-level `static`**, for the reason `OnceSite::reset` gives:
+/// state a test cannot name is state a test cannot control.
+static UNSUNK_REPORTED: crate::codes::OnceSite = crate::codes::OnceSite::new();
 
 /// `boyko-W0111`: a target is armed and **no `Active` sink accepts it**.
 ///
@@ -145,6 +153,16 @@ pub fn lossy() -> bool {
 pub fn print() -> u32 {
     let mut written = 0;
     for row in rows() {
+        // THE UNSUNK REPORT LIVES HERE, and behind a latch, because the row declares `Once`.
+        //
+        // ONE latch for every target rather than one per target, which is what `W0111`'s own doc
+        // comment argues for: the condition is a CONFIGURATION, so every later unsunk target is
+        // the same misconfiguration, and reporting each would turn one mistake into a storm of
+        // reports about it. That is the opposite of `W2102`'s three-site case, where the sites are
+        // independent -- the granularity is a per-code judgement, not a rule.
+        if row.status == LossStatus::UnprovenUnsunk && UNSUNK_REPORTED.claim() {
+            report_unsunk(row.id, row.name);
+        }
         let mut buf = [0u8; 160];
         let n = render(&mut buf, &row);
         // SAFETY: `render` writes only ASCII copied from `&'static str`s and decimal digits.
@@ -159,6 +177,21 @@ pub fn print() -> u32 {
     let text = unsafe { core::str::from_utf8_unchecked(&buf[..n]) };
     if crate::sync_out::write_oracle_line("LOG-CENSUS ", text).is_some() {
         written += 1;
+    }
+    // ONE `LOG-ONCE` ROW PER FIRED SITE, under its own prefix.
+    //
+    // A separate prefix rather than more `LOG-CENSUS` lines, because these rows are per SITE while
+    // every other census row is per TARGET, and a reader filtering on one prefix must not have to
+    // know which shape each line is.
+    for row in crate::once_sites::walk() {
+        let mut buf = [0u8; 320];
+        let n = render_once(&mut buf, &row);
+        // SAFETY: `render_once` writes ASCII literals, decimal digits, and `LogSite::file`, which
+        //   is a `&'static str` from `file!()`.
+        let text = unsafe { core::str::from_utf8_unchecked(&buf[..n]) };
+        if crate::sync_out::write_oracle_line("LOG-ONCE ", text).is_some() {
+            written += 1;
+        }
     }
     written
 }
@@ -199,6 +232,65 @@ fn render(buf: &mut [u8], row: &CensusRow) -> usize {
     dec(row.dropped, &mut n, &mut put);
     put(b" status=", &mut n);
     put(row.status_str().as_bytes(), &mut n);
+    n
+}
+
+/// Render `code=W2102 site=<file>:<line> fired=N suppressed=…` into `buf`.
+///
+/// # `fired` is the row that matters, and anything above `1` is a defect
+///
+/// A `Once` site with a latch fires exactly once per process. `fired=17` is a site whose registry
+/// row promises `Once` and whose code delivers seventeen -- the condition that was previously
+/// findable only by grepping identifier uses, which cannot tell an emitter from a doc link.
+///
+/// # The FULL path, not the basename
+///
+/// The corpus's worked example prints `site=device.rs:3100`. Two files in this workspace may share
+/// a basename -- `mod.rs` is in twenty directories -- so a reader given the basename has to guess
+/// which one, and the guess is silent. The path is what makes the row actionable.
+fn render_once(buf: &mut [u8], row: &crate::once_sites::OnceRow) -> usize {
+    let mut n = 0usize;
+    let mut put = |s: &[u8], n: &mut usize| {
+        let take = s.len().min(buf.len() - *n);
+        buf[*n..*n + take].copy_from_slice(&s[..take]);
+        *n += take;
+    };
+    let dec = |v: u64, n: &mut usize, put: &mut dyn FnMut(&[u8], &mut usize)| {
+        let mut d = [0u8; 20];
+        let mut v = v;
+        let mut i = d.len();
+        loop {
+            i -= 1;
+            d[i] = b'0' + (v % 10) as u8;
+            v /= 10;
+            if v == 0 || i == 0 {
+                break;
+            }
+        }
+        put(&d[i..], n);
+    };
+    put(b"code=", &mut n);
+    put(&[row.class], &mut n);
+    dec(u64::from(row.code), &mut n, &mut put);
+    put(b" site=", &mut n);
+    put(row.file.as_bytes(), &mut n);
+    put(b":", &mut n);
+    dec(u64::from(row.line), &mut n, &mut put);
+    put(b" fired=", &mut n);
+    dec(u64::from(row.fired), &mut n, &mut put);
+    // `Once` does not count its suppressions BY DESIGN -- counting them costs an RMW on a shared
+    // line during the storm the policy exists to damp. Saying so is not the same as saying zero,
+    // and the two must never render alike.
+    if row.counted {
+        // `OnceCounted` is specified to carry a real number and no counter is wired for it yet.
+        // Named rather than printed as zero, for the same reason.
+        put(b" suppressed=UNWIRED(OnceCounted)", &mut n);
+    } else {
+        put(b" suppressed=UNCOUNTED(by policy)", &mut n);
+    }
+    if row.fired > 1 {
+        put(b"  <-- DECLARES Once AND HAS NO LATCH", &mut n);
+    }
     n
 }
 
@@ -361,8 +453,8 @@ mod tests {
         crate::sync_out::set_console_enabled(was_on);
         assert_eq!(
             lines as usize,
-            rows().count() + 1,
-            "the census must print one line per target AND the limiter line"
+            rows().count() + 1 + crate::once_sites::walk().count(),
+            "the census must print one line per target, the limiter line, and one LOG-ONCE row              per fired site"
         );
     }
 }
