@@ -223,11 +223,22 @@ fn boot_and_enable_logging_from_env() {
     let raw = raw.to_string_lossy().into_owned();
     let level = parse_log_level(&raw).unwrap_or(boyko_log::Level::Info);
 
-    if !enable() {
-        return;
-    }
+    // ARM BEFORE ENABLE, and the order is the whole reason the session header reaches anyone.
+    //
+    // `enable()` emits the header -- `build_profile` / `runtime_preset` / `ceiling` / `session`,
+    // which is G16(d)'s subject. `CONTROL` is `.bss`-zero, so with the targets still `Off` gate (c)
+    // refuses that record and the header is silently dropped. MEASURED by running the host with
+    // `BOYKO_LOG=debug` and reading its output: every census row printed, and the header was
+    // absent. No logging gate could see it -- `l17_preset_boot` goes through `boot_preset`, which
+    // arms the targets itself, so the shipped host was the only path with the defect.
+    //
+    // Arming first is safe: a control byte is a `.bss` write, and nothing is delivered before
+    // `enable()` opens a destination anyway.
     for (id, _name) in boyko_log::target::engine_targets() {
         boyko_log::target::set_target_level(id, level);
+    }
+    if !enable() {
+        return;
     }
     boyko_log::info!(
         boyko_log::App,

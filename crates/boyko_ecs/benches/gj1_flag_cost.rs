@@ -141,7 +141,6 @@ fn flags_on(profiler: &mut Profiler) {
     );
 }
 
-/// Turn both off, and assert the state GJ1 specifies for leg (B).
 /// Profiler on, logger off. **This is logging's `P1` (`sched_cpu_logger_on_off`) subject**, and it
 /// is taken in this sitting rather than its own because J2's whole instruction is to re-take the
 /// baselines *in the both-present configuration*: a logger cost measured with no profiler present
@@ -157,6 +156,7 @@ fn profiler_only(profiler: &mut Profiler) {
     );
 }
 
+/// Turn both off, and assert the state GJ1 specifies for leg (B).
 fn flags_off(profiler: &mut Profiler) {
     profiler.disarm();
     set_target_control(<Log as LogTarget>::ID, TargetControl::OFF);

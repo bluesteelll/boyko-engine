@@ -85,6 +85,9 @@ thread_local! {
     /// needs none of what it buys. `Cell::take`/`Cell::set` move the `String` in and out, which
     /// is all a single-owner thread-local ever does.
     static LAST: Cell<String> = const { Cell::new(String::new()) };
+    // The FIRST matching message since `watch`. See `first_message` for why both exist.
+    // A `///` here does not parse: `thread_local!`'s pattern takes attributes, not doc comments.
+    static FIRST: Cell<String> = const { Cell::new(String::new()) };
 }
 
 /// Charge one emission to the calling thread, and keep its rendered message. Called from
@@ -130,6 +133,15 @@ pub(crate) fn note_emission<A: crate::record::LogArgs>(
     let mut line = String::new();
     let mut f = crate::site::LogFormatter::new(&mut line);
     crate::record::render_payload(&payload[..written], site.fmt, &mut f);
+    // Take ONCE, decide, put back. The first draft called `take()` inside the condition and again
+    // in the else arm -- and `Cell::take` leaves the default behind, so the second call returned
+    // `""` and the FIRST message was destroyed by the arrival of the second. A datum written and
+    // then thrown away, which is the defect this whole campaign is about, in the accessor built to
+    // observe it.
+    FIRST.with(|fst| {
+        let held = fst.take();
+        fst.set(if held.is_empty() { line.clone() } else { held });
+    });
     LAST.with(|l| l.set(line));
 }
 
@@ -144,6 +156,7 @@ pub fn watch(class: u8, code: u16) {
     WATCH.with(|w| w.set(Some((class, code))));
     COUNT.with(|c| c.set(0));
     LAST.with(|l| l.set(String::new()));
+    FIRST.with(|f| f.set(String::new()));
 }
 
 /// Start counting **every** emission on this thread, from zero.
@@ -151,6 +164,7 @@ pub fn watch_any() {
     WATCH.with(|w| w.set(None));
     COUNT.with(|c| c.set(0));
     LAST.with(|l| l.set(String::new()));
+    FIRST.with(|f| f.set(String::new()));
 }
 
 /// Emissions matching the current [`watch`] since it was set.
@@ -164,6 +178,24 @@ pub fn watched() -> u64 {
 /// Empty when nothing has matched since the last [`watch`]. Use it to gate a record's
 /// **arguments**, which is the half a count cannot reach — see [`note_emission`] for the
 /// measurement that established the difference.
+/// The rendered message of the **first** matching emission since [`watch`].
+///
+/// The mirror of [`last_message`], and it exists because the two answer different questions.
+/// MEASURED: the host gate for the session header used `last_message` and read
+/// `"logging enabled at debug ..."` — the line the host emits AFTER the header — so it reported the
+/// header missing while it was there. An assertion that reads the wrong record accuses the wrong
+/// code.
+#[must_use]
+pub fn first_message() -> String {
+    // Take, clone, put back, for the reason `last_message` gives: reading must not consume.
+    FIRST.with(|f| {
+        let s = f.take();
+        let out = s.clone();
+        f.set(s);
+        out
+    })
+}
+
 #[must_use]
 pub fn last_message() -> String {
     // Take, clone, put back: reading the message must not consume it, or a second assertion in
