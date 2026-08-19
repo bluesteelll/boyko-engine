@@ -186,7 +186,14 @@ fn merge_all(loaded: &[(String, Vec<u8>)]) -> bool {
 
     rows.sort_by_key(|r| r.ticks);
     if let Some((lo, hi)) = session {
-        let _ = writeln!(out, "== merged session {hi:x}{lo:016x}, {} record(s)", rows.len());
+        // The same renderer, for the reason the per-file line gives.
+        let hex = boyko_diag::clock::session_hex(boyko_diag::clock::SessionId(lo, hi));
+        let _ = writeln!(
+            out,
+            "== merged session {}, {} record(s)",
+            String::from_utf8_lossy(&hex),
+            rows.len()
+        );
     }
     for r in &rows {
         let _ = writeln!(out, "{:>20}  {}:{}  {}  [{}]", r.ticks, r.file, r.line, r.text, r.from);
@@ -219,7 +226,12 @@ fn decode_one(path: &str, bytes: &[u8]) {
                 let _ = writeln!(out, "-- anchor ticks={ticks} ticks_per_ns={scale}");
             }
             Frame::Session { lo, hi } => {
-                let _ = writeln!(out, "-- session {hi:x}{lo:016x}");
+                // `boyko_diag`'s renderer, not a second one here. `{hi:x}{lo:016x}` dropped the
+                // high half's leading zeros, so a session whose top nibble is 0 printed 31 digits
+                // here against the header's 32 -- one id, two renderings, disagreeing on a
+                // sixteenth of sessions.
+                let hex = boyko_diag::clock::session_hex(boyko_diag::clock::SessionId(lo, hi));
+                let _ = writeln!(out, "-- session {}", String::from_utf8_lossy(&hex));
             }
             Frame::Dictionary { site_id, line, file, fmt } => {
                 let i = site_id as usize;

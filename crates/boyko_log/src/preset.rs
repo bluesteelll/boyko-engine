@@ -31,6 +31,19 @@
 //! "this is a shipping log" cannot tell which of the two axes said so, and will reason about the
 //! wrong one.
 //!
+//! # `Off` beats a level flag, and that is a decision
+//!
+//! A host that reads both a preset and a level (`boyko_app` reads `BOYKO_LOG_PRESET` and
+//! `BOYKO_LOG`) must resolve `Off` + a level. The two candidate answers are not symmetric:
+//! honouring the level ARMS every target while `Off` has opened no sink, which is precisely the
+//! state [`crate::census`] names `UNPROVEN(unsunk)` — every site pays gate (c)'s load and delivers
+//! nothing. And the `W0111` that reports that condition cannot be printed either, because printing
+//! needs a destination `Off` did not open. MEASURED: a host run at `Off` emits not one line, census
+//! included.
+//!
+//! So `Off` wins. A contradictory pair resolves to the row that promises nothing rather than to a
+//! configuration that costs something and delivers nothing.
+//!
 //! # A preset says what is configured when diagnostics are ON
 //!
 //! It does not say whether they are on. `Off` configures nothing; a flag-off run of any other
@@ -200,30 +213,17 @@ impl LogRuntimePreset {
 /// profiling artifact identify the same session without anyone having to correlate timestamps.
 pub fn header(preset: Option<LogRuntimePreset>) {
     let session = boyko_diag::clock::session_id();
-    // ── THE ID IS RENDERED HERE, AS HEX, AND `{:x}` COULD NOT DO IT ─────────────────────────
+    // ── ONE RENDERER, IN `boyko_diag`, BESIDE THE TYPE ─────────────────────────────────────
     //
-    // `record::render_payload` consumes a value for any `{…}` group and **ignores the format
-    // spec** -- a documented limitation of the one walker both sinks share. So `session={:x}{:x}`
-    // printed the two halves in DECIMAL, glued: `183307752869167903659220641735087238341` is
-    // `dec(hi)` followed by `dec(lo)`, a number that is not the id in any base.
+    // `{:x}` could not do it: `record::render_payload` consumes a value for any `{…}` group and
+    // IGNORES the format spec, so the two halves printed in DECIMAL, glued end to end.
     //
-    // MEASURED by running a host with `BOYKO_LOG_PRESET=shipping` and decoding the `.blog`: the
-    // file's own `Session` frame read `fe63ff00ba2f385d7ff64cce15042cc5` and the header beside it
-    // read that decimal. The id exists so an uploaded log and an uploaded profiling artifact can be
-    // proved to be one run; two representations that cannot be compared defeat exactly that.
-    //
-    // Rendered into a stack buffer and passed as `&str`, so the sink still receives a plain value
-    // and nothing formats on the drain thread.
-    let mut hex = [0u8; 32];
-    for (i, byte) in hex.iter_mut().enumerate() {
-        let nibble = if i < 16 {
-            (session.1 >> (60 - 4 * i)) & 0xF
-        } else {
-            (session.0 >> (60 - 4 * (i - 16))) & 0xF
-        } as u8;
-        *byte = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
-    }
-    // SAFETY: every byte written above is an ASCII hex digit.
+    // And the first fix rendered hex HERE while `logdec` rendered it there -- two renderings of one
+    // id, which disagreed on the sixteenth of sessions whose top nibble is zero. `session_hex` is
+    // now the only one, and it has a test with a CHOSEN value rather than the live id, because a
+    // test that sampled the id would catch that defect one run in sixteen.
+    let hex = boyko_diag::clock::session_hex(session);
+    // SAFETY: `session_hex` writes 32 ASCII hex digits and nothing else.
     let hex = unsafe { core::str::from_utf8_unchecked(&hex) };
     crate::info!(
         crate::Log,

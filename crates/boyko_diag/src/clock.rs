@@ -169,6 +169,33 @@ fn uncalibrated_scale() -> f64 {
     1.0
 }
 
+/// Render a [`SessionId`] as **exactly 32 lowercase hex digits**, high half first.
+///
+/// # One renderer, because two of them produced two ids for one session
+///
+/// MEASURED: `preset::header` rendered all 32 nibbles while `logdec` printed `{hi:x}{lo:016x}` —
+/// so a session whose top nibble is zero read 31 digits in the file's own `Session` frame and 32
+/// in the header beside it. The id exists so an uploaded log and an uploaded profiling artifact can
+/// be proved to be one run; two renderings that disagree on a sixteenth of sessions defeat that,
+/// and defeat it *intermittently*, which is worse than never working.
+///
+/// It lives here because both consumers are downstream of this module, and because a formatter
+/// beside the type it formats cannot be forgotten by a third consumer.
+///
+/// Hand-rolled rather than `format!`: this crate allocates nothing, and the one caller on a
+/// lifecycle path should not be the exception.
+#[must_use]
+pub fn session_hex(id: SessionId) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        let half = if i < 16 { id.1 } else { id.0 };
+        let shift = 60 - 4 * (i % 16);
+        let nibble = ((half >> shift) & 0xF) as u8;
+        *byte = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
+    }
+    out
+}
+
 /// The current epoch. Incremented by [`note_forward_jump`] on a detected discontinuity.
 ///
 /// Two ticks are comparable only if they were taken in the same epoch; a consumer that records
@@ -495,6 +522,28 @@ static SESSION_MINTS: AtomicU32 = AtomicU32::new(0);
 
 #[cfg(test)]
 mod tests {
+    use super::{SessionId, session_hex};
+
+    /// 32 digits, always, INCLUDING the leading zeros two independent renderers used to drop.
+    ///
+    /// The value is chosen, not sampled: a real `SessionId` has a zero top nibble one time in
+    /// sixteen, so a test that used the live id would catch this defect on a sixteenth of runs and
+    /// pass on the rest -- which is how it reached the tree in the first place.
+    #[test]
+    fn a_session_id_renders_as_exactly_thirty_two_hex_digits() {
+        let id = SessionId(0x0000_0000_0000_000f, 0x0f00_0000_0000_0001);
+        let hex = session_hex(id);
+        let text = core::str::from_utf8(&hex).expect("ASCII hex");
+        assert_eq!(text.len(), 32);
+        assert_eq!(text, "0f00000000000001000000000000000f");
+
+        // Both halves at their extremes, so a swapped pair or a dropped half is visible.
+        assert_eq!(
+            core::str::from_utf8(&session_hex(SessionId(0, u64::MAX))).expect("ASCII"),
+            "ffffffffffffffff0000000000000000"
+        );
+    }
+
     use std::sync::atomic::AtomicUsize;
     use std::time::{Duration, Instant};
 

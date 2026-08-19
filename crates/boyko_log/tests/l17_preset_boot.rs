@@ -126,6 +126,16 @@ fn shipping_opens_the_binary_sink_and_the_header_is_in_the_file() {
         frame_id, header_id,
         "the file's session frame and the header's id are different strings, so nothing can correlate this log with a profiling artifact from the same run"
     );
+    // ── AND BOTH ARE 32 HEX DIGITS, WHICH IS THE PART THAT FIRES ON EVERY RUN ───────────────
+    //
+    // The equality above caught a real defect -- `logdec` printed the high half as `{hi:x}`, so a
+    // session whose top nibble is 0 lost a leading zero and read 31 digits against the header's 32.
+    // But it catches it only ONE RUN IN SIXTEEN, because the id is minted per process: a gate that
+    // fires on a sixteenth of runs would have let the regression through the other fifteen.
+    //
+    // The LENGTH does not depend on the value. This is the deterministic half.
+    assert_eq!(frame_id.len(), 32, "the frame's id is not 32 hex digits: {frame_id:?}");
+    assert_eq!(header_id.len(), 32, "the header's id is not 32 hex digits: {header_id:?}");
     assert!(
         decoded.contains("a record after the header 9"),
         "ordinary records must follow the header into the same file: {decoded}"

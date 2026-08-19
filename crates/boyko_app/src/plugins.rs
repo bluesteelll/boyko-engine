@@ -230,7 +230,19 @@ fn boot_and_enable_logging_from_env() {
             }
             // The preset armed every engine target at the compile ceiling; `BOYKO_LOG` still
             // narrows it, so the two knobs compose rather than one silently winning.
-            if let Some(level) = std::env::var("BOYKO_LOG").ok().and_then(|v| parse_log_level(&v)) {
+            //
+            // EXCEPT under `Off`, and the exception is measured rather than tidy. `Off` configures
+            // no sink at all, so arming its targets produces the one state this vocabulary calls
+            // out by name: armed, and no sink accepts it. Every site would pay gate (c)'s load and
+            // deliver nothing -- and the `W0111` that reports exactly that could not be printed
+            // either, because reporting needs a destination `Off` did not open. MEASURED: a host
+            // run with `BOYKO_LOG_PRESET=off` emits not one line, census included.
+            //
+            // So `Off` means off. A contradictory pair of flags resolves to the row that promises
+            // nothing rather than to a configuration that costs something and delivers nothing.
+            if preset != LogRuntimePreset::Off
+                && let Some(level) = std::env::var("BOYKO_LOG").ok().and_then(|v| parse_log_level(&v))
+            {
                 for (id, _name) in boyko_log::target::engine_targets() {
                     boyko_log::target::set_target_level(id, level);
                 }
