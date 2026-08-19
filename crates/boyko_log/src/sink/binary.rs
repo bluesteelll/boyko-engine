@@ -264,3 +264,208 @@ fn report_dict_full() {
         );
     }
 }
+
+// ─────────────────── the destination: what makes this a SINK and not a codec ───────────────────
+
+/// Longest binary-sink path, in bytes. Same bound as the text sink's, for the same reason: a path
+/// is configuration, and configuration lives in `.bss` rather than on a heap this crate refuses.
+pub const MAX_BIN_PATH_BYTES: usize = 256;
+
+/// The path cell, written on the enable path and read at `open`.
+struct BinPathSlot(core::cell::UnsafeCell<[u8; MAX_BIN_PATH_BYTES]>);
+
+// SAFETY: written only by `set_path`, which the host calls on the enable path before any drain
+//   token exists, and read only by `open` on that same path. `BIN_PATH_LEN`'s `Release`/`Acquire`
+//   pair publishes the bytes.
+unsafe impl Sync for BinPathSlot {}
+
+static BIN_PATH: BinPathSlot = BinPathSlot(core::cell::UnsafeCell::new([0; MAX_BIN_PATH_BYTES]));
+static BIN_PATH_LEN: AtomicU64 = AtomicU64::new(0);
+
+/// The open handle.
+struct BinFileSlot(core::cell::UnsafeCell<Option<std::fs::File>>);
+
+// SAFETY: `open` runs on the enable path before any drain token exists; every later access holds
+//   the token, of which there is exactly one. So this cell has one writer by construction.
+unsafe impl Sync for BinFileSlot {}
+
+static BIN_FILE: BinFileSlot = BinFileSlot(core::cell::UnsafeCell::new(None));
+
+/// Frames written since `open`. The census's question and the test's.
+static FRAMES: AtomicU64 = AtomicU64::new(0);
+
+/// Record the binary sink's destination. Returns `false` for a path that does not fit.
+///
+/// Separate from the TEXT sink's `set_path` on purpose: a process may want both, and one path
+/// setter serving two destinations would make "which file did that go to" unanswerable.
+pub fn set_path(path: &str) -> bool {
+    if path.is_empty() || path.len() > MAX_BIN_PATH_BYTES {
+        return false;
+    }
+    // SAFETY: the enable path is single-threaded by contract (no drain token exists yet), and the
+    //   `Release` below publishes these bytes to whoever `Acquire`s the length.
+    unsafe {
+        let dst = core::slice::from_raw_parts_mut(BIN_PATH.0.get().cast::<u8>(), path.len());
+        dst.copy_from_slice(path.as_bytes());
+    }
+    BIN_PATH_LEN.store(path.len() as u64, Ordering::Release);
+    true
+}
+
+/// Whether a destination has been recorded.
+#[must_use]
+pub fn path_recorded() -> bool {
+    BIN_PATH_LEN.load(Ordering::Acquire) != 0
+}
+
+/// Open the destination and write the file's opening anchor.
+///
+/// The anchor goes in at `open` rather than before the first record, because a file whose first
+/// frame is a record has no absolute time to add its deltas to -- it decodes to a session that
+/// started at zero, which is worse than one that refuses to decode.
+pub fn open() -> bool {
+    let len = BIN_PATH_LEN.load(Ordering::Acquire) as usize;
+    if len == 0 {
+        return false;
+    }
+    // SAFETY: `Acquire` pairs with `set_path`'s `Release`, so these `len` bytes are that call's.
+    //   No drain token exists on the enable path, so no other thread is inside this cell.
+    let path = unsafe {
+        let src = core::slice::from_raw_parts(BIN_PATH.0.get().cast::<u8>(), len);
+        match core::str::from_utf8(src) {
+            Ok(s) => s,
+            Err(_) => return false,
+        }
+    };
+    let Ok(file) = std::fs::File::create(path) else { return false };
+    FRAMES.store(0, Ordering::Relaxed);
+    // SAFETY: as above -- `open` runs before any drain token can be claimed.
+    unsafe { *BIN_FILE.0.get() = Some(file) };
+    // The dictionary is per FILE, not per process: a decoder replays it from the frames in the
+    // file it is reading, so ids from a previous file would decode this one under wrong sites.
+    reset_site_dict();
+    write_anchor();
+    true
+}
+
+/// Frames written since `open`.
+#[must_use]
+pub fn frames_written() -> u64 {
+    FRAMES.load(Ordering::Relaxed)
+}
+
+/// Write raw bytes to the open handle. Returns `false` when there is no destination.
+fn write_raw(bytes: &[u8]) -> bool {
+    use std::io::Write;
+    // SAFETY: every caller reaches here from the drain, holding the single drain token, or from
+    //   `open` on the enable path before any token exists.
+    let slot = unsafe { &mut *BIN_FILE.0.get() };
+    let Some(f) = slot.as_mut() else { return false };
+    if f.write_all(bytes).is_err() {
+        return false;
+    }
+    FRAMES.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+/// Emit an `Anchor` frame: the absolute clock this file's deltas are relative to.
+fn write_anchor() -> bool {
+    let mut buf = [0u8; 1 + 8];
+    buf[0] = FrameKind::Anchor as u8;
+    buf[1..9].copy_from_slice(&boyko_diag::clock::ticks().to_le_bytes());
+    write_raw(&buf)
+}
+
+/// Emit a `Dictionary` frame: one site, spelled out, so every later record can name it by id.
+///
+/// Length-prefixed per field rather than fixed-width, because a `file` and a `fmt` are arbitrary
+/// strings and a fixed cap would silently truncate the one thing that makes a record locatable.
+fn write_dictionary(site_id: u16, site: &crate::LogSite) -> bool {
+    let file = site.file.as_bytes();
+    let fmt = site.fmt.as_bytes();
+    let mut buf = [0u8; 1 + 2 + 4 + 2 + 2 + 512];
+    let need = 1 + 2 + 4 + 2 + file.len() + 2 + fmt.len();
+    if need > buf.len() || file.len() > u16::MAX as usize || fmt.len() > u16::MAX as usize {
+        return false;
+    }
+    buf[0] = FrameKind::Dictionary as u8;
+    buf[1..3].copy_from_slice(&site_id.to_le_bytes());
+    buf[3..7].copy_from_slice(&site.line.to_le_bytes());
+    buf[7..9].copy_from_slice(&(file.len() as u16).to_le_bytes());
+    let mut at = 9;
+    buf[at..at + file.len()].copy_from_slice(file);
+    at += file.len();
+    buf[at..at + 2].copy_from_slice(&(fmt.len() as u16).to_le_bytes());
+    at += 2;
+    buf[at..at + fmt.len()].copy_from_slice(fmt);
+    at += fmt.len();
+    write_raw(&buf[..at])
+}
+
+/// Write one record to the binary sink, interning its site first.
+///
+/// **The whole point of the format lives in the two returns of `intern_site`**: a site seen before
+/// costs one probe and no bytes, and a site seen for the first time costs one `Dictionary` frame.
+/// A full dictionary is neither -- the record is written with its site INLINE, so it is still
+/// locatable, and `W0116` has already been reported once.
+pub(crate) fn write_record(
+    _token: &crate::drain_owner::DrainToken,
+    site: &'static crate::LogSite,
+    tsc: u64,
+    flags: u8,
+    payload: &[u8],
+) -> bool {
+    let mut buf = [0u8; 1024];
+    match intern_site(core::ptr::from_ref(site)) {
+        Some((id, is_new)) => {
+            if is_new && !write_dictionary(id, site) {
+                return false;
+            }
+            let frame = RecordFrame {
+                site_id: id,
+                // Truncated deliberately: the anchor at the head of the file carries the absolute
+                // clock, and a `u32` of ticks spans ~1.4 s at 3 GHz. A file that runs longer needs
+                // a re-anchor, which this rung does not do -- recorded as owed rather than hidden.
+                tsc_delta: tsc as u32,
+                flags,
+                epoch_lo: 0,
+                payload,
+            };
+            match encode_record(&mut buf, &frame) {
+                Some(n) => write_raw(&buf[..n]),
+                None => false,
+            }
+        }
+        None => {
+            // The dictionary is full. Spell the site out beside the record rather than reusing an
+            // id: a log that lies about where a record came from is worse than a large one.
+            let file = site.file.as_bytes();
+            let need = 1 + 4 + 2 + file.len() + 2 + payload.len();
+            if need > buf.len() {
+                return false;
+            }
+            buf[0] = FrameKind::InlineSite as u8;
+            buf[1..5].copy_from_slice(&site.line.to_le_bytes());
+            buf[5..7].copy_from_slice(&(file.len() as u16).to_le_bytes());
+            let mut at = 7;
+            buf[at..at + file.len()].copy_from_slice(file);
+            at += file.len();
+            buf[at..at + 2].copy_from_slice(&(payload.len() as u16).to_le_bytes());
+            at += 2;
+            buf[at..at + payload.len()].copy_from_slice(payload);
+            at += payload.len();
+            write_raw(&buf[..at])
+        }
+    }
+}
+
+/// Close the destination, flushing it.
+pub(crate) fn close(_token: &crate::drain_owner::DrainToken) {
+    use std::io::Write;
+    // SAFETY: the caller holds the single drain token.
+    let slot = unsafe { &mut *BIN_FILE.0.get() };
+    if let Some(f) = slot.as_mut() {
+        let _ = f.flush();
+    }
+    *slot = None;
+}

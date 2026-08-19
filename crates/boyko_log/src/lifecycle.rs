@@ -283,6 +283,14 @@ pub fn drain_once() -> Option<crate::lane::DrainStats> {
         if admits(crate::sink::slot::SLOT_FILE) {
             crate::sink::file::write_line(&token, text.as_bytes());
         }
+        // The BINARY sink takes the record BEFORE rendering would matter to it: it writes the
+        // payload verbatim and names the site by a dictionary id, which is the entire reason the
+        // format exists. It is fed the same `_tsc` and `flags` the ring carried, not a re-read
+        // clock -- a second clock read here would put a different time in the two files for one
+        // record, and a reader correlating them would find a skew that never happened.
+        if admits(crate::sink::slot::SLOT_BINARY) {
+            crate::sink::binary::write_record(&token, site, _tsc, flags, payload);
+        }
         // Counted once per record, HERE and not per destination: `delivered` answers "did this
         // target ever produce anything", and a record that reached two sinks did not happen twice.
         //

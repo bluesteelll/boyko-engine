@@ -202,10 +202,23 @@ pub fn pump(token: &crate::drain_owner::DrainToken, cap_bytes: u64) -> usize {
         match req.verb {
             // `open` reports its own failure through `W0102`; a second report here would name the
             // same fact twice with different codes.
+            // DISPATCHED ON `req.slot`, which until now was written by every poster and read by
+            // nobody -- the same defect this campaign has found seven times, written by me two
+            // commits ago. The field is the whole reason a request names a destination.
             SinkVerb::OpenFile => {
-                let _ = crate::sink::file::open(cap_bytes);
+                if req.slot as usize == crate::sink::slot::SLOT_BINARY {
+                    let _ = crate::sink::binary::open();
+                } else {
+                    let _ = crate::sink::file::open(cap_bytes);
+                }
             }
-            SinkVerb::CloseFile => crate::sink::file::close(token),
+            SinkVerb::CloseFile => {
+                if req.slot as usize == crate::sink::slot::SLOT_BINARY {
+                    crate::sink::binary::close(token);
+                } else {
+                    crate::sink::file::close(token);
+                }
+            }
             // The control spec is applied by the poster, which is a plain `CONTROL` byte write and
             // needs no thread of its own (L14-B). The verb stays in the vocabulary because a
             // FILE-sourced spec is read by whoever owns the file, and that is the sink.
@@ -214,4 +227,26 @@ pub fn pump(token: &crate::drain_owner::DrainToken, cap_bytes: u64) -> usize {
         ran += 1;
     }
     ran
+}
+
+/// Ask the sink to open the BINARY destination recorded by [`crate::sink::binary::set_path`].
+///
+/// Separate from [`request_open_file`] because the two sinks have separate destinations: one verb
+/// serving both would make "which file did that open" unanswerable, which is the question a
+/// request exists to answer.
+pub fn request_open_binary() -> Result<(), RingFull> {
+    let r = post(SinkReq { slot: crate::sink::slot::SLOT_BINARY as u8, verb: SinkVerb::OpenFile });
+    if r.is_err() {
+        report_refused(SinkVerb::OpenFile, crate::sink::slot::SLOT_BINARY as u8);
+    }
+    r
+}
+
+/// Ask the sink to close the binary destination, flushing it.
+pub fn request_close_binary() -> Result<(), RingFull> {
+    let r = post(SinkReq { slot: crate::sink::slot::SLOT_BINARY as u8, verb: SinkVerb::CloseFile });
+    if r.is_err() {
+        report_refused(SinkVerb::CloseFile, crate::sink::slot::SLOT_BINARY as u8);
+    }
+    r
 }
