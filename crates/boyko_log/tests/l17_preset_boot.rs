@@ -101,6 +101,31 @@ fn shipping_opens_the_binary_sink_and_the_header_is_in_the_file() {
     );
     assert!(decoded.contains("ceiling="), "the ceiling is missing from the header: {decoded}");
     assert!(decoded.contains("session="), "the session id is missing from the header: {decoded}");
+
+    // ── THE HEADER'S ID AND THE FILE'S OWN SESSION FRAME ARE THE SAME STRING ────────────────
+    //
+    // The id exists so an uploaded log and an uploaded profiling artifact can be proved to be one
+    // run. Two representations that cannot be compared defeat exactly that.
+    //
+    // MEASURED before this assertion existed: the frame read `fe63ff00ba2f385d7ff64cce15042cc5`
+    // and the header beside it read `183307752869167903659220641735087238341`. The header used
+    // `session={:x}{:x}`, and `record::render_payload` consumes a value for any `{…}` group and
+    // IGNORES the format spec -- so the two halves printed in DECIMAL, glued end to end, into a
+    // number that is the id in no base at all.
+    let frame_id = decoded
+        .lines()
+        .find_map(|l| l.strip_prefix("-- session "))
+        .map(str::trim)
+        .unwrap_or_else(|| panic!("the file carries no session frame: {decoded}"));
+    let header_id = decoded
+        .lines()
+        .find_map(|l| l.split("session=").nth(1))
+        .map(str::trim)
+        .unwrap_or_else(|| panic!("the header carries no session: {decoded}"));
+    assert_eq!(
+        frame_id, header_id,
+        "the file's session frame and the header's id are different strings, so nothing can correlate this log with a profiling artifact from the same run"
+    );
     assert!(
         decoded.contains("a record after the header 9"),
         "ordinary records must follow the header into the same file: {decoded}"

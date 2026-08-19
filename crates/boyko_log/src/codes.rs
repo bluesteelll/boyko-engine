@@ -904,6 +904,11 @@ codes! {
         "A plugin was added more than once"),
     (1802, B, B1802, RatePolicy::Every, CodeStatus::Live,
         "An App method was called after finish(), in the run phase"),
+    // `Every`, and the subject is why: each occurrence names a DIFFERENT mistyped value, so a latch
+    // would report the first launch flag anyone got wrong and silence every later one. The site
+    // runs once per process in practice, which is a fact about the caller and not a policy.
+    (1803, W, W1803, RatePolicy::Every, CodeStatus::Live,
+        "A launch flag named a runtime preset the table does not carry"),
     // ── L8c: `boyko_rhi` ────────────────────────────────────────────────────────────────────
     // The FIRST code in the `20xx` band proper, and the crate is here because `print_census.rs`
     // found it -- not because any ledger row named it. Five migration rungs each reported a
@@ -1417,6 +1422,7 @@ mod tests {
             (b'W', 1501), // L6  -- ordering references an empty system set
             (b'B', 1801), // L8b -- a plugin was added more than once (boyko_ecs's, not the host's)
             (b'B', 1802), // L8b -- an App config method called after finish()
+            (b'W', 1803), // the host's preset flag named nothing
             (b'E', 2001), // L8c -- a resource registry dropped with live resources (found by the census)
             (b'E', 2101), // L7a -- validation requested but not delivered
             (b'W', 2102), // L7b -- a device format feature is missing (three sites, one code)

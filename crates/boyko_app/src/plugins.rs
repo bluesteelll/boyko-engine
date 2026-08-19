@@ -202,7 +202,49 @@ fn parse_log_level(spec: &str) -> Option<boyko_log::Level> {
 /// logger emits says which level was applied and what the variable held, so the operator never has
 /// to infer it from the absence of output.
 fn boot_and_enable_logging_from_env() {
-    use boyko_log::lifecycle::{LogConfig, SinkMode, boot, enable};
+    use boyko_log::lifecycle::{LogConfig, SinkMode, boot, boot_preset, enable};
+    use boyko_log::preset::LogRuntimePreset;
+
+    // ── `BOYKO_LOG_PRESET` — the production route to the preset table ───────────────────────
+    //
+    // Without this `boot_preset` had exactly one caller: its own test. That is the same defect the
+    // rung before this one fixed for `header()` and `rotates()`, arriving one rung later in the
+    // function introduced to fix it -- and it kept the binary sink, rotation and `logdec` reachable
+    // only from tests, which is what "a format nobody writes" means.
+    //
+    // The names are `LogRuntimePreset::name`'s own, so the string a host sets and the string
+    // `runtime_preset=` prints in the header are the same set. That is what lets someone reproduce
+    // a run from its own log rather than from a memory of how it was launched.
+    //
+    // Absent, the hand-built config below runs and the header says `runtime_preset=custom`, which
+    // is the honest answer for a configuration no row describes.
+    let mut bad_preset: Option<String> = None;
+    if let Some(raw) = std::env::var_os("BOYKO_LOG_PRESET") {
+        let raw = raw.to_string_lossy().into_owned();
+        if let Some(preset) = LogRuntimePreset::from_name(&raw) {
+            let text = std::env::var("BOYKO_LOG_FILE").ok();
+            let blog = std::env::var("BOYKO_LOG_BLOG").ok();
+            boot_preset(preset, text.as_deref(), blog.as_deref());
+            if !enable() {
+                return;
+            }
+            // The preset armed every engine target at the compile ceiling; `BOYKO_LOG` still
+            // narrows it, so the two knobs compose rather than one silently winning.
+            if let Some(level) = std::env::var("BOYKO_LOG").ok().and_then(|v| parse_log_level(&v)) {
+                for (id, _name) in boyko_log::target::engine_targets() {
+                    boyko_log::target::set_target_level(id, level);
+                }
+            }
+            return;
+        }
+        // A name the table does not carry is a launch mistake worth naming. The record is emitted
+        // BELOW, after the fallback has armed its targets -- reporting it here would emit into a
+        // process whose `CONTROL` is still `.bss`-zero, and gate (c) would refuse the one record
+        // that tells the operator about their typo. MEASURED: the first draft did exactly that and
+        // the host gate read `left: 0, right: 1`. It is the same defect as the session header's,
+        // one function down, written by the same hand an hour later.
+        bad_preset = Some(raw);
+    }
 
     boot(LogConfig {
         console: true,
@@ -239,6 +281,14 @@ fn boot_and_enable_logging_from_env() {
     }
     if !enable() {
         return;
+    }
+    if let Some(raw) = bad_preset {
+        boyko_log::warn!(
+            boyko_log::App,
+            boyko_log::codes::W1803,
+            "BOYKO_LOG_PRESET={} names no preset; the hand-built configuration is used instead",
+            boyko_log::dsp!(raw, 32)
+        );
     }
     boyko_log::info!(
         boyko_log::App,

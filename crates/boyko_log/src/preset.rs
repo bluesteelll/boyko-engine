@@ -137,6 +137,23 @@ pub const ROTATE_AT_BYTES: u64 = 64 * 1024 * 1024;
 pub const ROTATE_KEEP: u8 = 4;
 
 impl LogRuntimePreset {
+    /// Parse a preset from the name [`name`](Self::name) prints. `None` for anything else.
+    ///
+    /// The inverse of `name`, and it is the inverse deliberately: a host reads `BOYKO_LOG_PRESET`
+    /// and a reader reads `runtime_preset=` in the header, and those two strings being the same
+    /// set is what lets someone reproduce a run from its own log.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<LogRuntimePreset> {
+        match name {
+            "dev" => Some(LogRuntimePreset::Dev),
+            "editor" => Some(LogRuntimePreset::Editor),
+            "shipping" => Some(LogRuntimePreset::Shipping),
+            "shipping-min" => Some(LogRuntimePreset::ShippingMin),
+            "off" => Some(LogRuntimePreset::Off),
+            _ => None,
+        }
+    }
+
     /// Rebuild a preset from `boot_preset`'s stored byte, where `0` means "no preset".
     ///
     /// Plus-one encoding so the `.bss`-zero state means ABSENT: a host that built its own
@@ -183,9 +200,34 @@ impl LogRuntimePreset {
 /// profiling artifact identify the same session without anyone having to correlate timestamps.
 pub fn header(preset: Option<LogRuntimePreset>) {
     let session = boyko_diag::clock::session_id();
+    // ── THE ID IS RENDERED HERE, AS HEX, AND `{:x}` COULD NOT DO IT ─────────────────────────
+    //
+    // `record::render_payload` consumes a value for any `{…}` group and **ignores the format
+    // spec** -- a documented limitation of the one walker both sinks share. So `session={:x}{:x}`
+    // printed the two halves in DECIMAL, glued: `183307752869167903659220641735087238341` is
+    // `dec(hi)` followed by `dec(lo)`, a number that is not the id in any base.
+    //
+    // MEASURED by running a host with `BOYKO_LOG_PRESET=shipping` and decoding the `.blog`: the
+    // file's own `Session` frame read `fe63ff00ba2f385d7ff64cce15042cc5` and the header beside it
+    // read that decimal. The id exists so an uploaded log and an uploaded profiling artifact can be
+    // proved to be one run; two representations that cannot be compared defeat exactly that.
+    //
+    // Rendered into a stack buffer and passed as `&str`, so the sink still receives a plain value
+    // and nothing formats on the drain thread.
+    let mut hex = [0u8; 32];
+    for (i, byte) in hex.iter_mut().enumerate() {
+        let nibble = if i < 16 {
+            (session.1 >> (60 - 4 * i)) & 0xF
+        } else {
+            (session.0 >> (60 - 4 * (i - 16))) & 0xF
+        } as u8;
+        *byte = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
+    }
+    // SAFETY: every byte written above is an ASCII hex digit.
+    let hex = unsafe { core::str::from_utf8_unchecked(&hex) };
     crate::info!(
         crate::Log,
-        "build_profile={} runtime_preset={} ceiling={} session={:x}{:x}",
+        "build_profile={} runtime_preset={} ceiling={} session={}",
         boyko_diag::profile::PROFILE_NAME,
         // `None` prints `custom`, and that is not a cosmetic choice: a host that built its own
         // `LogConfig` selected no preset, and naming one would send a reader to reason about a row
@@ -195,7 +237,6 @@ pub fn header(preset: Option<LogRuntimePreset>) {
             None => "custom",
         },
         crate::GLOBAL_CEILING.as_str(),
-        session.1,
-        session.0
+        hex
     );
 }
