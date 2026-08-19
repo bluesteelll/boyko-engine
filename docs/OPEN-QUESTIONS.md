@@ -2468,3 +2468,33 @@ rather than another in the same file. That residue is `boyko_log::once_sites`' a
 **Disposition 2 above — placing the latch in the macro — is therefore NOT needed** and is withdrawn
 as a question. The human link is now checked mechanically at build time and observably at run time,
 which is what auto-latching was going to buy, without making all 45 rows untestable in isolation.
+
+---
+
+## 2026-08-20: the census reaches only the console — a `shipping` log never carries its own loss summary
+
+**Context.** The windowed runner now ends the diagnostics session (`lifecycle::shutdown()` at the
+end of `run_windowed`), so `close_out` runs in every real host: the final drain delivers the lane
+tail and `census::print()` fires. Measured on live 16-frame runs of the `clear` example.
+
+**The question.** `census::print` writes through `sync_out::write_oracle_line` — the synchronous
+console channel — and through nothing else. Under `dev`/`editor` (console on) the census reaches
+the operator. Under `shipping` (binary file, console off) and `shipping-min` (text file, console
+off) the rows are refused at the console gate and reach **no destination at all**: the uploaded
+log a released title produces does not say whether it lost anything, which is the one question a
+reader of that log asks first.
+
+**Two dispositions, neither taken without you:**
+
+1. **Route the census through the ring** (ordinary records, `Diag` target) so it lands in
+   whatever sinks the preset opened. Cost: the census becomes subject to the same admission
+   control it reports on — a storm that drops records could drop the census rows that say so.
+   The current synchronous channel exists precisely to be outside that machinery.
+2. **Render the census into the file sinks directly under the drain token at `close_out`**,
+   beside the console write. Cost: a second delivery path for one report, and the binary sink
+   would carry text lines outside the record format (or needs a frame kind for them).
+
+Disposition 2 looks structurally right (the crash path already writes through the sink under the
+token), but it touches the `.blog` format, which is pinned by `docs/LOG-BINARY-FORMAT.md` — a
+VALUES call on whether the format grows a summary frame. Until decided, the census is a
+console-only fact and `shipping` logs stay silent about loss.

@@ -823,6 +823,21 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
         "invariant: the post-run World is GPU-evicted (plan D2 + textured-PBR T6b)"
     );
 
+    // ── The diagnostics session ends WITH the run, and nothing ended it before this line ────
+    //
+    // The host layer that boots and enables the logger (`EnginePlugins::build`) never shut it
+    // down, and no example does either. MEASURED on live 16-frame runs of `clear` under all
+    // three file-bearing presets: no census row in any output, and every record emitted after
+    // the last frame's drain — the teardown records above included — was dropped on the floor.
+    // `close_out`'s census, the final drain and the clean file close were reachable ONLY from
+    // tests, which is the same "the shipped path is the one path no gate runs" hole as the
+    // `LogPlugin` registration one commit earlier.
+    //
+    // Last, after the teardown records are all emitted; symmetric with `boot`/`enable` living
+    // in the plugin build. A host that wants to keep logging past `run` owns the lifecycle and
+    // does not use this runner's exit.
+    let _ = boyko_log::lifecycle::shutdown();
+
     AppExit(true)
 }
 

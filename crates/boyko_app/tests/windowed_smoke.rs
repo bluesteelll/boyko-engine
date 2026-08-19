@@ -66,4 +66,18 @@ fn windowed_smoke_five_frames_then_clean_teardown() {
         !app.world().contains_non_send_resource::<boyko_app::GpuDevice>(),
         "teardown must evict the GpuDevice handle"
     );
+
+    // The runner ends the DIAGNOSTICS session too, not only the GPU one. MEASURED before the
+    // fix, on live 16-frame runs of the `clear` example under all three file-bearing presets:
+    // no host ever called `shutdown`, so `close_out`'s census printed in no real process and
+    // every record emitted after the last frame's drain was dropped. Asserted on the state
+    // machine rather than on output, because the un-flagged run this test performs never
+    // enables a console for the census to reach — `Exited` is the fact that survives both
+    // configurations.
+    assert_eq!(
+        boyko_log::lifecycle::state(),
+        boyko_log::lifecycle::SinkState::Exited,
+        "the runner must end the diagnostics session; a run that exits with the logger still \
+         armed is one whose census never printed and whose lane tail was dropped"
+    );
 }
