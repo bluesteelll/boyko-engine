@@ -315,6 +315,24 @@ These are distinct `.hlsl`, listed here for the temporal/spatial pipeline pictur
 The mode matrix (None / Spatial / Temporal / Both) is a **host** selection of which of these passes run
 between the VIS producer and the DENOISED consumer — see `BOYKO_SHADOW_DENOISE`.
 
+## `sdf_mesh_shadow.comp.hlsl` — the VB SDF-on-mesh shadow + contact-AO prepass (compute)
+
+The VB-SV0 dedicated pass (plan Rev 10, `RENDER-PARITY-PLAN.md` §3.2 Option B): per covered pixel
+(`vb_id != SENTINEL`) it re-fetches the triangle (`vb_geom_fetch`, under a SOURCE-level
+`#define VB_SV0` that no lit-producer tail defines), marches `sdf_soft_shadow_ranged` from the
+geometric face normal's lifted origin for the PRIMARY directional, runs the 5-tap `sdf_ao` along
+the shading normal, and writes both into the R8G8 `gSdfTerm` it owns — the term the ten tails
+`min`-combine (DP2). ONE variant, no `-D` axes:
+
+| Variant | `.spv` | dxc `-T` | Interface |
+|---|---|---|---|
+| base | `sdf_mesh_shadow.comp.spv` | `cs_6_0` | Set 0: `gVbInstances`@0 · Camera@2 · `LightBuf`@3 · `gVbId`@5 · `gSdfTerm`@6 (rg8 UAV) · SDF `Buf`@10; Set 2: the geometry table. 64 B `view_proj` push. |
+
+Byte gate: `sdf_mesh_shadow_spv_sync.rs` (re-DXC under the frozen recipe + a march-compiled-in
+size floor). Why a separate pass and not `-D` variants of the tails: carrying the march compiled
+into the tails cost ~+75% of the fused dispatch DARK (measured, reverted at `13f1c9a3`), and armed
+it ran at 2.34× its dedicated-host cost — this file IS the dedicated host.
+
 ## `sdf_ssao.comp.hlsl` — the screen-space AO gather (compute)
 
 One source `shaders/sdf_ssao.comp.hlsl`, ONE `-D` axis: `VB_THIN` (six `#if VB_THIN` spans). The
