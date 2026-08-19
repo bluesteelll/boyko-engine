@@ -968,6 +968,7 @@ mod tests {
                 run_token: "t".into(),
                 workload_tag: "vb_mesh#abcd1234".into(),
                 content_tag: "n14_kronecker".into(),
+                subsystems_tag: crate::profiling::artifact::subsystems_tag(),
                 instrument: super::super::artifact::Instrument::Live,
                 precision_decimals: 1,
                 regimes: "-".into(),

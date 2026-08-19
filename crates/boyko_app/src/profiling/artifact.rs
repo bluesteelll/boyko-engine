@@ -157,9 +157,9 @@ use crate::profiling::correlate::{Correlated, Correlation, Uncorrelated};
 ///
 /// The history, because this constant's own doc said `2` for five bumps and nobody noticed until
 /// the sixth: `2` rung 7c (the tag split) · `3` the reducer's rows · `4` `stddev_ns` · `5`
-/// `[[loss]]` · `6` `present_mode` · `7` the `alloc_shim` block · **`8` rung 9's
-/// `cpu_gpu_offset`.**
-pub const ARTIFACT_SCHEMA_VERSION: u32 = 8;
+/// `[[loss]]` · `6` `present_mode` · `7` the `alloc_shim` block · `8` rung 9's
+/// `cpu_gpu_offset` · **`9` rung 16 (J2)'s `subsystems_tag`.**
+pub const ARTIFACT_SCHEMA_VERSION: u32 = 9;
 
 /// The **derived, unforgeable** half of a workload tag: everything about the boot-resolved
 /// configuration that the engine itself knows.
@@ -183,6 +183,26 @@ pub fn config_tag(resolved: &boyko_render::ResolvedRenderPath) -> String {
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     format!("{:?}_{:?}#{:08x}", resolved.path, resolved.legs, (h >> 32) as u32).to_lowercase()
+}
+
+/// Derive [`ArtifactHeader::subsystems_tag`] from the LIVE state of both subsystems.
+///
+/// Profiler: `ARM_MASK` non-zero. Logger: any engine target admitting anything, which is the
+/// condition under which a record can reach a sink at all -- `enable()` alone is not enough,
+/// because `CONTROL` is `.bss`-zero and a booted logger with every target `Off` emits nothing and
+/// costs nothing. Reading `enable()` instead would stamp `logger` on a file whose logger was
+/// structurally silent.
+#[must_use]
+pub fn subsystems_tag() -> String {
+    let profiler = boyko_diag::profiling_abi::arm_mask_bits() != 0;
+    let logger = boyko_log::target::engine_targets()
+        .any(|(id, _)| boyko_log::runtime_ceiling(id) != boyko_log::Level::Off as u8);
+    match (profiler, logger) {
+        (true, true) => "profiler+logger".to_owned(),
+        (true, false) => "profiler".to_owned(),
+        (false, true) => "logger".to_owned(),
+        (false, false) => "neither".to_owned(),
+    }
 }
 
 /// Decimal places every nanosecond figure carries. See the module doc's Decision 1 — this is a
@@ -272,6 +292,31 @@ pub struct ArtifactHeader {
     /// [`Artifact::floor_source`] refuses rather than a short string. See the module doc's
     /// Decision 5.
     pub content_tag: String,
+    /// **Which diagnostics subsystems were live when this file was written** — profiling rung 16
+    /// (joint rung J2). One of `profiler+logger`, `profiler`, `logger`, `neither`.
+    ///
+    /// # It is DERIVED, like `workload_tag`, and for the same reason
+    ///
+    /// Read from `ARM_MASK` and the target control table at write time, never passed in. A caller
+    /// who could name it could stamp a file `profiler+logger` that was taken with neither, and
+    /// every later regression gate compares against exactly this field.
+    ///
+    /// # Why it is a field at all
+    ///
+    /// Rung 16's whole finding: a baseline taken without the other subsystem present **is not a
+    /// number about the both-present configuration**, and nothing else in this header can see the
+    /// difference — `workload_tag` covers the render path, not the diagnostics state. The argument
+    /// is [`alloc_shim`](Self::alloc_shim)'s one field down, at a different granularity: a flag
+    /// that says which build produced the number, because the numbers are not comparable across it.
+    ///
+    /// # The name is NOT `config_tag`, and the corpus asked for that name
+    ///
+    /// `config_tag` already exists in this module as the function that derives
+    /// [`workload_tag`](Self::workload_tag) from the render path. A field of that name beside it
+    /// would put two facts under one word in one crate — which is how a reader ends up comparing a
+    /// VB baseline against a Deferred one and calling it a regression, the exact hazard S10's own
+    /// note raises. Recorded as a deliberate divergence rather than transcribed.
+    pub subsystems_tag: String,
     /// Whether the timestamp instrument was alive.
     pub instrument: Instrument,
     /// [`PRECISION_DECIMALS`] at write time, stated so a reader never has to assume it.
@@ -499,6 +544,7 @@ impl Artifact {
         let _ = writeln!(s, "modes = \"{}\"", h.modes);
         let _ = writeln!(s, "regime_n_distinct = {}", h.regime_n_distinct);
         let _ = writeln!(s, "present_mode = \"{}\"", h.present_mode);
+        let _ = writeln!(s, "subsystems_tag = {}", h.subsystems_tag);
         let _ = writeln!(s, "alloc_shim = {}", h.alloc_shim);
         let _ = writeln!(s, "alloc_allocs = {}", h.alloc_allocs);
         let _ = writeln!(s, "alloc_deallocs = {}", h.alloc_deallocs);
@@ -710,6 +756,7 @@ impl Artifact {
         let mut instrument = None;
         let mut precision_decimals = None;
         let mut present_mode: Option<String> = None;
+        let mut subsystems_tag: Option<String> = None;
         let mut alloc_shim: Option<bool> = None;
         let mut alloc_allocs: Option<u64> = None;
         let mut alloc_deallocs: Option<u64> = None;
@@ -803,6 +850,7 @@ impl Artifact {
                 "modes" => modes = Some(unquote(v).to_owned()),
                 "regime_n_distinct" => regime_n_distinct = v.trim().parse().ok(),
                 "present_mode" => present_mode = Some(unquote(v).to_owned()),
+                "subsystems_tag" => subsystems_tag = Some(v.trim().to_owned()),
                 "alloc_shim" => alloc_shim = Some(v.trim() == "true"),
                 "alloc_allocs" => alloc_allocs = v.trim().parse().ok(),
                 "alloc_deallocs" => alloc_deallocs = v.trim().parse().ok(),
@@ -889,6 +937,8 @@ impl Artifact {
                 // "no shim", the one value that makes a diagnostic-mode artifact look like a clean
                 // one. The three COUNTS default to zero, because a `false` flag already says they
                 // mean nothing and requiring them would refuse a writer that had nothing to say.
+                subsystems_tag: subsystems_tag
+                    .ok_or(ArtifactError::BadHeader("subsystems_tag"))?,
                 alloc_shim: alloc_shim.ok_or(ArtifactError::BadHeader("alloc_shim"))?,
                 alloc_allocs: alloc_allocs.unwrap_or(0),
                 alloc_deallocs: alloc_deallocs.unwrap_or(0),

@@ -787,6 +787,10 @@ fn artifact_with(zones: &[(u16, ZoneLabel, f64)], instrument: Instrument) -> Art
             session_hi: 2,
             run_token: "t".into(),
             workload_tag: "visibilitybuffer_mesh#deadbeef".into(),
+            // A hand-built fixture header, so the tag is a literal rather than the live derivation:
+            // this file is a FLOOR, taken with neither subsystem armed, and stamping it otherwise
+            // would be the forgery the field's derived form exists to prevent.
+            subsystems_tag: "neither".into(),
             content_tag: format!("n{N_PS}_{RIG}"),
             // Decision 7: a floor session is one regime by construction; a worker that saw two
             // is what `vg_occ_split_timing.rs` rejects, and this rung's sessions never force one.

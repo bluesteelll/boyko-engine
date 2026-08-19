@@ -2667,6 +2667,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                             // refuses — the strict option, owner's call.
                             content_tag: std::env::var("BOYKO_PROFILE_WORKLOAD")
                                 .unwrap_or_default(),
+                            subsystems_tag: crate::profiling::artifact::subsystems_tag(),
                             instrument: if ctx.device_caps().timestamps_usable() {
                                 crate::profiling::artifact::Instrument::Live
                             } else {

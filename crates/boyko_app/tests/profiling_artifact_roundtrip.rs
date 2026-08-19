@@ -69,6 +69,9 @@ fn fixture(run_token: &str) -> Artifact {
             alloc_allocs: 0,
             alloc_deallocs: 0,
             alloc_bytes: 0,
+            // NOT the default "neither": a field that round-trips its own zero value proves
+            // nothing about the round trip. `profiler+logger` is the state rung 16 baselines in.
+            subsystems_tag: "profiler+logger".to_owned(),
             instrument: Instrument::Live,
             precision_decimals: PRECISION_DECIMALS,
             // Rung 9. The fixture carries a MEASURED correlation, not a refusal: the round-trip
@@ -717,4 +720,50 @@ fn g24_census_the_retired_stdout_channel_has_no_producers() {
          not seeing the files it thinks it is, and a green from a walker that reads nothing is the \
          failure mode this assertion exists to catch."
     );
+}
+
+/// The subsystems tag survives the file, and it is DERIVED rather than taken from a caller.
+///
+/// Two claims, and the second is the one that matters: a caller who could name this field could
+/// stamp `profiler+logger` on a file taken with neither, and every regression gate compares against
+/// exactly this field. `subsystems_tag()` reads `ARM_MASK` and the target control table at write
+/// time, so the only way to make it lie is to actually arm something.
+#[test]
+fn the_subsystems_tag_survives_the_file_and_is_derived_from_the_live_state() {
+    let path = scratch("subsystems_tag");
+    let _ = std::fs::remove_file(&path);
+    let a = fixture("tok-subsys");
+    a.write(&path).expect("the fixture writes");
+    let back = Artifact::parse(&std::fs::read_to_string(&path).expect("readable"), "tok-subsys")
+        .expect("the fixture parses");
+    assert_eq!(
+        back.header.subsystems_tag, "profiler+logger",
+        "the tag did not survive the file, so a baseline cannot say which subsystems produced it"
+    );
+
+    // ── THE DERIVATION, driven through the real control table ───────────────────────────────
+    //
+    // Nothing is armed in this test binary, so the derivation must say so. Then one target is
+    // armed and it must move -- a derivation that returned a constant would pass the first half.
+    for (id, _) in boyko_log::target::engine_targets() {
+        boyko_log::target::set_target_control(id, boyko_log::target::TargetControl::OFF);
+    }
+    assert_eq!(
+        boyko_app::profiling::artifact::subsystems_tag(),
+        "neither",
+        "with nothing armed the tag must say so; `enable()` alone is not the logger being live"
+    );
+    boyko_log::target::set_target_control(
+        <boyko_log::Log as boyko_log::LogTarget>::ID,
+        boyko_log::target::TargetControl::new(boyko_log::Level::Warn, 0, false),
+    );
+    assert_eq!(
+        boyko_app::profiling::artifact::subsystems_tag(),
+        "logger",
+        "arming a target must move the tag; a constant would have passed the check above"
+    );
+    for (id, _) in boyko_log::target::engine_targets() {
+        boyko_log::target::set_target_control(id, boyko_log::target::TargetControl::OFF);
+    }
+    let _ = std::fs::remove_file(&path);
 }
