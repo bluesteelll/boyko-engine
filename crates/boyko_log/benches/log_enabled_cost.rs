@@ -113,6 +113,7 @@ fn main() {
     let mut sampled = Vec::with_capacity(ROUNDS);
     let mut down = Vec::with_capacity(ROUNDS);
     let mut engine_w = Vec::with_capacity(ROUNDS);
+    let mut three_gate = Vec::with_capacity(ROUNDS);
     let mut unsampled = Vec::with_capacity(ROUNDS);
 
     // The `Once` latch has to be spent BEFORE it is timed: the row is
@@ -156,6 +157,18 @@ fn main() {
         engine_w.push(time_block(|| {
             warn!(Log, boyko_log::codes::W0117, "downstream {}", black_box(7u32));
         }));
+
+        // `log_enabled_rate_gate_every` -- THE FOURTH GATE'S OWN COST, at a site that declares
+        // `Every`. The control is `info!`, which carries no code and therefore has THREE gates,
+        // with the identical format literal and the identical single `u32`. Everything else that
+        // differs between the two macros -- the level byte, the class byte, the code number -- is
+        // in the per-site `static` and is never touched on the emitting thread.
+        //
+        // This is an IN-SITTING control, and it exists because the alternative was a cross-sitting
+        // one: the corpus recorded `downstream_code_warn` at 10.16 ns before the gate was wired
+        // and it reads 11.72 ns after, which cannot separate the gate from a rebuild's code
+        // layout, a different day's clock, or a busier box.
+        three_gate.push(time_block(|| info!(Log, "downstream {}", black_box(7u32))));
     }
     arm(Level::Off, 0);
 
@@ -173,6 +186,7 @@ fn main() {
     let (med_unsamp, _) = med_and_floor(&mut unsampled, resolution);
     let (med_down, se_down) = med_and_floor(&mut down, resolution);
     let (med_engw, se_engw) = med_and_floor(&mut engine_w, resolution);
+    let (med_3g, se_3g) = med_and_floor(&mut three_gate, resolution);
 
     println!(
         "instrument: clock tick {:.0} ns / {CALLS}-call block = {resolution:.3} ns/call resolution",
@@ -196,6 +210,8 @@ fn main() {
     println!("log_enabled_str32             : {med_s:7.2} ns  (se {se_s:.2})  bound 30");
     println!("log_enabled_rate_once_fired   : {med_once:7.2} ns  (se {se_once:.2})  bound 5");
     println!("control  rate Every           : {med_every:7.2} ns  (se {se_every:.2})");
+    println!("log_enabled_rate_gate_every   : {med_engw:7.2} ns  (se {se_engw:.2})   [4 gates]");
+    println!("control  info!, same arg      : {med_3g:7.2} ns  (se {se_3g:.2})   [3 gates]");
     println!("log_enabled_sampled_out       : {med_samp:7.2} ns  (se {se_samp:.2})  bound 6");
     println!("control  same site, shift 0   : {med_unsamp:7.2} ns");
 
@@ -225,9 +241,16 @@ fn main() {
     verdict("log_enabled_str32", med_s, 30.0, med_dis, se_s + se_dis);
     // THIS ROW HAS NO SUBJECT ON THIS TREE, AND THE BENCH SAYS SO RATHER THAN SAYING "NOT
     // RESOLVED". The bound assumes a fired `Once` latch short-circuits the emission -- "<= 5 ns,
-    // no store, no shared line". The emission macros never call `rate::admit` (stated in
-    // `codes.rs`'s header, and gated there), so a `Once` code costs EXACTLY what an `Every` code
-    // costs and the measured delta is 0.00 ns by construction, not by coincidence.
+    // no store, no shared line".
+    //
+    // THE REASON CHANGED AND THE ANSWER DID NOT. It used to be that the emission macros never
+    // called `rate::admit` at all. They do now, through `__log_rate_admits!` -- but `Once` folds
+    // to `true` there, DELIBERATELY: the latch is the site's own named `OnceSite`, never one the
+    // macro places, because a `static` inside a macro expansion cannot be named and an observer
+    // must be able to reset the latch it is about to test. So a `Once` code still costs EXACTLY
+    // what an `Every` code costs, and the delta is 0.00 ns by construction rather than by
+    // coincidence. The subject the row wants -- `OnceSite::claim` on a fired latch -- is real and
+    // measurable, but it is at the SITE, not in this expansion.
     //
     // Reporting that as "NOT RESOLVED" would blame the instrument for an absence in the product.
     // The two verdicts look identical on a plot and mean opposite things: one says measure harder,
@@ -238,24 +261,48 @@ fn main() {
         println!(
             "    a `Once` code costs what an `Every` code costs ({med_once:.2} vs {med_every:.2} ns)"
         );
-        println!("    the emission macros do not consult `rate::admit`;");
-        println!("    the row bounds a short-circuit that does not exist on this tree");
+        println!("    `Once` folds to `true` inside `__log_rate_admits!` BY DESIGN:");
+        println!("    the latch is the site's own named `OnceSite`, not one the macro places.");
+        println!("    The subject is real but it is at the SITE, not in this expansion");
     } else {
         verdict("log_enabled_rate_once_fired", med_once, 5.0, med_every, se_once + se_every);
     }
+    // ── log_enabled_rate_gate_every: WHAT THE FOURTH GATE COSTS WHERE IT SHOULD COST NOTHING ──
+    //
+    // `warn!` with an `Every` code has FOUR gates; `info!` with the same argument has THREE. The
+    // policy is bound into a `const` at the call site, so the `match` is expected to fold and the
+    // difference is expected to be nothing. **Expected is not measured**, which is why this leg
+    // exists rather than a sentence.
+    //
+    // Reported against the combined spread floor: a difference below it is the clock, and calling
+    // it "zero" would be reporting the instrument's resolution as the subject's cost.
+    let gate_cost = med_engw - med_3g;
+    let gate_se = se_engw + se_3g;
+    println!("  log_enabled_rate_gate_every: 4 gates vs 3, delta {gate_cost:+.2} ns (floor {gate_se:.2})");
+    if gate_cost.abs() < gate_se {
+        println!("    FOLDED: the fourth gate is not resolvable against a three-gate site");
+    } else if gate_cost > 0.0 {
+        println!("    COSTS {gate_cost:.2} ns -- an `Every` site is NOT free, and the const match did not fold");
+    } else {
+        println!("    the four-gate leg is FASTER by {:.2} ns, which the gate does not explain -- read as drift", -gate_cost);
+    }
+
     // ── downstream_code_warn ────────────────────────────────────────────────────────────────
     //
     // The ABSOLUTE bound is measured here and stays as specified -- it has never been measured, so
     // there is nothing to re-cut it from.
     //
     // THE DELTA HAS NO SUBJECT ON THIS PATH, and the reason is structural rather than statistical.
-    // `resolve_idx` -- the `idx_cell` load the row names -- is called from exactly ONE place in the
-    // crate: `CodeNewtype::code_idx`, which exists to address the RATE array. No emission macro
-    // calls it. So a downstream code and an engine code reach the ring by the same instructions,
-    // and the delta is zero because there is no load, not because the clock cannot see one.
+    // `resolve_idx` -- the `idx_cell` load the row names -- is reached from `CodeNewtype::code_idx`,
+    // which exists to address the RATE array. Since the fourth gate landed, `__log_rate_admits!`
+    // DOES call it -- but only from the `EveryN` and `MinIntervalMs` arms, and BOTH legs here
+    // declare `Every`, which folds before the call is compiled. So a downstream code and an engine
+    // code still reach the ring by the same instructions, and the delta is zero because there is
+    // no load, not because the clock cannot see one.
     //
-    // This is the same root cause as `log_enabled_rate_once_fired`'s NO SUBJECT: the macros do not
-    // consult the rate machinery, and the index exists to index it.
+    // Giving this row a subject means re-cutting the downstream leg to declare `EveryN(2)`, which
+    // changes what it measures: the mint load AND one RMW, not the load alone. Recorded as the
+    // next form of the row rather than done here under the old name.
     //
     // What the load WOULD cost is measured in `code_idx_cost`, where it resolves cleanly at
     // ~1.35 ns -- the number this row will need on the day `rate::admit` is wired into emission.
@@ -266,8 +313,9 @@ fn main() {
     let abs = if med_down <= DOWNSTREAM_BOUND_NS { "PASS" } else { "OVER BOUND" };
     println!("  downstream_code_warn: absolute {abs} ({med_down:.2} vs {DOWNSTREAM_BOUND_NS} ns)");
     println!(
-        "    delta = {idx_cost:.2} ns -- NO SUBJECT: no emission macro calls `resolve_idx`, so a"
+        "    delta = {idx_cost:.2} ns -- NO SUBJECT: both legs declare `Every`, which folds before"
     );
+    println!("    `code_idx` is compiled, so a");
     println!(
         "    downstream code and an engine code reach the ring by the same instructions. See"
     );

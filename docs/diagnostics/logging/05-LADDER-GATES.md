@@ -336,6 +336,78 @@ the flood. `codes.rs` gained
 `MinIntervalMs(1000)` on `E2203`. It proves what it can and its failure text says what it cannot:
 **it does not prove that a declared `Once` has an `OnceSite` behind it.**
 
+> **SUPERSEDED — `rate::admit` IS WIRED.** The gate above is **deleted**, because its assertion
+> would now forbid the capability that exists. `warn!`/`error!`, their `_kv!` forms and
+> `dyn_warn!`/`dyn_error!` gained a **fourth gate**, `__log_rate_admits!`, placed LAST in the `&&`
+> chain: a rate RMW spent ahead of the ceilings would let a silenced logger keep advancing a
+> code's phase. The policy is bound into a **`const`** at the call site — the three code newtypes
+> now CARRY their row's `rate`, written from the same token as the registry column — so the four
+> arms a site does not declare are deleted rather than branched over and an `Every` row still
+> costs exactly nothing. Only `EveryN` and `MinIntervalMs` reach `rate::admit`, and only they pay
+> for `code_idx`.
+>
+> **`Once`/`OnceCounted` deliberately still do NOT get a macro-placed latch**, and that is the one
+> thing the wiring refuses. A `static` inside a macro expansion **cannot be named**, and
+> `OnceSite::reset` exists precisely so an observer can reset the latch it is about to test —
+> auto-latching would buy redundancy at the price of making all 45 `Once` rows untestable in
+> isolation. So the human link the deleted gate disclaimed is unchanged, and it is now the ONLY
+> one: see the `Once`-without-a-latch finding recorded in `docs/OPEN-QUESTIONS.md`.
+>
+> `tests/l8a_rate_policy_wired.rs` replaces the gate with the mechanism: a **downstream** table
+> (the path that mints its `code_idx` rather than reading a compile-time row) driven through
+> `dyn_warn!` with the `Log` target switched fully OFF, so every drained record is the test's own.
+> Four legs, in one `#[test]` because `RATE` and the drain role are process-global: `Every` 8/8
+> **first, as the positive control**, `EveryN(4)` 4 of 16 with 12 counted, `MinIntervalMs(60_000)`
+> 1 of 8 with 7 counted — a window nothing can cross, so no leg sleeps — and `Once` 8 of 8, which
+> pins the refusal above rather than leaving it implicit.
+>
+> **AND THE WIRING EXPOSED A DEAD DATUM IT WOULD HAVE CREATED.** `rate::suppressed` and
+> `rate::unindexed` were `pub`, written by `admit`, and read by **nothing** — so the first policy
+> that actually suppressed would have made a log quieter with nothing accounting for it, which is
+> the defect the limiter is supposed to prevent, arriving through the limiter. `03-CODES-REGISTRY`
+> already required both to be printed by the census and they were not. `census::print` now emits
+> `LOG-CENSUS limiter suppressed=N unindexed=M`, **unconditionally**: a line that appeared only
+> when a counter was non-zero would make "refused nothing" and "does not report the limiter" the
+> same output.
+>
+> **`ONCE_SITES` DOES NOT EXIST, AND TWO DOC COMMENTS SAID IT DID.** The corpus assigns the
+> per-SITE breakdown to an `ONCE_SITES` walk printing `LOG-ONCE` rows;
+> `crates/boyko_log/src/rate.rs` named it as the answer to its own aggregate, and
+> `crates/boyko_rhi_vulkan/src/present/passes/gbuffer.rs` went further and claimed a site "enrols
+> itself" in it. Neither is true and no site does. Both corrected in place. This is the same
+> finding as the 39 latch-less `Once` sites, from the other end: **nothing enumerates `Once` sites,
+> so nothing could notice that 39 of them do not latch.**
+>
+> **"AN `Every` ROW COSTS NOTHING" IS NOW MEASURED, NOT ASSERTED — AND THE FIRST ATTEMPT TO CHECK
+> IT WAS THE WRONG COMPARISON.** The corpus recorded `downstream_code_warn` at **10.16 ns** before
+> the wiring; the first sitting after it read **11.72 ns**, four quanta above resolution, which
+> reads like the gate costing 1.5 ns. It is not: across four sittings on this box the SAME leg read
+> 10.16, 10.94, 11.72 and 12.11 ns, so a cross-sitting absolute cannot separate the gate from a
+> rebuild's code layout, a busier box or a different minute.
+>
+> `log_enabled_cost` therefore gained an **in-sitting** leg, `log_enabled_rate_gate_every`:
+> `warn!` with an `Every` code (FOUR gates) against `info!` with the identical format literal and
+> the identical single `u32` (THREE gates). Everything else that differs — level byte, class byte,
+> code number — lives in the per-site `static` and is never touched on the emitting thread.
+> **Two sittings: 11.33 vs 11.33 (floor 0.39) and 12.11 vs 12.11 (floor 0.73). Delta +0.00 ns
+> both times.** The `const` match folds; the fourth gate is not resolvable against a three-gate
+> site.
+>
+> **A COMPILE-TIME GATE ON THE TWO COPIES OF THE POLICY.** The value the site folds now comes from
+> the newtype and the value the registry prints from the row; `codes!` and `declare_codes!` write
+> both from one token, and a `const _: () = assert!(rate_eq(..))` per row makes that structural.
+> Without it, a `code_class_new!` that dropped or transposed its rate argument would leave **every
+> test in this crate green** — the registry printing one policy while every call site folded
+> another, visible only to a behavioural test of a damped code.
+>
+> **FIVE REDs.** (1) Unwire `dyn_warn!`'s fourth gate ⇒ `left: 16, right: 4`, the pre-commit state
+> exactly. (2) Flip the `Every` arm to `false` ⇒ `left: 0, right: 8` on leg 1 — the control catches
+> a gate closed too hard, which is what makes legs 2 and 3 mean "the declared policy" rather than
+> "the gate is shut". (3) Print a literal `0` instead of the live counter ⇒ `0 -> 0`. (4) Drop the
+> limiter line from `print` ⇒ `left: 27, right: 28`, which is the check that `render_limiter` is
+> not itself a function nothing reaches. (5) Hard-code a policy in `code_class_new!` ⇒ `E0080` at
+> `W0103`, `W0111`, `W0112`, … , one per row that disagrees.
+
 **4. The `#[cfg(debug_assertions)]` question is per SITE, and L7b's rule is not "delete every
 gate".** `boyko_physics/src/soft/self_collision.rs` had three debug-only warnings. Two lost the
 gate: `W1301`'s condition (`radius <= 0.0`) **is** the release guard one line above the call, and
@@ -503,6 +575,13 @@ serialize on one `OBSERVE_LOCK`, and the exact run that was red is green.
    `MinIntervalMs` here would have dragged a clock read onto a cold ECS path and put the rate
    decision *ahead* of the macro's own runtime gate.
 
+   > **PARTLY SUPERSEDED.** `rate::admit` now has production callers (note 3's supersession), and
+   > the second half of the objection is answered by construction: the fourth gate is **last** in
+   > the `&&` chain, so the rate decision can no longer sit ahead of the runtime gate. The first
+   > half stands unchanged — `W0701` still wants a per-CALL-SITE latch, which `MinIntervalMs`
+   > (per CODE) is not, and its clock read would still land on a cold ECS path. `W0701` keeps
+   > `Once` and its two hand-passed `OnceSite`s **for the granularity, not for want of wiring**.
+
 6. **`E0801` is L6's, though the row's code list does not name it.** The ledger's file table covers
    `ecs/asset/server.rs (1)`, and its disposition class is "everything else → `error!`/`warn!` with
    codes". Block `08xx` is assets by the block map's own six-domain split of `04xx`–`09xx`, so the
@@ -663,7 +742,8 @@ both-present configuration. The tags become uniform at **J2**, the joint baselin
 | `log_disabled_runtime` *(**BUILT** L10-C)* | ≤ 3 ns | the same site enabled; **and the v2-shaped unpacked gate, which must be NOT RESOLVED** (G10d) |
 | `log_disabled_warn` *(**BUILT**; **0.50–0.55 ns**, PASS)* | ≤ 4 ns | `log_disabled_runtime` (an `info!`, untouched by `sink_can_accept`) in the same sitting. **The delta is an UPPER BOUND on S5, not S5 itself**: the `info!` control measures within its own noise of an empty loop — a runtime-disabled `info!` folds to nothing on this tree — so the delta carries the warn gate's own cost as well. Measured S5 ≤ **0.20–0.25 ns**. Timed in **1 000 000-call blocks**, because a disabled site publishes nothing and the 256-call lane cap that forces 0.391 ns/call resolution on every other row does not apply here; that is why this row is measurable while `log_gate_cost`'s disabled leg is not |
 | `log_enabled_0args` / `_2u32` / `_str32` *(**BUILT**; 9.38 / 10.94 / 12.50 ns, all PASS)* | ≤ 15 / 20 / 30 ns | runtime-disabled — **which measures AT the instrument floor on this box** (2 quanta of 0.391 ns), so the *delta* column is bounded by resolution and only the absolutes carry a verdict |
-| `log_enabled_rate_once_fired` *(**BUILT**; returns **NO SUBJECT**)* | ≤ 5 ns, **no store, no shared line** | `Every` policy — measured delta **0.00 ns**, because the emission macros never call `rate::admit` (stated in `codes.rs`'s header and gated there). The row bounds a short-circuit this tree does not have; it is not NOT-RESOLVED, it has no subject |
+| `log_enabled_rate_once_fired` *(**BUILT**; returns **NO SUBJECT**, and the reason CHANGED)* | ≤ 5 ns, **no store, no shared line** | `Every` policy — measured delta **0.00 ns**. Originally because the emission macros never called `rate::admit` at all; since the fourth gate landed they do, and this row **still** has no subject — by design rather than by omission. `Once` folds to `true` inside `__log_rate_admits!` because the latch is the SITE's own named `OnceSite`, never one the macro places (a `static` in a macro expansion cannot be named, and `OnceSite::reset` exists so an observer can reset the latch it tests). **The subject the row wants now exists somewhere measurable**: `OnceSite::claim` on a fired latch, which is one `Relaxed` load and no store, timed against an empty control at a site that does not publish — so it is not lane-capped and can use million-call blocks |
+| `log_enabled_rate_gate_every` *(**BUILT**, and it is this rung's own row)* | the fourth gate must be free where it declares no damping | `info!` with the same argument — THREE gates against the `warn!` leg's FOUR, in one sitting. **Measured +0.00 ns twice** (11.33 vs 11.33, floor 0.39; 12.11 vs 12.11, floor 0.73): the `const` match folds. Built because the alternative was a cross-sitting absolute, and the same leg read 10.16 / 10.94 / 11.72 / 12.11 ns across four sittings — a spread wider than anything the gate could have cost |
 | `sink_sustained_rate` | finds the drop knee; reports records·s⁻¹ | zero-record idle sink |
 | `lane_padding_ablation` *(**BUILT**; **padding RESOLVED at 0.75–0.96 ns/item, 43–57 %**; **cursor cache NOT RESOLVED**)* | padded+cached vs padded-only vs neither | — . **Two threads, because false sharing is a two-core phenomenon** and a single-threaded ablation would show three identical layouts and print a verdict about nothing. Read as PAIRS, not a league table: `A vs B` isolates the cursor cache, `A vs C` the padding. The **padding pays for itself decisively** — every accepted sitting, always positive, ~half the per-item cost. The **cursor cache's effect flips sign between sittings** (−0.13 … +0.28 ns) and is inside the combined floor in most of them: this instrument cannot see it, which is not the same as it being worthless, and it was left there rather than chased with a longer sitting. ⚠️ **41 rounds is WORSE than 15**: a longer sitting drifts further and the A-vs-A twin rejected 3 of 4 against 1 of 3, with the same answer either way |
 | `sched_cpu_logger_on_off` (gate **P1**, re-specified) | not resolvable above the floor, **at each of the two profiler states** | interleaved zero control, ABBA, **2×2 with {profiler absent, armed}** (S10) |
@@ -672,7 +752,7 @@ both-present configuration. The tags become uniform at **J2**, the joint baselin
 | `log_enabled_0args_sampling` | NOT RESOLVED vs the pre-L12 baseline | pre-L12 baseline, same sitting |
 | `log_pod_12b` *(**BUILT**; `encode_pod` **1.04–1.06 ns**, PASS; ratio **74–79×**, estimate MET)* | ≤ 20 ns | `dsp!` of the same value, which must be ≥ 5× slower. **The subject is `encode_pod` alone** — `fmt_pod` runs on the SINK, later, and a first draft that timed encode+fmt against `dsp!` alone compared a round trip with a one-way trip and made the POD path look 1.5× *slower*. **And the path moves cost rather than removing it**: encode 1.06 + sink-side fmt ~127 ns is MORE total work than `dsp!`'s ~79 ns; the purchase is that the emitting thread pays 1 ns instead of 79 |
 | `sink_sustained_rate_binary` | ≥ 3 M rec·s⁻¹ **and ≥ 5× the text sink** | the text sink, same sitting |
-| `downstream_code_warn` *(**BUILT**; absolute **10.16 ns**, PASS; **the delta has NO SUBJECT**)* | ≤ 18 ns | the engine-code `warn!`, same sitting; the delta is the `idx_cell` load. **Measured 0.00 ns, structurally**: `resolve_idx` is called from exactly one place in the crate — `CodeNewtype::code_idx`, which addresses the RATE array — and no emission macro calls it. A downstream code and an engine code reach the ring by the same instructions. Same root cause as `log_enabled_rate_once_fired`. **What the load costs where it is actually performed is `code_idx_cost`: 1.33–1.36 ns** (dynamic 2.02 vs static 0.67), which is the number this row needs on the day `rate::admit` is wired into emission |
+| `downstream_code_warn` *(**BUILT**; absolute **10.16 ns**, PASS; **the delta has NO SUBJECT**)* | ≤ 18 ns | the engine-code `warn!`, same sitting; the delta is the `idx_cell` load. **Measured 0.00 ns, structurally**: `resolve_idx` is called from exactly one place in the crate — `CodeNewtype::code_idx`, which addresses the RATE array — and no emission macro calls it. A downstream code and an engine code reach the ring by the same instructions. Same root cause as `log_enabled_rate_once_fired`. **What the load costs where it is actually performed is `code_idx_cost`: 1.33–1.36 ns** (dynamic 2.02 vs static 0.67), which is the number this row needs on the day `rate::admit` is wired into emission <br><br>**UPDATE (fourth gate wired):** `code_idx` now HAS an emission-path caller — but only from the `EveryN`/`MinIntervalMs` arms, and this bench's downstream code declares neither, so the delta is still 0.00 ns and the row still has no subject **as written**. Re-cutting it so the downstream leg declares `EveryN(2)` would give the mint load a subject on the emission path and should land the 1.33–1.36 ns `code_idx_cost` already measures in isolation — recorded as the next form of this row, not claimed as measured. |
 | `sched_cpu_flag_on_off` (gate **GJ1**, S13) | (A) flag-on vs (B) flag-off vs **(C) ceiling removed, flags off** — three pairwise verdicts | interleaved zero control, ABBA, one sitting, **leg C is the control that decides whether the instrument measured anything** |
 
 **`log_disabled_compile` is deleted** (B7). A compile-disabled site optimises to nothing and the

@@ -2293,3 +2293,60 @@ picture:
 The direction of the ruling is unaffected. What changed is that "reproducible" is now a claim about
 an idle box with a drift-rejecting twin, rather than a claim resting on byte-identical numbers that
 were byte-identical because the floor was fictional.
+
+---
+
+## `Once` is now the ONLY policy honoured by hand, and 39 sites do not obviously honour it
+
+**Status:** OPEN — measured 2026-08-19, not fixed. Raised because the fix is a rung, not a footnote.
+
+`rate::admit` is wired (`__log_rate_admits!`, the fourth gate). `Every`, `EveryN` and
+`MinIntervalMs` are now applied mechanically by the emission macros. `Once` and `OnceCounted` are
+NOT, deliberately: the latch stays a named `OnceSite` the site declares, because a `static` inside
+a macro expansion cannot be named and `OnceSite::reset` exists precisely so an observer can reset
+the latch it is about to test.
+
+That leaves `Once` as the last policy whose declaration is kept by human diligence — which is this
+campaign's signature defect shape. **Measured across `crates/**/*.rs` and `src/**/*.rs`, excluding
+`codes.rs`, `tests/` and `benches/`: 45 `Live` rows declare `Once`/`OnceCounted`, and 39
+(identifier-use, file) pairs have NO `OnceSite` anywhere in the file.** Two were read by hand and
+are real:
+
+* **`W0111` (`crates/boyko_log/src/census.rs:122`, `report_unsunk`)** — `#[cold]`, no latch, called
+  from inside `census::rows()`, which is a **public iterator** any host may walk per frame. Its own
+  doc comment says `Once`, "because the condition is a CONFIGURATION and not an event". A per-frame
+  census overlay would emit it once per unsunk target per frame.
+* **`E0109` (`crates/boyko_log/src/sink/crash.rs:82`, `report_unopenable`)** — `#[cold]`, no latch.
+  It fires once today only because `arm()` is called once on the enable path; the row's `Once` is
+  honoured by the CALL STRUCTURE, not by anything at the site.
+
+The crude scan cannot tell an emitter from a mention (a `use`, a doc link, a test assertion), so 39
+is an upper bound and the real count needs an emitter-aware walk — the shape `code_registry.rs`'s
+existing checks already have.
+
+**Two dispositions, and the second is the one that needs a ruling:**
+
+1. **Audit the 39 and place the missing latches.** Mechanical, site by site, and each site's
+   correct granularity is a judgement (`W2205` deliberately keeps its latches in a `Resource`, not
+   a `static`, so one world's first divergence cannot silence another's).
+2. **Place the latch in the macro after all, and make it resettable.** The objection above is
+   testability, and it is answerable: register every macro-placed latch against its `&LogSite` in a
+   walkable table and give `test-probe` a `reset_all_once_sites()`. Then all 45 rows are honoured
+   mechanically and an observer resets everything before driving its site. This changes behaviour
+   at 45 rows and costs `.bss` plus a registration on first emission, so it is a scope call.
+
+Recorded rather than decided.
+
+**Addendum (same session): the corpus's own accounting for `Once` is not built either.**
+`00-GOAL-TARGETS.md:37`, `01-EMISSION-RING.md:273` and `05-LADDER-GATES.md:918` all specify an
+`ONCE_SITES` intrusive list and one `LOG-ONCE` census row per fired site
+(`code=W2102 site=device.rs:3100 fired=1 suppressed=UNCOUNTED(by policy)`). **Neither exists.** Two
+doc comments in the tree named it as though it did — `crates/boyko_log/src/rate.rs` called it "the
+`ONCE_SITES` walk's answer", and `crates/boyko_rhi_vulkan/src/present/passes/gbuffer.rs` claimed a
+site "enrols itself in `ONCE_SITES` so the `LOG-ONCE` census can report that it fired at all". Both
+corrected in place with the wiring commit.
+
+This is the same finding as the 39 latch-less sites, from the other end: **nothing enumerates
+`Once` sites, so nothing could notice.** Building `ONCE_SITES` + the `LOG-ONCE` rows is the natural
+pair to disposition 1 above — the audit needs the enumeration, and the enumeration makes the audit
+mechanical instead of a grep.

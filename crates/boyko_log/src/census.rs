@@ -153,6 +153,13 @@ pub fn print() -> u32 {
             written += 1;
         }
     }
+    let mut buf = [0u8; 96];
+    let n = render_limiter(&mut buf);
+    // SAFETY: `render_limiter` writes only ASCII literals and decimal digits.
+    let text = unsafe { core::str::from_utf8_unchecked(&buf[..n]) };
+    if crate::sync_out::write_oracle_line("LOG-CENSUS ", text).is_some() {
+        written += 1;
+    }
     written
 }
 
@@ -192,6 +199,49 @@ fn render(buf: &mut [u8], row: &CensusRow) -> usize {
     dec(row.dropped, &mut n, &mut put);
     put(b" status=", &mut n);
     put(row.status_str().as_bytes(), &mut n);
+    n
+}
+
+/// Render `limiter suppressed=N unindexed=M` into `buf`.
+///
+/// # It is printed UNCONDITIONALLY, and a zero row is the point
+///
+/// A line that appeared only when a counter was non-zero would make "the limiter refused nothing"
+/// and "this census does not report the limiter" the same output — the silence-is-not-evidence
+/// defect `W0111` exists to refuse, one level up. A reader must be able to see the zero.
+///
+/// # What it closes
+///
+/// `03-CODES-REGISTRY.md` requires that `E0115` and the unindexed count are **both printed by the
+/// census**, and until the rate gate was wired neither counter had a production reader at all:
+/// `rate::suppressed` and `rate::unindexed` were `pub`, written by `admit`, and read by nothing.
+/// The moment a policy actually suppresses, a log gets quieter — and a quietness nothing accounts
+/// for is exactly what a diagnostics census is for.
+fn render_limiter(buf: &mut [u8]) -> usize {
+    let mut n = 0usize;
+    let mut put = |s: &[u8], n: &mut usize| {
+        let take = s.len().min(buf.len() - *n);
+        buf[*n..*n + take].copy_from_slice(&s[..take]);
+        *n += take;
+    };
+    let dec = |v: u64, n: &mut usize, put: &mut dyn FnMut(&[u8], &mut usize)| {
+        let mut d = [0u8; 20];
+        let mut v = v;
+        let mut i = d.len();
+        loop {
+            i -= 1;
+            d[i] = b'0' + (v % 10) as u8;
+            v /= 10;
+            if v == 0 || i == 0 {
+                break;
+            }
+        }
+        put(&d[i..], n);
+    };
+    put(b"limiter suppressed=", &mut n);
+    dec(crate::rate::suppressed(), &mut n, &mut put);
+    put(b" unindexed=", &mut n);
+    dec(crate::rate::unindexed(), &mut n, &mut put);
     n
 }
 
@@ -256,6 +306,63 @@ mod tests {
         assert_eq!(
             core::str::from_utf8(&buf[..n]).expect("ascii"),
             "target=ecs level=warn records=7 dropped=0 status=MEASURED"
+        );
+    }
+
+    /// The census reports what the limiter refused, and the number is the LIVE counter.
+    ///
+    /// Two renders around a known suppression, and the claim is a DELTA rather than an absolute:
+    /// `SUPPRESSED` is process-global and the lib tests run on many threads, so an equality against
+    /// a snapshot would be a race. A monotone counter makes `after - before >= 56` sound whatever
+    /// else is running.
+    ///
+    /// It drives `rate::admit` directly rather than through a macro because the subject here is the
+    /// CENSUS reading the counter -- the macro's own wiring is `tests/l8a_rate_policy_wired.rs`.
+    #[test]
+    fn the_census_prints_what_the_rate_limiter_refused() {
+        fn suppressed_in_line() -> u64 {
+            let mut buf = [0u8; 96];
+            let n = render_limiter(&mut buf);
+            let text = core::str::from_utf8(&buf[..n]).expect("ASCII only");
+            let at = text.find("suppressed=").expect("the census line names the counter");
+            let rest = &text[at + "suppressed=".len()..];
+            let end = rest.find(' ').unwrap_or(rest.len());
+            rest[..end].parse().expect("a decimal count")
+        }
+
+        let before = suppressed_in_line();
+        // A slot no registry row owns, so this test's suppression is its own.
+        const IDX: u32 = 502;
+        for _ in 0..64 {
+            let _ = crate::rate::admit(IDX, crate::codes::RatePolicy::EveryN(8), 0);
+        }
+        let after = suppressed_in_line();
+        assert!(
+            after - before >= 56,
+            "the census must report the limiter's refusals: {before} -> {after}"
+        );
+
+        let mut buf = [0u8; 96];
+        let n = render_limiter(&mut buf);
+        let text = core::str::from_utf8(&buf[..n]).expect("ASCII only");
+        assert!(text.contains("unindexed="), "the unindexed count is owed by the corpus too");
+
+        // ── AND `print` MUST ACTUALLY EMIT IT ────────────────────────────────────────────────
+        //
+        // Everything above would pass on a `render_limiter` that no caller reaches -- which is the
+        // dead-datum shape this whole line exists to remove, reproduced one level in. So the count
+        // `print` returns is checked against the rows plus exactly one.
+        //
+        // The console flag is process-global and this SETS it rather than asserting it, for the
+        // reason `sync_out`'s own tests give: another test may legitimately have it either way.
+        let was_on = crate::sync_out::write_oracle_line("", "").is_some();
+        crate::sync_out::set_console_enabled(true);
+        let lines = print();
+        crate::sync_out::set_console_enabled(was_on);
+        assert_eq!(
+            lines as usize,
+            rows().count() + 1,
+            "the census must print one line per target AND the limiter line"
         );
     }
 }

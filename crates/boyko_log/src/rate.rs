@@ -10,6 +10,15 @@
 //! | [`EveryN(n)`](RatePolicy::EveryN) | [`RATE`] | **per code** | one RMW |
 //! | [`MinIntervalMs(ms)`](RatePolicy::MinIntervalMs) | [`RATE`] | **per code** | one load, and one RMW only when the window opens |
 //!
+//! # Who calls this file *(L8a wired)*
+//!
+//! The emission macros do, through [`__log_rate_admits!`](crate::__log_rate_admits) — but only
+//! from the two arms that need it. The policy is a `const` at every call site, so a site declaring
+//! `Every`, `Once` or `OnceCounted` does not compile a call to [`admit`] at all. Until that wiring
+//! landed this module had **zero production callers** and `codes.rs` carried a gate forbidding any
+//! row from declaring the two policies it implements; that gate is gone and
+//! `tests/l8a_rate_policy_wired.rs` exercises all four through the real macro.
+//!
 //! `Once` is per **site**, not per code, and the reason is a measured defect rather than a
 //! preference: `RATE` is indexed by `code_idx`, so a code-scoped `Once` fires once per *code*.
 //! Three independent capability degradations in `boyko_rhi_vulkan` share one `Once` code, and a
@@ -31,7 +40,9 @@ use crate::codes::{CODE_IDX_EXHAUSTED, RatePolicy};
 ///
 /// 512 slots × 64 B = 32 KiB of `.bss`, demand-zero and untouched until a code with a
 /// shared-state policy actually fires. The engine's own registry declares `Every` or `Once` on
-/// every row today, so in the shipped default this array is never written at all.
+/// every row today, so in the shipped default this array is never written at all — the first
+/// writer is a **downstream** table that declares [`EveryN`](RatePolicy::EveryN) or
+/// [`MinIntervalMs`](RatePolicy::MinIntervalMs), which is the case L8a's wiring exists for.
 pub const MAX_RATE_SLOTS: usize = 512;
 
 /// One code's shared rate state.
@@ -64,7 +75,14 @@ static RATE: [RateSlot; MAX_RATE_SLOTS] = [const { RateSlot::new() }; MAX_RATE_S
 /// Suppressed occurrences, summed over every code. Reported by the census.
 ///
 /// One counter rather than one per code, because the per-code breakdown a reader wants is the
-/// per-**site** one, and that is the `ONCE_SITES` walk's answer rather than this array's.
+/// per-**site** one — which the corpus assigns to an `ONCE_SITES` walk printing `LOG-ONCE` rows.
+///
+/// ⚠️ **`ONCE_SITES` DOES NOT EXIST.** This sentence used to name it as though it did, and so did a
+/// doc comment in `boyko_rhi_vulkan`'s gbuffer pass, which went further and claimed a site enrols
+/// itself in it. The aggregate below is therefore the ONLY accounting the limiter has, and it is
+/// printed by [`crate::census`]'s limiter line. Recorded in `docs/OPEN-QUESTIONS.md` beside the 39
+/// `Once` sites that have no latch — the two findings are one: nothing enumerates `Once` sites, so
+/// nothing could notice.
 static SUPPRESSED: AtomicU64 = AtomicU64::new(0);
 
 /// Occurrences that ran with no rate state because the code index space was exhausted.
@@ -74,6 +92,38 @@ static SUPPRESSED: AtomicU64 = AtomicU64::new(0);
 /// [`Every`](RatePolicy::Every) — it is delivered, and the degradation is counted here — instead
 /// of quietly inheriting some other code's throttle.
 static UNINDEXED: AtomicU64 = AtomicU64::new(0);
+
+/// A monotone millisecond stamp for [`MinIntervalMs`](RatePolicy::MinIntervalMs).
+///
+/// **Read only by that one policy**, and only at a site that declares it: the emission macro binds
+/// the policy into a `const`, so this call is not compiled into the 74 sites that declare anything
+/// else. That is what makes a clock read acceptable on an emitting thread at all.
+///
+/// # The cost is the point, not a concession
+///
+/// One integer divide against the ~40 ns a delivered record costs, on a site whose whole reason
+/// for declaring a minimum interval is that it would otherwise storm. The policy pays a divide to
+/// refuse a record; refusing is the win.
+///
+/// # Before calibration it under-damps, and says so rather than guessing
+///
+/// [`ticks_per_ns`](boyko_diag::clock::ticks_per_ns) returns `1.0` on an uncalibrated clock, so on
+/// x86-64 -- where a tick is a `rdtsc` count -- this reads about a third of a real millisecond at
+/// 3 GHz. The stamp stays MONOTONE, which is what the comparison needs; it is the window that is
+/// short. Under-damping before the enable path has run is the correct failure direction: the
+/// alternative is a window that silences the very reports a boot problem produces.
+#[inline]
+#[must_use]
+pub fn now_ms() -> u64 {
+    let per_ms = (boyko_diag::clock::ticks_per_ns() * 1.0e6) as u64;
+    if per_ms == 0 {
+        // A scale that rounds to zero would divide by zero. It cannot happen through
+        // `ticks_per_ns` -- the uncalibrated arm returns 1.0 -- and is handled rather than
+        // asserted because a rate limiter must never be the thing that panics.
+        return 0;
+    }
+    boyko_diag::clock::ticks() / per_ms
+}
 
 /// Should this occurrence be delivered?
 ///

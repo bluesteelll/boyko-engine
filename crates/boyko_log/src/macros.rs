@@ -1,4 +1,5 @@
-//! The five emission macros and their three-gate expansion.
+//! The five emission macros and their gate chain — three ceilings, and a fourth gate at the five
+//! forms that carry a diagnostic code.
 //!
 //! # The gate chain, and why it is `&&`
 //!
@@ -6,8 +7,13 @@
 //! if T::STATIC_CEILING as u8 >= LVL as u8            // (a) const: per-target compile ceiling
 //!     && $crate::GLOBAL_CEILING as u8 >= LVL as u8   // (b) const: per-profile compile ceiling
 //!     && $crate::runtime_ceiling(T::ID) >= LVL as u8 // (c) one Relaxed byte load
+//!     && __log_rate_admits!(WarnCode, code)          // (d) const: the declared delivery policy
 //! { … }
 //! ```
+//!
+//! Gate (d) exists only on `warn!`/`error!` and their `_kv!`/`dyn_` forms — the ones that carry a
+//! code, because the policy is declared *on the code*. `info!`/`debug!`/`trace!` have three gates
+//! and no fourth to have. See the block above [`__log_rate_admits!`] for why it is LAST.
 //!
 //! The `&&` short-circuit is the guarantee: **argument expressions are never evaluated when a
 //! gate is false.** That is what makes `debug!(Ecs, "{}", expensive())` free in a shipping build
@@ -31,6 +37,65 @@
 //! pointer to it instead of re-carrying file, line, format literal and code — and none of that
 //! data is touched on the emitting thread. `line!()` and `file!()` are expanded at the **call**
 //! site, which is why they are in the macro rather than in `emit_impl`.
+
+// ───────────────────── L8a-wired: the FOURTH gate, and where it sits ─────────────────────
+//
+// ```text
+// if (a) && (b) && (c)                                  // the three ceilings, unchanged
+//     && $crate::__log_rate_admits!(WarnCode, $code)    // (d) the declared delivery policy
+// { … }
+// ```
+//
+// **It is last, and that ordering is load-bearing.** `EveryN` costs one RMW on a shared line; a
+// gate placed before the ceilings would spend it at a site whose target is switched off, so a
+// silenced logger would still be counting occurrences and still be advancing a code's phase. The
+// three ceilings answer "is anyone listening"; only then is "may this one through" a question.
+//
+// # What each policy costs here, and why four of the five cost nothing
+//
+// The code is a `const` at its call site, so `policy()` is a constant expression and the `match`
+// below has exactly ONE live arm per site. `Every` folds to `true` and vanishes. `Once` and
+// `OnceCounted` also fold to `true` -- they are answered by the site's own named `OnceSite`, NOT
+// by a latch this macro places, and that is a decision rather than an omission: a `static` inside
+// a macro expansion cannot be named, and `OnceSite::reset` exists precisely because an observer
+// must be able to reset the latch it is about to test. Auto-latching would buy redundancy at the
+// price of making every `Once` site untestable in isolation.
+//
+// Only `EveryN` and `MinIntervalMs` reach `rate::admit`, and only they pay for `code_idx` -- which
+// is a compile-time move for an engine code and a cold mint-then-load for a downstream one.
+
+/// The delivery-policy gate. Internal; expands inside the `&&` chain of the five code-carrying
+/// emission macros.
+///
+/// `$Class` is the code's newtype (`WarnCode` / `ErrorCode`), named by the caller because the
+/// macro that expands this already knows its own class byte.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __log_rate_admits {
+    ($Class:ident, $code:expr) => {{
+        // A `const`, so the four arms this site does not declare are deleted rather than branched
+        // over. `$code` was already required to be a constant expression -- it is placed in the
+        // per-site `static` -- so this adds no constraint a caller can notice.
+        const __BOYKO_RATE: $crate::codes::RatePolicy = $crate::codes::$Class::policy($code);
+        match __BOYKO_RATE {
+            $crate::codes::RatePolicy::Every => true,
+            // The site's own `OnceSite` answers these. See the note above.
+            $crate::codes::RatePolicy::Once | $crate::codes::RatePolicy::OnceCounted => true,
+            $crate::codes::RatePolicy::EveryN(_) => $crate::rate::admit(
+                $crate::codes::$Class::code_idx($code),
+                __BOYKO_RATE,
+                // Unread by this policy; passing a stamp would be a clock read on a path that
+                // does not need one.
+                0,
+            ),
+            $crate::codes::RatePolicy::MinIntervalMs(_) => $crate::rate::admit(
+                $crate::codes::$Class::code_idx($code),
+                __BOYKO_RATE,
+                $crate::rate::now_ms(),
+            ),
+        }
+    }};
+}
 
 /// Build the per-site `static` and hand it to the producer path.
 ///
@@ -74,6 +139,7 @@ macro_rules! error {
             && $crate::GLOBAL_CEILING as u8 >= $crate::Level::Error as u8
             && $crate::runtime_ceiling(<$T as $crate::LogTarget>::ID)
                 >= $crate::Level::Error as u8
+            && $crate::__log_rate_admits!(ErrorCode, $code)
         {
             $crate::__log_site_emit!(
                 $crate::Level::Error,
@@ -98,6 +164,7 @@ macro_rules! warn {
             && $crate::GLOBAL_CEILING as u8 >= $crate::Level::Warn as u8
             && $crate::runtime_ceiling(<$T as $crate::LogTarget>::ID)
                 >= $crate::Level::Warn as u8
+            && $crate::__log_rate_admits!(WarnCode, $code)
         {
             $crate::__log_site_emit!(
                 $crate::Level::Warn,
@@ -208,7 +275,9 @@ macro_rules! dyn_error {
     ($id:expr, $code:expr, $fmt:literal $(, $a:expr)* $(,)?) => {
         if $crate::GLOBAL_CEILING as u8 >= $crate::Level::Error as u8 {
             let __boyko_id = $id;
-            if $crate::runtime_ceiling(__boyko_id) >= $crate::Level::Error as u8 {
+            if $crate::runtime_ceiling(__boyko_id) >= $crate::Level::Error as u8
+                && $crate::__log_rate_admits!(ErrorCode, $code)
+            {
                 $crate::__log_site_emit_dyn!(
                     $crate::Level::Error,
                     __boyko_id,
@@ -228,7 +297,9 @@ macro_rules! dyn_warn {
     ($id:expr, $code:expr, $fmt:literal $(, $a:expr)* $(,)?) => {
         if $crate::GLOBAL_CEILING as u8 >= $crate::Level::Warn as u8 {
             let __boyko_id = $id;
-            if $crate::runtime_ceiling(__boyko_id) >= $crate::Level::Warn as u8 {
+            if $crate::runtime_ceiling(__boyko_id) >= $crate::Level::Warn as u8
+                && $crate::__log_rate_admits!(WarnCode, $code)
+            {
                 $crate::__log_site_emit_dyn!(
                     $crate::Level::Warn,
                     __boyko_id,
@@ -375,6 +446,7 @@ macro_rules! warn_kv {
         if <$T as $crate::LogTarget>::STATIC_CEILING as u8 >= $crate::Level::Warn as u8
             && $crate::GLOBAL_CEILING as u8 >= $crate::Level::Warn as u8
             && $crate::runtime_ceiling(<$T as $crate::LogTarget>::ID) >= $crate::Level::Warn as u8
+            && $crate::__log_rate_admits!(WarnCode, $code)
         {
             $crate::__log_site_emit_kv!(
                 $crate::Level::Warn,
@@ -394,6 +466,7 @@ macro_rules! error_kv {
         if <$T as $crate::LogTarget>::STATIC_CEILING as u8 >= $crate::Level::Error as u8
             && $crate::GLOBAL_CEILING as u8 >= $crate::Level::Error as u8
             && $crate::runtime_ceiling(<$T as $crate::LogTarget>::ID) >= $crate::Level::Error as u8
+            && $crate::__log_rate_admits!(ErrorCode, $code)
         {
             $crate::__log_site_emit_kv!(
                 $crate::Level::Error,

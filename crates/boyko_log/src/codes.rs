@@ -47,23 +47,32 @@ use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 /// policy visible in the registry — a reader can see that `W2102` is `Once` without finding every
 /// emitter — while applying it per site keeps two unrelated call sites from silencing each other.
 ///
-/// # What "applied per site" means today, measured rather than assumed *(L8a)*
+/// # How the column reaches a site *(L8a wired)*
 ///
-/// **The emission macros do not read this column.** `warn!`/`error!` gate on the three ceilings
-/// and call `emit_impl`; neither calls [`rate::admit`](crate::rate::admit), which still has zero
-/// production callers. So a row declaring [`Once`](RatePolicy::Once) is honoured only because a
-/// human placed an [`OnceSite`] at each emitter, and a row declaring [`Every`](RatePolicy::Every)
-/// is honest only because nothing damps it.
+/// The emission macros read it. `warn!`/`error!` and their `_kv!`/`dyn_` forms gate on the three
+/// ceilings and then on [`__log_rate_admits!`](crate::__log_rate_admits), which binds
+/// `policy()` into a **`const`** at the call site — so the four arms a site does not declare are
+/// deleted rather than branched over, and a row declaring
+/// [`Every`](RatePolicy::Every) still costs exactly nothing.
 ///
-/// The consequence that matters is not the missing plumbing — it is that a row declaring
-/// [`EveryN`](RatePolicy::EveryN) or [`MinIntervalMs`](RatePolicy::MinIntervalMs) would be a
-/// **declaration with no effect**: the registry would promise damping, the site would emit every
-/// occurrence, and no check would notice. `L8a` therefore adds
-/// `no_live_row_declares_a_policy_the_emission_path_cannot_honour`, which reds the day such a row
-/// is added. It proves what it can — that no row promises machinery that does not exist — and its
-/// failure text says so, because it cannot prove that a declared `Once` has an `OnceSite` behind
-/// it. Deleting the gate when `rate::admit` acquires its first caller is the correct move; leaving
-/// a row that lies is not.
+/// Two of the five reach [`rate::admit`](crate::rate::admit): [`EveryN`](RatePolicy::EveryN) and
+/// [`MinIntervalMs`](RatePolicy::MinIntervalMs), the two that need state shared across sites.
+///
+/// # What is still a human link, stated rather than implied
+///
+/// [`Once`](RatePolicy::Once) and [`OnceCounted`](RatePolicy::OnceCounted) are answered by an
+/// [`OnceSite`] **the site declares**, not by a latch the macro places, and that is a decision:
+/// a `static` inside a macro expansion cannot be named, and `OnceSite::reset` exists precisely
+/// so an observer can reset the latch it is about to test. Auto-latching would buy redundancy at
+/// the price of making every `Once` site untestable in isolation.
+///
+/// So a row declaring `Once` is still honoured only because a human placed a latch at each
+/// emitter. Until L8a-wired that was true of `EveryN` and `MinIntervalMs` too — and worse, since
+/// *no* latch exists for those, a row declaring one was a **declaration with no effect** and
+/// nothing could notice. `codes.rs` carried
+/// `no_live_row_declares_a_policy_the_emission_path_cannot_honour` to forbid such a row outright;
+/// that gate is DELETED with this rung, and `tests/l8a_rate_policy_wired.rs` replaces it by
+/// exercising all four policies through the real macro.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RatePolicy {
     /// Every occurrence.
@@ -126,6 +135,18 @@ pub struct DiagInfo {
 pub struct WarnCode {
     num: u16,
     idx: CodeIdx,
+    /// The declared delivery policy, copied from this code's registry row.
+    ///
+    /// **Carried on the value rather than looked up from the table**, and that is what
+    /// lets the emission macros fold the policy away: a code is a `const` at its call
+    /// site, so `policy()` is a constant expression and the four arms the site does not
+    /// declare are deleted before a branch is ever emitted. A table lookup would put a
+    /// scan on the emitting thread, and a downstream code is not in the engine's table
+    /// at all -- so the lookup form would silently report `Every` for every game code.
+    ///
+    /// It is not a second source of truth: `codes!` and `declare_codes!` write this
+    /// field and the row's `rate` column from the SAME row token.
+    rate: RatePolicy,
 }
 
 /// An `E`-class code: the engine could not do what was asked.
@@ -133,6 +154,18 @@ pub struct WarnCode {
 pub struct ErrorCode {
     num: u16,
     idx: CodeIdx,
+    /// The declared delivery policy, copied from this code's registry row.
+    ///
+    /// **Carried on the value rather than looked up from the table**, and that is what
+    /// lets the emission macros fold the policy away: a code is a `const` at its call
+    /// site, so `policy()` is a constant expression and the four arms the site does not
+    /// declare are deleted before a branch is ever emitted. A table lookup would put a
+    /// scan on the emitting thread, and a downstream code is not in the engine's table
+    /// at all -- so the lookup form would silently report `Every` for every game code.
+    ///
+    /// It is not a second source of truth: `codes!` and `declare_codes!` write this
+    /// field and the row's `rate` column from the SAME row token.
+    rate: RatePolicy,
 }
 
 /// A `B`-class code: a broken invariant. Appears only inside a `#[cold] fn … -> !` or a `panic!`.
@@ -140,6 +173,18 @@ pub struct ErrorCode {
 pub struct PanicCode {
     num: u16,
     idx: CodeIdx,
+    /// The declared delivery policy, copied from this code's registry row.
+    ///
+    /// **Carried on the value rather than looked up from the table**, and that is what
+    /// lets the emission macros fold the policy away: a code is a `const` at its call
+    /// site, so `policy()` is a constant expression and the four arms the site does not
+    /// declare are deleted before a branch is ever emitted. A table lookup would put a
+    /// scan on the emitting thread, and a downstream code is not in the engine's table
+    /// at all -- so the lookup form would silently report `Every` for every game code.
+    ///
+    /// It is not a second source of truth: `codes!` and `declare_codes!` write this
+    /// field and the row's `rate` column from the SAME row token.
+    rate: RatePolicy,
 }
 
 /// Equality is by **number**, for all three classes.
@@ -182,8 +227,12 @@ macro_rules! code_newtype {
             /// another code's rate slot — the aliasing the whole mint exists to prevent.
             #[inline]
             #[must_use]
-            pub const fn downstream(number: u16, cell: &'static AtomicU16) -> Self {
-                Self { num: number, idx: CodeIdx::Dynamic(cell) }
+            pub const fn downstream(
+                number: u16,
+                rate: RatePolicy,
+                cell: &'static AtomicU16,
+            ) -> Self {
+                Self { num: number, idx: CodeIdx::Dynamic(cell), rate }
             }
 
             /// Where this code's rate slot lives: `Static` for an engine row, `Dynamic` for a
@@ -192,6 +241,23 @@ macro_rules! code_newtype {
             #[must_use]
             pub const fn idx(self) -> CodeIdx {
                 self.idx
+            }
+
+            /// This code's declared delivery policy.
+            ///
+            /// `const`, and that is the whole reason the rate gate costs nothing at the 74 sites
+            /// that declare no damping: [`__log_rate_admits!`](crate::__log_rate_admits) binds this
+            /// into a `const` at the call site, so the arm the site does not take is not compiled.
+            ///
+            /// **`PanicCode` has one too, and no caller.** A `B` code's site is a `panic!`, not an
+            /// emission macro, so nothing folds its policy. It is here because the *row* has a
+            /// `rate` column and the newtype mirrors the row — a `B`-shaped special case in
+            /// `code_newtype!` would be more surface than the unread method, and the value is read
+            /// by anyone reading the registry.
+            #[inline]
+            #[must_use]
+            pub const fn policy(self) -> RatePolicy {
+                self.rate
             }
 
             /// The class byte.
@@ -268,6 +334,9 @@ macro_rules! codes {
             pub const $Ident: code_class_ty!($class) = code_class_new!(
                 $class,
                 $num,
+                // The same token that fills this row's `rate` column below, so the value a site
+                // folds and the value the registry prints cannot disagree.
+                $rate,
                 // The row's own position, resolved when the table compiles -- which is what makes
                 // "an engine `code_idx` is a compile-time constant" structural rather than a
                 // promise: nothing a downstream crate mints can move it.
@@ -276,6 +345,28 @@ macro_rules! codes {
                     stringify!($class).as_bytes()[0],
                     $num,
                 ))
+            );
+
+            // THE SITE'S POLICY AND THE REGISTRY'S ARE ONE TOKEN, AND THIS IS WHAT MAKES THAT
+            // STRUCTURAL. `code_class_new!` could drop or transpose its rate argument and every
+            // test in this crate would stay green -- the registry would print one policy while
+            // every call site folded another, and only a behavioural test of a damped code could
+            // see it. A compile-time assert per row is the cheap form of that test.
+            const _: () = assert!(
+                rate_eq(
+                    $Ident.policy(),
+                    DIAGNOSTICS_TABLE[const_row_of(
+                        &DIAGNOSTICS_TABLE,
+                        stringify!($class).as_bytes()[0],
+                        $num,
+                    ) as usize]
+                        .rate
+                ),
+                concat!(
+                    "the `",
+                    stringify!($Ident),
+                    "` const and its registry row disagree about the rate policy"
+                )
             );
         )*
 
@@ -342,9 +433,9 @@ pub const fn const_row_of(table: &[DiagInfo], class: u8, number: u16) -> u16 {
 /// not stand where a struct literal's PATH goes -- `code_class_ty!(W) { num: .. }` is a parse
 /// error, which is the entire reason this exists.
 macro_rules! code_class_new {
-    (B, $num:expr, $idx:expr) => { PanicCode { num: $num, idx: $idx } };
-    (E, $num:expr, $idx:expr) => { ErrorCode { num: $num, idx: $idx } };
-    (W, $num:expr, $idx:expr) => { WarnCode { num: $num, idx: $idx } };
+    (B, $num:expr, $rate:expr, $idx:expr) => { PanicCode { num: $num, idx: $idx, rate: $rate } };
+    (E, $num:expr, $rate:expr, $idx:expr) => { ErrorCode { num: $num, idx: $idx, rate: $rate } };
+    (W, $num:expr, $rate:expr, $idx:expr) => { WarnCode { num: $num, idx: $idx, rate: $rate } };
 }
 
 macro_rules! code_class_ty {
@@ -360,6 +451,24 @@ macro_rules! code_class_ty {
 }
 
 /// `true` when every number is greater than the one before it.
+/// Whether two policies are the same policy, in a `const` context.
+///
+/// `PartialEq` is derived on [`RatePolicy`] but is not `const`, and the one place this is needed is
+/// a `const _` assert. Written out rather than reached for by deriving something cleverer: the
+/// wildcard arm is the whole safety of it — a new variant added without a row here compares
+/// unequal to itself and reds the assert, which is the correct direction for a check.
+#[must_use]
+pub const fn rate_eq(a: RatePolicy, b: RatePolicy) -> bool {
+    match (a, b) {
+        (RatePolicy::Every, RatePolicy::Every)
+        | (RatePolicy::Once, RatePolicy::Once)
+        | (RatePolicy::OnceCounted, RatePolicy::OnceCounted) => true,
+        (RatePolicy::EveryN(x), RatePolicy::EveryN(y)) => x == y,
+        (RatePolicy::MinIntervalMs(x), RatePolicy::MinIntervalMs(y)) => x == y,
+        _ => false,
+    }
+}
+
 /// Whether ONE row's policy is representable. The slice form is a `const` assert at declaration;
 /// this is its per-row companion, for a downstream table checking itself at run time.
 #[must_use]
@@ -1045,6 +1154,10 @@ macro_rules! declare_codes {
             pub const $Ident: $crate::code_class_ty_pub!($class) =
                 <$crate::code_class_ty_pub!($class)>::downstream(
                     $num,
+                    // The same token that fills this row's `rate` column above. A downstream code
+                    // is NOT in the engine's table, so a policy looked up rather than carried
+                    // would read `Every` for every row here and damp nothing.
+                    $rate,
                     // The row's own position, resolved when this table compiles -- the same
                     // const scan the engine table uses, so a downstream code's cell is as
                     // statically placed as an engine code's index.
@@ -1054,6 +1167,27 @@ macro_rules! declare_codes {
                         $num,
                     ) as usize],
                 );
+
+            // The engine table's per-row gate, for a caller's table. Same argument, and it must be
+            // repeated here rather than inherited: `declare_codes!` builds its consts through
+            // `downstream()` rather than `code_class_new!`, so it is a SECOND place the two values
+            // could drift apart.
+            const _: () = assert!(
+                $crate::codes::rate_eq(
+                    $Ident.policy(),
+                    DIAGNOSTICS_TABLE[$crate::codes::const_row_of(
+                        &DIAGNOSTICS_TABLE,
+                        stringify!($class).as_bytes()[0],
+                        $num,
+                    ) as usize]
+                        .rate
+                ),
+                concat!(
+                    "the `",
+                    stringify!($Ident),
+                    "` const and its registry row disagree about the rate policy"
+                )
+            );
         )*
 
         // Same rule as the engine table, and for the same reason: two rows sharing a number would
@@ -1340,43 +1474,6 @@ mod tests {
                     row.class as char, row.number
                 ),
             }
-        }
-    }
-
-    #[test]
-    fn no_live_row_declares_a_policy_the_emission_path_cannot_honour() {
-        // MEASURED at L8a, by reading the expansion rather than the design: `warn!`/`error!`
-        // gate on the three ceilings and call `emit_impl`. Neither reaches `rate::admit`, which
-        // still has no production caller. So the only policies the engine can actually apply are
-        // the two that need no rate state -- `Every` (do nothing) and `Once`/`OnceCounted` (an
-        // `OnceSite` a human placed at the emitter).
-        //
-        // A row declaring `EveryN` or `MinIntervalMs` would therefore be a promise with no
-        // machinery behind it: the registry would say "damped", the site would emit every
-        // occurrence, and nothing in this crate would disagree. That is the exact defect shape
-        // this campaign keeps finding -- a declaration nothing applies -- so it gets a check.
-        //
-        // WHAT THIS CANNOT CLAIM, and the assertion message says it too: it does not prove that a
-        // row declaring `Once` has an `OnceSite` behind it. That link is still a human one. When
-        // `rate::admit` acquires its first production caller this test should be DELETED rather
-        // than loosened, because at that point the declaration means something again.
-        for row in DIAGNOSTICS {
-            if !matches!(row.status, CodeStatus::Live) {
-                continue;
-            }
-            assert!(
-                matches!(
-                    row.rate,
-                    RatePolicy::Every | RatePolicy::Once | RatePolicy::OnceCounted
-                ),
-                "row {}{} declares {:?}, but the emission macros never call `rate::admit`, so \
-                 that policy is a declaration with no effect -- either wire the policy into the \
-                 emission path or declare what the site actually does. (This check does NOT \
-                 prove that a `Once` row has an `OnceSite` behind it; that link is still human.)",
-                row.class as char,
-                row.number,
-                row.rate
-            );
         }
     }
 

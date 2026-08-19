@@ -289,10 +289,15 @@ use super::super::{COLOR_SUBRESOURCE_RANGE, SwapchainError};
 /// comment said it was.** The comment claimed "no per-frame `AtomicBool` load cost beyond the one
 /// `swap` on the FIRST occurrence"; the code did a `load` and then a separate `store`, which is not
 /// a `swap` and does not exclude anything — two threads arriving together both saw `false` and both
-/// printed. `OnceSite::claim` is a single CAS, so exactly one caller wins, and the site enrols
-/// itself in `ONCE_SITES` so the `LOG-ONCE` census can report that it fired at all. The
-/// steady-state cost is unchanged: one `Relaxed` load from a private line, off the hot path behind
-/// `#[cold]`.
+/// printed. `OnceSite::claim` short-circuits on a `Relaxed` load and then does a `swap`, so exactly
+/// one caller observes the `false` and wins. The steady-state cost is one `Relaxed` load from a
+/// private line, off the hot path behind `#[cold]`.
+///
+/// ⚠️ **This paragraph used to claim the site "enrols itself in `ONCE_SITES` so the `LOG-ONCE`
+/// census can report that it fired at all". It does not, and no site does: `ONCE_SITES` and the
+/// `LOG-ONCE` rows are specified by the corpus and NOT BUILT.** Corrected rather than deleted,
+/// because a comment asserting an accounting mechanism that does not exist is how 39 `Once` sites
+/// came to have no latch with nothing noticing — see `docs/OPEN-QUESTIONS.md`.
 #[cold]
 #[inline(never)]
 fn warn_textured_suppressed_by_motion_vectors() {

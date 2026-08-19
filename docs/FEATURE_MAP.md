@@ -931,13 +931,13 @@ nothing more. Verified the same way — repointing it stays green.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Turn a class byte and a number into its registry row | `explain` (421) |
+| Turn a class byte and a number into its registry row | `explain` (530) |
 
 **File:** [crates/boyko_log/src/rate.rs](../crates/boyko_log/src/rate.rs) — per-code rate limiting.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Apply a code's rate policy (Once / Every / EveryN / MinInterval) | `admit` (88) |
+| Apply a code's rate policy (EveryN / MinInterval; Once is the site's own latch) | `admit` (138), called from `__log_rate_admits!` |
 
 **File:** [crates/boyko_log/src/lifecycle.rs](../crates/boyko_log/src/lifecycle.rs) — boot, drain, teardown.
 
