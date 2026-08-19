@@ -966,7 +966,21 @@ codes! {
     // fault that recurs every frame can only reach the operator as a record per frame; the ring
     // damps it by dropping and counting, which is the damping this design has. It is NOT damped
     // by this column -- see the note on `RatePolicy` above.
-    (2203, E, E2203, RatePolicy::Every, CodeStatus::Live,
+    // MinIntervalMs, and the decision is the corpus's rather than mine: `05-LADDER-GATES.md`
+    // records this site as one that "genuinely wants per-second damping" and settles for `Every`
+    // because the macros did not read this column. They do now.
+    //
+    // The site's own comment argued for `Every` -- and argued it FROM THE SAME ABSENCE: "the flood
+    // is bounded by the ring, which drops and counts -- not by the registry's rate column, which
+    // the emission macros do not read". What it was defending is that a recurring device fault
+    // must stay VISIBLE, and one line per second keeps that: this is not a latch, and an hour of
+    // broken frames does not look like a good one.
+    //
+    // What `Every` cost is not this code's own bytes but everyone else's: the lane ring is SHARED,
+    // so a fault recurring at 60 fps evicts other subsystems' records for the whole session. The
+    // suppressed occurrences are counted and the census prints them (`LOG-CENSUS limiter`), which
+    // is the half that did not exist when the site's comment was written.
+    (2203, E, E2203, RatePolicy::MinIntervalMs(1_000), CodeStatus::Live,
         "A GPU dispatch failed inside a system that has no error channel"),
     (2204, W, W2204, RatePolicy::Once,  CodeStatus::Live,
         "Lights with a non-finite position or range were dropped from the GPU light table"),

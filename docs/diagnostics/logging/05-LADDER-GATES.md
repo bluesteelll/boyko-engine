@@ -336,6 +336,8 @@ the flood. `codes.rs` gained
 `MinIntervalMs(1000)` on `E2203`. It proves what it can and its failure text says what it cannot:
 **it does not prove that a declared `Once` has an `OnceSite` behind it.**
 
+> **AND `E2203` HAS THAT POLICY NOW.** The row above records the site as one that "genuinely wants per-second damping" and settling for `Every`; the site's own comment argued for `Every` **from the same absence** — "bounded by the ring, which drops and counts, not by the registry's rate column, which the emission macros do not read". They read it now, so the site declares `MinIntervalMs(1_000)`. What the comment was defending — that a recurring device fault stays VISIBLE — a one-second window keeps; what `Every` cost was not this code's own bytes but everyone else's, because the lane ring is SHARED and a fault recurring at 60 fps evicts other subsystems' records for the session. Its test is re-cut to the two halves of the choice: 1 of 3 delivered with 2 counted, and a later window opens (driven through `rate::admit` with an explicit stamp rather than by sleeping a second, which would assert about the scheduler). **The `not a latch` leg failed first, and informatively**: a literal `9_000_000` ms stamp refused, because `now_ms` counts from the tick counter's own origin and is already ~80 million at process start — a "large" literal is in the PAST, and the test would have accused the policy of the opposite of its defect.
+
 > **SUPERSEDED — `rate::admit` IS WIRED.** The gate above is **deleted**, because its assertion
 > would now forbid the capability that exists. `warn!`/`error!`, their `_kv!` forms and
 > `dyn_warn!`/`dyn_error!` gained a **fourth gate**, `__log_rate_admits!`, placed LAST in the `&&`
