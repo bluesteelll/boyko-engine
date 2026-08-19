@@ -212,6 +212,7 @@ fn boot_and_enable_logging_from_env() {
         // every line into ECS storage for no reader.
         ecs_ring: false,
         file: false,
+        binary: false,
         file_cap_bytes: 0,
         sink_mode: SinkMode::Thread,
     });

@@ -14,6 +14,7 @@ fn a_refusing_handoff_reports_its_pass_count_and_says_the_byte_sinks_are_intact(
         sink_thread: false,
         ecs_ring: true,
         file: true,
+        binary: false,
         file_cap_bytes: 0,
         sink_mode: SinkMode::Manual,
     });

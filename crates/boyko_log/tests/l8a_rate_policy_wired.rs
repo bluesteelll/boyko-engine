@@ -59,6 +59,7 @@ fn the_registry_column_is_applied_by_the_emission_macros() {
         sink_thread: false,
         ecs_ring: false,
         file: false,
+        binary: false,
         file_cap_bytes: 0,
         sink_mode: SinkMode::Manual,
     });

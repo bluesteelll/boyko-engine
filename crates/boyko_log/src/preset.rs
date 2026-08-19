@@ -6,11 +6,23 @@
 //!
 //! | preset | sinks | rotation | `SinkMode` | intended for |
 //! |---|---|---|---|---|
-//! | `Dev` | console + file | off | `Thread` | engine work, benches, goldens |
-//! | `Editor` | console + file | on | `Thread` | long editor sessions |
-//! | `Shipping` | binary + crash | on | `Thread` | a released title |
-//! | `ShippingMin` | crash only | on | `Scheduled` | a title that wants no resident diagnostics thread |
+//! | `Dev` | console + text file | off | `Thread` | engine work, benches, goldens |
+//! | `Editor` | console + text file | on | `Thread` | long editor sessions |
+//! | `Shipping` | binary file | on | `Thread` | a released title |
+//! | `ShippingMin` | text file | on | `Scheduled` | a title that wants no resident diagnostics thread |
 //! | `Off` | none | — | `Manual` | the "diagnostics cost nothing" leg |
+//!
+//! # There is no separate "crash" sink, and the table used to say there was
+//!
+//! The rows for `Shipping` and `ShippingMin` read "binary + crash" and "crash only". **A crash
+//! destination distinct from the file sink does not exist**: [`crash::arm`](crate::sink::crash::arm)
+//! points the FILE sink at a path and installs the hook's flush protocol on top. Nor should it —
+//! a destination that only received records at panic time would be EMPTY, because the drain empties
+//! the ring continuously under every `SinkMode`. What makes a crash file work is that it is an
+//! ordinary continuous sink which happens to survive the crash.
+//!
+//! So the column is corrected rather than the code. `crash::arm` is orthogonal to this table: any
+//! preset with a file sink can arm it, and arming replaces that sink's path.
 //!
 //! # The default is a default, not a coupling
 //!
@@ -69,6 +81,7 @@ impl LogRuntimePreset {
                 sink_thread: true,
                 ecs_ring: true,
                 file: true,
+                binary: false,
                 file_cap_bytes: 0,
                 sink_mode: SinkMode::Thread,
             },
@@ -77,6 +90,7 @@ impl LogRuntimePreset {
                 sink_thread: true,
                 ecs_ring: true,
                 file: true,
+                binary: false,
                 file_cap_bytes: 0,
                 sink_mode: SinkMode::Thread,
             },
@@ -84,7 +98,8 @@ impl LogRuntimePreset {
                 console: false,
                 sink_thread: true,
                 ecs_ring: false,
-                file: true,
+                file: false,
+                binary: true,
                 file_cap_bytes: 0,
                 sink_mode: SinkMode::Thread,
             },
@@ -93,6 +108,7 @@ impl LogRuntimePreset {
                 sink_thread: false,
                 ecs_ring: false,
                 file: true,
+                binary: false,
                 file_cap_bytes: 0,
                 sink_mode: SinkMode::Scheduled,
             },
@@ -101,9 +117,40 @@ impl LogRuntimePreset {
                 sink_thread: false,
                 ecs_ring: false,
                 file: false,
+                binary: false,
                 file_cap_bytes: 0,
                 sink_mode: SinkMode::Manual,
             },
+        }
+    }
+
+}
+
+/// Rotate the text sink at 64 MiB.
+///
+/// A number rather than a knob, because a preset that took one would be a configuration wearing a
+/// preset's name. A host that wants its own calls
+/// [`set_rotation`](crate::sink::file::set_rotation) directly.
+pub const ROTATE_AT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Keep four rotated files. Enough to hold a session's tail across three restarts.
+pub const ROTATE_KEEP: u8 = 4;
+
+impl LogRuntimePreset {
+    /// Rebuild a preset from `boot_preset`'s stored byte, where `0` means "no preset".
+    ///
+    /// Plus-one encoding so the `.bss`-zero state means ABSENT: a host that built its own
+    /// `LogConfig` selected no preset at all, and printing `runtime_preset=dev` for it would name
+    /// an axis nobody chose.
+    #[must_use]
+    pub const fn from_raw(raw: u8) -> Option<LogRuntimePreset> {
+        match raw {
+            1 => Some(LogRuntimePreset::Dev),
+            2 => Some(LogRuntimePreset::Editor),
+            3 => Some(LogRuntimePreset::Shipping),
+            4 => Some(LogRuntimePreset::ShippingMin),
+            5 => Some(LogRuntimePreset::Off),
+            _ => None,
         }
     }
 
@@ -134,13 +181,19 @@ impl LogRuntimePreset {
 ///
 /// The `SessionId` is the profiler's, minted once per process, so an uploaded log and an uploaded
 /// profiling artifact identify the same session without anyone having to correlate timestamps.
-pub fn header(preset: LogRuntimePreset) {
+pub fn header(preset: Option<LogRuntimePreset>) {
     let session = boyko_diag::clock::session_id();
     crate::info!(
         crate::Log,
         "build_profile={} runtime_preset={} ceiling={} session={:x}{:x}",
         boyko_diag::profile::PROFILE_NAME,
-        preset.name(),
+        // `None` prints `custom`, and that is not a cosmetic choice: a host that built its own
+        // `LogConfig` selected no preset, and naming one would send a reader to reason about a row
+        // of the table above that nobody chose.
+        match preset {
+            Some(p) => p.name(),
+            None => "custom",
+        },
         crate::GLOBAL_CEILING.as_str(),
         session.1,
         session.0

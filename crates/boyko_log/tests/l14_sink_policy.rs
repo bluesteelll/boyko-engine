@@ -29,6 +29,7 @@ fn state_floor_and_filter_each_decide_delivery_on_their_own() {
         sink_thread: false,
         ecs_ring: false,
         file: true,
+        binary: false,
         file_cap_bytes: 0,
         sink_mode: SinkMode::Manual,
     });
@@ -111,6 +112,7 @@ fn an_armed_target_no_sink_accepts_is_unsunk_and_says_so() {
         sink_thread: false,
         ecs_ring: false,
         file: true,
+        binary: false,
         file_cap_bytes: 0,
         sink_mode: SinkMode::Manual,
     });

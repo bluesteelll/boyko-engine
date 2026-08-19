@@ -11,6 +11,17 @@
 //! `boyko-E0109` reports a crash file that could not be opened, at enable time, when there is still
 //! a healthy process to tell.
 //!
+//! # The crash file IS the file sink, pointed at a different path
+//!
+//! [`arm`] calls [`file::set_path`](crate::sink::file::set_path) and opens it. There is no separate
+//! crash destination, and there should not be: one that only received records at panic time would
+//! be **empty**, because the drain empties the ring continuously under every `SinkMode`. What makes
+//! a crash file work is that it is an ordinary continuous sink which happens to survive the crash.
+//!
+//! The consequence a caller must know: **arming replaces the file sink's path.** A process cannot
+//! have an ordinary text log and a separate crash log; it has one file, which contains both. The
+//! preset table in [`crate::preset`] used to imply otherwise and no longer does.
+//!
 //! # The hook's protocol, and why step 1.5 exists
 //!
 //! - **Step 1** -- mark the sink `Exiting`, so nothing new is admitted.
@@ -74,9 +85,6 @@ pub fn arm(path: &str) -> bool {
     true
 }
 
-/// `boyko-E0109`: the crash file could not be opened.
-///
-/// `Once`: one process has one crash destination, and a second attempt fails for the same reason.
 /// The `E0109` latch, a NAMED module-level `static` so an observer can control it.
 ///
 /// Without it this site's `Once` was honoured by the CALL STRUCTURE -- `arm` runs once on the
@@ -85,6 +93,9 @@ pub fn arm(path: &str) -> bool {
 /// register (`crate::once_sites`), which is the first thing in this crate able to see it.
 static UNOPENABLE_REPORTED: crate::codes::OnceSite = crate::codes::OnceSite::new();
 
+/// `boyko-E0109`: the crash file could not be opened.
+///
+/// `Once`: one process has one crash destination, and a second attempt fails for the same reason.
 #[cold]
 #[inline(never)]
 fn report_unopenable(path: &str) {

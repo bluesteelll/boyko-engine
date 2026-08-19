@@ -98,6 +98,7 @@ fn main() {
         sink_thread: false,
         ecs_ring: false,
         file: false,
+        binary: false,
         file_cap_bytes: 0,
         sink_mode: SinkMode::Manual,
     });

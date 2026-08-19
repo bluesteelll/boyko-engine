@@ -59,6 +59,7 @@ fn requests_round_trip_in_order_and_a_full_ring_is_refused_not_dropped() {
         sink_thread: false,
         ecs_ring: false,
         file: true,
+        binary: false,
         file_cap_bytes: 0,
         sink_mode: SinkMode::Manual,
     });
@@ -130,6 +131,7 @@ fn a_posted_open_takes_effect_and_earlier_records_are_not_retrofitted() {
         sink_thread: false,
         ecs_ring: false,
         file: false,
+        binary: false,
         file_cap_bytes: 0,
         sink_mode: SinkMode::Manual,
     });

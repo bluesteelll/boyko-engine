@@ -107,6 +107,18 @@ pub struct LogConfig {
     /// handles and no borrowed lifetime — a configuration that owned a path would be one `boot`
     /// could not record without allocating.
     pub file: bool,
+    /// Open the destination recorded by [`crate::sink::binary::set_path`] at [`enable`].
+    ///
+    /// # It had no production route until this field existed
+    ///
+    /// The binary sink shipped with a format, a dictionary, a destination and — a rung later — an
+    /// offline decoder. Nothing on the enable path opened it: the only routes were the request
+    /// ring and a direct call from a test. So a shipped configuration could not produce a `.blog`
+    /// at all, which makes every gate below it a gate on a file no process writes.
+    ///
+    /// Separate from [`file`](Self::file) rather than an enum, because a process may legitimately
+    /// want both: a text file for a human tailing it and a binary one for the upload.
+    pub binary: bool,
     /// Byte cap for the file sink; `0` means uncapped. Reaching it emits `boyko-W0103` once.
     pub file_cap_bytes: u64,
     /// Who drains the rings. See [`SinkMode`].
@@ -153,6 +165,61 @@ pub enum DrainResult {
 /// the same answer.
 static WANT_ECS_RING: AtomicU8 = AtomicU8::new(0);
 
+/// Boot from a [`LogRuntimePreset`](crate::preset::LogRuntimePreset), applying its WHOLE row.
+///
+/// # Why a function and not "call `boot(preset.config())`"
+///
+/// Because `config()` is only part of the row. The preset table also says whether the file sink
+/// rotates and which destinations exist, and neither is in `LogConfig` -- `rotates()`'s own doc
+/// warned that a preset claiming to rotate without calling `set_rotation` would be "a table that
+/// describes a behaviour nobody implements". It was exactly that, because nothing called either.
+///
+/// This applies all of it in one place: paths, rotation, sinks, and the boot itself. What it
+/// cannot invent is the paths, so they are arguments.
+///
+/// `text` and `binary` are `Option`s rather than a single path, because the two sinks have their
+/// own destinations on purpose -- a process may want a text file for a human tailing it and a
+/// binary one for the upload, and one path setter serving both would make "which file did that go
+/// to" unanswerable.
+pub fn boot_preset(preset: crate::preset::LogRuntimePreset, text: Option<&str>, binary: Option<&str>) {
+    let cfg = preset.config();
+    if cfg.file && let Some(path) = text {
+        crate::sink::file::set_path(path);
+    }
+    if cfg.binary && let Some(path) = binary {
+        crate::sink::binary::set_path(path);
+    }
+    if preset.rotates() {
+        crate::sink::file::set_rotation(crate::preset::ROTATE_AT_BYTES, crate::preset::ROTATE_KEEP);
+    }
+    BOOT_PRESET.store(preset as u8 + 1, Ordering::Relaxed);
+    // A PRESET ARMS THE ENGINE'S TARGETS, and without this it configures sinks nothing reaches.
+    //
+    // `CONTROL` is `.bss`-zero, which is `Level::Off` for every target: a process that boots a
+    // preset and enables it would open a file, write a header into a ring, and drop every record
+    // at gate (c). MEASURED -- the first draft of this function did not arm, and the session
+    // header did not reach the `.blog` the preset had just opened.
+    //
+    // Armed at the COMPILE ceiling, not above it: the runtime axis cannot exceed the compile one,
+    // and a preset that tried would be claiming a level the binary cannot emit. A host wanting
+    // something narrower calls `set_target_control` after this returns.
+    if preset != crate::preset::LogRuntimePreset::Off {
+        for (id, _) in crate::target::engine_targets() {
+            crate::target::set_target_control(
+                id,
+                crate::target::TargetControl::new(crate::GLOBAL_CEILING, 0, false),
+            );
+        }
+    }
+    boot(cfg);
+}
+
+/// The preset [`boot_preset`] recorded, or `None` for a hand-built [`LogConfig`].
+#[must_use]
+pub fn boot_preset_recorded() -> Option<crate::preset::LogRuntimePreset> {
+    crate::preset::LogRuntimePreset::from_raw(BOOT_PRESET.load(Ordering::Relaxed))
+}
+
 /// Whether the consumer role should feed [`ECS_HANDOFF`](crate::sink::ecs).
 #[inline]
 #[must_use]
@@ -162,6 +229,16 @@ pub fn ecs_ring_enabled() -> bool {
 
 /// Recorded by [`boot`], acted on by [`enable`].
 static WANT_FILE: AtomicU8 = AtomicU8::new(0);
+
+/// Recorded by [`boot`], acted on by [`enable`]. See [`LogConfig::binary`].
+static WANT_BINARY: AtomicU8 = AtomicU8::new(0);
+
+/// The preset [`boot_preset`] recorded, plus one, or `0` for a hand-built [`LogConfig`].
+///
+/// Plus one so the `.bss`-zero state means "no preset", which is the honest answer for a host that
+/// built its own config: printing `runtime_preset=dev` for it would name an axis the host never
+/// selected.
+static BOOT_PRESET: AtomicU8 = AtomicU8::new(0);
 
 /// The file sink's byte cap, recorded by [`boot`].
 static FILE_CAP: AtomicU64 = AtomicU64::new(0);
@@ -393,6 +470,7 @@ pub fn boot(cfg: LogConfig) {
     );
     WANT_ECS_RING.store(u8::from(cfg.ecs_ring), Ordering::Relaxed);
     WANT_FILE.store(u8::from(cfg.file), Ordering::Relaxed);
+    WANT_BINARY.store(u8::from(cfg.binary), Ordering::Relaxed);
     FILE_CAP.store(cfg.file_cap_bytes, Ordering::Relaxed);
     SINK_MODE.store(cfg.sink_mode as u8, Ordering::Relaxed);
     SINK_STATE.store(SinkState::Booted as u8, Ordering::Release);
@@ -434,6 +512,14 @@ pub fn enable() -> bool {
     if cur != SinkState::Booted {
         return false;
     }
+    // CALIBRATION COMES FIRST, and the ordering is load-bearing rather than tidy.
+    //
+    // The binary sink writes its anchor at `open`, and the anchor carries `ticks_per_ns` so a
+    // reader on another machine can turn a delta into a time. Opening a sink before calibrating
+    // stamps the UNCALIBRATED 1.0 into the file -- MEASURED: `logdec` read `ticks_per_ns=1` and
+    // reported a record 0.2 ms after open as `+85.215ms`. The 20 ms window still lives here and
+    // nowhere else; a process that never asks for a log still never pays it.
+    boyko_diag::clock::calibrate();
     if WANT_CONSOLE.load(Ordering::Relaxed) != 0 {
         crate::sync_out::set_console_enabled(true);
     }
@@ -444,11 +530,21 @@ pub fn enable() -> bool {
         // not authorised is exactly what boot may not make.
         crate::sink::file::open(FILE_CAP.load(Ordering::Relaxed));
     }
-    // The 20 ms calibration window lives here and nowhere else. Doing it at boot would make every
-    // process pay it, including one that never asks for a log.
-    boyko_diag::clock::calibrate();
+    if WANT_BINARY.load(Ordering::Relaxed) != 0 {
+        // Same rule as the text sink one branch up: the syscall belongs to the enable path, not to
+        // boot. A refusal is not a launch failure -- `binary::path_recorded()` and
+        // `binary::frames_written()` are how a host learns, rather than by noticing a missing file.
+        crate::sink::binary::open();
+    }
     install_panic_hook();
     SINK_STATE.store(SinkState::Enabled as u8, Ordering::Release);
+    // THE SESSION HEADER, and it is emitted here because here is the first moment it can be.
+    //
+    // After `calibrate`, so the clock scale it implies is real; after the state moves to `Enabled`,
+    // because `info!` is refused before that. G16(d) owes three INDEPENDENT facts -- build profile,
+    // runtime preset and ceiling -- and `preset::header` had no caller at all until this line: the
+    // function existed, the rung was reported half-shipped, and nothing printed anything.
+    crate::preset::header(boot_preset_recorded());
     if WANT_SINK.load(Ordering::Relaxed) != 0 {
         SINK_RUNNING.store(1, Ordering::Release);
         SINK_PASSES.store(0, Ordering::Release);

@@ -55,7 +55,7 @@ fn the_header_prints_three_independent_facts_and_the_presets_differ_where_the_ta
 
     // A `shipping` BUILD running `Dev` is legal and ordinary; here the run-time axis says
     // `shipping-min` while the compile axis says whatever this build is. Both must be legible.
-    header(LogRuntimePreset::ShippingMin);
+    header(Some(LogRuntimePreset::ShippingMin));
     let DrainResult::Ran(_) = drain() else { panic!("the drain role is free in this process") };
     let text = std::fs::read_to_string(&path).expect("the sink's file is readable");
 

@@ -27,6 +27,7 @@ fn rotation_keeps_the_tail_discards_the_head_and_reports_once() {
         sink_thread: false,
         ecs_ring: false,
         file: true,
+        binary: false,
         file_cap_bytes: 0,
         sink_mode: SinkMode::Manual,
     });

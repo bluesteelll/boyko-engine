@@ -15,6 +15,7 @@ fn the_crash_path_is_armed_at_enable_reports_an_unopenable_file_and_flushes_on_p
         sink_thread: false,
         ecs_ring: false,
         file: true,
+        binary: false,
         file_cap_bytes: 0,
         sink_mode: SinkMode::Manual,
     });

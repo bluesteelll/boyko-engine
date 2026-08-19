@@ -24,6 +24,7 @@ fn the_kv_forms_render_name_equals_value_in_declaration_order() {
         sink_thread: false,
         ecs_ring: false,
         file: true,
+        binary: false,
         file_cap_bytes: 0,
         sink_mode: SinkMode::Manual,
     });

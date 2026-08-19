@@ -30,6 +30,7 @@ fn the_mint_hands_out_one_index_per_code_and_never_aliases() {
         sink_thread: false,
         ecs_ring: false,
         file: true,
+        binary: false,
         file_cap_bytes: 0,
         sink_mode: SinkMode::Manual,
     });

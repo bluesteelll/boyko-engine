@@ -34,6 +34,7 @@ fn sampling_is_exact_counted_separately_and_never_suppresses_argument_evaluation
         sink_thread: false,
         ecs_ring: false,
         file: true,
+        binary: false,
         file_cap_bytes: 0,
         sink_mode: SinkMode::Manual,
     });

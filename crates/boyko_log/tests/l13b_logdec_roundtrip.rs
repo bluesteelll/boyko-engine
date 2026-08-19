@@ -28,6 +28,7 @@ fn a_blog_written_by_the_sink_decodes_back_through_the_logdec_binary() {
         sink_thread: false,
         ecs_ring: false,
         file: false,
+        binary: false,
         file_cap_bytes: 0,
         sink_mode: SinkMode::Manual,
     });

@@ -50,6 +50,7 @@ fn the_dynamic_band_interns_idempotently_and_then_refuses() {
         sink_thread: false,
         ecs_ring: false,
         file: true,
+        binary: false,
         file_cap_bytes: 0,
         sink_mode: SinkMode::Manual,
     });

@@ -154,6 +154,7 @@ fn the_downstream_target_band_claims_ids_and_names_both_colliders() {
         sink_thread: false,
         ecs_ring: false,
         file: true,
+        binary: false,
         file_cap_bytes: 0,
         sink_mode: SinkMode::Manual,
     });

@@ -30,6 +30,7 @@ fn the_binary_sink_writes_a_file_that_decodes_to_the_records_that_went_in() {
         sink_thread: false,
         ecs_ring: false,
         file: false,
+        binary: false,
         file_cap_bytes: 0,
         sink_mode: SinkMode::Manual,
     });

@@ -45,6 +45,7 @@ fn the_file_sink_writes_caps_and_the_census_tells_the_two_silences_apart() {
         sink_thread: false,
         ecs_ring: false,
         file: true,
+        binary: false,
         file_cap_bytes: CAP,
         sink_mode: SinkMode::Manual,
     });

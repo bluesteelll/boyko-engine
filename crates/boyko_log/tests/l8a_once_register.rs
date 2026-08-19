@@ -52,6 +52,7 @@ fn the_register_tells_a_latched_once_site_from_an_unlatched_one() {
         sink_thread: false,
         ecs_ring: false,
         file: false,
+        binary: false,
         file_cap_bytes: 0,
         sink_mode: SinkMode::Manual,
     });

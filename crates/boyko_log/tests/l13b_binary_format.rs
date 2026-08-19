@@ -93,6 +93,7 @@ fn a_full_site_dictionary_refuses_rather_than_reusing_an_id() {
         sink_thread: false,
         ecs_ring: false,
         file: true,
+        binary: false,
         file_cap_bytes: 0,
         sink_mode: SinkMode::Manual,
     });
