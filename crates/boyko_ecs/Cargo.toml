@@ -253,3 +253,11 @@ harness = false
 
 [lints]
 workspace = true
+
+# GJ1 / profiling rung 16 (= J2). `harness = false` for the same reason every diagnostics bench in
+# this campaign uses it: the verdict discipline is the corpus's -- an interleaved twin, a spread
+# floor that is the CLOCK's resolution, and `NOT RESOLVED` as a first-class outcome -- and criterion
+# reports none of those.
+[[bench]]
+name = "gj1_flag_cost"
+harness = false
