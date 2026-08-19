@@ -943,7 +943,7 @@ nothing more. Verified the same way — repointing it stays green.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Ask whether anything is actually consuming records — the answer every stderr fallback is written against | `flush` (654) |
+| Ask whether anything is actually consuming records — the answer every stderr fallback is written against | `flush` (661) |
 
 **File:** [crates/boyko_log/src/sync_out.rs](../crates/boyko_log/src/sync_out.rs) — the synchronous route.
 
@@ -955,8 +955,8 @@ nothing more. Verified the same way — repointing it stays green.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Walk every frame in a `.blog` — the ONE walker, shared by `logdec` and the format tests | `frames` (687) |
-| Decode a single frame, stopping rather than guessing at a truncated tail | `decode_frame` (618) |
+| Walk every frame in a `.blog` — the ONE walker, shared by `logdec` and the format tests | `frames` (841) |
+| Decode a single frame, stopping rather than guessing at a truncated tail | `decode_frame` (759) |
 | Turn a `.blog` back into text on the command line | `crates/boyko_log/src/bin/logdec.rs` |
 
 Wire contract: [docs/LOG-BINARY-FORMAT.md](LOG-BINARY-FORMAT.md).

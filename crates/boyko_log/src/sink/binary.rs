@@ -37,6 +37,9 @@ pub enum FrameKind {
     Anchor = 3,
     /// A record whose site could not be interned: the site is spelled out INLINE beside it.
     InlineSite = 4,
+    /// The process's `SessionId`. Written once per FILE, so a rotated generation can be proved to
+    /// belong to the same run as the one before it.
+    Session = 5,
 }
 
 impl FrameKind {
@@ -49,6 +52,7 @@ impl FrameKind {
             2 => Some(FrameKind::Record),
             3 => Some(FrameKind::Anchor),
             4 => Some(FrameKind::InlineSite),
+            5 => Some(FrameKind::Session),
             _ => None,
         }
     }
@@ -196,6 +200,9 @@ pub struct RecordFrame<'a> {
 /// Anchor frame width: kind + absolute ticks + the writer's `ticks_per_ns`.
 pub const ANCHOR_BYTES: usize = 1 + 8 + 8;
 
+/// Session frame width: kind + the two halves of the 128-bit id.
+pub const SESSION_BYTES: usize = 1 + 8 + 8;
+
 /// Frame header width: kind + site_id + tsc_delta + len + flags + epoch_lo.
 pub const RECORD_HEADER_BYTES: usize = 1 + 2 + 4 + 2 + 1 + 1;
 
@@ -297,6 +304,102 @@ static BIN_FILE: BinFileSlot = BinFileSlot(core::cell::UnsafeCell::new(None));
 /// Frames written since `open`. The census's question and the test's.
 static FRAMES: AtomicU64 = AtomicU64::new(0);
 
+/// Bytes in the CURRENT generation. Reset by `open` and by every rotation.
+static WRITTEN: AtomicU64 = AtomicU64::new(0);
+
+/// Rotate at this many bytes; `0` disables rotation.
+static ROTATE_AT: AtomicU64 = AtomicU64::new(0);
+
+/// Generations to keep beside the live file.
+static ROTATE_KEEP: AtomicU64 = AtomicU64::new(0);
+
+/// Rotations performed, and bytes that stopped being reachable.
+static ROTATIONS: AtomicU64 = AtomicU64::new(0);
+static ROTATED_AWAY: AtomicU64 = AtomicU64::new(0);
+
+/// Rotate the binary sink at `at_bytes`, keeping `keep` generations. `0` disables.
+///
+/// Separate from the text sink's setter because the two destinations are separate, and a process
+/// may want a small rotating `.blog` beside an uncapped text file or the reverse.
+pub fn set_rotation(at_bytes: u64, keep: u8) {
+    ROTATE_AT.store(at_bytes, Ordering::Relaxed);
+    ROTATE_KEEP.store(u64::from(keep), Ordering::Relaxed);
+}
+
+/// The rotation cap in bytes; `0` when rotation is off.
+#[must_use]
+pub fn rotation_cap() -> u64 {
+    ROTATE_AT.load(Ordering::Relaxed)
+}
+
+/// `(rotations, bytes that stopped being reachable)`.
+#[must_use]
+pub fn rotation_state() -> (u64, u64) {
+    (ROTATIONS.load(Ordering::Relaxed), ROTATED_AWAY.load(Ordering::Relaxed))
+}
+
+/// Roll the file, then RE-OPEN THE FORMAT: a fresh anchor, a fresh session, an empty dictionary.
+///
+/// # A rotated generation must be self-contained, and that is not true by default
+///
+/// A decoder reads one file. Rolling the bytes away without re-emitting the header would leave the
+/// new generation starting mid-stream: no anchor to add its deltas to, and record frames naming
+/// dictionary ids whose `Dictionary` frames went out with the previous generation — every line
+/// decoded under some earlier site's file and line. That is the failure the per-FILE dictionary
+/// rule already refuses at `open`, arriving by the other door.
+fn rotate_now() -> u64 {
+    let len = BIN_PATH_LEN.load(Ordering::Acquire) as usize;
+    if len == 0 {
+        return 0;
+    }
+    // SAFETY: as `open` -- the `Acquire` pairs with `set_path`'s `Release`, and the caller holds
+    //   the single drain token, so nothing else is inside this cell.
+    let path = unsafe {
+        let src = core::slice::from_raw_parts(BIN_PATH.0.get().cast::<u8>(), len);
+        match core::str::from_utf8(src) {
+            Ok(p) => p.to_owned(),
+            Err(_) => return 0,
+        }
+    };
+    let keep = ROTATE_KEEP.load(Ordering::Relaxed);
+
+    // The handle goes first: on Windows an open handle blocks the rename, and a rotation that
+    // silently failed would be a file growing past its own limit while reporting it rotated.
+    // SAFETY: the caller holds the drain token, which is the single-writer argument for this cell.
+    unsafe { *BIN_FILE.0.get() = None };
+
+    let oldest = std::path::PathBuf::from(format!("{path}.{keep}"));
+    let lost_oldest = std::fs::metadata(&oldest).map(|m| m.len()).unwrap_or(0);
+    let _ = std::fs::remove_file(&oldest);
+    for n in (1..=keep).rev() {
+        let from = if n == 1 {
+            std::path::PathBuf::from(&path)
+        } else {
+            std::path::PathBuf::from(format!("{path}.{}", n - 1))
+        };
+        let _ = std::fs::rename(&from, std::path::PathBuf::from(format!("{path}.{n}")));
+    }
+    let lost = if keep == 0 {
+        let n = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let _ = std::fs::remove_file(&path);
+        n
+    } else {
+        lost_oldest
+    };
+
+    let fresh = std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&path).ok();
+    // SAFETY: as above.
+    unsafe { *BIN_FILE.0.get() = fresh };
+    WRITTEN.store(0, Ordering::Relaxed);
+    ROTATIONS.fetch_add(1, Ordering::Relaxed);
+    ROTATED_AWAY.fetch_add(lost, Ordering::Relaxed);
+    // The new generation is a FILE, so it gets a file's opening: its own time base, its own run id
+    // and its own dictionary.
+    reset_site_dict();
+    write_file_header();
+    lost
+}
+
 /// The tick value the file's anchor recorded. **Every `tsc_delta` is measured from this.**
 ///
 /// It has to be remembered, and the first draft did not: `write_record` wrote `tsc as u32`, the low
@@ -358,7 +461,8 @@ pub fn open() -> bool {
     // The dictionary is per FILE, not per process: a decoder replays it from the frames in the
     // file it is reading, so ids from a previous file would decode this one under wrong sites.
     reset_site_dict();
-    write_anchor();
+    WRITTEN.store(0, Ordering::Relaxed);
+    write_file_header();
     true
 }
 
@@ -379,6 +483,13 @@ fn write_raw(bytes: &[u8]) -> bool {
         return false;
     }
     FRAMES.fetch_add(1, Ordering::Relaxed);
+    let at = WRITTEN.fetch_add(bytes.len() as u64, Ordering::Relaxed) + bytes.len() as u64;
+    let cap = ROTATE_AT.load(Ordering::Relaxed);
+    // AFTER the write, never before: rotating first would split a frame across two generations, and
+    // a half-frame is exactly what the decoder's ragged-tail rule reads as a crash.
+    if cap != 0 && at >= cap {
+        rotate_now();
+    }
     true
 }
 
@@ -419,6 +530,29 @@ fn write_anchor_at(now: u64) -> bool {
     buf[1..9].copy_from_slice(&now.to_le_bytes());
     buf[9..17].copy_from_slice(&boyko_diag::clock::ticks_per_ns().to_bits().to_le_bytes());
     write_raw(&buf)
+}
+
+/// Emit the `Session` frame: which run this file belongs to.
+///
+/// **Once per FILE and not once per process**, which is the whole point: a rotated generation that
+/// carried no session could not be proved to belong to the run before it, and `logdec --merge`
+/// would be merging files on the strength of their names.
+fn write_session() -> bool {
+    let id = boyko_diag::clock::session_id();
+    let mut buf = [0u8; SESSION_BYTES];
+    buf[0] = FrameKind::Session as u8;
+    buf[1..9].copy_from_slice(&id.0.to_le_bytes());
+    buf[9..17].copy_from_slice(&id.1.to_le_bytes());
+    write_raw(&buf)
+}
+
+/// The frames every generation opens with: an anchor, then the session.
+///
+/// Anchor FIRST, because a file whose first frame is a record has no absolute time to add its
+/// deltas to; session second, because it is the answer to "which run" and not to "when". Both are
+/// re-emitted after a rotation, which is what makes a generation self-contained.
+fn write_file_header() -> bool {
+    write_anchor() && write_session()
 }
 
 /// Emit a `Dictionary` frame: one site, spelled out, so every later record can name it by id.
@@ -596,6 +730,13 @@ pub enum Frame<'a> {
     },
     /// The common case: a site id and a payload.
     Record(RecordFrame<'a>),
+    /// The process's session id, written once per file.
+    Session {
+        /// Low half of `boyko_diag::clock::session_id`.
+        lo: u64,
+        /// High half.
+        hi: u64,
+    },
     /// A record whose site could not be interned, carrying its own site.
     InlineSite {
         /// Source line.
@@ -655,6 +796,19 @@ pub fn decode_frame(buf: &[u8]) -> Option<(Frame<'_>, usize)> {
             let (file, at) = take_str(buf, 7)?;
             let (fmt, end) = take_str(buf, at)?;
             Some((Frame::Dictionary { site_id, line, file, fmt }, end))
+        }
+        FrameKind::Session => {
+            if buf.len() < SESSION_BYTES {
+                return None;
+            }
+            let mut lo = [0u8; 8];
+            lo.copy_from_slice(&buf[1..9]);
+            let mut hi = [0u8; 8];
+            hi.copy_from_slice(&buf[9..17]);
+            Some((
+                Frame::Session { lo: u64::from_le_bytes(lo), hi: u64::from_le_bytes(hi) },
+                SESSION_BYTES,
+            ))
         }
         FrameKind::Record => decode_record(buf).map(|(r, n)| (Frame::Record(r), n)),
         FrameKind::InlineSite => {

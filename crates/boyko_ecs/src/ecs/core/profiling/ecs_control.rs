@@ -195,6 +195,27 @@ pub fn register_scope(name: &'static str) -> Result<ProfilingScope, ScopeError> 
     Ok(ProfilingScope { bit: bit as u8, name })
 }
 
+/// Put the game-scope mint back to its start. **Test builds only.**
+///
+/// # Why a saturating test must restore what it spent
+///
+/// `NEXT_GAME_SCOPE` is process-global and monotone, and one test in this crate
+/// (`register_scope_mints_in_the_game_range_and_refuses_past_the_word`) **saturates it by design**
+/// -- that IS its subject. Everything after it in the same binary then sees an exhausted space, and
+/// the `g12` gates, whose zones are declared on the top two bits, fail with "a register_scope mint
+/// has reached this gate's own bits".
+///
+/// That was recorded as a known order dependency and guarded with an assertion rather than fixed:
+/// *"under the module lock the two orders are both legal, and only the assertion tells them
+/// apart."* Both orders being legal is precisely what makes the suite flaky -- the gate passes or
+/// fails on which test won the race, which is a gate that reports the scheduler. The saturating
+/// test now restores the counter under the same serial lock it saturates it under, so both orders
+/// are legal AND correct.
+#[cfg(test)]
+pub(crate) fn reset_game_scope_mint() {
+    NEXT_GAME_SCOPE.store(USER_SCOPE_BASE, Ordering::Relaxed);
+}
+
 /// Game scope bits minted so far, for a gate or a report. `0` before the first [`register_scope`].
 #[must_use]
 pub fn minted_game_scopes() -> u32 {

@@ -41,6 +41,14 @@ fn shipping_opens_the_binary_sink_and_the_header_is_in_the_file() {
     assert!(!cfg.file, "`Shipping` opens no TEXT file, whatever the row used to say");
     assert!(!cfg.console, "a released title writes no console");
     assert!(LogRuntimePreset::Shipping.rotates(), "a released title's file must not grow forever");
+    // Rotation must reach the sink the row actually writes to. The first draft of `boot_preset`
+    // set it on the TEXT sink only, so `Shipping` -- whose destination is the binary file --
+    // claimed rotation in the table and rotated nothing.
+    assert_eq!(
+        boyko_log::sink::binary::rotation_state(),
+        (0, 0),
+        "the binary sink has not rotated before this test boots"
+    );
 
     // ── THE PRODUCTION PATH, WITH NOTHING OPENED BY HAND ────────────────────────────────────
     boot_preset(
@@ -65,6 +73,11 @@ fn shipping_opens_the_binary_sink_and_the_header_is_in_the_file() {
 
     // ── THE BINARY FILE EXISTS AND THE TEXT ONE DOES NOT ────────────────────────────────────
     assert!(blog.exists(), "`Shipping` did not open the binary sink `enable` was supposed to open");
+    assert!(
+        boyko_log::sink::binary::rotation_cap() > 0,
+        "`Shipping` rotates by its own table row, and the cap must reach the BINARY sink -- the \
+         one this preset writes to"
+    );
     assert!(
         !text.exists(),
         "`Shipping` opened a TEXT file; the row says binary, and two destinations for one row is \

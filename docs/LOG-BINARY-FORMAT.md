@@ -33,6 +33,7 @@ sittings: `render_payload` against `encode_record`, same payload, interleaved �
 | `2` | `Record` | the common case |
 | `3` | `Anchor` | at `open`, and whenever a delta would overflow or go backwards |
 | `4` | `InlineSite` | the dictionary is full; the site travels with the record |
+| `5` | `Session` | once per FILE, right after the opening anchor |
 
 ### `Anchor` — 17 bytes, fixed
 
@@ -51,6 +52,19 @@ computing a plausible-looking millisecond figure against a scale of one.
 **A file must open with an anchor.** One that opens with a record has no absolute time to add its
 deltas to: it decodes to a session that started at zero, which is worse than one that refuses to
 decode.
+
+### `Session` — 17 bytes, fixed
+
+| offset | width | field |
+|---|---|---|
+| 0 | 1 | kind = `5` |
+| 1 | 8 | `session_lo` — `boyko_diag::clock::session_id`'s low half |
+| 9 | 8 | `session_hi` |
+
+**Once per FILE and not once per process**, which is the whole point. Rotation leaves `foo.blog`,
+`foo.blog.1`, `foo.blog.2` in a directory — and so does yesterday's run, under the same names. A
+generation carrying no session could not be proved to belong to the run before it, and
+`logdec --merge` would be merging files on the strength of their names.
 
 ### `Dictionary` — variable
 
@@ -141,13 +155,31 @@ Prints one line per record: the stamp, the source location, and the rendered mes
 usage, `1` for a file that could not be read, `0` otherwise — **including a ragged tail**, which is
 reported and is not a failure.
 
+`--merge` takes several generations of ONE session and prints one time-ordered listing, sorted on
+the ABSOLUTE tick (anchor + delta) rather than on file order — concatenating by name would be right
+by accident and silently wrong the moment a generation's clock base differed. It **refuses** files
+whose `SessionId` differs, exit `3`; an `InlineSite` record carries no delta and so has no place on
+a timeline, and is printed under `[unordered]` rather than dropped.
+
 It has no parsing of its own: `boyko_log::sink::binary::frames` is the one walker, shared with the
 format tests. A tool with a private copy of the decode would go on working after the shipped
 decoder broke, and the test that proved the decoder would go on passing after the tool broke.
 
+## Rotation
+
+`binary::set_rotation(at_bytes, keep)` rolls `name` -> `name.1` -> … -> `name.keep`. The check runs
+**after** each write, never before: rotating first would split a frame across two generations, and a
+half-frame is exactly what the decoder's ragged-tail rule reads as a crash.
+
+**A rotated generation is re-opened as a FILE, not continued as a stream.** After the roll the sink
+emits a fresh anchor, a fresh session, and resets the site dictionary. Without that the new
+generation starts mid-stream: no anchor for its deltas to be relative to, and record frames naming
+dictionary ids whose `Dictionary` frames went out with the previous generation — so every line
+decodes under some earlier site's file and line. That is the failure the per-FILE dictionary rule
+already refuses at `open`, arriving through the other door.
+
 ## What this format does not do yet
 
-* **No rotation.** `02-SINK-LIFECYCLE.md` specifies a retained-file set and `logdec --merge`;
-  neither exists.
-* **No `SessionId` in the file.** Two files from one run cannot yet be proved to belong together,
-  which is what `06-DISPOSITIONS.md` assigns to the cross-process case.
+* **No cross-process merge.** `logdec --merge` puts one process's generations back together and
+  refuses files whose `SessionId` differs. Merging two PROCESSES of one run needs the clock-agreement
+  bound `06-DISPOSITIONS.md` asks to be printed, which is not measured.

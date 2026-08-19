@@ -44,11 +44,16 @@ struct Site<'a> {
 /// file with a ragged tail, which is reported and is not a failure.
 const EXIT_USAGE: i32 = 2;
 const EXIT_IO: i32 = 1;
+/// Files that do not share a `SessionId`. Distinct from an I/O failure: the files were readable.
+const EXIT_SESSION: i32 = 3;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() || args.iter().any(|a| a == "-h" || a == "--help") {
-        eprintln!("usage: logdec <file.blog> [more.blog ...]");
+        eprintln!("usage: logdec [--merge] <file.blog> [more.blog ...]");
+        eprintln!();
+        eprintln!("--merge  one time-ordered listing across rotated generations of ONE session;");
+        eprintln!("         refuses files whose SessionId differs, because names do not prove a run.");
         eprintln!();
         eprintln!("Reads the binary log format written by boyko_log's binary sink and prints one");
         eprintln!("line per record. A file whose tail was cut off mid-write is decoded up to the");
@@ -56,9 +61,33 @@ fn main() {
         std::process::exit(EXIT_USAGE);
     }
 
+    let merge = args.iter().any(|a| a == "--merge");
+    let files: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+    if files.is_empty() {
+        eprintln!("logdec: --merge given no files");
+        std::process::exit(EXIT_USAGE);
+    }
+
     let mut code = 0;
-    for path in &args {
-        match std::fs::read(path) {
+    if merge {
+        let mut loaded = Vec::with_capacity(files.len());
+        for path in &files {
+            match std::fs::read(path.as_str()) {
+                Ok(b) => loaded.push(((*path).clone(), b)),
+                Err(e) => {
+                    eprintln!("logdec: {path}: {e}");
+                    code = EXIT_IO;
+                }
+            }
+        }
+        if !loaded.is_empty() && !merge_all(&loaded) {
+            code = EXIT_SESSION;
+        }
+        std::process::exit(code);
+    }
+
+    for path in &files {
+        match std::fs::read(path.as_str()) {
             Ok(bytes) => decode_one(path, &bytes),
             Err(e) => {
                 eprintln!("logdec: {path}: {e}");
@@ -67,6 +96,102 @@ fn main() {
         }
     }
     std::process::exit(code);
+}
+
+/// One record, lifted out of its file and stamped with an absolute tick.
+struct Merged<'a> {
+    ticks: u64,
+    file: &'a str,
+    line: u32,
+    text: String,
+    from: &'a str,
+}
+
+/// Merge several generations of ONE session into one time-ordered listing.
+///
+/// # It refuses files from different runs, and that refusal is the session frame's whole purpose
+///
+/// Rotation leaves `foo.blog`, `foo.blog.1`, `foo.blog.2`; a reader wants them back in order. But
+/// file NAMES prove nothing — a stale `.1` from yesterday's run sits in the same directory under
+/// the same name, and merging it would interleave two sessions into one plausible timeline. Every
+/// file carries its `SessionId`, so this compares them and refuses rather than guessing.
+///
+/// Returns `false` when the files do not share a session.
+fn merge_all(loaded: &[(String, Vec<u8>)]) -> bool {
+    let out = std::io::stdout();
+    let mut out = std::io::BufWriter::new(out.lock());
+
+    let mut session: Option<(u64, u64)> = None;
+    let mut mismatched = Vec::new();
+    let mut rows: Vec<Merged<'_>> = Vec::new();
+    let mut line_buf = DspBuf::<MAX_RENDERED_BYTES>::new();
+
+    for (path, bytes) in loaded {
+        let mut dict: Vec<Option<Site<'_>>> = Vec::new();
+        let mut anchor = 0u64;
+        let mut scale = 0.0f64;
+        for frame in frames(bytes) {
+            match frame {
+                Frame::Session { lo, hi } => match session {
+                    None => session = Some((lo, hi)),
+                    Some(s) if s != (lo, hi) => mismatched.push(path.clone()),
+                    Some(_) => {}
+                },
+                Frame::Anchor { ticks, ticks_per_ns } => {
+                    anchor = ticks;
+                    scale = ticks_per_ns;
+                }
+                Frame::Dictionary { site_id, line, file, fmt } => {
+                    let i = site_id as usize;
+                    if dict.len() <= i {
+                        dict.resize(i + 1, None);
+                    }
+                    dict[i] = Some(Site { file, line, fmt });
+                }
+                Frame::Record(r) => {
+                    let Some(Some(site)) = dict.get(r.site_id as usize).copied() else { continue };
+                    line_buf.clear();
+                    let mut f = LogFormatter::new(&mut line_buf);
+                    render_payload(r.payload, site.fmt, &mut f);
+                    rows.push(Merged {
+                        ticks: anchor + u64::from(r.tsc_delta),
+                        file: site.file,
+                        line: site.line,
+                        text: line_buf.as_str().to_owned(),
+                        from: path,
+                    });
+                }
+                // An inline record carries no delta, so it has no place on a merged timeline. It is
+                // reported rather than dropped: a record that vanished because the merger could not
+                // order it would be a loss the reader has no way to notice.
+                Frame::InlineSite { line, file, fmt, payload } => {
+                    line_buf.clear();
+                    let mut f = LogFormatter::new(&mut line_buf);
+                    render_payload(payload, fmt, &mut f);
+                    let _ = writeln!(out, "[unordered] {path}  {file}:{line}  {}", line_buf.as_str());
+                }
+            }
+        }
+        let _ = scale;
+    }
+
+    if !mismatched.is_empty() {
+        eprintln!(
+            "logdec: refusing to merge -- these files carry a different SessionId: {}",
+            mismatched.join(", ")
+        );
+        eprintln!("        file names do not prove a shared run; the session frame does.");
+        return false;
+    }
+
+    rows.sort_by_key(|r| r.ticks);
+    if let Some((lo, hi)) = session {
+        let _ = writeln!(out, "== merged session {hi:x}{lo:016x}, {} record(s)", rows.len());
+    }
+    for r in &rows {
+        let _ = writeln!(out, "{:>20}  {}:{}  {}  [{}]", r.ticks, r.file, r.line, r.text, r.from);
+    }
+    true
 }
 
 /// Decode one file to stdout.
@@ -92,6 +217,9 @@ fn decode_one(path: &str, bytes: &[u8]) {
                 anchor_ticks = ticks;
                 ticks_per_ns = scale;
                 let _ = writeln!(out, "-- anchor ticks={ticks} ticks_per_ns={scale}");
+            }
+            Frame::Session { lo, hi } => {
+                let _ = writeln!(out, "-- session {hi:x}{lo:016x}");
             }
             Frame::Dictionary { site_id, line, file, fmt } => {
                 let i = site_id as usize;

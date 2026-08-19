@@ -1544,15 +1544,31 @@ fn g12_a_table_storage_id_forced_through_the_enable_path_projects_zero() {
 /// constant, and because the refusal is the only failure a legal call can reach.
 ///
 /// **This test saturates the process's scope counter by design**, which is why the `g12_app` helper
-/// asserts the mint has not reached bits 62/63 rather than assuming it: under the module lock the
-/// two orders are both legal, and only the assertion tells them apart.
+/// asserts the mint has not reached bits 62/63 rather than assuming it.
+///
+/// ⚠️ **That used to end "under the module lock the two orders are both legal, and only the
+/// assertion tells them apart" — and both orders being legal is exactly what made the suite
+/// flaky.** MEASURED: under the workspace sweep's parallel ordering three `g12` gates failed with
+/// *"a register_scope mint has reached this gate's own bits"*, while the same suite run alone was
+/// green four times of four. A gate whose colour depends on which test the scheduler picked first
+/// reports the scheduler. This test now RESTORES the counter under the same serial lock it spends
+/// it under, and asserts the restoration — the obligation it owes its successors is checked here,
+/// where it is deterministic, rather than in them, where it is a race.
 #[test]
 fn register_scope_mints_in_the_game_range_and_refuses_past_the_word() {
     use boyko_diag::profiling_abi::{SCOPE_COUNT, USER_SCOPE_BASE};
 
-    use crate::ecs::core::profiling::ecs_control::{ScopeError, register_scope};
+    use crate::ecs::core::profiling::ecs_control::{
+        ScopeError, minted_game_scopes, register_scope, reset_game_scope_mint,
+    };
 
     let _guard = test_serial();
+
+    // Independent of what ran before, and -- at the end -- harmless to what runs after. This test
+    // SATURATES a process-global monotone counter, which used to leave every later `g12` gate
+    // failing on "a register_scope mint has reached this gate's own bits". Both orders were legal
+    // and only one of them was green, which is a gate reporting the scheduler.
+    reset_game_scope_mint();
 
     // The mint is process-global and other tests in this binary may have taken bits, so the claim
     // is about the RANGE and the name, not about a particular number.
@@ -1578,6 +1594,26 @@ fn register_scope_mints_in_the_game_range_and_refuses_past_the_word() {
         "the 33rd game scope must be refused; a wrap would hand out a bit that is already live"
     );
     assert!(register_scope("g12.after").is_err(), "the refusal must be sticky, not one-shot");
+
+    // Give the space back. Under the same serial lock that made the saturation safe, so no minter
+    // is in flight; without this the next `g12` gate to run reads an exhausted counter.
+    reset_game_scope_mint();
+
+    // ── AND THAT RESTORATION IS ASSERTED, NOT HOPED FOR ─────────────────────────────────────
+    //
+    // The property this test owes its SUCCESSORS cannot be checked by running them: whether they
+    // see a spent counter depends on which of them the scheduler picks first, and both orders were
+    // legal. So the obligation is checked HERE, where it is deterministic.
+    //
+    // MEASURED before the restore existed: under the workspace sweep's parallel ordering, three
+    // `g12` gates failed with "a register_scope mint has reached this gate's own bits", and the
+    // same suite run alone was green four times out of four. A gate whose colour depends on the
+    // scheduler reports the scheduler.
+    assert_eq!(
+        minted_game_scopes(),
+        0,
+        "this test saturates a process-global counter and must hand it back; every `g12` gate declares its zones on the top two bits and fails once a mint reaches them"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════

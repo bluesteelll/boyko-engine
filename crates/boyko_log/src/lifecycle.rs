@@ -190,7 +190,14 @@ pub fn boot_preset(preset: crate::preset::LogRuntimePreset, text: Option<&str>, 
         crate::sink::binary::set_path(path);
     }
     if preset.rotates() {
+        // BOTH sinks, and the first draft did only the text one -- which left `Shipping` (the row
+        // whose destination IS the binary file) claiming rotation in the table and never rotating.
+        // A preset's `rotates()` is a claim about the preset's destination, not about one sink.
         crate::sink::file::set_rotation(crate::preset::ROTATE_AT_BYTES, crate::preset::ROTATE_KEEP);
+        crate::sink::binary::set_rotation(
+            crate::preset::ROTATE_AT_BYTES,
+            crate::preset::ROTATE_KEEP,
+        );
     }
     BOOT_PRESET.store(preset as u8 + 1, Ordering::Relaxed);
     // A PRESET ARMS THE ENGINE'S TARGETS, and without this it configures sinks nothing reaches.
