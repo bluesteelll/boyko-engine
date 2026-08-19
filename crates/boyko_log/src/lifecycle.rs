@@ -141,9 +141,13 @@ pub enum SinkMode {
     /// Nothing drains until a host calls [`drain`]. For hermetic tests, CLI tools and the
     /// zero-allocation gate — **not** for a shipping profile, for the reason above.
     Manual,
-    /// The ECS drains once per frame on the frame thread. Its `DRAIN_OWNER` participation lands
-    /// with rung L15; the variant is named here so the set is closed and a reader does not infer
-    /// that `Manual` is the only alternative to a thread.
+    /// The ECS drains once per frame on the frame thread — `log_drain_system`'s first duty
+    /// (`boyko_ecs::ecs::core::log`), keyed on [`sink_mode`].
+    ///
+    /// The previous doc said the participation "lands with rung L15". It did not: the mode was
+    /// recorded by [`boot`] and read back by NOTHING until a live `shipping-min` host was measured
+    /// delivering zero records — the dead-datum class, found by
+    /// `boyko_app/tests/log_host_shipping_min.rs` after both ladders were closed.
     Scheduled,
 }
 
@@ -664,20 +668,18 @@ pub fn flush() -> FlushResult {
     }
 
     if SINK_RUNNING.load(Ordering::Acquire) == 0 {
-        // Inline drain. If another consumer holds the role right now, that consumer is draining
-        // these same rings, so waiting for it is the same answer with more steps.
-        return match crate::drain_owner::try_claim() {
-            Some(t) => {
-                let mut line = crate::record::DspBuf::<{ crate::record::MAX_RENDERED_BYTES }>::new();
-                let _ = crate::lane::drain(&t, |site, _tsc, _flags, payload| {
-                    line.clear();
-                    render_record(&mut line, site, payload);
-                    crate::sync_out::write_oracle_line("boyko-log ", line.as_str());
-                });
-                FlushResult::Flushed
-            }
-            None => FlushResult::Flushed,
-        };
+        // Inline drain, THROUGH THE SINKS. The first draft hand-rolled a lane walk here that
+        // rendered every record to the console oracle and nothing else — pre-L14 code that never
+        // learned the sinks exist. MEASURED on a `shipping-min` host: a `flush` "delivered" its
+        // records to a console that preset turns OFF, and the file the preset promised stayed
+        // empty. `drain_once` is the one pass all three consumer shapes share; per-sink policy,
+        // the once-register, delivered-counting and the request pump all live inside it, and a
+        // flush that skipped any of them would make "flushed" mean less than "drained".
+        //
+        // A `None` claim means another consumer is draining these same rings right now, so
+        // waiting for it is the same answer with more steps.
+        let _ = drain_once();
+        return FlushResult::Flushed;
     }
 
     let start = sink_passes();
@@ -705,14 +707,23 @@ pub fn flush() -> FlushResult {
 /// Returns `false` if the wait expired, which is a defect signal rather than an error to handle:
 /// the caller is on its way out either way.
 pub fn shutdown() -> bool {
-    // The census FIRST, and before the last drain rather than after it: it reports what the
-    // session's counters hold, and a reader comparing it against the file wants the file to still
-    // be open. Its own last records are the cost, and they are one drain's worth.
-    close_out();
     if SINK_RUNNING.swap(0, Ordering::AcqRel) == 0 {
+        // No resident consumer, so nothing will ever move what the lanes still hold. One final
+        // pass BEFORE `close_out`, or the census-and-close shuts the file with the session's last
+        // records still in the ring — MEASURED on a `shipping-min` host: a record emitted after
+        // the last frame's drain was simply gone. Only when `Enabled`: a never-enabled process
+        // has no sinks, and the pass would spend the claim to deliver nowhere.
+        if state() == SinkState::Enabled {
+            let _ = drain_once();
+        }
+        close_out();
         SINK_STATE.store(SinkState::Exited as u8, Ordering::Release);
         return true;
     }
+    // The census before the thread's last drain rather than after it: it reports what the
+    // session's counters hold, and a reader comparing it against the file wants the file to still
+    // be open. Its own last records are the cost, and they are one drain's worth.
+    close_out();
     SINK_STATE.store(SinkState::Exiting as u8, Ordering::Release);
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
     while std::time::Instant::now() < deadline {

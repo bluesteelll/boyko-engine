@@ -6,8 +6,8 @@
 //!
 //! | preset | sinks | rotation | `SinkMode` | intended for |
 //! |---|---|---|---|---|
-//! | `Dev` | console + text file | off | `Thread` | engine work, benches, goldens |
-//! | `Editor` | console + text file | on | `Thread` | long editor sessions |
+//! | `Dev` | console + text file + in-frame ring | off | `Thread` | engine work, benches, goldens |
+//! | `Editor` | console + text file + in-frame ring | on | `Thread` | long editor sessions |
 //! | `Shipping` | binary file | on | `Thread` | a released title |
 //! | `ShippingMin` | text file | on | `Scheduled` | a title that wants no resident diagnostics thread |
 //! | `Off` | none | — | `Manual` | the "diagnostics cost nothing" leg |
@@ -59,9 +59,18 @@ pub enum LogRuntimePreset {
     Dev,
     /// Console + file, rotating, resident sink thread.
     Editor,
-    /// Binary + crash, rotating, resident sink thread.
+    /// Binary file, rotating, resident sink thread.
+    ///
+    /// Not "binary + crash": a crash destination distinct from the file sink does not exist — see
+    /// the module doc. This doc line carried the refuted column for two commits after the table
+    /// above was corrected, which is exactly the diverged-pair failure the correction argued
+    /// against.
     Shipping,
-    /// Crash only, drained on the frame thread -- **no resident diagnostics thread**.
+    /// Text file, rotating, drained in-frame -- **no resident diagnostics thread**.
+    ///
+    /// The in-frame drain is `log_drain_system`'s first duty (`boyko_ecs::ecs::core::log`), keyed
+    /// on [`sink_mode`](crate::lifecycle::sink_mode) — which no production code read at all until
+    /// `boyko_app/tests/log_host_shipping_min.rs` measured the row delivering nothing.
     ShippingMin,
     /// Nothing configured.
     Off,
@@ -139,11 +148,13 @@ impl LogRuntimePreset {
 
 }
 
-/// Rotate the text sink at 64 MiB.
+/// Rotate the file sinks at 64 MiB — BOTH of them, because a preset's `rotates()` is a claim
+/// about the preset's destination, and `Shipping`'s destination is the binary file.
 ///
 /// A number rather than a knob, because a preset that took one would be a configuration wearing a
 /// preset's name. A host that wants its own calls
-/// [`set_rotation`](crate::sink::file::set_rotation) directly.
+/// [`sink::file::set_rotation`](crate::sink::file::set_rotation) or
+/// [`sink::binary::set_rotation`](crate::sink::binary::set_rotation) directly.
 pub const ROTATE_AT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Keep four rotated files. Enough to hold a session's tail across three restarts.

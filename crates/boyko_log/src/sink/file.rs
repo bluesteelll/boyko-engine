@@ -155,6 +155,15 @@ pub fn set_rotation(at_bytes: u64, keep: u8) {
     ROTATE_KEEP.store(u64::from(keep), Ordering::Relaxed);
 }
 
+/// The rotation cap in bytes; `0` when rotation is off.
+///
+/// The binary sink already had this read-back and this one exists for the same caller: a gate
+/// asserting that a preset's rotation reached the SINK, not that a table row claims it.
+#[must_use]
+pub fn rotation_cap() -> u64 {
+    ROTATE_AT.load(Ordering::Relaxed)
+}
+
 /// `(rotations, bytes_deleted)` — what rotation has discarded this session.
 #[must_use]
 pub fn rotation_state() -> (u64, u64) {

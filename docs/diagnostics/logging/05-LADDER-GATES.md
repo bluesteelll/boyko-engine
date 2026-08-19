@@ -80,7 +80,7 @@ subsystem present is not a baseline for the both-present configuration (S10).
 | **L13b-gate** | **G12** (a-c) — **including the revert clause** | `tests/`, `benches/` | — |
 | **L14** | **Runtime sink control.** `SinkSlot` state/filter/floor, `SINK_REQ`, `request_open_file`/`request_close`, `E0107`, `ControlSource::File` + `apply_control_spec`, census `UNPROVEN(unsunk)` + `W0111` | `src/sink/request.rs`, `src/control.rs` | no I/O on a caller thread |
 | **L14-gate** | **G13** (a-c) | `tests/` | — |
-| **L15** | **Crash path.** `CrashSink` opened **on the enable path** (S13 — it was "at boot"; the file is opened when diagnostics are turned on, which is still before the first frame and still not inside the panic hook), `SINK_STATE::Exiting`, the panic-hook protocol **with step 1.5 (`PRE_FLUSH`)**, the `DRAIN_OWNER` claim (B5), `E0109`, `E0118`. **`SinkMode::Scheduled`** and its `DRAIN_OWNER` participation (B8) | `src/sink/crash.rs`, `src/sink/mod.rs` | Decision 12's flush semantics; no new unbounded wait; **`SINK_STATE` must NOT regain an exclusivity role**; **the open must NOT move into the hook** |
+| **L15** | **Crash path.** `CrashSink` opened **on the enable path** (S13 — it was "at boot"; the file is opened when diagnostics are turned on, which is still before the first frame and still not inside the panic hook), `SINK_STATE::Exiting`, the panic-hook protocol **with step 1.5 (`PRE_FLUSH`)**, the `DRAIN_OWNER` claim (B5), `E0109`, `E0118`. **`SinkMode::Scheduled`** and its `DRAIN_OWNER` participation (B8) *(the participation was measured ABSENT post-ladder — nothing read `sink_mode()` until `log_drain_system` gained the in-frame drain; see the L5 decisions' corrected item 6)* | `src/sink/crash.rs`, `src/sink/mod.rs` | Decision 12's flush semantics; no new unbounded wait; **`SINK_STATE` must NOT regain an exclusivity role**; **the open must NOT move into the hook** |
 | **L15-gate** | **G14**, **three-sided** — the third leg panics while a **manual `drain()` is in flight** (B5) | `tests/` | — |
 | **L16** | **Game consumption.** ~~`TARGET_STATS`~~ *(landed at L4 — see that row)*, `LogCensus`, `DiagCensus`, `LogRing::since` + `RingFilter` + `skipped`, the per-frame **`frame_epoch`** record (S11 rename), `boyko_diag::SessionId` in every header, the `ONCE_SITES` census walk (M1) | `src/target.rs`, `crates/boyko_ecs/.../log/` | the drain stays off the frame thread **except under `Scheduled`, where it is on it by design** |
 | **L16-gate** | **G15**, two-sided, plus the `ECS_HANDOFF` overflow leg (`W0117` fires, `lossy` set, no silent loss) | `crates/boyko_app/tests/` | — |
@@ -726,6 +726,18 @@ running a probe's consequences out rather than reverting at the first red line.
    callers need exactly this pass — the resident sink thread, a host draining by hand, and L15's
    `SinkMode::Scheduled` — and a pass that differed between them would make "was the ECS ring fed"
    depend on which of the three ran.
+
+   **Corrected 2026-08-20: the third caller did not exist when this item was written, and the
+   ladder closed over it.** `boot` recorded the mode into a byte and *nothing read `sink_mode()`
+   back* — the dead-datum class, sixth instance. A `shipping-min` host opened its text file at
+   `enable` and never moved one record into it, the session header included. Measured by
+   `boyko_app/tests/log_host_shipping_min.rs`, which found three more of the same root on the same
+   run: no host added `LogPlugin` at all (the `ProfilerPlugin` hole verbatim, in the subsystem
+   whose reachability gate cited it), `flush()`'s thread-less arm rendered to the console oracle
+   and bypassed every sink, and a thread-less `shutdown()` closed the file with the lane tail
+   still in the ring. The in-frame drain now lives at the top of `log_drain_system`
+   (`boyko_ecs/src/ecs/core/log/plugin.rs`), and each of the four fixes was reverted individually
+   to show the gate reds on its own assertion.
 
 **One defect this rung's gate caught, recorded because the shape recurs.** `LogRing`'s arena wraps
 by abandoning the tail remainder rather than writing it. A line lying wholly inside that abandoned

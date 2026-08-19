@@ -62,12 +62,13 @@ impl Plugin for LogPlugin {
     }
 }
 
-/// Copy every formatted line the drain token's holder published into [`LogRing`].
+/// Run the `Scheduled` drain when that mode is on, then copy every formatted line the drain
+/// token's holder published into [`LogRing`].
 ///
-/// # The first statement is the flag check — argued, and NOT verifiable at this rung
+/// # The flag check guards the handoff copy — argued, and NOT verifiable at this rung
 ///
-/// With the ECS ring off, this returns after one `Relaxed` load and touches no column and no page
-/// of the handoff ring. That is what makes the subsystem's "off costs address space, not resident
+/// With the ECS ring off, the copy path exits after one `Relaxed` load and touches no column and
+/// no page of the handoff ring. That is what makes the subsystem's "off costs address space, not resident
 /// memory" claim true *below* the emission path, where it is usually argued.
 ///
 /// **MEASURED: deleting the check leaves the L5 gate GREEN.** At this rung the system has one duty
@@ -78,6 +79,23 @@ impl Plugin for LogPlugin {
 /// a later rung to fall into; saying so here means nobody reads it as tested. The L16 obligation
 /// is to delete the check and confirm `tests/log_seam.rs`'s flag-off assertion reds.
 pub fn log_drain_system(mut ring: ResMut<LogRing>, mut stats: ResMut<LogStats>) {
+    // ── The `Scheduled` drain — the preset row's whole promise, and it ran NOWHERE ──────────
+    //
+    // MEASURED by `boyko_app/tests/log_host_shipping_min.rs`: `boot` recorded the mode into a
+    // byte and nothing read it back — the campaign's dead-datum class, sixth instance. A
+    // `shipping-min` host opened its text file at `enable` and then never moved one record into
+    // it, the session header included, for the life of the process.
+    //
+    // BEFORE the display-ring gate below, because the modes are orthogonal: `shipping-min` turns
+    // the display ring off, which is exactly when this drain is the only consumer there is.
+    // Every other mode pays one `Relaxed` load and a compare per FRAME, not per record.
+    if boyko_log::lifecycle::sink_mode() == boyko_log::lifecycle::SinkMode::Scheduled
+        && boyko_log::lifecycle::state() == boyko_log::lifecycle::SinkState::Enabled
+    {
+        // `Busy` means a host is draining by hand this instant; that pass is emptying these same
+        // lanes, so skipping is the same answer with fewer steps — a refusal, never a steal.
+        let _ = boyko_log::lifecycle::drain();
+    }
     if !boyko_log::lifecycle::ecs_ring_enabled() {
         return;
     }

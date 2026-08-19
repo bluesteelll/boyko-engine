@@ -6,6 +6,7 @@
 //! D4 `FixedSet` ordering seam, and the windowed G-buffer runner.
 
 use boyko_ecs::ecs::core::app::CoreSchedule;
+use boyko_ecs::ecs::core::log::LogPlugin;
 use boyko_ecs::ecs::core::profiling::{ArmOutcome, Profiler, ProfilerConfig, ProfilerPlugin};
 use boyko_ecs::{App, Plugin};
 use boyko_render::instance_model::sync_instance_model_cols;
@@ -369,6 +370,16 @@ impl Plugin for EnginePlugins {
         // whether a record arrived, so none of them can observe that no host does. The hole lies
         // BETWEEN the gates. `crates/boyko_app/tests/log_host_*.rs` are the two that look at a
         // real host instead of building their own world.
+        //
+        // And the SEAM, made reachable the same way — found by the same kind of test, one rung
+        // later. `boot`/`enable` above fixed the lifecycle's reachability; `LogPlugin` — the L5
+        // seam's registration, `log_drain_system`, `LogRing`, `LogStats` — was still added by
+        // NOTHING outside its own tests, so the in-frame display ring had no consumer in any real
+        // host and `SinkMode::Scheduled`'s per-frame drain (which lives in that system) could not
+        // run anywhere. Unconditional for the same reason `ProfilerPlugin` is: `build` inserts two
+        // lazy resources and one system, reserves nothing, and a process that never enables
+        // logging pays one flag load per frame.
+        app.add_plugin(LogPlugin);
         boot_and_enable_logging_from_env();
 
         // Scene stack: propagation + camera resolve + visibility bridge
