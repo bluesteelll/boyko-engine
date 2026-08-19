@@ -972,7 +972,7 @@ Wire contract: [docs/LOG-BINARY-FORMAT.md](LOG-BINARY-FORMAT.md).
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Print the per-target census that tells a clean target from a switched-off one | `print` (153) |
+| Print the per-target census that tells a clean target from a switched-off one | `print` (161) |
 
 ### The gates that keep this honest
 
