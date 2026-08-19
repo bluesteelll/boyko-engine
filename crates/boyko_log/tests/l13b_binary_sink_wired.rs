@@ -5,55 +5,18 @@
 //! signature defect wearing a shipped rung's name.
 
 use boyko_log::lifecycle::{DrainResult, LogConfig, SinkMode, boot, drain, enable};
-use boyko_log::sink::binary::{FrameKind, RECORD_HEADER_BYTES, frames_written, site_dict_used};
+use boyko_log::sink::binary::{Frame, frames, frames_written, site_dict_used};
 use boyko_log::sink::slot::{SLOT_BINARY, SLOT_CONSOLE, SLOT_ECS, SLOT_FILE, SinkState, reset, set_state};
 use boyko_log::target::{LogTarget, TargetControl, set_target_control};
 use boyko_log::{Level, Log, info};
 
-/// Walk the frames a file holds, returning `(kind, payload-or-body)` pairs in order.
-///
-/// Written here rather than reusing `decode_record` alone, because the file carries FOUR kinds and
-/// a test that could only read one of them would pass on a file that was mostly unreadable.
-fn frames(bytes: &[u8]) -> Vec<(FrameKind, Vec<u8>)> {
-    let mut out = Vec::new();
-    let mut at = 0usize;
-    while at < bytes.len() {
-        let Some(kind) = FrameKind::from_raw(bytes[at]) else {
-            panic!("unknown frame kind {} at offset {at}", bytes[at]);
-        };
-        match kind {
-            FrameKind::Anchor => {
-                assert!(at + 9 <= bytes.len(), "a truncated anchor at {at}");
-                out.push((kind, bytes[at + 1..at + 9].to_vec()));
-                at += 9;
-            }
-            FrameKind::Dictionary => {
-                let flen = u16::from_le_bytes([bytes[at + 7], bytes[at + 8]]) as usize;
-                let fmt_at = at + 9 + flen;
-                let mlen = u16::from_le_bytes([bytes[fmt_at], bytes[fmt_at + 1]]) as usize;
-                let end = fmt_at + 2 + mlen;
-                out.push((kind, bytes[at + 9..at + 9 + flen].to_vec()));
-                at = end;
-            }
-            FrameKind::Record => {
-                let len = u16::from_le_bytes([bytes[at + 7], bytes[at + 8]]) as usize;
-                let end = at + RECORD_HEADER_BYTES + len;
-                assert!(end <= bytes.len(), "a truncated record at {at}");
-                out.push((kind, bytes[at + RECORD_HEADER_BYTES..end].to_vec()));
-                at = end;
-            }
-            FrameKind::InlineSite => {
-                let flen = u16::from_le_bytes([bytes[at + 5], bytes[at + 6]]) as usize;
-                let plen_at = at + 7 + flen;
-                let plen = u16::from_le_bytes([bytes[plen_at], bytes[plen_at + 1]]) as usize;
-                let end = plen_at + 2 + plen;
-                out.push((kind, bytes[plen_at + 2..end].to_vec()));
-                at = end;
-            }
-        }
-    }
-    out
-}
+// THE WALKER IS THE LIBRARY'S, NOT THIS FILE'S, AND THAT SWAP IS THE POINT.
+//
+// This test used to carry its own frame walker. It passed, and it proved a decoder that no tool
+// used -- while `logdec`, the decoder a reader actually needs, did not exist. A private copy goes
+// on passing after the shipped decoder breaks, which is the vacuous gate this campaign removes.
+// `boyko_log::sink::binary::frames` is now the ONE walker: this test, `logdec` and any third
+// consumer read the format through it.
 
 #[test]
 fn the_binary_sink_writes_a_file_that_decodes_to_the_records_that_went_in() {
@@ -96,17 +59,32 @@ fn the_binary_sink_writes_a_file_that_decodes_to_the_records_that_went_in() {
 
     let bytes = std::fs::read(&path).expect("the binary sink created its file");
     assert!(!bytes.is_empty(), "the sink is wired but wrote nothing");
-    let fr = frames(&bytes);
+    let mut walk = frames(&bytes);
+    let fr: Vec<Frame<'_>> = walk.by_ref().collect();
+    // NOT A RAGGED TAIL. The walker stops at the first frame that does not decode, so a file whose
+    // last frame is truncated yields a short list and no error -- and every assertion below would
+    // then be about a prefix. Comparing consumed bytes against the file length is what tells the
+    // two apart, and it has to be asserted rather than assumed.
+    assert_eq!(
+        walk.consumed(),
+        bytes.len(),
+        "the walker stopped early: {} of {} bytes decoded, so everything below is about a prefix",
+        walk.consumed(),
+        bytes.len()
+    );
 
     // ── THE FILE OPENS WITH AN ANCHOR ────────────────────────────────────────────────────────
     //
     // A file whose first frame is a record has no absolute time to add its deltas to: it decodes
     // to a session that started at zero, which is worse than one that refuses to decode.
-    assert_eq!(fr[0].0, FrameKind::Anchor, "the file does not open with an anchor: {fr:?}");
+    assert!(
+        matches!(fr[0], Frame::Anchor { .. }),
+        "the file does not open with an anchor: {fr:?}"
+    );
 
     // ── ONE DICTIONARY FRAME PER SITE, NOT PER RECORD ────────────────────────────────────────
-    let dicts = fr.iter().filter(|(k, _)| *k == FrameKind::Dictionary).count();
-    let records = fr.iter().filter(|(k, _)| *k == FrameKind::Record).count();
+    let dicts = fr.iter().filter(|f| matches!(f, Frame::Dictionary { .. })).count();
+    let records = fr.iter().filter(|f| matches!(f, Frame::Record(_))).count();
     assert_eq!(records, 3, "three records went in: {fr:?}");
     assert_eq!(
         dicts, 2,
@@ -116,18 +94,45 @@ fn the_binary_sink_writes_a_file_that_decodes_to_the_records_that_went_in() {
     assert_eq!(site_dict_used(), 2, "the dictionary holds one entry per site");
 
     // ── THE DICTIONARY FRAME NAMES THIS FILE ─────────────────────────────────────────────────
-    let named: Vec<String> =
-        fr.iter().filter(|(k, _)| *k == FrameKind::Dictionary).map(|(_, b)| String::from_utf8_lossy(b).into_owned()).collect();
+    let named: Vec<&str> = fr
+        .iter()
+        .filter_map(|f| match f {
+            Frame::Dictionary { file, .. } => Some(*file),
+            _ => None,
+        })
+        .collect();
     assert!(
         named.iter().all(|f| f.contains("l13b_binary_sink_wired")),
         "a dictionary frame does not carry this test's file: {named:?}"
+    );
+
+    // ── AND IT CARRIES THE FORMAT LITERAL, WHICH IS WHAT MAKES A RECORD RENDERABLE ───────────
+    //
+    // A dictionary that named the file and line but not the format would locate a record and leave
+    // its arguments as raw tags -- exactly the hole the INLINE frame turned out to have.
+    let fmts: Vec<&str> = fr
+        .iter()
+        .filter_map(|f| match f {
+            Frame::Dictionary { fmt, .. } => Some(*fmt),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        fmts.iter().any(|f| f.contains("same site")) && fmts.iter().any(|f| f.contains("other site")),
+        "the dictionary frames do not carry both format literals: {fmts:?}"
     );
 
     // ── THE PAYLOAD SURVIVES VERBATIM ────────────────────────────────────────────────────────
     //
     // The binary sink writes the ring's bytes without rendering them, so the argument values must
     // be findable in the frames. `7u32` little-endian is the third record's only argument.
-    let bodies: Vec<&Vec<u8>> = fr.iter().filter(|(k, _)| *k == FrameKind::Record).map(|(_, b)| b).collect();
+    let bodies: Vec<&[u8]> = fr
+        .iter()
+        .filter_map(|f| match f {
+            Frame::Record(r) => Some(r.payload),
+            _ => None,
+        })
+        .collect();
     assert!(
         bodies.iter().any(|b| b.windows(4).any(|w| w == 7u32.to_le_bytes())),
         "the record payload did not survive into the file"

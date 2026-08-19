@@ -951,6 +951,16 @@ nothing more. Verified the same way — repointing it stays green.
 |---------------------|---------------|
 | Report a condition the transport itself cannot carry, such as the file sink hitting its own cap | `write_oracle_line` (173) |
 
+**File:** [crates/boyko_log/src/sink/binary.rs](../crates/boyko_log/src/sink/binary.rs) — the `.blog` format, written and read.
+
+| What you want to do | Member (line) |
+|---------------------|---------------|
+| Walk every frame in a `.blog` — the ONE walker, shared by `logdec` and the format tests | `frames` (646) |
+| Decode a single frame, stopping rather than guessing at a truncated tail | `decode_frame` (577) |
+| Turn a `.blog` back into text on the command line | `crates/boyko_log/src/bin/logdec.rs` |
+
+Wire contract: [docs/LOG-BINARY-FORMAT.md](LOG-BINARY-FORMAT.md).
+
 **File:** [crates/boyko_log/src/once_sites.rs](../crates/boyko_log/src/once_sites.rs) — which `Once` sites actually fired, and how often.
 
 | What you want to do | Member (line) |

@@ -193,6 +193,9 @@ pub struct RecordFrame<'a> {
     pub payload: &'a [u8],
 }
 
+/// Anchor frame width: kind + absolute ticks + the writer's `ticks_per_ns`.
+pub const ANCHOR_BYTES: usize = 1 + 8 + 8;
+
 /// Frame header width: kind + site_id + tsc_delta + len + flags + epoch_lo.
 pub const RECORD_HEADER_BYTES: usize = 1 + 2 + 4 + 2 + 1 + 1;
 
@@ -294,6 +297,17 @@ static BIN_FILE: BinFileSlot = BinFileSlot(core::cell::UnsafeCell::new(None));
 /// Frames written since `open`. The census's question and the test's.
 static FRAMES: AtomicU64 = AtomicU64::new(0);
 
+/// The tick value the file's anchor recorded. **Every `tsc_delta` is measured from this.**
+///
+/// It has to be remembered, and the first draft did not: `write_record` wrote `tsc as u32`, the low
+/// 32 bits of the ABSOLUTE counter, into a field called `tsc_delta` and documented as "ticks since
+/// the file's current anchor". `logdec` then printed `+425.840ms` for three records emitted
+/// microseconds apart -- a number that is plausible, wrong, and indistinguishable from an elapsed
+/// time to anyone reading the file. Found by reading the tool's output, not by any test of the
+/// writer: every frame round-tripped byte for byte, because the bytes were faithfully the wrong
+/// number.
+static ANCHOR_TICKS: AtomicU64 = AtomicU64::new(0);
+
 /// Record the binary sink's destination. Returns `false` for a path that does not fit.
 ///
 /// Separate from the TEXT sink's `set_path` on purpose: a process may want both, and one path
@@ -368,11 +382,25 @@ fn write_raw(bytes: &[u8]) -> bool {
     true
 }
 
-/// Emit an `Anchor` frame: the absolute clock this file's deltas are relative to.
+/// Emit an `Anchor` frame: the absolute clock this file's deltas are relative to, **and its
+/// scale**.
+///
+/// # The scale is in the file because the reader is on another machine
+///
+/// The first draft wrote ticks alone. A tick count is meaningless without `ticks_per_ns`, and that
+/// number is a property of the CPU that produced the file, not of the one reading it -- so a
+/// decoder could print `+41231 ticks` and nothing better, for a format whose entire purpose is to
+/// be read offline. Found by writing `logdec`; no writer-side test could have found it, because
+/// the writer's own process knows the scale.
+///
+/// Eight bytes, once per file, for the difference between a tick count and a time.
 fn write_anchor() -> bool {
-    let mut buf = [0u8; 1 + 8];
+    let mut buf = [0u8; 1 + 8 + 8];
+    let now = boyko_diag::clock::ticks();
+    ANCHOR_TICKS.store(now, Ordering::Relaxed);
     buf[0] = FrameKind::Anchor as u8;
-    buf[1..9].copy_from_slice(&boyko_diag::clock::ticks().to_le_bytes());
+    buf[1..9].copy_from_slice(&now.to_le_bytes());
+    buf[9..17].copy_from_slice(&boyko_diag::clock::ticks_per_ns().to_bits().to_le_bytes());
     write_raw(&buf)
 }
 
@@ -423,10 +451,15 @@ pub(crate) fn write_record(
             }
             let frame = RecordFrame {
                 site_id: id,
-                // Truncated deliberately: the anchor at the head of the file carries the absolute
-                // clock, and a `u32` of ticks spans ~1.4 s at 3 GHz. A file that runs longer needs
-                // a re-anchor, which this rung does not do -- recorded as owed rather than hidden.
-                tsc_delta: tsc as u32,
+                // FROM THE ANCHOR, not the raw counter. `wrapping_sub` because a record staged
+                // before this file's anchor -- possible when a drain pass straddles an `open` --
+                // must not underflow; it wraps to a huge delta, which reads as obviously wrong
+                // rather than as a small plausible time.
+                //
+                // Truncated to `u32` deliberately: a `u32` of ticks spans ~1.4 s at 3 GHz, and a
+                // file that runs longer needs a re-anchor, which this rung does not do -- recorded
+                // as owed rather than hidden.
+                tsc_delta: tsc.wrapping_sub(ANCHOR_TICKS.load(Ordering::Relaxed)) as u32,
                 flags,
                 epoch_lo: 0,
                 payload,
@@ -440,7 +473,14 @@ pub(crate) fn write_record(
             // The dictionary is full. Spell the site out beside the record rather than reusing an
             // id: a log that lies about where a record came from is worse than a large one.
             let file = site.file.as_bytes();
-            let need = 1 + 4 + 2 + file.len() + 2 + payload.len();
+            let fmt = site.fmt.as_bytes();
+            // ⚠️ THE FORMAT LITERAL WAS MISSING HERE, AND THIS MODULE'S HEADER SAID IT WAS NOT.
+            // The header promises "file, line and format spelled out in the record itself"; the
+            // first draft wrote file and line only, so an inline record was LOCATABLE and not
+            // FORMATTABLE -- the decoder could say where it came from and could only dump its
+            // values as raw tags. Found by writing the reader, which is the only thing that could
+            // have found it: every writer-side test passed.
+            let need = 1 + 4 + 2 + file.len() + 2 + fmt.len() + 2 + payload.len();
             if need > buf.len() {
                 return false;
             }
@@ -450,6 +490,10 @@ pub(crate) fn write_record(
             let mut at = 7;
             buf[at..at + file.len()].copy_from_slice(file);
             at += file.len();
+            buf[at..at + 2].copy_from_slice(&(fmt.len() as u16).to_le_bytes());
+            at += 2;
+            buf[at..at + fmt.len()].copy_from_slice(fmt);
+            at += fmt.len();
             buf[at..at + 2].copy_from_slice(&(payload.len() as u16).to_le_bytes());
             at += 2;
             buf[at..at + payload.len()].copy_from_slice(payload);
@@ -468,4 +512,161 @@ pub(crate) fn close(_token: &crate::drain_owner::DrainToken) {
         let _ = f.flush();
     }
     *slot = None;
+}
+
+// ────────────────────────── the READER: one walker, three consumers ──────────────────────────
+//
+// # A format with a writer and no reader is the same defect as one with neither
+//
+// L13b shipped `encode_record`, the dictionary and `W0116`; the destination followed. Nothing
+// could read a `.blog` back except a private walker inside one test -- so the test proved a
+// decoder that no tool used, and the tool that a reader needs did not exist. The walker below is
+// the ONE walker: `logdec` uses it, the format test uses it, and a third consumer would use it
+// too. A test with its own copy would go on passing after the shipped decoder broke.
+
+/// One frame, as a reader sees it.
+///
+/// Borrowed from the buffer throughout: a decoder that copied would allocate per frame to hand
+/// back bytes the caller already owns.
+///
+/// **`PartialEq` and not `Eq`**: the anchor carries an `f64` scale. Deriving `Eq` on a type with a
+/// float is a claim about reflexivity that NaN breaks, and a decoder must be able to hand back
+/// whatever the file contained rather than refusing values it dislikes.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Frame<'a> {
+    /// The absolute clock every following `tsc_delta` is relative to, and its scale.
+    Anchor {
+        /// Absolute tick count, from `boyko_diag::clock::ticks`.
+        ticks: u64,
+        /// Ticks per nanosecond **on the machine that wrote the file**. Without it a `tsc_delta`
+        /// is a number a reader cannot turn into a time.
+        ticks_per_ns: f64,
+    },
+    /// One site, spelled out, so later records can name it by id.
+    Dictionary {
+        /// The id later records use.
+        site_id: u16,
+        /// Source line.
+        line: u32,
+        /// Source file.
+        file: &'a str,
+        /// The format literal, which is what makes a record renderable.
+        fmt: &'a str,
+    },
+    /// The common case: a site id and a payload.
+    Record(RecordFrame<'a>),
+    /// A record whose site could not be interned, carrying its own site.
+    InlineSite {
+        /// Source line.
+        line: u32,
+        /// Source file.
+        file: &'a str,
+        /// The format literal.
+        fmt: &'a str,
+        /// The value payload.
+        payload: &'a [u8],
+    },
+}
+
+/// Decode one frame, returning it and the bytes consumed.
+///
+/// `None` for a truncated or unknown frame. **A short read is an ordinary outcome, not corrupt
+/// input**: the file a reader most wants is the one a crash cut off mid-write, so the tail is
+/// expected to be ragged and the decoder stops rather than panicking.
+#[must_use]
+pub fn decode_frame(buf: &[u8]) -> Option<(Frame<'_>, usize)> {
+    /// Read a `u16` length prefix at `at`, then that many bytes as UTF-8.
+    fn take_str(buf: &[u8], at: usize) -> Option<(&str, usize)> {
+        if at + 2 > buf.len() {
+            return None;
+        }
+        let n = u16::from_le_bytes([buf[at], buf[at + 1]]) as usize;
+        let end = at + 2 + n;
+        if end > buf.len() {
+            return None;
+        }
+        Some((core::str::from_utf8(&buf[at + 2..end]).ok()?, end))
+    }
+
+    match FrameKind::from_raw(*buf.first()?)? {
+        FrameKind::Anchor => {
+            if buf.len() < ANCHOR_BYTES {
+                return None;
+            }
+            let mut t = [0u8; 8];
+            t.copy_from_slice(&buf[1..9]);
+            let mut r = [0u8; 8];
+            r.copy_from_slice(&buf[9..17]);
+            Some((
+                Frame::Anchor {
+                    ticks: u64::from_le_bytes(t),
+                    ticks_per_ns: f64::from_bits(u64::from_le_bytes(r)),
+                },
+                ANCHOR_BYTES,
+            ))
+        }
+        FrameKind::Dictionary => {
+            if buf.len() < 7 {
+                return None;
+            }
+            let site_id = u16::from_le_bytes([buf[1], buf[2]]);
+            let line = u32::from_le_bytes([buf[3], buf[4], buf[5], buf[6]]);
+            let (file, at) = take_str(buf, 7)?;
+            let (fmt, end) = take_str(buf, at)?;
+            Some((Frame::Dictionary { site_id, line, file, fmt }, end))
+        }
+        FrameKind::Record => decode_record(buf).map(|(r, n)| (Frame::Record(r), n)),
+        FrameKind::InlineSite => {
+            if buf.len() < 5 {
+                return None;
+            }
+            let line = u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]);
+            let (file, at) = take_str(buf, 5)?;
+            let (fmt, at) = take_str(buf, at)?;
+            if at + 2 > buf.len() {
+                return None;
+            }
+            let n = u16::from_le_bytes([buf[at], buf[at + 1]]) as usize;
+            let end = at + 2 + n;
+            if end > buf.len() {
+                return None;
+            }
+            Some((Frame::InlineSite { line, file, fmt, payload: &buf[at + 2..end] }, end))
+        }
+    }
+}
+
+/// Walk every frame in a buffer, stopping at the first one that does not decode.
+///
+/// Stopping rather than skipping is deliberate. The frames are length-prefixed, so a reader that
+/// meets an unknown KIND could skip it -- but a frame that fails to decode has no trustworthy
+/// length, and resynchronising by scanning for a plausible kind byte is guesswork that produces
+/// confident nonsense. A truncated tail is reported by the caller comparing consumed bytes against
+/// the file's length.
+pub fn frames(buf: &[u8]) -> Frames<'_> {
+    Frames { buf, at: 0 }
+}
+
+/// Iterator over [`decode_frame`]. See [`frames`].
+pub struct Frames<'a> {
+    buf: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Frames<'a> {
+    /// Bytes consumed so far. `frames(b).count()` then `consumed() < b.len()` is a ragged tail.
+    #[must_use]
+    pub fn consumed(&self) -> usize {
+        self.at
+    }
+}
+
+impl<'a> Iterator for Frames<'a> {
+    type Item = Frame<'a>;
+
+    fn next(&mut self) -> Option<Frame<'a>> {
+        let (frame, n) = decode_frame(&self.buf[self.at..])?;
+        self.at += n;
+        Some(frame)
+    }
 }
