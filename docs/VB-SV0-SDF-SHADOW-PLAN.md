@@ -1,5 +1,76 @@
 # VB-SV0 — SDF soft-shadow + contact-AO on mesh, inlined into the VB lit-producer tails
 
+**Status:** **Rev 10 — the disposition is TAKEN, and the architecture changes.** Taken under the
+owner's standing decide-without-asking directive (2026-08-20 chat), on numbers rather than taste,
+because every number that arrived after Rev 9 pointed the same way:
+
+* **The dark-path tax Rev 9 called unmeasured was measured: ~+75%** (24576 → 41984 ns on the fused
+  `vb_resolve` dispatch, both phases dark, exact repeat — protocol and numbers in commit
+  `13f1c9a3`, which REVERTED the inline march out of all ten producers and restored the three
+  Rev-6-re-blessed pins to their `9dffe39` frames).
+* Rev 9's own diagnosis stands: the 2.342× armed ratio contains neither march ALU nor occupancy —
+  **the VB tail is a 2.34× worse host for this march than the Deferred marcher is**.
+* §0's "dedicated pass REJECTED by measurement" remains RETRACTED — the pass never existed to be
+  measured, and `RENDER-PARITY-PLAN.md` §3.2 chose the decoupled prepass with a critic agreeing.
+
+**SV0 therefore returns as `sdf_mesh_shadow.comp` — Option B, the decoupled screen-space prepass —
+and everything below Rev 10's ladder describes the RETIRED inline architecture.** It is kept
+because its measurements, bit-budget reconciliations and refuted claims are the inputs the new
+ladder starts from; read it as evidence, not as instructions.
+
+## Rev 10 — the DP (dedicated-pass) ladder
+
+**What survives the revert and is REUSED, not rebuilt:** S0/S1 in full — the `vb_both_sdf` /
+`vb_both_sdf_tex` fixtures, the CPU coverage oracle (`sv0_adequacy.rs`: `SV0_MIN_SHADOWED_PIXELS`
+and `SV0_MIN_AO_PIXELS` floors, the two mutations, the R11 staging tripwire); S3 layers 3a/3b/5
+(the `sdf_soft_shadow_ranged` leaf pins and the NaN-inversion test); the §3.1 gate design (word 7
+bits 5..6, the request/armed FOUR-field split, the monotone-downward clamp — the mechanism
+re-lands with DP3); the §2 slot-10 reconciliation (now for the PASS's own consumption of the edit
+list, and re-purposed in the tails for the term image); the S1.5 reference number (6144 ns raw,
+≈5.5 µs mirror-adjusted ×0.8895) and the ABBA-quadruplet protocol — **re-instrumented through the
+`BOYKO_VB_ZONE` + `BOYKO_PROFILE_ARTIFACT` channel**, because `Sv0TimestampCollector` was deleted
+at profiling rung 7 step 6c and the artifact channel is the shipped instrument (driven live
+2026-08-20; one defect found and fixed in its writer the same day).
+
+**DP1 — the dark module.** `sdf_mesh_shadow.comp.hlsl`: restore the march leaves from `13f1c9a3^`
+(`sdf_shadow_leaves.hlsli` — shared header, not three copies, per §4.1), shadow-origin bias off the
+GEOMETRIC face normal (§4.2), termination/bounds exactly §4.4, the §4.5/Rev-6 `NMin`/`NMax` clamp
+rules. Inputs: `gVbId` + geometry table (normal via `vb_geom_fetch` — VB's native model, no MRT,
+per RENDER-PARITY §3.4), camera, the edit-list `Buf` at the PASS's own slot 10, `LightBuf`.
+Output: one `R8G8_UNORM` term target (`R` shadow, `G` contact-AO) — mirroring Deferred's
+`gMaterial.RG` decoupled term. Pipeline + framegraph pass built but NOT recorded (arm hardcoded
+off). Gates: all 24 pins byte-identical; `spirv-val` on the new module; a census row for it in
+`docs/SHADER-VARIANT-MANIFEST.md`.
+
+**DP2 — the tails consume.** Each lit-producer samples the term under the §3.1 mode bits and
+`min`-combines (shadow) / multiplies ambient (AO). The term binding is slot 10 in every Set-0
+layout variant (fused/classified × tex × froxel × split — ALL of them, the S2 lesson), bound to a
+persistent 1×1 white `R8G8` when disarmed and re-pointed to the real target at sync time — the AA
+`present_set` re-point precedent, so recording code never branches on arming. Gates: 24 pins hold
+(the OFF branch is untaken arithmetic); **pre-registered byte budget: each producer grows ≤ 1 KiB**
+(the inline grew each by +10128 B — this is the number that killed it); **the dark-dispatch ABBA
+A/B re-run with a pre-registered budget of one timer grid-step (1024 ns)** — the gate the inline
+never had, now standing where its absence cost a stage.
+
+**DP3 — arm.** Re-land the four `LightingConfig` fields, `sync_sv0_light_gate` (request &&
+armable, clamp monotone downward — S4's corrected form, NOT the plan snippet S4 refuted), and the
+pass records ONLY when the resolved mode is non-zero — structural absence when off, per the
+capability-is-structural rule. Gates: S1 adequacy floors on armed dumps, (ii-a) shadow alone and
+(ii-b) AO alone each moving pixels ALONE; the arm matrix restored from `13f1c9a3^`
+(`scripts/sv0_arm_matrix.ps1`) and re-pointed at the pass.
+
+**DP4 — measure.** Armed cost of the dedicated pass against the S1.5 Deferred reference under the
+ABBA protocol on the artifact channel; **§7 clause 3's 2× threshold re-applied to the pass**, and
+**clause 5 now GATES clause 3** (Rev 9's own filed gate defect: a row that fails its spread gate
+cannot be adjudicated). Expected from Rev 9's diagnosis: the marcher-shaped host removes the 2.34×
+hosting penalty; if the number comes back ≥ 2× anyway, the stage aborts again and the record says
+so — the threshold is inherited, not renegotiated.
+
+**DP5 — owner-eval packet.** The visual dumps (S4's gate (iv) as specified), produced and filed;
+flagged for the owner, not blocking the ladder.
+
+*(Rev 9 header retained below for the revision trail.)*
+
 **Status:** DESIGN, **Rev 9** — NOT APPROVED, and **the stage's disposition is OPEN pending an owner
 decision**. S0–S5 have all shipped (`189d063`, `9b53365`, `9dffe39`, `c878b3f`, `24612e8`,
 `f057d1a`, `35ff3aa`). **S5's measurement fired §7 clause 3** (2.342× on row 1, 2.623× on row 7,

@@ -2504,3 +2504,17 @@ included, which previously had no shutdown-time close at all — close only afte
 The stated cost stands and is accepted: the census obeys the admission control it reports on,
 which at shutdown means a quiet ring and an immediate delivery pass. Gate:
 `log_host_shipping_min.rs` asserts `LOG-CENSUS` rows in the preset's own file after `shutdown`.
+
+---
+
+## 2026-08-20: SV0 returns as the dedicated pass — decision taken, not asked
+
+Diagnostics closed; rendering resumed per the standing directive. The first decision was SV0's
+disposition, OPEN since Rev 9: **taken — `sdf_mesh_shadow.comp`, RENDER-PARITY-PLAN §3.2's
+critic-agreed Option B.** The numbers that decided it: the inline carried a MEASURED ~+75%
+dark-path tax on every VB frame (reverted at `13f1c9a3`), the armed ratio 2.34× was the VB tail
+being a worse HOST for the march (not the march's own cost), and the "dedicated pass rejected by
+measurement" premise was retracted as false — the pass never existed to be measured. Ladder and
+gates: `docs/VB-SV0-SDF-SHADOW-PLAN.md` Rev 10 (DP1–DP5), including the two gates the inline never
+had — a per-producer byte budget and a dark-dispatch ABBA A/B with a pre-registered grid-step
+budget.
