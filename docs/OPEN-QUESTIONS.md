@@ -2494,7 +2494,13 @@ reader of that log asks first.
    beside the console write. Cost: a second delivery path for one report, and the binary sink
    would carry text lines outside the record format (or needs a frame kind for them).
 
-Disposition 2 looks structurally right (the crash path already writes through the sink under the
-token), but it touches the `.blog` format, which is pinned by `docs/LOG-BINARY-FORMAT.md` — a
-VALUES call on whether the format grows a summary frame. Until decided, the census is a
-console-only fact and `shipping` logs stay silent about loss.
+**RESOLVED same day, by the owner's standing directive to decide without asking (2026-08-20 chat).
+Disposition 1 was taken, narrowed to shutdown-time.** Disposition 2 fell to a fact discovered on
+inspection: the `.blog` is a framed format, so "write the rows into the sink directly" means
+constructing record frames anyway — which IS disposition 1 with extra steps. `census::print` now
+emits every row as an ordinary ring record (`LOG-CENSUS …` / `LOG-ONCE …` under the `log` target),
+`shutdown` orders itself "emit → deliver → close" in both arms, and the sinks — the binary one
+included, which previously had no shutdown-time close at all — close only after the final pass.
+The stated cost stands and is accepted: the census obeys the admission control it reports on,
+which at shutdown means a quiet ring and an immediate delivery pass. Gate:
+`log_host_shipping_min.rs` asserts `LOG-CENSUS` rows in the preset's own file after `shutdown`.

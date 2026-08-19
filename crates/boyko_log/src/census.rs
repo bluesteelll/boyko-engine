@@ -145,11 +145,19 @@ pub fn lossy() -> bool {
     rows().any(|r| r.status != LossStatus::Measured && r.status != LossStatus::Unproven)
 }
 
-/// Print the census through the synchronous channel, one line per target.
+/// Emit the census through the RING, one record per target, plus the limiter line and one
+/// `LOG-ONCE` row per fired site.
 ///
-/// Returns the number of lines written — `0` when no synchronous destination is configured, which
-/// is not a failure: a host that asked for no console and no crash file asked for no census
-/// either, and saying so through the return value beats writing it nowhere and reporting success.
+/// Ordinary records rather than the synchronous console channel (owner-directed 2026-08-20): the
+/// summary lands in every sink the preset opened, so a `shipping` `.blog` and a `shipping-min`
+/// text file carry their own loss report instead of leaving it on a console those presets turn
+/// off. The caller owes a delivery pass afterwards — [`crate::lifecycle::shutdown`] runs its
+/// final drain AFTER this, and closes the sinks after THAT.
+///
+/// Returns the number of rows OFFERED to the ring. Offered, not delivered: emission is subject to
+/// the same four admission gates as any record, so an un-armed process offers rows that go
+/// nowhere — the same silence, decided by the same policy, as every other record it never asked
+/// to see.
 pub fn print() -> u32 {
     let mut written = 0;
     for row in rows() {
@@ -167,17 +175,23 @@ pub fn print() -> u32 {
         let n = render(&mut buf, &row);
         // SAFETY: `render` writes only ASCII copied from `&'static str`s and decimal digits.
         let text = unsafe { core::str::from_utf8_unchecked(&buf[..n]) };
-        if crate::sync_out::write_oracle_line("LOG-CENSUS ", text).is_some() {
-            written += 1;
-        }
+        // THROUGH THE RING, not the console channel (owner-directed 2026-08-20). The census used
+        // to go through `sync_out::write_oracle_line` alone -- so under `shipping` and
+        // `shipping-min`, whose console is OFF, the summary reached no destination at all and the
+        // uploaded log of a released title could not say whether it lost anything. An ordinary
+        // record lands in every sink the preset opened, console included, by the same slot policy
+        // as everything else. The cost, stated: these rows are subject to the admission control
+        // they report on -- acceptable at shutdown, where the lanes are quiet and the final drain
+        // runs immediately after.
+        crate::info!(crate::Log, "LOG-CENSUS {}", crate::dsp!(text, 160));
+        written += 1;
     }
     let mut buf = [0u8; 96];
     let n = render_limiter(&mut buf);
     // SAFETY: `render_limiter` writes only ASCII literals and decimal digits.
     let text = unsafe { core::str::from_utf8_unchecked(&buf[..n]) };
-    if crate::sync_out::write_oracle_line("LOG-CENSUS ", text).is_some() {
-        written += 1;
-    }
+    crate::info!(crate::Log, "LOG-CENSUS {}", crate::dsp!(text, 96));
+    written += 1;
     // ONE `LOG-ONCE` ROW PER FIRED SITE, under its own prefix.
     //
     // A separate prefix rather than more `LOG-CENSUS` lines, because these rows are per SITE while
@@ -189,9 +203,8 @@ pub fn print() -> u32 {
         // SAFETY: `render_once` writes ASCII literals, decimal digits, and `LogSite::file`, which
         //   is a `&'static str` from `file!()`.
         let text = unsafe { core::str::from_utf8_unchecked(&buf[..n]) };
-        if crate::sync_out::write_oracle_line("LOG-ONCE ", text).is_some() {
-            written += 1;
-        }
+        crate::info!(crate::Log, "LOG-ONCE {}", crate::dsp!(text, 320));
+        written += 1;
     }
     written
 }
@@ -445,16 +458,15 @@ mod tests {
         // dead-datum shape this whole line exists to remove, reproduced one level in. So the count
         // `print` returns is checked against the rows plus exactly one.
         //
-        // The console flag is process-global and this SETS it rather than asserting it, for the
-        // reason `sync_out`'s own tests give: another test may legitimately have it either way.
-        let was_on = crate::sync_out::write_oracle_line("", "").is_some();
-        crate::sync_out::set_console_enabled(true);
+        // The count is rows OFFERED to the ring, so it holds whether or not this process armed a
+        // target -- which is the point: the census obeys the same admission gates as every other
+        // record, and this test pins the offering, not the policy.
         let lines = print();
-        crate::sync_out::set_console_enabled(was_on);
         assert_eq!(
             lines as usize,
             rows().count() + 1 + crate::once_sites::walk().count(),
-            "the census must print one line per target, the limiter line, and one LOG-ONCE row              per fired site"
+            "the census must offer one row per target, the limiter line, and one LOG-ONCE row \
+             per fired site"
         );
     }
 }

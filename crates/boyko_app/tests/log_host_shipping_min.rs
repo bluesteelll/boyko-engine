@@ -133,5 +133,21 @@ fn shipping_min_delivers_to_its_file_from_the_frame_loop() {
         "the lane tail was dropped at shutdown: {text:?}"
     );
 
+    // ── AND THE FILE CARRIES ITS OWN LOSS REPORT ────────────────────────────────────────────
+    //
+    // The census used to go through the synchronous console channel alone, and this preset's
+    // console is OFF: the uploaded log of a released title could not say whether it lost
+    // anything — the first question its reader asks. Ring-borne now (owner-directed), delivered
+    // by `shutdown`'s final pass, closed after.
+    assert!(
+        text.contains("LOG-CENSUS "),
+        "the census never reached the preset's own file; a shipping log that cannot say whether \
+         it lost records is silent about the one thing a reader must know: {text:?}"
+    );
+    assert!(
+        text.contains("LOG-CENSUS limiter"),
+        "the limiter line is part of the census and travels with it: {text:?}"
+    );
+
     let _ = std::fs::remove_file(&file);
 }

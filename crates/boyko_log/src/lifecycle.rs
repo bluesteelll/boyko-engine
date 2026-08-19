@@ -707,27 +707,33 @@ pub fn flush() -> FlushResult {
 /// Returns `false` if the wait expired, which is a defect signal rather than an error to handle:
 /// the caller is on its way out either way.
 pub fn shutdown() -> bool {
+    // THE CENSUS FIRST, while the state is still `Enabled` and emission is still admitted. It is
+    // ring-borne now, so the order is "emit, then deliver, then close" in BOTH arms: the summary
+    // must be in the lanes before the final pass that moves it, and the sinks must outlive that
+    // pass. Emitting after the swap would work too, but emitting before it keeps one rule —
+    // nothing is offered after a consumer has been told to stop.
+    close_out();
     if SINK_RUNNING.swap(0, Ordering::AcqRel) == 0 {
-        // No resident consumer, so nothing will ever move what the lanes still hold. One final
-        // pass BEFORE `close_out`, or the census-and-close shuts the file with the session's last
-        // records still in the ring — MEASURED on a `shipping-min` host: a record emitted after
-        // the last frame's drain was simply gone. Only when `Enabled`: a never-enabled process
-        // has no sinks, and the pass would spend the claim to deliver nowhere.
+        // No resident consumer, so nothing will ever move what the lanes still hold — the census
+        // just offered included. One final pass, then the close. MEASURED on a `shipping-min`
+        // host before this arm drained at all: a record emitted after the last frame's drain was
+        // simply gone. Only when `Enabled`: a never-enabled process has no sinks, and the pass
+        // would spend the claim to deliver nowhere.
         if state() == SinkState::Enabled {
             let _ = drain_once();
         }
-        close_out();
+        close_sinks();
         SINK_STATE.store(SinkState::Exited as u8, Ordering::Release);
         return true;
     }
-    // The census before the thread's last drain rather than after it: it reports what the
-    // session's counters hold, and a reader comparing it against the file wants the file to still
-    // be open. Its own last records are the cost, and they are one drain's worth.
-    close_out();
     SINK_STATE.store(SinkState::Exiting as u8, Ordering::Release);
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
     while std::time::Instant::now() < deadline {
         if state() == SinkState::Exited {
+            // The thread's exit pass has delivered everything, the census included; the sinks
+            // close only now. In the previous shape `close_out` closed the text file BEFORE that
+            // pass, so the tail was delivered to a destination that no longer existed.
+            close_sinks();
             return true;
         }
         std::thread::yield_now();
@@ -741,15 +747,25 @@ pub fn shutdown() -> bool {
 /// would come to disagree about whether a session's last lines reached the disk.
 fn close_out() {
     crate::census::print();
-    if crate::sink::file::is_open()
-        && let Some(token) = crate::drain_owner::try_claim()
-    {
-        // Closing under the token, not beside it: the handle's single-writer argument is the
-        // token, and a close that ran outside it would be the one access that argument does not
-        // cover. A busy token means another consumer is mid-drain; the file is flushed on its
-        // next write and the OS closes it at exit, which is a worse outcome than a clean close and
-        // a better one than racing a writer.
-        crate::sink::file::close(&token);
+}
+
+/// Close both file-backed sinks under the token, AFTER the final delivery pass.
+///
+/// After and not before, because the census is ring-borne (owner-directed 2026-08-20): a close
+/// that ran ahead of the last drain would shut the file over the very records that summarize it —
+/// MEASURED in the previous shape, where `close_out` closed the text sink and the resident
+/// thread's exit pass then delivered the tail to a destination that no longer existed.
+///
+/// A busy token means another consumer is mid-drain; the sinks are flushed on their next write
+/// and the OS closes them at exit, which is a worse outcome than a clean close and a better one
+/// than racing a writer. The binary sink is closed here too — it previously had no shutdown-time
+/// close at all, only the request-ring route a host had to know to ask for.
+fn close_sinks() {
+    if let Some(token) = crate::drain_owner::try_claim() {
+        if crate::sink::file::is_open() {
+            crate::sink::file::close(&token);
+        }
+        crate::sink::binary::close(&token);
     }
 }
 
