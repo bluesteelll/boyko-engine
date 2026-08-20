@@ -1879,6 +1879,171 @@ a short cold block, and anything longer wants PAIRING**. Also: **4 of 222 legs t
 instead of 21** (internally consistent; clause 5(3) holds) — the first departure from the uniform 21
 across gate #17's 213 legs. Recorded so the next measurer does not read it as corruption.
 
+#### P2 item 4 — `-D SOFT` (soft particles) — **DESIGNED 2026-08-21, not yet landed**
+
+*The last open item of P2. `SortMode`/R10 closed with item 3; `Wboit` stays a plan-level deferral.
+A scoping pass established the blocker below and wrote no code — the alternative would have been a
+shader variant nothing can build plus a knob with one reachable value, which is the anti-pattern
+this rung refused for `Wboit` twelve lines earlier.*
+
+##### D13 — The depth descriptor is PUSHED, not ringed
+
+The FS must sample the path's depth image, and **neither existing owner can hold that descriptor**.
+The path recorders keep only raw `VkImageView` handles in `ParticleDrawTargets` — they reference a
+view in a rendering-attachment info and own nothing across frames. The particle bundle in
+`gpu_scene/particle.rs` cannot reach the depth image at all: `boyko_app` never sees a frame target,
+and `present/targets.rs` exposes no depth accessor. Every target-view descriptor in the tree is
+created in `targets.rs`.
+
+**Decision: enable `VK_KHR_push_descriptor` and push the descriptor inline from the view the
+recorder already holds.**
+
+| | ring in `targets.rs` | **push descriptor** | particle-owned depth copy |
+|---|---|---|---|
+| sites | ~20 | ~5 | ~12 + a pass |
+| new per-extent resources | 1 ring | **0** | 1 image |
+| new partial-failure drain ladders | **1** | **0** | 1 |
+| resize plumbing | full | **none** | full |
+| extra bandwidth | 0 | 0 | ~2× depth |
+
+**Why push wins, and it is not the site count.** A descriptor ring over a depth image is a
+per-extent resource recreated on resize — the exact lifecycle event where the DeferredSets audit
+found a mute datum leaking on every VB+TAA resize. Adding another drain ladder to a file whose
+ladders are *currently under audit for systematic under-draining* means adding an instance of a
+pattern before that audit has settled what the correct shape is: at best it is redone afterwards,
+at worst it inherits the bug and the same audit finds it two rounds later. **Push makes the class
+structurally absent rather than correctly handled**, which is this engine's stated preference and
+here also the smaller change.
+
+**Degrade, per the `rg8_unorm_storage_ok` idiom verbatim:** `DeviceCaps::push_descriptor_ok`, probed
+at device create; **absent ⇒ SOFT resolves unarmable and everything else is byte-identical.** SOFT
+is a quality feature whose absence is the shipped P0/P1 appearance, pinned by all image goldens, so
+the degrade needs no fallback path. **This is deliberately NOT push-with-a-ring-fallback — that
+would be the ring PLUS an extension, strictly worse than the ring alone.** The fallback question is
+what distinguishes the two shapes: only the no-fallback form is *instead of* a ring.
+
+**Structural constraint, in the design rather than discovered:** a set layout is push-capable or
+bindable, never both, so the depth descriptor takes **its own set 2, push-only**. Sets 0 and 1 are
+untouched and the bundle does not change.
+
+**Sequencing.** `targets.rs` gains **no particle code** under this option, so contention with the
+DeferredSets audit drops to zero; item 4 can start the moment the extension enable lands in
+`device.rs`.
+
+##### D14 — SOFT is TWO FS variants and ZERO new VS variants
+
+D7's per-path encoding is decisive, and it already paid for both arms' inputs:
+
+| arm | defines | scene depth | particle depth | new varying |
+|---|---|---|---|---|
+| **Deferred** | `-D SOFT -D DEPTH_LINEAR` | `stored × T_MAX` (64.0) — the dlin FS's own encode inverted | `length(eye_rel)` — already computed for `SV_Depth` | **none** |
+| **reverse-Z** | `-D SOFT` | `view_z = B / (depth − A)`, `(A,B)` from `boyko_render::view::forward_view_z_coeffs`, already pinned as `ViewtFromDepthRzPush::{view_z_a, view_z_b}` | `1.0 / SV_Position.w` — in a fragment shader that lane holds the RECIPROCAL of clip `w` | **none** |
+
+Zero new VS variants is a **result, not a convenience**: each arm's inputs are already met by the VS
+that arm already uses. Two `SHADER-VARIANT-MANIFEST` rows, two `*_spv_sync` pins, and **every
+existing particle `.spv` byte-frozen** — assert the invariant, not a count.
+
+##### D15 — One metric: VIEW-SPACE Z on every path. The divergence is FIXED, not recorded
+
+A single authored `fade_distance` under the raw per-arm metrics would mean **euclidean radial
+distance on Deferred and along-view-axis distance elsewhere, diverging by `1/cos θ`** — 1.41× at the
+corner of a 90° FOV. Both softer dispositions are refused: *accept and record it* (item 1's "Cost 2"
+shape) leaves a fade band 41 % wider at screen corners on one path, a per-path fact that will be
+re-discovered as a bug; *a per-path `fade_distance`* is worse still, because it makes an **authored
+value path-dependent**, so one effect must be tuned twice and the tuning does not travel.
+
+**Taken instead: unify on view-space Z by converting on the DEFERRED arm.** Both terms there are
+euclidean, so the conversion applies to their *difference*, not to each term:
+
+```
+cos_theta   = eye_rel.z * rsqrt(dot(eye_rel, eye_rel))
+delta_viewz = (stored * T_MAX - len_eye_rel) * cos_theta
+```
+
+The dlin FS already forms `length(eye_rel)`, so deriving it from one `rsqrt(dot(...))` costs the
+same instruction class and **the marginal cost is one multiply**. View-space Z is also the metric
+comparable implementations fade on, so an authored `fade_distance` keeps its conventional meaning.
+
+##### D16 — The push range widens to 84 B and gains FRAGMENT; `fade_distance` is GLOBAL
+
+`(A,B)` are not in the 80-byte camera UBO, and the draw's push range is **72 B, VERTEX-only**.
+
+| bytes | field | reverse-Z | Deferred |
+|---|---|---|---|
+| `[0,64)` | view-projection rows | — | — |
+| `[64,68)` | `index_base` | — | — |
+| `[68,72)` | `index_step` | — | — |
+| `[72,76)` | `soft_a` | `view_z_a` | `T_MAX` (64.0) |
+| `[76,80)` | `soft_b` | `view_z_b` | unused |
+| `[80,84)` | `fade_distance` | — | — |
+
+`PARTICLE_DRAW_PUSH_BYTES` **72 → 84** (`compute.rs`), stage flags **VERTEX → VERTEX | FRAGMENT**;
+84 ≤ the 128 B guaranteed minimum. This moves a constant several sites read and re-blesses the draw
+pins, so **it lands in the SAME edit as the shaders**.
+
+**`fade_distance` is global, not per-effect, and the refusal carries a number.** The FS cannot reach
+the effect table (the draw's sets carry the render record, not `EffectParamsGpu`), so a per-effect
+fade would have to grow `ParticleRender` — moving the sim's **128 B/particle** traffic figure and
+re-opening §Goal's re-derived budget for **+4 B = +3.1 %** on every particle every frame, to vary a
+value that is a scene/camera-scale property. Refused; **filed as a P3 candidate with that cost
+attached** so it is not re-litigated from scratch.
+
+##### D17 — ORTHO on a reverse-Z path: a runtime sentinel, not a boot gate
+
+Under an orthographic projection `SV_Position.w == 1`, so `1/w` recovers nothing and
+`forward_view_z_coeffs` is a **perspective** encode — `B/(depth − A)` is the wrong function.
+Deferred's ortho arm sidesteps this by keeping `position.z`; the reverse-Z ortho arm has no answer
+and **no fixture reaches it**.
+
+*Refused — a third FS variant with an affine ortho decode:* untested by construction, and shipping
+an untested decode arm is the dead-datum class this campaign already carries five instances of.
+*Refused — a boot-frozen resolver conjunct:* the projection is a **per-frame** property (a camera may
+switch to ortho at frame 100), so a boot gate would be wrong in the one direction that matters.
+
+**Taken: a runtime sentinel, free by construction.** `B = near·far/(far−near) > 0` for every valid
+perspective frustum, so **`soft_b == 0.0` is impossible for a live decode** and is an unambiguous
+sentinel. The host writes `soft_b = 0.0` when the camera is orthographic on a reverse-Z path; the
+FS's soft branch reads it and degrades to opacity 1.0 — the hard-intersection appearance P0 ships.
+One float compare, zero variants, runtime-correct.
+
+##### Where the cost lands
+
+A depth sample per fragment is **DRAW-side** bandwidth: `ZONE_PARTICLE_DRAW` is the row that moves,
+and §Goal's `9 µs + 1.10 × (128 B × N)/121 GB/s` sim budget needs **no new term** — the accounting
+item 3 used for the sort.
+
+⚠️ **The SOFT A/B must be same-scene** while `ZONE_PARTICLE_DRAW` is `TOP_OF_PIPE`-stamped: gate #17
+measured it absorbing **+74 752 ns at 65 536 and +369 664 at 102 400** for a scene change the draw
+does no work for. *(If id 51's restamp to `BottomOfPipe` has landed, this lifts and the A/B may
+cross scenes — sequence the measurement after it where possible.)*
+
+##### Gate
+
+- **Two decoders, ONE metric, and a CROSS-DECODER EQUALITY** — stronger than two independent
+  oracles. Two device-free host mirrors in `particle_readback`'s shape, plus a test that both
+  decoders return the **same `delta_viewz`** for a shared world configuration to within f32. Two
+  per-arm oracles can each be right and mutually inconsistent; this one cannot.
+- **Sentinel non-vacuity:** an ortho reverse-Z configuration drives `soft_b == 0.0` and the FS
+  returns opacity 1.0; a perspective one never produces `soft_b == 0.0`.
+- **Byte-identity:** every existing particle `.spv` frozen; two manifest rows; two `*_spv_sync`
+  pins; `dxc -P` two-sided for each new define.
+- **Degrade:** with `push_descriptor_ok == false`, SOFT unarmable and **all image goldens
+  byte-identical** to pre-item-4.
+- **Red mutations:** (a) drop the `cos_theta` multiply ⇒ the cross-decoder equality reds; (b) push
+  `soft_b = 0.0` from a perspective camera ⇒ the sentinel test reds; (c) leave the push range at
+  72 B ⇒ FRAGMENT-stage validation error; (d) bind set 2 normally instead of pushing ⇒
+  layout-creation error, since a push layout is not bindable.
+
+##### Files
+
+`device.rs` (extension enable, `push_descriptor_ok` probe, `vkCmdPushDescriptorSetKHR` in the fn
+table) · an RHI push-descriptor verb · the path recorders (push set 2 from the view they hold) ·
+`compute.rs` (`PARTICLE_DRAW_PUSH_BYTES` 72 → 84, two `embed_spirv!`) · `emit_particles.rs` (the two
+FS variants) · `runner.rs` (three push words + the ortho sentinel) · `ffi.rs`
+(`VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL`) · D7's Deferred row (its derived transition
+becomes `SRO → DS_READ_ONLY_OPTIMAL`; `depth_write` is already OFF) · `SHADER-VARIANT-MANIFEST.md` ·
+**`targets.rs`: nothing.**
+
 ### P2b — Render-time interpolation — **size S**, default OFF *(M6)*
 
 `ParticleRender` gains a packed `vel` lane (32 B → **40 B**, **+25 % of the draw's read traffic**) — **as a COMPILE-TIME variant (K3): `-D PARTICLE_INTERP` on the sim and VS, plus the host `cfg` that sizes the record and the buffer 40 B**, with its own `docs/SHADER-VARIANT-MANIFEST.md` row. Never a runtime flag over an always-40 B record — that would pay the +25 % draw-read while off, the F24 dark-tax class this plan cites everywhere else. The VS advances `pos + vel · (pc.overstep · timestep)` — one fused multiply-add — with `overstep = ParticleClock::overstep_fraction()`. Rides the engine's existing interpolation seam (`FixedTime::overstep_fraction()` / RDG Pillar B).
