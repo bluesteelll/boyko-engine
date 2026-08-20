@@ -51,6 +51,17 @@ const USER_PACKAGES: &[&str] = &[
     // engine one. Recording it here is what stops that being discovered as a surprise `E0425` in a
     // crate nobody was working on, which is the failure mode the gate's own message names.
     "profile-fixture-log",
+    // The Aether DSL's transpiler half: a plain library of parse/expand code that executes only
+    // inside rustc's process, at compile time. A proc-macro's code never runs in the shipped
+    // process, so no runtime zone can ever exist here — `Engine` would claim runtime membership
+    // that is false by construction. Recorded as a decision, per this gate's own rule.
+    "aether-lang",
+    // The two-line proc-macro shim over `aether-lang`. Same compile-time-only argument.
+    "aether",
+    // The Aether integration-test crate: it boots real `App`s the way a game does, so if it ever
+    // grows a zone it is a consumer of the engine, not part of it — the `bench-bevy-vs-boyko`
+    // precedent exactly.
+    "aether-tests",
 ];
 
 fn repo_root() -> PathBuf {
