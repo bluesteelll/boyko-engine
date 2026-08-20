@@ -1219,3 +1219,55 @@ BOYKO_HOST_DUMP          = "D:\\tmp\\particle_additive.bmp"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 BOYKO_WIN                = "512"
 BOYKO_RENDER_PATH        = "vb"
+
+[particle_sdf_collide]
+# Particles P1 gate -- the SDF-collision image pin. The same one-emitter fixture as
+# `particle_additive`, plus an `SdfPrimitive` slab (a 4 x 0.2 x 4 box at y = 2.0) standing above the
+# upward fan, with the sim built from the `-D SDF_COLLIDE` module.
+#
+# WHAT THE BYTES SAY, and what makes them a pin rather than a picture: the particles stop at the
+# slab. MEASURED at this capture against the control run (`BOYKO_PARTICLE_SDF` set,
+# `BOYKO_PARTICLE_COLLIDE` unset -- the same scene, the same effect table, the same clock, the
+# pipeline built from the base module instead): above the contact plane this image holds ZERO
+# near-white pixels while the control holds 164; the topmost white row is 216 here and 99 there,
+# against a slab-underside row of 219 predicted from the camera. The fan's x-range is identical in
+# both (`[175,386]`) because the fixture's friction is 0 and the tangential component is untouched.
+#
+# TWO KNOBS, ON PURPOSE. `BOYKO_PARTICLE_SDF` puts the collider AND the per-effect contact
+# parameters in the scene; `BOYKO_PARTICLE_COLLIDE` picks the shader module. Splitting them is what
+# makes the control exact -- with only the first set, the two runs differ in ONE BIT, so "they
+# bounced" cannot be explained by the scene having changed.
+#
+# The determinism argument is `particle_additive`'s, verbatim and unchanged: `Time` is inserted
+# PAUSED at config time and the fixture drives exactly one substep per frame, so the simulated
+# instant is a function of the frame index alone -- which matters twice, because `particle_emit`
+# seeds its RNG with `rng_seed ^ gid ^ frame_index`. Verified: two runs, byte-identical.
+#
+# PINNED ON DEFERRED, not on VB like its sibling. That path marches the `SdfPrimitive` into the
+# G-buffer, so the collider the particles hit is VISIBLE in the same image as the collision -- which
+# is the whole point of an image pin for this rung. (Its own known property, unchanged by P1: SDF
+# surfaces do not write depth on this leg, so the billboards are not occluded BY the slab; the
+# claim here is about trajectories, and gate #12's dumps are where occlusion is judged.)
+crate           = "boyko-app"
+test_binary     = "particle_lab"
+test_name       = "particle_lab_screenshot_dump"
+bmp             = "D:\\tmp\\particle_sdf_collide.bmp"
+width           = 512
+height          = 512
+# PENDING owner visual sign-off, captured 2026-08-20 (two byte-identical runs). The value is the
+# real digest, not the unblessed sentinel, so -Check regressions are caught from today; what is
+# outstanding is the OWNER's look at the BMP -- the only thing that can say the image is RIGHT
+# rather than merely stable and merely different from its control.
+sha256_software = "729f5ad69846b146dcd07dc840943234af3781b8b127fd5da760b918a6784704"
+# The HW-RT leg was NOT run for this pin. Seeded with the mechanically-checked unblessed sentinel
+# rather than a copy of the software digest, which would be a claim nobody made.
+sha256_hwrt     = "PENDING"
+
+[particle_sdf_collide.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_HOST_DUMP          = "D:\\tmp\\particle_sdf_collide.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+BOYKO_WIN                = "512"
+BOYKO_RENDER_PATH        = "deferred"
+BOYKO_PARTICLE_SDF       = "1"
+BOYKO_PARTICLE_COLLIDE   = "1"

@@ -97,7 +97,7 @@ and `particle_depth_compare_for` (`boyko_app/src/gpu_scene/particle.rs`) are two
 question — what does this path's depth image hold — and take the SAME `deferred_path` predicate,
 so exactly one `VkPipeline` exists per run and the two answers cannot disagree.
 
-*Byte gate:* `crates/boyko_rhi_vulkan/tests/particle_edsl_sync.rs` re-DXCs **all seven** particle
+*Byte gate:* `crates/boyko_rhi_vulkan/tests/particle_edsl_sync.rs` re-DXCs **all eight** particle
 artifacts under the recipes their headers pin and byte-compares. The base rows are load-bearing in
 both directions: they prove the `#ifdef` leaves the undefined compile byte-frozen (it does —
 verified at the landing). The same file pins the encode agreement itself
@@ -106,9 +106,35 @@ depth right-hand sides are compared as text, and `MESH_DEPTH_T_MAX` / `CAM_MODE_
 pinned against their host consts. A drifted normalizer or arm-select would mis-occlude with nothing
 in the image to say so.
 
-*Not yet built:* the remaining particle `-D` rows the plan schedules — `SDF_COLLIDE` (P1), `SOFT`
-(P2), `LIT_PERPIXEL` / `MOTION` (P3), `PARTICLE_INTERP` (P2b). Each gets its own row here when it
-lands.
+## `particle_sim.comp.hlsl` — the GPU particle hot loop (compute)
+
+One source (GENERATED — `boyko_shaderdsl/src/bin/emit_particles.rs`), two artifacts. The axis is
+`SDF_COLLIDE`, rung P1 of `docs/PARTICLES-PLAN.md` (D9), and it is a `-D` rather than a runtime flag
+for the F24 reason this plan cites everywhere: a field consumer's `#include`d code and register
+pressure would otherwise be paid on every frame of every scene that does not collide.
+
+| Variant | `SC` | `.spv` | dxc `-T` | Interface delta vs base |
+|---|---|---|---|---|
+| base (no collision) | — | `particle_sim.comp.spv` | `cs_6_0` | the P0 module: Set-0 bindings 0/2/3/4/5/6/7/9, 8 B push, three wave-leader `OpAtomicIAdd`, **zero `OpFDiv`**. `cached_field_d` is written 0 at spawn and never read. |
+| sdf-collide (P1) | `1` | `particle_sim_sdf.comp.spv` | `cs_6_0` | **+`StructuredBuffer<uint> Buf` @10** — the engine's ONE SDF edit list, the same binding number every other field consumer uses (`sdf_mesh_shadow.comp.hlsl:97`), followed by `#include "sdf_field.hlsli"`. The buffer is boot-static and read-only for the whole present loop, so it is **not** a framegraph resource: no `ResId`, no seed row, no barrier, and `particle_barrier_stream` is byte-unmoved by this rung. Push range, layout object, descriptor sets and atomic census are all UNCHANGED (collision publishes nothing — it moves state one lane already owns exclusively). The one census that moves is `OpFDiv`: 0 → **28**, all of them the frozen field header's (7 `sdf` instantiations — 1 for `field_distance`, 6 for `sdf_normal` — × 4 divides each: `smin`, both `smax` arms, `sd_capsule`). The particle-owned text adds none, pinned source-side. |
+
+`SC` = `SDF_COLLIDE`. Selection is **boot-frozen, once per process**: `particle_sim_spirv_for`
+(`boyko_app/src/gpu_scene/particle.rs`) takes `ParticleConfig::collides()`, so exactly one sim
+`VkPipeline` exists per run. Binding 10 is in the host layout table **either way** — bound-but-unread
+under the base module, the same shape the marcher's `tiles_buffer`/`PointerGrid` bindings have — so
+the pick never reaches the descriptor plumbing.
+
+*Byte gate:* the same `particle_edsl_sync` battery (30 tests). Beyond the two byte rows it pins the
+variant's binding set (`[0,2,3,4,5,6,7,9,10]` against the base's `[0,2,3,4,5,6,7,9]` — DXC strips a
+declared-but-unread resource, so this is a real "the field is actually consumed" claim), that the
+variant adds **no** atomic, the divide count above, and the collide block's own hand-written
+skeleton (the include contract, the skip test's direction, the cache write-back). The selector
+itself is pinned in-crate by identity AND by artifact property
+(`the_collide_arm_takes_the_sdf_module_and_the_base_arm_does_not`), because a swapped arm is
+invisible to every text and byte pin in the tree.
+
+*Not yet built:* the remaining particle `-D` rows the plan schedules — `SOFT` (P2), `LIT_PERPIXEL` /
+`MOTION` (P3), `PARTICLE_INTERP` (P2b). Each gets its own row here when it lands.
 
 ## `sdf_forward_march.comp.hlsl` — the Forward/VB fused SDF march+shade (compute)
 

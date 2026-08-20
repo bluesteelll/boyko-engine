@@ -2963,3 +2963,47 @@ pub fn emit_hlsl_particle_rot_advance() -> String {
         );
     })
 }
+
+/// Generates the **`particle_sdf_response`** span by tracing
+/// [`crate::particle::particle_sdf_response_body`] over `EmitCf` — rung P1's contact resolution
+/// (plan D9's `p += n·(radius − d)` and `v' = (v − v_n)(1 − friction) − v_n·restitution`).
+///
+/// ```text
+///     float vn = dot(vel, normal);
+///     float3 v_n = normal * vn;
+///     pos = pos + normal * (radius - d);
+///     vel = (vel - v_n) * (1.0 - friction) - v_n * restitution;
+/// ```
+///
+/// `pos`/`vel` are SUPPRESSED-DECL params exactly as [`emit_hlsl_particle_integrate`]'s are — the
+/// wrapper spells them `inout`, so the span assigns them by name and declares nothing. This span is
+/// spliced ONLY into the `-D SDF_COLLIDE` arm of `particle_sim.comp.hlsl`; the base compile does
+/// not carry it.
+pub fn emit_hlsl_particle_sdf_response() -> String {
+    use crate::particle;
+
+    emit_particle_leaf(
+        &["d", "radius", "restitution", "friction"],
+        &[],
+        &["pos", "vel", "normal"],
+        &[],
+        || {
+            let pos = EmitCf::decl_param_vec3("pos", Emit(push(Node::Vec3Param(0))));
+            let vel = EmitCf::decl_param_vec3("vel", Emit(push(Node::Vec3Param(1))));
+            let normal = Emit(push(Node::Vec3Param(2)));
+            let d = Emit::input(0);
+            let radius = Emit::input(1);
+            let restitution = Emit::input(2);
+            let friction = Emit::input(3);
+            let _ = particle::particle_sdf_response_body::<EmitCf>(
+                &pos,
+                &vel,
+                normal,
+                d,
+                radius,
+                restitution,
+                friction,
+            );
+        },
+    )
+}

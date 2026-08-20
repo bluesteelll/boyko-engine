@@ -1,5 +1,5 @@
-//! The **P0 particle leaf** pins (`feature = "emit"`) — `docs/PARTICLES-PLAN.md` rung E's leaf
-//! table, one test per leaf.
+//! The **particle leaf** pins (`feature = "emit"`) — `docs/PARTICLES-PLAN.md` rung E's leaf table,
+//! one test per leaf: the six P0 rows plus rung P1's `particle_sdf_response`.
 //!
 //! Each test pins BOTH halves of the dual instantiation of the SAME generic body
 //! ([`boyko_shaderdsl::particle`]):
@@ -113,6 +113,35 @@ fn eval_rot_advance(rot_cs: u32, mul_cos: f32, mul_sin: f32) -> u32 {
     let cell: Cell<u32> = Cell::new(0);
     let _ = leaves::particle_rot_advance_body::<EvalCf>(rot_cs, mul_cos, mul_sin, &cell);
     cell.get()
+}
+
+/// Runs `particle_sdf_response` over `EvalCf`, returning the resolved `(pos, vel)`.
+#[allow(clippy::too_many_arguments)]
+// Mirrors the leaf's own parameter list one-for-one; see the leaf's own rationale.
+fn eval_sdf_response(
+    pos: [f32; 3],
+    vel: [f32; 3],
+    normal: [f32; 3],
+    d: f32,
+    radius: f32,
+    restitution: f32,
+    friction: f32,
+) -> ([f32; 3], [f32; 3]) {
+    let pos_var = EvalCf::decl_param_vec3("pos", pos);
+    let vel_var = EvalCf::decl_param_vec3("vel", vel);
+    let _ = leaves::particle_sdf_response_body::<EvalCf>(
+        &pos_var,
+        &vel_var,
+        normal,
+        d,
+        radius,
+        restitution,
+        friction,
+    );
+    (
+        EvalCf::get_var_vec3(&pos_var),
+        EvalCf::get_var_vec3(&vel_var),
+    )
 }
 
 /// Packs a `(cos, sin)` pair the way [`leaves::particle_rot_advance_body`]'s encode does, for the
@@ -568,5 +597,144 @@ fn particle_rot_advance_eval_and_emit() {
     assert!(
         !g.contains("rsqrt(") && !g.contains("sqrt("),
         "particle_rot_advance must NOT renormalize (plan M7/K1 drops it deliberately):\n{g}"
+    );
+}
+
+// ---- particle_sdf_response (rung P1) --------------------------------------------------------
+
+#[test]
+fn particle_sdf_response_eval_and_emit() {
+    // EVERY quantity below is a dyadic rational, so the whole response is EXACT in binary32 and
+    // the expectations carry no tolerance. That is deliberate: the leaf's only non-exact
+    // ingredient is `dot`'s freedom to contract into an FMA, which cannot change a sum of exactly
+    // representable products.
+
+    // 1. HEAD-ON, on the plane normal (0,1,0): a particle 0.25 above the surface with a contact
+    //    radius of 0.5 is 0.25 INSIDE the shell, so it lifts by exactly that, and its -2 approach
+    //    speed leaves at +1 under restitution 0.5.
+    let (pos, vel) = eval_sdf_response(
+        [0.0, 0.25, 0.0],
+        [0.0, -2.0, 0.0],
+        [0.0, 1.0, 0.0],
+        0.25,
+        0.5,
+        0.5,
+        0.25,
+    );
+    assert_eq!(pos, [0.0, 0.5, 0.0], "the lift is n * (radius - d) = (0, 0.25, 0)");
+    assert_eq!(
+        vel,
+        [0.0, 1.0, 0.0],
+        "a -2 normal speed under restitution 0.5 must leave at +1, i.e. REVERSED and halved"
+    );
+
+    // 2. OBLIQUE: the same contact with a tangential component. Friction 0.25 damps the tangent to
+    //    0.75 of itself and leaves the normal reflection untouched — the two coefficients are
+    //    independent, which is the whole reason the effect row carries both.
+    let (_, vel) = eval_sdf_response(
+        [0.0, 0.25, 0.0],
+        [4.0, -2.0, 0.0],
+        [0.0, 1.0, 0.0],
+        0.25,
+        0.5,
+        0.5,
+        0.25,
+    );
+    assert_eq!(
+        vel,
+        [3.0, 1.0, 0.0],
+        "tangential 4 -> 4*(1-0.25) = 3, normal -2 -> +1; friction must not touch the normal term \
+         and restitution must not touch the tangent"
+    );
+
+    // 3. A NON-AXIS normal, so the `dot` is exercised as a real sum of three products rather than
+    //    as a component read. `n = (0.5, 0.5, 0)` is exactly representable (its non-unit length is
+    //    fine here — the leaf's contract is that the CALLER passes `sdf_normal`'s already-
+    //    normalized gradient, and this case is about the algebra):
+    //      vn  = 2*0.5 + (-4)*0.5 = -1        v_n = (-0.5, -0.5, 0)
+    //      v_t = (2.5, -3.5, 0)               v_t*(1-0.5) = (1.25, -1.75, 0)
+    //      vel = (1.25, -1.75, 0) - (-0.25, -0.25, 0) = (1.5, -1.5, 0)
+    //      pos = (1,1,1) + (0.5,0.5,0)*(0.5-0.25) = (1.125, 1.125, 1)
+    let (pos, vel) = eval_sdf_response(
+        [1.0, 1.0, 1.0],
+        [2.0, -4.0, 0.0],
+        [0.5, 0.5, 0.0],
+        0.25,
+        0.5,
+        0.5,
+        0.5,
+    );
+    assert_eq!(pos, [1.125, 1.125, 1.0]);
+    assert_eq!(
+        vel,
+        [1.5, -1.5, 0.0],
+        "the normal component must come from a real dot product over all three lanes"
+    );
+
+    // 4. The two COEFFICIENT EXTREMES, as properties rather than as numbers pulled from a run.
+    //    restitution 0 ⇒ the normal component is annihilated (the particle slides along the
+    //    surface instead of bouncing); friction 1 ⇒ the tangential component is annihilated (it
+    //    stops dead where it hit and only the bounce remains).
+    let (_, slide) = eval_sdf_response(
+        [0.0, 0.0, 0.0],
+        [3.0, -2.0, 0.0],
+        [0.0, 1.0, 0.0],
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    );
+    assert_eq!(slide, [3.0, 0.0, 0.0], "restitution 0 must remove the normal component entirely");
+    let (_, stopped) = eval_sdf_response(
+        [0.0, 0.0, 0.0],
+        [3.0, -2.0, 0.0],
+        [0.0, 1.0, 0.0],
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+    );
+    assert_eq!(
+        stopped,
+        [0.0, 2.0, 0.0],
+        "friction 1 must remove the tangential component entirely, leaving the full elastic bounce"
+    );
+
+    // 5. NON-VACUITY: a contact at exactly the shell with no coefficients at all still has to be a
+    //    no-op, or the leaf would be silently moving particles that never touched anything.
+    let (pos, vel) = eval_sdf_response(
+        [1.0, 2.0, 3.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        0.5,
+        0.5,
+        0.0,
+        0.0,
+    );
+    assert_eq!(pos, [1.0, 2.0, 3.0], "d == radius means zero penetration, hence zero lift");
+    assert_eq!(vel, [1.0, 0.0, 0.0], "a purely tangential velocity is untouched at friction 0");
+
+    let g = boyko_shaderdsl::emit::emit_hlsl_particle_sdf_response().replace("\r\n", "\n");
+    assert_eq!(
+        g,
+        "    float vn = dot(vel, normal);\n\
+         \x20   float3 v_n = normal * vn;\n\
+         \x20   pos = pos + normal * (radius - d);\n\
+         \x20   vel = (vel - v_n) * (1.0 - friction) - v_n * restitution;\n",
+        "the particle_sdf_response span must be plan D9's response verbatim, with no decls (the \
+         wrapper's pos/vel are `inout`):\n{g}"
+    );
+    // The particle side of the collide variant adds NO divide. The artifact-level half of this
+    // claim cannot be zero — the variant `#include`s the frozen field header, whose smin/smax and
+    // capsule carry divides — so `particle_edsl_sync` pins that module's count to the FIELD's own
+    // contribution and this is the half that says the particle side contributed none of it.
+    assert!(
+        !g.contains('/'),
+        "particle_sdf_response must contain NO divide:\n{g}"
+    );
+    assert!(
+        !g.contains("sqrt(") && !g.contains("normalize("),
+        "particle_sdf_response must not renormalize: `sdf_normal` already ends in `normalize`, and \
+         doing it twice would put an approximate op inside this leaf's oracle for nothing:\n{g}"
     );
 }

@@ -801,7 +801,17 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
         let capacity = particle_config.capacity;
         let deferred_path =
             matches!(host.resolved_render_path.path, boyko_render::RenderPath::Deferred);
-        host.gpu.build_particle_bundle(ctx, bindless_texture_table, capacity, deferred_path);
+        // Rung P1's arming, resolved here for the same reason and at the same moment: it picks the
+        // sim's SPIR-V (`-D SDF_COLLIDE`), so it is a boot-frozen module choice rather than a
+        // per-frame branch, and it travels as the config's own structural predicate.
+        let collide = particle_config.collides();
+        host.gpu.build_particle_bundle(
+            ctx,
+            bindless_texture_table,
+            capacity,
+            deferred_path,
+            collide,
+        );
     }
 
     // Asset-system rung A3b: drain any decoded-but-not-yet-uploaded assets BEFORE
@@ -1405,9 +1415,22 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 // `GpuSceneBundles::boot` (`RhiDevice::create_buffer`, HostVisibleCoherent
                 // — its `mapped`/`size` are the RHI's own) and destroyed only in teardown
                 // after the loop. This is the ONE-SHOT boot-static write, run under the
-                // fenced token BEFORE the first marcher dispatch reads the buffer, so no
+                // fenced token BEFORE the first dispatch that reads the buffer, so no
                 // in-flight GPU read of a non-empty edit list is racing it (the SSBO was
                 // boot-seeded EMPTY; nothing else rewrites this single shared buffer).
+                //
+                // THE READERS THIS ARGUMENT COVERS — THREE, and the list is load-bearing:
+                // "before the first reader dispatches" is only true while every reader is
+                // enumerated, and a fourth one added without a look here inherits a claim
+                // nobody re-checked.
+                //   1. the MARCHER family (`sdf_gbuffer_composite` / `sdf_depth_composite` /
+                //      `deferred_pbr` / `sdf_forward_march`) — binding 0 of its vocabulary;
+                //   2. `sdf_mesh_shadow.comp` (the VB-SV0 shadow prepass) — its `Buf` @10;
+                //   3. `particle_sim_sdf.comp` (particles rung P1, `-D SDF_COLLIDE`) — its
+                //      `Buf` @10, bound in BOTH parity sets by `ParticleGpuBundle::create`.
+                // All three are READ-ONLY consumers of the frozen `sdf_field.hlsli` gateway,
+                // and none of them is declared before this write in the frame's recording
+                // order, which is what makes the single unsynchronised write sound.
                 unsafe {
                     upload_sdf_edit_list(&token, host.gpu.edit_list(), staging.edits());
                 }

@@ -1,5 +1,7 @@
-//! The **P0 particle leaves** (`docs/PARTICLES-PLAN.md` rung E's leaf table) — the six generic
-//! `C: Cf` bodies the GPU particle system's five shaders splice their math out of.
+//! The **particle leaves** (`docs/PARTICLES-PLAN.md` rung E's leaf table) — the six P0 generic
+//! `C: Cf` bodies the GPU particle system's five shaders splice their math out of, plus rung P1's
+//! [`particle_sdf_response_body`] (the seventh row of that table, spliced into the
+//! `-D SDF_COLLIDE` variant of `particle_sim`).
 //!
 //! Rung E landed the eDSL nodes these leaves need ([`crate::particle_facets`] is the per-node
 //! facet probe set); this module is the first REAL consumer. Every leaf here is authored ONCE
@@ -156,7 +158,7 @@ fn rng_unit<C: Cf>(h: C::Uint) -> C::Scalar {
     C::float_from_uint(C::shr_u(h, C::uint_lit(RNG_UNIT_SHIFT))).mul(C::Scalar::lit(RNG_TO_UNIT))
 }
 
-// ---- The six P0 leaves ---------------------------------------------------------------------
+// ---- The six P0 leaves + rung P1's collision response ---------------------------------------
 
 /// **`particle_integrate`** (plan rung E leaf table, row 1) — ONE substep of the explicit-Euler
 /// integrator, over the caller's `inout` state.
@@ -559,4 +561,75 @@ pub fn particle_rot_advance_body<C: Cf>(
             ),
         ),
     )
+}
+
+/// **`particle_sdf_response`** (plan rung E leaf table, row 7 — rung **P1**) — the contact
+/// resolution of one particle against the SDF field, over the caller's `inout` state.
+///
+/// ```text
+/// float vn = dot(vel, normal);        // the SIGNED normal speed
+/// float3 v_n = normal * vn;           // the velocity's normal component
+/// pos = pos + normal * (radius - d);
+/// vel = (vel - v_n) * (1.0 - friction) - v_n * restitution;
+/// ```
+///
+/// This is plan D9's response, term for term: `p += n·(radius − d)` and
+/// `v' = (v − v_n)(1 − friction) − v_n·restitution`. `normal` is `sdf_normal(pos)` — the field
+/// gradient, pointing AWAY from the surface — and `d` is the field value at `pos`, so the caller
+/// reaches this leaf only on the `d < radius` branch and `radius − d` is the positive depth the
+/// particle has to be lifted by.
+///
+/// # Why the two terms are what they are
+///
+/// `v_n` is the component that is driving the particle INTO the surface (`vn < 0` on approach), so
+/// `−v_n·restitution` is that component reflected and scaled: `restitution == 0` kills the bounce
+/// (the particle slides), `restitution == 1` reflects it undamped. The remainder `v − v_n` is the
+/// TANGENTIAL component, which `(1 − friction)` damps: `friction == 0` slides frictionlessly,
+/// `friction == 1` stops the slide dead. The two coefficients are therefore independent, which is
+/// why the effect row carries both.
+///
+/// The position correction uses the field value rather than a fixed epsilon: a distance field
+/// reports how deep the point is, so `p + n·(radius − d)` lands the centre on the `radius` shell in
+/// ONE step for any depth — no iteration, and no dependence on the substep size.
+///
+/// # No trig, no divide, no normalization
+///
+/// `normal` arrives already normalized (`sdf_normal` ends in `normalize`), and every operation here
+/// is a multiply, an add or a `dot` — so this leaf inherits [`particle_integrate_body`]'s standing
+/// FMA-contraction carve-out and nothing worse. It is the ONE leaf that spells [`Cf::vec3_dot`]
+/// (rung E3), whose `OpDot` is free to contract, so its host oracle is a CLOSE mirror rather than a
+/// bit-exact one — the trade that node's own doc states.
+#[inline]
+pub fn particle_sdf_response_body<C: Cf>(
+    pos: &C::Vec3Var,
+    vel: &C::Vec3Var,
+    normal: C::Vec3f,
+    d: C::Scalar,
+    radius: C::Scalar,
+    restitution: C::Scalar,
+    friction: C::Scalar,
+) -> Flow {
+    // Read the pre-impact velocity ONCE: both output terms are functions of it, and the
+    // assignment below must not observe its own result.
+    let v = C::get_var_vec3(vel);
+    let vn = C::temp_float("vn", C::vec3_dot(v, normal));
+    let v_n = C::temp_vec3("v_n", C::vec3_mul_scalar(normal, vn));
+
+    // pos = pos + normal * (radius - d);
+    C::set_var_vec3(
+        pos,
+        C::vec3_add(
+            C::get_var_vec3(pos),
+            C::vec3_mul_scalar(normal, radius.sub(d)),
+        ),
+    );
+    // vel = (vel - v_n) * (1.0 - friction) - v_n * restitution;
+    C::set_var_vec3(
+        vel,
+        C::vec3_sub(
+            C::vec3_mul_scalar(C::vec3_sub(v, v_n), C::Scalar::lit(1.0).sub(friction)),
+            C::vec3_mul_scalar(v_n, restitution),
+        ),
+    );
+    Flow::Continue(())
 }

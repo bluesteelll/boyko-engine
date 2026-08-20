@@ -4751,6 +4751,10 @@ impl GpuSceneBundles {
     /// Deferred, the base pair elsewhere). It is passed as the PREDICATE, not as two values
     /// derived from it, because the two answers must never disagree.
     ///
+    /// `collide` is rung P1's independent arming ([`ParticleConfig::collides`]): it picks the sim
+    /// module ([`particle::particle_sim_spirv_for`]) and nothing else — same layout, same push
+    /// range, same descriptor sets, and the edit list is bound either way.
+    ///
     /// # Panics
     /// Panics (`expect("invariant: ...")`) on any RHI create/submit failure — mirrors
     /// [`Self::boot`]'s contract, and on being called twice (the bundle is built once per run;
@@ -4761,6 +4765,7 @@ impl GpuSceneBundles {
         bindless: &BindlessTextureTable,
         capacity: u32,
         deferred_path: bool,
+        collide: bool,
     ) {
         assert!(
             self.particle.is_none(),
@@ -4770,8 +4775,12 @@ impl GpuSceneBundles {
             ctx,
             &self.camera_ring,
             bindless,
+            // Rung P1's field, bound at Set-0 binding 10 — the SAME single edit list the marcher
+            // and the SDF shadow prepass read, never a particle-owned copy of it (principle 0).
+            &self.edit_list,
             capacity,
             deferred_path,
+            collide,
         ));
     }
 

@@ -82,7 +82,9 @@ struct EffectParamsGpu {
 // The sim's working set (plan D2, 48 B, AoS). `size0_invlife` packs the spawn size and the
 // RECIPROCAL total lifetime as two binary16 halves -- emit pays the one divide, once per
 // particle, so the per-frame sim is divide-free. `effect_flags` packs `u16 effect_index |
-// u16 flags`. `cached_field_d` is the P1 Lipschitz cache, written 0 at P0.
+// u16 flags`. `cached_field_d` is rung P1's Lipschitz cache: seeded 0 at spawn (so the first
+// substep always evaluates the field) and maintained by the sim's `-D SDF_COLLIDE` arm --
+// untouched, and never read, by the base compile.
 struct ParticleSim {
     float3 position; float life_remaining;
     float3 velocity; float cached_field_d;

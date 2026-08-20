@@ -1,5 +1,6 @@
-//! Particles P0 (D13, D14) — the ECS-native owner-set arming knob for the GPU particle
-//! subsystem.
+//! Particles P0 (D13, D14) + P1 (D9) — the ECS-native owner-set arming knobs for the GPU particle
+//! subsystem: [`ParticleMode`] (simulate and draw at all?) and [`ParticleCollision`] (collide
+//! against the SDF field?), two INDEPENDENT axes, both `#[default] Off`.
 //!
 //! Principle 0: ECS-native — [`ParticleConfig`] is a `#[derive(Resource)]` singleton (the cold
 //! owner-set config, NOT a side `std::Vec`/`HashMap`), mirroring
@@ -87,6 +88,54 @@ impl ParticleMode {
     pub const ALL: [ParticleMode; 2] = [ParticleMode::Off, ParticleMode::GpuUnlit];
 }
 
+// ---- ParticleCollision (rung P1's own arming axis) -----------------------------------
+
+/// Whether — and against what — simulated particles collide (`docs/PARTICLES-PLAN.md` rung P1 /
+/// D9). `#[repr(u32)]` for [`ParticleMode`]'s reason: the discriminant is a stable arm word.
+///
+/// # Its own axis, not a [`ParticleMode`] variant
+///
+/// Collision is ORTHOGONAL to how particles are shaded: rung P3's lit mode will want colliding and
+/// non-colliding particles alike, and folding the two knobs into one enum would make that a cross
+/// product of variants rather than two independent bits.
+///
+/// # A COMPILE-TIME arm, resolved once at boot
+///
+/// `Sdf` selects a different `particle_sim` SPIR-V (`-D SDF_COLLIDE`), not a runtime branch inside
+/// one shader — plan F24's rule, measured: the VB-SV0 inline detour cost +75 % with its feature OFF
+/// and no byte gate could see it. So this knob is read exactly once, where the pipeline is built,
+/// and a live flip is NOT honoured (the field's doc says boot-frozen for the same reason
+/// [`ParticleConfig::capacity`]'s does).
+#[repr(u32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ParticleCollision {
+    /// Particles pass through everything — the DEFAULT, and the base `particle_sim` module. No
+    /// field binding, no field evaluation, no `cached_field_d` traffic.
+    #[default]
+    Off,
+    /// Particles collide against the engine's ONE SDF field (the `SdfPrimitive` edit list), with
+    /// the per-effect `collision_radius` / `restitution` / `friction` deciding the contact.
+    ///
+    /// An effect whose `collision_radius` is 0 still passes through everything but the interior of
+    /// a surface, so this arm is the SUBSYSTEM's switch and the effect row is the per-effect one.
+    Sdf,
+}
+
+impl ParticleCollision {
+    /// The ARTIFACT spelling — `"off"` / `"sdf"`. See [`ParticleMode::as_str`] for why the
+    /// spelling is a table rather than a `Debug` formatting.
+    #[inline]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ParticleCollision::Off => "off",
+            ParticleCollision::Sdf => "sdf",
+        }
+    }
+
+    /// Every collision mode, for exhaustive iteration in tests and artifact readers.
+    pub const ALL: [ParticleCollision; 2] = [ParticleCollision::Off, ParticleCollision::Sdf];
+}
+
 // ---- ParticleConfig (the owner-set Resource — mirrors OcclusionConfig) ---------------
 
 /// The global particle-subsystem arming config — a `World`-singleton Resource the owner sets.
@@ -105,13 +154,21 @@ pub struct ParticleConfig {
     /// The boot-frozen pool capacity in particles (D14). Bounds MEMORY only — per-frame work is
     /// `O(alive)`. Default [`PARTICLE_DEFAULT_CAPACITY`].
     pub capacity: u32,
+    /// Rung P1's collision arming — boot-frozen, because it picks the sim's SPIR-V rather than a
+    /// runtime branch. Default [`ParticleCollision::Off`].
+    pub collision: ParticleCollision,
 }
 
 impl Default for ParticleConfig {
     #[inline]
     fn default() -> Self {
-        // Off == today (the 0%-gate anchor): a default world simulates and draws no particles.
-        Self { mode: ParticleMode::Off, capacity: PARTICLE_DEFAULT_CAPACITY }
+        // Off == today (the 0%-gate anchor): a default world simulates and draws no particles, and
+        // an armed world that says nothing about collision gets the base sim module.
+        Self {
+            mode: ParticleMode::Off,
+            capacity: PARTICLE_DEFAULT_CAPACITY,
+            collision: ParticleCollision::Off,
+        }
     }
 }
 
@@ -123,11 +180,27 @@ impl ParticleConfig {
     pub const fn enabled(&self) -> bool {
         !matches!(self.mode, ParticleMode::Off)
     }
+
+    /// Whether the sim collides against the SDF field — the structural predicate
+    /// `collision != Off`, the ONE value the boot site turns into `-D SDF_COLLIDE`'s pipeline pick.
+    ///
+    /// Independent of [`enabled`](Self::enabled): a disarmed subsystem builds no pipeline at all,
+    /// so this predicate is only ever consulted on the armed path.
+    #[inline]
+    pub const fn collides(&self) -> bool {
+        !matches!(self.collision, ParticleCollision::Off)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A config literal at the two defaults, so a test that varies ONE knob does not have to
+    /// restate the others (and so a third axis lands in one place).
+    fn cfg(mode: ParticleMode, capacity: u32) -> ParticleConfig {
+        ParticleConfig { mode, capacity, collision: ParticleCollision::Off }
+    }
 
     #[test]
     fn particle_config_default_is_off_the_zero_gate() {
@@ -138,6 +211,73 @@ mod tests {
             cfg.capacity, PARTICLE_DEFAULT_CAPACITY,
             "the default pool capacity is the plan's D14 number"
         );
+        assert_eq!(cfg.collision, ParticleCollision::Off);
+        assert!(!cfg.collides(), "rung P1's arm is default-OFF (the base sim module)");
+    }
+
+    /// The collision axis's artifact spelling gets the SAME three claims its sibling's does —
+    /// total, unique, and indexable by the `#[repr(u32)]` discriminant.
+    ///
+    /// Written rather than the surface deleted because `as_str` exists for a reason a diagnostic
+    /// reader depends on ([`ParticleMode::as_str`]'s doc): a capture must be able to answer "which
+    /// configuration produced this?" from the artifact. An untested spelling is the version of that
+    /// surface that can silently answer wrongly — two arms sharing a word, or an `ALL` that has
+    /// stopped listing every variant, are both invisible until someone reads a log and believes it.
+    #[test]
+    fn the_collision_artifact_spelling_is_total_and_unique() {
+        assert_eq!(ParticleCollision::ALL.len(), 2, "ALL must list every collision mode");
+        for (i, a) in ParticleCollision::ALL.iter().enumerate() {
+            assert_eq!(*a as u32, i as u32, "{a:?} must sit at its own discriminant in ALL");
+            assert!(!a.as_str().is_empty(), "{a:?} has no word");
+            for b in &ParticleCollision::ALL[i + 1..] {
+                assert_ne!(a.as_str(), b.as_str(), "{a:?} and {b:?} share a word");
+            }
+        }
+        // The two axes are independent, so their words may coincide without ambiguity ("off" is
+        // both) — but only while a reader is told WHICH axis a word came from. Asserted here so the
+        // coincidence is a recorded property rather than an accident nobody looked at.
+        assert_eq!(ParticleCollision::Off.as_str(), ParticleMode::Off.as_str());
+    }
+
+    #[test]
+    fn default_collision_is_off() {
+        // The second route into `Off`, exactly as `default_mode_is_off` below: the hand-written
+        // `ParticleConfig::default` names the variant literally, while `ParticleCollision::default`
+        // comes from the `#[default]` attribute. Neither implies the other.
+        assert_eq!(ParticleCollision::default(), ParticleCollision::Off);
+    }
+
+    /// A WILDCARD-FREE match over the collision axis, so a future arm (a mesh-BVH collider, a
+    /// height field) fails to COMPILE here rather than inheriting whichever answer a `_` swallowed.
+    #[test]
+    fn every_collision_variant_states_its_own_answer_without_a_wildcard() {
+        for collision in ParticleCollision::ALL {
+            let want = match collision {
+                ParticleCollision::Off => false,
+                ParticleCollision::Sdf => true,
+            };
+            assert_eq!(
+                ParticleConfig { collision, ..ParticleConfig::default() }.collides(),
+                want,
+                "{collision:?}"
+            );
+            assert_eq!(
+                collision as u32 != ParticleCollision::Off as u32,
+                want,
+                "{collision:?}: collides() must track the `#[repr(u32)]` discriminant"
+            );
+        }
+    }
+
+    /// The collision axis is orthogonal to the arming one — the property that keeps rung P1 from
+    /// becoming a `ParticleMode` cross product.
+    #[test]
+    fn collision_is_orthogonal_to_the_arming_predicate() {
+        let armed_no_collide = cfg(ParticleMode::GpuUnlit, 1);
+        assert!(armed_no_collide.enabled() && !armed_no_collide.collides());
+        let disarmed_collide =
+            ParticleConfig { collision: ParticleCollision::Sdf, ..ParticleConfig::default() };
+        assert!(!disarmed_collide.enabled() && disarmed_collide.collides());
     }
 
     #[test]
@@ -157,7 +297,7 @@ mod tests {
         for mode in ParticleMode::ALL {
             let expected = mode as u32 != ParticleMode::Off as u32;
             assert_eq!(
-                ParticleConfig { mode, capacity: PARTICLE_DEFAULT_CAPACITY }.enabled(),
+                cfg(mode, PARTICLE_DEFAULT_CAPACITY).enabled(),
                 expected,
                 "{mode:?}: enabled() must track the discriminant"
             );
@@ -189,7 +329,7 @@ mod tests {
                 ParticleMode::GpuUnlit => true,
             };
             assert_eq!(
-                ParticleConfig { mode, capacity: PARTICLE_DEFAULT_CAPACITY }.enabled(),
+                cfg(mode, PARTICLE_DEFAULT_CAPACITY).enabled(),
                 want,
                 "{mode:?}"
             );
@@ -201,7 +341,7 @@ mod tests {
     /// armed config with a tiny capacity is still armed.
     #[test]
     fn capacity_is_orthogonal_to_the_arming_predicate() {
-        assert!(!ParticleConfig { mode: ParticleMode::Off, capacity: 1 << 20 }.enabled());
-        assert!(ParticleConfig { mode: ParticleMode::GpuUnlit, capacity: 1 }.enabled());
+        assert!(!cfg(ParticleMode::Off, 1 << 20).enabled());
+        assert!(cfg(ParticleMode::GpuUnlit, 1).enabled());
     }
 }

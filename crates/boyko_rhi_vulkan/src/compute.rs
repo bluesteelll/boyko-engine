@@ -5674,7 +5674,8 @@ pub const fn tile_grid_extent(img_w: u32, img_h: u32) -> (u32, u32) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-// Particles P0 — the five committed modules, their push ranges and their group edges
+// Particles — the eight committed artifacts (five base modules + the two `-D DEPTH_LINEAR` draw
+// stages + the `-D SDF_COLLIDE` sim), their push ranges and their group edges
 // (`docs/PARTICLES-PLAN.md` Rev 4). See `present/passes/particles.rs` for the recorder and
 // `boyko_app::gpu_scene::particle` for the host layout table these bindings mirror.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -5719,6 +5720,25 @@ embed_spirv! {
     /// counter), which is the difference between ~32 µs and ~0.5 ms at 1M survivors.
     PARTICLE_SIM_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_sim.comp.spv")
+}
+
+embed_spirv! {
+    /// Particles P1: the `-D SDF_COLLIDE` HOT LOOP (`shaders/particle_sim.comp.hlsl`, plan D9) —
+    /// the same pass with field collision compiled IN.
+    ///
+    /// Interface-identical to [`PARTICLE_SIM_SPV`] apart from ONE added read: the engine's SDF edit
+    /// list at Set-0 binding 10 (`StructuredBuffer<uint> Buf`, the binding number every field
+    /// consumer in the tree uses), which is boot-static and read-only for the whole present loop —
+    /// so it needs no framegraph `ResId`, no seed row and no barrier, and arming this variant moves
+    /// no derived barrier stream. Same [`PARTICLE_SIM_PUSH_BYTES`] push block, same layout object:
+    /// the collision tuning (`collision_radius`/`restitution`/`friction`) is PER-EFFECT and arrives
+    /// in the row the sim already fetched.
+    ///
+    /// Per substep it either SKIPS the field on a Lipschitz bound carried in the sim record's
+    /// `cached_field_d` lane, or evaluates it once and resolves a contact. Its atomic census is
+    /// UNCHANGED (the same three wave-leader sites): collision adds no counter.
+    PARTICLE_SIM_SDF_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_sim_sdf.comp.spv")
 }
 
 embed_spirv! {
@@ -5865,6 +5885,13 @@ pub fn particle_emit_spirv() -> &'static [u32] {
 #[inline]
 pub fn particle_sim_spirv() -> &'static [u32] {
     PARTICLE_SIM_SPV.as_words()
+}
+
+/// Particles P1: the `-D SDF_COLLIDE` HOT-LOOP SPIR-V as a `u32` word stream. See
+/// [`PARTICLE_SIM_SDF_SPV`]'s doc.
+#[inline]
+pub fn particle_sim_sdf_spirv() -> &'static [u32] {
+    PARTICLE_SIM_SDF_SPV.as_words()
 }
 
 /// Particles P0: the billboard-expansion VERTEX SPIR-V as a `u32` word stream. See

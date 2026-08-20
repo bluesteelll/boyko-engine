@@ -34,7 +34,7 @@ use boyko_rhi_vulkan::compute::{
     PARTICLE_DRAW_PUSH_BYTES, PARTICLE_EMIT_PUSH_BYTES, PARTICLE_KICKOFF_PUSH_BYTES,
     PARTICLE_QUAD_IB_BYTES, PARTICLE_SIM_PUSH_BYTES, particle_draw_dlin_fs_spirv,
     particle_draw_dlin_vs_spirv, particle_draw_fs_spirv, particle_draw_vs_spirv,
-    particle_emit_spirv, particle_kickoff_spirv, particle_sim_spirv,
+    particle_emit_spirv, particle_kickoff_spirv, particle_sim_sdf_spirv, particle_sim_spirv,
 };
 use boyko_rhi_vulkan::ffi::{VK_COMPARE_OP_GREATER, VK_COMPARE_OP_LESS, VkDescriptorSet};
 use boyko_rhi_vulkan::swapchain::ParticleActivation;
@@ -65,10 +65,17 @@ pub(crate) struct ParticleLayoutEntry {
     pub(crate) kind: DescriptorKind,
 }
 
-/// The COMPUTE Set-0 vocabulary, bindings 0..9 — the union of what
+/// The COMPUTE Set-0 vocabulary, bindings 0..10 — the union of what
 /// `particle_{kickoff,emit,sim}.comp.hlsl` declare. Each module names only the subset it uses and
 /// DXC strips the rest; the host layout is the union, and a set that binds more than a module
 /// declares is legal (an unreferenced descriptor is simply never read).
+///
+/// Binding 10 is rung P1's SDF edit list, and it is the one row that is a union member without
+/// being in EVERY armed frame's flow: the base `particle_sim` module does not declare it (the
+/// `-D SDF_COLLIDE` block is invisible to DXC), so on a non-colliding run it is bound-but-unread —
+/// the same shape the marcher's `tiles_buffer`/`PointerGrid` bindings already have. One layout
+/// serves both sim variants, which is what keeps the pipeline pick from reaching the descriptor
+/// plumbing.
 ///
 /// ⚠️ The DRAW's two sets are deliberately NOT in this table. Set 0 of the draw is a DIFFERENT
 /// vocabulary over the same set number (`p_render` @0 + the camera cbuffer @1, both `VERTEX`),
@@ -76,7 +83,7 @@ pub(crate) struct ParticleLayoutEntry {
 /// one flat table would make the well-formedness check below meaningless: it asserts that no two
 /// rows share a `(set, binding)`, which is exactly the property two independent set-0 layouts do
 /// not have.
-pub(crate) const PARTICLE_LAYOUT_ENTRIES: [ParticleLayoutEntry; 10] = [
+pub(crate) const PARTICLE_LAYOUT_ENTRIES: [ParticleLayoutEntry; 11] = [
     // `p_counters` — kickoff read+write, emit read, sim read+write (atomic).
     ParticleLayoutEntry { set: 0, binding: 0, kind: DescriptorKind::StorageBuffer },
     // `p_dispatch_args` — kickoff write; read by `DRAW_INDIRECT`, never by a shader.
@@ -97,6 +104,11 @@ pub(crate) const PARTICLE_LAYOUT_ENTRIES: [ParticleLayoutEntry; 10] = [
     ParticleLayoutEntry { set: 0, binding: 8, kind: DescriptorKind::StorageBuffer },
     // `p_effects` — emit read, sim read.
     ParticleLayoutEntry { set: 0, binding: 9, kind: DescriptorKind::StorageBuffer },
+    // `Buf` — the SDF edit list, read by the `-D SDF_COLLIDE` sim only (rung P1 / plan D9). The
+    // SAME binding number every other field consumer in the tree uses
+    // (`sdf_mesh_shadow.comp.hlsl:97`), and the engine's ONE edit list: boot-static, read-only for
+    // the whole present loop, hence not a framegraph resource and not a seed-table row.
+    ParticleLayoutEntry { set: 0, binding: 10, kind: DescriptorKind::StorageBuffer },
 ];
 
 /// The DRAW's Set-0 vocabulary — a different table over the same set number (see
@@ -143,16 +155,18 @@ const fn layout_table_is_well_formed(entries: &[ParticleLayoutEntry], set: u32) 
 
 const _: () = assert!(
     layout_table_is_well_formed(&PARTICLE_LAYOUT_ENTRIES, 0),
-    "the particle COMPUTE Set-0 table must be bindings 0..9 in order, all in set 0"
+    "the particle COMPUTE Set-0 table must be bindings 0..10 in order, all in set 0"
 );
 const _: () = assert!(
     layout_table_is_well_formed(&PARTICLE_DRAW_LAYOUT_ENTRIES, 0),
     "the particle DRAW Set-0 table must be bindings 0..1 in order, all in set 0"
 );
-// The compute vocabulary is exactly the ten seed-table rows — the same count the declarators
-// append and the same count each sink reserves. A drift here and a drift there would otherwise
-// have to be noticed by a human.
-const _: () = assert!(PARTICLE_LAYOUT_ENTRIES.len() == 10);
+// The compute vocabulary is the ten seed-table rows — the same count the declarators append and
+// the same count each sink reserves — PLUS rung P1's edit list, which is deliberately not one of
+// them (boot-static, read-only, no `ResId`). Spelling the sum rather than the total is what keeps
+// the two claims separable: a new GRAPH resource must move the declarators too, a new read-only
+// resident one must not.
+const _: () = assert!(PARTICLE_LAYOUT_ENTRIES.len() == 10 + 1);
 
 // ── Boot sizing ──────────────────────────────────────────────────────────────────────
 
@@ -244,7 +258,16 @@ impl ParticleGpuBundle {
     /// them (`p_dead` = identity permutation with `dead_count = CAP`; everything else zeroed).
     ///
     /// `camera_ring` is the per-in-flight-slot camera UBO ring the draw's Set-0 binding 1 reads;
-    /// `bindless` owns the set-1 texture table.
+    /// `bindless` owns the set-1 texture table; `edit_list` is the engine's ONE SDF edit list,
+    /// bound at Set-0 binding 10 for rung P1's `-D SDF_COLLIDE` sim (and bound-but-unread when
+    /// `collide` is false — see [`PARTICLE_LAYOUT_ENTRIES`]).
+    ///
+    /// # `collide` picks a MODULE, not a branch
+    ///
+    /// [`particle_sim_spirv_for`] resolves it once, here, into one of the two committed sim
+    /// artifacts. A runtime flag inside one shader would pay the field-consumer's register
+    /// pressure and its `#include`d code on every disarmed frame — the F24 dark tax this plan
+    /// refuses everywhere else.
     ///
     /// # `deferred_path` decides BOTH halves of the depth contract, and that is why it is one
     /// argument
@@ -260,12 +283,25 @@ impl ParticleGpuBundle {
     ///
     /// Panics (`expect("invariant: ...")`) on any RHI create/map/submit failure — a setup-stage
     /// device failure by design (the `GpuSceneBundles::boot` contract).
+    #[allow(clippy::too_many_arguments)]
+    // SEVEN independent inputs, each from a different owner, and the count is worth naming one by
+    // one because the list is the argument: `ctx` (the device); THREE borrowed resources this
+    // bundle does NOT own and must not destroy — `camera_ring` (the per-FIF UBO ring, owned by
+    // `GpuSceneBundles`), `bindless` (the shared texture table, owned by `BindlessTextureTable`)
+    // and `edit_list` (the engine's ONE SDF edit list, owned by `GpuSceneBundles`, bound here at
+    // Set-0 binding 10 for rung P1 and boot-static thereafter); the boot-frozen `capacity`; and the
+    // two boot-frozen PREDICATES `deferred_path` and `collide`, each of which picks a shader
+    // artifact. Grouping them would either hide which of the four are borrows of somebody else's
+    // resource — the distinction `destroy` depends on — or invent a struct whose only purpose is
+    // this one call.
     pub(crate) fn create(
         ctx: &VulkanContext,
         camera_ring: &[BoundBuffer; FRAMES_IN_FLIGHT],
         bindless: &BindlessTextureTable,
+        edit_list: &BoundBuffer,
         capacity: u32,
         deferred_path: bool,
+        collide: bool,
     ) -> Self {
         debug_assert!(capacity >= 1, "invariant: the particle pool needs at least one slot");
         let device = ctx;
@@ -379,6 +415,10 @@ impl ParticleGpuBundle {
                     BindGroupEntry::StorageBuffer { buffer: &render },
                     BindGroupEntry::StorageBuffer { buffer: &emit_req_device },
                     BindGroupEntry::StorageBuffer { buffer: &effects_device },
+                    // Rung P1's field. Bound in BOTH parity sets and on a non-colliding run alike:
+                    // the descriptor is written once at boot, and a bound-but-unread storage buffer
+                    // costs nothing per frame.
+                    BindGroupEntry::StorageBuffer { buffer: edit_list },
                 ],
             })
             .expect("invariant: particle parity bind group create")
@@ -411,7 +451,8 @@ impl ParticleGpuBundle {
         let kickoff =
             compute_pipeline(particle_kickoff_spirv(), PARTICLE_KICKOFF_PUSH_BYTES, "kickoff");
         let emit = compute_pipeline(particle_emit_spirv(), PARTICLE_EMIT_PUSH_BYTES, "emit");
-        let sim = compute_pipeline(particle_sim_spirv(), PARTICLE_SIM_PUSH_BYTES, "sim");
+        let sim =
+            compute_pipeline(particle_sim_spirv_for(collide), PARTICLE_SIM_PUSH_BYTES, "sim");
 
         // ── The draw's Set-0 layout + its per-slot groups + the graphics pipeline.
         let draw_entries: [BindGroupLayoutEntry; PARTICLE_DRAW_LAYOUT_ENTRIES.len()] =
@@ -839,6 +880,25 @@ pub(crate) fn particle_draw_spirv_for(deferred_path: bool) -> (&'static [u32], &
     }
 }
 
+/// The `particle_sim` SPIR-V the compute pipeline is frozen with for a resolved
+/// [`ParticleCollision`](boyko_render::ParticleCollision) arming (rung P1 / plan D9).
+///
+/// **`true` is the `-D SDF_COLLIDE` module.** Its per-substep loop either skips the field on the
+/// Lipschitz bound cached in the sim record's `cached_field_d` lane, or evaluates
+/// `field_distance` once and — inside `collision_radius` — resolves the contact against
+/// `sdf_normal`. The base module carries none of that: the define is invisible to DXC, so the
+/// committed base `.spv` is byte-frozen and a non-colliding run pays exactly what P0 paid.
+///
+/// Interface-identical apart from ONE added read (`Buf` @10, in the layout either way), so the pick
+/// never reaches the descriptor plumbing and both variants share one pipeline layout, one push
+/// range and one bind group.
+///
+/// Boot-frozen, like [`particle_draw_spirv_for`]: exactly one sim `VkPipeline` exists per process.
+#[inline]
+pub(crate) fn particle_sim_spirv_for(collide: bool) -> &'static [u32] {
+    if collide { particle_sim_sdf_spirv() } else { particle_sim_spirv() }
+}
+
 /// The nine device buffers the boot fill writes, plus the index buffer. Grouped so
 /// [`boot_fill`] takes one argument instead of ten.
 struct BootFillTargets<'a> {
@@ -1090,6 +1150,35 @@ mod tests {
         false
     }
 
+    /// `OpDecorate`'s opcode (SPIR-V 1.x core, section 3.32.3).
+    const OP_DECORATE: u32 = 71;
+    /// The `Binding` decoration (SPIR-V 1.x, section 3.20) — its literal operand is the binding
+    /// number the descriptor set exposes the variable at.
+    const DECORATION_BINDING: u32 = 33;
+
+    /// Whether `spirv` decorates any variable with `Binding <binding>`.
+    ///
+    /// The same real instruction walk [`declares_depth_replacing`] does, for the same reason: a
+    /// bare "contains the value 10" scan would match a constant, an id or a literal anywhere in the
+    /// module and could never fail honestly.
+    fn declares_binding(spirv: &[u32], binding: u32) -> bool {
+        let mut i = SPIRV_HEADER_WORDS;
+        while i < spirv.len() {
+            let word_count = (spirv[i] >> 16) as usize;
+            let opcode = spirv[i] & 0xFFFF;
+            assert!(word_count >= 1, "malformed SPIR-V: zero-length instruction at word {i}");
+            if opcode == OP_DECORATE
+                && word_count >= 4
+                && spirv[i + 2] == DECORATION_BINDING
+                && spirv[i + 3] == binding
+            {
+                return true;
+            }
+            i += word_count;
+        }
+        false
+    }
+
     /// Slice IDENTITY — same address and same length, i.e. the same `static` blob, not merely
     /// equal bytes.
     fn is_the_same_blob(a: &'static [u32], b: &'static [u32]) -> bool {
@@ -1190,5 +1279,50 @@ mod tests {
             particle_depth_compare_for(false),
             "the two legs must not share a compare op"
         );
+    }
+
+    /// **Rung P1's selector, pinned by identity AND by artifact property** — the same class of
+    /// defect the two tests above exist for, one rung later.
+    ///
+    /// A swapped arm here is invisible to every text and byte pin in the tree: both sim modules are
+    /// re-DXC'd and censused by `particle_edsl_sync`, and both stay green while the host builds the
+    /// pipeline from the wrong one. The visible symptom would be particles falling through the
+    /// world (or paying the field walk for nothing), which only a GPU run shows.
+    ///
+    /// The property claim is the field binding read out of the committed artifact: rung P1's module
+    /// decorates a variable `Binding 10` (the edit list `sdf_field.hlsli` walks), and the base one
+    /// cannot — the `#ifdef SDF_COLLIDE` block is invisible to DXC there, which is exactly what
+    /// makes the base `.spv` byte-frozen.
+    #[test]
+    fn the_collide_arm_takes_the_sdf_module_and_the_base_arm_does_not() {
+        let collide = particle_sim_spirv_for(true);
+        assert!(
+            is_the_same_blob(collide, particle_sim_sdf_spirv()),
+            "ParticleCollision::Sdf must build the -D SDF_COLLIDE sim module"
+        );
+        assert!(
+            declares_binding(collide, 10),
+            "the collide module must declare the SDF edit list at binding 10 — the accessor may \
+             name the variant while the artifact behind it is the base compile"
+        );
+
+        let base = particle_sim_spirv_for(false);
+        assert!(
+            is_the_same_blob(base, particle_sim_spirv()),
+            "ParticleCollision::Off must build the BASE sim module — a colliding module on a \
+             disarmed run pays the field consumer's cost on every substep for nothing"
+        );
+        assert!(
+            !declares_binding(base, 10),
+            "the base module must NOT declare binding 10: structural absence is what makes the \
+             base .spv byte-frozen and the disarmed run identical to P0's"
+        );
+
+        assert!(
+            !is_the_same_blob(collide, base),
+            "the two arms must be distinct artifacts — otherwise the selector is a branch with one \
+             outcome"
+        );
+        assert_ne!(collide, base, "the two sim modules must differ in CONTENT, not only in address");
     }
 }

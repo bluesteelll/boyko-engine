@@ -258,8 +258,9 @@ pub mod particle;
 /// `CoreSchedule::Fixed` schedule would flip the whole process's event-update policy (D17).
 pub mod particle_clock;
 /// Particles P0 (D13/D14) — the owner-set [`ParticleConfig`](particle_config::ParticleConfig) +
-/// its [`ParticleMode`](particle_config::ParticleMode) knob. Capability is structural (`Off` IS
-/// disabled); default `Off` is the 0%-gate.
+/// its [`ParticleMode`](particle_config::ParticleMode) knob, and rung P1's independent
+/// [`ParticleCollision`](particle_config::ParticleCollision) axis. Capability is structural (`Off`
+/// IS disabled); default `Off` is the 0%-gate on both.
 pub mod particle_config;
 /// Particles P0 — the authored [`ParticleEffect`](particle_effect::ParticleEffect) asset, its
 /// host-side bake into `EffectParamsGpu` (`damping = exp2(-drag·timestep)` and the `(cos, sin)`
@@ -512,7 +513,9 @@ pub use particle::{
     ParticleEmitter, ParticleRender, ParticleSim, VkDrawIndexedIndirectCommandMirror,
 };
 pub use particle_clock::{PARTICLE_DEFAULT_HZ, ParticleClock};
-pub use particle_config::{PARTICLE_DEFAULT_CAPACITY, ParticleConfig, ParticleMode};
+pub use particle_config::{
+    PARTICLE_DEFAULT_CAPACITY, ParticleCollision, ParticleConfig, ParticleMode,
+};
 pub use particle_effect::{
     PARTICLE_RAMP_KEYS, PARTICLE_SHAPE_BOX, PARTICLE_SHAPE_CONE, PARTICLE_SHAPE_POINT,
     PARTICLE_SHAPE_SPHERE, ParticleEffect, ParticleEffectsExt, pack_effect_params, pack_f16x2,

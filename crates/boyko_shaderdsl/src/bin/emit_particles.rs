@@ -11,10 +11,11 @@
 //!
 //! Run: `cargo run -p boyko_shaderdsl --features emit --bin emit_particles`
 //!
-//! Five sources, SEVEN artifacts: the two draw stages each carry a `-D DEPTH_LINEAR` variant
-//! (`particle_draw_dlin.{vs,fs}.spv`) — the Deferred path's fragment-written depth encode, one row
-//! in `docs/SHADER-VARIANT-MANIFEST.md`. The define is INERT in the base compile, so the five base
-//! `.spv` are byte-frozen by construction.
+//! Five sources, EIGHT artifacts: the two draw stages each carry a `-D DEPTH_LINEAR` variant
+//! (`particle_draw_dlin.{vs,fs}.spv`) — the Deferred path's fragment-written depth encode — and the
+//! sim carries a `-D SDF_COLLIDE` one (`particle_sim_sdf.comp.spv`), rung P1's field collision.
+//! Each has a row in `docs/SHADER-VARIANT-MANIFEST.md`. Every define is INERT in the base compile,
+//! so the five base `.spv` are byte-frozen by construction.
 //!
 //! Then DXC each file with the frozen recipe pinned in its own header, and commit the `.spv`.
 //! `boyko_rhi_vulkan/tests/particle_edsl_sync.rs` pins both halves: the committed `.hlsl` to
@@ -103,6 +104,15 @@ const CTR_CLAMPED: u32 = 6;
 const DISPATCH_EMIT_WORD: u32 = 0;
 /// The `VkDispatchIndirectCommand` word index of the SIM dispatch (offset 16).
 const DISPATCH_SIM_WORD: u32 = 4;
+
+/// The Set-0 binding the `-D SDF_COLLIDE` variant reads the SDF edit list at (rung P1 / plan D9).
+///
+/// The SAME number `sdf_mesh_shadow.comp.hlsl` gives its own `Buf` — every field CONSUMER in the
+/// tree binds the edit list at 10 — and the next free slot in the particle compute vocabulary,
+/// whose P0 bindings are 0..9. The host `PARTICLE_LAYOUT_ENTRIES` table mirrors it; the base
+/// compile does not declare it at all (DXC never sees the block), so the descriptor is
+/// bound-but-unread on a disarmed run.
+const SDF_FIELD_BINDING: u32 = 10;
 
 /// `boyko_rhi_vulkan::compute::CAM_MODE_PERSPECTIVE` — the raw `camera_mode` value the shared
 /// 80-byte camera UBO carries for a perspective view (P2 `-D DEPTH_LINEAR`).
@@ -205,7 +215,9 @@ fn particle_sim_struct() -> &'static str {
     "// The sim's working set (plan D2, 48 B, AoS). `size0_invlife` packs the spawn size and the\n\
      // RECIPROCAL total lifetime as two binary16 halves -- emit pays the one divide, once per\n\
      // particle, so the per-frame sim is divide-free. `effect_flags` packs `u16 effect_index |\n\
-     // u16 flags`. `cached_field_d` is the P1 Lipschitz cache, written 0 at P0.\n\
+     // u16 flags`. `cached_field_d` is rung P1's Lipschitz cache: seeded 0 at spawn (so the first\n\
+     // substep always evaluates the field) and maintained by the sim's `-D SDF_COLLIDE` arm --\n\
+     // untouched, and never read, by the base compile.\n\
      struct ParticleSim {\n\
      \x20   float3 position; float life_remaining;\n\
      \x20   float3 velocity; float cached_field_d;\n\
@@ -582,6 +594,7 @@ fn build_sim() -> String {
     let integrate = emit::emit_hlsl_particle_integrate();
     let rot = emit::emit_hlsl_particle_rot_advance();
     let curve = emit::emit_hlsl_particle_curve_eval();
+    let response = emit::emit_hlsl_particle_sdf_response();
     let additive_word = ADDITIVE_INSTANCE_COUNT_OFFSET / 4;
     format!(
         r#"// particle_sim.comp -- the GPU particle system's HOT LOOP
@@ -647,10 +660,47 @@ fn build_sim() -> String {
 // this module is written to satisfy it: the age normalization multiplies by the reciprocal
 // lifetime `particle_emit` stored at spawn, and the group/index math is integer.
 //
+// The claim is about the BASE artifact. The `-D SDF_COLLIDE` variant `#include`s the frozen
+// `sdf_field.hlsli`, whose `smin`/`sd_capsule` carry divides of their own; those are the FIELD's
+// bytes, byte-shared with the marcher and the host oracle, and re-spelling them here to dodge an
+// opcode count would fork the determinism contract that header exists to hold. Everything the
+// PARTICLE side adds under that define is multiply-only -- which is the decidable claim
+// `particle_edsl_sync` pins for the variant.
+//
+// # The `-D SDF_COLLIDE` variant (rung P1, plan D9)
+//
+// Off by default and STRUCTURALLY absent: with the define undefined DXC never sees the field
+// binding, the include, the response leaf or the in-loop block, so the base `.spv` is byte-frozen
+// and there is no dark tax to measure (plan F24). Armed, each substep either SKIPS the field or
+// evaluates it once:
+//
+//   travel_l = length(vel) * dt * FIELD_LIPSCHITZ_L      // the most the field value can drop
+//   if (cached_d - travel_l > radius_l)  cached_d -= travel_l;          // no evaluation
+//   else                                 d = field_distance(pos);       // one evaluation
+//                                        if (d < radius) resolve;
+//                                        cached_d = d;
+//
+// # Why the Lipschitz constant MULTIPLIES the travel rather than dividing it
+//
+// `FIELD_LIPSCHITZ_L` is the worst-case |grad| of `field_distance` (`sdf_field.hlsli`: the IQ
+// polynomial smin's blend peaks at sqrt(2) where two unit-gradient fields meet at 90 degrees).
+// From |grad f| <= L: f(p + s) >= f(p) - L*s. So a move of `s` world units can cost up to `L*s`
+// of REPORTED distance, and the conservative decrement is `travel * L`. Equivalently, in the
+// euclidean units the header states its own rule in ("a cone-trace consumer divides the reported
+// distance by L"), the test is `cached_d/L - travel > radius`; both sides are scaled by L here so
+// every per-substep operation stays a multiply.
+//
+// Plan D9's one-line pseudocode writes the reciprocal form (`speed*timestep/L`). The two agree
+// EXACTLY at L == 1 -- hard-CSG scenes, which is every fixture today -- and diverge only where a
+// smooth (k > 0) edit makes the field super-Lipschitz, where the reciprocal form OVER-estimates
+// the clearance and can skip a substep in which contact happened. This module implements the
+// conservative direction, because the alternative is a tunneling class that no image gate sees.
+//
 // # Compile (offline + hermetic; committed `.spv` is byte-gated)
 //
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T cs_6_0 -E main \
 //       -fspv-target-env=vulkan1.3 particle_sim.comp.hlsl -Fo particle_sim.comp.spv
+//   (SDF_COLLIDE variant: add `-D SDF_COLLIDE=1` -Fo particle_sim_sdf.comp.spv)
 //
 // # Set / binding vocabulary -- MIRRORS the host `PARTICLE_LAYOUT_ENTRIES` table
 //
@@ -663,11 +713,16 @@ fn build_sim() -> String {
 //   (0, 6, STORAGE_BUFFER)  RWStructuredBuffer<ParticleSim>     p_particle     read+write
 //   (0, 7, STORAGE_BUFFER)  RWStructuredBuffer<ParticleRender>  p_render       write
 //   (0, 9, STORAGE_BUFFER)  StructuredBuffer<EffectParamsGpu>   p_effects      read
+//   (0, {SDF_FIELD_BINDING}, STORAGE_BUFFER) StructuredBuffer<uint>             Buf            read  [SDF_COLLIDE only]
 //
-// # Push constants (8 B)
+// # Push constants (8 B) -- UNCHANGED by the variant
 //
 //   [0,4)  uint  steps    -- the host-clamped substep count (plan M3); ONE number, two consumers
 //   [4,8)  float timestep -- `ParticleClock`'s CONSTANT dt (plan D6)
+//
+// The collision tuning is NOT pushed: `collision_radius`, `restitution` and `friction` are
+// PER-EFFECT (plan D2's `EffectParamsGpu` already carries all three), so they arrive through the
+// row the sim already fetched and the two pipelines share one push range and one layout.
 
 struct SimPush {{
     uint  steps;
@@ -686,6 +741,20 @@ struct SimPush {{
 [[vk::binding(6, 0)]] RWStructuredBuffer<ParticleSim>       p_particle    : register(u6);
 [[vk::binding(7, 0)]] RWStructuredBuffer<ParticleRender>    p_render      : register(u7);
 [[vk::binding(9, 0)]] StructuredBuffer<EffectParamsGpu>     p_effects     : register(t9);
+
+#ifdef SDF_COLLIDE
+// Rung P1 (plan D9). `sdf_field.hlsli`'s INCLUDE CONTRACT requires `Buf` to be declared and in
+// scope BEFORE the include -- the field eval reads the packed edit-list header out of it. This
+// pass is a strict FIELD-CONSUMER: it CALLS `field_distance`/`sdf_normal` read-only and never
+// edits, exactly as `sdf_mesh_shadow.comp.hlsl` does, and it binds the list at the same binding
+// number that pass gives its own `Buf`.
+//
+// The buffer is the engine's ONE edit list -- boot-static and read-only for the whole present loop
+// (the same contract the marcher relies on), which is why it needs no framegraph `ResId`, no seed
+// row and no barrier, and why arming this variant moves no derived barrier stream.
+[[vk::binding({SDF_FIELD_BINDING}, 0)]] StructuredBuffer<uint> Buf : register(t0);
+#include "sdf_field.hlsli"
+#endif
 
 {words}
 // The additive class's RENDER counter, at the word the generator derived from
@@ -720,6 +789,18 @@ float particle_curve_eval(uint keys_lo, uint keys_hi, float t) {{
 {curve}}}
 // === GENERATED particle_curve_eval END ===
 
+#ifdef SDF_COLLIDE
+// === GENERATED particle_sdf_response BEGIN ===
+// Rung P1's contact resolution (`boyko_shaderdsl::particle::particle_sdf_response_body`): plan
+// D9's `p += n*(radius - d)` and `v' = (v - v_n)(1 - friction) - v_n*restitution`, where `v_n` is
+// the velocity's component along the field normal. Pure multiply/add plus the one `dot` rung E3
+// added for it.
+void particle_sdf_response(inout float3 pos, inout float3 vel, float3 normal,
+                           float d, float radius, float restitution, float friction) {{
+{response}}}
+// === GENERATED particle_sdf_response END ===
+#endif
+
 [numthreads({LOCAL_SIZE}, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {{
     uint i = tid.x;
@@ -738,10 +819,53 @@ void main(uint3 tid : SV_DispatchThreadID) {{
     uint   rot  = p.rot_cs;
 
     uint steps = min(pc.steps, SUBSTEP_CEILING);
+#ifdef SDF_COLLIDE
+    // The Lipschitz cache rides the record's `.w` lane (plan D2). `particle_emit` seeds it 0, so a
+    // particle's FIRST substep always evaluates the field and the cache is never read stale.
+    float cached_d = p.cached_field_d;
+    float radius   = e.collision_radius;
+    // The skip test `cached_d/L - travel > radius`, with BOTH sides scaled by L once, here,
+    // outside the loop -- `radius` and L are constants for this particle's whole step sequence, so
+    // the per-substep work is a multiply and a compare (see the header for the bound's derivation).
+    float radius_l = radius * FIELD_LIPSCHITZ_L;
+#endif
     [loop]
     for (uint s = 0u; s < steps; ++s) {{
         particle_integrate(pos, vel, life, e.gravity, e.damping, pc.timestep);
         rot = particle_rot_advance(rot, e.rot_mul_cos, e.rot_mul_sin);
+#ifdef SDF_COLLIDE
+        // `particle_integrate` advanced the position by EXACTLY `vel * dt` (the post-damping
+        // velocity it just wrote), so this is the displacement itself, not an estimate of it.
+        float travel_l = length(vel) * pc.timestep * FIELD_LIPSCHITZ_L;
+        if (cached_d - travel_l > radius_l) {{
+            // THE SKIP. The Lipschitz bound proves the collision shell cannot have been reached,
+            // so this LANE evaluates no field this substep.
+            //
+            // THE SAVING IS REALIZED PER WAVE, NOT PER LANE, and the distinction is the whole
+            // measurement: this is a DIVERGENT branch, so a wave whose lanes disagree executes
+            // BOTH sides and every lane in it pays the ~240-flop edit-list walk. One near particle
+            // costs its wave the entire saving. The cache therefore pays off exactly to the degree
+            // that nearness is wave-COHERENT -- which the alive-list gather makes the common case
+            // (neighbouring list entries are particles spawned together, hence spatially close),
+            // but which is a property of the scene and not of this code. A skip rate quoted per
+            // lane would overstate the win by the wave's incoherence; read it at wave granularity,
+            // off the `ZONE_PARTICLE_SIM` delta between the two boot-frozen pipelines.
+            cached_d = cached_d - travel_l;
+        }} else {{
+            float d = field_distance(pos);
+            if (d < radius) {{
+                // `sdf_normal` is the frozen central-difference gradient -- SIX more field
+                // evaluations, and the reason it is inside the contact branch rather than beside
+                // the distance fetch.
+                float3 n = sdf_normal(pos);
+                particle_sdf_response(pos, vel, n, d, radius, e.restitution, e.friction);
+            }}
+            // The PRE-response value, exactly as plan D9 caches it: after a resolve the particle
+            // sits ON the shell, so the next substep must re-evaluate rather than trust a bound
+            // taken from where it used to be.
+            cached_d = d;
+        }}
+#endif
     }}
 
     bool survives = (life > 0.0);
@@ -786,6 +910,11 @@ void main(uint3 tid : SV_DispatchThreadID) {{
     p.velocity       = vel;
     p.life_remaining = life;
     p.rot_cs         = rot;
+#ifdef SDF_COLLIDE
+    // The cache is per-particle STATE, not a scratch value: carrying it across the frame edge is
+    // what lets a distant particle skip the field for many frames, not merely many substeps.
+    p.cached_field_d = cached_d;
+#endif
     p_particle[slot] = p;
 
     float size0    = f16tof32(p.size0_invlife & 65535u);

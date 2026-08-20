@@ -2728,3 +2728,54 @@ assumed" is precisely the sentence a reader trusts instead of re-checking. Repai
 census the sentence describes (a `spirv-dis` block-membership assertion, the
 `vb_raster_geo_classify_spv_sync.rs` builtin-census idiom) or striking the claim; DP6b widened the
 `VB_SV0` definer set to two, so the sentence now also covers a module nobody has looked at.
+
+## 2026-08-20: particles P1 ships the Lipschitz skip in the OPPOSITE form to D9's pseudocode — deliberately, and the two agree only at `L == 1`
+
+**Not a question about what to do — the conservative form shipped. Recorded because the plan's own
+text now disagrees with the code on one line, and the reader who checks D9 against
+`particle_sim.comp.hlsl` deserves to find the reason here rather than derive it.**
+
+`docs/PARTICLES-PLAN.md` D9 writes rung P1's per-substep skip as
+
+```
+if (cached_d - speed*timestep/FIELD_LIPSCHITZ_L > radius) { cached_d -= speed*timestep/L; skip }
+```
+
+— the Lipschitz constant DIVIDING the travel. The shipped block multiplies by it instead
+(`travel_l = length(vel) * pc.timestep * FIELD_LIPSCHITZ_L`, compared against `radius * L`).
+
+**The defect is a UNIT MISMATCH, and naming it is the point of this entry.** The three quantities
+in that line do not live in the same space. `cached_d` is a value the FIELD reported; `radius` and
+`speed*timestep` are EUCLIDEAN world lengths. `sdf_field.hlsli` states the conversion between them
+in its own words — *"`d / L` is a conservative lower bound on the Euclidean clearance"* — so the
+comparison is only meaningful once one side is converted. D9 converts neither: it divides the
+euclidean travel by `L` (a quantity that is already euclidean) and compares it against a reported
+value left unconverted.
+
+Done properly, in euclidean units throughout: the true clearance `c` satisfies `c >= cached_d / L`,
+a move of `s` leaves `c' >= cached_d/L - s`, and the substep is safe to skip exactly when
+`cached_d/L - s > radius`. Multiplying through by `L` — which is what the shipped code does, so
+that every per-substep operation stays a multiply — gives `cached_d - L*s > L*radius`. **`L`
+multiplies the travel and the radius; it divides nothing.**
+
+**What the shipped form costs, stated so it is not mistaken for the hazard.** Against a field with
+`L == 1` the shipped test re-evaluates earlier by `(L-1)*(s + radius)` of reported distance. The
+travel term `(L-1)*s` is the *necessary* correction for a super-Lipschitz field. The remaining
+`radius*(L-1)` is a **conservative band**: the shell is a euclidean length carried through the same
+`1/L` clearance bound as the distance, so it is over-stated in reported units. Its price is extra
+field evaluations near a surface — never a missed contact. D9's form errs in the opposite
+direction, and that direction is unbounded: `d > radius + s/L` passes wherever the safe
+`d > L*(radius + s)` does and in a band above it, so it skips substeps in which contact happened.
+Every skipped substep is a substep in which the field is not evaluated at all, so this is a
+TUNNELING class — the one failure this rung's gate exists to bound.
+
+**Scope of the disagreement, stated so nobody re-opens it as a bug.** The two forms are IDENTICAL
+at `L == 1`, which is every hard-CSG (`smoothness == 0`) scene, i.e. every fixture in the tree today
+including P1's own live fire. They diverge only where a smooth edit makes the field
+super-Lipschitz — precisely the regime the constant exists for.
+
+**What is left open:** whether D9's line should be corrected in the plan (an architect edit — the
+plan is APPROVED Rev 4 and an implementer amending its normative pseudocode is not the same thing
+as recording a deviation), and whether a fixture with a `k > 0` edit should exist to exercise the
+`L > 1` regime at all. Today no shipped scene has one, so the divergence is unmeasured in both
+directions.

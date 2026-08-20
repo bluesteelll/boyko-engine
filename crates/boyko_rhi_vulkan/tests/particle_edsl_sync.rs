@@ -9,15 +9,17 @@
 //!    determinism harness compares a readback against — silently, because the same shader still
 //!    compiles and still draws plausible particles.
 //! 2. **`particle_*_spv_byte_identical`** — each committed `.spv` is the re-DXC of its own source
-//!    under the frozen recipe pinned in that source's header. SEVEN artifacts from five sources:
-//!    the two draw stages each carry the `-D DEPTH_LINEAR` variant the Deferred path binds, and
-//!    the base rows are the other half of that claim (the `#ifdef` must leave the undefined
-//!    compile byte-frozen). SKIPS (with an `eprintln`) when no `dxc` resolves; the byte gate is
+//!    under the frozen recipe pinned in that source's header. EIGHT artifacts from five sources:
+//!    the two draw stages each carry the `-D DEPTH_LINEAR` variant the Deferred path binds and the
+//!    sim carries rung P1's `-D SDF_COLLIDE`; the base rows are the other half of that claim (the
+//!    `#ifdef` must leave the undefined compile byte-frozen). SKIPS (with an `eprintln`) when no
+//!    `dxc` resolves; the byte gate is
 //!    only as hermetic as the pinned VulkanSDK 1.4.350.0 toolchain that produced the artifacts.
 //! 3. **The opcode census** — plan gate #14's artifact-level claims: the workgroup widths, the
-//!    exact `OpAtomicIAdd` population of `particle_sim`, zero `OpAtomicUMax` anywhere, zero
-//!    atomics in `particle_emit`, and zero `OpFDiv` in the module that carries
-//!    `particle_rot_advance`.
+//!    exact `OpAtomicIAdd` population of `particle_sim` (and of rung P1's variant, which adds
+//!    none), zero `OpAtomicUMax` anywhere, zero atomics in `particle_emit`, and zero `OpFDiv` in
+//!    the module that carries `particle_rot_advance` — with the variant's own divide count pinned
+//!    to the frozen field header's contribution, since a field consumer cannot be divide-free.
 //! 4. **The Deferred depth-encode agreement** — the `DEPTH_LINEAR` fragment's `SV_Depth`
 //!    expression IS `gbuffer_mrt.fs.hlsl`'s, term for term, and the two shaders' `VsOut` is one
 //!    text. That producer is the sole writer of the depth image this draw tests against, so an
@@ -232,6 +234,73 @@ fn particle_rot_advance_matches_edsl_emit() {
     );
 }
 
+#[test]
+fn particle_sdf_response_matches_edsl_emit() {
+    // Rung P1's contact resolution. It lives inside `#ifdef SDF_COLLIDE`, which the preprocessor
+    // strips from the base compile but this TEXT pin does not care about — the span has to be the
+    // generator's wherever it sits, and a hand-edit here would fork the response from the `EvalCf`
+    // oracle exactly as one in `particle_integrate` would.
+    let span = boyko_shaderdsl::emit::emit_hlsl_particle_sdf_response().replace("\r\n", "\n");
+    assert_span_is_the_body_of(
+        "particle_sim.comp.hlsl",
+        "void particle_sdf_response(inout float3 pos, inout float3 vel, float3 normal,",
+        "particle_sdf_response",
+        &span,
+    );
+    // The PARTICLE side of the collide variant adds no divide. That claim cannot be made at the
+    // artifact for this module — `sdf_field.hlsli`'s frozen `smin`/`smax`/`sd_capsule` carry
+    // divides of their own and they are byte-shared with the marcher and the host oracle — so it is
+    // made HERE, at the text the particle system owns, and the artifact-level count below is what
+    // pins the field's own contribution to a number.
+    assert!(
+        !span.contains('/'),
+        "particle_sdf_response's committed span must contain NO divide:\n{span}"
+    );
+}
+
+/// The `-D SDF_COLLIDE` block's own skeleton — the hand-written half rung P1 adds around the leaf.
+///
+/// Not eDSL-generated (F13: the eDSL has no `#include`, no buffer walk and no control flow over a
+/// frozen function), so these three lines are the ONE part of the collision path a hand-edit could
+/// change without any generator pin noticing. Each is load-bearing:
+///
+/// * the include CONTRACT — `Buf` declared before `sdf_field.hlsli`, or the header does not compile;
+/// * the skip TEST — the Lipschitz bound in its conservative direction (`travel * L`, not
+///   `travel / L`); a flipped operator here silently tunnels particles through thin geometry, and
+///   the artifact would still carry the same opcodes;
+/// * the write-BACK — without it the cache is recomputed from 0 every frame and the skip only ever
+///   works within one frame's substeps.
+#[test]
+fn the_sdf_collide_block_is_the_one_the_plan_specifies() {
+    let sim = read_shader("particle_sim.comp.hlsl");
+    for needle in [
+        "[[vk::binding(10, 0)]] StructuredBuffer<uint> Buf : register(t0);",
+        "#include \"sdf_field.hlsli\"",
+        "float travel_l = length(vel) * pc.timestep * FIELD_LIPSCHITZ_L;",
+        "if (cached_d - travel_l > radius_l) {",
+        "float d = field_distance(pos);",
+        "if (d < radius) {",
+        "float3 n = sdf_normal(pos);",
+        "particle_sdf_response(pos, vel, n, d, radius, e.restitution, e.friction);",
+        "p.cached_field_d = cached_d;",
+    ] {
+        assert!(
+            sim.contains(needle),
+            "particle_sim.comp.hlsl's SDF_COLLIDE block no longer contains `{needle}` — the \
+             generator (`emit_particles.rs::build_sim`) owns this text, so re-run it rather than \
+             editing the shader"
+        );
+    }
+    // The whole block is inside the define, in BOTH directions: a line that escaped it would
+    // change the base artifact, and the base `.spv` byte gate is what would fail first — but this
+    // says WHY, and it fails on a host with no dxc too.
+    assert_eq!(
+        sim.matches("#ifdef SDF_COLLIDE").count(),
+        sim.matches("#endif").count(),
+        "every SDF_COLLIDE block in particle_sim.comp.hlsl must be closed"
+    );
+}
+
 // ---- The generator-input pins (plan gate #8, shader half) ------------------------------------
 
 /// `offset_of!(ParticleDrawArgs, additive.instance_count)` — plan D4 pins it at 4.
@@ -331,9 +400,14 @@ fn every_particle_shader_pins_its_own_frozen_recipe() {
             );
         } else {
             // A variant row's recipe is the base one PLUS its defines and its own `-Fo`. Pinned as
-            // one line so the define set and the artifact it produces cannot drift apart.
+            // one line so the define set, the variant's NAME and the artifact it produces cannot
+            // drift apart.
             let defines = a.defines.join(" ");
-            let line = format!("//   (DEPTH_LINEAR variant: add `{defines}` -Fo {}.spv)", a.spv_stem);
+            let variant = a
+                .variant_name()
+                .expect("invariant: a row with defines names its variant");
+            let line =
+                format!("//   ({variant} variant: add `{defines}` -Fo {}.spv)", a.spv_stem);
             assert!(
                 src.contains(&line),
                 "{}.hlsl must pin the {}.spv variant recipe in its own header:\n--- expected ---\n\
@@ -355,9 +429,10 @@ fn every_particle_shader_pins_its_own_frozen_recipe() {
 /// One committed particle artifact: which source builds it, under which profile, with which
 /// defines.
 ///
-/// Seven artifacts from five sources — the two draw stages each carry the `-D DEPTH_LINEAR`
-/// variant the Deferred path binds (`docs/SHADER-VARIANT-MANIFEST.md`). The table is the ONE place
-/// that mapping is written; every gate below walks it rather than re-listing stems.
+/// EIGHT artifacts from five sources — the two draw stages each carry the `-D DEPTH_LINEAR` variant
+/// the Deferred path binds, and the sim carries rung P1's `-D SDF_COLLIDE`
+/// (`docs/SHADER-VARIANT-MANIFEST.md`). The table is the ONE place that mapping is written; every
+/// gate below walks it rather than re-listing stems.
 #[derive(Clone, Copy)]
 struct ParticleArtifact {
     /// The `.hlsl` stem (no extension), relative to the shaders directory.
@@ -370,11 +445,27 @@ struct ParticleArtifact {
     spv_stem: &'static str,
 }
 
+impl ParticleArtifact {
+    /// The variant's NAME as its header's recipe line spells it (`DEPTH_LINEAR`, `SDF_COLLIDE`), or
+    /// `None` on a base row.
+    ///
+    /// Derived from `defines` rather than carried as a second field: the name and the flag that
+    /// produces it are then one datum, and a row whose label and define disagreed is
+    /// unconstructible.
+    fn variant_name(self) -> Option<&'static str> {
+        let flag = self.defines.get(1)?;
+        Some(flag.split('=').next().unwrap_or(flag))
+    }
+}
+
 /// The `-D` flag pair for the Deferred fragment-depth variant, spelled once.
 const DEPTH_LINEAR_DEFINES: &[&str] = &["-D", "DEPTH_LINEAR=1"];
 
+/// The `-D` flag pair for rung P1's field-collision sim variant, spelled once.
+const SDF_COLLIDE_DEFINES: &[&str] = &["-D", "SDF_COLLIDE=1"];
+
 /// Every committed particle artifact.
-const PARTICLE_ARTIFACTS: [ParticleArtifact; 7] = [
+const PARTICLE_ARTIFACTS: [ParticleArtifact; 8] = [
     ParticleArtifact {
         hlsl_stem: "particle_kickoff.comp",
         profile: "cs_6_0",
@@ -392,6 +483,12 @@ const PARTICLE_ARTIFACTS: [ParticleArtifact; 7] = [
         profile: "cs_6_0",
         defines: &[],
         spv_stem: "particle_sim.comp",
+    },
+    ParticleArtifact {
+        hlsl_stem: "particle_sim.comp",
+        profile: "cs_6_0",
+        defines: SDF_COLLIDE_DEFINES,
+        spv_stem: "particle_sim_sdf.comp",
     },
     ParticleArtifact {
         hlsl_stem: "particle_draw.vs",
@@ -521,6 +618,15 @@ fn particle_emit_spv_byte_identical() {
 #[test]
 fn particle_sim_spv_byte_identical() {
     assert_spv_byte_identical("particle_sim.comp");
+}
+
+#[test]
+fn particle_sim_sdf_spv_byte_identical() {
+    // Rung P1's variant. Its BASE sibling above is the other half of the claim, and it is the half
+    // the plan words as P1's own gate: `particle_sim.comp.spv` must be BYTE-UNPERTURBED with the
+    // define undefined, which is what makes "collision is default-off" a structural statement
+    // rather than a promise.
+    assert_spv_byte_identical("particle_sim_sdf.comp");
 }
 
 #[test]
@@ -707,6 +813,72 @@ fn particle_sim_atomic_census_is_exactly_the_wave_leader_sites() {
 }
 
 #[test]
+fn the_collide_variant_adds_no_atomic() {
+    // Rung P1's budget claim, re-asserted at the artifact rather than restated in prose: field
+    // collision publishes NOTHING — it moves a position and a velocity that this lane already owns
+    // exclusively (`p_particle[slot]` is touched by exactly one lane), so it needs no counter, no
+    // reservation and no cross-lane agreement. The plan's D5 table is therefore unchanged by this
+    // rung, and the day a collision feature does want to publish something (a contact event, a
+    // per-frame hit count) this is the gate that makes that a DELIBERATE re-bless.
+    let Some(sdf) = census_of("particle_sim_sdf.comp") else {
+        eprintln!("SKIP the_collide_variant_adds_no_atomic: no spirv-dis on this host");
+        return;
+    };
+    assert_eq!(
+        sdf.op_atomic_iadd, SIM_WAVE_LEADER_ATOMIC_SITES,
+        "the -D SDF_COLLIDE sim must carry exactly the same three wave-leader InterlockedAdd sites \
+         as the base module; census: {sdf:?}"
+    );
+    assert_eq!(
+        sdf.op_atomic_any, SIM_WAVE_LEADER_ATOMIC_SITES,
+        "the -D SDF_COLLIDE sim must carry NO atomic beyond those three; census: {sdf:?}"
+    );
+}
+
+/// The `OpFDiv` population of the `-D SDF_COLLIDE` sim, all of it `sdf_field.hlsli`'s.
+///
+/// Derived, not observed-and-blessed: the module instantiates the frozen `sdf` SEVEN times — once
+/// for `field_distance(pos)` and six for `sdf_normal`'s central differences — and each instance
+/// inlines four divides: `smin`'s `t1 / k`, both `smax` arms' `t4 / k` (the subtract and intersect
+/// ops of `combine`), and `sd_capsule`'s `paba / max(baba, EPS)`. 7 × 4 = 28.
+///
+/// A count that MOVED means one of two things, and the message says both: either the field header's
+/// own divide population changed (re-derive this number — it is the field's, and the marcher's
+/// goldens are the authority on that side), or the PARTICLE side introduced a divide, which is the
+/// defect this pin exists for.
+const SIM_SDF_FIELD_DIVIDES: usize = 28;
+
+#[test]
+fn particle_sim_carries_no_float_divide() {
+    // Plan gate #14's `OpFDiv` clause, in its decidable module-wide form (see this file's header
+    // for why span-scoping is unreachable). `particle_sim` is the module that carries
+    // `particle_rot_advance`, and it is written to have no divide anywhere: the age normalization
+    // multiplies by the reciprocal lifetime `particle_emit` computed once at spawn.
+    let Some(sim) = census_of("particle_sim.comp") else {
+        eprintln!("SKIP particle_sim_carries_no_float_divide: no spirv-dis on this host");
+        return;
+    };
+    assert_eq!(
+        sim.op_fdiv, 0,
+        "particle_sim must carry ZERO OpFDiv (plan gate #14 / M7 — a divide inside a leaf drags \
+         2.5 ULP into that leaf's bit-exact contract); census: {sim:?}"
+    );
+
+    // The variant's divides are the FIELD's, and there are exactly as many as the field's own
+    // structure predicts. The particle side's half of this claim is a source-level pin
+    // (`particle_sdf_response_matches_edsl_emit`), because at the artifact the two contributions
+    // are indistinguishable — DXC inlines everything into one `%main`.
+    let sdf = census_of("particle_sim_sdf.comp").expect("spirv-dis resolved above");
+    assert_eq!(
+        sdf.op_fdiv, SIM_SDF_FIELD_DIVIDES,
+        "the -D SDF_COLLIDE sim's divide count moved. Either `sdf_field.hlsli`'s own divides \
+         changed (re-derive SIM_SDF_FIELD_DIVIDES from the header — 7 `sdf` instantiations x 4 \
+         divides each) or the PARTICLE side of the collide block grew one, which would put \
+         `OpFDiv`'s 2.5 ULP into rung P1's contact math; census: {sdf:?}"
+    );
+}
+
+#[test]
 fn no_particle_module_carries_an_atomic_max() {
     // Plan M1 deleted the `InterlockedMax` mirror: it existed only because ONE counter was trying
     // to serve two different quantities, and once the list count and the render count were
@@ -728,23 +900,6 @@ fn no_particle_module_carries_an_atomic_max() {
 }
 
 #[test]
-fn particle_sim_carries_no_float_divide() {
-    // Plan gate #14's `OpFDiv` clause, in its decidable module-wide form (see this file's header
-    // for why span-scoping is unreachable). `particle_sim` is the module that carries
-    // `particle_rot_advance`, and it is written to have no divide anywhere: the age normalization
-    // multiplies by the reciprocal lifetime `particle_emit` computed once at spawn.
-    let Some(sim) = census_of("particle_sim.comp") else {
-        eprintln!("SKIP particle_sim_carries_no_float_divide: no spirv-dis on this host");
-        return;
-    };
-    assert_eq!(
-        sim.op_fdiv, 0,
-        "particle_sim must carry ZERO OpFDiv (plan gate #14 / M7 — a divide inside a leaf drags \
-         2.5 ULP into that leaf's bit-exact contract); census: {sim:?}"
-    );
-}
-
-#[test]
 fn particle_modules_declare_the_bindings_they_read() {
     // DXC STRIPS a declared-but-unloaded resource (measured, `vb_batch_cull_spv_sync` rung
     // R2d-3), so this census reads back the bindings the module actually TOUCHES. Pinning the set
@@ -755,13 +910,19 @@ fn particle_modules_declare_the_bindings_they_read() {
         eprintln!("SKIP particle_modules_declare_the_bindings_they_read: no spirv-dis on this host");
         return;
     }
-    let expected: [(&str, &[usize]); 7] = [
+    let expected: [(&str, &[usize]); 8] = [
         // counters, dispatch args, draw args.
         ("particle_kickoff.comp", &[0, 1, 2]),
         // counters, dead, alive_read, particle, emit requests, effects.
         ("particle_emit.comp", &[0, 3, 4, 6, 8, 9]),
         // counters, draw args, dead, alive_read, alive_write, particle, render, effects.
         ("particle_sim.comp", &[0, 2, 3, 4, 5, 6, 7, 9]),
+        // Rung P1: the base set PLUS the SDF edit list at 10 — the ONE resource the variant adds,
+        // and the artifact-level proof that the base module above declares none of it. Both halves
+        // matter: the base row shrinking to 8 is what "structural absence" means here, and this row
+        // growing past 10 would mean the collide path reached for something the host layout table
+        // does not bind.
+        ("particle_sim_sdf.comp", &[0, 2, 3, 4, 5, 6, 7, 9, 10]),
         // render records + the camera UBO (set 0).
         ("particle_draw.vs", &[0, 1]),
         // the bindless texture array + its sampler (set 1).

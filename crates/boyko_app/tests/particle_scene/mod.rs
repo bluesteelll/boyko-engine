@@ -91,7 +91,15 @@
 //! | `BOYKO_PARTICLE_SIZE` | 0.05 | billboard extent (world units) |
 //! | `BOYKO_PARTICLE_CAPACITY` | 65536 | the boot-frozen pool capacity |
 //! | `BOYKO_PARTICLE_OCCLUDER` | unset | set ⇒ spawn the opaque wall gate #12 needs |
+//! | `BOYKO_PARTICLE_CONE` | `LAB_CONE_COS` (cos 40°) | the spawn cone's half-angle cosine; `1.0` degenerates it to the axis — the tunneling probe's instrument |
+//! | `BOYKO_PARTICLE_SDF` | unset | set ⇒ spawn rung P1's SDF collider slab AND give the effect its contact parameters — the SCENE half |
+//! | `BOYKO_PARTICLE_COLLIDE` | unset | set ⇒ `ParticleCollision::Sdf`, i.e. build the sim from the `-D SDF_COLLIDE` module — the SHADER half |
 //! | `BOYKO_PARTICLE_READBACK_FRAME` | unset | the runner's own knob (gates #7/#9), not read here |
+//!
+//! The two P1 knobs are separate ON PURPOSE (see [`sdf_collider_armed`]): with the scene one set
+//! and the shader one unset, the control run renders a byte-identical scene whose particles fly
+//! straight through the slab, so "they bounced" cannot be explained by anything except the module
+//! the pipeline was built from.
 
 #![allow(dead_code)]
 
@@ -101,9 +109,9 @@ use boyko_ecs::ecs::core::system::{Res, ResMut};
 use boyko_ecs::ecs::core::time::Time;
 use boyko_macros::Resource;
 use boyko_render::{
-    PARTICLE_BLEND_ADDITIVE, PARTICLE_SHAPE_CONE, EmitterActive, ParticleClock, ParticleConfig,
-    ParticleEffect, ParticleEffectHandle, ParticleEffectRefs, ParticleEffectScratch,
-    ParticleEffectsExt, ParticleEmitScratch, ParticleEmitter, ParticleMode,
+    PARTICLE_BLEND_ADDITIVE, PARTICLE_SHAPE_CONE, EmitterActive, ParticleClock, ParticleCollision,
+    ParticleConfig, ParticleEffect, ParticleEffectHandle, ParticleEffectRefs,
+    ParticleEffectScratch, ParticleEffectsExt, ParticleEmitScratch, ParticleEmitter, ParticleMode,
     particle_apply_effect_refs, particle_pack_effects, particle_tick_emitters,
 };
 
@@ -182,6 +190,37 @@ pub const OCCLUDER_SIZE: f32 = 2.2;
 /// the way every other host fixture lights them.
 pub const SUN_DIR: [f32; 3] = [-0.45, 0.82, 0.36];
 
+// ── Rung P1's collider (`BOYKO_PARTICLE_SDF`) ────────────────────────────────────────
+
+/// Rung P1's SDF collider: a slab centred 2.0 units up, i.e. a CEILING the upward fan runs into.
+///
+/// A ceiling rather than a floor because this fixture's effect has no gravity (the module doc's
+/// determinism constraint): the particles' only motion is their launch velocity, so the one surface
+/// they will certainly reach is the one they are already flying at. Its underside sits at
+/// `2.0 − 0.1 = 1.9`, which the oldest particle reaches at ~frame 15 of a 30-frame capture — early
+/// enough that the bounce is half the fan's history by the time the dump is taken.
+pub const SDF_COLLIDER_POS: [f32; 3] = [0.0, 2.0, 0.0];
+
+/// The collider slab's half-extents. 2.0 in x/z covers the whole fan: a 40° cone travelling the
+/// 1.55 units to the slab spreads at most `1.55 · sin 40° ≈ 1.0` sideways, so no particle escapes
+/// past an edge and the image has no "some bounced, some did not" ambiguity in it.
+pub const SDF_COLLIDER_HALF: [f32; 3] = [2.0, 0.1, 2.0];
+
+/// The colliding effect's contact radius, in world units — the billboard's own half-extent, so a
+/// sprite comes to rest visually TOUCHING the slab rather than half inside it.
+pub const LAB_COLLISION_RADIUS: f32 = 0.05;
+
+/// The colliding effect's restitution. 0.5 is chosen to be unmistakable in a still image: the
+/// bounced half of the fan travels back down at exactly half the launch speed, so the returning
+/// shells are spaced at half the pitch of the outgoing ones and the two families cannot be confused
+/// for one.
+pub const LAB_RESTITUTION: f32 = 0.5;
+
+/// The colliding effect's friction. Zero: the tangential component is what carries a particle
+/// ACROSS the slab, and keeping it undamped is what makes the contact read as a bounce rather than
+/// as particles sticking where they landed.
+pub const LAB_FRICTION: f32 = 0.0;
+
 // ── Env knobs ────────────────────────────────────────────────────────────────────────
 
 /// The square window/composite extent (`BOYKO_WIN`, default 512 — the extent every image pin in
@@ -238,6 +277,39 @@ pub fn pool_capacity() -> u32 {
 /// Whether gate #12's opaque occluder is in the scene (`BOYKO_PARTICLE_OCCLUDER`).
 pub fn occluder_armed() -> bool {
     std::env::var("BOYKO_PARTICLE_OCCLUDER").is_ok()
+}
+
+/// The spawn cone's half-angle cosine (`BOYKO_PARTICLE_CONE`, default [`LAB_CONE_COS`]).
+///
+/// Exists for ONE measurement: rung P1's tunneling probe (plan P1 gate, R6). A fan is the wrong
+/// instrument for it — at a raised launch speed the cone's outer particles leave past the collider's
+/// EDGE, which is indistinguishable in an image from particles that stepped THROUGH it. At
+/// `BOYKO_PARTICLE_CONE=1.0` the cone degenerates to the axis (`cap == 0` ⇒ the direction is exactly
+/// `basis_z`, the leaf's own documented degenerate case), every particle flies straight at the
+/// collider, and a white pixel above it can only be a particle that tunneled.
+///
+/// The default is the fixture constant, so every existing pin renders the same bytes.
+pub fn cone_cos() -> f32 {
+    env_parsed("BOYKO_PARTICLE_CONE").unwrap_or(LAB_CONE_COS)
+}
+
+/// Whether rung P1's SDF collider slab is in the SCENE (`BOYKO_PARTICLE_SDF`) — and, with it, the
+/// per-effect contact parameters.
+///
+/// Deliberately SEPARATE from [`collision_armed`], which arms the shader variant. Splitting them is
+/// what makes the live-fire control exact: with `BOYKO_PARTICLE_SDF` set and
+/// `BOYKO_PARTICLE_COLLIDE` unset the scene, the effect table, the emitter, the clock and the
+/// camera are all identical and the ONLY difference between the two runs is which `particle_sim`
+/// module the pipeline was built from. One knob doing both would leave "the particles moved because
+/// the scene changed" on the table as an explanation.
+pub fn sdf_collider_armed() -> bool {
+    std::env::var("BOYKO_PARTICLE_SDF").is_ok()
+}
+
+/// Whether the sim is built from the `-D SDF_COLLIDE` module (`BOYKO_PARTICLE_COLLIDE`) — rung
+/// P1's `ParticleCollision::Sdf` arming. See [`sdf_collider_armed`] for why this is its own knob.
+pub fn collision_armed() -> bool {
+    std::env::var("BOYKO_PARTICLE_COLLIDE").is_ok()
 }
 
 /// Whether this run resolves to the DEFERRED path — the one whose depth buffer holds a
@@ -410,6 +482,10 @@ pub fn lab_drive_clock(
 /// rotation multiplier bakes to the exact identity `(1, 0)`), and a FLAT size ramp.
 pub fn lab_effect() -> ParticleEffect {
     let speed = launch_speed();
+    // The contact parameters ride the SCENE knob, not the collision one: both live-fire runs then
+    // upload a byte-identical effect table and the only difference between them is the sim module.
+    // Unset (every existing pin's configuration), all three stay 0 and the row is P0's exactly.
+    let collides = sdf_collider_armed();
     ParticleEffect {
         gravity: [0.0; 3],
         drag: 0.0,
@@ -419,10 +495,10 @@ pub fn lab_effect() -> ParticleEffect {
         speed_min: speed,
         speed_max: speed,
         size_base: billboard_size(),
-        cone_cos: LAB_CONE_COS,
-        collision_radius: 0.0,
-        restitution: 0.0,
-        friction: 0.0,
+        cone_cos: cone_cos(),
+        collision_radius: if collides { LAB_COLLISION_RADIUS } else { 0.0 },
+        restitution: if collides { LAB_RESTITUTION } else { 0.0 },
+        friction: if collides { LAB_FRICTION } else { 0.0 },
         // White-hot for the particle's whole life: P0 is spawn-passthrough on colour, and `lit` is
         // 8-bit post-tonemap, so a dim key would land under the 2/255 additive floor.
         color_keys: [0xFFFF_FFFF; 4],
@@ -458,6 +534,23 @@ pub fn setup(
             rotation: WALL_ROTATION,
             scale: Vec3::ONE,
         }));
+    }
+
+    if sdf_collider_armed() {
+        // Rung P1's collider — an `SdfPrimitive` entity, which is the ONE way geometry enters the
+        // engine's field (principle 0: the per-entity component IS the store, and `collect_sdf_edits`
+        // gathers it into the single edit list every field consumer reads). The particle sim reads
+        // that same list at binding 10; there is no particle-side copy of this slab anywhere.
+        //
+        // It is a UNION with hard edges (`smoothness = 0`): a smooth blend would make the field
+        // super-Lipschitz, which is exactly the regime where the skip bound's L factor starts to
+        // matter — worth a fixture of its own, but not the one that has to show a bounce.
+        commands.spawn(SdfPrimitive(SdfEdit::box_shape(
+            SDF_COLLIDER_POS,
+            SDF_COLLIDER_HALF,
+            sdf_op::UNION,
+            0.0,
+        )));
     }
 
     // The effect row is minted through the domain API, not `Assets::add`, so it is PINNED — a
@@ -544,6 +637,13 @@ pub fn build_app(title: &'static str) -> App {
     app.insert_resource(ParticleConfig {
         mode: ParticleMode::GpuUnlit,
         capacity: pool_capacity(),
+        // Rung P1's arm. Boot-frozen: the runner reads it once, beside `capacity`, to pick which
+        // `particle_sim` module the pipeline is built from.
+        collision: if collision_armed() {
+            ParticleCollision::Sdf
+        } else {
+            ParticleCollision::Off
+        },
     });
     // The subsystem's own clock, re-rated to the fixture's substep.
     app.insert_resource(ParticleClock::from_hz(LAB_STEP_HZ));
@@ -582,7 +682,8 @@ pub fn build_app(title: &'static str) -> App {
 pub fn print_config(what: &str) {
     println!(
         "{what}: path={} win={} spawn_per_frame={} speed={} size={} capacity={} occluder={} \
-         substep={LAB_SUBSTEP_SECS}s hz={LAB_STEP_HZ} capture_frame={CAPTURE_FRAME}",
+         sdf_collider={} collide={} substep={LAB_SUBSTEP_SECS}s hz={LAB_STEP_HZ} \
+         capture_frame={CAPTURE_FRAME}",
         std::env::var("BOYKO_RENDER_PATH").unwrap_or_else(|_| "deferred (default)".into()),
         window_size(),
         spawn_per_frame(),
@@ -590,6 +691,8 @@ pub fn print_config(what: &str) {
         billboard_size(),
         pool_capacity(),
         occluder_armed(),
+        sdf_collider_armed(),
+        collision_armed(),
     );
 }
 
