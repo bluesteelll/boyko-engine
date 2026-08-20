@@ -85,9 +85,25 @@ Three rules the table does not show:
   has a value the engine's shipped scenes agree on; a base color does not. The
   error names the whole default table so you can see what you *are* getting for
   free.
-- **A repeated key is an error, not last-write-wins.** `base: … , base: …`
-  reports on the second key. Silently dropping the first value is the kind of
-  bug you find in a screenshot.
+- **A repeated key is an error, not last-write-wins.** It reports on the second
+  key **and carries a span at the first** — in a seven-key material the earlier
+  line can be pages away, and it is the line you actually have to look at:
+
+  ```text
+  error: duplicate material key `roughness`
+    --> tests/ui/material_duplicate_key.rs:15:9
+     |
+  15 |         roughness: 0.20,
+     |         ^^^^^^^^^
+
+  error: the first `roughness:` is here
+    --> tests/ui/material_duplicate_key.rs:13:9
+     |
+  13 |         roughness: 0.14,
+     |         ^^^^^^^^^
+  ```
+
+  Silently dropping the first value is the kind of bug you find in a screenshot.
 - **`emissive` takes exactly three components.** `Material::new` takes
   `emissive: [f32; 3]`; emitted radiance has no alpha. A fourth component would
   otherwise fail in rustc against a *synthesized* array that carries no span of
@@ -253,7 +269,7 @@ someone's game.
 | `emissive: (1.0, 0.5, 0.2, 1.0)` | ``` `emissive` color takes exactly 3 components (rgb) — `Material::new` takes `emissive: [f32; 3]`, emitted radiance has no alpha — found 4 ``` |
 | `base: 0.5` | ``` `base` takes a color tuple: `(r, g, b)` or `(r, g, b, a)` ``` |
 | `roughnes: 0.14` | ``unknown material key `roughnes`; keys are: base, metallic, roughness, reflectance, emissive, flags, textures (did you mean `roughness`?)`` |
-| `base: …, base: …` | ``duplicate material key `base` `` |
+| `base: …, base: …` | ``duplicate material key `base` `` + a second span: *the first `base:` is here* |
 | no `base` key | ``` material `m` needs a `base:` color — every other key defaults (metallic 0.0, roughness 0.5, reflectance 0.5, emissive (0.0, 0.0, 0.0), flags 0), the base color does not ``` |
 | two `material twice` | ``duplicate material `twice` — each material expands to a builder fn of its own name, and two of one name is one fn defined twice`` + *the first `material` of this name is here* |
 

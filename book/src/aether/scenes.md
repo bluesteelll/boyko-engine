@@ -247,8 +247,13 @@ error: an `sdf` edit carries its WORLD-SPACE position inside the edit itself (v1
 > the translation sugar), so this costs nothing else. The same applies to
 > `sdf MY_EDIT { … }`. A call expression — `at pose_of(x)`, `sdf
 > SdfEdit::sphere(…)` — cannot be continued by a brace and is never affected.
-> The parser records this caveat at both sites; it is the one place where the
-> node grammar borrows Rust's own ambiguity rather than resolving it.
+>
+> **You do not have to recognize this yourself.** Since rung A7 the resulting
+> error names it: a required-key refusal on a node whose pose is a bare path
+> carries a note saying the braces were parsed as a struct literal, and gives
+> you the parenthesized form. The note is *gated* on that shape, so an honest
+> `at Transform { … }` node missing an unrelated key gets no false lead. See
+> [Diagnostics](diagnostics.md#the-hint-for-a-pose-that-ate-its-own-body).
 
 ## Props
 

@@ -13,6 +13,138 @@ Two mechanisms do most of the work:
 - **Did-you-mean at edit distance ≤ 2.** Against construct keywords, clause
   keywords, filter keywords, sibling system names, and sibling state names.
 
+And one rule governs how *many* errors you get.
+
+## Recovery: one typo costs one error
+
+A macro that aborts on the first parse error erases every item the block would
+have emitted. One missing colon becomes one honest error **plus an
+unresolved-name error for every other construct in the block** — and for every
+line in the file that used one. That is the failure mode `view!`-style macros
+are reported for, and it lands exactly when you are mid-edit, which is exactly
+when you needed the editor.
+
+Aether does not do that. Each construct is parsed **speculatively**. A failure
+records its error, keeps a **name-carrying stub**, resyncs at the next construct
+head, and every construct that parsed expands in full:
+
+```rust,ignore
+aether! {
+    component Health { hp: f32 }
+
+    component Broken { hp f32 }          // the one fault
+
+    tag Player;
+
+    system tick(q: query<&Health>) { let _ = &q; }
+}
+
+fn main() {
+    let _ = Health { hp: 1.0 };
+    let _ = Player;                      // declared AFTER the fault
+    let _ = Broken;                      // the broken construct's OWN name
+    let _ = tick;
+}
+```
+
+```text
+error: expected `:` after field `hp` (or a known item: requires / on_add / on_insert / on_replace / on_remove / no_bundle)
+  --> tests/ui/recovery_one_typo_costs_one_error.rs:25:24
+   |
+25 |     component Broken { hp f32 }
+   |                        ^^
+```
+
+That is the whole output. The contract this golden pins is the **size** of the
+`.stderr`: `Player` and `tick` are declared *after* the fault, so an aborting
+parser never reaches them, and `Broken` resolves through its own stub.
+
+### The stub takes the construct's own shape
+
+A stub is not a placeholder struct for everything. It is the item kind the
+construct would have produced, because "keeps resolving" means different things:
+
+| Broken construct | Stub |
+|------------------|------|
+| `component`, `tag`, `bundle`, `event`, `machine` | `pub struct Name;` |
+| `system`, `material`, `scene` | `pub fn Name() {}` |
+| `plugin` | `pub struct Name;` **and** an empty `impl Plugin` |
+
+The `plugin` row is the one that had to be measured. Every reference to a plugin
+is `app.add_plugin(P)`, which needs the *trait*: a bare unit struct would trade
+"cannot find value `P`" for "the trait bound `P: Plugin` is not satisfied" at
+the same line — a different error, not one fewer.
+
+Stubs are also **diagnostic-silent** (`#[allow(dead_code, …)]`) and carry the
+**user's** name at the **user's span**. That last part is a recorded exemption
+from the `__aether_` prefix rule: a stub's whole purpose is to occupy your name,
+so prefixing it would produce an item nothing can reference.
+
+### A broken construct still participates
+
+The subtle half, and the one review caught: a broken construct is **not absent**.
+The whole-block rules run over `constructs ∪ broken`, keyed by name and kind.
+
+Consider the ordinary mid-edit state of any block with a plugin — the `;` not
+typed yet:
+
+```rust,ignore
+aether! {
+    component Health { hp: f32 }
+
+    plugin Arena                          // missing `;`
+
+    system boot(mut cmds: commands) on startup { … }
+    system tick(q: query<&Health>) on update { … }
+}
+```
+
+Read as absent, the broken `plugin` would make "scheduling clauses need a
+plugin" fire against every sibling system, the whole-block rule would fail, and
+the expansion would be dropped — one typo erasing `Health`, `boot` and `tick`,
+re-creating the error sea the mechanism exists to prevent. Instead the broken
+plugin **holds the plugin slot**, and the file is left with exactly the typo:
+
+```text
+error: a plugin declaration ends with `;` (the systems it registers are sibling `system` items)
+  --> tests/ui/recovery_broken_plugin_keeps_the_block.rs:29:5
+   |
+29 |     system boot(mut cmds: commands) on startup {
+   |     ^^^^^^
+```
+
+The same rule keeps duplicate detection honest. A `material gold` that failed to
+parse still **occupies the name `gold`**, so a real duplicate stays Aether's own
+two-span diagnostic instead of degrading into rustc's `E0428` on the macro
+token:
+
+```text
+error: `metallic` takes an expression
+  --> tests/ui/recovery_duplicate_name_with_a_broken_twin.rs:17:54
+   |
+17 |     material gold { base: (0.1, 0.1, 0.1), metallic: }
+   |                                                      ^
+
+error: duplicate material `gold` — each material expands to a builder fn of its own name, and two of one name is one fn defined twice
+  --> tests/ui/recovery_duplicate_name_with_a_broken_twin.rs:17:14
+   |
+17 |     material gold { base: (0.1, 0.1, 0.1), metallic: }
+   |              ^^^^
+
+error: the first `material` of this name is here
+  --> tests/ui/recovery_duplicate_name_with_a_broken_twin.rs:15:14
+   |
+15 |     material gold { base: (1.0, 0.72, 0.30) }
+   |              ^^^^
+```
+
+What *does* stay suppressed is narrow and specific: a rule whose failure could
+not exist without the break. The broken plugin's own registration contents, an
+ordering edge naming a system that did not parse, a scene minting a material
+that did not parse — reporting those would contradict your source (``no material
+`gold` `` with `gold` declared three lines up). They come back the moment the
+construct does.
+
 ## Unknown construct
 
 The canonical extensibility diagnostic. It names the whole v1 surface, and since
@@ -45,6 +177,35 @@ as its own comment promised, and its golden was replaced by the one above —
 whose whole job is to prove the removal went cleanly: **no planned-construct
 text survives anywhere in the crate**. A diagnostic that outlived the condition
 it described would be worse than none.
+
+## The version header
+
+`aether v1;` is optional, and both ways of getting it wrong are refused on the
+token that is wrong. An unknown version reads from the same one-row table the
+parser dispatches on, so the message cannot advertise a header the parser would
+reject:
+
+```text
+error: unknown aether syntax version `v2`; this aether speaks: v1 (did you mean `v1`?)
+ --> tests/ui/version_header_unknown.rs:9:12
+  |
+9 |     aether v2;
+  |            ^^
+```
+
+Position is checked too, and it is not pedantry: a header *below* a construct
+means the constructs above it were already parsed against whatever version the
+block defaulted to. Reported as an unknown construct — `aether` is not one of
+the nine — the reader would be told the keyword does not exist, which is both
+false and unactionable.
+
+```text
+error: the `aether v1;` syntax-version header is the block's FIRST item — move it above every construct
+  --> tests/ui/version_header_out_of_place.rs:10:5
+   |
+10 |     aether v1;
+   |     ^^^^^^
+```
 
 ## Case gates
 
@@ -163,8 +324,8 @@ these carries a second span, *the first … is here*:
 |-----------|-------------|
 | `state A { state BC {} }` next to `state AB { state C {} }` | ``states `A.BC` and `AB.C` both flatten to `ABC` — flattening concatenates the state path, so they would emit one name; rename one`` |
 | two sibling `state Idle {}` | ``duplicate state `Idle` — sibling states need distinct names`` |
-| leaves `AB` and `A_b`, each with `on E` | ``states `AB` and `A_b` both generate the system `__aether_m__a_b__e` — generated names are the snake_case collapse of the flattened state path, and `AB` and `A_b` collapse alike; rename one`` |
-| composites `AB` and `A_b` | ``composite states `AB` and `A_b` flatten to `AB` and `A_b`, which both collapse to the predicate `in_a_b` — rename one`` |
+| leaves `AB` and `Ab`, each with `on E` | ``states `AB` and `Ab` both generate the system `__aether_m__ab__e` — generated names are the snake_case collapse of the flattened state path, and `AB` and `Ab` collapse alike; rename one`` |
+| composites that collapse alike | ``composite states `AB` and `Ab` flatten to `AB` and `Ab`, which both collapse to the predicate `in_ab` — rename one`` |
 | `on a::E` and `on b::E` in one state | ``events `a::E` and `b::E` both generate the system `__aether_m__a__e` for leaf `A` — the generated name keys on the event's last path segment; import one under an alias (`use … as …`)`` |
 
 ```text
@@ -264,6 +425,31 @@ The `at` family is the one worth pausing on. Those poses would otherwise be
 **silently dropped** — the single failure mode a user cannot see in the rendered
 frame without going looking for it — so each message names where the pose really
 comes from instead of merely refusing.
+
+### The hint for a pose that ate its own body
+
+`camera at MY_POSE { aspect: 1.5 }` parses `MY_POSE { aspect: 1.5 }` as one
+struct-literal expression, exactly as Rust would in an `if` scrutinee. The node
+body is gone, and the required-key rule then tells an author who is looking
+straight at `aspect: 1.5` that the node needs an `aspect:` key — a message that
+**contradicts the source**. Their only remaining move would be to add a *second*
+`aspect:` and watch that fail too.
+
+Since A7 the refusal names what happened and how to split it:
+
+```text
+error: the `camera` node needs an `aspect:` key — it has no default (these default: fov, near, far) — note: the `{ … }` after `MY_POSE` was parsed as a STRUCT LITERAL (`MY_POSE { … }`), not as this node's body, so the node has no keys at all; parenthesize the pose to split them: `at (MY_POSE) { … }`
+  --> tests/ui/scene_at_bare_path_struct_literal.rs:16:9
+   |
+16 |         camera at MY_POSE { aspect: 1.5 }
+   |         ^^^^^^
+```
+
+The hint is **gated**, and that is the whole design. It is attached only when a
+bare-path pose could have swallowed the body — an honest `at Transform { … }`
+node that merely forgot an unrelated key gets the plain required-key error and
+no false lead. A hint that fires on the wrong shape is worse than no hint,
+because it sends a reader to inspect syntax that is already correct.
 
 ```text
 error: the `sky` node has no shadow-caster form

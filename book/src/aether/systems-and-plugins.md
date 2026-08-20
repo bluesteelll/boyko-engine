@@ -113,6 +113,37 @@ You may always write `mut` yourself — an explicit `mut` and an inferred one
 produce the same binding. For a verbatim escape-hatch parameter, writing it is
 the only way, because Aether does not inspect types it does not own.
 
+### Generated fns and the arity lint
+
+A system's parameter list is its data dependencies, and a wide one is ordinary.
+Clippy's `too_many_arguments` disagreed: an eight-param `system` used to produce
+
+```text
+warning: this function has too many arguments (8/7)
+  --> tests/a7_probe.rs:21:1
+   |
+21 | / aether! {
+   | |_^
+   = note: this warning originates in the macro `aether`
+```
+
+— a lint about a signature you did not write, spanned on the **macro token**,
+where no `#[allow]` of yours can reach it and "take fewer arguments" is not
+advice about data dependencies.
+
+Aether now emits `#[allow(clippy::too_many_arguments)]` on the three generated
+fn kinds whose arity you control: `system` fns, machine
+[transition systems](state-machines.md#merged-parameters) (which merge the
+params of every handler they inline), and the machine
+[initial-enter chain](state-machines.md#the-initial-enter-chain). A shipped test
+target carries an eight-param system, so the repo's `-D warnings` clippy run
+fails the day the suppression is dropped.
+
+**The honest caveat:** that gate exercises clippy's *default* threshold of 7. A
+crate that lowers `too-many-arguments-threshold` is covered by the fix — the
+attribute is unconditional — but not by the gate, because `trybuild` drives
+rustc, not clippy, and no fixture can carry a lint at all.
+
 ### The escape hatch
 
 Anything the sugar does not claim passes through as a verbatim type, so any real

@@ -24,8 +24,8 @@ The consequences are the point:
   through as verbatim token trees with their original spans, so rustc errors,
   rust-analyzer completions and go-to-definition land on your own tokens.
 
-*(Branch: `feat/multi-paradigm-render`. Shipped rungs: A0–A6 — the v1 construct
-surface is complete.)*
+*(Branch: `feat/multi-paradigm-render`. Shipped rungs: **A0–A7 — the plan is
+complete**. Nothing in the language is scheduled for a later rung.)*
 
 ## Hello, Aether
 
@@ -225,14 +225,15 @@ Every construct's expansion is also pinned token-for-token by unit tests in
 `crates/aether_lang/src/expand.rs`. If you want the authoritative "what does
 this become", those tests are it.
 
-## Status and what is next
+## Status: the plan is complete
 
-Rungs **A0–A6** ship in this build: `component`, `tag`, `bundle`, `event`,
-`system`, `plugin`, `machine`, `material`, `scene`. That is the **complete v1
-construct surface** — the language has no keyword left that only names a future
-rung. Machines carry the full hierarchy — composite states, `initial`
-retargeting, superstate handler inheritance, LCA-inlined enter/exit and group
-predicates — which A3 delivered a rung early.
+**Every rung ships. A0 through A7 — the design plan's last — are done, and
+nothing in the language is waiting on a later one.**
+
+The nine constructs are `component`, `tag`, `bundle`, `event`, `system`,
+`plugin`, `machine`, `material` and `scene`. Machines carry the full hierarchy —
+composite states, `initial` retargeting, superstate handler inheritance,
+LCA-inlined enter/exit and group predicates — which A3 delivered a rung early.
 
 A4 was therefore spent on the piece nobody had built and on hardening what was
 already there:
@@ -278,13 +279,56 @@ the code — asset mints were first-use ordered (so moving two nodes renumbered
 every row a scene minted), and the four generated params could be shadowed by an
 ordinary `let`, which is why they are `__aether_`-prefixed today.
 
-Planned, not shipped:
+A7 added **no constructs** — it hardened the language around them:
 
-| Rung | Contents | Status today |
-|------|----------|--------------|
-| A7 | DX hardening: expansion-size CI measurement, span-column-pinned goldens, `aether v1;` version header | not started |
+- **[Recovery](diagnostics.md#recovery-one-typo-costs-one-error).** One broken
+  construct now costs **one error**. Each construct is parsed speculatively; a
+  failure records its error plus a name-carrying stub, the parser resyncs at the
+  next construct head, and every sibling expands in full. Listed since A0, built
+  here.
+- **The `aether v1;` header.** Optional, and about the future rather than the
+  present — see below.
+- **An expansion-volume band**, two-sided per corpus. A ceiling alone is
+  satisfied by emitting nothing; a band catches drift in both directions. The
+  sugar constructs measure near 3× their source, and the two that *transpile* —
+  `machine` and `scene` — sit at 9–11×, counted against the hand-written code
+  they replace.
+- **A mechanical span sweep** over the whole golden corpus: every fixture is
+  registered, every `.stderr` pins a `line:column`, and **no label sits on the
+  `aether! {` line** — primary or secondary. That last clause was widened this
+  rung, because the one defect the sweep caught put its macro-line reference in a
+  *secondary* label.
+- **The four recorded candidates**, all landed: the
+  [`at BARE_PATH` hint](scenes.md#poses-and-where-at-is-refused), the
+  [`too_many_arguments` allow](systems-and-plugins.md#generated-fns-and-the-arity-lint),
+  the snake-collapse fix, and both spans on a duplicate key.
 
-A7 adds **no constructs**. Everything the language declares, it declares today.
+**Nothing is planned and unshipped.** Post-v1 ideas exist — an `aetherfmt`, a
+tree-sitter grammar, a `shader` construct pointing at an eDSL body — but none of
+them is a keyword the language names today and refuses tomorrow.
+
+### The version header
+
+A block may open with a syntax-version header:
+
+```rust,ignore
+aether! {
+    aether v1;
+
+    component Health { hp: f32 }
+}
+```
+
+It is **insurance, not ceremony**. Absent, a block is read as the crate's
+current version, and v1 code never needs it. What it buys is the day a v2
+grammar breaks v1: the version dispatches through an **exhaustive match** on a
+one-row table, so adding v2 forces a *second construct table* rather than
+letting two grammars quietly share one — and the compiler enumerates every site
+that must grow an arm.
+
+Without that gate, v2 source would parse against the v1 table and every
+construct in the block would report its own unrelated fault. With it, the block
+is refused on the version token itself, with the supported list.
 
 ## See also
 
@@ -297,7 +341,10 @@ A7 adds **no constructs**. Everything the language declares, it declares today.
   escape.
 - [Scenes](scenes.md) — `scene`, the eight node heads, and the demand-driven
   spawn fn.
-- [Diagnostics](diagnostics.md) — every error contract Aether promises.
+- [Diagnostics](diagnostics.md) — every error contract Aether promises,
+  including [recovery](diagnostics.md#recovery-one-typo-costs-one-error).
+- [Contributing](../contributing.md#changing-the-aether-dsl) — the checklist a
+  change to the DSL is reviewed against.
 - [Components](../concepts/components.md) and [Systems](../concepts/systems.md) —
   the hand-written surface Aether expands to.
 - Source: `crates/aether_lang/src/parse.rs`, `crates/aether_lang/src/expand.rs`,

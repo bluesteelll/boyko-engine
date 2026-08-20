@@ -107,6 +107,27 @@ A PR with undocumented `unsafe` will not be merged.
 - `[profile.bench]` pins `codegen-units = 1` so two builds of the same source produce identical machine code — this hardens the "0%-regression / byte-identical asm" A/B methodology.
 - Don't add a benchmark just for the sake of it — measure something meaningful.
 
+### Changing the Aether DSL
+
+If your change touches [Aether](aether/overview.md) — a new construct, a new key,
+a new diagnostic — the crate's own doc carries the checklist a review runs
+against. Every item on it is something that has already gone wrong, here or in
+the prior art the design surveyed:
+
+1. **Verbatim tokens, never strings.** User fragments are carried as parsed `syn` nodes and re-emitted unchanged; a `stringify!` + re-parse round trip loses spans, and everything below depends on spans.
+2. **The narrowest applicable span.** The offending token — not the construct, not the block.
+3. **Every diagnostic gets a `trybuild` golden.** The message is half the contract; the line and column are the other half, and the half that degrades silently.
+4. **Accumulate, do not abort.** Independent constructs all report, and a broken one still emits its stub so its name resolves.
+5. **Pre-check only where Aether is strictly better.** A fault rustc or a derive reports against the user's own tokens is left to them — duplicated checks drift.
+6. **One table, spelling and dispatch together.** What a message advertises and what the parser accepts must be the same rows.
+7. **Did-you-mean at edit distance ≤ 2**, against that same table.
+8. **Emit the canonical hand-written surface.** Codegen belongs in `boyko_macros`; the expansion-volume test fails on drift in either direction.
+9. **Engine paths are tokens, never dependencies** — and they must be the real nested paths, verified by a target that compiles them against the real crates.
+10. **Never panic.** A panicking proc-macro erases the block from analysis; every internal failure becomes a spanned `compile_error!`.
+
+The living version is the `aether` crate's module doc
+(`crates/aether/src/lib.rs`); if the two disagree, that one is right.
+
 ## Pull request workflow
 
 1. **Open an issue first** if your change is more than a trivial fix. Get alignment on the approach before writing code.

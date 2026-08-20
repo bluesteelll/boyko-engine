@@ -190,6 +190,11 @@ both declare `mut cmds: commands` — that is one parameter. The same **name**
 bound to a **different type** across the merged handlers is a compile error
 naming the conflict.
 
+Because that merge can push a generated fn past clippy's argument threshold on
+params you never wrote in one place, transition systems and the initial-enter
+chain carry
+[the arity allow](systems-and-plugins.md#generated-fns-and-the-arity-lint).
+
 ## The initial-enter chain
 
 `insert_state` seeds the machine's **value**, but nothing in the kernel runs an
@@ -377,10 +382,10 @@ The same comparison, at each level a name is minted:
 
 - two siblings spelled alike — ``duplicate state `Idle` — sibling states need
   distinct names``;
-- ``states `AB` and `A_b` both generate the system `__aether_m__a_b__e` `` — the
+- ``states `AB` and `Ab` both generate the system `__aether_m__ab__e` `` — the
   variants differ, their snake_case collapse does not;
-- ``composite states `AB` and `A_b` … which both collapse to the predicate
-  `in_a_b` — rename one``;
+- ``composite states `AB` and `Ab` … which both collapse to the predicate
+  `in_ab` — rename one``;
 - ``events `a::E` and `b::E` both generate the system `__aether_m__a__e` for
   leaf `A` `` — inheritance dedupes on the event's full spelling, the fn name
   keys on its last segment. Import one under an alias.
@@ -402,6 +407,15 @@ is resolved eagerly, reachability be damned:
 
 Every one of these is a `trybuild` golden; see
 [Diagnostics](diagnostics.md#machines) for the full table.
+
+> **The colliding pair moved at A7.** The collapse used to spell a run of
+> capitals one letter per word — `GOLD` became `g_o_l_d`, then `gold` — which
+> made `AB` and `A_b` collide. With that fixed, they no longer do: they mint
+> `__aether_m__ab__e` and `__aether_m__a_b__e`. The collision *fixture* was
+> therefore re-aimed at `AB` / `Ab`, a pair the current rule really does
+> collapse alike, rather than re-blessed — a compile-fail fixture whose input
+> has stopped being a fault still passes, for the wrong reason, and pins
+> nothing.
 
 ## Hazards
 
