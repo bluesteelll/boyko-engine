@@ -197,6 +197,13 @@ static const float3 LIGHT_UP = float3(0.0, 1.0, 0.0);
 [[vk::binding(9, 0)]] StructuredBuffer<uint>  LightIndexList;  // flat surviving-index slices
 #endif
 
+#ifndef VB_SV0_KILL
+// VB-SV0 DP2: the dedicated `sdf_mesh_shadow` pass's R8G8 term — a VERBATIM mirror of
+// `vb_resolve.comp.hlsl`'s own binding-10 block (that block's doc carries the ~+75%/`13f1c9a3`
+// argument for why the march is a PASS and this is two `.Load`s).
+[[vk::binding(10, 0)]] Texture2D<float2> gSdfTerm : register(t10);
+#endif
+
 // --- Set 1 (shadow): a VERBATIM copy of `vb_resolve.comp.hlsl`'s own Set-1 block, so the SAME
 // physical descriptor set (`ForwardTargets::set1`) binds to both.
 
@@ -451,6 +458,21 @@ void main(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID) {
 #else
     float ao_final = 1.0;
 #endif
+#ifndef VB_SV0_KILL
+    // VB-SV0 DP2: the 2-bit runtime gate, hoisted ONCE per pixel — a VERBATIM mirror of
+    // `vb_resolve.comp.hlsl`'s own block (per-bit independence and the mode-0 identity argument
+    // live there). Under TEXTURED the AO half `min`-combines WITH the material's `ao_tex`, which
+    // is exactly how the two AO sources compose everywhere else (`min` is exact and
+    // order-independent on floats).
+    uint sv0_mode = load_vb_sdf_mesh_mode(LightBuf);
+    float2 sv0_term = float2(1.0, 1.0);
+    if (sv0_mode != 0u) {
+        sv0_term = gSdfTerm.Load(int3((int)px, (int)py, 0));
+    }
+    if ((sv0_mode & VB_SDF_MESH_AO_BIT) != 0u) {
+        ao_final = min(ao_final, sv0_term.g);
+    }
+#endif
     float spec_ao = saturate(pow(NoV + ao_final, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao_final);
 
     LightHeader H = load_light_header(LightBuf);
@@ -479,6 +501,14 @@ void main(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID) {
                     float view_z = dot(cam_forward.xyz, P - cam_eye.xyz);
                     vis = min(vis, csm_visibility(P, n, view_z, NoL));
                 }
+#ifndef VB_SV0_KILL
+                // VB-SV0 DP2: the shadow half, beside the CSM combine and OUTSIDE its `if` — a
+                // VERBATIM mirror of `vb_resolve.comp.hlsl`'s own block (the independence and
+                // by-construction pairing arguments live there).
+                if ((sv0_mode & VB_SDF_MESH_SHADOW_BIT) != 0u) {
+                    vis = min(vis, sv0_term.r);
+                }
+#endif
             }
             PbrDirectTerms bsdf = eval_pbr_direct_bsdf(surf, v, l, NoL);
             lit_direct += (bsdf.diffuse + bsdf.specular) * (NoL * vis) * L.color;

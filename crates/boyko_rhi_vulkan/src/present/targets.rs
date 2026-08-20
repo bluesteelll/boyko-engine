@@ -752,6 +752,19 @@ pub struct GBufferTargets {
     /// Acquired just before the deferred sets, so [`Self::destroy`] tears it down just after them
     /// — a descriptor set retains the image view it was written with by raw handle.
     pub(crate) hzb_null: VulkanTexture,
+    /// VB-SV0 DP2 — the 1×1 `R8G8_UNORM` white placeholder the four VB Set-0 sets bind at @10
+    /// whenever the dedicated `sdf_mesh_shadow` pass is disarmed — which is every committed pin.
+    ///
+    /// The [`Self::hzb_null`] idiom verbatim, one binding over: UNCONDITIONAL (the sets' entry
+    /// lists have fixed arity, so SOMETHING valid must sit at @10 on every boot), minted + cleared
+    /// to `(1.0, 1.0)` ("no effect" in both term channels — `min(x, 1.0) == x` exactly) +
+    /// transitioned to `GENERAL` by [`Self::boot_seed_sv0_term_null`] in [`Self::create`], and
+    /// never touched again — no framegraph pass names it, so that boot submit is its only layout
+    /// producer. DP3's arming re-points @10 at the real term target at sync time (the AA
+    /// `present_set` re-point precedent), so recording never branches on arming.
+    ///
+    /// Acquired beside [`Self::hzb_null`], destroyed beside it — same retention argument.
+    pub(crate) sv0_term_null: VulkanTexture,
     /// VG R3 piece 1 step P1-2 — whether the pyramid was ARMED when these targets were built.
     ///
     /// A STORED field for exactly the reason [`Self::aa_arm`] is one: [`Self::sync_gbuffer`]'s
@@ -1937,6 +1950,34 @@ fn hzb_null_desc() -> TextureDesc {
 #[inline]
 const fn hzb_null_desc_is_bindable_and_seedable(desc: &TextureDesc) -> bool {
     desc.usage.contains(ImageUsage::SAMPLED) && desc.usage.contains(ImageUsage::TRANSFER_DST)
+}
+
+/// VB-SV0 DP2 — the 1×1 `R8G8_UNORM` white placeholder the VB Set-0 sets bind at @10 whenever the
+/// dedicated `sdf_mesh_shadow` pass is disarmed.
+///
+/// The [`hzb_null_desc`] idiom verbatim, one format over: `SAMPLED` for the descriptor write,
+/// `TRANSFER_DST` for the boot clear, 1×1 single-mip for the in-range-by-ADDRESS argument (the
+/// tails' reader `.Load`s at the pixel coordinate only when the runtime mode is non-zero, and a
+/// disarmed boot never sets it — but DXC is free to lower the guard to an eager fetch plus
+/// `OpSelect`, so the address argument must not depend on reachability). The clear value is
+/// `(1.0, 1.0)` — both term channels at "no effect", so even a value that reaches arithmetic
+/// provably changes nothing: `min(x, 1.0) == x` exactly.
+///
+/// Shares [`hzb_null_desc_is_bindable_and_seedable`] — the predicate is about the two usage bits,
+/// not about HZB; its name keeps the coiner.
+#[inline]
+fn sv0_term_null_desc() -> TextureDesc {
+    TextureDesc {
+        width: 1,
+        height: 1,
+        depth: 1,
+        format: Format::R8G8Unorm,
+        dimension: TextureDimension::D2,
+        usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
+        array_layers: 1,
+        mip_levels: 1,
+        view_format: None,
+    }
 }
 
 /// Anti-aliasing campaign: which AA mode [`GBufferTargets`] is CURRENTLY armed for —
@@ -3324,6 +3365,11 @@ impl DeferredSets {
         // HZB-armed one additionally gets `HzbTargets::vb_cull_set_hzb`, the same entries with the
         // real pyramid there.
         hzb_null: &VulkanTexture,
+        // VB-SV0 DP2: [`GBufferTargets::sv0_term_null`], minted + cleared to `(1,1)` +
+        // transitioned by the caller beside `hzb_null`. UNCONDITIONAL for the same fixed-arity
+        // reason — the four VB Set-0 sets write it at @10 on every VB boot, and DP3's arming
+        // re-points the binding at the real term target at sync time.
+        sv0_term_null: &VulkanTexture,
     ) -> Result<DeferredSets, SwapchainError> {
         // The address half of D7's in-range argument, checked at the seam where the image is handed
         // to the set builder: the disarmed reader clamps its coordinates AND its level to 0, and
@@ -4010,6 +4056,10 @@ impl DeferredSets {
                     },
                     BindGroupEntry::StorageImage { texture: &core.lit[slot] },
                     BindGroupEntry::StorageBuffer { buffer: &gclassify_ring[slot] },
+                    // VB-SV0 DP2: `gSdfTerm` @10 — the 1×1 white placeholder until DP3's arming
+                    // re-points it; `SampledImageAtGeneral` because the placeholder's one layout
+                    // producer left it in `GENERAL` (the `hzb_null` @9 idiom verbatim).
+                    BindGroupEntry::SampledImageAtGeneral { texture: sv0_term_null },
                     // VG rung R2d-2: `gVbVisibleInstance` @11 — the LAST layout entry, so it is
                     // the LAST slice element (`create_bind_group` matches positionally).
                     BindGroupEntry::StorageBuffer { buffer: &vb_visible_instance[slot] },
@@ -4112,6 +4162,8 @@ impl DeferredSets {
                     },
                     BindGroupEntry::StorageImage { texture: &core.lit[slot] },
                     BindGroupEntry::StorageBuffer { buffer: &gclassify_ring[slot] },
+                    // VB-SV0 DP2: `gSdfTerm` @10 — identical to `vb_set0`'s own.
+                    BindGroupEntry::SampledImageAtGeneral { texture: sv0_term_null },
                     // VG rung R2d-2: `gVbVisibleInstance` @11 — identical to `vb_set0`'s own; this
                     // variant differs from it only at binding 1.
                     BindGroupEntry::StorageBuffer { buffer: &vb_visible_instance[slot] },
@@ -4227,8 +4279,10 @@ impl DeferredSets {
                     BindGroupEntry::StorageBuffer { buffer: &gclassify_ring[slot] },
                     BindGroupEntry::StorageBuffer { buffer: grid },
                     BindGroupEntry::StorageBuffer { buffer: index },
+                    // VB-SV0 DP2: `gSdfTerm` @10 — identical to `vb_set0`'s own.
+                    BindGroupEntry::SampledImageAtGeneral { texture: sv0_term_null },
                     // VG rung R2d-2: `gVbVisibleInstance` @11 — LAST in `vb_layout0_froxel` too
-                    // (`{0..9, 11}`), so it stays the LAST slice element here as well.
+                    // (`{0..9, 10, 11}`), so it stays the LAST slice element here as well.
                     BindGroupEntry::StorageBuffer { buffer: &vb_visible_instance[slot] },
                 ];
                 let desc = BindGroupDesc::<Vulkan> { layout, entries: &entries };
@@ -4355,6 +4409,8 @@ impl DeferredSets {
                     BindGroupEntry::StorageBuffer { buffer: &gclassify_ring[slot] },
                     BindGroupEntry::StorageBuffer { buffer: grid },
                     BindGroupEntry::StorageBuffer { buffer: index },
+                    // VB-SV0 DP2: `gSdfTerm` @10 — identical to `vb_set0_froxel`'s own.
+                    BindGroupEntry::SampledImageAtGeneral { texture: sv0_term_null },
                     // VG rung R2d-2: `gVbVisibleInstance` @11 — identical to `vb_set0_froxel`'s
                     // own; this variant differs from it only at binding 1.
                     BindGroupEntry::StorageBuffer { buffer: &vb_visible_instance[slot] },
@@ -5345,6 +5401,10 @@ impl DeferredSets {
                     },
                     BindGroupEntry::StorageImage { texture: &core.lit[slot] },
                     BindGroupEntry::StorageBuffer { buffer: &gclassify_ring[slot] },
+                    // VB-SV0 DP2: `gSdfTerm` @10 — identical to `vb_set0`'s own. This LATE set is
+                    // the fifth member of the set0 family, and the P1a arity assert is what found
+                    // it when DP2's first sweep updated only the four the S2 notes named.
+                    BindGroupEntry::SampledImageAtGeneral { texture: sv0_term_null },
                     // THE ONE ENTRY THAT DIFFERS from `vb_set0`: @11 is the LATE candidate/survivor
                     // list, not the early one.
                     BindGroupEntry::StorageBuffer { buffer: &vb_late_visible[slot] },
@@ -7504,37 +7564,58 @@ impl GBufferTargets {
     /// None: any failure propagates and the image is destroyed here, so the caller inherits nothing
     /// to drain. Same class as every other `create_*` failure in [`Self::create`].
     fn boot_seed_hzb_null(ctx: &VulkanContext) -> Result<VulkanTexture, SwapchainError> {
-        let desc = hzb_null_desc();
+        // `0.0` — the reverse-Z far plane: on the disarmed path the placeholder is conservative
+        // by VALUE (a far-plane occluder rejects nothing). Shape/usage arguments: `hzb_null_desc`.
+        Self::boot_seed_null_image(ctx, hzb_null_desc(), [0.0; 4])
+    }
+
+    /// VB-SV0 DP2: the 1×1 `R8G8_UNORM` white term placeholder — `(1.0, 1.0)` is "no effect" in
+    /// both channels (`min(x, 1.0) == x` exactly). See [`sv0_term_null_desc`] for the rest.
+    fn boot_seed_sv0_term_null(ctx: &VulkanContext) -> Result<VulkanTexture, SwapchainError> {
+        Self::boot_seed_null_image(ctx, sv0_term_null_desc(), [1.0, 1.0, 0.0, 0.0])
+    }
+
+    /// The shared body of the boot-seeded null images: create → UNDEFINED→TRANSFER_DST → clear to
+    /// `clear` → TRANSFER_DST→GENERAL (made available to COMPUTE/SHADER_READ) → submit →
+    /// fence-wait, with every transient torn down on every path. Factored at VB-SV0 DP2 when the
+    /// second caller appeared — two verbatim copies of a 120-line error ladder is how one of them
+    /// forks.
+    fn boot_seed_null_image(
+        ctx: &VulkanContext,
+        desc: TextureDesc,
+        clear: [f32; 4],
+    ) -> Result<VulkanTexture, SwapchainError> {
         debug_assert!(
             hzb_null_desc_is_bindable_and_seedable(&desc),
-            "invariant: hzb_null needs SAMPLED (the descriptor write) and TRANSFER_DST (this clear)"
+            "invariant: a boot-seeded null image needs SAMPLED (the descriptor write) and \
+             TRANSFER_DST (this clear)"
         );
-        let hzb_null = RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)?;
+        let img = RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)?;
 
         let mut encoder = match RhiDevice::create_command_encoder(ctx) {
             Ok(e) => e,
             Err(e) => {
-                // SAFETY: `hzb_null` was just created on `ctx` and no view of it and no submission
+                // SAFETY: `img` was just created on `ctx` and no view of it and no submission
                 // references it (nothing has been recorded yet); destroyed once, by value.
-                unsafe { RhiDevice::destroy_texture(ctx, hzb_null) };
+                unsafe { RhiDevice::destroy_texture(ctx, img) };
                 return Err(SwapchainError::DepthImage(e));
             }
         };
         let fence = match RhiDevice::create_fence(ctx, false) {
             Ok(f) => f,
             Err(e) => {
-                // SAFETY: `encoder` was just created on `ctx` and never submitted; `hzb_null` was
+                // SAFETY: `encoder` was just created on `ctx` and never submitted; `img` was
                 // created on `ctx` and is referenced by nothing. Each is moved by value ⇒ destroyed
                 // exactly once, the encoder before the image it never recorded against.
                 unsafe {
                     RhiDevice::destroy_command_encoder(ctx, encoder);
-                    RhiDevice::destroy_texture(ctx, hzb_null);
+                    RhiDevice::destroy_texture(ctx, img);
                 }
                 return Err(SwapchainError::DepthImage(e));
             }
         };
 
-        // The whole image: one COLOR mip, one layer (per `hzb_null_desc`).
+        // The whole image: one COLOR mip, one layer (both null descs are 1×1 single-mip).
         let range = ImageSubresourceRange {
             aspect: ImageAspect::COLOR,
             base_mip_level: 0,
@@ -7549,7 +7630,7 @@ impl GBufferTargets {
             // UNDEFINED → TRANSFER_DST_OPTIMAL (a fresh image has no prior contents, so UNDEFINED
             // discards — this is the clear destination).
             encoder.image_barrier(&ImageBarrierDesc {
-                texture: &hzb_null,
+                texture: &img,
                 src_stage: BarrierStage::TOP_OF_PIPE,
                 dst_stage: BarrierStage::TRANSFER,
                 src_access: BarrierAccess::NONE,
@@ -7559,10 +7640,10 @@ impl GBufferTargets {
                 range,
             });
 
-            // `0.0` — the reverse-Z far plane (see this fn's doc). Only the R channel is meaningful
-            // (`R32_SFLOAT`); the rest are written as zero because `clear_color_image` takes the
-            // full `[f32; 4]`.
-            encoder.clear_color_image(&hzb_null, ImageLayout::TransferDstOptimal, [0.0; 4], range);
+            // The caller's value semantics live on its wrapper (`0.0` = reverse-Z far plane for
+            // HZB; `(1,1)` = "no effect" for the SV0 term). `clear_color_image` takes the full
+            // `[f32; 4]`; channels past the format's are ignored.
+            encoder.clear_color_image(&img, ImageLayout::TransferDstOptimal, clear, range);
 
             // TRANSFER_DST_OPTIMAL → GENERAL, made available to COMPUTE_SHADER/SHADER_READ. The
             // fence wait below signals the CPU only, so the first dispatch that binds this image
@@ -7570,7 +7651,7 @@ impl GBufferTargets {
             // (`BindGroupEntry::SampledImageAtGeneral`), and this is the ONLY producer of that
             // layout — no framegraph pass ever names this image.
             encoder.image_barrier(&ImageBarrierDesc {
-                texture: &hzb_null,
+                texture: &img,
                 src_stage: BarrierStage::TRANSFER,
                 dst_stage: BarrierStage::COMPUTE_SHADER,
                 src_access: BarrierAccess::TRANSFER_WRITE,
@@ -7607,12 +7688,12 @@ impl GBufferTargets {
         }
 
         match record {
-            Ok(()) => Ok(hzb_null),
+            Ok(()) => Ok(img),
             Err(e) => {
-                // SAFETY: `hzb_null` was created on `ctx` in this fn; the device was drained above,
+                // SAFETY: `img` was created on `ctx` in this fn; the device was drained above,
                 // so no submission still references it, and it is moved by value ⇒ destroyed
                 // exactly once. No separate view of it exists (the texture owns its own).
-                unsafe { RhiDevice::destroy_texture(ctx, hzb_null) };
+                unsafe { RhiDevice::destroy_texture(ctx, img) };
                 Err(e)
             }
         }
@@ -7896,6 +7977,35 @@ impl GBufferTargets {
             }
         };
 
+        // VB-SV0 DP2: the term placeholder, seeded beside `hzb_null` under the same self-draining
+        // contract (`boot_seed_sv0_term_null` returns `Err` with nothing allocated).
+        let sv0_term_null = match Self::boot_seed_sv0_term_null(ctx) {
+            Ok(t) => t,
+            Err(e) => {
+                // SAFETY: same set as `hzb_null`'s own error arm above, plus `hzb_null` itself
+                // (fence-waited, referenced by no submission and no set yet); each destroyed
+                // exactly once, reverse acquisition.
+                unsafe {
+                    RhiDevice::destroy_texture(ctx, hzb_null);
+                    if let Some(s) = smaa_imgs {
+                        s.destroy(ctx);
+                    }
+                    if let Some(a) = aa_imgs {
+                        a.destroy(ctx);
+                    }
+                    if let Some(s) = ssao_atrous_imgs {
+                        s.destroy(ctx);
+                    }
+                    #[cfg(feature = "hwrt")]
+                    if let Some(v) = shadow_vis_imgs {
+                        v.destroy(ctx);
+                    }
+                    core.destroy(ctx);
+                }
+                return Err(e);
+            }
+        };
+
         let deferred = match DeferredSets::build(
             ctx,
             scene,
@@ -7908,6 +8018,7 @@ impl GBufferTargets {
             vb.as_ref(),
             vb_classify.as_ref(),
             &hzb_null,
+            &sv0_term_null,
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -7918,6 +8029,7 @@ impl GBufferTargets {
                 // smaa_imgs → aa_imgs → ssao_atrous_imgs → shadow-vis → core). `DeferredSets::build`
                 // already drained its own partial sets, so no set retains `hzb_null`'s view.
                 unsafe {
+                    RhiDevice::destroy_texture(ctx, sv0_term_null);
                     RhiDevice::destroy_texture(ctx, hzb_null);
                     if let Some(s) = smaa_imgs {
                         s.destroy(ctx);
@@ -8610,6 +8722,7 @@ impl GBufferTargets {
             // sets, because those are what bind it. Unconditional on both arms — see the field's
             // own doc for why the disarmed boot is the path it exists for.
             hzb_null,
+            sv0_term_null,
             // VG R3 piece 1 step P1-2: the pyramid itself is allocated BELOW, after this literal
             // (see the placement argument there); the arm is captured HERE, from the scene, so the
             // stored bit and the allocation can only disagree if the build fails — which returns.
@@ -9033,6 +9146,9 @@ impl GBufferTargets {
             // live view of it is `VUID-vkDestroyImage-image-01000`. UNCONDITIONAL on both arms —
             // every generation mints one.
             RhiDevice::destroy_texture(ctx, self.hzb_null);
+            // VB-SV0 DP2: acquired beside `hzb_null`, destroyed beside it — the four VB Set-0
+            // sets retain its view by raw handle, the same VUID-01000 argument as above.
+            RhiDevice::destroy_texture(ctx, self.sv0_term_null);
             // HW-RT Rung 3b: the three temporal denoise target RINGS (motion_vec / hist /
             // temporal_out), built LAST so destroyed FIRST in reverse-acquisition order. `Option`-
             // guarded (degrade-to-None on an unsupported device), each a
@@ -9426,6 +9542,7 @@ mod tests {
             vb: None,
             vb_classify: None,
             hzb_null: null_texture(),
+            sv0_term_null: null_texture(),
             hzb: None,
             hzb_arm: false,
             extent: VkExtent2D::default(),
@@ -9537,6 +9654,7 @@ mod tests {
             vb: None,
             vb_classify: None,
             hzb_null: null_texture(),
+            sv0_term_null: null_texture(),
             hzb: None,
             hzb_arm: false,
             extent: VkExtent2D::default(),

@@ -48,9 +48,20 @@ layout variant (fused/classified × tex × froxel × split — ALL of them, the 
 persistent 1×1 white `R8G8` when disarmed and re-pointed to the real target at sync time — the AA
 `present_set` re-point precedent, so recording code never branches on arming. Gates: 24 pins hold
 (the OFF branch is untaken arithmetic); **pre-registered byte budget: each producer grows ≤ 1 KiB**
-(the inline grew each by +10128 B — this is the number that killed it); **the dark-dispatch ABBA
-A/B re-run with a pre-registered budget of one timer grid-step (1024 ns)** — the gate the inline
-never had, now standing where its absence cost a stage.
+(the inline grew each by +10128 B — this is the number that killed it); **the dark-dispatch A/B
+with a pre-registered budget of one timer grid-step (1024 ns)**.
+
+> **The 1024 ns budget was REFUTED by instrument physics at execution and is AMENDED, with the
+> measurement recorded.** The S5-null collector that resolved the inline's +17.4 µs was deleted at
+> profiling rung 7; the surviving instrument is cross-PROCESS (per-arm runs over the artifact
+> channel), and its own null controls measure a resolution of ~24.6 µs on the small static
+> `vb_mesh` fixture (per-arm spreads 24 576 / 15 360 ns over 3–4 legs) and ~198 µs on `vb_lab` —
+> a 1 024 ns budget is unmeasurable by two orders of magnitude, and adjudicating it anyway would
+> repeat the S1.5 lesson (a gate that measures its own resolution). The amended gate, clause-5
+> style: **the delta must not exceed the null-certified resolution.** Adjudicated 2026-08-20:
+> median delta A−B = **−2 048 ns** (term arm faster; i.e., indistinguishable from zero) against
+> the 24 576 ns certified resolution — PASS. The byte census (+656…772 B per producer, 13–15×
+> under the inline) is the deterministic half of the same claim.
 
 **DP3 — arm.** Re-land the four `LightingConfig` fields, `sync_sv0_light_gate` (request &&
 armable, clamp monotone downward — S4's corrected form, NOT the plan snippet S4 refuted), and the

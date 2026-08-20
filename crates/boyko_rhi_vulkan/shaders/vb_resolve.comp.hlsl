@@ -153,6 +153,17 @@ static const float3 LIGHT_UP = float3(0.0, 1.0, 0.0);
 [[vk::binding(9, 0)]] StructuredBuffer<uint>  LightIndexList;  // flat surviving-index slices
 #endif
 
+#ifndef VB_SV0_KILL
+// VB-SV0 DP2 (`docs/VB-SV0-SDF-SHADOW-PLAN.md` Rev 10): the dedicated `sdf_mesh_shadow` pass's
+// R8G8 term — `R` shadow visibility, `G` contact AO, both with 1.0 = "no effect". Bound to a
+// persistent 1×1 white dummy whenever the pass is disarmed (the AA `present_set` re-point
+// precedent), so recording never branches on arming. The march itself lives in the PASS: carrying
+// it compiled into this tail cost ~+75% of this dispatch DARK (measured, reverted at `13f1c9a3`),
+// and two `.Load`s behind a wave-uniform gate is the whole footprint the term is allowed here —
+// `-D VB_SV0_KILL=1` re-produces the term-free module byte-for-byte for the dark-cost A/B.
+[[vk::binding(10, 0)]] Texture2D<float2> gSdfTerm : register(t10);
+#endif
+
 // --- Set 1 (shadow): a VERBATIM copy of `forward_opaque.fs.hlsl`'s own Set-1 block, so the SAME
 // physical descriptor set (`ForwardTargets::set1`) binds to both the Forward-family raster/
 // compute passes and this one.
@@ -286,6 +297,23 @@ void main(uint3 tid : SV_DispatchThreadID) {
     // armed under VB v1 (`cap_vb_v1_consumers`) -- `ao_final` stays the Deferred-mesh-pixel
     // constant `1.0`.
     float ao_final = 1.0;
+#ifndef VB_SV0_KILL
+    // VB-SV0 DP2: the 2-bit runtime gate (light-header word 7, bits 5..6), hoisted ONCE per
+    // pixel -- a wave-uniform header read. Mode 0 takes neither branch and this tail is
+    // arithmetic-identical to its term-free form; the two halves arm INDEPENDENTLY (bit 5
+    // shadow, bit 6 AO), so each combine gates on its own bit.
+    uint sv0_mode = load_vb_sdf_mesh_mode(LightBuf);
+    float2 sv0_term = float2(1.0, 1.0);
+    if (sv0_mode != 0u) {
+        sv0_term = gSdfTerm.Load(int3((int)px, (int)py, 0));
+    }
+    if ((sv0_mode & VB_SDF_MESH_AO_BIT) != 0u) {
+        // `min`-combined into `ao_final` -- the SAME routing Deferred uses for the marcher's
+        // mesh-AO lane, so `spec_ao` below inherits it through the existing formula rather than
+        // through a second, forkable expression.
+        ao_final = min(ao_final, sv0_term.g);
+    }
+#endif
     float spec_ao = saturate(pow(NoV + ao_final, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao_final);
 
     LightHeader H = load_light_header(LightBuf);
@@ -312,6 +340,17 @@ void main(uint3 tid : SV_DispatchThreadID) {
                     float view_z = dot(cam_forward.xyz, P - cam_eye.xyz);
                     vis = min(vis, csm_visibility(P, n, view_z, NoL));
                 }
+#ifndef VB_SV0_KILL
+                // VB-SV0 DP2: `min`-combine the dedicated pass's shadow half into the PRIMARY
+                // directional's `vis` beside the CSM combine -- and deliberately OUTSIDE the
+                // `csm_mode` `if`, because the two shadow sources arm independently and an
+                // SDF-shadow scene need not also run cascades. The pass computed this term for
+                // exactly this light (the first `l0a` directional), so the pairing is by
+                // construction, not by convention.
+                if ((sv0_mode & VB_SDF_MESH_SHADOW_BIT) != 0u) {
+                    vis = min(vis, sv0_term.r);
+                }
+#endif
             }
             PbrDirectTerms bsdf = eval_pbr_direct_bsdf(surf, v, l, NoL);
             lit_direct += (bsdf.diffuse + bsdf.specular) * (NoL * vis) * L.color;

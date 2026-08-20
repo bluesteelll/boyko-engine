@@ -196,6 +196,13 @@ Texture2D<uint2> gVbId : register(t5);
 // (Ã‚Â§0), but the descriptor stays declared for the ONE shared `vb_layout0` layout object.
 #include "vb_classify_common.hlsli"
 
+#ifndef VB_SV0_KILL
+// VB-SV0 DP2: the dedicated `sdf_mesh_shadow` pass's R8G8 term — a VERBATIM mirror of
+// `vb_resolve.comp.hlsl`'s own binding-10 block (that block's doc carries the ~+75%/`13f1c9a3`
+// argument for why the march is a PASS and this is two `.Load`s).
+[[vk::binding(10, 0)]] Texture2D<float2> gSdfTerm : register(t10);
+#endif
+
 #ifdef TEXTURED
 // Set 3 (`#if TEXTURED` ONLY): the shared bindless texture-array table -- the SAME layout
 // OBJECT `vb_shade.comp.hlsl`'s own TEXTURED Set 3 binds. A runtime-sized `Texture2D[]`
@@ -459,6 +466,21 @@ void main(uint3 tid : SV_DispatchThreadID) {
         float ssao_blurred = gSsao.Load(int2(px, py)).r;
         ao_final = min(ao_final, ssao_blurred);
     }
+#ifndef VB_SV0_KILL
+    // VB-SV0 DP2: the 2-bit runtime gate, hoisted ONCE per pixel — a VERBATIM mirror of
+    // `vb_resolve.comp.hlsl`'s own block (per-bit independence and the mode-0 identity argument
+    // live there). Placed AFTER the SSAO combine to keep the split's stated AO ordering idiom
+    // ("texture AO first, SSAO `min`-combine after", now SV0 after that) — `min` is exact and
+    // order-independent, so the placement is readability, not arithmetic.
+    uint sv0_mode = load_vb_sdf_mesh_mode(LightBuf);
+    float2 sv0_term = float2(1.0, 1.0);
+    if (sv0_mode != 0u) {
+        sv0_term = gSdfTerm.Load(int3((int)px, (int)py, 0));
+    }
+    if ((sv0_mode & VB_SDF_MESH_AO_BIT) != 0u) {
+        ao_final = min(ao_final, sv0_term.g);
+    }
+#endif
     float spec_ao = saturate(pow(NoV + ao_final, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao_final);
 
     LightHeader H = load_light_header(LightBuf);
@@ -496,6 +518,15 @@ void main(uint3 tid : SV_DispatchThreadID) {
                     vis = min(vis, csm_visibility(P, n, view_z, NoL));
 #endif
                 }
+#ifndef VB_SV0_KILL
+                // VB-SV0 DP2: the shadow half, beside the CSM/denoised combine and OUTSIDE its
+                // `if` — a VERBATIM mirror of `vb_resolve.comp.hlsl`'s own block (the
+                // independence and by-construction pairing arguments live there). Composes with
+                // the HWRT denoised arm the same way it composes with CSM: one more `min` source.
+                if ((sv0_mode & VB_SDF_MESH_SHADOW_BIT) != 0u) {
+                    vis = min(vis, sv0_term.r);
+                }
+#endif
             }
             PbrDirectTerms bsdf = eval_pbr_direct_bsdf(surf, v, l, NoL);
             lit_direct += (bsdf.diffuse + bsdf.specular) * (NoL * vis) * L.color;
