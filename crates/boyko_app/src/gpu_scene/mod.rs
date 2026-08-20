@@ -744,6 +744,10 @@ fn to_gpu_resolved_render_path(r: &boyko_render::ResolvedRenderPath) -> Resolved
         thin_aux: r.thin_aux.bits(),
         shadow: r.shadow.bits(),
         froxel_light_cull: r.froxel_light_cull,
+        // VB-SV0 rung S4 (code-review P1-a): the resolver's OWN answer, called here rather than
+        // re-derived downstream — `boyko_rhi_vulkan` cannot name `ShadowSources`, so a recompute
+        // there would have to hardcode the `SDF_SOFT_MARCH` bit value.
+        vb_sdf_mesh_armable: r.vb_sdf_mesh_armable(),
     }
 }
 

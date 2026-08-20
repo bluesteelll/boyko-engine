@@ -6000,6 +6000,7 @@ fn resolved_render_path_gpu_from(r: &boyko_render::ResolvedRenderPath) -> Resolv
         thin_aux: r.thin_aux.bits(),
         shadow: r.shadow.bits(),
         froxel_light_cull: r.froxel_light_cull,
+        vb_sdf_mesh_armable: r.vb_sdf_mesh_armable(),
     }
 }
 

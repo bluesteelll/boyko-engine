@@ -26,7 +26,7 @@ use boyko_render::{
     RenderPathPlugin, SdfPlugin, ShadowAtlasPlugin, ShadowDenoisePlugin, SsaoPlugin,
     add_gpu_transform_pack, gather_mesh_draws, gather_shadow_casters, reduce_caster_bounds,
     snap_apply, sync_cluster_light_gate, sync_csm_light_gate, sync_punctual_light_gate,
-    sync_ssao_light_gate,
+    sync_ssao_light_gate, sync_sv0_light_gate,
 };
 use boyko_scene::{CameraPlugin, FixedSet};
 
@@ -616,6 +616,25 @@ impl Plugin for EnginePlugins {
             // reads `SsaoConfig` directly (no `ResolvedSsao`/caster dependency — mirrors
             // `sync_ddgi_light_gate`'s shape), so it carries no ordering edge here.
             b.add_system(sync_ssao_light_gate);
+            // VB-SV0 rung S4: the SDF-on-mesh header-gate bridge — reads the boot-committed
+            // `ResolvedRenderPath`, RESOLVES `LightingConfig`'s two SV0 request bits against
+            // `vb_sdf_mesh_armable()`, and publishes the pair into the `_armed` fields the header
+            // packer reads. Same cross-plugin registration rationale as the gates above (it
+            // bridges `RenderPathPlugin`'s resolved carrier and `LightingPlugin`'s
+            // `LightingConfig`). The resolve is monotone downward — `request && capability` — so
+            // a world that never sets the request is untouched.
+            //
+            // It DOES carry an ordering edge (code-review P2-b), for the reason
+            // `sync_cluster_light_gate` below carries one and `sync_ssao_light_gate` above does
+            // not. Those two publish a bit that FOLLOWS an owner-set config, so an unordered fold
+            // packs a value one frame late and self-corrects. This gate publishes the result of a
+            // CAPABILITY resolve against a request the owner may set at any time: run after the
+            // fold, the first armed frame packs the PRE-resolve `_armed` pair — the wrong state,
+            // not a late one. `[vb_both_sdf]`-shaped fixtures dump a small fixed number of
+            // frames, so "one frame" is a frame that can be the measured one. `LightCollectSet`
+            // is the same by-name cross-plugin seam `sync_cluster_light_gate` uses (see its own
+            // comment below for why `collect_lights`' `SystemKey` is not nameable here).
+            b.add_system(sync_sv0_light_gate).before_set(LightCollectSet);
             // VB-P1b-0: the L1 cluster header-gate bridge — reads `ClusterConfig` directly (no
             // caster/resolved-carrier dependency, the SAME "no edge" shape `sync_ssao_light_gate`
             // above carries for ITS OWN inputs). `ClusterConfig` is seeded by THIS fn (mirrors

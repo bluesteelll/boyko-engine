@@ -1494,6 +1494,24 @@ pub struct ResolvedRenderPathGpu {
     /// (`consumers.clusters_wanted && path == VisibilityBuffer`), and VB-P1b's opt-in scenes arm
     /// it. This COPY has no reader; see the struct doc for the route the arm actually takes.
     pub froxel_light_cull: bool,
+    /// VB-SV0 rung S4 (code-review P1-a): `ResolvedRenderPath::vb_sdf_mesh_armable()` — whether
+    /// this boot's light header can carry a non-zero `sv0_mode` at all.
+    ///
+    /// # Why a copied ANSWER and not the terms it is computed from
+    ///
+    /// This crate could recompute it (`path`, `mesh_leg` and `shadow` are all right here), but
+    /// that would spell `ShadowSources::SDF_SOFT_MARCH`'s bit VALUE a second time, in a crate that
+    /// cannot name the flag type — a mirror of exactly the kind this campaign has had to un-drift
+    /// twice. `boyko_app::gpu_scene`'s conversion seam calls the ONE predicate and copies its
+    /// result, so there is nothing here to drift from.
+    ///
+    /// # Its consumer
+    ///
+    /// `record_vb`'s split branch `debug_assert!`s that no `_hwrt` lit producer is ever bound on a
+    /// boot where this is `true` — the record-site half of the argument that variant-matrix rows
+    /// 9-10 are structurally unarmable. Nothing else reads it; it emits no Vulkan command and is
+    /// not uploaded, so it cannot move a rendered byte.
+    pub vb_sdf_mesh_armable: bool,
 }
 
 /// Code review P2-5: the `RenderPath::VisibilityBuffer` discriminant
@@ -1534,6 +1552,7 @@ impl Default for ResolvedRenderPathGpu {
             thin_aux: 0,
             shadow: 0,
             froxel_light_cull: false,
+            vb_sdf_mesh_armable: false,
         }
     }
 }
