@@ -1,0 +1,5 @@
+error: duplicate hook `on_add`
+  --> tests/ui/duplicate_hook.rs:11:9
+   |
+11 |         on_add = g,
+   |         ^^^^^^

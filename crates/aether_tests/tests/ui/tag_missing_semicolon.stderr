@@ -1,0 +1,5 @@
+error: a tag declaration ends with `;` (tags have no body — a component with fields wants `component`)
+ --> tests/ui/tag_missing_semicolon.rs:5:16
+  |
+5 |     tag Player { }
+  |                ^

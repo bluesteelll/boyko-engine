@@ -1,0 +1,5 @@
+error: unknown tag modifier `dense`; the only one is `bitset` (the EnableTag backend)
+ --> tests/ui/bad_tag_modifier.rs:5:16
+  |
+5 |     tag Frozen(dense);
+  |                ^^^^^

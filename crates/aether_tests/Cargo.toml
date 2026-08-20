@@ -13,6 +13,7 @@ edition = "2024"
 aether = { path = "../aether" }
 boyko-ecs = { path = "../boyko_ecs" }
 boyko-macros = { path = "../boyko_macros" }
+trybuild = "1"
 
 [lints]
 workspace = true

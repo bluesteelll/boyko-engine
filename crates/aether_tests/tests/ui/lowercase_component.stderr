@@ -1,0 +1,5 @@
+error: component names are UpperCamelCase — they expand to types (rename `health` to `Health`)
+ --> tests/ui/lowercase_component.rs:5:15
+  |
+5 |     component health { hp: f32 }
+  |               ^^^^^^

@@ -1,0 +1,5 @@
+error: unknown construct `compnent`; this aether supports: component, tag, bundle, system, event, machine, material, scene (did you mean `component`?)
+ --> tests/ui/unknown_construct.rs:5:5
+  |
+5 |     compnent Health { hp: f32 }
+  |     ^^^^^^^^
