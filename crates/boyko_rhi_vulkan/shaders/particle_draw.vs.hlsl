@@ -21,10 +21,24 @@
 // multiplication, so the corner placement is pure multiply/add. R9 is closed by construction:
 // `instanceCount` is the sim's live survivor count, never CAP.
 //
+// # The `DEPTH_LINEAR` variant (the Deferred path's ONLY arm)
+//
+// Deferred's depth buffer does not hold hardware depth: `gbuffer_mrt.fs.hlsl` OVERWRITES it with
+// the marcher-aligned euclidean encode. The projection that path hands this VS is the marcher's,
+// whose `row2 == row3` pins `SV_Position.z` to exactly 1.0 for every vertex, so the projective
+// depth this stage emits is meaningless there and `VK_COMPARE_OP_LESS` fails on every fragment --
+// including over the cleared sky. `-D DEPTH_LINEAR` forwards `eye_rel` and `cam_mode` so the
+// fragment can write the depth buffer's OWN encode through `SV_Depth`. No host-side matrix can
+// substitute: `z_ndc` is a ratio of affine functions of the world position and a euclidean norm is
+// not (`docs/PARTICLES-PLAN.md`, the P0 live-fire erratum).
+//
+// The three reverse-Z paths take the base compile and are byte-unperturbed by the define.
+//
 // # Compile (offline + hermetic; committed `.spv` is byte-gated)
 //
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T vs_6_0 -E main \
 //       -fspv-target-env=vulkan1.3 particle_draw.vs.hlsl -Fo particle_draw.vs.spv
+//   (DEPTH_LINEAR variant: add `-D DEPTH_LINEAR=1` -Fo particle_draw_dlin.vs.spv)
 //
 // # Set / binding vocabulary -- MIRRORS the host `PARTICLE_LAYOUT_ENTRIES` table
 //
@@ -61,7 +75,9 @@ struct ParticleRender {
 [[vk::binding(0, 0)]] StructuredBuffer<ParticleRender> p_render : register(t0);
 
 // binding 1: the extent/camera UNIFORM block -- the SAME 80-byte shape every other consumer
-// declares. This pass reads `cam_right`/`cam_up` (the billboard basis) and nothing else.
+// declares. This pass reads `cam_right`/`cam_up` (the billboard basis), and under DEPTH_LINEAR
+// also `cam_eye`/`camera_mode` -- the SAME `ViewUniform::camera_pos` the Deferred raster push
+// carries at its own bytes [64,80), so the two eyes are one number.
 [[vk::binding(1, 0)]] cbuffer Camera {
     uint   count;
     uint   img_w_raw;
@@ -76,11 +92,20 @@ struct ParticleRender {
 // The RGBA8 -> UNORM scale. A constant EXPRESSION, folded by DXC, so no divide reaches the module.
 static const float UNORM_SCALE = 1.0 / 255.0;
 
+#ifdef DEPTH_LINEAR
+// `boyko_rhi_vulkan::compute::CAM_MODE_PERSPECTIVE`, mirrored (a generator input, not typed here).
+static const uint CAM_MODE_PERSPECTIVE = 1u;
+#endif
+
 struct VsOut {
     float4 position  : SV_Position;
     float2 uv        : TEXCOORD0;
     nointerpolation float4 color : COLOR0;
     nointerpolation uint tex_index : TEXIDX;
+#ifdef DEPTH_LINEAR
+    float3 eye_rel   : WORLDDIST;   // cam_eye.xyz - world position (perspective-correct)
+    float  cam_mode  : CAMMODE;     // 0 = ortho, 1 = perspective
+#endif
 };
 
 // === GENERATED particle_billboard_corner BEGIN ===
@@ -127,5 +152,12 @@ VsOut main(uint vid : SV_VertexID, uint iid : SV_InstanceID) {
                      (float)((r.color_rgba8 >> 16u) & 255u),
                      (float)((r.color_rgba8 >> 24u) & 255u)) * UNORM_SCALE;
     o.tex_index = r.tex_index;
+#ifdef DEPTH_LINEAR
+    // The two lanes the Deferred fragment's `SV_Depth` needs, and NOTHING else: the encode itself
+    // lives in the fragment because the depth of a billboard's INTERIOR is not an affine function
+    // of its corners' depths -- only the perspective-correct `eye_rel` is.
+    o.eye_rel = cam_eye.xyz - world;
+    o.cam_mode = (camera_mode == CAM_MODE_PERSPECTIVE) ? 1.0 : 0.0;
+#endif
     return o;
 }

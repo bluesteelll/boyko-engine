@@ -5746,6 +5746,34 @@ embed_spirv! {
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_draw.fs.spv")
 }
 
+embed_spirv! {
+    /// Particles P2: the `-D DEPTH_LINEAR` VERTEX stage (`shaders/particle_draw.vs.hlsl`), the
+    /// DEFERRED path's only arm.
+    ///
+    /// Interface-identical to [`PARTICLE_DRAW_VS_SPV`] — the same two set-0 bindings, the same
+    /// [`PARTICLE_DRAW_PUSH_BYTES`] `VERTEX` range, so the SAME pipeline layout object serves both
+    /// (the `deferred_pbr_wrap` precedent). The delta is two extra interpolants: `eye_rel`
+    /// (`cam_eye.xyz - world`, perspective-correct) and `cam_mode`, which
+    /// [`PARTICLE_DRAW_DLIN_FS_SPV`] needs to write the depth buffer's own encode.
+    PARTICLE_DRAW_DLIN_VS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_draw_dlin.vs.spv")
+}
+
+embed_spirv! {
+    /// Particles P2: the `-D DEPTH_LINEAR` FRAGMENT stage (`shaders/particle_draw.fs.hlsl`).
+    ///
+    /// Writes `SV_Depth = (cam_mode > 0.5) ? length(eye_rel) / MESH_DEPTH_T_MAX : position.z` —
+    /// term for term `gbuffer_mrt.fs.hlsl`'s own `SV_Depth`, because on Deferred that fragment IS
+    /// what the depth buffer holds, and the particle VS's projective `SV_Position.z` is pinned to
+    /// 1.0 by the marcher matrix (`row2 == row3`). Same set-1 bindings and no push range, so the
+    /// layout is unchanged.
+    ///
+    /// COST: an `SV_Depth` write disables early-Z on this leg (see the shader header). The three
+    /// reverse-Z paths bind [`PARTICLE_DRAW_FS_SPV`] and keep it.
+    PARTICLE_DRAW_DLIN_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_draw_dlin.fs.spv")
+}
+
 /// Particles P0: `particle_kickoff`'s push block — `{ uint requested_spawn; uint capacity }`.
 ///
 /// ⚠️ **NOT part of the shared `COMPUTE_PUSH_CONSTANT_RANGE_BYTES` `max`, deliberately.** The
@@ -5850,6 +5878,19 @@ pub fn particle_draw_vs_spirv() -> &'static [u32] {
 #[inline]
 pub fn particle_draw_fs_spirv() -> &'static [u32] {
     PARTICLE_DRAW_FS_SPV.as_words()
+}
+
+/// Particles P2: the `-D DEPTH_LINEAR` billboard-expansion VERTEX SPIR-V. See
+/// [`PARTICLE_DRAW_DLIN_VS_SPV`]'s doc.
+#[inline]
+pub fn particle_draw_dlin_vs_spirv() -> &'static [u32] {
+    PARTICLE_DRAW_DLIN_VS_SPV.as_words()
+}
+
+/// Particles P2: the `-D DEPTH_LINEAR` FRAGMENT SPIR-V. See [`PARTICLE_DRAW_DLIN_FS_SPV`]'s doc.
+#[inline]
+pub fn particle_draw_dlin_fs_spirv() -> &'static [u32] {
+    PARTICLE_DRAW_DLIN_FS_SPV.as_words()
 }
 
 #[cfg(test)]

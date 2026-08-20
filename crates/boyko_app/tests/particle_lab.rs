@@ -152,14 +152,16 @@ fn particle_lab_screenshot_dump() {
         "no particles reached `lit`: {white_in_fan} near-white pixels in the emitter's screen \
          region, floor {MIN_PARTICLE_PIXELS}. The subsystem was ARMED, so this is the armed \
          pipeline failing silently.{}",
-        if particle_scene::on_known_particle_free_path() {
-            "\n         THIS RUN IS ON THE DEFERRED PATH, where that is the KNOWN defect and not \
-             a new one: the projection the runner hands the particle draw there has row2 == row3, \
-             so every billboard vertex rasterizes at SV_Position.z == 1.0 against a depth buffer \
-             holding euclidean length(cam_eye - P)/T_MAX under VK_COMPARE_OP_LESS, and every \
-             fragment fails. See `particle_scene::on_known_particle_free_path` for the full \
-             derivation and why no host-side matrix can fix it. Re-run with \
-             BOYKO_RENDER_PATH=vb|forward|forwardplus to exercise the working arms."
+        if particle_scene::on_deferred_depth_encode_path() {
+            "\n         THIS RUN IS ON THE DEFERRED PATH, whose depth buffer holds the G-buffer \
+             fragment's euclidean length(cam_eye - P)/MESH_DEPTH_T_MAX rather than hardware depth \
+             — the billboards' own SV_Position.z is pinned to 1.0 there by the marcher matrix \
+             (row2 == row3), so they render ONLY through the `-D DEPTH_LINEAR` shader pair whose \
+             fragment writes that same encode. Suspect the DEPTH CONTRACT first: \
+             `particle_draw_spirv_for` (the pair) and `particle_depth_compare_for` (the op) are \
+             two answers off one `deferred_path` predicate, and either half regressing reproduces \
+             EXACTLY this symptom. `particle_edsl_sync` pins the encode itself. Re-run with \
+             BOYKO_RENDER_PATH=vb|forward|forwardplus to compare against the reverse-Z arms."
         } else {
             " Check the sim's instanceCount publish and the draw's declare/record parity before \
              touching the tuning — the gate-#7 readback (`particle_counters_readback`) separates \

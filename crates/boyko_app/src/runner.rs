@@ -786,9 +786,15 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // absence is what the whole 0%-gate rests on, and it is structural rather than a flag test on
     // a hot path.
     //
-    // The depth compare op is frozen HERE, once, from the resolved render path: `LESS` under
-    // Deferred (custom-linear depth) and `GREATER` under the three reverse-Z paths. Getting it
-    // wrong inverts occlusion and no image gate would see it.
+    // The whole DEPTH CONTRACT is frozen HERE, once, from the resolved render path — both halves,
+    // off this one `deferred_path` predicate:
+    //   * the compare op — `LESS` under Deferred (custom-linear depth), `GREATER` under the three
+    //     reverse-Z paths. Getting it wrong inverts occlusion and no image gate would see it;
+    //   * the draw's SHADER PAIR — the `-D DEPTH_LINEAR` variant under Deferred, whose fragment
+    //     writes that path's own euclidean depth encode through `SV_Depth`, and the base pair
+    //     elsewhere. Getting THAT wrong renders no particles at all on Deferred (the P0 live-fire
+    //     erratum: the marcher projection pins every billboard vertex to `SV_Position.z == 1.0`).
+    // Both are pinned by `gpu_scene::particle`'s own unit tests; only the predicate travels.
     if let Some(particle_config) = app.world().try_resource::<boyko_render::ParticleConfig>()
         && particle_config.enabled()
     {

@@ -9,13 +9,19 @@
 //!    determinism harness compares a readback against — silently, because the same shader still
 //!    compiles and still draws plausible particles.
 //! 2. **`particle_*_spv_byte_identical`** — each committed `.spv` is the re-DXC of its own source
-//!    under the frozen recipe pinned in that source's header. SKIPS (with an `eprintln`) when no
-//!    `dxc` resolves; the byte gate is only as hermetic as the pinned VulkanSDK 1.4.350.0
-//!    toolchain that produced the artifacts.
+//!    under the frozen recipe pinned in that source's header. SEVEN artifacts from five sources:
+//!    the two draw stages each carry the `-D DEPTH_LINEAR` variant the Deferred path binds, and
+//!    the base rows are the other half of that claim (the `#ifdef` must leave the undefined
+//!    compile byte-frozen). SKIPS (with an `eprintln`) when no `dxc` resolves; the byte gate is
+//!    only as hermetic as the pinned VulkanSDK 1.4.350.0 toolchain that produced the artifacts.
 //! 3. **The opcode census** — plan gate #14's artifact-level claims: the workgroup widths, the
 //!    exact `OpAtomicIAdd` population of `particle_sim`, zero `OpAtomicUMax` anywhere, zero
 //!    atomics in `particle_emit`, and zero `OpFDiv` in the module that carries
 //!    `particle_rot_advance`.
+//! 4. **The Deferred depth-encode agreement** — the `DEPTH_LINEAR` fragment's `SV_Depth`
+//!    expression IS `gbuffer_mrt.fs.hlsl`'s, term for term, and the two shaders' `VsOut` is one
+//!    text. That producer is the sole writer of the depth image this draw tests against, so an
+//!    encode that drifted would mis-occlude with nothing in the image to say so.
 //!
 //! # Why gate #14's `OpFDiv` clause is asserted MODULE-WIDE
 //!
@@ -305,107 +311,238 @@ fn substep_ceiling_is_the_shader_side_hang_guard() {
 #[test]
 fn every_particle_shader_pins_its_own_frozen_recipe() {
     // A committed `.spv` is only gated if the recipe the gate re-runs is the recipe the header
-    // claims. Pinning the `-T` profile per file keeps those one text: a header that drifted to a
-    // different stage would make the byte gate below assert against an artifact nobody builds.
-    for (file, profile) in PARTICLE_MODULES {
-        let src = read_shader(&format!("{file}.hlsl"));
+    // claims. The BASE row is pinned as its whole two-line text rather than by three substring
+    // probes: that single assertion carries the profile, the target env, the source, the output
+    // artifact AND the absence of any `-O`/`-D` — a header that drifted in any of those makes the
+    // byte gate below assert against an artifact nobody builds.
+    for a in PARTICLE_ARTIFACTS {
+        let src = read_shader(&format!("{}.hlsl", a.hlsl_stem));
+        if a.defines.is_empty() {
+            let recipe = format!(
+                "//   C:\\VulkanSDK\\1.4.350.0\\Bin\\dxc.exe -spirv -T {} -E main \\\n\
+                 //       -fspv-target-env=vulkan1.3 {}.hlsl -Fo {}.spv",
+                a.profile, a.hlsl_stem, a.spv_stem
+            );
+            assert!(
+                src.contains(&recipe),
+                "{}.hlsl must pin its frozen dxc recipe VERBATIM in its own header (plan D12 — no \
+                 -O, no -D on the base row):\n--- expected ---\n{recipe}",
+                a.hlsl_stem
+            );
+        } else {
+            // A variant row's recipe is the base one PLUS its defines and its own `-Fo`. Pinned as
+            // one line so the define set and the artifact it produces cannot drift apart.
+            let defines = a.defines.join(" ");
+            let line = format!("//   (DEPTH_LINEAR variant: add `{defines}` -Fo {}.spv)", a.spv_stem);
+            assert!(
+                src.contains(&line),
+                "{}.hlsl must pin the {}.spv variant recipe in its own header:\n--- expected ---\n\
+                 {line}",
+                a.hlsl_stem,
+                a.spv_stem
+            );
+        }
         assert!(
-            src.contains(&format!("-T {profile} -E main")),
-            "{file}.hlsl must pin its frozen dxc recipe (`-T {profile} -E main`) in its own header"
-        );
-        assert!(
-            src.contains("-fspv-target-env=vulkan1.3"),
-            "{file}.hlsl's frozen recipe must target vulkan1.3"
-        );
-        assert!(
-            !src.contains(" -O3") && !src.contains(" -D "),
-            "{file}.hlsl's frozen recipe must carry no -O and no -D (plan D12)"
+            !src.contains(" -O3"),
+            "{}.hlsl's frozen recipes must carry no -O (plan D12)",
+            a.hlsl_stem
         );
     }
 }
 
 // ---- Layer 2: the re-DXC byte gate ----------------------------------------------------------
 
-/// The five committed particle modules and the DXC target profile each one's frozen recipe names.
-const PARTICLE_MODULES: [(&str, &str); 5] = [
-    ("particle_kickoff.comp", "cs_6_0"),
-    ("particle_emit.comp", "cs_6_0"),
-    ("particle_sim.comp", "cs_6_0"),
-    ("particle_draw.vs", "vs_6_0"),
-    ("particle_draw.fs", "ps_6_0"),
+/// One committed particle artifact: which source builds it, under which profile, with which
+/// defines.
+///
+/// Seven artifacts from five sources — the two draw stages each carry the `-D DEPTH_LINEAR`
+/// variant the Deferred path binds (`docs/SHADER-VARIANT-MANIFEST.md`). The table is the ONE place
+/// that mapping is written; every gate below walks it rather than re-listing stems.
+#[derive(Clone, Copy)]
+struct ParticleArtifact {
+    /// The `.hlsl` stem (no extension), relative to the shaders directory.
+    hlsl_stem: &'static str,
+    /// The DXC target profile its frozen recipe names.
+    profile: &'static str,
+    /// The `-D` flags the recipe adds, VERBATIM and in order. Empty for a base row.
+    defines: &'static [&'static str],
+    /// The `.spv` stem the recipe writes — equal to `hlsl_stem` on a base row.
+    spv_stem: &'static str,
+}
+
+/// The `-D` flag pair for the Deferred fragment-depth variant, spelled once.
+const DEPTH_LINEAR_DEFINES: &[&str] = &["-D", "DEPTH_LINEAR=1"];
+
+/// Every committed particle artifact.
+const PARTICLE_ARTIFACTS: [ParticleArtifact; 7] = [
+    ParticleArtifact {
+        hlsl_stem: "particle_kickoff.comp",
+        profile: "cs_6_0",
+        defines: &[],
+        spv_stem: "particle_kickoff.comp",
+    },
+    ParticleArtifact {
+        hlsl_stem: "particle_emit.comp",
+        profile: "cs_6_0",
+        defines: &[],
+        spv_stem: "particle_emit.comp",
+    },
+    ParticleArtifact {
+        hlsl_stem: "particle_sim.comp",
+        profile: "cs_6_0",
+        defines: &[],
+        spv_stem: "particle_sim.comp",
+    },
+    ParticleArtifact {
+        hlsl_stem: "particle_draw.vs",
+        profile: "vs_6_0",
+        defines: &[],
+        spv_stem: "particle_draw.vs",
+    },
+    ParticleArtifact {
+        hlsl_stem: "particle_draw.fs",
+        profile: "ps_6_0",
+        defines: &[],
+        spv_stem: "particle_draw.fs",
+    },
+    ParticleArtifact {
+        hlsl_stem: "particle_draw.vs",
+        profile: "vs_6_0",
+        defines: DEPTH_LINEAR_DEFINES,
+        spv_stem: "particle_draw_dlin.vs",
+    },
+    ParticleArtifact {
+        hlsl_stem: "particle_draw.fs",
+        profile: "ps_6_0",
+        defines: DEPTH_LINEAR_DEFINES,
+        spv_stem: "particle_draw_dlin.fs",
+    },
 ];
 
-/// Re-DXCs `<stem>.hlsl` under the EXACT frozen recipe its header pins (`-spirv -T <profile> -E
-/// main -fspv-target-env=vulkan1.3`, no `-O`, no `-D`) into a fresh temp `.spv` and returns the
-/// bytes. Never overwrites a committed artifact.
-fn redxc(dxc: &PathBuf, dir: &PathBuf, stem: &str, profile: &str) -> Vec<u8> {
-    let out_spv = std::env::temp_dir().join(format!("{stem}.spv.redxc.spv"));
+/// Re-DXCs one [`ParticleArtifact`] under the EXACT frozen recipe its header pins (`-spirv -T
+/// <profile> -E main -fspv-target-env=vulkan1.3` + the row's defines, no `-O`) into a fresh temp
+/// `.spv` and returns the bytes. Never overwrites a committed artifact.
+fn redxc(dxc: &PathBuf, dir: &PathBuf, a: ParticleArtifact) -> Vec<u8> {
+    let out_spv = std::env::temp_dir().join(format!("{}.spv.redxc.spv", a.spv_stem));
     let mut cmd = Command::new(dxc);
     cmd.current_dir(dir)
-        .args(["-spirv", "-T", profile, "-E", "main"]);
-    cmd.args([
-        "-fspv-target-env=vulkan1.3",
-        &format!("{stem}.hlsl"),
-        "-Fo",
-    ])
-    .arg(&out_spv);
+        .args(["-spirv", "-T", a.profile, "-E", "main"]);
+    cmd.arg("-fspv-target-env=vulkan1.3");
+    // The defines land AFTER the frozen flags and BEFORE the source, the order the header's
+    // "add `-D …`" wording states (`vb_batch_cull_spv_sync`'s own convention).
+    cmd.args(a.defines);
+    cmd.arg(format!("{}.hlsl", a.hlsl_stem)).arg("-Fo").arg(&out_spv);
     let status = cmd
         .status()
         .expect("invariant: dxc was located and must run");
     assert!(
         status.success(),
-        "dxc failed re-compiling {stem}.hlsl under the frozen recipe"
+        "dxc failed re-compiling {}.hlsl under the frozen recipe for {}.spv",
+        a.hlsl_stem,
+        a.spv_stem
     );
     let bytes = std::fs::read(&out_spv).expect("invariant: dxc wrote the re-DXC .spv");
     let _ = std::fs::remove_file(&out_spv); // best-effort tidy
     bytes
 }
 
-/// Asserts one module's committed `.spv` byte-equals its own re-DXC.
-fn assert_spv_byte_identical(stem: &str, profile: &str) {
+#[test]
+fn every_committed_particle_artifact_has_a_row() {
+    // THE CENSUS IS CLOSED, in the direction that actually leaks. Every gate in this file walks
+    // `PARTICLE_ARTIFACTS`, so it can only ever check artifacts it was already told about: the
+    // eighth `.spv` dropped into this directory tomorrow — a second `-D` variant, a second entry
+    // point, a hand-compiled experiment somebody committed — would be embedded, bound and shipped
+    // while passing every test here by being INVISIBLE to them. This walks the directory instead
+    // and fails on the first artifact without a row.
+    //
+    // Discovery is by FILE NAME PREFIX, which is exact for this family: the generator owns every
+    // `particle_*` source in this directory and the plan's D12 makes that ownership the rule.
+    let dir = shaders_dir();
+    let entries = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("cannot enumerate the shader directory {}: {e}", dir.display()));
+    let mut found: Vec<String> = entries
+        .map(|e| e.expect("invariant: the shader directory is readable entry by entry"))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("particle_") && n.ends_with(".spv"))
+        .map(|n| n.trim_end_matches(".spv").to_string())
+        .collect();
+    found.sort();
+
+    let mut enumerated: Vec<String> =
+        PARTICLE_ARTIFACTS.iter().map(|a| a.spv_stem.to_string()).collect();
+    enumerated.sort();
+
+    assert_eq!(
+        found, enumerated,
+        "the committed particle `.spv` set and PARTICLE_ARTIFACTS have diverged. An artifact on \
+         the LEFT and not the right is UNGATED — nothing re-DXCs it, nothing censuses it, and a \
+         stale copy of it would ship silently. One on the RIGHT and not the left means a row \
+         names an artifact nobody builds, so its byte gate asserts against a missing file."
+    );
+}
+
+/// Asserts one artifact's committed `.spv` byte-equals its own re-DXC.
+fn assert_spv_byte_identical(spv_stem: &str) {
+    let a = PARTICLE_ARTIFACTS
+        .into_iter()
+        .find(|a| a.spv_stem == spv_stem)
+        .expect("invariant: every byte gate names a row of PARTICLE_ARTIFACTS");
     let Some(dxc) = find_dxc() else {
-        eprintln!("SKIP {stem}_spv_byte_identical: no dxc on this host");
+        eprintln!("SKIP {spv_stem}_spv_byte_identical: no dxc on this host");
         return;
     };
     let dir = shaders_dir();
-    let committed_path = dir.join(format!("{stem}.spv"));
+    let committed_path = dir.join(format!("{spv_stem}.spv"));
     let committed = std::fs::read(&committed_path)
         .unwrap_or_else(|e| panic!("missing committed {}: {e}", committed_path.display()));
-    let fresh = redxc(&dxc, &dir, stem, profile);
+    let fresh = redxc(&dxc, &dir, a);
     assert!(
         committed == fresh,
-        "{stem}.spv ({} bytes committed, {} bytes fresh) is NOT the re-DXC of its source under \
+        "{spv_stem}.spv ({} bytes committed, {} bytes fresh) is NOT the re-DXC of {}.hlsl under \
          the frozen recipe — either the committed .spv is stale (re-run the recipe in the \
          shader's header and commit it) or the host dxc is not the pinned VulkanSDK 1.4.350.0 \
          toolchain.",
         committed.len(),
         fresh.len(),
+        a.hlsl_stem,
     );
 }
 
 #[test]
 fn particle_kickoff_spv_byte_identical() {
-    assert_spv_byte_identical("particle_kickoff.comp", "cs_6_0");
+    assert_spv_byte_identical("particle_kickoff.comp");
 }
 
 #[test]
 fn particle_emit_spv_byte_identical() {
-    assert_spv_byte_identical("particle_emit.comp", "cs_6_0");
+    assert_spv_byte_identical("particle_emit.comp");
 }
 
 #[test]
 fn particle_sim_spv_byte_identical() {
-    assert_spv_byte_identical("particle_sim.comp", "cs_6_0");
+    assert_spv_byte_identical("particle_sim.comp");
 }
 
 #[test]
 fn particle_draw_vs_spv_byte_identical() {
-    assert_spv_byte_identical("particle_draw.vs", "vs_6_0");
+    assert_spv_byte_identical("particle_draw.vs");
 }
 
 #[test]
 fn particle_draw_fs_spv_byte_identical() {
-    assert_spv_byte_identical("particle_draw.fs", "ps_6_0");
+    assert_spv_byte_identical("particle_draw.fs");
+}
+
+#[test]
+fn particle_draw_dlin_vs_spv_byte_identical() {
+    // The Deferred variant. Its BASE sibling above is the other half of the claim: the `#ifdef`
+    // that adds these two interpolants must leave the undefined compile byte-frozen.
+    assert_spv_byte_identical("particle_draw_dlin.vs");
+}
+
+#[test]
+fn particle_draw_dlin_fs_spv_byte_identical() {
+    assert_spv_byte_identical("particle_draw_dlin.fs");
 }
 
 // ---- Layer 3: the opcode census (plan gate #14) ----------------------------------------------
@@ -580,11 +717,12 @@ fn no_particle_module_carries_an_atomic_max() {
         eprintln!("SKIP no_particle_module_carries_an_atomic_max: no spirv-dis on this host");
         return;
     }
-    for (stem, _) in PARTICLE_MODULES {
-        let c = census_of(stem).expect("spirv-dis resolved above");
+    for a in PARTICLE_ARTIFACTS {
+        let c = census_of(a.spv_stem).expect("spirv-dis resolved above");
         assert_eq!(
             c.op_atomic_umax, 0,
-            "{stem} carries an OpAtomicUMax — plan M1 deleted that mirror; census: {c:?}"
+            "{} carries an OpAtomicUMax — plan M1 deleted that mirror; census: {c:?}",
+            a.spv_stem
         );
     }
 }
@@ -617,7 +755,7 @@ fn particle_modules_declare_the_bindings_they_read() {
         eprintln!("SKIP particle_modules_declare_the_bindings_they_read: no spirv-dis on this host");
         return;
     }
-    let expected: [(&str, &[usize]); 5] = [
+    let expected: [(&str, &[usize]); 7] = [
         // counters, dispatch args, draw args.
         ("particle_kickoff.comp", &[0, 1, 2]),
         // counters, dead, alive_read, particle, emit requests, effects.
@@ -628,6 +766,13 @@ fn particle_modules_declare_the_bindings_they_read() {
         ("particle_draw.vs", &[0, 1]),
         // the bindless texture array + its sampler (set 1).
         ("particle_draw.fs", &[0, 1]),
+        // The Deferred variant is INTERFACE-IDENTICAL to its base — which is exactly why one
+        // pipeline layout serves both. It reads MORE of the camera UBO (`cam_eye`/`camera_mode`
+        // on top of the billboard basis), and reading more of an already-bound block declares no
+        // new binding; a variant that had grown one would need its own layout, and this is where
+        // that shows up.
+        ("particle_draw_dlin.vs", &[0, 1]),
+        ("particle_draw_dlin.fs", &[0, 1]),
     ];
     for (stem, want) in expected {
         let c = census_of(stem).expect("spirv-dis resolved above");
@@ -636,4 +781,115 @@ fn particle_modules_declare_the_bindings_they_read() {
             "{stem}'s declared-and-read binding set moved; census: {c:?}"
         );
     }
+}
+
+// ---- The Deferred depth-encode agreement (the P0 live-fire erratum's discharge) ---------------
+
+/// The one line `gbuffer_mrt.fs.hlsl` encodes the Deferred depth buffer with.
+const GBUFFER_DEPTH_ENCODE_SITE: &str = "output.depth = ";
+
+/// The particle `DEPTH_LINEAR` fragment's own depth write.
+const PARTICLE_DEPTH_ENCODE_SITE: &str = "o.depth = ";
+
+/// Collapses runs of whitespace (including the line breaks a wrapped ternary carries) to single
+/// spaces, so two spellings of ONE expression compare equal while a changed TERM does not.
+fn normalize_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The right-hand side of the first `site` assignment in `src`, through its `;`, whitespace-
+/// normalized.
+fn depth_encode_rhs(src: &str, site: &str) -> String {
+    let start = src
+        .find(site)
+        .unwrap_or_else(|| panic!("the shader no longer contains a `{site}` depth write"))
+        + site.len();
+    let rest = &src[start..];
+    let end = rest
+        .find(';')
+        .expect("a depth-write statement must terminate in a semicolon");
+    normalize_ws(&rest[..end])
+}
+
+#[test]
+fn particle_depth_linear_encodes_exactly_what_deferred_s_depth_buffer_holds() {
+    // THE claim of the DEPTH_LINEAR variant, as a decidable text pin.
+    //
+    // The Deferred path's depth image is written by ONE producer — `gbuffer_mrt.fs.hlsl`'s
+    // `SV_Depth` — and the particle draw only tests against it. Two encodes that agree "in spirit"
+    // are two encodes: a normalizer, an eye or an arm select that drifted on either side puts the
+    // billboards at a different distance from the meshes and NOTHING in the image says so (the
+    // particles simply occlude wrongly, which is precisely the failure gate #12 hands to the eye).
+    //
+    // Both sides read `input.cam_mode` / `input.eye_rel` / `input.position.z` under the same
+    // names, so the two right-hand sides are comparable as TEXT after whitespace normalization —
+    // the strongest form available without compiling both and diffing the instruction stream.
+    let gbuf = read_shader("gbuffer_mrt.fs.hlsl");
+    let particle = read_shader("particle_draw.fs.hlsl");
+    let want = depth_encode_rhs(&gbuf, GBUFFER_DEPTH_ENCODE_SITE);
+    let got = depth_encode_rhs(&particle, PARTICLE_DEPTH_ENCODE_SITE);
+    assert_eq!(
+        got, want,
+        "particle_draw.fs's DEPTH_LINEAR encode has DRIFTED from gbuffer_mrt.fs's — the particle \
+         draw would then depth-test against units nothing writes"
+    );
+
+    // The normalizer's own literal, on both sides and against the host mirror. The raster shaders
+    // `#include` nothing, so this constant genuinely exists three times.
+    let decl = format!(
+        "static const float MESH_DEPTH_T_MAX = {:?};",
+        boyko_rhi_vulkan::compute::MESH_DEPTH_T_MAX
+    );
+    assert!(
+        gbuf.contains(&decl),
+        "gbuffer_mrt.fs.hlsl must carry `{decl}` (the host mirror is compute::MESH_DEPTH_T_MAX)"
+    );
+    assert!(
+        particle.contains(&decl),
+        "particle_draw.fs.hlsl's DEPTH_LINEAR arm must carry `{decl}`"
+    );
+}
+
+#[test]
+fn particle_draw_vs_mirrors_the_host_camera_mode_discriminant() {
+    // The VS's arm select (`camera_mode == CAM_MODE_PERSPECTIVE`) reads the SHARED 80-byte camera
+    // UBO, whose `camera_mode` word is written host-side. A drifted literal here selects the ORTHO
+    // arm on a perspective frame — i.e. writes back the pinned 1.0 — and the variant silently
+    // becomes the defect it was built to remove.
+    let vs = read_shader("particle_draw.vs.hlsl");
+    let decl = format!(
+        "static const uint CAM_MODE_PERSPECTIVE = {}u;",
+        boyko_rhi_vulkan::compute::CAM_MODE_PERSPECTIVE
+    );
+    assert!(
+        vs.contains(&decl),
+        "particle_draw.vs.hlsl's DEPTH_LINEAR arm must carry `{decl}`"
+    );
+    assert!(
+        vs.contains("o.eye_rel = cam_eye.xyz - world;"),
+        "the DEPTH_LINEAR VS must forward `cam_eye.xyz - world` — the SAME eye \
+         (`ViewUniform::camera_pos`) the Deferred raster push carries, reached through the camera \
+         UBO; a second eye would be a second answer"
+    );
+}
+
+#[test]
+fn the_two_draw_stages_declare_one_vs_out() {
+    // SPIR-V wires a VS output to an FS input by LOCATION, assigned in declaration order, so two
+    // `VsOut` declarations that drifted would compile and MIS-WIRE rather than fail. The generator
+    // prints both from one source (`vs_out_struct`); this asserts the committed files agree, which
+    // is the property that survives a hand-edit of either file.
+    let vs = read_shader("particle_draw.vs.hlsl");
+    let fs = read_shader("particle_draw.fs.hlsl");
+    let vs_struct = extract_fn(&vs, "struct VsOut {");
+    let fs_struct = extract_fn(&fs, "struct VsOut {");
+    assert_eq!(
+        vs_struct, fs_struct,
+        "particle_draw.vs and .fs declare DIFFERENT `VsOut`s — one interface, two texts"
+    );
+    assert!(
+        vs_struct.contains("#ifdef DEPTH_LINEAR"),
+        "the DEPTH_LINEAR interpolants must be inside the `#ifdef`, or the base compile pays for \
+         two varyings it never reads:\n{vs_struct}"
+    );
 }

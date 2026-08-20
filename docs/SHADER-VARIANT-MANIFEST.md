@@ -75,6 +75,41 @@ via one `-D`; `motion + material` needs both) — the host selects among them by
 pipeline per frame (never a dynamic branch), gated on `mesh_mvpm_active()` checked BEFORE
 `mesh_mv_active()`/`mesh_pm_active()` at the recorder's selection site (priority mvpm > mv > pm > base).
 
+## `particle_draw.{vs,fs}.hlsl` — the GPU particle billboard draw (raster)
+
+One source per stage (both GENERATED — `boyko_shaderdsl/src/bin/emit_particles.rs`; never
+hand-edited), two artifacts each. The axis is `DEPTH_LINEAR`, and the variant exists because
+**the Deferred path's depth buffer does not hold depth**: `gbuffer_mrt.fs.hlsl` overwrites it
+through `SV_Depth` with the marcher-aligned euclidean encode, while the projection that path hands
+the particle VS is the marcher's, whose `row2 == row3` pins every billboard vertex to
+`SV_Position.z == 1.0`. Under that path's `VK_COMPARE_OP_LESS` the base compile fails on **every**
+pixel, sky included — MEASURED at P0 live fire (`docs/PARTICLES-PLAN.md`, the P0 live-fire
+erratum), and not fixable host-side (`z_ndc` is a ratio of affine functions of the world position;
+a euclidean norm is not one).
+
+| Variant | `DL` | `.spv` | dxc `-T` | Interface delta vs base |
+|---|---|---|---|---|
+| base (reverse-Z paths) | — | `particle_draw.vs.spv` / `particle_draw.fs.spv` | `vs_6_0` / `ps_6_0` | hardware depth from the VS's projective `SV_Position.z`; the FS writes colour only, so **early-Z stays live**. Bound by Forward / ForwardPlus / VisibilityBuffer (`VK_COMPARE_OP_GREATER`). |
+| depth-linear (Deferred) | `1` | `particle_draw_dlin.vs.spv` / `particle_draw_dlin.fs.spv` | `vs_6_0` / `ps_6_0` | **no descriptor delta — the layout object is unchanged** (the `deferred_pbr_wrap` precedent): the VS forwards two extra interpolants (`eye_rel` = `cam_eye.xyz - world`, perspective-correct, and `cam_mode`) read from the ALREADY-BOUND camera UBO @1, and the FS gains `SV_Depth` = `(cam_mode > 0.5) ? length(eye_rel) / MESH_DEPTH_T_MAX : position.z` — term for term `gbuffer_mrt.fs.hlsl:327`. **COST 1: an `SV_Depth` write disables early-Z on this leg** (the value the test needs does not exist until the shader has run); accepted, and bounded by a fragment that is one modulate + at most one bindless sample. `depth_write` stays OFF, so nothing is stored. **COST 2 — a per-path DIVERGENCE: the encode's range is the particle FAR HORIZON here.** Beyond `MESH_DEPTH_T_MAX = 64` world units the quotient exceeds 1, the write clamps to `[0,1]`, and `LESS` then fails against anything stored (the 1.0 sky clear included) — so Deferred particles vanish at 64 units while the base rows carry them to the camera's far plane. Same horizon this path's raster meshes already have (same divisor); moving it means moving both sites and re-blessing every Deferred pin. |
+
+`DL` = `DEPTH_LINEAR`. Selection is **boot-frozen, once per process**: `particle_draw_spirv_for`
+and `particle_depth_compare_for` (`boyko_app/src/gpu_scene/particle.rs`) are two answers to one
+question — what does this path's depth image hold — and take the SAME `deferred_path` predicate,
+so exactly one `VkPipeline` exists per run and the two answers cannot disagree.
+
+*Byte gate:* `crates/boyko_rhi_vulkan/tests/particle_edsl_sync.rs` re-DXCs **all seven** particle
+artifacts under the recipes their headers pin and byte-compares. The base rows are load-bearing in
+both directions: they prove the `#ifdef` leaves the undefined compile byte-frozen (it does —
+verified at the landing). The same file pins the encode agreement itself
+(`particle_depth_linear_encodes_exactly_what_deferred_s_depth_buffer_holds`): the two shaders'
+depth right-hand sides are compared as text, and `MESH_DEPTH_T_MAX` / `CAM_MODE_PERSPECTIVE` are
+pinned against their host consts. A drifted normalizer or arm-select would mis-occlude with nothing
+in the image to say so.
+
+*Not yet built:* the remaining particle `-D` rows the plan schedules — `SDF_COLLIDE` (P1), `SOFT`
+(P2), `LIT_PERPIXEL` / `MOTION` (P3), `PARTICLE_INTERP` (P2b). Each gets its own row here when it
+lands.
+
 ## `sdf_forward_march.comp.hlsl` — the Forward/VB fused SDF march+shade (compute)
 
 One source `shaders/sdf_forward_march.comp.hlsl`; the `{HAS_MESH} x {VIEWT}` matrix, all four built

@@ -15,15 +15,25 @@
 > (that would be the F24 dark tax: +25 % draw-read paid while off).
 
 > **Status:** Rev 4 — APPROVED by the final verify pass.
-> **P0 LIVE-FIRE ERRATUM (implementation-discovered, 2e3f2c2d):** D7's Deferred row is REFUTED by
-> controlled experiment — Deferred's depth buffer holds a FRAGMENT-WRITTEN euclidean encode
-> (`length(eye−P)/T_MAX`) while the particle VS emits projective `SV_Position.z`, which the marcher
-> matrix pins to 1.0 (row3 == row4); `LESS` fails on every pixel including sky, and no host-side
-> matrix can fix it (z_ndc is a ratio of affine functions; a euclidean norm is not). **P0 ships
-> particles on Forward / ForwardPlus / VisibilityBuffer; Deferred lands with the `-D DEPTH_LINEAR`
-> fragment-depth variant D7 already schedules at P2** (pulled forward as that rung's first item).
-> The compute half is path-independent and proven (identical readback on Deferred). The armed
-> fixture FAILS on Deferred by design until then. Also named at P0 exit: gate #17 is a residual
+> **P0 LIVE-FIRE ERRATUM (implementation-discovered, 2e3f2c2d) — DISCHARGED at rung P2's first
+> item; see §P2.** D7's Deferred row was REFUTED by controlled experiment — Deferred's depth buffer
+> holds a FRAGMENT-WRITTEN euclidean encode (`length(eye−P)/T_MAX`) while the particle VS emits
+> projective `SV_Position.z`, which the marcher matrix pins to 1.0 (**`row2 == row3`, 0-BASED** —
+> `boyko_render/src/view.rs:248`, "clip.z == clip.w, the perspective-divide row"; Rev 4 spelled this
+> `row3 == row4` 1-based, which no other site in the tree does, and the index is the thing a reader
+> checks the matrix against); `LESS` failed on
+> every pixel including sky, and no host-side matrix can fix it (z_ndc is a ratio of affine
+> functions; a euclidean norm is not). **P0 shipped particles on Forward / ForwardPlus /
+> VisibilityBuffer; the fourth path lands with the `-D DEPTH_LINEAR` fragment-depth variant D7
+> already scheduled at P2**, pulled forward as that rung's first item and now built: the FS writes
+> `SV_Depth` with `gbuffer_mrt.fs.hlsl`'s own two-arm encode, term for term, and the boot-frozen
+> pipeline pick takes the SAME `deferred_path` predicate as the compare op. **Its cost, recorded
+> once here and once in the shader header: an `SV_Depth` write disables early-Z for the particle
+> draw ON THE DEFERRED LEG** — the depth value the test needs does not exist until the fragment has
+> run, so the billboards pay their (one modulate + at most one bindless sample) shading before the
+> reject. `depth_write` stays OFF and the three reverse-Z paths keep the base compile and their
+> early-Z. The compute half was path-independent and proven all along (identical readback on
+> Deferred), which is why nothing below the draw moved. Also named at P0 exit: gate #17 is a residual
 > (no zone ids reach the particle passes — mint them before any measurement claim), and the
 > fixture composes the subsystem by hand pending a public SystemSet for the plugin's Main systems. Rev 3 closed `architecture-critic`'s final-verify findings on Rev 2 (4 P1, 3 P2). No P0 survives; all 9 N-findings and all 12 Rev-0 findings remain closed. Endorsed items — the industry skeleton, the buffer split, the per-path compare op, the role-keyed seeds, the kickoff pre-decrement, the four-boundary algebra including frame 0 — are carried **unchanged**. `graphify` CLI is not installed on this machine; orientation was Grep/Read.
 
@@ -392,6 +402,8 @@ pub fn create_graphics_pipeline_particle(
 ```
 
 The compare op is resolved **once at boot** from `ResolvedRenderPath`, so exactly one `VkPipeline` exists per process. **No image-create change** — F1: `lit` already carries `COLOR_ATTACHMENT` on every path.
+
+**The Deferred row's compare op is only half its depth contract** (the P0 live-fire erratum, discharged at P2 item 1): that path's depth image holds the G-buffer fragment's euclidean encode, not hardware depth, so Deferred also binds the `-D DEPTH_LINEAR` shader pair, whose FS writes that same encode through `SV_Depth`. The two answers come off ONE predicate at the same boot site (`particle_depth_compare_for` / `particle_draw_spirv_for`, both taking `deferred_path`), because a compare op and an encode that disagree produce an image that looks plausible and occludes wrongly.
 
 P0 depth access is attachment-only (`EARLY|LATE_FRAGMENT_TESTS`, `DEPTH_STENCIL_ATTACHMENT_READ`, `DEPTH_ATTACHMENT_OPTIMAL`); no `FRAGMENT_SHADER|SHADER_READ` bit, no new layout constant, no new `BindGroupEntry` variant. All read-only-depth plumbing is P2's.
 
@@ -874,6 +886,8 @@ Unconditional gate on every rung: all 35 `goldens/PINS.toml` hashes unchanged; `
 10. **Clock test (M3):** a synthetic frame at `relative_speed = 8.0` on a 250 ms delta produces `raw_steps == 129`, `steps == 64`, `dropped_steps += 65`, the accumulator drained to its fractional remainder, and **the sim's push constant equals 64** — one value asserted at both consumers.
 11. **Containment test (M4/D17):** build two apps differing only by `add_plugins(ParticlePlugin)`; assert the resolved `EventUpdatePolicy` is identical, that no Fixed schedule exists in either, and that the set of registered schedule labels is identical.
 12. **Per-path depth test:** boot-resolved compare op is `LESS` under Deferred and `GREATER` elsewhere, plus an owner-eval screenshot per path showing particles occluded by opaque geometry (a wrong compare op inverts occlusion and no automated gate would see it).
+    * **The compare-op half is DELIVERED at P2 item 1** — `boyko_app/src/gpu_scene/particle.rs`'s own `#[cfg(test)] mod tests`, which pins BOTH halves of the depth contract off the one predicate: the op per leg, the shader-pair identity per leg, and — read out of the committed artifact, not from a file name — that the Deferred fragment declares `OpExecutionMode DepthReplacing` while the base one does not. Mutation-proven: swapping both arms reds two of the three tests. It was owed from P0 and had no coverage until then; the 25 shader pins are all statements about shader text and bytes, so a swapped arm stayed green everywhere except on a GPU with `BOYKO_HOST_DUMP` set.
+    * **The owner-eval half stays open** — an automated gate cannot say an image is RIGHT. The four dumps exist (`D:\tmp\particle_occl_{deferred,vb}*.bmp`).
 13. **Determinism harness:** (a) **single-step exact** — host-authored `p_dead`/`p_alive_read`, one emit + one sim, per-slot comparison against the `EvalCf` oracle; (b) **multi-step multiset** — N steps, compare the *multiset* of particle states (dead-stack pop order is nondeterministic from frame 2). Frame count pinned in the test name.
 14. **`particle_edsl_sync`:** per-leaf `*_matches_edsl_emit`; `particle_*_spv_byte_identical` × 5; `LocalSize == 256`; an `OpAtomicIAdd` census on `particle_sim` (exactly the wave-leader sites, **and no `OpAtomicUMax`** — M1 deleted the mirror) **and zero atomics in `particle_emit`**; **no `OpFDiv` in `particle_rot_advance`'s generated span** (M7).
 15. **OOB test (D15/R8):** `MAX_EMITTERS + 1` / `MAX_EFFECTS + 1` — writes stay in bounds, `clamped_spawns` counts the shortfall exactly.
@@ -891,6 +905,24 @@ Unconditional gate on every rung: all 35 `goldens/PINS.toml` hashes unchanged; `
 
 One FFX-shaped radix pass; **D10's partition** (shared list counter, per-class render counters, `first_instance = 0` in both slots, push-constant index transform); `-D SOFT` FS sampling depth; `SortMode` incl. `Wboit`.
 **New plumbing named:** `VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL` in `ffi.rs`; a `BindGroupEntry::SampledDepthAtReadOnly` variant (the `SampledImageAtGeneral` precedent); the depth access gains `FRAGMENT_SHADER|SHADER_READ` and the read-only layout; `-D DEPTH_LINEAR` FS variant for Deferred's decode (interface-identical, same layout object — the `TERMINATOR_WRAP` precedent).
+
+#### P2 item 1 — `-D DEPTH_LINEAR`, **LANDED** (pulled forward to discharge the P0 erratum)
+
+Scope taken here is exactly the erratum's: the fourth render path, nothing of P2's sort/alpha/soft.
+
+* **Shader (generator-owned, both stages).** `emit_particles.rs` gains the variant; the VS forwards `eye_rel = cam_eye.xyz - world` (perspective-correct, `WORLDDIST` — `gbuffer_mrt.vs.hlsl`'s own semantic) and `cam_mode`, both read from the ALREADY-BOUND camera UBO @1, and the FS writes `SV_Depth = (cam_mode > 0.5) ? length(eye_rel) / MESH_DEPTH_T_MAX : position.z`. **The plan said "FS variant"; it is a VS+FS variant** — the deviation is forced, not chosen: the encode needs a per-pixel world position, and a billboard's interior depth is not an affine function of its corners' depths, so only a perspective-correct varying reconstructs it. The FS alone cannot manufacture one.
+* **Eye and normalizer are the deferred producer's own.** `cam_eye` is `ViewUniform::camera_pos` — the same number `gbuffer_push_from_view` writes at its bytes [64,80) — reached through the camera UBO rather than through a second push. `MESH_DEPTH_T_MAX = 64.0` is `gbuffer_mrt.fs.hlsl:113`'s literal, mirrored from `compute::MESH_DEPTH_T_MAX` and pinned. Verified at the ARTIFACT level too: both modules emit `OpExtInst Length` → `OpFMul %float_0_015625` → `OpStore %gl_FragDepth` (DXC folds the power-of-two divide identically on both sides).
+* **Pipeline pick.** Boot-frozen, one `VkPipeline` per process, unchanged: `ParticleGpuBundle::create` now takes the `deferred_path` PREDICATE instead of a pre-derived compare op, and derives both answers from it (`particle_depth_compare_for` + `particle_draw_spirv_for`). Interface-identical ⇒ the same layout object, the same descriptor sets, the same 72-byte VERTEX push, no barrier-stream change (the declarator's depth access already spans `EARLY|LATE_FRAGMENT_TESTS`).
+* **Cost 1, accepted for this leg only.** Early-Z is off for the Deferred particle draw (an `SV_Depth` write cannot be tested before the shader runs). `[earlydepthstencil]` is not an escape — it would test the pinned interpolated 1.0, which is the defect being removed. The other three paths are byte-untouched.
+* **Cost 2 — a per-path DIVERGENCE, recorded because nothing else would say it.** The encode's range *is* the particle far horizon on Deferred: past `MESH_DEPTH_T_MAX = 64` world units the quotient exceeds 1, the depth write clamps to the `[0,1]` range, and `LESS` against any stored value — including the 1.0 clear over sky — then fails. **Deferred particles disappear at 64 units; the three reverse-Z paths carry them to the camera's own far plane** (100 in the lab fixture). It is the same horizon this path's raster meshes already live under (same divisor, `gbuffer_mrt.fs.hlsl:99-113` explains why 64 was chosen for room scale), so it is a property of Deferred's depth encode rather than of particles — but a scene that needs particles beyond 64 units moves the constant at BOTH sites and re-blesses every Deferred pin, never here alone. No fixture reaches it today (the lab's fan sits ~6 units out), which is exactly why it is written down rather than measured.
+* **Known, unchanged by this rung:** on a Deferred leg with NO mesh raster the depth image holds only its clear (SDF surfaces do not write depth on this path), so billboards are not occluded by SDF geometry there. That is P0's attachment-only depth access (D7), not a regression of this item; read-only-depth sampling is still P2's.
+* **Gate run.** The 7-artifact `particle_edsl_sync` battery: **25 pins, was 20** — the five new ones are the two variant byte gates, the encode-agreement pin, the camera-mode/eye pin and the one-`VsOut` pin; the five base `.spv` re-DXC byte-identical, so the `#ifdef` is inert as claimed. The whole `*_spv_sync`/`*_edsl_sync` battery green (14 binaries), `particle_barrier_stream` unmoved (16), and the five named image goldens byte-identical — including `particle_additive`, which is still pinned on VB.
+* **Live fire, and its control.** `particle_lab` on `BOYKO_RENDER_PATH=deferred` with `BOYKO_PARTICLE_OCCLUDER=1`: **265 saturated particle pixels in 22 sprites** (floor 64) where the same fixture rendered **0** before. Three claims, each measured rather than eyeballed:
+  1. **The variant is the cause.** Same binary, same scene, `particle_draw_spirv_for` temporarily forced to the base pair ⇒ `white=0` and the fixture's own assertion fails. Restored ⇒ the capture reproduces its hash exactly.
+  2. **The occlusion is real and correctly signed.** Zero particle pixels fall inside the wall's silhouette (`x ∈ [0,236], y ∈ [117,394]`, recovered from the with/without-wall pixel diff), while 48 sit within 10 px to the RIGHT of its edge — a straight cut at the wall boundary. The one sprite entirely left of that edge is at `y ∈ [99,103]`, ABOVE the wall. The wall-less run puts **11** sprites inside that region, at `y` from 125 to 294. Re-run at **eight** particles per frame once the dead knob below was repaired — ~240 live particles, a fan that saturates the wall region — the split is **0 particle pixels inside the silhouette against 961 in the same region without the wall**. (Caveat, stated rather than hidden: the two runs do not share a spawn seed — the occluder entity shifts the emitter's — so this is a distribution comparison, not a per-sprite one. Claim 3 is the per-pixel one.)
+  3. **Deferred now agrees with a blessed path pixel for pixel.** The particle pixel set is IDENTICAL to the VisibilityBuffer leg's — symmetric difference **0** — in the wall, no-wall and dense (1737-pixel) runs alike. A depth test failing in either direction (all-reject, all-pass) could not produce that.
+  4. **The selector itself is pinned in-crate.** `particle_draw_spirv_for` / `particle_depth_compare_for` now carry unit tests that assert both legs by identity AND by artifact property (`DepthReplacing` present on the Deferred fragment, absent on the base one) — see gate #12 above. Claim 1's manual A/B is what those tests automate.
+* **Found while measuring, and REPAIRED here:** `BOYKO_PARTICLE_RATE` was a DEAD knob — `lab_arm_burst` re-armed `burst = 1` every frame ahead of the fold, including frame 0, so the env value was overwritten before anything consumed it (a rate-8 run was byte-identical to a rate-1 one), while the fixture's env table and `spawn_per_frame`'s doc both advertised it live and named gate #17 as its consumer. The re-arm now reads `spawn_per_frame()` — the one fn both sites read. Verified both ways: rate 8 renders **1737** particle pixels against **265** at rate 1, and the default is unchanged, so all five image goldens re-proved byte-identical. **Consequence for gate #17: any density measurement previously taken through this fixture was taken at one particle per frame whatever the env said** — see `docs/OPEN-QUESTIONS.md` (2026-08-20).
 **Hard rule (R10):** `SortMode != None` ⇒ motion vectors disabled.
 **Gate:** sort monotonicity readback; reverse-Z **and** linear soft-fade oracles; `first_instance == 0` on both slots; the alpha reverse index transform verified by readback; **`additive.instanceCount + alpha.instanceCount == alive_count_next` with both terms non-zero** (the M2 assertion, now exercised); `SortMode::None` byte-identical to P1.
 

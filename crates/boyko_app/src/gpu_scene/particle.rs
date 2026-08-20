@@ -32,8 +32,9 @@ use boyko_rhi::enums::BlendState;
 use boyko_rhi::{BarrierDesc, BufferBarrier, BufferCopy};
 use boyko_rhi_vulkan::compute::{
     PARTICLE_DRAW_PUSH_BYTES, PARTICLE_EMIT_PUSH_BYTES, PARTICLE_KICKOFF_PUSH_BYTES,
-    PARTICLE_QUAD_IB_BYTES, PARTICLE_SIM_PUSH_BYTES, particle_draw_fs_spirv,
-    particle_draw_vs_spirv, particle_emit_spirv, particle_kickoff_spirv, particle_sim_spirv,
+    PARTICLE_QUAD_IB_BYTES, PARTICLE_SIM_PUSH_BYTES, particle_draw_dlin_fs_spirv,
+    particle_draw_dlin_vs_spirv, particle_draw_fs_spirv, particle_draw_vs_spirv,
+    particle_emit_spirv, particle_kickoff_spirv, particle_sim_spirv,
 };
 use boyko_rhi_vulkan::ffi::{VK_COMPARE_OP_GREATER, VK_COMPARE_OP_LESS, VkDescriptorSet};
 use boyko_rhi_vulkan::swapchain::ParticleActivation;
@@ -104,8 +105,10 @@ pub(crate) const PARTICLE_LAYOUT_ENTRIES: [ParticleLayoutEntry; 10] = [
 pub(crate) const PARTICLE_DRAW_LAYOUT_ENTRIES: [ParticleLayoutEntry; 2] = [
     // `StructuredBuffer<ParticleRender> p_render` @0.
     ParticleLayoutEntry { set: 0, binding: 0, kind: DescriptorKind::StorageBuffer },
-    // The 80-byte camera/extent cbuffer @1 — the SAME shape every other consumer declares; the
-    // VS reads `cam_right`/`cam_up` (the billboard basis) and nothing else.
+    // The 80-byte camera/extent cbuffer @1 — the SAME shape every other consumer declares. The VS
+    // reads `cam_right`/`cam_up` (the billboard basis), and under `-D DEPTH_LINEAR` also
+    // `cam_eye`/`camera_mode` for the Deferred depth encode. Reading MORE of an already-bound
+    // block adds no binding, which is why both shader pairs share this one table.
     ParticleLayoutEntry { set: 0, binding: 1, kind: DescriptorKind::UniformBuffer },
 ];
 
@@ -241,10 +244,17 @@ impl ParticleGpuBundle {
     /// them (`p_dead` = identity permutation with `dead_count = CAP`; everything else zeroed).
     ///
     /// `camera_ring` is the per-in-flight-slot camera UBO ring the draw's Set-0 binding 1 reads;
-    /// `bindless` owns the set-1 texture table; `depth_compare` is the render path's own compare
-    /// op, resolved ONCE by the caller (`VK_COMPARE_OP_LESS` under Deferred's custom-linear
-    /// depth, `VK_COMPARE_OP_GREATER` under the three reverse-Z paths) — see
-    /// [`particle_depth_compare_for`].
+    /// `bindless` owns the set-1 texture table.
+    ///
+    /// # `deferred_path` decides BOTH halves of the depth contract, and that is why it is one
+    /// argument
+    ///
+    /// The compare op ([`particle_depth_compare_for`]) and the draw's shader pair
+    /// ([`particle_draw_spirv_for`]) are two answers to ONE question — what does this path's depth
+    /// image hold — so the boot resolution crosses this boundary as the single predicate that
+    /// produced them, never as two pre-derived values that could disagree. Deferred gets
+    /// `VK_COMPARE_OP_LESS` and the `-D DEPTH_LINEAR` pair (its depth is the G-buffer fragment's
+    /// euclidean encode); the three reverse-Z paths get `VK_COMPARE_OP_GREATER` and the base pair.
     ///
     /// # Panics
     ///
@@ -255,7 +265,7 @@ impl ParticleGpuBundle {
         camera_ring: &[BoundBuffer; FRAMES_IN_FLIGHT],
         bindless: &BindlessTextureTable,
         capacity: u32,
-        depth_compare: i32,
+        deferred_path: bool,
     ) -> Self {
         debug_assert!(capacity >= 1, "invariant: the particle pool needs at least one slot");
         let device = ctx;
@@ -426,9 +436,14 @@ impl ParticleGpuBundle {
             .expect("invariant: particle draw Set-0 bind group create")
         });
 
-        let draw_vs = RhiDevice::create_shader_module(device, particle_draw_vs_spirv())
+        // The path's depth contract, resolved from the ONE predicate: which encode the depth image
+        // holds decides the compare op AND which of the two interface-identical shader pairs the
+        // draw is built from.
+        let (draw_vs_spirv, draw_fs_spirv) = particle_draw_spirv_for(deferred_path);
+        let depth_compare = particle_depth_compare_for(deferred_path);
+        let draw_vs = RhiDevice::create_shader_module(device, draw_vs_spirv)
             .expect("invariant: particle draw vertex shader module create");
-        let draw_fs = RhiDevice::create_shader_module(device, particle_draw_fs_spirv())
+        let draw_fs = RhiDevice::create_shader_module(device, draw_fs_spirv)
             .expect("invariant: particle draw fragment shader module create");
         let draw_pipeline = ctx
             .create_graphics_pipeline_particle(
@@ -798,6 +813,32 @@ pub(crate) const fn particle_depth_compare_for(deferred_path: bool) -> i32 {
     if deferred_path { VK_COMPARE_OP_LESS } else { VK_COMPARE_OP_GREATER }
 }
 
+/// The `(vertex, fragment)` SPIR-V the draw pipeline is frozen with for a resolved render path —
+/// [`particle_depth_compare_for`]'s other half, off the SAME predicate.
+///
+/// **Deferred is the `-D DEPTH_LINEAR` pair.** That path's depth image is not hardware depth: the
+/// G-buffer fragment overwrites it with `length(cam_eye - P) / MESH_DEPTH_T_MAX`, while the
+/// projection this path hands the particle VS is the marcher's, whose `row2 == row3` pins every
+/// billboard vertex to `SV_Position.z == 1.0`. Under `LESS` that fails on every pixel including
+/// the cleared sky — MEASURED at P0, and not fixable by any host-side matrix (`z_ndc` is a ratio
+/// of affine functions of the world position; a euclidean norm is not one). The variant's fragment
+/// writes the depth image's OWN encode through `SV_Depth` instead, which costs early-Z ON THIS LEG
+/// (see the shader header) and nothing anywhere else.
+///
+/// The three reverse-Z paths take the base pair unchanged: their depth image holds exactly the
+/// projective `SV_Position.z` the base VS already emits.
+///
+/// Interface-identical by construction (same bindings, same push range), so ONE pipeline layout
+/// serves either pair and the pick never reaches the descriptor plumbing.
+#[inline]
+pub(crate) fn particle_draw_spirv_for(deferred_path: bool) -> (&'static [u32], &'static [u32]) {
+    if deferred_path {
+        (particle_draw_dlin_vs_spirv(), particle_draw_dlin_fs_spirv())
+    } else {
+        (particle_draw_vs_spirv(), particle_draw_fs_spirv())
+    }
+}
+
 /// The nine device buffers the boot fill writes, plus the index buffer. Grouped so
 /// [`boot_fill`] takes one argument instead of ten.
 struct BootFillTargets<'a> {
@@ -1009,5 +1050,145 @@ fn boot_fill(ctx: &VulkanContext, capacity: u32, t: BootFillTargets<'_>) {
         RhiDevice::destroy_buffer(device, ctrl_staging);
         RhiDevice::destroy_buffer(device, dead_staging);
         RhiDevice::destroy_buffer(device, zero_staging);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `OpExecutionMode`'s opcode (SPIR-V 1.x core, section 3.32.6).
+    const OP_EXECUTION_MODE: u32 = 16;
+    /// The `DepthReplacing` execution mode — "this fragment stage writes `FragDepth`"
+    /// (SPIR-V 1.x, section 3.6). A stage that declares it CANNOT be early-Z tested; a stage that
+    /// does not, can.
+    const EXEC_MODE_DEPTH_REPLACING: u32 = 12;
+    /// The SPIR-V module header, in words (magic, version, generator, bound, schema).
+    const SPIRV_HEADER_WORDS: usize = 5;
+
+    /// Whether `spirv` declares [`EXEC_MODE_DEPTH_REPLACING`].
+    ///
+    /// A real instruction walk, not a word scan: every instruction's first word packs
+    /// `(word_count << 16) | opcode`, so stepping by `word_count` from the header is exact, and the
+    /// mode operand is the instruction's THIRD word (`%entry_point`, then the mode). A bare
+    /// "contains the value 12 somewhere" search would match any constant, id or literal in the
+    /// module and could never fail honestly.
+    fn declares_depth_replacing(spirv: &[u32]) -> bool {
+        let mut i = SPIRV_HEADER_WORDS;
+        while i < spirv.len() {
+            let word_count = (spirv[i] >> 16) as usize;
+            let opcode = spirv[i] & 0xFFFF;
+            assert!(word_count >= 1, "malformed SPIR-V: zero-length instruction at word {i}");
+            if opcode == OP_EXECUTION_MODE
+                && word_count >= 3
+                && spirv[i + 2] == EXEC_MODE_DEPTH_REPLACING
+            {
+                return true;
+            }
+            i += word_count;
+        }
+        false
+    }
+
+    /// Slice IDENTITY — same address and same length, i.e. the same `static` blob, not merely
+    /// equal bytes.
+    fn is_the_same_blob(a: &'static [u32], b: &'static [u32]) -> bool {
+        core::ptr::eq(a.as_ptr(), b.as_ptr()) && a.len() == b.len()
+    }
+
+    /// **Plan gate #12's compare-op half, and the depth contract's other half with it.**
+    ///
+    /// # What this closes
+    ///
+    /// Both selectors are `pub(crate)` with exactly one production caller, and the ONLY thing that
+    /// noticed a swapped arm before this test was a GPU with a window and `BOYKO_HOST_DUMP` set:
+    /// the 25 shader pins are all statements about shader TEXT and BYTES, and every one of them
+    /// stays green while the host hands the wrong pair to `create`. That is a gate that cannot
+    /// fail on the defect it exists for.
+    ///
+    /// # What it asserts, and why identity is not enough on its own
+    ///
+    /// Three claims per leg. The IDENTITY claim (this leg gets that accessor's blob) would still
+    /// pass if the `embed_spirv!` for the variant had been pointed back at the base `.spv`, so the
+    /// PROPERTY claim is asserted too: the Deferred leg's fragment declares `DepthReplacing` and
+    /// the reverse-Z leg's does not. That is the actual difference the render depends on, read out
+    /// of the committed artifact rather than trusted from a file name.
+    #[test]
+    fn the_deferred_leg_takes_the_depth_linear_pair_and_the_less_compare_op() {
+        let (vs, fs) = particle_draw_spirv_for(true);
+        assert!(
+            is_the_same_blob(vs, particle_draw_dlin_vs_spirv()),
+            "the Deferred leg must be built from the -D DEPTH_LINEAR VERTEX module: its two extra \
+             interpolants are what the fragment's depth encode reads"
+        );
+        assert!(
+            is_the_same_blob(fs, particle_draw_dlin_fs_spirv()),
+            "the Deferred leg must be built from the -D DEPTH_LINEAR FRAGMENT module: that path's \
+             depth image holds `length(cam_eye - P) / MESH_DEPTH_T_MAX`, and the base fragment \
+             writes no depth at all, so every fragment would fail VK_COMPARE_OP_LESS against the \
+             VS's pinned SV_Position.z == 1.0 — the P0 live-fire erratum, verbatim"
+        );
+        assert!(
+            declares_depth_replacing(fs),
+            "the Deferred fragment module must declare OpExecutionMode DepthReplacing — the \
+             accessor may name the variant while the artifact behind it is the base compile"
+        );
+        assert_eq!(
+            particle_depth_compare_for(true),
+            VK_COMPARE_OP_LESS,
+            "Deferred's depth image increases with distance (a linear encode), so nearer is LESS"
+        );
+    }
+
+    /// The reverse-Z legs' row of the same table — see the Deferred test for what these claims
+    /// are for.
+    #[test]
+    fn the_reverse_z_legs_take_the_base_pair_and_the_greater_compare_op() {
+        let (vs, fs) = particle_draw_spirv_for(false);
+        assert!(
+            is_the_same_blob(vs, particle_draw_vs_spirv()),
+            "Forward / ForwardPlus / VisibilityBuffer must take the BASE vertex module"
+        );
+        assert!(
+            is_the_same_blob(fs, particle_draw_fs_spirv()),
+            "Forward / ForwardPlus / VisibilityBuffer must take the BASE fragment module"
+        );
+        assert!(
+            !declares_depth_replacing(fs),
+            "the base fragment must NOT declare DepthReplacing: those three paths hold hardware \
+             reverse-Z depth, the VS's own SV_Position.z is already the right value, and writing \
+             SV_Depth there would cost them early-Z for nothing"
+        );
+        assert_eq!(
+            particle_depth_compare_for(false),
+            VK_COMPARE_OP_GREATER,
+            "reverse-Z depth decreases with distance, so nearer is GREATER"
+        );
+    }
+
+    /// The non-vacuity control: the two legs really are two different pipelines.
+    ///
+    /// Without this, a build in which both accessors resolved to one artifact — or in which the
+    /// two `.spv` happened to be copies — would satisfy every assertion above, and the selector
+    /// would be a branch with one outcome.
+    #[test]
+    fn the_two_legs_are_distinct_artifacts_in_both_stages() {
+        let (dlin_vs, dlin_fs) = particle_draw_spirv_for(true);
+        let (base_vs, base_fs) = particle_draw_spirv_for(false);
+        assert!(!is_the_same_blob(dlin_vs, base_vs), "the two vertex blobs must be distinct");
+        assert!(!is_the_same_blob(dlin_fs, base_fs), "the two fragment blobs must be distinct");
+        assert_ne!(
+            dlin_vs, base_vs,
+            "the two vertex modules must differ in CONTENT, not only in address"
+        );
+        assert_ne!(
+            dlin_fs, base_fs,
+            "the two fragment modules must differ in CONTENT, not only in address"
+        );
+        assert_ne!(
+            particle_depth_compare_for(true),
+            particle_depth_compare_for(false),
+            "the two legs must not share a compare op"
+        );
     }
 }

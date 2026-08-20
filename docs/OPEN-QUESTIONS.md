@@ -14,6 +14,40 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-20 — Particles P2 item 1: a dead fixture knob (repaired), and one pin I will not re-point without you
+
+Landing the Deferred `-D DEPTH_LINEAR` arm turned up two things that are yours rather than mine.
+
+**1. `BOYKO_PARTICLE_RATE` was a DEAD KNOB, and gate #17's density numbers depend on it.** MEASURED
+while trying to drive a denser fan for the occlusion control: a `BOYKO_PARTICLE_RATE=8` run produced
+a dump **byte-identical** to the rate-1 one (`sha256 60f39a3c…`). Cause: `particle_scene::setup`
+seeds `ParticleEmitter::burst` from the env value, but `lab_arm_burst` — ordered BEFORE the fold,
+including on frame 0 — overwrote it with a hardcoded `1` before anything consumed it. The knob's own
+carrier advertised it as live in two places (the env table and `spawn_per_frame`'s doc, which names
+gate #17 as its consumer), so the next person to run a density measurement would have measured a
+1-per-frame scene and reported it as 8.
+
+**Repaired here** (the re-arm reads `spawn_per_frame()`, the one fn both sites now read), because
+the alternative — documenting it dead — leaves gate #17 undrivable. Verified in both directions:
+rate 8 now renders **1737** saturated particle pixels against **265** at rate 1, and the default is
+unchanged, so `particle_additive` and the other four image goldens re-proved byte-identical.
+
+**What is yours: the P0 measurement rows this invalidates.** Gate #17 asks for kickoff/emit/sim/draw
+µs at 10k/100k/1M. Any number produced through this knob before today came from a 1-per-frame scene
+whatever the env said. I do not know which of P0's reported measurements, if any, were taken that
+way — the ones I can see in the plan are stated as budgets, not as captures — but if a density
+number was ever quoted from this fixture, it needs re-taking.
+
+**2. `particle_additive` is still pinned on VisibilityBuffer, and re-pointing it is a VALUES call.**
+The pin's comment said "re-point this pin at Deferred when that arm lands"; the arm has landed and I
+did **not** re-point it. Doing so replaces a blessed digest with one nobody has looked at, and the
+two paths shade the scene differently (only the particle pixels are identical between them — the
+full BMPs are not). The comment now records the landing and leaves the decision open. **Say the
+word and it is one `-Bless` run; the reason to want it is that the pin would then cover the engine's
+DEFAULT path instead of the one it fell back to.**
+
+---
+
 ## 2026-08-12 — L8a: two SCOPE calls I made narrowly, and one I did not make at all
 
 Rung L8a migrated `boyko_render` / `boyko_image` / `boyko_serialize` / `boyko_physics` (16 sites,

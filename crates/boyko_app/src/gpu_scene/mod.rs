@@ -4744,9 +4744,12 @@ impl GpuSceneBundles {
     /// World, and the draw's set-1 layout is the bindless table's, which does not exist at
     /// [`Self::boot`] time. A disarmed run never calls this and therefore allocates nothing.
     ///
-    /// `deferred_path` selects the depth compare op frozen into the one pipeline
-    /// ([`particle::particle_depth_compare_for`]): `LESS` for Deferred's custom-linear depth,
-    /// `GREATER` for the three reverse-Z paths.
+    /// `deferred_path` selects the whole depth contract frozen into the one pipeline — the compare
+    /// op ([`particle::particle_depth_compare_for`]: `LESS` for Deferred's custom-linear depth,
+    /// `GREATER` for the three reverse-Z paths) AND the draw's shader pair
+    /// ([`particle::particle_draw_spirv_for`]: the `-D DEPTH_LINEAR` fragment-depth variant on
+    /// Deferred, the base pair elsewhere). It is passed as the PREDICATE, not as two values
+    /// derived from it, because the two answers must never disagree.
     ///
     /// # Panics
     /// Panics (`expect("invariant: ...")`) on any RHI create/submit failure — mirrors
@@ -4768,7 +4771,7 @@ impl GpuSceneBundles {
             &self.camera_ring,
             bindless,
             capacity,
-            particle::particle_depth_compare_for(deferred_path),
+            deferred_path,
         ));
     }
 

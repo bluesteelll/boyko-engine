@@ -1179,16 +1179,22 @@ BOYKO_GEOMETRY_LEGS      = "sdf"
 # different frames would draw different DIRECTIONS, not merely different positions. Verified: three
 # runs, byte-identical.
 #
-# ⚠️ PINNED ON THE VB PATH, NOT ON THE ENGINE-DEFAULT DEFERRED ONE -- deliberately, and it is a
-# DEFECT that made it so. On Deferred the particle draw renders NOTHING: `gbuffer_push_from_view`
-# (the marcher-aligned projection) sets row2 == row3, so every rasterized vertex has
-# clip.z == clip.w and SV_Position.z is exactly 1.0, while that path's depth buffer holds the
-# fragment-written euclidean `length(cam_eye - P)/T_MAX`; under VK_COMPARE_OP_LESS every particle
-# fragment fails. The compute half is provably fine there (the gate-#7 readback on Deferred reports
-# the same 30 alive / 30 additive instances as VB), so this is a rasterization-stage defect, and it
-# cannot be fixed host-side: no 4x4 matrix produces a euclidean distance through a perspective
-# divide. Pinning the default path today would freeze a particle-free image as "correct". Re-point
-# this pin at Deferred when that arm lands.
+# ⚠️ PINNED ON THE VB PATH, NOT ON THE ENGINE-DEFAULT DEFERRED ONE. It was pinned here because on
+# Deferred the particle draw rendered NOTHING: `gbuffer_push_from_view` (the marcher-aligned
+# projection) sets row2 == row3, so every rasterized vertex has clip.z == clip.w and
+# SV_Position.z is exactly 1.0, while that path's depth buffer holds the fragment-written euclidean
+# `length(cam_eye - P)/MESH_DEPTH_T_MAX`; under VK_COMPARE_OP_LESS every particle fragment failed.
+# It was never fixable host-side (no 4x4 matrix produces a euclidean distance through a perspective
+# divide), and pinning the default path then would have frozen a particle-free image as "correct".
+#
+# THAT ARM HAS LANDED (`docs/PARTICLES-PLAN.md`, P2 item 1): Deferred binds the `-D DEPTH_LINEAR`
+# shader pair, whose fragment writes the depth buffer's own encode through SV_Depth. MEASURED
+# 2026-08-20 on this host, same fixture, gate-#12 occluder armed: 265 saturated particle pixels on
+# Deferred, a particle set IDENTICAL to the VB leg's, zero of them on the wall; the same run with
+# the base pair forced still renders 0. **Re-pointing this pin at Deferred is an owner call, not a
+# mechanical one** -- it would replace a blessed digest with one nobody has looked at, and the two
+# paths shade the scene differently (their BMPs are not equal even where the particles are). Left
+# on VB until that sign-off.
 crate           = "boyko-app"
 test_binary     = "particle_lab"
 test_name       = "particle_lab_screenshot_dump"

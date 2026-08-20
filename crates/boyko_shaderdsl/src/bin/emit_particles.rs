@@ -11,6 +11,11 @@
 //!
 //! Run: `cargo run -p boyko_shaderdsl --features emit --bin emit_particles`
 //!
+//! Five sources, SEVEN artifacts: the two draw stages each carry a `-D DEPTH_LINEAR` variant
+//! (`particle_draw_dlin.{vs,fs}.spv`) — the Deferred path's fragment-written depth encode, one row
+//! in `docs/SHADER-VARIANT-MANIFEST.md`. The define is INERT in the base compile, so the five base
+//! `.spv` are byte-frozen by construction.
+//!
 //! Then DXC each file with the frozen recipe pinned in its own header, and commit the `.spv`.
 //! `boyko_rhi_vulkan/tests/particle_edsl_sync.rs` pins both halves: the committed `.hlsl` to
 //! these templates' generated spans, and each committed `.spv` to a fresh re-DXC of its source.
@@ -98,6 +103,23 @@ const CTR_CLAMPED: u32 = 6;
 const DISPATCH_EMIT_WORD: u32 = 0;
 /// The `VkDispatchIndirectCommand` word index of the SIM dispatch (offset 16).
 const DISPATCH_SIM_WORD: u32 = 4;
+
+/// `boyko_rhi_vulkan::compute::CAM_MODE_PERSPECTIVE` — the raw `camera_mode` value the shared
+/// 80-byte camera UBO carries for a perspective view (P2 `-D DEPTH_LINEAR`).
+///
+/// The draw's VS forwards `cam_mode = (camera_mode == CAM_MODE_PERSPECTIVE) ? 1.0 : 0.0` so the
+/// fragment's depth encode selects the SAME arm `gbuffer_mrt.fs.hlsl` selects from its own
+/// `cam_eye.w` lane. Pinned against the host const by `particle_edsl_sync`.
+const CAM_MODE_PERSPECTIVE: u32 = 1;
+
+/// `boyko_rhi_vulkan::compute::MESH_DEPTH_T_MAX` — the PERSPECTIVE mesh-depth normalizer the
+/// Deferred path's depth buffer is encoded with (P2 `-D DEPTH_LINEAR`).
+///
+/// Not a free choice: it is the divisor `gbuffer_mrt.fs.hlsl:327` writes its `SV_Depth` with, and
+/// the particle variant must land in the SAME units or the depth test compares two encodings. The
+/// raster shaders `#include` nothing, so the literal is duplicated in each of them and pinned
+/// host-side (`particle_edsl_sync`, the `instanced_vs_host_mirror` discipline).
+const MESH_DEPTH_T_MAX: f32 = 64.0;
 
 fn main() {
     // Compile-time guards on the generator's own inputs: a mis-set constant would silently
@@ -793,10 +815,48 @@ void main(uint3 tid : SV_DispatchThreadID) {{
     )
 }
 
+/// The `VsOut` interface — printed into BOTH draw stages from ONE source.
+///
+/// The two declarations must stay character-identical: SPIR-V matches a VS output to an FS input
+/// by LOCATION, which DXC assigns in declaration order, so a field that drifted in one file would
+/// silently re-wire an interpolant rather than fail to compile.
+///
+/// The `DEPTH_LINEAR` tail is the Deferred variant's (plan D7 / the P0 live-fire erratum):
+/// `eye_rel` is `cam_eye.xyz - world`, forwarded as a PERSPECTIVE-CORRECT varying under the SAME
+/// `WORLDDIST` semantic `gbuffer_mrt.vs.hlsl` uses — `cam_eye` is constant across the primitive,
+/// so interpolating the difference reconstructs the true per-pixel `cam_eye - P`. `cam_mode`
+/// selects the fragment's encode arm, mirroring that shader's `cam_eye.w` lane.
+///
+/// # Why `cam_mode` is NOT `nointerpolation`, though it is primitive-constant
+///
+/// Considered and rejected. It is one value for the whole frame, so `nointerpolation` would be
+/// free-or-better on paper (one less interpolant slot to iterate). It is not taken because this
+/// declaration's job is to be `gbuffer_mrt`'s depth interface, character for character: that
+/// shader declares a plain `float cam_mode : CAMMODE` beside a plain `float3 eye_rel : WORLDDIST`,
+/// and the `particle_edsl_sync` pin that compares the two shaders' depth expressions is only
+/// meaningful while the INPUTS of those expressions are the same kind of varying. Interpolating a
+/// constant is exact in either case (all three vertices carry identical bits), so the difference
+/// is a slot, not a number — and a divergence here would be the first thing to re-derive if the
+/// two encodes ever disagreed. If the slot is ever wanted back, change BOTH shaders together and
+/// re-bless the `dlin` pair only.
+fn vs_out_struct() -> &'static str {
+    "struct VsOut {\n\
+     \x20   float4 position  : SV_Position;\n\
+     \x20   float2 uv        : TEXCOORD0;\n\
+     \x20   nointerpolation float4 color : COLOR0;\n\
+     \x20   nointerpolation uint tex_index : TEXIDX;\n\
+     #ifdef DEPTH_LINEAR\n\
+     \x20   float3 eye_rel   : WORLDDIST;   // cam_eye.xyz - world position (perspective-correct)\n\
+     \x20   float  cam_mode  : CAMMODE;     // 0 = ortho, 1 = perspective\n\
+     #endif\n\
+     };\n"
+}
+
 /// Assembles `particle_draw.vs.hlsl` — plan A5's vertex half: a sequential render-record read and
 /// the trig-free billboard expansion.
 fn build_draw_vs() -> String {
     let render_rec = particle_render_struct();
+    let vs_out = vs_out_struct();
     let corner = emit::emit_hlsl_particle_billboard_corner();
     format!(
         r#"// particle_draw.vs -- the GPU particle system's BILLBOARD EXPANSION
@@ -822,10 +882,24 @@ fn build_draw_vs() -> String {
 // multiplication, so the corner placement is pure multiply/add. R9 is closed by construction:
 // `instanceCount` is the sim's live survivor count, never CAP.
 //
+// # The `DEPTH_LINEAR` variant (the Deferred path's ONLY arm)
+//
+// Deferred's depth buffer does not hold hardware depth: `gbuffer_mrt.fs.hlsl` OVERWRITES it with
+// the marcher-aligned euclidean encode. The projection that path hands this VS is the marcher's,
+// whose `row2 == row3` pins `SV_Position.z` to exactly 1.0 for every vertex, so the projective
+// depth this stage emits is meaningless there and `VK_COMPARE_OP_LESS` fails on every fragment --
+// including over the cleared sky. `-D DEPTH_LINEAR` forwards `eye_rel` and `cam_mode` so the
+// fragment can write the depth buffer's OWN encode through `SV_Depth`. No host-side matrix can
+// substitute: `z_ndc` is a ratio of affine functions of the world position and a euclidean norm is
+// not (`docs/PARTICLES-PLAN.md`, the P0 live-fire erratum).
+//
+// The three reverse-Z paths take the base compile and are byte-unperturbed by the define.
+//
 // # Compile (offline + hermetic; committed `.spv` is byte-gated)
 //
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T vs_6_0 -E main \
 //       -fspv-target-env=vulkan1.3 particle_draw.vs.hlsl -Fo particle_draw.vs.spv
+//   (DEPTH_LINEAR variant: add `-D DEPTH_LINEAR=1` -Fo particle_draw_dlin.vs.spv)
 //
 // # Set / binding vocabulary -- MIRRORS the host `PARTICLE_LAYOUT_ENTRIES` table
 //
@@ -852,7 +926,9 @@ struct ParticleDrawPush {{
 [[vk::binding(0, 0)]] StructuredBuffer<ParticleRender> p_render : register(t0);
 
 // binding 1: the extent/camera UNIFORM block -- the SAME 80-byte shape every other consumer
-// declares. This pass reads `cam_right`/`cam_up` (the billboard basis) and nothing else.
+// declares. This pass reads `cam_right`/`cam_up` (the billboard basis), and under DEPTH_LINEAR
+// also `cam_eye`/`camera_mode` -- the SAME `ViewUniform::camera_pos` the Deferred raster push
+// carries at its own bytes [64,80), so the two eyes are one number.
 [[vk::binding(1, 0)]] cbuffer Camera {{
     uint   count;
     uint   img_w_raw;
@@ -867,13 +943,12 @@ struct ParticleDrawPush {{
 // The RGBA8 -> UNORM scale. A constant EXPRESSION, folded by DXC, so no divide reaches the module.
 static const float UNORM_SCALE = 1.0 / 255.0;
 
-struct VsOut {{
-    float4 position  : SV_Position;
-    float2 uv        : TEXCOORD0;
-    nointerpolation float4 color : COLOR0;
-    nointerpolation uint tex_index : TEXIDX;
-}};
+#ifdef DEPTH_LINEAR
+// `boyko_rhi_vulkan::compute::CAM_MODE_PERSPECTIVE`, mirrored (a generator input, not typed here).
+static const uint CAM_MODE_PERSPECTIVE = {CAM_MODE_PERSPECTIVE}u;
+#endif
 
+{vs_out}
 // === GENERATED particle_billboard_corner BEGIN ===
 // The corner placement (`boyko_shaderdsl::particle::particle_billboard_corner_body`): decode the
 // stored `(cos, sin)` pair, rotate and scale the corner offset, ride the camera basis.
@@ -911,6 +986,13 @@ VsOut main(uint vid : SV_VertexID, uint iid : SV_InstanceID) {{
                      (float)((r.color_rgba8 >> 16u) & 255u),
                      (float)((r.color_rgba8 >> 24u) & 255u)) * UNORM_SCALE;
     o.tex_index = r.tex_index;
+#ifdef DEPTH_LINEAR
+    // The two lanes the Deferred fragment's `SV_Depth` needs, and NOTHING else: the encode itself
+    // lives in the fragment because the depth of a billboard's INTERIOR is not an affine function
+    // of its corners' depths -- only the perspective-correct `eye_rel` is.
+    o.eye_rel = cam_eye.xyz - world;
+    o.cam_mode = (camera_mode == CAM_MODE_PERSPECTIVE) ? 1.0 : 0.0;
+#endif
     return o;
 }}
 "#
@@ -920,7 +1002,9 @@ VsOut main(uint vid : SV_VertexID, uint iid : SV_InstanceID) {{
 /// Assembles `particle_draw.fs.hlsl` — plan A5's fragment half: `color * tex[tex_index].Sample`,
 /// composited additively by the pipeline's blend state.
 fn build_draw_fs() -> String {
-    r#"// particle_draw.fs -- the GPU particle system's FRAGMENT half
+    let vs_out = vs_out_struct();
+    format!(
+        r#"// particle_draw.fs -- the GPU particle system's FRAGMENT half
 // (`docs/PARTICLES-PLAN.md` Rev 4, algorithm A5). Unlit, additive, bindless-textured.
 //
 // GENERATED by `cargo run -p boyko_shaderdsl --features emit --bin emit_particles`. This stage
@@ -941,10 +1025,42 @@ fn build_draw_fs() -> String {
 // slot, so an UNTEXTURED effect leaves `tex_index` at 0 and the sample is skipped entirely --
 // the same `!= 0` gate every other bindless consumer in this tree uses.
 //
+// # The `DEPTH_LINEAR` variant -- the DEFERRED path's depth encode, and its early-Z cost
+//
+// Deferred's depth buffer holds neither hardware depth nor a projective one: `gbuffer_mrt.fs.hlsl`
+// OVERWRITES it through `SV_Depth` with the marcher-aligned encode
+//
+//     depth = (cam_mode > 0.5) ? (length(eye_rel) / MESH_DEPTH_T_MAX) : position.z
+//
+// (`gbuffer_mrt.fs.hlsl:327`, `MESH_DEPTH_T_MAX = 64.0` at `:113`). The particle VS emits a
+// PROJECTIVE `SV_Position.z` that the marcher matrix pins to exactly 1.0 (its `row2 == row3`), so
+// on that path the base compile's fragments fail `VK_COMPARE_OP_LESS` everywhere, sky included.
+// `-D DEPTH_LINEAR` writes the SAME two-arm expression, term for term, from the SAME eye
+// (`ViewUniform::camera_pos`, reached here through the shared camera UBO instead of through the
+// raster push) -- so a particle and a mesh fragment at one distance encode to one number.
+//
+// COST 1, accepted for this leg only: a fragment that writes `SV_Depth` cannot be early-Z tested,
+// because the value the test needs does not exist until the shader has run. The billboards
+// therefore pay full shading before the depth reject on Deferred. Bounded: the stage is one
+// modulate and (at most) one bindless sample, the pipeline still writes NO depth
+// (`depth_write = OFF`), and the three reverse-Z paths take the base compile and keep early-Z.
+// `[earlydepthstencil]` is NOT an escape here -- it would test the interpolated 1.0, which is the
+// defect this variant exists to remove.
+//
+// COST 2, a per-path DIVERGENCE rather than a tax: this encode's range IS the particle's far
+// horizon on Deferred. Past `MESH_DEPTH_T_MAX` world units the quotient exceeds 1, the pipeline
+// clamps the depth write to the [0,1] range, and `LESS` against any stored value (including the
+// 1.0 clear over sky) then fails -- so Deferred particles vanish at 64 units while the three
+// reverse-Z paths carry them to the camera's own far plane. It is the SAME horizon this path's
+// raster meshes already have (they are encoded by the same divisor), which is why the number is
+// chosen for room scale rather than for particles; a scene that needs particles further out moves
+// `MESH_DEPTH_T_MAX` at BOTH sites (and re-blesses every Deferred pin) rather than here alone.
+//
 // # Compile (offline + hermetic; committed `.spv` is byte-gated)
 //
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T ps_6_0 -E main \
 //       -fspv-target-env=vulkan1.3 particle_draw.fs.hlsl -Fo particle_draw.fs.spv
+//   (DEPTH_LINEAR variant: add `-D DEPTH_LINEAR=1` -Fo particle_draw_dlin.fs.spv)
 //
 // # Set / binding vocabulary -- MIRRORS the host `PARTICLE_LAYOUT_ENTRIES` table
 //
@@ -961,21 +1077,41 @@ fn build_draw_fs() -> String {
 [[vk::binding(0, 1)]] Texture2D gTextures[] : register(t0, space1);
 [[vk::binding(1, 1)]] SamplerState gTexSampler : register(s0, space1);
 
-// Must stay byte-identical to `particle_draw.vs.hlsl`'s `VsOut` -- the two are one interface.
-struct VsOut {
-    float4 position  : SV_Position;
-    float2 uv        : TEXCOORD0;
-    nointerpolation float4 color : COLOR0;
-    nointerpolation uint tex_index : TEXIDX;
-};
+// Must stay byte-identical to `particle_draw.vs.hlsl`'s `VsOut` -- the two are one interface, and
+// both are printed from ONE generator source (`vs_out_struct`).
+{vs_out}
+#ifdef DEPTH_LINEAR
+// `boyko_rhi_vulkan::compute::MESH_DEPTH_T_MAX`, mirrored (a generator input, not typed here) --
+// the SAME divisor `gbuffer_mrt.fs.hlsl` encodes this path's depth buffer with. The normalizer
+// only has to AGREE; it cancels in nothing here, because this stage compares rather than decodes.
+static const float MESH_DEPTH_T_MAX = {MESH_DEPTH_T_MAX:?};
 
-float4 main(VsOut input) : SV_Target {
+struct PsOut {{
+    float4 color : SV_Target;
+    float  depth : SV_Depth;
+}};
+
+PsOut main(VsOut input) {{
+#else
+float4 main(VsOut input) : SV_Target {{
+#endif
     float4 c = input.color;
-    if (input.tex_index != 0u) {
+    if (input.tex_index != 0u) {{
         c = c * gTextures[NonUniformResourceIndex(input.tex_index)].Sample(gTexSampler, input.uv);
-    }
+    }}
+#ifdef DEPTH_LINEAR
+    PsOut o;
+    o.color = c;
+    // TERM FOR TERM `gbuffer_mrt.fs.hlsl:327`. The ortho arm keeps the interpolated
+    // `SV_Position.z` for the same reason that shader does: an ortho projection bakes the
+    // marcher's own axial encode into the matrix, so writing it back is the identity.
+    o.depth = (input.cam_mode > 0.5) ? (length(input.eye_rel) / MESH_DEPTH_T_MAX)
+                                     : input.position.z;
+    return o;
+#else
     return c;
-}
+#endif
+}}
 "#
-    .to_string()
+    )
 }

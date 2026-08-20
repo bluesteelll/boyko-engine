@@ -19,10 +19,42 @@
 // slot, so an UNTEXTURED effect leaves `tex_index` at 0 and the sample is skipped entirely --
 // the same `!= 0` gate every other bindless consumer in this tree uses.
 //
+// # The `DEPTH_LINEAR` variant -- the DEFERRED path's depth encode, and its early-Z cost
+//
+// Deferred's depth buffer holds neither hardware depth nor a projective one: `gbuffer_mrt.fs.hlsl`
+// OVERWRITES it through `SV_Depth` with the marcher-aligned encode
+//
+//     depth = (cam_mode > 0.5) ? (length(eye_rel) / MESH_DEPTH_T_MAX) : position.z
+//
+// (`gbuffer_mrt.fs.hlsl:327`, `MESH_DEPTH_T_MAX = 64.0` at `:113`). The particle VS emits a
+// PROJECTIVE `SV_Position.z` that the marcher matrix pins to exactly 1.0 (its `row2 == row3`), so
+// on that path the base compile's fragments fail `VK_COMPARE_OP_LESS` everywhere, sky included.
+// `-D DEPTH_LINEAR` writes the SAME two-arm expression, term for term, from the SAME eye
+// (`ViewUniform::camera_pos`, reached here through the shared camera UBO instead of through the
+// raster push) -- so a particle and a mesh fragment at one distance encode to one number.
+//
+// COST 1, accepted for this leg only: a fragment that writes `SV_Depth` cannot be early-Z tested,
+// because the value the test needs does not exist until the shader has run. The billboards
+// therefore pay full shading before the depth reject on Deferred. Bounded: the stage is one
+// modulate and (at most) one bindless sample, the pipeline still writes NO depth
+// (`depth_write = OFF`), and the three reverse-Z paths take the base compile and keep early-Z.
+// `[earlydepthstencil]` is NOT an escape here -- it would test the interpolated 1.0, which is the
+// defect this variant exists to remove.
+//
+// COST 2, a per-path DIVERGENCE rather than a tax: this encode's range IS the particle's far
+// horizon on Deferred. Past `MESH_DEPTH_T_MAX` world units the quotient exceeds 1, the pipeline
+// clamps the depth write to the [0,1] range, and `LESS` against any stored value (including the
+// 1.0 clear over sky) then fails -- so Deferred particles vanish at 64 units while the three
+// reverse-Z paths carry them to the camera's own far plane. It is the SAME horizon this path's
+// raster meshes already have (they are encoded by the same divisor), which is why the number is
+// chosen for room scale rather than for particles; a scene that needs particles further out moves
+// `MESH_DEPTH_T_MAX` at BOTH sites (and re-blesses every Deferred pin) rather than here alone.
+//
 // # Compile (offline + hermetic; committed `.spv` is byte-gated)
 //
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T ps_6_0 -E main \
 //       -fspv-target-env=vulkan1.3 particle_draw.fs.hlsl -Fo particle_draw.fs.spv
+//   (DEPTH_LINEAR variant: add `-D DEPTH_LINEAR=1` -Fo particle_draw_dlin.fs.spv)
 //
 // # Set / binding vocabulary -- MIRRORS the host `PARTICLE_LAYOUT_ENTRIES` table
 //
@@ -39,18 +71,48 @@
 [[vk::binding(0, 1)]] Texture2D gTextures[] : register(t0, space1);
 [[vk::binding(1, 1)]] SamplerState gTexSampler : register(s0, space1);
 
-// Must stay byte-identical to `particle_draw.vs.hlsl`'s `VsOut` -- the two are one interface.
+// Must stay byte-identical to `particle_draw.vs.hlsl`'s `VsOut` -- the two are one interface, and
+// both are printed from ONE generator source (`vs_out_struct`).
 struct VsOut {
     float4 position  : SV_Position;
     float2 uv        : TEXCOORD0;
     nointerpolation float4 color : COLOR0;
     nointerpolation uint tex_index : TEXIDX;
+#ifdef DEPTH_LINEAR
+    float3 eye_rel   : WORLDDIST;   // cam_eye.xyz - world position (perspective-correct)
+    float  cam_mode  : CAMMODE;     // 0 = ortho, 1 = perspective
+#endif
 };
 
+#ifdef DEPTH_LINEAR
+// `boyko_rhi_vulkan::compute::MESH_DEPTH_T_MAX`, mirrored (a generator input, not typed here) --
+// the SAME divisor `gbuffer_mrt.fs.hlsl` encodes this path's depth buffer with. The normalizer
+// only has to AGREE; it cancels in nothing here, because this stage compares rather than decodes.
+static const float MESH_DEPTH_T_MAX = 64.0;
+
+struct PsOut {
+    float4 color : SV_Target;
+    float  depth : SV_Depth;
+};
+
+PsOut main(VsOut input) {
+#else
 float4 main(VsOut input) : SV_Target {
+#endif
     float4 c = input.color;
     if (input.tex_index != 0u) {
         c = c * gTextures[NonUniformResourceIndex(input.tex_index)].Sample(gTexSampler, input.uv);
     }
+#ifdef DEPTH_LINEAR
+    PsOut o;
+    o.color = c;
+    // TERM FOR TERM `gbuffer_mrt.fs.hlsl:327`. The ortho arm keeps the interpolated
+    // `SV_Position.z` for the same reason that shader does: an ortho projection bakes the
+    // marcher's own axial encode into the matrix, so writing it back is the identity.
+    o.depth = (input.cam_mode > 0.5) ? (length(input.eye_rel) / MESH_DEPTH_T_MAX)
+                                     : input.position.z;
+    return o;
+#else
     return c;
+#endif
 }

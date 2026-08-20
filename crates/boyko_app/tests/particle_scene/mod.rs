@@ -86,7 +86,7 @@
 //! |---|---|---|
 //! | `BOYKO_RENDER_PATH` | `deferred` | honoured by `EnginePlugins` itself, not read here |
 //! | `BOYKO_WIN` | 512 | square window/composite extent |
-//! | `BOYKO_PARTICLE_RATE` | 1 | particles spawned per FRAME, via `ParticleEmitter::burst` |
+//! | `BOYKO_PARTICLE_RATE` | 1 | particles spawned per FRAME, via `ParticleEmitter::burst` — applied at BOTH the spawn site and [`lab_arm_burst`]'s per-frame re-arm; the re-arm is the load-bearing one (see its doc: it was hardcoded to 1 until 2026-08-20, which made this knob DEAD) |
 //! | `BOYKO_PARTICLE_SPEED` | 100 | uniform launch speed (units/s) = spacing / substep |
 //! | `BOYKO_PARTICLE_SIZE` | 0.05 | billboard extent (world units) |
 //! | `BOYKO_PARTICLE_CAPACITY` | 65536 | the boot-frozen pool capacity |
@@ -197,6 +197,12 @@ pub fn window_size() -> u32 {
 /// has a distinct age ⇒ a distinct radius ⇒ no two billboards land on the same pixels. A higher
 /// value is for the density/measurement runs (gate #17), where overlap is expected and the image
 /// is not a pin.
+///
+/// **Read at TWO sites, and only one of them mattered.** [`setup`] seeds the component with this
+/// value and [`lab_arm_burst`] re-arms it every frame; the re-arm hardcoded `1` until 2026-08-20,
+/// which overwrote the seed BEFORE the fold ever consumed it — the knob was dead, MEASURED as a
+/// rate-8 run producing a dump byte-identical to a rate-1 one. Both sites now read this fn, so a
+/// future divergence needs two edits rather than none.
 pub fn spawn_per_frame() -> u32 {
     env_parsed("BOYKO_PARTICLE_RATE").unwrap_or(1)
 }
@@ -234,30 +240,31 @@ pub fn occluder_armed() -> bool {
     std::env::var("BOYKO_PARTICLE_OCCLUDER").is_ok()
 }
 
-/// Whether this run resolves to the DEFERRED path, on which the particle draw is currently known
-/// to render nothing.
+/// Whether this run resolves to the DEFERRED path — the one whose depth buffer holds a
+/// FRAGMENT-WRITTEN encode rather than hardware depth.
+///
+/// # This USED to name a known defect. It no longer does — and the distinction is the message
 ///
 /// MEASURED on the first armed run of this fixture, and root-caused: `gbuffer_push_from_view` —
 /// the projection the runner hands the particle draw on Deferred — is `marcher_view_proj_rows`,
 /// whose `row2 == row3` (`boyko_render/src/view.rs`, "clip.z == clip.w (perspective divide row)").
 /// Every rasterized vertex therefore has `SV_Position.z == clip.z / clip.w == 1.0` exactly, while
-/// that path's depth buffer holds the euclidean `length(cam_eye - P) / T_MAX` its G-buffer FS
-/// writes through `SV_Depth`. The particle pipeline is built `VK_COMPARE_OP_LESS` there, so every
-/// fragment fails — including over the sky, whose cleared depth is not greater than 1.0.
+/// that path's depth buffer holds the euclidean `length(cam_eye - P) / MESH_DEPTH_T_MAX` its
+/// G-buffer FS writes through `SV_Depth`. The particle pipeline is built `VK_COMPARE_OP_LESS`
+/// there, so under the BASE shader pair every fragment failed — including over the sky, whose
+/// cleared depth is not greater than 1.0.
 ///
-/// The compute half is unaffected and provably fine: the gate-#7 readback on Deferred reports the
-/// same 30 alive / 30 additive instances as the working paths, so the indirect draw fetches a
-/// correct instance count and the fragments die in the depth test.
+/// It was never fixable host-side: `z_ndc` is a ratio of two affine functions of the world
+/// position, and no such ratio equals a Euclidean norm. The fix is the `-D DEPTH_LINEAR` shader
+/// pair this path now binds (`docs/PARTICLES-PLAN.md`, P2 item 1) — the fragment writes the depth
+/// buffer's OWN encode, term for term the G-buffer producer's. **Particles are expected to render
+/// here now, and the assertion below is expected to hold on all four paths.**
 ///
-/// It is NOT fixable host-side: `z_ndc` is a ratio of two affine functions of the world position,
-/// and no such ratio equals a Euclidean norm. The fix is a Deferred-specific fragment depth write
-/// (the plan already names a `-D DEPTH_LINEAR` FS variant for rung P2's soft particles), which is
-/// a SHADER change the byte-identity gates own.
-///
-/// Used only to make the fixture's failure message name this cause instead of sending the reader
-/// looking for a bug in the sim. The assertion still FAILS: an image with no particles is not a
-/// pass, and a gate that excused it on one path would be a gate that cannot fail there.
-pub fn on_known_particle_free_path() -> bool {
+/// Kept, and still consulted by the failure message, because a trip on THIS path has a different
+/// first suspect from a trip anywhere else: the depth contract is two answers (compare op +
+/// shader pair) off one predicate, and if either half regressed the symptom is exactly the old
+/// one — a scene that renders perfectly with no particles in it.
+pub fn on_deferred_depth_encode_path() -> bool {
     matches!(
         std::env::var("BOYKO_RENDER_PATH").ok().as_deref().map(str::trim),
         None | Some("") | Some("deferred")
@@ -335,17 +342,31 @@ impl LabClockWitness {
     }
 }
 
-/// Re-arms one BURST per frame on every emitter, ordered BEFORE `particle_tick_emitters`.
+/// Re-arms [`spawn_per_frame`] BURST per frame on every emitter, ordered BEFORE
+/// `particle_tick_emitters`.
 ///
 /// The burst path, not `rate`, because the fold derives its continuous spawn count from
 /// `clock.steps() · timestep` and this fixture's clock is advanced AFTER the fold — the fold's
 /// `dt` is therefore zero and a rate would spawn nothing. `burst` is consumed exactly once by the
-/// tick that reads it, so one write per frame is exactly one particle per frame, with no
-/// dependence on any clock at all.
+/// tick that reads it, so one write per frame is exactly `spawn_per_frame()` particles per frame,
+/// with no dependence on any clock at all.
+///
+/// # This write is the knob, and it used to be a literal `1`
+///
+/// Because this system is ordered BEFORE the fold, its value — not [`setup`]'s seed — is what
+/// every frame including frame 0 actually spawns. With `1` hardcoded here, `BOYKO_PARTICLE_RATE`
+/// changed nothing at all: MEASURED 2026-08-20, a rate-8 run produced a dump byte-identical to
+/// the rate-1 one (`sha256 60f39a3c…`), so gate #17's density runs could not be driven and would
+/// have reported a 1-per-frame scene as an 8-per-frame one. Reading the same fn both sites read
+/// is the repair; the DEFAULT is unchanged, so every existing pin renders the same bytes.
+///
+/// The env read is per frame rather than cached: this is a fixture, the value is wanted at the
+/// site that uses it, and one `getenv` per frame is not measurable against a windowed present.
 #[allow(clippy::needless_pass_by_value)]
 pub fn lab_arm_burst(mut emitters: Query<&mut ParticleEmitter>) {
+    let burst = spawn_per_frame();
     for emitter in emitters.iter_mut() {
-        emitter.burst = 1;
+        emitter.burst = burst;
     }
 }
 
