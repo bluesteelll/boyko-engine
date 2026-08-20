@@ -43,7 +43,8 @@
 
 use boyko_rhi_vulkan::compute::{
     COMPOSITE_PUSH_CONSTANT_BYTES, PARTICLE_DISPATCH_EMIT_OFFSET, PARTICLE_DISPATCH_SIM_OFFSET,
-    PARTICLE_DRAW_ADDITIVE_OFFSET, PARTICLE_DRAW_PUSH_BYTES, PARTICLE_EMIT_PUSH_BYTES,
+    PARTICLE_DRAW_ADDITIVE_OFFSET, PARTICLE_DRAW_ALPHA_OFFSET, PARTICLE_DRAW_PUSH_BYTES,
+    PARTICLE_EMIT_PUSH_BYTES,
     PARTICLE_KICKOFF_PUSH_BYTES, PARTICLE_LOCAL_SIZE, PARTICLE_QUAD_IB_BYTES,
     PARTICLE_QUAD_INDEX_COUNT, PARTICLE_SIM_PUSH_BYTES, VB_BATCH_CULL_PUSH_BYTES,
 };
@@ -1342,12 +1343,14 @@ fn particle_push_bytes_do_not_widen_the_shared_compute_range() {
         shared, 112,
         "the shared COMPUTE push range must still be max(marcher 80, batch cull 112) == 112"
     );
-    for (what, bytes) in [
-        ("kickoff", PARTICLE_KICKOFF_PUSH_BYTES),
-        ("emit", PARTICLE_EMIT_PUSH_BYTES),
-        ("sim", PARTICLE_SIM_PUSH_BYTES),
+    // `sim` is THREE words since rung P2 — `capacity` joined `steps`/`timestep` as the alpha
+    // class's render-index mirror (`capacity - 1 - q_pos`). The other two are still two words.
+    for (what, bytes, words) in [
+        ("kickoff", PARTICLE_KICKOFF_PUSH_BYTES, 2),
+        ("emit", PARTICLE_EMIT_PUSH_BYTES, 2),
+        ("sim", PARTICLE_SIM_PUSH_BYTES, 3),
     ] {
-        assert_eq!(bytes, 8, "{what}: the block is two 4-byte words");
+        assert_eq!(bytes, words * 4, "{what}: the block is {words} 4-byte words");
         assert!(bytes < shared, "{what}: a dedicated-layout range must not reach the shared one");
         assert!(bytes.is_multiple_of(4), "{what}: Vulkan requires a multiple of 4");
     }
@@ -1375,7 +1378,21 @@ fn indirect_offsets_and_the_quad_are_pinned() {
     assert_eq!(PARTICLE_DISPATCH_EMIT_OFFSET, 0);
     assert_eq!(PARTICLE_DISPATCH_SIM_OFFSET, 16, "the second VkDispatchIndirectCommand slot");
     assert!(PARTICLE_DISPATCH_SIM_OFFSET.is_multiple_of(4), "Vulkan requires a 4-aligned offset");
-    assert_eq!(PARTICLE_DRAW_ADDITIVE_OFFSET, 0, "P0 records only the additive slot");
+    assert_eq!(PARTICLE_DRAW_ADDITIVE_OFFSET, 0, "the first VkDrawIndexedIndirectCommand slot");
+    // Rung P2's second slot. 24, not 20: the command is 20 bytes and the block pads to a 12-byte
+    // multiple, so `alpha.instanceCount` lands at byte 28 — the offset the generator turns into the
+    // sim's `DRAW_ALPHA_INSTANCE_WORD`. A drift here makes the alpha draw fetch its instance count
+    // out of the additive command's `firstIndex`, with no validation message.
+    assert_eq!(PARTICLE_DRAW_ALPHA_OFFSET, 24, "the second VkDrawIndexedIndirectCommand slot");
+    assert!(PARTICLE_DRAW_ALPHA_OFFSET.is_multiple_of(4), "Vulkan requires a 4-aligned offset");
+    // A `const` block for the same reason the push-size claim below is one: both operands are
+    // compile-time constants, so a runtime `assert!` on them proves nothing at runtime.
+    const {
+        assert!(
+            PARTICLE_DRAW_ALPHA_OFFSET >= PARTICLE_DRAW_ADDITIVE_OFFSET + 20,
+            "the two commands must not overlap — a VkDrawIndexedIndirectCommand is 20 bytes"
+        );
+    }
     assert_eq!(PARTICLE_QUAD_INDEX_COUNT, 6, "two triangles");
     assert_eq!(PARTICLE_QUAD_IB_BYTES, 12, "six u16 indices");
     assert_eq!(PARTICLE_LOCAL_SIZE, 256, "emit + sim group edge (the research corpus's number)");

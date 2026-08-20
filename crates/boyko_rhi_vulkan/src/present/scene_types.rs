@@ -3685,6 +3685,16 @@ pub struct ParticleActivation<'a> {
     /// resolved render path (`LESS` under Deferred's custom-linear depth, `GREATER` under the
     /// three reverse-Z paths), so exactly one `VkPipeline` exists per process.
     pub draw_pipeline: &'a VulkanGraphicsPipeline,
+    /// Rung P2: the ALPHA billboard graphics pipeline — the same two shader modules, the same
+    /// layout object, the same boot-frozen depth compare op and the same `depth_write = false`, and
+    /// `BlendState::STRAIGHT_ALPHA` where the additive one carries `BlendState::ADDITIVE`.
+    ///
+    /// A second `VkPipeline` and NOT a second shader variant: D10's partition is two push-constant
+    /// values over one pipeline as far as the SHADER is concerned, but the blend factors are fixed
+    /// pipeline state on this device (no `VK_EXT_extended_dynamic_state3` is enabled), so the
+    /// class distinction has to live in a pipeline object. Both are boot-frozen; nothing is created
+    /// per frame.
+    pub draw_pipeline_alpha: &'a VulkanGraphicsPipeline,
     /// THIS frame's parity's compute set over the shared Set-0 vocabulary (bindings 0..9). The
     /// three compute passes bind the SAME set; each module declares only the subset it uses.
     pub sets: &'a VulkanBindGroup,
@@ -3774,10 +3784,18 @@ pub struct ParticleActivation<'a> {
     /// only: the roles are already baked into [`Self::sets`], so nothing reads this to decide
     /// anything.
     pub parity: u32,
-    /// The 72-byte `VERTEX` push for the draw — `{ float4x4 view_proj; uint index_base; int
-    /// index_step }`, assembled host-side from the path's own view-projection rows with
-    /// `(index_base, index_step) == (0, +1)` (the P0 identity).
+    /// The 72-byte `VERTEX` push for the ADDITIVE draw — `{ float4x4 view_proj; uint index_base;
+    /// int index_step }`, assembled host-side from the path's own view-projection rows with
+    /// `(index_base, index_step) == (0, +1)` (the identity — a strictly sequential read).
     pub draw_push: [u8; crate::compute::PARTICLE_DRAW_PUSH_BYTES as usize],
+    /// Rung P2: the same 72-byte push for the ALPHA draw, differing from [`Self::draw_push`] in
+    /// its last eight bytes ONLY — `(index_base, index_step) == (capacity - 1, -1)`, the reverse
+    /// walk of the same buffer the sim wrote the alpha class into from the far end.
+    ///
+    /// Derived from [`Self::capacity`] at the activation site rather than assembled by the runner,
+    /// so CAP is read from the one place that owns it and the two derivations of `capacity - 1`
+    /// (this and the sim's push) come off the same field.
+    pub draw_push_alpha: [u8; crate::compute::PARTICLE_DRAW_PUSH_BYTES as usize],
 }
 
 impl GBufferScene<'_> {

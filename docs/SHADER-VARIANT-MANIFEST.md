@@ -97,7 +97,7 @@ and `particle_depth_compare_for` (`boyko_app/src/gpu_scene/particle.rs`) are two
 question — what does this path's depth image hold — and take the SAME `deferred_path` predicate,
 so exactly one `VkPipeline` exists per run and the two answers cannot disagree.
 
-*Byte gate:* `crates/boyko_rhi_vulkan/tests/particle_edsl_sync.rs` re-DXCs **all eight** particle
+*Byte gate:* `crates/boyko_rhi_vulkan/tests/particle_edsl_sync.rs` re-DXCs **all nine** particle
 artifacts under the recipes their headers pin and byte-compares. The base rows are load-bearing in
 both directions: they prove the `#ifdef` leaves the undefined compile byte-frozen (it does —
 verified at the landing). The same file pins the encode agreement itself
@@ -116,9 +116,9 @@ would otherwise be paid on every frame of every scene that does not use them.
 
 | Variant | `SC` | `SCS` | `.spv` | dxc `-T` | Interface delta vs base |
 |---|---|---|---|---|---|
-| base (no collision) | — | — | `particle_sim.comp.spv` | `cs_6_0` | the P0 module: Set-0 bindings 0/2/3/4/5/6/7/9, 8 B push, three wave-leader `OpAtomicIAdd`, **zero `OpFDiv`**. `cached_field_d` is written 0 at spawn and never read. |
-| sdf-collide (P1) | `1` | — | `particle_sim_sdf.comp.spv` | `cs_6_0` | **+`StructuredBuffer<uint> Buf` @10** — the engine's ONE SDF edit list, the same binding number every other field consumer uses (`sdf_mesh_shadow.comp.hlsl:97`), followed by `#include "sdf_field.hlsli"`. The buffer is boot-static and read-only for the whole present loop, so it is **not** a framegraph resource: no `ResId`, no seed row, no barrier, and `particle_barrier_stream` is byte-unmoved by this rung. Push range, layout object, descriptor sets and atomic census are all UNCHANGED (collision publishes nothing — it moves state one lane already owns exclusively). The one census that moves is `OpFDiv`: 0 → **28**, all of them the frozen field header's (7 `sdf` instantiations — 1 for `field_distance`, 6 for `sdf_normal` — × 4 divides each: `smin`, both `smax` arms, `sd_capsule`). The particle-owned text adds none, pinned source-side. |
-| **sdf-collide + skip census (P1b)** | `1` | `1` | `particle_sim_stats.comp.spv` | `cs_6_0` | **ZERO interface delta against the row above** — same nine bindings, same 8 B push, same layout object, same descriptor sets, same 28 divides, same simulation. What it adds is the SKIP-RATE INSTRUMENT: one `WaveActiveCountBits` ballot on the collide arm's own skip predicate, folded by one `WaveIsFirstLane()` into three counter words (`waves_evaluated` @7, `waves_skipped` @8, `lanes_evaluated` @9) carved out of `ParticleCounters`' pad — so it needs no buffer, no `ResId` and no barrier, and rides the existing `particle_counters_readback` channel. **⚠️ CENSUS EXCEPTION — see below. A MEASUREMENT module: nothing in a pinned boot selects it.** |
+| base (no collision) | — | — | `particle_sim.comp.spv` | `cs_6_0` | the shipping module: Set-0 bindings 0/2/3/4/5/6/7/9, **12 B push** (`steps`, `timestep`, `capacity` — the third arrived at rung P2 as the alpha class's render-index mirror), **four** wave-leader `OpAtomicIAdd`, **zero `OpFDiv`**. `cached_field_d` is written 0 at spawn and never read. |
+| sdf-collide (P1) | `1` | — | `particle_sim_sdf.comp.spv` | `cs_6_0` | **+`StructuredBuffer<uint> Buf` @10** — the engine's ONE SDF edit list, the same binding number every other field consumer uses (`sdf_mesh_shadow.comp.hlsl:97`), followed by `#include "sdf_field.hlsli"`. The buffer is boot-static and read-only for the whole present loop, so it is **not** a framegraph resource: no `ResId`, no seed row, no barrier, and `particle_barrier_stream` is byte-unmoved by this rung. Push range, layout object, descriptor sets and atomic census are all UNCHANGED against the base row of its own generation (collision publishes nothing — it moves state one lane already owns exclusively; the 3 → 4 move above is the base module's, and this variant inherits it). The one census that moves is `OpFDiv`: 0 → **28**, all of them the frozen field header's (7 `sdf` instantiations — 1 for `field_distance`, 6 for `sdf_normal` — × 4 divides each: `smin`, both `smax` arms, `sd_capsule`). The particle-owned text adds none, pinned source-side. |
+| **sdf-collide + skip census (P1b)** | `1` | `1` | `particle_sim_stats.comp.spv` | `cs_6_0` | **ZERO interface delta against the row above** — same nine bindings, same 12 B push, same layout object, same descriptor sets, same 28 divides, same simulation. What it adds is the SKIP-RATE INSTRUMENT: one `WaveActiveCountBits` ballot on the collide arm's own skip predicate, folded by one `WaveIsFirstLane()` into three counter words (`waves_evaluated` @7, `waves_skipped` @8, `lanes_evaluated` @9) carved out of `ParticleCounters`' pad — so it needs no buffer, no `ResId` and no barrier, and rides the existing `particle_counters_readback` channel. **⚠️ CENSUS EXCEPTION — see below. A MEASUREMENT module: nothing in a pinned boot selects it.** |
 
 `SC` = `SDF_COLLIDE`, `SCS` = `SDF_COLLIDE_STATS` (which implies `SC`: the census instruments the
 collide arm and has nothing to count without it). Selection is **boot-frozen, once per process**:
@@ -127,15 +127,39 @@ in a wildcard-free match, so exactly one sim `VkPipeline` exists per run. Bindin
 layout table **on every arm** — bound-but-unread under the base module, the same shape the marcher's
 `tiles_buffer`/`PointerGrid` bindings have — so the pick never reaches the descriptor plumbing.
 
+### ⚠️ The shipping budget moved 3 → 4 at rung P2 — a re-bless, not a drift
+
+D10's blend partition specifies one `InterlockedAdd` RENDER counter **per class** (the two classes
+take their positions from opposite ends of `p_render`, so a single shared counter cannot yield both),
+so the sim gained the `alpha.instanceCount` site. The per-wave budget is now 1 (all dying) / 2 (all
+surviving, ONE class) / 3 (surviving, BOTH classes) / 4 (that, mixed with dying), and each site is
+`> 0u`-guarded — so a wave carrying no alpha survivor, which is every wave of every additive-only
+scene, issues exactly the three it always did. It is **not** a widening of the aggregation: still one
+op per wave per counter, never one per lane. `SIM_WAVE_LEADER_ATOMIC_SITES` in `particle_edsl_sync`
+carries the number and the reason.
+
 ### ⚠️ The atomic-census exception, stated on the row that takes it
 
-`particle_sim_stats.comp.spv` runs **3–5 atomics per wave against D5's 1–3, BY DESIGN.** The plan's
-D5 budget prices a wave at 1 (all dying) / 2 (all surviving, one class) / 3 (mixed) `InterlockedAdd`s
-*at retirement*; this module adds **1–2 more per wave per substep** — one for the wave counter (the
-two arms are exclusive: a wave that evaluates counts as evaluated, never as both) plus one for
-`lanes_evaluated` on the evaluating arm. At the plan's steady state (one substep, an all-surviving
-wave) that is 2 + 1 = **3**; in the worst mixed case 3 + 2 = **5**. Statically the artifact carries
-**6** `OpAtomicIAdd` sites against the shipping modules' 3.
+`particle_sim_stats.comp.spv` runs **3–6 atomics per wave against the shipping modules' 1–4, BY
+DESIGN.** Re-derived here rather than transcribed, because the two bounds move differently:
+
+| | retirement (the budget above) | + census, per substep | total |
+|---|---|---|---|
+| **lower** — all-surviving, ONE class, every lane skips the field | 2 | 1 (`waves_skipped`) | **3** |
+| **upper** — mixed survive/die, BOTH classes, some lane evaluates | 4 | 2 (`waves_evaluated` + `lanes_evaluated`) | **6** |
+
+The census adds **1–2 per wave per substep** — one for the wave counter (the two arms are exclusive:
+a wave that evaluates counts as evaluated, never as both) plus one for `lanes_evaluated` on the
+evaluating arm — and the plan's steady state is ONE substep per dispatch, which the host hard-refuses
+to violate for a census frame.
+
+**Rung P2 moved the UPPER bound only, 5 → 6.** The lower stayed at 3, because an additive-only wave
+still takes exactly 2 retirement atomics — the same headline argument the shipping row makes.
+
+Statically the artifact carries **7** `OpAtomicIAdd` sites (4 retirement + 3 census) against the
+shipping modules' 4. The static count and the per-wave count are different quantities and are stated
+separately on purpose: 7 is what an opcode census can see, 3–6 is what the device runs, and putting
+the static number in a per-wave row is the transcription error this table exists to prevent.
 
 The architect's reason, recorded rather than paraphrased: **a census that forbids the instrument is a
 census that forbids measuring itself.** Gate #17 measured that the `ZONE_PARTICLE_SIM`
@@ -144,10 +168,10 @@ kernel-level term of the OPPOSITE sign at 4–6× the row's resolution, so the r
 from a timing difference at all and a device-side counter is the only remaining instrument.
 
 **The exception is NOT a widening.** `particle_sim_atomic_census_is_exactly_the_wave_leader_sites`
-and `the_collide_variant_adds_no_atomic` still assert **exactly 3** for the two modules that ship, and
-were deliberately left alone: a bound of "3 or 6" would stop gating the modules D5's budget is
-load-bearing for. The instrument's own bound lives in its own test
-(`the_stats_variant_carries_its_declared_census_exception_and_nothing_more`), which asserts 3 + 3 and
+and `the_collide_variant_adds_no_atomic` still assert an EXACT count for the two modules that ship
+(**4** since rung P2), and were deliberately left alone: a bound of "4 or 7" would stop gating the
+modules D5's budget is load-bearing for. The instrument's own bound lives in its own test
+(`the_stats_variant_carries_its_declared_census_exception_and_nothing_more`), which asserts 4 + 3 and
 **no other atomic of any kind** — a fourth census site would mean a counter nobody derives a rate
 from, and a second `OpAtomic*` species would mean the census reached for a primitive D5's
 aggregation argument does not cover.

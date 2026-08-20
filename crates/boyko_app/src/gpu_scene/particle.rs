@@ -246,6 +246,13 @@ pub(crate) struct ParticleGpuBundle {
     /// The additive billboard pipeline. Its depth compare op was frozen HERE, at boot, from the
     /// resolved render path, so exactly one `VkPipeline` exists per process.
     draw_pipeline: VulkanGraphicsPipeline,
+    /// Rung P2: the ALPHA billboard pipeline — the same descriptor, the same two shader modules and
+    /// the same boot-frozen depth compare op, differing ONLY in its `BlendState`.
+    ///
+    /// Two pipelines and not one, because blend factors are static pipeline state here (no
+    /// `VK_EXT_extended_dynamic_state3`). Two `VkPipeline`s per process, both boot-frozen: D10's
+    /// "no shader variant" holds — the two classes share one VS, one FS and one push layout.
+    draw_pipeline_alpha: VulkanGraphicsPipeline,
     /// The SHARED bindless texture set bound at set 1 — owned by `BindlessTextureTable`, borrowed
     /// as a raw handle exactly as `GBufferScene::bindless_set` does. NOT destroyed here.
     bindless_set: VkDescriptorSet,
@@ -500,35 +507,54 @@ impl ParticleGpuBundle {
             .expect("invariant: particle draw vertex shader module create");
         let draw_fs = RhiDevice::create_shader_module(device, draw_fs_spirv)
             .expect("invariant: particle draw fragment shader module create");
+        // ONE descriptor, TWO pipelines: the blend is the only field that differs between the
+        // classes, and building both from one `desc` closure is what keeps every other piece of
+        // state — the formats, the push range, the layout, the depth compare op, `CullMode::None` —
+        // provably identical instead of duplicated and drifting.
+        let draw_desc = |blend: BlendState| GraphicsPipelineDesc {
+            vertex_module: &draw_vs,
+            vertex_entry: c"main",
+            fragment_module: &draw_fs,
+            fragment_entry: c"main",
+            // Composited into `lit` (`R8G8B8A8_UNORM`), depth-tested against the path's
+            // own `D32_SFLOAT`. NO vertex layout: the four corners are generated from
+            // `SV_VertexID` and the six indices come from `quad_ib`.
+            color_formats: &[RASTER_COLOR_FORMAT],
+            depth_format: Some(Format::D32Sfloat),
+            topology: PrimitiveTopology::TriangleList,
+            vertex_layout: None,
+            push_constant_bytes: PARTICLE_DRAW_PUSH_BYTES,
+            bind_group_layout: Some(&draw_layout0),
+            // The blend is PIPELINE state, never shader code.
+            blend: Some(blend),
+            // A billboard quad is two triangles facing the camera; culling either winding
+            // would drop half of them depending on the rotation the sim stored.
+            cull_mode: CullMode::None,
+            depth_bias: None,
+        };
+        // ADDITIVE is COMMUTATIVE, which is what lets the class ship unsorted with a proof rather
+        // than a hope (plan D10).
         let draw_pipeline = ctx
             .create_graphics_pipeline_particle(
-                &GraphicsPipelineDesc {
-                    vertex_module: &draw_vs,
-                    vertex_entry: c"main",
-                    fragment_module: &draw_fs,
-                    fragment_entry: c"main",
-                    // Composited into `lit` (`R8G8B8A8_UNORM`), depth-tested against the path's
-                    // own `D32_SFLOAT`. NO vertex layout: the four corners are generated from
-                    // `SV_VertexID` and the six indices come from `quad_ib`.
-                    color_formats: &[RASTER_COLOR_FORMAT],
-                    depth_format: Some(Format::D32Sfloat),
-                    topology: PrimitiveTopology::TriangleList,
-                    vertex_layout: None,
-                    push_constant_bytes: PARTICLE_DRAW_PUSH_BYTES,
-                    bind_group_layout: Some(&draw_layout0),
-                    // The blend is PIPELINE state, never shader code — and it is the additive one
-                    // precisely because additive is COMMUTATIVE, which is what lets P0 ship
-                    // unsorted with a proof rather than a hope.
-                    blend: Some(BlendState::ADDITIVE),
-                    // A billboard quad is two triangles facing the camera; culling either winding
-                    // would drop half of them depending on the rotation the sim stored.
-                    cull_mode: CullMode::None,
-                    depth_bias: None,
-                },
+                &draw_desc(BlendState::ADDITIVE),
                 bindless.set().set_layout(),
                 depth_compare,
             )
             .expect("invariant: particle draw graphics pipeline create");
+        // STRAIGHT, not PREMULTIPLIED: `particle_draw.fs` emits `color_rgba8` unpacked and (when
+        // textured) modulated — a straight-alpha source, with no `rgb *= a` anywhere in the chain.
+        // Feeding it to the premultiplied state would double-count coverage and darken every edge.
+        //
+        // This class is NOT commutative, which is precisely why the next rung sorts it; until then
+        // its intra-class order is the order waves retired in. No image pin may be authored over
+        // OVERLAPPING alpha billboards before that lands.
+        let draw_pipeline_alpha = ctx
+            .create_graphics_pipeline_particle(
+                &draw_desc(BlendState::STRAIGHT_ALPHA),
+                bindless.set().set_layout(),
+                depth_compare,
+            )
+            .expect("invariant: particle alpha draw graphics pipeline create");
         // SAFETY: both modules were created on `device` above and are consumed by the pipeline
         // create; each is destroyed exactly once; no GPU work referencing them is in flight.
         unsafe {
@@ -557,6 +583,7 @@ impl ParticleGpuBundle {
             draw_layout0,
             draw_set0,
             draw_pipeline,
+            draw_pipeline_alpha,
             bindless_set: bindless.set().set(),
             capacity,
             collision,
@@ -611,6 +638,7 @@ impl ParticleGpuBundle {
             emit_pipeline: &self.emit,
             sim_pipeline: &self.sim,
             draw_pipeline: &self.draw_pipeline,
+            draw_pipeline_alpha: &self.draw_pipeline_alpha,
             sets: &self.sets[parity as usize],
             draw_set0: &self.draw_set0[fi],
             draw_set1: self.bindless_set,
@@ -637,6 +665,7 @@ impl ParticleGpuBundle {
             frame_index: push.frame_index,
             parity,
             draw_push: push.draw_push,
+            draw_push_alpha: alpha_draw_push(push.draw_push, self.capacity),
         }
     }
 
@@ -768,6 +797,7 @@ impl ParticleGpuBundle {
         // (sets before their layout, pipelines before the layout their layouts embed, buffers
         // last).
         unsafe {
+            RhiDevice::destroy_graphics_pipeline(ctx, self.draw_pipeline_alpha);
             RhiDevice::destroy_graphics_pipeline(ctx, self.draw_pipeline);
             for bg in self.draw_set0 {
                 RhiDevice::destroy_bind_group(ctx, bg);
@@ -896,6 +926,40 @@ pub(crate) fn particle_draw_spirv_for(deferred_path: bool) -> (&'static [u32], &
     } else {
         (particle_draw_vs_spirv(), particle_draw_fs_spirv())
     }
+}
+
+/// Rung P2 (plan D10): the ALPHA class's `VERTEX` push, derived from the ADDITIVE one.
+///
+/// The two differ in their last eight bytes and nowhere else: bytes `[0,64)` are the path's own
+/// view-projection rows, which BOTH classes must agree on to the last bit (they are one raster of
+/// one scene), and `[64,72)` carry the render-index affine the VS applies as
+/// `index_base + index_step * SV_InstanceID` — `(0, +1)` for additive and `(capacity - 1, -1)`
+/// here, the reverse walk of the far end the sim wrote this class into.
+///
+/// Derived rather than assembled: copying the matrix from the additive push makes the
+/// "one projection" property structural instead of a thing two call sites have to keep true.
+///
+/// Pure, so the transform is testable without a device.
+///
+/// # Panics (debug)
+///
+/// `debug_assert!`s `capacity > 0` — a zero capacity would make `index_base` wrap to `u32::MAX`
+/// and every alpha instance read past the render buffer, on a device with `robustBufferAccess`
+/// OFF. The bundle's capacity is boot-frozen from `ParticleConfig`, which clamps it above zero.
+///
+/// No `#[inline]`: this is a private fn in the same crate as its one caller, called ONCE per frame
+/// from `activation`. LLVM inlines it or does not on its own evidence, and an attribute here would
+/// be decoration — principle 7's measured-inlining rule, which is about not annotating for
+/// cosmetics as much as it is about not over-annotating hot code.
+fn alpha_draw_push(
+    additive: [u8; PARTICLE_DRAW_PUSH_BYTES as usize],
+    capacity: u32,
+) -> [u8; PARTICLE_DRAW_PUSH_BYTES as usize] {
+    debug_assert!(capacity > 0, "invariant: the boot-frozen particle capacity is non-zero");
+    let mut push = additive;
+    push[64..68].copy_from_slice(&(capacity - 1).to_ne_bytes());
+    push[68..72].copy_from_slice(&(-1i32).to_ne_bytes());
+    push
 }
 
 /// **Rung P1b: the census's one-substep precondition, enforced as a HARD REFUSAL.**
@@ -1184,6 +1248,99 @@ fn boot_fill(ctx: &VulkanContext, capacity: u32, t: BootFillTargets<'_>) {
 mod tests {
     use super::*;
 
+    // ── Rung P2: the alpha class's index transform ──────────────────────────
+    //
+    // The transform's failure mode is INVISIBLE TO EVERY IMAGE GATE, measured rather than assumed:
+    // forcing it to the additive identity produced a dump BYTE-IDENTICAL to the `particle_additive`
+    // golden (the alpha command then re-draws the additive records, which are already white). So
+    // the cheap pin has to live here — and `alpha_draw_push` is a pure fn precisely so it can.
+
+    /// The additive push this fixture derives from: a recognisable matrix pattern in `[0,64)` and
+    /// the P0 identity `(0, +1)` in the tail, i.e. exactly what the runner assembles.
+    fn additive_push_fixture() -> [u8; PARTICLE_DRAW_PUSH_BYTES as usize] {
+        let mut push = [0u8; PARTICLE_DRAW_PUSH_BYTES as usize];
+        for (i, b) in push[..64].iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(7).wrapping_add(3);
+        }
+        push[64..68].copy_from_slice(&0u32.to_ne_bytes());
+        push[68..72].copy_from_slice(&1i32.to_ne_bytes());
+        push
+    }
+
+    #[test]
+    fn the_alpha_push_mirrors_the_index_and_reverses_the_step() {
+        let additive = additive_push_fixture();
+        let alpha = alpha_draw_push(additive, 65_536);
+
+        assert_eq!(
+            u32::from_ne_bytes(alpha[64..68].try_into().expect("invariant: 4 bytes")),
+            65_535,
+            "index_base must be `capacity - 1` — the TOP of the render buffer, which is where the \
+             sim wrote this class from"
+        );
+        assert_eq!(
+            i32::from_ne_bytes(alpha[68..72].try_into().expect("invariant: 4 bytes")),
+            -1,
+            "index_step must be -1: the alpha class is written DOWNWARD from the far end, so the \
+             VS must walk it downward or read records nothing wrote"
+        );
+    }
+
+    /// The two classes must agree on the projection **to the last bit** — they are one raster of
+    /// one scene, and two derivations of the view-projection would be two chances to disagree.
+    /// This is why `alpha_draw_push` derives from the additive push instead of assembling its own.
+    #[test]
+    fn the_alpha_push_shares_the_additive_view_projection_byte_for_byte() {
+        let additive = additive_push_fixture();
+        let alpha = alpha_draw_push(additive, 4_096);
+
+        assert_eq!(
+            alpha[..64],
+            additive[..64],
+            "bytes [0,64) are the path's own view-projection rows and must be copied, not rebuilt"
+        );
+        assert_ne!(
+            alpha[64..72],
+            additive[64..72],
+            "...and the tail must differ, or the alpha draw walks the ADDITIVE range — the failure \
+             this whole test exists for, and the one no image gate can see"
+        );
+    }
+
+    /// The transform is exactly an involution on the index space the sim mirrors with: for every
+    /// class-dense position `q`, the VS's `index_base + index_step * q` must land on the sim's own
+    /// `capacity - 1 - q`. Stated over a RANGE rather than one point, because an off-by-one here
+    /// puts the first alpha billboard one slot past the last written record.
+    #[test]
+    fn the_vs_affine_lands_on_the_slot_the_sim_wrote() {
+        const CAP: u32 = 1_024;
+        let alpha = alpha_draw_push(additive_push_fixture(), CAP);
+        let base = u32::from_ne_bytes(alpha[64..68].try_into().expect("invariant: 4 bytes"));
+        let step = i32::from_ne_bytes(alpha[68..72].try_into().expect("invariant: 4 bytes"));
+
+        for q in [0u32, 1, 2, 17, CAP / 2, CAP - 2, CAP - 1] {
+            let vs_reads = (base as i32 + step * q as i32) as u32;
+            let sim_wrote = CAP - 1 - q;
+            assert_eq!(vs_reads, sim_wrote, "class-dense alpha position {q} at capacity {CAP}");
+        }
+    }
+
+    /// The wave-leader `InterlockedAdd` sites both SHIPPING sim modules carry: the list counter
+    /// (`alive_count_next`), each blend class's render counter, and the dying path's free-list push.
+    ///
+    /// **Four since rung P2, up from three** — D10's blend partition gives each class its own render
+    /// counter, since the two take positions from opposite ends of `p_render` and one shared counter
+    /// cannot yield both. Not a widening of the aggregation: still one op per wave per counter,
+    /// each `> 0u`-guarded, so an additive-only wave issues the three it always did.
+    ///
+    /// Mirrors `particle_edsl_sync`'s `SIM_WAVE_LEADER_ATOMIC_SITES`; both read the same committed
+    /// artifacts, from opposite sides of the crate boundary.
+    const SIM_SHIPPING_ATOMIC_SITES: usize = 4;
+
+    /// The census's own `InterlockedAdd` sites in the `-D SDF_COLLIDE_STATS` instrument
+    /// (`waves_evaluated`, `waves_skipped`, `lanes_evaluated`). Unmoved by rung P2.
+    const SIM_CENSUS_ATOMIC_SITES: usize = 3;
+
     /// `OpExecutionMode`'s opcode (SPIR-V 1.x core, section 3.32.6).
     const OP_EXECUTION_MODE: u32 = 16;
     /// The `DepthReplacing` execution mode — "this fragment stage writes `FragDepth`"
@@ -1399,9 +1556,9 @@ mod tests {
     /// Identity alone is weaker here than it was for rung P1, because the stats module and the
     /// collide module share every binding — the census writes to `p_counters` @0, which the sim has
     /// bound since P0. So `declares_binding` cannot tell them apart, and the property claim is the
-    /// ATOMIC POPULATION instead: the census is three more `OpAtomicIAdd` sites (6 against the
-    /// shipping 3), which is the one thing an `embed_spirv!` pointed back at the wrong `.spv` could
-    /// not fake.
+    /// ATOMIC POPULATION instead: the census is three more `OpAtomicIAdd` sites (7 against the
+    /// shipping 4 since rung P2 — see [`SIM_SHIPPING_ATOMIC_SITES`]), which is the one thing an
+    /// `embed_spirv!` pointed back at the wrong `.spv` could not fake.
     #[test]
     fn the_stats_arm_takes_the_instrumented_module_and_the_shipping_arms_do_not() {
         let stats = particle_sim_spirv_for(ParticleCollision::SdfStats);
@@ -1422,14 +1579,27 @@ mod tests {
              would report a skip rate of 0/0 while every other pin stayed green"
         );
 
-        // The atomic population, read out of the committed artifact. 3 wave-leader sites in both
-        // shipping modules (plan D5); 6 in the instrument (D5's three plus the census's three).
-        assert_eq!(count_atomic_iadd(base), 3, "the base sim's D5 budget");
-        assert_eq!(count_atomic_iadd(sdf), 3, "collision publishes nothing (rung P1's claim)");
+        // The atomic population, read out of the committed artifact: the shipping wave-leader
+        // sites in both shipping modules, plus the census's three in the instrument.
+        //
+        // Expressed against the named consts rather than as literals, because rung P2 moved the
+        // shipping half from 3 to 4 (D10's per-class render counter) and a literal would have had
+        // to be re-derived by hand at exactly the moment it changed. This test went RED on that
+        // move, which is what a pin is for.
+        assert_eq!(
+            count_atomic_iadd(base),
+            SIM_SHIPPING_ATOMIC_SITES,
+            "the base sim's wave-leader budget"
+        );
+        assert_eq!(
+            count_atomic_iadd(sdf),
+            SIM_SHIPPING_ATOMIC_SITES,
+            "collision publishes nothing (rung P1's claim)"
+        );
         assert_eq!(
             count_atomic_iadd(stats),
-            6,
-            "the instrument must carry D5's three sites PLUS the census's three — this is the \
+            SIM_SHIPPING_ATOMIC_SITES + SIM_CENSUS_ATOMIC_SITES,
+            "the instrument must carry the shipping sites PLUS the census's three — this is the \
              property that distinguishes it from the module it measures"
         );
     }

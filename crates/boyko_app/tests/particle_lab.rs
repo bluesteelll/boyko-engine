@@ -72,6 +72,24 @@ const MIN_PARTICLE_PIXELS: usize = 64;
 /// Any-channel floor separating "the frame was rendered" from "the frame is black".
 const NONBLACK_FLOOR: u8 = 12;
 
+/// Rung P2: the blue floor an ALPHA-class pixel must clear.
+///
+/// `particle_scene::LAB_ALPHA_COLOR` is pure blue at 75 % coverage, so over the fixture's warm
+/// sun-lit floor the composited pixel is ~`(210, 21, 22)` in BGR — far above this, so the threshold
+/// is a "did the class draw at all" probe rather than a tuning-sensitive one.
+const ALPHA_BLUE_FLOOR: u8 = 120;
+/// How far the blue channel must lead the other two.
+///
+/// Both this and the floor are load-bearing: the scene's `SkyLight` ambient IS blue-leading
+/// (`[0.26, 0.32, 0.42]`) and is excluded by BOTH margins at once — ~107 against the 120 floor,
+/// ~41 against this 60. See `LabImage::count_blue_dominant`'s doc for why that is stated as a
+/// measurement rather than as "nothing else in the scene is blue".
+const ALPHA_BLUE_MARGIN: u8 = 60;
+
+/// The minimum count of alpha-class pixels when `BOYKO_PARTICLE_ALPHA` is armed — the same
+/// derivation as [`MIN_PARTICLE_PIXELS`], on the second emitter's identically-sized fan.
+const MIN_ALPHA_PIXELS: usize = 64;
+
 /// **The armed particle dump.** See the module doc for what it asserts and what it hands to the
 /// owner.
 #[test]
@@ -111,9 +129,10 @@ fn particle_lab_screenshot_dump() {
     // that is x in [1/6 w, 5/6 w) and y in [0, 3/4 h).
     let region = (win / 6, 0, win - win / 6, win * 3 / 4);
     let white_in_fan = image.count_white_in(region.0, region.1, region.2, region.3, WHITE_FLOOR);
+    let alpha_pixels = image.count_blue_dominant(ALPHA_BLUE_FLOOR, ALPHA_BLUE_MARGIN);
     println!(
         "particle_lab: dump={dump} {}x{} nonblack={nonblack} white={white} \
-         white_in_fan={white_in_fan} max_channel={} sha256={}",
+         white_in_fan={white_in_fan} alpha_pixels={alpha_pixels} max_channel={} sha256={}",
         image.width,
         image.height,
         image.max_channel(),
@@ -168,4 +187,29 @@ fn particle_lab_screenshot_dump() {
              those two: it reports what the compute half published."
         }
     );
+
+    // ── Rung P2's blend partition. Both directions are asserted, and the disarmed one is what
+    //    makes the armed one evidence rather than a threshold that happened to be met: the
+    //    fixture's default scene contains no alpha-class effect, so a blue-dominant pixel there
+    //    would mean the class predicate mis-selected and survivors were written to the far end of
+    //    `p_render` — visible as MISSING additive particles, which the count above cannot see
+    //    (it would simply be lower, and "lower" is what a tuning drift looks like too).
+    if particle_scene::alpha_class_armed() {
+        assert!(
+            alpha_pixels >= MIN_ALPHA_PIXELS,
+            "the ALPHA class reached no pixel: {alpha_pixels} blue-dominant pixels, floor \
+             {MIN_ALPHA_PIXELS}. The second emitter simulated (the readback gate reports \
+             `alpha.instanceCount` separately), so this is the second draw slot, its \
+             `(index_base, index_step) == (capacity - 1, -1)` push, or its `STRAIGHT_ALPHA` \
+             pipeline — in that order of suspicion. A reversed index transform reads the ADDITIVE \
+             end of the buffer and renders the white fan twice instead."
+        );
+    } else {
+        assert_eq!(
+            alpha_pixels, 0,
+            "no alpha-class effect is in this scene, yet {alpha_pixels} blue-dominant pixels \
+             reached `lit`. Nothing in the disarmed fixture is blue: the floor is warm and the \
+             additive billboards are white."
+        );
+    }
 }

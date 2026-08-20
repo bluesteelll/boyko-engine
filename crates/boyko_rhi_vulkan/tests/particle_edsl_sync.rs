@@ -468,11 +468,64 @@ fn draw_arg_instance_count_word_indices_are_generator_derived() {
          {ADDITIVE_INSTANCE_COUNT_OFFSET} — this is the address the returning InterlockedAdd \
          allocates render positions from"
     );
-    // The sim must NOT name the alpha counter at P0: the alpha class is unreachable here, and a
-    // reference to it would mean a class select shipped before the pass that needs one.
+    // RUNG P2 RE-BLESS. Until the blend partition landed this asserted the NEGATIVE — the sim must
+    // not name the alpha counter, because the class was unreachable and a reference to it would
+    // have meant a class select shipped before the draw that needs one. The draw now exists, so
+    // the claim inverts: the sim must name it, at the word DERIVED from the same byte offset, and
+    // must reserve on it with the alpha class's own count.
     assert!(
-        !sim.contains("DRAW_ALPHA_INSTANCE_WORD"),
-        "particle_sim must not reference the alpha render counter at P0 (additive-only)"
+        sim.contains(&format!("static const uint DRAW_ALPHA_INSTANCE_WORD    = {alpha_word}u;")),
+        "particle_sim's ALPHA render counter must sit at the word derived from byte offset \
+         {ALPHA_INSTANCE_COUNT_OFFSET} — a wrong word here reserves render positions out of the \
+         additive command's `firstIndex` field, with no validation message and a plausible image"
+    );
+    assert!(
+        sim.contains("InterlockedAdd(p_draw_args[DRAW_ALPHA_INSTANCE_WORD], q_count, q_base_raw);"),
+        "particle_sim must RESERVE on the alpha counter, not merely declare its word index — a \
+         declared-but-unused counter leaves `alpha.instanceCount` at kickoff's zero, so the second \
+         draw fetches zero instances and the class is silently invisible while every offset pin \
+         above stays green"
+    );
+}
+
+/// **The alpha class's index MIRROR, pinned at the shader source — the write half of the transform
+/// whose read half `alpha_draw_push` owns.**
+///
+/// The two halves must be inverses: the sim writes `p_render[capacity - 1 - q_pos]` and the VS
+/// reads `index_base + index_step * SV_InstanceID` with `(capacity - 1, -1)`. `boyko_app`'s own
+/// `#[cfg(test)] mod tests` pins the READ half against the same arithmetic; nothing pinned the
+/// WRITE half, which is the one that lives in a generated shader.
+///
+/// **Why a cheap text pin and not "the image will show it":** MEASURED at this rung — forcing the
+/// read half to the additive identity produced a dump BYTE-IDENTICAL to the `particle_additive`
+/// golden, because the alpha command then re-draws the (already white) additive records. A mirror
+/// that broke in either direction is therefore invisible to every image gate in the tree, and its
+/// only cheap witnesses are this assertion and the counters readback.
+#[test]
+fn the_alpha_class_writes_the_mirrored_render_index() {
+    let sim = read_shader("particle_sim.comp.hlsl");
+
+    assert!(
+        sim.contains("uint r_pos = is_alpha ? (pc.capacity - 1u - q_pos) : (r_base + r_lane);"),
+        "particle_sim must select the MIRRORED render index for the alpha class and the ascending \
+         one for the additive class. The two ranges grow toward each other from opposite ends of \
+         one buffer; a class writing the wrong end overwrites the other's records, and the image \
+         that results is a plausible one"
+    );
+    assert!(
+        sim.contains("uint q_pos = min(q_base + q_lane, pc.capacity - 1u);"),
+        "the mirror's operand must be CLAMPED (F25). Over `uint`, an alpha reservation past \
+         `capacity` makes `capacity - 1 - q_pos` UNDERFLOW to ~0xFFFFFFFF — an unbounded \
+         out-of-range store with `robustBufferAccess` OFF, i.e. UB rather than a clamp. The \
+         additive arm overshoots boundedly and needs no such guard; the asymmetry is the reason \
+         this one exists"
+    );
+    assert!(
+        sim.contains("uint q_count = w_count - r_count;")
+            && sim.contains("uint q_lane  = w_lane - r_lane;"),
+        "the alpha class's count and rank must be DERIVED by subtraction rather than balloted: two \
+         wave ops instead of four, and — the property that matters — exact even under \
+         non-reconvergence, because both operands are ballots over the same active set"
     );
 }
 
@@ -988,12 +1041,21 @@ fn particle_emit_carries_zero_atomics() {
 }
 
 /// The wave-leader `InterlockedAdd` sites in `particle_sim`, enumerated: the LIST counter
-/// (`alive_count_next`), the additive class's RENDER counter (`additive.instanceCount`), and the
-/// dying path's free-list push (`dead_count`).
+/// (`alive_count_next`), the ADDITIVE class's RENDER counter (`additive.instanceCount`), the ALPHA
+/// class's (`alpha.instanceCount`), and the dying path's free-list push (`dead_count`).
 ///
-/// Three, not two and not four. Two would mean a counter lost its reservation; four would mean
-/// P2's alpha counter (or a re-introduced mirror) shipped early.
-const SIM_WAVE_LEADER_ATOMIC_SITES: usize = 3;
+/// **FOUR since rung P2, up from three — a DELIBERATE re-bless with its reason recorded here.**
+/// D10's blend partition specifies one `InterlockedAdd` counter PER CLASS (the two classes take
+/// their render positions from opposite ends of `p_render`, so one shared counter could not yield
+/// both), and the sim gained the alpha one. It is NOT a widening of the aggregation: the ops are
+/// still ONE per wave per counter, never one per lane, and each is `> 0u`-guarded, so a wave
+/// carrying no alpha survivor — every wave of every additive-only scene, i.e. every image pin
+/// shipped before P2 — issues exactly the three it always did.
+///
+/// Three now means a counter lost its reservation, or the alpha class was reverted without this
+/// number being moved back. Five would mean a mirror (M1's deleted `InterlockedMax` shape) or a
+/// per-lane form came back.
+const SIM_WAVE_LEADER_ATOMIC_SITES: usize = 4;
 
 #[test]
 fn particle_sim_atomic_census_is_exactly_the_wave_leader_sites() {
@@ -1006,14 +1068,16 @@ fn particle_sim_atomic_census_is_exactly_the_wave_leader_sites() {
     };
     assert_eq!(
         sim.op_atomic_iadd, SIM_WAVE_LEADER_ATOMIC_SITES,
-        "particle_sim must carry exactly the three wave-leader InterlockedAdd sites (plan D5's \
-         per-wave budget). A HIGHER count is the per-lane form the wave aggregation exists to \
+        "particle_sim must carry exactly the {SIM_WAVE_LEADER_ATOMIC_SITES} wave-leader \
+         InterlockedAdd sites (plan D5's per-wave budget, as re-blessed at rung P2 — see the \
+         const's doc). A HIGHER count is the per-lane form the wave aggregation exists to \
          delete — ~0.5 ms/frame at 1M against ~32 us; a LOWER one means a reservation went \
          missing. Census: {sim:?}"
     );
     assert_eq!(
         sim.op_atomic_any, SIM_WAVE_LEADER_ATOMIC_SITES,
-        "particle_sim must carry NO atomic beyond those three; census: {sim:?}"
+        "particle_sim must carry NO atomic beyond those {SIM_WAVE_LEADER_ATOMIC_SITES}; census: \
+         {sim:?}"
     );
 }
 
@@ -1031,12 +1095,12 @@ fn the_collide_variant_adds_no_atomic() {
     };
     assert_eq!(
         sdf.op_atomic_iadd, SIM_WAVE_LEADER_ATOMIC_SITES,
-        "the -D SDF_COLLIDE sim must carry exactly the same three wave-leader InterlockedAdd sites \
-         as the base module; census: {sdf:?}"
+        "the -D SDF_COLLIDE sim must carry exactly the same wave-leader InterlockedAdd sites as \
+         the base module; census: {sdf:?}"
     );
     assert_eq!(
         sdf.op_atomic_any, SIM_WAVE_LEADER_ATOMIC_SITES,
-        "the -D SDF_COLLIDE sim must carry NO atomic beyond those three; census: {sdf:?}"
+        "the -D SDF_COLLIDE sim must carry NO atomic beyond those; census: {sdf:?}"
     );
 }
 
@@ -1052,17 +1116,23 @@ const SIM_STATS_CENSUS_ATOMIC_SITES: usize = 3;
 fn the_stats_variant_carries_its_declared_census_exception_and_nothing_more() {
     // THE CENSUS EXCEPTION, ASSERTED AGAINST THE ROW THAT DECLARES IT — never by widening the two
     // pins above. `docs/SHADER-VARIANT-MANIFEST.md`'s `particle_sim_stats.comp.spv` row states that
-    // this module runs 3–5 atomics per wave against D5's 1–3, BY DESIGN, because a census that
-    // forbids the instrument is a census that forbids measuring itself.
+    // this module runs 3–6 atomics per wave against the shipping budget's 1–4, BY DESIGN, because a
+    // census that forbids the instrument is a census that forbids measuring itself. (3–6 is the
+    // PER-WAVE figure — `retirement 2..4 + census 1..2`. The 7 below is the STATIC site count, a
+    // different quantity; conflating them is how a per-wave row acquires a static number.)
     //
-    // The exception is bounded HERE rather than left open: exactly D5's three wave-leader sites
+    // The exception is bounded HERE rather than left open: exactly the shipping wave-leader sites
     // plus exactly the census's three, and NO other atomic of any kind. A fourth census site would
     // mean the instrument grew a counter nobody derived a rate from — the dead-datum class — and a
     // second `OpAtomic*` species would mean it reached for a primitive D5's aggregation argument
     // does not cover.
     //
+    // It is expressed as `shipping + census` rather than as a literal on purpose: rung P2 moved the
+    // shipping half from 3 to 4 (the alpha class's render counter), and a literal would have had to
+    // be re-derived by hand at exactly the moment the number it depends on moved.
+    //
     // Widening `particle_sim_atomic_census_is_exactly_the_wave_leader_sites` to accommodate this
-    // module would have been the defect: a bound of "3 or 6" stops gating the two modules that
+    // module would have been the defect: a bound of "4 or 7" stops gating the two modules that
     // ship, which is the only place D5's budget is load-bearing.
     let Some(stats) = census_of("particle_sim_stats.comp") else {
         eprintln!(
@@ -1137,6 +1207,105 @@ fn the_stats_variant_folds_its_census_through_one_wave_leader() {
         count(&sdf_dis, "OpGroupNonUniformBroadcastFirst"),
         "the census reserves nothing, so it needs no WaveReadLaneFirst broadcast: its counters are \
          write-only from the device's side"
+    );
+}
+
+/// **The retirement block's ballots and its election must share ONE basic block — a SOUNDNESS pin,
+/// not a style one.**
+///
+/// The wave-aggregation argument (plan D5) reads the ballots on the CONVERGED wave and then elects
+/// one leader to publish the reservations. That is only true while nothing splits the wave between
+/// the two: Vulkan guarantees no reconvergence at a merge block without
+/// `VK_KHR_shader_maximal_reconvergence`, so a divergent wave reaching the election in two groups
+/// elects TWO leaders, each of which publishes the FULL-wave counts it read before the split.
+///
+/// MEASURED, on rung P2's first cut: writing the class predicate as `survives && !is_alpha` put two
+/// `OpSelectionMerge` regions here, because DXC lowers a short-circuit into control flow. The
+/// consequences would have been `alive_count_next` and `dead_count` each advanced twice (B3's
+/// `N + D == CAP` broken, the next kickoff walking entries nothing wrote) and — silently — the
+/// dying group contributing `w_count` to `alpha.instanceCount` in an ADDITIVE-ONLY scene, pointing
+/// the alpha draw at a never-written region of `p_render`.
+///
+/// **Nothing else in this tree can see it.** Every fixture leg runs `LAB_LIFETIME = 8 s` against
+/// ~30 ms of virtual time, so `dead_count == 0` in every readback row and no wave is ever mixed.
+/// The shader spells the predicate bitwise (`&`); this is what keeps the next `&&` from
+/// re-introducing the hazard without a red test.
+///
+/// # WHERE the split sits is the whole question, and the span is chosen accordingly
+///
+/// Established by compiling both shapes and reading the artifact, not by reasoning:
+///
+/// * `&&` written INLINE inside the two ballot arguments — the rung's first cut — puts the merge
+///   regions **between the ballots**, so a leader elected after the split publishes counts taken
+///   partly before it. **This is the unsound one**, and it is what this test reddens on (proven by
+///   mutation: restoring that spelling fails this assertion).
+/// * `&&` at a HOISTED `bool` puts one merge region **before every ballot**. That one is benign:
+///   each divergent group then takes its own ballots AND elects its own leader, so every group
+///   publishes exactly its own lanes' reservations and `w_base + w_lane` stays unique. It passes
+///   this test, correctly.
+/// * `&` emits no region at all, which is what ships — strictly the cheapest of the three, and it
+///   keeps the whole predicate computation converged so a later edit cannot hoist a ballot above a
+///   branch without this test noticing.
+///
+/// So the span is `first ballot → election` rather than "anywhere near here": legitimate control
+/// flow (the early return, the substep loop) sits above the ballots, and widening the span to
+/// include it would make this test fail on correct code and then be relaxed until it failed on
+/// nothing.
+#[test]
+fn the_retirement_ballots_and_the_election_share_one_basic_block() {
+    let Some(dis) = disassembly_of("particle_sim.comp") else {
+        eprintln!(
+            "SKIP the_retirement_ballots_and_the_election_share_one_basic_block: no spirv-dis on \
+             this host"
+        );
+        return;
+    };
+
+    // The span is delimited by the artifact's own opcodes rather than by a line number: from the
+    // FIRST ballot of the retirement block to the election that consumes its counts.
+    let first_ballot = dis
+        .find("OpGroupNonUniformBallot ")
+        .expect("invariant: the sim takes at least one wave ballot");
+    let elect = dis
+        .find("OpGroupNonUniformElect")
+        .expect("invariant: the sim elects a wave leader to publish its reservations");
+    assert!(
+        first_ballot < elect,
+        "the ballots must precede the election — they are what it publishes"
+    );
+    let span = &dis[first_ballot..elect];
+
+    for splitter in ["OpSelectionMerge", "OpLoopMerge", "OpBranchConditional", "OpSwitch"] {
+        assert!(
+            !span.contains(splitter),
+            "`{splitter}` sits between the retirement block's first ballot and its \
+             `OpGroupNonUniformElect`, so the wave may reach the election SPLIT and elect one \
+             leader per divergent group — each publishing the full-wave counts read before the \
+             split. Suspect a `&&`/`||` in the class or survival predicates: DXC lowers a \
+             short-circuit into exactly this control flow. Spell it bitwise (`&`), which evaluates \
+             both operands unconditionally."
+        );
+    }
+
+    // And the span really is the whole aggregation, so the assertion above is not vacuous on an
+    // empty or truncated region: all six `WaveActiveCountBits`/`WavePrefixCountBits` results and
+    // both class subtractions are inside it.
+    let count = |hay: &str, op: &str| -> usize {
+        hay.lines().flat_map(|l| l.split_whitespace()).filter(|t| *t == op).count()
+    };
+    assert_eq!(
+        count(span, "OpGroupNonUniformBallotBitCount"),
+        6,
+        "the span must hold all six ballot reductions/scans (survives, !survives, add_class — a \
+         Reduce and an ExclusiveScan each); fewer means part of the aggregation escaped the block \
+         this test is checking"
+    );
+    assert_eq!(
+        count(span, "OpISub"),
+        2,
+        "the two class subtractions (`q_count = w_count - r_count`, `q_lane = w_lane - r_lane`) \
+         must sit inside the converged span too — they are the alpha class's ballots, derived \
+         rather than taken"
     );
 }
 

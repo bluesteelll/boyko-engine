@@ -117,9 +117,25 @@ pub struct ParticleEffect {
     pub restitution: f32,
     /// Rung P1 tangential friction, `[0, 1]`. Zero at P0.
     pub friction: f32,
-    /// Four `RGBA8` colour keys, already in the device's own encoding (a colour is authored as a
-    /// packed word everywhere else in this engine, so packing it again here would only invite a
+    /// Four colour keys, already in the device's own encoding (a colour is authored as a packed
+    /// word everywhere else in this engine, so packing it again here would only invite a
     /// channel-order disagreement).
+    ///
+    /// # The byte order is `0xAABBGGRR`, and it is named here because not naming it cost two bugs
+    ///
+    /// `particle_emit` copies key 0 into the particle verbatim and `particle_draw.vs` unpacks it as
+    /// `R = word & 255`, `G = (word >> 8) & 255`, `B = (word >> 16) & 255`, `A = word >> 24`. So a
+    /// `u32` literal spells **alpha, blue, green, red** left to right — the little-endian RGBA8
+    /// byte order the field's name implies, and the opposite of the `0xRRGGBBAA` an author reaches
+    /// for by habit.
+    ///
+    /// Both presets below were authored wrong in exactly that way before rung P2, and neither was
+    /// caught by anything: `smoke`'s "dim grey" was a BRIGHT RED plume and both presets' "gone"
+    /// final key was pure red. The additive blend ignores the alpha byte, only key 0 is rendered
+    /// until the colour ramp lands, and no fixture renders either preset — so the mistake was
+    /// invisible in three independent ways at once. It stops being invisible the moment an effect
+    /// is ALPHA-class, because then the byte an `0xRRGGBBAA` literal fills with red is the one the
+    /// ROP reads as coverage.
     ///
     /// ⚠️ **At P0 only key 0 is rendered**: it is copied into the particle at spawn and held for
     /// the particle's whole life. Keys 1–3 are packed and uploaded for layout parity — see the
@@ -139,9 +155,12 @@ pub struct ParticleEffect {
     /// Bindless texture index. One draw covers every effect precisely because this rides the
     /// per-particle render record instead of becoming a batch key.
     pub tex_index: u32,
-    /// [`PARTICLE_BLEND_ADDITIVE`] or [`PARTICLE_BLEND_ALPHA`]. **P0 draws only the additive
-    /// class** — the alpha slot's draw is not declared, so an alpha effect would simulate and
-    /// then not appear.
+    /// [`PARTICLE_BLEND_ADDITIVE`] or [`PARTICLE_BLEND_ALPHA`] — the class decides which END of the
+    /// render buffer this effect's survivors are written to, and therefore which of the two indirect
+    /// draw commands rasterizes them (rung P2, plan D10/M2).
+    ///
+    /// Additive is commutative under the target's 8-bit saturation and needs no sort. Alpha is not:
+    /// its intra-class order is the order the sim's waves retired in until the sort rung lands.
     pub blend_class: u32,
     /// Effect-level feature bits, forwarded verbatim.
     pub flags: u32,
@@ -353,10 +372,15 @@ pub trait ParticleEffectsExt {
     /// A slow, large, buoyant SMOKE plume: 2–3.5 s of life, a narrow cone, upward drift, heavy
     /// drag, a slow spin, and a size ramp that GROWS the billboard as it rises.
     ///
-    /// ⚠️ **Additive at P0.** Smoke wants the alpha class, whose second draw slot rung P2 lands;
-    /// until then an alpha effect would simulate correctly and draw nothing, so this preset ships
-    /// as a dim additive plume and switches class at P2. Its colour is likewise the first key only
-    /// — see [`spark`](Self::spark).
+    /// **ALPHA-class since rung P2** — the draw slot that renders it now exists, and this is the
+    /// preset whose promise the blend partition was owed. Its colour is still the first key only
+    /// (see [`spark`](Self::spark)), so the plume is a constant grey whose visible evolution is the
+    /// size ramp; the ALPHA byte of that key is what the straight-alpha blend reads as coverage.
+    ///
+    /// ⚠️ **Its intra-class draw order is the order the sim's waves retired in**, which is not
+    /// depth order — the sort is the next rung. Overlapping smoke billboards therefore composite in
+    /// an order that is correct-looking but arbitrary, and NO image pin may be authored over
+    /// overlapping alpha particles until that lands.
     fn smoke(&mut self) -> Handle<ParticleEffect>;
 }
 
@@ -388,12 +412,18 @@ impl ParticleEffectsExt for Assets<ParticleEffect> {
             collision_radius: 0.0,
             restitution: 0.0,
             friction: 0.0,
-            // Authored white-hot -> amber -> deep red -> gone. At P0 only key 0 (white-hot) is
-            // rendered, held for the particle's whole life; the remaining keys are layout parity
-            // until the post-P0 colour blend lands. The visible fade is the SIZE ramp below.
-            // `lit` is 8-bit post-tonemap, so an additive contribution below 2/255 vanishes -- key
-            // 0 is deliberately bright.
-            color_keys: [0xFFFF_FFFF, 0xFF40_C8FF, 0x8000_60FF, 0x0000_00FF],
+            // Authored white-hot -> amber -> deep red -> gone, in the `0xAABBGGRR` order the field's
+            // doc names. At P0 only key 0 (white-hot) is rendered, held for the particle's whole
+            // life; the remaining keys are layout parity until the post-P0 colour blend lands. The
+            // visible fade is the SIZE ramp below. `lit` is 8-bit post-tonemap, so an additive
+            // contribution below 2/255 vanishes -- key 0 is deliberately bright.
+            //
+            // ⚠️ KEY 3 REPAIRED at rung P2. It read `0x0000_00FF`, which is not "gone" but
+            // R=255/A=0 -- a BRIGHT RED final key, the same `0xRRGGBBAA`-shaped slip the `smoke`
+            // preset below carried and the same literal. Renders nothing different today (only key
+            // 0 reaches the device), which is exactly why it survived; it would have arrived as a
+            // red flash the day the colour ramp landed.
+            color_keys: [0xFFFF_FFFF, 0xFF40_C8FF, 0x8000_60FF, 0x0000_0000],
             color_times: [0.0, 0.25, 0.65, 1.0],
             size_keys: [1.0, 0.85, 0.5, 0.05],
             tex_index: 0,
@@ -420,15 +450,29 @@ impl ParticleEffectsExt for Assets<ParticleEffect> {
             collision_radius: 0.0,
             restitution: 0.0,
             friction: 0.0,
-            // Authored dim grey, dimming further. As with `spark`, only key 0 is rendered at P0,
-            // so the plume is a CONSTANT dim grey whose visible evolution is the growing size ramp.
-            // An additive plume must stay well under white or it clips, and `lit` is 8-bit
-            // post-tonemap, so key 0 sits just above the 2/255 floor.
-            color_keys: [0x2020_20FF, 0x1818_18FF, 0x1010_10FF, 0x0000_00FF],
+            // Grey, dimming, with a COVERAGE ramp in the ALPHA byte: under the straight-alpha
+            // blend that byte is what the ROP reads as `src_a`, so `0x60` is a plume that veils
+            // rather than replaces what is behind it. Only key 0 is rendered until the colour ramp
+            // lands, so both the grey and that coverage are constant for a particle's life and the
+            // visible evolution is the growing size ramp.
+            //
+            // The 2/255 additive floor that shaped the P0 authoring does NOT apply to this class:
+            // an alpha source at `a = 0x60/255` contributes a lerp toward its own colour rather
+            // than a sum, so a dim grey is legible instead of vanishing.
+            //
+            // ⚠️ REPAIRED HERE, and it is a real defect rather than a re-spelling: these keys were
+            // authored `0xRRGGBBAA` while the device unpacks `0xAABBGGRR` (`particle_draw.vs`:
+            // `color_rgba8 & 255` is RED). `0x2020_20FF` therefore rendered as R=255, G=32, B=32 —
+            // a BRIGHT RED plume, not the dim grey the comment beside it claimed, and the final key
+            // `0x0000_00FF` was pure red rather than "gone". Nothing caught it because the additive
+            // blend ignores the alpha byte and no fixture renders this preset. `spark`'s amber key
+            // above is authored in the correct order, which is what makes this a slip in one preset
+            // rather than a convention disagreement.
+            color_keys: [0x6020_2020, 0x5018_1818, 0x3010_1010, 0x0000_0000],
             color_times: [0.0, 0.3, 0.7, 1.0],
             size_keys: [0.35, 0.7, 1.0, 1.25],
             tex_index: 0,
-            blend_class: PARTICLE_BLEND_ADDITIVE,
+            blend_class: PARTICLE_BLEND_ALPHA,
             flags: 0,
             emitter_shape: PARTICLE_SHAPE_CONE,
         })
@@ -623,11 +667,15 @@ mod tests {
 
     // ── The presets ─────────────────────────────────────────────────────────
 
-    /// Both P0 presets are ADDITIVE — the only class whose draw slot exists at P0. An alpha preset
-    /// would simulate correctly and draw nothing, which is the kind of "works, invisible" failure
-    /// no automated gate would report.
+    /// The presets cover BOTH blend classes since rung P2: `spark` is additive, `smoke` is alpha.
+    ///
+    /// Until P2 both were additive, because only that class had a draw slot and an alpha preset
+    /// would have simulated correctly and drawn nothing — the kind of "works, invisible" failure no
+    /// automated gate reports. This assertion is the re-bless of that state, and it is the
+    /// compile-time end of the live-fire evidence: the shipped mint API can now reach the class the
+    /// second draw slot renders.
     #[test]
-    fn both_p0_presets_are_additive() {
+    fn the_presets_cover_both_blend_classes() {
         let mut assets = Assets::<ParticleEffect>::default();
         let spark = assets.spark();
         let smoke = assets.smoke();
@@ -638,7 +686,38 @@ mod tests {
         );
         assert_eq!(
             assets.get(smoke).expect("invariant: a freshly minted handle resolves").blend_class,
-            PARTICLE_BLEND_ADDITIVE
+            PARTICLE_BLEND_ALPHA
+        );
+    }
+
+    /// The alpha preset carries NON-ZERO COVERAGE in its first colour key's ALPHA byte.
+    ///
+    /// The straight-alpha blend reads that byte as `src_a`, and only key 0 is rendered until the
+    /// colour ramp lands — so a zero there makes every smoke billboard exactly invisible while
+    /// every counter, every instance count and every pixel-free image gate stays green. The
+    /// additive class had no such failure mode (its `dst` factor is `ONE`), which is why this
+    /// assertion arrives with the class rather than before it.
+    ///
+    /// ⚠️ **`>> 24`, not `& 0xFF`.** The first cut of this test read the LOW byte, which is RED
+    /// (`particle_draw.vs.hlsl`: `color_rgba8 & 255` → red, `>> 24` → alpha) — so it would have
+    /// passed on `0x0020_2020`, an α = 0 key, which is EXACTLY the invisible-billboard defect its
+    /// own doc claims to catch. A guard against a byte-order mistake must not itself be written in
+    /// the wrong byte order.
+    #[test]
+    fn the_alpha_preset_key_zero_carries_coverage() {
+        let mut assets = Assets::<ParticleEffect>::default();
+        let smoke = assets.smoke();
+        let effect = *assets.get(smoke).expect("invariant: a freshly minted handle resolves");
+
+        assert_eq!(effect.blend_class, PARTICLE_BLEND_ALPHA);
+        assert!(
+            (effect.color_keys[0] >> 24) > 0,
+            "the alpha class's rendered key must carry COVERAGE in its alpha byte, got {:#010X}. \
+             Keys are `0xAABBGGRR` — the device unpacks `color_rgba8 & 255` as RED and `>> 24` as \
+             ALPHA (`particle_draw.vs.hlsl`), so an `0xRRGGBBAA`-shaped literal puts the coverage \
+             where the red channel is read and leaves α at 0: every billboard of this effect then \
+             renders exactly nothing while every counter stays green.",
+            effect.color_keys[0]
         );
     }
 

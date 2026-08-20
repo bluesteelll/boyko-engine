@@ -28,8 +28,9 @@
 //!
 //! `drawIndirectFirstInstance` is not enabled on this device, so a nonzero `firstInstance` in the
 //! fetched command is a silent corruption class. The two blend classes rung P2 adds are therefore
-//! distinguished by the VS's push-constant affine (`index_base + index_step * SV_InstanceID`),
-//! never by that field — which is why the draw below pushes 72 bytes and reads one command.
+//! distinguished by the VS's push-constant affine (`index_base + index_step * SV_InstanceID`) —
+//! `(0, +1)` for additive and `(capacity - 1, -1)` for alpha — never by that field, which is why
+//! the draw below pushes 72 bytes twice and reads two commands whose `firstInstance` is 0 in both.
 
 use core::ptr;
 
@@ -58,7 +59,7 @@ use super::super::scene_types::{GBufferScene, ParticleActivation};
 /// own.
 #[derive(Clone, Copy)]
 pub(crate) struct ParticleDrawTargets {
-    /// The frame slot's `lit` image view — the additive blend destination, entered at
+    /// The frame slot's `lit` image view — both blend classes' destination, entered at
     /// `COLOR_ATTACHMENT_OPTIMAL` (the graph derived the transition; `lit` already carries
     /// `COLOR_ATTACHMENT` usage on every path, so no image-create change was needed).
     pub(crate) color_view: VkImageView,
@@ -339,7 +340,8 @@ impl Renderer<'_> {
         //   emit     5  = barriers + bind pipeline + bind set + push + dispatchIndirect
         //   sim      5  = barriers + bind pipeline + bind set + push + dispatchIndirect
         //   ------------------------------------------------------------------------
-        //   this fn 18 on a frame that uploads and spawns; `record_particle_draw` adds 10.
+        //   this fn 18 on a frame that uploads and spawns; `record_particle_draw` adds 13
+        //   (10 before rung P2's second blend class — see that fn's own block).
         // The three brackets contribute 3 pairs / 6 timestamps on top, counted separately by
         // `open_pair`/`timestamp` rather than by `cmd()`.
         let mut ts = ParticleZones::new(zones);
@@ -528,11 +530,15 @@ impl Renderer<'_> {
             unsafe { ts.begin(self.fns, cmd, ZONE_PARTICLE_SIM) };
             ts.cmd();
             barriers(p);
-            let mut push = [0u8; 8];
+            // 12 bytes since rung P2: `capacity` is the alpha class's render-index mirror
+            // (`capacity - 1 - q_pos`), pushed rather than read from a counter word so the hot
+            // loop's tail costs no device load for a boot-frozen value.
+            let mut push = [0u8; crate::compute::PARTICLE_SIM_PUSH_BYTES as usize];
             push[..4].copy_from_slice(&act.steps.to_ne_bytes());
-            push[4..].copy_from_slice(&act.timestep.to_ne_bytes());
+            push[4..8].copy_from_slice(&act.timestep.to_ne_bytes());
+            push[8..12].copy_from_slice(&act.capacity.to_ne_bytes());
             // SAFETY: recording is open and outside a render scope. `sim_pipeline`'s layout
-            // declares `act.sets`' layout at set 0 and an 8-byte COMPUTE push range. The indirect
+            // declares `act.sets`' layout at set 0 and a 12-byte COMPUTE push range. The indirect
             // fetch reads the sim `VkDispatchIndirectCommand` at offset 16 of the live 32-byte
             // `p_dispatch_args` (4-aligned, in bounds), whose group count kickoff wrote this
             // frame behind the derived barrier.
@@ -577,11 +583,32 @@ impl Renderer<'_> {
         ts.finish();
     }
 
-    /// Particles P0: records the single indirect billboard draw into `lit`.
+    /// Particles P0/P2: records the indirect billboard draws into `lit` — one per blend class.
     ///
-    /// ONE `vkCmdDrawIndexedIndirect` covers every effect: the texture is a bindless index in the
-    /// render record, so there is no per-effect batch key and no draw split. `instanceCount` is
-    /// the sim's live survivor count, never the pool capacity.
+    /// ONE `vkCmdDrawIndexedIndirect` per CLASS covers every effect of that class: the texture is a
+    /// bindless index in the render record, so there is no per-effect batch key and no draw split.
+    /// Each `instanceCount` is the sim's live per-class survivor count, never the pool capacity, and
+    /// the two sum to `alive_count_next` (plan M2).
+    ///
+    /// # The ALPHA class is recorded FIRST, and the order is load-bearing
+    ///
+    /// Neither order is "correct" — two draws cannot interleave two classes by depth, which is the
+    /// standard two-bucket compromise this partition buys. The order is chosen so that the ADDITIVE
+    /// class's contribution stays a pure SUM over whatever the opaque + alpha stack produced:
+    /// `dst + Σ`, never `(dst + Σ) · (1 - a)`. That is exactly the property gate #16's
+    /// `particle_additive` pin rests on (additive is order-independent under 8-bit saturation while
+    /// nothing attenuates it), so putting alpha last would have made the shipped pin's
+    /// order-independence conditional on the alpha class's coverage. Both classes are still
+    /// internally correct: `alpha_over` is linear in `dst`, so the additive sum's own commutativity
+    /// is untouched either way — only the pin's argument distinguishes them.
+    ///
+    /// # A scene with no alpha effect records the same PIXELS it did at P0
+    ///
+    /// The alpha command is fetched unconditionally, but kickoff zeroes its `instanceCount` every
+    /// frame and only an alpha-class survivor raises it, so the fetched command draws zero
+    /// instances and rasterizes nothing. Two commands and one pipeline bind, no fragment.
+    /// MEASURED: with the alpha arm off, `particle_lab`'s dump hashes byte-identical to the
+    /// `particle_additive` golden it did before this rung.
     ///
     /// # Safety
     ///
@@ -591,15 +618,20 @@ impl Renderer<'_> {
     ///   pass: `color_view` at `COLOR_ATTACHMENT_OPTIMAL` and `depth_view` at
     ///   `DEPTH_ATTACHMENT_OPTIMAL`. A view of a different image, or one the graph did not name,
     ///   would be a recorded-vs-actual layout divergence (spec UB).
-    /// * `act.draw_pipeline`'s layout declares `draw_set0`'s layout at set 0, `draw_set1`'s at
-    ///   set 1, and a `VERTEX` push range of `PARTICLE_DRAW_PUSH_BYTES` at offset 0 — exactly the
-    ///   range written here.
+    /// * `act.draw_pipeline`'s and `act.draw_pipeline_alpha`'s layouts each declare `draw_set0`'s
+    ///   layout at set 0, `draw_set1`'s at set 1, and a `VERTEX` push range of
+    ///   `PARTICLE_DRAW_PUSH_BYTES` at offset 0 — exactly the range written here. The two layouts
+    ///   are therefore COMPATIBLE in the spec's sense (identical set layouts, identical push
+    ///   range), which is what lets the one `vkCmdBindDescriptorSets` below serve both draws: a
+    ///   compatible-layout pipeline switch does not disturb bound descriptor sets.
     /// * `act.quad_ib` holds six `u16` indices, boot-uploaded and already made visible to
     ///   `INDEX_READ` by the boot barrier; `act.draw_args` is the live 64-byte argument block
-    ///   created with `INDIRECT_BUFFER` usage, whose additive command at offset 0 the sim's
+    ///   created with `INDIRECT_BUFFER` usage, whose two commands — additive at offset 0 and alpha
+    ///   at offset 24, each 20 bytes inside the 64-byte allocation and 4-aligned — the sim's
     ///   `instanceCount` accumulation just filled behind the derived barrier.
     /// * `draw_count == 1` is not a choice: `multiDrawIndirect` is not enabled on this device, so
-    ///   1 is the only useful legal value, and the stride argument is then unread.
+    ///   1 is the only useful legal value, and the stride argument is then unread. It is also why
+    ///   the two classes are two commands rather than one two-element fetch.
     /// * If `zones` is armed, this frame's query pool has already been reset by the caller's own
     ///   witness and that witness seals the ring slot AFTER this call — see [`ParticleZoneArm`].
     pub(crate) unsafe fn record_particle_draw<F: FnMut(crate::framegraph::PassId)>(
@@ -621,8 +653,12 @@ impl Renderer<'_> {
         );
         let Some(p) = plan.draw else { return };
         // CENSUS ARITHMETIC (see `record_particle_compute`'s block for the convention):
-        //   draw 10 = barriers + beginRendering + bind pipeline + bind sets + push + viewport
-        //             + scissor + index buffer + drawIndexedIndirect + endRendering
+        //   draw 13 = barriers + beginRendering + bind pipeline(alpha) + bind sets + push(alpha)
+        //             + viewport + scissor + index buffer + drawIndexedIndirect(alpha)
+        //             + bind pipeline(additive) + push(additive)
+        //             + drawIndexedIndirect(additive) + endRendering
+        // (was 10 before rung P2's second blend class; the sets, viewport, scissor and index buffer
+        // are bound ONCE and serve both draws.)
         // plus this fn's ONE bracket: 1 pair / 2 timestamps.
         let mut ts = ParticleZones::new(zones);
         // Particles P0 gate #17. Opened before the barrier callback AND before
@@ -692,19 +728,50 @@ impl Renderer<'_> {
             (self.fns.cmd_bind_pipeline)(
                 cmd,
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
-                act.draw_pipeline.pipeline,
+                act.draw_pipeline_alpha.pipeline,
             );
             let sets = [act.draw_set0.descriptor_set, act.draw_set1];
             ts.cmd();
             (self.fns.cmd_bind_descriptor_sets)(
                 cmd,
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
-                act.draw_pipeline.layout,
+                act.draw_pipeline_alpha.layout,
                 0,
                 sets.len() as u32,
                 sets.as_ptr(),
                 0,
                 ptr::null(),
+            );
+            ts.cmd();
+            (self.fns.cmd_push_constants)(
+                cmd,
+                act.draw_pipeline_alpha.layout,
+                VK_SHADER_STAGE_VERTEX_BIT,
+                0,
+                act.draw_push_alpha.len() as u32,
+                act.draw_push_alpha.as_ptr().cast(),
+            );
+            ts.cmd();
+            (self.fns.cmd_set_viewport)(cmd, 0, 1, &targets.viewport);
+            ts.cmd();
+            (self.fns.cmd_set_scissor)(cmd, 0, 1, &targets.area);
+            ts.cmd();
+            (self.fns.cmd_bind_index_buffer)(cmd, act.quad_ib.buffer, 0, VK_INDEX_TYPE_UINT16);
+            ts.cmd();
+            (self.fns.cmd_draw_indexed_indirect)(
+                cmd,
+                act.draw_args.buffer,
+                crate::compute::PARTICLE_DRAW_ALPHA_OFFSET,
+                1,
+                DRAW_INDEXED_INDIRECT_STRIDE,
+            );
+            // Only the last two push words and the blend state differ; the index buffer, both
+            // descriptor sets, the viewport and the scissor are already bound and stay bound.
+            ts.cmd();
+            (self.fns.cmd_bind_pipeline)(
+                cmd,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                act.draw_pipeline.pipeline,
             );
             ts.cmd();
             (self.fns.cmd_push_constants)(
@@ -715,12 +782,6 @@ impl Renderer<'_> {
                 act.draw_push.len() as u32,
                 act.draw_push.as_ptr().cast(),
             );
-            ts.cmd();
-            (self.fns.cmd_set_viewport)(cmd, 0, 1, &targets.viewport);
-            ts.cmd();
-            (self.fns.cmd_set_scissor)(cmd, 0, 1, &targets.area);
-            ts.cmd();
-            (self.fns.cmd_bind_index_buffer)(cmd, act.quad_ib.buffer, 0, VK_INDEX_TYPE_UINT16);
             ts.cmd();
             (self.fns.cmd_draw_indexed_indirect)(
                 cmd,

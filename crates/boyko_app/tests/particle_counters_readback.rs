@@ -9,8 +9,11 @@
 //!   is on exactly one of the two lists. A leak makes the sum small, a double-count makes it large,
 //!   and both are invisible in every image the engine can produce.
 //! * **The M2 class split** — `additive.instanceCount + alpha.instanceCount == alive_count_next`.
-//!   At P0 the alpha term is structurally zero, so this reads "every survivor got a render slot";
-//!   it is stated as the sum because that is the form that catches rung P2's alpha leak.
+//!   With no alpha-class effect in the scene the alpha term is zero and this reads "every survivor
+//!   got a render slot"; under rung P2's `BOYKO_PARTICLE_ALPHA` arm BOTH terms are asserted
+//!   non-zero, which is the form the plan's P2 gate names and the only form in which the sum has
+//!   discriminating power (a shipped-but-never-written alpha counter satisfies `additive + 0`
+//!   exactly as well as a correct one).
 //! * **R9 by construction** — `additive.instanceCount` is the live count, NOT the capacity. A pool
 //!   of 65 536 that draws 65 536 instances is the pitfall this number refutes.
 //! * **F5b** — `firstInstance == 0` in both slots, read back rather than trusted.
@@ -118,17 +121,37 @@ fn particle_counters_partition_readback() {
     assert!(
         rb.class_split_sums_to_list(),
         "the class split does not sum to the list counter: additive ({}) + alpha ({}) != \
-         alive_count_next ({}). At P0 the alpha term must be 0 and the additive term must be \
-         every survivor.",
+         alive_count_next ({}). Every survivor of EITHER class takes its LIST index from \
+         alive_count_next and its RENDER index from its own class counter, so a shortfall here is \
+         the alpha leak M2 exists to catch: survivors that got a list position and no render \
+         position, or the reverse.",
         rb.additive_instance_count,
         rb.alpha_instance_count,
         rb.alive_count_next
     );
-    assert_eq!(
-        rb.alpha_instance_count, 0,
-        "P0 declares no alpha draw, so a non-zero alpha render counter means survivors were \
-         written to render slots nothing draws"
-    );
+    // ── The M2 assertion, in the form each arm can actually make.
+    if particle_scene::alpha_class_armed() {
+        // RUNG P2, and the gate the plan asks for by name: BOTH terms non-zero. Until this arm
+        // existed the split above was satisfied by `additive + 0 == alive`, which a shipped alpha
+        // counter that was never written satisfies exactly as well as a correct one.
+        assert!(
+            rb.alpha_instance_count > 0 && rb.additive_instance_count > 0,
+            "the alpha arm is armed, so BOTH classes must be live: additive={} alpha={}. A zero \
+             alpha term means the second emitter's survivors never reached the alpha render \
+             counter — they would then be drawn by neither command while the sum above still \
+             held, because a class that reserved nothing contributes nothing to either side.",
+            rb.additive_instance_count,
+            rb.alpha_instance_count
+        );
+    } else {
+        assert_eq!(
+            rb.alpha_instance_count, 0,
+            "no alpha-class effect is in this scene, so nothing may have reserved a position on \
+             the alpha render counter. A non-zero value here means the class predicate selected \
+             the wrong arm and those survivors were written to the FAR END of p_render, where the \
+             additive draw does not look."
+        );
+    }
     assert!(
         rb.draw_args_are_well_formed(),
         "the indirect draw block is malformed: first_instance additive={} alpha={}, \
@@ -160,10 +183,14 @@ fn particle_counters_partition_readback() {
         // skipped assertion looks the same in a log as one that was never reached — but it carries
         // NO discriminating power here, and the next assertion is the one that does.
         assert_eq!(
-            rb.additive_instance_count, rb.capacity,
+            rb.additive_instance_count + rb.alpha_instance_count,
+            rb.capacity,
             "the pool is saturated (dead_count == 0), so every slot is alive and every survivor \
-             must have a render position: additive ({}) must equal CAP ({})",
-            rb.additive_instance_count, rb.capacity
+             must have a render position in ONE of the two classes: additive ({}) + alpha ({}) \
+             must equal CAP ({})",
+            rb.additive_instance_count,
+            rb.alpha_instance_count,
+            rb.capacity
         );
 
         // THE NON-VACUOUS ONE. With a full free list and a live spawn request, kickoff's clamp
@@ -172,7 +199,7 @@ fn particle_counters_partition_readback() {
         // `clamped_spawns` is a live datum rather than a word nobody writes: the unsaturated ladder
         // asserts it is ZERO, which a deleted accumulator satisfies perfectly. Without this, the
         // `+=` at `particle_kickoff.comp.hlsl`'s clamp could be dropped and every gate stays green.
-        if particle_scene::spawn_per_frame() > 0 {
+        if particle_scene::spawn_per_frame() * particle_scene::emitter_count() > 0 {
             assert!(
                 rb.clamped_spawns > 0,
                 "the pool is saturated (dead_count == 0) and the fixture asks for {} spawn(s) per \
@@ -244,7 +271,10 @@ fn particle_counters_partition_readback() {
         // DERIVED from the three mechanics this fixture pins, not from the default rate:
         //
         // 1. `lab_arm_burst` writes `burst = spawn_per_frame()` on every emitter each ECS frame,
-        //    ordered BEFORE the fold, and `particle_scene::setup` spawns exactly ONE emitter.
+        //    ordered BEFORE the fold, and `particle_scene::setup` spawns `emitter_count()` of them
+        //    — ONE by default, TWO under rung P2's `BOYKO_PARTICLE_ALPHA` arm. The per-frame spawn
+        //    is the PRODUCT, and reading the count off the fixture rather than assuming one is what
+        //    keeps this bound from reddening on a correct two-class run.
         // 2. `particle_tick_emitters` folds `continuous + burst` into one `EmitRequestGpu` whose
         //    `spawn_count` is that value — `continuous` is 0 here (the emitter's `rate` is 0 and
         //    the paused clock leaves the fold's `dt` at zero) — and `ParticleEmitScratch::
@@ -267,15 +297,18 @@ fn particle_counters_partition_readback() {
         // frames_presented` EXACTLY at rates 1 / 8 / 64 / 512, so the slack term was never
         // consumed on a quiet window and this bound is tight to one frame rather than loose by
         // construction.
-        let rate = u64::from(particle_scene::spawn_per_frame());
+        let rate = u64::from(particle_scene::spawn_per_frame())
+            * u64::from(particle_scene::emitter_count());
         let bound = rate * (u64::from(rb.frames_presented) + 1);
         assert!(
             u64::from(rb.alive_count_next) <= bound,
             "more particles are alive ({}) than the fixture could have spawned: {} presented \
-             frame(s) at {rate} per frame, plus one frame of slack for a submitted-but-unpresented \
-             recreate, is {bound}",
+             frame(s) at {rate} per frame ({} per emitter × {} emitters), plus one frame of slack \
+             for a submitted-but-unpresented recreate, is {bound}",
             rb.alive_count_next,
-            rb.frames_presented
+            rb.frames_presented,
+            particle_scene::spawn_per_frame(),
+            particle_scene::emitter_count()
         );
     }
 

@@ -95,6 +95,7 @@
 //! | `BOYKO_PARTICLE_SDF` | unset | set ⇒ spawn rung P1's SDF collider slab AND give the effect its contact parameters — the SCENE half |
 //! | `BOYKO_PARTICLE_COLLIDE` | unset | set ⇒ `ParticleCollision::Sdf`, i.e. build the sim from the `-D SDF_COLLIDE` module — the SHADER half |
 //! | `BOYKO_PARTICLE_STATS` | unset | set ⇒ `ParticleCollision::SdfStats` (rung P1b's `-D SDF_COLLIDE_STATS` instrument). Implies the collide arm; it is the ONLY way `p_counters`' three stats words become non-zero, so a skip-rate run reads them through `BOYKO_PARTICLE_READBACK_FRAME` |
+//! | `BOYKO_PARTICLE_ALPHA` | unset | set ⇒ rung P2's SECOND emitter, carrying a second effect of the ALPHA blend class (blue, 75 % coverage, 1.6 units right of the additive fan). The only configuration in the tree where `alpha.instanceCount` is non-zero |
 //! | `BOYKO_PARTICLE_READBACK_FRAME` | unset | the runner's own knob (gates #7/#9 and rung P1b's skip-rate readback), not read here |
 //!
 //! The two P1 knobs are separate ON PURPOSE (see [`sdf_collider_armed`]): with the scene one set
@@ -110,7 +111,8 @@ use boyko_ecs::ecs::core::system::{Res, ResMut};
 use boyko_ecs::ecs::core::time::Time;
 use boyko_macros::Resource;
 use boyko_render::{
-    PARTICLE_BLEND_ADDITIVE, PARTICLE_SHAPE_CONE, EmitterActive, ParticleClock, ParticleCollision,
+    PARTICLE_BLEND_ADDITIVE, PARTICLE_BLEND_ALPHA, PARTICLE_SHAPE_CONE, EmitterActive,
+    ParticleClock, ParticleCollision,
     ParticleConfig, ParticleEffect, ParticleEffectHandle, ParticleEffectRefs,
     ParticleEffectScratch, ParticleEffectsExt, ParticleEmitScratch, ParticleEmitter, ParticleMode,
     particle_apply_effect_refs, particle_pack_effects, particle_tick_emitters,
@@ -190,6 +192,28 @@ pub const OCCLUDER_SIZE: f32 = 2.2;
 /// The sun direction TO the light — `examples/room.rs`'s, so the floor and the occluder are lit
 /// the way every other host fixture lights them.
 pub const SUN_DIR: [f32; 3] = [-0.45, 0.82, 0.36];
+
+// ── Rung P2's alpha class (`BOYKO_PARTICLE_ALPHA`) ───────────────────────────────────
+
+/// Rung P2's second emitter, 1.6 units to the RIGHT of the additive one.
+///
+/// Separated so the two classes' fans do not overlap ON SCREEN. That is not cosmetic: the two
+/// draws composite into one target in a fixed order (alpha, then additive), so an overlap would
+/// make the pixel evidence for one class depend on the other's coverage, and the blue-pixel count
+/// would stop being a statement about the alpha draw alone.
+pub const ALPHA_EMITTER_POS: Vec3 = Vec3::new(1.6, 0.35, 0.0);
+
+/// Rung P2's alpha-class colour key — pure BLUE at `0xC0` coverage (75 %).
+///
+/// Blue because the additive class is white and the sun-lit floor is warm, so a blue-dominant
+/// pixel can only have come from this class's draw. `0xC0` rather than `0xFF` because the point is
+/// to exercise the STRAIGHT-ALPHA blend: at full coverage `src·a + dst·(1−a)` degenerates to a
+/// plain write, and a pipeline built with the wrong blend state would look identical.
+///
+/// Spelled `0xAABBGGRR`, which is the byte order the device's `color_rgba8` unpack imposes
+/// (`particle_draw.vs`: `& 255` is RED) — the same order `ParticleEffectsExt::spark`'s amber key is
+/// authored in.
+pub const LAB_ALPHA_COLOR: u32 = 0xC0FF_0000;
 
 // ── Rung P1's collider (`BOYKO_PARTICLE_SDF`) ────────────────────────────────────────
 
@@ -311,6 +335,27 @@ pub fn sdf_collider_armed() -> bool {
 /// `ParticleCollision::Sdf` arming. See [`sdf_collider_armed`] for why this is its own knob.
 pub fn collision_armed() -> bool {
     std::env::var("BOYKO_PARTICLE_COLLIDE").is_ok()
+}
+
+/// Whether rung P2's ALPHA-class emitter is in the scene (`BOYKO_PARTICLE_ALPHA`).
+///
+/// Unset — every pre-P2 pin's configuration — the scene, the effect table, the emitter count and
+/// every device counter are exactly what they were, so the six shipped goldens render the same
+/// bytes. Set, a SECOND emitter carrying a SECOND effect of the alpha class joins the scene, which
+/// is the only configuration in the tree where `alpha.instanceCount` is non-zero and the M2
+/// identity has two live terms.
+pub fn alpha_class_armed() -> bool {
+    std::env::var("BOYKO_PARTICLE_ALPHA").is_ok()
+}
+
+/// How many emitters [`setup`] spawns — the divisor every count derived from
+/// [`spawn_per_frame`] needs, since [`lab_arm_burst`] re-arms the burst on EVERY emitter.
+///
+/// A function rather than a constant because the readback gate's spawn arithmetic must follow the
+/// alpha arm: at two emitters the fixture spawns `2 × rate` per frame, and a bound derived from one
+/// would red on a correct run.
+pub fn emitter_count() -> u32 {
+    if alpha_class_armed() { 2 } else { 1 }
 }
 
 /// Whether the sim is built from rung P1b's INSTRUMENTED module (`BOYKO_PARTICLE_STATS`) — the
@@ -567,6 +612,23 @@ pub fn lab_effect() -> ParticleEffect {
     }
 }
 
+/// Rung P2's ALPHA-class effect — [`lab_effect`] with two fields changed and nothing else.
+///
+/// The two are the whole point of the arm: `blend_class` sends the survivors to the TOP end of
+/// `p_render` and therefore to the second indirect draw, and [`LAB_ALPHA_COLOR`] makes the pixels
+/// they leave identifiable as that class's rather than the additive one's.
+///
+/// Everything else is copied rather than re-authored, so a difference between the two fans in the
+/// dump can only be the class: the same lifetime, the same uniform speed, the same flat size ramp,
+/// the same cone. The determinism constraint [`lab_effect`]'s doc states carries over unchanged.
+pub fn lab_alpha_effect() -> ParticleEffect {
+    ParticleEffect {
+        color_keys: [LAB_ALPHA_COLOR; 4],
+        blend_class: PARTICLE_BLEND_ALPHA,
+        ..lab_effect()
+    }
+}
+
 // ── The scene ────────────────────────────────────────────────────────────────────────
 
 /// The fixture scene: a floor, the sun/sky pair, the camera, ONE emitter, and — when
@@ -630,6 +692,27 @@ pub fn setup(
         // The third arming axis (D13): the config arms the subsystem, the component's presence
         // makes the entity an emitter, and this bit makes it emit NOW.
         .enable::<EmitterActive>();
+
+    if alpha_class_armed() {
+        // Rung P2's second emitter. A SECOND effect row, not the same one re-classed: the two
+        // classes have to be live SIMULTANEOUSLY for the M2 identity to have two non-zero terms,
+        // and `blend_class` is per EFFECT (the sim reads it out of the row it already fetched).
+        let alpha_effect = effects.register_effect(lab_alpha_effect());
+        commands
+            .spawn(ParticleEmitter {
+                rate: 0.0,
+                accumulator: 0.0,
+                burst: spawn_per_frame(),
+                speed_scale: 1.0,
+            })
+            .insert(Transform {
+                translation: ALPHA_EMITTER_POS,
+                rotation: EMITTER_ROTATION,
+                scale: Vec3::ONE,
+            })
+            .insert(ParticleEffectHandle(alpha_effect.index()))
+            .enable::<EmitterActive>();
+    }
 
     let sun_pose = Affine3A::look_at_rh(
         Vec3::ZERO,
@@ -796,6 +879,45 @@ impl LabImage {
     /// The brightest single channel anywhere in the image.
     pub fn max_channel(&self) -> u8 {
         self.bgra.iter().map(|p| p[0].max(p[1]).max(p[2])).max().unwrap_or(0)
+    }
+
+    /// Rung P2: pixels the ALPHA class left — blue at `floor` or more, and leading both other
+    /// channels by `margin`.
+    ///
+    /// A BLUE probe rather than a brightness one, because the additive class already owns "bright"
+    /// in this fixture: [`lab_effect`] is white-hot and [`lab_alpha_effect`] is pure blue, so the
+    /// two channels' separation is what distinguishes "the alpha draw rendered" from "the additive
+    /// draw rendered".
+    ///
+    /// # The scene DOES contain blue-leading pixels; the probe survives on its THRESHOLDS
+    ///
+    /// Stated because the first version of this doc claimed the opposite and was wrong: [`setup`]
+    /// spawns `SkyLight::new([0.26, 0.32, 0.42], …)`, whose ambient term leads in blue. It does not
+    /// reach here because it clears NEITHER threshold — ~107 against a 120 floor, and a ~41 lead
+    /// against a 60 margin — so both numbers are load-bearing and neither is decoration.
+    ///
+    /// The claim that carries the disarmed assertion is therefore EMPIRICAL, not architectural, and
+    /// it is re-measured on every run: the disarmed leg reports **0** over the whole frame. If a
+    /// future scene edit brightens the ambient, this reddens honestly instead of silently
+    /// admitting sky pixels into a particle count.
+    ///
+    /// # Whole-frame, deliberately
+    ///
+    /// Unlike [`Self::count_white_in`], this scans the entire image rather than the emitter region.
+    /// The armed assertion does not need it (the alpha fan is inside that region too), but the
+    /// DISARMED one is strictly stronger this way: "no blue anywhere" rather than "no blue where we
+    /// looked". Since the disarmed direction is the one that makes the armed count evidence, it is
+    /// the one worth over-scanning for.
+    pub fn count_blue_dominant(&self, floor: u8, margin: u8) -> usize {
+        self.bgra
+            .iter()
+            .filter(|p| {
+                // BGRA: p[0] is blue, p[1] green, p[2] red.
+                p[0] >= floor
+                    && u16::from(p[0]) >= u16::from(p[1]) + u16::from(margin)
+                    && u16::from(p[0]) >= u16::from(p[2]) + u16::from(margin)
+            })
+            .count()
     }
 }
 

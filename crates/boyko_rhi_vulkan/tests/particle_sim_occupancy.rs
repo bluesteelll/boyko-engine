@@ -124,8 +124,13 @@ const VK_API_VERSION_1_3: u32 = (1 << 22) | (3 << 12);
 /// The Set-0 binding count the particle compute vocabulary spans (0..=10 — see any
 /// `particle_*.comp.hlsl` header's `# Set / binding vocabulary` block).
 const PARTICLE_BINDING_COUNT: u32 = 11;
-/// The sim's `COMPUTE` push range, in bytes (`uint steps` + `float timestep`).
-const PARTICLE_SIM_PUSH_BYTES: u32 = 8;
+/// The sim's `COMPUTE` push range, in bytes (`uint steps` + `float timestep` + `uint capacity`).
+///
+/// A LOCAL mirror of `boyko_rhi_vulkan::compute::PARTICLE_SIM_PUSH_BYTES` — this probe stands up
+/// its own instance/device/pipelines and deliberately links nothing of the engine's boot path, so
+/// the value is re-declared here. It must not be SMALLER than the range the committed module
+/// declares, or every pipeline create below fails with a range/shader mismatch.
+const PARTICLE_SIM_PUSH_BYTES: u32 = 12;
 
 type VkResult = i32;
 /// A dispatchable handle (`VkInstance`, `VkPhysicalDevice`, `VkDevice`) — a pointer.

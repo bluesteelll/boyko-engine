@@ -5756,10 +5756,13 @@ embed_spirv! {
     /// predicate the collide arm already computes, folded by one `WaveIsFirstLane()` lane into
     /// `p_counters`' three stats words (7/8/9, carved out of the counter line's pad).
     ///
-    /// **It EXCEEDS D5's per-wave atomic budget by design** — 1–2 more per wave per substep, so 3–5
-    /// per wave at the plan's steady state against D5's 1–3 — and
-    /// `docs/SHADER-VARIANT-MANIFEST.md`'s row states that exception rather than the census pins
-    /// being widened: a widened bound would stop gating the two modules that ship.
+    /// **It EXCEEDS the shipping per-wave atomic budget by design** — 1–2 more per wave per
+    /// substep, so **3–6** per wave at the plan's steady state against the shipping modules' 1–4
+    /// (`2 + 1` for an all-surviving single-class wave that skips the field, `4 + 2` for a mixed
+    /// survive/die wave carrying both classes that evaluates). Rung P2's blend partition moved the
+    /// UPPER bound only, 5 → 6; the lower is unchanged, since an additive-only wave still retires
+    /// in two. `docs/SHADER-VARIANT-MANIFEST.md`'s row states that exception rather than the census
+    /// pins being widened: a widened bound would stop gating the two modules that ship.
     PARTICLE_SIM_STATS_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_sim_stats.comp.spv")
 }
@@ -5834,14 +5837,21 @@ pub const PARTICLE_KICKOFF_PUSH_BYTES: u32 = 8;
 /// the shared range.
 pub const PARTICLE_EMIT_PUSH_BYTES: u32 = 8;
 
-/// Particles P0: `particle_sim`'s push block — `{ uint steps; float timestep }`.
+/// Particles P0/P2: `particle_sim`'s push block — `{ uint steps; float timestep; uint capacity }`.
 ///
 /// `steps` is `ParticleClock::steps()`, ALREADY ceiling-clamped on the host (plan M3) — one
 /// number with two consumers, the host's own emitter advance and this push. The shader's
 /// `min(pc.steps, PARTICLE_SUBSTEP_CEILING)` is the hang guard against a corrupt push constant
 /// and can never bind on a well-formed frame. See [`PARTICLE_KICKOFF_PUSH_BYTES`] for why this is
 /// not in the shared range.
-pub const PARTICLE_SIM_PUSH_BYTES: u32 = 8;
+///
+/// **`capacity` arrived at rung P2's blend partition (plan D10/M2)**, and it is a push rather than
+/// a counter word because the alpha class's render index is the mirror `capacity - 1 - q_pos`: a
+/// counter word would put a per-frame device load on the hot loop's tail for a value that is
+/// boot-frozen. It is `ParticleGpuBundle::capacity` — the SAME number `particle_kickoff` is pushed
+/// and the same one the draw's alpha `index_base` is derived from, so CAP has one home and three
+/// consumers rather than three derivations.
+pub const PARTICLE_SIM_PUSH_BYTES: u32 = 12;
 
 /// Particles P0: `particle_draw.vs`'s `VERTEX`-stage push block — `{ float4x4 view_proj; uint
 /// index_base; int index_step }` (64 + 4 + 4).
@@ -5875,9 +5885,22 @@ pub const PARTICLE_DISPATCH_EMIT_OFFSET: u64 = 0;
 pub const PARTICLE_DISPATCH_SIM_OFFSET: u64 = 16;
 
 /// Particles P0: the byte offset of the ADDITIVE `VkDrawIndexedIndirectCommand` inside
-/// `p_draw_args` — the only slot P0 records (the alpha slot at 24 is zeroed and its draw is not
-/// declared).
+/// `p_draw_args` — the first of the two slots (plan D4).
 pub const PARTICLE_DRAW_ADDITIVE_OFFSET: u64 = 0;
+
+/// Particles P2: the byte offset of the ALPHA `VkDrawIndexedIndirectCommand` inside `p_draw_args`
+/// — the second slot, at `size_of::<VkDrawIndexedIndirectCommand>() + 4` bytes of inter-command pad
+/// (plan D4: the two slots sit at 0 and 24, so `alpha.instanceCount` lands at byte 28).
+///
+/// Both slots carry `firstInstance == 0` (F5b — `drawIndirectFirstInstance` is not enabled on this
+/// device and a nonzero value there is a silent corruption class), so the two classes are told
+/// apart ONLY by the VS's `index_base`/`index_step` push pair, never by the fetched command.
+///
+/// Recorded UNCONDITIONALLY beside the additive slot: kickoff zeroes `instanceCount` every frame
+/// and only an alpha-class survivor ever raises it, so a scene with no alpha effect fetches a
+/// zero-instance command and rasterizes nothing. That is what keeps every pre-P2 image pin
+/// byte-identical without a host-side predicate.
+pub const PARTICLE_DRAW_ALPHA_OFFSET: u64 = 24;
 
 /// Particles P0: the index count of the billboard quad — two triangles over four corners.
 ///

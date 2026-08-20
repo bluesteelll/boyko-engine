@@ -87,8 +87,8 @@ A GPU-resident particle system where per-particle state never touches the CPU an
 | CPU allocations per frame | **0** | **0** |
 | Draw calls | **1** at P0 (all effects/textures — bindless), 2 at P2 | same |
 | Global atomics: emit | **0** | **0** |
-| Global atomics: sim | **1–3 per wave** (see D5) | same |
-| *(the `-D SDF_COLLIDE_STATS` MEASUREMENT module runs 3–5 per wave BY DESIGN — rung P1b; it is selected by no shipping configuration, so the row above is unqualified for everything that ships)* | | |
+| Global atomics: sim | **1–4 per wave** (see D5; was 1–3 before P2's blend partition added the per-class render counter — 2 stays the single-class survivor case, which is every wave of an additive-only scene) | same |
+| *(the `-D SDF_COLLIDE_STATS` MEASUREMENT module runs **3–6** per wave BY DESIGN — rung P1b, `= retirement 2..4 + census 1..2`; P2 moved its UPPER bound only, 5 → 6, since an additive-only wave still retires in 2. Statically 7 sites, which is a different quantity. It is selected by no shipping configuration, so the row above is unqualified for everything that ships)* | | |
 | Readback | **none, ever** | **none, ever** |
 | Effect on other subsystems' schedules/event policy | **none** (M4) | **none** |
 | `goldens/PINS.toml` (35 pins) when `mode == Off` | **byte-identical by construction** | same |
@@ -517,6 +517,8 @@ P2 sort: **one FFX-shaped pass** (histogram → 256-bin scan → scatter) over a
 - **Draw.** Two `VkDrawIndexedIndirectCommand` slots, `first_instance = 0` in both; the VS computes `render_index = pc.index_base + pc.index_step * SV_InstanceID`, with `(0, +1)` for additive and `(CAP-1, -1)` for alpha.
 
 This gives: no `firstInstance`, **no finish pass** (each base is a compile-time constant per draw), **no per-class capacity cap** (the two ends share `CAP` dynamically), **no shader variant** (two push-constant values, one pipeline), and A5's sequential read preserved in both directions. At P0 the transform is the identity, slot 1 is zeroed and its pass undeclared.
+
+> **⚠️ AMENDED AT P2 item 2 — "one pipeline" is TWO `VkPipeline`s, and "no shader variant" still holds.** The clause is right about what it was defending: the two classes share one VS, one FS, one pipeline layout, one push range and one descriptor set — the class is a pair of push values, exactly as written, and nothing was recompiled or specialized. But the BLEND FACTORS differ between the classes and blend state is static pipeline state on this device (`VK_EXT_extended_dynamic_state3` is not enabled), so the additive and alpha draws bind two boot-frozen `VkPipeline` objects built from ONE `GraphicsPipelineDesc` closure differing in a single field. Both are created once per process; nothing is created per frame. The alternative — one pipeline plus a dynamic blend state — would have required an extension this engine does not enable, for a saving of one `vkCmdBindPipeline` per frame. See `ParticleGpuBundle::draw_pipeline_alpha`.
 
 **R10 — sorting vs motion vectors.** Godot: motion vectors work only under index order. **Hard rule: `SortMode != None` ⇒ particle motion vectors disabled**, as a resolver truth-table row and a boot `debug_assert`.
 
@@ -1192,6 +1194,10 @@ question.
    its own `docs/SHADER-VARIANT-MANIFEST.md` row and its own `*_spv_sync` pin — **and the atomic-census
    exception is stated ON THAT ROW**: this module runs **3–5 atomics per wave against D5's 1–3, BY
    DESIGN**, because *a census that forbids the instrument is a census that forbids measuring itself.*
+   *(Both numbers were amended at rung P2, whose blend partition added a per-class render counter:
+   the shipping budget is now 1–4 and the instrument's 3–6. The UPPER bounds each moved by one; the
+   lower bounds did not, because an additive-only wave still retires in two atomics. See "P2 item 2
+   as built".)*
 2. **The register / occupancy figure for all three sim modules** (`VK_KHR_pipeline_executable_properties`,
    or the offline `dxc` register report). It tests gate #17 §A1's standing hypothesis — that a larger,
    higher-register kernel raises achieved bandwidth on an over-subscribed bandwidth-bound sim — **and
@@ -1229,7 +1235,8 @@ figure recorded for all three modules whether or not it confirms the hypothesis.
   *evaluated*, never as both. Their sum is therefore the wave-substep total exactly, and the skip
   rate is a ratio needing no fourth counter and no host-side denominator. Per wave per substep that
   costs **1 atomic (all lanes skip) or 2 (any lane evaluates)** — D5's 1–3 plus 1–2, i.e. the 3–5
-  the manifest row declares as its exception.
+  the manifest row declares as its exception. *(P2: D5's term became 1–4 and this total 3–6 — the
+  upper bound only.)*
 * **The counters ride the existing channel.** Three words carved out of `ParticleCounters`' pad
   (7/8/9), read through `particle_counters_readback` — no buffer, no `ResId`, no seed row, no
   barrier, and `particle_barrier_stream` is unmoved (16 tests). They ACCUMULATE from boot: kickoff
@@ -1321,6 +1328,35 @@ over the SAME committed `.spv` the engine binds. No engine file changed to obtai
 | `-D SDF_COLLIDE` | 8 962 | **48** | 21 760 | 32 | **40 / 48** | **83.3 %** |
 | `-D SDF_COLLIDE_STATS` | 9 055 | **48** | 22 144 | 32 | **40 / 48** | **83.3 %** |
 
+> **⚠️ SUPERSEDED AT P2 item 2 — this table describes the P1b artifacts, and the base row MOVED.**
+> Re-taken on the same probe, same device, after the blend partition landed:
+>
+> | module | SPIR-V words | Register Count | derived warps/SM | derived occupancy |
+> |---|---|---|---|---|
+> | base | 2 107 → **2 322** | 39 → **41** | 48 → **40** | 100 % → **83.3 %** |
+> | `-D SDF_COLLIDE` | 8 962 → 9 177 | **48** (unmoved) | 40 | 83.3 % |
+> | `-D SDF_COLLIDE_STATS` | 9 055 → 9 270 | **48** (unmoved) | 40 | 83.3 % |
+>
+> **+2 registers is enough to cross an allocation step.** The 1 280-reg/warp bucket holds up to
+> **40** registers per thread (`ceil(40·32/256)·256 = 1 280`); 41 rounds to 1 536, which is the same
+> bucket the collide module already sat in. So the base sim lost its 100 % row to a two-register
+> move — it was one register inside the boundary, not comfortably inside it.
+>
+> **Two things were measured rather than assumed about the cause**, because "the new code costs
+> registers" is a claim with several candidates:
+> * the **branchless class predicate** (`&` rather than `&&`, forced by the C1 soundness fix)
+>   recovers **one** register, 42 → 41 — it does not recover the step;
+> * the **F25 mirror clamp** costs **zero** — 41 with and without it, so the guard is free and is
+>   kept unconditionally.
+>
+> The residual +2 is the class ballots, the two subtractions, the `q_base` broadcast and the
+> `capacity` push together; no single one of them was isolated.
+>
+> **WALL-CLOCK COST: UNPRICED.** No `ZONE_PARTICLE_SIM` run was taken at this rung, and the sign is
+> genuinely not obvious — gate #17 §A1 and P1b both measured the *same* downward occupancy step
+> arriving with a **5.6 % SPEED-UP** on this bandwidth-bound sim. Pricing it is seam work for the
+> next rung, and it is the FIRST thing to run before anyone treats this as a regression.
+
 *Register Count and ISA bytes are the DRIVER's, read back verbatim. The warps/SM and occupancy
 columns are DERIVED* from them on Ampere's published limits (CC 8.6: 65 536 registers/SM, 48
 warps/SM, 256-register-per-warp allocation unit, whole 256-thread = 8-warp blocks): base
@@ -1340,13 +1376,36 @@ counter would be needed and this instrument does not produce one. **Stated as it
 promoted: the mechanism is now consistent with three independent measurements instead of one, and
 proven by none.**
 
+> **⚠️ THE VERDICT ABOVE IS UN-SETTLED BY P2 item 2, and the un-settling is the point.** The
+> comparison it rests on was *base at 100 % vs collide at 83.3 %*. The base module now sits at
+> **41 registers / 83.3 %** — the SAME 1 536-reg/warp bucket as the collide module — so **the two
+> kernels the A1 anomaly compared now have IDENTICAL derived occupancy**, which is precisely the
+> competing explanation this paragraph declared dead. The gap in the delta's inputs shrank from
+> `39 → 48` (+23 %) to `41 → 48` (**+17 %**) while the occupancy difference went to **zero**.
+>
+> That does not restore the competing explanation — the −5.6 % was measured on the P1b artifacts,
+> whose occupancies did differ, and nothing about that run changed retroactively. What it removes is
+> the ability to *re-measure* the anomaly against a differing-occupancy baseline using today's
+> modules. **Anyone re-running A1 must take the base leg from the P1b artifacts, not from HEAD**,
+> or they will be comparing two kernels at the same occupancy and concluding the mechanism is absent.
+
 **Lever 1's number (§Goal's budget re-derivation).** The −5.6 % the isolated module swap bought at
 65 536 came with a **48 → 40 warps/SM** drop. That is the lever's exchange rate on this part: a
-16.7 % occupancy reduction for 5.6 % of sim time. **And the lever's headroom is now bounded**: the
-base sim sits at **100 % occupancy already**, so there is no occupancy to *gain* — the lever runs in
-the direction the plan's own §Goal text names ("fewer concurrent waves raising achieved bandwidth by
-reducing thrash"), i.e. deliberately capping registers, and 39 → 48 is the only step of it anyone
+16.7 % occupancy reduction for 5.6 % of sim time. **And the lever's headroom was bounded at P1b**:
+the base sim sat at **100 % occupancy already**, so there was no occupancy to *gain* — the lever ran
+in the direction the plan's own §Goal text names ("fewer concurrent waves raising achieved bandwidth
+by reducing thrash"), i.e. deliberately capping registers, and 39 → 48 is the only step of it anyone
 has measured.
+
+> **⚠️ INVERTED AT P2 item 2.** The base sim is now **41 registers / 83.3 %**, so the sentence above
+> — "there is no occupancy to *gain*" — is false as of this rung: there is **16.7 % to recover**, and
+> recovering it means getting the base module from 41 back to **≤ 40** registers per thread, which is
+> a one-register problem rather than an architectural one. Two candidates are already priced: the
+> branchless predicate is spent (it bought the register from 42 to 41 and is required for soundness
+> anyway) and the F25 clamp is free (0 registers), so neither is available. **Whether recovering it
+> is worth anything is the open question**, and it is the same one Lever 1 has always had: on this
+> bandwidth-bound sim, *lower* occupancy measured *faster* twice. A `ZONE_PARTICLE_SIM` A/B at
+> 41-vs-≤40 registers would answer both at once and is the cheapest experiment in this section.
 
 **Gate run.** `particle_edsl_sync` **36 tests, was 30** (the ninth artifact's byte gate, the census
 exception, the wave-leader fold, the predicate-agreement pin, the census block skeleton, the stats
@@ -1449,8 +1508,108 @@ Scope taken here is exactly the erratum's: the fourth render path, nothing of P2
   3. **Deferred now agrees with a blessed path pixel for pixel.** The particle pixel set is IDENTICAL to the VisibilityBuffer leg's — symmetric difference **0** — in the wall, no-wall and dense (1737-pixel) runs alike. A depth test failing in either direction (all-reject, all-pass) could not produce that.
   4. **The selector itself is pinned in-crate.** `particle_draw_spirv_for` / `particle_depth_compare_for` now carry unit tests that assert both legs by identity AND by artifact property (`DepthReplacing` present on the Deferred fragment, absent on the base one) — see gate #12 above. Claim 1's manual A/B is what those tests automate.
 * **Found while measuring, and REPAIRED here:** `BOYKO_PARTICLE_RATE` was a DEAD knob — `lab_arm_burst` re-armed `burst = 1` every frame ahead of the fold, including frame 0, so the env value was overwritten before anything consumed it (a rate-8 run was byte-identical to a rate-1 one), while the fixture's env table and `spawn_per_frame`'s doc both advertised it live and named gate #17 as its consumer. The re-arm now reads `spawn_per_frame()` — the one fn both sites read. Verified both ways: rate 8 renders **1737** particle pixels against **265** at rate 1, and the default is unchanged, so all five image goldens re-proved byte-identical. **Consequence for gate #17: any density measurement previously taken through this fixture was taken at one particle per frame whatever the env said** — see `docs/OPEN-QUESTIONS.md` (2026-08-20).
+#### P2 item 2 — D10's BLEND PARTITION (the alpha class), **LANDED** (2026-08-21)
+
+Scope taken: the partition and its second draw slot only — nothing of P2's sort, `-D SOFT`, the
+read-only-depth plumbing or `SortMode`. **Remaining P2 after this rung: the radix pass (over the
+alpha class only), `-D SOFT` + the read-only depth plumbing, and `SortMode`/`Wboit`/R10.**
+
+* **The sim (generator-owned).** The class predicate rides `EffectParamsGpu.blend_class` — already
+  in the row the sim fetched, so **0 B/particle of new traffic**. Additive takes its own ballots;
+  **alpha's are DERIVED by subtraction** (`q_count = w_count - r_count`, `q_lane = w_lane - r_lane`),
+  which is two wave ops instead of four and is exact. Verified at the artifact: 6
+  `OpGroupNonUniformBallotBitCount`, not 8. The render index mirrors,
+  `r_pos = is_alpha ? (capacity - 1 - q_pos) : (r_base + r_lane)`, with an F25 `min` on the mirror's
+  operand — asymmetric on purpose, because over `uint` an alpha overshoot UNDERFLOWS to ~0xFFFFFFFF
+  (unbounded OOB store, `robustBufferAccess` OFF) while the additive side overshoots boundedly.
+* **The atomic budget moved 3 → 4 per wave, deliberately.** D10 specifies one render counter PER
+  CLASS. Each site is `> 0u`-guarded, so an additive-only wave — every wave of every pre-P2 pin —
+  issues the three it always did. The instrument's exception moved 5 → **6** at its upper bound only
+  (`retirement 2..4 + census 1..2`); its lower stayed 3. Recorded at all five sites that carry the
+  number, each re-derived rather than transcribed.
+* **⚠️ A SOUNDNESS DEFECT WAS SHIPPED INTO THE BASE MODULE AND CAUGHT IN REVIEW — the class
+  predicate was `survives && !is_alpha`.** `&&` short-circuits, and DXC lowers a short-circuit into
+  control flow: **two `OpSelectionMerge` regions appeared BETWEEN the ballots and the election**, the
+  exact structure this file's own census block refuses to sit in and the reason rung P1b carries a
+  host-side hard refusal. On a mixed survive/die wave with no reconvergence guarantee that elects
+  **two leaders**, each publishing full-wave counts: `alive_count_next` and `dead_count` each
+  advanced twice (B3 broken), and — silently — the dying group's `q_count = w_count - 0 > 0` adding
+  `w_count` to `alpha.instanceCount` **in an additive-only scene**. **No gate in this tree could see
+  it**: `LAB_LIFETIME = 8 s` against ~30 ms of virtual time means `dead_count == 0` in every readback
+  row of every leg, so no wave is ever mixed. Fixed by the bitwise `&`; **pinned at the artifact**
+  (`the_retirement_ballots_and_the_election_share_one_basic_block`) and the pin proven by mutation.
+  * **Where the split sits is the whole question, and it was established by compiling all three
+    shapes**, not by reasoning: `&&` INLINE in the ballot arguments splits BETWEEN the ballots — the
+    unsound one; `&&` at a hoisted `bool` splits BEFORE every ballot, which is **benign** (each group
+    then takes its own ballots AND elects its own leader, so each publishes exactly its own lanes);
+    `&` emits no region at all. The pin's span is `first ballot → election` for that reason.
+  * **A robustness property worth keeping**: the derivation is correct even under
+    non-reconvergence, because `add_class` is false on precisely the lanes a split here could
+    remove, so both operands of each subtraction are ballots over the same active set. **Only the
+    election is exposed** — which is why the fix is about the block, not the operands.
+* **The draw.** Two `VkDrawIndexedIndirectCommand`s, `firstInstance = 0` in both, **alpha recorded
+  FIRST** so the additive class's contribution stays a pure sum over whatever is beneath it — which
+  is the property gate #16's `particle_additive` pin rests on. Two boot-frozen `VkPipeline`s from ONE
+  desc closure differing in one field; **D10's "one pipeline" is amended above**, and "no shader
+  variant" still holds exactly.
+* **Cost of the unconditionally-recorded second draw: BELOW RESOLUTION, measured rather than
+  asserted.** `ZONE_PARTICLE_DRAW` at 10 240 alive on VB, 3 legs each, medians: **two draws
+  `[21504, 20480, 20480]` vs one draw `[21504, 20480, 22528]`** — every value on the row's own
+  1 024 ns lattice, and the control's median is *higher* than the arm's. A physically impossible
+  sign, so the effect is noise: it is under the row's certified 1 024 ns resolution and under the leg
+  dispersion (5.0 % / 10.0 %).
+* **Register / occupancy: the base module moved 39 → 41 and LOST its 100 % row.** Full table and the
+  three claims it un-settles are recorded at the P1b occupancy table above. **UNPRICED in
+  wall-clock** — no `ZONE_PARTICLE_SIM` run was taken, and the sign is not obvious (the same
+  downward step measured *faster* twice). The branchless C1 fix recovers one register (42 → 41, not
+  enough — the bucket boundary is 40); the F25 clamp costs zero.
+* **Gate run.** `particle_edsl_sync` **38 pins, was 36** (the basic-block soundness pin and the
+  mirror-expression source pin); the whole `*_edsl_sync`/`*_spv_sync` battery green;
+  `particle_barrier_stream` **unmoved at 16**; **all six named goldens byte-identical**;
+  `particle_counters_readback` green at **four** legs (saturated × unsaturated, armed × unarmed);
+  three new in-crate `alpha_draw_push` unit tests; clippy `-D warnings` clean, unpiped.
+* **The M2 identity, exercised at last** (it had only ever been `additive + 0`):
+
+  | leg | additive | alpha | alive_next |
+  |---|---|---|---|
+  | unsaturated, no alpha | 30 | 0 | 30 |
+  | saturated (CAP 10 240), no alpha | 10 240 | 0 | 10 240 |
+  | unsaturated, **alpha armed** | 30 | **30** | 60 |
+  | **saturated, alpha armed** | **5 120** | **5 120** | 10 240 |
+
+  The last row is D10's "no per-class capacity cap" measured: two classes splitting one pool evenly
+  and dynamically from opposite ends, summing to exactly CAP.
+* **Live fire and its controls** (`BOYKO_PARTICLE_ALPHA=1`, VB, frame 30): **356 blue-dominant
+  pixels beside 354 white**, against **0** disarmed. Two controls, each the same binary minus one
+  thing: deleting the alpha draw command ⇒ 0 blue (the class simulated — `alpha.instanceCount = 30`
+  — and drew nothing, the failure this rung was owed); forcing the index transform to the additive
+  identity ⇒ 0 blue **and a dump byte-identical to the `particle_additive` golden**, because the
+  alpha command then re-draws the already-white additive records. **That second result is why the
+  gate line below was re-worded**: the transform's failure mode is invisible to every image gate in
+  the tree. Restoring reproduced the armed hash exactly in both cases. The Deferred leg
+  (`-D DEPTH_LINEAR`) gives identical particle counts, 354/356.
+* **NO IMAGE PIN was authored over alpha particles**, and that is deliberate: gate #16's
+  order-independence argument does not transfer to a non-commutative blend, and the intra-class
+  order is wave-retirement order until the sort lands. The blue count is live-fire evidence, not a
+  golden.
+* **Found while measuring, and repaired here: both presets' colour keys were authored in the wrong
+  byte order.** `color_keys` is `0xAABBGGRR` (the device unpacks `& 255` as RED), and both `smoke`
+  and `spark` were written `0xRRGGBBAA` — so `smoke`'s "dim grey" plume was BRIGHT RED and both
+  presets' "gone" final key was pure red. Invisible in three independent ways at once: additive
+  ignores the alpha byte, only key 0 is rendered, and no fixture renders either preset. It stops
+  being invisible the moment an effect is alpha-class, because the byte the wrong order fills with
+  red is the one the ROP reads as coverage. **The convention is now NAMED at the field's own doc**,
+  which is the root cause — repairing the instances without naming it leaves the next author to
+  repeat it. *(A guard written for this defect had the same bug: it tested `& 0xFF`, the RED byte,
+  and would have passed on an α = 0 key. It now tests `>> 24`.)*
+
 **Hard rule (R10):** `SortMode != None` ⇒ motion vectors disabled.
-**Gate:** sort monotonicity readback; reverse-Z **and** linear soft-fade oracles; `first_instance == 0` on both slots; the alpha reverse index transform verified by readback; **`additive.instanceCount + alpha.instanceCount == alive_count_next` with both terms non-zero** (the M2 assertion, now exercised); `SortMode::None` byte-identical to P1.
+**Gate:** sort monotonicity readback; reverse-Z **and** linear soft-fade oracles; `first_instance == 0` on both slots; ~~the alpha reverse index transform verified by readback~~ → **the alpha reverse index transform verified by the three instruments below**; **`additive.instanceCount + alpha.instanceCount == alive_count_next` with both terms non-zero** (the M2 assertion, now exercised); `SortMode::None` byte-identical to P1.
+
+> **Gate correction (P2 item 2): "verified by readback" named an instrument that cannot exist.** The `particle_counters_readback` channel copies back `p_counters` and `p_draw_args` — it does not, and should not, copy back `p_render` (24 MB at the default CAP, for a value whose per-slot meaning the host cannot check without re-deriving the whole sim). **Readback can see the transform's INPUTS and never the transform.** What it does verify is the class split: `alpha.instanceCount` non-zero, and the M2 sum. The transform itself is gated in three other places, and it needed them, because **its failure mode is byte-invisible**: forcing the read half to the additive identity produced a dump byte-identical to the `particle_additive` golden (the alpha command then re-draws the already-white additive records). The three:
+> 1. **the WRITE half, at the shader source** — `the_alpha_class_writes_the_mirrored_render_index` pins `r_pos = is_alpha ? (pc.capacity - 1u - q_pos) : …` and its F25 clamp;
+> 2. **the READ half, in-crate and device-free** — `alpha_draw_push`'s three unit tests, including `the_vs_affine_lands_on_the_slot_the_sim_wrote`, which checks `index_base + index_step·q == capacity - 1 - q` over a RANGE of `q` rather than at one point;
+> 3. **the composition, live** — the blue-dominant pixel count under `BOYKO_PARTICLE_ALPHA=1`, with the identity-transform control that produces zero of them.
 
 ### P2b — Render-time interpolation — **size S**, default OFF *(M6)*
 
@@ -1490,6 +1649,7 @@ Ribbon = per-particle history ring expanded to a strip; mesh particles = the sam
 | kickoff | — | 3 lines | 192 B | 192 B |
 | emit | 56 (48 W + 4 R + 4 W) | scatter + sequential | 1.1 MB | 2.8 MB |
 | sim | 136 (48 R + 48 W + 32 W + 8) | 48 B gathered as one line; rest sequential | 13.6 MB | 136 MB |
+| *(rung P2's blend partition moves **0 B/particle** of this: the class predicate rides `EffectParamsGpu.blend_class`, already in the row the sim fetched; the alpha class's render write is the SAME 32 B at a mirrored index; the only new bytes are 4 of PUSH per dispatch and, per wave carrying both classes, one extra `InterlockedAdd`)* | | | | |
 | draw VS | 32 (×4 verts, L1-absorbed) | **sequential** | 3.2 MB | 32 MB |
 | **Total** | **≈168 B/particle** | | **17.9 MB** | **171 MB** |
 | **@ 60 Hz** | | | **1.07 GB/s** | **10.3 GB/s** |

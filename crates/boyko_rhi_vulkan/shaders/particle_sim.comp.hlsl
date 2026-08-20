@@ -16,11 +16,19 @@
 //   w_base  = WaveReadLaneFirst(w_base_raw)      // the wave's LIST reservation base
 //   idx     = w_base + w_lane                    // this lane's LIST position
 //
-// and, on the additive class's own RENDER counter (`p_draw_args`'s `instanceCount`, at the byte
-// offset the generator was fed):
+// and, on EACH blend class's own RENDER counter (`p_draw_args`'s two `instanceCount` words, at the
+// byte offsets the generator was fed) -- plan D5's own two-class form:
 //
-//   r_base  = WaveReadLaneFirst(InterlockedAdd(additive.instanceCount, r_count))
-//   r_pos   = r_base + r_lane
+//   add_class = survives & !is_alpha              // BITWISE -- see the retirement block
+//   r_count = WaveActiveCountBits(add_class)      // ADDITIVE survivors in THIS wave
+//   r_lane  = WavePrefixCountBits(add_class)      // this lane's rank among them
+//   q_count = w_count - r_count                   // ALPHA, by the partition (not a ballot)
+//   q_lane  = w_lane  - r_lane
+//   if (WaveIsFirstLane())
+//       r_base_raw = InterlockedAdd(additive.instanceCount, r_count)   // if r_count > 0
+//       q_base_raw = InterlockedAdd(alpha.instanceCount,    q_count)   // if q_count > 0
+//   r_pos   = is_alpha ? (capacity - 1 - (q_base + q_lane))            // DOWN from the top
+//                      : (r_base + r_lane)                            // UP from 0
 //
 // EXACTNESS: reservations from one `InterlockedAdd` counter are contiguous and disjoint, so the
 // multiset of `(base, count)` pairs partitions `[0, sum)` exactly and the counter's final value is
@@ -28,23 +36,60 @@
 // commutative. That is why NO `InterlockedMax` and no mirror is needed (plan M1), and plan gate
 // #14 asserts this module carries ZERO `OpAtomicUMax`.
 //
-// P0 is ADDITIVE-ONLY, so the blend-class select is a compile-time constant and `r_count`/`r_lane`
-// are exactly `w_count`/`w_lane`. They are spelled as their own names anyway: P2's alpha class
-// makes them different numbers, and the seam is where the reader needs to see it.
+// # The BLEND PARTITION (rung P2, plan D10/M2)
 //
-// # The atomic budget, per WAVE (plan D5)
+// `firstInstance` must be 0 in both draw slots (F5b), so the two classes cannot be distinguished by
+// it. They are distinguished by WHERE IN `p_render` they are written, and the VS reads back with a
+// push-constant affine (`index_base + index_step * SV_InstanceID`):
 //
-//   all dying                     -> 1     (dead_count)
-//   all surviving, one class      -> 2     (alive_count_next, additive.instanceCount)
-//   mixed survive/die             -> 3     (+ dead_count)
+//   LIST index   -- SHARED. Every survivor of EITHER class takes `idx` from `alive_count_next`.
+//                   This is what makes an alpha leak structurally impossible: kickoff reads only
+//                   that counter, so a class allocating its list position anywhere else would
+//                   vanish from the next frame's walk entirely.
+//   RENDER index -- PER CLASS. Additive counts UP from 0; alpha counts DOWN from `capacity - 1`.
+//                   The two ends share one buffer dynamically, so neither class carries a capacity
+//                   cap of its own, and A5's sequential read is preserved in both directions.
+//
+// The ALPHA ballots are NOT taken: they are DERIVED. `q_count = w_count - r_count` and
+// `q_lane = w_lane - r_lane` are exact, because the surviving lanes of a wave partition into the
+// two classes and both prefix counts are over the same lane order. Two wave ops, not four.
+//
+// THE DERIVATION IS ALSO ROBUST UNDER NON-RECONVERGENCE, which is a stronger property than
+// exactness and is written down so it is not rediscovered. Suppose the wave reaches these ballots
+// already split into divergent groups. Each ballot then sees only its own group -- but `add_class`
+// is FALSE on precisely the lanes a divergence here could have removed (it implies `survives`), so
+// `w_count - r_count` and `w_lane - r_lane` are differences of ballots over the SAME active set,
+// and each is still exactly the alpha count / rank within that set. The subtraction can never mix
+// two different masks. It is the ELECTION that a split would corrupt, never this arithmetic --
+// which is why the guard below is about keeping the BLOCK whole rather than about the operands.
+//
+// # The atomic budget, per WAVE (plan D5, WIDENED at rung P2 -- see below)
+//
+//   all dying                       -> 1   (dead_count)
+//   all surviving, ONE class        -> 2   (alive_count_next, that class's instanceCount)
+//   all surviving, BOTH classes     -> 3   (+ the other class's instanceCount)
+//   mixed survive/die               -> +1  (dead_count)                       ==> 4 at worst
+//
+// ⚠️ THE UPPER BOUND MOVED FROM 3 TO 4 AT RUNG P2, and that is a DELIBERATE re-bless, not a drift:
+// D10's partition specifies one `InterlockedAdd` counter PER CLASS, so a wave carrying survivors of
+// both classes reserves on both. It is not a widening of the aggregation -- the ops are still ONE
+// per wave per counter, never one per lane. The common case is still 2-3: the alive list groups
+// particles spawned together, hence of one emitter, hence of one effect, hence of ONE class, so a
+// mixed-class wave only occurs where two effects' spawns interleave in the list.
 //
 // At 1M survivors that is ~62 500 ops ~= 32 us, against ~0.5 ms for the naive per-lane form.
 //
 // The `-D SDF_COLLIDE_STATS` module DELIBERATELY EXCEEDS that budget -- 1-2 more per wave per
-// substep, i.e. 3-5 per wave at the plan's steady state -- and its manifest row states the
-// exception rather than the census being widened to accommodate it: a census that forbids the
-// instrument is a census that forbids measuring itself, and a widened bound would stop gating the
-// two modules that ship.
+// substep, i.e. **3-6** per wave at the plan's steady state (one substep): `2 + 1` for an
+// all-surviving single-class wave whose every lane skips the field, `4 + 2` for a mixed
+// survive/die wave carrying both classes that evaluates. Rung P2 moved its UPPER bound only,
+// 5 -> 6 -- the lower is still 3, because an additive-only wave still retires in two atomics.
+// Statically the module carries 7 `OpAtomicIAdd` SITES, which is a different quantity from the
+// per-wave count and is stated separately wherever both appear.
+//
+// Its manifest row states the exception rather than the census being widened to accommodate it: a
+// census that forbids the instrument is a census that forbids measuring itself, and a widened
+// bound would stop gating the two modules that ship.
 //
 // # Two counters, not one (plan N3c)
 //
@@ -140,10 +185,14 @@
 //   (0, 9, STORAGE_BUFFER)  StructuredBuffer<EffectParamsGpu>   p_effects      read
 //   (0, 10, STORAGE_BUFFER) StructuredBuffer<uint>             Buf            read  [SDF_COLLIDE only]
 //
-// # Push constants (8 B) -- UNCHANGED by the variant
+// # Push constants (12 B) -- UNCHANGED by the variant
 //
-//   [0,4)  uint  steps    -- the host-clamped substep count (plan M3); ONE number, two consumers
-//   [4,8)  float timestep -- `ParticleClock`'s CONSTANT dt (plan D6)
+//   [0,4)   uint  steps    -- the host-clamped substep count (plan M3); ONE number, two consumers
+//   [4,8)   float timestep -- `ParticleClock`'s CONSTANT dt (plan D6)
+//   [8,12)  uint  capacity -- CAP, the boot-frozen pool size (plan D14); the ALPHA class's render
+//                             index mirror `capacity - 1 - q_pos`. The SAME value `particle_kickoff`
+//                             is pushed and the SAME `ParticleGpuBundle::capacity` the VS's
+//                             `index_base` is derived from -- one home, three consumers.
 //
 // The collision tuning is NOT pushed: `collision_radius`, `restitution` and `friction` are
 // PER-EFFECT (plan D2's `EffectParamsGpu` already carries all three), so they arrive through the
@@ -152,6 +201,7 @@
 struct SimPush {
     uint  steps;
     float timestep;
+    uint  capacity;
 };
 [[vk::push_constant]] SimPush pc;
 
@@ -232,10 +282,19 @@ static const uint CTR_EMIT_BASE  = 4u;
 static const uint CTR_REAL_EMIT  = 5u;
 static const uint CTR_CLAMPED    = 6u;
 
-// The additive class's RENDER counter, at the word the generator derived from
-// `PARTICLE_ADDITIVE_INSTANCE_COUNT_OFFSET` (4 bytes) -- plan gate #8. The `InterlockedAdd` on it
-// yields BOTH this lane's render position and, at retirement, the class's final instance count.
+// The two classes' RENDER counters, at the words the generator derived from
+// `PARTICLE_{ADDITIVE,ALPHA}_INSTANCE_COUNT_OFFSET` (4 and 28 bytes) -- plan gate #8. The
+// `InterlockedAdd` on each yields BOTH this lane's render position within its class and, at
+// retirement, that class's final instance count -- which is the field the command processor fetches,
+// so there is no finish pass (closing R9).
 static const uint DRAW_ADDITIVE_INSTANCE_WORD = 1u;
+static const uint DRAW_ALPHA_INSTANCE_WORD    = 7u;
+
+// `boyko_render::PARTICLE_BLEND_ALPHA` -- the `blend_class` discriminant that sends a survivor to
+// the TOP end of `p_render` (plan D10). Tested for alpha rather than for additive on purpose: a
+// future third class falls to the additive arm, which needs no sort, rather than joining the sorted
+// one by default.
+static const uint BLEND_CLASS_ALPHA = 1u;
 
 #ifdef SDF_COLLIDE_STATS
 // Rung P1b's three census words, at the indices the generator derived from
@@ -439,6 +498,35 @@ void main(uint3 tid : SV_DispatchThreadID) {
     }
 
     bool survives = (life > 0.0);
+    // The BLEND CLASS is per EFFECT, so it is already in the row this lane fetched -- no extra
+    // load, no per-particle bit and no second table (plan D10/M2).
+    bool is_alpha = (e.blend_class == BLEND_CLASS_ALPHA);
+    // ⚠️ BITWISE `&`, NOT `&&`, AND THAT IS A SOUNDNESS REQUIREMENT RATHER THAN A STYLE CHOICE.
+    //
+    // `&&` SHORT-CIRCUITS, and DXC lowers a short-circuit into control flow: an `OpSelectionMerge`
+    // + `OpBranchConditional` region around the second operand. MEASURED on the first cut of this
+    // rung: two such regions appeared BETWEEN the first ballot and `OpGroupNonUniformElect`, which
+    // splits the single basic block the retirement block's whole correctness argument rests on --
+    // the SAME structure the substep-census block 80 lines above refuses to sit in, and the reason
+    // rung P1b's census carries a HOST-SIDE hard refusal instead of a comment.
+    //
+    // What it would have cost, on a MIXED SURVIVE/DIE wave with no reconvergence guarantee (Vulkan
+    // promises none at a merge block without `VK_KHR_shader_maximal_reconvergence`): the wave
+    // arrives at the election in TWO divergent groups, each electing its own leader, and each
+    // leader reads the CONVERGED full-wave `w_count`/`d_count` computed before the split. So
+    // `alive_count_next` and `dead_count` are each advanced TWICE -- B3's `N + D == CAP` breaks and
+    // the next kickoff walks list entries nothing wrote -- and, worse because it is silent, the
+    // dying group's `r_count` is 0, so its `q_count = w_count - 0 > 0` and it adds `w_count` to
+    // `alpha.instanceCount` IN AN ADDITIVE-ONLY SCENE, pointing the alpha draw at a never-written
+    // region of `p_render`.
+    //
+    // No gate in this tree would have caught it: `LAB_LIFETIME` is 8 s against ~30 ms of virtual
+    // time, so NOTHING retires in any fixture leg (`dead_count == 0` in every readback row) and a
+    // divergent wave never occurs. The artifact pin below is what makes this decidable instead.
+    //
+    // `&` evaluates both operands unconditionally, so the block stays whole -- pinned at the
+    // artifact by `the_retirement_ballots_and_the_election_share_one_basic_block`.
+    bool add_class = survives & !is_alpha;
 
     // Every wave quantity is computed BEFORE either branch, so the ballots see the full set of
     // in-range lanes exactly as the plan's NORMATIVE block describes them.
@@ -446,20 +534,34 @@ void main(uint3 tid : SV_DispatchThreadID) {
     uint w_lane  = WavePrefixCountBits(survives);
     uint d_count = WaveActiveCountBits(!survives);
     uint d_lane  = WavePrefixCountBits(!survives);
-    // P0 is additive-only: the class predicate is the compile-time `true`, so the RENDER
-    // reservation is the LIST reservation's twin. P2 gives them different predicates.
-    uint r_count = w_count;
-    uint r_lane  = w_lane;
+    // The ADDITIVE class's own ballots -- the only extra pair this rung takes.
+    uint r_count = WaveActiveCountBits(add_class);
+    uint r_lane  = WavePrefixCountBits(add_class);
+    // ...and the ALPHA class's BY SUBTRACTION, which is exact rather than an approximation: the
+    // surviving lanes of a wave partition into the two classes, and both prefix counts run over the
+    // same lane order, so the lanes counted by `w_lane` and not by `r_lane` are exactly the alpha
+    // survivors ahead of this one. Two wave ops saved per wave over ballotting the complement.
+    uint q_count = w_count - r_count;
+    uint q_lane  = w_lane - r_lane;
 
     uint w_base_raw = 0u;
     uint r_base_raw = 0u;
+    uint q_base_raw = 0u;
     uint d_base_raw = 0u;
     if (WaveIsFirstLane()) {
-        // The `> 0u` guards are what keep an all-surviving wave at TWO atomics and an all-dying
-        // wave at ONE (plan D5's budget), rather than three unconditional ones.
+        // The `> 0u` guards are what keep a SINGLE-CLASS surviving wave at TWO atomics and an
+        // all-dying wave at ONE (plan D5's budget as widened at P2 -- see the header), rather than
+        // four unconditional ones. A wave that carries no alpha survivor -- which is every wave of
+        // every additive-only scene, i.e. every image pin shipped before this rung -- issues
+        // EXACTLY the same atomics in the same order it did at P0.
         if (w_count > 0u) {
             InterlockedAdd(p_counters[CTR_ALIVE_NEXT], w_count, w_base_raw);
+        }
+        if (r_count > 0u) {
             InterlockedAdd(p_draw_args[DRAW_ADDITIVE_INSTANCE_WORD], r_count, r_base_raw);
+        }
+        if (q_count > 0u) {
+            InterlockedAdd(p_draw_args[DRAW_ALPHA_INSTANCE_WORD], q_count, q_base_raw);
         }
         if (d_count > 0u) {
             InterlockedAdd(p_counters[CTR_DEAD_COUNT], d_count, d_base_raw);
@@ -468,6 +570,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     // Broadcast OUTSIDE the leader branch -- every lane needs the reservation base.
     uint w_base = WaveReadLaneFirst(w_base_raw);
     uint r_base = WaveReadLaneFirst(r_base_raw);
+    uint q_base = WaveReadLaneFirst(q_base_raw);
     uint d_base = WaveReadLaneFirst(d_base_raw);
 
     if (!survives) {
@@ -497,7 +600,21 @@ void main(uint3 tid : SV_DispatchThreadID) {
     // The LIST position (shared by both blend classes -- this is what makes an alpha leak
     // structurally impossible, plan M2) and the class-dense RENDER position.
     uint idx   = w_base + w_lane;
-    uint r_pos = r_base + r_lane;
+    // The two classes grow toward each other from opposite ends of ONE buffer: additive from 0
+    // upward, alpha from `capacity - 1` downward. They cannot collide, because
+    // `additive.instanceCount + alpha.instanceCount == alive_count_next <= capacity` -- the M2
+    // identity plan gate #7 reads back. The VS walks each range with the matching
+    // `(index_base, index_step)` push pair, `(0, +1)` and `(capacity - 1, -1)`, so BOTH reads stay
+    // sequential in their own direction (plan A5/D10).
+    //
+    // The `min` is the F25 guard on the MIRROR, and the asymmetry is why it is here and not on the
+    // additive arm: over `uint`, an alpha reservation past `capacity` makes `capacity - 1 - q_pos`
+    // UNDERFLOW to ~0xFFFFFFFF -- an unbounded out-of-range store with `robustBufferAccess` OFF,
+    // i.e. undefined behaviour rather than a clamp. The additive arm overshoots BOUNDEDLY (by at
+    // most the overshoot itself) and needs no guard to stay in the same class of wrong. One
+    // instruction, on a path that can only be reached if the M2 identity is already broken.
+    uint q_pos = min(q_base + q_lane, pc.capacity - 1u);
+    uint r_pos = is_alpha ? (pc.capacity - 1u - q_pos) : (r_base + r_lane);
 
     p_alive_write[idx] = slot;
 
