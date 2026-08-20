@@ -9,6 +9,9 @@ mod clear;
 mod forward;
 mod fxaa;
 mod gbuffer;
+// Particles P0: the `upload → kickoff → emit → sim` block and the indirect billboard draw, shared
+// verbatim by all three recorders (the barrier callback is what differs per path).
+mod particles;
 mod present_blit;
 mod rcas;
 mod scene;

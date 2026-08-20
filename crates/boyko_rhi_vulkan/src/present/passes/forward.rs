@@ -164,6 +164,26 @@ impl Renderer<'_> {
             // (the COMPUTE→VERTEX RAW barrier derived at `forward_opaque`, the reader) — NOT here.
         }
 
+        // === Particles P0: the `upload → kickoff → emit → sim` block, at the position
+        // `declare_forward_graph` declared it (right after `interp`). One predicate at both sites
+        // — plan gate #6. ===
+        debug_assert_eq!(
+            scene.path_has_particles(),
+            plan.particle.kickoff.is_some(),
+            "invariant: declare/record parity on path_has_particles()"
+        );
+        if let Some(act) = scene.particle.as_ref() {
+            // SAFETY: recording is open and outside any dynamic-rendering scope (the Forward
+            // opaque scope opens below). Every handle in `act` is live for this frame and
+            // `act.sets` is this frame parity's set; `record_forward_pass` is the Forward path's
+            // own sink, so the barriers resolve through the ResId space THIS declarator built.
+            unsafe {
+                self.record_particle_compute(cmd, act, &plan.particle, |p| {
+                    self.record_forward_pass(p, cmd, targets, forward, scene, fi);
+                });
+            }
+        }
+
         let vertex_offset: VkDeviceSize = 0;
 
         // === Multi-paradigm render-path plan, rung R5 (ForwardPlus): the depth-only PRE-PASS
@@ -958,6 +978,38 @@ impl Renderer<'_> {
                     push_bytes.as_ptr().cast(),
                 );
                 (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+            }
+        }
+
+        // === Particles P0: the indirect billboard draw, after every `lit` producer
+        // (`forward_opaque`, and `sdf_forward_march` where it ran) and before `present_sample` —
+        // the declarator's own position. `forward.depth[fi]` is the path's depth image: under
+        // plain `Forward` the opaque pass left a pending depth WRITE, so the callback emits an
+        // availability barrier; under `ForwardPlus` the froxel opaque pass already declared this
+        // exact stage/access/layout, so it emits NOTHING (D7's free row). ===
+        if let Some(act) = scene.particle.as_ref() {
+            let draw_targets = super::particles::ParticleDrawTargets {
+                color_view: targets.lit[fi].view,
+                depth_view: forward.depth[fi].view,
+                area: VkRect2D { offset: VkOffset2D { x: 0, y: 0 }, extent: present_extent },
+                viewport: VkViewport {
+                    x: 0.0,
+                    y: 0.0,
+                    width: present_extent.width as f32,
+                    height: present_extent.height as f32,
+                    min_depth: 0.0,
+                    max_depth: 1.0,
+                },
+            };
+            // SAFETY: recording is open and outside any dynamic-rendering scope (the opaque
+            // scope closed above; `record_particle_draw` opens and closes its own). The two views
+            // are this frame slot's live `lit` and `forward_depth` — the SAME two the declarator
+            // named in the `particle_draw` pass, so the layouts the graph leaves them in are the
+            // ones the attachments declare.
+            unsafe {
+                self.record_particle_draw(cmd, act, &plan.particle, draw_targets, |p| {
+                    self.record_forward_pass(p, cmd, targets, forward, scene, fi);
+                });
             }
         }
 

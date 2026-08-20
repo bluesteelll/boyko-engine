@@ -9,7 +9,7 @@ pub use crate::present::{
     AaActivation, BrickActivation, ClusterCullHierDispatch, CsmDepthActivation, DdgiUpdateActivation,
     FRAMES_IN_FLIGHT, FrameWriteToken, GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES,
     GBUFFER_PUSH_BYTES, GBufferFrame, GBufferMeshDraw, GBufferScene, GBufferTargets,
-    InterpActivation, PunctualDepthActivation, RcasActivation, Renderer,
+    InterpActivation, ParticleActivation, PunctualDepthActivation, RcasActivation, Renderer,
     ResolvedRenderPathGpu, SCENE_MVP_BYTES, SampledComposite, Scene,
     PresentModeConfig, SmaaActivation, SsaaActivation, SsaoActivation, Surface, Swapchain,
     SwapchainError,

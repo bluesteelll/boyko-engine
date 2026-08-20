@@ -830,8 +830,21 @@ pub const VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT: VkFlags = 0x0000_0800;
 /// `VkPipelineStageFlagBits::VK_PIPELINE_STAGE_TRANSFER_BIT`.
 pub const VK_PIPELINE_STAGE_TRANSFER_BIT: VkFlags = 0x0000_1000;
 
+/// `VkPipelineStageFlagBits::VK_PIPELINE_STAGE_VERTEX_INPUT_BIT` — the fixed-function stage that
+/// FETCHES index and vertex-attribute data.
+///
+/// Particles P0: the destination stage of the billboard quad's ONE boot barrier. The 12-byte
+/// 6-entry `u16` index buffer is uploaded once and never rewritten, so it is deliberately NOT a
+/// framegraph resource (the plan's seed table names it as the one exception); its
+/// `TRANSFER_WRITE → INDEX_READ` hand-off is therefore hand-recorded at boot instead of derived.
+pub const VK_PIPELINE_STAGE_VERTEX_INPUT_BIT: VkFlags = 0x0000_0004;
+
 /// `VkAccessFlagBits` (subset used by the 0d buffer barrier).
 pub const VK_ACCESS_SHADER_READ_BIT: VkFlags = 0x0000_0020;
+/// `VkAccessFlagBits::VK_ACCESS_INDEX_READ_BIT` — the access
+/// [`VK_PIPELINE_STAGE_VERTEX_INPUT_BIT`] performs on a bound index buffer. See that constant's
+/// doc for the one consumer.
+pub const VK_ACCESS_INDEX_READ_BIT: VkFlags = 0x0000_0002;
 /// `VK_ACCESS_INDIRECT_COMMAND_READ_BIT` — the only access
 /// `VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT` performs. Virtual-geometry rung R1: its absence is
 /// why `boyko_render`'s `GpuStage::Indirect` widened to a whole shader/transfer superset.

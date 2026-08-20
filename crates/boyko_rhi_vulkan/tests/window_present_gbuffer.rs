@@ -2262,6 +2262,8 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
 
     let mvp = ortho_mvp_bytes();
     let mut scene = GBufferScene {
+        // Particles P0: disarmed in every windowed fixture — no ResId, no pass, no command.
+        particle: None,
         raster_pipeline: &raster_pipeline,
         vertex_buffer: &vertex_buffer,
         vertex_count: vertices.len() as u32,
@@ -3392,6 +3394,8 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
 
     let mvp = ortho_mvp_bytes();
     let mut scene = GBufferScene {
+        // Particles P0: disarmed in every windowed fixture — no ResId, no pass, no command.
+        particle: None,
         raster_pipeline: &raster_pipeline,
         vertex_buffer: &vertex_buffer,
         vertex_count: vertices.len() as u32,
@@ -8445,6 +8449,8 @@ fn run_showcase_body_ddgi(
 
     let mvp = cfg.mvp;
     let scene = GBufferScene {
+        // Particles P0: disarmed in every windowed fixture — no ResId, no pass, no command.
+        particle: None,
         raster_pipeline: &raster_pipeline,
         vertex_buffer: &vertex_buffer,
         vertex_count: vertices.len() as u32,
@@ -9710,6 +9716,8 @@ fn run_showcase_body(
 
     let mvp = cfg.mvp;
     let mut scene = GBufferScene {
+        // Particles P0: disarmed in every windowed fixture — no ResId, no pass, no command.
+        particle: None,
         raster_pipeline: &raster_pipeline,
         vertex_buffer: &vertex_buffer,
         vertex_count: vertices.len() as u32,

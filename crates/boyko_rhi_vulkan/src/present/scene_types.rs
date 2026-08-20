@@ -3642,9 +3642,160 @@ pub struct GBufferScene<'a> {
     /// so the cull's control and the dump's pairing check (piece 3 steps P3-5/P3-7) can be compared
     /// against ONE clock rather than two that happen to agree.
     pub engine_frame_index: u32,
+    /// Particles P0 (`docs/PARTICLES-PLAN.md` Rev 4): this frame's particle activation, or `None`
+    /// when the subsystem is disarmed.
+    ///
+    /// `None` is STRUCTURAL ABSENCE, not a disabled flag: the three declarators declare no pass
+    /// and no `ResId` for particles, so the graph routes zero barriers, the recorder emits no
+    /// command, and every existing image pin is byte-identical BY CONSTRUCTION rather than by an
+    /// argument about untaken branches (plan invariant 2 / D13). [`Self::path_has_particles`] is
+    /// the ONE predicate both the declare and the record site read.
+    pub particle: Option<ParticleActivation<'a>>,
+}
+
+/// Particles P0 (`docs/PARTICLES-PLAN.md` Rev 4, §Host-side): everything the recorder needs to
+/// run the frame's `kickoff → emit → sim → draw` chain, borrowed from the host-owned particle
+/// bundle plus the handful of per-frame push values.
+///
+/// # Why the push values travel HERE and are not recomputed at the record site
+///
+/// Every scalar below has exactly ONE home on the CPU (the plan's "one number, two consumers"
+/// rule at the host↔device seam): `steps`/`timestep` are `ParticleClock`'s, `requested_spawn`/
+/// `emitter_count` are `ParticleEmitScratch`'s, `capacity` is `ParticleConfig`'s, and
+/// `frame_index` is the runner's monotonic counter — the SAME number that selected
+/// [`Self::sets`]' parity. Recomputing any of them here would create the second home the plan's
+/// reversal ledger names as the shape the defects keep arriving in.
+///
+/// # The parity is already resolved
+///
+/// [`Self::sets`] is the descriptor set for THIS frame's parity, chosen host-side from the frame
+/// counter: it binds physical `alive[p]` at binding 4 (`p_alive_read`) and `alive[p^1]` at
+/// binding 5 (`p_alive_write`). There is no device-side parity word and no parity arithmetic in
+/// the recorder — the two roles simply are what the bound set says they are.
+pub struct ParticleActivation<'a> {
+    /// The one-thread bookkeeping pipeline (`particle_kickoff.comp`), dispatched DIRECTLY as a
+    /// single group: it is the pass that WRITES the indirect argument blocks, so it cannot itself
+    /// be indirect.
+    pub kickoff_pipeline: &'a ComputePipeline,
+    /// The spawn pipeline (`particle_emit.comp`), dispatched from `p_dispatch_args + 0`.
+    pub emit_pipeline: &'a ComputePipeline,
+    /// The hot-loop pipeline (`particle_sim.comp`), dispatched from `p_dispatch_args + 16`.
+    pub sim_pipeline: &'a ComputePipeline,
+    /// The additive billboard graphics pipeline. Its depth compare op was frozen at BOOT from the
+    /// resolved render path (`LESS` under Deferred's custom-linear depth, `GREATER` under the
+    /// three reverse-Z paths), so exactly one `VkPipeline` exists per process.
+    pub draw_pipeline: &'a VulkanGraphicsPipeline,
+    /// THIS frame's parity's compute set over the shared Set-0 vocabulary (bindings 0..9). The
+    /// three compute passes bind the SAME set; each module declares only the subset it uses.
+    pub sets: &'a VulkanBindGroup,
+    /// The draw's set 0 — `{ StructuredBuffer<ParticleRender> @0, camera cbuffer @1 }`, both
+    /// `VERTEX`. A different vocabulary from [`Self::sets`], not a subset of it.
+    pub draw_set0: &'a VulkanBindGroup,
+    /// The draw's set 1 — the SHARED bindless `Texture2D[]` + sampler set every other textured
+    /// consumer binds. This is what makes ONE draw cover every effect.
+    ///
+    /// A RAW `VkDescriptorSet` rather than a `&VulkanBindGroup`, because that is what the
+    /// bindless table hands out: its set is minted by `VulkanBindlessSet` (a runtime-sized array
+    /// with its own pool), not by `create_bind_group`. The same shape
+    /// [`GBufferScene::bindless_set`] already carries for the textured raster pass.
+    pub draw_set1: VkDescriptorSet,
+    /// Seed row 6 — the bookkeeping cache line (`p_counters`).
+    ///
+    /// This and the nine handles that follow exist so the three barrier SINKS can resolve the
+    /// particle tail's `ResId`s to physical buffers. They are listed in the SAME order the
+    /// declarator declares the `ResId`s (the shaders' Set-0 binding numbering 0..9), because the
+    /// sink's mapping is positional and a re-ordering here would name a LIVE WRONG buffer with no
+    /// VUID and no validation message.
+    pub counters: &'a BoundBuffer,
+    /// Seed row 7 — the indirect DISPATCH argument block (`p_dispatch_args`), written by kickoff
+    /// and read by `vkCmdDispatchIndirect` at offsets 0 (emit) and 16 (sim).
+    pub dispatch_args: &'a BoundBuffer,
+    /// Seed row 8 — the indirect DRAW argument block (`p_draw_args`), written by kickoff,
+    /// accumulated into by the sim's `InterlockedAdd`, and fetched by `vkCmdDrawIndexedIndirect`
+    /// at offset 0.
+    pub draw_args: &'a BoundBuffer,
+    /// Seed row 3 — the free list (`p_dead`).
+    pub dead: &'a BoundBuffer,
+    /// Seed row 4 — the physical `alive[parity]` buffer, bound at Set-0 binding 4 as
+    /// `p_alive_read`. The PREVIOUS frame drove this same allocation as `p_alive_write`.
+    pub alive_read: &'a BoundBuffer,
+    /// Seed row 5 — the physical `alive[parity ^ 1]` buffer, bound at Set-0 binding 5 as
+    /// `p_alive_write`. The previous frame drove this same allocation as `p_alive_read`.
+    pub alive_write: &'a BoundBuffer,
+    /// Seed row 1 — the 48-byte sim records (`p_particle`).
+    pub particle_records: &'a BoundBuffer,
+    /// Seed row 2 — the 32-byte render records (`p_render`).
+    pub render_records: &'a BoundBuffer,
+    /// Seed row 9 — the DEVICE-side emit-request table (`p_emit_req`), the copy destination.
+    pub emit_req_device: &'a BoundBuffer,
+    /// Seed row 10 — the DEVICE-side effect-parameter table (`p_effects`), the copy destination.
+    pub effects_device: &'a BoundBuffer,
+    /// THIS frame slot's host-visible emit-request STAGING, the copy source. A per-in-flight-slot
+    /// ring, not a single instance: a single one would be host-rewritten on frame N+1 while frame
+    /// N's recorded copy may still be reading it.
+    pub emit_req_staging: &'a BoundBuffer,
+    /// Bytes to copy staging→device for the emit-request table this frame; `0` ⇒ no copy.
+    /// Non-zero iff [`Self::requested_spawn`] is non-zero — the conditional-pass proof's
+    /// load-bearing detail, since the upload and the emit pass must share ONE predicate.
+    pub emit_upload_bytes: u64,
+    /// THIS frame slot's host-visible effect-table STAGING, the copy source. Same per-slot ring
+    /// rationale as [`Self::emit_req_staging`].
+    pub effects_staging: &'a BoundBuffer,
+    /// Bytes to copy staging→device for the effect table this frame; `0` ⇒ no copy. Gated by a
+    /// WRITER-SIDE generation (`ParticleEffectScratch::rows_gen`) against a per-slot record, never
+    /// a hash and never a byte-compare, so a static scene re-uploads nothing.
+    pub effects_upload_bytes: u64,
+    /// The billboard quad's 12-byte `u16` index buffer — boot-uploaded, never rewritten, and
+    /// deliberately NOT a framegraph resource (its one `TRANSFER_WRITE → INDEX_READ` hand-off is
+    /// hand-recorded at boot).
+    pub quad_ib: &'a BoundBuffer,
+    /// `ParticleEmitScratch::total_spawn()` — kickoff's `requested_spawn` push AND the predicate
+    /// that decided whether the upload and the emit pass exist this frame. Doing double duty is
+    /// the point: the value the device is told and the predicate deciding whether the device is
+    /// told anything cannot disagree.
+    pub requested_spawn: u32,
+    /// `ParticleEmitScratch::emitter_count()` — emit's `emitter_count` push, already bounded by
+    /// the host's `MAX_EMITTERS` release clamp.
+    pub emitter_count: u32,
+    /// `ParticleConfig::capacity` — kickoff's `capacity` push, the boot-frozen pool size. Bounds
+    /// MEMORY only; per-frame work is `O(alive)`.
+    pub capacity: u32,
+    /// `ParticleClock::steps()` — the sim's substep count, ALREADY ceiling-clamped on the host.
+    /// `0` is a legal and common value above the step rate: the sim still rebuilds the alive list
+    /// and the render records, only the integrator loop is empty.
+    pub steps: u32,
+    /// `ParticleClock::timestep()` — the constant `dt` every host-precomputed effect parameter
+    /// (`damping`, the rotation multiplier) was baked against.
+    pub timestep: f32,
+    /// The runner's monotonic engine frame index — emit's per-frame RNG seed half, and the SAME
+    /// counter whose low bit chose [`Self::sets`].
+    pub frame_index: u32,
+    /// This frame's parity bit (`frame_index & 1`), carried for the recorder's `debug_assert!`
+    /// only: the roles are already baked into [`Self::sets`], so nothing reads this to decide
+    /// anything.
+    pub parity: u32,
+    /// The 72-byte `VERTEX` push for the draw — `{ float4x4 view_proj; uint index_base; int
+    /// index_step }`, assembled host-side from the path's own view-projection rows with
+    /// `(index_base, index_step) == (0, +1)` (the P0 identity).
+    pub draw_push: [u8; crate::compute::PARTICLE_DRAW_PUSH_BYTES as usize],
 }
 
 impl GBufferScene<'_> {
+    /// Particles P0 (plan gate #6) — the SINGLE source of "does this frame declare and record the
+    /// particle passes".
+    ///
+    /// Both the three declarators' conditional tail and the three recorders' particle blocks read
+    /// THIS method, so a frame can never declare a pass whose commands are not recorded (a
+    /// barrier ordering nothing) or record commands the graph never named (a missing barrier,
+    /// which on this device — `robustBufferAccess` OFF — is undefined behaviour rather than a
+    /// wasted edge). It is deliberately a predicate over the activation's PRESENCE rather than a
+    /// separate flag, so the two cannot drift apart the way two independently-computed booleans
+    /// can.
+    #[inline]
+    pub(crate) fn path_has_particles(&self) -> bool {
+        self.particle.is_some()
+    }
+
     /// HW-RT Rung 3b step 5a — the SINGLE source of the "the raster pass writes the mesh
     /// motion-vector 4th MRT this frame" decision, so the framegraph barrier declaration
     /// (`declare_deferred_graph`) and the draw recording (`record_gbuffer`) can never diverge.

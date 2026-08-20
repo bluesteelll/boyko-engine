@@ -5630,5 +5630,184 @@ pub const fn tile_grid_extent(img_w: u32, img_h: u32) -> (u32, u32) {
     (img_w.div_ceil(TILE_SIZE), img_h.div_ceil(TILE_SIZE))
 }
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Particles P0 — the five committed modules, their push ranges and their group edges
+// (`docs/PARTICLES-PLAN.md` Rev 4). See `present/passes/particles.rs` for the recorder and
+// `boyko_app::gpu_scene::particle` for the host layout table these bindings mirror.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+embed_spirv! {
+    /// Particles P0: the ONE-THREAD bookkeeping pass (`shaders/particle_kickoff.comp.hlsl`,
+    /// algorithm A2 / decision D3).
+    ///
+    /// Swaps the alive roles' COUNTS, clamps the requested spawn against the free list, publishes
+    /// `dead_base`/`emit_append_base`, and writes both indirect argument blocks. Binds a SUBSET of
+    /// the shared Set-0 vocabulary — `p_counters` @0 (read+write), `p_dispatch_args` @1 (write),
+    /// `p_draw_args` @2 (write) — and takes [`PARTICLE_KICKOFF_PUSH_BYTES`] of `COMPUTE` push.
+    ///
+    /// It is one thread because that is what makes `particle_emit` need ZERO atomics: a single
+    /// lane owning both counters can pre-DECREMENT one and pre-INCREMENT the other in the same
+    /// pass, so every emit lane computes both of its indices arithmetically from `gid`.
+    PARTICLE_KICKOFF_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_kickoff.comp.spv")
+}
+
+embed_spirv! {
+    /// Particles P0: the SPAWN pass (`shaders/particle_emit.comp.hlsl`, algorithm A3 / decision
+    /// D8). `DispatchIndirect`, [`PARTICLE_LOCAL_SIZE`] threads, ZERO global atomics.
+    ///
+    /// Binds `p_counters` @0 (read), `p_dead` @3 (read), `p_alive_read` @4 (write), `p_particle`
+    /// @6 (write), `p_emit_req` @8 (read) and `p_effects` @9 (read); takes
+    /// [`PARTICLE_EMIT_PUSH_BYTES`] of `COMPUTE` push. The `first_spawn` prefix orders LANES only
+    /// — the slot comes from the free list and the list position from the append base — so the
+    /// pass is correct against the SHUFFLED `p_dead` the free list is in from frame 2 onward.
+    PARTICLE_EMIT_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_emit.comp.spv")
+}
+
+embed_spirv! {
+    /// Particles P0: the HOT LOOP (`shaders/particle_sim.comp.hlsl`, algorithm A4 / decisions
+    /// D3, D5). `DispatchIndirect`, [`PARTICLE_LOCAL_SIZE`] threads, `O(alive_count_cur)`.
+    ///
+    /// The widest Set-0 subset: `p_counters` @0 (RW, atomic), `p_draw_args` @2 (RW, atomic),
+    /// `p_dead` @3 (write), `p_alive_read` @4 (read), `p_alive_write` @5 (write), `p_particle` @6
+    /// (RW), `p_render` @7 (write), `p_effects` @9 (read); [`PARTICLE_SIM_PUSH_BYTES`] of
+    /// `COMPUTE` push. Its atomics are WAVE-AGGREGATED (one `InterlockedAdd` per wave per
+    /// counter), which is the difference between ~32 µs and ~0.5 ms at 1M survivors.
+    PARTICLE_SIM_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_sim.comp.spv")
+}
+
+embed_spirv! {
+    /// Particles P0: the billboard-expansion VERTEX stage (`shaders/particle_draw.vs.hlsl`,
+    /// algorithm A5). Four vertices and six indices per instance, one `DrawIndexedIndirect`.
+    ///
+    /// Its OWN set-0 vocabulary — `StructuredBuffer<ParticleRender>` @0 + the camera cbuffer @1,
+    /// both `VERTEX` — NOT the compute vocabulary above; set 1 is the bindless table
+    /// [`PARTICLE_DRAW_FS_SPV`] samples. Takes [`PARTICLE_DRAW_PUSH_BYTES`] of `VERTEX` push, and
+    /// reads the render buffer at `index_base + index_step * SV_InstanceID` because
+    /// `firstInstance` MUST be 0 on this device.
+    PARTICLE_DRAW_VS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_draw.vs.spv")
+}
+
+embed_spirv! {
+    /// Particles P0: the FRAGMENT stage (`shaders/particle_draw.fs.hlsl`, algorithm A5) — one
+    /// modulate and one bindless sample, unlit. Paired with [`PARTICLE_DRAW_VS_SPV`].
+    ///
+    /// The blend is PIPELINE state ([`boyko_rhi::enums::BlendState::ADDITIVE`] with
+    /// `depth_write = OFF`), never shader code. Binds set 1 only: `Texture2D gTextures[]` @0 and
+    /// `SamplerState` @1 — the SAME layout object `gbuffer_mrt.fs.hlsl` binds — which is what
+    /// makes ONE draw cover every effect. Declares NO push range of its own.
+    PARTICLE_DRAW_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_draw.fs.spv")
+}
+
+/// Particles P0: `particle_kickoff`'s push block — `{ uint requested_spawn; uint capacity }`.
+///
+/// ⚠️ **NOT part of the shared `COMPUTE_PUSH_CONSTANT_RANGE_BYTES` `max`, deliberately.** The
+/// three particle compute pipelines are built against their OWN pipeline layouts (the plan's
+/// "dedicated layouts" clause, D12), so none of these three consts may widen the shared range —
+/// which sits at 112 of a 128-byte guaranteed floor and has only 16 bytes of headroom left.
+/// `tests/particle_barrier_stream.rs` asserts the shared range is still exactly 112 and that each
+/// particle range is strictly under it.
+pub const PARTICLE_KICKOFF_PUSH_BYTES: u32 = 8;
+
+/// Particles P0: `particle_emit`'s push block — `{ uint emitter_count; uint frame_index }`.
+/// `emitter_count` is the host's D15 release-clamped row count; `frame_index` is the per-frame
+/// half of the spawn seed (the per-emitter half is a constant in the request row, so an idle
+/// frame rewrites no request bytes). See [`PARTICLE_KICKOFF_PUSH_BYTES`] for why this is not in
+/// the shared range.
+pub const PARTICLE_EMIT_PUSH_BYTES: u32 = 8;
+
+/// Particles P0: `particle_sim`'s push block — `{ uint steps; float timestep }`.
+///
+/// `steps` is `ParticleClock::steps()`, ALREADY ceiling-clamped on the host (plan M3) — one
+/// number with two consumers, the host's own emitter advance and this push. The shader's
+/// `min(pc.steps, PARTICLE_SUBSTEP_CEILING)` is the hang guard against a corrupt push constant
+/// and can never bind on a well-formed frame. See [`PARTICLE_KICKOFF_PUSH_BYTES`] for why this is
+/// not in the shared range.
+pub const PARTICLE_SIM_PUSH_BYTES: u32 = 8;
+
+/// Particles P0: `particle_draw.vs`'s `VERTEX`-stage push block — `{ float4x4 view_proj; uint
+/// index_base; int index_step }` (64 + 4 + 4).
+///
+/// A GRAPHICS range, entirely separate from the shared COMPUTE one, so it is bounded only by the
+/// device's own `maxPushConstantsSize` floor and not by [`PARTICLE_KICKOFF_PUSH_BYTES`]'s note.
+/// `(index_base, index_step) == (0, +1)` at P0 — the identity, i.e. a strictly sequential read of
+/// the render buffer with no indirection.
+pub const PARTICLE_DRAW_PUSH_BYTES: u32 = 72;
+
+/// Particles P0: the `[numthreads(256,1,1)]` group edge of `particle_emit` and `particle_sim`
+/// (the research corpus's `THREADCOUNT_SIMULATION`).
+///
+/// Mirrored HOST-side only for the boot-time argument-block seeding and the OOB reasoning: the
+/// per-frame group counts are computed ON THE DEVICE by `particle_kickoff` and consumed by
+/// `vkCmdDispatchIndirect`, so no host code divides by this on the hot path. `LocalSize` is
+/// pinned against the compiled modules by `tests/particle_edsl_sync.rs`.
+pub const PARTICLE_LOCAL_SIZE: u32 = 256;
+
+/// Particles P0: `particle_kickoff`'s `[numthreads(1,1,1)]` group edge. The pass is dispatched
+/// DIRECTLY (one group of one thread) — it is the pass that WRITES the indirect argument blocks
+/// the other two are dispatched from, so it cannot itself be indirect.
+pub const PARTICLE_KICKOFF_LOCAL_SIZE: u32 = 1;
+
+/// Particles P0: the byte offset of `particle_emit`'s `VkDispatchIndirectCommand` inside
+/// `p_dispatch_args` (plan D4 — the two commands sit at 0 and 16).
+pub const PARTICLE_DISPATCH_EMIT_OFFSET: u64 = 0;
+
+/// Particles P0: the byte offset of `particle_sim`'s `VkDispatchIndirectCommand` inside
+/// `p_dispatch_args`. See [`PARTICLE_DISPATCH_EMIT_OFFSET`].
+pub const PARTICLE_DISPATCH_SIM_OFFSET: u64 = 16;
+
+/// Particles P0: the byte offset of the ADDITIVE `VkDrawIndexedIndirectCommand` inside
+/// `p_draw_args` — the only slot P0 records (the alpha slot at 24 is zeroed and its draw is not
+/// declared).
+pub const PARTICLE_DRAW_ADDITIVE_OFFSET: u64 = 0;
+
+/// Particles P0: the index count of the billboard quad — two triangles over four corners.
+///
+/// `vkCmdDrawIndirect` (non-indexed) is not loaded on this device, so the draw is INDEXED and
+/// this is the `indexCount` every kickoff writes into both draw slots.
+pub const PARTICLE_QUAD_INDEX_COUNT: u32 = 6;
+
+/// Particles P0: the byte size of the billboard quad's `u16` index buffer — six 2-byte indices.
+/// Uploaded ONCE at boot under its own `TRANSFER_WRITE → INDEX_READ` barrier and never rewritten,
+/// which is why it is deliberately NOT a framegraph resource.
+pub const PARTICLE_QUAD_IB_BYTES: u64 = PARTICLE_QUAD_INDEX_COUNT as u64 * 2;
+
+/// Particles P0: the ONE-THREAD bookkeeping SPIR-V as a `u32` word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module). See
+/// [`PARTICLE_KICKOFF_SPV`]'s doc for the binding subset and the push block.
+#[inline]
+pub fn particle_kickoff_spirv() -> &'static [u32] {
+    PARTICLE_KICKOFF_SPV.as_words()
+}
+
+/// Particles P0: the SPAWN SPIR-V as a `u32` word stream. See [`PARTICLE_EMIT_SPV`]'s doc.
+#[inline]
+pub fn particle_emit_spirv() -> &'static [u32] {
+    PARTICLE_EMIT_SPV.as_words()
+}
+
+/// Particles P0: the HOT-LOOP SPIR-V as a `u32` word stream. See [`PARTICLE_SIM_SPV`]'s doc.
+#[inline]
+pub fn particle_sim_spirv() -> &'static [u32] {
+    PARTICLE_SIM_SPV.as_words()
+}
+
+/// Particles P0: the billboard-expansion VERTEX SPIR-V as a `u32` word stream. See
+/// [`PARTICLE_DRAW_VS_SPV`]'s doc.
+#[inline]
+pub fn particle_draw_vs_spirv() -> &'static [u32] {
+    PARTICLE_DRAW_VS_SPV.as_words()
+}
+
+/// Particles P0: the FRAGMENT SPIR-V as a `u32` word stream. See [`PARTICLE_DRAW_FS_SPV`]'s doc.
+#[inline]
+pub fn particle_draw_fs_spirv() -> &'static [u32] {
+    PARTICLE_DRAW_FS_SPV.as_words()
+}
+
 #[cfg(test)]
 mod tests;

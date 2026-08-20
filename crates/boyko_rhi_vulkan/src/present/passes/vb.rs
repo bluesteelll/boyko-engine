@@ -1012,6 +1012,27 @@ impl Renderer<'_> {
             }
         }
 
+        // === Particles P0: the `upload → kickoff → emit → sim` block, at the position
+        // `declare_vb_graph` declared it (right after `light_upload`). One predicate at both
+        // sites — plan gate #6. ===
+        debug_assert_eq!(
+            scene.path_has_particles(),
+            plan.particle.kickoff.is_some(),
+            "invariant: declare/record parity on path_has_particles()"
+        );
+        if let Some(act) = scene.particle.as_ref() {
+            // SAFETY: recording is open and outside any dynamic-rendering scope (the VB raster
+            // scope opens far below). Every handle in `act` is live for this frame and `act.sets`
+            // is this frame parity's set; `record_vb_pass` is the VB path's own sink, so the
+            // barriers resolve through the ResId space THIS declarator built.
+            ts.cmd();
+            unsafe {
+                self.record_particle_compute(cmd, act, &plan.particle, |p| {
+                    self.record_vb_pass(p, cmd, targets, forward, vb, scene, fi);
+                });
+            }
+        }
+
         // VB-P1e H0: open the CullReset bracket BEFORE the cull's `if let` gate, so it is
         // written EVERY bench-armed frame REGARDLESS of whether the froxel arm itself is
         // boot-built (`scene.cluster_cull.is_none()` on a flat-leg bench boot ⇒ a near-zero-
@@ -4574,6 +4595,39 @@ impl Renderer<'_> {
             self.record_vb_viewt_dispatch(
                     vb_viewt_pass, cmd, targets, forward, vb, scene, present_extent, fi, &ts,
                 );
+        }
+
+        // === Particles P0: the indirect billboard draw, after every `lit` producer
+        // (`vb_resolve`/`vb_shade`/`sdf_forward_march`/`vb_sky`) and before `taa_resolve` +
+        // `present_sample` — the declarator's own position. `forward.depth[fi]` is VB's depth
+        // image (VB reuses `ForwardTargets::depth` verbatim as `vb_depth`), which ends the frame
+        // on a depth-stencil write, so the callback emits an AVAILABILITY barrier with no layout
+        // change (D7's Forward/VB row). ===
+        if let Some(act) = scene.particle.as_ref() {
+            let draw_targets = super::particles::ParticleDrawTargets {
+                color_view: targets.lit[fi].view,
+                depth_view: forward.depth[fi].view,
+                area: VkRect2D { offset: VkOffset2D { x: 0, y: 0 }, extent: present_extent },
+                viewport: VkViewport {
+                    x: 0.0,
+                    y: 0.0,
+                    width: present_extent.width as f32,
+                    height: present_extent.height as f32,
+                    min_depth: 0.0,
+                    max_depth: 1.0,
+                },
+            };
+            // SAFETY: recording is open and outside any dynamic-rendering scope (every VB raster
+            // scope closed above; `record_particle_draw` opens and closes its own). The two views
+            // are this frame slot's live `lit` and `vb_depth` — the SAME two the declarator named
+            // in the `particle_draw` pass, so the layouts the graph leaves them in are the ones
+            // the attachments declare.
+            ts.cmd();
+            unsafe {
+                self.record_particle_draw(cmd, act, &plan.particle, draw_targets, |p| {
+                    self.record_vb_pass(p, cmd, targets, forward, vb, scene, fi);
+                });
+            }
         }
 
         // === TAA-under-VB: the temporal-resolve (+ RCAS) — recorded HERE, BEFORE

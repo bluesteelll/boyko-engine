@@ -142,6 +142,14 @@ impl BarrierStage {
     /// widened to a `COMPUTE_SHADER | TRANSFER` superset, which is sound but
     /// synchronises far more than a GPU-decided cut needs.
     pub const DRAW_INDIRECT: BarrierStage = BarrierStage(0x0000_0002);
+    /// `VK_PIPELINE_STAGE_VERTEX_INPUT_BIT` — the fixed-function stage that FETCHES
+    /// index and vertex-attribute data.
+    ///
+    /// Particles P0: the destination stage of the billboard quad's ONE boot barrier.
+    /// That 12-byte index buffer is written once at boot and read-only forever, which
+    /// is why it is deliberately NOT a framegraph resource — its hand-off is the one
+    /// hand-written barrier in the whole subsystem.
+    pub const VERTEX_INPUT: BarrierStage = BarrierStage(0x0000_0004);
 
     /// The empty set (no stage bits) — an invalid barrier; callers must set at
     /// least one when a buffer barrier is present (asserted at the encoder).
@@ -199,6 +207,9 @@ impl BarrierAccess {
     /// read by this stage. A declaration of "indirect write" is incoherent, and
     /// `boyko_render`'s mapping widens it rather than inventing a bit.
     pub const INDIRECT_COMMAND_READ: BarrierAccess = BarrierAccess(0x0000_0001);
+    /// `VK_ACCESS_INDEX_READ_BIT` — the access [`BarrierStage::VERTEX_INPUT`] performs
+    /// on a bound index buffer. See that constant's doc for the one consumer.
+    pub const INDEX_READ: BarrierAccess = BarrierAccess(0x0000_0002);
 
     /// The empty set (no access bits).
     pub const NONE: BarrierAccess = BarrierAccess(0);
@@ -912,6 +923,29 @@ impl BlendState {
         color_op: BlendOp::Add,
         src_alpha: BlendFactor::One,
         dst_alpha: BlendFactor::OneMinusSrcAlpha,
+        alpha_op: BlendOp::Add,
+    };
+
+    /// Additive: `src + dst` for both color and alpha (`ONE`/`ONE`, op `ADD`) — the
+    /// GPU particle system's P0 blend (`docs/PARTICLES-PLAN.md` D7/D10).
+    ///
+    /// Unlike the two alpha states above, this one is COMMUTATIVE, which is the whole
+    /// reason P0 ships its particles UNSORTED: under the 8-bit saturation of an LDR
+    /// target `sat(sat(x) + y) == min(1, x + y)`, so the composited result does not
+    /// depend on the order the instances retire in. The destination factor is `ONE`
+    /// rather than `ONE_MINUS_SRC_ALPHA` precisely so no term of the sum can attenuate
+    /// what was already there — an attenuating factor would re-introduce order
+    /// dependence and with it the sort P0 does not have.
+    ///
+    /// The pipeline that uses it pairs it with `depth_test = ON` / `depth_write = OFF`,
+    /// so opaque geometry still occludes the additive fragments while they contribute
+    /// nothing to the depth buffer for each other.
+    pub const ADDITIVE: BlendState = BlendState {
+        src_color: BlendFactor::One,
+        dst_color: BlendFactor::One,
+        color_op: BlendOp::Add,
+        src_alpha: BlendFactor::One,
+        dst_alpha: BlendFactor::One,
         alpha_op: BlendOp::Add,
     };
 }

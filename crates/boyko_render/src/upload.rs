@@ -45,6 +45,8 @@ use crate::mesh_draw::{
 // TAA W3: un-walled from `hwrt` — the resolve's camera-only MV reconstruction needs the
 // MotionCam ring upload on BOTH legs (see `boyko_render::motion_cam`'s module doc).
 use crate::motion_cam::{MOTION_CAM_UBO_BYTES, MotionCam};
+// Particles P0: the two POD tables the gated per-frame uploads stage.
+use crate::particle::{EffectParamsGpu, EmitRequestGpu};
 use crate::view::composite_from_view_sheared;
 
 /// [`upload_camera_ring`] with an optional TAA rung-C1 b5 camera-basis shear
@@ -1310,6 +1312,137 @@ pub unsafe fn upload_sdf_edit_list(token: &FrameWriteToken, slot: &BoundBuffer, 
         core::slice::from_raw_parts_mut(mapped.as_ptr().cast::<u32>(), EDITLIST_BUFFER_WORDS)
     };
     encode_edit_list(buf, edits);
+}
+
+/// Particles P0 (`docs/PARTICLES-PLAN.md` Rev 4): writes this frame's packed
+/// [`EmitRequestGpu`](crate::particle::EmitRequestGpu) table into ONE emit-request STAGING ring
+/// slot. The recorder's `particle_upload` pass then copies those bytes into the device-local
+/// table on the GPU timeline.
+///
+/// # Called ONLY on a frame that spawns
+///
+/// The caller gates this on `ParticleEmitScratch::total_spawn() > 0` — the SAME predicate that
+/// decides whether the `particle_emit` pass is declared. That is not an optimisation but a
+/// correctness requirement: the plan's conditional-pass proof needs "written but unread this
+/// frame" to be unconstructible, because the device table's cross-frame seed says its terminal is
+/// a COMPUTE READ. A frame with no spawns therefore moves **0 bytes** across PCIe, which is one
+/// of the plan's own metric rows.
+///
+/// Returns the number of bytes staged — the SAME number the recorder's `vkCmdCopyBuffer` region
+/// takes, so the caller never computes it a second time.
+///
+/// # Why this takes `&[EmitRequestGpu]` and not `&[u8]`
+///
+/// The plan's API sketch says `bytes: &[u8]`. It is typed here instead, and the byte view happens
+/// in THIS crate, because this crate owns the POD type and its `Pod` bound: a `&[u8]` parameter
+/// would push the `bytemuck::cast_slice` out to every caller, where passing the WRONG table (the
+/// effect rows into the request staging, say) is a type-correct mistake. It is untypeable here.
+///
+/// # Panics
+///
+/// Panics if the staged bytes exceed `staging_slot.size`: the memcpy would run past the mapped
+/// range (UB), so the guard is a hard assert in every build. Size the staging ring at
+/// `MAX_EMITTERS * size_of::<EmitRequestGpu>()` (16 KB) so any table the host's D15 release clamp
+/// admits fits.
+///
+/// # Safety
+///
+/// * `staging_slot` is a LIVE host-visible buffer minted by `RhiDevice::create_buffer`
+///   (`HostVisibleCoherent`) and not yet destroyed: its `mapped` pointer targets at least
+///   `staging_slot.size` valid, persistently-mapped bytes.
+/// * `staging_slot` is the FENCED slot's buffer — `emit_req_staging[token.slot()]` (the same
+///   token/slot contract as [`upload_light_table`]). A single un-ringed staging instance, or the
+///   wrong slot, re-opens the host-write-vs-GPU-copy race: frame N's recorded staging→device copy
+///   READS this buffer while it executes, and only the borrowed token proves frame N−2's copy
+///   retired.
+pub unsafe fn upload_particle_emit_requests(
+    token: &FrameWriteToken,
+    staging_slot: &BoundBuffer,
+    requests: &[EmitRequestGpu],
+) -> u64 {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+    let bytes: &[u8] = bytemuck::cast_slice(requests);
+
+    assert!(
+        bytes.len() as u64 <= staging_slot.size,
+        "particle emit-request table overflow: {} staged bytes exceed the {}-byte staging slot \
+         (size the staging ring at MAX_EMITTERS * size_of::<EmitRequestGpu>())",
+        bytes.len(),
+        staging_slot.size
+    );
+
+    let mapped = staging_slot
+        .mapped
+        .expect("invariant: the particle emit-request staging slot is host-visible mapped");
+    // SAFETY: per this fn's contract `mapped` targets >= `staging_slot.size` valid mapped
+    // host-coherent bytes, and `bytes.len() <= staging_slot.size` is hard-asserted above — the
+    // write is in-bounds. The borrowed `FrameWriteToken` + the slot-identity contract prove this
+    // slot's in-flight fence was waited THIS frame, so the slot's previous occupant (frame N−2)
+    // finished its recorded staging→device copy and the sibling in-flight frame writes the OTHER
+    // ring slot — race-free, lock-free. `bytes` is the `ScratchColumn`'s own VM-backed lane, a
+    // distinct non-overlapping region.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+    }
+    bytes.len() as u64
+}
+
+/// Particles P0: writes the baked [`EffectParamsGpu`](crate::particle::EffectParamsGpu) table
+/// into ONE effect-table STAGING ring slot. The recorder's `particle_upload` pass copies it into
+/// the device-local table.
+///
+/// # Called only when the table actually changed
+///
+/// The caller gates this on a WRITER-SIDE generation — `ParticleEffectScratch::rows_gen()`
+/// compared against a per-in-flight-slot record — never a hash and never a byte-compare. A static
+/// scene therefore re-uploads nothing after the two boot catch-up frames, and the idle command
+/// stream is byte-identical.
+///
+/// Unlike the emit-request half, this one is NOT tied to the emit pass's predicate: the effect
+/// table has at least one reader on EVERY armed frame (the sim needs effect parameters whether or
+/// not anything spawned), so an upload with no spawns is a well-formed state rather than the
+/// "written but unread" one the conditional-pass proof rules out.
+///
+/// Returns the number of bytes staged — the recorder's copy size. Typed on `&[EffectParamsGpu]`
+/// for the reason [`upload_particle_emit_requests`] states.
+///
+/// # Panics
+///
+/// Panics if the staged bytes exceed `staging_slot.size`. Size the staging ring at
+/// `MAX_EFFECTS * size_of::<EffectParamsGpu>()` (32 KB).
+///
+/// # Safety
+///
+/// Identical contract to [`upload_particle_emit_requests`], on
+/// `effects_staging[token.slot()]`.
+pub unsafe fn upload_particle_effects(
+    token: &FrameWriteToken,
+    staging_slot: &BoundBuffer,
+    rows: &[EffectParamsGpu],
+) -> u64 {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+    let bytes: &[u8] = bytemuck::cast_slice(rows);
+
+    assert!(
+        bytes.len() as u64 <= staging_slot.size,
+        "particle effect table overflow: {} staged bytes exceed the {}-byte staging slot \
+         (size the staging ring at MAX_EFFECTS * size_of::<EffectParamsGpu>())",
+        bytes.len(),
+        staging_slot.size
+    );
+
+    let mapped = staging_slot
+        .mapped
+        .expect("invariant: the particle effect staging slot is host-visible mapped");
+    // SAFETY: verbatim the argument `upload_particle_emit_requests` makes, on the effect-table
+    // staging ring — bounded write into a live mapping, on the slot whose fence the borrowed
+    // token proves was waited this frame.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+    }
+    bytes.len() as u64
 }
 
 #[cfg(test)]

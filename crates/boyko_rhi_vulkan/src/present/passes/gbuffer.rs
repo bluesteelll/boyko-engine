@@ -540,6 +540,31 @@ impl Renderer<'_> {
             // AFTER this dispatch's write. NOT recorded here.
         }
 
+        // === Particles P0: the `upload → kickoff → emit → sim` block, recorded HERE — at the
+        // position the declarator declared it (right after `interp`), which is what keeps declare
+        // and record in the SAME order. Gated on `scene.path_has_particles()`, the ONE predicate
+        // both sites read (plan gate #6). The draw is recorded far below, at the resolve→present
+        // seam. ===
+        debug_assert_eq!(
+            scene.path_has_particles(),
+            plan.particle.kickoff.is_some(),
+            "invariant: declare/record parity on path_has_particles() — the declarator arms the \
+             kickoff pass under exactly the predicate this recorder gates on"
+        );
+        if let Some(act) = scene.particle.as_ref() {
+            // SAFETY: recording is open and outside any dynamic-rendering scope (the raster pass
+            // below opens the frame's first one). Every handle in `act` is live for this frame
+            // (`build_particle_bundle` owns them until teardown) and `act.sets` is this frame
+            // parity's set. `record_graph_pass` is the deferred path's own barrier sink, so each
+            // pass's derived barriers resolve through the ResId space THIS declarator built.
+            ts.cmd();
+            unsafe {
+                self.record_particle_compute(cmd, act, &plan.particle, |p| {
+                    self.record_graph_pass(p, cmd, targets, scene, fi);
+                });
+            }
+        }
+
         // === HW-RT rung R2a-3: the GPU-resident per-frame TLAS PACK + BUILD. Recorded ONLY when
         // the scene wires the activation (`scene.tlas.is_some()` — armed under hwrt + ray_query +
         // count > 0) AND the AS command table resolved (`accel_fns.is_some()`); otherwise skipped
@@ -2899,6 +2924,47 @@ impl Renderer<'_> {
         // pipelines reading `lit` AFTER the SHADER_READ_ONLY_OPTIMAL transition, below). Gated on
         // `scene.taa.is_some()` AND `targets.taa_resolve_set.is_some()` (kept in lockstep by
         // `GBufferTargets::create`) — `None` on every other `AaMode` records nothing here.
+        // === Particles P0: the indirect billboard draw, recorded HERE — after the resolve wrote
+        // `lit` and BEFORE the TAA resolve + present blit read it, the SAME position the
+        // declarator declared the pass in. `depth[fi]` arrives at `SHADER_READ_ONLY_OPTIMAL` on
+        // this path (three pre-lit consumers sampled it), so the barrier the callback emits is a
+        // real layout transition — the one path of the four where it is (D7). ===
+        if let Some(act) = scene.particle.as_ref() {
+            let particle_plan = self
+                .gbuffer_pass_plan
+                .as_ref()
+                .expect("invariant: declare_frame_graph ran before record_gbuffer")
+                .particle;
+            // `present_extent` is the COMPOSITE size every `lit`/`depth` slot is allocated at —
+            // the same extent the raster scope above used, so the billboards rasterize against
+            // exactly the depth the opaque pass wrote, texel for texel.
+            let draw_targets = super::particles::ParticleDrawTargets {
+                color_view: targets.lit[fi].view,
+                depth_view: targets.depth[fi].view,
+                area: VkRect2D { offset: VkOffset2D { x: 0, y: 0 }, extent: present_extent },
+                viewport: VkViewport {
+                    x: 0.0,
+                    y: 0.0,
+                    width: present_extent.width as f32,
+                    height: present_extent.height as f32,
+                    min_depth: 0.0,
+                    max_depth: 1.0,
+                },
+            };
+            // SAFETY: recording is open and outside any dynamic-rendering scope (the raster
+            // scope closed long above; `record_particle_draw` opens and closes its own). The two
+            // views are this frame slot's live `lit` and `depth` images — the SAME two the
+            // declarator named in the `particle_draw` pass, so the layouts the graph leaves them
+            // in are the ones the attachments declare. Every handle in `act` is live for the
+            // frame.
+            ts.cmd();
+            unsafe {
+                self.record_particle_draw(cmd, act, &particle_plan, draw_targets, |p| {
+                    self.record_graph_pass(p, cmd, targets, scene, fi);
+                });
+            }
+        }
+
         if let Some(taa) = scene.taa.as_ref()
             && targets.taa_resolve_set.is_some()
         {

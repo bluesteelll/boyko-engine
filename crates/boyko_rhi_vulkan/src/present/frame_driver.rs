@@ -186,7 +186,15 @@ impl<'ctx> Renderer<'ctx> {
         // hand path emits: the 3 color images UNDEFINED→COLOR_ATTACHMENT_OPTIMAL at
         // TOP_OF_PIPE→COLOR_ATTACHMENT_OUTPUT, then depth UNDEFINED→DEPTH_ATTACHMENT_OPTIMAL
         // at TOP_OF_PIPE→(EARLY|LATE)_FRAGMENT_TESTS.
-        let mut frame_graph = crate::framegraph::FrameGraph::with_capacity(16, 16, 64);
+        //
+        // Particles P0 raised this from `(16, 16, 64)` to `(48, 32, 192)`. The reserve is a
+        // FIRST-FRAME ALLOCATION HINT, not a bound — `Vec::with_capacity` grows on demand — so an
+        // undersized one costs a reallocation on the frame that overflows it and nothing else. It
+        // was already undersized before this rung (`declare_vb_graph` alone declares 33
+        // resources), and the particle tail adds ten more resources, five more passes and ~25 more
+        // accesses on an armed frame. The new numbers cover the widest declarator with the tail
+        // armed, with room left so the next append does not re-open the question.
+        let mut frame_graph = crate::framegraph::FrameGraph::with_capacity(48, 32, 192);
         let albedo = frame_graph.add_image("albedo");
         let normal = frame_graph.add_image("normal");
         let material = frame_graph.add_image("material");

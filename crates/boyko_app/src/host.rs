@@ -136,6 +136,15 @@ pub(crate) struct WindowHost {
     /// `light_uploaded_gen[s] != generation` (the deterministic writer-side
     /// gate — see `crate::light_gate::light_upload_due`).
     pub(crate) light_uploaded_gen: [u64; FRAMES_IN_FLIGHT],
+    /// Particles P0: per-in-flight-slot record of the `ParticleEffectScratch::rows_gen()` whose
+    /// baked bytes were last written into that slot's effect staging.
+    ///
+    /// `light_uploaded_gen`'s twin, seeded `u64::MAX` for the same reason — BOTH slots upload the
+    /// real effect table on their first frames, which is what makes the device table defined at
+    /// frame 0 without a separate boot upload path. The gate is
+    /// [`crate::particle_gate::particle_effects_upload_due`]. Carried unconditionally (8 bytes on
+    /// a disarmed run, never read there).
+    pub(crate) particle_effects_uploaded_gen: [u64; FRAMES_IN_FLIGHT],
     /// The swapchain + per-image views. Dropped after the explicit
     /// frame/gpu teardown (device idle by then).
     pub(crate) swapchain: Swapchain<'static>,
@@ -268,6 +277,9 @@ impl WindowHost {
             // u64::MAX ≠ any real generation ⇒ both slots upload the ECS light
             // table on their first frames (host plan D5/R4).
             light_uploaded_gen: [u64::MAX; FRAMES_IN_FLIGHT],
+            // Same `u64::MAX ≠ any real generation` seed, same reason: both slots upload the
+            // baked particle effect table on their first frames.
+            particle_effects_uploaded_gen: [u64::MAX; FRAMES_IN_FLIGHT],
             swapchain,
             surface,
             window,

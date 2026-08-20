@@ -2143,6 +2143,38 @@ impl VulkanContext {
         self.build_graphics_pipeline(desc, Some(set1_layout), VK_COMPARE_OP_GREATER, true)
     }
 
+    /// Particles P0 (`docs/PARTICLES-PLAN.md` D7): builds the additive billboard draw pipeline —
+    /// set 0 = `desc.bind_group_layout` (`{ StructuredBuffer<ParticleRender> @0, Camera cbuffer
+    /// @1 }`, the VERTEX half's own vocabulary), set 1 = `set1_layout` (the shared bindless
+    /// `Texture2D[]` + sampler set the FRAGMENT half samples through), and a `VERTEX`-stage push
+    /// range of `desc.push_constant_bytes` — the 2-set shape
+    /// [`Self::create_graphics_pipeline_bindless`] already establishes.
+    ///
+    /// # Why the compare op is a PARAMETER and the depth write is not
+    ///
+    /// `depth_compare` is caller-supplied because it is the ONE piece of this pipeline that is a
+    /// property of the RENDER PATH rather than of particles: `VK_COMPARE_OP_LESS` under Deferred
+    /// (custom-linear depth) and `VK_COMPARE_OP_GREATER` under Forward / ForwardPlus /
+    /// VisibilityBuffer (hardware reverse-Z). It is resolved ONCE at boot from
+    /// `ResolvedRenderPath`, so exactly one `VkPipeline` exists per process — a wrong value here
+    /// inverts occlusion, and no automated image gate would see it (plan gate #12 is an
+    /// owner-eval screenshot per path for exactly that reason).
+    ///
+    /// `depth_write` is hardcoded `false` and is NOT a parameter, because it is a property of the
+    /// BLEND CLASS and not of the path: additive fragments must not occlude each other, on any
+    /// path. Depth TESTING stays on (`build_graphics_pipeline` hardcodes `depth_test_enable`), so
+    /// opaque geometry still occludes the billboards. Making it a knob would let a caller
+    /// construct the one combination — additive with depth writes — that this plan's
+    /// "P0 ships unsorted, provably" argument does not survive.
+    pub fn create_graphics_pipeline_particle(
+        &self,
+        desc: &GraphicsPipelineDesc<Vulkan>,
+        set1_layout: VkDescriptorSetLayout,
+        depth_compare: i32,
+    ) -> Result<VulkanGraphicsPipeline, VulkanError> {
+        self.build_graphics_pipeline(desc, Some(set1_layout), depth_compare, false)
+    }
+
     /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): builds the `depth_prepass`
     /// pipeline — a DEPTH-ONLY pipeline (`desc.color_formats` empty, zero color attachments;
     /// `build_graphics_pipeline`'s existing CSM/atlas depth-only shape, the SAME one

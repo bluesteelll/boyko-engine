@@ -72,7 +72,11 @@ use crate::device::GpuDevice;
 #[cfg(windows)]
 use crate::host::WindowHost;
 #[cfg(windows)]
+use boyko_rhi_vulkan::compute::PARTICLE_DRAW_PUSH_BYTES;
+
+use crate::gpu_scene::{ParticleFrameInputs, ParticleFramePush};
 use crate::light_gate::light_upload_due;
+use crate::particle_gate::particle_effects_upload_due;
 // VG R3 piece 4 rung P4-4: the diagnostic regime, read live per frame beside `HzbConfig` and
 // recorded into both artifacts (the probe dump's `[host]` table and the bench summary's regime
 // line).
@@ -734,6 +738,30 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
                 hier_cull,
             );
         }
+    }
+
+    // === Particles P0: the GPU bundle, built ONCE and ONLY when the owner armed the subsystem.
+    //
+    // Sited here, after `build_textured_resources`, because the draw's set-1 layout IS the
+    // bindless texture table's — which does not exist at `GpuSceneBundles::boot` time — and
+    // because `ParticleConfig` lives in the World, which is only readable after every plugin's
+    // `build()` ran.
+    //
+    // A disarmed run (the `#[default] Off` mode, which is every existing scene) never enters this
+    // branch: no buffer, no pipeline, no descriptor set, no shader module, no boot submit. That
+    // absence is what the whole 0%-gate rests on, and it is structural rather than a flag test on
+    // a hot path.
+    //
+    // The depth compare op is frozen HERE, once, from the resolved render path: `LESS` under
+    // Deferred (custom-linear depth) and `GREATER` under the three reverse-Z paths. Getting it
+    // wrong inverts occlusion and no image gate would see it.
+    if let Some(particle_config) = app.world().try_resource::<boyko_render::ParticleConfig>()
+        && particle_config.enabled()
+    {
+        let capacity = particle_config.capacity;
+        let deferred_path =
+            matches!(host.resolved_render_path.path, boyko_render::RenderPath::Deferred);
+        host.gpu.build_particle_bundle(ctx, bindless_texture_table, capacity, deferred_path);
     }
 
     // Asset-system rung A3b: drain any decoded-but-not-yet-uploaded assets BEFORE
@@ -1974,6 +2002,106 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 zeroed
             };
 
+            // 6b'. Particles P0: the TWO gated uploads into slot `s`, and the frame's push
+            //      values. Sited HERE — after `mvp` (6b) and before the scene assembly — for
+            //      one reason: the draw's push carries the path's OWN view-projection rows, and
+            //      taking them from `mvp` rather than recomputing them is what keeps the
+            //      billboards' projection bit-identical to the raster pass's. Everything else
+            //      it reads (`ParticleClock`/`ParticleEmitScratch`/`ParticleEffectScratch`) was
+            //      final the moment `app.update_with_delta` returned, with zero workers still
+            //      in flight.
+            //
+            //      The two gates are deliberately DIFFERENT in kind, because the two tables are:
+            //
+            //      * the emit-request table is gated on `total_spawn > 0` — a plain read of the
+            //        value A1 already computed, and the SAME expression the declarator gates the
+            //        `particle_emit` pass on. That sharing is the plan's conditional-pass proof:
+            //        it is what makes "written but unread this frame" — which would falsify the
+            //        request buffer's reader seed — unconstructible. A frame with no spawns moves
+            //        ZERO bytes across PCIe.
+            //      * the effect table is gated on a WRITER-SIDE GENERATION against a per-slot
+            //        record (`particle_effects_upload_due`), never a hash and never a byte
+            //        compare — the light table's protocol, on a different writer.
+            //
+            //      `particle_upload_slots` returns `None` on a disarmed run, so this whole block
+            //      is one `Option` test then.
+            let particle_inputs = host.gpu.particle_upload_slots(s).map(
+                |(emit_staging, effects_staging)| {
+                    let clock = *world.resource::<boyko_render::ParticleClock>();
+                    let emit_scratch = world.resource::<boyko_render::ParticleEmitScratch>();
+                    let effect_scratch = world.resource::<boyko_render::ParticleEffectScratch>();
+
+                    let requested_spawn = emit_scratch.total_spawn();
+                    let emit_upload_bytes = if requested_spawn > 0 {
+                        // SAFETY: `emit_staging` is `emit_req_staging[s]` — boot-minted
+                        // host-visible at the full `MAX_EMITTERS` table size, live until
+                        // teardown, and the FENCED slot (`s == token.slot()`), so the previous
+                        // occupant's recorded staging→device copy retired behind the waited
+                        // fence and the sibling in-flight frame writes the OTHER slot. The rows
+                        // are the `ScratchColumn`'s own VM-backed lane, bounded by the D15
+                        // release clamp to at most that table.
+                        unsafe {
+                            boyko_render::upload_particle_emit_requests(
+                                &token,
+                                emit_staging,
+                                emit_scratch.requests(),
+                            )
+                        }
+                    } else {
+                        0
+                    };
+
+                    let rows_gen = effect_scratch.rows_gen();
+                    let effects_upload_bytes = if particle_effects_upload_due(
+                        &mut host.particle_effects_uploaded_gen,
+                        s,
+                        rows_gen,
+                    ) {
+                        // SAFETY: same provenance and slot contract as the emit-request staging
+                        // above, on `effects_staging[s]` (boot-minted at the full `MAX_EFFECTS`
+                        // table size).
+                        unsafe {
+                            boyko_render::upload_particle_effects(
+                                &token,
+                                effects_staging,
+                                effect_scratch.rows(),
+                            )
+                        }
+                    } else {
+                        0
+                    };
+
+                    // The draw's 72-byte VERTEX push. Bytes [0,64) are the path's OWN
+                    // view-projection rows, taken from `mvp` rather than recomputed — the raster
+                    // pass and the billboards must agree on the projection to the last bit, and
+                    // two derivations of it would be two chances not to. `(index_base,
+                    // index_step) == (0, +1)` is the P0 identity; rung P2's alpha class is the
+                    // only thing that ever makes them anything else.
+                    let mut draw_push = [0u8; PARTICLE_DRAW_PUSH_BYTES as usize];
+                    draw_push[..64].copy_from_slice(&mvp[..64]);
+                    draw_push[64..68].copy_from_slice(&0u32.to_ne_bytes());
+                    draw_push[68..72].copy_from_slice(&1i32.to_ne_bytes());
+
+                    ParticleFrameInputs {
+                        // The PARITY is the host's monotonic frame counter's low bit — the whole
+                        // parity mechanism, and the reason no device buffer carries a `ping`
+                        // word. It picks the descriptor set whose bindings 4/5 assign the two
+                        // physical alive lists their roles for this frame.
+                        parity: frame_index & 1,
+                        push: ParticleFramePush {
+                            requested_spawn,
+                            emitter_count: emit_scratch.emitter_count(),
+                            steps: clock.steps(),
+                            timestep: clock.timestep(),
+                            frame_index,
+                            draw_push,
+                        },
+                        emit_upload_bytes,
+                        effects_upload_bytes,
+                    }
+                },
+            );
+
             // Multi-paradigm render-path plan, rung R-SDFFWD: the `sdf_forward_march`
             // `HAS_MESH` push's reverse-Z decode `A`/`B`
             // (`boyko_render::view::forward_view_z_coeffs`), precomputed from the SAME
@@ -2353,6 +2481,10 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 // VG R3 piece 3 step P3-5: this frame's cull-readback arming, from the request just
                 // above — `false` on every frame but the one the probe captures.
                 vb_cull_capture,
+                // Particles P0: this frame's particle inputs from the 6b' block above — `None`
+                // on a disarmed run, which is what makes the whole subsystem structurally absent
+                // from the declaration, the barrier stream and the command stream alike.
+                particle_inputs,
                 ctx,
             );
 
@@ -3105,6 +3237,7 @@ unsafe fn destroy_host_gpu_chain(host: WindowHost, ctx: &VulkanContext) {
         native_extent: _,
         resolved_render_path: _,
         light_uploaded_gen: _,
+        particle_effects_uploaded_gen: _,
         swapchain,
         surface,
         window,

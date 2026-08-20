@@ -138,11 +138,16 @@ use boyko_scene::render_caps::MeshHandle;
 // is NOT split out — its creation is inlined into (and interleaved with) `boot`.
 mod csm;
 mod interp;
+// Particles P0: the GPU-side bundle (buffers, pipelines, the two parity sets) + its one
+// fence-waited boot fill. Built ONLY when the owner armed the subsystem.
+mod particle;
 #[cfg(feature = "hwrt")]
 mod tlas;
 
 use csm::CsmResources;
 use interp::InterpGpuProd;
+// Particles P0: the runner assembles the frame's inputs, so both of these leave this module.
+pub(crate) use particle::{ParticleFrameInputs, ParticleFramePush};
 #[cfg(feature = "hwrt")]
 use tlas::TlasResources;
 
@@ -932,6 +937,16 @@ pub(crate) struct GpuSceneBundles {
     /// SAME `instance_rings[slot]` (the compute overwrites the dynamic slots). The
     /// raster `instance_bind_group` stays `instance_bind_groups[slot]` (no bind swap).
     interp: InterpGpuProd,
+    /// Particles P0: the GPU-side particle bundle, or `None` when the owner left
+    /// `ParticleConfig::mode` at its `Off` default.
+    ///
+    /// `None` is the whole 0%-gate: no buffer, no pipeline, no descriptor set, no shader module —
+    /// and, because `scene()` then leaves `GBufferScene::particle` `None`, no framegraph `ResId`,
+    /// no pass and no recorded command either. Built by
+    /// [`Self::build_particle_bundle`](GpuSceneBundles::build_particle_bundle) AFTER `boot`,
+    /// because the arming lives in the World and `boot` runs before the World is readable
+    /// (the `build_textured_resources` precedent).
+    particle: Option<particle::ParticleGpuBundle>,
     /// HW-RT rung R2a-3: the GPU-resident per-frame TLAS resources (the packer pipeline +
     /// FIF-ringed mesh-id / instance-array SSBOs + persistent per-slot TLASes + the frame-
     /// invariant BLAS-address table). Built at boot ONLY on an RT device (`ray_query_enabled`);
@@ -4550,6 +4565,10 @@ impl GpuSceneBundles {
             instance_rings,
             instance_bind_groups,
             interp,
+            // Particles P0: `boot` never builds the bundle — the arming lives in the World, which
+            // is not readable here. `build_particle_bundle` fills this in after `setup`, or
+            // leaves it `None` forever on a disarmed run.
+            particle: None,
             #[cfg(feature = "hwrt")]
             tlas,
             #[cfg(feature = "hwrt")]
@@ -4716,6 +4735,59 @@ impl GpuSceneBundles {
     /// widened for the 2-set layout ([`VulkanContext::create_graphics_pipeline_bindless`])
     /// and the 5-attribute textured vertex layout (position/normal/color/uv/tangent).
     ///
+    /// Particles P0: builds [`Self::particle`] — every buffer, pipeline and descriptor set the
+    /// subsystem owns, plus the one fence-waited boot fill.
+    ///
+    /// Called by the runner AFTER `setup`, and ONLY when `ParticleConfig::enabled()` holds, for
+    /// the same reason [`Self::build_textured_resources`] is deferred: the arming lives in the
+    /// World, and the draw's set-1 layout is the bindless table's, which does not exist at
+    /// [`Self::boot`] time. A disarmed run never calls this and therefore allocates nothing.
+    ///
+    /// `deferred_path` selects the depth compare op frozen into the one pipeline
+    /// ([`particle::particle_depth_compare_for`]): `LESS` for Deferred's custom-linear depth,
+    /// `GREATER` for the three reverse-Z paths.
+    ///
+    /// # Panics
+    /// Panics (`expect("invariant: ...")`) on any RHI create/submit failure — mirrors
+    /// [`Self::boot`]'s contract, and on being called twice (the bundle is built once per run;
+    /// a second call would leak the first).
+    pub(crate) fn build_particle_bundle(
+        &mut self,
+        ctx: &VulkanContext,
+        bindless: &BindlessTextureTable,
+        capacity: u32,
+        deferred_path: bool,
+    ) {
+        assert!(
+            self.particle.is_none(),
+            "invariant: the particle bundle is built exactly once per run"
+        );
+        self.particle = Some(particle::ParticleGpuBundle::create(
+            ctx,
+            &self.camera_ring,
+            bindless,
+            capacity,
+            particle::particle_depth_compare_for(deferred_path),
+        ));
+    }
+
+    /// Particles P0: this frame slot's two staging buffers — everything the runner needs to
+    /// perform the two gated uploads. `None` on a disarmed run, which is also the runner's test
+    /// for "is there a particle frame at all".
+    ///
+    /// The pool CAPACITY is deliberately not returned beside them: it is boot-frozen inside the
+    /// bundle and read straight into the activation there, so the runner never carries a second
+    /// copy of a number the device is told.
+    #[inline]
+    pub(crate) fn particle_upload_slots(
+        &self,
+        slot: usize,
+    ) -> Option<(&BoundBuffer, &BoundBuffer)> {
+        self.particle
+            .as_ref()
+            .map(|p| (p.emit_req_staging_slot(slot), p.effects_staging_slot(slot)))
+    }
+
     /// # Panics
     /// Panics (`expect("invariant: ...")`) on any RHI create failure — mirrors
     /// [`Self::boot`]'s contract (a device OOM at scene-boot time is a setup failure).
@@ -6180,6 +6252,11 @@ impl GpuSceneBundles {
         // is the `hzb_dump` staging's own per-frame `Option` in boolean form — that probe reaches
         // the same property by handing out its buffer on the request frame alone.
         vb_cull_readback_armed: bool,
+        // Particles P0: this frame's particle inputs — the parity, the push scalars and the two
+        // upload byte counts the runner's gates produced. `None` on a disarmed run (and, if the
+        // bundle itself is `None`, the match below produces `None` regardless: two independent
+        // reasons to be absent, neither of which can produce a half-armed frame).
+        particle: Option<particle::ParticleFrameInputs>,
         device: &VulkanContext,
     ) -> GBufferScene<'a> {
         debug_assert!(
@@ -7085,6 +7162,21 @@ impl GpuSceneBundles {
             // VG R3 piece 4 rung P4-4: the OWNER's arming, threaded verbatim (see this fn's
             // `vb_occlusion` param doc). `None` on the default `OcclusionMode::Off` — no split.
             vb_occlusion,
+
+            // Particles P0: `Some` iff the bundle was built at boot (owner armed) AND the runner
+            // handed this frame's push/upload inputs. `None` is STRUCTURAL ABSENCE — no ResId, no
+            // pass, no command — which is what makes every existing image pin byte-identical by
+            // construction rather than by an argument about untaken branches.
+            particle: match (self.particle.as_ref(), particle) {
+                (Some(bundle), Some(inputs)) => Some(bundle.activation(
+                    slot,
+                    inputs.parity,
+                    inputs.push,
+                    inputs.emit_upload_bytes,
+                    inputs.effects_upload_bytes,
+                )),
+                _ => None,
+            },
         };
 
         // === VG R3 piece 3 step P3-6 (plan D9): THE ARMING, and why it is a post-assignment. ===
@@ -7900,6 +7992,16 @@ impl GpuSceneBundles {
             #[cfg(feature = "hwrt")]
             if let Some(t) = self.tlas {
                 t.destroy(ctx);
+            }
+            // Particles P0: the particle bundle — 9 device buffers + `quad_ib` + 2×FIF staging
+            // rings + 2 compute/draw layouts + 2 parity sets + FIF draw sets + 3 compute
+            // pipelines + 1 graphics pipeline. Torn down BEFORE the interp cluster and the shared
+            // rings below because it borrows `camera_ring` (destroyed with the rest of the boot
+            // resources further down) at its draw set's binding 1; the bindless set-1 table is
+            // owned by `BindlessTextureTable` and is NOT touched here. `None` on a disarmed run
+            // (no-op) — the arm that would otherwise leak the whole bundle at shutdown.
+            if let Some(p) = self.particle {
+                p.destroy(ctx);
             }
             // The B3 interp cluster (host plan R5, refined-B): its `interp_bg` binds
             // the SHARED `instance_rings` (the model-out target) plus the pair +

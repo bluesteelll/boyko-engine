@@ -146,6 +146,380 @@ pub(crate) struct GbufferPassPlan {
     /// The always-present present-sample pass: only the `lit` GENERAL→SHADER_READ_ONLY
     /// transition (site 5c). The swapchain WSI barriers stay hand-recorded.
     pub(crate) present_sample: crate::framegraph::PassId,
+    /// Particles P0: the conditional-tail pass map. Every member is `None` on a disarmed frame
+    /// (nothing declared at all — see [`ParticlePassPlan`]).
+    pub(crate) particle: ParticlePassPlan,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Particles P0 — the conditional tail, shared by all three declarators
+// (`docs/PARTICLES-PLAN.md` Rev 4: D13's conditional tail, §Cross-frame seed table,
+// §Conditional-pass proof, D7's per-path depth table).
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// The number of BUFFER `ResId`s the particle tail appends — one per row of the plan's seed
+/// table, in the SAME order the shaders number their Set-0 bindings 0..9.
+///
+/// It is the length of the sink's particle span in all three sinks, and it is spelled ONCE
+/// because a count that merely equals a literal somewhere else is dead the moment the two drift.
+/// The tail is CONDITIONAL: on a disarmed frame not one of these `ResId`s exists, so the arrays
+/// that reserve room for them hold [`VkBuffer::NULL`] and no derived barrier names a slot.
+pub(crate) const PARTICLE_BUFFER_COUNT: usize = 10;
+
+/// Particles P0: the ten conditional-tail buffer `ResId`s, in DECLARATION order.
+///
+/// The order is the shaders' own Set-0 binding numbering (`p_counters` @0 … `p_effects` @9), so
+/// a reader checking the declarator against a shader header walks one list, not two. Every sink's
+/// particle span is filled in this SAME order — see each sink's `buffers` doc.
+#[derive(Clone, Copy)]
+pub(crate) struct ParticleResIds {
+    /// Seed row 6 — the bookkeeping cache line. Terminal: a C write (the sim's
+    /// `alive_count_next`), so the seed is a WRITER and next frame's kickoff read is a real RAW.
+    counters: crate::framegraph::ResId,
+    /// Seed row 7 — the two `VkDispatchIndirectCommand`s. Terminal: the `DRAW_INDIRECT` fetch, so
+    /// the seed is a READER and next frame's kickoff write is a real WAR.
+    dispatch_args: crate::framegraph::ResId,
+    /// Seed row 8 — the two `VkDrawIndexedIndirectCommand`s. Same reader seed as
+    /// [`Self::dispatch_args`], and the sim's access is `C/RW` because a returning
+    /// `InterlockedAdd` is a read-modify-write (K2, the `light_index_alloc` precedent).
+    draw_args: crate::framegraph::ResId,
+    /// Seed row 3 — the free list.
+    dead: crate::framegraph::ResId,
+    /// Seed row 4 — ROLE-KEYED: the physical `alive[parity]` buffer, which the PREVIOUS frame
+    /// drove as `p_alive_write`. Hence a WRITER seed, and hence its derived barrier appears at
+    /// the EMIT pass (the `ResId`'s first access, a WAW) rather than at the sim's read.
+    alive_read: crate::framegraph::ResId,
+    /// Seed row 5 — ROLE-KEYED: the physical `alive[parity ^ 1]` buffer, which the previous frame
+    /// drove as `p_alive_read`. Hence a READER seed, and hence its derived barrier is a WAR at
+    /// the SIM pass, its only access.
+    alive_write: crate::framegraph::ResId,
+    /// Seed row 1 — the 48-byte sim records.
+    particle: crate::framegraph::ResId,
+    /// Seed row 2 — the 32-byte render records. Terminal: the draw's VERTEX read, so the seed is
+    /// a reader at `VERTEX_SHADER` and the sim's write next frame is a WAR sourced there.
+    render: crate::framegraph::ResId,
+    /// Seed row 9 — the device-side emit-request table.
+    emit_req: crate::framegraph::ResId,
+    /// Seed row 10 — the device-side effect-parameter table.
+    effects: crate::framegraph::ResId,
+}
+
+/// Particles P0: the conditional-tail `PassId` map (D13). Every member is `None` when the
+/// subsystem is disarmed — and then no `ResId` exists either, so the graph routes ZERO barriers
+/// and the frame's command stream is byte-identical to a tree without the feature.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ParticlePassPlan {
+    /// The staging→device copies. `Some` iff at least one half is armed; each COPY inside it is
+    /// gated separately (the plan's conditional-pass proof, rows 1–4).
+    pub(crate) upload: Option<crate::framegraph::PassId>,
+    /// The one-thread bookkeeping dispatch. `Some` on every armed frame.
+    pub(crate) kickoff: Option<crate::framegraph::PassId>,
+    /// The spawn dispatch. `Some` iff `requested_spawn > 0` — the SAME predicate that gates the
+    /// emit-request upload, which is what makes the "written but unread this frame" state (a
+    /// wrong reader seed on row 9) unconstructible.
+    pub(crate) emit: Option<crate::framegraph::PassId>,
+    /// The hot-loop dispatch. `Some` on every armed frame — `steps == 0` still rebuilds the alive
+    /// list and the render records.
+    pub(crate) sim: Option<crate::framegraph::PassId>,
+    /// The indirect billboard draw. `Some` on every armed frame.
+    pub(crate) draw: Option<crate::framegraph::PassId>,
+}
+
+/// Particles P0: the depth resource the draw's read-only depth attachment names, per path (D7).
+///
+/// The ACCESS is identical on all four paths — `(EARLY|LATE)_FRAGMENT_TESTS` /
+/// `DEPTH_STENCIL_ATTACHMENT_READ` / `DEPTH_ATTACHMENT_OPTIMAL`, attachment-only, with no
+/// `FRAGMENT_SHADER|SHADER_READ` bit and no new layout constant. What differs per path is what
+/// the graph DERIVES from it, and that difference is a consequence of the state the path's
+/// earlier passes left the depth image in, never of a per-path access list:
+///
+/// * **Deferred** — depth reaches the transparent slot at `SHADER_READ_ONLY_OPTIMAL` (three
+///   pre-lit consumers), so a LAYOUT TRANSITION is derived.
+/// * **Forward / VisibilityBuffer** — depth ends on a depth-stencil write, so an AVAILABILITY
+///   barrier is derived (same layout, pending flush).
+/// * **ForwardPlus** — the froxel opaque pass already declared exactly this stage/access/layout,
+///   so NOTHING is derived. Free.
+///
+/// Plan gate #2 asserts all four separately, which is the only way a per-path regression shows up
+/// as a per-path failure.
+#[derive(Clone, Copy)]
+pub(crate) struct ParticleDepthTarget {
+    /// The path's own depth `ResId` (`depth` under Deferred, `forward_depth` under the Forward
+    /// family, `vb_depth` under VisibilityBuffer).
+    pub(crate) res: crate::framegraph::ResId,
+    /// The subresource the path's other depth accesses use — always the single-layer DEPTH span
+    /// at P0, carried explicitly so a future layered depth cannot silently mismatch.
+    pub(crate) sub: crate::framegraph::SubRange,
+}
+
+/// Particles P0: declares the ten conditional-tail buffer `ResId`s, each with the EXACT seed
+/// constructor its row of the plan's cross-frame seed table names.
+///
+/// # Why every one of them is `add_buffer_seeded`
+///
+/// Not one of these buffers is filled by this graph from nothing: each carries state across the
+/// frame edge, and the seed is the ONLY cross-frame carrier (`reset` + `compile` refill every
+/// per-resource state from the seed each frame). The seed also EXEMPTS the resource from
+/// `compile`'s unwritten-read provenance guard, which is required for the two host-filled tables
+/// (rows 9/10) and correct for the eight device-resident ones, whose producer is the SIBLING
+/// frame rather than this one.
+///
+/// # Why `alive_read` / `alive_write` take OPPOSITE seeds
+///
+/// They are two `ResId`s over two PHYSICAL buffers whose ROLES swap every frame, and each row
+/// tracks its physical buffer across two frames rather than its role. The buffer bound as
+/// `p_alive_read` this frame was written by the sibling frame's sim (writer seed ⇒ its first
+/// access here, emit's write, is a WAW); the buffer bound as `p_alive_write` was READ by the
+/// sibling frame's sim (reader seed ⇒ its only access here, the sim's write, is a WAR). Swapping
+/// the two seeds would leave one of the two hazards unordered every frame while the barrier COUNT
+/// stayed identical — measured-invisible on a static scene.
+fn declare_particle_buffers(g: &mut crate::framegraph::FrameGraph) -> ParticleResIds {
+    use crate::framegraph::ResSync;
+
+    ParticleResIds {
+        counters: g.add_buffer_seeded(
+            "p_counters",
+            ResSync::seeded_writer(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT),
+        ),
+        dispatch_args: g.add_buffer_seeded(
+            "p_dispatch_args",
+            ResSync::seeded_readers(
+                VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+            ),
+        ),
+        draw_args: g.add_buffer_seeded(
+            "p_draw_args",
+            ResSync::seeded_readers(
+                VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+            ),
+        ),
+        dead: g.add_buffer_seeded(
+            "p_dead",
+            ResSync::seeded_writer(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT),
+        ),
+        alive_read: g.add_buffer_seeded(
+            "p_alive_read",
+            ResSync::seeded_writer(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT),
+        ),
+        alive_write: g.add_buffer_seeded(
+            "p_alive_write",
+            ResSync::seeded_readers(
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+            ),
+        ),
+        particle: g.add_buffer_seeded(
+            "p_particle",
+            ResSync::seeded_writer(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT),
+        ),
+        render: g.add_buffer_seeded(
+            "p_render",
+            ResSync::seeded_readers(
+                VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+            ),
+        ),
+        emit_req: g.add_buffer_seeded(
+            "p_emit_req",
+            ResSync::seeded_readers(
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+            ),
+        ),
+        effects: g.add_buffer_seeded(
+            "p_effects",
+            ResSync::seeded_readers(
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+            ),
+        ),
+    }
+}
+
+/// Particles P0: declares the `upload → kickoff → emit → sim` block, whose accesses are the seed
+/// table's access column read pass by pass.
+///
+/// Declared EARLY in every declarator (before the opaque work) for a free latency win: declaration
+/// order is execution order and no barrier separates the sim from the opaque passes that follow,
+/// so the particle compute overlaps them at zero cost.
+///
+/// # ⚠️ ONE DELIBERATE DEVIATION from the plan's seed table, and why it is the safe direction
+///
+/// Row 6 (`p_counters`) lists its access column as `kickoff C/RW → sim C/RW` and OMITS emit's
+/// read. The shipped `particle_emit.comp.hlsl` binds `p_counters` at Set-0 binding 0 and reads
+/// three fields out of it (`real_emit_count` for the tail guard, `dead_base` and
+/// `emit_append_base` for its two arithmetic indices — algorithm A3), so the read is real. Taking
+/// the table literally would leave kickoff's write of those three fields UNORDERED against emit's
+/// read of them: a missing barrier, which on this device (`robustBufferAccess` OFF, and a compute
+/// dispatch that may overlap its predecessor freely) is undefined behaviour, not a wasted edge —
+/// exactly the F7d/N1 class the table's own preamble names as "measured-invisible".
+///
+/// The read is therefore DECLARED here. It adds ONE `BufBarrier` to the emit pass's existing
+/// `COMPUTE → COMPUTE` group (the one `p_dead`'s read already opens), so the cost is a single
+/// array element and no extra `vkCmdPipelineBarrier`. `tests/particle_barrier_stream.rs` encodes
+/// the AMENDED column and states the amendment at the row it changed, rather than encoding a
+/// column the declarator does not implement.
+fn declare_particle_compute(
+    g: &mut crate::framegraph::FrameGraph,
+    ids: ParticleResIds,
+    act: &super::scene_types::ParticleActivation<'_>,
+) -> ParticlePassPlan {
+    // The read|write access an atomic read-modify-write declares — the tree's own
+    // `light_index_alloc` spelling (K2 cites it by name for `p_draw_args`).
+    const RW: u32 = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+
+    // Conditional-pass proof, rows 1-4: the two halves are gated SEPARATELY, and the pass exists
+    // iff at least one is armed. `emit_upload_bytes > 0` is the SAME predicate the emit pass takes
+    // below (`requested_spawn > 0` implies it and is asserted to), so "written but unread this
+    // frame" — which would make row 9's reader seed wrong — cannot be constructed.
+    let spawn_upload = act.requested_spawn > 0;
+    let effects_upload = act.effects_upload_bytes > 0;
+    debug_assert!(
+        !spawn_upload || act.emit_upload_bytes > 0,
+        "invariant: a frame that asks for spawns has emit-request bytes to upload"
+    );
+    let upload = (spawn_upload || effects_upload).then(|| {
+        let p = g.add_pass("particle_upload");
+        if spawn_upload {
+            g.buffer_access(ids.emit_req, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+        }
+        if effects_upload {
+            g.buffer_access(ids.effects, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+        }
+        p
+    });
+
+    // Pass `particle_kickoff` (A2). Seed rows 6, 3, 7, 8. It reads `alive_count_next` — the
+    // previous frame's sim write — through row 6's writer seed, which is what carries that
+    // availability across the frame edge. It NEVER reads `p_draw_args`.
+    let kickoff = {
+        let p = g.add_pass("particle_kickoff");
+        g.buffer_access(ids.counters, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, RW);
+        g.buffer_access(ids.dead, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, RW);
+        g.buffer_access(
+            ids.dispatch_args,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+        );
+        g.buffer_access(
+            ids.draw_args,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+        );
+        Some(p)
+    };
+
+    // Pass `particle_emit` (A3) — gated on `requested_spawn > 0`, the SAME predicate the upload's
+    // spawn half took. Its `p_dispatch_args` access is the INDIRECT FETCH (`DRAW_INDIRECT` /
+    // `INDIRECT_COMMAND_READ`), which is what derives kickoff's `C/SHADER_WRITE → DI/ICR` edge;
+    // the sim's identical fetch below is then barrier-free.
+    let emit = spawn_upload.then(|| {
+        let p = g.add_pass("particle_emit");
+        g.buffer_access(
+            ids.dispatch_args,
+            VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+            VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+        );
+        // The deviation this fn's doc states: emit's real read of the three fields kickoff just
+        // published. Omitting it deletes the barrier that makes them visible.
+        g.buffer_access(ids.counters, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+        g.buffer_access(ids.dead, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+        g.buffer_access(
+            ids.alive_read,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+        );
+        g.buffer_access(
+            ids.particle,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+        );
+        g.buffer_access(ids.emit_req, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+        g.buffer_access(ids.effects, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+        p
+    });
+
+    // Pass `particle_sim` (A4) — the widest access list, and the one that publishes to BOTH
+    // consumers: the list count into `p_counters` (whose terminal is an undrained compute write,
+    // so next frame's kickoff gets a real RAW) and the render count into `p_draw_args` (whose
+    // terminal is this frame's indirect fetch, so next frame's kickoff write is a real WAR).
+    let sim = {
+        let p = g.add_pass("particle_sim");
+        g.buffer_access(
+            ids.dispatch_args,
+            VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+            VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+        );
+        g.buffer_access(ids.counters, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, RW);
+        g.buffer_access(ids.draw_args, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, RW);
+        g.buffer_access(ids.dead, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, RW);
+        g.buffer_access(ids.alive_read, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+        g.buffer_access(
+            ids.alive_write,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+        );
+        g.buffer_access(ids.particle, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, RW);
+        g.buffer_access(ids.render, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
+        g.buffer_access(ids.effects, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+        Some(p)
+    };
+
+    ParticlePassPlan { upload, kickoff, emit, sim, draw: None }
+}
+
+/// Particles P0: declares the indirect billboard draw, LATE — after the path's last `lit`
+/// producer and before `present_sample` (and before `taa_resolve` where that exists, which reads
+/// `lit` as this frame's final shaded colour).
+///
+/// Four accesses, and every per-path difference lives in what the graph derives from them rather
+/// than in the list itself (see [`ParticleDepthTarget`]):
+///
+/// * `p_render` at `VERTEX_SHADER / SHADER_READ` — the VS's sequential fetch; derives the sim's
+///   `C/SHADER_WRITE → VS/SHADER_READ` RAW.
+/// * `p_draw_args` at `DRAW_INDIRECT / INDIRECT_COMMAND_READ` — the command processor's fetch;
+///   derives the sim's atomic-write → fetch edge, and IS the buffer's frame terminal (which is
+///   why its seed is a reader).
+/// * `lit` at `COLOR_ATTACHMENT_OUTPUT` with READ|WRITE — a BLEND is a read-modify-write of the
+///   attachment, so both bits are declared; derives `GENERAL → COLOR_ATTACHMENT_OPTIMAL` on every
+///   path (`lit` already carries `COLOR_ATTACHMENT` usage on all four — no image-create change).
+/// * the path's depth, attachment-read-only.
+fn declare_particle_draw(
+    g: &mut crate::framegraph::FrameGraph,
+    ids: ParticleResIds,
+    lit: crate::framegraph::ResId,
+    depth: ParticleDepthTarget,
+) -> crate::framegraph::PassId {
+    use crate::framegraph::SubRange;
+
+    // The depth-attachment stage pair every depth access in this file uses.
+    const FRAG: u32 =
+        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+
+    let p = g.add_pass("particle_draw");
+    g.buffer_access(ids.render, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+    g.buffer_access(
+        ids.draw_args,
+        VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+        VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+    );
+    g.image_access(
+        lit,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        SubRange::COLOR,
+    );
+    g.image_access(
+        depth.res,
+        FRAG,
+        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        depth.sub,
+    );
+    p
 }
 
 /// Multi-paradigm render-path plan, rung R4b-b — the per-frame [`PassId`](crate::framegraph::PassId)
@@ -223,6 +597,8 @@ pub(crate) struct ForwardPassPlan {
     /// source layout). The swapchain WSI barriers stay hand-recorded, exactly like
     /// [`GbufferPassPlan::present_sample`].
     pub(crate) present_sample: crate::framegraph::PassId,
+    /// Particles P0: the conditional-tail pass map. Every member is `None` on a disarmed frame.
+    pub(crate) particle: ParticlePassPlan,
 }
 
 /// The number of IMAGE resources the whole-frame graph declares (Steps 1d/1e), in the
@@ -331,11 +707,53 @@ pub(crate) struct GbufferBarrierSink<'a> {
     /// unchanged indices (RISK-2: cfg-gated ⇒ no OFF-path ResId shift). On any OFF path an
     /// ungated slot is never named by a derived barrier, so its [`VkBuffer::NULL`] is inert
     /// (same NULL-when-ungated rule as [`Self::images`]).
-    #[cfg(not(feature = "hwrt"))]
-    pub(crate) buffers: [VkBuffer; 10],
-    /// See the `not(hwrt)` variant's doc: `hwrt` grows this by one (`tlas_instances` at index 7).
-    #[cfg(feature = "hwrt")]
-    pub(crate) buffers: [VkBuffer; 11],
+    ///
+    /// Particles P0 appends [`PARTICLE_BUFFER_COUNT`] more slots, LAST — after the interp trio —
+    /// mirroring the declarator's own conditional tail. Because BOTH tails are conditional, the
+    /// array is filled POSITIONALLY at the `record_graph_pass` call site rather than from a fixed
+    /// literal; see that fn's comment for why a literal would resolve a live wrong buffer on an
+    /// interp-off, particles-on frame.
+    pub(crate) buffers: [VkBuffer; GBUFFER_SINK_BUFFER_COUNT],
+}
+
+/// The length of [`GbufferBarrierSink::buffers`] — the deferred declarator's whole buffer ResId
+/// space: 7 unconditional (+1 for `tlas_instances` under `hwrt`), the 3-buffer interp trio, and
+/// the [`PARTICLE_BUFFER_COUNT`] particle tail.
+///
+/// It is the ARRAY LENGTH rather than a number standing beside one, for the reason
+/// [`VB_BUFFER_COUNT`]'s doc gives at length: a `res.index()` that lands on the wrong BUFFER slot
+/// names a live wrong allocation with no VUID and no validation message, where a wrong IMAGE slot
+/// would hold `VkImage::NULL` and fault loudly.
+#[cfg(not(feature = "hwrt"))]
+pub(crate) const GBUFFER_SINK_BUFFER_COUNT: usize = 7 + 3 + PARTICLE_BUFFER_COUNT;
+/// See the `not(hwrt)` variant's doc: `hwrt` adds `tlas_instances` to the unconditional prefix.
+#[cfg(feature = "hwrt")]
+pub(crate) const GBUFFER_SINK_BUFFER_COUNT: usize = 8 + 3 + PARTICLE_BUFFER_COUNT;
+
+/// Particles P0: the ten physical handles of the particle tail, in the SAME order
+/// [`declare_particle_buffers`] declares their `ResId`s and the shaders number their Set-0
+/// bindings.
+///
+/// ONE function for all three sinks, because three hand-written copies of a positional order are
+/// three chances for one of them to drift — and a drifted buffer slot is the silent class: every
+/// slot resolves to a live handle, so a mis-keyed barrier synchronises the wrong allocation
+/// without a validation message.
+#[inline]
+fn particle_sink_buffers(
+    act: &super::scene_types::ParticleActivation<'_>,
+) -> [VkBuffer; PARTICLE_BUFFER_COUNT] {
+    [
+        act.counters.buffer,
+        act.dispatch_args.buffer,
+        act.draw_args.buffer,
+        act.dead.buffer,
+        act.alive_read.buffer,
+        act.alive_write.buffer,
+        act.particle_records.buffer,
+        act.render_records.buffer,
+        act.emit_req_device.buffer,
+        act.effects_device.buffer,
+    ]
 }
 
 /// Compile-time guard that [`GbufferBarrierSink::images`] is exactly [`FRAMEGRAPH_IMAGE_COUNT`]
@@ -542,7 +960,13 @@ pub(crate) struct ForwardBarrierSink<'a> {
     /// when `scene.interp` is `None`, or the L1 trio when [`ForwardPassPlan::light_cull`] is
     /// `None`) never routes a barrier naming it, so an inert `VkBuffer::NULL` there is harmless
     /// (the same "ungated slot may hold NULL" rule [`GbufferBarrierSink`] documents).
-    pub(crate) buffers: [VkBuffer; 5],
+    ///
+    /// Particles P0 appends [`PARTICLE_BUFFER_COUNT`] slots LAST, in
+    /// [`particle_sink_buffers`]'s order. Every ResId ahead of them on this path is
+    /// UNCONDITIONAL, so the particle span always starts at slot 5 here — unlike
+    /// [`GbufferBarrierSink`], whose conditional interp trio makes its own span's base
+    /// frame-dependent.
+    pub(crate) buffers: [VkBuffer; FORWARD_SINK_BUFFER_COUNT],
 }
 
 /// The number of IMAGE resources [`Renderer::declare_forward_graph`] declares — see
@@ -550,6 +974,11 @@ pub(crate) struct ForwardBarrierSink<'a> {
 /// (Forward's `self.frame_graph` is fully `reset()` + re-declared every frame, so this constant
 /// has no relationship to [`FRAMEGRAPH_IMAGE_COUNT`] and never grows it).
 const FORWARD_IMAGE_COUNT: usize = 4;
+
+/// The length of [`ForwardBarrierSink::buffers`] — the five unconditional Forward buffers plus
+/// the [`PARTICLE_BUFFER_COUNT`] particle tail. The ARRAY LENGTH, for the reason
+/// [`GBUFFER_SINK_BUFFER_COUNT`]'s doc gives.
+const FORWARD_SINK_BUFFER_COUNT: usize = 5 + PARTICLE_BUFFER_COUNT;
 
 impl crate::framegraph::BarrierSink for ForwardBarrierSink<'_> {
     fn image_barriers(&mut self, src_stage: u32, dst_stage: u32, group: &[crate::framegraph::ImgBarrier]) {
@@ -1057,6 +1486,16 @@ impl Renderer<'_> {
         } else {
             (None, None, None)
         };
+        // Particles P0 (D13's conditional tail): the ten seed-table buffers, declared LAST of all
+        // — after the conditional interp trio — and ONLY when the subsystem is armed. A disarmed
+        // frame declares nothing, so every earlier ResId is byte-unchanged and the graph routes
+        // zero barriers on a tail that does not exist.
+        //
+        // ⚠️ Because the interp trio ahead of it is ALSO conditional, the particle span's ResIds
+        // SHIFT by three between an interp-on and an interp-off frame. `record_graph_pass`'s sink
+        // therefore fills its buffer array POSITIONALLY under the same two conditions, in the same
+        // order, rather than from a fixed literal — see that fn's own comment.
+        let particle_res = scene.particle.as_ref().map(|_| declare_particle_buffers(g));
 
         // Pass `interp` (Pillar B B3, refined-B) — gated `scene.interp.is_some()`. Runs FIRST
         // (before raster): reads the pair + out-slot SSBOs (COMPUTE/SHADER_READ — first touch, no
@@ -1086,6 +1525,16 @@ impl Renderer<'_> {
             Some(p)
         } else {
             None
+        };
+
+        // Particles P0: the `upload → kickoff → emit → sim` block, declared EARLY — the free
+        // latency win the plan names (declaration order is execution order, and no barrier
+        // separates the sim from the opaque work that follows, so ~80-700 µs of particle compute
+        // overlaps the opaque pass at zero cost). The DRAW is declared far below, at the
+        // resolve→present seam.
+        let mut particle_plan = match (particle_res, scene.particle.as_ref()) {
+            (Some(ids), Some(act)) => declare_particle_compute(g, ids, act),
+            _ => ParticlePassPlan::default(),
         };
 
         // HW-RT rung R2a-3: the TLAS pack + build passes — declared ONLY when `scene.tlas.is_some()`
@@ -1875,6 +2324,22 @@ impl Renderer<'_> {
             SubRange::COLOR,
         );
 
+        // Particles P0: the indirect billboard draw, declared HERE — after the deferred resolve's
+        // `lit` write above and before `taa_resolve`/`present_sample` below, so the composite the
+        // temporal resolve and the present blit see includes the particles.
+        //
+        // `depth` (ResId 3) is Deferred's depth image, which reaches this slot at
+        // `SHADER_READ_ONLY_OPTIMAL` (three pre-lit consumers read it), so this attachment-read
+        // derives a real LAYOUT TRANSITION — the one path of the four where it does (D7).
+        if let Some(ids) = particle_res {
+            particle_plan.draw = Some(declare_particle_draw(
+                g,
+                ids,
+                lit,
+                ParticleDepthTarget { res: depth, sub: SubRange::DEPTH },
+            ));
+        }
+
         // Anti-aliasing Stage 4 (TAA W5): the temporal-resolve pass declaration, positioned at the
         // resolve→present seam — AFTER the deferred resolve's `lit` write above, BEFORE
         // `present_sample`'s GENERAL→SHADER_READ_ONLY_OPTIMAL read. UNLIKE FXAA/SMAA/SSAA (which
@@ -1969,6 +2434,7 @@ impl Renderer<'_> {
             resolve,
             taa_resolve: taa_resolve_pass,
             present_sample,
+            particle: particle_plan,
         });
     }
 
@@ -2072,6 +2538,11 @@ impl Renderer<'_> {
             "light_index",
             ResSync::seeded_readers(VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
         );
+        // Particles P0 (D13's conditional tail): the ten seed-table buffers, appended LAST and
+        // ONLY when armed. Every buffer ResId ahead of them here is UNCONDITIONAL, so — unlike the
+        // deferred declarator, whose interp trio is conditional — the particle span always begins
+        // at the same sink slot on this path.
+        let particle_res = scene.particle.as_ref().map(|_| declare_particle_buffers(g));
 
         // Pass `interp` — gated `scene.interp.is_some()`, the SAME activation
         // `declare_deferred_graph`'s own `interp` pass reads. Writes `instance_model_ring`
@@ -2087,6 +2558,14 @@ impl Renderer<'_> {
             Some(p)
         } else {
             None
+        };
+
+        // Particles P0: the `upload → kickoff → emit → sim` block, declared EARLY (the free
+        // latency win — see `declare_deferred_graph`'s own site). The DRAW is declared below, at
+        // the `forward_opaque` → `present_sample` seam.
+        let mut particle_plan = match (particle_res, scene.particle.as_ref()) {
+            (Some(ids), Some(act)) => declare_particle_compute(g, ids, act),
+            _ => ParticlePassPlan::default(),
         };
 
         // Pass `depth_prepass` — Multi-paradigm render-path plan, rung R5 (ForwardPlus,
@@ -2372,6 +2851,23 @@ impl Renderer<'_> {
         // SHADER_READ_ONLY_OPTIMAL (the deferred resolve's own transition shape); when it did not
         // run, this is UNCHANGED from rung R4b-b (`forward_opaque`'s COLOR_ATTACHMENT_OPTIMAL →
         // SHADER_READ_ONLY_OPTIMAL). The swapchain WSI barriers stay hand-recorded.
+        // Particles P0: the indirect billboard draw, declared HERE — after every `lit` producer
+        // (`forward_opaque`, and `sdf_forward_march` where it runs) and before `present_sample`.
+        //
+        // `forward_depth` (ResId 1) reaches this slot in one of TWO states, and the same access
+        // covers both (D7): under `Forward` the opaque pass left a depth-stencil WRITE pending, so
+        // an AVAILABILITY barrier is derived (no layout change); under `ForwardPlus` the froxel
+        // opaque pass already declared exactly this stage/access/layout, so NOTHING is derived —
+        // the one free path of the four.
+        if let Some(ids) = particle_res {
+            particle_plan.draw = Some(declare_particle_draw(
+                g,
+                ids,
+                lit,
+                ParticleDepthTarget { res: forward_depth, sub: SubRange::DEPTH },
+            ));
+        }
+
         let present_sample = g.add_pass("present_sample");
         g.image_access(
             lit,
@@ -2393,6 +2889,7 @@ impl Renderer<'_> {
             forward_opaque,
             sdf_forward_march,
             present_sample,
+            particle: particle_plan,
         });
     }
 
@@ -2428,6 +2925,58 @@ impl Renderer<'_> {
                 .is_none_or(|r| r[fi].image != r[fi ^ 1].image),
             "invariant: the temporal history pool's [fi] write slot and [fi^1] read slot must be distinct images"
         );
+        // Particles P0: the buffer array is filled POSITIONALLY rather than written as one fixed
+        // literal, because the declarator's buffer tail is now conditional TWICE — the interp trio
+        // and, after it, the ten-buffer particle span. A fixed literal cannot express that: on an
+        // interp-OFF frame the particle ResIds shift down by three, and a literal would resolve
+        // every particle barrier to a LIVE WRONG buffer (every slot here holds a real handle, so
+        // there is no VUID and no validation message — the failure mode `VB_BUFFER_COUNT`'s doc
+        // spells out). The fill below walks the SAME two conditions in the SAME order the
+        // declarator does, which is the only shape that cannot drift from it.
+        #[cfg(not(feature = "hwrt"))]
+        let fixed: [VkBuffer; 7] = [
+            scene.light_table.buffer,
+            scene.tiles_buffer.buffer,
+            scene.cluster_grid.map_or(VkBuffer::NULL, |b| b.buffer),
+            scene.light_index.map_or(VkBuffer::NULL, |b| b.buffer),
+            scene.light_index_alloc.map_or(VkBuffer::NULL, |b| b.buffer),
+            // SDFDDGI I2: the single-instance classification + Fibonacci ray-table buffers, ALWAYS
+            // resolved (declared unconditionally in the graph). Named by a derived barrier ONLY on
+            // the `ddgi_update` ON path.
+            scene.ddgi_classification.buffer,
+            scene.ddgi_ray_table.buffer,
+        ];
+        // HW-RT rung R2a-3 (RISK-2): `tlas_instances` is declared UNCONDITIONALLY right after the
+        // DDGI buffers, so its slot is FIXED regardless of the conditional tails after it. NULL on
+        // the tlas-OFF path (never named by a derived barrier there); on the ON path the pack
+        // write → build read barrier is derived on this slot.
+        #[cfg(feature = "hwrt")]
+        let fixed: [VkBuffer; 8] = [
+            scene.light_table.buffer,
+            scene.tiles_buffer.buffer,
+            scene.cluster_grid.map_or(VkBuffer::NULL, |b| b.buffer),
+            scene.light_index.map_or(VkBuffer::NULL, |b| b.buffer),
+            scene.light_index_alloc.map_or(VkBuffer::NULL, |b| b.buffer),
+            scene.ddgi_classification.buffer,
+            scene.ddgi_ray_table.buffer,
+            scene.tlas.map_or(VkBuffer::NULL, |t| t.instance_array.buffer),
+        ];
+        let mut buffers = [VkBuffer::NULL; GBUFFER_SINK_BUFFER_COUNT];
+        buffers[..fixed.len()].copy_from_slice(&fixed);
+        let mut next = fixed.len();
+        // Pillar B B3 (refined-B): the CURRENT frame slot's FIF-ringed interp SSBOs. On the ON
+        // path the ONLY derived barrier is the COMPUTE→VERTEX RAW on `interp_model_out` (the
+        // shared instance ring) at the raster pass; `interp_pairs` and `interp_out_slot` are
+        // declared but never barriered (first-touch reads).
+        if let Some(a) = scene.interp {
+            buffers[next] = a.pair_buffer.buffer;
+            buffers[next + 1] = a.out_slot_buffer.buffer;
+            buffers[next + 2] = a.model_out_buffer.buffer;
+            next += 3;
+        }
+        if let Some(p) = scene.particle.as_ref() {
+            buffers[next..next + PARTICLE_BUFFER_COUNT].copy_from_slice(&particle_sink_buffers(p));
+        }
         let mut sink = GbufferBarrierSink {
             fns: self.fns,
             cmd,
@@ -2525,46 +3074,7 @@ impl Renderer<'_> {
                 targets.ssao_ring_a.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
                 targets.ssao_ring_b.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
             ],
-            #[cfg(not(feature = "hwrt"))]
-            buffers: [
-                scene.light_table.buffer,
-                scene.tiles_buffer.buffer,
-                scene.cluster_grid.map_or(VkBuffer::NULL, |b| b.buffer),
-                scene.light_index.map_or(VkBuffer::NULL, |b| b.buffer),
-                scene.light_index_alloc.map_or(VkBuffer::NULL, |b| b.buffer),
-                // SDFDDGI I2 (ResIds 16/17 → slots 5/6): the single-instance classification +
-                // Fibonacci ray-table buffers, ALWAYS resolved (declared unconditionally in the
-                // graph). Named by a derived barrier ONLY on the `ddgi_update` ON path.
-                scene.ddgi_classification.buffer,
-                scene.ddgi_ray_table.buffer,
-                // Pillar B B3 (ResIds 18/19/20 → slots 7/8/9, refined-B): the CURRENT frame slot's
-                // FIF-ringed interp SSBOs, NULL on the interp-OFF path (never named by a derived
-                // barrier there). On the ON path the ONLY derived barrier is the COMPUTE→VERTEX RAW on
-                // `interp_model_out` (the shared instance ring) at the raster pass; `interp_pairs`
-                // and `interp_out_slot` are declared but never barriered (first-touch reads).
-                scene.interp.map_or(VkBuffer::NULL, |a| a.pair_buffer.buffer),
-                scene.interp.map_or(VkBuffer::NULL, |a| a.out_slot_buffer.buffer),
-                scene.interp.map_or(VkBuffer::NULL, |a| a.model_out_buffer.buffer),
-            ],
-            // HW-RT rung R2a-3 (RISK-2): `tlas_instances` is declared UNCONDITIONALLY right after
-            // the DDGI buffers (ResId 18 → slot 7), so its slot is FIXED regardless of the
-            // conditional interp trio (which shifts to ResIds 19/20/21 → slots 8/9/10). NULL on the
-            // tlas-OFF path (never named by a derived barrier there); on the ON path the pack write
-            // → build read barrier is derived on this slot.
-            #[cfg(feature = "hwrt")]
-            buffers: [
-                scene.light_table.buffer,
-                scene.tiles_buffer.buffer,
-                scene.cluster_grid.map_or(VkBuffer::NULL, |b| b.buffer),
-                scene.light_index.map_or(VkBuffer::NULL, |b| b.buffer),
-                scene.light_index_alloc.map_or(VkBuffer::NULL, |b| b.buffer),
-                scene.ddgi_classification.buffer,
-                scene.ddgi_ray_table.buffer,
-                scene.tlas.map_or(VkBuffer::NULL, |t| t.instance_array.buffer),
-                scene.interp.map_or(VkBuffer::NULL, |a| a.pair_buffer.buffer),
-                scene.interp.map_or(VkBuffer::NULL, |a| a.out_slot_buffer.buffer),
-                scene.interp.map_or(VkBuffer::NULL, |a| a.model_out_buffer.buffer),
-            ],
+            buffers,
         };
         self.frame_graph.record_pass(pass, &mut sink);
     }
@@ -2593,6 +3103,39 @@ impl Renderer<'_> {
         scene: &GBufferScene<'_>,
         fi: usize,
     ) {
+        // Particles P0: the five unconditional slots, then the conditional particle span. Filled
+        // positionally (rather than as one literal) for the SAME reason `record_graph_pass` does
+        // it — one fill shape across all three sinks, so no reader has to check which sink uses
+        // which.
+        let mut buffers = [VkBuffer::NULL; FORWARD_SINK_BUFFER_COUNT];
+        let fixed: [VkBuffer; 5] = [
+            scene.light_table.buffer,
+            // The SAME physical buffer `forward_opaque`'s VS reads at Set-0 binding 0
+            // (`scene.forward_instance_ring[fi]`) AND (when armed) the interp compute pass
+            // writes into (`GBufferScene::forward_instance_ring`'s doc — the "SAME shared
+            // model-out ring" the Deferred raster/interp precedent already establishes).
+            // This fn is called ONLY on a `Forward`-resolved frame (the caller's `forward:
+            // &ForwardTargets` param already required unwrapping `TargetsProfile::ForwardMesh`),
+            // so `Some(...)` is a production invariant here (`GBufferScene::forward_pipeline`'s
+            // doc).
+            scene
+                .forward_instance_ring
+                .expect("invariant: a Forward-resolved scene always carries forward_instance_ring")
+                [fi]
+                .buffer,
+            // Multi-paradigm render-path plan, rung R5 (ForwardPlus): the L1 cluster-cull
+            // trio, single-instance (NOT ringed) — the SAME physical buffers
+            // `record_graph_pass`'s own `[cluster_grid, light_index, light_index_alloc]`
+            // slots resolve for Deferred.
+            scene.light_index_alloc.map_or(scene.light_table.buffer, |b| b.buffer),
+            scene.cluster_grid.map_or(scene.light_table.buffer, |b| b.buffer),
+            scene.light_index.map_or(scene.light_table.buffer, |b| b.buffer),
+        ];
+        buffers[..fixed.len()].copy_from_slice(&fixed);
+        if let Some(p) = scene.particle.as_ref() {
+            buffers[fixed.len()..fixed.len() + PARTICLE_BUFFER_COUNT]
+                .copy_from_slice(&particle_sink_buffers(p));
+        }
         let mut sink = ForwardBarrierSink {
             fns: self.fns,
             cmd,
@@ -2602,29 +3145,7 @@ impl Renderer<'_> {
                 scene.csm_cascade_texture.image,
                 scene.shadow_atlas_texture.image,
             ],
-            buffers: [
-                scene.light_table.buffer,
-                // The SAME physical buffer `forward_opaque`'s VS reads at Set-0 binding 0
-                // (`scene.forward_instance_ring[fi]`) AND (when armed) the interp compute pass
-                // writes into (`GBufferScene::forward_instance_ring`'s doc — the "SAME shared
-                // model-out ring" the Deferred raster/interp precedent already establishes).
-                // This fn is called ONLY on a `Forward`-resolved frame (the caller's `forward:
-                // &ForwardTargets` param already required unwrapping `TargetsProfile::ForwardMesh`),
-                // so `Some(...)` is a production invariant here (`GBufferScene::forward_pipeline`'s
-                // doc).
-                scene
-                    .forward_instance_ring
-                    .expect("invariant: a Forward-resolved scene always carries forward_instance_ring")
-                    [fi]
-                    .buffer,
-                // Multi-paradigm render-path plan, rung R5 (ForwardPlus): the L1 cluster-cull
-                // trio, single-instance (NOT ringed) — the SAME physical buffers
-                // `record_graph_pass`'s own `[cluster_grid, light_index, light_index_alloc]`
-                // slots resolve for Deferred.
-                scene.light_index_alloc.map_or(scene.light_table.buffer, |b| b.buffer),
-                scene.cluster_grid.map_or(scene.light_table.buffer, |b| b.buffer),
-                scene.light_index.map_or(scene.light_table.buffer, |b| b.buffer),
-            ],
+            buffers,
         };
         self.frame_graph.record_pass(pass, &mut sink);
     }
@@ -2973,6 +3494,8 @@ pub(crate) struct VbPassPlan {
     /// `viewt`/`taa_hist_read` GENERAL reads + `taa_hist` GENERAL write; `aa_out`/`taa_resolved`
     /// hand-recorded in `record_taa`/`record_rcas`). `Some` iff `scene.taa.is_some()`.
     pub(crate) taa_resolve: Option<crate::framegraph::PassId>,
+    /// Particles P0: the conditional-tail pass map. Every member is `None` on a disarmed frame.
+    pub(crate) particle: ParticlePassPlan,
 }
 
 /// Multi-paradigm render-path plan, rung R8: the [`BarrierSink`](crate::framegraph::BarrierSink)
@@ -3058,11 +3581,17 @@ pub(crate) struct VbBarrierSink<'a> {
 /// VG R3 piece 2 step P2-3: 13 → 14 (`vb_indirect_late`), 14 → 15 under `hwrt`. VG R3 piece 3 step
 /// P3-3 appends the occlusion split's THREE buffers after it — `vb_late_visible`, `vb_late_count`,
 /// `vb_cull_uniform` — so 14 → 17 and 15 → 18.
+/// Particles P0 appends the [`PARTICLE_BUFFER_COUNT`] seed-table buffers after `vb_cull_uniform`,
+/// so 18 → 28 and 17 → 27. That tail is CONDITIONAL, which is why the `debug_assert_eq!` at the
+/// end of the declarator's buffer block now pins the UNCONDITIONAL prefix and a second assert
+/// pins the armed total — see the comment there for why weakening it to the prefix alone would
+/// let an armed frame run off the end of the sink array in silence.
 #[cfg(feature = "hwrt")]
-const VB_BUFFER_COUNT: usize = 18;
-/// See the `hwrt` variant's doc: a `not(hwrt)` build has no `tlas_instances` slot, so 18 - 1 = 17.
+const VB_BUFFER_COUNT: usize = 18 + PARTICLE_BUFFER_COUNT;
+/// See the `hwrt` variant's doc: a `not(hwrt)` build has no `tlas_instances` slot, so 18 - 1 = 17
+/// unconditional, plus the same particle tail.
 #[cfg(not(feature = "hwrt"))]
-const VB_BUFFER_COUNT: usize = 17;
+const VB_BUFFER_COUNT: usize = 17 + PARTICLE_BUFFER_COUNT;
 
 /// The number of IMAGE resources [`Renderer::declare_vb_graph`] declares — see
 /// [`VbBarrierSink::images`]'s doc for the fixed order. A PRIVATE, per-frame ResId space (mirrors
@@ -3797,15 +4326,36 @@ impl Renderer<'_> {
         let vb_late_visible = g.add_buffer("vb_late_visible");
         let vb_late_count = g.add_buffer("vb_late_count");
         let vb_cull_uniform = g.add_buffer("vb_cull_uniform");
+        // Particles P0 (D13's conditional tail): the ten seed-table buffers, appended LAST — after
+        // `vb_cull_uniform`, which held that position until now — and ONLY when armed. Appending
+        // is still the one edit shape that cannot re-key an existing barrier: every ResId above is
+        // unchanged, and on a disarmed frame not one of these exists.
+        let particle_res = scene.particle.as_ref().map(|_| declare_particle_buffers(g));
         // The buffer-side sibling of the `hzb_pyramid` assert above, and the buffer side is where
         // it matters more: a mis-keyed buffer barrier names a LIVE WRONG buffer (every sink slot
         // resolves to a real handle) instead of faulting on a NULL. `- VB_IMAGE_COUNT` is exactly
         // the mapping `VbBarrierSink::buffer_barriers` performs.
+        //
+        // ⚠️ **This assert MOVED at particles P0, and the claim it makes moved with it.** It used
+        // to say "`vb_cull_uniform` is the LAST buffer ResId this declarator declares"; that is
+        // now FALSE on an armed frame, because the particle tail follows it. The property worth
+        // asserting is the one the sink actually depends on — that the declared buffer ResIds
+        // exactly FILL `VbBarrierSink::buffers`, with the particle span present or absent — so it
+        // is asserted in both regimes rather than weakened to the unconditional prefix alone. A
+        // future tail appended after the particle one must extend this the same way; asserting
+        // only the disarmed half would let an armed frame's span run off the end of the sink array
+        // silently.
         debug_assert_eq!(
             vb_cull_uniform.index() + 1 - VB_IMAGE_COUNT,
-            VB_BUFFER_COUNT,
-            "invariant: vb_cull_uniform is the LAST buffer ResId declare_vb_graph declares, and \
-             the buffer ResIds must exactly fill VbBarrierSink::buffers"
+            VB_BUFFER_COUNT - PARTICLE_BUFFER_COUNT,
+            "invariant: vb_cull_uniform is the last UNCONDITIONAL buffer ResId declare_vb_graph \
+             declares — the particle tail follows it and is conditional"
+        );
+        debug_assert!(
+            particle_res.is_none_or(|ids| ids.effects.index() + 1 - VB_IMAGE_COUNT
+                == VB_BUFFER_COUNT),
+            "invariant: with particles armed, p_effects is the LAST buffer ResId and the buffer \
+             ResIds must exactly fill VbBarrierSink::buffers"
         );
 
         // Pass `light_upload` (async light-table re-upload) — the SAME gate
@@ -3816,6 +4366,14 @@ impl Renderer<'_> {
             Some(p)
         } else {
             None
+        };
+
+        // Particles P0: the `upload → kickoff → emit → sim` block, declared EARLY (the free
+        // latency win — see `declare_deferred_graph`'s own site). The DRAW is declared far below,
+        // after every `lit` producer.
+        let mut particle_plan = match (particle_res, scene.particle.as_ref()) {
+            (Some(ids), Some(act)) => declare_particle_compute(g, ids, act),
+            _ => ParticlePassPlan::default(),
         };
 
         // Pass `light_cull` (L1 clustered froxel cull) — VB-P1a ("dark infra"). Gated EXACTLY as
@@ -5482,6 +6040,22 @@ impl Renderer<'_> {
             "invariant: a TAA-armed VB frame has a coherent gViewT producer set \
              (strict XOR without SSAO; at-least-one + marcher-last on SDF legs with SSAO)"
         );
+        // Particles P0: the indirect billboard draw, declared HERE — after every `lit` producer
+        // (`vb_resolve`/`vb_shade`/`sdf_forward_march`/`vb_sky`) and before `taa_resolve` +
+        // `present_sample`, so both of them see the composited particles.
+        //
+        // `vb_depth` (ResId 2) ends this frame on a depth-stencil write from `vb_raster` (or the
+        // late raster under the occlusion split), so this attachment-read derives an AVAILABILITY
+        // barrier with no layout change — the Forward arm of D7's table, not Deferred's transition.
+        if let Some(ids) = particle_res {
+            particle_plan.draw = Some(declare_particle_draw(
+                g,
+                ids,
+                lit,
+                ParticleDepthTarget { res: vb_depth, sub: SubRange::DEPTH },
+            ));
+        }
+
         let taa_resolve_pass = scene.taa.is_some().then(|| {
             let p = g.add_pass("taa_resolve");
             g.image_access(
@@ -5813,6 +6387,7 @@ impl Renderer<'_> {
             viewt_from_depth: vb_viewt_pre.or(vb_viewt),
             taa_resolve: taa_resolve_pass,
             present_sample,
+            particle: particle_plan,
         });
     }
 
@@ -5901,8 +6476,13 @@ impl Renderer<'_> {
                 // its ResId, so the live handle is as inert as a NULL would be.
                 vb.sdf_term[fi].image,
             ],
+            // Particles P0: the ten-buffer particle tail is appended by `vb_sink_buffers`, which
+            // takes the unconditional prefix below and returns the full-length array. Every VB
+            // buffer ResId ahead of the tail is unconditional, so the tail's base slot is the same
+            // on every frame — the arrangement `record_graph_pass`'s conditional interp trio
+            // denies the deferred sink.
             #[cfg(not(feature = "hwrt"))]
-            buffers: [
+            buffers: vb_sink_buffers(scene, [
                 scene.light_table.buffer,
                 scene
                     .vb_instance_ring
@@ -5977,11 +6557,11 @@ impl Renderer<'_> {
                     .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_cull_uniform")
                     [fi]
                     .buffer,
-            ],
+            ]),
             // Rung R9d (buffer ResId 5): `tlas_instances` — mirrors [`GbufferBarrierSink`]'s own
             // `scene.tlas.map_or(VkBuffer::NULL, |t| t.instance_array.buffer)` source.
             #[cfg(feature = "hwrt")]
-            buffers: [
+            buffers: vb_sink_buffers(scene, [
                 scene.light_table.buffer,
                 scene
                     .vb_instance_ring
@@ -6049,8 +6629,28 @@ impl Renderer<'_> {
                     .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_cull_uniform")
                     [fi]
                     .buffer,
-            ],
+            ]),
         };
         self.frame_graph.record_pass(pass, &mut sink);
     }
+}
+
+/// Particles P0: appends the ten-buffer particle tail to the VB sink's unconditional prefix.
+///
+/// A function rather than an inline fill because the prefix is written TWICE (once per `hwrt`
+/// arm) and the tail must be identical in both. `fixed` is the prefix in declaration order; the
+/// returned array is the sink's whole buffer space, with the tail present iff the frame is armed
+/// and [`VkBuffer::NULL`] otherwise (inert — no derived barrier names a ResId that was never
+/// declared).
+#[inline]
+fn vb_sink_buffers(
+    scene: &GBufferScene<'_>,
+    fixed: [VkBuffer; VB_BUFFER_COUNT - PARTICLE_BUFFER_COUNT],
+) -> [VkBuffer; VB_BUFFER_COUNT] {
+    let mut buffers = [VkBuffer::NULL; VB_BUFFER_COUNT];
+    buffers[..fixed.len()].copy_from_slice(&fixed);
+    if let Some(p) = scene.particle.as_ref() {
+        buffers[fixed.len()..].copy_from_slice(&particle_sink_buffers(p));
+    }
+    buffers
 }
