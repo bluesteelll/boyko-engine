@@ -1,0 +1,5 @@
+error: no state `Runing` in `Playing`; states declared here: `Running`, `Paused` (did you mean `Running`?)
+  --> tests/ui/machine_unknown_initial_did_you_mean.rs:10:21
+   |
+10 |             initial Runing;
+   |                     ^^^^^^

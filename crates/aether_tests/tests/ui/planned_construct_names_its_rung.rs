@@ -3,7 +3,7 @@
 use aether::aether;
 
 aether! {
-    machine GameFlow { }
+    material gold { }
 }
 
 fn main() {}

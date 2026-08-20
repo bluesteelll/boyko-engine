@@ -7,8 +7,8 @@ use quote::{format_ident, quote};
 use syn::Ident;
 
 use crate::ast::{
-    AetherBlock, BundleDef, ComponentDef, Construct, EvField, EventDef, OrderKind, PluginDef,
-    Schedule, SysParam, SysParamTy, SystemDef, TagDef,
+    AetherBlock, BundleDef, ComponentDef, Construct, EvField, EventDef, MachineDef, OrderKind,
+    PluginDef, Schedule, StateDef, SysParam, SysParamTy, SystemDef, TagDef, TransitionDef,
 };
 use crate::diag;
 
@@ -33,6 +33,7 @@ fn expand_inner(block: &AetherBlock) -> syn::Result<TokenStream> {
             Construct::Event(def) => out.extend(event(def)),
             Construct::System(def) => out.extend(system_fn(def)),
             Construct::Plugin(def) => out.extend(plugin_impl(def, block)?),
+            Construct::Machine(def) => out.extend(machine_items(def)?),
         }
     }
     Ok(out)
@@ -66,6 +67,12 @@ fn validate_block(block: &AetherBlock) -> syn::Result<()> {
                 return Err(diag::err(
                     s.name.span(),
                     "scheduling clauses (`on`, `after`, `when`, …) need a `plugin <Name>;` declaration in this block to hold the generated registration",
+                ));
+            }
+            if let Construct::Machine(m) = c {
+                return Err(diag::err(
+                    m.name.span(),
+                    "a `machine` needs a `plugin <Name>;` declaration in this block to hold its `insert_state` and transition registrations",
                 ));
             }
         }
@@ -179,8 +186,16 @@ fn system_fn(def: &SystemDef) -> TokenStream {
 /// self`, so a non-mut reader binding could never be read).
 fn sys_param_tokens(p: &SysParam) -> TokenStream {
     let name = &p.name;
+    let (inferred_mut, ty) = param_ty_and_mut(&p.ty);
+    let mut_kw = (p.explicit_mut || inferred_mut).then(|| quote!(mut));
+    quote!(#mut_kw #name: #ty)
+}
+
+/// The sugar table's (needs-`mut`, emitted-type) pair — shared by `system` params and the
+/// `machine` merged-param path (which needs the type ALONE for its dedup identity).
+fn param_ty_and_mut(ty: &SysParamTy) -> (bool, TokenStream) {
     let sys = quote!(::boyko_ecs::ecs::core::system);
-    let (inferred_mut, ty) = match &p.ty {
+    match ty {
         SysParamTy::Query { data, filters } => {
             (type_mentions_mut(data), query_type(data, filters))
         }
@@ -191,9 +206,7 @@ fn sys_param_tokens(p: &SysParam) -> TokenStream {
         SysParamTy::Events(t) => (true, quote!(#sys::EventReader<#t>)),
         SysParamTy::Emit(t) => (true, quote!(#sys::EventWriter<#t>)),
         SysParamTy::Verbatim(t) => (false, quote!(#t)),
-    };
-    let mut_kw = (p.explicit_mut || inferred_mut).then(|| quote!(mut));
-    quote!(#mut_kw #name: #ty)
+    }
 }
 
 /// `query<D, filters>` → `Query<D, F>`: one filter stays bare (the kernel implements
@@ -290,8 +303,20 @@ fn plugin_impl(def: &PluginDef, block: &AetherBlock) -> syn::Result<TokenStream>
             quote!(app.add_startup_system(#n);)
         });
 
-    let main_stmts = bucket_stmts(&systems, &resolved, &needs_key, Schedule::Update)?;
+    let mut main_stmts = bucket_stmts(&systems, &resolved, &needs_key, Schedule::Update)?;
     let fixed_stmts = bucket_stmts(&systems, &resolved, &needs_key, Schedule::Fixed)?;
+
+    // Sibling machines (§3.5): the plugin holds their `insert_state` and their transition
+    // systems' Main registrations, after the systems' own (deterministic output order).
+    let mut inserts: Vec<TokenStream> = Vec::new();
+    for c in &block.constructs {
+        if let Construct::Machine(m) = c {
+            let (insert, stmts) = machine_registrations(m)?;
+            inserts.push(insert);
+            main_stmts.extend(stmts);
+        }
+    }
+
     let main_block = (!main_stmts.is_empty()).then(|| {
         quote! { app.add_systems_cfg(|b| { #(#main_stmts)* }); }
     });
@@ -307,6 +332,7 @@ fn plugin_impl(def: &PluginDef, block: &AetherBlock) -> syn::Result<TokenStream>
         pub struct #pname;
         impl ::boyko_ecs::Plugin for #pname {
             fn build(&self, app: &mut ::boyko_ecs::App) {
+                #(#inserts)*
                 #(#startup_calls)*
                 #main_block
                 #fixed_block
@@ -455,6 +481,403 @@ fn bucket_stmts(
 /// The captured-`SystemKey` local for a sibling-ordered system (the plan's exact spelling).
 fn key_ident(name: &Ident) -> Ident {
     format_ident!("__aether_k_{}", name)
+}
+
+// ---------------------------------------------------------------------------------- rung A3
+
+/// One flattened state node. The hierarchy exists ONLY here, inside the transpiler (§3.5):
+/// the runtime sees a flat enum and per-(leaf, event) systems.
+struct MNode<'a> {
+    state: &'a StateDef,
+    /// Arena index of the parent; `None` for a top-level state.
+    parent: Option<usize>,
+    /// Concatenated path names (`PlayingRunning`) — the leaf's enum variant spelling.
+    cat: String,
+    /// Dotted path names (`Playing.Running`) — for diagnostics.
+    dotted: String,
+}
+
+/// The flattened machine: an arena of nodes (preorder) + resolved leaves.
+struct MachineModel<'a> {
+    def: &'a MachineDef,
+    nodes: Vec<MNode<'a>>,
+    /// Arena indices of the LEAVES, in preorder — the enum variant order.
+    leaves: Vec<usize>,
+    /// The machine-level `initial`, resolved through composite `initial` chains to a leaf.
+    initial_leaf: usize,
+    /// Per-leaf inherited transitions, innermost-wins: `(owner_node, transition, target_leaf)`.
+    routes: Vec<Vec<(usize, &'a TransitionDef, usize)>>,
+}
+
+impl<'a> MachineModel<'a> {
+    /// Build + validate: every §3.5 hard fault is diagnosed here, on the user's tokens.
+    fn build(def: &'a MachineDef) -> syn::Result<MachineModel<'a>> {
+        let mut nodes: Vec<MNode<'a>> = Vec::new();
+        fn walk<'a>(
+            nodes: &mut Vec<MNode<'a>>,
+            state: &'a StateDef,
+            parent: Option<usize>,
+        ) -> usize {
+            let (cat, dotted) = match parent {
+                Some(p) => (
+                    format!("{}{}", nodes[p].cat, state.name),
+                    format!("{}.{}", nodes[p].dotted, state.name),
+                ),
+                None => (state.name.to_string(), state.name.to_string()),
+            };
+            let idx = nodes.len();
+            nodes.push(MNode { state, parent, cat, dotted });
+            for c in &state.children {
+                walk(nodes, c, Some(idx));
+            }
+            idx
+        }
+        for s in &def.states {
+            walk(&mut nodes, s, None);
+        }
+        if nodes.is_empty() {
+            return Err(diag::err(def.name.span(), "a machine declares at least one state"));
+        }
+        let leaves: Vec<usize> =
+            (0..nodes.len()).filter(|&i| nodes[i].state.children.is_empty()).collect();
+
+        // Duplicate handler for one event in one state — error on the SECOND `on`, with a
+        // note at the first (the §3.5 diagnostic).
+        for n in &nodes {
+            for (i, t) in n.state.transitions.iter().enumerate() {
+                let key = path_key(&t.event);
+                if let Some(first) =
+                    n.state.transitions[..i].iter().find(|p| path_key(&p.event) == key)
+                {
+                    let mut e = diag::err(
+                        t.kw_span,
+                        format!("duplicate handler for `{key}` in state `{}`", n.dotted),
+                    );
+                    e.combine(diag::err(first.kw_span, "the first handler is here"));
+                    return Err(e);
+                }
+            }
+        }
+
+        let model_initial = resolve_child(&nodes, None, &def.initial, &def.name.to_string())?;
+        let initial_leaf = resolve_to_leaf(&nodes, model_initial, def.initial.span())?;
+
+        // Per-leaf inherited transitions: walk the leaf's ancestor chain innermost-first;
+        // the innermost handler for an event wins (§3.5 "superstate handlers were copied
+        // into each leaf that lacks its own handler").
+        let mut routes: Vec<Vec<(usize, &'a TransitionDef, usize)>> =
+            Vec::with_capacity(leaves.len());
+        for &leaf in &leaves {
+            let mut seen: Vec<String> = Vec::new();
+            let mut list: Vec<(usize, &'a TransitionDef, usize)> = Vec::new();
+            let mut cur = Some(leaf);
+            while let Some(i) = cur {
+                for t in &nodes[i].state.transitions {
+                    let key = path_key(&t.event);
+                    if !seen.contains(&key) {
+                        seen.push(key);
+                        let target = resolve_target(&nodes, &def.name.to_string(), &t.target)?;
+                        list.push((i, t, target));
+                    }
+                }
+                cur = nodes[i].parent;
+            }
+            routes.push(list);
+        }
+
+        Ok(MachineModel { def, nodes, leaves, initial_leaf, routes })
+    }
+
+    /// The leaf's enum variant ident, spanned at the leaf's own name.
+    fn variant(&self, leaf: usize) -> Ident {
+        Ident::new(&self.nodes[leaf].cat, self.nodes[leaf].state.name.span())
+    }
+
+    /// Root-first ancestor chain including `idx` itself.
+    fn lineage(&self, idx: usize) -> Vec<usize> {
+        let mut v = Vec::new();
+        let mut cur = Some(idx);
+        while let Some(i) = cur {
+            v.push(i);
+            cur = self.nodes[i].parent;
+        }
+        v.reverse();
+        v
+    }
+}
+
+/// A path's dedup identity for handler-inheritance (token spelling, whitespace-free).
+fn path_key(p: &syn::Path) -> String {
+    quote!(#p).to_string().replace(' ', "")
+}
+
+/// Find `name` among the children of `parent` (or the top level), with the §3.5 message:
+/// the declared list + did-you-mean.
+fn resolve_child(
+    nodes: &[MNode<'_>],
+    parent: Option<usize>,
+    name: &Ident,
+    scope: &str,
+) -> syn::Result<usize> {
+    let candidates: Vec<usize> = (0..nodes.len())
+        .filter(|&i| nodes[i].parent == parent)
+        .collect();
+    if let Some(&found) =
+        candidates.iter().find(|&&i| nodes[i].state.name == *name)
+    {
+        return Ok(found);
+    }
+    let declared: Vec<String> =
+        candidates.iter().map(|&i| nodes[i].state.name.to_string()).collect();
+    let refs: Vec<&str> = declared.iter().map(String::as_str).collect();
+    let mut msg = format!(
+        "no state `{name}` in `{scope}`; states declared here: {}",
+        declared.iter().map(|d| format!("`{d}`")).collect::<Vec<_>>().join(", ")
+    );
+    if let Some(sugg) = diag::did_you_mean(&name.to_string(), &refs) {
+        msg.push_str(&format!(" (did you mean `{sugg}`?)"));
+    }
+    Err(diag::err(name.span(), msg))
+}
+
+/// Follow `initial` chains from a (possibly composite) state down to a leaf. A composite
+/// with no `initial` is the §3.5 hard fault, suggested with its first child by name.
+fn resolve_to_leaf(nodes: &[MNode<'_>], mut idx: usize, err_span: Span) -> syn::Result<usize> {
+    loop {
+        if nodes[idx].state.children.is_empty() {
+            return Ok(idx);
+        }
+        let Some(init) = &nodes[idx].state.initial else {
+            let first_child = (0..nodes.len())
+                .find(|&i| nodes[i].parent == Some(idx))
+                .map(|i| nodes[i].state.name.to_string())
+                .unwrap_or_default();
+            return Err(diag::err(
+                err_span,
+                format!(
+                    "target `{}` is a composite state with no `initial` — add `initial <leaf>;` or target a leaf (`{}.{first_child}`)",
+                    nodes[idx].dotted, nodes[idx].dotted
+                ),
+            ));
+        };
+        idx = resolve_child(nodes, Some(idx), init, &nodes[idx].dotted)?;
+    }
+}
+
+/// Resolve a ROOT-ANCHORED transition target path (`Playing.Paused`) to a leaf.
+fn resolve_target(
+    nodes: &[MNode<'_>],
+    machine: &str,
+    segments: &[Ident],
+) -> syn::Result<usize> {
+    let mut parent: Option<usize> = None;
+    let mut scope = machine.to_string();
+    let mut idx = 0usize;
+    for seg in segments {
+        idx = resolve_child(nodes, parent, seg, &scope)?;
+        scope = nodes[idx].dotted.clone();
+        parent = Some(idx);
+    }
+    resolve_to_leaf(nodes, idx, segments.last().expect("grammar: non-empty path").span())
+}
+
+/// The snake_case spelling for generated fn names (`PlayingRunning` → `playing_running`).
+fn snake(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for (i, c) in s.chars().enumerate() {
+        if c.is_uppercase() {
+            if i != 0 {
+                out.push('_');
+            }
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The generated transition system's fn name (the plan's exact shape):
+/// `__aether_<machine>__<leaf>__<event>`.
+fn transition_fn_ident(machine: &Ident, leaf_cat: &str, event: &syn::Path) -> Ident {
+    let ev = event.segments.last().expect("grammar: non-empty path").ident.to_string();
+    format_ident!(
+        "__aether_{}__{}__{}",
+        snake(&machine.to_string()),
+        snake(leaf_cat),
+        snake(&ev)
+    )
+}
+
+/// §3.5 items: the flat enum, the `States` impl, the composite-group predicates, and one
+/// transition fn per (leaf, inherited event). Registration lives in the sibling plugin.
+fn machine_items(def: &MachineDef) -> syn::Result<TokenStream> {
+    let model = MachineModel::build(def)?;
+    let mname = &def.name;
+    let variants: Vec<Ident> = model.leaves.iter().map(|&l| model.variant(l)).collect();
+
+    // Composite predicates: `in_playing(self)` = membership in the composite's leaf set.
+    let mut predicates: Vec<TokenStream> = Vec::new();
+    for (i, n) in model.nodes.iter().enumerate() {
+        if n.state.children.is_empty() {
+            continue;
+        }
+        let members: Vec<Ident> = model
+            .leaves
+            .iter()
+            .filter(|&&l| model.lineage(l).contains(&i))
+            .map(|&l| model.variant(l))
+            .collect();
+        let pred = format_ident!("in_{}", snake(&n.cat));
+        predicates.push(quote! {
+            /// Zero-cost superstate predicate (compile-time group membership).
+            #[inline]
+            pub const fn #pred(self) -> bool {
+                matches!(self, #( Self::#members )|*)
+            }
+        });
+    }
+    let predicate_impl = (!predicates.is_empty()).then(|| {
+        quote! { impl #mname { #( #predicates )* } }
+    });
+
+    let mut fns: Vec<TokenStream> = Vec::new();
+    for (li, &leaf) in model.leaves.iter().enumerate() {
+        for (owner, t, target) in &model.routes[li] {
+            fns.push(transition_fn(&model, leaf, *owner, t, *target)?);
+        }
+    }
+
+    Ok(quote! {
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+        pub enum #mname {
+            #( #variants ),*
+        }
+        impl ::boyko_ecs::ecs::core::state::States for #mname {}
+        #predicate_impl
+        #( #fns )*
+    })
+}
+
+/// One generated (leaf, event) transition system (§3.5's After block, real paths).
+fn transition_fn(
+    model: &MachineModel<'_>,
+    leaf: usize,
+    owner: usize,
+    t: &TransitionDef,
+    target: usize,
+) -> syn::Result<TokenStream> {
+    let _ = owner;
+    let mname = &model.def.name;
+    let fn_name = transition_fn_ident(mname, &model.nodes[leaf].cat, &t.event);
+    let event = &t.event;
+    let sys = quote!(::boyko_ecs::ecs::core::system);
+    let state = quote!(::boyko_ecs::ecs::core::state);
+
+    // LCA of source leaf and target leaf: longest common lineage prefix.
+    let src_line = model.lineage(leaf);
+    let dst_line = model.lineage(target);
+    let mut lca_depth = 0;
+    while lca_depth < src_line.len()
+        && lca_depth < dst_line.len()
+        && src_line[lca_depth] == dst_line[lca_depth]
+    {
+        lca_depth += 1;
+    }
+    // Exit actions: source-side states BELOW the LCA, innermost-first.
+    let exit_nodes: Vec<usize> = src_line[lca_depth..].iter().rev().copied().collect();
+    // Enter actions: target-side states below the LCA, outermost-first.
+    let enter_nodes: Vec<usize> = dst_line[lca_depth..].to_vec();
+
+    // Merged params: transition params + exit/enter handler params, deduped by NAME with
+    // a type-identity check (two handlers may share `cmds: commands`; a NAME reused with a
+    // DIFFERENT type is refused on the later occurrence).
+    let mut merged: Vec<&SysParam> = Vec::new();
+    let mut all: Vec<&SysParam> = t.params.iter().collect();
+    for &i in &exit_nodes {
+        if let Some(h) = &model.nodes[i].state.exit {
+            all.extend(h.params.iter());
+        }
+    }
+    for &i in &enter_nodes {
+        if let Some(h) = &model.nodes[i].state.enter {
+            all.extend(h.params.iter());
+        }
+    }
+    for p in all {
+        if let Some(prev) = merged.iter().find(|m| m.name == p.name) {
+            let (_, a) = param_ty_and_mut(&prev.ty);
+            let (_, b) = param_ty_and_mut(&p.ty);
+            if a.to_string() != b.to_string() {
+                return Err(diag::err(
+                    p.name.span(),
+                    format!(
+                        "param `{}` is declared with conflicting types across this transition's merged enter/exit/action handlers",
+                        p.name
+                    ),
+                ));
+            }
+            continue;
+        }
+        merged.push(p);
+    }
+    let params = merged.iter().map(|p| sys_param_tokens(p));
+
+    let guard = t.guard.as_ref().map(|g| quote! { if !(#g) { continue; } });
+    let exits = exit_nodes.iter().filter_map(|&i| {
+        model.nodes[i].state.exit.as_ref().map(|h| {
+            let b = &h.body;
+            quote! { { #b } }
+        })
+    });
+    let action = t.action.as_ref().map(|a| quote! { { #a } });
+    let enters = enter_nodes.iter().filter_map(|&i| {
+        model.nodes[i].state.enter.as_ref().map(|h| {
+            let b = &h.body;
+            quote! { { #b } }
+        })
+    });
+    let target_variant = model.variant(target);
+
+    Ok(quote! {
+        fn #fn_name(
+            mut __aether_ev: #sys::EventReader<#event>,
+            mut __aether_next: #sys::ResMut<#state::NextState<#mname>>,
+            #( #params ),*
+        ) {
+            for _ in __aether_ev.read() {
+                #guard
+                #( #exits )*
+                #action
+                #( #enters )*
+                *__aether_next = #state::NextState::Pending(#mname::#target_variant);
+                return;
+            }
+        }
+    })
+}
+
+/// The plugin-side registrations for one machine: `insert_state(initial-leaf)` + one
+/// `run_if(in_state(leaf))` Main registration per generated transition system.
+fn machine_registrations(
+    def: &MachineDef,
+) -> syn::Result<(TokenStream, Vec<TokenStream>)> {
+    let model = MachineModel::build(def)?;
+    let mname = &def.name;
+    let init_variant = model.variant(model.initial_leaf);
+    let insert = quote! { app.insert_state(#mname::#init_variant); };
+    let cond = quote!(::boyko_ecs::ecs::core::schedule::common_conditions::in_state);
+    let mut stmts = Vec::new();
+    for (li, &leaf) in model.leaves.iter().enumerate() {
+        let leaf_variant = model.variant(leaf);
+        for (_, t, _) in &model.routes[li] {
+            let fn_name = transition_fn_ident(mname, &model.nodes[leaf].cat, &t.event);
+            stmts.push(quote! {
+                b.add_system(#fn_name).run_if(#cond(#mname::#leaf_variant));
+            });
+        }
+    }
+    Ok((insert, stmts))
 }
 
 #[cfg(test)]
@@ -622,8 +1045,69 @@ mod tests {
 
     #[test]
     fn planned_constructs_name_their_rung_instead_of_pretending_unknown() {
-        fails_with(quote! { machine G {} }, "lands at rung A3");
         fails_with(quote! { material gold {} }, "lands at rung A5");
+        fails_with(quote! { scene lab {} }, "lands at rung A6");
+    }
+
+    // -------------------------------------------------------- night-review fixes (A0/A1 scope)
+
+    /// The review's MAJOR: a participant context the derive's comma-split ident channel cannot
+    /// carry must be refused HERE, on the user's tokens — never forwarded into a downstream
+    /// proc-macro panic with no span.
+    #[test]
+    fn participant_context_rejects_paths_and_generics_on_the_users_span() {
+        fails_with(
+            quote! { event E { hit: entity(foo::Bar), } },
+            "bare component idents",
+        );
+        fails_with(
+            quote! { event E { hit: entity(Slot<A, B>), } },
+            "bare component idents",
+        );
+        // The plain form still passes untouched.
+        expands_to(
+            quote! { event E { hit: entity(Health), } },
+            quote! {
+                #[::boyko_macros::event]
+                pub struct E {
+                    #[participant(components = "Health")]
+                    pub hit: ::boyko_ecs::ecs::core::entity::entity::Entity
+                }
+            },
+        );
+    }
+
+    /// The review's position-dependence: a path whose FIRST segment spells a keyword parses
+    /// the same at every list position (`ident ::` continues a path, bare keywords open items).
+    #[test]
+    fn requires_list_accepts_keyword_headed_paths_at_every_position() {
+        expands_to(
+            quote! { component X { requires A, no_bundle::C, on_add = f } },
+            quote! {
+                #[derive(::boyko_macros::Component)]
+                #[require(A, no_bundle::C)]
+                #[component(on_add = f)]
+                pub struct X {}
+            },
+        );
+    }
+
+    /// The review's Unicode finding: a name the ASCII probe cannot classify must not produce a
+    /// self-identical rename suggestion; `char::is_uppercase` accepts any titled spelling.
+    #[test]
+    fn unicode_names_pass_the_case_gate_or_fail_without_a_useless_rename() {
+        // A Cyrillic-titled component is UpperCamelCase in its own script — accepted.
+        expands_to(
+            quote! { component Здоровье { hp: f32 } },
+            quote! {
+                #[derive(::boyko_macros::Component)]
+                pub struct Здоровье {
+                    pub hp: f32
+                }
+            },
+        );
+        // A lowercase Cyrillic name still fails, WITH a real (different) suggestion.
+        fails_with(quote! { component здоровье { hp: f32 } }, "rename `здоровье` to `Здоровье`");
     }
 
     // ------------------------------------------------------------------ rung A2: system+plugin
@@ -784,6 +1268,212 @@ mod tests {
                 pub fn a() {}
                 pub fn z() {}
             },
+        );
+    }
+
+    // ------------------------------------------------------------------ rung A3: machine
+
+    /// The §3.5 before/after pair, verbatim — the plan's GameFlow chart with its `…` bodies
+    /// made concrete, against the REAL nested engine paths. Pins: flattening (4 leaves), the
+    /// superstate predicate, innermost-wins inheritance (PlayerDied exists for BOTH Playing
+    /// leaves), LCA exit/enter inlining, guard placement, first-accepted-event-wins, and the
+    /// plugin's insert_state + run_if(in_state(leaf)) registrations.
+    #[test]
+    fn the_section_3_5_before_after_pair_holds_verbatim() {
+        expands_to(
+            quote! {
+                plugin Flow;
+
+                machine GameFlow {
+                    initial Boot;
+
+                    state Boot {
+                        on AssetsReady => Playing;
+                    }
+
+                    state Playing {
+                        initial Running;
+                        enter (mut cmds: commands) { cmds.spawn(Hud); }
+                        exit (mut cmds: commands) { cmds.despawn_hud(); }
+
+                        state Running {
+                            on PausePressed => Playing.Paused;
+                        }
+                        state Paused {
+                            on PausePressed => Playing.Running;
+                        }
+
+                        on PlayerDied (score: res<Score>) if score.lives == 0 => GameOver {
+                        }
+                    }
+
+                    state GameOver {
+                        on RestartPressed => Boot;
+                    }
+                }
+            },
+            quote! {
+                pub struct Flow;
+                impl ::boyko_ecs::Plugin for Flow {
+                    fn build(&self, app: &mut ::boyko_ecs::App) {
+                        app.insert_state(GameFlow::Boot);
+                        app.add_systems_cfg(|b| {
+                            b.add_system(__aether_game_flow__boot__assets_ready)
+                                .run_if(::boyko_ecs::ecs::core::schedule::common_conditions::in_state(GameFlow::Boot));
+                            b.add_system(__aether_game_flow__playing_running__pause_pressed)
+                                .run_if(::boyko_ecs::ecs::core::schedule::common_conditions::in_state(GameFlow::PlayingRunning));
+                            b.add_system(__aether_game_flow__playing_running__player_died)
+                                .run_if(::boyko_ecs::ecs::core::schedule::common_conditions::in_state(GameFlow::PlayingRunning));
+                            b.add_system(__aether_game_flow__playing_paused__pause_pressed)
+                                .run_if(::boyko_ecs::ecs::core::schedule::common_conditions::in_state(GameFlow::PlayingPaused));
+                            b.add_system(__aether_game_flow__playing_paused__player_died)
+                                .run_if(::boyko_ecs::ecs::core::schedule::common_conditions::in_state(GameFlow::PlayingPaused));
+                            b.add_system(__aether_game_flow__game_over__restart_pressed)
+                                .run_if(::boyko_ecs::ecs::core::schedule::common_conditions::in_state(GameFlow::GameOver));
+                        });
+                    }
+                    fn name(&self) -> &'static str { "Flow" }
+                }
+                #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+                pub enum GameFlow {
+                    Boot,
+                    PlayingRunning,
+                    PlayingPaused,
+                    GameOver
+                }
+                impl ::boyko_ecs::ecs::core::state::States for GameFlow {}
+                impl GameFlow {
+                    /// Zero-cost superstate predicate (compile-time group membership).
+                    #[inline]
+                    pub const fn in_playing(self) -> bool {
+                        matches!(self, Self::PlayingRunning | Self::PlayingPaused)
+                    }
+                }
+                fn __aether_game_flow__boot__assets_ready(
+                    mut __aether_ev: ::boyko_ecs::ecs::core::system::EventReader<AssetsReady>,
+                    mut __aether_next: ::boyko_ecs::ecs::core::system::ResMut<::boyko_ecs::ecs::core::state::NextState<GameFlow>>,
+                    mut cmds: ::boyko_ecs::ecs::core::system::Commands
+                ) {
+                    for _ in __aether_ev.read() {
+                        { cmds.spawn(Hud); }
+                        *__aether_next = ::boyko_ecs::ecs::core::state::NextState::Pending(GameFlow::PlayingRunning);
+                        return;
+                    }
+                }
+                fn __aether_game_flow__playing_running__pause_pressed(
+                    mut __aether_ev: ::boyko_ecs::ecs::core::system::EventReader<PausePressed>,
+                    mut __aether_next: ::boyko_ecs::ecs::core::system::ResMut<::boyko_ecs::ecs::core::state::NextState<GameFlow>>,
+                ) {
+                    for _ in __aether_ev.read() {
+                        *__aether_next = ::boyko_ecs::ecs::core::state::NextState::Pending(GameFlow::PlayingPaused);
+                        return;
+                    }
+                }
+                fn __aether_game_flow__playing_running__player_died(
+                    mut __aether_ev: ::boyko_ecs::ecs::core::system::EventReader<PlayerDied>,
+                    mut __aether_next: ::boyko_ecs::ecs::core::system::ResMut<::boyko_ecs::ecs::core::state::NextState<GameFlow>>,
+                    score: ::boyko_ecs::ecs::core::system::Res<Score>,
+                    mut cmds: ::boyko_ecs::ecs::core::system::Commands
+                ) {
+                    for _ in __aether_ev.read() {
+                        if !(score.lives == 0) { continue; }
+                        { cmds.despawn_hud(); }
+                        { }
+                        *__aether_next = ::boyko_ecs::ecs::core::state::NextState::Pending(GameFlow::GameOver);
+                        return;
+                    }
+                }
+                fn __aether_game_flow__playing_paused__pause_pressed(
+                    mut __aether_ev: ::boyko_ecs::ecs::core::system::EventReader<PausePressed>,
+                    mut __aether_next: ::boyko_ecs::ecs::core::system::ResMut<::boyko_ecs::ecs::core::state::NextState<GameFlow>>,
+                ) {
+                    for _ in __aether_ev.read() {
+                        *__aether_next = ::boyko_ecs::ecs::core::state::NextState::Pending(GameFlow::PlayingRunning);
+                        return;
+                    }
+                }
+                fn __aether_game_flow__playing_paused__player_died(
+                    mut __aether_ev: ::boyko_ecs::ecs::core::system::EventReader<PlayerDied>,
+                    mut __aether_next: ::boyko_ecs::ecs::core::system::ResMut<::boyko_ecs::ecs::core::state::NextState<GameFlow>>,
+                    score: ::boyko_ecs::ecs::core::system::Res<Score>,
+                    mut cmds: ::boyko_ecs::ecs::core::system::Commands
+                ) {
+                    for _ in __aether_ev.read() {
+                        if !(score.lives == 0) { continue; }
+                        { cmds.despawn_hud(); }
+                        { }
+                        *__aether_next = ::boyko_ecs::ecs::core::state::NextState::Pending(GameFlow::GameOver);
+                        return;
+                    }
+                }
+                fn __aether_game_flow__game_over__restart_pressed(
+                    mut __aether_ev: ::boyko_ecs::ecs::core::system::EventReader<RestartPressed>,
+                    mut __aether_next: ::boyko_ecs::ecs::core::system::ResMut<::boyko_ecs::ecs::core::state::NextState<GameFlow>>,
+                ) {
+                    for _ in __aether_ev.read() {
+                        *__aether_next = ::boyko_ecs::ecs::core::state::NextState::Pending(GameFlow::Boot);
+                        return;
+                    }
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn a3_diagnostics_fire_where_the_plan_says() {
+        // Unknown `initial` target, with the declared list + did-you-mean (§3.5 verbatim).
+        fails_with(
+            quote! {
+                plugin P;
+                machine M {
+                    initial Playing;
+                    state Playing { initial Runing; state Running {} state Paused {} }
+                }
+            },
+            "no state `Runing` in `Playing`; states declared here: `Running`, `Paused` (did you mean `Running`?)",
+        );
+        // A transition targeting a composite with no `initial` (§3.5 verbatim).
+        fails_with(
+            quote! {
+                plugin P;
+                machine M {
+                    initial Boot;
+                    state Boot { on Go => Playing; }
+                    state Playing { state Running {} }
+                }
+            },
+            "target `Playing` is a composite state with no `initial`",
+        );
+        // Two handlers for one event in one state — the second `on` errs.
+        fails_with(
+            quote! {
+                plugin P;
+                machine M {
+                    initial A;
+                    state A { on E => A; on E => A; }
+                }
+            },
+            "duplicate handler for `E` in state `A`",
+        );
+        // A machine needs the plugin header.
+        fails_with(
+            quote! { machine M { initial A; state A {} } },
+            "a `machine` needs a `plugin <Name>;` declaration",
+        );
+        // A merged-param NAME reused with a different type across handlers is refused.
+        fails_with(
+            quote! {
+                plugin P;
+                machine M {
+                    initial A;
+                    state A {
+                        exit (mut cmds: commands) { let _ = &mut cmds; }
+                        on E (cmds: res<Thing>) => B;
+                    }
+                    state B {}
+                }
+            },
+            "conflicting types",
         );
     }
 

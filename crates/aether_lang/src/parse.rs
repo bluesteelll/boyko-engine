@@ -9,8 +9,9 @@ use syn::parse::{Parse, ParseStream};
 use syn::{Expr, Path, Token, Type, parenthesized};
 
 use crate::ast::{
-    AetherBlock, BundleDef, ComponentDef, Construct, EvField, EventDef, FilterKind, HookKind,
-    OrderKind, PluginDef, Schedule, SysParam, SysParamTy, SystemDef, TagDef,
+    AetherBlock, BundleDef, ComponentDef, Construct, EvField, EventDef, FilterKind, HandlerDef,
+    HookKind, MachineDef, OrderKind, PluginDef, Schedule, StateDef, SysParam, SysParamTy,
+    SystemDef, TagDef, TransitionDef,
 };
 use crate::diag;
 
@@ -29,25 +30,20 @@ impl Parse for AetherBlock {
                 "event" => constructs.push(Construct::Event(parse_event(input)?)),
                 "system" => constructs.push(Construct::System(parse_system(input)?)),
                 "plugin" => constructs.push(Construct::Plugin(parse_plugin(input)?)),
-                // Planned constructs (§9, rungs A3..A6): name the rung rather than pretending
+                "machine" => constructs.push(Construct::Machine(parse_machine(input)?)),
+                // Planned constructs (§9, rungs A5..A6): name the rung rather than pretending
                 // the keyword is unknown — a misspelling and a not-yet-shipped construct are
                 // different failures and deserve different messages.
-                "machine" => {
-                    return Err(diag::err(
-                        head.span(),
-                        "`machine` is an Aether construct but lands at rung A3; this build carries rungs A0..A2 (component, tag, bundle, event, system, plugin)",
-                    ));
-                }
                 "material" => {
                     return Err(diag::err(
                         head.span(),
-                        "`material` is an Aether construct but lands at rung A5; this build carries rungs A0..A2 (component, tag, bundle, event, system, plugin)",
+                        "`material` is an Aether construct but lands at rung A5; this build carries rungs A0..A3 (component, tag, bundle, event, system, plugin, machine)",
                     ));
                 }
                 "scene" => {
                     return Err(diag::err(
                         head.span(),
-                        "`scene` is an Aether construct but lands at rung A6; this build carries rungs A0..A2 (component, tag, bundle, event, system, plugin)",
+                        "`scene` is an Aether construct but lands at rung A6; this build carries rungs A0..A3 (component, tag, bundle, event, system, plugin, machine)",
                     ));
                 }
                 other => return Err(diag::unknown_construct(head.span(), other)),
@@ -64,16 +60,9 @@ fn parse_component(input: ParseStream) -> syn::Result<ComponentDef> {
     let name: Ident = input.parse().map_err(|e| {
         diag::err(e.span(), "expected a component name after `component`")
     })?;
-    let name_str = name.to_string();
-    if !name_str.starts_with(|c: char| c.is_ascii_uppercase()) {
-        // §2 case convention, diagnosed EARLY with the name's own span: components expand to
-        // types, and a lowercase type would fail far away in the derive's output.
-        return Err(diag::err(
-            name.span(),
-            format!("component names are UpperCamelCase — they expand to types (rename `{name_str}` to `{}`)",
-                upper_camel(&name_str)),
-        ));
-    }
+    // §2 case convention, diagnosed EARLY with the name's own span: components expand to
+    // types, and a lowercase type would fail far away in the derive's output.
+    upper_camel_gate(&name, "component names are UpperCamelCase — they expand to types")?;
 
     let body;
     syn::braced!(body in input);
@@ -110,14 +99,18 @@ fn parse_component(input: ParseStream) -> syn::Result<ComponentDef> {
                     if fork.is_empty() {
                         break;
                     }
-                    if let Ok(next) = fork.fork().parse::<Ident>() {
+                    let after_ident = fork.fork();
+                    if let Ok(next) = after_ident.parse::<Ident>() {
                         let ns = next.to_string();
-                        // `ident :` opens a FIELD — but `ident ::` continues a PATH, so the
-                        // `::` check must come first (`requires A, b::C` vs the field `b: T`).
-                        let is_item_head = ns == "requires"
-                            || ns == "no_bundle"
-                            || HookKind::from_str(&ns).is_some()
-                            || (fork.peek2(Token![:]) && !fork.peek2(Token![::]));
+                        // `ident ::` CONTINUES A PATH no matter which ident it is — the
+                        // keyword names too (`requires A, no_bundle::C` is a path whose first
+                        // segment happens to spell a keyword; only bare keywords open items).
+                        // `ident :` (single colon) opens a FIELD.
+                        let is_item_head = !after_ident.peek(Token![::])
+                            && (ns == "requires"
+                                || ns == "no_bundle"
+                                || HookKind::from_str(&ns).is_some()
+                                || after_ident.peek(Token![:]));
                         if is_item_head {
                             break;
                         }
@@ -170,14 +163,7 @@ fn parse_component(input: ParseStream) -> syn::Result<ComponentDef> {
 fn parse_tag(input: ParseStream) -> syn::Result<TagDef> {
     let _kw: Ident = input.parse()?; // `tag`
     let name: Ident = input.parse().map_err(|e| diag::err(e.span(), "expected a tag name after `tag`"))?;
-    let name_str = name.to_string();
-    if !name_str.starts_with(|c: char| c.is_ascii_uppercase()) {
-        return Err(diag::err(
-            name.span(),
-            format!("tag names are UpperCamelCase — they expand to types (rename `{name_str}` to `{}`)",
-                upper_camel(&name_str)),
-        ));
-    }
+    upper_camel_gate(&name, "tag names are UpperCamelCase — they expand to types")?;
     let mut bitset = false;
     if input.peek(syn::token::Paren) {
         let inner;
@@ -200,6 +186,24 @@ fn parse_tag(input: ParseStream) -> syn::Result<TagDef> {
         diag::err(e.span(), "a tag declaration ends with `;` (tags have no body — a component with fields wants `component`)")
     })?;
     Ok(TagDef { name, bitset })
+}
+
+/// The §2 case gate for type-producing names. Unicode-correct — `char::is_uppercase`, not the
+/// ASCII probe (a name titled with a non-ASCII capital must pass), and the rename suggestion is
+/// attached only when [`upper_camel`] actually changes the spelling — a self-identical rename
+/// explains nothing.
+fn upper_camel_gate(name: &Ident, base: &str) -> syn::Result<()> {
+    let s = name.to_string();
+    if s.starts_with(char::is_uppercase) {
+        return Ok(());
+    }
+    let sugg = upper_camel(&s);
+    let msg = if !sugg.is_empty() && sugg != s {
+        format!("{base} (rename `{s}` to `{sugg}`)")
+    } else {
+        base.to_string()
+    };
+    Err(diag::err(name.span(), msg))
 }
 
 /// Best-effort UpperCamelCase suggestion for the §2 case diagnostics.
@@ -226,14 +230,7 @@ const MAX_BUNDLE_ARITY: usize = 16;
 fn parse_bundle(input: ParseStream) -> syn::Result<BundleDef> {
     let _kw: Ident = input.parse()?; // `bundle`
     let name: Ident = input.parse().map_err(|e| diag::err(e.span(), "expected a bundle name after `bundle`"))?;
-    let name_str = name.to_string();
-    if !name_str.starts_with(|c: char| c.is_ascii_uppercase()) {
-        return Err(diag::err(
-            name.span(),
-            format!("bundle names are UpperCamelCase — they expand to types (rename `{name_str}` to `{}`)",
-                upper_camel(&name_str)),
-        ));
-    }
+    upper_camel_gate(&name, "bundle names are UpperCamelCase — they expand to types")?;
     let body;
     syn::braced!(body in input);
     let mut fields = Vec::new();
@@ -264,14 +261,7 @@ fn parse_bundle(input: ParseStream) -> syn::Result<BundleDef> {
 fn parse_event(input: ParseStream) -> syn::Result<EventDef> {
     let _kw: Ident = input.parse()?; // `event`
     let name: Ident = input.parse().map_err(|e| diag::err(e.span(), "expected an event name after `event`"))?;
-    let name_str = name.to_string();
-    if !name_str.starts_with(|c: char| c.is_ascii_uppercase()) {
-        return Err(diag::err(
-            name.span(),
-            format!("event names are UpperCamelCase — they expand to types (rename `{name_str}` to `{}`)",
-                upper_camel(&name_str)),
-        ));
-    }
+    upper_camel_gate(&name, "event names are UpperCamelCase — they expand to types")?;
     let body;
     syn::braced!(body in input);
     let mut fields = Vec::new();
@@ -295,6 +285,21 @@ fn parse_event(input: ParseStream) -> syn::Result<EventDef> {
                 let p: Path = inner.parse().map_err(|e| {
                     diag::err(e.span(), "participant fields name their component context: `entity(ComponentA, ComponentB)`")
                 })?;
+                // The derive's `components = "…"` channel is a comma-separated list of BARE
+                // idents (boyko_macros splits on `,` and mints an Ident from each piece) — a
+                // qualified path would panic the downstream macro with no user span, and a
+                // generic argument's own comma would corrupt the split. Refuse both HERE, on
+                // the user's tokens (the never-panic contract).
+                if p.leading_colon.is_some()
+                    || p.segments.len() != 1
+                    || !p.segments[0].arguments.is_none()
+                {
+                    let shown = quote::quote!(#p).to_string().replace(' ', "");
+                    return Err(diag::err(
+                        p.segments[0].ident.span(),
+                        format!("participant context components are bare component idents (the `#[event]` channel is comma-separated identifiers) — found `{shown}`; import the component and name it unqualified"),
+                    ));
+                }
                 components.push(p);
                 if inner.peek(Token![,]) {
                     let _: Token![,] = inner.parse()?;
@@ -342,7 +347,7 @@ fn parse_system(input: ParseStream) -> syn::Result<SystemDef> {
         .parse()
         .map_err(|e| diag::err(e.span(), "expected a system name after `system`"))?;
     let name_str = name.to_string();
-    if name_str.starts_with(|c: char| c.is_ascii_uppercase()) {
+    if name_str.starts_with(char::is_uppercase) {
         // The §2 case convention mirrored: systems expand to FNS, and an UpperCamelCase fn
         // name reads like a type everywhere the plugin registers it.
         return Err(diag::err(
@@ -351,17 +356,7 @@ fn parse_system(input: ParseStream) -> syn::Result<SystemDef> {
         ));
     }
 
-    let paren_body;
-    parenthesized!(paren_body in input);
-    let mut params = Vec::new();
-    while !paren_body.is_empty() {
-        params.push(parse_sys_param(&paren_body)?);
-        if paren_body.peek(Token![,]) {
-            let _: Token![,] = paren_body.parse()?;
-        } else if !paren_body.is_empty() {
-            return Err(diag::err(paren_body.span(), "expected `,` between system params"));
-        }
-    }
+    let params = parse_params_paren(input)?;
 
     let mut def = SystemDef {
         name,
@@ -467,6 +462,23 @@ fn parse_system(input: ParseStream) -> syn::Result<SystemDef> {
     syn::braced!(body in input);
     def.body = body.parse()?; // verbatim tokens, spans preserved
     Ok(def)
+}
+
+/// A parenthesized param list in the SYSTEM grammar — shared by `system` and the `machine`
+/// handlers/transitions (§3.5: "same param grammar as system").
+fn parse_params_paren(input: ParseStream) -> syn::Result<Vec<SysParam>> {
+    let paren_body;
+    parenthesized!(paren_body in input);
+    let mut params = Vec::new();
+    while !paren_body.is_empty() {
+        params.push(parse_sys_param(&paren_body)?);
+        if paren_body.peek(Token![,]) {
+            let _: Token![,] = paren_body.parse()?;
+        } else if !paren_body.is_empty() {
+            return Err(diag::err(paren_body.span(), "expected `,` between params"));
+        }
+    }
+    Ok(params)
 }
 
 /// One system param: `mut? NAME ':' param_ty` (§3.3).
@@ -592,20 +604,166 @@ fn parse_angle_type(input: ParseStream, kw: &str) -> syn::Result<Type> {
     Ok(ty)
 }
 
+/// `machine NAME { initial X; state* }` (§3.5).
+fn parse_machine(input: ParseStream) -> syn::Result<MachineDef> {
+    let _kw: Ident = input.parse()?; // `machine`
+    let name: Ident = input
+        .parse()
+        .map_err(|e| diag::err(e.span(), "expected a machine name after `machine`"))?;
+    upper_camel_gate(&name, "machine names are UpperCamelCase — they expand to enums")?;
+    let body;
+    syn::braced!(body in input);
+
+    // The required leading `initial LEAF;` — a machine without one has no inserted value.
+    let init_kw: Ident = body
+        .parse()
+        .map_err(|e| diag::err(e.span(), "a machine opens with `initial <State>;`"))?;
+    if init_kw != "initial" {
+        return Err(diag::err(init_kw.span(), "a machine opens with `initial <State>;`"));
+    }
+    let initial: Ident = body
+        .parse()
+        .map_err(|e| diag::err(e.span(), "`initial` names a state"))?;
+    body.parse::<Token![;]>()
+        .map_err(|e| diag::err(e.span(), "`initial <State>` ends with `;`"))?;
+
+    let mut states = Vec::new();
+    while !body.is_empty() {
+        states.push(parse_state(&body)?);
+    }
+    Ok(MachineDef { name, initial, states })
+}
+
+/// `state NAME { (initial X;)? (enter|exit|on|state)* }` (§3.5).
+fn parse_state(input: ParseStream) -> syn::Result<StateDef> {
+    let kw: Ident = input.parse().map_err(|e| {
+        diag::err(e.span(), "expected `state` (a machine body holds only states after `initial`)")
+    })?;
+    if kw != "state" {
+        return Err(diag::err(
+            kw.span(),
+            format!("expected `state`, found `{kw}` (a machine body holds only states after `initial`)"),
+        ));
+    }
+    let name: Ident = input
+        .parse()
+        .map_err(|e| diag::err(e.span(), "expected a state name after `state`"))?;
+    upper_camel_gate(&name, "state names are UpperCamelCase — leaves become enum variants")?;
+
+    let body;
+    syn::braced!(body in input);
+    let mut def = StateDef {
+        name,
+        initial: None,
+        enter: None,
+        exit: None,
+        transitions: Vec::new(),
+        children: Vec::new(),
+    };
+
+    while !body.is_empty() {
+        let head: Ident = body.fork().parse().map_err(|_| {
+            diag::err(body.span(), "expected `initial`, `enter`, `exit`, `on`, or a nested `state`")
+        })?;
+        match head.to_string().as_str() {
+            "initial" => {
+                let kw: Ident = body.parse()?;
+                if def.initial.is_some() {
+                    return Err(diag::err(kw.span(), "duplicate `initial` in this state"));
+                }
+                let target: Ident = body
+                    .parse()
+                    .map_err(|e| diag::err(e.span(), "`initial` names a child state"))?;
+                body.parse::<Token![;]>()
+                    .map_err(|e| diag::err(e.span(), "`initial <State>` ends with `;`"))?;
+                def.initial = Some(target);
+            }
+            "enter" | "exit" => {
+                let kw: Ident = body.parse()?;
+                let is_enter = kw == "enter";
+                let params = if body.peek(syn::token::Paren) {
+                    parse_params_paren(&body)?
+                } else {
+                    Vec::new()
+                };
+                let block;
+                syn::braced!(block in body);
+                let handler = HandlerDef { params, body: block.parse()? };
+                let slot = if is_enter { &mut def.enter } else { &mut def.exit };
+                if slot.is_some() {
+                    return Err(diag::err(kw.span(), format!("duplicate `{kw}` in this state")));
+                }
+                *slot = Some(handler);
+            }
+            "on" => {
+                let kw: Ident = body.parse()?;
+                let event: Path = body
+                    .parse()
+                    .map_err(|e| diag::err(e.span(), "`on` takes an event type path"))?;
+                let params = if body.peek(syn::token::Paren) {
+                    parse_params_paren(&body)?
+                } else {
+                    Vec::new()
+                };
+                let guard = if body.peek(Token![if]) {
+                    let _: Token![if] = body.parse()?;
+                    Some(body.call(Expr::parse_without_eager_brace).map_err(|e| {
+                        diag::err(e.span(), "`if` takes a guard expression")
+                    })?)
+                } else {
+                    None
+                };
+                body.parse::<Token![=>]>().map_err(|e| {
+                    diag::err(e.span(), "a transition points at its target: `on Event => State.Path`")
+                })?;
+                let mut target = Vec::new();
+                target.push(body.parse::<Ident>().map_err(|e| {
+                    diag::err(e.span(), "the transition target is a state path (`Playing.Paused`)")
+                })?);
+                while body.peek(Token![.]) {
+                    let _: Token![.] = body.parse()?;
+                    target.push(body.parse::<Ident>().map_err(|e| {
+                        diag::err(e.span(), "the state path continues with a state name after `.`")
+                    })?);
+                }
+                let action = if body.peek(syn::token::Brace) {
+                    let block;
+                    syn::braced!(block in body);
+                    Some(block.parse()?)
+                } else {
+                    body.parse::<Token![;]>().map_err(|e| {
+                        diag::err(e.span(), "a transition ends with an action block or `;`")
+                    })?;
+                    None
+                };
+                def.transitions.push(TransitionDef {
+                    event,
+                    kw_span: kw.span(),
+                    params,
+                    guard,
+                    target,
+                    action,
+                });
+            }
+            "state" => def.children.push(parse_state(&body)?),
+            other => {
+                return Err(diag::err(
+                    head.span(),
+                    format!("unknown state item `{other}`; state items are: initial, enter, exit, on, state"),
+                ));
+            }
+        }
+    }
+    Ok(def)
+}
+
 /// `plugin NAME;` (§3.3).
 fn parse_plugin(input: ParseStream) -> syn::Result<PluginDef> {
     let _kw: Ident = input.parse()?; // `plugin`
     let name: Ident = input
         .parse()
         .map_err(|e| diag::err(e.span(), "expected a plugin name after `plugin`"))?;
-    let name_str = name.to_string();
-    if !name_str.starts_with(|c: char| c.is_ascii_uppercase()) {
-        return Err(diag::err(
-            name.span(),
-            format!("plugin names are UpperCamelCase — they expand to types (rename `{name_str}` to `{}`)",
-                upper_camel(&name_str)),
-        ));
-    }
+    upper_camel_gate(&name, "plugin names are UpperCamelCase — they expand to types")?;
     input.parse::<Token![;]>().map_err(|e| {
         diag::err(e.span(), "a plugin declaration ends with `;` (the systems it registers are sibling `system` items)")
     })?;

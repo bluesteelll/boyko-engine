@@ -28,6 +28,8 @@ pub enum Construct {
     System(SystemDef),
     /// `plugin NAME;` (rung A2) — the block's registration holder.
     Plugin(PluginDef),
+    /// `machine NAME { initial X; state* }` (rung A3) — Harel-lite, flattened at expansion.
+    Machine(MachineDef),
 }
 
 /// The four Phase-14a hook keys the `component` construct forwards (§3.1). Mutually exclusive
@@ -265,4 +267,57 @@ impl SystemDef {
 pub struct PluginDef {
     /// The plugin type name (UpperCamelCase — it expands to a struct).
     pub name: Ident,
+}
+
+/// `machine NAME { initial X; state* }` (§3.5) — the hierarchy exists ONLY inside the
+/// transpiler: leaves flatten to one enum, superstate handlers are copied into leaves,
+/// LCA entry/exit sequences are inlined into the generated transition systems.
+pub struct MachineDef {
+    /// The machine enum name (UpperCamelCase — it expands to a type).
+    pub name: Ident,
+    /// The required top-level `initial` target (resolved through composite `initial`
+    /// chains to a leaf at expansion).
+    pub initial: Ident,
+    /// Top-level states, in source order.
+    pub states: Vec<StateDef>,
+}
+
+/// One `state` node (§3.5) — possibly composite (children non-empty).
+pub struct StateDef {
+    /// The state name (UpperCamelCase — leaves concatenate into enum variant names).
+    pub name: Ident,
+    /// `initial CHILD;` — required for a composite that is ever a transition target.
+    pub initial: Option<Ident>,
+    /// `enter (params)? { … }` — at most one per state (duplicate diagnosed at parse).
+    pub enter: Option<HandlerDef>,
+    /// `exit (params)? { … }` — at most one per state.
+    pub exit: Option<HandlerDef>,
+    /// `on EVENT … => target` transitions, in source order.
+    pub transitions: Vec<TransitionDef>,
+    /// Nested states, in source order. Empty ⇒ this is a LEAF.
+    pub children: Vec<StateDef>,
+}
+
+/// An `enter`/`exit` action: optional system-grammar params + a verbatim body.
+pub struct HandlerDef {
+    /// Params, same grammar as `system` (§3.5: "same param grammar").
+    pub params: Vec<SysParam>,
+    /// The verbatim action body.
+    pub body: TokenStream,
+}
+
+/// `on EVENT (params)? (if GUARD)? => state.path (BLOCK | ;)` (§3.5).
+pub struct TransitionDef {
+    /// The event type path, verbatim.
+    pub event: Path,
+    /// The `on` keyword's span — duplicate-handler errors point at the SECOND `on`.
+    pub kw_span: Span,
+    /// Params the guard and action may use, same grammar as `system`.
+    pub params: Vec<SysParam>,
+    /// `if EXPR` — verbatim; a failed guard SKIPS the event (does not consume the frame).
+    pub guard: Option<Expr>,
+    /// The root-anchored target path (`Playing.Paused`), unresolved segments.
+    pub target: Vec<Ident>,
+    /// The action block body (`None` for the `;` form).
+    pub action: Option<TokenStream>,
 }
