@@ -1,9 +1,11 @@
 //! Re-DXC byte-identity gate for the **ten shipping VB lit-producer `.spv`**.
 //!
 //! ⚠️ **THIS FILE OUTLIVED THE STAGE THAT CREATED IT — IT IS NOT DEAD-STAGE CLEANUP.**
-//! It was authored as VB-SV0 rung S0 (`docs/VB-SV0-SDF-SHADOW-PLAN.md` §6), and that stage was
-//! **REVERTED IN FULL at `13f1c9a`** when its own abort clause fired: SV0 will never be built.
-//! The gate survives the revert because the rows it enumerates **ship regardless of it** — the
+//! It was authored as VB-SV0 rung S0 (`docs/VB-SV0-SDF-SHADOW-PLAN.md` §6). The INLINE SV0 stage
+//! was **REVERTED IN FULL at `13f1c9a`** when its own abort clause fired; SV0 was later rebuilt
+//! as a DEDICATED PASS (`sdf_mesh_shadow.comp`, plan Rev 10 DP1..DP5) — so "SV0" is live again,
+//! but through different shaders than the rows here. The gate survives both turns because the
+//! rows it enumerates **ship regardless of either implementation** — the
 //! same reason `docs/SHADER-VARIANT-MANIFEST.md`'s `vb_shade_split` and `vb_geo` sections outlived
 //! that stage. This file was renamed off the dead stage's name (it was `vb_sv0_offpath.rs`, with
 //! `vb_sv0_offpath_*` tests) precisely so a future reader does not delete it while sweeping up
