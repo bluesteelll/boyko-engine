@@ -2553,3 +2553,39 @@ now repaired — the split shade fell 112 640 → 35 328 ns on the restamped ins
 design's own pre-registered rule, DP6a does not land until Decision 3's fused row is re-derived
 with that term. The re-derivation is in flight; this entry exists so a resume reader does not
 start DP6a from the ladder order alone.
+
+**RESOLVED, same day.** The re-derivation landed as Decision 3's *"Trade-off, RE-DERIVED at
+DP6-0b"* sub-block (design Rev 4.4): `Δ NET_fused ∈ [−5 404, +14 848] ns`, point estimate
+`+1 034`, against a `+5 120` bar. §R4.3.7's block is discharged and **DP6a has landed** (design
+Rev 4.5 carries its review dispositions). The headline of that revision is a WITHDRAWAL — §Goal's
+"fused boots: cost-neutral **by construction**" was a construction claim refuted by measurement,
+and neutrality is now claimed at DP6d or not at all.
+
+---
+
+## 2026-08-20: `vb_occ_dense` cites a release-live assert that does not exist — and one citation is inside a panic message
+
+Found while enumerating the fixtures VB-SV0 DP6a turns; **pre-existing, unrelated to DP6a, and
+left unfixed deliberately** (out of that rung's scope — filed rather than drive-by repaired).
+
+`crates/boyko_app/tests/vb_occ_dense/mod.rs` twice attributes a guard to
+`boyko_app/src/runner.rs:1101-1106`:
+
+* its doc: *"`boyko_app::runner`'s bench arming carries a release-live `assert!(!mesh_geo_shade_split, …)`
+  whose message is about **VB-P1d's published break-even**"*;
+* the body of `assert_no_split_producer`'s own **panic message**, which tells a tripped author that
+  arming a pre-light consumer *"makes `boyko_app::runner`'s bench arming panic at runner.rs:1101-1106
+  with a message about VB-P1d's break-even"*.
+
+**No such assertion exists anywhere in `runner.rs`.** A repo-wide search for a release-live
+`assert!(!… mesh_geo_shade_split …)` returns nothing outside `boyko_render`'s own unit tests, and
+`runner.rs:1100` is the DP6-0b `vb_zone_chain` / `vb_zone_derived` selector — an `if
+… mesh_geo_shade_split { VB_CHAIN_SPLIT } else { VB_CHAIN_FUSED }`, which explains nothing about
+break-evens and panics on nothing.
+
+Why it is worth an entry rather than a silent fix: **the second citation is inside a panic
+message**, i.e. it is read by exactly the person who has just tripped the fixture and is looking
+for the cause. Sending them to a line that is a chain selector costs them the one lead they were
+given. The class is the campaign's recorded one — a datum nobody re-derives, which the first
+"fix" re-blesses. Repair should either name the real guard (if the intent survives somewhere) or
+delete both citations and state the fixture's own reason without borrowing another rung's.

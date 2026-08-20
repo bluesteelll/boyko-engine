@@ -425,6 +425,10 @@ fn vb_sv0_produce_run_worker() {
         app.insert_resource(SsaoConfig { quality: SsaoQuality::High, atrous_levels: 3 });
     }
     {
+        // DP6a: `host` is a FOURTH accepted value and is deliberately in neither pattern below —
+        // it arms the boot-side `sdf_mesh_term_wanted` (read from the env at `runner`'s boot seam)
+        // and leaves both REQUEST bits false. That IS measurement arm B, and this worker's own
+        // arms are `on` / unset, so neither pattern needs to change for it.
         let sdf_mesh = std::env::var("BOYKO_SDF_MESH").unwrap_or_default();
         app.insert_resource(boyko_render::LightingConfig {
             vb_sdf_mesh_shadow: matches!(sdf_mesh.as_str(), "on" | "shadow"),

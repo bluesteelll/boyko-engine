@@ -1050,7 +1050,10 @@ fn report_sv0_request_clamped(shadow: bool, ao: bool) {
         eprintln!(
             "boyko_render: VB-SV0 was requested (shadow={shadow}, ao={ao}) on a boot whose \
              resolved render path cannot carry it (needs path == VisibilityBuffer, a mesh leg, \
-             and ShadowSources::SDF_SOFT_MARCH) — both gate bits forced OFF for this run"
+             ShadowSources::SDF_SOFT_MARCH, RG8-UNORM storage, and — since DP6a — the geo/shade \
+             split, whose geometry half is the term's only producer) — both gate bits forced OFF \
+             for this run. NOTE: the split is resolved from a BOOT SNAPSHOT of this same request, \
+             so a request first raised AFTER boot is clamped for the process lifetime"
         );
     }
 }
@@ -1073,9 +1076,14 @@ fn report_sv0_request_clamped(shadow: bool, ao: bool) {
 /// **The resolve is monotone DOWNWARD and that is the load-bearing property.** `_armed` can only
 /// ever be `request && …`, never more, so no scene that has not asked for SV0 can be armed by
 /// this system — the "every existing golden stays byte-identical" guarantee is structural here,
-/// not an argument about which shipped fixtures happen to resolve `VB x Both`. (Several do:
-/// `boyko_app::runner` hardwires `sdf_shadows_wanted: true`, so `[vb_both]`, `[vb_both_taa]` and
-/// the two S1 fixtures are all *capable*. What keeps them unarmed is that they do not ask.)
+/// not an argument about which shipped fixtures happen to resolve `VB x Both`.
+///
+/// **DP6a strengthened the second half of that parenthetical and falsified its first half.** It
+/// used to read: "`[vb_both]`, `[vb_both_taa]` and the two S1 fixtures are all *capable*; what
+/// keeps them unarmed is that they do not ask." After DP6a they are **not capable** — none of them
+/// asks for the term and none arms a pre-light consumer, so all of them resolve FUSED, and
+/// `vb_sdf_mesh_armable()`'s `mesh_geo_shade_split` conjunct is `false` on every one. Not asking
+/// is now *why* they are incapable, not merely a second reason they stay dark.
 ///
 /// # Why the request is not clamped IN PLACE (code-review P2-c)
 ///
@@ -2150,10 +2158,20 @@ mod tests {
     /// runner's hardwired `sdf_shadows_wanted: true`, no hwrt), plus the optional consumers the
     /// §S4 variant rows need. Built through the production entry point rather than as a literal,
     /// so a change to the arming rules reaches these tests instead of being mirrored past them.
+    /// **DP6a made `term_wanted` an explicit per-row axis rather than a helper-wide constant.**
+    /// `vb_sdf_mesh_armable()` now conjoins `mesh_geo_shade_split`, so a row that leaves the bit
+    /// false on a boot with no pre-light consumer resolves unarmable for a SECOND reason on top of
+    /// whichever one it meant to demonstrate. Each call site below therefore states the bit, and
+    /// the negative rows arm whatever else they need so that exactly ONE conjunct is the cause.
+    ///
+    /// The one row that cannot be made single-cause is `VB × Sdf`: `mesh_geo_shade_split ⇒
+    /// mesh_leg` by construction, so the missing mesh leg fails both conjuncts together. Said
+    /// there rather than papered over.
     fn sv0_resolved(
         legs: crate::render_path_config::GeometryLegs,
         ssao_on: bool,
         hwrt: bool,
+        term_wanted: bool,
     ) -> crate::render_path_config::ResolvedRenderPath {
         use crate::render_path_config::{
             RenderPath, RenderPathConfig, RenderPathConsumers, RenderPathDeviceCaps,
@@ -2164,6 +2182,7 @@ mod tests {
             RenderPathConsumers {
                 sdf_shadows_wanted: true,
                 ssao_on,
+                sdf_mesh_term_wanted: term_wanted,
                 hwrt_denoise_or_vis_on: hwrt,
                 ..Default::default()
             },
@@ -2219,7 +2238,17 @@ mod tests {
 
         // VB x Mesh: structurally unarmable, so the request can never be honoured — the exact
         // configuration the fused design would have re-folded on forever.
-        let resolved = sv0_resolved(GeometryLegs::Mesh, false, false);
+        //
+        // SSAO is armed so the SPLIT is present and the SOLE failing conjunct is the march: a red
+        // here then names "no SDF field", which is what this row is about, instead of leaving a
+        // reader to pick between two false conjuncts.
+        let resolved =
+            sv0_resolved(GeometryLegs::Mesh, /* ssao */ true, /* hwrt */ false, /* term */ true);
+        assert!(resolved.mesh_geo_shade_split, "test setup: the producer must be present");
+        assert!(
+            !resolved.shadow.contains(crate::render_path_config::ShadowSources::SDF_SOFT_MARCH),
+            "test setup: VB x Mesh has no SDF field to march — the ONE reason this row is unarmable"
+        );
         assert!(!resolved.vb_sdf_mesh_armable(), "test setup: this boot must NOT be armable");
 
         let mut app = App::new();
@@ -2245,15 +2274,26 @@ mod tests {
     /// **The 0%-gate, and the reason no shipped golden moves at rung S4.** An armable boot that
     /// does NOT request SV0 keeps both bits clear and the header word at its pre-SV0 anchor.
     ///
-    /// This is the assertion that makes "every existing golden stays byte-identical" structural:
-    /// `[vb_both]`, `[vb_both_taa]` and both S1 fixtures all resolve `VB × Both` with the
-    /// runner's hardwired `sdf_shadows_wanted`, i.e. they are all CAPABLE. What keeps them
-    /// unarmed is only that they never set the request — so the gate must never set it for them.
+    /// **DP6a corrects what this test's setup models.** It used to say `[vb_both]`,
+    /// `[vb_both_taa]` and both S1 fixtures "are all CAPABLE, and what keeps them unarmed is only
+    /// that they never set the request". After DP6a those fixtures are not capable at all — no
+    /// request and no pre-light consumer means no split, and no split means no producer. The
+    /// armable-but-unrequesting state this test pins is still REACHABLE, and it is a state
+    /// production really enters, twice over:
+    ///
+    /// * `BOYKO_SDF_MESH=host` (measurement arm B) sets the boot snapshot without setting either
+    ///   request bit — armable, unrequesting, mode 0, which is precisely what that arm needs;
+    /// * an owner who requested the term at boot and then withdrew it mid-run (the disarm test
+    ///   below drives exactly that transition).
     #[test]
     fn sv0_gate_leaves_an_unrequesting_armable_boot_at_the_zero_gate() {
         use crate::render_path_config::GeometryLegs;
 
-        let resolved = sv0_resolved(GeometryLegs::Both, false, false);
+        let resolved = sv0_resolved(GeometryLegs::Both, /* ssao */ false, /* hwrt */ false, /* term */ true);
+        assert!(
+            resolved.mesh_geo_shade_split,
+            "test setup: DP6a — the term request is what arms the split on this boot"
+        );
         assert!(resolved.vb_sdf_mesh_armable(), "test setup: VB x Both must be SV0-armable");
 
         let (cfg, dirty) = run_sv0_gate(resolved, false, false);
@@ -2270,7 +2310,7 @@ mod tests {
     fn sv0_gate_passes_each_requested_term_through_independently() {
         use crate::render_path_config::GeometryLegs;
 
-        let resolved = sv0_resolved(GeometryLegs::Both, false, false);
+        let resolved = sv0_resolved(GeometryLegs::Both, /* ssao */ false, /* hwrt */ false, /* term */ true);
 
         let (shadow_only, _) = run_sv0_gate(resolved, true, false);
         assert!(shadow_only.vb_sdf_mesh_shadow_armed);
@@ -2311,17 +2351,30 @@ mod tests {
 
         // Rows 9-10: `ssao_on` selects the split tail, the hwrt carrier selects its `_hwrt`
         // variants — and displaces `SDF_SOFT_MARCH`, which is exactly why SV0 cannot ride them.
-        let hwrt = sv0_resolved(GeometryLegs::Both, true, true);
+        let hwrt = sv0_resolved(GeometryLegs::Both, /* ssao */ true, /* hwrt */ true, /* term */ true);
         assert!(hwrt.shadow.contains(ShadowSources::HWRT_VIS), "test setup: the hwrt rows");
+        // Single-cause: SSAO arms the split, so the ONE failing conjunct is the displaced march.
+        assert!(hwrt.mesh_geo_shade_split, "test setup: ssao_on must arm the split tail");
         assert!(!hwrt.vb_sdf_mesh_armable());
         let (cfg, dirty) = run_sv0_gate(hwrt, true, true);
         assert!(!cfg.vb_sdf_mesh_shadow_armed && !cfg.vb_sdf_mesh_ao_armed, "rows 9-10 never arm");
         assert_eq!(cfg.shadow_gate_word() >> VB_SDF_MESH_MODE_SHIFT & VB_SDF_MESH_MODE_MASK, 0);
         assert!(!dirty, "a request that resolves to the already-published OFF state writes nothing");
 
-        // VB x Mesh (no field to march) and VB x Sdf (no mesh pixels to shade).
+        // VB x Mesh (no field to march) and VB x Sdf (no mesh pixels to shade). SSAO is armed on
+        // both so each row fails for as few conjuncts as it structurally can:
+        //   * `Mesh` — the split IS armed, so the march is the single cause;
+        //   * `Sdf`  — `mesh_geo_shade_split ⇒ mesh_leg`, so the missing mesh leg fails the split
+        //     conjunct too, and this row cannot be made single-cause by any input. Stated, not
+        //     papered over.
         for legs in [GeometryLegs::Mesh, GeometryLegs::Sdf] {
-            let resolved = sv0_resolved(legs, false, false);
+            let resolved = sv0_resolved(legs, /* ssao */ true, /* hwrt */ false, /* term */ true);
+            assert_eq!(
+                resolved.mesh_geo_shade_split,
+                legs.has_mesh(),
+                "{legs:?}: the split follows the mesh leg, and that is why only one of these two \
+                 rows can name a single cause"
+            );
             assert!(!resolved.vb_sdf_mesh_armable(), "{legs:?} must not be SV0-armable");
             let (cfg, _) = run_sv0_gate(resolved, true, true);
             assert!(
@@ -2352,7 +2405,7 @@ mod tests {
         use crate::render_path_config::GeometryLegs;
 
         let mut app = App::new();
-        app.insert_resource(sv0_resolved(GeometryLegs::Both, false, false));
+        app.insert_resource(sv0_resolved(GeometryLegs::Both, /* ssao */ false, /* hwrt */ false, /* term */ true));
         app.insert_resource(LightingConfig {
             vb_sdf_mesh_shadow: true,
             vb_sdf_mesh_ao: true,

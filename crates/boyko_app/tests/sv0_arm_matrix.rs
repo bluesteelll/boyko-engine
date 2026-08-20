@@ -75,11 +75,32 @@ struct Boot {
     legs: GeometryLegs,
     /// Arms `mesh_geo_shade_split` on a VB × Both boot (the old matrix's split rows 7/8).
     ssao_on: bool,
+    /// **VB-SV0 DP6a.** `RenderPathConsumers::sdf_mesh_term_wanted` — the BOOT SNAPSHOT of the
+    /// owner's term request, which `boyko_app::runner` takes from `LightingConfig`'s two request
+    /// fields (or `BOYKO_SDF_MESH=host`) BEFORE `resolve_render_path` runs. It arms
+    /// `mesh_geo_shade_split` on its own, because the term's producer is that split's geometry
+    /// half.
+    ///
+    /// It is a separate axis from [`REQUESTS`] on purpose: `REQUESTS` is the per-frame request the
+    /// clamp reads, this is the boot snapshot the resolver read. A cell with `term_wanted: false`
+    /// and a non-empty request is exactly Decision 4's boot-frozen contract — a request first
+    /// raised after boot, clamped for the process lifetime.
+    term_wanted: bool,
     /// The hardware shadow chain — what displaces `ShadowSources::SDF_SOFT_MARCH` and therefore
     /// makes SV0 structurally unarmable (the old matrix's absent rows 9/10).
     hwrt_on: bool,
     /// `shaderStorageBufferArrayNonUniformIndexing`. `false` degrades VB to Deferred.
     descriptor_indexing: bool,
+    /// `DeviceCaps::rg8_unorm_storage_ok` — the `sdf_term` ring's write format. **VB-SV0 DP6a
+    /// (W3):** `vb_sv0_split` conjoins it, so a device without RG8 storage does not pay the split
+    /// for a term it could never deliver.
+    rg8_storage: bool,
+    /// The `mesh_geo_shade_split` this boot MUST resolve to. Carried as its own expectation rather
+    /// than folded into [`Self::armable`] because after DP6a the two are different claims: the
+    /// split is what the term REQUEST arms, armability is that split plus the march plus the cap.
+    /// The `!rg8` row exists precisely to show them moving together, and could not say so through
+    /// one field.
+    expect_split: bool,
     /// The armability this boot MUST resolve to. Asserted per cell rather than inferred, so a
     /// resolve that silently stopped arming anything cannot make the whole sweep pass by covering
     /// nothing — the failure mode the old row table's own vacuity guard existed for.
@@ -91,34 +112,50 @@ struct Boot {
 
 /// **The boot shapes SV0 arming is quantified over.** The armable rows are the configuration the
 /// `vb_both_sdf` / `vb_both_sdf_tex` fixtures boot under (`VisibilityBuffer × Both`, the runner's
-/// hardwired `sdf_shadows_wanted`); every other row is unarmable for its own distinct reason.
-const BOOTS: [Boot; 9] = [
+/// hardwired `sdf_shadows_wanted`) **once DP6a's term request is present** — after DP6a an armable
+/// boot is necessarily a SPLIT boot, because the term's only producer is the split's geometry half
+/// (`vb_geo`). So `VisibilityBuffer × Both` alone is no longer sufficient: the split has to come
+/// from somewhere, either a pre-light consumer (row 1) or the term request itself (row 9). Every
+/// other row is unarmable for its own distinct reason.
+///
+/// Rows 9 and 10 are a matched PAIR and differ in exactly one input — `rg8_storage` — so the W3
+/// cap conjunct is pinned by a difference rather than by a claim.
+const BOOTS: [Boot; 11] = [
     Boot {
         name: "VB x Both (fused)",
         path: RenderPath::VisibilityBuffer,
         legs: GeometryLegs::Both,
         ssao_on: false,
+        term_wanted: false,
         hwrt_on: false,
+        rg8_storage: true,
+        expect_split: false,
         descriptor_indexing: true,
-        armable: true,
-        why: "the SDF soft march is the shadow source and there are mesh pixels to shade",
+        armable: false,
+        why: "DP6a: no split => no `vb_geo` => no producer for the term",
     },
     Boot {
         name: "VB x Both + SSAO (split tail)",
         path: RenderPath::VisibilityBuffer,
         legs: GeometryLegs::Both,
         ssao_on: true,
+        term_wanted: false,
         hwrt_on: false,
+        rg8_storage: true,
+        expect_split: true,
         descriptor_indexing: true,
         armable: true,
-        why: "SSAO selects the split lit producer, which is armable exactly like the fused one",
+        why: "SSAO arms the split, and the split's geometry half IS the term's producer",
     },
     Boot {
         name: "VB x Both + hwrt",
         path: RenderPath::VisibilityBuffer,
         legs: GeometryLegs::Both,
         ssao_on: true,
+        term_wanted: false,
         hwrt_on: true,
+        rg8_storage: true,
+        expect_split: true,
         descriptor_indexing: true,
         armable: false,
         why: "the hwrt carrier displaces SDF_SOFT_MARCH, and it is what selects the _hwrt tails",
@@ -128,7 +165,10 @@ const BOOTS: [Boot; 9] = [
         path: RenderPath::VisibilityBuffer,
         legs: GeometryLegs::Mesh,
         ssao_on: false,
+        term_wanted: false,
         hwrt_on: false,
+        rg8_storage: true,
+        expect_split: false,
         descriptor_indexing: true,
         armable: false,
         why: "no SDF leg, so there is no field to march",
@@ -138,7 +178,10 @@ const BOOTS: [Boot; 9] = [
         path: RenderPath::VisibilityBuffer,
         legs: GeometryLegs::Sdf,
         ssao_on: false,
+        term_wanted: false,
         hwrt_on: false,
+        rg8_storage: true,
+        expect_split: false,
         descriptor_indexing: true,
         armable: false,
         why: "no mesh leg, so the term would be quantified over an empty pixel set",
@@ -148,7 +191,10 @@ const BOOTS: [Boot; 9] = [
         path: RenderPath::Deferred,
         legs: GeometryLegs::Both,
         ssao_on: false,
+        term_wanted: false,
         hwrt_on: false,
+        rg8_storage: true,
+        expect_split: false,
         descriptor_indexing: true,
         armable: false,
         why: "Deferred ships this visual through the marcher's own composite, not through SV0",
@@ -158,7 +204,10 @@ const BOOTS: [Boot; 9] = [
         path: RenderPath::Forward,
         legs: GeometryLegs::Both,
         ssao_on: false,
+        term_wanted: false,
         hwrt_on: false,
+        rg8_storage: true,
+        expect_split: false,
         descriptor_indexing: true,
         armable: false,
         why: "no VB lit-producer tail exists on this path",
@@ -168,7 +217,10 @@ const BOOTS: [Boot; 9] = [
         path: RenderPath::ForwardPlus,
         legs: GeometryLegs::Both,
         ssao_on: false,
+        term_wanted: false,
         hwrt_on: false,
+        rg8_storage: true,
+        expect_split: false,
         descriptor_indexing: true,
         armable: false,
         why: "no VB lit-producer tail exists on this path",
@@ -178,10 +230,42 @@ const BOOTS: [Boot; 9] = [
         path: RenderPath::VisibilityBuffer,
         legs: GeometryLegs::Both,
         ssao_on: false,
+        term_wanted: false,
         hwrt_on: false,
+        rg8_storage: true,
+        expect_split: false,
         descriptor_indexing: false,
         armable: false,
         why: "the device degrades VB to Deferred, which takes SV0 with it",
+    },
+    Boot {
+        name: "VB x Both + term wanted (no SSAO)",
+        path: RenderPath::VisibilityBuffer,
+        legs: GeometryLegs::Both,
+        ssao_on: false,
+        term_wanted: true,
+        hwrt_on: false,
+        rg8_storage: true,
+        expect_split: true,
+        descriptor_indexing: true,
+        armable: true,
+        why: "DP6a: the term's own request is a producer-side reason for the split to exist — \
+              `vb_sv0_split`, which is NOT a member of the `pre_light` union and does not widen it",
+    },
+    Boot {
+        name: "VB x Both + term wanted, no RG8 storage",
+        path: RenderPath::VisibilityBuffer,
+        legs: GeometryLegs::Both,
+        ssao_on: false,
+        term_wanted: true,
+        hwrt_on: false,
+        rg8_storage: false,
+        expect_split: false,
+        descriptor_indexing: true,
+        armable: false,
+        why: "DP6a/W3: the `sdf_term` ring is an RG8 STORAGE target, so the cap gates \
+              `vb_sv0_split` itself — the boot does not pay the split for a term it could never \
+              deliver. The row above is this one with the cap restored, and they differ ONLY in it",
     },
 ];
 
@@ -204,17 +288,19 @@ fn resolve(boot: &Boot) -> ResolvedRenderPath {
         RenderPathConsumers {
             sdf_shadows_wanted: true,
             ssao_on: boot.ssao_on,
+            sdf_mesh_term_wanted: boot.term_wanted,
             hwrt_denoise_or_vis_on: boot.hwrt_on,
             ..Default::default()
         },
-        RenderPathDeviceCaps::new(boot.descriptor_indexing),
+        RenderPathDeviceCaps::new(boot.descriptor_indexing)
+            .with_rg8_unorm_storage(boot.rg8_storage),
     );
     resolved
 }
 
 /// The world every cell is driven through, built ONCE.
 ///
-/// `App::new` stands up a whole worker pool, and the matrix has 36 cells — but the reuse is sound
+/// `App::new` stands up a whole worker pool, and the matrix has 44 cells (11 boots x 4 requests) — but the reuse is sound
 /// for a stronger reason than cost: [`arm`] overwrites BOTH resources wholesale, so each cell
 /// starts from a default `LightingConfig` with the `_armed` pair clear, exactly as a fresh world
 /// would. Nothing in `sync_sv0_light_gate` reads state older than the resources it is handed.
@@ -338,6 +424,18 @@ fn sv0_arm_matrix_clamps_every_request_to_the_boots_capability() {
     let mut app = matrix_app();
     for boot in &BOOTS {
         let resolved = resolve(boot);
+        // Asserted BEFORE armability, because after DP6a armability is downstream of it: a red on
+        // the split names the term that actually moved, where a red on armability alone would
+        // leave a reader to guess between the split, the march and the cap.
+        assert_eq!(
+            resolved.mesh_geo_shade_split,
+            boot.expect_split,
+            "`{}` resolved mesh_geo_shade_split={} but the matrix declares {} ({})",
+            boot.name,
+            resolved.mesh_geo_shade_split,
+            boot.expect_split,
+            boot.why
+        );
         assert_eq!(
             resolved.vb_sdf_mesh_armable(),
             boot.armable,
@@ -385,7 +483,8 @@ fn sv0_arm_matrix_clamps_every_request_to_the_boots_capability() {
     }
 }
 
-/// **The graph predicate's second conjunct is redundant, and must stay that way.**
+/// **The graph predicate's second conjunct is redundant, and must stay that way — now pinned at
+/// the STRONGER of the two available statements.**
 ///
 /// `graph_bridge` declares the prepass on `mesh_leg && scene.vb_sdf_mesh_mode != 0`. The `mesh_leg`
 /// term is belt-and-braces: `vb_sdf_mesh_armable()` already requires it, so a non-zero mode implies
@@ -393,8 +492,15 @@ fn sv0_arm_matrix_clamps_every_request_to_the_boots_capability() {
 /// ever widened to a mesh-legless boot, the pass would become the ONLY thing standing between an
 /// armed header and a prepass that reads a `vb_id` no raster wrote, and the widening would show up
 /// here rather than as a blank term image.
+///
+/// **VB-SV0 DP6a replaces `mode != 0 ⇒ mesh_leg` with `mode != 0 ⇒ mesh_geo_shade_split`, which is
+/// strictly stronger** (`mesh_geo_shade_split ⇒ mesh_leg` by its own definition, so the old claim
+/// is a corollary of the new one and nothing is given up). It is the property Decision 3 actually
+/// rests on: from DP6c the term's producer is `vb_geo` and the dedicated pass is unreachable, so
+/// an armed mode on a FUSED boot would be a mode with no producer at all. The old spelling could
+/// not have caught that — a fused VB × Both boot has a mesh leg.
 #[test]
-fn sv0_mode_nonzero_implies_the_mesh_leg() {
+fn sv0_mode_nonzero_implies_the_split() {
     let mut app = matrix_app();
     for boot in &BOOTS {
         let resolved = resolve(boot);
@@ -403,10 +509,18 @@ fn sv0_mode_nonzero_implies_the_mesh_leg() {
         let cfg = arm(&mut app, resolved, true, true);
         if graph_mode(&cfg) != 0 {
             assert!(
+                resolved.mesh_geo_shade_split,
+                "`{}` resolves a non-zero SV0 mode on a FUSED boot — after DP6c there is no \
+                 `vb_geo` to host the march and no dedicated pass left to fall back to, so the \
+                 light header would tell the lit producers a term is live that nothing produced",
+                boot.name
+            );
+            // The corollary, kept explicit because `graph_bridge`'s conjunct is spelled
+            // `mesh_leg`, not `mesh_geo_shade_split`.
+            assert!(
                 resolved.mesh_leg,
                 "`{}` resolves a non-zero SV0 mode without a mesh leg — `graph_bridge`'s \
-                 `mesh_leg &&` conjunct would then be the only thing disarming the prepass, and \
-                 the light header would still tell the lit producers the term is live",
+                 `mesh_leg &&` conjunct would then be the only thing disarming the prepass",
                 boot.name
             );
         }

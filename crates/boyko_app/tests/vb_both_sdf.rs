@@ -98,6 +98,10 @@ fn vb_both_sdf_screenshot_dump() {
     // arms the request bits on THIS fixture, which is the S1 scene the S1.5 reference was
     // measured on — the comparability DP4's clause 3 requires.
     {
+        // DP6a: `host` is a FOURTH accepted value and is deliberately in neither pattern below —
+        // it arms the boot-side `sdf_mesh_term_wanted` (read from the env at `runner`'s boot seam)
+        // and leaves both REQUEST bits false, which is measurement arm B (SV0 variant bound, mode
+        // 0). Listing it here would arm the term and turn this pin.
         let sdf_mesh = std::env::var("BOYKO_SDF_MESH").unwrap_or_default();
         app.insert_resource(boyko_render::LightingConfig {
             vb_sdf_mesh_shadow: matches!(sdf_mesh.as_str(), "on" | "shadow"),

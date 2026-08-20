@@ -83,6 +83,22 @@
 //! frame-stale motion (the W4 hole). Folding `shadow_temporal` into the SAME union as the NORMAL
 //! consumers is what closes it — see [`resolve_rules`]'s doc for the exact formula.
 //!
+//! ## Erratum (VB-SV0 DP6a) to the MANDATORY single-predicate rule
+//!
+//! After DP6a the rule holds for **two** of the three flags. `needs_depth_prepass` (Forward) and
+//! `sdf_geo_shade_split` (the SDF leg) still read the `pre_light` union ALONE. The **VB** flag
+//! reads `pre_light ∨ vb_sv0_split`, where `vb_sv0_split` is the VB-only SDF-on-mesh term request
+//! (`RenderPathConsumers::sdf_mesh_term_wanted` ∧ the resolved soft march). Restated:
+//! **one predicate for the Forward and SDF flags; the VB flag is that predicate OR the VB-only
+//! SV0 term.**
+//!
+//! The W4 hole class cannot re-open through this term, and the shape is the argument: W4 was a
+//! *consumer* left without its producer (a MOTION-only pre-light consumer under Forward reading
+//! frame-stale motion because the prepass was not armed). `vb_sv0_split` conjoins
+//! `path == VisibilityBuffer`, so it can never reach `needs_depth_prepass`; it consumes no
+//! thin-aux channel; and it exists precisely to arm a PRODUCER for an image it writes itself.
+//! There is no consumer it can leave unfed.
+//!
 //! # Threading (plan §A "Threading")
 //!
 //! `boyko_app::runner` reads [`RenderPathConfig`] + the consumer configs via `world.try_resource`
@@ -561,8 +577,10 @@ pub struct ResolvedRenderPath {
     /// writes `motion_vec` (id Tech 6 depth+motion prepass) so a pre-light motion consumer sees
     /// current-frame motion; otherwise `mesh_forward` writes it (cheaper, post-tail).
     pub prepass_writes_motion: bool,
-    /// `VisibilityBuffer` with a pre-light consumer armed — the SAME single predicate as
-    /// `needs_depth_prepass` (Rev 5).
+    /// `VisibilityBuffer` **and a mesh leg** with a pre-light consumer armed — Rev 5's single
+    /// predicate, **plus the VB-only SV0 term request** (DP6a's recorded erratum: this is the one
+    /// flag of the three whose trigger is `pre_light ∨ vb_sv0_split`, because the SDF-on-mesh
+    /// term's producer IS this split's geometry half). See [`resolve_rules`]'s doc.
     pub mesh_geo_shade_split: bool,
     /// `sdf_forward_marched` with a pre-light consumer armed (Decision 6) — the SAME single
     /// predicate again.
@@ -687,14 +705,24 @@ impl ResolvedRenderPath {
     /// **VB-SV0 (`docs/VB-SV0-SDF-SHADOW-PLAN.md` §S4): whether this boot's VB lit producer is
     /// structurally capable of running the SDF-on-mesh shadow / contact-AO terms.**
     ///
-    /// The SINGLE capability predicate every SV0 consumer reads —
+    /// The single **ARMABILITY** predicate every SV0 consumer reads —
     /// [`sync_sv0_light_gate`](crate::light::sync_sv0_light_gate) clamps the owner's request
     /// against it, and the `sv0_never_arms_under_hwrt` truth table is quantified over it.
     ///
+    /// **VB-SV0 DP6a (Decision 3/4, P1-3) — this is no longer purely a statement about the device
+    /// and the path.** It is a capability conjunction PLUS, through
+    /// [`Self::mesh_geo_shade_split`], a boot-frozen snapshot of the owner's request: the term's
+    /// producer is the split's geometry half (`vb_geo`), so a boot with no split has no producer
+    /// and cannot arm the term however capable the device is. The word "capability" was accurate
+    /// until DP6a and is not any more; the rename of the sentence is the correction, not a style
+    /// edit.
+    ///
     /// # It CONSUMES the already-resolved shadow bit; it does not re-derive it
     ///
-    /// [`ShadowSources::SDF_SOFT_MARCH`] is resolved exactly once, in [`resolve_rules`], as
-    /// `sdf_leg && consumers.sdf_shadows_wanted && !consumers.hwrt_denoise_or_vis_on`. Reading
+    /// [`ShadowSources::SDF_SOFT_MARCH`] is resolved exactly once, in [`resolve_rules`], and since
+    /// DP6a it has exactly one spelling there: the hoisted `let sdf_soft_march = sdf_leg &&
+    /// consumers.sdf_shadows_wanted && !consumers.hwrt_denoise_or_vis_on;` binding, which the
+    /// `shadow` insert and `vb_sv0_split` both read. Reading
     /// [`Self::shadow`] rather than restating those three terms is what keeps SV0 from drifting
     /// away from the engine's own answer to "is the SDF soft march the shadow source here?" — a
     /// mirrored derivation would have to be re-audited every time that rule moves.
@@ -706,6 +734,14 @@ impl ResolvedRenderPath {
     ///   this visual through the marcher's own composite.
     /// * [`Self::mesh_leg`] — SV0 shades MESH pixels. On `VB × Sdf` there are none, so the term
     ///   would be quantified over an empty set.
+    /// * [`Self::mesh_geo_shade_split`] (**DP6a**) — the term's SOLE producer after DP6c is
+    ///   `vb_geo`, the split's geometry half. A fused boot runs no `vb_geo`, so there is nothing
+    ///   to host the march. This conjunct is what makes the dedicated `sdf_mesh_shadow` pass
+    ///   unreachable at DP6c (`mesh_leg && mode != 0` can no longer coexist with a fused path)
+    ///   and dead code at DP6e. Note the conjunct is on `armable`, NOT on
+    ///   `mesh_geo_shade_split`'s own definition — a boot that merely asks for the term arms the
+    ///   split through `resolve_rules`' `vb_sv0_split`, so "wanting the term" is itself a reason
+    ///   for the split to exist.
     ///
     /// # Rows 9-10 of the §S4 variant matrix can never be armed, and that is structural
     ///
@@ -733,6 +769,7 @@ impl ResolvedRenderPath {
         matches!(self.path, RenderPath::VisibilityBuffer)
             && self.shadow.contains(ShadowSources::SDF_SOFT_MARCH)
             && self.mesh_leg
+            && self.mesh_geo_shade_split
             && self.vb_sdf_mesh_storage_ok
     }
 }
@@ -801,6 +838,31 @@ pub struct RenderPathConsumers {
     /// [`LightingConfig::clusters_enabled`](crate::light::LightingConfig::clusters_enabled),
     /// DEFAULT `false` (the 0%-gate — every scene that never sets it stays unarmed).
     pub clusters_wanted: bool,
+    /// **VB-SV0 DP6 (Decision 4).** BOOT SNAPSHOT of "the owner asked for the SDF-on-mesh term
+    /// (either half), or the env-only measurement host arm". Set at the `boyko_app::runner` boot
+    /// seam from `LightingConfig::vb_sdf_mesh_shadow || ::vb_sdf_mesh_ao`, OR'd with
+    /// `BOYKO_SDF_MESH == "host"` — there is deliberately no `LightingConfig` field for the host
+    /// arm, because a measurement knob on a production `Resource` is one a shipped title can set.
+    ///
+    /// DEFAULT `false` — the mechanism by which zero goldens turn: no existing boot's resolution
+    /// moves by one field.
+    ///
+    /// Gates [`ResolvedRenderPath::mesh_geo_shade_split`] (VB only) because the term's PRODUCER is
+    /// the split's geometry half. **BOOT-FROZEN:** [`resolve_render_path`] runs once, while
+    /// `LightingConfig` requests are re-asserted every frame, so a boot that does not carry the
+    /// request at resolve time gets `mesh_geo_shade_split == false`,
+    /// `vb_sdf_mesh_armable() == false`, and `sync_sv0_light_gate` clamps it to 0 for the process
+    /// lifetime. This is the same contract [`ssao_on`](Self::ssao_on) already carries — but it was
+    /// previously true only of *capabilities* and is now true of a *request*. See
+    /// [`ResolvedRenderPath::vb_sdf_mesh_armable`]'s corrected doc.
+    ///
+    /// ⚠️ **The deadline is earlier than "before frame 100" — it is before the runner starts.**
+    /// `boyko_app::runner::run_windowed` takes this snapshot at its `:536` and calls
+    /// `app.finish()` at `:627`, so **a STARTUP SYSTEM that sets the request has already missed
+    /// it**: no user system of any kind has run by `:536`. The request must be `insert_resource`d
+    /// onto the `App` before `run_windowed` is entered. Stated in this shape because "set it
+    /// early" reads as satisfiable by a startup system, and it is not.
+    pub sdf_mesh_term_wanted: bool,
 }
 
 // ---- RenderPathDeviceCaps (the resolver's device-capability input) --------------------
@@ -993,6 +1055,12 @@ impl RenderPathDegradeLog {
 /// ShadowDenoiseMode::Temporal + no SSAO/DDGI/SSR` reading frame-stale motion (the W4 hole,
 /// re-opened without this fold — see this module's doc + Decision 8).
 ///
+/// **Erratum (VB-SV0 DP6a).** The "SOLE trigger" sentence above now holds for `needs_depth_prepass`
+/// and `sdf_geo_shade_split` only. `mesh_geo_shade_split` reads `pre_light ∨ vb_sv0_split` — the
+/// VB-only SDF-on-mesh term request, whose producer IS the split's geometry half. One predicate
+/// for the Forward and SDF flags; the VB flag is that predicate OR the VB-only SV0 term. The full
+/// statement, with why W4's shape cannot re-open through it, is in this module's doc.
+///
 /// `pub` (cross-crate): besides this module's own tests, `boyko_app::gpu_scene`'s
 /// `to_gpu_resolved_render_path` round-trip test builds a rich, non-default carrier through
 /// this fn to verify the `boyko_render` → `boyko_rhi_vulkan` POD conversion copies every field
@@ -1009,6 +1077,8 @@ pub fn resolve_rules(
 
     // Rev 5 / final-critic P1: the single pre-light-consumer union (MANDATORY — see this fn's
     // doc). `shadow_temporal_on` MUST stay in this union, not a separate NORMAL-only union.
+    // DP6a erratum: this union is still the SOLE trigger for `needs_depth_prepass` and
+    // `sdf_geo_shade_split`; `mesh_geo_shade_split` ORs in the VB-only `vb_sv0_split` below.
     let pre_light = consumers.ssao_on
         || consumers.ddgi_on
         || consumers.shadow_denoise_spatial_on
@@ -1031,13 +1101,44 @@ pub fn resolve_rules(
     let prepass_writes_motion = needs_depth_prepass && consumers.shadow_temporal_on;
 
     let sdf_forward_marched = sdf_leg && !matches!(path, RenderPath::Deferred);
+    // VB-SV0 DP6a: `SDF_SOFT_MARCH`'s arming rule, hoisted so it has exactly ONE spelling. It is
+    // consumed twice — once by `vb_sv0_split` below, once by the `shadow` insert further down —
+    // and a mirrored second derivation is what `vb_sdf_mesh_armable`'s doc already refuses.
+    let sdf_soft_march = sdf_leg && consumers.sdf_shadows_wanted && !consumers.hwrt_denoise_or_vis_on;
+    // Hoisted so the RG8 fact has exactly ONE spelling in this fn: read here by `vb_sv0_split`
+    // and again by the `vb_sdf_mesh_storage_ok` field below.
+    let vb_sdf_mesh_storage_ok = caps.rg8_unorm_storage;
+    // VB-SV0 DP6 Decision 3/4: the SDF-on-mesh term's PRODUCER is the split's geometry half
+    // (`vb_geo`), so a boot that wants the term must arm the split even with no other pre-light
+    // consumer. VB-only, and it conjoins the march because a term with no shadow source has
+    // nothing to produce. `mesh_leg` is NOT conjoined here — it is applied once, in
+    // `mesh_geo_shade_split` below, so a `VB × Sdf` boot that asks for the term arms no split
+    // (and `vb_sdf_mesh_armable` then resolves `false` on its own `mesh_leg` term).
+    //
+    // **The cap conjunct is on THIS binding and must never move up onto `sdf_soft_march`.** The
+    // inline soft march writes no storage image and needs no RG8; hoisting the cap one line would
+    // disarm SDF soft shadows on every non-RG8 device — a far larger regression than the one it
+    // is here to prevent.
+    //
+    // Why the cap belongs here at all: on a non-RG8 device `vb_sdf_mesh_armable()` is false, so
+    // the term is never produced AND there is no dedicated pass to delete — the consolidation's
+    // credit is zero while its debits stand alone. At term medians that is +26 112 ns/frame
+    // (`GEO_base` + `E_split_host`), taking `NET` from 27 648 to 53 760 — **+94.4 %, 5.1 ×
+    // `R_neutral`** — boot-frozen for the process, in exchange for zero delivered term.
+    let vb_sv0_split = matches!(path, RenderPath::VisibilityBuffer)
+        && consumers.sdf_mesh_term_wanted
+        && sdf_soft_march
+        && vb_sdf_mesh_storage_ok;
     // Rung R9a: `mesh_leg` gates the VB split too (the R-SDFFWD "mesh_leg gates the prepass"
     // precedent above): the split's ENTIRE purpose is separating the MESH raster's geometry
     // fetch from its shade — under `GeometryLegs::Sdf` there is no `vb_raster`/`vb_id` to
     // split, so a mesh-less pre-light config must not arm `vb_geo`/`vb_shade_split` (the
     // plan-doc's literal "VB && pre_light" rule carries a recorded erratum for this).
+    //
+    // DP6a — the Rev-5 erratum, in code: this is the ONE flag of the three whose trigger is not
+    // `pre_light` alone. See this fn's doc, "# The Rev-5 single predicate".
     let mesh_geo_shade_split =
-        matches!(path, RenderPath::VisibilityBuffer) && mesh_leg && pre_light;
+        matches!(path, RenderPath::VisibilityBuffer) && mesh_leg && (pre_light || vb_sv0_split);
     // Gated on the R-SDFSPLIT rung const (see [`SDF_SPLIT_IMPLEMENTED`]'s doc): the RULE is
     // `sdf_forward_marched && pre_light`, but the flag must not arm while no producer exists.
     let sdf_geo_shade_split = sdf_forward_marched && pre_light && SDF_SPLIT_IMPLEMENTED;
@@ -1059,11 +1160,24 @@ pub fn resolve_rules(
     // is a NORMAL consumer there. Consequence (recorded as a plan-doc erratum): the Rev-5
     // "Temporal-only (MOTION-only arming)" config arms `NORMAL|MOTION` on non-Deferred paths,
     // which also makes `mesh_geo_shade_split ⇒ NORMAL` hold for every hwrt-armed split config.
+    // DP6a adds `|| mesh_geo_shade_split`, and the choice of ANTECEDENT is the whole point.
+    //
+    // The obligation R9b §7 states is `mesh_geo_shade_split ⇒ NORMAL`: `vb_geo` writes
+    // `thin_normal` unconditionally, and the mask must stay the single truth about what that image
+    // holds. The tightest term that discharges it is the antecedent itself — so the union reads
+    // `mesh_geo_shade_split`, and the implication becomes true BY CONSTRUCTION rather than by a
+    // disjunct that happens to cover it.
+    //
+    // `vb_sv0_split` was the first spelling and it was WRONG in one corner: it carries no
+    // `mesh_leg` conjunct, so on a `VB × Sdf` boot it is true while the split is false — arming
+    // the NORMAL channel on a leg that runs no `vb_geo` to write it. That is a bound-but-never-
+    // written aux image, the 09600 class the MOTION arm below refuses by name three lines down.
     if consumers.ssao_on
         || consumers.ddgi_on
         || consumers.shadow_denoise_spatial_on
         || consumers.ssr_on
         || (consumers.hwrt_denoise_or_vis_on && !matches!(path, RenderPath::Deferred))
+        || mesh_geo_shade_split
     {
         thin_aux = thin_aux.insert(ThinAuxMask::NORMAL);
     }
@@ -1086,14 +1200,15 @@ pub fn resolve_rules(
     if consumers.punctual_shadows_on {
         shadow = shadow.insert(ShadowSources::PUNCTUAL_ATLAS);
     }
-    if sdf_leg && consumers.sdf_shadows_wanted && !consumers.hwrt_denoise_or_vis_on {
+    if sdf_soft_march {
         shadow = shadow.insert(ShadowSources::SDF_SOFT_MARCH);
     }
     if consumers.hwrt_denoise_or_vis_on {
         shadow = shadow.insert(ShadowSources::HWRT_VIS);
     }
     // Decision 7's exclusion, asserted at the ONE site that can violate it: the two `if`s above
-    // read the SAME `hwrt_denoise_or_vis_on` with opposite polarity, so any future edit that
+    // read the SAME `hwrt_denoise_or_vis_on` with opposite polarity (the negative one through
+    // `sdf_soft_march`, hoisted at DP6a so the rule has one spelling), so any future edit that
     // splits them (a per-path carve-out, a second hwrt flag) breaks the exclusion HERE and
     // nowhere else. Debug-only per the project's hot-path convention; the property is also
     // pinned unconditionally by
@@ -1124,7 +1239,7 @@ pub fn resolve_rules(
         thin_aux,
         shadow,
         froxel_light_cull,
-        vb_sdf_mesh_storage_ok: caps.rg8_unorm_storage,
+        vb_sdf_mesh_storage_ok,
     }
 }
 
@@ -2599,7 +2714,14 @@ mod tests {
     /// Every `RenderPathConsumers` bool, so the sweep below stays exhaustive by CONSTRUCTION:
     /// adding a field to that struct without adding it here leaves the sweep silently narrower
     /// than it claims. The setters are listed in declaration order.
-    const CONSUMER_SETTERS: [fn(&mut RenderPathConsumers); 11] = [
+    ///
+    /// **VB-SV0 DP6a added the twelfth entry, and the omission was a real defect for one review
+    /// cycle:** `sdf_mesh_term_wanted` landed on `RenderPathConsumers` while this array stayed at
+    /// eleven, so every sweep below kept claiming "the whole input space" while covering half of
+    /// it. That is precisely the silent narrowing this array's own doc warns about — recorded here
+    /// because the array cannot make the claim true on its own; only the next author extending it
+    /// can.
+    const CONSUMER_SETTERS: [fn(&mut RenderPathConsumers); 12] = [
         |c| c.ssao_on = true,
         |c| c.ddgi_on = true,
         |c| c.shadow_denoise_spatial_on = true,
@@ -2611,7 +2733,32 @@ mod tests {
         |c| c.hwrt_denoise_or_vis_on = true,
         |c| c.sdf_shadows_wanted = true,
         |c| c.clusters_wanted = true,
+        |c| c.sdf_mesh_term_wanted = true,
     ];
+
+    /// The device-capability axis every exhaustive sweep below iterates: **three DISTINCT points,
+    /// one per independent cap bit plus the all-true corner.**
+    ///
+    /// Stated as a helper because the two sweeps read it and a hand-written pair drifted: until
+    /// DP6a both of them iterated `[caps_ok(), RenderPathDeviceCaps::default()]`, and those are
+    /// the SAME VALUE — `RenderPathDeviceCaps::default()` is `{ indexing: true, rg8: true }`, which
+    /// is `caps_ok()` spelled differently. The axis therefore had one point wearing two names, and
+    /// **neither `false` corner was ever swept** while both sweeps' censuses reported a `2` that
+    /// made the loop look covered.
+    ///
+    /// Note `caps_missing()` is the `storage_buffer_array_non_uniform_indexing` corner and carries
+    /// `rg8_unorm_storage: true` — it is NOT the RG8 corner, which is why the third entry is
+    /// spelled out rather than assumed to be covered by the second.
+    fn cap_sets() -> [RenderPathDeviceCaps; 3] {
+        [
+            caps_ok(),
+            // no descriptor indexing -> `resolve_render_path` degrades VB to Deferred
+            caps_missing(),
+            // no RG8-UNORM storage -> the SV0 `sdf_term` ring is unhostable, `vb_sdf_mesh_armable`
+            // resolves false while the VB path itself survives
+            caps_ok().with_rg8_unorm_storage(false),
+        ]
+    }
 
     /// Builds the consumer snapshot whose set bits are `mask`'s (bit `i` ⇒ `CONSUMER_SETTERS[i]`).
     fn consumers_from_mask(mask: u32) -> RenderPathConsumers {
@@ -2651,14 +2798,14 @@ mod tests {
             RenderPath::VisibilityBuffer,
         ] {
             for legs in [GeometryLegs::Both, GeometryLegs::Mesh, GeometryLegs::Sdf] {
-                for caps in [caps_ok(), RenderPathDeviceCaps::default()] {
+                for caps in cap_sets() {
                     for mask in 0..(1u32 << CONSUMER_SETTERS.len()) {
                         let consumers = consumers_from_mask(mask);
 
                         let resolved = resolve_rules(path, legs, consumers, caps);
                         assert!(
                             resolved.shadow.hwrt_vis_excludes_sdf_soft_march(),
-                            "resolve_rules({path:?}, {legs:?}, mask={mask:#013b}, caps={caps:?}) \
+                            "resolve_rules({path:?}, {legs:?}, mask={mask:#014b}, caps={caps:?}) \
                              armed both SDF_SOFT_MARCH and HWRT_VIS: {:?}",
                             resolved.shadow
                         );
@@ -2668,7 +2815,7 @@ mod tests {
                         let (booted, _) = resolve_render_path(&cfg, consumers, caps);
                         assert!(
                             booted.shadow.hwrt_vis_excludes_sdf_soft_march(),
-                            "resolve_render_path({path:?}, {legs:?}, mask={mask:#013b}, \
+                            "resolve_render_path({path:?}, {legs:?}, mask={mask:#014b}, \
                              caps={caps:?}) armed both SDF_SOFT_MARCH and HWRT_VIS: {:?}",
                             booted.shadow
                         );
@@ -2678,12 +2825,17 @@ mod tests {
             }
         }
         // A census, so a sweep silently reduced to nothing (an emptied `CONSUMER_SETTERS`, a
-        // narrowed range) fails instead of passing vacuously: 4 paths x 3 leg sets x 2 cap sets
-        // x 2^11 masks. The `11` is spelled as a LITERAL rather than `CONSUMER_SETTERS.len()` on
+        // narrowed range) fails instead of passing vacuously: 4 paths x 3 leg sets x 3 cap sets
+        // x 2^12 masks. The `12` is spelled as a LITERAL rather than `CONSUMER_SETTERS.len()` on
         // purpose — deriving it from the array would make the census self-fulfilling and blind
-        // to exactly the shrinkage it exists to catch. Adding a 12th consumer therefore fails
+        // to exactly the shrinkage it exists to catch. Adding a 13th consumer therefore fails
         // this line by design: update it in the same edit that extends the array.
-        assert_eq!(rule_rows, 4 * 3 * 2 * (1 << 11));
+        //
+        // DP6a moved BOTH factors, and each was a live hole: the mask range was `2^11` while the
+        // struct had twelve bools, and the cap loop read `[caps_ok(), RenderPathDeviceCaps::
+        // default()]` — the SAME all-true value twice, so one third of the cap axis was a
+        // duplicate and the two `false` corners were never swept at all.
+        assert_eq!(rule_rows, 4 * 3 * 3 * (1 << 12));
         assert_eq!(boot_rows, rule_rows);
     }
 
@@ -2714,9 +2866,18 @@ mod tests {
     // ---- VB-SV0 arming truth table (plan §S4 gate (iii)) ------------------------------------
 
     /// The consumer set a VB-SV0 fixture boots under: `boyko_app::runner` hardwires
-    /// `sdf_shadows_wanted: true` (no owner-facing toggle exists), and nothing else is armed.
+    /// `sdf_shadows_wanted: true` (no owner-facing toggle exists), and — from **DP6a** —
+    /// `sdf_mesh_term_wanted: true`, because a fixture that does not ask for the term no longer
+    /// arms it: [`ResolvedRenderPath::vb_sdf_mesh_armable`] conjoins `mesh_geo_shade_split`, and
+    /// with no pre-light consumer the request IS the only thing that arms the split. Without this
+    /// bit every "armable" row below would resolve `false` and the truth table would assert
+    /// nothing.
     fn sv0_consumers() -> RenderPathConsumers {
-        RenderPathConsumers { sdf_shadows_wanted: true, ..Default::default() }
+        RenderPathConsumers {
+            sdf_shadows_wanted: true,
+            sdf_mesh_term_wanted: true,
+            ..Default::default()
+        }
     }
 
     /// **VB-SV0 plan §S4 gate (iii) — the ONLY mechanical instrument covering variant rows 9-10.**
@@ -2734,10 +2895,12 @@ mod tests {
     ///
     /// # The red mutation this test exists to catch
     ///
-    /// Delete the `&& !consumers.hwrt_denoise_or_vis_on` term from [`resolve_rules`]'
-    /// `SDF_SOFT_MARCH` arming: the hwrt rows then report `vb_sdf_mesh_armable() == true` and the
-    /// `!armable` assertions below fail. DEMONSTRATED at rung S4 — not asserted to be
-    /// demonstrable.
+    /// Delete the `&& !consumers.hwrt_denoise_or_vis_on` term from the **`sdf_soft_march` binding**
+    /// in [`resolve_rules`] — the hoisted `let sdf_soft_march = …;` that DP6a introduced, which is
+    /// now the single site that arms `SDF_SOFT_MARCH` (the `if` further down reads the binding, so
+    /// mutating the `if` is no longer possible). The hwrt rows then report
+    /// `vb_sdf_mesh_armable() == true` and the `!armable` assertions below fail. DEMONSTRATED at
+    /// rung S4 — not asserted to be demonstrable.
     #[test]
     fn sv0_never_arms_under_hwrt() {
         // Rows 1-8: VB x Both, no hwrt carrier -> the SDF soft march IS the shadow source, and
@@ -2752,6 +2915,13 @@ mod tests {
         assert!(
             armable.shadow.contains(ShadowSources::SDF_SOFT_MARCH),
             "VB x Both with sdf_shadows_wanted and no hwrt must arm SDF_SOFT_MARCH"
+        );
+        // DP6a: no pre-light consumer is armed on this row, so the split can only come from the
+        // term request itself (`vb_sv0_split`). Asserted before armability, because armability now
+        // DEPENDS on it — without this line a red would name the wrong term.
+        assert!(
+            armable.mesh_geo_shade_split,
+            "DP6a: the SV0 term request must arm the split on its own — it is the term's producer"
         );
         assert!(armable.vb_sdf_mesh_armable(), "rows 1-8 must be SV0-armable");
 
@@ -2793,6 +2963,14 @@ mod tests {
             resolved_hwrt.shadow.contains(ShadowSources::HWRT_VIS),
             "the hwrt carrier survives cap_vb_v1_consumers on a mesh-carrying leg set"
         );
+        // DP6a: the split IS armed here (SSAO arms it), so the negative below is about the hwrt
+        // carrier displacing `SDF_SOFT_MARCH` and NOT about a missing producer — without this
+        // line, `armable`'s new `mesh_geo_shade_split` conjunct could satisfy the assertion for a
+        // reason the test does not claim.
+        assert!(
+            resolved_hwrt.mesh_geo_shade_split,
+            "ssao_on must still arm the split through the production resolve"
+        );
         assert!(
             !resolved_hwrt.vb_sdf_mesh_armable(),
             "rows 9-10 must be unarmable through the production resolve too"
@@ -2806,6 +2984,32 @@ mod tests {
     /// one moves `path` and `legs`, that one moves only the hwrt carrier.
     #[test]
     fn sv0_armable_only_on_vb_with_both_legs() {
+        // POSITIVE CONTROL (DP6a). Every row below is a negative, and after the `armable` conjunct
+        // a resolver that stopped arming the split entirely would satisfy all of them by covering
+        // nothing. This row is the one the negatives are contrasted against.
+        let positive =
+            resolve_rules(RenderPath::VisibilityBuffer, GeometryLegs::Both, sv0_consumers(), caps_ok());
+        assert!(positive.mesh_geo_shade_split, "the term request arms the split");
+        assert!(positive.vb_sdf_mesh_armable(), "VB x Both + term wanted IS the armable row");
+
+        // The same boot WITHOUT the term request and without any pre-light consumer: fused, so
+        // there is no `vb_geo` to host the march. This is the row DP6a turns.
+        let fused = resolve_rules(
+            RenderPath::VisibilityBuffer,
+            GeometryLegs::Both,
+            RenderPathConsumers { sdf_shadows_wanted: true, ..Default::default() },
+            caps_ok(),
+        );
+        assert!(
+            fused.shadow.contains(ShadowSources::SDF_SOFT_MARCH) && fused.mesh_leg,
+            "the march and the mesh pixels are both there — only the producer is missing"
+        );
+        assert!(!fused.mesh_geo_shade_split, "nothing asks for the split on a fused boot");
+        assert!(
+            !fused.vb_sdf_mesh_armable(),
+            "DP6a: no split => no `vb_geo` => no producer for the term"
+        );
+
         // Non-VB paths: SV0 exists only in the three VB lit-producer tails.
         for path in [RenderPath::Deferred, RenderPath::Forward, RenderPath::ForwardPlus] {
             let resolved = resolve_rules(path, GeometryLegs::Both, sv0_consumers(), caps_ok());
@@ -2840,7 +3044,13 @@ mod tests {
 
         // A device without RG8-UNORM STORAGE keeps the full VB boot but cannot host the SV0
         // prepass (the `sdf_term` ring is an RG8 storage target): the FULLY-armed row goes
-        // unarmable on the cap alone, and NOTHING ELSE about the resolution moves.
+        // unarmable on the cap alone.
+        //
+        // DP6a note, stated because it is a real consequence and not an oversight: the SPLIT still
+        // arms on such a device. `vb_sv0_split` deliberately carries no cap term (Decision 4's
+        // formula), so the degrade chain is `!rg8 => !armable => mode 0 => the term is never
+        // produced or read`, NOT `!rg8 => fused`. Such a boot pays `vb_geo` + `vb_shade_split` and
+        // gets no term — a cost, not a correctness hole, and no committed pin boots without RG8.
         let (no_rg8, _) = resolve_render_path(
             &RenderPathConfig { path: RenderPath::VisibilityBuffer, legs: GeometryLegs::Both },
             sv0_consumers(),
@@ -2849,6 +3059,272 @@ mod tests {
         assert!(matches!(no_rg8.path, RenderPath::VisibilityBuffer), "the path itself survives");
         assert!(no_rg8.mesh_leg && no_rg8.shadow.contains(ShadowSources::SDF_SOFT_MARCH));
         assert!(!no_rg8.vb_sdf_mesh_armable(), "no RG8 storage => no SV0 prepass");
+    }
+
+    /// The pre-DP6a `mesh_geo_shade_split` rule, spelled out as an ORACLE rather than referenced.
+    ///
+    /// `git show <pre-DP6a>:crates/boyko_render/src/render_path_config.rs` reads, verbatim:
+    ///
+    /// ```text
+    /// let mesh_geo_shade_split =
+    ///     matches!(path, RenderPath::VisibilityBuffer) && mesh_leg && pre_light;
+    /// ```
+    ///
+    /// DP6a rewrote that one line to `… && (pre_light || vb_sv0_split)`. The `pre_light` union is
+    /// re-derived here from the consumer snapshot instead of being read back off the resolution,
+    /// because an oracle that asks the subject for its own answer proves nothing — the five
+    /// members are the Rev-5 union and they are UNCHANGED by DP6a.
+    fn mesh_geo_shade_split_pre_dp6a(
+        path: RenderPath,
+        legs: GeometryLegs,
+        c: RenderPathConsumers,
+    ) -> bool {
+        let pre_light =
+            c.ssao_on || c.ddgi_on || c.shadow_denoise_spatial_on || c.shadow_temporal_on || c.ssr_on;
+        matches!(path, RenderPath::VisibilityBuffer) && legs.has_mesh() && pre_light
+    }
+
+    /// **VB-SV0 DP6a's landing gate, in its "tested, not argued" form:
+    /// `sdf_mesh_term_wanted == false` ⇒ every `ResolvedRenderPath` field is what pre-DP6a
+    /// produced.**
+    ///
+    /// This is the property that lets DP6a claim it turns no golden: the new consumer bit defaults
+    /// `false`, so every boot in the tree that does not ask for the SDF-on-mesh term must resolve
+    /// bit-for-bit as before. The design's DP6a entry requires it *tested*, and the sweep below is
+    /// the test.
+    ///
+    /// # Two claims, the second of which pins DP6a's ENTIRE reach
+    ///
+    /// 1. **The oracle.** With the bit false, `mesh_geo_shade_split` equals
+    ///    [`mesh_geo_shade_split_pre_dp6a`] at every point of the input space. This is the one
+    ///    field whose FORMULA DP6a rewrote, so it is the one an oracle has to speak for.
+    /// 2. **The bit's total effect is ONE field, and the whole struct says so.** After the O5
+    ///    disposition `vb_sv0_split` has exactly one consumer — `mesh_geo_shade_split` — and
+    ///    `thin_aux`'s NORMAL arm follows `mesh_geo_shade_split` rather than `vb_sv0_split`, so
+    ///    NORMAL moves only as a CONSEQUENCE of the split moving. The bit-true resolution is
+    ///    therefore *constructed* from the bit-false one by applying that one rule and its one
+    ///    consequence, then compared through the derived `PartialEq`. All sixteen fields at once.
+    ///    A leak into a seventeenth place reds here without anyone having to predict which field
+    ///    it would be, and — because the construction is exact rather than an inequality — so does
+    ///    a rule that stops arming, over-arms, or arms the wrong field.
+    ///
+    /// That second form subsumes the inert half: wherever `vb_sv0_split` is false the constructed
+    /// struct IS the bit-false struct, so `assert_eq!` becomes the "DP6a changed nothing" claim
+    /// with no separate branch. Both halves are censused, because an inert-only property is
+    /// satisfied by a resolver that ignores the bit entirely and an active-only one by a resolver
+    /// that arms on everything.
+    ///
+    /// ⚠️ **Fields, not the derived predicate.** `vb_sdf_mesh_armable()` is a METHOD and DP6a
+    /// deliberately moved it (it gained a `mesh_geo_shade_split` conjunct), so on a VB×Both march
+    /// boot with no pre-light consumer it now answers `false` where it once answered `true`. That
+    /// is DP6a's intended behaviour change and it is covered by
+    /// `sv0_armable_only_on_vb_with_both_legs`. The gate this test carries is about the sixteen
+    /// stored fields, which is why it compares structs and not predicates.
+    ///
+    /// ⚠️ **`vb_sv0_split` still carries no `mesh_leg` conjunct**, so on a `VB × Sdf` boot it is
+    /// `true` while `mesh_geo_shade_split` is `false`. When this test was first written that row
+    /// armed `thin_aux` NORMAL — a producer-less channel, since only `vb_geo` writes
+    /// `thin_normal` and a mesh-less leg runs none. **The DP6a review's O5 disposition removed it**
+    /// by pointing the union's new term at `mesh_geo_shade_split` instead, so the row is now fully
+    /// INERT and the sweep says so rather than encoding the anomaly. It is recorded here because
+    /// the encoded form passed — a gate can be exactly right about a resolver that is wrong.
+    ///
+    /// ⚠️ **The `!rg8` corner is swept and it is inert**, per the W3 disposition: `vb_sv0_split`
+    /// conjoins `caps.rg8_unorm_storage`, so a device that cannot host the `sdf_term` ring never
+    /// pays the split for a term it could not deliver. Until the review, `cap_sets()` did not
+    /// contain that corner at all (`[caps_ok(), RenderPathDeviceCaps::default()]` is one value
+    /// twice), so this claim would have been swept over zero rows.
+    #[test]
+    fn dp6a_moves_no_resolved_field_on_boots_that_do_not_request_the_term() {
+        let mut swept = 0u32;
+        let mut inert_rows = 0u32;
+        let mut flipping_rows = 0u32;
+
+        for path in [
+            RenderPath::Deferred,
+            RenderPath::Forward,
+            RenderPath::ForwardPlus,
+            RenderPath::VisibilityBuffer,
+        ] {
+            for legs in [GeometryLegs::Both, GeometryLegs::Mesh, GeometryLegs::Sdf] {
+                for caps in cap_sets() {
+                    for mask in 0..(1u32 << CONSUMER_SETTERS.len()) {
+                        // `CONSUMER_SETTERS` DOES carry `sdf_mesh_term_wanted` (it is the twelfth
+                        // entry, added when the review found the array a bool short of the struct).
+                        // That makes the bit the SUBJECT of this test and a swept variable at the
+                        // same time, so both sides override the mask's own value for it: `without`
+                        // forces it false, `with` forces it true. The mask's bit 11 is therefore
+                        // inert HERE and each of the 2^11 other combinations is visited twice.
+                        //
+                        // The duplication is deliberate and cheaper than the alternative: deriving
+                        // this loop's bound from anything except `CONSUMER_SETTERS.len()` is
+                        // exactly how the sweep silently narrowed the last time a consumer landed.
+                        let without =
+                            RenderPathConsumers { sdf_mesh_term_wanted: false, ..consumers_from_mask(mask) };
+                        let with = RenderPathConsumers { sdf_mesh_term_wanted: true, ..without };
+
+                        let resolved = resolve_rules(path, legs, without, caps);
+
+                        // (1) THE ORACLE.
+                        assert_eq!(
+                            resolved.mesh_geo_shade_split,
+                            mesh_geo_shade_split_pre_dp6a(path, legs, without),
+                            "DP6a moved `mesh_geo_shade_split` on a boot that never asked for the \
+                             term: resolve_rules({path:?}, {legs:?}, mask={mask:#014b}, \
+                             caps={caps:?})"
+                        );
+
+                        // `vb_sv0_split` with the bit TRUE, re-derived from the inputs — the
+                        // resolver's own `matches!(path, VB) && sdf_mesh_term_wanted &&
+                        // sdf_soft_march && vb_sdf_mesh_storage_ok`, with the second conjunct
+                        // known true on this side. Deliberately WITHOUT a `mesh_leg` term,
+                        // because the rule has none. The CAP conjunct is the architect's W3
+                        // disposition and it is load-bearing here: `cap_sets()` sweeps the
+                        // `!rg8` corner, and without this term every row there would expect an
+                        // arming the resolver (correctly) does not perform.
+                        let sdf_soft_march = legs.has_sdf()
+                            && without.sdf_shadows_wanted
+                            && !without.hwrt_denoise_or_vis_on;
+                        let vb_sv0_split = matches!(path, RenderPath::VisibilityBuffer)
+                            && sdf_soft_march
+                            && caps.rg8_unorm_storage;
+
+                        // (2) DP6a's ENTIRE reach, constructed rather than compared field by
+                        // field: `mesh_geo_shade_split` re-reads the pre-DP6a rule with
+                        // `pre_light || vb_sv0_split`, `thin_aux`'s NORMAL arm follows
+                        // `mesh_geo_shade_split` (NOT `vb_sv0_split` — the O5 disposition), and
+                        // everything else is carried over verbatim by the struct-update syntax.
+                        let expected_split = matches!(path, RenderPath::VisibilityBuffer)
+                            && legs.has_mesh()
+                            && (mesh_geo_shade_split_pre_dp6a(path, legs, without) || vb_sv0_split);
+                        let expected = ResolvedRenderPath {
+                            mesh_geo_shade_split: expected_split,
+                            thin_aux: if expected_split {
+                                resolved.thin_aux.insert(ThinAuxMask::NORMAL)
+                            } else {
+                                resolved.thin_aux
+                            },
+                            ..resolved
+                        };
+
+                        let armed = resolve_rules(path, legs, with, caps);
+                        assert_eq!(
+                            armed, expected,
+                            "the term request's effect on the resolution is not the two fields \
+                             DP6a threads it through: resolve_rules({path:?}, {legs:?}, \
+                             mask={mask:#014b}, caps={caps:?})"
+                        );
+
+                        if armed == resolved {
+                            inert_rows += 1;
+                        } else {
+                            flipping_rows += 1;
+                        }
+                        swept += 1;
+                    }
+                }
+            }
+        }
+
+        // The census, for `sdf_soft_march_and_hwrt_vis_stay_exclusive_over_the_whole_input_space`'s
+        // stated reason: 4 paths x 3 leg sets x 3 cap sets x 2^12 masks, with `12` a LITERAL so a
+        // shrunken `CONSUMER_SETTERS` fails here instead of quietly narrowing the sweep.
+        assert_eq!(swept, 4 * 3 * 3 * (1 << 12));
+        // NEITHER half may be empty. Without these two lines the whole sweep is satisfied by a
+        // resolver that ignores the bit (every row inert) or by one that arms on everything
+        // (every row flipping) — the two failures this test exists to separate.
+        assert!(flipping_rows > 0, "no row exercised the arming half: the sweep proves nothing");
+        assert!(inert_rows > 0, "no row exercised the inert half: the sweep proves nothing");
+        assert_eq!(inert_rows + flipping_rows, swept);
+    }
+
+    /// **The CONVERSE of R9b §7, and the property that would have caught DP6a's first NORMAL
+    /// term.** `mesh_geo_shade_split ⇒ NORMAL` says the channel is armed wherever `vb_geo` writes
+    /// it. It says nothing about the other direction, and the other direction is where the defect
+    /// lived: DP6a originally spelled the union's new disjunct `|| vb_sv0_split`, which carries no
+    /// `mesh_leg` conjunct, so a `VB × Sdf` boot that requested the term armed NORMAL on a leg
+    /// that runs no `vb_geo` at all — an aux image bound and never written, the 09600 class.
+    ///
+    /// So: **under `VisibilityBuffer`, NORMAL may not be armed without a stated reason.** The
+    /// reasons are exactly two — the split's own geometry half writes it, or one of the pre-light
+    /// consumers that reads it is armed. Anything else arming the channel is a producer-less
+    /// declaration, and this test is its red.
+    ///
+    /// Quantified over the same axes as the sweeps above, asserted on the VB rows (the SDF and
+    /// Forward families have their own producers and their own rules).
+    ///
+    /// **It is deliberately a statement about the union's permitted MEMBERSHIP, not about its
+    /// formula.** Against today's resolver the two coincide, so the assertion cannot fail — that
+    /// is the point: it fails the moment someone adds a disjunct that is neither the writer nor
+    /// one of the five readers, which is the only way this defect can be reintroduced. A test that
+    /// re-derived the formula would instead pass for any formula at all.
+    #[test]
+    fn under_vb_the_normal_channel_is_never_armed_without_a_writer_or_a_reader() {
+        let mut vb_rows = 0u32;
+        let mut normal_rows = 0u32;
+
+        for legs in [GeometryLegs::Both, GeometryLegs::Mesh, GeometryLegs::Sdf] {
+            for caps in cap_sets() {
+                for mask in 0..(1u32 << CONSUMER_SETTERS.len()) {
+                    let c = consumers_from_mask(mask);
+                    let r = resolve_rules(RenderPath::VisibilityBuffer, legs, c, caps);
+                    vb_rows += 1;
+                    if !r.thin_aux.contains(ThinAuxMask::NORMAL) {
+                        continue;
+                    }
+                    normal_rows += 1;
+
+                    // A READER: one of the pre-light consumers that samples `thin_normal`.
+                    let reader = c.ssao_on
+                        || c.ddgi_on
+                        || c.shadow_denoise_spatial_on
+                        || c.ssr_on
+                        || c.hwrt_denoise_or_vis_on;
+                    assert!(
+                        r.mesh_geo_shade_split || reader,
+                        "VB({legs:?}, mask={mask:#014b}, caps={caps:?}) armed thin_aux NORMAL with \
+                         neither a writer (`mesh_geo_shade_split` ⇒ `vb_geo`) nor a reader — a \
+                         bound-but-never-written aux image"
+                    );
+                }
+            }
+        }
+
+        // Anti-vacuity in both directions: the sweep must reach VB rows at all, and it must reach
+        // rows where NORMAL is actually armed — a resolver that stopped arming the channel
+        // entirely would satisfy an implication-only property everywhere.
+        assert_eq!(vb_rows, 3 * 3 * (1 << 12));
+        assert!(normal_rows > 0, "no row armed NORMAL: the implication is vacuous");
+        assert!(normal_rows < vb_rows, "every row armed NORMAL: the implication is untested");
+    }
+
+    /// The positive control for the gate above, on ONE named boot rather than a swept one — the
+    /// row `[vb_both_sdf]` + `BOYKO_SDF_MESH=on` actually boots.
+    ///
+    /// Stated separately because a reader auditing "does DP6a do anything at all?" should not have
+    /// to reconstruct it from a partition predicate inside a 49 152-row loop.
+    #[test]
+    fn the_term_request_alone_arms_the_split_on_a_vb_both_march_boot() {
+        let base = RenderPathConsumers { sdf_shadows_wanted: true, ..Default::default() };
+        let wanted = RenderPathConsumers { sdf_mesh_term_wanted: true, ..base };
+
+        let without = resolve_rules(RenderPath::VisibilityBuffer, GeometryLegs::Both, base, caps_ok());
+        let with = resolve_rules(RenderPath::VisibilityBuffer, GeometryLegs::Both, wanted, caps_ok());
+
+        // The precondition, so a red below names the right term: the march and the mesh pixels are
+        // present on BOTH sides, and no pre-light consumer is armed on either.
+        assert!(
+            without.shadow.contains(ShadowSources::SDF_SOFT_MARCH) && without.mesh_leg,
+            "the fixture must carry the march and a mesh leg, or the control tests nothing"
+        );
+
+        assert_ne!(without, with, "DP6a must move this boot — it is the boot DP6a exists for");
+        assert!(!without.mesh_geo_shade_split, "no consumer asks for the split without the term");
+        assert!(with.mesh_geo_shade_split, "the term request IS a reason for the split to exist");
+        assert!(
+            !without.vb_sdf_mesh_armable() && with.vb_sdf_mesh_armable(),
+            "armability follows the split, because the split's geometry half IS the producer"
+        );
     }
 
     #[test]

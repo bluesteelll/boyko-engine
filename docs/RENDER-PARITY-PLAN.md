@@ -174,6 +174,29 @@ This is architecturally **Option B already**.
 - **(C) Hybrid selector** — a knob over A/B via the existing `sdf_shadows_wanted` consumer; not a
   distinct algorithm.
 
+> **Erratum — VB-SV0 DP6a (`docs/VB-SV0-DP6-DESIGN.md`, Decision 3): Option B is SUPERSEDED UNDER VB
+> ONLY. Forward / ForwardPlus / Deferred are untouched and Option B stands there verbatim.**
+>
+> Under VB the dedicated `sdf_mesh_shadow.comp` prepass is consolidated into `vb_geo.comp.hlsl`, the
+> geo/shade split's geometry half, which becomes the term's SOLE producer (unreachable at DP6c,
+> deleted at DP6e). **Option B's overdraw-invariance rationale is PRESERVED, not traded away:**
+> `vb_geo` is also exactly one march per COVERED pixel — one thread per full-res `vb_id` pixel — so
+> the "1 march/pixel" property that rejected Option A holds in the new host too. What changes is
+> only *which* pass hosts the march, and the reason is maintenance surface plus the split-boot
+> `−1 fetch / −1 dispatch` win, not a re-litigation of A vs B.
+>
+> Two consequences recorded here so a reader of this section does not act on the pre-DP6 shape:
+> * under VB, arming the term now arms `mesh_geo_shade_split` (the producer must exist), so an
+>   SV0-wanting VB boot is necessarily a SPLIT boot — `ResolvedRenderPath::vb_sdf_mesh_armable()`
+>   conjoins it;
+> * the fused VB row's cost is a MEASURED question (`Δ NET ∈ [−5 404, +14 848] ns`, point estimate
+>   `+1 034`, gated by G-NEUTRAL at DP6d), **not** the "cost-neutral by construction" the DP6 design
+>   originally claimed and withdrew at its Rev 4.4.
+>
+> This erratum is written rather than a §3.2B subsection edited, because **§3.2B never existed** —
+> a repo-wide grep for `3.2B` returns zero; the lever's entire prior written form was one sentence
+> in DP4's disposition (that design's Open Question 4).
+
 ### 3.3 C1 (resolved) — plain Forward needs an EQUAL shade pipeline
 
 Plain Forward's shade pipeline is `create_graphics_pipeline_forward` = `GREATER + depth-write ON`

@@ -122,6 +122,11 @@ fn vb_both_ssao_screenshot_dump() {
     // The env-gated SV0 arm — `vb_both_sdf.rs`'s block verbatim. Unset ⇒ requests stay false ⇒ arm
     // C (the production split boot, SV0 disarmed); `on|shadow|ao` arms the request bits.
     {
+        // DP6a: `host` is a FOURTH accepted value and is deliberately in neither pattern below —
+        // it arms the boot-side `sdf_mesh_term_wanted` (read from the env at `runner`'s boot seam)
+        // and leaves both REQUEST bits false, which is measurement arm B (SV0 variant bound, mode
+        // 0). On THIS fixture the split is already armed by SSAO, so `host` changes only the
+        // pipeline pick, never the leg class.
         let sdf_mesh = std::env::var("BOYKO_SDF_MESH").unwrap_or_default();
         app.insert_resource(boyko_render::LightingConfig {
             vb_sdf_mesh_shadow: matches!(sdf_mesh.as_str(), "on" | "shadow"),

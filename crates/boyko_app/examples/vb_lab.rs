@@ -118,6 +118,12 @@ fn main() {
     app.insert_resource(LightingConfig {
         csm_shadows: csm_on,
         // `on` arms both; `shadow`/`ao` arm one bit — the S1 (ii-a)/(ii-b) per-bit legs.
+        // **DP6a added a fourth accepted value, `host`, and it is ABSENT from both patterns on
+        // purpose**: `BOYKO_SDF_MESH=host` is measurement arm B, which arms the boot-side
+        // `RenderPathConsumers::sdf_mesh_term_wanted` (read directly from the env at
+        // `boyko_app::runner`'s boot seam) while leaving both REQUEST bits false, so the boot
+        // binds the SV0 variant and resolves mode 0. Adding `"host"` to either arm below would
+        // arm the term and destroy the arm.
         vb_sdf_mesh_shadow: matches!(sdf_mesh.as_str(), "on" | "shadow"),
         vb_sdf_mesh_ao: matches!(sdf_mesh.as_str(), "on" | "ao"),
         ..LightingConfig::default()

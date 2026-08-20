@@ -497,10 +497,44 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
         // (`RenderPathConsumers::clusters_wanted`'s doc) additionally requires
         // `path == VisibilityBuffer`, so a Deferred/Forward/ForwardPlus scene that sets
         // `clusters_enabled = true` still resolves unarmed here — VB-only by construction.
+        //
+        // Same boot-freeze boundary as `sdf_mesh_term_wanted` below, and the same trap: this read
+        // precedes `app.finish()` (:627), so a startup system that sets `clusters_enabled` is too
+        // late and the froxel machinery stays off for the process, silently.
         clusters_wanted: app
             .world()
             .try_resource::<LightingConfig>()
             .is_some_and(|c| c.clusters_enabled),
+        // VB-SV0 DP6a (Decision 4): the BOOT SNAPSHOT of the SDF-on-mesh term request. The term's
+        // producer is the split's geometry half, so wanting the term is itself a reason for the
+        // split to arm — which is why this is a resolver INPUT and not a downstream read of the
+        // per-frame `_armed` pair.
+        //
+        // BOOT-FROZEN CONTRACT, stated here because this is the site that publishes the request
+        // into the boot seam: `resolve_render_path` runs ONCE, below, while `LightingConfig`'s
+        // request fields are re-asserted EVERY frame by the owner. A boot that does not carry the
+        // request HERE resolves `mesh_geo_shade_split == false` and `vb_sdf_mesh_armable() ==
+        // false`, and `sync_sv0_light_gate` then clamps the request to 0 for the PROCESS LIFETIME
+        // (reported once by its cold latch).
+        //
+        // **Where the line actually falls, because "set it before frame 100" is not the useful
+        // form:** this read happens at `run_windowed`'s :536, and `app.finish()` is at :627 — so
+        // **a STARTUP SYSTEM that sets `vb_sdf_mesh_shadow`/`_ao` is ALREADY TOO LATE.** By the
+        // time any user system runs, the resolve has been taken with the bit false. The request
+        // must be `insert_resource`d onto the `App` BEFORE `run_windowed` is entered; a startup
+        // system is on the wrong side of the line, and its only symptom is one `eprintln!` from
+        // the clamp's cold latch.
+        //
+        // `BOYKO_SDF_MESH=host` is the measurement-only arm B: it arms the split and the host
+        // pipeline WITHOUT arming either request bit, so the boot binds the SV0 variant and the
+        // shader's store stays behind its `mode != 0` gate. Env-only, like every sibling knob
+        // (`BOYKO_VB_ZONE`, `BOYKO_AA`, `BOYKO_SSAO`, `BOYKO_CSM_OFF`) — deliberately NOT a
+        // `LightingConfig` field, because nothing would then stop a shipped title from setting it.
+        sdf_mesh_term_wanted: app
+            .world()
+            .try_resource::<LightingConfig>()
+            .is_some_and(|c| c.vb_sdf_mesh_shadow || c.vb_sdf_mesh_ao)
+            || std::env::var("BOYKO_SDF_MESH").is_ok_and(|v| v == "host"),
     };
     let render_path_caps = boyko_render::RenderPathDeviceCaps::new(
         ctx.device_caps().storage_buffer_array_non_uniform_indexing_ok,

@@ -85,10 +85,14 @@ after-side `ZONE_VB_GEO` latches TOP while `ZONE_VB_LATE_RASTER` drains, and its
 
 ### R4.1.7 Why "the skew is common-mode, do nothing" is refuted, by the numbers
 
-DP6 deletes a **32 768 ns dispatch** ahead of both latches and adds `M_geo ∈ [6 100, 14 400] ns`
-into `ZONE_VB_GEO`. The latch is demonstrably throttled by execution progress — were it not,
-`ZONE_VB_SHADE` would have read ≥ 256 µs, not 112.6. So a 32 µs change in preceding work moves the
-latch by an unknown amount **of the same order as the effect** (`D + F ∈ [20 939, 29 184] ns`).
+DP6 deletes a dispatch re-taken at **36 864 ns** (the id-10 zone median at DP6-0b) — **35 328 ns** on
+the same-fixture paired route `NET(on) − NET(off)`, the two agreeing to 1 536 ns = 3 ticks; DP6-0's
+`32 768` is superseded, the instrument having changed under it — ahead of both latches, and adds
+`M_geo ∈ [6 100, 14 400] ns` into `ZONE_VB_GEO` — **still a model at DP6-0b, see Decision 3's §0**:
+the two `ZONE_VB_GEO` arms differ by 3 072 ns on the *same* base variant and do not bound it. The
+latch is demonstrably throttled by execution progress — were it not, `ZONE_VB_SHADE` would have read
+≥ 256 µs, not 112.6. So a ~36 µs change in preceding work moves the latch by an unknown amount **of
+the same order as the effect** (`D + F ∈ [20 939, 29 184] ns`).
 Cancellation is first-order only and the residual is bounded by nothing.
 
 ### R4.1.8 A second, independent defect in the specified comparator
@@ -449,6 +453,11 @@ DP6-0's voided 24 576.**
 > measurement; what makes the verdict usable is that all nine leg pairings land in this row
 > (`E_split_host ∈ [10 512, 19 392] ns`), so no pairing reaches branch 1 or branch 3. Full cells,
 > spreads and the instrument-skew decomposition are in the DP6-0b RESULT block of §The ladder.
+>
+> **BLOCK DISCHARGED at Rev 4.4.** Decision 3's *"Trade-off, RE-DERIVED at DP6-0b"* sub-block
+> absorbs `E_split_host` into the fused row — `Δ NET ∈ [−5 404, +14 848] ns`, point estimate
+> `+1 034`. **DP6a may land.** The blocking sentence above is kept rather than rewritten, because
+> it is the measurement that imposed the block.
 
 ## R4.4 `vg_occ_split_timing` — the premise, corrected
 
@@ -546,6 +555,8 @@ on its own, since it guards an invariant unrelated to this rung.
 | 4 | OQ1 adjudicated: A+B composed, C rejected as primary. Repair rung, run bracket, containment clause. |
 | 4.1 | 4 P0 + 8 P1: containment moved into `observe_frame`; `PASS_COUNT` edit withdrawn and the blindness premise corrected; `PRODUCE_RUN`'s predicate hoisted + unmatched-END detector; **primary/fallback inverted with a number**; id 6 and `vb_viewt` named; DDGI/hwrt mechanism corrected; DP6a's timing claim corrected; the `280/560` pin refuted; `Δ_host`'s third branch; OQ narrowed. |
 | **4.3 (post-implementation, measured)** | Written back from the rung that ran. **RESULT recorded**: four re-taken cells, `E_split_host = 11 264 ns`, **branch 2 MIXED**, DP6a BLOCKED, 87.8 % of DP6-0's inflation shown to be instrument skew (§The ladder's DP6-0b RESULT block, §R4.3.7, OQ1). **Mutation (a)'s predicted red CORRECTED against measurement** — `OrderCensus` does not fire on it (0 violations / 241 frames); the `const` stage pin's build failure is the real gate and the `[e6 → b11]` gap the runtime carrier; §R4.3.3's nondeterminism argument is scoped to members whose predecessor is a tick away, not tens of µs. **Mutation (c)'s direction corrected.** **§R4.6's tier table corrected**: id 6 → tier "none" because occlusion-split arming is per-frame and not boot-frozen; ids 2 and 14 placed with their reasons. **§R4.3.6**: the `vb_viewt` `Forbidden` cell is not live until DP6a. |
+| **4.4 (Decision 3 re-derived; arithmetic only, no design change)** | **The headline edit is a WITHDRAWAL:** §Goal's *"fused boots: cost-neutral **by construction** (2/2 → 2/2)"* is struck — the counts are still 2/2 → 2/2, but the boot changes **leg class** and pays `E_split_host`, so neutrality is a **measured question, not a construction**, and it is claimed at DP6d or not at all. Decision 3's trade-off paragraph loses its second sentence and gains a **RE-DERIVED sub-block** (§R4.3.7's block, discharged): the four non-cancelling terms — deletion **−35 328** (measured, paired; id-10 median 36 864 agrees to 3 ticks), `GEO_base` **+13 312…+16 384** (measured, transferable post-restamp), `M_geo` **+6 100…+14 400** (**MODEL**, unmeasured — the two `ZONE_VB_GEO` arms run the *same* base variant and their 3 072 ns Δ does not bound it), `E_split_host` **+10 512…+19 392** (measured) — giving **`Δ NET_fused ∈ [−5 404, +14 848] ns`, point `+1 034`** against a `+5 120` bar, cross-checked against a DISJOINT-INPUT route through the split row (`Δ NET_fused = Δ NET_split + GEO_base + E_split_host` = `[−6 940, +13 312]`, point `−502`; the 1 536 ns gap IS the deletion term measured two ways on two fixtures — the original "independent absolute reconstruction" was struck at the DP6a review as the same calculation rearranged), with a three-row `M_geo` ceiling table showing the red region is confined to the joint upper corner (**99.2 %** of the model band clears at median inputs). Decision 6's cost table gains the measured before-side cells (**62 976** fused / **97 280** split). **G-MARGINAL: `Δ_AB` is reported BEFORE G-NEUTRAL is interpreted** — `M_geo` is 41 % of the predicted width and the term that decides the row. **The `PRESHADE` anomaly clause extends from across-rung to between-arm on the same side**, forced by a finding this re-derivation was not looking for: the split row's arithmetic misses by **16 384 ns** (3.2 × `R`) while the fused row's closes to 3 ticks, and `NET = PRODUCE_RUN − PRESHADE` with `PRESHADE ≈ 304 µs` makes a 5.4 % between-arm drift worth ±16 µs. **DP6a's precondition is discharged** (gate content unchanged); OQ1's fallback gains its quantified trigger region (`GEO_base + M_geo + E_split_host > 40 448 ns`); §R4.1.7's deletion is re-pointed to **36 864 / 35 328** with the `M_geo` model marked as still a model. |
+| **4.5 (DP6a review dispositions; two resolver changes, three doc corrections)** | **W3 — the cap conjunct TAKEN:** `vb_sv0_split` gains `&& vb_sdf_mesh_storage_ok` (hoisted, one spelling, read twice), on that binding ALONE and never on `sdf_soft_march`; the deciding number is +26 112 ns/frame (NET 27 648 → 53 760, **+94.4 %, 5.1 × `R_neutral`**) boot-frozen for a term that is never produced. Invariants **11** and **12** added; Decision 5's degrade chain gains `!rg8 ⇒ !vb_sv0_split ⇒ !split` at its head; red mutation **(7)** added and demonstrated; `sv0_arm_matrix` gains the matched-pair row *"VB x Both + term wanted, no RG8 storage"*. **O5 — the NORMAL union's antecedent SWITCHED** from `|| vb_sv0_split` to `|| mesh_geo_shade_split`: the obligation's own antecedent is the tightest discharging term, and the old spelling armed a producer-less channel on `VB × Sdf` (the 09600 class). `mesh_geo_shade_split ⇒ NORMAL` becomes by-construction and gains its CONVERSE as a shipped property. Composed, **`vb_sv0_split` ends with exactly one consumer.** **W2 — the cross-check's independence claim STRUCK**: the absolute reconstruction was the same calculation rearranged (the `24 576` cancels identically), replaced by the disjoint-input route through the split row, `[−6 940, +13 312]` point `−502`, whose **1 536 ns** disagreement with the primary is the deletion term measured two ways on two fixtures. **W4 — the boot-freeze boundary corrected at all three sites**: the deadline is `run_windowed`'s `:536`, which PRECEDES `app.finish()` at `:627`, so **a startup system is already too late**; "frame 100" understated it by the whole startup phase. **W5 — N3's `matches!` instruction STRUCK** as the inverse of its own stated purpose (adding `"host"` would set the request bits and destroy arm B) and its site count corrected from two to four. |
 | **4.2 (as landed here)** | **P1-A:** `vb_viewt` DOES run on `[vb_both_ssao]` — the authoritative two-arm predicate is `gpu_scene/mod.rs:6550-6553`, arm (b) fires without `TaaConfig`; §R4.1.1's GEO row restored and quantified at 5 248 ns from `gpu_zone.rs:450-452`; the precondition is restated per side and gets a checked expectation cell. **P1-B:** the detector is release-live — `writes` is `#[cfg(debug_assertions)]` and stays so under its own name; two unconditional `u16` masks + `finish`'s three compares are the gate input. **P1-C:** the absence policy keys on absent-from-slice resolved against the leg's expectation, so a full-ring runtime absence skips instead of injecting a 4.5× inflated sample; `GpuPairBudgetExhausted` added to clause 5(2). **P2:** `Δ_host` baselines on DP6-0b's re-taken cell; `ZONE_VB_PRODUCE_NET` gets id 14, `VB_ZONE_COUNT` 15, one slot left, never stamped; the three particle ratios quoted with the tree's refusal of the band; `[order]` dispatches at `artifact.rs:848+`; the `atrous_levels` assertion closes the DP6-0b→DP6c window. |
 
 ---
@@ -571,8 +582,19 @@ on its own, since it guards an invariant unrelated to this rung.
 > **N2 (P1)** — the `[vb_both_ssao]` FIXTURE is created at **DP6-0** (unpinned), so all four baseline cells
 > are measurable before the producer moves; DP6c byte-pins it as planned.
 > **N3** — seam corrected: `RenderPathConsumers` is built at `runner.rs:467` and resolved at `:509`; the env
-> `host` read is a NEW site there (not "beside an existing read" — the only in-tree BOYKO_SDF_MESH reads are
-> the two test/example hosts, whose `matches!` arms each gain `"host"` to keep the REQUEST bits false).
+> `host` read is a NEW site there (not "beside an existing read").
+> ~~The only in-tree BOYKO_SDF_MESH reads are the two test/example hosts, whose `matches!` arms each gain
+> `"host"` to keep the REQUEST bits false.~~
+> **⚠️ STRUCK at the DP6a review (W5) — that instruction is the INVERSE of what it asks for, and it was
+> implemented as its own negation.** `matches!(sdf_mesh.as_str(), "on" | "shadow")` already yields `false`
+> for `"host"`; ADDING `"host"` to those arms would SET the request bits, which arms the term, resolves
+> `mode != 0`, and destroys measurement arm B (whose entire definition is "host bound, mode 0"). The count
+> is also wrong: there are **four** in-tree readers, not two —
+> `crates/boyko_app/examples/vb_lab.rs`, `crates/boyko_app/tests/vb_both_sdf.rs`,
+> `crates/boyko_app/tests/vb_both_ssao.rs`, `crates/boyko_app/tests/vb_sv0_produce_run_timing.rs`.
+> **What DP6a actually landed, and what a future implementer must do:** leave every `matches!` pattern
+> untouched, and add a comment at each of the four naming `"host"` as a fourth accepted value that
+> deliberately arms neither request bit. The request bits stay false because the patterns do NOT list it.
 > **N4** — red mutation (6) respecified: drop the `sdf_term` write access while **arm A** (mode ≠ 0) runs;
 > the detector is `graph.rs:643-690`'s debug authoring guard on the tails' read of a non-seeded transient —
 > NOT sync validation, which this box's record says cannot see it.
@@ -625,9 +647,11 @@ But **P0-4 stands and is not answered by that tie.** DP6 and DP7 are *partially 
 >
 > **`R` is certified per row, per fixture, per session, and inherited from nothing** — not DP6-0's 4 608 ns (void: the instrument changed under it), not DP2's 24 576, not DP4's 1 024.
 >
-> **Reported, not gating:** `Δ median(PRESHADE)`. DP6 emits no SSAO, à-trous, DDGI or hwrt command; a movement beyond `R_preshade` means the workload changed and the run is re-taken with the cause stated.
+> **Reported, not gating:** `Δ median(PRESHADE)`, **in two directions — across the rung AND between arms on the same side.** DP6 emits no SSAO, à-trous, DDGI or hwrt command; a movement beyond `R_preshade` means the workload changed and the run is re-taken with the cause stated, and a **between-arm** movement beyond `R_preshade` is a stated-cause anomaly exactly like the across-rung one.
 >
-> **G-MARGINAL (informational).** `Δ_AB` on `ZONE_VB_GEO`, now BOTTOM-stamped and therefore an exact difference of prefix-completion times. Reported against 6 144 ns with its ratio; **not adjudicated** — the rung no longer claims it.
+> **Why the between-arm direction was added (Rev 4.4), with the finding that forced it.** The split row's arithmetic does not close: `NET(on) − NET(off) = 23 552` on `[vb_both_ssao]` against `36 864` (id 10) `+ (16 384 − 13 312)` (GEO) `= 39 936` of measured per-zone armed change — a **16 384 ns** shortfall, 32 ticks, **3.2 × `R`, so not rounding** — while the fused row's closes to 1 536 ns (3 ticks, below `R`). The most likely carrier is structural and was unpriced: `NET = PRODUCE_RUN − PRESHADE` and `PRESHADE ≈ 304 µs`, so a **5.4 % drift between arms injects ±16 µs into `NET`** — inside `PRESHADE`'s own spread and invisible to a clause that only compares it across the rung. This does **not** change G-REDUCE's bar; it makes the subtraction's sensitivity visible. It does not touch the fused row, where `PRESHADE ≈ 0` on both sides — which is incidentally why the fused arithmetic closed and the split one did not.
+>
+> **G-MARGINAL (informational).** `Δ_AB` on `ZONE_VB_GEO`, now BOTTOM-stamped and therefore an exact difference of prefix-completion times. Reported against 6 144 ns with its ratio; **not adjudicated** — the rung no longer claims it. **`Δ_AB` stays informational and non-adjudicated, but DP6d reports it BEFORE interpreting G-NEUTRAL** — `M_geo` is 41 % of the fused row's predicted width and the term that decides it, so a red read without it will be attributed to "consolidation costs" when the decomposition may say "the march costs, and it would have cost in either host."
 >
 > **Clause 5, four clauses. A row failing any is INCONCLUSIVE — never PASS, never FAIL:**
 > 1. either side's 3-leg relative spread of the gated median > 10 %;
@@ -675,7 +699,13 @@ Collapse SV0's **two** possible producers into **one**, hosted in `vb_geo.comp.h
 - **Maintenance:** −1 shader source, −1 committed `.spv`, −1 pipeline, −1 Set-0 layout, −1 per-FIF descriptor ring, −1 zone id, −1 `spv_sync` test, −75 lines of `record_vb`, −1 declared pass. One producer, one code path, one zone story, one cost model.
 - **Performance, stated per boot class** (never as one headline):
   - already-split boots: **−1 fetch, −1 dispatch** = `D + F ∈ [20 939, 29 184] ns` deleted.
-  - fused boots: **cost-neutral by construction** (2/2 → 2/2), gated as such.
+  - fused boots: ~~**cost-neutral by construction** (2/2 → 2/2), gated as such.~~ — **WITHDRAWN at
+    Rev 4.4: a construction claim refuted by measurement.** The fetch/dispatch counts are still
+    2/2 → 2/2, but the boot changes **leg class** and pays `E_split_host` (measured 11 264 ns at
+    DP6-0b), so neutrality is a **measured question, not a construction**. What replaces it:
+    **predicted `Δ NET ∈ [−5 404, +14 848] ns`, point estimate `+1 034`**, against a `+5 120` bar
+    (`R_neutral` as certified at DP6-0b; DP6d certifies its own) — see Decision 3's re-derivation.
+    **Neutrality is claimed by measurement at DP6d, not by counting.**
 - **Not a goal:** reducing SV0's marginal armed cost below the inherited 2× threshold. That is DP7's job, and DP6 must not foreclose it.
 
 ## Context and constraints
@@ -685,6 +715,8 @@ Invariants 1–7 from Rev 1 are carried unchanged, plus:
 8. **`vb_geo`'s thread↔pixel mapping stays one-per-full-res-`vb_id`-pixel.** DP7's antagonism follows from it; any rung that changes it re-opens DP6e's disposition.
 9. **`vb_sv0_host ⇒` (pipeline pick == sv0) `∧` (`sdf_term` write declared).** One predicate, two consumers — the O1 discipline.
 10. **`vb_sdf_mesh_mode != 0 ⇒ vb_sv0_host`.** Host is the weaker predicate.
+11. **`vb_sv0_split ⇒ vb_sdf_mesh_storage_ok`** (DP6a review, W3). The term's request cannot arm the split on a device that cannot host the `sdf_term` ring — otherwise the boot pays the consolidation's debits with its credit structurally zero.
+12. **`vb_sv0_split ∧ mesh_leg ⇒ vb_sdf_mesh_armable()`** (DP6a review, W3). The converse of 11 on the rows that matter: once the split is armed BY the term on a mesh-carrying leg, every remaining conjunct of `armable` is already implied, so the rung can never arm the split for a term it then refuses to deliver.
 
 ## Key decisions
 
@@ -704,7 +736,109 @@ Unchanged; on the critic's preserve list. **P2-2 edit:** the record-site `debug_
 
 **Why consolidation and not two producers.** The surviving second producer would be the one that **failed its inherited cost clause at 5.75× and does not claim it**. Shipping it as the fused-boot path means the feature's cost jumps 2–3× depending on whether an unrelated consumer (SSAO) happens to be armed — a cliff the owner cannot predict from the config. Principle 10.
 
-**Trade-off, priced.** A VB×Both boot wanting SV0 and nothing else now allocates `thin_normal`, runs `vb_geo`, and shades through `vb_shade_split`. **Gated by G-NEUTRAL**, which is the only reason this trade is acceptable: if it costs, the rung reds.
+**Trade-off, priced.** A VB×Both boot wanting SV0 and nothing else now allocates `thin_normal`, runs `vb_geo`, and shades through `vb_shade_split`. **Priced at Rev 4.4 with `E_split_host` measured:** the four terms that do not cancel are tabulated once, in the RE-DERIVED sub-block immediately below, and they give **`Δ NET_fused ∈ [−5 404, +14 848] ns`, point estimate `+1 034 ns`**, against G-NEUTRAL's `+5 120` bar. **G-NEUTRAL remains the only reason this trade is acceptable — and the prediction does not exclude a red: the interval straddles the bar in the upper corner where `E_split_host` and `GEO_base` are both pessimistic.**
+
+#### Trade-off, RE-DERIVED at DP6-0b (§R4.3.7's block, discharged)
+
+**Release condition, stated so the block reads as discharged rather than forgotten.** §R4.3.7's
+middle branch blocked DP6a until this row absorbed `E_split_host`. This sub-block **is** that
+absorption: the block is lifted and DP6a may land. It is an arithmetic update to one decision; no
+design changes.
+
+**§0 — a premise correction first, because it changes which terms are measured.**
+
+> **`ZONE_VB_GEO`'s two DP6-0b arms (13 312 off / 16 384 on) do NOT bound `M_geo`.**
+
+At DP6-0b the producer has **not moved** — the march is still in the dedicated pass. `vb_geo` runs
+the **same base variant on both arms**, so the two cells differ only by whatever arming perturbs
+around it. Their Δ is **3 072 ns, below `R_neutral` = 5 120**, i.e. indistinguishable from zero — the
+same shape as DP6-0's GEO Δ of −4 096 below its 4 608. **`M_geo` is therefore unmeasured and stays
+the design's model `[6 100, 14 400]`.** It is first measured at DP6d, as `Δ_AB` on the
+now-BOTTOM-stamped `ZONE_VB_GEO` — which is exactly G-MARGINAL's own quantity, whence the
+gate-ordering consequence recorded in G-MARGINAL's clause.
+
+What the two GEO arms *do* give is **`GEO_base` — the cost of `vb_geo` itself, `[13 312, 16 384]`** —
+and after the restamp that number is **transferable across boots**, because a BOTTOM begin no longer
+admits the predecessor drain that made DP6-0's GEO cell fixture-specific. That transferability is
+what the restamp bought, and this re-derivation is its first consumer.
+
+**The four terms.** Before-side, MEASURED, no modelling: `NET([vb_both_sdf], arm A) = 62 976 ns` at
+DP6-0b. Four terms do not cancel; everything else does. `id 6`'s unsplit hzb slot runs on both sides
+(same fixture, same occlusion arming); `vb_viewt` is `Forbidden` on both sides of this fixture
+(§R4.3.6's two-arm derivation); `PRESHADE` is absent-`Forbidden` before and `≈ 0` after.
+
+| # | term | value | provenance |
+|---|---|---|---|
+| 1 | dedicated pass deleted | **−35 328** | **MEASURED**, same-fixture paired: `NET(on) − NET(off) = 62 976 − 27 648`. Corroborated by the id-10 zone median (36 864) to **1 536 ns = 3 ticks**, and by DP4's independently published pass median of **35 328** |
+| 2 | `vb_geo` newly runs (`GEO_base`) | **+13 312 … +16 384** | **MEASURED** on `[vb_both_ssao]`, transferable because id 11 is now BOTTOM-stamped. Includes the `thin_normal` write and the NORMAL union |
+| 3 | march moves into `vb_geo` (`M_geo`) | **+6 100 … +14 400** | **MODEL** — the design's own band. **Unmeasured; §0 above says why the DP6-0b cells cannot bound it** |
+| 4 | shade fused→split (`E_split_host`) | **+10 512 … +19 392**, median **11 264** | **MEASURED** cross-fixture (`shade_derived` 35 840 on the split fixture − re-taken fused shade 24 576), band from the 3×3 leg cross-product |
+
+**Prediction:** `Δ NET_fused ∈ [−5 404, +14 848] ns`, **point estimate `+1 034 ns`**, taken at term
+medians (`GEO_base` 14 848, `M_geo` 10 250, `E_split_host` 11 264). **Where the width comes from:**
+`E_split_host` **43.8 %** (8 880), `M_geo` **41.0 %** (8 300), `GEO_base` **15.2 %** (3 072).
+
+**Cross-check — corrected at the DP6a review (W2).**
+~~Reconstructing the after-side absolutely — `3 072` (common frame, = 27 648 − 24 576) `+ GEO_base +
+M_geo + 24 576 + E_split_host` — reproduces the same interval to the nanosecond, so the two routes
+are not one calculation written twice.~~ **WITHDRAWN: that route is the same calculation
+rearranged.** The `24 576` enters once positively and once inside the `3 072`, so it cancels
+identically; a slip in any input reproduces itself down both routes, and "agrees to the nanosecond"
+is what an algebraic identity does, not what a corroboration does.
+
+**Replaced by a route with DISJOINT inputs.** The fused row can be reached from the *split* row,
+which shares no measured cell with the primary decomposition except by prediction:
+
+`Δ NET_fused = Δ NET_split + GEO_base + E_split_host`
+
+— because the split side already runs `vb_geo` and already hosts the tail in `vb_shade_split`, so
+those two terms are exactly what the fused side additionally pays. Feeding it the split row's own
+`Δ NET_split = −36 864 + M_geo` (whose deletion term is the **id-10 zone median on
+`[vb_both_ssao]`**, a different fixture and a different statistic from the primary route's
+same-fixture paired `35 328`) gives **`[−6 940, +13 312]`, point estimate `−502`** against the
+primary's `[−5 404, +14 848]`, point `+1 034`. **The two disagree by 1 536 ns — 3 ticks — which is
+the deletion term measured two ways on two fixtures**, and that gap is the corroboration: it is a
+measurement difference, not an identity.
+
+Two caveats carry: the route is only as good as `M_geo`, which is still a model on both sides; and
+**§3.3's 16 384 ns split-row shortfall must be dispositioned at DP6d before this check is read**,
+since it is the split row's own arithmetic that the second route consumes.
+
+**Verdict: the point estimate clears the bar with 4 086 ns of margin; the interval straddles it.**
+Bar `Δ ≤ +R_neutral = +5 120` (certified at DP6-0b; DP6d certifies its own and inherits nothing).
+Point estimate **+1 034** clears. Upper end **+14 848** exceeds by 9 728. Lower end **−5 404** is a
+net *improvement* on a fused boot, which the rung never claimed.
+
+**What has to happen for it to red, stated as a region.** Red requires
+`GEO_base + M_geo + E_split_host > 40 448`.
+
+| holding the other two at | `M_geo` ceiling | share of the model band that clears |
+|---|---|---|
+| medians (14 848 / 11 264) | **14 336** | **99.2 %** — only the top 64 ns of `[6 100, 14 400]` fails |
+| pessimistic (16 384 / 19 392) | 4 672 | 0 % — reds across the whole band |
+| optimistic (13 312 / 10 512) | 16 624 | 100 % |
+
+**So the red region is real but confined to the upper corner of the joint space:** it requires
+`E_split_host` and `GEO_base` to land at their pessimistic ends **together**, and `M_geo` near its
+model top. At median inputs the bar sits essentially exactly at the top of the `M_geo` model band — a
+coincidence worth naming, because it means the fused row's verdict is decided almost entirely by
+term 3.
+
+**Disposition — what DP6d's measurement decides.** **`M_geo`, and it is the one term that is a model
+rather than a measurement.** DP6d measures it directly as `Δ_AB` on `ZONE_VB_GEO` — arm A minus arm B
+on one boot, one stream, both BOTTOM-stamped, so it is an exact difference of prefix-completion
+times. It also re-measures `E_split_host` on the after-side (where `shade_derived` is read on
+`[vb_both_sdf]` itself rather than transferred), collapsing term 4's cross-fixture provenance.
+
+> **Predicted disposition:** G-NEUTRAL passes unless `M_geo` lands above
+> `40 448 − GEO_base − E_split_host` as those two are then measured. If it reds, OQ1's pre-agreed
+> fallback applies unchanged — restrict DP6e to split boots, keep the dedicated pass for fused — and
+> it now has a **quantified** trigger region instead of a bare contingency.
+
+**One distinction, recorded because both quantities are now live and both in nanoseconds on the same
+row.** The inherited 2× reference (6 144 ns) is about **the term's marginal cost inside an
+already-fetching host** — that is `M_geo`, i.e. `Δ_AB`. **`E_split_host` is a host-change cost, a
+different quantity, and must not be folded into `Δ_AB`.**
 
 ### Decision 4 (REWRITTEN) — env-only host arm; boot-frozen contract stated; Rev-5 erratum recorded
 
@@ -719,15 +853,42 @@ let vb_sv0_split   = matches!(path, RenderPath::VisibilityBuffer)
                   && consumers.sdf_mesh_term_wanted && sdf_soft_march;
 let mesh_geo_shade_split = matches!(path, RenderPath::VisibilityBuffer)
                         && mesh_leg && (pre_light || vb_sv0_split);
-// NORMAL union gains `|| vb_sv0_split`  (preserves `split => NORMAL`, R9b §7)
+// NORMAL union gains `|| mesh_geo_shade_split`  (see the O5 amendment below)
 // later, unchanged in effect: if sdf_soft_march { shadow.insert(SDF_SOFT_MARCH) }
 ```
+
+> **Amendment, DP6a review (W3) — the cap conjunct.** `vb_sv0_split` gains
+> `&& vb_sdf_mesh_storage_ok`, hoisted as `let vb_sdf_mesh_storage_ok = caps.rg8_unorm_storage;`
+> so the RG8 fact has ONE spelling and the `vb_sdf_mesh_storage_ok` FIELD reads the same binding:
+> ```rust
+> let vb_sdf_mesh_storage_ok = caps.rg8_unorm_storage;
+> let vb_sv0_split = matches!(path, RenderPath::VisibilityBuffer)
+>                 && consumers.sdf_mesh_term_wanted && sdf_soft_march && vb_sdf_mesh_storage_ok;
+> ```
+> **SCOPE WARNING: the conjunct goes on `vb_sv0_split` ALONE, never on `sdf_soft_march`.** The
+> inline soft march writes no storage image and needs no RG8; moving the cap up one line would
+> disarm SDF soft shadows on every non-RG8 device.
+>
+> **Deciding argument.** On a non-RG8 device there is no dedicated pass to delete, so the
+> consolidation's credit is **zero** and its debits stand alone: `GEO_base + E_split_host` =
+> **+26 112 ns/frame** at medians, taking `NET` from 27 648 to **53 760 — +94.4 %, 5.1 ×
+> `R_neutral`** — boot-frozen for the process, in exchange for a term that is never produced.
+>
+> **Amendment, DP6a review (O5) — the NORMAL union's antecedent.** The union reads
+> `|| mesh_geo_shade_split`, **not** `|| vb_sv0_split`. The obligation is `mesh_geo_shade_split ⇒
+> NORMAL`, so the tightest discharging term is the antecedent itself and the implication becomes
+> true by construction. `vb_sv0_split` carries no `mesh_leg` conjunct, so it is true on a
+> `VB × Sdf` boot where the split is false — arming a NORMAL channel on a leg that runs no
+> `vb_geo` to write it, which is the bound-but-never-written 09600 class the MOTION arm refuses by
+> name. Composed with the W3 amendment, **`vb_sv0_split` ends with exactly one consumer.**
 `sdf_mesh_term_wanted` is set at the **`boyko_app::gpu_scene` boot seam** from `LightingConfig::vb_sdf_mesh_shadow || ::vb_sdf_mesh_ao`, OR'd with an **env-only** host flag (`BOYKO_SDF_MESH == "host"`) read at that same seam. **No new `LightingConfig` field.**
 
 **Q3 answered.** Rev 1 put a measurement knob on a production `Resource`; every sibling knob (`BOYKO_VB_ZONE`, `BOYKO_SDF_MESH=on|shadow|ao`, `BOYKO_AA`, `BOYKO_SSAO`, `BOYKO_CSM_OFF`) is env-gated. Nothing kept a shipped title from setting the field. Now nothing *can*: there is no field. The env read lives beside the existing `BOYKO_SDF_MESH` read, so it adds one match arm, not a plumbing hop.
 
 **P1-3 — the boot-frozen contract, stated.** `resolve_render_path` runs **once**, at boot (`render_path_config.rs:1374-1376`); `LightingConfig` requests are re-asserted **every frame** (`light.rs:2231-2233`). Therefore:
-> **Contract.** `sdf_mesh_term_wanted` is a **boot snapshot of the request**. A world that arms `vb_sdf_mesh_shadow`/`_ao` at frame 100 gets `mesh_geo_shade_split == false`, `vb_sdf_mesh_armable() == false`, and `sync_sv0_light_gate` clamps the request to 0 **for the process lifetime**, reported once by the cold latch. To arm SV0 the request must be present **before the first `resolve_render_path` call**.
+> **Contract.** `sdf_mesh_term_wanted` is a **boot snapshot of the request**. A boot that does not carry `vb_sdf_mesh_shadow`/`_ao` at resolve time gets `mesh_geo_shade_split == false`, `vb_sdf_mesh_armable() == false`, and `sync_sv0_light_gate` clamps the request to 0 **for the process lifetime**, reported once by the cold latch. To arm SV0 the request must be present **before the first `resolve_render_path` call**.
+>
+> ⚠️ **Where that line actually falls, corrected at the DP6a review (W4).** This clause used to illustrate with "a world that arms the request at frame 100", which reads as a warning about late dynamic toggling and understates the deadline by the entire startup phase. **`run_windowed` takes the snapshot at `runner.rs:536` and calls `app.finish()` at `:627`** — no user system of any kind has run at `:536`. **A STARTUP SYSTEM that sets the request is therefore ALREADY TOO LATE**, and its only symptom is one `eprintln!` from the clamp's cold latch. The request must be `insert_resource`d onto the `App` **before `run_windowed` is entered**. `clusters_wanted` sits on the same boundary and carries the same trap.
 
 This is the **same** contract `ssao_on` already carries (`SsaoConfig::enabled` is a boot read; a late SSAO enable is a no-op under VB), so it introduces no new class — but it was previously true only of *capabilities*, and it is now true of a *request*. Two consequences, both owned:
 - **`runner.rs` is an affected file** (it publishes the request into the boot seam) and gains the contract comment.
@@ -736,7 +897,7 @@ This is the **same** contract `ssao_on` already carries (`SsaoConfig::enabled` i
 **P1-2 — the Rev-5 erratum, recorded.**
 > **Erratum (DP6) to Rev 5's MANDATORY single-predicate rule** (`render_path_config.rs:74-79`, `:985-987`, `:1009-1010`). Rev 5 says one union `pre_light` is the **sole** trigger for three flags. After DP6 that holds for **two** of them — `needs_depth_prepass` (Forward) and `sdf_geo_shade_split` (the SDF leg) still read `pre_light` alone. The **VB** flag reads `pre_light ∨ vb_sv0_split`. The rule is restated as: *one predicate for the Forward and SDF flags; the VB flag is that predicate OR the VB-only SV0 term.*
 
-**Why the W4 hole class cannot re-open.** W4 was: *a MOTION-only pre-light consumer under Forward reads frame-stale motion because the prepass was not armed* — a **consumer** left without its **producer**. `vb_sv0_split` is the opposite shape: it conjoins `path == VisibilityBuffer` (so it can never reach `needs_depth_prepass`), it consumes **no** thin-aux channel, and it exists precisely to arm a **producer** (`vb_geo_sv0`) for an image it writes itself. There is no consumer it can leave unfed. The `|| vb_sv0_split` on the NORMAL union is likewise producer-side: it keeps `split ⇒ NORMAL` true so `vb_geo`'s unconditional `thin_normal` write and the mask agree (R9b's own stated reason: "the mask must stay the single truth").
+**Why the W4 hole class cannot re-open.** W4 was: *a MOTION-only pre-light consumer under Forward reads frame-stale motion because the prepass was not armed* — a **consumer** left without its **producer**. `vb_sv0_split` is the opposite shape: it conjoins `path == VisibilityBuffer` (so it can never reach `needs_depth_prepass`), it consumes **no** thin-aux channel, and it exists precisely to arm a **producer** (`vb_geo_sv0`) for an image it writes itself. There is no consumer it can leave unfed. The NORMAL union's new term is likewise producer-side: it keeps `split ⇒ NORMAL` true so `vb_geo`'s unconditional `thin_normal` write and the mask agree (R9b's own stated reason: "the mask must stay the single truth"). ~~That term is `|| vb_sv0_split`.~~ — **corrected at the DP6a review (O5): it is `|| mesh_geo_shade_split`**, the obligation's own antecedent; the `vb_sv0_split` spelling armed the channel on `VB × Sdf`, where the split is false and no `vb_geo` runs.
 
 **`split ⇒ NORMAL` cost, unchanged from Rev 1:** one `oct_encode` (~10 ALU) + two already-warm loads + one RGBA8 store, against 128 march iterations × N-edit field walks plus 5 AO taps. **<1 %.** Buying that back would cost an invariant, a 4th variant, and a test.
 
@@ -753,7 +914,7 @@ This is the **same** contract `ssao_on` already carries (`SsaoConfig::enabled` i
 | **@4** | **t0** | **`Buf`** (edit list) — **`register(t0)`, P1-4** | unread | READ |
 
 **P1-6 degrade, stated.** `vb_geo_aux_set` is built on **every split boot** (`targets.rs:347-351`), including SSAO boots on devices without `rg8_unorm_storage_ok` — where the `sdf_term` ring is created **SAMPLED-only** (`:1144-1155`). A `StorageImage` entry over it would violate `VUID-VkWriteDescriptorSet-descriptorType-00339` at update time.
-> **Degrade: placeholder-bind @3 to `thin_normal[i]` when `!ctx.device_caps().rg8_unorm_storage_ok`.** Same descriptor type (`STORAGE_IMAGE`), `thin_normal` always carries STORAGE usage, and this is the shipped R9d idiom verbatim (`vb_geo_aux_set`'s @1 motion slot is already placeholder-bound to `thin_normal[i]`, `targets.rs:347-351`). Provably inert: `!rg8_ok ⇒ !vb_sdf_mesh_armable ⇒ mode 0 ⇒ !vb_sv0_host ⇒ `sv0` module never bound ⇒ @3 never referenced by any executing module`. @4 needs no degrade — `edit_list` is always a valid `StorageBuffer`.
+> **Degrade: placeholder-bind @3 to `thin_normal[i]` when `!ctx.device_caps().rg8_unorm_storage_ok`.** Same descriptor type (`STORAGE_IMAGE`), `thin_normal` always carries STORAGE usage, and this is the shipped R9d idiom verbatim (`vb_geo_aux_set`'s @1 motion slot is already placeholder-bound to `thin_normal[i]`, `targets.rs:347-351`). Provably inert, and the chain gained a new HEAD at the DP6a review (W3): **`!rg8_ok ⇒ !vb_sv0_split ⇒ !mesh_geo_shade_split`** (unless some other pre-light consumer arms it) `⇒ !vb_sdf_mesh_armable ⇒ mode 0 ⇒ !vb_sv0_host ⇒ `sv0` module never bound ⇒ @3 never referenced by any executing module`. The new head is what keeps a non-RG8 boot from paying `vb_geo` + `vb_shade_split` for a term it can never produce. @4 needs no degrade — `edit_list` is always a valid `StorageBuffer`.
 
 **Refutation of the critic's parenthetical, with the citation.** The shipped `sdf_mesh_shadow_set0` does **not** carry this hole. `targets.rs:4271-4279` gates its construction on `ctx.device_caps().rg8_unorm_storage_ok`, with a comment naming the exact hazard:
 
@@ -804,10 +965,14 @@ Three properties this buys, all needed:
 
 **The cost table's four cells, restated on the Rev 4 comparator** (one quantity on every row, and it does not name which producer ran):
 
-| | today | after DP6 |
-|---|---|---|
-| fused, SV0 armed | `ZONE_VB_PRODUCE_NET` (`≡ PRODUCE_RUN`; `PRESHADE` absent-`Forbidden`) | `ZONE_VB_PRODUCE_NET` |
-| split, SV0 armed | `ZONE_VB_PRODUCE_NET` | `ZONE_VB_PRODUCE_NET` |
+| | today | today, MEASURED at DP6-0b | after DP6 |
+|---|---|---|---|
+| fused, SV0 armed | `ZONE_VB_PRODUCE_NET` (`≡ PRODUCE_RUN`; `PRESHADE` absent-`Forbidden`) | **62 976 ns** (`[vb_both_sdf]`, arm A) | `ZONE_VB_PRODUCE_NET` |
+| split, SV0 armed | `ZONE_VB_PRODUCE_NET` | **97 280 ns** (`[vb_both_ssao]`, arm A) | `ZONE_VB_PRODUCE_NET` |
+
+The middle column is a number where one exists — the two armed cells of the DP6-0b RESULT block, on
+the repaired instrument. The after-DP6 column stays symbolic because it is not measured until DP6d;
+its **prediction** for the fused row is Decision 3's re-derived sub-block.
 
 Both rows still need their brackets to exist **before** the producer moves — hence **rung DP6-0**, which minted `ZONE_VB_GEO` alone, and **rung DP6-0b**, which mints ids 12/13/14 and re-takes DP6-0's four cells on the repaired instrument. Baselines are then a *paired* before/after on one instrument, not a comparison against a remembered number — and DP6-0's own four cells are **void as baselines** (the instrument changed under them) while being **kept as the evidence for the repair**.
 
@@ -986,6 +1151,8 @@ Revert-red at every rung. **Semantic point of no return is DP6c** (Q4).
   > ⚠️ **The margin to branch 1 is 272 ns — half a timer tick — on the worst leg pairing.** That is *below this box's resolution*, so the branch-1/branch-2 boundary is **not resolvable** by this measurement: the verdict is branch 2, and the honest statement is that branch 1 cannot be excluded by 272 ns. What makes the verdict actionable anyway is its **robustness across the 3×3 leg cross-product: `E_split_host ∈ [10 512, 19 392] ns`** — every pairing is inside the middle band, so no pairing produces branch 1 or branch 3.
   >
   > **Consequence, per §R4.3.7's own text: `DP6a does not land` until Decision 3's fused row is re-derived with `E_split_host`.** G-NEUTRAL's after-side pays this surcharge and its before-side does not, so the fused cost table is understated by 10.5–19.4 µs until it is carried explicitly.
+  >
+  > **DISCHARGED at Rev 4.4** — the re-derivation is Decision 3's *"Trade-off, RE-DERIVED at DP6-0b"* sub-block, which carries `E_split_host` explicitly as term 4 of four. **DP6a is unblocked.**
 
   *Red mutations:* **(a) id 11 back to TOP ⇒ BUILD FAILURE (`E0080`) at the `const` stage pin, and — at runtime — the `[e6 → b11]` gap check.** *(Corrected against measurement; see the block below.)* (b) `PRODUCE_RUN` closed inside the split block ⇒ `Torn` on the fused leg; **(c) the `if produce_run_armed` guard dropped from `PRODUCE_RUN`'s CLOSE while its open stays inside `mesh_leg` ⇒ `GpuZoneUnmatchedEnd` on the VB×Sdf leg, in a RELEASE run** *(direction corrected: an open moved outside `mesh_leg` with a gated close is open-without-close, i.e. `Torn`, not an unmatched END)*; (d) declare `ZONE_VB_GEO` `Forbidden` on the split leg ⇒ expectation table reds.
 
@@ -1001,7 +1168,7 @@ Revert-red at every rung. **Semantic point of no return is DP6c** (Q4).
   >
   > `OrderCensus` keeps its place for the direction it *did* prove — the per-frame containment and ordering of ids 10/11/12/13 — and its `frames_checked` remains the number that makes `violations == 0` readable. It is simply not the detector for this mutation on this box.
 
-- **DP6a — resolver.** The consumer bit, the hoist, `mesh_geo_shade_split`, the NORMAL union, the `armable` conjunct, the env `host` arm, the doc corrections, the Rev-5 erratum. *Gate:* the eight fixtures above green after their stated edits; `sdf_mesh_term_wanted == false ⇒ every ResolvedRenderPath field bit-identical to pre-DP6` (tested, not argued); **all goldens byte-identical**.
+- **DP6a — resolver.** The consumer bit, the hoist, `mesh_geo_shade_split`, the NORMAL union, the `armable` conjunct, the env `host` arm, the doc corrections, the Rev-5 erratum. *Gate:* the eight fixtures above green after their stated edits; `sdf_mesh_term_wanted == false ⇒ every ResolvedRenderPath field bit-identical to pre-DP6` (tested, not argued); **all goldens byte-identical**. **Gate content unchanged by Rev 4.4** — DP6a is resolver-only, gated on fixture truth tables and byte-identity, none of which the re-derivation touches. **Precondition discharged:** §R4.3.7's block is lifted by Decision 3's re-derivation (`E_split_host = 11 264 ns`, band `[10 512, 19 392]`); **DP6a may land.**
 - **DP6b — the dark variant.** Guarded span; `vb_geo_aux_layout` @3/@4 + the `!rg8_ok` placeholder; `vb_geo_sv0.comp.spv`; `embed_spirv!`; boot pipeline. Selected by nothing. *Gate:* `vb_geo.comp.spv`/`vb_geo_mv.comp.spv` byte-identical; new `spv_sync` row 7; **the new two-sided `-P` gate**; `spirv-val`; `sdf_field_edsl_sync` re-pointed; manifest row; all goldens.
 - **DP6c — select, declare, record.** `vb_sv0_host`; the graph diff; the pick; `ZONE_VB_GEO` recording. Dedicated pass becomes **unreachable**. *Gate:* **new pin `[vb_both_ssao]`** (VB×Both + SSAO, SV0 disarmed — the boot class DP6 changes most, unpinned today) byte-identical across the rung; `[vb_mesh_ssao]` byte-identical; **live pixel-signature armed**: `SV0_MIN_SHADOWED_PIXELS`/`SV0_MIN_AO_PIXELS` with **(ii-a) shadow alone and (ii-b) AO alone each moving pixels on its own**; `sv0_arm_matrix.ps1` re-pointed; declare↔record parity asserts.
 - **DP6d — measure.** Arms A/B/C on both boot classes. *Gates (Rev 4 — every row reads `ZONE_VB_PRODUCE_NET`, see the gate text above):* **what DP6d does FIRST, before any arm is read:**
@@ -1033,22 +1200,24 @@ Revert-red at every rung. **Semantic point of no return is DP6c** (Q4).
 
 **P1-5 — the `-P` gate is NEW work.** No `.rs`/`.ps1` in-tree invokes `dxc -P`; only plan prose cites it (the recurring dead-datum shape — five instances on record). **Owning file: `crates/boyko_rhi_vulkan/tests/vb_geo_preprocess_sync.rs`, landing at DP6b**, cloning `find_dxc()`/temp-dir discipline from `cluster_cull_spv_sync.rs`. Two assertions: (i) `dxc -P vb_geo.comp.hlsl` (no defines) is **character-identical** to the pre-DP6b file's `-P`; (ii) with `-D VB_SV0_TERM=1` it **differs**. **The pre-DP6b hash is RECOMPUTED via `git show <DP6b^>:crates/.../vb_geo.comp.hlsl`, not committed** — a committed literal is a datum nobody re-derives and the first "fix" is to re-bless it; `git show` makes staleness impossible. Skips (with `eprintln!`) when no pinned `dxc` resolves, per house idiom.
 
-**Property-based (quantified, not sampled):** `vb_sdf_mesh_armable() ⇒ mesh_geo_shade_split`; `mesh_geo_shade_split ⇒ thin_aux.NORMAL`; `vb_geo_mv_active() ⇒ !vb_sv0_host` (the variant-count proof); `vb_sdf_mesh_mode != 0 ⇒ vb_sv0_host` (invariant 10).
+**Property-based (quantified, not sampled):** `vb_sdf_mesh_armable() ⇒ mesh_geo_shade_split`; `mesh_geo_shade_split ⇒ thin_aux.NORMAL` — **BY CONSTRUCTION after the O5 amendment**, since the union's new disjunct IS the antecedent, so this one can no longer fail independently; `vb_geo_mv_active() ⇒ !vb_sv0_host` (the variant-count proof); `vb_sdf_mesh_mode != 0 ⇒ vb_sv0_host` (invariant 10).
+
+**The CONVERSE companion, added at the DP6a review (O5) because it is the property that would have caught the defect:** **`thin_aux.NORMAL ∧ path == VisibilityBuffer ⇒ mesh_geo_shade_split ∨ another pre-light consumer`.** `mesh_geo_shade_split ⇒ NORMAL` says the channel is armed wherever `vb_geo` writes it and says nothing about the other direction — and the other direction is where the first spelling failed: `|| vb_sv0_split` armed NORMAL on a `VB × Sdf` boot that runs no `vb_geo` at all. Shipped as `under_vb_the_normal_channel_is_never_armed_without_a_writer_or_a_reader`, quantified over the same path × legs × caps × 2^12-consumer-mask space as the exclusion sweep. It is deliberately a statement about the union's permitted MEMBERSHIP rather than its formula, so it reds exactly when a disjunct that is neither the writer nor one of the five readers is added.
 
 **Q5 answered.** No committed pin covers split+SV0-armed. `[vb_mesh_ssao]` is VB×**Mesh** — no SDF leg — so `SDF_SOFT_MARCH` never arms and it can *never* pin SV0; `[vb_both_sdf]` is fused. With the new bit defaulting false, none would arise by itself. **This is not left as intended-but-unpinned:** DP6c adds `[vb_both_ssao]` (split, SV0 **disarmed**) as a real byte pin on the boot class the rung most changes, and seeds `[vb_both_ssao_sv0]` **PENDING** for the owner-eval packet — the `[vb_both_sdf]` precedent. The armed combination stays proven by adequacy floors until the owner blesses the frame.
 
-**Red mutations to DEMONSTRATE:** (1) move a statement outside `#ifdef VB_SV0_TERM` → `-P` gate reds; (2) drop the `mesh_geo_shade_split` conjunct → `sv0_armable_requires_the_split` reds; (3) default the consumer bit `true` → goldens red; (4) move `Buf`'s vk::binding without the table → `sdf_field_edsl_sync` reds; (5) drive the pick from `mode != 0` instead of `vb_sv0_host` → arm B binds `base` and `Δ_AB` collapses to the whole march (the P0-3 mutation); (6) drop the `sdf_term` access while keeping the pick → validation/sync red on arm B.
+**Red mutations to DEMONSTRATE:** (1) move a statement outside `#ifdef VB_SV0_TERM` → `-P` gate reds; (2) drop the `mesh_geo_shade_split` conjunct → `sv0_armable_requires_the_split` reds; (3) default the consumer bit `true` → goldens red; (4) move `Buf`'s vk::binding without the table → `sdf_field_edsl_sync` reds; (5) drive the pick from `mode != 0` instead of `vb_sv0_host` → arm B binds `base` and `Δ_AB` collapses to the whole march (the P0-3 mutation); (6) drop the `sdf_term` access while keeping the pick → validation/sync red on arm B. **(7) [DP6a review, W3] drop the `&& vb_sdf_mesh_storage_ok` conjunct from `vb_sv0_split` → `sv0_arm_matrix`'s row *"VB x Both + term wanted, no RG8 storage"* flips (`expect_split` false → true, and the matrix reds on the split assertion before it reaches armability).**
 
 ## Open questions
 
 1. **ADJUDICATED at Rev 4 — REPLACED in full by §R4.** The question was *"can G-NEUTRAL fail on fused boots, and what then?"*. DP6-0's measurement turned it from a hypothetical into a number, and the number says Rev 3's comparator could not have adjudicated it either way: `ZONE_VB_SHADE` read **4.58×** higher on the split boot than the fused one, of which the fetch arithmetic explains **< 1 %** and a TOP-latch absorbing ≈ 34 % of a ~256 µs unbracketed predecessor stretch explains the rest (§R4.1.3, §R4.1.5); and the split-side sum `ZONE_VB_GEO + ZONE_VB_SHADE` is a `Σ(median_f)` the reducer's own rule forbids (§R4.1.8). **Disposition: repair the instrument first (rung DP6-0b), then gate on `ZONE_VB_PRODUCE_NET`** — one quantity whose definition never mentions which producer ran, so it is identical on both sides of the fused/split discontinuity by construction (§R4-D2, §R4-D4). The Rev 4 gate text above replaces Rev 3's three bullets.
 
    **The old disposition is retained as the FALLBACK CHAIN, not deleted:** `vb_shade_split` is still not bit-for-bit `vb_resolve` (different Set 1, SSAO combine, DDGI sampling — runtime-gated off but compiled in), and the split still adds the `thin_normal` write, so the fused row can still red *on its merits* once the instrument no longer skews it. Two escalation steps, in order:
-   - ~~**If** DP6-0b's `Δ_host` lands in §R4.3.7's middle branch~~ — **IT DID. MEASURED: `Δ_host = 11 264 ns`, branch 2, `E_split_host` real and material** (see the DP6-0b RESULT block in the ladder for the cells, the 272 ns unresolvable margin to branch 1, and the `[10 512, 19 392]` robustness band). **DP6a does not land** until Decision 3's fused row is re-derived with it. The third branch (`Δ_host > 29 184`) — which would have re-opened DP6's whole cost model — is **excluded** on every leg pairing.
-   - **If G-NEUTRAL then reds on the repaired instrument, or if `R_net > 10 752` makes G-REDUCE INCONCLUSIVE** (§R4.6's open residual 1), the disposition is the one Rev 3 pre-agreed and Rev 4 keeps: **restrict DP6e to split boots and keep the dedicated pass for fused** — the critic's option (b) *with a measurement behind it* rather than as a premise. Pre-agreed here so it is not improvised under a red.
+   - ~~**If** DP6-0b's `Δ_host` lands in §R4.3.7's middle branch~~ — **IT DID. MEASURED: `Δ_host = 11 264 ns`, branch 2, `E_split_host` real and material** (see the DP6-0b RESULT block in the ladder for the cells, the 272 ns unresolvable margin to branch 1, and the `[10 512, 19 392]` robustness band). ~~**DP6a does not land** until Decision 3's fused row is re-derived with it.~~ — **DISCHARGED at Rev 4.4**: the re-derivation is Decision 3's *"Trade-off, RE-DERIVED at DP6-0b"* sub-block, and DP6a may land. The third branch (`Δ_host > 29 184`) — which would have re-opened DP6's whole cost model — is **excluded** on every leg pairing.
+   - **If G-NEUTRAL then reds on the repaired instrument, or if `R_net > 10 752` makes G-REDUCE INCONCLUSIVE** (§R4.6's open residual 1), the disposition is the one Rev 3 pre-agreed and Rev 4 keeps: **restrict DP6e to split boots and keep the dedicated pass for fused** — the critic's option (b) *with a measurement behind it* rather than as a premise. Pre-agreed here so it is not improvised under a red. **Rev 4.4 — the pre-agreed fallback now has a measured region rather than a bare contingency: it applies iff `GEO_base + M_geo + E_split_host > 40 448 ns` as DP6d measures them**, which at term medians means `M_geo` above **14 336 ns**, i.e. only the top 64 ns of its `[6 100, 14 400]` model band (Decision 3's three-row ceiling table).
 2. **DP6d.5 may say half-res is wanted.** Then DP6e must name the post-retirement host shape for it, and the honest answer may be "a new minimal half-res marcher pass" — which partially un-does the consolidation. Recorded as a real risk of Decision 3, not hidden.
 3. **DP2's and DP4's null resolutions disagree** (~24 576 ns vs 1 024 ns, same date, different fixtures) and both are load-bearing for their PASS verdicts. DP6-0 must re-certify on its own fixtures and **inherit neither**. → `docs/OPEN-QUESTIONS.md`.
 
    **Rev 4 extends the do-not-inherit list by one, and the new entry is this design's own:** **DP6-0's 4 608 ns is void as a baseline** — the instrument changed under it when DP6-0b restamped ids 10/11 and added ids 12/13. Every `R` is certified **per row, per fixture, per session**: not DP6-0's 4 608, not DP2's 24 576, not DP4's 1 024. DP6-0's four cells are kept as *evidence for the repair* and republished beside the re-taken ones at DP6-0b; they are never a side of a comparison. The reason the list keeps growing is the same each time — a resolution is a property of one instrument on one fixture in one session, and a number that outlives any of the three is a remembered number, not a measured one.
-4. **`docs/RENDER-PARITY-PLAN.md` §3.2B does not exist** — repo-wide grep for `3.2B` returns zero; §3.2 is the A/B/C options list, next heading §3.3. The lever's entire prior written form is one sentence in DP4's disposition. DP6a adds the erratum rather than pretending the subsection existed.
+4. **`docs/RENDER-PARITY-PLAN.md` §3.2B does not exist** — repo-wide grep for `3.2B` returns zero; §3.2 is the A/B/C options list, next heading §3.3. The lever's entire prior written form is one sentence in DP4's disposition. DP6a adds the erratum rather than pretending the subsection existed. **LANDED at DP6a**: the erratum sits as a blockquote after §3.2's A/B/C list — Option B superseded **under VB only**, its overdraw-invariance rationale preserved (`vb_geo` is also one march per covered pixel), and the withdrawn "cost-neutral by construction" named so a §3.2 reader does not inherit it. The `3.2B` grep still returns zero for a subsection; the two new hits are the erratum's own citation of this line.
 5. **External corroboration still pending.** A `researcher` sweep on published `vb_geom_fetch` cost shares, dedicated-vs-inline practice and its occupancy/VGPR rationale, half-res march savings, and async-compute overlap has not returned to me. Two findings could still move Rev 2: a documented occupancy cliff for merging a long march into a geometry pass would strengthen G-NEUTRAL's risk (open question 1); a large published half-res saving would raise DP6d.5 from probe to blocking rung. **Neither can change the fetch/dispatch counting table**, which is measured on this box — which is why the rung's justification now rests on that table and on consolidation, not on external practice.

@@ -579,12 +579,17 @@ pub fn assert_fixture_invariants(k: u32) {
 
 /// **The trap this fixture folds in** — asserts that no PRE-LIGHT consumer is armed on `app`.
 ///
-/// `ResolvedRenderPath::mesh_geo_shade_split` is `VisibilityBuffer && mesh_leg && pre_light`
-/// (`boyko_render/src/render_path_config.rs:945-946`), and `pre_light` is the union
-/// `ssao || ddgi || shadow_denoise_spatial || shadow_temporal || ssr` (`:918-922`; no `SsrConfig`
-/// type exists yet, so the runner threads a literal `false` at `runner.rs:533`). The three
-/// Resources below are the whole free variable on a `VisibilityBuffer × Mesh` fixture — the path and
-/// the leg are fixed by the worker's own `RenderPathConfig`.
+/// `ResolvedRenderPath::mesh_geo_shade_split` is
+/// `VisibilityBuffer && mesh_leg && (pre_light || vb_sv0_split)` (`boyko_render::resolve_rules`),
+/// and `pre_light` is the union `ssao || ddgi || shadow_denoise_spatial || shadow_temporal || ssr`
+/// (no `SsrConfig` type exists yet, so the runner threads a literal `false`). The three Resources
+/// below are the whole free variable on a `VisibilityBuffer × Mesh` fixture — the path and the leg
+/// are fixed by the worker's own `RenderPathConfig`.
+///
+/// **VB-SV0 DP6a added the `|| vb_sv0_split` disjunct, and it cannot reach this fixture** —
+/// `vb_sv0_split` conjoins the resolved `SDF_SOFT_MARCH`, which needs an SDF leg, and this worker
+/// boots `VisibilityBuffer × Mesh`. So the three Resources below remain the complete free
+/// variable, and this assertion stays exhaustive rather than merely still-passing.
 ///
 /// Why it is here and not left to the engine: `boyko_app::runner`'s bench arming carries a
 /// release-live `assert!(!mesh_geo_shade_split, ...)` (`runner.rs:1101-1106`) whose message is about
