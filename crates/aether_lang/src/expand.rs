@@ -541,6 +541,61 @@ impl<'a> MachineModel<'a> {
         let leaves: Vec<usize> =
             (0..nodes.len()).filter(|&i| nodes[i].state.children.is_empty()).collect();
 
+        // §5.4 flattening is name CONCATENATION, so two distinct chart positions can collapse
+        // onto one generated name (`A.BC` and `AB.C` both spell `ABC`; duplicate siblings spell
+        // themselves twice). Left to rustc it surfaces as "defined multiple times" on the
+        // generated enum/impl with no word about flattening — Aether owns the better message
+        // and both spans, so it pre-checks (§7.1).
+        for i in 0..nodes.len() {
+            let Some(first) = (0..i).find(|&j| nodes[j].cat == nodes[i].cat) else {
+                continue;
+            };
+            let msg = if nodes[first].dotted == nodes[i].dotted {
+                format!(
+                    "duplicate state `{}` — sibling states need distinct names",
+                    nodes[i].dotted
+                )
+            } else {
+                format!(
+                    "states `{}` and `{}` both flatten to `{}` — flattening concatenates the state path, so they would emit one name; rename one",
+                    nodes[first].dotted, nodes[i].dotted, nodes[i].cat
+                )
+            };
+            let mut e = diag::err(nodes[i].state.name.span(), msg);
+            e.combine(diag::err(
+                nodes[first].state.name.span(),
+                "the first state flattening to this name is here",
+            ));
+            return Err(e);
+        }
+
+        // The `in_<group>` predicates are keyed on the flattened name's snake_case COLLAPSE, and
+        // that collapse is lossy: `AB` and `A_b` flatten to two distinct variants yet generate
+        // one `in_a_b`. The raw-name check above cannot see it — distinct strings, one emitted
+        // method — so the collapsed identity gets its own comparison, on the composites that
+        // actually emit a predicate.
+        let composites: Vec<usize> =
+            (0..nodes.len()).filter(|&i| !nodes[i].state.children.is_empty()).collect();
+        for (k, &i) in composites.iter().enumerate() {
+            let snake_i = snake(&nodes[i].cat);
+            let Some(&first) = composites[..k].iter().find(|&&j| snake(&nodes[j].cat) == snake_i)
+            else {
+                continue;
+            };
+            let mut e = diag::err(
+                nodes[i].state.name.span(),
+                format!(
+                    "composite states `{}` and `{}` flatten to `{}` and `{}`, which both collapse to the predicate `in_{snake_i}` — rename one",
+                    nodes[first].dotted, nodes[i].dotted, nodes[first].cat, nodes[i].cat
+                ),
+            );
+            e.combine(diag::err(
+                nodes[first].state.name.span(),
+                "the first composite generating this predicate is here",
+            ));
+            return Err(e);
+        }
+
         // Duplicate handler for one event in one state — error on the SECOND `on`, with a
         // note at the first (the §3.5 diagnostic).
         for n in &nodes {
@@ -556,6 +611,38 @@ impl<'a> MachineModel<'a> {
                     e.combine(diag::err(first.kw_span, "the first handler is here"));
                     return Err(e);
                 }
+            }
+        }
+
+        // Every declared `initial` is validated HERE, not only the ones a transition happens to
+        // reach: `resolve_to_leaf` runs lazily on targets, so an unreferenced composite's typo
+        // (or an `initial` on a childless state, which retargeting can never use) would expand
+        // silently. Reachability must not decide whether a name is checked.
+        for i in 0..nodes.len() {
+            let Some(init) = &nodes[i].state.initial else {
+                continue;
+            };
+            if nodes[i].state.children.is_empty() {
+                return Err(diag::err(
+                    init.span(),
+                    format!(
+                        "`{0}` has no nested states, so `initial` has nothing to name — drop it, or nest `state {init} {{ … }}` inside `{0}`",
+                        nodes[i].dotted
+                    ),
+                ));
+            }
+            let scope = nodes[i].dotted.clone();
+            resolve_child(&nodes, Some(i), init, &scope)?;
+        }
+
+        // Every transition's TARGET is resolved here for the same reason. The per-leaf walk
+        // below resolves only the handlers it actually inherits, and a handler an inner state
+        // SHADOWS for the same event is never walked — so `state P { on E => Nowhere; state A {
+        // on E => Top; } }` would expand silently, with `Nowhere` never looked up. Whether a
+        // name is checked must not depend on whether some leaf happens to reach it.
+        for n in &nodes {
+            for t in &n.state.transitions {
+                resolve_target(&nodes, &def.name.to_string(), &t.target)?;
             }
         }
 
@@ -582,7 +669,54 @@ impl<'a> MachineModel<'a> {
                 }
                 cur = nodes[i].parent;
             }
+            // The walk above is innermost-FIRST because that is what resolves inheritance
+            // (§3.5's innermost-wins), but it is not the order the routes must REGISTER in.
+            // §5.1 makes two same-frame transitions deterministic by "ordering the generated
+            // systems in declaration order", and the walk puts every inherited handler after
+            // the leaf's own no matter where it was written. Re-sort on the parser's source
+            // index, which is the only exact record of that order.
+            list.sort_by_key(|(_, t, _)| t.decl_index);
             routes.push(list);
+        }
+
+        // One generated fn per (leaf, inherited event), named from the snake_case collapse of
+        // the flattened leaf path and the event path's LAST segment — and BOTH halves of that
+        // name are lossy. `on a::E` + `on b::E` on one leaf collapse the event half; sibling
+        // leaves `AB` and `A_b` collapse the state half. Either way rustc reports a duplicate
+        // definition on GENERATED tokens; the check belongs where the name is actually minted,
+        // across every fn the machine will emit, so both causes are caught by one comparison.
+        let mut minted: Vec<(String, usize, &'a TransitionDef)> = Vec::new();
+        for (li, &leaf) in leaves.iter().enumerate() {
+            for (_, t, _) in &routes[li] {
+                let name = transition_fn_ident(&def.name, &nodes[leaf].cat, &t.event).to_string();
+                let Some(&(_, first_leaf, first_t)) = minted.iter().find(|(n, _, _)| *n == name)
+                else {
+                    minted.push((name, leaf, t));
+                    continue;
+                };
+                let msg = if first_leaf == leaf {
+                    format!(
+                        "events `{}` and `{}` both generate the system `{name}` for leaf `{}` — the generated name keys on the event's last path segment; import one under an alias (`use … as …`)",
+                        path_key(&first_t.event),
+                        path_key(&t.event),
+                        nodes[leaf].dotted
+                    )
+                } else {
+                    format!(
+                        "states `{}` and `{}` both generate the system `{name}` — generated names are the snake_case collapse of the flattened state path, and `{}` and `{}` collapse alike; rename one",
+                        nodes[first_leaf].dotted,
+                        nodes[leaf].dotted,
+                        nodes[first_leaf].cat,
+                        nodes[leaf].cat
+                    )
+                };
+                let mut e = diag::err(t.kw_span, msg);
+                e.combine(diag::err(
+                    first_t.kw_span,
+                    "the first handler generating this name is here",
+                ));
+                return Err(e);
+            }
         }
 
         Ok(MachineModel { def, nodes, leaves, initial_leaf, routes })
@@ -697,6 +831,34 @@ fn snake(s: &str) -> String {
     out
 }
 
+/// Merge the params of several inlined handler bodies into one system signature (§5.3):
+/// dedup by NAME, and refuse a name reused at a DIFFERENT type on the later occurrence, with
+/// the earlier binding's span attached — §5.3 asks for both spans, because the reader needs
+/// the pair to see which two handlers disagree.
+fn merge_params<'a>(all: &[&'a SysParam], site: &str) -> syn::Result<Vec<&'a SysParam>> {
+    let mut merged: Vec<&'a SysParam> = Vec::with_capacity(all.len());
+    for &p in all {
+        if let Some(prev) = merged.iter().find(|m| m.name == p.name) {
+            let (_, a) = param_ty_and_mut(&prev.ty);
+            let (_, b) = param_ty_and_mut(&p.ty);
+            if a.to_string() != b.to_string() {
+                let mut e = diag::err(
+                    p.name.span(),
+                    format!(
+                        "param `{}` is declared with conflicting types across {site}",
+                        p.name
+                    ),
+                );
+                e.combine(diag::err(prev.name.span(), "the first binding of this name is here"));
+                return Err(e);
+            }
+            continue;
+        }
+        merged.push(p);
+    }
+    Ok(merged)
+}
+
 /// The generated transition system's fn name (the plan's exact shape):
 /// `__aether_<machine>__<leaf>__<event>`.
 fn transition_fn_ident(machine: &Ident, leaf_cat: &str, event: &syn::Path) -> Ident {
@@ -709,8 +871,54 @@ fn transition_fn_ident(machine: &Ident, leaf_cat: &str, event: &syn::Path) -> Id
     )
 }
 
-/// §3.5 items: the flat enum, the `States` impl, the composite-group predicates, and one
-/// transition fn per (leaf, inherited event). Registration lives in the sibling plugin.
+/// The machine's initial-enter-chain startup system (§5.3).
+fn initial_enter_fn_ident(machine: &Ident) -> Ident {
+    format_ident!("__aether_{}__initial_enter", snake(&machine.to_string()))
+}
+
+/// `true` iff the initial leaf's ancestor path declares at least one `enter` — the gate on
+/// emitting (and registering) the startup system at all.
+fn has_initial_enter(model: &MachineModel<'_>) -> bool {
+    model
+        .lineage(model.initial_leaf)
+        .iter()
+        .any(|&i| model.nodes[i].state.enter.is_some())
+}
+
+/// §5.3: the machine's **initial enter chain**. `insert_state` seeds the VALUE, but nothing in
+/// the kernel runs an entry action for a state nobody transitioned into — so the `enter` bodies
+/// along the initial leaf's ancestor path are emitted as ONE startup system, outermost-first
+/// (the same order the LCA rule uses on a transition's enter side). Emitted only when that
+/// chain has a body: an empty startup system would be pure expansion volume (§8 R1).
+fn initial_enter_fn(model: &MachineModel<'_>) -> syn::Result<Option<TokenStream>> {
+    if !has_initial_enter(model) {
+        return Ok(None);
+    }
+    let chain = model.lineage(model.initial_leaf);
+    let all: Vec<&SysParam> = chain
+        .iter()
+        .filter_map(|&i| model.nodes[i].state.enter.as_ref())
+        .flat_map(|h| h.params.iter())
+        .collect();
+    let merged = merge_params(&all, "the initial state's merged `enter` chain")?;
+    let params = merged.iter().map(|p| sys_param_tokens(p));
+    let bodies = chain.iter().filter_map(|&i| {
+        model.nodes[i].state.enter.as_ref().map(|h| {
+            let b = &h.body;
+            quote! { { #b } }
+        })
+    });
+    let fn_name = initial_enter_fn_ident(&model.def.name);
+    Ok(Some(quote! {
+        fn #fn_name( #( #params ),* ) {
+            #( #bodies )*
+        }
+    }))
+}
+
+/// §3.5 items: the flat enum, the `States` impl, the composite-group predicates, the
+/// initial-enter chain, and one transition fn per (leaf, inherited event). Registration lives
+/// in the sibling plugin.
 fn machine_items(def: &MachineDef) -> syn::Result<TokenStream> {
     let model = MachineModel::build(def)?;
     let mname = &def.name;
@@ -741,6 +949,8 @@ fn machine_items(def: &MachineDef) -> syn::Result<TokenStream> {
         quote! { impl #mname { #( #predicates )* } }
     });
 
+    let initial_enter = initial_enter_fn(&model)?;
+
     let mut fns: Vec<TokenStream> = Vec::new();
     for (li, &leaf) in model.leaves.iter().enumerate() {
         for (owner, t, target) in &model.routes[li] {
@@ -755,6 +965,7 @@ fn machine_items(def: &MachineDef) -> syn::Result<TokenStream> {
         }
         impl ::boyko_ecs::ecs::core::state::States for #mname {}
         #predicate_impl
+        #initial_enter
         #( #fns )*
     })
 }
@@ -789,10 +1000,7 @@ fn transition_fn(
     // Enter actions: target-side states below the LCA, outermost-first.
     let enter_nodes: Vec<usize> = dst_line[lca_depth..].to_vec();
 
-    // Merged params: transition params + exit/enter handler params, deduped by NAME with
-    // a type-identity check (two handlers may share `cmds: commands`; a NAME reused with a
-    // DIFFERENT type is refused on the later occurrence).
-    let mut merged: Vec<&SysParam> = Vec::new();
+    // Merged params: transition params + exit/enter handler params (§5.3).
     let mut all: Vec<&SysParam> = t.params.iter().collect();
     for &i in &exit_nodes {
         if let Some(h) = &model.nodes[i].state.exit {
@@ -804,26 +1012,26 @@ fn transition_fn(
             all.extend(h.params.iter());
         }
     }
-    for p in all {
-        if let Some(prev) = merged.iter().find(|m| m.name == p.name) {
-            let (_, a) = param_ty_and_mut(&prev.ty);
-            let (_, b) = param_ty_and_mut(&p.ty);
-            if a.to_string() != b.to_string() {
-                return Err(diag::err(
-                    p.name.span(),
-                    format!(
-                        "param `{}` is declared with conflicting types across this transition's merged enter/exit/action handlers",
-                        p.name
-                    ),
-                ));
-            }
-            continue;
-        }
-        merged.push(p);
-    }
+    let merged = merge_params(&all, "this transition's merged enter/exit/action handlers")?;
     let params = merged.iter().map(|p| sys_param_tokens(p));
 
-    let guard = t.guard.as_ref().map(|g| quote! { if !(#g) { continue; } });
+    // §5.1's "one transition per machine per frame", spelled DRAIN-THEN-ACT.
+    //
+    // The obvious body — act on the first accepted event and `return` — leaks: the kernel's
+    // `EventIter` advances the cursor only past the events it YIELDED, so breaking out mid-drain
+    // leaves the rest of THIS frame's events unread, and the next frame re-reads them and fires
+    // a second transition. §5.1 requires the remainder to be "observed and discarded", so the
+    // loop always runs to completion and merely REMEMBERS that one event was accepted; the
+    // exit/action/enter chain and the `NextState` write happen once, after the drain.
+    //
+    // (§3.5's illustrative template shows the `return`-in-loop form; §5.1 is the semantic
+    // authority and the two disagree — recorded here because the emission follows §5.1.)
+    let accept = match t.guard.as_ref() {
+        // Short-circuit on `!__aether_fire` so a guard with side effects is not evaluated
+        // against the events that are being discarded.
+        Some(g) => quote! { if !__aether_fire && (#g) { __aether_fire = true; } },
+        None => quote! { __aether_fire = true; },
+    };
     let exits = exit_nodes.iter().filter_map(|&i| {
         model.nodes[i].state.exit.as_ref().map(|h| {
             let b = &h.body;
@@ -845,19 +1053,22 @@ fn transition_fn(
             mut __aether_next: #sys::ResMut<#state::NextState<#mname>>,
             #( #params ),*
         ) {
+            let mut __aether_fire = false;
             for _ in __aether_ev.read() {
-                #guard
+                #accept
+            }
+            if __aether_fire {
                 #( #exits )*
                 #action
                 #( #enters )*
                 *__aether_next = #state::NextState::Pending(#mname::#target_variant);
-                return;
             }
         }
     })
 }
 
-/// The plugin-side registrations for one machine: `insert_state(initial-leaf)` + one
+/// The plugin-side registrations for one machine: `insert_state(initial-leaf)`, the §5.3
+/// initial-enter chain as a startup system **after** the seed, and one
 /// `run_if(in_state(leaf))` Main registration per generated transition system.
 fn machine_registrations(
     def: &MachineDef,
@@ -865,7 +1076,14 @@ fn machine_registrations(
     let model = MachineModel::build(def)?;
     let mname = &def.name;
     let init_variant = model.variant(model.initial_leaf);
-    let insert = quote! { app.insert_state(#mname::#init_variant); };
+    let initial_enter = has_initial_enter(&model).then(|| {
+        let f = initial_enter_fn_ident(mname);
+        quote! { app.add_startup_system(#f); }
+    });
+    let insert = quote! {
+        app.insert_state(#mname::#init_variant);
+        #initial_enter
+    };
     let cond = quote!(::boyko_ecs::ecs::core::schedule::common_conditions::in_state);
     let mut stmts = Vec::new();
     for (li, &leaf) in model.leaves.iter().enumerate() {
@@ -1354,19 +1572,25 @@ mod tests {
                     mut __aether_next: ::boyko_ecs::ecs::core::system::ResMut<::boyko_ecs::ecs::core::state::NextState<GameFlow>>,
                     mut cmds: ::boyko_ecs::ecs::core::system::Commands
                 ) {
+                    let mut __aether_fire = false;
                     for _ in __aether_ev.read() {
+                        __aether_fire = true;
+                    }
+                    if __aether_fire {
                         { cmds.spawn(Hud); }
                         *__aether_next = ::boyko_ecs::ecs::core::state::NextState::Pending(GameFlow::PlayingRunning);
-                        return;
                     }
                 }
                 fn __aether_game_flow__playing_running__pause_pressed(
                     mut __aether_ev: ::boyko_ecs::ecs::core::system::EventReader<PausePressed>,
                     mut __aether_next: ::boyko_ecs::ecs::core::system::ResMut<::boyko_ecs::ecs::core::state::NextState<GameFlow>>,
                 ) {
+                    let mut __aether_fire = false;
                     for _ in __aether_ev.read() {
+                        __aether_fire = true;
+                    }
+                    if __aether_fire {
                         *__aether_next = ::boyko_ecs::ecs::core::state::NextState::Pending(GameFlow::PlayingPaused);
-                        return;
                     }
                 }
                 fn __aether_game_flow__playing_running__player_died(
@@ -1375,21 +1599,26 @@ mod tests {
                     score: ::boyko_ecs::ecs::core::system::Res<Score>,
                     mut cmds: ::boyko_ecs::ecs::core::system::Commands
                 ) {
+                    let mut __aether_fire = false;
                     for _ in __aether_ev.read() {
-                        if !(score.lives == 0) { continue; }
+                        if !__aether_fire && (score.lives == 0) { __aether_fire = true; }
+                    }
+                    if __aether_fire {
                         { cmds.despawn_hud(); }
                         { }
                         *__aether_next = ::boyko_ecs::ecs::core::state::NextState::Pending(GameFlow::GameOver);
-                        return;
                     }
                 }
                 fn __aether_game_flow__playing_paused__pause_pressed(
                     mut __aether_ev: ::boyko_ecs::ecs::core::system::EventReader<PausePressed>,
                     mut __aether_next: ::boyko_ecs::ecs::core::system::ResMut<::boyko_ecs::ecs::core::state::NextState<GameFlow>>,
                 ) {
+                    let mut __aether_fire = false;
                     for _ in __aether_ev.read() {
+                        __aether_fire = true;
+                    }
+                    if __aether_fire {
                         *__aether_next = ::boyko_ecs::ecs::core::state::NextState::Pending(GameFlow::PlayingRunning);
-                        return;
                     }
                 }
                 fn __aether_game_flow__playing_paused__player_died(
@@ -1398,21 +1627,26 @@ mod tests {
                     score: ::boyko_ecs::ecs::core::system::Res<Score>,
                     mut cmds: ::boyko_ecs::ecs::core::system::Commands
                 ) {
+                    let mut __aether_fire = false;
                     for _ in __aether_ev.read() {
-                        if !(score.lives == 0) { continue; }
+                        if !__aether_fire && (score.lives == 0) { __aether_fire = true; }
+                    }
+                    if __aether_fire {
                         { cmds.despawn_hud(); }
                         { }
                         *__aether_next = ::boyko_ecs::ecs::core::state::NextState::Pending(GameFlow::GameOver);
-                        return;
                     }
                 }
                 fn __aether_game_flow__game_over__restart_pressed(
                     mut __aether_ev: ::boyko_ecs::ecs::core::system::EventReader<RestartPressed>,
                     mut __aether_next: ::boyko_ecs::ecs::core::system::ResMut<::boyko_ecs::ecs::core::state::NextState<GameFlow>>,
                 ) {
+                    let mut __aether_fire = false;
                     for _ in __aether_ev.read() {
+                        __aether_fire = true;
+                    }
+                    if __aether_fire {
                         *__aether_next = ::boyko_ecs::ecs::core::state::NextState::Pending(GameFlow::Boot);
-                        return;
                     }
                 }
             },
@@ -1474,6 +1708,356 @@ mod tests {
                 }
             },
             "conflicting types",
+        );
+    }
+
+    // ------------------------------------------------------- rung A4: machine hierarchy depth
+
+    /// §5.3's initial-enter chain and the LCA rule's *upper* bound, in one three-level chart.
+    ///
+    /// Pins, all of them A4 contract:
+    /// * the initial resolves through TWO composite `initial` hops (`World` → `Field` → `Idle`);
+    /// * `insert_state` is followed by the chain's ONE startup system — `enter` bodies of the
+    ///   initial leaf's whole ancestor path, outermost-first, params merged across the three
+    ///   handlers (`cmds` declared twice at one type collapses to one binding);
+    /// * a transition INSIDE `Field` runs only the enter/exit below the LCA — `Busy → Idle`
+    ///   replays `Idle`'s enter and NOT `World`'s or `Field`'s, which the naive "enter the
+    ///   whole target lineage" reading would have emitted;
+    /// * one `in_<group>` predicate per composite, at both depths.
+    #[test]
+    fn the_section_5_3_initial_enter_chain_and_the_lca_bound_hold_verbatim() {
+        expands_to(
+            quote! {
+                plugin Boot;
+
+                machine Sim {
+                    initial World;
+
+                    state World {
+                        initial Field;
+                        enter (mut cmds: commands) { cmds.spawn(Ground); }
+
+                        state Field {
+                            initial Idle;
+                            enter (mut cmds: commands, log: mut res<Probe>) { log.field += 1; }
+
+                            state Idle {
+                                enter (log: mut res<Probe>) { log.idle += 1; }
+                                on Go => World.Field.Busy;
+                            }
+                            state Busy {
+                                on Stop => World.Field.Idle;
+                            }
+                        }
+                    }
+                }
+            },
+            quote! {
+                pub struct Boot;
+                impl ::boyko_ecs::Plugin for Boot {
+                    fn build(&self, app: &mut ::boyko_ecs::App) {
+                        app.insert_state(Sim::WorldFieldIdle);
+                        app.add_startup_system(__aether_sim__initial_enter);
+                        app.add_systems_cfg(|b| {
+                            b.add_system(__aether_sim__world_field_idle__go)
+                                .run_if(::boyko_ecs::ecs::core::schedule::common_conditions::in_state(Sim::WorldFieldIdle));
+                            b.add_system(__aether_sim__world_field_busy__stop)
+                                .run_if(::boyko_ecs::ecs::core::schedule::common_conditions::in_state(Sim::WorldFieldBusy));
+                        });
+                    }
+                    fn name(&self) -> &'static str { "Boot" }
+                }
+                #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+                pub enum Sim {
+                    WorldFieldIdle,
+                    WorldFieldBusy
+                }
+                impl ::boyko_ecs::ecs::core::state::States for Sim {}
+                impl Sim {
+                    /// Zero-cost superstate predicate (compile-time group membership).
+                    #[inline]
+                    pub const fn in_world(self) -> bool {
+                        matches!(self, Self::WorldFieldIdle | Self::WorldFieldBusy)
+                    }
+                    /// Zero-cost superstate predicate (compile-time group membership).
+                    #[inline]
+                    pub const fn in_world_field(self) -> bool {
+                        matches!(self, Self::WorldFieldIdle | Self::WorldFieldBusy)
+                    }
+                }
+                fn __aether_sim__initial_enter(
+                    mut cmds: ::boyko_ecs::ecs::core::system::Commands,
+                    mut log: ::boyko_ecs::ecs::core::system::ResMut<Probe>
+                ) {
+                    { cmds.spawn(Ground); }
+                    { log.field += 1; }
+                    { log.idle += 1; }
+                }
+                fn __aether_sim__world_field_idle__go(
+                    mut __aether_ev: ::boyko_ecs::ecs::core::system::EventReader<Go>,
+                    mut __aether_next: ::boyko_ecs::ecs::core::system::ResMut<::boyko_ecs::ecs::core::state::NextState<Sim>>,
+                ) {
+                    let mut __aether_fire = false;
+                    for _ in __aether_ev.read() {
+                        __aether_fire = true;
+                    }
+                    if __aether_fire {
+                        *__aether_next = ::boyko_ecs::ecs::core::state::NextState::Pending(Sim::WorldFieldBusy);
+                    }
+                }
+                fn __aether_sim__world_field_busy__stop(
+                    mut __aether_ev: ::boyko_ecs::ecs::core::system::EventReader<Stop>,
+                    mut __aether_next: ::boyko_ecs::ecs::core::system::ResMut<::boyko_ecs::ecs::core::state::NextState<Sim>>,
+                    mut log: ::boyko_ecs::ecs::core::system::ResMut<Probe>
+                ) {
+                    let mut __aether_fire = false;
+                    for _ in __aether_ev.read() {
+                        __aether_fire = true;
+                    }
+                    if __aether_fire {
+                        { log.idle += 1; }
+                        *__aether_next = ::boyko_ecs::ecs::core::state::NextState::Pending(Sim::WorldFieldIdle);
+                    }
+                }
+            },
+        );
+    }
+
+    /// An initial chain with no `enter` anywhere emits NO startup system and NO registration —
+    /// the §8 R1 expansion-volume rule applied to the one construct that could have shipped a
+    /// dead empty fn per machine.
+    #[test]
+    fn an_enterless_initial_chain_emits_no_startup_system() {
+        expands_to(
+            quote! {
+                plugin P;
+                machine M {
+                    initial A;
+                    state A { initial B; state B {} }
+                }
+            },
+            quote! {
+                pub struct P;
+                impl ::boyko_ecs::Plugin for P {
+                    fn build(&self, app: &mut ::boyko_ecs::App) {
+                        app.insert_state(M::AB);
+                    }
+                    fn name(&self) -> &'static str { "P" }
+                }
+                #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+                pub enum M {
+                    AB
+                }
+                impl ::boyko_ecs::ecs::core::state::States for M {}
+                impl M {
+                    /// Zero-cost superstate predicate (compile-time group membership).
+                    #[inline]
+                    pub const fn in_a(self) -> bool {
+                        matches!(self, Self::AB)
+                    }
+                }
+            },
+        );
+    }
+
+    /// Assert `first` is emitted before `second` — for contracts about ORDER, where a full
+    /// token pin would bury the one claim being made.
+    fn emits_in_order(input: proc_macro2::TokenStream, first: &str, second: &str) {
+        let out = crate::expand_block(input).to_string();
+        let (i, j) = (out.find(first), out.find(second));
+        assert!(
+            matches!((i, j), (Some(a), Some(b)) if a < b),
+            "expected {first:?} before {second:?}, got: {out}"
+        );
+    }
+
+    /// §5.1 makes two same-frame transitions deterministic by registering "in declaration
+    /// order". Inheritance walks each leaf innermost-first, so a superstate handler declared
+    /// BEFORE the leaf's own would otherwise register after it — order decided by the tree,
+    /// not by the source.
+    #[test]
+    fn registration_follows_declaration_order_not_the_inheritance_walk() {
+        emits_in_order(
+            quote! {
+                plugin P;
+                machine M {
+                    initial P0;
+                    state P0 {
+                        initial A;
+                        on E1 => X;
+                        state A { on E2 => X; }
+                    }
+                    state X {}
+                }
+            },
+            "__aether_m__p0_a__e1",
+            "__aether_m__p0_a__e2",
+        );
+        // …and the reverse source order registers the other way round, so the ordering tracks
+        // the SOURCE rather than some fixed leaf-vs-ancestor rule.
+        emits_in_order(
+            quote! {
+                plugin P;
+                machine M {
+                    initial P0;
+                    state P0 {
+                        initial A;
+                        state A { on E2 => X; }
+                        on E1 => X;
+                    }
+                    state X {}
+                }
+            },
+            "__aether_m__p0_a__e2",
+            "__aether_m__p0_a__e1",
+        );
+    }
+
+    /// `Expr::Let` is a real expression node, legal only as an `if`/`while` scrutinee. Aether
+    /// splices guards into `if !(…)` and conditions into `.run_if(…)`, where it is not valid
+    /// Rust — so it is refused on the user's own `let`.
+    #[test]
+    fn let_bindings_are_refused_as_guards_and_run_conditions() {
+        fails_with(
+            quote! { plugin P; system s() on update when let Some(x) = f() {} },
+            "`let` bindings are not usable as a run condition",
+        );
+        fails_with(
+            quote! {
+                plugin P;
+                machine M {
+                    initial A;
+                    state A { on E if let Some(_) = q => A; }
+                }
+            },
+            "`let` bindings are not usable as a transition guard",
+        );
+    }
+
+    /// A raw ident prints WITH its `r#` escape, so the case gate must classify the escaped
+    /// spelling — otherwise `r#Foo` is refused for starting with `r`, and the suggested rename
+    /// (`R#Foo`) is not a legal identifier at all.
+    #[test]
+    fn the_case_gate_reads_through_a_raw_ident_escape() {
+        expands_to(
+            quote! { component r#Foo { x: u32 } },
+            quote! {
+                #[derive(::boyko_macros::Component)]
+                pub struct r#Foo {
+                    pub x: u32
+                }
+            },
+        );
+        fails_with(quote! { component r#health { hp: f32 } }, "rename `r#health` to `Health`");
+    }
+
+    #[test]
+    fn a4_hierarchy_diagnostics_fire_where_the_plan_says() {
+        // Flattening is CONCATENATION, so two chart positions can collide on one generated
+        // name. Aether names both positions and the name they share.
+        fails_with(
+            quote! {
+                plugin P;
+                machine M {
+                    initial A;
+                    state A { initial BC; state BC {} }
+                    state AB { initial C; state C {} }
+                }
+            },
+            "states `A.BC` and `AB.C` both flatten to `ABC`",
+        );
+        // The degenerate case of the same check reads as what it is.
+        fails_with(
+            quote! { plugin P; machine M { initial A; state A {} state A {} } },
+            "duplicate state `A` — sibling states need distinct names",
+        );
+        // `initial` on a childless state can never retarget anything — silently ignoring it
+        // would leave the author believing a nested chart exists.
+        fails_with(
+            quote! { plugin P; machine M { initial A; state A { initial B; } } },
+            "`A` has no nested states, so `initial` has nothing to name",
+        );
+        // Reachability must not decide whether a name is checked: `Lonely` is never targeted,
+        // so the lazy `resolve_to_leaf` path would never have looked at its typo.
+        fails_with(
+            quote! {
+                plugin P;
+                machine M {
+                    initial A;
+                    state A { on Go => A; }
+                    state Lonely { initial Runing; state Running {} }
+                }
+            },
+            "no state `Runing` in `Lonely`",
+        );
+        // Inheritance dedups on the event's FULL spelling, the generated fn name on its LAST
+        // segment — the gap between the two would emit one fn twice.
+        fails_with(
+            quote! {
+                plugin P;
+                machine M {
+                    initial A;
+                    state A { on a::E => A; on b::E => A; }
+                }
+            },
+            "events `a::E` and `b::E` both generate the system `__aether_m__a__e` for leaf `A`",
+        );
+        // The OTHER half of the same name is just as lossy: two leaves whose flattened names
+        // differ but whose snake_case collapse does not.
+        fails_with(
+            quote! {
+                plugin P;
+                machine M {
+                    initial AB;
+                    state AB { on E => AB; }
+                    state A_b { on E => A_b; }
+                }
+            },
+            "states `AB` and `A_b` both generate the system `__aether_m__a_b__e`",
+        );
+        // …and the composite form of that collapse, which lands on the predicate instead.
+        fails_with(
+            quote! {
+                plugin P;
+                machine M {
+                    initial AB;
+                    state AB { initial X; state X {} }
+                    state A_b { initial Y; state Y {} }
+                }
+            },
+            "which both collapse to the predicate `in_a_b`",
+        );
+        // A handler an inner state SHADOWS is never inherited by any leaf, so the per-leaf walk
+        // never resolves its target — but a target that names nothing is still a broken chart.
+        fails_with(
+            quote! {
+                plugin P;
+                machine M {
+                    initial P0;
+                    state P0 {
+                        initial A;
+                        on E => Nowhere;
+                        state A { on E => Top; }
+                    }
+                    state Top {}
+                }
+            },
+            "no state `Nowhere` in `M`",
+        );
+        // The merged-param conflict rule reaches the initial-enter chain too, and names ITS site.
+        fails_with(
+            quote! {
+                plugin P;
+                machine M {
+                    initial A;
+                    state A {
+                        initial B;
+                        enter (x: mut res<T>) { let _ = &mut x; }
+                        state B { enter (x: res<T>) { let _ = &x; } }
+                    }
+                }
+            },
+            "conflicting types across the initial state's merged `enter` chain",
         );
     }
 

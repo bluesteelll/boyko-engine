@@ -1,0 +1,5 @@
+error: `Idle` has no nested states, so `initial` has nothing to name — drop it, or nest `state Running { … }` inside `Idle`
+  --> tests/ui/machine_initial_on_a_leaf.rs:11:21
+   |
+11 |             initial Running;
+   |                     ^^^^^^^

@@ -2,6 +2,21 @@
 //! startup one-shot spawning through `commands`, an `after` sibling edge that must hold every
 //! frame, a `when` gate that must hold the gated system shut, and a `query<(&mut …)>` that
 //! actually integrates component data (the plan's A2 gate: not just expansion, execution).
+//!
+//! # Why `check_order` is declared BEFORE `integrate`
+//!
+//! As first written, the `order_ok` assertion could not fail. The two systems conflict on
+//! `mut res<SeqLog>`, and the scheduler serializes conflicting systems in registration order —
+//! which, with `check_order` declared second, was already `integrate`-then-`check_order`. The
+//! edge and the fallback agreed, so deleting `after integrate` changed nothing and the test
+//! stayed green: an assertion about an ordering primitive that never exercised it.
+//!
+//! Reversing the declaration order makes the fallback `check_order`-then-`integrate`, so only
+//! the `after` edge can produce the asserted sequence — the topological emission in
+//! `bucket_stmts` registers the edge's TARGET first to capture its `SystemKey`.
+//!
+//! MEASURED: with the edge deleted, `order_ok` fails on the first frame
+//! (`integrate_runs == check_runs + 1` reads `0 == 1`). Restored, the test is green.
 
 use aether::aether;
 use boyko_ecs::App;
@@ -26,17 +41,22 @@ aether! {
         cmds.spawn(Mover { pos: Position { x: 0.0 }, vel: Velocity { v: 2.0 } });
     }
 
+    // DECLARED FIRST, ON PURPOSE — see the test's doc comment. Two systems that both take
+    // `mut res<SeqLog>` conflict, and the scheduler serializes a conflict in REGISTRATION
+    // order; registration order is source order EXCEPT where an `after` edge re-sorts it. With
+    // `check_order` written after `integrate`, both orders agree and the assertion below could
+    // never fail. Written before it, only the edge produces the asserted order.
+    system check_order(log: mut res<SeqLog>) on update after integrate {
+        // The after-edge's observable: integrate has ALREADY run this frame, every frame.
+        log.order_ok = log.order_ok && (log.integrate_runs == log.check_runs + 1);
+        log.check_runs += 1;
+    }
+
     system integrate(q: query<(&mut Position, &Velocity)>, log: mut res<SeqLog>) on update {
         for (p, v) in &mut q {
             p.x += v.v;
         }
         log.integrate_runs += 1;
-    }
-
-    system check_order(log: mut res<SeqLog>) on update after integrate {
-        // The after-edge's observable: integrate has ALREADY run this frame, every frame.
-        log.order_ok = log.order_ok && (log.integrate_runs == log.check_runs + 1);
-        log.check_runs += 1;
     }
 
     system observe(q: query<&Position>, log: mut res<SeqLog>) on update after integrate {

@@ -7,11 +7,28 @@
 //! system's `EventReader` cursor does not advance, so a shared event type would let the freshly
 //! entered leaf read the SAME event from its backlog and bounce straight back — a semantic
 //! hazard this test sidesteps (and documents) rather than depends on.
+//!
+//! ⚠️ Event lanes are sized for `MAX_EVENT_LANES`, not for a hard-coded 2, and that is
+//! load-bearing. `EventConfig::default_for`'s argument is the WORKER-LANE COUNT, and
+//! `EventWriter::send` picks its lane as `current_worker_id_or_dispatcher_lane(thread_count-1)`
+//! — i.e. the id of whatever worker the scheduler put the sending system on. On a pool wider
+//! than the configured lane count, `EventBuffer::send_one`'s
+//! `debug_assert!(thread_index < thread_count)` trips ON A WORKER THREAD, which the test harness
+//! surfaces as an infinite HANG, not a failure. A hard-coded `2` therefore passes or hangs by
+//! scheduling luck; MEASURED, it hung here the moment an unrelated edit perturbed placement, on
+//! `boyko-worker-4`. `preregister_event_default` is NOT the fix either — the dispatcher's
+//! default is `EventDispatcher::new(1)`, i.e. ONE lane. Nothing in the public App surface
+//! reports the pool width, so a test sizes for the kernel's maximum.
+
 
 use aether::aether;
 use boyko_ecs::App;
 use boyko_ecs::ecs::core::events::event_config::EventConfig;
 use boyko_ecs::ecs::core::state::State;
+
+/// The kernel's maximum event-lane count (`EventConfig` validates `1..=64`). Sizing for it
+/// makes lane selection independent of how wide THIS machine's worker pool is.
+const MAX_EVENT_LANES: u32 = 64;
 
 aether! {
     event AssetsReady { tick: u32, }
@@ -72,21 +89,43 @@ struct Script {
 fn machine_transitions_ride_real_events_and_state() {
     let mut app = App::new();
     app.world_mut()
-        .preregister_event::<AssetsReady>(EventConfig::default_for(2).expect("config"))
+        .preregister_event::<AssetsReady>(EventConfig::default_for(MAX_EVENT_LANES).expect("config"))
         .expect("preregister");
     app.world_mut()
-        .preregister_event::<PauseOn>(EventConfig::default_for(2).expect("config"))
+        .preregister_event::<PauseOn>(EventConfig::default_for(MAX_EVENT_LANES).expect("config"))
         .expect("preregister");
     app.world_mut()
-        .preregister_event::<PauseOff>(EventConfig::default_for(2).expect("config"))
+        .preregister_event::<PauseOff>(EventConfig::default_for(MAX_EVENT_LANES).expect("config"))
         .expect("preregister");
     app.insert_resource(Script { frame: 0, entered_playing: 0 });
     app.add_plugin(Flow);
 
-    // Frame 1 sends AssetsReady (Boot → Playing.Running via the composite's `initial`);
-    // frame 3 sends PauseOn (Running → Paused). Six frames comfortably cover both events'
-    // one-frame delivery bounds plus the state passes that apply the transitions.
-    for _ in 0..6 {
+    // The two hops are asserted SEPARATELY, and that is the point. Checking only the final
+    // `PlayingPaused` cannot see the middle state: a composite-`initial` regression that landed
+    // Boot directly in `Playing.Paused` would satisfy every end-state assertion while the
+    // `PauseOn` edge never fired at all. Frame 1 sends AssetsReady; three frames cover its
+    // one-frame delivery plus the state pass that applies the transition.
+    for _ in 0..3 {
+        app.update();
+    }
+    let mid = *app.world_mut().resource::<State<GameFlow>>().get();
+    assert_eq!(
+        mid,
+        GameFlow::PlayingRunning,
+        "AssetsReady targets the COMPOSITE `Playing`, which retargets through `initial Running` \
+         to the Running leaf — not to Paused, and not to Playing itself"
+    );
+    assert!(mid.in_playing(), "the flattened superstate predicate holds for the Running leaf");
+    assert_eq!(
+        app.world_mut().resource::<Script>().entered_playing,
+        1,
+        "the Playing `enter` action ran on the way in"
+    );
+
+    // Frame 3 sent PauseOn; three more frames cover its delivery and state pass. Reaching
+    // `PlayingPaused` from a state asserted to be `PlayingRunning` is a change only the
+    // `Running -PauseOn-> Playing.Paused` edge can make.
+    for _ in 0..3 {
         app.update();
     }
 
@@ -98,5 +137,9 @@ fn machine_transitions_ride_real_events_and_state() {
     );
     assert!(flow.in_playing(), "the flattened superstate predicate holds for the Paused leaf");
     let script = app.world_mut().resource::<Script>();
-    assert_eq!(script.entered_playing, 1, "the Playing `enter` action ran exactly once");
+    assert_eq!(
+        script.entered_playing, 1,
+        "the Playing `enter` action ran exactly once — the Running→Paused hop stays under \
+         `Playing`, so the LCA excludes its enter"
+    );
 }

@@ -1,6 +1,18 @@
 //! Rung A1 end-to-end: an `aether!` block's `bundle` spawns through the derive's own path, and
 //! its `event` rides the REAL kernel event lanes — written by an `EventWriter`, read by an
 //! `EventReader`, through an `App` frame (the plan's A1 gate verbatim).
+//!
+//! ⚠️ Event lanes are sized for `MAX_EVENT_LANES`, not for a hard-coded 2, and that is
+//! load-bearing. `EventConfig::default_for`'s argument is the WORKER-LANE COUNT, and
+//! `EventWriter::send` picks its lane as `current_worker_id_or_dispatcher_lane(thread_count-1)`
+//! — i.e. the id of whatever worker the scheduler put the sending system on. On a pool wider
+//! than the configured lane count, `EventBuffer::send_one`'s
+//! `debug_assert!(thread_index < thread_count)` trips ON A WORKER THREAD, which the test harness
+//! surfaces as an infinite HANG, not a failure. A hard-coded `2` therefore passes or hangs by
+//! scheduling luck; MEASURED, it hung here the moment an unrelated edit perturbed placement, on
+//! `boyko-worker-4`. `preregister_event_default` is NOT the fix either — the dispatcher's
+//! default is `EventDispatcher::new(1)`, i.e. ONE lane. Nothing in the public App surface
+//! reports the pool width, so a test sizes for the kernel's maximum.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -9,7 +21,12 @@ use boyko_ecs::App;
 use boyko_ecs::ecs::core::events::event_config::EventConfig;
 use boyko_ecs::ecs::core::system::{EventReader, EventWriter, ResMut};
 
+
 use aether::aether;
+
+/// The kernel's maximum event-lane count (`EventConfig` validates `1..=64`). Sizing for it
+/// makes lane selection independent of how wide THIS machine's worker pool is.
+const MAX_EVENT_LANES: u32 = 64;
 
 aether! {
     component Position {
@@ -42,7 +59,7 @@ fn aether_event_rides_the_kernel_lanes_through_an_app() {
 
     let mut app = App::new();
     app.world_mut()
-        .preregister_event::<Damage>(EventConfig::default_for(2).expect("config"))
+        .preregister_event::<Damage>(EventConfig::default_for(MAX_EVENT_LANES).expect("config"))
         .expect("preregister");
     app.world_mut().insert_resource(SendOnce(true));
 

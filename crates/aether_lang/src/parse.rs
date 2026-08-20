@@ -192,18 +192,42 @@ fn parse_tag(input: ParseStream) -> syn::Result<TagDef> {
 /// ASCII probe (a name titled with a non-ASCII capital must pass), and the rename suggestion is
 /// attached only when [`upper_camel`] actually changes the spelling — a self-identical rename
 /// explains nothing.
+///
+/// A RAW ident (`r#Foo`) prints as `r#Foo`, whose first char is the escape's `r` — so the gate
+/// must classify the ESCAPED spelling, otherwise `r#Foo` is refused for being lowercase and the
+/// suggestion reads `R#Foo`, which is not a legal ident at all.
 fn upper_camel_gate(name: &Ident, base: &str) -> syn::Result<()> {
-    let s = name.to_string();
+    let raw = name.to_string();
+    let s = raw.strip_prefix("r#").unwrap_or(&raw);
     if s.starts_with(char::is_uppercase) {
         return Ok(());
     }
-    let sugg = upper_camel(&s);
+    let sugg = upper_camel(s);
     let msg = if !sugg.is_empty() && sugg != s {
-        format!("{base} (rename `{s}` to `{sugg}`)")
+        format!("{base} (rename `{raw}` to `{sugg}`)")
     } else {
         base.to_string()
     };
     Err(diag::err(name.span(), msg))
+}
+
+/// Refuse a `let` binding where a plain `bool` is required.
+///
+/// `if let Some(x) = y` and `when let …` both parse — `Expr::Let` is a real expression node,
+/// legal only inside an `if`/`while` scrutinee. Aether drops the surrounding `if` and splices
+/// the expression into `if !(…)` (a guard) or `.run_if(…)` (a condition), where a `let` is not
+/// valid Rust at all. Caught here, the error names the user's own `let`; passed through, rustc
+/// reports it against a synthesized `if` the user never wrote.
+fn reject_let_binding(e: &Expr, role: &str, kw: &str) -> syn::Result<()> {
+    let Expr::Let(l) = e else {
+        return Ok(());
+    };
+    Err(diag::err(
+        l.let_token.span,
+        format!(
+            "`let` bindings are not usable as {role} — {kw} takes a plain bool expression (bind with a `local<…>` param or match inside the body instead)"
+        ),
+    ))
 }
 
 /// Best-effort UpperCamelCase suggestion for the §2 case diagnostics.
@@ -432,6 +456,7 @@ fn parse_system(input: ParseStream) -> syn::Result<SystemDef> {
                 let e: Expr = input.call(Expr::parse_without_eager_brace).map_err(|e| {
                     diag::err(e.span(), "`when` takes a condition expression (a fn implementing IntoSystem<(), bool, _>)")
                 })?;
+                reject_let_binding(&e, "a run condition", "`when`")?;
                 def.whens.push((e, kw.span()));
                 first_non_on_span.get_or_insert(kw.span());
             }
@@ -627,15 +652,18 @@ fn parse_machine(input: ParseStream) -> syn::Result<MachineDef> {
     body.parse::<Token![;]>()
         .map_err(|e| diag::err(e.span(), "`initial <State>` ends with `;`"))?;
 
+    // The declaration counter threads through the whole body, nested states included, so the
+    // index it stamps is exact SOURCE order across the machine (see `TransitionDef::decl_index`).
+    let mut decl = 0usize;
     let mut states = Vec::new();
     while !body.is_empty() {
-        states.push(parse_state(&body)?);
+        states.push(parse_state(&body, &mut decl)?);
     }
     Ok(MachineDef { name, initial, states })
 }
 
 /// `state NAME { (initial X;)? (enter|exit|on|state)* }` (§3.5).
-fn parse_state(input: ParseStream) -> syn::Result<StateDef> {
+fn parse_state(input: ParseStream, decl: &mut usize) -> syn::Result<StateDef> {
     let kw: Ident = input.parse().map_err(|e| {
         diag::err(e.span(), "expected `state` (a machine body holds only states after `initial`)")
     })?;
@@ -707,9 +735,11 @@ fn parse_state(input: ParseStream) -> syn::Result<StateDef> {
                 };
                 let guard = if body.peek(Token![if]) {
                     let _: Token![if] = body.parse()?;
-                    Some(body.call(Expr::parse_without_eager_brace).map_err(|e| {
+                    let g = body.call(Expr::parse_without_eager_brace).map_err(|e| {
                         diag::err(e.span(), "`if` takes a guard expression")
-                    })?)
+                    })?;
+                    reject_let_binding(&g, "a transition guard", "`if`")?;
+                    Some(g)
                 } else {
                     None
                 };
@@ -739,13 +769,15 @@ fn parse_state(input: ParseStream) -> syn::Result<StateDef> {
                 def.transitions.push(TransitionDef {
                     event,
                     kw_span: kw.span(),
+                    decl_index: *decl,
                     params,
                     guard,
                     target,
                     action,
                 });
+                *decl += 1;
             }
-            "state" => def.children.push(parse_state(&body)?),
+            "state" => def.children.push(parse_state(&body, decl)?),
             other => {
                 return Err(diag::err(
                     head.span(),

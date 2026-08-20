@@ -1,0 +1,5 @@
+error: no state `Nowhere` in `M`; states declared here: `P0`, `Top`
+  --> tests/ui/machine_shadowed_handler_target.rs:13:21
+   |
+13 |             on E => Nowhere;
+   |                     ^^^^^^^

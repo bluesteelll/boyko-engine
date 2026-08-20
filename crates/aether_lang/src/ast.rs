@@ -312,6 +312,14 @@ pub struct TransitionDef {
     pub event: Path,
     /// The `on` keyword's span — duplicate-handler errors point at the SECOND `on`.
     pub kw_span: Span,
+    /// Source position among the machine's transitions, assigned as the parser walks the body.
+    ///
+    /// §5.1's arbitration for two transitions accepted on one frame is "last write wins, made
+    /// deterministic by registering in DECLARATION order". Inheritance walks each leaf's chain
+    /// innermost-first, which is not declaration order, so the expander re-sorts on this index.
+    /// A span cannot serve: `proc_macro2::Span::start()` needs the `span-locations` feature,
+    /// which this crate does not take.
+    pub decl_index: usize,
     /// Params the guard and action may use, same grammar as `system`.
     pub params: Vec<SysParam>,
     /// `if EXPR` — verbatim; a failed guard SKIPS the event (does not consume the frame).
