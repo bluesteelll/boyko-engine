@@ -241,6 +241,37 @@ pub mod motion_cam;
 /// [`VbInstanceRow::flags`](instance_model::VbInstanceRow::flags). Read on the host by both
 /// gathers since P2-2; read by NOTHING on the device until piece 3.
 pub mod occlusion_marker;
+/// Particles P0 — the ECS component vocabulary
+/// ([`ParticleEmitter`](particle::ParticleEmitter), the
+/// [`EmitterActive`](particle::EmitterActive) enable tag, the refcount-hooked
+/// [`ParticleEffectHandle`](particle::ParticleEffectHandle)) plus every GPU-facing POD record
+/// ([`ParticleSim`](particle::ParticleSim) 48 B, [`ParticleRender`](particle::ParticleRender) 32 B,
+/// [`ParticleCounters`](particle::ParticleCounters) 64 B,
+/// [`ParticleDispatchArgs`](particle::ParticleDispatchArgs),
+/// [`ParticleDrawArgs`](particle::ParticleDrawArgs),
+/// [`EmitRequestGpu`](particle::EmitRequestGpu),
+/// [`EffectParamsGpu`](particle::EffectParamsGpu)) with its `offset_of!` layout pins — the
+/// generator inputs the particle shaders' word indices are emitted from.
+pub mod particle;
+/// Particles P0 (D6) — the subsystem's OWN fixed-rate [`ParticleClock`](particle_clock::ParticleClock),
+/// advanced from `Time::delta_secs()` on the Main schedule. Deliberately NOT `FixedTime`: creating a
+/// `CoreSchedule::Fixed` schedule would flip the whole process's event-update policy (D17).
+pub mod particle_clock;
+/// Particles P0 (D13/D14) — the owner-set [`ParticleConfig`](particle_config::ParticleConfig) +
+/// its [`ParticleMode`](particle_config::ParticleMode) knob. Capability is structural (`Off` IS
+/// disabled); default `Off` is the 0%-gate.
+pub mod particle_config;
+/// Particles P0 — the authored [`ParticleEffect`](particle_effect::ParticleEffect) asset, its
+/// host-side bake into `EffectParamsGpu` (`damping = exp2(-drag·timestep)` and the `(cos, sin)`
+/// rotation multiplier as an f32 pair — which is what deletes `exp2` and all trig from the device),
+/// and the [`ParticleEffectsExt`](particle_effect::ParticleEffectsExt) mint API.
+pub mod particle_effect;
+/// Particles P0 — the [`ParticlePlugin`](particle_plugin::ParticlePlugin) that composes the whole
+/// ECS half under the D17 containment contract.
+pub mod particle_plugin;
+/// Particles P0 (A1) — the per-frame emitter fold, the effect-table bake and the carrier refcount
+/// fold, plus their two `ScratchColumn`-backed staging Resources.
+pub mod particle_system;
 /// VG R3 piece 4 rung P4-4 — the ECS-native occlusion-decision CONSUMER config
 /// ([`OcclusionConfig`](occlusion_config::OcclusionConfig) + its
 /// [`OcclusionMode`](occlusion_config::OcclusionMode) knob), the consumer-side sibling of
@@ -469,6 +500,28 @@ pub use hzb::{
 pub use hzb_config::{HzbConfig, HzbMode};
 pub use hzb_plugin::HzbPlugin;
 pub use occlusion_config::{OcclusionConfig, OcclusionMode};
+// Particles P0 — the public surface named by the plan's §Public API. No internal type leaks: no
+// `BoundBuffer`, `ResId`, `ScratchColumn`, `dyn` or `Vec` appears in any signature re-exported
+// here (the two staging Resources expose their lanes as `&[T]` only).
+pub use particle::{
+    EffectParamsGpu, EmitRequestGpu, EmitterActive, MAX_EFFECTS, MAX_EMITTERS,
+    PARTICLE_ADDITIVE_INSTANCE_COUNT_OFFSET, PARTICLE_ALPHA_INSTANCE_COUNT_OFFSET,
+    PARTICLE_BLEND_ADDITIVE, PARTICLE_BLEND_ALPHA, PARTICLE_EFFECT_REF_GEN,
+    PARTICLE_QUAD_INDEX_COUNT, PARTICLE_SUBSTEP_CEILING, ParticleCounters, ParticleDispatchArgs,
+    ParticleDrawArgs, ParticleEffectHandle, ParticleEffectRefDelta, ParticleEffectRefs,
+    ParticleEmitter, ParticleRender, ParticleSim, VkDrawIndexedIndirectCommandMirror,
+};
+pub use particle_clock::{PARTICLE_DEFAULT_HZ, ParticleClock};
+pub use particle_config::{PARTICLE_DEFAULT_CAPACITY, ParticleConfig, ParticleMode};
+pub use particle_effect::{
+    PARTICLE_RAMP_KEYS, PARTICLE_SHAPE_BOX, PARTICLE_SHAPE_CONE, PARTICLE_SHAPE_POINT,
+    PARTICLE_SHAPE_SPHERE, ParticleEffect, ParticleEffectsExt, pack_effect_params, pack_f16x2,
+};
+pub use particle_plugin::ParticlePlugin;
+pub use particle_system::{
+    ParticleEffectScratch, ParticleEmitScratch, advance_emitter, particle_apply_effect_refs,
+    particle_pack_effects, particle_tick_emitters,
+};
 pub use occlusion_marker::{OcclusionCulling, VB_INST_FLAG_OCCLUSION_CULLING};
 pub use occlusion_plugin::OcclusionPlugin;
 pub use instance_model::{
