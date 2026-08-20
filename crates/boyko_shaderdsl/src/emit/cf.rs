@@ -916,5 +916,57 @@ impl Cf for EmitCf {
         // `FieldScalar::select`'s `Select` (condition wrapped).
         Emit(push(Node::SelectBare(cond.0, t.0, e.0)))
     }
-}
 
+    // ---- Rung E: the particle-leaf prerequisite facets (recorder) ---------------------
+    // Every node below prints its operands at `OperandPos::BitSide` (the infix three) or at
+    // Root (the four intrinsic calls + `dot`), so the recorder itself carries no spelling
+    // decision — it only pushes the node.
+
+    fn ushl(a: Emit, b: Emit) -> Emit {
+        Emit(push(Node::Shl(a.0, b.0)))
+    }
+
+    fn uxor(a: Emit, b: Emit) -> Emit {
+        Emit(push(Node::Xor(a.0, b.0)))
+    }
+
+    fn uor(a: Emit, b: Emit) -> Emit {
+        // The BITWISE `|` over two `uint` values — DISTINCT from `or`'s `Or` node (the logical
+        // `||` over two Masks), which is why it is a separate node and not an overload.
+        Emit(push(Node::BitOr(a.0, b.0)))
+    }
+
+    fn asuint(x: Emit) -> Emit {
+        Emit(push(Node::AsUint(x.0)))
+    }
+
+    fn asfloat(u: Emit) -> Emit {
+        Emit(push(Node::AsFloat(u.0)))
+    }
+
+    fn f16tof32(u: Emit) -> Emit {
+        Emit(push(Node::F16ToF32(u.0)))
+    }
+
+    fn f32tof16(x: Emit) -> Emit {
+        Emit(push(Node::F32ToF16(x.0)))
+    }
+
+    fn vec3_dot(a: Emit, b: Emit) -> Emit {
+        Emit(push(Node::Vec3Dot(a.0, b.0)))
+    }
+
+    fn sin(x: Emit) -> Emit {
+        // The SAME `Node::Sin` the `InterpBackend` recorder pushes — one node, one printer arm,
+        // so the trig spells identically whichever backend axis authored the leaf.
+        Emit(push(Node::Sin(x.0)))
+    }
+
+    fn cos(x: Emit) -> Emit {
+        Emit(push(Node::Cos(x.0)))
+    }
+
+    fn rsqrt(x: Emit) -> Emit {
+        Emit(push(Node::Rsqrt(x.0)))
+    }
+}

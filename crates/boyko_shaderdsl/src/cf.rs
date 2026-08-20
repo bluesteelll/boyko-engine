@@ -1060,6 +1060,126 @@ pub trait Cf {
         t: Self::Scalar,
         e: Self::Scalar,
     ) -> Self::Scalar;
+
+    // ---- Rung E: the particle-leaf prerequisite facets (docs/PARTICLES-PLAN.md) ----------
+    //
+    // The seven particle leaves need four op families this axis could not express: the
+    // bitwise/shift `uint` ops the PCG32 hash folds (E1), the bit-cast + half-precision
+    // conversions the packed per-particle attributes decode/encode (E2), a real `dot` (E3),
+    // and the two transcendentals the billboard corner spins with (E4).
+    //
+    // TWO of E1's five listed ops ALREADY EXIST and are deliberately NOT duplicated: the
+    // bitwise AND is [`and_u`](Self::and_u) and the logical right shift is
+    // [`shr_u`](Self::shr_u) (Track B Increment G1, the `pack_material_id_ba` byte split).
+    // A second name pushing the SAME node and printing the SAME text would be two spellings
+    // of one op, and the committed `.spv` is pinned to the existing pair.
+    //
+    // PRECEDENCE — the one composition rule to know. The bitwise/shift operators bind LOOSER
+    // than `+ - * /`, so `crate::emit`'s printer WRAPS any bitwise/shift operand that sits
+    // inside an infix parent (`(state << 13u) ^ state`, `(a ^ b) * c`). The frozen
+    // [`and_u`](Self::and_u) / [`shr_u`](Self::shr_u) printer arms keep spelling THEIR operands
+    // un-wrapped (byte-identity with the committed `pack_material_id_ba`), so a body that nests
+    // a NEW bitwise node INSIDE `and_u`/`shr_u` must materialize it first
+    // ([`temp_uint`](Self::temp_uint)); nesting the other way round wraps correctly.
+    //
+    // SHIFT AMOUNTS: `shr_u`'s Eval arm is the plain host `>>`, which PANICS in debug for an
+    // amount >= 32 instead of masking it the way the GPU does (see [`ushl`](Self::ushl) for the
+    // measured masking rule). Every committed shift amount is a small constant, so the two
+    // agree on the whole reachable domain; a leaf that ever needs an unbounded dynamic right
+    // shift must mask the amount itself.
+
+    /// `a << b` over two [`Uint`](Self::Uint)s — the LEFT shift (the PCG32 hash's diffusion
+    /// step). The `<<` analogue of the existing [`shr_u`](Self::shr_u) (`>>`).
+    ///
+    /// SHIFT-AMOUNT MASKING (measured, `dxc -T cs_6_0 -spirv`, Vulkan SDK 1.4.350): DXC lowers
+    /// `a << b` to `OpBitwiseAnd %b %uint_31` followed by `OpShiftLeftLogical` — the HLSL/D3D
+    /// rule that only the LOW 5 BITS of the shift amount are used, so shifting by 32 is
+    /// shifting by 0, NOT a zero result. The Eval arm therefore uses `u32::wrapping_shl`, which
+    /// masks by 31 identically; the two backends agree on the FULL `u32` amount domain, not
+    /// merely on the in-range part.
+    fn ushl(a: Self::Uint, b: Self::Uint) -> Self::Uint;
+
+    /// `a ^ b` over two [`Uint`](Self::Uint)s — the bitwise XOR (`OpBitwiseXor`), the PCG32
+    /// hash's mixing step. On Eval the host `^` over `u32`s (exact, no wrapping question); on
+    /// Emit a `crate::emit` `Xor` node.
+    fn uxor(a: Self::Uint, b: Self::Uint) -> Self::Uint;
+
+    /// `a | b` over two [`Uint`](Self::Uint)s — the bitwise OR (`OpBitwiseOr`), the packed-pair
+    /// assembly (`lo | (hi << 16u)`). SEPARATE from the logical [`or`](Self::or) (which joins
+    /// two Masks and prints `||`): this is `|` over two `uint` VALUES, result-typed
+    /// [`Uint`](Self::Uint).
+    fn uor(a: Self::Uint, b: Self::Uint) -> Self::Uint;
+
+    /// `asuint(x)` — the BIT-REINTERPRET `float -> uint` (`OpBitcast`), NOT the numeric
+    /// truncating cast [`float_to_uint`](Self::float_to_uint) (`(uint)f`, `OpConvertFToU`).
+    /// The two are a standing confusion and produce completely different values, so they are
+    /// distinct nodes with distinct spellings. On Eval `f32::to_bits`.
+    fn asuint(x: Self::Scalar) -> Self::Uint;
+
+    /// `asfloat(u)` — the BIT-REINTERPRET `uint -> float` (`OpBitcast`), NOT the numeric
+    /// widening cast [`float_from_uint`](Self::float_from_uint) (`(float)u`, `OpConvertUToF`).
+    /// On Eval `f32::from_bits` (total: every `u32` bit pattern is a valid `f32`, including the
+    /// NaN payloads).
+    fn asfloat(u: Self::Uint) -> Self::Scalar;
+
+    /// `f16tof32(u)` — widens the IEEE 754 binary16 in the LOW 16 bits of `u` to a `float`
+    /// (the HIGH 16 bits are ignored, so a packed pair may be passed directly). MEASURED
+    /// lowering: `OpExtInst GLSL.std.450 UnpackHalf2x16` + `OpCompositeExtract 0`. On Eval
+    /// [`crate::half::f16_bits_to_f32`] — the IEEE conversion, subnormals and NaN payloads
+    /// included.
+    fn f16tof32(u: Self::Uint) -> Self::Scalar;
+
+    /// `f32tof16(x)` — narrows `x` to IEEE 754 binary16 in the LOW 16 bits of a `uint` (the
+    /// HIGH 16 bits are zero). MEASURED lowering: `OpExtInst GLSL.std.450 PackHalf2x16` over
+    /// `float2(x, 0.0)`, i.e. round-to-nearest-EVEN with real subnormals, ±Inf on overflow and
+    /// a truncated-payload NaN. On Eval [`crate::half::f32_to_f16_bits`].
+    fn f32tof16(x: Self::Scalar) -> Self::Uint;
+
+    /// `dot(a, b)` over two `float3`s — the HLSL `dot` INTRINSIC (`OpDot`), returning a
+    /// [`Scalar`](Self::Scalar).
+    ///
+    /// DISTINCT from [`crate::scalar::v_dot`], which spells the EXPLICIT scalar fold
+    /// `a.x*b.x + a.y*b.y + a.z*b.z` precisely BECAUSE the frozen field leaves must stay
+    /// byte-identical to a host oracle and `OpDot` is free to contract into an FMA chain. This
+    /// node is the opposite trade: a leaf that spells `dot(...)` accepts that its host oracle
+    /// is a CLOSE, not bit-exact, mirror (the same standing carve-out division carries). Use
+    /// [`crate::scalar::v_dot`] whenever a bit-exact contract is required.
+    ///
+    /// On Eval the left-associated fold `(a.x*b.x + a.y*b.y) + a.z*b.z`.
+    fn vec3_dot(a: Self::Vec3f, b: Self::Vec3f) -> Self::Scalar;
+
+    /// `sin(x)` — the HLSL `sin` intrinsic (`OpExtInst GLSL.std.450 Sin`).
+    ///
+    /// The transcendentals live HERE (on the control-flow axis, whose Eval instantiation is a
+    /// codegen-only ZST no physics-reachable code calls) rather than on
+    /// [`FieldScalar`](crate::scalar::FieldScalar), whose `f32` impl IS the physics leaf — the
+    /// same firewall reasoning [`crate::interp::InterpBackend`] states, which is why trig has
+    /// so far existed ONLY on that codegen-gated backend. Both spell the identical HLSL, so a
+    /// leaf may be authored against either axis.
+    ///
+    /// The Eval arm is the `nightly`/`std` shim [`FieldScalar::sqrt`](crate::scalar::FieldScalar::sqrt)
+    /// uses for the other op stable `core` lacks.
+    fn sin(x: Self::Scalar) -> Self::Scalar;
+
+    /// `cos(x)` — the HLSL `cos` intrinsic (`OpExtInst GLSL.std.450 Cos`). The companion of
+    /// [`sin`](Self::sin); see it for the axis + Eval-shim rationale.
+    fn cos(x: Self::Scalar) -> Self::Scalar;
+
+    /// `rsqrt(x)` — the HLSL reciprocal-square-root intrinsic (measured lowering:
+    /// `OpExtInst GLSL.std.450 InverseSqrt`), the op a unit-vector / rotation-pair
+    /// renormalization is written with instead of a `sqrt` followed by a divide.
+    ///
+    /// NOT bit-exact: `InverseSqrt` is an APPROXIMATE instruction (the Vulkan precision table
+    /// allows 2 ULP), so a host oracle mirroring it as `1.0 / sqrt(x)` — which is what the Eval
+    /// arm does — agrees to a tolerance, not to the bit. The same standing carve-out
+    /// [`vec3_dot`](Self::vec3_dot) and division carry: a leaf that spells `rsqrt` has opted
+    /// out of a byte-identity contract for that value.
+    ///
+    /// The DIVIDE this replaces needs no new facet — the scalar `/` is
+    /// [`FieldScalar::div`](crate::scalar::FieldScalar::div), already reachable from any
+    /// `C: Cf` body through [`Scalar`](Self::Scalar)'s own trait bound (as
+    /// [`crate::pack::pack_material_id_ba_body`] spells it).
+    fn rsqrt(x: Self::Scalar) -> Self::Scalar;
 }
 
 /// The control-flow EVAL backend — REAL host `for`/`if`/`continue`, a unit ZST.
@@ -1858,5 +1978,89 @@ impl Cf for EvalCf {
         // result-equivalent to the GPU ternary (which computes both arms and selects). The SAME shape
         // `select` / `FieldScalar::select` use; the bare vs wrapped spelling is an Emit-only concern.
         if cond { t } else { e }
+    }
+
+    // ---- Rung E: the particle-leaf prerequisite facets (native host) -------------------
+
+    #[inline]
+    fn ushl(a: u32, b: u32) -> u32 {
+        // `wrapping_shl` MASKS the amount by 31, which is exactly the `OpBitwiseAnd %b
+        // %uint_31` DXC emits ahead of `OpShiftLeftLogical` (measured). The plain `a << b`
+        // would panic in debug for `b >= 32` where the GPU silently shifts by `b & 31`.
+        a.wrapping_shl(b)
+    }
+
+    #[inline]
+    fn uxor(a: u32, b: u32) -> u32 {
+        a ^ b
+    }
+
+    #[inline]
+    fn uor(a: u32, b: u32) -> u32 {
+        a | b
+    }
+
+    #[inline]
+    fn asuint(x: f32) -> u32 {
+        // The BIT-REINTERPRET (`OpBitcast`), not the numeric cast: `to_bits` is total and
+        // preserves every bit including a NaN's payload and the sign of a zero.
+        x.to_bits()
+    }
+
+    #[inline]
+    fn asfloat(u: u32) -> f32 {
+        f32::from_bits(u)
+    }
+
+    #[inline]
+    fn f16tof32(u: u32) -> f32 {
+        crate::half::f16_bits_to_f32(u)
+    }
+
+    #[inline]
+    fn f32tof16(x: f32) -> u32 {
+        crate::half::f32_to_f16_bits(x)
+    }
+
+    #[inline]
+    fn vec3_dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+        // The left-associated fold `(a.x*b.x + a.y*b.y) + a.z*b.z`. `OpDot` may contract into
+        // an FMA chain on the GPU, so this mirror is close but NOT part of a bit-exact
+        // contract (see the trait doc).
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+
+    #[inline]
+    fn sin(x: f32) -> f32 {
+        // The same `nightly`/`std` shim `FieldScalar::sqrt` uses: stable `core` has no trig, so
+        // a strictly-`no_std` build takes the intrinsic and the default build links `std`.
+        #[cfg(feature = "nightly")]
+        {
+            core::intrinsics::sinf32(x)
+        }
+        #[cfg(not(feature = "nightly"))]
+        {
+            f32::sin(x)
+        }
+    }
+
+    #[inline]
+    fn cos(x: f32) -> f32 {
+        #[cfg(feature = "nightly")]
+        {
+            core::intrinsics::cosf32(x)
+        }
+        #[cfg(not(feature = "nightly"))]
+        {
+            f32::cos(x)
+        }
+    }
+
+    #[inline]
+    fn rsqrt(x: f32) -> f32 {
+        // `1.0 / sqrt(x)` through the SAME `nightly`/`std` sqrt shim `FieldScalar::sqrt` uses,
+        // so this arm stays `no_std`-clean. It is a CLOSE mirror of the GPU's approximate
+        // `InverseSqrt` (2 ULP allowed), not a bit-exact one — see the trait doc.
+        f32::lit(1.0).div(FieldScalar::sqrt(x))
     }
 }

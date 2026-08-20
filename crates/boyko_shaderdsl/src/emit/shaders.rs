@@ -2502,3 +2502,214 @@ pub fn emit_hlsl_m2_brick_cubic_hit() -> String {
         span
     })
 }
+
+// ---- Rung E: the particle-leaf prerequisite FACET PROBES (docs/PARTICLES-PLAN.md) ---------
+//
+// One emitter per [`crate::particle_facets`] probe body. Unlike every emitter above, these
+// spans are spliced into NO shader (no sentinel pair references them and no `.spv` depends on
+// their text) — they are the EMIT half of each rung-E facet pin, the Eval half being the same
+// body over `EvalCf`. They share [`emit_facet_probe`], which is the same reset/seed/pop/print
+// harness the other emitters spell inline.
+
+/// The shared reset/seed/pop/print harness for the rung-E facet probes. `float_in` / `uint_in`
+/// / `vec_in` are the probe's parameter-name tables (every other name table is empty — a probe
+/// declares no vars, calls no frozen function, reads no push-constant or level field, and
+/// declares no array); `body` records the probe's statements into the freshly-seeded function
+/// block. Returns the span printed at DEPTH 1 (4-space indent), like every other body span.
+fn emit_facet_probe<F: FnOnce()>(
+    float_in: &[&str],
+    uint_in: &[&str],
+    vec_in: &[&str],
+    body: F,
+) -> String {
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    CALLS.with(|c| c.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    body();
+
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    let vars = VARS.with(|v| v.borrow().clone());
+    let names = Names {
+        float_in,
+        uint_in,
+        vec_in,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
+        named_lit: NO_NAMED_LITS,
+        vars: &vars,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: NO_CALL_INPUTS,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut span = String::new();
+        print_block(&body_block, &arena, names, 1, &mut span);
+        span
+    })
+}
+
+/// Generates the **E1** bitwise/shift facet span by tracing
+/// [`crate::particle_facets::e1_bit_mix_body`] over `EmitCf` — the PCG-shaped fold over all
+/// five `uint` bit ops (`>>`, `^`, `<<`, `&`, `|`).
+///
+/// ```text
+///     uint rot = state >> 28u;
+///     uint word = state ^ (state << 13u);
+///     uint tail = word & 65535u;
+///     return tail | rot;
+/// ```
+///
+/// The parenthesized `(state << 13u)` is the printer's precedence rule made visible: a
+/// bitwise/shift node WRAPS inside an infix parent.
+pub fn emit_hlsl_e1_bit_mix() -> String {
+    use crate::particle_facets;
+
+    emit_facet_probe(&[], &["state"], &[], || {
+        // state → UintInput(0) (uint_in[0] = "state") — the probe's only input.
+        let state = Emit::uint_input(0);
+        let ret_out = RetCell;
+        let _ = particle_facets::e1_bit_mix_body::<EmitCf>(state, &ret_out);
+    })
+}
+
+/// Generates the **E2 encode** facet span by tracing
+/// [`crate::particle_facets::e2_pack_half2_body`] over `EmitCf` — two `f32tof16` narrows packed
+/// into one `uint`.
+///
+/// ```text
+///     uint lo = f32tof16(x);
+///     uint hi = f32tof16(y);
+///     return lo | (hi << 16u);
+/// ```
+pub fn emit_hlsl_e2_pack_half2() -> String {
+    use crate::particle_facets;
+
+    emit_facet_probe(&["x", "y"], &[], &[], || {
+        let x = Emit::input(0);
+        let y = Emit::input(1);
+        let ret_out = RetCell;
+        let _ = particle_facets::e2_pack_half2_body::<EmitCf>(x, y, &ret_out);
+    })
+}
+
+/// Generates the **E2 decode** facet span by tracing
+/// [`crate::particle_facets::e2_unpack_half2_body`] over `EmitCf` — the `f16tof32` widen of both
+/// halves of a packed `uint`.
+///
+/// ```text
+///     float lo = f16tof32(packed & 65535u);
+///     float hi = f16tof32(packed >> 16u);
+///     return lo + hi;
+/// ```
+///
+/// The un-parenthesized `packed & 65535u` inside the call is correct: a function-call ARGUMENT
+/// is at [`OperandPos::Root`], where nothing wraps.
+pub fn emit_hlsl_e2_unpack_half2() -> String {
+    use crate::particle_facets;
+
+    emit_facet_probe(&[], &["packed"], &[], || {
+        let packed = Emit::uint_input(0);
+        let ret_out = RetCellF;
+        let _ = particle_facets::e2_unpack_half2_body::<EmitCf>(packed, &ret_out);
+    })
+}
+
+/// Generates the **E2 bit-cast** facet span by tracing
+/// [`crate::particle_facets::e2_bitcast_sign_flip_body`] over `EmitCf` — the
+/// `asuint` → sign-bit XOR → `asfloat` round trip.
+///
+/// ```text
+///     uint bits = asuint(x);
+///     uint flipped = bits ^ 2147483648u;
+///     return asfloat(flipped);
+/// ```
+pub fn emit_hlsl_e2_bitcast_sign_flip() -> String {
+    use crate::particle_facets;
+
+    emit_facet_probe(&["x"], &[], &[], || {
+        let x = Emit::input(0);
+        let ret_out = RetCellF;
+        let _ = particle_facets::e2_bitcast_sign_flip_body::<EmitCf>(x, &ret_out);
+    })
+}
+
+/// Generates the **E3** `dot` facet span by tracing [`crate::particle_facets::e3_dot_body`]
+/// over `EmitCf` — the intrinsic spelled once as a named temp and once inline under a `*`.
+///
+/// ```text
+///     float vn = dot(v, n);
+///     return vn * dot(v, v);
+/// ```
+pub fn emit_hlsl_e3_dot() -> String {
+    use crate::particle_facets;
+
+    emit_facet_probe(&[], &[], &["v", "n"], || {
+        // v/n → Vec3Param(0)/Vec3Param(1) — WHOLE `float3` params (passed to `dot`, never
+        // indexed), so they spell their names.
+        let v = Emit(push(Node::Vec3Param(0)));
+        let n = Emit(push(Node::Vec3Param(1)));
+        let ret_out = RetCellF;
+        let _ = particle_facets::e3_dot_body::<EmitCf>(v, n, &ret_out);
+    })
+}
+
+/// Generates the **E4** trig facet span by tracing [`crate::particle_facets::e4_trig_body`]
+/// over `EmitCf` — `sin`/`cos` on the control-flow axis, printed by the SAME
+/// [`Node::Sin`]/[`Node::Cos`] arms the `InterpBackend` recorder feeds.
+///
+/// ```text
+///     float s = sin(theta);
+///     float c = cos(theta);
+///     return s * s + c * c;
+/// ```
+pub fn emit_hlsl_e4_trig() -> String {
+    use crate::particle_facets;
+
+    emit_facet_probe(&["theta"], &[], &[], || {
+        let theta = Emit::input(0);
+        let ret_out = RetCellF;
+        let _ = particle_facets::e4_trig_body::<EmitCf>(theta, &ret_out);
+    })
+}
+
+/// Generates the **E5** renormalization facet span by tracing
+/// [`crate::particle_facets::e5_renorm_body`] over `EmitCf` — the `rsqrt` that rescales a
+/// stored `(cos, sin)` rotation pair back onto the unit circle.
+///
+/// ```text
+///     float len_sq = c * c + s * s;
+///     float inv_len = rsqrt(len_sq);
+///     return c * inv_len;
+/// ```
+pub fn emit_hlsl_e5_renorm() -> String {
+    use crate::particle_facets;
+
+    emit_facet_probe(&["c", "s"], &[], &[], || {
+        let c = Emit::input(0);
+        let s = Emit::input(1);
+        let ret_out = RetCellF;
+        let _ = particle_facets::e5_renorm_body::<EmitCf>(c, s, &ret_out);
+    })
+}

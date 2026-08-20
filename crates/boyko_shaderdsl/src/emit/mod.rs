@@ -540,6 +540,57 @@ enum Node {
     /// name. An inline leaf; spells the array NAME (`s`). Carries no element type ([`type_of`]
     /// default `Float`, harmless — it is only ever a `CallN` arg, never an arithmetic operand).
     ArrName(u32),
+
+    // ---- Rung E: the particle-leaf prerequisite nodes (docs/PARTICLES-PLAN.md) ----------
+    //
+    // E1 (`<<` / `^` / `|`; the `&` and `>>` of the same family are the pre-existing
+    // [`Node::And`] / [`Node::Shr`]), E2 (the two `OpBitcast`s + the two half-precision
+    // conversions), E3 (`OpDot`). E4 (`sin`/`cos`) adds NO node — it re-uses [`Node::Sin`] /
+    // [`Node::Cos`], so the trig prints identically whichever backend axis authored it.
+    //
+    // Every one of the three infix nodes below binds LOOSER than `+ - * /`, so they are the
+    // first family in this arena that must PARENTHESIZE as an operand: see the
+    // [`OperandPos::BitSide`] arm of [`needs_paren_as_operand`].
+    /// `a << b` over two `uint` handles — the LEFT shift. Lowers to an `OpBitwiseAnd %b
+    /// %uint_31` feeding an `OpShiftLeftLogical` (DXC masks the amount to its low 5 bits —
+    /// measured). The `<<` analogue of [`Node::Shr`]; result type [`EmitTy::Uint`], printed
+    /// `{} << {}`.
+    Shl(u32, u32),
+    /// `a ^ b` over two `uint` handles — the bitwise XOR (`OpBitwiseXor`), the PCG32 mixing
+    /// step. Result type [`EmitTy::Uint`], printed `{} ^ {}`.
+    Xor(u32, u32),
+    /// `a | b` over two `uint` handles — the bitwise OR (`OpBitwiseOr`), the packed-pair
+    /// assembly. DISTINCT from [`Node::Or`], which is the LOGICAL `||` over two MASKS and
+    /// result-types as a mask; this is `|` over two `uint` VALUES. Result type
+    /// [`EmitTy::Uint`], printed `{} | {}`.
+    BitOr(u32, u32),
+    /// `asuint(a)` — the BIT-REINTERPRET `float -> uint` (`OpBitcast`). DISTINCT from
+    /// [`Node::FloatToUint`], the NUMERIC truncating cast `(uint)f` (`OpConvertFToU`): the two
+    /// produce entirely different values from the same operand. Result type [`EmitTy::Uint`].
+    AsUint(u32),
+    /// `asfloat(a)` — the BIT-REINTERPRET `uint -> float` (`OpBitcast`). DISTINCT from
+    /// [`Node::UintToFloat`] / [`Node::FloatFromUint`], the NUMERIC widening cast `(float)u`
+    /// (`OpConvertUToF`). Result type [`EmitTy::Float`] (the `_ => Float` default).
+    AsFloat(u32),
+    /// `f16tof32(a)` — widens the IEEE 754 binary16 in the LOW 16 bits of a `uint` operand
+    /// (`OpExtInst GLSL.std.450 UnpackHalf2x16` + `OpCompositeExtract 0` — measured). Result
+    /// type [`EmitTy::Float`] (the default arm).
+    F16ToF32(u32),
+    /// `f32tof16(a)` — narrows a `float` operand to IEEE 754 binary16 in the LOW 16 bits of a
+    /// `uint` (`OpExtInst GLSL.std.450 PackHalf2x16` over `float2(a, 0.0)` — measured, i.e.
+    /// round-to-nearest-even). Result type [`EmitTy::Uint`].
+    F32ToF16(u32),
+    /// `dot(a, b)` over two `float3` handles — the HLSL `dot` INTRINSIC (`OpDot`). The
+    /// straight-line field leaves deliberately spell the EXPLICIT scalar fold instead (see
+    /// [`crate::scalar::v_dot`]) because `OpDot` may contract into an FMA chain and fork a
+    /// bit-exact host oracle; this node is for the leaves that accept that trade. Result type
+    /// [`EmitTy::Float`] (the default arm).
+    Vec3Dot(u32, u32),
+    /// `rsqrt(a)` — the reciprocal square root (`OpExtInst GLSL.std.450 InverseSqrt` —
+    /// measured), the renormalization op. APPROXIMATE on the GPU (2 ULP allowed), so like
+    /// [`Node::Vec3Dot`] it carries no byte-identity contract. Result type [`EmitTy::Float`]
+    /// (the default arm, as for [`Node::Sqrt`]).
+    Rsqrt(u32),
 }
 
 /// One VECTOR (`float3`/`float2`) SSA node — the normal leaf is a vector expression
@@ -709,6 +760,15 @@ fn type_of(node: Node) -> EmitTy {
         | Node::Vec2AddScalar(_, _)
         | Node::Vec2RSubScalar(_, _) => EmitTy::Float2,
         Node::Vec2Comp(_, _) => EmitTy::Float,
+        // Rung E: the `uint`-RESULT nodes — the three bitwise/shift ops, the `float -> uint`
+        // bit-cast, and the half-precision NARROW (whose 16 result bits live in a `uint`). The
+        // float-result members of the same rung (`AsFloat` / `F16ToF32` / `Vec3Dot`) take the
+        // `_ => Float` default, like the other intrinsic-call nodes (`Sqrt`/`Sin`/`Cos`).
+        Node::Shl(_, _)
+        | Node::Xor(_, _)
+        | Node::BitOr(_, _)
+        | Node::AsUint(_)
+        | Node::F32ToF16(_) => EmitTy::Uint,
         // A mutable-local READ carries the var's DECLARED type out-of-band ([`var_type`], keyed by the
         // `VARS` id) — `float3` for `oct_encode`'s `n`, `float2` for `e`, `float`/`bool` for every
         // pre-G2 scalar var (the default). Above the `_ => Float` catch-all so the typed-var reads
@@ -1293,6 +1353,11 @@ enum OperandPos {
     /// An operand (either side) of a MULTIPLICATIVE (`*`/`/`) parent — an additive child
     /// always wraps (`(t1 - p[a]) * t3`), since `*`/`/` bind tighter than `+`/`-`.
     MulSide,
+    /// An operand (either side) of a BITWISE/SHIFT parent (`<<`/`^`/`|` — the rung-E nodes).
+    /// Those operators bind LOOSER than every arithmetic operator AND differ in precedence
+    /// among themselves (`<<`/`>>` > `&` > `^` > `|`), so a bitwise/shift CHILD wraps here
+    /// while an arithmetic child needs no wrap (`a + b << c` already groups as `(a + b) << c`).
+    BitSide,
 }
 
 /// The spelling of an ARRAY-SUBSCRIPT / DYNAMIC-INDEX index node (Increment 5c). The committed
@@ -1514,6 +1579,16 @@ fn needs_paren_as_operand(node: Node, pos: OperandPos) -> bool {
         // scalar/`float3` additive nodes.
         | Node::Vec2AddScalar(..)
         | Node::Vec2RSubScalar(..) => matches!(pos, OperandPos::MulSide | OperandPos::AddRight),
+        // Rung E: the bitwise/shift family binds LOOSER than `+ - * /` and its members differ in
+        // precedence among themselves (`<<`/`>>` > `&` > `^` > `|`), so ANY infix parent gets an
+        // explicit wrap — `(state << 13u) ^ state`, `(a ^ b) * c`, `(a | b) & c`. At
+        // [`OperandPos::Root`] (a call argument, a `return`, a comparison comparand, a decl rhs)
+        // nothing wraps, which is why this is BYTE-NEUTRAL for the committed
+        // `pack_material_id_ba`: its only nested bit op is the `Shr` inside `And`, and the frozen
+        // `And` printer arm spells its operands at Root.
+        Node::Shl(..) | Node::Xor(..) | Node::BitOr(..) | Node::And(..) | Node::Shr(..) => {
+            !matches!(pos, OperandPos::Root)
+        }
         _ => false,
     }
 }
@@ -1550,6 +1625,8 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
     let opl = |child: u32| operand_str(arena, names, temps, child, OperandPos::AddLeft);
     let opr = |child: u32| operand_str(arena, names, temps, child, OperandPos::AddRight);
     let opm = |child: u32| operand_str(arena, names, temps, child, OperandPos::MulSide);
+    // `opb` = an operand of a BITWISE/SHIFT parent (rung E) — a bitwise/shift child wraps.
+    let opb = |child: u32| operand_str(arena, names, temps, child, OperandPos::BitSide);
     // M1: the FLOAT arithmetic nodes take FLOAT operands; the bit/cast nodes take
     // UINT operands. Check before spelling (the `Mask` operand of `Select` and the
     // `Gt`/`IntEq` comparands are excluded — a comparison is an inlined leaf typed
@@ -1857,6 +1934,58 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
             chk(s, EmitTy::Float);
             chk(v, EmitTy::Float2);
             format!("{} - {}", opl(s), opr(v))
+        }
+        // ---- Rung E: the particle-leaf prerequisite nodes -------------------------------
+        // The three infix bitwise/shift ops. Both operands spell at `BitSide`, so a nested
+        // bitwise/shift child WRAPS (`(state << 13u) ^ state`) while an arithmetic child stays
+        // flat (`a + b << c` already groups correctly). Both operands are checked `Uint`.
+        Node::Shl(a, b) => {
+            chk(a, EmitTy::Uint);
+            chk(b, EmitTy::Uint);
+            format!("{} << {}", opb(a), opb(b))
+        }
+        Node::Xor(a, b) => {
+            chk(a, EmitTy::Uint);
+            chk(b, EmitTy::Uint);
+            format!("{} ^ {}", opb(a), opb(b))
+        }
+        Node::BitOr(a, b) => {
+            chk(a, EmitTy::Uint);
+            chk(b, EmitTy::Uint);
+            format!("{} | {}", opb(a), opb(b))
+        }
+        // The two bit-casts + the two half-precision conversions. All four are function-call
+        // forms, so the operand spells at Root (position-irrelevant) and never needs a wrap.
+        // The operand type is the load-bearing check: `asuint`/`f32tof16` consume a `float`,
+        // `asfloat`/`f16tof32` a `uint` — swapping either pair is a semantically-wrong body
+        // that would still be textually valid HLSL.
+        Node::AsUint(a) => {
+            chk(a, EmitTy::Float);
+            format!("asuint({})", op(a))
+        }
+        Node::AsFloat(a) => {
+            chk(a, EmitTy::Uint);
+            format!("asfloat({})", op(a))
+        }
+        Node::F16ToF32(a) => {
+            chk(a, EmitTy::Uint);
+            format!("f16tof32({})", op(a))
+        }
+        Node::F32ToF16(a) => {
+            chk(a, EmitTy::Float);
+            format!("f32tof16({})", op(a))
+        }
+        // `dot(a, b)` — the `float3` intrinsic. Both operands are checked `Float3` and spell at
+        // Root (intrinsic arguments).
+        Node::Vec3Dot(a, b) => {
+            chk(a, EmitTy::Float3);
+            chk(b, EmitTy::Float3);
+            format!("dot({}, {})", op(a), op(b))
+        }
+        // `rsqrt(a)` — the scalar renormalization intrinsic (the `Sqrt` arm's shape).
+        Node::Rsqrt(a) => {
+            chk(a, EmitTy::Float);
+            format!("rsqrt({})", op(a))
         }
         // A variadic heterogeneous call `sym(op(a0), op(a1), ...)` — `m2_corner(atlas, atlas_smp,
         // tile_org, cx, cy, cz, inv_atlas, band_half)` / `m2_jcgt_cubic_coeffs(s, lo_g, rd_v)` /
