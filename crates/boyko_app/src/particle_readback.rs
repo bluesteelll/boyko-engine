@@ -28,6 +28,9 @@
 //! `n = 1` is gate #9's frame-0 case (the boot partition, `alive_count_cur == real_emit_count`,
 //! nothing yet retired); `n = 30` is the settled case, at the same instant the image pin captures.
 
+use boyko_rhi_vulkan::compute::{PARTICLE_SORT_BINS, PARTICLE_SORT_LOG_SPAN, particle_sort_key};
+use boyko_render::ParticleRender;
+
 use crate::gpu_scene::ParticleCountersRaw;
 
 /// The wave width the artifact line's per-lane rate is computed against — 32, this part's
@@ -269,6 +272,307 @@ impl ParticleCountersReadback {
     }
 }
 
+// ---- Rung P2 item 3: the SORT MONOTONICITY readback (plan P2's named gate) -----------------
+
+/// The largest number of alpha render records either half of the sort readback copies back —
+/// 16 384, i.e. 512 KB per range and 1 MB for the pair.
+///
+/// A bound and not the whole class, because `p_render` is `CAP × 32 B` (8.4 MB at the default
+/// capacity) and a gate that copies a scene-sized buffer is a gate nobody runs. Every fixture leg
+/// in this tree is well inside it — the saturated alpha leg is 5 120 records — so on the legs that
+/// gate this rung the readback sees the ENTIRE class and
+/// [`ParticleSortRangeScan::is_complete`](ParticleSortRangeScan::is_complete) says so per capture
+/// rather than leaving the reader to assume it.
+pub const PARTICLE_SORT_READBACK_MAX_RECORDS: u32 = 16_384;
+
+/// The sentinel [`ParticleSortRangeScan::first_inversion_rank`] carries when the scanned range is
+/// monotone — `u32::MAX`, which is unreachable as a rank because
+/// [`PARTICLE_SORT_READBACK_MAX_RECORDS`] bounds the scan.
+pub const PARTICLE_SORT_NO_INVERSION: u32 = u32::MAX;
+
+/// **The sort's correctness instrument** (plan P2, "sort monotonicity readback"): what a scan of
+/// one contiguous alpha range says about its order.
+///
+/// # Why THIS is the gate, and why no image can be
+///
+/// Gate #16's order-independence argument does not transfer to a non-commutative blend, so no image
+/// pin may be authored over overlapping alpha billboards — the plan records that at three code
+/// sites. And rung P2 item 2 measured the harder half: a wrong alpha index transform produced a
+/// dump BYTE-IDENTICAL to the `particle_additive` golden. **A byte-identical golden can hide a
+/// wrong answer**, so the sort's gate has to be a statement about the ORDER itself.
+///
+/// # What it reports on a wrong range
+///
+/// * **UNSORTED** (the order the sim's waves retired in) — keys jump both ways, so
+///   [`inversions`](Self::inversions) is large, [`first_inversion_rank`](Self::first_inversion_rank)
+///   is small, and [`max_depth_ratio`](Self::max_depth_ratio) far exceeds one bin's width.
+/// * **REVERSED** (front-to-back) — keys are non-INcreasing, so almost every adjacent pair is an
+///   inversion: `inversions ≈ records_checked − 1` and `first_inversion_rank == 0` unless the first
+///   two share a bin.
+/// * **PARTIALLY sorted** (one pass of a two-pass radix, a lost group's reservation) —
+///   `first_inversion_rank` is the exact rank of the first out-of-order pair, which is the number
+///   that localizes the defect rather than merely reporting it.
+///
+/// # Two claims, one oracle-free
+///
+/// [`inversions`](Self::inversions) is computed from the HOST mirror of the device key
+/// (`compute::particle_sort_key`), so it is exact only while the two agree — and `log2` is not a
+/// correctly-rounded operation on either side, so a record sitting exactly on a bin boundary may
+/// quantize one step differently here. [`max_depth_ratio`](Self::max_depth_ratio) needs no oracle
+/// at all: it is a statement about the DEPTHS the records carry, and a correctly sorted range
+/// satisfies `depth[r+1] ≤ depth[r] · 2^(SPAN/BINS)` because two elements out of depth order must
+/// share a bin, and one bin is exactly that wide. Reported together so a boundary artefact is
+/// diagnosable instead of being the one number a reader has.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ParticleSortRangeScan {
+    /// The class's live length as `alpha.instanceCount` reported it — the population the scan is a
+    /// prefix of.
+    pub alpha_count: u32,
+    /// How many records the scan actually walked: `min(alpha_count,
+    /// PARTICLE_SORT_READBACK_MAX_RECORDS)`.
+    pub records_checked: u32,
+    /// Adjacent pairs whose host-recomputed key DECREASES with rank — zero for a correctly ordered
+    /// range. The key is inverted (bin 0 is the farthest), so a non-decreasing key sequence is
+    /// exactly back-to-front.
+    pub inversions: u32,
+    /// The rank `r` of the FIRST pair with `key[r] > key[r+1]`, or [`PARTICLE_SORT_NO_INVERSION`].
+    pub first_inversion_rank: u32,
+    /// The key at rank 0 — the farthest particle's bin on a correct range.
+    pub key_first: u32,
+    /// The key at rank `records_checked − 1`.
+    pub key_last: u32,
+    /// Distinct keys seen, in scan order. **The scan's own non-vacuity number**: a range whose
+    /// particles all land in ONE bin is trivially monotone, so a gate that asserted monotonicity
+    /// without reading this could pass on a fixture that proves nothing.
+    pub distinct_keys: u32,
+    /// The largest `depth[r+1] / depth[r]` over the scanned pairs — the ORACLE-FREE half. A
+    /// correctly sorted range keeps it at or below one bin's width (`2^(SPAN/BINS)` ≈ 1.0415);
+    /// `1.0` or less means every pair was strictly ordered.
+    pub max_depth_ratio: f32,
+    /// The camera distance at rank 0.
+    pub depth_first: f32,
+    /// The camera distance at rank `records_checked − 1`.
+    pub depth_last: f32,
+}
+
+impl ParticleSortRangeScan {
+    /// The empty scan — what a capture of a class with no live particles reports. Monotone and
+    /// VACUOUS, which [`is_conclusive`](Self::is_conclusive) is what distinguishes.
+    pub const EMPTY: Self = Self {
+        alpha_count: 0,
+        records_checked: 0,
+        inversions: 0,
+        first_inversion_rank: PARTICLE_SORT_NO_INVERSION,
+        key_first: 0,
+        key_last: 0,
+        distinct_keys: 0,
+        max_depth_ratio: 0.0,
+        depth_first: 0.0,
+        depth_last: 0.0,
+    };
+
+    /// Whether the whole class was walked rather than a prefix of it.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.records_checked == self.alpha_count
+    }
+
+    /// **The monotonicity property itself**: the key sequence never decreases with rank.
+    #[must_use]
+    pub fn is_monotone(&self) -> bool {
+        self.inversions == 0
+    }
+
+    /// Whether this scan can support ANY verdict — at least two records and at least two distinct
+    /// bins among them.
+    ///
+    /// A single-bin range is monotone for a reason that has nothing to do with the sort, and a
+    /// one-record range is monotone by arithmetic. Asserting `is_monotone()` without this is the
+    /// vacuous-green shape this campaign has found five times; the gate asserts BOTH.
+    #[must_use]
+    pub fn is_conclusive(&self) -> bool {
+        self.records_checked >= 2 && self.distinct_keys >= 2
+    }
+
+    /// The oracle-free bound: no adjacent pair rises in depth by more than one bin's width.
+    ///
+    /// `tolerance` is that width, `2^(PARTICLE_SORT_LOG_SPAN / PARTICLE_SORT_BINS)`, which
+    /// [`particle_sort_bin_depth_ratio`] computes from the same two constants the shaders are
+    /// generated from.
+    #[must_use]
+    pub fn depth_order_holds(&self, tolerance: f32) -> bool {
+        self.records_checked < 2 || self.max_depth_ratio <= tolerance
+    }
+
+    /// The one-line artifact form, for the runner's capture log.
+    #[must_use]
+    pub fn artifact_line(&self, label: &str) -> String {
+        format!(
+            "particle_sort[{label}] alpha={} checked={} complete={} inversions={} \
+             first_inversion={} distinct_keys={} monotone={} conclusive={} key_first={} \
+             key_last={} depth_first={:.4} depth_last={:.4} max_depth_ratio={:.6}",
+            self.alpha_count,
+            self.records_checked,
+            self.is_complete(),
+            self.inversions,
+            self.first_inversion_rank,
+            self.distinct_keys,
+            self.is_monotone(),
+            self.is_conclusive(),
+            self.key_first,
+            self.key_last,
+            self.depth_first,
+            self.depth_last,
+            self.max_depth_ratio,
+        )
+    }
+}
+
+/// **The sort readback's non-vacuity CONTROL, taken in the same submit as the measurement.**
+///
+/// `sorted` scans `p_render_sorted` (the scatter's output) and `source` scans `p_render` (the
+/// unsorted class the sim wrote), for the SAME frame and the SAME particles. The gate asserts that
+/// `sorted` is monotone and conclusive **and that `source` is not monotone** — so the instrument
+/// proves, in every run, that it can tell the two apart.
+///
+/// A control taken as a second RUN would not have this property: two runs do not share a spawn
+/// seed, so a difference between them is a distribution comparison. Two ranges of one frame are a
+/// per-record one.
+#[derive(boyko_macros::Resource, Clone, Copy, Debug, PartialEq)]
+pub struct ParticleSortReadback {
+    /// Presented frames that had elapsed when the capture ran.
+    pub frames_presented: u32,
+    /// The scatter's destination — the range the alpha draw actually reads under a sorting arming.
+    pub sorted: ParticleSortRangeScan,
+    /// The sim's own unsorted output, still in `p_render` — the CONTROL.
+    pub source: ParticleSortRangeScan,
+}
+
+impl ParticleSortReadback {
+    /// **The whole gate as one predicate**: the destination is conclusively monotone and the source
+    /// is not.
+    ///
+    /// Both halves are load-bearing, and the second is the one this campaign keeps having to add:
+    /// without it a scatter that copied nothing at all — leaving `p_render_sorted` at its boot
+    /// zeroes, every record at the origin, every key identical — would report `inversions == 0` and
+    /// pass. `is_conclusive` on the destination refuses that, and `!source.is_monotone()` proves the
+    /// fixture had an order to fix.
+    #[must_use]
+    pub fn sort_is_proven(&self) -> bool {
+        self.sorted.is_monotone() && self.sorted.is_conclusive() && !self.source.is_monotone()
+    }
+
+    /// Both halves' artifact lines, newline-joined — printed by the runner at the capture.
+    #[must_use]
+    pub fn artifact_lines(&self) -> String {
+        format!(
+            "{}\n{}",
+            self.sorted.artifact_line("sorted"),
+            self.source.artifact_line("source")
+        )
+    }
+}
+
+/// One bin's width as a DEPTH RATIO — `2^(PARTICLE_SORT_LOG_SPAN / (PARTICLE_SORT_BINS − 1))`,
+/// ≈ 1.041559.
+///
+/// The tolerance [`ParticleSortRangeScan::depth_order_holds`] is stated against, derived from the
+/// two constants the shaders are generated from rather than written as a literal: moving the range
+/// moves this with it.
+///
+/// # ⚠️ The divisor is `BINS − 1`, and getting it wrong is an off-by-one that only a DENSE range
+/// reveals
+///
+/// The key quantizes with `round(t · 255)` over `t ∈ [0, 1]`, so the map has **255 steps, not 256**
+/// — bin `b` covers `t ∈ [(b − ½)/255, (b + ½)/255)`, and the two end bins are half-width. One step
+/// is therefore `SPAN/255` octaves, not `SPAN/256`.
+///
+/// **MEASURED, 2026-08-21**: the first cut of this function divided by `BINS` and gave 1.041450.
+/// The 30-particle lab leg passed it (its widest adjacent pair was 1.033370 — no two particles were
+/// at opposite ends of one bin), and the **saturated 32 256-particle leg reddened it at 1.041559**,
+/// which is `2^(15/255)` to six figures — the correct width, produced by a correctly sorted range.
+/// The bound was wrong, not the sort. Recorded because the sparse leg is the one a reader would
+/// reach for first, and it cannot see this.
+#[must_use]
+pub fn particle_sort_bin_depth_ratio() -> f32 {
+    (PARTICLE_SORT_LOG_SPAN / (PARTICLE_SORT_BINS - 1) as f32).exp2()
+}
+
+/// **The pure half of the sort readback**: scans one contiguous run of alpha render records, in
+/// RANK order, and reports its order.
+///
+/// `records[r]` must be the record at rank `r` — the caller is responsible for undoing the class's
+/// `capacity - 1 - rank` mirror, which it does by reading the range backwards. Device-free and
+/// allocation-free, so the whole verdict is unit-testable against a hand-built range.
+#[must_use]
+pub fn scan_alpha_range(records: &[ParticleRender], cam_eye: [f32; 3]) -> ParticleSortRangeScan {
+    let checked = records.len() as u32;
+    if records.is_empty() {
+        return ParticleSortRangeScan::EMPTY;
+    }
+    let depth_of = |r: &ParticleRender| -> f32 {
+        let dx = cam_eye[0] - r.position[0];
+        let dy = cam_eye[1] - r.position[1];
+        let dz = cam_eye[2] - r.position[2];
+        (dx * dx + dy * dy + dz * dz).sqrt()
+    };
+
+    let mut prev_key = particle_sort_key(records[0].position, cam_eye);
+    let mut prev_depth = depth_of(&records[0]);
+    let key_first = prev_key;
+    let depth_first = prev_depth;
+    let mut inversions = 0u32;
+    let mut first_inversion_rank = PARTICLE_SORT_NO_INVERSION;
+    // The keys are u8-valued, so "distinct in scan order" is a run count: a correctly sorted range
+    // is non-decreasing, and a change of key is then a change of bin. On an UNSORTED range this
+    // over-counts — which is the harmless direction, since the number only ever guards against a
+    // range too uniform to prove anything.
+    let mut distinct_keys = 1u32;
+    let mut max_depth_ratio = 0.0f32;
+
+    for (i, r) in records[1..].iter().enumerate() {
+        let key = particle_sort_key(r.position, cam_eye);
+        let depth = depth_of(r);
+        if key < prev_key {
+            if first_inversion_rank == PARTICLE_SORT_NO_INVERSION {
+                // The rank of the pair's FIRST element: `r` sits at rank `i + 1`, so the pair
+                // begins at `i`. Naming the pair's HEAD is what makes the number a place to look
+                // rather than a place a break was noticed.
+                first_inversion_rank = i as u32;
+            }
+            inversions += 1;
+        }
+        if key != prev_key {
+            distinct_keys += 1;
+        }
+        // `prev_depth` can be zero only for a particle at the eye, which the key's own near clamp
+        // already folds into bin 255; guard anyway so the ratio is a number rather than an inf.
+        if prev_depth > 0.0 {
+            let ratio = depth / prev_depth;
+            if ratio > max_depth_ratio {
+                max_depth_ratio = ratio;
+            }
+        }
+        prev_key = key;
+        prev_depth = depth;
+    }
+
+    ParticleSortRangeScan {
+        // Filled by the caller, which is the side that knows the class's true length; the scan
+        // itself only ever sees the prefix it was handed.
+        alpha_count: checked,
+        records_checked: checked,
+        inversions,
+        first_inversion_rank,
+        key_first,
+        key_last: prev_key,
+        distinct_keys,
+        max_depth_ratio,
+        depth_first,
+        depth_last: prev_depth,
+    }
+}
+
 /// The settle → capture driver the windowed frame loop threads through its steady path.
 ///
 /// Armed by `BOYKO_PARTICLE_READBACK_FRAME=<n>`; `n` is the presented-frame count to capture
@@ -356,6 +660,176 @@ mod tests {
             waves_skipped: 0,
             lanes_evaluated: 0,
         }
+    }
+
+    // ---- Rung P2 item 3: the sort scan, device-free -------------------------------------
+
+    /// A render record at `distance` units along +X from the origin — the only field
+    /// [`scan_alpha_range`] reads is `position`, so the rest is left at its zero value.
+    fn at(distance: f32) -> ParticleRender {
+        ParticleRender {
+            position: [distance, 0.0, 0.0],
+            size: 1.0,
+            color_rgba8: 0,
+            rot_cs: 0,
+            tex_index: 0,
+            flags: 0,
+        }
+    }
+
+    /// The eye every scan below measures from.
+    const EYE: [f32; 3] = [0.0, 0.0, 0.0];
+
+    /// A depth ladder wide enough to span many bins: each step is a factor of two, i.e. a whole
+    /// octave, which is ~17 bins apart at the shipped 15-octave / 256-bin range.
+    fn far_to_near() -> Vec<ParticleRender> {
+        vec![at(64.0), at(32.0), at(16.0), at(8.0), at(4.0), at(2.0), at(1.0), at(0.5)]
+    }
+
+    /// **What the gate reports on a CORRECT range.** Rank 0 is the farthest; the key never
+    /// decreases; the depths never rise.
+    #[test]
+    fn a_back_to_front_range_is_monotone_and_conclusive() {
+        let scan = scan_alpha_range(&far_to_near(), EYE);
+        assert_eq!(scan.inversions, 0, "a back-to-front range has no inversion");
+        assert_eq!(scan.first_inversion_rank, PARTICLE_SORT_NO_INVERSION);
+        assert!(scan.is_monotone() && scan.is_conclusive());
+        assert!(
+            scan.key_first < scan.key_last,
+            "the key is INVERTED (bin 0 is the farthest), so it must RISE from far to near: \
+             {} -> {}",
+            scan.key_first,
+            scan.key_last
+        );
+        assert!(scan.depth_first > scan.depth_last, "rank 0 is the farthest");
+        // Eight octaves over the ladder ⇒ eight distinct bins, and the oracle-free bound holds
+        // because every step goes DOWN in depth.
+        assert_eq!(scan.distinct_keys, 8);
+        assert!(scan.depth_order_holds(particle_sort_bin_depth_ratio()));
+        assert!(scan.max_depth_ratio < 1.0, "every adjacent step falls in depth");
+    }
+
+    /// **What the gate reports on a REVERSED range** — front-to-back, the exact opposite of what
+    /// `alpha_over` needs. Nearly every adjacent pair is an inversion and the first is at rank 0.
+    #[test]
+    fn a_front_to_back_range_inverts_at_every_step() {
+        let mut records = far_to_near();
+        records.reverse();
+        let scan = scan_alpha_range(&records, EYE);
+        assert_eq!(
+            scan.inversions,
+            (records.len() - 1) as u32,
+            "a strictly reversed range inverts at every adjacent pair"
+        );
+        assert_eq!(scan.first_inversion_rank, 0, "the very first pair is already wrong");
+        assert!(!scan.is_monotone());
+        assert!(
+            !scan.depth_order_holds(particle_sort_bin_depth_ratio()),
+            "the oracle-free bound catches it too: each step DOUBLES the depth, which is ~17 bins"
+        );
+    }
+
+    /// **What the gate reports on a PARTIALLY sorted range** — one pair out of order in the middle.
+    /// `first_inversion_rank` localizes the defect rather than merely reporting it.
+    #[test]
+    fn a_partially_sorted_range_names_the_rank_of_its_first_break() {
+        let mut records = far_to_near();
+        records.swap(4, 5);
+        let scan = scan_alpha_range(&records, EYE);
+        assert_eq!(scan.inversions, 1, "one swapped pair is one inversion");
+        assert_eq!(
+            scan.first_inversion_rank, 4,
+            "the break is the pair (rank 4, rank 5) — the rank NAMED is the pair's first element"
+        );
+        assert!(!scan.is_monotone());
+    }
+
+    /// **The vacuity the control exists to refuse**: a scatter that wrote NOTHING leaves
+    /// `p_render_sorted` at its boot zeroes, so every record sits at the origin, every key is the
+    /// same, and the range is monotone. `is_conclusive` is what refuses it.
+    #[test]
+    fn an_all_zero_range_is_monotone_and_inconclusive() {
+        let records = vec![at(0.0); 16];
+        let scan = scan_alpha_range(&records, EYE);
+        assert!(scan.is_monotone(), "a run of identical keys has no inversion — that is the trap");
+        assert_eq!(scan.distinct_keys, 1);
+        assert!(
+            !scan.is_conclusive(),
+            "one distinct bin cannot support a verdict, which is exactly what a scatter that never \
+             ran produces"
+        );
+        // ...and the near clamp is what keeps a particle AT the eye from producing -inf: it lands
+        // in the nearest bin, deterministically.
+        assert_eq!(scan.key_first, PARTICLE_SORT_BINS - 1);
+    }
+
+    /// A one-record range is monotone by arithmetic, and a zero-record one is
+    /// [`ParticleSortRangeScan::EMPTY`]. Both are inconclusive, and both are states a live capture
+    /// can be in (an alpha class with one particle, or none at all).
+    #[test]
+    fn short_ranges_are_monotone_and_inconclusive() {
+        assert_eq!(scan_alpha_range(&[], EYE), ParticleSortRangeScan::EMPTY);
+        assert!(ParticleSortRangeScan::EMPTY.is_monotone());
+        assert!(!ParticleSortRangeScan::EMPTY.is_conclusive());
+        let one = scan_alpha_range(&[at(3.0)], EYE);
+        assert_eq!(one.records_checked, 1);
+        assert!(one.is_monotone() && !one.is_conclusive());
+    }
+
+    /// **The whole gate as one predicate**, exercised in all four corners — because the composite
+    /// is what the device-side gate asserts last, and a composite that disagreed with its parts
+    /// would be a second opinion rather than a summary.
+    #[test]
+    fn sort_is_proven_needs_all_three_of_its_terms() {
+        let good = scan_alpha_range(&far_to_near(), EYE);
+        let mut reversed_records = far_to_near();
+        reversed_records.reverse();
+        let bad = scan_alpha_range(&reversed_records, EYE);
+        let flat = scan_alpha_range(&vec![at(0.0); 16], EYE);
+
+        let rb = |sorted, source| ParticleSortReadback { frames_presented: 30, sorted, source };
+        // Monotone destination + disordered source ⇒ proven.
+        assert!(rb(good, bad).sort_is_proven());
+        // A disordered destination is the defect the gate exists for.
+        assert!(!rb(bad, bad).sort_is_proven());
+        // A monotone SOURCE means the frame could not distinguish a working sort from a verbatim
+        // copy — the control is vacuous, so nothing is proven.
+        assert!(!rb(good, good).sort_is_proven());
+        // A flat destination is the scatter-never-ran case: monotone, and refused by conclusiveness.
+        assert!(!rb(flat, bad).sort_is_proven());
+    }
+
+    /// The bin width the oracle-free bound is stated against is DERIVED from the two constants the
+    /// shaders are generated from, so moving the range moves it.
+    ///
+    /// **The divisor is `BINS − 1`, and this test is written to red on `BINS`** — the off-by-one a
+    /// 30-particle leg cannot see (see [`particle_sort_bin_depth_ratio`]'s doc for the measurement
+    /// that found it). `2^(15/255) = 1.0415593` against `2^(15/256) = 1.0414502`: they differ in the
+    /// fourth decimal, so the tolerance below is deliberately tight enough to tell them apart.
+    #[test]
+    fn one_bin_is_the_octave_span_divided_by_the_step_count() {
+        let ratio = particle_sort_bin_depth_ratio();
+        // The key quantizes with `round(t * 255)`, so the map has 255 STEPS over `t ∈ [0, 1]`.
+        let steps = (PARTICLE_SORT_BINS - 1) as f32;
+        let want = (PARTICLE_SORT_LOG_SPAN / steps).exp2();
+        assert!(
+            (ratio - want).abs() < 1e-7,
+            "one bin is 2^(SPAN/(BINS-1)) = {want}, got {ratio} — dividing by BINS instead gives \
+             {}, which is 1e-4 SMALLER and reddens on a correctly sorted DENSE range",
+            (PARTICLE_SORT_LOG_SPAN / PARTICLE_SORT_BINS as f32).exp2()
+        );
+        // The 255 steps tile the octave span exactly, which is what "constant RELATIVE resolution"
+        // means and why the key is logarithmic at all.
+        let spanned = ratio.powf(steps);
+        assert!(
+            (spanned.log2() - PARTICLE_SORT_LOG_SPAN).abs() < 1e-2,
+            "the steps must tile the octave span exactly: {} vs {PARTICLE_SORT_LOG_SPAN}",
+            spanned.log2()
+        );
+        // And the wrong divisor does NOT tile it — the property that makes the assertion above a
+        // discriminator rather than a restatement.
+        let wrong = (PARTICLE_SORT_LOG_SPAN / PARTICLE_SORT_BINS as f32).exp2();
+        assert!(wrong < ratio, "2^(SPAN/256) < 2^(SPAN/255), so the wrong divisor is the TIGHT one");
     }
 
     #[test]

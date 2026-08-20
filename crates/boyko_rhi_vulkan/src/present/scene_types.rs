@@ -3681,6 +3681,21 @@ pub struct ParticleActivation<'a> {
     pub emit_pipeline: &'a ComputePipeline,
     /// The hot-loop pipeline (`particle_sim.comp`), dispatched from `p_dispatch_args + 16`.
     pub sim_pipeline: &'a ComputePipeline,
+    /// Rung P2 item 3: the radix HISTOGRAM (`particle_sort_hist.comp`), or `None` under
+    /// `ParticleSortMode::None`. Dispatched from the SIM's own `p_dispatch_args + 16` block —
+    /// `alpha.instanceCount <= alive_count_cur` (the M2 identity), so the sim's group count always
+    /// covers the class and no fourth dispatch is needed to compute one.
+    pub sort_hist_pipeline: Option<&'a ComputePipeline>,
+    /// Rung P2 item 3: the 256-bin SCAN (`particle_sort_scan.comp`), dispatched DIRECTLY as one
+    /// group. `None` under `ParticleSortMode::None`.
+    pub sort_scan_pipeline: Option<&'a ComputePipeline>,
+    /// Rung P2 item 3: the PERMUTATION (`particle_sort_scatter.comp`), dispatched from the SIM's
+    /// block like the histogram. `None` under `ParticleSortMode::None`.
+    ///
+    /// The three sort `Option`s are `Some` together or `None` together — the host builds them as
+    /// one decision (`ParticleSortPipelines`), and the recorder's own `debug_assert` restates that
+    /// against the declared pass plan.
+    pub sort_scatter_pipeline: Option<&'a ComputePipeline>,
     /// The additive billboard graphics pipeline. Its depth compare op was frozen at BOOT from the
     /// resolved render path (`LESS` under Deferred's custom-linear depth, `GREATER` under the
     /// three reverse-Z paths), so exactly one `VkPipeline` exists per process.
@@ -3701,6 +3716,16 @@ pub struct ParticleActivation<'a> {
     /// The draw's set 0 — `{ StructuredBuffer<ParticleRender> @0, camera cbuffer @1 }`, both
     /// `VERTEX`. A different vocabulary from [`Self::sets`], not a subset of it.
     pub draw_set0: &'a VulkanBindGroup,
+    /// Rung P2 item 3: the ALPHA draw's own set 0, identical to [`Self::draw_set0`] except that
+    /// binding 0 names `p_render_sorted`. `None` under `ParticleSortMode::None`, where the alpha
+    /// draw shares the base set exactly as it did at rung P2 item 2.
+    ///
+    /// This is the ONLY difference a sorted arming makes to the draw: the push pair is still
+    /// `(capacity - 1, -1)` (the scatter wrote the class with the same mirror the sim used), the
+    /// pipeline object is the same, and the VS was not recompiled — so D10's "no shader variant"
+    /// survives the sort. Both rings come from ONE layout object, so the two sets are
+    /// interchangeable at `vkCmdBindDescriptorSets`.
+    pub draw_set0_alpha: Option<&'a VulkanBindGroup>,
     /// The draw's set 1 — the SHARED bindless `Texture2D[]` + sampler set every other textured
     /// consumer binds. This is what makes ONE draw cover every effect.
     ///
@@ -3736,6 +3761,13 @@ pub struct ParticleActivation<'a> {
     pub particle_records: &'a BoundBuffer,
     /// Seed row 2 — the 32-byte render records (`p_render`).
     pub render_records: &'a BoundBuffer,
+    /// Seed row 11 — rung P2 item 3's SORTED render records (`p_render_sorted`), the scatter's
+    /// destination and the alpha draw's source. `None` under `ParticleSortMode::None`, where the
+    /// buffer does not exist.
+    pub sorted_render_records: Option<&'a BoundBuffer>,
+    /// Seed row 12 — rung P2 item 3's 512-word radix scratch (`p_sort_bins`). `None` under
+    /// `ParticleSortMode::None`.
+    pub sort_bins: Option<&'a BoundBuffer>,
     /// Seed row 9 — the DEVICE-side emit-request table (`p_emit_req`), the copy destination.
     pub emit_req_device: &'a BoundBuffer,
     /// Seed row 10 — the DEVICE-side effect-parameter table (`p_effects`), the copy destination.
@@ -3770,6 +3802,15 @@ pub struct ParticleActivation<'a> {
     /// `ParticleConfig::capacity` — kickoff's `capacity` push, the boot-frozen pool size. Bounds
     /// MEMORY only; per-frame work is `O(alive)`.
     pub capacity: u32,
+    /// Rung P2 item 3: `ViewUniform::camera_pos.xyz` — the eye the sort key measures depth from,
+    /// pushed to the histogram AND the scatter.
+    ///
+    /// It is the SAME number the shared camera UBO carries at its own bytes [16,28) and the same
+    /// one `-D DEPTH_LINEAR`'s depth encode reads, so the sort's metric and the depth test's are
+    /// one eye rather than two. Carried even on an unsorted frame (it costs 12 bytes in a struct
+    /// the recorder already has) so the two sort dispatches never have to reach past the
+    /// activation for it.
+    pub cam_eye: [f32; 3],
     /// `ParticleClock::steps()` — the sim's substep count, ALREADY ceiling-clamped on the host.
     /// `0` is a legal and common value above the step rate: the sim still rebuilds the alive list
     /// and the render records, only the integrator loop is empty.

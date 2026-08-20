@@ -132,15 +132,29 @@ Two facts must sit beside the re-derivation or it reads as budget-fitting:
 **It is also a real overspend, and there are two ranked levers.** 121 GB/s is 36–42 % of this part's
 peak (192-bit GDDR6, 288–336 GB/s), low for a streaming RMW where 60–80 % is usual.
 
-* **Lever 1 — OCCUPANCY. Free, ranked first, and rung P1b's second deliverable.** Gate #17's §5
-  anomaly is its first measurement: a LARGER, higher-register kernel runs the same sim **5.6 %
-  faster** on a byte-identical scene, which is direct evidence that the sim is memory-system
-  OVER-subscribed — fewer concurrent waves raising achieved bandwidth by reducing thrash.
-  **MEASURED at P1b: that 5.6 % came with 39 → 48 registers and 48 → 40 warps/SM (−16.7 %
-  occupancy)** — the lever's exchange rate on this part. **And its headroom is bounded in the
-  direction that matters: the base sim already sits at 100 % occupancy**, so there is nothing to
-  gain by raising it; the lever runs downward (a deliberate register cap), and 39 → 48 is the only
-  step of it anyone has measured. Full table in "P1b as built".
+* **~~Lever 1 — OCCUPANCY. Free, ranked first, and rung P1b's second deliverable.~~ STRUCK
+  2026-08-21 — the lever's sign is NEGATIVE on this part, measured.** The claim it made was that
+  P2's 39 → 41 register step cost 83.3 % occupancy that was worth recovering. **Both halves are
+  refuted**: the recovery is reachable, and taking it makes the sim SLOWER. See
+  "§P2 sim pricing (M1/M2), measured 2026-08-21" below the P2 rung for the 222-leg run; the short
+  form, because the next reader will otherwise spend a rung recovering occupancy that costs 9 %:
+
+  * **≤ 40 registers is reachable — twice**, by two unrelated semantically-neutral edits (hoisting
+    the size computation above the ballots; re-loading the effect row after the loop). Both take
+    base 41 → 38 registers, 83.3 % → 100 % occupancy, with **2 322 SPIR-V words and 4 480 ISA bytes
+    identical** in every variant — only the register count moves.
+  * **And recovering it costs +9.40 % at 65 536 (signs 8/0/0) and +2.99 % at 102 400 (7/0/1).**
+  * **The discriminator is a control pair**: a *same-shape* hoist that stops at 41 registers — the
+    same bucket — costs **nothing** (signs 2/5/1), while **two unrelated** edits that cross the
+    bucket both cost. **The cost tracks the BUCKET, not the code motion.**
+  * So **the P2 register step 39 → 41 is not a regression**, and the "16.7 % to recover" figure is
+    worth negative wall clock here.
+
+  What survives of the original observation is the ANOMALY, not the lever: gate #17's §5 result (a
+  larger, higher-register kernel running the same sim 5.6 % faster) and P1b's 39 → 48 / 48 → 40
+  warps/SM exchange rate both stand as measurements. What does not survive is reading them as
+  headroom. **They also compared 4 096 vs 21 760 ISA bytes — two different kernels — so M2 is the
+  first isolation of occupancy on this part where both arms are the same kernel size.**
 * **Lever 2 — BYTES. 12.5 %, structural, and it CONTRADICTS a shipped decision, so it is FILED, not
   scheduled.** `size0_invlife` + `effect_flags` (8 B) are read-only per frame and `cached_field_d`
   (4 B) is write-dead in the base compile (the shipped shader's own comment says so). A hot/cold
@@ -509,6 +523,8 @@ The consequence is not cosmetic. `d > radius + s/L` passes wherever the correct 
 Additive is commutative, and under 8-bit saturation `sat(sat(x)+y) = min(1, x+y)` is order-independent. With `depth_write = OFF` and `depth_test = ON`, opaque geometry still occludes. **P0 ships unsorted, provably.**
 
 P2 sort: **one FFX-shaped pass** (histogram → 256-bin scan → scatter) over an 8-bit quantized log-depth key — 3 dispatches, ≈0.3–0.5 ms at 1M. Rejected: bitonic (R5 — production moved off it), 4-pass 32-bit radix (3–4× the cost for precision invisible in an 8-bit blend). `SortMode::Wboit` is kept as an opt-in for smoke-class media.
+
+> **LANDED at P2 item 3 (2026-08-21), with three details this clause did not specify and one arm it did.** The KEY is INVERTED (bin 0 = farthest) so the ascending scatter is back-to-front and the draw's push pair is unchanged; the sort's group count is the SIM's own indirect block (`alpha.instanceCount ≤ alive_count_cur`), so "3 dispatches" holds without a fourth pass to size it; and the SCAN re-zeroes the histogram half in the dispatch that consumes it, which is what keeps `particle_kickoff` — one module for every arming — byte-frozen. **`SortMode::Wboit` was deliberately NOT landed**: it is a weighted order-independent accumulation rather than a permutation, so it is its own rung, not an arm to ship dark. The ≈0.3–0.5 ms figure is still an ESTIMATE — item 3 added no GPU zone, and its measured claim is a byte count (96 B per alpha particle), not a timing.
 
 **The blend partition.** `first_instance` **must be 0** (F5b, verbatim: "a nonzero value here is a silent corruption class"), so two draws cannot be distinguished by `firstInstance`. The mechanism, completed per M2:
 
@@ -897,7 +913,7 @@ The load-bearing detail: `particle_upload_emit` **and** `particle_emit` are gate
 
 ### New modules
 
-`boyko_render/src/{particle_config,particle_clock,particle,particle_effect,particle_system,particle_plugin}.rs` · `boyko_app/src/particle_gate.rs` · `boyko_app/src/gpu_scene/particle.rs` · `boyko_rhi_vulkan/src/present/passes/particles.rs` · `boyko_shaderdsl/src/particle.rs` · `boyko_shaderdsl/src/bin/emit_particles.rs` · `boyko_rhi_vulkan/shaders/particle_{kickoff,emit,sim}.comp.hlsl` + `particle_draw.{vs,fs}.hlsl` · `boyko_rhi_vulkan/tests/{particle_edsl_sync,particle_barrier_stream}.rs` · `boyko_render/tests/particle_containment.rs` *(M4)*
+`boyko_render/src/{particle_config,particle_clock,particle,particle_effect,particle_system,particle_plugin}.rs` · `boyko_app/src/particle_gate.rs` · `boyko_app/src/gpu_scene/particle.rs` · `boyko_rhi_vulkan/src/present/passes/particles.rs` · `boyko_shaderdsl/src/particle.rs` · `boyko_shaderdsl/src/bin/emit_particles.rs` · `boyko_rhi_vulkan/shaders/particle_{kickoff,emit,sim}.comp.hlsl` + `particle_draw.{vs,fs}.hlsl` + **`particle_sort_{hist,scan,scatter}.comp.hlsl`** *(P2 item 3)* · `boyko_rhi_vulkan/tests/{particle_edsl_sync,particle_barrier_stream}.rs` · `boyko_render/tests/particle_containment.rs` *(M4)*
 
 ### Changes to existing code
 
@@ -1489,6 +1505,7 @@ same file.
 ### P2 — Alpha blending, sorting, soft particles — **size L**
 
 One FFX-shaped radix pass; **D10's partition** (shared list counter, per-class render counters, `first_instance = 0` in both slots, push-constant index transform); `-D SOFT` FS sampling depth; `SortMode` incl. `Wboit`.
+**Status:** items 1–3 LANDED (`-D DEPTH_LINEAR`, the blend partition, the radix sort + `SortMode` + R10). **Open: `-D SOFT` + the read-only depth plumbing, and `SortMode::Wboit`.**
 **New plumbing named:** `VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL` in `ffi.rs`; a `BindGroupEntry::SampledDepthAtReadOnly` variant (the `SampledImageAtGeneral` precedent); the depth access gains `FRAGMENT_SHADER|SHADER_READ` and the read-only layout; `-D DEPTH_LINEAR` FS variant for Deferred's decode (interface-identical, same layout object — the `TERMINATOR_WRAP` precedent).
 
 #### P2 item 1 — `-D DEPTH_LINEAR`, **LANDED** (pulled forward to discharge the P0 erratum)
@@ -1513,6 +1530,8 @@ Scope taken here is exactly the erratum's: the fourth render path, nothing of P2
 Scope taken: the partition and its second draw slot only — nothing of P2's sort, `-D SOFT`, the
 read-only-depth plumbing or `SortMode`. **Remaining P2 after this rung: the radix pass (over the
 alpha class only), `-D SOFT` + the read-only depth plumbing, and `SortMode`/`Wboit`/R10.**
+*(The radix pass, `SortMode` and R10 LANDED at item 3 below; `Wboit` was deliberately not landed with
+them — see that block. `-D SOFT` + the read-only depth plumbing is what remains of P2.)*
 
 * **The sim (generator-owned).** The class predicate rides `EffectParamsGpu.blend_class` — already
   in the row the sim fetched, so **0 B/particle of new traffic**. Additive takes its own ballots;
@@ -1603,6 +1622,186 @@ alpha class only), `-D SOFT` + the read-only depth plumbing, and `SortMode`/`Wbo
   repeat it. *(A guard written for this defect had the same bug: it tested `& 0xFF`, the RED byte,
   and would have passed on an α = 0 key. It now tests `>> 24`.)*
 
+#### P2 item 3 — D10's RADIX SORT over the alpha class, **LANDED** (2026-08-21)
+
+Scope taken: the three-dispatch radix, the `SortMode` axis and R10 — nothing of `-D SOFT` or the
+read-only-depth plumbing. **Remaining P2 after this rung: `-D SOFT` + the read-only depth plumbing,
+and `SortMode::Wboit`.**
+
+* **The subject is the ALPHA class ONLY, structurally.** The additive class is not sorted and is not
+  given the option: `ONE/ONE` is commutative and, under the 8-bit saturation `lit` imposes,
+  order-independent (D10/R5). So the three passes read `p_render[CAP − alpha.instanceCount, CAP)`
+  and never touch the additive half, and a scene with no alpha effect pays three dispatches that see
+  a zero count.
+* **The key: an 8-bit quantized log-depth, INVERTED.** `key = 255 − round(255 · saturate((log2(max(d,
+  0.125)) + 3) / 15))` where `d = |cam_eye − pos|`. Fifteen octaves over 256 bins is **0.0586 octaves
+  per bin ⇒ 4.15 % RELATIVE depth resolution, constant across the range** — which is the whole reason
+  the key is logarithmic: a linear key over the same span spends 99.99 % of its bins beyond four
+  units and resolves nothing where billboards overlap. `SORT_NEAR = 2^−3` and the span `= 15` are
+  powers of two, so `log2(NEAR)` is EXACT and the host mirror needs no rounding argument; the span's
+  reciprocal is host-computed and printed as a literal, so all three modules are `OpFDiv`-free.
+  * **Inverted on purpose**: bin 0 is the FARTHEST, so the plain ascending order the three passes
+    produce is back-to-front, the scan stays a forward exclusive prefix sum, and the draw's
+    `(capacity − 1, −1)` push pair is **unchanged**. The alternative (forward key + reverse scan)
+    puts the inversion where a reader has to hold two facts to see it.
+  * **F13 places it in the SKELETON, not the eDSL** — `log2`/`saturate` are not reachable from `Cf`
+    (F13b/F13c) — so it is a `SORT_KEY_FN` generator input printed into BOTH key-bearing modules,
+    the `SDF_SKIP_TEST` precedent, with a pin that the two committed texts are character-identical.
+* **The three dispatches, and why they are three.** `hist` (256-bin histogram) → `scan` (ONE group,
+  8 Hillis-Steele steps, exclusive prefix) → `scatter` (permutation into `p_render_sorted`). A
+  workgroup barrier cannot order two dispatches' writes, so the two RAW edges on `p_sort_bins` ARE
+  the reason D10 spends three passes on a 256-bin sort.
+* **No fourth dispatch, and no kickoff change — two things that were not obvious and are the rung's
+  two structural wins:**
+  1. **The sort's group count is the SIM's.** The element count is `alpha.instanceCount`, which the
+     SIM produces — so kickoff, one pass earlier, cannot have written a group count for it. Rather
+     than add a pass to compute one, `hist` and `scatter` re-fetch the sim's own
+     `VkDispatchIndirectCommand`: `alpha.instanceCount ≤ alive_count_next ≤ alive_count_cur` (the M2
+     identity) means that block always covers the class, and the surplus lanes retire on `i < count`.
+     It also costs **no new barrier** — the sim already read that block this frame.
+  2. **The scan RE-ZEROES the histogram half in the dispatch that consumed it.** `p_sort_bins` is one
+     allocation in two halves (histogram `[0,256)`, running offsets `[256,512)`), because the scatter
+     DESTROYS what it consumes and a single array would leave nothing to zero. Lane `b` reads its own
+     bin into a register and writes `0u` back — no other lane touches that word, so no barrier is
+     needed — and the histogram is therefore clean for the next frame **without `particle_kickoff`
+     learning that the sort exists**. Kickoff is one module for every arming; the alternative was a
+     `-D` variant of a shader that ships in every configuration, i.e. a thirteenth artifact to zero
+     1 KB.
+* **The scatter is FFX-shaped: per-group bases, never one global atomic per element.** Three LDS
+  phases (population → per-occupied-bin reservation → intra-group rank) with **one** device
+  `InterlockedAdd` per occupied bin per group. The record is loaded ONCE and serves all three phases
+  plus the store. **⚠️ The WORKGROUP atomic count is what discriminates this from the naive form,
+  not the device count** — a per-element reservation carries one device atomic too, and reports
+  `(1, 0)` where the aggregated one reports `(1, 2)`. Proven by mutation, below.
+  * Stability, stated rather than assumed: the permutation is stable WITHIN a group and unspecified
+    ACROSS groups. That cannot become a defect — two elements sharing a bin share a quantized depth,
+    so an 8-bit key does not distinguish them and no order between them is the right one.
+* **The draw did not change, and D10's "no shader variant" survives.** The scatter writes at the SAME
+  `capacity − 1 − rank` mirror the sim wrote the class with, so the alpha push pair is byte-identical
+  to item 2's. The ONLY difference a sorted arming makes is WHICH BUFFER binding 0 of the draw's
+  set 0 names — a second per-FIF ring over the same layout object. Recorded command census: **13
+  unsorted, 14 sorted** (one extra `vkCmdBindDescriptorSets`, because the two classes then read two
+  different buffers).
+* **Structural absence on a fourth axis.** `ParticleSortMode::None` (the default) ⇒ no sort buffer,
+  no sort pipeline, no sort pass, no alpha descriptor ring. Bindings 11/12 exist in the ONE Set-0
+  layout and are filled with live PLACEHOLDERS (`p_render`, `p_counters`) — the bound-but-unread
+  shape rung P1's edit list at binding 10 established, chosen over leaving a descriptor unwritten
+  because an unwritten descriptor in a bound set is UB on this device even when no shader reads it.
+* **The two `ResId`s are declared on EVERY armed frame, sorted or not**, so `PARTICLE_BUFFER_COUNT`
+  (10 → **12**) stays ONE number and all three sinks keep a single positional fill. F9 makes that
+  free — a declared `ResId` no pass names routes zero barriers — and the alternative was a second
+  predicate inside three sinks' index arithmetic, the shape `graph_bridge`'s own interp-trio comment
+  warns about. **The `p_effects`-is-LAST assert moved to `p_sort_bins` in the same edit.**
+* **Seed rows 11 and 12**, derived rather than transcribed: `p_render_sorted` terminates on the alpha
+  draw's VERTEX read ⇒ READER seed ⇒ the scatter's write is a WAR sourced at `(VERTEX_SHADER, 0)`
+  (the same shape `p_render` carries; a writer seed here would leave a cross-frame WAR unordered on
+  a single-buffered target — the torn-shimmer class). `p_sort_bins` terminates on a COMPUTE write
+  (the scan's re-zero) ⇒ WRITER seed ⇒ the histogram's accumulate is a real RAW, **which is the
+  barrier that makes the re-zero visible** and is therefore load-bearing, not hygiene.
+* **BYTE COST, against §Goal's formula.** The formula prices `kickoff + emit + sim` and the sort is
+  none of them, so **the budget row does not need a term** — but the sort's own traffic is stated
+  here so it is not re-derived: **96 B per ALPHA particle per frame** (`hist` reads the 32 B record;
+  `scatter` reads 32 B and writes 32 B; the keys are recomputed, never stored, so there is no key
+  buffer at all), plus 2 KB of bin traffic per frame independent of `N`. Against the sim's 128 B
+  that is **+75 % of the sim's traffic — for the alpha class only**. On the shipped fixtures where
+  the class is half the pool, the whole-subsystem traffic rises ~37 %; on an additive-only scene it
+  rises by 2 KB. **VRAM: +32 B/particle when armed** (`p_render_sorted` is a second `CAP × 32 B`,
+  8.4 MB at the default capacity), charged to nobody who does not arm it.
+  * **UNMEASURED in wall clock, and that is a stated gap rather than an omission.** The sort has NO
+    GPU zone: gate #17's row set is kickoff/emit/sim/draw, and a `ZONE_PARTICLE_SORT` would have to
+    grow `PARTICLE_ZONE_COUNT` and every artifact reader keyed on it — an instrument rung of its own
+    (rung P1b's shape). The byte figure above is arithmetic, not a timing.
+* **Gate run.** `particle_edsl_sync` **48 pins, was 38** (three re-DXC byte rows, three binding sets,
+  the one-bin-per-lane width, the two-modules-one-key pin, the range constants against their host
+  home, the derived atomic budget, divide-freedom, the scan's re-zero + read-before-zero ordering,
+  the scatter's mirror/clamp/one-load); `particle_barrier_stream` **21, was 16** — and the five new
+  ones include the claim that matters, *arming the sort adds nine accesses and MOVES none that
+  existed*, derived by filtering the two DECLARED lists rather than by a second hand-written table;
+  `cargo check --workspace --all-targets` and `cargo clippy --workspace --all-targets -D warnings`
+  clean, unpiped, touch-first.
+* **THE GATE IS A MONOTONICITY READBACK, and it carries its control in the same submit.** Plan P2
+  names it; item 2's correction explains why the transform could not have one and this can:
+  `p_render` is 8.4 MB "for a value whose per-slot meaning the host cannot check without re-deriving
+  the whole sim" — but the range copied here is `alpha.instanceCount` records (160 KB on the
+  saturated lab leg, bounded at 16 384), and the property is a relation between ADJACENT records
+  whose key is a function of the record's own `position` and the eye. Nothing the sim decided enters
+  it.
+  * **One submit reads BOTH `p_render_sorted` (the measurement) and `p_render` (the control)**, for
+    the same frame and the same particles. The gate asserts: the destination is monotone, the
+    destination is CONCLUSIVE (≥ 2 records over ≥ 2 bins), and **the source is NOT monotone**. A
+    control taken as a second RUN would only be a distribution comparison — the two runs do not
+    share a spawn seed, which is the caveat item 2's live fire had to state.
+  * **What it reports on a wrong range, stated because a gate that cannot say this is a gate nobody
+    can read** — and each is a device-free unit test in `particle_readback`:
+    **UNSORTED** ⇒ inversions large, first break early, `max_depth_ratio` far above one bin's width;
+    **REVERSED** ⇒ `inversions == records − 1` and `first_inversion_rank == 0`;
+    **PARTIALLY sorted** ⇒ exactly the rank of the first out-of-order pair, which localizes rather
+    than merely reports. And **a scatter that wrote NOTHING** ⇒ boot zeroes ⇒ every record at the
+    origin ⇒ ONE bin ⇒ monotone-and-passing, which `is_conclusive` is what refuses.
+  * **Two claims, one oracle-free.** `inversions` uses the HOST mirror of the device key, so it is
+    exact only while the two agree (`log2` is correctly rounded on neither side, so a record exactly
+    on a bin boundary may quantize one step differently). `max_depth_ratio ≤ 2^(15/256)` needs no
+    oracle at all: two elements out of depth order must share a bin, and one bin is exactly that
+    wide. Both are asserted, so a boundary artefact is diagnosable instead of being the one number
+    a reader has.
+  * **The fixture REFUSES `BOYKO_PARTICLE_SORT` without `BOYKO_PARTICLE_ALPHA`**, for gate #17's own
+    reason one axis over: with no alpha emitter every sort dispatch runs over zero elements, the
+    readback reports an EMPTY range, and an empty range is monotone. Such a run passes the gate,
+    prints a plausible artifact line and produces the default arming's byte-identical goldens. A
+    caveat would not have been enough.
+* **LIVE FIRE, and its control is IN THE SAME SUBMIT.** `particle_lab` on VB, frame 30,
+  `BOYKO_PARTICLE_ALPHA=1 BOYKO_PARTICLE_SORT=1`:
+
+  | range | records | inversions | first break | distinct bins | key first → last | depth first → last | max depth ratio |
+  |---|---|---|---|---|---|---|---|
+  | `p_render_sorted` (the measurement) | 30 / 30 | **0** | — | 12 | 154 → 166 | **7.580 → 4.782** | 1.0334 |
+  | `p_render` (the CONTROL, same frame) | 30 / 30 | **11** | rank 1 | 25 | 158 → 159 | 6.592 → 6.292 | **1.3594** |
+
+  The destination's depth FALLS monotonically from rank 0 (back-to-front, which is what
+  `alpha_over` needs) while its key RISES (the key is inverted). The control — the same particles,
+  the same frame, the buffer the sim wrote — is out of order eleven times and its widest adjacent
+  depth jump is 1.36 against one bin's 1.0416. **The disarmed state produces the wrong order, and
+  the instrument reports 0 vs 11 inversions and 1.03 vs 1.36 depth ratio to say so.**
+  * **Saturated leg** (`CAP 10 240`-style density, 32 256 alpha particles): sorted **0 inversions
+    over the 16 384 records the readback bound covers**, against the source's **7 382**; the
+    readback correctly reports `complete=false` because the class exceeds the bound.
+  * **The fixture's refusal fires**: `BOYKO_PARTICLE_SORT` without `BOYKO_PARTICLE_ALPHA` panics
+    with the reason, rather than running three dispatches over zero elements and reporting an empty
+    (and therefore monotone) range.
+* **FOUND WHILE MEASURING, AND REPAIRED HERE: the oracle-free tolerance was off by one, and only
+  the DENSE leg could see it.** The bound was written `2^(SPAN/BINS)` = 1.041450. The key quantizes
+  with `round(t · 255)`, so the map has **255 steps, not 256** — one bin is `2^(SPAN/255)` =
+  1.041559. The 30-particle leg PASSED the wrong bound (its widest adjacent pair was 1.0334 — no
+  two particles sat at opposite ends of one bin); the 32 256-particle leg reddened it at exactly
+  **1.041559**, i.e. at the true bin width, produced by a correctly sorted range. **The bound was
+  wrong, not the sort.** Recorded at the function, with a unit test written to red on the wrong
+  divisor, because the sparse leg is the one a reader reaches for first and it cannot see this.
+* **The pins are mutation-proven, three of them, and one correction came out of it.** Rewriting the
+  scatter to the naive per-element form reddens the atomic-budget pin — reporting exactly `(1, 0)`
+  against `(1, 2)`, i.e. **the device count did not move**, which is why the test's own message now
+  names the workgroup half as the discriminator rather than the device half it originally claimed.
+  Deleting the scan's re-zero reddens exactly one pin; dropping the key's inversion in the histogram
+  alone reddens exactly one pin. Each mutation was compiled, re-DXC'd and run.
+* **Six goldens byte-identical** with the sort default-off — `particle_additive`,
+  `particle_sdf_collide`, `grand_showcase`, `vb_mesh`, `forward_mesh`, `deferred_mesh_only` — which
+  is the pixel-level half of "`SortMode::None` is byte-identical to item 2"; the declaration-level
+  half is `arming_the_sort_adds_accesses_and_moves_none_that_existed`.
+* **One deviation from the plan's own wording, forced by the RHI.** D12's "dedicated layouts" was
+  read as letting the scan take a ZERO-byte push range, since its shader declares none.
+  `create_compute_pipeline` rejects `push_constant_bytes == 0`, so the scan's LAYOUT carries the
+  family's 16 bytes while its SHADER declares no push block — legal Vulkan, and the recorder emits
+  no `vkCmdPushConstants` for it. Widening the RHI validation for one pipeline would have been a
+  device-wide change for a local convenience.
+* **R10 landed WITH the enum, not after it.** `ParticleSortMode::motion_vectors_allowed()` is the
+  rule's one definition, `ParticleConfig` forwards it, a `const` block asserts that exactly one arm
+  permits motion vectors, a unit test asserts the two predicates are exact COMPLEMENTS on every arm,
+  and the bundle's boot site asserts it as an implication over the arm. P3's `-D MOTION` resolver
+  will read the predicate rather than restate the rule.
+* **`SortMode::Wboit` was NOT landed, and that is a deliberate deviation from D10's arm list.** It is
+  a different technique — a weighted order-independent accumulation, not a permutation — so landing
+  it as a third enum arm now would ship a knob whose value selects nothing. It stays D10's opt-in and
+  becomes a rung when it becomes a pass.
+
 **Hard rule (R10):** `SortMode != None` ⇒ motion vectors disabled.
 **Gate:** sort monotonicity readback; reverse-Z **and** linear soft-fade oracles; `first_instance == 0` on both slots; ~~the alpha reverse index transform verified by readback~~ → **the alpha reverse index transform verified by the three instruments below**; **`additive.instanceCount + alpha.instanceCount == alive_count_next` with both terms non-zero** (the M2 assertion, now exercised); `SortMode::None` byte-identical to P1.
 
@@ -1610,6 +1809,75 @@ alpha class only), `-D SOFT` + the read-only depth plumbing, and `SortMode`/`Wbo
 > 1. **the WRITE half, at the shader source** — `the_alpha_class_writes_the_mirrored_render_index` pins `r_pos = is_alpha ? (pc.capacity - 1u - q_pos) : …` and its F25 clamp;
 > 2. **the READ half, in-crate and device-free** — `alpha_draw_push`'s three unit tests, including `the_vs_affine_lands_on_the_slot_the_sim_wrote`, which checks `index_base + index_step·q == capacity - 1 - q` over a RANGE of `q` rather than at one point;
 > 3. **the composition, live** — the blue-dominant pixel count under `BOYKO_PARTICLE_ALPHA=1`, with the identity-transform control that produces zero of them.
+
+#### P2 sim pricing (M1/M2), measured 2026-08-21 — 222 zone legs
+
+> **Provenance, and the separation this block exists to keep.** Everything below is a SEPARATE
+> measurement campaign against rung P2 **item 2** (the blend partition) and against §Goal's Lever 1.
+> It is **not** rung P2 item 3's result — item 3's own numbers are the byte arithmetic and the
+> monotonicity readback in the block above, and the sort is UNMEASURED in wall clock by its own
+> admission. The two are recorded together only because they touched the same file in the same
+> commit. Full report: `D:\tmp\p2-sim-pricing.md`.
+>
+> **Protocol.** 222 zone legs; census `lost/torn/not_bracketed = 0` and `violations = 0` on all 222.
+> **`R = 1 024 ns`, certified this session from nulls, INHERITED FROM NOTHING.**
+
+**M1 — the blend partition costs nothing resolvable.**
+
+`ZONE_PARTICLE_SIM`, armed vs disarmed: **0 / −1 024 / −1 024 ns** at 10 240 / 65 536 / 102 400
+alive — at or under ONE lattice step, and two of the three NEGATIVE. The paired re-take's sign
+distribution is indistinguishable from the null. **1 048 576 is INCONCLUSIVE** (49.3 % / 29.7 %
+spreads) and is reported as such rather than folded in.
+
+*Non-vacuity, on the same runs:* DRAW moves **+55 296 ns at 65 536** and **+362 496 at 102 400**, and
+the readback splits exactly 5120/5120, 32768/32768, 51200/51200, 524288/524288 with
+`class_split = true`. The instrument can see an effect this size; it did not see one in SIM.
+
+*What the comparison HOLDS CONSTANT:* `alive == CAP` with `dead = 0`, and **the SAME compiled
+`.spv`** — arming the alpha class is a SCENE change, not a shader change. *What it does NOT hold
+constant, stated because "alive is the same" invites the wrong reading:* half the particles take the
+ALPHA arm of the mirror, `p_render` becomes two opposite-direction streams, and `q_count > 0` fires,
+so a mixed-class wave issues **3 atomics instead of 2**. **Alive is the same; the work per particle
+is not.**
+
+**M2 — ≤ 40 registers is reachable, and reaching it makes the sim SLOWER. This INVERTS Lever 1.**
+
+*Reachability, twice, by two unrelated semantically-neutral edits:* a 4-line hoist of the size
+computation above the ballots, and re-loading the effect row after the loop. Both take base
+**41 → 38 registers, 83.3 % → 100 % occupancy**, with **2 322 SPIR-V words and 4 480 ISA bytes
+IDENTICAL in every variant** — only Register Count moves.
+
+*Neutrality proven four ways:* identical `OpFDiv` / ballot / atomic censuses; the P2 soundness span
+(first ballot → `OpGroupNonUniformElect`) stays **15 lines with zero control-flow ops**; the frame-30
+dump byte-identical to HEAD's **and** to the `particle_additive` golden; the armed split reads back
+5120/5120.
+
+*Cost of recovering it:* **+9.40 % at 65 536** (signs 8/0/0) and **+2.99 % at 102 400** (7/0/1);
+nothing at 10 240.
+
+*The discriminator is a CONTROL PAIR, and it is what makes this a finding rather than a coincidence:*
+a **same-shape** hoist that stops at 41 registers — the same occupancy bucket — costs **nothing**
+(signs 2/5/1), while **two unrelated** edits that cross the bucket **both** cost. **The cost tracks
+the BUCKET, not the code motion.**
+
+*Why this is the first clean isolation on this part:* gate #17 §A1 and rung P1b both compared
+**4 096 vs 21 760 ISA bytes** — two different kernels — so neither could separate occupancy from
+kernel size. M2's arms are the same kernel size to the byte.
+
+⇒ **The P2 register step 39 → 41 is NOT a regression**, and §Goal's Lever 1 recoverable-headroom
+claim is **struck** there, with this block as its reason.
+
+**⚠️ Caveat carried, not buried:** per-arm spreads in the M2 blocks are **13–36 %**, so every cell
+fails measurement clause 5(1) as written. The results are **PAIRED against a paired null** and must
+be read as such — never as median-of-3 cells.
+
+**An instrument finding, worth its own line in this plan's measurement guidance.** The SIM row's
+3-leg dispersion was **1.4–3.4 % COLD and 13–32 % WARM on the same binary and the same config**; a
+cross-binary control put two executables within **2 048 ns** while both wandered **59–78 µs**. That
+is slow DEVICE-CLOCK DRIFT moving both arms together — so **medians-of-3 are trustworthy only inside
+a short cold block, and anything longer wants PAIRING**. Also: **4 of 222 legs timed 22 frames
+instead of 21** (internally consistent; clause 5(3) holds) — the first departure from the uniform 21
+across gate #17's 213 legs. Recorded so the next measurer does not read it as corruption.
 
 ### P2b — Render-time interpolation — **size S**, default OFF *(M6)*
 

@@ -258,9 +258,11 @@ pub mod particle;
 /// `CoreSchedule::Fixed` schedule would flip the whole process's event-update policy (D17).
 pub mod particle_clock;
 /// Particles P0 (D13/D14) — the owner-set [`ParticleConfig`](particle_config::ParticleConfig) +
-/// its [`ParticleMode`](particle_config::ParticleMode) knob, and rung P1's independent
-/// [`ParticleCollision`](particle_config::ParticleCollision) axis. Capability is structural (`Off`
-/// IS disabled); default `Off` is the 0%-gate on both.
+/// its [`ParticleMode`](particle_config::ParticleMode) knob, rung P1's independent
+/// [`ParticleCollision`](particle_config::ParticleCollision) axis, and rung P2's
+/// [`ParticleSortMode`](particle_config::ParticleSortMode) (which also carries R10's
+/// motion-vector rule). Capability is structural (`Off` IS disabled); the default is the 0%-gate
+/// on all three.
 pub mod particle_config;
 /// Particles P0 — the authored [`ParticleEffect`](particle_effect::ParticleEffect) asset, its
 /// host-side bake into `EffectParamsGpu` (`damping = exp2(-drag·timestep)` and the `(cos, sin)`
@@ -514,7 +516,7 @@ pub use particle::{
 };
 pub use particle_clock::{PARTICLE_DEFAULT_HZ, ParticleClock};
 pub use particle_config::{
-    PARTICLE_DEFAULT_CAPACITY, ParticleCollision, ParticleConfig, ParticleMode,
+    PARTICLE_DEFAULT_CAPACITY, ParticleCollision, ParticleConfig, ParticleMode, ParticleSortMode,
 };
 pub use particle_effect::{
     PARTICLE_RAMP_KEYS, PARTICLE_SHAPE_BOX, PARTICLE_SHAPE_CONE, PARTICLE_SHAPE_POINT,

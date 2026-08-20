@@ -806,12 +806,18 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
         // it is a boot-frozen module choice rather than a per-frame branch. The whole ENUM travels
         // because there are three answers and only the pick site should know which is which.
         let collision = particle_config.collision;
+        // Rung P2 item 3's arming axis, resolved here for the same reason: it decides whether the
+        // two sort buffers exist, whether the three sort pipelines are created and whether the
+        // alpha draw gets its own descriptor ring. Boot-frozen, like the other two — and it also
+        // carries R10 (`SortMode != None` ⇒ no particle motion vectors), which the bundle asserts.
+        let sort_mode = particle_config.sort;
         host.gpu.build_particle_bundle(
             ctx,
             bindless_texture_table,
             capacity,
             deferred_path,
             collision,
+            sort_mode,
         );
     }
 
@@ -2198,6 +2204,17 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                             timestep: clock.timestep(),
                             frame_index,
                             draw_push,
+                            // Rung P2 item 3: the sort key's eye. `ViewUniform::camera_pos` is the
+                            // SAME number the shared camera UBO carries and the same one
+                            // `-D DEPTH_LINEAR`'s depth encode reads, taken from `view` rather
+                            // than recovered from `mvp` — the sort's metric and the depth test's
+                            // must be one eye, and two derivations of it would be two chances not
+                            // to be.
+                            cam_eye: [
+                                view.camera_pos.x,
+                                view.camera_pos.y,
+                                view.camera_pos.z,
+                            ],
                         },
                         emit_upload_bytes,
                         effects_upload_bytes,
@@ -3172,6 +3189,30 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     let line = readback.artifact_line();
                     boyko_log::info!(boyko_log::Host, "{}", boyko_log::dsp!(line, 256));
                     println!("{line}");
+                    // Rung P2 item 3 (plan P2's "sort monotonicity readback"): the SECOND capture,
+                    // taken only when the sort was armed at boot. It reads the alpha class from
+                    // BOTH `p_render_sorted` and `p_render` in one submit, so the measurement and
+                    // its non-vacuity control describe the same frame and the same particles — a
+                    // control taken as a second RUN would only be a distribution comparison,
+                    // because the spawn seed differs.
+                    //
+                    // The alpha count comes from the capture ABOVE rather than from a second
+                    // device read: `alpha.instanceCount` has one home, and re-reading it would be
+                    // a second chance for the two halves of one gate to describe different frames.
+                    let view = *app.world().resource::<ViewUniform>();
+                    let cam_eye =
+                        [view.camera_pos.x, view.camera_pos.y, view.camera_pos.z];
+                    if let Some(sort_readback) = host.gpu.read_particle_sort_scan(
+                        ctx,
+                        readback.alpha_instance_count,
+                        cam_eye,
+                        probe.presented(),
+                    ) {
+                        let lines = sort_readback.artifact_lines();
+                        boyko_log::info!(boyko_log::Host, "{}", boyko_log::dsp!(lines, 512));
+                        println!("{lines}");
+                        app.world_mut().insert_resource(sort_readback);
+                    }
                     app.world_mut().insert_resource(readback);
                 }
                 None => {

@@ -4757,6 +4757,12 @@ impl GpuSceneBundles {
     /// (base / `-D SDF_COLLIDE` / rung P1b's `-D SDF_COLLIDE_STATS` instrument), which is why the
     /// value travels as the enum rather than as a predicate.
     ///
+    /// `sort_mode` is rung P2 item 3's, and it is the axis with the widest boot consequence: it
+    /// decides whether the two sort buffers are allocated, whether the three sort pipelines are
+    /// created, and whether the alpha draw gets its own descriptor ring — structural absence on all
+    /// three when it is `None`. It also carries R10 (a sorted class may not produce motion
+    /// vectors), which is why the whole enum travels rather than a `bool`.
+    ///
     /// # Panics
     /// Panics (`expect("invariant: ...")`) on any RHI create/submit failure — mirrors
     /// [`Self::boot`]'s contract, and on being called twice (the bundle is built once per run;
@@ -4768,6 +4774,7 @@ impl GpuSceneBundles {
         capacity: u32,
         deferred_path: bool,
         collision: boyko_render::ParticleCollision,
+        sort_mode: boyko_render::ParticleSortMode,
     ) {
         assert!(
             self.particle.is_none(),
@@ -4783,6 +4790,7 @@ impl GpuSceneBundles {
             capacity,
             deferred_path,
             collision,
+            sort_mode,
         ));
     }
 
@@ -4815,6 +4823,25 @@ impl GpuSceneBundles {
         ctx: &VulkanContext,
     ) -> Option<particle::ParticleCountersRaw> {
         self.particle.as_ref().map(|p| p.read_counters(ctx))
+    }
+
+    /// Particles P2 item 3: the cold SORT MONOTONICITY readback and its in-submit control — `None`
+    /// on a disarmed run OR on one that did not arm the sort (there is no sorted buffer then, and a
+    /// scan of the unsorted source alone would be a measurement with nothing to compare it to).
+    ///
+    /// See [`particle::ParticleGpuBundle::read_sort_scan`] for why this range CAN be read back
+    /// where rung P2 item 2's index transform could not.
+    #[inline]
+    pub(crate) fn read_particle_sort_scan(
+        &self,
+        ctx: &VulkanContext,
+        alpha_count: u32,
+        cam_eye: [f32; 3],
+        frames_presented: u32,
+    ) -> Option<crate::particle_readback::ParticleSortReadback> {
+        self.particle
+            .as_ref()
+            .and_then(|p| p.read_sort_scan(ctx, alpha_count, cam_eye, frames_presented))
     }
 
     /// # Panics

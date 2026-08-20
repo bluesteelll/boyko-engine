@@ -96,7 +96,8 @@
 //! | `BOYKO_PARTICLE_COLLIDE` | unset | set ⇒ `ParticleCollision::Sdf`, i.e. build the sim from the `-D SDF_COLLIDE` module — the SHADER half |
 //! | `BOYKO_PARTICLE_STATS` | unset | set ⇒ `ParticleCollision::SdfStats` (rung P1b's `-D SDF_COLLIDE_STATS` instrument). Implies the collide arm; it is the ONLY way `p_counters`' three stats words become non-zero, so a skip-rate run reads them through `BOYKO_PARTICLE_READBACK_FRAME` |
 //! | `BOYKO_PARTICLE_ALPHA` | unset | set ⇒ rung P2's SECOND emitter, carrying a second effect of the ALPHA blend class (blue, 75 % coverage, 1.6 units right of the additive fan). The only configuration in the tree where `alpha.instanceCount` is non-zero |
-//! | `BOYKO_PARTICLE_READBACK_FRAME` | unset | the runner's own knob (gates #7/#9 and rung P1b's skip-rate readback), not read here |
+//! | `BOYKO_PARTICLE_SORT` | unset | set ⇒ `ParticleSortMode::Radix` (rung P2 item 3's three-dispatch radix over the alpha class). REFUSES to arm without `BOYKO_PARTICLE_ALPHA` — see [`sort_arming`] |
+//! | `BOYKO_PARTICLE_READBACK_FRAME` | unset | the runner's own knob (gates #7/#9, rung P1b's skip-rate readback and rung P2 item 3's sort-monotonicity readback), not read here |
 //!
 //! The two P1 knobs are separate ON PURPOSE (see [`sdf_collider_armed`]): with the scene one set
 //! and the shader one unset, the control run renders a byte-identical scene whose particles fly
@@ -115,7 +116,7 @@ use boyko_render::{
     ParticleClock, ParticleCollision,
     ParticleConfig, ParticleEffect, ParticleEffectHandle, ParticleEffectRefs,
     ParticleEffectScratch, ParticleEffectsExt, ParticleEmitScratch, ParticleEmitter, ParticleMode,
-    particle_apply_effect_refs, particle_pack_effects, particle_tick_emitters,
+    ParticleSortMode, particle_apply_effect_refs, particle_pack_effects, particle_tick_emitters,
 };
 
 // ── The pinned clock ─────────────────────────────────────────────────────────────────
@@ -368,6 +369,42 @@ pub fn emitter_count() -> u32 {
 /// independently of the scene's.
 pub fn collision_stats_armed() -> bool {
     std::env::var("BOYKO_PARTICLE_STATS").is_ok()
+}
+
+/// The resolved [`ParticleSortMode`] arm for this run (`BOYKO_PARTICLE_SORT`) — rung P2 item 3.
+///
+/// # It REFUSES the sort without the alpha class, and for gate #17's own reason
+///
+/// `BOYKO_PARTICLE_SORT` without `BOYKO_PARTICLE_ALPHA` is a legal-looking configuration that is
+/// not a legal measurement: the alpha class is then EMPTY on every frame, so all three sort
+/// dispatches run over zero elements, `p_render_sorted` never receives a record, and the
+/// monotonicity readback reports an empty range — which
+/// [`ParticleSortRangeScan::is_monotone`](boyko_app::particle_readback::ParticleSortRangeScan::is_monotone)
+/// answers `true` to, because a range of nothing is trivially ordered.
+///
+/// A caveat would not be enough: such a run passes the monotonicity assertion, prints a plausible
+/// artifact line and produces the byte-identical goldens the default arming produces. It is the
+/// instrument-cannot-see-its-subject class one axis over from where rung P1b found it, so the
+/// fixture refuses it here rather than letting a gate certify it.
+///
+/// # Panics
+///
+/// When `BOYKO_PARTICLE_SORT` is set and `BOYKO_PARTICLE_ALPHA` is not.
+pub fn sort_arming() -> ParticleSortMode {
+    if std::env::var("BOYKO_PARTICLE_SORT").is_ok() {
+        assert!(
+            alpha_class_armed(),
+            "BOYKO_PARTICLE_SORT was set without BOYKO_PARTICLE_ALPHA. The sort's subject is the \
+             ALPHA class alone (the additive class is commutative and is deliberately not sorted), \
+             so with no alpha emitter every sort dispatch runs over ZERO elements and the \
+             monotonicity readback reports an EMPTY range — which is monotone. The run would pass \
+             the gate, print a plausible artifact line and prove nothing. Set \
+             BOYKO_PARTICLE_ALPHA=1 as well, or drop BOYKO_PARTICLE_SORT."
+        );
+        ParticleSortMode::Radix
+    } else {
+        ParticleSortMode::None
+    }
 }
 
 /// The resolved [`ParticleCollision`] arm for this run — ONE function, so the three-valued axis is
@@ -778,6 +815,10 @@ pub fn build_app(title: &'static str) -> App {
         // `particle_sim` module the pipeline is built from. Rung P1b's census is a THIRD value on
         // the same axis, not a second knob over `Sdf`, so the fixture resolves both here.
         collision: collision_arming(),
+        // Rung P2 item 3's arm, boot-frozen for a wider reason than the other two: it decides
+        // whether the two sort buffers are allocated at all. `sort_arming` refuses the sort without
+        // the alpha class — see its doc.
+        sort: sort_arming(),
     });
     // The subsystem's own clock, re-rated to the fixture's substep.
     app.insert_resource(ParticleClock::from_hz(LAB_STEP_HZ));

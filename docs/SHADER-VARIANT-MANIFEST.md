@@ -97,7 +97,7 @@ and `particle_depth_compare_for` (`boyko_app/src/gpu_scene/particle.rs`) are two
 question — what does this path's depth image hold — and take the SAME `deferred_path` predicate,
 so exactly one `VkPipeline` exists per run and the two answers cannot disagree.
 
-*Byte gate:* `crates/boyko_rhi_vulkan/tests/particle_edsl_sync.rs` re-DXCs **all nine** particle
+*Byte gate:* `crates/boyko_rhi_vulkan/tests/particle_edsl_sync.rs` re-DXCs **all twelve** particle
 artifacts under the recipes their headers pin and byte-compares. The base rows are load-bearing in
 both directions: they prove the `#ifdef` leaves the undefined compile byte-frozen (it does —
 verified at the landing). The same file pins the encode agreement itself
@@ -193,8 +193,63 @@ atomics. The selector itself is pinned in-crate by identity AND by artifact prop
 instrument from the module it measures by ATOMIC POPULATION, since the two share every binding),
 because a swapped arm is invisible to every text and byte pin in the tree.
 
+## `particle_sort_{hist,scan,scatter}.comp.hlsl` — the alpha class's radix sort (compute)
+
+**Three sources, three artifacts, and ZERO `-D` rows — which is why this section exists at all.**
+Rung P2 item 3 (plan D10) is the first particle feature whose arming is resolved into *separate
+pipelines* rather than into a define, and recording that here is the point: a reader looking for
+"where is the sort's variant row?" must find the answer *no such row exists* rather than conclude
+the manifest is stale.
+
+The sort is a boot arming (`ParticleSortMode`, default `None`), and everything it adds is
+structurally absent when it is off — two device buffers, three compute pipelines, one descriptor
+ring, three framegraph passes. There is nothing to make conditional *inside* a shader, so there is
+nothing for a define to gate. The three modules are unconditional compiles of three whole files:
+
+| Source | Artifact | Profile | Bindings (declared ∧ read) | Push | Atomics (device, workgroup) |
+|---|---|---|---|---|---|
+| `particle_sort_hist.comp.hlsl` | `particle_sort_hist.comp.spv` | `cs_6_0` | `[2, 7, 12]` | 16 B (`float3 cam_eye`, `uint capacity`) | **(1, 1)** |
+| `particle_sort_scan.comp.hlsl` | `particle_sort_scan.comp.spv` | `cs_6_0` | `[12]` | **none** | **(0, 0)** |
+| `particle_sort_scatter.comp.hlsl` | `particle_sort_scatter.comp.spv` | `cs_6_0` | `[2, 7, 11, 12]` | 16 B (the same block) | **(1, 2)** |
+
+Bindings 11 (`p_render_sorted`) and 12 (`p_sort_bins`) are new Set-0 rows; on an unsorted run they
+are filled with live PLACEHOLDERS (`p_render`, `p_counters`) so ONE layout serves both armings —
+the bound-but-unread shape rung P1's edit list at binding 10 already established.
+
+**⚠️ The atomic pair is the budget claim, and the WORKGROUP half is what discriminates.** The
+dangerous edit is a scatter that reserves per ELEMENT rather than per occupied bin — it sorts
+correctly, passes the monotonicity readback, and costs up to 256× the global traffic (D5's
+~0.5 ms/frame-at-1M shape). That form carries **one device atomic too**, so a device-only bound
+cannot see it; it reports `(1, 0)`, because it needs no LDS phases at all. **Proven by mutation
+2026-08-21**: rewriting the scatter to the per-element form reddens
+`the_sort_modules_carry_their_derived_atomic_budget` on the workgroup count and nothing else in the
+battery.
+
+**The scan's re-zero is why `particle_kickoff` needed no variant.** `p_sort_bins` is one allocation
+in two halves — histogram `[0, 256)`, running offsets `[256, 512)` — and the scan reads its own bin
+into a register, publishes the exclusive prefix into the offsets half, and writes `0u` back to the
+histogram half in the same dispatch. So the histogram is clean for the next frame without any
+shipping shader learning that the sort exists; the alternative was a `-D` variant of a module that
+ships in every configuration, i.e. a thirteenth artifact to zero 1 KB. Frame 0 works because the
+boot fill zeroes the buffer, and the seed row's WRITER constructor is what makes the re-zero
+*visible* to the next frame's accumulate.
+
+*Byte gate:* the same `particle_edsl_sync` battery — three re-DXC byte rows, the three binding sets
+above, the three declared widths (all `256`, which must equal the bin count: the modules are
+one-bin-per-lane), zero `OpFDiv` in all three (the octave span's reciprocal is host-computed and
+printed as a literal), the atomic pair above, the scan's re-zero and its read-before-zero ordering,
+the scatter's mirror + F25 clamp + one-load-per-element traffic claim, and — the pin that makes the
+two key-bearing modules one module — that `particle_sort_key` is **character-identical** in the
+histogram and the scatter. A key that differed between them would size a bin from one population
+and fill it from another. The range constants (`SORT_NEAR`, `SORT_LOG_NEAR`, `SORT_INV_LOG_SPAN`,
+`SORT_BINS`, `SORT_BIN_MAX`, `SORT_OFFSET_BASE`) are pinned against
+`boyko_rhi_vulkan::compute::PARTICLE_SORT_*`, because the host recomputes the key for the
+monotonicity readback and a drifted constant would make that instrument lie in both directions.
+
 *Not yet built:* the remaining particle `-D` rows the plan schedules — `SOFT` (P2), `LIT_PERPIXEL` /
-`MOTION` (P3), `PARTICLE_INTERP` (P2b). Each gets its own row here when it lands.
+`MOTION` (P3), `PARTICLE_INTERP` (P2b). Each gets its own row here when it lands. `SortMode::Wboit`
+is **not** on that list: D10 keeps it as an opt-in, but it is a different technique (a weighted
+order-independent accumulation, not a permutation) and would be its own rung, not a define.
 
 ## `sdf_forward_march.comp.hlsl` — the Forward/VB fused SDF march+shade (compute)
 

@@ -158,13 +158,23 @@ pub(crate) struct GbufferPassPlan {
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 /// The number of BUFFER `ResId`s the particle tail appends — one per row of the plan's seed
-/// table, in the SAME order the shaders number their Set-0 bindings 0..9.
+/// table, in the SAME order the shaders number their Set-0 bindings 0..9 followed by rung P2 item
+/// 3's two at 11 and 12.
 ///
 /// It is the length of the sink's particle span in all three sinks, and it is spelled ONCE
 /// because a count that merely equals a literal somewhere else is dead the moment the two drift.
 /// The tail is CONDITIONAL: on a disarmed frame not one of these `ResId`s exists, so the arrays
 /// that reserve room for them hold [`VkBuffer::NULL`] and no derived barrier names a slot.
-pub(crate) const PARTICLE_BUFFER_COUNT: usize = 10;
+///
+/// **⚠️ The last two rows are conditional on a SECOND predicate, and they are declared anyway.**
+/// `p_render_sorted` and `p_sort_bins` exist only under a sorting arming, but their `ResId`s are
+/// declared on every armed frame so the tail's LENGTH — and therefore every sink's positional fill
+/// — stays one number. F9 is what makes that free: *a declared `ResId` no pass names routes ZERO
+/// barriers*, so on an unsorted frame the two slots hold [`VkBuffer::NULL`], no pass names them,
+/// and the derived stream is byte-identical to the tree before this rung. Making the LENGTH
+/// conditional instead would have put a second predicate into three sinks' index arithmetic, which
+/// is exactly the shape the interp trio's own comment warns about.
+pub(crate) const PARTICLE_BUFFER_COUNT: usize = 12;
 
 /// Particles P0: the ten conditional-tail buffer `ResId`s, in DECLARATION order.
 ///
@@ -202,6 +212,19 @@ pub(crate) struct ParticleResIds {
     emit_req: crate::framegraph::ResId,
     /// Seed row 10 — the device-side effect-parameter table.
     effects: crate::framegraph::ResId,
+    /// Seed row 11 — rung P2 item 3's SORTED render records. Terminal: the alpha draw's VERTEX
+    /// read, so the seed is a reader at `VERTEX_SHADER` and the scatter's write next frame is a
+    /// WAR sourced there — the same shape [`Self::render`] carries, for the same reason.
+    ///
+    /// Named by no pass under `ParticleSortMode::None`; F9 then routes zero barriers for it.
+    render_sorted: crate::framegraph::ResId,
+    /// Seed row 12 — rung P2 item 3's radix scratch. Terminal: a COMPUTE write (the scan's
+    /// re-zero of the histogram half), so the seed is a WRITER and next frame's histogram
+    /// accumulate is a real RAW — which is the barrier that makes the re-zero VISIBLE and is
+    /// therefore load-bearing, not hygiene.
+    ///
+    /// Named by no pass under `ParticleSortMode::None`.
+    sort_bins: crate::framegraph::ResId,
 }
 
 /// Particles P0: the conditional-tail `PassId` map (D13). Every member is `None` when the
@@ -221,6 +244,14 @@ pub(crate) struct ParticlePassPlan {
     /// The hot-loop dispatch. `Some` on every armed frame — `steps == 0` still rebuilds the alive
     /// list and the render records.
     pub(crate) sim: Option<crate::framegraph::PassId>,
+    /// Rung P2 item 3: the radix HISTOGRAM. `Some` iff the frame's activation carries the sort
+    /// pipelines, i.e. iff the owner armed `ParticleSortMode::Radix` at boot.
+    pub(crate) sort_hist: Option<crate::framegraph::PassId>,
+    /// Rung P2 item 3: the 256-bin SCAN. `Some` under the SAME predicate as [`Self::sort_hist`] —
+    /// the three sort passes are one decision, and the recorder `debug_assert`s that they agree.
+    pub(crate) sort_scan: Option<crate::framegraph::PassId>,
+    /// Rung P2 item 3: the PERMUTATION. `Some` under the same predicate.
+    pub(crate) sort_scatter: Option<crate::framegraph::PassId>,
     /// The indirect billboard draw. `Some` on every armed frame.
     pub(crate) draw: Option<crate::framegraph::PassId>,
 }
@@ -334,6 +365,17 @@ fn declare_particle_buffers(g: &mut crate::framegraph::FrameGraph) -> ParticleRe
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 VK_ACCESS_SHADER_READ_BIT,
             ),
+        ),
+        render_sorted: g.add_buffer_seeded(
+            "p_render_sorted",
+            ResSync::seeded_readers(
+                VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+            ),
+        ),
+        sort_bins: g.add_buffer_seeded(
+            "p_sort_bins",
+            ResSync::seeded_writer(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT),
         ),
     }
 }
@@ -467,7 +509,61 @@ fn declare_particle_compute(
         Some(p)
     };
 
-    ParticlePassPlan { upload, kickoff, emit, sim, draw: None }
+    // Rung P2 item 3 (plan D10): `hist → scan → scatter`, declared HERE — between the sim that
+    // produces the alpha class and the draw that consumes it, which is the only window where the
+    // class exists and is not yet being fetched.
+    //
+    // Gated on the ACTIVATION carrying the pipelines, never on a second predicate: the host builds
+    // the three pipelines and the two buffers as one boot decision, so "the sort exists" has a
+    // single home and the declarator merely reads it (gate #6's declare/record parity, applied to
+    // the fourth axis).
+    //
+    // ⚠️ TWO accesses are deliberately ABSENT from these three passes, and their absence is what
+    // keeps the derived stream from growing more than it must:
+    //   * `p_dispatch_args` — the histogram and the scatter re-fetch the SIM's own
+    //     `VkDispatchIndirectCommand`, which the sim already read this frame at the same
+    //     `DRAW_INDIRECT / INDIRECT_COMMAND_READ`. Declaring it again would derive nothing (a read
+    //     after a read is free) but would put a redundant row in the access-column gate;
+    //   * `p_render` at the scatter — declared, because it IS read there, and it costs no barrier
+    //     for the same reason (the histogram's read precedes it).
+    let sort_armed = act.sort_hist_pipeline.is_some();
+    let sort_hist = sort_armed.then(|| {
+        let p = g.add_pass("particle_sort_hist");
+        // The alpha class's live count. A read of the word the sim's `InterlockedAdd` just left ⇒
+        // a real `C/RW → C/R` RAW.
+        g.buffer_access(ids.draw_args, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+        // The records the keys are derived from ⇒ the sim's `C/W → C/R` RAW.
+        g.buffer_access(ids.render, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+        // The histogram half, accumulated into. RW because the `InterlockedAdd` is a
+        // read-modify-write (K2's `light_index_alloc` spelling, as for `p_draw_args`).
+        g.buffer_access(ids.sort_bins, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, RW);
+        p
+    });
+    let sort_scan = sort_armed.then(|| {
+        let p = g.add_pass("particle_sort_scan");
+        // Its ONLY resource. The RAW against the histogram's accumulate is the whole reason this
+        // is a separate pass rather than a phase of it: a workgroup barrier cannot order two
+        // dispatches' writes.
+        g.buffer_access(ids.sort_bins, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, RW);
+        p
+    });
+    let sort_scatter = sort_armed.then(|| {
+        let p = g.add_pass("particle_sort_scatter");
+        g.buffer_access(ids.draw_args, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+        g.buffer_access(ids.render, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+        // The destination — the ONLY write to this resource in the whole frame, and the one the
+        // alpha draw's VERTEX read below is ordered against.
+        g.buffer_access(
+            ids.render_sorted,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+        );
+        // The offsets half, consumed by the per-group reservations ⇒ the scan's `C/RW → C/RW` RAW.
+        g.buffer_access(ids.sort_bins, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, RW);
+        p
+    });
+
+    ParticlePassPlan { upload, kickoff, emit, sim, sort_hist, sort_scan, sort_scatter, draw: None }
 }
 
 /// Particles P0: declares the indirect billboard draw, LATE — after the path's last `lit`
@@ -491,6 +587,7 @@ fn declare_particle_draw(
     ids: ParticleResIds,
     lit: crate::framegraph::ResId,
     depth: ParticleDepthTarget,
+    sort_armed: bool,
 ) -> crate::framegraph::PassId {
     use crate::framegraph::SubRange;
 
@@ -500,6 +597,21 @@ fn declare_particle_draw(
 
     let p = g.add_pass("particle_draw");
     g.buffer_access(ids.render, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+    // Rung P2 item 3: the ALPHA half of this pass reads a DIFFERENT buffer when the sort is armed,
+    // so the pass declares BOTH — `p_render` (the additive draw's source, always) and
+    // `p_render_sorted` (the alpha draw's, when it exists). This is the access that derives the
+    // scatter's `C/SHADER_WRITE → VS/SHADER_READ` RAW, and it is also the frame TERMINAL that
+    // makes row 11's reader seed correct.
+    //
+    // Declared under the SAME predicate the recorder binds the alpha set under: one `Option` read
+    // at both sites (gate #6), never two booleans.
+    if sort_armed {
+        g.buffer_access(
+            ids.render_sorted,
+            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+        );
+    }
     g.buffer_access(
         ids.draw_args,
         VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
@@ -730,7 +842,7 @@ pub(crate) const GBUFFER_SINK_BUFFER_COUNT: usize = 7 + 3 + PARTICLE_BUFFER_COUN
 #[cfg(feature = "hwrt")]
 pub(crate) const GBUFFER_SINK_BUFFER_COUNT: usize = 8 + 3 + PARTICLE_BUFFER_COUNT;
 
-/// Particles P0: the ten physical handles of the particle tail, in the SAME order
+/// Particles P0/P2: the twelve physical handles of the particle tail, in the SAME order
 /// [`declare_particle_buffers`] declares their `ResId`s and the shaders number their Set-0
 /// bindings.
 ///
@@ -738,6 +850,12 @@ pub(crate) const GBUFFER_SINK_BUFFER_COUNT: usize = 8 + 3 + PARTICLE_BUFFER_COUN
 /// three chances for one of them to drift — and a drifted buffer slot is the silent class: every
 /// slot resolves to a live handle, so a mis-keyed barrier synchronises the wrong allocation
 /// without a validation message.
+///
+/// The last two slots are rung P2 item 3's and are [`VkBuffer::NULL`] under an unsorted arming —
+/// the same convention the WHOLE span already follows on a disarmed frame. That is sound, not
+/// merely tidy: the three sort passes are undeclared then, so F9 routes ZERO barriers naming
+/// either `ResId` and neither handle is ever dereferenced. A live-but-wrong handle would have been
+/// the dangerous choice here, and it is exactly what `NULL` refuses to become.
 #[inline]
 fn particle_sink_buffers(
     act: &super::scene_types::ParticleActivation<'_>,
@@ -753,6 +871,8 @@ fn particle_sink_buffers(
         act.render_records.buffer,
         act.emit_req_device.buffer,
         act.effects_device.buffer,
+        act.sorted_render_records.map_or(VkBuffer::NULL, |b| b.buffer),
+        act.sort_bins.map_or(VkBuffer::NULL, |b| b.buffer),
     ]
 }
 
@@ -2337,6 +2457,7 @@ impl Renderer<'_> {
                 ids,
                 lit,
                 ParticleDepthTarget { res: depth, sub: SubRange::DEPTH },
+                particle_plan.sort_scatter.is_some(),
             ));
         }
 
@@ -2865,6 +2986,7 @@ impl Renderer<'_> {
                 ids,
                 lit,
                 ParticleDepthTarget { res: forward_depth, sub: SubRange::DEPTH },
+                particle_plan.sort_scatter.is_some(),
             ));
         }
 
@@ -4351,10 +4473,15 @@ impl Renderer<'_> {
             "invariant: vb_cull_uniform is the last UNCONDITIONAL buffer ResId declare_vb_graph \
              declares — the particle tail follows it and is conditional"
         );
+        // ⚠️ **The named ResId MOVED again at rung P2 item 3**, and the reason is the same one the
+        // block above records: the tail grew two rows (`p_render_sorted`, `p_sort_bins`), so
+        // `p_effects` is no longer last and asserting on it would have kept passing while the span
+        // ran two slots short. The property is unchanged — the declared buffer ResIds exactly FILL
+        // the sink — so the assert names the CURRENT last row and nothing else about it moves.
         debug_assert!(
-            particle_res.is_none_or(|ids| ids.effects.index() + 1 - VB_IMAGE_COUNT
+            particle_res.is_none_or(|ids| ids.sort_bins.index() + 1 - VB_IMAGE_COUNT
                 == VB_BUFFER_COUNT),
-            "invariant: with particles armed, p_effects is the LAST buffer ResId and the buffer \
+            "invariant: with particles armed, p_sort_bins is the LAST buffer ResId and the buffer \
              ResIds must exactly fill VbBarrierSink::buffers"
         );
 
@@ -6053,6 +6180,7 @@ impl Renderer<'_> {
                 ids,
                 lit,
                 ParticleDepthTarget { res: vb_depth, sub: SubRange::DEPTH },
+                particle_plan.sort_scatter.is_some(),
             ));
         }
 

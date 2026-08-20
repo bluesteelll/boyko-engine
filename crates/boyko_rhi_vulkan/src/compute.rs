@@ -5674,9 +5674,9 @@ pub const fn tile_grid_extent(img_w: u32, img_h: u32) -> (u32, u32) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-// Particles — the eight committed artifacts (five base modules + the two `-D DEPTH_LINEAR` draw
-// stages + the `-D SDF_COLLIDE` sim), their push ranges and their group edges
-// (`docs/PARTICLES-PLAN.md` Rev 4). See `present/passes/particles.rs` for the recorder and
+// Particles — the twelve committed artifacts (eight base modules + the two `-D DEPTH_LINEAR` draw
+// stages + the `-D SDF_COLLIDE` and `-D SDF_COLLIDE_STATS` sims), their push ranges and their group
+// edges (`docs/PARTICLES-PLAN.md` Rev 4). See `present/passes/particles.rs` for the recorder and
 // `boyko_app::gpu_scene::particle` for the host layout table these bindings mirror.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -5820,6 +5820,50 @@ embed_spirv! {
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_draw_dlin.fs.spv")
 }
 
+embed_spirv! {
+    /// Particles P2 item 3: the radix sort's HISTOGRAM, dispatch 1 of 3
+    /// (`shaders/particle_sort_hist.comp.hlsl`, plan D10). `DispatchIndirect`,
+    /// [`PARTICLE_LOCAL_SIZE`] threads.
+    ///
+    /// Builds the global 256-bin population of the ALPHA class's 8-bit quantized log-depth keys.
+    /// Binds `p_draw_args` @2 (read — the class's live count), `p_render` @7 (read) and
+    /// `p_sort_bins` @12 (read+write, atomic); takes [`PARTICLE_SORT_PUSH_BYTES`] of `COMPUTE` push.
+    ///
+    /// The per-element increments are LDS; exactly ONE global `InterlockedAdd` is issued per
+    /// OCCUPIED bin per group, which is D5's wave-aggregation argument applied to a histogram.
+    PARTICLE_SORT_HIST_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_sort_hist.comp.spv")
+}
+
+embed_spirv! {
+    /// Particles P2 item 3: the radix sort's 256-BIN SCAN, dispatch 2 of 3
+    /// (`shaders/particle_sort_scan.comp.hlsl`, plan D10). ONE group of [`PARTICLE_LOCAL_SIZE`]
+    /// threads, dispatched DIRECTLY.
+    ///
+    /// Turns the histogram half of `p_sort_bins` into the offsets half (an exclusive prefix sum)
+    /// **and re-zeroes the histogram half in the same dispatch** — which is what keeps
+    /// `particle_kickoff`, one module for every arming, byte-frozen across this rung. Binds
+    /// `p_sort_bins` @12 alone, takes NO push, and carries ZERO atomics: one lane owns one bin for
+    /// the whole dispatch.
+    PARTICLE_SORT_SCAN_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_sort_scan.comp.spv")
+}
+
+embed_spirv! {
+    /// Particles P2 item 3: the radix sort's PERMUTATION, dispatch 3 of 3
+    /// (`shaders/particle_sort_scatter.comp.hlsl`, plan D10). `DispatchIndirect`,
+    /// [`PARTICLE_LOCAL_SIZE`] threads.
+    ///
+    /// Copies each alpha render record from `p_render` to `p_render_sorted` at its sorted rank,
+    /// using the SAME `capacity - 1 - rank` mirror the sim wrote the class with — so the ALPHA
+    /// draw's `(capacity - 1, -1)` push pair is unchanged and only the buffer bound at the draw
+    /// set's binding 0 differs. Binds `p_draw_args` @2 (read), `p_render` @7 (read),
+    /// `p_render_sorted` @11 (write) and `p_sort_bins` @12 (read+write, atomic); takes
+    /// [`PARTICLE_SORT_PUSH_BYTES`] of `COMPUTE` push.
+    PARTICLE_SORT_SCATTER_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_sort_scatter.comp.spv")
+}
+
 /// Particles P0: `particle_kickoff`'s push block — `{ uint requested_spawn; uint capacity }`.
 ///
 /// ⚠️ **NOT part of the shared `COMPUTE_PUSH_CONSTANT_RANGE_BYTES` `max`, deliberately.** The
@@ -5852,6 +5896,91 @@ pub const PARTICLE_EMIT_PUSH_BYTES: u32 = 8;
 /// and the same one the draw's alpha `index_base` is derived from, so CAP has one home and three
 /// consumers rather than three derivations.
 pub const PARTICLE_SIM_PUSH_BYTES: u32 = 12;
+
+/// Particles P2 item 3: the push block `particle_sort_hist` and `particle_sort_scatter` SHARE —
+/// `{ float3 cam_eye; uint capacity }` (12 + 4).
+///
+/// One block for both, because the two passes must bin from the SAME eye: the histogram decides how
+/// large each bin's reservation is and the scatter decides which reservation an element joins, so
+/// two eyes would size a bin from one population and fill it from another.
+///
+/// `particle_sort_scan`'s SHADER declares no push block at all — a range it does not read cannot
+/// drift from the one these two do — but its pipeline layout is given this same range anyway,
+/// because [`RhiDevice::create_compute_pipeline`](boyko_rhi::RhiDevice::create_compute_pipeline)
+/// has no zero-range form. A declared range no shader references is legal Vulkan, and the recorder
+/// emits no `vkCmdPushConstants` for that pass.
+///
+/// See [`PARTICLE_KICKOFF_PUSH_BYTES`] for why this is not in the shared COMPUTE range.
+pub const PARTICLE_SORT_PUSH_BYTES: u32 = 16;
+
+/// Particles P2 item 3: the radix's bin count — `2^8`, one 8-bit digit, ONE pass (plan D10).
+///
+/// EQUAL to [`PARTICLE_LOCAL_SIZE`] by design, which is what makes all three sort modules
+/// one-bin-per-lane; the generator asserts the equality and `tests/particle_edsl_sync.rs` pins the
+/// declared width against the compiled artifacts.
+pub const PARTICLE_SORT_BINS: u32 = 256;
+
+/// Particles P2 item 3: the word count of `p_sort_bins` — the histogram half `[0, BINS)` followed
+/// by the running-offsets half `[BINS, 2·BINS)` in ONE allocation.
+///
+/// Two halves and not one array because the scatter DESTROYS what it consumes (each reservation
+/// advances its bin's offset), so a single array would leave nothing to zero for the next frame.
+pub const PARTICLE_SORT_BINS_WORDS: u32 = 2 * PARTICLE_SORT_BINS;
+
+/// Particles P2 item 3: the near end of the sort key's depth range, in world units.
+///
+/// A power of two so [`PARTICLE_SORT_LOG_NEAR`] is EXACT in binary floating point and the shader
+/// mirror needs no rounding argument. It also serves as the `max` clamp that makes the key's `log2`
+/// total (a particle at the eye would otherwise reach `log2(0)`).
+pub const PARTICLE_SORT_NEAR: f32 = 0.125;
+
+/// Particles P2 item 3: `log2(PARTICLE_SORT_NEAR)` — exactly `-3`.
+pub const PARTICLE_SORT_LOG_NEAR: f32 = -3.0;
+
+/// Particles P2 item 3: the sort key's range in OCTAVES — `log2(4096) - log2(0.125) == 15`.
+///
+/// Fifteen octaves over [`PARTICLE_SORT_BINS`] bins is 0.0586 octaves per bin ⇒ **4.15 % relative
+/// depth resolution, CONSTANT across the range**, which is the whole reason the key is logarithmic:
+/// a linear key over the same span would spend 99.99 % of its bins beyond four units and resolve
+/// nothing where billboards actually overlap.
+pub const PARTICLE_SORT_LOG_SPAN: f32 = 15.0;
+
+/// Particles P2 item 3: the reciprocal of [`PARTICLE_SORT_LOG_SPAN`], mirrored into both key-bearing
+/// shaders as a LITERAL so the device multiplies rather than divides (plan gate #14 / M7 — a divide
+/// drags `OpFDiv`'s 2.5 ULP into a quantizer whose job is to be a stable step function).
+pub const PARTICLE_SORT_INV_LOG_SPAN: f32 = 1.0 / PARTICLE_SORT_LOG_SPAN;
+
+/// Particles P2 item 3: **the host mirror of the device's sort key** — the same expression
+/// `particle_sort_{hist,scatter}.comp.hlsl` carry, term for term.
+///
+/// # What it is for, and what it is NOT for
+///
+/// It exists so the monotonicity readback (plan P2's named gate) can state its property in the
+/// key's own units: "the recomputed key is non-decreasing in rank". It is NOT a bit-exactness
+/// contract — `log2` is not required to be correctly rounded on either side, so a record sitting
+/// exactly on a bin boundary may quantize one step differently here than on the device. The
+/// readback therefore reports the depth sequence beside the key sequence, and the depth-ratio bound
+/// it checks needs no oracle at all.
+///
+/// The two shaders' constants are pinned against the four `PARTICLE_SORT_*` consts above by
+/// `tests/particle_edsl_sync.rs`, which is what makes "the same expression" decidable rather than
+/// asserted.
+///
+/// Returns a value in `[0, PARTICLE_SORT_BINS)`. Bin 0 is the FARTHEST — the key is inverted so
+/// that an ascending sort is back-to-front.
+#[must_use]
+pub fn particle_sort_key(pos: [f32; 3], cam_eye: [f32; 3]) -> u32 {
+    let dx = cam_eye[0] - pos[0];
+    let dy = cam_eye[1] - pos[1];
+    let dz = cam_eye[2] - pos[2];
+    let d = (dx * dx + dy * dy + dz * dz).sqrt();
+    // `max` in the NaN-tolerant direction the device's `NMax` takes: a NaN distance becomes the
+    // near clamp, so the particle sorts as the nearest rather than poisoning the quantizer.
+    let clamped = if d > PARTICLE_SORT_NEAR { d } else { PARTICLE_SORT_NEAR };
+    let bin_max = (PARTICLE_SORT_BINS - 1) as f32;
+    let t = ((clamped.log2() - PARTICLE_SORT_LOG_NEAR) * PARTICLE_SORT_INV_LOG_SPAN).clamp(0.0, 1.0);
+    PARTICLE_SORT_BINS - 1 - (t * bin_max + 0.5) as u32
+}
 
 /// Particles P0: `particle_draw.vs`'s `VERTEX`-stage push block — `{ float4x4 view_proj; uint
 /// index_base; int index_step }` (64 + 4 + 4).
@@ -5945,6 +6074,27 @@ pub fn particle_sim_sdf_spirv() -> &'static [u32] {
 #[inline]
 pub fn particle_sim_stats_spirv() -> &'static [u32] {
     PARTICLE_SIM_STATS_SPV.as_words()
+}
+
+/// Particles P2 item 3: the radix HISTOGRAM SPIR-V as a `u32` word stream. See
+/// [`PARTICLE_SORT_HIST_SPV`]'s doc.
+#[inline]
+pub fn particle_sort_hist_spirv() -> &'static [u32] {
+    PARTICLE_SORT_HIST_SPV.as_words()
+}
+
+/// Particles P2 item 3: the radix SCAN SPIR-V as a `u32` word stream. See
+/// [`PARTICLE_SORT_SCAN_SPV`]'s doc.
+#[inline]
+pub fn particle_sort_scan_spirv() -> &'static [u32] {
+    PARTICLE_SORT_SCAN_SPV.as_words()
+}
+
+/// Particles P2 item 3: the radix SCATTER SPIR-V as a `u32` word stream. See
+/// [`PARTICLE_SORT_SCATTER_SPV`]'s doc.
+#[inline]
+pub fn particle_sort_scatter_spirv() -> &'static [u32] {
+    PARTICLE_SORT_SCATTER_SPV.as_words()
 }
 
 /// Particles P0: the billboard-expansion VERTEX SPIR-V as a `u32` word stream. See

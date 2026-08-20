@@ -9,12 +9,13 @@
 //!    determinism harness compares a readback against — silently, because the same shader still
 //!    compiles and still draws plausible particles.
 //! 2. **`particle_*_spv_byte_identical`** — each committed `.spv` is the re-DXC of its own source
-//!    under the frozen recipe pinned in that source's header. NINE artifacts from five sources:
+//!    under the frozen recipe pinned in that source's header. TWELVE artifacts from eight sources:
 //!    the two draw stages each carry the `-D DEPTH_LINEAR` variant the Deferred path binds, and the
 //!    sim carries TWO — rung P1's `-D SDF_COLLIDE` and rung P1b's `-D SDF_COLLIDE_STATS` skip-rate
 //!    instrument stacked on top of it; the base rows are the other half of that claim (the
-//!    `#ifdef` must leave the undefined compile byte-frozen). SKIPS (with an `eprintln`) when no
-//!    `dxc` resolves; the byte gate is
+//!    `#ifdef` must leave the undefined compile byte-frozen). Rung P2 item 3's three sort modules
+//!    carry no define at all — the sort is a boot arming that picks three separate PIPELINES.
+//!    SKIPS (with an `eprintln`) when no `dxc` resolves; the byte gate is
 //!    only as hermetic as the pinned VulkanSDK 1.4.350.0 toolchain that produced the artifacts.
 //! 3. **The opcode census** — plan gate #14's artifact-level claims: the workgroup widths, the
 //!    exact `OpAtomicIAdd` population of `particle_sim` (and of rung P1's variant, which adds
@@ -695,7 +696,7 @@ const SDF_COLLIDE_DEFINES: &[&str] = &["-D", "SDF_COLLIDE=1"];
 const SDF_COLLIDE_STATS_DEFINES: &[&str] = &["-D", "SDF_COLLIDE=1", "-D", "SDF_COLLIDE_STATS=1"];
 
 /// Every committed particle artifact.
-const PARTICLE_ARTIFACTS: [ParticleArtifact; 9] = [
+const PARTICLE_ARTIFACTS: [ParticleArtifact; 12] = [
     ParticleArtifact {
         hlsl_stem: "particle_kickoff.comp",
         profile: "cs_6_0",
@@ -725,6 +726,27 @@ const PARTICLE_ARTIFACTS: [ParticleArtifact; 9] = [
         profile: "cs_6_0",
         defines: SDF_COLLIDE_STATS_DEFINES,
         spv_stem: "particle_sim_stats.comp",
+    },
+    // Rung P2 item 3's three. NO defines on any of them: the sort is a boot arming that picks three
+    // separate PIPELINES, so there is nothing to make conditional inside a shader and therefore no
+    // variant row to carry.
+    ParticleArtifact {
+        hlsl_stem: "particle_sort_hist.comp",
+        profile: "cs_6_0",
+        defines: &[],
+        spv_stem: "particle_sort_hist.comp",
+    },
+    ParticleArtifact {
+        hlsl_stem: "particle_sort_scan.comp",
+        profile: "cs_6_0",
+        defines: &[],
+        spv_stem: "particle_sort_scan.comp",
+    },
+    ParticleArtifact {
+        hlsl_stem: "particle_sort_scatter.comp",
+        profile: "cs_6_0",
+        defines: &[],
+        spv_stem: "particle_sort_scatter.comp",
     },
     ParticleArtifact {
         hlsl_stem: "particle_draw.vs",
@@ -876,6 +898,21 @@ fn particle_sim_stats_spv_byte_identical() {
     // siblings do — and it is the row that makes the census exception below assert against an
     // artifact somebody actually builds.
     assert_spv_byte_identical("particle_sim_stats.comp");
+}
+
+#[test]
+fn particle_sort_hist_spv_byte_identical() {
+    assert_spv_byte_identical("particle_sort_hist.comp");
+}
+
+#[test]
+fn particle_sort_scan_spv_byte_identical() {
+    assert_spv_byte_identical("particle_sort_scan.comp");
+}
+
+#[test]
+fn particle_sort_scatter_spv_byte_identical() {
+    assert_spv_byte_identical("particle_sort_scatter.comp");
 }
 
 #[test]
@@ -1394,7 +1431,7 @@ fn particle_modules_declare_the_bindings_they_read() {
         eprintln!("SKIP particle_modules_declare_the_bindings_they_read: no spirv-dis on this host");
         return;
     }
-    let expected: [(&str, &[usize]); 9] = [
+    let expected: [(&str, &[usize]); 12] = [
         // counters, dispatch args, draw args.
         ("particle_kickoff.comp", &[0, 1, 2]),
         // counters, dead, alive_read, particle, emit requests, effects.
@@ -1412,6 +1449,18 @@ fn particle_modules_declare_the_bindings_they_read() {
         // of its own — no new binding, no layout change, no barrier-stream movement. A row that had
         // grown a binding would mean the census had reached for a buffer the host does not bind.
         ("particle_sim_stats.comp", &[0, 2, 3, 4, 5, 6, 7, 9, 10]),
+        // Rung P2 item 3. THREE claims live in these three rows, and each is the kind an image
+        // cannot make:
+        //   * the HISTOGRAM reads the class's count (@2) and the records (@7) and writes only the
+        //     bins (@12). A row that had grown 11 would mean it reached for the sorted buffer,
+        //     which does not exist yet at that point in the frame;
+        //   * the SCAN touches ONE resource. Any growth here means the pure reduction started
+        //     reading the world, and its "no push, no atomic, one lane one bin" argument is over;
+        //   * the SCATTER is the only module that writes @11, which is what makes the alpha draw's
+        //     source a buffer with exactly one producer.
+        ("particle_sort_hist.comp", &[2, 7, 12]),
+        ("particle_sort_scan.comp", &[12]),
+        ("particle_sort_scatter.comp", &[2, 7, 11, 12]),
         // render records + the camera UBO (set 0).
         ("particle_draw.vs", &[0, 1]),
         // the bindless texture array + its sampler (set 1).
@@ -1431,6 +1480,345 @@ fn particle_modules_declare_the_bindings_they_read() {
             "{stem}'s declared-and-read binding set moved; census: {c:?}"
         );
     }
+}
+
+// ---- Rung P2 item 3: the radix sort's pins (plan D10) ----------------------------------------
+
+/// **The two key-bearing sort modules must carry ONE key, character for character.**
+///
+/// The histogram decides how large each bin's reservation is and the scatter decides which
+/// reservation an element joins. A key that differed between them would size a bin from one
+/// population and fill it from another — an overrun of that bin's run into its neighbour's, with a
+/// plausible image, no validation message and a monotonicity readback that would still pass on the
+/// bins that happened not to overflow.
+///
+/// The generator prints both from one `SORT_KEY_FN` input; this asserts the committed files agree,
+/// which is the property that survives a hand-edit of either.
+#[test]
+fn the_two_sort_modules_carry_one_key() {
+    let hist = read_shader("particle_sort_hist.comp.hlsl");
+    let scatter = read_shader("particle_sort_scatter.comp.hlsl");
+    let sig = "uint particle_sort_key(float3 pos, float3 cam_eye) {";
+    let hist_key = extract_fn(&hist, sig);
+    let scatter_key = extract_fn(&scatter, sig);
+    assert_eq!(
+        hist_key, scatter_key,
+        "particle_sort_hist and particle_sort_scatter declare DIFFERENT sort keys — one key, two \
+         texts. The histogram would then size a bin from one population and the scatter fill it \
+         from another."
+    );
+    // ...and the key is really the thing this test thinks it is, so the equality above is not an
+    // equality of two empty extractions.
+    for needle in [
+        "float d = length(cam_eye - pos);",
+        "float t = saturate((log2(max(d, SORT_NEAR)) - SORT_LOG_NEAR) * SORT_INV_LOG_SPAN);",
+        "return SORT_BIN_MAX - (uint)(t * SORT_BIN_MAX_F + 0.5);",
+    ] {
+        assert!(
+            hist_key.contains(needle),
+            "the sort key no longer contains `{needle}` — the generator (`emit_particles.rs`'s \
+             SORT_KEY_FN) owns this text, so re-run it rather than editing the shaders:\n{hist_key}"
+        );
+    }
+    // The INVERSION is the whole reason the scan can stay a forward exclusive prefix sum and the
+    // draw's `(capacity - 1, -1)` push pair can stay unchanged. A key that stopped inverting would
+    // sort the class FRONT-to-back — the exact opposite of what `alpha_over` needs — and every
+    // structural pin in this file would still pass.
+    assert!(
+        hist_key.contains("SORT_BIN_MAX - (uint)"),
+        "the sort key must be INVERTED (bin 0 is the FARTHEST). Without the inversion the ascending
+         scatter produces front-to-back order, which is the wrong order for a non-commutative blend
+         and is invisible to every other pin here."
+    );
+}
+
+/// The sort's range constants, pinned against their host home — gate #8's discipline on rung P2
+/// item 3's four numbers.
+///
+/// `SORT_INV_LOG_SPAN` is the load-bearing one: it is the HOST's reciprocal, printed as a literal so
+/// the device multiplies. A drift between the two would put the host oracle's bins and the device's
+/// at different boundaries, and the monotonicity readback — which recomputes the key host-side —
+/// would then report inversions on a correctly sorted range, or (worse) miss them on a wrong one.
+#[test]
+fn the_sort_key_constants_mirror_their_host_home() {
+    let decls = [
+        format!(
+            "static const float SORT_NEAR         = {:?};",
+            boyko_rhi_vulkan::compute::PARTICLE_SORT_NEAR
+        ),
+        format!(
+            "static const float SORT_LOG_NEAR     = {:?};",
+            boyko_rhi_vulkan::compute::PARTICLE_SORT_LOG_NEAR
+        ),
+        format!(
+            "static const float SORT_INV_LOG_SPAN = {:?};",
+            boyko_rhi_vulkan::compute::PARTICLE_SORT_INV_LOG_SPAN
+        ),
+        format!(
+            "static const uint  SORT_BINS         = {}u;",
+            boyko_rhi_vulkan::compute::PARTICLE_SORT_BINS
+        ),
+        format!(
+            "static const uint  SORT_BIN_MAX      = {}u;",
+            boyko_rhi_vulkan::compute::PARTICLE_SORT_BINS - 1
+        ),
+        // The offsets half's base. It is `SORT_BINS` by construction — the two halves are
+        // back-to-back in one allocation — and a base that drifted would make the scatter reserve
+        // from the histogram half, i.e. from counts the scan already zeroed.
+        format!(
+            "static const uint  SORT_OFFSET_BASE  = {}u;",
+            boyko_rhi_vulkan::compute::PARTICLE_SORT_BINS
+        ),
+    ];
+    for stem in ["particle_sort_hist.comp", "particle_sort_scan.comp", "particle_sort_scatter.comp"]
+    {
+        let src = read_shader(&format!("{stem}.hlsl"));
+        for decl in &decls {
+            assert!(
+                src.contains(decl.as_str()),
+                "{stem}.hlsl must carry `{decl}` (the host home is boyko_rhi_vulkan::compute)"
+            );
+        }
+    }
+    // The buffer's word count is the two halves, and the host sizes the allocation from it. A
+    // shader that indexed past it would be an out-of-range store with `robustBufferAccess` OFF.
+    assert_eq!(
+        boyko_rhi_vulkan::compute::PARTICLE_SORT_BINS_WORDS,
+        2 * boyko_rhi_vulkan::compute::PARTICLE_SORT_BINS,
+        "p_sort_bins is exactly the histogram half plus the offsets half"
+    );
+}
+
+/// The one-bin-per-lane shape, asserted at the ARTIFACT — all three sort modules declare the width
+/// that makes their LDS arrays exactly one element per lane.
+#[test]
+fn the_sort_modules_declare_the_one_bin_per_lane_width() {
+    let Some(hist) = census_of("particle_sort_hist.comp") else {
+        eprintln!("SKIP the_sort_modules_declare_the_one_bin_per_lane_width: no spirv-dis");
+        return;
+    };
+    let scan = census_of("particle_sort_scan.comp").expect("spirv-dis resolved above");
+    let scatter = census_of("particle_sort_scatter.comp").expect("spirv-dis resolved above");
+    let bins = boyko_rhi_vulkan::compute::PARTICLE_SORT_BINS as usize;
+    for (stem, c) in
+        [("hist", hist), ("scan", scan), ("scatter", scatter)]
+    {
+        assert_eq!(
+            c.local_size_x, PARTICLE_LOCAL_SIZE,
+            "particle_sort_{stem} must declare the {PARTICLE_LOCAL_SIZE}-lane width; census: {c:?}"
+        );
+    }
+    assert_eq!(
+        bins, PARTICLE_LOCAL_SIZE,
+        "the bin count and the group width are ONE number (the generator asserts it too): the \
+         zero-fill, the per-bin flush, the whole scan and the per-bin reservation are each one \
+         element per lane, and a width that differed would turn every one of them into a strided \
+         loop"
+    );
+}
+
+/// Counts `OpAtomicIAdd` by SCOPE — the distinction that makes rung P2 item 3's budget claim mean
+/// something.
+///
+/// A `groupshared` `InterlockedAdd` lowers to `OpAtomicIAdd` with `Workgroup` scope (`%uint_2`) and
+/// a device-buffer one to `Device` scope (`%uint_1`). Counting them together would let a scatter
+/// that issued one GLOBAL atomic per element pass a bound written for one per bin, which is exactly
+/// the ~0.5 ms/frame-at-1M shape plan D5 deletes.
+///
+/// The operand order is `OpAtomicIAdd <result-type> <pointer> <scope> <semantics> <value>`, so the
+/// scope is three tokens after the opcode.
+fn atomic_scope_counts(dis: &str) -> (usize, usize) {
+    let mut device = 0;
+    let mut workgroup = 0;
+    for line in dis.lines() {
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        let Some(i) = toks.iter().position(|t| *t == "OpAtomicIAdd") else { continue };
+        match toks.get(i + 3) {
+            Some(&"%uint_1") => device += 1,
+            Some(&"%uint_2") => workgroup += 1,
+            other => panic!(
+                "unrecognised atomic scope operand {other:?} on `{line}` — the census cannot tell \
+                 a groupshared increment from a global one, which is the whole distinction rung \
+                 P2 item 3's budget rests on"
+            ),
+        }
+    }
+    (device, workgroup)
+}
+
+/// **The sort's atomic budget, per module, split by scope — D5's aggregation argument applied to a
+/// radix.**
+///
+/// The numbers are DERIVED from the three passes' structure, not observed and blessed:
+///
+/// * **histogram** — one WORKGROUP atomic (the per-element LDS increment) and one DEVICE atomic
+///   (the per-occupied-bin flush). A second device site would mean the flush stopped being
+///   per-bin; a device count of zero would mean the group's histogram never reached the global one.
+/// * **scan** — ZERO of either. One lane owns one bin for the whole dispatch, so there is nothing
+///   to contend for. A single atomic here would mean the scan had stopped being a pure reduction.
+/// * **scatter** — TWO workgroup atomics (phase 1's population count, phase 3's intra-group rank)
+///   and ONE device atomic (phase 2's per-occupied-bin reservation).
+///
+/// # ⚠️ Which HALF of the scatter's pair actually discriminates, stated because it is not the
+/// obvious one
+///
+/// The dangerous edit is a scatter that reserves per ELEMENT — `InterlockedAdd(offset[key], 1u,
+/// rank)` inside the live branch — which sorts correctly, passes the monotonicity readback and
+/// costs up to 256× the global traffic. That form carries **one device atomic too**, so the DEVICE
+/// count cannot see it. What sees it is the WORKGROUP count: the per-element form needs no LDS
+/// phases at all, so it reports `(1, 0)` where the aggregated one reports `(1, 2)`.
+///
+/// The pair is therefore the assertion, and the workgroup half is the load-bearing one. **Proven by
+/// mutation** (2026-08-21): rewriting the scatter to the per-element form reddens this test on the
+/// workgroup count and on nothing else in this file.
+///
+/// And the SIM's own census is deliberately not widened to accommodate any of this: these are
+/// separate modules with separate budgets, exactly as rung P1b's instrument was.
+#[test]
+fn the_sort_modules_carry_their_derived_atomic_budget() {
+    let Some(hist) = disassembly_of("particle_sort_hist.comp") else {
+        eprintln!("SKIP the_sort_modules_carry_their_derived_atomic_budget: no spirv-dis");
+        return;
+    };
+    let scan = disassembly_of("particle_sort_scan.comp").expect("spirv-dis resolved above");
+    let scatter = disassembly_of("particle_sort_scatter.comp").expect("spirv-dis resolved above");
+
+    assert_eq!(
+        atomic_scope_counts(&hist),
+        (1, 1),
+        "particle_sort_hist must carry exactly ONE device atomic (the per-occupied-bin flush) and \
+         ONE workgroup atomic (the per-element LDS increment)"
+    );
+    assert_eq!(
+        atomic_scope_counts(&scan),
+        (0, 0),
+        "particle_sort_scan must carry NO atomic of either scope — one lane owns one bin for the \
+         whole dispatch, so there is nothing to contend for"
+    );
+    assert_eq!(
+        atomic_scope_counts(&scatter),
+        (1, 2),
+        "particle_sort_scatter must carry exactly ONE device atomic (phase 2's per-occupied-bin \
+         reservation) and TWO workgroup atomics (phase 1's population, phase 3's rank). THE \
+         WORKGROUP HALF IS THE DISCRIMINATOR: a scatter that reserved per ELEMENT carries one \
+         device atomic too, so it would pass a device-only bound — it reports (1, 0) here, because \
+         it needs no LDS phases. That form sorts correctly, passes the monotonicity readback and \
+         costs up to 256x the global traffic, which is the ~0.5 ms/frame-at-1M shape D5's \
+         aggregation exists to delete."
+    );
+
+    // No `OpAtomicUMax` anywhere is already asserted across every artifact by
+    // `no_particle_module_carries_an_atomic_max`, which walks PARTICLE_ARTIFACTS and therefore
+    // covers these three the moment their rows exist.
+
+    // The SHIPPING sim's budget is UNMOVED beside them, read in the same run rather than trusted
+    // from another test: rung P2 item 3 added three modules, not three atomics to an existing one.
+    let sim = census_of("particle_sim.comp").expect("spirv-dis resolved above");
+    assert_eq!(
+        sim.op_atomic_iadd, SIM_WAVE_LEADER_ATOMIC_SITES,
+        "the sort is three separate modules, so `particle_sim`'s own wave-leader census must not \
+         have moved; census: {sim:?}"
+    );
+}
+
+/// The three sort modules carry no float divide — the same claim gate #14 makes of `particle_sim`,
+/// and here it is a statement about the QUANTIZER.
+///
+/// The key's `SORT_INV_LOG_SPAN` is a host-computed reciprocal printed as a literal precisely so
+/// the device multiplies. A divide that appeared here would drag `OpFDiv`'s 2.5 ULP into a step
+/// function whose whole job is to put two nearby depths in the same bin deterministically — and it
+/// would do so on BOTH sides of a comparison the host oracle re-derives, so the monotonicity
+/// readback would start reporting boundary inversions on correct ranges.
+#[test]
+fn the_sort_modules_carry_no_float_divide() {
+    let Some(hist) = census_of("particle_sort_hist.comp") else {
+        eprintln!("SKIP the_sort_modules_carry_no_float_divide: no spirv-dis on this host");
+        return;
+    };
+    let scan = census_of("particle_sort_scan.comp").expect("spirv-dis resolved above");
+    let scatter = census_of("particle_sort_scatter.comp").expect("spirv-dis resolved above");
+    for (stem, c) in [("hist", hist), ("scan", scan), ("scatter", scatter)] {
+        assert_eq!(
+            c.op_fdiv, 0,
+            "particle_sort_{stem} must carry ZERO OpFDiv — the octave span's reciprocal is \
+             host-computed and printed as a literal; census: {c:?}"
+        );
+    }
+}
+
+/// The scan's RE-ZERO, pinned at the source — the line that keeps `particle_kickoff` byte-frozen.
+///
+/// Without it the histogram half accumulates across frames: bin populations grow without bound, the
+/// offsets stop describing this frame's class, and the scatter reserves ranks past
+/// `alpha.instanceCount`. The F25 clamp on `dst_rank` then folds every one of them onto the last
+/// slot — so the failure mode is "the far end of the class is a single particle drawn N times",
+/// which is a plausible image and produces NO inversion in the monotonicity readback (a run of
+/// identical records is monotone).
+///
+/// It is one line, it is invisible to every other pin in this file, and nothing downstream would
+/// re-emit it. That is exactly the shape rung P1's include contract and rung P1b's census block are
+/// pinned for.
+#[test]
+fn the_sort_scan_re_zeroes_the_histogram_half() {
+    let scan = read_shader("particle_sort_scan.comp.hlsl");
+    assert!(
+        scan.contains("uint own = p_sort_bins[lane];"),
+        "the scan must hold its own bin's population in a REGISTER — the exclusive result is \
+         `inclusive - own`, and reading it back from the array after the re-zero would give 0"
+    );
+    assert!(
+        scan.contains("p_sort_bins[SORT_OFFSET_BASE + lane] = gs_scan[lane] - own;"),
+        "the scan must publish the EXCLUSIVE prefix into the offsets half"
+    );
+    assert!(
+        scan.contains("p_sort_bins[lane] = 0u;"),
+        "the scan must RE-ZERO the histogram half in the same dispatch that consumed it. Without \
+         this line the histogram accumulates across frames and the offsets stop describing this \
+         frame's class — and the resulting image is plausible while the monotonicity readback stays \
+         green, because a run of identical records is monotone."
+    );
+    // ...and the re-zero is AFTER the read, which is the only ordering that works. Compared by
+    // byte offset rather than by prose, because the two lines are three lines apart and a future
+    // edit that hoisted the zero would compile and would be silently wrong on every frame.
+    let read_at = scan.find("uint own = p_sort_bins[lane];").expect("checked above");
+    let zero_at = scan.find("p_sort_bins[lane] = 0u;").expect("checked above");
+    assert!(read_at < zero_at, "the scan must READ its bin before it zeroes it");
+}
+
+/// The scatter's write is MIRRORED and CLAMPED — the same two properties the sim's own alpha write
+/// carries, restated at the pass that now performs it.
+///
+/// The mirror is what keeps the draw's push pair unchanged (D10's "no shader variant" surviving
+/// this rung); the clamp is F25's, and the asymmetry is the sim's own: over `uint`, a rank past
+/// `capacity` makes `capacity - 1 - rank` UNDERFLOW to ~0xFFFFFFFF — an unbounded out-of-range
+/// store with `robustBufferAccess` OFF.
+#[test]
+fn the_sort_scatter_writes_the_mirrored_and_clamped_render_index() {
+    let scatter = read_shader("particle_sort_scatter.comp.hlsl");
+    assert!(
+        scatter.contains("uint dst_rank = min(gs_base[key] + rank, pc.capacity - 1u);"),
+        "the scatter's rank must be CLAMPED before the mirror (F25) — the additive arm overshoots \
+         boundedly, this one underflows to ~0xFFFFFFFF"
+    );
+    assert!(
+        scatter.contains("p_render_sorted[pc.capacity - 1u - dst_rank] = r;"),
+        "the scatter must write at the SAME `capacity - 1 - rank` mirror the sim wrote the class \
+         with. Any other layout would need a different `index_base`/`index_step` push in the draw, \
+         and D10's `no shader variant` would stop holding"
+    );
+    assert!(
+        scatter.contains("r   = p_render[pc.capacity - 1u - i];"),
+        "the scatter must READ through the same mirror, so rank `i` of the class is the element it \
+         keys and stores"
+    );
+    // ONE load per element. The record serves phase 1, phase 3 and the store; a second
+    // `p_render[` read would double the pass's read traffic for a value already in a register.
+    assert_eq!(
+        scatter.matches("p_render[").count(),
+        1,
+        "the scatter must load each record ONCE — its traffic claim (32 B read + 32 B written per \
+         element) is what the plan's budget row is stated against"
+    );
 }
 
 // ---- The Deferred depth-encode agreement (the P0 live-fire erratum's discharge) ---------------

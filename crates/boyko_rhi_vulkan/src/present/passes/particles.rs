@@ -580,6 +580,183 @@ impl Renderer<'_> {
             unsafe { ts.end(self.fns, cmd, ZONE_PARTICLE_SIM) };
         }
 
+        // --- Rung P2 item 3 (plan D10): `hist → scan → scatter`, the ALPHA class's back-to-front
+        //     ordering. Three dispatches, all `None` under `ParticleSortMode::None`, in which case
+        //     this block records nothing at all — no barrier call, no bind, no dispatch.
+        //
+        //     ⚠️ NO GPU ZONE. Gate #17's row set is kickoff/emit/sim/draw and this rung does not
+        //     widen it: a `ZONE_PARTICLE_SORT` would have to grow `PARTICLE_ZONE_COUNT` and every
+        //     artifact reader keyed on it, which is an instrument rung of its own (rung P1b's
+        //     shape). The consequence is stated rather than hidden: the sort's wall-clock cost is
+        //     UNMEASURED on this rung, and its byte cost is derived arithmetically in the plan.
+        //
+        //     CENSUS ARITHMETIC (this fn's convention):
+        //       sort_hist    5 = barriers + bind pipeline + bind set + push + dispatchIndirect
+        //       sort_scan    4 = barriers + bind pipeline + bind set + dispatch   (NO push)
+        //       sort_scatter 5 = barriers + bind pipeline + bind set + push + dispatchIndirect
+        //       ------------------------------------------------------------------------
+        //       this block  14 on a SORTED frame, 0 otherwise; `record_particle_compute` is then
+        //       32 rather than 18.
+        debug_assert_eq!(
+            plan.sort_hist.is_some(),
+            act.sort_hist_pipeline.is_some(),
+            "invariant: declare/record parity on the sort axis — the declarator gated the three \
+             sort passes on the activation's own pipelines, so a disagreement here would be a \
+             barrier ordering nothing or a dispatch the graph never named"
+        );
+        debug_assert_eq!(
+            plan.sort_hist.is_some(),
+            plan.sort_scatter.is_some(),
+            "invariant: the three sort passes are ONE decision — a partial set is not a state the \
+             radix can be in (a histogram nobody scatters leaves p_render_sorted stale, and the \
+             alpha draw would read it)"
+        );
+        if let Some(p) = plan.sort_hist {
+            let pipeline = act
+                .sort_hist_pipeline
+                .expect("invariant: the declared sort pass and its pipeline share one predicate");
+            ts.cmd();
+            barriers(p);
+            // `{ float3 cam_eye; uint capacity }` — the block the histogram and the scatter SHARE,
+            // assembled once and pushed to both. Two eyes would size a bin from one population and
+            // fill it from another.
+            let mut push = [0u8; crate::compute::PARTICLE_SORT_PUSH_BYTES as usize];
+            push[..4].copy_from_slice(&act.cam_eye[0].to_ne_bytes());
+            push[4..8].copy_from_slice(&act.cam_eye[1].to_ne_bytes());
+            push[8..12].copy_from_slice(&act.cam_eye[2].to_ne_bytes());
+            push[12..16].copy_from_slice(&act.capacity.to_ne_bytes());
+            // SAFETY: recording is open and outside a render scope (this fn's contract).
+            // `pipeline`'s layout declares `act.sets`' layout at set 0 and a 16-byte COMPUTE push
+            // range at offset 0 — exactly the 16 bytes written here (a multiple of 4). The
+            // indirect fetch reads the SIM's `VkDispatchIndirectCommand` at offset 16 of the live
+            // 32-byte `p_dispatch_args` (4-aligned, in bounds), whose group count kickoff wrote
+            // this frame; the sim already fetched the same command behind the derived barrier, so
+            // this read is ordered by that same edge. `push` outlives the call.
+            unsafe {
+                ts.cmd();
+                (self.fns.cmd_bind_pipeline)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    pipeline.pipeline,
+                );
+                ts.cmd();
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    pipeline.layout,
+                    0,
+                    1,
+                    &act.sets.descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                ts.cmd();
+                (self.fns.cmd_push_constants)(
+                    cmd,
+                    pipeline.layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    push.len() as u32,
+                    push.as_ptr().cast(),
+                );
+                ts.cmd();
+                // The SIM's block: `alpha.instanceCount <= alive_count_next <= alive_count_cur`
+                // (the M2 identity), so `ceil(alive_count_cur / 256)` groups always cover the
+                // class and the surplus lanes retire on the shader's own `i < count` test. That is
+                // what keeps D10's "3 dispatches" true — the alternative was a fourth pass to
+                // compute a group count for a number the sim had only just produced.
+                (self.fns.cmd_dispatch_indirect)(
+                    cmd,
+                    act.dispatch_args.buffer,
+                    crate::compute::PARTICLE_DISPATCH_SIM_OFFSET,
+                );
+            }
+        }
+
+        if let Some(p) = plan.sort_scan {
+            let pipeline = act
+                .sort_scan_pipeline
+                .expect("invariant: the declared sort pass and its pipeline share one predicate");
+            ts.cmd();
+            barriers(p);
+            // SAFETY: recording is open and outside a render scope. `pipeline`'s layout declares
+            // `act.sets`' layout at set 0; its push range is the family's 16 bytes but the SHADER
+            // declares no push block, which is why no `cmd_push_constants` follows — a declared
+            // range nobody writes and nobody reads. ONE group of 256 lanes, dispatched DIRECTLY:
+            // the bin count is a compile-time constant, so there is nothing for an indirect
+            // command to carry.
+            unsafe {
+                ts.cmd();
+                (self.fns.cmd_bind_pipeline)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    pipeline.pipeline,
+                );
+                ts.cmd();
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    pipeline.layout,
+                    0,
+                    1,
+                    &act.sets.descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                ts.cmd();
+                (self.fns.cmd_dispatch)(cmd, 1, 1, 1);
+            }
+        }
+
+        if let Some(p) = plan.sort_scatter {
+            let pipeline = act
+                .sort_scatter_pipeline
+                .expect("invariant: the declared sort pass and its pipeline share one predicate");
+            ts.cmd();
+            barriers(p);
+            let mut push = [0u8; crate::compute::PARTICLE_SORT_PUSH_BYTES as usize];
+            push[..4].copy_from_slice(&act.cam_eye[0].to_ne_bytes());
+            push[4..8].copy_from_slice(&act.cam_eye[1].to_ne_bytes());
+            push[8..12].copy_from_slice(&act.cam_eye[2].to_ne_bytes());
+            push[12..16].copy_from_slice(&act.capacity.to_ne_bytes());
+            // SAFETY: as the histogram dispatch above — same set, same 16-byte COMPUTE range, same
+            // in-bounds indirect fetch of the sim's `VkDispatchIndirectCommand`.
+            unsafe {
+                ts.cmd();
+                (self.fns.cmd_bind_pipeline)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    pipeline.pipeline,
+                );
+                ts.cmd();
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    pipeline.layout,
+                    0,
+                    1,
+                    &act.sets.descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                ts.cmd();
+                (self.fns.cmd_push_constants)(
+                    cmd,
+                    pipeline.layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    push.len() as u32,
+                    push.as_ptr().cast(),
+                );
+                ts.cmd();
+                (self.fns.cmd_dispatch_indirect)(
+                    cmd,
+                    act.dispatch_args.buffer,
+                    crate::compute::PARTICLE_DISPATCH_SIM_OFFSET,
+                );
+            }
+        }
+
         ts.finish();
     }
 
@@ -659,6 +836,9 @@ impl Renderer<'_> {
         //             + drawIndexedIndirect(additive) + endRendering
         // (was 10 before rung P2's second blend class; the sets, viewport, scissor and index buffer
         // are bound ONCE and serve both draws.)
+        // **14 under a SORTING arming** — rung P2 item 3 adds ONE `vkCmdBindDescriptorSets`,
+        // because the two classes then read two different buffers at set 0 binding 0. Nothing else
+        // in this fn moves: same pipelines, same push bytes, same two indirect commands.
         // plus this fn's ONE bracket: 1 pair / 2 timestamps.
         let mut ts = ParticleZones::new(zones);
         // Particles P0 gate #17. Opened before the barrier callback AND before
@@ -730,7 +910,12 @@ impl Renderer<'_> {
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
                 act.draw_pipeline_alpha.pipeline,
             );
-            let sets = [act.draw_set0.descriptor_set, act.draw_set1];
+            // Rung P2 item 3: the ALPHA draw reads `p_render_sorted` when the sort is armed and
+            // `p_render` otherwise. That is the ONLY difference a sorted arming makes to this
+            // recorder — the push pair below is unchanged, because the scatter wrote the class with
+            // the same `capacity - 1 - rank` mirror the sim used.
+            let alpha_set0 = act.draw_set0_alpha.unwrap_or(act.draw_set0);
+            let sets = [alpha_set0.descriptor_set, act.draw_set1];
             ts.cmd();
             (self.fns.cmd_bind_descriptor_sets)(
                 cmd,
@@ -765,8 +950,24 @@ impl Renderer<'_> {
                 1,
                 DRAW_INDEXED_INDIRECT_STRIDE,
             );
-            // Only the last two push words and the blend state differ; the index buffer, both
-            // descriptor sets, the viewport and the scissor are already bound and stay bound.
+            // Only the last two push words and the blend state differ; the index buffer, set 1,
+            // the viewport and the scissor are already bound and stay bound. Set 0 is re-bound
+            // ONLY under a sorting arming, where the two classes read two different buffers — an
+            // unsorted frame records exactly the commands it recorded at rung P2 item 2.
+            if act.draw_set0_alpha.is_some() {
+                let sets = [act.draw_set0.descriptor_set, act.draw_set1];
+                ts.cmd();
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    act.draw_pipeline.layout,
+                    0,
+                    sets.len() as u32,
+                    sets.as_ptr(),
+                    0,
+                    ptr::null(),
+                );
+            }
             ts.cmd();
             (self.fns.cmd_bind_pipeline)(
                 cmd,

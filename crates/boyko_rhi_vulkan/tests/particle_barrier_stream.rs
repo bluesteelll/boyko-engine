@@ -46,7 +46,8 @@ use boyko_rhi_vulkan::compute::{
     PARTICLE_DRAW_ADDITIVE_OFFSET, PARTICLE_DRAW_ALPHA_OFFSET, PARTICLE_DRAW_PUSH_BYTES,
     PARTICLE_EMIT_PUSH_BYTES,
     PARTICLE_KICKOFF_PUSH_BYTES, PARTICLE_LOCAL_SIZE, PARTICLE_QUAD_IB_BYTES,
-    PARTICLE_QUAD_INDEX_COUNT, PARTICLE_SIM_PUSH_BYTES, VB_BATCH_CULL_PUSH_BYTES,
+    PARTICLE_QUAD_INDEX_COUNT, PARTICLE_SIM_PUSH_BYTES, PARTICLE_SORT_BINS,
+    PARTICLE_SORT_BINS_WORDS, PARTICLE_SORT_PUSH_BYTES, VB_BATCH_CULL_PUSH_BYTES,
 };
 use boyko_rhi_vulkan::ffi::{
     VK_ACCESS_COLOR_ATTACHMENT_READ_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
@@ -115,6 +116,11 @@ struct Row {
     /// half only. Independent of `spawn` by design: `p_effects` has a reader on every armed
     /// frame, so an upload with no spawn is well-formed.
     effects_dirty: bool,
+    /// `ParticleConfig::sorts()` — rung P2 item 3's arming. Declares the three sort passes and
+    /// gives the alpha half of `particle_draw` a second source. The two sort `ResId`s are declared
+    /// on EVERY armed row regardless, so the tail's length is one number (F9 then routes zero
+    /// barriers for a ResId no pass names).
+    sort: bool,
 }
 
 const DEFERRED_OFF: Row = Row {
@@ -123,6 +129,7 @@ const DEFERRED_OFF: Row = Row {
     particles: false,
     spawn: false,
     effects_dirty: false,
+    sort: false,
 };
 const FORWARD_OFF: Row = Row { id: "forward/disarmed", path: Path::Forward, ..DEFERRED_OFF };
 const FORWARD_PLUS_OFF: Row =
@@ -135,6 +142,7 @@ const DEFERRED_ON: Row = Row {
     particles: true,
     spawn: true,
     effects_dirty: true,
+    sort: false,
 };
 const FORWARD_ON: Row = Row { id: "forward/armed", path: Path::Forward, ..DEFERRED_ON };
 const FORWARD_PLUS_ON: Row =
@@ -150,7 +158,16 @@ const DEFERRED_ON_IDLE: Row = Row {
     particles: true,
     spawn: false,
     effects_dirty: false,
+    sort: false,
 };
+
+/// Rung P2 item 3's twin of [`DEFERRED_ON`]: the SAME frame with the radix armed. Every gate that
+/// compares the two is asserting "arming the sort ADDS and moves nothing", which is the property
+/// the default-off claim rests on.
+const DEFERRED_ON_SORTED: Row =
+    Row { id: "deferred/armed-sorted", sort: true, ..DEFERRED_ON };
+const VB_ON_SORTED: Row =
+    Row { id: "vb/armed-sorted", path: Path::VisibilityBuffer, ..DEFERRED_ON_SORTED };
 
 /// The eight disarmed/armed rows plus the idle one, for the sweeps that run over everything.
 const ALL_ARMED: [Row; 4] = [DEFERRED_ON, FORWARD_ON, FORWARD_PLUS_ON, VB_ON];
@@ -173,6 +190,11 @@ struct ParticleRes {
     render: ResId,
     emit_req: ResId,
     effects: ResId,
+    /// Seed row 11 — rung P2 item 3's sorted render records. Declared on every ARMED row, named by
+    /// a pass only on a sorted one.
+    render_sorted: ResId,
+    /// Seed row 12 — rung P2 item 3's radix scratch. Same declaration rule.
+    sort_bins: ResId,
 }
 
 /// One declared + compiled replica frame, with the labels a failure message needs.
@@ -287,6 +309,17 @@ fn declare_particle_buffers(g: &mut FrameGraph) -> ParticleRes {
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 VK_ACCESS_SHADER_READ_BIT,
             ),
+        ),
+        render_sorted: g.add_buffer_seeded(
+            "p_render_sorted",
+            ResSync::seeded_readers(
+                VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+            ),
+        ),
+        sort_bins: g.add_buffer_seeded(
+            "p_sort_bins",
+            ResSync::seeded_writer(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT),
         ),
     }
 }
@@ -631,6 +664,47 @@ fn declare_particle_compute(
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_ACCESS_SHADER_READ_BIT,
     );
+
+    // Rung P2 item 3 (plan D10): `hist -> scan -> scatter`, between the sim that produces the alpha
+    // class and the draw that consumes it. NEITHER sort pass declares `p_dispatch_args`: both
+    // re-fetch the SIM's own indirect command, which the sim already read this frame at the same
+    // stage/access, so the read is free and declaring it again would only add a redundant row to
+    // this column.
+    if !row.sort {
+        return;
+    }
+    names.push("particle_sort_hist");
+    g.add_pass("particle_sort_hist");
+    let h = "particle_sort_hist";
+    acc(g, accesses, h, ids.draw_args, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+    acc(g, accesses, h, ids.render, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+    acc(g, accesses, h, ids.sort_bins, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, RW);
+
+    names.push("particle_sort_scan");
+    g.add_pass("particle_sort_scan");
+    acc(
+        g,
+        accesses,
+        "particle_sort_scan",
+        ids.sort_bins,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        RW,
+    );
+
+    names.push("particle_sort_scatter");
+    g.add_pass("particle_sort_scatter");
+    let c = "particle_sort_scatter";
+    acc(g, accesses, c, ids.draw_args, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+    acc(g, accesses, c, ids.render, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+    acc(
+        g,
+        accesses,
+        c,
+        ids.render_sorted,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_WRITE_BIT,
+    );
+    acc(g, accesses, c, ids.sort_bins, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, RW);
 }
 
 /// The replica of `declare_particle_draw`.
@@ -641,6 +715,7 @@ fn declare_particle_draw(
     ids: ParticleRes,
     lit: ResId,
     depth: ResId,
+    sort: bool,
 ) {
     names.push("particle_draw");
     g.add_pass("particle_draw");
@@ -651,6 +726,22 @@ fn declare_particle_draw(
         VK_ACCESS_SHADER_READ_BIT,
     ));
     g.buffer_access(ids.render, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+    // Rung P2 item 3: the ALPHA half reads `p_render_sorted` when the sort is armed, so this ONE
+    // pass names both buffers. This access is what derives the scatter's C/W -> VS/R RAW, and it is
+    // also the frame TERMINAL that makes row 11's reader seed correct.
+    if sort {
+        accesses.push((
+            "particle_draw",
+            g.res_name(ids.render_sorted),
+            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+        ));
+        g.buffer_access(
+            ids.render_sorted,
+            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+        );
+    }
     accesses.push((
         "particle_draw",
         g.res_name(ids.draw_args),
@@ -813,7 +904,7 @@ fn declare_frame(row: Row) -> (Frame, Vec<(&'static str, &'static str, u32, u32)
 
     // The particle draw is declared LATE — after every `lit` producer, before `present_sample`.
     if let Some(ids) = particle {
-        declare_particle_draw(&mut g, &mut names, &mut accesses, ids, lit, depth);
+        declare_particle_draw(&mut g, &mut names, &mut accesses, ids, lit, depth, row.sort);
     }
 
     names.push("present_sample");
@@ -1396,4 +1487,191 @@ fn indirect_offsets_and_the_quad_are_pinned() {
     assert_eq!(PARTICLE_QUAD_INDEX_COUNT, 6, "two triangles");
     assert_eq!(PARTICLE_QUAD_IB_BYTES, 12, "six u16 indices");
     assert_eq!(PARTICLE_LOCAL_SIZE, 256, "emit + sim group edge (the research corpus's number)");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Rung P2 item 3 — the radix sort's derived stream (plan D10)
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// **Arming the sort ADDS accesses and MOVES none that existed.**
+///
+/// The claim is derived from the two DECLARED lists rather than from two hand-written tables, so
+/// there is no second copy of the access column to drift: strip every row belonging to a
+/// `particle_sort_*` pass and every row naming `p_render_sorted`, and what remains must be the
+/// unsorted frame's list, element for element and in order.
+///
+/// That is the executable form of "`SortMode::None` is byte-identical to rung P2 item 2" at the
+/// DECLARATION level — the level the image goldens cannot see, because a barrier that moved would
+/// still produce the same pixels on a scene with no hazard to expose.
+#[test]
+fn arming_the_sort_adds_accesses_and_moves_none_that_existed() {
+    for (unsorted_row, sorted_row) in [(DEFERRED_ON, DEFERRED_ON_SORTED), (VB_ON, VB_ON_SORTED)] {
+        let (_, unsorted) = declare_frame(unsorted_row);
+        let (_, sorted) = declare_frame(sorted_row);
+        let is_sort_row = |r: &(&'static str, &'static str, u32, u32)| {
+            r.0.starts_with("particle_sort") || r.1 == "p_render_sorted"
+        };
+        let kept: Vec<_> = sorted.iter().filter(|r| !is_sort_row(r)).copied().collect();
+        assert_eq!(
+            kept, unsorted,
+            "{}: arming the sort MOVED an access that already existed. The three sort passes are \
+             appended between the sim and the draw and the draw gains ONE read; nothing else may \
+             change, or `SortMode::None` stops being byte-identical to rung P2 item 2.",
+            sorted_row.id
+        );
+
+        // ...and what it added is exactly the nine rows D10's partition names, in order. Spelled
+        // out rather than counted, because a count would pass on nine WRONG rows.
+        let added: Vec<_> = sorted.iter().filter(|r| is_sort_row(r)).copied().collect();
+        const C: u32 = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        const R: u32 = VK_ACCESS_SHADER_READ_BIT;
+        const W: u32 = VK_ACCESS_SHADER_WRITE_BIT;
+        const VS: u32 = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
+        let want: [(&str, &str, u32, u32); 9] = [
+            ("particle_sort_hist", "p_draw_args", C, R),
+            ("particle_sort_hist", "p_render", C, R),
+            ("particle_sort_hist", "p_sort_bins", C, RW),
+            ("particle_sort_scan", "p_sort_bins", C, RW),
+            ("particle_sort_scatter", "p_draw_args", C, R),
+            ("particle_sort_scatter", "p_render", C, R),
+            ("particle_sort_scatter", "p_render_sorted", C, W),
+            ("particle_sort_scatter", "p_sort_bins", C, RW),
+            ("particle_draw", "p_render_sorted", VS, R),
+        ];
+        assert_eq!(
+            added.as_slice(),
+            want.as_slice(),
+            "{}: the sort's access column",
+            sorted_row.id
+        );
+    }
+}
+
+/// The two sort `ResId`s exist on EVERY armed frame and route ZERO barriers when no sort pass
+/// names them — F9, which is what lets the tail's length stay one number.
+///
+/// The alternative was a conditional tail LENGTH, i.e. a second predicate inside three sinks'
+/// positional index arithmetic — the shape `graph_bridge`'s own interp-trio comment warns about,
+/// and the one that resolves a barrier to a LIVE WRONG buffer when it goes wrong.
+#[test]
+fn the_sort_res_ids_are_declared_unarmed_and_route_nothing() {
+    let (frame, _) = declare_frame(DEFERRED_ON);
+    let ids = frame.particle.expect("the armed row declares the particle tail");
+    assert_eq!(
+        frame.g.res_name(ids.render_sorted),
+        "p_render_sorted",
+        "the sorted-render ResId must be declared on an armed-but-unsorted frame"
+    );
+    assert_eq!(frame.g.res_name(ids.sort_bins), "p_sort_bins");
+    assert!(
+        frame.buf_on(ids.render_sorted).is_empty(),
+        "no pass names p_render_sorted on an unsorted frame, so F9 must route ZERO barriers for it"
+    );
+    assert!(
+        frame.buf_on(ids.sort_bins).is_empty(),
+        "no pass names p_sort_bins on an unsorted frame, so F9 must route ZERO barriers for it"
+    );
+}
+
+/// **The sort's own seed rows, at the pass each names** — gate #3's discipline applied to rows 11
+/// and 12.
+///
+/// * `p_render_sorted` — terminal is the alpha draw's VERTEX read, so the seed is a READER and the
+///   scatter's write derives a **WAR** sourced at `(VERTEX_SHADER, 0)`. A writer seed here would
+///   leave the sibling frame's draw unordered against this frame's scatter — a cross-frame WAR on
+///   a single-buffered target, which is the torn-shimmer fingerprint this tree has a reference note
+///   about and which no static scene would show.
+/// * `p_sort_bins` — terminal is a COMPUTE write (the scan's re-zero), so the seed is a WRITER and
+///   the histogram's accumulate derives a real **RAW**. That barrier is what makes the re-zero
+///   VISIBLE to the next frame's histogram, so it is load-bearing rather than hygiene.
+#[test]
+fn the_sort_seed_rows_derive_at_the_pass_they_name() {
+    let (frame, _) = declare_frame(DEFERRED_ON_SORTED);
+    let ids = frame.particle.expect("the armed row declares the particle tail");
+
+    let (pass, b) = frame
+        .first_buf(ids.render_sorted)
+        .expect("p_render_sorted must derive a barrier on a sorted frame");
+    assert_eq!(pass, "particle_sort_scatter", "row 11's first access is the scatter's WRITE");
+    assert_eq!(
+        (b.src_stage, b.src_access),
+        (VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0),
+        "row 11 is a READER seed: the sibling frame's alpha draw is the terminal, so this is a WAR"
+    );
+    assert_eq!(
+        (b.dst_stage, b.dst_access),
+        (VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT)
+    );
+
+    let (pass, b) = frame
+        .first_buf(ids.sort_bins)
+        .expect("p_sort_bins must derive a barrier on a sorted frame");
+    assert_eq!(pass, "particle_sort_hist", "row 12's first access is the histogram's accumulate");
+    assert_eq!(
+        (b.src_stage, b.src_access),
+        (VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT),
+        "row 12 is a WRITER seed: the sibling frame's scan re-zeroed the histogram half, and THIS \
+         is the barrier that makes that zero visible"
+    );
+}
+
+/// The intra-frame chain the three dispatches need, each DERIVED rather than hand-written.
+///
+/// `hist → scan` and `scan → scatter` are both RAW on `p_sort_bins`: a workgroup barrier cannot
+/// order two dispatches' writes, which is the entire reason D10 spends three dispatches on a
+/// 256-bin sort instead of one. If either edge vanished the scatter would reserve from counts the
+/// scan had not yet turned into offsets — and the result would still be a permutation, still be
+/// dense, and still pass a monotonicity check on whichever bins happened to come out ordered.
+#[test]
+fn the_three_sort_dispatches_are_chained_on_the_bin_buffer() {
+    let (frame, _) = declare_frame(DEFERRED_ON_SORTED);
+    let ids = frame.particle.expect("the armed row declares the particle tail");
+    for pass in ["particle_sort_scan", "particle_sort_scatter"] {
+        let bars = frame.buf_at(pass);
+        let bin_bar = bars.iter().find(|b| b.res == ids.sort_bins).unwrap_or_else(|| {
+            panic!(
+                "{pass} must derive a barrier on p_sort_bins — without it the pass reads what its \
+                 predecessor has not published"
+            )
+        });
+        assert_eq!(
+            (bin_bar.src_stage, bin_bar.src_access),
+            (VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT),
+            "{pass}'s p_sort_bins edge is a RAW against the previous dispatch's write"
+        );
+    }
+    // The scatter's destination reaches the draw with a real RAW — the edge that makes the alpha
+    // draw read records rather than the boot zeroes.
+    let draw = frame.buf_at("particle_draw");
+    let sorted_bar = draw
+        .iter()
+        .find(|b| b.res == ids.render_sorted)
+        .expect("particle_draw must derive a RAW on p_render_sorted against the scatter's write");
+    assert_eq!(
+        (sorted_bar.src_stage, sorted_bar.src_access),
+        (VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT)
+    );
+    assert_eq!(
+        (sorted_bar.dst_stage, sorted_bar.dst_access),
+        (VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT)
+    );
+}
+
+/// Rung P2 item 3's push range does not widen the shared COMPUTE one either — the same claim
+/// `particle_push_bytes_do_not_widen_the_shared_compute_range` makes of the other three, restated
+/// for the range the sort adds.
+#[test]
+fn the_sort_push_bytes_do_not_widen_the_shared_compute_range() {
+    assert_eq!(PARTICLE_SORT_PUSH_BYTES, 16, "float3 cam_eye + uint capacity");
+    const {
+        assert!(
+            PARTICLE_SORT_PUSH_BYTES < COMPOSITE_PUSH_CONSTANT_BYTES,
+            "the sort's push range must stay strictly under the shared COMPUTE range, which sits \
+             at 112 of a 128-byte floor with 16 bytes of headroom — the particle pipelines have \
+             their own layouts (D12) precisely so none of them can move it"
+        );
+    }
+    // The bin buffer is the two halves and nothing else; the host sizes the allocation from this.
+    assert_eq!(PARTICLE_SORT_BINS_WORDS, 2 * PARTICLE_SORT_BINS);
+    assert_eq!(PARTICLE_SORT_BINS, PARTICLE_LOCAL_SIZE, "one bin per lane, in all three modules");
 }

@@ -32,17 +32,23 @@ use boyko_rhi::enums::BlendState;
 use boyko_rhi::{BarrierDesc, BufferBarrier, BufferCopy};
 use boyko_rhi_vulkan::compute::{
     PARTICLE_DRAW_PUSH_BYTES, PARTICLE_EMIT_PUSH_BYTES, PARTICLE_KICKOFF_PUSH_BYTES,
-    PARTICLE_QUAD_IB_BYTES, PARTICLE_SIM_PUSH_BYTES, particle_draw_dlin_fs_spirv,
-    particle_draw_dlin_vs_spirv, particle_draw_fs_spirv, particle_draw_vs_spirv,
-    particle_emit_spirv, particle_kickoff_spirv, particle_sim_sdf_spirv, particle_sim_spirv,
-    particle_sim_stats_spirv,
+    PARTICLE_QUAD_IB_BYTES, PARTICLE_SIM_PUSH_BYTES, PARTICLE_SORT_BINS_WORDS,
+    PARTICLE_SORT_PUSH_BYTES, particle_draw_dlin_fs_spirv, particle_draw_dlin_vs_spirv,
+    particle_draw_fs_spirv, particle_draw_vs_spirv, particle_emit_spirv, particle_kickoff_spirv,
+    particle_sim_sdf_spirv, particle_sim_spirv, particle_sim_stats_spirv, particle_sort_hist_spirv,
+    particle_sort_scan_spirv, particle_sort_scatter_spirv,
 };
 use boyko_rhi_vulkan::ffi::{VK_COMPARE_OP_GREATER, VK_COMPARE_OP_LESS, VkDescriptorSet};
 use boyko_rhi_vulkan::swapchain::ParticleActivation;
 use boyko_render::{
     EffectParamsGpu, EmitRequestGpu, MAX_EFFECTS, MAX_EMITTERS, PARTICLE_QUAD_INDEX_COUNT,
     ParticleCollision, ParticleCounters, ParticleDispatchArgs, ParticleDrawArgs, ParticleRender,
-    ParticleSim,
+    ParticleSim, ParticleSortMode,
+};
+
+use crate::particle_readback::{
+    PARTICLE_SORT_READBACK_MAX_RECORDS, ParticleSortRangeScan, ParticleSortReadback,
+    scan_alpha_range,
 };
 
 use super::*;
@@ -67,17 +73,27 @@ pub(crate) struct ParticleLayoutEntry {
     pub(crate) kind: DescriptorKind,
 }
 
-/// The COMPUTE Set-0 vocabulary, bindings 0..10 — the union of what
-/// `particle_{kickoff,emit,sim}.comp.hlsl` declare. Each module names only the subset it uses and
-/// DXC strips the rest; the host layout is the union, and a set that binds more than a module
-/// declares is legal (an unreferenced descriptor is simply never read).
+/// The COMPUTE Set-0 vocabulary, bindings 0..12 — the union of what
+/// `particle_{kickoff,emit,sim,sort_hist,sort_scan,sort_scatter}.comp.hlsl` declare. Each module
+/// names only the subset it uses and DXC strips the rest; the host layout is the union, and a set
+/// that binds more than a module declares is legal (an unreferenced descriptor is simply never
+/// read).
 ///
-/// Binding 10 is rung P1's SDF edit list, and it is the one row that is a union member without
+/// Binding 10 is rung P1's SDF edit list, and it is the first row that is a union member without
 /// being in EVERY armed frame's flow: the base `particle_sim` module does not declare it (the
 /// `-D SDF_COLLIDE` block is invisible to DXC), so on a non-colliding run it is bound-but-unread —
 /// the same shape the marcher's `tiles_buffer`/`PointerGrid` bindings already have. One layout
 /// serves both sim variants, which is what keeps the pipeline pick from reaching the descriptor
 /// plumbing.
+///
+/// Bindings 11 and 12 are rung P2 item 3's, and they are the SAME shape: on a
+/// [`ParticleSortMode::None`](boyko_render::ParticleSortMode::None) run the two sort buffers are
+/// never allocated, so those two slots are filled with a PLACEHOLDER (`p_render` and `p_counters`,
+/// both already live) and no module that could read them is built. Binding a live buffer rather
+/// than leaving the descriptor unwritten is deliberate: an unwritten descriptor in a bound set is
+/// undefined behaviour on this device even when no shader reads it, whereas a bound-but-unread one
+/// is explicitly legal. One layout therefore serves both armings, and — like the collision pick —
+/// the sort pick never reaches the descriptor plumbing.
 ///
 /// ⚠️ The DRAW's two sets are deliberately NOT in this table. Set 0 of the draw is a DIFFERENT
 /// vocabulary over the same set number (`p_render` @0 + the camera cbuffer @1, both `VERTEX`),
@@ -85,7 +101,7 @@ pub(crate) struct ParticleLayoutEntry {
 /// one flat table would make the well-formedness check below meaningless: it asserts that no two
 /// rows share a `(set, binding)`, which is exactly the property two independent set-0 layouts do
 /// not have.
-pub(crate) const PARTICLE_LAYOUT_ENTRIES: [ParticleLayoutEntry; 11] = [
+pub(crate) const PARTICLE_LAYOUT_ENTRIES: [ParticleLayoutEntry; 13] = [
     // `p_counters` — kickoff read+write, emit read, sim read+write (atomic).
     ParticleLayoutEntry { set: 0, binding: 0, kind: DescriptorKind::StorageBuffer },
     // `p_dispatch_args` — kickoff write; read by `DRAW_INDIRECT`, never by a shader.
@@ -111,6 +127,14 @@ pub(crate) const PARTICLE_LAYOUT_ENTRIES: [ParticleLayoutEntry; 11] = [
     // (`sdf_mesh_shadow.comp.hlsl:97`), and the engine's ONE edit list: boot-static, read-only for
     // the whole present loop, hence not a framegraph resource and not a seed-table row.
     ParticleLayoutEntry { set: 0, binding: 10, kind: DescriptorKind::StorageBuffer },
+    // `p_render_sorted` — the sort SCATTER's destination and the ALPHA draw's source (rung P2 item
+    // 3 / plan D10). Written by `particle_sort_scatter` only. On an unsorted run this slot holds
+    // the `p_render` placeholder; see this table's doc.
+    ParticleLayoutEntry { set: 0, binding: 11, kind: DescriptorKind::StorageBuffer },
+    // `p_sort_bins` — the radix's 512-word scratch: the histogram half `[0, 256)` and the running
+    // offsets half `[256, 512)`. Read+write (atomic) by the histogram and the scatter, read+write
+    // by the scan. On an unsorted run this slot holds the `p_counters` placeholder.
+    ParticleLayoutEntry { set: 0, binding: 12, kind: DescriptorKind::StorageBuffer },
 ];
 
 /// The DRAW's Set-0 vocabulary — a different table over the same set number (see
@@ -157,18 +181,22 @@ const fn layout_table_is_well_formed(entries: &[ParticleLayoutEntry], set: u32) 
 
 const _: () = assert!(
     layout_table_is_well_formed(&PARTICLE_LAYOUT_ENTRIES, 0),
-    "the particle COMPUTE Set-0 table must be bindings 0..10 in order, all in set 0"
+    "the particle COMPUTE Set-0 table must be bindings 0..12 in order, all in set 0"
 );
 const _: () = assert!(
     layout_table_is_well_formed(&PARTICLE_DRAW_LAYOUT_ENTRIES, 0),
     "the particle DRAW Set-0 table must be bindings 0..1 in order, all in set 0"
 );
-// The compute vocabulary is the ten seed-table rows — the same count the declarators append and
+// The compute vocabulary is the TWELVE seed-table rows — the same count the declarators append and
 // the same count each sink reserves — PLUS rung P1's edit list, which is deliberately not one of
 // them (boot-static, read-only, no `ResId`). Spelling the sum rather than the total is what keeps
 // the two claims separable: a new GRAPH resource must move the declarators too, a new read-only
 // resident one must not.
-const _: () = assert!(PARTICLE_LAYOUT_ENTRIES.len() == 10 + 1);
+//
+// Rung P2 item 3 moved the first term from 10 to 12 (`p_render_sorted`, `p_sort_bins`), and both of
+// its additions ARE graph resources: each is written by one sort pass and read by another (or by
+// the draw), so each carries a seed row and a derived barrier. The second term is unchanged.
+const _: () = assert!(PARTICLE_LAYOUT_ENTRIES.len() == 12 + 1);
 
 // ── Boot sizing ──────────────────────────────────────────────────────────────────────
 
@@ -213,6 +241,17 @@ pub(crate) struct ParticleGpuBundle {
     particle: BoundBuffer,
     /// Seed row 2 — the 32-byte render records.
     render: BoundBuffer,
+    /// Seed row 11 — rung P2 item 3's SORTED render records, `CAP × 32 B`. `None` on a
+    /// [`ParticleSortMode::None`](boyko_render::ParticleSortMode::None) run: structural absence, so
+    /// an unsorted arming allocates not one byte of it.
+    ///
+    /// Only the ALPHA sub-range `[CAP − alpha.instanceCount, CAP)` is ever written; the additive
+    /// half of `p_render` is never copied, because that class needs no sort (D10/R5) and the
+    /// additive draw keeps reading `p_render` directly.
+    render_sorted: Option<BoundBuffer>,
+    /// Seed row 12 — rung P2 item 3's 512-word radix scratch (the histogram half followed by the
+    /// running-offsets half). `None` on an unsorted run, for [`Self::render_sorted`]'s reason.
+    sort_bins: Option<BoundBuffer>,
     /// Seed row 9 — the device-side emit-request table.
     emit_req_device: BoundBuffer,
     /// Seed row 10 — the device-side effect-parameter table.
@@ -238,11 +277,25 @@ pub(crate) struct ParticleGpuBundle {
     emit: ComputePipeline,
     /// The hot-loop pipeline.
     sim: ComputePipeline,
+    /// Rung P2 item 3's three sort pipelines — histogram, scan, scatter — or `None` on an unsorted
+    /// run. They travel as ONE `Option` rather than three because they are one decision: a partial
+    /// set is not a state the sort can be in, and three independent `Option`s would admit five
+    /// combinations that mean nothing.
+    sort: Option<ParticleSortPipelines>,
     /// The draw's Set-0 layout ([`PARTICLE_DRAW_LAYOUT_ENTRIES`]).
     draw_layout0: VulkanBindGroupLayout,
     /// Per-in-flight-slot draw Set-0 groups — a RING because binding 1 is the camera UBO ring
     /// slot, which is per-frame. Binding 0 (`p_render`) is the single shared buffer in every slot.
     draw_set0: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    /// Rung P2 item 3: the ALPHA draw's own Set-0 ring, IDENTICAL to [`Self::draw_set0`] except
+    /// that binding 0 names `p_render_sorted`. `None` on an unsorted run, where the alpha draw
+    /// shares the base ring exactly as it did at rung P2 item 2.
+    ///
+    /// This is the ONLY thing the sort changes about the draw: the push pair stays
+    /// `(capacity - 1, -1)` (the scatter wrote the class with the same mirror the sim used), the
+    /// pipeline stays the same object, and the VS was not recompiled — so D10's "no shader variant"
+    /// survives this rung untouched.
+    draw_set0_alpha: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// The additive billboard pipeline. Its depth compare op was frozen HERE, at boot, from the
     /// resolved render path, so exactly one `VkPipeline` exists per process.
     draw_pipeline: VulkanGraphicsPipeline,
@@ -267,6 +320,25 @@ pub(crate) struct ParticleGpuBundle {
     /// [`Self::activation`] is the site that sees both this arm and the frame's substep count. See
     /// the refusal there.
     collision: ParticleCollision,
+    /// The boot-frozen sort arm (rung P2 item 3 / plan D10). Carried so the activation can state
+    /// R10's rule and so a reader of this struct can tell whether the three `Option`s above are
+    /// `Some` for a reason or by accident — [`Self::sort_mode`] asserts the agreement.
+    sort_mode: ParticleSortMode,
+}
+
+/// Rung P2 item 3: the radix sort's three boot-frozen compute pipelines, in dispatch order.
+///
+/// Grouped rather than three loose fields on [`ParticleGpuBundle`] because they are ONE decision
+/// (see that struct's `sort` field): the sort either exists with all three passes or does not
+/// exist, and D10's "3 dispatches" is a property of the group.
+pub(crate) struct ParticleSortPipelines {
+    /// Dispatch 1 — the 256-bin histogram over the alpha class's keys.
+    hist: ComputePipeline,
+    /// Dispatch 2 — the ONE-GROUP exclusive scan that turns bin populations into offsets and
+    /// re-zeroes the histogram half for the next frame.
+    scan: ComputePipeline,
+    /// Dispatch 3 — the permutation into `p_render_sorted`.
+    scatter: ComputePipeline,
 }
 
 impl ParticleGpuBundle {
@@ -323,10 +395,23 @@ impl ParticleGpuBundle {
         capacity: u32,
         deferred_path: bool,
         collision: ParticleCollision,
+        sort_mode: ParticleSortMode,
     ) -> Self {
         debug_assert!(capacity >= 1, "invariant: the particle pool needs at least one slot");
+        // **R10, live rather than filed** (plan D10 / research fact R10). A sort re-permutes
+        // `p_render` every frame, so slot `k` of frame N and slot `k` of frame N+1 are different
+        // particles and their difference is not a velocity. Rung P3's `-D MOTION` resolver will
+        // read `ParticleSortMode::motion_vectors_allowed`; until it exists this is the site that
+        // makes the rule observable, and it is stated as an implication over the arm rather than as
+        // a comment so the arm that breaks it fails here.
+        debug_assert!(
+            sort_mode.motion_vectors_allowed() == matches!(sort_mode, ParticleSortMode::None),
+            "invariant: R10 — a ParticleSortMode that permutes p_render may not carry motion \
+             vectors, and only ParticleSortMode::None does not permute it"
+        );
         let device = ctx;
         let cap = u64::from(capacity);
+        let sorts = !matches!(sort_mode, ParticleSortMode::None);
 
         // ── The nine device-local buffers + the index buffer. `create_buffer` already ORs both
         //    TRANSFER bits into every DeviceLocal allocation, so the explicit spellings below are
@@ -357,6 +442,15 @@ impl ParticleGpuBundle {
             device_buffer(cap * size_of::<ParticleSim>() as u64, storage, "particle records");
         let render =
             device_buffer(cap * size_of::<ParticleRender>() as u64, storage, "render records");
+        // Rung P2 item 3's two buffers, allocated ONLY under a sorting arming (structural absence,
+        // D13's rule on a fourth axis). `p_render_sorted` costs a second `CAP × 32 B` — 8.4 MB at
+        // the default capacity — which is the price of the sort and is charged to nobody who does
+        // not arm it.
+        let render_sorted = sorts.then(|| {
+            device_buffer(cap * size_of::<ParticleRender>() as u64, storage, "sorted render records")
+        });
+        let sort_bins =
+            sorts.then(|| device_buffer(u64::from(PARTICLE_SORT_BINS_WORDS) * 4, storage, "sort bins"));
         let emit_req_device = device_buffer(EMIT_REQ_TABLE_BYTES, storage, "emit-request table");
         let effects_device = device_buffer(EFFECT_TABLE_BYTES, storage, "effect table");
         let quad_ib = device_buffer(
@@ -398,6 +492,8 @@ impl ParticleGpuBundle {
                 alive: &alive,
                 particle: &particle,
                 render: &render,
+                render_sorted: render_sorted.as_ref(),
+                sort_bins: sort_bins.as_ref(),
                 emit_req_device: &emit_req_device,
                 effects_device: &effects_device,
                 quad_ib: &quad_ib,
@@ -440,6 +536,16 @@ impl ParticleGpuBundle {
                     // the descriptor is written once at boot, and a bound-but-unread storage buffer
                     // costs nothing per frame.
                     BindGroupEntry::StorageBuffer { buffer: edit_list },
+                    // Rung P2 item 3's two, with the PLACEHOLDER fallback this table's doc states.
+                    // The placeholders are `p_render` and `p_counters` — both live for the bundle's
+                    // whole lifetime, so the descriptor is never dangling — and no module that
+                    // could read either slot is built on an unsorted run.
+                    BindGroupEntry::StorageBuffer {
+                        buffer: render_sorted.as_ref().unwrap_or(&render),
+                    },
+                    BindGroupEntry::StorageBuffer {
+                        buffer: sort_bins.as_ref().unwrap_or(&counters),
+                    },
                 ],
             })
             .expect("invariant: particle parity bind group create")
@@ -474,6 +580,29 @@ impl ParticleGpuBundle {
         let emit = compute_pipeline(particle_emit_spirv(), PARTICLE_EMIT_PUSH_BYTES, "emit");
         let sim =
             compute_pipeline(particle_sim_spirv_for(collision), PARTICLE_SIM_PUSH_BYTES, "sim");
+        // Rung P2 item 3's three, built together or not at all (see [`ParticleSortPipelines`]).
+        //
+        // The SCAN's SHADER declares no push block at all — it is a pure reduction over a
+        // fixed-size array and needs neither the capacity nor the camera. Its pipeline LAYOUT is
+        // nonetheless given the family's range, because the RHI has no zero-range form
+        // (`create_compute_pipeline` rejects `push_constant_bytes == 0`) and widening that
+        // validation for one pipeline would be a device-wide change for a local convenience. A
+        // declared range no shader references is legal Vulkan and costs nothing: the recorder
+        // emits no `vkCmdPushConstants` for this pass, which is the property that matters and the
+        // one its command census states.
+        let sort = sorts.then(|| ParticleSortPipelines {
+            hist: compute_pipeline(
+                particle_sort_hist_spirv(),
+                PARTICLE_SORT_PUSH_BYTES,
+                "sort histogram",
+            ),
+            scan: compute_pipeline(particle_sort_scan_spirv(), PARTICLE_SORT_PUSH_BYTES, "sort scan"),
+            scatter: compute_pipeline(
+                particle_sort_scatter_spirv(),
+                PARTICLE_SORT_PUSH_BYTES,
+                "sort scatter",
+            ),
+        });
 
         // ── The draw's Set-0 layout + its per-slot groups + the graphics pipeline.
         let draw_entries: [BindGroupLayoutEntry; PARTICLE_DRAW_LAYOUT_ENTRIES.len()] =
@@ -497,6 +626,22 @@ impl ParticleGpuBundle {
             })
             .expect("invariant: particle draw Set-0 bind group create")
         });
+        // Rung P2 item 3: the alpha ring, differing in binding 0 alone. Built from the SAME layout
+        // object, so the two are interchangeable at `vkCmdBindDescriptorSets` and the pipeline is
+        // not re-bound between them.
+        let draw_set0_alpha: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> =
+            render_sorted.as_ref().map(|sorted| {
+                core::array::from_fn(|fi| {
+                    RhiDevice::create_bind_group(device, &BindGroupDesc {
+                        layout: &draw_layout0,
+                        entries: &[
+                            BindGroupEntry::StorageBuffer { buffer: sorted },
+                            BindGroupEntry::UniformBuffer { buffer: &camera_ring[fi] },
+                        ],
+                    })
+                    .expect("invariant: particle sorted-alpha draw Set-0 bind group create")
+                })
+            });
 
         // The path's depth contract, resolved from the ONE predicate: which encode the depth image
         // holds decides the compare op AND which of the two interface-identical shader pairs the
@@ -570,6 +715,8 @@ impl ParticleGpuBundle {
             alive,
             particle,
             render,
+            render_sorted,
+            sort_bins,
             emit_req_device,
             effects_device,
             quad_ib,
@@ -580,13 +727,16 @@ impl ParticleGpuBundle {
             kickoff,
             emit,
             sim,
+            sort,
             draw_layout0,
             draw_set0,
+            draw_set0_alpha,
             draw_pipeline,
             draw_pipeline_alpha,
             bindless_set: bindless.set().set(),
             capacity,
             collision,
+            sort_mode,
         }
     }
 
@@ -637,10 +787,14 @@ impl ParticleGpuBundle {
             kickoff_pipeline: &self.kickoff,
             emit_pipeline: &self.emit,
             sim_pipeline: &self.sim,
+            sort_hist_pipeline: self.sort.as_ref().map(|s| &s.hist),
+            sort_scan_pipeline: self.sort.as_ref().map(|s| &s.scan),
+            sort_scatter_pipeline: self.sort.as_ref().map(|s| &s.scatter),
             draw_pipeline: &self.draw_pipeline,
             draw_pipeline_alpha: &self.draw_pipeline_alpha,
             sets: &self.sets[parity as usize],
             draw_set0: &self.draw_set0[fi],
+            draw_set0_alpha: self.draw_set0_alpha.as_ref().map(|ring| &ring[fi]),
             draw_set1: self.bindless_set,
             counters: &self.counters,
             dispatch_args: &self.dispatch_args,
@@ -650,6 +804,8 @@ impl ParticleGpuBundle {
             alive_write: &self.alive[(parity ^ 1) as usize],
             particle_records: &self.particle,
             render_records: &self.render,
+            sorted_render_records: self.render_sorted.as_ref(),
+            sort_bins: self.sort_bins.as_ref(),
             emit_req_device: &self.emit_req_device,
             effects_device: &self.effects_device,
             emit_req_staging: &self.emit_req_staging[fi],
@@ -660,6 +816,7 @@ impl ParticleGpuBundle {
             requested_spawn: push.requested_spawn,
             emitter_count: push.emitter_count,
             capacity: self.capacity,
+            cam_eye: push.cam_eye,
             steps: push.steps,
             timestep: push.timestep,
             frame_index: push.frame_index,
@@ -784,6 +941,173 @@ impl ParticleGpuBundle {
         ParticleCountersRaw { counters, draw_args, capacity: self.capacity }
     }
 
+    /// **Rung P2 item 3's monotonicity readback** (plan P2's named gate for the sort), with its
+    /// non-vacuity CONTROL taken in the same submit.
+    ///
+    /// Copies back the alpha class's live range from BOTH `p_render_sorted` (the scatter's output,
+    /// which the alpha draw reads) and `p_render` (the sim's unsorted output), decodes each into a
+    /// [`ParticleSortRangeScan`], and hands the pair back. `None` on a run that did not arm the
+    /// sort — there is no sorted buffer then, and a scan of the source alone would be a measurement
+    /// with nothing to compare it to.
+    ///
+    /// # Why THIS readback exists where the transform's could not
+    ///
+    /// Rung P2 item 2's gate correction ruled that `p_render` cannot be read back to verify the
+    /// alpha index transform: at the default capacity it is 8.4 MB, "for a value whose per-slot
+    /// meaning the host cannot check without re-deriving the whole sim". Both halves of that
+    /// objection fail here, which is why the plan names a monotonicity readback for the SORT and
+    /// named none for the transform:
+    ///
+    /// * the range copied is `alpha.instanceCount` records, not `CAP` — 160 KB on the saturated lab
+    ///   leg, bounded at [`PARTICLE_SORT_READBACK_MAX_RECORDS`] for anything larger;
+    /// * and the per-slot meaning IS checkable without the sim: the property is a relation between
+    ///   ADJACENT records (their keys do not decrease), and the key is a function of the record's
+    ///   own `position` and the eye — nothing the sim decided enters it.
+    ///
+    /// # Rank order, and the mirror this fn undoes
+    ///
+    /// The class is stored DESCENDING (rank `r` at `capacity - 1 - r`), so the copied range is
+    /// reversed before scanning. That reversal is done HERE, once, on the host — the alternative
+    /// (scanning backwards) would make every rank in the report an index the reader has to invert.
+    ///
+    /// # Panics
+    ///
+    /// Panics (`expect("invariant: ...")`) on any RHI failure, exactly as [`Self::read_counters`]
+    /// does and for the same reason: this runs on a diagnostic path that ends the process, where a
+    /// silent `None` would read like a scene that produced nothing.
+    pub(crate) fn read_sort_scan(
+        &self,
+        ctx: &VulkanContext,
+        alpha_count: u32,
+        cam_eye: [f32; 3],
+        frames_presented: u32,
+    ) -> Option<ParticleSortReadback> {
+        let sorted_buffer = self.render_sorted.as_ref()?;
+        debug_assert!(
+            !matches!(self.sort_mode, ParticleSortMode::None),
+            "invariant: the sorted render buffer exists exactly when the sort arm does"
+        );
+        let record_bytes = size_of::<ParticleRender>() as u64;
+        let count = alpha_count.min(PARTICLE_SORT_READBACK_MAX_RECORDS).min(self.capacity);
+        if count == 0 {
+            // A class with nothing in it: report the empty pair rather than submitting a
+            // zero-length copy, so the caller's `is_conclusive` is what refuses it.
+            return Some(ParticleSortReadback {
+                frames_presented,
+                sorted: ParticleSortRangeScan::EMPTY,
+                source: ParticleSortRangeScan::EMPTY,
+            });
+        }
+        // The class occupies `[capacity - alpha_count, capacity)`. When `alpha_count` exceeds the
+        // readback bound the PREFIX of the RANK order is what matters — ranks 0..count, i.e. the
+        // TOP `count` slots — so the source offset is measured from the top of the buffer, never
+        // from the class's own base.
+        let src_offset = (u64::from(self.capacity) - u64::from(count)) * record_bytes;
+        let range_bytes = u64::from(count) * record_bytes;
+        let total = range_bytes * 2;
+
+        let device = ctx;
+        RhiDevice::wait_idle(device).expect("invariant: particle sort readback device idle");
+
+        let staging = RhiDevice::create_buffer(device, &BufferDesc {
+            size: total,
+            usage: BufferUsage::TRANSFER_DST,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("invariant: particle sort readback staging create");
+        let mapped = RhiDevice::buffer_mapped_ptr(device, &staging)
+            .expect("invariant: host-visible particle sort readback staging is mapped");
+
+        let mut encoder = RhiDevice::create_command_encoder(device)
+            .expect("invariant: particle sort readback command encoder create");
+        let fence = RhiDevice::create_fence(device, false)
+            .expect("invariant: particle sort readback fence create");
+        encoder.begin().expect("invariant: particle sort readback encoder begin");
+        // Availability for both sources: `p_render_sorted` was written by `particle_sort_scatter`
+        // and `p_render` by `particle_sim`, both through STORAGE descriptors. The device idle above
+        // ordered the execution; this makes the writes visible to a transfer read.
+        encoder.pipeline_barrier(&BarrierDesc {
+            src_stage: BarrierStage::COMPUTE_SHADER,
+            dst_stage: BarrierStage::TRANSFER,
+            buffers: &[
+                BufferBarrier {
+                    buffer: sorted_buffer,
+                    src_access: BarrierAccess::SHADER_WRITE,
+                    dst_access: BarrierAccess::TRANSFER_READ,
+                },
+                BufferBarrier {
+                    buffer: &self.render,
+                    src_access: BarrierAccess::SHADER_WRITE,
+                    dst_access: BarrierAccess::TRANSFER_READ,
+                },
+            ],
+        });
+        encoder.copy_buffer(sorted_buffer, &staging, &[BufferCopy {
+            src_offset,
+            dst_offset: 0,
+            size: range_bytes,
+        }]);
+        encoder.copy_buffer(&self.render, &staging, &[BufferCopy {
+            src_offset,
+            dst_offset: range_bytes,
+            size: range_bytes,
+        }]);
+        encoder.end().expect("invariant: particle sort readback encoder end");
+        device
+            .rhi_queue()
+            .submit(&encoder, &fence)
+            .expect("invariant: particle sort readback submit");
+        RhiDevice::wait_fence(device, &fence, u64::MAX)
+            .expect("invariant: particle sort readback fence wait");
+
+        let n = count as usize;
+        // SAFETY: `mapped` addresses `total == 2 * n * size_of::<ParticleRender>()` valid mapped
+        // host-coherent bytes of a buffer this fn just created, and the fence wait above completed
+        // the ONLY submission that writes them (the memory being HOST_COHERENT, the results are
+        // host-visible). `ParticleRender` is `#[repr(C)]` + `Pod`, so every byte pattern of its
+        // exact size is a valid value and no padding is uninitialized. The two slices cover the two
+        // disjoint halves `[0, n)` and `[n, 2n)` of one allocation whose base the RHI aligns to at
+        // least 16 bytes — more than `ParticleRender`'s alignment. Nothing else aliases the mapping
+        // and the slices do not outlive this fn.
+        let (sorted_records, source_records) = unsafe {
+            let base = mapped.as_ptr().cast::<ParticleRender>();
+            (
+                core::slice::from_raw_parts(base, n),
+                core::slice::from_raw_parts(base.add(n), n),
+            )
+        };
+
+        // The class is stored DESCENDING, so slot `capacity - 1 - r` holds rank `r`: the copied
+        // range read BACKWARDS is rank order. Reversed into a scratch column rather than scanned in
+        // reverse so every rank the report names is a rank and not its mirror.
+        let mut rank_order: Vec<ParticleRender> = Vec::with_capacity(n);
+        let mut scan_one = |records: &[ParticleRender]| {
+            rank_order.clear();
+            rank_order.extend(records.iter().rev().copied());
+            let mut scan = scan_alpha_range(&rank_order, cam_eye);
+            // The scan only ever saw the prefix it was handed; the CLASS's true length is this
+            // fn's, and `is_complete()` is the difference.
+            scan.alpha_count = alpha_count;
+            scan
+        };
+        let sorted = scan_one(sorted_records);
+        let source = scan_one(source_records);
+
+        // SAFETY: `encoder`, `fence` and `staging` were created on `device` above; the encoder's
+        // only submission completed (the fence wait returned), so no GPU work references any of
+        // them; each is moved by value ⇒ destroyed exactly once. The two slices above borrow the
+        // mapping this destroys — they are NOT read after this point (both scans ran above, and
+        // `rank_order` holds COPIES, not references into it), so nothing observes the freed
+        // memory. The borrow checker cannot see that dependency, which is why it is stated.
+        unsafe {
+            RhiDevice::destroy_command_encoder(device, encoder);
+            RhiDevice::destroy_fence(device, fence);
+            RhiDevice::destroy_buffer(device, staging);
+        }
+
+        Some(ParticleSortReadback { frames_presented, sorted, source })
+    }
+
     /// Tears every owned resource down in reverse dependency order. The bindless set-1 table and
     /// the camera UBO ring are owned elsewhere and are NOT destroyed here.
     ///
@@ -799,10 +1123,22 @@ impl ParticleGpuBundle {
         unsafe {
             RhiDevice::destroy_graphics_pipeline(ctx, self.draw_pipeline_alpha);
             RhiDevice::destroy_graphics_pipeline(ctx, self.draw_pipeline);
+            // Rung P2 item 3's alpha ring, before the layout both rings were built from.
+            if let Some(ring) = self.draw_set0_alpha {
+                for bg in ring {
+                    RhiDevice::destroy_bind_group(ctx, bg);
+                }
+            }
             for bg in self.draw_set0 {
                 RhiDevice::destroy_bind_group(ctx, bg);
             }
             RhiDevice::destroy_bind_group_layout(ctx, self.draw_layout0);
+            // Rung P2 item 3's three, in reverse creation order like every other pipeline here.
+            if let Some(s) = self.sort {
+                RhiDevice::destroy_compute_pipeline(ctx, s.scatter);
+                RhiDevice::destroy_compute_pipeline(ctx, s.scan);
+                RhiDevice::destroy_compute_pipeline(ctx, s.hist);
+            }
             RhiDevice::destroy_compute_pipeline(ctx, self.sim);
             RhiDevice::destroy_compute_pipeline(ctx, self.emit);
             RhiDevice::destroy_compute_pipeline(ctx, self.kickoff);
@@ -819,6 +1155,14 @@ impl ParticleGpuBundle {
             RhiDevice::destroy_buffer(ctx, self.quad_ib);
             RhiDevice::destroy_buffer(ctx, self.effects_device);
             RhiDevice::destroy_buffer(ctx, self.emit_req_device);
+            // Rung P2 item 3's two. `Option::map` over a by-value field ⇒ destroyed exactly once,
+            // and never at all when the sort was disarmed (nothing was created).
+            if let Some(b) = self.sort_bins {
+                RhiDevice::destroy_buffer(ctx, b);
+            }
+            if let Some(b) = self.render_sorted {
+                RhiDevice::destroy_buffer(ctx, b);
+            }
             RhiDevice::destroy_buffer(ctx, self.render);
             RhiDevice::destroy_buffer(ctx, self.particle);
             for b in self.alive {
@@ -866,6 +1210,9 @@ pub(crate) struct ParticleFramePush {
     pub(crate) frame_index: u32,
     /// The draw's assembled 72-byte `VERTEX` push.
     pub(crate) draw_push: [u8; PARTICLE_DRAW_PUSH_BYTES as usize],
+    /// Rung P2 item 3: `ViewUniform::camera_pos.xyz` — the eye the sort key measures from, and the
+    /// same one the camera UBO carries.
+    pub(crate) cam_eye: [f32; 3],
 }
 
 /// Everything the runner decides per frame and the scene assembler needs to build the frame's
@@ -1030,8 +1377,8 @@ pub(crate) fn particle_sim_spirv_for(collision: ParticleCollision) -> &'static [
     }
 }
 
-/// The nine device buffers the boot fill writes, plus the index buffer. Grouped so
-/// [`boot_fill`] takes one argument instead of ten.
+/// The device buffers the boot fill writes, plus the index buffer. Grouped so [`boot_fill`] takes
+/// one argument instead of a dozen.
 struct BootFillTargets<'a> {
     counters: &'a BoundBuffer,
     dispatch_args: &'a BoundBuffer,
@@ -1040,6 +1387,14 @@ struct BootFillTargets<'a> {
     alive: &'a [BoundBuffer; 2],
     particle: &'a BoundBuffer,
     render: &'a BoundBuffer,
+    /// Rung P2 item 3's sorted render records, or `None` on an unsorted arming.
+    render_sorted: Option<&'a BoundBuffer>,
+    /// Rung P2 item 3's radix scratch, or `None` on an unsorted arming. Zeroing it is
+    /// LOAD-BEARING, unlike most of the fill: `particle_sort_hist` ACCUMULATES into the histogram
+    /// half, and every frame after the first is handed a zeroed half by `particle_sort_scan`'s own
+    /// re-zero — so frame 0's zero has to come from here or the first histogram is built on
+    /// whatever the allocation carried.
+    sort_bins: Option<&'a BoundBuffer>,
     emit_req_device: &'a BoundBuffer,
     effects_device: &'a BoundBuffer,
     quad_ib: &'a BoundBuffer,
@@ -1067,6 +1422,10 @@ struct BootFillTargets<'a> {
 ///   write within the same frame's counters, so zeroing is not load-bearing for the shipped
 ///   passes; it is done anyway because "defined at boot" is a property worth having when the next
 ///   rung adds a reader, and it costs one boot submit.
+/// * `p_sort_bins` ← 0 (rung P2 item 3, when armed) — and THIS one IS load-bearing. The histogram
+///   pass ACCUMULATES; every frame after the first is handed a zeroed histogram half by the scan's
+///   own re-zero, so frame 0's has to come from here. `p_render_sorted` ← 0 for `p_render`'s
+///   reason.
 /// * `quad_ib` ← the six `u16` indices of two triangles, then a `TRANSFER_WRITE → INDEX_READ`
 ///   barrier. This buffer is NOT a framegraph resource (written once, read-only forever), so this
 ///   is the ONE hand-written barrier in the whole subsystem — and it must be here, at the write,
@@ -1168,18 +1527,22 @@ fn boot_fill(ctx: &VulkanContext, capacity: u32, t: BootFillTargets<'_>) {
 
     // The zeroed destinations, in declaration order. `p_counters` is deliberately absent: the
     // control copy below writes all 64 of its bytes, so zeroing it first would be a copy whose
-    // every byte is immediately overwritten.
-    let zero_targets: [(&BoundBuffer, u64); 8] = [
-        (t.dispatch_args, size_of::<ParticleDispatchArgs>() as u64),
-        (t.draw_args, size_of::<ParticleDrawArgs>() as u64),
-        (&t.alive[0], cap * 4),
-        (&t.alive[1], cap * 4),
-        (t.particle, cap * size_of::<ParticleSim>() as u64),
-        (t.render, cap * size_of::<ParticleRender>() as u64),
-        (t.emit_req_device, EMIT_REQ_TABLE_BYTES),
-        (t.effects_device, EFFECT_TABLE_BYTES),
+    // every byte is immediately overwritten. The last two rows are rung P2 item 3's and are
+    // present only under a sorting arming — `flatten` drops them structurally rather than emitting
+    // a zero-length copy.
+    let zero_targets: [Option<(&BoundBuffer, u64)>; 10] = [
+        Some((t.dispatch_args, size_of::<ParticleDispatchArgs>() as u64)),
+        Some((t.draw_args, size_of::<ParticleDrawArgs>() as u64)),
+        Some((&t.alive[0], cap * 4)),
+        Some((&t.alive[1], cap * 4)),
+        Some((t.particle, cap * size_of::<ParticleSim>() as u64)),
+        Some((t.render, cap * size_of::<ParticleRender>() as u64)),
+        t.render_sorted.map(|b| (b, cap * size_of::<ParticleRender>() as u64)),
+        t.sort_bins.map(|b| (b, u64::from(PARTICLE_SORT_BINS_WORDS) * 4)),
+        Some((t.emit_req_device, EMIT_REQ_TABLE_BYTES)),
+        Some((t.effects_device, EFFECT_TABLE_BYTES)),
     ];
-    for (dst, total) in zero_targets {
+    for (dst, total) in zero_targets.into_iter().flatten() {
         let mut written = 0u64;
         while written < total {
             let size = (total - written).min(zero_bytes);

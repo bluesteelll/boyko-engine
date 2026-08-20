@@ -24,6 +24,11 @@
 //!   for internal consistency against the census's own construction and PRINTED as the two rates.
 //!   The rate itself is never pinned: it is a property of the scene's wave coherence, which is what
 //!   the rung exists to measure. See [`assert_skip_census`].
+//! * **Rung P2 item 3's SORT MONOTONICITY** (`BOYKO_PARTICLE_SORT=1`, which the fixture refuses
+//!   without `BOYKO_PARTICLE_ALPHA`) — the sorted alpha range's key sequence never decreases with
+//!   rank, the range is conclusive (≥ 2 records over ≥ 2 bins), and the SAME frame's unsorted
+//!   source is NOT monotone. The third is the control, and it is taken in the same submit so the
+//!   measurement and its control describe the same particles. See [`assert_sort_monotonicity`].
 //!
 //! # The capture frame is an ENV, and the test reads it
 //!
@@ -54,7 +59,7 @@
 
 mod particle_scene;
 
-use boyko_app::particle_readback::ParticleCountersReadback;
+use boyko_app::particle_readback::{ParticleCountersReadback, ParticleSortReadback};
 use particle_scene::LabClockWitness;
 
 /// The capture frame this gate arms when the env does not name one — the same settled window the
@@ -313,6 +318,122 @@ fn particle_counters_partition_readback() {
     }
 
     assert_skip_census(&rb, &witness);
+    assert_sort_monotonicity(&app);
+}
+
+/// **Rung P2 item 3's SORT MONOTONICITY gate** (plan P2, "sort monotonicity readback") — the sort's
+/// correctness instrument, with the non-vacuity control it was taken beside.
+///
+/// # Why this and not an image
+///
+/// Gate #16's order-independence argument does not transfer to a non-commutative blend, so the plan
+/// forbids an image pin over overlapping alpha billboards — and rung P2 item 2 measured the harder
+/// half: forcing the alpha index transform to the identity produced a dump BYTE-IDENTICAL to the
+/// `particle_additive` golden. A byte-identical golden can hide a wrong answer, so the sort's gate
+/// has to be a statement about the ORDER.
+///
+/// # The three assertions, and what each refuses
+///
+/// 1. **The destination is monotone** — the recomputed key never decreases with rank. This is the
+///    property; alone it proves nothing, which is why it is never asserted alone.
+/// 2. **The destination is CONCLUSIVE** — at least two records and at least two distinct bins.
+///    Without it, a scatter that wrote NOTHING (leaving `p_render_sorted` at its boot zeroes, every
+///    record at the origin, every key identical) reports zero inversions and passes.
+/// 3. **The SOURCE is not monotone** — `p_render`, the same frame's unsorted class, read in the
+///    same submit. This is the control, and it is what makes the instrument prove in every run that
+///    it can tell an ordered range from an unordered one. A control taken as a second RUN would
+///    only be a distribution comparison: the two runs do not share a spawn seed.
+///
+/// Plus the oracle-free half — no adjacent pair rises in depth by more than one bin's width — which
+/// holds without the host reproducing the device's quantization bit for bit.
+fn assert_sort_monotonicity(app: &boyko_app::prelude::App) {
+    let sorted_run = particle_scene::sort_arming() != boyko_render::ParticleSortMode::None;
+    let rb = app.world().try_resource::<ParticleSortReadback>().copied();
+    if !sorted_run {
+        // Structural absence, asserted rather than assumed: an UNSORTED run must produce no sort
+        // readback at all, because the runner only takes one when `p_render_sorted` exists. A
+        // resource here would mean the sorted buffer was allocated on a `SortMode::None` run.
+        assert!(
+            rb.is_none(),
+            "BOYKO_PARTICLE_SORT is unset, so no sorted render buffer should exist and the runner \
+             should have taken no sort readback — yet one is in the world. Structural absence is \
+             what makes `SortMode::None` byte-identical to rung P2 item 2."
+        );
+        println!("particle_counters_readback: SORT unarmed (BOYKO_PARTICLE_SORT unset)");
+        return;
+    }
+    let rb = rb.expect(
+        "BOYKO_PARTICLE_SORT is set but no ParticleSortReadback reached the world: either the \
+         frame loop never reached the capture frame, or the sort bundle was not built at boot \
+         (the fixture's `sort_arming` resolves to Radix, so a trip here means the runner's \
+         boot-time read did not see it)",
+    );
+    println!("{}", rb.artifact_lines());
+
+    // (2) first: a conclusive range is the precondition for (1) meaning anything, and saying so in
+    // this order is what keeps a vacuous pass from being reported as a green one.
+    assert!(
+        rb.sorted.is_conclusive(),
+        "VACUOUS: the sorted range holds {} record(s) across {} distinct bin(s) — a range with \
+         fewer than two of either is monotone for reasons that have nothing to do with the sort. \
+         A scatter that wrote NOTHING reports exactly this (boot zeroes ⇒ every record at the \
+         origin ⇒ one bin). Arm a denser fixture or a wider depth spread.",
+        rb.sorted.records_checked,
+        rb.sorted.distinct_keys
+    );
+    // (3) the CONTROL, asserted BEFORE the measurement so a run whose fixture cannot produce
+    // disorder fails as a fixture problem rather than as a sort success.
+    assert!(
+        !rb.source.is_monotone(),
+        "the CONTROL is vacuous: `p_render`'s unsorted alpha range is ALREADY monotone ({} \
+         inversion(s) over {} record(s)). The sim's wave-retirement order happened to be \
+         back-to-front, so this frame cannot distinguish a working sort from a scatter that copied \
+         the range verbatim. Nothing is proven — re-run at a density or a camera where the spawn \
+         order is not already depth order.",
+        rb.source.inversions,
+        rb.source.records_checked
+    );
+    // (1) the property itself.
+    assert!(
+        rb.sorted.is_monotone(),
+        "the sorted alpha range is NOT back-to-front: {} inversion(s), the first at rank {} \
+         (keys run {} → {}, depths {:.4} → {:.4} over {} records). The class is drawn from rank 0 \
+         outward, so an inversion is a near billboard composited before a far one — which \
+         `alpha_over` cannot recover from and no golden in this tree would show.",
+        rb.sorted.inversions,
+        rb.sorted.first_inversion_rank,
+        rb.sorted.key_first,
+        rb.sorted.key_last,
+        rb.sorted.depth_first,
+        rb.sorted.depth_last,
+        rb.sorted.records_checked
+    );
+    // The ORACLE-FREE half, stated in the key's own units so a bin-boundary rounding difference
+    // between the host mirror and the device cannot make it red on a correct range.
+    let tolerance = boyko_app::particle_readback::particle_sort_bin_depth_ratio();
+    assert!(
+        rb.sorted.depth_order_holds(tolerance),
+        "the sorted range's depths rise by up to {:.6}x between adjacent ranks, more than one \
+         bin's width ({tolerance:.6}). This claim needs NO host oracle — two records out of depth \
+         order must share a bin, and one bin is exactly that wide — so a failure here is a real \
+         mis-ordering rather than a quantization artefact.",
+        rb.sorted.max_depth_ratio
+    );
+    // The class was fully walked, or the verdict is about a PREFIX and says so.
+    println!(
+        "particle_counters_readback: SORT PROVEN sorted_inversions={} source_inversions={} \
+         complete={} distinct_bins={} max_depth_ratio={:.6} (tolerance {tolerance:.6})",
+        rb.sorted.inversions,
+        rb.source.inversions,
+        rb.sorted.is_complete(),
+        rb.sorted.distinct_keys,
+        rb.sorted.max_depth_ratio
+    );
+    assert!(
+        rb.sort_is_proven(),
+        "the readback's own composite predicate disagrees with the three assertions above — \
+         `sort_is_proven` and this gate must be one statement, not two"
+    );
 }
 
 /// The device wave width the census's bounds are derived against — 32 on this part.

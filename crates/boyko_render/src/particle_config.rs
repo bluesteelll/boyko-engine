@@ -1,6 +1,7 @@
-//! Particles P0 (D13, D14) + P1 (D9) — the ECS-native owner-set arming knobs for the GPU particle
-//! subsystem: [`ParticleMode`] (simulate and draw at all?) and [`ParticleCollision`] (collide
-//! against the SDF field?), two INDEPENDENT axes, both `#[default] Off`.
+//! Particles P0 (D13, D14) + P1 (D9) + P2 (D10/R10) — the ECS-native owner-set arming knobs for
+//! the GPU particle subsystem: [`ParticleMode`] (simulate and draw at all?),
+//! [`ParticleCollision`] (collide against the SDF field?) and [`ParticleSortMode`] (order the
+//! ALPHA class back-to-front?), three INDEPENDENT axes, all three `#[default] Off`/`None`.
 //!
 //! Principle 0: ECS-native — [`ParticleConfig`] is a `#[derive(Resource)]` singleton (the cold
 //! owner-set config, NOT a side `std::Vec`/`HashMap`), mirroring
@@ -162,6 +163,81 @@ impl ParticleCollision {
         [ParticleCollision::Off, ParticleCollision::Sdf, ParticleCollision::SdfStats];
 }
 
+// ---- ParticleSortMode (rung P2 item 3's own arming axis; D10 / R10) ------------------
+
+/// Whether — and how — the ALPHA blend class is ordered back-to-front before it is drawn
+/// (`docs/PARTICLES-PLAN.md` rung P2 / D10). `#[repr(u32)]` for [`ParticleMode`]'s reason.
+///
+/// # Only the ALPHA class is ever a subject, and that is STRUCTURAL
+///
+/// The additive class needs no sort and is not given one: `ONE/ONE` is commutative and, under the
+/// 8-bit saturation `lit` imposes, `sat(sat(x) + y) = min(1, x + y)` is order-independent (D10,
+/// research fact R5). So this knob names one class, and a scene with no alpha effect pays nothing
+/// for arming it beyond three dispatches that see a zero instance count.
+///
+/// # Its own axis, not a [`ParticleMode`] variant
+///
+/// Sorting is orthogonal to shading and to collision, exactly as [`ParticleCollision`] is: rung
+/// P3's lit mode will want sorted and unsorted alpha alike, and folding the knobs together would
+/// make each new one a cross product of variants.
+///
+/// # ⚠️ R10 — a sorted class CANNOT carry motion vectors
+///
+/// Research fact R10 (the Godot pitfall): particle motion vectors are only reconstructible while a
+/// particle's INDEX is stable frame to frame, and a depth sort re-permutes indices every frame by
+/// construction. The rule is therefore a hard one — `SortMode != None` ⇒ particle motion vectors
+/// disabled — and it lives on this enum as [`motion_vectors_allowed`](Self::motion_vectors_allowed)
+/// so that rung P3's `-D MOTION` resolver reads the rule rather than restating it.
+#[repr(u32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ParticleSortMode {
+    /// No sort — the DEFAULT, and byte-identical to rung P2 item 2: no sort pass is declared, no
+    /// sort buffer is allocated, no sort pipeline is created, and the alpha draw reads the render
+    /// records in the order the sim's waves retired.
+    ///
+    /// That order is arbitrary but not wrong for every scene: alpha billboards that do not OVERLAP
+    /// each other composite identically in any order, which is the same argument gate #16's
+    /// `particle_additive` pin rests on for the additive class.
+    #[default]
+    None,
+    /// One FFX-shaped radix pass over an 8-bit quantized log-depth key — histogram → 256-bin scan →
+    /// scatter, three dispatches (D10).
+    ///
+    /// The key is INVERTED (bin 0 is the farthest), so the plain ascending sort the three passes
+    /// implement lands the class back-to-front, which is the order `alpha_over` needs. Eight bits
+    /// rather than a 4-pass 32-bit radix because the blend it feeds is 8-bit: D10 prices the wider
+    /// sort at 3–4× the cost for precision the destination cannot represent.
+    Radix,
+}
+
+impl ParticleSortMode {
+    /// The ARTIFACT spelling — `"none"` / `"radix"`. See [`ParticleMode::as_str`] for why the
+    /// spelling is a table rather than a `Debug` formatting.
+    #[inline]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ParticleSortMode::None => "none",
+            ParticleSortMode::Radix => "radix",
+        }
+    }
+
+    /// **R10, as a predicate rather than as prose**: whether particle motion vectors may be
+    /// produced under this arming.
+    ///
+    /// True for [`None`](Self::None) alone. A sort re-permutes `p_render` every frame, so slot `k`
+    /// of frame N and slot `k` of frame N+1 are different particles and the difference of their
+    /// positions is not a velocity — it is noise with the magnitude of the scene. Rung P3's
+    /// `-D MOTION` resolver consults this; until it lands, the boot site asserts it, so the rule is
+    /// live rather than filed.
+    #[inline]
+    pub const fn motion_vectors_allowed(self) -> bool {
+        matches!(self, ParticleSortMode::None)
+    }
+
+    /// Every sort mode, for exhaustive iteration in tests and artifact readers.
+    pub const ALL: [ParticleSortMode; 2] = [ParticleSortMode::None, ParticleSortMode::Radix];
+}
+
 // ---- ParticleConfig (the owner-set Resource — mirrors OcclusionConfig) ---------------
 
 /// The global particle-subsystem arming config — a `World`-singleton Resource the owner sets.
@@ -183,17 +259,23 @@ pub struct ParticleConfig {
     /// Rung P1's collision arming — boot-frozen, because it picks the sim's SPIR-V rather than a
     /// runtime branch. Default [`ParticleCollision::Off`].
     pub collision: ParticleCollision,
+    /// Rung P2 item 3's ALPHA-class sort arming — boot-frozen, because it decides whether the two
+    /// sort buffers and the three sort pipelines exist at all (structural absence, D13's rule
+    /// applied to a fourth axis). Default [`ParticleSortMode::None`].
+    pub sort: ParticleSortMode,
 }
 
 impl Default for ParticleConfig {
     #[inline]
     fn default() -> Self {
         // Off == today (the 0%-gate anchor): a default world simulates and draws no particles, and
-        // an armed world that says nothing about collision gets the base sim module.
+        // an armed world that says nothing about collision or sorting gets the base sim module and
+        // the unsorted alpha class rung P2 item 2 shipped.
         Self {
             mode: ParticleMode::Off,
             capacity: PARTICLE_DEFAULT_CAPACITY,
             collision: ParticleCollision::Off,
+            sort: ParticleSortMode::None,
         }
     }
 }
@@ -224,7 +306,46 @@ impl ParticleConfig {
     pub const fn counts_waves(&self) -> bool {
         self.collision.counts_waves()
     }
+
+    /// Whether the ALPHA class is depth-sorted — the structural predicate `sort != None`, the ONE
+    /// value the boot site turns into "allocate the two sort buffers, build the three sort
+    /// pipelines, declare the three sort passes".
+    ///
+    /// Independent of [`enabled`](Self::enabled), for [`collides`](Self::collides)'s reason: a
+    /// disarmed subsystem builds nothing at all, so this predicate is only consulted on the armed
+    /// path.
+    #[inline]
+    pub const fn sorts(&self) -> bool {
+        !matches!(self.sort, ParticleSortMode::None)
+    }
+
+    /// **R10** — whether particle motion vectors may be produced under this config. Forwards
+    /// [`ParticleSortMode::motion_vectors_allowed`], so the rule has ONE definition.
+    #[inline]
+    pub const fn motion_vectors_allowed(&self) -> bool {
+        self.sort.motion_vectors_allowed()
+    }
 }
+
+// R10, as a BUILD-time statement rather than a runtime one: exactly one arm of the sort axis
+// permits motion vectors, and it is the one that performs no permutation. A future `Wboit` arm —
+// which reorders nothing and could legitimately carry them — has to state its own answer here,
+// which is the point of spelling the count rather than the arm.
+const _: () = {
+    let mut allowed = 0;
+    let mut i = 0;
+    while i < ParticleSortMode::ALL.len() {
+        if ParticleSortMode::ALL[i].motion_vectors_allowed() {
+            allowed += 1;
+        }
+        i += 1;
+    }
+    assert!(
+        allowed == 1,
+        "R10: exactly one ParticleSortMode may carry motion vectors — the one that does not \
+         re-permute p_render"
+    );
+};
 
 #[cfg(test)]
 mod tests {
@@ -233,7 +354,12 @@ mod tests {
     /// A config literal at the two defaults, so a test that varies ONE knob does not have to
     /// restate the others (and so a third axis lands in one place).
     fn cfg(mode: ParticleMode, capacity: u32) -> ParticleConfig {
-        ParticleConfig { mode, capacity, collision: ParticleCollision::Off }
+        ParticleConfig {
+            mode,
+            capacity,
+            collision: ParticleCollision::Off,
+            sort: ParticleSortMode::None,
+        }
     }
 
     #[test]
@@ -247,6 +373,96 @@ mod tests {
         );
         assert_eq!(cfg.collision, ParticleCollision::Off);
         assert!(!cfg.collides(), "rung P1's arm is default-OFF (the base sim module)");
+        assert_eq!(cfg.sort, ParticleSortMode::None);
+        assert!(!cfg.sorts(), "rung P2 item 3's arm is default-OFF (no sort pass, no sort buffer)");
+    }
+
+    /// The sort axis's artifact spelling gets the SAME three claims its two siblings' do.
+    #[test]
+    fn the_sort_artifact_spelling_is_total_and_unique() {
+        assert_eq!(ParticleSortMode::ALL.len(), 2, "ALL must list every sort mode");
+        for (i, a) in ParticleSortMode::ALL.iter().enumerate() {
+            assert_eq!(*a as u32, i as u32, "{a:?} must sit at its own discriminant in ALL");
+            assert!(!a.as_str().is_empty(), "{a:?} has no word");
+            for b in &ParticleSortMode::ALL[i + 1..] {
+                assert_ne!(a.as_str(), b.as_str(), "{a:?} and {b:?} share a word");
+            }
+        }
+        // The "off" arm of THIS axis is spelled `none`, not `off`, and that is deliberate: an
+        // artifact line carrying three axes reads `off/off/none`, so a reader can tell which axis a
+        // word came from even when the line's field order is what drifted.
+        assert_ne!(ParticleSortMode::None.as_str(), ParticleMode::Off.as_str());
+    }
+
+    #[test]
+    fn default_sort_is_none() {
+        // The second route into `None`, exactly as `default_collision_is_off`: the hand-written
+        // `ParticleConfig::default` names the variant literally while `ParticleSortMode::default`
+        // comes from the `#[default]` attribute.
+        assert_eq!(ParticleSortMode::default(), ParticleSortMode::None);
+    }
+
+    /// A WILDCARD-FREE match over the sort axis, so a future arm (D10's deferred `Wboit`, or a
+    /// wider key) fails to COMPILE here rather than inheriting whichever answer a `_` swallowed.
+    #[test]
+    fn every_sort_variant_states_its_own_answer_without_a_wildcard() {
+        for sort in ParticleSortMode::ALL {
+            let want = match sort {
+                ParticleSortMode::None => false,
+                ParticleSortMode::Radix => true,
+            };
+            assert_eq!(
+                ParticleConfig { sort, ..ParticleConfig::default() }.sorts(),
+                want,
+                "{sort:?}"
+            );
+            assert_eq!(
+                sort as u32 != ParticleSortMode::None as u32,
+                want,
+                "{sort:?}: sorts() must track the `#[repr(u32)]` discriminant"
+            );
+        }
+    }
+
+    /// **R10, exercised rather than filed.** `SortMode != None` ⇒ motion vectors disabled, on every
+    /// arm, wildcard-free — and the two predicates are stated as EXACT COMPLEMENTS, because the
+    /// defect this guards is one drifting into "sorts() is usually the opposite of
+    /// motion_vectors_allowed()".
+    #[test]
+    fn r10_a_sorted_class_may_not_carry_motion_vectors() {
+        for sort in ParticleSortMode::ALL {
+            let allowed = match sort {
+                ParticleSortMode::None => true,
+                ParticleSortMode::Radix => false,
+            };
+            assert_eq!(sort.motion_vectors_allowed(), allowed, "{sort:?}: the enum's own rule");
+            let cfg = ParticleConfig { sort, ..ParticleConfig::default() };
+            assert_eq!(cfg.motion_vectors_allowed(), allowed, "{sort:?}: the config forwards it");
+            assert_ne!(
+                cfg.sorts(),
+                cfg.motion_vectors_allowed(),
+                "{sort:?}: R10 makes the two predicates exact complements — a permutation of \
+                 `p_render` destroys the index stability a motion vector is reconstructed from"
+            );
+        }
+    }
+
+    /// The sort axis is orthogonal to the other two — the property that keeps rung P2 item 3 from
+    /// becoming a [`ParticleMode`] × [`ParticleCollision`] cross product.
+    #[test]
+    fn sorting_is_orthogonal_to_the_other_two_axes() {
+        let armed_unsorted = cfg(ParticleMode::GpuUnlit, 1);
+        assert!(armed_unsorted.enabled() && !armed_unsorted.sorts());
+        let disarmed_sorted =
+            ParticleConfig { sort: ParticleSortMode::Radix, ..ParticleConfig::default() };
+        assert!(!disarmed_sorted.enabled() && disarmed_sorted.sorts());
+        let sorted_collider = ParticleConfig {
+            mode: ParticleMode::GpuUnlit,
+            collision: ParticleCollision::Sdf,
+            sort: ParticleSortMode::Radix,
+            ..ParticleConfig::default()
+        };
+        assert!(sorted_collider.enabled() && sorted_collider.collides() && sorted_collider.sorts());
     }
 
     /// The collision axis's artifact spelling gets the SAME three claims its sibling's does —

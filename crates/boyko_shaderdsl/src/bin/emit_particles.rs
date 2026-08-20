@@ -1,24 +1,29 @@
-//! `emit_particles` — generates ALL FIVE committed GPU-particle shaders
+//! `emit_particles` — generates ALL EIGHT committed GPU-particle shaders
 //! (`docs/PARTICLES-PLAN.md` Rev 4, decision D12).
 //!
 //! ```text
-//! particle_kickoff.comp.hlsl   [numthreads(1,1,1)]     the one-thread bookkeeping pass (A2)
-//! particle_emit.comp.hlsl      [numthreads(256,1,1)]   ZERO global atomics (A3)
-//! particle_sim.comp.hlsl       [numthreads(256,1,1)]   the wave-aggregated hot loop (A4)
-//! particle_draw.vs.hlsl                                the billboard expansion (A5)
-//! particle_draw.fs.hlsl                                additive, bindless-textured (A5)
+//! particle_kickoff.comp.hlsl     [numthreads(1,1,1)]     the one-thread bookkeeping pass (A2)
+//! particle_emit.comp.hlsl        [numthreads(256,1,1)]   ZERO global atomics (A3)
+//! particle_sim.comp.hlsl         [numthreads(256,1,1)]   the wave-aggregated hot loop (A4)
+//! particle_sort_hist.comp.hlsl   [numthreads(256,1,1)]   P2 item 3: the 256-bin histogram
+//! particle_sort_scan.comp.hlsl   [numthreads(256,1,1)]   P2 item 3: the ONE-GROUP bin scan
+//! particle_sort_scatter.comp.hlsl[numthreads(256,1,1)]   P2 item 3: the permutation
+//! particle_draw.vs.hlsl                                  the billboard expansion (A5)
+//! particle_draw.fs.hlsl                                  additive, bindless-textured (A5)
 //! ```
 //!
 //! Run: `cargo run -p boyko_shaderdsl --features emit --bin emit_particles`
 //!
-//! Five sources, NINE artifacts: the two draw stages each carry a `-D DEPTH_LINEAR` variant
+//! Eight sources, TWELVE artifacts: the two draw stages each carry a `-D DEPTH_LINEAR` variant
 //! (`particle_draw_dlin.{vs,fs}.spv`) — the Deferred path's fragment-written depth encode — and the
 //! sim carries TWO, `-D SDF_COLLIDE` (`particle_sim_sdf.comp.spv`, rung P1's field collision) and
 //! `-D SDF_COLLIDE_STATS` on top of it (`particle_sim_stats.comp.spv`, rung P1b's per-wave skip
 //! census — a MEASUREMENT module, never a shipping one). Each has a row in
-//! `docs/SHADER-VARIANT-MANIFEST.md`. Every define is INERT in the compiles below it, so the five
-//! base `.spv` — and, across rung P1b, `particle_sim_sdf.comp.spv` too — are byte-frozen by
-//! construction.
+//! `docs/SHADER-VARIANT-MANIFEST.md`. Every define is INERT in the compiles below it, so the base
+//! `.spv` — and, across rung P1b, `particle_sim_sdf.comp.spv` too — are byte-frozen by
+//! construction. **Rung P2 item 3's three sort modules carry NO define at all**: the sort is a
+//! separate arming axis resolved into three separate PIPELINES, so there is nothing to make
+//! conditional inside a shader.
 //!
 //! Then DXC each file with the frozen recipe pinned in its own header, and commit the `.spv`.
 //! `boyko_rhi_vulkan/tests/particle_edsl_sync.rs` pins both halves: the committed `.hlsl` to
@@ -156,6 +161,85 @@ const SDF_FIELD_BINDING: u32 = 10;
 /// `cam_eye.w` lane. Pinned against the host const by `particle_edsl_sync`.
 const CAM_MODE_PERSPECTIVE: u32 = 1;
 
+// ---- Rung P2 item 3: the radix sort's generator inputs (plan D10) --------------------------
+
+/// The number of radix bins — `2^8`, one 8-bit digit, ONE pass (plan D10).
+///
+/// It is deliberately EQUAL to [`LOCAL_SIZE`], and that equality is load-bearing in all three sort
+/// modules: the histogram's LDS array is one bin per lane, the scan is one group covering every
+/// bin with one lane each, and the scatter's per-group base reservation is one lane per bin. A
+/// width that differed from the bin count would turn each of those into a strided loop.
+const SORT_BINS: u32 = 256;
+
+/// The largest bin index — `SORT_BINS - 1`, spelled once because it appears in the key's inversion
+/// AND as the quantizer's scale.
+const SORT_BIN_MAX: u32 = SORT_BINS - 1;
+
+/// `boyko_rhi_vulkan::compute::PARTICLE_SORT_LOG_NEAR` — `log2` of the near end of the sort's depth
+/// range (`0.125` world units ⇒ `-3`).
+///
+/// A power of two so the logarithm is EXACT in binary floating point and the host mirror needs no
+/// rounding argument: the constant is `-3.0` on both sides, not "whatever `log2(0.125)` came out as".
+const SORT_LOG_NEAR: f32 = -3.0;
+
+/// `boyko_rhi_vulkan::compute::PARTICLE_SORT_LOG_SPAN` — the sort range in OCTAVES: `log2(4096) -
+/// log2(0.125) == 15`.
+///
+/// Fifteen octaves over 256 bins is **0.0586 octaves per bin ⇒ 4.15 % relative depth resolution**,
+/// CONSTANT across the whole range — which is the entire reason the key is logarithmic rather than
+/// linear. A linear key over the same range would put 99.99 % of its bins beyond 4 units and
+/// resolve nothing at all where billboards actually overlap.
+const SORT_LOG_SPAN: f32 = 15.0;
+
+/// The reciprocal of [`SORT_LOG_SPAN`], emitted as a LITERAL so the device performs a multiply.
+///
+/// Computed here rather than divided on the device for the reason the whole subsystem is written
+/// around (plan gate #14 / M7): a divide in a per-particle path drags `OpFDiv`'s 2.5 ULP into a
+/// quantizer whose whole job is to be a stable step function, and the three sort modules are pinned
+/// divide-free at the artifact.
+const SORT_INV_LOG_SPAN: f32 = 1.0 / SORT_LOG_SPAN;
+
+/// The near clamp itself (`2^SORT_LOG_NEAR`), which the key applies BEFORE the logarithm so a
+/// particle at the camera's exact position cannot produce `log2(0) == -inf`.
+const SORT_NEAR: f32 = 0.125;
+
+/// **The sort KEY, spelled ONCE and printed into BOTH the histogram and the scatter.**
+///
+/// The two passes must agree bit for bit — the histogram decides how many elements land in each
+/// bin and the scatter decides which bin each element goes to, so a key that differed between them
+/// would over- or under-run a bin's reservation and write outside it. Emitting both occurrences
+/// from this one string makes that drift unconstructible here, exactly as [`SDF_SKIP_TEST`] does
+/// for rung P1b's census, and `particle_edsl_sync` re-checks the two committed files against each
+/// other.
+///
+/// # Why the key is INVERTED
+///
+/// `bin 0` is the FARTHEST, so the plain ascending order the three passes produce is
+/// back-to-front — which is the order `alpha_over` needs — and the scan below stays an ordinary
+/// forward exclusive prefix sum instead of a reverse one. The alternative (a forward key and a
+/// reverse scan) puts the inversion somewhere a reader has to hold two facts to see.
+const SORT_KEY_FN: &str = "\
+uint particle_sort_key(float3 pos, float3 cam_eye) {
+    // The EUCLIDEAN camera distance -- the same metric `-D DEPTH_LINEAR`'s depth encode uses, and
+    // the only one that is correct for a billboard whose plane faces the camera (a view-space z
+    // would order two particles on one sphere around the eye differently, though they occlude
+    // identically).
+    float d = length(cam_eye - pos);
+    // Affine in log2 over [SORT_NEAR, SORT_NEAR * 2^SORT_LOG_SPAN], saturated at both ends. The
+    // `max` is what makes `log2` TOTAL, in both of the ways it can fail to be: a particle at the
+    // eye's exact position would give log2(0) = -inf, and a NaN position would give NaN. DXC
+    // lowers this `max` to `NMax`, whose documented behaviour on a NaN operand is to return the
+    // OTHER one -- so a NaN distance becomes SORT_NEAR here and the particle sorts as the nearest
+    // (drawn last) rather than poisoning the quantizer. That is the benign direction of a
+    // primitive this tree has been bitten by, and it is stated because it is not obvious which
+    // direction it takes.
+    float t = saturate((log2(max(d, SORT_NEAR)) - SORT_LOG_NEAR) * SORT_INV_LOG_SPAN);
+    // INVERTED (see the generator's SORT_KEY_FN doc): bin 0 is the farthest, so ascending order is
+    // back-to-front. `+ 0.5` rounds to nearest; `t` is saturated, so the product is in [0, 255.5]
+    // and the truncating cast cannot leave the bin range.
+    return SORT_BIN_MAX - (uint)(t * SORT_BIN_MAX_F + 0.5);
+}";
+
 /// `boyko_rhi_vulkan::compute::MESH_DEPTH_T_MAX` — the PERSPECTIVE mesh-depth normalizer the
 /// Deferred path's depth buffer is encoded with (P2 `-D DEPTH_LINEAR`).
 ///
@@ -172,16 +256,22 @@ fn main() {
     const _: () = assert!(MAX_EMITTERS.is_power_of_two());
     const _: () = assert!(ADDITIVE_INSTANCE_COUNT_OFFSET.is_multiple_of(4));
     const _: () = assert!(ALPHA_INSTANCE_COUNT_OFFSET.is_multiple_of(4));
+    // The sort's one-bin-per-lane shape, in all three modules (see `SORT_BINS`' doc).
+    const _: () = assert!(SORT_BINS == LOCAL_SIZE);
+    const _: () = assert!(SORT_BINS.is_power_of_two());
 
     let shaders = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("boyko_rhi_vulkan")
         .join("shaders");
 
-    let files: [(&str, String); 5] = [
+    let files: [(&str, String); 8] = [
         ("particle_kickoff.comp.hlsl", build_kickoff()),
         ("particle_emit.comp.hlsl", build_emit()),
         ("particle_sim.comp.hlsl", build_sim()),
+        ("particle_sort_hist.comp.hlsl", build_sort_hist()),
+        ("particle_sort_scan.comp.hlsl", build_sort_scan()),
+        ("particle_sort_scatter.comp.hlsl", build_sort_scatter()),
         ("particle_draw.vs.hlsl", build_draw_vs()),
         ("particle_draw.fs.hlsl", build_draw_fs()),
     ];
@@ -1183,6 +1273,405 @@ void main(uint3 tid : SV_DispatchThreadID) {{
     r.tex_index   = e.tex_index;
     r.flags       = p.effect_flags >> 16u;
     p_render[r_pos] = r;
+}}
+"#
+    )
+}
+
+// ---- Rung P2 item 3: the three sort modules (plan D10) -------------------------------------
+
+/// The Set-0 binding rung P2 item 3 gives the sorted render buffer — the scatter's destination and
+/// the ALPHA draw's source when the sort is armed. The next free slot after rung P1's field at 10.
+const SORT_RENDER_BINDING: u32 = 11;
+
+/// The Set-0 binding of the sort's 512-word scratch — bins `[0, 256)` and running offsets
+/// `[256, 512)` in ONE allocation (see [`sort_constants`]).
+const SORT_BINS_BINDING: u32 = 12;
+
+/// The `p_sort_bins` layout, the sort's push block and the key's constants — one block, printed
+/// into every module that needs any of it, so the offsets half's base and the bin count cannot be
+/// spelled twice.
+fn sort_constants() -> String {
+    let alpha_word = ALPHA_INSTANCE_COUNT_OFFSET / 4;
+    format!(
+        "// The radix's 512-word scratch, ONE allocation in TWO halves (plan D10's `histogram ->\n\
+         // 256-bin scan -> scatter`):\n\
+         //\n\
+         //   [0, SORT_BINS)                 the HISTOGRAM -- accumulated by `particle_sort_hist`,\n\
+         //                                  consumed AND RE-ZEROED by `particle_sort_scan`;\n\
+         //   [SORT_OFFSET_BASE, +SORT_BINS) the running OFFSETS -- written by the scan, consumed\n\
+         //                                  by the scatter's per-group reservations.\n\
+         //\n\
+         // TWO halves and not one array because the scatter DESTROYS what it consumes (each\n\
+         // reservation advances its bin's offset), so there would be nothing left to zero for the\n\
+         // next frame. The scan zeroing the histogram half in the same dispatch that reads it is\n\
+         // what keeps `particle_kickoff` -- one module for every arming -- byte-frozen across this\n\
+         // rung: no shipping shader learned that the sort exists.\n\
+         static const uint  SORT_BINS         = {SORT_BINS}u;\n\
+         static const uint  SORT_BIN_MAX      = {SORT_BIN_MAX}u;\n\
+         static const float SORT_BIN_MAX_F    = {bin_max_f:?};\n\
+         static const uint  SORT_OFFSET_BASE  = {SORT_BINS}u;\n\
+         \n\
+         // The key's range constants. `SORT_INV_LOG_SPAN` is the HOST-computed reciprocal of the\n\
+         // octave span, so the device multiplies (plan gate #14's no-divide discipline).\n\
+         static const float SORT_NEAR         = {SORT_NEAR:?};\n\
+         static const float SORT_LOG_NEAR     = {SORT_LOG_NEAR:?};\n\
+         static const float SORT_INV_LOG_SPAN = {SORT_INV_LOG_SPAN:?};\n\
+         \n\
+         // The ALPHA class's live instance count, at the word the generator derived from\n\
+         // `PARTICLE_ALPHA_INSTANCE_COUNT_OFFSET` ({ALPHA_INSTANCE_COUNT_OFFSET} bytes) -- plan gate #8. It is the sim's own\n\
+         // returning `InterlockedAdd` result and therefore the exact length of the range this pass\n\
+         // sorts.\n\
+         static const uint  DRAW_ALPHA_INSTANCE_WORD = {alpha_word}u;\n",
+        bin_max_f = SORT_BIN_MAX as f32,
+    )
+}
+
+/// The ALPHA class's source-index derivation, printed into the histogram and the scatter from one
+/// source: rank `i` of the class sits at `p_render[capacity - 1 - i]` (plan D10's mirror).
+fn sort_alpha_range_block() -> &'static str {
+    "    // The class's live length, CLAMPED ONCE (F25: `robustBufferAccess` is OFF, so an\n\
+     \x20   // out-of-range fetch is undefined behaviour rather than a zero). Every index below is\n\
+     \x20   // derived from `count`, so this one `min` is the whole pass's bound: `i < count` then\n\
+     \x20   // implies `capacity - 1 - i` is in `[capacity - count, capacity)`, which is exactly the\n\
+     \x20   // range the sim's mirrored write filled.\n\
+     \x20   uint count = min(p_draw_args[DRAW_ALPHA_INSTANCE_WORD], pc.capacity);\n"
+}
+
+/// Assembles `particle_sort_hist.comp.hlsl` — rung P2 item 3's HISTOGRAM (plan D10, dispatch 1 of 3).
+fn build_sort_hist() -> String {
+    let render_rec = particle_render_struct();
+    let consts = sort_constants();
+    let key = SORT_KEY_FN;
+    let range = sort_alpha_range_block();
+    format!(
+        r#"// particle_sort_hist.comp -- rung P2 item 3's 256-BIN HISTOGRAM, dispatch 1 of 3
+// (`docs/PARTICLES-PLAN.md` Rev 4, decision D10). `DispatchIndirect`, {LOCAL_SIZE} threads.
+//
+// GENERATED by `cargo run -p boyko_shaderdsl --features emit --bin emit_particles`. Hand-edits
+// fail `boyko_rhi_vulkan/tests/particle_edsl_sync.rs`.
+//
+// # THE SUBJECT IS THE ALPHA CLASS ONLY, and that is structural rather than an optimisation
+//
+// The additive class is COMMUTATIVE -- `ONE/ONE` under the 8-bit saturation `lit` imposes gives
+// `sat(sat(x) + y) = min(1, x + y)`, which is order-independent (plan D10, research fact R5) -- so
+// it needs no sort and is not given one. This pass never touches `p_render[0, additive.count)`.
+// The alpha class occupies `p_render[capacity - alpha.count, capacity)`, class-dense and
+// DESCENDING (rank `i` at `capacity - 1 - i`), which is what the sim's mirrored render index wrote.
+//
+// # Why this dispatch is sized from the SIM's indirect block
+//
+// The element count is `alpha.instanceCount`, which the SIM produces -- so `particle_kickoff`, one
+// pass earlier, cannot have written a group count for it. Rather than add a fourth dispatch to
+// compute one (plan D10 says THREE), this pass and the scatter re-fetch the SIM's own
+// `VkDispatchIndirectCommand`: `ceil(alive_count_cur / {LOCAL_SIZE})` groups. That is exact enough by
+// construction, because `alpha.instanceCount <= alive_count_next <= alive_count_cur` -- the M2
+// identity -- so the block always covers the class, and the surplus lanes retire on the `i < count`
+// test below. It also costs NO new barrier: the sim already read that block this frame, so the
+// derived stream is unmoved.
+//
+// # The atomic budget: at most ONE global `InterlockedAdd` per lane, and typically far fewer
+//
+// The per-element increments are LDS (`gs_bins`), never global. Exactly one global atomic is issued
+// per OCCUPIED bin per group -- at most {SORT_BINS} for a group of {LOCAL_SIZE} elements, and in a real
+// scene a few dozen, because neighbouring alive-list entries are particles spawned together and
+// therefore at similar depths. This is D5's aggregation applied to a histogram: the shape it
+// deletes is one global atomic per element.
+//
+// # Compile (offline + hermetic; committed `.spv` is byte-gated)
+//
+//   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T cs_6_0 -E main \
+//       -fspv-target-env=vulkan1.3 particle_sort_hist.comp.hlsl -Fo particle_sort_hist.comp.spv
+//
+// # Set / binding vocabulary -- MIRRORS the host `PARTICLE_LAYOUT_ENTRIES` table
+//
+//   (set, binding, kind)
+//   (0, 2,  STORAGE_BUFFER)  RWStructuredBuffer<uint>            p_draw_args   read
+//   (0, 7,  STORAGE_BUFFER)  RWStructuredBuffer<ParticleRender>  p_render      read
+//   (0, {SORT_BINS_BINDING}, STORAGE_BUFFER)  RWStructuredBuffer<uint>            p_sort_bins   read+write (atomic)
+//
+// # Push constants (16 B)
+//
+//   [0,12)   float3 cam_eye  -- `ViewUniform::camera_pos`, the SAME eye the draw's DEPTH_LINEAR
+//                              arm encodes depth from; the key is a function of it
+//   [12,16)  uint   capacity -- CAP, the boot-frozen pool size (plan D14); the alpha class's
+//                              mirror `capacity - 1 - i`
+
+struct SortPush {{
+    float3 cam_eye;
+    uint   capacity;
+}};
+[[vk::push_constant]] SortPush pc;
+
+{render_rec}
+[[vk::binding(2, 0)]]  RWStructuredBuffer<uint>           p_draw_args : register(u2);
+[[vk::binding(7, 0)]]  RWStructuredBuffer<ParticleRender> p_render    : register(u7);
+[[vk::binding({SORT_BINS_BINDING}, 0)]] RWStructuredBuffer<uint>           p_sort_bins : register(u{SORT_BINS_BINDING});
+
+{consts}
+// One bin per lane -- the group width IS the bin count (see the generator's `SORT_BINS` doc), so
+// the zero-fill, the accumulate and the flush below are each exactly one element per lane.
+groupshared uint gs_bins[SORT_BINS];
+
+// === GENERATED particle_sort_key BEGIN ===
+// The 8-bit quantized log-depth key, printed from ONE generator input into this module and into
+// `particle_sort_scatter.comp.hlsl`. A key that differed between the two would size a bin from one
+// population and fill it from another -- an overrun of that bin's reservation into its neighbour's,
+// with a plausible image and no validation message.
+{key}
+// === GENERATED particle_sort_key END ===
+
+[numthreads({LOCAL_SIZE}, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID, uint lane : SV_GroupIndex) {{
+    // EVERY lane of the group reaches both barriers: the range test is an `if` BLOCK and not an
+    // early `return`, because a `return` above a `GroupMemoryBarrierWithGroupSync` is undefined and
+    // typically a device hang (the same shape `particle_emit`'s cooperative prefix load carries).
+    gs_bins[lane] = 0u;
+    GroupMemoryBarrierWithGroupSync();
+
+{range}
+    uint i = tid.x;
+    if (i < count) {{
+        // Rank `i` of the class, at the mirrored slot the sim wrote it to.
+        float3 pos = p_render[pc.capacity - 1u - i].position;
+        InterlockedAdd(gs_bins[particle_sort_key(pos, pc.cam_eye)], 1u);
+    }}
+    GroupMemoryBarrierWithGroupSync();
+
+    // The FLUSH: one global atomic per occupied bin. The `> 0u` guard is what makes the count
+    // proportional to the group's DISTINCT keys rather than to the bin count -- the same guard the
+    // sim's retirement block uses for the same reason.
+    if (gs_bins[lane] > 0u) {{
+        InterlockedAdd(p_sort_bins[lane], gs_bins[lane]);
+    }}
+}}
+"#
+    )
+}
+
+/// Assembles `particle_sort_scan.comp.hlsl` — rung P2 item 3's BIN SCAN (plan D10, dispatch 2 of 3).
+fn build_sort_scan() -> String {
+    let consts = sort_constants();
+    let scan_steps = SORT_BINS.trailing_zeros();
+    format!(
+        r#"// particle_sort_scan.comp -- rung P2 item 3's 256-BIN SCAN, dispatch 2 of 3
+// (`docs/PARTICLES-PLAN.md` Rev 4, decision D10). ONE group of {LOCAL_SIZE} threads, dispatched
+// DIRECTLY.
+//
+// GENERATED by `cargo run -p boyko_shaderdsl --features emit --bin emit_particles`. Hand-edits
+// fail `boyko_rhi_vulkan/tests/particle_edsl_sync.rs`.
+//
+// # One group, and therefore no second scan level
+//
+// A 256-element exclusive prefix sum fits one workgroup exactly (the group width IS the bin count),
+// so the whole scan is {scan_steps} Hillis-Steele steps in LDS with no partial-sum buffer, no
+// spine pass and no third dispatch. That is the entire reason D10 chose an 8-bit digit: a wider key
+// would need `numGroups x bins` of per-group histograms and the multi-level scan FFX carries for
+// them.
+//
+// # THE RE-ZERO IS PART OF THIS PASS, and it is what keeps `particle_kickoff` byte-frozen
+//
+// Lane `b` reads `p_sort_bins[b]` into a register at the top and writes `0u` back at the bottom.
+// No other lane touches that word, so no barrier separates the two -- and the histogram half is
+// therefore clean for the NEXT frame without any other shader learning that the sort exists. The
+// alternative (kickoff clearing the bins) would have needed a `-D` variant of a module that ships in
+// every configuration, i.e. a tenth artifact to zero 1 KB.
+//
+// Frame 0 works because the boot fill zeroes every particle buffer, so the invariant "the histogram
+// half is zero when `particle_sort_hist` runs" holds from the first frame and is re-established by
+// this pass on every one after it.
+//
+// # Compile (offline + hermetic; committed `.spv` is byte-gated)
+//
+//   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T cs_6_0 -E main \
+//       -fspv-target-env=vulkan1.3 particle_sort_scan.comp.hlsl -Fo particle_sort_scan.comp.spv
+//
+// # Set / binding vocabulary -- MIRRORS the host `PARTICLE_LAYOUT_ENTRIES` table
+//
+//   (set, binding, kind)
+//   (0, {SORT_BINS_BINDING}, STORAGE_BUFFER)  RWStructuredBuffer<uint>  p_sort_bins  read+write
+//
+//   The ONLY resource this pass touches. It carries no atomic at all -- one lane owns one bin
+//   through the whole dispatch.
+//
+// # Push constants
+//
+//   NONE IN THE SHADER. The scan is a pure reduction over a fixed-size array: it needs neither the
+//   capacity nor the camera, and a range it does not read cannot drift from the one the other two
+//   passes do. Its pipeline LAYOUT still carries the family's 16-byte range host-side, because the
+//   RHI has no zero-range form -- a declared range no shader references is legal Vulkan, and the
+//   recorder emits no `vkCmdPushConstants` for this pass.
+
+[[vk::binding({SORT_BINS_BINDING}, 0)]] RWStructuredBuffer<uint> p_sort_bins : register(u{SORT_BINS_BINDING});
+
+{consts}
+groupshared uint gs_scan[SORT_BINS];
+
+[numthreads({LOCAL_SIZE}, 1, 1)]
+void main(uint lane : SV_GroupIndex) {{
+    // This lane's OWN bin population, held in a register across the scan so the exclusive result is
+    // `inclusive - own` and no second LDS array (or shifted store) is needed.
+    uint own = p_sort_bins[lane];
+    gs_scan[lane] = own;
+    GroupMemoryBarrierWithGroupSync();
+
+    // Hillis-Steele INCLUSIVE scan, {scan_steps} steps. The read and the write are separated by
+    // barriers on BOTH sides: without the second one a fast lane could overwrite `gs_scan[lane]`
+    // while a slower lane at `lane + off` still needs the pre-step value.
+    [unroll]
+    for (uint off = 1u; off < SORT_BINS; off <<= 1) {{
+        uint add = (lane >= off) ? gs_scan[lane - off] : 0u;
+        GroupMemoryBarrierWithGroupSync();
+        gs_scan[lane] = gs_scan[lane] + add;
+        GroupMemoryBarrierWithGroupSync();
+    }}
+
+    // The offsets half: where bin `lane`'s first element lands. Bin 0 is the FARTHEST (the key is
+    // inverted), so rank 0 -- offset 0 -- is the farthest particle, which the ALPHA draw's
+    // `(capacity - 1, -1)` affine fetches FIRST. Back-to-front, with no reverse anywhere.
+    p_sort_bins[SORT_OFFSET_BASE + lane] = gs_scan[lane] - own;
+    // ...and the histogram half, clean for next frame (see the header).
+    p_sort_bins[lane] = 0u;
+}}
+"#
+    )
+}
+
+/// Assembles `particle_sort_scatter.comp.hlsl` — rung P2 item 3's PERMUTATION (plan D10, dispatch
+/// 3 of 3).
+fn build_sort_scatter() -> String {
+    let render_rec = particle_render_struct();
+    let consts = sort_constants();
+    let key = SORT_KEY_FN;
+    let range = sort_alpha_range_block();
+    format!(
+        r#"// particle_sort_scatter.comp -- rung P2 item 3's PERMUTATION, dispatch 3 of 3
+// (`docs/PARTICLES-PLAN.md` Rev 4, decision D10). `DispatchIndirect`, {LOCAL_SIZE} threads.
+//
+// GENERATED by `cargo run -p boyko_shaderdsl --features emit --bin emit_particles`. Hand-edits
+// fail `boyko_rhi_vulkan/tests/particle_edsl_sync.rs`.
+//
+// # What it writes, and why the DRAW does not change
+//
+// It copies each alpha render record from `p_render` to `p_render_sorted` at its sorted rank, using
+// the SAME mirror the sim wrote the class with: rank `r` lands at `capacity - 1 - r`. So the ALPHA
+// draw's push pair is still `(capacity - 1, -1)` -- byte-identical to the unsorted arming -- and the
+// only thing that changes when the sort is armed is WHICH BUFFER binding 0 of the draw's set 0
+// names. D10's "no shader variant" therefore survives this rung untouched: the VS was not
+// recompiled, respecialized or given an indirection.
+//
+// # The scatter is FFX-shaped: per-group bases, never one global atomic per element
+//
+// Three LDS phases and ONE global atomic per occupied bin per group:
+//
+//   1. `gs_count[key]++`             -- this group's population per bin            (LDS atomics)
+//   2. `InterlockedAdd(offset[b], gs_count[b], gs_base[b])`  for occupied `b` only (GLOBAL, <= 256)
+//   3. `gs_rank[key]++`              -- this element's rank within its group's bin (LDS atomics)
+//   dst_rank = gs_base[key] + rank
+//
+// Phase 2 is where the ordering is decided and it is the only global traffic: a group RESERVES a
+// contiguous run of each bin it occupies, then fills that run from LDS. The naive form -- one
+// `InterlockedAdd` per element on its bin -- is the ~0.5 ms/frame-at-1M shape plan D5 deletes
+// everywhere else in this subsystem, and it is deleted here for the same reason.
+//
+// The record is loaded ONCE, into a register, and serves all three phases plus the store. The key
+// is computed once from it. So the per-element traffic is exactly `32 B read + 32 B written`.
+//
+// # Stability, stated rather than assumed
+//
+// The permutation is stable WITHIN a group and unspecified ACROSS groups (a group's base depends on
+// the order the groups reached phase 2). That is not a defect and cannot become one: two elements
+// that share a bin share a quantized depth, so an 8-bit key does not distinguish them and no order
+// between them is the right one. The property the sort owes -- and the one the monotonicity
+// readback checks -- is that the KEYS are non-decreasing in rank, which holds regardless.
+//
+// # Compile (offline + hermetic; committed `.spv` is byte-gated)
+//
+//   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T cs_6_0 -E main \
+//       -fspv-target-env=vulkan1.3 particle_sort_scatter.comp.hlsl -Fo particle_sort_scatter.comp.spv
+//
+// # Set / binding vocabulary -- MIRRORS the host `PARTICLE_LAYOUT_ENTRIES` table
+//
+//   (set, binding, kind)
+//   (0, 2,  STORAGE_BUFFER)  RWStructuredBuffer<uint>            p_draw_args      read
+//   (0, 7,  STORAGE_BUFFER)  RWStructuredBuffer<ParticleRender>  p_render         read
+//   (0, {SORT_RENDER_BINDING}, STORAGE_BUFFER)  RWStructuredBuffer<ParticleRender>  p_render_sorted  write
+//   (0, {SORT_BINS_BINDING}, STORAGE_BUFFER)  RWStructuredBuffer<uint>            p_sort_bins      read+write (atomic)
+//
+// # Push constants (16 B) -- the SAME block `particle_sort_hist` declares
+//
+//   [0,12)   float3 cam_eye  -- one eye for both passes, or the two would bin differently
+//   [12,16)  uint   capacity -- CAP (plan D14)
+
+struct SortPush {{
+    float3 cam_eye;
+    uint   capacity;
+}};
+[[vk::push_constant]] SortPush pc;
+
+{render_rec}
+[[vk::binding(2, 0)]]  RWStructuredBuffer<uint>           p_draw_args     : register(u2);
+[[vk::binding(7, 0)]]  RWStructuredBuffer<ParticleRender> p_render        : register(u7);
+[[vk::binding({SORT_RENDER_BINDING}, 0)]] RWStructuredBuffer<ParticleRender> p_render_sorted : register(u{SORT_RENDER_BINDING});
+[[vk::binding({SORT_BINS_BINDING}, 0)]] RWStructuredBuffer<uint>           p_sort_bins     : register(u{SORT_BINS_BINDING});
+
+{consts}
+// One bin per lane, three arrays (see the header's three phases). 3 KB of LDS on a {LOCAL_SIZE}-lane
+// group -- well inside the 32 KB budget, and the reason the phases are separate arrays rather than
+// one reused array is that phase 3 needs `gs_base` to still be live while it counts.
+groupshared uint gs_count[SORT_BINS];
+groupshared uint gs_base[SORT_BINS];
+groupshared uint gs_rank[SORT_BINS];
+
+// === GENERATED particle_sort_key BEGIN ===
+// The SAME text `particle_sort_hist.comp.hlsl` carries, printed from one generator input -- see
+// that file's copy for why the two must be one spelling.
+{key}
+// === GENERATED particle_sort_key END ===
+
+[numthreads({LOCAL_SIZE}, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID, uint lane : SV_GroupIndex) {{
+    gs_count[lane] = 0u;
+    GroupMemoryBarrierWithGroupSync();
+
+{range}
+    uint i = tid.x;
+    bool live = (i < count);
+    // Zero-initialized so the `live == false` lanes carry a defined record through the barriers
+    // below; they store nothing, so the value is never observed.
+    ParticleRender r = (ParticleRender)0;
+    uint key = 0u;
+    if (live) {{
+        // ONE load. The record then serves phase 1, phase 3 and the store, so the pass reads
+        // `p_render` exactly once per element (see the header's traffic line).
+        r   = p_render[pc.capacity - 1u - i];
+        key = particle_sort_key(r.position, pc.cam_eye);
+        InterlockedAdd(gs_count[key], 1u);
+    }}
+    GroupMemoryBarrierWithGroupSync();
+
+    // PHASE 2 -- the only global traffic. `> 0u` keeps it proportional to the group's DISTINCT
+    // keys; the returning value is where this group's run of bin `lane` starts.
+    uint my_count = gs_count[lane];
+    uint my_base  = 0u;
+    if (my_count > 0u) {{
+        InterlockedAdd(p_sort_bins[SORT_OFFSET_BASE + lane], my_count, my_base);
+    }}
+    gs_base[lane] = my_base;
+    gs_rank[lane] = 0u;
+    GroupMemoryBarrierWithGroupSync();
+
+    if (live) {{
+        // PHASE 3 -- this element's rank inside its group's run, from an LDS atomic.
+        uint rank;
+        InterlockedAdd(gs_rank[key], 1u, rank);
+        // The F25 guard, on the MIRROR and not on the source, for the sim's own asymmetric reason:
+        // over `uint` a rank past `capacity` makes `capacity - 1 - rank` UNDERFLOW to ~0xFFFFFFFF,
+        // an unbounded out-of-range store with `robustBufferAccess` OFF. It can only be reached if
+        // the bins already disagree with `alpha.instanceCount`, i.e. if the M2 identity is broken.
+        uint dst_rank = min(gs_base[key] + rank, pc.capacity - 1u);
+        p_render_sorted[pc.capacity - 1u - dst_rank] = r;
+    }}
 }}
 "#
     )
