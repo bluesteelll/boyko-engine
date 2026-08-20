@@ -955,8 +955,8 @@ nothing more. Verified the same way — repointing it stays green.
 
 | What you want to do | Member (line) |
 |---------------------|---------------|
-| Walk every frame in a `.blog` — the ONE walker, shared by `logdec` and the format tests | `frames` (841) |
-| Decode a single frame, stopping rather than guessing at a truncated tail | `decode_frame` (759) |
+| Walk every frame in a `.blog` — the ONE walker, shared by `logdec` and the format tests | `frames` (851) |
+| Decode a single frame, stopping rather than guessing at a truncated tail | `decode_frame` (769) |
 | Turn a `.blog` back into text on the command line | `crates/boyko_log/src/bin/logdec.rs` |
 
 Wire contract: [docs/LOG-BINARY-FORMAT.md](LOG-BINARY-FORMAT.md).

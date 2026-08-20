@@ -1283,7 +1283,17 @@ fn waivers_that_were_not_needed_are_reported_and_pinned() {
     const OVER_WAIVED_MAX: &[(&str, usize)] = &[
         ("ARCHITECTURE.md", 0),
         ("FEATURE_MAP.md", 0),
-        ("MESHLET-VIRTUAL-GEOMETRY-PLAN.md", 6),
+        // 6 → 7, 2026-08-20, and the growth was checked rather than absorbed. All seven waivers
+        // were dropped and the gate re-run: it reported seven STALE anchors, every one the
+        // off-by-one attribution this test's doc describes — `:279` paired with `Coverage` while
+        // the line reads `pub fn rasterize(`, `:211` with `CoveredPixel` while the line reads
+        // `pub struct Coverage {`, and so on down all seven. So all seven suppress false
+        // positives and none is a genuine over-waiver. Restored, ceiling raised.
+        //
+        // ⚠️ The panic message below tells the reader to drop the `~` and lower the ceiling.
+        // That advice is right for a genuine over-waiver and WRONG for this shape, where it
+        // manufactures stale anchors out of correct ones — measured, not supposed.
+        ("MESHLET-VIRTUAL-GEOMETRY-PLAN.md", 7),
         ("SYSTEMS.md", 0),
     ];
 
@@ -1312,7 +1322,14 @@ fn waivers_that_were_not_needed_are_reported_and_pinned() {
         !failed,
         "more anchors are waived-yet-definition-shaped than the pinned ceiling.\n\
          A `~` waives BOTH the shape and the identity assertion, so putting one on a line that \
-         would have passed silently weakens the gate. Drop the `~` from the anchors listed below \
-         and let them be checked; lower the ceiling in the same commit.\n{report}"
+         would have passed silently weakens the gate.\n\
+         CHECK BEFORE YOU DROP: definition-shaped does NOT mean the identity check would pass. \
+         Where the prose runs SYMBOL then anchor — ``Coverage` (`:211`)` — the pairing attributes \
+         anchor i to symbol i+1, so the waiver is suppressing a false positive and dropping it \
+         MANUFACTURES a stale anchor out of a correct one. Drop one `~`, re-run \
+         `internal_docs_line_anchors_land_on_definitions`, and read what it says: a genuine \
+         over-waiver goes green, an off-by-one victim reports `does not define X` against the \
+         line the PREVIOUS symbol defines. Lower the ceiling only for the ones that went green; \
+         raise it, with the measurement, for the ones that did not.\n{report}"
     );
 }
