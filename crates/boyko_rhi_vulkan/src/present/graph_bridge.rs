@@ -2717,6 +2717,10 @@ pub(crate) struct VbPassPlan {
     /// `instanceCount = late_k` in ONE command buffer, so sharing would put a transfer against the
     /// early scope's still-in-flight indirect fetches, every frame, forever, to save 20 KiB × FIF.
     pub(crate) vb_raster_late: Option<crate::framegraph::PassId>,
+    /// VB-SV0 DP3b: the dedicated `sdf_mesh_shadow` prepass — `Some` iff `mesh_leg` AND the
+    /// frame's resolved mode is non-zero (`GBufferScene::vb_sdf_mesh_mode`). Declared after the
+    /// raster arms and before every lit producer; a disarmed frame names no term ResId at all.
+    pub(crate) sv0_pass: Option<crate::framegraph::PassId>,
     /// Rung R2a': the inline `vkCmdUpdateBuffer` that fills this frame's indirect draw records —
     /// and, since rung R2c0, the [`VbBatchDesc`](super::scene_types::VbBatchDesc) array the batch
     /// cull reads. `Some` iff the mesh leg records a raster (the same gate `vb_raster` itself
@@ -3072,10 +3076,11 @@ const VB_BUFFER_COUNT: usize = 17;
 /// VG R3 piece 1 step P1-5 appends the HZB depth pyramid LAST in BOTH `cfg` arms — ResId 20
 /// under `hwrt`, ResId 14 without it — so every existing ResId is byte-unchanged.
 #[cfg(feature = "hwrt")]
-const VB_IMAGE_COUNT: usize = 21;
-/// See the `hwrt` variant's doc: a `not(hwrt)` build keeps the count at 14 + the pyramid = 15.
+const VB_IMAGE_COUNT: usize = 22;
+/// See the `hwrt` variant's doc: a `not(hwrt)` build keeps the count at 14 + the pyramid +
+/// the VB-SV0 term = 16.
 #[cfg(not(feature = "hwrt"))]
-const VB_IMAGE_COUNT: usize = 15;
+const VB_IMAGE_COUNT: usize = 16;
 
 /// VG R3 piece 1 step P1-5: the HZB build passes' framegraph names, indexed by pass number.
 /// [`FrameGraph::add_pass`](crate::framegraph::FrameGraph::add_pass) takes a `&'static str`, so a
@@ -3640,11 +3645,19 @@ impl Renderer<'_> {
                 VK_ACCESS_SHADER_WRITE_BIT,
             ),
         );
-        // ONE assert rather than the two `cfg`-split ones this step replaced: the pyramid is the
-        // last image in BOTH arms, so `ddgi_depth`'s and `shadow_temporal_hist_read`'s former
-        // invariants collapse into this single statement.
+        // VB-SV0 DP3b (Track-A append, after the pyramid so every existing ResId is
+        // byte-unchanged): the R8G8 term the dedicated `sdf_mesh_shadow` pass writes and the
+        // lit-producer tails read. Plain `add_image` — when armed, the pass is its sole
+        // first-touch producer THIS frame's graph knows about (the build-time seed left the
+        // physical image in GENERAL, and an armed pass's UNDEFINED-licensed first write may
+        // discard seed texels it fully overwrites; disarmed frames name no ResId and route zero
+        // barriers, which is what keeps every pin byte-identical by construction).
+        let sdf_term = g.add_image("sdf_term");
+        // ONE assert rather than the two `cfg`-split ones this step replaced: the TERM is the
+        // last image in BOTH arms (the pyramid was, until DP3b appended one more), so the former
+        // per-image invariants collapse into this single statement.
         debug_assert_eq!(
-            hzb_pyramid.index() + 1,
+            sdf_term.index() + 1,
             VB_IMAGE_COUNT,
             "invariant: declare_vb_graph's image declarations must match VB_IMAGE_COUNT"
         );
@@ -3962,6 +3975,9 @@ impl Renderer<'_> {
         // slot is between the poison+build block's ARMED position and `vb_cull_late`, both of which
         // live inside the `if mesh_leg` block below.
         let mut hzb_dump_depth_early: Option<crate::framegraph::PassId> = None;
+        // VB-SV0 DP3b: assigned inside the mesh-leg block below (graph order — after the raster
+        // arms, before every lit producer), read by BOTH the fused and the split tail arms.
+        let mut sv0_pass: Option<crate::framegraph::PassId> = None;
         let (
             vb_classify_fill,
             vb_classify_count,
@@ -4576,6 +4592,41 @@ impl Renderer<'_> {
                     p
                 });
 
+            // VB-SV0 DP3b: the dedicated `sdf_mesh_shadow` prepass — declared AFTER the raster
+            // arms (it `.Load`s the `vb_id` they produced) and BEFORE every lit producer (they
+            // `min`-combine its term). Gated on the frame's RESOLVED mode: a disarmed frame does
+            // not declare the pass and no term ResId is named anywhere, so the graph routes zero
+            // barriers on it — structural absence, which is what keeps every disarmed pin
+            // byte-identical by construction rather than by an argument about untaken branches.
+            //
+            // Reads `vb_id` (COMPUTE, SRO — the same access every lit producer declares) and the
+            // instance ring + light table (COMPUTE reads — the geometry fetch and the primary-
+            // directional scan); writes `sdf_term` (COMPUTE, GENERAL — the graph's first touch,
+            // extending the build-time seed's GENERAL). The SDF edit list is boot-static and
+            // outside the graph (the S2 rule its own binding comment carries).
+            sv0_pass = (mesh_leg && scene.vb_sdf_mesh_mode != 0).then(|| {
+                let p = g.add_pass("sdf_mesh_shadow");
+                g.image_access(
+                    vb_id,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    SubRange::COLOR,
+                );
+                g.image_access(
+                    sdf_term,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    SubRange::COLOR,
+                );
+                g.buffer_access(vb_instance_ring, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+                if light_upload.is_some() {
+                    g.buffer_access(light_table, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+                }
+                p
+            });
+
             // VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2c: the
             // classify chain `fill -> count -> scan -> scatter`, declared BEFORE the `lit`
             // producer (below) — gated on `use_classified` (P1-4: a `!use_classified` frame pays
@@ -4693,6 +4744,17 @@ impl Renderer<'_> {
                     VK_IMAGE_LAYOUT_GENERAL,
                     SubRange::COLOR,
                 );
+                if sv0_pass.is_some() {
+                    // VB-SV0 DP3b: the term read — declared only on an armed frame (the same
+                    // conditional shape as the light_table read below/above), GENERAL end-to-end.
+                    g.image_access(
+                        sdf_term,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        VK_IMAGE_LAYOUT_GENERAL,
+                        SubRange::COLOR,
+                    );
+                }
                 g.buffer_access(vb_instance_ring, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
                 if light_upload.is_some() {
                     g.buffer_access(light_table, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
@@ -4755,6 +4817,17 @@ impl Renderer<'_> {
                     VK_IMAGE_LAYOUT_GENERAL,
                     SubRange::COLOR,
                 );
+                if sv0_pass.is_some() {
+                    // VB-SV0 DP3b: the term read — declared only on an armed frame (the same
+                    // conditional shape as the light_table read below/above), GENERAL end-to-end.
+                    g.image_access(
+                        sdf_term,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        VK_IMAGE_LAYOUT_GENERAL,
+                        SubRange::COLOR,
+                    );
+                }
                 g.buffer_access(vb_instance_ring, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
                 if light_upload.is_some() {
                     g.buffer_access(light_table, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
@@ -5193,6 +5266,17 @@ impl Renderer<'_> {
                 VK_IMAGE_LAYOUT_GENERAL,
                 SubRange::COLOR,
             );
+            if sv0_pass.is_some() {
+                // VB-SV0 DP3b: the term read — declared only on an armed frame (the fused tails'
+                // own conditional shape), GENERAL end-to-end.
+                g.image_access(
+                    sdf_term,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    SubRange::COLOR,
+                );
+            }
             g.buffer_access(vb_instance_ring, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
             if light_upload.is_some() {
                 g.buffer_access(light_table, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
@@ -5700,6 +5784,7 @@ impl Renderer<'_> {
             hzb_dump_depth_early,
             vb_raster,
             vb_raster_late,
+            sv0_pass,
             vb_classify_fill,
             vb_classify_count,
             vb_classify_scan,
@@ -5810,6 +5895,11 @@ impl Renderer<'_> {
                 // always-allocated one): with the pyramid disarmed no pass names its ResId, so
                 // the NULL is inert.
                 targets.hzb.as_ref().map_or(VkImage::NULL, |h| h.pyramid.image),
+                // VB-SV0 DP3b (LAST in both `cfg` arms — ResId 15, or 21 under `hwrt`): the R8G8
+                // term ring the dedicated pass writes and the tails read. RINGED (`[fi]`), always
+                // allocated on a VB boot (`VbTargets::sdf_term`); with SV0 disarmed no pass names
+                // its ResId, so the live handle is as inert as a NULL would be.
+                vb.sdf_term[fi].image,
             ],
             #[cfg(not(feature = "hwrt"))]
             buffers: [

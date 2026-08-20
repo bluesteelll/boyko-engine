@@ -3092,6 +3092,21 @@ pub struct GBufferScene<'a> {
     /// Set 2 = [`Self::vb_geometry_set`]'s layout), the SAME `Option`/UNREAD rationale as
     /// [`Self::vb_classify_count_pipeline`].
     pub vb_shade_pipeline: Option<&'a ComputePipeline>,
+    /// VB-SV0 DP3b: the dedicated `sdf_mesh_shadow.comp` prepass pipeline (its own Set-0
+    /// vocabulary — `gpu_scene`'s `sdf_mesh_shadow_layout0` — Set 1 declared-never-bound, Set 2
+    /// the geometry table). `Some` on every VB boot (built beside
+    /// [`Self::vb_resolve_pipeline`]); recorded ONLY when [`Self::vb_sdf_mesh_mode`] is non-zero.
+    pub sdf_mesh_shadow_pipeline: Option<&'a ComputePipeline>,
+    /// VB-SV0 DP3b: the prepass's OWN Set-0 layout (`{0, 2, 3, 5, 6, 10}` — see the pipeline
+    /// field), threaded so `DeferredSets::build` can build the per-FIF prepass sets against the
+    /// SAME layout object the pipeline was created from (the R5 identity rule).
+    pub sdf_mesh_shadow_layout0: Option<&'a VulkanBindGroupLayout>,
+    /// VB-SV0 DP3b: the frame's RESOLVED mode — bit 0 shadow, bit 1 AO, `0` = disarmed. The
+    /// runner reads `LightingConfig`'s `_armed` pair (published by `sync_sv0_light_gate`, monotone
+    /// downward) and threads it here; `declare_vb_graph`/`record_vb_pass` key the pass and the
+    /// tails' term-read access on it, so a disarmed frame names no term ResId and records no
+    /// dispatch — structural absence, the capability rule.
+    pub vb_sdf_mesh_mode: u32,
     /// The VB-only Set-0 (core + images + classify) bind-group LAYOUT — 9 bindings, `{0..7, 11}`:
     /// `gVbInstances` @0 (VERTEX+COMPUTE, [`Self::vb_instance_ring`]), `instance_materials` @1
     /// (COMPUTE, [`Self::forward_instance_material_ring`] — the SAME per-instance-material ring

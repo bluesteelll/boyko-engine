@@ -636,6 +636,11 @@ pub struct GBufferTargets {
     /// [`ForwardTargets::set1`] (the shadow set, reused verbatim); Set 2 is
     /// [`GBufferScene::vb_geometry_set`] (the Decision-0 geometry table, bound directly — no ring).
     pub(crate) vb_set0: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// VB-SV0 DP3b: the dedicated `sdf_mesh_shadow` prepass's per-FIF Set-0 ring — its OWN
+    /// vocabulary (`{0, 2, 3, 5, 6, 10}` against `gpu_scene`'s `sdf_mesh_shadow_layout0`), built
+    /// on every VB boot beside [`Self::vb_set0`]; the recorder binds `[fi]` only on a frame whose
+    /// resolved mode is non-zero.
+    pub(crate) sdf_mesh_shadow_set0: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// Textured-PBR rung TV0 (`RENDER-PARITY-PLAN.md` §2.3): the `vb_shade` TEXTURED-variant
     /// Set-0 vocabulary descriptor set RING, written ONCE against
     /// [`GBufferScene::vb_layout0`] — a DISTINCT descriptor SET instance from [`Self::vb_set0`]
@@ -752,19 +757,6 @@ pub struct GBufferTargets {
     /// Acquired just before the deferred sets, so [`Self::destroy`] tears it down just after them
     /// — a descriptor set retains the image view it was written with by raw handle.
     pub(crate) hzb_null: VulkanTexture,
-    /// VB-SV0 DP2 — the 1×1 `R8G8_UNORM` white placeholder the four VB Set-0 sets bind at @10
-    /// whenever the dedicated `sdf_mesh_shadow` pass is disarmed — which is every committed pin.
-    ///
-    /// The [`Self::hzb_null`] idiom verbatim, one binding over: UNCONDITIONAL (the sets' entry
-    /// lists have fixed arity, so SOMETHING valid must sit at @10 on every boot), minted + cleared
-    /// to `(1.0, 1.0)` ("no effect" in both term channels — `min(x, 1.0) == x` exactly) +
-    /// transitioned to `GENERAL` by [`Self::boot_seed_sv0_term_null`] in [`Self::create`], and
-    /// never touched again — no framegraph pass names it, so that boot submit is its only layout
-    /// producer. DP3's arming re-points @10 at the real term target at sync time (the AA
-    /// `present_set` re-point precedent), so recording never branches on arming.
-    ///
-    /// Acquired beside [`Self::hzb_null`], destroyed beside it — same retention argument.
-    pub(crate) sv0_term_null: VulkanTexture,
     /// VG R3 piece 1 step P1-2 — whether the pyramid was ARMED when these targets were built.
     ///
     /// A STORED field for exactly the reason [`Self::aa_arm`] is one: [`Self::sync_gbuffer`]'s
@@ -1078,6 +1070,20 @@ pub(crate) struct VbTargets {
     /// `SAMPLED` (`.Load` unfiltered fetch, `vb_resolve`). Cleared to the sentinel `(0xFFFFFFFF,
     /// 0)` every frame by `record_vb` (mirrors `ForwardTargets::depth`'s per-frame re-clear).
     pub(crate) vb_id: [VulkanTexture; FRAMES_IN_FLIGHT],
+    /// VB-SV0 DP3b — the `R8G8_UNORM` term RING the dedicated `sdf_mesh_shadow` pass writes
+    /// (`STORAGE`, its `u6`) and the ten lit-producer tails `.Load` at Set-0 @10 (`SAMPLED`).
+    ///
+    /// **Bound at @10 ALWAYS on a VB boot — armed or not — and seeded once at build** (cleared to
+    /// `(1.0, 1.0)` = "no effect", transitioned to `GENERAL`): the tails' read sits behind the
+    /// runtime mode gate, but DXC is free to lower a guarded load to an eager fetch plus
+    /// `OpSelect`, so the image must hold a defined GENERAL layout and a neutral value even on a
+    /// frame where no pass names it. When the pass IS armed it re-writes every covered texel in
+    /// `GENERAL` (first write extends the seed's layout, no transition), and a disarmed frame
+    /// after an armed one still shows stale-but-unread texels — unread because the gate that
+    /// armed the pass is the same word the tails' loads key on.
+    ///
+    /// `TRANSFER_DST` is the build-time seed clear — the same two-bits argument `hzb_null_desc` makes.
+    pub(crate) sdf_term: [VulkanTexture; FRAMES_IN_FLIGHT],
 }
 
 impl VbTargets {
@@ -1129,7 +1135,64 @@ impl VbTargets {
         }
         let vb_id: [VulkanTexture; FRAMES_IN_FLIGHT] =
             vb_id_slots.map(|s| s.expect("invariant: every vb_id ring slot built before here"));
-        Ok(Self { vb_id })
+
+        // VB-SV0 DP3b: the term ring — full-extent `R8G8_UNORM`, STORAGE (the pass's `u6`) |
+        // SAMPLED (the tails' @10) | TRANSFER_DST (the one-time seed below).
+        let sdf_term_desc = TextureDesc {
+            width: extent.width,
+            height: extent.height,
+            depth: 1,
+            format: Format::R8G8Unorm,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::STORAGE | ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
+            array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
+        };
+        let mut sdf_term_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] = [const { None }; FRAMES_IN_FLIGHT];
+        for slot in sdf_term_slots.iter_mut() {
+            match RhiDevice::create_texture(ctx, &sdf_term_desc).map_err(SwapchainError::DepthImage) {
+                Ok(t) => *slot = Some(t),
+                Err(e) => {
+                    // SAFETY: every drained slot was created on `ctx` above, referenced by no
+                    // submission (the build phase); `Option::take` leaves each `None` so each is
+                    // destroyed exactly once — the vb_id ladder above, verbatim, plus the already
+                    // fully-built vb_id ring itself.
+                    unsafe {
+                        for built in sdf_term_slots.iter_mut() {
+                            if let Some(t) = built.take() {
+                                RhiDevice::destroy_texture(ctx, t);
+                            }
+                        }
+                        for t in vb_id {
+                            RhiDevice::destroy_texture(ctx, t);
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        let sdf_term: [VulkanTexture; FRAMES_IN_FLIGHT] =
+            sdf_term_slots.map(|s| s.expect("invariant: every sdf_term ring slot built before here"));
+
+        // The one-time seed: both slots cleared to (1.0, 1.0) and left in GENERAL — see the
+        // field's doc for why a defined layout + neutral value must hold even on disarmed frames.
+        if let Err(e) = seed_sdf_term_ring(ctx, &sdf_term) {
+            // SAFETY: everything above was created on `ctx`; the seed's own submit (if reached)
+            // was drained by `seed_sdf_term_ring`'s error path before it returned; by-value,
+            // destroyed exactly once.
+            unsafe {
+                for t in sdf_term {
+                    RhiDevice::destroy_texture(ctx, t);
+                }
+                for t in vb_id {
+                    RhiDevice::destroy_texture(ctx, t);
+                }
+            }
+            return Err(e);
+        }
+
+        Ok(Self { vb_id, sdf_term })
     }
 
     /// # Safety
@@ -1141,8 +1204,78 @@ impl VbTargets {
             for t in self.vb_id {
                 RhiDevice::destroy_texture(ctx, t);
             }
+            for t in self.sdf_term {
+                RhiDevice::destroy_texture(ctx, t);
+            }
         }
     }
+}
+
+/// VB-SV0 DP3b: clear both term-ring slots to `(1.0, 1.0)` and leave them in `GENERAL` — ONE
+/// encoder, one submit, fence-waited. The [`GBufferTargets::boot_seed_null_image`] protocol over
+/// a ring instead of a single 1×1 (that fn owns its image and this one does not, which is why it
+/// is not the same function).
+fn seed_sdf_term_ring(
+    ctx: &VulkanContext,
+    ring: &[VulkanTexture; FRAMES_IN_FLIGHT],
+) -> Result<(), SwapchainError> {
+    let mut encoder = RhiDevice::create_command_encoder(ctx).map_err(SwapchainError::DepthImage)?;
+    let fence = match RhiDevice::create_fence(ctx, false) {
+        Ok(f) => f,
+        Err(e) => {
+            // SAFETY: the encoder was just created on `ctx` and never submitted; by value.
+            unsafe { RhiDevice::destroy_command_encoder(ctx, encoder) };
+            return Err(SwapchainError::DepthImage(e));
+        }
+    };
+    let range = ImageSubresourceRange {
+        aspect: ImageAspect::COLOR,
+        base_mip_level: 0,
+        level_count: 1,
+        base_array_layer: 0,
+        layer_count: 1,
+    };
+    let record = (|| -> Result<(), SwapchainError> {
+        encoder.begin().map_err(SwapchainError::DepthImage)?;
+        for t in ring {
+            encoder.image_barrier(&ImageBarrierDesc {
+                texture: t,
+                src_stage: BarrierStage::TOP_OF_PIPE,
+                dst_stage: BarrierStage::TRANSFER,
+                src_access: BarrierAccess::NONE,
+                dst_access: BarrierAccess::TRANSFER_WRITE,
+                old_layout: ImageLayout::Undefined,
+                new_layout: ImageLayout::TransferDstOptimal,
+                range,
+            });
+            encoder.clear_color_image(t, ImageLayout::TransferDstOptimal, [1.0, 1.0, 0.0, 0.0], range);
+            encoder.image_barrier(&ImageBarrierDesc {
+                texture: t,
+                src_stage: BarrierStage::TRANSFER,
+                dst_stage: BarrierStage::COMPUTE_SHADER,
+                src_access: BarrierAccess::TRANSFER_WRITE,
+                dst_access: BarrierAccess::SHADER_READ | BarrierAccess::SHADER_WRITE,
+                old_layout: ImageLayout::TransferDstOptimal,
+                new_layout: ImageLayout::General,
+                range,
+            });
+        }
+        encoder.end().map_err(SwapchainError::DepthImage)?;
+        let queue = ctx.rhi_queue();
+        queue.submit(&encoder, &fence).map_err(SwapchainError::DepthImage)?;
+        RhiDevice::wait_fence(ctx, &fence, u64::MAX).map_err(SwapchainError::DepthImage)?;
+        Ok(())
+    })();
+    if record.is_err() {
+        let _ = RhiDevice::wait_idle(ctx);
+    }
+    // SAFETY: encoder/fence created on `ctx`; the only submission (if reached) completed —
+    // fence-waited on Ok, device-drained on Err; by value, destroyed exactly once.
+    unsafe {
+        RhiDevice::destroy_command_encoder(ctx, encoder);
+        RhiDevice::destroy_fence(ctx, fence);
+    }
+    record
 }
 
 /// VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2a (dark infra,
@@ -1950,34 +2083,6 @@ fn hzb_null_desc() -> TextureDesc {
 #[inline]
 const fn hzb_null_desc_is_bindable_and_seedable(desc: &TextureDesc) -> bool {
     desc.usage.contains(ImageUsage::SAMPLED) && desc.usage.contains(ImageUsage::TRANSFER_DST)
-}
-
-/// VB-SV0 DP2 — the 1×1 `R8G8_UNORM` white placeholder the VB Set-0 sets bind at @10 whenever the
-/// dedicated `sdf_mesh_shadow` pass is disarmed.
-///
-/// The [`hzb_null_desc`] idiom verbatim, one format over: `SAMPLED` for the descriptor write,
-/// `TRANSFER_DST` for the boot clear, 1×1 single-mip for the in-range-by-ADDRESS argument (the
-/// tails' reader `.Load`s at the pixel coordinate only when the runtime mode is non-zero, and a
-/// disarmed boot never sets it — but DXC is free to lower the guard to an eager fetch plus
-/// `OpSelect`, so the address argument must not depend on reachability). The clear value is
-/// `(1.0, 1.0)` — both term channels at "no effect", so even a value that reaches arithmetic
-/// provably changes nothing: `min(x, 1.0) == x` exactly.
-///
-/// Shares [`hzb_null_desc_is_bindable_and_seedable`] — the predicate is about the two usage bits,
-/// not about HZB; its name keeps the coiner.
-#[inline]
-fn sv0_term_null_desc() -> TextureDesc {
-    TextureDesc {
-        width: 1,
-        height: 1,
-        depth: 1,
-        format: Format::R8G8Unorm,
-        dimension: TextureDimension::D2,
-        usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
-        array_layers: 1,
-        mip_levels: 1,
-        view_format: None,
-    }
 }
 
 /// Anti-aliasing campaign: which AA mode [`GBufferTargets`] is CURRENTLY armed for —
@@ -3260,6 +3365,8 @@ struct DeferredSets {
     /// (both need `core.lit[i]`), so its own error path tears down every prior set including
     /// `sdf_forward_set`.
     vb_set0: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// VB-SV0 DP3b: the prepass Set-0 ring — see `GBufferTargets`' mirror field's doc.
+    sdf_mesh_shadow_set0: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// Textured-PBR rung TV0: the `vb_shade` TEXTURED-variant Set-0 vocabulary set — `None`
     /// unless `vb_set0` is also built AND both [`GBufferScene::vb_tex_instance_material_ring`]/
     /// [`GBufferScene::vb_shade_tex_pipeline`] are `Some`. Built immediately after `vb_set0`
@@ -3365,11 +3472,6 @@ impl DeferredSets {
         // HZB-armed one additionally gets `HzbTargets::vb_cull_set_hzb`, the same entries with the
         // real pyramid there.
         hzb_null: &VulkanTexture,
-        // VB-SV0 DP2: [`GBufferTargets::sv0_term_null`], minted + cleared to `(1,1)` +
-        // transitioned by the caller beside `hzb_null`. UNCONDITIONAL for the same fixed-arity
-        // reason — the four VB Set-0 sets write it at @10 on every VB boot, and DP3's arming
-        // re-points the binding at the real term target at sync time.
-        sv0_term_null: &VulkanTexture,
     ) -> Result<DeferredSets, SwapchainError> {
         // The address half of D7's in-range argument, checked at the seam where the image is handed
         // to the set builder: the disarmed reader clamps its coordinates AND its level to 0, and
@@ -4035,6 +4137,10 @@ impl DeferredSets {
             let vb_id_ring = &vb
                 .expect("invariant: path_is_vb() implies TargetsProfile::VbMesh (vb is Some)")
                 .vb_id;
+            // VB-SV0 DP3b: the term ring, bound at @10 ALWAYS on a VB boot -- see its field doc.
+            let sdf_term_ring = &vb
+                .expect("invariant: reached only under path_is_vb (vb is Some)")
+                .sdf_term;
             let gclassify_ring = &vb_classify
                 .expect("invariant: path_is_vb() implies TargetsProfile::VbMesh (vb_classify is Some)")
                 .gclassify;
@@ -4056,10 +4162,10 @@ impl DeferredSets {
                     },
                     BindGroupEntry::StorageImage { texture: &core.lit[slot] },
                     BindGroupEntry::StorageBuffer { buffer: &gclassify_ring[slot] },
-                    // VB-SV0 DP2: `gSdfTerm` @10 — the 1×1 white placeholder until DP3's arming
-                    // re-points it; `SampledImageAtGeneral` because the placeholder's one layout
-                    // producer left it in `GENERAL` (the `hzb_null` @9 idiom verbatim).
-                    BindGroupEntry::SampledImageAtGeneral { texture: sv0_term_null },
+                    // VB-SV0 DP3b: `gSdfTerm` @10 — the term RING, bound ALWAYS on a VB boot
+                    // (armed or not; the build-time seed left every slot white and in `GENERAL`,
+                    // so `SampledImageAtGeneral` records the layout its one producer guarantees).
+                    BindGroupEntry::SampledImageAtGeneral { texture: &sdf_term_ring[slot] },
                     // VG rung R2d-2: `gVbVisibleInstance` @11 — the LAST layout entry, so it is
                     // the LAST slice element (`create_bind_group` matches positionally).
                     BindGroupEntry::StorageBuffer { buffer: &vb_visible_instance[slot] },
@@ -4120,6 +4226,94 @@ impl DeferredSets {
             None
         };
 
+        // VB-SV0 DP3b: the dedicated prepass's OWN per-FIF Set-0 ring — built on every VB boot
+        // (armed or not; recording keys on the frame's mode, and a set that exists unrecorded
+        // costs two descriptors). Entries POSITIONALLY match `gpu_scene`'s
+        // `sdf_mesh_shadow_layout0` `{0, 2, 3, 5, 6, 10}`: the instance ring, the camera ring,
+        // the light table, `gVbId` (sampled, the placeholder-sampler idiom), `gSdfTerm` (STORAGE
+        // — the pass WRITES it; the tails' @10 reads the same ring as SAMPLED), and the SDF edit
+        // list (the deferred/marcher sets' identical expression).
+        let sdf_mesh_shadow_set0: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> = if let (true, Some(layout)) =
+            (scene.path_is_vb(), scene.sdf_mesh_shadow_layout0)
+        {
+            let vb_instance_ring = scene
+                .vb_instance_ring
+                .expect("invariant: path_is_vb() requires scene.vb_instance_ring");
+            let vb_ref = vb.expect("invariant: path_is_vb() implies TargetsProfile::VbMesh (vb is Some)");
+            let mut slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] = [const { None }; FRAMES_IN_FLIGHT];
+            let mut failure: Option<crate::error::VulkanError> = None;
+            for (slot, dst) in slots.iter_mut().enumerate() {
+                let entries = [
+                    BindGroupEntry::StorageBuffer { buffer: &vb_instance_ring[slot] },
+                    BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[slot] },
+                    BindGroupEntry::StorageBuffer { buffer: scene.light_table },
+                    BindGroupEntry::SampledImage {
+                        texture: &vb_ref.vb_id[slot],
+                        sampler: scene.depth_sampler,
+                    },
+                    BindGroupEntry::StorageImage { texture: &vb_ref.sdf_term[slot] },
+                    BindGroupEntry::StorageBuffer { buffer: scene.edit_list },
+                ];
+                let desc = BindGroupDesc::<Vulkan> { layout, entries: &entries };
+                match RhiDevice::create_bind_group(ctx, &desc) {
+                    Ok(g) => *dst = Some(g),
+                    Err(e) => {
+                        failure = Some(e);
+                        break;
+                    }
+                }
+            }
+            if let Some(e) = failure {
+                // SAFETY: the prepass slots already built [0..slot) plus everything the vb_set0
+                // arm's own failure ladder names (the vb ring is now FULLY built — it succeeded
+                // one block above), created on `ctx`, referenced by no submission; each destroyed
+                // exactly once, reverse acquisition.
+                unsafe {
+                    for s in slots.iter_mut() {
+                        if let Some(g) = s.take() {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    if let Some(vs) = vb_set0 {
+                        for g in vs {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    if let Some(sfs) = sdf_forward_set {
+                        for g in sfs {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    for g in present_set {
+                        RhiDevice::destroy_bind_group(ctx, g);
+                    }
+                    if let Some(du) = ddgi_update_set {
+                        RhiDevice::destroy_bind_group(ctx, du);
+                    }
+                    if let Some(ss) = ssao_set {
+                        for g in ss {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    if let Some(cs) = cull_set {
+                        for g in cs {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    for g in resolve_set {
+                        RhiDevice::destroy_bind_group(ctx, g);
+                    }
+                    for g in vocab_set {
+                        RhiDevice::destroy_bind_group(ctx, g);
+                    }
+                }
+                return Err(SwapchainError::DepthImage(e));
+            }
+            Some(slots.map(|s| s.expect("invariant: every prepass Set-0 ring slot built before reaching here")))
+        } else {
+            None
+        };
+
         // Textured-PBR rung TV0 (`RENDER-PARITY-PLAN.md` §2.3): the `vb_shade` TEXTURED-variant
         // Set-0 vocabulary RING — a DISTINCT descriptor SET instance from `vb_set0` against the
         // SAME `vb_layout0` layout object (R5: Vulkan's `STORAGE_BUFFER` binding shape carries no
@@ -4140,6 +4334,10 @@ impl DeferredSets {
             let vb_id_ring = &vb
                 .expect("invariant: path_is_vb() implies TargetsProfile::VbMesh (vb is Some)")
                 .vb_id;
+            // VB-SV0 DP3b: the term ring, bound at @10 ALWAYS on a VB boot -- see its field doc.
+            let sdf_term_ring = &vb
+                .expect("invariant: reached only under path_is_vb (vb is Some)")
+                .sdf_term;
             let gclassify_ring = &vb_classify
                 .expect("invariant: path_is_vb() implies TargetsProfile::VbMesh (vb_classify is Some)")
                 .gclassify;
@@ -4163,7 +4361,7 @@ impl DeferredSets {
                     BindGroupEntry::StorageImage { texture: &core.lit[slot] },
                     BindGroupEntry::StorageBuffer { buffer: &gclassify_ring[slot] },
                     // VB-SV0 DP2: `gSdfTerm` @10 — identical to `vb_set0`'s own.
-                    BindGroupEntry::SampledImageAtGeneral { texture: sv0_term_null },
+                    BindGroupEntry::SampledImageAtGeneral { texture: &sdf_term_ring[slot] },
                     // VG rung R2d-2: `gVbVisibleInstance` @11 — identical to `vb_set0`'s own; this
                     // variant differs from it only at binding 1.
                     BindGroupEntry::StorageBuffer { buffer: &vb_visible_instance[slot] },
@@ -4255,6 +4453,10 @@ impl DeferredSets {
             let vb_id_ring = &vb
                 .expect("invariant: vb_layout0_froxel armed implies TargetsProfile::VbMesh (vb is Some)")
                 .vb_id;
+            // VB-SV0 DP3b: the term ring, bound at @10 ALWAYS on a VB boot -- see its field doc.
+            let sdf_term_ring = &vb
+                .expect("invariant: reached only under path_is_vb (vb is Some)")
+                .sdf_term;
             let gclassify_ring = &vb_classify
                 .expect("invariant: vb_layout0_froxel armed implies TargetsProfile::VbMesh (vb_classify is Some)")
                 .gclassify;
@@ -4280,7 +4482,7 @@ impl DeferredSets {
                     BindGroupEntry::StorageBuffer { buffer: grid },
                     BindGroupEntry::StorageBuffer { buffer: index },
                     // VB-SV0 DP2: `gSdfTerm` @10 — identical to `vb_set0`'s own.
-                    BindGroupEntry::SampledImageAtGeneral { texture: sv0_term_null },
+                    BindGroupEntry::SampledImageAtGeneral { texture: &sdf_term_ring[slot] },
                     // VG rung R2d-2: `gVbVisibleInstance` @11 — LAST in `vb_layout0_froxel` too
                     // (`{0..9, 10, 11}`), so it stays the LAST slice element here as well.
                     BindGroupEntry::StorageBuffer { buffer: &vb_visible_instance[slot] },
@@ -4385,6 +4587,10 @@ impl DeferredSets {
             let vb_id_ring = &vb
                 .expect("invariant: vb_layout0_froxel armed implies TargetsProfile::VbMesh (vb is Some)")
                 .vb_id;
+            // VB-SV0 DP3b: the term ring, bound at @10 ALWAYS on a VB boot -- see its field doc.
+            let sdf_term_ring = &vb
+                .expect("invariant: reached only under path_is_vb (vb is Some)")
+                .sdf_term;
             let gclassify_ring = &vb_classify
                 .expect("invariant: vb_layout0_froxel armed implies TargetsProfile::VbMesh (vb_classify is Some)")
                 .gclassify;
@@ -4410,7 +4616,7 @@ impl DeferredSets {
                     BindGroupEntry::StorageBuffer { buffer: grid },
                     BindGroupEntry::StorageBuffer { buffer: index },
                     // VB-SV0 DP2: `gSdfTerm` @10 — identical to `vb_set0_froxel`'s own.
-                    BindGroupEntry::SampledImageAtGeneral { texture: sv0_term_null },
+                    BindGroupEntry::SampledImageAtGeneral { texture: &sdf_term_ring[slot] },
                     // VG rung R2d-2: `gVbVisibleInstance` @11 — identical to `vb_set0_froxel`'s
                     // own; this variant differs from it only at binding 1.
                     BindGroupEntry::StorageBuffer { buffer: &vb_visible_instance[slot] },
@@ -5314,6 +5520,7 @@ impl DeferredSets {
                             present_set,
                             sdf_forward_set,
                             vb_set0,
+                            sdf_mesh_shadow_set0,
                             vb_set0_tex,
                             vb_set0_froxel,
                             vb_set0_tex_froxel,
@@ -5379,6 +5586,10 @@ impl DeferredSets {
             let vb_id_ring = &vb
                 .expect("invariant: path_is_vb() implies TargetsProfile::VbMesh (vb is Some)")
                 .vb_id;
+            // VB-SV0 DP3b: the term ring, bound at @10 ALWAYS on a VB boot -- see its field doc.
+            let sdf_term_ring = &vb
+                .expect("invariant: reached only under path_is_vb (vb is Some)")
+                .sdf_term;
             let gclassify_ring = &vb_classify
                 .expect("invariant: path_is_vb() implies TargetsProfile::VbMesh (vb_classify is Some)")
                 .gclassify;
@@ -5404,7 +5615,7 @@ impl DeferredSets {
                     // VB-SV0 DP2: `gSdfTerm` @10 — identical to `vb_set0`'s own. This LATE set is
                     // the fifth member of the set0 family, and the P1a arity assert is what found
                     // it when DP2's first sweep updated only the four the S2 notes named.
-                    BindGroupEntry::SampledImageAtGeneral { texture: sv0_term_null },
+                    BindGroupEntry::SampledImageAtGeneral { texture: &sdf_term_ring[slot] },
                     // THE ONE ENTRY THAT DIFFERS from `vb_set0`: @11 is the LATE candidate/survivor
                     // list, not the early one.
                     BindGroupEntry::StorageBuffer { buffer: &vb_late_visible[slot] },
@@ -5440,6 +5651,7 @@ impl DeferredSets {
                         present_set,
                         sdf_forward_set,
                         vb_set0,
+                        sdf_mesh_shadow_set0,
                         vb_set0_tex,
                         vb_set0_froxel,
                         vb_set0_tex_froxel,
@@ -5473,6 +5685,7 @@ impl DeferredSets {
             present_set,
             sdf_forward_set,
             vb_set0,
+            sdf_mesh_shadow_set0,
             vb_set0_tex,
             vb_set0_froxel,
             vb_set0_tex_froxel,
@@ -5587,6 +5800,11 @@ impl DeferredSets {
             // Multi-paradigm render-path plan, rung R8: the VB v1 Set-0 vocabulary set,
             // `Option`-guarded (present only when `scene.path_is_vb()` held). Built AFTER
             // `sdf_forward_set` (so destroyed BEFORE it, reverse acquisition).
+            if let Some(ps) = self.sdf_mesh_shadow_set0 {
+                for g in ps {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
             if let Some(vs) = self.vb_set0 {
                 for g in vs {
                     RhiDevice::destroy_bind_group(ctx, g);
@@ -7569,12 +7787,6 @@ impl GBufferTargets {
         Self::boot_seed_null_image(ctx, hzb_null_desc(), [0.0; 4])
     }
 
-    /// VB-SV0 DP2: the 1×1 `R8G8_UNORM` white term placeholder — `(1.0, 1.0)` is "no effect" in
-    /// both channels (`min(x, 1.0) == x` exactly). See [`sv0_term_null_desc`] for the rest.
-    fn boot_seed_sv0_term_null(ctx: &VulkanContext) -> Result<VulkanTexture, SwapchainError> {
-        Self::boot_seed_null_image(ctx, sv0_term_null_desc(), [1.0, 1.0, 0.0, 0.0])
-    }
-
     /// The shared body of the boot-seeded null images: create → UNDEFINED→TRANSFER_DST → clear to
     /// `clear` → TRANSFER_DST→GENERAL (made available to COMPUTE/SHADER_READ) → submit →
     /// fence-wait, with every transient torn down on every path. Factored at VB-SV0 DP2 when the
@@ -7977,35 +8189,6 @@ impl GBufferTargets {
             }
         };
 
-        // VB-SV0 DP2: the term placeholder, seeded beside `hzb_null` under the same self-draining
-        // contract (`boot_seed_sv0_term_null` returns `Err` with nothing allocated).
-        let sv0_term_null = match Self::boot_seed_sv0_term_null(ctx) {
-            Ok(t) => t,
-            Err(e) => {
-                // SAFETY: same set as `hzb_null`'s own error arm above, plus `hzb_null` itself
-                // (fence-waited, referenced by no submission and no set yet); each destroyed
-                // exactly once, reverse acquisition.
-                unsafe {
-                    RhiDevice::destroy_texture(ctx, hzb_null);
-                    if let Some(s) = smaa_imgs {
-                        s.destroy(ctx);
-                    }
-                    if let Some(a) = aa_imgs {
-                        a.destroy(ctx);
-                    }
-                    if let Some(s) = ssao_atrous_imgs {
-                        s.destroy(ctx);
-                    }
-                    #[cfg(feature = "hwrt")]
-                    if let Some(v) = shadow_vis_imgs {
-                        v.destroy(ctx);
-                    }
-                    core.destroy(ctx);
-                }
-                return Err(e);
-            }
-        };
-
         let deferred = match DeferredSets::build(
             ctx,
             scene,
@@ -8018,7 +8201,6 @@ impl GBufferTargets {
             vb.as_ref(),
             vb_classify.as_ref(),
             &hzb_null,
-            &sv0_term_null,
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -8029,7 +8211,6 @@ impl GBufferTargets {
                 // smaa_imgs → aa_imgs → ssao_atrous_imgs → shadow-vis → core). `DeferredSets::build`
                 // already drained its own partial sets, so no set retains `hzb_null`'s view.
                 unsafe {
-                    RhiDevice::destroy_texture(ctx, sv0_term_null);
                     RhiDevice::destroy_texture(ctx, hzb_null);
                     if let Some(s) = smaa_imgs {
                         s.destroy(ctx);
@@ -8212,6 +8393,7 @@ impl GBufferTargets {
             present_set,
             sdf_forward_set,
             vb_set0,
+            sdf_mesh_shadow_set0,
             vb_set0_tex,
             vb_set0_froxel,
             vb_set0_tex_froxel,
@@ -8709,6 +8891,7 @@ impl GBufferTargets {
             present_set,
             sdf_forward_set,
             vb_set0,
+            sdf_mesh_shadow_set0,
             vb_set0_tex,
             vb_set0_froxel,
             vb_set0_tex_froxel,
@@ -8722,7 +8905,6 @@ impl GBufferTargets {
             // sets, because those are what bind it. Unconditional on both arms — see the field's
             // own doc for why the disarmed boot is the path it exists for.
             hzb_null,
-            sv0_term_null,
             // VG R3 piece 1 step P1-2: the pyramid itself is allocated BELOW, after this literal
             // (see the placement argument there); the arm is captured HERE, from the scene, so the
             // stored bit and the allocation can only disagree if the build fails — which returns.
@@ -9125,6 +9307,7 @@ impl GBufferTargets {
                 present_set: self.present_set,
                 sdf_forward_set: self.sdf_forward_set,
                 vb_set0: self.vb_set0,
+                sdf_mesh_shadow_set0: self.sdf_mesh_shadow_set0,
                 vb_set0_tex: self.vb_set0_tex,
                 vb_set0_froxel: self.vb_set0_froxel,
                 vb_set0_tex_froxel: self.vb_set0_tex_froxel,
@@ -9146,9 +9329,6 @@ impl GBufferTargets {
             // live view of it is `VUID-vkDestroyImage-image-01000`. UNCONDITIONAL on both arms —
             // every generation mints one.
             RhiDevice::destroy_texture(ctx, self.hzb_null);
-            // VB-SV0 DP2: acquired beside `hzb_null`, destroyed beside it — the four VB Set-0
-            // sets retain its view by raw handle, the same VUID-01000 argument as above.
-            RhiDevice::destroy_texture(ctx, self.sv0_term_null);
             // HW-RT Rung 3b: the three temporal denoise target RINGS (motion_vec / hist /
             // temporal_out), built LAST so destroyed FIRST in reverse-acquisition order. `Option`-
             // guarded (degrade-to-None on an unsupported device), each a
@@ -9534,6 +9714,7 @@ mod tests {
             present_set: bg_ring(),
             sdf_forward_set: None,
             vb_set0: None,
+            sdf_mesh_shadow_set0: None,
             vb_set0_tex: None,
             vb_set0_froxel: None,
             vb_set0_tex_froxel: None,
@@ -9542,7 +9723,6 @@ mod tests {
             vb: None,
             vb_classify: None,
             hzb_null: null_texture(),
-            sv0_term_null: null_texture(),
             hzb: None,
             hzb_arm: false,
             extent: VkExtent2D::default(),
@@ -9646,6 +9826,7 @@ mod tests {
             present_set: bg_ring(),
             sdf_forward_set: None,
             vb_set0: None,
+            sdf_mesh_shadow_set0: None,
             vb_set0_tex: None,
             vb_set0_froxel: None,
             vb_set0_tex_froxel: None,
@@ -9654,7 +9835,6 @@ mod tests {
             vb: None,
             vb_classify: None,
             hzb_null: null_texture(),
-            sv0_term_null: null_texture(),
             hzb: None,
             hzb_arm: false,
             extent: VkExtent2D::default(),

@@ -2269,6 +2269,13 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 interp_count,
                 overstep,
                 ddgi_enabled,
+                // VB-SV0 DP3b: the frame's resolved mode from the `_armed` pair
+                // `sync_sv0_light_gate` published inside this same ECS frame — the request bits
+                // never reach the recorder, only the clamped resolution does.
+                {
+                    let lc = app.world().resource::<boyko_render::LightingConfig>();
+                    u32::from(lc.vb_sdf_mesh_shadow_armed) | (u32::from(lc.vb_sdf_mesh_ao_armed) << 1)
+                },
                 frame_index,
                 #[cfg(feature = "hwrt")]
                 tlas_enabled,

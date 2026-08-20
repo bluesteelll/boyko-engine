@@ -3094,6 +3094,68 @@ impl Renderer<'_> {
                 }
             }
 
+            // === VB-SV0 DP3b: the dedicated `sdf_mesh_shadow` prepass — recorded ONLY when the
+            // plan carries it (mesh_leg && resolved mode != 0, folded at declaration). Marches
+            // the frozen field once per covered pixel and writes the R8G8 term every lit
+            // producer below `min`-combines. Set 1 is DECLARED in the pipeline layout and never
+            // bound: the module statically uses only Sets 0 and 2 (the DP1 layout doc). ===
+            if let Some(sv0) = plan.sv0_pass {
+                // SAFETY: recording is open; `record_vb_pass` records the graph's derived
+                // barriers for the "sdf_mesh_shadow" pass into `cmd` — the raster's `vb_id`
+                // COLOR→SRO transition and the term's first-touch →GENERAL write access.
+                self.record_vb_pass(sv0, cmd, targets, forward, vb, scene, fi);
+                let sv0_pipeline = scene.sdf_mesh_shadow_pipeline.expect(
+                    "invariant: plan.sv0_pass is Some => scene.sdf_mesh_shadow_pipeline is Some \
+                     (both derive from a VisibilityBuffer-resolved boot)",
+                );
+                let sv0_set0 = targets.sdf_mesh_shadow_set0.as_ref().expect(
+                    "invariant: plan.sv0_pass is Some => targets.sdf_mesh_shadow_set0 is built \
+                     (DeferredSets::build's path_is_vb arm)",
+                );
+                let vb_geometry_set = scene
+                    .vb_geometry_set
+                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_geometry_set");
+                // SAFETY: recording is open; `sv0_pipeline` (3-set layout: Set 0 =
+                // `sv0_set0[fi]`, Set 1 declared-unbound, Set 2 = `vb_geometry_set`) was built on
+                // this device; the push's leading 64 bytes are the `view_proj` matrix
+                // `sdf_mesh_shadow.comp.hlsl`'s push constant reads (the SAME `scene.mvp` bytes
+                // `vb_resolve` pushes — GBUFFER_PUSH_BYTES layout parity);
+                // `scene.dispatch_group_count_x` covers `present_extent.width * height` at 64
+                // threads/group — the SAME grid every full-screen VB compute dispatches at.
+                unsafe {
+                    (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sv0_pipeline.pipeline);
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        sv0_pipeline.layout,
+                        0,
+                        1,
+                        &sv0_set0[fi].descriptor_set,
+                        0,
+                        ptr::null(),
+                    );
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        sv0_pipeline.layout,
+                        2,
+                        1,
+                        &vb_geometry_set.set(),
+                        0,
+                        ptr::null(),
+                    );
+                    (self.fns.cmd_push_constants)(
+                        cmd,
+                        sv0_pipeline.layout,
+                        VK_SHADER_STAGE_COMPUTE_BIT,
+                        0,
+                        64,
+                        scene.mvp.as_ptr().cast(),
+                    );
+                    (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+                }
+            }
+
             // === VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2c: the
             // classify chain `fill -> count -> scan -> scatter` — populates `gClassify` on real
             // hardware ONLY when the classified path is selected (`scene.vb_use_classified`, plan

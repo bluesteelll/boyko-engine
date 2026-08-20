@@ -107,7 +107,21 @@ fn main() {
     let csm_on = std::env::var("BOYKO_CSM_OFF").is_err();
     app.insert_resource(CsmConfig { cascade_count: if csm_on { 3 } else { 0 }, ..CsmConfig::default() });
     app.insert_resource(ShadowConfig { enabled: true, ..ShadowConfig::default() });
-    app.insert_resource(LightingConfig { csm_shadows: csm_on, ..LightingConfig::default() });
+    // VB-SV0 DP3b: the owner-eval arming channel for the SDF-on-mesh shadow + contact-AO terms.
+    // Default OFF — the opposite polarity of `env_on`'s default-on knobs, deliberately: every
+    // committed pin renders with SV0 dark, and a knob that armed a brand-new term by default
+    // would re-bless four goldens as a side effect of adding it. `BOYKO_SDF_MESH=on` opts in.
+    // These are the REQUEST bits; `sync_sv0_light_gate` clamps them against
+    // `vb_sdf_mesh_armable()` per frame (monotone downward), so setting them on a non-VB or
+    // hwrt-shadowed boot arms nothing.
+    let sdf_mesh = std::env::var("BOYKO_SDF_MESH").unwrap_or_default();
+    app.insert_resource(LightingConfig {
+        csm_shadows: csm_on,
+        // `on` arms both; `shadow`/`ao` arm one bit — the S1 (ii-a)/(ii-b) per-bit legs.
+        vb_sdf_mesh_shadow: matches!(sdf_mesh.as_str(), "on" | "shadow"),
+        vb_sdf_mesh_ao: matches!(sdf_mesh.as_str(), "on" | "ao"),
+        ..LightingConfig::default()
+    });
 
     // VB v1 caps SSAO / DDGI / TAA OFF (`cap_vb_v1_consumers`) — the fused `vb_resolve` does not
     // consume them yet (the deferred R9 geo/shade split would unlock them); FXAA / SMAA DO run

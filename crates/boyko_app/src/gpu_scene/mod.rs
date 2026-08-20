@@ -5983,6 +5983,11 @@ impl GpuSceneBundles {
         interp_count: u32,
         overstep: f32,
         ddgi_enabled: bool,
+        // VB-SV0 DP3b: this frame's resolved SV0 mode (bit 0 shadow, bit 1 AO; `0` disarmed) —
+        // the runner reads `LightingConfig`'s `_armed` pair, published by `sync_sv0_light_gate`
+        // inside the SAME ECS frame (`.before_set(LightCollectSet)`), so the mode and the
+        // light-header word the tails decode can never disagree for one frame.
+        vb_sdf_mesh_mode: u32,
         frame_index: u32,
         #[cfg(feature = "hwrt")] tlas_enabled: bool,
         // HW-RT rung 3a/3b step 7: the DENOISE-ARMED gate — `spatial_enabled() || temporal_enabled()`
@@ -6996,6 +7001,14 @@ impl GpuSceneBundles {
             vb_classify_scan_pipeline: self.vb_classify_scan_pipeline.as_ref(),
             vb_classify_scatter_pipeline: self.vb_classify_scatter_pipeline.as_ref(),
             vb_shade_pipeline: self.vb_shade_pipeline.as_ref(),
+            // VB-SV0 DP3b: the dedicated prepass — pipeline (Some on VB boots, built beside
+            // `vb_resolve_pipeline`), its layout (for `DeferredSets::build`'s per-FIF prepass
+            // sets, the R5 same-object rule), and THIS frame's resolved mode (the runner threads
+            // it from `LightingConfig`'s `_armed` pair; `0` = disarmed = the pass is not declared
+            // and no term ResId is named).
+            sdf_mesh_shadow_pipeline: self.sdf_mesh_shadow_pipeline.as_ref(),
+            sdf_mesh_shadow_layout0: Some(&self.sdf_mesh_shadow_layout0),
+            vb_sdf_mesh_mode,
             // VB-P2 classification plan, rung P2b: the classify `scan` pass's loop-bound push
             // constant (`GBufferScene::vb_classify_material_count`'s own doc — a valid upper
             // bound on any live `MaterialId` this frame could reference).
