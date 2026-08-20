@@ -24,7 +24,7 @@ The consequences are the point:
   through as verbatim token trees with their original spans, so rustc errors,
   rust-analyzer completions and go-to-definition land on your own tokens.
 
-*(Branch: `feat/multi-paradigm-render`. Shipped rungs: A0–A3.)*
+*(Branch: `feat/multi-paradigm-render`. Shipped rungs: A0–A4.)*
 
 ## Hello, Aether
 
@@ -155,7 +155,7 @@ expansion:
 | `event Name { … }` | `#[::boyko_macros::event]` struct | A1 | [Data constructs](data-constructs.md#event) |
 | `system name(…) clauses { … }` | `pub fn` with the desugared `SystemParam` signature | A2 | [Systems & plugins](systems-and-plugins.md) |
 | `plugin Name;` | `pub struct` + `impl Plugin` holding every sibling registration | A2 | [Systems & plugins](systems-and-plugins.md#the-plugin-header) |
-| `machine Name { … }` | flat `States` enum + one transition system per (leaf, event) | A3 | [State machines](state-machines.md) |
+| `machine Name { … }` | flat `States` enum + one transition system per (leaf, event) + the initial-enter startup system | A3 · A4 | [State machines](state-machines.md) |
 | `material name { … }` | *planned* — rung A5 | — | — |
 | `scene name { … }` | *planned* — rung A6 | — | — |
 
@@ -224,16 +224,39 @@ this become", those tests are it.
 
 ## Status and what is next
 
-Rungs **A0–A3** ship in this build: `component`, `tag`, `bundle`, `event`,
-`system`, `plugin`, `machine`. Machines include hierarchy — composite states,
-`initial` retargeting, superstate handler inheritance and LCA-inlined
-enter/exit — which the roadmap had scheduled one rung later.
+Rungs **A0–A4** ship in this build: `component`, `tag`, `bundle`, `event`,
+`system`, `plugin`, `machine`. Machines carry the full hierarchy — composite
+states, `initial` retargeting, superstate handler inheritance, LCA-inlined
+enter/exit and group predicates — which A3 delivered a rung early.
+
+A4 was therefore spent on the piece nobody had built and on hardening what was
+already there:
+
+- **[The initial-enter chain](state-machines.md#the-initial-enter-chain).**
+  `insert_state` seeds the *value*; nothing in the kernel runs an entry action
+  for a state nobody transitioned into. One generated startup system now walks
+  the initial leaf's ancestor path, outermost-first — emitted only when that
+  chain has a body.
+- **[Drain-then-act](state-machines.md#what-a-transition-system-does).** A
+  transition system reads *every* event queued this frame and acts once. The
+  earlier `return`-in-loop shape left the remainder unread, and it fired a
+  second transition on the next frame.
+- **Declaration-order registration.** Registrations follow your source order,
+  not the inheritance walk's — the deterministic half of the last-write-wins
+  policy on `NextState`.
+- **Eight new refusals** for charts that used to expand silently or to collide
+  on generated tokens; see
+  [Charts the flattener refuses](state-machines.md#charts-the-flattener-refuses).
+- **Three parser repairs**, all visible in the errors you get: `plugin` joined
+  the construct registry (so `pluging P;` gets its did-you-mean), `if let` /
+  `when let` are refused on your own `let` instead of expanding to invalid Rust,
+  and the case gate reads through a `r#raw` ident escape. See
+  [Diagnostics](diagnostics.md).
 
 Planned, not shipped:
 
 | Rung | Contents | Status today |
 |------|----------|--------------|
-| A4 | machine hierarchy (composites, handler copy-down, LCA inlining, group predicates) + the initial-enter chain | the hierarchy landed early, with the shipped `machine`; the [initial-enter chain](state-machines.md#hazards) has not |
 | A5 | `material` — PBR material builder fns over `Material::new` / `with_textures` | the parser refuses it and names the rung |
 | A6 | `scene` — entity trees, mesh/material resolution, demand-driven spawn-fn params | the parser refuses it and names the rung |
 | A7 | DX hardening: expansion-size CI measurement, span-column-pinned goldens, `aether v1;` version header | not started |
@@ -246,8 +269,8 @@ find out whether a construct exists yet — try it and read the error.
 - [Data constructs](data-constructs.md) — `component`, `tag`, `bundle`, `event`.
 - [Systems & plugins](systems-and-plugins.md) — the param sugar table, clauses,
   and sibling ordering.
-- [State machines](state-machines.md) — `machine`, flattening, and the two
-  recorded hazards.
+- [State machines](state-machines.md) — `machine`, flattening, the initial-enter
+  chain, and the one recorded hazard.
 - [Diagnostics](diagnostics.md) — every error contract Aether promises.
 - [Components](../concepts/components.md) and [Systems](../concepts/systems.md) —
   the hand-written surface Aether expands to.

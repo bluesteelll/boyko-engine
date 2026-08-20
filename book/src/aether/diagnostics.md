@@ -19,12 +19,17 @@ The canonical extensibility diagnostic. It names the whole v1 surface, not just
 what happens to be implemented, so the list reads the same on every rung:
 
 ```text
-error: unknown construct `compnent`; this aether supports: component, tag, bundle, system, event, machine, material, scene (did you mean `component`?)
+error: unknown construct `compnent`; this aether supports: component, tag, bundle, system, event, plugin, machine, material, scene (did you mean `component`?)
  --> tests/ui/unknown_construct.rs:5:5
   |
 5 |     compnent Health { hp: f32 }
   |     ^^^^^^^^
 ```
+
+`plugin` is in that list because the block parser **dispatches** on it, and the
+list must name every keyword the parser dispatches on or it misstates the
+surface. It was missing until rung A4, which cost `pluging P;` both its
+did-you-mean and an honest list; a unit test now ties the two together.
 
 ## Planned constructs name their rung
 
@@ -43,6 +48,11 @@ error: `material` is an Aether construct but lands at rung A5; this build carrie
 `scene` answers the same way with rung A6. You never need to consult a roadmap
 to find out whether something exists — try it.
 
+The rung *range* in that message is a literal, and it trails this page: A4
+deepened `machine` rather than adding a construct, so the string still reads
+`A0..A3`. The **list** is the part to act on — it names the whole v1 surface and
+reads the same on every rung.
+
 ## Case gates
 
 Names that expand to **types** (`component`, `tag`, `bundle`, `event`,
@@ -59,6 +69,13 @@ The check is Unicode-correct: it asks `char::is_uppercase`, not an ASCII probe,
 so `component Здоровье { … }` is accepted as titled in its own script. And the
 rename is only attached when it actually differs from what you wrote — a
 self-identical suggestion explains nothing.
+
+It also **reads through a raw-ident escape**. `r#Foo` prints as `r#Foo`, whose
+first character is the escape's `r`, so a naive gate refused it for being
+lowercase and suggested `R#Foo` — which is not a legal identifier at all. The
+gate classifies the escaped spelling and quotes the original: `component
+r#Foo { … }` passes, and `component r#health { … }` says ``rename `r#health` to
+`Health` ``.
 
 ## Data constructs
 
@@ -88,6 +105,7 @@ and it tells you the whole item vocabulary.
 | `on update on fixed` | ``duplicate schedule clause; a system runs on exactly one schedule`` |
 | `on tick` | ``unknown schedule `tick`; `on` takes one of: startup, update, fixed`` |
 | `p: mut query<…>` | ``in the type position `mut` pairs only with `res`: `mut res<T>` `` |
+| `when let Some(x) = f()` | ``` `let` bindings are not usable as a run condition — `when` takes a plain bool expression (bind with a `local<…>` param or match inside the body instead) ``` |
 | any clause, no `plugin` header | ``scheduling clauses (`on`, `after`, `when`, …) need a `plugin <Name>;` declaration in this block to hold the generated registration`` |
 | `on startup in SomeSet` | ``scheduling clauses other than `on` are rejected on startup systems — the engine runs them once, pre-loop`` |
 | `after a` where `a` is on another schedule | ``sibling system `a` runs on a different schedule — cross-schedule ordering is not expressible`` |
@@ -125,6 +143,8 @@ must be referenced by a qualified path.
 | two `on E` in one state | ``duplicate handler for `E` in state `A` `` + a second span: *the first handler is here* |
 | `machine` with no `plugin` header | ``a `machine` needs a `plugin <Name>;` declaration in this block to hold its `insert_state` and transition registrations`` |
 | the same param name with different types across merged handlers | ``param `cmds` is declared with conflicting types across this transition's merged enter/exit/action handlers`` |
+| the same, across the initial leaf's ancestor `enter` bodies | ``param `x` is declared with conflicting types across the initial state's merged `enter` chain`` |
+| `on E if let Some(_) = q => A;` | ``` `let` bindings are not usable as a transition guard — `if` takes a plain bool expression (bind with a `local<…>` param or match inside the body instead) ``` |
 | an unknown item inside a state | ``unknown state item `foo`; state items are: initial, enter, exit, on, state`` |
 | a non-state item in the machine body | ``expected `state`, found `foo` (a machine body holds only states after `initial`)`` |
 
@@ -135,6 +155,61 @@ error: no state `Runing` in `Playing`; states declared here: `Running`, `Paused`
 10 |             initial Runing;
    |                     ^^^^^^
 ```
+
+### Flattening collisions
+
+Flattening concatenates the state path, and the generated fn and predicate names
+are its snake_case collapse. Both steps are lossy, so two legal chart positions
+can mint one name. rustc would report these as "defined multiple times" against
+generated tokens; Aether reports both chart positions instead — every one of
+these carries a second span, *the first … is here*:
+
+| You write | Aether says |
+|-----------|-------------|
+| `state A { state BC {} }` next to `state AB { state C {} }` | ``states `A.BC` and `AB.C` both flatten to `ABC` — flattening concatenates the state path, so they would emit one name; rename one`` |
+| two sibling `state Idle {}` | ``duplicate state `Idle` — sibling states need distinct names`` |
+| leaves `AB` and `A_b`, each with `on E` | ``states `AB` and `A_b` both generate the system `__aether_m__a_b__e` — generated names are the snake_case collapse of the flattened state path, and `AB` and `A_b` collapse alike; rename one`` |
+| composites `AB` and `A_b` | ``composite states `AB` and `A_b` flatten to `AB` and `A_b`, which both collapse to the predicate `in_a_b` — rename one`` |
+| `on a::E` and `on b::E` in one state | ``events `a::E` and `b::E` both generate the system `__aether_m__a__e` for leaf `A` — the generated name keys on the event's last path segment; import one under an alias (`use … as …`)`` |
+
+```text
+error: states `A.BC` and `AB.C` both flatten to `ABC` — flattening concatenates the state path, so they would emit one name; rename one
+  --> tests/ui/machine_flattened_name_collision.rs:17:19
+   |
+17 |             state C {}
+   |                   ^
+
+error: the first state flattening to this name is here
+  --> tests/ui/machine_flattened_name_collision.rs:13:19
+   |
+13 |             state BC {}
+   |                   ^^
+```
+
+### Reachability does not decide what is checked
+
+Retargeting and handler inheritance are lazy walks. A name no leaf happens to
+reach was never resolved — so until rung A4 a typo in one expanded clean. Every
+declared name is now resolved eagerly:
+
+| You write | Aether says |
+|-----------|-------------|
+| `initial Running;` inside a **childless** state `Idle` | ``` `Idle` has no nested states, so `initial` has nothing to name — drop it, or nest `state Running { … }` inside `Idle` ``` |
+| a typo'd `initial` inside a composite nothing targets | ``no state `Runing` in `Lonely`; states declared here: `Running` (did you mean `Running`?)`` |
+| `on E => Nowhere;` on a state whose inner state shadows `on E` | ``no state `Nowhere` in `M`; states declared here: `P0`, `Top` `` |
+
+```text
+error: `Idle` has no nested states, so `initial` has nothing to name — drop it, or nest `state Running { … }` inside `Idle`
+  --> tests/ui/machine_initial_on_a_leaf.rs:11:21
+   |
+11 |             initial Running;
+   |                     ^^^^^^^
+```
+
+The shadowed-target case is the sharpest of the three: `P0`'s `on E` is shadowed
+for every leaf by `A`'s own `on E`, so no inheritance walk ever reaches it — and
+the target it names would never have been looked up. A chart that names a state
+which does not exist is broken whether or not anything reaches it.
 
 ## What Aether checks, and what it leaves alone
 
@@ -149,6 +224,9 @@ can produce a strictly better span or message. The whole pre-check list:
 | duplicate hook keys | Aether has both spans |
 | sibling ordering cycles, cross-schedule and startup ordering | said at expansion, before `ScheduleBuildError::OrderingCycle` at `build()` |
 | machine state resolution | the state namespace exists only inside the transpiler |
+| flattened-name and snake-collapse collisions | Aether has both chart positions; rustc sees only a duplicate definition on tokens the user never wrote |
+| every declared machine name, reachable or not | the lazy retargeting and inheritance walks skip what nothing targets, so a typo used to expand clean |
+| `let` in a guard or a run condition | Aether splices that expression into `if !(…)` or `.run_if(…)`, where a `let` is not valid Rust; caught here, the error lands on your own `let` instead of on a synthesized `if` you never wrote |
 
 Everything else defers. Query data is handed to the engine's `QueryData` trait
 unvalidated; trait-bound failures come from the derive's own const-asserts;

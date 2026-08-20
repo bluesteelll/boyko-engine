@@ -205,8 +205,11 @@ Three rules to know:
 ### Registering event lanes
 
 ```rust,ignore
+/// The kernel's maximum lane count (`EventConfig` validates `1..=64`).
+const MAX_EVENT_LANES: u32 = 64;
+
 app.world_mut()
-    .preregister_event::<Damage>(EventConfig::default_for(2).expect("config"))
+    .preregister_event::<Damage>(EventConfig::default_for(MAX_EVENT_LANES).expect("config"))
     .expect("preregister");
 ```
 
@@ -214,6 +217,17 @@ Declaring an event is not registering its lanes; the engine has no
 `App::add_event`, and an `EventWriter<E>` / `EventReader<E>` for an unregistered
 type panics with a message naming it. See
 [App & Plugins](../app/plugins.md#events-there-is-no-appadd_event).
+
+> **Size the lanes for the pool, not for the send sites.**
+> `EventConfig::default_for`'s argument is the **worker-lane count**, and
+> `EventWriter::send` picks its lane by the id of whichever worker the scheduler
+> placed the sending system on. Configure fewer lanes than the pool is wide and
+> a send from a high-numbered worker trips a `debug_assert` **on that worker** —
+> which surfaces as a hang, not a failure, and only on the runs where placement
+> happens to land there. Where the pool width is known, `worker_count + 1` is
+> the idiom (see [Events](../concepts/events.md)); the Aether integration tests
+> size for the kernel maximum, because nothing in the public `App` surface
+> reports the width.
 
 > **Hazard — a zero-sized event does not compile.** The dispatcher carries a
 > `const` guard: *"Event type is zero-sized; use a counter instead (add a

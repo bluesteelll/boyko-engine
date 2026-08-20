@@ -141,6 +141,10 @@ follows it. `query::Thing`, a bare user type named `res`, and
 your own condition fn — parsed so the system's body brace is never swallowed as
 a struct literal. See [Run conditions](../scheduling/run-conditions.md).
 
+It must be a **plain bool expression**, and `when let Some(x) = f()` is refused
+on its own `let`: the expression is spliced into `.run_if(…)`, where a `let`
+binding is not valid Rust at all. The same rule covers a machine's `if` guard.
+
 A system with **no `on` clause** lands on Main, the engine's own default for
 `add_systems_cfg`.
 
@@ -158,6 +162,10 @@ plugin Movement;
   `add_systems` yourself.
 - **With a plugin present, every sibling system is registered** — clause-free
   ones land on Main, unordered. The plugin collects the block.
+- **It is a construct keyword like any other.** `plugin` sits in the registry the
+  unknown-construct diagnostic prints, so `pluging Movement;` gets the list *and*
+  a did-you-mean — see
+  [Unknown construct](diagnostics.md#unknown-construct).
 
 The generated plugin is an ordinary `impl Plugin`, so everything on the
 [App & Plugins](../app/plugins.md) page applies: it is consumed at `add_plugin`
@@ -299,17 +307,18 @@ aether! {
         cmds.spawn(Mover { pos: Position { x: 0.0 }, vel: Velocity { v: 2.0 } });
     }
 
+    // DECLARED FIRST, ON PURPOSE — see below.
+    system check_order(log: mut res<SeqLog>) on update after integrate {
+        // The after-edge's observable: integrate has ALREADY run this frame, every frame.
+        log.order_ok = log.order_ok && (log.integrate_runs == log.check_runs + 1);
+        log.check_runs += 1;
+    }
+
     system integrate(q: query<(&mut Position, &Velocity)>, log: mut res<SeqLog>) on update {
         for (p, v) in &mut q {
             p.x += v.v;
         }
         log.integrate_runs += 1;
-    }
-
-    system check_order(log: mut res<SeqLog>) on update after integrate {
-        // The after-edge's observable: integrate has ALREADY run this frame, every frame.
-        log.order_ok = log.order_ok && (log.integrate_runs == log.check_runs + 1);
-        log.check_runs += 1;
     }
 
     system frozen(log: mut res<SeqLog>) on update when never {
@@ -327,6 +336,15 @@ struct SeqLog {
 
 fn never() -> bool { false }
 ```
+
+The declaration order in that block is load-bearing, and the reason generalizes.
+`check_order` and `integrate` both take `mut res<SeqLog>`, so they conflict, and
+the scheduler serializes a conflict in **registration order** — which is source
+order except where an `after` edge re-sorts it. Written *after* `integrate`, the
+edge and the fallback agree, and deleting `after integrate` changes nothing:
+the assertion can no longer fail. Written *before* it, only the edge can produce
+the asserted sequence. Measured: with the edge deleted, `order_ok` fails on the
+first frame; restored, the test is green.
 
 Full source: `crates/aether_tests/tests/a2_system_plugin.rs`.
 
