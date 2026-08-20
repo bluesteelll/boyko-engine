@@ -1,12 +1,15 @@
 //! `aether-lang` — parser, diagnostics and expander for the Aether authoring DSL
-//! (docs/AETHER-LANG-PLAN.md; rung **A0**: `component` + `tag`, end to end).
+//! (docs/AETHER-LANG-PLAN.md; through rung **A6**, the whole §6.1 construct registry:
+//! `component`, `tag`, `bundle`, `system`, `event`, `plugin`, `machine`, `material`, `scene`).
 //!
 //! # Architecture (the plan's decisions, enforced by this crate's shape)
 //!
 //! * **One umbrella parse context** (Decision A1): [`expand_block`] parses a whole `aether!`
-//!   block into a list of constructs, so later rungs' cross-construct references (a `system`
-//!   naming a sibling for ordering, a `scene` naming a `material`) resolve inside ONE context —
-//!   the reason per-construct macros were rejected.
+//!   block into a list of constructs, so cross-construct references (a `system` naming a sibling
+//!   for ordering, a `scene` naming a `material`) resolve inside ONE context — the reason
+//!   per-construct macros were rejected. §4's pipeline is literal here: `parse.rs` builds the
+//!   construct list, `ctx.rs` turns it into the block's symbol table and runs every whole-block
+//!   rule, and `expand.rs` emits with that table in hand.
 //! * **A plain library** (Decision A2): everything here is testable without macro expansion;
 //!   the `aether` proc-macro crate is a two-line shim.
 //! * **Emit the canonical hand-written surface** (Decision A3): the expander produces exactly
@@ -16,7 +19,7 @@
 //! * **Verbatim span-preserved Rust fragments** (§2): field types and hook paths pass through
 //!   with their original spans, so rustc/rust-analyzer report errors at the user's tokens.
 //!
-//! # A0 test-channel note (a recorded deviation, not an omission)
+//! # Test-channel note (a recorded deviation, not an omission)
 //!
 //! The plan's rung table names `macrotest` snapshots. `macrotest` is a NEW third-party
 //! dev-dependency this workspace does not carry, and the no-new-third-party rule outranks the
@@ -25,6 +28,7 @@
 //! strictly MORE precise than macrotest's rustfmt-normalized snapshots.
 
 mod ast;
+mod ctx;
 mod diag;
 mod expand;
 mod parse;

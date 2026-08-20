@@ -1,0 +1,5 @@
+error: unknown construct `scen`; this aether supports: component, tag, bundle, system, event, plugin, machine, material, scene (did you mean `scene`?)
+  --> tests/ui/no_planned_construct_remains.rs:11:5
+   |
+11 |     scen lab { }
+   |     ^^^^

@@ -82,5 +82,10 @@ mod tests {
         // `material` began dispatching at rung A5 — a keyword the parser routes but the list
         // omits is exactly the hole this test exists to catch.
         assert_eq!(did_you_mean("materia", CONSTRUCT_KEYWORDS), Some("material"));
+        // `scene` began dispatching at rung A6. It was in the list from A0 (the list has always
+        // named the whole v1 surface), so the drift direction here is the OTHER one: a keyword the
+        // list names and the parser does NOT route would advertise a construct that errors as
+        // unknown. `parse.rs` now routes all nine.
+        assert_eq!(did_you_mean("scen", CONSTRUCT_KEYWORDS), Some("scene"));
     }
 }

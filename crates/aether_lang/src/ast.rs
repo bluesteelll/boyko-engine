@@ -13,8 +13,9 @@ pub struct AetherBlock {
     pub constructs: Vec<Construct>,
 }
 
-/// Every construct rung A0 knows. Later rungs add variants — one new variant, one new parser
-/// row, one new expander module each (§6.1's extensibility contract).
+/// Every construct in the v1 registry (§6.1) — complete as of rung A6. A construct is one
+/// variant, one parser row and one expander section; §6.1's extensibility claim was checked
+/// against each of the nine as it landed.
 pub enum Construct {
     /// `component NAME { fields / requires / hooks / no_bundle }`
     Component(ComponentDef),
@@ -38,6 +39,59 @@ pub enum Construct {
     /// declared material; the hot-path `Box` ban is a RUNTIME rule and this is transpiler state
     /// (the same build-time exemption §4 grants `AetherCtx`'s keyed collections).
     Material(Box<MaterialDef>),
+    /// `scene NAME { let … ; node* }` (rung A6) — a spawn fn over the engine's own bundles.
+    Scene(SceneDef),
+}
+
+impl Construct {
+    /// The construct's surface keyword — the noun every cross-construct diagnostic prints.
+    pub fn keyword(&self) -> &'static str {
+        match self {
+            Construct::Component(_) => "component",
+            Construct::Tag(_) => "tag",
+            Construct::Bundle(_) => "bundle",
+            Construct::Event(_) => "event",
+            Construct::System(_) => "system",
+            Construct::Plugin(_) => "plugin",
+            Construct::Machine(_) => "machine",
+            Construct::Material(_) => "material",
+            Construct::Scene(_) => "scene",
+        }
+    }
+
+    /// The declared name, for the §4 duplicate-symbol rule.
+    pub fn name(&self) -> &Ident {
+        match self {
+            Construct::Component(d) => &d.name,
+            Construct::Tag(d) => &d.name,
+            Construct::Bundle(d) => &d.name,
+            Construct::Event(d) => &d.name,
+            Construct::System(d) => &d.name,
+            Construct::Plugin(d) => &d.name,
+            Construct::Machine(d) => &d.name,
+            Construct::Material(d) => &d.name,
+            Construct::Scene(d) => &d.name,
+        }
+    }
+
+    /// The Rust ITEM KIND this construct's name occupies (§4's duplicate rule keys on it): a
+    /// `fn` for the name-is-a-value constructs, a type for the rest.
+    ///
+    /// Aether owns the duplicate diagnostic only for the `fn` half — see [`crate::ctx`] for the
+    /// measurement that split the rule.
+    pub fn emits_fn(&self) -> bool {
+        matches!(self, Construct::System(_) | Construct::Material(_) | Construct::Scene(_))
+    }
+
+    /// The noun a duplicate-name diagnostic uses for the emitted fn ("each `material` expands to
+    /// a *builder fn* of its own name").
+    pub fn fn_noun(&self) -> &'static str {
+        match self {
+            Construct::Material(_) => "builder fn",
+            Construct::Scene(_) => "spawn fn",
+            _ => "fn",
+        }
+    }
 }
 
 /// The four Phase-14a hook keys the `component` construct forwards (§3.1). Mutually exclusive
@@ -353,6 +407,262 @@ pub struct MaterialDef {
     /// the engine's one authority.
     pub textures: Option<Expr>,
 }
+
+/// `scene NAME { scene_item* }` (§3.7) — an entity tree that expands to ONE spawn fn.
+///
+/// Scenes are the `AetherCtx` showcase: `material: gold` resolves against a sibling `material`
+/// construct, `mesh floor` against this scene's own `let` bindings, and the fn's parameter list is
+/// DEMAND-DRIVEN — computed from what the body actually uses, so a scene with neither mesh lets
+/// nor material props compresses to `(commands)` alone.
+pub struct SceneDef {
+    /// The spawn-fn name (lowercase by the §2 case convention — diagnosed at parse).
+    pub name: Ident,
+    /// `let NAME = plane(…) | cube(…) | mesh(…, …);` bindings, in source order.
+    pub lets: Vec<MeshLet>,
+    /// Top-level nodes, in source order (emission order is spawn order).
+    pub nodes: Vec<SceneNode>,
+}
+
+/// `let NAME = mesh_src ;` (§3.7) — a mesh registered once per scene run and reused by every
+/// `mesh NAME` node.
+pub struct MeshLet {
+    /// The binding name a `mesh NAME` node resolves against.
+    pub name: Ident,
+    /// The registration call.
+    pub src: MeshSrc,
+}
+
+/// The §3.7 `mesh_src` production — each row is one `MeshAssetsExt` constructor.
+pub enum MeshSrc {
+    /// `plane(SIZE)` → `MeshAssetsExt::plane(…, size)`.
+    Plane(Expr),
+    /// `cube(SIZE)` → `MeshAssetsExt::cube(…, size)`.
+    Cube(Expr),
+    /// `mesh(VERTICES, INDICES)` → `MeshAssetsExt::register_mesh(…, &[Vertex], &[u32])`.
+    Mesh(Expr, Expr),
+}
+
+/// One `node` (§3.7). A node spawns exactly one entity; `children` nest.
+pub struct SceneNode {
+    /// The sugar head (or [`NodeHead::Entity`], the §8 R8 universal fallback).
+    pub head: NodeHead,
+    /// The head keyword's own span — every per-head refusal points here.
+    pub head_span: Span,
+    /// `at EXPR`, when the head has a pose to place (see [`NodeHead::takes_at`]).
+    pub at: Option<AtPose>,
+    /// One slot per row of [`NodeHead::keys`], in TABLE order; `None` = absent ⇒ the row's
+    /// default. Positional rather than keyed so the expander is total: a key the parser accepts
+    /// cannot reach emission unhandled (the `MATERIAL_KEYS` discipline, one step further).
+    pub keys: Vec<Option<NodeKeyValue>>,
+    /// `material: IDENT` — a sibling `material` construct's name, resolved through `AetherCtx`.
+    pub material: Option<Ident>,
+    /// `casts_shadow` — the flag's own span (the refusal for a head with no shadow form).
+    pub casts_shadow: Option<Span>,
+    /// Bare component expressions (the `ui!` fallback) — each becomes one `.insert(EXPR)`.
+    pub extras: Vec<Expr>,
+    /// `children: [ node, … ]`, in source order.
+    pub children: Vec<SceneNode>,
+}
+
+/// A node's `at` pose (§3.7's two sugars over a verbatim `Transform` expression).
+pub enum AtPose {
+    /// `at (x, y, z)` → `Transform::from_translation(Vec3::new(x, y, z))`.
+    Translation(Vec<Expr>),
+    /// `at EXPR` → the verbatim `Transform` expression, spans preserved.
+    ///
+    /// BOXED for the reason `Construct::Material` is: `syn::Expr` is a ~200-byte enum and this
+    /// `Option` sits in every node of the tree.
+    Verbatim(Box<Expr>),
+}
+
+/// The value shape a head key takes — the parser validates against it, so the expander can read
+/// the slot without re-checking.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum KeyShape {
+    /// `(x, y, z)` — exactly three components (a direction, a position, or a linear color).
+    Tuple3,
+    /// A scalar expression (`lux: 3.2`, `range: 9.0`).
+    Scalar,
+}
+
+/// One head-specific key (§3.7's `sun { dir:, color:, lux: }` family).
+///
+/// ONE table per head, spelling and shape together — the `MATERIAL_KEYS` rule: what a diagnostic
+/// PRINTS and what the parser ACCEPTS are the same rows, so neither can gain a key the other lacks.
+pub struct NodeKeySpec {
+    /// The surface spelling.
+    pub name: &'static str,
+    /// The value shape.
+    pub shape: KeyShape,
+    /// `false` when the row has a default Aether can honestly synthesize. A key whose engine
+    /// parameter has no neutral value is REQUIRED (the §3.6 `base:` precedent — Aether refuses
+    /// rather than inventing a value no default can be right about).
+    pub required: bool,
+}
+
+/// A head key's parsed value.
+pub enum NodeKeyValue {
+    /// `(x, y, z)` — three verbatim component exprs; arity is validated at parse against the
+    /// parenthesized group's own span.
+    Tuple(Vec<Expr>),
+    /// A scalar/verbatim expression. BOXED for the `AtPose::Verbatim` reason — `spot` carries
+    /// seven key slots and a `syn::Expr` is ~200 bytes.
+    Scalar(Box<Expr>),
+}
+
+/// The §3.7 `node_head` production. Every head lowers to engine bundles that already exist; the
+/// `entity` row is the universal fallback §8 R8 requires, so no engine feature is walled off.
+pub enum NodeHead {
+    /// `mesh IDENT` — a `let` binding of this scene.
+    Mesh(Ident),
+    /// `sun` → `DirectionalLightObject`.
+    Sun,
+    /// `spot` → `SpotLightObject`.
+    Spot,
+    /// `point` → `PointLightObject`.
+    Point,
+    /// `sky` → `SkyLight`.
+    Sky,
+    /// `camera` → `CameraRig`.
+    Camera,
+    /// `sdf EXPR` → `SdfPrimitive(EXPR)`.
+    Sdf(Expr),
+    /// `entity` → a bare spawn carrying only its `at` pose and its component exprs.
+    Entity,
+}
+
+/// The `sun` key table — `DirectionalLight::new(direction, color, illuminance)`.
+const SUN_KEYS: &[NodeKeySpec] = &[
+    NodeKeySpec { name: "dir", shape: KeyShape::Tuple3, required: true },
+    NodeKeySpec { name: "color", shape: KeyShape::Tuple3, required: false },
+    NodeKeySpec { name: "lux", shape: KeyShape::Scalar, required: true },
+];
+
+/// The `sky` key table — `SkyLight::new(sky_color, ground_color)`. Neither hemisphere has a
+/// neutral value (a black ground and a white ground light a scene differently), so both are
+/// required.
+const SKY_KEYS: &[NodeKeySpec] = &[
+    NodeKeySpec { name: "sky", shape: KeyShape::Tuple3, required: true },
+    NodeKeySpec { name: "ground", shape: KeyShape::Tuple3, required: true },
+];
+
+/// The `point` key table — `PointLight::new(position, color, power, range)`.
+const POINT_KEYS: &[NodeKeySpec] = &[
+    NodeKeySpec { name: "pos", shape: KeyShape::Tuple3, required: true },
+    NodeKeySpec { name: "color", shape: KeyShape::Tuple3, required: false },
+    NodeKeySpec { name: "power", shape: KeyShape::Scalar, required: true },
+    NodeKeySpec { name: "range", shape: KeyShape::Scalar, required: true },
+];
+
+/// The `spot` key table — `SpotLight::new(position, direction, color, power, range, inner_deg,
+/// outer_deg)`. `dir` is the SHINE axis; the pose is derived from `pos` + `dir` exactly as the
+/// shipped scenes derive theirs (`look_at_rh` + `Quat::from_mat3`), because `light_reconcile`
+/// overwrites the seeded direction from the transform's world `-Z`.
+const SPOT_KEYS: &[NodeKeySpec] = &[
+    NodeKeySpec { name: "pos", shape: KeyShape::Tuple3, required: true },
+    NodeKeySpec { name: "dir", shape: KeyShape::Tuple3, required: true },
+    NodeKeySpec { name: "color", shape: KeyShape::Tuple3, required: false },
+    NodeKeySpec { name: "power", shape: KeyShape::Scalar, required: true },
+    NodeKeySpec { name: "range", shape: KeyShape::Scalar, required: true },
+    NodeKeySpec { name: "inner", shape: KeyShape::Scalar, required: true },
+    NodeKeySpec { name: "outer", shape: KeyShape::Scalar, required: true },
+];
+
+/// The `camera` key table — the `Projection::Perspective` fields. `aspect` is REQUIRED: it is the
+/// TARGET's width/height and no default can be right about it (the §3.6 `base:` rule); `fov`
+/// (degrees), `near` and `far` carry the conventional defaults.
+///
+/// The head fills `CameraRig`'s `camera` field with `Camera::DEFAULT`, whose `order` is 0. A
+/// SECOND camera therefore needs its own order, and the escape is the same one every head has: a
+/// bare component expression is inserted AFTER the bundle, so
+/// `camera at (…) { aspect: …, Camera { order: 1, ..Camera::DEFAULT } }` overwrites the field. The
+/// orthographic projection is reached the same way, through `entity { CameraRig { … } }` (§8 R8's
+/// universal fallback) — sugar is additive over it, never a wall around it.
+const CAMERA_KEYS: &[NodeKeySpec] = &[
+    NodeKeySpec { name: "fov", shape: KeyShape::Scalar, required: false },
+    NodeKeySpec { name: "aspect", shape: KeyShape::Scalar, required: true },
+    NodeKeySpec { name: "near", shape: KeyShape::Scalar, required: false },
+    NodeKeySpec { name: "far", shape: KeyShape::Scalar, required: false },
+];
+
+/// The heads that carry no key table (`mesh` / `sdf` / `entity` — geometry and the fallback).
+const NO_KEYS: &[NodeKeySpec] = &[];
+
+/// What `casts_shadow` means on a head (§3.7: "mesh: `ShadowCaster`; spot/point:
+/// `CastsPunctualShadow`").
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ShadowForm {
+    /// The CSM caster marker.
+    Caster,
+    /// The punctual-atlas opt-in.
+    Punctual,
+}
+
+impl NodeHead {
+    /// The head's surface keyword — the noun every per-head diagnostic prints.
+    pub fn kw(&self) -> &'static str {
+        match self {
+            NodeHead::Mesh(_) => "mesh",
+            NodeHead::Sun => "sun",
+            NodeHead::Spot => "spot",
+            NodeHead::Point => "point",
+            NodeHead::Sky => "sky",
+            NodeHead::Camera => "camera",
+            NodeHead::Sdf(_) => "sdf",
+            NodeHead::Entity => "entity",
+        }
+    }
+
+    /// The head's key table (empty for the heads whose whole content is their `at` pose and their
+    /// component exprs).
+    pub fn keys(&self) -> &'static [NodeKeySpec] {
+        match self {
+            NodeHead::Sun => SUN_KEYS,
+            NodeHead::Sky => SKY_KEYS,
+            NodeHead::Point => POINT_KEYS,
+            NodeHead::Spot => SPOT_KEYS,
+            NodeHead::Camera => CAMERA_KEYS,
+            NodeHead::Mesh(_) | NodeHead::Sdf(_) | NodeHead::Entity => NO_KEYS,
+        }
+    }
+
+    /// `true` iff `at` has somewhere to go. The light heads derive their whole pose from their own
+    /// keys (`dir` / `pos`), and an `sdf` edit carries WORLD-SPACE position inside the edit itself
+    /// — on those, an `at` would be silently dropped, so it is refused instead.
+    pub fn takes_at(&self) -> bool {
+        matches!(self, NodeHead::Mesh(_) | NodeHead::Camera | NodeHead::Entity)
+    }
+
+    /// `true` iff `material: NAME` has a component to become (`MaterialHandle`).
+    ///
+    /// `Entity` is here DELIBERATELY, not as a side effect of how the check was written. §8 R8
+    /// makes `entity` the head an author reaches for when no sugar head covers their case — the
+    /// one that must never be POORER than the sugar heads in the props it accepts, or the escape
+    /// hatch stops being one. An `entity` node that carries a `MeshHandle` component expression is
+    /// a drawable prop assembled by hand, and refusing it the `material:` prop would force the
+    /// author to spell `MaterialHandle(h.index() as u16)` themselves — the exact narrowing §3.7
+    /// exists to hide. The same argument makes [`shadow_form`](Self::shadow_form) answer
+    /// `Caster` for it.
+    pub fn takes_material(&self) -> bool {
+        matches!(self, NodeHead::Mesh(_) | NodeHead::Entity)
+    }
+
+    /// The `casts_shadow` form for this head, `None` when it has none (§3.7's `sky` diagnostic).
+    ///
+    /// `Entity` answers `Caster` for the reason [`takes_material`](Self::takes_material) records.
+    pub fn shadow_form(&self) -> Option<ShadowForm> {
+        match self {
+            NodeHead::Mesh(_) | NodeHead::Entity => Some(ShadowForm::Caster),
+            NodeHead::Spot | NodeHead::Point => Some(ShadowForm::Punctual),
+            NodeHead::Sun | NodeHead::Sky | NodeHead::Camera | NodeHead::Sdf(_) => None,
+        }
+    }
+}
+
+/// The §3.7 node heads, in `node_head` order — the "expected one of" list and the did-you-mean
+/// candidate set.
+pub const NODE_HEADS: &[&str] =
+    &["mesh", "sun", "spot", "point", "sky", "camera", "sdf", "entity"];
 
 /// `on EVENT (params)? (if GUARD)? => state.path (BLOCK | ;)` (§3.5).
 pub struct TransitionDef {

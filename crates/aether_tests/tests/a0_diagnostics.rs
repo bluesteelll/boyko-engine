@@ -14,7 +14,10 @@
 fn a0_diagnostics_land_on_the_users_tokens() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/unknown_construct.rs");
-    t.compile_fail("tests/ui/planned_construct_names_its_rung.rs");
+    // `planned_construct_names_its_rung` lived here until rung A6 landed `scene`, the last
+    // construct §9 listed as planned. With no planned construct left, the arm it pinned
+    // self-destructed; its successor — that the removal left the canonical §6.1 diagnostic whole —
+    // is `tests/ui/no_planned_construct_remains.rs`, registered in `a6_diagnostics.rs`.
     t.compile_fail("tests/ui/lowercase_component.rs");
     t.compile_fail("tests/ui/duplicate_hook.rs");
     t.compile_fail("tests/ui/bad_tag_modifier.rs");

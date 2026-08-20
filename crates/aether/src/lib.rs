@@ -8,11 +8,14 @@
 
 use proc_macro::TokenStream;
 
-/// The Aether authoring block: components, tags (rung A0) — later rungs add bundles, events,
-/// systems, machines, materials and scenes (docs/AETHER-LANG-PLAN.md §3, §9).
+/// The Aether authoring block. As of rung A6 the whole v1 construct registry dispatches:
+/// `component`, `tag`, `bundle`, `system`, `event`, `plugin`, `machine`, `material`, `scene`
+/// (docs/AETHER-LANG-PLAN.md §3, §9).
 ///
 /// ```ignore
 /// aether! {
+///     plugin Arena;
+///
 ///     component Health {
 ///         current: f32,
 ///         max: f32,
@@ -20,6 +23,19 @@ use proc_macro::TokenStream;
 ///
 ///     tag Player;
 ///     tag Stunned(bitset);
+///
+///     material gold { base: (1.0, 0.72, 0.30), metallic: 1.0, roughness: 0.14 }
+///
+///     // A scene declares the world's initial entities IN THE LANGUAGE, and the sibling
+///     // `plugin` registers its spawn fn as a startup one-shot.
+///     scene arena {
+///         let floor = plane(22.0);
+///
+///         mesh floor;
+///         mesh floor at (0.0, 1.0, 0.0) { material: gold, casts_shadow };
+///
+///         sun { dir: (-0.42, 0.80, 0.42), lux: 3.2 }
+///     }
 /// }
 /// ```
 ///

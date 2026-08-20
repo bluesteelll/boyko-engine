@@ -1,0 +1,5 @@
+error: no mesh binding `floor` in scene `props` (bindings here: `crate_box`)
+  --> tests/ui/scene_unknown_mesh_binding.rs:21:14
+   |
+21 |         mesh floor;
+   |              ^^^^^

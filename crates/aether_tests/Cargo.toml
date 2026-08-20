@@ -26,6 +26,18 @@ boyko-macros = { path = "../boyko_macros" }
 # ~31.7 s (MEASURED). The alternative — emitting engine paths nobody compiles — is the drift R4
 # exists to prevent, so the cost is bought deliberately.
 boyko-render = { path = "../boyko_render" }
+# Rung A6: a `scene` names types from FOUR crates, because that is where the engine defines them —
+# `boyko_render` re-exports neither `Transform` (boyko_scene) nor `Vec3` (boyko_math), and the
+# device singleton a mesh binding needs (`GpuDevice`) is the HOST's. These edges are what make the
+# emitted paths compile in-repo instead of in a user's game (§8 R4 again).
+#
+# BLAST RADIUS, continued from the `boyko-render` note above: `boyko-app` pulls the host layer
+# (`boyko_input`, the windowed runner) behind the Aether gate. NOTHING here opens a window or
+# touches a device — the mesh half of `a6_scene` is a REGISTRATION gate (the spawn fn must be a
+# legal `IntoSystem`), never an `app.update()`, so the suite stays headless and GPU-free.
+boyko-app = { path = "../boyko_app" }
+boyko-scene = { path = "../boyko_scene" }
+boyko-math = { path = "../boyko_math" }
 trybuild = "1"
 
 [lints]

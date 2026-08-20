@@ -7,10 +7,12 @@ use quote::{format_ident, quote};
 use syn::Ident;
 
 use crate::ast::{
-    AetherBlock, BundleDef, ColorLit, ComponentDef, Construct, EvField, EventDef, MachineDef,
-    MaterialDef, OrderKind, PluginDef, Schedule, StateDef, SysParam, SysParamTy, SystemDef, TagDef,
+    AetherBlock, AtPose, BundleDef, ColorLit, ComponentDef, Construct, EvField, EventDef,
+    MachineDef, MaterialDef, MeshSrc, NodeHead, NodeKeyValue, OrderKind, PluginDef, Schedule,
+    SceneDef, SceneNode, ShadowForm, StateDef, SysParam, SysParamTy, SystemDef, TagDef,
     TransitionDef,
 };
+use crate::ctx::AetherCtx;
 use crate::diag;
 
 /// Expand a parsed block to the flat item list, in source order (deterministic output is what
@@ -24,7 +26,10 @@ pub fn expand(block: &AetherBlock) -> TokenStream {
 }
 
 fn expand_inner(block: &AetherBlock) -> syn::Result<TokenStream> {
-    validate_block(block)?;
+    // §4's pipeline: parse ─▶ ctx ─▶ expand. Every whole-block rule (duplicate fn names, one
+    // plugin, the plugin requirement for scheduled constructs) runs at ctx-build time, so an
+    // expander never re-derives block-level facts.
+    let ctx = AetherCtx::build(block)?;
     let mut out = TokenStream::new();
     for c in &block.constructs {
         match c {
@@ -36,73 +41,10 @@ fn expand_inner(block: &AetherBlock) -> syn::Result<TokenStream> {
             Construct::Plugin(def) => out.extend(plugin_impl(def, block)?),
             Construct::Machine(def) => out.extend(machine_items(def)?),
             Construct::Material(def) => out.extend(material_fn(def)),
+            Construct::Scene(def) => out.extend(scene_fn(def, &ctx)?),
         }
     }
     Ok(out)
-}
-
-/// The cross-construct rules that need the WHOLE block (the reason per-construct macros were
-/// rejected): one plugin per block, scheduling clauses require the plugin header (§3.3), and one
-/// builder fn per material name (§3.6).
-fn validate_block(block: &AetherBlock) -> syn::Result<()> {
-    // §4's duplicate-name rule, at the ONE kind where rustc's own error is useless: two materials
-    // of one name emit two `pub fn`s and nothing else — no derive, no trait bound — so rustc has
-    // only E0428 to report, and MEASURED, it puts both of its labels on the `aether!` token,
-    // naming no user token at all. (component×component and material×system each get a second,
-    // localized error that rescues them; §7.1's "defer when downstream already lands well" is why
-    // cross-KIND collisions are still left to rustc.)
-    for (i, c) in block.constructs.iter().enumerate() {
-        let Construct::Material(m) = c else { continue };
-        let Some(first) = block.constructs[..i].iter().find_map(|p| match p {
-            Construct::Material(prev) if prev.name == m.name => Some(prev),
-            _ => None,
-        }) else {
-            continue;
-        };
-        let mut e = diag::err(
-            m.name.span(),
-            format!("duplicate material `{}` — each material expands to a builder fn of its own name, and two of one name is one fn defined twice", m.name),
-        );
-        e.combine(diag::err(first.name.span(), "the first `material` of this name is here"));
-        return Err(e);
-    }
-
-    let mut first_plugin: Option<&PluginDef> = None;
-    for c in &block.constructs {
-        if let Construct::Plugin(p) = c {
-            if let Some(first) = first_plugin {
-                let mut e = diag::err(
-                    p.name.span(),
-                    format!(
-                        "one `plugin` per aether block — `{}` already holds this block's registrations",
-                        first.name
-                    ),
-                );
-                e.combine(diag::err(first.name.span(), "the first `plugin` is here"));
-                return Err(e);
-            }
-            first_plugin = Some(p);
-        }
-    }
-    if first_plugin.is_none() {
-        for c in &block.constructs {
-            if let Construct::System(s) = c
-                && s.has_clauses()
-            {
-                return Err(diag::err(
-                    s.name.span(),
-                    "scheduling clauses (`on`, `after`, `when`, …) need a `plugin <Name>;` declaration in this block to hold the generated registration",
-                ));
-            }
-            if let Construct::Machine(m) = c {
-                return Err(diag::err(
-                    m.name.span(),
-                    "a `machine` needs a `plugin <Name>;` declaration in this block to hold its `insert_state` and transition registrations",
-                ));
-            }
-        }
-    }
-    Ok(())
 }
 
 /// §3.1: `component` → `#[derive(::boyko_macros::Component)]` struct with the derive's own
@@ -319,14 +261,25 @@ fn plugin_impl(def: &PluginDef, block: &AetherBlock) -> syn::Result<TokenStream>
         resolved.push(rs);
     }
 
-    // Startup one-shots keep source order (parse already rejected their other clauses).
-    let startup_calls = systems
+    // Startup one-shots keep BLOCK SOURCE order (parse already rejected a startup system's other
+    // clauses). §3.7 registers a `scene`'s spawn fn the same way, so the two kinds interleave by
+    // declaration — a scene declared before a startup system spawns before it runs, which is the
+    // only reading of the source a user can predict without knowing Aether's internals.
+    let startup_calls: Vec<TokenStream> = block
+        .constructs
         .iter()
-        .filter(|s| bucket(s) == Schedule::Startup)
-        .map(|s| {
-            let n = &s.name;
-            quote!(app.add_startup_system(#n);)
-        });
+        .filter_map(|c| match c {
+            Construct::System(s) if bucket(s) == Schedule::Startup => {
+                let n = &s.name;
+                Some(quote!(app.add_startup_system(#n);))
+            }
+            Construct::Scene(s) => {
+                let n = &s.name;
+                Some(quote!(app.add_startup_system(#n);))
+            }
+            _ => None,
+        })
+        .collect();
 
     let mut main_stmts = bucket_stmts(&systems, &resolved, &needs_key, Schedule::Update)?;
     let fixed_stmts = bucket_stmts(&systems, &resolved, &needs_key, Schedule::Fixed)?;
@@ -1189,6 +1142,494 @@ fn rgb_array(c: &ColorLit) -> TokenStream {
     quote!([#(#comps),*])
 }
 
+// ---------------------------------------------------------------------------------- rung A6
+
+/// §3.7: `scene` → ONE spawn fn with a DEMAND-DRIVEN `SystemParam` signature, plus (via the
+/// sibling `plugin`) a startup registration.
+///
+/// The param set is computed from what the body actually uses: the mesh table + device appear
+/// because a `let … = plane/cube/mesh(…)` binding exists, the material table because a `material:`
+/// prop does. A scene with neither compresses to one param — the plan's own rule, and the reason a
+/// pure-`entity` scene needs no render crate at runtime.
+///
+/// # Emission order: every `let` first, then every mint, then the nodes
+///
+/// A DECISION, not a side effect of how the parser buckets the body. Mesh bindings are
+/// SCENE-scoped, not statement-scoped: a `let` written between two nodes still lands above both,
+/// so a node may name a binding declared below it. A mesh registration is a scene-wide resource
+/// whose ordering against spawns has no observable effect, and the alternative — refusing forward
+/// references to match Rust's statement scoping — buys a diagnostic nobody needs and costs the
+/// author a rule to remember. The mint block follows for the same reason (§3.7 hoists it "ONCE per
+/// scene fn"), and nodes come last so every name they can reference already exists.
+///
+/// # Recorded spellings that differ from §3.7's After block
+///
+/// * Engine types are named by their DEFINING crate (`::boyko_scene::Transform`,
+///   `::boyko_math::Vec3` — `boyko_render` re-exports neither), for the tokens-not-deps rule.
+/// * `meshes.plane(…)` is emitted trait-qualified, because the method form would require the user
+///   to have imported `MeshAssetsExt` into the module the macro expands into.
+/// * The four params are `__aether_`-PREFIXED (§7.2(4): "generated internal names are
+///   `__aether_`-prefixed and never collide with user names"). §3.7's After block spells them
+///   `commands` / `meshes` / `materials` / `dev`, which are user-reachable names, and a scene may
+///   legally bind any of them: MEASURED, `let dev = plane(1.0); mesh dev;` shadowed the device
+///   param and produced E0599 (`no method get on MeshHandle`) with both labels on the whole
+///   `aether!` token — the exact user-token-free shape `ctx.rs` cites to justify owning a
+///   diagnostic. Prefixing makes the collision unrepresentable instead of diagnosable. Param
+///   NAMES are invisible to registration (only types and order are), so `add_startup_system` is
+///   unaffected.
+fn scene_fn(def: &SceneDef, ctx: &AetherCtx<'_>) -> syn::Result<TokenStream> {
+    // Resolve every `material:` reference first: a scene naming a material that does not exist is
+    // the §3.7 diagnostic, and it must fire before any emission decision depends on the answer.
+    let mut referenced: Vec<&Ident> = Vec::new();
+    collect_materials(&def.nodes, ctx, &mut referenced)?;
+    // Re-order into BLOCK declaration order. Collecting in first-USE order would make the emitted
+    // mint sequence a function of node order, so swapping two nodes that place different materials
+    // would silently renumber every asset row this scene mints.
+    let used_materials: Vec<&Ident> = ctx
+        .materials()
+        .iter()
+        .map(|m| &m.name)
+        .filter(|name| referenced.iter().any(|r| r == name))
+        .collect();
+
+    // Every engine path below is VERIFIED against the tree (the tokens-not-deps rule): `Transform`
+    // / `Vec3` / `MeshBundle` live in three different crates, and §3.7's bare spellings are the
+    // AUTHOR's imports, not the macro's — the A1 `Entity` and A2 `Res` precedent, a third time.
+    let sys = quote!(::boyko_ecs::ecs::core::system);
+    let assets = quote!(::boyko_ecs::ecs::core::asset::Assets);
+
+    let (cmds, meshes, materials, dev) = (
+        scene_param(SCENE_PARAM_COMMANDS),
+        scene_param(SCENE_PARAM_MESHES),
+        scene_param(SCENE_PARAM_MATERIALS),
+        scene_param(SCENE_PARAM_DEV),
+    );
+
+    let mut params: Vec<TokenStream> = vec![quote!(mut #cmds: #sys::Commands)];
+    if !def.lets.is_empty() {
+        params.push(quote! {
+            mut #meshes: #sys::NonSendResMut<#assets<::boyko_render::MeshGpu>>
+        });
+    }
+    if !used_materials.is_empty() {
+        params.push(quote! {
+            mut #materials: #sys::ResMut<#assets<::boyko_render::Material>>
+        });
+    }
+    if !def.lets.is_empty() {
+        params.push(quote!(#dev: #sys::NonSendRes<::boyko_app::GpuDevice>));
+    }
+
+    let lets = def.lets.iter().map(|l| {
+        let name = &l.name;
+        let call = match &l.src {
+            MeshSrc::Plane(size) => {
+                quote!(::boyko_render::MeshAssetsExt::plane(&mut *#meshes, #dev.get(), #size))
+            }
+            MeshSrc::Cube(size) => {
+                quote!(::boyko_render::MeshAssetsExt::cube(&mut *#meshes, #dev.get(), #size))
+            }
+            MeshSrc::Mesh(vertices, indices) => quote! {
+                ::boyko_render::MeshAssetsExt::register_mesh(
+                    &mut *#meshes, #dev.get(), #vertices, #indices
+                )
+            },
+        };
+        quote!(let #name = #call;)
+    });
+
+    // The mints are hoisted ONCE per scene fn, in the BLOCK's material declaration order — a
+    // scene that places one material on forty nodes mints one asset row, not forty.
+    let mints = used_materials.iter().map(|name| {
+        let local = material_local(name);
+        quote!(let #local = #materials.add(#name());)
+    });
+
+    let mut stmts: Vec<TokenStream> = Vec::new();
+    let mut counter = 0usize;
+    for node in &def.nodes {
+        emit_node(node, def, &mut counter, false, &mut stmts)?;
+    }
+
+    let name = &def.name;
+    let doc = format!(" Aether scene `{name}` — the spawn fn.");
+    Ok(quote! {
+        #[doc = #doc]
+        pub fn #name( #(#params),* ) {
+            #(#lets)*
+            #(#mints)*
+            #(#stmts)*
+        }
+    })
+}
+
+/// Walk the node tree and resolve every `material: NAME` against the sibling `material`
+/// constructs (§3.7's `AetherCtx` showcase), collecting the used names in BLOCK declaration order.
+fn collect_materials<'a>(
+    nodes: &[SceneNode],
+    ctx: &AetherCtx<'a>,
+    out: &mut Vec<&'a Ident>,
+) -> syn::Result<()> {
+    for node in nodes {
+        if let Some(reference) = &node.material {
+            let Some(def) = ctx.material(reference) else {
+                return Err(unknown_symbol(
+                    reference,
+                    "material",
+                    "this aether block",
+                    &ctx.material_names(),
+                    "materials",
+                ));
+            };
+            // Declaration order, deduped: the mint sequence must not depend on node order.
+            if !out.iter().any(|m| **m == def.name) {
+                out.push(&def.name);
+            }
+        }
+        collect_materials(&node.children, ctx, out)?;
+    }
+    Ok(())
+}
+
+/// §3.7's two symmetric "no such sibling" diagnostics (`material: gol`, `mesh floot`): the
+/// declared list, then a did-you-mean when one candidate is within edit distance 2.
+///
+/// `scope` is spelled by the CALLER because the two symbol tables have different extents — a
+/// material is a block symbol (§4), a mesh binding belongs to one scene — and a message that
+/// misstates where it looked sends the reader to the wrong file region.
+fn unknown_symbol(
+    found: &Ident,
+    kind: &str,
+    scope: &str,
+    declared: &[String],
+    plural: &str,
+) -> syn::Error {
+    let refs: Vec<&str> = declared.iter().map(String::as_str).collect();
+    let list = if refs.is_empty() {
+        format!("no {plural} are declared here")
+    } else {
+        format!(
+            "{plural} here: {}",
+            refs.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ")
+        )
+    };
+    let mut msg = format!("no {kind} `{found}` in {scope} ({list})");
+    if let Some(sugg) = diag::did_you_mean(&found.to_string(), &refs) {
+        msg.push_str(&format!(" (did you mean `{sugg}`?)"));
+    }
+    diag::err(found.span(), msg)
+}
+
+/// The hoisted `Handle<Material>` local for one material name (the plan's exact spelling).
+fn material_local(name: &Ident) -> Ident {
+    format_ident!("__aether_mat_{}", name)
+}
+
+/// The generated scene-param binding names (§7.2(4)). Spelled once each, here, because the
+/// signature and the body must agree on them and a typo in either would only surface as an
+/// unresolved name inside macro output.
+const SCENE_PARAM_COMMANDS: &str = "commands";
+/// The `NonSendResMut<Assets<MeshGpu>>` binding — see [`SCENE_PARAM_COMMANDS`].
+const SCENE_PARAM_MESHES: &str = "meshes";
+/// The `ResMut<Assets<Material>>` binding — see [`SCENE_PARAM_COMMANDS`].
+const SCENE_PARAM_MATERIALS: &str = "materials";
+/// The `NonSendRes<GpuDevice>` binding — see [`SCENE_PARAM_COMMANDS`].
+const SCENE_PARAM_DEV: &str = "dev";
+
+/// One generated scene param, `__aether_`-prefixed so no user `let` can shadow it (see
+/// [`scene_fn`]'s recorded-spellings section for the measurement that forced this).
+fn scene_param(role: &str) -> Ident {
+    format_ident!("__aether_{}", role)
+}
+
+/// The bound `Entity` local for a node that is a parent, a child, or both.
+fn node_local(index: usize) -> Ident {
+    format_ident!("__aether_e{}", index)
+}
+
+/// Emit one node's statements (and, recursively, its children's).
+///
+/// A node binds its `Entity` only when someone needs it — it has children, or it IS one. Every
+/// other node emits §3.7's statement form (`<commands>.spawn(…).insert(…);`), so the common case
+/// carries no locals it does not use.
+fn emit_node(
+    node: &SceneNode,
+    scene: &SceneDef,
+    counter: &mut usize,
+    want_id: bool,
+    out: &mut Vec<TokenStream>,
+) -> syn::Result<Option<Ident>> {
+    let spawn = spawn_call(node, scene)?;
+
+    let mut call = spawn;
+    if let (Some(form), Some(_)) = (node.head.shadow_form(), node.casts_shadow) {
+        let marker = match form {
+            ShadowForm::Caster => quote!(::boyko_render::ShadowCaster),
+            ShadowForm::Punctual => quote!(::boyko_render::CastsPunctualShadow),
+        };
+        call = quote!(#call.insert(#marker));
+    }
+    if let Some(reference) = &node.material {
+        // `MaterialHandle` is a `u16` TABLE SLOT, and `Handle::index()` is the row — the exact
+        // narrowing every shipped scene writes by hand.
+        let local = material_local(reference);
+        call = quote!(#call.insert(::boyko_scene::MaterialHandle(#local.index() as u16)));
+    }
+    for extra in &node.extras {
+        call = quote!(#call.insert(#extra));
+    }
+
+    let needs_id = want_id || !node.children.is_empty();
+    if !needs_id {
+        out.push(quote!(#call;));
+        return Ok(None);
+    }
+
+    let id = node_local(*counter);
+    *counter += 1;
+    out.push(quote!(let #id = #call.id();));
+
+    for child in &node.children {
+        let child_id = emit_node(child, scene, counter, true, out)?
+            .expect("invariant: `want_id` was set, so the child bound an id");
+        // Hierarchy is driven by `ChildOf` insertion (Phase 19) — user code never writes
+        // `Children`, and neither does Aether.
+        let cmds = scene_param(SCENE_PARAM_COMMANDS);
+        out.push(quote!(#cmds.add_child(#id, #child_id);));
+    }
+    Ok(Some(id))
+}
+
+/// The `<commands>.spawn(<bundle>)` (or `spawn_empty()`) head of one node's statement.
+///
+/// The numeric key slots below (`tuple3(node, 0)`, `scalar(node, 2)`, …) index the head's OWN key
+/// table in `ast.rs` — `SUN_KEYS`, `SKY_KEYS`, `POINT_KEYS`, `SPOT_KEYS`, `CAMERA_KEYS`, each in
+/// declaration order. The parser fills `SceneNode::keys` positionally from the same table, so the
+/// two sides cannot disagree about which slot a key is; what they CAN disagree about is which key
+/// a slot means, if a row is ever inserted in the middle of a table. Renaming a key is therefore
+/// free, but REORDERING one is not: change a `*_KEYS` const and the matching arm here moves with
+/// it. (The unit pins below catch that — every slot of every table is exercised with a distinct
+/// value.)
+fn spawn_call(node: &SceneNode, scene: &SceneDef) -> syn::Result<TokenStream> {
+    let cmds = scene_param(SCENE_PARAM_COMMANDS);
+    let bundle = match &node.head {
+        NodeHead::Mesh(binding) => {
+            if !scene.lets.iter().any(|l| l.name == *binding) {
+                let declared: Vec<String> =
+                    scene.lets.iter().map(|l| l.name.to_string()).collect();
+                // SCENE-scoped, not block-scoped: two scenes have two independent binding tables,
+                // and saying "in this aether block" would claim a name is absent while a sibling
+                // scene declares it. (The material list above IS block-scoped — §4 puts material
+                // symbols in the block's table — so its wording stays as A5 shipped it.)
+                return Err(unknown_symbol(
+                    binding,
+                    "mesh binding",
+                    &format!("scene `{}`", scene.name),
+                    &declared,
+                    "bindings",
+                ));
+            }
+            let transform = at_tokens(node.at.as_ref());
+            quote!(::boyko_render::MeshBundle::new(#binding, #transform))
+        }
+        NodeHead::Sun => {
+            let dir = tuple3(node, 0)?;
+            let color = tuple3_or(node, 1, quote!([1.0, 1.0, 1.0]));
+            let lux = scalar(node, 2)?;
+            // The pose is derived exactly as the shipped scenes derive theirs: a look-at whose
+            // `-Z` points at the light direction, converted to the entity's rotation.
+            quote! {
+                {
+                    let __aether_dir = #dir;
+                    let __aether_pose = ::boyko_math::Affine3A::look_at_rh(
+                        ::boyko_math::Vec3::ZERO,
+                        ::boyko_math::Vec3::new(__aether_dir[0], __aether_dir[1], __aether_dir[2]),
+                        ::boyko_math::Vec3::new(0.0, 1.0, 0.0),
+                    );
+                    ::boyko_render::DirectionalLightObject {
+                        transform: ::boyko_scene::Transform {
+                            translation: ::boyko_math::Vec3::ZERO,
+                            rotation: ::boyko_math::Quat::from_mat3(__aether_pose.matrix3),
+                            scale: ::boyko_math::Vec3::ONE,
+                        },
+                        global: ::boyko_scene::GlobalTransform::IDENTITY,
+                        light: ::boyko_render::DirectionalLight::new(__aether_dir, #color, #lux),
+                    }
+                }
+            }
+        }
+        NodeHead::Sky => {
+            let sky = tuple3(node, 0)?;
+            let ground = tuple3(node, 1)?;
+            quote!(::boyko_render::SkyLight::new(#sky, #ground))
+        }
+        NodeHead::Point => {
+            let pos = tuple3(node, 0)?;
+            let color = tuple3_or(node, 1, quote!([1.0, 1.0, 1.0]));
+            let power = scalar(node, 2)?;
+            let range = scalar(node, 3)?;
+            quote! {
+                {
+                    let __aether_pos = #pos;
+                    ::boyko_render::PointLightObject {
+                        transform: ::boyko_scene::Transform::from_translation(
+                            ::boyko_math::Vec3::new(__aether_pos[0], __aether_pos[1], __aether_pos[2])
+                        ),
+                        global: ::boyko_scene::GlobalTransform::IDENTITY,
+                        light: ::boyko_render::PointLight::new(__aether_pos, #color, #power, #range),
+                    }
+                }
+            }
+        }
+        NodeHead::Spot => {
+            let pos = tuple3(node, 0)?;
+            let dir = tuple3(node, 1)?;
+            let color = tuple3_or(node, 2, quote!([1.0, 1.0, 1.0]));
+            let power = scalar(node, 3)?;
+            let range = scalar(node, 4)?;
+            let inner = scalar(node, 5)?;
+            let outer = scalar(node, 6)?;
+            // `SpotLight::new`'s `direction` is only a SEED: `light_reconcile` overwrites it from
+            // the transform's world `-Z`, so the POSE is what actually aims the cone — hence the
+            // look-at at `pos + dir` rather than a bare translation.
+            quote! {
+                {
+                    let __aether_pos = #pos;
+                    let __aether_dir = #dir;
+                    let __aether_eye = ::boyko_math::Vec3::new(
+                        __aether_pos[0], __aether_pos[1], __aether_pos[2]
+                    );
+                    let __aether_pose = ::boyko_math::Affine3A::look_at_rh(
+                        __aether_eye,
+                        __aether_eye + ::boyko_math::Vec3::new(
+                            __aether_dir[0], __aether_dir[1], __aether_dir[2]
+                        ),
+                        ::boyko_math::Vec3::new(0.0, 1.0, 0.0),
+                    );
+                    ::boyko_render::SpotLightObject {
+                        transform: ::boyko_scene::Transform {
+                            translation: __aether_eye,
+                            rotation: ::boyko_math::Quat::from_mat3(__aether_pose.matrix3),
+                            scale: ::boyko_math::Vec3::ONE,
+                        },
+                        global: ::boyko_scene::GlobalTransform::IDENTITY,
+                        light: ::boyko_render::SpotLight::new(
+                            __aether_pos, __aether_dir, #color, #power, #range, #inner, #outer
+                        ),
+                    }
+                }
+            }
+        }
+        NodeHead::Camera => {
+            let transform = at_tokens(node.at.as_ref());
+            let fov = scalar_or(node, 0, quote!(60.0));
+            let aspect = scalar(node, 1)?;
+            let near = scalar_or(node, 2, quote!(0.1));
+            let far = scalar_or(node, 3, quote!(1000.0));
+            // `fov` is authored in DEGREES; the multiply (rather than `.to_radians()`) keeps the
+            // whole expression `f32` — a method call on a bare float literal would infer `f64`
+            // and then fail against the `f32` field.
+            quote! {
+                ::boyko_scene::CameraRig {
+                    transform: #transform,
+                    global: ::boyko_scene::GlobalTransform::IDENTITY,
+                    camera: ::boyko_scene::Camera::DEFAULT,
+                    projection: ::boyko_scene::Projection::Perspective {
+                        fov_y: (#fov) * (::core::f32::consts::PI / 180.0),
+                        aspect: #aspect,
+                        near: #near,
+                        far: #far,
+                    },
+                }
+            }
+        }
+        NodeHead::Sdf(edit) => quote!(::boyko_render::SdfPrimitive(#edit)),
+        NodeHead::Entity => match &node.at {
+            // A bare `entity` with no pose spawns EMPTY and takes only its component exprs — the
+            // `ui!` shape. With a pose it takes the engine's own placed-anchor preset, so the
+            // `GlobalTransform` slot `propagate_transforms` fills is present from spawn.
+            None => return Ok(quote!(#cmds.spawn_empty())),
+            Some(_) => {
+                let transform = at_tokens(node.at.as_ref());
+                quote! {
+                    ::boyko_scene::SpatialBundle {
+                        transform: #transform,
+                        global: ::boyko_scene::GlobalTransform::IDENTITY,
+                        visibility: ::boyko_scene::Visibility::default(),
+                    }
+                }
+            }
+        },
+    };
+    Ok(quote!(#cmds.spawn(#bundle)))
+}
+
+/// A node's pose: the §3.7 translation sugar, a verbatim `Transform` expression, or the identity
+/// for a node that declared none (the shipped `MeshBundle::new(floor, Transform::IDENTITY)` form).
+fn at_tokens(at: Option<&AtPose>) -> TokenStream {
+    match at {
+        None => quote!(::boyko_scene::Transform::IDENTITY),
+        Some(AtPose::Verbatim(e)) => quote!(#e),
+        Some(AtPose::Translation(c)) => {
+            let (x, y, z) = (&c[0], &c[1], &c[2]);
+            quote! {
+                ::boyko_scene::Transform::from_translation(::boyko_math::Vec3::new(#x, #y, #z))
+            }
+        }
+    }
+}
+
+/// A REQUIRED `Tuple3` key slot as an `[x, y, z]` array literal.
+///
+/// The parser fills slots in table order and refuses a node whose required row is absent, so this
+/// cannot fail from user input. It still returns a `Result` rather than panicking: §8 R3's
+/// never-panic contract says an internal invariant failure becomes a SPANNED error (which keeps
+/// rust-analyzer's view of the file alive), not a macro panic (which erases the whole block).
+fn tuple3(node: &SceneNode, slot: usize) -> syn::Result<TokenStream> {
+    match node.keys.get(slot) {
+        Some(Some(NodeKeyValue::Tuple(c))) => Ok(quote!([#(#c),*])),
+        _ => Err(missing_slot(node, slot, "3-tuple")),
+    }
+}
+
+/// An OPTIONAL `Tuple3` key slot, or its default.
+fn tuple3_or(node: &SceneNode, slot: usize, default: TokenStream) -> TokenStream {
+    match node.keys.get(slot) {
+        Some(Some(NodeKeyValue::Tuple(c))) => quote!([#(#c),*]),
+        _ => default,
+    }
+}
+
+/// A REQUIRED `Scalar` key slot, verbatim. Fallible for the [`tuple3`] reason.
+fn scalar(node: &SceneNode, slot: usize) -> syn::Result<TokenStream> {
+    match node.keys.get(slot) {
+        Some(Some(NodeKeyValue::Scalar(e))) => Ok(quote!(#e)),
+        _ => Err(missing_slot(node, slot, "scalar")),
+    }
+}
+
+/// An OPTIONAL `Scalar` key slot, or its default.
+fn scalar_or(node: &SceneNode, slot: usize, default: TokenStream) -> TokenStream {
+    match node.keys.get(slot) {
+        Some(Some(NodeKeyValue::Scalar(e))) => quote!(#e),
+        _ => default,
+    }
+}
+
+/// The §8 R3 fallback: a key table row the expander expected and the parse did not deliver. Not
+/// reachable from user input — the message says so, so a reader who ever sees it knows it is an
+/// Aether bug and not their syntax.
+fn missing_slot(node: &SceneNode, slot: usize, shape: &str) -> syn::Error {
+    let name = node.head.keys().get(slot).map_or("<unknown>", |k| k.name);
+    diag::err(
+        node.head_span,
+        format!(
+            "internal aether error: the `{}` node's required `{name}:` {shape} slot was not filled by the parser — please report this block",
+            node.head.kw()
+        ),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     //! The A0 snapshot channel (see the crate doc's macrotest note): `expand_block` is a plain
@@ -1352,11 +1793,26 @@ mod tests {
         fails_with(quote! { compnent Health {} }, "did you mean `component`?");
     }
 
+    /// The planned-construct arm is GONE, and this test is the proof it went cleanly.
+    ///
+    /// Rung A6 landed `scene`, the last construct §9 listed as planned, so every keyword in
+    /// `CONSTRUCT_KEYWORDS` now dispatches and an unrecognized head is unambiguously a
+    /// misspelling. Two ways this could have gone wrong, both asserted here: the arm could have
+    /// outlived its construct (a shipped `scene` still reported "lands at rung A6" — the exact
+    /// drift the A5 version of this test was written to catch, one rung earlier), or removing it
+    /// could have taken the canonical unknown-construct path with it, leaving a near-miss on
+    /// `scene` with no suggestion.
     #[test]
-    fn planned_constructs_name_their_rung_instead_of_pretending_unknown() {
-        fails_with(quote! { scene lab {} }, "lands at rung A6");
-        // `material` shipped at A5, so it must NO LONGER take the planned-construct path — a
-        // construct that stays "planned" after it lands is the one drift this test can catch.
+    fn no_planned_construct_remains_and_a_near_miss_still_suggests() {
+        // `scene` is REAL: an empty scene expands, and nothing mentions a rung.
+        let out = crate::expand_block(quote! { scene lab {} }).to_string();
+        assert!(!out.contains("compile_error"), "a shipped construct must not error: {out}");
+        assert!(!out.contains("rung A6"), "the planned-construct arm outlived its rung: {out}");
+        // A near-miss on it takes the §6.1 canonical path, list and did-you-mean intact.
+        fails_with(quote! { scen lab {} }, "unknown construct `scen`");
+        fails_with(quote! { scen lab {} }, "did you mean `scene`?");
+        // `material` shipped at A5, and the same rule holds for it — a construct that stays
+        // "planned" after it lands is the one drift these two lines can catch.
         fails_with(quote! { material gold {} }, "needs a `base:` color");
     }
 
@@ -2435,6 +2891,627 @@ mod tests {
                 #[derive(::boyko_macros::Component)]
                 pub struct Paint {
                     pub coats: u8
+                }
+            },
+        );
+    }
+
+    // ------------------------------------------------------------------------------ rung A6
+
+    /// §3.7's before/after pair VERBATIM — the vb_lab compression, token for token.
+    ///
+    /// Four spellings differ from the plan's After block, all recorded on [`super::scene_fn`]:
+    /// engine types are named by their DEFINING crate (`::boyko_scene::Transform`,
+    /// `::boyko_math::Vec3` — `boyko_render` re-exports neither), `meshes.plane(…)` is emitted
+    /// trait-qualified so the user need not have imported `MeshAssetsExt`, the `Commands` /
+    /// `NonSendResMut` / `ResMut` params carry their real nested paths (the A2 `Res` precedent),
+    /// and the four param BINDINGS are `__aether_`-prefixed per §7.2(4) — the After block's bare
+    /// `commands` / `meshes` / `materials` / `dev` are names a user `let` can bind, and one that
+    /// did shadowed the param with both error labels on the `aether!` token.
+    ///
+    /// What this pin OWNS that no behavior test can: the `at Transform { … }` node passes through
+    /// with the USER's bare `Transform` / `Vec3` / `Quat` spellings untouched (§7.2's verbatim
+    /// rule), while the node that gave no `at` receives Aether's own qualified
+    /// `Transform::IDENTITY`. A stringify/re-parse round-trip would erase that difference.
+    #[test]
+    fn the_section_3_7_before_after_pair_holds_verbatim() {
+        expands_to(
+            quote! {
+                plugin VbLab;
+
+                material gold { base: (1.0, 0.72, 0.30), metallic: 1.0, roughness: 0.14 }
+                material lamp { base: (0.02, 0.02, 0.02), roughness: 0.6, emissive: (1.6, 0.9, 0.3) }
+
+                scene lab {
+                    let floor = plane(22.0);
+                    let block = cube(1.0);
+
+                    mesh floor;
+                    mesh block at Transform { translation: Vec3::new(0.0, 3.0, -4.5),
+                                              rotation: Quat::IDENTITY,
+                                              scale: Vec3::new(14.0, 6.0, 0.4) };
+                    mesh block at (-2.4, 0.5, -2.2) { material: gold, casts_shadow };
+                    mesh block at (-4.4, 1.4, -1.0) { material: lamp };
+
+                    sdf SdfEdit::sphere([3.2, 0.85, 1.8], 0.85, sdf_op::UNION, 0.0);
+
+                    sun { dir: (-0.42, 0.80, 0.42), color: (1.0, 0.97, 0.92), lux: 3.2 }
+                    sky { sky: (0.28, 0.36, 0.50), ground: (0.15, 0.14, 0.13) }
+                }
+            },
+            quote! {
+                pub struct VbLab;
+                impl ::boyko_ecs::Plugin for VbLab {
+                    fn build(&self, app: &mut ::boyko_ecs::App) {
+                        app.add_startup_system(lab);
+                    }
+                    fn name(&self) -> &'static str { "VbLab" }
+                }
+                #[doc = " Aether material `gold`."]
+                #[inline]
+                pub fn gold() -> ::boyko_render::Material {
+                    ::boyko_render::Material::new([1.0, 0.72, 0.30, 1.0], 1.0, 0.14, 0.5, [0.0; 3], 0)
+                }
+                #[doc = " Aether material `lamp`."]
+                #[inline]
+                pub fn lamp() -> ::boyko_render::Material {
+                    ::boyko_render::Material::new([0.02, 0.02, 0.02, 1.0], 0.0, 0.6, 0.5, [1.6, 0.9, 0.3], 0)
+                }
+                #[doc = " Aether scene `lab` — the spawn fn."]
+                pub fn lab(
+                    mut __aether_commands: ::boyko_ecs::ecs::core::system::Commands,
+                    mut __aether_meshes: ::boyko_ecs::ecs::core::system::NonSendResMut<
+                        ::boyko_ecs::ecs::core::asset::Assets<::boyko_render::MeshGpu>>,
+                    mut __aether_materials: ::boyko_ecs::ecs::core::system::ResMut<
+                        ::boyko_ecs::ecs::core::asset::Assets<::boyko_render::Material>>,
+                    __aether_dev: ::boyko_ecs::ecs::core::system::NonSendRes<::boyko_app::GpuDevice>
+                ) {
+                    let floor = ::boyko_render::MeshAssetsExt::plane(&mut *__aether_meshes, __aether_dev.get(), 22.0);
+                    let block = ::boyko_render::MeshAssetsExt::cube(&mut *__aether_meshes, __aether_dev.get(), 1.0);
+                    let __aether_mat_gold = __aether_materials.add(gold());
+                    let __aether_mat_lamp = __aether_materials.add(lamp());
+                    __aether_commands.spawn(::boyko_render::MeshBundle::new(
+                        floor,
+                        ::boyko_scene::Transform::IDENTITY
+                    ));
+                    __aether_commands.spawn(::boyko_render::MeshBundle::new(block, Transform {
+                        translation: Vec3::new(0.0, 3.0, -4.5),
+                        rotation: Quat::IDENTITY,
+                        scale: Vec3::new(14.0, 6.0, 0.4)
+                    }));
+                    __aether_commands.spawn(::boyko_render::MeshBundle::new(
+                        block,
+                        ::boyko_scene::Transform::from_translation(
+                            ::boyko_math::Vec3::new(-2.4, 0.5, -2.2)
+                        )
+                    ))
+                    .insert(::boyko_render::ShadowCaster)
+                    .insert(::boyko_scene::MaterialHandle(__aether_mat_gold.index() as u16));
+                    __aether_commands.spawn(::boyko_render::MeshBundle::new(
+                        block,
+                        ::boyko_scene::Transform::from_translation(
+                            ::boyko_math::Vec3::new(-4.4, 1.4, -1.0)
+                        )
+                    ))
+                    .insert(::boyko_scene::MaterialHandle(__aether_mat_lamp.index() as u16));
+                    __aether_commands.spawn(::boyko_render::SdfPrimitive(
+                        SdfEdit::sphere([3.2, 0.85, 1.8], 0.85, sdf_op::UNION, 0.0)
+                    ));
+                    __aether_commands.spawn({
+                        let __aether_dir = [-0.42, 0.80, 0.42];
+                        let __aether_pose = ::boyko_math::Affine3A::look_at_rh(
+                            ::boyko_math::Vec3::ZERO,
+                            ::boyko_math::Vec3::new(__aether_dir[0], __aether_dir[1], __aether_dir[2]),
+                            ::boyko_math::Vec3::new(0.0, 1.0, 0.0),
+                        );
+                        ::boyko_render::DirectionalLightObject {
+                            transform: ::boyko_scene::Transform {
+                                translation: ::boyko_math::Vec3::ZERO,
+                                rotation: ::boyko_math::Quat::from_mat3(__aether_pose.matrix3),
+                                scale: ::boyko_math::Vec3::ONE,
+                            },
+                            global: ::boyko_scene::GlobalTransform::IDENTITY,
+                            light: ::boyko_render::DirectionalLight::new(
+                                __aether_dir, [1.0, 0.97, 0.92], 3.2
+                            ),
+                        }
+                    });
+                    __aether_commands.spawn(::boyko_render::SkyLight::new(
+                        [0.28, 0.36, 0.50], [0.15, 0.14, 0.13]
+                    ));
+                }
+            },
+        );
+    }
+
+    /// The DEMAND-DRIVEN param rule, at its floor: a scene with no mesh binding and no `material:`
+    /// prop compresses to `(commands)` alone — §3.7's own sentence, and the reason a pure-`entity`
+    /// scene drags neither the asset tables nor the device into its signature.
+    ///
+    /// Also pins the `entity` fallback's two shapes (§8 R8): with `at` it takes the engine's placed
+    /// anchor preset, without one it spawns EMPTY and carries only its component exprs.
+    #[test]
+    fn a_scene_that_uses_neither_meshes_nor_materials_takes_commands_alone() {
+        expands_to(
+            quote! {
+                scene props {
+                    entity at (1.0, 0.0, 2.0) { Health { hp: 10.0 } };
+                    entity { Marker, Tally(3) };
+                }
+            },
+            quote! {
+                #[doc = " Aether scene `props` — the spawn fn."]
+                pub fn props(mut __aether_commands: ::boyko_ecs::ecs::core::system::Commands) {
+                    __aether_commands.spawn(::boyko_scene::SpatialBundle {
+                        transform: ::boyko_scene::Transform::from_translation(
+                            ::boyko_math::Vec3::new(1.0, 0.0, 2.0)
+                        ),
+                        global: ::boyko_scene::GlobalTransform::IDENTITY,
+                        visibility: ::boyko_scene::Visibility::default(),
+                    })
+                    .insert(Health { hp: 10.0 });
+                    __aether_commands.spawn_empty().insert(Marker).insert(Tally(3));
+                }
+            },
+        );
+    }
+
+    /// `children:` — the ONE shape that cannot use the plan's chained statement form, because a
+    /// parent must hand its `Entity` to `add_child`. A childless node keeps the chained form (the
+    /// pin above); only the nodes that need an id bind one, and the ids number in spawn order.
+    ///
+    /// Hierarchy rides on `ChildOf` insertion (Phase 19) — `Commands::add_child` is that, and
+    /// Aether writes `Children` no more than user code does.
+    #[test]
+    fn children_bind_entity_ids_and_parent_through_the_kernels_own_command() {
+        expands_to(
+            quote! {
+                scene rig {
+                    entity at (0.0, 0.0, 0.0) {
+                        Root,
+                        children: [
+                            entity { LeftArm },
+                            entity at (1.0, 0.0, 0.0) { RightArm, children: [ entity { Hand } ] }
+                        ]
+                    };
+                }
+            },
+            quote! {
+                #[doc = " Aether scene `rig` — the spawn fn."]
+                pub fn rig(mut __aether_commands: ::boyko_ecs::ecs::core::system::Commands) {
+                    let __aether_e0 = __aether_commands.spawn(::boyko_scene::SpatialBundle {
+                        transform: ::boyko_scene::Transform::from_translation(
+                            ::boyko_math::Vec3::new(0.0, 0.0, 0.0)
+                        ),
+                        global: ::boyko_scene::GlobalTransform::IDENTITY,
+                        visibility: ::boyko_scene::Visibility::default(),
+                    })
+                    .insert(Root)
+                    .id();
+                    let __aether_e1 = __aether_commands.spawn_empty().insert(LeftArm).id();
+                    __aether_commands.add_child(__aether_e0, __aether_e1);
+                    let __aether_e2 = __aether_commands.spawn(::boyko_scene::SpatialBundle {
+                        transform: ::boyko_scene::Transform::from_translation(
+                            ::boyko_math::Vec3::new(1.0, 0.0, 0.0)
+                        ),
+                        global: ::boyko_scene::GlobalTransform::IDENTITY,
+                        visibility: ::boyko_scene::Visibility::default(),
+                    })
+                    .insert(RightArm)
+                    .id();
+                    let __aether_e3 = __aether_commands.spawn_empty().insert(Hand).id();
+                    __aether_commands.add_child(__aether_e2, __aether_e3);
+                    __aether_commands.add_child(__aether_e0, __aether_e2);
+                }
+            },
+        );
+    }
+
+    /// The three heads §3.7 names but never demonstrates.
+    ///
+    /// # What this pin gates, and what it CANNOT
+    ///
+    /// It gates the EXPANDER: argument count, argument ORDER, which key lands in which slot, and
+    /// the synthesized defaults. `aether-lang` has no engine dependency — it emits tokens — so no
+    /// assertion in this file can notice that `SpotLight::new` grew a parameter. It would stay
+    /// green forever. (An earlier revision of this comment claimed the opposite; it was wrong, and
+    /// wrong in the "gate that could not fail" direction.)
+    ///
+    /// The ENGINE half is `aether_tests`' compiled surface — `tests/a6_scene.rs`'s `vb_lab`
+    /// module, where these same heads are expanded against the real crates and registered with
+    /// `add_startup_system`, which type-checks the whole generated body. A changed constructor
+    /// breaks THERE, in-repo, which is what §8 R4 actually asks for. The two halves are
+    /// complementary: this one says what Aether meant to emit, that one says the engine still
+    /// accepts it.
+    ///
+    /// Also pins the two defaults that are NOT the engine's: `color` falls back to white (a
+    /// neutral that IS right), and `camera`'s `fov` is authored in DEGREES and converted by a
+    /// multiply — a `.to_radians()` on a bare float literal would infer `f64` and fail against the
+    /// `f32` field.
+    #[test]
+    fn the_spot_point_and_camera_heads_lower_to_the_engines_own_constructors() {
+        expands_to(
+            quote! {
+                scene lights {
+                    spot {
+                        pos: (3.6, 4.2, 3.2), dir: (-0.6, -0.7, -0.5),
+                        color: (1.0, 0.85, 0.6),
+                        power: 6000.0, range: 14.0, inner: 16.0, outer: 26.0,
+                        casts_shadow
+                    }
+                    point { pos: (-1.8, 2.2, 2.4), power: 240.0, range: 9.0 }
+                    camera at (0.0, 2.1, 8.4) { aspect: 1120.0 / 720.0, fov: 52.0, far: 120.0 }
+                }
+            },
+            quote! {
+                #[doc = " Aether scene `lights` — the spawn fn."]
+                pub fn lights(mut __aether_commands: ::boyko_ecs::ecs::core::system::Commands) {
+                    __aether_commands.spawn({
+                        let __aether_pos = [3.6, 4.2, 3.2];
+                        let __aether_dir = [-0.6, -0.7, -0.5];
+                        let __aether_eye = ::boyko_math::Vec3::new(
+                            __aether_pos[0], __aether_pos[1], __aether_pos[2]
+                        );
+                        let __aether_pose = ::boyko_math::Affine3A::look_at_rh(
+                            __aether_eye,
+                            __aether_eye + ::boyko_math::Vec3::new(
+                                __aether_dir[0], __aether_dir[1], __aether_dir[2]
+                            ),
+                            ::boyko_math::Vec3::new(0.0, 1.0, 0.0),
+                        );
+                        ::boyko_render::SpotLightObject {
+                            transform: ::boyko_scene::Transform {
+                                translation: __aether_eye,
+                                rotation: ::boyko_math::Quat::from_mat3(__aether_pose.matrix3),
+                                scale: ::boyko_math::Vec3::ONE,
+                            },
+                            global: ::boyko_scene::GlobalTransform::IDENTITY,
+                            light: ::boyko_render::SpotLight::new(
+                                __aether_pos, __aether_dir, [1.0, 0.85, 0.6],
+                                6000.0, 14.0, 16.0, 26.0
+                            ),
+                        }
+                    })
+                    .insert(::boyko_render::CastsPunctualShadow);
+                    __aether_commands.spawn({
+                        let __aether_pos = [-1.8, 2.2, 2.4];
+                        ::boyko_render::PointLightObject {
+                            transform: ::boyko_scene::Transform::from_translation(
+                                ::boyko_math::Vec3::new(
+                                    __aether_pos[0], __aether_pos[1], __aether_pos[2]
+                                )
+                            ),
+                            global: ::boyko_scene::GlobalTransform::IDENTITY,
+                            light: ::boyko_render::PointLight::new(
+                                __aether_pos, [1.0, 1.0, 1.0], 240.0, 9.0
+                            ),
+                        }
+                    });
+                    __aether_commands.spawn(::boyko_scene::CameraRig {
+                        transform: ::boyko_scene::Transform::from_translation(
+                            ::boyko_math::Vec3::new(0.0, 2.1, 8.4)
+                        ),
+                        global: ::boyko_scene::GlobalTransform::IDENTITY,
+                        camera: ::boyko_scene::Camera::DEFAULT,
+                        projection: ::boyko_scene::Projection::Perspective {
+                            fov_y: (52.0) * (::core::f32::consts::PI / 180.0),
+                            aspect: 1120.0 / 720.0,
+                            near: 0.1,
+                            far: 120.0,
+                        },
+                    });
+                }
+            },
+        );
+    }
+
+    /// One material placed on many nodes mints ONE asset row, and the mint order follows the
+    /// BLOCK's material declarations — not the order the nodes happen to reference them, which is
+    /// what makes the emitted sequence stable under a scene edit that only moves nodes around.
+    #[test]
+    fn material_mints_are_hoisted_once_per_scene_in_declaration_order() {
+        expands_to(
+            quote! {
+                material gold { base: (1.0, 0.72, 0.30) }
+                material chalk { base: (0.86, 0.86, 0.88) }
+
+                scene row {
+                    let cube_mesh = cube(1.0);
+                    mesh cube_mesh { material: chalk };
+                    mesh cube_mesh { material: gold };
+                    mesh cube_mesh { material: chalk };
+                }
+            },
+            quote! {
+                #[doc = " Aether material `gold`."]
+                #[inline]
+                pub fn gold() -> ::boyko_render::Material {
+                    ::boyko_render::Material::new([1.0, 0.72, 0.30, 1.0], 0.0, 0.5, 0.5, [0.0; 3], 0)
+                }
+                #[doc = " Aether material `chalk`."]
+                #[inline]
+                pub fn chalk() -> ::boyko_render::Material {
+                    ::boyko_render::Material::new([0.86, 0.86, 0.88, 1.0], 0.0, 0.5, 0.5, [0.0; 3], 0)
+                }
+                #[doc = " Aether scene `row` — the spawn fn."]
+                pub fn row(
+                    mut __aether_commands: ::boyko_ecs::ecs::core::system::Commands,
+                    mut __aether_meshes: ::boyko_ecs::ecs::core::system::NonSendResMut<
+                        ::boyko_ecs::ecs::core::asset::Assets<::boyko_render::MeshGpu>>,
+                    mut __aether_materials: ::boyko_ecs::ecs::core::system::ResMut<
+                        ::boyko_ecs::ecs::core::asset::Assets<::boyko_render::Material>>,
+                    __aether_dev: ::boyko_ecs::ecs::core::system::NonSendRes<::boyko_app::GpuDevice>
+                ) {
+                    let cube_mesh = ::boyko_render::MeshAssetsExt::cube(&mut *__aether_meshes, __aether_dev.get(), 1.0);
+                    let __aether_mat_gold = __aether_materials.add(gold());
+                    let __aether_mat_chalk = __aether_materials.add(chalk());
+                    __aether_commands.spawn(::boyko_render::MeshBundle::new(
+                        cube_mesh, ::boyko_scene::Transform::IDENTITY
+                    ))
+                    .insert(::boyko_scene::MaterialHandle(__aether_mat_chalk.index() as u16));
+                    __aether_commands.spawn(::boyko_render::MeshBundle::new(
+                        cube_mesh, ::boyko_scene::Transform::IDENTITY
+                    ))
+                    .insert(::boyko_scene::MaterialHandle(__aether_mat_gold.index() as u16));
+                    __aether_commands.spawn(::boyko_render::MeshBundle::new(
+                        cube_mesh, ::boyko_scene::Transform::IDENTITY
+                    ))
+                    .insert(::boyko_scene::MaterialHandle(__aether_mat_chalk.index() as u16));
+                }
+            },
+        );
+    }
+
+    /// Startup one-shots keep BLOCK SOURCE order across the two kinds that produce them — a scene
+    /// declared before a startup system spawns before it runs. Registering all systems first and
+    /// all scenes after would type-check identically and reorder the frame.
+    #[test]
+    fn a_plugin_registers_scenes_and_startup_systems_in_declaration_order() {
+        emits_in_order(
+            quote! {
+                plugin Boot;
+                system early() on startup { }
+                scene arena { entity { Floor }; }
+                system late() on startup { }
+            },
+            "app . add_startup_system (early) ; app . add_startup_system (arena) ;",
+            "app . add_startup_system (late) ;",
+        );
+    }
+
+    /// §7.2(4) made concrete: a scene may bind ALL FOUR names §3.7's After block gives the
+    /// generated params, and every one of them still resolves to the user's own `let`.
+    ///
+    /// MEASURED before the prefix landed: `let dev = plane(1.0); mesh dev;` shadowed the device
+    /// param, and rustc reported E0599 (`no method get on MeshHandle`) with both labels on the
+    /// whole `aether!` token — no user token named anywhere, the same shape `ctx.rs` cites to
+    /// justify owning a diagnostic. Prefixing does not diagnose that fault; it deletes it.
+    ///
+    /// The pin is the WHOLE fn, not a substring search, because the failure mode is a param and a
+    /// binding agreeing on a name — which only a token-exact expansion can rule out.
+    #[test]
+    fn a_scene_may_bind_the_plans_own_param_names_without_shadowing_anything() {
+        expands_to(
+            quote! {
+                material materials { base: (0.0, 0.0, 0.0) }
+
+                scene s {
+                    let dev = plane(1.0);
+                    let commands = cube(1.0);
+                    let meshes = cube(2.0);
+
+                    mesh dev { material: materials };
+                    mesh commands;
+                    mesh meshes;
+                }
+            },
+            quote! {
+                #[doc = " Aether material `materials`."]
+                #[inline]
+                pub fn materials() -> ::boyko_render::Material {
+                    ::boyko_render::Material::new([0.0, 0.0, 0.0, 1.0], 0.0, 0.5, 0.5, [0.0; 3], 0)
+                }
+                #[doc = " Aether scene `s` — the spawn fn."]
+                pub fn s(
+                    mut __aether_commands: ::boyko_ecs::ecs::core::system::Commands,
+                    mut __aether_meshes: ::boyko_ecs::ecs::core::system::NonSendResMut<
+                        ::boyko_ecs::ecs::core::asset::Assets<::boyko_render::MeshGpu>>,
+                    mut __aether_materials: ::boyko_ecs::ecs::core::system::ResMut<
+                        ::boyko_ecs::ecs::core::asset::Assets<::boyko_render::Material>>,
+                    __aether_dev: ::boyko_ecs::ecs::core::system::NonSendRes<::boyko_app::GpuDevice>
+                ) {
+                    let dev = ::boyko_render::MeshAssetsExt::plane(&mut *__aether_meshes, __aether_dev.get(), 1.0);
+                    let commands = ::boyko_render::MeshAssetsExt::cube(&mut *__aether_meshes, __aether_dev.get(), 1.0);
+                    let meshes = ::boyko_render::MeshAssetsExt::cube(&mut *__aether_meshes, __aether_dev.get(), 2.0);
+                    let __aether_mat_materials = __aether_materials.add(materials());
+                    __aether_commands.spawn(::boyko_render::MeshBundle::new(
+                        dev, ::boyko_scene::Transform::IDENTITY
+                    ))
+                    .insert(::boyko_scene::MaterialHandle(__aether_mat_materials.index() as u16));
+                    __aether_commands.spawn(::boyko_render::MeshBundle::new(
+                        commands, ::boyko_scene::Transform::IDENTITY
+                    ));
+                    __aether_commands.spawn(::boyko_render::MeshBundle::new(
+                        meshes, ::boyko_scene::Transform::IDENTITY
+                    ));
+                }
+            },
+        );
+    }
+
+    /// A scene needs NO plugin — §3.7 registers it "when a `plugin` header is present", so a
+    /// plugin-free block emits the spawn fn and leaves registration to the author (the same
+    /// contract a clause-free `system` has).
+    #[test]
+    fn a_plugin_free_scene_is_a_plain_spawn_fn() {
+        expands_to(
+            quote! { scene empty { } },
+            quote! {
+                #[doc = " Aether scene `empty` — the spawn fn."]
+                pub fn empty(mut __aether_commands: ::boyko_ecs::ecs::core::system::Commands) {}
+            },
+        );
+    }
+
+    #[test]
+    fn a6_diagnostics_fire_where_the_plan_says() {
+        // §3.7's own two examples: an unknown material and an unknown mesh binding, each with the
+        // declared list and a did-you-mean.
+        fails_with(
+            quote! {
+                material gold { base: (1.0, 0.72, 0.30) }
+                material lamp { base: (0.02, 0.02, 0.02) }
+                scene s { entity { material: gol } }
+            },
+            "no material `gol` in this aether block (materials here: `gold`, `lamp`)",
+        );
+        fails_with(
+            quote! {
+                material gold { base: (1.0, 0.72, 0.30) }
+                scene s { entity { material: gol } }
+            },
+            "did you mean `gold`?",
+        );
+        // SCENE-scoped, and the wording has to say so: the binding table belongs to one scene, so
+        // "in this aether block" would claim a name is absent while a sibling scene declares it.
+        // The second scene below is the whole point of this case — with a block-scoped message it
+        // would read as a lie about `floor`.
+        fails_with(
+            quote! {
+                scene a {
+                    let floor = plane(1.0);
+                }
+                scene s {
+                    let ground = plane(1.0);
+                    mesh floor;
+                }
+            },
+            "no mesh binding `floor` in scene `s` (bindings here: `ground`)",
+        );
+        fails_with(
+            quote! {
+                scene s {
+                    let floor = plane(1.0);
+                    mesh floot;
+                }
+            },
+            "no mesh binding `floot` in scene `s` (bindings here: `floor`) (did you mean `floor`?)",
+        );
+        // §3.7's third published diagnostic, verbatim.
+        fails_with(
+            quote! { scene s { sky { sky: (0.0, 0.0, 0.0), ground: (0.0, 0.0, 0.0), casts_shadow } } },
+            "the `sky` node has no shadow-caster form",
+        );
+        // §6.1's extensibility diagnostic, one level down: the node-head registry.
+        fails_with(
+            quote! { scene s { sunn { dir: (0.0, 1.0, 0.0), lux: 1.0 } } },
+            "unknown scene node `sunn`; heads are: mesh, sun, spot, point, sky, camera, sdf, entity (did you mean `sun`?)",
+        );
+        // A head key table is exhaustive in its own diagnostic, exactly as `material`'s is.
+        fails_with(
+            quote! { scene s { sun { dirr: (0.0, 1.0, 0.0), lux: 1.0 } } },
+            "unknown `sun` key `dirr`; keys are: dir, color, lux (plus material, casts_shadow, children) (did you mean `dir`?)",
+        );
+        // The §3.6 required-key rule, inherited: a key whose engine parameter has no honest
+        // default is refused rather than invented.
+        fails_with(
+            quote! { scene s { sun { lux: 3.0 } } },
+            "the `sun` node needs a `dir:` key — it has no default (these default: color)",
+        );
+        // "an `aspect:` key", not "a `aspect:` key" — a published, pinned message reads as prose.
+        fails_with(
+            quote! { scene s { camera { fov: 60.0 } } },
+            "the `camera` node needs an `aspect:` key",
+        );
+        // A pose given to a head that derives its own would be SILENTLY DROPPED — the one failure
+        // mode a user cannot see in the rendered frame without hunting for it.
+        fails_with(
+            quote! { scene s { sun at (0.0, 1.0, 0.0) { dir: (0.0, 1.0, 0.0), lux: 1.0 } } },
+            "the `sun` node derives its whole pose from `dir:`",
+        );
+        fails_with(
+            quote! { scene s { sdf E::new() at (0.0, 1.0, 0.0); } },
+            "an `sdf` edit carries its WORLD-SPACE position inside the edit itself",
+        );
+        // A head with nothing to hang a `MaterialHandle` on.
+        fails_with(
+            quote! {
+                material m { base: (0.0, 0.0, 0.0) }
+                scene s { sky { sky: (0.0, 0.0, 0.0), ground: (0.0, 0.0, 0.0), material: m } }
+            },
+            "the `sky` node has no `material:` form",
+        );
+        // §2's case rule for the value-producing constructs, with the shipped rename helper.
+        fails_with(
+            quote! { scene Lab { } },
+            "scene names are lowercase — they expand to spawn fns, not types (rename `Lab` to `lab`)",
+        );
+        // Two bindings of one name silently retarget every `mesh NAME` below the second.
+        fails_with(
+            quote! { scene s { let a = cube(1.0); let a = plane(2.0); } },
+            "duplicate mesh binding `a` in this scene",
+        );
+        // The `at (…)` sugar is a TRANSLATION and has one arity; a 2-tuple is refused on the
+        // tuple's own span, and the message names the unparenthesized escape.
+        fails_with(
+            quote! { scene s { entity at (1.0, 2.0) { X } } },
+            "`at (…)` is the translation sugar and takes 3 components (x, y, z) — found 2",
+        );
+        fails_with(
+            quote! { scene s { let a = plain(1.0); } },
+            "unknown mesh source `plain`; sources are: plane, cube, mesh (did you mean `plane`?)",
+        );
+        fails_with(
+            quote! { scene s { sun { dir: (0.0, 1.0), lux: 1.0 } } },
+            "`sun` key `dir` takes exactly 3 components (x, y, z) — found 2",
+        );
+    }
+
+    /// §4's duplicate-name rule, at the boundary the A5 measurement drew: two constructs that both
+    /// expand to a bare `pub fn` collide in a way rustc reports with NO user token, so Aether owns
+    /// it — ACROSS kinds as well as within one, because `scene lab` beside `material lab` is the
+    /// same fault. The type-producing half still defers (§7.1).
+    #[test]
+    fn two_constructs_that_both_emit_a_fn_of_one_name_are_refused_with_both_spans() {
+        let out = crate::expand_block(quote! {
+            material lab { base: (0.0, 0.0, 0.0) }
+            scene lab { }
+        })
+        .to_string();
+        assert!(
+            out.contains(
+                "`lab` is declared twice in this aether block — the `material` and the `scene` both expand to a fn of that name"
+            ),
+            "got: {out}"
+        );
+        assert!(out.contains("the first `material` of this name is here"), "got: {out}");
+
+        // The A5 same-kind wording is unchanged — that golden's `.stderr` is byte-pinned.
+        let same = crate::expand_block(quote! {
+            material twice { base: (0.0, 0.0, 0.0) }
+            material twice { base: (1.0, 1.0, 1.0) }
+        })
+        .to_string();
+        assert!(
+            same.contains(
+                "duplicate material `twice` — each material expands to a builder fn of its own name"
+            ),
+            "got: {same}"
+        );
+
+        // A TYPE-producing name reused stays with rustc: the derive gives it a second, localized
+        // error, and §7.1 forbids a pre-check that could only be worse.
+        expands_to(
+            quote! {
+                tag Same;
+                component Same { x: u8 }
+            },
+            quote! {
+                #[derive(::boyko_macros::Component)]
+                pub struct Same;
+                #[derive(::boyko_macros::Component)]
+                pub struct Same {
+                    pub x: u8
                 }
             },
         );

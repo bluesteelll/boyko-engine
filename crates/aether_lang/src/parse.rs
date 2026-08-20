@@ -1,7 +1,11 @@
 //! The block parser: dispatch on the leading contextual keyword (§6.1's registry), one `Parse`
-//! per construct. Rung A0 registers `component` and `tag`; an unregistered-but-planned keyword
-//! gets an honest "not implemented at this rung" rather than the unknown-construct error, so a
-//! user tracking the roadmap is told the truth about which failure they hit.
+//! per construct.
+//!
+//! Through rung A6 the registry is CLOSED and complete — all nine v1 keywords dispatch. Earlier
+//! rungs carried an extra arm for the keywords the plan had announced but not yet shipped, so a
+//! roadmap-following user was told which rung a construct lands at rather than that it did not
+//! exist; `scene` was the last of those, and the arm went with it. An unrecognized head is now
+//! unambiguously a misspelling and takes the canonical unknown-construct path.
 
 use proc_macro2::TokenStream;
 use syn::Ident;
@@ -9,9 +13,10 @@ use syn::parse::{Parse, ParseStream};
 use syn::{Expr, Path, Token, Type, parenthesized};
 
 use crate::ast::{
-    AetherBlock, BundleDef, ColorLit, ComponentDef, Construct, EvField, EventDef, FilterKind,
-    HandlerDef, HookKind, MachineDef, MaterialDef, OrderKind, PluginDef, Schedule, StateDef,
-    SysParam, SysParamTy, SystemDef, TagDef, TransitionDef,
+    AetherBlock, AtPose, BundleDef, ColorLit, ComponentDef, Construct, EvField, EventDef,
+    FilterKind, HandlerDef, HookKind, KeyShape, MachineDef, MaterialDef, MeshLet, MeshSrc,
+    NODE_HEADS, NodeHead, NodeKeyValue, OrderKind, PluginDef, Schedule, SceneDef, SceneNode,
+    StateDef, SysParam, SysParamTy, SystemDef, TagDef, TransitionDef,
 };
 use crate::diag;
 
@@ -34,19 +39,13 @@ impl Parse for AetherBlock {
                 "material" => {
                     constructs.push(Construct::Material(Box::new(parse_material(input)?)))
                 }
-                // Planned constructs (§9, rung A6): name the rung rather than pretending the
-                // keyword is unknown — a misspelling and a not-yet-shipped construct are
-                // different failures and deserve different messages.
-                "scene" => {
-                    return Err(diag::err(
-                        head.span(),
-                        // The shipped list is spelled in `CONSTRUCT_KEYWORDS` order (§6.1's
-                        // registry order), so the two surfaces a user can see never disagree
-                        // about the order of the same nine names. The whole arm disappears when
-                        // A6 lands `scene`.
-                        "`scene` is an Aether construct but lands at rung A6; this build carries rungs A0..A5 (component, tag, bundle, system, event, plugin, machine, material)",
-                    ));
-                }
+                "scene" => constructs.push(Construct::Scene(parse_scene(input)?)),
+                // NOTE: rung A6 landed `scene`, the LAST construct §9 had listed as planned, and
+                // with it the planned-construct arm that used to sit here self-destructed exactly
+                // as its comment promised. Every keyword in `CONSTRUCT_KEYWORDS` now dispatches,
+                // so an unrecognized head is unambiguously a misspelling and the canonical
+                // unknown-construct diagnostic is the whole truth. A7 adds no constructs; should a
+                // v2 one ever be announced ahead of its rung, the arm comes back with it.
                 other => return Err(diag::unknown_construct(head.span(), other)),
             }
         }
@@ -1027,4 +1026,456 @@ fn parse_color(input: ParseStream, key: &str, allow_alpha: bool) -> syn::Result<
         return Err(diag::err(span, msg));
     }
     Ok(ColorLit { components })
+}
+
+/// `scene NAME { scene_item* }` (§3.7).
+fn parse_scene(input: ParseStream) -> syn::Result<SceneDef> {
+    let _kw: Ident = input.parse()?; // `scene`
+    let name: Ident = input
+        .parse()
+        .map_err(|e| diag::err(e.span(), "expected a scene name after `scene`"))?;
+    // §2's case rule for the value-producing constructs: a scene expands to a SPAWN FN, and an
+    // UpperCamelCase name reads like a type at the `add_startup_system` call site.
+    lowercase_gate(&name, "scene names are lowercase — they expand to spawn fns, not types")?;
+
+    let body;
+    syn::braced!(body in input);
+
+    let mut def = SceneDef { name, lets: Vec::new(), nodes: Vec::new() };
+    while !body.is_empty() {
+        if body.peek(Token![let]) {
+            let binding = parse_mesh_let(&body)?;
+            // A second `let` of one name would shadow the first and silently retarget every
+            // `mesh NAME` node below it — refused on the SECOND binding, with the first's span.
+            if let Some(first) = def.lets.iter().find(|l| l.name == binding.name) {
+                let mut e = diag::err(
+                    binding.name.span(),
+                    format!("duplicate mesh binding `{}` in this scene", binding.name),
+                );
+                e.combine(diag::err(first.name.span(), "the first binding of this name is here"));
+                return Err(e);
+            }
+            def.lets.push(binding);
+        } else {
+            def.nodes.push(parse_node(&body)?);
+        }
+    }
+    Ok(def)
+}
+
+/// `let NAME = mesh_src ;` (§3.7's `mesh_let`).
+fn parse_mesh_let(input: ParseStream) -> syn::Result<MeshLet> {
+    let _: Token![let] = input.parse()?;
+    let name: Ident = input
+        .parse()
+        .map_err(|e| diag::err(e.span(), "expected a mesh binding name after `let`"))?;
+    input.parse::<Token![=]>().map_err(|e| {
+        diag::err(e.span(), format!("expected `=` after the mesh binding `{name}`"))
+    })?;
+
+    let src_kw: Ident = input.parse().map_err(|e| {
+        diag::err(e.span(), "a mesh binding is `plane(SIZE)`, `cube(SIZE)`, or `mesh(&VERTICES, &INDICES)`")
+    })?;
+    let src_str = src_kw.to_string();
+    let args;
+    parenthesized!(args in input);
+    let src = match src_str.as_str() {
+        "plane" => MeshSrc::Plane(parse_one_arg(&args, "plane")?),
+        "cube" => MeshSrc::Cube(parse_one_arg(&args, "cube")?),
+        "mesh" => {
+            let vertices: Expr = args.parse().map_err(|e| {
+                diag::err(e.span(), "`mesh(…)` takes two expressions: `(&[Vertex], &[u32])`")
+            })?;
+            args.parse::<Token![,]>().map_err(|e| {
+                diag::err(e.span(), "`mesh(…)` takes two expressions: `(&[Vertex], &[u32])`")
+            })?;
+            let indices: Expr = args.parse().map_err(|e| {
+                diag::err(e.span(), "`mesh(…)` takes two expressions: `(&[Vertex], &[u32])`")
+            })?;
+            if args.peek(Token![,]) {
+                let _: Token![,] = args.parse()?;
+            }
+            if !args.is_empty() {
+                return Err(diag::err(args.span(), "`mesh(…)` takes exactly two expressions"));
+            }
+            MeshSrc::Mesh(vertices, indices)
+        }
+        other => {
+            let mut msg = format!(
+                "unknown mesh source `{other}`; sources are: plane, cube, mesh"
+            );
+            if let Some(sugg) = diag::did_you_mean(other, &["plane", "cube", "mesh"]) {
+                msg.push_str(&format!(" (did you mean `{sugg}`?)"));
+            }
+            return Err(diag::err(src_kw.span(), msg));
+        }
+    };
+
+    input.parse::<Token![;]>().map_err(|e| {
+        diag::err(e.span(), format!("a mesh binding ends with `;` (`let {name} = …;`)"))
+    })?;
+    Ok(MeshLet { name, src })
+}
+
+/// The single-argument `plane`/`cube` source.
+fn parse_one_arg(args: ParseStream, kw: &str) -> syn::Result<Expr> {
+    let e: Expr = args
+        .parse()
+        .map_err(|e| diag::err(e.span(), format!("`{kw}(…)` takes one size expression")))?;
+    if args.peek(Token![,]) {
+        let _: Token![,] = args.parse()?;
+    }
+    if !args.is_empty() {
+        return Err(diag::err(args.span(), format!("`{kw}(…)` takes exactly one size expression")));
+    }
+    Ok(e)
+}
+
+/// `node := node_head ('at' EXPR)? ('{' node_body? '}')? ';'?` (§3.7).
+fn parse_node(input: ParseStream) -> syn::Result<SceneNode> {
+    let head_ident: Ident = input.parse().map_err(|_| {
+        diag::err(input.span(), format!("expected a scene node; heads are: {}", NODE_HEADS.join(", ")))
+    })?;
+    let head_span = head_ident.span();
+    let head = match head_ident.to_string().as_str() {
+        "mesh" => NodeHead::Mesh(input.parse().map_err(|e| {
+            diag::err(e.span(), "`mesh` names a `let` binding of this scene: `mesh floor`")
+        })?),
+        "sun" => NodeHead::Sun,
+        "spot" => NodeHead::Spot,
+        "point" => NodeHead::Point,
+        "sky" => NodeHead::Sky,
+        "camera" => NodeHead::Camera,
+        // `sdf` takes the edit EXPRESSION eagerly, for the same reason and with the same caveat as
+        // `at` (see `parse_at`): a call like `SdfEdit::sphere(…)` cannot be continued by a brace,
+        // so the node body that may follow is never swallowed — but a BARE PATH followed by the
+        // body brace (`sdf MY_EDIT { … }`) reads as a struct literal, exactly as it would in a
+        // Rust `if` scrutinee. Parenthesize (`sdf (MY_EDIT) { … }`) to split them.
+        "sdf" => NodeHead::Sdf(input.parse().map_err(|e| {
+            diag::err(e.span(), "`sdf` takes an `SdfEdit` expression")
+        })?),
+        "entity" => NodeHead::Entity,
+        other => {
+            let mut msg =
+                format!("unknown scene node `{other}`; heads are: {}", NODE_HEADS.join(", "));
+            if let Some(sugg) = diag::did_you_mean(other, NODE_HEADS) {
+                msg.push_str(&format!(" (did you mean `{sugg}`?)"));
+            }
+            return Err(diag::err(head_span, msg));
+        }
+    };
+
+    let mut node = SceneNode {
+        keys: vec_of_none(head.keys().len()),
+        head,
+        head_span,
+        at: None,
+        material: None,
+        casts_shadow: None,
+        extras: Vec::new(),
+        children: Vec::new(),
+    };
+
+    if peek_contextual(input, "at") {
+        let at_kw: Ident = input.parse()?;
+        if !node.head.takes_at() {
+            return Err(diag::err(at_kw.span(), at_refusal(&node.head)));
+        }
+        node.at = Some(parse_at(input)?);
+    }
+
+    if input.peek(syn::token::Brace) {
+        let body;
+        syn::braced!(body in input);
+        parse_node_body(&body, &mut node)?;
+    }
+    // The node terminator is optional (§3.7's `';'?`) — `mesh floor;` and `sun { … }` both read.
+    if input.peek(Token![;]) {
+        let _: Token![;] = input.parse()?;
+    }
+
+    check_required_keys(&node)?;
+    Ok(node)
+}
+
+/// `n` empty key slots — the positional table [`SceneNode::keys`] documents.
+fn vec_of_none(n: usize) -> Vec<Option<NodeKeyValue>> {
+    let mut v = Vec::with_capacity(n);
+    v.resize_with(n, || None);
+    v
+}
+
+/// The refusal wording for an `at` on a head that has no pose slot for it (§3.7's per-head
+/// diagnostic family, whose published member is `casts_shadow` on `sky`).
+fn at_refusal(head: &NodeHead) -> String {
+    match head {
+        NodeHead::Sun => {
+            "the `sun` node derives its whole pose from `dir:` (look-at + `Quat::from_mat3`, exactly as the shipped scenes do) — an `at` here would be dropped".to_string()
+        }
+        NodeHead::Spot | NodeHead::Point => format!(
+            "the `{}` node derives its pose from `pos:` (and `dir:` for the aim) — an `at` here would be dropped",
+            head.kw()
+        ),
+        NodeHead::Sky => {
+            "the `sky` node is a hemisphere fill with no pose — an `at` here would be dropped".to_string()
+        }
+        NodeHead::Sdf(_) => {
+            "an `sdf` edit carries its WORLD-SPACE position inside the edit itself (v1 reads no `Transform`) — an `at` here would be dropped".to_string()
+        }
+        // The heads that DO take `at` never reach this message.
+        NodeHead::Mesh(_) | NodeHead::Camera | NodeHead::Entity => {
+            format!("the `{}` node takes `at`", head.kw())
+        }
+    }
+}
+
+/// `at EXPR` with §3.7's 3-tuple sugar.
+///
+/// A parenthesized group is claimed by Aether: three components are the translation sugar, ONE is
+/// an ordinary parenthesized expression passed through. Everything else is an eager `Expr`, so the
+/// `Transform { … }` struct-literal form passes through verbatim — which also means a BARE PATH
+/// followed by the node body brace (`at MY_POSE { material: gold }`) reads as a struct literal,
+/// exactly as it would in a Rust `if` scrutinee; parenthesize (`at (MY_POSE) { … }`) to split them.
+fn parse_at(input: ParseStream) -> syn::Result<AtPose> {
+    if input.peek(syn::token::Paren) {
+        let inner;
+        let paren = parenthesized!(inner in input);
+        let mut comps = Vec::new();
+        while !inner.is_empty() {
+            comps.push(inner.parse::<Expr>().map_err(|e| {
+                diag::err(e.span(), "`at` components are expressions")
+            })?);
+            if inner.peek(Token![,]) {
+                let _: Token![,] = inner.parse()?;
+            } else if !inner.is_empty() {
+                return Err(diag::err(inner.span(), "expected `,` between `at` components"));
+            }
+        }
+        return match comps.len() {
+            3 => Ok(AtPose::Translation(comps)),
+            1 => Ok(AtPose::Verbatim(Box::new(comps.into_iter().next().expect(
+                "invariant: the match arm proved exactly one component",
+            )))),
+            n => Err(diag::err(
+                paren.span.join(),
+                format!("`at (…)` is the translation sugar and takes 3 components (x, y, z) — found {n}; a full pose is written unparenthesized (`at Transform {{ … }}`)"),
+            )),
+        };
+    }
+    Ok(AtPose::Verbatim(Box::new(input.parse::<Expr>().map_err(|e| {
+        diag::err(e.span(), "`at` takes a `Transform` expression or the `(x, y, z)` translation sugar")
+    })?)))
+}
+
+/// `true` iff the next token is the bare contextual keyword `kw` (§2: only a keyword in
+/// clause-head position — a component expression named `at` reaches the fallback unharmed as long
+/// as it is path-qualified or followed by its own syntax).
+fn peek_contextual(input: ParseStream, kw: &str) -> bool {
+    let fork = input.fork();
+    match fork.parse::<Ident>() {
+        Ok(id) => id == kw && !fork.peek(Token![::]) && !fork.peek(Token![!]),
+        Err(_) => false,
+    }
+}
+
+/// `node_body := prop (',' prop)*` (§3.7).
+fn parse_node_body(body: ParseStream, node: &mut SceneNode) -> syn::Result<()> {
+    while !body.is_empty() {
+        parse_prop(body, node)?;
+        if body.peek(Token![,]) {
+            let _: Token![,] = body.parse()?;
+        } else if !body.is_empty() {
+            return Err(diag::err(body.span(), "expected `,` between node props"));
+        }
+    }
+    Ok(())
+}
+
+/// One `prop`: a keyed prop (`material:` / `children:` / a head key), the `casts_shadow` flag, or
+/// a bare component EXPRESSION (the `ui!` fallback).
+fn parse_prop(body: ParseStream, node: &mut SceneNode) -> syn::Result<()> {
+    // A keyed prop is `ident :` — a SINGLE colon. `ident ::` opens a path, and `Ident { … }` a
+    // struct literal; both are component expressions and fall through untouched.
+    let keyed = {
+        let fork = body.fork();
+        fork.parse::<Ident>().is_ok() && fork.peek(Token![:]) && !fork.peek(Token![::])
+    };
+
+    if !keyed {
+        if peek_contextual(body, "casts_shadow") {
+            let flag: Ident = body.parse()?;
+            if node.head.shadow_form().is_none() {
+                return Err(diag::err(
+                    flag.span(),
+                    format!("the `{}` node has no shadow-caster form", node.head.kw()),
+                ));
+            }
+            if node.casts_shadow.is_some() {
+                return Err(diag::err(flag.span(), "duplicate `casts_shadow`"));
+            }
+            node.casts_shadow = Some(flag.span());
+            return Ok(());
+        }
+        node.extras.push(body.parse::<Expr>().map_err(|e| {
+            diag::err(e.span(), "expected a node prop (`material:`, `casts_shadow`, `children:`, a head key) or a component expression")
+        })?);
+        return Ok(());
+    }
+
+    let key: Ident = body.parse()?;
+    let _: Token![:] = body.parse()?;
+    let ks = key.to_string();
+
+    if ks == "material" {
+        if !node.head.takes_material() {
+            return Err(diag::err(
+                key.span(),
+                format!(
+                    "the `{}` node has no `material:` form — a head that draws nothing carries no `MaterialHandle`",
+                    node.head.kw()
+                ),
+            ));
+        }
+        if node.material.is_some() {
+            return Err(diag::err(key.span(), "duplicate `material:`"));
+        }
+        node.material = Some(body.parse::<Ident>().map_err(|e| {
+            diag::err(e.span(), "`material:` names a sibling `material` construct")
+        })?);
+        return Ok(());
+    }
+
+    if ks == "children" {
+        if !node.children.is_empty() {
+            return Err(diag::err(key.span(), "duplicate `children:`"));
+        }
+        let list;
+        syn::bracketed!(list in body);
+        while !list.is_empty() {
+            node.children.push(parse_node(&list)?);
+            if list.peek(Token![,]) {
+                let _: Token![,] = list.parse()?;
+            } else if !list.is_empty() {
+                return Err(diag::err(list.span(), "expected `,` between child nodes"));
+            }
+        }
+        if node.children.is_empty() {
+            return Err(diag::err(key.span(), "`children:` takes at least one node"));
+        }
+        return Ok(());
+    }
+
+    let table = node.head.keys();
+    let Some(slot) = table.iter().position(|k| k.name == ks) else {
+        let names: Vec<&str> = table.iter().map(|k| k.name).collect();
+        let mut msg = if names.is_empty() {
+            format!(
+                "the `{}` node takes no keys; props here are: material, casts_shadow, children, or a component expression",
+                node.head.kw()
+            )
+        } else {
+            format!(
+                "unknown `{}` key `{ks}`; keys are: {} (plus material, casts_shadow, children)",
+                node.head.kw(),
+                names.join(", ")
+            )
+        };
+        if let Some(sugg) = diag::did_you_mean(&ks, &names) {
+            msg.push_str(&format!(" (did you mean `{sugg}`?)"));
+        }
+        return Err(diag::err(key.span(), msg));
+    };
+    if node.keys[slot].is_some() {
+        return Err(diag::err(
+            key.span(),
+            format!("duplicate `{}` key `{ks}`", node.head.kw()),
+        ));
+    }
+    node.keys[slot] = Some(parse_key_value(body, node.head.kw(), &table[slot])?);
+    Ok(())
+}
+
+/// A head key's value, in the shape its table row declares.
+fn parse_key_value(
+    body: ParseStream,
+    head: &str,
+    spec: &crate::ast::NodeKeySpec,
+) -> syn::Result<NodeKeyValue> {
+    match spec.shape {
+        KeyShape::Scalar => Ok(NodeKeyValue::Scalar(Box::new(body.parse::<Expr>().map_err(
+            |e| diag::err(e.span(), format!("`{head}` key `{}` takes an expression", spec.name)),
+        )?))),
+        KeyShape::Tuple3 => {
+            if !body.peek(syn::token::Paren) {
+                return Err(diag::err(
+                    body.span(),
+                    format!("`{head}` key `{}` takes a 3-tuple: `(x, y, z)`", spec.name),
+                ));
+            }
+            let inner;
+            let paren = parenthesized!(inner in body);
+            let mut comps = Vec::new();
+            while !inner.is_empty() {
+                comps.push(inner.parse::<Expr>().map_err(|e| {
+                    diag::err(e.span(), format!("`{}` components are expressions", spec.name))
+                })?);
+                if inner.peek(Token![,]) {
+                    let _: Token![,] = inner.parse()?;
+                } else if !inner.is_empty() {
+                    return Err(diag::err(
+                        inner.span(),
+                        format!("expected `,` between `{}` components", spec.name),
+                    ));
+                }
+            }
+            if comps.len() != 3 {
+                // On the TUPLE's own span — the §3.6 rule: neither the key nor any one component
+                // is the thing that is wrong.
+                return Err(diag::err(
+                    paren.span.join(),
+                    format!(
+                        "`{head}` key `{}` takes exactly 3 components (x, y, z) — found {}",
+                        spec.name,
+                        comps.len()
+                    ),
+                ));
+            }
+            Ok(NodeKeyValue::Tuple(comps))
+        }
+    }
+}
+
+/// The indefinite article for a key name, so a published message reads "an `aspect:` key" and not
+/// "a `aspect:` key". Vowel-letter test, not a pronunciation model: every key in every `*_KEYS`
+/// table is a plain lowercase English word, and a rule that is right for all of them and honest
+/// about its scope beats one that is nearly right for words nobody writes here.
+fn article(word: &str) -> &'static str {
+    if word.starts_with(['a', 'e', 'i', 'o', 'u']) { "an" } else { "a" }
+}
+
+/// The §3.6 required-key rule, per head: a row whose engine parameter has no honest default is
+/// refused HERE, on the head's own span, rather than expanding to an invented value.
+fn check_required_keys(node: &SceneNode) -> syn::Result<()> {
+    let table = node.head.keys();
+    for (i, spec) in table.iter().enumerate() {
+        if spec.required && node.keys[i].is_none() {
+            let optional: Vec<&str> =
+                table.iter().filter(|k| !k.required).map(|k| k.name).collect();
+            let tail = if optional.is_empty() {
+                String::new()
+            } else {
+                format!(" (these default: {})", optional.join(", "))
+            };
+            return Err(diag::err(
+                node.head_span,
+                format!(
+                    "the `{}` node needs {} `{}:` key — it has no default{tail}",
+                    node.head.kw(),
+                    article(spec.name),
+                    spec.name
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
