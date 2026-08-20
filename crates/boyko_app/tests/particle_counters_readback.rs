@@ -17,6 +17,10 @@
 //! * **Gate #9, frame 0** — with `BOYKO_PARTICLE_READBACK_FRAME=1`: `alive_count_cur ==
 //!   real_emit_count` and `emit_append_base == 0`, i.e. kickoff's `A = alive_count_next + E`
 //!   reduced to `A = E` because nothing was alive before the first frame.
+//! * **Rung P1b's skip census** (`BOYKO_PARTICLE_STATS=1`) — the three per-wave counters, asserted
+//!   for internal consistency against the census's own construction and PRINTED as the two rates.
+//!   The rate itself is never pinned: it is a property of the scene's wave coherence, which is what
+//!   the rung exists to measure. See [`assert_skip_census`].
 //!
 //! # The capture frame is an ENV, and the test reads it
 //!
@@ -135,26 +139,73 @@ fn particle_counters_partition_readback() {
         rb.additive_index_count
     );
 
+    // ── Whether the pool SATURATED inside the window, read off the device rather than derived
+    //    from the env: `dead_count == 0` is "no free slot is left", which is the state gate #17's
+    //    extension ladder (`rate = CAP/4` ⇒ full pool from frame 3) runs in on purpose and rung
+    //    P1b's skip-rate ladder inherits.
+    //
+    //    Two assertions below MEAN DIFFERENT THINGS on the two ladders, and each states both
+    //    readings rather than being armed for one. Before this was written the saturated ladder
+    //    could not be run through this gate at all — it reddens on numbers that are correct — which
+    //    would have made every rung-P1b density a red-by-construction run whose output a harness
+    //    could not tell from a real failure.
+    let saturated = rb.dead_count == 0;
+
     // ── R9: the draw fetches the LIVE count, never the capacity. The pitfall this refutes is a
     //    pool that renders `CAP` instances because a buffer was sized from a constant.
-    assert!(
-        rb.additive_instance_count < rb.capacity,
-        "the additive draw's instanceCount ({}) reached the pool capacity ({}) — the R9 pitfall: \
-         the draw is rendering the pool, not the live set",
-        rb.additive_instance_count,
-        rb.capacity
-    );
-    assert_eq!(
-        rb.clamped_spawns, 0,
-        "kickoff refused {} spawn(s) for want of free slots; the fixture spawns {} particle(s) per \
-         frame into a {}-slot pool, so a non-zero count means the free list is not being \
-         replenished. (A rate that SATURATES the pool inside the window — gate #17's extension \
-         ladder runs `rate = CAP/4` — refuses spawns because the pool is genuinely full, which is \
-         a different reading of the same number; this gate is armed for the non-saturating ladder.)",
-        rb.clamped_spawns,
-        particle_scene::spawn_per_frame(),
-        rb.capacity
-    );
+    if saturated {
+        // At `dead_count == 0` the live set IS the pool, so `additive == CAP` is FORCED by the two
+        // assertions already made (partition: `alive_next + dead == CAP`; class split: `additive ==
+        // alive_next`). It is stated as the equality it degenerates into rather than skipped — a
+        // skipped assertion looks the same in a log as one that was never reached — but it carries
+        // NO discriminating power here, and the next assertion is the one that does.
+        assert_eq!(
+            rb.additive_instance_count, rb.capacity,
+            "the pool is saturated (dead_count == 0), so every slot is alive and every survivor \
+             must have a render position: additive ({}) must equal CAP ({})",
+            rb.additive_instance_count, rb.capacity
+        );
+
+        // THE NON-VACUOUS ONE. With a full free list and a live spawn request, kickoff's clamp
+        // `real_emit = min(requested, dead_count)` MUST have refused every spawn, and D15's
+        // accumulator must therefore be non-zero. This is the ONLY place either ladder asserts that
+        // `clamped_spawns` is a live datum rather than a word nobody writes: the unsaturated ladder
+        // asserts it is ZERO, which a deleted accumulator satisfies perfectly. Without this, the
+        // `+=` at `particle_kickoff.comp.hlsl`'s clamp could be dropped and every gate stays green.
+        if particle_scene::spawn_per_frame() > 0 {
+            assert!(
+                rb.clamped_spawns > 0,
+                "the pool is saturated (dead_count == 0) and the fixture asks for {} spawn(s) per \
+                 frame, so kickoff MUST have refused some and accumulated the shortfall — yet \
+                 clamped_spawns is 0. Either the free list is not actually empty, or D15's \
+                 accumulator is not being written at all (the unsaturated ladder's `== 0` cannot \
+                 tell those apart).",
+                particle_scene::spawn_per_frame()
+            );
+        }
+    } else {
+        assert!(
+            rb.additive_instance_count < rb.capacity,
+            "the additive draw's instanceCount ({}) reached the pool capacity ({}) while the free \
+             list was NOT empty ({} slots) — the R9 pitfall: the draw is rendering the pool, not \
+             the live set",
+            rb.additive_instance_count,
+            rb.capacity,
+            rb.dead_count
+        );
+        assert_eq!(
+            rb.clamped_spawns, 0,
+            "kickoff refused {} spawn(s) while the free list still held {} slot(s); the fixture \
+             spawns {} particle(s) per frame into a {}-slot pool, so a non-zero count here means \
+             the free list is not being replenished. (On the SATURATED ladder the same number is a \
+             genuinely full pool — a different reading, which is why this arm is gated on \
+             `dead_count != 0` rather than on the ladder's name.)",
+            rb.clamped_spawns,
+            rb.dead_count,
+            particle_scene::spawn_per_frame(),
+            rb.capacity
+        );
+    }
 
     // ── The gate must not be VACUOUS: a run where nothing ever spawned satisfies every equality
     //    above trivially (0 + CAP == CAP, 0 + 0 == 0). The scene emits one particle per frame with
@@ -227,4 +278,138 @@ fn particle_counters_partition_readback() {
             rb.frames_presented
         );
     }
+
+    assert_skip_census(&rb, &witness);
+}
+
+/// The device wave width the census's bounds are derived against — 32 on this part.
+///
+/// It enters only the LANE bounds, never the wave ones, and both are stated as inequalities that a
+/// wider wave would still satisfy in one direction: see the derivations at each assertion.
+const WAVE_WIDTH: u64 = 32;
+
+/// **Rung P1b: the skip census, asserted for INTERNAL CONSISTENCY against its own construction.**
+///
+/// This is not a re-statement of the skip rate — the rate is a MEASUREMENT and has no expected
+/// value, since it is a property of the scene's wave coherence. What is checkable is that the three
+/// counters could have come from the census the shader carries, and every bound below is derived
+/// from that construction rather than from an observed run:
+///
+/// 1. **Armed iff the module says so.** `waves_evaluated + waves_skipped > 0` exactly when the sim
+///    was built from `-D SDF_COLLIDE_STATS`. The two directions are different defects: zero on an
+///    armed run means the census never executed (a selector that resolved to the shipping module —
+///    the swapped-arm class gate #12 exists for); non-zero on an unarmed run means a shipping module
+///    is writing the stats words, which would make every future run's ratio garbage.
+/// 2. **`waves_evaluated ≤ lanes_evaluated`.** The evaluating arm is entered only when
+///    `eval_lanes > 0`, and it adds `1` to one counter and `eval_lanes` to the other in the same
+///    leader block. Equality means perfect incoherence (one lane per wave needed the field).
+/// 3. **`lanes_evaluated ≤ waves_evaluated × W`.** A wave has at most `W` lanes to contribute.
+///    Violating this means the ballot counted lanes outside its own wave.
+/// 4. **`wave_substeps ≤ substeps_driven × ceil(alive / W)`.** Nothing retires inside the window,
+///    so the alive count is monotone and the final one is the maximum; a SUBSTEP therefore
+///    contributes at most `ceil(alive / W)` participating waves. `substeps_driven` is
+///    [`LabClockWitness::substeps`] — the fixture's own count of substeps it drove — and it is an
+///    upper bound on what the device ran, because an ECS frame whose present reported a recreate
+///    drove a substep the device never dispatched. **Derived from the substep count rather than
+///    from a frame count**: hard-coding one substep per frame would red spuriously on a legitimate
+///    multi-substep run instead of catching the reconvergence hazard, which is enforced at the
+///    host instead (`gpu_scene::particle::assert_one_substep_for_the_census`).
+/// 5. **The counters cannot have WRAPPED.** All three are `u32` and none is ever reset, so the same
+///    derived ceiling is checked to fit in `u32` before any of the bounds above are believed. A
+///    wrapped counter satisfies every inequality here while reporting a rate that is nonsense.
+///
+/// A run that armed the census prints its rates and passes; a run that did not prints
+/// `census=false` and asserts only direction 1's other half. Nothing here has an expected NUMBER —
+/// the number is the deliverable, and it is read off the artifact line.
+fn assert_skip_census(rb: &ParticleCountersReadback, witness: &LabClockWitness) {
+    let armed = particle_scene::collision_stats_armed();
+    assert_eq!(
+        rb.skip_census_is_armed(),
+        armed,
+        "the skip census {} while BOYKO_PARTICLE_STATS was {}: waves_evaluated={} \
+         waves_skipped={} lanes_evaluated={}. An armed run with a silent census means the pipeline \
+         was built from a SHIPPING sim module (the swapped-arm class); an unarmed run with a live \
+         one means a shipping module is writing rung P1b's words.",
+        if rb.skip_census_is_armed() { "RAN" } else { "did not run" },
+        if armed { "set" } else { "unset" },
+        rb.waves_evaluated,
+        rb.waves_skipped,
+        rb.lanes_evaluated,
+    );
+    if !armed {
+        return;
+    }
+
+    // The ceiling comes FIRST, because it is also the wrap detector and every bound below is only
+    // meaningful on counters that did not wrap.
+    //
+    // `substeps` is the fixture's own count of substeps DRIVEN, which is an upper bound on what the
+    // device dispatched (an ECS frame whose present reported a recreate drove one the device never
+    // ran). `alive_count_cur` is the maximum alive over the window because nothing retires inside
+    // it, so `ceil(alive / W)` is the most waves any one substep could have engaged.
+    let waves_per_substep = u64::from(rb.alive_count_cur).div_ceil(WAVE_WIDTH);
+    // Already `u64` on the witness — the substep total is exactly the quantity that must not
+    // overflow a narrower type on a long run.
+    let substeps_driven = witness.substeps;
+    let ceiling = substeps_driven * waves_per_substep;
+    assert!(
+        substeps_driven > 0,
+        "the fixture drove ZERO substeps, so no wave-substep bound can be derived and the census's \
+         numbers are unanchored"
+    );
+
+    // O1's wrap detector, and it is the derived ceiling doing double duty: all THREE counters are
+    // `u32` and none is ever reset, so a long or dense enough run silently wraps and then satisfies
+    // every inequality below while reporting nonsense. `lanes_evaluated` is the first to go — it
+    // grows `W` times faster than the wave pair — so its ceiling is the one checked.
+    let lane_ceiling = ceiling * WAVE_WIDTH;
+    assert!(
+        lane_ceiling <= u64::from(u32::MAX),
+        "this run could overflow the census counters: up to {ceiling} wave-substeps x {WAVE_WIDTH} \
+         lanes = {lane_ceiling} lane-substeps against u32::MAX. The three stats words accumulate \
+         from boot and are never reset, so a wrapped counter would pass every consistency bound \
+         below and report a rate that means nothing. Shorten the window or lower the density."
+    );
+
+    let waves_eval = u64::from(rb.waves_evaluated);
+    let lanes_eval = u64::from(rb.lanes_evaluated);
+    assert!(
+        waves_eval <= lanes_eval,
+        "every evaluating wave contributes at least one evaluating lane, but waves_evaluated ({}) \
+         exceeds lanes_evaluated ({}) — the two counters cannot have come from the same leader \
+         block",
+        rb.waves_evaluated,
+        rb.lanes_evaluated
+    );
+    assert!(
+        lanes_eval <= waves_eval * WAVE_WIDTH,
+        "lanes_evaluated ({}) exceeds waves_evaluated ({}) x the {WAVE_WIDTH}-lane wave width — \
+         the ballot counted lanes outside its own wave",
+        rb.lanes_evaluated,
+        rb.waves_evaluated
+    );
+
+    assert!(
+        rb.wave_substeps() <= ceiling,
+        "the census saw {} wave-substeps, more than the {ceiling} the fixture could have run: \
+         {substeps_driven} substep(s) driven over at most {waves_per_substep} participating wave(s) \
+         each ({} alive / {WAVE_WIDTH} lanes, rounded up). Either the counters are accumulating \
+         something other than wave-substeps, or a wave-substep was counted more than once — which \
+         is what a still-split wave at the top of the substep loop would do (see \
+         `assert_one_substep_for_the_census`).",
+        rb.wave_substeps(),
+        rb.alive_count_cur,
+    );
+
+    // The rates themselves, PRINTED and never asserted: they are the rung's deliverable, and a
+    // gate that pinned one would pin a property of this fixture's scene.
+    println!(
+        "particle_counters_readback: SKIP CENSUS wave_substeps={} wave_skip_rate={:.4} \
+         lane_skip_rate={:.4} (lanes_evaluated={} of {} lane-substeps)",
+        rb.wave_substeps(),
+        rb.wave_skip_rate().expect("armed above"),
+        rb.lane_skip_rate(WAVE_WIDTH as u32).expect("armed above"),
+        rb.lanes_evaluated,
+        rb.wave_substeps() * WAVE_WIDTH,
+    );
 }

@@ -35,12 +35,14 @@ use boyko_rhi_vulkan::compute::{
     PARTICLE_QUAD_IB_BYTES, PARTICLE_SIM_PUSH_BYTES, particle_draw_dlin_fs_spirv,
     particle_draw_dlin_vs_spirv, particle_draw_fs_spirv, particle_draw_vs_spirv,
     particle_emit_spirv, particle_kickoff_spirv, particle_sim_sdf_spirv, particle_sim_spirv,
+    particle_sim_stats_spirv,
 };
 use boyko_rhi_vulkan::ffi::{VK_COMPARE_OP_GREATER, VK_COMPARE_OP_LESS, VkDescriptorSet};
 use boyko_rhi_vulkan::swapchain::ParticleActivation;
 use boyko_render::{
     EffectParamsGpu, EmitRequestGpu, MAX_EFFECTS, MAX_EMITTERS, PARTICLE_QUAD_INDEX_COUNT,
-    ParticleCounters, ParticleDispatchArgs, ParticleDrawArgs, ParticleRender, ParticleSim,
+    ParticleCollision, ParticleCounters, ParticleDispatchArgs, ParticleDrawArgs, ParticleRender,
+    ParticleSim,
 };
 
 use super::*;
@@ -251,6 +253,13 @@ pub(crate) struct ParticleGpuBundle {
     /// is `O(alive)`). Carried so the activation can push it without the runner re-reading the
     /// config, which would give the number a second home.
     capacity: u32,
+    /// The boot-frozen collision arm this bundle's sim `VkPipeline` was built from.
+    ///
+    /// Carried for ONE reason, and it is a correctness reason rather than a diagnostic one: rung
+    /// P1b's census is only well-defined at **one substep per dispatch**, and
+    /// [`Self::activation`] is the site that sees both this arm and the frame's substep count. See
+    /// the refusal there.
+    collision: ParticleCollision,
 }
 
 impl ParticleGpuBundle {
@@ -259,15 +268,20 @@ impl ParticleGpuBundle {
     ///
     /// `camera_ring` is the per-in-flight-slot camera UBO ring the draw's Set-0 binding 1 reads;
     /// `bindless` owns the set-1 texture table; `edit_list` is the engine's ONE SDF edit list,
-    /// bound at Set-0 binding 10 for rung P1's `-D SDF_COLLIDE` sim (and bound-but-unread when
-    /// `collide` is false — see [`PARTICLE_LAYOUT_ENTRIES`]).
+    /// bound at Set-0 binding 10 for rung P1's `-D SDF_COLLIDE` sim (and bound-but-unread under
+    /// [`ParticleCollision::Off`] — see [`PARTICLE_LAYOUT_ENTRIES`]).
     ///
-    /// # `collide` picks a MODULE, not a branch
+    /// # `collision` picks a MODULE, not a branch
     ///
-    /// [`particle_sim_spirv_for`] resolves it once, here, into one of the two committed sim
-    /// artifacts. A runtime flag inside one shader would pay the field-consumer's register
-    /// pressure and its `#include`d code on every disarmed frame — the F24 dark tax this plan
-    /// refuses everywhere else.
+    /// [`particle_sim_spirv_for`] resolves it once, here, into one of the THREE committed sim
+    /// artifacts — base, rung P1's `-D SDF_COLLIDE`, or rung P1b's `-D SDF_COLLIDE_STATS`
+    /// instrument. A runtime flag inside one shader would pay the field-consumer's register
+    /// pressure and its `#include`d code (and, for the instrument, its atomics) on every disarmed
+    /// frame — the F24 dark tax this plan refuses everywhere else.
+    ///
+    /// The whole ENUM crosses this boundary rather than a `bool`, because there are now three
+    /// answers and a predicate can only carry two: a `collides()` flag would have to be joined by a
+    /// second `counts_waves()` flag, and two booleans admit a fourth combination the enum does not.
     ///
     /// # `deferred_path` decides BOTH halves of the depth contract, and that is why it is one
     /// argument
@@ -290,7 +304,7 @@ impl ParticleGpuBundle {
     // `GpuSceneBundles`), `bindless` (the shared texture table, owned by `BindlessTextureTable`)
     // and `edit_list` (the engine's ONE SDF edit list, owned by `GpuSceneBundles`, bound here at
     // Set-0 binding 10 for rung P1 and boot-static thereafter); the boot-frozen `capacity`; and the
-    // two boot-frozen PREDICATES `deferred_path` and `collide`, each of which picks a shader
+    // two boot-frozen ARMINGS `deferred_path` and `collision`, each of which picks a shader
     // artifact. Grouping them would either hide which of the four are borrows of somebody else's
     // resource — the distinction `destroy` depends on — or invent a struct whose only purpose is
     // this one call.
@@ -301,7 +315,7 @@ impl ParticleGpuBundle {
         edit_list: &BoundBuffer,
         capacity: u32,
         deferred_path: bool,
-        collide: bool,
+        collision: ParticleCollision,
     ) -> Self {
         debug_assert!(capacity >= 1, "invariant: the particle pool needs at least one slot");
         let device = ctx;
@@ -452,7 +466,7 @@ impl ParticleGpuBundle {
             compute_pipeline(particle_kickoff_spirv(), PARTICLE_KICKOFF_PUSH_BYTES, "kickoff");
         let emit = compute_pipeline(particle_emit_spirv(), PARTICLE_EMIT_PUSH_BYTES, "emit");
         let sim =
-            compute_pipeline(particle_sim_spirv_for(collide), PARTICLE_SIM_PUSH_BYTES, "sim");
+            compute_pipeline(particle_sim_spirv_for(collision), PARTICLE_SIM_PUSH_BYTES, "sim");
 
         // ── The draw's Set-0 layout + its per-slot groups + the graphics pipeline.
         let draw_entries: [BindGroupLayoutEntry; PARTICLE_DRAW_LAYOUT_ENTRIES.len()] =
@@ -545,6 +559,7 @@ impl ParticleGpuBundle {
             draw_pipeline,
             bindless_set: bindless.set().set(),
             capacity,
+            collision,
         }
     }
 
@@ -588,6 +603,9 @@ impl ParticleGpuBundle {
             "invariant: the emit-request upload and the emit pass share ONE predicate — an \
              upload with no requested spawn would make row 9's reader seed wrong"
         );
+        if self.collision.counts_waves() {
+            assert_one_substep_for_the_census(push.steps);
+        }
         ParticleActivation {
             kickoff_pipeline: &self.kickoff,
             emit_pipeline: &self.emit,
@@ -880,23 +898,72 @@ pub(crate) fn particle_draw_spirv_for(deferred_path: bool) -> (&'static [u32], &
     }
 }
 
+/// **Rung P1b: the census's one-substep precondition, enforced as a HARD REFUSAL.**
+///
+/// The `-D SDF_COLLIDE_STATS` census sits at the TOP OF THE SUBSTEP LOOP BODY, so on the second and
+/// later iterations it is reached from the previous iteration's DIVERGENT skip branch. Vulkan does
+/// not guarantee reconvergence at a merge block without `VK_KHR_shader_maximal_reconvergence`, so a
+/// still-split wave may run the census once per divergent group: one `WaveIsFirstLane()` elects per
+/// group, each ballots over its own subset, and **the same wave-substep is counted more than once**.
+/// The wave counters then stop summing to the wave-substep total and the skip rate loses its
+/// denominator — silently, because every internal consistency bound the readback gate checks still
+/// holds.
+///
+/// `ParticleClock` supports up to `PARTICLE_SUBSTEP_CEILING = 64` (D6/M3), so this is reachable by
+/// configuration and not merely in theory. The instrument therefore REFUSES rather than misleads:
+/// the measurement fixture pins one substep per frame, and any other caller that arms the census
+/// gets a panic naming what would lift the restriction.
+///
+/// It is a hard `assert!`, not a `debug_assert!`: a release measurement run is exactly when this
+/// would otherwise pass silently and hand back a wrong number.
+///
+/// # Panics
+///
+/// When the census arm is armed and `steps != 1`.
+#[cold]
+#[inline(never)]
+fn assert_one_substep_for_the_census(steps: u32) {
+    assert_eq!(
+        steps, 1,
+        "ParticleCollision::SdfStats requires EXACTLY ONE SUBSTEP per dispatch, got {steps}. The \
+         per-wave census is taken inside the substep loop, and from the second iteration on it is \
+         reached from a divergent branch — without VK_KHR_shader_maximal_reconvergence the wave \
+         may still be split there, so one wave-substep would be counted once per divergent group \
+         and `waves_skipped + waves_evaluated` would stop being the wave-substep total. The rate \
+         would be wrong and every consistency bound would still pass. Lift this by enabling \
+         maximal reconvergence (and re-deriving the census), or drive the clock at one substep per \
+         frame as the measurement fixture does."
+    );
+}
+
 /// The `particle_sim` SPIR-V the compute pipeline is frozen with for a resolved
-/// [`ParticleCollision`](boyko_render::ParticleCollision) arming (rung P1 / plan D9).
+/// [`ParticleCollision`](boyko_render::ParticleCollision) arming (rung P1 / plan D9, rung P1b).
 ///
-/// **`true` is the `-D SDF_COLLIDE` module.** Its per-substep loop either skips the field on the
-/// Lipschitz bound cached in the sim record's `cached_field_d` lane, or evaluates
-/// `field_distance` once and — inside `collision_radius` — resolves the contact against
-/// `sdf_normal`. The base module carries none of that: the define is invisible to DXC, so the
-/// committed base `.spv` is byte-frozen and a non-colliding run pays exactly what P0 paid.
+/// * [`Off`](ParticleCollision::Off) — the BASE module. The define is invisible to DXC, so the
+///   committed base `.spv` is byte-frozen and a non-colliding run pays exactly what P0 paid.
+/// * [`Sdf`](ParticleCollision::Sdf) — the `-D SDF_COLLIDE` module. Its per-substep loop either
+///   skips the field on the Lipschitz bound cached in the sim record's `cached_field_d` lane, or
+///   evaluates `field_distance` once and — inside `collision_radius` — resolves the contact against
+///   `sdf_normal`.
+/// * [`SdfStats`](ParticleCollision::SdfStats) — rung P1b's INSTRUMENT: that same simulation plus a
+///   per-wave census of the skip, published into `p_counters`' three stats words. A measurement
+///   arm; it runs atomics a shipping configuration should not pay for.
 ///
-/// Interface-identical apart from ONE added read (`Buf` @10, in the layout either way), so the pick
-/// never reaches the descriptor plumbing and both variants share one pipeline layout, one push
-/// range and one bind group.
+/// The match is WILDCARD-FREE, so a fourth collider arm has to state which module it builds instead
+/// of inheriting whichever one a `_` swallowed — the defect class gate #12 exists for.
+///
+/// All three are interface-identical apart from ONE added read (`Buf` @10, in the layout either
+/// way), so the pick never reaches the descriptor plumbing and every variant shares one pipeline
+/// layout, one push range and one bind group.
 ///
 /// Boot-frozen, like [`particle_draw_spirv_for`]: exactly one sim `VkPipeline` exists per process.
 #[inline]
-pub(crate) fn particle_sim_spirv_for(collide: bool) -> &'static [u32] {
-    if collide { particle_sim_sdf_spirv() } else { particle_sim_spirv() }
+pub(crate) fn particle_sim_spirv_for(collision: ParticleCollision) -> &'static [u32] {
+    match collision {
+        ParticleCollision::Off => particle_sim_spirv(),
+        ParticleCollision::Sdf => particle_sim_sdf_spirv(),
+        ParticleCollision::SdfStats => particle_sim_stats_spirv(),
+    }
 }
 
 /// The nine device buffers the boot fill writes, plus the index buffer. Grouped so
@@ -1295,7 +1362,7 @@ mod tests {
     /// makes the base `.spv` byte-frozen.
     #[test]
     fn the_collide_arm_takes_the_sdf_module_and_the_base_arm_does_not() {
-        let collide = particle_sim_spirv_for(true);
+        let collide = particle_sim_spirv_for(ParticleCollision::Sdf);
         assert!(
             is_the_same_blob(collide, particle_sim_sdf_spirv()),
             "ParticleCollision::Sdf must build the -D SDF_COLLIDE sim module"
@@ -1306,7 +1373,7 @@ mod tests {
              name the variant while the artifact behind it is the base compile"
         );
 
-        let base = particle_sim_spirv_for(false);
+        let base = particle_sim_spirv_for(ParticleCollision::Off);
         assert!(
             is_the_same_blob(base, particle_sim_spirv()),
             "ParticleCollision::Off must build the BASE sim module — a colliding module on a \
@@ -1324,5 +1391,92 @@ mod tests {
              outcome"
         );
         assert_ne!(collide, base, "the two sim modules must differ in CONTENT, not only in address");
+    }
+
+    /// **Rung P1b's selector**, the same two claims one arm further: identity, then an ARTIFACT
+    /// PROPERTY that separates the instrument from the module it instruments.
+    ///
+    /// Identity alone is weaker here than it was for rung P1, because the stats module and the
+    /// collide module share every binding — the census writes to `p_counters` @0, which the sim has
+    /// bound since P0. So `declares_binding` cannot tell them apart, and the property claim is the
+    /// ATOMIC POPULATION instead: the census is three more `OpAtomicIAdd` sites (6 against the
+    /// shipping 3), which is the one thing an `embed_spirv!` pointed back at the wrong `.spv` could
+    /// not fake.
+    #[test]
+    fn the_stats_arm_takes_the_instrumented_module_and_the_shipping_arms_do_not() {
+        let stats = particle_sim_spirv_for(ParticleCollision::SdfStats);
+        assert!(
+            is_the_same_blob(stats, particle_sim_stats_spirv()),
+            "ParticleCollision::SdfStats must build the -D SDF_COLLIDE_STATS sim module"
+        );
+        assert!(
+            declares_binding(stats, 10),
+            "the stats module is the COLLIDE module plus a census — it must still read the field"
+        );
+
+        let sdf = particle_sim_spirv_for(ParticleCollision::Sdf);
+        let base = particle_sim_spirv_for(ParticleCollision::Off);
+        assert!(
+            !is_the_same_blob(stats, sdf) && !is_the_same_blob(stats, base),
+            "the instrument must be its own artifact: an arm that resolved to the shipping module \
+             would report a skip rate of 0/0 while every other pin stayed green"
+        );
+
+        // The atomic population, read out of the committed artifact. 3 wave-leader sites in both
+        // shipping modules (plan D5); 6 in the instrument (D5's three plus the census's three).
+        assert_eq!(count_atomic_iadd(base), 3, "the base sim's D5 budget");
+        assert_eq!(count_atomic_iadd(sdf), 3, "collision publishes nothing (rung P1's claim)");
+        assert_eq!(
+            count_atomic_iadd(stats),
+            6,
+            "the instrument must carry D5's three sites PLUS the census's three — this is the \
+             property that distinguishes it from the module it measures"
+        );
+    }
+
+    /// **Rung P1b's one-substep refusal, gated rather than merely written.**
+    ///
+    /// The hazard it covers cannot be reached through the measurement fixture (which pins one
+    /// substep per frame), so without this test the refusal would be a line of code no run ever
+    /// executes — and a later edit could invert or delete it with every gate green. `ParticleClock`
+    /// supports up to `PARTICLE_SUBSTEP_CEILING = 64`, so the configuration IS reachable.
+    #[test]
+    fn the_census_refuses_more_than_one_substep() {
+        // The legal case: exactly one substep, no panic.
+        assert_one_substep_for_the_census(1);
+
+        for steps in [0u32, 2, 64] {
+            let refused = std::panic::catch_unwind(|| assert_one_substep_for_the_census(steps));
+            assert!(
+                refused.is_err(),
+                "steps = {steps} must be REFUSED: from the second substep on the census is reached \
+                 from a divergent branch, so a still-split wave counts one wave-substep more than \
+                 once and the skip rate silently loses its denominator"
+            );
+        }
+    }
+
+    /// Counts `OpAtomicIAdd` (opcode 234) instructions in a SPIR-V word stream.
+    ///
+    /// Walks the instruction stream by word length rather than scanning for a value, because the
+    /// opcode number can also appear as a literal or a result id inside another instruction — the
+    /// whole-token discipline `particle_edsl_sync`'s census follows, in the binary.
+    fn count_atomic_iadd(words: &[u32]) -> usize {
+        const OP_ATOMIC_IADD: u32 = 234;
+        const HEADER_WORDS: usize = 5;
+        let mut i = HEADER_WORDS;
+        let mut found = 0;
+        while i < words.len() {
+            let opcode = words[i] & 0xFFFF;
+            let len = (words[i] >> 16) as usize;
+            if len == 0 {
+                break; // malformed; the byte gates own that failure, not this counter
+            }
+            if opcode == OP_ATOMIC_IADD {
+                found += 1;
+            }
+            i += len;
+        }
+        found
     }
 }

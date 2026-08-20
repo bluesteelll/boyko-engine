@@ -108,30 +108,66 @@ in the image to say so.
 
 ## `particle_sim.comp.hlsl` — the GPU particle hot loop (compute)
 
-One source (GENERATED — `boyko_shaderdsl/src/bin/emit_particles.rs`), two artifacts. The axis is
-`SDF_COLLIDE`, rung P1 of `docs/PARTICLES-PLAN.md` (D9), and it is a `-D` rather than a runtime flag
-for the F24 reason this plan cites everywhere: a field consumer's `#include`d code and register
-pressure would otherwise be paid on every frame of every scene that does not collide.
+One source (GENERATED — `boyko_shaderdsl/src/bin/emit_particles.rs`), **three** artifacts. The axis is
+`SDF_COLLIDE`, rung P1 of `docs/PARTICLES-PLAN.md` (D9), plus rung P1b's `SDF_COLLIDE_STATS` stacked
+on top of it; both are `-D` rather than runtime flags for the F24 reason this plan cites everywhere:
+a field consumer's `#include`d code and register pressure — and, for the instrument, its atomics —
+would otherwise be paid on every frame of every scene that does not use them.
 
-| Variant | `SC` | `.spv` | dxc `-T` | Interface delta vs base |
-|---|---|---|---|---|
-| base (no collision) | — | `particle_sim.comp.spv` | `cs_6_0` | the P0 module: Set-0 bindings 0/2/3/4/5/6/7/9, 8 B push, three wave-leader `OpAtomicIAdd`, **zero `OpFDiv`**. `cached_field_d` is written 0 at spawn and never read. |
-| sdf-collide (P1) | `1` | `particle_sim_sdf.comp.spv` | `cs_6_0` | **+`StructuredBuffer<uint> Buf` @10** — the engine's ONE SDF edit list, the same binding number every other field consumer uses (`sdf_mesh_shadow.comp.hlsl:97`), followed by `#include "sdf_field.hlsli"`. The buffer is boot-static and read-only for the whole present loop, so it is **not** a framegraph resource: no `ResId`, no seed row, no barrier, and `particle_barrier_stream` is byte-unmoved by this rung. Push range, layout object, descriptor sets and atomic census are all UNCHANGED (collision publishes nothing — it moves state one lane already owns exclusively). The one census that moves is `OpFDiv`: 0 → **28**, all of them the frozen field header's (7 `sdf` instantiations — 1 for `field_distance`, 6 for `sdf_normal` — × 4 divides each: `smin`, both `smax` arms, `sd_capsule`). The particle-owned text adds none, pinned source-side. |
+| Variant | `SC` | `SCS` | `.spv` | dxc `-T` | Interface delta vs base |
+|---|---|---|---|---|---|
+| base (no collision) | — | — | `particle_sim.comp.spv` | `cs_6_0` | the P0 module: Set-0 bindings 0/2/3/4/5/6/7/9, 8 B push, three wave-leader `OpAtomicIAdd`, **zero `OpFDiv`**. `cached_field_d` is written 0 at spawn and never read. |
+| sdf-collide (P1) | `1` | — | `particle_sim_sdf.comp.spv` | `cs_6_0` | **+`StructuredBuffer<uint> Buf` @10** — the engine's ONE SDF edit list, the same binding number every other field consumer uses (`sdf_mesh_shadow.comp.hlsl:97`), followed by `#include "sdf_field.hlsli"`. The buffer is boot-static and read-only for the whole present loop, so it is **not** a framegraph resource: no `ResId`, no seed row, no barrier, and `particle_barrier_stream` is byte-unmoved by this rung. Push range, layout object, descriptor sets and atomic census are all UNCHANGED (collision publishes nothing — it moves state one lane already owns exclusively). The one census that moves is `OpFDiv`: 0 → **28**, all of them the frozen field header's (7 `sdf` instantiations — 1 for `field_distance`, 6 for `sdf_normal` — × 4 divides each: `smin`, both `smax` arms, `sd_capsule`). The particle-owned text adds none, pinned source-side. |
+| **sdf-collide + skip census (P1b)** | `1` | `1` | `particle_sim_stats.comp.spv` | `cs_6_0` | **ZERO interface delta against the row above** — same nine bindings, same 8 B push, same layout object, same descriptor sets, same 28 divides, same simulation. What it adds is the SKIP-RATE INSTRUMENT: one `WaveActiveCountBits` ballot on the collide arm's own skip predicate, folded by one `WaveIsFirstLane()` into three counter words (`waves_evaluated` @7, `waves_skipped` @8, `lanes_evaluated` @9) carved out of `ParticleCounters`' pad — so it needs no buffer, no `ResId` and no barrier, and rides the existing `particle_counters_readback` channel. **⚠️ CENSUS EXCEPTION — see below. A MEASUREMENT module: nothing in a pinned boot selects it.** |
 
-`SC` = `SDF_COLLIDE`. Selection is **boot-frozen, once per process**: `particle_sim_spirv_for`
-(`boyko_app/src/gpu_scene/particle.rs`) takes `ParticleConfig::collides()`, so exactly one sim
-`VkPipeline` exists per run. Binding 10 is in the host layout table **either way** — bound-but-unread
-under the base module, the same shape the marcher's `tiles_buffer`/`PointerGrid` bindings have — so
-the pick never reaches the descriptor plumbing.
+`SC` = `SDF_COLLIDE`, `SCS` = `SDF_COLLIDE_STATS` (which implies `SC`: the census instruments the
+collide arm and has nothing to count without it). Selection is **boot-frozen, once per process**:
+`particle_sim_spirv_for` (`boyko_app/src/gpu_scene/particle.rs`) takes the `ParticleCollision` enum
+in a wildcard-free match, so exactly one sim `VkPipeline` exists per run. Binding 10 is in the host
+layout table **on every arm** — bound-but-unread under the base module, the same shape the marcher's
+`tiles_buffer`/`PointerGrid` bindings have — so the pick never reaches the descriptor plumbing.
 
-*Byte gate:* the same `particle_edsl_sync` battery (30 tests). Beyond the two byte rows it pins the
-variant's binding set (`[0,2,3,4,5,6,7,9,10]` against the base's `[0,2,3,4,5,6,7,9]` — DXC strips a
-declared-but-unread resource, so this is a real "the field is actually consumed" claim), that the
-variant adds **no** atomic, the divide count above, and the collide block's own hand-written
-skeleton (the include contract, the skip test's direction, the cache write-back). The selector
-itself is pinned in-crate by identity AND by artifact property
-(`the_collide_arm_takes_the_sdf_module_and_the_base_arm_does_not`), because a swapped arm is
-invisible to every text and byte pin in the tree.
+### ⚠️ The atomic-census exception, stated on the row that takes it
+
+`particle_sim_stats.comp.spv` runs **3–5 atomics per wave against D5's 1–3, BY DESIGN.** The plan's
+D5 budget prices a wave at 1 (all dying) / 2 (all surviving, one class) / 3 (mixed) `InterlockedAdd`s
+*at retirement*; this module adds **1–2 more per wave per substep** — one for the wave counter (the
+two arms are exclusive: a wave that evaluates counts as evaluated, never as both) plus one for
+`lanes_evaluated` on the evaluating arm. At the plan's steady state (one substep, an all-surviving
+wave) that is 2 + 1 = **3**; in the worst mixed case 3 + 2 = **5**. Statically the artifact carries
+**6** `OpAtomicIAdd` sites against the shipping modules' 3.
+
+The architect's reason, recorded rather than paraphrased: **a census that forbids the instrument is a
+census that forbids measuring itself.** Gate #17 measured that the `ZONE_PARTICLE_SIM`
+armed-vs-disarmed delta — which the plan had named as the skip-rate instrument — is dominated by a
+kernel-level term of the OPPOSITE sign at 4–6× the row's resolution, so the rate is not recoverable
+from a timing difference at all and a device-side counter is the only remaining instrument.
+
+**The exception is NOT a widening.** `particle_sim_atomic_census_is_exactly_the_wave_leader_sites`
+and `the_collide_variant_adds_no_atomic` still assert **exactly 3** for the two modules that ship, and
+were deliberately left alone: a bound of "3 or 6" would stop gating the modules D5's budget is
+load-bearing for. The instrument's own bound lives in its own test
+(`the_stats_variant_carries_its_declared_census_exception_and_nothing_more`), which asserts 3 + 3 and
+**no other atomic of any kind** — a fourth census site would mean a counter nobody derives a rate
+from, and a second `OpAtomic*` species would mean the census reached for a primitive D5's
+aggregation argument does not cover.
+
+*Byte gate:* the same `particle_edsl_sync` battery. Beyond the three byte rows it pins each variant's
+binding set (`[0,2,3,4,5,6,7,9,10]` for both collide rows against the base's `[0,2,3,4,5,6,7,9]` —
+DXC strips a declared-but-unread resource, so this is a real "the field is actually consumed"
+claim), that rung P1's variant adds **no** atomic, the divide count above (unmoved by the census —
+it counts, it does not divide), the collide block's own hand-written skeleton (the include contract,
+the skip test's direction, the cache write-back), the census block's skeleton, and — the pin that
+makes the instrument trustworthy — that the census **ballots on the branch's own predicate**: DXC
+folds the re-spelled test into ONE `OpFOrdGreaterThan` feeding both the ballot's `OpLogicalNot` and
+the branch, so the two are provably the same value. The `WaveIsFirstLane()` fold is pinned at the
+artifact too (+1 `OpGroupNonUniformElect`, +1 `OpGroupNonUniformBallotBitCount` against the collide
+module), because a census that lost its leader would still count correctly while running 32× the
+atomics. The selector itself is pinned in-crate by identity AND by artifact property
+(`the_collide_arm_takes_the_sdf_module_and_the_base_arm_does_not`,
+`the_stats_arm_takes_the_instrumented_module_and_the_shipping_arms_do_not` — the latter separates the
+instrument from the module it measures by ATOMIC POPULATION, since the two share every binding),
+because a swapped arm is invisible to every text and byte pin in the tree.
 
 *Not yet built:* the remaining particle `-D` rows the plan schedules — `SOFT` (P2), `LIT_PERPIXEL` /
 `MOTION` (P3), `PARTICLE_INTERP` (P2b). Each gets its own row here when it lands.

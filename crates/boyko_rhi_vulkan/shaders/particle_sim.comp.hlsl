@@ -40,6 +40,12 @@
 //
 // At 1M survivors that is ~62 500 ops ~= 32 us, against ~0.5 ms for the naive per-lane form.
 //
+// The `-D SDF_COLLIDE_STATS` module DELIBERATELY EXCEEDS that budget -- 1-2 more per wave per
+// substep, i.e. 3-5 per wave at the plan's steady state -- and its manifest row states the
+// exception rather than the census being widened to accommodate it: a census that forbids the
+// instrument is a census that forbids measuring itself, and a widened bound would stop gating the
+// two modules that ship.
+//
 // # Two counters, not one (plan N3c)
 //
 // The LIST count lives in `p_counters` (whose frame terminal is an undrained compute write, so
@@ -97,11 +103,29 @@
 // the clearance and can skip a substep in which contact happened. This module implements the
 // conservative direction, because the alternative is a tunneling class that no image gate sees.
 //
+// # The `-D SDF_COLLIDE_STATS` variant (rung P1b) -- the SKIP-RATE INSTRUMENT
+//
+// Gate #17 measured that the `ZONE_PARTICLE_SIM` armed-vs-disarmed delta, which the plan had named
+// as the skip-rate instrument, is DOMINATED by a kernel-level term of the OPPOSITE SIGN at 4-6x the
+// row's resolution: at 65 536 alive a strict superset of work runs 20.3% FASTER, and the isolated
+// module swap alone is -5.6%. So the skip rate is not recoverable from a timing difference, and
+// this variant counts it on the device instead.
+//
+// It is a THIRD COMPILED MODULE and not a runtime flag, for F24's measured reason (the VB-SV0
+// inline detour cost +75% with its feature OFF and no byte gate could see it) and D1's `-D`
+// precedent: a runtime-gated atomic span would be paid on every disarmed frame. With the define
+// undefined DXC never sees the census, so BOTH shipping modules stay byte-frozen.
+//
+// The census is D5's wave aggregation VERBATIM -- one ballot taken where the wave is converged,
+// folded to ONE `InterlockedAdd` by ONE lane -- and it reads the branch's OWN predicate, emitted
+// from one generator input so the two spellings cannot drift.
+//
 // # Compile (offline + hermetic; committed `.spv` is byte-gated)
 //
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T cs_6_0 -E main \
 //       -fspv-target-env=vulkan1.3 particle_sim.comp.hlsl -Fo particle_sim.comp.spv
 //   (SDF_COLLIDE variant: add `-D SDF_COLLIDE=1` -Fo particle_sim_sdf.comp.spv)
+//   (SDF_COLLIDE_STATS variant: add `-D SDF_COLLIDE=1 -D SDF_COLLIDE_STATS=1` -Fo particle_sim_stats.comp.spv)
 //
 // # Set / binding vocabulary -- MIRRORS the host `PARTICLE_LAYOUT_ENTRIES` table
 //
@@ -213,6 +237,24 @@ static const uint CTR_CLAMPED    = 6u;
 // yields BOTH this lane's render position and, at retirement, the class's final instance count.
 static const uint DRAW_ADDITIVE_INSTANCE_WORD = 1u;
 
+#ifdef SDF_COLLIDE_STATS
+// Rung P1b's three census words, at the indices the generator derived from
+// `offset_of!(ParticleCounters, ...) / 4`. They were CARVED OUT OF THE PAD of the same 64-byte
+// counter line, so no shipping counter moved to make room.
+//
+// Declared INSIDE the define on purpose: with `SDF_COLLIDE_STATS` undefined DXC never sees these
+// three names, which is the same structural absence that keeps `particle_sim.comp.spv` and
+// `particle_sim_sdf.comp.spv` byte-frozen across this rung.
+//
+// They ACCUMULATE from boot and are never cleared -- `particle_kickoff` is ONE module for all three
+// sim variants and does not know about them. That is deliberate: the quantity is a RATIO, which is
+// frame-count independent, and a per-frame reset would put a writer for a measurement word into a
+// shipping shader.
+static const uint CTR_WAVES_EVALUATED = 7u;
+static const uint CTR_WAVES_SKIPPED   = 8u;
+static const uint CTR_LANES_EVALUATED = 9u;
+#endif
+
 // `PARTICLE_SUBSTEP_CEILING` (plan M3). The HOST already clamped; this is the F25 hang guard.
 static const uint SUBSTEP_CEILING = 64u;
 
@@ -318,6 +360,48 @@ void main(uint3 tid : SV_DispatchThreadID) {
         // `particle_integrate` advanced the position by EXACTLY `vel * dt` (the post-damping
         // velocity it just wrote), so this is the displacement itself, not an estimate of it.
         float travel_l = length(vel) * pc.timestep * FIELD_LIPSCHITZ_L;
+#ifdef SDF_COLLIDE_STATS
+        // RUNG P1b'S SKIP-RATE CENSUS -- the instrument gate #17 proved a timing delta cannot be.
+        //
+        // D5's wave aggregation, VERBATIM: one ballot, folded to ONE `InterlockedAdd` by ONE lane,
+        // with the `> 0u` guard that keeps the count minimal -- the same three moves the retirement
+        // block below makes.
+        //
+        // ⚠️ PRECONDITION: EXACTLY ONE SUBSTEP PER DISPATCH. The wave is converged HERE only on the
+        // FIRST iteration. From the second on, this point is reached from the previous iteration's
+        // DIVERGENT skip branch, and Vulkan guarantees no reconvergence at a merge block without
+        // `VK_KHR_shader_maximal_reconvergence` -- so a still-split wave would elect one leader PER
+        // DIVERGENT GROUP and count the same wave-substep more than once, which destroys the
+        // denominator `waves_skipped + waves_evaluated` is supposed to be.
+        //
+        // (Wave-uniform trip count and pre-ballot retirement of out-of-range lanes are both true
+        // and NEITHER covers this: uniform iteration counts say nothing about whether the lanes
+        // are executing that iteration together.)
+        //
+        // The host REFUSES to record a census frame at `steps != 1`
+        // (`gpu_scene::particle::assert_one_substep_for_the_census`), so this precondition is
+        // enforced rather than assumed.
+        //
+        // Read at WAVE granularity, and the two wave counters are EXCLUSIVE: the skip is a divergent
+        // branch, so a wave whose lanes disagree executes BOTH sides and PAID the walk. It therefore
+        // counts as EVALUATED, never as both, which is what makes `skipped + evaluated` the
+        // wave-substep total and the skip rate a ratio that needs no fourth counter.
+        //
+        // `lanes_evaluated` is the per-LANE numerator beside it. The gap between the two rates is
+        // exactly the wave's incoherence -- the quantity the plan says a per-lane figure hides.
+        //
+        // The predicate is the branch's OWN, emitted from one generator input (`SDF_SKIP_TEST`):
+        // a census counting a decision the shader did not make would be worse than no census.
+        uint eval_lanes = WaveActiveCountBits(!(cached_d - travel_l > radius_l));
+        if (WaveIsFirstLane()) {
+            if (eval_lanes > 0u) {
+                InterlockedAdd(p_counters[CTR_WAVES_EVALUATED], 1u);
+                InterlockedAdd(p_counters[CTR_LANES_EVALUATED], eval_lanes);
+            } else {
+                InterlockedAdd(p_counters[CTR_WAVES_SKIPPED], 1u);
+            }
+        }
+#endif
         if (cached_d - travel_l > radius_l) {
             // THE SKIP. The Lipschitz bound proves the collision shell cannot have been reached,
             // so this LANE evaluates no field this substep.
@@ -329,8 +413,13 @@ void main(uint3 tid : SV_DispatchThreadID) {
             // that nearness is wave-COHERENT -- which the alive-list gather makes the common case
             // (neighbouring list entries are particles spawned together, hence spatially close),
             // but which is a property of the scene and not of this code. A skip rate quoted per
-            // lane would overstate the win by the wave's incoherence; read it at wave granularity,
-            // off the `ZONE_PARTICLE_SIM` delta between the two boot-frozen pipelines.
+            // lane would overstate the win by the wave's incoherence -- MEASURED at rung P1b:
+            // 42.1% per wave against 63.2% per lane on the lab fixture.
+            //
+            // READ IT OFF THE `-D SDF_COLLIDE_STATS` CENSUS ABOVE, never off a timing delta. This
+            // line used to name the `ZONE_PARTICLE_SIM` armed-vs-disarmed delta; gate #17 measured
+            // that delta to be dominated by a kernel-level term of the OPPOSITE SIGN at 4-6x the
+            // row's own resolution, so it cannot see this branch at all.
             cached_d = cached_d - travel_l;
         } else {
             float d = field_distance(pos);

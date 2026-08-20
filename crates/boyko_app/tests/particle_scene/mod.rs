@@ -94,7 +94,8 @@
 //! | `BOYKO_PARTICLE_CONE` | `LAB_CONE_COS` (cos 40°) | the spawn cone's half-angle cosine; `1.0` degenerates it to the axis — the tunneling probe's instrument |
 //! | `BOYKO_PARTICLE_SDF` | unset | set ⇒ spawn rung P1's SDF collider slab AND give the effect its contact parameters — the SCENE half |
 //! | `BOYKO_PARTICLE_COLLIDE` | unset | set ⇒ `ParticleCollision::Sdf`, i.e. build the sim from the `-D SDF_COLLIDE` module — the SHADER half |
-//! | `BOYKO_PARTICLE_READBACK_FRAME` | unset | the runner's own knob (gates #7/#9), not read here |
+//! | `BOYKO_PARTICLE_STATS` | unset | set ⇒ `ParticleCollision::SdfStats` (rung P1b's `-D SDF_COLLIDE_STATS` instrument). Implies the collide arm; it is the ONLY way `p_counters`' three stats words become non-zero, so a skip-rate run reads them through `BOYKO_PARTICLE_READBACK_FRAME` |
+//! | `BOYKO_PARTICLE_READBACK_FRAME` | unset | the runner's own knob (gates #7/#9 and rung P1b's skip-rate readback), not read here |
 //!
 //! The two P1 knobs are separate ON PURPOSE (see [`sdf_collider_armed`]): with the scene one set
 //! and the shader one unset, the control run renders a byte-identical scene whose particles fly
@@ -306,10 +307,63 @@ pub fn sdf_collider_armed() -> bool {
     std::env::var("BOYKO_PARTICLE_SDF").is_ok()
 }
 
-/// Whether the sim is built from the `-D SDF_COLLIDE` module (`BOYKO_PARTICLE_COLLIDE`) — rung
-/// P1's `ParticleCollision::Sdf` arming. See [`sdf_collider_armed`] for why this is its own knob.
+/// Whether the sim is built from a COLLIDING module (`BOYKO_PARTICLE_COLLIDE`) — rung P1's
+/// `ParticleCollision::Sdf` arming. See [`sdf_collider_armed`] for why this is its own knob.
 pub fn collision_armed() -> bool {
     std::env::var("BOYKO_PARTICLE_COLLIDE").is_ok()
+}
+
+/// Whether the sim is built from rung P1b's INSTRUMENTED module (`BOYKO_PARTICLE_STATS`) — the
+/// `-D SDF_COLLIDE_STATS` variant, whose per-wave census is the only way `p_counters`' three stats
+/// words become non-zero.
+///
+/// A third knob rather than a second value of [`collision_armed`], for the reason the two P1 knobs
+/// are already split: the skip-rate measurement compares the census run against the plain collide
+/// run at the SAME density, and a measurer must be able to state the two runs' arming
+/// independently of the scene's.
+pub fn collision_stats_armed() -> bool {
+    std::env::var("BOYKO_PARTICLE_STATS").is_ok()
+}
+
+/// The resolved [`ParticleCollision`] arm for this run — ONE function, so the three-valued axis is
+/// decided in one place rather than by two booleans at the config literal (two booleans admit a
+/// fourth combination the enum does not).
+///
+/// `BOYKO_PARTICLE_STATS` implies the collide arm: the census instruments the field walk and has
+/// nothing to count without it, exactly as its `-D` stacks on rung P1's.
+///
+/// # It REFUSES the census without the scene half, and that is the rung's own subject
+///
+/// `BOYKO_PARTICLE_STATS` without `BOYKO_PARTICLE_SDF` is a legal-looking configuration that is not
+/// a legal control: the shader half is armed, the module walks the field — but there is no collider
+/// entity and the effect's `collision_radius` is 0, so the edit list is empty and the "skip rate"
+/// measured is a property of *no geometry existing*, not of the Lipschitz cache.
+///
+/// It has to be a refusal rather than a caveat because such a run passes EVERYTHING: the census is
+/// armed, the counters are non-zero, and all three of `assert_skip_census`'s construction
+/// inequalities hold on it. That is the instrument-cannot-see-its-subject class — gate #17's own
+/// finding — one axis over, inside the rung built to close it.
+///
+/// # Panics
+///
+/// When `BOYKO_PARTICLE_STATS` is set and `BOYKO_PARTICLE_SDF` is not.
+pub fn collision_arming() -> ParticleCollision {
+    if collision_stats_armed() {
+        assert!(
+            sdf_collider_armed(),
+            "BOYKO_PARTICLE_STATS was set without BOYKO_PARTICLE_SDF. The census would run against \
+             an EMPTY edit list with collision_radius = 0 — no collider in the scene, no contact \
+             parameters on the effect — so the skip rate it reports would be a property of `no \
+             geometry exists`, not of the Lipschitz cache. Such a run is indistinguishable from a \
+             real measurement in every artifact and passes every consistency bound. Set \
+             BOYKO_PARTICLE_SDF=1 as well (the scene half), or drop BOYKO_PARTICLE_STATS."
+        );
+        ParticleCollision::SdfStats
+    } else if collision_armed() {
+        ParticleCollision::Sdf
+    } else {
+        ParticleCollision::Off
+    }
 }
 
 /// Whether this run resolves to the DEFERRED path — the one whose depth buffer holds a
@@ -638,12 +692,9 @@ pub fn build_app(title: &'static str) -> App {
         mode: ParticleMode::GpuUnlit,
         capacity: pool_capacity(),
         // Rung P1's arm. Boot-frozen: the runner reads it once, beside `capacity`, to pick which
-        // `particle_sim` module the pipeline is built from.
-        collision: if collision_armed() {
-            ParticleCollision::Sdf
-        } else {
-            ParticleCollision::Off
-        },
+        // `particle_sim` module the pipeline is built from. Rung P1b's census is a THIRD value on
+        // the same axis, not a second knob over `Sdf`, so the fixture resolves both here.
+        collision: collision_arming(),
     });
     // The subsystem's own clock, re-rated to the fixture's substep.
     app.insert_resource(ParticleClock::from_hz(LAB_STEP_HZ));
@@ -680,6 +731,10 @@ pub fn build_app(title: &'static str) -> App {
 /// fixture in this workspace emits, so a capture's env is readable from its own log rather than
 /// from whoever ran it.
 pub fn print_config(what: &str) {
+    // `collide` prints the RESOLVED arm, not the raw `BOYKO_PARTICLE_COLLIDE` bit. A run armed by
+    // `BOYKO_PARTICLE_STATS` alone builds a colliding module, so the raw bit would have printed
+    // `false` on a run whose particles collide — a boot line that says the opposite of what the
+    // pipeline does is worse than no boot line.
     println!(
         "{what}: path={} win={} spawn_per_frame={} speed={} size={} capacity={} occluder={} \
          sdf_collider={} collide={} substep={LAB_SUBSTEP_SECS}s hz={LAB_STEP_HZ} \
@@ -692,7 +747,7 @@ pub fn print_config(what: &str) {
         pool_capacity(),
         occluder_armed(),
         sdf_collider_armed(),
-        collision_armed(),
+        collision_arming().as_str(),
     );
 }
 

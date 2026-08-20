@@ -88,6 +88,7 @@ A GPU-resident particle system where per-particle state never touches the CPU an
 | Draw calls | **1** at P0 (all effects/textures — bindless), 2 at P2 | same |
 | Global atomics: emit | **0** | **0** |
 | Global atomics: sim | **1–3 per wave** (see D5) | same |
+| *(the `-D SDF_COLLIDE_STATS` MEASUREMENT module runs 3–5 per wave BY DESIGN — rung P1b; it is selected by no shipping configuration, so the row above is unqualified for everything that ships)* | | |
 | Readback | **none, ever** | **none, ever** |
 | Effect on other subsystems' schedules/event policy | **none** (M4) | **none** |
 | `goldens/PINS.toml` (35 pins) when `mode == Off` | **byte-identical by construction** | same |
@@ -135,6 +136,11 @@ peak (192-bit GDDR6, 288–336 GB/s), low for a streaming RMW where 60–80 % is
   anomaly is its first measurement: a LARGER, higher-register kernel runs the same sim **5.6 %
   faster** on a byte-identical scene, which is direct evidence that the sim is memory-system
   OVER-subscribed — fewer concurrent waves raising achieved bandwidth by reducing thrash.
+  **MEASURED at P1b: that 5.6 % came with 39 → 48 registers and 48 → 40 warps/SM (−16.7 %
+  occupancy)** — the lever's exchange rate on this part. **And its headroom is bounded in the
+  direction that matters: the base sim already sits at 100 % occupancy**, so there is nothing to
+  gain by raising it; the lever runs downward (a deliberate register cap), and 39 → 48 is the only
+  step of it anyone has measured. Full table in "P1b as built".
 * **Lever 2 — BYTES. 12.5 %, structural, and it CONTRADICTS a shipped decision, so it is FILED, not
   scheduled.** `size0_invlife` + `effect_flags` (8 B) are read-only per frame and `cached_field_d`
   (4 B) is write-dead in the base compile (the shipped shader's own comment says so). A hot/cold
@@ -961,11 +967,11 @@ Unconditional gate on every rung: all 35 `goldens/PINS.toml` hashes unchanged; `
     * **The compare-op half is DELIVERED at P2 item 1** — `boyko_app/src/gpu_scene/particle.rs`'s own `#[cfg(test)] mod tests`, which pins BOTH halves of the depth contract off the one predicate: the op per leg, the shader-pair identity per leg, and — read out of the committed artifact, not from a file name — that the Deferred fragment declares `OpExecutionMode DepthReplacing` while the base one does not. Mutation-proven: swapping both arms reds two of the three tests. It was owed from P0 and had no coverage until then; the 25 shader pins are all statements about shader text and bytes, so a swapped arm stayed green everywhere except on a GPU with `BOYKO_HOST_DUMP` set.
     * **The owner-eval half stays open** — an automated gate cannot say an image is RIGHT. The four dumps exist (`D:\tmp\particle_occl_{deferred,vb}*.bmp`).
 13. **Determinism harness:** (a) **single-step exact** — host-authored `p_dead`/`p_alive_read`, one emit + one sim, per-slot comparison against the `EvalCf` oracle; (b) **multi-step multiset** — N steps, compare the *multiset* of particle states (dead-stack pop order is nondeterministic from frame 2). Frame count pinned in the test name.
-14. **`particle_edsl_sync`:** per-leaf `*_matches_edsl_emit`; `particle_*_spv_byte_identical` × **8** *(was written × 5 for P0's five base modules; the two `-D DEPTH_LINEAR` draw stages landed at P2 item 1 and the `-D SDF_COLLIDE` sim at P1, and every one of them is byte-gated — the count is the artifact census `every_committed_particle_artifact_has_a_row` enforces, so it is a number that must move with the directory)*; `LocalSize == 256`; an `OpAtomicIAdd` census on `particle_sim` (exactly the wave-leader sites, **and no `OpAtomicUMax`** — M1 deleted the mirror) **and zero atomics in `particle_emit`**; **no `OpFDiv` in `particle_rot_advance`'s generated span** (M7).
+14. **`particle_edsl_sync`:** per-leaf `*_matches_edsl_emit`; `particle_*_spv_byte_identical` × **9** *(was written × 5 for P0's five base modules; the two `-D DEPTH_LINEAR` draw stages landed at P2 item 1, the `-D SDF_COLLIDE` sim at P1 and the `-D SDF_COLLIDE_STATS` instrument at P1b, and every one of them is byte-gated — the count is the artifact census `every_committed_particle_artifact_has_a_row` enforces, so it is a number that must move with the directory)*; `LocalSize == 256`; an `OpAtomicIAdd` census on `particle_sim` (exactly the wave-leader sites, **and no `OpAtomicUMax`** — M1 deleted the mirror) **and zero atomics in `particle_emit`**; **no `OpFDiv` in `particle_rot_advance`'s generated span** (M7).
 15. **OOB test (D15/R8):** `MAX_EMITTERS + 1` / `MAX_EFFECTS + 1` — writes stay in bounds, `clamped_spawns` counts the shortfall exactly.
 16. **New golden `particle_additive`** — one emitter, fixed seed, fixed `timestep`, frame 30, **spatially separated particles (no inter-particle overdraw)** so blend order is irrelevant and the pin is bit-reproducible. The constraint is stated in the pin's own doc. Owner-blessed.
 17. **Measurements reported:** kickoff/emit/sim/draw µs at 10k/100k/1M against R12 — **TAKEN 2026-08-20, see "Gate #17 as measured" below**; **A/B render record vs direct gather** with the corrected break-even derivation; **A/B wave-aggregated vs naive atomics** at 1M; **A/B 4-vertex instanced vs `vid/6`**; the 64-substep worst-case frame cost.
-    * **⚠️ The `ZONE_PARTICLE_SIM` armed-vs-disarmed delta is NOT an instrument for the skip rate and must not be reported as one.** *(Ruled 2026-08-20 after the measurement refuted it.)* Isolating the module on a byte-identical scene (`BOYKO_PARTICLE_COLLIDE=1` **without** `BOYKO_PARTICLE_SDF=1`) gives **−4 096 ns / −5.6 % at 65 536** and **−3 584 ns with the run order reversed** — i.e. **the delta's dominant term has the OPPOSITE SIGN to the field walk and is 4–6× the row's own resolution**. What the delta still supports is an upper bound at low density: **< 12.5 % of SIM at 1 344 alive, < 8.3 % at 10 752, < 5.9 % at 10 240 saturated, and NOTHING at ≥ 65 536** — which is exactly where the skip is designed to pay. The 33 % → 29 % → below-resolution fall is **interpretation consistent with the shader's wave-coherence statement, not measurement**. **Rule: the skip rate is measured by rung P1b's device-side per-wave counter (`-D SDF_COLLIDE_STATS`), never by a timing delta. Until P1b lands, no skip-rate figure may be quoted.**
+    * **⚠️ The `ZONE_PARTICLE_SIM` armed-vs-disarmed delta is NOT an instrument for the skip rate and must not be reported as one.** *(Ruled 2026-08-20 after the measurement refuted it.)* Isolating the module on a byte-identical scene (`BOYKO_PARTICLE_COLLIDE=1` **without** `BOYKO_PARTICLE_SDF=1`) gives **−4 096 ns / −5.6 % at 65 536** and **−3 584 ns with the run order reversed** — i.e. **the delta's dominant term has the OPPOSITE SIGN to the field walk and is 4–6× the row's own resolution**. What the delta still supports is an upper bound at low density: **< 12.5 % of SIM at 1 344 alive, < 8.3 % at 10 752, < 5.9 % at 10 240 saturated, and NOTHING at ≥ 65 536** — which is exactly where the skip is designed to pay. The 33 % → 29 % → below-resolution fall is **interpretation consistent with the shader's wave-coherence statement, not measurement**. **Rule: the skip rate is measured by rung P1b's device-side per-wave counter (`-D SDF_COLLIDE_STATS`), never by a timing delta. Until P1b lands, no skip-rate figure may be quoted.** — **P1b LANDED 2026-08-20; the figure is 42.1 % of wave-substeps, FLAT across 10 240…1 048 576 alive, and the `33 % → 29 % → below-resolution` fall above is REFUTED by it. See "P1b as built".**
 
 **Limitations recorded:** LDR additive clipping/quantization (D7/F2); **fixed-rate stepping without interpolation** (M6 — above 64 Hz most frames step zero times); TAA ghosting until P3.
 
@@ -1070,12 +1076,28 @@ and the extra instructions cost **+1 024 ns** instead). **No occupancy or regist
 this instrument cannot produce one on this host.** Rung **P1b** produces it, and it is Lever 1's own
 number (§Goal).
 
+> **TAKEN AT P1b (2026-08-20): the register footprint IS larger and the occupancy IS lower —
+> 39 → 48 registers, 48 → 40 warps/SM (−16.7 %), read off the driver through
+> `VK_KHR_pipeline_executable_properties`.** The hypothesis's first link survives, and the
+> competing explanation ("the two kernels have the same occupancy, so occupancy cannot be the
+> mechanism") is refuted. The causal SECOND link (fewer resident waves ⇒ higher achieved GB/s) is
+> still an inference and is labelled one — a bandwidth counter would be needed. Table, derivation
+> and verdict in "P1b as built".
+
 **The skip rate: UPPER BOUNDS only.** `< 12.5 %` of SIM at 1 344 alive, `< 8.3 %` at 10 752, `< 5.9 %`
 at 10 240 saturated — and **nothing at ≥ 65 536**, where the measured delta is negative (A1) and where
 the skip is designed to pay. The **33 % → 29 % → below-resolution** fall as density rises is
 **interpretation consistent with the shipped shader's own wave-coherence statement** (*"the saving is
 realized per WAVE, not per lane"*), **not a measurement** — no per-wave counter exists yet. See gate
 item 17's rule: **no skip-rate figure may be quoted until P1b lands.**
+
+> **MEASURED AT P1b (2026-08-20). The bounds above SURVIVE; the fall does NOT.** The bounds are on
+> TIME SAVED and the counter is on WORK SKIPPED — different quantities, and both hold. The
+> **42.1 %** wave skip rate is FLAT to within 0.07 points from 10 240 to 1 048 576 alive, so the
+> `33 % → 29 % → below-resolution` fall was a wrong inference: it read a falling time saving as a
+> falling skip rate. Combining the two at the one density they share gives a NEW bound —
+> `5.9 % / 42.19 % =` **the edit-list walk is ≤ 14.0 % of SIM at 10 240 saturated**, which is why
+> deleting 42 % of it is nearly invisible in the wall clock.
 
 **The pool RAMP, recorded because it changes how a future measurer must read the primary ladder.**
 Nothing retires inside the window (`LAB_LIFETIME` = 8 s against 21 substeps × 1 ms = **21 ms** of
@@ -1151,9 +1173,9 @@ arithmetic survives a 4.4-million-spawn refusal.**
 
   **Consequence for R6's automated form, recorded here so the gate is not written wrong:** a test may assert capture ONLY over `v·timestep < thickness + 2·radius`, strictly. Asserting capture at or above the window would pin a phase coincidence (travel 0.4 above is exactly such a coincidence) and would red on an unrelated change to the spawn offset or the substep rate. The complementary assertion — that some step size above the window DOES cross — is sound and is the non-vacuity half.
 * **Gate run.** `particle_edsl_sync` **30 tests, was 25** (the leaf pin, the collide-block skeleton pin, the variant's byte gate, its atomic census and the divide count); `particle_barrier_stream` 16, unmoved; `boyko_shaderdsl` leaf oracles 8; the four `gpu_scene::particle` selector pins; `cargo clippy --workspace --all-targets -D warnings` clean; **all five named image goldens byte-identical** (`particle_additive`, `vb_both_sdf`, `vb_mesh_ssao`, `vb_taa`, `grand_showcase`).
-* **Deferred to the tester / not built here:** an automated form of the tunneling probe (bounded as above), and the two MEASUREMENTS this rung did not take: the armed-vs-disarmed µs delta and the field-evaluation skip rate. ~~Both are measurements, **not missing instruments** — `ZONE_PARTICLE_{KICKOFF,EMIT,SIM,DRAW}` shipped @913f1731 and all four are opened and closed in `present/passes/particles.rs`, so the `ZONE_PARTICLE_SIM` delta between the two boot-frozen pipelines is the instrument for both.~~ **REFUTED BY MEASUREMENT 2026-08-20** (struck rather than deleted, because the sentence was the reason no instrument was built): the delta WAS taken, and at every saturated cell ≥ 65 536 it is NEGATIVE — its dominant term is a kernel-level effect of the opposite sign to the field walk, 4–6× the row's own resolution. The armed-vs-disarmed delta is reported in "Gate #17 as measured" above; **the skip rate is not obtainable from it and waits on rung P1b's device-side per-wave counter.** **The skip rate must be read at WAVE granularity**: the skip is a divergent branch, so a wave keeps paying the field walk while ANY of its lanes is near geometry, and a per-lane figure would overstate the saving by exactly the wave's coherence. The `particle_sdf_collide` image pin carries its real digest and is PENDING the owner's look, like `particle_additive` before it.
+* **Deferred to the tester / not built here:** an automated form of the tunneling probe (bounded as above), and the two MEASUREMENTS this rung did not take: the armed-vs-disarmed µs delta and the field-evaluation skip rate. ~~Both are measurements, **not missing instruments** — `ZONE_PARTICLE_{KICKOFF,EMIT,SIM,DRAW}` shipped @913f1731 and all four are opened and closed in `present/passes/particles.rs`, so the `ZONE_PARTICLE_SIM` delta between the two boot-frozen pipelines is the instrument for both.~~ **REFUTED BY MEASUREMENT 2026-08-20** (struck rather than deleted, because the sentence was the reason no instrument was built): the delta WAS taken, and at every saturated cell ≥ 65 536 it is NEGATIVE — its dominant term is a kernel-level effect of the opposite sign to the field walk, 4–6× the row's own resolution. The armed-vs-disarmed delta is reported in "Gate #17 as measured" above; **the skip rate is not obtainable from it and waits on rung P1b's device-side per-wave counter.** **P1b LANDED 2026-08-20: 42.1 % of wave-substeps skip, flat across 10 240…1 048 576 alive, against 63.2 % read per lane — see "P1b as built".** **The skip rate must be read at WAVE granularity**: the skip is a divergent branch, so a wave keeps paying the field walk while ANY of its lanes is near geometry, and a per-lane figure would overstate the saving by exactly the wave's coherence. The `particle_sdf_collide` image pin carries its real digest and is PENDING the owner's look, like `particle_additive` before it.
 
-### P1b — the skip-rate instrument and the occupancy figure — **size S** *(inserted 2026-08-20, ordered AFTER P1 and BEFORE P2)*
+### P1b — the skip-rate instrument and the occupancy figure — **size S** *(inserted 2026-08-20, ordered AFTER P1 and BEFORE P2)* — **LANDED**
 
 Gate #17 refuted the instrument P1 named for its own two measurements (item 17 above). This rung
 builds the replacement. **One rung and not two, because the two deliverables share the machinery:**
@@ -1184,6 +1206,226 @@ overdue, not early.
 pin; the atomic census asserted against the exception this row declares (not against D5's shipped
 bound); a skip-rate readback at the densities gate #17 could only bound from above; the occupancy
 figure recorded for all three modules whether or not it confirms the hypothesis.
+
+#### P1b as built (2026-08-20) — **LANDED**
+
+* **The variant.** `particle_sim_stats.comp.spv`, the ninth committed particle artifact, built from
+  the one generated source under `-D SDF_COLLIDE=1 -D SDF_COLLIDE_STATS=1` (the census instruments
+  the collide arm and has nothing to count without it, so the define STACKS rather than replaces).
+  Selected by a third `ParticleCollision` arm, `SdfStats`, resolved once at boot by
+  `particle_sim_spirv_for` in a wildcard-free match. **Both shipping `.spv` re-DXC byte-identical**
+  — proven by the existing byte gates, not asserted.
+* **The census is D5's aggregation verbatim, and the artifact says so.** One
+  `WaveActiveCountBits` on the skip predicate, one `WaveIsFirstLane()` fold, three
+  `InterlockedAdd` sites under it. The disassembly carries **one**
+  `OpFOrdGreaterThan` feeding BOTH the ballot's `OpLogicalNot` and the branch's
+  `OpBranchConditional` — DXC folds the re-spelled predicate — so the census provably counts the
+  decision the shader makes rather than a second opinion about it. Against the collide module the
+  instrument adds exactly `+1 OpGroupNonUniformElect`, `+1 OpGroupNonUniformBallotBitCount`, `+0
+  OpGroupNonUniformBroadcastFirst` (it reserves nothing) and `+0 OpFDiv` (it counts; it does not
+  divide).
+* **The two wave counters are EXCLUSIVE, and that is the design decision.** A wave whose lanes
+  disagree executes both sides of the divergent branch, so it PAID the walk and counts as
+  *evaluated*, never as both. Their sum is therefore the wave-substep total exactly, and the skip
+  rate is a ratio needing no fourth counter and no host-side denominator. Per wave per substep that
+  costs **1 atomic (all lanes skip) or 2 (any lane evaluates)** — D5's 1–3 plus 1–2, i.e. the 3–5
+  the manifest row declares as its exception.
+* **The counters ride the existing channel.** Three words carved out of `ParticleCounters`' pad
+  (7/8/9), read through `particle_counters_readback` — no buffer, no `ResId`, no seed row, no
+  barrier, and `particle_barrier_stream` is unmoved (16 tests). They ACCUMULATE from boot: kickoff
+  is one module for all three sim variants and does not clear them, which is deliberate because the
+  quantity is a frame-count-independent ratio, and a per-frame reset would put a writer for a
+  measurement word into a shipping shader.
+* **THE INSTRUMENT DOES NOT PERTURB ITS SUBJECT, measured twice and by independent routes.**
+  (1) The `particle_sdf_collide` golden rendered through the STATS module hashes
+  `729f5ad6…84704` — **byte-identical to the pin the `-D SDF_COLLIDE` module produces**, so the
+  census moves no pixel. (2) The driver reports the **same 48 registers** for both modules (below),
+  so it does not move the occupancy of the thing it measures either. An instrument that changed
+  either would be measuring a different kernel from the one that ships.
+
+  **⚠️ WHY (1) holds, recorded because a future pin will not inherit it.** The census adds three
+  atomics, which perturbs the order waves reach the render counter, which permutes the order
+  billboards are written into `p_render` and therefore the order they are DRAWN. That is invisible
+  here **only because gate #16 authored `particle_additive` — and `particle_sdf_collide` after it —
+  to be ORDER-INDEPENDENT**: additive blending under 8-bit saturation is commutative while nothing
+  clips, and the fixture emits spatially separated particles precisely so nothing does. It is NOT
+  because the census leaves draw ordering untouched; it does not. **A future image pin without that
+  constraint — P2's alpha class is the first one, where blend order is the whole point — must not
+  expect byte-identity across the instrument**, and a measurer who assumed it would be re-blessing
+  a pin against a reordering rather than a defect.
+
+**The skip-rate table.** Four pool-SATURATED cells (`rate = CAP/4`, `CAP = alive`), armed
+`BOYKO_PARTICLE_SDF=1 BOYKO_PARTICLE_STATS=1`, `BOYKO_RENDER_PATH=vb`, readback after presented
+frame 30, one leg per cell (see the determinism note below).
+
+| alive | wave-substeps | waves skipped | waves evaluated | **WAVE skip rate** | lanes evaluated | **LANE skip rate** |
+|---|---|---|---|---|---|---|
+| 10 240 | 9 120 | 3 848 | 5 272 | **42.19 %** | 107 238 / 291 840 | **63.25 %** |
+| 65 536 | 58 368 | 24 584 | 33 784 | **42.12 %** | 686 810 / 1 867 776 | **63.23 %** |
+| 102 400 | 91 200 | 38 416 | 52 784 | **42.12 %** | 1 072 967 / 2 918 400 | **63.23 %** |
+| 1 048 576 | 933 888 | 393 473 | 540 415 | **42.13 %** | 10 988 156 / 29 884 416 | **63.23 %** |
+
+* **ONE leg per cell is enough HERE, and the reason is NOT "a device counter is deterministic".**
+  The 65 536 cell was re-run and returned `33784 / 24584 / 686810` — bit-identical. But wave →
+  particle membership is **atomic-arrival dependent in general**: the alive list is rewritten at
+  wave-reserved bases taken from an `InterlockedAdd`, so which particles share a wave next frame
+  depends on the order waves retired this frame. The legs agreed because **nothing retires inside
+  this window**: every wave has `w_count == 32`, so every reservation base is a multiple of 32 and
+  emit appends 32-aligned, which permutes the wave GROUPINGS in block order without ever reshuffling
+  their membership. **A future measurer taking one leg on a window where particles DIE gets real
+  dispersion with no warning** — there, the three-leg discipline gate #17 used applies to this
+  counter too.
+* **The instrument is verified against arithmetic, not merely against plausibility.** At the 10 240
+  cell the fixture's alive count ramps `2 560 → 5 120 → 7 680 → 10 240` and then saturates, so the
+  participating waves are `80 + 160 + 240 + 320 × 27 = **9 120**` — the counter's total, EXACTLY.
+  The census is therefore counting wave-substeps and nothing else.
+* **The per-lane figure overstates the saving by 21 points**, at every density. That is the wave's
+  incoherence, measured: a lane-granular counter would report the Lipschitz cache deleting 63 % of
+  the field walks where it deletes 42 % of them. The plan's rule — *read it at wave granularity* —
+  is now a number rather than an argument.
+
+**⚠️ The density-dependence the plan recorded as interpretation is REFUTED.** Gate #17 wrote a
+`33 % → 29 % → below-resolution` fall as density rises, explicitly labelled *"interpretation
+consistent with the shader's wave-coherence statement, not measurement"*. The counter says the rate
+is **FLAT to within 0.07 points over a 102× density range**. The interpretation was wrong, and it
+was wrong in the way an inference from a timing delta is always at risk of being: it read a falling
+time saving as a falling skip rate, when the time saving was falling for an unrelated reason.
+
+**Why flat, and the limit of that finding.** It is a property of THIS FIXTURE, not of the
+algorithm: `particle_lab` spawns every particle from one emitter with one cone and one speed, so
+raising the rate multiplies the population without changing its shape, and the fraction of it near
+the collider is scale-invariant. A scene whose particle density varies in space would not be flat.
+**No general claim about how skip rate scales with density is supported by this table** — what is
+supported is that the fall gate #17 inferred did not happen here.
+
+**Consistency with gate #17's bounds — both survive, and together they give a NEW number.** The
+bounds are on TIME SAVED (`< 12.5 %` of SIM at 1 344 alive, `< 8.3 %` at 10 752, `< 5.9 %` at 10 240
+saturated); the counter is on WORK SKIPPED. They are different quantities and neither refutes the
+other. Combined, at the one density both cover: 42.19 % of wave-substeps skipped the field walk and
+that saved less than 5.9 % of SIM ⇒ **the ~240-flop edit-list walk is at most 5.9/0.4219 = 14.0 % of
+the sim's cost at 10 240 saturated.** The rest is the memory traffic the budget formula prices,
+which is why deleting 42 % of the ALU is nearly invisible in the wall clock — and which is the same
+fact the A1 anomaly is a symptom of.
+
+**The occupancy / register figure (deliverable 2).** `VK_KHR_pipeline_executable_properties` **IS
+exposed** by the RTX 3060 Laptop (and by the integrated AMD device beside it), but the engine's own
+`VkDevice` does not enable it and should not — `VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR` asks
+the driver to retain information every shipping boot would then pay for, which is F24's dark tax in
+another costume. So the figure is taken by a self-contained headless probe,
+`boyko_rhi_vulkan/tests/particle_sim_occupancy.rs`, which stands up its own instance/device/pipelines
+over the SAME committed `.spv` the engine binds. No engine file changed to obtain it.
+
+| module | SPIR-V words | **Register Count** | ISA bytes | subgroupSize | **derived warps/SM** | **derived occupancy** |
+|---|---|---|---|---|---|---|
+| base | 2 107 | **39** | 4 096 | 32 | **48 / 48** | **100 %** |
+| `-D SDF_COLLIDE` | 8 962 | **48** | 21 760 | 32 | **40 / 48** | **83.3 %** |
+| `-D SDF_COLLIDE_STATS` | 9 055 | **48** | 22 144 | 32 | **40 / 48** | **83.3 %** |
+
+*Register Count and ISA bytes are the DRIVER's, read back verbatim. The warps/SM and occupancy
+columns are DERIVED* from them on Ampere's published limits (CC 8.6: 65 536 registers/SM, 48
+warps/SM, 256-register-per-warp allocation unit, whole 256-thread = 8-warp blocks): base
+`ceil(39·32/256)·256 = 1 280` regs/warp ⇒ 10 240 per block ⇒ `floor(65536/10240) = 6` blocks = 48
+warps (the hardware cap); collide `ceil(48·32/256)·256 = 1 536` ⇒ 12 288 per block ⇒ 5 blocks = 40
+warps. *(The driver also reports `Local Memory Size = 68 719 476 736` = 2³⁶ identically on all three
+modules, which is not a plausible per-kernel figure; it is recorded as reported and NOT used.)*
+
+**The hypothesis verdict: its first link SURVIVES, its second remains an inference — and the
+alternative it competed with is now REFUTED.** Gate #17 §A1 proposed that the SDF variant is a
+larger kernel with a larger register footprint ⇒ lower occupancy ⇒ higher achieved bandwidth on an
+over-subscribed bandwidth-bound sim. Measured: the register footprint **is** larger (39 → 48, +23 %)
+and the occupancy **is** lower (48 → 40 warps/SM, **−16.7 %**). The competing explanation — *the two
+kernels have the same occupancy, so occupancy cannot be the mechanism* — is dead. What is still NOT
+measured is the causal second link (fewer resident waves ⇒ higher achieved GB/s); a bandwidth
+counter would be needed and this instrument does not produce one. **Stated as it stands rather than
+promoted: the mechanism is now consistent with three independent measurements instead of one, and
+proven by none.**
+
+**Lever 1's number (§Goal's budget re-derivation).** The −5.6 % the isolated module swap bought at
+65 536 came with a **48 → 40 warps/SM** drop. That is the lever's exchange rate on this part: a
+16.7 % occupancy reduction for 5.6 % of sim time. **And the lever's headroom is now bounded**: the
+base sim sits at **100 % occupancy already**, so there is no occupancy to *gain* — the lever runs in
+the direction the plan's own §Goal text names ("fewer concurrent waves raising achieved bandwidth by
+reducing thrash"), i.e. deliberately capping registers, and 39 → 48 is the only step of it anyone
+has measured.
+
+**Gate run.** `particle_edsl_sync` **36 tests, was 30** (the ninth artifact's byte gate, the census
+exception, the wave-leader fold, the predicate-agreement pin, the census block skeleton, the stats
+counter words); `particle_barrier_stream` 16, unmoved; `particle_counters_readback` green at all
+four saturated cells; the four `gpu_scene::particle` selector pins plus a fifth for the stats arm;
+`cargo check --workspace --all-targets` and `cargo clippy --workspace --all-targets -D warnings`
+clean; **the five named image goldens plus `particle_sdf_collide` byte-identical**, and
+`particle_sdf_collide` byte-identical a SECOND time when rendered through the instrument.
+
+**Red-checked, not merely green.** The `WaveIsFirstLane()` fold was removed from the generated
+source and the artifact rebuilt: `the_stats_variant_folds_its_census_through_one_wave_leader` and
+`the_sdf_collide_stats_block_is_the_one_the_plan_specifies` both went red, and so did the two
+SHIPPING byte gates (the source edit reaches them) — while the atomic-census exception test stayed
+green, correctly, because removing the fold changes no static site count. That is why the fold has a
+pin of its own: a census that lost its leader would still count correctly while running 32× the
+atomics, and only this pin sees it.
+
+**Found while measuring, and repaired here.** `particle_counters_readback` could not run on the
+SATURATED ladder at all — it asserts `clamped_spawns == 0` and `additive < CAP`, both of which are
+FALSE by construction when the pool is full, so every rung-P1b density would have been a
+red-by-construction run indistinguishable from a real failure (the same defect class gate #17 filed
+about its own zone runs). Both assertions now read `dead_count == 0` off the device and state their
+saturated meaning instead of being armed for one ladder.
+
+**And the saturated arm gained the assertion that ladder can actually make.** `additive == CAP`
+there is FORCED by the partition and class-split equalities above it, so it discriminates nothing;
+what is not forced, and is now asserted, is **`clamped_spawns > 0`** — with an empty free list and a
+live spawn request, kickoff's clamp must have refused every spawn. That is the only place either
+ladder states D15's accumulator is a LIVE datum: the unsaturated ladder asserts it is `0`, which a
+deleted `+=` satisfies perfectly. Before this, removing kickoff's accumulation left the unsaturated
+ladder green on `0`, the saturated ladder asserting nothing, the counter dead, and every gate
+passing — the campaign's own dead-datum class, sitting inside the rung's new test.
+
+The fixture's boot line also printed `collide=false` on a run armed by `BOYKO_PARTICLE_STATS` alone;
+it prints the resolved arm now.
+
+**The instrument REFUSES two configurations rather than reporting a wrong number for them.** Both
+are cases where every consistency bound still passes, which is why a caveat would not have done:
+
+1. **More than one substep per dispatch** — `assert_one_substep_for_the_census`
+   (`gpu_scene/particle.rs`), a hard `assert!` on the census arm at the activation site. The census
+   sits at the top of the substep loop body, so from the second iteration on it is reached from the
+   previous iteration's DIVERGENT branch; without `VK_KHR_shader_maximal_reconvergence` Vulkan does
+   not guarantee the wave has reconverged there, so a still-split wave elects one leader **per
+   divergent group** and counts one wave-substep more than once — destroying the denominator while
+   every inequality the readback checks still holds. Reachable by configuration, not merely in
+   theory: D6 supports 64 substeps. The panic names maximal reconvergence as what would lift it.
+   *(Wave-uniform trip count and pre-ballot retirement of out-of-range lanes are both true and
+   neither covers this — uniform iteration counts say nothing about lanes executing an iteration
+   together. The shader comment now says so instead of citing them.)*
+2. **`BOYKO_PARTICLE_STATS` without `BOYKO_PARTICLE_SDF`** — the fixture's `collision_arming()`
+   refuses. Arming the shader half alone walks an EMPTY edit list at `collision_radius = 0`, so the
+   "skip rate" measured is a property of *no geometry existing*. The census is armed, the counters
+   are non-zero, and all three construction inequalities hold: the instrument-cannot-see-its-subject
+   class, one axis over, inside the rung built to close it.
+
+**A wrap detector was added** (`particle_counters_readback`): the same derived ceiling that bounds
+the wave-substep count is checked to fit in `u32` before any bound is believed. All three words
+wrap — `lanes_evaluated` merely ~32× sooner, because it counts lanes where the others count waves —
+and a wrapped counter satisfies every consistency bound while reporting nonsense. It is the only
+detection available from a single sample.
+
+**Not built here, and named:** a bandwidth counter (the hypothesis's second link); any skip-rate
+figure on a scene whose particle density varies in space; a census valid at more than one substep
+(it refuses instead); the `-D SDF_COLLIDE_STATS` module is selected by nothing in any pinned boot
+and must not be — it is a measurement arm.
+
+**The occupancy probe's own defect, found in review and fixed before the numbers were trusted.** Its
+first version hand-rolled `VkPhysicalDeviceProperties` with the limits blob as `[u8; 504]` at
+align 1 — 816 bytes against the C ABI's 824 — so `vkGetPhysicalDeviceProperties` overran the stack
+local by 8 bytes on **every enumerated device**, benign only by stack-layout luck. `boyko_rhi_vulkan
+::ffi` already declares the correct `pub` type, with `VkPhysicalDeviceLimitsBlob` carrying the
+8-alignment, a `const _: () = assert!(size == 824)` beside it, and a doc comment describing this
+exact defect. The probe now uses the crate's type. **Re-run after the fix: 39 / 48 / 48 registers and
+4 096 / 21 760 / 22 144 ISA bytes — UNCHANGED, so the table above stands and needed no re-taking**
+(the statistics come from a different call than the smashed one). The two KHR structs the probe
+still declares locally gained size/alignment guards of their own — and the properties guard rejected
+a hand-derived 544 on its first compile, catching the same by-eye-ABI class a second time in the
+same file.
 
 ### P2 — Alpha blending, sorting, soft particles — **size L**
 

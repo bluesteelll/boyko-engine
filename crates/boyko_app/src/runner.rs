@@ -801,16 +801,17 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
         let capacity = particle_config.capacity;
         let deferred_path =
             matches!(host.resolved_render_path.path, boyko_render::RenderPath::Deferred);
-        // Rung P1's arming, resolved here for the same reason and at the same moment: it picks the
-        // sim's SPIR-V (`-D SDF_COLLIDE`), so it is a boot-frozen module choice rather than a
-        // per-frame branch, and it travels as the config's own structural predicate.
-        let collide = particle_config.collides();
+        // Rung P1's arming axis, resolved here for the same reason and at the same moment: it picks
+        // the sim's SPIR-V (`-D SDF_COLLIDE`, or rung P1b's `-D SDF_COLLIDE_STATS` instrument), so
+        // it is a boot-frozen module choice rather than a per-frame branch. The whole ENUM travels
+        // because there are three answers and only the pick site should know which is which.
+        let collision = particle_config.collision;
         host.gpu.build_particle_bundle(
             ctx,
             bindless_texture_table,
             capacity,
             deferred_path,
-            collide,
+            collision,
         );
     }
 

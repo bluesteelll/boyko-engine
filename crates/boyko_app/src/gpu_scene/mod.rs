@@ -4751,9 +4751,11 @@ impl GpuSceneBundles {
     /// Deferred, the base pair elsewhere). It is passed as the PREDICATE, not as two values
     /// derived from it, because the two answers must never disagree.
     ///
-    /// `collide` is rung P1's independent arming ([`ParticleConfig::collides`]): it picks the sim
-    /// module ([`particle::particle_sim_spirv_for`]) and nothing else — same layout, same push
-    /// range, same descriptor sets, and the edit list is bound either way.
+    /// `collision` is rung P1's independent arming axis, carried as the config's own enum: it picks
+    /// the sim module ([`particle::particle_sim_spirv_for`]) and nothing else — same layout, same
+    /// push range, same descriptor sets, and the edit list is bound on every arm. Three answers
+    /// (base / `-D SDF_COLLIDE` / rung P1b's `-D SDF_COLLIDE_STATS` instrument), which is why the
+    /// value travels as the enum rather than as a predicate.
     ///
     /// # Panics
     /// Panics (`expect("invariant: ...")`) on any RHI create/submit failure — mirrors
@@ -4765,7 +4767,7 @@ impl GpuSceneBundles {
         bindless: &BindlessTextureTable,
         capacity: u32,
         deferred_path: bool,
-        collide: bool,
+        collision: boyko_render::ParticleCollision,
     ) {
         assert!(
             self.particle.is_none(),
@@ -4780,7 +4782,7 @@ impl GpuSceneBundles {
             &self.edit_list,
             capacity,
             deferred_path,
-            collide,
+            collision,
         ));
     }
 

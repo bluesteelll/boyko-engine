@@ -9,9 +9,10 @@
 //!    determinism harness compares a readback against — silently, because the same shader still
 //!    compiles and still draws plausible particles.
 //! 2. **`particle_*_spv_byte_identical`** — each committed `.spv` is the re-DXC of its own source
-//!    under the frozen recipe pinned in that source's header. EIGHT artifacts from five sources:
-//!    the two draw stages each carry the `-D DEPTH_LINEAR` variant the Deferred path binds and the
-//!    sim carries rung P1's `-D SDF_COLLIDE`; the base rows are the other half of that claim (the
+//!    under the frozen recipe pinned in that source's header. NINE artifacts from five sources:
+//!    the two draw stages each carry the `-D DEPTH_LINEAR` variant the Deferred path binds, and the
+//!    sim carries TWO — rung P1's `-D SDF_COLLIDE` and rung P1b's `-D SDF_COLLIDE_STATS` skip-rate
+//!    instrument stacked on top of it; the base rows are the other half of that claim (the
 //!    `#ifdef` must leave the undefined compile byte-frozen). SKIPS (with an `eprintln`) when no
 //!    `dxc` resolves; the byte gate is
 //!    only as hermetic as the pinned VulkanSDK 1.4.350.0 toolchain that produced the artifacts.
@@ -20,6 +21,10 @@
 //!    none), zero `OpAtomicUMax` anywhere, zero atomics in `particle_emit`, and zero `OpFDiv` in
 //!    the module that carries `particle_rot_advance` — with the variant's own divide count pinned
 //!    to the frozen field header's contribution, since a field consumer cannot be divide-free.
+//!    Rung P1b's instrument EXCEEDS the atomic bound by design; its exception is asserted against
+//!    the manifest row that declares it, in a test of its own, and the two shipping modules' pins
+//!    are deliberately NOT widened to cover it — a widened bound would stop gating the modules
+//!    that ship, which is the only place D5's budget is load-bearing.
 //! 4. **The Deferred depth-encode agreement** — the `DEPTH_LINEAR` fragment's `SV_Depth`
 //!    expression IS `gbuffer_mrt.fs.hlsl`'s, term for term, and the two shaders' `VsOut` is one
 //!    text. That producer is the sole writer of the depth image this draw tests against, so an
@@ -294,10 +299,123 @@ fn the_sdf_collide_block_is_the_one_the_plan_specifies() {
     // The whole block is inside the define, in BOTH directions: a line that escaped it would
     // change the base artifact, and the base `.spv` byte gate is what would fail first — but this
     // says WHY, and it fails on a host with no dxc too.
+    //
+    // Counted per SPELLING, not by prefix: `#ifdef SDF_COLLIDE` is a prefix of
+    // `#ifdef SDF_COLLIDE_STATS`, so a naive `matches` would let an unclosed block of one kind be
+    // masked by a surplus `#endif` of the other. Since rung P1b there are two kinds.
+    let ifdef_collide = sim.matches("#ifdef SDF_COLLIDE\n").count();
+    let ifdef_stats = sim.matches("#ifdef SDF_COLLIDE_STATS\n").count();
+    assert!(ifdef_collide > 0 && ifdef_stats > 0, "both defines must still open blocks here");
     assert_eq!(
-        sim.matches("#ifdef SDF_COLLIDE").count(),
+        ifdef_collide + ifdef_stats,
         sim.matches("#endif").count(),
-        "every SDF_COLLIDE block in particle_sim.comp.hlsl must be closed"
+        "every SDF_COLLIDE and SDF_COLLIDE_STATS block in particle_sim.comp.hlsl must be closed"
+    );
+}
+
+/// Rung P1b's census block — the hand-written half, pinned exactly as rung P1's is, and for the same
+/// reason: the eDSL owns no atomic, no ballot and no store (F13), so this text is generator-owned
+/// and nothing else in the tree would notice a hand-edit of it.
+///
+/// Each needle is load-bearing:
+///
+/// * the BALLOT — `WaveActiveCountBits` on the negated skip predicate, i.e. the lanes that need the
+///   field. Replacing it with a per-lane increment is the ~0.5 ms/frame form D5 deleted;
+/// * the LEADER — `WaveIsFirstLane()`, without which the three atomics below run per lane;
+/// * the EXCLUSIVE arms — `> 0u` selects evaluated-or-skipped, never both, which is what makes
+///   `skipped + evaluated` the wave-substep total and the rate a ratio with no fourth counter;
+/// * the three counter words — a census writing the wrong word would corrupt a live counter, and
+///   `p_counters` is the one buffer the sim shares with kickoff.
+#[test]
+fn the_sdf_collide_stats_block_is_the_one_the_plan_specifies() {
+    let sim = read_shader("particle_sim.comp.hlsl");
+    for needle in [
+        "static const uint CTR_WAVES_EVALUATED = 7u;",
+        "static const uint CTR_WAVES_SKIPPED   = 8u;",
+        "static const uint CTR_LANES_EVALUATED = 9u;",
+        "uint eval_lanes = WaveActiveCountBits(!(cached_d - travel_l > radius_l));",
+        "if (WaveIsFirstLane()) {",
+        "if (eval_lanes > 0u) {",
+        "InterlockedAdd(p_counters[CTR_WAVES_EVALUATED], 1u);",
+        "InterlockedAdd(p_counters[CTR_LANES_EVALUATED], eval_lanes);",
+        "InterlockedAdd(p_counters[CTR_WAVES_SKIPPED], 1u);",
+    ] {
+        assert!(
+            sim.contains(needle),
+            "particle_sim.comp.hlsl's SDF_COLLIDE_STATS block no longer contains `{needle}` — the \
+             generator (`emit_particles.rs::build_sim`) owns this text, so re-run it rather than \
+             editing the shader"
+        );
+    }
+}
+
+/// The text between `open` and the first `close` after it — used to lift an expression back OUT of
+/// the committed shader instead of restating it in the test.
+fn between<'a>(src: &'a str, open: &str, close: &str) -> Option<&'a str> {
+    let start = src.find(open)? + open.len();
+    let rest = &src[start..];
+    let end = rest.find(close)?;
+    Some(&rest[..end])
+}
+
+/// **The census must count the decision the shader actually makes.**
+///
+/// The census re-states the skip predicate to take its ballot (it cannot hoist it into a named
+/// `bool` without re-spelling the collide arm's own branch, which would perturb a byte-frozen
+/// shipping artifact). Re-statement is a drift risk, so it is pinned on BOTH sides:
+///
+/// * here, at the source — the ballot's operand is READ OUT of the committed shader and the
+///   branch is then looked for spelled with THAT text. Neither side is a literal in this test, so
+///   the assertion is a statement about shader content: change either spelling alone and the
+///   constructed needle is not found;
+/// * and at the ARTIFACT, by DXC itself — the disassembly carries ONE `OpFOrdGreaterThan` feeding
+///   both the `OpLogicalNot` the ballot consumes and the `OpBranchConditional` the branch takes, so
+///   the two are provably the same value and not merely the same text.
+///
+/// A census whose predicate had drifted would report a skip rate for a decision that was never made
+/// — a wrong number where the whole rung exists to produce a right one.
+#[test]
+fn the_census_ballots_on_the_branch_s_own_predicate() {
+    let sim = read_shader("particle_sim.comp.hlsl");
+
+    // Lift the ballot's operand out of the shader. This is the ONE spelling the test knows, and it
+    // knows it by reading it.
+    let ballot_predicate = between(&sim, "WaveActiveCountBits(!(", "))")
+        .expect("the census's WaveActiveCountBits ballot is gone from particle_sim.comp.hlsl");
+    assert!(
+        !ballot_predicate.is_empty() && !ballot_predicate.contains('\n'),
+        "the ballot's operand is not a single-line expression: {ballot_predicate:?}"
+    );
+
+    // ...then require the BRANCH to be spelled with exactly that text. Derived, not restated: if
+    // the generator changed either occurrence without the other, this needle does not exist.
+    let branch = format!("if ({ballot_predicate}) {{");
+    assert!(
+        sim.contains(&branch),
+        "the census ballots on `{ballot_predicate}` but no skip branch tests it. The generator \
+         emits both from one `SDF_SKIP_TEST` input, so a mismatch here means the two spellings \
+         have drifted and the census is counting a decision the shader does not make."
+    );
+
+    // The artifact claim: one comparison, two consumers.
+    let Some(dis) = disassembly_of("particle_sim_stats.comp") else {
+        eprintln!("SKIP the_census_ballots_on_the_branch_s_own_predicate (artifact half): no spirv-dis");
+        return;
+    };
+    let compares = dis
+        .lines()
+        .filter(|l| l.contains("OpFOrdGreaterThan") || l.contains("OpFOrdLessThanEqual"))
+        .count();
+    let sdf_dis = disassembly_of("particle_sim_sdf.comp").expect("spirv-dis resolved above");
+    let sdf_compares = sdf_dis
+        .lines()
+        .filter(|l| l.contains("OpFOrdGreaterThan") || l.contains("OpFOrdLessThanEqual"))
+        .count();
+    assert_eq!(
+        compares, sdf_compares,
+        "the instrument must carry NO extra float comparison: DXC folds the re-spelled predicate \
+         into the collide arm's own, which is the artifact-level proof that the census counts the \
+         branch the shader takes rather than a second opinion about it"
     );
 }
 
@@ -355,6 +473,57 @@ fn draw_arg_instance_count_word_indices_are_generator_derived() {
     assert!(
         !sim.contains("DRAW_ALPHA_INSTANCE_WORD"),
         "particle_sim must not reference the alpha render counter at P0 (additive-only)"
+    );
+}
+
+/// `offset_of!(ParticleCounters, waves_evaluated)` — rung P1b's first stats word, at byte 28 (the
+/// first word of what used to be the counter line's pad).
+const WAVES_EVALUATED_OFFSET: u32 = 28;
+/// `offset_of!(ParticleCounters, waves_skipped)` — byte 32.
+const WAVES_SKIPPED_OFFSET: u32 = 32;
+/// `offset_of!(ParticleCounters, lanes_evaluated)` — byte 36.
+const LANES_EVALUATED_OFFSET: u32 = 36;
+
+#[test]
+fn the_stats_counter_words_are_generator_derived_and_out_of_the_shipping_range() {
+    // Gate #8's discipline, applied to rung P1b's three words: the shader must spell the WORD
+    // indices DERIVED from the host's byte offsets, never typed ones. `28/4 == 7`, `32/4 == 8`,
+    // `36/4 == 9`.
+    for off in [WAVES_EVALUATED_OFFSET, WAVES_SKIPPED_OFFSET, LANES_EVALUATED_OFFSET] {
+        assert_eq!(off % 4, 0, "a word index only exists for a 4-aligned offset");
+    }
+    let sim = read_shader("particle_sim.comp.hlsl");
+    for (name, off) in [
+        ("CTR_WAVES_EVALUATED", WAVES_EVALUATED_OFFSET),
+        ("CTR_WAVES_SKIPPED  ", WAVES_SKIPPED_OFFSET),
+        ("CTR_LANES_EVALUATED", LANES_EVALUATED_OFFSET),
+    ] {
+        let word = off / 4;
+        assert!(
+            sim.contains(&format!("static const uint {name} = {word}u;")),
+            "particle_sim must derive {} from byte offset {off}",
+            name.trim_end()
+        );
+    }
+
+    // The three stats words sit ABOVE every word kickoff and the shipping sim write (0..=6). This
+    // is what makes the instrument unable to perturb a shipping counter even though it shares the
+    // 64-byte line with all of them — the property that lets the census ride the existing readback
+    // channel instead of needing a buffer, a `ResId` and a barrier of its own.
+    const { assert!(WAVES_EVALUATED_OFFSET / 4 > 6) };
+    // ...and BELOW the end of the line, or the readback would be reading past the block.
+    const { assert!(LANES_EVALUATED_OFFSET + 4 <= 64) };
+
+    // Structural absence, at the source: the two SHIPPING compiles must not even see these names.
+    // Their `.spv` byte gates are the artifact-level half; this half fails on a host with no dxc,
+    // and it says which line moved.
+    let stats_block_start = sim
+        .find("#ifdef SDF_COLLIDE_STATS")
+        .expect("the stats block must exist");
+    assert!(
+        sim.find("CTR_WAVES_EVALUATED").expect("the word must be declared") > stats_block_start,
+        "the stats counter words must be declared INSIDE `#ifdef SDF_COLLIDE_STATS` — a \
+         declaration outside it would put text into the two byte-frozen shipping compiles"
     );
 }
 
@@ -446,14 +615,18 @@ struct ParticleArtifact {
 }
 
 impl ParticleArtifact {
-    /// The variant's NAME as its header's recipe line spells it (`DEPTH_LINEAR`, `SDF_COLLIDE`), or
-    /// `None` on a base row.
+    /// The variant's NAME as its header's recipe line spells it (`DEPTH_LINEAR`, `SDF_COLLIDE`,
+    /// `SDF_COLLIDE_STATS`), or `None` on a base row.
     ///
     /// Derived from `defines` rather than carried as a second field: the name and the flag that
     /// produces it are then one datum, and a row whose label and define disagreed is
     /// unconstructible.
+    ///
+    /// The name comes from the LAST flag, not the first: rung P1b's row STACKS its define on rung
+    /// P1's (`-D SDF_COLLIDE=1 -D SDF_COLLIDE_STATS=1`, because the census instruments the collide
+    /// arm), and the variant a stacked row names is the one it adds.
     fn variant_name(self) -> Option<&'static str> {
-        let flag = self.defines.get(1)?;
+        let flag = self.defines.last()?;
         Some(flag.split('=').next().unwrap_or(flag))
     }
 }
@@ -464,8 +637,12 @@ const DEPTH_LINEAR_DEFINES: &[&str] = &["-D", "DEPTH_LINEAR=1"];
 /// The `-D` flag pair for rung P1's field-collision sim variant, spelled once.
 const SDF_COLLIDE_DEFINES: &[&str] = &["-D", "SDF_COLLIDE=1"];
 
+/// The `-D` flags for rung P1b's skip-census sim variant — rung P1's define PLUS its own, because
+/// the census instruments the collide arm and has nothing to count without it.
+const SDF_COLLIDE_STATS_DEFINES: &[&str] = &["-D", "SDF_COLLIDE=1", "-D", "SDF_COLLIDE_STATS=1"];
+
 /// Every committed particle artifact.
-const PARTICLE_ARTIFACTS: [ParticleArtifact; 8] = [
+const PARTICLE_ARTIFACTS: [ParticleArtifact; 9] = [
     ParticleArtifact {
         hlsl_stem: "particle_kickoff.comp",
         profile: "cs_6_0",
@@ -489,6 +666,12 @@ const PARTICLE_ARTIFACTS: [ParticleArtifact; 8] = [
         profile: "cs_6_0",
         defines: SDF_COLLIDE_DEFINES,
         spv_stem: "particle_sim_sdf.comp",
+    },
+    ParticleArtifact {
+        hlsl_stem: "particle_sim.comp",
+        profile: "cs_6_0",
+        defines: SDF_COLLIDE_STATS_DEFINES,
+        spv_stem: "particle_sim_stats.comp",
     },
     ParticleArtifact {
         hlsl_stem: "particle_draw.vs",
@@ -626,7 +809,20 @@ fn particle_sim_sdf_spv_byte_identical() {
     // the plan words as P1's own gate: `particle_sim.comp.spv` must be BYTE-UNPERTURBED with the
     // define undefined, which is what makes "collision is default-off" a structural statement
     // rather than a promise.
+    //
+    // Rung P1b re-uses BOTH halves: its census lives under a define of its own, so this row and the
+    // base row are what prove the two SHIPPING modules were byte-frozen across the instrument's
+    // arrival — proven, per the rung's own wording, rather than asserted.
     assert_spv_byte_identical("particle_sim_sdf.comp");
+}
+
+#[test]
+fn particle_sim_stats_spv_byte_identical() {
+    // Rung P1b's instrument. A THIRD module rather than a runtime flag over the collide arm (F24's
+    // dark-tax rule, D1's `-D` precedent), so it needs its own byte gate for the same reason its
+    // siblings do — and it is the row that makes the census exception below assert against an
+    // artifact somebody actually builds.
+    assert_spv_byte_identical("particle_sim_stats.comp");
 }
 
 #[test]
@@ -739,9 +935,18 @@ fn census(dis: &str) -> SpvCensus {
 
 /// Censuses one committed module, or `None` when `spirv-dis` does not resolve on this host.
 fn census_of(stem: &str) -> Option<SpvCensus> {
+    Some(census(&disassembly_of(stem)?))
+}
+
+/// One committed module's raw disassembly, or `None` when `spirv-dis` does not resolve on this host.
+///
+/// Separate from [`census_of`] because the wave-aggregation pin counts opcodes [`SpvCensus`] has no
+/// field for, and adding three fields to the census struct to serve one test would put counts
+/// nobody reads into every other test's failure message.
+fn disassembly_of(stem: &str) -> Option<String> {
     let spirv_dis = find_spirv_dis()?;
     let path = shaders_dir().join(format!("{stem}.spv"));
-    Some(census(&disassemble(&spirv_dis, &path)))
+    Some(disassemble(&spirv_dis, &path))
 }
 
 #[test]
@@ -835,6 +1040,106 @@ fn the_collide_variant_adds_no_atomic() {
     );
 }
 
+/// The `InterlockedAdd` sites rung P1b's census adds: `waves_evaluated` and `lanes_evaluated` on the
+/// evaluating arm, `waves_skipped` on the other.
+///
+/// THREE SITES, but at most TWO EVER FIRE per wave per substep — the two arms are exclusive, which
+/// is what makes `skipped + evaluated` the wave-substep total. The static count is what an opcode
+/// census can see; the dynamic bound is what the manifest row states.
+const SIM_STATS_CENSUS_ATOMIC_SITES: usize = 3;
+
+#[test]
+fn the_stats_variant_carries_its_declared_census_exception_and_nothing_more() {
+    // THE CENSUS EXCEPTION, ASSERTED AGAINST THE ROW THAT DECLARES IT — never by widening the two
+    // pins above. `docs/SHADER-VARIANT-MANIFEST.md`'s `particle_sim_stats.comp.spv` row states that
+    // this module runs 3–5 atomics per wave against D5's 1–3, BY DESIGN, because a census that
+    // forbids the instrument is a census that forbids measuring itself.
+    //
+    // The exception is bounded HERE rather than left open: exactly D5's three wave-leader sites
+    // plus exactly the census's three, and NO other atomic of any kind. A fourth census site would
+    // mean the instrument grew a counter nobody derived a rate from — the dead-datum class — and a
+    // second `OpAtomic*` species would mean it reached for a primitive D5's aggregation argument
+    // does not cover.
+    //
+    // Widening `particle_sim_atomic_census_is_exactly_the_wave_leader_sites` to accommodate this
+    // module would have been the defect: a bound of "3 or 6" stops gating the two modules that
+    // ship, which is the only place D5's budget is load-bearing.
+    let Some(stats) = census_of("particle_sim_stats.comp") else {
+        eprintln!(
+            "SKIP the_stats_variant_carries_its_declared_census_exception_and_nothing_more: no \
+             spirv-dis on this host"
+        );
+        return;
+    };
+    let expected = SIM_WAVE_LEADER_ATOMIC_SITES + SIM_STATS_CENSUS_ATOMIC_SITES;
+    assert_eq!(
+        stats.op_atomic_iadd, expected,
+        "the -D SDF_COLLIDE_STATS sim must carry D5's {SIM_WAVE_LEADER_ATOMIC_SITES} wave-leader \
+         sites PLUS exactly {SIM_STATS_CENSUS_ATOMIC_SITES} census sites; census: {stats:?}"
+    );
+    assert_eq!(
+        stats.op_atomic_any, expected,
+        "the -D SDF_COLLIDE_STATS sim must carry NO atomic beyond those {expected}; census: {stats:?}"
+    );
+
+    // And the exception is EXACTLY the instrument: the shipping modules are unmoved beside it, read
+    // in the same run rather than trusted from the test above.
+    let sdf = census_of("particle_sim_sdf.comp").expect("spirv-dis resolved above");
+    let base = census_of("particle_sim.comp").expect("spirv-dis resolved above");
+    assert_eq!(sdf.op_atomic_iadd, SIM_WAVE_LEADER_ATOMIC_SITES);
+    assert_eq!(base.op_atomic_iadd, SIM_WAVE_LEADER_ATOMIC_SITES);
+    assert_eq!(
+        stats.op_atomic_iadd - sdf.op_atomic_iadd,
+        SIM_STATS_CENSUS_ATOMIC_SITES,
+        "the difference between the instrument and the module it measures must be the census and \
+         nothing else"
+    );
+}
+
+#[test]
+fn the_stats_variant_folds_its_census_through_one_wave_leader() {
+    // D5'S AGGREGATION, VERBATIM — asserted at the artifact, because "we used the wave idiom" is a
+    // claim about text and this is a claim about what the device runs.
+    //
+    // Three opcodes carry it, and the counts are the whole argument:
+    //   * `OpGroupNonUniformElect`  — `WaveIsFirstLane()`. The base module has ONE (the retirement
+    //     block); the instrument has TWO. A per-LANE census would have none: its atomics would sit
+    //     in open code, which is the ~0.5 ms/frame form D5 exists to delete.
+    //   * `OpGroupNonUniformBallot` + `...BallotBitCount` — `WaveActiveCountBits`. Exactly one more
+    //     than the base module, on the skip predicate.
+    // A census that had lost its `Elect` would still count correctly and would still pass every
+    // other pin in this file, while running 32× the atomics.
+    let Some(stats_dis) = disassembly_of("particle_sim_stats.comp") else {
+        eprintln!(
+            "SKIP the_stats_variant_folds_its_census_through_ONE_wave_leader: no spirv-dis on this \
+             host"
+        );
+        return;
+    };
+    let sdf_dis = disassembly_of("particle_sim_sdf.comp").expect("spirv-dis resolved above");
+
+    let count = |dis: &str, op: &str| -> usize {
+        dis.lines().flat_map(|l| l.split_whitespace()).filter(|t| *t == op).count()
+    };
+
+    assert_eq!(
+        count(&stats_dis, "OpGroupNonUniformElect"),
+        count(&sdf_dis, "OpGroupNonUniformElect") + 1,
+        "the census must add exactly ONE wave leader — its three atomic sites all sit under it"
+    );
+    assert_eq!(
+        count(&stats_dis, "OpGroupNonUniformBallotBitCount"),
+        count(&sdf_dis, "OpGroupNonUniformBallotBitCount") + 1,
+        "the census must add exactly ONE WaveActiveCountBits — the ballot on the skip predicate"
+    );
+    assert_eq!(
+        count(&stats_dis, "OpGroupNonUniformBroadcastFirst"),
+        count(&sdf_dis, "OpGroupNonUniformBroadcastFirst"),
+        "the census reserves nothing, so it needs no WaveReadLaneFirst broadcast: its counters are \
+         write-only from the device's side"
+    );
+}
+
 /// The `OpFDiv` population of the `-D SDF_COLLIDE` sim, all of it `sdf_field.hlsli`'s.
 ///
 /// Derived, not observed-and-blessed: the module instantiates the frozen `sdf` SEVEN times — once
@@ -876,6 +1181,16 @@ fn particle_sim_carries_no_float_divide() {
          divides each) or the PARTICLE side of the collide block grew one, which would put \
          `OpFDiv`'s 2.5 ULP into rung P1's contact math; census: {sdf:?}"
     );
+
+    // Rung P1b's instrument adds counting, not arithmetic: its divide count is the collide module's
+    // exactly. A census that computed a RATE on the device would show up here as a 29th divide —
+    // and it would be the wrong place to compute one, because the two counters accumulate across
+    // frames and only the host knows the window.
+    let stats = census_of("particle_sim_stats.comp").expect("spirv-dis resolved above");
+    assert_eq!(
+        stats.op_fdiv, SIM_SDF_FIELD_DIVIDES,
+        "the skip census must add no float divide — it counts, it does not divide; census: {stats:?}"
+    );
 }
 
 #[test]
@@ -910,7 +1225,7 @@ fn particle_modules_declare_the_bindings_they_read() {
         eprintln!("SKIP particle_modules_declare_the_bindings_they_read: no spirv-dis on this host");
         return;
     }
-    let expected: [(&str, &[usize]); 8] = [
+    let expected: [(&str, &[usize]); 9] = [
         // counters, dispatch args, draw args.
         ("particle_kickoff.comp", &[0, 1, 2]),
         // counters, dead, alive_read, particle, emit requests, effects.
@@ -923,6 +1238,11 @@ fn particle_modules_declare_the_bindings_they_read() {
         // growing past 10 would mean the collide path reached for something the host layout table
         // does not bind.
         ("particle_sim_sdf.comp", &[0, 2, 3, 4, 5, 6, 7, 9, 10]),
+        // Rung P1b: IDENTICAL to the row above, and that identity is the claim. The census writes
+        // to `p_counters` @0, which the sim has bound since P0, so the instrument needs no resource
+        // of its own — no new binding, no layout change, no barrier-stream movement. A row that had
+        // grown a binding would mean the census had reached for a buffer the host does not bind.
+        ("particle_sim_stats.comp", &[0, 2, 3, 4, 5, 6, 7, 9, 10]),
         // render records + the camera UBO (set 0).
         ("particle_draw.vs", &[0, 1]),
         // the bindless texture array + its sampler (set 1).

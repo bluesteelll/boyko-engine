@@ -442,9 +442,51 @@ pub struct ParticleCounters {
     /// Diagnostic: spawns refused because the pool was full, accumulated by kickoff. Read by the
     /// host on a cold path only.
     pub clamped_spawns: u32,
+    /// **Rung P1b's skip-rate instrument, word 7.** Wave-substeps in which AT LEAST ONE lane needed
+    /// the field — i.e. the whole wave paid the edit-list walk, because the skip is a divergent
+    /// branch and a wave executes both of its sides.
+    ///
+    /// Written ONLY by the `-D SDF_COLLIDE_STATS` sim module, which is the third committed sim
+    /// artifact and is selected by [`ParticleCollision::SdfStats`](crate::ParticleCollision) alone.
+    /// The two shipping modules never name this word, so on every shipping configuration it holds
+    /// the boot zero — which is what makes the instrument free rather than a dark tax (F24).
+    ///
+    /// ⚠️ **Accumulates across frames and is never reset — so it WRAPS.** `particle_kickoff` is one
+    /// module for all three sim variants and does not clear it, so the value is a running total
+    /// from boot. That is deliberate: the quantity of interest is the RATIO
+    /// [`waves_skipped`](Self::waves_skipped)`/(skipped + evaluated)`, which is frame-count
+    /// independent, and a per-frame reset would need a fourth writer in a shipping shader.
+    ///
+    /// **All three stats words wrap, not only [`lanes_evaluated`](Self::lanes_evaluated)** — that
+    /// one merely wraps ~`W` times sooner, because it counts lanes where these count waves. The
+    /// wave pair grows by `ceil(alive / W) × steps` per frame, so 1 M particles at 64 substeps
+    /// wraps `u32` after ~2 100 frames; `lanes_evaluated` wraps after ~67. `particle_counters_
+    /// readback` derives the run's own ceiling and refuses to believe counters that could have
+    /// wrapped, which is the only detection available from a single sample.
+    pub waves_evaluated: u32,
+    /// **Rung P1b's skip-rate instrument, word 8.** Wave-substeps in which NO lane needed the field
+    /// — the ones where the Lipschitz cache actually saved the walk.
+    ///
+    /// Exclusive with [`waves_evaluated`](Self::waves_evaluated) by construction: exactly one of the
+    /// two increments per wave per substep, so their sum IS the wave-substep count and the skip rate
+    /// needs no separate denominator. Same accumulation and same writer as its sibling.
+    pub waves_skipped: u32,
+    /// **Rung P1b's skip-rate instrument, word 9.** LANES that needed the field, summed over every
+    /// wave-substep — the per-lane numerator the wave-coherence argument predicts will overstate the
+    /// saving.
+    ///
+    /// The pair is the point: `lanes_evaluated` divided by the lane-substep count is the rate a
+    /// naive per-lane counter would report, and the gap between that and the wave rate IS the wave's
+    /// incoherence. Same accumulation and same writer as its siblings.
+    ///
+    /// ⚠️ It is the FIRST of the three to wrap — not the only one (see
+    /// [`waves_evaluated`](Self::waves_evaluated)). It grows by up to `alive × steps` per frame, so
+    /// a 1 M-particle run at 64 substeps wraps `u32` after ~67 frames, roughly `W` times sooner than
+    /// its wave-counting siblings. The measurement fixtures run 30 frames at one substep.
+    pub lanes_evaluated: u32,
     /// Padding to the full cache line. Present so the struct's size is a layout PIN rather than a
     /// consequence of the field list.
-    pub _pad: [u32; 9],
+    pub _pad: [u32; 6],
 }
 
 /// The two `VkDispatchIndirectCommand`s (D4) — written ONLY by kickoff, read ONLY by
@@ -710,7 +752,14 @@ const _: () = assert!(offset_of!(ParticleCounters, dead_base) == 12);
 const _: () = assert!(offset_of!(ParticleCounters, emit_append_base) == 16);
 const _: () = assert!(offset_of!(ParticleCounters, real_emit_count) == 20);
 const _: () = assert!(offset_of!(ParticleCounters, clamped_spawns) == 24);
-const _: () = assert!(offset_of!(ParticleCounters, _pad) == 28);
+// Rung P1b's three stats words — GENERATOR INPUTS for the `-D SDF_COLLIDE_STATS` module's
+// `CTR_WAVES_EVALUATED`/`CTR_WAVES_SKIPPED`/`CTR_LANES_EVALUATED`, whose word indices are these
+// offsets divided by four (7, 8, 9). Carved out of the pad, so no field above them moved and the
+// two shipping `.spv` are untouched by their existence.
+const _: () = assert!(offset_of!(ParticleCounters, waves_evaluated) == 28);
+const _: () = assert!(offset_of!(ParticleCounters, waves_skipped) == 32);
+const _: () = assert!(offset_of!(ParticleCounters, lanes_evaluated) == 36);
+const _: () = assert!(offset_of!(ParticleCounters, _pad) == 40);
 
 // `ParticleDispatchArgs` — two 16 B `VkDispatchIndirectCommand` slots.
 const _: () =
@@ -785,6 +834,10 @@ mod tests {
     /// a device-side `ping` would be the host's parity living in two places, and an `alpha_count`
     /// beside the list counter would be one counter trying to serve two consumers with
     /// incompatible synchronisation needs.
+    ///
+    /// Rung P1b's three stats words are listed here for the same reason the others are: they were
+    /// CARVED OUT OF THE PAD, so the destructuring is what makes "they took pad, they did not move
+    /// a live field" a compile-time statement rather than a claim about a diff.
     #[test]
     fn counters_have_no_parity_field_and_no_alpha_count_field() {
         let counters = ParticleCounters::default();
@@ -796,6 +849,9 @@ mod tests {
             emit_append_base,
             real_emit_count,
             clamped_spawns,
+            waves_evaluated,
+            waves_skipped,
+            lanes_evaluated,
             _pad,
         } = counters;
 
@@ -806,12 +862,53 @@ mod tests {
         assert_eq!(emit_append_base, 0);
         assert_eq!(real_emit_count, 0);
         assert_eq!(clamped_spawns, 0);
-        assert_eq!(_pad, [0; 9]);
+        assert_eq!(waves_evaluated, 0);
+        assert_eq!(waves_skipped, 0);
+        assert_eq!(lanes_evaluated, 0);
+        assert_eq!(_pad, [0; 6]);
 
-        // The seven live fields plus the pad account for the WHOLE cache line, so there is no room
-        // for an eighth counter even if the destructuring above were relaxed.
+        // The ten live fields plus the pad account for the WHOLE cache line, so there is no room
+        // for an eleventh counter even if the destructuring above were relaxed.
         assert_eq!(size_of::<ParticleCounters>(), 64);
-        assert_eq!(offset_of!(ParticleCounters, _pad) + size_of::<[u32; 9]>(), 64);
+        assert_eq!(offset_of!(ParticleCounters, _pad) + size_of::<[u32; 6]>(), 64);
+    }
+
+    /// Rung P1b: the three stats words sit at the word indices the `-D SDF_COLLIDE_STATS` generator
+    /// spells, and they are DISJOINT from every shipping counter.
+    ///
+    /// Read back through raw bytes rather than through the field names the offsets were derived
+    /// from — the same discipline `draw_args_offsets_and_first_instance_are_pinned` uses, and for
+    /// the same reason: the shader addresses WORDS, so the pin has to be about words.
+    #[test]
+    fn the_stats_words_are_seven_eight_and_nine_and_collide_with_no_shipping_counter() {
+        assert_eq!(offset_of!(ParticleCounters, waves_evaluated) / 4, 7);
+        assert_eq!(offset_of!(ParticleCounters, waves_skipped) / 4, 8);
+        assert_eq!(offset_of!(ParticleCounters, lanes_evaluated) / 4, 9);
+
+        // Every word kickoff or the shipping sim writes is below 7, so the stats module cannot
+        // perturb a shipping counter even though it shares the cache line with them.
+        for shipping in [
+            offset_of!(ParticleCounters, alive_count_cur),
+            offset_of!(ParticleCounters, alive_count_next),
+            offset_of!(ParticleCounters, dead_count),
+            offset_of!(ParticleCounters, dead_base),
+            offset_of!(ParticleCounters, emit_append_base),
+            offset_of!(ParticleCounters, real_emit_count),
+            offset_of!(ParticleCounters, clamped_spawns),
+        ] {
+            assert!(
+                shipping / 4 < 7,
+                "a shipping counter moved into the stats words' range ({shipping} B)"
+            );
+        }
+
+        // A default (boot-zeroed) block reads zero at all three words: the shipping modules never
+        // name them, so this is the value every non-stats run leaves behind.
+        let zeroed = ParticleCounters::default();
+        let bytes = bytemuck::bytes_of(&zeroed);
+        for off in [28usize, 32, 36] {
+            assert_eq!(u32::from_ne_bytes(bytes[off..][..4].try_into().unwrap()), 0);
+        }
     }
 
     /// Gate #8: the two render-counter offsets, and `first_instance == 0` in BOTH draw slots

@@ -5742,6 +5742,29 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// Particles P1b: the `-D SDF_COLLIDE -D SDF_COLLIDE_STATS` HOT LOOP
+    /// (`shaders/particle_sim.comp.hlsl`) — [`PARTICLE_SIM_SDF_SPV`]'s simulation, exactly, plus the
+    /// per-wave SKIP CENSUS.
+    ///
+    /// **A MEASUREMENT module, never a shipping one.** Gate #17 measured that the
+    /// `ZONE_PARTICLE_SIM` armed-vs-disarmed delta cannot serve as the skip-rate instrument — its
+    /// dominant term has the opposite sign to the field walk and is 4–6× the row's resolution — so
+    /// the rate is read off this module's device-side counters instead.
+    ///
+    /// Interface-identical to [`PARTICLE_SIM_SDF_SPV`]: the same nine bindings, the same push block,
+    /// the same layout object. What it adds is one `WaveActiveCountBits` ballot on the skip
+    /// predicate the collide arm already computes, folded by one `WaveIsFirstLane()` lane into
+    /// `p_counters`' three stats words (7/8/9, carved out of the counter line's pad).
+    ///
+    /// **It EXCEEDS D5's per-wave atomic budget by design** — 1–2 more per wave per substep, so 3–5
+    /// per wave at the plan's steady state against D5's 1–3 — and
+    /// `docs/SHADER-VARIANT-MANIFEST.md`'s row states that exception rather than the census pins
+    /// being widened: a widened bound would stop gating the two modules that ship.
+    PARTICLE_SIM_STATS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_sim_stats.comp.spv")
+}
+
+embed_spirv! {
     /// Particles P0: the billboard-expansion VERTEX stage (`shaders/particle_draw.vs.hlsl`,
     /// algorithm A5). Four vertices and six indices per instance, one `DrawIndexedIndirect`.
     ///
@@ -5892,6 +5915,13 @@ pub fn particle_sim_spirv() -> &'static [u32] {
 #[inline]
 pub fn particle_sim_sdf_spirv() -> &'static [u32] {
     PARTICLE_SIM_SDF_SPV.as_words()
+}
+
+/// Particles P1b: the `-D SDF_COLLIDE_STATS` HOT-LOOP SPIR-V as a `u32` word stream — the skip-rate
+/// instrument. See [`PARTICLE_SIM_STATS_SPV`]'s doc for why it is a third module and not a flag.
+#[inline]
+pub fn particle_sim_stats_spirv() -> &'static [u32] {
+    PARTICLE_SIM_STATS_SPV.as_words()
 }
 
 /// Particles P0: the billboard-expansion VERTEX SPIR-V as a `u32` word stream. See

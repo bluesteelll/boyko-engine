@@ -119,21 +119,47 @@ pub enum ParticleCollision {
     /// An effect whose `collision_radius` is 0 still passes through everything but the interior of
     /// a surface, so this arm is the SUBSYSTEM's switch and the effect row is the per-effect one.
     Sdf,
+    /// **Rung P1b's INSTRUMENTED collide arm** — [`Sdf`](Self::Sdf)'s simulation, exactly, plus the
+    /// per-wave skip census the `-D SDF_COLLIDE_STATS` module publishes into
+    /// [`ParticleCounters`](crate::particle::ParticleCounters)' three stats words.
+    ///
+    /// **A MEASUREMENT arm, not a shipping one.** It is a third compiled module rather than a
+    /// runtime flag over [`Sdf`](Self::Sdf) for F24's reason — a runtime-gated atomic span would be
+    /// paid on every disarmed frame — and the consequence is that it runs 1–2 extra atomics per
+    /// wave per substep, which is a cost a shipping configuration should not carry. The physics it
+    /// simulates is bit-identical to [`Sdf`](Self::Sdf)'s: the stats span only reads the skip
+    /// predicate the collide arm already computed.
+    ///
+    /// Selecting it is the ONLY way any of the three stats words becomes non-zero.
+    SdfStats,
 }
 
 impl ParticleCollision {
-    /// The ARTIFACT spelling — `"off"` / `"sdf"`. See [`ParticleMode::as_str`] for why the
-    /// spelling is a table rather than a `Debug` formatting.
+    /// The ARTIFACT spelling — `"off"` / `"sdf"` / `"sdf_stats"`. See [`ParticleMode::as_str`] for
+    /// why the spelling is a table rather than a `Debug` formatting.
     #[inline]
     pub const fn as_str(self) -> &'static str {
         match self {
             ParticleCollision::Off => "off",
             ParticleCollision::Sdf => "sdf",
+            ParticleCollision::SdfStats => "sdf_stats",
         }
     }
 
+    /// Whether this arm publishes rung P1b's per-wave skip census — the structural predicate that
+    /// tells a reader of a counter block whether its three stats words mean anything.
+    ///
+    /// Distinct from [`ParticleConfig::collides`]: every stats arm collides, but not every colliding
+    /// arm counts. A reader that confused the two would report a skip rate of `0/0` for a plain
+    /// `Sdf` run as though the field had never been evaluated.
+    #[inline]
+    pub const fn counts_waves(self) -> bool {
+        matches!(self, ParticleCollision::SdfStats)
+    }
+
     /// Every collision mode, for exhaustive iteration in tests and artifact readers.
-    pub const ALL: [ParticleCollision; 2] = [ParticleCollision::Off, ParticleCollision::Sdf];
+    pub const ALL: [ParticleCollision; 3] =
+        [ParticleCollision::Off, ParticleCollision::Sdf, ParticleCollision::SdfStats];
 }
 
 // ---- ParticleConfig (the owner-set Resource — mirrors OcclusionConfig) ---------------
@@ -190,6 +216,14 @@ impl ParticleConfig {
     pub const fn collides(&self) -> bool {
         !matches!(self.collision, ParticleCollision::Off)
     }
+
+    /// Whether the sim publishes rung P1b's per-wave skip census — forwards
+    /// [`ParticleCollision::counts_waves`], so the predicate has ONE definition and the config is
+    /// merely where a caller reaches it.
+    #[inline]
+    pub const fn counts_waves(&self) -> bool {
+        self.collision.counts_waves()
+    }
 }
 
 #[cfg(test)]
@@ -225,7 +259,7 @@ mod tests {
     /// stopped listing every variant, are both invisible until someone reads a log and believes it.
     #[test]
     fn the_collision_artifact_spelling_is_total_and_unique() {
-        assert_eq!(ParticleCollision::ALL.len(), 2, "ALL must list every collision mode");
+        assert_eq!(ParticleCollision::ALL.len(), 3, "ALL must list every collision mode");
         for (i, a) in ParticleCollision::ALL.iter().enumerate() {
             assert_eq!(*a as u32, i as u32, "{a:?} must sit at its own discriminant in ALL");
             assert!(!a.as_str().is_empty(), "{a:?} has no word");
@@ -255,6 +289,7 @@ mod tests {
             let want = match collision {
                 ParticleCollision::Off => false,
                 ParticleCollision::Sdf => true,
+                ParticleCollision::SdfStats => true,
             };
             assert_eq!(
                 ParticleConfig { collision, ..ParticleConfig::default() }.collides(),
@@ -267,6 +302,35 @@ mod tests {
                 "{collision:?}: collides() must track the `#[repr(u32)]` discriminant"
             );
         }
+    }
+
+    /// Rung P1b's census predicate, wildcard-free for the same reason: a fourth collider arm must
+    /// state whether it counts, rather than inheriting `SdfStats`' answer or `Sdf`'s.
+    ///
+    /// The two predicates are DIFFERENT partitions of the same enum — `collides()` splits after
+    /// `Off`, `counts_waves()` splits before `SdfStats` — and that difference is the whole reason
+    /// both exist. Asserted as the pair, because the defect this guards is one collapsing into the
+    /// other.
+    #[test]
+    fn only_the_stats_arm_counts_waves_and_it_also_collides() {
+        for collision in ParticleCollision::ALL {
+            let counts = match collision {
+                ParticleCollision::Off => false,
+                ParticleCollision::Sdf => false,
+                ParticleCollision::SdfStats => true,
+            };
+            let cfg = ParticleConfig { collision, ..ParticleConfig::default() };
+            assert_eq!(cfg.counts_waves(), counts, "{collision:?}");
+            assert_eq!(collision.counts_waves(), counts, "{collision:?}: the enum's own predicate");
+            assert!(
+                !counts || cfg.collides(),
+                "{collision:?}: an arm that counts field evaluations must evaluate the field"
+            );
+        }
+        // Not the same partition: `Sdf` collides and does not count. A `counts_waves` that had
+        // been written as `collides()` would pass every assertion above except this one.
+        let sdf = ParticleConfig { collision: ParticleCollision::Sdf, ..ParticleConfig::default() };
+        assert!(sdf.collides() && !sdf.counts_waves());
     }
 
     /// The collision axis is orthogonal to the arming one — the property that keeps rung P1 from
