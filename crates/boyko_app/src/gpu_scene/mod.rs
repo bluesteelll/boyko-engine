@@ -146,8 +146,9 @@ mod tlas;
 
 use csm::CsmResources;
 use interp::InterpGpuProd;
-// Particles P0: the runner assembles the frame's inputs, so both of these leave this module.
-pub(crate) use particle::{ParticleFrameInputs, ParticleFramePush};
+// Particles P0: the runner assembles the frame's inputs, so both of these leave this module — as
+// does the raw readback the gate-#7 probe decodes.
+pub(crate) use particle::{ParticleCountersRaw, ParticleFrameInputs, ParticleFramePush};
 #[cfg(feature = "hwrt")]
 use tlas::TlasResources;
 
@@ -4786,6 +4787,20 @@ impl GpuSceneBundles {
         self.particle
             .as_ref()
             .map(|p| (p.emit_req_staging_slot(slot), p.effects_staging_slot(slot)))
+    }
+
+    /// Particles P0 gates #7/#9: the cold pool-partition readback — `None` on a disarmed run
+    /// (no bundle, nothing to read).
+    ///
+    /// Idles the device and performs one fenced transfer submit; see
+    /// [`particle::ParticleGpuBundle::read_counters`] for why this one probe reads out of band
+    /// instead of through a framegraph pass. The caller ends the frame loop straight after.
+    #[inline]
+    pub(crate) fn read_particle_counters(
+        &self,
+        ctx: &VulkanContext,
+    ) -> Option<particle::ParticleCountersRaw> {
+        self.particle.as_ref().map(|p| p.read_counters(ctx))
     }
 
     /// # Panics

@@ -978,6 +978,13 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     // the cull file and never the pyramid one; it now settles, requests and drains on the SAME
     // schedule as `hzb_dump` and exits through the conjunction below with the other four.
     let mut vb_cull_probe = crate::vb_cull_probe::VbCullProbe::from_env();
+    // Particles P0 gates #7/#9: the env-gated pool-partition readback
+    // (`BOYKO_PARTICLE_READBACK_FRAME`). `None` on the steady path, and independent of the five
+    // drivers above: it copies the particle bookkeeping line and the indirect draw block, which
+    // none of them touch, and it does so OUT OF BAND (device idle + one fenced transfer) rather
+    // than through the framegraph — so it adds no `ResId` to any declarator and moves no
+    // armed/disarmed barrier-stream baseline.
+    let mut particle_readback = crate::particle_readback::ParticleReadbackProbe::from_env();
     // The staging and the driver read the SAME variable at two sites (`GpuSceneBundles::boot` mints
     // the buffer, this drives the capture). A boot that allocated the staging with no driver to end
     // the run would spin forever; a driver with no staging would drain and decode nothing.
@@ -3034,6 +3041,47 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             probe.finish(&line);
         }
 
+        // Particles P0 gates #7/#9 (cold): settle, then ONE out-of-band capture of `p_counters` +
+        // `p_draw_args`. No drain phase — `read_particle_counters` idles the whole device, which
+        // covers strictly more than re-waiting one slot's fence, and it is affordable precisely
+        // because the loop is about to end.
+        //
+        // The decoded values are inserted into the WORLD rather than written to a file: `App::run`
+        // returns once this loop exits, so the fixture that armed the capture reads them straight
+        // out of the resource. The artifact line is still printed, so a run whose caller asserted
+        // nothing is still diagnosable from its own log.
+        let particle_readback_ready = match particle_readback.as_mut() {
+            Some(p) => p.after_present(presented_ok),
+            None => false,
+        };
+        if particle_readback_ready {
+            let probe = particle_readback
+                .take()
+                .expect("invariant: the particle readback just reported ready");
+            // `None` means the run was DISARMED (`ParticleConfig::mode == Off`, so no bundle was
+            // ever built). That is a real answer, not a failure: it is reported rather than
+            // panicked on, because a gate that armed the probe on a disarmed scene must learn
+            // WHICH of the two arming axes it missed.
+            match host.gpu.read_particle_counters(ctx) {
+                Some(raw) => {
+                    let readback = crate::particle_readback::ParticleCountersReadback::from_raw(
+                        &raw,
+                        probe.presented(),
+                    );
+                    let line = readback.artifact_line();
+                    boyko_log::info!(boyko_log::Host, "{}", boyko_log::dsp!(line, 256));
+                    println!("{line}");
+                    app.world_mut().insert_resource(readback);
+                }
+                None => {
+                    println!(
+                        "particle_counters UNARMED: no particle GPU bundle exists on this run \
+                         (ParticleConfig::mode == Off at boot), so there is nothing to read back"
+                    );
+                }
+            }
+        }
+
         // Exit once EVERY armed capture has completed. Each driver `take()`s itself on completion,
         // so `is_none()` reads "not armed, or already finished".
         //
@@ -3048,12 +3096,18 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // branch on the FIRST presented frame, so `BOYKO_VB_CULL_READBACK` beside `BOYKO_HZB_DUMP`
         // exited at frame 1 with the cull file written and the pyramid file never. The pairing check
         // that compares the two captures' frame index could not be run at all until this line.
-        if (dump_ready || census_ready || hzb_dump_ready || vb_probe_ready || vb_cull_ready)
+        if (dump_ready
+            || census_ready
+            || hzb_dump_ready
+            || vb_probe_ready
+            || vb_cull_ready
+            || particle_readback_ready)
             && dump.is_none()
             && census.is_none()
             && hzb_dump.is_none()
             && vb_probe.is_none()
             && vb_cull_probe.is_none()
+            && particle_readback.is_none()
         {
             return;
         }

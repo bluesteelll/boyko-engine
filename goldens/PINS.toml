@@ -1157,3 +1157,59 @@ BOYKO_WIN                = "512"
 BOYKO_TAA_SCOPE          = "raster"
 BOYKO_RENDER_PATH        = "vb"
 BOYKO_GEOMETRY_LEGS      = "sdf"
+
+[particle_additive]
+# Particles P0 gate #16 -- the FIRST particle image pin. One emitter, one effect, the whole armed
+# GPU chain (kickoff -> emit -> sim, all indirect -> one vkCmdDrawIndexedIndirect) composited into
+# `lit` as additive billboards, captured at presented frame 30.
+#
+# NO INTER-PARTICLE OVERDRAW, and that is the pin's precondition, not a description. Additive
+# blending is commutative, but `lit` is 8-bit post-tonemap and saturates, so `sat(sat(a)+b)` is
+# order-free only while nothing clips. The fixture therefore emits ONE particle per frame at a
+# UNIFORM speed from a cone whose axis is rotated onto world +Y: every live particle has a distinct
+# age, hence a distinct radius, hence its own pixels. MEASURED at the capture: 30 particles, 354
+# saturated pixels, ~12 px each, shells ~7 px apart. Blend ORDER is therefore irrelevant to these
+# bytes and the pin is reproducible whatever order the sim's waves retire in.
+#
+# The clock is NOT the engine's. `Time` is inserted PAUSED at config time and the fixture drives
+# exactly one substep per frame from its own system, so the simulated instant is a function of the
+# FRAME INDEX alone. That is load-bearing twice over: the runner advances the ECS with the real
+# wall delta (measured 0.1-40 ms on this host, so no `max_delta` clamp binds on every frame), and
+# `particle_emit` seeds its RNG with `rng_seed ^ gid ^ frame_index` -- a run that spawned on
+# different frames would draw different DIRECTIONS, not merely different positions. Verified: three
+# runs, byte-identical.
+#
+# ⚠️ PINNED ON THE VB PATH, NOT ON THE ENGINE-DEFAULT DEFERRED ONE -- deliberately, and it is a
+# DEFECT that made it so. On Deferred the particle draw renders NOTHING: `gbuffer_push_from_view`
+# (the marcher-aligned projection) sets row2 == row3, so every rasterized vertex has
+# clip.z == clip.w and SV_Position.z is exactly 1.0, while that path's depth buffer holds the
+# fragment-written euclidean `length(cam_eye - P)/T_MAX`; under VK_COMPARE_OP_LESS every particle
+# fragment fails. The compute half is provably fine there (the gate-#7 readback on Deferred reports
+# the same 30 alive / 30 additive instances as VB), so this is a rasterization-stage defect, and it
+# cannot be fixed host-side: no 4x4 matrix produces a euclidean distance through a perspective
+# divide. Pinning the default path today would freeze a particle-free image as "correct". Re-point
+# this pin at Deferred when that arm lands.
+crate           = "boyko-app"
+test_binary     = "particle_lab"
+test_name       = "particle_lab_screenshot_dump"
+bmp             = "D:\\tmp\\particle_additive.bmp"
+width           = 512
+height          = 512
+# PENDING owner visual sign-off, captured 2026-08-20 (three byte-identical runs). The value is the
+# real digest, not the unblessed sentinel, so -Check regressions are caught from today; what is
+# outstanding is the OWNER's look at the BMP, which is the only thing that can say the image is
+# RIGHT rather than merely stable.
+sha256_software = "f27d97acd104039e849ce5740f30bf89a5560bbba6822110eadaf0fdd023fc89"
+# The HW-RT leg was NOT run for this pin. The scene has no ray-traced content (no shadow casters,
+# no SDF, unlit particles), so the two legs are expected to agree -- but "expected" is not
+# "measured", and the sibling vb_* pins each blessed their hwrt leg on its own run. Seeded with the
+# mechanically-checked unblessed sentinel rather than a copy of the software digest, which would be
+# a claim nobody made.
+sha256_hwrt     = "PENDING"
+
+[particle_additive.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_HOST_DUMP          = "D:\\tmp\\particle_additive.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+BOYKO_WIN                = "512"
+BOYKO_RENDER_PATH        = "vb"

@@ -92,6 +92,10 @@ pub mod light_gate;
 /// [`particle_effects_upload_due`](particle_gate::particle_effects_upload_due) gate the runner
 /// drives its effect-staging rewrites with, `light_gate`'s twin.
 pub mod particle_gate;
+/// Particles P0 gates #7/#9: the pool-partition readback — the decoded counters an armed run
+/// leaves in the `World` ([`ParticleCountersReadback`](particle_readback::ParticleCountersReadback))
+/// plus the settle→capture driver behind `BOYKO_PARTICLE_READBACK_FRAME`.
+pub mod particle_readback;
 pub mod plugins;
 /// Profiling rung 7: the measurement artifact that replaces the stdout channel.
 pub mod profiling;

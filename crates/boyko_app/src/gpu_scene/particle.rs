@@ -566,6 +566,121 @@ impl ParticleGpuBundle {
         }
     }
 
+    /// Plan gate #7/#9 (cold, once per run): copies `p_counters` and `p_draw_args` back to the
+    /// host and decodes the pool partition.
+    ///
+    /// # Why an out-of-band submit rather than a framegraph pass
+    ///
+    /// The sibling probes (`vb_cull_readback`, the HZB dump) copy inside the frame's recorded
+    /// command buffer and DRAIN, because they run while the loop continues and must not stall it.
+    /// This one is the last thing a run does — the caller ends the frame loop immediately after —
+    /// so it takes the simpler and stricter route: idle the device, then one fenced
+    /// transfer submit. That buys three things a graph pass would have cost real work to get: no
+    /// `ResId` is added to any declarator (so no armed/disarmed barrier-stream baseline moves), no
+    /// per-FIF staging ring is needed (nothing else is in flight), and the values read are
+    /// unambiguously the ones the LAST submitted frame's `particle_sim` left behind.
+    ///
+    /// The barrier is still explicit and not implied by the idle: `vkDeviceWaitIdle` orders
+    /// EXECUTION, and the compute writes must additionally be made AVAILABLE to a transfer read.
+    ///
+    /// # Panics
+    ///
+    /// Panics (`expect("invariant: ...")`) on any RHI failure — this runs on a diagnostic path
+    /// that ends the process, where a silent `None` would read exactly like a scene that produced
+    /// nothing.
+    pub(crate) fn read_counters(&self, ctx: &VulkanContext) -> ParticleCountersRaw {
+        const COUNTERS_BYTES: u64 = size_of::<ParticleCounters>() as u64;
+        const DRAW_ARGS_BYTES: u64 = size_of::<ParticleDrawArgs>() as u64;
+        const TOTAL: u64 = COUNTERS_BYTES + DRAW_ARGS_BYTES;
+
+        let device = ctx;
+        RhiDevice::wait_idle(device).expect("invariant: particle readback device idle");
+
+        let staging = RhiDevice::create_buffer(device, &BufferDesc {
+            size: TOTAL,
+            usage: BufferUsage::TRANSFER_DST,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("invariant: particle readback staging create");
+        let mapped = RhiDevice::buffer_mapped_ptr(device, &staging)
+            .expect("invariant: host-visible particle readback staging is mapped");
+
+        let mut encoder = RhiDevice::create_command_encoder(device)
+            .expect("invariant: particle readback command encoder create");
+        let fence = RhiDevice::create_fence(device, false)
+            .expect("invariant: particle readback fence create");
+        encoder.begin().expect("invariant: particle readback encoder begin");
+        // Availability: the last frame's `particle_sim`/`particle_kickoff` wrote both blocks
+        // through a STORAGE descriptor, and this submit reads them as a transfer source. The
+        // device idle above already ordered the execution; this makes the writes visible.
+        encoder.pipeline_barrier(&BarrierDesc {
+            src_stage: BarrierStage::COMPUTE_SHADER,
+            dst_stage: BarrierStage::TRANSFER,
+            buffers: &[
+                BufferBarrier {
+                    buffer: &self.counters,
+                    src_access: BarrierAccess::SHADER_WRITE,
+                    dst_access: BarrierAccess::TRANSFER_READ,
+                },
+                BufferBarrier {
+                    buffer: &self.draw_args,
+                    src_access: BarrierAccess::SHADER_WRITE,
+                    dst_access: BarrierAccess::TRANSFER_READ,
+                },
+            ],
+        });
+        encoder.copy_buffer(&self.counters, &staging, &[BufferCopy {
+            src_offset: 0,
+            dst_offset: 0,
+            size: COUNTERS_BYTES,
+        }]);
+        encoder.copy_buffer(&self.draw_args, &staging, &[BufferCopy {
+            src_offset: 0,
+            dst_offset: COUNTERS_BYTES,
+            size: DRAW_ARGS_BYTES,
+        }]);
+        encoder.end().expect("invariant: particle readback encoder end");
+        device
+            .rhi_queue()
+            .submit(&encoder, &fence)
+            .expect("invariant: particle readback submit");
+        RhiDevice::wait_fence(device, &fence, u64::MAX)
+            .expect("invariant: particle readback fence wait");
+
+        let mut counters = ParticleCounters::default();
+        let mut draw_args = ParticleDrawArgs::default();
+        // SAFETY: `mapped` addresses `TOTAL` valid mapped host-coherent bytes of a buffer this fn
+        // just created; the fence wait above completed the ONLY submission that writes them, so
+        // the transfer's results are complete and (the memory being HOST_COHERENT) host-visible.
+        // Both destinations are `#[repr(C)]` + `Pod` — every byte pattern of their exact size is a
+        // valid value — and the two source ranges `[0, COUNTERS_BYTES)` and
+        // `[COUNTERS_BYTES, TOTAL)` are in bounds, disjoint, and exactly the two struct sizes.
+        // The destinations are fresh locals, so nothing aliases them.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                mapped.as_ptr(),
+                (&raw mut counters).cast::<u8>(),
+                COUNTERS_BYTES as usize,
+            );
+            core::ptr::copy_nonoverlapping(
+                mapped.as_ptr().add(COUNTERS_BYTES as usize),
+                (&raw mut draw_args).cast::<u8>(),
+                DRAW_ARGS_BYTES as usize,
+            );
+        }
+
+        // SAFETY: `encoder`, `fence` and `staging` were created on `device` above; the encoder's
+        // only submission completed (the fence wait returned), so no GPU work references any of
+        // them; each is moved by value ⇒ destroyed exactly once.
+        unsafe {
+            RhiDevice::destroy_command_encoder(device, encoder);
+            RhiDevice::destroy_fence(device, fence);
+            RhiDevice::destroy_buffer(device, staging);
+        }
+
+        ParticleCountersRaw { counters, draw_args, capacity: self.capacity }
+    }
+
     /// Tears every owned resource down in reverse dependency order. The bindless set-1 table and
     /// the camera UBO ring are owned elsewhere and are NOT destroyed here.
     ///
@@ -611,6 +726,22 @@ impl ParticleGpuBundle {
             RhiDevice::destroy_buffer(ctx, self.counters);
         }
     }
+}
+
+/// The raw device blocks [`ParticleGpuBundle::read_counters`] brings back, plus the capacity they
+/// must partition — the three values plan gate #7's arithmetic is stated over.
+///
+/// Deliberately the DEVICE structs and not a pre-digested summary: the decode into named
+/// quantities and the partition predicates live in [`crate::particle_readback`], which is pure and
+/// therefore testable without a GPU, and this type is the seam between the two halves.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ParticleCountersRaw {
+    /// The bookkeeping cache line as the last submitted frame's passes left it.
+    pub(crate) counters: ParticleCounters,
+    /// The two indirect draw commands; `additive.instance_count` is the sim's own render counter.
+    pub(crate) draw_args: ParticleDrawArgs,
+    /// The boot-frozen pool capacity the partition is checked against.
+    pub(crate) capacity: u32,
 }
 
 /// The per-frame scalars the activation carries to the device, gathered into one struct so the
