@@ -24,7 +24,8 @@ The consequences are the point:
   through as verbatim token trees with their original spans, so rustc errors,
   rust-analyzer completions and go-to-definition land on your own tokens.
 
-*(Branch: `feat/multi-paradigm-render`. Shipped rungs: A0–A5.)*
+*(Branch: `feat/multi-paradigm-render`. Shipped rungs: A0–A6 — the v1 construct
+surface is complete.)*
 
 ## Hello, Aether
 
@@ -157,14 +158,13 @@ expansion:
 | `plugin Name;` | `pub struct` + `impl Plugin` holding every sibling registration | A2 | [Systems & plugins](systems-and-plugins.md#the-plugin-header) |
 | `machine Name { … }` | flat `States` enum + one transition system per (leaf, event) + the initial-enter startup system | A3 · A4 | [State machines](state-machines.md) |
 | `material name { … }` | `#[inline] pub fn` over `Material::new` / `with_textures` | A5 | [Materials](materials.md) |
-| `scene name { … }` | *planned* — rung A6 | — | — |
+| `scene name { … }` | `pub fn` spawning the declared world, registered as a startup one-shot | A6 | [Scenes](scenes.md) |
 
-Naming the still-planned construct in that list is deliberate: writing
-`scene lab { }` today gives you an error that says **which rung it lands on**,
-not "unknown construct". See
-[Diagnostics](diagnostics.md#planned-constructs-name-their-rung). The list is
-also how you can tell a rung landed — `material gold { }` used to answer with
-rung A5, and now answers ``material `gold` needs a `base:` color``.
+**That table is now the whole v1 surface, and every row of it ships.** The list
+used to carry constructs that only named the rung they were coming on; A6 landed
+the last of them, so an unrecognized keyword is unambiguously a misspelling and
+the [unknown-construct](diagnostics.md#unknown-construct) message is the whole
+truth about it.
 
 ## Three crates, one macro
 
@@ -205,8 +205,8 @@ behavior, and a few things stay firmly yours:
   construct; `#[derive(Resource)]` is unchanged. Component hooks are *forwarded*
   by the `component` construct, not reimplemented.
 - **Cross-block references do not exist.** Sibling resolution (a system naming a
-  system for ordering, a machine naming its states) is scoped to one `aether!`
-  block. Across blocks you are back to ordinary Rust name resolution — which is
+  system for ordering, a machine naming its states, a scene naming a material)
+  is scoped to one `aether!` block. Across blocks you are back to ordinary Rust name resolution — which is
   usually what you want, because the expanded items are just items.
 - **No `Vec`, no `HashMap`, no `dyn`, no allocation** appears in any expansion.
   The transpiler's own internals use them freely; the *emitted* code obeys the
@@ -227,10 +227,12 @@ this become", those tests are it.
 
 ## Status and what is next
 
-Rungs **A0–A5** ship in this build: `component`, `tag`, `bundle`, `event`,
-`system`, `plugin`, `machine`, `material`. Machines carry the full hierarchy —
-composite states, `initial` retargeting, superstate handler inheritance,
-LCA-inlined enter/exit and group predicates — which A3 delivered a rung early.
+Rungs **A0–A6** ship in this build: `component`, `tag`, `bundle`, `event`,
+`system`, `plugin`, `machine`, `material`, `scene`. That is the **complete v1
+construct surface** — the language has no keyword left that only names a future
+rung. Machines carry the full hierarchy — composite states, `initial`
+retargeting, superstate handler inheritance, LCA-inlined enter/exit and group
+predicates — which A3 delivered a rung early.
 
 A4 was therefore spent on the piece nobody had built and on hardening what was
 already there:
@@ -265,15 +267,24 @@ crates still depend on nothing — but the integration crate now compiles agains
 `boyko_render`, deliberately, so a change to `Material::new` goes red in this
 repo instead of in your game.
 
+A6 is the rung the others were built toward: **[`scene`](scenes.md)**, the
+declarative world. Eight node heads, scene-scoped `let` mesh bindings, poses,
+`children:` trees and a demand-driven parameter list — a scene with neither mesh
+nor material compresses to `(commands)` alone. It is also where §4's symbol
+table became a real module: `material:` props resolve through
+[`AetherCtx`](scenes.md#aetherctx-the-blocks-symbol-table), which now owns every
+whole-block rule. Two defects were caught by writing the pins before trusting
+the code — asset mints were first-use ordered (so moving two nodes renumbered
+every row a scene minted), and the four generated params could be shadowed by an
+ordinary `let`, which is why they are `__aether_`-prefixed today.
+
 Planned, not shipped:
 
 | Rung | Contents | Status today |
 |------|----------|--------------|
-| A6 | `scene` — entity trees, mesh/material resolution, demand-driven spawn-fn params | the parser refuses it and names the rung |
 | A7 | DX hardening: expansion-size CI measurement, span-column-pinned goldens, `aether v1;` version header | not started |
 
-Because the parser answers with the rung, you never have to check a roadmap to
-find out whether a construct exists yet — try it and read the error.
+A7 adds **no constructs**. Everything the language declares, it declares today.
 
 ## See also
 
@@ -284,6 +295,8 @@ find out whether a construct exists yet — try it and read the error.
   chain, and the one recorded hazard.
 - [Materials](materials.md) — `material`, the key table, and the `textures:`
   escape.
+- [Scenes](scenes.md) — `scene`, the eight node heads, and the demand-driven
+  spawn fn.
 - [Diagnostics](diagnostics.md) — every error contract Aether promises.
 - [Components](../concepts/components.md) and [Systems](../concepts/systems.md) —
   the hand-written surface Aether expands to.

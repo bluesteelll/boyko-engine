@@ -15,53 +15,49 @@ Two mechanisms do most of the work:
 
 ## Unknown construct
 
-The canonical extensibility diagnostic. It names the whole v1 surface, not just
-what happens to be implemented, so the list reads the same on every rung:
+The canonical extensibility diagnostic. It names the whole v1 surface, and since
+rung A6 every keyword in it **dispatches** — so an unrecognized head is
+unambiguously a misspelling, and this message is the whole truth about it:
 
 ```text
-error: unknown construct `compnent`; this aether supports: component, tag, bundle, system, event, plugin, machine, material, scene (did you mean `component`?)
- --> tests/ui/unknown_construct.rs:5:5
-  |
-5 |     compnent Health { hp: f32 }
-  |     ^^^^^^^^
+error: unknown construct `scen`; this aether supports: component, tag, bundle, system, event, plugin, machine, material, scene (did you mean `scene`?)
+  --> tests/ui/no_planned_construct_remains.rs:11:5
+   |
+11 |     scen lab { }
+   |     ^^^^
 ```
 
-`plugin` is in that list because the block parser **dispatches** on it, and the
+`plugin` is in that list because the block parser dispatches on it too, and the
 list must name every keyword the parser dispatches on or it misstates the
 surface. It was missing until rung A4, which cost `pluging P;` both its
 did-you-mean and an honest list; a unit test now ties the two together.
 
-## Planned constructs name their rung
+### The arm that retired itself
 
-A misspelling and a not-yet-shipped construct are different failures, and they
-get different messages. Writing a construct from a later rung tells you the
-rung:
+Until A6 there was a second answer here. A construct the language had *named*
+but not yet shipped got its own message — ``` `scene` is an Aether construct but
+lands at rung A6; this build carries rungs A0..A5 … ``` — so a misspelling and a
+not-yet-shipped construct never looked alike, and no reader had to consult a
+roadmap to find out which they had hit.
 
-```text
-error: `scene` is an Aether construct but lands at rung A6; this build carries rungs A0..A5 (component, tag, bundle, system, event, plugin, machine, material)
- --> tests/ui/planned_construct_names_its_rung.rs:9:5
-  |
-9 |     scene lab { }
-  |     ^^^^^
-```
-
-`scene` is the only construct left with that answer. The message is also how a
-rung's landing becomes visible from the outside: this golden's subject was
-`material` until A5 shipped it, and the rung range moved with it. You never need
-to consult a roadmap to find out whether something exists — try it, and read
-which of the two errors you get.
+`scene` was the last of them. When A6 landed it, the arm self-destructed exactly
+as its own comment promised, and its golden was replaced by the one above —
+whose whole job is to prove the removal went cleanly: **no planned-construct
+text survives anywhere in the crate**. A diagnostic that outlived the condition
+it described would be worse than none.
 
 ## Case gates
 
 Names that expand to **types** (`component`, `tag`, `bundle`, `event`,
 `machine`, `state`, `plugin`) must be UpperCamelCase; names that expand to
-**fns** (`system`, `material`) must not. Both directions are checked in the
-block, with a concrete rename:
+**fns** (`system`, `material`, `scene`) must not. Both directions are checked in
+the block, with a concrete rename:
 
 ```text
 error: component names are UpperCamelCase — they expand to types (rename `health` to `Health`)
 error: system names are snake_case — they expand to fns (rename `Foo`)
 error: material names are lowercase — they expand to builder functions, not types (rename `Gold` to `gold`)
+error: scene names are lowercase — they expand to spawn fns, not types (rename `Lab` to `lab`)
 ```
 
 The check is Unicode-correct: it asks `char::is_uppercase`, not an ASCII probe,
@@ -238,6 +234,69 @@ Where each fault lands is the whole point:
 The full message texts, and the story behind that last row, are on
 [Materials](materials.md#refusals).
 
+## Scenes
+
+A scene resolves two symbol tables with two different extents, and each message
+names the one it actually searched — a wording that misstated the scope would
+send you hunting in the wrong place:
+
+```text
+error: no material `gol` in this aether block (materials here: `gold`, `lamp`) (did you mean `gold`?)
+error: no mesh binding `floor` in scene `props` (bindings here: `crate_box`)
+```
+
+The rest of the scene contract, by what it protects:
+
+| Fault | Aether says |
+|-------|-------------|
+| unknown node head | ``unknown scene node `sunn`; heads are: mesh, sun, spot, point, sky, camera, sdf, entity (did you mean `sun`?)`` |
+| unknown head key | ``unknown `sun` key `dirr`; keys are: dir, color, lux (plus material, casts_shadow, children) (did you mean `dir`?)`` |
+| a required key omitted | ``` the `sun` node needs a `dir:` key — it has no default (these default: color) ``` · ``` the `camera` node needs an `aspect:` key ``` |
+| a tuple key's arity | ``` `sun` key `dir` takes exactly 3 components (x, y, z) — found 2 ``` |
+| `at` on a head that derives its pose | ``` the `sun` node derives its whole pose from `dir:` … — an `at` here would be dropped ``` (and one each for `spot`/`point`, `sky`, `sdf`) |
+| `at (…)` arity | ``` `at (…)` is the translation sugar and takes 3 components (x, y, z) — found 2; a full pose is written unparenthesized (`at Transform { … }`) ``` |
+| `casts_shadow` on a head with no form | ``` the `sky` node has no shadow-caster form ``` |
+| `material:` on a head with nothing to hang it on | ``` the `sky` node has no `material:` form ``` |
+| two `let` bindings of one name | ``` duplicate mesh binding `a` in this scene ``` |
+| unknown mesh source | ``unknown mesh source `plain`; sources are: plane, cube, mesh (did you mean `plane`?)`` |
+
+The `at` family is the one worth pausing on. Those poses would otherwise be
+**silently dropped** — the single failure mode a user cannot see in the rendered
+frame without going looking for it — so each message names where the pose really
+comes from instead of merely refusing.
+
+```text
+error: the `sky` node has no shadow-caster form
+ --> tests/ui/scene_casts_shadow_on_sky.rs:7:68
+  |
+7 |         sky { sky: (0.28, 0.36, 0.50), ground: (0.15, 0.14, 0.13), casts_shadow }
+  |                                                                    ^^^^^^^^^^^^
+```
+
+### One name, two constructs
+
+The A5 measurement — two bare `pub fn`s of one name give rustc nothing but the
+`aether!` token to point at — widened at A6 rather than gaining a case. It now
+covers the fn-producing constructs **across kinds**:
+
+```text
+error: `lab` is declared twice in this aether block — the `material` and the `scene` both expand to a fn of that name
+  --> tests/ui/scene_collides_with_a_material_fn.rs:10:11
+   |
+10 |     scene lab {
+   |           ^^^
+
+error: the first `material` of this name is here
+ --> tests/ui/scene_collides_with_a_material_fn.rs:8:14
+  |
+8 |     material lab { base: (0.0, 0.0, 0.0) }
+  |              ^^^
+```
+
+The type-producing constructs still defer: they carry a derive, so rustc reports
+the duplicate *and* a second, localized error against your own item. See
+[Scenes](scenes.md#aetherctx-the-blocks-symbol-table).
+
 ## What Aether checks, and what it leaves alone
 
 Duplicated checks drift, so Aether pre-checks a downstream rule **only** when it
@@ -255,7 +314,8 @@ can produce a strictly better span or message. The whole pre-check list:
 | every declared machine name, reachable or not | the lazy retargeting and inheritance walks skip what nothing targets, so a typo used to expand clean |
 | `let` in a guard or a run condition | Aether splices that expression into `if !(…)` or `.run_if(…)`, where a `let` is not valid Rust; caught here, the error lands on your own `let` instead of on a synthesized `if` you never wrote |
 | material keys, color arities, and the required `base:` | the key surface is Aether's; and a wrong arity would otherwise fail against an array Aether synthesized, which carries no span of yours |
-| two materials of one name | measured: rustc's `E0428` puts **both** labels on the `aether!` token, because a material emits no derive and no trait bound to carry a second, localized error |
+| two fn-producing constructs of one name (`system` / `material` / `scene`, within a kind or across kinds) | measured: rustc's `E0428` puts **both** labels on the `aether!` token, because those constructs emit no derive and no trait bound to carry a second, localized error |
+| scene node heads, head keys, poses and mesh bindings | the head registry, the key tables and the binding table exist only inside the transpiler; and a refused `at` is a value that would otherwise be dropped in silence |
 
 Everything else defers. Query data is handed to the engine's `QueryData` trait
 unvalidated; trait-bound failures come from the derive's own const-asserts;
@@ -287,5 +347,7 @@ is a regression.
 - [State machines](state-machines.md) — the chart semantics the machine errors
   protect.
 - [Materials](materials.md) — the key table these messages advertise.
+- [Scenes](scenes.md) — the node heads, the two symbol tables, and the poses
+  that would otherwise be dropped.
 - Source: `crates/aether_lang/src/diag.rs`, `crates/aether_lang/src/parse.rs`,
   goldens in `crates/aether_tests/tests/ui/`.

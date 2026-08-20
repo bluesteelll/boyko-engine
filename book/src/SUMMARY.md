@@ -12,6 +12,7 @@
 - [Bundles](concepts/bundles.md)
 - [Entities](concepts/entities.md)
 - [Resources](concepts/resources.md)
+- [Assets & Handles](concepts/assets.md)
 - [Queries](concepts/queries.md)
 - [Iteration — Chunked & Parallel](concepts/iteration.md)
 - [Systems](concepts/systems.md)
@@ -53,6 +54,7 @@
 - [Systems & Plugins](aether/systems-and-plugins.md)
 - [State Machines](aether/state-machines.md)
 - [Materials](aether/materials.md)
+- [Scenes](aether/scenes.md)
 - [Diagnostics](aether/diagnostics.md)
 
 # Architecture

@@ -211,21 +211,38 @@ depends on `boyko_render` precisely so that the day `Material::new` gains a
 seventh parameter, the A5 tests stop compiling **in this repo** instead of in
 someone's game.
 
-## What A5 deliberately does not do
+## What the construct does, and does not, do itself
 
 - **No plugin registration.** A material carries no scheduling, so it needs no
   `plugin` header — and a block that has one is unaffected: the plugin collects
   sibling *systems*, never materials. Pinned by
   `a_material_needs_no_plugin_and_a_sibling_plugin_does_not_register_it`.
-- **No handles on entities.** Aether gives you `gold()`; putting the resulting
-  handle on an entity as a `MaterialHandle` is scene work, and `scene` is
-  [rung A6](overview.md#status-and-what-is-next).
+- **No handles on entities — but a sibling construct now does that for you.**
+  `material` gives you `gold()` and stops there. Rung A6 landed
+  [`scene`](scenes.md), which names a sibling material by its bare name, hoists
+  one `Assets::add` per scene, and writes the narrowed `MaterialHandle` on every
+  node that asked for it:
+
+  ```rust,ignore
+  material gold { base: (1.0, 0.72, 0.30), metallic: 1.0, roughness: 0.14 }
+
+  scene lab {
+      let block = cube(1.0);
+      mesh block at (-2.4, 0.5, -2.2) { material: gold, casts_shadow };
+  }
+  ```
+
+  A `material:` prop naming nothing is a compile error listing the materials
+  that do exist — the block's symbol table is what makes that possible, and
+  materials are the one symbol class it carries.
 - **No shading math.** `material` parameterizes the frozen `MaterialGpu` that
   the one Cook-Torrance BRDF consumes. Custom surface math belongs to
   [the shader eDSL](../rendering/shader-edsl.md), which owns its own emission
   gates. A post-v1 `shader` construct is the designed seam between them.
-- **No pre-check for cross-kind name collisions.** `material paint` beside
-  `component Paint` expands untouched — see below.
+- **No pre-check against the type-producing kinds.** `material paint` beside
+  `component Paint` expands untouched, because rustc reports that pair well. A
+  collision with another **fn-producing** construct — `system` or `scene` — is
+  Aether's, for the reason below.
 
 ## Refusals
 
@@ -251,12 +268,12 @@ error: `base` color takes 3 (rgb, alpha=1.0) or 4 (rgba) components — found 2
   |                           ^^^^^^^^^^^
 ```
 
-### The one collision rustc could not place
+### The collision rustc could not place
 
 Aether's rule is to [defer](diagnostics.md#what-aether-checks-and-what-it-leaves-alone)
 whenever the downstream layer already produces a good error. `material` found
-the one place in the whole DSL where that rule breaks down, and it took a
-measurement to see it.
+the place in the DSL where that rule breaks down, and it took a measurement to
+see it.
 
 Two materials of one name expand to two `pub fn twice()`s — and to *nothing
 else*. No derive, no trait bound, no second item. rustc has only `E0428` to
@@ -282,8 +299,14 @@ error: the first `material` of this name is here
    |              ^^^^^
 ```
 
-Cross-*kind* collisions stay with rustc, which genuinely lands them well — and
-that is now stated by a test rather than by a comment:
+Rung A6 widened that finding rather than adding a case to it. A `scene` also
+expands to a bare `pub fn`, so `scene lab` beside `material lab` is the *same*
+fault across two kinds, and it now gets the same two-span refusal:
+``` `lab` is declared twice in this aether block — the `material` and the
+`scene` both expand to a fn of that name ```.
+
+Collisions with the **type-producing** kinds stay with rustc, which genuinely
+lands them well — and that is stated by a test rather than by a comment:
 `two_materials_of_one_name_are_refused_with_both_spans` ends by asserting that
 `material paint` beside `component Paint` expands **untouched**.
 
@@ -297,6 +320,10 @@ one small parse; there is no derive behind this construct at all.
 ## See also
 
 - [Aether overview](overview.md) — the macro, the crates, and the shipped rungs.
+- [Scenes](scenes.md) — the construct that names a material and puts its handle
+  on entities.
+- [Assets & handles](../concepts/assets.md) — where `Assets::add` mints, and
+  what the 16-bit carrier is.
 - [Diagnostics](diagnostics.md) — the full error contract, including these.
 - [Data constructs](data-constructs.md) — `component`, `tag`, `bundle`, `event`.
 - [Rendering overview](../rendering/overview.md) and
