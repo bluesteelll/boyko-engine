@@ -299,7 +299,11 @@ impl<E: Event> EventBuffer<E> {
     pub(crate) fn send_one(&self, thread_index: u32, event: E) -> EcsResult<()> {
         debug_assert!(
             thread_index < self.thread_count,
-            "thread_index {thread_index} >= thread_count {}",
+            "event lane out of range: thread_index {thread_index} >= thread_count {} \
+             — the event type was preregistered with fewer lanes than the thread \
+             pool has senders (worker lanes 0..worker_count plus the reserved \
+             dispatcher lane); preregister with EventConfig::default_for(\
+             worker_count + 1) or preregister_event_default",
             self.thread_count
         );
         let lane = &self.lanes[thread_index as usize].writer;
@@ -366,7 +370,9 @@ impl<E: Event> EventBuffer<E> {
     {
         debug_assert!(
             thread_index < self.thread_count,
-            "thread_index {thread_index} >= thread_count {}",
+            "event lane out of range: thread_index {thread_index} >= thread_count {} \
+             — see send_one's message: the buffer has fewer lanes than the pool \
+             has senders; preregister with EventConfig::default_for(worker_count + 1)",
             self.thread_count
         );
         let lane = &self.lanes[thread_index as usize].writer;

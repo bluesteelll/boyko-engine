@@ -17,7 +17,10 @@ impl EcsMaster {
     ///
     /// # Errors
     ///
-    /// Forwards errors from [`EventDispatcher::preregister`].
+    /// Forwards errors from [`EventDispatcher::preregister`] — notably
+    /// `EventConfigTooFewLanes` when `cfg.thread_count` is below the
+    /// dispatcher's required lane count (on an `App`-hosted world that is
+    /// `worker_count + 1`; read it from `events().default_thread_count()`).
     #[inline]
     pub fn preregister_event<E: Event>(&mut self, cfg: EventConfig) -> EcsResult<()> {
         self.events.preregister::<E>(cfg)

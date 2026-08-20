@@ -206,10 +206,32 @@ impl App {
 
     /// Creates an `App` reusing an external pool — for sharing one
     /// [`ThreadPool`] across several `App`s.
+    ///
+    /// # Event lane wiring
+    ///
+    /// The world's event dispatcher is told the pool width here, BEFORE any
+    /// event can be preregistered: every event buffer needs one writer lane
+    /// per worker (`0..worker_count`) plus the reserved dispatcher lane
+    /// (Phase 9 EVT1), because `EventWriter::send` routes by the sending
+    /// worker's id. This makes `preregister_event_default` size buffers to
+    /// the pool automatically, and makes a hand-rolled `EventConfig` with
+    /// fewer lanes fail loudly at `preregister_event` time (main thread)
+    /// instead of tripping a lane assertion on whichever worker a sending
+    /// system happens to land on. Callers sizing a custom config should read
+    /// the requirement from `world().events().default_thread_count()`.
     pub fn with_pool(pool: Arc<ThreadPool>) -> Self {
         let builder = ScheduleBuilder::new(Arc::clone(&pool));
+        let mut world = EcsMaster::new();
+        world
+            .events_mut()
+            .set_default_thread_count(pool.worker_count() + 1)
+            .expect(
+                "invariant: worker_count is clamped to [1, MAX_WORKERS], so \
+                 worker_count + 1 <= MAX_EVENT_THREADS, and no event type can \
+                 be preregistered before App construction",
+            );
         Self {
-            world: EcsMaster::new(),
+            world,
             builder: Some(builder),
             schedule: None,
             fixed_builder: None,

@@ -1250,28 +1250,48 @@ impl Schedule {
             //   - Cell ↑Send (SEND3); SystemBox ↑Send via Box<dyn System
             //     + Send + Sync + 'static>; `CompletionCell` ↑Send.
             scope.spawn(move || {
-                // Allocation discipline (ALLOC1 / ALLOC6): set the TLS
-                // flag so allocation-restricted paths (event send/read,
-                // Time access) can debug_assert their context.
-                let _alloc_guard = boyko_threadpool::InSystemRunGuard::enter();
+                // A panic inside the system body (assert / debug_assert / bug)
+                // must NOT strand the dispatcher: `running[sys_idx]` is set and
+                // the executor loop waits for `pending_apply` to match it.
+                // `Scope::spawn`'s own wrapper catches panics and re-raises
+                // them at `Scope::drop` — but that drop runs only AFTER
+                // `executor_main_loop` returns, which it never would if this
+                // task skipped its completion push (the failure surfaced as an
+                // INFINITE HANG, and whether it fired at all depended on which
+                // worker the panicking system landed on). So: catch, publish
+                // completion unconditionally, then re-raise into Scope's
+                // wrapper so `Schedule::run` fails loudly on the dispatcher at
+                // frame end. `catch_unwind` costs nothing on the non-panic
+                // path (landing-pad table entry only, no executed code).
+                //
+                // `AssertUnwindSafe` carries the same justification as the
+                // identical wrapper in `Scope::spawn` immediately above this
+                // body on the call stack: on the panic path the world state is
+                // abandoned to the propagating panic, never re-observed as if
+                // consistent.
+                let body_result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        // Allocation discipline (ALLOC1 / ALLOC6): set the TLS
+                        // flag so allocation-restricted paths (event send/read,
+                        // Time access) can debug_assert their context. RAII —
+                        // the guard drops when this closure exits, normally OR
+                        // by unwind, so it is always cleared BEFORE completion
+                        // is published below (closing the SP1' window for the
+                        // future force_alloc CI mode).
+                        let _alloc_guard = boyko_threadpool::InSystemRunGuard::enter();
 
-                // SAFETY (S1 / SCH3): see outer SAFETY block. The cell
-                //   copy carries write-capable provenance; aliasing is
-                //   enforced upstream by the conflict graph. Method
-                //   receivers force whole-`ptrs` capture (sidestepping
-                //   Rust 2021 disjoint capture which would otherwise
-                //   reduce the closure's `Send` bound to per-field
-                //   `*const T` Send-ness).
-                unsafe {
-                    let system_slot = ptrs.system_slot(sys_idx.0 as usize);
-                    (*system_slot).system.run_unsafe(cell_copy);
-                }
-                // Drop the guard BEFORE publishing completion so a
-                // dispatcher that observes `pending_apply == running`
-                // cannot still find a worker inside the system body
-                // (closing the SP1' window for the future force_alloc
-                // CI mode).
-                drop(_alloc_guard);
+                        // SAFETY (S1 / SCH3): see outer SAFETY block. The cell
+                        //   copy carries write-capable provenance; aliasing is
+                        //   enforced upstream by the conflict graph. Method
+                        //   receivers force whole-`ptrs` capture (sidestepping
+                        //   Rust 2021 disjoint capture which would otherwise
+                        //   reduce the closure's `Send` bound to per-field
+                        //   `*const T` Send-ness).
+                        unsafe {
+                            let system_slot = ptrs.system_slot(sys_idx.0 as usize);
+                            (*system_slot).system.run_unsafe(cell_copy);
+                        }
+                    }));
 
                 // Phase 9.3c: publish completion through the `CompletionCell`.
                 // `push` / `pending_fetch_add` are SAFE interior-mutable `&self`
@@ -1288,6 +1308,15 @@ impl Schedule {
                 // (plan §5.4.5.1 diagram). Every byte the body wrote becomes
                 // visible to the dispatcher before it reads pending == target.
                 ptrs.completion.pending_fetch_add(Ordering::Release);
+
+                // Re-raise AFTER the completion is published: the frame's
+                // remaining systems still run to the apply barrier, and the
+                // first payload is re-raised from `Scope::drop` when the
+                // frame's install scope joins — a loud test failure instead of
+                // a silent hang.
+                if let Err(payload) = body_result {
+                    std::panic::resume_unwind(payload);
+                }
             });
 
             dispatched += 1;

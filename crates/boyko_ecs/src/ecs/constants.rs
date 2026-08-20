@@ -371,9 +371,14 @@ pub const INLAND_MAX_SLAB: usize = 16 * 1024 * 1024;
 // Event dispatch configuration
 //
 
-/// Maximum number of worker threads that can send events concurrently.
-/// Controls the number of per-type writer lanes in `EventBuffer<E>`.
-pub const MAX_EVENT_THREADS: u32 = 64;
+/// Maximum number of writer lanes an `EventBuffer<E>` may carry.
+///
+/// Derived from the pool, not chosen independently: a full-width pool has
+/// `MAX_WORKERS` (64) worker lanes plus the reserved dispatcher lane at
+/// index `worker_count` (Phase 9 EVT1), so the widest valid lane count is
+/// `MAX_WORKERS + 1` = 65. Tying the constant to the pool keeps the two
+/// from drifting apart if `MAX_WORKERS` ever changes.
+pub const MAX_EVENT_THREADS: u32 = boyko_threadpool::MAX_WORKERS as u32 + 1;
 
 /// Maximum events per lane per frame in `EventBuffer<E>`.
 /// Bounds the per-lane write buffer allocation at preregister time.

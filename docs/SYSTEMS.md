@@ -1582,8 +1582,14 @@ are rejected at compile time (`ZstCheck`).
   (436, per-frame swap of write lanes into the read buffer).
 - `EventBuffer<E>` — split cache-line lanes (`#[repr(C)]` + `CachePadded`,
   Phase 12 false-sharing fix C3): `frame_event_count` on CL0; reader fields on
-  CL1; per-thread write lanes on CL2+. `MAX_EVENT_THREADS = 64`,
+  CL1; per-thread write lanes on CL2+. `MAX_EVENT_THREADS = MAX_WORKERS + 1
+  = 65` (64 worker lanes + the reserved dispatcher lane),
   `MAX_EVENT_CAPACITY = 16384` (constants).
+- Lane-width gate — `EventDispatcher::preregister` rejects any config with
+  fewer lanes than `default_thread_count` (`EventConfigTooFewLanes`);
+  `App::with_pool` wires `worker_count + 1` in before any registration, so an
+  under-provisioned config fails on the main thread at registration time
+  instead of tripping a worker-side lane assertion by scheduling luck.
 - Events sit OUTSIDE the conflict graph (Option A) — parallel writers of the
   same `E` are OK via per-lane TLS routing (strictly more permissive than Bevy).
 
@@ -1818,7 +1824,7 @@ Bundle, SystemSet};`.
 | `POOL_MIN_SLAB` / `POOL_MAX_SLAB` | 64 KiB / 64 MiB | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):90/97 (Phase X.I) |
 | `DEFAULT_INLAND_RESERVE` | 1 GiB (syscall arms) / 16 MiB (fallback) | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):237/244 (Phase X.G) |
 | `INLAND_MIN_SLAB` / `INLAND_MAX_SLAB` | 256 KiB / 16 MiB | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):250/255 (Phase X.G) |
-| `MAX_EVENT_THREADS` / `MAX_EVENT_CAPACITY` | 64 / 16384 | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):263/267 |
+| `MAX_EVENT_THREADS` / `MAX_EVENT_CAPACITY` | 65 (`MAX_WORKERS + 1`) / 16384 | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs) |
 | `MAX_COMPONENTS` | 512 | [component/component_registry.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry.rs):50 |
 | `MAX_EVENTS` | 256 | [events/event_registry.rs](../crates/boyko_ecs/src/ecs/core/events/event_registry.rs):51 |
 | `MAX_ARCHETYPES` | 1024 | [iters/archetype_bit_set.rs](../crates/boyko_ecs/src/ecs/core/iters/archetype_bit_set.rs):7 |

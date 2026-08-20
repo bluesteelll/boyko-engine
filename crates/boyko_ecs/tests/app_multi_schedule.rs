@@ -16,7 +16,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use boyko_ecs::ecs::core::events::event::Event;
-use boyko_ecs::ecs::core::events::event_config::EventConfig;
 use boyko_ecs::ecs::core::events::event_registry::register_event;
 use boyko_ecs::ecs::core::events::parameters::parameters::Parameters;
 use boyko_ecs::ecs::core::events::participants::participants::{ParticipantInfo, Participants};
@@ -213,8 +212,11 @@ fn gated_event_app<E: Event + HasValue + Send + Sync + 'static>(
     let c = Arc::clone(&cnt);
 
     let mut app = App::with_pool(serial_pool());
+    // Lane count derived from the pool by the App wiring (1 worker +
+    // dispatcher ⇒ 2 lanes) — never hand-coded, so a pool-width change
+    // cannot silently under-provision the buffer.
     app.world_mut()
-        .preregister_event::<E>(EventConfig::default_for(2).expect("config"))
+        .preregister_event_default::<E>()
         .expect("preregister");
     app.world_mut().insert_resource(SendBudget(0));
 
@@ -328,8 +330,9 @@ fn every_frame_policy_swaps_each_frame() {
     let r = Arc::clone(&recv);
 
     let mut app = App::with_pool(serial_pool());
+    // Lane count derived from the pool by the App wiring (see gated_event_app).
     app.world_mut()
-        .preregister_event::<FrameEvt>(EventConfig::default_for(2).expect("config"))
+        .preregister_event_default::<FrameEvt>()
         .expect("preregister");
     app.world_mut().insert_resource(SendBudget(0));
     app.set_event_update_policy(EventUpdatePolicy::EveryFrame);

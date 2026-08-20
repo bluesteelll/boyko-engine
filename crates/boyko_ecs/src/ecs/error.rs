@@ -66,6 +66,23 @@ pub enum EcsError {
         reason: &'static str,
     },
 
+    /// `preregister` received a config with fewer writer lanes than this
+    /// world's thread pool requires (worker lanes `0..worker_count` plus the
+    /// reserved dispatcher lane at index `worker_count` — Phase 9 EVT1).
+    ///
+    /// Without this check the hazard surfaces only at `send` time, as a
+    /// lane-index assertion on a WORKER thread whose firing depends on which
+    /// worker the sending system happens to land on — scheduling luck.
+    EventConfigTooFewLanes {
+        /// Name of the event type (for diagnostics).
+        type_name: &'static str,
+        /// The number of lanes the rejected config carried.
+        lanes: u32,
+        /// The minimum lane count this dispatcher requires
+        /// (`worker_count + 1` when wired to a pool via `App`).
+        required: u32,
+    },
+
     /// Phase 12.5 Opt-A2 (SBO17): a `spawn_batch` call exceeded the
     /// hard-coded per-call cap (`MAX_BATCH_HINT = 8 192`).
     ///
@@ -158,6 +175,16 @@ impl std::fmt::Display for EcsError {
             }
             EcsError::InvalidEventConfig { reason } => {
                 write!(f, "invalid EventConfig: {}", reason)
+            }
+            EcsError::EventConfigTooFewLanes { type_name, lanes, required } => {
+                write!(
+                    f,
+                    "event type '{}' preregistered with {} writer lanes, but this \
+                     world's thread pool requires at least {} (one lane per worker \
+                     plus the reserved dispatcher lane); use \
+                     EventConfig::default_for({}) or preregister_event_default",
+                    type_name, lanes, required, required
+                )
             }
             EcsError::SpawnBatchExceedsCapacity { requested, max } => {
                 write!(

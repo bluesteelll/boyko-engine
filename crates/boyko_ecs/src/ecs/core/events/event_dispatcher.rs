@@ -185,9 +185,46 @@ impl EventDispatcher {
     }
 
     /// Returns the validated default thread count.
+    ///
+    /// When the world is hosted by an `App`, this is `worker_count + 1` (one
+    /// lane per worker plus the reserved dispatcher lane — Phase 9 EVT1), so
+    /// callers building a custom [`EventConfig`] can size `thread_count` from
+    /// it instead of guessing the pool width.
     #[inline]
     pub fn default_thread_count(&self) -> u32 {
         self.default_thread_count
+    }
+
+    /// Sets the default/required lane count used by
+    /// `preregister_event_default` and enforced as a minimum by
+    /// [`preregister`](Self::preregister).
+    ///
+    /// `App::with_pool` calls this with `worker_count + 1` right after world
+    /// construction so that (a) default preregistration sizes every buffer to
+    /// the pool automatically and (b) an under-provisioned custom config
+    /// fails LOUDLY on the main thread at registration time — instead of
+    /// firing `EventBuffer::send_one`'s lane assertion on whichever WORKER a
+    /// sending system happens to land on (which the executor surfaced as an
+    /// infinite hang before the completion-publication fix, and whose firing
+    /// depended on scheduling luck).
+    ///
+    /// # Errors
+    ///
+    /// - `InvalidEventConfig` — if `thread_count` is out of range, or if any
+    ///   event type is already registered (an earlier registration would have
+    ///   escaped the lane-width validation, so late reconfiguration is
+    ///   rejected rather than silently trusted).
+    pub fn set_default_thread_count(&mut self, thread_count: u32) -> EcsResult<()> {
+        EventConfig::default_for(thread_count)?;
+        if !self.registered_mask.is_empty() {
+            return Err(EcsError::InvalidEventConfig {
+                reason: "set_default_thread_count called after an event type was \
+                         preregistered; the lane-width requirement must be set \
+                         before any preregistration",
+            });
+        }
+        self.default_thread_count = thread_count;
+        Ok(())
     }
 
     /// Registers event type `E` on this dispatcher with the given config.
@@ -199,6 +236,14 @@ impl EventDispatcher {
     ///
     /// - `EventAlreadyRegistered` — if `E` was already registered.
     /// - `EventNotRegistered` — if `E::event_id() as usize >= MAX_EVENTS`.
+    /// - `EventConfigTooFewLanes` — if `cfg.thread_count` is below this
+    ///   dispatcher's [`default_thread_count`](Self::default_thread_count).
+    ///   Every worker lane (`0..worker_count`) plus the reserved dispatcher
+    ///   lane must exist in every buffer, because `EventWriter::send` routes
+    ///   by the sending WORKER's id — an under-provisioned buffer fails on a
+    ///   worker thread only when scheduling happens to land a sender on a
+    ///   high-id worker. This check moves that failure to the main thread,
+    ///   at registration time, deterministically.
     /// - `InvalidEventConfig` — if the allocation size overflows.
     /// - `EventBufferFull` — never returned here; included via `EcsResult`.
     ///
@@ -216,6 +261,13 @@ impl EventDispatcher {
         }
         if self.registered_mask.get(id) {
             return Err(EcsError::EventAlreadyRegistered { type_name: type_name::<E>() });
+        }
+        if cfg.thread_count < self.default_thread_count {
+            return Err(EcsError::EventConfigTooFewLanes {
+                type_name: type_name::<E>(),
+                lanes: cfg.thread_count,
+                required: self.default_thread_count,
+            });
         }
 
         let buffer = Box::new(EventBuffer::<E>::new(cfg)?);
@@ -805,9 +857,53 @@ mod tests {
     fn event_config_bounds() {
         assert!(EventConfig::new(1, 64).is_ok());
         assert!(EventConfig::new(0, 64).is_err());
-        assert!(EventConfig::new(65, 64).is_err());
+        // MAX_EVENT_THREADS = MAX_WORKERS (64) + 1 dispatcher lane = 65.
+        assert!(EventConfig::new(65, 64).is_ok());
+        assert!(EventConfig::new(66, 64).is_err());
         assert!(EventConfig::new(1, 0).is_err());
         assert!(EventConfig::new(1, 16385).is_err());
+    }
+
+    /// Lane-width gate: a config narrower than the dispatcher's required
+    /// lane count is rejected LOUDLY at registration time (main thread),
+    /// never deferred to a worker-side lane assertion.
+    #[test]
+    fn preregister_below_required_lanes_errors() {
+        register_ev_a();
+        let mut d = EventDispatcher::new(1).unwrap();
+        d.set_default_thread_count(3).unwrap();
+
+        let result = d.preregister::<EvA>(EventConfig::new(2, 64).unwrap());
+        assert!(
+            matches!(
+                result,
+                Err(EcsError::EventConfigTooFewLanes { lanes: 2, required: 3, .. })
+            ),
+            "2 lanes under a 3-lane requirement must be rejected, got {result:?}"
+        );
+
+        // Exactly the required width is accepted (and wider would be too).
+        d.preregister::<EvA>(EventConfig::new(3, 64).unwrap())
+            .expect("exact-width config must register");
+    }
+
+    /// `set_default_thread_count` validates its input and refuses to run
+    /// after any preregistration (which would have escaped the gate).
+    #[test]
+    fn set_default_thread_count_validates_and_orders() {
+        let mut d = EventDispatcher::new(1).unwrap();
+        assert!(d.set_default_thread_count(0).is_err());
+        assert!(d.set_default_thread_count(66).is_err());
+        d.set_default_thread_count(65).unwrap();
+        assert_eq!(d.default_thread_count(), 65);
+
+        register_ev_a();
+        let mut d2 = EventDispatcher::new(1).unwrap();
+        d2.preregister::<EvA>(EventConfig::new(1, 4).unwrap()).unwrap();
+        assert!(
+            d2.set_default_thread_count(2).is_err(),
+            "raising the requirement after a registration must fail loudly"
+        );
     }
 
     /// Test #2: preregistering the same type twice errors.
