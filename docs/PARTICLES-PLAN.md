@@ -81,7 +81,7 @@ A GPU-resident particle system where per-particle state never touches the CPU an
 |---|---|---|
 | VRAM at that CAP (92 B/particle) | 9.2 MB | 92 MB |
 | Host→device per frame | ≤ 16 KB; **0 B when `total_spawn == 0`** | same |
-| GPU kickoff+emit+sim | **≤ 80 µs** | ≤ 700 µs |
+| GPU kickoff+emit+sim | **≤ 128 µs** *(was ≤ 80 — re-derived, see below)* | **≤ 1.23 ms** *(was ≤ 700 µs)* |
 | GPU draw (fill-dependent) | **≤ 250 µs** | ≤ 2.5 ms |
 | CPU per frame (≤256 emitters) | ≤ 15 µs | ≤ 15 µs |
 | CPU allocations per frame | **0** | **0** |
@@ -93,6 +93,58 @@ A GPU-resident particle system where per-particle state never touches the CPU an
 | `goldens/PINS.toml` (35 pins) when `mode == Off` | **byte-identical by construction** | same |
 
 Calibration (`PARTICLES-RESEARCH.md` §Scale): Team Nutshell 99 720 particles = 0.05 ms sim + 0.17 ms draw, RTX 4070, 64 B/particle; Brian-Jiang >1M @60 fps, GTX 1080.
+
+#### The compute budget is a FORMULA, not a blessed constant *(re-derived 2026-08-20 against gate #17's measurement — architect's ruling)*
+
+```
+kickoff + emit + sim  ≤  9 µs  +  1.10 × (128 B × N) / 121 GB/s
+```
+
+⇒ **≤ 128 µs at 100k** (the formula at the measured 102 400-alive cell; at exactly 100 000 it gives
+125 µs) and **≤ 1.23 ms at 1M**. The old ≤ 80 µs / ≤ 700 µs pair missed by 1.67×, and the miss
+decomposes into two terms of which only the first is arithmetic:
+
+* **Term A — 1.39×, an arithmetic error.** The old budget was scaled off **92 B/particle**, which is
+  the **VRAM RESIDENCY** figure from D2's own summation (48 + 32 + 4 + 8) and sits in the row
+  labelled *"VRAM at that CAP"* above. The sim's TRAFFIC is 48 R + 48 W on `ParticleSim` (a
+  read-modify-write) + 32 W on `ParticleRender` = **128 B/particle/frame**; 128/92 = 1.39. *A
+  read-modify-write record costs twice its residency.*
+* **Term B — 1.20×, and it was UNSTATED, hence uncheckable.** The plan never wrote down an assumed
+  GB/s. Measured on this part at gate #17: **121 GB/s effective**. 1.39 × 1.20 = 1.67, which closes
+  against the observed ratio.
+
+**The two constants are a self-consistent PAIR and move together**: the 121 GB/s was itself derived
+using the same 128 B, on this part (RTX 3060 Laptop). On other hardware the constant moves and the
+formula does not. The §Perf traffic table's sim row prices 136 B — the same 128 B plus the 8 B of
+alive/dead list words — which is +6 %, inside the 1.10 margin the formula carries explicitly so that
+the margin is visible rather than baked in.
+
+Two facts must sit beside the re-derivation or it reads as budget-fitting:
+
+1. **The 1M row missed in BOTH of its modes**, so the miss is independent of the bimodality §Gate
+   #17 records: even the fast ~805 µs mode gives an 814 µs composite, 1.16× the old ≤ 700 µs.
+2. **The 10 240 row is NOT an overspend and must not be "fixed".** 1.700 ns/particle there is the
+   fixed launch cost still amortising (it falls to ~1.0 ns/particle from 65 536 up); **no budget was
+   ever stated at 10k**, and the formula's 9 µs fixed term does not model the launch-latency regime
+   below ~65k.
+
+**It is also a real overspend, and there are two ranked levers.** 121 GB/s is 36–42 % of this part's
+peak (192-bit GDDR6, 288–336 GB/s), low for a streaming RMW where 60–80 % is usual.
+
+* **Lever 1 — OCCUPANCY. Free, ranked first, and rung P1b's second deliverable.** Gate #17's §5
+  anomaly is its first measurement: a LARGER, higher-register kernel runs the same sim **5.6 %
+  faster** on a byte-identical scene, which is direct evidence that the sim is memory-system
+  OVER-subscribed — fewer concurrent waves raising achieved bandwidth by reducing thrash.
+* **Lever 2 — BYTES. 12.5 %, structural, and it CONTRADICTS a shipped decision, so it is FILED, not
+  scheduled.** `size0_invlife` + `effect_flags` (8 B) are read-only per frame and `cached_field_d`
+  (4 B) is write-dead in the base compile (the shipped shader's own comment says so). A hot/cold
+  split turns 96 B of RMW into 64 B RMW + 16 B RO = **−16 B of 128 = −12.5 %** — but that
+  contradicts **D2/R2's "one fully-consumed 64 B line per particle"**, which is *why* the record is
+  AoS at all. **Filed as a P3 candidate with the 12.5 % attached** so it is not re-litigated from
+  scratch, and ordered **after P2**: P2's radix changes the alive-list access pattern, and deciding
+  AoS/SoA before knowing whether the gather became sequential would decide it twice.
+* **Explicitly NOT a lever: the render record.** The A/B stays in gate #17, but the arithmetic
+  already says it nets −16 B while trading a sequential write for a 48 B VS gather.
 
 ---
 
@@ -912,9 +964,164 @@ Unconditional gate on every rung: all 35 `goldens/PINS.toml` hashes unchanged; `
 14. **`particle_edsl_sync`:** per-leaf `*_matches_edsl_emit`; `particle_*_spv_byte_identical` × **8** *(was written × 5 for P0's five base modules; the two `-D DEPTH_LINEAR` draw stages landed at P2 item 1 and the `-D SDF_COLLIDE` sim at P1, and every one of them is byte-gated — the count is the artifact census `every_committed_particle_artifact_has_a_row` enforces, so it is a number that must move with the directory)*; `LocalSize == 256`; an `OpAtomicIAdd` census on `particle_sim` (exactly the wave-leader sites, **and no `OpAtomicUMax`** — M1 deleted the mirror) **and zero atomics in `particle_emit`**; **no `OpFDiv` in `particle_rot_advance`'s generated span** (M7).
 15. **OOB test (D15/R8):** `MAX_EMITTERS + 1` / `MAX_EFFECTS + 1` — writes stay in bounds, `clamped_spawns` counts the shortfall exactly.
 16. **New golden `particle_additive`** — one emitter, fixed seed, fixed `timestep`, frame 30, **spatially separated particles (no inter-particle overdraw)** so blend order is irrelevant and the pin is bit-reproducible. The constraint is stated in the pin's own doc. Owner-blessed.
-17. **Measurements reported:** kickoff/emit/sim/draw µs at 10k/100k/1M against R12; **A/B render record vs direct gather** with the corrected break-even derivation; **A/B wave-aggregated vs naive atomics** at 1M; **A/B 4-vertex instanced vs `vid/6`**; the 64-substep worst-case frame cost.
+17. **Measurements reported:** kickoff/emit/sim/draw µs at 10k/100k/1M against R12 — **TAKEN 2026-08-20, see "Gate #17 as measured" below**; **A/B render record vs direct gather** with the corrected break-even derivation; **A/B wave-aggregated vs naive atomics** at 1M; **A/B 4-vertex instanced vs `vid/6`**; the 64-substep worst-case frame cost.
+    * **⚠️ The `ZONE_PARTICLE_SIM` armed-vs-disarmed delta is NOT an instrument for the skip rate and must not be reported as one.** *(Ruled 2026-08-20 after the measurement refuted it.)* Isolating the module on a byte-identical scene (`BOYKO_PARTICLE_COLLIDE=1` **without** `BOYKO_PARTICLE_SDF=1`) gives **−4 096 ns / −5.6 % at 65 536** and **−3 584 ns with the run order reversed** — i.e. **the delta's dominant term has the OPPOSITE SIGN to the field walk and is 4–6× the row's own resolution**. What the delta still supports is an upper bound at low density: **< 12.5 % of SIM at 1 344 alive, < 8.3 % at 10 752, < 5.9 % at 10 240 saturated, and NOTHING at ≥ 65 536** — which is exactly where the skip is designed to pay. The 33 % → 29 % → below-resolution fall is **interpretation consistent with the shader's wave-coherence statement, not measurement**. **Rule: the skip rate is measured by rung P1b's device-side per-wave counter (`-D SDF_COLLIDE_STATS`), never by a timing delta. Until P1b lands, no skip-rate figure may be quoted.**
 
 **Limitations recorded:** LDR additive clipping/quantization (D7/F2); **fixed-rate stepping without interpolation** (M6 — above 64 Hz most frames step zero times); TAA ghosting until P3.
+
+#### Gate #17 as measured (2026-08-20) — 213 legs, four sessions
+
+**Protocol.** Release build, `BOYKO_RENDER_PATH=vb` (the pinned path), fixture `particle_lab.rs` +
+`particle_scene/mod.rs`, instrument `BOYKO_VB_ZONE=1` + `BOYKO_PROFILE_ARTIFACT` reading zone ids
+**48/49/50/51** = KICKOFF/EMIT/SIM/DRAW. `BOYKO_VB_BENCH_FRAMES=1` ⇒ `VB_BENCH_WARMUP(20) + 1` =
+**21 timed frames per leg** (`n = 21` in every zone row), **3 legs per cell**, **medians** reported.
+**213 profiling artifacts / 239 process launches**, every leg running the SAME prebuilt executable so
+no leg straddles a re-link. Device: RTX 3060 Laptop.
+
+**Resolution `R`, certified this session from three nulls, INHERITED FROM NOTHING** (not DP6-0's
+4 608 ns, not DP6-0b's 5 120, not DP2's 24 576):
+
+| Row | `R` | Basis |
+|---|---|---|
+| `ZONE_PARTICLE_SIM` (50) | **1 024 ns** | N1 (scene null, `ctrl − base`) = 0 ns at all 8 cells; N2 (position null, two identical runs back to back) = 0 ns; one lattice step |
+| `ZONE_PARTICLE_EMIT` (49) | **1 024 ns** | same |
+| `ZONE_PARTICLE_KICKOFF` (48) | **1 792 ns** | N3, the row's own worst 3-leg dispersion |
+| `ZONE_PARTICLE_DRAW` (51) | 1 024 ns **within one scene only** | N2 = 0 ns, but N1 fails catastrophically — see "the instrument findings" below |
+
+Every EMIT/SIM/DRAW median is an exact multiple of 1 024 ns while KICKOFF resolves at 32 ns, so the
+1 024-ns lattice is a property of the DISPATCH, not of the timer.
+
+**The rows gate #17 asks for** — pool-SATURATED cells (`rate = capacity/4` ⇒ full pool from frame 3,
+17 of the 21 timed frames saturated), base arm, alive counts confirmed by readback:
+
+| alive | KICKOFF | EMIT | **SIM** | **SIM ns/particle** | DRAW |
+|---|---|---|---|---|---|
+| 10 240 | 4 960 ns | 3 072 ns | **17.4 µs** | 1.700 | 37.9 µs |
+| 65 536 | 5 120 ns | 3 200 ns | **72.7 µs** | 1.109 | 106.5 µs |
+| 102 400 | 4 768 ns | 3 072 ns | **102.4 µs** | 1.000 | 158.7 µs |
+| 1 048 576 | 5 888 ns | 3 072 ns | **1 110 µs** | 1.059 | 1 404 µs |
+
+* **KICKOFF is flat** at ~4.8–6.1 µs with no resolvable density dependence — the architectural claim
+  the row exists to test (a one-thread pass does not scale with particle count) HOLDS, though the row
+  is INCONCLUSIVE by clause 5(1) at 22 of 32 arm-cells because its leg dispersion (up to 33.5 %)
+  exceeds its cross-cell variation.
+* **EMIT collapses to ~3.1 µs at every saturated cell, and that is correct**: with `dead_count == 0`
+  the device clamps `real_emit` to 0, kickoff writes a zero-group indirect block and the emit
+  dispatch covers nothing. **The EMIT row is therefore NOT a monotone function of the requested
+  spawn count** and must not be read as one.
+* **Traffic check:** 128 B of state per particle × 1 048 576 / 1 110 µs = **121 GB/s effective** — the
+  sim is bandwidth-bound at the top of the ladder, exactly as the plan's own model says, and this is
+  the number the re-derived budget formula (§Goal) is built on.
+
+**Clause-5 conformance.**
+
+| Clause | Result |
+|---|---|
+| 5(2) — every gated zone `Measured`, `lost == 0`, `torn == 0` | **PASS on 213/213 legs**: `census_measured = 315` (21 frames × 15 zones), `census_lost = 0`, `census_torn = 0`, `census_not_bracketed = 0` on every artifact |
+| 5(3) — `OrderCensus.violations == 0` **and** `frames_checked != 0` | **PASS on 213/213**: `frames_checked = 21`, `violations = 0`, `frames_skipped = 0` |
+| 5(4) — arming / expectation-table half | **PASS**: byte-identical headers across all four arms (`workload_tag = visibilitybuffer_both#7d77abfd`, `regimes = none`, `modes = off`, `regime_n_distinct = 1`, `present_mode = fifo`, `instrument = live`) |
+| 5(4) — derived-row half (`n ≥ 0.9 × frames_checked`) | **N/A — and said as N/A rather than as a pass.** The particle family declares no derived row (`reduce::VB_DERIVED_*` are VB-only), so there is no `n` to gate. The `[order]` block's 21/0/0 is the VB chain's verdict, not the particle rows'. *(The campaign's own vacuity lesson: a clause with nothing to check is not a clause that passed.)* |
+| 5(1) — 3-leg relative spread ≤ 10 % | **per cell.** Two classes fail — below |
+
+**The two INCONCLUSIVE classes, with their reasons.**
+
+1. **`ZONE_PARTICLE_SIM` at 1 048 576 is BIMODAL** — legs land at either **~805 µs** or **~1 110 µs**,
+   never between (base e1m: `[804 864, 1 108 000, 1 110 688]`; standalone probes gave 803 840 and
+   1 110 496 on identical configs). A 38 % step, which puts **every 1M row over the 10 % bar ⇒ every
+   1M row fails clause 5(1)**. Cause not established; a device power/clock-residency state is the
+   obvious suspect and was NOT confirmed.
+2. **The low-alive collision cells fail on SPREAD.** Every cell of the primary (non-saturated)
+   collision axis is over the bar on at least one side — coll spread 16.7 % at 21 alive, all three
+   arms over at 168, base/ctrl 12.5 % at 1 344, ctrl 41.7 % / coll 33.3 % at 10 752. What survives as
+   evidence is only that sign and magnitude reproduce across two sessions with different run orders
+   (+2 048 / +2 048 / 0 / {0, +1 024} ns).
+
+**Against the budget.** 102.4 µs at 102 400 alive is **1.28× the plan's original ≤ 80 µs budget and
+1.7× its 0.06 ms point estimate**; DRAW is 158.7 µs at the same cell; 1M gives 1.11 ms. **DISPOSITION:
+the budget was RE-DERIVED** — see §Goal, "The compute budget is a FORMULA, not a blessed constant":
+the miss is 1.39× arithmetic (the old budget scaled off the 92 B **residency** figure where 128 B of
+RMW **traffic** was required) × 1.20× an unstated bandwidth assumption. Under the re-derived formula
+the measured composites pass (110.2 µs against ≤ 128 µs at 102 400; 1.119 ms against ≤ 1.23 ms at
+1M), and the two levers on the residual overspend are ranked there.
+
+**The collision-axis anomaly (A1) — a strict superset of work measures FASTER.** At 65 536 alive the
+`-D SDF_COLLIDE` sim runs **−12 288 ns / −20.3 %** against the control, and that cell **passes clause
+5(1) on both sides** (spreads 0.0 % and 5.1 %) — it is the one collision cell that passes every gate,
+and it carries the anomaly. Four explanations are **refuted by measurement**, not by argument:
+
+| Refuted explanation | How |
+|---|---|
+| the arms process different particle counts | `particle_counters_readback` at every saturated cell, all three arms: `alive_cur = alive_next = capacity`, `dead = 0`, `real_emit = 0` identically |
+| run ORDER / warm-up (session 1 ran the arms in blocks) | session 2 re-ran everything with the arms INTERLEAVED inside each leg; sign and magnitude reproduce (−12 288 ns both) |
+| position in the back-to-back launch sequence | the position null: two IDENTICAL base runs back to back, 4 legs each ⇒ `slot2 − slot1 = **+0 ns**` on SIM and on DRAW |
+| the scene's own extra GPU load (the slab arms the marcher) | the scene null reads `ctrl − base = **0 ns** on SIM` at all 8 cells while the same change moves DRAW by up to 370 µs — the SIM bracket is insensitive to whole-frame load |
+
+**The decisive isolation:** `BOYKO_PARTICLE_COLLIDE=1` **without** `BOYKO_PARTICLE_SDF=1` — a
+byte-identical scene, an empty edit list, zero contact radius, and the ONLY difference is which
+compiled kernel the sim dispatch runs. **−4 096 ns / −5.6 % at 65 536**, and **−3 584 ns with the
+order reversed** (modonly first, base second). Same sign, same magnitude, opposite order.
+
+**The one surviving hypothesis, stated AS unverified:** at ≥ 65 536 the sim is bandwidth-bound
+(121 GB/s), and the SDF variant is a larger kernel with a larger register footprint ⇒ lower
+occupancy ⇒ **for a bandwidth-bound kernel, lower occupancy can RAISE achieved bandwidth** by
+reducing memory-system over-subscription. Consistent with the sign, with the effect appearing only at
+and above 65 536, and with its absence at 10 240 and below (where the kernel is launch-latency-bound
+and the extra instructions cost **+1 024 ns** instead). **No occupancy or register figure was taken —
+this instrument cannot produce one on this host.** Rung **P1b** produces it, and it is Lever 1's own
+number (§Goal).
+
+**The skip rate: UPPER BOUNDS only.** `< 12.5 %` of SIM at 1 344 alive, `< 8.3 %` at 10 752, `< 5.9 %`
+at 10 240 saturated — and **nothing at ≥ 65 536**, where the measured delta is negative (A1) and where
+the skip is designed to pay. The **33 % → 29 % → below-resolution** fall as density rises is
+**interpretation consistent with the shipped shader's own wave-coherence statement** (*"the saving is
+realized per WAVE, not per lane"*), **not a measurement** — no per-wave counter exists yet. See gate
+item 17's rule: **no skip-rate figure may be quoted until P1b lands.**
+
+**The pool RAMP, recorded because it changes how a future measurer must read the primary ladder.**
+Nothing retires inside the window (`LAB_LIFETIME` = 8 s against 21 substeps × 1 ms = **21 ms** of
+virtual time), and the burst is per frame, so the primary ladder's alive count **RAMPS 0 → 21×rate
+across the measured window** and a cell's median-of-21-frames is the value at the MEDIAN FRAME,
+i.e. ≈ 11×rate alive — **not a steady-state density**. That is a property of the fixture, not of the
+instrument. The **saturated extension ladder** (`rate = capacity/4` ⇒ full pool from frame 3, 17 of 21
+frames saturated) is what removes the ramp and is what delivers the 10k/100k/1M rows above. **A future
+measurer must not read the primary ladder's rows as steady-state.**
+
+**CAP facts, confirmed by readback rather than assumed.** The fixture's `BOYKO_PARTICLE_CAPACITY`
+default is **65 536**, a quarter of the shipping `PARTICLE_DEFAULT_CAPACITY = 262 144`; it is
+boot-frozen and bounds memory only. `BOYKO_PARTICLE_RATE` is `ParticleEmitter::burst`, re-armed every
+frame, folded into ONE `EmitRequestGpu` with **no per-frame spawn cap** other than the device's own
+`real_emit ≤ dead_count` clamp — so **512 particles/frame does NOT exceed what the emitter can mint**
+(measured: `real_emit = 512`, `clamped = 0`). `clamped_spawns` reaches 4 456 448 at the 1M cell and the
+partition still holds exactly (`alive + dead == CAP`, `dead == 0`) at every cell: **gate #7's
+arithmetic survives a 4.4-million-spawn refusal.**
+
+**The instrument findings this measurement produced.**
+
+* **`ZONE_PARTICLE_DRAW` was readable only WITHIN one scene — FIXED in this same commit, and the fix
+  is MEASURED.** Adding the `SdfPrimitive` slab moved the row by **+74 752 ns** (and **+369 664 ns**
+  at 102 400) for work the draw does not do: the `TOP_OF_PIPE` drain absorption `gpu_zone.rs` warns
+  about, now measured on this family. The id is **restamped to `BOTTOM_OF_PIPE`** (the DP6-0b
+  precedent; cheaper here because no published number is defined against id 51's `TOP` stamp). Re-take
+  at the 65 536 cell, 3 legs per arm, after the restamp: **base DRAW 93 184 ns** (was 106 496,
+  **−12.5 %** — the absorbed drain leaving the bracket) and **ctrl − base = +3 072 ns / +3.2 %**,
+  against **+76 800 ns / +72 %** before it: **96 % of the cross-scene absorption is gone**, with a
+  resolvable 3-step residual that is stated rather than rounded to zero. Both arms' leg spreads are
+  under the 10 % bar (5.5 % / 2.1 %), and `measured = 315`, `lost = torn = not_bracketed = 0`,
+  `frames_checked = 21`, `violations = 0` on all six legs. KICKOFF/EMIT/SIM are unmoved (SIM 73 728 on
+  both arms) — they were already `BOTTOM`, which is the control. **The DRAW column above is void as a
+  baseline across the restamp by construction** — the same treatment DP6-0's four cells got.
+* **Every gate-#17 run is a RED TEST BY CONSTRUCTION.** The zone budget returns from `app.run()`
+  before the frame-30 capture, so the artifact is written and the process then fails on the missing
+  dump. Expected — but it means a harness that reads exit codes cannot tell this red from a real one.
+  Filed in `docs/OPEN-QUESTIONS.md` (2026-08-20).
+* **1 windowing flake in 213 artifact-producing runs (0.5 %)** — a 0×0 client ⇒ 400 pump-only frames,
+  no artifact. Re-ran clean in isolation. A known environmental shape, not a particle defect; recorded
+  because a silent zero-artifact run is indistinguishable from a disarmed instrument to anything that
+  only checks "did the file appear".
+* **`particle_counters_readback`'s alive-count bound was rate-1 shaped** (`alive ≤ frames + 1`,
+  hardcoded one-spawn-per-frame) and reddened every rate > 1 AFTER printing correct numbers. **Fixed
+  in this same commit**: the bound is derived from `spawn_per_frame()`, the same knob the fixture
+  drives, as `alive ≤ rate × (frames_presented + 1)`.
 
 ### P1 — SDF collision — **size M** *(prerequisite: E3)* — **LANDED**
 
@@ -944,7 +1151,39 @@ Unconditional gate on every rung: all 35 `goldens/PINS.toml` hashes unchanged; `
 
   **Consequence for R6's automated form, recorded here so the gate is not written wrong:** a test may assert capture ONLY over `v·timestep < thickness + 2·radius`, strictly. Asserting capture at or above the window would pin a phase coincidence (travel 0.4 above is exactly such a coincidence) and would red on an unrelated change to the spawn offset or the substep rate. The complementary assertion — that some step size above the window DOES cross — is sound and is the non-vacuity half.
 * **Gate run.** `particle_edsl_sync` **30 tests, was 25** (the leaf pin, the collide-block skeleton pin, the variant's byte gate, its atomic census and the divide count); `particle_barrier_stream` 16, unmoved; `boyko_shaderdsl` leaf oracles 8; the four `gpu_scene::particle` selector pins; `cargo clippy --workspace --all-targets -D warnings` clean; **all five named image goldens byte-identical** (`particle_additive`, `vb_both_sdf`, `vb_mesh_ssao`, `vb_taa`, `grand_showcase`).
-* **Deferred to the tester / not built here:** an automated form of the tunneling probe (bounded as above), and the two MEASUREMENTS this rung did not take: the armed-vs-disarmed µs delta and the field-evaluation skip rate. Both are measurements, **not missing instruments** — `ZONE_PARTICLE_{KICKOFF,EMIT,SIM,DRAW}` shipped @913f1731 and all four are opened and closed in `present/passes/particles.rs`, so the `ZONE_PARTICLE_SIM` delta between the two boot-frozen pipelines is the instrument for both. **The skip rate must be read at WAVE granularity**: the skip is a divergent branch, so a wave keeps paying the field walk while ANY of its lanes is near geometry, and a per-lane figure would overstate the saving by exactly the wave's coherence. The `particle_sdf_collide` image pin carries its real digest and is PENDING the owner's look, like `particle_additive` before it.
+* **Deferred to the tester / not built here:** an automated form of the tunneling probe (bounded as above), and the two MEASUREMENTS this rung did not take: the armed-vs-disarmed µs delta and the field-evaluation skip rate. ~~Both are measurements, **not missing instruments** — `ZONE_PARTICLE_{KICKOFF,EMIT,SIM,DRAW}` shipped @913f1731 and all four are opened and closed in `present/passes/particles.rs`, so the `ZONE_PARTICLE_SIM` delta between the two boot-frozen pipelines is the instrument for both.~~ **REFUTED BY MEASUREMENT 2026-08-20** (struck rather than deleted, because the sentence was the reason no instrument was built): the delta WAS taken, and at every saturated cell ≥ 65 536 it is NEGATIVE — its dominant term is a kernel-level effect of the opposite sign to the field walk, 4–6× the row's own resolution. The armed-vs-disarmed delta is reported in "Gate #17 as measured" above; **the skip rate is not obtainable from it and waits on rung P1b's device-side per-wave counter.** **The skip rate must be read at WAVE granularity**: the skip is a divergent branch, so a wave keeps paying the field walk while ANY of its lanes is near geometry, and a per-lane figure would overstate the saving by exactly the wave's coherence. The `particle_sdf_collide` image pin carries its real digest and is PENDING the owner's look, like `particle_additive` before it.
+
+### P1b — the skip-rate instrument and the occupancy figure — **size S** *(inserted 2026-08-20, ordered AFTER P1 and BEFORE P2)*
+
+Gate #17 refuted the instrument P1 named for its own two measurements (item 17 above). This rung
+builds the replacement. **One rung and not two, because the two deliverables share the machinery:**
+the variant that counts waves is also the module whose register footprint answers the occupancy
+question.
+
+1. **A THIRD `-D` variant of `particle_sim`: `SDF_COLLIDE_STATS`, over the collide arm.** **Not a
+   runtime flag** — F24's dark-tax rule and D1's `-D` precedent both forbid a runtime-gated span paid
+   while off. **One `InterlockedAdd` per WAVE per branch**, using **D5's own wave aggregation
+   verbatim** (`WaveActiveCountBits` folded by one lane). Counters: `waves_evaluated`,
+   `waves_skipped`, `lanes_evaluated` — the wave/lane pair is the point, since a per-lane figure
+   overstates the saving by exactly the wave's coherence. Read back through the existing
+   `particle_counters_readback` channel. **The two shipped `.spv` stay byte-frozen**; the third gets
+   its own `docs/SHADER-VARIANT-MANIFEST.md` row and its own `*_spv_sync` pin — **and the atomic-census
+   exception is stated ON THAT ROW**: this module runs **3–5 atomics per wave against D5's 1–3, BY
+   DESIGN**, because *a census that forbids the instrument is a census that forbids measuring itself.*
+2. **The register / occupancy figure for all three sim modules** (`VK_KHR_pipeline_executable_properties`,
+   or the offline `dxc` register report). It tests gate #17 §A1's standing hypothesis — that a larger,
+   higher-register kernel raises achieved bandwidth on an over-subscribed bandwidth-bound sim — **and
+   it produces Lever 1's number** (§Goal's budget re-derivation).
+
+**Why an instrument rung comes before P2.** Instruments land before the measurements that consume
+them: DP6-0 minted the zone before the producer moved, and DP6-0b repaired it before DP6a flipped the
+boot. **P1's skip claim is already made and is currently unsupported** — so this instrument is
+overdue, not early.
+
+**Gate:** the base and `-D SDF_COLLIDE` `.spv` byte-identical; the stats module's manifest row + spv
+pin; the atomic census asserted against the exception this row declares (not against D5's shipped
+bound); a skip-rate readback at the densities gate #17 could only bound from above; the occupancy
+figure recorded for all three modules whether or not it confirms the hypothesis.
 
 ### P2 — Alpha blending, sorting, soft particles — **size L**
 
@@ -979,6 +1218,15 @@ Scope taken here is exactly the erratum's: the fourth render path, nothing of P2
 ### P3 — Lit particles + motion vectors — **size M**
 
 Per-particle froxel lookup in the sim writing the render record's colour lane; `-D LIT_PERPIXEL`; `-D MOTION` FS (`pos` and `pos − vel·timestep` are both exact) **only when `SortMode == None`**.
+
+**Carried candidate (filed 2026-08-20, NOT scheduled): the sim record's hot/cold split, worth −12.5 %
+of the sim's traffic.** `size0_invlife` + `effect_flags` (8 B) are read-only per frame and
+`cached_field_d` (4 B) is write-dead in the base compile, so a split turns 96 B of RMW into 64 B RMW +
+16 B RO = **−16 B of 128**. It **contradicts D2/R2's "one fully-consumed 64 B line per particle"**,
+which is why the record is AoS at all — filed with the number attached so it is not re-litigated from
+scratch, and deliberately ordered after P2, whose radix pass changes the alive-list access pattern
+(deciding AoS/SoA before knowing whether the gather became sequential would decide it twice). See
+§Goal's budget re-derivation, Lever 2.
 **Gate:** `taa_*` pins byte-identical with particles off; new `particle_lit` pin; per-particle vs per-fragment cost measured; a test that `SortMode != None && MOTION` is unconstructible.
 
 ### P4 — Trails / ribbons / mesh particles — **size L**
@@ -1004,7 +1252,15 @@ Ribbon = per-particle history ring expanded to a strip; mesh particles = the sam
 | **Total** | **≈168 B/particle** | | **17.9 MB** | **171 MB** |
 | **@ 60 Hz** | | | **1.07 GB/s** | **10.3 GB/s** |
 
-0.1–0.3 % of GPU bandwidth at 100k, 1–2.5 % at 1M. Raster and overdraw dominate at 1M. Cross-check against R12: our 80 B of state vs Nutshell's 64 B ⇒ ~1.25× their traffic ⇒ predicted sim ≈ 0.06 ms at 100k, just under the ≤80 µs budget. Rung P2b adds 8 B/particle to the draw read (+25 % of that term).
+0.1–0.3 % of GPU bandwidth at 100k, 1–2.5 % at 1M. Raster and overdraw dominate at 1M. Cross-check against R12: our 80 B of state vs Nutshell's 64 B ⇒ ~1.25× their traffic ⇒ predicted sim ≈ 0.06 ms at 100k. Rung P2b adds 8 B/particle to the draw read (+25 % of that term).
+
+> **⚠️ MEASURED at gate #17: the sim is 102.4 µs at 102 400 alive — 1.7× that 0.06 ms estimate.** The
+> estimate is left in place because it is the R12 cross-check and its input (a 1.25× scaling of
+> another part's number) is still what it was; what was wrong is the BUDGET it was read against. The
+> live budget is the formula in §Goal ("The compute budget is a FORMULA, not a blessed constant"),
+> whose two terms — 128 B of RMW traffic, 121 GB/s measured on this part — are both stated so either
+> can be checked. The sim row above prices 136 B/particle (the 128 B plus 8 B of list words); the
+> formula's 1.10 margin covers the difference.
 
 ### Dispatch sizes
 
@@ -1049,7 +1305,7 @@ Ribbon = per-particle history ring expanded to a strip; mesh particles = the sam
 
 ### Benchmarks
 
-Criterion `particle_tick_emitters` at 1/16/256 emitters (≤15 µs) · GPU timestamps at 10k/100k/1M armed and disarmed, against R12 · **A/B render record vs direct gather** · **A/B wave-aggregated vs naive atomics** · **A/B instanced vs non-instanced quad** · the 64-substep worst-case frame cost · sort cost at 100k/1M (P2) · the P2b interpolation traffic delta · the armed-vs-disarmed declaration cost (expected exactly zero — nothing is declared).
+Criterion `particle_tick_emitters` at 1/16/256 emitters (≤15 µs) · GPU timestamps at 10k/100k/1M armed and disarmed, against R12 — **TAKEN 2026-08-20 (P0 §"Gate #17 as measured"); the armed/disarmed half is reported but is NOT a skip-rate instrument, see gate item 17** · **A/B render record vs direct gather** · **A/B wave-aggregated vs naive atomics** · **A/B instanced vs non-instanced quad** · the 64-substep worst-case frame cost · sort cost at 100k/1M (P2) · the P2b interpolation traffic delta · the armed-vs-disarmed declaration cost (expected exactly zero — nothing is declared).
 
 ---
 

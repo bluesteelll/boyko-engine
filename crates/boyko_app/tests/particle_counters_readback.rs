@@ -146,10 +146,14 @@ fn particle_counters_partition_readback() {
     );
     assert_eq!(
         rb.clamped_spawns, 0,
-        "kickoff refused {} spawn(s) for want of free slots; the fixture spawns one particle per \
+        "kickoff refused {} spawn(s) for want of free slots; the fixture spawns {} particle(s) per \
          frame into a {}-slot pool, so a non-zero count means the free list is not being \
-         replenished",
-        rb.clamped_spawns, rb.capacity
+         replenished. (A rate that SATURATES the pool inside the window — gate #17's extension \
+         ladder runs `rate = CAP/4` — refuses spawns because the pool is genuinely full, which is \
+         a different reading of the same number; this gate is armed for the non-saturating ladder.)",
+        rb.clamped_spawns,
+        particle_scene::spawn_per_frame(),
+        rb.capacity
     );
 
     // ── The gate must not be VACUOUS: a run where nothing ever spawned satisfies every equality
@@ -185,14 +189,40 @@ fn particle_counters_partition_readback() {
             particle_scene::LAB_LIFETIME
         );
     } else {
-        // Past frame 0 the fixture's own arithmetic is checkable: one spawn per frame, nothing
-        // retiring inside the capture window, so the live count is the number of frames that
-        // emitted. Stated as a bound rather than an equality because the FIRST frame's emit is
-        // consumed by the fold that runs before the first present.
+        // Past frame 0 the fixture's own arithmetic is checkable — AT ANY RATE. The bound is
+        // DERIVED from the three mechanics this fixture pins, not from the default rate:
+        //
+        // 1. `lab_arm_burst` writes `burst = spawn_per_frame()` on every emitter each ECS frame,
+        //    ordered BEFORE the fold, and `particle_scene::setup` spawns exactly ONE emitter.
+        // 2. `particle_tick_emitters` folds `continuous + burst` into one `EmitRequestGpu` whose
+        //    `spawn_count` is that value — `continuous` is 0 here (the emitter's `rate` is 0 and
+        //    the paused clock leaves the fold's `dt` at zero) — and `ParticleEmitScratch::
+        //    begin_frame` CLEARS the table every frame, so an ECS frame that never reached the
+        //    upload contributes nothing rather than accumulating into the next one.
+        // 3. Nothing retires inside the window (`LAB_LIFETIME` = 8 s against ~1 ms of virtual time
+        //    per frame), so the live count only grows, and kickoff's clamp
+        //    (`real_emit = min(requested, dead_count)`) can only make it grow by less.
+        //
+        // ⇒ at most `rate` particles reach the device per frame that RENDERED. `frames_presented`
+        // counts frames whose present returned `Ok(true)`; a frame may submit its emit and only
+        // then have `present` report a recreate (`frame_driver`'s step 7, the out-of-date /
+        // suboptimal path), leaving those spawns on the device and uncounted here. ONE frame of
+        // slack covers one such recreate — the same allowance the previous rate-1 form carried as
+        // a literal `+ 1`, which is one frame's spawns at one per frame, and which is why that
+        // form reddened every rate > 1 (gate #17's whole density ladder) after printing correct
+        // numbers.
+        //
+        // MEASURED at gate #17 (`BOYKO_PARTICLE_READBACK_FRAME=21`): `alive == rate ×
+        // frames_presented` EXACTLY at rates 1 / 8 / 64 / 512, so the slack term was never
+        // consumed on a quiet window and this bound is tight to one frame rather than loose by
+        // construction.
+        let rate = u64::from(particle_scene::spawn_per_frame());
+        let bound = rate * (u64::from(rb.frames_presented) + 1);
         assert!(
-            rb.alive_count_next <= rb.frames_presented + 1,
-            "more particles are alive ({}) than the fixture could have spawned in {} presented \
-             frames at one burst per frame",
+            u64::from(rb.alive_count_next) <= bound,
+            "more particles are alive ({}) than the fixture could have spawned: {} presented \
+             frame(s) at {rate} per frame, plus one frame of slack for a submitted-but-unpresented \
+             recreate, is {bound}",
             rb.alive_count_next,
             rb.frames_presented
         );

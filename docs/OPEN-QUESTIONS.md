@@ -14,6 +14,66 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-20 — Gate #17: two findings about the INSTRUMENT, one fixed in this commit and one still open
+
+Measuring the particle passes (213 legs over four sessions) produced two facts about the measuring
+apparatus itself. They are recorded here because both outlive the measurement: anyone who reads a
+`ZONE_PARTICLE_DRAW` number, or who wires a harness around `particle_lab`, walks into them.
+
+**1. `ZONE_PARTICLE_DRAW` was readable only WITHIN one scene. — RESOLVED (architect's ruling,
+2026-08-20); the fix lands in this same commit.**
+
+MEASURED: putting an `SdfPrimitive` slab in the scene moves `ZONE_PARTICLE_DRAW` by **+74 752 ns** at
+65 536 alive and by **+369 664 ns** at 102 400 — for work the particle draw does not do. The three
+`BOTTOM_OF_PIPE`-stamped compute rows (kickoff/emit/sim) read **exactly 0 ns** for the same change at
+all eight density cells, so this is not scene noise: it is the `TOP_OF_PIPE` drain absorption
+`gpu_zone.rs` already warns about (*"the `TOP` rows … may each include a share of the drain ahead of
+them"*), now measured on the particle family. The consequence while it stood: **any cross-scene DRAW
+comparison was invalid**, and nothing said so at the point of reading.
+
+The premise id 51 topped on was *"the whole lit producer runs before the particle draw, so its
+isolation is unconditional"*. That is true — and it is a statement about **BRACKETING**, which the
+measurement shows is not the same claim as isolation from **DRAIN**. **The id is restamped to
+`BOTTOM_OF_PIPE`** (the DP6-0b precedent for ids 10/11, and cheaper here: unlike `ZONE_VB_SHADE`, no
+published number is defined against id 51's `TOP` stamp, so there is no compatibility pin to break).
+**The fix is measured, not assumed.** Re-taking the same null at 65 536 alive, 3 legs per arm, after
+the restamp: base DRAW **93 184 ns** (was 106 496 — the absorbed drain leaving the bracket) and
+**ctrl − base = +3 072 ns / +3.2 %**, against **+76 800 ns / +72 %** before. **96 % of the cross-scene
+absorption is gone**; the resolvable 3-step residual is stated rather than rounded away. The three
+compute rows are unmoved (SIM 73 728 on both arms), which is the control, and all six legs report
+`measured = 315`, `lost = torn = not_bracketed = 0`, `frames_checked = 21`, `violations = 0`. The five
+image goldens are byte-identical — a begin stage moves no pixel, and that is proven rather than
+argued. Gate #17's own DRAW column is void as a baseline across the restamp by construction — the
+same treatment DP6-0's four cells got, and for the same reason.
+
+**2. Every gate-#17 run is a RED TEST BY CONSTRUCTION, and a harness cannot tell it from a real
+failure. — STILL OPEN.**
+
+An armed-zone `particle_lab` run writes its profiling artifact and *then* fails the process. The
+cause is two **mutually-exclusive** exits from the same frame loop in `crates/boyko_app/src/runner.rs`:
+
+* the **zone-budget exit** — `vb_zone_seen >= VB_BENCH_WARMUP(20) + vb_zone_frames`, which writes the
+  artifact and `return`s from `App::run`;
+* the **capture-driver exit** — the conjunction over the five settle/drain drivers (host dump, census,
+  HZB, VB probe, cull readback, particle readback), which fires at presented frame 30 (+3 drain).
+
+With `BOYKO_VB_BENCH_FRAMES=1` the budget is 21 retired frames, so the first exit always fires first
+and the frame-30 dump is never written — after which the fixture panics reading a file that does not
+exist. Every number in gate #17 came out of a process that exited non-zero. **What is open: a harness
+that keys on exit codes cannot distinguish "the measurement completed and the dump was skipped" from
+"the run genuinely broke".** I am not fixing it here — the fix is a scope call (either the two exits
+learn about each other, or the measurement legs stop asking for a dump they cannot reach), and both
+touch a loop that five other capture drivers share.
+
+**Also recorded, as an environmental shape rather than a defect: 1 windowing flake in 213
+artifact-producing runs (0.5 %).** One leg reported `frames=400` (the `BOYKO_WINDOW_FRAMES` cap) with
+no artifact: the window's client area was 0×0, so the runner's minimized path `continue`s before the
+fence, the uploads and the render, and no zone frame ever retired. Re-run in isolation it gave
+`frames=23` with a clean census. It is written down because **a silent zero-artifact run is
+indistinguishable from a disarmed instrument to anything that only checks "did the file appear"**.
+
+---
+
 ## 2026-08-20 — Particles P2 item 1: a dead fixture knob (repaired), and one pin I will not re-point without you
 
 Landing the Deferred `-D DEPTH_LINEAR` arm turned up two things that are yours rather than mine.

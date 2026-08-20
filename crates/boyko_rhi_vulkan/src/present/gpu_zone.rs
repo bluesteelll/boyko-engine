@@ -504,10 +504,11 @@ pub const SV0_ZONE_COUNT: u16 = 1;
 // witnessed by the command census (one `cmd()` per copy) and left unbracketed, the same treatment
 // `record_vb`'s `light_upload` copy gets.
 //
-// STAGES: the three compute ids open at BOTTOM_OF_PIPE and the draw at TOP — see
-// `zone_begin_stage`'s consecutive-partition rule. The three are recorded back-to-back with zero
-// commands between one's END and the next's BEGIN, so they partition; the draw sits behind the
-// whole lit producer and partitions against nothing.
+// STAGES: all four ids open at BOTTOM_OF_PIPE — see `zone_begin_stage`'s consecutive-partition
+// rule. The three compute ids are recorded back-to-back with zero commands between one's END and
+// the next's BEGIN, so they partition. The DRAW opened at TOP until gate #17 measured what that
+// stamp costs it (`zone_begin_stage`'s "what a TOP begin cost id 51" block): its premise was
+// isolation from BRACKETING, and the drain is a different thing.
 
 /// Particles P0: the **kickoff** dispatch — the one-thread pass, dispatched DIRECTLY because it is
 /// the pass that writes the indirect argument blocks the other two are fetched from. Brackets its
@@ -534,6 +535,11 @@ pub const ZONE_PARTICLE_SIM: u16 = ZONE_BASE_PARTICLE + 2;
 /// ⚠️ Bracketed OUTSIDE the rendering scope, which is not a style choice: `vkCmdWriteTimestamp` is
 /// legal inside a render pass, but a bracket that opened after `cmd_begin_rendering` would exclude
 /// the scope's own setup — and the scope is a real part of what the draw costs.
+///
+/// Opens at `BOTTOM_OF_PIPE` since gate #17 (see [`zone_begin_stage`]). It topped on the premise
+/// that the whole lit producer runs ahead of it — a statement about BRACKETING, which the
+/// measurement showed is not a statement about DRAIN: a scene change this draw does no work for
+/// moved the row by up to +369 664 ns.
 pub const ZONE_PARTICLE_DRAW: u16 = ZONE_BASE_PARTICLE + 3;
 
 /// How many zone ids the particle family uses.
@@ -599,13 +605,15 @@ const _: () = assert!(
 ///   `ZONE_VB_PRESHADE`) — **VB-SV0 DP6-0b, and this is the rung the paragraph below nominated.**
 ///   See "the premise ids 10 and 11 topped on, and what changed it" further down.
 ///
-/// **`TOP_OF_PIPE`** for the isolated single-dispatch brackets: VB slots 0..2 keep it for
-/// compatibility with published VB-P1d numbers (id 2 additionally because VB-P1d's published
-/// break-even is defined against it — see its own doc's skew warning and `shade_derived`), both
-/// gbuffer families' collectors always opened there, and [`ZONE_PARTICLE_DRAW`] sits with
-/// unbracketed work on both sides. The whole lit producer runs before the particle draw on every
-/// leg, so id 51's isolation is **unconditional** — which is exactly what stopped being true of
-/// ids 10 and 11:
+/// * **[`ZONE_PARTICLE_DRAW`]** — **Particles P0 gate #17.** Not a partition member: it bottoms
+///   because a `TOP` begin was MEASURED absorbing the drain ahead of it. See "what a `TOP` begin
+///   cost id 51" further down.
+///
+/// **`TOP_OF_PIPE`** for what is left: VB slots 0..2 keep it for compatibility with published
+/// VB-P1d numbers (id 2 additionally because VB-P1d's published break-even is defined against it —
+/// see its own doc's skew warning and `shade_derived`), and both gbuffer families' collectors
+/// always opened there. [`ZONE_PARTICLE_DRAW`] was the last id here whose premise was "sits with
+/// unbracketed work on both sides" — the same premise that stopped being true of ids 10 and 11:
 ///
 /// > # The premise ids 10 and 11 topped on, and what changed it (VB-SV0 DP6-0b)
 /// >
@@ -633,6 +641,32 @@ const _: () = assert!(
 /// > The `[vb_both_ssao]` fixture the DP6-0 cells were measured on arms `SsaoConfig::High`, so
 /// > `vb_viewt` did run there and its 5 248 ns gap between id 6's END and id 11's BEGIN is that
 /// > dispatch — the number the `[e6 → b11]` expectation check now pins.
+///
+/// > # What a `TOP` begin cost id 51, and why gate #17 restamped it (Particles P0)
+/// >
+/// > Id 51 topped on *"sits with unbracketed work on both sides"*. That is a claim about
+/// > BRACKETING, and gate #17 measured that it does not carry the claim it was used for: a `TOP`
+/// > begin retires when the command is FETCHED, so whatever the queue is still draining is inside
+/// > the bracket whether or not anything else is bracketing it.
+/// >
+/// > **The null that showed it.** Put an `SdfPrimitive` slab in the scene — the SDF marcher then
+/// > runs, and the particle draw does not one instruction more of work for it — and read both
+/// > families across eight density cells. The three `BOTTOM`-stamped compute rows moved by
+/// > **exactly 0 ns** at every cell. `ZONE_PARTICLE_DRAW` moved by **+74 752 ns** at 65 536 alive
+/// > and by **+369 664 ns** at 102 400: the marcher's drain, attributed to the draw. A row that
+/// > can only be compared inside one scene is not a µs row.
+/// >
+/// > Restamped to `BOTTOM` here, and cheaper than DP6-0b's two ids: no published number is defined
+/// > against id 51's `TOP` stamp, so unlike [`ZONE_VB_SHADE`] there is no compatibility pin to
+/// > break. Gate #17's own DRAW column is void as a baseline across this change by construction —
+/// > the same treatment DP6-0's four cells got, and for the same reason.
+/// >
+/// > **The repair is measured, not assumed.** Re-running the same null after the restamp (65 536
+/// > alive, 3 legs per arm): base DRAW **93 184 ns** against 106 496 before, and
+/// > `ctrl − base = **+3 072 ns**` against **+76 800 ns** before — 96 % of the absorption gone, with
+/// > a resolvable 3-step residual stated rather than rounded away. The three compute rows do not
+/// > move (SIM 73 728 ns on both arms), which is the control that says the edit reached exactly one
+/// > id.
 ///
 /// ⚠️ The `TOP` rows are still NOT addable to the `BOTTOM` rows as a partition. They are
 /// independent durations that may each include a share of the drain ahead of them.
@@ -668,10 +702,13 @@ pub const fn zone_begin_stage(zone: u16) -> TimestampStage {
     // is tautological on a `u16` and clippy refuses it; the other families' bases (gbuffer's 16,
     // SV0's 32) fall outside this range on their own.
     //
-    // The particle compute run is spelled as THREE NAMES and not as a second range. A range would
-    // read `ZONE_PARTICLE_KICKOFF..=ZONE_PARTICLE_SIM`, which is `base..=base+2` — and the next id
+    // The particle family is spelled as FOUR NAMES and not as a range. A range would read
+    // `ZONE_PARTICLE_KICKOFF..=ZONE_PARTICLE_DRAW`, which is `base..=base+3` — and the next id
     // appended to that family would land at `base+4`, outside it, while any id inserted between
-    // them would be swallowed without a line changing. Names cost three tokens and cannot do that.
+    // them would be swallowed without a line changing. Names cost four tokens and cannot do that.
+    // The four are here for TWO different reasons, which is itself an argument against the range:
+    // the three compute ids are a consecutive partition, while the draw bottoms because a `TOP`
+    // begin was measured absorbing the drain ahead of it (gate #17).
     //
     // The VB producer-run quartet is spelled as FOUR NAMES for the same reason and one more: the
     // ids are 10, 11, 12, 13, so a range `10..=13` would sit FLUSH against `3..=9` above it, and
@@ -680,7 +717,10 @@ pub const fn zone_begin_stage(zone: u16) -> TimestampStage {
     // their sites and quietly changed what they measured.
     if matches!(zone, ZONE_VB_LATE_UPLOAD..=ZONE_VB_RUN)
         || matches!(zone, ZONE_VB_SDF_MESH | ZONE_VB_GEO | ZONE_VB_PRODUCE_RUN | ZONE_VB_PRESHADE)
-        || matches!(zone, ZONE_PARTICLE_KICKOFF | ZONE_PARTICLE_EMIT | ZONE_PARTICLE_SIM)
+        || matches!(
+            zone,
+            ZONE_PARTICLE_KICKOFF | ZONE_PARTICLE_EMIT | ZONE_PARTICLE_SIM | ZONE_PARTICLE_DRAW
+        )
     {
         TimestampStage::BottomOfPipe
     } else {
@@ -723,8 +763,7 @@ const _: () = {
     // silently change what its bracket measures — rung 7c's defect exactly.
     //
     // The split is the consecutive-partition rule stated above, NOT the id's age: the three
-    // particle COMPUTE ids are back-to-back with no commands between them, so they bottom; an
-    // isolated single-dispatch bracket with unbracketed work on both sides tops.
+    // particle COMPUTE ids are back-to-back with no commands between them, so they bottom.
     assert!(
         bottoms(ZONE_PARTICLE_KICKOFF) && bottoms(ZONE_PARTICLE_EMIT) && bottoms(ZONE_PARTICLE_SIM),
         "the particle compute ids are a consecutive partition and must open at BOTTOM_OF_PIPE"
@@ -743,13 +782,16 @@ const _: () = {
             && bottoms(ZONE_VB_PRESHADE),
         "the VB producer-run ids are a consecutive partition and must open at BOTTOM_OF_PIPE"
     );
-    // What is LEFT of the old "three isolated single-dispatch ids" assert. The whole lit producer
-    // runs before the particle draw on every leg, so this one's isolation is unconditional and its
-    // premise is untouched by DP6-0b — which is why the message now names it alone instead of
-    // claiming three.
+    // Particles P0 gate #17: the last member of the old "three isolated single-dispatch ids"
+    // assert MOVED, and for a reason of its own rather than DP6-0b's. Its premise was isolation
+    // from BRACKETING ("the whole lit producer runs before it"), which is true and which the
+    // measurement showed is not the premise a `TOP` begin needs: a scene change the draw does no
+    // work for moved this row by +74 752 ns at 65 536 alive and +369 664 ns at 102 400, while the
+    // three BOTTOM-stamped compute rows moved 0 ns. The `tops` half of this block is now the VB
+    // and gbuffer/SV0 asserts above, and nothing in the particle family tops.
     assert!(
-        tops(ZONE_PARTICLE_DRAW),
-        "the particle draw is the one isolated single-dispatch id left at TOP_OF_PIPE"
+        bottoms(ZONE_PARTICLE_DRAW),
+        "the particle draw bottoms since gate #17 — a TOP begin was measured absorbing the drain"
     );
 };
 
