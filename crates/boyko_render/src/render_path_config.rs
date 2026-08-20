@@ -618,6 +618,12 @@ pub struct ResolvedRenderPath {
     /// DEFAULT `false` — an unarmed scene (every scene that never opts in) builds/declares/
     /// records nothing here, so every pre-VB-P1b golden stays byte-identical (the 0%-gate).
     pub froxel_light_cull: bool,
+    /// The device's RG8-UNORM `STORAGE_IMAGE` fact (`DeviceCaps::rg8_unorm_storage_ok`), copied
+    /// at resolve: the SV0 `sdf_term` ring is an RG8 STORAGE target, so a device without the
+    /// format feature cannot host the prepass — [`Self::vb_sdf_mesh_armable`] conjoins this.
+    /// Defaults `true` through [`RenderPathDeviceCaps::default`] (the near-universal desktop
+    /// answer; the host boot seam overrides with the real probe).
+    pub vb_sdf_mesh_storage_ok: bool,
 }
 
 // P2-d note: "frozen at boot" here means [`resolve_render_path`] is never RE-CALLED after
@@ -727,6 +733,7 @@ impl ResolvedRenderPath {
         matches!(self.path, RenderPath::VisibilityBuffer)
             && self.shadow.contains(ShadowSources::SDF_SOFT_MARCH)
             && self.mesh_leg
+            && self.vb_sdf_mesh_storage_ok
     }
 }
 
@@ -811,6 +818,11 @@ pub struct RenderPathDeviceCaps {
     /// wave-non-uniform `mesh_id` (`NonUniformResourceIndex`). Near-universal on desktop; absent
     /// ⇒ [`resolve_render_path`] degrades `VisibilityBuffer` to `Deferred` at boot.
     pub storage_buffer_array_non_uniform_indexing: bool,
+    /// Whether `R8G8_UNORM` supports `STORAGE_IMAGE` under OPTIMAL tiling
+    /// (`DeviceCaps::rg8_unorm_storage_ok`) — the SV0 `sdf_term` ring's write format. Absent ⇒
+    /// [`ResolvedRenderPath::vb_sdf_mesh_armable`] resolves `false` (degrade-not-panic: the
+    /// request clamps, the prepass never exists, the tails read the seeded white term).
+    pub rg8_unorm_storage: bool,
 }
 
 impl Default for RenderPathDeviceCaps {
@@ -819,15 +831,24 @@ impl Default for RenderPathDeviceCaps {
         // Assume supported until the host overrides with the real boot query (mirrors
         // `DdgiCaps::default`'s "most desktop GPUs support it" rationale) — a bench/test
         // harness that never queries the device wants the enabled path.
-        Self { storage_buffer_array_non_uniform_indexing: true }
+        Self { storage_buffer_array_non_uniform_indexing: true, rg8_unorm_storage: true }
     }
 }
 
 impl RenderPathDeviceCaps {
-    /// Builds the caps from a device query result (the host boot seam).
+    /// Builds the caps from a device query result (the host boot seam). RG8 storage defaults
+    /// `true` here for the eight pre-SV0 callers; the host chains
+    /// [`with_rg8_unorm_storage`](Self::with_rg8_unorm_storage) with the real probe.
     #[inline]
     pub const fn new(storage_buffer_array_non_uniform_indexing: bool) -> Self {
-        Self { storage_buffer_array_non_uniform_indexing }
+        Self { storage_buffer_array_non_uniform_indexing, rg8_unorm_storage: true }
+    }
+
+    /// Overrides the RG8-UNORM `STORAGE_IMAGE` fact with the device's real probe answer.
+    #[inline]
+    pub const fn with_rg8_unorm_storage(mut self, ok: bool) -> Self {
+        self.rg8_unorm_storage = ok;
+        self
     }
 }
 
@@ -1102,6 +1123,7 @@ pub fn resolve_rules(
         thin_aux,
         shadow,
         froxel_light_cull,
+        vb_sdf_mesh_storage_ok: caps.rg8_unorm_storage,
     }
 }
 
@@ -1394,11 +1416,11 @@ mod tests {
     use super::*;
 
     fn caps_ok() -> RenderPathDeviceCaps {
-        RenderPathDeviceCaps { storage_buffer_array_non_uniform_indexing: true }
+        RenderPathDeviceCaps { storage_buffer_array_non_uniform_indexing: true, rg8_unorm_storage: true }
     }
 
     fn caps_missing() -> RenderPathDeviceCaps {
-        RenderPathDeviceCaps { storage_buffer_array_non_uniform_indexing: false }
+        RenderPathDeviceCaps { storage_buffer_array_non_uniform_indexing: false, rg8_unorm_storage: true }
     }
 
     // ---- rung R8 sync-pin: VB_ID_SENTINEL host<->shader ---------------------------------
@@ -2814,6 +2836,18 @@ mod tests {
         );
         assert!(!matches!(degraded.path, RenderPath::VisibilityBuffer));
         assert!(!degraded.vb_sdf_mesh_armable(), "a VB->Deferred degrade must disarm SV0");
+
+        // A device without RG8-UNORM STORAGE keeps the full VB boot but cannot host the SV0
+        // prepass (the `sdf_term` ring is an RG8 storage target): the FULLY-armed row goes
+        // unarmable on the cap alone, and NOTHING ELSE about the resolution moves.
+        let (no_rg8, _) = resolve_render_path(
+            &RenderPathConfig { path: RenderPath::VisibilityBuffer, legs: GeometryLegs::Both },
+            sv0_consumers(),
+            caps_ok().with_rg8_unorm_storage(false),
+        );
+        assert!(matches!(no_rg8.path, RenderPath::VisibilityBuffer), "the path itself survives");
+        assert!(no_rg8.mesh_leg && no_rg8.shadow.contains(ShadowSources::SDF_SOFT_MARCH));
+        assert!(!no_rg8.vb_sdf_mesh_armable(), "no RG8 storage => no SV0 prepass");
     }
 
     #[test]

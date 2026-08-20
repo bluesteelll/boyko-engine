@@ -1137,14 +1137,22 @@ impl VbTargets {
             vb_id_slots.map(|s| s.expect("invariant: every vb_id ring slot built before here"));
 
         // VB-SV0 DP3b: the term ring — full-extent `R8G8_UNORM`, STORAGE (the pass's `u6`) |
-        // SAMPLED (the tails' @10) | TRANSFER_DST (the one-time seed below).
+        // SAMPLED (the tails' @10) | TRANSFER_DST (the one-time seed below). STORAGE on RG8 is
+        // DEVICE-OPTIONAL (VUID-VkImageCreateInfo-usage) — probe-gated: an unsupported device
+        // gets a SAMPLED-only ring (the seed keeps it white, the tails read the neutral term)
+        // and SV0 resolves unarmable, so the pass that would storage-write it never exists.
+        let sdf_term_storage = if ctx.device_caps().rg8_unorm_storage_ok {
+            ImageUsage::STORAGE | ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST
+        } else {
+            ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST
+        };
         let sdf_term_desc = TextureDesc {
             width: extent.width,
             height: extent.height,
             depth: 1,
             format: Format::R8G8Unorm,
             dimension: TextureDimension::D2,
-            usage: ImageUsage::STORAGE | ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
+            usage: sdf_term_storage,
             array_layers: 1,
             mip_levels: 1,
             view_format: None,
@@ -4233,9 +4241,15 @@ impl DeferredSets {
         // the light table, `gVbId` (sampled, the placeholder-sampler idiom), `gSdfTerm` (STORAGE
         // — the pass WRITES it; the tails' @10 reads the same ring as SAMPLED), and the SDF edit
         // list (the deferred/marcher sets' identical expression).
-        let sdf_mesh_shadow_set0: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> = if let (true, Some(layout)) =
-            (scene.path_is_vb(), scene.sdf_mesh_shadow_layout0)
-        {
+        let sdf_mesh_shadow_set0: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> = if let (true, true, Some(layout)) = (
+            scene.path_is_vb(),
+            // The set's @6 is a STORAGE_IMAGE descriptor over the `sdf_term` ring — on a device
+            // without RG8 storage the ring was created SAMPLED-only (see `sdf_term_storage`
+            // above) and a storage descriptor over it would violate the update-time VUID; SV0
+            // is unarmable there, so the set has no consumer either.
+            ctx.device_caps().rg8_unorm_storage_ok,
+            scene.sdf_mesh_shadow_layout0,
+        ) {
             let vb_instance_ring = scene
                 .vb_instance_ring
                 .expect("invariant: path_is_vb() requires scene.vb_instance_ring");
@@ -4376,7 +4390,7 @@ impl DeferredSets {
                 }
             }
             if let Some(e) = failure {
-                // SAFETY: the vb-tex slots already built [0..slot) + `vb_set0` (fully built) +
+                // SAFETY: the vb-tex slots already built [0..slot) + the sdf-mesh-shadow ring + `vb_set0` (fully built) +
                 // the sdf-forward + present + (optional) ddgi-update/ssao/cull + the resolve &
                 // vocab rings were created on `ctx`, referenced by no submission; each destroyed
                 // exactly once (reverse acquisition). The optional sets are `Option`-guarded; the
@@ -4384,6 +4398,11 @@ impl DeferredSets {
                 unsafe {
                     for s in vb_tex_slots.iter_mut() {
                         if let Some(g) = s.take() {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    if let Some(sms) = sdf_mesh_shadow_set0 {
+                        for g in sms {
                             RhiDevice::destroy_bind_group(ctx, g);
                         }
                     }
@@ -4510,6 +4529,11 @@ impl DeferredSets {
                     }
                     if let Some(vt) = vb_set0_tex {
                         for g in vt {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    if let Some(sms) = sdf_mesh_shadow_set0 {
+                        for g in sms {
                             RhiDevice::destroy_bind_group(ctx, g);
                         }
                     }
@@ -4652,6 +4676,11 @@ impl DeferredSets {
                             RhiDevice::destroy_bind_group(ctx, g);
                         }
                     }
+                    if let Some(sms) = sdf_mesh_shadow_set0 {
+                        for g in sms {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
                     if let Some(vs) = vb_set0 {
                         for g in vs {
                             RhiDevice::destroy_bind_group(ctx, g);
@@ -4761,6 +4790,11 @@ impl DeferredSets {
                         }
                         if let Some(vts) = vb_set0_tex {
                             for g in vts {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(sms) = sdf_mesh_shadow_set0 {
+                            for g in sms {
                                 RhiDevice::destroy_bind_group(ctx, g);
                             }
                         }

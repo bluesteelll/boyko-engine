@@ -500,7 +500,11 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     };
     let render_path_caps = boyko_render::RenderPathDeviceCaps::new(
         ctx.device_caps().storage_buffer_array_non_uniform_indexing_ok,
-    );
+    )
+    // SV0's `sdf_term` ring is an RG8 STORAGE target — a device without the format feature
+    // resolves vb_sdf_mesh_armable() false, the request clamps, and the ring is created
+    // SAMPLED-only (targets.rs reads the same probe), so nothing ever storage-writes it.
+    .with_rg8_unorm_storage(ctx.device_caps().rg8_unorm_storage_ok);
     let (resolved_render_path, render_path_degrades) =
         boyko_render::resolve_render_path(&render_path_cfg, render_path_consumers, render_path_caps);
     // Boot diagnostics. Never a panic — degrade-not-panic by construction.

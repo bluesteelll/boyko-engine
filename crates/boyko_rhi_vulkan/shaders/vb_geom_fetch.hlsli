@@ -553,9 +553,12 @@ struct VbGeomFetchResult {
     // `world_normal` is `mul(m3, n)` with no inverse-transpose correction (see the limitation
     // note at the `world_n*` lines below).
     //
-    // `VB_SV0` is a SOURCE-level `#define` written by each of the three VB lit-producer tails
-    // before this header is `#include`d — NEVER a `-D` on the dxc command line, so it creates
-    // zero new compile variants. `vb_geo.comp.hlsl` does not define it and therefore preprocesses
+    // `VB_SV0` is a SOURCE-level `#define` — NEVER a `-D` on the dxc command line, so it creates
+    // zero new compile variants. Its definer set has TURNED once: the inline stage (rung S2,
+    // reverted at 13f1c9a3) had each of the three VB lit-producer tails define it; the shipped
+    // DEDICATED pass (plan Rev 10 DP1..DP5) defines it in `sdf_mesh_shadow.comp.hlsl` ONLY — the
+    // tails read the pass's R8G8 term instead of marching, so they no longer include these
+    // exports. `vb_geo.comp.hlsl` does not define it and therefore preprocesses
     // character-identical to its pre-SV0 form, which is what keeps `vb_geo.comp.spv` /
     // `vb_geo_mv.comp.spv` byte-identical BY CONSTRUCTION rather than by DXC's goodwill. (DXC
     // would in fact strip unguarded unread members anyway — measured, plan §11.4 — so the guard

@@ -322,9 +322,19 @@ static ROTATED_AWAY: AtomicU64 = AtomicU64::new(0);
 /// Separate from the text sink's setter because the two destinations are separate, and a process
 /// may want a small rotating `.blog` beside an uncapped text file or the reverse.
 pub fn set_rotation(at_bytes: u64, keep: u8) {
-    ROTATE_AT.store(at_bytes, Ordering::Relaxed);
+    // Floor the cap at 64 B (0 stays "rotation off"): every rotation re-emits the per-generation
+    // header (anchor 17 B + session 17 B) THROUGH `write_raw`, so a cap at or below 34 B is
+    // re-exceeded by the header itself and `write_raw <-> rotate_now` recurse without bound —
+    // stack-overflow abort, one file created per cycle. No shipped preset comes near the floor;
+    // a hand-set cap this small is a misconfiguration the floor absorbs instead of amplifying.
+    let floored = if at_bytes == 0 { 0 } else { at_bytes.max(MIN_ROTATE_AT_BYTES) };
+    ROTATE_AT.store(floored, Ordering::Relaxed);
     ROTATE_KEEP.store(u64::from(keep), Ordering::Relaxed);
 }
+
+/// The smallest accepted rotation cap: comfortably above the 34-byte per-generation header
+/// (anchor + session) whose re-emission inside `rotate_now` re-enters `write_raw`.
+pub const MIN_ROTATE_AT_BYTES: u64 = 64;
 
 /// The rotation cap in bytes; `0` when rotation is off.
 #[must_use]

@@ -272,10 +272,10 @@ pub struct DeviceCaps {
     /// (`shadow_vis` + `shadow_vis2`) were unified to `R16G16_UNORM` (the uniform-RG16 design that
     /// lets one `"rg16"` shader pin fit every binding on every parity), so
     /// [`shadow_denoise_storage_ok`](Self::shadow_denoise_storage_ok) reads
-    /// [`rg16_unorm_storage_ok`](Self::rg16_unorm_storage_ok) alone. This field is kept as a probed
-    /// device fact (a future RG8 storage user can read it) but drives nothing today.
-    /// `#[cfg(feature = "hwrt")]`, so a `not(hwrt)` build has neither the field nor the probe.
-    #[cfg(feature = "hwrt")]
+    /// [`rg16_unorm_storage_ok`](Self::rg16_unorm_storage_ok) alone. UNCONDITIONAL as of the SV0
+    /// dedicated pass: the `sdf_term` ring is an RG8 STORAGE target on every VB boot, so this
+    /// probe gates SV0 arming and the ring's STORAGE usage bit (degrade-not-panic — an
+    /// unsupported device gets a SAMPLED-only ring and SV0 resolves unarmable).
     pub rg8_unorm_storage_ok: bool,
     /// Rung 3a: whether `R16G16_UNORM` supports `STORAGE_IMAGE` under OPTIMAL tiling (BOTH ping-pong
     /// rings `shadow_vis` + `shadow_vis2` — 16-bit avoids the cumulative 8-bit rounding of a
@@ -3407,17 +3407,12 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
         report_ddgi_storage_unsupported(ddgi_irr_storage_ok, ddgi_depth_storage_ok);
     }
 
-    // --- rg8_unorm_storage_ok / rg16_unorm_storage_ok (Rung 3a): STORAGE_IMAGE on R8G8_UNORM +
-    // R16G16_UNORM, OPTIMAL tiling. BOTH shadow-vis ping-pong rings are now R16G16_UNORM (the
-    // uniform-RG16 design), so `rg16_unorm_storage_ok` is the SOLE denoise storage precondition;
-    // `rg8_unorm_storage_ok` is still probed as a device fact but no longer gates the denoise.
-    // Mirror the `ddgi_*_storage_ok` QUERY shape, and — like the DDGI pair — the caller does NOT
-    // fail-fast on `false`: the RT soft-shadow denoise is opt-in (`feature = "hwrt"` + config
-    // `Spatial`), so an unsupported device degrades the denoise to disabled, never a boot failure.
-    // `#[cfg(feature = "hwrt")]`-gated, so a `not(hwrt)` build runs neither probe nor records the
-    // fields.
-    #[cfg(feature = "hwrt")]
-    let (rg8_unorm_storage_ok, rg16_unorm_storage_ok) = {
+    // --- rg8_unorm_storage_ok: STORAGE_IMAGE on R8G8_UNORM, OPTIMAL tiling. UNCONDITIONAL as of
+    // the SV0 dedicated pass: the `sdf_term` ring is an RG8 STORAGE target on every VB boot, so
+    // this probe now gates a SHIPPING feature (SV0 arming + the ring's STORAGE usage bit), not
+    // just the hwrt denoise ladder that first added it. Same degrade-not-panic contract: an
+    // unsupported device creates the ring SAMPLED-only and SV0 resolves unarmable.
+    let rg8_unorm_storage_ok = {
         let mut rg8_props = VkFormatProperties {
             linear_tiling_features: 0,
             optimal_tiling_features: 0,
@@ -3433,9 +3428,12 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
                 &mut rg8_props,
             )
         };
-        let rg8_ok =
-            (rg8_props.optimal_tiling_features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
+        (rg8_props.optimal_tiling_features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0
+    };
 
+    #[cfg(feature = "hwrt")]
+    let rg16_unorm_storage_ok = {
+        let rg8_ok = rg8_unorm_storage_ok;
         let mut rg16_props = VkFormatProperties {
             linear_tiling_features: 0,
             optimal_tiling_features: 0,
@@ -3460,7 +3458,7 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
         if !rg16_ok {
             report_shadow_denoise_storage_unsupported(rg16_ok, rg8_ok);
         }
-        (rg8_ok, rg16_ok)
+        rg16_ok
     };
 
     // --- r16_unorm_storage_ok: STORAGE_IMAGE on R16_UNORM, OPTIMAL tiling — the SSAO à-trous
@@ -3502,7 +3500,7 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
         ddgi_irr_storage_ok,
         ddgi_depth_storage_ok,
         // Rung 3a: the RT soft-shadow denoise storage-format probes (recorded, not fail-fast).
-        #[cfg(feature = "hwrt")]
+        // RG8 is unconditional as of the SV0 dedicated pass (the `sdf_term` STORAGE gate).
         rg8_unorm_storage_ok,
         #[cfg(feature = "hwrt")]
         rg16_unorm_storage_ok,
@@ -4108,7 +4106,6 @@ mod tests {
             atlas_linear_filter_ok: true,
             ddgi_irr_storage_ok: true,
             ddgi_depth_storage_ok: true,
-            #[cfg(feature = "hwrt")]
             rg8_unorm_storage_ok: true,
             #[cfg(feature = "hwrt")]
             rg16_unorm_storage_ok: true,

@@ -3963,8 +3963,10 @@ impl GpuSceneBundles {
                         stage: ShaderStage::COMPUTE,
                     },
                     // VB-SV0 DP2: `gSdfTerm` @10 (COMPUTE-only SAMPLED_IMAGE) — the dedicated
-                    // `sdf_mesh_shadow` pass's R8G8 term, bound to the 1×1 white
-                    // `sv0_term_null` placeholder on every boot until DP3's arming re-points it.
+                    // `sdf_mesh_shadow` pass's R8G8 term. The SHIPPED design binds the REAL
+                    // per-FIF `sdf_term` ring on every VB boot, seeded to white (1,1) at creation
+                    // (`seed_sdf_term_ring`) — there is no null-placeholder re-point; recording
+                    // never branches on arming because the seeded ring IS the neutral value.
                     // The slot the @11 comment below has been HOLDING since the S2 revert; added
                     // to this ONE shared layout object before any VB pipeline is built (R5), and
                     // as of DP2 the ten lit-producer modules DO declare `binding(10, 0)` — read

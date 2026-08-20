@@ -3104,6 +3104,7 @@ impl Renderer<'_> {
                 // SAFETY: recording is open; `record_vb_pass` records the graph's derived
                 // barriers for the "sdf_mesh_shadow" pass into `cmd` — the raster's `vb_id`
                 // COLOR→SRO transition and the term's first-touch →GENERAL write access.
+                ts.cmd();
                 self.record_vb_pass(sv0, cmd, targets, forward, vb, scene, fi);
                 let sv0_pipeline = scene.sdf_mesh_shadow_pipeline.expect(
                     "invariant: plan.sv0_pass is Some => scene.sdf_mesh_shadow_pipeline is Some \
@@ -3132,7 +3133,9 @@ impl Renderer<'_> {
                 // SAFETY: recording is open; the pool was reset this frame; `fi` is this slot.
                 unsafe { ts.begin(self.fns, cmd, ZONE_VB_SDF_MESH) };
                 unsafe {
+                    ts.cmd();
                     (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sv0_pipeline.pipeline);
+                    ts.cmd();
                     (self.fns.cmd_bind_descriptor_sets)(
                         cmd,
                         VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -3143,6 +3146,7 @@ impl Renderer<'_> {
                         0,
                         ptr::null(),
                     );
+                    ts.cmd();
                     (self.fns.cmd_bind_descriptor_sets)(
                         cmd,
                         VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -3153,6 +3157,7 @@ impl Renderer<'_> {
                         0,
                         ptr::null(),
                     );
+                    ts.cmd();
                     (self.fns.cmd_push_constants)(
                         cmd,
                         sv0_pipeline.layout,
@@ -3161,6 +3166,7 @@ impl Renderer<'_> {
                         64,
                         scene.mvp.as_ptr().cast(),
                     );
+                    ts.cmd();
                     (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
                 }
                 // SAFETY: recording is open; the pool was reset this frame; `fi` is this slot.
