@@ -52,6 +52,7 @@
 - [Data Constructs](aether/data-constructs.md)
 - [Systems & Plugins](aether/systems-and-plugins.md)
 - [State Machines](aether/state-machines.md)
+- [Materials](aether/materials.md)
 - [Diagnostics](aether/diagnostics.md)
 
 # Architecture

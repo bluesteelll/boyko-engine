@@ -251,6 +251,8 @@ heavy codegen belongs to the derives, which the crate already pays for.
 - [Aether overview](overview.md) — the macro, the crates, and the shipped rungs.
 - [Systems & plugins](systems-and-plugins.md) — the constructs that *use* this
   data.
+- [Materials](materials.md) — the other declarative construct, and the only one
+  that emits a builder fn instead of a type.
 - [Diagnostics](diagnostics.md) — the full error contract for these constructs.
 - [Components](../concepts/components.md), [Tags](../concepts/tags.md),
   [Enable tags](../concepts/enable-tags.md), [Bundles](../concepts/bundles.md),

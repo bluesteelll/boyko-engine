@@ -38,31 +38,30 @@ get different messages. Writing a construct from a later rung tells you the
 rung:
 
 ```text
-error: `material` is an Aether construct but lands at rung A5; this build carries rungs A0..A3 (component, tag, bundle, event, system, plugin, machine)
- --> tests/ui/planned_construct_names_its_rung.rs:6:5
+error: `scene` is an Aether construct but lands at rung A6; this build carries rungs A0..A5 (component, tag, bundle, system, event, plugin, machine, material)
+ --> tests/ui/planned_construct_names_its_rung.rs:9:5
   |
-6 |     material gold { }
-  |     ^^^^^^^^
+9 |     scene lab { }
+  |     ^^^^^
 ```
 
-`scene` answers the same way with rung A6. You never need to consult a roadmap
-to find out whether something exists — try it.
-
-The rung *range* in that message is a literal, and it trails this page: A4
-deepened `machine` rather than adding a construct, so the string still reads
-`A0..A3`. The **list** is the part to act on — it names the whole v1 surface and
-reads the same on every rung.
+`scene` is the only construct left with that answer. The message is also how a
+rung's landing becomes visible from the outside: this golden's subject was
+`material` until A5 shipped it, and the rung range moved with it. You never need
+to consult a roadmap to find out whether something exists — try it, and read
+which of the two errors you get.
 
 ## Case gates
 
 Names that expand to **types** (`component`, `tag`, `bundle`, `event`,
-`machine`, `state`, `plugin`) must be UpperCamelCase; `system` names must be
-snake_case, because they expand to fns. Both are checked in the block, with a
-concrete rename:
+`machine`, `state`, `plugin`) must be UpperCamelCase; names that expand to
+**fns** (`system`, `material`) must not. Both directions are checked in the
+block, with a concrete rename:
 
 ```text
 error: component names are UpperCamelCase — they expand to types (rename `health` to `Health`)
 error: system names are snake_case — they expand to fns (rename `Foo`)
+error: material names are lowercase — they expand to builder functions, not types (rename `Gold` to `gold`)
 ```
 
 The check is Unicode-correct: it asks `char::is_uppercase`, not an ASCII probe,
@@ -211,6 +210,34 @@ for every leaf by `A`'s own `on E`, so no inheritance walk ever reaches it — a
 the target it names would never have been looked up. A chart that names a state
 which does not exist is broken whether or not anything reaches it.
 
+## Materials
+
+The seven material keys are one table in the parser — the same rows the
+diagnostic prints and the parser dispatches on — so the "expected one of" list
+cannot advertise a key the parser lacks, or omit one it accepts:
+
+```text
+error: unknown material key `roughnes`; keys are: base, metallic, roughness, reflectance, emissive, flags, textures (did you mean `roughness`?)
+ --> tests/ui/material_unknown_key.rs:7:46
+  |
+7 |     material gold { base: (1.0, 0.72, 0.30), roughnes: 0.14 }
+  |                                              ^^^^^^^^
+```
+
+Where each fault lands is the whole point:
+
+| You write | Where the error lands |
+|-----------|-----------------------|
+| `roughnes: 0.14` | the **key**, with the exhaustive list and a did-you-mean |
+| `base: (1.0, 0.72)` | the **tuple** — neither the key nor any one component is what is wrong |
+| `emissive: (r, g, b, a)` | the tuple again; `Material::new` takes `[f32; 3]`, and a synthesized array carries no span of yours |
+| `base: …, base: …` | the **second** key, refusing last-write-wins |
+| no `base:` | the material's **name**, with the default table for every key that does have one |
+| two materials of one name | **both** names — the one collision rustc could not place on a user token |
+
+The full message texts, and the story behind that last row, are on
+[Materials](materials.md#refusals).
+
 ## What Aether checks, and what it leaves alone
 
 Duplicated checks drift, so Aether pre-checks a downstream rule **only** when it
@@ -227,6 +254,8 @@ can produce a strictly better span or message. The whole pre-check list:
 | flattened-name and snake-collapse collisions | Aether has both chart positions; rustc sees only a duplicate definition on tokens the user never wrote |
 | every declared machine name, reachable or not | the lazy retargeting and inheritance walks skip what nothing targets, so a typo used to expand clean |
 | `let` in a guard or a run condition | Aether splices that expression into `if !(…)` or `.run_if(…)`, where a `let` is not valid Rust; caught here, the error lands on your own `let` instead of on a synthesized `if` you never wrote |
+| material keys, color arities, and the required `base:` | the key surface is Aether's; and a wrong arity would otherwise fail against an array Aether synthesized, which carries no span of yours |
+| two materials of one name | measured: rustc's `E0428` puts **both** labels on the `aether!` token, because a material emits no derive and no trait bound to carry a second, localized error |
 
 Everything else defers. Query data is handed to the engine's `QueryData` trait
 unvalidated; trait-bound failures come from the derive's own const-asserts;
@@ -257,5 +286,6 @@ is a regression.
   [Systems & plugins](systems-and-plugins.md) — the rules behind the messages.
 - [State machines](state-machines.md) — the chart semantics the machine errors
   protect.
+- [Materials](materials.md) — the key table these messages advertise.
 - Source: `crates/aether_lang/src/diag.rs`, `crates/aether_lang/src/parse.rs`,
   goldens in `crates/aether_tests/tests/ui/`.

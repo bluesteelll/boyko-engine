@@ -24,7 +24,7 @@ The consequences are the point:
   through as verbatim token trees with their original spans, so rustc errors,
   rust-analyzer completions and go-to-definition land on your own tokens.
 
-*(Branch: `feat/multi-paradigm-render`. Shipped rungs: A0–A4.)*
+*(Branch: `feat/multi-paradigm-render`. Shipped rungs: A0–A5.)*
 
 ## Hello, Aether
 
@@ -156,12 +156,15 @@ expansion:
 | `system name(…) clauses { … }` | `pub fn` with the desugared `SystemParam` signature | A2 | [Systems & plugins](systems-and-plugins.md) |
 | `plugin Name;` | `pub struct` + `impl Plugin` holding every sibling registration | A2 | [Systems & plugins](systems-and-plugins.md#the-plugin-header) |
 | `machine Name { … }` | flat `States` enum + one transition system per (leaf, event) + the initial-enter startup system | A3 · A4 | [State machines](state-machines.md) |
-| `material name { … }` | *planned* — rung A5 | — | — |
+| `material name { … }` | `#[inline] pub fn` over `Material::new` / `with_textures` | A5 | [Materials](materials.md) |
 | `scene name { … }` | *planned* — rung A6 | — | — |
 
-Naming the two planned constructs in that list is deliberate: writing
-`material gold { }` today gives you an error that says **which rung it lands
-on**, not "unknown construct". See [Diagnostics](diagnostics.md#planned-constructs-name-their-rung).
+Naming the still-planned construct in that list is deliberate: writing
+`scene lab { }` today gives you an error that says **which rung it lands on**,
+not "unknown construct". See
+[Diagnostics](diagnostics.md#planned-constructs-name-their-rung). The list is
+also how you can tell a rung landed — `material gold { }` used to answer with
+rung A5, and now answers ``material `gold` needs a `base:` color``.
 
 ## Three crates, one macro
 
@@ -224,10 +227,10 @@ this become", those tests are it.
 
 ## Status and what is next
 
-Rungs **A0–A4** ship in this build: `component`, `tag`, `bundle`, `event`,
-`system`, `plugin`, `machine`. Machines carry the full hierarchy — composite
-states, `initial` retargeting, superstate handler inheritance, LCA-inlined
-enter/exit and group predicates — which A3 delivered a rung early.
+Rungs **A0–A5** ship in this build: `component`, `tag`, `bundle`, `event`,
+`system`, `plugin`, `machine`, `material`. Machines carry the full hierarchy —
+composite states, `initial` retargeting, superstate handler inheritance,
+LCA-inlined enter/exit and group predicates — which A3 delivered a rung early.
 
 A4 was therefore spent on the piece nobody had built and on hardening what was
 already there:
@@ -253,11 +256,19 @@ already there:
   and the case gate reads through a `r#raw` ident escape. See
   [Diagnostics](diagnostics.md).
 
+A5 then added the first construct that reaches outside the ECS kernel:
+**[`material`](materials.md)** — seven keys over a six-entry default table,
+emitting an `#[inline]` builder fn over `Material::new`, or over
+`Material::with_textures` when you name the `textures:` escape. It is also the
+first construct whose emitted paths point outside `boyko_ecs`. The language
+crates still depend on nothing — but the integration crate now compiles against
+`boyko_render`, deliberately, so a change to `Material::new` goes red in this
+repo instead of in your game.
+
 Planned, not shipped:
 
 | Rung | Contents | Status today |
 |------|----------|--------------|
-| A5 | `material` — PBR material builder fns over `Material::new` / `with_textures` | the parser refuses it and names the rung |
 | A6 | `scene` — entity trees, mesh/material resolution, demand-driven spawn-fn params | the parser refuses it and names the rung |
 | A7 | DX hardening: expansion-size CI measurement, span-column-pinned goldens, `aether v1;` version header | not started |
 
@@ -271,6 +282,8 @@ find out whether a construct exists yet — try it and read the error.
   and sibling ordering.
 - [State machines](state-machines.md) — `machine`, flattening, the initial-enter
   chain, and the one recorded hazard.
+- [Materials](materials.md) — `material`, the key table, and the `textures:`
+  escape.
 - [Diagnostics](diagnostics.md) — every error contract Aether promises.
 - [Components](../concepts/components.md) and [Systems](../concepts/systems.md) —
   the hand-written surface Aether expands to.
