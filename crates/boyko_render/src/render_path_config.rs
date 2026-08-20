@@ -821,7 +821,8 @@ pub struct RenderPathDeviceCaps {
     /// Whether `R8G8_UNORM` supports `STORAGE_IMAGE` under OPTIMAL tiling
     /// (`DeviceCaps::rg8_unorm_storage_ok`) — the SV0 `sdf_term` ring's write format. Absent ⇒
     /// [`ResolvedRenderPath::vb_sdf_mesh_armable`] resolves `false` (degrade-not-panic: the
-    /// request clamps, the prepass never exists, the tails read the seeded white term).
+    /// request clamps, the prepass never exists, and the tails never READ the ring — their
+    /// term read sits behind the mode gate, and mode is 0 on every frame of such a boot).
     pub rg8_unorm_storage: bool,
 }
 

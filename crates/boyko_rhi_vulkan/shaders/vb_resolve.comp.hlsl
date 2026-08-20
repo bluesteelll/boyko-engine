@@ -156,9 +156,12 @@ static const float3 LIGHT_UP = float3(0.0, 1.0, 0.0);
 #ifndef VB_SV0_KILL
 // VB-SV0 DP2 (`docs/VB-SV0-SDF-SHADOW-PLAN.md` Rev 10): the dedicated `sdf_mesh_shadow` pass's
 // R8G8 term — `R` shadow visibility, `G` contact AO, both with 1.0 = "no effect". The bound
-// image is ALWAYS the real per-FIF `sdf_term` ring, seeded to white (1,1) at creation, so a
-// disarmed frame reads the neutral term and recording never branches on arming (no dummy image
-// exists). The march itself lives in the PASS: carrying
+// image is ALWAYS the real per-FIF `sdf_term` ring (no dummy image exists), so recording never
+// branches on arming — but a DISARMED (mode-0) frame never READS it: the `.Load` below sits
+// behind the mode gate, and the neutral this shader uses on those frames is the local
+// `float2(1,1)` initializer, not the image. The boot seed to white exists so every texel is
+// DEFINED before the first armed read; an armed frame rewrites every pixel it will read (the
+// pass and this tail gate on the same vb_id sentinel). The march itself lives in the PASS: carrying
 // it compiled into this tail cost ~+75% of this dispatch DARK (measured, reverted at `13f1c9a3`),
 // and two `.Load`s behind a wave-uniform gate is the whole footprint the term is allowed here —
 // `-D VB_SV0_KILL=1` re-produces the term-free module byte-for-byte for the dark-cost A/B.
