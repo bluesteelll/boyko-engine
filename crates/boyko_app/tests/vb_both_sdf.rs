@@ -93,5 +93,17 @@ fn vb_both_sdf_screenshot_dump() {
     // Requested AFTER `add_plugins` (which installs `RenderPathPlugin`'s `Deferred` default) so
     // this owner override wins — `vb_both.rs`'s own post-plugins insert, verbatim.
     app.insert_resource(RenderPathConfig { path: RenderPath::VisibilityBuffer, legs: GeometryLegs::Both });
+    // VB-SV0 DP4b: the env-gated arm — the BOYKO_AA=fxaa oracle-knob precedent verbatim: unset
+    // ⇒ requests stay false ⇒ the committed pin holds byte-identical; `BOYKO_SDF_MESH=on|shadow|ao`
+    // arms the request bits on THIS fixture, which is the S1 scene the S1.5 reference was
+    // measured on — the comparability DP4's clause 3 requires.
+    {
+        let sdf_mesh = std::env::var("BOYKO_SDF_MESH").unwrap_or_default();
+        app.insert_resource(boyko_render::LightingConfig {
+            vb_sdf_mesh_shadow: matches!(sdf_mesh.as_str(), "on" | "shadow"),
+            vb_sdf_mesh_ao: matches!(sdf_mesh.as_str(), "on" | "ao"),
+            ..boyko_render::LightingConfig::default()
+        });
+    }
     app.run();
 }

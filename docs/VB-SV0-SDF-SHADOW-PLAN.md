@@ -80,6 +80,29 @@ so — the threshold is inherited, not renegotiated.
 **DP5 — owner-eval packet.** The visual dumps (S4's gate (iv) as specified), produced and filed;
 flagged for the owner, not blocking the ladder.
 
+> **DP4 ADJUDICATED 2026-08-20 — clause 3 FAILS at 5.75×, and the record says so as Rev 10
+> promised.** Instrument first (clause 5): three release legs on the S1 fixture, medians
+> 34 816 / 35 840 / 35 328 ns, null spread 1 024 ns — ONE timer grid step, signal 34× above it;
+> the measurement is unimpeachable. The pass median 35 328 ns against the 6 144 ns S1.5
+> reference is **5.75×** where the inherited threshold is 2×.
+>
+> **The diagnosis, so the number teaches rather than merely fails:** the reference measured the
+> term's MARGINAL cost inside an already-running full-screen marcher — `P` and `N` were free,
+> the field was hot. The dedicated pass pays a SECOND full `vb_geom_fetch` per covered pixel
+> (instance row → indices → vertices → transforms → barycentric interpolation) that neither the
+> reference nor the inline form contained — the inline amortized it into the tail's own fetch.
+> Composing the two prior measurements: inline-armed ≈ 2.34 × ref ≈ 14.4 µs on this family, so
+> the dedicated form's own hosting is ≈ 2.45× the inline's armed cost — the price paid for the
+> dark side going 17.4 µs → **0** on every disarmed frame, which every committed pin now enjoys
+> by construction.
+>
+> **Disposition recorded, not renegotiated:** the feature stays SHIPPED and DEFAULT-OFF (its
+> disarmed cost is structurally zero; four pins byte-identical on hardware), the stage does NOT
+> claim DP4's cost clause, and the identified lever is filed as the next rung: **amortize the
+> fetch by producing the term in the split path's geometry half** (`vb_geo` already fetches
+> every covered pixel's triangle — the R9 split exists to pay that walk once). The owner's DP5
+> packet carries this verdict beside the visuals.
+
 *(Rev 9 header retained below for the revision trail.)*
 
 **Status:** DESIGN, **Rev 9** — NOT APPROVED, and **the stage's disposition is OPEN pending an owner
