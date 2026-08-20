@@ -86,7 +86,14 @@ const PINNED: &[&str] = &[
 const SYMBOL: &str = "vkGetQueryPoolResults";
 
 /// Directories the walk skips outright.
-const SKIP_DIRS: &[&str] = &["target", ".git", "graphify-out", "book", "assets"];
+///
+/// `.claude` is here because agent sessions park REGISTERED WORKTREES of other branches under
+/// `.claude/worktrees/` (gitignored). A census that walks them enumerates another checkout's
+/// source as if it were this tree's, so the pin reds for whoever happens to have a worktree
+/// parked — the same leak class as the recorded clippy.toml ancestor-walk hazard, and it was
+/// MEASURED here: two parked worktrees turned this census red in the main checkout while a
+/// clean worktree at the same HEAD passed.
+const SKIP_DIRS: &[&str] = &["target", ".git", ".claude", "graphify-out", "book", "assets"];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
