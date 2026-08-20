@@ -1,0 +1,5 @@
+error: query takes angle brackets: `query<&mut Transform>`
+ --> tests/ui/query_takes_angle_brackets.rs:5:22
+  |
+5 |     system s(q: query(&mut Transform)) {}
+  |                      ^
