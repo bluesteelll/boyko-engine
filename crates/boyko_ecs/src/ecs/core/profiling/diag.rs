@@ -30,8 +30,10 @@
 //! Measured: the two rows above were added by a compile error, not by remembering.
 //!
 //! **`ClockUncalibrated` gets no code, and that is a decision rather than an omission.** The
-//! `92xx` block is exactly eighteen rows, dense and consecutive, and check 1 of the code registry
-//! makes a nineteenth un-addable without moving the block — so "invent a code for it" is not free.
+//! `92xx` block runs consecutively from `9201`, so a new row is free only at the END of it and a
+//! code *inside* the block would move every row after it — which is what made "invent a code for
+//! it" expensive when this paragraph was written. (VB-SV0 DP6-0b appended `W9219` and `W9220` at the
+//! end, the cheap direction, which does not change the argument for `ClockUncalibrated`.)
 //! More to the point, it does not *want* a code: the condition is "a tick was read before the
 //! scale was probed", whose consequence is that the window's magnitudes are unscaled. That is a
 //! **status on the data**, and the corpus already has a vocabulary for exactly that
@@ -60,14 +62,14 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use boyko_diag::loss::DiagFlag;
 use boyko_log::codes::{
     E9204, E9213, OnceSite, W9201, W9202, W9203, W9205, W9206, W9207, W9208, W9209, W9210, W9211,
-    W9212, W9214, W9215, W9216, W9217, W9218,
+    W9212, W9214, W9215, W9216, W9217, W9218, W9219, W9220,
 };
 use boyko_log::target::Profiling;
 use boyko_log::{error, warn};
 
 /// The codes this rung emits, in registry order. The census is indexed by position here.
 ///
-/// A slice rather than a range: a reader who has to compute which of `9201..=9218` are live from a
+/// A slice rather than a range: a reader who has to compute which of `9201..=9220` are live from a
 /// pair of bounds has been handed arithmetic instead of a list.
 ///
 /// # TWO REPORTERS COULD NOT EMIT, and this list is why *(found at L8c)*
@@ -84,7 +86,7 @@ use boyko_log::{error, warn};
 /// codes to this array and the length pin moved.
 ///
 /// The list is now the whole block: every `92xx` code that has an emitter has a slot.
-pub const LIVE_CODES: [u16; 18] = [
+pub const LIVE_CODES: [u16; 20] = [
     W9201.number(), // engine zone registry exhausted
     W9202.number(), // GPU timestamp pair budget exhausted            (L8c)
     W9203.number(), // region overflow / unclaimed drops
@@ -103,6 +105,8 @@ pub const LIVE_CODES: [u16; 18] = [
     W9216.number(), // clock epoch break
     W9217.number(), // GPU slots abandoned at teardown                (L8c)
     W9218.number(), // a telemetry quantile subscription was refused past the cap
+    W9219.number(), // a GPU zone END with no matching BEGIN            (VB-SV0 DP6-0b)
+    W9220.number(), // a GPU zone's declared record order was violated  (VB-SV0 DP6-0b)
 ];
 
 /// One counter per [`LIVE_CODES`] entry. `.bss`, so a process that emits nothing writes no page.
@@ -199,6 +203,13 @@ pub const fn flag_code(flag: DiagFlag) -> Option<u16> {
         // L8c. The only one of that rung's four conditions that RAISES a flag rather than calling
         // its reporter directly -- see the variant's own doc for why this one has no other route.
         DiagFlag::GpuPairBudgetExhausted => Some(W9202.number()),
+        // VB-SV0 DP6-0b. A SECOND code rather than a second meaning for `W9202`, and the split is
+        // the same kind the rung-10 and rung-13 pairs make: a pair budget exhausted leaves the
+        // frame's earlier zones intact and its later ones absent, while an unmatched END means a
+        // bracket's two halves reached the recorder through different predicates — a recorder
+        // defect, not a budget. One code for both would tell a reader to raise `MAX_GPU_PAIRS`
+        // over a condition no budget can fix.
+        DiagFlag::GpuZoneUnmatchedEnd => Some(W9219.number()),
         DiagFlag::ClockUncalibrated => None,
     }
 }
@@ -230,6 +241,7 @@ pub(crate) fn report_raised(bits: u32) {
         DiagFlag::TelemetryWriteFailed,
         DiagFlag::TelemetryZonesRefused,
         DiagFlag::GpuPairBudgetExhausted,
+        DiagFlag::GpuZoneUnmatchedEnd,
     ] {
         if bits & flag.as_bits() == 0 {
             continue;
@@ -249,6 +261,7 @@ pub(crate) fn report_raised(bits: u32) {
             DiagFlag::TelemetryWriteFailed => report_telemetry_write_failed(),
             DiagFlag::TelemetryZonesRefused => report_telemetry_zones_refused(),
             DiagFlag::GpuPairBudgetExhausted => report_gpu_pair_budget_exhausted(),
+            DiagFlag::GpuZoneUnmatchedEnd => report_gpu_zone_unmatched_end(),
             DiagFlag::ClockUncalibrated => {
                 debug_assert!(false, "invariant: flag_code(ClockUncalibrated) is None");
             }
@@ -357,6 +370,30 @@ pub(crate) fn report_gpu_pair_budget_exhausted() {
     }
 }
 
+/// `W9219` — a GPU zone bracket recorded an END with no matching BEGIN.
+///
+/// Reached from the fold, via [`DiagFlag::GpuZoneUnmatchedEnd`]. **The direction the witness's
+/// `Torn` label cannot see**: `Torn` is `begun ∧ ¬ended`, so a bracket whose END was reached
+/// through a predicate its BEGIN was not leaves no bit set at all and the zone reads as absent —
+/// indistinguishable from a leg that legitimately does not run that pass.
+///
+/// A `Warn` and not an `Error` for the same reason `W9202` is: the frame renders correctly and
+/// only its instrument is wrong. It is nonetheless a **defect in the recorder**, never a budget,
+/// so no amount of raising a cap will clear it.
+#[cold]
+#[inline(never)]
+pub(crate) fn report_gpu_zone_unmatched_end() {
+    debug_assert_eq!(flag_code(DiagFlag::GpuZoneUnmatchedEnd), Some(W9219.number()));
+    if claim(W9219.number()) {
+        warn!(
+            Profiling,
+            W9219,
+            "a GPU zone bracket recorded an END with no matching BEGIN; that zone's pair belongs \
+             to no interval"
+        );
+    }
+}
+
 /// `W9205` — pairs were lost in this window, so its figures are folded from fewer samples.
 ///
 /// **`pub`, and called directly by `boyko_app`'s reducer** — see the block above. A lost pair is
@@ -375,6 +412,33 @@ pub fn report_window_zones_lost(lost: u32, torn: u32, measured: u32) {
             lost,
             torn,
             measured
+        );
+    }
+}
+
+/// `W9220` — a GPU zone's declared record order was violated on a frame — VB-SV0 DP6-0b.
+///
+/// **`pub`, and called DIRECTLY by `boyko_app`'s window reducer**, for the reason the block above
+/// gives for `W9205`/`W9206`/`W9217`: `boyko_app` depends on this crate, and a bit raised by a
+/// measured run that outlives the last fold is a report nobody takes. The `Once` latch is what
+/// makes it one record per process — a chain that breaks on one frame usually breaks on many, and
+/// the COUNT belongs in the artifact's `[order]` block where a reader can compare it with
+/// `frames_checked`.
+///
+/// `zone` and `run` are arguments rather than part of the literal for `W9206`'s reason: which
+/// bracket left its declared position is what a reader acts on, and a message that named only the
+/// condition would send them to the file to find out.
+#[cold]
+#[inline(never)]
+pub fn report_zone_order_violated(zone: u16, run: u16) {
+    if claim(W9220.number()) {
+        warn!(
+            Profiling,
+            W9220,
+            "GPU zone {} left its declared position inside the run bracket {} -- that frame's \
+             brackets do not partition the interval they divide",
+            zone,
+            run
         );
     }
 }
@@ -676,6 +740,9 @@ mod tests {
         // L8c's one flag-routed condition. The other three of that rung call their
         // reporters directly and so have no arm here -- see the block above them.
         assert_eq!(flag_code(DiagFlag::GpuPairBudgetExhausted), Some(W9202.number()));
+        // VB-SV0 DP6-0b's flag. TWO codes for the two GPU-zone conditions, because a budget and a
+        // recorder defect want opposite actions from the reader.
+        assert_eq!(flag_code(DiagFlag::GpuZoneUnmatchedEnd), Some(W9219.number()));
         // A POSITIVE answer, not a gap: the condition is reported as a frame flag, because its
         // consequence is a status on the data rather than an event.
         assert_eq!(flag_code(DiagFlag::ClockUncalibrated), None);
@@ -689,7 +756,7 @@ mod tests {
     /// and every individual `assert_eq!` above would still pass.
     #[test]
     fn no_two_flags_share_a_code() {
-        const FLAGS: [DiagFlag; 11] = [
+        const FLAGS: [DiagFlag; 12] = [
             DiagFlag::ClockEpochBreak,
             DiagFlag::ClockUncalibrated,
             DiagFlag::LaneExhausted,
@@ -701,6 +768,7 @@ mod tests {
             DiagFlag::TelemetryWriteFailed,
             DiagFlag::TelemetryZonesRefused,
             DiagFlag::GpuPairBudgetExhausted,
+            DiagFlag::GpuZoneUnmatchedEnd,
         ];
         let mut seen: Vec<u16> = Vec::new();
         for f in FLAGS {
@@ -709,7 +777,7 @@ mod tests {
                 seen.push(c);
             }
         }
-        assert_eq!(seen.len(), 10, "ten of the eleven flags carry a code; ClockUncalibrated does not");
+        assert_eq!(seen.len(), 11, "eleven of the twelve flags carry a code; ClockUncalibrated does not");
     }
 
     /// `W9207`'s selection is measured here because its emission cannot be: `invariant_tsc()` is
@@ -806,6 +874,7 @@ mod l8c_emitter_tests {
             DiagFlag::TelemetryWriteFailed,
             DiagFlag::TelemetryZonesRefused,
             DiagFlag::GpuPairBudgetExhausted,
+            DiagFlag::GpuZoneUnmatchedEnd,
         ] {
             let Some(code) = flag_code(f) else { continue };
             assert!(
@@ -828,8 +897,31 @@ mod l8c_emitter_tests {
         }
         assert_eq!(
             LIVE_CODES.len(),
-            18,
-            "twelve before L8c; four added for its own codes, and TWO for rung 10's reporters that \n             had no slot and therefore could not emit"
+            20,
+            "twelve before L8c; four added for its own codes, TWO for rung 10's reporters that \n             had no slot and therefore could not emit, and TWO for VB-SV0 DP6-0b's W9219/W9220"
         );
+    }
+
+    /// VB-SV0 DP6-0b's `W9219` reaches the emit path, driven the way the fold drives it.
+    ///
+    /// The same shape as the `W9202` row above and for the same reason: the condition's site is in
+    /// `boyko_rhi_vulkan`, which cannot call this module, so the only route that can be exercised
+    /// here is bits in / report out — which also covers the `report_raised` dispatch arm a direct
+    /// call to the reporter would skip.
+    #[test]
+    fn the_unmatched_end_condition_reaches_the_emit_path() {
+        report_raised(DiagFlag::GpuZoneUnmatchedEnd.as_bits());
+        assert!(report_count(W9219.number()) >= 1, "the unmatched GPU zone END was silent");
+    }
+
+    /// VB-SV0 DP6-0b's `W9220` reaches the emit path through the PRODUCTION reporter.
+    ///
+    /// A direct call and not the flag word, which is the route its site takes: `boyko_app`'s
+    /// window reducer depends on this crate, and a bit raised by a run that outlives the last fold
+    /// is a report nobody takes.
+    #[test]
+    fn the_record_order_violation_reaches_the_emit_path() {
+        report_zone_order_violated(11, 12);
+        assert!(report_count(W9220.number()) >= 1, "the record-order violation was silent");
     }
 }

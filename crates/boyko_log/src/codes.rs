@@ -1114,6 +1114,12 @@ codes! {
         "GPU timestamp slots were still in flight at teardown and were abandoned"),
     (9218, W, W9218, RatePolicy::Once,  CodeStatus::Live          ,
         "A telemetry quantile subscription was refused past the per-session cap"),
+    // VB-SV0 DP6-0b. The block's nineteenth row, appended rather than inserted: check 1 wants
+    // strictly increasing numbers, and 9219 is the first free one after 9218.
+    (9219, W, W9219, RatePolicy::Once,  CodeStatus::Live          ,
+        "A GPU zone bracket recorded an END with no matching BEGIN"),
+    (9220, W, W9220, RatePolicy::Once,  CodeStatus::Live          ,
+        "A GPU zone's declared record order was violated on a frame"),
 }
 
 /// Declare a **downstream** diagnostic-code table: a game's, a mod's, or a tool's *(Decision 19)*.
@@ -1471,6 +1477,17 @@ mod tests {
             (b'W', 9216), // P2  -- clock epoch break
             (b'W', 9217), // L8c -- GPU slots abandoned at teardown (direct call, post-fold)
             (b'W', 9218), // P13 -- telemetry quantile subscription refused past the cap
+            // VB-SV0 DP6-0b. Both appended after the L2 block; `W9220` takes the DIRECT-call route
+            // (its site is `boyko_app`'s window reducer, which depends on the emitter), `W9219` the
+            // flag route (its site is `boyko_rhi_vulkan`, which cannot reach it).
+            //
+            // ⚠️ These two rows were added to the ECS-side prose and to `code_registry.rs`'s
+            // corpus checks in the same commit as their emitters, and BOTH pins in THIS file were
+            // missed — `cargo test -p boyko-log --test code_registry` passed 16/16 while
+            // `--lib` reds. That is the documented target-selection blind spot: `--test <name>`
+            // does not build `--lib`, so a green from one says nothing about the other.
+            (b'W', 9219), // DP6-0b -- a GPU zone END with no matching BEGIN (flag route)
+            (b'W', 9220), // DP6-0b -- a GPU zone's declared record order was violated (direct call)
         ];
         for row in DIAGNOSTICS {
             match row.status {
@@ -1523,10 +1540,19 @@ mod tests {
     }
 
     #[test]
-    fn the_profiling_block_is_eighteen_consecutive_rows() {
+    fn the_profiling_block_is_twenty_consecutive_rows() {
+        // VB-SV0 DP6-0b took the block 18 -> 20 (`W9219`, `W9220`). The NAME carries the count for
+        // the same reason the assertion does: a test called "...eighteen..." asserting twenty is a
+        // row nobody can read, and the next reader has to open the body to learn which number is
+        // current.
+        //
+        // ⚠️ This pin and the Live-set pin above both live in `--lib`, and the delta that added the
+        // two rows was gated with `--test code_registry` alone — 16/16 green while these two were
+        // red. `--test <name>` does not build `--lib`; a filter is an assertion about coverage and
+        // it was wider than the filter.
         let block: Vec<u16> =
             DIAGNOSTICS.iter().filter(|r| (9201..=9299).contains(&r.number)).map(|r| r.number).collect();
-        assert_eq!(block.len(), 18, "the 92xx reservation is eighteen rows");
+        assert_eq!(block.len(), 20, "the 92xx reservation is twenty rows");
         for (i, n) in block.iter().enumerate() {
             assert_eq!(*n, 9201 + i as u16, "the block must be consecutive with no gaps");
         }

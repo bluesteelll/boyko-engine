@@ -985,6 +985,7 @@ mod tests {
             },
             zones: Vec::new(),
             census: LabelCensus::default(),
+            order: super::super::artifact::OrderCensus::default(),
             losses: Vec::new(),
         };
         assert_eq!(WorkloadTag::of(&art, &[2, 0, 1]), WorkloadTag::of(&art, &[0, 1, 2]));

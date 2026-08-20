@@ -39,8 +39,8 @@ use super::super::frame_driver::Renderer;
 use super::super::gpu_zone::{
     GpuZoneRecorder, VB_ZONE_COUNT, ZONE_BASE_VB, ZONE_VB_CULL_DISPATCH, ZONE_VB_CULL_RESET,
     ZONE_VB_EARLY_CULL, ZONE_VB_EARLY_RASTER, ZONE_VB_GEO, ZONE_VB_HZB_BUILD, ZONE_VB_LATE_CULL,
-    ZONE_VB_LATE_RASTER, ZONE_VB_LATE_UPLOAD, ZONE_VB_RUN, ZONE_VB_SDF_MESH, ZONE_VB_SHADE,
-    zone_begin_stage,
+    ZONE_VB_LATE_RASTER, ZONE_VB_LATE_UPLOAD, ZONE_VB_PRESHADE, ZONE_VB_PRODUCE_RUN, ZONE_VB_RUN,
+    ZONE_VB_SDF_MESH, ZONE_VB_SHADE, zone_begin_stage,
 };
 
 #[cfg(feature = "profiling-census")]
@@ -229,8 +229,34 @@ struct TsWitness<'a> {
     /// Dev-profile only: writes per QUERY index (`2 * slot`, `2 * slot + 1`). A slot written
     /// twice after one reset is a `VUID-vkCmdWriteTimestamp` violation and a silently wrong
     /// delta — not a hang, so neither the epilogue nor the readback can catch it.
+    ///
+    /// **READ by [`Self::finish`] under this same `cfg`** (VB-SV0 DP6-0b). It was incremented and
+    /// read nowhere for four rungs while two call-site comments — `record_hzb_poison_build`'s doc
+    /// and its `if occlusion_split` site — cited *"the dev-profile double-write counter in
+    /// `TsWitness::finish`"* as the safety net for that function's mutual-exclusion invariant.
+    /// Those two comments are true from this rung on, in the profile they name.
     #[cfg(debug_assertions)]
     writes: [u8; 2 * VB_ZONE_COUNT as usize],
+    /// **Bit `p` set when pass `p`'s BEGIN call SITE was reached** — unconditionally, before every
+    /// early return in [`Self::begin`], and in every profile.
+    ///
+    /// # Why a second pair of masks, and why release-live
+    ///
+    /// [`Self::begun`] records that a stamp was WRITTEN; this records that the site was REACHED.
+    /// The difference is the whole detector: `end` returns silently when `pair_of[slot]` is
+    /// [`Self::NO_PAIR`] — no command, no `Torn`, no counter — so a bracket whose END is reached
+    /// through a predicate its BEGIN was not leaves the zone simply ABSENT, which reads exactly
+    /// like a leg that does not run that pass. `Torn` is `begun ∧ ¬ended` and catches only the
+    /// opposite direction.
+    ///
+    /// Two `u16`s on a per-frame stack struct, four bytes, off the GPU path. They are NOT
+    /// `#[cfg(debug_assertions)]` and cannot be: this is a **gate input**, and the timing worker
+    /// inherits the driver's profile — a release bench run has `debug_assertions` OFF, so a
+    /// detector there would be dead in exactly the runs that read it (this type's own header
+    /// settled that class for [`Self::finish`]).
+    begin_called: u16,
+    /// [`Self::begin_called`]'s counterpart at an END, set before [`Self::end`]'s `NO_PAIR` return.
+    end_called: u16,
 }
 
 impl<'a> TsWitness<'a> {
@@ -281,6 +307,8 @@ impl<'a> TsWitness<'a> {
             pair_of: [Self::NO_PAIR; VB_ZONE_COUNT as usize],
             #[cfg(debug_assertions)]
             writes: [0; 2 * VB_ZONE_COUNT as usize],
+            begin_called: 0,
+            end_called: 0,
         };
         #[cfg(feature = "profiling-census")]
         if let Some(w) = ts.cw {
@@ -368,7 +396,7 @@ impl<'a> TsWitness<'a> {
     /// The witness's own index for `zone` — its bit in the two masks and its entry in `pair_of`.
     ///
     /// # Panics
-    /// On a zone outside the VB family. Every caller passes one of the twelve `ZONE_VB_*`
+    /// On a zone outside the VB family. Every caller passes one of the fourteen STAMPED `ZONE_VB_*`
     /// constants literally, so an out-of-range id is a mis-typed call site, not a runtime
     /// condition — and a wrong-family id would otherwise silently index another pass's bit.
     #[inline]
@@ -386,11 +414,18 @@ impl<'a> TsWitness<'a> {
     #[inline]
     unsafe fn begin(&mut self, fns: &DeviceFns, cmd: VkCommandBuffer, zone: u16) {
         let slot = Self::slot_of(zone);
+        // VB-SV0 DP6-0b: the SITE was reached. Set before every early return below — including the
+        // unarmed path — so `finish` compares "which sites ran" against "which stamps landed",
+        // which is a statement about the RECORDER and not about this frame's arming.
+        self.begin_called |= 1u16 << slot;
         if let Some((rec, ring)) = self.zr {
             // A full ring slot is a stated refusal, not a loss: the pass records no bracket, its
             // `begun` bit stays clear, and `end` finds `NO_PAIR` and records nothing either — so
-            // the pair is never half-written. `MAX_GPU_PAIRS` is 128 against this frame's ten, so
-            // reaching it means a caller reused a sealed slot, which the recorder counts.
+            // the pair is never half-written. `MAX_GPU_PAIRS` is 128 against this frame's FOURTEEN
+            // at the widest — ids 0..=13 all stamp on a split, SV0-armed mesh leg, because ids
+            // 3/4/5/7/8's brackets sit OUTSIDE `if occlusion_split` by design and id 14 is derived
+            // and never stamped — so reaching the cap means a caller reused a sealed slot, which
+            // the recorder counts.
             let Some(pair) = rec.alloc_pair(ring, zone) else { return };
             self.pair_of[slot as usize] = pair;
             // THE STAGE IS THE ZONE'S, not the recorder's default. `GpuZoneRecorder` opened every
@@ -411,6 +446,9 @@ impl<'a> TsWitness<'a> {
     #[inline]
     unsafe fn end(&mut self, fns: &DeviceFns, cmd: VkCommandBuffer, zone: u16) {
         let slot = Self::slot_of(zone);
+        // VB-SV0 DP6-0b: set BEFORE the `NO_PAIR` return below — that return is the silence this
+        // mask exists to break, so recording the site after it would witness nothing.
+        self.end_called |= 1u16 << slot;
         if let Some((rec, ring)) = self.zr {
             let pair = self.pair_of[slot as usize];
             if pair == Self::NO_PAIR {
@@ -437,8 +475,65 @@ impl<'a> TsWitness<'a> {
     /// back labelled `NotBracketed` — a stated absence instead of a hang. With the collector deleted
     /// there is nothing left to fill, so this is a `seal` and nothing else. **A frame may now
     /// legitimately leave pairs unopened**, which is why the labels exist.
+    ///
+    /// # The three mask compares (VB-SV0 DP6-0b)
+    ///
+    /// | condition | meaning | outcome |
+    /// |---|---|---|
+    /// | `begin_called & !begun` | `alloc_pair` returned `None` | already `GpuPairBudgetExhausted` |
+    /// | `end_called & !begin_called` | **an END with no BEGIN** | raises `GpuZoneUnmatchedEnd` |
+    /// | `begin_called & !end_called` | a bracket left open | `Torn`, or the budget flag |
+    ///
+    /// Only the middle row had no report of any kind before this rung, which is why it is the one
+    /// that raises. The other two are asserted in the dev profile as a taxonomy check: each is
+    /// already reported release-side by a mechanism that exists, and a second flag for either would
+    /// double-report one condition.
     #[inline]
     fn finish(self) {
+        // An END whose BEGIN site was never reached. RELEASE-LIVE by construction: the masks are
+        // unconditional and this function is the per-frame invariant the type's header calls out as
+        // release-live. Sticky flag rather than a `warn!` for `alloc_pair`'s structural reason —
+        // this crate cannot reach the `92xx` emitter, and `boyko_diag` sits below both.
+        if self.end_called & !self.begin_called != 0 {
+            boyko_diag::loss::raise(boyko_diag::loss::DiagFlag::GpuZoneUnmatchedEnd);
+        }
+        // A bracket left open. Reported release-side as `Torn` when the pair exists, and as
+        // `GpuPairBudgetExhausted` when it does not (`begin_called & !begun`, the first row of the
+        // table above — flagged at `alloc_pair`'s own site, so it is NOT re-raised here: one
+        // condition, one report). This compare therefore adds a dev-profile early warning rather
+        // than the only report, and it holds whether or not the frame armed an instrument.
+        debug_assert!(
+            self.begin_called & !self.end_called == 0,
+            "invariant: every VB bracket that opens also closes (open-without-close mask {:#06x})",
+            self.begin_called & !self.end_called
+        );
+        // The masks BOUND the stamps in both directions: a stamp can only exist where its site ran.
+        // Always true today, and it is what keeps the two pairs of masks one statement — a future
+        // edit that sets `begun`/`ended` from anywhere but `begin`/`end` would make the detector
+        // above compare two unrelated things and still read green.
+        debug_assert!(
+            self.begun & !self.begin_called == 0 && self.ended & !self.end_called == 0,
+            "invariant: `begun`/`ended` are subsets of the sites that ran (begun {:#06x} of {:#06x}, \
+             ended {:#06x} of {:#06x})",
+            self.begun,
+            self.begin_called,
+            self.ended,
+            self.end_called
+        );
+        // VB-SV0 DP6-0b: the dev-profile double-write counter, READ. `record_hzb_poison_build`'s
+        // doc and its armed call site both cite this check by name as the net under their
+        // mutual-exclusion invariant; until this line it did not exist. A second
+        // `vkCmdWriteTimestamp` into one query after a single reset is a
+        // `VUID-vkCmdWriteTimestamp` violation and a silently wrong delta, not a hang.
+        #[cfg(debug_assertions)]
+        for (i, &w) in self.writes.iter().enumerate() {
+            debug_assert!(
+                w <= 1,
+                "invariant: query {i} (zone {}, {}) was written {w} times after one pool reset",
+                ZONE_BASE_VB as usize + i / 2,
+                if i % 2 == 0 { "begin" } else { "end" }
+            );
+        }
         if let Some((rec, ring)) = self.zr {
             // The release edge: every plain mark byte written above becomes visible to `retire`'s
             // `Acquire` load through this one store, and nothing else publishes them.
@@ -966,6 +1061,23 @@ impl Renderer<'_> {
         // them has a declared counterpart; a second spelling here is how declare/record parity
         // breaks. The `debug_assert!`s below check the agreement rather than assume it.
         let occlusion_split = scene.path_vb_occlusion_split();
+
+        // VB-SV0 DP6-0b: `ZONE_VB_PRODUCE_RUN`'s arming predicate, hoisted ONCE and read at BOTH
+        // stamps — the O1 discipline, one binding and two consumers.
+        //
+        // The bracket opens INSIDE `if scene.resolved_render_path.mesh_leg` (right after
+        // `ZONE_VB_RUN`'s end) and closes OUTSIDE it (after the lit-producer chain), because those
+        // are the two ends of the interval DP6 moves work across: the dedicated SV0 prepass and the
+        // fused/classified shade arms are inside the block, and opening after it would exclude
+        // exactly what DP6 deletes. A predicate re-read at the close would be a SECOND spelling of
+        // the same condition, and a bracket whose two halves are gated by two spellings is the
+        // unmatched-END defect `TsWitness::finish` now detects.
+        //
+        // `mesh_leg` and not `path_vb_split()`: `mesh_geo_shade_split ⇒ mesh_leg` by definition, so
+        // every split frame is inside it, and on a mesh-less leg there is no producer run to time —
+        // `NotBracketed` is the honest label there rather than a zero.
+        let produce_run_armed = scene.resolved_render_path.mesh_leg;
+
         debug_assert_eq!(
             plan.vb_raster_late.is_some(),
             occlusion_split,
@@ -3048,6 +3160,27 @@ impl Renderer<'_> {
             unsafe { ts.end(self.fns, cmd, ZONE_VB_LATE_RASTER) };
             unsafe { ts.end(self.fns, cmd, ZONE_VB_RUN) };
 
+            // VB-SV0 DP6-0b: open `ZONE_VB_PRODUCE_RUN` — the DP6 comparator. Immediately after
+            // `e9` and before the first thing the producer chain records, so the two stamps are
+            // adjacent `BOTTOM_OF_PIPE` reads with zero commands between them and the run begins
+            // exactly where the P4-2 run ends.
+            //
+            // Scope: this site is inside `if mesh_leg`, so the predicate is not re-read — the
+            // block already implies it. The assertion is the other direction and is not vacuous:
+            // it checks that the HOISTED binding still agrees with the block it was hoisted out
+            // of. A hoist that drifted to a narrower predicate would open this bracket here and
+            // gate its close on something else, which is the unmatched-pair defect `finish`
+            // reports rather than the one a reader would look for here.
+            debug_assert!(
+                produce_run_armed,
+                "invariant: `produce_run_armed` is the enclosing `mesh_leg` block's own predicate"
+            );
+            // SAFETY: recording is open and no rendering scope is active (the late scope's
+            // `cmd_end_rendering` is above); the pool was reset this frame (this witness's
+            // construction site); `fi` is this present's in-flight slot; this is the only site that
+            // stamps id 12's begin.
+            unsafe { ts.begin(self.fns, cmd, ZONE_VB_PRODUCE_RUN) };
+
             // === VG R3 piece 3 steps P3-3/P3-5 (plan D8): the POST-LATE readback snapshot. ===
             //
             // Recorded at `declare_vb_graph`'s matching position — AFTER the late scope — so pass
@@ -3134,6 +3267,19 @@ impl Renderer<'_> {
             // producer below `min`-combines. Set 1 is DECLARED in the pipeline layout and never
             // bound: the module statically uses only Sets 0 and 2 (the DP1 layout doc). ===
             if let Some(sv0) = plan.sv0_pass {
+                // VB-SV0 DP4a: the pass's OWN zone bracket — the artifact channel's only eye on
+                // this dispatch. GATED like every bracket (unarmed ⇒ no command), and reached only
+                // under `plan.sv0_pass`, so a leg that does not run the prepass never stamps it.
+                //
+                // VB-SV0 DP6-0b MOVED this begin ABOVE `record_vb_pass`. It used to sit after the
+                // derived barriers, while ids 11 and 2 both open before theirs — an attribution
+                // asymmetry that made this id's number a different SHAPE of interval from the two
+                // it was compared against. The three now measure the same extent: derived barriers
+                // + binds + dispatch.
+                // SAFETY: recording is open and no rendering scope is active; the pool was reset
+                // this frame; `fi` is this present's in-flight slot; this is the only site that
+                // stamps id 10's begin.
+                unsafe { ts.begin(self.fns, cmd, ZONE_VB_SDF_MESH) };
                 // SAFETY: recording is open; `record_vb_pass` records the graph's derived
                 // barriers for the "sdf_mesh_shadow" pass into `cmd` — the raster's `vb_id`
                 // COLOR→SRO transition and the term's first-touch →GENERAL write access.
@@ -3158,13 +3304,10 @@ impl Renderer<'_> {
                 // `scene.dispatch_group_count_x` covers `present_extent.width * height` at 64
                 // threads/group — the SAME grid every full-screen VB compute dispatches at.
                 //
-                // VB-SV0 DP4a: the pass's OWN zone bracket — the artifact channel's only eye on
-                // this dispatch (it records between `ZONE_VB_RUN`'s end and `ZONE_VB_SHADE`'s
-                // begin, inside no other interval). GATED like every bracket (unarmed ⇒ no
-                // command), and reached only under `plan.sv0_pass` ⇒ the disarmed fixtures'
-                // pinned pair counts never see this id.
-                // SAFETY: recording is open; the pool was reset this frame; `fi` is this slot.
-                unsafe { ts.begin(self.fns, cmd, ZONE_VB_SDF_MESH) };
+                // The bracket that used to open here opens above, before `record_vb_pass` — see
+                // the DP6-0b note there. This dispatch records between `ZONE_VB_RUN`'s end and
+                // `ZONE_VB_SHADE`'s begin, i.e. inside `ZONE_VB_PRODUCE_RUN` and inside no other
+                // zone's own bracket.
                 unsafe {
                     ts.cmd();
                     (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sv0_pipeline.pipeline);
@@ -3888,6 +4031,22 @@ impl Renderer<'_> {
             // matching begin was recorded above in this same `path_vb_split()` arm.
             unsafe { ts.end(self.fns, cmd, ZONE_VB_GEO) };
 
+            // VB-SV0 DP6-0b: open `ZONE_VB_PRESHADE` — the split's pre-shade stretch, which is
+            // everything between `vb_geo` and the split lit producer: the SSAO gather, the à-trous
+            // chain, the hwrt shadow chain and the DDGI update. Until this rung that stretch (~256
+            // µs on `[vb_both_ssao]`) sat outside every bracket, and `ZONE_VB_SHADE`'s
+            // `TOP_OF_PIPE` begin was latching against its drain — the 4.58× skew this bracket
+            // exists to remove by SUBTRACTION rather than by restamping id 2.
+            //
+            // Opened here and not inside `if scene.path_vb_ssao()`: the stretch is a union of four
+            // independently-armed consumers, and a bracket gated on one of them would measure a
+            // different interval on every leg. The empty case is a pair of adjacent BOTTOM stamps,
+            // which reads as this box's empty-bracket floor and not as an absence.
+            // SAFETY: recording is open and no rendering scope is active; the pool was reset this
+            // frame; `fi` is this present's in-flight slot; this is the only site that stamps id
+            // 13's begin, inside the single `path_vb_split()` arm.
+            unsafe { ts.begin(self.fns, cmd, ZONE_VB_PRESHADE) };
+
             // (3) The SSAO gather + à-trous chain (`path_vb_ssao` — the declare-site predicate).
             if scene.path_vb_ssao() {
                 let ssao_pass = plan
@@ -4306,6 +4465,15 @@ impl Renderer<'_> {
                 }
             }
 
+            // VB-SV0 DP6-0b: close `ZONE_VB_PRESHADE`. Everything between this stamp and
+            // `ZONE_VB_SHADE`'s begin below is host-side pipeline/descriptor selection — no
+            // recorded command — so `e13` and `b2` are adjacent in the stream and
+            // `[b12, e12]` is partitioned: `PRODUCE_RUN − PRESHADE` is the DP6 comparator and
+            // `PRODUCE_RUN.end − PRESHADE.end` is the split producer's derived cost.
+            // SAFETY: recording is open; the pool was reset this frame; `fi` is this slot, and the
+            // matching begin was recorded above in this same `path_vb_split()` arm.
+            unsafe { ts.end(self.fns, cmd, ZONE_VB_PRESHADE) };
+
             // (4) Pass `vb_shade_split` — the split's lit producer (RE-fetch + shade + the
             // unconditional gSsao read + the rung-R9c header-gated DDGI probe sample). Per-frame
             // base/`_tex` pick mirrors the fused
@@ -4491,6 +4659,46 @@ impl Renderer<'_> {
             // Close the SPLIT lit producer's VbShade bracket. GATED (unarmed ⇒ no command).
             // SAFETY: recording is open; the pool was reset this frame; `fi` is this slot.
             unsafe { ts.end(self.fns, cmd, ZONE_VB_SHADE) };
+        }
+
+        // VB-SV0 DP6-0b: close `ZONE_VB_PRODUCE_RUN` — after ALL THREE lit-producer arms, and
+        // before `sdf_forward_march` below (which stays outside every bracket, on both legs of
+        // every `VB × Both` frame — see `ZONE_VB_GEO`'s enumerated residual).
+        //
+        // `produce_run_armed` is the SAME binding the begin site asserted, read a second time
+        // rather than re-derived: the two halves of this bracket are gated by one word.
+        // The containment DP6's comparator rests on, made structural instead of argued: a split
+        // frame is always a mesh-leg frame, so `path_vb_split()` can never open ids 11/13 outside
+        // this bracket.
+        //
+        // OUTSIDE the `if` below, deliberately. Written inside it the assertion would only ever be
+        // evaluated where `produce_run_armed` is already true, which makes its own disjunction
+        // trivially satisfied — a check that cannot fail. The state it exists to catch is exactly
+        // the other one: a split frame on a leg this bracket did not arm.
+        debug_assert!(
+            !scene.path_vb_split() || produce_run_armed,
+            "invariant: path_vb_split() => mesh_leg, so the split's brackets are inside the \
+             producer run"
+        );
+        if produce_run_armed {
+            // SAFETY: recording is open; the pool was reset this frame (this witness's construction
+            // site); `fi` is this present's in-flight slot; this is the only site that stamps id
+            // 12's end, and its matching begin was recorded inside the `mesh_leg` block under this
+            // same hoisted predicate.
+            //
+            // NO RENDERING SCOPE IS ACTIVE, enumerated over every route that reaches this line
+            // rather than asserted for the one arm above it — `vkCmdWriteTimestamp` is legal inside
+            // a render pass but a bracket that closed inside one would measure a scope this zone
+            // does not own:
+            //   * split arm — last command is `vb_shade_split`'s compute dispatch;
+            //   * fused / classified arms — both end inside the `mesh_leg` block, whose last
+            //     recorded command is a compute dispatch, and the block closed above this line;
+            //   * the `!occlusion_split` `record_hzb_poison_build` slot between them — its own
+            //     `cmd_end_rendering` (if it opened one at all) is inside the function, which
+            //     stamps `e6` as its LAST statement, so it cannot leave a scope open past its
+            //     return;
+            //   * a mesh-less leg — unreachable here, gated off by `produce_run_armed`.
+            unsafe { ts.end(self.fns, cmd, ZONE_VB_PRODUCE_RUN) };
         }
 
         // === Pass `sdf_forward_march` — rung R10: the fused SDF march-then-shade COMPUTE pass,

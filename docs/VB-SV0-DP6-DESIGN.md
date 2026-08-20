@@ -414,6 +414,15 @@ reason `[vb_both_sdf]`'s after-side stays clean is **arm (b)'s second conjunct**
 `[e6 → b11]` gap must be ≈ 5 248 ns where `Required` and ≈ 0 where `Forbidden`. That turns an
 unbracketed dispatch into a checked one.
 
+> **⚠️ Correction, landed with the implementation: the `Forbidden` side is not live at DP6-0b.**
+> On `[vb_both_sdf]` there is no `b11` — id 11 stamps only inside `if scene.path_vb_split()` and
+> that fixture is fused — so the gap has no second end and the arithmetic has no subject. What
+> ships: the fused driver asserts the gap is **absent** (`None`), which is "the check does not
+> apply here" rather than "the check passed", and the `Forbidden` arm is exercised by unit-tested
+> arithmetic. It becomes live on a real leg at **DP6a**, where `[vb_both_sdf]` gains the split
+> (id 11 appears) while still carrying no `SsaoConfig` (arm (b) stays dead) — the first boot on
+> which "id 11 exists and `vb_viewt` must not have run" is a statement about a frame.
+
 **The residual hazard is named in `PRODUCE_RUN`'s doc beside id 6:** site A `vb.rs:3773-3779` is
 inside the span and site B `:4622-4628` (gated `ssao.is_none()`) is outside it, so a config that
 flips which arm fires **moves a dispatch across `e12`**. A TAA-armed VB×Mesh boot takes arm (a) with
@@ -433,6 +442,13 @@ DP6-0's voided 24 576.**
 
 **The `29 184` boundary is derived, not chosen:** it is this rung's own published upper bound on
 `D + F`, one full-screen dispatch plus one `vb_geom_fetch`.
+
+> **MEASURED at DP6-0b: `Δ_host = 11 264 ns` ⇒ the MIDDLE row. `E_split_host = 11 264 ns`, and
+> DP6a is BLOCKED** until Decision 3's fused row absorbs it. The margin to the first row is
+> **272 ns — half a timer tick, i.e. unresolvable** — so branch 1 is not excluded by the
+> measurement; what makes the verdict usable is that all nine leg pairings land in this row
+> (`E_split_host ∈ [10 512, 19 392] ns`), so no pairing reaches branch 1 or branch 3. Full cells,
+> spreads and the instrument-skew decomposition are in the DP6-0b RESULT block of §The ladder.
 
 ## R4.4 `vg_occ_split_timing` — the premise, corrected
 
@@ -481,9 +497,28 @@ about the table as a whole. After DP6-0b the VB ids stand in three tiers:
 
 | tier | ids | check |
 |---|---|---|
-| per-frame chain (this rung) | 6 (on `!occlusion_split` legs), 10, 11, 12, 13 | `OrderCensus`, per frame, counted |
+| per-frame chain (this rung) | **10, 11, 12, 13** | `OrderCensus`, per frame, counted |
 | median-level chain (today) | 3, 4, 5, 7, 8, 9 | `vg_occ_split_timing`'s monotone clause — weaker, and `:669-672`'s own 144 ns finding says why |
-| none | 0, 1, 2, and the gbuffer / SV0 / particle families | — |
+| none | 0, 1, 2, **6**, 14, and the gbuffer / SV0 / particle families | — |
+
+> **⚠️ Correction, landed with the implementation (this table's first form put id 6 in tier 1).**
+> The chain is exactly the quartet `zone_begin_stage` restamps to `BOTTOM_OF_PIPE`, and id 6 is not
+> in it. The reason is stronger than "its position is leg-dependent":
+> **`path_vb_occlusion_split()` is not boot-frozen at all.** It conjoins
+> `scene.vb_occlusion.is_some()` — recomputed EVERY FRAME in `boyko_app::runner` from a live
+> `OcclusionConfig` resource, since rung P4-4 turned that regime from a boot env read into a live
+> resource — and `scene.vb_occlusion_instances > 0`, this frame's count of marker-carrying
+> instances. So id 6 can take its `ZONE_VB_RUN`-side slot on one frame of a window and its
+> post-producer slot on the next, while `chain` is one `&'static [u16]` chosen once at reducer
+> construction. A declaration naming id 6 would be right on some frames of a single window and
+> wrong on others — and the wrong ones would be counted as violations of an order the recorder
+> never promised. Its containment is still asserted the way the design intends: the gate requires
+> the two sides of a comparison to agree in occlusion-split arming.
+>
+> **Id 2 is in tier "none" and stays there**, which the implementation now enforces by name: it
+> keeps `TOP_OF_PIPE`, a `TOP` begin retires at command FETCH rather than at prefix completion, so
+> ordering it against `BOTTOM` begins would manufacture non-deterministic violations that describe
+> only the stage difference. **Id 14** is derived and never stamped, so it has no begin to order.
 
 **Offered as a follow-up, not claimed as done:** once the per-frame channel exists, upgrading tier 2
 to it is a one-line change to that harness's chain declaration.
@@ -510,6 +545,7 @@ on its own, since it guards an invariant unrelated to this rung.
 |---|---|
 | 4 | OQ1 adjudicated: A+B composed, C rejected as primary. Repair rung, run bracket, containment clause. |
 | 4.1 | 4 P0 + 8 P1: containment moved into `observe_frame`; `PASS_COUNT` edit withdrawn and the blindness premise corrected; `PRODUCE_RUN`'s predicate hoisted + unmatched-END detector; **primary/fallback inverted with a number**; id 6 and `vb_viewt` named; DDGI/hwrt mechanism corrected; DP6a's timing claim corrected; the `280/560` pin refuted; `Δ_host`'s third branch; OQ narrowed. |
+| **4.3 (post-implementation, measured)** | Written back from the rung that ran. **RESULT recorded**: four re-taken cells, `E_split_host = 11 264 ns`, **branch 2 MIXED**, DP6a BLOCKED, 87.8 % of DP6-0's inflation shown to be instrument skew (§The ladder's DP6-0b RESULT block, §R4.3.7, OQ1). **Mutation (a)'s predicted red CORRECTED against measurement** — `OrderCensus` does not fire on it (0 violations / 241 frames); the `const` stage pin's build failure is the real gate and the `[e6 → b11]` gap the runtime carrier; §R4.3.3's nondeterminism argument is scoped to members whose predecessor is a tick away, not tens of µs. **Mutation (c)'s direction corrected.** **§R4.6's tier table corrected**: id 6 → tier "none" because occlusion-split arming is per-frame and not boot-frozen; ids 2 and 14 placed with their reasons. **§R4.3.6**: the `vb_viewt` `Forbidden` cell is not live until DP6a. |
 | **4.2 (as landed here)** | **P1-A:** `vb_viewt` DOES run on `[vb_both_ssao]` — the authoritative two-arm predicate is `gpu_scene/mod.rs:6550-6553`, arm (b) fires without `TaaConfig`; §R4.1.1's GEO row restored and quantified at 5 248 ns from `gpu_zone.rs:450-452`; the precondition is restated per side and gets a checked expectation cell. **P1-B:** the detector is release-live — `writes` is `#[cfg(debug_assertions)]` and stays so under its own name; two unconditional `u16` masks + `finish`'s three compares are the gate input. **P1-C:** the absence policy keys on absent-from-slice resolved against the leg's expectation, so a full-ring runtime absence skips instead of injecting a 4.5× inflated sample; `GpuPairBudgetExhausted` added to clause 5(2). **P2:** `Δ_host` baselines on DP6-0b's re-taken cell; `ZONE_VB_PRODUCE_NET` gets id 14, `VB_ZONE_COUNT` 15, one slot left, never stamped; the three particle ratios quoted with the tree's refusal of the band; `[order]` dispatches at `artifact.rs:848+`; the `atrous_levels` assertion closes the DP6-0b→DP6c window. |
 
 ---
@@ -928,7 +964,42 @@ Revert-red at every rung. **Semantic point of no return is DP6c** (Q4).
 
   *Gate:* all goldens byte-identical; `torn == 0` and no diag flag on **five** leg shapes; `OrderCensus.violations == 0` with `frames_checked > 0`; **the four DP6-0 cells re-taken and published beside the old ones**, with §R4.1's diagnosis landed explicitly on one of §R4.3.7's three branches.
 
-  *Red mutations:* (a) id 11 back to TOP ⇒ `violations > 0` on the split fixture; (b) `PRODUCE_RUN` closed inside the split block ⇒ `Torn` on the fused leg; **(c) `PRODUCE_RUN`'s open moved outside `mesh_leg` while the close keeps the predicate ⇒ `GpuZoneUnmatchedEnd` on the VB×Sdf leg, in a RELEASE run**; (d) declare `ZONE_VB_GEO` `Forbidden` on the split leg ⇒ expectation table reds.
+  ### DP6-0b RESULT — measured, and the rung's verdict
+
+  > **The gate passed and the diagnosis landed on branch 2. `DP6a IS BLOCKED.`**
+  >
+  > **The four cells, re-taken on the repaired instrument** (release, 512×512, `sv0_scene`, 3 legs per arm; every arm's 3-leg relative spread in **0–7.89 %**, all under clause 5's 10 % bar; `R` certified this session and inherited from nothing):
+  >
+  > | fixture | `BOYKO_SDF_MESH` | `ZONE_VB_PRODUCE_NET` |
+  > |---|---|---|
+  > | `[vb_both_sdf]` (fused) | off | **27 648 ns** |
+  > | `[vb_both_sdf]` (fused) | on | **62 976 ns** |
+  > | `[vb_both_ssao]` (split) | off | **73 728 ns** |
+  > | `[vb_both_ssao]` (split) | on | **97 280 ns** |
+  >
+  > `PRESHADE ≈ 304 µs` on the split fixture, confirming §R4-D4's premise that it dominates the wide bracket — which is why `NET` and not `PRODUCE_RUN` is the comparator.
+  >
+  > **The instrument is confirmed repaired, two ways.** `shade_derived` (`PRODUCE_RUN.end − PRESHADE.end`) agrees with the direct `ZONE_VB_SHADE` reading **to one timer tick**, so the derivation D3 introduced measures what it claims. And DP6-0's `112 640` split-shade reading is now decomposed: **87.8 % of its 88 064 ns inflation was instrument skew, 12.2 % was real.** §R4.1.3's "≈ 34 % absorbed" estimate was the right shape and the wrong fraction; the measured split is recorded here in its place.
+  >
+  > **The branch.** `Δ_host = shade_derived (35 840) − re-taken fused shade (24 576) = 11 264 ns`, which lands in §R4.3.7's **middle band** (`2 × R_neutral < Δ_host ≤ 29 184`) ⇒ **branch 2, MIXED**: both contributions are material, and `Δ_host` is recorded as **`E_split_host` = 11 264 ns**, the split tail's hosting surcharge.
+  >
+  > ⚠️ **The margin to branch 1 is 272 ns — half a timer tick — on the worst leg pairing.** That is *below this box's resolution*, so the branch-1/branch-2 boundary is **not resolvable** by this measurement: the verdict is branch 2, and the honest statement is that branch 1 cannot be excluded by 272 ns. What makes the verdict actionable anyway is its **robustness across the 3×3 leg cross-product: `E_split_host ∈ [10 512, 19 392] ns`** — every pairing is inside the middle band, so no pairing produces branch 1 or branch 3.
+  >
+  > **Consequence, per §R4.3.7's own text: `DP6a does not land` until Decision 3's fused row is re-derived with `E_split_host`.** G-NEUTRAL's after-side pays this surcharge and its before-side does not, so the fused cost table is understated by 10.5–19.4 µs until it is carried explicitly.
+
+  *Red mutations:* **(a) id 11 back to TOP ⇒ BUILD FAILURE (`E0080`) at the `const` stage pin, and — at runtime — the `[e6 → b11]` gap check.** *(Corrected against measurement; see the block below.)* (b) `PRODUCE_RUN` closed inside the split block ⇒ `Torn` on the fused leg; **(c) the `if produce_run_armed` guard dropped from `PRODUCE_RUN`'s CLOSE while its open stays inside `mesh_leg` ⇒ `GpuZoneUnmatchedEnd` on the VB×Sdf leg, in a RELEASE run** *(direction corrected: an open moved outside `mesh_leg` with a gated close is open-without-close, i.e. `Torn`, not an unmatched END)*; (d) declare `ZONE_VB_GEO` `Forbidden` on the split leg ⇒ expectation table reds.
+
+  > **⚠️ Mutation (a)'s predicted red was WRONG, and the measurement says so.**
+  >
+  > This entry predicted `OrderCensus.violations > 0` on the split fixture. **Measured: 0 violations over 241 frames.** Restamping id 11 to TOP moves `b11` about **7 µs** earlier, but `b10` sits roughly **38 µs** ahead of it, so `prev_begin ≤ begin(m)` is never crossed — the displacement is an order of magnitude smaller than the slack it would have to consume.
+  >
+  > §R4.3.3's nondeterminism argument (`P(0 violations) = (1-p)^100 < 10⁻³`) **does not generalise to a member whose predecessor sits tens of µs ahead of it.** It was derived from the particle lane, where three dispatches are back-to-back with *zero* recorded commands between them and the slack is a timer tick. Stated here so the claim does not outlive the case it was measured on.
+  >
+  > The mutation IS caught, twice, and the stronger of the two is the one this design did not credit:
+  > 1. **The `const` stage pin — a BUILD FAILURE (`E0080`), at compile time.** `bottoms(ZONE_VB_GEO)` is asserted in `gpu_zone.rs`'s `const` block, so the mutation cannot produce a binary at all. A gate that fails before a frame is rendered is strictly stronger than one that counts frames, and the ladder should have named it first.
+  > 2. **The `[e6 → b11]` gap check**, as the runtime carrier: measured **544 ns** against the required ~5 248 ns, because the TOP latch swallows the `vb_viewt` dispatch that the gap exists to see.
+  >
+  > `OrderCensus` keeps its place for the direction it *did* prove — the per-frame containment and ordering of ids 10/11/12/13 — and its `frames_checked` remains the number that makes `violations == 0` readable. It is simply not the detector for this mutation on this box.
 
 - **DP6a — resolver.** The consumer bit, the hoist, `mesh_geo_shade_split`, the NORMAL union, the `armable` conjunct, the env `host` arm, the doc corrections, the Rev-5 erratum. *Gate:* the eight fixtures above green after their stated edits; `sdf_mesh_term_wanted == false ⇒ every ResolvedRenderPath field bit-identical to pre-DP6` (tested, not argued); **all goldens byte-identical**.
 - **DP6b — the dark variant.** Guarded span; `vb_geo_aux_layout` @3/@4 + the `!rg8_ok` placeholder; `vb_geo_sv0.comp.spv`; `embed_spirv!`; boot pipeline. Selected by nothing. *Gate:* `vb_geo.comp.spv`/`vb_geo_mv.comp.spv` byte-identical; new `spv_sync` row 7; **the new two-sided `-P` gate**; `spirv-val`; `sdf_field_edsl_sync` re-pointed; manifest row; all goldens.
@@ -973,7 +1044,7 @@ Revert-red at every rung. **Semantic point of no return is DP6c** (Q4).
 1. **ADJUDICATED at Rev 4 — REPLACED in full by §R4.** The question was *"can G-NEUTRAL fail on fused boots, and what then?"*. DP6-0's measurement turned it from a hypothetical into a number, and the number says Rev 3's comparator could not have adjudicated it either way: `ZONE_VB_SHADE` read **4.58×** higher on the split boot than the fused one, of which the fetch arithmetic explains **< 1 %** and a TOP-latch absorbing ≈ 34 % of a ~256 µs unbracketed predecessor stretch explains the rest (§R4.1.3, §R4.1.5); and the split-side sum `ZONE_VB_GEO + ZONE_VB_SHADE` is a `Σ(median_f)` the reducer's own rule forbids (§R4.1.8). **Disposition: repair the instrument first (rung DP6-0b), then gate on `ZONE_VB_PRODUCE_NET`** — one quantity whose definition never mentions which producer ran, so it is identical on both sides of the fused/split discontinuity by construction (§R4-D2, §R4-D4). The Rev 4 gate text above replaces Rev 3's three bullets.
 
    **The old disposition is retained as the FALLBACK CHAIN, not deleted:** `vb_shade_split` is still not bit-for-bit `vb_resolve` (different Set 1, SSAO combine, DDGI sampling — runtime-gated off but compiled in), and the split still adds the `thin_normal` write, so the fused row can still red *on its merits* once the instrument no longer skews it. Two escalation steps, in order:
-   - **If DP6-0b's `Δ_host` lands in §R4.3.7's middle branch** (`2 × R_neutral < Δ_host ≤ 29 184`), the hosting surcharge `E_split_host` is real and material: **DP6a does not land** until Decision 3's fused row is re-derived with it. If it lands in the third branch (`Δ_host > 29 184`), **DP6's cost model re-opens** and Decision 3's consolidate-into-the-split premise is itself in question.
+   - ~~**If** DP6-0b's `Δ_host` lands in §R4.3.7's middle branch~~ — **IT DID. MEASURED: `Δ_host = 11 264 ns`, branch 2, `E_split_host` real and material** (see the DP6-0b RESULT block in the ladder for the cells, the 272 ns unresolvable margin to branch 1, and the `[10 512, 19 392]` robustness band). **DP6a does not land** until Decision 3's fused row is re-derived with it. The third branch (`Δ_host > 29 184`) — which would have re-opened DP6's whole cost model — is **excluded** on every leg pairing.
    - **If G-NEUTRAL then reds on the repaired instrument, or if `R_net > 10 752` makes G-REDUCE INCONCLUSIVE** (§R4.6's open residual 1), the disposition is the one Rev 3 pre-agreed and Rev 4 keeps: **restrict DP6e to split boots and keep the dedicated pass for fused** — the critic's option (b) *with a measurement behind it* rather than as a premise. Pre-agreed here so it is not improvised under a red.
 2. **DP6d.5 may say half-res is wanted.** Then DP6e must name the post-retirement host shape for it, and the honest answer may be "a new minimal half-res marcher pass" — which partially un-does the consolidation. Recorded as a real risk of Decision 3, not hidden.
 3. **DP2's and DP4's null resolutions disagree** (~24 576 ns vs 1 024 ns, same date, different fixtures) and both are load-bearing for their PASS verdicts. DP6-0 must re-certify on its own fixtures and **inherit neither**. → `docs/OPEN-QUESTIONS.md`.

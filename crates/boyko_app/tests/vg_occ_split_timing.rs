@@ -372,6 +372,31 @@ const PASS_LABELS: [&str; PASS_COUNT] = [
 ];
 
 /// The VB zone count as this harness sees it (rung P4-2 took it 3 → 10).
+///
+/// # It stays 10 while the family is 15, and widening it would PANIC (VB-SV0 DP6-0b)
+///
+/// This worker is one `VisibilityBuffer × Mesh` boot with no `SsaoConfig` / `DdgiConfig` /
+/// `TaaConfig`, so on it ids **10, 11 and 13 never stamp** — no `alloc_pair`, no `PairResult`, no
+/// row. They are not written-and-unread here; they do not exist. And the loop over
+/// [`PASS_LABELS`] **panics** through `unwrap_or_else` on a missing row, so raising this bound to
+/// cover them would be an unconditional panic on all four legs, on every run.
+///
+/// DP6-0b adds **TWO** rows this harness ignores, and the count is spelled because the first
+/// version of this note said "exactly one":
+///
+/// * **id 12** (`ZONE_VB_PRODUCE_RUN`) — armed on `mesh_leg`, which this boot is, so it stamps;
+/// * **id 14** (`ZONE_VB_PRODUCE_NET`) — never stamped by anything, but the reducer FORMS it every
+///   frame on a fused leg, where `ZONE_VB_PRESHADE` is `Forbidden` and therefore contributes 0.0
+///   (`VB_DERIVED_FUSED`). A derived row is still a row in the file.
+///
+/// Both are deliberate and cost nothing: the bound stops at 10, neither is ever looked up, and this
+/// file's `begin_off` base is unmoved (the frame's earliest measured begin is
+/// `ZONE_VB_CULL_RESET`, far ahead of the producer run).
+///
+/// The blindness this leaves is real and DOUBLE — blind by FIXTURE (this boot structurally cannot
+/// stamp 10/11/13) and blind by BOUND — and widening the bound fixes neither. The per-leg
+/// expectation table in `vb_sv0_produce_run_timing.rs` is what covers those ids, on legs that
+/// stamp them.
 const PASS_COUNT: usize = 10;
 
 const P_CULL_RESET: usize = 0;

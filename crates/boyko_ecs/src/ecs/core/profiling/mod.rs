@@ -91,7 +91,13 @@ pub use diag::{LIVE_CODES, report_count};
 // L8c: the three `92xx` conditions whose sites live in `boyko_app` and whose reports cannot go
 // through the flag word, because `fold.rs` is its single consumer and these three become true
 // after the last fold. Re-exported so the host can reach the emitter without becoming one.
-pub use diag::{report_contrast_not_resolved, report_gpu_slots_abandoned, report_window_zones_lost};
+//
+// VB-SV0 DP6-0b adds a FOURTH on the same terms: the window reducer's per-frame record-order
+// check runs in `boyko_app`, and a measured run's last frame is regularly its last fold.
+pub use diag::{
+    report_contrast_not_resolved, report_gpu_slots_abandoned, report_window_zones_lost,
+    report_zone_order_violated,
+};
 pub use ecs_control::{
     ENGINE_SCOPE_BASE, LatencyTable, ProfiledZone, ProfilingScope, ProfilingScopeEnabled,
     ScopeError, minted_game_scopes, register_scope,

@@ -179,6 +179,25 @@ pub const ZONE_VB_CULL_DISPATCH: u16 = ZONE_BASE_VB + 1;
 /// extent — so exactly one pair is opened per mesh-leg frame whichever branch runs. VB-P1d's
 /// assertion survives as a SCOPE statement (its break-even number is defined against the fused /
 /// classified tail), which is all it ever was once the split arm gained its own bracket.
+///
+/// # ⚠️ MEASURED SKEW: this id's SPLIT arm is not comparable to its fused arm
+///
+/// VB-SV0 DP6-0's baseline read **112 640 ns** on the split arm (`[vb_both_ssao]`) against
+/// **24 576 ns** on the fused one (`[vb_both_sdf]`) — **4.58×**, on a dispatch whose extra work
+/// over the fused resolve is one SSAO combine and one `thin_normal` read, a budget priced below
+/// 1 % of the march it sits beside. **No fetch arithmetic produces 4.58×.**
+///
+/// What produces it is the `TOP_OF_PIPE` begin: the split arm's BEGIN sits downstream of ~256 µs
+/// of unbracketed SSAO + à-trous, and the latch absorbed ≈ 34 % of it (88 064 ns of inflation
+/// against that stretch). The control is in the same reading — [`ZONE_VB_SDF_MESH`] is the same
+/// dispatch on both boots and agrees to 512 ns — so the instrument is not broadly broken; this one
+/// id's split arm is.
+///
+/// **The id is NOT restamped** (VB-SV0 DP6-0b, decision D1): id 2 keeps `TOP_OF_PIPE` so VB-P1d's
+/// published break-even keeps its meaning. The split producer's cost is obtained by DERIVATION
+/// instead — `shade_derived = ZONE_VB_PRODUCE_RUN.end − ZONE_VB_PRESHADE.end`, two `BOTTOM_OF_PIPE`
+/// stamps that partition the interval — and every DP6 gate reads
+/// [`ZONE_VB_PRODUCE_RUN`]/[`ZONE_VB_PRESHADE`], never this id's split arm.
 pub const ZONE_VB_SHADE: u16 = ZONE_BASE_VB + 2;
 /// VG R3 piece 4 rung P4-2: the LATE indirect-record fill — the host `vkCmdUpdateBuffer` chunks that
 /// seed `vb_indirect_late` with `instanceCount = 0`, plus the pass's derived barriers.
@@ -228,18 +247,46 @@ pub const ZONE_VB_RUN: u16 = ZONE_BASE_VB + 9;
 /// `record_vb`'s SV0 section. This id exists ONLY on an SV0-armed leg (the pass is not recorded
 /// otherwise), so it joins [`ZONE_VB_HZB_BUILD`] and [`ZONE_VB_SHADE`] in the leg-dependent
 /// record-order table above: on an armed leg its BEGIN lands between `9e` and `2`; on every
-/// other leg it never stamps at all — which is what keeps the pinned disarmed-fixture pair
-/// counts (`vb_bench_query_validation`'s 280/560) untouched by this id's existence.
+/// other leg it never stamps at all.
+///
+/// **The pin that checks this is the per-leg EXPECTATION TABLE**
+/// (`crates/boyko_app/tests/vb_sv0_produce_run_timing.rs`), which declares `Required` /
+/// `Forbidden` / `Optional` per zone per fixture and is red-capable in both directions. It is
+/// named here because the citation this doc used to carry — *"`vb_bench_query_validation`'s
+/// 280/560"* — **is a phantom** (VB-SV0 DP6-0b): those literals appear nowhere in that test, which
+/// asserts `bench_ok == control_ok`, `measured > 0` and validation-message-set equality and counts
+/// no pairs. A pair-count pin is refused with a reason rather than minted: it is leg-dependent, it
+/// would red on every legitimate zone addition, and it has already failed to red on two.
+///
+/// VB-SV0 DP6-0b restamped this id to `BOTTOM_OF_PIPE` — see [`zone_begin_stage`].
 pub const ZONE_VB_SDF_MESH: u16 = ZONE_BASE_VB + 10;
 
 /// VB-SV0 DP6-0: **the `vb_geo` dispatch** — the geometry half of the geo/shade split, bracketed
 /// over its derived barriers → three descriptor binds → push → dispatch, exactly the
 /// "barriers + bind + dispatch" extent [`ZONE_VB_SHADE`] measures on each of its three producer
-/// arms. Until this id the family's ONLY unbracketed dispatch.
+/// arms.
+///
+/// # What is still unbracketed, ENUMERATED (VB-SV0 DP6-0b)
+///
+/// This doc used to end *"until this id the family's ONLY unbracketed dispatch"*, and that was
+/// false when it was written. After DP6-0b's [`ZONE_VB_PRESHADE`] swallowed the SSAO + à-trous +
+/// DDGI + hwrt stretch, what remains outside every bracket is a LIST, not an empty set:
+///
+/// * `sdf_forward_march` (`passes/vb.rs`, after the lit-producer chain closes) — an unbracketed
+///   compute dispatch on **both** legs of every `VB × Both` frame;
+/// * `vb_viewt`, at **both** of its sites — the split arm's pre-tail slot (inside
+///   [`ZONE_VB_PRODUCE_RUN`], not inside any zone's own bracket) and the `ssao.is_none()` site
+///   after the producer chain (outside the run entirely).
+///
+/// Narrowing a falsehood to an enumerated residual is the doc-rot discipline, not a claim of
+/// repair: nothing here brackets those three sites.
 ///
 /// Recorded inside `record_vb`'s `if scene.path_vb_split()` arm, so a fused or classified leg
-/// never stamps it — `NotBracketed`, not a zero. That gating is what keeps the disarmed-fixture
-/// pair counts `vb_bench_query_validation` boots (VB × Mesh, no split) untouched by this id.
+/// never stamps it — `NotBracketed`, not a zero. The gate that checks WHICH legs stamp it is the
+/// per-leg expectation table (see [`ZONE_VB_SDF_MESH`]'s doc for why it is that and not a pair
+/// count).
+///
+/// VB-SV0 DP6-0b restamped this id to `BOTTOM_OF_PIPE` — see [`zone_begin_stage`].
 ///
 /// # It is minted BEFORE the producer it will host moves, and that is the point
 ///
@@ -252,6 +299,101 @@ pub const ZONE_VB_SDF_MESH: u16 = ZONE_BASE_VB + 10;
 /// ⚠️ The split pair is a **SUM of two DISJOINT intervals**, never a span: `vb_viewt`, the SSAO
 /// gather and the à-trous chain all record between this id's END and [`ZONE_VB_SHADE`]'s BEGIN.
 pub const ZONE_VB_GEO: u16 = ZONE_BASE_VB + 11;
+
+/// VB-SV0 DP6-0b: **the producer RUN bracket** — `BOTTOM_OF_PIPE` at both ends, opening
+/// immediately after [`ZONE_VB_RUN`]'s end and closing immediately after the lit-producer chain
+/// does.
+///
+/// # It is the DP6 comparator, and its definition never names a producer
+///
+/// It is the smallest interval containing every site DP6 can move work into or out of:
+/// [`ZONE_VB_SDF_MESH`]'s dedicated prepass, the unsplit `[hzb_poison, hzb_build_*]` slot, both
+/// `vb_viewt` pre-tail arms, [`ZONE_VB_GEO`], the SSAO/à-trous/hwrt/DDGI stretch, and all three of
+/// [`ZONE_VB_SHADE`]'s producer arms. Because the definition does not mention WHICH producer ran,
+/// the quantity is identical on both sides of the fused/split discontinuity **by construction** —
+/// which neither `ZONE_VB_SHADE` alone nor a sum of per-zone medians is.
+///
+/// Armed on `scene.resolved_render_path.mesh_leg`, hoisted into one binding read at both stamps.
+/// `mesh_geo_shade_split ⇒ mesh_leg`, so a split frame is always inside it; on a mesh-less leg
+/// there is no producer run at all and `NotBracketed` is the honest label.
+///
+/// # ⚠️ It CONTAINS [`ZONE_VB_HZB_BUILD`] (id 6), leg-conditionally
+///
+/// `record_hzb_poison_build` stamps id 6 at its own first and last statements, and its two call
+/// sites sit on opposite sides of the lit producer: the `!occlusion_split` site is INSIDE this
+/// span, the `occlusion_split` one is inside [`ZONE_VB_RUN`] and therefore outside it. So this
+/// bracket's magnitude is **comparable only within one occlusion-split arming**, and the DP6 gate
+/// asserts leg-field equality between its two sides before comparing them.
+///
+/// # ⚠️ Residual hazard: `vb_viewt` has two sites and a config decides which fires
+///
+/// `viewt_from_vb_depth` is armed by `VB ∧ mesh_leg ∧ ((¬sdf_leg ∧ aa == Taa) ∨ (split ∧ ssao))`.
+/// The split arm's site is INSIDE this span; the `ssao.is_none()` site after the producer chain is
+/// OUTSIDE it. A fixture that flips which arm fires therefore moves a whole dispatch across this
+/// zone's END without any line of code changing — a TAA-armed `VB × Mesh` boot is exactly that
+/// shape. Named here because the first such fixture would otherwise move it unnoticed.
+pub const ZONE_VB_PRODUCE_RUN: u16 = ZONE_BASE_VB + 12;
+
+/// VB-SV0 DP6-0b: **the split path's pre-shade stretch** — `BOTTOM_OF_PIPE` at both ends, from
+/// [`ZONE_VB_GEO`]'s end to [`ZONE_VB_SHADE`]'s begin, inside `if scene.path_vb_split()`.
+///
+/// It brackets the SSAO gather, the à-trous chain, the hwrt shadow chain and the DDGI update —
+/// ~256 µs of shipped GPU work that sat outside every bracket until this rung, and the stretch
+/// whose drain [`ZONE_VB_SHADE`]'s `TOP_OF_PIPE` begin was latching against.
+///
+/// # It exists to be SUBTRACTED, and that is the whole design
+///
+/// With it, `[b12, e12]` is partitioned by `BOTTOM` stamps, so two derived quantities are exact
+/// differences of prefix-completion times on one stream:
+///
+/// * `ZONE_VB_PRODUCE_NET = PRODUCE_RUN.dur − PRESHADE.dur` — the DP6 gate's one quantity, formed
+///   PER FRAME and reduced afterwards (`median_f(Σ)`, never `Σ(median_f)`);
+/// * `shade_derived = PRODUCE_RUN.end − PRESHADE.end` — the split producer's cost, without
+///   restamping [`ZONE_VB_SHADE`].
+///
+/// A fused leg never opens it: it is **absent** from the frame's pairs, not `NotBracketed`, and the
+/// derived row's absence policy resolves that against the leg's declared expectation (`Forbidden` ⇒
+/// contribute 0.0; `Required` but absent ⇒ skip the frame, because a full-ring runtime absence
+/// means the 256 µs EXECUTED and contributing zero would inject a 4.5× inflated sample).
+pub const ZONE_VB_PRESHADE: u16 = ZONE_BASE_VB + 13;
+
+/// VB-SV0 DP6-0b: **the derived comparator** — `PRODUCE_RUN.dur − PRESHADE.dur`, formed at the
+/// frame inside `WindowReducer::observe_frame` and never stamped by anything.
+///
+/// # It is an id so that it can be a ROW, and it is NEVER a bracket
+///
+/// The artifact's `[[zone]]` rows are keyed by `u16` zone id and every consumer finds by
+/// `z.zone == want`; a derived row outside that space would be a second vocabulary for one
+/// artifact. So it takes an id in this family and takes nothing else: `TsWitness::slot_of` is never
+/// called with it, `pair_of[14]` stays `NO_PAIR`, and mask bit 14 is never set.
+///
+/// # What actually guards that, stated exactly — because the two halves have DIFFERENT strengths
+///
+/// The per-leg expectation table says **`Required`** for this id, and it must: the row IS produced,
+/// every frame, by the reducer. `Required`-as-a-ROW and forbidden-as-a-STAMP are different claims,
+/// and **an artifact cannot express the second one** — a derived row and a bracketed row are the
+/// same six numbers under the same key, so no reader of the file can tell them apart. Three guards
+/// therefore share the job, and none of them is a release-live check of the artifact:
+///
+/// 1. **A source pin** (`vb_sv0_produce_run_timing.rs`) asserts the recorder's source never names
+///    this constant. Coarse — one `contains` over one file — but it is the only form the "no site
+///    exists" claim has, and it is the guard that would catch a new bracket being written.
+/// 2. **A `debug_assert!` in `WindowReducer::fold_derived`** refuses a `PairResult` arriving from
+///    the slice under a declared derived id.
+/// 3. **The reducer's main accumulation loop SKIPS** any slice pair whose zone is a declared
+///    derived id, so a stamped id 14 can never merge into the derived accumulator and be reduced
+///    as if it were the difference. That one is live in every profile.
+///
+/// An earlier revision of this doc claimed the expectation table declared it "`Forbidden` as a
+/// stamped row on every leg — a release-live check". That was false in both halves and is recorded
+/// here rather than quietly rewritten.
+///
+/// Why the derived row is the PRIMARY comparator and the wide bracket only the total: on a split
+/// boot `PRESHADE` is ~78 % of `PRODUCE_RUN`, so it dominates that bracket's variance as well as
+/// its magnitude, and an effect of 20.9–29.2 µs against a ~330 µs base is below its own resolution
+/// (~0.8–1.1×). Against the ~74 µs NET base the same effect is 3.5–4.9× resolvable, with the
+/// largest jitter term cancelled per frame instead of tolerated by a threshold.
+pub const ZONE_VB_PRODUCE_NET: u16 = ZONE_BASE_VB + 14;
 
 /// How many zone ids the VB family uses — the count [`super::passes`]'s witness masks are sized by.
 ///
@@ -271,21 +413,44 @@ pub const ZONE_VB_GEO: u16 = ZONE_BASE_VB + 11;
 ///
 /// | occlusion split | geo/shade split | order of BEGIN stamps |
 /// |---|---|---|
-/// | armed | off (fused / classified) | `0 1` ‖ `9b 3 4 5 6 7 8 9e` ‖ `2` |
-/// | off | off (fused / classified) | `0 1` ‖ `9b 3 4 5 7 8 9e` ‖ `2` ‖ `6` |
-/// | armed | armed | `0 1` ‖ `9b 3 4 5 6 7 8 9e` ‖ `11` ‖ `2` |
-/// | off | armed | `0 1` ‖ `9b 3 4 5 7 8 9e` ‖ `6` ‖ `11` ‖ `2` |
-/// | *(either)* | *(either)*, **SV0 armed** | `10` inserts immediately after `9e`, before `6`/`11`/`2` |
+/// | armed | off (fused / classified) | `0 1` ‖ `9b 3 4 5 6 7 8 9e` ‖ `12b` ‖ `2` ‖ `12e` |
+/// | off | off (fused / classified) | `0 1` ‖ `9b 3 4 5 7 8 9e` ‖ `12b` ‖ `2` ‖ `6` ‖ `12e` |
+/// | armed | armed | `0 1` ‖ `9b 3 4 5 6 7 8 9e` ‖ `12b` ‖ `11` ‖ `13` ‖ `2` ‖ `12e` |
+/// | off | armed | `0 1` ‖ `9b 3 4 5 7 8 9e` ‖ `12b` ‖ `6` ‖ `11` ‖ `13` ‖ `2` ‖ `12e` |
+/// | *(either)* | *(either)*, **SV0 armed** | `10` inserts immediately after `12b`, before `6`/`11`/`13`/`2` |
+/// | *(either)*, **mesh-less leg** | n/a | `0 1` ‖ `6` |
 ///
 /// The SV0 row is the one [`ZONE_VB_SDF_MESH`]'s own doc describes and this table never carried:
 /// the dedicated prepass records between [`ZONE_VB_RUN`]'s end and everything below it, on an
 /// armed leg only, and on no other leg stamps at all. The `9b … 9e` span is identical on every
 /// row.
 ///
+/// **VB-SV0 DP6-0b added ids 12 and 13, and with them the fourth thing this table has to say.**
+/// [`ZONE_VB_PRODUCE_RUN`] (12) opens on every `mesh_leg` frame right after `9e` and closes after
+/// the lit-producer chain, so it CONTAINS ids 10, 11, 13, 2 and — on an unsplit-occlusion leg only
+/// — id **6**. That is why id 6 appears at two different positions above and why every aggregate
+/// over the run is comparable only within one occlusion-split arming. [`ZONE_VB_PRESHADE`] (13)
+/// stamps on the geo/shade-split rows alone, between `11` and `2`. [`ZONE_VB_PRODUCE_NET`] (14)
+/// appears in **no** row of this table: it is derived per frame and never stamped.
+///
+/// ⚠️ **The mesh-less row is `0 1 ‖ 6`, and the `6` is not a typo.** Ids 9 and 12 and everything
+/// they contain are inside `if scene.resolved_render_path.mesh_leg`, so a `VB × Sdf` frame stamps
+/// none of them — but [`ZONE_VB_HZB_BUILD`]'s `!occlusion_split` call site sits **after** that
+/// block closes, at `record_vb`'s own body level, and `record_hzb_poison_build` stamps
+/// unconditionally at its first and last statements. So id 6 is the one VB bracket that survives a
+/// leg with no mesh: it is `Measured` there, outside every run, and any aggregate that reads it
+/// across a mesh/mesh-less pair is comparing a bracket to itself in two different positions.
+///
 /// This table is why `TsWitness::pair_of` REMEMBERS each id's pair index instead of deriving it
 /// from the count of lower-numbered opens: the ids do not open in increasing order, so the
 /// derivation gives `VbRun` pair 8 where it is 2.
-pub const VB_ZONE_COUNT: u16 = 12;
+///
+/// # Budget (VB-SV0 DP6-0b)
+///
+/// 15 of the family's 16 ids are spoken for. **ONE slot remains, and the VB zone minted after it
+/// is the last the `u16` witness masks in `super::passes::vb` can carry** — widening them is then
+/// a prerequisite, not a follow-up. Stated as a cost rather than discovered at the const assert.
+pub const VB_ZONE_COUNT: u16 = 15;
 
 // The per-frame witness masks in `passes::vb` are `u16`, one bit per id, so the family may not
 // outgrow that width without widening them too — and it may not outgrow its base spacing either.
@@ -430,28 +595,46 @@ const _: () = assert!(
 ///   attributable numbers). Kickoff additionally opens the frame's command buffer, where a `TOP`
 ///   stamp absorbs whatever backlog the queue was already carrying.
 ///
+/// * **the four VB producer-run ids** (`ZONE_VB_SDF_MESH`, `ZONE_VB_GEO`, `ZONE_VB_PRODUCE_RUN`,
+///   `ZONE_VB_PRESHADE`) — **VB-SV0 DP6-0b, and this is the rung the paragraph below nominated.**
+///   See "the premise ids 10 and 11 topped on, and what changed it" further down.
+///
 /// **`TOP_OF_PIPE`** for the isolated single-dispatch brackets: VB slots 0..2 keep it for
-/// compatibility with published VB-P1d numbers, both gbuffer families' collectors always opened
-/// there, and [`ZONE_VB_SDF_MESH`], [`ZONE_VB_GEO`] and [`ZONE_PARTICLE_DRAW`] sit with unbracketed
-/// work on both sides — **on the legs named below**. The whole lit producer runs before the
-/// particle draw on every leg, so id 51's isolation is unconditional; the other two are not, and
-/// the qualification is the load-bearing part:
+/// compatibility with published VB-P1d numbers (id 2 additionally because VB-P1d's published
+/// break-even is defined against it — see its own doc's skew warning and `shade_derived`), both
+/// gbuffer families' collectors always opened there, and [`ZONE_PARTICLE_DRAW`] sits with
+/// unbracketed work on both sides. The whole lit producer runs before the particle draw on every
+/// leg, so id 51's isolation is **unconditional** — which is exactly what stopped being true of
+/// ids 10 and 11:
 ///
-/// > ⚠️ **[`ZONE_VB_GEO`]'s isolation holds only when `scene.ssao.is_some()`.** What precedes
-/// > `vb_geo` in the split arm is the `vb_viewt` pre-tail dispatch, and that dispatch is gated on
-/// > SSAO — while `path_vb_split()` is **not**: `pre_light` is the union
-/// > `ssao ∨ ddgi ∨ shadow_denoise ∨ shadow_temporal ∨ ssr`. On a split boot with SSAO **off** and
-/// > another pre-light consumer on, and the occlusion split off, [`ZONE_VB_HZB_BUILD`]'s
-/// > `BOTTOM_OF_PIPE` END is followed by **zero recorded commands** before id 11's `TOP_OF_PIPE`
-/// > BEGIN — the exact adjacency the particle compute run was measured overlapping at. **That leg's
-/// > `ZONE_VB_GEO` number is contaminated by the drain ahead of it**, and it is recorded here as a
-/// > known limitation rather than fixed: rung **DP6-0b** restamps ids 10 and 11 to `BOTTOM` with a
-/// > stated reason and re-baselines against it, and moving them early would silently invalidate
-/// > DP6-0's recorded cells. The cells themselves are unaffected — `[vb_both_ssao]` arms
-/// > `SsaoConfig::High`, so `vb_viewt` ran and geo was genuinely isolated on the fixture they were
-/// > measured on (its 5 248 ns gap between id 6's end and id 11's begin is that dispatch).
+/// > # The premise ids 10 and 11 topped on, and what changed it (VB-SV0 DP6-0b)
+/// >
+/// > They were topped because they *"sit with unbracketed work on both sides"*. That premise was
+/// > already qualified here for id 11: what precedes `vb_geo` in the split arm is the `vb_viewt`
+/// > pre-tail dispatch, gated on SSAO, while `path_vb_split()` is **not** (`pre_light` is the union
+/// > `ssao ∨ ddgi ∨ shadow_denoise ∨ shadow_temporal ∨ ssr`). On a split boot with SSAO **off**,
+/// > another pre-light consumer on and the occlusion split off, [`ZONE_VB_HZB_BUILD`]'s
+/// > `BOTTOM_OF_PIPE` END is followed by **zero recorded commands** before id 11's BEGIN — the exact
+/// > adjacency the particle compute run was measured overlapping at. That paragraph named the fix
+/// > and the rung: *"rung DP6-0b restamps ids 10 and 11 to `BOTTOM` with a stated reason and
+/// > re-baselines against it"*. **This is that rung, and the reason is a premise CHANGE rather than
+/// > a reversal of the round that wrote it.**
+/// >
+/// > DP6-0b adds [`ZONE_VB_PRODUCE_RUN`] and [`ZONE_VB_PRESHADE`]. After them ids 10 and 11 are
+/// > members of a consecutive-partition run — `12b`, then 10/6/11, then 13, then 2, then `12e` —
+/// > and id 13 removes the unbracketed stretch on id 11's far side. Under the rule stated at the
+/// > top of this doc a `TOP` begin is legal *only* where the bracket is preceded by work not being
+/// > attributed to it; that is now false for all four, so all four bottom. The concurrent particle
+/// > round's own measurement is the evidence (1.083/1.025/1.077 on `TOP` versus 1.000/1.002/1.000
+/// > on `BOTTOM`), and DP6-0's four cells are re-taken on the repaired instrument rather than
+/// > carried across it — they are void as baselines by construction, which is why restamping does
+/// > not "silently invalidate" them: the re-baseline is part of the same rung.
+/// >
+/// > The `[vb_both_ssao]` fixture the DP6-0 cells were measured on arms `SsaoConfig::High`, so
+/// > `vb_viewt` did run there and its 5 248 ns gap between id 6's END and id 11's BEGIN is that
+/// > dispatch — the number the `[e6 → b11]` expectation check now pins.
 ///
-/// ⚠️ The `TOP` rows are therefore NOT addable to the `BOTTOM` rows as a partition. They are
+/// ⚠️ The `TOP` rows are still NOT addable to the `BOTTOM` rows as a partition. They are
 /// independent durations that may each include a share of the drain ahead of them.
 ///
 /// # What gates this table now — stated, because the answer changed
@@ -463,9 +646,12 @@ const _: () = assert!(
 /// **because there is no independent copy left to measure against.**
 ///
 /// What replaces it is weaker and is named as weaker: the `const` block below pins the ten original
-/// VB ids to the stage they had when both tables agreed, plus the six minted since
-/// ([`ZONE_VB_SDF_MESH`], [`ZONE_VB_GEO`] and the four particle ids) to the stage the
-/// consecutive-partition rule above assigns them. That catches a row edited by hand; it cannot
+/// VB ids to the stage they had when both tables agreed, plus the eight minted since
+/// ([`ZONE_VB_SDF_MESH`], [`ZONE_VB_GEO`], [`ZONE_VB_PRODUCE_RUN`], [`ZONE_VB_PRESHADE`] and the
+/// four particle ids) to the stage the consecutive-partition rule above assigns them. **Two of
+/// those pins MOVED at DP6-0b** — ids 10 and 11 from `TOP` to `BOTTOM` — which is a stage change
+/// made by editing the line that states it, exactly as this block intends. That catches a row
+/// edited by hand; it cannot
 /// catch a bracket moved to a site where the other stage is the right one. That question is a
 /// measurement — and Particles P0 gate #17 is the first time this tree took it. With the three
 /// compute ids on `TOP`, their medians summed against the wall span they were supposed to divide
@@ -486,7 +672,14 @@ pub const fn zone_begin_stage(zone: u16) -> TimestampStage {
     // read `ZONE_PARTICLE_KICKOFF..=ZONE_PARTICLE_SIM`, which is `base..=base+2` — and the next id
     // appended to that family would land at `base+4`, outside it, while any id inserted between
     // them would be swallowed without a line changing. Names cost three tokens and cannot do that.
+    //
+    // The VB producer-run quartet is spelled as FOUR NAMES for the same reason and one more: the
+    // ids are 10, 11, 12, 13, so a range `10..=13` would sit FLUSH against `3..=9` above it, and
+    // the two would then read as one span `3..=13` that no line states. Any id minted at 14 would
+    // be one edit away from being swallowed by it — which is rung 7c's defect, where brackets kept
+    // their sites and quietly changed what they measured.
     if matches!(zone, ZONE_VB_LATE_UPLOAD..=ZONE_VB_RUN)
+        || matches!(zone, ZONE_VB_SDF_MESH | ZONE_VB_GEO | ZONE_VB_PRODUCE_RUN | ZONE_VB_PRESHADE)
         || matches!(zone, ZONE_PARTICLE_KICKOFF | ZONE_PARTICLE_EMIT | ZONE_PARTICLE_SIM)
     {
         TimestampStage::BottomOfPipe
@@ -523,22 +716,40 @@ const _: () = {
         tops(ZONE_BASE_GBUFFER) && tops(ZONE_BASE_SV0),
         "the gbuffer and SV0 families open at TOP_OF_PIPE"
     );
-    // The SIX ids minted after those collectors were deleted — `ZONE_VB_SDF_MESH` (DP4a),
-    // `ZONE_VB_GEO` (DP6-0) and the four particle ids (P0 gate #17). Pinned by NAME and not left to
-    // the `matches!` arithmetic: an id that later slid into `LATE_UPLOAD..=RUN`, or out of the
-    // particle compute triple, would silently change what its bracket measures — rung 7c's defect
-    // exactly.
+    // The EIGHT ids minted after those collectors were deleted — `ZONE_VB_SDF_MESH` (DP4a),
+    // `ZONE_VB_GEO` (DP6-0), `ZONE_VB_PRODUCE_RUN` + `ZONE_VB_PRESHADE` (DP6-0b) and the four
+    // particle ids (P0 gate #17). Pinned by NAME and not left to the `matches!` arithmetic: an id
+    // that later slid into `LATE_UPLOAD..=RUN`, or out of the particle compute triple, would
+    // silently change what its bracket measures — rung 7c's defect exactly.
     //
     // The split is the consecutive-partition rule stated above, NOT the id's age: the three
-    // particle COMPUTE ids are back-to-back with no commands between them, so they bottom; the
-    // three isolated single-dispatch ids have unbracketed work on both sides, so they top.
+    // particle COMPUTE ids are back-to-back with no commands between them, so they bottom; an
+    // isolated single-dispatch bracket with unbracketed work on both sides tops.
     assert!(
         bottoms(ZONE_PARTICLE_KICKOFF) && bottoms(ZONE_PARTICLE_EMIT) && bottoms(ZONE_PARTICLE_SIM),
         "the particle compute ids are a consecutive partition and must open at BOTTOM_OF_PIPE"
     );
+    // VB-SV0 DP6-0b: ids 10 and 11 MOVED HERE from the `tops` assert below, and the reason is a
+    // change of premise rather than a change of mind. `ZONE_VB_PRODUCE_RUN` and
+    // `ZONE_VB_PRESHADE` make all four members of a consecutive-partition run (`12b`, 10/6/11,
+    // 13, 2, `12e`), so the "unbracketed work on both sides" that justified `TOP` is no longer
+    // true of any of them — and the paragraph at `zone_begin_stage`'s doc nominated THIS rung to
+    // say so. The measured evidence is the particle round's own: `TOP` gave 1.083/1.025/1.077 on
+    // three legs of a span the rows were supposed to divide, `BOTTOM` gives 1.000/1.002/1.000.
     assert!(
-        tops(ZONE_VB_SDF_MESH) && tops(ZONE_VB_GEO) && tops(ZONE_PARTICLE_DRAW),
-        "the three isolated single-dispatch ids open at TOP_OF_PIPE"
+        bottoms(ZONE_VB_SDF_MESH)
+            && bottoms(ZONE_VB_GEO)
+            && bottoms(ZONE_VB_PRODUCE_RUN)
+            && bottoms(ZONE_VB_PRESHADE),
+        "the VB producer-run ids are a consecutive partition and must open at BOTTOM_OF_PIPE"
+    );
+    // What is LEFT of the old "three isolated single-dispatch ids" assert. The whole lit producer
+    // runs before the particle draw on every leg, so this one's isolation is unconditional and its
+    // premise is untouched by DP6-0b — which is why the message now names it alone instead of
+    // claiming three.
+    assert!(
+        tops(ZONE_PARTICLE_DRAW),
+        "the particle draw is the one isolated single-dispatch id left at TOP_OF_PIPE"
     );
 };
 

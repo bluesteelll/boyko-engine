@@ -489,7 +489,7 @@ pub fn delta_since(cell: &LossCell, last: &mut LossSeen) -> LossDelta {
 /// unreported flag is a condition the system observes and cannot say, which is the failure the
 /// mute-leaf rule accepts once, at the leaf, and must not accumulate above it.
 ///
-/// Ten assigned, 22 unassigned.
+/// Eleven assigned, 21 unassigned.
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DiagFlag {
@@ -552,6 +552,21 @@ pub enum DiagFlag {
     /// "report a drop as a counter read, not as a log record that can itself be dropped" argument
     /// was made for.
     GpuPairBudgetExhausted = 1 << 10,
+    /// A GPU zone bracket recorded an END whose BEGIN was never recorded, so the pair's numbers
+    /// belong to no interval — VB-SV0 DP6-0b.
+    ///
+    /// **The direction the existing witness could not see.** `Torn` is `begun ∧ ¬ended` and catches
+    /// only a bracket left open; a recorder that reaches an END through a path its BEGIN skipped
+    /// returns silently, writes no command and sets no bit, so the zone is simply absent and reads
+    /// as "this leg does not run that pass". Both are absences in the artifact and only one of them
+    /// is legitimate.
+    ///
+    /// Raised from the same crate and for the same structural reason as
+    /// [`Self::GpuPairBudgetExhausted`]: `boyko_rhi_vulkan` cannot reach the `92xx` emitter, so this
+    /// word is the only route. It is a **gate input** (the DP6 clause-5 structural read), which is
+    /// why it is release-live rather than a `debug_assert!` — the timing worker inherits the driver's
+    /// profile and a release bench run has `debug_assertions` OFF.
+    GpuZoneUnmatchedEnd = 1 << 11,
 }
 
 impl DiagFlag {

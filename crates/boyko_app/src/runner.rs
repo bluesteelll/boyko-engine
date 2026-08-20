@@ -1051,8 +1051,40 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     let mut vb_zone_mode_seen: u8 = 0;
     let vb_zone_run_token: String =
         std::env::var("BOYKO_PROFILE_RUN_TOKEN").unwrap_or_default();
+    // VB-SV0 DP6-0b: the reducer's chain and derived-row DECLARATIONS, picked by the boot-frozen
+    // leg. They are two tables and not one with runtime branches because the difference between
+    // them IS the leg: on a fused boot `ZONE_VB_PRESHADE` is structurally absent and contributes
+    // zero, while on a split boot the same absence means its ~256 µs executed and only the bracket
+    // is gone — opposite contributions to the same derived row, and only the leg can say which.
+    //
+    // A leg with no producer run at all (mesh-less) declares NEITHER, which publishes
+    // `frames_checked = 0`: an honest "nothing was checked here" instead of a chain that would
+    // trivially hold over zones the leg never stamps.
+    //
+    // **`path_is_vb` is the FIRST conjunct, and it is not decoration.** `mesh_leg` is true on a
+    // `Deferred × Mesh` boot too, where `record_vb` never runs and not one VB zone stamps. Declared
+    // there, the fused table would find its minuend absent on every frame and count every frame in
+    // `frames_skipped` — a population of "frames whose derived row could not be formed" filled
+    // entirely by frames that were never candidates. `GBufferScene::path_vb_split` conjoins
+    // `path_is_vb()` for the same reason; this is that precedent applied to the declaration site.
+    let (vb_zone_chain, vb_zone_derived): (
+        &'static [u16],
+        &'static [crate::profiling::reduce::DerivedSpec],
+    ) = if host.resolved_render_path.path != boyko_render::RenderPath::VisibilityBuffer
+        || !host.resolved_render_path.mesh_leg
+    {
+        (&[], &[])
+    } else if host.resolved_render_path.mesh_geo_shade_split {
+        (crate::profiling::reduce::VB_CHAIN_SPLIT, crate::profiling::reduce::VB_DERIVED_SPLIT)
+    } else {
+        (crate::profiling::reduce::VB_CHAIN_FUSED, crate::profiling::reduce::VB_DERIVED_FUSED)
+    };
     let mut vb_zone_reducer = (vb_zone && vb_zone_artifact_path.is_some()).then(|| {
-        crate::profiling::reduce::WindowReducer::new(f64::from(ctx.device_caps().timestamp_period))
+        crate::profiling::reduce::WindowReducer::new(
+            f64::from(ctx.device_caps().timestamp_period),
+            vb_zone_chain,
+            vb_zone_derived,
+        )
     });
     // Profiling rung 9: the ARM-time correlation between the CPU tick axis and the device tick
     // axis, plus the tick it was taken at so the window's span can be measured.
@@ -2776,7 +2808,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 if let (Some(r), Some(path)) = (vb_zone_reducer.take(), vb_zone_artifact_path.as_ref())
                 {
                     let frames = r.frames();
-                    let (zones, census) = r.finish();
+                    let (zones, census, order) = r.finish();
                     let session = boyko_diag::clock::session_id();
                     // Snapshotted HERE and not inside the literal: the three counts must come
                     // from one read, or a concurrent allocation could land between two of them and
@@ -2868,6 +2900,11 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                         },
                         zones,
                         census,
+                        // VB-SV0 DP6-0b: the per-frame record-order verdicts, formed at the frame
+                        // and only counted here. Written whether or not a chain was declared —
+                        // `frames_checked == 0` is the file SAYING nothing was checked, which is
+                        // what keeps "the chain held" from being the default reading.
+                        order,
                         // Profiling rung 8, `G4c`: the drop counters reach the reader. Read at
                         // write time, from `boyko_diag`'s own cells -- not from the label census
                         // beside it, which is a different tally of the same events and would make

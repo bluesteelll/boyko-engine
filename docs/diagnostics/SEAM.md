@@ -935,7 +935,9 @@ user zone budget or name arena exhausted · `W9211` fold working set exceeds L1d
 `register_zone` refused an engine scope · `E9213` re-arm with a different geometry · `W9214`
 telemetry path unwritable at boot · `W9215` telemetry write error, streaming disabled · `W9216`
 clock epoch break, window discarded · `W9217` GPU slots abandoned at teardown · `W9218` telemetry
-quantile subscription refused.
+quantile subscription refused · `W9219` a GPU zone bracket recorded an END with no matching BEGIN ·
+`W9220` a GPU zone's declared record order was violated (both VB-SV0 DP6-0b — appended after L2's
+block, so the "18 rows" arithmetic below is about the SEED and the live count is **20**).
 
 > **A live divergence between the two monoliths, recorded rather than silently resolved.**
 > The profiling plan's §Integration says L2 seeds **"all 18 rows"** and lists eighteen codes;

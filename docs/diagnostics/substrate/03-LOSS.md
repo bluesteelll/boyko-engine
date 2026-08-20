@@ -251,8 +251,11 @@ first.
 | `ClockUncalibrated` | **none** | see below |
 
 **`ClockUncalibrated` gets no code, and that is a positive answer rather than a gap.** The `92xx`
-block is exactly eighteen rows, dense and consecutive, and the registry's check 1 makes a
-nineteenth un-addable without moving the block — so inventing one is not free. More to the point it
+block runs consecutively from `9201`, and the registry's check 1 (strictly increasing numbers) makes
+a row free only at the **end** of it — a code inserted *inside* the block would move every row after
+it, which is why inventing one is not free. *(The block was eighteen rows when this was written;
+VB-SV0 DP6-0b appended `W9219` and `W9220` at the end, the cheap direction, which does not change
+the argument.)* More to the point it
 does not want one: the condition is *"a tick was read before the scale was probed"*, whose
 consequence is that the window's magnitudes are unscaled. That is a **status on the data**, and
 this file already owns the vocabulary for exactly that ([`LossStatus::Unproven`](#)). It is

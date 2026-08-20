@@ -158,8 +158,9 @@ use crate::profiling::correlate::{Correlated, Correlation, Uncorrelated};
 /// The history, because this constant's own doc said `2` for five bumps and nobody noticed until
 /// the sixth: `2` rung 7c (the tag split) · `3` the reducer's rows · `4` `stddev_ns` · `5`
 /// `[[loss]]` · `6` `present_mode` · `7` the `alloc_shim` block · `8` rung 9's
-/// `cpu_gpu_offset` · **`9` rung 16 (J2)'s `subsystems_tag`.**
-pub const ARTIFACT_SCHEMA_VERSION: u32 = 9;
+/// `cpu_gpu_offset` · `9` rung 16 (J2)'s `subsystems_tag` · **`10` VB-SV0 DP6-0b's `[order]`
+/// block.**
+pub const ARTIFACT_SCHEMA_VERSION: u32 = 10;
 
 /// The **derived, unforgeable** half of a workload tag: everything about the boot-resolved
 /// configuration that the engine itself knows.
@@ -414,6 +415,58 @@ pub struct LabelCensus {
     pub torn: u32,
 }
 
+/// The window's per-frame RECORD-ORDER verdicts — VB-SV0 DP6-0b's `[order]` block.
+///
+/// # A count, and the two numbers that make it readable
+///
+/// `violations` alone cannot be read: zero violations over zero frames checked is not a pass, and
+/// the two states are told apart only because `frames_checked` is published beside it. Every DP6
+/// gate reads both, and a family that declared no chain publishes `frames_checked = 0` — an honest
+/// "nothing was checked here" rather than a green.
+///
+/// The verdicts are formed **per frame**, inside [`super::reduce::WindowReducer::observe_frame`],
+/// from that frame's own raw `begin_ticks` / `dur_ticks`. Only the verdict is reduced. A check
+/// written over this file's medians would be a different statement about a different quantity —
+/// a `TOP`-stamped member violates its chain non-deterministically, which is exactly what a median
+/// averages away.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct OrderCensus {
+    /// Frames on which the declared chain's containing run was present and `Measured`, so the
+    /// chain could be checked at all.
+    pub frames_checked: u32,
+    /// Frames on which a DERIVED row could not be formed — a `Required` member absent from the
+    /// slice, a present-but-unmeasured term, or a subtrahend longer than its container.
+    ///
+    /// # Its POPULATION is "frames of a leg that declared a derived row"
+    ///
+    /// The count is only readable against that population, and the population is narrowed at the
+    /// DECLARATION site rather than here: a boot that is not `VisibilityBuffer × mesh_leg` declares
+    /// no chain and no derived spec at all, so its frames are not candidates and cannot land in
+    /// this number. Without that conjunct a `Deferred × Mesh` run would report every frame as
+    /// skipped — a nonzero count over an empty population, which reads as an instrument failure
+    /// and is really a leg that was never asked.
+    pub frames_skipped: u32,
+    /// How many (member, frame) pairs breached the declared order or containment. One per member
+    /// per frame, at its worst delta.
+    pub violations: u32,
+    /// The largest single breach, ns. Zero when `violations` is zero.
+    pub worst_ns: f64,
+    /// Derived zone ids whose `n` fell below `0.9 * frames_checked` — **INCONCLUSIVE**, not merely
+    /// noisy: a derived row folded over a different subset of frames than its terms is not
+    /// comparable to them.
+    pub derived_inconclusive: Vec<u16>,
+}
+
+/// Which `[order]` keys a file carried — the parser's own record, so the block's REQUIRED keys can
+/// be refused at close rather than defaulted into a verdict.
+#[derive(Default)]
+struct OrderSeen {
+    frames_checked: bool,
+    violations: bool,
+    worst_ns: bool,
+    derived_inconclusive: bool,
+}
+
 /// One drop class the window observed, with what it cost — **profiling rung 8, `G4c`**.
 ///
 /// Only NON-ZERO classes get a row. A class with no drops is absent rather than present-and-zero,
@@ -438,6 +491,12 @@ pub struct Artifact {
     pub zones: Vec<ZoneRow>,
     /// The label census for the same window.
     pub census: LabelCensus,
+    /// **The per-frame record-order verdicts for the same window** — VB-SV0 DP6-0b.
+    ///
+    /// A file written by a build with no declared chain carries `frames_checked = 0`, which is why
+    /// this is a block of counts rather than a boolean: "the chain held" and "nothing checked the
+    /// chain" are different statements and a single flag could only carry one of them.
+    pub order: OrderCensus,
     /// **Every non-zero drop class this process accrued, with its count** — `G4c`'s clause: the
     /// loss has to reach the reader, not only the counter.
     ///
@@ -586,6 +645,20 @@ impl Artifact {
         let _ = writeln!(s, "census_not_bracketed = {}", c.not_bracketed);
         let _ = writeln!(s, "census_lost = {}", c.lost);
         let _ = writeln!(s, "census_torn = {}", c.torn);
+        // VB-SV0 DP6-0b's `[order]`. A SINGLE table (`[order]`, not `[[order]]`) because there is
+        // one chain per window, and written UNCONDITIONALLY — an absent block would make "the chain
+        // held" and "this writer had no chain" the same observation, which is the `content_tag`
+        // lesson applied to a second field.
+        let o = &self.order;
+        let _ = writeln!(s, "\n[order]");
+        let _ = writeln!(s, "frames_checked = {}", o.frames_checked);
+        let _ = writeln!(s, "frames_skipped = {}", o.frames_skipped);
+        let _ = writeln!(s, "violations = {}", o.violations);
+        let _ = writeln!(s, "worst_ns = {}", ns(o.worst_ns));
+        // A TOML array of ids, empty when every derived row cleared its floor. Rendered as one line
+        // so the block stays diffable against another leg's.
+        let ids: Vec<String> = o.derived_inconclusive.iter().map(u16::to_string).collect();
+        let _ = writeln!(s, "derived_inconclusive = [{}]", ids.join(", "));
         for l in &self.losses {
             let _ = writeln!(s);
             let _ = writeln!(s, "[[loss]]");
@@ -782,13 +855,41 @@ impl Artifact {
         let mut cur: Option<PartialZone> = None;
         let mut losses: Vec<LossRow> = Vec::new();
         let mut cur_loss: Option<PartialLoss> = None;
+        // VB-SV0 DP6-0b's `[order]`. Its own builder, and a plain `OrderCensus` rather than a
+        // `Partial*`: every field has a meaningful default (`0` verdicts over `0` frames checked is
+        // exactly what a file from a writer with no chain says), so there is no field whose absence
+        // has to be refused at the block's close.
+        let mut order = OrderCensus::default();
+        let mut in_order = false;
+        // Which of the block's keys the file actually carried. The three that decide a verdict are
+        // REQUIRED once the block is opened, on `PartialZone::finish`'s precedent: a present-but-
+        // incomplete block would default `frames_checked` to 0 and `violations` to 0, which is the
+        // one combination every gate reads as INCONCLUSIVE — so a truncated block would look like a
+        // deliberate "nothing was checked" instead of a malformed file.
+        let mut order_opened = false;
+        let mut order_seen = OrderSeen::default();
 
         for (i, raw) in text.lines().enumerate() {
             let line = raw.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
+            if line == "[order]" {
+                // Defensive close, like the `[[zone]]` arm below: the renderer puts this block
+                // first, but a parser that assumed the writer's order would break on any file that
+                // ever moves it.
+                if let Some(p) = cur_loss.take() {
+                    losses.push(p.finish(i + 1)?);
+                }
+                if let Some(p) = cur.take() {
+                    zones.push(p.finish(i + 1)?);
+                }
+                in_order = true;
+                order_opened = true;
+                continue;
+            }
             if line == "[[loss]]" {
+                in_order = false;
                 if let Some(p) = cur_loss.take() {
                     losses.push(p.finish(i + 1)?);
                 }
@@ -796,6 +897,7 @@ impl Artifact {
                 continue;
             }
             if line == "[[zone]]" {
+                in_order = false;
                 // The loss blocks come first in the rendered order, so the first `[[zone]]` closes
                 // whichever loss block was open. Written as a close-on-transition rather than as
                 // two passes because a second pass would have to agree with this one about where
@@ -808,6 +910,67 @@ impl Artifact {
                 }
                 cur = Some(PartialZone::default());
                 continue;
+            }
+            if in_order {
+                let bad = |why| ArtifactError::Malformed { line: i + 1, why };
+                let Some((k, v)) = split_kv(line) else {
+                    return Err(bad("not a `key = value` line"));
+                };
+                // An UNKNOWN key ENDS the block instead of being swallowed. A `_ => {}` here would
+                // eat every flat header key that followed an `[order]` block, so the parser would
+                // silently drop half a file whose sections were written in another order — while
+                // the block's own doc claims order-independence. Ending the block on the first key
+                // it does not own keeps that claim true and costs one bool.
+                if !matches!(
+                    k,
+                    "frames_checked"
+                        | "frames_skipped"
+                        | "violations"
+                        | "worst_ns"
+                        | "derived_inconclusive"
+                ) {
+                    in_order = false;
+                    // NO `continue`: fall through to the flat-header arm set below, which is where
+                    // this key belongs.
+                } else {
+                match k {
+                    "frames_checked" => {
+                        order.frames_checked = v.parse().map_err(|_| bad("frames_checked"))?;
+                        order_seen.frames_checked = true;
+                    }
+                    "frames_skipped" => {
+                        order.frames_skipped = v.parse().map_err(|_| bad("frames_skipped"))?;
+                    }
+                    "violations" => {
+                        order.violations = v.parse().map_err(|_| bad("violations"))?;
+                        order_seen.violations = true;
+                    }
+                    "worst_ns" => {
+                        order.worst_ns = v.parse().map_err(|_| bad("worst_ns"))?;
+                        order_seen.worst_ns = true;
+                    }
+                    "derived_inconclusive" => {
+                        order_seen.derived_inconclusive = true;
+                        let inner = v.trim().trim_start_matches('[').trim_end_matches(']');
+                        for id in inner.split(',') {
+                            let id = id.trim();
+                            if id.is_empty() {
+                                continue;
+                            }
+                            order
+                                .derived_inconclusive
+                                .push(id.parse().map_err(|_| bad("derived_inconclusive id"))?);
+                        }
+                    }
+                    // Unreachable: the `matches!` guard above admits exactly the five keys this
+                    // arm set handles, so a sixth would have ended the block rather than arriving
+                    // here. Spelled as an assertion instead of `{}` so the two lists cannot drift.
+                    other => {
+                        debug_assert!(false, "invariant: `{other}` is not an [order] key");
+                    }
+                }
+                continue;
+                }
             }
             if let Some(l) = cur_loss.as_mut() {
                 let bad = |why| ArtifactError::Malformed { line: i + 1, why };
@@ -891,6 +1054,28 @@ impl Artifact {
             losses.push(p.finish(text.lines().count())?);
         }
 
+        // The `[order]` block's close-time refusal — VB-SV0 DP6-0b, W4. A block that OPENED owes
+        // the three keys a verdict is read from; `frames_skipped` defaults to 0 (nothing skipped)
+        // and `worst_ns` is required only where it means something.
+        //
+        // A file with NO `[order]` block at all is a different case and is NOT refused here: it
+        // keeps `frames_checked = 0`, which every gate reads as "nothing was checked". The schema
+        // version is what refuses a writer this reader does not understand.
+        if order_opened {
+            if !order_seen.frames_checked {
+                return Err(ArtifactError::BadHeader("order.frames_checked"));
+            }
+            if !order_seen.violations {
+                return Err(ArtifactError::BadHeader("order.violations"));
+            }
+            if !order_seen.derived_inconclusive {
+                return Err(ArtifactError::BadHeader("order.derived_inconclusive"));
+            }
+            if order.violations != 0 && !order_seen.worst_ns {
+                return Err(ArtifactError::BadHeader("order.worst_ns"));
+            }
+        }
+
         // Profiling rung 9: the one key decides which shape the seven numbers belong to. Required
         // for `content_tag`'s reason and one more: an absent key would have to default to
         // *something*, and both candidates are wrong — defaulting to a refusal invents a device
@@ -951,6 +1136,7 @@ impl Artifact {
             },
             zones,
             census,
+            order,
             losses,
         })
     }

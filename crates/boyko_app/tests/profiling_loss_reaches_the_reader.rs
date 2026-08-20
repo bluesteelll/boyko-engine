@@ -93,7 +93,7 @@ fn every_drop_the_reducer_folded_is_named_in_the_artifact() {
     let _serial = DEVICE_CELL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let before = device_total();
 
-    let mut r = WindowReducer::new(1.0);
+    let mut r = WindowReducer::new(1.0, &[], &[]);
     r.observe_frame(&[
         pair(0, GpuLabel::Measured),
         pair(1, GpuLabel::Lost),
@@ -104,7 +104,7 @@ fn every_drop_the_reducer_folded_is_named_in_the_artifact() {
         pair(3, GpuLabel::NotBracketed),
     ]);
     r.observe_frame(&[pair(1, GpuLabel::Lost)]);
-    let (_, census) = r.finish();
+    let (_, census, _order) = r.finish();
 
     let folded_drops = u64::from(census.lost + census.torn);
     assert_eq!(folded_drops, 3, "the fixture folds two Lost and one Torn");
@@ -129,7 +129,7 @@ fn the_artifact_names_the_class_and_absent_means_zero() {
     // is the report, and re-panicking here would bury it under a second one.
     let _serial = DEVICE_CELL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let before = device_total();
-    let mut r = WindowReducer::new(1.0);
+    let mut r = WindowReducer::new(1.0, &[], &[]);
     r.observe_frame(&[pair(0, GpuLabel::Lost)]);
     let _ = r.finish();
     assert_eq!(device_total() - before, 1);
@@ -182,9 +182,9 @@ fn a_window_with_no_drops_moves_neither_tally() {
     // is the report, and re-panicking here would bury it under a second one.
     let _serial = DEVICE_CELL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let before = device_total();
-    let mut r = WindowReducer::new(1.0);
+    let mut r = WindowReducer::new(1.0, &[], &[]);
     r.observe_frame(&[pair(0, GpuLabel::Measured), pair(1, GpuLabel::NotBracketed)]);
-    let (_, census) = r.finish();
+    let (_, census, _order) = r.finish();
 
     assert_eq!(census.lost + census.torn, 0, "no drops in this window");
     assert_eq!(

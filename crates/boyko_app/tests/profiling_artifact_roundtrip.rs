@@ -36,7 +36,7 @@ use std::path::PathBuf;
 use boyko_app::profiling::artifact::{
     LossRow,
     ARTIFACT_SCHEMA_VERSION, Artifact, ArtifactError, ArtifactHeader, Instrument, LabelCensus,
-    PRECISION_DECIMALS, ZoneLabel, ZoneRow,
+    OrderCensus, PRECISION_DECIMALS, ZoneLabel, ZoneRow,
 };
 use boyko_app::profiling::correlate::{Correlated, Correlation, Uncorrelated};
 
@@ -118,6 +118,9 @@ fn fixture(run_token: &str) -> Artifact {
             },
         ],
         census: LabelCensus { measured: 10, not_bracketed: 10, lost: 2, torn: 1 },
+        // VB-SV0 DP6-0b: this fixture declares no chain, so the block it round-trips is the
+        // `frames_checked = 0` one — the state a reader must be able to tell from a pass.
+        order: OrderCensus::default(),
         // Profiling rung 8, `G4c`: three drops, and the `Device` row that must accompany them.
         // `lost + torn == 3` is the label census's count of the SAME events -- two tallies of one
         // fact, which is what the cross-check gate below compares.
@@ -135,12 +138,151 @@ fn a_fresh_artifact_round_trips_through_the_file() {
     let read = Artifact::read(&path, "run-A").expect("a fresh artifact parses");
     assert_eq!(read.header, written.header, "the header did not survive the round trip");
     assert_eq!(read.census, written.census, "the label census did not survive the round trip");
+    assert_eq!(read.order, written.order, "the [order] block did not survive the round trip");
     assert_eq!(read.zones.len(), written.zones.len());
     for (a, b) in read.zones.iter().zip(written.zones.iter()) {
         assert_eq!(a, b, "a zone row did not survive the round trip");
     }
 
     let _ = std::fs::remove_file(&path);
+}
+
+/// **VB-SV0 DP6-0b.** A POPULATED `[order]` block survives the file — every field non-default.
+///
+/// # A zero-valued block round-trips through a parser that reads none of it
+///
+/// The fixture above carries `OrderCensus::default()`, so `read.order == written.order` holds
+/// whether the writer emits the block, whether the reader parses it, and whether either of them
+/// handles a single key — all four combinations produce two equal all-zero structs. That is the
+/// partial-parse false green, and it is exactly the defect class this rung exists to close: a gate
+/// satisfied by the absence of the thing it checks.
+///
+/// So this one populates all five fields with values nothing defaults to, and asserts the block
+/// both textually (the keys are IN the file, with the array rendered as an array) and structurally.
+#[test]
+fn a_populated_order_block_survives_the_file() {
+    let path = scratch("order_populated");
+    let mut written = fixture("run-ORDER");
+    written.order = OrderCensus {
+        frames_checked: 217,
+        frames_skipped: 4,
+        violations: 3,
+        worst_ns: 1_536.0,
+        derived_inconclusive: vec![14, 27],
+    };
+    written.write(&path).expect("invariant: the artifact writes");
+
+    let text = std::fs::read_to_string(&path).expect("the file is readable");
+    assert!(text.contains("[order]"), "the block header must be in the file:\n{text}");
+    assert!(text.contains("frames_checked = 217"), "{text}");
+    assert!(text.contains("frames_skipped = 4"), "{text}");
+    assert!(text.contains("violations = 3"), "{text}");
+    assert!(
+        text.contains("derived_inconclusive = [14, 27]"),
+        "the id list must render as a TOML array, not as a debug-formatted Vec:\n{text}"
+    );
+
+    let read = Artifact::read(&path, "run-ORDER").expect("a populated order block parses");
+    assert_eq!(
+        read.order, written.order,
+        "the [order] block did not survive the round trip field for field"
+    );
+    // Named individually as well: a `PartialEq` over a struct whose fields all defaulted on both
+    // sides would pass, and the equality above cannot say which field carried the file.
+    assert_eq!(read.order.frames_checked, 217);
+    assert_eq!(read.order.frames_skipped, 4);
+    assert_eq!(read.order.violations, 3);
+    assert!((read.order.worst_ns - 1_536.0).abs() < 0.05, "worst_ns was {}", read.order.worst_ns);
+    assert_eq!(read.order.derived_inconclusive, vec![14, 27]);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// **W4's close-time refusal.** An `[order]` block that OPENED and omitted a verdict key is
+/// MALFORMED, not a block saying "nothing was checked".
+///
+/// The three keys are required together because their default combination —
+/// `frames_checked = 0`, `violations = 0` — is the one every gate reads as INCONCLUSIVE. A
+/// truncated block that defaulted into it would look like a deliberate refusal, which is the
+/// strongest possible disguise for a broken writer.
+#[test]
+fn an_incomplete_order_block_is_refused() {
+    let mut written = fixture("run-ORDER2");
+    written.order = OrderCensus {
+        frames_checked: 100,
+        frames_skipped: 0,
+        violations: 2,
+        worst_ns: 512.0,
+        derived_inconclusive: Vec::new(),
+    };
+    let full = written.render();
+
+    for (key, line) in [
+        ("frames_checked", "frames_checked = 100"),
+        ("violations", "violations = 2"),
+        ("derived_inconclusive", "derived_inconclusive = []"),
+        ("worst_ns", "worst_ns = 512.0"),
+    ] {
+        let stripped: String =
+            full.lines().filter(|l| l.trim() != line).map(|l| format!("{l}\n")).collect();
+        assert!(stripped.len() < full.len(), "`{line}` was not in the rendered file:\n{full}");
+        let err = Artifact::parse(&stripped, "run-ORDER2")
+            .expect_err(&format!("an [order] block missing `{key}` must be refused"));
+        match err {
+            ArtifactError::BadHeader(k) => assert!(
+                k.contains(key),
+                "the refusal must name the missing key; it named `{k}` for `{key}`"
+            ),
+            other => panic!("expected BadHeader for the missing `{key}`, got {other:?}"),
+        }
+    }
+}
+
+/// An unknown key inside `[order]` ENDS the block instead of eating the keys after it.
+///
+/// The parser's own doc claims section-order independence. A `_ => {}` inside the block would have
+/// made that false in the one direction nobody tests: every flat header key written after an
+/// `[order]` block would be swallowed, and the parse would then fail on a header field that IS in
+/// the file — or, worse, succeed with a defaulted one.
+#[test]
+fn an_unknown_order_key_does_not_swallow_the_keys_after_it() {
+    let written = fixture("run-ORDER3");
+    let full = written.render();
+    // Re-emit with the `[order]` block FIRST and an unknown key inside it, followed by every flat
+    // header key. If the block swallowed them, the parse loses `session_lo` and fails.
+    let mut header_keys = Vec::new();
+    let mut rest = Vec::new();
+    for l in full.lines() {
+        if l.starts_with("[[") || l.starts_with("[order]") {
+            rest.push(l);
+        } else if rest.is_empty() && l.contains(" = ") {
+            header_keys.push(l);
+        } else {
+            rest.push(l);
+        }
+    }
+    let mut text = String::from("[order]\nframes_checked = 5\nviolations = 0\n");
+    text.push_str("derived_inconclusive = []\nan_unknown_future_key = 7\n");
+    for l in &header_keys {
+        text.push_str(l);
+        text.push('\n');
+    }
+    for l in &rest {
+        if l.trim() == "[order]" || l.trim().starts_with("frames_") || l.trim().starts_with("violations")
+            || l.trim().starts_with("worst_ns") || l.trim().starts_with("derived_inconclusive")
+        {
+            continue;
+        }
+        text.push_str(l);
+        text.push('\n');
+    }
+    let read = Artifact::parse(&text, "run-ORDER3")
+        .expect("the header keys after an unknown [order] key must still be parsed");
+    assert_eq!(read.order.frames_checked, 5, "the block's own keys still parsed");
+    assert_eq!(
+        read.header.session_lo, written.header.session_lo,
+        "a header key written after the [order] block was swallowed by it"
+    );
 }
 
 /// **Rung 9.** The correlation survives the file in BOTH shapes, and the refusal keeps D14's own
