@@ -14,7 +14,18 @@
 > record 40 B), with its own SHADER-VARIANT-MANIFEST row — never a runtime flag over an always-40 B record
 > (that would be the F24 dark tax: +25 % draw-read paid while off).
 
-> **Status:** Rev 4 — APPROVED by the final verify pass. Rev 3 closed `architecture-critic`'s final-verify findings on Rev 2 (4 P1, 3 P2). No P0 survives; all 9 N-findings and all 12 Rev-0 findings remain closed. Endorsed items — the industry skeleton, the buffer split, the per-path compare op, the role-keyed seeds, the kickoff pre-decrement, the four-boundary algebra including frame 0 — are carried **unchanged**. `graphify` CLI is not installed on this machine; orientation was Grep/Read.
+> **Status:** Rev 4 — APPROVED by the final verify pass.
+> **P0 LIVE-FIRE ERRATUM (implementation-discovered, 2e3f2c2d):** D7's Deferred row is REFUTED by
+> controlled experiment — Deferred's depth buffer holds a FRAGMENT-WRITTEN euclidean encode
+> (`length(eye−P)/T_MAX`) while the particle VS emits projective `SV_Position.z`, which the marcher
+> matrix pins to 1.0 (row3 == row4); `LESS` fails on every pixel including sky, and no host-side
+> matrix can fix it (z_ndc is a ratio of affine functions; a euclidean norm is not). **P0 ships
+> particles on Forward / ForwardPlus / VisibilityBuffer; Deferred lands with the `-D DEPTH_LINEAR`
+> fragment-depth variant D7 already schedules at P2** (pulled forward as that rung's first item).
+> The compute half is path-independent and proven (identical readback on Deferred). The armed
+> fixture FAILS on Deferred by design until then. Also named at P0 exit: gate #17 is a residual
+> (no zone ids reach the particle passes — mint them before any measurement claim), and the
+> fixture composes the subsystem by hand pending a public SystemSet for the plugin's Main systems. Rev 3 closed `architecture-critic`'s final-verify findings on Rev 2 (4 P1, 3 P2). No P0 survives; all 9 N-findings and all 12 Rev-0 findings remain closed. Endorsed items — the industry skeleton, the buffer split, the per-path compare op, the role-keyed seeds, the kickoff pre-decrement, the four-boundary algebra including frame 0 — are carried **unchanged**. `graphify` CLI is not installed on this machine; orientation was Grep/Read.
 
 ---
 
