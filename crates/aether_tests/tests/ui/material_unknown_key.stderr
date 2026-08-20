@@ -1,0 +1,5 @@
+error: unknown material key `roughnes`; keys are: base, metallic, roughness, reflectance, emissive, flags, textures (did you mean `roughness`?)
+ --> tests/ui/material_unknown_key.rs:7:46
+  |
+7 |     material gold { base: (1.0, 0.72, 0.30), roughnes: 0.14 }
+  |                                              ^^^^^^^^

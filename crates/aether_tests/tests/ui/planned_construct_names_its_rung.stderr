@@ -1,5 +1,5 @@
-error: `material` is an Aether construct but lands at rung A5; this build carries rungs A0..A3 (component, tag, bundle, event, system, plugin, machine)
- --> tests/ui/planned_construct_names_its_rung.rs:6:5
+error: `scene` is an Aether construct but lands at rung A6; this build carries rungs A0..A5 (component, tag, bundle, system, event, plugin, machine, material)
+ --> tests/ui/planned_construct_names_its_rung.rs:9:5
   |
-6 |     material gold { }
-  |     ^^^^^^^^
+9 |     scene lab { }
+  |     ^^^^^

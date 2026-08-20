@@ -1,0 +1,5 @@
+error: `base` color takes 3 (rgb, alpha=1.0) or 4 (rgba) components — found 2
+ --> tests/ui/material_color_arity.rs:6:27
+  |
+6 |     material gold { base: (1.0, 0.72), metallic: 1.0 }
+  |                           ^^^^^^^^^^^

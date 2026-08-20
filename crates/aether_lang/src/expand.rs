@@ -7,8 +7,9 @@ use quote::{format_ident, quote};
 use syn::Ident;
 
 use crate::ast::{
-    AetherBlock, BundleDef, ComponentDef, Construct, EvField, EventDef, MachineDef, OrderKind,
-    PluginDef, Schedule, StateDef, SysParam, SysParamTy, SystemDef, TagDef, TransitionDef,
+    AetherBlock, BundleDef, ColorLit, ComponentDef, Construct, EvField, EventDef, MachineDef,
+    MaterialDef, OrderKind, PluginDef, Schedule, StateDef, SysParam, SysParamTy, SystemDef, TagDef,
+    TransitionDef,
 };
 use crate::diag;
 
@@ -34,14 +35,38 @@ fn expand_inner(block: &AetherBlock) -> syn::Result<TokenStream> {
             Construct::System(def) => out.extend(system_fn(def)),
             Construct::Plugin(def) => out.extend(plugin_impl(def, block)?),
             Construct::Machine(def) => out.extend(machine_items(def)?),
+            Construct::Material(def) => out.extend(material_fn(def)),
         }
     }
     Ok(out)
 }
 
-/// The §3.3 cross-construct rules that need the WHOLE block (the reason per-construct macros
-/// were rejected): one plugin per block, and scheduling clauses require the plugin header.
+/// The cross-construct rules that need the WHOLE block (the reason per-construct macros were
+/// rejected): one plugin per block, scheduling clauses require the plugin header (§3.3), and one
+/// builder fn per material name (§3.6).
 fn validate_block(block: &AetherBlock) -> syn::Result<()> {
+    // §4's duplicate-name rule, at the ONE kind where rustc's own error is useless: two materials
+    // of one name emit two `pub fn`s and nothing else — no derive, no trait bound — so rustc has
+    // only E0428 to report, and MEASURED, it puts both of its labels on the `aether!` token,
+    // naming no user token at all. (component×component and material×system each get a second,
+    // localized error that rescues them; §7.1's "defer when downstream already lands well" is why
+    // cross-KIND collisions are still left to rustc.)
+    for (i, c) in block.constructs.iter().enumerate() {
+        let Construct::Material(m) = c else { continue };
+        let Some(first) = block.constructs[..i].iter().find_map(|p| match p {
+            Construct::Material(prev) if prev.name == m.name => Some(prev),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let mut e = diag::err(
+            m.name.span(),
+            format!("duplicate material `{}` — each material expands to a builder fn of its own name, and two of one name is one fn defined twice", m.name),
+        );
+        e.combine(diag::err(first.name.span(), "the first `material` of this name is here"));
+        return Err(e);
+    }
+
     let mut first_plugin: Option<&PluginDef> = None;
     for c in &block.constructs {
         if let Construct::Plugin(p) = c {
@@ -1098,6 +1123,72 @@ fn machine_registrations(
     Ok((insert, stmts))
 }
 
+/// §3.6: `material` → an `#[inline]` BUILDER FN over the engine's own constructors.
+///
+/// Materials are runtime-minted assets (`Assets<Material>::add`), so a static table would be the
+/// parallel data system Principle 0 forbids; a fn that returns the engine's `Material` is the
+/// zero-cost target, and it composes with any minting site (`materials.add(gold())`).
+///
+/// Both engine paths are the REAL ones and both RESOLVE: `boyko_render` re-exports `Material` and
+/// `MaterialGpu` at its root, so the plan's idealized `::boyko_render::Material` needed no nesting
+/// substitution (unlike the A1 `Entity` / A2 `Res` precedents).
+///
+/// The `textures:` escape routes through `Material::with_textures` — the ONLY constructor that can
+/// produce a textured material — so the `MATERIAL_FLAG_TEXTURED` derivation stays in the engine's
+/// one authority and Aether never mints that bit itself.
+fn material_fn(def: &MaterialDef) -> TokenStream {
+    let name = &def.name;
+    let doc = format!(" Aether material `{name}`.");
+
+    let base = rgba_array(&def.base);
+    let metallic = expr_or(def.metallic.as_ref(), quote!(0.0));
+    let roughness = expr_or(def.roughness.as_ref(), quote!(0.5));
+    let reflectance = expr_or(def.reflectance.as_ref(), quote!(0.5));
+    let flags = expr_or(def.flags.as_ref(), quote!(0));
+    let emissive = def.emissive.as_ref().map_or_else(|| quote!([0.0; 3]), rgb_array);
+
+    let build = match &def.textures {
+        None => quote! {
+            ::boyko_render::Material::new(#base, #metallic, #roughness, #reflectance, #emissive, #flags)
+        },
+        Some(t) => quote! {
+            ::boyko_render::Material::with_textures(
+                ::boyko_render::MaterialGpu::new(#base, #metallic, #roughness, #reflectance, #emissive, #flags),
+                #t
+            )
+        },
+    };
+
+    quote! {
+        #[doc = #doc]
+        #[inline]
+        pub fn #name() -> ::boyko_render::Material { #build }
+    }
+}
+
+/// A material key's verbatim expression, or the §3.6 default when the key is absent.
+fn expr_or(e: Option<&syn::Expr>, default: TokenStream) -> TokenStream {
+    e.map_or(default, |e| quote!(#e))
+}
+
+/// `base` → `[r, g, b, a]`, synthesizing the §3.6 alpha default (`1.0`) for the 3-component form.
+/// The parser guarantees 3 or 4 components, so this is total.
+fn rgba_array(c: &ColorLit) -> TokenStream {
+    let comps = &c.components;
+    if comps.len() == 3 {
+        quote!([#(#comps),*, 1.0])
+    } else {
+        quote!([#(#comps),*])
+    }
+}
+
+/// `emissive` → `[r, g, b]` (`Material::new` takes `[f32; 3]`; the parser rejected any other
+/// arity, so this is total).
+fn rgb_array(c: &ColorLit) -> TokenStream {
+    let comps = &c.components;
+    quote!([#(#comps),*])
+}
+
 #[cfg(test)]
 mod tests {
     //! The A0 snapshot channel (see the crate doc's macrotest note): `expand_block` is a plain
@@ -1263,8 +1354,10 @@ mod tests {
 
     #[test]
     fn planned_constructs_name_their_rung_instead_of_pretending_unknown() {
-        fails_with(quote! { material gold {} }, "lands at rung A5");
         fails_with(quote! { scene lab {} }, "lands at rung A6");
+        // `material` shipped at A5, so it must NO LONGER take the planned-construct path — a
+        // construct that stays "planned" after it lands is the one drift this test can catch.
+        fails_with(quote! { material gold {} }, "needs a `base:` color");
     }
 
     // -------------------------------------------------------- night-review fixes (A0/A1 scope)
@@ -2136,5 +2229,214 @@ mod tests {
             "duplicate hook `on_add`",
         );
         fails_with(quote! { tag T(dense); }, "unknown tag modifier `dense`");
+    }
+
+    // ------------------------------------------------------------------------ rung A5: material
+
+    /// The §3.6 before/after pair, VERBATIM — the plan's two vb_lab materials and the exact
+    /// `Material::new` calls it prints, against the REAL engine paths (`::boyko_render::Material`
+    /// resolves as written: `boyko_render` re-exports it at the crate root).
+    ///
+    /// Pins the whole default table in one assertion: `gold` omits `reflectance`/`emissive`/
+    /// `flags` (→ `0.5`, `[0.0; 3]`, `0`), `lamp` omits `metallic` (→ `0.0`), and BOTH omit the
+    /// alpha component (→ the synthesized `1.0` lane).
+    #[test]
+    fn the_section_3_6_before_after_pair_holds_verbatim() {
+        expands_to(
+            quote! {
+                material gold  { base: (1.0, 0.72, 0.30), metallic: 1.0, roughness: 0.14 }
+                material lamp  { base: (0.02, 0.02, 0.02), roughness: 0.6, emissive: (1.6, 0.9, 0.3) }
+            },
+            quote! {
+                #[doc = " Aether material `gold`."]
+                #[inline]
+                pub fn gold() -> ::boyko_render::Material {
+                    ::boyko_render::Material::new([1.0, 0.72, 0.30, 1.0], 1.0, 0.14, 0.5, [0.0; 3], 0)
+                }
+                #[doc = " Aether material `lamp`."]
+                #[inline]
+                pub fn lamp() -> ::boyko_render::Material {
+                    ::boyko_render::Material::new([0.02, 0.02, 0.02, 1.0], 0.0, 0.6, 0.5, [1.6, 0.9, 0.3], 0)
+                }
+            },
+        );
+    }
+
+    /// The `textures:` escape (§3.6): the emission switches to `Material::with_textures` over an
+    /// explicit `MaterialGpu::new`, because that is the engine's ONLY textured constructor and
+    /// therefore the only place `MATERIAL_FLAG_TEXTURED` may be derived. Aether never mints the
+    /// bit itself.
+    ///
+    /// Also pins the 4-component `base` (explicit alpha passes through, no lane synthesized), a
+    /// non-literal channel expression, and the `flags:` key.
+    #[test]
+    fn the_textures_escape_routes_through_the_engines_only_textured_constructor() {
+        expands_to(
+            quote! {
+                material crate_box {
+                    base: (0.8, 0.8, 0.8, 0.5),
+                    metallic: BRASS_METALLIC,
+                    roughness: 0.3,
+                    reflectance: 0.35,
+                    flags: 0,
+                    textures: MaterialTextures { albedo: slot, ..MaterialTextures::NONE },
+                }
+            },
+            quote! {
+                #[doc = " Aether material `crate_box`."]
+                #[inline]
+                pub fn crate_box() -> ::boyko_render::Material {
+                    ::boyko_render::Material::with_textures(
+                        ::boyko_render::MaterialGpu::new(
+                            [0.8, 0.8, 0.8, 0.5], BRASS_METALLIC, 0.3, 0.35, [0.0; 3], 0
+                        ),
+                        MaterialTextures { albedo: slot, ..MaterialTextures::NONE }
+                    )
+                }
+            },
+        );
+    }
+
+    /// Every advertised key, all seven at once, every value non-default.
+    ///
+    /// The failure this catches is the one the unknown-key diagnostic exists to prevent, arriving
+    /// by the other door: a key the parser ACCEPTS but never threads into the emission is silently
+    /// ignored — the author sets `reflectance` and ships the default. Per-key coverage spread
+    /// across the other two tests cannot state that, because neither exercises all seven.
+    #[test]
+    fn every_advertised_key_reaches_the_emission() {
+        expands_to(
+            quote! {
+                material full {
+                    base: (0.1, 0.2, 0.3, 0.4),
+                    metallic: 0.11,
+                    roughness: 0.22,
+                    reflectance: 0.33,
+                    emissive: (0.44, 0.55, 0.66),
+                    flags: 7,
+                    textures: TEX,
+                }
+            },
+            quote! {
+                #[doc = " Aether material `full`."]
+                #[inline]
+                pub fn full() -> ::boyko_render::Material {
+                    ::boyko_render::Material::with_textures(
+                        ::boyko_render::MaterialGpu::new(
+                            [0.1, 0.2, 0.3, 0.4], 0.11, 0.22, 0.33, [0.44, 0.55, 0.66], 7
+                        ),
+                        TEX
+                    )
+                }
+            },
+        );
+    }
+
+    /// A material carries no scheduling, so it needs no `plugin` — and a block that HAS one is
+    /// unaffected: the plugin collects sibling systems, never materials. (Handles reach entities
+    /// through `scene` at rung A6; A5 stops at the builder fn.)
+    #[test]
+    fn a_material_needs_no_plugin_and_a_sibling_plugin_does_not_register_it() {
+        expands_to(
+            quote! {
+                plugin Look;
+                material chalk { base: (0.86, 0.86, 0.88) }
+            },
+            quote! {
+                pub struct Look;
+                impl ::boyko_ecs::Plugin for Look {
+                    fn build(&self, app: &mut ::boyko_ecs::App) {}
+                    fn name(&self) -> &'static str { "Look" }
+                }
+                #[doc = " Aether material `chalk`."]
+                #[inline]
+                pub fn chalk() -> ::boyko_render::Material {
+                    ::boyko_render::Material::new([0.86, 0.86, 0.88, 1.0], 0.0, 0.5, 0.5, [0.0; 3], 0)
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn a5_diagnostics_fire_where_the_plan_says() {
+        // §3.6's own example: a two-component color, refused on the TUPLE.
+        fails_with(
+            quote! { material gold { base: (1.0, 0.72) } },
+            "color takes 3 (rgb, alpha=1.0) or 4 (rgba) components",
+        );
+        // §2's case rule, with the plan's own wording and a rename.
+        fails_with(
+            quote! { material Gold { base: (1.0, 0.72, 0.30) } },
+            "material names are lowercase — they expand to builder functions, not types",
+        );
+        fails_with(quote! { material Gold { base: (1.0, 0.72, 0.30) } }, "rename `Gold` to `gold`");
+        // Unknown key: the exhaustive list plus a did-you-mean.
+        fails_with(
+            quote! { material m { base: (0.0, 0.0, 0.0), roughnes: 0.5 } },
+            "unknown material key `roughnes`; keys are: base, metallic, roughness, reflectance, emissive, flags, textures",
+        );
+        fails_with(
+            quote! { material m { base: (0.0, 0.0, 0.0), roughnes: 0.5 } },
+            "did you mean `roughness`?",
+        );
+        // `emissive` has no alpha lane — `Material::new` takes `[f32; 3]`. A 4-component emissive
+        // would otherwise expand to an `[f32; 4]` and fail in rustc against a SYNTHESIZED array.
+        fails_with(
+            quote! { material m { base: (0.0, 0.0, 0.0), emissive: (1.0, 0.5, 0.2, 1.0) } },
+            "`emissive` color takes exactly 3 components (rgb)",
+        );
+        // Every key defaults except `base` — §3.6's default table names six values and omits it.
+        fails_with(
+            quote! { material m { roughness: 0.5 } },
+            "material `m` needs a `base:` color",
+        );
+        // Last-write-wins on a repeated key would silently drop the first value.
+        fails_with(
+            quote! { material m { base: (0.0, 0.0, 0.0), base: (1.0, 1.0, 1.0) } },
+            "duplicate material key `base`",
+        );
+        // A color key given a scalar names the shape it wants.
+        fails_with(
+            quote! { material m { base: 0.5 } },
+            "`base` takes a color tuple: `(r, g, b)` or `(r, g, b, a)`",
+        );
+    }
+
+    /// Two materials of one name are one fn defined twice. MEASURED with real rustc: E0428 puts
+    /// BOTH of its labels on the `aether!` token and names no user token at all — a material
+    /// emits no derive and no trait bound, so unlike component×component there is no second,
+    /// localized error to rescue it. Aether therefore owns this one, with both spans (the
+    /// plugin×plugin shape). Cross-KIND collisions stay with rustc, which lands them well.
+    #[test]
+    fn two_materials_of_one_name_are_refused_with_both_spans() {
+        let out = crate::expand_block(quote! {
+            material twice { base: (0.0, 0.0, 0.0) }
+            material twice { base: (1.0, 1.0, 1.0) }
+        })
+        .to_string();
+        assert!(out.contains("duplicate material `twice`"), "got: {out}");
+        assert!(
+            out.contains("the first `material` of this name is here"),
+            "the SECOND span is the point of this diagnostic, got: {out}"
+        );
+        // A name reused across KINDS is rustc's, per §7.1 — it reports both a duplicate fn AND a
+        // localized second error, so an Aether pre-check could only be worse.
+        expands_to(
+            quote! {
+                material paint { base: (0.0, 0.0, 0.0) }
+                component Paint { coats: u8 }
+            },
+            quote! {
+                #[doc = " Aether material `paint`."]
+                #[inline]
+                pub fn paint() -> ::boyko_render::Material {
+                    ::boyko_render::Material::new([0.0, 0.0, 0.0, 1.0], 0.0, 0.5, 0.5, [0.0; 3], 0)
+                }
+                #[derive(::boyko_macros::Component)]
+                pub struct Paint {
+                    pub coats: u8
+                }
+            },
+        );
     }
 }

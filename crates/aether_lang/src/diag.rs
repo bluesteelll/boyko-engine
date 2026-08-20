@@ -79,5 +79,8 @@ mod tests {
     fn the_registry_list_covers_every_dispatched_keyword() {
         assert_eq!(did_you_mean("pluging", CONSTRUCT_KEYWORDS), Some("plugin"));
         assert!(unknown_construct(Span::call_site(), "pluging").to_string().contains("plugin"));
+        // `material` began dispatching at rung A5 — a keyword the parser routes but the list
+        // omits is exactly the hole this test exists to catch.
+        assert_eq!(did_you_mean("materia", CONSTRUCT_KEYWORDS), Some("material"));
     }
 }

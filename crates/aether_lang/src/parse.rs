@@ -9,9 +9,9 @@ use syn::parse::{Parse, ParseStream};
 use syn::{Expr, Path, Token, Type, parenthesized};
 
 use crate::ast::{
-    AetherBlock, BundleDef, ComponentDef, Construct, EvField, EventDef, FilterKind, HandlerDef,
-    HookKind, MachineDef, OrderKind, PluginDef, Schedule, StateDef, SysParam, SysParamTy,
-    SystemDef, TagDef, TransitionDef,
+    AetherBlock, BundleDef, ColorLit, ComponentDef, Construct, EvField, EventDef, FilterKind,
+    HandlerDef, HookKind, MachineDef, MaterialDef, OrderKind, PluginDef, Schedule, StateDef,
+    SysParam, SysParamTy, SystemDef, TagDef, TransitionDef,
 };
 use crate::diag;
 
@@ -31,19 +31,20 @@ impl Parse for AetherBlock {
                 "system" => constructs.push(Construct::System(parse_system(input)?)),
                 "plugin" => constructs.push(Construct::Plugin(parse_plugin(input)?)),
                 "machine" => constructs.push(Construct::Machine(parse_machine(input)?)),
-                // Planned constructs (§9, rungs A5..A6): name the rung rather than pretending
-                // the keyword is unknown — a misspelling and a not-yet-shipped construct are
-                // different failures and deserve different messages.
                 "material" => {
-                    return Err(diag::err(
-                        head.span(),
-                        "`material` is an Aether construct but lands at rung A5; this build carries rungs A0..A3 (component, tag, bundle, event, system, plugin, machine)",
-                    ));
+                    constructs.push(Construct::Material(Box::new(parse_material(input)?)))
                 }
+                // Planned constructs (§9, rung A6): name the rung rather than pretending the
+                // keyword is unknown — a misspelling and a not-yet-shipped construct are
+                // different failures and deserve different messages.
                 "scene" => {
                     return Err(diag::err(
                         head.span(),
-                        "`scene` is an Aether construct but lands at rung A6; this build carries rungs A0..A3 (component, tag, bundle, event, system, plugin, machine)",
+                        // The shipped list is spelled in `CONSTRUCT_KEYWORDS` order (§6.1's
+                        // registry order), so the two surfaces a user can see never disagree
+                        // about the order of the same nine names. The whole arm disappears when
+                        // A6 lands `scene`.
+                        "`scene` is an Aether construct but lands at rung A6; this build carries rungs A0..A5 (component, tag, bundle, system, event, plugin, machine, material)",
                     ));
                 }
                 other => return Err(diag::unknown_construct(head.span(), other)),
@@ -230,6 +231,25 @@ fn reject_let_binding(e: &Expr, role: &str, kw: &str) -> syn::Result<()> {
     ))
 }
 
+/// The §2 case gate for the FN-producing names that must not read like types (§3.6's
+/// `material Gold`). The mirror image of [`upper_camel_gate`], down to the raw-ident rule: a
+/// `r#Type` prints with its escape, so the classification and the suggestion both work on the
+/// unescaped spelling.
+fn lowercase_gate(name: &Ident, base: &str) -> syn::Result<()> {
+    let raw = name.to_string();
+    let s = raw.strip_prefix("r#").unwrap_or(&raw);
+    if !s.starts_with(char::is_uppercase) {
+        return Ok(());
+    }
+    let sugg = snake_case(s);
+    let msg = if !sugg.is_empty() && sugg != s {
+        format!("{base} (rename `{raw}` to `{sugg}`)")
+    } else {
+        base.to_string()
+    };
+    Err(diag::err(name.span(), msg))
+}
+
 /// Best-effort UpperCamelCase suggestion for the §2 case diagnostics.
 fn upper_camel(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -240,6 +260,27 @@ fn upper_camel(s: &str) -> String {
         } else if upper_next {
             out.extend(c.to_uppercase());
             upper_next = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Best-effort snake_case suggestion for the §2 case diagnostics — the rename half of
+/// [`lowercase_gate`].
+///
+/// Deliberately a SECOND implementation of the same transform the expander's `snake` performs on
+/// generated identifiers: this one exists only inside an error message, and coupling a
+/// diagnostic's wording to a codegen naming rule would make either one hostage to the other.
+fn snake_case(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for (i, c) in s.chars().enumerate() {
+        if c.is_uppercase() {
+            if i != 0 {
+                out.push('_');
+            }
+            out.extend(c.to_lowercase());
         } else {
             out.push(c);
         }
@@ -800,4 +841,190 @@ fn parse_plugin(input: ParseStream) -> syn::Result<PluginDef> {
         diag::err(e.span(), "a plugin declaration ends with `;` (the systems it registers are sibling `system` items)")
     })?;
     Ok(PluginDef { name })
+}
+
+/// The §3.6 material keys, in the EBNF's order — which is also `Material::new`'s parameter order,
+/// so the "expected one of" list reads as the constructor a user is filling in.
+///
+/// ONE table, spelling and dispatch token together: what the diagnostic PRINTS and what the parser
+/// ACCEPTS are the same rows, so neither can gain a key the other lacks. (Two parallel lists — a
+/// `&[&str]` beside a `from_str` match, the shape `HookKind`/`FilterKind` carry — drift silently
+/// in opposite directions: a key only in the list is advertised then rejected as unknown, a key
+/// only in the match is accepted but never named in the "expected one of". Those two have two
+/// entries each and a derive behind them; this one has seven and no downstream authority.)
+const MATERIAL_KEYS: &[(&str, MatKey)] = &[
+    ("base", MatKey::Base),
+    ("metallic", MatKey::Metallic),
+    ("roughness", MatKey::Roughness),
+    ("reflectance", MatKey::Reflectance),
+    ("emissive", MatKey::Emissive),
+    ("flags", MatKey::Flags),
+    ("textures", MatKey::Textures),
+];
+
+/// The advertised key list, for the "expected one of" diagnostics (§7.1: exhaustive, in table
+/// order). Built from [`MATERIAL_KEYS`], so it cannot describe a surface the parser does not have.
+fn material_key_list() -> String {
+    MATERIAL_KEYS.iter().map(|(k, _)| *k).collect::<Vec<_>>().join(", ")
+}
+
+/// One `mat_key` head (§3.6) — a parse-time dispatch token, deliberately NOT an AST node: making
+/// it an enum is what lets the key match be exhaustive, so an added key cannot reach the body
+/// loop unhandled (the alternative, a `&str` match with a catch-all, either panics or silently
+/// drops).
+#[derive(Clone, Copy)]
+enum MatKey {
+    /// `base: color`
+    Base,
+    /// `metallic: EXPR`
+    Metallic,
+    /// `roughness: EXPR`
+    Roughness,
+    /// `reflectance: EXPR`
+    Reflectance,
+    /// `emissive: color`
+    Emissive,
+    /// `flags: EXPR`
+    Flags,
+    /// `textures: EXPR`
+    Textures,
+}
+
+impl MatKey {
+    /// Parse a key from its surface ident, `None` for anything else (the unknown-key diagnostic).
+    /// The table is the only source — there is no second spelling list to disagree with.
+    fn from_str(s: &str) -> Option<MatKey> {
+        MATERIAL_KEYS.iter().find(|(k, _)| *k == s).map(|(_, v)| *v)
+    }
+}
+
+/// `material NAME { mat_key* }` (§3.6).
+fn parse_material(input: ParseStream) -> syn::Result<MaterialDef> {
+    let _kw: Ident = input.parse()?; // `material`
+    let name: Ident = input
+        .parse()
+        .map_err(|e| diag::err(e.span(), "expected a material name after `material`"))?;
+    // §2 names this construct's case rule and its exact wording: materials expand to BUILDER
+    // FNS, so an UpperCamelCase name reads like a type at every call site.
+    lowercase_gate(&name, "material names are lowercase — they expand to builder functions, not types")?;
+
+    let body;
+    syn::braced!(body in input);
+
+    let (mut base, mut emissive) = (None, None);
+    let (mut metallic, mut roughness, mut reflectance) = (None, None, None);
+    let (mut flags, mut textures) = (None, None);
+
+    while !body.is_empty() {
+        let key: Ident = body.parse().map_err(|_| {
+            diag::err(body.span(), format!("expected a material key: {}", material_key_list()))
+        })?;
+        let ks = key.to_string();
+        let Some(which) = MatKey::from_str(&ks) else {
+            let mut msg =
+                format!("unknown material key `{ks}`; keys are: {}", material_key_list());
+            let names: Vec<&str> = MATERIAL_KEYS.iter().map(|(k, _)| *k).collect();
+            if let Some(sugg) = diag::did_you_mean(&ks, &names) {
+                msg.push_str(&format!(" (did you mean `{sugg}`?)"));
+            }
+            return Err(diag::err(key.span(), msg));
+        };
+        let _: Token![:] = body.parse().map_err(|_| {
+            diag::err(key.span(), format!("expected `:` after material key `{ks}`"))
+        })?;
+
+        match which {
+            // `base` carries an alpha lane (`MaterialGpu::base_color.w`); `emissive` does not —
+            // `Material::new` takes `emissive: [f32; 3]`, so a 4th component has nowhere to go.
+            MatKey::Base => set_once(&mut base, parse_color(&body, "base", true)?, &key)?,
+            MatKey::Emissive => {
+                set_once(&mut emissive, parse_color(&body, "emissive", false)?, &key)?
+            }
+            MatKey::Metallic => set_once(&mut metallic, parse_key_expr(&body, &ks)?, &key)?,
+            MatKey::Roughness => set_once(&mut roughness, parse_key_expr(&body, &ks)?, &key)?,
+            MatKey::Reflectance => set_once(&mut reflectance, parse_key_expr(&body, &ks)?, &key)?,
+            MatKey::Flags => set_once(&mut flags, parse_key_expr(&body, &ks)?, &key)?,
+            MatKey::Textures => set_once(&mut textures, parse_key_expr(&body, &ks)?, &key)?,
+        }
+
+        if body.peek(Token![,]) {
+            let _: Token![,] = body.parse()?;
+        } else if !body.is_empty() {
+            return Err(diag::err(body.span(), "expected `,` between material keys"));
+        }
+    }
+
+    // §3.6 lists a default for every key EXCEPT `base`. Aether refuses rather than inventing a
+    // color: a material's base color is the one value no default can be right about.
+    let base = base.ok_or_else(|| {
+        diag::err(
+            name.span(),
+            format!(
+                "material `{name}` needs a `base:` color — every other key defaults (metallic 0.0, roughness 0.5, reflectance 0.5, emissive (0.0, 0.0, 0.0), flags 0), the base color does not"
+            ),
+        )
+    })?;
+
+    Ok(MaterialDef { name, base, metallic, roughness, reflectance, emissive, flags, textures })
+}
+
+/// Record a key's value, refusing a second occurrence on the SECOND key's span — the same
+/// duplicate-key contract `component`'s hooks and `state`'s `initial` carry.
+fn set_once<T>(slot: &mut Option<T>, value: T, key: &Ident) -> syn::Result<()> {
+    if slot.is_some() {
+        return Err(diag::err(key.span(), format!("duplicate material key `{key}`")));
+    }
+    *slot = Some(value);
+    Ok(())
+}
+
+/// A scalar/expression material value, verbatim with the user's spans.
+fn parse_key_expr(input: ParseStream, key: &str) -> syn::Result<Expr> {
+    input
+        .parse::<Expr>()
+        .map_err(|e| diag::err(e.span(), format!("`{key}` takes an expression")))
+}
+
+/// The §3.6 `color` production. `allow_alpha` distinguishes `base` (3 → alpha 1.0, or 4) from
+/// `emissive` (exactly 3).
+///
+/// The arity error lands on the TUPLE's own span (§3.6: "error on the tuple"), because neither
+/// the key nor any single component is the thing that is wrong.
+fn parse_color(input: ParseStream, key: &str, allow_alpha: bool) -> syn::Result<ColorLit> {
+    if !input.peek(syn::token::Paren) {
+        let shape = if allow_alpha { "`(r, g, b)` or `(r, g, b, a)`" } else { "`(r, g, b)`" };
+        return Err(diag::err(
+            input.span(),
+            format!("`{key}` takes a color tuple: {shape}"),
+        ));
+    }
+    let inner;
+    let paren = parenthesized!(inner in input);
+    let span = paren.span.join();
+
+    let mut components = Vec::new();
+    while !inner.is_empty() {
+        components.push(inner.parse::<Expr>().map_err(|e| {
+            diag::err(e.span(), format!("`{key}` components are expressions"))
+        })?);
+        if inner.peek(Token![,]) {
+            let _: Token![,] = inner.parse()?;
+        } else if !inner.is_empty() {
+            return Err(diag::err(inner.span(), format!("expected `,` between `{key}` components")));
+        }
+    }
+
+    let ok = components.len() == 3 || (allow_alpha && components.len() == 4);
+    if !ok {
+        let n = components.len();
+        let msg = if allow_alpha {
+            format!("`{key}` color takes 3 (rgb, alpha=1.0) or 4 (rgba) components — found {n}")
+        } else {
+            format!(
+                "`{key}` color takes exactly 3 components (rgb) — `Material::new` takes `emissive: [f32; 3]`, emitted radiance has no alpha — found {n}"
+            )
+        };
+        return Err(diag::err(span, msg));
+    }
+    Ok(ColorLit { components })
 }

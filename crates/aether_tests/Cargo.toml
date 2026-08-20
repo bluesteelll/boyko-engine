@@ -13,6 +13,19 @@ edition = "2024"
 aether = { path = "../aether" }
 boyko-ecs = { path = "../boyko_ecs" }
 boyko-macros = { path = "../boyko_macros" }
+# Rung A5: `material` emits `::boyko_render::Material` / `MaterialGpu` tokens, so the §8 R4
+# anti-drift gate for that construct is this dependency — the day `Material::new` gains a
+# parameter, the A5 tests stop compiling here, in-repo, instead of in a user's game. Vulkan is
+# loaded dynamically by `boyko_rhi_vulkan` (only `user32` is `#[link]`ed), so linking the render
+# crate into a test binary needs no GPU and no SDK.
+#
+# BLAST RADIUS, recorded so a reader debugging a red `aether-tests` looks at the right lane: this
+# pulls the whole render stack (`boyko_render` → `boyko_rhi_vulkan` → `boyko_rhi`) behind the
+# Aether gate. `cargo test -p aether-tests` now goes red when THAT lane is red, for reasons that
+# have nothing to do with the DSL, and a cold `cargo check -p aether-tests` went from ~1 s to
+# ~31.7 s (MEASURED). The alternative — emitting engine paths nobody compiles — is the drift R4
+# exists to prevent, so the cost is bought deliberately.
+boyko-render = { path = "../boyko_render" }
 trybuild = "1"
 
 [lints]

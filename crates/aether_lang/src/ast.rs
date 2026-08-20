@@ -30,6 +30,14 @@ pub enum Construct {
     Plugin(PluginDef),
     /// `machine NAME { initial X; state* }` (rung A3) — Harel-lite, flattened at expansion.
     Machine(MachineDef),
+    /// `material NAME { base: (…), … }` (rung A5) — a PBR material builder fn.
+    ///
+    /// BOXED: `MaterialDef` holds seven optional `syn::Expr` slots, and `syn::Expr` (with the
+    /// `full` feature) is a ~200-byte enum — inline, this one variant would have made EVERY
+    /// `Construct` in the block's `Vec` 952 bytes. The `Box` costs one build-time allocation per
+    /// declared material; the hot-path `Box` ban is a RUNTIME rule and this is transpiler state
+    /// (the same build-time exemption §4 grants `AetherCtx`'s keyed collections).
+    Material(Box<MaterialDef>),
 }
 
 /// The four Phase-14a hook keys the `component` construct forwards (§3.1). Mutually exclusive
@@ -304,6 +312,46 @@ pub struct HandlerDef {
     pub params: Vec<SysParam>,
     /// The verbatim action body.
     pub body: TokenStream,
+}
+
+/// A `color` production (§3.6): `'(' EXPR ',' EXPR ',' EXPR (',' EXPR)? ')'`. The components are
+/// verbatim exprs — a color channel may be any const/`f32` expression the user writes, not just a
+/// literal.
+pub struct ColorLit {
+    /// 3 or 4 components for `base`, exactly 3 for `emissive`.
+    ///
+    /// Arity is validated at PARSE (where the parenthesized group's own span is in hand — §3.6
+    /// puts the error on the tuple), so the expander is total and carries no span of its own: a
+    /// field kept "for later" is a datum nothing reads.
+    pub components: Vec<Expr>,
+}
+
+/// `material NAME { base: (…), metallic: EXPR, … }` (§3.6).
+///
+/// Materials are RUNTIME-MINTED assets (`Assets<Material>::add`), so the expansion target is a
+/// builder fn over the engine's own constructors — a static table would be exactly the parallel
+/// data system Principle 0 forbids.
+pub struct MaterialDef {
+    /// The builder-fn name (lowercase by the §2 case convention — diagnosed at parse).
+    pub name: Ident,
+    /// `base: (r, g, b)` / `(r, g, b, a)` — REQUIRED: §3.6's default table covers every other
+    /// key and conspicuously omits this one, so Aether refuses rather than inventing a color.
+    pub base: ColorLit,
+    /// `metallic: EXPR` — defaults to `0.0`.
+    pub metallic: Option<Expr>,
+    /// `roughness: EXPR` — defaults to `0.5`.
+    pub roughness: Option<Expr>,
+    /// `reflectance: EXPR` — defaults to `0.5` (the standard 4% dielectric F0).
+    pub reflectance: Option<Expr>,
+    /// `emissive: (r, g, b)` — defaults to `[0.0; 3]`. Exactly 3 components: the engine's
+    /// `Material::new` takes `emissive: [f32; 3]`.
+    pub emissive: Option<ColorLit>,
+    /// `flags: EXPR` — defaults to `0`.
+    pub flags: Option<Expr>,
+    /// `textures: EXPR` — the §3.6 escape: a `MaterialTextures` expression that switches the
+    /// emission to `Material::with_textures`, so the `MATERIAL_FLAG_TEXTURED` derivation stays in
+    /// the engine's one authority.
+    pub textures: Option<Expr>,
 }
 
 /// `on EVENT (params)? (if GUARD)? => state.path (BLOCK | ;)` (§3.5).
