@@ -1,6 +1,8 @@
 //! `aether-lang` — parser, diagnostics and expander for the Aether authoring DSL
-//! (docs/AETHER-LANG-PLAN.md; through rung **A6**, the whole §6.1 construct registry:
-//! `component`, `tag`, `bundle`, `system`, `event`, `plugin`, `machine`, `material`, `scene`).
+//! (docs/AETHER-LANG-PLAN.md; through rung **A7**, the plan's last: the whole §6.1 construct
+//! registry — `component`, `tag`, `bundle`, `system`, `event`, `plugin`, `machine`, `material`,
+//! `scene` — plus §6.3's `aether v1;` header, §7.3's recovery stubs and §8 R1's expansion-volume
+//! measurement).
 //!
 //! # Architecture (the plan's decisions, enforced by this crate's shape)
 //!
@@ -26,6 +28,26 @@
 //! rung table's tooling suggestion. The same coverage lands through this crate's own unit tests:
 //! [`expand_block`] is a plain function, and the tests pin its output token-for-token — which is
 //! strictly MORE precise than macrotest's rustfmt-normalized snapshots.
+//!
+//! §8 R1's expansion-size measurement rides on that same corpus (`expand::tests`'s
+//! `expansion_volume_stays_inside_its_measured_band`), which is what the plan asked macrotest's
+//! output for: expanded volume per snapshot, measured in CI rather than noticed in a build time.
+//!
+//! # Error recovery (§7.3), for a reader of this crate
+//!
+//! A parse failure does NOT abort the block. Each construct is parsed speculatively; a failure
+//! records its error plus a best-effort stub and the parser resyncs on the next construct head,
+//! so a block yields one error per fault, a name-resolving stub per fault, and the expansion of
+//! every construct that parsed.
+//!
+//! A broken construct is not treated as absent. §4's whole-block rules run over
+//! `constructs ∪ broken` ([`mod@ctx`]): a `plugin` that failed to parse still holds the plugin
+//! slot, so its siblings' clauses do not report a second fault; a `material gold` that failed to
+//! parse still occupies the name `gold`, so a real duplicate is still Aether's own two-span
+//! diagnostic rather than rustc's E0428 on the macro token. What stays suppressed is narrower and
+//! specific: a rule whose failure could not exist WITHOUT the break — the broken plugin's own
+//! registration contents, an ordering edge naming a system that did not parse, a scene minting a
+//! material that did not parse. Those come back the moment the construct does.
 
 mod ast;
 mod ctx;

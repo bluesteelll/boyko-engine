@@ -3,14 +3,14 @@
 //! engine path below is a TOKEN resolved downstream, never a dependency of this crate.
 
 use proc_macro2::{Span, TokenStream, TokenTree};
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, quote_spanned};
 use syn::Ident;
 
 use crate::ast::{
     AetherBlock, AtPose, BundleDef, ColorLit, ComponentDef, Construct, EvField, EventDef,
     MachineDef, MaterialDef, MeshSrc, NodeHead, NodeKeyValue, OrderKind, PluginDef, Schedule,
-    SceneDef, SceneNode, ShadowForm, StateDef, SysParam, SysParamTy, SystemDef, TagDef,
-    TransitionDef,
+    SceneDef, SceneNode, ShadowForm, StateDef, Stub, SyntaxVersion, SysParam, SysParamTy,
+    SystemDef, TagDef, TransitionDef,
 };
 use crate::ctx::AetherCtx;
 use crate::diag;
@@ -19,13 +19,112 @@ use crate::diag;
 /// the unit tests pin token-for-token). Block-level validation failures (§3.3's cross-construct
 /// rules) become `compile_error!` exactly like parse failures.
 pub fn expand(block: &AetherBlock) -> TokenStream {
+    if !block.broken.is_empty() {
+        return recovered(block);
+    }
     match expand_inner(block) {
         Ok(ts) => ts,
         Err(e) => e.to_compile_error(),
     }
 }
 
+/// §7.3's recovery emission, for a block that had at least one unreadable construct.
+///
+/// The three parts of the contract, in the order they are emitted: (a) each failure's own
+/// `compile_error!` at its own span, (b) a name-resolving stub for each failure whose name
+/// parsed, and (c) the expansion of every construct that DID parse — so one typo costs one error
+/// instead of a module-wide sea of "unresolved name".
+///
+/// Part (c) runs UNCONDITIONALLY, and a whole-block rule the survivors fail reports its own error
+/// beside the parse errors. It is not an artifact of the break, because §4's rules run over
+/// `constructs ∪ broken` ([`crate::ctx`]): a broken `plugin` still holds the plugin slot, and a
+/// broken `material gold` still occupies the name `gold`. Anything those rules still refuse would
+/// refuse just as loudly with the broken construct typed out in full.
+///
+/// The earlier shape — drop the whole expansion whenever the survivors failed a rule — is the one
+/// this comment exists to warn off. It read as conservative and was the opposite: a half-typed
+/// `plugin ;`, the ordinary mid-edit state of every block that has one, erased every sibling item
+/// in the block and re-created the unresolved-name sea the mechanism was built to prevent.
+fn recovered(block: &AetherBlock) -> TokenStream {
+    let mut out = TokenStream::new();
+    // Stub names are deduped against EACH OTHER (two broken `material gold` declarations would
+    // otherwise emit one fn twice, adding rustc's duplicate-definition error to the two parse
+    // errors that already say it) — but never against a SURVIVING construct: a stub colliding
+    // with a real item is a genuine duplicate, and §7.1 leaves the type-producing half of that
+    // fault to rustc, which reports it on both user idents.
+    let mut stubbed: Vec<String> = Vec::new();
+    for b in &block.broken {
+        out.extend(b.error.to_compile_error());
+        if let Some(stub) = &b.stub {
+            let key = stub.name().to_string();
+            if !stubbed.contains(&key) {
+                stubbed.push(key);
+                out.extend(stub_item(stub));
+            }
+        }
+    }
+    match expand_inner(block) {
+        Ok(rest) => out.extend(rest),
+        Err(e) => out.extend(e.to_compile_error()),
+    }
+    out
+}
+
+/// One §7.3 stub: the construct's name, declared in its own item kind, at the NAME's span (§7.2(3)
+/// — a downstream error against the stub points at the user's declaration).
+///
+/// The stub is diagnostic-SILENT by construction. It exists inside a file that already has one
+/// error, and a recovery item that adds `dead_code` (the author has not written the use yet) or a
+/// case-convention warning (the case gate is often the very failure being recovered from) would
+/// turn one error into an error plus a paragraph of noise — the failure mode this whole mechanism
+/// is aimed at.
+///
+/// A RECORDED EXEMPTION from §7.2(4): stubs carry the USER's name, not an `__aether_`-prefixed
+/// one. The prefix rule exists so generated names cannot collide with the author's; a stub's whole
+/// purpose is to occupy the author's name, so prefixing it would produce an item nothing can
+/// reference — the rule's letter against its own reason. The collision the prefix rule prevents is
+/// therefore possible here and is exactly the diagnostic that should fire (a stub colliding with a
+/// real item IS a duplicate declaration).
+///
+/// `plugin` gets the `Plugin` impl too. Every reference to a plugin is `app.add_plugin(P)`, so a
+/// bare `pub struct P;` would swap "cannot find value `P`" for "the trait bound `P: Plugin` is not
+/// satisfied" at the same call site — a different error, not one fewer. The empty `build` is
+/// honest: the registrations a broken `plugin` would have held are exactly the part of it that did
+/// not parse, and the file carries a `compile_error!` in any case, so nothing can run.
+fn stub_item(stub: &Stub) -> TokenStream {
+    match stub {
+        Stub::Type(name) => quote_spanned! {name.span()=>
+            #[allow(dead_code, non_camel_case_types)]
+            pub struct #name;
+        },
+        Stub::Plugin(name) => {
+            let label = name.to_string();
+            quote_spanned! {name.span()=>
+                #[allow(dead_code, non_camel_case_types)]
+                pub struct #name;
+                impl ::boyko_ecs::Plugin for #name {
+                    fn build(&self, _app: &mut ::boyko_ecs::App) {}
+                    fn name(&self) -> &'static str { #label }
+                }
+            }
+        }
+        Stub::Fn(name) => quote_spanned! {name.span()=>
+            #[allow(dead_code, non_snake_case)]
+            pub fn #name() {}
+        },
+    }
+}
+
 fn expand_inner(block: &AetherBlock) -> syn::Result<TokenStream> {
+    match block.version {
+        // §6.3's version dispatch, at the construct-table level: v2 syntax adds an arm HERE (a
+        // second table), and the exhaustive match is what makes the compiler enumerate every
+        // site that must grow one. v1 ships with the header parsed and one table.
+        SyntaxVersion::V1 => expand_v1(block),
+    }
+}
+
+fn expand_v1(block: &AetherBlock) -> syn::Result<TokenStream> {
     // §4's pipeline: parse ─▶ ctx ─▶ expand. Every whole-block rule (duplicate fn names, one
     // plugin, the plugin requirement for scheduled constructs) runs at ctx-build time, so an
     // expander never re-derives block-level facts.
@@ -41,10 +140,25 @@ fn expand_inner(block: &AetherBlock) -> syn::Result<TokenStream> {
             Construct::Plugin(def) => out.extend(plugin_impl(def, block)?),
             Construct::Machine(def) => out.extend(machine_items(def)?),
             Construct::Material(def) => out.extend(material_fn(def)),
+            // A scene that mints a material which did not PARSE cannot expand, and its own
+            // diagnostic would contradict the source ("no material `gold`" with `gold` declared
+            // three lines up). This failure DERIVES from the break — one fault, one error — so
+            // the scene is skipped silently and reappears the moment the material parses.
+            Construct::Scene(def) if scene_awaits_a_broken_material(def, &ctx) => {}
             Construct::Scene(def) => out.extend(scene_fn(def, &ctx)?),
         }
     }
     Ok(out)
+}
+
+/// `true` iff any node of `def` names a `material` this block declares but could not read.
+fn scene_awaits_a_broken_material(def: &SceneDef, ctx: &AetherCtx<'_>) -> bool {
+    fn walk(nodes: &[SceneNode], ctx: &AetherCtx<'_>) -> bool {
+        nodes.iter().any(|n| {
+            n.material.as_ref().is_some_and(|m| ctx.material_is_broken(m)) || walk(&n.children, ctx)
+        })
+    }
+    walk(&def.nodes, ctx)
 }
 
 /// §3.1: `component` → `#[derive(::boyko_macros::Component)]` struct with the derive's own
@@ -67,7 +181,11 @@ fn component(def: &ComponentDef) -> TokenStream {
         (!keys.is_empty()).then(|| quote! { #[component( #( #keys ),* )] })
     };
     let fields = def.fields.iter().map(|(fname, ty)| quote! { pub #fname: #ty });
-    quote! {
+    // §7.2(3): the item exists BECAUSE of the user's name, so it is spanned at that name — a
+    // downstream fault against it (a duplicate definition, an unsatisfied derive bound) then
+    // reports at the declaration instead of at the `aether!` token. MEASURED at rung A7: with
+    // `quote!` here, rustc's "previous definition of the type `Foo` here" pointed at `aether! {`.
+    quote_spanned! {name.span()=>
         #[derive(::boyko_macros::Component)]
         #requires
         #component_attr
@@ -84,7 +202,8 @@ fn component(def: &ComponentDef) -> TokenStream {
 fn tag(def: &TagDef) -> TokenStream {
     let name = &def.name;
     let storage = def.bitset.then(|| quote! { #[component(storage = "bitset")] });
-    quote! {
+    // Spanned at the user's name — §7.2(3), see `component`.
+    quote_spanned! {name.span()=>
         #[derive(::boyko_macros::Component)]
         #storage
         pub struct #name;
@@ -96,7 +215,8 @@ fn tag(def: &TagDef) -> TokenStream {
 fn bundle(def: &BundleDef) -> TokenStream {
     let name = &def.name;
     let fields = def.fields.iter().map(|(fname, ty)| quote! { pub #fname: #ty });
-    quote! {
+    // Spanned at the user's name — §7.2(3), see `component`.
+    quote_spanned! {name.span()=>
         #[derive(::boyko_macros::Bundle)]
         pub struct #name {
             #( #fields ),*
@@ -126,12 +246,46 @@ fn event(def: &EventDef) -> TokenStream {
             pub #name: #ty
         },
     });
-    quote! {
+    // Spanned at the user's name — §7.2(3), see `component`.
+    quote_spanned! {name.span()=>
         #[::boyko_macros::event]
         pub struct #name {
             #( #fields ),*
         }
     }
+}
+
+/// The lint suppression every Aether-generated fn whose ARITY the user controls carries.
+///
+/// MEASURED (clippy 0.1.97, rustc 1.97.1): an eight-param `system` produces
+/// `warning: this function has too many arguments (8/7)` whose span is the whole `aether!` token
+/// — the user is shown a lint about a signature they did not write, in a form they cannot act on
+/// (a `#[allow]` has nowhere to go; splitting the params is not what the lint means here, since a
+/// system's params ARE its data dependencies).
+///
+/// UNCONDITIONAL rather than gated on a param count: clippy's threshold is configuration
+/// (`too-many-arguments-threshold`, default 7), so a count-gated emission would be correct only
+/// for whoever kept the default and would go silently wrong in a crate that lowered it. The cost
+/// is a handful of tokens per generated fn (§8 R1's expansion budget measures it).
+///
+/// It rides only on the fns whose arity is UNBOUNDED by construction — `system`, and the machine
+/// fns that merge handler params. `material` emits a nullary builder and `scene` a demand-driven
+/// signature of at most four params, so neither can reach any threshold, and an `#[allow]` there
+/// would be expansion volume that can never suppress anything.
+///
+/// # What the gate covers, stated because it is narrower than the fix
+///
+/// The suppression is gated by `aether_tests`'s `a7_dx.rs` compiling clean under
+/// `cargo clippy --all-targets -- -D warnings`: that target holds an eight-param system, so the
+/// day this attribute is dropped, the gate goes red. It exercises clippy's DEFAULT threshold (7)
+/// only. A crate that lowers `too-many-arguments-threshold` is covered by the FIX (the attribute
+/// is unconditional) but not by the gate, and no cheap gate exists for it: `trybuild` drives
+/// rustc, not clippy, so no fixture can carry a lint at all, and a second probe crate with its own
+/// `clippy.toml` would have to shell out to cargo from a test — against a config-discovery walk
+/// this repo has already measured as leaking from the parent checkout
+/// (docs/OPEN-QUESTIONS.md's clippy-worktree note). Recorded rather than half-built.
+fn arity_allow() -> TokenStream {
+    quote!(#[allow(clippy::too_many_arguments)])
 }
 
 /// §3.3: `system` → a plain `pub fn` with the sugared signature and the UNTOUCHED verbatim
@@ -142,7 +296,9 @@ fn system_fn(def: &SystemDef) -> TokenStream {
     let name = &def.name;
     let params = def.params.iter().map(sys_param_tokens);
     let body = &def.body;
+    let allow = arity_allow();
     quote! {
+        #allow
         pub fn #name( #(#params),* ) { #body }
     }
 }
@@ -219,6 +375,11 @@ enum ResolvedOrder<'a> {
     Sibling { kind: OrderKind, target: usize },
     /// Anything else — a `SystemSet` type, emitted as `before_set`/`after_set` verbatim.
     Set { kind: OrderKind, path: &'a syn::Path },
+    /// The target names a sibling `system` that did not parse (§7.3): the edge is dropped, with
+    /// no diagnostic of its own. It is not a `SystemSet` — treating it as one emits a fn item
+    /// where a type belongs — and it is not an unknown name either, since the system is declared
+    /// right there. The edge returns when its target parses.
+    Suppressed,
 }
 
 /// The registration bucket a system lands in (`on` clause; `None` → Main).
@@ -250,13 +411,22 @@ fn plugin_impl(def: &PluginDef, block: &AetherBlock) -> syn::Result<TokenStream>
         })
         .collect();
 
+    // Sibling `system`s that did NOT parse (§7.3) — an ordering clause naming one is dropped
+    // rather than mistaken for a `SystemSet` path.
+    let broken_systems: Vec<&Ident> = block
+        .broken
+        .iter()
+        .filter(|b| b.keyword == Some("system"))
+        .filter_map(crate::ast::BrokenConstruct::name)
+        .collect();
+
     // Resolve every ordering clause against the sibling table.
     let mut resolved: Vec<Vec<ResolvedOrder<'_>>> = Vec::with_capacity(systems.len());
     let mut needs_key = vec![false; systems.len()];
     for s in &systems {
         let mut rs = Vec::with_capacity(s.orders.len());
         for (kind, path, _) in &s.orders {
-            rs.push(resolve_order(*kind, path, s, &systems, &mut needs_key)?);
+            rs.push(resolve_order(*kind, path, s, &systems, &broken_systems, &mut needs_key)?);
         }
         resolved.push(rs);
     }
@@ -326,6 +496,7 @@ fn resolve_order<'a>(
     path: &'a syn::Path,
     from: &SystemDef,
     systems: &[&SystemDef],
+    broken_systems: &[&Ident],
     needs_key: &mut [bool],
 ) -> syn::Result<ResolvedOrder<'a>> {
     let bare = (path.leading_colon.is_none()
@@ -333,6 +504,11 @@ fn resolve_order<'a>(
         && path.segments[0].arguments.is_none())
     .then(|| path.segments[0].ident.to_string());
     if let Some(name) = bare {
+        // A sibling `system` that did not parse is neither an unknown name nor a SystemSet: the
+        // edge is dropped (§7.3's derived-fault rule) and comes back when its target parses.
+        if broken_systems.iter().any(|b| *b == &name) {
+            return Ok(ResolvedOrder::Suppressed);
+        }
         if let Some(target) = systems.iter().position(|s| s.name == name) {
             if bucket(systems[target]) == Schedule::Startup {
                 return Err(diag::err(
@@ -441,6 +617,10 @@ fn bucket_stmts(
                         OrderKind::Before => quote!(#call.before_set(#path)),
                         OrderKind::After => quote!(#call.after_set(#path)),
                     },
+                    // The edge names a sibling `system` that did not PARSE (§7.3). Emitting it as
+                    // a SystemSet path would hand rustc a fn item where a set type belongs — an
+                    // error on GENERATED tokens, derived from a fault already reported.
+                    ResolvedOrder::Suppressed => call,
                 };
             }
             for (e, _) in &s.whens {
@@ -793,18 +973,35 @@ fn resolve_target(
     resolve_to_leaf(nodes, idx, segments.last().expect("grammar: non-empty path").span())
 }
 
-/// The snake_case spelling for generated fn names (`PlayingRunning` → `playing_running`).
+/// The snake_case spelling for generated names (`PlayingRunning` → `playing_running`).
+///
+/// A RUN of capitals is one word, not one word per letter: `UIState` → `ui_state`, `HTTPProbe` →
+/// `http_probe`. The letter-by-letter rule this shipped with spelled those `u_i_state` and
+/// `h_t_t_p_probe` — legal idents nobody would write, in the two places a user READS a generated
+/// name (the `in_<group>` predicates §3.5 exposes, and the `__aether_` fn names that appear in
+/// panic traces and profiles).
+///
+/// The rule, applied at each uppercase char: open a new word when the previous char was lowercase
+/// or a digit (`GameFlow` → `game_flow`), or when the previous char was uppercase and the NEXT is
+/// lowercase (`UIState`: the `S` opens `state`). Everything else continues the current word.
+///
+/// Still lossy, deliberately: `AB` and `Ab` both collapse to `ab`. That is what
+/// `MachineModel::build`'s minted-name comparison exists to catch, on the user's tokens, before
+/// rustc reports a duplicate definition on generated ones.
 fn snake(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len() + 4);
-    for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() {
-            if i != 0 {
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_uppercase() && i != 0 {
+            let prev = chars[i - 1];
+            let next_is_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+            // `!out.ends_with('_')`: a name that already spells the break (`A_B`) gets one
+            // separator, not two.
+            if (!prev.is_uppercase() || next_is_lower) && !out.ends_with('_') {
                 out.push('_');
             }
-            out.extend(c.to_lowercase());
-        } else {
-            out.push(c);
         }
+        out.extend(c.to_lowercase());
     }
     out
 }
@@ -887,7 +1084,9 @@ fn initial_enter_fn(model: &MachineModel<'_>) -> syn::Result<Option<TokenStream>
         })
     });
     let fn_name = initial_enter_fn_ident(&model.def.name);
+    let allow = arity_allow();
     Ok(Some(quote! {
+        #allow
         fn #fn_name( #( #params ),* ) {
             #( #bodies )*
         }
@@ -936,7 +1135,9 @@ fn machine_items(def: &MachineDef) -> syn::Result<TokenStream> {
         }
     }
 
-    Ok(quote! {
+    // Spanned at the machine's own name — §7.2(3), see `component`. The generated FNS below keep
+    // their own spans (each is built from its leaf's tokens).
+    Ok(quote_spanned! {mname.span()=>
         #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
         pub enum #mname {
             #( #variants ),*
@@ -1024,8 +1225,10 @@ fn transition_fn(
         })
     });
     let target_variant = model.variant(target);
+    let allow = arity_allow();
 
     Ok(quote! {
+        #allow
         fn #fn_name(
             mut __aether_ev: #sys::EventReader<#event>,
             mut __aether_next: #sys::ResMut<#state::NextState<#mname>>,
@@ -1916,12 +2119,14 @@ mod tests {
                     }
                     fn name(&self) -> &'static str { "Movement" }
                 }
+                #[allow(clippy::too_many_arguments)]
                 pub fn read_input(
                     actions: ::boyko_ecs::ecs::core::system::Res<ActionState>,
                     mut cmds: ::boyko_ecs::ecs::core::system::Commands
                 ) {
                     let _ = (&actions, &mut cmds);
                 }
+                #[allow(clippy::too_many_arguments)]
                 pub fn apply_velocity(
                     mut q: ::boyko_ecs::ecs::core::iters::query::Query<
                         (&mut Transform, &Velocity),
@@ -1944,6 +2149,7 @@ mod tests {
         expands_to(
             quote! { system tick(n: mut res<Counter>) { n.0 += 1; } },
             quote! {
+                #[allow(clippy::too_many_arguments)]
                 pub fn tick(mut n: ::boyko_ecs::ecs::core::system::ResMut<Counter>) { n.0 += 1; }
             },
         );
@@ -1960,6 +2166,7 @@ mod tests {
                          f: query<&Mutation>, g: local<u32>) {}
             },
             quote! {
+                #[allow(clippy::too_many_arguments)]
                 pub fn s(
                     a: ::boyko_ecs::ecs::core::iters::query::Query<&T>,
                     mut b: ::boyko_ecs::ecs::core::iters::query::Query<&mut T>,
@@ -1999,13 +2206,16 @@ mod tests {
                     }
                     fn name(&self) -> &'static str { "Sim" }
                 }
+                #[allow(clippy::too_many_arguments)]
                 pub fn boot(mut cmds: ::boyko_ecs::ecs::core::system::Commands) { let _ = &mut cmds; }
+                #[allow(clippy::too_many_arguments)]
                 pub fn step(
                     mut q: ::boyko_ecs::ecs::core::iters::query::Query<
                         &mut Body,
                         ::boyko_ecs::ecs::core::iters::query::With<Alive>
                     >
                 ) { let _ = &mut q; }
+                #[allow(clippy::too_many_arguments)]
                 pub fn draw(dev: NonSendRes<Gpu>) { let _ = &dev; }
             },
         );
@@ -2032,7 +2242,9 @@ mod tests {
                     }
                     fn name(&self) -> &'static str { "P" }
                 }
+                #[allow(clippy::too_many_arguments)]
                 pub fn a() {}
+                #[allow(clippy::too_many_arguments)]
                 pub fn z() {}
             },
         );
@@ -2116,6 +2328,7 @@ mod tests {
                         matches!(self, Self::PlayingRunning | Self::PlayingPaused)
                     }
                 }
+                #[allow(clippy::too_many_arguments)]
                 fn __aether_game_flow__boot__assets_ready(
                     mut __aether_ev: ::boyko_ecs::ecs::core::system::EventReader<AssetsReady>,
                     mut __aether_next: ::boyko_ecs::ecs::core::system::ResMut<::boyko_ecs::ecs::core::state::NextState<GameFlow>>,
@@ -2130,6 +2343,7 @@ mod tests {
                         *__aether_next = ::boyko_ecs::ecs::core::state::NextState::Pending(GameFlow::PlayingRunning);
                     }
                 }
+                #[allow(clippy::too_many_arguments)]
                 fn __aether_game_flow__playing_running__pause_pressed(
                     mut __aether_ev: ::boyko_ecs::ecs::core::system::EventReader<PausePressed>,
                     mut __aether_next: ::boyko_ecs::ecs::core::system::ResMut<::boyko_ecs::ecs::core::state::NextState<GameFlow>>,
@@ -2142,6 +2356,7 @@ mod tests {
                         *__aether_next = ::boyko_ecs::ecs::core::state::NextState::Pending(GameFlow::PlayingPaused);
                     }
                 }
+                #[allow(clippy::too_many_arguments)]
                 fn __aether_game_flow__playing_running__player_died(
                     mut __aether_ev: ::boyko_ecs::ecs::core::system::EventReader<PlayerDied>,
                     mut __aether_next: ::boyko_ecs::ecs::core::system::ResMut<::boyko_ecs::ecs::core::state::NextState<GameFlow>>,
@@ -2158,6 +2373,7 @@ mod tests {
                         *__aether_next = ::boyko_ecs::ecs::core::state::NextState::Pending(GameFlow::GameOver);
                     }
                 }
+                #[allow(clippy::too_many_arguments)]
                 fn __aether_game_flow__playing_paused__pause_pressed(
                     mut __aether_ev: ::boyko_ecs::ecs::core::system::EventReader<PausePressed>,
                     mut __aether_next: ::boyko_ecs::ecs::core::system::ResMut<::boyko_ecs::ecs::core::state::NextState<GameFlow>>,
@@ -2170,6 +2386,7 @@ mod tests {
                         *__aether_next = ::boyko_ecs::ecs::core::state::NextState::Pending(GameFlow::PlayingRunning);
                     }
                 }
+                #[allow(clippy::too_many_arguments)]
                 fn __aether_game_flow__playing_paused__player_died(
                     mut __aether_ev: ::boyko_ecs::ecs::core::system::EventReader<PlayerDied>,
                     mut __aether_next: ::boyko_ecs::ecs::core::system::ResMut<::boyko_ecs::ecs::core::state::NextState<GameFlow>>,
@@ -2186,6 +2403,7 @@ mod tests {
                         *__aether_next = ::boyko_ecs::ecs::core::state::NextState::Pending(GameFlow::GameOver);
                     }
                 }
+                #[allow(clippy::too_many_arguments)]
                 fn __aether_game_flow__game_over__restart_pressed(
                     mut __aether_ev: ::boyko_ecs::ecs::core::system::EventReader<RestartPressed>,
                     mut __aether_next: ::boyko_ecs::ecs::core::system::ResMut<::boyko_ecs::ecs::core::state::NextState<GameFlow>>,
@@ -2334,6 +2552,7 @@ mod tests {
                         matches!(self, Self::WorldFieldIdle | Self::WorldFieldBusy)
                     }
                 }
+                #[allow(clippy::too_many_arguments)]
                 fn __aether_sim__initial_enter(
                     mut cmds: ::boyko_ecs::ecs::core::system::Commands,
                     mut log: ::boyko_ecs::ecs::core::system::ResMut<Probe>
@@ -2342,6 +2561,7 @@ mod tests {
                     { log.field += 1; }
                     { log.idle += 1; }
                 }
+                #[allow(clippy::too_many_arguments)]
                 fn __aether_sim__world_field_idle__go(
                     mut __aether_ev: ::boyko_ecs::ecs::core::system::EventReader<Go>,
                     mut __aether_next: ::boyko_ecs::ecs::core::system::ResMut<::boyko_ecs::ecs::core::state::NextState<Sim>>,
@@ -2354,6 +2574,7 @@ mod tests {
                         *__aether_next = ::boyko_ecs::ecs::core::state::NextState::Pending(Sim::WorldFieldBusy);
                     }
                 }
+                #[allow(clippy::too_many_arguments)]
                 fn __aether_sim__world_field_busy__stop(
                     mut __aether_ev: ::boyko_ecs::ecs::core::system::EventReader<Stop>,
                     mut __aether_next: ::boyko_ecs::ecs::core::system::ResMut<::boyko_ecs::ecs::core::state::NextState<Sim>>,
@@ -2553,16 +2774,23 @@ mod tests {
         );
         // The OTHER half of the same name is just as lossy: two leaves whose flattened names
         // differ but whose snake_case collapse does not.
+        //
+        // The colliding PAIR moved at rung A7 and that move is the collapse rule's own evidence:
+        // `AB` / `A_b` used to collide (letter-by-letter, both `a_b`) and no longer do (`ab` vs
+        // `a_b`), while `AB` / `Ab` collide now and did not before. The check being pinned is
+        // unchanged — it compares minted names, whatever the minting rule is — so re-targeting it
+        // onto a pair the CURRENT rule collapses is what keeps it a live gate instead of a case
+        // the new rule quietly made unreachable.
         fails_with(
             quote! {
                 plugin P;
                 machine M {
                     initial AB;
                     state AB { on E => AB; }
-                    state A_b { on E => A_b; }
+                    state Ab { on E => Ab; }
                 }
             },
-            "states `AB` and `A_b` both generate the system `__aether_m__a_b__e`",
+            "states `AB` and `Ab` both generate the system `__aether_m__ab__e`",
         );
         // …and the composite form of that collapse, which lands on the predicate instead.
         fails_with(
@@ -2571,11 +2799,24 @@ mod tests {
                 machine M {
                     initial AB;
                     state AB { initial X; state X {} }
-                    state A_b { initial Y; state Y {} }
+                    state Ab { initial Y; state Y {} }
                 }
             },
-            "which both collapse to the predicate `in_a_b`",
+            "which both collapse to the predicate `in_ab`",
         );
+        // The pair the OLD rule collapsed must now expand cleanly — a rule change that only ever
+        // adds collisions would pass every assertion above while fixing nothing.
+        let out = crate::expand_block(quote! {
+            plugin P;
+            machine M {
+                initial AB;
+                state AB { on E => AB; }
+                state A_b { on E => A_b; }
+            }
+        })
+        .to_string();
+        assert!(!out.contains("compile_error"), "`AB` and `A_b` collapse apart now: {out}");
+        assert!(out.contains("__aether_m__ab__e") && out.contains("__aether_m__a_b__e"), "{out}");
         // A handler an inner state SHADOWS is never inherited by any leaf, so the per-leaf walk
         // never resolves its target — but a target that names nothing is still a broken chart.
         fails_with(
@@ -3515,5 +3756,416 @@ mod tests {
                 }
             },
         );
+    }
+
+    // ------------------------------------------------------------- rung A7: DX hardening
+
+    /// §6.3's version header: accepted, defaulted, and refused — with the block underneath it
+    /// expanding exactly as it does without one (the header must be a gate, never a dialect).
+    #[test]
+    fn the_version_header_is_parsed_accepted_and_gated() {
+        let expected = quote! {
+            #[derive(::boyko_macros::Component)]
+            pub struct Health {
+                pub hp: f32
+            }
+        };
+        expands_to(quote! { aether v1; component Health { hp: f32 } }, expected.clone());
+        // Absent = the crate's current default (§6.3), byte-for-byte the same expansion.
+        expands_to(quote! { component Health { hp: f32 } }, expected);
+        // A version this aether does not speak is refused on the VERSION's own token, with the
+        // supported list and a did-you-mean — the §6.1 canonical shape, applied to §6.3.
+        fails_with(
+            quote! { aether v2; component Health { hp: f32 } },
+            "unknown aether syntax version `v2`; this aether speaks: v1 (did you mean `v1`?)",
+        );
+        fails_with(quote! { aether v1 component Health {} }, "header ends with `;`");
+        fails_with(quote! { aether; }, "the syntax-version header names a version");
+        // The header is the block's FIRST item; below a construct it is a misplaced header, not
+        // an unknown construct (the message a reader can act on).
+        fails_with(
+            quote! { component Health { hp: f32 } aether v1; },
+            "syntax-version header is the block's FIRST item",
+        );
+    }
+
+    /// §7.3 / §8 R3, the whole contract in one block: a broken construct yields (a) ONE error at
+    /// its own span, (b) a stub that keeps its name resolving, and (c) the full expansion of
+    /// every sibling — the difference between one typo costing one error and costing a
+    /// module-wide sea of "unresolved name" while the author is still typing.
+    #[test]
+    fn a_broken_construct_costs_one_error_and_leaves_its_siblings_whole() {
+        let out = crate::expand_block(quote! {
+            component Health { hp: f32 }
+            component Broken { hp f32 }
+            tag Player;
+            system tick() { }
+        })
+        .to_string();
+
+        // (a) exactly one error, and it is the field's own.
+        assert_eq!(out.matches("compile_error").count(), 1, "one typo, one error: {out}");
+        assert!(out.contains("expected `:` after field `hp`"), "got: {out}");
+        // (b) the broken construct's NAME still resolves, in its own item kind, and silently:
+        // a recovery stub that emitted `dead_code` or case warnings would trade one error for a
+        // paragraph of noise.
+        assert!(out.contains("pub struct Broken ;"), "no stub for the broken construct: {out}");
+        assert!(out.contains("dead_code"), "the stub must not add diagnostics of its own: {out}");
+        // (c) every OTHER construct expanded in full — including the ones declared after the
+        // failure, which an abort-at-first-error parser never reaches.
+        assert!(out.contains("pub struct Health"), "sibling before the break: {out}");
+        assert!(out.contains("pub struct Player"), "sibling after the break: {out}");
+        assert!(out.contains("pub fn tick"), "sibling after the break: {out}");
+    }
+
+    /// Recovery accumulates (§7.1) and resyncs on the next construct HEAD, not on a terminator
+    /// the author never wrote — the `;`-less `tag` is the case that would otherwise swallow its
+    /// successor and report the successor's absence as a second, invented fault.
+    #[test]
+    fn recovery_resyncs_on_the_next_construct_head() {
+        let out = crate::expand_block(quote! {
+            tag Player { }
+            component Health { hp: f32 }
+            bundle Bad { x }
+            tag Frozen;
+        })
+        .to_string();
+        assert_eq!(out.matches("compile_error").count(), 2, "two faults, two errors: {out}");
+        assert!(out.contains("a tag declaration ends with `;`"), "got: {out}");
+        assert!(out.contains("expected `:` after bundle field `x`"), "got: {out}");
+        // The construct between the two faults, and the one after the second, both survive.
+        assert!(out.contains("pub struct Health"), "got: {out}");
+        assert!(out.contains("pub struct Frozen"), "got: {out}");
+        // Both broken names still resolve, each in its own item kind.
+        assert!(out.contains("pub struct Player ;") && out.contains("pub struct Bad ;"), "{out}");
+    }
+
+    /// The recovery loop's own liveness. A resync that consumed nothing would SPIN — a hang in a
+    /// proc-macro, which presents as an editor that stops responding rather than as an error, and
+    /// is the one failure mode worse than the sea of errors §7.3 removes.
+    ///
+    /// Each input below stops the resync scan differently: no ident at all, a keyword with no
+    /// name, a keyword whose name is itself a keyword, a body that never closes its own grammar,
+    /// and a lone version header. Every one must terminate, emit at least one error, and never
+    /// panic (the never-panic contract §8 R3 rests on).
+    #[test]
+    fn recovery_terminates_and_never_panics_on_garbage() {
+        for input in [
+            quote! { 42 },
+            quote! { component },
+            quote! { component; component; },
+            quote! { system system system },
+            quote! { tag },
+            quote! { machine M { state } },
+            quote! { , , , },
+        ] {
+            let out = crate::expand_block(input.clone()).to_string();
+            assert!(
+                out.contains("compile_error"),
+                "garbage must produce an error, not silence: {input} -> {out}"
+            );
+        }
+        // A lone version header is NOT garbage — it is a legal, empty block, and it belongs in
+        // this test as the case that terminates without an error. Stated as its own assertion:
+        // folded into the loop above as `|| input == "aether v1 ;"`, the disjunct made every
+        // OTHER input's failure impossible to distinguish from this one's success.
+        let empty = crate::expand_block(quote! { aether v1; }).to_string();
+        assert!(empty.is_empty(), "a header-only block expands to nothing, quietly: {empty}");
+    }
+
+    /// §4's whole-block rules run over `constructs ∪ broken`, and this is the case that forced it:
+    /// a half-typed `plugin` is the ordinary mid-edit state of every block that has one.
+    ///
+    /// Read as absent, it makes the plugin-requirement rule fire against every sibling clause —
+    /// a second error derived from the first — and the whole-block failure then erased the entire
+    /// expansion, so ONE typo cost the block every item in it. That is the unresolved-name sea
+    /// §7.3 exists to prevent, produced by the mechanism built to prevent it.
+    #[test]
+    fn a_broken_plugin_still_holds_the_plugin_slot() {
+        let out = crate::expand_block(quote! {
+            component Health { hp: f32 }
+            plugin ;
+            system boot(mut cmds: commands) on startup { let _ = &mut cmds; }
+            system tick(q: query<&Health>) on update { let _ = &q; }
+        })
+        .to_string();
+
+        assert_eq!(out.matches("compile_error").count(), 1, "one fault, one error: {out}");
+        assert!(out.contains("expected a plugin name"), "got: {out}");
+        assert!(
+            !out.contains("need a `plugin <Name>;`"),
+            "the clause rule fired against a plugin that IS declared: {out}"
+        );
+        // Every sibling still emits.
+        assert!(out.contains("pub struct Health"), "got: {out}");
+        assert!(out.contains("pub fn boot"), "got: {out}");
+        assert!(out.contains("pub fn tick"), "got: {out}");
+    }
+
+    /// A NAMED broken plugin also stubs the `Plugin` impl — because every reference to a plugin is
+    /// `app.add_plugin(P)`, which needs the trait. A bare `pub struct P;` would trade "cannot find
+    /// value `P`" for "the trait bound `P: Plugin` is not satisfied": a different error, not one
+    /// fewer.
+    #[test]
+    fn a_named_broken_plugin_stubs_the_trait_its_only_use_site_needs() {
+        let out = crate::expand_block(quote! {
+            plugin Arena
+            component Health { hp: f32 }
+        })
+        .to_string();
+        assert!(out.contains("pub struct Arena ;"), "got: {out}");
+        assert!(out.contains("impl :: boyko_ecs :: Plugin for Arena"), "got: {out}");
+        assert!(out.contains("pub struct Health"), "got: {out}");
+    }
+
+    /// The duplicate rule sees the broken half (§4 over the union). Skipping it would not make the
+    /// collision go away — it would move the report to rustc's E0428 over two generated fns, which
+    /// the A5 measurement showed puts both labels on the `aether!` token.
+    #[test]
+    fn a_duplicate_whose_twin_is_broken_is_still_aethers_own_two_span_diagnostic() {
+        let out = crate::expand_block(quote! {
+            material gold { base: (1.0, 0.72, 0.30) }
+            material gold { base: (0.1, 0.1, 0.1), metallic: }
+        })
+        .to_string();
+        assert!(out.contains("duplicate material `gold`"), "got: {out}");
+        assert!(out.contains("the first `material` of this name is here"), "got: {out}");
+        // Two stubs of one name would add rustc's duplicate-definition error to the two errors
+        // that already say it, so stubs dedupe against each other.
+        let twice = crate::expand_block(quote! {
+            material gold { metallic: }
+            material gold { roughness: }
+        })
+        .to_string();
+        assert_eq!(twice.matches("pub fn gold").count(), 1, "one stub per name: {twice}");
+    }
+
+    /// Two suppressions that are NOT rule failures but references INTO a construct that did not
+    /// parse. Both would otherwise produce a message that contradicts the source (a scene told
+    /// there is no material `gold` while `gold` is declared above it) or an error on generated
+    /// tokens (a fn item handed to `after_set`, which takes a `SystemSet` type).
+    #[test]
+    fn a_reference_into_a_broken_construct_is_suppressed_not_reported() {
+        let scene = crate::expand_block(quote! {
+            component Health { hp: f32 }
+            material gold { metallic: }
+            scene lab { entity { material: gold } }
+        })
+        .to_string();
+        assert_eq!(scene.matches("compile_error").count(), 1, "one fault, one error: {scene}");
+        assert!(!scene.contains("no material"), "a contradicting message survived: {scene}");
+        assert!(scene.contains("pub struct Health"), "an unrelated sibling was erased: {scene}");
+
+        let order = crate::expand_block(quote! {
+            plugin P;
+            system tick(q: query(&T)) on update { }
+            system draw() on update after tick { }
+        })
+        .to_string();
+        assert_eq!(order.matches("compile_error").count(), 1, "one fault, one error: {order}");
+        assert!(!order.contains("after_set"), "the edge became a SystemSet path: {order}");
+        assert!(order.contains("b . add_system (draw)"), "got: {order}");
+    }
+
+    /// A fn-producing construct stubs as a FN, not as a struct: the stub's whole job is that the
+    /// name keeps resolving, and `scene lab` resolving to a TYPE would fail at every call site
+    /// instead — the cascade the mechanism exists to prevent, re-introduced by the fix for it.
+    #[test]
+    fn a_broken_fn_construct_stubs_as_a_fn() {
+        let out = crate::expand_block(quote! { scene lab { sun { dir: (0.0, 1.0) } } }).to_string();
+        assert!(out.contains("pub fn lab ()"), "got: {out}");
+        assert_eq!(out.matches("compile_error").count(), 1, "got: {out}");
+    }
+
+    /// The stub's item kind is keyed on the construct KEYWORD (the recovery path has no parsed
+    /// construct to ask), and that second table must agree with `Construct::emits_fn` for every
+    /// keyword in the registry — a `material` stubbed as a struct is a silent cascade.
+    #[test]
+    fn every_registry_keyword_stubs_in_the_item_kind_its_construct_emits() {
+        use crate::ast::Stub;
+        let sample = |kw: &str| -> String {
+            let name = syn::Ident::new("N", proc_macro2::Span::call_site());
+            match Stub::for_keyword(kw, name) {
+                Some(Stub::Fn(_)) => "fn".to_string(),
+                Some(Stub::Type(_)) => "type".to_string(),
+                Some(Stub::Plugin(_)) => "plugin".to_string(),
+                None => "none".to_string(),
+            }
+        };
+        for kw in crate::diag::CONSTRUCT_KEYWORDS {
+            let want = match *kw {
+                "system" | "material" | "scene" => "fn",
+                // `plugin` is a type-producing construct with a THIRD stub shape (the type plus
+                // the `Plugin` impl its only use site needs) — a shape distinction, not a kind
+                // one, which is why `emits_fn` below still lines it up with the type half.
+                "plugin" => "plugin",
+                _ => "type",
+            };
+            assert_eq!(&sample(kw), want, "stub kind for `{kw}`");
+            let name = syn::Ident::new("N", proc_macro2::Span::call_site());
+            let stub = Stub::for_keyword(kw, name).expect("every registry keyword stubs");
+            assert_eq!(
+                stub.emits_fn(),
+                matches!(*kw, "system" | "material" | "scene"),
+                "`{kw}`: the stub's item kind must agree with `Construct::emits_fn`, or §4's \
+                 duplicate rule draws its line at two different places on the two paths"
+            );
+        }
+        assert_eq!(&sample("shader"), "none", "a keyword outside the registry has no stub kind");
+    }
+
+    /// The two snake_case implementations (the expander's generated names and the parser's rename
+    /// SUGGESTION) are separate code by design — a diagnostic's wording must not be hostage to a
+    /// codegen rule. They implement ONE specification, and this is where that is stated: the
+    /// cases below are exactly the ones that distinguish the rule from the letter-by-letter one
+    /// it replaced.
+    #[test]
+    fn both_snake_case_implementations_agree_on_the_same_rule() {
+        for (input, want) in [
+            ("GOLD", "gold"),
+            ("Gold", "gold"),
+            ("GameFlow", "game_flow"),
+            ("UIState", "ui_state"),
+            ("HTTPProbe", "http_probe"),
+            ("PlayingRunning", "playing_running"),
+            ("A_b", "a_b"),
+            ("AB", "ab"),
+            ("Ab", "ab"),
+            ("x", "x"),
+        ] {
+            assert_eq!(super::snake(input), want, "expander snake({input})");
+            assert_eq!(crate::parse::snake_case_for_tests(input), want, "parser snake({input})");
+        }
+    }
+
+    /// §8 R1's expansion-size measurement, in CI.
+    ///
+    /// nnethercote's point is that expansion volume is INVISIBLE — nobody notices a macro that
+    /// quietly emits ten times what it used to until compile times are already bad. Decision A3
+    /// (emit the canonical hand-written surface, leave codegen to `boyko_macros`) is a claim
+    /// about volume, and a claim nobody measures is a claim nobody keeps.
+    ///
+    /// The corpus is the pinned §3.x before/after pairs — the same content macrotest snapshots
+    /// would have carried, so this measures exactly the plan's "expanded-LOC per snapshot".
+    /// TOKENS rather than lines, because a token count is what the two crates actually exchange
+    /// and is invariant under formatting.
+    ///
+    /// The band is two-sided ON PURPOSE. A ceiling alone is satisfied by emitting NOTHING, and
+    /// this repo has shipped that exact failure — a gate whose green state includes the empty
+    /// one. The floor is what makes a silently-emptied expander fail here.
+    ///
+    /// MEASURED at rung A7 (out-tokens / in-tokens):
+    ///
+    /// | corpus | in | out | ratio |
+    /// |---|---|---|---|
+    /// | component+tag (§3.1) | 26 | 70 | 2.69 |
+    /// | system+plugin (§3.3) | 74 | 239 | 3.23 |
+    /// | machine (§3.5) | 59 | 624 | 10.58 |
+    /// | material (§3.6) | 19 | 52 | 2.74 |
+    /// | scene (§3.7) | 55 | 493 | 8.96 |
+    ///
+    /// The two double-digit ratios are the two constructs that TRANSPILE rather than sugar: a
+    /// machine emits one drain-and-act system per (leaf, inherited event) and a scene one spawn
+    /// statement per node, so both are counted against the hand-written code they replace, not
+    /// against their own source. The sugar constructs sit near 3× — Decision A3's claim, in a
+    /// number.
+    #[test]
+    fn expansion_volume_stays_inside_its_measured_band() {
+        // (construct, block, floor, ceiling) — bands are the MEASURED count ±10%, rounded OUT
+        // (a band rounded inward excludes counts the stated tolerance admits, so the number and
+        // the rule it claims to follow disagree — and the rule is what a re-measurer applies).
+        let corpus: [(&str, proc_macro2::TokenStream, usize, usize); 5] = [
+            (
+                "component+tag (§3.1)",
+                quote! {
+                    component Health { current: f32, max: f32, requires Regen, on_add = heal_full, }
+                    tag Player;
+                    tag Stunned(bitset);
+                },
+                63,
+                77,
+            ),
+            (
+                "system+plugin (§3.3)",
+                quote! {
+                    plugin Movement;
+                    system read_input(actions: res<ActionState>, mut cmds: commands)
+                        on update in InputSet { let _ = (&actions, &mut cmds); }
+                    system apply_velocity(q: query<(&mut Transform, &Velocity), with Player>,
+                                          time: res<Time>)
+                        on update after read_input { let _ = (&mut q, &time); }
+                },
+                215,
+                263,
+            ),
+            (
+                "machine (§3.5)",
+                quote! {
+                    plugin Flow;
+                    machine GameFlow {
+                        initial Boot;
+                        state Boot { on AssetsReady => Playing; }
+                        state Playing {
+                            initial Running;
+                            enter (mut cmds: commands) { cmds.spawn(Hud); }
+                            state Running { on PausePressed => Playing.Paused; }
+                            state Paused { on PausePressed => Playing.Running; }
+                        }
+                    }
+                },
+                560,
+                690,
+            ),
+            (
+                "material (§3.6)",
+                quote! {
+                    material gold { base: (1.0, 0.72, 0.30), metallic: 1.0, roughness: 0.14 }
+                },
+                46,
+                58,
+            ),
+            (
+                "scene (§3.7)",
+                quote! {
+                    material gold { base: (1.0, 0.72, 0.30) }
+                    scene arena {
+                        let floor = plane(22.0);
+                        mesh floor;
+                        mesh floor at (0.0, 1.0, 0.0) { material: gold, casts_shadow };
+                        sun { dir: (-0.42, 0.80, 0.42), lux: 3.2 }
+                    }
+                },
+                443,
+                543,
+            ),
+        ];
+
+        for (name, input, floor, ceil) in corpus {
+            let inp = count_tokens(input.clone());
+            let out = crate::expand_block(input);
+            assert!(!out.to_string().contains("compile_error"), "{name}: {out}");
+            let got = count_tokens(out);
+            // The measurement itself, in the CI log (`cargo test -- --nocapture`): a band that
+            // passes tells a reader nothing about which way the number is drifting.
+            println!(
+                "expansion volume {name}: in={inp} out={got} ratio={:.2}",
+                got as f64 / inp as f64
+            );
+            assert!(
+                (floor..=ceil).contains(&got),
+                "{name}: expansion is {got} tokens, band is {floor}..={ceil} — if this is a deliberate emission change, re-measure and move the band in the same commit"
+            );
+        }
+    }
+
+    /// Tokens in a stream, groups counted recursively (a `Group` is one token tree but the
+    /// downstream compiler pays for its contents).
+    fn count_tokens(ts: proc_macro2::TokenStream) -> usize {
+        ts.into_iter()
+            .map(|tt| match tt {
+                proc_macro2::TokenTree::Group(g) => 1 + count_tokens(g.stream()),
+                _ => 1,
+            })
+            .sum()
     }
 }

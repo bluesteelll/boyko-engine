@@ -1,11 +1,11 @@
-error: states `AB` and `A_b` both generate the system `__aether_m__a_b__e` — generated names are the snake_case collapse of the flattened state path, and `AB` and `A_b` collapse alike; rename one
-  --> tests/ui/machine_snake_collapse_collision.rs:15:13
+error: states `AB` and `Ab` both generate the system `__aether_m__ab__e` — generated names are the snake_case collapse of the flattened state path, and `AB` and `Ab` collapse alike; rename one
+  --> tests/ui/machine_snake_collapse_collision.rs:21:13
    |
-15 |             on E => A_b;
+21 |             on E => Ab;
    |             ^^
 
 error: the first handler generating this name is here
-  --> tests/ui/machine_snake_collapse_collision.rs:12:13
+  --> tests/ui/machine_snake_collapse_collision.rs:18:13
    |
-12 |             on E => AB;
+18 |             on E => AB;
    |             ^^

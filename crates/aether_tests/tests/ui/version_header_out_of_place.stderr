@@ -1,0 +1,5 @@
+error: the `aether v1;` syntax-version header is the block's FIRST item — move it above every construct
+  --> tests/ui/version_header_out_of_place.rs:10:5
+   |
+10 |     aether v1;
+   |     ^^^^^^

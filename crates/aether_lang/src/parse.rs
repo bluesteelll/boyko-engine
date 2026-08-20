@@ -1,56 +1,206 @@
-//! The block parser: dispatch on the leading contextual keyword (§6.1's registry), one `Parse`
-//! per construct.
+//! The block parser: an optional §6.3 version header, then dispatch on the leading contextual
+//! keyword (§6.1's registry), one `Parse` per construct.
 //!
-//! Through rung A6 the registry is CLOSED and complete — all nine v1 keywords dispatch. Earlier
-//! rungs carried an extra arm for the keywords the plan had announced but not yet shipped, so a
-//! roadmap-following user was told which rung a construct lands at rather than that it did not
-//! exist; `scene` was the last of those, and the arm went with it. An unrecognized head is now
-//! unambiguously a misspelling and takes the canonical unknown-construct path.
+//! The registry is CLOSED and complete — all nine v1 keywords dispatch. Earlier rungs carried an
+//! extra arm for the keywords the plan had announced but not yet shipped, so a roadmap-following
+//! user was told which rung a construct lands at rather than that it did not exist; `scene` was
+//! the last of those, and the arm went with it. An unrecognized head is now unambiguously a
+//! misspelling and takes the canonical unknown-construct path.
+//!
+//! # Construct-level recovery (§7.3), added at rung A7
+//!
+//! Constructs are parsed SPECULATIVELY, one at a time. A failure does not abort the block: its
+//! error and a best-effort stub are recorded on [`AetherBlock::broken`], the stream resyncs to
+//! the next construct head, and parsing continues. So this function returns `Err` only for a
+//! fault that invalidates the whole block — today that is exactly one thing, a syntax-version
+//! header naming a version this parser does not implement, where continuing would mean judging v2
+//! source by v1 rules and reporting nine faults the author never committed.
 
 use proc_macro2::TokenStream;
 use syn::Ident;
+use syn::parse::discouraged::Speculative;
 use syn::parse::{Parse, ParseStream};
 use syn::{Expr, Path, Token, Type, parenthesized};
 
 use crate::ast::{
-    AetherBlock, AtPose, BundleDef, ColorLit, ComponentDef, Construct, EvField, EventDef,
-    FilterKind, HandlerDef, HookKind, KeyShape, MachineDef, MaterialDef, MeshLet, MeshSrc,
-    NODE_HEADS, NodeHead, NodeKeyValue, OrderKind, PluginDef, Schedule, SceneDef, SceneNode,
-    StateDef, SysParam, SysParamTy, SystemDef, TagDef, TransitionDef,
+    AetherBlock, AtPose, BrokenConstruct, BundleDef, ColorLit, ComponentDef, Construct, EvField,
+    EventDef, FilterKind, HandlerDef, HookKind, KeyShape, MachineDef, MaterialDef, MeshLet,
+    MeshSrc, NODE_HEADS, NodeHead, NodeKeyValue, OrderKind, PluginDef, Schedule, SceneDef,
+    SceneNode, StateDef, Stub, SyntaxVersion, SysParam, SysParamTy, SystemDef, TagDef,
+    TransitionDef,
 };
 use crate::diag;
 
 impl Parse for AetherBlock {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let mut constructs = Vec::new();
+        // §6.3: the optional `aether vN;` header is the block's FIRST item, and a version this
+        // aether does not speak is a hard block-level error — every construct below it is written
+        // in a grammar this parser does not have, so recovering past it would report faults
+        // against rules the author never claimed.
+        let version = parse_version_header(input)?;
+
+        let mut block = AetherBlock { version, constructs: Vec::new(), broken: Vec::new() };
         while !input.is_empty() {
-            let head: Ident = input.fork().parse().map_err(|_| {
-                diag::err(input.span(), "expected a construct keyword (component, tag, …)")
-            })?;
+            let Ok(head) = input.fork().parse::<Ident>() else {
+                // Not a keyword at all (a stray literal, a `#`, …). One error, then the ordinary
+                // resync runs — it scans to the next construct head and consumes at least one
+                // token tree on the way, which is what makes this loop terminate.
+                block.broken.push(BrokenConstruct {
+                    error: diag::err(
+                        input.span(),
+                        "expected a construct keyword (component, tag, …)",
+                    ),
+                    keyword: None,
+                    after: block.constructs.len(),
+                    stub: None,
+                });
+                skip_to_next_construct(input);
+                continue;
+            };
             let kw = head.to_string();
-            match kw.as_str() {
-                "component" => constructs.push(Construct::Component(parse_component(input)?)),
-                "tag" => constructs.push(Construct::Tag(parse_tag(input)?)),
-                "bundle" => constructs.push(Construct::Bundle(parse_bundle(input)?)),
-                "event" => constructs.push(Construct::Event(parse_event(input)?)),
-                "system" => constructs.push(Construct::System(parse_system(input)?)),
-                "plugin" => constructs.push(Construct::Plugin(parse_plugin(input)?)),
-                "machine" => constructs.push(Construct::Machine(parse_machine(input)?)),
-                "material" => {
-                    constructs.push(Construct::Material(Box::new(parse_material(input)?)))
-                }
-                "scene" => constructs.push(Construct::Scene(parse_scene(input)?)),
+
+            // §7.3 recovery: parse each construct SPECULATIVELY. On success the real stream
+            // advances past it; on failure the stream is still parked at the construct's own
+            // head, which is what makes the resync below well-defined (a failed `ParseStream`
+            // parse leaves the cursor wherever it stopped).
+            let fork = input.fork();
+            let parsed = match kw.as_str() {
+                "component" => parse_component(&fork).map(Construct::Component),
+                "tag" => parse_tag(&fork).map(Construct::Tag),
+                "bundle" => parse_bundle(&fork).map(Construct::Bundle),
+                "event" => parse_event(&fork).map(Construct::Event),
+                "system" => parse_system(&fork).map(Construct::System),
+                "plugin" => parse_plugin(&fork).map(Construct::Plugin),
+                "machine" => parse_machine(&fork).map(Construct::Machine),
+                "material" => parse_material(&fork).map(|m| Construct::Material(Box::new(m))),
+                "scene" => parse_scene(&fork).map(Construct::Scene),
+                // A version header anywhere but the first position: the block already committed
+                // to a grammar, so this is a misplaced header, not an unknown construct.
+                "aether" => Err(diag::err(
+                    head.span(),
+                    "the `aether v1;` syntax-version header is the block's FIRST item — move it above every construct",
+                )),
                 // NOTE: rung A6 landed `scene`, the LAST construct §9 had listed as planned, and
                 // with it the planned-construct arm that used to sit here self-destructed exactly
                 // as its comment promised. Every keyword in `CONSTRUCT_KEYWORDS` now dispatches,
                 // so an unrecognized head is unambiguously a misspelling and the canonical
                 // unknown-construct diagnostic is the whole truth. A7 adds no constructs; should a
                 // v2 one ever be announced ahead of its rung, the arm comes back with it.
-                other => return Err(diag::unknown_construct(head.span(), other)),
+                other => Err(diag::unknown_construct(head.span(), other)),
+            };
+
+            match parsed {
+                Ok(c) => {
+                    input.advance_to(&fork);
+                    block.constructs.push(c);
+                }
+                Err(error) => {
+                    let stub = peek_stub(input, &kw);
+                    block.broken.push(BrokenConstruct {
+                        error,
+                        keyword: registry_keyword(&kw),
+                        after: block.constructs.len(),
+                        stub,
+                    });
+                    skip_to_next_construct(input);
+                }
             }
         }
-        Ok(AetherBlock { constructs })
+        Ok(block)
     }
+}
+
+/// §6.3's optional `aether vN;` header. Absent ⇒ [`SyntaxVersion::CURRENT`].
+///
+/// The leading `aether` ident is claimed unconditionally: no construct keyword spells it, so a
+/// block that opens with it is opening a header, and a MALFORMED header gets the header's own
+/// diagnostic instead of "unknown construct `aether`".
+fn parse_version_header(input: ParseStream) -> syn::Result<SyntaxVersion> {
+    let fork = input.fork();
+    match fork.parse::<Ident>() {
+        Ok(kw) if kw == "aether" => {}
+        _ => return Ok(SyntaxVersion::CURRENT),
+    }
+
+    let _: Ident = input.parse()?; // `aether`
+    let v: Ident = input.parse().map_err(|e| {
+        diag::err(
+            e.span(),
+            format!(
+                "the syntax-version header names a version: `aether {};`",
+                SyntaxVersion::CURRENT.spelling()
+            ),
+        )
+    })?;
+    let vs = v.to_string();
+    let Some(version) = SyntaxVersion::from_str(&vs) else {
+        let known = SyntaxVersion::spellings();
+        let mut msg = format!(
+            "unknown aether syntax version `{vs}`; this aether speaks: {}",
+            known.join(", ")
+        );
+        if let Some(sugg) = diag::did_you_mean(&vs, &known) {
+            msg.push_str(&format!(" (did you mean `{sugg}`?)"));
+        }
+        return Err(diag::err(v.span(), msg));
+    };
+    input.parse::<Token![;]>().map_err(|e| {
+        diag::err(e.span(), format!("the syntax-version header ends with `;` (`aether {vs};`)"))
+    })?;
+    Ok(version)
+}
+
+/// The REGISTRY's spelling of a keyword the user typed, `None` if it is not one.
+///
+/// Returns the `'static` row rather than the user's `String` so a whole-block rule keyed on it
+/// compares against — and prints — the language's own vocabulary. A near-miss (`compnent`) has no
+/// row and therefore participates in no rule: nothing about its kind is knowable.
+fn registry_keyword(kw: &str) -> Option<&'static str> {
+    diag::CONSTRUCT_KEYWORDS.iter().copied().find(|k| *k == kw)
+}
+
+/// Peek the failed construct's NAME off the real stream, for §7.3's best-effort stub.
+///
+/// Speculative throughout: the stream is left exactly where it was, because the resync
+/// ([`skip_to_next_construct`]) is what advances it.
+fn peek_stub(input: ParseStream, keyword: &str) -> Option<Stub> {
+    let fork = input.fork();
+    let _kw: Ident = fork.parse().ok()?;
+    let name: Ident = fork.parse().ok()?;
+    Stub::for_keyword(keyword, name)
+}
+
+/// Resync to the next construct head (§7.3's "one typo costs one error").
+///
+/// The block grammar is keyword-led and LL(1) at the construct level (§6.1 / §8 R5), so the next
+/// `<construct-keyword> <ident>` pair at DEPTH ZERO is the one resync point that does not depend
+/// on how far into the broken construct the failure happened. A `;`-terminated construct missing
+/// its `;` therefore costs its successor nothing — the scan looks for the successor's head, not
+/// for a terminator the author never wrote.
+///
+/// Always consumes at least one token tree, which is what makes the caller's loop terminate.
+fn skip_to_next_construct(input: ParseStream) {
+    let _ = input.step(|cursor| {
+        let mut rest = *cursor;
+        let mut first = true;
+        while let Some((tt, next)) = rest.token_tree() {
+            if !first && opens_a_construct(&tt, next) {
+                break;
+            }
+            first = false;
+            rest = next;
+        }
+        Ok(((), rest))
+    });
+}
+
+/// `true` iff `tt` is a construct keyword followed by a name — the resync signature.
+fn opens_a_construct(tt: &proc_macro2::TokenTree, next: syn::buffer::Cursor<'_>) -> bool {
+    let proc_macro2::TokenTree::Ident(id) = tt else {
+        return false;
+    };
+    let s = id.to_string();
+    diag::CONSTRUCT_KEYWORDS.contains(&s.as_str()) && next.ident().is_some()
 }
 
 /// `component NAME { item* }` — items: `field: Type,` | `requires P, Q,` | `on_* = path,`
@@ -271,20 +421,35 @@ fn upper_camel(s: &str) -> String {
 ///
 /// Deliberately a SECOND implementation of the same transform the expander's `snake` performs on
 /// generated identifiers: this one exists only inside an error message, and coupling a
-/// diagnostic's wording to a codegen naming rule would make either one hostage to the other.
+/// diagnostic's wording to a codegen naming rule would make either one hostage to the other. The
+/// two implement the same RULE, and `aether_lang`'s unit tests pin them equal on the cases that
+/// distinguish it — separate code, one specification.
+///
+/// A run of capitals is one word: `material GOLD` is told to rename to `gold`, not to `g_o_l_d`
+/// (which the letter-by-letter rule this shipped with produced — a suggestion that named a legal
+/// ident nobody would accept, in the one message whose whole job is to be copy-pasted).
 fn snake_case(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len() + 4);
-    for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() {
-            if i != 0 {
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_uppercase() && i != 0 {
+            let prev = chars[i - 1];
+            let next_is_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+            if (!prev.is_uppercase() || next_is_lower) && !out.ends_with('_') {
                 out.push('_');
             }
-            out.extend(c.to_lowercase());
-        } else {
-            out.push(c);
         }
+        out.extend(c.to_lowercase());
     }
     out
+}
+
+/// The diagnostic-side snake_case transform, reachable from the crate's tests: the parity check
+/// between this rule and the expander's `snake` is a TEST, so the two stay separate code with one
+/// specification instead of one hostage to the other.
+#[cfg(test)]
+pub(crate) fn snake_case_for_tests(s: &str) -> String {
+    snake_case(s)
 }
 
 /// §3.2's own arity cap mirror — the derive owns the rule; Aether owns the friendlier span.
@@ -964,16 +1129,36 @@ fn parse_material(input: ParseStream) -> syn::Result<MaterialDef> {
         )
     })?;
 
-    Ok(MaterialDef { name, base, metallic, roughness, reflectance, emissive, flags, textures })
+    // The accepted-key idents did their work in `set_once` (the duplicate's second span); the AST
+    // keeps only the values.
+    Ok(MaterialDef {
+        name,
+        base: base.1,
+        metallic: metallic.map(|(_, v)| v),
+        roughness: roughness.map(|(_, v)| v),
+        reflectance: reflectance.map(|(_, v)| v),
+        emissive: emissive.map(|(_, v)| v),
+        flags: flags.map(|(_, v)| v),
+        textures: textures.map(|(_, v)| v),
+    })
 }
 
-/// Record a key's value, refusing a second occurrence on the SECOND key's span — the same
-/// duplicate-key contract `component`'s hooks and `state`'s `initial` carry.
-fn set_once<T>(slot: &mut Option<T>, value: T, key: &Ident) -> syn::Result<()> {
-    if slot.is_some() {
-        return Err(diag::err(key.span(), format!("duplicate material key `{key}`")));
+/// Record a key's value, refusing a second occurrence on the SECOND key's span WITH the first
+/// key's span attached.
+///
+/// The slot carries the accepted key's ident for exactly that second span. A duplicate is the
+/// diagnostic class where one span is never enough: the reader's question is not "where is the
+/// duplicate" (they are looking at it) but "which earlier line did I already say this on", and in
+/// a seven-key material with the pair pages apart, a single span answers the question they do not
+/// have. The two-span shape is the block's own convention already — duplicate mesh bindings,
+/// conflicting merged params and duplicate fn names all combine a "the first … is here".
+fn set_once<T>(slot: &mut Option<(Ident, T)>, value: T, key: &Ident) -> syn::Result<()> {
+    if let Some((first, _)) = slot {
+        let mut e = diag::err(key.span(), format!("duplicate material key `{key}`"));
+        e.combine(diag::err(first.span(), format!("the first `{key}:` is here")));
+        return Err(e);
     }
-    *slot = Some(value);
+    *slot = Some((key.clone(), value));
     Ok(())
 }
 
@@ -1151,6 +1336,13 @@ fn parse_node(input: ParseStream) -> syn::Result<SceneNode> {
         // so the node body that may follow is never swallowed — but a BARE PATH followed by the
         // body brace (`sdf MY_EDIT { … }`) reads as a struct literal, exactly as it would in a
         // Rust `if` scrutinee. Parenthesize (`sdf (MY_EDIT) { … }`) to split them.
+        //
+        // `at`'s half of this hazard is now NAMED in the diagnostic it used to contradict (see
+        // `swallowed_body_hint`). `sdf`'s half gets no such hint and this comment stays the whole
+        // warning, for a structural reason rather than an oversight: that hint rides on the
+        // required-key refusal, and `sdf` has NO key table (`NO_KEYS`), so an `sdf` node whose
+        // body was swallowed parses CLEANLY — there is no Aether diagnostic to attach anything
+        // to. What the author gets instead is rustc, on their own tokens, at the struct literal.
         "sdf" => NodeHead::Sdf(input.parse().map_err(|e| {
             diag::err(e.span(), "`sdf` takes an `SdfEdit` expression")
         })?),
@@ -1236,6 +1428,10 @@ fn at_refusal(head: &NodeHead) -> String {
 /// `Transform { … }` struct-literal form passes through verbatim — which also means a BARE PATH
 /// followed by the node body brace (`at MY_POSE { material: gold }`) reads as a struct literal,
 /// exactly as it would in a Rust `if` scrutinee; parenthesize (`at (MY_POSE) { … }`) to split them.
+///
+/// The eager form STAYS (a `Transform { … }` pose is the common case and must not need parens);
+/// what changed at rung A7 is that the trap is now named in the diagnostic it produces — see
+/// [`swallowed_body_hint`].
 fn parse_at(input: ParseStream) -> syn::Result<AtPose> {
     if input.peek(syn::token::Paren) {
         let inner;
@@ -1466,16 +1662,58 @@ fn check_required_keys(node: &SceneNode) -> syn::Result<()> {
             } else {
                 format!(" (these default: {})", optional.join(", "))
             };
-            return Err(diag::err(
-                node.head_span,
-                format!(
-                    "the `{}` node needs {} `{}:` key — it has no default{tail}",
-                    node.head.kw(),
-                    article(spec.name),
-                    spec.name
-                ),
-            ));
+            let mut msg = format!(
+                "the `{}` node needs {} `{}:` key — it has no default{tail}",
+                node.head.kw(),
+                article(spec.name),
+                spec.name
+            );
+            if let Some(hint) = swallowed_body_hint(node, spec.name) {
+                msg.push_str(&hint);
+            }
+            return Err(diag::err(node.head_span, msg));
         }
     }
     Ok(())
+}
+
+/// The `at BARE_PATH { … }` trap, named in the message it would otherwise contradict.
+///
+/// `camera at MY_POSE { aspect: 1.5 }` parses `MY_POSE { aspect: 1.5 }` as ONE struct-literal
+/// expression — exactly as it would in a Rust `if` scrutinee — so the node body is gone and the
+/// required-key rule reports `the camera node needs an aspect: key` at a user who is looking
+/// straight at `aspect: 1.5`. A message that contradicts the source teaches the reader nothing;
+/// this appends what actually happened and the one-character fix (`at (MY_POSE) { … }`).
+///
+/// Gated on the swallowed braces LOOKING like this node's body — a field named for the missing
+/// key or for any prop this head accepts. An honest `at Transform { translation: … }` whose
+/// author simply forgot `aspect:` names none of them and gets no hint, because for that author
+/// the hint would be the wrong lead.
+fn swallowed_body_hint(node: &SceneNode, missing: &str) -> Option<String> {
+    let Some(AtPose::Verbatim(expr)) = node.at.as_ref() else {
+        return None;
+    };
+    let Expr::Struct(lit) = &**expr else {
+        return None;
+    };
+    let names = node.head.keys().iter().map(|k| k.name);
+    let looks_like_body = lit.fields.iter().any(|f| {
+        let syn::Member::Named(id) = &f.member else {
+            return false;
+        };
+        let n = id.to_string();
+        n == missing
+            || n == "material"
+            || n == "casts_shadow"
+            || n == "children"
+            || names.clone().any(|k| k == n)
+    });
+    if !looks_like_body {
+        return None;
+    }
+    let lit_path = &lit.path;
+    let path = quote::quote!(#lit_path).to_string().replace(' ', "");
+    Some(format!(
+        " — note: the `{{ … }}` after `{path}` was parsed as a STRUCT LITERAL (`{path} {{ … }}`), not as this node's body, so the node has no keys at all; parenthesize the pose to split them: `at ({path}) {{ … }}`"
+    ))
 }

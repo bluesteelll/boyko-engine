@@ -1,0 +1,5 @@
+error: a plugin declaration ends with `;` (the systems it registers are sibling `system` items)
+  --> tests/ui/recovery_broken_plugin_keeps_the_block.rs:29:5
+   |
+29 |     system boot(mut cmds: commands) on startup {
+   |     ^^^^^^

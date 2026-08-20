@@ -8,9 +8,142 @@ use syn::{Expr, Ident, Path, Type};
 
 /// One parsed `aether!` block: a flat list of constructs sharing one parse context.
 pub struct AetherBlock {
-    /// The constructs, in source order (emission preserves it — deterministic output is what
-    /// makes the unit-test snapshots exact).
+    /// The `aether vN;` header's version (§6.3). Absent header = [`SyntaxVersion::CURRENT`].
+    pub version: SyntaxVersion,
+    /// The constructs that PARSED, in source order (emission preserves it — deterministic output
+    /// is what makes the unit-test snapshots exact).
     pub constructs: Vec<Construct>,
+    /// The constructs that did NOT parse, in source order — §7.3's recovery record. Empty for
+    /// every well-formed block, so the common path pays nothing for it.
+    pub broken: Vec<BrokenConstruct>,
+}
+
+/// The syntax version an `aether!` block is written against (§6.3).
+///
+/// ONE table, spelling and dispatch token together — the `MATERIAL_KEYS` discipline: what the
+/// diagnostic PRINTS and what the parser ACCEPTS are the same rows, so neither can gain a version
+/// the other lacks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SyntaxVersion {
+    /// `aether v1;` — the version this crate speaks.
+    V1,
+}
+
+/// Every version this aether accepts, in order — the parse table and the "this aether speaks: …"
+/// list, from one source.
+const SYNTAX_VERSIONS: &[(&str, SyntaxVersion)] = &[("v1", SyntaxVersion::V1)];
+
+impl SyntaxVersion {
+    /// The version a header-less block is read as: §6.3's "absent = the crate's current default".
+    pub const CURRENT: SyntaxVersion = SyntaxVersion::V1;
+
+    /// Parse a version from its surface spelling, `None` for anything else.
+    pub fn from_str(s: &str) -> Option<SyntaxVersion> {
+        SYNTAX_VERSIONS.iter().find(|(k, _)| *k == s).map(|(_, v)| *v)
+    }
+
+    /// The accepted spellings, for the unknown-version diagnostic (§7.1: exhaustive, in table
+    /// order) and its did-you-mean candidate set.
+    pub fn spellings() -> Vec<&'static str> {
+        SYNTAX_VERSIONS.iter().map(|(k, _)| *k).collect()
+    }
+
+    /// This version's surface spelling — the same table the parser dispatches on, so a message
+    /// that offers `aether v1;` cannot advertise a header the parser would reject.
+    pub fn spelling(self) -> &'static str {
+        SYNTAX_VERSIONS
+            .iter()
+            .find(|(_, v)| *v == self)
+            .map(|(k, _)| *k)
+            .expect("invariant: every SyntaxVersion variant has a SYNTAX_VERSIONS row")
+    }
+}
+
+/// One construct the parser could not read, kept so the expander can honor §7.3's recovery
+/// contract: the error at its own span, a name-resolving stub, and the FULL expansion of every
+/// sibling construct in the block.
+///
+/// A broken construct is not a hole in the block. It still PARTICIPATES in every whole-block rule
+/// by NAME and KIND — it holds its name, and a broken `plugin` still means "this block has a
+/// plugin". Rules that read it as absent produce faults that DERIVE from the fault already
+/// reported: `clauses need a plugin` under a half-typed `plugin`, or a duplicate that goes
+/// unnoticed because one of the two names was unreadable. §4 runs over the union
+/// ([`crate::ctx`]); only rules whose failure could not exist without the break stay suppressed.
+pub struct BrokenConstruct {
+    /// The failure, at the offending token's own span.
+    pub error: syn::Error,
+    /// The construct's keyword when it was one of the registry's — the whole-block rules key on
+    /// it. `None` for an unknown head (nothing about its kind is knowable).
+    ///
+    /// `&'static str`: the value is the [`crate::diag::CONSTRUCT_KEYWORDS`] row, not the user's
+    /// spelling, so a diagnostic printing it cannot print a typo back at the reader as if it were
+    /// a construct name.
+    pub keyword: Option<&'static str>,
+    /// How many constructs PARSED before this one — the block-order key. Source order across the
+    /// two lists is what a duplicate diagnostic needs ("the first … is here" must point at the
+    /// earlier declaration), and it is not recoverable from two separate vectors otherwise.
+    pub after: usize,
+    /// The best-effort stub — `None` when the construct's NAME never parsed (an unknown keyword,
+    /// or a head that is not an ident at all), because a stub needs a name to declare.
+    pub stub: Option<Stub>,
+}
+
+impl BrokenConstruct {
+    /// The declared name, when one was parsed — the whole-block rules' key.
+    pub fn name(&self) -> Option<&Ident> {
+        self.stub.as_ref().map(Stub::name)
+    }
+}
+
+/// The item shape a §7.3 recovery stub takes: the construct's own kind, so a downstream reference
+/// to its name keeps resolving while the author is still typing.
+pub enum Stub {
+    /// A type-producing construct (`component`, `tag`, `bundle`, `event`, `machine`).
+    Type(Ident),
+    /// `plugin` — a type AND the `Plugin` impl its only use site needs.
+    ///
+    /// Split from [`Stub::Type`] by what "keeps resolving" MEANS for this kind: every reference to
+    /// a plugin is `app.add_plugin(P)`, which needs the trait, not the name. A bare `pub struct P;`
+    /// turns the unresolved-name error into an unsatisfied-trait-bound error at the same call site
+    /// — a different error, not one fewer.
+    Plugin(Ident),
+    /// A fn-producing construct (`system`, `material`, `scene`).
+    Fn(Ident),
+}
+
+impl Stub {
+    /// The stub shape for a construct KEYWORD.
+    ///
+    /// The recovery path's mirror of [`Construct::emits_fn`], which needs a parsed construct that
+    /// a FAILED parse never produced. The two are stated beside each other because a construct
+    /// added to one and not the other would stub as the wrong item kind — a `material` stubbed as
+    /// a struct resolves the name and then fails at every call site, which is exactly the
+    /// cascade §7.3 exists to prevent. `aether_lang`'s unit tests pin them equal, keyword by
+    /// keyword.
+    ///
+    /// `None` for a keyword outside the registry: an unknown construct has no known item kind, so
+    /// there is nothing honest to declare.
+    pub fn for_keyword(keyword: &str, name: Ident) -> Option<Stub> {
+        match keyword {
+            "system" | "material" | "scene" => Some(Stub::Fn(name)),
+            "plugin" => Some(Stub::Plugin(name)),
+            "component" | "tag" | "bundle" | "event" | "machine" => Some(Stub::Type(name)),
+            _ => None,
+        }
+    }
+
+    /// The stubbed construct's name.
+    pub fn name(&self) -> &Ident {
+        match self {
+            Stub::Type(n) | Stub::Plugin(n) | Stub::Fn(n) => n,
+        }
+    }
+
+    /// `true` iff this construct's name occupies a FN item — [`Construct::emits_fn`] for the
+    /// recovery half, so §4's duplicate rule draws its line at the same place on both.
+    pub fn emits_fn(&self) -> bool {
+        matches!(self, Stub::Fn(_))
+    }
 }
 
 /// Every construct in the v1 registry (§6.1) — complete as of rung A6. A construct is one

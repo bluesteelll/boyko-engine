@@ -25,10 +25,20 @@
 //!   `plugin`) carry a derive, so rustc reports the duplicate definition AND a second, localized
 //!   error against the user's own item. §7.1 defers those — a duplicated check there could only be
 //!   worse, and duplicated checks drift.
+//!
+//! # Broken constructs participate (§7.3, rung A7)
+//!
+//! Every rule below runs over `constructs ∪ broken`. A construct that failed to PARSE still holds
+//! its name and its kind, and reading it as absent manufactures a second fault out of the first:
+//! a half-typed `plugin` would make every sibling clause report "needs a plugin", and a duplicate
+//! `material gold` would go unreported here and surface as rustc's E0428 on the macro token —
+//! the two shapes this table exists to prevent. Only rules whose failure could not exist without
+//! the break (the broken plugin's own registration contents, a scene's reference INTO a construct
+//! that never parsed) stay suppressed, at their own sites.
 
 use syn::Ident;
 
-use crate::ast::{AetherBlock, Construct, MaterialDef, PluginDef};
+use crate::ast::{AetherBlock, BrokenConstruct, Construct, MaterialDef};
 use crate::diag;
 
 /// The per-block symbol table (§4) — the ONLY channel constructs use to see each other.
@@ -41,6 +51,10 @@ pub struct AetherCtx<'a> {
     /// Every sibling `material`, in declaration order — `scene`'s `material:` prop resolves here,
     /// and the order is what makes the hoisted mint sequence deterministic.
     materials: Vec<&'a MaterialDef>,
+    /// The names of `material` constructs that did NOT parse (§7.3). A `material: gold` pointing
+    /// at one of these is not an unknown symbol — the material is right there, unread — so the
+    /// consumer SUPPRESSES itself instead of reporting a message that contradicts the source.
+    broken_materials: Vec<&'a Ident>,
 }
 
 impl<'a> AetherCtx<'a> {
@@ -52,24 +66,32 @@ impl<'a> AetherCtx<'a> {
     pub fn build(block: &'a AetherBlock) -> syn::Result<Self> {
         duplicate_fn_names(block)?;
 
-        let mut plugin: Option<&PluginDef> = None;
-        for c in &block.constructs {
-            let Construct::Plugin(p) = c else { continue };
+        // The plugin slot, over the union: a `plugin` that failed to parse still OCCUPIES it.
+        // Two named plugins are a real duplicate whichever of them parsed (the fault survives the
+        // author finishing the line); a nameless broken one can only hold the slot, since a
+        // diagnostic has nothing to print for it.
+        let mut plugin: Option<&Ident> = None;
+        let mut plugin_declared = false;
+        for item in block_symbols(block) {
+            if item.keyword != "plugin" {
+                continue;
+            }
+            plugin_declared = true;
+            let Some(name) = item.name else { continue };
             if let Some(first) = plugin {
                 let mut e = diag::err(
-                    p.name.span(),
+                    name.span(),
                     format!(
-                        "one `plugin` per aether block — `{}` already holds this block's registrations",
-                        first.name
+                        "one `plugin` per aether block — `{first}` already holds this block's registrations"
                     ),
                 );
-                e.combine(diag::err(first.name.span(), "the first `plugin` is here"));
+                e.combine(diag::err(first.span(), "the first `plugin` is here"));
                 return Err(e);
             }
-            plugin = Some(p);
+            plugin = Some(name);
         }
 
-        if plugin.is_none() {
+        if !plugin_declared {
             for c in &block.constructs {
                 match c {
                     Construct::System(s) if s.has_clauses() => {
@@ -97,8 +119,23 @@ impl<'a> AetherCtx<'a> {
                 _ => None,
             })
             .collect();
+        let broken_materials = block
+            .broken
+            .iter()
+            .filter(|b| b.keyword == Some("material"))
+            .filter_map(BrokenConstruct::name)
+            .collect();
 
-        Ok(AetherCtx { materials })
+        Ok(AetherCtx { materials, broken_materials })
+    }
+
+    /// `true` iff `name` is a `material` this block declares but the parser could not read.
+    ///
+    /// The consumer's cue to suppress ITSELF (§7.3): a scene that mints this material cannot
+    /// expand, and "no material `gold` in this aether block" would be false — `gold` is declared
+    /// three lines up. One fault, one error.
+    pub fn material_is_broken(&self, name: &Ident) -> bool {
+        self.broken_materials.contains(&name)
     }
 
     /// Resolve a `material: NAME` reference against the sibling `material` constructs.
@@ -118,40 +155,102 @@ impl<'a> AetherCtx<'a> {
     }
 }
 
+/// One declared symbol of the block, from EITHER list — the view §4's whole-block rules read.
+struct BlockSymbol<'a> {
+    /// The construct's keyword.
+    keyword: &'static str,
+    /// Its declared name; `None` only for a broken construct whose name never parsed.
+    name: Option<&'a Ident>,
+    /// Whether this construct's name occupies a fn item (§4's rule splits on it).
+    emits_fn: bool,
+    /// The noun a duplicate diagnostic uses for that fn ("builder fn", "spawn fn").
+    fn_noun: &'static str,
+}
+
+/// Every declared symbol in the block, in SOURCE order across both lists.
+///
+/// The merge is what makes "the first `material` of this name is here" point at the earlier
+/// declaration rather than at whichever list happened to hold it —
+/// [`BrokenConstruct::after`](crate::ast::BrokenConstruct::after) is the ordering key, since two
+/// separate vectors cannot answer "which came first" on their own.
+fn block_symbols(block: &AetherBlock) -> Vec<BlockSymbol<'_>> {
+    let mut out: Vec<BlockSymbol<'_>> = Vec::with_capacity(block.constructs.len());
+    let mut broken = block.broken.iter().peekable();
+    for (i, c) in block.constructs.iter().enumerate() {
+        while broken.peek().is_some_and(|b| b.after <= i) {
+            let b = broken.next().expect("invariant: peek said Some");
+            push_broken(&mut out, b);
+        }
+        out.push(BlockSymbol {
+            keyword: c.keyword(),
+            name: Some(c.name()),
+            emits_fn: c.emits_fn(),
+            fn_noun: c.fn_noun(),
+        });
+    }
+    for b in broken {
+        push_broken(&mut out, b);
+    }
+    out
+}
+
+fn push_broken<'a>(out: &mut Vec<BlockSymbol<'a>>, b: &'a BrokenConstruct) {
+    let Some(keyword) = b.keyword else { return };
+    let emits_fn = b.stub.as_ref().is_some_and(crate::ast::Stub::emits_fn);
+    out.push(BlockSymbol {
+        keyword,
+        name: b.name(),
+        emits_fn,
+        // The parsed half derives this from the construct; the recovery half has only the
+        // keyword, and the two must agree — `material` says "builder fn" on both paths.
+        fn_noun: match keyword {
+            "material" => "builder fn",
+            "scene" => "spawn fn",
+            _ => "fn",
+        },
+    });
+}
+
 /// §4's duplicate-name rule over the fn-producing half of the registry (see the module docs for
 /// why the type-producing half stays with rustc).
 ///
 /// The error lands on the SECOND declaration and carries the first's span — the shape `plugin` ×
 /// `plugin` and `material` × `material` already ship with, generalized rather than re-invented.
+///
+/// Runs over the UNION (§7.3): a `material gold` that did not parse still occupies the name
+/// `gold`, and skipping it does not make the collision go away — it moves the report to rustc's
+/// E0428, which for two macro-generated fns puts both of its labels on the `aether!` token and
+/// names no user token anywhere (the A5 measurement this rule exists for).
 fn duplicate_fn_names(block: &AetherBlock) -> syn::Result<()> {
-    for (i, c) in block.constructs.iter().enumerate() {
-        if !c.emits_fn() {
+    let symbols = block_symbols(block);
+    for (i, c) in symbols.iter().enumerate() {
+        let (true, Some(name)) = (c.emits_fn, c.name) else {
             continue;
-        }
-        let Some(first) =
-            block.constructs[..i].iter().find(|p| p.emits_fn() && p.name() == c.name())
+        };
+        let Some(first) = symbols[..i]
+            .iter()
+            .find(|p| p.emits_fn && p.name.is_some_and(|n| n == name))
         else {
             continue;
         };
-        let msg = if first.keyword() == c.keyword() {
+        let first_name = first.name.expect("invariant: the finder required a name");
+        let msg = if first.keyword == c.keyword {
             format!(
                 "duplicate {kw} `{name}` — each {kw} expands to a {noun} of its own name, and two of one name is one fn defined twice",
-                kw = c.keyword(),
-                name = c.name(),
-                noun = c.fn_noun(),
+                kw = c.keyword,
+                noun = c.fn_noun,
             )
         } else {
             format!(
                 "`{name}` is declared twice in this aether block — the `{a}` and the `{b}` both expand to a fn of that name",
-                name = c.name(),
-                a = first.keyword(),
-                b = c.keyword(),
+                a = first.keyword,
+                b = c.keyword,
             )
         };
-        let mut e = diag::err(c.name().span(), msg);
+        let mut e = diag::err(name.span(), msg);
         e.combine(diag::err(
-            first.name().span(),
-            format!("the first `{}` of this name is here", first.keyword()),
+            first_name.span(),
+            format!("the first `{}` of this name is here", first.keyword),
         ));
         return Err(e);
     }
