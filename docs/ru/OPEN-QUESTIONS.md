@@ -2531,3 +2531,67 @@ RENDER-PARITY-PLAN §3.2.** Решившие числа: инлайн нёс И�
 `docs/VB-SV0-SDF-SHADOW-PLAN.md` Rev 10 (DP1–DP5), включая два гейта, которых у инлайна не было, —
 побайтовый бюджет на производителя и тёмный ABBA A/B с предрегистрированным бюджетом в шаг решётки
 таймера.
+
+
+---
+
+## 2026-08-20: два кандидата Aether A7, записаны здесь, чтобы «recorded» в книге было правдой
+
+Оба найдены ревью на A6 и задокументированы у своих парс-сайтов, но ни один плановый документ их
+не перечислял до этой записи. Ничего не блокируют; оба — DX-дефекты отгруженной поверхности.
+
+1. **The AT command has been deprecated. Please use schtasks.exe instead.
+
+Invalid command.
+
+The AT command schedules commands and programs to run on a computer at      
+a specified time and date. The Schedule service must be running to use      
+the AT command.
+                                                           
+AT [\computername] [ [id] [/DELETE] | /DELETE [/YES]]                    
+AT [\computername] time [/INTERACTIVE]
+    [ /EVERY:date[,...] | /NEXT:date[,...]] "command"
+
+\computername     Specifies a remote computer. Commands are scheduled on the
+                   local computer if this parameter is omitted.             
+id                 Is an identification number assigned to a scheduled      
+                   command.                                                 
+/delete            Cancels a scheduled command. If id is omitted, all the
+                   scheduled commands on the computer are canceled.
+/yes               Used with cancel all jobs command when no further
+                   confirmation is desired.
+time               Specifies the time when command is to run.
+/interactive       Allows the job to interact with the desktop of the user   
+                   who is logged on at the time the job runs.
+/every:date[,...]  Runs the command on each specified day(s) of the week or
+                   month. If date is omitted, the current day of the month
+                   is assumed.                                              
+/next:date[,...]   Runs the specified command on the next occurrence of the
+                   day (for example, next Thursday).  If date is omitted, the
+                   current day of the month is assumed.
+"command"          Is the Windows NT command, or batch program to be run. заглатывает тело узла как struct-литерал.**  парсит  одним выражением, и итоговый диагноз —
+   the  node needs an  key — противоречит написанному пользователем. Обход
+   (скобки вокруг позы) задокументирован у  и у ветки , но сообщение об ошибке не
+   несёт подсказки. Фикс — хинт на диагнозе обязательного ключа, когда The AT command has been deprecated. Please use schtasks.exe instead.
+
+The binding handle is invalid.-выражение было путём
+   с брейс-суффиксом. Тот же хазард у .
+2. ** на сгенерированной системе садится на весь блок .**
+    с 8+ demand-driven параметрами эмитит fn, который clippy флажит, и спан — макро-токен:
+   пользователь не может действовать.  внутри  переблессил бы все A2
+   токен-пины, так что фикс принадлежит осознанному проходу A7, не драйв-баю.
+
+Также записано:  не классифицирует три крейта  — он краснеет на
+каждом полном прогоне воркспейса по причине, не связанной с проверяемым. Таблице классификации
+переписи нужны три строки (это движковые крейты: фронтенд языка, шим и интеграционно-тестовый).
+
+---
+
+## 2026-08-20: DP6a ЗАБЛОКИРОВАН арифметикой, не вопросами — запись для резюмирующего читателя
+
+Пере-снятые ячейки DP6-0b посадили §R4.3.7 на ветку 2 (MIXED): 
+хостинговой надбавки сплит-хвоста реальны (остальные 87.8% находки DP6-0 были перекосом
+инструмента, теперь починенным — split shade упал 112 640 → 35 328 нс на рестампнутом
+инструменте). По пре-регистрированному правилу самого дизайна DP6a не приземляется, пока
+fused-строка Decision 3 не пересчитана с этим членом. Пересчёт в полёте; эта запись существует,
+чтобы резюмирующий читатель не начал DP6a по одному лишь порядку лестницы.

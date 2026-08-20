@@ -2518,3 +2518,38 @@ measurement" premise was retracted as false — the pass never existed to be mea
 gates: `docs/VB-SV0-SDF-SHADOW-PLAN.md` Rev 10 (DP1–DP5), including the two gates the inline never
 had — a per-producer byte budget and a dark-dispatch ABBA A/B with a pre-registered grid-step
 budget.
+
+---
+
+## 2026-08-20: two Aether A7 candidates, recorded here so the book's "recorded" claim is true
+
+Both were found by review during A6 and are documented at their parse sites, but no planning
+document listed them until this entry. Neither blocks anything; both are DX defects of the shipped
+surface.
+
+1. **`at BARE_PATH { … }` swallows the node body as a struct literal.** `camera at MY_POSE
+   { aspect: 1.5 }` parses `MY_POSE { aspect: 1.5 }` as one expression, and the diagnostic that
+   results — ``the `camera` node needs an `aspect:` key`` — contradicts what the user wrote. The
+   workaround (parenthesize the pose) is documented at `parse_at` and at the `sdf` arm, but the
+   error message carries no hint. The fix is a hint on the required-key diagnostic when the `at`
+   expression was a brace-suffixed path. Same hazard exists for `sdf EXPR`.
+2. **`clippy::too_many_arguments` on a generated system fn lands on the whole `aether!` block.**
+   A `system` with 8+ demand-driven params emits a fn clippy flags, and the span is the macro
+   token — the user cannot act on it. An `#[allow]` inside `system_fn` would re-bless every A2
+   token pin, so the fix belongs to a deliberate A7 pass, not a drive-by.
+
+Also recorded: `engine_packages_census` does not classify the three `aether*` crates — it reds on
+every full-workspace run for a reason unrelated to whatever is being tested. The census's
+classification table needs three rows (they are engine crates: the language front-end, the shim,
+and the integration-test crate).
+
+---
+
+## 2026-08-20: DP6a is BLOCKED on arithmetic, not on questions — recorded for the resume reader
+
+DP6-0b's re-taken cells landed §R4.3.7 on branch 2 (MIXED): `E_split_host = 11 264 ns` of the
+split tail's hosting surcharge is real (the other 87.8% of DP6-0's finding was instrument skew,
+now repaired — the split shade fell 112 640 → 35 328 ns on the restamped instrument). Per the
+design's own pre-registered rule, DP6a does not land until Decision 3's fused row is re-derived
+with that term. The re-derivation is in flight; this entry exists so a resume reader does not
+start DP6a from the ladder order alone.
