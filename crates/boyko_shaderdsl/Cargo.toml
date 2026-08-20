@@ -52,5 +52,12 @@ name = "emit_probe_gi"
 path = "src/bin/emit_probe_gi.rs"
 required-features = ["emit"]
 
+# The GPU particle system's shader emitter (`docs/PARTICLES-PLAN.md` D12) — writes ALL FIVE
+# committed files: `particle_{kickoff,emit,sim}.comp.hlsl` + `particle_draw.{vs,fs}.hlsl`.
+[[bin]]
+name = "emit_particles"
+path = "src/bin/emit_particles.rs"
+required-features = ["emit"]
+
 [lints]
 workspace = true

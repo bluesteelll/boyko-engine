@@ -2713,3 +2713,253 @@ pub fn emit_hlsl_e5_renorm() -> String {
         let _ = particle_facets::e5_renorm_body::<EmitCf>(c, s, &ret_out);
     })
 }
+
+// ---- The P0 PARTICLE LEAVES (docs/PARTICLES-PLAN.md rung E's leaf table) ------------------
+//
+// One emitter per [`crate::particle`] body. Unlike the rung-E probes above, these spans ARE
+// spliced: `boyko_shaderdsl/src/bin/emit_particles.rs` owns all five particle `.hlsl` files as
+// `format!` templates and drops each span between its own
+// `// === GENERATED <name> BEGIN/END ===` sentinel pair, so `particle_edsl_sync` can pin the
+// committed text to the generator and the committed `.spv` to a re-DXC of that text.
+//
+// They share [`emit_particle_leaf`], which is [`emit_facet_probe`] plus an `out_in` name table —
+// three of the six leaves write `out` parameters (a `float3` velocity / world position, a `float`
+// lifetime) rather than returning, because `Cf` has no `float3` return facet.
+
+/// The shared reset/seed/pop/print harness for the P0 particle leaves. `float_in` / `uint_in` /
+/// `vec_in` / `out_in` are the leaf's parameter-name tables (a leaf declares no vars beyond its
+/// own suppressed-decl `inout` params, calls no frozen function, reads no push-constant or level
+/// field, and declares no array); `body` records the leaf's statements into the freshly-seeded
+/// function block. Returns the span printed at DEPTH 1 (4-space indent), like every other body
+/// span.
+///
+/// The ONLY difference from [`emit_facet_probe`] is `out_in`: both [`OutParam`] (a `float3` out)
+/// and [`OutFloatParam`] (a `float` out) index that one table, so a leaf with both — as
+/// `particle_spawn_state` has — numbers them `0` and `1` in a single sequence.
+fn emit_particle_leaf<F: FnOnce()>(
+    float_in: &[&str],
+    uint_in: &[&str],
+    vec_in: &[&str],
+    out_in: &[&str],
+    body: F,
+) -> String {
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    CALLS.with(|c| c.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    body();
+
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    let vars = VARS.with(|v| v.borrow().clone());
+    let names = Names {
+        float_in,
+        uint_in,
+        vec_in,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in,
+        named_lit: NO_NAMED_LITS,
+        vars: &vars,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: NO_CALL_INPUTS,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut span = String::new();
+        print_block(&body_block, &arena, names, 1, &mut span);
+        span
+    })
+}
+
+/// Generates the **`particle_integrate`** span by tracing
+/// [`crate::particle::particle_integrate_body`] over `EmitCf` — one explicit-Euler substep over
+/// the sim's `inout` state.
+///
+/// ```text
+///     vel = (vel + gravity * dt) * damping;
+///     pos = pos + vel * dt;
+///     life = life - dt;
+/// ```
+///
+/// `pos`/`vel`/`life` are SUPPRESSED-DECL params (the wrapper spells them `inout`), so the span
+/// assigns them by name and declares nothing. The `Vec3Param`/`Input` seeds below are discarded
+/// by `decl_param_vec3`/`decl_param` — a parameter is already bound by name — and exist only so
+/// the name tables read as the generated signature does.
+pub fn emit_hlsl_particle_integrate() -> String {
+    use crate::particle;
+
+    emit_particle_leaf(
+        &["life", "damping", "dt"],
+        &[],
+        &["pos", "vel", "gravity"],
+        &[],
+        || {
+            let pos = EmitCf::decl_param_vec3("pos", Emit(push(Node::Vec3Param(0))));
+            let vel = EmitCf::decl_param_vec3("vel", Emit(push(Node::Vec3Param(1))));
+            let life = EmitCf::decl_param("life", Emit::input(0));
+            let gravity = Emit(push(Node::Vec3Param(2)));
+            let damping = Emit::input(1);
+            let dt = Emit::input(2);
+            let _ = particle::particle_integrate_body::<EmitCf>(
+                &pos, &vel, &life, gravity, damping, dt,
+            );
+        },
+    )
+}
+
+/// Generates the **`particle_rng`** span by tracing [`crate::particle::particle_rng_body`] over
+/// `EmitCf` — the 32-bit PCG hash (LCG advance + xorshift-multiply-xorshift permutation).
+///
+/// ```text
+///     uint s = state * 747796405u + 2891336453u;
+///     uint shift = (s >> 28u) + 4u;
+///     uint word = ((s >> shift) ^ s) * 277803737u;
+///     return (word >> 22u) ^ word;
+/// ```
+pub fn emit_hlsl_particle_rng() -> String {
+    use crate::particle;
+
+    emit_particle_leaf(&[], &["state"], &[], &[], || {
+        let state = Emit::uint_input(0);
+        let ret_out = RetCell;
+        let _ = particle::particle_rng_body::<EmitCf>(state, &ret_out);
+    })
+}
+
+/// Generates the **`particle_spawn_state`** span by tracing
+/// [`crate::particle::particle_spawn_state_body`] over `EmitCf` — the trig-free cone velocity
+/// (square → unit disc → spherical cap) plus the sampled lifetime.
+///
+/// Writes TWO out-parameters, `velocity` (`out_in[0]`, a `float3`) and `life` (`out_in[1]`, a
+/// `float`), so this is the emitter that exercises the mixed [`OutParam`]/[`OutFloatParam`]
+/// numbering [`emit_particle_leaf`]'s doc describes.
+pub fn emit_hlsl_particle_spawn_state() -> String {
+    use crate::particle;
+
+    emit_particle_leaf(
+        &["cone_cos", "speed_min", "speed_max", "life_min", "life_max"],
+        &["r_dir_x", "r_dir_y", "r_speed", "r_life"],
+        &["basis_x", "basis_y", "basis_z"],
+        &["velocity", "life"],
+        || {
+            let basis_x = Emit(push(Node::Vec3Param(0)));
+            let basis_y = Emit(push(Node::Vec3Param(1)));
+            let basis_z = Emit(push(Node::Vec3Param(2)));
+            let cone_cos = Emit::input(0);
+            let speed_min = Emit::input(1);
+            let speed_max = Emit::input(2);
+            let life_min = Emit::input(3);
+            let life_max = Emit::input(4);
+            let r_dir_x = Emit::uint_input(0);
+            let r_dir_y = Emit::uint_input(1);
+            let r_speed = Emit::uint_input(2);
+            let r_life = Emit::uint_input(3);
+            let velocity_out = OutParam(0);
+            let life_out = OutFloatParam(1);
+            let _ = particle::particle_spawn_state_body::<EmitCf>(
+                basis_x,
+                basis_y,
+                basis_z,
+                cone_cos,
+                speed_min,
+                speed_max,
+                life_min,
+                life_max,
+                r_dir_x,
+                r_dir_y,
+                r_speed,
+                r_life,
+                &velocity_out,
+                &life_out,
+            );
+        },
+    )
+}
+
+/// Generates the **`particle_curve_eval`** span by tracing
+/// [`crate::particle::particle_curve_eval_body`] over `EmitCf` — the branch-free 4-key
+/// piecewise-linear ramp over two packed binary16 pairs.
+///
+/// ```text
+///     float k0 = f16tof32(keys_lo & 65535u);
+///     …
+///     return lerp(v1, k3, w2);
+/// ```
+pub fn emit_hlsl_particle_curve_eval() -> String {
+    use crate::particle;
+
+    emit_particle_leaf(&["t"], &["keys_lo", "keys_hi"], &[], &[], || {
+        let keys_lo = Emit::uint_input(0);
+        let keys_hi = Emit::uint_input(1);
+        let t = Emit::input(0);
+        let ret_out = RetCellF;
+        let _ = particle::particle_curve_eval_body::<EmitCf>(keys_lo, keys_hi, t, &ret_out);
+    })
+}
+
+/// Generates the **`particle_billboard_corner`** span by tracing
+/// [`crate::particle::particle_billboard_corner_body`] over `EmitCf` — the VS's corner placement
+/// (camera basis × rotated, size-scaled corner offset), with the snorm16 rotation decode inline.
+pub fn emit_hlsl_particle_billboard_corner() -> String {
+    use crate::particle;
+
+    emit_particle_leaf(
+        &["cx", "cy", "size"],
+        &["rot_cs"],
+        &["center", "cam_right", "cam_up"],
+        &["world_pos"],
+        || {
+            let center = Emit(push(Node::Vec3Param(0)));
+            let cam_right = Emit(push(Node::Vec3Param(1)));
+            let cam_up = Emit(push(Node::Vec3Param(2)));
+            let cx = Emit::input(0);
+            let cy = Emit::input(1);
+            let size = Emit::input(2);
+            let rot_cs = Emit::uint_input(0);
+            let world_out = OutParam(0);
+            let _ = particle::particle_billboard_corner_body::<EmitCf>(
+                center, cam_right, cam_up, cx, cy, size, rot_cs, &world_out,
+            );
+        },
+    )
+}
+
+/// Generates the **`particle_rot_advance`** span by tracing
+/// [`crate::particle::particle_rot_advance_body`] over `EmitCf` — the complex multiply against
+/// the host-precomputed `(cos ω·timestep, sin ω·timestep)` pair, re-quantized to snorm16.
+///
+/// Plan gate #14 asserts this span carries **zero `OpFDiv`**: the snorm16 scale/inverse are
+/// literal MULTIPLIES and the renormalization is deliberately absent (plan M7/K1).
+pub fn emit_hlsl_particle_rot_advance() -> String {
+    use crate::particle;
+
+    emit_particle_leaf(&["mul_cos", "mul_sin"], &["rot_cs"], &[], &[], || {
+        let rot_cs = Emit::uint_input(0);
+        let mul_cos = Emit::input(0);
+        let mul_sin = Emit::input(1);
+        let ret_out = RetCell;
+        let _ = particle::particle_rot_advance_body::<EmitCf>(
+            rot_cs, mul_cos, mul_sin, &ret_out,
+        );
+    })
+}

@@ -51,6 +51,7 @@ pub mod marcher;
 pub mod normal;
 pub mod oct;
 pub mod pack;
+pub mod particle;
 pub mod particle_facets;
 pub mod probe_blend;
 pub mod probe_march;
@@ -91,6 +92,10 @@ pub use marcher::{b1_marcher_fold_d_body, b1_marcher_mesh_p_body};
 pub use normal::sdf_normal_body;
 pub use oct::{oct_decode_body, oct_encode_body};
 pub use pack::pack_material_id_ba_body;
+pub use particle::{
+    particle_billboard_corner_body, particle_curve_eval_body, particle_integrate_body,
+    particle_rng_body, particle_rot_advance_body, particle_spawn_state_body,
+};
 pub use particle_facets::{
     e1_bit_mix_body, e2_bitcast_sign_flip_body, e2_pack_half2_body, e2_unpack_half2_body,
     e3_dot_body, e4_trig_body, e5_renorm_body,
