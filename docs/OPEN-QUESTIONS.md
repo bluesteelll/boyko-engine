@@ -2729,7 +2729,18 @@ census the sentence describes (a `spirv-dis` block-membership assertion, the
 `vb_raster_geo_classify_spv_sync.rs` builtin-census idiom) or striking the claim; DP6b widened the
 `VB_SV0` definer set to two, so the sentence now also covers a module nobody has looked at.
 
-## 2026-08-20: particles P1 ships the Lipschitz skip in the OPPOSITE form to D9's pseudocode — deliberately, and the two agree only at `L == 1`
+## RESOLVED 2026-08-20: particles P1's Lipschitz skip — the ARCHITECT ruled the PLAN was the stale artifact, not the code
+
+**Disposition (architect, 2026-08-20): the shipped form stands; `docs/PARTICLES-PLAN.md` §D9 is
+amended and carries an ERRATUM.** The original line applied the reported→euclidean transform to an
+operand that was already euclidean; the corrected block, the tunneling class it authorized for any
+`k > 0` smooth edit, and the `radius·(L−1)` conservative band the shipped form pays instead are all
+recorded there. See **§D9 + ERRATUM**. The entry below is kept verbatim as the escalation that
+produced the ruling.
+
+**What remains open is only the second half:** no `k > 0` fixture exists, so the two forms are
+still discriminated by DERIVATION and not by measurement. Building one is the follow-up, and it is
+a scene, not a code change.
 
 **Not a question about what to do — the conservative form shipped. Recorded because the plan's own
 text now disagrees with the code on one line, and the reader who checks D9 against
@@ -2774,8 +2785,9 @@ at `L == 1`, which is every hard-CSG (`smoothness == 0`) scene, i.e. every fixtu
 including P1's own live fire. They diverge only where a smooth edit makes the field
 super-Lipschitz — precisely the regime the constant exists for.
 
-**What is left open:** whether D9's line should be corrected in the plan (an architect edit — the
-plan is APPROVED Rev 4 and an implementer amending its normative pseudocode is not the same thing
-as recording a deviation), and whether a fixture with a `k > 0` edit should exist to exercise the
-`L > 1` regime at all. Today no shipped scene has one, so the divergence is unmeasured in both
-directions.
+**What was left open, and how it closed:** whether D9's line should be corrected in the plan — an
+architect edit, since the plan is APPROVED Rev 4 and an implementer amending its normative
+pseudocode is not the same thing as recording a deviation. **Ruled 2026-08-20: corrected, with an
+ERRATUM.** The second half — whether a fixture with a `k > 0` edit should exist to exercise the
+`L > 1` regime — stays open: today no shipped scene has one, so the divergence remains unmeasured in
+both directions and the shipped form's soundness rests on the derivation.

@@ -793,8 +793,11 @@ float particle_curve_eval(uint keys_lo, uint keys_hi, float t) {{
 // === GENERATED particle_sdf_response BEGIN ===
 // Rung P1's contact resolution (`boyko_shaderdsl::particle::particle_sdf_response_body`): plan
 // D9's `p += n*(radius - d)` and `v' = (v - v_n)(1 - friction) - v_n*restitution`, where `v_n` is
-// the velocity's component along the field normal. Pure multiply/add plus the one `dot` rung E3
-// added for it.
+// the velocity's INWARD component along the field normal. Pure multiply/add plus the one `dot`
+// rung E3 added for it, and the `min(., 0.0)` SIGN GATE: on a re-contact frame the particle is
+// already moving outward, and un-gated the `-v_n*restitution` term would flip that back inward --
+// at restitution 1, a particle inside the shell could never escape. Branchless, one instruction,
+// on the rare `d < radius` arm only.
 void particle_sdf_response(inout float3 pos, inout float3 vel, float3 normal,
                            float d, float radius, float restitution, float friction) {{
 {response}}}

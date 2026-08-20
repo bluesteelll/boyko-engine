@@ -717,12 +717,12 @@ fn particle_sdf_response_eval_and_emit() {
     let g = boyko_shaderdsl::emit::emit_hlsl_particle_sdf_response().replace("\r\n", "\n");
     assert_eq!(
         g,
-        "    float vn = dot(vel, normal);\n\
+        "    float vn = min(dot(vel, normal), 0.0);\n\
          \x20   float3 v_n = normal * vn;\n\
          \x20   pos = pos + normal * (radius - d);\n\
          \x20   vel = (vel - v_n) * (1.0 - friction) - v_n * restitution;\n",
-        "the particle_sdf_response span must be plan D9's response verbatim, with no decls (the \
-         wrapper's pos/vel are `inout`):\n{g}"
+        "the particle_sdf_response span must be plan D9's response verbatim — including the \
+         `min(., 0.0)` sign gate — with no decls (the wrapper's pos/vel are `inout`):\n{g}"
     );
     // The particle side of the collide variant adds NO divide. The artifact-level half of this
     // claim cannot be zero — the variant `#include`s the frozen field header, whose smin/smax and
@@ -737,4 +737,77 @@ fn particle_sdf_response_eval_and_emit() {
         "particle_sdf_response must not renormalize: `sdf_normal` already ends in `normalize`, and \
          doing it twice would put an approximate op inside this leaf's oracle for nothing:\n{g}"
     );
+}
+
+/// **The SIGN GATE** (plan D9's `min`, ruled 2026-08-20) — its own test, because its red must name
+/// the property rather than "the response leaf changed".
+///
+/// The un-gated response reverses an OUTWARD normal component on a re-contact frame. Rung P1's
+/// live geometry does not reach that frame (the fixture's fan approaches the slab from outside and
+/// its restitution is 0.5), which is exactly why it needs a leaf-level test: the defect is
+/// unreachable by the image pin and would sit in the code until a scene spawned inside a collider.
+#[test]
+fn the_sign_gate_keeps_an_outward_particle_escaping() {
+    // 6. THE SIGN GATE (plan D9's `min`), and the case that motivates it: a particle INSIDE the
+    //    shell already moving OUTWARD. `dot(v, n) > 0` there, and un-gated the
+    //    `- v_n * restitution` term would flip that outward component back INWARD — at
+    //    restitution 1, exactly reversed, so a particle spawned inside the shell could never
+    //    escape. Gated, `v_n` is zero and the escape velocity survives intact.
+    let (pos, vel) = eval_sdf_response(
+        [0.0, 0.0, 0.0],
+        [0.0, 2.0, 0.0],
+        [0.0, 1.0, 0.0],
+        0.25,
+        0.5,
+        1.0,
+        0.0,
+    );
+    assert_eq!(
+        vel,
+        [0.0, 2.0, 0.0],
+        "an OUTWARD-moving particle inside the shell must keep its escape velocity: min(dot, 0) \
+         zeroes the normal term. Un-gated this reads (0, -2, 0) — the exact reversal that traps a \
+         particle at restitution 1"
+    );
+    assert_eq!(
+        pos,
+        [0.0, 0.25, 0.0],
+        "the POSITION correction stays UNCONDITIONAL — a particle inside the shell is lifted out \
+         of it whichever way it is moving"
+    );
+
+    // 7. The RESIDUAL of choosing a `min` over a two-arm select, asserted rather than described:
+    //    on that outward frame the outward normal component is no longer reflected, but it IS
+    //    still scaled by (1 - friction) along with the tangential part, because the gate removes
+    //    it from `v_n` and therefore leaves it inside `v - v_n`. A bounded speed loss in the
+    //    CORRECT direction, never a reversal.
+    let (_, vel) = eval_sdf_response(
+        [0.0, 0.0, 0.0],
+        [4.0, 2.0, 0.0],
+        [0.0, 1.0, 0.0],
+        0.25,
+        0.5,
+        1.0,
+        0.5,
+    );
+    assert_eq!(
+        vel,
+        [2.0, 1.0, 0.0],
+        "outward normal AND tangential are both damped by (1 - friction) = 0.5; the sign of the \
+         normal component is preserved"
+    );
+
+    // 8. The gate is INERT on every approaching contact — the case the response is written for.
+    //    Asserted as an identity over the earlier cases' inputs so a future edit cannot "fix" the
+    //    outward frame by changing the inward one.
+    let (_, inward) = eval_sdf_response(
+        [0.0, 0.25, 0.0],
+        [4.0, -2.0, 0.0],
+        [0.0, 1.0, 0.0],
+        0.25,
+        0.5,
+        0.5,
+        0.25,
+    );
+    assert_eq!(inward, [3.0, 1.0, 0.0], "an approaching contact must be unchanged by the gate");
 }

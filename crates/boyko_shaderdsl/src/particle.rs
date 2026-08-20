@@ -567,17 +567,55 @@ pub fn particle_rot_advance_body<C: Cf>(
 /// resolution of one particle against the SDF field, over the caller's `inout` state.
 ///
 /// ```text
-/// float vn = dot(vel, normal);        // the SIGNED normal speed
-/// float3 v_n = normal * vn;           // the velocity's normal component
+/// float vn = min(dot(vel, normal), 0.0);   // the INWARD normal speed, gated at zero
+/// float3 v_n = normal * vn;                // the velocity's normal component
 /// pos = pos + normal * (radius - d);
 /// vel = (vel - v_n) * (1.0 - friction) - v_n * restitution;
 /// ```
 ///
-/// This is plan D9's response, term for term: `p += n·(radius − d)` and
-/// `v' = (v − v_n)(1 − friction) − v_n·restitution`. `normal` is `sdf_normal(pos)` — the field
-/// gradient, pointing AWAY from the surface — and `d` is the field value at `pos`, so the caller
-/// reaches this leaf only on the `d < radius` branch and `radius − d` is the positive depth the
-/// particle has to be lifted by.
+/// This is plan D9's response, term for term (`p += n·(radius − d)` and
+/// `v' = (v − v_n)(1 − friction) − v_n·restitution`) with D9's own `min` gate on the normal speed.
+/// `normal` is `sdf_normal(pos)` — the field gradient, pointing AWAY from the surface — and `d` is
+/// the field value at `pos`, so the caller reaches this leaf only on the `d < radius` branch and
+/// `radius − d` is the positive depth the particle has to be lifted by.
+///
+/// # The `min` is the SIGN GATE, and why it is a `min` and not a select
+///
+/// `dot(v, n)` is negative while the particle approaches the surface — the case a contact response
+/// is written for. It is POSITIVE on a re-contact frame: the previous substep's correction put the
+/// particle on the `radius` shell, so a marginally-inside sample can reach this leaf with the
+/// particle already moving OUTWARD. Un-gated, `−v_n·restitution` would then flip that outward
+/// component back INWARD at scale `restitution` — a particle sucked into the surface it just left,
+/// and at `restitution == 1` a particle spawned inside the shell that can never escape.
+///
+/// `min(·, 0)` is the whole fix: outward motion contributes `v_n == 0`, so the normal term
+/// vanishes and only the tangential damping applies. It is a `min` rather than a two-arm select
+/// because [`FieldScalar::min`](crate::scalar::FieldScalar::min) already exists (no new eDSL node),
+/// it is branchless in the hottest loop the sim has, and it preserves this leaf's family property —
+/// no trig, no divide, one extra instruction on the rare `d < radius` arm.
+///
+/// **Why the gate is sign-safe exactly where its predicate is uncertain.** `dot` is free to
+/// contract into an FMA (see [`Cf::vec3_dot`]), so the Eval and Emit instantiations may disagree
+/// about the SIGN of `vn` when `vn ≈ 0`. That disagreement cannot change the result: at `vn == 0`
+/// the gated and un-gated arms are the same expression (`v_n == 0` either way), so the two
+/// backends' outputs coincide precisely in the neighbourhood where they might not agree on which
+/// branch a select would have taken. A select would have made the boundary a real fork; the `min`
+/// makes it a continuity.
+///
+/// **The `NMin` lowering cannot launder a NaN here** — worth stating because this engine has been
+/// bitten by that opcode before (`NMin`/`NMax` do not propagate NaN; they silently take the OTHER
+/// operand, so `min(NaN, 0.0) == 0.0`). By dataflow, both NaN sources still reach the outputs
+/// through terms the gate does not touch: a NaN `normal` gives `normal * vn == NaN * 0 == NaN` in
+/// `v_n`, and a NaN `vel` survives in `vel − v_n` whatever `v_n` is. So the gate can turn a NaN
+/// `vn` into a finite `0`, but it cannot turn a NaN particle into a plausible-looking one.
+///
+/// **The residual, stated rather than hidden.** On an outward re-contact frame the outward normal
+/// component is no longer reflected — but it is still scaled by `(1 − friction)` along with the
+/// tangential part, because the gate removes the component from `v_n` and therefore leaves it
+/// inside `v − v_n`. That is a bounded speed loss in the CORRECT direction (never a reversal), and
+/// it is the price of one token instead of a two-arm select that would split this leaf's oracle.
+/// The POSITION correction is deliberately left UNCONDITIONAL: a particle inside the shell must be
+/// lifted out of it whichever way it happens to be moving.
 ///
 /// # Why the two terms are what they are
 ///
@@ -612,7 +650,8 @@ pub fn particle_sdf_response_body<C: Cf>(
     // Read the pre-impact velocity ONCE: both output terms are functions of it, and the
     // assignment below must not observe its own result.
     let v = C::get_var_vec3(vel);
-    let vn = C::temp_float("vn", C::vec3_dot(v, normal));
+    // The sign gate (see the doc): only INWARD motion drives a bounce.
+    let vn = C::temp_float("vn", C::vec3_dot(v, normal).min(C::Scalar::lit(0.0)));
     let v_n = C::temp_vec3("v_n", C::vec3_mul_scalar(normal, vn));
 
     // pos = pos + normal * (radius - d);
