@@ -1,4 +1,518 @@
-# Architecture: VB-SV0 DP6 — producer consolidation (design Rev 3)
+# Architecture: VB-SV0 DP6 — producer consolidation (design Rev 4)
+
+# Rev 4 delta — Open Question 1 adjudicated, and the instrument repaired first
+
+> **This block supersedes Open Question 1 in full and amends Decisions 6 and 7, the gate
+> definitions, the implementation ladder and §Metrics. Rev 3 is otherwise carried verbatim.**
+>
+> **Trigger:** DP6-0's baseline measurement turned OQ1 from a hypothetical into a number. The
+> number says the comparator Rev 3 specified cannot be adjudicated, for two independent reasons,
+> and the repair is one rung.
+
+## R4.1 What DP6-0 measured, and what it proves
+
+### R4.1.1 The reading
+
+Release, 512×512, `sv0_scene`, three identical legs per arm, every arm under clause 5's 10 % bar,
+certified resolution **4 608 ns**.
+
+| zone | fused `[vb_both_sdf]` | split `[vb_both_ssao]` | ratio | what precedes its BEGIN |
+|---|---|---|---|---|
+| `ZONE_VB_SDF_MESH` (10) | 32 256 | 32 768 | **1.016×** | `e9` at `vb.rs:3049`, then the pass's own derived barriers at `:3141` (outside its bracket) |
+| `ZONE_VB_GEO` (11) | n/a | **20 480** (arm A, SV0 armed) / **24 576** (arm B, disarmed) — two ARMS on one boot; Δ = −4 096, below resolution | the `vb_viewt` pre-tail dispatch, then the unsplit `record_hzb_poison_build` slot at `:3753-3765` |
+| `ZONE_VB_SHADE` (2) | 24 576 | **112 640** | **4.58×** | fused: the SDF_MESH bracket. split: **~256 µs of unbracketed SSAO + à-trous** |
+
+### R4.1.2 The control is already in the data
+
+`ZONE_VB_SDF_MESH` is the same dispatch, on the same scene, under the same TOP→BOTTOM bracket, on
+both boots, and agrees to **+512 ns = 0.11 × resolution**. The instrument is not broadly broken.
+The one zone that disagrees by 4.58× is the one zone whose BEGIN sits downstream of a
+boot-class-dependent unbracketed stretch. **Measured, not argued.**
+
+### R4.1.3 The skew is partial, and nothing in the instrument sets the fraction
+
+Inflation `112 640 − 24 576 = 88 064 ns` against a `~256 000 ns` predecessor stretch: **the TOP
+latch absorbed ≈ 34 % of it.** At 0 % the bracket would be honest; at 100 % it would be obviously
+broken. At 34 % it is **silently wrong**, and the fraction is set by front-end throttling — a
+quantity no gate reads.
+
+Third instance of a named class in this tree: `VB-P1E-HIERARCHICAL-CULL-PLAN.md:2622-2628`
+(`CullDispatch` over-counting by `t_fill` for exactly this reason) and profiling rung 7c (five
+green commits on silently-changed stages).
+
+### R4.1.4 The hardware agrees, in-tree, measured, from a lane that was not looking for it
+
+`gpu_zone.rs:470-476`, landed by the concurrent particle round:
+
+> *"With the three compute ids on `TOP`, their medians summed against the wall span they were
+> supposed to divide (`48.begin → 50.end`, `particle_lab`, three release legs) gave
+> **1.083 / 1.025 / 1.077** — every leg over 1, i.e. three rows overlapping. On `BOTTOM` the same
+> three legs give **1.000 / 1.002 / 1.000**, and the 1.002 is 32 ns on a 15 296 ns span: one timer
+> tick of median-of-21-frames rounding, not an overlap. The ratios are quoted rather than banded
+> because a band that reads "1.03–1.08" excludes one of the three legs it claims to summarise."*
+
+Three back-to-back compute dispatches on **this box**, same recorder, same wrapper: TOP begins
+overlapped on every leg; BOTTOM begins partitioned to within a tick. The ratios are quoted here for
+the same reason that text refuses to band them.
+
+### R4.1.5 "The split shade genuinely costs 4.6× more" does not survive this design's own arithmetic
+
+Decision 3's fetch table counts `vb_shade_split` and `vb_resolve` as **one full-screen
+`vb_geom_fetch` each**. The split shade's surplus over the fused resolve is the SSAO combine plus a
+`thin_normal` read — the budget Decision 4 prices at **< 1 %** against 128 march iterations. **No
+route from that budget reaches 4.58×.** Contribution (a) is real and small; contribution (b)
+dominates.
+
+### R4.1.6 Where the contamination actually lands — and it is not where Rev 3 supposed
+
+`vb_both_sdf` carries no `SsaoConfig`. After DP6a it resolves `vb_sv0_split ⇒
+mesh_geo_shade_split` with `pre_light == false`, so the split arm runs with `scene.ssao == None`:
+
+- SSAO gather `vb.rs:3892`, à-trous `:3932-4022` — **skipped**
+- `path_vb_ddgi()` = `path_is_vb ∧ mesh_geo_shade_split ∧ ddgi_update.is_some()`
+  (`scene_types.rs:4076-4080`) — **`ddgi_update` is None** (no `DdgiConfig`), skipped
+- `path_vb_hwrt_shadow()` = `path_vb_split() ∧ shadow.is_some()`, `#[cfg(feature = "hwrt")]`
+  (`:4088-4092`) — feature default-OFF **and** `shadow` None, skipped
+
+**The conjunction is stated because arming the split does not by itself keep DDGI and hwrt off —
+both key on `mesh_geo_shade_split`, not on SSAO.** All three conjuncts hold on `vb_both_sdf`, so
+**G-NEUTRAL's after-side has no unbracketed stretch at all.**
+
+The 4.58× therefore lands on the **G-REDUCE** row, where the SSAO stretch is present on both sides
+and is *partially* common-mode. G-NEUTRAL is contaminated by a smaller, different term: its
+after-side `ZONE_VB_GEO` latches TOP while `ZONE_VB_LATE_RASTER` drains, and its before-side has no
+`ZONE_VB_GEO` at all — **that skew has no counterpart to cancel against.**
+
+### R4.1.7 Why "the skew is common-mode, do nothing" is refuted, by the numbers
+
+DP6 deletes a **32 768 ns dispatch** ahead of both latches and adds `M_geo ∈ [6 100, 14 400] ns`
+into `ZONE_VB_GEO`. The latch is demonstrably throttled by execution progress — were it not,
+`ZONE_VB_SHADE` would have read ≥ 256 µs, not 112.6. So a 32 µs change in preceding work moves the
+latch by an unknown amount **of the same order as the effect** (`D + F ∈ [20 939, 29 184] ns`).
+Cancellation is first-order only and the residual is bounded by nothing.
+
+### R4.1.8 A second, independent defect in the specified comparator
+
+Rev 3's split-pair quantity is `ZONE_VB_GEO + ZONE_VB_SHADE` — a **sum of two per-zone medians**.
+`contrast.rs:477` computes `median_ns += row.median_ns`, i.e. `Σ(median)`, which
+`03-STATISTICS.md:121-125` forbids: *"the sum is formed per frame, then reduced — `median_f(Σ_members)`,
+never `Σ_members(median_f)`"*, an inequality that was crossed by 144–240 ns on a real reading.
+`contrast.rs:447-456` **states** the precondition it would then violate (valid *"only if the zones
+are the partition their ids say they are"*) and has **no caller passing a multi-zone set** — so the
+defect is not a shipped miscomputation but **Rev 3's own caller-side subscription of a
+non-partition**, which would have been the first such caller. Recorded alongside:
+`03-STATISTICS.md:123-125` says the reducer has *"no API that adds two reduced statistics"*, and
+`LegSummary::from_artifact` is one.
+
+**Both defects are fixed by the same repair.**
+
+## R4.2 Decisions
+
+### R4-D1 — The restamp is the tree's own rule applied to a premise this rung changes
+
+`gpu_zone.rs:415-419` states the rule:
+
+> *"A `TOP_OF_PIPE` begin retires when the command is fetched, which is legal **only where the
+> bracket is preceded by work that is not being attributed to it** — otherwise the stamp lands
+> before its predecessor has drained and the two brackets OVERLAP."*
+
+Ids 10 and 11 are kept at TOP on the premise that they *"sit with unbracketed work on BOTH sides"*
+— and `gpu_zone.rs:440-452` already qualifies that premise for id 11 and **already names this
+rung**: *"That leg's `ZONE_VB_GEO` number is contaminated by the drain ahead of it, and it is
+recorded here as a known limitation rather than fixed: rung **DP6-0b** restamps ids 10 and 11 to
+`BOTTOM` with a stated reason and re-baselines against it."*
+
+**DP6-0b falsifies the premise deliberately.** After it, ids 10 and 11 are members of a
+consecutive-partition run, and `ZONE_VB_PRESHADE` removes the unbracketed stretch on id 11's far
+side. Under the rule as written, they must then bottom. **This is not a reversal of the concurrent
+round; it is that round's rule evaluated against a changed premise, at the rung that round
+nominated.**
+
+`ZONE_PARTICLE_DRAW` is untouched (premise unchanged). `ZONE_VB_SHADE` (id 2) is untouched — the
+split producer's cost is derived (R4-D3), so VB-P1d's published break-even keeps its meaning and
+`tops(ZONE_VB_SHADE)` stands.
+
+**Spelling.** Four **names**, never a range:
+`|| matches!(zone, ZONE_VB_SDF_MESH | ZONE_VB_GEO | ZONE_VB_PRODUCE_RUN | ZONE_VB_PRESHADE)`
+— the tree's own argument at `gpu_zone.rs:485-488` (*"Names cost three tokens and cannot do
+that"*). A range `10..=13` would sit flush against `3..=9` and re-open rung 7c's slide. **The
+assertion message at `gpu_zone.rs:539-542` ("the three isolated single-dispatch ids open at
+`TOP_OF_PIPE`") goes false in this same edit and is rewritten to name `ZONE_PARTICLE_DRAW` alone,
+in the same commit.**
+
+### R4-D2 — One comparator: `ZONE_VB_PRODUCE_RUN`, opened and closed under one hoisted predicate
+
+**Span.** BOTTOM→BOTTOM, begin immediately after `ts.end(ZONE_VB_RUN)` at `vb.rs:3049`, end
+immediately after the lit-producer chain closes at `vb.rs:4494`. It is the smallest interval
+containing every site DP6 can move work into or out of: `ZONE_VB_SDF_MESH` `[3167,3206]`, the
+unsplit hzb slot `[3753,3765]`, `vb_viewt` `:3776`, `ZONE_VB_GEO` `[3798,3889]`, the
+SSAO/à-trous/hwrt/DDGI stretch `[3892,4307]`, and all three `ZONE_VB_SHADE` arms. **Its definition
+never mentions which producer ran, so it is identical on both sides of the fused/split
+discontinuity by construction** — which neither `ZONE_VB_SHADE` nor `ZONE_VB_GEO + ZONE_VB_SHADE`
+is.
+
+**Scope, verified.** `if scene.resolved_render_path.mesh_leg {` opens at `:1529` and closes at
+`:3735`; `:3050` is inside it, `:4495` is outside it; there is **no `return` anywhere in
+`[3049, 4494]`**. The bracket **cannot** be moved to one nesting level without losing its subject —
+id 10 and the fused/classified shade arms are inside the `mesh_leg` block, and opening after
+`:3735` would exclude exactly what DP6 deletes. So:
+
+```rust
+let produce_run_armed = scene.resolved_render_path.mesh_leg;   // hoisted ONCE, above :1529
+```
+
+read at the begin (`:3050`, where scope also implies it) and at the end (`:4495`,
+`if produce_run_armed { … }`). One binding, two consumers — invariant 9's discipline.
+
+**`mesh_leg` is the correct arming predicate, not a workaround.** `mesh_geo_shade_split ⇒ mesh_leg`
+by definition, so `path_vb_split ⇒ mesh_leg`, and every lit producer plus the dedicated SV0 pass is
+inside that block. **On a mesh-less leg there is no producer run**, and `NotBracketed` is the honest
+label. `debug_assert!(!scene.path_vb_split() || produce_run_armed)` at the close makes the
+containment structural.
+
+**Bonus the sum could not have.** `ZONE_VB_SDF_MESH`'s `record_vb_pass` barriers at `:3141` are
+**outside** its bracket while ids 11 and 2 include theirs — a real attribution asymmetry. The run
+bracket is **immune** to it. That immunity is the whole argument for gating on a run rather than on
+members; the asymmetry is fixed at DP6-0b for attribution's sake and the gate does not depend on
+the fix.
+
+### R4-D3 — `ZONE_VB_PRESHADE`, and the split producer's cost by derivation
+
+BOTTOM→BOTTOM, begin `vb.rs:3890` (after `ts.end(ZONE_VB_GEO)`, before `if scene.path_vb_ssao()` at
+`:3892`), end `vb.rs:4327` (after the DDGI block closes at `:4307`, before `ts.begin(ZONE_VB_SHADE)`
+at `:4328`). Both inside `if scene.path_vb_split()`.
+
+It completes the partition, so `shade_derived = PRODUCE_RUN.end − PRESHADE.end` — two BOTTOM stamps
+this rung owns — and **id 2 is never restamped.**
+
+It also ends the state in which ~256 µs of shipped GPU work sits outside every bracket. It does
+**not** make `gpu_zone.rs:238`'s claim (*"the family's ONLY unbracketed dispatch"*) true:
+`sdf_forward_march` (`vb.rs:4503-4608`, unbracketed compute on **both** legs of every VB×Both frame)
+and `vb_viewt` (unbracketed at **both** sites) remain outside every bracket. **The `:238` edit
+narrows a falsehood to an enumerated residual and names what remains** — the doc-rot discipline, not
+a claim of repair.
+
+### R4-D4 — The derived per-frame row is PRIMARY; the wide bracket is the total
+
+On `[vb_both_ssao]`, `PRESHADE ≈ 256 µs` is **~78 %** of a `PRODUCE_RUN ≈ 330 µs`, so it dominates
+that bracket's variance as well as its magnitude. A control set at `R_preshade` cannot bound an
+effect whose **entire low end is 20 939 ns**. And migration-immunity does not discriminate: **DP6's
+migration is entirely upstream of `b13`**, so `PRODUCE_RUN − PRESHADE` is equally migration-immune
+*for this rung*, on a 3–4× smaller base, with the largest jitter term cancelled **per frame** rather
+than tolerated by a threshold.
+
+Applying one consistent 8 % scaling to both candidates:
+
+| comparator | base | effect `D+F` | R at 8 % | effect / R | verdict |
+|---|---|---|---|---|---|
+| `PRODUCE_RUN` (wide) | ~330 µs | 20.9–29.2 µs | ~26 µs | **0.8–1.1×** | below its own resolution |
+| **`PRODUCE_RUN − PRESHADE`** | ~74 µs | 20.9–29.2 µs | ~5.9 µs | **3.5–4.9×** | **resolvable** |
+
+**Decision: `ZONE_VB_PRODUCE_NET = PRODUCE_RUN − PRESHADE`, formed per frame, is the primary
+comparator on both rows.** `PRODUCE_RUN` is reported beside it as the total and as a per-frame
+cross-check (`NET + PRESHADE ≡ PRODUCE_RUN`).
+
+**On the fused row `PRESHADE` is absent-Forbidden before and `≈ 0` after, so `NET ≡ PRODUCE_RUN`
+there — the two rows use ONE comparator, not two.**
+
+**The control is demoted, not deleted.** `Δ median(PRESHADE)` becomes a **reported anomaly requiring
+a stated cause**: DP6 emits no SSAO, à-trous, DDGI or hwrt command, so a movement beyond
+`R_preshade` means the workload changed and the run is re-taken. It no longer has to bound the
+effect, because the effect is no longer inside it.
+
+### R4-D5 — What is retained from the "restrict the claim" option, and why it is not the answer
+
+Restricting G-REDUCE to boots split on both sides, and handing the fused→split transition to
+Decision 6's same-boot paired-delta, is **rejected as primary**: that transition **is** what
+G-NEUTRAL exists to price — Decision 3 says so verbatim (*"Gated by G-NEUTRAL, which is the only
+reason this trade is acceptable"*) — and arms A/B/C are all same-boot, so none of them crosses the
+boundary. It would leave Decision 3 unpriced and foreclose OQ1's own fallback.
+
+**Retained:** the observation is correct that the same-boot arms were never contaminated, and after
+the restamp they get strictly better. `Δ_AB` and `Δ_BC` move onto the BOTTOM-stamped `ZONE_VB_GEO`,
+where they become exact differences of prefix-completion times on one stream. Decision 6's
+instrument is **strengthened**, not replaced.
+
+## R4.3 Mechanism specifications
+
+### R4.3.1 Zone ids and headroom
+
+| id | name | stamped? | stage |
+|---|---|---|---|
+| `ZONE_BASE_VB + 12` | `ZONE_VB_PRODUCE_RUN` | yes | BOTTOM |
+| `ZONE_BASE_VB + 13` | `ZONE_VB_PRESHADE` | yes | BOTTOM |
+| `ZONE_BASE_VB + 14` | `ZONE_VB_PRODUCE_NET` | **never** — derived | n/a |
+
+`VB_ZONE_COUNT` **12 → 15**, under the `≤ 16` const assert at `gpu_zone.rs:292-295`. **This rung
+consumes three of the family's four remaining ids; ONE slot remains, and the next VB zone after that
+is the last the `u16` witness masks can carry.** Stated as a cost, not discovered later.
+
+`ZONE_VB_PRODUCE_NET` sits in the VB family because the artifact's `[[zone]]` rows are keyed by
+`u16` zone id and every consumer finds by `z.zone == want`; a second id space would be a second
+vocabulary. **`TsWitness` never stamps it: `slot_of` and the leg table are untouched, `pair_of[14]`
+stays `NO_PAIR`, mask bit 14 is never set, and the expectation table declares it `Forbidden` as a
+stamped row on every leg** — a release-live check, not a `debug_assert`. `pair_of` and the masks
+grow by one entry automatically from `VB_ZONE_COUNT`; no call site changes.
+
+### R4.3.2 Record sites (all verified)
+
+| what | site | scope |
+|---|---|---|
+| `PRODUCE_RUN` begin | immediately after `vb.rs:3049` | inside `mesh_leg` `[1529,3735]` |
+| `PRODUCE_RUN` end | immediately after `vb.rs:4494`, under `produce_run_armed` | outside; predicate hoisted above `:1529` |
+| `PRESHADE` begin | `vb.rs:3890` | inside `path_vb_split()` `[3771,4494]` |
+| `PRESHADE` end | `vb.rs:4327` | same |
+| `ZONE_VB_SDF_MESH` begin | moves **above** its `record_vb_pass` at `vb.rs:3141` | attribution symmetry; the gate does not depend on it |
+
+### R4.3.3 The per-frame channel — a deliverable inside `WindowReducer::observe_frame`
+
+Artifact rows carry window **medians** of `begin_off_ns`/`end_off_ns` (`reduce.rs:199-213`);
+per-frame samples live in private `ZoneAccum` vectors and die at `finish()`. A containment check
+written as a test over the artifact would compare medians — a different statement, and
+`vg_occ_split_timing.rs:669-672` records that exact composition reporting an inequality **backwards
+by 144 ns**. A TOP-stamped member violates the chain *non-deterministically*, which is precisely
+what a median averages away.
+
+`observe_frame(&mut self, pairs: &[PairResult])` (`reduce.rs:105-157`) is the **only** place in the
+tree holding one frame's `PairResult` slice. The check goes there, and **only its verdict is
+reduced**:
+
+1. **`WindowReducer::new` gains a declared `chain: &'static [u16]` and
+   `derived: &'static [DerivedSpec]`.** Declarations, so a family shipping an undeclared chain is a
+   compile-site omission, not a silent pass.
+2. **Per frame, over that frame's raw `begin_ticks`/`dur_ticks`:** for each consecutive `(a,b)` in
+   `chain` present-and-`Measured` this frame, require `begin(a) ≤ begin(b)`; and for each member
+   `m`, `begin(run) ≤ begin(m)` and `begin(m)+dur(m) ≤ begin(run)+dur(run)`. Ties are legal (`≤`) —
+   equal-tick BOTTOM stamps give equal offsets, and this box's empty-bracket floor is 96–128 ticks.
+3. **The output is a COUNT, not a statistic:**
+   `OrderCensus { frames_checked, frames_skipped, violations, worst_ns }`. A median can average a
+   violation away; a count cannot. Quantitatively: with per-frame violation probability `p` over a
+   ~100-frame window, `P(0 violations) = (1-p)^100`; at the 2.5–8.3 % overlap the particle lane
+   measured, that is `< 10⁻³`.
+4. **`frames_checked` is published,** so `violations == 0` over `frames_checked == 0` is
+   distinguishable from a pass.
+5. **First violation raises a sticky `boyko_diag` flag,** so a red reaches a reader who never opens
+   the artifact.
+6. **The derived row is formed AT THE FRAME** — `PRODUCE_RUN.dur − PRESHADE.dur` from the frame's
+   own slice, pushed as **one sample** into an ordinary `ZoneAccum`. **Nothing is ever zipped**, so
+   positional misalignment across `Lost`/`NotBracketed` frames cannot arise; and this is
+   `median_f(Σ)`, which is what R4-D7's statistics rule demands.
+7. **Artifact.** The `[order]` block dispatches at the **match-`k` arm set at `artifact.rs:848+`,
+   with its own builder** (`:830-845` is the `[[zone]]` arm set, and `:842`/`:1026` are zone-row
+   sites — those are affected by the derived ROW, a separate item).
+
+### R4.3.4 The absence policy keys on ABSENCE, resolved against the leg's expectation
+
+A never-opened zone has **no `PairResult` in the slice at all** — `alloc_pair` is called only from
+`begin`, and `label_slot` iterates `used_pairs`. It is **absent**, not `NotBracketed`. Keying the
+policy on the label would key on something the per-frame path does not deliver for the structural
+case.
+
+Worse, the two absences differ in what they mean:
+
+| absence | cause | correct contribution |
+|---|---|---|
+| **structural** | `PRESHADE` on a fused leg — `path_vb_split()` false, the bracket is not in the stream | **0.0** |
+| **runtime** | `alloc_pair` returned `None` on a full ring (`gpu_zone.rs:761-777`, raising `GpuPairBudgetExhausted`) — **`PRESHADE`'s 256 µs EXECUTED** | **skip the frame** |
+
+Contributing `0.0` in the runtime case yields a **4.5× inflated `NET` sample**, and the `n` floor
+cannot catch it because the sample was pushed, not skipped.
+
+**`DerivedSpec`'s policy therefore keys on member-absent-from-slice, resolved against the leg's
+declared expectation:**
+- expectation `Forbidden` ⇒ structural ⇒ contribute **0.0**
+- expectation `Required` but absent ⇒ **skip the frame**, count in `frames_skipped`
+- expectation `Optional` ⇒ the spec must declare which; an undeclared `Optional` member is a
+  compile-site omission
+
+**Floor:** if the derived row's `n < 0.9 × frames_checked`, the row is **INCONCLUSIVE** — a derived
+row over a different subset of frames than its terms is not comparable to them.
+
+### R4.3.5 The unmatched-END detector, RELEASE-LIVE
+
+`TsWitness::end` (`vb.rs:411-424`) returns silently when `pair_of[slot] == NO_PAIR` (`:238`,
+`u16::MAX`): no command, no `Torn`, no counter — `mark_end` is *after* the return. `Torn` is
+`begun ∧ ¬ended` and catches only the opposite direction.
+
+**`TsWitness::writes` cannot be the detector.** It is `#[cfg(debug_assertions)]` (`vb.rs:232-233`)
+and documented *"Dev-profile only"*, while the gates run **release** — a detector there is dead in
+exactly the runs clause 5(2) reads it in, and red mutation (c) would show green. The type's own doc
+settled this class at `vb.rs:184-186`: *"[`Self::finish`] is the per-frame invariant, and it is
+RELEASE-LIVE: a `debug_assert!` cannot substitute, because the timing worker inherits the driver's
+profile and a release bench run has `debug_assertions` OFF."*
+
+**Decision — two mechanisms, each with its stated liveness, and `writes` keeps its own name.** The
+two invariants are different: `writes` counts a `VUID-vkCmdWriteTimestamp` double-write, a
+driver-correctness question no gate reads; the begin/end pairing is a **gate input**. Merging them
+would put two liveness requirements on one array, and making `writes` release-live would falsify its
+own doc.
+
+- **`writes` stays `#[cfg(debug_assertions)]`, and `finish` READS it under the same `cfg`.** That
+  closes the dead datum on its own terms: `vb.rs:5353` and `:2540` both assert *"the dev-profile
+  double-write counter in `TsWitness::finish` reds by slot name"* — a safety net cited as
+  load-bearing for `record_hzb_poison_build`'s mutual-exclusion invariant, incremented at
+  `:333`/`:355` and **read nowhere**. After this edit those two comments are true in the profile they
+  name.
+- **Two NEW unconditional `u16` masks — `begin_called`, `end_called`** — set at the **top** of
+  `begin` and `end`, **before** the `NO_PAIR` / alloc-failure early returns. Four bytes on a
+  per-frame stack struct. `finish` (already release-live) does three mask compares, total over both
+  directions:
+
+| condition | meaning | outcome |
+|---|---|---|
+| `begin_called & !begun` | `alloc_pair` returned `None` | already flagged `GpuPairBudgetExhausted` |
+| `end_called & !begin_called` | **unmatched END** — the direction that was invisible | raise `GpuZoneUnmatchedEnd` |
+| `begin_called & !end_called` | unmatched BEGIN | `Torn`, now visible even when alloc failed |
+
+Sticky flags via `boyko_diag::loss::raise`, the idiom `alloc_pair` uses at `gpu_zone.rs:775` and for
+the same structural reason: this crate cannot reach the `92xx` emitter.
+
+**DP6d's leg shapes gain a fifth — a non-mesh-leg `VB × Sdf` leg.** Without it the four originally
+listed could never exercise the direction this detector exists to catch.
+
+### R4.3.6 What the span contains that is not its subject
+
+**`ZONE_VB_HZB_BUILD` (id 6).** `record_hzb_poison_build` stamps it unconditionally at its own first
+and last statements (`vb.rs:5376`, `:5576`). Its **unsplit** call site `:3753-3765`, gated only on
+`!occlusion_split`, runs on every leg and sits textually inside `[3050, 4495]`; its split-armed
+sibling `:2541-2542` is inside `ZONE_VB_RUN`, i.e. **outside** `PRODUCE_RUN`. `vb.rs:3749-3752`
+states the governing rule: *"every aggregate that spans both legs excludes it by name."* Three
+obligations:
+1. `PRODUCE_RUN`'s doc **names id 6** and states the scope: *comparable only within one
+   occlusion-split arming.*
+2. id 6 enters the chain **leg-conditionally**, driven by the expectation table. It is already
+   `bottoms(...)`, so it composes natively.
+3. **The gate asserts occlusion-split leg-field equality between the two sides** before comparing.
+   DP6 does not touch `HzbConfig`, so this makes a common-mode assumption verified rather than
+   assumed.
+
+**`vb_viewt` — and the authoritative predicate is the two-arm expression, not "no `TaaConfig`".**
+`gpu_scene/mod.rs:6550-6553`:
+
+```
+viewt_from_vb_depth = VB ∧ mesh_leg ∧ ( (¬sdf_leg ∧ aa_mode == Taa)                      [arm a]
+                                      ∨ (mesh_geo_shade_split ∧ ssao_variant.is_some()) ) [arm b]
+```
+
+Derived **per side**:
+
+| fixture | side | arm (a) | arm (b) | result |
+|---|---|---|---|---|
+| `[vb_both_ssao]` | before | dead (`sdf_leg`) | **fires** (split ∧ SSAO) | **runs**, at site A `:3776`, **inside** `PRODUCE_RUN` |
+| `[vb_both_ssao]` | after | dead | **fires** | **runs**, same site — **common-mode inside the run ✓** |
+| `[vb_both_sdf]` | before | dead (`sdf_leg`) | dead (no split) | None |
+| `[vb_both_sdf]` | after | dead | dead (**no SSAO**, though the split is now armed) | None — **common-mode ✓** |
+
+**So `vb_viewt` DOES run on `[vb_both_ssao]`, and `gpu_zone.rs:450-452` quantifies it: the 5 248 ns
+gap between id 6's END and id 11's BEGIN IS that dispatch.** §R4.1.1's GEO predecessor row is stated
+accordingly. The conclusion (common-mode on each row) survives by the corrected route, and the
+reason `[vb_both_sdf]`'s after-side stays clean is **arm (b)'s second conjunct**, not the absence of
+`TaaConfig`.
+
+**It gets a per-side cell in the expectation table** — `Forbidden` on `[vb_both_sdf]` both sides,
+`Required` on `[vb_both_ssao]` both sides — **checked mechanically without minting a zone**: the
+`[e6 → b11]` gap must be ≈ 5 248 ns where `Required` and ≈ 0 where `Forbidden`. That turns an
+unbracketed dispatch into a checked one.
+
+**The residual hazard is named in `PRODUCE_RUN`'s doc beside id 6:** site A `vb.rs:3773-3779` is
+inside the span and site B `:4622-4628` (gated `ssao.is_none()`) is outside it, so a config that
+flips which arm fires **moves a dispatch across `e12`**. A TAA-armed VB×Mesh boot takes arm (a) with
+`ssao.is_none()` ⇒ site B ⇒ outside. The first such fixture would otherwise move it unnoticed.
+
+### R4.3.7 Outcome space for the diagnosis, made total
+
+The repair rung is a red-capable test of §R4.1's own diagnosis. Let
+`Δ_host = shade_derived − shade_fused|DP6-0b` — **the RE-TAKEN fused-shade cell from DP6-0b, never
+DP6-0's voided 24 576.**
+
+| branch | verdict | consequence |
+|---|---|---|
+| `\|Δ_host\| ≤ 2 × R_neutral` | §R4.1 **confirmed** — the 112 640 was latch skew | proceed |
+| `2 × R_neutral < Δ_host ≤ 29 184` | **mixed** — both contributions material | `Δ_host` is recorded as `E_split_host`, the split tail's hosting surcharge. **DP6a does not land** until Decision 3's fused row is re-derived with it, because G-NEUTRAL's after-side pays it and its before-side does not |
+| `Δ_host > 29 184` | §R4.1 **refuted** | `vb_shade_split` costs more than one extra full-screen fetch+dispatch over `vb_resolve` — no work-budget explanation remains. **DP6's cost model re-opens**, and Decision 3's consolidate-into-the-split premise is in question |
+
+**The `29 184` boundary is derived, not chosen:** it is this rung's own published upper bound on
+`D + F`, one full-screen dispatch plus one `vb_geom_fetch`.
+
+## R4.4 `vg_occ_split_timing` — the premise, corrected
+
+Its worker is one `VB × Mesh` boot (`vg_occ_split_timing.rs:629-636`; no
+`SsaoConfig`/`DdgiConfig`/`TaaConfig`; `:644` `assert_no_split_producer`). On it, ids 10/11/13
+**never stamp** — no `alloc_pair`, no `PairResult`, no `ZoneAccum`, **no row**. They are not
+written-and-unread; they do not exist there. And `:708-713` **panics** via `unwrap_or_else` on a
+missing row, so widening `PASS_COUNT` 10→14 would be an **unconditional panic on all four legs**.
+**That edit is withdrawn** — it was never in a shipped Rev, and it is recorded here so no reader
+re-derives it.
+
+**The blindness is real and doubled:** blind **by fixture** (its boot structurally cannot stamp
+10/11/13) **and by loop bound** (`PASS_COUNT = 10` would ignore them if it could). Widening the
+bound fixes neither.
+
+`vg_occ_split_timing` keeps `PASS_COUNT = 10` and gains **exactly one row** (id 12 — `mesh_leg` is
+true on VB×Mesh), which its bounded loop ignores. No panic. Its `begin_off` base is unmoved: the
+frame's earliest measured begin is `ZONE_VB_CULL_RESET` at `vb.rs:1066`, far ahead of `:3050`.
+
+**The `280/560` pin does not exist, and it is not being minted.** The literals appear nowhere in
+`vb_bench_query_validation.rs`, which asserts `bench_ok == control_ok`, `measured > 0`, and
+validation-message-set equality. The only occurrences are doc comments at `gpu_zone.rs:232` and
+`:241-242` citing a number the named test does not contain. **A pair-count pin is refused with a
+reason:** it is leg-dependent, would red on every legitimate zone addition, and has already failed
+to red on two. The expectation table asserts the invariant those comments were reaching for — *which
+zones stamp on which leg* — and is red-capable.
+
+## R4.5 Costs
+
+| cost | size | disposition |
+|---|---|---|
+| One rung before DP6a | no behaviour change | required: DP6a moves armed-leg timing |
+| DP6-0's four cells void | 4 numbers | re-taken; kept as the evidence for the repair |
+| **Zone budget 12 → 15** | three of four free ids | **ONE remains**; the next VB zone after it is the last the `u16` masks carry |
+| Reducer gains a per-frame predicate | one pass over one frame's slice, off-frame host code | the module already allocates per-zone `Vec`s here (`reduce.rs:32-37`) |
+| Artifact gains `[order]` | one match-`k` arm set + builder | `artifact.rs:848+` |
+| Two unconditional `u16` masks + 3 compares in `finish` | 4 bytes, per frame, off the GPU path | the price of a release-live gate input |
+| DP6b's `vb_geo_aux_layout` 3→5 widening | 2 descriptor writes at boot, **0 per-frame commands** — `cmd_bind_descriptor_sets` at `vb.rs:3850` binds the set regardless of width | priced, negligible |
+| New harness | 1 file | it is the real content of the blindness finding, not overhead |
+| **Wide-bracket dilution** | — | **no longer a cost**: R4-D4 makes the derived row primary. `PRODUCE_RUN`'s fused magnitude is **not a measured quantity anywhere** — it is the `[3050,4495]` interval including the id-6 slot and the inter-bracket gaps, not a sum of two brackets — and becomes a DP6-0b cell. No comparison is made against 4 608, since inheriting it is forbidden |
+
+## R4.6 Residuals and the dead-datum ledger
+
+**`zone_begin_stage`'s lost gate is NARROWED, not closed.** `docs/OPEN-QUESTIONS.md:471-475` is
+about the table as a whole. After DP6-0b the VB ids stand in three tiers:
+
+| tier | ids | check |
+|---|---|---|
+| per-frame chain (this rung) | 6 (on `!occlusion_split` legs), 10, 11, 12, 13 | `OrderCensus`, per frame, counted |
+| median-level chain (today) | 3, 4, 5, 7, 8, 9 | `vg_occ_split_timing`'s monotone clause — weaker, and `:669-672`'s own 144 ns finding says why |
+| none | 0, 1, 2, and the gbuffer / SV0 / particle families | — |
+
+**Offered as a follow-up, not claimed as done:** once the per-frame channel exists, upgrading tier 2
+to it is a one-line change to that harness's chain declaration.
+
+**Dead-datum ledger** (a list, because the count was wrong and a count is the wrong shape):
+- **`gpu_zone.rs:238`** — *"the family's ONLY unbracketed dispatch"*, false while SSAO, à-trous,
+  DDGI, hwrt, `sdf_forward_march` and both `vb_viewt` sites are unbracketed. → narrowed to an
+  enumerated residual.
+- **`gpu_zone.rs:232` / `:241-242`** — cite a `280/560` pin the named test does not contain. →
+  corrected to point at the expectation table.
+- **`TsWitness::writes`** — incremented at `vb.rs:333`/`:355`, read nowhere, while `:5353` and
+  `:2540` assert a `finish` counter that does not exist. → `finish` reads it under its own `cfg`.
+- *(stale, dropped: "id 10 has no stage pin" — the concurrent round landed `tops(ZONE_VB_SDF_MESH)`
+  at `gpu_zone.rs:539-542`.)*
+
+**Note beyond this rung's scope:** `TsWitness::writes` being unread means
+`record_hzb_poison_build`'s documented mutual-exclusion safety net has never existed in any profile.
+DP6-0b repairs it as a side effect; if DP6 is deferred, that repair should be lifted out and landed
+on its own, since it guards an invariant unrelated to this rung.
+
+## R4.7 Revision trail
+
+| rev | change |
+|---|---|
+| 4 | OQ1 adjudicated: A+B composed, C rejected as primary. Repair rung, run bracket, containment clause. |
+| 4.1 | 4 P0 + 8 P1: containment moved into `observe_frame`; `PASS_COUNT` edit withdrawn and the blindness premise corrected; `PRODUCE_RUN`'s predicate hoisted + unmatched-END detector; **primary/fallback inverted with a number**; id 6 and `vb_viewt` named; DDGI/hwrt mechanism corrected; DP6a's timing claim corrected; the `280/560` pin refuted; `Δ_host`'s third branch; OQ narrowed. |
+| **4.2 (as landed here)** | **P1-A:** `vb_viewt` DOES run on `[vb_both_ssao]` — the authoritative two-arm predicate is `gpu_scene/mod.rs:6550-6553`, arm (b) fires without `TaaConfig`; §R4.1.1's GEO row restored and quantified at 5 248 ns from `gpu_zone.rs:450-452`; the precondition is restated per side and gets a checked expectation cell. **P1-B:** the detector is release-live — `writes` is `#[cfg(debug_assertions)]` and stays so under its own name; two unconditional `u16` masks + `finish`'s three compares are the gate input. **P1-C:** the absence policy keys on absent-from-slice resolved against the leg's expectation, so a full-ring runtime absence skips instead of injecting a 4.5× inflated sample; `GpuPairBudgetExhausted` added to clause 5(2). **P2:** `Δ_host` baselines on DP6-0b's re-taken cell; `ZONE_VB_PRODUCE_NET` gets id 14, `VB_ZONE_COUNT` 15, one slot left, never stamped; the three particle ratios quoted with the tree's refusal of the band; `[order]` dispatches at `artifact.rs:848+`; the `atrous_levels` assertion closes the DP6-0b→DP6c window. |
+
+---
 
 > **Rev 3 delta** (closing the verify pass's N1..N6; everything else is Rev 2 verbatim):
 > **N1 (P0), narrowed by the verify pass's N7** — `vb_sv0_host` gets its EXPRESSION:
@@ -62,10 +576,30 @@ Why not (c) — measure DP7 (half-res) first and let it decide: the numbers do n
 
 But **P0-4 stands and is not answered by that tie.** DP6 and DP7 are *partially antagonistic*: `vb_geo` is one thread per full-res `vb_id` pixel (`vb_geo.comp.hlsl:214-236`), so a half-res term in the geo host needs a second dispatch — which reintroduces `D` and converges back on DP7-alone. Retiring the dedicated pass therefore removes the only host shape DP7 can use. **Remedy: a DP7 FEASIBILITY PROBE (rung DP6d.5) runs in the dedicated pass while it still exists, and DP6e's gate carries its explicit disposition.** Probe it; do not build it. That converts the one-way door into a door with a measurement in front of it, at a fraction of a reordering's cost.
 
-**Consequence for the gates: the 2× cost clause is NOT this rung's justification and is dropped as such.** A consolidation is justified by maintenance surface plus the split-boot win. It is replaced by:
-- **G-NEUTRAL (fused boots):** `T(DP6, armed) − T(today, armed) ≤ +` the null-certified resolution. A consolidation may not cost performance.
-- **G-REDUCE (split boots):** `T(DP6, armed) < T(today, armed)` by more than the null-certified resolution.
-- **G-MARGINAL (informational, not gating):** `Δ_AB` against the 6 144 ns reference, reported with its 2× ratio so the inherited threshold's fate is on the record — but **not adjudicated as a pass/fail**, because the rung no longer claims it.
+**Consequence for the gates: the 2× cost clause is NOT this rung's justification and is dropped as such.** A consolidation is justified by maintenance surface plus the split-boot win. It is replaced by the gate text below — **Rev 4, superseding Rev 3's three bullets in full** (Rev 3 stated G-NEUTRAL/G-REDUCE over `T(armed)` with the split side read as `ZONE_VB_GEO + ZONE_VB_SHADE`; §R4.1.8 shows that sum is a `Σ(median_f)` the reducer forbids, and §R4.1.3 shows the TOP latch makes it unadjudicable either way):
+
+> **All gates read ONE quantity: `ZONE_VB_PRODUCE_NET = ZONE_VB_PRODUCE_RUN − ZONE_VB_PRESHADE`**, formed inside `WindowReducer::observe_frame` from each frame's own pairs and reduced afterwards — `median_f(Σ)`, never `Σ(median_f)`. `ZONE_VB_PRODUCE_RUN` is reported beside it as the total. Protocol: release, 512×512, `sv0_scene`, **3 identical legs per side**, warmup discarded.
+>
+> **G-NEUTRAL (fused boots).** `[vb_both_sdf]`, `BOYKO_SDF_MESH=on` (arm A), fixture otherwise unchanged:
+> `median_f(NET)|after DP6c ≤ median_f(NET)|at DP6-0b + R_neutral`.
+> `PRESHADE` is absent-`Forbidden` before and `≈ 0` after, so `NET ≡ PRODUCE_RUN` on this row. **The two sides differ in leg class deliberately** — the fused→split flip is exactly the trade Decision 3 makes and the sole thing G-NEUTRAL prices.
+>
+> **G-REDUCE (split boots).** `[vb_both_ssao]`, same arm:
+> `median_f(NET)|after DP6c < median_f(NET)|at DP6-0b − R_reduce`.
+>
+> **`R` is certified per row, per fixture, per session, and inherited from nothing** — not DP6-0's 4 608 ns (void: the instrument changed under it), not DP2's 24 576, not DP4's 1 024.
+>
+> **Reported, not gating:** `Δ median(PRESHADE)`. DP6 emits no SSAO, à-trous, DDGI or hwrt command; a movement beyond `R_preshade` means the workload changed and the run is re-taken with the cause stated.
+>
+> **G-MARGINAL (informational).** `Δ_AB` on `ZONE_VB_GEO`, now BOTTOM-stamped and therefore an exact difference of prefix-completion times. Reported against 6 144 ns with its ratio; **not adjudicated** — the rung no longer claims it.
+>
+> **Clause 5, four clauses. A row failing any is INCONCLUSIVE — never PASS, never FAIL:**
+> 1. either side's 3-leg relative spread of the gated median > 10 %;
+> 2. any gated zone not `Measured` on any leg; or `lost != 0` / `torn != 0`; or the **`GpuZoneUnmatchedEnd`** flag raised; or the **`GpuPairBudgetExhausted`** flag raised;
+> 3. `OrderCensus.violations != 0`, **or `OrderCensus.frames_checked == 0`** (a zero over zero is not a pass);
+> 4. the derived row's `n < 0.9 × frames_checked`; **or** the two sides differ in occlusion-split arming; **or** the per-leg expectation table does not match the artifact exactly.
+>
+> **Lattice-snap rule.** A threshold derived as a fraction of a measured bound is **snapped up to the next multiple of the device timer step (512 ns on this box)**, with the arithmetic shown: half of `20 939` is `10 469.5` → **`10 752 = 21 × 512`**.
 
 ---
 
@@ -74,7 +608,7 @@ But **P0-4 stands and is not answered by that tie.** DP6 and DP7 are *partially 
 | Finding | Closure |
 |---|---|
 | **P0-1** baseline / relocation | Rung reframed to consolidation. Per-boot-class cost table added (above and §Metrics). Headline "35 328 → ≤ 12 288" **withdrawn**. 2× clause demoted from gate to informational. Gates replaced by G-NEUTRAL / G-REDUCE. |
-| **P0-2** bracket spans nothing | **Verified: `ZONE_VB_RUN` ends `vb.rs:3016`; `vb_geo` records `:3752`; split shade `:4277`.** Comparator respecified: split pair = **`ZONE_VB_GEO + ZONE_VB_SHADE` (a SUM of two disjoint intervals, not one span)**; fused comparator = **`ZONE_VB_SHADE` alone** (it is *defined* to bracket whichever of the three producers runs — `vb.rs:3388-3398`), plus `ZONE_VB_SDF_MESH` on today's armed frames. New rung **DP6-0** mints the zone **before** the producer moves, so baselines are paired, not remembered. |
+| **P0-2** bracket spans nothing | **Verified: `ZONE_VB_RUN` ends `vb.rs:3016`; `vb_geo` records `:3752`; split shade `:4277`.** Comparator respecified: split pair = **`ZONE_VB_GEO + ZONE_VB_SHADE` (a SUM of two disjoint intervals, not one span)**; fused comparator = **`ZONE_VB_SHADE` alone** (it is *defined* to bracket whichever of the three producers runs — `vb.rs:3388-3398`), plus `ZONE_VB_SDF_MESH` on today's armed frames. New rung **DP6-0** mints the zone **before** the producer moves, so baselines are paired, not remembered. **⚠️ Rev 4: the two comparators in this row are WITHDRAWN** (§R4.1.8, §R4.1.3) — read §R4-D2/§R4-D4 for the one that replaced them. The DP6-0 rung and the paired-baseline principle stand. |
 | **P0-3** arm B unbuildable | ONE predicate `GBufferScene::vb_sv0_host` drives **both** the pipeline pick and the `sdf_term` access declaration. The shader's store is **moved inside `if (sv0_mode != 0u)`** — wave-uniform, behaviourally identical on every mode≠0 frame. Arm B's write is declared (safe over-declaration) *and* skipped in-shader. Both halves stated in §Decision 6. |
 | **P0-4** one-way door | New rung **DP6d.5 — DP7 feasibility probe** in the dedicated pass. **DP6e's gate requires an explicit recorded DP7 disposition.** Antagonism (`vb_geo` = one thread per full-res pixel) stated as a first-class constraint. |
 | **P1-1** truth tables turned | Enumerated in §Integration: `render_path_config.rs::sv0_never_arms_under_hwrt` (:2755) and `sv0_armable_only_on_vb_with_both_legs`; `sv0_arm_matrix.rs` `BOOTS[0]` (`:96-105`, `armable:true` → `false`, `why` rewritten) and `BOOTS[1]`'s `why` (its stated reason "armable exactly like the fused one" becomes false); `BOOTS` gains a fused+term-wanted row. |
@@ -89,13 +623,13 @@ But **P0-4 stands and is not answered by that tie.** DP6 and DP7 are *partially 
 | **P2-4** leg table | New split+SV0 row **and** the "armed" ambiguity resolved (occlusion-split vs geo/shade split get distinct words) in the same edit. |
 | **Q4** | Answered: the dedicated pass becomes **unreachable at DP6c**, not at DP6e. Revert story restated accordingly. |
 | **Q5** | Answered constructively: no pin covers split+SV0 today (`[vb_mesh_ssao]` is VB×**Mesh** — no SDF leg — so it can never arm SV0). DP6c **adds** `[vb_both_ssao]` (split, SV0 disarmed) and seeds `[vb_both_ssao_sv0]` PENDING. |
-| **Preserve list** | All ten items byte-stable. Fetch arithmetic, zone story (11→12, hole at 10, auto-TopOfPipe via the `:333` exclusion), `gSdfTerm` double-role non-hazard, 2+1 tail reads, Decision 2's emptiness proof, span fidelity, `sdf_field.hlsli`'s Buf-only need, and Decision 6's paired-delta instrument all carried unchanged except where a P0 forced a stated edit. |
+| **Preserve list** | All ten items byte-stable. Fetch arithmetic, zone story (11→12, hole at 10, auto-TopOfPipe via `zone_begin_stage`'s range exclusion — **⚠️ Rev 4 supersedes the stage half: 12→15, and ids 10/11 restamp to BOTTOM by name, §R4-D1**), `gSdfTerm` double-role non-hazard, 2+1 tail reads, Decision 2's emptiness proof, span fidelity, `sdf_field.hlsli`'s Buf-only need, and Decision 6's paired-delta instrument all carried unchanged except where a P0 forced a stated edit. |
 
 ---
 
 # Architecture: VB-SV0 DP6 — producer consolidation into the split path's geometry half
 
-**Status:** DESIGN Rev 3 (critic-converged: 'fix N7's one conjunct and this is APPROVED' — the conjunct is fixed above).
+**Status:** DESIGN Rev 4 (Rev 3 was critic-converged: 'fix N7's one conjunct and this is APPROVED' — the conjunct is fixed above; Rev 4 adjudicates OQ1 on DP6-0's measurement and inserts the DP6-0b repair rung, architect↔critic converged over three rounds).
 **Parent:** `docs/VB-SV0-SDF-SHADOW-PLAN.md` Rev 10, DP4 adjudication block.
 
 ## Goal
@@ -228,18 +762,18 @@ Three properties this buys, all needed:
 **P0-2 — the brackets, named against verified line numbers.**
 `ZONE_VB_RUN` ends at `vb.rs:3016`; `vb_geo` records at `:3752`; `ZONE_VB_SHADE` brackets the split shade at `:4277`/`:4442`, the classified producer at `:3416`/`:3585`, the fused one at `:3591`/`:3700`. So:
 
-- **New `ZONE_VB_GEO = ZONE_BASE_VB + 11`** brackets `vb_geo`'s barriers→bind→dispatch. It is the family's only unbracketed dispatch today.
-- **Split-pair quantity = `ZONE_VB_GEO + ZONE_VB_SHADE`, a SUM of two DISJOINT intervals** — the `vb_viewt` pass, the SSAO gather and the à-trous chain sit between them. It is *"the split pair's own dispatches"*, **not** wall-clock from geo-start to shade-end. Stated because a reader will otherwise treat it as a span.
-- **Fused-side comparator = `ZONE_VB_SHADE` alone.** It is *defined* to bracket whichever of the three lit producers a frame selects (`vb.rs:3388-3398`), which is precisely what makes it cross-arm comparable.
+- **New `ZONE_VB_GEO = ZONE_BASE_VB + 11`** brackets `vb_geo`'s barriers→bind→dispatch. Rev 3 called it "the family's only unbracketed dispatch"; §R4-D3 shows that claim was false when written (`sdf_forward_march` and both `vb_viewt` sites remain unbracketed after DP6-0b too) and narrows it to an enumerated residual.
+- ~~Split-pair quantity = `ZONE_VB_GEO + ZONE_VB_SHADE`~~ — **WITHDRAWN at Rev 4.** Two independent defects (§R4.1.8: it is a `Σ(median_f)` the reducer's own rule forbids; §R4.1.3: `ZONE_VB_SHADE`'s TOP latch absorbed ≈ 34 % of a ~256 µs unbracketed predecessor stretch, measured at 4.58× the fused row). Superseded by `ZONE_VB_PRODUCE_NET` (§R4-D2/§R4-D4). The disjointness observation itself stands and is why a sum was reached for: `vb_viewt`, the SSAO gather and the à-trous chain sit between the two brackets, so the pair was never a span.
+- ~~Fused-side comparator = `ZONE_VB_SHADE` alone~~ — **WITHDRAWN at Rev 4** for the same latch reason. `ZONE_VB_SHADE` remains a reported row and keeps `tops(...)` (id 2 is never restamped, so VB-P1d's published break-even keeps its meaning); the split producer's cost is obtained by derivation, `shade_derived = PRODUCE_RUN.end − PRESHADE.end`.
 
-**The cost table's four cells, all measurable with one new id:**
+**The cost table's four cells, restated on the Rev 4 comparator** (one quantity on every row, and it does not name which producer ran):
 
 | | today | after DP6 |
 |---|---|---|
-| fused, SV0 armed | `ZONE_VB_SHADE + ZONE_VB_SDF_MESH` | `ZONE_VB_GEO + ZONE_VB_SHADE` |
-| split, SV0 armed | `ZONE_VB_GEO + ZONE_VB_SHADE + ZONE_VB_SDF_MESH` | `ZONE_VB_GEO + ZONE_VB_SHADE` |
+| fused, SV0 armed | `ZONE_VB_PRODUCE_NET` (`≡ PRODUCE_RUN`; `PRESHADE` absent-`Forbidden`) | `ZONE_VB_PRODUCE_NET` |
+| split, SV0 armed | `ZONE_VB_PRODUCE_NET` | `ZONE_VB_PRODUCE_NET` |
 
-The "today, split" row needs `ZONE_VB_GEO` to exist **before** the producer moves — hence **rung DP6-0**, which mints the zone alone. Baselines are then a *paired* before/after on one instrument, not a comparison against a remembered number.
+Both rows still need their brackets to exist **before** the producer moves — hence **rung DP6-0**, which minted `ZONE_VB_GEO` alone, and **rung DP6-0b**, which mints ids 12/13/14 and re-takes DP6-0's four cells on the repaired instrument. Baselines are then a *paired* before/after on one instrument, not a comparison against a remembered number — and DP6-0's own four cells are **void as baselines** (the instrument changed under them) while being **kept as the evidence for the repair**.
 
 **Arms** (on `vb_both_sdf` for fused, on the new `[vb_both_ssao]` boot for split):
 | arm | `BOYKO_SDF_MESH` | split | variant | mode | `vb_sv0_host` |
@@ -254,7 +788,17 @@ The "today, split" row needs `ZONE_VB_GEO` to exist **before** the producer move
 
 ### Decision 7 (carried, P2-4 edit) — `ZONE_VB_GEO` minted, `ZONE_VB_SDF_MESH` retired in place
 
-`VB_ZONE_COUNT` 11 → 12; slot 10 a permanent hole (one unused pair, zero commands — `NotBracketed`); id 11 auto-`TopOfPipe` via the `matches!(zone, LATE_UPLOAD..=RUN)` exclusion at `:333`. **On the preserve list, carried verbatim.**
+`VB_ZONE_COUNT` 11 → 12; slot 10 a permanent hole (one unused pair, zero commands — `NotBracketed`); id 11 auto-`TopOfPipe` via the `matches!(zone, LATE_UPLOAD..=RUN)` exclusion in `zone_begin_stage`. **On the preserve list, carried verbatim.**
+
+**Rev 4 amendment — the zone count and the stages both move at DP6-0b.** `VB_ZONE_COUNT` **12 → 15**:
+
+| id | name | stamped? | stage |
+|---|---|---|---|
+| `ZONE_BASE_VB + 12` | `ZONE_VB_PRODUCE_RUN` | yes | BOTTOM |
+| `ZONE_BASE_VB + 13` | `ZONE_VB_PRESHADE` | yes | BOTTOM |
+| `ZONE_BASE_VB + 14` | `ZONE_VB_PRODUCE_NET` | **never** — derived from the two above, per frame | n/a |
+
+Ids **10 and 11 restamp TOP → BOTTOM** (§R4-D1: the tree's own rule at `gpu_zone.rs:415-419` applied to a premise this rung deliberately falsifies, at the rung `:448` itself nominates), spelled as **four names** in `zone_begin_stage` and never as a range. `tops(ZONE_VB_SHADE)` and `tops(ZONE_PARTICLE_DRAW)` are retained; the `gpu_zone.rs:539-542` assertion message is rewritten to name `ZONE_PARTICLE_DRAW` alone, because it goes false in the same edit. Under the `≤ 16` const assert at `:292-295` this rung consumes **three of the family's four remaining ids: ONE slot remains, and the next VB zone after that is the last the `u16` witness masks can carry** — a stated cost, not a later discovery.
 
 **P2-4:** the leg table (`gpu_zone.rs:227-230`) currently has two rows labelled by *occlusion*-split arming and no SV0 row, so "armed" already means two things. The same edit (a) renames the axis to `occlusion split armed` / `occlusion split off`, (b) adds a `geo/shade split` dimension, (c) adds the SV0 row that `ZONE_VB_SDF_MESH`'s own doc describes but the table never had. Resolving the pre-existing ambiguity is in scope because the new row inherits it.
 
@@ -354,15 +898,48 @@ void main(...) {
 
 **Also affected:** `runner.rs` (boot-freeze contract comment + the `host` env arm), `gpu_scene/mod.rs` (the boot seam sets `sdf_mesh_term_wanted` and `vb_sv0_host`), `docs/RENDER-PARITY-PLAN.md` §3.2 (erratum: Option B superseded **under VB**; its overdraw-invariance rationale is *preserved* — `vb_geo` is also exactly one march per covered pixel), `docs/SHADER-VARIANT-MANIFEST.md`, `docs/OPEN-QUESTIONS.md`.
 
+**Also affected, Rev 4 (DP6-0b only — no render behaviour, no shader, no pipeline):**
+`crates/boyko_rhi_vulkan/src/present/gpu_zone.rs` (ids 12/13/14, `VB_ZONE_COUNT` 12→15, the four names in `zone_begin_stage`, the const stage pins, the `:539-542` message, the leg table's rows for 12/13 and id 6's two positions, `ZONE_VB_SHADE`'s skew warning, and the two dead-datum doc repairs at `:238` and `:232`/`:241-242`);
+`crates/boyko_rhi_vulkan/src/present/passes/vb.rs` (the hoisted `produce_run_armed`, the two new brackets, id 10's begin moved above its `record_vb_pass`, the `begin_called`/`end_called` masks and `finish`'s compares including the `cfg`-gated `writes` read);
+`crates/boyko_app/src/profiling/reduce.rs` (`chain` + `derived` declarations, the per-frame predicate, `OrderCensus`, frame-formed derived rows);
+`crates/boyko_app/src/profiling/artifact.rs` (the `[order]` block and its builder, the derived `[[zone]]` row);
+`crates/boyko_diag` (the `GpuZoneUnmatchedEnd` flag beside `GpuPairBudgetExhausted`);
+new `crates/boyko_app/tests/vb_sv0_produce_run_timing.rs`;
+`crates/boyko_app/tests/vg_occ_split_timing.rs` (**comment only** — id 12 now appears on its VB×Mesh boot and its bounded loop ignores it; `PASS_COUNT` stays 10).
+
 ## Implementation plan
 
 Revert-red at every rung. **Semantic point of no return is DP6c** (Q4).
 
+**Ladder after Rev 4's insertion:** DP6-0 → **DP6-0b** → DP6a → DP6b → DP6c *(semantic point of no return)* → DP6d → DP6d.5 → DP6e.
+
 - **DP6-0 — the instrument, alone.** `ZONE_VB_GEO`; `VB_ZONE_COUNT` 12; leg-table edit (P2-4). No producer change. *Gate:* all goldens byte-identical; `vb_bench_query_validation` still `measured > 0`; **the four baseline cells recorded** on the unmodified producer.
+- **DP6-0b — instrument repair and re-baseline. No render behaviour change.** (Rev 4; inserted between DP6-0, shipped and not re-opened, and DP6a.)
+
+  **Why it precedes DP6a.** *"Nothing in DP6a/DP6b perturbs GPU timing"* is true only of **golden, SV0-disarmed legs**. On an **armed** leg DP6a's entire effect **is** the fused→split flip — which is what G-NEUTRAL prices. That is the argument for the ordering: the flip must be measured with the instrument already repaired.
+
+  *`gpu_zone.rs`:* four names added to `zone_begin_stage` (never a range); ids 10/11 to BOTTOM with §R4-D1's premise-change reasoning written at the function, discharging `:448`'s own nomination of this rung; `:539-542`'s message rewritten to name `ZONE_PARTICLE_DRAW` alone; `VB_ZONE_COUNT` 12→15; the leg table gains rows for 12/13 and id 6's two positions; `ZONE_VB_SHADE`'s doc gains the measured skew warning (112 640 split vs 24 576 fused, 4.58×, no fetch arithmetic produces it) pointing at `shade_derived`; `:238`'s falsehood narrowed to an enumerated residual naming `sdf_forward_march` and both `vb_viewt` sites; `:232`/`:241-242`'s phantom `280/560` citation corrected to point at the expectation table.
+
+  *`passes/vb.rs`:* `produce_run_armed` hoisted above `:1529`; `PRODUCE_RUN` `[3050, 4495]`; `PRESHADE` `[3890, 4327]`; id 10's begin moved above `:3141`; the two unconditional `begin_called`/`end_called` masks + `finish`'s three compares; `finish` reads `writes` under `#[cfg(debug_assertions)]`, making `:5353` and `:2540` true.
+
+  *`boyko_app/src/profiling/`:* `reduce.rs` gains `chain` + `derived` declarations, the per-frame predicate, `OrderCensus`, and frame-formed derived rows; `artifact.rs` gains the `[order]` block at the `:848+` match-`k` arm set with its own builder, plus the derived row through the `[[zone]]` sites.
+
+  *Tests:* new `crates/boyko_app/tests/vb_sv0_produce_run_timing.rs` — boots `[vb_both_sdf]` and `[vb_both_ssao]`, drives the **per-leg Required/Forbidden/Optional expectation table** (both directions red), the `[e6 → b11]` gap check, and **one assertion on `vb_both_ssao.rs:121`'s `atrous_levels: 3` literal**, which closes the DP6-0b→DP6c window in which `PRESHADE Required` asserts stamping but not magnitude and the byte pin does not yet exist. `vg_occ_split_timing` **unchanged** but for a comment recording that id 12 now appears and why its bounded loop ignores it.
+
+  *Gate:* all goldens byte-identical; `torn == 0` and no diag flag on **five** leg shapes; `OrderCensus.violations == 0` with `frames_checked > 0`; **the four DP6-0 cells re-taken and published beside the old ones**, with §R4.1's diagnosis landed explicitly on one of §R4.3.7's three branches.
+
+  *Red mutations:* (a) id 11 back to TOP ⇒ `violations > 0` on the split fixture; (b) `PRODUCE_RUN` closed inside the split block ⇒ `Torn` on the fused leg; **(c) `PRODUCE_RUN`'s open moved outside `mesh_leg` while the close keeps the predicate ⇒ `GpuZoneUnmatchedEnd` on the VB×Sdf leg, in a RELEASE run**; (d) declare `ZONE_VB_GEO` `Forbidden` on the split leg ⇒ expectation table reds.
+
 - **DP6a — resolver.** The consumer bit, the hoist, `mesh_geo_shade_split`, the NORMAL union, the `armable` conjunct, the env `host` arm, the doc corrections, the Rev-5 erratum. *Gate:* the eight fixtures above green after their stated edits; `sdf_mesh_term_wanted == false ⇒ every ResolvedRenderPath field bit-identical to pre-DP6` (tested, not argued); **all goldens byte-identical**.
 - **DP6b — the dark variant.** Guarded span; `vb_geo_aux_layout` @3/@4 + the `!rg8_ok` placeholder; `vb_geo_sv0.comp.spv`; `embed_spirv!`; boot pipeline. Selected by nothing. *Gate:* `vb_geo.comp.spv`/`vb_geo_mv.comp.spv` byte-identical; new `spv_sync` row 7; **the new two-sided `-P` gate**; `spirv-val`; `sdf_field_edsl_sync` re-pointed; manifest row; all goldens.
 - **DP6c — select, declare, record.** `vb_sv0_host`; the graph diff; the pick; `ZONE_VB_GEO` recording. Dedicated pass becomes **unreachable**. *Gate:* **new pin `[vb_both_ssao]`** (VB×Both + SSAO, SV0 disarmed — the boot class DP6 changes most, unpinned today) byte-identical across the rung; `[vb_mesh_ssao]` byte-identical; **live pixel-signature armed**: `SV0_MIN_SHADOWED_PIXELS`/`SV0_MIN_AO_PIXELS` with **(ii-a) shadow alone and (ii-b) AO alone each moving pixels on its own**; `sv0_arm_matrix.ps1` re-pointed; declare↔record parity asserts.
-- **DP6d — measure.** Arms A/B/C on both boot classes. *Gates:* clause 5 first; then **G-NEUTRAL** (fused: Δ ≤ +resolution) and **G-REDUCE** (split: Δ < −resolution); `Δ_BC` ≤ resolution; `Δ_AB` reported with its 2× ratio, **informational**.
+- **DP6d — measure.** Arms A/B/C on both boot classes. *Gates (Rev 4 — every row reads `ZONE_VB_PRODUCE_NET`, see the gate text above):* **what DP6d does FIRST, before any arm is read:**
+  1. **Assert the instrument identity** — `const` block: `bottoms(ZONE_VB_SDF_MESH) && bottoms(ZONE_VB_GEO) && bottoms(ZONE_VB_PRODUCE_RUN) && bottoms(ZONE_VB_PRESHADE)`; `tops(ZONE_VB_SHADE) && tops(ZONE_PARTICLE_DRAW)` retained. A build failure, not a test.
+  2. **Certify `R`** per gated row, per fixture, this session. Inherit nothing.
+  3. **Read the structural verdicts** — `OrderCensus` (violations **and** `frames_checked`), both diag flags, the expectation table, and `torn == 0` on **five** leg shapes: VB×Mesh; VB×Both fused; VB×Both split; VB×Both split+SV0; **and VB×Sdf (non-mesh-leg)**.
+  4. **Confirm** the derived row's `n` floor and the occlusion-split leg-field equality between sides.
+
+  Only then are arms A/B/C read — **G-NEUTRAL** (fused: `median_f(NET)` Δ ≤ `+R_neutral`) and **G-REDUCE** (split: Δ < `−R_reduce`); `Δ_BC` ≤ resolution; `Δ_AB` on the now-BOTTOM-stamped `ZONE_VB_GEO`, reported with its 2× ratio, **informational**; `Δ median(PRESHADE)` reported as an anomaly requiring a stated cause. **A DP6d that reads an arm before step 4 has chosen its comparator after seeing its data, and its verdict is void.**
 - **DP6d.5 — DP7 feasibility probe (P0-4).** In the dedicated pass, still present: half-res dispatch grid + half-extent term + a bilinear read at the tail. *Deliverables:* the quarter-cost number, and an owner-eval visual on silhouette crawl. **Not shipped, not gated on** — a probe. Reverted after measurement.
 - **DP6e — retire.** Delete the shader, `.spv`, pipeline, layout, `sdf_mesh_shadow_set0` (and with it the `:639-643` doc-rot), `VbPlan::sv0_pass`, `ZONE_VB_SDF_MESH`'s live use, `sdf_mesh_shadow_spv_sync.rs`; `SHADOW_LEAVES_MIN_CONSUMERS` → 2 entries; the three P2-3 prose sites. *Gate:* `--workspace --no-fail-fast` green; all goldens; **the DP6c live-pixel proof re-run**; and — **blocking** — **an explicit recorded DP7 disposition** from DP6d.5: either *"half-res is refused on quality, the door may close"* or *"half-res is wanted; here is the host shape it will use after `vb_geo` retires the dedicated pass"*. **No disposition ⇒ DP6e does not land.**
 
@@ -370,7 +947,18 @@ Revert-red at every rung. **Semantic point of no return is DP6c** (Q4).
 
 **Per-boot-class table** (§Decision 6) is the headline. No single-number claim.
 
-**Byte-identity:** all goldens at every rung; `vb_geo.comp.spv` / `vb_geo_mv.comp.spv`; all ten lit-producer `.spv`; the two-sided `-P` gate.
+**Rev 4 additions — the timing channel's own deliverables.** Every one of these is a gate input, not a report:
+
+- **`ZONE_VB_PRODUCE_NET` is the one gated quantity** on both rows, formed per frame inside `WindowReducer::observe_frame` and reduced afterwards (`median_f(Σ)`). `ZONE_VB_PRODUCE_RUN` is published beside it as the total and as a per-frame cross-check (`NET + PRESHADE ≡ PRODUCE_RUN`). `Δ median(PRESHADE)` is reported, not gating, and a movement beyond `R_preshade` re-takes the run with a stated cause.
+- **`OrderCensus { frames_checked, frames_skipped, violations, worst_ns }`** — a COUNT of per-frame chain violations, published in the artifact's `[order]` block. `violations == 0` **with `frames_checked > 0`**; a zero over zero is not a pass. The first violation additionally raises a sticky `boyko_diag` flag, so a red reaches a reader who never opens the artifact.
+- **The per-leg expectation table** (`Required` / `Forbidden` / `Optional` per zone per fixture) must match the artifact exactly. It is the red-capable form of the invariant `gpu_zone.rs:232`/`:241-242`'s phantom `280/560` citation was reaching for; a pair-count pin is refused with a reason (leg-dependent, reds on every legitimate zone addition, has already failed to red on two).
+- **`ZONE_VB_PRODUCE_NET` (id 14) is `Forbidden` as a stamped row on every leg** — a release-live check that the derived id never reaches `TsWitness`.
+- **The `[e6 → b11]` gap** checks the unbracketed `vb_viewt` dispatch without minting a zone: ≈ 5 248 ns where the expectation table says `Required`, ≈ 0 where `Forbidden`.
+- **`R` is certified per row, per fixture, per session and inherited from nothing** — including from DP6-0's own 4 608 ns, which is void because the instrument changed under it.
+- **Two diag flags gate every row:** `GpuZoneUnmatchedEnd` (new at DP6-0b, release-live) and `GpuPairBudgetExhausted`.
+- **Five leg shapes** carry `torn == 0` and no diag flag: VB×Mesh; VB×Both fused; VB×Both split; VB×Both split+SV0; VB×Sdf (non-mesh-leg). The fifth exists because the four originally listed could never exercise the unmatched-END direction.
+
+**Byte-identity:** all goldens at every rung; `vb_geo.comp.spv` / `vb_geo_mv.comp.spv`; all ten lit-producer `.spv`; the two-sided `-P` gate. **DP6-0b moves no pixel** — it adds timestamp brackets only, so its own gate is the full golden set byte-identical, proved rather than argued.
 
 **P1-5 — the `-P` gate is NEW work.** No `.rs`/`.ps1` in-tree invokes `dxc -P`; only plan prose cites it (the recurring dead-datum shape — five instances on record). **Owning file: `crates/boyko_rhi_vulkan/tests/vb_geo_preprocess_sync.rs`, landing at DP6b**, cloning `find_dxc()`/temp-dir discipline from `cluster_cull_spv_sync.rs`. Two assertions: (i) `dxc -P vb_geo.comp.hlsl` (no defines) is **character-identical** to the pre-DP6b file's `-P`; (ii) with `-D VB_SV0_TERM=1` it **differs**. **The pre-DP6b hash is RECOMPUTED via `git show <DP6b^>:crates/.../vb_geo.comp.hlsl`, not committed** — a committed literal is a datum nobody re-derives and the first "fix" is to re-bless it; `git show` makes staleness impossible. Skips (with `eprintln!`) when no pinned `dxc` resolves, per house idiom.
 
@@ -382,8 +970,14 @@ Revert-red at every rung. **Semantic point of no return is DP6c** (Q4).
 
 ## Open questions
 
-1. **G-NEUTRAL can fail on fused boots.** `vb_shade_split` is not bit-for-bit `vb_resolve` (different Set 1, SSAO combine, DDGI sampling — runtime-gated off but compiled in), and the split adds the `thin_normal` write. If the fused row reds, the disposition is **restrict DP6e to split boots and keep the dedicated pass for fused** — i.e. fall back to the critic's option (b) *with a measurement behind it* rather than as a premise. Pre-agreed here so it is not improvised under a red.
+1. **ADJUDICATED at Rev 4 — REPLACED in full by §R4.** The question was *"can G-NEUTRAL fail on fused boots, and what then?"*. DP6-0's measurement turned it from a hypothetical into a number, and the number says Rev 3's comparator could not have adjudicated it either way: `ZONE_VB_SHADE` read **4.58×** higher on the split boot than the fused one, of which the fetch arithmetic explains **< 1 %** and a TOP-latch absorbing ≈ 34 % of a ~256 µs unbracketed predecessor stretch explains the rest (§R4.1.3, §R4.1.5); and the split-side sum `ZONE_VB_GEO + ZONE_VB_SHADE` is a `Σ(median_f)` the reducer's own rule forbids (§R4.1.8). **Disposition: repair the instrument first (rung DP6-0b), then gate on `ZONE_VB_PRODUCE_NET`** — one quantity whose definition never mentions which producer ran, so it is identical on both sides of the fused/split discontinuity by construction (§R4-D2, §R4-D4). The Rev 4 gate text above replaces Rev 3's three bullets.
+
+   **The old disposition is retained as the FALLBACK CHAIN, not deleted:** `vb_shade_split` is still not bit-for-bit `vb_resolve` (different Set 1, SSAO combine, DDGI sampling — runtime-gated off but compiled in), and the split still adds the `thin_normal` write, so the fused row can still red *on its merits* once the instrument no longer skews it. Two escalation steps, in order:
+   - **If DP6-0b's `Δ_host` lands in §R4.3.7's middle branch** (`2 × R_neutral < Δ_host ≤ 29 184`), the hosting surcharge `E_split_host` is real and material: **DP6a does not land** until Decision 3's fused row is re-derived with it. If it lands in the third branch (`Δ_host > 29 184`), **DP6's cost model re-opens** and Decision 3's consolidate-into-the-split premise is itself in question.
+   - **If G-NEUTRAL then reds on the repaired instrument, or if `R_net > 10 752` makes G-REDUCE INCONCLUSIVE** (§R4.6's open residual 1), the disposition is the one Rev 3 pre-agreed and Rev 4 keeps: **restrict DP6e to split boots and keep the dedicated pass for fused** — the critic's option (b) *with a measurement behind it* rather than as a premise. Pre-agreed here so it is not improvised under a red.
 2. **DP6d.5 may say half-res is wanted.** Then DP6e must name the post-retirement host shape for it, and the honest answer may be "a new minimal half-res marcher pass" — which partially un-does the consolidation. Recorded as a real risk of Decision 3, not hidden.
 3. **DP2's and DP4's null resolutions disagree** (~24 576 ns vs 1 024 ns, same date, different fixtures) and both are load-bearing for their PASS verdicts. DP6-0 must re-certify on its own fixtures and **inherit neither**. → `docs/OPEN-QUESTIONS.md`.
+
+   **Rev 4 extends the do-not-inherit list by one, and the new entry is this design's own:** **DP6-0's 4 608 ns is void as a baseline** — the instrument changed under it when DP6-0b restamped ids 10/11 and added ids 12/13. Every `R` is certified **per row, per fixture, per session**: not DP6-0's 4 608, not DP2's 24 576, not DP4's 1 024. DP6-0's four cells are kept as *evidence for the repair* and republished beside the re-taken ones at DP6-0b; they are never a side of a comparison. The reason the list keeps growing is the same each time — a resolution is a property of one instrument on one fixture in one session, and a number that outlives any of the three is a remembered number, not a measured one.
 4. **`docs/RENDER-PARITY-PLAN.md` §3.2B does not exist** — repo-wide grep for `3.2B` returns zero; §3.2 is the A/B/C options list, next heading §3.3. The lever's entire prior written form is one sentence in DP4's disposition. DP6a adds the erratum rather than pretending the subsection existed.
 5. **External corroboration still pending.** A `researcher` sweep on published `vb_geom_fetch` cost shares, dedicated-vs-inline practice and its occupancy/VGPR rationale, half-res march savings, and async-compute overlap has not returned to me. Two findings could still move Rev 2: a documented occupancy cliff for merging a long march into a geometry pass would strengthen G-NEUTRAL's risk (open question 1); a large published half-res saving would raise DP6d.5 from probe to blocking rung. **Neither can change the fetch/dispatch counting table**, which is measured on this box — which is why the rung's justification now rests on that table and on consolidation, not on external practice.
