@@ -46,6 +46,14 @@
 - [Input](app/input.md)
 - [Multiple Worlds](app/multi-world.md)
 
+# Aether DSL
+
+- [Overview](aether/overview.md)
+- [Data Constructs](aether/data-constructs.md)
+- [Systems & Plugins](aether/systems-and-plugins.md)
+- [State Machines](aether/state-machines.md)
+- [Diagnostics](aether/diagnostics.md)
+
 # Architecture
 
 - [Design Principles](architecture/principles.md)

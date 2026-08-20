@@ -1,0 +1,183 @@
+# Diagnostics
+
+A DSL is only as good as its errors. Aether's rule is narrow and absolute:
+**every error carries the offending token's own span**, and the message names
+what was expected. There is no fallback to "error in macro invocation", and no
+diagnostic is allowed to land on the `aether!` call site when a real token
+exists.
+
+Two mechanisms do most of the work:
+
+- **Exhaustive expected-one-of lists.** When a keyword is wrong, the message
+  enumerates the legal set.
+- **Did-you-mean at edit distance ≤ 2.** Against construct keywords, clause
+  keywords, filter keywords, sibling system names, and sibling state names.
+
+## Unknown construct
+
+The canonical extensibility diagnostic. It names the whole v1 surface, not just
+what happens to be implemented, so the list reads the same on every rung:
+
+```text
+error: unknown construct `compnent`; this aether supports: component, tag, bundle, system, event, machine, material, scene (did you mean `component`?)
+ --> tests/ui/unknown_construct.rs:5:5
+  |
+5 |     compnent Health { hp: f32 }
+  |     ^^^^^^^^
+```
+
+## Planned constructs name their rung
+
+A misspelling and a not-yet-shipped construct are different failures, and they
+get different messages. Writing a construct from a later rung tells you the
+rung:
+
+```text
+error: `material` is an Aether construct but lands at rung A5; this build carries rungs A0..A3 (component, tag, bundle, event, system, plugin, machine)
+ --> tests/ui/planned_construct_names_its_rung.rs:6:5
+  |
+6 |     material gold { }
+  |     ^^^^^^^^
+```
+
+`scene` answers the same way with rung A6. You never need to consult a roadmap
+to find out whether something exists — try it.
+
+## Case gates
+
+Names that expand to **types** (`component`, `tag`, `bundle`, `event`,
+`machine`, `state`, `plugin`) must be UpperCamelCase; `system` names must be
+snake_case, because they expand to fns. Both are checked in the block, with a
+concrete rename:
+
+```text
+error: component names are UpperCamelCase — they expand to types (rename `health` to `Health`)
+error: system names are snake_case — they expand to fns (rename `Foo`)
+```
+
+The check is Unicode-correct: it asks `char::is_uppercase`, not an ASCII probe,
+so `component Здоровье { … }` is accepted as titled in its own script. And the
+rename is only attached when it actually differs from what you wrote — a
+self-identical suggestion explains nothing.
+
+## Data constructs
+
+| You write | Aether says |
+|-----------|-------------|
+| `current f32` (missing colon) | ``expected `:` after field `current` (or a known item: requires / on_add / on_insert / on_replace / on_remove / no_bundle)`` |
+| `on_add = f, on_add = g` | ``duplicate hook `on_add` `` |
+| `no_bundle, no_bundle` | ``duplicate `no_bundle` `` |
+| `tag Stunned(dense);` | ``unknown tag modifier `dense`; the only one is `bitset` (the EnableTag backend)`` |
+| `tag Player` (no semicolon) | ``a tag declaration ends with `;` (tags have no body — a component with fields wants `component`)`` |
+| a 17-field bundle | ``bundle arity is capped at 16 (`MAX_BUNDLE_ARITY`) — split it`` — spanned on the 17th field's name |
+| `victim: entity,` | ``participant fields name their component context: `entity(ComponentA, ComponentB)` `` |
+| `hit: entity(foo::Bar)` | ``participant context components are bare component idents … — found `foo::Bar`; import the component and name it unqualified`` |
+
+The unknown-key case is worth a second look: because a component item that is
+not a known keyword is parsed as a *field*, mistyping `on_ad = heal_full` gives
+you the missing-colon error — whose message lists every legal item. One error,
+and it tells you the whole item vocabulary.
+
+## Systems and clauses
+
+| You write | Aether says |
+|-----------|-------------|
+| `q: query(&mut T)` | ``query takes angle brackets: `query<&mut Transform>` `` |
+| `q: query<&T, wih P>` | ``unknown query filter `wih`; filters are: with, without, added, changed, enabled, disabled (did you mean `with`?)`` |
+| `system s() afterr X {}` | ``unknown clause `afterr`; clauses are: on, in, before, after, when (did you mean `after`?)`` |
+| `on update on fixed` | ``duplicate schedule clause; a system runs on exactly one schedule`` |
+| `on tick` | ``unknown schedule `tick`; `on` takes one of: startup, update, fixed`` |
+| `p: mut query<…>` | ``in the type position `mut` pairs only with `res`: `mut res<T>` `` |
+| any clause, no `plugin` header | ``scheduling clauses (`on`, `after`, `when`, …) need a `plugin <Name>;` declaration in this block to hold the generated registration`` |
+| `on startup in SomeSet` | ``scheduling clauses other than `on` are rejected on startup systems — the engine runs them once, pre-loop`` |
+| `after a` where `a` is on another schedule | ``sibling system `a` runs on a different schedule — cross-schedule ordering is not expressible`` |
+| `after a` where `a` is a startup system | ``ordering references `a`, a startup system — startup systems run once, pre-loop, and cannot be ordered against`` |
+| mutually `after` siblings | ``system ordering cycle among `a`, `c` — break one `before`/`after` edge`` (every member's span reported) |
+| `after read_inpt` next to a sibling `read_input` | ``…is not a sibling aether system; a sibling `read_input` exists — system-to-system ordering uses the bare system name (a real SystemSet type this close in name must be referenced by a qualified path)`` |
+| two `plugin` headers | ``one `plugin` per aether block — `A` already holds this block's registrations`` (with a second span on the first header) |
+
+The plugin-header error is a good example of the span policy — it lands on the
+**system's name**, the thing that needs the plugin, not on the block:
+
+```text
+error: scheduling clauses (`on`, `after`, `when`, …) need a `plugin <Name>;` declaration in this block to hold the generated registration
+ --> tests/ui/clauses_need_a_plugin.rs:5:12
+  |
+5 |     system tick() on update {}
+  |            ^^^^
+```
+
+### One recorded deviation
+
+The near-miss ordering case (`after read_inpt`) was designed to pass through and
+have Aether attach a *note* to rustc's unresolved-name error. Stable
+proc-macros cannot attach notes to downstream errors, so the close call became
+an **Aether error** carrying the note's text. The cost is stated in the message
+itself: a genuine `SystemSet` type whose name is that close to a sibling system
+must be referenced by a qualified path.
+
+## Machines
+
+| You write | Aether says |
+|-----------|-------------|
+| `initial Runing;` inside `Playing` | ``no state `Runing` in `Playing`; states declared here: `Running`, `Paused` (did you mean `Running`?)`` |
+| `=> Playing` where `Playing` is composite with no `initial` | ``target `Playing` is a composite state with no `initial` — add `initial <leaf>;` or target a leaf (`Playing.Running`)`` |
+| two `on E` in one state | ``duplicate handler for `E` in state `A` `` + a second span: *the first handler is here* |
+| `machine` with no `plugin` header | ``a `machine` needs a `plugin <Name>;` declaration in this block to hold its `insert_state` and transition registrations`` |
+| the same param name with different types across merged handlers | ``param `cmds` is declared with conflicting types across this transition's merged enter/exit/action handlers`` |
+| an unknown item inside a state | ``unknown state item `foo`; state items are: initial, enter, exit, on, state`` |
+| a non-state item in the machine body | ``expected `state`, found `foo` (a machine body holds only states after `initial`)`` |
+
+```text
+error: no state `Runing` in `Playing`; states declared here: `Running`, `Paused` (did you mean `Running`?)
+  --> tests/ui/machine_unknown_initial_did_you_mean.rs:10:21
+   |
+10 |             initial Runing;
+   |                     ^^^^^^
+```
+
+## What Aether checks, and what it leaves alone
+
+Duplicated checks drift, so Aether pre-checks a downstream rule **only** when it
+can produce a strictly better span or message. The whole pre-check list:
+
+| Pre-check | Why Aether owns it |
+|-----------|--------------------|
+| bundle arity ≤ 16 | the span lands on the 17th field, not on the struct |
+| participant components are bare idents | the alternative is a downstream proc-macro panic with no span at all |
+| tag modifier is `bitset` | the surface is Aether's, so the vocabulary error is Aether's |
+| duplicate hook keys | Aether has both spans |
+| sibling ordering cycles, cross-schedule and startup ordering | said at expansion, before `ScheduleBuildError::OrderingCycle` at `build()` |
+| machine state resolution | the state namespace exists only inside the transpiler |
+
+Everything else defers. Query data is handed to the engine's `QueryData` trait
+unvalidated; trait-bound failures come from the derive's own const-asserts;
+unresolved component or resource names are ordinary rustc errors. They still
+land on your tokens, because every fragment is re-emitted verbatim with its
+original span — that is the same mechanism that keeps rust-analyzer working
+inside a block.
+
+## How the contract is held
+
+Every message above is pinned twice:
+
+- **Unit tests** in `crates/aether_lang/src/expand.rs` assert the message text —
+  the tighter pin, and it needs no compiler session.
+- **`trybuild` goldens** in `crates/aether_tests/tests/ui/` assert that the error
+  surfaces *through rustc*, in a real downstream crate, at the user's own tokens.
+  A message that is right in a unit test but anchored at the call site passes the
+  first and fails the second.
+
+A `.stderr` golden is re-blessed only after verifying the error *kind* is
+unchanged. Wording improvements are deliberate; a silently weakened diagnostic
+is a regression.
+
+## See also
+
+- [Aether overview](overview.md) — the constructs these errors talk about.
+- [Data constructs](data-constructs.md) and
+  [Systems & plugins](systems-and-plugins.md) — the rules behind the messages.
+- [State machines](state-machines.md) — the chart semantics the machine errors
+  protect.
+- Source: `crates/aether_lang/src/diag.rs`, `crates/aether_lang/src/parse.rs`,
+  goldens in `crates/aether_tests/tests/ui/`.

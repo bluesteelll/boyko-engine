@@ -43,6 +43,7 @@ Key design choices:
 - **New to ECS?** Start with [Design Principles](architecture/principles.md).
 - **Curious how memory works?** See [Memory](memory/arena.md) for the per-pool virtual-memory reserve/commit storage model.
 - **Looking for the API?** See the [API reference](https://bluesteelll.github.io/boyko-engine/api/boyko_ecs/index.html) (auto-generated from `cargo doc`).
+- **Want a shorter notation?** [Aether](aether/overview.md) is the engine's authoring DSL: one `aether!` macro whose constructs expand to exactly the hand-written surface this book documents. It lives on the `feat/multi-paradigm-render` branch, not yet on `ecs`.
 - **Want to contribute?** See [Contributing](contributing.md).
 
 ## Project links
