@@ -44,7 +44,19 @@ use boyko_rhi_vulkan::present::gpu_zone::{
 use boyko_rhi_vulkan::rhi_impl::{VulkanCommandEncoder, VulkanQueryPool};
 
 /// The zones the armed leg brackets, in the order the recorder opens them.
-const ZONES: [u16; 3] = [11, 22, 33];
+///
+/// **Deliberately outside every real family.** These were `[11, 22, 33]` until VB-SV0 DP6-0 minted
+/// `ZONE_VB_GEO = 11`, at which point this file's printed `stamps=` line and any failure message
+/// naming zone 11 read as a claim about a shipped pass it has nothing to do with. The recorder is
+/// generic over `u16` ids, so the only requirement is that they collide with nothing: 77/88/99 sit
+/// above `ZONE_ID_SPAN` entirely and stay ambiguous-free however the families grow next.
+///
+/// Above the span means `CommandWitness`'s two zone-keyed tables ignore them (both writers are
+/// bounds-checked `.get()`), so this file no longer exercises `zone_commands`. That costs nothing:
+/// that verb's coverage is `command_witness.rs`'s own unit test, which uses REAL ids
+/// (`ZONE_VB_RUN`, `ZONE_VB_EARLY_RASTER`, `ZONE_SV0_MARCHER`) precisely because it is asserting on
+/// them. This file asserts on `zone_open_order`, which is keyed by pair slot and not by id.
+const ZONES: [u16; 3] = [77, 88, 99];
 
 /// Ordinary, non-profiling commands the "scene" records between its brackets. Any recorded
 /// `vkCmd*` would do; a pool reset on a scratch pool is the cheapest one that is unambiguously a

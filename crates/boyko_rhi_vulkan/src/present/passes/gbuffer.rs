@@ -557,11 +557,22 @@ impl Renderer<'_> {
             // (`build_particle_bundle` owns them until teardown) and `act.sets` is this frame
             // parity's set. `record_graph_pass` is the deferred path's own barrier sink, so each
             // pass's derived barriers resolve through the ResId space THIS declarator built.
-            ts.cmd();
+            //
+            // Particles P0 gate #17: the zone arm is ARMED here — `GbufWitness::open` recorded
+            // this frame's `vkCmdResetQueryPool` above and `ts.finish()` seals the slot after the
+            // particle draw far below. The single coarse `ts.cmd()` this line used to carry is
+            // gone: the recorder marks each of its own commands now, so keeping it would count the
+            // particle block twice.
             unsafe {
-                self.record_particle_compute(cmd, act, &plan.particle, |p| {
-                    self.record_graph_pass(p, cmd, targets, scene, fi);
-                });
+                self.record_particle_compute(
+                    cmd,
+                    act,
+                    &plan.particle,
+                    super::particles::ParticleZoneArm::from_scene(scene),
+                    |p| {
+                        self.record_graph_pass(p, cmd, targets, scene, fi);
+                    },
+                );
             }
         }
 
@@ -2956,12 +2967,19 @@ impl Renderer<'_> {
             // views are this frame slot's live `lit` and `depth` images — the SAME two the
             // declarator named in the `particle_draw` pass, so the layouts the graph leaves them
             // in are the ones the attachments declare. Every handle in `act` is live for the
-            // frame.
-            ts.cmd();
+            // frame. The zone arm is ARMED — see the compute site above; this call is still ahead
+            // of `ts.finish()`, so `ZONE_PARTICLE_DRAW`'s marks are published by that seal.
             unsafe {
-                self.record_particle_draw(cmd, act, &particle_plan, draw_targets, |p| {
-                    self.record_graph_pass(p, cmd, targets, scene, fi);
-                });
+                self.record_particle_draw(
+                    cmd,
+                    act,
+                    &particle_plan,
+                    draw_targets,
+                    super::particles::ParticleZoneArm::from_scene(scene),
+                    |p| {
+                        self.record_graph_pass(p, cmd, targets, scene, fi);
+                    },
+                );
             }
         }
 

@@ -34,11 +34,11 @@ use crate::memory::BoundBuffer;
 use crate::texture::{MAX_CASCADES, MAX_TEXTURE_LAYERS};
 
 use super::super::frame_driver::Renderer;
-// Profiling rung 7 step 5: the ten ids and their count now come from `gpu_zone`, where
+// Profiling rung 7 step 5: the ids and their count now come from `gpu_zone`, where
 // `zone_begin_stage` is keyed by the same id — one vocabulary, not a pass enum and a mapping.
 use super::super::gpu_zone::{
     GpuZoneRecorder, VB_ZONE_COUNT, ZONE_BASE_VB, ZONE_VB_CULL_DISPATCH, ZONE_VB_CULL_RESET,
-    ZONE_VB_EARLY_CULL, ZONE_VB_EARLY_RASTER, ZONE_VB_HZB_BUILD, ZONE_VB_LATE_CULL,
+    ZONE_VB_EARLY_CULL, ZONE_VB_EARLY_RASTER, ZONE_VB_GEO, ZONE_VB_HZB_BUILD, ZONE_VB_LATE_CULL,
     ZONE_VB_LATE_RASTER, ZONE_VB_LATE_UPLOAD, ZONE_VB_RUN, ZONE_VB_SDF_MESH, ZONE_VB_SHADE,
     zone_begin_stage,
 };
@@ -368,9 +368,9 @@ impl<'a> TsWitness<'a> {
     /// The witness's own index for `zone` — its bit in the two masks and its entry in `pair_of`.
     ///
     /// # Panics
-    /// On a zone outside the VB family. Every caller passes one of the ten `ZONE_VB_*` constants
-    /// literally, so an out-of-range id is a mis-typed call site, not a runtime condition — and a
-    /// wrong-family id would otherwise silently index another pass's bit.
+    /// On a zone outside the VB family. Every caller passes one of the twelve `ZONE_VB_*`
+    /// constants literally, so an out-of-range id is a mis-typed call site, not a runtime
+    /// condition — and a wrong-family id would otherwise silently index another pass's bit.
     #[inline]
     fn slot_of(zone: u16) -> u32 {
         let slot = zone.wrapping_sub(ZONE_BASE_VB);
@@ -1025,11 +1025,23 @@ impl Renderer<'_> {
             // scope opens far below). Every handle in `act` is live for this frame and `act.sets`
             // is this frame parity's set; `record_vb_pass` is the VB path's own sink, so the
             // barriers resolve through the ResId space THIS declarator built.
-            ts.cmd();
+            //
+            // Particles P0 gate #17: the zone arm is ARMED here — `TsWitness::open` recorded this
+            // frame's `vkCmdResetQueryPool` above and `ts.finish()` seals the slot after the
+            // particle draw far below, which is exactly what a particle bracket needs. The single
+            // coarse `ts.cmd()` this line used to carry is gone: the recorder now marks each of
+            // its own commands, and keeping a mark for a block that counts itself would put the
+            // particle commands in the census twice.
             unsafe {
-                self.record_particle_compute(cmd, act, &plan.particle, |p| {
-                    self.record_vb_pass(p, cmd, targets, forward, vb, scene, fi);
-                });
+                self.record_particle_compute(
+                    cmd,
+                    act,
+                    &plan.particle,
+                    super::particles::ParticleZoneArm::from_scene(scene),
+                    |p| {
+                        self.record_vb_pass(p, cmd, targets, forward, vb, scene, fi);
+                    },
+                );
             }
         }
 
@@ -3773,6 +3785,17 @@ impl Renderer<'_> {
             let geo_pass = plan
                 .vb_geo
                 .expect("invariant: path_vb_split() => vb_geo pass declared (declare_vb_graph)");
+            // VB-SV0 DP6-0: open `ZONE_VB_GEO`. Opened BEFORE `record_vb_pass` so the bracket
+            // spans the SAME "derived barriers + bind + dispatch" extent the three `ZONE_VB_SHADE`
+            // arms measure — the split pair's two numbers are only addable if both are the same
+            // shape of interval. GATED like every bracket: `None` on every golden / host /
+            // interactive frame records nothing, so the command stream stays byte-identical to the
+            // path that had no bracket here.
+            // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was reset
+            // at the frame top (this witness's construction site); `fi` is this present's
+            // in-flight slot, and this zone's begin query is written at most once per frame — this
+            // is the only site that stamps id 11, inside the single `path_vb_split()` arm.
+            unsafe { ts.begin(self.fns, cmd, ZONE_VB_GEO) };
             ts.cmd();
             self.record_vb_pass(geo_pass, cmd, targets, forward, vb, scene, fi);
             // Rung R9d: select the `-D MOTION=1` sibling when the hwrt shadow chain's temporal
@@ -3857,6 +3880,13 @@ impl Renderer<'_> {
                 ts.cmd();
                 (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
             }
+            // VB-SV0 DP6-0: close `ZONE_VB_GEO`. Everything the split records next — `vb_viewt`
+            // is already behind us, the SSAO gather and the à-trous chain are below — sits BETWEEN
+            // this end and `ZONE_VB_SHADE`'s begin, which is why the split pair is a sum of two
+            // disjoint intervals and never a span.
+            // SAFETY: recording is open; the pool was reset this frame; `fi` is this slot, and the
+            // matching begin was recorded above in this same `path_vb_split()` arm.
+            unsafe { ts.end(self.fns, cmd, ZONE_VB_GEO) };
 
             // (3) The SSAO gather + à-trous chain (`path_vb_ssao` — the declare-site predicate).
             if scene.path_vb_ssao() {
@@ -4621,12 +4651,20 @@ impl Renderer<'_> {
             // scope closed above; `record_particle_draw` opens and closes its own). The two views
             // are this frame slot's live `lit` and `vb_depth` — the SAME two the declarator named
             // in the `particle_draw` pass, so the layouts the graph leaves them in are the ones
-            // the attachments declare.
-            ts.cmd();
+            // the attachments declare. The zone arm is ARMED — see the compute site above; this
+            // call is still ahead of `ts.finish()`, so `ZONE_PARTICLE_DRAW`'s marks are published
+            // by that seal.
             unsafe {
-                self.record_particle_draw(cmd, act, &plan.particle, draw_targets, |p| {
-                    self.record_vb_pass(p, cmd, targets, forward, vb, scene, fi);
-                });
+                self.record_particle_draw(
+                    cmd,
+                    act,
+                    &plan.particle,
+                    draw_targets,
+                    super::particles::ParticleZoneArm::from_scene(scene),
+                    |p| {
+                        self.record_vb_pass(p, cmd, targets, forward, vb, scene, fi);
+                    },
+                );
             }
         }
 

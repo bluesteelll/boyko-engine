@@ -60,15 +60,28 @@
 //! concurrency this type never has.
 //!
 //! **2. What `stream_pos` counts, stated exactly, because rung 5b's doc claimed more than the
-//! instrument delivers.** It counts **record sites in `vb.rs`**: every `vkCmd*` recorded there
-//! directly (MEASURED: 167 through `self.fns.cmd_*` plus 2 through `crate::accel::cmd_*`) *and*
-//! every call to a helper that records commands elsewhere (`record_vb_pass`, the AA/post chain),
-//! which counts as **one** whatever it records inside. It is therefore a position in `vb.rs`'s
-//! record stream, not a count of `vkCmd` calls, and the resolution of the cross-leg claim is
-//! exactly that: a bracket that moves across any witnessed site moves a position, and a bracket
-//! that moves *within* one delegate's body does not. Rung 5b's *"every recorded command in the
-//! witnessed region"* was wider than any instrument that does not also thread through the shared
-//! post-process recorders.
+//! instrument delivers.** It counts **record sites in the witnessed region**: every `vkCmd*`
+//! recorded there directly *and* every call to a helper that records commands elsewhere
+//! (`record_vb_pass`, the AA/post chain), which counts as **one** whatever it records inside. It is
+//! therefore a position in that region's record stream, not a count of `vkCmd` calls, and the
+//! resolution of the cross-leg claim is exactly that: a bracket that moves across any witnessed
+//! site moves a position, and a bracket that moves *within* one delegate's body does not. Rung 5b's
+//! *"every recorded command in the witnessed region"* was wider than any instrument that does not
+//! also thread through the shared post-process recorders.
+//!
+//! **The region is TWO files since Particles P0 gate #17**, and the granularity is not uniform
+//! across them:
+//!
+//! * **`passes/vb.rs`** — as measured when this paragraph was written: 167 sites through
+//!   `self.fns.cmd_*` plus 2 through `crate::accel::cmd_*`, plus the delegate calls.
+//! * **`passes/particles.rs`** — witnessed at **per-command granularity**: 18 sites in
+//!   `record_particle_compute` and 10 in `record_particle_draw` (the per-block arithmetic is
+//!   spelled at both fns). Before gate #17 this whole subsystem was ONE site — the single coarse
+//!   `ts.cmd()` each caller placed before the delegate call — and that mark was removed in the
+//!   same edit, because a block that counts its own commands must not also be counted as one.
+//!
+//! `passes/gbuffer.rs` reaches the same instrument through `GbufWitness` and is witnessed on the
+//! same terms; `passes/forward.rs` holds no witness at all and contributes nothing.
 //!
 //! # Rung 7c: a position says WHERE a stamp was recorded and nothing about WHAT was recorded
 //!
@@ -180,6 +193,19 @@ impl CommandWitness {
     /// wrong reason, because a K-frame total is insensitive to a bracket that moved earlier in one
     /// frame and later in another. Called at the top of the witnessed region, so what the reader
     /// sees after a frame is that frame.
+    ///
+    /// # The two zone-keyed tables are cleared HERE, and Particles P0 gate #17 is why
+    ///
+    /// They were not, and while every zone was recorded unconditionally that was invisible: each
+    /// frame overwrote both entries of every id it opened, so a stale value was never read. The
+    /// particle family is the first with **frame-conditional** ids — `plan.emit` is `None` on a
+    /// spawn-free frame, so [`ZONE_PARTICLE_EMIT`] opens on some frames and not others. Without
+    /// this clear, such a frame would difference **this** frame's absence against the **previous**
+    /// frame's close, and [`zone_commands`](Self::zone_commands) would return a number that spans
+    /// two frames — or, with the two positions crossed, an underflow-saturated zero reported as a
+    /// measurement.
+    ///
+    /// [`ZONE_PARTICLE_EMIT`]: super::gpu_zone::ZONE_PARTICLE_EMIT
     pub fn begin_frame(&self) {
         self.profiling_cmds.set(0);
         self.query_resets.set(0);
@@ -187,6 +213,10 @@ impl CommandWitness {
         self.repairs.set(0);
         self.recorded_pairs.set(0);
         self.stream_pos.set(0);
+        for k in 0..ZONE_ID_SPAN {
+            self.zone_cmd_open[k].set(Self::NO_POS);
+            self.zone_cmd_close[k].set(Self::NO_POS);
+        }
     }
 
     /// One witnessed record site that is **not** the profiler's.
@@ -544,6 +574,74 @@ mod tests {
         assert!(
             w.stamp_positions().eq([1]),
             "the second frame's first stamp carried the first frame's offset"
+        );
+    }
+
+    /// **The two-frame half of `begin_frame`'s contract, and the one it shipped without.**
+    ///
+    /// The sibling above asserts the SCALAR counters reset. It cannot see the two zone-keyed
+    /// tables, and while every zone was recorded unconditionally that blindness was harmless: each
+    /// frame overwrote both entries of every id it opened, so a stale value was never read.
+    ///
+    /// Particles P0 gate #17 minted the first **frame-conditional** ids — `plan.emit` is `None` on a
+    /// spawn-free frame, so [`ZONE_PARTICLE_EMIT`] opens on some frames and not others. This test is
+    /// the red for that: it drives one frame that brackets the zone, one that does not, and one that
+    /// leaves it half-open, and asserts the two later frames report NO number rather than a number
+    /// differenced against the first frame's close.
+    ///
+    /// **Deleting `begin_frame`'s clear loop reds this test deterministically** — DEMONSTRATED, not
+    /// asserted: case 2 fails with `left: Some(5)`, the whole of frame 1's bracket attributed to a
+    /// frame that never opened it. Case 3 is not reached on that run (a test stops at its first
+    /// failed assertion) and is a second, independent red for the same deletion: frame 3's open
+    /// differenced against frame 1's stale close fabricates `Some(4)`. It is kept because the two
+    /// cases fail for different reasons — an absent zone and a half-open one — and a later edit
+    /// that fixed only the first would leave the second uncovered.
+    ///
+    /// [`ZONE_PARTICLE_EMIT`]: super::super::gpu_zone::ZONE_PARTICLE_EMIT
+    #[test]
+    fn a_frame_conditional_zone_does_not_difference_against_the_previous_frame() {
+        use super::super::gpu_zone::ZONE_PARTICLE_EMIT;
+
+        let w = CommandWitness::new();
+
+        // ── Frame 1: the zone opens, runs three commands, and closes. ──
+        w.begin_frame();
+        w.open_pair(ZONE_PARTICLE_EMIT);
+        w.timestamp(TimestampStage::BottomOfPipe);
+        w.command();
+        w.command();
+        w.command();
+        w.timestamp(TimestampStage::BottomOfPipe);
+        w.close_pair(ZONE_PARTICLE_EMIT);
+        assert_eq!(
+            w.zone_commands(ZONE_PARTICLE_EMIT),
+            Some(5),
+            "the positive control: a zone that opened and closed reports its own span (three \
+             commands plus the two bracket timestamps)"
+        );
+
+        // ── Frame 2: a spawn-free frame. The zone is NOT opened. ──
+        w.begin_frame();
+        w.command();
+        w.command();
+        assert_eq!(
+            w.zone_commands(ZONE_PARTICLE_EMIT),
+            None,
+            "a frame that never opened this zone reported a number — it differenced its own \
+             absence against the PREVIOUS frame's close, which is what clearing the zone tables \
+             in begin_frame prevents"
+        );
+
+        // ── Frame 3: the zone opens and the frame ends before it closes. ──
+        w.begin_frame();
+        w.command();
+        w.open_pair(ZONE_PARTICLE_EMIT);
+        w.timestamp(TimestampStage::BottomOfPipe);
+        assert_eq!(
+            w.zone_commands(ZONE_PARTICLE_EMIT),
+            None,
+            "a half-open zone reported a number — this frame's open differenced against a stale \
+             close is a fabricated span, not a measurement"
         );
     }
 

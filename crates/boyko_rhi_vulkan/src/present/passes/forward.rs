@@ -177,10 +177,26 @@ impl Renderer<'_> {
             // opaque scope opens below). Every handle in `act` is live for this frame and
             // `act.sets` is this frame parity's set; `record_forward_pass` is the Forward path's
             // own sink, so the barriers resolve through the ResId space THIS declarator built.
+            //
+            // ⚠️ Particles P0 gate #17: the zone arm is **DISARMED**, and that is a statement about
+            // THIS file rather than about particles. `record_forward` is the one top-level path
+            // recorder with no timestamp witness at all — nothing here records the frame's
+            // `vkCmdResetQueryPool` and nothing seals the ring slot. A `vkCmdWriteTimestamp` into
+            // an unreset query reads an undefined value, and marks that are never sealed retire as
+            // `NotBracketed`, so arming here would produce commands with no number and a number
+            // with no meaning. Instrumenting Forward/ForwardPlus therefore needs the reset/seal
+            // pair `TsWitness::open`/`finish` gives the other two paths — a rung of its own, and a
+            // named residual of this one.
             unsafe {
-                self.record_particle_compute(cmd, act, &plan.particle, |p| {
-                    self.record_forward_pass(p, cmd, targets, forward, scene, fi);
-                });
+                self.record_particle_compute(
+                    cmd,
+                    act,
+                    &plan.particle,
+                    super::particles::ParticleZoneArm::disarmed(),
+                    |p| {
+                        self.record_forward_pass(p, cmd, targets, forward, scene, fi);
+                    },
+                );
             }
         }
 
@@ -1005,11 +1021,19 @@ impl Renderer<'_> {
             // scope closed above; `record_particle_draw` opens and closes its own). The two views
             // are this frame slot's live `lit` and `forward_depth` — the SAME two the declarator
             // named in the `particle_draw` pass, so the layouts the graph leaves them in are the
-            // ones the attachments declare.
+            // ones the attachments declare. The zone arm is **DISARMED** for the reason spelled
+            // out at the compute site above: this path resets no query pool and seals no slot.
             unsafe {
-                self.record_particle_draw(cmd, act, &plan.particle, draw_targets, |p| {
-                    self.record_forward_pass(p, cmd, targets, forward, scene, fi);
-                });
+                self.record_particle_draw(
+                    cmd,
+                    act,
+                    &plan.particle,
+                    draw_targets,
+                    super::particles::ParticleZoneArm::disarmed(),
+                    |p| {
+                        self.record_forward_pass(p, cmd, targets, forward, scene, fi);
+                    },
+                );
             }
         }
 

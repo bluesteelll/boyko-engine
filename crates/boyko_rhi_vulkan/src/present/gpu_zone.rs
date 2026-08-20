@@ -126,10 +126,22 @@ pub const ZONE_BASE_VB: u16 = 0;
 pub const ZONE_BASE_GBUFFER: u16 = ZONE_FAMILY_WIDTH;
 /// Base for `Sv0TimedPass`-derived ids — the Deferred fine-marcher dispatch.
 pub const ZONE_BASE_SV0: u16 = 2 * ZONE_FAMILY_WIDTH;
+/// Particles P0 gate #17: base for the four `record_particle_*` ids.
+///
+/// The FOURTH family, and the first one minted after the bases stopped being a migration
+/// artifact — there is no `ParticleTimedPass` enum it derives from, because that vocabulary was
+/// deleted at profiling rung 7 and the id IS the name now.
+///
+/// It gets its own base rather than borrowing a hole in an existing family for the reason the
+/// bases exist at all: the particle recorder is called from all three path recorders, so a
+/// particle id sharing a family with `record_vb`'s would be indistinguishable from a VB pass id in
+/// the artifact, on exactly the frames where both are recorded.
+pub const ZONE_BASE_PARTICLE: u16 = 3 * ZONE_FAMILY_WIDTH;
 
 const _: () = assert!(
     ZONE_BASE_VB + ZONE_FAMILY_WIDTH <= ZONE_BASE_GBUFFER
-        && ZONE_BASE_GBUFFER + ZONE_FAMILY_WIDTH <= ZONE_BASE_SV0,
+        && ZONE_BASE_GBUFFER + ZONE_FAMILY_WIDTH <= ZONE_BASE_SV0
+        && ZONE_BASE_SV0 + ZONE_FAMILY_WIDTH <= ZONE_BASE_PARTICLE,
     "zone family ranges overlap, so one id would name two passes"
 );
 
@@ -220,23 +232,60 @@ pub const ZONE_VB_RUN: u16 = ZONE_BASE_VB + 9;
 /// counts (`vb_bench_query_validation`'s 280/560) untouched by this id's existence.
 pub const ZONE_VB_SDF_MESH: u16 = ZONE_BASE_VB + 10;
 
+/// VB-SV0 DP6-0: **the `vb_geo` dispatch** — the geometry half of the geo/shade split, bracketed
+/// over its derived barriers → three descriptor binds → push → dispatch, exactly the
+/// "barriers + bind + dispatch" extent [`ZONE_VB_SHADE`] measures on each of its three producer
+/// arms. Until this id the family's ONLY unbracketed dispatch.
+///
+/// Recorded inside `record_vb`'s `if scene.path_vb_split()` arm, so a fused or classified leg
+/// never stamps it — `NotBracketed`, not a zero. That gating is what keeps the disarmed-fixture
+/// pair counts `vb_bench_query_validation` boots (VB × Mesh, no split) untouched by this id.
+///
+/// # It is minted BEFORE the producer it will host moves, and that is the point
+///
+/// DP6 consolidates SV0's two producers into `vb_geo`. The cost table's "today, split" row is
+/// `ZONE_VB_GEO + ZONE_VB_SHADE + ZONE_VB_SDF_MESH` and its "after" row is
+/// `ZONE_VB_GEO + ZONE_VB_SHADE`, so the before/after is a PAIRED difference on one instrument
+/// rather than a comparison against a remembered number — which it could not be if the id arrived
+/// with the move.
+///
+/// ⚠️ The split pair is a **SUM of two DISJOINT intervals**, never a span: `vb_viewt`, the SSAO
+/// gather and the à-trous chain all record between this id's END and [`ZONE_VB_SHADE`]'s BEGIN.
+pub const ZONE_VB_GEO: u16 = ZONE_BASE_VB + 11;
+
 /// How many zone ids the VB family uses — the count [`super::passes`]'s witness masks are sized by.
 ///
-/// # Record order is LEG-DEPENDENT, and two ids are the ones that move
+/// # Record order is LEG-DEPENDENT, and THREE ids are the ones that move
 ///
-/// | leg | order of BEGIN stamps |
-/// |---|---|
-/// | armed split | `0 1` ‖ `9b 3 4 5 6 7 8 9e` ‖ `2` |
-/// | disarmed | `0 1` ‖ `9b 3 4 5 7 8 9e` ‖ `2` ‖ `6` |
+/// Two independent axes, and until VB-SV0 DP6-0 this table named only one of them "armed" —
+/// which by then meant two different things (an occlusion-split leg and a geo/shade-split leg are
+/// unrelated arming decisions that move different ids). Both are spelled out:
 ///
-/// [`ZONE_VB_HZB_BUILD`] moves because `record_hzb_poison_build` has two mutually-exclusive call
-/// sites on opposite sides of the lit producer; [`ZONE_VB_SHADE`] moves between its own three
-/// producer arms. The `9b … 9e` span is identical on every leg.
+/// * **occlusion split** — `path_vb_occlusion_split()`. Moves [`ZONE_VB_HZB_BUILD`], because
+///   `record_hzb_poison_build` has two mutually-exclusive call sites on opposite sides of the lit
+///   producer, and decides whether ids 4/5 (EARLY) and 7/8 (LATE) enclose real work.
+/// * **geo/shade split** — `path_vb_split()`. Decides which of [`ZONE_VB_SHADE`]'s three producer
+///   arms records, and hence whether [`ZONE_VB_GEO`] stamps at all: the split arm records
+///   `vb_geo` (id 11) and then `vb_shade_split` (id 2) AFTER the unsplit `hzb` slot, where the
+///   fused and classified arms record id 2 BEFORE it.
+///
+/// | occlusion split | geo/shade split | order of BEGIN stamps |
+/// |---|---|---|
+/// | armed | off (fused / classified) | `0 1` ‖ `9b 3 4 5 6 7 8 9e` ‖ `2` |
+/// | off | off (fused / classified) | `0 1` ‖ `9b 3 4 5 7 8 9e` ‖ `2` ‖ `6` |
+/// | armed | armed | `0 1` ‖ `9b 3 4 5 6 7 8 9e` ‖ `11` ‖ `2` |
+/// | off | armed | `0 1` ‖ `9b 3 4 5 7 8 9e` ‖ `6` ‖ `11` ‖ `2` |
+/// | *(either)* | *(either)*, **SV0 armed** | `10` inserts immediately after `9e`, before `6`/`11`/`2` |
+///
+/// The SV0 row is the one [`ZONE_VB_SDF_MESH`]'s own doc describes and this table never carried:
+/// the dedicated prepass records between [`ZONE_VB_RUN`]'s end and everything below it, on an
+/// armed leg only, and on no other leg stamps at all. The `9b … 9e` span is identical on every
+/// row.
 ///
 /// This table is why `TsWitness::pair_of` REMEMBERS each id's pair index instead of deriving it
 /// from the count of lower-numbered opens: the ids do not open in increasing order, so the
 /// derivation gives `VbRun` pair 8 where it is 2.
-pub const VB_ZONE_COUNT: u16 = 11;
+pub const VB_ZONE_COUNT: u16 = 12;
 
 // The per-frame witness masks in `passes::vb` are `u16`, one bit per id, so the family may not
 // outgrow that width without widening them too — and it may not outgrow its base spacing either.
@@ -275,6 +324,56 @@ pub const ZONE_SV0_MARCHER: u16 = ZONE_BASE_SV0;
 /// How many zone ids the SV0 family uses.
 pub const SV0_ZONE_COUNT: u16 = 1;
 
+// === The particle family — Particles P0 gate #17. ===
+//
+// The P0 exit named this a RESIDUAL in as many words: *"no zone ids reach the particle passes —
+// mint them before any measurement claim"*. Gate #17 asks for kickoff/emit/sim/draw µs, and until
+// these four ids existed there was no instrument that could produce them: the recorder took no
+// recorder at all, so the four passes were the only shipped GPU work in the engine outside every
+// bracket.
+//
+// FOUR ids and not five: `particle_upload`'s two `vkCmdCopyBuffer`s are host→device staging
+// traffic, not a dispatch, and gate #17's own row set does not include them — the plan prices the
+// upload with a BANDWIDTH row ("Host→device per frame ≤ 16 KB; 0 B when `total_spawn == 0`",
+// PARTICLES-PLAN.md §Metrics), which is a host-side count and not a GPU duration. They are
+// witnessed by the command census (one `cmd()` per copy) and left unbracketed, the same treatment
+// `record_vb`'s `light_upload` copy gets.
+//
+// STAGES: the three compute ids open at BOTTOM_OF_PIPE and the draw at TOP — see
+// `zone_begin_stage`'s consecutive-partition rule. The three are recorded back-to-back with zero
+// commands between one's END and the next's BEGIN, so they partition; the draw sits behind the
+// whole lit producer and partitions against nothing.
+
+/// Particles P0: the **kickoff** dispatch — the one-thread pass, dispatched DIRECTLY because it is
+/// the pass that writes the indirect argument blocks the other two are fetched from. Brackets its
+/// derived barriers → bind → push → `vkCmdDispatch(1,1,1)`.
+///
+/// Recorded on exactly the frames `scene.particle` is `Some` AND the declarator armed the pass, so
+/// a disarmed boot leaves this pair `NotBracketed` rather than reporting a zero.
+pub const ZONE_PARTICLE_KICKOFF: u16 = ZONE_BASE_PARTICLE;
+/// Particles P0: the **emit** dispatch — `vkCmdDispatchIndirect` over `ceil(real_emit_count / 256)`
+/// groups, a count the DEVICE computed in kickoff and the host never learns. Brackets the derived
+/// barriers → bind → push → indirect dispatch.
+///
+/// A frame with no spawns declares no emit pass, so this id is `NotBracketed` there — which is the
+/// distinction the 2×2 label exists for: "nothing was emitted" and "emit cost ~0" are different
+/// statements about a frame.
+pub const ZONE_PARTICLE_EMIT: u16 = ZONE_BASE_PARTICLE + 1;
+/// Particles P0: the **sim** dispatch — the hot loop, `steps` substeps over the live pool, again
+/// indirect off kickoff's block. The row gate #17's 10k/100k/1M scaling measurement reads.
+pub const ZONE_PARTICLE_SIM: u16 = ZONE_BASE_PARTICLE + 2;
+/// Particles P0: the **draw** — the single `vkCmdDrawIndexedIndirect` of additive billboards,
+/// bracketed over its derived barriers, its OWN dynamic-rendering scope
+/// (`cmd_begin_rendering` … `cmd_end_rendering`) and everything between.
+///
+/// ⚠️ Bracketed OUTSIDE the rendering scope, which is not a style choice: `vkCmdWriteTimestamp` is
+/// legal inside a render pass, but a bracket that opened after `cmd_begin_rendering` would exclude
+/// the scope's own setup — and the scope is a real part of what the draw costs.
+pub const ZONE_PARTICLE_DRAW: u16 = ZONE_BASE_PARTICLE + 3;
+
+/// How many zone ids the particle family uses.
+pub const PARTICLE_ZONE_COUNT: u16 = 4;
+
 // One assert per family and not a conjunction: the widths are independent, so an `&&` would let the
 // wider one imply the narrower and clippy is right to call the second conjunct dead.
 const _: () = assert!(
@@ -285,15 +384,20 @@ const _: () = assert!(
     SV0_ZONE_COUNT <= ZONE_FAMILY_WIDTH,
     "the SV0 family no longer fits its reserved zone-id range"
 );
+const _: () = assert!(
+    PARTICLE_ZONE_COUNT <= ZONE_FAMILY_WIDTH,
+    "the particle family no longer fits its reserved zone-id range"
+);
 
 /// One past the highest zone id any family can mint — the width a zone-KEYED array needs.
 ///
-/// Three families at [`ZONE_FAMILY_WIDTH`] apiece. Derived rather than written, so a fourth family
-/// widens every zone-keyed array by changing one base.
-pub const ZONE_ID_SPAN: usize = (ZONE_BASE_SV0 + ZONE_FAMILY_WIDTH) as usize;
+/// FOUR families at [`ZONE_FAMILY_WIDTH`] apiece. Derived rather than written, and Particles P0
+/// gate #17 is the promise being kept: the fourth family widened every zone-keyed array
+/// (`CommandWitness`'s two `ZONE_ID_SPAN` tables) by changing one base and nothing else.
+pub const ZONE_ID_SPAN: usize = (ZONE_BASE_PARTICLE + ZONE_FAMILY_WIDTH) as usize;
 
 const _: () = assert!(
-    ZONE_ID_SPAN > (ZONE_BASE_SV0 + SV0_ZONE_COUNT - 1) as usize,
+    ZONE_ID_SPAN > (ZONE_BASE_PARTICLE + PARTICLE_ZONE_COUNT - 1) as usize,
     "a zone-keyed array sized by ZONE_ID_SPAN must hold the highest id any family mints"
 );
 
@@ -306,10 +410,49 @@ const _: () = assert!(
 /// different quantity under a green `G10` for five commits. Re-deriving this under deadline
 /// pressure is that failure's exact shape.
 ///
-/// `BOTTOM_OF_PIPE` for the seven P4-2 partitioning brackets (`ZONE_BASE_VB + 3 ..= +9`), because a
-/// bottom stamp is a prefix-completion time and consecutive ones exactly partition their span.
-/// `TOP_OF_PIPE` everywhere else: VB slots 0..2 keep it for compatibility with published VB-P1d
-/// numbers, and both gbuffer families' collectors always opened there.
+/// # The rule is CONSECUTIVE-PARTITION vs ISOLATED-SINGLE-DISPATCH, not "old ids vs new ids"
+///
+/// A `BOTTOM_OF_PIPE` begin is a prefix-COMPLETION time, so two consecutive bottom stamps with no
+/// executable work between them delimit exactly the work recorded between them, and a run of them
+/// PARTITIONS its span. A `TOP_OF_PIPE` begin retires when the command is fetched, which is legal
+/// only where the bracket is preceded by work that is not being attributed to it — otherwise the
+/// stamp lands before its predecessor has drained and the two brackets OVERLAP.
+///
+/// **`BOTTOM_OF_PIPE`** for the two consecutive-partition runs:
+/// * the seven P4-2 VB brackets (`ZONE_VB_LATE_UPLOAD ..= ZONE_VB_RUN`) — the range that gave the
+///   run bracket its migration-immunity;
+/// * **the three particle COMPUTE ids** (`ZONE_PARTICLE_KICKOFF`, `_EMIT`, `_SIM`), named rather
+///   than ranged because the `matches!` range above is VB-only and widening it would silently
+///   swallow whatever id is minted next. They are back-to-back with **zero** recorded commands
+///   between one's END and the next's BEGIN (`passes/particles.rs`), so under `TOP_OF_PIPE` the
+///   three rows overlapped and their sum exceeded the wall time they were supposed to divide —
+///   which is precisely what P0 gate #17 asks them not to do (it wants four separately
+///   attributable numbers). Kickoff additionally opens the frame's command buffer, where a `TOP`
+///   stamp absorbs whatever backlog the queue was already carrying.
+///
+/// **`TOP_OF_PIPE`** for the isolated single-dispatch brackets: VB slots 0..2 keep it for
+/// compatibility with published VB-P1d numbers, both gbuffer families' collectors always opened
+/// there, and [`ZONE_VB_SDF_MESH`], [`ZONE_VB_GEO`] and [`ZONE_PARTICLE_DRAW`] sit with unbracketed
+/// work on both sides — **on the legs named below**. The whole lit producer runs before the
+/// particle draw on every leg, so id 51's isolation is unconditional; the other two are not, and
+/// the qualification is the load-bearing part:
+///
+/// > ⚠️ **[`ZONE_VB_GEO`]'s isolation holds only when `scene.ssao.is_some()`.** What precedes
+/// > `vb_geo` in the split arm is the `vb_viewt` pre-tail dispatch, and that dispatch is gated on
+/// > SSAO — while `path_vb_split()` is **not**: `pre_light` is the union
+/// > `ssao ∨ ddgi ∨ shadow_denoise ∨ shadow_temporal ∨ ssr`. On a split boot with SSAO **off** and
+/// > another pre-light consumer on, and the occlusion split off, [`ZONE_VB_HZB_BUILD`]'s
+/// > `BOTTOM_OF_PIPE` END is followed by **zero recorded commands** before id 11's `TOP_OF_PIPE`
+/// > BEGIN — the exact adjacency the particle compute run was measured overlapping at. **That leg's
+/// > `ZONE_VB_GEO` number is contaminated by the drain ahead of it**, and it is recorded here as a
+/// > known limitation rather than fixed: rung **DP6-0b** restamps ids 10 and 11 to `BOTTOM` with a
+/// > stated reason and re-baselines against it, and moving them early would silently invalidate
+/// > DP6-0's recorded cells. The cells themselves are unaffected — `[vb_both_ssao]` arms
+/// > `SsaoConfig::High`, so `vb_viewt` ran and geo was genuinely isolated on the fixture they were
+/// > measured on (its 5 248 ns gap between id 6's end and id 11's begin is that dispatch).
+///
+/// ⚠️ The `TOP` rows are therefore NOT addable to the `BOTTOM` rows as a partition. They are
+/// independent durations that may each include a share of the drain ahead of them.
 ///
 /// # What gates this table now — stated, because the answer changed
 ///
@@ -319,10 +462,18 @@ const _: () = assert!(
 /// and the gate is gone with it. Nothing measures this table against an independent copy any more,
 /// **because there is no independent copy left to measure against.**
 ///
-/// What replaces it is weaker and is named as weaker: the `const` block below pins each of the ten
-/// VB ids to the stage it had when both tables agreed. That catches a row edited by hand; it cannot
+/// What replaces it is weaker and is named as weaker: the `const` block below pins the ten original
+/// VB ids to the stage they had when both tables agreed, plus the six minted since
+/// ([`ZONE_VB_SDF_MESH`], [`ZONE_VB_GEO`] and the four particle ids) to the stage the
+/// consecutive-partition rule above assigns them. That catches a row edited by hand; it cannot
 /// catch a bracket moved to a site where the other stage is the right one. That question is a
-/// measurement, and after this rung it is rung 8's.
+/// measurement — and Particles P0 gate #17 is the first time this tree took it. With the three
+/// compute ids on `TOP`, their medians summed against the wall span they were supposed to divide
+/// (`48.begin → 50.end`, `particle_lab`, three release legs) gave **1.083 / 1.025 / 1.077** — every
+/// leg over 1, i.e. three rows overlapping. On `BOTTOM` the same three legs give
+/// **1.000 / 1.002 / 1.000**, and the 1.002 is 32 ns on a 15 296 ns span: one timer tick of
+/// median-of-21-frames rounding, not an overlap. The ratios are quoted rather than banded because
+/// a band that reads "1.03–1.08" excludes one of the three legs it claims to summarise.
 #[must_use]
 pub const fn zone_begin_stage(zone: u16) -> TimestampStage {
     // Written against the NAMED ids rather than `3..=9`: the range is the P4-2 partitioning span,
@@ -330,7 +481,14 @@ pub const fn zone_begin_stage(zone: u16) -> TimestampStage {
     // the family grows. No `>= ZONE_BASE_VB` guard is possible — that base is 0, so the comparison
     // is tautological on a `u16` and clippy refuses it; the other families' bases (gbuffer's 16,
     // SV0's 32) fall outside this range on their own.
-    if matches!(zone, ZONE_VB_LATE_UPLOAD..=ZONE_VB_RUN) {
+    //
+    // The particle compute run is spelled as THREE NAMES and not as a second range. A range would
+    // read `ZONE_PARTICLE_KICKOFF..=ZONE_PARTICLE_SIM`, which is `base..=base+2` — and the next id
+    // appended to that family would land at `base+4`, outside it, while any id inserted between
+    // them would be swallowed without a line changing. Names cost three tokens and cannot do that.
+    if matches!(zone, ZONE_VB_LATE_UPLOAD..=ZONE_VB_RUN)
+        || matches!(zone, ZONE_PARTICLE_KICKOFF | ZONE_PARTICLE_EMIT | ZONE_PARTICLE_SIM)
+    {
         TimestampStage::BottomOfPipe
     } else {
         TimestampStage::TopOfPipe
@@ -364,6 +522,23 @@ const _: () = {
     assert!(
         tops(ZONE_BASE_GBUFFER) && tops(ZONE_BASE_SV0),
         "the gbuffer and SV0 families open at TOP_OF_PIPE"
+    );
+    // The SIX ids minted after those collectors were deleted — `ZONE_VB_SDF_MESH` (DP4a),
+    // `ZONE_VB_GEO` (DP6-0) and the four particle ids (P0 gate #17). Pinned by NAME and not left to
+    // the `matches!` arithmetic: an id that later slid into `LATE_UPLOAD..=RUN`, or out of the
+    // particle compute triple, would silently change what its bracket measures — rung 7c's defect
+    // exactly.
+    //
+    // The split is the consecutive-partition rule stated above, NOT the id's age: the three
+    // particle COMPUTE ids are back-to-back with no commands between them, so they bottom; the
+    // three isolated single-dispatch ids have unbracketed work on both sides, so they top.
+    assert!(
+        bottoms(ZONE_PARTICLE_KICKOFF) && bottoms(ZONE_PARTICLE_EMIT) && bottoms(ZONE_PARTICLE_SIM),
+        "the particle compute ids are a consecutive partition and must open at BOTTOM_OF_PIPE"
+    );
+    assert!(
+        tops(ZONE_VB_SDF_MESH) && tops(ZONE_VB_GEO) && tops(ZONE_PARTICLE_DRAW),
+        "the three isolated single-dispatch ids open at TOP_OF_PIPE"
     );
 };
 
@@ -513,6 +688,24 @@ struct FrameSlot {
     /// that holds the recorder shared for a frame's recording could not then call it at the frame
     /// top — which is the one place it belongs.
     needs_cmd_reset: AtomicBool,
+    /// **Whether this slot's pool is known-clean for the frame it is recording** — the precondition
+    /// every `vkCmdWriteTimestamp` below has, and until Particles P0 gate #17 the only one nothing
+    /// could check.
+    ///
+    /// # It is NOT [`Self::needs_cmd_reset`], and that flag cannot be used for this
+    ///
+    /// [`GpuZoneRecorder::open_frame`] REFUSES a slot whose `needs_cmd_reset` is set, so every slot
+    /// a caller can hold reads `false` there by construction — an assert against it would be
+    /// tautological, which is the "gate that cannot fail" shape this tree treats as a defect. It is
+    /// also `false` on a slot whose pool has **never been reset at all** ([`FrameSlot::new`]), which
+    /// is exactly the first-frame case a caller that forgets its reset would hit.
+    ///
+    /// Set by [`GpuZoneRecorder::record_reset`] and by [`GpuZoneRecorder::close_slot`]'s successful
+    /// HOST reset; cleared by `close_slot` before that attempt, because the frame just written into
+    /// this pool made it dirty. Starts `false`: a pool nobody has reset is not clean.
+    ///
+    /// Atomic for [`Self::needs_cmd_reset`]'s reason — `record_reset` takes `&self`.
+    pool_clean: AtomicBool,
     /// Whether this slot is recording or awaiting retire.
     in_flight: bool,
 }
@@ -529,6 +722,7 @@ impl FrameSlot {
             record_frame: 0,
             grace: RETIRE_GRACE_FRAMES,
             needs_cmd_reset: AtomicBool::new(false),
+            pool_clean: AtomicBool::new(false),
             in_flight: false,
         }
     }
@@ -690,6 +884,8 @@ impl GpuZoneRecorder {
         // The recorded reset is what clears the fallback flag: after this command executes the
         // pool is clean, so the slot may be claimed again.
         self.slots[slot].needs_cmd_reset.store(false, Ordering::Relaxed);
+        // …and it is what discharges `record_begin`'s precondition for this frame.
+        self.slots[slot].pool_clean.store(true, Ordering::Relaxed);
     }
 
     /// Record `pair`'s BEGIN stamp at `stage` and witness it. **Returns the stage it wrote at**,
@@ -710,8 +906,9 @@ impl GpuZoneRecorder {
     ///
     /// # Safety
     ///
-    /// As [`Self::record_reset`], and `pair` must have come from [`Self::alloc_pair`] on this
-    /// slot.
+    /// As [`Self::record_reset`]; `pair` must have come from [`Self::alloc_pair`] on this slot;
+    /// and **`slot`'s pool must have been reset since the last queries were written into it** —
+    /// `debug_assert`ed below against the recorder's own `pool_clean` bit.
     pub unsafe fn record_begin(
         &self,
         fns: &DeviceFns,
@@ -720,6 +917,31 @@ impl GpuZoneRecorder {
         pair: u16,
         stage: TimestampStage,
     ) -> TimestampStage {
+        // Particles P0 gate #17: the reset precondition, CHECKED. It used to be prose in three
+        // places, and the recorder gained a third family of callers at that rung — one of which
+        // (`record_forward`) has no witness and therefore records no reset, so a one-line edit
+        // there would have written timestamps into never-reset queries with nothing to red.
+        //
+        // Placed HERE and not in the particle witness on purpose: the precondition belongs to every
+        // caller of this fn, and a check that lives in one caller is a check the next one does not
+        // inherit.
+        //
+        // ITS EXACT STRENGTH, stated so it is not read as more: it catches the FIRST USE of a slot
+        // whose pool has never been reset — and that is the whole of it. It does NOT additionally
+        // catch "a pool the previous retire could not clean": that state is `needs_cmd_reset`, and
+        // `open_frame` refuses exactly those slots, so no caller can ever hold one. Claiming it
+        // would be the same tautology this bit exists instead of.
+        //
+        // On a device with host query reset it therefore cannot catch a caller that merely FORGOT
+        // its own `record_reset` on a RECYCLED slot, because that pool is genuinely clean. The
+        // other half of such a caller's error — marks nobody seals — is already fail-safe by
+        // `label_slot`'s design (an unsealed slot labels every pair `NotBracketed` and reports no
+        // numbers).
+        debug_assert!(
+            self.slots[slot].pool_clean.load(Ordering::Relaxed),
+            "invariant: a zone bracket's slot pool was reset this frame (record_reset) or by the \
+             host at its last retire — a timestamp written into an unreset query is undefined"
+        );
         // SAFETY: caller contract.
         unsafe {
             self.write_timestamp(fns, cmd, slot, u32::from(pair) * 2, stage);
@@ -953,10 +1175,15 @@ impl GpuZoneRecorder {
     fn close_slot(&mut self, device: &VulkanContext, idx: usize) {
         self.slots[idx].in_flight = false;
         self.slots[idx].seal.store(SEAL_UNSEALED, Ordering::Relaxed);
+        // The frame that just retired WROTE into this pool, so it is dirty until something resets
+        // it. Cleared before the attempt below, never after it, so the failure path leaves the
+        // honest state rather than the previous frame's.
+        self.slots[idx].pool_clean.store(false, Ordering::Relaxed);
         if device.host_query_reset_supported()
             && device.reset_query_pool_host(&self.pools[idx], 0, QUERIES_PER_SLOT).is_ok()
         {
             self.slots[idx].needs_cmd_reset.store(false, Ordering::Relaxed);
+            self.slots[idx].pool_clean.store(true, Ordering::Relaxed);
         } else {
             // The fully specified fallback: the slot is unavailable until an armed frame records a
             // `vkCmdResetQueryPool` for it. With `GPU_RING_DEPTH > FRAMES_IN_FLIGHT` there is
