@@ -1,0 +1,18 @@
+[package]
+name = "aether-tests"
+version = "0.1.0"
+edition = "2024"
+
+# The integration half of Decision A2: this crate is where the ENGINE dependency lives, so the
+# drift gate (Aether output compiling against the real `boyko_ecs`/`boyko_macros`) sits beside
+# the engine deps rather than inside the dependency-free language crates.
+
+[dependencies]
+
+[dev-dependencies]
+aether = { path = "../aether" }
+boyko-ecs = { path = "../boyko_ecs" }
+boyko-macros = { path = "../boyko_macros" }
+
+[lints]
+workspace = true

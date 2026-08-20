@@ -1,0 +1,19 @@
+[package]
+name = "aether-lang"
+version = "0.1.0"
+edition = "2024"
+
+# NOTE: a PLAIN library, not a proc-macro crate — the Dioxus-proven split
+# (docs/AETHER-LANG-PLAN.md Decision A2): the parser and expander are unit-testable
+# here without macro expansion, and the thin `aether` proc-macro crate wraps
+# `expand_block`. Like `boyko-macros`, this crate does NOT depend on `boyko-ecs`:
+# every `boyko_ecs::…`/`boyko_macros::…` occurrence in the expander is an emitted
+# TOKEN resolved in the downstream crate (the tokens-not-deps rule).
+
+[dependencies]
+syn = { version = "2.0.100", features = ["full", "extra-traits"] }
+quote = "1.0.39"
+proc-macro2 = "1.0.93"
+
+[lints]
+workspace = true
