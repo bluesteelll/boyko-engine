@@ -278,20 +278,39 @@ needs a device. The resolver sweep is the part that runs on every `cargo test`. 
 
 ## `vb_geo.comp.hlsl` — the R9 thin-aux geometry pre-pass (compute)
 
-One source, ONE axis. Paired 1:1 with `vb_shade_split.comp.hlsl` above: the split producer's geometry
-half, dispatched when `path_vb_split()` resolves. It re-fetches the covered triangle through
-`vb_geom_fetch.hlsli` and writes the thin aux targets the pre-light consumers read.
+One source, TWO independent axes (`MOTION`, `VB_SV0_TERM`). Paired 1:1 with `vb_shade_split.comp.hlsl`
+above: the split producer's geometry half, dispatched when `path_vb_split()` resolves. It re-fetches
+the covered triangle through `vb_geom_fetch.hlsli` and writes the thin aux targets the pre-light
+consumers read.
 
-| Variant | `MOTION` | `.spv` | dxc `-T` | Delta |
-|---|---|---|---|---|
-| base | — | `vb_geo.comp.spv` | `cs_6_0` | the thin-aux write (`gThinNormal` + depth-derived view-space data) that SSAO / DDGI / the shadow-temporal reproject consume. |
-| motion (R9d) | `1` | `vb_geo_mv.comp.spv` | `cs_6_0` | **+ the per-pixel camera-reprojected motion vector** for static geometry. No `rayQuery`, so the SAME `cs_6_0` target as base suffices — unlike the `deferred_pbr` HWRT rows, this axis does not move the profile. |
+| Variant | `MOTION` | `VB_SV0_TERM` | `.spv` | dxc `-T` | Delta |
+|---|---|---|---|---|---|
+| base | — | — | `vb_geo.comp.spv` | `cs_6_0` | the thin-aux write (`gThinNormal` + depth-derived view-space data) that SSAO / DDGI / the shadow-temporal reproject consume. |
+| motion (R9d) | `1` | — | `vb_geo_mv.comp.spv` | `cs_6_0` | **+ the per-pixel camera-reprojected motion vector** for static geometry. No `rayQuery`, so the SAME `cs_6_0` target as base suffices — unlike the `deferred_pbr` HWRT rows, this axis does not move the profile. |
+| sv0 term (VB-SV0 DP6b) | — | `1` | `vb_geo_sv0.comp.spv` | `cs_6_0` | **+ Set-1 `gSdfTerm` @3** (`rg8` UAV, **write** `RG(vis, ao)` under a wave-uniform `sv0_mode != 0` gate) **+ Set-1 `Buf` @4** (`register(t0)`, the SDF edit list, read). **Also a Set-0 delta, in the reflection though not in the layout: `vb_layout0`'s @3 `LightBuf` is declared by all three variants but READ only by this one, and DXC strips a declared-but-unread `StructuredBuffer` — `OpDecorate %LightBuf` count is 0 / 0 / 2 across base / motion / sv0.** The descriptor-set-layout object is shared and unchanged (a module that does not statically use a descriptor imposes no requirement on it — the R2 bound-but-unread contract); what differs is what each `.spv` reflects. The source-level `#define VB_SV0` is DERIVED from this flag, unlocking `vb_geom_fetch.hlsli`'s `tri_p0/1/2` + `vb_sv0_face_normal`; `light_table.hlsli` (ordered FIRST) + `sdf_field.hlsli` + `sdf_shadow_leaves.hlsli` are included, giving one `sdf_soft_shadow_ranged` march for the primary directional from the geometric face normal's lifted origin plus the 5-tap `sdf_ao` on the shading normal. Still `cs_6_0` — a software march, no `rayQuery`. |
+
+**The `MOTION × VB_SV0_TERM` cross is provably empty and is deliberately NOT built** (DP6 design
+Decision 2): `vb_geo_mv_active()` is `feature = "hwrt"` + `ray_query_enabled()` + the hwrt temporal
+denoise arm, and `vb_sv0_host ⇒ !vb_geo_mv_active()` is a shipped property. Two axes, three modules —
+the fourth cell has no boot that could select it.
+
+**Why `-D` and not a runtime branch** (Decision 1): carrying the march compiled-in DARK measured
+`+10 128 B` on this `15 888 B` kernel at `13f1c9a3` (and `+75 %` on `vb_resolve`). The variant as
+shipped is `28 292 B` — **`+12 404 B`, `+78.1 %`** — so the dark tax the design refused to pay
+unconditionally is *larger* on this host than the figure it refused it on.
+
+**Byte gates:** `vb_raster_geo_classify_spv_sync.rs`'s row table (all three rows re-DXC'd under the
+frozen recipe) **plus** `vb_geo_preprocess_sync.rs`, the two-sided `dxc -P` gate that proves the SV0
+span is ADDITIVE — with the flag undefined the source preprocesses to its pre-DP6b program, which is
+what keeps the base and motion `.spv` byte-frozen and every VB golden unmoved. At DP6b
+`vb_geo_sv0.comp.spv` is selected by NOTHING, so those two gates are its entire coverage; the pick
+arrives at DP6c.
 
 *Provenance: this section was **missing** until 2026-07-26. `vb_geo` has shipped since rung R9 with a
 real `-D` axis and no row — the same standing-rule violation `deferred_pbr_wrap` carried until
 `a4824a8`. Found while enumerating the VB-SV0 blast radius, which had to prove both rows
 **unperturbed**; the section outlived that stage's revert because the rows themselves ship
-regardless of it.*
+regardless of it. The `VB_SV0_TERM` row is VB-SV0 DP6b's, added with the axis rather than after it.*
 
 ## Deliberately ABSENT from this manifest: `vb_raster.{vs,fs}.hlsl`
 

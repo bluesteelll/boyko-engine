@@ -2589,3 +2589,108 @@ for the cause. Sending them to a line that is a chain selector costs them the on
 given. The class is the campaign's recorded one — a datum nobody re-derives, which the first
 "fix" re-blesses. Repair should either name the real guard (if the intent survives somewhere) or
 delete both citations and state the fixture's own reason without borrowing another rung's.
+
+---
+
+## 2026-08-20: DP6b's `-P` gate cannot be "character-identical" as the design spells it — and the measured reason
+
+VB-SV0 DP6-DESIGN §Metrics (P1-5) specifies the new two-sided preprocessor gate as: *"`dxc -P
+vb_geo.comp.hlsl` (no defines) is **character-identical** to the pre-DP6b file's `-P`"*. **As
+written that is unachievable for any additive edit, and the shipped gate
+(`crates/boyko_rhi_vulkan/tests/vb_geo_preprocess_sync.rs`) states a normalized form instead.**
+
+Two independent reasons, both measured on the pinned VulkanSDK 1.4.350.0 `dxc`:
+
+1. **`#line` directives carry the path and the line number.** The pre-DP6b side has to be
+   materialised somewhere (`git show` writes it to a temp file), so the paths differ; and DP6b's
+   edit is additive, so every line after the first insertion is renumbered. A gate comparing the
+   raw text would red on a pure comment addition.
+2. **`dxc -P` does not preserve blank lines across an elided region.** With the `#ifdef
+   VB_SV0_TERM` block present, the single blank line between `} pc;` and `[numthreads(64, 1, 1)]`
+   is swallowed by the `#line` jump that replaces the guarded span. **With `#line` stripped the two
+   sides differ by exactly one empty line** — on a source every added line of which is inside a
+   guard. No source formatting removes it: the jump is emitted whenever the elided run is long.
+
+**Shipped form:** strip `#line` directives and empty lines, compare the remainder
+character-for-character. Measured: **571 identical lines** pre-DP6b vs HEAD with the flag OFF;
+**916 lines** with `-D VB_SV0_TERM=1`. The gate ships with its own two-directional sensitivity
+control — an edit OUTSIDE every guard must move the base text, an edit INSIDE the guard must not
+(and must move the `-D` text) — so the normalization is proved not to have removed the teeth
+rather than argued to have kept them.
+
+**What the normalization gives up, stated:** a mutation that changes ONLY whitespace outside a
+guard. That cannot change a compile, and the `.spv` byte gate
+(`vb_raster_geo_classify_spv_sync.rs`) covers the compile independently.
+
+**Not filed as a defect in the design.** The spelling was written before anyone ran `dxc -P` on
+this file — the same shape as the design's own P1-5 finding that no `.rs`/`.ps1` in-tree invoked
+`-P` at all, only plan prose. It is recorded here so the next reader of that sentence does not try
+to "fix" the test back to a literal comparison it can never pass.
+
+## 2026-08-20: DP6b landed its SHADER half only — the `vb_geo_aux_layout` widening is atomic with a file that was checked out dirty
+
+DP6b's ladder entry has two halves. The shader/variant/gate half is landed (guarded span,
+`vb_geo_sv0.comp.spv`, `embed_spirv!` + accessor, `spv_sync` row, the new `-P` gate,
+`sdf_field_edsl_sync` re-pointed, manifest row). **Decision 5's `vb_geo_aux_layout` 3 -> 5 widening
+and its two boot descriptor writes are NOT landed**, because
+`crates/boyko_rhi_vulkan/src/present/targets.rs` carried unrelated uncommitted work from a
+concurrent lane at the time.
+
+**They cannot be split, and the reason is mechanical rather than stylistic** — recorded so nobody
+lands "just the layout" as a smaller step:
+
+* `rhi_impl/device.rs::create_bind_group` sizes the descriptor POOL from the `entries` histogram
+  and then allocates a set from the LAYOUT. A 5-binding layout fed 3 entries allocates against a
+  pool missing one `STORAGE_IMAGE` and one `STORAGE_BUFFER` -> `VK_ERROR_OUT_OF_POOL_MEMORY` on
+  every split boot.
+* The same function carries `debug_assert!(count == desc.layout.entry_count)`, so a debug build
+  panics before it gets there.
+
+So the widening (`boyko_app/src/gpu_scene/mod.rs`), the `!rg8_ok` placeholder bind
+(`targets.rs::vb_geo_aux_set`) and the `vb_geo_sv0` boot pipeline land together or not at all. The
+DP6b gate is otherwise met: all `*_edsl_sync`/`*_spv_sync` green, the five named goldens
+byte-identical, `gpu_command_census` and `vb_bench_query_validation` green.
+
+## 2026-08-20: the SV0 tuning-block VALUE pin covered two of four shipped hosts — CLOSED at DP6b, with one adjacent claim left open
+
+**Found by the DP6b review, and the finding is partly about the report that preceded it:** the DP6b
+implementation report said this gap was "filed". It was not — it was named in a report and filed
+nowhere, while the twin defect of the same class (`vb_occ_dense`'s citation of a non-existent
+release-live assert, the entry above) was filed properly the same day. *One twin filed, one
+claimed.* Recorded because the failure mode is the campaign's own: a datum that exists only in
+prose nobody re-derives.
+
+**The defect.** `sdf_shadow_leaf_oracle.rs`'s `SHADOW_CONST_SOURCES` read
+`["deferred_pbr.hlsl", "sdf_gbuffer_composite.hlsl"]` above a doc calling them *"the two sources
+that carry the SHADOW march tuning block"* — while **six** shipped shaders declared `SHADOW_K`. The
+two SV0 marcher hosts, `sdf_mesh_shadow.comp.hlsl` (DP1) and `vb_geo.comp.hlsl` (DP6b), were never
+added. An edit to `SHADOW_K` in either one alone stayed green in that oracle, green in
+`sdf_field_edsl_sync.rs` (which pins the consts' PRESENCE and their ORDER against the include, never
+their VALUES), and green in every golden — the only red would have been the `.spv` byte gate, whose
+documented repair for a red is *"re-run the header recipe and commit the result"*, i.e. the exact
+motion that blesses the divergence.
+
+Two independent citations pointed at a test that does not exist — `sv0_consts_match_deferred_and_marcher`
+— in `sdf_field_edsl_sync.rs`'s panic message and in `docs/VB-SV0-SDF-SHADOW-PLAN.md`. The real
+test had been RENAMED to `sdf_shadow_and_ao_consts_match_deferred_and_marcher`, and the rename is
+what carried the reader past the coverage hole: looking up the cited name returns nothing, so
+nobody reached the list to notice what was missing from it.
+
+**CLOSED, not filed.** `SHADOW_CONST_SOURCES` is now all four shipped hosts; the selection-size
+assertion derives from `SHADOW_CONST_SOURCES.len()` instead of a hand-written `21`, so adding or
+removing a source can no longer silently shrink the gate; the doc states why the two SV0 hosts were
+missing; the `sdf_field_edsl_sync.rs` panic message cites the real test name. **All four hosts fold
+identically on the first run** — the blocks were verbatim mirrors, so no divergence had accumulated
+in the window; the gate is red-capable, demonstrated by perturbing `SHADOW_K` in `vb_geo.comp.hlsl`
+alone (`folds to 9 (0x41100000), but the host mirror is 8 (0x41000000)`).
+
+**Still open, filed rather than fixed (pre-existing, unrelated to DP6b).**
+`vb_geom_fetch.hlsli:581-583` claims of `vb_sv0_face_normal`'s cost argument that *"that is verified
+on the artifact, not assumed: the committed `.spv` are disassembled and the `Cross`/`InverseSqrt`
+chain must appear INSIDE the gate's conditional region, never hoisted into the entry block by
+`-O3`"*. **No test in the workspace disassembles any `.spv` for a `Cross`/`InverseSqrt` hoist
+check.** The claim's own words are what make it worth an entry — "verified on the artifact, not
+assumed" is precisely the sentence a reader trusts instead of re-checking. Repair is either the
+census the sentence describes (a `spirv-dis` block-membership assertion, the
+`vb_raster_geo_classify_spv_sync.rs` builtin-census idiom) or striking the claim; DP6b widened the
+`VB_SV0` definer set to two, so the sentence now also covers a module nobody has looked at.

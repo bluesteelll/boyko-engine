@@ -553,16 +553,33 @@ struct VbGeomFetchResult {
     // `world_normal` is `mul(m3, n)` with no inverse-transpose correction (see the limitation
     // note at the `world_n*` lines below).
     //
-    // `VB_SV0` is a SOURCE-level `#define` — NEVER a `-D` on the dxc command line, so it creates
-    // zero new compile variants. Its definer set has TURNED once: the inline stage (rung S2,
-    // reverted at 13f1c9a3) had each of the three VB lit-producer tails define it; the shipped
-    // DEDICATED pass (plan Rev 10 DP1..DP5) defines it in `sdf_mesh_shadow.comp.hlsl` ONLY — the
-    // tails read the pass's R8G8 term instead of marching, so they no longer include these
-    // exports. `vb_geo.comp.hlsl` does not define it and therefore preprocesses
-    // character-identical to its pre-SV0 form, which is what keeps `vb_geo.comp.spv` /
-    // `vb_geo_mv.comp.spv` byte-identical BY CONSTRUCTION rather than by DXC's goodwill. (DXC
-    // would in fact strip unguarded unread members anyway — measured, plan §11.4 — so the guard
-    // is checked at the level where it is observable, `dxc -P`, not at the `.spv` level.)
+    // `VB_SV0` is a SOURCE-level `#define`. Its definer set has TURNED TWICE:
+    //
+    //   1. The inline stage (rung S2, reverted at 13f1c9a3) had each of the three VB lit-producer
+    //      tails define it.
+    //   2. The DEDICATED pass (plan Rev 10 DP1..DP5) moved it to `sdf_mesh_shadow.comp.hlsl` ALONE
+    //      — the tails read that pass's R8G8 term instead of marching, so they no longer include
+    //      these exports.
+    //   3. VB-SV0 DP6b (`docs/VB-SV0-DP6-DESIGN.md`) adds a SECOND definer, `vb_geo.comp.hlsl`,
+    //      which consolidates the march into the split's geometry half. `sdf_mesh_shadow.comp.hlsl`
+    //      is retired at DP6e, returning the set to one.
+    //
+    // **The "NEVER a `-D`" half of this contract is now stated per-definer, because DP6b's definer
+    // DERIVES it from one.** `sdf_mesh_shadow.comp.hlsl` still writes a bare `#define VB_SV0`.
+    // `vb_geo.comp.hlsl` writes `#ifdef VB_SV0_TERM / #define VB_SV0 / #endif`, so `VB_SV0` itself
+    // is still never passed on a dxc command line — the command line carries `-D VB_SV0_TERM=1` and
+    // the two names cannot drift apart. What HAS changed is the consequence: `vb_geo.comp.hlsl`
+    // does define `VB_SV0`, on one of its three compiles, so it DOES create a compile variant
+    // (`vb_geo_sv0.comp.spv`). "Zero new compile variants" was true of definer set (2) and is not a
+    // property of the mechanism.
+    //
+    // `vb_geo.comp.spv` / `vb_geo_mv.comp.spv` therefore keep their byte-identity by the `#ifdef`
+    // GUARD rather than by non-definition: with `VB_SV0_TERM` undefined the file preprocesses to
+    // its pre-DP6b program, and that is MEASURED, not asserted — the two-sided gate is
+    // `tests/vb_geo_preprocess_sync.rs`, which re-derives the pre-DP6b source through `git show`
+    // and compares the normalized `dxc -P` texts in both directions. (DXC would in fact strip
+    // unguarded unread members anyway — measured, plan §11.4 — so the guard is checked at the level
+    // where it is observable, `dxc -P`, not at the `.spv` level.)
     float3 tri_p0;
     float3 tri_p1;
     float3 tri_p2;

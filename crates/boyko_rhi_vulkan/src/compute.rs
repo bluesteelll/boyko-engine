@@ -1063,6 +1063,41 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// VB-SV0 DP6b (`docs/VB-SV0-DP6-DESIGN.md`, Decisions 1 + 5): the `-D VB_SV0_TERM=1` sibling
+    /// of [`VB_GEO_SPV`] — the SDF-on-mesh soft shadow + contact-AO march compiled INTO the split's
+    /// geometry half, which already performs the per-covered-pixel `vb_geom_fetch` the march needs.
+    /// This is DP6's producer consolidation: it replaces the dedicated `sdf_mesh_shadow.comp.spv`
+    /// prepass, which is retired at DP6e.
+    ///
+    /// Identical `vb_geo` re-fetch + `gThinNormal` write, plus — under a wave-uniform light-header
+    /// mode read — one `sdf_soft_shadow_ranged` march for the PRIMARY directional from the
+    /// GEOMETRIC face normal's lifted origin and the 5-tap `sdf_ao` along the SHADING normal, both
+    /// stored into the R8G8 term. Set 1 (`vb_geo_aux_layout`) gains `gSdfTerm` @3 (rg8 STORAGE,
+    /// WRITE) and the SDF edit list `Buf` @4 (STORAGE, READ); Set 2 is unchanged.
+    ///
+    /// **Set 0's reflected interface is NOT common with [`VB_GEO_SPV`], and the difference is
+    /// measured rather than assumed.** `vb_layout0`'s @3 `LightBuf` is declared by all three
+    /// variants but READ only by this one, and DXC strips a declared-but-unread
+    /// `StructuredBuffer` — `spirv-dis | grep -c 'OpDecorate %LightBuf'` gives **0** on
+    /// `vb_geo.comp.spv`, **0** on `vb_geo_mv.comp.spv` and **2** here. The DESCRIPTOR SET LAYOUT
+    /// object is nonetheless shared and unchanged: a module that does not statically use a
+    /// descriptor imposes no requirement on it, which is the whole R2 bound-but-unread contract.
+    /// Stated because "Set 0 unchanged" would otherwise be read as "the reflection matches", and a
+    /// later rung diffing the three modules' interfaces would find a discrepancy this doc denied.
+    ///
+    /// **A `-D` variant and NOT an unconditionally-compiled runtime-gated span**, because carrying
+    /// the march dark measured `+10 128 B` on this `15 888 B` kernel at `13f1c9a3` (+75 % on
+    /// `vb_resolve`) — Decision 1. The variant as shipped is `28 292 B`, i.e. `+12 404 B` /
+    /// `+78.1 %`, so the tax the design refused to pay unconditionally is larger here than the
+    /// figure it refused it on.
+    ///
+    /// **Selected by NOTHING at DP6b** — the pipeline pick and the `sdf_term` write declaration
+    /// both arrive at DP6c, driven by the single `vb_sv0_host` predicate (Decision 6, invariant 9).
+    VB_GEO_SV0_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_geo_sv0.comp.spv")
+}
+
+embed_spirv! {
     /// Rung R9b: the `vb_shade_split` lit-producer compute SPIR-V
     /// (`shaders/vb_shade_split.comp.hlsl`, no `-D`): the split's consumer half — RE-fetch +
     /// the `vb_resolve`-character-identical shading tail + the gSsao Filament combine (gated by
@@ -2211,6 +2246,14 @@ pub fn sdf_forward_march_sdfonly_viewt_spirv() -> &'static [u32] {
 #[inline]
 pub fn vb_geo_spirv() -> &'static [u32] {
     VB_GEO_SPV.as_words()
+}
+
+/// VB-SV0 DP6b: the `-D VB_SV0_TERM=1` `vb_geo` sibling as a `u32` word stream — the consolidated
+/// SDF-on-mesh term producer. See [`VB_GEO_SV0_SPV`] for the added `gSdfTerm`/`Buf` bindings and
+/// for why it is a separate module rather than a runtime branch.
+#[inline]
+pub fn vb_geo_sv0_spirv() -> &'static [u32] {
+    VB_GEO_SV0_SPV.as_words()
 }
 
 /// Rung R9b: the `vb_shade_split` lit-producer compute SPIR-V as a `u32` word stream.

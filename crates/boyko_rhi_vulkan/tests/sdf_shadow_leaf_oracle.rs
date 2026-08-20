@@ -105,11 +105,35 @@ fn extract_fn(src: &str, sig: &str) -> String {
 // LAYER 5 — the tuning-const pin, across every file that redeclares one
 // ===============================================================================================
 
-/// The two sources that carry the SHADOW march tuning block: the Deferred resolve (whose
-/// `sdf_soft_shadow_ranged` is the eDSL-generated leaf) and the SDF marcher (whose own copy of the
-/// march is what the image goldens exercise). Both must agree, because both call a march whose
-/// numeric behaviour is entirely in these names.
-const SHADOW_CONST_SOURCES: [&str; 2] = ["deferred_pbr.hlsl", "sdf_gbuffer_composite.hlsl"];
+/// **Every shipped source that redeclares the SHADOW march tuning block.** All must fold to the
+/// same numbers, because each calls a march whose entire numeric behaviour is in these names.
+///
+/// * `deferred_pbr.hlsl` — the Deferred resolve, whose `sdf_soft_shadow_ranged` is the
+///   eDSL-generated leaf.
+/// * `sdf_gbuffer_composite.hlsl` — the SDF marcher, whose own copy of the march is what the image
+///   goldens exercise.
+/// * `sdf_mesh_shadow.comp.hlsl` — VB-SV0 DP1's dedicated SDF-on-mesh prepass (retired at DP6e).
+/// * `vb_geo.comp.hlsl` — VB-SV0 DP6b's `-D VB_SV0_TERM=1` variant, which hosts the same march
+///   inside the split's geometry half. Its block is declared inside `#ifdef VB_SV0_TERM`; this
+///   scan is TEXTUAL, so the guard does not hide it, which is the intended outcome — a variant's
+///   consts are as load-bearing as an unconditional file's.
+///
+/// # Why the last two were missing until DP6b, stated rather than quietly repaired
+///
+/// The list said *"the two sources"* while **six** shipped shaders declared `SHADOW_K`. The two
+/// SV0 marcher hosts were never added when they were written, so an edit to `SHADOW_K` in either
+/// one alone stayed green in this file, green in `sdf_field_edsl_sync.rs` (which pins the consts'
+/// PRESENCE and their ORDER against the include, never their VALUES), and green everywhere else
+/// except the `.spv` byte gate — whose documented repair for a red is *"re-run the header recipe
+/// and commit the result"*, i.e. the exact motion that blesses the divergence. This list is now
+/// the whole shipped set, and [`sdf_shadow_and_ao_consts_match_deferred_and_marcher`]'s selection-
+/// size assertion is what makes a future silent shrink red.
+const SHADOW_CONST_SOURCES: [&str; 4] = [
+    "deferred_pbr.hlsl",
+    "sdf_gbuffer_composite.hlsl",
+    "sdf_mesh_shadow.comp.hlsl",
+    "vb_geo.comp.hlsl",
+];
 
 /// The one source that carries the AO tuning block. A single-source list is NOT a vacuous
 /// selection here: the comparison is shipped-value-versus-HOST-MIRROR (`goldens::host_ao`'s
@@ -259,13 +283,19 @@ fn sdf_shadow_and_ao_consts_match_deferred_and_marcher() {
         }
     }
 
-    // MEASURED SELECTION SIZE — 9 shadow rows × 2 sources + 3 AO consts × 1 source. Asserted so
-    // that quietly dropping a row from the table (the "gate stops covering things" failure) reds
+    // MEASURED SELECTION SIZE — 9 shadow rows × 4 sources + 3 AO consts × 1 source. Asserted so
+    // that quietly dropping a row or a SOURCE (the "gate stops covering things" failure — which is
+    // exactly how the two SV0 marcher hosts went unpinned from their creation until DP6b) reds
     // instead of passing over a smaller set.
+    const EXPECTED_CHECKS: usize = 9 * SHADOW_CONST_SOURCES.len() + 3 * AO_CONST_SOURCES.len();
     assert_eq!(
-        checked, 21,
-        "the const × file selection changed shape: expected 9×2 shadow rows (MAX_IT is pinned \
-         against BOTH host copies) + 3×1 AO = 21 checks"
+        checked, EXPECTED_CHECKS,
+        "the const × file selection changed shape: expected 9 shadow rows (MAX_IT is pinned \
+         against BOTH host copies) × {} sources + 3 AO consts × {} source = {EXPECTED_CHECKS} \
+         checks. If a source was ADDED, this arithmetic already followed it and the red is a real \
+         count mismatch; if one was REMOVED, say why in its doc before touching this line",
+        SHADOW_CONST_SOURCES.len(),
+        AO_CONST_SOURCES.len()
     );
 }
 

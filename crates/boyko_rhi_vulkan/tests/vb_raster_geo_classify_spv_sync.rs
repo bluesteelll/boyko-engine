@@ -1,22 +1,43 @@
-//! Re-DXC byte-identity gate for the **six shipping VB `.spv` that no byte gate reached**:
-//! the `vb_raster` pair, the `vb_geo` pair, and the two atomic `vb_classify` passes.
+//! Re-DXC byte-identity gate for the **shipping VB `.spv` that no other byte gate reaches**:
+//! the `vb_raster` pair, the `vb_geo` family, and the two atomic `vb_classify` passes.
+//!
+//! The row table is the authority on the membership, and this doc deliberately does NOT restate its
+//! CARDINALITY. A count written into prose (or worse, into a test's NAME) is the `280/560` shape:
+//! it goes stale on the first legitimate addition, and the repair everyone reaches for is to edit
+//! the number rather than to read what changed. `VB_RASTER_GEO_CLASSIFY_ROWS.len()` is printed by
+//! the gate itself on every run.
 //!
 //! # What was ungated, and why indirect cover is not the same thing
 //!
-//! Eighteen artifacts named `vb_*.spv` are committed under `shaders/`. Before this file, exactly
-//! ten of them had a re-DXC oracle — `vb_lit_producer_spv_sync.rs`'s `VB_LIT_PRODUCER_ROWS` (the
-//! `vb_resolve` / `vb_shade` / `vb_shade_split` families; `vb_froxel_spv_sync.rs` re-covers six of
-//! those same ten and adds none). Of the remaining eight, two are outside this file's scope by
-//! construction (see below) and SIX shipped with no byte-wise coverage at all:
+//! Eighteen artifacts named `vb_*.spv` were committed under `shaders/` **when this file was
+//! written**; ten of them had a re-DXC oracle — `vb_lit_producer_spv_sync.rs`'s
+//! `VB_LIT_PRODUCER_ROWS` (the `vb_resolve` / `vb_shade` / `vb_shade_split` families;
+//! `vb_froxel_spv_sync.rs` re-covers six of those same ten and adds none). Of the remaining eight,
+//! two are outside this file's scope by construction (see below) and the rest shipped with no
+//! byte-wise coverage at all.
+//!
+//! **That census is a snapshot of its own rung and has not been re-taken since** — the directory
+//! now holds **21**, the three additions being `vb_batch_cull.comp.spv`,
+//! `vb_batch_cull_debug.comp.spv` (both gated by `vb_batch_cull_spv_sync.rs`) and DP6b's
+//! `vb_geo_sv0.comp.spv` (gated by row 5 below). It is left
+//! standing rather than silently updated because re-deriving it is a real audit, not a number edit;
+//! what the numbers still support is the argument below (indirect cover is weaker than re-DXC), and
+//! that argument does not depend on the total. The membership this file actually gates is
+//! [`VB_RASTER_GEO_CLASSIFY_ROWS`], never this paragraph.
+//!
+//! The rows:
 //!
 //! * `vb_raster.vs.spv`, `vb_raster.fs.spv` — the VB producer: the raster pair that WRITES the
 //!   `vb_id` `R32G32_UINT` attachment every consumer below unpacks.
 //! * `vb_geo.comp.spv`, `vb_geo_mv.comp.spv` — R9's thin-aux geometry pass and its
 //!   `-D MOTION=1` motion-vector variant.
+//! * `vb_geo_sv0.comp.spv` — VB-SV0 DP6b's `-D VB_SV0_TERM=1` variant, added with the axis itself
+//!   rather than after the fact. Selected by nothing at DP6b, so it has no indirect golden cover
+//!   either: this table is its whole coverage.
 //! * `vb_classify_count.comp.spv`, `vb_classify_scatter.comp.spv` — the two atomic passes of the
 //!   VB-P2 classify chain.
 //!
-//! MEASURED, not assumed: each of the six is referenced from `src/compute.rs` (its `embed_spirv!`
+//! MEASURED, not assumed: each of these is referenced from `src/compute.rs` (its `embed_spirv!`
 //! site) and from nothing under any `tests/` directory in the workspace. Their only cover is
 //! INDIRECT — some golden pin renders through them, so a drifted blob eventually shows up as an
 //! image diff. That is a strictly weaker property for two reasons: it only fires on a host that
@@ -42,7 +63,7 @@
 //! # (a) Why a NEW file rather than rows appended to `vb_lit_producer_spv_sync.rs`
 //!
 //! That file's name, module doc and row table all say one thing: the ten shipping VB **lit
-//! producers**. None of the six here is a lit producer — `vb_raster` writes ids and no lighting,
+//! producers**. None of the rows here is a lit producer — `vb_raster` writes ids and no lighting,
 //! `vb_geo` writes an oct-encoded geometric normal and explicitly does no lighting, `vb_classify`
 //! writes bin counts and pixel lists. Appending them would make that file's name false, and that
 //! file is the one place in this repo whose module doc had to be written to stop a future sweep
@@ -57,11 +78,13 @@
 //! # (c) Why the row table carries a PROFILE column
 //!
 //! The `-T` profile is read from each shader's own frozen header recipe and they are NOT uniform:
-//! `vb_raster.vs.hlsl` pins `-T vs_6_0`, `vb_raster.fs.hlsl` pins `-T ps_6_0`, and the four
-//! compute rows pin `-T cs_6_0`. So the profile is per-row data, not a constant folded into the
-//! helper. (`vb_classify_scatter.comp.hlsl`'s header delegates — "identical flags, this file's own
-//! name substituted" — to `vb_classify_count.comp.hlsl`'s `-T cs_6_0` recipe; `vb_geo_mv` is
-//! `vb_geo.comp.hlsl`'s header's own second line, `-T cs_6_0 -D MOTION=1`.)
+//! `vb_raster.vs.hlsl` pins `-T vs_6_0`, `vb_raster.fs.hlsl` pins `-T ps_6_0`, and every compute
+//! row pins `-T cs_6_0`. So the profile is per-row data, not a constant folded into the helper.
+//! (`vb_classify_scatter.comp.hlsl`'s header delegates — "identical flags, this file's own name
+//! substituted" — to `vb_classify_count.comp.hlsl`'s `-T cs_6_0` recipe; `vb_geo_mv` is
+//! `vb_geo.comp.hlsl`'s header's own second line, `-T cs_6_0 -D MOTION=1`, and `vb_geo_sv0` its
+//! third, `-T cs_6_0 -D VB_SV0_TERM=1` — the SV0 march needs no `rayQuery`, so unlike the
+//! `deferred_pbr` HWRT rows this axis does not move the profile either.)
 //!
 //! # (b) SKIP policy
 //!
@@ -74,7 +97,7 @@
 //!
 //! Two gates, the same pair the precedent files carry, plus one census added at rung R2d-4:
 //!
-//! 1. **Reproduction** — each of the six rows, re-DXC'd under its own frozen recipe, is
+//! 1. **Reproduction** — each row, re-DXC'd under its own frozen recipe, is
 //!    byte-identical to its committed `.spv`.
 //! 2. **Sensitivity** — the control that makes (1)'s green mean something. A scratch copy of
 //!    `vb_raster.fs.hlsl` with its two `SV_Target0` lanes swapped must re-DXC to DIFFERENT bytes.
@@ -243,34 +266,43 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// The six previously-ungated VB artifacts, each `(source, -T profile, defines, committed .spv)`.
+/// The previously-ungated VB artifacts, each `(source, -T profile, defines, committed .spv)`.
 ///
 /// Every profile and define here was read out of the named shader's OWN header recipe, not
 /// inferred from a sibling: `vb_raster.vs.hlsl` -> `vs_6_0`, `vb_raster.fs.hlsl` -> `ps_6_0`,
 /// `vb_geo.comp.hlsl` -> `cs_6_0` (and its second header line, `-T cs_6_0 -D MOTION=1`, for
-/// `vb_geo_mv`), `vb_classify_count.comp.hlsl` -> `cs_6_0` (whose flags
-/// `vb_classify_scatter.comp.hlsl`'s header delegates to by name).
+/// `vb_geo_mv`; its third, `-T cs_6_0 -D VB_SV0_TERM=1`, for `vb_geo_sv0`),
+/// `vb_classify_count.comp.hlsl` -> `cs_6_0` (whose flags `vb_classify_scatter.comp.hlsl`'s header
+/// delegates to by name).
 ///
-/// This table is the ONLY byte-wise coverage in the repo for all six rows — do not thin it.
-const VB_RASTER_GEO_CLASSIFY_ROWS: [(&str, &str, &[&str], &str); 6] = [
+/// **Row 7 is VB-SV0 DP6b's `vb_geo_sv0`** — the `-D VB_SV0_TERM=1` variant that compiles the
+/// SDF-on-mesh shadow + contact-AO march into `vb_geo` (design Decision 1). At DP6b it is selected
+/// by NOTHING, so no golden renders through it and this row is its ONLY coverage of any kind — the
+/// indirect-cover argument in the module doc does not even apply to it yet. Its additivity (that
+/// rows 3 and 4 stay byte-frozen under the new axis) is a separate, stronger statement measured by
+/// `vb_geo_preprocess_sync.rs`.
+///
+/// This table is the ONLY byte-wise coverage in the repo for all seven rows — do not thin it.
+const VB_RASTER_GEO_CLASSIFY_ROWS: [(&str, &str, &[&str], &str); 7] = [
     ("vb_raster.vs.hlsl", "vs_6_0", &[], "vb_raster.vs.spv"),
     ("vb_raster.fs.hlsl", "ps_6_0", &[], "vb_raster.fs.spv"),
     ("vb_geo.comp.hlsl", "cs_6_0", &[], "vb_geo.comp.spv"),
     ("vb_geo.comp.hlsl", "cs_6_0", &["MOTION=1"], "vb_geo_mv.comp.spv"),
+    ("vb_geo.comp.hlsl", "cs_6_0", &["VB_SV0_TERM=1"], "vb_geo_sv0.comp.spv"),
     ("vb_classify_count.comp.hlsl", "cs_6_0", &[], "vb_classify_count.comp.spv"),
     ("vb_classify_scatter.comp.hlsl", "cs_6_0", &[], "vb_classify_scatter.comp.spv"),
 ];
 
-/// Gate (1) — reproduction: every one of the six rows, re-DXC'd under its own frozen recipe,
+/// Gate (1) — reproduction: every one of the seven rows, re-DXC'd under its own frozen recipe,
 /// byte-equals its committed artifact. RED for any row names that artifact and means the frozen
 /// recipe no longer reproduces it on this host.
 #[test]
-fn vb_raster_geo_classify_six_rows_reproduce_under_frozen_recipe() {
+fn vb_raster_geo_classify_rows_reproduce_under_frozen_recipe() {
     let Some(dxc) = find_dxc() else {
         eprintln!(
             "vb_raster_geo_classify_spv_sync: dxc not found (no C:/VulkanSDK/.../dxc.exe, no \
              $VULKAN_SDK/Bin, not on PATH) — SKIPPING the reproduction check on this host. A skip \
-             is NOT a pass: nothing was proven about these six artifacts."
+             is NOT a pass: nothing was proven about these artifacts."
         );
         return;
     };
@@ -353,7 +385,7 @@ fn vb_raster_fs_redxc_is_sensitive_to_a_swapped_vb_id_lane() {
     assert!(
         committed != mutated_bytes,
         "RED: swapping vb_raster.fs.hlsl's two SV_Target0 lanes re-DXC'd to a BYTE-IDENTICAL .spv. \
-         A re-DXC byte comparison is therefore BLIND for this module, which makes the six-row \
+         A re-DXC byte comparison is therefore BLIND for this module, which makes the \
          reproduction gate above vacuously green — it would not catch a real edit either. This is \
          a real finding — do not tune the mutation to force a green."
     );

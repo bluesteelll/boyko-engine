@@ -517,10 +517,24 @@ fn sdf_soft_shadow_ranged_matches_edsl_emit() {
 /// with a name: `deferred_pbr.hlsl` is the FOURTH consumer (rung S2's §4.1 move put the leaf
 /// there), it is subject to the identical ordering contract, and a `deferred_pbr.hlsl` that
 /// violated it would fail to COMPILE while passing this entire CPU suite. A hard-coded list is
-/// also how the gate goes stale in the other direction: the fifth consumer is added, nobody
-/// remembers this file, and the new one is silently uncovered. So the set is read off the
+/// also how the gate goes stale in the other direction: a new consumer is added, nobody
+/// remembers this file, and it is silently uncovered. So the set is read off the
 /// shipped tree — every `.hlsl`/`.hlsli` that carries the `#include` is checked — and
-/// [`SHADOW_LEAVES_MIN_CONSUMERS`] only asserts that the four known ones did not vanish.
+/// [`SHADOW_LEAVES_MIN_CONSUMERS`] only asserts that the currently-known ones did not vanish.
+///
+/// # VB-SV0 DP6b — the `Buf` SLOT stops being one number for everyone
+///
+/// Until DP6b every consumer put the edit list at Set-0 slot 10 (plan §2.2), so a single
+/// two-spelling disjunction covered them all. `vb_geo.comp.hlsl`'s `-D VB_SV0_TERM=1` variant
+/// hosts the march inside the split's geometry pass, whose Set 0 is the shared `vb_layout0`
+/// (slot 10 is not free there) and whose Set 1 is its own aux layout — so its edit list is at
+/// **Set 1 @4**, with `register(t0)` unchanged (DP6 design P1-4: only the Vulkan SLOT moves; the
+/// HLSL register is what `sdf_field.hlsli`'s contract names).
+///
+/// The disjunction is therefore replaced by [`BUF_BINDING_BY_CONSUMER`], a per-consumer table.
+/// A consumer ABSENT from that table is a RED rather than a pass: a new marcher host must state
+/// where it put the edit list, because "wherever it likes" is how two hosts silently disagree
+/// about which descriptor the field comes from.
 #[test]
 fn sv0_shadow_leaf_consumers_satisfy_include_contract() {
     //
@@ -542,10 +556,10 @@ fn sv0_shadow_leaf_consumers_satisfy_include_contract() {
     for required in SHADOW_LEAVES_MIN_CONSUMERS {
         assert!(
             found.contains(&required),
-            "{required} no longer contains `{SHADOW_LEAVES_INCLUDE}` (VB-SV0 §4.1). The three VB \
-             lit-producer tails plus the deferred resolve are the whole reason the shared header \
-             exists, and a consumer that dropped the include either forked its own copy or \
-             silently lost the SV0 term. Derived consumer set: {found:?}"
+            "{required} no longer contains `{SHADOW_LEAVES_INCLUDE}` (VB-SV0 §4.1). The shared \
+             header exists so that the ranged shadow leaf has ONE definition across the deferred \
+             resolve and the SV0 marcher hosts; a consumer that dropped the include either forked \
+             its own copy or silently lost the SV0 term. Derived consumer set: {found:?}"
         );
     }
 
@@ -579,17 +593,32 @@ fn sv0_shadow_leaf_consumers_satisfy_include_contract() {
              precondition must be in scope BEFORE the include; this ordering does not compile"
         );
 
-        // SV0's binding decision (plan §2.2) put that SSBO at Set-0 slot 10. The `register(t0)`
-        // token above carries the HLSL register but NOT the Vulkan binding, so the binding is
-        // asserted separately, on the SAME line, accepting BOTH shipped spellings: the VB tails
-        // write `[[vk::binding(10, 0)]]` and `deferred_pbr.hlsl:161` writes `[[vk::binding(10)]]`
-        // (set 0 by default). Only the SLOT is pinned; the set is left to those two spellings.
+        // The `register(t0)` token above carries the HLSL register but NOT the Vulkan binding, so
+        // the binding is asserted separately, on the SAME line, against this consumer's own row in
+        // `BUF_BINDING_BY_CONSUMER`. Before DP6b this was a two-spelling disjunction on one slot
+        // (§2.2's Set-0 @10); `vb_geo.comp.hlsl` moved its edit list to Set-1 @4 because slot 10 is
+        // not free in the shared `vb_layout0`, and a disjunction that grew a third arm would stop
+        // pinning anything — every consumer would satisfy some arm. The table pins each host to ITS
+        // OWN slot instead.
+        let expected_binding = BUF_BINDING_BY_CONSUMER
+            .iter()
+            .find(|(consumer, _)| *consumer == name.as_str())
+            .map(|(_, binding)| *binding)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{name} consumes `{SHADOW_LEAVES_INCLUDE}` but has no row in \
+                     `BUF_BINDING_BY_CONSUMER`. A new marcher host must STATE where it put the \
+                     edit list — an unlisted consumer is a RED, not a pass, because 'wherever it \
+                     likes' is how two hosts come to disagree about which descriptor carries the \
+                     field. Add the row with the host's own `vk::binding` spelling."
+                )
+            });
         assert!(
-            decl_line.contains("[[vk::binding(10)]]")
-                || decl_line.contains("[[vk::binding(10, 0)]]"),
-            "{name} declares `Buf` at a Vulkan binding other than Set-0 slot 10 — the line is \
-             `{decl_line}`. SV0's §2.2 binding decision is slot 10 in set 0, and all ten \
-             perturbed `.spv` rows carry that interface delta"
+            decl_line.contains(expected_binding),
+            "{name} declares `Buf` at a Vulkan binding other than its pinned \
+             `{expected_binding}` — the line is `{decl_line}`. The binding is host-specific since \
+             DP6b, so read `BUF_BINDING_BY_CONSUMER`'s doc before changing either side: the `.spv` \
+             interface delta moves with it"
         );
 
         // The const block. These five names are quoted verbatim from the header's own contract;
@@ -607,9 +636,11 @@ fn sv0_shadow_leaf_consumers_satisfy_include_contract() {
                     panic!(
                         "{name} does not declare `{const_name}`, which \
                          `sdf_shadow_leaves.hlsli`'s INCLUDE CONTRACT requires in scope before \
-                         the `#include`. Each VB tail's tuning block is a VERBATIM mirror of \
-                         `deferred_pbr.hlsl`'s (plan §4.2); `sv0_consts_match_deferred_and_marcher` \
-                         pins the VALUES, this pins their PRESENCE"
+                         the `#include`. Each consumer's tuning block is a VERBATIM mirror of \
+                         `deferred_pbr.hlsl`'s (plan §4.2); \
+                         `sdf_shadow_leaf_oracle.rs::sdf_shadow_and_ao_consts_match_deferred_and_marcher` \
+                         pins the VALUES (its `SHADOW_CONST_SOURCES` gained this file at DP6b), \
+                         this pins their PRESENCE and their ORDER against the include"
                     )
                 });
             assert!(
@@ -635,11 +666,35 @@ const SHADOW_LEAVES_INCLUDE: &str = "#include \"sdf_shadow_leaves.hlsli\"";
 /// before it is included.
 ///
 /// This token carries the HLSL REGISTER (`t0`) only — it deliberately contains no Vulkan binding
-/// number, because the four consumers spell the attribute two different ways
-/// (`[[vk::binding(10, 0)]]` in the VB tails, `[[vk::binding(10)]]` in `deferred_pbr.hlsl:161`).
-/// SV0's Set-0 slot-10 decision (plan §2.2) is asserted separately by the caller, against the
-/// same declaration LINE, accepting both spellings.
+/// number, because the consumers spell the attribute differently
+/// (`[[vk::binding(10, 0)]]` in `sdf_mesh_shadow.comp.hlsl`, `[[vk::binding(10)]]` in
+/// `deferred_pbr.hlsl:161`, `[[vk::binding(4, 1)]]` in `vb_geo.comp.hlsl`'s DP6b variant). The
+/// Vulkan binding is asserted separately by the caller against the same declaration LINE, through
+/// [`BUF_BINDING_BY_CONSUMER`].
+///
+/// **UNTOUCHED by DP6b** (design P1-4): `vb_geo`'s SV0 span writes
+/// `[[vk::binding(4, 1)]] StructuredBuffer<uint> Buf : register(t0);`, keeping the register exactly
+/// as `sdf_mesh_shadow.comp.hlsl:96` spells it. Only the SLOT moved.
 const BUF_T0_DECL: &str = "StructuredBuffer<uint> Buf : register(t0)";
+
+/// Each derived consumer's OWN expected `vk::binding` spelling for the edit-list SSBO.
+///
+/// A consumer ABSENT from this table is a RED (the caller panics by name): a new marcher host must
+/// state where it put the edit list. That is the whole reason this is a table and not a widened
+/// disjunction — a three-arm `contains(a) || contains(b) || contains(c)` is satisfied by any host
+/// matching any arm, so it would stop distinguishing the hosts it lists.
+///
+/// * `deferred_pbr.hlsl` — Set 0 slot 10, set index defaulted (§2.2's original decision).
+/// * `sdf_mesh_shadow.comp.hlsl` — Set 0 slot 10, set index explicit. The dedicated DP1 pass; it is
+///   RETIRED at DP6e, and its row goes with it.
+/// * `vb_geo.comp.hlsl` — **Set 1 slot 4** (VB-SV0 DP6b, Decision 5). The SV0 variant hosts the
+///   march inside the split's geometry pass, whose Set 0 is the shared `vb_layout0` where slot 10
+///   is not free; its own `vb_geo_aux_layout` carries the edit list at @4 instead.
+const BUF_BINDING_BY_CONSUMER: [(&str, &str); 3] = [
+    ("deferred_pbr.hlsl", "[[vk::binding(10)]]"),
+    ("sdf_mesh_shadow.comp.hlsl", "[[vk::binding(10, 0)]]"),
+    ("vb_geo.comp.hlsl", "[[vk::binding(4, 1)]]"),
+];
 
 /// The five names `sdf_shadow_leaves.hlsli`'s INCLUDE CONTRACT names verbatim. `GRAD_H` and
 /// `FIELD_LIPSCHITZ_L` are NOT here: the contract sources those from `sdf_field.hlsli`, not from
@@ -697,19 +752,31 @@ fn find_static_const_decl(src: &str, name: &str) -> Option<usize> {
 
 /// The consumers of `sdf_shadow_leaves.hlsli` that must NEVER stop consuming it.
 ///
-/// **Rev 10 re-points this list.** The inline architecture put the leaves in the three VB
-/// lit-producer tails; the revert (`13f1c9a3`) took them out after the dark-path tax measured
-/// ~+75%, and the march now lives in ONE marcher-shaped host — `sdf_mesh_shadow.comp.hlsl`, the
-/// dedicated prepass (plan Rev 10 / RENDER-PARITY §3.2 Option B). The tails deliberately do NOT
-/// consume the leaves any more: a tail regaining this include is the inline coming back, and the
-/// derived-set scan below makes that visible the day it happens.
+/// **Rev 10 re-pointed this list; VB-SV0 DP6b adds its third entry.** The inline architecture put
+/// the leaves in the three VB lit-producer tails; the revert (`13f1c9a3`) took them out after the
+/// dark-path tax measured ~+75%, and the march moved into ONE marcher-shaped host —
+/// `sdf_mesh_shadow.comp.hlsl`, the dedicated prepass (plan Rev 10 / RENDER-PARITY §3.2 Option B).
+/// The tails deliberately do NOT consume the leaves any more: a tail regaining this include is the
+/// inline coming back, and the derived-set scan below makes that visible the day it happens.
+///
+/// **DP6b (`docs/VB-SV0-DP6-DESIGN.md`, Decision 3) adds `vb_geo.comp.hlsl`** — but ONLY behind
+/// `-D VB_SV0_TERM=1`. That is not the inline returning: the tails are lit producers that would
+/// have paid the +64 % dark tax on every VB frame, whereas `vb_geo` compiles the march into a
+/// SEPARATE `.spv` selected only when the term is armed, and it already performs the very
+/// `vb_geom_fetch` the march needs. The include is nonetheless unconditional TEXT to this file's
+/// scanner (a `#include` inside an `#ifdef` still matches the substring), which is what puts the
+/// new host under the same contract as the old ones — the intended outcome.
+///
+/// **At DP6e this list goes back to two entries**, when `sdf_mesh_shadow.comp.hlsl` is deleted and
+/// `vb_geo` is the sole producer (design Decision 8).
 ///
 /// This is a MINIMUM, not the selection: [`sv0_shadow_leaf_consumers`] derives the actual set from
-/// the shipped tree so a third consumer is covered the day it appears. This list exists only so
+/// the shipped tree so a further consumer is covered the day it appears. This list exists only so
 /// that a consumer LOSING the include reds instead of shrinking the gate silently.
-const SHADOW_LEAVES_MIN_CONSUMERS: [&str; 2] = [
+const SHADOW_LEAVES_MIN_CONSUMERS: [&str; 3] = [
     "deferred_pbr.hlsl",
     "sdf_mesh_shadow.comp.hlsl",
+    "vb_geo.comp.hlsl",
 ];
 
 /// Every committed shader that consumes `sdf_shadow_leaves.hlsli`, DERIVED by scanning the crate's
