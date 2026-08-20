@@ -1,0 +1,5 @@
+error: participant fields name their component context: `entity(ComponentA, ComponentB)`
+ --> tests/ui/participant_without_context.rs:6:17
+  |
+6 |         victim: entity,
+  |                 ^^^^^^

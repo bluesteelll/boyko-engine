@@ -19,6 +19,10 @@ pub enum Construct {
     Component(ComponentDef),
     /// `tag NAME;` / `tag NAME(bitset);`
     Tag(TagDef),
+    /// `bundle NAME { field: Type, … }` (rung A1)
+    Bundle(BundleDef),
+    /// `event NAME { participant/parameter fields }` (rung A1)
+    Event(EventDef),
 }
 
 /// The four Phase-14a hook keys the `component` construct forwards (§3.1). Mutually exclusive
@@ -79,4 +83,41 @@ pub struct TagDef {
     pub name: Ident,
     /// `(bitset)` — the EnableTag backend (`storage = "bitset"`): O(1) toggle, no migration.
     pub bitset: bool,
+}
+
+/// `bundle NAME { … }` (§3.2) — pure surface uniformity: the derive owns every rule. Aether
+/// pre-checks only the arity cap, because it owns the friendlier span (the 17th field's name).
+pub struct BundleDef {
+    /// The type name.
+    pub name: Ident,
+    /// `field: Type,` pairs, verbatim types.
+    pub fields: Vec<(Ident, Type)>,
+}
+
+/// One `event` field (§3.4): a participant carries its component CONTEXT type-shaped
+/// (`entity(A, B)`), a parameter is a plain typed field.
+pub enum EvField {
+    /// `name: entity(A, B),` → `#[participant(components = "A, B")] name: Entity`.
+    Participant {
+        /// The field name.
+        name: Ident,
+        /// The participant's component context — deliberately never defaulted (§3.4: the
+        /// engine's participant contract wants it explicit).
+        components: Vec<Path>,
+    },
+    /// `name: Type,` → `#[parameter] name: Type`.
+    Parameter {
+        /// The field name.
+        name: Ident,
+        /// The verbatim type.
+        ty: Type,
+    },
+}
+
+/// `event NAME { … }` (§3.4).
+pub struct EventDef {
+    /// The type name.
+    pub name: Ident,
+    /// The fields, in source order (the `#[event]` macro's two-band rewrite is ITS business).
+    pub fields: Vec<EvField>,
 }

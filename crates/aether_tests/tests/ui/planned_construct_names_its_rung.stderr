@@ -1,4 +1,4 @@
-error: `machine` is an Aether construct but lands at rung A3; this build carries rung A0 (component, tag)
+error: `machine` is an Aether construct but lands at rung A3; this build carries rungs A0..A1 (component, tag, bundle, event)
  --> tests/ui/planned_construct_names_its_rung.rs:6:5
   |
 6 |     machine GameFlow { }

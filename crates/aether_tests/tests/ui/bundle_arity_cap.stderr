@@ -1,0 +1,5 @@
+error: bundle arity is capped at 16 (`MAX_BUNDLE_ARITY`) — split it
+  --> tests/ui/bundle_arity_cap.rs:22:5
+   |
+22 |     f16: u32,
+   |     ^^^

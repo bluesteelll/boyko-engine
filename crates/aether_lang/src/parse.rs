@@ -7,7 +7,7 @@ use syn::Ident;
 use syn::parse::{Parse, ParseStream};
 use syn::{Path, Token, Type, parenthesized};
 
-use crate::ast::{AetherBlock, ComponentDef, Construct, HookKind, TagDef};
+use crate::ast::{AetherBlock, BundleDef, ComponentDef, Construct, EvField, EventDef, HookKind, TagDef};
 use crate::diag;
 
 impl Parse for AetherBlock {
@@ -21,37 +21,33 @@ impl Parse for AetherBlock {
             match kw.as_str() {
                 "component" => constructs.push(Construct::Component(parse_component(input)?)),
                 "tag" => constructs.push(Construct::Tag(parse_tag(input)?)),
-                // Planned constructs (§9, rungs A1..A6): name the rung rather than pretending
+                "bundle" => constructs.push(Construct::Bundle(parse_bundle(input)?)),
+                "event" => constructs.push(Construct::Event(parse_event(input)?)),
+                // Planned constructs (§9, rungs A2..A6): name the rung rather than pretending
                 // the keyword is unknown — a misspelling and a not-yet-shipped construct are
                 // different failures and deserve different messages.
-                "bundle" | "event" => {
-                    return Err(diag::err(
-                        head.span(),
-                        format!("`{kw}` is an Aether construct but lands at rung A1 (docs/AETHER-LANG-PLAN.md §9); this build carries rung A0 (component, tag)"),
-                    ));
-                }
                 "system" | "plugin" => {
                     return Err(diag::err(
                         head.span(),
-                        format!("`{kw}` is an Aether construct but lands at rung A2; this build carries rung A0 (component, tag)"),
+                        format!("`{kw}` is an Aether construct but lands at rung A2; this build carries rungs A0..A1 (component, tag, bundle, event)"),
                     ));
                 }
                 "machine" => {
                     return Err(diag::err(
                         head.span(),
-                        "`machine` is an Aether construct but lands at rung A3; this build carries rung A0 (component, tag)",
+                        "`machine` is an Aether construct but lands at rung A3; this build carries rungs A0..A1 (component, tag, bundle, event)",
                     ));
                 }
                 "material" => {
                     return Err(diag::err(
                         head.span(),
-                        "`material` is an Aether construct but lands at rung A5; this build carries rung A0 (component, tag)",
+                        "`material` is an Aether construct but lands at rung A5; this build carries rungs A0..A1 (component, tag, bundle, event)",
                     ));
                 }
                 "scene" => {
                     return Err(diag::err(
                         head.span(),
-                        "`scene` is an Aether construct but lands at rung A6; this build carries rung A0 (component, tag)",
+                        "`scene` is an Aether construct but lands at rung A6; this build carries rungs A0..A1 (component, tag, bundle, event)",
                     ));
                 }
                 other => return Err(diag::unknown_construct(head.span(), other)),
@@ -221,4 +217,114 @@ fn upper_camel(s: &str) -> String {
         }
     }
     out
+}
+
+/// §3.2's own arity cap mirror — the derive owns the rule; Aether owns the friendlier span.
+const MAX_BUNDLE_ARITY: usize = 16;
+
+/// `bundle NAME { field: Type, … }` (§3.2).
+fn parse_bundle(input: ParseStream) -> syn::Result<BundleDef> {
+    let _kw: Ident = input.parse()?; // `bundle`
+    let name: Ident = input.parse().map_err(|e| diag::err(e.span(), "expected a bundle name after `bundle`"))?;
+    let name_str = name.to_string();
+    if !name_str.starts_with(|c: char| c.is_ascii_uppercase()) {
+        return Err(diag::err(
+            name.span(),
+            format!("bundle names are UpperCamelCase — they expand to types (rename `{name_str}` to `{}`)",
+                upper_camel(&name_str)),
+        ));
+    }
+    let body;
+    syn::braced!(body in input);
+    let mut fields = Vec::new();
+    while !body.is_empty() {
+        let fname: Ident = body.parse().map_err(|e| diag::err(e.span(), "expected a bundle field"))?;
+        let _: Token![:] = body.parse().map_err(|_| diag::err(fname.span(), format!("expected `:` after bundle field `{fname}`")))?;
+        let ty: Type = body.parse()?;
+        if fields.len() == MAX_BUNDLE_ARITY {
+            // The friendlier span the §3.2 pre-check exists for: ON the 17th field, before the
+            // derive's own downstream refusal.
+            return Err(diag::err(
+                fname.span(),
+                "bundle arity is capped at 16 (`MAX_BUNDLE_ARITY`) — split it",
+            ));
+        }
+        fields.push((fname, ty));
+        if body.peek(Token![,]) {
+            let _: Token![,] = body.parse()?;
+        } else if !body.is_empty() {
+            return Err(diag::err(body.span(), "expected `,` between bundle fields"));
+        }
+    }
+    Ok(BundleDef { name, fields })
+}
+
+/// `event NAME { participant/parameter fields }` (§3.4). A participant is TYPE-SHAPED —
+/// `name: entity(A, B)` — and the empty context is deliberately not defaulted.
+fn parse_event(input: ParseStream) -> syn::Result<EventDef> {
+    let _kw: Ident = input.parse()?; // `event`
+    let name: Ident = input.parse().map_err(|e| diag::err(e.span(), "expected an event name after `event`"))?;
+    let name_str = name.to_string();
+    if !name_str.starts_with(|c: char| c.is_ascii_uppercase()) {
+        return Err(diag::err(
+            name.span(),
+            format!("event names are UpperCamelCase — they expand to types (rename `{name_str}` to `{}`)",
+                upper_camel(&name_str)),
+        ));
+    }
+    let body;
+    syn::braced!(body in input);
+    let mut fields = Vec::new();
+    while !body.is_empty() {
+        let fname: Ident = body.parse().map_err(|e| diag::err(e.span(), "expected an event field"))?;
+        let _: Token![:] = body.parse().map_err(|_| diag::err(fname.span(), format!("expected `:` after event field `{fname}`")))?;
+        // `entity` in the type position is the participant marker — contextual (§2): a PARAMETER
+        // may still be of a user type named `entity` via a qualified path.
+        if input_is_bare_entity(&body) {
+            let ent: Ident = body.parse()?; // `entity`
+            if !body.peek(syn::token::Paren) {
+                return Err(diag::err(
+                    ent.span(),
+                    "participant fields name their component context: `entity(ComponentA, ComponentB)`",
+                ));
+            }
+            let inner;
+            parenthesized!(inner in body);
+            let mut components = Vec::new();
+            loop {
+                let p: Path = inner.parse().map_err(|e| {
+                    diag::err(e.span(), "participant fields name their component context: `entity(ComponentA, ComponentB)`")
+                })?;
+                components.push(p);
+                if inner.peek(Token![,]) {
+                    let _: Token![,] = inner.parse()?;
+                    if inner.is_empty() {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            fields.push(EvField::Participant { name: fname, components });
+        } else {
+            let ty: Type = body.parse()?;
+            fields.push(EvField::Parameter { name: fname, ty });
+        }
+        if body.peek(Token![,]) {
+            let _: Token![,] = body.parse()?;
+        } else if !body.is_empty() {
+            return Err(diag::err(body.span(), "expected `,` between event fields"));
+        }
+    }
+    Ok(EventDef { name, fields })
+}
+
+/// `true` iff the next tokens are the bare `entity` marker (not a path like `foo::entity` and
+/// not a generic type) — the §2 contextual-keyword rule at the event-field type position.
+fn input_is_bare_entity(body: ParseStream) -> bool {
+    let fork = body.fork();
+    match fork.parse::<Ident>() {
+        Ok(id) => id == "entity" && !fork.peek(Token![::]) && !fork.peek(Token![<]),
+        Err(_) => false,
+    }
 }

@@ -19,4 +19,7 @@ fn a0_diagnostics_land_on_the_users_tokens() {
     t.compile_fail("tests/ui/duplicate_hook.rs");
     t.compile_fail("tests/ui/bad_tag_modifier.rs");
     t.compile_fail("tests/ui/tag_missing_semicolon.rs");
+    // Rung A1's two goldens (§9 table: arity cap, participant syntax).
+    t.compile_fail("tests/ui/bundle_arity_cap.rs");
+    t.compile_fail("tests/ui/participant_without_context.rs");
 }

@@ -6,7 +6,7 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::Ident;
 
-use crate::ast::{AetherBlock, ComponentDef, Construct, TagDef};
+use crate::ast::{AetherBlock, BundleDef, ComponentDef, Construct, EvField, EventDef, TagDef};
 
 /// Expand a parsed block to the flat item list, in source order (deterministic output is what
 /// the unit tests pin token-for-token).
@@ -16,6 +16,8 @@ pub fn expand(block: &AetherBlock) -> TokenStream {
         match c {
             Construct::Component(def) => out.extend(component(def)),
             Construct::Tag(def) => out.extend(tag(def)),
+            Construct::Bundle(def) => out.extend(bundle(def)),
+            Construct::Event(def) => out.extend(event(def)),
         }
     }
     out
@@ -62,6 +64,49 @@ fn tag(def: &TagDef) -> TokenStream {
         #[derive(::boyko_macros::Component)]
         #storage
         pub struct #name;
+    }
+}
+
+/// §3.2: `bundle` → `#[derive(::boyko_macros::Bundle)]` — nothing more; the derive owns arity,
+/// the named-struct rule, and the static-cache codegen.
+fn bundle(def: &BundleDef) -> TokenStream {
+    let name = &def.name;
+    let fields = def.fields.iter().map(|(fname, ty)| quote! { pub #fname: #ty });
+    quote! {
+        #[derive(::boyko_macros::Bundle)]
+        pub struct #name {
+            #( #fields ),*
+        }
+    }
+}
+
+/// §3.4: `event` → `#[::boyko_macros::event]` with the two-band field markers. The Entity path
+/// is the REAL nested one — `boyko_ecs` has no root re-export, and a token that resolves is the
+/// whole tokens-not-deps contract.
+fn event(def: &EventDef) -> TokenStream {
+    let name = &def.name;
+    let fields = def.fields.iter().map(|f| match f {
+        EvField::Participant { name, components } => {
+            let ctx = components
+                .iter()
+                .map(|p| quote!(#p).to_string().replace(' ', ""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            quote! {
+                #[participant(components = #ctx)]
+                pub #name: ::boyko_ecs::ecs::core::entity::entity::Entity
+            }
+        }
+        EvField::Parameter { name, ty } => quote! {
+            #[parameter]
+            pub #name: #ty
+        },
+    });
+    quote! {
+        #[::boyko_macros::event]
+        pub struct #name {
+            #( #fields ),*
+        }
     }
 }
 
@@ -153,6 +198,69 @@ mod tests {
         assert!(
             out.contains("compile_error") && out.contains(needle),
             "expected a compile_error containing {needle:?}, got: {out}"
+        );
+    }
+
+    #[test]
+    fn the_section_3_2_and_3_4_pairs_hold_verbatim() {
+        expands_to(
+            quote! {
+                bundle Projectile {
+                    pos: Position,
+                    vel: Velocity,
+                }
+            },
+            quote! {
+                #[derive(::boyko_macros::Bundle)]
+                pub struct Projectile {
+                    pub pos: Position,
+                    pub vel: Velocity
+                }
+            },
+        );
+        expands_to(
+            quote! {
+                event Damage {
+                    victim: entity(Position, Health),
+                    amount: f32,
+                }
+            },
+            quote! {
+                #[::boyko_macros::event]
+                pub struct Damage {
+                    #[participant(components = "Position, Health")]
+                    pub victim: ::boyko_ecs::ecs::core::entity::entity::Entity,
+                    #[parameter]
+                    pub amount: f32
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn a1_diagnostics_fire_where_the_plan_says() {
+        // The 17th field carries the arity error's span-friendly message.
+        let mut fields = proc_macro2::TokenStream::new();
+        for i in 0..17 {
+            let f = proc_macro2::Ident::new(&format!("f{i}"), proc_macro2::Span::call_site());
+            fields.extend(quote! { #f: u32, });
+        }
+        fails_with(quote! { bundle Fat { #fields } }, "bundle arity is capped at 16");
+        // A participant without its component context is refused, never defaulted.
+        fails_with(
+            quote! { event E { victim: entity, } },
+            "participant fields name their component context",
+        );
+        // `entity` stays contextual: a qualified path is an ordinary parameter type.
+        expands_to(
+            quote! { event E { thing: my::entity, } },
+            quote! {
+                #[::boyko_macros::event]
+                pub struct E {
+                    #[parameter]
+                    pub thing: my::entity
+                }
+            },
         );
     }
 
