@@ -212,6 +212,14 @@ pub const ZONE_VB_LATE_RASTER: u16 = ZONE_BASE_VB + 8;
 /// ids 2 and 6), which is why a record-order clause is scoped to it.
 pub const ZONE_VB_RUN: u16 = ZONE_BASE_VB + 9;
 
+/// VB-SV0 DP4a: **the dedicated `sdf_mesh_shadow` prepass** — brackets its bind→dispatch in
+/// `record_vb`'s SV0 section. This id exists ONLY on an SV0-armed leg (the pass is not recorded
+/// otherwise), so it joins [`ZONE_VB_HZB_BUILD`] and [`ZONE_VB_SHADE`] in the leg-dependent
+/// record-order table above: on an armed leg its BEGIN lands between `9e` and `2`; on every
+/// other leg it never stamps at all — which is what keeps the pinned disarmed-fixture pair
+/// counts (`vb_bench_query_validation`'s 280/560) untouched by this id's existence.
+pub const ZONE_VB_SDF_MESH: u16 = ZONE_BASE_VB + 10;
+
 /// How many zone ids the VB family uses — the count [`super::passes`]'s witness masks are sized by.
 ///
 /// # Record order is LEG-DEPENDENT, and two ids are the ones that move
@@ -228,7 +236,7 @@ pub const ZONE_VB_RUN: u16 = ZONE_BASE_VB + 9;
 /// This table is why `TsWitness::pair_of` REMEMBERS each id's pair index instead of deriving it
 /// from the count of lower-numbered opens: the ids do not open in increasing order, so the
 /// derivation gives `VbRun` pair 8 where it is 2.
-pub const VB_ZONE_COUNT: u16 = 10;
+pub const VB_ZONE_COUNT: u16 = 11;
 
 // The per-frame witness masks in `passes::vb` are `u16`, one bit per id, so the family may not
 // outgrow that width without widening them too — and it may not outgrow its base spacing either.

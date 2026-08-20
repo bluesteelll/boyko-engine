@@ -39,7 +39,8 @@ use super::super::frame_driver::Renderer;
 use super::super::gpu_zone::{
     GpuZoneRecorder, VB_ZONE_COUNT, ZONE_BASE_VB, ZONE_VB_CULL_DISPATCH, ZONE_VB_CULL_RESET,
     ZONE_VB_EARLY_CULL, ZONE_VB_EARLY_RASTER, ZONE_VB_HZB_BUILD, ZONE_VB_LATE_CULL,
-    ZONE_VB_LATE_RASTER, ZONE_VB_LATE_UPLOAD, ZONE_VB_RUN, ZONE_VB_SHADE, zone_begin_stage,
+    ZONE_VB_LATE_RASTER, ZONE_VB_LATE_UPLOAD, ZONE_VB_RUN, ZONE_VB_SDF_MESH, ZONE_VB_SHADE,
+    zone_begin_stage,
 };
 
 #[cfg(feature = "profiling-census")]
@@ -3122,6 +3123,14 @@ impl Renderer<'_> {
                 // `vb_resolve` pushes — GBUFFER_PUSH_BYTES layout parity);
                 // `scene.dispatch_group_count_x` covers `present_extent.width * height` at 64
                 // threads/group — the SAME grid every full-screen VB compute dispatches at.
+                //
+                // VB-SV0 DP4a: the pass's OWN zone bracket — the artifact channel's only eye on
+                // this dispatch (it records between `ZONE_VB_RUN`'s end and `ZONE_VB_SHADE`'s
+                // begin, inside no other interval). GATED like every bracket (unarmed ⇒ no
+                // command), and reached only under `plan.sv0_pass` ⇒ the disarmed fixtures'
+                // pinned pair counts never see this id.
+                // SAFETY: recording is open; the pool was reset this frame; `fi` is this slot.
+                unsafe { ts.begin(self.fns, cmd, ZONE_VB_SDF_MESH) };
                 unsafe {
                     (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sv0_pipeline.pipeline);
                     (self.fns.cmd_bind_descriptor_sets)(
@@ -3154,6 +3163,8 @@ impl Renderer<'_> {
                     );
                     (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
                 }
+                // SAFETY: recording is open; the pool was reset this frame; `fi` is this slot.
+                unsafe { ts.end(self.fns, cmd, ZONE_VB_SDF_MESH) };
             }
 
             // === VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2c: the
