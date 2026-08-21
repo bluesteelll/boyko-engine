@@ -2885,3 +2885,38 @@ The kernel conflict is the same either way; the difference is which history carr
 **Not started because** the main checkout currently holds ~484 lines of live uncommitted work in
 `crates/boyko_rhi_vulkan/src/present/targets.rs` and `device.rs`. A kernel merge wants a clean
 tree and its own worktree.
+
+---
+
+## No `.gitattributes`, and the worktree rule just armed what that costs (2026-08-21)
+
+**Measured while fixing `the_thresholds_file_is_the_one_r0a_froze`.** Git for Windows ships
+`core.autocrlf = true` in its system gitconfig, so every checkout made under it writes text files
+with CRLF, and every checkout made before it kept LF. This repository has **no `.gitattributes` at
+all**, so on-disk bytes are a property of *when and where the checkout was made*.
+
+The main checkout has LF. All three worktrees (`D:/wt/gates`, `D:/wt/reflect`, `D:/wt/ui`) have
+CRLF. Any gate that hashes a file's **raw** bytes therefore reports where it ran.
+
+**Why this surfaced now and not a year ago.** The one-worktree-per-system rule created the first
+new checkouts this repository has seen in a while. The defect it exposed was latent from birth —
+`assert_thresholds_frozen` has never normalised, across every commit since the module was created
+at `21edc80f` — and was invisible for exactly as long as only the LF checkout ran it. Adopting the
+rule did not cause the bug; it armed it, and it will keep arming this class.
+
+**Fixed at the one site that could red.** `assert_thresholds_frozen` now hashes LF-normalised bytes,
+matching the definition its two sibling sites (`vg_thresholds_freeze.rs`, `vg_r0_reference_rig.rs`)
+already used and documented. The pinned literal is unchanged.
+
+**One residual, which cannot red and is therefore worse in a quiet way.**
+`crates/boyko_app/tests/vg_r0d_census.rs:332` hashes `assets/vg_corpus/CORPUS.toml` over raw bytes
+and *writes the digest into* `docs/VG-R0-DENSITY-CENSUS.md`. Nothing compares it against a pin, so
+no gate will ever complain — but the number recorded in that document depends on which checkout
+produced it. A future reader comparing two runs would be comparing checkout configurations. It sits
+behind a GPU `#[ignore]`, so it is not urgent.
+
+**The decision that is yours, not mine.** A `.gitattributes` — `* -text`, or a narrower rule for the
+frozen/hashed files — would make on-disk bytes deterministic everywhere and retire this whole class.
+The cost is that it rewrites line endings across working trees on the next checkout, and two lanes
+(`feat/reflection`, `feat/ui-advanced`) are mid-flight in worktrees right now. That is a
+disruption I should not schedule for you. The thresholds gate is immune either way.
