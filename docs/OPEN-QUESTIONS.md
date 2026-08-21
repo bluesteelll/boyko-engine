@@ -14,6 +14,66 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-21 — UI-ADVANCED S0 stopped at a plan defect: `host_upload_frame_from_world` has no POSSIBLE caller, and S0's observer + two gates are specified against it
+
+**The situation.** `UI-PLAN-SPRITES.md` rung S0 item 7 wires the observer through
+`UiUploadSystem::host_upload_frame_from_world`, item 5 hoists the D6a per-slot generation gate to
+the top of that same function, and gates G0-2/G0-3 (with reds M0-a/M0-b) drive it across frames.
+The plan's own fact table records the seam has "zero callers outside its own doc comments" — as a
+symptom. The cause turns out to be structural: **no caller can exist**. The signature demands a
+`WorldView<'_>` and a `&mut RhiContext` alive at the same call site, and every route dies in the
+compiler (all three probed in-tree on 2026-08-21, errors captured verbatim):
+
+1. **In-schedule shape** (`RhiContext` as the NonSend resource it already is,
+   `boyko_app/src/runner.rs:239`): inside `System::run_dispatcher`, `token.world()` borrows the
+   token shared and `token.nonsend_resource_mut::<RhiContext>()` needs it mutable —
+   **E0502** (`cannot borrow token as mutable because it is also borrowed as immutable`). This is
+   M1 working as designed (`dispatcher_token.rs` — "a `WorldView` cannot coexist with
+   `nonsend_resource_mut`").
+2. **Host shape, owning adapter** (`RhiContext`/`Renderer` as host locals, minted into a
+   `run_system_once` adapter): `System: Send + Sync + 'static` (`system.rs:57`) vs `RhiContext`'s
+   `*mut c_void` / `OnceCell` / `RefCell` — **E0277** (not `Send`, not `Sync`).
+3. **Host shape, borrowing adapter**: the same `'static` bound — **E0521/E0505** ("argument
+   requires that … is borrowed for `'static`").
+
+`WorldView` has private fields and exactly one constructor (`DispatcherToken::world`);
+`DispatcherToken::new` is `pub(crate)` with two mint sites (scheduler dispatch, `run_system_once`)
+— both put the caller inside a `Send + Sync + 'static` system. The set of shapes is exhaustive.
+
+Note the endgame recorded in `upload.rs`'s own doc ("until an ECS-resident swapchain handle
+exists") does not rescue the signature: shape 1 IS that endgame, and it is the E0502 case. The
+`WorldView`-taking form is unsalvageable even after the Renderer becomes a resource — an
+in-schedule body must gather, END the view borrow, then project the context, i.e. it can only ever
+call the split form (`host_upload_frame` on the gathered nodes).
+
+**What S0 landed anyway (defect-free half, gated, all green):** the `boyko-ui` Cargo promotion
+(item 1); `ui_pack_inputs!` with the one-spelling list (item 2); `gather_ui_nodes` + host-owned
+`UiGatherScratch` (item 3); `ui_render_discovery` (item 4); the per-slot
+`last_seen_generation: [u64; FRAMES_IN_FLIGHT]` + hoisted compare as specified (item 5 — compiles,
+but see below); both diagnostic counters (item 6). Gates G0-1 and G0-4 run green
+(`boyko_render/tests/ui_s0_discovery.rs`); M0-c redded as specified (E0308 "expected a tuple with
+3 elements" AT the gather); M0-d redded on G0-1's settle assert (its declared gate G0-2 cannot
+run). **Blocked by the defect:** item 7 (observer), G0-2, G0-3, G0-5, M0-a, M0-b, and measurements
+§10.8(a,d)/§10.3. Item 5's hoisted compare is therefore LANDED BUT UNGATED — a gate inside a
+function nothing can call is exactly the "gate that could not fail" class this plan warns about,
+which is why this entry exists instead of a quiet green report.
+
+**The options (architecture fork — but it edits the KERNEL's capability surface and re-specifies a
+plan rung, so it is recorded before anyone lands it):**
+
+- **(a) One kernel API:** `EcsMaster::world_view(&mut self) -> WorldView<'_>` — sound by the same
+  argument `run_system_once` already makes (`&mut self` ⇒ `running == 0` at the language level);
+  the host then holds the view + its own locals, and item 7 lands as written. One function in
+  `boyko_ecs`, no unsafe surface for callers.
+- **(b) Re-specify the seam:** drop the `WorldView` parameter; the gather half takes `&EcsMaster`
+  (whose `&self` read surface is exactly what `WorldView` forwards to), or the plan's item 7 is
+  re-worded to the callable decomposition (gate → `run_system_once(gather)` → `host_upload_frame`).
+- **(c) Not an option:** an adapter smuggling `*mut RhiContext` behind `unsafe impl Send/Sync` —
+  production wiring routing around M1/M2 through the exact hole they exist to close.
+
+Blocks: the rest of S0 (observer, G0-2/G0-3/G0-5, M0-a/M0-b, §10.3/§10.8), and therefore the S2
+image-hash protocol's "the observer exists before the gate" sequencing argument (SR1).
+
 ## 2026-08-20 — Gate #17: two findings about the INSTRUMENT, one fixed in this commit and one still open
 
 Measuring the particle passes (213 legs over four sessions) produced two facts about the measuring

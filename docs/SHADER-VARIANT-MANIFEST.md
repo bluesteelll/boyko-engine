@@ -251,6 +251,32 @@ monotonicity readback and a drifted constant would make that instrument lie in b
 is **not** on that list: D10 keeps it as an opt-in, but it is a different technique (a weighted
 order-independent accumulation, not a permutation) and would be its own rung, not a define.
 
+## `ui_rect.{vs,fs}.hlsl` — the UI rect/text draw (raster)
+
+One source per stage (both GENERATED — `boyko_shaderdsl/src/bin/emit_ui.rs`; never hand-edit the
+`// === GENERATED … ===` spans), **NO `-D` axis** — each source compiles to exactly ONE artifact.
+The rows exist because the workspace rule ("HLSL the eDSL owns is generated, never hand-edited;
+committed `.spv` are byte-gated") did not bind these files before UI-ADVANCED rung S1
+(`docs/UI-PLAN-SPRITES.md`; architecture D30): the only pin on the two binaries was the
+const-generic byte LENGTH (`SpirvBlob<2368>` / `SpirvBlob<7060>`, `boyko_render/src/ui/mod.rs`),
+which cannot see a re-compile drift at the same size.
+
+| Variant | `-D` | `.spv` | dxc `-T` | Notes |
+|---|---|---|---|---|
+| the only one | — | `ui_rect.vs.spv` | `vs_6_0` | vertexless unit quad from `SV_VertexID`; per-instance transform read from `StructuredBuffer<UiInstance>` @ set 0 binding 0 (VERTEX-stage SSBO read); pixel→NDC ortho push constant (16 B). The `UiInstance` mirror span is generated from the `UiInstanceLayout` GENERATOR INPUTS and pinned to the HOST `offset_of!` by `ui_rect_edsl_sync`. |
+| the only one | — | `ui_rect.fs.spv` | `ps_6_0` | rounded-box SDF + `fwidth` AA + uniform border (premultiplied over) + MSDF text branch (`FLAG_TEXT`) + flag-gated clip; PREMULTIPLIED output (src=ONE blend). Six eDSL leaves (`boyko_shaderdsl::ui`): `ui_unpack_rgba8`, `ui_sd_rounded_box`, `ui_clip_coverage`, `ui_median3`, `ui_screen_px_range`, `ui_premultiplied_over`. |
+
+Frozen recipe (each source's header pins it verbatim; no `-O`, no `-D`):
+`dxc.exe -spirv -T {vs_6_0|ps_6_0} -E main -fspv-target-env=vulkan1.3 ui_rect.{vs|fs}.hlsl`.
+
+*Byte gates:* `boyko_render/tests/ui_rect_edsl_sync.rs` (every generated span IS the printer's
+output, inside the right function; the struct mirror is pinned to the live host struct, not to a
+copied literal) + `boyko_render/tests/ui_rect_spv_sync.rs` (each committed `.spv` is the re-DXC of
+its own source; SKIPs with an `eprintln` when no dxc resolves — **a skipped run is not a pass**,
+the PARTICLES-PLAN F15 rule) + `boyko_shaderdsl/tests/ui_leaves.rs` (the `EvalCf` oracle tables
+and the literal span pins, host-side, dxc-independent). The S1 landing itself moved **neither**
+binary: both re-DXC'd byte-identical from the generator's re-spliced sources.
+
 ## `sdf_forward_march.comp.hlsl` — the Forward/VB fused SDF march+shade (compute)
 
 One source `shaders/sdf_forward_march.comp.hlsl`; the `{HAS_MESH} x {VIEWT}` matrix, all four built
