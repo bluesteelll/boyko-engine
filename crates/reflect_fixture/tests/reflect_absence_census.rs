@@ -17,15 +17,25 @@
 //! ~~Until CORE C7 lands the `#[component(reflect)]` key, "present" means G0's landed
 //! deviation: the direct `#[cfg(feature = "reflect")]` fn-pointer reference to
 //! `boyko_reflect::install_type_info` (`reflect_linkage()`), and "absent" means
-//! `reflect_never.rs` carries no such linkage.~~ → **corrected at C7's landing
-//! (2026-08-21, CORE D26).** C7 landed the key and `reflect_on.rs` now carries **both**:
-//! the annotation *and* `reflect_linkage()`. "Present" therefore means the pair, and
-//! "absent" means `reflect_never.rs` carries neither. The linkage cannot go until
-//! **C8**, because needle B is the literal name `install_type_info` and C7 emits no
-//! install — deleting the reference here would leave the present control with no
-//! needle-B subject, and the gate asserts only `l2_a > 0`. `OPT_IN_TOKENS` below and its
-//! assertion's failure text still say "C7" and are **deliberately left**: C8's `Lands`
-//! carries them, in the same change that deletes the linkage.
+//! `reflect_never.rs` carries no such linkage.~~ ~~→ **corrected at C7's landing
+//! (2026-08-21, CORE D26).** C7 landed the key and `reflect_on.rs` now carries **both** …
+//! `OPT_IN_TOKENS` below and its assertion's failure text still say "C7" and are
+//! **deliberately left**: C8's `Lands` carries them.~~
+//!
+//! → **BOTH SUPERSEDED at CORE C8's landing (2026-08-21).** "Present" now means the
+//! annotation and nothing else: `reflect_linkage()` is deleted from `reflect_on.rs` (and
+//! from `reflect_off_twin_plus.rs`), and needle B's subject in the L2 image is the
+//! derive's own emitted `install_type_info` call. `OPT_IN_TOKENS` is the annotation form,
+//! and the crate-path token it used to carry moved to `L3_FORBIDDEN_TOKENS` — it could not
+//! stay, because the same list is asserted **present in L2**, and post-C8 `reflect_on.rs`
+//! does not spell that path anywhere.
+//!
+//! **The retirement is sound only because `main()` now touches `component_id()`** (CORE
+//! D27). The install slot lives inside that method; measured before C8, `component_id`
+//! occurred **zero** times in every link configuration of this bin, so deleting the
+//! linkage without the touch would have reddened `l2_a > 0` *and* `l2_b > 0` together. All
+//! three bins carry the touch, because L3 and G7a's control must not differ from L2 in a
+//! second way.
 //!
 //! # THE MEASURED LINK-CONFIGURATION TABLE (this box, `x86_64-pc-windows-gnu`)
 //!
@@ -124,6 +134,40 @@
 //! their `Vec<Problem>` `RawVec` instantiations. One referenced symbol still pulls the
 //! whole object; the object got bigger.
 //!
+//! **RE-CALIBRATED at CORE C8 (2026-08-21) — the linkage is RETIRED, `main()` touches
+//! `component_id()`, and needle B's subject is now the derive's own emitted install:**
+//!
+//! | link configuration | L1 A | L2 A | L3 A | L1 B | L2 B | L3 B |
+//! |---|---|---|---|---|---|---|
+//! | default release | 0 | **42** | **0** | 0 | **1** | **0** |
+//! | `-C link-arg=-Wl,--gc-sections` | 0 | **42** | **0** | 0 | **1** | **0** |
+//! | `lto = "fat"`, `codegen-units = 1` | 0 | **7** | **0** | 0 | **1** | **0** |
+//!
+//! The gated cells did not move: L1 and L3 read 0 in every row, both needles. **The rung's
+//! whole claim is in the two cells that DID move**, and both moved in the direction that
+//! says the emission reached an artifact — measured, not attributed:
+//!
+//! * **L2 A under fat LTO: 5 → 7.** At C7 the surviving five were the pulled object's
+//!   floor. The two additions, read off `llvm-nm` rather than guessed, are
+//!   `boyko_reflect::prim::get_f32` and `prim::set_f32` — the accessor pair
+//!   `FixturePod::value`'s baked `FieldInfo` names. They survive LTO now because the
+//!   descriptor is REACHED; at C7 nothing referenced it, so they were dropped. The whole
+//!   fat-LTO row is: those two accessors, `install_type_info`, the `REFLECT` data symbol,
+//!   and the three std `OnceLock<&TypeInfo>` instantiations.
+//! * **The consumer-side descriptor, 0 → 2.** `__REFLECT_TYPE_INFO` / `__REFLECT_FIELDS`
+//!   read **zero in every row at C7** — the artifact-level witness of *"the static exists
+//!   and is inert"*. They now read **2** in the L2 fat-LTO image and **0** in L1 and L3.
+//!   Needle A still cannot count them (they are mangled with `reflect_on` as the defining
+//!   crate), which is why this is recorded here in prose rather than left to a cell.
+//!
+//! **And the number that makes L1's zero mean something, first measured at this rung:**
+//! `component_id` occurs **4** times in the L1 image and **4** in L3, where it occurred
+//! **0** times in every configuration before C8. The funnel is now compiled into *both*
+//! images and only the emitted `#[cfg(feature = "reflect")]` separates them. Until the
+//! D27 touch landed, the ship cell's zero was earned by the funnel being absent from
+//! everything — a true statement about a program that called nothing, not about the
+//! feature gate.
+//!
 //! **And needle A structurally cannot see the derive's emission at all.**
 //! `__REFLECT_TYPE_INFO` / `__REFLECT_FIELDS` / `__reflect_type_id_of::<T>` are defined
 //! in the CONSUMER crate, so v0 mangling names *`reflect_on`* as their defining crate — a
@@ -133,8 +177,11 @@
 //! *"the static exists and is inert"* with an artifact-level witness, and why the fat-LTO
 //! row is unchanged at 5. Whether the emission reached the image is **G6b's** question,
 //! not this gate's — and from CORE C8 it becomes needle B's, because the install slot is
-//! the first thing that references `boyko_reflect` FROM the emission. Re-run this
-//! calibration at C8.
+//! the first thing that references `boyko_reflect` FROM the emission. ~~Re-run this
+//! calibration at C8.~~ → **done, 2026-08-21; the C8 table is above.** The prediction held
+//! and the counter-reading is recorded there: the descriptor symbols went 0 → 2 while
+//! needle A stayed structurally blind to them, so the derive's emission reaching the image
+//! is visible in this file only through needle B and through that prose row.
 //!
 //! And "absent from the image" still does not mean "absent from the build": L3's build
 //! DID resolve, compile and link the crate. That is G1/G2's question and not this
@@ -362,13 +409,178 @@ fn bin_source(bin: &str) -> PathBuf {
     );
 }
 
-/// The linkage tokens whose absence defines `reflect_never` until CORE C7 swaps the
-/// landed deviation for the real `#[component(reflect)]` key (G0's target-table note).
-/// Deliberately NOT `feature = "reflect"`: the gate-5 self-report line legitimately
-/// probes `cfg!(feature = "reflect")` in every bin, and a `cfg!` probe can put no symbol
-/// in the image — the opt-in, until C7, is the linkage (the crate path reference), and
-/// after C7 it is the derive key.
-const OPT_IN_TOKENS: &[&str] = &["reflect_linkage", "boyko_reflect::"];
+/// Returns `source` with every Rust comment removed, so a token clause reads **code** and
+/// never **prose**.
+///
+/// Both token clauses of the gate below run over this text, and the reason they must move
+/// together is at [`OPT_IN_TOKENS`]. This function is the whole mechanism: with it, an
+/// annotation quoted in a doc comment is not an annotation, in either direction.
+///
+/// # What it models, and what it REFUSES rather than mis-reads
+///
+/// Line comments (`//`, `///`, `//!`) and plain string literals with backslash escapes —
+/// which is every construct the two scanned sources (`reflect_on.rs`, `reflect_never.rs`)
+/// contain, a fact the preconditions below re-check on every run rather than assume it
+/// stays true. It deliberately does **not**
+/// model block comments, raw strings, or a `'"'` character literal; each of those is
+/// detected *in the normal state* (so a mention inside a comment is invisible to the check,
+/// which is why `for"` in a prose sentence does not trip the raw-string guard) and panics
+/// with a message saying what to do. A silent mis-scan of a construct the scanner does not
+/// understand is the failure this refusal exists to prevent: it would drop code text, and a
+/// dropped token is a GREEN on the L2 half.
+fn code_only(source: &str) -> String {
+    let src: Vec<char> = source.chars().collect();
+    let mut out = String::with_capacity(source.len());
+    let mut in_string = false;
+    let mut i = 0;
+    while i < src.len() {
+        let c = src[i];
+        if in_string {
+            out.push(c);
+            if c == '\\' {
+                if let Some(&next) = src.get(i + 1) {
+                    out.push(next);
+                    i += 2;
+                    continue;
+                }
+            } else if c == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        // ── normal state ─────────────────────────────────────────────────────────────
+        if c == '/' && src.get(i + 1) == Some(&'/') {
+            // Drop to end of line; the newline itself is pushed by the next iteration, so
+            // line structure survives and a stripped line cannot join its neighbour.
+            while i < src.len() && src[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        assert!(
+            !(c == '/' && src.get(i + 1) == Some(&'*')),
+            "a fixture source opens a BLOCK comment, which `code_only` does not model -- it \
+             would be copied into the scanned text and could satisfy the L2 token clause \
+             exactly like the prose this function exists to exclude. Use `//` comments in \
+             the census's legs, or teach this scanner block comments in the same change."
+        );
+        if c == '"' {
+            let quoted_char = i > 0 && src[i - 1] == '\'' && src.get(i + 1) == Some(&'\'');
+            assert!(
+                !quoted_char,
+                "a fixture source contains a `'\\\"'` character literal, which `code_only` \
+                 would mistake for the start of a string and then scan the rest of the file \
+                 in string state -- every comment after it would be copied into the scanned \
+                 text. Rewrite it, or teach this scanner character literals."
+            );
+            let mut start = i;
+            while start > 0 && src[start - 1] == '#' {
+                start -= 1;
+            }
+            assert!(
+                !(start > 0 && src[start - 1] == 'r'),
+                "a fixture source contains a RAW string literal, which `code_only` does not \
+                 model -- its `\\` is not an escape, so the scanner would leave string state \
+                 at the wrong quote and mis-classify everything after it. Rewrite it, or \
+                 teach this scanner raw strings."
+            );
+            in_string = true;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// [`code_only`] is the gate's instrument, so it is pinned rather than trusted.
+///
+/// An instrument that only the gate exercises is checked exactly as far as today's fixture
+/// sources happen to reach — and this campaign's most-repeated defect is a datum computed
+/// and asserted nowhere. The four shapes below are the ones the two token clauses turn on:
+/// a whole-line comment (the C8 header's two mentions), a **trailing** comment (the shape a
+/// line-oriented stripper would miss), real code, and a `//` inside a string literal (which
+/// must NOT be treated as a comment, or the rest of a code line vanishes).
+#[test]
+fn code_only_keeps_code_and_drops_prose() {
+    const TOKEN: &str = "#[component(reflect)]";
+
+    let whole_line = format!("// the target table says `{TOKEN}` and it now is\nstruct A;\n");
+    assert!(!code_only(&whole_line).contains(TOKEN), "a whole-line comment survived");
+    assert!(code_only(&whole_line).contains("struct A;"), "the code line did not survive");
+
+    let trailing = format!("struct A; // beside {TOKEN}\n");
+    assert!(!code_only(&trailing).contains(TOKEN), "a TRAILING comment survived");
+
+    let code = format!("{TOKEN}\nstruct A;\n");
+    assert!(code_only(&code).contains(TOKEN), "a real annotation was stripped");
+
+    let in_string = "let s = \"a // b\"; let t = 1;\n";
+    assert!(
+        code_only(in_string).contains("let t = 1;"),
+        "a `//` inside a string literal was taken for a comment, so the rest of the line \
+         was dropped -- on the L3 half that direction is a silent GREEN"
+    );
+}
+
+/// The opt-in whose presence defines `reflect_on` and whose absence defines
+/// `reflect_never` — **the annotation form since CORE C8** (2026-08-21), which retired
+/// G0's `reflect_linkage()` deviation.
+///
+/// Deliberately NOT `feature = "reflect"`: the gate-5 self-report line legitimately probes
+/// `cfg!(feature = "reflect")` in every bin, and a `cfg!` probe can put no symbol in the
+/// image. The opt-in is the one thing that makes the derive emit.
+///
+/// # Why this list SHRANK to one entry at C8, rather than gaining the annotation
+///
+/// It read `["reflect_linkage", "boyko_reflect::"]`, and both clauses below use it: L3
+/// must contain **none** of these, L2 must contain **all** of them. Post-C8 the second
+/// requirement is what decides the list. `reflect_on.rs` no longer spells
+/// `boyko_reflect::` anywhere — that path now exists only inside the derive's expansion —
+/// so keeping the entry here (the literal reading of "swap in the annotation form") reds
+/// the twin-source clause on the very change that landed the rung. The crate-path token
+/// did not simply vanish; it moved to [`L3_FORBIDDEN_TOKENS`], which is the half of its
+/// old job that survives.
+///
+/// # These strings are matched against CODE, never against prose — and BOTH halves must be
+///
+/// The entries are ordinary Rust that any file may also mention **in a comment**, and the
+/// list is read by two clauses pointing in **opposite** directions: L3 must contain
+/// **none** of them, L2 must contain **all** of them. Prose satisfies a `contains`-all just
+/// as readily as it trips a `contains`-any, so a rule applied to one half only leaves the
+/// other half's defect intact — and the C8 landing did exactly that, twice in one change:
+///
+/// * The **L3** half fired on prose first: `reflect_never.rs`'s `FixturePod` doc comment
+///   spelled the attribute out inside a sentence explaining what the file lacks, and the
+///   census failed on its own documentation. The rule written then — *"L3's source may not
+///   quote these tokens"* — fixed the file and left the mechanism untouched.
+/// * The **L2** half then failed silently, which is the worse direction. C8 changed this
+///   list from `["reflect_linkage", "boyko_reflect::"]` — tokens the pre-C8 `reflect_on.rs`
+///   carried **only in code** — to an attribute the same change's rewritten header spells
+///   **twice in prose**. MEASURED at the C8 audit: deleting the real
+///   `#[component(reflect)]` from `reflect_on.rs` left the header's two mentions, left this
+///   clause GREEN, and the census only reported three assertions and ~16 s of fat-LTO builds
+///   later, on `l2_a`, with a message about the linker rather than about the retired
+///   annotation.
+///
+/// So the scan runs over [`code_only`], for **both** halves, from one derived text. That is
+/// the mechanism rather than a rule authors must remember, and it is deliberately shared: a
+/// future entry cannot be prose-proof on one side and prose-satisfiable on the other,
+/// because there is only one scan. Neither leg's rustdoc has to avoid the tokens any more —
+/// `reflect_never.rs`'s warning paragraph says so at its own site.
+const OPT_IN_TOKENS: &[&str] = &["#[component(reflect)]"];
+
+/// Tokens L3 must not contain, but which L2 is no longer required to spell.
+///
+/// `boyko_reflect::` was in [`OPT_IN_TOKENS`] until CORE C8 and did two jobs there. The
+/// job that ends at C8 is *"the present control carries a hand-written reference"* — G0's
+/// deviation, now retired. The job that does **not** end is L3's: `reflect_never` is the
+/// LINKED-UNUSED leg, and its whole meaning is that the crate is resolved, compiled and
+/// linked while the source **references nothing in it**. A source-text reference would end
+/// that without touching the derive key, and the check for it must survive the constant it
+/// used to live in — dropping it silently would be the same class of loss the `l2_b`
+/// clause exists to prevent.
+const L3_FORBIDDEN_TOKENS: &[&str] = &["boyko_reflect::"];
 
 /// **The gate** (GATES G3, all five clauses, under the one link configuration the
 /// measured table shows is decidable: `lto = "fat"`, `codegen-units = 1`).
@@ -380,25 +592,41 @@ fn reflect_absence_census_three_legs_under_fat_lto() {
     let l3_source = bin_source(l3_bin);
     let l3_text = std::fs::read_to_string(&l3_source)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", l3_source.display()));
-    let colliding: Vec<&&str> =
-        OPT_IN_TOKENS.iter().filter(|t| l3_text.contains(*(*t))).collect();
+    let l3_code = code_only(&l3_text);
+    let colliding: Vec<&&str> = OPT_IN_TOKENS
+        .iter()
+        .chain(L3_FORBIDDEN_TOKENS)
+        .filter(|t| l3_code.contains(*(*t)))
+        .collect();
     assert!(
         colliding.is_empty(),
-        "L3's fixture ({}) contains the reflect opt-in tokens {colliding:?} -- the \
+        "L3's fixture ({}) contains the reflect opt-in tokens {colliding:?} IN CODE -- the \
          linked-unused discriminator has collapsed into the present control under a \
          different name, and any number it reported would be a false statement about the \
          instrument's reach (the exact wrong conclusion the corrected G3 exists to \
-         prevent)",
+         prevent). Comments are stripped before this scan ([`code_only`]), so this is a \
+         real reference and not that file's rustdoc describing what it lacks.",
         l3_source.display()
     );
-    // ...and the twin source MUST contain them, or the deviation was retired without
-    // updating this census (CORE C7's swap-over is named in both bin headers).
+    // ...and the twin source MUST carry the opt-in, or the annotation was retired without
+    // updating this census. `L3_FORBIDDEN_TOKENS` is deliberately NOT required here: since
+    // CORE C8 the crate path lives only in the derive's expansion, and requiring the
+    // source to spell it would demand the very hand-written reference C8 deleted.
+    //
+    // SAME `code_only` TEXT AS THE CLAUSE ABOVE, and that is the point (see OPT_IN_TOKENS):
+    // read against raw source this clause is satisfied by `reflect_on.rs`'s own header,
+    // which spells the attribute twice, and deleting the real annotation leaves it green.
     let l2_text = std::fs::read_to_string(bin_source("reflect_on")).expect("reflect_on source");
+    let l2_code = code_only(&l2_text);
+    let missing: Vec<&&str> = OPT_IN_TOKENS.iter().filter(|t| !l2_code.contains(*(*t))).collect();
     assert!(
-        OPT_IN_TOKENS.iter().all(|t| l2_text.contains(*t)),
-        "reflect_on.rs no longer carries the G0 linkage tokens {OPT_IN_TOKENS:?} -- if \
-         CORE C7 has landed the `#[component(reflect)]` key, update OPT_IN_TOKENS to the \
-         annotation form in the same change (the swap-over is named in the bin headers)"
+        missing.is_empty(),
+        "reflect_on.rs no longer carries the reflect opt-in {missing:?} IN CODE -- the \
+         present control has stopped being annotated, so `l2_a`/`l2_b` below would report \
+         a build that opted into nothing. Comments are stripped before this scan \
+         ([`code_only`]), so a mention of {missing:?} in that file's header does NOT \
+         satisfy this clause: the attribute must be on a type. If the opt-in's spelling \
+         changed, update OPT_IN_TOKENS in the same change."
     );
 
     // ── The three legs, fat-LTO linked. ──────────────────────────────────────────────
@@ -462,25 +690,51 @@ fn reflect_absence_census_three_legs_under_fat_lto() {
     // equality here would red on the linker's bookkeeping rather than on the property.
     // Measured 1 in all three rows at C7.
     //
-    // **This assertion is a CONSTANT until C8, and that is written down rather than
-    // discovered later.** What puts `install_type_info` in the L2 image today is
-    // `reflect_on.rs`'s temporary `reflect_linkage()`, whose presence the OPT_IN_TOKENS
-    // clause at the top of this test already requires -- so at C7 the two clauses cannot
-    // disagree, and deleting the linkage reds the source-text clause first. Its worth is
-    // at C8: that rung deletes `reflect_linkage()` and replaces it with the derive's
-    // emitted install call, and this is the clause that reds if the replacement does not
-    // arrive. Without it, C8 could take L2's `install_type_info` to zero and move nothing
-    // this instrument reports -- a probe losing its subject in silence, which is the
-    // entire reason D26 exists.
+    // **THE CLAUSE WENT LIVE AT CORE C8** (2026-08-21). It was written at the C7 follow-up
+    // and stated plainly there that it was a CONSTANT until C8: what put `install_type_info`
+    // in the L2 image at C7 was `reflect_on.rs`'s temporary `reflect_linkage()`, whose
+    // presence the OPT_IN_TOKENS clause already required, so the two clauses could not
+    // disagree. C8 deleted that reference. Since C8 the ONLY thing that can put needle B in
+    // this image is the derive's own emitted install call -- and, because that call sits
+    // inside `component_id()`, only if `main()` still CALLS `component_id()` (CORE D27,
+    // measured: with the funnel untouched the whole slot is dropped before the linker sees
+    // it, and this clause reds together with `l2_a > 0`).
+    //
+    // So this is now the clause that answers "did C8's emission reach an artifact?", which
+    // no other check in the campaign asks.
+    //
+    // **AND IT HAS NO OBSERVED RED OF ITS OWN THAT DOES NOT ALSO RED `l2_a`.** Written at
+    // the C8 landing as *"its two live REDs are the deletion of the `#[cfg]` wrapper and
+    // the deletion of the `black_box(component_id())` touch, which reds exactly here"* --
+    // both halves of that sentence are refuted by measurement. The `cfg` deletion reds gate
+    // 2 (`E0433` on `reflect_off_twin`, in the BUILD, before any needle is counted). The
+    // touch deletion takes needle A and needle B to zero TOGETHER (D27 measured it: with
+    // the funnel untouched the whole slot is dropped), and `l2_a > 0` is asserted ~35 lines
+    // above, so THAT is the clause that reports -- observed at `l2_a`, not here. The same
+    // holds for deleting the annotation itself. Every mutation that removes the install
+    // removes the pulled object, and the pulled object is what needle A counts.
+    //
+    // Its ONE distinguishing case is *needle B losing its subject while the crate is still
+    // in the image* -- the "probe loses its subject in silence" shape D26 exists to prevent.
+    // That case IS constructible at C8, and the red was OBSERVED (2026-08-21, this box) by
+    // flipping `boyko_reflect::registry::install_type_info` from `#[inline(never)]` to
+    // `#[inline(always)]`: under fat LTO the call is inlined into the emitted slot, the
+    // symbol NAME leaves the image, and this clause reds ALONE with `L2 B = 0` while
+    // `l2_a > 0` stays green on the six remaining `boyko_reflect` symbols. The sibling case
+    // -- renaming the installer without re-pointing NEEDLE_B -- is the same shape by a
+    // different route and needs no separate run. `#[inline(never)]` on the installer is
+    // therefore load-bearing for this census, not a codegen preference.
     assert!(
         l2_b > 0,
         "NOT RESOLVED (needle B inert): the present control (reflect_on, feature on) \
          carries NO `{NEEDLE_B}` symbol, so L1 B = {l1_b} and L3 B = {l3_b} below are \
          indistinguishable from `the needle matches nothing anywhere` and neither zero \
-         is evidence of anything. At C7 this means the `reflect_linkage()` reference was \
-         neutered while its NAME survived in the source; from C8 it means the derive's \
-         install call did not reach the image after the linkage was retired (L2 B = \
-         {l2_b}, measured 1 in every link configuration at C7)"
+         is evidence of anything. Since CORE C8 this means the derive's emitted install \
+         call did not reach the image: either the seventh slot in `component_id()` is not \
+         being emitted, or nothing calls `component_id()` in `reflect_on.rs`'s `main()` -- \
+         an uncalled `#[inline]` method is dropped before the linker sees it, so the slot \
+         can be present, correct, and in no artifact (L2 B = {l2_b}; the C8 re-calibration \
+         in this file's header records what it reads now)"
     );
 
     // Gate 1 — the ship cell.

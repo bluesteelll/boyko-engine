@@ -37,6 +37,23 @@ boyko-render = { path = "../boyko_render" }
 # no `features` array, exactly like the two edges above (GATES D3 C4).
 boyko-math = { path = "../boyko_math" }
 
+[dev-dependencies]
+# CORE C8 gate 5 / D30 — Horn 2's generator-agreement subject needs BOTH derives on one
+# struct, and `#[derive(Bindable)]` emits `impl ::boyko_ui::binding::Bindable` (see
+# `boyko_macros/src/bindable.rs:70`), so the trait must be nameable from the test target.
+#
+# **DEV, deliberately, and the distinction is the whole argument.** A dev edge is
+# test-only: it enters no ship closure, so G2's censuses do not move; `boyko-ui` names no
+# `boyko-reflect`, so it moves no reflect surface; and it carries no `features = [...]`
+# array, so none of G1's six manifest clauses (which are about `boyko-reflect` edges and
+# feature arrays) touch it. The alternative host — a test target in `boyko_render`, which
+# already has both a non-default `reflect` feature and this same dev edge at ZERO manifest
+# cost — was rejected on a different ground: no CI leg builds
+# `-p boyko-render --features reflect`, so the gate would be compiled by nothing (F17's
+# measured class). This package's leg (`cargo test -p reflect-dogfood --all-targets
+# --features reflect-dogfood/reflect`) already exists and already enforces non-vacuity.
+boyko-ui = { path = "../boyko_ui" }
+
 [features]
 default = []
 # The LEAF UMBRELLA (GATES D15): the one place the engine crates' non-default `reflect`

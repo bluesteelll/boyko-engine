@@ -10,6 +10,7 @@
 // path. G7a's harness is the drift gate: it measures the multiset delta and must see
 // exactly the marker.
 
+use boyko_ecs::ecs::core::component::component::Component as ComponentTrait;
 use boyko_macros::Component;
 
 /// Copy of `reflect_on`'s `FixturePod` (see the header for why this file is a copy).
@@ -37,8 +38,12 @@ fn main() {
     // Referenced from main so no lint fires and no linker config can strip it silently.
     core::hint::black_box(positive_control_marker());
 
-    #[cfg(feature = "reflect")]
-    reflect_linkage();
+    // CORE C8 / D27 — the funnel touch, mirrored from `reflect_on.rs`. This file's whole
+    // contract is "the twin's source plus exactly one fn", so a statement added there and
+    // not here would make G7a's positive control differ from its baseline by the marker
+    // PLUS a funnel call — a delta that is still non-zero, so the control would keep
+    // reporting a pass while no longer measuring what its header says it measures.
+    core::hint::black_box(<FixturePod as ComponentTrait>::component_id());
 
     // GATES G3 gate 5, mirrored from `reflect_on.rs` so the twin comparison G7a runs
     // stays "the marker and nothing else": the print exists on both sides of the pair.
@@ -54,12 +59,4 @@ fn main() {
 #[inline(never)]
 fn positive_control_marker() -> u64 {
     0x5eed
-}
-
-/// Same linkage as `reflect_on` (this file is its copy plus the marker).
-#[cfg(feature = "reflect")]
-#[inline(never)]
-fn reflect_linkage() {
-    let install: fn(usize, &'static boyko_reflect::TypeInfo) = boyko_reflect::install_type_info;
-    core::hint::black_box(install);
 }

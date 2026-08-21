@@ -156,12 +156,27 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     // `impl boyko_reflect::Reflect` pointing at it, and D20's `ReflectDefault` witness.
     // The whole emission is `#[cfg(feature = "reflect")]` evaluated in the EXPANDING
     // crate (D2), so an un-annotated derive and a feature-off consumer both emit nothing,
-    // and this crate keeps no edge to `boyko_reflect` (D17). NO install call is emitted
-    // here — the static is inert until C8 wires it into `component_id()`.
+    // and this crate keeps no edge to `boyko_reflect` (D17). CORE C8 adds the install
+    // call in `component_id()` below, which is what makes the descriptor reachable.
+    //
+    // CORE C8 / D29 — the `storage_bitset` term, and why ONE binding rather than two
+    // matching conditions: a bitset enable tag has no `ComponentPool` and no per-row
+    // bytes, so a descriptor published for its id is a coherent lie — an editor reading
+    // by id would be handed a zero-field view of something whose state is a bit in a
+    // bitset. Up to C7 the emission was inert and the combination merely compiled
+    // (MEASURED at the C8 audit: `size=0 align=1 fields=0 kind=Struct`); C8 is the rung
+    // that makes it publish, so C8 is where the suppression lands. This slot was the ONE
+    // in its neighbourhood carrying no `storage_bitset` term — its six neighbours
+    // (`entities_items`, `serialize_items`, `clone_install`, `relationship_install`,
+    // `serialize_install`, `bundle_items`) all do. Read TWICE below, by the descriptor
+    // emission and by the install slot: a single binding is what makes it impossible for
+    // the two to drift into "installs something it did not emit". C9 owns the spanned
+    // refusal message and, with it, ECS D5's release `assert!` inside `install_type_info`.
     //
     // Computed BEFORE `input.ident` moves below, like every other codegen that needs to
     // walk the fields.
-    let (reflect_items, reflect_default_witness) = if hooks.reflect {
+    let reflect_enabled = hooks.reflect && !hooks.storage_bitset;
+    let (reflect_items, reflect_default_witness) = if reflect_enabled {
         let no_default = match crate::reflect::parse_reflect_no_default(&input.attrs) {
             Ok(v) => v,
             Err(ts) => return ts,
@@ -321,6 +336,43 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         }
     };
 
+    // Reflection CORE C8 — the SEVENTH install slot, and the campaign's central claim in
+    // one line. `component_id()` is the funnel every other per-type datum is published
+    // through; the descriptor C7 baked is inert until it joins them, because nothing else
+    // in the expansion references it (MEASURED at C7: zero `__REFLECT_TYPE_INFO` symbols
+    // in every link configuration — an uncalled static is dropped before the linker sees
+    // it).
+    //
+    // The paths are ABSOLUTE, and that is a decision rather than a copy of the neighbours.
+    // The six slots above use the non-absolute `boyko_ecs::…` form and matching them would
+    // be defensible — but this is the one path whose ABSENCE IN A SHIP BUILD is what the
+    // whole campaign claims, and a bare first segment resolves through the consumer's own
+    // scope before the extern prelude, so a consumer `mod boyko_reflect` or
+    // `use x as boyko_reflect` would shadow it. Every other path the reflect emission puts
+    // into a consumer crate is already absolute (`reflect.rs:190`, `:249`, `:378`, `:463`);
+    // this closes the last one.
+    //
+    // `#[cfg(feature = "reflect")]` on the STATEMENT, evaluated in the crate the derive
+    // expanded into (D2) — the same gate the descriptor itself carries. Feature-off, the
+    // statement is not merely dead, it does not exist: `boyko_reflect` is not in the
+    // consumer's resolved graph at all, so an un-`cfg`'d form would be `E0433` rather than
+    // a silent leak (which is exactly what C8's first RED observes).
+    //
+    // No `IS_REFLECT` const (D7): "is `T` reflectable?" has one carrier, and it is
+    // `type_info_of(id).is_some()`. `boyko_macros` gains NO dependency on `boyko_reflect`
+    // (D17) — this is a token stream, not a call site in this crate.
+    let reflect_install = if reflect_enabled {
+        quote! {
+            #[cfg(feature = "reflect")]
+            ::boyko_reflect::install_type_info(
+                raw,
+                <Self as ::boyko_reflect::Reflect>::TYPE_INFO,
+            );
+        }
+    } else {
+        TokenStream2::new()
+    };
+
     // Phase 22 D7: single-component Bundle emission (suppressed by
     // `#[component(no_bundle)]`). EnableTag D6: `storage = "bitset"` ALSO
     // suppresses it — a bitset tag has no `ComponentPool` and must not be
@@ -392,6 +444,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                     #relationship_install
                     #residency_install
                     #serialize_install
+                    #reflect_install
                     boyko_ecs::ecs::identifiers::primitives::ComponentId(raw)
                 })
             }
