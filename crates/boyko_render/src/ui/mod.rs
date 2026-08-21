@@ -80,7 +80,7 @@ pub use instance::{
 };
 pub use pack::{pack_ui_instance, PackInput, UiRenderGeneration, UiRenderScratch};
 pub use plan::UiFramePlan;
-pub use upload::{UiNode, UiUploadSystem};
+pub use upload::{UiNode, UiUploadSystem, UI_STAGING_ROWS};
 
 /// Frames-in-flight for the UI render ring — one host-mapped STORAGE ring slot + one
 /// bind-group per slot (Decision 7). MUST equal the swapchain `Renderer`'s

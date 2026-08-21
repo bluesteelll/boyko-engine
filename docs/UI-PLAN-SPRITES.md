@@ -60,7 +60,7 @@ wrong.
 | `PackInput` has **no** texture, **no** tint, **no** slot field; `text_uv: Option<[f32;4]>` is the only UV | `ui/pack.rs:21-46` |
 | `UiRenderScratch.last_seen_generation` is a **single `u64`** and is **read by nobody**; `UiRenderGeneration::bump` has no production caller; `pack_sort_upload` contains no compare and repacks unconditionally | `pack.rs:141-199`, `upload.rs:153-180` |
 | The seam order today is `gather_nodes(world, node_buf)` **then** `pack_sort_upload` — so a gate inside the pack still pays the whole world read | `upload.rs:255-274` |
-| `host_upload_frame_from_world` has **zero callers** outside its own doc comments | crate-wide grep |
+| The fused seam predecessor (`host_upload_frame_from_world`, **DELETED 2026-08-21**) had **zero callers** outside its own doc comments — and the CAUSE, established after this table was first written: its parameter list demanded a live `WorldView` AND a `&mut RhiContext` at one call site, which the token's M1 discipline forbids by borrowck. All three call routes died in the compiler — in-schedule: **E0502** (view = `&self` of the token, `nonsend_resource_mut` = `&mut self`); host owning adapter: **E0277** (`System: Send + Sync + 'static` vs `RhiContext`'s raw pointers); host borrowing adapter: **E0521/E0505** (the `'static` bound) — and the shapes are exhaustive because `WorldView` has exactly ONE constructor (`DispatcherToken::world`) and `DispatcherToken::new` is `pub(crate)` with two mint sites (scheduler dispatch, `run_system_once`), both inside a `Send + Sync + 'static` system. Superseded by S0's **two-phase seam** (Phase 1 gather / Phase 2 upload, sequenced in one `run_dispatcher`) | `docs/OPEN-QUESTIONS.md` entry 2026-08-21 (RESOLVED); `upload.rs` |
 | The UI pipeline is built through the **one-set** `create_graphics_pipeline`; set 0 has three bindings (StorageBuffer @0 VERTEX\|FRAGMENT, CombinedImageSampler @1 FRAGMENT, UniformBuffer @2 FRAGMENT) | `ui/resources.rs:188-243` |
 | `create_graphics_pipeline_bindless(desc, set1_layout)` exists and is used by the textured gbuffer, Forward and particle paths | `boyko_rhi_vulkan/src/rhi_impl/device.rs:2112` |
 | `BINDLESS_TEXTURE_CAPACITY = 4096`; the allocator issues `1..capacity`, so the maximum live slot is **4095** | `boyko_rhi_vulkan/src/bindless.rs:72`, `boyko_render/src/bindless.rs:80-93` |
@@ -233,8 +233,9 @@ for a human to look at. The existing texel assertions stay — they say *what* i
 
 **Reason.** This is not tidiness. **M2-b** — swapping two fields in the HLSL mirror only — is the
 mutation **R1** says nothing in the tree can currently see, and a full-image hash is the cheapest
-thing that sees it. The pin is only as live as a machine with a GPU, which is why S0's observer rung
-is sequenced first.
+thing that sees it. The pin is only as live as a machine with a GPU — since the 2026-08-21 ruling
+re-pointed S0's observer at device-free Phase 1, that liveness comes from the owner-run windowed
+leg (SR1's completion criterion), not from S0.
 
 **Rejected:** (a) adding the UI goldens to `goldens/PINS.toml` — that file's discipline is a BMP dump
 from a windowed `boyko_app` test driven by `scripts/golden.ps1`; the UI goldens are offscreen
@@ -338,15 +339,31 @@ render); author-only commit.
    hit-test's `paint_seq` are one traversal rather than two that must be kept in agreement.
 4. **`ui_render_discovery`** — one normal system whose `Query<(), ui_pack_inputs!(changed)>` bumps
    `UiRenderGeneration` once per changed frame. One site, not fifteen.
-5. `UiRenderScratch.last_seen_generation` becomes **`[u64; FRAMES_IN_FLIGHT]`** and the compare is
-   **hoisted to the top of `host_upload_frame_from_world`, ahead of the gather** (D6a). A static
-   frame then costs one `u64` compare and **zero** component probes.
+5. **The two-phase seam** (the architect's 2026-08-21 WorldView ruling — sequence, never fuse,
+   inside one `UiUploadSystem::run_dispatcher`, mirroring the shipped `GpuSystem` ordering):
+   **Phase 1 (shared borrow)** — the per-slot `[u64; FRAMES_IN_FLIGHT]` generation gate, hoisted
+   AHEAD of the gather (D6a; a static frame costs one `u64` compare and **zero** component probes —
+   the structural skip), then `gather_into_staging(&mut self, view: &WorldView<'_>) -> usize`
+   (gather + pack + z-sort into the system-owned staging `Box`, no `!Send` type in the signature,
+   device-free, unit-testable with a bare `EcsMaster`), the view dropped at the phase's closing
+   brace; **Phase 2 (exclusive borrow)** — `token.nonsend_resource_mut::<RhiContext>()`, then
+   `upload_staging(rhi, packed, ortho, token)` (no `WorldView` in the signature, so the fusion
+   cannot be re-written). `self.staging` is a preallocated `Box<[UiInstance]>` sized at
+   `initialize`, never grown in the frame loop (the Principle-0 named legitimate exception: the
+   staging mirror for a GPU-contiguity write; durable data stays in ECS columns). The fused
+   predecessor `host_upload_frame_from_world` is **DELETED, not re-signed** — its parameter list
+   WAS the defect (see the fact table).
 6. Two **diagnostic** counters (not `#[cfg(test)]` — the §10.4 `relayout_count` lesson): probes/frame
-   in `gather_ui_nodes` and repacks/frame in `pack_sort_upload`.
-7. **The observer:** a `boyko_app` UI rung — a `UiPlugin` registration, `gather_ui_nodes` wired to
-   `host_upload_frame_from_world`, and one hardcoded panel. **No assets, no `.ui` file, no font**
-   (S3 delivers the font-optional boot; until then the rung supplies the existing `.bfont` path or
-   the rung's panel is rect-only). It is a rung, not a showcase.
+   in `gather_ui_nodes` and repacks/frame in `pack_sort_upload`. The two-phase seam carries its own
+   pack census on the system (`UiUploadSystem::repacks`), because Phase 1 reads the world through a
+   read-only `WorldView` that cannot project `&mut` to a `Resource`.
+7. **The observer — re-pointed at Phase 1 alone** (the 2026-08-21 ruling): a device-free test on a
+   bare `EcsMaster`, no graphics type in sight — one hardcoded panel, discovery + the two-phase
+   dispatch, the staged records asserted **by value** (scale folding, z-order, packed count) in
+   `tests/ui_s0_seam.rs`. Cheaper than a windowed rung AND unit-testable. The windowed `boyko_app`
+   UI rung (D32's floor) is deferred to the rung that makes the swapchain `Renderer` an ECS
+   resource — until then the host drives the seam via
+   `stage_frame(token, ortho)` → `run_system_once` → `take_frame_output()`.
 
 **No instance change. No shader change. No `.spv` change.**
 
@@ -355,21 +372,37 @@ render); author-only commit.
 | # | Claim | How |
 |---|---|---|
 | **G0-1** | The gather reads every pack-input component, and cannot drift | Compile-level: `ui_pack_inputs!` is the only spelling. Plus a behavioural test — a world with one node, mutating each pack-input component in turn, asserting the generation bumps **exactly once** per mutation and **zero** times on an unrelated component. |
-| **G0-2** | A static frame costs zero probes and zero repacks | The two counters over 10 consecutive static frames: `probes == 0` and `repacks == 0`. |
-| **G0-3** | The gate is **per-slot** | Mutate one node once. Assert frames 1 and 2 both repack (one per ring slot) and frame 3 does not. Then assert the pixels of frame 2 equal the pixels of frame 1. |
+| **G0-2** | The structural skip is Phase 1's contract | Asserted on the **COMMAND CENSUS**, not a timing delta: 10 consecutive static dispatches of the two-phase `run_dispatcher` record **zero** on both census counters — zero component probes, zero packs — i.e. zero recorded work on an unchanged generation (`ui_s0_seam.rs::g0_2_static_frames_record_zero_census`). |
+| **G0-3** | The packed-count return crosses the seam | Phase 1's contract: mutate one node once ⇒ the next dispatch packs **exactly once**, `gather_into_staging`'s packed-count is observable off the system (the count AND the repacked row carrying the new value — not a stale re-serve), and the dispatch after that skips again (`ui_s0_seam.rs::g0_3_one_mutation_one_repack_count_returned`). |
 | **G0-4** | The DFS carries the inherited clip and its pre-order is paint order | A three-level tree with a clip at the middle level: the leaf's packed `clip` is the ancestor's, and the emitted `append` order equals `collect_candidates`'s `paint_seq` for the same tree. |
-| **G0-5** | The host rung boots and draws | Owner-eval: the rung runs, a panel appears. The recorded lesson from the `boyko_app` host campaign — *host render rungs need a golden-independent visual regression, because owner-eval caught three bugs there and the autogates caught zero*. |
+| **G0-5** | **THE SEAM GATE: the fusion is unrepresentable** | Two halves. (1) Signature pins: Phase 1's signature names **no** `!Send`/graphics type, Phase 2's names **no** world type — pinned by fn-pointer coercions that stop compiling if either signature grows the other phase's type (`ui_s0_seam.rs::g0_5_seam_signatures_do_not_cross`). (2) A trybuild fixture where **re-fusing them fails to compile**: one call site holding Phase 1's `WorldView` live across Phase 2's `&mut RhiContext` projection is E0502 (`tests/ui_s0_seam_fusion/refused_refusion.rs`, blessed `.stderr`). That makes the fusion unrepeatable rather than fixed. |
 
 **Red mutations.**
 
-* **M0-a — collapse `last_seen_generation` back to a single `u64`.** G0-3 reds: frame 2 skips and
-  serves ring slot 1's stale contents, so frame 2's pixels differ from frame 1's. *This proves the
-  gate is per-slot rather than merely present — the defect was in the original **specification**, not
-  only in the wiring, and a scalar gate passes every test that only checks "a static frame skips".*
-* **M0-b — move the compare from above the gather into `pack_sort_upload`.** G0-2 splits: `repacks == 0`
-  stays green while `probes` goes non-zero. *This is why there are two counters and not one — the
-  cheaper, wrong placement is invisible to a repack counter, and the probe cost is the one cost this
-  campaign adds to every node of every frame.*
+* **M0-a — hoist Phase 1's braces (delete the view drop).** The 2026-08-21 ruling re-specified this
+  as "⇒ E0502 AT COMPILE TIME — a build failure, stronger than a runtime red; pins the brace as
+  load-bearing". **That claim is REFUTED BY THE COMPILER** (probed the same day, ledger in the
+  landing report and `docs/OPEN-QUESTIONS.md`): under NLL the view's borrow ends at its **last
+  use** (`gather_into_staging(&view)`), so the hoisted-brace form **compiles clean — exit 0, no
+  E0502, no warning**. What the brace actually is: scope hygiene against a future edit that HOLDS
+  the view across Phase 2 — and the compile-time tripwire on *that* shape is real and demonstrated:
+  it is M0-b below and G0-5's trybuild fixture, both of which red. The brace's comment in
+  `upload.rs` records exactly this so the brace is not deleted as decorative. *(The pre-ruling
+  M0-a — collapse the per-slot gate to a scalar ⇒ a skip serves the sibling slot's stale ring — is
+  retired as a plan mutation; its rationale is pinned at the gate's field doc in `upload.rs`.)*
+
+  **Disposition (orchestrator, same day): M0-a is RETIRED as a mutation.** Its premise is false and
+  its property is covered twice over — at compile time by M0-b (the borrow crossing the seam) and
+  structurally by G0-5's re-fusion fixture. A mutation kept alive after its predicted red is proven
+  unfireable would be this plan's own gate-that-cannot-fail class, curated rather than caught.
+* **M0-b — read the generation from the view across Phase 2 instead of from self.** ⇒ **E0502**,
+  demonstrated 2026-08-21 (ledger): `cannot borrow 'token' as mutable because it is also borrowed
+  as immutable` — the view minted in Phase 1, the `&mut` projection at Phase 2's head, the
+  view-read after it named as "immutable borrow later used here". *Pins that the gate's RESULT
+  crosses the seam — the packed count, a copied `u64` — never its borrow.* *(The pre-ruling M0-b —
+  move the compare into `pack_sort_upload`, splitting the two counters — is retired as a plan
+  mutation; the two-counter split it argued for is now G0-2's census design, asserted on both
+  halves.)*
 * **M0-c — delete `ComputedClip` from `ui_pack_inputs!`.** The build fails at the gather. *A
   completeness test that checks a hand-kept list against the gather is checking a list against itself;
   only one spelling can fail to compile.*
@@ -380,7 +413,14 @@ render); author-only commit.
 **(d)** the static frame with the compare hoisted — which must read **zero probes** or D6a is not
 wired where it claims to be. §10.3: repacks avoided on a static frame **and** the unchanged full cost
 of a changing frame, both reported, so the module doc never again claims more than the mechanism
-delivers.
+delivers. **Both previously-blocked legs are re-pointed at `run_dispatcher` as the bracket** (the
+two-phase seam, driven through `run_system_once` — headless; `ui_s0_measure.rs`). **Scope note:**
+Phase 2's upload cost is DRAW-adjacent host+transfer on the windowed device — compare only within
+one scene, and name the GPU zone id before quoting a number; that half is the owner-run windowed
+leg, not the headless harness. *Landed 2026-08-21 (this box, debug profile, Instant/QPC ~0.1 µs
+floor): leg (d) static dispatch median 0.2 µs @ N=256 / 0.4 µs @ N=2048, probes = 0 asserted,
+repacks avoided 100/100; §10.3 changed-frame full cost median 231.7 µs @ N=256 / 2250.3 µs @
+N=2048 — the gate does not reduce it, and now the number says so.*
 
 ---
 
@@ -789,7 +829,7 @@ there.
 | **S0** | **`ui_pack_inputs!`** — the single spelling of the pack-input set. Adding a visual component to it wires the discovery filter **and** the gather read list together, or fails to compile. | **Animation** adds `UiVisual`. **Interaction** adds its scroll datum. Neither may add a component to the gather without adding it here. |
 | **S0** | **`gather_ui_nodes`** — the DFS over `UiRoot`/`Children` carrying the inherited clip on its stack. Its pre-order **is** paint order. | **Interaction**: this DFS and `collect_candidates` are the same traversal; D19a's traversal-folded scroll offset rides this stack. |
 | **S0** | `UiRenderGeneration` + the per-slot gate, hoisted ahead of the gather. | **Animation**: an animating frame bumps the generation every frame and the gate cannot help it — §10.3 reports that number unchanged, so the animation plan inherits an honest baseline rather than a claim. |
-| **S0** | The `boyko_app` UI rung (D32's floor). | **All three.** Everything sequenced after S0 is visible to a human; without it **R1** and **R2** are unfalsifiable. |
+| **S0** | The **two-phase seam** (`gather_into_staging` / `upload_staging`, G0-5-pinned signatures) + the host drive protocol (`stage_frame` → `run_system_once` → `take_frame_output`). The `boyko_app` UI rung (D32's floor) is **deferred** to the Renderer-as-ECS-resource rung (2026-08-21 ruling) — the observer S0 ships is Phase 1, device-free. | **All three.** The device-free observer makes the seam's behaviour falsifiable on any machine; the human-visible floor arrives with the windowed rung, and until then **R1**/**R2**'s visual half rests on the owner-run windowed leg. |
 | **S2** | `UiInstance` at 80 B with `uv` and S-D2's bit map. **Bits 5..19 are free; bit 4 is reserved.** | **Animation**: D5 folds the visual transform at pack and costs **zero** GPU bytes, so animation needs none of these bits. If it ever does, it takes bits 5..19 and says so here. |
 | **S3** | `FLAG_TEXTURED`, the bindless slot lane, the UI sampler binding, font-optional boot. | **Aether**: the `ui` construct's `image` / `sheet` vocabulary can only name what S3–S5 built. |
 | **S5** | The `u16 sheet_id` dense-handle mint. | **Aether**: the sheet-id mint is the natural thing for the construct to own at expand time (research §11 item 6). |
@@ -818,7 +858,10 @@ re-compile drift at the same size.
 
 *Mitigation, and it is the ladder itself:* **S0 before S1 before S2.** The observer exists before the
 gate; the gate exists before the edit. **M2-b** is the mutation that says whether the mitigation
-worked, and if M2-b does not red, S2 is not done.
+worked, and if M2-b does not red, S2 is not done. *Status 2026-08-21: S0's seam landed (two-phase,
+observer + G0-2/G0-3/G0-5 green, measurement legs run), so the sequencing argument holds and* ***S2
+is unblocked as written*** *(S1 first, per the ladder). The observer's half of this mitigation is
+device-free; the visual half rides the completion criterion below.*
 
 *Residual:* every gate here needs a GPU. On a device-less machine S2's gate is vacuous and reports
 green. **The rung's completion criterion therefore includes "run on the RTX 3060 with the four hashes

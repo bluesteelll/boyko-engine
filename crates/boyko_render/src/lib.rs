@@ -654,4 +654,5 @@ pub use ui::{
     ui_rect_vs_spirv, ui_render_discovery, FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, FLAG_TEXT,
     FRAMES_IN_FLIGHT as UI_FRAMES_IN_FLIGHT, PackInput, UiFramePlan, UiGatherScratch, UiInstance,
     UiNode, UiOrtho, UiRenderGeneration, UiRenderScratch, UiUploadSystem, UI_INSTANCE_SIZE,
+    UI_STAGING_ROWS,
 };

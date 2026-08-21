@@ -90,6 +90,11 @@ bytemuck.workspace = true
 # a migrated site reports ONCE and not once per frame. A dev-dependency, so the feature reaches
 # this crate's test and bench targets and never a shipping build.
 boyko-log = { path = "../boyko_log", features = ["test-probe"] }
+# UI-ADVANCED S0 gate G0-5 (the SEAM GATE): `tests/ui_s0_seam_fusion.rs` proves by FAILURE TO
+# COMPILE that the two-phase upload seam cannot be re-fused — a call site holding Phase 1's
+# `WorldView` and Phase 2's `&mut RhiContext` at once is the M1 borrow conflict (E0502). Same
+# harness + compiler-witness discipline as `boyko_ecs`'s compile_fail suites.
+trybuild = "1"
 # UI-ADVANCED S1 (`docs/UI-PLAN-SPRITES.md`): `tests/ui_rect_edsl_sync.rs` re-runs the
 # `emit_hlsl_ui_*` span printers against the committed `ui_rect.{vs,fs}.hlsl` (which live in
 # THIS crate's `shaders/`), and feeds the HOST `UiInstance` offsets into the mirror printer so

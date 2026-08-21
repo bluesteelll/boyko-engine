@@ -1,15 +1,21 @@
-//! UI-ADVANCED rung S0 — measurement §10.8 leg (a): the gather alone
+//! UI-ADVANCED rung S0 — measurements §10.8 legs (a)+(d) and §10.3
 //! (`docs/UI-PLAN-SPRITES.md` §5).
 //!
-//! Reports probes/node/frame and gather wall-clock at N ∈ {256, 2048} for
-//! today's rect-only baseline — the one cost this campaign adds to every node
-//! of every frame, measured SEPARATELY from pack+sort (the pack is not run).
+//! Leg (a) reports probes/node/frame and gather wall-clock at N ∈ {256, 2048}
+//! for today's rect-only baseline — the one cost this campaign adds to every
+//! node of every frame, measured SEPARATELY from pack+sort (the pack is not
+//! run).
 //!
-//! Leg (d) — the static frame with the D6a compare hoisted, which must read
-//! ZERO probes — is specified against `host_upload_frame_from_world` and is
-//! BLOCKED by the seam-callability defect recorded in `docs/OPEN-QUESTIONS.md`
-//! (entry 2026-08-21). Its zero-probe property is meanwhile pinned at the CPU
-//! level by G0-2's counter design, not measured here.
+//! Legs (d) and §10.3 bracket **`UiUploadSystem::run_dispatcher`** — the
+//! two-phase seam — through `EcsMaster::run_system_once`: (d) the static frame
+//! under the hoisted D6a gate, which must read ZERO probes (asserted, not just
+//! reported); §10.3 the repacks avoided on a static frame AND the unchanged
+//! full cost of a changing frame, both reported so the module doc never claims
+//! more than the mechanism delivers. **Scope note:** these brackets are
+//! device-free — Phase 2's upload cost is DRAW-adjacent host+transfer on the
+//! windowed device, is comparable only within one scene, and needs its GPU
+//! zone id named before any number is quoted; that half is the owner-run
+//! windowed leg, not this file.
 //!
 //! Instrument: `std::time::Instant` (QPC on Windows, ~100 ns resolution —
 //! reported beside the numbers per §5's resolution rule). Run explicitly:
@@ -35,7 +41,12 @@ use boyko_ecs::ecs::core::system::system_meta::SystemMeta;
 use boyko_ecs::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
 use boyko_ecs::ecs::core::system::Commands;
 
-use boyko_render::{gather_ui_nodes, UiGatherScratch, UiNode};
+use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
+use boyko_render::{
+    gather_ui_nodes, ui_render_discovery, UiGatherScratch, UiNode, UiRenderGeneration,
+    UiUploadSystem,
+};
+use boyko_threadpool::ThreadPoolBuilder;
 use boyko_ui::components::{ComputedRect, StackIndex, UiBackground, UiRoot};
 
 const WARMUP: usize = 10;
@@ -99,7 +110,8 @@ unsafe impl System for MeasureGather {
 
 /// Builds the rect-only baseline: one `UiRoot` panel with `n - 1` children,
 /// every node carrying `ComputedRect` + `UiBackground` + `StackIndex`.
-fn build_world(n: usize) -> EcsMaster {
+/// Returns the world and the root's handle (the seam leg mutates it).
+fn build_world(n: usize) -> (EcsMaster, Entity) {
     let mut world = EcsMaster::new();
     let sink: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
     let probe = Arc::clone(&sink);
@@ -130,11 +142,11 @@ fn build_world(n: usize) -> EcsMaster {
             e.set_parent(root);
         }
     });
-    world
+    (world, root)
 }
 
 fn report(n: usize) {
-    let mut world = build_world(n);
+    let (mut world, _root) = build_world(n);
     let mut sys = MeasureGather {
         scratch: UiGatherScratch::default(),
         node_buf: Vec::new(),
@@ -170,4 +182,90 @@ fn report(n: usize) {
 fn measure_gather_baseline() {
     report(256);
     report(2048);
+}
+
+/// §10.8 leg (d) + §10.3, bracketed at `run_dispatcher` (the two-phase seam):
+/// the static frame under the hoisted gate (must read ZERO probes) and the
+/// changing frame's unchanged full cost (gather + pack + z-sort into staging;
+/// the gate cannot help it and the number says by how much it does not).
+fn report_seam(n: usize) {
+    let (mut world, root) = build_world(n);
+    world.insert_resource(UiRenderGeneration::default());
+
+    let pool = ThreadPoolBuilder::new().num_threads(2).build();
+    let mut b = ScheduleBuilder::new(pool);
+    b.add_system(ui_render_discovery);
+    let mut schedule = b.build(&mut world);
+
+    let mut sys = UiUploadSystem::new(1.0);
+
+    // Settle the spawn's own change, then arm the gate with one packed frame.
+    for _ in 0..4 {
+        schedule.run(&mut world);
+    }
+    world.run_system_once(&mut sys);
+    assert_eq!(sys.staged().len(), n, "the settle dispatch packed the scene");
+
+    // ── leg (d): the static frame. ──
+    let probes_before = sys.probes();
+    let repacks_before = sys.repacks();
+    let mut static_ns: Vec<u128> = Vec::with_capacity(ITERS);
+    for _ in 0..ITERS {
+        schedule.run(&mut world); // no change ⇒ no bump
+        let t0 = Instant::now();
+        world.run_system_once(&mut sys);
+        static_ns.push(t0.elapsed().as_nanos());
+    }
+    assert_eq!(
+        sys.probes().wrapping_sub(probes_before),
+        0,
+        "leg (d): the static frame under the hoisted compare reads ZERO probes"
+    );
+    let static_repacks = sys.repacks().wrapping_sub(repacks_before);
+    assert_eq!(static_repacks, 0, "§10.3: every static repack is avoided");
+    static_ns.sort_unstable();
+
+    // ── §10.3's other half: the changing frame's FULL cost, unchanged. ──
+    // Mutate ONE existing pack input per frame (a same-archetype re-insert on
+    // the root — the scene's node count never moves), bump via discovery, then
+    // time the dispatch: gather + pack + z-sort of ALL n nodes into staging.
+    let mut changed_ns: Vec<u128> = Vec::with_capacity(ITERS);
+    for i in 0..ITERS {
+        let dx = i as f32 * 0.25;
+        world.run_system(move |mut cmds: Commands| {
+            cmds.entity(root)
+                .insert(ComputedRect { x: dx, y: 0.0, w: 800.0, h: 600.0 });
+        });
+        schedule.run(&mut world); // the mutation is a change ⇒ one bump
+        let t0 = Instant::now();
+        world.run_system_once(&mut sys);
+        changed_ns.push(t0.elapsed().as_nanos());
+    }
+    let changed_repacks = sys.repacks().wrapping_sub(repacks_before);
+    assert_eq!(changed_repacks as usize, ITERS, "every changed frame repacks exactly once");
+    changed_ns.sort_unstable();
+
+    println!(
+        "§10.8(d)+§10.3 N={n}: static dispatch min/median/max = {:.2}/{:.2}/{:.2} µs \
+         (probes = 0, repacks avoided = {ITERS}/{ITERS}); \
+         changed dispatch min/median/max = {:.1}/{:.1}/{:.1} µs — the FULL \
+         gather+pack+sort cost, which the gate does not reduce \
+         (instrument: Instant/QPC, ~0.1 µs floor; Phase 2 upload cost is the \
+         owner-run windowed leg — DRAW-adjacent host+transfer, same-scene \
+         comparisons only, GPU zone id named first)",
+        static_ns[0] as f64 / 1000.0,
+        static_ns[ITERS / 2] as f64 / 1000.0,
+        static_ns[ITERS - 1] as f64 / 1000.0,
+        changed_ns[0] as f64 / 1000.0,
+        changed_ns[ITERS / 2] as f64 / 1000.0,
+        changed_ns[ITERS - 1] as f64 / 1000.0,
+    );
+}
+
+/// §10.8 leg (d) + §10.3 at N ∈ {256, 2048}, headless.
+#[test]
+#[ignore = "measurement harness - run explicitly with --ignored --nocapture"]
+fn measure_seam_static_and_changed() {
+    report_seam(256);
+    report_seam(2048);
 }

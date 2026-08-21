@@ -16,6 +16,50 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ## 2026-08-21 — UI-ADVANCED S0 stopped at a plan defect: `host_upload_frame_from_world` has no POSSIBLE caller, and S0's observer + two gates are specified against it
 
+**RESOLVED 2026-08-21 (architect's WorldView ruling; landed the same day).** The finding, in
+substance:
+
+* **Option (a) (`EcsMaster::world_view`) is SOUND — and REFUSED as a dead datum at birth, not as
+  unsound.** `WorldView` is ptr + `PhantomData` + a debug `ThreadId` — no tick, no epochs, no
+  command queue — so a `&mut EcsMaster` mint discharges its invariants at least as strongly as the
+  token's (`DispatcherToken::new`'s own Safety block, `dispatcher_token.rs:87-92`, blesses
+  "`&mut EcsMaster` ⇒ `running == 0` at the language level"). But it does NOT unblock:
+  `RhiContext` is a NonSend resource inside the SAME `EcsMaster`, so `world_view()` +
+  `nonsend_resource_mut()` conflict on the master exactly as `world()` + `nonsend_resource_mut()`
+  conflict on the token — the same E0502 one level up. The conflict is SEMANTIC, not syntactic:
+  both operands of the fused signature are projections of one object.
+  `run_closure_once` already serves host-time reads.
+* **Option (c) (unsafe smuggling) confirmed rejected** against `dispatcher_token.rs:13-18` — the
+  previously hand-asserted form of this property was UB on two axes (C1 worker reachability, M1
+  aliasing).
+* **The fix: sequence, never fuse, inside one `run_dispatcher`** (mirroring the shipped
+  `GpuSystem` ordering). Phase 1 (shared borrow): the generation gate + `gather_into_staging`
+  against the token's read-only view, the view dropped at the phase's closing brace, only the
+  packed COUNT crossing. Phase 2 (exclusive borrow): `nonsend_resource_mut::<RhiContext>()` +
+  `upload_staging` — no world type in the signature. `host_upload_frame_from_world` DELETED, not
+  re-signed — its parameter list WAS the defect.
+
+**Landed:** the two-phase `run_dispatcher` + `gather_into_staging`/`upload_staging` split + the
+preallocated staging `Box` in `boyko_render/src/ui/upload.rs`; the fused fn deleted; the plan's
+ten edit sites re-pointed (`docs/UI-PLAN-SPRITES.md` S0); the observer + G0-2 + G0-3 re-pointed at
+Phase 1 (device-free, bare `EcsMaster` — `tests/ui_s0_seam.rs`, green); G0-5 as the SEAM GATE
+(signature pins + the trybuild fixture `tests/ui_s0_seam_fusion/refused_refusion.rs`, E0502,
+blessed and green); measurement legs §10.8(d)/§10.3 run headless (static dispatch median
+0.2–0.4 µs, probes = 0 asserted; changed-frame full cost 231.7 µs @ 256 / 2250.3 µs @ 2048,
+unreduced by the gate — reported honestly). S2 is unblocked as written.
+
+**One claim of the ruling REFUTED by the compiler, recorded rather than landed.** The re-specified
+M0-a — "hoist Phase 1's braces (delete the view drop) ⇒ E0502 AT COMPILE TIME" — is FALSE under
+NLL: the view's borrow ends at its last use, so the hoisted-brace form COMPILES (probed in-tree
+2026-08-21, `cargo check -p boyko-render --lib` exit 0, no diagnostic). The compile-time tripwire
+exists on the shape that HOLDS the view across Phase 2 — M0-b (probed: E0502, exit 101) and the
+G0-5 fixture (blessed E0502) both red as ruled. The brace is landed as scope hygiene with a
+comment saying exactly this; the plan's M0-a row carries the refutation. The architect may want to
+re-rule M0-a (e.g. as a `#[deny]`-able lint shape or drop it in favour of M0-b + G0-5, which
+already cover the property).
+
+*(Original entry follows, unedited — the record of why the call was made outlives the call.)*
+
 **The situation.** `UI-PLAN-SPRITES.md` rung S0 item 7 wires the observer through
 `UiUploadSystem::host_upload_frame_from_world`, item 5 hoists the D6a per-slot generation gate to
 the top of that same function, and gates G0-2/G0-3 (with reds M0-a/M0-b) drive it across frames.

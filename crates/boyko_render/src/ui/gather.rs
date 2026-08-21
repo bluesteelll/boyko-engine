@@ -29,21 +29,22 @@
 //! the gather is the one cost this campaign adds to every node of every frame
 //! (§10.8), and because the cheaper-but-wrong gate placement — the compare
 //! INSIDE the pack instead of ahead of the gather — is invisible to a repack
-//! counter and visible only here (red mutation M0-b). The `relayout_count`
-//! lesson (§10.4): a `#[cfg(test)]` counter cannot be read by the observer rung,
-//! so this one is unconditional (one `u64` add per probe).
+//! counter and visible only here (the two counters split exactly on that
+//! placement; gate G0-2 asserts BOTH halves of the census). The
+//! `relayout_count` lesson (§10.4): a `#[cfg(test)]` counter cannot be read by
+//! the observer rung, so this one is unconditional (one `u64` add per probe).
 //!
 //! # Scratch ownership
 //!
-//! [`UiGatherScratch`] follows the seam's established host-owned-scratch idiom
-//! (`node_buf` / `gather` in [`UiUploadSystem::host_upload_frame_from_world`]):
-//! retained buffers the host passes in each frame, cleared and refilled, never
-//! reallocated in steady state. It is deliberately NOT an ECS `Resource`: the
-//! gather runs against a read-only [`WorldView`], which cannot project `&mut`
-//! to a resource — the host (or the test harness) owns it beside the other
-//! seam scratch.
+//! [`UiGatherScratch`] is retained caller-owned scratch: cleared and refilled
+//! per gather, never reallocated in steady state. It is deliberately NOT an
+//! ECS `Resource`: the gather runs against a read-only [`WorldView`], which
+//! cannot project `&mut` to a resource — so the two-phase seam's
+//! [`UiUploadSystem`] owns one as system state (its Phase 1 packs through it),
+//! and a host or test harness owns one beside its other scratch when driving
+//! the gather directly.
 //!
-//! [`UiUploadSystem::host_upload_frame_from_world`]: crate::ui::upload::UiUploadSystem::host_upload_frame_from_world
+//! [`UiUploadSystem`]: crate::ui::upload::UiUploadSystem
 
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::entity::entity::Entity;
@@ -187,10 +188,12 @@ pub struct UiGatherScratch {
 /// one `Children` probe per node for the traversal itself. Every probe counts
 /// into [`UiGatherScratch::probes`].
 ///
-/// The signature matches the
-/// [`host_upload_frame_from_world`](crate::ui::upload::UiUploadSystem::host_upload_frame_from_world)
-/// gather seam up to the scratch: wire it as
-/// `|view, buf| gather_ui_nodes(&view, &mut gather_scratch, buf)`.
+/// This is the gather Phase 1 of the two-phase seam runs:
+/// [`UiUploadSystem::gather_into_staging`](crate::ui::upload::UiUploadSystem::gather_into_staging)
+/// drives it against the [`DispatcherToken`]'s read-only view, then packs the
+/// emitted nodes into the system's staging box.
+///
+/// [`DispatcherToken`]: boyko_ecs::ecs::core::system::dispatcher_token::DispatcherToken
 pub fn gather_ui_nodes(
     view: &WorldView<'_>,
     scratch: &mut UiGatherScratch,
