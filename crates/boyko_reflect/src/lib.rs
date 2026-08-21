@@ -41,16 +41,23 @@
 //!   count` (CORE C5), with the bounds check ordered **before** the multiply so
 //!   `usize::MAX` is a refusal in both profiles rather than a debug panic and a
 //!   release wild pointer.
+//! * [`cursor`] — [`NestedCursor`] / [`FieldValue`], the `Nested` descend (CORE C6).
+//!   One `add` and one pointer copy per level, with the `'a` doing the validity
+//!   guarantee the compiler can check; the two properties that make that arithmetic
+//!   sound live in [`validate`] as [`Violation::NestedNotInline`] and
+//!   [`Violation::NestedCycle`] (CORE D21), paid once at validation time.
 
 pub mod array;
+pub mod cursor;
 pub mod prim;
 pub mod registry;
 pub mod scalar;
 pub mod type_info;
 
+pub use cursor::{FieldValue, NestedCursor};
 pub use registry::{install_type_info, type_info_of};
 pub use scalar::{Scalar, ScalarKind};
 pub use type_info::{
-    ArrayInfo, EnumInfo, EnumRepr, FieldInfo, Problem, TypeInfo, TypeKind, ValueKind, VariantInfo,
-    Violation, validate,
+    ArrayInfo, EnumInfo, EnumRepr, FieldInfo, MAX_NESTED_DEPTH, MAX_NESTED_TYPES, Problem, TypeInfo,
+    TypeKind, ValueKind, VariantInfo, Violation, validate,
 };

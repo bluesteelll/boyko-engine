@@ -31,6 +31,25 @@
 //! [`Problem`] per violation, over a match with **no wildcard arm** — a new
 //! [`ValueKind`] fails to compile until it is classified. That exhaustiveness is the
 //! whole reason the rules live in code rather than in this comment.
+//!
+//! # The descend's two structural proofs live here (CORE D21, plan §3.1)
+//!
+//! `Nested` descent is `base.add(offset)` over a `&'static` graph, and two properties
+//! have to hold for that to be anything but a wild pointer chase. Both are
+//! [`validate`] rules, checked at **validation time** — the descend itself stays one
+//! `add` plus one pointer copy per level:
+//!
+//! * **Check A, [`Violation::NestedNotInline`]** — the child is inline-contained
+//!   (`offset + child.size <= parent.size`, aligned, `child.align <= parent.align`).
+//!   *Addressing validity.*
+//! * **Check B, [`Violation::NestedCycle`]** — no `Nested` edge closes a cycle, proved
+//!   by a DFS with a fixed on-stack path array. *Termination.*
+//!
+//! **Neither enumerates a type name**, which is the point: a runtime list of refused
+//! types cannot exist (`Vec<T>` is generic over unboundedly many `TypeId`s) and a
+//! syntactic one cannot name a user-defined indirection. The derive's refusal list
+//! (CORE C9) is a *diagnostic* that turns the common cases into spanned compile errors;
+//! it is not, and cannot be, the proof.
 
 use std::any::TypeId;
 use std::fmt;
@@ -307,6 +326,46 @@ pub enum Violation {
     /// `Nested` carrying a scalar accessor: a struct is not a [`Scalar`], and an
     /// accessor here would reinterpret its first bytes (analysis FIX Mi2).
     NestedWithScalarAccessor,
+    /// **Check A (CORE D21, §3.1) — the child is not inline-contained in the parent.**
+    ///
+    /// One of `offset + child.size <= parent.size`, `offset % child.align == 0`,
+    /// `child.align <= parent.align` does not hold, so `base.add(offset)` is not the
+    /// address of a live `child` inside a live parent.
+    ///
+    /// **This is a memory-safety rule, not a tidiness rule.** Give a container field a
+    /// `Nested` descriptor — a `Vec<T>` pointed at the element type's `TYPE_INFO`, say —
+    /// and the *first* descend reads the container's own words as the child's inline
+    /// fields. When the child descriptor does not fit the field's extent, that read runs
+    /// **past the end of the value**, at depth 1, before any recursion. The infinite
+    /// descent people name this defect after is the *second* step, and
+    /// [`Violation::NestedCycle`] is what refuses it.
+    ///
+    /// The rule enumerates **no type name**, which is why it can catch a user-defined
+    /// indirection that no syntactic blacklist could name.
+    NestedNotInline,
+    /// **Check B (CORE D21, §3.1) — this `Nested` edge closes a cycle.**
+    ///
+    /// The child's `TypeInfo` is already on the walk's current path, so descending it
+    /// would not terminate. Reported against the *edge that closes the cycle*, which is
+    /// the one a fix must delete.
+    ///
+    /// A `Sized` Rust value cannot contain itself by value, so a **derive-generated**
+    /// containment graph is acyclic by the type system. That argument does not reach
+    /// **hand-written** statics — which is what C3's gates walk, what C6's fixtures
+    /// build, and what any non-derive producer emits — and a `size(A) == size(B)`
+    /// newtype chain closes a cycle with [`Violation::NestedNotInline`] fully satisfied
+    /// at every edge. That is why both checks exist and why neither subsumes the other.
+    NestedCycle,
+    /// **Check B's capacity refusal** — the reachable `Nested` graph did not fit the
+    /// walk's fixed on-stack arrays ([`MAX_NESTED_DEPTH`] levels, [`MAX_NESTED_TYPES`]
+    /// distinct types).
+    ///
+    /// The walk allocates nothing (D18), so its bound is a capacity rather than a
+    /// growth loop, and a walk that could not finish is reported as a **refusal**: a
+    /// partial acyclicity proof is not one. Real component graphs are two or three
+    /// levels deep (`Transform → Vec3 → f32`), so reaching this is a descriptor defect,
+    /// not a limit an honest type meets.
+    NestedGraphTooLarge,
     /// `Array` without an [`ArrayInfo`] — no stride, no length, no element access.
     ArrayWithoutArrayInfo,
     /// `Array` carrying a scalar accessor: elements are reached by index (C5), not
@@ -361,6 +420,17 @@ impl fmt::Display for Problem {
 /// `Vec` is the natural shape for the error path and is not a hot-path allocation:
 /// this is a dev-time descriptor check, run by tests and by the derive's own
 /// fixtures, never on a frame.
+///
+/// # What a green `validate` licenses (CORE D21)
+///
+/// `Ok(())` is the precondition [`crate::cursor::NestedCursor::new`] names: every
+/// `Nested` edge of **this** descriptor is inline-contained (Check A), and the whole
+/// graph reachable from it is acyclic (Check B). Check A is deliberately checked on
+/// *this* descriptor's own edges rather than on every node the walk visits, because a
+/// descriptor's coherence is its own to prove and `Problem::field_index` names *this*
+/// descriptor's fields; a cursor rooted at a nested type therefore rests on that type's
+/// own `validate`, which is the same discipline the model already uses for every other
+/// per-descriptor rule.
 pub fn validate(info: &TypeInfo) -> Result<(), Vec<Problem>> {
     let mut problems = Vec::new();
 
@@ -409,6 +479,13 @@ pub fn validate(info: &TypeInfo) -> Result<(), Vec<Problem>> {
                 if has_scalar_accessor {
                     push(Violation::NestedWithScalarAccessor);
                 }
+                // Check A (D21): the child must be inline-contained at `offset`, or the
+                // first descend addresses bytes this value does not own.
+                if let Some(child) = field.nested
+                    && !is_inline_contained(field.offset, child, info)
+                {
+                    push(Violation::NestedNotInline);
+                }
             }
             ValueKind::Array => {
                 if field.array.is_none() {
@@ -436,9 +513,155 @@ pub fn validate(info: &TypeInfo) -> Result<(), Vec<Problem>> {
         }
     }
 
+    // Check B (D21): the reachable `Nested` graph is finite. Skipped — with identical
+    // semantics — when this descriptor has no `Nested` edge at all, so the overwhelmingly
+    // common flat descriptor never pays for the walk's 2 KiB of on-stack arrays.
+    if info.fields.iter().any(|f| matches!(f.kind, ValueKind::Nested)) {
+        check_nested_graph(info, &mut problems);
+    }
+
     if problems.is_empty() {
         Ok(())
     } else {
         Err(problems)
+    }
+}
+
+// ─────────────────── Check A: inline containment (CORE D21) ─────────────────
+
+/// True when a `child` descriptor really does describe bytes that live **inside** the
+/// parent at `offset` — [`Violation::NestedNotInline`]'s rule, stated once.
+///
+/// The `align == 0` guard is mandatory rather than defensive: `is_multiple_of(0)` answers
+/// `offset == 0`, so a descriptor claiming `align: 0` would *pass* the alignment clause at
+/// offset 0 while describing no alignment at all. The power-of-two clause is that same
+/// guard's honest form — a value that is not a power of two is not an alignment, so
+/// "is `offset` a multiple of it" is answering a question about nothing. `checked_add` is
+/// C5's lesson applied one rung later: refuse before the arithmetic bites, so a descriptor
+/// claiming `size == usize::MAX` is a `false` here rather than a debug-only overflow panic
+/// inside a checker whose whole contract is to refuse.
+fn is_inline_contained(offset: usize, child: &TypeInfo, parent: &TypeInfo) -> bool {
+    if child.align == 0 || !child.align.is_power_of_two() {
+        return false;
+    }
+    let Some(end) = offset.checked_add(child.size) else {
+        return false;
+    };
+    end <= parent.size && offset.is_multiple_of(child.align) && child.align <= parent.align
+}
+
+// ───────────────────── Check B: acyclicity (CORE D21) ───────────────────────
+
+/// The deepest chain of `Nested` edges [`validate`]'s acyclicity walk will follow.
+///
+/// Real component graphs are two or three levels (`Transform → Vec3 → f32`); this is an
+/// order of magnitude of headroom over anything a derive can produce, and exceeding it
+/// is [`Violation::NestedGraphTooLarge`] rather than a deeper stack.
+pub const MAX_NESTED_DEPTH: usize = 32;
+
+/// The most distinct types the acyclicity walk will remember as finished.
+///
+/// The finished set is what keeps the walk linear in edges instead of exponential in a
+/// diamond-shaped graph. It is a fixed array for the same reason the path is: this
+/// checker allocates nothing.
+pub const MAX_NESTED_TYPES: usize = 256;
+
+/// The walk's whole state: two fixed on-stack sets and one flag. No `Vec`, no
+/// `HashMap` (CORE D18), no allocation.
+struct NestedWalk {
+    /// The current DFS path (the "gray" set). A child found here closes a cycle.
+    ///
+    /// **The path, not a plain visited set** — and the difference is the whole check. A
+    /// global visited set would skip the re-entry into `A` in `A → B → A` and report
+    /// **no cycle at all**, terminating quietly while proving nothing. Only membership
+    /// of the *current path* is a cycle.
+    path: [*const TypeInfo; MAX_NESTED_DEPTH],
+    path_len: usize,
+    /// Types whose subtree is fully walked (the "black" set) — a memoization, never a
+    /// cycle test.
+    done: [*const TypeInfo; MAX_NESTED_TYPES],
+    done_len: usize,
+    /// Set once when either array fills. The walk stops and reports a refusal rather
+    /// than silently completing a partial proof.
+    exhausted: bool,
+}
+
+/// Reports the capacity refusal exactly once and stops the walk.
+#[cold]
+#[inline(never)]
+fn exhaust(walk: &mut NestedWalk, problems: &mut Vec<Problem>, name: &'static str) {
+    if !walk.exhausted {
+        walk.exhausted = true;
+        problems.push(Problem {
+            field_index: None,
+            name,
+            violation: Violation::NestedGraphTooLarge,
+        });
+    }
+}
+
+/// Walks the `Nested` graph reachable from `root`, reporting every edge that closes a
+/// cycle ([`Violation::NestedCycle`]).
+fn check_nested_graph(root: &TypeInfo, problems: &mut Vec<Problem>) {
+    let mut walk = NestedWalk {
+        path: [std::ptr::null(); MAX_NESTED_DEPTH],
+        path_len: 0,
+        done: [std::ptr::null(); MAX_NESTED_TYPES],
+        done_len: 0,
+        exhausted: false,
+    };
+    walk_nested(root, &mut walk, problems);
+}
+
+/// One DFS node. Recursion depth is bounded by [`MAX_NESTED_DEPTH`] — the refusal above
+/// fires *before* the frame is pushed — so this cannot overflow the real stack.
+fn walk_nested(node: &TypeInfo, walk: &mut NestedWalk, problems: &mut Vec<Problem>) {
+    if walk.exhausted {
+        return;
+    }
+    if walk.path_len == MAX_NESTED_DEPTH {
+        exhaust(walk, problems, node.type_name);
+        return;
+    }
+    walk.path[walk.path_len] = std::ptr::from_ref(node);
+    walk.path_len += 1;
+
+    for (index, field) in node.fields.iter().enumerate() {
+        if walk.exhausted {
+            break;
+        }
+        if !matches!(field.kind, ValueKind::Nested) {
+            continue;
+        }
+        // A `Nested` field with no descriptor is `NestedWithoutTypeInfo`'s business, and
+        // it is not an edge, so there is nothing here to descend.
+        let Some(child) = field.nested else {
+            continue;
+        };
+        let child_ptr = std::ptr::from_ref(child);
+
+        if walk.path[..walk.path_len].iter().any(|seen| std::ptr::eq(*seen, child_ptr)) {
+            problems.push(Problem {
+                field_index: Some(index),
+                name: field.name,
+                violation: Violation::NestedCycle,
+            });
+            continue;
+        }
+        if walk.done[..walk.done_len].iter().any(|seen| std::ptr::eq(*seen, child_ptr)) {
+            continue;
+        }
+        walk_nested(child, walk, problems);
+    }
+
+    walk.path_len -= 1;
+    if walk.exhausted {
+        return;
+    }
+    if walk.done_len < MAX_NESTED_TYPES {
+        walk.done[walk.done_len] = std::ptr::from_ref(node);
+        walk.done_len += 1;
+    } else {
+        exhaust(walk, problems, node.type_name);
     }
 }

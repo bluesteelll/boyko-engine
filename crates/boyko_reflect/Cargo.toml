@@ -25,6 +25,19 @@ boyko-ecs = { path = "../boyko_ecs" }
 # mandated by CORE C1 gate 2 (full-range per-kind round-trips).
 [dev-dependencies]
 proptest.workspace = true
+# CORE C6 gate 5: the `compile_fail` corpus that pins **the borrow checker's** refusal of
+# a `NestedCursor` held across a `&mut` — the plan's *"the `'a` is the validity guarantee,
+# compiler-enforced, not a documented contract"*. There is no other way to assert that a
+# program does NOT compile, and C6's second RED (deleting the cursor's `'a` and `_pd`) is
+# only observable through this harness.
+#
+# The workspace's established compile-fail instrument, declared exactly this way in five
+# members already (`boyko_ecs`, `boyko_ui`, `boyko_log`, `aether_tests`,
+# `boyko_rhi_vulkan`), each as a bare `"1"` rather than through `[workspace.dependencies]`
+# — matched here rather than hoisted, because hoisting is a separate change and does not
+# belong inside a rung. The `.stderr` bytes it pins are covered by the repository-wide
+# compiler freeze in `tests/trybuild_corpus_compiler_witness.rs`.
+trybuild = "1"
 
 [lints]
 workspace = true

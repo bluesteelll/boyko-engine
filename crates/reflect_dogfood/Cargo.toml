@@ -27,6 +27,15 @@ boyko-reflect = { path = "../boyko_reflect", optional = true }
 # Enablement happens ONLY through the leaf umbrella below or a command line.
 boyko-scene = { path = "../boyko_scene" }
 boyko-render = { path = "../boyko_render" }
+# CORE C6 gate 1's dogfood half descends `Transform -> Vec3 -> f32`, so it must name
+# `Vec3`/`Quat` to bake their REAL `offset_of!` / `size_of` / `align_of` — the whole point
+# of a dogfood is that the numbers are the compiler's own and not transcribed constants.
+# `boyko_scene` does not re-export them (`transform.rs:33` imports them from here), and
+# `boyko-render`'s edge does not put the crate in scope. `boyko-math` is a leaf with no
+# third-party deps and no FFI, so this changes neither the Miri disposition (this package
+# is already off that allowlist) nor any `reflect` feature surface: plain, non-optional,
+# no `features` array, exactly like the two edges above (GATES D3 C4).
+boyko-math = { path = "../boyko_math" }
 
 [features]
 default = []

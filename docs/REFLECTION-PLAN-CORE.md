@@ -364,6 +364,52 @@ pair, and the third is the one that makes it a plan defect rather than a taste q
 requiring an explicit `#[reflect(default)]` opt-in for the `Some` arm (it inverts the common case —
 most components derive `Default` — and buys nothing the `on_unimplemented` label does not).
 
+### D21 — Termination and addressing-validity are RUNTIME STRUCTURAL checks that enumerate NOTHING. A syntactic refusal list is a DIAGNOSTIC, and the two are not a drift pair.
+
+*Architect's ruling on the C6 escalation, 2026-08-21.* Amends **§3.1**, **§5**, **C6** and **C9
+gate 2**.
+
+**The decision.** `validate` gains exactly two rules, and they are the proof:
+
+* **Check A — inline containment**, per `Nested` edge, O(1): `offset + child.size <= parent.size`,
+  `offset % child.align == 0`, `child.align <= parent.align` ⇒ `Violation::NestedNotInline`.
+* **Check B — acyclicity**, per validated root: a DFS over `Nested` edges with a **fixed on-stack**
+  path array and a linear scan ⇒ `Violation::NestedCycle`.
+
+Both land at **C6**, both at validation time, neither on the descend path: no allocation, no
+`HashMap` (D18), zero per-frame and per-level cost.
+
+**Why the list cannot be the proof.**
+
+1. **The defect is misnamed.** "Infinite descent" is the *second* step. Give a container field a
+   `Nested` descriptor and the first descend reads the container's own words as the child's inline
+   fields; when the child descriptor does not fit the field's extent that read runs past the end of
+   the value. A **memory-safety** property is enforced next to its `unsafe`, in the crate that owns
+   the pointer arithmetic — not in a proc macro four rungs downstream.
+2. **A runtime refusal list is not even expressible.** `Vec<T>` is generic over unboundedly many
+   `TypeId`s, so "refuse these types at registration" is not a finite check. A *syntactic* list is
+   finite but cannot name a user-defined indirection (`struct MyBox<T>(*mut T)`).
+3. **Sizedness proves acyclicity only for derive-generated statics.** Inline containment means the
+   parent's size includes the child's and Rust forbids a `Sized` type of infinite size — so a
+   derive-generated containment graph is acyclic **by the type system**. Hand-written statics are
+   what C3's gates walk and what C6's red constructs, and a `size(A) == size(B)` newtype chain
+   passes Check A while closing a cycle. **Both checks are required**; C6 gate 3(ii) measures that
+   Check A stays green on a cycle rather than conceding it in prose.
+
+**Why this is not a second list.** Checks A and B enumerate **no type name**. There is nothing in
+them for C9's `REFUSALS` to agree or disagree with, so the drift surface the escalation correctly
+feared does not exist. C9's list keeps its job — turning a registration-time `Problem` into a
+**spanned compile error at the user's own token** for the five standard kinds — and that job is
+*diagnostics*, so a missing kind is a worse message, not an unsound descend (C9 gate 2, re-scoped).
+
+**Why this is recorded as a decision rather than fixed silently.** The first revision put the proof
+**in the list**, said so in **three** places (§3.1's *"C9's refusal test IS the acyclicity proof"*,
+C6 gate 3, §5's *"it is what makes C6's acyclicity proof true"*), and then scheduled that list
+**four rungs after its consumer** — §5's own tree is `C6 → C7 → C8 → C9`. Three agreeing statements
+of a false claim are not three checks; they are one claim with three readers. The escalation that
+caught it was right to refuse the "second list" resolution and right to escalate rather than
+amend. This entry exists so the next author meets the reasoning, not just the two `Violation` arms.
+
 ---
 
 ## 3. The value taxonomy (scope B + arrays)
@@ -413,11 +459,47 @@ that is the entire `Box<dyn>`-per-field allocation class this design refuses.
   it does **not** walk the inner type's fields — the inner type's own derive did that. So there is
   no proc-macro recursion, no expansion blow-up, and no ordering requirement between the two
   types' expansions.
-* **Acyclicity is structural, not checked.** A `Sized` Rust value cannot contain itself by value,
+* ~~**Acyclicity is structural, not checked.** A `Sized` Rust value cannot contain itself by value,
   and *every* indirection (`Box`, `Vec`, `&T`, `Option<Box<…>>`) is a v2 kind that C9 refuses. So
   **no runtime cycle guard and no depth counter exist, and none is needed.** The property that
   keeps this true is C9's refusal list — **C9's refusal test IS the acyclicity proof**, and if v2
-  ever admits an indirection, the guard becomes required in the same commit.
+  ever admits an indirection, the guard becomes required in the same commit.~~
+  → **Acyclicity and addressing-validity are CHECKED, by two rules in `validate`, and both land at
+  C6** (architect's C6 ruling, 2026-08-21; decision **D21**). The struck sentence is false, and it
+  is false in the direction that reads as safe.
+
+  The *inline-containment* half of the old argument survives: a parent's `size` includes its
+  child's, and Rust forbids a `Sized` type of infinite size, so a **derive-generated** containment
+  graph is acyclic **by the type system** and every cycle must pass through an indirection. What
+  that argument does not reach is the descriptor set this crate actually admits. `TYPE_INFO`
+  statics are **hand-written** at C3 and C6 and in every fixture, and a hand-baked
+  `size(A) == size(B)` newtype chain closes a cycle with inline containment intact. A proof that
+  holds for the case the author imagined and not the case the code admits is this campaign's
+  recurring shape, so both properties are enforced next to the `unsafe` that depends on them:
+
+  * **Check A — inline containment.** Per `Nested` edge, O(1), no allocation:
+    `offset + child.size <= parent.size`, `offset % child.align == 0`, `child.align <= parent.align`
+    ⇒ `Violation::NestedNotInline`. This is the **addressing-validity** proof, and it is a
+    memory-safety property rather than a tidiness one: a child descriptor that does not fit the
+    field's extent makes the **very first** descend address bytes past the end of the value, before
+    any recursion happens.
+  * **Check B — acyclicity.** Per validated root, a DFS over `Nested` edges with a **fixed
+    on-stack** path array and a linear scan ⇒ `Violation::NestedCycle`. Termination of the descend
+    is this rule's corollary, not a separate device.
+
+  **Both are required, and neither implies the other.** For derive-generated statics Check A
+  implies acyclicity through sizedness; for hand-written statics it does not, which is exactly the
+  fixture C6 gate 3(ii) builds. Both run at **validation time**, not descend time — the descend
+  stays one `add` plus one pointer copy per level, and §3.3's *nested descend* row still claims 0.
+
+  **C9's refusal list is the derive-side EARLY DIAGNOSTIC, not the proof — and it cannot be the
+  proof.** A syntactic blacklist cannot name a user-defined indirection (`struct MyBox<T>(*mut T)`
+  is not on any list of five kinds), and no enumerable *runtime* list exists either: `Vec<T>` is
+  generic over unboundedly many `TypeId`s, so "refuse these types at registration" is not a
+  finite check. What C9 buys is that a user who writes `Vec<u8>` meets a **spanned compile error at
+  the field** instead of a registration-time `Problem` — a better diagnostic for the five standard
+  kinds, and nothing more. Checks A and B enumerate **no type name**, so there is nothing for C9's
+  list to drift against.
 
 ### 3.2 The Opaque contract
 
@@ -474,7 +556,7 @@ does.~~
 | enumerate (`info.fields`) | **0** | C5 | delta harness; the slice is `&'static`. **Measured 2026-08-21: `enumerate (1 field(s)): baseline=0 measured=0 delta=0`** over 1000 walks |
 | `Prim` get / set | **0** | **C4** (was C5 — see the correction above) | delta harness, per `ScalarKind`; **measured 2026-08-21: delta 0 for all 12 kinds, get, set and the refused-set path, over 1000 calls each** |
 | array read (offset + stride + count) | **0** | C5 | delta harness; all three are `const`. **Measured 2026-08-21: `array read (len 4): baseline=0 measured=0 delta=0`** over 4000 calls; its red seen at 4000/4000 |
-| **nested descend, depth ≥ 2** | **0 per level** | C6 | delta harness over `Transform → Vec3 → f32`; **a depth-1 harness proves nothing about recursion and is not accepted** |
+| **nested descend, depth ≥ 2** | **0 per level** | C6 | delta harness; **a depth-1 harness proves nothing about recursion and is not accepted**. **Measured 2026-08-21: `nested descend (depth 2): baseline=0 measured=0 delta=0`** over 1000 walks; its red seen at **2000/1000** — two per walk, i.e. one **per level**. ~~over `Transform → Vec3 → f32`~~ → over a local depth-2 nest: the harness is a `boyko-reflect` test binary (one `#[global_allocator]` per binary, C5's reasoning), and that crate cannot reach `boyko_scene`. The engine-types descend is C6 **gate 1's dogfood half**, in `reflect_dogfood`, where it belongs |
 | enum discr read / write | **0** | C10 | delta harness |
 | `Opaque` field (skipped) | **0** | C9 | no accessor exists to call — asserted as `get.is_none() && set.is_none()` |
 | `default_in_place` | **0 bespoke** | C7 | delta harness + a **drop-count** test (A.8) over `{ pod, Nested{pod}, [f32;4] }` |
@@ -1201,6 +1283,32 @@ bare `{ptr, info}` variant is **deleted** and never introduced (M2/O3). **The `'
 validity guarantee** — compiler-enforced, not a documented contract: a `NestedCursor` cannot
 coexist with a `&mut EcsMaster`.
 
+**Also lands (architect's C6 ruling, 2026-08-21 — D21, §3.1):** the two rules that make the descend
+addressing-valid and finite, as **two new `Violation` arms on `validate`** — the coherence checker
+C3 shipped, *"one `Problem` per violation, over a match with no wildcard arm"*:
+
+* `Violation::NestedNotInline` — **Check A**, in the existing `ValueKind::Nested` arm of that
+  match, O(1) per edge: `offset + child.size <= parent.size`, `offset % child.align == 0`,
+  `child.align <= parent.align`.
+* `Violation::NestedCycle` — **Check B**, a DFS over `Nested` edges from the validated root, with a
+  **fixed on-stack `[*const TypeInfo; N]` path array and a linear scan**. No `Vec` growth, no
+  `HashMap` (D18), no allocation on the clean path.
+
+Both are **validation-time**. The descend path is unchanged — still one `add` plus one pointer copy
+per level, still 0 allocations (§3.3) — so this costs nothing per frame and nothing per level.
+Neither check enumerates a type name, so neither is half of a drift pair with C9.
+
+**And `trybuild = "1"` as a `[dev-dependencies]` entry of `boyko-reflect`** (gate 5's harness; see
+gate 5 and the G1 clause below). **This does not violate D18.** D18 governs the crate's
+*ship-visible* dependency surface — the manifest already states it in those words (*"D18 governs the
+SHIP-VISIBLE table above; dev-dependencies enter no consumer's resolved closure"*, written when
+`proptest` landed for C1). `trybuild` is the workspace's vetted compile-fail harness, declared the
+same way in **five** members already, e.g. `crates/boyko_ecs/Cargo.toml:91` (`trybuild = "1"` under
+`[dev-dependencies]`), and also `crates/boyko_ui/Cargo.toml`, `crates/boyko_log/Cargo.toml`,
+`crates/aether_tests/Cargo.toml`, `crates/boyko_rhi_vulkan/Cargo.toml`. It is pinned as a bare
+`"1"` rather than through `[workspace.dependencies]` because every existing site does — hoisting it
+is a separate change and is not smuggled into this rung.
+
 **Gate.**
 1. **Two packages, two claims** — and they are not the same claim, which is why the first revision's
    single sentence could not be built:
@@ -1216,29 +1324,97 @@ coexist with a `&mut EcsMaster`.
    > restricted to `boyko-ecs`/`boyko-macros`/`boyko-reflect` (GATES G4's Miri constraint) cannot
    > reach at all. Both halves are recoverable; neither is recoverable in one package.
 2. **Alloc-delta = 0 at depth ≥ 2** (§3.3) — a depth-1 harness is explicitly not accepted.
-3. **Acyclicity is asserted where it is actually enforced:** a test that the C9 refusal list
+3. ~~**Acyclicity is asserted where it is actually enforced:** a test that the C9 refusal list
    covers every indirection kind (`Box`, `Vec`, `&T`, `Option<Box<_>>`, raw pointers). This is
    the acyclicity proof (§3.1); there is no runtime guard, so this test is the only thing
-   standing between v1 and an infinite descend.
+   standing between v1 and an infinite descend.~~
+   → **`validate` refuses a hand-baked `Nested` edge two ways, on two separate fixtures** — the
+   rewrite the architect's ruling prescribes, and unlike the struck text it names an instrument
+   that exists at this rung:
+   * **3(i) — addressing-validity.** A fixture whose `Nested` field points at a child descriptor
+     **larger than the field's extent** (`offset + child.size > parent.size`) ⇒ a named
+     `Violation::NestedNotInline`. This is the mis-described-container case — the one a refusal
+     list is *supposed* to catch and cannot, since no list can name every indirection — and it is
+     caught at **depth 1**, by arithmetic over two `usize`s, with nothing enumerated.
+   * **3(ii) — acyclicity.** A hand-baked **cyclic** `TYPE_INFO` graph (`A.nested -> B`,
+     `B.nested -> A`, both descriptors sized so Check A is *satisfied* at every edge) ⇒ a named
+     `Violation::NestedCycle`. That fixture is also the proof that the two checks are **not**
+     redundant: gate 3(ii) asserts the same graph produces **no** `NestedNotInline`, so Check A's
+     green on a cycle is measured rather than conceded.
+
+   Both fixtures are **hand-written statics**, which is exactly what C3's gates already walk
+   (`tests/c3_type_info.rs`), so gate 3 is constructible **at C6** with nothing borrowed from C7's
+   derive or C9's census.
 4. Miri (TB) over the descend path.
-5. `compile_fail`: a `NestedCursor` held across a `&mut` op does not compile.
+5. `compile_fail`: a `NestedCursor` held across a `&mut` op does not compile. The harness is
+   `trybuild`, newly a dev-dependency of `boyko-reflect` (see **Lands**). **Because that is a
+   manifest change, this gate also re-runs G1's manifest census** (`tests/reflect_manifest_census.rs`,
+   all six clauses plus its non-vacuity clause) and the reason for the new entry is stated **at the
+   manifest**, next to the `proptest` rationale. Adding a dependency silently is precisely what G1
+   exists to catch; a green census that nobody re-ran after a manifest edit is not a green census.
 
-**RED MUTATION.** Delete `Vec` from C9's refusal list and add a `Vec<u8>` field to a fixture with
-a hand-baked `Nested` pointing back at the outer type. Gate 3 reds. *Without gate 3, the same
-mutation produces a stack overflow at some later rung and looks like a bug in whoever descended.*
+**RED MUTATION.** ~~Delete `Vec` from C9's refusal list and add a `Vec<u8>` field to a fixture with
+a hand-baked `Nested` pointing back at the outer type. Gate 3 reds.~~ **STRUCK 2026-08-21: the
+mutation edits a datum that does not exist until four rungs later.** `REFUSALS` is C9's, C9 is
+downstream of C7's derive, and §5's ladder is `C6 → C7 → C8 → C9` — measured on this worktree, the
+string `REFUSALS` occurs **only inside this document's own C9 prose** and in no source file. A red
+that cannot be performed at the rung it belongs to is not a red.
 
-*Second red:* change `NestedCursor`'s `PhantomData<&'a ()>` to `PhantomData<*const ()>`. Gate 5's
-`compile_fail` stops failing — i.e. the `.stderr` no longer matches — which is the shape this
-campaign has been bitten by (a trybuild fixture red for 87 commits because nobody re-blessed it).
-So gate 5 is run under `--no-fail-fast` and its `.stderr` is re-blessed only with a stated reason.
+→ **The rung's two reds, both acting on data and code this rung itself lands:**
 
-> ## ⛔ STOPPED 2026-08-21, BEFORE THE FIRST EDIT — gate 3 has no instrument, and its RED mutates a list that does not exist
+* **First red (Check B).** Delete the cycle test from the DFS — i.e. keep the walk but stop
+  comparing the child against the path — and run gate 3(ii)'s cyclic fixture. It reds by
+  **stack/array overflow or by hanging**, so the leg is run under `--no-fail-fast` and the observed
+  failure mode is recorded rather than predicted. *Without Check B the same graph produces a stack
+  overflow at some later rung and looks like a bug in whoever descended.*
+* **First red, second half (Check A).** Separately, delete the `offset + child.size <= parent.size`
+  clause and run gate 3(i)'s over-sized-child fixture. It goes green, which is the whole point: the
+  size clause is the load-bearing one, the alignment clauses do not stand in for it, and the fixture
+  proves the wild read is refused by *that* comparison and not by something adjacent.
+
+*Second red:* ~~change `NestedCursor`'s `PhantomData<&'a ()>` to `PhantomData<*const ()>`.~~
+**STRUCK: that mutation does not compile**, so it reds the library rather than gate 5 — measured
+(scratch crate, `stable-x86_64-pc-windows-gnu` 1.97.1): `error[E0392]: lifetime parameter 'a is
+never used`. → **Delete the `'a` parameter and the `_pd` field entirely**, reintroducing the bare
+`{ptr, info}` cursor M2/O3 says is *"deleted and never introduced"*. That is the **unique** mutation
+with the effect the rung describes: any `PhantomData` still naming `'a` (including the variance-only
+`PhantomData<*const &'a ()>`) keeps the region constraint, so the borrow is still held and the
+fixture keeps failing correctly. With the lifetime gone the cursor outlives the borrow, the
+`compile_fail` fixture **compiles**, and `trybuild` reports *"expected compile error but compiled
+successfully"* — the shape this campaign has been bitten by (a trybuild fixture red for 87 commits
+because nobody re-blessed it). So gate 5 is run under `--no-fail-fast` and its `.stderr` is
+re-blessed only with a stated reason.
+
+**Why the runtime check and not the list.** The defect a refusal list is supposed to prevent is
+**misnamed** when it is called "infinite descent". Give a container field a `Nested` descriptor and
+the *first* step reads the container's own words as the child's inline fields; if the child
+descriptor is larger than the field's extent, that read runs **past the end of the value** — a
+memory-safety failure at **depth 1, before any recursion**. The infinite descent is the *second*
+step. A memory-safety property is enforced next to its `unsafe`, in the crate that owns the
+pointer arithmetic, which is why Check A lives in `validate` and not in a proc macro four rungs
+downstream; and Check B refuses the descent itself, directly, without enumerating anything. The
+derive-side list remains worth having — as a *diagnostic* (C9 gate 2), so the common cases fail at
+the user's own token instead of at registration.
+
+> ## ~~⛔ STOPPED~~ → **RESOLVED 2026-08-21 by the architect's C6 ruling.** The escalation and its evidence are kept below; the disposition is at the end
 >
-> C5 landed and is fully gated. **C6 was not started.** The rung as written contains one blocking
-> defect and one mutation defect; both are of the classes this campaign has already paid for, and
-> the blocking one is **not** mechanically resolvable inside CORE the way C4 gate 5's was — it
-> changes where a datum lives and adds an obligation to another rung, so it is an escalation, not
-> an amendment. **The resolution is the orchestrator's / architect's call; nothing below decides it.**
+> **Disposition (read this first).** Both defects are dissolved, and the resolution **inverts** the
+> escalation's own option (a): `boyko_reflect` carries the **primary** proof, and it is **not a
+> list**. The refusal list is demoted to the derive-side early diagnostic. Options (b) and (c) are
+> refused — (b) would run two rungs of descending value model with nothing proving the descent is
+> even addressing-valid, and (c) is *unnecessary*, because the proof now lives where C6 already
+> works, so the ladder stays `C6 → C7 → C8 → C9` and §5's backwards dependency disappears rather
+> than being re-ordered around. The amendments are in **§3.1**, **§5**, **C6 Lands / gate 3 / gate 5
+> / RED MUTATION**, **C9 gate 2**, and the new decision **D21**. The escalation was **right to
+> refuse (a) as recorded** — a second list is a drift surface — and the recorded framing was the
+> defect: Checks A and B enumerate nothing, so there is no list to keep in sync.
+>
+> C5 landed and is fully gated. **C6 was not started** *when this was written*. The rung as written
+> contained one blocking defect and one mutation defect; both are of the classes this campaign has
+> already paid for, and the blocking one is **not** mechanically resolvable inside CORE the way C4
+> gate 5's was — it changes where a datum lives and adds an obligation to another rung, so it is an
+> escalation, not an amendment. **The resolution was the orchestrator's / architect's call; nothing
+> below decided it.**
 >
 > ### Defect 1 (BLOCKING) — gate 3 asserts a property of "the C9 refusal list", and that list cannot exist at C6
 >
@@ -1323,6 +1499,179 @@ So gate 5 is run under `--no-fail-fast` and its `.stderr` is re-blessed only wit
 >   corpus; `boyko-reflect` has none today (`proptest` is its only dev-dep). D18 governs the
 >   ship-visible table only, and the manifest already says so, so this is additive — but it is a
 >   manifest change and **G1's census must be re-run**, which it is not today for a new dev-dep.
+
+> **Executed 2026-08-21 (worktree `D:/wt/reflect`, toolchain `stable-x86_64-pc-windows-gnu` 1.97.1),
+> on the amended rung.**
+>
+> *Lands.* `crates/boyko_reflect/src/cursor.rs` — `NestedCursor<'a>` (`Copy`, re-rootable,
+> `type_info()` / `fields()` / `get()` / `descend()` / `value()`) and `FieldValue<'a>`;
+> `crates/boyko_reflect/src/type_info.rs` — Check A in the existing `ValueKind::Nested` arm and
+> Check B as a fixed-array DFS; `Cargo.toml` — `trybuild = "1"` as a dev-dependency with its reason
+> at the manifest. Tests: `tests/c6_nested.rs` (gate 3 + the cursor), `tests/c6_compile_fail.rs` +
+> two fixtures (gate 5), the `nested descend` arm appended to `tests/c4_prim_zero_alloc.rs` (gate 2),
+> `crates/reflect_fixture/tests/c6_nested_descend.rs` and
+> `crates/reflect_dogfood/tests/c6_dogfood_descend.rs` (gate 1's two halves).
+>
+> **The architect's caveat, checked first — he had read `type_info.rs`'s model but not `validate`'s
+> body.** Three findings, and one of them corrects the ruling's own vocabulary:
+>
+> 1. **The enum is `Violation`, not `Problem`.** `Problem` is the *located* struct
+>    `{ field_index, name, violation }`; `Violation` is the 14-arm rule enum. "Two new `Problem`
+>    arms" is "two new `Violation` arms", and the plan text above now says so.
+> 2. **The two arms land with zero call-site churn.** The *"no wildcard arm"* match is
+>    `match field.kind` over `ValueKind` — adding `Violation` arms does not touch it — and **no
+>    `match` over `Violation` exists anywhere in the tree** (`Display` prints it with `{:?}`;
+>    `c3_type_info.rs` only compares arms for equality). Measured by grep before the first edit.
+> 3. **`TypeInfo` carries `size` AND `align`** (`crates/boyko_reflect/src/type_info.rs:241`, `:243`
+>    after this rung's edits), so Check A keeps all three clauses; the contingency the caveat named
+>    — *"if align is absent, Check A drops its two alignment clauses"* — did not arise.
+>
+> *Five things decided here and recorded rather than worked around:*
+>
+> 1. **THREE new arms, not two — `NestedGraphTooLarge` is Check B's capacity refusal.** A *fixed
+>    on-stack array* has a capacity, and a walk that runs out of it has produced a **partial**
+>    acyclicity proof, which is not one. The third arm is where that is said out loud instead of
+>    silently returning `Ok`. Bounds: `MAX_NESTED_DEPTH = 32` (the path) and `MAX_NESTED_TYPES = 256`
+>    (the finished set, which is what keeps the walk linear in edges rather than exponential on a
+>    diamond). Both branches have their own test, so the arm is not a sixth *dead datum*.
+> 2. **The path array is the cycle test; the finished set is only a memo — and that distinction is
+>    the whole check.** A plain global visited set would skip the re-entry into `A` in `A → B → A`
+>    and report **no cycle at all**, terminating quietly while proving nothing. Written into
+>    `NestedWalk`'s doc comment because it is the single most inviting way to "simplify" this code
+>    into a vacuous green.
+> 3. **Check A is checked on the validated descriptor's own edges, not on every node the walk
+>    visits.** `Problem::field_index` names *this* descriptor's fields, and re-using it for a
+>    grandchild's field index would quietly change what a `Problem` means. A cursor rooted at a
+>    nested type therefore rests on that type's own `validate` — the same per-descriptor discipline
+>    every other rule already uses — and `validate`'s doc comment states it as the precondition
+>    `NestedCursor::new` names, rather than leaving it implied.
+> 4. **`NestedCursor::new` takes `&'a T`, not a raw pointer**, for two independent reasons that only
+>    became visible while building gate 5. A raw-pointer constructor leaves `'a` *unconstrained*, so
+>    the caller may pick `'static` and both `compile_fail` fixtures compile — gate 5 would be
+>    ornamental. And `&'a T` carries provenance over the **whole** value: a `&u8` to its first byte
+>    would make the very first `add(offset)` a Tree-Borrows violation, which Miri would have caught
+>    and which no amount of `unsafe` documentation would have fixed.
+> 5. **`FieldValue` has exactly two arms** (`Prim`, `Nested`) — the kinds with a reader at this rung.
+>    `Array`/`Enum`/`Str`/`Opaque` answer `None` and gain their arms in the commits that give them
+>    something to call (D9's rule, applied to a variant rather than a field).
+>
+> *One refinement of the ruling's reasoning, found by building its fixture, and it makes the rule
+> sharper rather than weaker.* The ruling says a `Vec<u8>` emitted as `Nested` means *"the descent
+> reads the Vec's `{ptr,cap,len}` words AS the child's inline fields — a WILD READ at depth 1"*. The
+> first half is exactly right; the second is only true **when the child descriptor does not fit the
+> field's extent**. A `Vec` described as a 24-byte inline triple reads its own three words —
+> in-bounds *garbage*, not a wild read. The out-of-bounds read appears the moment the mis-described
+> child is **larger** than the space the field occupies, which is precisely
+> `offset + child.size > parent.size` — the clause Check A leads with, and the one C6's second RED
+> deletes. The gate-3(i) fixture is built on the real property rather than on the illustration: a
+> `Leaky { data: Vec<f32> }` (24 B) whose `data` is described as a 40-byte `Wide`, and the test
+> **prints the overrun** — *"field `data` at offset 0 claims a 40-byte child inside a 24-byte value
+> — the first descend would read 16 bytes past the end"*. No check changed; the sentence that
+> justifies it did.
+>
+> *Gate 1, fixture half:* `-p reflect-fixture --features reflect-fixture/reflect` — a depth-2
+> named-field nest (`Body → Placement → Point → f32`, leaf read at depth 2) and a depth-2 tuple
+> struct (`Slot → Handle → u32`), plus a coherence precondition test and a descriptor-vs-real-type
+> pin, **4 tests**. *Gate 1, dogfood half:* `-p reflect-dogfood --features reflect-dogfood/reflect`
+> over the real `Transform → Vec3 → f32` and `Name → NameId → u32`, **4 tests**. `Transform` turned
+> out to be the first fixture in this campaign where the **finished set** earns its keep:
+> `translation` and `scale` both point at one `VEC3_TYPE_INFO`, so the walk meets that node twice
+> and must answer *"already proved"* rather than *"cycle"* — asserted, not assumed. **The dogfood
+> half needed one manifest edge**: `boyko-math`, because it must bake `Vec3`/`Quat`'s **real**
+> `offset_of!` / `size_of` / `align_of` and `boyko_scene` does not re-export them
+> (`transform.rs:33` imports them from there). Plain, non-optional, no `features` array — the rule
+> that manifest's own comment states.
+>
+> *Gate 2, MEASURED:* `nested descend (depth 2): baseline=0 measured=0 delta=0` over 1000 walks, on
+> the C4 instrument, in the same binary as the permanent positive control
+> (`deliberate allocations observed = 1`). Depth **2**, as §3.3's row demands.
+>
+> *Gate 3:* `a_nested_child_too_large_for_its_field_is_refused` (3(i)) asserts **exactly one**
+> `Problem`, so the rung's RED can green it by deleting exactly one clause;
+> `a_misaligned_or_over_aligned_nested_child_is_refused` isolates Check A's other two clauses on
+> their own single-violation fixtures; `a_cyclic_type_info_graph_is_refused` (3(ii)) covers both a
+> two-node ring and a self-naming descriptor and asserts the `Problem` names **the edge that closes
+> the cycle**; and `check_a_is_satisfied_at_every_edge_of_the_cycle` **measures** the ruling's
+> load-bearing claim — the cyclic fixtures produce **no** `NestedNotInline` at any node, so Check A's
+> blindness to a hand-baked cycle is a recorded fact rather than a conceded argument. Both
+> `A → B → A` and the direct self-reference compile as ordinary `static`s; rustc accepts the forward
+> reference, which was checked rather than assumed.
+>
+> *Gate 4:* `cargo +nightly-x86_64-pc-windows-gnu miri test -p boyko-reflect --all-targets` (TB) —
+> 4 + 8 + 0 + 13 + 7 + 0 + 8 + 0 + **12** green, exit 0; the new `descend`/`get` pointer arithmetic
+> is covered. The two capacity tests carry `#[cfg_attr(miri, ignore = …)]` with a stated reason —
+> they build their fixtures with `Box::leak` (a 33-deep chain of hand-written statics is 66
+> declarations, and 257 leaves is not writable at all) and Miri's leak checker reports the
+> deliberate leak. **No `unsafe` is in either**, and the Miri-relevant paths — the cursor and the
+> static cyclic fixtures — do run. `-p reflect-fixture --features reflect-fixture/reflect` under
+> Miri: 4 + 1 green, exit 0.
+>
+> *Gate 5:* two fixtures, both blessed against `rustc 1.97.1 (8bab26f4f 2026-07-14)` — the freeze
+> `tests/trybuild_corpus_compiler_witness.rs` already pins. `cursor_held_across_mut` reds with
+> **E0506** (*"cannot assign to `value.inner.x` because it is borrowed"*) and `cursor_outlives_value`
+> with **E0515** (*"cannot return value referencing local variable"*): aliasing and lifetime, the two
+> halves of what the `'a` buys. The first fixture reads the field again after the borrow ends, so its
+> blessed bytes carry the borrow error and nothing else — an `unused_assignments` warning was in the
+> first bless and was designed out rather than frozen in.
+>
+> **RED LEDGER — four mutations run, and one of them refuted this rung's own prediction.**
+>
+> * **RED 1b (Check A's size clause), one edit at `is_inline_contained`, exit 101, exactly one test
+>   red:** *"a 40-byte child inside a 24-byte value is not inline-contained: ()"* — `validate`
+>   returned `Ok`. The alignment fixtures stayed **green**, which is the measurement the split
+>   fixtures exist for: `offset + child.size <= parent.size` is separately load-bearing, and the two
+>   alignment clauses do not stand in for it.
+> * **RED 1a (Check B's path comparison), exit 101, one test red — AND IT REFUTES THE RUNG'S
+>   PREDICTED FAILURE MODE.** The rung says removing Check B reds *"by stack/array overflow or by
+>   hanging"*. Observed instead: `expected a named NestedCycle, got: [Problem { field_index: None,
+>   name: "c6_nested::RingA", violation: NestedGraphTooLarge }]`. The depth capacity is a **second**
+>   bound, so the cycle is caught — by the **wrong rule**, with a `Problem` that says "this graph is
+>   too big" about a two-node graph. That is a strictly worse diagnostic and a strictly weaker claim,
+>   and it is exactly the shape a maintainer accepts as "still refused". Recorded because a
+>   prediction that is off is worth more written down than quietly corrected.
+> * **RED 1a-bis (Check B deleted in FULL — path array, depth guard and comparison), run to show the
+>   failure the rung actually describes:** the test process dies with
+>   `exit code: 0xc00000fd, STATUS_STACK_OVERFLOW`. Note what survives in this state: the `done`
+>   memo. A finished-set-only walk does **not** terminate on `A → B → A`, because neither node is
+>   finished while the other is being walked — the concrete form of the "a plain visited set is not
+>   a cycle test" note in `NestedWalk`.
+> * **RED 2 (delete the `'a` parameter and the `_pd` field entirely — the bare `{ptr, info}` cursor
+>   M2/O3 forbids), exit 101:** `cursor_held_across_mut` → *"Expected test case to fail to compile,
+>   but it succeeded."*; `cursor_outlives_value` → `.stderr` mismatch, **E0515 → E0107** (*"struct
+>   takes 0 lifetime arguments but 1 lifetime argument was supplied"*). Run as
+>   `--test c6_compile_fail`, because the mutation **also** stops `tests/c4_prim_zero_alloc.rs` from
+>   compiling — that harness names `NestedCursor<'a>` in its fn-pointer types, so the deletion is
+>   refuted in three places at once; only the targeted invocation isolates gate 5's own signal.
+> * **The variance-only alternative was RUN, not argued.** `PhantomData<&'a ()>` →
+>   `PhantomData<*const &'a ()>`: gate 5 **exit 0**, both fixtures still failing to compile with the
+>   blessed bytes. `'a` stays used, the region constraint stays, and the borrow is still held — so
+>   the full deletion really is the unique mutation with the described effect, measured rather than
+>   asserted.
+> * **RED for the new alloc arm** (`let _red = Vec::<u8>::with_capacity(1);` inside `descend`), exit
+>   101: *"nested descend (depth 2): baseline=0 measured=**2000** delta=2000"* — exactly **two** per
+>   walk, no noise, and the `prim`, `enumerate` and `array read` arms stayed green in the same run.
+>   Two, not one, is the depth-≥2 claim made visible: §3.3's row says *per level*, and the counter
+>   counts per level.
+>
+> *Restoration:* `type_info.rs` and `cursor.rs` restored from file copies after every mutation and
+> verified byte-identical by sha256 (`type_info.rs` `53de5595…da4a`, `cursor.rs` `508859ad…5b9f`).
+>
+> *Gate.* `cargo check -p boyko-reflect --all-targets` exit 0; `cargo clippy -p boyko-reflect
+> --all-targets -- -D warnings` **touch-first, both profiles**, exit 0 — it caught one real thing,
+> `offset % child.align == 0` → `offset.is_multiple_of(child.align)`, which also strengthened the
+> `align == 0` guard's rationale (`is_multiple_of(0)` answers `offset == 0`, so a descriptor claiming
+> `align: 0` would have *passed* the alignment clause at offset 0). `cargo test -p boyko-reflect
+> --all-targets --no-fail-fast`: debug 4 + 19 + 1 + 13 + 7 + 9 + 8 + 1 + 14 = **76** across nine
+> binaries, release 5 + 19 + 1 + 13 + 7 + 9 + 8 + 1 + 14 = **77**, exit 0 both. `-p reflect-fixture`
+> feature-**off** (the ship configuration) exit 0 with `c6_nested_descend` compiling to 0 tests **by
+> design**, feature-**on** 4 + 1 + 1 exit 0; `-p reflect-dogfood --features reflect-dogfood/reflect`
+> 4, exit 0. Clippy `-D warnings` on both consumer packages with the feature on: exit 0.
+>
+> *Regression, all exit 0:* G0 census 3, **G1 manifest 7 — re-run for the two manifest edits and
+> green, which is gate 5's own clause**, G2 closure 2, G3 absence 1 (+1 ignored calibration), G4
+> coverage 6, leg-nonvacuity 1, `internal_docs_anchors` 5, `trybuild_corpus_compiler_witness` 2,
+> `engine_packages_census` 3, `goldens_pins_wellformed` 7, `gpu_blocking_reader_census` 2,
+> `vg_symbol_reachability` 16.
 
 ---
 
@@ -1460,6 +1809,15 @@ here' pointed at `aether! {`"*). Refusals stay spanned at the user's own token.
 2. **Anti-rot census:** a test asserting that the number of `.stderr` fixtures **equals** the
    number of refusal rules enumerated in the derive source (a `const REFUSALS: &[&str]` the derive
    itself iterates). A rule added without a fixture reds; a fixture deleted reds.
+   **Re-scoped 2026-08-21 (architect's C6 ruling, D21): this census covers DIAGNOSTIC quality, not
+   termination.** It asserts the derive names the five standard indirection kinds (`Box`, `Vec`,
+   `&T`, `Option<Box<_>>`, raw pointers) so a user who writes one gets a **spanned compile error at
+   the field** rather than a registration-time `Problem`. It is **not** the acyclicity proof and
+   never was — that is `validate`'s `NestedCycle` arm, with `NestedNotInline` alongside it for
+   addressing-validity, both landing at **C6** (§3.1). The consequence of a missing kind is
+   therefore a **worse diagnostic**, not an unsound descend: the descend is refused by C6's checks
+   either way. D20's item 2 (`REFUSALS` counts `missing_default_rejected`, so the hidden `T: Default`
+   bound stays census-visible) is unaffected by this re-scoping.
 3. The corpus is run under `--no-fail-fast`. **`cargo test` stops at the first failing target**,
    so one known-red target shadows every target behind it — this repo has measured a trybuild
    fixture staying red for **87 commits** because a line was added and its `.stderr` was never
@@ -1601,7 +1959,13 @@ C0  the red canary: prove the leg G4 installed can fail
  │                                   │                           └─ C11 Str  (LAST — D13)
 ```
 
-C9 may land before C10/C11 and should: it is what makes C6's acyclicity proof true (§3.1).
+~~C9 may land before C10/C11 and should: it is what makes C6's acyclicity proof true (§3.1).~~
+**DELETED 2026-08-21** (architect's C6 ruling, D21). C9 makes nothing about C6 true: the acyclicity
+proof is `validate`'s `NestedCycle` arm and the addressing-validity proof is its `NestedNotInline`
+arm, both in `boyko_reflect`, both landing **at C6** (§3.1). C9's list is the derive-side early
+diagnostic. The ladder above is therefore unchanged — `C6 → C7 → C8 → C9`, with no backwards
+dependency — and C9 may still land before C10/C11 for its own reasons (it gates the derive's
+refusals), which is a scheduling preference and not a proof obligation.
 
 ---
 

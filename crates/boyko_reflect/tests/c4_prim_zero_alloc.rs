@@ -103,6 +103,7 @@ use std::mem::offset_of;
 use boyko_ecs::ecs::identifiers::primitives::EntityId;
 
 use boyko_reflect::array::array_get;
+use boyko_reflect::cursor::NestedCursor;
 use boyko_reflect::prim;
 use boyko_reflect::scalar::{Scalar, ScalarKind};
 use boyko_reflect::type_info::{ArrayInfo, FieldInfo, TypeInfo, TypeKind, ValueKind};
@@ -624,4 +625,265 @@ fn the_array_arm_actually_reads_the_array() {
     // SAFETY: as above; an out-of-range index is a refusal, not a read.
     let past_end = unsafe { array_get(base.add(offset), &CORNERS_INFO, CORNERS_INFO.len) };
     assert_eq!(past_end, None, "the measured accessor did not refuse index == len");
+}
+
+// ══════════════════════════ CORE C6 gate 2 — one more arm ═══════════════════
+//
+// §3.3 row 4: `nested descend, depth >= 2` = **0 allocations per level**. The row's own
+// text refuses a shortcut in advance — *"a depth-1 harness proves nothing about recursion
+// and is not accepted"* — so the measured window descends **twice** and reads a leaf, and
+// the baseline is a no-op of the same shape driven through the same indirection.
+
+/// The leaf of the measured nest.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct DLeaf {
+    x: f32,
+    y: f32,
+}
+
+/// The middle level. Its presence is what makes this a depth-2 measurement.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct DMid {
+    leaf: DLeaf,
+    tag: u32,
+}
+
+/// The root.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct DRoot {
+    hp: f32,
+    mid: DMid,
+}
+
+fn d_leaf_type_id() -> TypeId {
+    TypeId::of::<DLeaf>()
+}
+fn d_mid_type_id() -> TypeId {
+    TypeId::of::<DMid>()
+}
+fn d_root_type_id() -> TypeId {
+    TypeId::of::<DRoot>()
+}
+fn d_f32_type_id() -> TypeId {
+    TypeId::of::<f32>()
+}
+fn d_u32_type_id() -> TypeId {
+    TypeId::of::<u32>()
+}
+
+static D_LEAF_FIELDS: [FieldInfo; 2] = [
+    FieldInfo {
+        name: "x",
+        offset: offset_of!(DLeaf, x),
+        type_id_fn: d_f32_type_id,
+        kind: ValueKind::Prim(ScalarKind::F32),
+        get: Some(prim::get_f32),
+        set: Some(prim::set_f32),
+        nested: None,
+        enum_info: None,
+        array: None,
+    },
+    FieldInfo {
+        name: "y",
+        offset: offset_of!(DLeaf, y),
+        type_id_fn: d_f32_type_id,
+        kind: ValueKind::Prim(ScalarKind::F32),
+        get: Some(prim::get_f32),
+        set: Some(prim::set_f32),
+        nested: None,
+        enum_info: None,
+        array: None,
+    },
+];
+
+static D_LEAF_TYPE_INFO: TypeInfo = TypeInfo {
+    type_name: "c4_prim_zero_alloc::DLeaf",
+    type_id_fn: d_leaf_type_id,
+    size: size_of::<DLeaf>(),
+    align: align_of::<DLeaf>(),
+    fields: &D_LEAF_FIELDS,
+    kind: TypeKind::Struct,
+    enum_info: None,
+    default_in_place: None,
+    drop_in_place: None,
+};
+
+static D_MID_FIELDS: [FieldInfo; 2] = [
+    FieldInfo {
+        name: "leaf",
+        offset: offset_of!(DMid, leaf),
+        type_id_fn: d_leaf_type_id,
+        kind: ValueKind::Nested,
+        get: None,
+        set: None,
+        nested: Some(&D_LEAF_TYPE_INFO),
+        enum_info: None,
+        array: None,
+    },
+    FieldInfo {
+        name: "tag",
+        offset: offset_of!(DMid, tag),
+        type_id_fn: d_u32_type_id,
+        kind: ValueKind::Prim(ScalarKind::U32),
+        get: Some(prim::get_u32),
+        set: Some(prim::set_u32),
+        nested: None,
+        enum_info: None,
+        array: None,
+    },
+];
+
+static D_MID_TYPE_INFO: TypeInfo = TypeInfo {
+    type_name: "c4_prim_zero_alloc::DMid",
+    type_id_fn: d_mid_type_id,
+    size: size_of::<DMid>(),
+    align: align_of::<DMid>(),
+    fields: &D_MID_FIELDS,
+    kind: TypeKind::Struct,
+    enum_info: None,
+    default_in_place: None,
+    drop_in_place: None,
+};
+
+static D_ROOT_FIELDS: [FieldInfo; 2] = [
+    FieldInfo {
+        name: "hp",
+        offset: offset_of!(DRoot, hp),
+        type_id_fn: d_f32_type_id,
+        kind: ValueKind::Prim(ScalarKind::F32),
+        get: Some(prim::get_f32),
+        set: Some(prim::set_f32),
+        nested: None,
+        enum_info: None,
+        array: None,
+    },
+    FieldInfo {
+        name: "mid",
+        offset: offset_of!(DRoot, mid),
+        type_id_fn: d_mid_type_id,
+        kind: ValueKind::Nested,
+        get: None,
+        set: None,
+        nested: Some(&D_MID_TYPE_INFO),
+        enum_info: None,
+        array: None,
+    },
+];
+
+static D_ROOT_TYPE_INFO: TypeInfo = TypeInfo {
+    type_name: "c4_prim_zero_alloc::DRoot",
+    type_id_fn: d_root_type_id,
+    size: size_of::<DRoot>(),
+    align: align_of::<DRoot>(),
+    fields: &D_ROOT_FIELDS,
+    kind: TypeKind::Struct,
+    enum_info: None,
+    default_in_place: None,
+    drop_in_place: None,
+};
+
+fn d_sample() -> DRoot {
+    DRoot { hp: 12.5, mid: DMid { leaf: DLeaf { x: -1.5, y: 2.25 }, tag: 7 } }
+}
+
+/// The measured descend, behind a fn pointer so the baseline is driven through an
+/// identical indirection.
+fn real_descend<'a>(cursor: &NestedCursor<'a>, index: usize) -> Option<NestedCursor<'a>> {
+    cursor.descend(index)
+}
+
+/// The baseline's descend half: same signature, same `Option` return, no arithmetic — it
+/// hands back the cursor it was given.
+fn noop_descend<'a>(cursor: &NestedCursor<'a>, _index: usize) -> Option<NestedCursor<'a>> {
+    Some(*cursor)
+}
+
+/// The measured leaf read, behind a fn pointer for the same reason.
+fn real_cursor_get(cursor: &NestedCursor<'_>, index: usize) -> Option<Scalar> {
+    cursor.get(index)
+}
+
+/// The baseline's read half.
+fn noop_cursor_get(_cursor: &NestedCursor<'_>, _index: usize) -> Option<Scalar> {
+    Some(Scalar::from(0u8))
+}
+
+/// The type both descend halves are called through, so the two windows differ only in the
+/// function body.
+type DescendFn = for<'a> fn(&NestedCursor<'a>, usize) -> Option<NestedCursor<'a>>;
+
+/// As [`DescendFn`], for the read half.
+type CursorGetFn = fn(&NestedCursor<'_>, usize) -> Option<Scalar>;
+
+/// **CORE C6 gate 2 / §3.3 row 4 — two levels of `Nested` descend allocate 0.**
+///
+/// Depth **2**, deliberately: §3.3's row says a depth-1 harness *"proves nothing about
+/// recursion and is not accepted"*, because the shape that would break the claim — a
+/// descend that materializes a path table, a `Vec<FieldInfo>` per level, or a boxed value
+/// tree — only appears once there is a second level to accumulate it into.
+#[test]
+fn nested_descend_allocates_nothing_at_depth_two() {
+    let value = d_sample();
+    // SAFETY: `D_ROOT_TYPE_INFO` describes `DRoot` -- its `type_id_fn`, `size` and `align`
+    // are that type's own and its `Nested` offsets are `offset_of!`s, pinned by
+    // `the_descend_arm_actually_descends` below -- and it validates clean, so every edge
+    // is inline-contained and the graph is acyclic. `value` is live and owned by this
+    // frame and not concurrently written.
+    let root = unsafe { NestedCursor::new(&value, &D_ROOT_TYPE_INFO) };
+
+    let noop_d: DescendFn = noop_descend;
+    let real_d: DescendFn = real_descend;
+    let noop_g: CursorGetFn = noop_cursor_get;
+    let real_g: CursorGetFn = real_cursor_get;
+
+    let baseline = count_allocs(|| {
+        for _ in 0..REPS {
+            let mid = (noop_d)(black_box(&root), black_box(1)).expect("baseline mid");
+            let leaf = (noop_d)(black_box(&mid), black_box(0)).expect("baseline leaf");
+            black_box((noop_g)(&leaf, 0));
+        }
+    });
+    let measured = count_allocs(|| {
+        for _ in 0..REPS {
+            let mid = (real_d)(black_box(&root), black_box(1)).expect("field #1 `mid`");
+            let leaf = (real_d)(black_box(&mid), black_box(0)).expect("field #0 `leaf`");
+            black_box((real_g)(&leaf, 0));
+        }
+    });
+
+    println!(
+        "nested descend (depth 2): baseline={baseline} measured={measured} delta={}",
+        measured as i64 - baseline as i64
+    );
+    assert_eq!(
+        measured, baseline,
+        "descending two levels allocated {} time(s) over the no-op baseline in {REPS} \
+         walks -- §3.3 row 4 claims 0 PER LEVEL",
+        measured as i64 - baseline as i64
+    );
+}
+
+/// The descend arm's non-vacuity: the measured window really did descend two levels and
+/// really did read the leaf. A window that returned `None` at level 1 would report delta 0
+/// while measuring one failed index check.
+#[test]
+fn the_descend_arm_actually_descends() {
+    let value = d_sample();
+    // SAFETY: as `nested_descend_allocates_nothing_at_depth_two`.
+    let root = unsafe { NestedCursor::new(&value, &D_ROOT_TYPE_INFO) };
+
+    assert_eq!(D_ROOT_FIELDS[1].offset, offset_of!(DRoot, mid));
+    assert_eq!(D_MID_FIELDS[0].offset, offset_of!(DMid, leaf));
+    assert_eq!(D_ROOT_TYPE_INFO.size, size_of::<DRoot>());
+    assert_eq!((D_ROOT_TYPE_INFO.type_id_fn)(), TypeId::of::<DRoot>());
+
+    let mid = root.descend(1).expect("field #1 `mid` is Nested");
+    assert_eq!(mid.type_info().type_name, "c4_prim_zero_alloc::DMid");
+    let leaf = mid.descend(0).expect("field #0 `leaf` is Nested");
+    assert_eq!(leaf.type_info().type_name, "c4_prim_zero_alloc::DLeaf");
+    assert_eq!(leaf.get(0), Some(Scalar::from(-1.5f32)), "the measured leaf read");
+    assert_eq!(leaf.get(1), Some(Scalar::from(2.25f32)));
 }
