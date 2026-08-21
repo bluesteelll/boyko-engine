@@ -44,9 +44,19 @@
 //! world-AGNOSTIC core [`UiUploadSystem::pack_sort_upload`], which takes the
 //! per-node inputs as an iterator plus the scratch, the ortho, the current
 //! `frame_index`, and an `&mut RhiContext`. It is fully unit-/Miri-testable
-//! (no Arena / world) and is what the render host and the goldens drive
-//! directly (host-time world reads go through `EcsMaster::run_closure_once` /
-//! a query system — never through a smuggled view).
+//! (no Arena / world).
+//!
+//! ⚠️ **It is UNREACHED and it is now WRONG.** Nothing drives it — its only
+//! non-doc caller is [`UiUploadSystem::host_upload_frame`], whose only occurrence
+//! in the tree is its own definition; the render host does not call it and
+//! neither does any test or golden, which is a change since the research corpus
+//! recorded it as test-driven. Since UI-ADVANCED S4 it also re-implements the
+//! per-node expansion with S3 semantics, so for a node carrying BOTH
+//! `UiNineSlice` and `UiImage` it emits the picture S-D12 (1) rules out. Whether
+//! it is deleted or wired is a SCOPE call already filed
+//! (`docs/OPEN-QUESTIONS.md`, entry 2026-08-21); until it is answered, read every
+//! "in both loops" instruction against that entry rather than against this
+//! sentence.
 //!
 //! # Driving the seam from a host (until the `Renderer` is an ECS resource)
 //!
@@ -83,8 +93,8 @@ use crate::gpu_column::RhiContext;
 use crate::ui::gather::{gather_ui_nodes, UiGatherScratch};
 use crate::ui::instance::{UiInstance, UiOrtho};
 use crate::ui::pack::{
-    pack_ui_image_instance, pack_ui_instance, PackInput, UiRenderGeneration, UiRenderScratch,
-    UI_RECORDS_PER_NODE,
+    pack_ui_image_instance, pack_ui_instance, pack_ui_sub_record, ui_node_sub_codes, PackInput,
+    UiRenderGeneration, UiRenderScratch, UI_MAX_SUBS_PER_NODE, UI_RECORDS_PER_NODE,
 };
 use crate::ui::plan::UiFramePlan;
 use crate::ui::FRAMES_IN_FLIGHT;
@@ -100,11 +110,44 @@ pub struct UiNode {
     pub stack: u32,
 }
 
+/// The NODE budget the staging box is sized for — the plan's own measurement
+/// scene, stated once so [`UI_STAGING_ROWS`] is a derivation rather than a
+/// number.
+pub const UI_MAX_NODES: usize = 2048;
+
 /// Rows in the preallocated [`UiUploadSystem`] staging box (sized at
-/// [`System::initialize`], never grown in the frame loop). 4096 × 80 B = 320 KiB
-/// (the S2-widened stride) — 2× the plan's own N = 2048 measurement scene, so
-/// steady state never touches the overflow clamp.
-pub const UI_STAGING_ROWS: usize = 4096;
+/// [`System::initialize`], never grown in the frame loop):
+/// [`UI_MAX_NODES`] × [`UI_RECORDS_PER_NODE`] = 22 528 × 80 B = **1.72 MiB**, one
+/// host allocation at initialize, never grown, never walked beyond the live
+/// prefix.
+///
+/// # Why the whole budget rather than a "typical" mix
+///
+/// The overflow arm is a `debug_assert!(false, …)` and, in release, a `truncate`
+/// of the emission TAIL with [`UiUploadSystem::staging_overflows`] bumped. A box
+/// sized for a typical composition therefore overflows as a function of *what
+/// the scene contains* — which is exactly the composition-dependent silent
+/// truncation the clamp exists to make loud. A constant that cannot overflow
+/// within the stated node budget is worth 1.4 MiB of host RAM.
+///
+/// The pre-S4 constant was a bare `4096` whose doc claimed "2× the plan's own
+/// N = 2048 measurement scene". That was already false at S3: two records per
+/// node × 2 048 nodes is 4 096 — exactly **1×**, overflowing at node 2 049 with
+/// zero margin. At S4 a nine-sliced imaged node emits ten records and the old
+/// box would have overflowed at the **410th** such node (10 × 409 = 4 090 ≤
+/// 4 096 < 4 100).
+///
+/// # Why the derivation is on the STRIDE
+///
+/// [`UI_RECORDS_PER_NODE`] is 11 while the true worst case is 10 records/node
+/// (20 480 rows, 1.56 MiB). The 160 KiB of slack is deliberate: a constant
+/// derived from the stride cannot go stale when a later rung adds a sub code,
+/// whereas one derived from today's maximum emission must be re-audited every
+/// time S-D12 (1)'s truth table gains a row.
+///
+/// *(The GPU ring needs no change: `UiRingSlot` is grow-only pow2 on overflow,
+/// so this CPU box is the sole hard cap.)*
+pub const UI_STAGING_ROWS: usize = UI_MAX_NODES * UI_RECORDS_PER_NODE as usize;
 
 /// The all-zero [`UiInstance`] the staging box is seeded with at initialize.
 const UI_INSTANCE_ZERO: UiInstance = UiInstance {
@@ -137,9 +180,12 @@ struct PendingFrame {
 /// staging mirror for the GPU-contiguity ring write; Principle 0's named
 /// legitimate exception), the gather scratch, and the per-slot generation gate.
 ///
-/// The per-frame seam is the two-phase [`System::run_dispatcher`]; the
-/// world-agnostic core [`pack_sort_upload`](Self::pack_sort_upload) remains the
-/// host/golden driver. See the module docs.
+/// The per-frame seam is the two-phase [`System::run_dispatcher`]. The
+/// world-agnostic core [`pack_sort_upload`](Self::pack_sort_upload) is public API
+/// with **no caller anywhere in the workspace** — not the host, not a test, not a
+/// golden — and since UI-ADVANCED S4 its pack loop is also semantically WRONG for
+/// a nine-sliced node; see its own doc and `docs/OPEN-QUESTIONS.md` (entry
+/// 2026-08-21, "delete them, or wire the host"). See the module docs.
 pub struct UiUploadSystem {
     /// The logical→physical DPI scale folded into every length at pack (so the shader
     /// works in physical px and `fwidth` AA is one device pixel). The host updates it
@@ -317,15 +363,21 @@ impl UiUploadSystem {
         // unstable sort IS the stable permutation, zero alloc) — then pack the
         // records into `staging` directly in sorted order.
         //
-        // UI-ADVANCED S3: a node emits up to `UI_RECORDS_PER_NODE` records (its
-        // background rect, then its sprite quad — D4's per-node paint order), so
-        // `append` is no longer the node index. It is the `(node, sub)` CODE
-        // `node * UI_RECORDS_PER_NODE + sub`, which is still unique and still
-        // strictly increasing in emission order (so the key stays TOTAL and the
-        // sorted result is still painter's order, sub-records of one node
-        // contiguous and in contract order) — and, unlike a running record
-        // counter, it lets this loop find each record's SOURCE node from the key
-        // alone, which is what packing directly in sorted order requires.
+        // UI-ADVANCED S3/S4: a node emits SEVERAL records — its background rect,
+        // then either its nine slice sub-quads or its whole-rect sprite (D4's
+        // per-node paint order; S-D12 (1)'s truth table) — so `append` is not the
+        // node index. It is the `(node, sub)` CODE
+        // `node * UI_RECORDS_PER_NODE + sub`, unique and strictly increasing in
+        // emission order (so the key stays TOTAL and the sorted result is still
+        // painter's order, one node's sub-records contiguous and in contract
+        // order) — and, unlike a running record counter, it lets this loop find
+        // each record's SOURCE node from the key alone, which is what packing
+        // directly in sorted order requires.
+        //
+        // The stride is `UI_RECORDS_PER_NODE` (11) while the emission is 10 / 9 /
+        // 2 / 1: the sub space is a fixed layout with a HOLE in it. The hole
+        // costs nothing here, because the push emits codes only for records that
+        // exist and the decode is `append % UI_RECORDS_PER_NODE`.
         let Self {
             staging,
             node_buf,
@@ -334,11 +386,14 @@ impl UiUploadSystem {
             ..
         } = self;
         keys.clear();
+        let mut subs = [0u32; UI_MAX_SUBS_PER_NODE];
         for (node_idx, node) in node_buf.iter().enumerate() {
             let base = node_idx as u32 * UI_RECORDS_PER_NODE;
-            keys.push((node.stack, base));
-            if node.input.image.is_some() {
-                keys.push((node.stack, base + 1));
+            // `ui_node_sub_codes` is the SOLE authority on which subs exist, so
+            // every code pushed here has a total decode arm below (G4-8, M4-g).
+            let n = ui_node_sub_codes(&node.input, &mut subs);
+            for &sub in &subs[..n] {
+                keys.push((node.stack, base + sub));
             }
         }
 
@@ -364,13 +419,11 @@ impl UiUploadSystem {
         keys.sort_unstable_by_key(|&k| k);
         for (dst, &(_, append)) in keys.iter().enumerate() {
             let node = &node_buf[(append / UI_RECORDS_PER_NODE) as usize];
-            staging[dst] = if append.is_multiple_of(UI_RECORDS_PER_NODE) {
-                pack_ui_instance(&node.input, *scale_factor)
-            } else {
-                pack_ui_image_instance(&node.input, *scale_factor).expect(
-                    "invariant: a sub-record key is emitted only for a node carrying UiImage",
-                )
-            };
+            staging[dst] = pack_ui_sub_record(
+                &node.input,
+                append % UI_RECORDS_PER_NODE,
+                *scale_factor,
+            );
         }
 
         if overflowed {
@@ -426,6 +479,25 @@ impl UiUploadSystem {
     /// Returns the [`UiFramePlan`] to stash for the swapchain recorder. An empty node
     /// set yields an empty plan (the recorder draws nothing).
     ///
+    /// # ⚠️ Unreached, and wrong for a nine-sliced node
+    ///
+    /// **Nothing in the workspace calls this.** Its only non-doc caller is
+    /// [`host_upload_frame`](Self::host_upload_frame), whose only occurrence in
+    /// the tree is its own definition; no test and no golden reaches either.
+    ///
+    /// **And since UI-ADVANCED S4 its pack loop is semantically wrong**, not
+    /// merely unused: it emits background + whole-rect image for a node carrying
+    /// both `UiNineSlice` and `UiImage`, which is the picture S-D12 (1) rules out.
+    /// The in-schedule seam ([`gather_into_staging`](Self::gather_into_staging))
+    /// and the loop-agnostic emitter
+    /// ([`emit_ui_node_records`](crate::ui::pack::emit_ui_node_records)) both go
+    /// through the sole authority `ui_node_sub_codes`; this loop does not.
+    ///
+    /// Deleting it or wiring it is an owner SCOPE call, already filed
+    /// (`docs/OPEN-QUESTIONS.md`, entry 2026-08-21). It is left standing and
+    /// wrong rather than half-fixed, because a fixed copy would be a second,
+    /// unrunnable implementation of the expansion policy. See the body comment.
+    ///
     /// # Errors
     /// [`GpuColumnError`] on a ring grow / mapping failure (or if
     /// [`RhiContext::ui_setup`](crate::RhiContext::ui_setup) was never called).
@@ -446,9 +518,26 @@ impl UiUploadSystem {
 
         // (2) pack — clear + extend into the preallocated scratch, never Vec::new.
         //
-        // UI-ADVANCED S3: a node emits up to `UI_RECORDS_PER_NODE` records — its
-        // background rect, then its sprite quad (D4's per-node paint order). The
-        // append key is the RUNNING RECORD index here, not the `(node, sub)` code
+        // ⚠️ **THIS LOOP IS WRONG SINCE UI-ADVANCED S4, and it is left wrong on
+        // purpose.** It re-implements the per-node expansion at S3 semantics —
+        // background, then `pack_ui_image_instance` — and that helper opens
+        // `let image = input.image?` WITHOUT consulting `nine_slice`. So a node
+        // carrying BOTH components gets its background plus an UNSLICED
+        // whole-rect image: exactly the picture S-D12 (1) rules out, and the one
+        // the sole authority (`ui_node_sub_codes`) exists to make unrepresentable.
+        // The correct expansion is one call to `emit_ui_node_records`.
+        //
+        // It is not fixed here because this whole function has NO caller in the
+        // workspace (see the method doc and `docs/OPEN-QUESTIONS.md`, entry
+        // 2026-08-21) and whether it is deleted or wired is an owner SCOPE call.
+        // Fixing an unreachable loop would land a second, ungatable copy of the
+        // expansion policy — the "two loops, two append encodings" hazard that has
+        // already cost this campaign three gate re-pointings. **If it is ever
+        // wired, this loop must be replaced by `emit_ui_node_records` in the same
+        // edit**, and the note in `UiNineSlice`'s own docs about presence
+        // suppressing the image record is the property to gate.
+        //
+        // The append key is the RUNNING RECORD index here, not the `(node, sub)` code
         // `gather_into_staging` uses, because `sort_by_stack`'s gather indexes
         // `pack[idx]` by it: both encodings are unique and strictly increasing in
         // emission order, so both yield the same painter's order — this one has to

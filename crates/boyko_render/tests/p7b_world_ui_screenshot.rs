@@ -289,6 +289,7 @@ fn msdf_instances_at(text: &str, font: &BakedFont, origin_x: f32, origin_y: f32)
                     clip: None,
                     text_uv: Some(g.uv),
                     image: None,
+                    nine_slice: None,
                 },
                 1.0,
             )

@@ -53,9 +53,9 @@ use boyko_ecs::ecs::core::iters::query::query::Query;
 use boyko_ecs::ecs::core::system::dispatcher_token::WorldView;
 use boyko_ecs::ecs::core::system::ResMut;
 use boyko_ecs::ecs::identifiers::primitives::ArchetypeId;
-use boyko_ui::components::UiRoot;
+use boyko_ui::components::{NineSliceMode, UiRoot};
 
-use crate::ui::pack::{PackInput, UiImageInput, UiRenderGeneration};
+use crate::ui::pack::{PackInput, UiImageInput, UiNineSliceInput, UiRenderGeneration};
 use crate::ui::upload::UiNode;
 
 /// The ONE component list behind [`ui_pack_inputs!`] — every expansion routes
@@ -64,9 +64,13 @@ use crate::ui::upload::UiNode;
 ///
 /// At S0 the list was the four pack inputs that existed then; UI-ADVANCED S3 adds
 /// the fifth, `UiImage` — which is what makes `ui_render_discovery` see
-/// `Changed<UiImage>` for free (S3 item 8: one edit, both halves). Animation adds
-/// `UiVisual` HERE; sprites add the rest at S4–S5; interaction adds its scroll
-/// datum HERE — never directly in the gather or the filter (§6 of the plan).
+/// `Changed<UiImage>` for free (S3 item 8: one edit, both halves). UI-ADVANCED S4
+/// adds the sixth, `UiNineSlice`, for exactly the same two reasons: without it the
+/// gather cannot READ the component at all, and an author's runtime edit to a
+/// nine-slice would never bump `UiRenderGeneration` — the frame would not repaint.
+/// Animation adds `UiVisual` HERE; S5 adds the sheet/flipbook trio HERE;
+/// interaction adds its scroll datum HERE — never directly in the gather or the
+/// filter (§6 of the plan).
 #[macro_export]
 #[doc(hidden)]
 macro_rules! __ui_pack_inputs_list {
@@ -76,7 +80,8 @@ macro_rules! __ui_pack_inputs_list {
             ::boyko_ui::components::UiBackground,
             ::boyko_ui::components::ComputedClip,
             ::boyko_ui::components::StackIndex,
-            ::boyko_ui::components::UiImage
+            ::boyko_ui::components::UiImage,
+            ::boyko_ui::components::UiNineSlice
         ] }
     };
 }
@@ -250,7 +255,7 @@ pub fn gather_ui_nodes(
     while let Some((node, inherited_clip)) = scratch.stack.pop() {
         // The ONE spelling of the pack-input reads (G0-1): arity-locked to the
         // component list — an edit there that does not land here fails to build.
-        let (rect, background, clip, stack_index, image) =
+        let (rect, background, clip, stack_index, image, nine_slice) =
             ui_pack_inputs!(read view, node, &mut scratch.probes);
 
         // The node's own clip narrows the inherited clip for its subtree.
@@ -280,6 +285,20 @@ pub fn gather_ui_nodes(
                         slot: img.texture,
                         uv: [img.uv_min[0], img.uv_min[1], img.uv_max[0], img.uv_max[1]],
                         tint: img.tint,
+                    }),
+                    // UI-ADVANCED S4: the same capability-is-presence rule. This
+                    // is also the ONE site that narrows the authored
+                    // `NineSliceMode` to the raw `u8` the pack bounds against
+                    // (`UI_NINE_SLICE_MODE_COUNT`), and the match is EXHAUSTIVE
+                    // on purpose: S5's `Tile` reds here with `error[E0004]`, at
+                    // the site that must bump the count.
+                    nine_slice: nine_slice.map(|ns| UiNineSliceInput {
+                        border_px: ns.border_px,
+                        border_uv: ns.border_uv,
+                        mode: match ns.mode {
+                            NineSliceMode::Stretch => 0,
+                        },
+                        fill_center: ns.fill_center,
                     }),
                 },
                 stack: stack_index.map(|s| s.0).unwrap_or(0),

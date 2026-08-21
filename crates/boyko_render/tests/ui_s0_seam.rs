@@ -241,8 +241,13 @@ fn g0_3_one_mutation_one_repack_count_returned() {
 ///
 /// This is the seam-level half of the sprite lane: the CPU pack tests
 /// (`ui_pack_cpu.rs`) pin what ONE record holds; this pins how many records a node
-/// emits and where they land after the z-sort — the property the append key encodes and
-/// the one S4's nine-slice will extend by seven more sub-quads.
+/// emits and where they land after the z-sort — the property the append key encodes.
+///
+/// UI-ADVANCED S4 does NOT extend this node: adding `UiNineSlice` to it would move
+/// it to a different row of S-D12 (1)'s truth table, where the nine sub-quads
+/// REPLACE the whole-rect image record rather than joining it (from 2 records S4
+/// adds eight and removes one, for 10). This test owns the unsliced row and stays
+/// byte-identical at S4; `ui_s4_nine_slice.rs` owns the sliced one.
 ///
 /// The sprite node sits at stack 1, BETWEEN two plain nodes at stacks 0 and 2, so a sort
 /// that lost the sub-record ordering (or interleaved the pair with a neighbour) shows up

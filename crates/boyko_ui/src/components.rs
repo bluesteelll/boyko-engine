@@ -466,6 +466,146 @@ impl Default for UiImage {
     }
 }
 
+/// How a [`UiNineSlice`]'s EDGE and CENTRE regions fill their destination
+/// (UI-ADVANCED S4). `#[repr(u8)]`, so the render side can carry the
+/// discriminant as a raw `u8` across the crate boundary.
+///
+/// At S4 there is exactly ONE legal value, and that is pinned mechanically by
+/// the one-variant `const` match below rather than asserted in prose: S5's
+/// `Tile` cannot arrive without turning that match into
+/// `error[E0004]: non-exhaustive patterns`, which walks the author to every
+/// site that assumes a single mode. (`std::mem::variant_count` would be the
+/// obvious spelling; MEASURED on rustc 1.97.1 it is `E0658` *and* "not yet
+/// stable as a const fn" — two errors on one line — so it does not exist on
+/// this toolchain.)
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum NineSliceMode {
+    /// The edges and the centre are STRETCHED to fill their destination
+    /// region. The only mode at S4; `Tile` arrives with S5's sub-rect `frac`
+    /// mechanism (`docs/UI-PLAN-SPRITES.md` S-D11).
+    #[default]
+    Stretch = 0,
+}
+
+// S4's "exactly one legal value", made mechanical. NO outer braces: MEASURED —
+// `const _: () = { match … };` emits `unused_braces`, which the project's
+// `clippy --all-targets -- -D warnings` gate turns into an error.
+const _: () = match NineSliceMode::Stretch {
+    NineSliceMode::Stretch => (),
+};
+
+/// Nine-slice (nine-patch) rendering for a node's [`UiImage`] (UI-ADVANCED S4).
+/// AUTHOR-OWNED, OPT-IN, COLD table storage. `#[repr(C)]`, POD, 36 B.
+///
+/// # Presence IS the statement "draw my image sliced"
+///
+/// This component does not add a layer on top of the sprite — it changes HOW
+/// the sprite is drawn. A node carrying both `UiNineSlice` and [`UiImage`]
+/// emits its background rect plus NINE sub-quads and **no whole-rect image
+/// record**; the slices *are* the image (`docs/UI-PLAN-SPRITES.md` S-D12 (1),
+/// which is what Unity's `Image{type: Sliced}`, Godot's `NinePatchRect` and
+/// Bevy's `NodeImageMode::Sliced` all do — none of them draws the image twice).
+/// A node carrying `UiNineSlice` and NO `UiImage` is a structural **no-op**: it
+/// emits its background and nothing else (S-D12 (3)) — never nine invisible
+/// quads.
+///
+/// A frame that wants a nine-sliced border AND an unsliced picture inside it is
+/// TWO nodes — a nine-sliced parent with an imaged child — exactly as it is
+/// expressed in Unity, Godot and Bevy, and the hierarchy for it already exists.
+///
+/// # The two borders
+///
+/// * [`border_px`](Self::border_px) is the DESTINATION inset, in logical px.
+/// * [`border_uv`](Self::border_uv) is the SOURCE inset, as a FRACTION of the
+///   node's current [`UiImage`] UV sub-rect — not in source texels, because the
+///   engine never records a texture's dimensions anywhere (the bindless table
+///   registers a bare image view and stores no size). A fraction needs no
+///   dimensions by construction, and it stays correct when S5 makes the
+///   sub-rect a flipbook frame that changes every tick.
+///
+/// Both are `[l, t, r, b]` — [`UiBackground::border_width`]'s side order, NOT
+/// [`UiBackground::corner_radius`]'s `tl, tr, br, bl`.
+#[repr(C)]
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct UiNineSlice {
+    /// DESTINATION inset per side, logical px, `[l, t, r, b]`.
+    ///
+    /// **The [`Default`] is `[0.0; 4]`, and the picture that produces is
+    /// ACCEPTED rather than guarded**: with a zero destination inset every
+    /// corner and edge region has zero extent, so the only visible sub-quad is
+    /// the centre — the node renders **the middle ninth of its texture, zoomed
+    /// to fill**. Because presence SUPPRESSES the whole-rect image record, a
+    /// defaulted `UiNineSlice` does NOT degrade to an unsliced sprite. That is
+    /// the same shape as [`UiImage`]'s alpha-0 default tint: the
+    /// zero-configuration value of an authored component is the null one and
+    /// the author sees the result immediately. It is stated here because an
+    /// unstated degenerate default is the datum an author discovers by acting
+    /// on it.
+    ///
+    /// If `l + r` exceeds the node's width (a chrome tweened below its own
+    /// border) the axis's two sides are shrunk PROPORTIONALLY at pack, per
+    /// axis — what Unity and Godot both do — so the corners never overlap and
+    /// the edges never invert. That is ordinary, not an error, and is silent.
+    ///
+    /// A NEGATIVE side is out of domain (`debug_assert!`ed at pack) and is
+    /// clamped to zero in release — the sum test above cannot see it, and left
+    /// alone it produces a negative-extent destination rect.
+    pub border_px: [f32; 4],
+    /// SOURCE inset per side as a fraction of the node's current UV sub-rect,
+    /// `[l, t, r, b]`. `Default` = equal thirds (`1/3` each side), which is the
+    /// zero-configuration split and NOT the rule — a 32×32 chrome with an 8 px
+    /// border wants `1/4`, and a 64×64 panel with a 6 px border wants `3/32`.
+    ///
+    /// Valid domain: each side in `[0, 1)` with `l + r < 1` and `t + b < 1`
+    /// (`debug_assert!`ed at pack). In release an axis whose sides sum to `1`
+    /// or more is scaled down proportionally, so the centre SOURCE region
+    /// degenerates to zero width instead of inverting into a negative-extent
+    /// UV rect; a side below `0` is clamped to zero, which is the OTHER edge of
+    /// the domain and needs the other remedy — a negative inset is not a
+    /// proportion of anything, and no sum test sees it.
+    pub border_uv: [f32; 4],
+    /// How the edges and the centre fill their destination. One legal value at
+    /// S4 ([`NineSliceMode::Stretch`]).
+    pub mode: NineSliceMode,
+    /// Emit the CENTRE sub-quad (region 4, sub code 5)? `false` leaves the
+    /// centre hole unpainted — the node's background shows through — and the
+    /// node emits 9 records rather than 10.
+    ///
+    /// **The [`Default`] is `true`**, and it is ruled rather than inherited
+    /// from `bool::default()`: `false` combined with `border_px`'s `[0.0; 4]`
+    /// default would make a defaulted `UiNineSlice` emit a background plus
+    /// EIGHT zero-extent slices and render nothing at all, while the image it
+    /// suppressed went undrawn. Every record count in this rung's gates is
+    /// stated for the `true` row of S-D12 (1)'s truth table.
+    pub fill_center: bool,
+    /// Explicit tail padding to 36 B. SPELLED rather than implicit: MEASURED on
+    /// rustc 1.97.1, the field list without it is *also* 36 B / align 4, i.e.
+    /// the two bytes are implicit tail padding — which is precisely what "the
+    /// padding is spelled" forbids leaving unwritten in a `#[repr(C)]` POD.
+    pub _pad: [u8; 2],
+}
+
+const _: () = assert!(size_of::<UiNineSlice>() == 36);
+const _: () = assert!(align_of::<UiNineSlice>() == 4);
+
+impl Default for UiNineSlice {
+    /// Zero destination inset, equal-thirds source split, `Stretch`, centre ON.
+    ///
+    /// See [`border_px`](UiNineSlice::border_px) for the picture the zero
+    /// destination inset produces — it is accepted, not guarded.
+    #[inline]
+    fn default() -> Self {
+        UiNineSlice {
+            border_px: [0.0; 4],
+            border_uv: [1.0 / 3.0; 4],
+            mode: NineSliceMode::Stretch,
+            fill_center: true,
+            _pad: [0; 2],
+        }
+    }
+}
+
 /// Uniform grid track config (GUI P6a). Pairs with
 /// [`UiLayout`]`{ layout_type: Grid }`. AUTHOR-OWNED, OPT-IN.
 ///

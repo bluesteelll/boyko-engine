@@ -107,6 +107,7 @@ fn grid_scene(n: u32, slots: &[u32]) -> Vec<UiInstance> {
                         uv: [0.0, 0.0, 1.0, 1.0],
                         tint: TINT_OPAQUE_WHITE,
                     }),
+                    nine_slice: None,
                 },
                 1.0,
             )

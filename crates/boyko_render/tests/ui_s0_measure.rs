@@ -208,27 +208,33 @@ fn measure_gather_baseline() {
     report(2048);
 }
 
-/// §10.8 leg (c): the sprite lane's gather cost (UI-ADVANCED S3).
+/// §10.8 leg (c): the sprite/nine-slice lanes' gather cost (UI-ADVANCED S3, S4).
 ///
 /// # What this leg measures — and the thing it does NOT (found by running it)
 ///
-/// The first run of this leg reported `probes/node = 6.00` for BOTH the imaged and the
-/// image-less world, and wall-clock medians that disagreed in SIGN between N=256 and
-/// N=2048. That is not noise hiding a signal; it is the correct answer to the wrong
-/// question. The gather probes EVERY pack input on EVERY visited node — a probe that
-/// returns `None` is still a probe — so a world where no node carries `UiImage` pays
-/// exactly the same six probes as one where every node does. Component PRESENCE changes
-/// what the pack emits, not what the gather reads.
+/// The first run of this leg — at S3, when the list held five pack inputs — reported
+/// `probes/node = 6.00` for BOTH the imaged and the image-less world, and wall-clock
+/// medians that disagreed in SIGN between N=256 and N=2048. That is not noise hiding a
+/// signal; it is the correct answer to the wrong question. The gather probes EVERY pack
+/// input on EVERY visited node — a probe that returns `None` is still a probe — so a
+/// world where no node carries `UiImage` pays exactly the same probes as one where every
+/// node does. Component PRESENCE changes what the pack emits, not what the gather reads.
 ///
-/// So the S3 cost §10.8(c) is actually about is the LIST getting longer, and it is a
-/// comparison against the PRE-S3 build, not against an image-less S3 world:
+/// So the cost §10.8(c) is actually about is the LIST getting longer, and it is a
+/// comparison against the PREVIOUS rung's build, not against a component-less world of
+/// the same build:
 ///
 /// * before S3: 4 pack inputs + `Children` = **5.00 probes/node/frame**
 /// * after  S3: 5 pack inputs + `Children` = **6.00 probes/node/frame** (+20 %)
+/// * after  S4: 6 pack inputs + `Children` = **7.00 probes/node/frame** (+16.7 %) —
+///   `UiNineSlice` joined the list
 ///
-/// paid by every node of every changed frame whether or not it is a sprite. The printed
-/// per-node figure below is derived from `ui_pack_inputs!(count)`, so it stays true as the
-/// list grows; the two worlds are still both run, because the probe-HIT vs probe-MISS
+/// paid by every node of every changed frame whether or not it is a sprite, and whether or
+/// not it is nine-sliced. The printed per-node figure below is derived from
+/// `ui_pack_inputs!(count)`, so it stays true as the list grows — and it is the number this
+/// paragraph must agree with, so the ladder above gains a row in the same edit that moves
+/// the list. MEASURED on the S4 build (2026-08-21): `probes/node = 7.00` in both worlds at
+/// both N. The two worlds are still both run, because the probe-HIT vs probe-MISS
 /// difference (and the different archetype behind it) is the only part that is not
 /// arithmetic — and the run says it is under this instrument's noise at both N.
 ///
@@ -241,9 +247,9 @@ fn measure_gather_with_sprite_components() {
     const PACK_INPUTS: usize = boyko_render::ui_pack_inputs!(count);
     println!(
         "§10.8(c) the LIST cost: {PACK_INPUTS} pack inputs + Children = {} probes/node/frame, \
-         paid by every node whether or not it carries a sprite (it was {} before UiImage \
-         joined the list at S3). Component PRESENCE does not change this number — the two \
-         worlds below differ only in probe-hit vs probe-miss.",
+         paid by every node whether or not it carries a sprite (it was {} probes/node/frame \
+         with one pack input fewer). Component PRESENCE does not change this number — the \
+         two worlds below differ only in probe-hit vs probe-miss.",
         PACK_INPUTS + 1,
         PACK_INPUTS,
     );
@@ -273,7 +279,17 @@ fn report_seam(n: usize) {
         schedule.run(&mut world);
     }
     world.run_system_once(&mut sys);
-    assert_eq!(sys.staged().len(), n, "the settle dispatch packed the scene");
+    // RECORDS, not nodes. The two are equal here only because `build_world` is
+    // RECT-ONLY — row 1 of S-D12 (1)'s truth table, one background record per
+    // node — and writing `n` on its own equated a record count with a node count.
+    // A leg-(c) scene containing sprites or nine-slices reds that with nothing
+    // wrong, which is the false-red shape S3 already recorded once.
+    const RECORDS_PER_RECT_ONLY_NODE: usize = 1;
+    assert_eq!(
+        sys.staged().len(),
+        n * RECORDS_PER_RECT_ONLY_NODE,
+        "the settle dispatch packed the scene"
+    );
 
     // ── leg (d): the static frame. ──
     let probes_before = sys.probes();

@@ -417,7 +417,10 @@ to retire from `UiInstance`.
 ### ID11 — the focus ring, the caret and the selection are ordinary `UiInstance` records; **no shader work in this plan**
 
 The ring is an outset rect with a border, emitted last in the node's paint order (the architecture's
-D4 emission contract: *background → nine-slice → image → glyphs → focus ring*). The caret is a
+D4 emission contract: *background → **either** nine-slice **or** image → glyphs → focus ring*
+*(the middle two terms became alternatives 2026-08-21 — `UI-PLAN-SPRITES.md` **S-D12 (1)**:
+`UiNineSlice` suppresses the image record it slices, because the slices ARE that image. The ring's
+position — last — is untouched, and so is everything this plan asserts about it.)*). The caret is a
 1–2 px rect; the selection is one rect per line. All three ride the existing pipeline, the existing
 per-instance clip and the existing z-sort.
 

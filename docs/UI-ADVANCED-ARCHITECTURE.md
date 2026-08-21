@@ -247,7 +247,20 @@ Sprites add a third kind of quad into the same ambiguity.
 The sort key `(StackIndex, append_order)` is already **total** — `append_order` is unique — so the
 sort is not ambiguous; the *emission* is. The fix is to specify emission order and pin it:
 
-> **background rect → nine-slice sub-quads (TL..BR) → image → glyphs → focus ring**, per node.
+> **background rect → EITHER the nine-slice sub-quads (row-major TL..BR) OR the image → glyphs →
+> focus ring**, per node.
+
+*(corrected 2026-08-21 at the SECOND S4 pre-build ruling — `UI-PLAN-SPRITES.md` **S-D12 (1)**. As
+written, "→ nine-slice sub-quads → image" listed the two as a SEQUENCE, and the sprites plan's S-D11
+took it at its word and ruled 11 records per node. But the only texture a sub-quad can sample is the
+node's own `UiImage`, and the image record is the whole node rect at the whole authored UV
+(`pack.rs:233-243`) painted LAST, so under `PREMULTIPLIED_ALPHA` an opaque sprite covers the nine
+regions it was just sliced into: **the contract occluded itself**, and the S4 golden written against
+it would have pinned a plain stretched sprite. The two terms are ALTERNATIVES — nine-slicing is a
+rendering MODE of an image, the way Unity's `type = Sliced`, Godot's `NinePatchRect` and Bevy's
+`NodeImageMode::Sliced` all are; none of the three draws its image twice. **The ORDER stated here is
+unchanged** — the image term is simply absent when slicing is on, the way a rect-only node has no
+image term.)*
 
 **Reason:** cheapest correct answer. It adds no instance byte, no key-lane width, and no sort cost.
 `StackIndex` remains available for an author who needs to override.
@@ -564,7 +577,7 @@ Capability is component **presence** throughout; every component is `#[repr(C)]`
 | Component | Size | Meaning | Storage |
 |---|---|---|---|
 | `UiImage` *(exists, 24 B)* | 24 B | `texture` **reinterpreted as the bindless slot**; presence ⇒ textured lane | table (authored, cold) |
-| `UiNineSlice` | 20 B | `border_px: [f32;4]`, `mode: u8` (`Stretch`; `Tile` lands at S5), `fill_center: bool`, `_pad: [u8;2]` — presence ⇒ pack emits 9 sub-quads (8 without the centre) **in addition to** the node's background | table (authored, cold) |
+| `UiNineSlice` | ~~20 B~~ **36 B** | `border_px: [f32;4]`, **`border_uv: [f32;4]`**, `mode: u8` (`Stretch`; `Tile` lands at S5), `fill_center: bool`, `_pad: [u8;2]` — both border arrays are `[l,t,r,b]`; presence ⇒ pack emits 9 sub-quads (8 without the centre) **in addition to the node's background and INSTEAD OF its image record** | table (authored, cold) |
 | `UiSpriteSheet` | 4 B | `sheet: u16`, `index: u16` — presence ⇒ pack derives `uv` from the sheet table instead of reading `uv_min`/`uv_max` | table (authored, cold) |
 | `UiSpriteAnim` | 12 B | the **cold track**: `first: u16, last: u16, fps: f32, mode: u8` (`Forward`\|`Reverse`\|`PingPong`\|`Once`), `repeats: u8` — author-written, never system-written | table (authored, cold) |
 | `UiSpriteCursor` | 8 B | the **hot cursor**: `elapsed: f32, frame: u16, dir: i8` — the only column the flipbook system writes per frame | **dense** |
@@ -618,9 +631,25 @@ float table. Also deferred; uniform fps is v1.
 ### 4.3 Nine-slice — CPU expansion into the pack scratch
 
 **D8d.** ~~`UiNineSlice` present ⇒ the pack emits **9 sub-quads** into the existing pack scratch;
-absent ⇒ it emits 1.~~ **`UiNineSlice` present ⇒ the pack emits the node's background rect (unchanged)
+absent ⇒ it emits 1.~~ ~~**`UiNineSlice` present ⇒ the pack emits the node's background rect (unchanged)
 PLUS 9 sub-quads (8 when `fill_center == false`) into the pack scratch; absent ⇒ it emits 1, exactly as
-before.**
+before.**~~ **`UiNineSlice` + `UiImage` present ⇒ the pack emits the node's background rect (unchanged)
+PLUS 9 sub-quads (8 when `fill_center == false`) and SUPPRESSES the node's image record — 10 records,
+not 11. `UiNineSlice` WITHOUT `UiImage` ⇒ 1 record, the background: the component alone is a structural
+no-op. Neither present ⇒ 1; image only ⇒ 2, exactly as before.**
+
+*(corrected AGAIN 2026-08-21, hours after the correction below, by `UI-PLAN-SPRITES.md` **S-D12 (1)** —
+and the second correction is the more instructive one. The first fixed a contradiction between this
+sentence and D4; it ruled "ADD" for the BACKGROUND record, which was right, and then **generalized the
+word to the IMAGE record**, which was a different question with the opposite answer. Under 11 records
+the sub-10 image paints the whole node rect at the whole authored UV **over** the nine regions, and an
+opaque source under `PREMULTIPLIED_ALPHA` replaces what is beneath it — so the arithmetic rendered a
+plain stretched sprite, S4's golden could not fail, and two of its red mutations could not fire. The
+implementer refused to build it and was right. **The slices ARE the image, sliced** — Unity, Godot and
+Bevy all treat nine-slicing as a rendering mode of an image rather than a layer above one, and all
+three keep the node's own background beneath it, which is the half ruled correctly the first time. A
+node wanting a sliced frame AND an unsliced picture is two nodes, which the DFS gather already
+supports.)*
 
 *(corrected 2026-08-21 at the S4 pre-build audit — see `UI-PLAN-SPRITES.md` **S-D11**. As written this
 sentence said the sub-quads REPLACE the node's record, while **D4** at `:250` lists "background rect →
@@ -642,8 +671,18 @@ the one-draw property. Godot carries `ninepatch_margins[4]` + `ninepatch_pixel_s
 `InstanceData` — 24 B taxing the 95 % of nodes that are plain rects. Unity expands on the CPU, and it
 is *cheaper here than in Unity* because:
 
-* `UiRenderScratch.pack` is **already** the sanctioned frame-transient buffer — the 9 sub-quads need
-  no new storage;
+* ~~`UiRenderScratch.pack`~~ **the in-schedule staging box (`UiUploadSystem::staging`)** is **already**
+  the sanctioned frame-transient buffer — the 9 sub-quads need
+  no new storage; *(and they replace the image record rather than joining it, so a nine-sliced node
+  costs 10 rows, not 11 — S-D12 (1))* *(buffer corrected 2026-08-21 — `UI-PLAN-SPRITES.md` **S-D13
+  (2)**: `UiRenderScratch` is production-filled only through `pack_sort_upload`, which has **no caller
+  anywhere in this workspace** — the surviving half of the path S0 replaced with the two-phase seam.
+  S4's expansion therefore lands in `gather_into_staging`, whose target is the fixed
+  `Box<[UiInstance]>` sized once at `initialize`. The argument is unchanged and if anything stronger:
+  the box is preallocated and never grown in the frame loop, so the sub-quads cost no allocation at
+  all rather than merely no new buffer. What DOES change is the sizing obligation — a fixed box
+  clamps where a `Vec` grows, which is why `UI_STAGING_ROWS` is re-derived at S4's Lands item 8 and
+  gated by G4-6.)*
 * all 9 inherit the parent's `StackIndex` and get **consecutive** `append` indices, so the existing
   total-order sort keeps them contiguous and in painter's order with **no change to the sort**;
 * they inherit the parent's `ComputedClip` verbatim, so per-instance clipping composes for free;
@@ -1581,14 +1620,21 @@ Both sprites and animation change the fragment shader. The options are exactly t
 leaves a trace of the choice:
 
 * **(a) Migrate into the eDSL** — the rule's intent, and the place where the per-corner rounded-box
-  SDF, the MSDF median, and the new nine-slice/frame-UV arithmetic get an `f32` **host oracle**. This
+  SDF, the MSDF median, and the new ~~nine-slice/frame-UV~~ **frame-UV and `frac`-in-sub-rect**
+  arithmetic get an `f32` **host oracle**. This
   is a real scope item, not a formality: it means *bringing the UI leaves into the eDSL for the first
-  time*.
+  time*. *(corrected 2026-08-21 — S-D11 (2) and S-D12 (2): **nine-slice arithmetic is not shader
+  arithmetic.** Both halves of it are resolved on the CPU at pack — the destination rects from
+  `border_px`, the source sub-rects from `border_uv` — and each sub-quad reaches the shader as an
+  ordinary textured rect with a `uv`. That S4 changes no shader at all is D8d's whole argument for CPU
+  expansion over Bevy's separate pipeline, so listing nine-slice among the shader's error-prone
+  arithmetic contradicted the decision two sections up. What S5 does add to the shader is the tiled
+  `frac` and the sheet frame-UV derivation, and those keep the oracle's justification intact.)*
 * (b) Record a reasoned exemption plus, at minimum, a manifest row and a re-DXC gate.
 * (c) Edit it a third time in silence.
 
 **(a) is chosen.** The reason is that the campaign adds genuinely error-prone shader arithmetic
-(nine-slice sub-rect math, frame-UV derivation, the un-aliased `uv`) to a file that today has *no gate
+(~~nine-slice sub-rect math,~~ **the tiled `frac` in the sub-rect (S5),** frame-UV derivation, the un-aliased `uv`) to a file that today has *no gate
 proving its binary matches its source*, and the eDSL's host oracle is exactly the instrument for that
 class of arithmetic. (c) is named so it is on the record as an option that was refused.
 

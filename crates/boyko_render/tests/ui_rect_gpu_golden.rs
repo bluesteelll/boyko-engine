@@ -102,6 +102,7 @@ fn opaque_rect(x: f32, y: f32, w: f32, h: f32, color: u32) -> UiInstance {
             clip: None,
             text_uv: None,
             image: None,
+            nine_slice: None,
         },
         1.0,
     )

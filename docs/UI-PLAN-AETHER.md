@@ -563,6 +563,14 @@ the sprite plan has decided how an author names a texture (a `TextureGpu` bindle
 per D2/D3). Until then the same trees are authorable through the universal fallback — this rung buys
 spelling, not capability.
 
+*(field-list note, 2026-08-21 — `UI-PLAN-SPRITES.md` **S-D12 (2)**: `UiNineSlice` gained
+**`border_uv: [f32;4]`** (36 B, not 20), so `nine_slice:`'s positional key table is **five** keys, not
+four: `border_px`, `border_uv`, `mode`, `fill_center`. It has a real `Default` — equal thirds — rather
+than a zero one, so an author who omits it gets the 3×3-cell case for free; the key table must carry
+that default rather than deriving it, or an omitted `border_uv` degenerates every corner to zero
+source width. Recorded here because "final field lists" is this rung's stated precondition and the
+list moved after it was written.)*
+
 **Lands.** `sprite:`, `nine_slice:`, `flipbook:` props with their positional key tables; if the
 texture name requires a resource, the **demand-driven signature becomes real** for the first time
 (the `scene_fn` param-set computation, `expand.rs:1411-1424`) and `ui_fn` grows its second param.

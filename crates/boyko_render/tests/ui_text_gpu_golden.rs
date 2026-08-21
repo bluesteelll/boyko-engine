@@ -219,6 +219,7 @@ fn glyph_quad(x: f32, y: f32, w: f32, h: f32, color: u32, uv: [f32; 4]) -> UiIns
             clip: None,
             text_uv: Some(uv),
             image: None,
+            nine_slice: None,
         },
         1.0,
     )

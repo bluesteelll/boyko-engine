@@ -127,7 +127,9 @@ Two defects:
 
 * **A node emits more than one quad.** Glyphs go through the same seam —
   `PackInput { text_uv: Some(uv), .. }` (`boyko_ui/src/text/emit.rs:25`), and the sprites plan's
-  nine-slice adds nine more (D8d). Applying `rect.wh * scale` to a glyph scales each glyph **in
+  nine-slice adds nine more (D8d) *(and takes the image record away in exchange, so a
+  nine-sliced imaged node is 10 quads rather than 11 — `UI-PLAN-SPRITES.md` **S-D12 (1)**, 2026-08-21;
+  it does not change this argument, which needs only "more than one")*. Applying `rect.wh * scale` to a glyph scales each glyph **in
   place**: the letters grow, the word does not. A scaled label becomes overlapping mush.
 * **The transform has no origin.** Scaling about the top-left is not what any UI means by "pop on
   hover". CSS's default is `transform-origin: 50% 50%`; Flutter, Unity uGUI and Godot all default to a
@@ -242,8 +244,9 @@ S_local = s
 T_local = c − s ⊙ c + o
 ```
 
-Every quad the node emits — background, glyphs, and the sprites plan's nine sub-quads — is
-transformed by the **same** pair: `min' = S ⊙ min + T`, `size' = S ⊙ size`. For the node's own
+Every quad the node emits — background, glyphs, and the sprites plan's nine sub-quads *(which stand in
+for the node's image record rather than beside it — `UI-PLAN-SPRITES.md` **S-D12 (1)**, 2026-08-21)* —
+is transformed by the **same** pair: `min' = S ⊙ min + T`, `size' = S ⊙ size`. For the node's own
 background quad this reduces to D5's formula plus the centring term; for a glyph it is the
 origin-relative form AM3 requires.
 

@@ -215,6 +215,7 @@ fn rect(x: f32, y: f32, w: f32, h: f32, color: u32, clip: Option<[f32; 4]>) -> U
             clip,
             text_uv: None,
             image: None,
+            nine_slice: None,
         },
         1.0,
     )

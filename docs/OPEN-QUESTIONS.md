@@ -14,11 +14,119 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-21 — SCOPE: `host_upload_frame` + `pack_sort_upload` are public API with no caller in the workspace — delete them, or wire the host that `APP-HOST-PLAN.md` already specifies?
+
+**Status: OPEN — SCOPE, owner's call. Not blocking S4**, which routes around them
+(`UI-PLAN-SPRITES.md` **S-D13 (2)**: the nine-slice expansion lands in `gather_into_staging` only).
+
+### The measurement
+
+Four greps, all re-runnable, all over `crates/` + `src/` + `tests/`:
+
+* **`pack_sort_upload`'s only non-doc caller is `host_upload_frame`** (`upload.rs:526`).
+* **`host_upload_frame`'s only non-doc occurrence in the entire tree is its own definition**
+  (`upload.rs:509`). Every other hit is a doc comment, and two of those (`upload.rs:39`,
+  `boyko_ecs/.../dispatcher_token.rs:531`) describe the already-DELETED
+  `host_upload_frame_from_world`. **The tests do not reach it either** — which is a change since the
+  research corpus's finding 3 (`UI-ADVANCED-RESEARCH-SPRITES.md:210`), written when it was
+  test-driven.
+* **Neither name is re-exported** from `crates/boyko_render/src/lib.rs` or `src/ui/mod.rs`. They are
+  public only as inherent methods on the re-exported `UiUploadSystem`, so they ARE public API — with
+  zero in-workspace callers.
+* The only mention of `UiUploadSystem` outside `boyko_render` is a doc comment
+  (`dispatcher_token.rs:531`).
+
+This is the surviving half of the path **S0 already replaced** with the two-phase seam. Its
+world-facing sibling `host_upload_frame_from_world` was deleted at S0 for having no possible caller
+(the entry below); this half was left standing.
+
+### Why it is not simply deletable — the counter-evidence, stated so the call is made on both halves
+
+**`docs/APP-HOST-PLAN.md` still prescribes it.** Op 5 of the per-frame sequence is
+`if has_ui { pack_sort_upload(&token) }` (`:316`), and R0b's token-discipline churn list names
+`pack_sort_upload` among the borrow-taking writers to migrate (`:136`), with the `has_ui` boot gate
+at `:230` and the token rule at `:343`. That prescription is **unimplemented** — `boyko_app` does not
+drive the UI pass at all — but it is a live plan, not dead prose. So the two functions are either
+*dead code awaiting deletion* or *a landed API awaiting its caller*, and which one they are is a
+scope decision about the host, not about the UI.
+
+### The options
+
+1. **Delete both.** Removes ~70 lines of unexercised public API and one of the two pack encodings,
+   which is the source of the "two loops, two append encodings" hazard that has now cost this
+   campaign three separate gate re-pointings (S3's reconciliations, S-D12's G4-1, S-D13 (2)).
+   Requires striking `APP-HOST-PLAN.md` op 5 and re-specifying the host's UI upload on the two-phase
+   seam.
+2. **Keep and wire.** Implement `APP-HOST-PLAN.md` op 5 so the legacy loop has a caller and the
+   golden/host path is real. Then S4's expansion would owe that loop a second implementation after
+   all — but with a gate that can be run, which is what S-D13 (2) actually objected to.
+3. **Keep, unwired, documented as such.** The status quo, with a doc note at the definition. Cheapest
+   now; it is also how this pair reached its current state.
+
+**What it blocks:** nothing today. What it costs if left: every UI rung from here on must re-derive
+the reachability before it can decide whether "in both loops" is an instruction or a trap. S4 is the
+third rung to pay that cost.
+
+---
+
 ## 2026-08-21 — UI-ADVANCED S4 stopped BEFORE the first line: the nine slices are painted, then covered by the image they slice
 
-**Status: BLOCKING. Two contradictions and one wrong number, in the rung as AMENDED by the
+**RESOLVED 2026-08-21 (architect's ruling, recorded as `UI-PLAN-SPRITES.md` **S-D12**; still no S4
+code written). All four questions ruled; ~~S4 is buildable as amended.~~ **RE-OPENED THE SAME DAY and
+resolved a second time by `UI-PLAN-SPRITES.md` **S-D13** — the implementer refused the S-D12-amended
+rung as well, and was right a second time.** The findings below stand as
+raised — every premise was re-verified at source before being ruled on, and two of them turned out
+stronger than reported. The resolution is at the end of this item.
+
+> **✅ THIRD BLOCK CLEARED — S4 IS BUILT AND LANDED, 2026-08-21.** The third implementer built
+> the S-D13-amended rung. Ten further corrections were needed and are ruled as
+> `UI-PLAN-SPRITES.md` **S-D14**; **two of them are this campaign's own headline class, and neither
+> was visible to reading — both were found by applying the mutation and watching the wrong thing
+> happen:**
+> **(a)** **M4-c2's ruled sub pair fires for the wrong reason.** Sub 0 is pushed for EVERY node, so
+> swapping the decode arms for sub 0 and sub 9 sends every node's background record — including
+> nodes with no `UiNineSlice`, one of which G4-2's scene contains by construction — into an arm that
+> resolves `nine_slice` and PANICS before any order assertion runs. The pair is **sub 1 (TL) and
+> sub 9 (BR)**: total on the sliced node, count unchanged, and it reds G4-2 on the per-slice `min_px`
+> the row already reads.
+> **(b)** **M4-d's ruled bound is a red that cannot fire.** `assert!(scratch.pack.capacity() <
+> 2 * emitted)` was applied against a setup-time reserve and came back GREEN — `sort_by_stack` ends
+> in `core::mem::swap(&mut self.pack, gather)`, so the two buffers rotate every frame and the reserve
+> was parked in the caller's `gather` (measured: `pack 4 096 / gather 22 528`). The bound belongs on
+> the PAIR.
+> The other eight: `fill_center` had no ruled `Default` and `bool::default()` falsifies the picture
+> ruled one field earlier; `UI_NINE_SLICE_MODE_COUNT` was named by a ruling and minted by no Lands
+> item; the gate table's preamble over-claimed (three of eight rows drive no pack loop, not one);
+> Lands item 2's emitter shape is not writable as spelled; G4-3 stated no TINT and `UiImage`'s
+> default tint is alpha 0, which disarms two reds; G4-3 could pass without comparing anything
+> (`BOYKO_UI_GOLDEN_REQUIRE_DEVICE=1` now makes a skip fail); G4-8's "either build profile" had no
+> release invocation; and the measurement paragraph's noun was off by the probe that is not a pack
+> input.
+> **All eight gates green with exit codes seen unpiped, all eight reds applied and OBSERVED, both
+> mutated sources restored byte-identically (`cmp` + SHA-256), the five existing image pins
+> unmoved, and the new pin blessed with all ten of its colours counted.** Full record:
+> `UI-PLAN-SPRITES.md` **S-D14** and the **S4 · LANDED** section.
+
+> **⚠️ Second block, 2026-08-21, AFTER the resolution below was written.** S-D12 ruled these four
+> questions correctly and introduced two blocking defects of its own, both confirmed by an
+> adversarial pass:
+> **(a)** its truth table made the image record and the BR sub-quad **mutually exclusive**, which
+> rendered **M4-c unapplicable** — leaving **G4-2**, the row carrying S-D12 (1)'s own headline claim,
+> with **no red at all** (G4-5 and G4-7 turned out to be named by none either). Split into M4-c1
+> (emit sub 10 as well) + M4-c2 (swap the decode's arms for sub 0 and sub 9 — **not** the key push,
+> which the sort normalizes away).
+> **(b)** `pack_sort_upload`, the loop that both Lands item 2 and G4-1 required the expansion to land
+> in, **has no caller anywhere in this workspace** — the surviving half of the path S0 replaced. S4
+> now expands `gather_into_staging` only. Its deletion is a public-API SCOPE question and is filed as
+> its own item above.
+> Twelve amend-level findings came with them, including one this entry must own: **S-D12 changed
+> G4-3's border to `[16,24,16,24]` in one row and left M4-b's margin — and two of its own
+> sentences — computing from `[16,16,16,16]`.** The doc-rot-repair class, committed by the repair.
+> Full record: `UI-PLAN-SPRITES.md` **S-D13** and ledger rows **20-33**.
+
+~~**Status: BLOCKING. Two contradictions and one wrong number, in the rung as AMENDED by the
 2026-08-21 pre-build audit. No S4 code was written; the protocol's stop condition ("a gate that
-cannot fail, a red that cannot fire, a contradiction") is met three times over.**
+cannot fail, a red that cannot fire, a contradiction") is met three times over.**~~
 
 ### 1 — the emission contract occludes itself (BLOCKING)
 
@@ -47,6 +155,13 @@ pinned image IS a plain stretched sprite, and:
 * **G4-3 cannot fail as a pin** — it would bless the picture that proves nine-slice does NOT work;
 * **M4-b cannot fire** (`:1043`) — moving a corner from 16×16 to 32×32 moves only occluded geometry;
 * **M4-e cannot fire** (`:1068`) — permuting two sub-quads' source UVs moves only occluded geometry.
+
+*(The `border_px = 16` and the 16×16 corner above are the scene **as it stood when this was raised**.
+The resolution's own ruling (2) changed the border to `[16, 24, 16, 24]` in the same day's edit, which
+makes a correct corner 16 × 24 = 384 px and M4-b's delta 2 560 of 9 216 — recorded here because
+leaving the old arithmetic to be discovered downstream is exactly the doc-rot the second block below
+had to correct in three other places. The finding is unaffected: an occluded delta of any size is
+still zero.)*
 
 Note the audit ledger's own row 3 caught the mirror-image of this for glyphs and the focus ring
 ("subject unconstructible") but did not ask whether the two terms it KEPT can coexist.
@@ -110,6 +225,62 @@ Lands items 6 (`ui_pack_inputs!` gains `UiNineSlice`), 7 (the decode becomes a m
 becomes a loop) and 8 (`UI_STAGING_ROWS = UI_MAX_NODES * UI_RECORDS_PER_NODE` = 22 528 rows =
 1.72 MiB) are all verified correct against the tree and are buildable the moment (1) and (2) are
 ruled. G4-6's scene fits the derived box exactly (2 048 × 11 = 22 528).
+
+### RESOLUTION — 2026-08-21, `UI-PLAN-SPRITES.md` **S-D12**
+
+**(1) SUPPRESS.** `UiNineSlice` + `UiImage` ⇒ the image is drawn **sliced**: subs 1..=9 are the whole
+of its rendering and **sub 10 is not emitted**. 10 records (9 without the centre);
+`UI_RECORDS_PER_NODE = 11` stays, now explicitly as the **stride**, with a hole in the sub space that
+costs nothing. *Reason:* nine-slicing is a rendering **mode of an image**, not a layer above one —
+Unity's `type = Sliced`, Godot's `NinePatchRect` and Bevy's `NodeImageMode::Sliced` all slice the
+image *instead of* drawing it, and all three keep the node's own background beneath, which is the half
+S-D11 ruled correctly. A node wanting a sliced frame **and** an unsliced picture is **two nodes** — a
+nine-sliced parent with an imaged child, exactly as in all three engines — which the DFS gather over
+`Children` already supports with no new datum, and which is what "capability is component presence"
+requires: `UiNineSlice`'s presence *is* "draw my image sliced".
+
+**(2) An authored `border_uv: [f32; 4]`** — the source inset per side, as a **fraction of the current
+UV sub-rect**, `[l, t, r, b]` (matching `PackInput::border_width`, not `corner_radius`). Component
+**20 B → 36 B** (measured under rustc 1.97.1, both spellings; the two trailing bytes are implicit tail
+padding again, so `_pad` stays), **zero GPU bytes** — the split resolves at pack into each sub-quad's
+`uv`. Equal thirds is its `Default`, so option (a) survives as the zero-configuration case and G4-3
+authors no new field, but is not the rule — a 32×32 chrome with an 8 px border wants 1/4, and a rule
+right only for third-sized cells is one an author discovers wrong, not a gate. **Fractions of the
+sub-rect rather than absolute UVs** is the load-bearing half: at S5 the sub-rect becomes a flipbook
+frame that changes every tick, and a fraction is frame-invariant — the same "wrap and inset both
+belong to the sub-rect" property S-D11 (1) found for `frac`. *One premise came back stronger than
+raised:* the texel size is not merely unreachable behind the `!Send` projection — **the engine never
+records it**. `BindlessTextureTable::register` takes a bare `VkImageView` (`bindless.rs:287`) and the
+table holds no dimension map (`:217-221`), so Unity's and Godot's texel-border shape is unavailable
+rather than deferred. Validity is ruled too (it was unstated): each side in `[0,1)`, `l + r < 1` and
+`t + b < 1`, `debug_assert!` in dev and a proportional shrink in release, with the same shrink for the
+destination twin `border_px[0] + border_px[2] > rect.w` — a 96×96 chrome tweened to 8×8 is an ordinary
+animation and without it the corners overlap and the edges invert.
+
+**(3) A nine-sliced node with no `UiImage` emits its background and nothing else** — `UiNineSlice`
+alone is a **no-op**, not nine invisible quads. It is the structural-skip rule S3 already spells at
+`pack.rs:205`. The rule that discharges Lands item 7 properly: **the key push is the sole authority on
+which subs exist**, so every arm of the decode's `match` has its precondition established at the push
+and **no `.expect` is reachable for any of the four component combinations**. New gate **G4-8** (all
+four rows of the truth table in one world, derived count, no panic) and new red **M4-g** — because
+item 7 fixed a release panic and no gate constructed the node that panics.
+
+**(4) 410**, not 187 and not 373. `187 = ceil(2048/11)` was the NODE budget over the stride;
+correcting only that gives 373; ruling (1) makes it 10 records/node, so **410**
+(`10 × 409 = 4 090 ≤ 4 096 < 4 100`). Computed. The red is unaffected — G4-6 drives 20 480 records
+into a 4 096-row box — and item 8's derivation stays on the **stride** (22 528 rows, 1.72 MiB): the
+160 KiB of slack over the true worst case buys a constant that cannot go stale when a later rung adds
+a sub code.
+
+**Two further findings folded in.** **G4-1** was wrong on one loop and unobservable on the other —
+`pack_sort_upload`'s `append` is the running record index (`upload.rs:449-455`), not the `(node, sub)`
+code, and `UiUploadSystem.keys` is private (`:160`) — so it now asserts the **consequence** in
+`staged()`, which is strictly stronger: reading the key lane before the sort would go green on exactly
+M4-a's duplication-and-loss. No accessor was added. **G4-3's `border_px = [16,16,16,16]`** repeated
+the amendment's own symmetry blindness one axis over (`[l,t,r,b]` and `[t,l,b,r]` hash identically,
+and no site stated the order at all) and becomes `[16, 24, 16, 24]`. **G4-7's instrument** was already
+repaired in the tree at `50a724ac` and the row now names the `PackInput` enum so the property is not
+re-lost.
 
 ---
 

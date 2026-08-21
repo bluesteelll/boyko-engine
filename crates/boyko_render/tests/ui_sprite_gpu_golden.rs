@@ -142,6 +142,7 @@ fn sprite(x: f32, y: f32, w: f32, h: f32, slot: u32) -> UiInstance {
                 uv: [0.0, 0.0, 1.0, 1.0],
                 tint: TINT_OPAQUE_WHITE,
             }),
+            nine_slice: None,
         },
         1.0,
     )

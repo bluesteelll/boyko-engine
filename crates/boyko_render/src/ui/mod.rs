@@ -79,12 +79,15 @@ pub use instance::{
     FLAG_TEXTURED, UI_INSTANCE_SIZE, UI_SLOT_BITS, UI_SLOT_MASK, UI_SLOT_SHIFT,
 };
 pub use pack::{
-    pack_ui_image_instance, pack_ui_instance, PackInput, UiImageInput, UiRenderGeneration,
-    UiRenderScratch, UI_RECORDS_PER_NODE,
+    emit_ui_node_records, pack_ui_image_instance, pack_ui_instance, pack_ui_nine_slice_instance,
+    pack_ui_sub_record, ui_node_sub_codes, PackInput, UiImageInput, UiNineSliceInput,
+    UiRenderGeneration, UiRenderScratch, UI_IMAGE_SUB, UI_MAX_SUBS_PER_NODE,
+    UI_NINE_SLICE_CENTER_SUB, UI_NINE_SLICE_MODE_COUNT, UI_NINE_SLICE_REGIONS,
+    UI_NINE_SLICE_SUB_BASE, UI_RECORDS_PER_NODE,
 };
 pub use resources::UiSamplerMode;
 pub use plan::UiFramePlan;
-pub use upload::{UiNode, UiUploadSystem, UI_STAGING_ROWS};
+pub use upload::{UiNode, UiUploadSystem, UI_MAX_NODES, UI_STAGING_ROWS};
 
 /// Frames-in-flight for the UI render ring — one host-mapped STORAGE ring slot + one
 /// bind-group per slot (Decision 7). MUST equal the swapchain `Renderer`'s

@@ -44,7 +44,7 @@ use boyko_threadpool::ThreadPoolBuilder;
 use boyko_input::PhysicalInput;
 use boyko_render::{gather_ui_nodes, ui_render_discovery, UiGatherScratch, UiNode, UiRenderGeneration};
 use boyko_ui::components::{
-    ComputedClip, ComputedRect, StackIndex, UiBackground, UiImage, UiLayout, UiRoot,
+    ComputedClip, ComputedRect, StackIndex, UiBackground, UiImage, UiLayout, UiNineSlice, UiRoot,
 };
 use boyko_ui::interaction::components::Interaction;
 use boyko_ui::interaction::focus::{
@@ -199,18 +199,20 @@ fn g0_1_discovery_bumps_exactly_once_per_pack_input_mutation() {
         ComputedClip,
         StackIndex,
         UiImage,
+        UiNineSlice,
     }
 
     impl PackInput {
         /// Every pack input this test drives. Adding a variant without extending this array
         /// reds the count assertion; extending this array without adding a variant does not
         /// compile.
-        const ALL: [PackInput; 5] = [
+        const ALL: [PackInput; 6] = [
             PackInput::ComputedRect,
             PackInput::UiBackground,
             PackInput::ComputedClip,
             PackInput::StackIndex,
             PackInput::UiImage,
+            PackInput::UiNineSlice,
         ];
 
         fn name(self) -> &'static str {
@@ -220,6 +222,7 @@ fn g0_1_discovery_bumps_exactly_once_per_pack_input_mutation() {
                 PackInput::ComputedClip => "ComputedClip",
                 PackInput::StackIndex => "StackIndex",
                 PackInput::UiImage => "UiImage",
+                PackInput::UiNineSlice => "UiNineSlice",
             }
         }
     }
@@ -252,6 +255,16 @@ fn g0_1_discovery_bumps_exactly_once_per_pack_input_mutation() {
                         uv_min: [0.0, 0.0],
                         uv_max: [0.5, 0.5],
                         tint: 0xFF_FF_FF_FF,
+                    });
+                }
+                PackInput::UiNineSlice => {
+                    // UI-ADVANCED S4: the sixth pack input. Same claim as the
+                    // fifth — an author's runtime edit to a nine-slice must bump
+                    // `UiRenderGeneration`, or the frame silently does not
+                    // repaint — and the same proof: this arm drives it.
+                    cmds.entity(node).insert(UiNineSlice {
+                        border_px: [4.0, 6.0, 4.0, 6.0],
+                        ..UiNineSlice::default()
                     });
                 }
             };
