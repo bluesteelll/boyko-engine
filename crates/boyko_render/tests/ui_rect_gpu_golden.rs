@@ -101,6 +101,7 @@ fn opaque_rect(x: f32, y: f32, w: f32, h: f32, color: u32) -> UiInstance {
             border_width: [0.0; 4],
             clip: None,
             text_uv: None,
+            image: None,
         },
         1.0,
     )
@@ -145,7 +146,9 @@ fn render_ui_golden(rhi: &mut RhiContext) -> Vec<u8> {
         // A tiny initial ring (2 rows) so this golden also crosses the grow path
         // (3 instances > 2) on a second frame if extended; here 2 instances fit.
         2,
-        &font,
+        Some(&font),
+        boyko_render::UiSamplerMode::Smooth,
+        None,
     )
     .expect("ui_setup (UI pipeline + bind-group layout + per-FIF rings)");
 
@@ -168,6 +171,9 @@ fn render_ui_golden(rhi: &mut RhiContext) -> Vec<u8> {
     let (pipeline, bind_group) = rhi
         .ui_handles(plan.frame_index)
         .expect("ui_handles after ui_setup");
+    // UI-ADVANCED S3: set 1 — the sprite lane. Resolved through the SAME accessor
+    // the on-screen `ui_pass` reads (S-D9), so both recorders bind one set.
+    let sprite_group = rhi.ui_sprite_group().expect("ui_sprite_group after ui_setup");
 
     // --- 4. RECORD: an offscreen target, then `record_ui_rects` into a fresh
     //        LoadOp::Load full-extent scope (the recorder's contract), then readback. ---
@@ -261,7 +267,7 @@ fn render_ui_golden(rhi: &mut RhiContext) -> Vec<u8> {
     // VERTEX-stage push range (`UiOrtho`). The recorder pushes `plan.ortho` (VERTEX),
     // sets the full-extent viewport+scissor, and records one `draw(6, N, 0, 0)`.
     unsafe {
-        record_ui_rects(&mut encoder, &full, &plan, pipeline, bind_group);
+        record_ui_rects(&mut encoder, &full, &plan, pipeline, bind_group, sprite_group);
     }
     encoder.end_rendering();
 

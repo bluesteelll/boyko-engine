@@ -3214,6 +3214,13 @@ pub struct UiInstanceLayout {
     pub flag_clip_present_bit: u32,
     /// `FLAG_TEXT.trailing_zeros()` — bit 2 today.
     pub flag_text_bit: u32,
+    /// `FLAG_TEXTURED.trailing_zeros()` — bit 3 (UI-ADVANCED S3's sprite lane, S-D2).
+    pub flag_textured_bit: u32,
+    /// `UI_SLOT_SHIFT` — the bindless-slot field's LOW bit inside `flags` (20; S-D2).
+    pub slot_shift: u32,
+    /// `UI_SLOT_BITS` — the bindless-slot field's WIDTH in bits (12; S-D2: slots
+    /// `0..4095`, EXACTLY `BINDLESS_TEXTURE_CAPACITY`'s range, zero headroom).
+    pub slot_bits: u32,
 }
 
 /// Generates the `UiInstance` STRUCT MIRROR span — the std430 record both `ui_rect` stages
@@ -3235,7 +3242,8 @@ struct UiInstance {{
     uint   color;         // @{color}  premultiplied RGBA8
     uint   border_color;  // @{border_color}  premultiplied RGBA8
     float  border_width;  // @{border_width}  uniform, physical px
-    uint   flags;         // @{flags}  bit{b0} BORDER_ANY, bit{b1} CLIP_PRESENT, bit{b2} TEXT
+    uint   flags;         // @{flags}  bit{b0} BORDER_ANY, bit{b1} CLIP_PRESENT, bit{b2} TEXT, bit{b3} TEXTURED,
+                          //      bits {slot_lo}..{slot_hi} the bindless sprite slot
 }};
 ",
         size = l.size,
@@ -3251,20 +3259,37 @@ struct UiInstance {{
         b0 = l.flag_border_any_bit,
         b1 = l.flag_clip_present_bit,
         b2 = l.flag_text_bit,
+        b3 = l.flag_textured_bit,
+        slot_lo = l.slot_shift,
+        slot_hi = l.slot_shift + l.slot_bits - 1,
     )
 }
 
-/// Generates the three FLAG-BIT constants span (`ui_rect.fs.hlsl` only — the VS never reads
-/// `flags`) from the [`UiInstanceLayout`] generator inputs.
+/// Generates the FLAG-BIT + SLOT-FIELD constants span (`ui_rect.fs.hlsl` only — the VS never
+/// reads `flags`) from the [`UiInstanceLayout`] generator inputs.
+///
+/// The slot mask is DERIVED from `slot_bits` rather than spelled: S-D2's field has zero
+/// headroom over `BINDLESS_TEXTURE_CAPACITY`, so a hand-written `0xFFF` here and a widened
+/// host constant there would make a UI quad sample a different texture with nothing to say so.
 pub fn emit_hlsl_ui_flag_consts(l: &UiInstanceLayout) -> String {
     format!(
         "\
 static const uint FLAG_BORDER_ANY   = 1u << {b0};
 static const uint FLAG_CLIP_PRESENT = 1u << {b1};
 static const uint FLAG_TEXT         = 1u << {b2};
+static const uint FLAG_TEXTURED     = 1u << {b3};
+// The bindless sprite slot rides flags bits {slot_lo}..{slot_hi} ({bits} bits, slots 0..{max_slot}).
+static const uint UI_SLOT_SHIFT     = {slot_lo}u;
+static const uint UI_SLOT_MASK      = 0x{mask:X}u;
 ",
         b0 = l.flag_border_any_bit,
         b1 = l.flag_clip_present_bit,
         b2 = l.flag_text_bit,
+        b3 = l.flag_textured_bit,
+        slot_lo = l.slot_shift,
+        slot_hi = l.slot_shift + l.slot_bits - 1,
+        bits = l.slot_bits,
+        max_slot = (1u32 << l.slot_bits) - 1,
+        mask = (1u32 << l.slot_bits) - 1,
     )
 }

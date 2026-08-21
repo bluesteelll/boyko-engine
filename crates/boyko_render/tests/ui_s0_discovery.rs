@@ -43,7 +43,9 @@ use boyko_threadpool::ThreadPoolBuilder;
 
 use boyko_input::PhysicalInput;
 use boyko_render::{gather_ui_nodes, ui_render_discovery, UiGatherScratch, UiNode, UiRenderGeneration};
-use boyko_ui::components::{ComputedClip, ComputedRect, StackIndex, UiBackground, UiLayout, UiRoot};
+use boyko_ui::components::{
+    ComputedClip, ComputedRect, StackIndex, UiBackground, UiImage, UiLayout, UiRoot,
+};
 use boyko_ui::interaction::components::Interaction;
 use boyko_ui::interaction::focus::{
     ui_focus_system, UiInputFocus, UiInteractionConfig, UiInteractionScratch, UiPointerState,
@@ -134,9 +136,10 @@ fn g0_1_discovery_bumps_exactly_once_per_pack_input_mutation() {
     let mut world = EcsMaster::new();
     world.insert_resource(UiRenderGeneration::default());
 
-    // One node carrying all four pack inputs PLUS the unrelated component
-    // (spawned up front so the later mutations are same-archetype re-inserts,
-    // never archetype moves).
+    // One node carrying EVERY pack input PLUS the unrelated component (spawned up
+    // front so the later mutations are same-archetype re-inserts, never archetype
+    // moves — `UiImage` joined the list at UI-ADVANCED S3 and must be spawned here
+    // for the same reason the other four are).
     let sink: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
     let probe = Arc::clone(&sink);
     world.run_system(move |mut cmds: Commands| {
@@ -144,6 +147,7 @@ fn g0_1_discovery_bumps_exactly_once_per_pack_input_mutation() {
         e.insert(UiBackground { color: 0xFF00_00FF, ..UiBackground::default() });
         e.insert(ComputedClip { x: 0.0, y: 0.0, w: 5.0, h: 5.0 });
         e.insert(StackIndex(0));
+        e.insert(UiImage::default());
         e.insert(UiLayout::default());
         e.insert(UiRoot);
         *probe.lock().expect("probe") = Some(e.id());
@@ -189,17 +193,46 @@ fn g0_1_discovery_bumps_exactly_once_per_pack_input_mutation() {
                 2 => {
                     cmds.entity(node).insert(ComputedClip { x: 1.0, y: 1.0, w: 8.0, h: 8.0 });
                 }
-                _ => {
+                3 => {
                     cmds.entity(node).insert(StackIndex(7));
+                }
+                _ => {
+                    // UI-ADVANCED S3: the fifth pack input. Adding a component to
+                    // `ui_pack_inputs!` wires the discovery filter for free — this arm is
+                    // what proves the "for free" is real and not a claim.
+                    cmds.entity(node).insert(UiImage {
+                        texture: 2,
+                        uv_min: [0.0, 0.0],
+                        uv_max: [0.5, 0.5],
+                        tint: 0xFF_FF_FF_FF,
+                    });
                 }
             };
         });
     }
 
-    for (which, name) in ["ComputedRect", "UiBackground", "ComputedClip", "StackIndex"]
-        .iter()
-        .enumerate()
-    {
+    // The names this loop drives, and the count the macro says exists. They must AGREE:
+    // a pack input added to `ui_pack_inputs!` but not here would leave this test claiming
+    // "each pack-input mutation" while checking a strict subset — which is exactly what
+    // happened when S3 added `UiImage` (the loop kept passing on four of five). The
+    // length check makes the omission a red WITH A REASON instead of a silent hole.
+    const NAMES: [&str; 5] = [
+        "ComputedRect",
+        "UiBackground",
+        "ComputedClip",
+        "StackIndex",
+        "UiImage",
+    ];
+    assert_eq!(
+        NAMES.len(),
+        boyko_render::ui_pack_inputs!(count),
+        "this test drives {} pack inputs but `ui_pack_inputs!` declares {} — add the new \
+         one to `mutate_pack_input` and to NAMES, or the discovery gate is untested for it",
+        NAMES.len(),
+        boyko_render::ui_pack_inputs!(count)
+    );
+
+    for (which, name) in NAMES.iter().enumerate() {
         let g0 = generation(&world);
         mutate_pack_input(&mut world, node, which);
         schedule.run(&mut world);
@@ -380,12 +413,24 @@ fn g0_4_gather_preorder_is_paint_order_and_clip_inherits() {
     assert_eq!(clip_of(C_CHILD2), None, "child2 is unclipped (no inheritance from a sibling)");
     assert_eq!(clip_of(C_ROOT_B), None, "rootB is unclipped");
 
-    // The probe counter moved (5 probes per visited node: 4 pack inputs +
-    // Children), and the emission order above required probes to happen.
+    // The probe counter moved — one probe per pack input per visited node, plus one
+    // `Children` probe for the traversal itself — and the emission order above required
+    // those probes to happen.
+    //
+    // The per-node count is DERIVED from `ui_pack_inputs!`, not written down. It used to
+    // be the literal `5 * 5`, and UI-ADVANCED S3's fifth pack input (`UiImage`) turned
+    // that into a red with nothing wrong: the census pinned the LIST'S LENGTH while
+    // spelling it a second time. Deriving it means the next rung that adds a pack input
+    // (animation's `UiVisual`, S4/S5's sprite components) moves this number with it, and
+    // the claim the assert makes — *the gather probes each input exactly once per node* —
+    // is the one it actually checks.
+    const PACK_INPUTS: u64 = boyko_render::ui_pack_inputs!(count) as u64;
+    const PROBES_PER_NODE: u64 = PACK_INPUTS + 1; // + the `Children` traversal read
     assert_eq!(
         scratch.probes,
-        5 * 5,
-        "five visited nodes at five probes each (four pack inputs + Children)"
+        5 * PROBES_PER_NODE,
+        "five visited nodes at {PROBES_PER_NODE} probes each \
+         ({PACK_INPUTS} pack inputs + Children)"
     );
 
     // ── The paint-order oracle: `collect_candidates` through `ui_focus_system`.

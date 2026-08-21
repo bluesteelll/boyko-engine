@@ -35,6 +35,7 @@ fn scene(n: usize) -> Vec<(PackInput, u32)> {
                 border_width: [0.0; 4],
                 clip: if clipped { Some([8.0, 8.0, 320.0, 240.0]) } else { None },
                 text_uv: None,
+                image: None,
             };
             // 16 stack strata, deliberately NOT in append order, so the sort permutes.
             let stack = ((i * 7) % 16) as u32;

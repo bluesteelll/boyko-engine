@@ -22,7 +22,8 @@
 use std::path::PathBuf;
 
 use boyko_render::ui::instance::{
-    UiInstance, FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, FLAG_TEXT, UI_INSTANCE_SIZE,
+    UiInstance, FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, FLAG_TEXT, FLAG_TEXTURED, UI_INSTANCE_SIZE,
+    UI_SLOT_BITS, UI_SLOT_SHIFT,
 };
 use boyko_shaderdsl::emit::{self, UiInstanceLayout};
 
@@ -122,6 +123,14 @@ fn host_layout() -> UiInstanceLayout {
         flag_border_any_bit: FLAG_BORDER_ANY.trailing_zeros(),
         flag_clip_present_bit: FLAG_CLIP_PRESENT.trailing_zeros(),
         flag_text_bit: FLAG_TEXT.trailing_zeros(),
+        // UI-ADVANCED S3: the sprite lane's bit and its 12-bit slot field. Derived from the
+        // LIVE host constants like every number above — the emitted `UI_SLOT_MASK` is
+        // computed from `slot_bits`, so a host that widened the field and a shader that did
+        // not (the S-D2 truncation that makes a UI quad sample a different texture) is a red
+        // test rather than a wrong picture.
+        flag_textured_bit: FLAG_TEXTURED.trailing_zeros(),
+        slot_shift: UI_SLOT_SHIFT,
+        slot_bits: UI_SLOT_BITS,
     }
 }
 

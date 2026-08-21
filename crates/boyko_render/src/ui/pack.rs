@@ -11,8 +11,33 @@
 use boyko_macros::Resource;
 
 use crate::ui::instance::{
-    premultiply_rgba8, FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, FLAG_TEXT, UiInstance,
+    premultiply_rgba8, FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, FLAG_TEXT, FLAG_TEXTURED, UiInstance,
+    UI_SLOT_MASK, UI_SLOT_SHIFT,
 };
+
+/// The SPRITE half of one node's pack inputs (UI-ADVANCED S3): the `UiImage`
+/// component's three render-relevant values, flattened so the pack stays free of
+/// any `boyko_ui` type (`boyko-render` reads the component in the gather and passes
+/// values here — the same shape `text_uv` already takes).
+///
+/// Its presence is the capability: a node WITHOUT `UiImage` emits no sprite record
+/// at all (structural skip), and one WITH it emits a sprite quad whose default tint
+/// is fully transparent, so an authored-but-untextured Image costs one invisible
+/// instance and ZERO pixels (S-D8's default-OFF row for this rung).
+#[derive(Clone, Copy, Debug)]
+pub struct UiImageInput {
+    /// The bindless texture slot (`UiImage.texture`) — MUST be
+    /// `< BINDLESS_TEXTURE_CAPACITY`; it is packed into `flags` bits
+    /// [`UI_SLOT_SHIFT`]`..32` and `debug_assert!`ed at the pack (gate G3-5).
+    pub slot: u32,
+    /// The sprite's normalized UV sub-rect `(u0, v0, u1, v1)` in `[0, 1]`
+    /// (`UiImage.uv_min`/`uv_max`), written VERBATIM into [`UiInstance::uv`] —
+    /// never scale-folded, exactly like the glyph UV.
+    pub uv: [f32; 4],
+    /// The tint, STRAIGHT RGBA8 (`UiImage.tint`); premultiplied at pack into
+    /// [`UiInstance::color`], the same convention `UiBackground.color` follows.
+    pub tint: u32,
+}
 
 /// One source node's pack inputs (logical-px component values + the node's z key),
 /// the testable boundary of [`pack_ui_instance`] (no Arena/world dependency, so the
@@ -42,6 +67,12 @@ pub struct PackInput {
     /// premultiplied-at-pack foreground, and `border_*` are ignored. `None` ⇒ the
     /// rect path (P5a, unchanged; packs the identity `uv = (0, 0, 1, 1)`).
     pub text_uv: Option<[f32; 4]>,
+    /// UI-ADVANCED S3 sprite lane: `Some` iff the node carries a `UiImage`. It does
+    /// NOT change what [`pack_ui_instance`] returns — the node's background rect is
+    /// packed exactly as before — it makes the node emit a SECOND record via
+    /// [`pack_ui_image_instance`], per D4's per-node emission contract
+    /// (*background rect → … → image → glyphs*).
+    pub image: Option<UiImageInput>,
 }
 
 /// Folds one node's logical-px inputs into a physical-px, premultiplied
@@ -141,6 +172,75 @@ pub fn pack_ui_instance(input: &PackInput, scale_factor: f32) -> UiInstance {
         border_width,
         flags,
     }
+}
+
+/// The maximum number of GPU records ONE gathered node emits (UI-ADVANCED S3): its
+/// background rect plus its optional sprite quad, in D4's per-node paint order.
+///
+/// It is the stride of the `(node, sub)` append code
+/// [`UiUploadSystem::gather_into_staging`](crate::ui::upload::UiUploadSystem::gather_into_staging)
+/// sorts on — the one loop that packs directly in SORTED order and therefore has to
+/// find each record's SOURCE node from its key alone. S4's nine-slice raises this
+/// constant; nothing else changes at that call site.
+pub const UI_RECORDS_PER_NODE: u32 = 2;
+
+/// Folds one node's SPRITE half into the second [`UiInstance`] that node emits
+/// (UI-ADVANCED S3), or `None` when the node carries no `UiImage` — absence is the
+/// structural skip, so an image-less world's record stream is byte-identical to S2's.
+///
+/// The sprite quad covers the SAME `ComputedRect` as the node's background (D4's
+/// contract paints it directly over the background, and layout is untouched by the
+/// image), so `min_px`/`size_px`/`clip` are the background record's verbatim — only
+/// the flags, the UV and the color differ:
+///
+/// * `FLAG_TEXTURED` + the slot in `flags` bits [`UI_SLOT_SHIFT`]`..32` (S-D2),
+/// * `uv` = the image's normalized sub-rect, written verbatim (never scale-folded),
+/// * `color` = the premultiplied tint; `corner_radius`/`border_*` are N/A for a
+///   sprite and pack ZERO (a rounded sprite is nine-slice's job, S4).
+///
+/// The default `UiImage` tint is alpha 0, so this record is INVISIBLE until an
+/// author writes an opaque tint — the rung's default-OFF guarantee (gate G3-2, red
+/// mutation M3-e).
+pub fn pack_ui_image_instance(input: &PackInput, scale_factor: f32) -> Option<UiInstance> {
+    let image = input.image?;
+    debug_assert!(scale_factor > 0.0, "invariant: UI scale_factor is positive");
+    debug_assert!(
+        input.text_uv.is_none(),
+        "invariant: a GLYPH row carries no sprite — FLAG_TEXT and FLAG_TEXTURED are \
+         different quads with different shader branches, never one record wearing both"
+    );
+    debug_assert!(
+        image.slot < boyko_rhi_vulkan::bindless::BINDLESS_TEXTURE_CAPACITY,
+        "invariant: a UI sprite slot is a live bindless slot (< BINDLESS_TEXTURE_CAPACITY); \
+         flags bits {UI_SLOT_SHIFT}..32 hold only {} of them",
+        UI_SLOT_MASK + 1
+    );
+    debug_assert!(
+        image.uv.iter().all(|v| v.is_finite()),
+        "invariant: a UI sprite UV rect is finite"
+    );
+
+    let s = scale_factor;
+    let mut flags = FLAG_TEXTURED | ((image.slot & UI_SLOT_MASK) << UI_SLOT_SHIFT);
+    let clip = match input.clip {
+        Some(c) => {
+            flags |= FLAG_CLIP_PRESENT;
+            [c[0] * s, c[1] * s, (c[0] + c[2]) * s, (c[1] + c[3]) * s]
+        }
+        None => [0.0; 4],
+    };
+
+    Some(UiInstance {
+        min_px: [input.rect[0] * s, input.rect[1] * s],
+        size_px: [input.rect[2] * s, input.rect[3] * s],
+        clip,
+        corner_radius: [0.0; 4],
+        uv: image.uv,
+        color: premultiply_rgba8(image.tint),
+        border_color: 0,
+        border_width: 0.0,
+        flags,
+    })
 }
 
 /// Reused per-frame UI render scratch (Principle 0 storage — a `Resource`, NOT a

@@ -66,11 +66,16 @@ pub struct UiInstance {
     pub border_width: f32,
     /// Bit flags under the S-D2 bit budget (fixed at S2, once):
     /// bit0 [`FLAG_BORDER_ANY`], bit1 [`FLAG_CLIP_PRESENT`], bit2 [`FLAG_TEXT`],
-    /// bit3 FLAG_TEXTURED (S3's sprite lane, not yet defined), bit4 reserved for
-    /// S7's deferred per-sprite sampler index, bits 5..19 free, bits 20..31 the
-    /// bindless slot — 12 bits, slots 0..4095, EXACTLY the table's range (the
-    /// capacity const-assert below). At S2 every packed instance has bits 3..31
-    /// zero (gate G2-6).
+    /// bit3 [`FLAG_TEXTURED`] (S3's sprite lane), bit4 reserved for S7's deferred
+    /// per-sprite sampler index, bits 5..19 free, bits
+    /// [`UI_SLOT_SHIFT`]`..32` the bindless slot — [`UI_SLOT_BITS`] bits, slots
+    /// `0..=`[`UI_SLOT_MASK`], EXACTLY the table's range (the capacity
+    /// const-assert below).
+    ///
+    /// At S2 every packed instance had bits 3..31 zero. **S3 moves that gate,
+    /// deliberately**: an UNTEXTURED instance still has bits 3..31 zero, and a
+    /// `FLAG_TEXTURED` one has bit 3 set plus its slot in the top 12 — bits 4..19
+    /// stay zero on BOTH (gate G3-5 / the S2 G2-6 successor).
     pub flags: u32,
 }
 
@@ -92,6 +97,31 @@ pub const FLAG_CLIP_PRESENT: u32 = 1 << 1;
 /// `screenPxRange` AA, premultiplied out) instead of evaluating the rounded-box
 /// SDF. A uniform-per-instance branch, so the rect majority is unregressed.
 pub const FLAG_TEXT: u32 = 1 << 2;
+/// `UiInstance.flags` bit3 — the instance is a SPRITE quad: the fragment shader
+/// samples the bindless texture at the slot in bits
+/// [`UI_SLOT_SHIFT`]`..32` through the UI's OWN sampler (set 0, binding 3 — S-D4)
+/// and modulates it by the premultiplied tint in [`UiInstance::color`]
+/// (UI-ADVANCED S3, architecture D2). Mutually exclusive with [`FLAG_TEXT`]: a
+/// glyph and a sprite are different quads, emitted separately (D4's per-node
+/// emission contract), never one record wearing both flags.
+pub const FLAG_TEXTURED: u32 = 1 << 3;
+
+/// The LOW bit of the bindless-slot field inside `UiInstance.flags` (S-D2).
+///
+/// The field sits at the TOP of the word on purpose: it is the widest field and the
+/// flags are what grow, so a new flag can never risk the slot (S-D2's rejected
+/// alternative packed it at bits 3..14, adjacent to the flags).
+pub const UI_SLOT_SHIFT: u32 = 20;
+/// The WIDTH in bits of the bindless-slot field inside `UiInstance.flags` (S-D2) —
+/// 12 bits, slots `0..=4095`, EXACTLY
+/// [`BINDLESS_TEXTURE_CAPACITY`](boyko_rhi_vulkan::bindless::BINDLESS_TEXTURE_CAPACITY)'s
+/// range with ZERO headroom (the const-assert below is what makes that safe).
+pub const UI_SLOT_BITS: u32 = 12;
+/// The bindless-slot field's mask AFTER the [`UI_SLOT_SHIFT`] right-shift
+/// (`0xFFF`). Derived from [`UI_SLOT_BITS`], never spelled — the emitted HLSL
+/// derives its own `UI_SLOT_MASK` from the same generator input, so the two cannot
+/// drift into a quad sampling a different texture.
+pub const UI_SLOT_MASK: u32 = (1u32 << UI_SLOT_BITS) - 1;
 
 // S-D2 (UI-ADVANCED S2): the 12-bit bindless-slot field in `flags` bits 20..31 has
 // EXACTLY zero headroom over the live table capacity — and D3 refuses a UI slot
@@ -100,8 +130,20 @@ pub const FLAG_TEXT: u32 = 1 << 2;
 // sample a different texture. This assert is against the LIVE constant the
 // allocator uses (mutation M2-c: a copy of it here would keep passing).
 const _: () = assert!(
-    boyko_rhi_vulkan::bindless::BINDLESS_TEXTURE_CAPACITY <= 1 << 12,
+    boyko_rhi_vulkan::bindless::BINDLESS_TEXTURE_CAPACITY <= 1 << UI_SLOT_BITS,
     "UiInstance.flags carries the bindless slot in bits 20..31"
+);
+// The slot field ends exactly at the top of the word: a shift/width pair that
+// overhung would silently drop the high slot bits on every sprite above 2047.
+const _: () = assert!(
+    UI_SLOT_SHIFT + UI_SLOT_BITS == 32,
+    "the bindless-slot field must end at bit 31 (S-D2's bit budget)"
+);
+// Bit 4 is RESERVED for S7's deferred per-sprite sampler index and bits 5..19 are
+// free, so the slot field must not reach down into either.
+const _: () = assert!(
+    FLAG_TEXTURED.trailing_zeros() < UI_SLOT_SHIFT - 1,
+    "bit 4 stays reserved between the flags and the slot field"
 );
 
 // --- std430 layout oracle (compile-time). The size/align pin the array stride;

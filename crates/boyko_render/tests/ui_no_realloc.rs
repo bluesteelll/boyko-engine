@@ -73,6 +73,7 @@ fn rect(i: usize) -> PackInput {
         border_width: [0.0; 4],
         clip: Some([0.0, 0.0, 1000.0, 1000.0]),
         text_uv: None,
+        image: None,
     }
 }
 

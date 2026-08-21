@@ -264,7 +264,7 @@ which cannot see a re-compile drift at the same size.
 | Variant | `-D` | `.spv` | dxc `-T` | Notes |
 |---|---|---|---|---|
 | the only one | — | `ui_rect.vs.spv` | `vs_6_0` | vertexless unit quad from `SV_VertexID`; per-instance transform read from `StructuredBuffer<UiInstance>` @ set 0 binding 0 (VERTEX-stage SSBO read); pixel→NDC ortho push constant (16 B). The `UiInstance` mirror span is generated from the `UiInstanceLayout` GENERATOR INPUTS and pinned to the HOST `offset_of!` by `ui_rect_edsl_sync`. |
-| the only one | — | `ui_rect.fs.spv` | `ps_6_0` | rounded-box SDF + `fwidth` AA + uniform border (premultiplied over) + MSDF text branch (`FLAG_TEXT`) + flag-gated clip; PREMULTIPLIED output (src=ONE blend). Six eDSL leaves (`boyko_shaderdsl::ui`): `ui_unpack_rgba8`, `ui_sd_rounded_box`, `ui_clip_coverage`, `ui_median3`, `ui_screen_px_range`, `ui_premultiplied_over`. |
+| the only one | — | `ui_rect.fs.spv` | `ps_6_0` | rounded-box SDF + `fwidth` AA + uniform border (premultiplied over) + MSDF text branch (`FLAG_TEXT`) + **SPRITE branch (`FLAG_TEXTURED`, UI-ADVANCED S3)** + flag-gated clip; PREMULTIPLIED output (src=ONE blend). Six eDSL leaves (`boyko_shaderdsl::ui`): `ui_unpack_rgba8`, `ui_sd_rounded_box`, `ui_clip_coverage`, `ui_median3`, `ui_screen_px_range`, `ui_premultiplied_over`. **TWO descriptor sets since S3:** set 0 = the ring SSBO @0 (VERTEX\|FRAGMENT), the MSDF atlas @1, the per-atlas UBO @2, the UI's OWN sprite sampler @3 (FRAGMENT, a `COMBINED_IMAGE_SAMPLER` whose SAMPLER half alone is read — S-D4); set 1 = the shared bindless `Texture2D g_sprites[]` @0, indexed by `NonUniformResourceIndex` from `flags` bits 20..31. The stage STATICALLY uses set 1, so every UI pipeline is 2-set and every UI draw binds set 1 — a rect-only draw included. |
 
 Frozen recipe (each source's header pins it verbatim; no `-O`, no `-D`):
 `dxc.exe -spirv -T {vs_6_0|ps_6_0} -E main -fspv-target-env=vulkan1.3 ui_rect.{vs|fs}.hlsl`.
@@ -276,6 +276,15 @@ its own source; SKIPs with an `eprintln` when no dxc resolves — **a skipped ru
 the PARTICLES-PLAN F15 rule) + `boyko_shaderdsl/tests/ui_leaves.rs` (the `EvalCf` oracle tables
 and the literal span pins, host-side, dxc-independent). The S1 landing itself moved **neither**
 binary: both re-DXC'd byte-identical from the generator's re-spliced sources.
+
+*Landing history of the two binaries* (each `.spv` byte length is pinned by a `SpirvBlob<N>` in
+`boyko_render/src/ui/mod.rs`, so every move below is a deliberate, recorded re-bless):
+
+| Rung | `ui_rect.vs.spv` | `ui_rect.fs.spv` | Why |
+|---|---|---|---|
+| S1 (eDSL migration) | 2368 → **2368** | 7060 → **7060** | a refactor: identical bytes from the re-spliced sources |
+| S2 (the 80 B record) | 2368 → **2408** | 7060 → **7136** | the shared mirror gained `uv`; the FS text branch reads it instead of the retired `corner_radius` alias |
+| S3 (the sprite lane) | 2408 → **2408**, byte-identical | 7136 → **8760** | the VS's only S3 edit is a COMMENT inside the shared mirror, and DXC's output is measurably indifferent to it; the FS gained the set-1 `g_sprites[]` array, the set-0 binding-3 sampler, the `FLAG_TEXTURED`/`UI_SLOT_*` constants and the `NonUniformResourceIndex` sprite branch |
 
 ## `sdf_forward_march.comp.hlsl` — the Forward/VB fused SDF march+shade (compute)
 

@@ -47,7 +47,7 @@ use boyko_render::{
     UiUploadSystem,
 };
 use boyko_threadpool::ThreadPoolBuilder;
-use boyko_ui::components::{ComputedRect, StackIndex, UiBackground, UiRoot};
+use boyko_ui::components::{ComputedRect, StackIndex, UiBackground, UiImage, UiRoot};
 
 const WARMUP: usize = 10;
 const ITERS: usize = 100;
@@ -108,10 +108,16 @@ unsafe impl System for MeasureGather {
     }
 }
 
-/// Builds the rect-only baseline: one `UiRoot` panel with `n - 1` children,
-/// every node carrying `ComputedRect` + `UiBackground` + `StackIndex`.
+/// Builds the baseline world: one `UiRoot` panel with `n - 1` children, every node
+/// carrying `ComputedRect` + `UiBackground` + `StackIndex` — plus, when `with_image` is
+/// set, a `UiImage` on every node (UI-ADVANCED S3, §10.8 leg (c)).
+///
+/// Leg (c) differs from leg (a) in EXACTLY that one component, so the probes/node and
+/// gather-µs deltas between the two reports are the sprite lane's whole gather cost and
+/// nothing else.
+///
 /// Returns the world and the root's handle (the seam leg mutates it).
-fn build_world(n: usize) -> (EcsMaster, Entity) {
+fn build_world_with(n: usize, with_image: bool) -> (EcsMaster, Entity) {
     let mut world = EcsMaster::new();
     let sink: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
     let probe = Arc::clone(&sink);
@@ -121,6 +127,9 @@ fn build_world(n: usize) -> (EcsMaster, Entity) {
             e.insert(UiBackground { color: 0xFF20_2020, ..UiBackground::default() });
             e.insert(StackIndex(0));
             e.insert(UiRoot);
+            if with_image {
+                e.insert(UiImage::default());
+            }
             e.id()
         };
         *probe.lock().expect("probe") = Some(root);
@@ -139,14 +148,23 @@ fn build_world(n: usize) -> (EcsMaster, Entity) {
             });
             e.insert(UiBackground { color: 0xFF40_8040, ..UiBackground::default() });
             e.insert(StackIndex((i % 8) as u32));
+            if with_image {
+                e.insert(UiImage::default());
+            }
             e.set_parent(root);
         }
     });
     (world, root)
 }
 
-fn report(n: usize) {
-    let (mut world, _root) = build_world(n);
+/// The rect-only baseline (`build_world_with(n, false)`), kept as a name so the seam leg
+/// below reads unchanged.
+fn build_world(n: usize) -> (EcsMaster, Entity) {
+    build_world_with(n, false)
+}
+
+fn report_with(n: usize, with_image: bool) {
+    let (mut world, _root) = build_world_with(n, with_image);
     let mut sys = MeasureGather {
         scratch: UiGatherScratch::default(),
         node_buf: Vec::new(),
@@ -166,8 +184,9 @@ fn report(n: usize) {
     let min = sys.samples_ns[0];
     let max = sys.samples_ns[ITERS - 1];
 
+    let leg = if with_image { "c" } else { "a" };
     println!(
-        "§10.8(a) N={n}: probes/frame={probes_per_frame:.0} probes/node={probes_per_node:.2} \
+        "§10.8({leg}) N={n}: probes/frame={probes_per_frame:.0} probes/node={probes_per_node:.2} \
          gather min/median/max = {:.1}/{:.1}/{:.1} µs over {ITERS} iters \
          (instrument: Instant/QPC, ~0.1 µs floor)",
         min as f64 / 1000.0,
@@ -176,12 +195,62 @@ fn report(n: usize) {
     );
 }
 
+/// The rect-only report (leg (a)) — the name the baseline test and the seam leg use.
+fn report(n: usize) {
+    report_with(n, false);
+}
+
 /// §10.8 leg (a): the rect-only gather baseline at N ∈ {256, 2048}.
 #[test]
 #[ignore = "measurement harness - run explicitly with --ignored --nocapture"]
 fn measure_gather_baseline() {
     report(256);
     report(2048);
+}
+
+/// §10.8 leg (c): the sprite lane's gather cost (UI-ADVANCED S3).
+///
+/// # What this leg measures — and the thing it does NOT (found by running it)
+///
+/// The first run of this leg reported `probes/node = 6.00` for BOTH the imaged and the
+/// image-less world, and wall-clock medians that disagreed in SIGN between N=256 and
+/// N=2048. That is not noise hiding a signal; it is the correct answer to the wrong
+/// question. The gather probes EVERY pack input on EVERY visited node — a probe that
+/// returns `None` is still a probe — so a world where no node carries `UiImage` pays
+/// exactly the same six probes as one where every node does. Component PRESENCE changes
+/// what the pack emits, not what the gather reads.
+///
+/// So the S3 cost §10.8(c) is actually about is the LIST getting longer, and it is a
+/// comparison against the PRE-S3 build, not against an image-less S3 world:
+///
+/// * before S3: 4 pack inputs + `Children` = **5.00 probes/node/frame**
+/// * after  S3: 5 pack inputs + `Children` = **6.00 probes/node/frame** (+20 %)
+///
+/// paid by every node of every changed frame whether or not it is a sprite. The printed
+/// per-node figure below is derived from `ui_pack_inputs!(count)`, so it stays true as the
+/// list grows; the two worlds are still both run, because the probe-HIT vs probe-MISS
+/// difference (and the different archetype behind it) is the only part that is not
+/// arithmetic — and the run says it is under this instrument's noise at both N.
+///
+/// Leg (b) (`UiVisual`) does not run until the animation plan lands it in
+/// `ui_pack_inputs!` — the plan's §6 says so, and a leg measuring a component that does
+/// not exist would be measuring nothing.
+#[test]
+#[ignore = "measurement harness - run explicitly with --ignored --nocapture"]
+fn measure_gather_with_sprite_components() {
+    const PACK_INPUTS: usize = boyko_render::ui_pack_inputs!(count);
+    println!(
+        "§10.8(c) the LIST cost: {PACK_INPUTS} pack inputs + Children = {} probes/node/frame, \
+         paid by every node whether or not it carries a sprite (it was {} before UiImage \
+         joined the list at S3). Component PRESENCE does not change this number — the two \
+         worlds below differ only in probe-hit vs probe-miss.",
+        PACK_INPUTS + 1,
+        PACK_INPUTS,
+    );
+    report_with(256, false);
+    report_with(256, true);
+    report_with(2048, false);
+    report_with(2048, true);
 }
 
 /// §10.8 leg (d) + §10.3, bracketed at `run_dispatcher` (the two-phase seam):

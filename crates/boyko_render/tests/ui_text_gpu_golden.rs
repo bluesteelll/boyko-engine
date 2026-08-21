@@ -218,6 +218,7 @@ fn glyph_quad(x: f32, y: f32, w: f32, h: f32, color: u32, uv: [f32; 4]) -> UiIns
             border_width: [0.0; 4],
             clip: None,
             text_uv: Some(uv),
+            image: None,
         },
         1.0,
     )
@@ -237,7 +238,9 @@ fn render_text_golden(rhi: &mut RhiContext) -> Vec<u8> {
         boyko_render::ui_rect_vs_spirv(),
         boyko_render::ui_rect_fs_spirv(),
         4,
-        &font,
+        Some(&font),
+        boyko_render::UiSamplerMode::Smooth,
+        None,
     )
     .expect("ui_setup (UI pipeline + atlas upload + per-FIF rings)");
 
@@ -262,6 +265,9 @@ fn render_text_golden(rhi: &mut RhiContext) -> Vec<u8> {
     let (pipeline, bind_group) = rhi
         .ui_handles(plan.frame_index)
         .expect("ui_handles after ui_setup");
+    // UI-ADVANCED S3: set 1 — the sprite lane. Resolved through the SAME accessor
+    // the on-screen `ui_pass` reads (S-D9), so both recorders bind one set.
+    let sprite_group = rhi.ui_sprite_group().expect("ui_sprite_group after ui_setup");
 
     let device = rhi.context();
     let queue = device.rhi_queue();
@@ -347,7 +353,7 @@ fn render_text_golden(rhi: &mut RhiContext) -> Vec<u8> {
     // for `plan.frame_index` above; the pipeline declares the UI bind-group layout
     // (binding 0 SSBO, binding 1 atlas, binding 2 UBO) and a 16-byte VERTEX push range.
     unsafe {
-        record_ui_rects(&mut encoder, &full, &plan, pipeline, bind_group);
+        record_ui_rects(&mut encoder, &full, &plan, pipeline, bind_group, sprite_group);
     }
     encoder.end_rendering();
 

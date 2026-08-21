@@ -214,6 +214,7 @@ fn rect(x: f32, y: f32, w: f32, h: f32, color: u32, clip: Option<[f32; 4]>) -> U
             border_width: [0.0; 4],
             clip,
             text_uv: None,
+            image: None,
         },
         1.0,
     )
@@ -530,7 +531,12 @@ fn ui_rects_render_through_the_swapchain_present_hook_golden() {
         boyko_render::ui_rect_vs_spirv(),
         boyko_render::ui_rect_fs_spirv(),
         UI_ROWS,
-        &font,
+        Some(&font),
+        boyko_render::UiSamplerMode::Smooth,
+        // No bindless table on this on-screen harness: the UI gets its private
+        // fallback set 1, which is exactly the G3-4 shape a host without a
+        // `BindlessTextureTable` boots into.
+        None,
     )
     .expect("ui_setup (UI pipeline + per-FIF rings, swapchain format)");
 

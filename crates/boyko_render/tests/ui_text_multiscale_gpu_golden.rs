@@ -138,6 +138,7 @@ fn glyph_quad(x: f32, y: f32, w: f32, h: f32, uv: [f32; 4]) -> UiInstance {
             border_width: [0.0; 4],
             clip: None,
             text_uv: Some(uv),
+            image: None,
         },
         1.0,
     )
@@ -154,7 +155,9 @@ fn render_multiscale(rhi: &mut RhiContext) -> Vec<u8> {
         boyko_render::ui_rect_vs_spirv(),
         boyko_render::ui_rect_fs_spirv(),
         4,
-        &font,
+        Some(&font),
+        boyko_render::UiSamplerMode::Smooth,
+        None,
     )
     .expect("ui_setup (UI pipeline + atlas upload + per-FIF rings)");
 
@@ -174,6 +177,9 @@ fn render_multiscale(rhi: &mut RhiContext) -> Vec<u8> {
     assert_eq!(plan.instance_count, 2, "two glyph instances (small + large) uploaded");
 
     let (pipeline, bind_group) = rhi.ui_handles(plan.frame_index).expect("ui_handles after ui_setup");
+    // UI-ADVANCED S3: set 1 — the sprite lane. Resolved through the SAME accessor
+    // the on-screen `ui_pass` reads (S-D9), so both recorders bind one set.
+    let sprite_group = rhi.ui_sprite_group().expect("ui_sprite_group after ui_setup");
 
     let device = rhi.context();
     let queue = device.rhi_queue();
@@ -236,7 +242,7 @@ fn render_multiscale(rhi: &mut RhiContext) -> Vec<u8> {
     // at `full`; `pipeline`/`bind_group` are the live current-frame (MF-7) UI handles
     // whose ring holds `plan.instance_count` valid records uploaded for `plan.frame_index`.
     unsafe {
-        record_ui_rects(&mut encoder, &full, &plan, pipeline, bind_group);
+        record_ui_rects(&mut encoder, &full, &plan, pipeline, bind_group, sprite_group);
     }
     encoder.end_rendering();
 

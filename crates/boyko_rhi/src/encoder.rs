@@ -178,12 +178,48 @@ pub trait RhiCommandEncoder<A: RhiApi> {
     /// against (the layout must have been built with the same bind-group layout via
     /// `GraphicsPipelineDesc::bind_group_layout`).
     ///
+    /// Since `docs/UI-PLAN-SPRITES.md` S3 (decision S-D3) this is a THIN, provided
+    /// wrapper over [`Self::bind_descriptor_set_at`]`(0, …)` — the backend overrides
+    /// the general verb, and this signature is unchanged, so no existing call site
+    /// moved.
+    #[inline]
+    fn bind_descriptor_set(&mut self, group: &A::BindGroup, pipeline: &A::GraphicsPipeline) {
+        self.bind_descriptor_set_at(0, group, pipeline);
+    }
+
+    /// Binds `group` at descriptor-set index `set_index` of `pipeline`'s layout for
+    /// the GRAPHICS bind point (`docs/UI-PLAN-SPRITES.md` rung S3, decision S-D3).
+    ///
+    /// This is the general verb; [`Self::bind_descriptor_set`] is its
+    /// `set_index == 0` case, and the ONLY one a backend overrides.
+    /// `pipeline` must have been created with a MULTI-SET layout that declares
+    /// `set_index` (`VulkanContext::create_graphics_pipeline_bindless` and its
+    /// siblings), and `group`'s own layout must be compatible with the layout
+    /// declared at that index — a shader that statically uses set *n* with no set
+    /// bound there is `VUID-vkCmdDraw-None-08600`, not a silent no-op.
+    ///
+    /// # Why this exists (and why it is not a Vulkan-only escape hatch)
+    ///
+    /// Binding a second set was expressible ONLY on the concrete on-screen path
+    /// (`present_blit.rs`'s raw `cmd_bind_descriptor_sets`), while the offscreen
+    /// goldens — the ones that run without a display — drive the SAME recorder
+    /// through this trait. Without this verb the two recorders would be
+    /// structurally different at the exact place they must agree, and the sprite
+    /// path would be untestable on a device-less machine (S-D3's rejected options
+    /// (a) and (b); risk **M3-c**).
+    ///
     /// The default body is a no-op marked `#[cold] #[inline(never)]`; the Vulkan
-    /// backend overrides it (`vkCmdBindDescriptorSets`, GRAPHICS bind point).
+    /// backend overrides it (`vkCmdBindDescriptorSets` with `firstSet =
+    /// set_index`, GRAPHICS bind point).
     #[cold]
     #[inline(never)]
-    fn bind_descriptor_set(&mut self, _group: &A::BindGroup, _pipeline: &A::GraphicsPipeline) {
-        // Phase-6 S0 default seam: overridden by the Vulkan backend.
+    fn bind_descriptor_set_at(
+        &mut self,
+        _set_index: u32,
+        _group: &A::BindGroup,
+        _pipeline: &A::GraphicsPipeline,
+    ) {
+        // Default seam: overridden by the Vulkan backend.
     }
 
     /// Binds `group` (a descriptor set) at `set 0` of `compute_pipeline`'s layout for

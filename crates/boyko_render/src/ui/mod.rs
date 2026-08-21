@@ -76,9 +76,13 @@ pub use draw::record_ui_rects;
 pub use gather::{gather_ui_nodes, probe_component, ui_render_discovery, UiGatherScratch};
 pub use instance::{
     premultiply_rgba8, UiInstance, UiOrtho, FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, FLAG_TEXT,
-    UI_INSTANCE_SIZE,
+    FLAG_TEXTURED, UI_INSTANCE_SIZE, UI_SLOT_BITS, UI_SLOT_MASK, UI_SLOT_SHIFT,
 };
-pub use pack::{pack_ui_instance, PackInput, UiRenderGeneration, UiRenderScratch};
+pub use pack::{
+    pack_ui_image_instance, pack_ui_instance, PackInput, UiImageInput, UiRenderGeneration,
+    UiRenderScratch, UI_RECORDS_PER_NODE,
+};
+pub use resources::UiSamplerMode;
 pub use plan::UiFramePlan;
 pub use upload::{UiNode, UiUploadSystem, UI_STAGING_ROWS};
 
@@ -139,7 +143,16 @@ static UI_RECT_VS_SPV: SpirvBlob<2408> = SpirvBlob(*include_bytes!(concat!(
 /// the retired `corner_radius` alias — the whole semantic delta of the rung. Diff
 /// read before the re-bless; the four S-D6 image hashes reproduced the 64 B build's
 /// exactly (G2-3).
-static UI_RECT_FS_SPV: SpirvBlob<7136> = SpirvBlob(*include_bytes!(concat!(
+///
+/// RE-BLESSED 7136 → 8760 at UI-ADVANCED S3 (the sprite lane): the stage gained the
+/// set-1 bindless `Texture2D g_sprites[]` declaration, the UI's own set-0/binding-3
+/// `SamplerState`, the `FLAG_TEXTURED` + `UI_SLOT_{SHIFT,MASK}` constants and the
+/// `NonUniformResourceIndex` sprite branch — the rung's whole semantic delta, and the
+/// first non-uniform descriptor index in this shader (SR3). The generated-HLSL diff was
+/// read before the re-bless. Its SIBLING `ui_rect.vs.spv` did NOT move (2408 → 2408,
+/// byte-identical): the VS's only S3 edit is a comment inside the shared struct mirror,
+/// and DXC's output is measurably indifferent to it.
+static UI_RECT_FS_SPV: SpirvBlob<8760> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/ui_rect.fs.spv"
 )));

@@ -55,15 +55,17 @@ use boyko_ecs::ecs::core::system::ResMut;
 use boyko_ecs::ecs::identifiers::primitives::ArchetypeId;
 use boyko_ui::components::UiRoot;
 
-use crate::ui::pack::{PackInput, UiRenderGeneration};
+use crate::ui::pack::{PackInput, UiImageInput, UiRenderGeneration};
 use crate::ui::upload::UiNode;
 
 /// The ONE component list behind [`ui_pack_inputs!`] — every expansion routes
 /// through this arm, so the discovery filter and the gather read list cannot
 /// drift (rung S0 gate G0-1: only one spelling can fail to compile).
 ///
-/// At S0 the list is the four pack inputs that exist today. Animation adds
-/// `UiVisual` HERE; sprites add theirs at S3–S5; interaction adds its scroll
+/// At S0 the list was the four pack inputs that existed then; UI-ADVANCED S3 adds
+/// the fifth, `UiImage` — which is what makes `ui_render_discovery` see
+/// `Changed<UiImage>` for free (S3 item 8: one edit, both halves). Animation adds
+/// `UiVisual` HERE; sprites add the rest at S4–S5; interaction adds its scroll
 /// datum HERE — never directly in the gather or the filter (§6 of the plan).
 #[macro_export]
 #[doc(hidden)]
@@ -73,7 +75,8 @@ macro_rules! __ui_pack_inputs_list {
             ::boyko_ui::components::ComputedRect,
             ::boyko_ui::components::UiBackground,
             ::boyko_ui::components::ComputedClip,
-            ::boyko_ui::components::StackIndex
+            ::boyko_ui::components::StackIndex,
+            ::boyko_ui::components::UiImage
         ] }
     };
 }
@@ -90,6 +93,11 @@ macro_rules! __ui_pack_inputs_list {
 ///   component, in list order. `view: &WorldView<'_>`, `entity: Entity`,
 ///   `probes: &mut u64`; each argument expression is evaluated once per
 ///   component, so pass plain borrows.
+/// - `count` → the `usize` LENGTH of the list, as a const expression. It exists
+///   because the gather issues exactly one probe per pack input per visited node,
+///   so any test pinning the probe census is pinning this number — and UI-ADVANCED
+///   S3 found `ui_s0_discovery` doing that with a hand-written `5 * 5` that the
+///   fifth pack input silently invalidated. A derived count moves with the list.
 ///
 /// Deleting a component from the list changes the read tuple's arity, which
 /// fails [`gather_ui_nodes`]'s destructuring at compile time — the M0-c red.
@@ -101,6 +109,9 @@ macro_rules! ui_pack_inputs {
     (read $view:expr, $entity:expr, $probes:expr) => {
         $crate::__ui_pack_inputs_list! { __ui_pack_inputs_read ($view, $entity, $probes) }
     };
+    (count) => {
+        $crate::__ui_pack_inputs_list! { __ui_pack_inputs_count () }
+    };
 }
 
 /// [`ui_pack_inputs!`] applier: the `Or<(Changed<…>, …)>` filter TYPE.
@@ -111,6 +122,26 @@ macro_rules! __ui_pack_inputs_changed {
         ::boyko_ecs::ecs::core::iters::query::filter::Or<(
             $(::boyko_ecs::ecs::core::iters::query::filter::Changed<$c>,)*
         )>
+    };
+}
+
+/// [`ui_pack_inputs!`] applier: the list's LENGTH as a const `usize`. Each type is
+/// mapped to a `()` element and the array's length is taken — the standard
+/// count-a-repetition idiom, with no runtime cost and no second spelling of the list.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __ui_pack_inputs_count {
+    (() [$($c:ty),* $(,)?]) => {
+        <[()]>::len(&[$($crate::__ui_pack_input_unit!($c)),*])
+    };
+}
+
+/// [`__ui_pack_inputs_count!`]'s per-type mapper: any type ↦ one `()` element.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __ui_pack_input_unit {
+    ($t:ty) => {
+        ()
     };
 }
 
@@ -219,7 +250,7 @@ pub fn gather_ui_nodes(
     while let Some((node, inherited_clip)) = scratch.stack.pop() {
         // The ONE spelling of the pack-input reads (G0-1): arity-locked to the
         // component list — an edit there that does not land here fails to build.
-        let (rect, background, clip, stack_index) =
+        let (rect, background, clip, stack_index, image) =
             ui_pack_inputs!(read view, node, &mut scratch.probes);
 
         // The node's own clip narrows the inherited clip for its subtree.
@@ -239,6 +270,17 @@ pub fn gather_ui_nodes(
                     border_width: bg.border_width,
                     clip: effective_clip,
                     text_uv: None,
+                    // UI-ADVANCED S3: capability = component presence. A node
+                    // without `UiImage` emits ONE record exactly as at S2; a node
+                    // WITH it emits a second, sprite record (D4's per-node order),
+                    // invisible until an author writes an opaque tint over the
+                    // alpha-0 default. `texture` IS the bindless slot — the dense
+                    // handle discipline the component was authored for.
+                    image: image.map(|img| UiImageInput {
+                        slot: img.texture,
+                        uv: [img.uv_min[0], img.uv_min[1], img.uv_max[0], img.uv_max[1]],
+                        tint: img.tint,
+                    }),
                 },
                 stack: stack_index.map(|s| s.0).unwrap_or(0),
             });

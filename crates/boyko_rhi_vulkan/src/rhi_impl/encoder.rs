@@ -748,20 +748,22 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
         }
     }
 
-    fn bind_descriptor_set(
+    fn bind_descriptor_set_at(
         &mut self,
+        set_index: u32,
         group: &VulkanBindGroup,
         pipeline: &VulkanGraphicsPipeline,
     ) {
         // SAFETY: recording is open and inside a `begin_rendering` scope with the
         // matching graphics pipeline bound (caller contract); `pipeline.layout` is
-        // that pipeline's own layout, built with the same bind-group set-layout at
-        // `set 0` (`GraphicsPipelineDesc::bind_group_layout`), so binding
+        // that pipeline's own layout, whose set `set_index` was declared with a
+        // layout compatible with `group`'s (`GraphicsPipelineDesc::bind_group_layout`
+        // for index 0, the `create_graphics_pipeline_*` `set1_layout` argument for
+        // index 1 — the trait method's caller contract), so binding
         // `group.descriptor_set` there for the GRAPHICS bind point is type-compatible.
         // `&group.descriptor_set` is a single-element local (alive for the call), so
-        // `first_set = 0`, `descriptor_set_count = 1` matches it; zero dynamic offsets
-        // (null valid for count 0). `self.fns` points into the context's boxed
-        // fn-table (alive per the type contract).
+        // `first_set = set_index`, `descriptor_set_count = 1` matches it; zero dynamic
+        // offsets (null valid for count 0).
         // SAFETY: `self.fns` points into the owning context's boxed `DeviceFns` — a stable
         // heap address that outlives this encoder (context teardown order); deref is valid.
         let fns = unsafe { &*self.fns };
@@ -770,7 +772,7 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
                 self.command_buffer,
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
                 pipeline.layout,
-                0,
+                set_index,
                 1,
                 &group.descriptor_set,
                 0,

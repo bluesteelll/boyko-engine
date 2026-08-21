@@ -2432,7 +2432,7 @@ rows) · `crates/boyko_rhi_vulkan/tests/vb_raster_geo_classify_spv_sync.rs`'s
 **Targets / readback:** `crates/boyko_rhi_vulkan/src/present/targets.rs:851~-856` (`VbTargets`),
 **`:868~` (`COLOR_ATTACHMENT | SAMPLED` — no `TRANSFER_SRC`)** ·
 `crates/boyko_rhi/src/encoder.rs:115` (`copy_image_to_buffer`) ·
-`crates/boyko_rhi_vulkan/src/rhi_impl/encoder.rs:1031` (impl) ·
+`crates/boyko_rhi_vulkan/src/rhi_impl/encoder.rs:1033` (impl) ·
 `crates/boyko_rhi_vulkan/src/present/frame_driver.rs:750~` (no depth readback) ·
 `crates/boyko_app/src/host_dump.rs:1~-10`, `:67~` (`BOYKO_HOST_DUMP`).
 

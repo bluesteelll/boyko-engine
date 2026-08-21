@@ -82,7 +82,10 @@ use crate::error::GpuColumnError;
 use crate::gpu_column::RhiContext;
 use crate::ui::gather::{gather_ui_nodes, UiGatherScratch};
 use crate::ui::instance::{UiInstance, UiOrtho};
-use crate::ui::pack::{pack_ui_instance, PackInput, UiRenderGeneration, UiRenderScratch};
+use crate::ui::pack::{
+    pack_ui_image_instance, pack_ui_instance, PackInput, UiRenderGeneration, UiRenderScratch,
+    UI_RECORDS_PER_NODE,
+};
 use crate::ui::plan::UiFramePlan;
 use crate::ui::FRAMES_IN_FLIGHT;
 
@@ -309,24 +312,20 @@ impl UiUploadSystem {
         self.node_buf.clear();
         gather_ui_nodes(view, &mut self.gather_scratch, &mut self.node_buf);
 
-        let emitted = self.node_buf.len();
-        let n = if emitted > self.staging.len() {
-            debug_assert!(
-                false,
-                "UiUploadSystem staging box overflow: gather emitted {emitted} \
-                 records into a {}-row box (raise UI_STAGING_ROWS)",
-                self.staging.len()
-            );
-            self.staging_overflows = self.staging_overflows.wrapping_add(1);
-            self.staging.len()
-        } else {
-            emitted
-        };
-
         // z-sort via the (stack, append) key lane — the same TOTAL order
         // `UiRenderScratch::sort_by_stack` argues (append is unique, so an
         // unstable sort IS the stable permutation, zero alloc) — then pack the
         // records into `staging` directly in sorted order.
+        //
+        // UI-ADVANCED S3: a node emits up to `UI_RECORDS_PER_NODE` records (its
+        // background rect, then its sprite quad — D4's per-node paint order), so
+        // `append` is no longer the node index. It is the `(node, sub)` CODE
+        // `node * UI_RECORDS_PER_NODE + sub`, which is still unique and still
+        // strictly increasing in emission order (so the key stays TOTAL and the
+        // sorted result is still painter's order, sub-records of one node
+        // contiguous and in contract order) — and, unlike a running record
+        // counter, it lets this loop find each record's SOURCE node from the key
+        // alone, which is what packing directly in sorted order requires.
         let Self {
             staging,
             node_buf,
@@ -335,14 +334,48 @@ impl UiUploadSystem {
             ..
         } = self;
         keys.clear();
-        for (append, node) in node_buf[..n].iter().enumerate() {
-            keys.push((node.stack, append as u32));
-        }
-        keys.sort_unstable_by_key(|&k| k);
-        for (dst, &(_, append)) in keys.iter().enumerate() {
-            staging[dst] = pack_ui_instance(&node_buf[append as usize].input, *scale_factor);
+        for (node_idx, node) in node_buf.iter().enumerate() {
+            let base = node_idx as u32 * UI_RECORDS_PER_NODE;
+            keys.push((node.stack, base));
+            if node.input.image.is_some() {
+                keys.push((node.stack, base + 1));
+            }
         }
 
+        let emitted = keys.len();
+        let overflowed = emitted > staging.len();
+        let n = if overflowed {
+            debug_assert!(
+                false,
+                "UiUploadSystem staging box overflow: gather emitted {emitted} \
+                 records into a {}-row box (raise UI_STAGING_ROWS)",
+                staging.len()
+            );
+            // Drop the TAIL of the emission order (the pre-S3 clamp semantics),
+            // which keeps whole nodes' sub-records together at the boundary
+            // only by luck — a clamped frame is a misconfiguration, counted so
+            // it is visible rather than silently half-drawn.
+            keys.truncate(staging.len());
+            staging.len()
+        } else {
+            emitted
+        };
+
+        keys.sort_unstable_by_key(|&k| k);
+        for (dst, &(_, append)) in keys.iter().enumerate() {
+            let node = &node_buf[(append / UI_RECORDS_PER_NODE) as usize];
+            staging[dst] = if append.is_multiple_of(UI_RECORDS_PER_NODE) {
+                pack_ui_instance(&node.input, *scale_factor)
+            } else {
+                pack_ui_image_instance(&node.input, *scale_factor).expect(
+                    "invariant: a sub-record key is emitted only for a node carrying UiImage",
+                )
+            };
+        }
+
+        if overflowed {
+            self.staging_overflows = self.staging_overflows.wrapping_add(1);
+        }
         self.staged = n;
         n
     }
@@ -412,11 +445,25 @@ impl UiUploadSystem {
         scratch.repacks = scratch.repacks.wrapping_add(1);
 
         // (2) pack — clear + extend into the preallocated scratch, never Vec::new.
+        //
+        // UI-ADVANCED S3: a node emits up to `UI_RECORDS_PER_NODE` records — its
+        // background rect, then its sprite quad (D4's per-node paint order). The
+        // append key is the RUNNING RECORD index here, not the `(node, sub)` code
+        // `gather_into_staging` uses, because `sort_by_stack`'s gather indexes
+        // `pack[idx]` by it: both encodings are unique and strictly increasing in
+        // emission order, so both yield the same painter's order — this one has to
+        // BE the pack index, and that one has to LOCATE the source node.
         scratch.pack.clear();
         scratch.keys.clear();
-        for (append, node) in nodes.into_iter().enumerate() {
+        for node in nodes {
+            let record = scratch.pack.len() as u32;
             scratch.pack.push(pack_ui_instance(&node.input, self.scale_factor));
-            scratch.keys.push((node.stack, append as u32));
+            scratch.keys.push((node.stack, record));
+            if let Some(sprite) = pack_ui_image_instance(&node.input, self.scale_factor) {
+                let record = scratch.pack.len() as u32;
+                scratch.pack.push(sprite);
+                scratch.keys.push((node.stack, record));
+            }
         }
 
         // (3) stable z-sort in place (zero alloc — the (stack, append) key is total).

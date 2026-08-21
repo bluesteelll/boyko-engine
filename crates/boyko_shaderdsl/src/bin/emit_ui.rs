@@ -57,6 +57,9 @@ const UI_INSTANCE_LAYOUT: UiInstanceLayout = UiInstanceLayout {
     flag_border_any_bit: 0,
     flag_clip_present_bit: 1,
     flag_text_bit: 2,
+    flag_textured_bit: 3,
+    slot_shift: 20,
+    slot_bits: 12,
 };
 
 /// Wraps a generated BODY span in its sentinel pair + doc comment + signature + closing brace.
@@ -238,6 +241,24 @@ struct AtlasUniform {{
 }};
 [[vk::binding(2, 0)]] ConstantBuffer<AtlasUniform> g_atlas_ubo : register(b2);
 
+// UI-ADVANCED S3 -- the SPRITE lane's two declarations (architecture D2 + S-D3 + S-D4).
+//
+// Set 1, binding 0 is the SHARED bindless texture array (`BindlessTextureTable`, capacity
+// 4096) -- the SAME set the textured gbuffer / Forward / particle paths bind, declared here
+// character-for-character as `particle_draw.fs.hlsl` declares it. The UI declares ONLY that
+// binding of set 1: it samples through its OWN sampler below, never through the set's shared
+// immutable sampler (trilinear + 16x anisotropic + REPEAT), which was chosen for tiled world
+// material textures and would foreclose a pixel-art UI forever (S-D4).
+[[vk::binding(0, 1)]] Texture2D g_sprites[] : register(t0, space1);
+
+// The UI's OWN sprite sampler (set 0, binding 3): the filter mode is chosen once at
+// `ui_setup` (`UiSamplerMode::{{Smooth, Pixel}}` -> LINEAR/ClampToEdge vs NEAREST/ClampToEdge),
+// so NEAREST pixel art is expressible without touching the world-shared bindless set (which
+// D3 refuses to let a UI concern mutate). The host binds a COMBINED_IMAGE_SAMPLER there and
+// this stage reads only its SAMPLER half -- the same separate-image/separate-sampler shape
+// binding 1 above already uses for the atlas, and the mechanism gate G3-0 measured.
+[[vk::binding(3, 0)]] SamplerState g_ui_sampler : register(s3);
+
 struct VsOut {{
     float4 position  : SV_Position;
     float2 pos_px    : TEXCOORD0;
@@ -269,6 +290,36 @@ float4 main(VsOut input) : SV_Target0 {{
         float  cov = clamp(ui_screen_px_range(uv) * (sd - 0.5) + 0.5, 0.0, 1.0);
 
         float4 result = ui_unpack_rgba8(inst.color) * cov;  // PREMULTIPLIED fg, weighted
+        if ((inst.flags & FLAG_CLIP_PRESENT) != 0u) {{
+            float fw = max(fwidth(input.pos_px.x), 1e-5);   // a device-px AA clip band
+            result *= ui_clip_coverage(input.pos_px, inst.clip, fw);
+        }}
+        return result;                                      // PREMULTIPLIED (src=ONE)
+    }}
+
+    // UI-ADVANCED S3 sprite branch (architecture D2 / D8e): a bindless-indexed textured
+    // quad. Uniform-per-instance like the text branch above (every fragment of one sprite
+    // takes the same side), so the rect majority is unregressed. The slot rides `flags`
+    // bits UI_SLOT_SHIFT..+12 (S-D2).
+    //
+    // `NonUniformResourceIndex` is REQUIRED INSURANCE, not an observed necessity here. The
+    // descriptor index is per INSTANCE, and dropping the qualifier was measured on an RTX
+    // 3060 (S3, red mutation M3-b) over 256 dense 4x4 quads on 64 distinct slots: every
+    // quad still sampled its own texture, because that rasterizer does not pack one warp
+    // from two primitives, so the index is wave-uniform by construction -- the same fact
+    // that made the plan's 10.1 divergence measurement come out flat. A non-uniform index
+    // WITHOUT the qualifier is undefined behaviour by the Vulkan spec, and another driver
+    // may pack warps differently, so it stays (risk SR3).
+    if ((inst.flags & FLAG_TEXTURED) != 0u) {{
+        uint   slot = (inst.flags >> UI_SLOT_SHIFT) & UI_SLOT_MASK;
+        float2 uv   = lerp(inst.uv.xy, inst.uv.zw, input.local_uv);
+        float4 t    = g_sprites[NonUniformResourceIndex(slot)].Sample(g_ui_sampler, uv);
+
+        // The sprite source is STRAIGHT RGBA8; premultiply it, then MODULATE by the
+        // already-premultiplied tint. Component-wise multiply of two premultiplied colors
+        // is the correct tint here: (src.rgb*src.a) * (c.rgb*c.a) == (src.rgb*c.rgb) *
+        // (src.a*c.a), which is the premultiplied form of the straight-space product.
+        float4 result = float4(t.rgb * t.a, t.a) * ui_unpack_rgba8(inst.color);
         if ((inst.flags & FLAG_CLIP_PRESENT) != 0u) {{
             float fw = max(fwidth(input.pos_px.x), 1e-5);   // a device-px AA clip band
             result *= ui_clip_coverage(input.pos_px, inst.clip, fw);

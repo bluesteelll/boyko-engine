@@ -32,7 +32,8 @@ struct UiInstance {
     uint   color;         // @64  premultiplied RGBA8
     uint   border_color;  // @68  premultiplied RGBA8
     float  border_width;  // @72  uniform, physical px
-    uint   flags;         // @76  bit0 BORDER_ANY, bit1 CLIP_PRESENT, bit2 TEXT
+    uint   flags;         // @76  bit0 BORDER_ANY, bit1 CLIP_PRESENT, bit2 TEXT, bit3 TEXTURED,
+                          //      bits 20..31 the bindless sprite slot
 };
 // === GENERATED ui_instance_mirror END ===
 
@@ -53,6 +54,24 @@ struct AtlasUniform {
 };
 [[vk::binding(2, 0)]] ConstantBuffer<AtlasUniform> g_atlas_ubo : register(b2);
 
+// UI-ADVANCED S3 -- the SPRITE lane's two declarations (architecture D2 + S-D3 + S-D4).
+//
+// Set 1, binding 0 is the SHARED bindless texture array (`BindlessTextureTable`, capacity
+// 4096) -- the SAME set the textured gbuffer / Forward / particle paths bind, declared here
+// character-for-character as `particle_draw.fs.hlsl` declares it. The UI declares ONLY that
+// binding of set 1: it samples through its OWN sampler below, never through the set's shared
+// immutable sampler (trilinear + 16x anisotropic + REPEAT), which was chosen for tiled world
+// material textures and would foreclose a pixel-art UI forever (S-D4).
+[[vk::binding(0, 1)]] Texture2D g_sprites[] : register(t0, space1);
+
+// The UI's OWN sprite sampler (set 0, binding 3): the filter mode is chosen once at
+// `ui_setup` (`UiSamplerMode::{Smooth, Pixel}` -> LINEAR/ClampToEdge vs NEAREST/ClampToEdge),
+// so NEAREST pixel art is expressible without touching the world-shared bindless set (which
+// D3 refuses to let a UI concern mutate). The host binds a COMBINED_IMAGE_SAMPLER there and
+// this stage reads only its SAMPLER half -- the same separate-image/separate-sampler shape
+// binding 1 above already uses for the atlas, and the mechanism gate G3-0 measured.
+[[vk::binding(3, 0)]] SamplerState g_ui_sampler : register(s3);
+
 struct VsOut {
     float4 position  : SV_Position;
     float2 pos_px    : TEXCOORD0;
@@ -65,6 +84,10 @@ struct VsOut {
 static const uint FLAG_BORDER_ANY   = 1u << 0;
 static const uint FLAG_CLIP_PRESENT = 1u << 1;
 static const uint FLAG_TEXT         = 1u << 2;
+static const uint FLAG_TEXTURED     = 1u << 3;
+// The bindless sprite slot rides flags bits 20..31 (12 bits, slots 0..4095).
+static const uint UI_SLOT_SHIFT     = 20u;
+static const uint UI_SLOT_MASK      = 0xFFFu;
 // === GENERATED ui_flag_consts END ===
 
 // === GENERATED ui_unpack_rgba8 BEGIN ===
@@ -149,6 +172,36 @@ float4 main(VsOut input) : SV_Target0 {
         float  cov = clamp(ui_screen_px_range(uv) * (sd - 0.5) + 0.5, 0.0, 1.0);
 
         float4 result = ui_unpack_rgba8(inst.color) * cov;  // PREMULTIPLIED fg, weighted
+        if ((inst.flags & FLAG_CLIP_PRESENT) != 0u) {
+            float fw = max(fwidth(input.pos_px.x), 1e-5);   // a device-px AA clip band
+            result *= ui_clip_coverage(input.pos_px, inst.clip, fw);
+        }
+        return result;                                      // PREMULTIPLIED (src=ONE)
+    }
+
+    // UI-ADVANCED S3 sprite branch (architecture D2 / D8e): a bindless-indexed textured
+    // quad. Uniform-per-instance like the text branch above (every fragment of one sprite
+    // takes the same side), so the rect majority is unregressed. The slot rides `flags`
+    // bits UI_SLOT_SHIFT..+12 (S-D2).
+    //
+    // `NonUniformResourceIndex` is REQUIRED INSURANCE, not an observed necessity here. The
+    // descriptor index is per INSTANCE, and dropping the qualifier was measured on an RTX
+    // 3060 (S3, red mutation M3-b) over 256 dense 4x4 quads on 64 distinct slots: every
+    // quad still sampled its own texture, because that rasterizer does not pack one warp
+    // from two primitives, so the index is wave-uniform by construction -- the same fact
+    // that made the plan's 10.1 divergence measurement come out flat. A non-uniform index
+    // WITHOUT the qualifier is undefined behaviour by the Vulkan spec, and another driver
+    // may pack warps differently, so it stays (risk SR3).
+    if ((inst.flags & FLAG_TEXTURED) != 0u) {
+        uint   slot = (inst.flags >> UI_SLOT_SHIFT) & UI_SLOT_MASK;
+        float2 uv   = lerp(inst.uv.xy, inst.uv.zw, input.local_uv);
+        float4 t    = g_sprites[NonUniformResourceIndex(slot)].Sample(g_ui_sampler, uv);
+
+        // The sprite source is STRAIGHT RGBA8; premultiply it, then MODULATE by the
+        // already-premultiplied tint. Component-wise multiply of two premultiplied colors
+        // is the correct tint here: (src.rgb*src.a) * (c.rgb*c.a) == (src.rgb*c.rgb) *
+        // (src.a*c.a), which is the premultiplied form of the straight-space product.
+        float4 result = float4(t.rgb * t.a, t.a) * ui_unpack_rgba8(inst.color);
         if ((inst.flags & FLAG_CLIP_PRESENT) != 0u) {
             float fw = max(fwidth(input.pos_px.x), 1e-5);   // a device-px AA clip band
             result *= ui_clip_coverage(input.pos_px, inst.clip, fw);

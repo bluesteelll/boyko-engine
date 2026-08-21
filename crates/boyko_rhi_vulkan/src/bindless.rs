@@ -115,6 +115,29 @@ impl VulkanBindlessSet {
         self.set
     }
 
+    /// A NON-OWNING [`VulkanBindGroup`] view of this set — the same `(pool, set)` handle
+    /// pair the generic bind-group carries — so the shared table can be bound through the
+    /// GENERIC [`RhiCommandEncoder::bind_descriptor_set_at`](boyko_rhi::RhiCommandEncoder::bind_descriptor_set_at)
+    /// verb instead of only through a concrete `cmd_bind_descriptor_sets` call
+    /// (`docs/UI-PLAN-SPRITES.md` S-D3: the offscreen golden and the on-screen recorder
+    /// must be able to bind the SAME set, or the sprite path is untestable without a
+    /// display).
+    ///
+    /// # The returned value owns NOTHING
+    ///
+    /// It is a copy of two raw handles this [`VulkanBindlessSet`] still owns. It MUST NOT
+    /// be passed to [`RhiDevice::destroy_bind_group`](boyko_rhi::RhiDevice::destroy_bind_group)
+    /// — that would destroy the descriptor pool underneath the real owner — and it must
+    /// not outlive the set (teardown goes through
+    /// [`destroy_bindless_texture_set`], as it always did).
+    #[inline]
+    pub fn as_bind_group(&self) -> crate::rhi_impl::VulkanBindGroup {
+        crate::rhi_impl::VulkanBindGroup {
+            descriptor_pool: self.pool,
+            descriptor_set: self.set,
+        }
+    }
+
     /// The raw `VkDescriptorSetLayout` — passed directly as
     /// [`VulkanContext::create_graphics_pipeline_bindless`](crate::device::VulkanContext::create_graphics_pipeline_bindless)'s
     /// `set1_layout` argument at TEXTURED raster pipeline creation (textured-PBR T6c).

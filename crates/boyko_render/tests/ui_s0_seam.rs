@@ -40,10 +40,12 @@ use boyko_threadpool::ThreadPoolBuilder;
 use boyko_render::error::GpuColumnError;
 use boyko_render::{
     ui_render_discovery, RhiContext, UiFramePlan, UiInstance, UiOrtho, UiRenderGeneration,
-    UiUploadSystem,
+    UiUploadSystem, FLAG_TEXTURED, UI_SLOT_MASK, UI_SLOT_SHIFT,
 };
 use boyko_rhi_vulkan::swapchain::FrameWriteToken;
-use boyko_ui::components::{ComputedClip, ComputedRect, StackIndex, UiBackground, UiRoot};
+use boyko_ui::components::{
+    ComputedClip, ComputedRect, StackIndex, UiBackground, UiImage, UiRoot,
+};
 
 // ───────────────────────── shared plumbing ─────────────────────────────────
 
@@ -228,6 +230,157 @@ fn g0_3_one_mutation_one_repack_count_returned() {
         sys.probes().wrapping_sub(probes_before),
         0,
         "the frame after the repack skips again (zero probes)"
+    );
+}
+
+// ───────────────────────── S3: the sprite emission ─────────────────────────
+
+/// UI-ADVANCED S3 — a node carrying `UiImage` emits TWO records, in D4's per-node paint
+/// order (*background rect → image*), CONTIGUOUS in the sorted stream and both carrying
+/// the node's own `StackIndex` and clip.
+///
+/// This is the seam-level half of the sprite lane: the CPU pack tests
+/// (`ui_pack_cpu.rs`) pin what ONE record holds; this pins how many records a node
+/// emits and where they land after the z-sort — the property the append key encodes and
+/// the one S4's nine-slice will extend by seven more sub-quads.
+///
+/// The sprite node sits at stack 1, BETWEEN two plain nodes at stacks 0 and 2, so a sort
+/// that lost the sub-record ordering (or interleaved the pair with a neighbour) shows up
+/// as a wrong index here rather than as a plausible-looking picture.
+#[test]
+fn s3_a_node_with_an_image_emits_two_contiguous_records_in_d4_order() {
+    let mut world = EcsMaster::new();
+    world.insert_resource(UiRenderGeneration::default());
+    world.run_system(move |mut cmds: Commands| {
+        let root = {
+            let mut e = cmds.spawn(ComputedRect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 });
+            e.insert(UiBackground { color: 0xFF11_2233, ..UiBackground::default() });
+            e.insert(StackIndex(0));
+            e.insert(UiRoot);
+            e.id()
+        };
+        // The SPRITE node (stack 1): a background AND an image.
+        {
+            let mut e = cmds.spawn(ComputedRect { x: 5.0, y: 6.0, w: 20.0, h: 10.0 });
+            e.insert(UiBackground { color: 0xFF44_5566, ..UiBackground::default() });
+            e.insert(StackIndex(1));
+            e.insert(UiImage {
+                texture: 9,
+                uv_min: [0.25, 0.5],
+                uv_max: [0.75, 1.0],
+                tint: 0xFF_FF_FF_FF,
+            });
+            e.set_parent(root);
+        }
+        // A plain node ABOVE it, so the pair is bracketed on both sides.
+        {
+            let mut e = cmds.spawn(ComputedRect { x: 50.0, y: 50.0, w: 10.0, h: 10.0 });
+            e.insert(UiBackground { color: 0xFF77_8899, ..UiBackground::default() });
+            e.insert(StackIndex(2));
+            e.set_parent(root);
+        }
+    });
+
+    let mut schedule = discovery_schedule(&mut world);
+    let mut sys = UiUploadSystem::new(1.0);
+    settle(&mut world, &mut schedule, &mut sys);
+
+    let staged = sys.staged();
+    assert_eq!(
+        staged.len(),
+        4,
+        "three nodes, but the sprite node emits TWO records: 3 + 1 = 4"
+    );
+    // stack 0 root, then the sprite node's PAIR at stack 1, then stack 2.
+    assert_eq!(staged[0].size_px, [100.0, 100.0], "the root paints first (stack 0)");
+    assert_eq!(
+        staged[1].flags & FLAG_TEXTURED,
+        0,
+        "index 1 is the sprite node's BACKGROUND — D4 paints the rect BEFORE the image"
+    );
+    assert_ne!(
+        staged[2].flags & FLAG_TEXTURED,
+        0,
+        "index 2 is the sprite record, immediately after its own background"
+    );
+    assert_eq!(
+        staged[3].size_px,
+        [10.0, 10.0],
+        "the stack-2 node still paints last — the pair did not straddle it"
+    );
+
+    // The sprite record inherits the node's geometry and carries its own UV + slot.
+    assert_eq!(staged[2].min_px, staged[1].min_px, "the pair shares one quad");
+    assert_eq!(staged[2].size_px, staged[1].size_px, "the pair shares one quad");
+    assert_eq!(
+        staged[2].uv,
+        [0.25, 0.5, 0.75, 1.0],
+        "`uv_min`/`uv_max` become the record's UV rect, in that order"
+    );
+    assert_eq!(
+        (staged[2].flags >> UI_SLOT_SHIFT) & UI_SLOT_MASK,
+        9,
+        "`UiImage.texture` IS the bindless slot, carried in flags bits 20..31"
+    );
+}
+
+/// UI-ADVANCED S3, the other half of item 8: `UiImage` joined `ui_pack_inputs!`, so
+/// `ui_render_discovery` sees `Changed<UiImage>` for FREE — one edit wired both the
+/// gather's read list and the discovery filter. Mutating ONLY the image must bump the
+/// generation and make the next dispatch repack.
+///
+/// Without this the sprite lane would render a stale frame after every tint change and
+/// nothing would say so: the D6a gate would keep skipping on an unbumped generation.
+#[test]
+fn s3_mutating_only_the_image_bumps_the_generation_and_repacks() {
+    let mut world = EcsMaster::new();
+    world.insert_resource(UiRenderGeneration::default());
+    let sink: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
+    let probe = Arc::clone(&sink);
+    world.run_system(move |mut cmds: Commands| {
+        let mut e = cmds.spawn(ComputedRect { x: 0.0, y: 0.0, w: 10.0, h: 10.0 });
+        e.insert(UiBackground { color: 0xFF11_2233, ..UiBackground::default() });
+        e.insert(StackIndex(0));
+        e.insert(UiRoot);
+        e.insert(UiImage::default());
+        *probe.lock().expect("probe") = Some(e.id());
+    });
+    let node = sink.lock().expect("probe").expect("node spawned");
+
+    let mut schedule = discovery_schedule(&mut world);
+    let mut sys = UiUploadSystem::new(1.0);
+    settle(&mut world, &mut schedule, &mut sys);
+
+    // Mutate ONLY the image — no rect, no background, no stack, no clip.
+    world.run_system(move |mut cmds: Commands| {
+        cmds.entity(node).insert(UiImage {
+            texture: 3,
+            uv_min: [0.0, 0.0],
+            uv_max: [1.0, 1.0],
+            tint: 0xFF_FF_FF_FF,
+        });
+    });
+    let before = world.resource::<UiRenderGeneration>().generation;
+    schedule.run(&mut world);
+    assert_ne!(
+        world.resource::<UiRenderGeneration>().generation,
+        before,
+        "Changed<UiImage> must bump the render generation — it is a pack input now"
+    );
+
+    let repacks_before = sys.repacks();
+    world.run_system_once(&mut sys);
+    assert_eq!(
+        sys.repacks().wrapping_sub(repacks_before),
+        1,
+        "the image change must repack, or the sprite renders the previous frame forever"
+    );
+    let staged = sys.staged();
+    assert_eq!(staged.len(), 2, "the node's background plus its sprite");
+    assert_eq!(
+        (staged[1].flags >> UI_SLOT_SHIFT) & UI_SLOT_MASK,
+        3,
+        "the repacked sprite carries the NEW slot, not a stale re-serve"
     );
 }
 

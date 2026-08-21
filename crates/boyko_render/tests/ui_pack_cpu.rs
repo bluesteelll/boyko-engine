@@ -14,8 +14,9 @@
 //! ortho math that the deferred goldens will ultimately verify pixel-for-pixel.
 
 use boyko_render::ui::{
-    pack_ui_instance, premultiply_rgba8, PackInput, UiInstance, UiOrtho, UiRenderGeneration,
-    UiRenderScratch, FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, FLAG_TEXT, UI_INSTANCE_SIZE,
+    pack_ui_image_instance, pack_ui_instance, premultiply_rgba8, PackInput, UiImageInput,
+    UiInstance, UiOrtho, UiRenderGeneration, UiRenderScratch, FLAG_BORDER_ANY, FLAG_CLIP_PRESENT,
+    FLAG_TEXT, FLAG_TEXTURED, UI_INSTANCE_SIZE, UI_SLOT_MASK, UI_SLOT_SHIFT,
 };
 
 // --- helpers ---------------------------------------------------------------
@@ -30,6 +31,7 @@ fn plain_rect(x: f32, y: f32, w: f32, h: f32, color: u32) -> PackInput {
         border_width: [0.0; 4],
         clip: None,
         text_uv: None,
+        image: None,
     }
 }
 
@@ -301,6 +303,147 @@ fn packed_flags_reserved_bits_are_zero() {
             inst.flags
         );
     }
+}
+
+// --- UI-ADVANCED S3: the sprite lane (D2, S-D2, S-D8) ----------------------
+
+/// A `PackInput` for a node carrying a `UiImage` at `slot` with `tint`, full-texture UV.
+fn sprite_node(slot: u32, tint: u32) -> PackInput {
+    let mut input = plain_rect(0.0, 0.0, 8.0, 8.0, OPAQUE_RED);
+    input.image = Some(UiImageInput {
+        slot,
+        uv: [0.0, 0.0, 1.0, 1.0],
+        tint,
+    });
+    input
+}
+
+/// Gate G3-5: the 12-bit slot field ROUND-TRIPS. Packing slot `s` and reading `flags`
+/// bits 20..31 back must yield `s` for both ends of the live table's range — the
+/// property no offset assert can state, because the field is a bit range inside one word
+/// and nothing but arithmetic connects the two ends of it.
+#[test]
+fn sprite_slot_round_trips_through_the_flags_bit_field() {
+    for slot in [1u32, 2, 1234, UI_SLOT_MASK] {
+        let inst = pack_ui_image_instance(&sprite_node(slot, OPAQUE_WHITE), 1.0)
+            .expect("a node carrying UiImage emits a sprite record");
+        assert_ne!(inst.flags & FLAG_TEXTURED, 0, "slot {slot}: FLAG_TEXTURED is set");
+        assert_eq!(
+            (inst.flags >> UI_SLOT_SHIFT) & UI_SLOT_MASK,
+            slot,
+            "slot {slot} must survive the pack into flags bits {UI_SLOT_SHIFT}..32 (got {:#010x})",
+            inst.flags
+        );
+    }
+    // The top of the field IS the top of the live table's range, with zero headroom —
+    // S-D2's whole reason for the `BINDLESS_TEXTURE_CAPACITY` const-assert beside the
+    // struct. If the capacity ever exceeds the field, this equality is the first thing
+    // that stops being true.
+    assert_eq!(
+        UI_SLOT_MASK + 1,
+        boyko_rhi_vulkan::bindless::BINDLESS_TEXTURE_CAPACITY,
+        "the slot field's range and the bindless table's capacity are the SAME number"
+    );
+}
+
+/// Gate G2-6's S3 SUCCESSOR: the reserved bits are still zero on BOTH lanes.
+///
+/// S2 proved every packed instance had bits 3..31 zero. S3 sets bit 3 and bits 20..31 —
+/// deliberately, on the SPRITE record only. So the claim splits: a background record is
+/// unchanged (bits 3..31 still zero, which is what keeps the S2 image pins identical),
+/// and a sprite record uses ONLY bit 3 plus its slot field, leaving bit 4 (S7's reserved
+/// per-sprite sampler index) and bits 5..19 zero.
+#[test]
+fn packed_flags_use_only_the_bits_their_lane_owns() {
+    let input = sprite_node(0x0AB, OPAQUE_WHITE);
+
+    // The BACKGROUND record of a node that also carries a sprite: unchanged from S2.
+    let background = pack_ui_instance(&input, 1.0);
+    assert_eq!(
+        background.flags & 0xFFFF_FFF8,
+        0,
+        "a background record must not gain a bit because its node carries a UiImage \
+         (got {:#010x}) — this is what keeps the S2 image pins identical",
+        background.flags
+    );
+
+    // The SPRITE record: bit 3 + the slot field, and NOTHING between them.
+    let sprite = pack_ui_image_instance(&input, 1.0).expect("the node carries a UiImage");
+    let between = sprite.flags & !(FLAG_TEXTURED | (UI_SLOT_MASK << UI_SLOT_SHIFT));
+    assert_eq!(
+        between, 0,
+        "a sprite record must use only FLAG_TEXTURED and the slot field — bit 4 is \
+         RESERVED for S7's per-sprite sampler index and bits 5..19 are free (got {:#010x})",
+        sprite.flags
+    );
+}
+
+/// S-D8's default-OFF row for this rung, at the pack: `UiImage::default()`'s fully
+/// TRANSPARENT tint premultiplies to an all-zero color, so the sprite record contributes
+/// nothing under the `src=ONE` premultiplied blend. This is the CPU half of gate G3-2 —
+/// the half that runs on a device-less host, and the one red mutation M3-e trips.
+#[test]
+fn default_image_tint_packs_a_fully_transparent_sprite() {
+    let default_tint = boyko_ui::components::UiImage::default().tint;
+    assert_eq!(default_tint, 0, "the authored default is a transparent tint");
+    let inst = pack_ui_image_instance(&sprite_node(1, default_tint), 1.0)
+        .expect("presence of UiImage is what emits the record, not its tint");
+    assert_eq!(
+        inst.color, 0,
+        "a transparent tint premultiplies to ZERO, so the sprite adds no pixels: \
+         src == 0 leaves dst untouched under premultiplied blending"
+    );
+}
+
+/// The sprite record is the SECOND record of its node, not a replacement: it takes the
+/// node's geometry verbatim (scale-folded like a rect), its own UV verbatim (NEVER
+/// scale-folded, exactly like the glyph UV), and packs no radius or border.
+#[test]
+fn sprite_record_mirrors_the_geometry_and_keeps_its_uv_unfolded() {
+    let mut input = plain_rect(4.0, 6.0, 10.0, 20.0, OPAQUE_RED);
+    input.corner_radius = [3.0; 4];
+    input.clip = Some([0.0, 0.0, 5.0, 5.0]);
+    input.image = Some(UiImageInput {
+        slot: 7,
+        uv: [0.25, 0.5, 0.75, 1.0],
+        tint: OPAQUE_WHITE,
+    });
+
+    let background = pack_ui_instance(&input, 2.0);
+    let sprite = pack_ui_image_instance(&input, 2.0).expect("the node carries a UiImage");
+
+    assert_eq!(sprite.min_px, background.min_px, "same quad as its background");
+    assert_eq!(sprite.size_px, background.size_px, "same quad as its background");
+    assert_eq!(sprite.clip, background.clip, "the node's clip applies to both records");
+    assert_ne!(
+        sprite.flags & FLAG_CLIP_PRESENT,
+        0,
+        "the sprite carries the clip FLAG too, or the shader would not read the AABB"
+    );
+    assert_eq!(
+        sprite.uv,
+        [0.25, 0.5, 0.75, 1.0],
+        "the sprite UV is written verbatim — a scale-folded UV would sample the wrong texels"
+    );
+    assert_eq!(
+        sprite.corner_radius,
+        [0.0; 4],
+        "a sprite packs no radius (a rounded sprite is nine-slice's job, S4)"
+    );
+    assert_eq!(sprite.border_width, 0.0, "a sprite packs no border");
+    assert_eq!(background.uv, [0.0, 0.0, 1.0, 1.0], "the background keeps its identity UV");
+}
+
+/// Absence is the structural skip: no `UiImage` ⇒ no sprite record at all, so an
+/// image-less world's record stream is byte-identical to S2's (gate G3-2's premise).
+#[test]
+fn a_node_without_an_image_emits_no_sprite_record() {
+    let input = plain_rect(0.0, 0.0, 8.0, 8.0, OPAQUE_RED);
+    assert!(
+        pack_ui_image_instance(&input, 1.0).is_none(),
+        "capability is component presence — absence emits nothing, it does not emit a \
+         disabled record"
+    );
 }
 
 // --- UiOrtho: pixel→NDC, top-left origin, G11 corners ----------------------

@@ -2955,3 +2955,39 @@ pseudocode is not the same thing as recording a deviation. **Ruled 2026-08-20: c
 ERRATUM.** The second half — whether a fixture with a `k > 0` edit should exist to exercise the
 `L > 1` regime — stays open: today no shipped scene has one, so the divergence remains unmeasured in
 both directions and the shipped form's soundness rests on the derivation.
+
+---
+
+## 2026-08-21: UI-ADVANCED S3 — `NonUniformResourceIndex` is UNGATED on this box, and the reason is the same one that made §10.1 flat
+
+**Status: recorded, not blocking. Owner-facing because it is a gate that CANNOT fail here, which is
+the class this project keeps finding late.**
+
+S3's red mutation **M3-b** — drop `NonUniformResourceIndex` from the `ui_rect.fs` sprite branch,
+re-emit, re-DXC — was run on this box (RTX 3060 Laptop, validation on). It **did not red**. Not the
+new 64-slot gate (`ui_sprite_divergence.rs`: 256 dense 4×4-px quads over 64 distinct bindless slots,
+every quad asserted against its own texture), not either sprite golden, not the validation
+messenger.
+
+**The cause is structural, and it is the same fact behind §10.1's flat measurement.** The descriptor
+index is `nointerpolation`, i.e. per INSTANCE. This rasterizer does not pack one warp from two
+primitives, so a per-instance index is wave-uniform *by construction* here — there is no divergence
+to punish, which is also why 1 / 8 / 64 distinct slots timed identically. Two observations, one
+cause; each makes the other believable.
+
+**Why the qualifier stays anyway.** A non-uniform descriptor index without it is **undefined
+behaviour by the Vulkan spec**, not "usually fine". Another driver, another vendor, or a future
+rasterizer that packs warps differently is free to resolve one lane's descriptor for the whole wave.
+Removing it because this box tolerates it would be trading a spec guarantee for one machine's
+observation.
+
+**What IS live on it:** the byte gate. `ui_rect_spv_sync` sees the qualifier's removal (the `.spv`
+moves 8760 → 8680 B) even though no pixel does, and `ui_rect_edsl_sync` sees a hand-edit of the
+span. So the qualifier is pinned to the generator — which catches an accidental removal, but is not
+the same thing as a test that catches its CONSEQUENCE.
+
+**The open half, for the owner:** whether this campaign should acquire a hardware leg that can
+actually make a divergent-descriptor read wrong (a vendor whose warps span primitives, or a
+synthetic shader that forces one wave across two indices), or whether "spec-required, byte-gated,
+consequence-unobservable-here" is the honest resting place. Nothing in S3–S5 depends on the answer;
+S7's Model-A disposition already has its number from §10.1.
