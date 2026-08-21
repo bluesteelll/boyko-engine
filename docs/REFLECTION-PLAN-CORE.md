@@ -437,15 +437,42 @@ The analysis says the compound paths are where allocation pressure lives and tha
 is how it goes wrong. So the audit is not a table in a document; it is an **enforced test**, and
 each row names the rung that adds its arm.
 
-**Instrument (rung C5):** a counting global allocator with **baseline subtraction**, modelled on
-`crates/boyko_ui/tests/p4_bind_zero_alloc.rs` (F20) — the delta between the measured path and an
-identically-shaped no-op, so the harness's own machinery cancels. `#[allow(clippy::disallowed_types)]`
-+ rationale on the file, exactly as the precedent does.
+**Instrument (~~rung C5~~ → rung C4, corrected 2026-08-21):** a counting global allocator with
+**baseline subtraction**, modelled on `crates/boyko_ui/tests/p4_bind_zero_alloc.rs` (F20) — the
+delta between the measured path and an identically-shaped no-op, so the harness's own machinery
+cancels. ~~`#[allow(clippy::disallowed_types)]` + rationale on the file, exactly as the precedent
+does.~~
+
+> **Corrected 2026-08-21, at C4's execution, and it closes a gate that could not run.** *"Instrument
+> (rung C5)"* contradicted **C4 gate 5** — *"Alloc-delta harness arm: `Prim` get/set = 0 (§3.3)"* —
+> which sits one rung **earlier**; the table below compounded it by assigning the `Prim get / set`
+> row to C5 as well, so one arm had two owners and its gate had none. A gate whose instrument is
+> specified to land after it is this campaign's most-repeated defect (twelve benches in a gate
+> table, none of which existed). Resolved in the direction that keeps every gate runnable: the
+> instrument lands at **C4** with the `Prim` arm; **C5 adds the `enumerate` and `array read` arms on
+> top** (its Lands is amended to match). Two further corrections, both MEASURED at C4 rather than
+> reasoned:
+>
+> * **The counter is THREAD-LOCAL, not the precedent's process-global `AtomicUsize` + `Mutex`.** Built
+>   the precedent's way first, the harness reported `get Bool: baseline=1 measured=0 **delta=-1**` —
+>   libtest's own machinery allocates on other threads while an armed window is open, and the mutex
+>   can serialize this file's windows only against each other. A negative delta is the diagnostic
+>   that settles it: a measured path cannot allocate less than nothing. A `const`-initialized,
+>   `Drop`-free thread-local `Cell` is a plain TLS read (no lazy init, no destructor, therefore no
+>   allocation inside the allocator), the deltas become exactly 0, and **no `Mutex` and no
+>   `#[allow(clippy::disallowed_types)]` are needed** — hence the strike-through above.
+> * **The harness binary is `#![cfg(not(miri))]`.** A `#[global_allocator]` forwarding to `System` is
+>   not transparent under Miri + Tree Borrows on `x86_64-pc-windows-gnu`: `HeapFree` through the
+>   pointer `System.alloc` returned is a foreign write to libtest's protected tags. **Measured, not
+>   assumed:** with a filter selecting *nothing*, the binary prints `running 0 tests` and still
+>   aborts inside `mpmc::Sender::drop`. Nothing is lost — C4 gate 4's subject is the `prim::` module,
+>   and `c4_prim.rs` covers all twenty-four accessors under Miri. (`boyko_ui`'s F20 precedent is not
+>   on the Miri allowlist, which is why no one has met this before.)
 
 | Path | Claim | Rung | How the number is obtained |
 |---|---|---|---|
 | enumerate (`info.fields`) | **0** | C5 | delta harness; the slice is `&'static` |
-| `Prim` get / set | **0** | C5 | delta harness, per `ScalarKind` |
+| `Prim` get / set | **0** | **C4** (was C5 — see the correction above) | delta harness, per `ScalarKind`; **measured 2026-08-21: delta 0 for all 12 kinds, get, set and the refused-set path, over 1000 calls each** |
 | array read (offset + stride + count) | **0** | C5 | delta harness; all three are `const` |
 | **nested descend, depth ≥ 2** | **0 per level** | C6 | delta harness over `Transform → Vec3 → f32`; **a depth-1 harness proves nothing about recursion and is not accepted** |
 | enum discr read / write | **0** | C10 | delta harness |
@@ -822,6 +849,83 @@ No `stable_name` (D8). No `serialize`, no `debug_fmt` (D9). **Every** accessor `
 reds with a named `Problem`. *Second red:* set a `Prim` field's `offset` to `0` when it is not the
 first field — gate 4 reds.
 
+> **Executed 2026-08-21 (worktree `D:/wt/reflect`, toolchain `stable-x86_64-pc-windows-gnu` 1.97.1).**
+> *Lands:* `crates/boyko_reflect/src/type_info.rs` — `TypeInfo` / `FieldInfo` exactly as
+> sketched, plus the four descriptors they point at (`ArrayInfo`, `EnumInfo`, `VariantInfo`
+> and `EnumRepr`, which the sketch's slots name and which therefore cannot be deferred past
+> the commit that declares those slots), `TypeInfo::get_field`, and `validate` with its
+> `Violation`/`Problem` pair. C2's `#[non_exhaustive]` ZST placeholder is DELETED from
+> `lib.rs`; `registry.rs`'s unit tests, which minted their two distinct subjects out of a
+> `#[repr(C)]` container *because* the placeholder was a ZST, now build real descriptors, and
+> the comment stating why those gates are unit tests is REWRITTEN rather than inherited — the
+> old argument (*"not constructible outside this crate"*) stopped being true at this rung, and
+> a stale rationale for a live test is the doc-rot class this campaign keeps paying for. The
+> registry's own five tests and its `install_type_info` name/signature are untouched, so GATES
+> needle B and G3's calibration are unaffected (verified: `reflect_fixture`'s two
+> `fn(usize, &'static boyko_reflect::TypeInfo)` coercion sites still compile, feature on and
+> off, and G3's census re-ran green).
+>
+> *Two deviations, both recorded rather than worked around:*
+>
+> 1. **`ValueKind::Str` is not in gate 1's rule list, and the gate's own text forbids leaving it
+>    unclassified.** The rung enumerates five arms (`Prim`, `Nested`, `Array`, `Enum`,
+>    `Opaque`) but the taxonomy has **six**, and the same sentence demands *"one arm per
+>    `ValueKind`, exhaustively matched so a new arm fails to compile until it is classified"* —
+>    a match with no wildcard cannot be written without deciding `Str`. **Decided here:** until
+>    C11 lands the string accessor pair, a `Str` field is *structurally accessorless*
+>    (`Violation::StrWithAccessor`), i.e. shaped like `Opaque` but labelled honestly. This is a
+>    rule C11 **replaces in the same commit that gives `Str` something to call**, and it is
+>    named in `Violation::StrWithAccessor`'s own doc comment so C11's author meets it there.
+> 2. **The first RED mutation names `prim::get_f32`, which does not exist at C3** —
+>    `prim::` is C4, the next rung (§5's order, and C4's own Lands). The mutation is executed
+>    with the fixture's hand-written `hand::get_f32`, identical in signature and role; what the
+>    mutation *tests* is a `Nested` field carrying a scalar getter, and the accessor's
+>    provenance is incidental to that. Recorded because it is literally the "an API the
+>    mutation assumes does not exist" class, and because the hand-written accessors are
+>    deliberately **kept** after C4 lands, as the standing witness that the model is expressible
+>    without the library.
+>
+> *Two rules added beyond the rung's list, both stated so they are not mistaken for the
+> plan's:* the type-level *"`enum_info` is `Some` **iff** `kind == Enum`"* is checked in **both**
+> directions (a one-sided check cannot see an `EnumInfo` hung on a struct), and `Nested`/`Array`
+> reject a scalar **setter** as well as a getter — the rung lists only `get.is_none()` for
+> `Nested`, and an accessor that *writes* a nested struct's first bytes is the same defect with
+> worse consequences.
+>
+> *Gate 1:* `every_fixture_descriptor_is_coherent` over all three hand-baked statics, plus
+> `the_fixture_covers_every_value_kind_arm` — a NON-VACUITY clause, because a green `validate`
+> over a fixture missing three arms is a statement about the arms it happened to contain.
+> *Gate 2:* `get_field_returns_none_for_every_non_prim_kind` walks all seven fields and asserts
+> `Some` for `Prim` / `None` for the other five kinds. **`get_field` checks the KIND first and
+> independently of the accessor slot** — a design decision this rung took and the plan does not
+> state: keying on `get.is_none()` alone would make gate 2 a second reading of gate 1, and a
+> malformed descriptor would then read `Inner`'s first four bytes as the whole field. The
+> independence is asserted
+> (`get_field_refuses_a_malformed_nested_descriptor_even_though_it_has_a_getter`) and was
+> **observed live**: under the first RED, gate 1 went red while gate 2 stayed green. *Gate 3:*
+> `(type_id_fn)()` checked on all three types and all nine fields. *Gate 4:*
+> `every_baked_offset_equals_offset_of` plus the `size`/`align` and `ArrayInfo`-stride halves.
+> 13 tests, `cargo test -p boyko-reflect --test c3_type_info` exit 0.
+>
+> *First RED:* `EVERYTHING_FIELDS[3]` (`inner`, `Nested`) given `get: Some(hand::get_f32)` →
+> **exit 101**, gate 1 red with the named problem *"`c3_type_info::Everything` is INCOHERENT:
+> field #3 `inner`: NestedWithScalarAccessor"*, 12 passed / 1 failed. *Second RED:* `level`'s
+> `offset` hand-edited from `offset_of!(Everything, level)` to `0` → **exit 101, TWO
+> independent reds**: gate 4 named it exactly (*"field #1 `level`: baked offset 0 != offset_of!
+> 4"*) and `get_field_reads_prim_fields_back` printed the shipped consequence —
+> `level` read back as **`Some(1095237632)`**, which is `12.5f32.to_bits() == 0x4148_0000`:
+> the `u32` field reading the `f32` field's bits. The plan predicted one red; the *value* is
+> what makes the defect legible, and it is measured here rather than described.
+> *Restoration:* byte-identical, sha256 `e7e78a85…4799` before and after both mutations.
+> *Miri:* `cargo +nightly-x86_64-pc-windows-gnu miri test -p boyko-reflect --all-targets`
+> (TB, from `.cargo/config.toml`) — 4 lib + 8 scalar-edge + **13 C3** tests green, exit 0; the
+> new `get_field` pointer arithmetic and the fixture's `&*(p as *const T)` reads are covered.
+> *Regression:* G0 census 3, G1 manifest 7, G2 closure 2, G3 absence 1 (+1 ignored
+> calibration), G4 coverage 6, leg-nonvacuity 1, `boyko-reflect` debug 4 + 19 + 1 + 13 = 37
+> across four binaries, release `--lib` 5, clippy `-D warnings` touch-first clean, and
+> `cargo check -p reflect-fixture/-p reflect-dogfood --all-targets --features reflect` both
+> exit 0.
+
 ---
 
 ### C4 — The `prim::` accessor library + the release kind check
@@ -878,14 +982,95 @@ release-editor build is exactly where it would ship.
 *Second red:* make `set_u32` write before checking. Gate 2 reds on the byte comparison even though
 the return value is still `false`.
 
+> **Executed 2026-08-21 (worktree `D:/wt/reflect`, toolchain `stable-x86_64-pc-windows-gnu` 1.97.1).**
+> *Lands:* `crates/boyko_reflect/src/prim.rs` — twelve `get_*`/`set_*` pairs, one per
+> `ScalarKind`, generated from a single `prim_accessors!` arm. **The macro is a decision, not
+> a shortcut:** C1's second RED was one per-kind extractor typo (a zero-extending `as_i8`),
+> and twenty-four hand-copied bodies are twenty-four chances to write it again — the macro
+> removes the *drift*, the gates stay per-kind, so nothing is removed from the *coverage*.
+> Reads use `&*(p as *const T)` (F11's precedented, Miri-clean trampoline pattern); **every
+> writer stays raw** (`ptr::write`, never an intermediate `&mut T`), and the asymmetry is
+> restated in the module header where both halves live, as the rung requires. The kind check
+> is `Scalar`'s own checked extractor, which makes the release `-> bool` and the
+> non-canonical-payload refusal **the same branch** — a `Scalar { kind: U8, bits: 300 }` never
+> reaches the store either. **No `#[inline]`**, deliberately: every production call arrives
+> through a `FieldInfo` fn-pointer slot where the attribute cannot help (§8 says so), and
+> principle 7 forbids doctrine-driven inlining; the paragraph naming that decision also names
+> what would reverse it.
+>
+> *One defect found in the rung as written, and it is gate 5's:* **C4 gate 5's instrument was
+> specified to land at C5.** §3.3 said *"Instrument (rung C5)"* and its table gave the
+> `Prim get / set` row to C5, while this rung's gate 5 demands that arm one rung earlier. The
+> full record, the resolution (instrument lands here; C5 keeps `enumerate` + `array read`) and
+> two measured corrections to the instrument's own design are at **§3.3**, where they govern.
+>
+> *Gate 1:* `every_kind_round_trips_through_its_accessor_pair` (12 kinds through a
+> `#[repr(C)]` fixture) plus `every_kind_lands_in_its_own_typed_field`, which writes all twelve
+> and compares the **whole struct** against a literal — a pair that consistently mis-addressed
+> the same wrong bytes would agree with itself, so the `Scalar`-level round-trip alone is not
+> the "read back through the typed field" the rung asks for. *Gate 2:* the full **12×12**
+> mismatch matrix (132 off-diagonal cells), each asserting `false` **and** byte equality of the
+> whole struct, plus a non-canonical-payload row. *Gate 3:* both profiles run, and they are
+> distinguishable rather than asserted — `debug_leg_is_live_and_debug_assert_still_fires` /
+> `release_leg_is_live_and_debug_assert_is_gone` observe at **runtime** whether a
+> `debug_assert!` executed, so "the release leg ran" is a measurement and not a `cfg!` restated
+> as an assertion. 7 tests, exit 0 in both profiles. *Gate 4:* `cargo
+> +nightly-x86_64-pc-windows-gnu miri test -p boyko-reflect --all-targets` (TB) — 4 lib + 8
+> scalar-edge + 13 C3 + **7 C4** green, exit 0. *Gate 5:* **measured, all deltas exactly 0** —
+> 12 kinds × {get, set, refused set} against an identically-shaped no-op, 1000 calls per window
+> (`get F32: baseline=0 measured=0 delta=0`, and so on for every row), with a permanent
+> positive control (`deliberate allocations observed = 1`) in the same binary so a green can
+> never mean "the counter never armed". The fixture's own precondition is asserted too:
+> **`size_of::<AllPrims>() = 56`, sum of field sizes `= 56`** — zero padding, because gate 2's
+> whole-struct byte comparison would otherwise be reading uninitialized memory, which is UB and
+> which gate 4 reds on.
+>
+> *First RED (the mutation this rung exists for), two profiles, two DIFFERENT failures — which
+> is the whole claim:* `set_f32`'s `-> bool` check replaced by
+> `debug_assert_eq!(v.kind, ScalarKind::F32); true` with an unconditional
+> `ptr::write(p, f32::from_bits(v.bits as u32))`. **Debug → exit 101, and it reds as a PANIC
+> inside the library** (`prim.rs:142: assertion left == right failed; left: Bool, right: F32`)
+> — not as a refusal, and exactly the shape a maintainer "fixes" with `#[should_panic]`.
+> **Release → exit 101, and it reds as a CONTRACT VIOLATION in the test**
+> (`set_F32 accepted a Bool scalar -- the kind check did not refuse`), the assertion vanished
+> and the setter accepted. *Recorded precisely:* in release the mutation trips gate 2's
+> **return-value** clause first, because the mutated setter returns `true` unconditionally; the
+> rung's sentence *"gate 2's byte comparison fails"* describes the clause the **second** RED
+> isolates, which is why the rung specifies two.
+>
+> *Second RED:* `set_u32` storing before checking (`ptr::write(…, v.bits as u32)` then
+> `v.as_u32().is_some()`). The return value stayed **correct** — gate 2's `assert!(!wrote)`
+> clause PASSED — and **only the byte comparison saw it**, in both profiles, exit 101:
+> *"set_U32 REFUSED a Bool scalar and still changed the bytes -- the check runs after the store
+> (field `u32_`, offset 32)"*, with the diff visible in the dumps at offset 32:
+> `239,190,173,222` (`0xDEAD_BEEF`) → `1,0,0,0`. That is the rung's claim about why the gate
+> compares bytes rather than return values, measured.
+>
+> *Third RED, added because the instrument moved here:* `let _ = Vec::<u8>::with_capacity(1);`
+> inserted into the macro's reader → gate 5 exit 101,
+> *"prim::get for Bool allocated **1000** time(s) over the no-op baseline in 1000 calls"* —
+> one per call, no noise, and the three setter/refusal arms stayed green. A zero-allocation
+> harness whose red nobody has seen is not a harness; this one's has been seen.
+>
+> *Restoration:* `prim.rs` restored byte-identically after each of the three mutations
+> (sha256 `01c9959e…c86c`). *Regression:* G0 census 3, G1 manifest 7, G2 closure 2, G3 absence
+> 1 (+1 ignored calibration), G4 coverage 6, leg-nonvacuity 1; `boyko-reflect` debug
+> 4 + 19 + 1 + 13 + 7 + 4 = **48** across six binaries and release 5 + 19 + 1 + 13 + 7 + 4 =
+> **49**; `cargo check -p boyko-reflect --all-targets` and `cargo clippy -p boyko-reflect
+> --all-targets -- -D warnings` (touch-first, both profiles) exit 0.
+
 ---
 
 ### C5 — `ValueKind::Array` + the zero-allocation harness
 
 **Lands.** `ArrayInfo { elem: ScalarKind, stride: usize, len: usize }` and the by-index element
 accessor `array_get(p, &ArrayInfo, i) -> Option<Scalar>` / `array_set(…) -> bool`, with `i < len`
-a **release** bounds check (same reasoning as D11). Plus the counting-allocator delta harness
-(§3.3), and its first three arms.
+a **release** bounds check (same reasoning as D11). ~~Plus the counting-allocator delta harness
+(§3.3), and its first three arms.~~ → **the harness itself and the `Prim` get/set arm landed at
+C4** (§3.3's correction of 2026-08-21: C4 gate 5 named an arm whose instrument this rung was
+specified to build). What C5 adds is the remaining two arms — **`enumerate` and `array read`** — on
+top of the existing `tests/c4_prim_zero_alloc.rs` instrument, whose thread-local counter and
+`#![cfg(not(miri))]` disposition are both measured facts C5 inherits rather than re-decides.
 
 **Scope of the arm — D19, decided here rather than discovered mid-gate:** v1 supports `[T; N]`
 where **`T` is a `Prim`, and only that**. `[[f32; 4]; 4]` is an array *of arrays*, so it needs a
@@ -913,7 +1098,11 @@ derive bug where `stride` came from the wrong `size_of`.
 
 *Second red (the harness's own):* insert `let _ = Vec::<u8>::with_capacity(1);` into `array_get`.
 Gate 3 reds. **A zero-allocation harness whose red nobody has seen is not a harness** — this
-mutation is run and its output recorded in the commit message.
+mutation is run and its output recorded in the commit message. *(The instrument's red has already
+been seen ONCE, at C4, where the harness landed: the same insertion into the `prim::` readers
+produced* `prim::get for Bool allocated 1000 time(s) over the no-op baseline in 1000 calls` *— one
+per call, no noise, and the setter arms stayed green. C5 still runs its own, because what is
+untested here is the `array read` **arm**, not the counter.)*
 
 ---
 

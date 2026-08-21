@@ -93,23 +93,52 @@ pub fn install_type_info(component_id: usize, info: &'static TypeInfo) {
     let _ = REFLECT[component_id].set(info);
 }
 
-// Unit tests, not integration tests, ON PURPOSE: the placeholder `TypeInfo` is
-// `#[non_exhaustive]` and deliberately not constructible outside this crate (its G0
-// contract — nothing external can install into a half-built registry), so the only
-// place a test can mint the two distinct `&'static TypeInfo` values gate 1 needs is
-// inside the crate. The release-profile halves (gate 2) are `#[cfg(not(debug_assertions))]`
-// and run under `cargo test -p boyko-reflect --release` — the gate greps for a
-// non-vacuous `running [1-9]` there, because a filtered-out test is a vacuous pass.
+// Unit tests, not integration tests, ON PURPOSE — and the reason CHANGED at C3, so it
+// is restated rather than inherited. Until C3 the placeholder `TypeInfo` was a
+// `#[non_exhaustive]` ZST that nothing outside the crate could construct, and that
+// unconstructibility was the argument. C3's real `TypeInfo` is constructible by any
+// consumer (C7's derive bakes one from a downstream crate), so the argument is now the
+// weaker but still sufficient one: these gates are about the TABLE, whose `REFLECT`
+// static is private, and a unit test is where a private static's slots can be reasoned
+// about without exporting a test-only door. The release-profile halves (gate 2) are
+// `#[cfg(not(debug_assertions))]` and run under `cargo test -p boyko-reflect --release`
+// — the gate greps for a non-vacuous `running [1-9]` there, because a filtered-out test
+// is a vacuous pass.
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::type_info::TypeKind;
 
-    /// Two distinct `&'static TypeInfo` subjects for the write-once gate. `TypeInfo`
-    /// is a ZST, and two separate ZST statics have no guaranteed-distinct addresses —
-    /// `#[repr(C)]` field layout guarantees them instead: `a` sits at offset 0, the
-    /// pad at 0..8, `b` at offset 8. The gate asserts the distinctness precondition
-    /// before using it, so a layout surprise reds as the instrument's own failure,
-    /// never as a false verdict about the registry.
+    /// The descriptor's `type_id_fn` needs *a* function; the registry's gates never
+    /// call it (`TypeId::of` is not `const`, which is why the slot is an fn pointer
+    /// at all — C3).
+    fn unit_type_id() -> std::any::TypeId {
+        std::any::TypeId::of::<()>()
+    }
+
+    /// A minimal, field-less descriptor — the registry's gates care only that two
+    /// `&'static TypeInfo` values are DISTINGUISHABLE BY ADDRESS, never about their
+    /// contents (C3's model is validated at C3, not here).
+    const fn empty_info(type_name: &'static str) -> TypeInfo {
+        TypeInfo {
+            type_name,
+            type_id_fn: unit_type_id,
+            size: 0,
+            align: 1,
+            fields: &[],
+            kind: TypeKind::Struct,
+            enum_info: None,
+            default_in_place: None,
+            drop_in_place: None,
+        }
+    }
+
+    /// Two distinct `&'static TypeInfo` subjects for the write-once gate. Since C3
+    /// `TypeInfo` is not a ZST, so two separate statics have distinct addresses by
+    /// construction; the `#[repr(C)]` container is kept anyway because the gate
+    /// asserts the distinctness precondition before using it, and a shared-address
+    /// surprise must red as the instrument's own failure rather than as a false
+    /// verdict about the registry.
     #[repr(C)]
     struct TwoInfos {
         a: TypeInfo,
@@ -117,7 +146,8 @@ mod tests {
         b: TypeInfo,
     }
 
-    static INFOS: TwoInfos = TwoInfos { a: TypeInfo, _pad: 0, b: TypeInfo };
+    static INFOS: TwoInfos =
+        TwoInfos { a: empty_info("registry::tests::A"), _pad: 0, b: empty_info("registry::tests::B") };
 
     /// CORE C2 gate 1 — write-once idempotence: two installs with DIFFERENT info for
     /// one id; `type_info_of` returns the FIRST and the second is a silent no-op

@@ -30,19 +30,22 @@
 //!   [`install_type_info`] / [`type_info_of`] (CORE C2). `install_type_info` keeps
 //!   G0's stub name and signature — the artifact census's needle B is that name
 //!   precisely because it survives the replacement (GATES D5).
+//! * [`type_info`] — [`TypeInfo`] / [`FieldInfo`] and the descriptors they point at,
+//!   plus [`validate`]'s coherence rules (CORE C3). C2's opaque placeholder is gone:
+//!   the descriptor is now constructible by any consumer, because C7's derive must
+//!   bake one from a downstream crate.
+//! * [`prim`] — the monomorphic `get_*`/`set_*` accessor library a `Prim` field's
+//!   fn-pointer slots are filled from, carrying the **release** kind check (CORE C4)
+//!   and the read-shared/write-raw asymmetry both halves of it depend on.
 
+pub mod prim;
 pub mod registry;
 pub mod scalar;
+pub mod type_info;
 
 pub use registry::{install_type_info, type_info_of};
 pub use scalar::{Scalar, ScalarKind};
-
-/// Opaque placeholder for the reflection type descriptor.
-///
-/// Replaced by CORE C3's real `TypeInfo` (name, layout, kind, `&'static [FieldInfo]`,
-/// accessors). Deliberately not constructible outside this crate: until C3, nothing
-/// downstream can install one, so nothing can observe a half-built registry — which is
-/// also why the C2 registry gates live in `registry`'s own unit-test module rather
-/// than in `tests/`.
-#[non_exhaustive]
-pub struct TypeInfo;
+pub use type_info::{
+    ArrayInfo, EnumInfo, EnumRepr, FieldInfo, Problem, TypeInfo, TypeKind, ValueKind, VariantInfo,
+    Violation, validate,
+};
