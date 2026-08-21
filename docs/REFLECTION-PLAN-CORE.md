@@ -532,12 +532,80 @@ must stay **green** — proving F17's hazard is live here too — and the `refle
 that F17 (zero `hwrt` legs in CI, measured) does not repeat.*
 
 *Second RED, and it is new because §0.3 made engine crates eligible:* land the same canary inside
-`crates/boyko_scene/src/transform.rs` under `#[cfg(feature = "reflect")]` **without** adding a
-`reflect` feature to `boyko_scene`'s manifest. The expected red is **not** the canary — it is
+~~`crates/boyko_scene/src/transform.rs` under `#[cfg(feature = "reflect")]` **without** adding a
+`reflect` feature to `boyko_scene`'s manifest~~ → **`crates/boyko_threadpool/src/lib.rs` — a crate
+that declares no `reflect` feature and never will (re-specified 2026-08-21, third pass; the defect
+and the choice are recorded below)**. The expected red is **not** the canary — it is
 `unexpected_cfgs` under `-D warnings`, naming `feature = "reflect"` (D2). Run it: it is the compile
 that settles whether a missing feature is a diagnostic or a silence, and
 [`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md)'s D16 and B6 gate 6 both rest on the
-answer.
+answer. In this disk-constrained worktree the scoped form
+`cargo clippy -p boyko-threadpool --all-targets -- -D warnings` carries the identical lint
+configuration (`[lints] workspace = true`), per §4's preamble.
+
+> **Re-specified 2026-08-21 (third pass) — closing Defect B of the honest C0 stop.** As first
+> written, this RED could not fire: G0's landed set already declares `reflect` on `boyko_scene` —
+> forced by G0's own gate 2 (`cargo check -p reflect-dogfood --all-targets --features reflect`
+> cannot resolve without it) — and [`REFLECTION-PLAN-GATES.md`](REFLECTION-PLAN-GATES.md)'s G0
+> Lands records the consequence where it is caused: *"`boyko_scene` declares `reflect` from G0
+> onward, so a `#[cfg(feature = "reflect")]` canary in `boyko_scene` is a KNOWN cfg — the
+> `unexpected_cfgs` red that mutation expects cannot fire unless the mutation also removes this
+> feature. The re-specification belongs to CORE."* The cfg is known, no warning fires, the canary
+> strips silently, and the "red" reads green — the F17 class, inside the rung that exists to
+> refuse it.
+>
+> Of the stop's two options, this re-specification takes the second — **target a crate that
+> declares no `reflect` feature** — and the crate is **`boyko_threadpool`**, because its NEVER is
+> architectural rather than predicted: it sits *below* the kernel (`boyko_ecs` depends on it), so
+> it cannot name a component, and a crate that can never define a component can never carry the
+> opt-in this feature exists for. (`boyko_math` was considered and REJECTED: `Vec3` is C6's
+> nested-dogfood inner type, so that crate plausibly bakes a `TypeInfo` behind `reflect` someday,
+> and this red would rot back into the same defect the day it does.) The mutation also lands where
+> the *real* residual hazard now lives: G0 gave `boyko_scene` and `boyko_render` their
+> declarations, so the next crate to write `#[cfg(feature = "reflect")]` without the manifest half
+> is by construction a crate that has not declared it.
+>
+> The stop's first option — the mutation ALSO removes `boyko_scene`'s declaration, restoring it
+> after — is REJECTED on a measurement, not on taste (run 2026-08-21, this worktree): with the
+> `reflect` feature and its optional `boyko-reflect` edge stripped from
+> `crates/boyko_scene/Cargo.toml`, **every selection in the workspace dies at version
+> resolution** — `cargo tree -p boyko-threadpool`, a selection that never reaches the dogfood,
+> exits 101 with *"package `reflect-dogfood` depends on `boyko-scene` with feature `reflect` but
+> `boyko-scene` does not have that feature"* — because `reflect-dogfood`'s leaf umbrella forwards
+> `boyko-scene/reflect` unconditionally, and a forward to a feature no manifest declares is a hard
+> resolver error (G0's Lands, measured again here) that fires **before and instead of** the
+> `unexpected_cfgs` diagnostic this RED exists to observe. An expected red that cannot be the
+> observed red is Defect B with one more moving part.
+
+> **Executed 2026-08-21 (worktree `D:/wt/reflect`, toolchain `stable-x86_64-pc-windows-gnu`).**
+> *Lands disposition:* bullets 1 and 3 were found already satisfied by G0's landed set —
+> verified against the tree, not assumed (`crates/boyko_reflect/src/lib.rs` carries the
+> directional-rule and D1 sections; both `boyko_reflect` and `reflect_fixture` manifests spell
+> `path = "../boyko_ecs"`; `boyko_reflect` has no `[features]` table). The rung's durable delta
+> is therefore this file's amendment plus the observed REDs below. *Prerequisite:* verified by
+> listing — `tests/reflect_manifest_census.rs`, `tests/reflect_ship_closure.rs`,
+> `tests/reflect_ci_coverage.rs`, `crates/reflect_fixture/tests/reflect_absence_census.rs`,
+> `crates/reflect_fixture/tests/reflect_leg_nonvacuity.rs`, and ci.yml's `reflect-on` /
+> `reflect-census` / `reflect-dogfood` jobs plus both Miri rows all exist. *Gate 1:*
+> `cargo build -p reflect-fixture` exit 0, `--features reflect` exit 0. *Gate 2:*
+> `cargo tree -p reflect-fixture` — `boyko-reflect` **0 hits**; with `--features reflect` —
+> present; both exit 0. *Primary RED:* canary in `src/bin/reflect_on.rs`; the G4 leg's debug
+> command run locally with the job's own `BOYKO_REFLECT_LEG=reflect-on` → **exit 101**,
+> *"error: red canary: the feature-ON leg is live"*, failing all four compilations of the two
+> `[[bin]]`s sharing the source; with the canary still in place, the default gate's scoped form
+> (`cargo clippy -p reflect-fixture -p boyko-reflect --all-targets -- -D warnings`, feature off)
+> → **exit 0, green** — F17's hazard shown live, and only the leg catches it. *Second RED (as
+> re-specified):* canary appended to `crates/boyko_threadpool/src/lib.rs`;
+> `cargo clippy -p boyko-threadpool --all-targets -- -D warnings` → **exit 101**,
+> *"error: unexpected `cfg` condition value: `reflect`"* spanned at the cfg
+> (`lib.rs:151:7`), with *"expected values for `feature` are: `default` and `scheduler-trace`"*
+> and *"`-D unexpected-cfgs` implied by `-D warnings`"* — and the canary's own text appears
+> **nowhere** in the output (0 hits): the diagnostic is the red, the `compile_error!` never
+> fires. A missing feature is a diagnostic, not a silence — the answer D16 and B6 gate 6 rest
+> on, now measured. *Restoration:* every mutated file restored byte-identically (sha256 equal
+> to the pre-mutation hash). *Regression:* G0's census (3 tests), G1 (7), G2 (2), G3 (2, the
+> self-building census), G4 (6 + the 1-test leg-nonvacuity) all re-run **exit 0** with
+> non-vacuous `running N` lines after the restorations.
 
 ---
 
