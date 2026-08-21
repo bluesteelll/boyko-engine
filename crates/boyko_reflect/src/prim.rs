@@ -44,22 +44,56 @@
 //! doctrine-driven inlining. If a direct-call consumer ever appears and a profile shows
 //! it matters, that is a measurement, and it changes this paragraph with it.
 //!
+//! # The by-kind dispatch, and why it is a `match` rather than a dense table
+//!
+//! [`getter_for`] / [`setter_for`] map a [`ScalarKind`] onto its pair. They exist for
+//! the [`array`] element accessors (CORE C5), which are handed an
+//! [`ArrayInfo::elem`][ai] rather than a baked fn-pointer, and for C7's derive, which
+//! picks a slot from the kind it inferred.
+//!
+//! A dense `[unsafe fn(…); 12]` indexed by `kind as usize` would be the house shape for
+//! a *runtime* table, but this one is resolved at compile time and a jump table is what
+//! the `match` lowers to anyway — while the `match`, written with **no wildcard arm and
+//! generated from the same macro rows as the accessors themselves**, additionally makes
+//! a newly added [`ScalarKind`] a *compile error* until it has a pair. That property is
+//! the reason for the shape; the discriminant-indexed array would silently answer a new
+//! kind with whatever sat at that index.
+//!
 //! [`FieldInfo`]: crate::type_info::FieldInfo
+//! [`array`]: crate::array
+//! [ai]: crate::type_info::ArrayInfo::elem
 
 use std::ptr;
 
 use boyko_ecs::ecs::identifiers::primitives::EntityId;
 
-use crate::scalar::Scalar;
+use crate::scalar::{Scalar, ScalarKind};
 
-/// Generates one monomorphic `get`/`set` pair per [`ScalarKind`].
+/// Generates one monomorphic `get`/`set` pair per [`ScalarKind`], plus the two
+/// wildcard-free dispatch functions over the same rows.
 ///
 /// The single `// SAFETY:` comment inside each half covers **every** expansion: the
 /// invariants are identical across kinds because the bodies are, and stating them once
 /// at the generating site is what keeps them from drifting apart the way twenty-four
 /// copies would.
 macro_rules! prim_accessors {
-    ($($get:ident, $set:ident, $t:ty, $extract:ident, $ty_name:literal;)*) => {$(
+    ($($kind:ident, $get:ident, $set:ident, $t:ty, $extract:ident, $ty_name:literal;)*) => {
+        /// Returns the reader baked for `kind`.
+        ///
+        /// The `match` carries **no wildcard arm** and is generated from the same rows
+        /// as the accessors, so a new [`ScalarKind`] fails to compile here until it has
+        /// a pair — see the module header for why this is not a discriminant-indexed
+        /// dense table.
+        pub fn getter_for(kind: ScalarKind) -> unsafe fn(*const u8) -> Scalar {
+            match kind { $( ScalarKind::$kind => $get, )* }
+        }
+
+        /// Returns the writer baked for `kind`. See [`getter_for`].
+        pub fn setter_for(kind: ScalarKind) -> unsafe fn(*mut u8, Scalar) -> bool {
+            match kind { $( ScalarKind::$kind => $set, )* }
+        }
+
+        $(
         #[doc = concat!("Reads a `", $ty_name, "` field as a [`Scalar`].")]
         ///
         /// # Safety
@@ -106,16 +140,16 @@ macro_rules! prim_accessors {
 }
 
 prim_accessors! {
-    get_bool,      set_bool,      bool,     as_bool,      "bool";
-    get_u8,        set_u8,        u8,       as_u8,        "u8";
-    get_u16,       set_u16,       u16,      as_u16,       "u16";
-    get_u32,       set_u32,       u32,      as_u32,       "u32";
-    get_u64,       set_u64,       u64,      as_u64,       "u64";
-    get_i8,        set_i8,        i8,       as_i8,        "i8";
-    get_i16,       set_i16,       i16,      as_i16,       "i16";
-    get_i32,       set_i32,       i32,      as_i32,       "i32";
-    get_i64,       set_i64,       i64,      as_i64,       "i64";
-    get_f32,       set_f32,       f32,      as_f32,       "f32";
-    get_f64,       set_f64,       f64,      as_f64,       "f64";
-    get_entity_id, set_entity_id, EntityId, as_entity_id, "EntityId";
+    Bool,     get_bool,      set_bool,      bool,     as_bool,      "bool";
+    U8,       get_u8,        set_u8,        u8,       as_u8,        "u8";
+    U16,      get_u16,       set_u16,       u16,      as_u16,       "u16";
+    U32,      get_u32,       set_u32,       u32,      as_u32,       "u32";
+    U64,      get_u64,       set_u64,       u64,      as_u64,       "u64";
+    I8,       get_i8,        set_i8,        i8,       as_i8,        "i8";
+    I16,      get_i16,       set_i16,       i16,      as_i16,       "i16";
+    I32,      get_i32,       set_i32,       i32,      as_i32,       "i32";
+    I64,      get_i64,       set_i64,       i64,      as_i64,       "i64";
+    F32,      get_f32,       set_f32,       f32,      as_f32,       "f32";
+    F64,      get_f64,       set_f64,       f64,      as_f64,       "f64";
+    EntityId, get_entity_id, set_entity_id, EntityId, as_entity_id, "EntityId";
 }

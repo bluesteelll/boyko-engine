@@ -471,9 +471,9 @@ does.~~
 
 | Path | Claim | Rung | How the number is obtained |
 |---|---|---|---|
-| enumerate (`info.fields`) | **0** | C5 | delta harness; the slice is `&'static` |
+| enumerate (`info.fields`) | **0** | C5 | delta harness; the slice is `&'static`. **Measured 2026-08-21: `enumerate (1 field(s)): baseline=0 measured=0 delta=0`** over 1000 walks |
 | `Prim` get / set | **0** | **C4** (was C5 — see the correction above) | delta harness, per `ScalarKind`; **measured 2026-08-21: delta 0 for all 12 kinds, get, set and the refused-set path, over 1000 calls each** |
-| array read (offset + stride + count) | **0** | C5 | delta harness; all three are `const` |
+| array read (offset + stride + count) | **0** | C5 | delta harness; all three are `const`. **Measured 2026-08-21: `array read (len 4): baseline=0 measured=0 delta=0`** over 4000 calls; its red seen at 4000/4000 |
 | **nested descend, depth ≥ 2** | **0 per level** | C6 | delta harness over `Transform → Vec3 → f32`; **a depth-1 harness proves nothing about recursion and is not accepted** |
 | enum discr read / write | **0** | C10 | delta harness |
 | `Opaque` field (skipped) | **0** | C9 | no accessor exists to call — asserted as `get.is_none() && set.is_none()` |
@@ -1104,6 +1104,92 @@ produced* `prim::get for Bool allocated 1000 time(s) over the no-op baseline in 
 per call, no noise, and the setter arms stayed green. C5 still runs its own, because what is
 untested here is the `array read` **arm**, not the counter.)*
 
+> **Executed 2026-08-21 (worktree `D:/wt/reflect`, toolchain `stable-x86_64-pc-windows-gnu` 1.97.1).**
+> *Lands:* `crates/boyko_reflect/src/array.rs` — `array_get` / `array_set` over an
+> `ArrayInfo`, with the `index < len` refusal ordered **before** the `index * stride`
+> multiply; and `crates/boyko_reflect/src/prim.rs` gains `getter_for` / `setter_for`,
+> the by-`ScalarKind` dispatch the element accessors need. `ArrayInfo` itself already
+> existed — C3 baked it — so this rung adds the *reader*, not the descriptor.
+> **The dispatch is a wildcard-free `match` generated from the same `prim_accessors!`
+> rows as the twenty-four accessors**, not the house-standard dense array indexed by
+> `kind as usize`: this table is resolved at compile time and lowers to a jump table
+> either way, and only the `match` makes a newly added `ScalarKind` a *compile error*
+> until it has a pair. The discriminant-indexed array would answer a new kind with
+> whatever sat at that index — the shape this campaign keeps paying for. The macro rows
+> gained a leading `ScalarKind` ident and nothing else moved.
+>
+> *Gate 1:* `every_element_round_trips_through_the_by_index_accessors` over `[f32;4]`,
+> `[u32;1]`, `[u8;60]`, `[i8;3]`, plus `every_element_lands_at_its_own_address`, which
+> writes all four arrays into ONE fixture and compares the whole struct against a
+> literal. **Both write every element before reading any**, deliberately: the rung's own
+> RED collapses a byte-wide array's stride to **0**, and a per-element write-then-read
+> pair would then agree with itself perfectly — C4 gate 1's self-consistency defect,
+> one rung later and with a different cause. A third test pins that the by-index writer
+> *adds* a bounds check rather than *replacing* D11's kind check. *Gate 2:*
+> `an_out_of_bounds_index_is_refused_in_both_directions` over `len`, `len + 1` and
+> `usize::MAX`, both accessors, with the fixture's bytes compared before/after; run in
+> both profiles, each carrying the runtime liveness probe (`debug_assert! executed =
+> true` / `= false`). *Gate 4:* three separate claims per shape — the descriptor's
+> `stride == size_of::<T>()`, the **measured** spacing of real element addresses, and
+> `stride * len == size_of::<[T; N]>()` — plus a **non-vacuity clause** proving the
+> fixture actually pads after an array, so "spacing taken from the next field's offset"
+> is a demonstrably different number: measured `offset_of!(tail) - offset_of!(i3) = 4`
+> against `size_of::<[i8;3]>() = 3`, `size_of::<Arrays>() = 88`. Without that clause the
+> gate is a tautology on a tightly packed struct. `u1` is len 1, so its measured-spacing
+> claim is *not defined*; the test prints that rather than silently skipping it.
+>
+> *Gate 3, MEASURED, both new arms exactly 0:* `enumerate (1 field(s)): baseline=0
+> measured=0 delta=0` and `array read (len 4): baseline=0 measured=0 delta=0`, on the
+> C4 instrument, in the same binary as the permanent positive control
+> (`deliberate allocations observed = 1`). The arms live in `tests/c4_prim_zero_alloc.rs`
+> and not in a `c5_*` twin because **a `#[global_allocator]` is one per binary** — a
+> second file would fork the allocator, the arming protocol and the positive control into
+> two copies free to drift. The array arm carries its own non-vacuity test
+> (`the_array_arm_actually_reads_the_array`), because a measured window that returned
+> `None` for every call would report delta 0 while measuring nothing.
+>
+> *First RED (stride from the wrong `size_of`), one edit at the single `descriptor_stride`
+> site, exit 101, **three** tests red:* gate 4 named the defect directly
+> (`f4: descriptor stride is not size_of::<f32>(): left: 3 right: 4`) and both gate-1
+> tests red on the data. *Recorded precisely, because the rung's prediction is off by
+> one element:* the rung says gate 1 *"reds on element 1..n"*, and the observed red is at
+> **element 0** — with `stride = 3` the writes of elements 1–3 overlap element 0's bytes
+> and destroy it before it is ever read (`f4[0] ... left: bits 0, right: bits 1056964608`).
+> The whole-struct comparison shows the same thing across all four arrays at once. *(The
+> mutation is UB by construction — `stride = 3` makes three of four `f32` reads
+> misaligned — so it was run natively and deliberately not under Miri.)*
+>
+> *Second RED (the arm's own):* `let _ = Vec::<u8>::with_capacity(1);` inserted into
+> `array_get` → gate 3 exit 101, *"array_get allocated **4000** time(s) over the no-op
+> baseline in 4000 calls"* — exactly one per call, no noise, and the `prim` and
+> `enumerate` arms stayed green in the same run.
+>
+> *Third RED, not named by the rung, run because gate 2 otherwise has no observed red —
+> and it REFUTED a sentence this rung's first draft had written into the module header.*
+> Moving the bounds check below the multiply: **debug → exit 101**, and it reds as
+> *"attempt to multiply with overflow"* raised at `array.rs:63` — a **panic out of a
+> library whose entire contract is to refuse rather than fail**, which is the shape a
+> maintainer "fixes" with `#[should_panic]`. **Release → exit 0, GREEN**: the wrapped
+> product is simply discarded, because the check is still keyed on `index`. So the cost
+> of the wrong order is a **debug-only panic, not a release wild read** — and the claim
+> "wraps into a wild pointer in a release build" is false for this shape and was deleted
+> from `array.rs`'s header and from the gate's doc comment. (`usize::MAX * stride` wraps
+> to `2^64 - stride`, which is above any real extent, so even an offset-keyed check
+> refuses it.) The rung is stronger for it: gate 2 is now documented as load-bearing in
+> the profile where it actually bites.
+>
+> *Restoration:* `array.rs`, `prim.rs`, `c5_array.rs`, `c4_prim_zero_alloc.rs` restored
+> from file copies after each mutation and verified by sha256 (`array.rs`
+> `6f69b7e6…1c03`, `c5_array.rs` `3c92b997…5100`). *Gate:* `cargo test -p boyko-reflect
+> --all-targets --no-fail-fast` — debug 4 + 19 + 1 + 13 + 7 + 7 + 8 = **59** across seven
+> binaries, release 5 + 19 + 1 + 13 + 7 + 7 + 8 = **60**, exit 0 both; `cargo +nightly
+> miri test -p boyko-reflect --all-targets` (TB) 4 + 8 + 0 + 13 + 7 + 0 + **8** green,
+> exit 0 — C5's new `unsafe` is covered, and `c4_prim_zero_alloc` is the `running 0
+> tests` its `#![cfg(not(miri))]` intends; `cargo check` / `cargo clippy -p boyko-reflect
+> --all-targets -- -D warnings` (touch-first, both profiles) exit 0. *Regression:* G0
+> census 3, G1 manifest 7, G2 closure 2, G3 absence 1 (+1 ignored calibration), G4
+> coverage 6, leg-nonvacuity 1, `internal_docs_anchors` 5 — all exit 0.
+
 ---
 
 ### C6 — `Nested`: the recursion contract, read side
@@ -1145,6 +1231,98 @@ mutation produces a stack overflow at some later rung and looks like a bug in wh
 `compile_fail` stops failing — i.e. the `.stderr` no longer matches — which is the shape this
 campaign has been bitten by (a trybuild fixture red for 87 commits because nobody re-blessed it).
 So gate 5 is run under `--no-fail-fast` and its `.stderr` is re-blessed only with a stated reason.
+
+> ## ⛔ STOPPED 2026-08-21, BEFORE THE FIRST EDIT — gate 3 has no instrument, and its RED mutates a list that does not exist
+>
+> C5 landed and is fully gated. **C6 was not started.** The rung as written contains one blocking
+> defect and one mutation defect; both are of the classes this campaign has already paid for, and
+> the blocking one is **not** mechanically resolvable inside CORE the way C4 gate 5's was — it
+> changes where a datum lives and adds an obligation to another rung, so it is an escalation, not
+> an amendment. **The resolution is the orchestrator's / architect's call; nothing below decides it.**
+>
+> ### Defect 1 (BLOCKING) — gate 3 asserts a property of "the C9 refusal list", and that list cannot exist at C6
+>
+> Gate 3: *"a test that the C9 refusal list covers every indirection kind (`Box`, `Vec`, `&T`,
+> `Option<Box<_>>`, raw pointers)"*. Its RED: *"Delete `Vec` from C9's refusal list …"*.
+>
+> **Evidence, measured on this worktree at `793d8d3a` + C5:**
+> * `grep -rn "REFUSALS" crates/ docs/ tests/` → **7 hits, every one inside C9's own prose in this
+>   file** (lines 318–319, 1369, 1380, 1382, 1384, 1392). **Zero occurrences in any source file.**
+> * `grep -rn "reflect" crates/boyko_macros/src/` → 2 hits, both unrelated prose (`bundle.rs:274`
+>   *"the registry layout reflects `size_of`"*, `lib.rs:504` *"reflection-free"*). The derive key
+>   `#[component(reflect)]` does not exist and does not land until **C7**, as the binding context
+>   for this session states.
+> * §5's own dependency tree is `C6 → C7 → C8 → C9`. C9's Lands is *"In `boyko_macros`: every
+>   rejection the derive must make"*, so C9 is strictly downstream of the derive, which is strictly
+>   downstream of this rung. **There is no ordering in which C9's list exists when C6 runs.**
+>
+> **The plan contradicts itself about where the proof lives**, and this is the same shape as the
+> §3.3-vs-C4-gate-5 contradiction corrected above. §3.1 says *"**C9's refusal test IS the
+> acyclicity proof**"* — i.e. at C9. C6 gate 3 says the proof is a C6 test. §5 then writes *"C9 may
+> land before C10/C11 and should: it is what makes C6's acyclicity proof true"* — which concedes
+> the dependency runs backwards and still schedules C9 four rungs later. One of the three has to
+> move.
+>
+> **Why this is not the C4 fix repeated.** C4's defect was *"which rung owns this arm"* — the
+> instrument moved one rung earlier, no API changed, no other rung gained an obligation. Here the
+> only ways to make gate 3 runnable at C6 are:
+> * **(a)** land the refusal set as a datum in `boyko_reflect` at C6 — e.g. a
+>   `pub const INDIRECTION_KINDS_REFUSED: &[&str]` that C6's test asserts covers the five kinds —
+>   and make C9's census assert `REFUSALS ⊇` it. This creates a **new cross-rung obligation** and a
+>   second list that can drift from the first; the campaign's own "dead datum" ledger is five
+>   entries long and this shape is how three of them started.
+> * **(b)** move gate 3 (and its RED) to **C9**, where §3.1 already says the proof lives, and give
+>   C6 an explicit note that its acyclicity rests on a gate that lands later — an honest but
+>   *weaker* v1, since C7/C8 would then descend with the proof outstanding.
+> * **(c)** re-order the ladder so a refusal census precedes the descend. This is a ladder change,
+>   not a rung change.
+>
+> Landing C6 with gate 3 silently skipped is the one option that is **not** available: a rung whose
+> gate nothing runs is this campaign's most repeated defect, and gate 3's own text says *"there is
+> no runtime guard, so this test is the only thing standing between v1 and an infinite descend"*.
+>
+> ### Defect 2 (mutation) — the second RED does not compile, so it reds the library rather than gate 5
+>
+> *"change `NestedCursor`'s `PhantomData<&'a ()>` to `PhantomData<*const ()>`"* leaves `'a`
+> referenced by nothing. **Measured** (scratch crate, `stable-x86_64-pc-windows-gnu` 1.97.1):
+>
+> ```text
+> error[E0392]: lifetime parameter `'a` is never used
+>  --> src\lib.rs:2:25
+>   | pub struct NestedCursor<'a> {
+>   |                         ^^ unused lifetime parameter
+> ```
+>
+> So the mutation cannot be run as written: it is a compile error in `boyko_reflect`, not a
+> `compile_fail` fixture that stopped failing. **The mutation whose *effect* the rung describes is
+> deleting the lifetime entirely** — reintroducing the bare `{ptr, info}` cursor that M2/O3 says is
+> *"deleted and never introduced"* — which is exactly the defect gate 5 exists to catch, and which
+> does make trybuild report *"expected compile error but compiled successfully"*. A variance-only
+> change (`PhantomData<*const &'a ()>`) is **not** a substitute: `'a` stays used, so the borrow is
+> still held and gate 5 still fails correctly.
+>
+> ### What was verified as RUNNABLE, so the resolution does not have to re-check it
+>
+> * **Gate 1, fixture half** — buildable today: hand-baked `TypeInfo` statics are what C3 shipped
+>   and `tests/c3_type_info.rs` already carries a depth-1 `Nested` fixture (`Inner { x: f32, y: f32 }`)
+>   to extend to depth 2.
+> * **Gate 1, dogfood half** — all four engine types exist and have the shapes the rung assumes:
+>   `Transform { translation: Vec3, rotation: Quat, scale: Vec3 }`
+>   (`crates/boyko_scene/src/transform.rs:46`, layout-pinned at 40 B),
+>   `Vec3 { x: f32, y: f32, z: f32 }` (`crates/boyko_math/src/vec.rs:145`),
+>   `Name(pub NameId)` / `NameId(pub u32)` (`crates/boyko_scene/src/identity.rs:56`, `:47`, both
+>   `#[repr(transparent)]`, both layout-pinned). `Transform → Vec3 → f32` and `Name → NameId → u32`
+>   are both genuine depth-2 descends, and the second is the tuple-struct case in the bargain.
+>   *Note for whoever builds it:* with no derive until C7 these statics are hand-baked in
+>   `reflect_dogfood`, so `boyko_scene`'s `reflect` feature gates the **dependency edge** and not
+>   yet any `#[cfg]`'d body — the feature is real, the gating is not load-bearing until C7.
+> * **Gate 2** — the C4/C5 instrument takes it: `tests/c4_prim_zero_alloc.rs` already measures
+>   `enumerate` and `array read` at delta 0 and carries the positive control.
+> * **Gate 4** — `-p boyko-reflect` is already on the Miri allowlist and green (§7.2's first row).
+> * **Gate 5** — needs `trybuild = "1"` as a **dev**-dependency of whichever package hosts the
+>   corpus; `boyko-reflect` has none today (`proptest` is its only dev-dep). D18 governs the
+>   ship-visible table only, and the manifest already says so, so this is additive — but it is a
+>   manifest change and **G1's census must be re-run**, which it is not today for a new dev-dep.
 
 ---
 

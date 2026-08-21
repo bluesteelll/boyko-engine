@@ -37,7 +37,12 @@
 //! * [`prim`] — the monomorphic `get_*`/`set_*` accessor library a `Prim` field's
 //!   fn-pointer slots are filled from, carrying the **release** kind check (CORE C4)
 //!   and the read-shared/write-raw asymmetry both halves of it depend on.
+//! * [`array`] — by-index element access over an [`ArrayInfo`]'s `offset + stride +
+//!   count` (CORE C5), with the bounds check ordered **before** the multiply so
+//!   `usize::MAX` is a refusal in both profiles rather than a debug panic and a
+//!   release wild pointer.
 
+pub mod array;
 pub mod prim;
 pub mod registry;
 pub mod scalar;
