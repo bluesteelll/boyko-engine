@@ -55,6 +55,8 @@
 
 #![cfg(windows)]
 
+mod common;
+
 use core::slice;
 
 use boyko_rhi::enums::{AddressMode, BarrierAccess, BarrierStage, DescriptorKind, Filter};
@@ -80,6 +82,22 @@ use boyko_render::{
 /// that always fits.
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 64;
+
+/// UI-ADVANCED S2 (S-D6): SHA-256 of the full swapchain readback, blessed on the 64 B
+/// `UiInstance` build (commit A of the S2 two-commit protocol) — the widening must
+/// reproduce it exactly (gate G2-3). Unlike the offscreen goldens' fixed 64×64 RGBA
+/// frames, this readback's extent AND byte order are WSI-decided (the driver clamps
+/// the surface extent; the swapchain picks BGRA or RGBA), so the pin carries both and
+/// is asserted only when the live frame matches the blessed shape — a different WSI
+/// shape gets a loud NOTE, never a silent pass-as-checked. Re-bless:
+/// `BOYKO_UI_GOLDEN_BLESS=1`.
+const UI_GOLDEN_SHA256: &str = "23145246c9a642c96eb3abce5c0d7a5dbbb0e1bd9febf3499e7e7b0f7bcffdd7";
+/// The swapchain extent the hash above was blessed at (WSI-clamped: the RTX 3060
+/// driver's minimum surface extent widens the requested 64×64 to 120×64).
+const UI_GOLDEN_EXTENT: (u32, u32) = (120, 64);
+/// The swapchain readback byte order the hash above was blessed at
+/// (`VK_FORMAT_B8G8R8A8_UNORM`, format 44).
+const UI_GOLDEN_IS_BGRA: bool = true;
 
 /// Per-channel tolerance on the readback bytes: the float->UNORM sample round-trip of
 /// the composite + the premultiplied blend ROP make a bit-exact match brittle; the
@@ -740,6 +758,26 @@ fn ui_rects_render_through_the_swapchain_present_hook_golden() {
     // (Decision 9 LoadOp::Load) a texel covered by NO UI rect keeps the BLUE SCENE — the
     // UI pass LOADED the composited scene, did not clear it.
     assert_readback_close(read(2, 2), SCENE_RGBA, is_bgra, "uncovered texel == BLUE scene (UI pass LoadOp::Load preserved it)");
+
+    // S-D6: the full-image pin, gated on the WSI shape it was blessed at (see the
+    // constant's doc). In bless mode the helper prints the hash and this arm prints the
+    // shape to record beside it.
+    if std::env::var_os("BOYKO_UI_GOLDEN_BLESS").is_some() {
+        println!(
+            "BLESS ui_rect_swapchain_golden: extent {w}x{h}, is_bgra = {is_bgra} (the hash is \
+             over the RAW readback bytes; the BMP dump assumes RGBA, so R/B appear swapped \
+             in the viewer when is_bgra — the geometry is what to eyeball)"
+        );
+        common::assert_ui_golden_image_pin("ui_rect_swapchain_golden", &out, w, h, UI_GOLDEN_SHA256);
+    } else if (w, h) == UI_GOLDEN_EXTENT && is_bgra == UI_GOLDEN_IS_BGRA {
+        common::assert_ui_golden_image_pin("ui_rect_swapchain_golden", &out, w, h, UI_GOLDEN_SHA256);
+    } else {
+        eprintln!(
+            "NOTE ui_rect_swapchain_golden: live readback {w}x{h} bgra={is_bgra} differs from \
+             the blessed WSI shape {UI_GOLDEN_EXTENT:?} bgra={UI_GOLDEN_IS_BGRA} — the S-D6 \
+             image hash was NOT checked on this host (the texel asserts above did run)"
+        );
+    }
 
     // Clean reverse-order teardown. The renderer was ALREADY dropped before the readback
     // read above (the wait-idle that fences the copy); the remaining windowed handles

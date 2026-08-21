@@ -36,7 +36,12 @@ use boyko_render::{pack_ui_instance, record_ui_rects, PackInput, RhiContext, UiI
 
 use boyko_fontbake::atlas::{AtlasImage, AtlasKind, AtlasMeta, BakedFont, GlyphMetrics};
 
-use common::{assert_validation_clean, boot_or_skip};
+use common::{assert_ui_golden_image_pin, assert_validation_clean, boot_or_skip};
+
+/// UI-ADVANCED S2 (S-D6): SHA-256 of the full 128×128 RGBA readback, blessed on the
+/// 64 B `UiInstance` build (commit A of the S2 two-commit protocol) — the widening
+/// must reproduce it exactly (gate G2-3). Re-bless: `BOYKO_UI_GOLDEN_BLESS=1`.
+const UI_GOLDEN_SHA256: &str = "44f3bab168728349d92fe7df9e5d2f10ab6c5207af0477e696e9adf4fa02e6f1";
 
 /// A 128×128 offscreen target — large enough to hold a 96-px glyph quad with margin.
 const WIDTH: u32 = 128;
@@ -344,6 +349,11 @@ fn ui_text_msdf_corner_stays_crisp_at_small_and_large_scale_golden() {
          boundary is a HARD edge at every scale — the defining sharp-corner MSDF property): got {:02x?}",
         at(72, 100)
     );
+
+    // S-D6: the full-image pin — the four band probes above sample two columns of a
+    // 128×128 image; every other texel (both quads' AA edges included) is visible
+    // only here.
+    assert_ui_golden_image_pin("ui_text_multiscale_gpu_golden", &out, WIDTH, HEIGHT, UI_GOLDEN_SHA256);
 
     // The GPU-half soundness oracle: zero validation messages across the multi-scale draw.
     assert_validation_clean(rhi.context());

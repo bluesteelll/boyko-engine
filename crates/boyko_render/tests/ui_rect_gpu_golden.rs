@@ -48,7 +48,12 @@ use boyko_render::{
     pack_ui_instance, record_ui_rects, PackInput, RhiContext, UiInstance, UiOrtho,
 };
 
-use common::{assert_validation_clean, boot_or_skip};
+use common::{assert_ui_golden_image_pin, assert_validation_clean, boot_or_skip};
+
+/// UI-ADVANCED S2 (S-D6): SHA-256 of the full 64×64 RGBA readback, blessed on the
+/// 64 B `UiInstance` build (commit A of the S2 two-commit protocol) — the widening
+/// must reproduce it exactly (gate G2-3). Re-bless: `BOYKO_UI_GOLDEN_BLESS=1`.
+const UI_GOLDEN_SHA256: &str = "a112a6995afa1bfaae5c0b1c68b1aa60f42e24816501fd0e8e3d92da00e24c2e";
 
 /// The offscreen image dimensions — small but multi-texel so a covered/uncovered
 /// boundary and the per-instance placement are unambiguous (matches the Rung-0.5
@@ -364,6 +369,11 @@ fn ui_rects_render_through_the_full_render_path_golden() {
         bg_texel, CLEAR_BYTES,
         "an uncovered texel must keep the CLEAR color (the UI pass loaded, did not clear): got {bg_texel:02x?}"
     );
+
+    // S-D6: the full-image pin — sees what the three texel probes above cannot
+    // (an AA edge that moved, a radius that appeared, a field the shader mirror
+    // swapped — mutation M2-b's whole class).
+    assert_ui_golden_image_pin("ui_rect_gpu_golden", &out, WIDTH, HEIGHT, UI_GOLDEN_SHA256);
 
     assert_validation_clean(rhi.context());
 

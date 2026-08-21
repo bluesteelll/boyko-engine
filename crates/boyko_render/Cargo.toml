@@ -136,6 +136,16 @@ boyko-threadpool = { path = "../boyko_threadpool" }
 # Acyclic + TEST-ONLY: `boyko_render` (dev) -> `boyko-input`; `boyko-input` names no
 # render crate (its deps are ecs/macros/utils/math), so no production cycle is introduced.
 boyko-input = { path = "../boyko_input" }
+# UI-ADVANCED S2 measurement §10.2: `benches/ui_pack_sort.rs` — wall-clock pack+sort at
+# N ∈ {256, 2048}, the SAME deterministic scene on the 64 B and the 80 B `UiInstance`
+# builds (criterion median of each build; the bytes are arithmetic, the time is not, and
+# only the time can say whether the sort's gather — which touches every record twice —
+# notices the widening). Workspace-pinned criterion 0.5 like every other bench crate.
+criterion.workspace = true
+
+[[bench]]
+name = "ui_pack_sort"
+harness = false
 
 [lints]
 workspace = true

@@ -63,7 +63,12 @@ use boyko_render::{pack_ui_instance, record_ui_rects, PackInput, RhiContext, UiI
 
 use boyko_fontbake::atlas::{AtlasImage, AtlasKind, AtlasMeta, BakedFont, GlyphMetrics};
 
-use common::{assert_validation_clean, boot_or_skip};
+use common::{assert_ui_golden_image_pin, assert_validation_clean, boot_or_skip};
+
+/// UI-ADVANCED S2 (S-D6): SHA-256 of the full 64×64 RGBA readback, blessed on the
+/// 64 B `UiInstance` build (commit A of the S2 two-commit protocol) — the widening
+/// must reproduce it exactly (gate G2-3). Re-bless: `BOYKO_UI_GOLDEN_BLESS=1`.
+const UI_GOLDEN_SHA256: &str = "fb7ffd693664aaa85061b0cce20bf5e1f2015e4f976a807b48ce5312522e79ee";
 
 /// The offscreen image dimensions (matches the rect golden geometry).
 const WIDTH: u32 = 64;
@@ -471,6 +476,11 @@ fn ui_text_renders_msdf_glyphs_through_the_full_render_path_golden() {
          solid interior — the UV lane selects a distinct atlas cell/region): got {:02x?}",
         at(48, 20)
     );
+
+    // S-D6: the full-image pin — the gate that sees a glyph UV moved by one texel,
+    // which none of the four band/interior probes above can (the M2-b/M2-d class:
+    // the text lane's un-aliasing is exactly a UV move).
+    assert_ui_golden_image_pin("ui_text_gpu_golden", &out, WIDTH, HEIGHT, UI_GOLDEN_SHA256);
 
     // The GPU-half soundness oracle: zero validation messages across the text draw.
     assert_validation_clean(rhi.context());

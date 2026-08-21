@@ -89,3 +89,82 @@ pub fn pattern_bytes(rows: usize) -> Vec<u8> {
     }
     out
 }
+
+// ---------------------------------------------------------------------------
+// UI-ADVANCED S2 (S-D6): the full-readback image pin for the UI GPU goldens.
+// ---------------------------------------------------------------------------
+
+/// Writes a 32-bit top-down BMP (RGBA input, swapped to the BGRA byte order BMP
+/// stores) — the `ui_hud_screenshot` writer, shared here so the S-D6 bless dump
+/// has a human-viewable artifact.
+fn write_bmp(path: &std::path::Path, rgba: &[u8], w: u32, h: u32) -> std::io::Result<()> {
+    debug_assert_eq!(
+        rgba.len(),
+        (w * h * 4) as usize,
+        "invariant: BMP body is w*h*4 bytes"
+    );
+    let pixel_bytes = w * h * 4;
+    let pixel_offset: u32 = 54; // 14-byte file header + 40-byte info header.
+    let file_size = pixel_offset + pixel_bytes;
+
+    let mut buf = Vec::with_capacity(file_size as usize);
+    // --- BITMAPFILEHEADER (14 bytes) ---
+    buf.extend_from_slice(b"BM");
+    buf.extend_from_slice(&file_size.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes()); // reserved1
+    buf.extend_from_slice(&0u16.to_le_bytes()); // reserved2
+    buf.extend_from_slice(&pixel_offset.to_le_bytes());
+    // --- BITMAPINFOHEADER (40 bytes) ---
+    buf.extend_from_slice(&40u32.to_le_bytes()); // biSize
+    buf.extend_from_slice(&(w as i32).to_le_bytes()); // biWidth
+    buf.extend_from_slice(&(-(h as i32)).to_le_bytes()); // biHeight (negative => top-down)
+    buf.extend_from_slice(&1u16.to_le_bytes()); // biPlanes
+    buf.extend_from_slice(&32u16.to_le_bytes()); // biBitCount
+    buf.extend_from_slice(&0u32.to_le_bytes()); // biCompression = BI_RGB
+    buf.extend_from_slice(&pixel_bytes.to_le_bytes()); // biSizeImage
+    buf.extend_from_slice(&0i32.to_le_bytes()); // biXPelsPerMeter
+    buf.extend_from_slice(&0i32.to_le_bytes()); // biYPelsPerMeter
+    buf.extend_from_slice(&0u32.to_le_bytes()); // biClrUsed
+    buf.extend_from_slice(&0u32.to_le_bytes()); // biClrImportant
+    // --- pixel data: RGBA -> BGRA (the ONLY channel swap; no row flip) ---
+    for texel in rgba.chunks_exact(4) {
+        buf.extend_from_slice(&[texel[2], texel[1], texel[0], texel[3]]);
+    }
+    std::fs::write(path, buf)
+}
+
+/// The S-D6 image pin: SHA-256 of the WHOLE readback, asserted against the constant the
+/// test file carries. A texel assertion cannot see a UV that moved by a texel — which is
+/// exactly what D1's un-aliasing does to every glyph; the full-image hash is the cheapest
+/// thing that sees it (`docs/UI-PLAN-SPRITES.md` S-D6, mutation M2-b).
+///
+/// `BOYKO_UI_GOLDEN_BLESS=1` prints the fresh hash and dumps a top-down BMP into
+/// `target/screenshots/` for a human to look at, then returns WITHOUT asserting (the
+/// bless run of a deliberately changed image must not red before the constant is
+/// updated). The texel assertions in each golden stay — they say WHAT is wrong; this
+/// hash says THAT something is.
+pub fn assert_ui_golden_image_pin(name: &str, rgba: &[u8], w: u32, h: u32, expected_hex: &str) {
+    let mut hasher = boyko_render::vg_census::Sha256::new();
+    hasher.update(rgba);
+    let got = hasher.finish_hex();
+    if std::env::var_os("BOYKO_UI_GOLDEN_BLESS").is_some() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("target")
+            .join("screenshots");
+        std::fs::create_dir_all(&dir).expect("create target/screenshots for the bless dump");
+        let path = dir.join(format!("{name}.bless.bmp"));
+        write_bmp(&path, rgba, w, h).expect("write the S-D6 bless BMP");
+        println!("BLESS {name}: sha256 = {got} ({w}x{h} RGBA readback); BMP -> {}", path.display());
+        return;
+    }
+    assert_eq!(
+        got, expected_hex,
+        "{name}: the full-readback SHA-256 moved (S-D6 image pin, {w}x{h}). Something changed \
+         the rendered image that the texel probes did not see. If the change is DELIBERATE \
+         (the rung's own text says the golden moves), re-bless with BOYKO_UI_GOLDEN_BLESS=1, \
+         LOOK at the dumped BMP, and update the constant in the same commit — otherwise STOP: \
+         this is the gate R1 says nothing else can fail."
+    );
+}
