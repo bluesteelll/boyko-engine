@@ -1000,6 +1000,18 @@ codes! {
     // put a `Warn` in every log for every folder that ships four maps instead of five.
     (2206, W, W2206, RatePolicy::Once,  CodeStatus::Live,
         "A material texture file exists but failed to decode, so the scalar fallback is used"),
+    // Numbered here rather than beside `W2205` because this registry is ordered by NUMBER and 2206
+    // was already spent; the subject is `boyko_render`'s, like 2201..2205.
+    //
+    // Distinct from `W3006` ("the render path was degraded") even though both report a capability
+    // the boot could not serve. 3006 is the HOST's, fires at boot, and its fix is "ask for a path
+    // this device supports"; this one fires from a per-frame render system reading a request the
+    // owner may raise at any time, and its fix names five specific boot preconditions plus the
+    // ordering rule that the split is resolved from a BOOT SNAPSHOT. Check 2 makes a code a page
+    // with ONE `## How to fix`, and those two pages are not the same page -- the same reasoning
+    // that split `W2201` from `W2204`.
+    (2207, W, W2207, RatePolicy::Once,  CodeStatus::Live,
+        "VB-SV0 was requested on a boot whose resolved render path cannot carry it, so it is off"),
     // ── L8a: `boyko_image` ──────────────────────────────────────────────────────────────────
     // `Every` for both: each occurrence names a different chunk or a different stream, the decode
     // CONTINUES past them, and a file with two corrupt chunks is a different report from a file
@@ -1442,6 +1454,7 @@ mod tests {
             (b'W', 2204), // L8a -- non-finite lights dropped from the GPU table
             (b'W', 2205), // L8a -- a render-path config changed after the consumer set froze
             (b'W', 2206), // L8a -- a material texture failed to decode
+            (b'W', 2207), // VB-SV0 requested on a boot that cannot carry it (found by the census)
             (b'W', 2601), // L8a -- PNG chunk CRC-32 mismatch
             (b'W', 2602), // L8a -- zlib Adler-32 mismatch
             (b'E', 3001), // L8b -- boyko_demo could not start
