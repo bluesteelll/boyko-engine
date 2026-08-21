@@ -25,7 +25,7 @@ struct GrowthBundle {
 /// 36768, 73536) with the X.G store. Every spawned handle must stay valid and
 /// its component readable with the right value.
 #[test]
-#[cfg_attr(miri, ignore)] // 100k spawns â€” minutes under Miri; M1/M2 cover the store there
+#[cfg_attr(miri, ignore = "100k spawns - minutes under Miri; M1/M2 cover the store there")]
 fn i1_spawn_across_growth_thresholds() {
     let mut world = EcsMaster::new();
     let mut all = Vec::with_capacity(100_000);
@@ -59,7 +59,7 @@ fn i1_spawn_across_growth_thresholds() {
 /// `inland_store::tests::addresses_stable_across_multi_slab_growth` (U-S2)
 /// and `entity_master::tests::xg_b6_slot_address_stable_across_growth`.
 #[test]
-#[cfg_attr(miri, ignore)] // 70k spawns; the Miri half is miri_entity_store.rs
+#[cfg_attr(miri, ignore = "70k spawns; the Miri half is miri_entity_store.rs")]
 fn i2_commit_frontier_growth_with_early_entity_intact() {
     let mut world = EcsMaster::new();
 
@@ -91,7 +91,7 @@ fn i2_commit_frontier_growth_with_early_entity_intact() {
 /// 0, recycled id space re-zeroed by the D5 memset) fully functional. Guards
 /// the stale-bytes hazard end-to-end.
 #[test]
-#[cfg_attr(miri, ignore)] // 50k spawns; the Miri clear/regrow half is miri_entity_store.rs
+#[cfg_attr(miri, ignore = "50k spawns; the Miri clear/regrow half is miri_entity_store.rs")]
 fn i3_clear_respawn_no_stale_liveness() {
     let mut world = EcsMaster::new();
 

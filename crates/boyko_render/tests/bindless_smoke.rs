@@ -28,7 +28,7 @@ use boyko_render::bindless::{BindlessTextureTable, create_solid_color_texture};
 use common::{assert_validation_clean, boot_or_skip};
 
 #[test]
-#[ignore]
+#[ignore = "boots a validation-enabled Vulkan device (headless, no window); the orchestrator runs it on the GPU (see module header)"]
 fn bindless_smoke_create_write_two_slots_and_teardown() {
     let Some(ctx) = boot_or_skip("bindless_smoke_create_write_two_slots_and_teardown") else {
         return;

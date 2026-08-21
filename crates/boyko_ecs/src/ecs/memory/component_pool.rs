@@ -3070,7 +3070,7 @@ mod tests {
     /// Miri: ignored (4096-add loop; the M-XI suite covers the identical
     /// bookkeeping with a small-granule-count geometry under Tree Borrows).
     #[test]
-    #[cfg_attr(miri, ignore)]
+    #[cfg_attr(miri, ignore = "tractability: a 4096-add loop; the M-XI suite (miri_pool_growth.rs) pins the identical bookkeeping at small-granule geometry")]
     fn address_stability_across_three_slab_growths() {
         use crate::ecs::core::change_detection::Tick;
 
@@ -3207,7 +3207,7 @@ mod tests {
     /// reads ZERO until stamped (write-before-read), then reads its stamp,
     /// and the new never-written tail `[1025, 2048)` reads ZERO.
     #[test]
-    #[cfg_attr(miri, ignore)]
+    #[cfg_attr(miri, ignore = "tractability: 1025 adds + two 1023-slot raw tick scans; the tick bases are pub(crate), so no tests/ Miri suite can reach this surface")]
     fn tick_lockstep_and_jxi_zero_at_slab_boundary() {
         use crate::ecs::core::change_detection::Tick;
 
@@ -3312,7 +3312,7 @@ mod tests {
     /// no uninit `[len, committed_rows)` slot dropped, and the growth event
     /// itself dropped nothing (O(1), zero bytes copied, zero drops).
     #[test]
-    #[cfg_attr(miri, ignore)]
+    #[cfg_attr(miri, ignore = "tractability: 1500 Arc-carrying rows dropped one by one; M-XI miri_drop_count_exact_across_boundary pins the same count at 70 rows")]
     fn drop_count_exact_across_growth_boundary() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};

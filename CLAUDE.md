@@ -51,6 +51,66 @@ measurement, not for tidiness.**
   cull gained a bound query. Neither was visible until the flag was passed. **"Green" without this
   flag means "green up to the first thing already known to be red".**
 
+### The ignored suite — legs by what the machine has
+
+The four commands above run **none** of the 164 `#[ignore]`d tests (143 unconditional + 21
+`#[cfg_attr(miri, ignore = …)]`). Every one of them now states its requirement at the site, and
+[tests/ignore_reasons_census.rs](tests/ignore_reasons_census.rs) fails the build if a new one does
+not — a bare `#[ignore]` is the **third** way to make a check disappear, after `unsafe` and
+`#[allow(clippy::disallowed_types)]`, and it now carries a written rationale like the other two.
+
+**Leg: device-free ignored tests.** Runs on any machine, no GPU, ~0.03 s. **Covers 1 test.**
+
+```powershell
+cargo test -p boyko-log --test l14_sink_policy -- --ignored --test-threads=1
+```
+
+The output must read `running 1 test`. A `running 0 tests` line is a vacuous pass, not a pass —
+see the `#![cfg(miri)]` trap below, which produced exactly that.
+
+**Leg: device-needing ignored tests.** A machine with the GPU; the orchestrator or the owner runs
+it, per-binary with `--test-threads=1`. **Covers 135 tests** across `boyko_app`, `boyko_render` and
+`boyko_rhi_vulkan`. Four of them need a non-default cargo feature and are not even *compiled*
+otherwise (`--features hwrt` ×3, `--features spec_constant_smoke` ×1); ~131 additionally sit behind
+`#![cfg(windows)]` and vanish on Linux. There is no single command — each binary has its own
+env-var protocol in its module header (`BOYKO_DISABLE_VALIDATION`, `BOYKO_HZB_DUMP`,
+`BOYKO_WINDOW_FRAMES`, …).
+
+**Leg: Miri.** `cargo +nightly miri test` already carries **22** of the ignores — the 21
+`cfg_attr(miri, …)` sites (which run *natively* and are skipped only under Miri) plus
+`miri_fixed_loop`'s one plain ignore. None of these belong to either leg above.
+
+**Six ignored tests belong to no leg at all**, and must not be swept into one: three *generators*
+that assert nothing and emit source to paste (`dump_maximal_frame_barrier_stream`,
+`dump_vb_unsplit_barrier_streams`, `dump_vb_split_barrier_streams` — the second's own doc warns
+that running it casually re-measures the baselines the split is compared against), two *deferred
+milestones* that are RED by design until M2's JCGT cubic lands
+(`brick_field_is_conservative_lower_bound`, `trilinear_reconstruct_is_a_tight_lower_bound_in_r1`),
+and one *timing probe* documented "NOT a CI gate" (`no_starvation_every_worker_makes_progress`).
+
+⚠️ **The device-free leg is one test, and it is an explicit invocation rather than a filter,
+because the partition CANNOT be derived from the reason strings.** A keyword classifier over
+`{GPU, RTX, Vulkan, windowed, device, dispatch}` puts 10 of the 143 on the device-free side, and
+**8 of those 10 are wrong** — and wrong in the direction that produces a green:
+
+- `negative_chained_barrier_hazard` and `a5_gpu_off_vs_on_wall_clock_ab` **do** need a device; their
+  reasons name the *hazard* and the *purpose*, not the requirement. Both call `boot_*_or_skip`, so
+  on a GPU-less box they return early and **pass** — a leg that includes them reports green while
+  measuring nothing.
+- `miri_app_driver_substeps_and_hold` is inside a `#![cfg(miri)]` file, so natively it does not
+  exist. Filtering for it prints `running 0 tests` and exits 0. **Measured while writing this leg.**
+- The other five are the generators / deferred / flaky above, which would pass meaninglessly, fail
+  outright, or flake.
+
+The property the leg needs — *what does this test require, and is it a gate at all* — is simply not
+what a prose reason answers. **Making it mechanical takes a reason PREFIX from a closed vocabulary**,
+checked by the same census: `#[ignore = "<class>: <prose>"]` with `class` one of `gpu`,
+`gpu-windowed`, `gpu-cap` (RT / ray-query / `VK_KHR_pipeline_executable_properties`), `feature`,
+`solo` (device-free, needs `--test-threads=1`), `slow` (device-free, wall-clock budget),
+`miri-slow`, `generator`, `deferred`, `flaky`. Today's tree maps onto it exactly — 135 `gpu*`/
+`feature`, 1 `solo`, 1 `miri-slow`, 3 `generator`, 2 `deferred`, 1 `flaky` — so the migration is
+mechanical, and afterwards each leg is a `grep` and every new ignore picks its own leg at the site.
+
 ## Target platform
 
 - OS: Windows / Linux (x86_64)

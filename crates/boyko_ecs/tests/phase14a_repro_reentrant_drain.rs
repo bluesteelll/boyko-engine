@@ -76,7 +76,10 @@ struct ReproTriggerBundle {
 /// re-entrancy-guarded, `delete_entity`'s own end-of-body drain re-applies the
 /// despawn and the debug_assert in `DespawnCommand::apply` fires.
 #[test]
-#[cfg_attr(miri, ignore)] // thread pool — Phase 9.1 precedent
+#[cfg_attr(
+    miri,
+    ignore = "Phase 9.1-era ignore, NOT re-validated since Phase 9.3a made every executor wait               site Miri-cooperative (schedule.rs carries #[cfg(miri)] yield_now() at both drain               sites); miri_schedule_parallel runs the same 2-worker Schedule::run green under               Miri, so this is LIKELY REMOVABLE -- unverifiable on this box (Miri needs the               nightly MSVC toolchain, which was removed). miri_phase14a covers the               enqueue-then-drain path single-threaded meanwhile."
+)]
 fn schedule_hook_enqueued_despawn_applies_exactly_once() {
     REMOVE_FIRES.store(0, SEQ);
     let pool = ThreadPoolBuilder::new().num_threads(2).build();

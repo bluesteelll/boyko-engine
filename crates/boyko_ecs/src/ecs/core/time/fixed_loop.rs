@@ -242,7 +242,12 @@ mod tests {
             /// post-loop `overstep < timestep`, and
             /// `elapsed == steps_total × timestep`.
             #[test]
-            #[cfg_attr(miri, ignore)]
+            #[cfg_attr(
+                miri,
+                ignore = "Miri wall-time: 64 cases x up to 39 frames on a fresh world each; \
+                          the same accumulate/expend math is covered there by \
+                          miri_fixed_loop's M-P20-1"
+            )]
             fn fixed_advance_invariants(
                 raw_deltas in proptest::collection::vec(0u64..400_000_000, 1..40)
             ) {

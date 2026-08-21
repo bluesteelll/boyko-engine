@@ -24,7 +24,7 @@ use boyko_render::{ColorSpace, TextureData, build_texture_gpu, mip_levels_for};
 use common::{assert_validation_clean, boot_or_skip};
 
 #[test]
-#[ignore]
+#[ignore = "boots a validation-enabled Vulkan device (headless, no window); the orchestrator runs it on the GPU (see module header)"]
 fn texture_upload_smoke_checkerboard_8x8_builds_mip_chain_and_bindless_slot() {
     let Some(ctx) =
         boot_or_skip("texture_upload_smoke_checkerboard_8x8_builds_mip_chain_and_bindless_slot")

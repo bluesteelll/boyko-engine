@@ -483,7 +483,7 @@ mod tests {
     /// semantics (resize-with-NULL): random ensure/write/clear/read sequences
     /// must agree slot-for-slot.
     #[test]
-    #[cfg_attr(miri, ignore)] // 64 cases × slot-by-slot 40k-slot comparisons — hours under Miri
+    #[cfg_attr(miri, ignore = "tractability: 64 proptest cases × slot-by-slot 40k-slot comparisons — hours under Miri")]
     fn model_equivalence_with_vec_resize_semantics() {
         use proptest::prelude::*;
         use proptest::test_runner::{Config, TestRunner};

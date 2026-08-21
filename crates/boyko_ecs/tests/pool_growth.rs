@@ -115,7 +115,7 @@ static I1_FRAME_ADDED: AtomicUsize = AtomicUsize::new(0);
 /// handles over the whole range, and the pool frontier
 /// (`committed_rows >= 100_000 > 65_536`).
 #[test]
-#[cfg_attr(miri, ignore)]
+#[cfg_attr(miri, ignore = "tractability: 100 k rows through the schedule apply-window (see the file's # Miri note)")]
 fn cross_ceiling_spawn_100k_one_archetype() {
     I1_ENTITIES.lock().expect("probe").clear();
     I1_DO_SPAWN.store(false, SEQ);
@@ -288,7 +288,7 @@ static I2_FRAME_ADDED_TAG: AtomicUsize = AtomicUsize::new(0);
 ///   `[0, 0, 0, 2500, 0]`),
 /// * the target pool's frontier covers all 2500 rows.
 #[test]
-#[cfg_attr(miri, ignore)]
+#[cfg_attr(miri, ignore = "tractability: 2500 spawns + 2500 insert migrations through the apply-window (see the file's # Miri note)")]
 fn migration_into_grown_target_preserves_bytes_and_ticks() {
     I2_ENTITIES.lock().expect("probe").clear();
     I2_DO_SPAWN.store(false, SEQ);
@@ -478,7 +478,7 @@ unsafe fn i3_on_add(mut w: DeferredEcsMaster<'_>, _ctx: HookContext) {
 /// a double-apply would inflate both), pool frontier grown past the
 /// boundary, and the value checksum proves every row landed exactly once.
 #[test]
-#[cfg_attr(miri, ignore)]
+#[cfg_attr(miri, ignore = "tractability: 1027 deferred spawns driving a re-entrant hook drain (see the file's # Miri note)")]
 fn hook_deferred_spawns_grow_same_archetype_at_slab_boundary() {
     I3_FIRES.store(0, SEQ);
 
@@ -563,7 +563,7 @@ const I4_N: usize = 3_000;
 /// whole-archetype single-slice contract (the demo's zero-copy GPU upload
 /// depends on it).
 #[test]
-#[cfg_attr(miri, ignore)]
+#[cfg_attr(miri, ignore = "tractability: 3000 rows walked whole-slice then by random access (see the file's # Miri note)")]
 fn for_each_chunk_single_slice_after_growth() {
     let mut world = EcsMaster::new();
     let _ = I4Pay::component_id();

@@ -325,7 +325,7 @@ fn step_coupled_once(world: &mut EcsMaster) {
 // Miri interpreter. The per-substep volume-projection arithmetic is covered under
 // Miri by `tet_construction_*` + `volume_projection_*` short gates.
 #[test]
-#[cfg_attr(miri, ignore)]
+#[cfg_attr(miri, ignore = "settles TWO cubes 200 steps × 8 substeps each — intractable under the Miri interpreter; tet_construction_rest_volume_zero_at_rest + volume_projection_inflates_compressed_tet cover the volume projection there")]
 fn rest_volume_preserved() {
     // A tet-meshed soft cube (5-tet decomposition) dropped onto the SDF floor must
     // SETTLE preserving its volume: V_settle / V_0 >= 0.99. A distance-only cube with
@@ -486,7 +486,7 @@ fn rest_volume_preserved() {
 // SP1 `drop_cube_rests`). The per-substep clamp arithmetic is covered under Miri by
 // `clamp_zeroes_slow_velocity`.
 #[test]
-#[cfg_attr(miri, ignore)]
+#[cfg_attr(miri, ignore = "settles 400 steps × 8 substeps — intractable under the Miri interpreter; clamp_zeroes_slow_velocity covers the rest-clamp arithmetic there")]
 fn rest_residual_tightened() {
     // The SP1 `drop_cube_rests` scene, but with `soft_rest_clamp == true`: the
     // K-step rest residual speed must now be STRICTLY below REST_SPEED_EPS (1e-3),

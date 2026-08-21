@@ -213,7 +213,7 @@ fn sdf_floor() -> SdfField {
 // exercises is covered under Miri by the short gates (`empty_softbody_noop`,
 // `sdf_zero_gradient_no_push`, the construction validators, `compliance_*`).
 #[test]
-#[cfg_attr(miri, ignore)]
+#[cfg_attr(miri, ignore = "settles 400 steps × 8 substeps — intractable under the Miri interpreter; the short kernel gates (sdf_zero_gradient_no_push, empty_softbody_noop) cover the per-substep arithmetic there")]
 fn drop_cube_rests() {
     // A diagonal-braced soft cube (half-extent 0.5, all-pairs brace set) dropped
     // from above onto the SDF box floor (top at y = 0). Under gravity it must FALL,
@@ -473,7 +473,7 @@ fn pinned_particle_unmoved() {
 // covered under Miri by the short gates (`sdf_zero_gradient_no_push`,
 // `pinned_particle_unmoved`, `empty_softbody_noop`).
 #[test]
-#[cfg_attr(miri, ignore)]
+#[cfg_attr(miri, ignore = "settles 400 steps × 8 substeps of SDF collide — intractable under the Miri interpreter; sdf_zero_gradient_no_push covers the collide arithmetic there")]
 fn soft_on_sdf_floor() {
     // A small soft body rests on the SDF floor: each CONTACTING particle's center
     // settles ≈ particle_radius OUTSIDE the surface (gap = dist - radius ≈ 0, the
