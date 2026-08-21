@@ -3007,3 +3007,259 @@ pub fn emit_hlsl_particle_sdf_response() -> String {
         },
     )
 }
+
+// ---- UI-ADVANCED S1: the `ui_rect` leaf emitters (`docs/UI-PLAN-SPRITES.md` rung S1) --------
+
+/// The shared UI-leaf recorder harness — the [`emit_particle_leaf`] idiom with the `vec4_in`
+/// name table added (the UI leaves are the first to take `float4` parameters). Clears the
+/// recorder state, seeds the function-body block, runs the tracing closure, and prints the
+/// BODY span at depth 1 (4-space indent). NO function-signature wrap — the signature line and
+/// the closing `}` are spelled by `emit_ui.rs`'s templates, exactly as the particle bin
+/// spells its leaves' signatures around [`emit_particle_leaf`]'s spans.
+fn emit_ui_leaf<F: FnOnce()>(
+    float_in: &[&str],
+    uint_in: &[&str],
+    vec_in: &[&str],
+    vec4_in: &[&str],
+    body: F,
+) -> String {
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    CALLS.with(|c| c.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    body();
+
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    let vars = VARS.with(|v| v.borrow().clone());
+    let names = Names {
+        float_in,
+        uint_in,
+        vec_in,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
+        named_lit: NO_NAMED_LITS,
+        vars: &vars,
+        vec4_in,
+        call_in: NO_CALL_INPUTS,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut span = String::new();
+        print_block(&body_block, &arena, names, 1, &mut span);
+        span
+    })
+}
+
+/// Generates the **`ui_unpack_rgba8`** BODY span by tracing
+/// [`crate::ui::ui_unpack_rgba8_body`] over `EmitCf` — the premultiplied RGBA8 unpack.
+///
+/// ```text
+///     return float4((float)(c & 255u), (float)(c >> 8u & 255u), (float)(c >> 16u & 255u),
+///                   (float)(c >> 24u & 255u)) * (1.0 / 255.0);
+/// ```
+pub fn emit_hlsl_ui_unpack_rgba8() -> String {
+    use crate::ui;
+
+    emit_ui_leaf(&[], &["c"], &[], &[], || {
+        let c = Emit::uint_input(0);
+        let ret_out = RetCellV4;
+        let _ = ui::ui_unpack_rgba8_body::<EmitCf>(c, &ret_out);
+    })
+}
+
+/// Generates the **`ui_sd_rounded_box`** BODY span by tracing
+/// [`crate::ui::ui_sd_rounded_box_body`] over `EmitCf` — the Quilez/Bevy per-corner
+/// rounded-box SDF (quadrant radius select + corner distance).
+pub fn emit_hlsl_ui_sd_rounded_box() -> String {
+    use crate::ui;
+
+    emit_ui_leaf(&[], &[], &["p", "half_size"], &["r"], || {
+        let p = Emit(push(Node::Vec2Param(0)));
+        let half_size = Emit(push(Node::Vec2Param(1)));
+        let r = Emit(push(Node::Vec4Param(0)));
+        let ret_out = RetCellF;
+        let _ = ui::ui_sd_rounded_box_body::<EmitCf>(p, half_size, r, &ret_out);
+    })
+}
+
+/// Generates the **`ui_clip_coverage`** BODY span by tracing
+/// [`crate::ui::ui_clip_coverage_body`] over `EmitCf` — the separable anti-aliased clip-AABB
+/// coverage.
+pub fn emit_hlsl_ui_clip_coverage() -> String {
+    use crate::ui;
+
+    emit_ui_leaf(&["fw"], &[], &["pos"], &["clip"], || {
+        let pos = Emit(push(Node::Vec2Param(0)));
+        let clip = Emit(push(Node::Vec4Param(0)));
+        let fw = Emit::input(0);
+        let ret_out = RetCellF;
+        let _ = ui::ui_clip_coverage_body::<EmitCf>(pos, clip, fw, &ret_out);
+    })
+}
+
+/// Generates the **`ui_median3`** BODY span by tracing [`crate::ui::ui_median3_body`] over
+/// `EmitCf` — the canonical Chlumsky MSDF per-channel median.
+pub fn emit_hlsl_ui_median3() -> String {
+    use crate::ui;
+
+    emit_ui_leaf(&["r", "g", "b"], &[], &[], &[], || {
+        let r = Emit::input(0);
+        let g = Emit::input(1);
+        let b = Emit::input(2);
+        let ret_out = RetCellF;
+        let _ = ui::ui_median3_body::<EmitCf>(r, g, b, &ret_out);
+    })
+}
+
+/// Generates the **`ui_screen_px_range`** BODY span by tracing
+/// [`crate::ui::ui_screen_px_range_body`] over `EmitCf` — the MSDF texel→screen-px range
+/// fold. The atlas-UBO reads spell VERBATIM as the printer input names
+/// (`g_atlas_ubo.px_range` / `g_atlas_ubo.atlas_size`), so the leaf's HLSL signature takes
+/// only `uv` and the span reads the globals directly — the committed shape.
+pub fn emit_hlsl_ui_screen_px_range() -> String {
+    use crate::ui;
+
+    emit_ui_leaf(
+        &["g_atlas_ubo.px_range"],
+        &[],
+        &["g_atlas_ubo.atlas_size", "uv"],
+        &[],
+        || {
+            let px_range = Emit::input(0);
+            let atlas_size = Emit(push(Node::Vec2Param(0)));
+            let uv = Emit(push(Node::Vec2Param(1)));
+            let ret_out = RetCellF;
+            let _ = ui::ui_screen_px_range_body::<EmitCf>(px_range, atlas_size, uv, &ret_out);
+        },
+    )
+}
+
+/// Generates the **`ui_premultiplied_over`** BODY span by tracing
+/// [`crate::ui::ui_premultiplied_over_body`] over `EmitCf` — the premultiplied
+/// border-over-fill composite.
+pub fn emit_hlsl_ui_premultiplied_over() -> String {
+    use crate::ui;
+
+    emit_ui_leaf(
+        &["border_cov", "inner_cov"],
+        &[],
+        &[],
+        &["bc", "fill"],
+        || {
+            let bc = Emit(push(Node::Vec4Param(0)));
+            let fill = Emit(push(Node::Vec4Param(1)));
+            let border_cov = Emit::input(0);
+            let inner_cov = Emit::input(1);
+            let ret_out = RetCellV4;
+            let _ = ui::ui_premultiplied_over_body::<EmitCf>(
+                bc, border_cov, fill, inner_cov, &ret_out,
+            );
+        },
+    )
+}
+
+/// The `UiInstance` byte layout as GENERATOR INPUTS (`docs/UI-PLAN-SPRITES.md` S-D10): the
+/// field offsets, the stride, and the three flag-bit indices. `emit_ui.rs` spells them as
+/// literals mirroring `boyko_render::ui::instance`; `ui_rect_edsl_sync` re-derives them from
+/// the HOST's own `offset_of!`/`size_of` and pins the committed mirror span to that — so a
+/// struct that moves on either side reds the sync test, and no committed shader ever spells a
+/// byte offset that a host `offset_of!` also spells.
+#[derive(Clone, Copy)]
+pub struct UiInstanceLayout {
+    /// `size_of::<UiInstance>()` — the std430 stride.
+    pub size: u32,
+    /// `offset_of!(UiInstance, min_px)`.
+    pub min_px: u32,
+    /// `offset_of!(UiInstance, size_px)`.
+    pub size_px: u32,
+    /// `offset_of!(UiInstance, clip)`.
+    pub clip: u32,
+    /// `offset_of!(UiInstance, corner_radius)`.
+    pub corner_radius: u32,
+    /// `offset_of!(UiInstance, color)`.
+    pub color: u32,
+    /// `offset_of!(UiInstance, border_color)`.
+    pub border_color: u32,
+    /// `offset_of!(UiInstance, border_width)`.
+    pub border_width: u32,
+    /// `offset_of!(UiInstance, flags)`.
+    pub flags: u32,
+    /// `FLAG_BORDER_ANY.trailing_zeros()` — bit 0 today.
+    pub flag_border_any_bit: u32,
+    /// `FLAG_CLIP_PRESENT.trailing_zeros()` — bit 1 today.
+    pub flag_clip_present_bit: u32,
+    /// `FLAG_TEXT.trailing_zeros()` — bit 2 today.
+    pub flag_text_bit: u32,
+}
+
+/// Generates the `UiInstance` STRUCT MIRROR span — the std430 record both `ui_rect` stages
+/// re-declare — from the [`UiInstanceLayout`] generator inputs. One printer, two splice sites
+/// (the `.vs` and `.fs` files carry the SAME span), which is S1's dividend at the S2 widening:
+/// the mirror is one edit, not two.
+pub fn emit_hlsl_ui_instance_mirror(l: &UiInstanceLayout) -> String {
+    format!(
+        "\
+// The std430 UiInstance record -- the byte-layout mirror of the Rust
+// #[repr(C, align(16))] UiInstance (stride {size} B). The offsets below are emit_ui
+// GENERATOR INPUTS, pinned to the host offset_of! constants by ui_rect_edsl_sync.
+struct UiInstance {{
+    float2 min_px;        // @{min_px}
+    float2 size_px;       // @{size_px}
+    float4 clip;          // @{clip}  (min.xy, max.xy; valid iff CLIP_PRESENT)
+    float4 corner_radius; // @{corner_radius}  (tl, tr, br, bl)
+    uint   color;         // @{color}  premultiplied RGBA8
+    uint   border_color;  // @{border_color}  premultiplied RGBA8
+    float  border_width;  // @{border_width}  uniform, physical px
+    uint   flags;         // @{flags}  bit{b0} BORDER_ANY, bit{b1} CLIP_PRESENT, bit{b2} TEXT
+}};
+",
+        size = l.size,
+        min_px = l.min_px,
+        size_px = l.size_px,
+        clip = l.clip,
+        corner_radius = l.corner_radius,
+        color = l.color,
+        border_color = l.border_color,
+        border_width = l.border_width,
+        flags = l.flags,
+        b0 = l.flag_border_any_bit,
+        b1 = l.flag_clip_present_bit,
+        b2 = l.flag_text_bit,
+    )
+}
+
+/// Generates the three FLAG-BIT constants span (`ui_rect.fs.hlsl` only — the VS never reads
+/// `flags`) from the [`UiInstanceLayout`] generator inputs.
+pub fn emit_hlsl_ui_flag_consts(l: &UiInstanceLayout) -> String {
+    format!(
+        "\
+static const uint FLAG_BORDER_ANY   = 1u << {b0};
+static const uint FLAG_CLIP_PRESENT = 1u << {b1};
+static const uint FLAG_TEXT         = 1u << {b2};
+",
+        b0 = l.flag_border_any_bit,
+        b1 = l.flag_clip_present_bit,
+        b2 = l.flag_text_bit,
+    )
+}

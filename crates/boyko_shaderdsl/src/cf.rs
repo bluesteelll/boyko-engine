@@ -1180,6 +1180,139 @@ pub trait Cf {
     /// `C: Cf` body through [`Scalar`](Self::Scalar)'s own trait bound (as
     /// [`crate::pack::pack_material_id_ba_body`] spells it).
     fn rsqrt(x: Self::Scalar) -> Self::Scalar;
+
+    // ---- UI-ADVANCED S1: the `ui_rect` fragment-leaf facets (`docs/UI-PLAN-SPRITES.md`) ----
+    //
+    // The six UI leaves (`crate::ui`) are the eDSL's first `float2`/`float4` VALUE math: the
+    // per-corner rounded-box SDF, the clip-AABB coverage, the MSDF median/range pair, the
+    // premultiplied border-over-fill composite, and the RGBA8 unpack. Every facet below is a
+    // 2-line mirror of a proven `float2`/`float3` facet; the two genuinely new op families are
+    // the `float2` INTRINSICS (`smoothstep`/`length`/`dot`/`fwidth`) and the `float4`
+    // arithmetic (`float4(...)` ctor, `* s`, `+`, `.a`). `fwidth` is the one facet with NO
+    // host semantics — its Eval arm is an honest panic (the [`call1`](Self::call1) discipline),
+    // so the leaf that spells it (`ui_screen_px_range_body`) is deliberately not oracle-swept.
+
+    /// The `float4` RETURN-VALUE cell (`Cell<[f32; 4]>` on Eval — the body-local cell the
+    /// producer reads after the body runs; a ZST on Emit, the expression travels in the
+    /// recorded `Stmt::Return`). The `float4` analogue of [`RetCellV2`](Self::RetCellV2).
+    /// Owned, passed by `&` to [`ret_vec4`](Self::ret_vec4).
+    type RetCellV4;
+
+    /// The `float4` function-return — `return <float4>;` (the `ui_unpack_rgba8` /
+    /// `ui_premultiplied_over` tails). The `float4` analogue of [`ret_vec2`](Self::ret_vec2).
+    /// On Eval deposits `value` into the [`RetCellV4`](Self::RetCellV4) and returns
+    /// [`Break`](LoopOp::Return); on Emit records a single `Stmt::Return`.
+    fn ret_vec4(cell: &Self::RetCellV4, value: Self::Vec4f) -> Flow;
+
+    /// `a - b` over two `float2`s (`abs(p) - half_size`) — component-wise. The `float2`
+    /// analogue of [`vec3_sub`](Self::vec3_sub). On Eval `[a0-b0, a1-b1]`; on Emit a
+    /// `crate::emit` `Vec2Sub` node (additive — flat on the LEFT of a same-class parent).
+    fn vec2_sub(a: Self::Vec2f, b: Self::Vec2f) -> Self::Vec2f;
+
+    /// `v - s` — a `float2` MINUS a `float` scalar broadcast (`clip.xy - fw`), vector on the
+    /// LEFT. The operand-order complement of [`vec2_rsub_scalar`](Self::vec2_rsub_scalar)
+    /// (`s - v`). On Eval `[v0-s, v1-s]`; on Emit a `Vec2SubScalar` node.
+    fn vec2_sub_scalar(v: Self::Vec2f, s: Self::Scalar) -> Self::Vec2f;
+
+    /// `max(v, s)` — a component-wise `float2` max against a scalar broadcast (`max(q, 0.0)`,
+    /// the rounded-box outside clamp; HLSL promotes the scalar arg). On Eval
+    /// `[max(v0,s), max(v1,s)]`; on Emit a `Vec2MaxScalar` node printed as the intrinsic call.
+    fn vec2_max_scalar(v: Self::Vec2f, s: Self::Scalar) -> Self::Vec2f;
+
+    /// `length(v)` over a `float2` (`length(max(q, 0.0))`) — `OpExtInst GLSL.std.450 Length`.
+    /// The Eval arm is `sqrt(x*x + y*y)` over the host f32s — `Length` carries the same
+    /// sqrt-family precision as [`FieldScalar::sqrt`], so the rounded-box oracle sweep pins
+    /// table points where the radicand is an exact square (the corner cases) rather than
+    /// claiming bit-exactness of the general norm.
+    fn vec2_length(v: Self::Vec2f) -> Self::Scalar;
+
+    /// `dot(a, b)` over two `float2`s (`dot(unit_range, screen_tex_sz)`) — `OpDot`, free to
+    /// contract into an FMA like [`vec3_dot`](Self::vec3_dot), so it carries no bit-exact
+    /// oracle contract. On Eval the left-associated fold `a.x*b.x + a.y*b.y`.
+    fn vec2_dot(a: Self::Vec2f, b: Self::Vec2f) -> Self::Scalar;
+
+    /// `smoothstep(e0, e1, x)` over three `float2`s (the clip AA band) — `OpExtInst
+    /// GLSL.std.450 SmoothStep`, component-wise. The Eval arm mirrors the spec polynomial
+    /// `t*t*(3 - 2*t)` over `t = clamp((x-e0)/(e1-e0), 0, 1)` — it contains a DIVIDE, so per
+    /// the house rule it is exact only at the saturated ends (`x <= e0` ⇒ 0, `x >= e1` ⇒ 1),
+    /// which is where the clip-coverage oracle pins its table.
+    fn vec2_smoothstep(e0: Self::Vec2f, e1: Self::Vec2f, x: Self::Vec2f) -> Self::Vec2f;
+
+    /// `fwidth(v)` over a `float2` (`fwidth(uv)`) — the FRAGMENT-stage derivative `OpFwidth`.
+    /// NO host semantics exist for a device derivative, so the Eval arm is an honest
+    /// `unreachable!` (the [`call1`](Self::call1) discipline — a loud panic, never a wrong
+    /// value); a leaf that spells it is not oracle-swept and says so in its own doc.
+    fn vec2_fwidth(v: Self::Vec2f) -> Self::Vec2f;
+
+    /// `s / v` — a `float` scalar (broadcast) DIVIDED by a `float2`, scalar on the LEFT
+    /// (`g_atlas_ubo.px_range / g_atlas_ubo.atlas_size`, `1.0 / fwidth(uv)`). A DIVIDE —
+    /// `OpFDiv` carries 2.5 ULP, so per the house rule it is never part of a bit-exact
+    /// contract; the facet exists because the committed MSDF range math spells it. On Eval
+    /// `[s/v0, s/v1]`; on Emit a `Vec2RDivScalar` node.
+    fn vec2_rdiv_scalar(s: Self::Scalar, v: Self::Vec2f) -> Self::Vec2f;
+
+    /// `cond ? t : e` over `float2` ARMS — the rounded-box radius-pair select
+    /// (`(p.x > 0.0) ? r.yz : r.xw`). The `float2` analogue of [`FieldScalar::select`] (the
+    /// cond-wrapped, arms-bare form). On Eval the eager `if cond { t } else { e }` (both arms
+    /// are pure swizzles); on Emit a `SelectVec2` node.
+    fn select_vec2(
+        cond: <Self::Scalar as FieldScalar>::Mask,
+        t: Self::Vec2f,
+        e: Self::Vec2f,
+    ) -> Self::Vec2f;
+
+    /// `v.xy` — a `float4` → `float2` two-lane swizzle (`clip.xy`, the clip AABB min). On Eval
+    /// `[v[0], v[1]]`; on Emit a `Vec4SwizzleV2` node (mask 0). DISTINCT from
+    /// [`vec3_xy`](Self::vec3_xy) (a `float3` source).
+    fn vec4_xy(v: Self::Vec4f) -> Self::Vec2f;
+
+    /// `v.zw` — the clip AABB max half (`clip.zw`). On Eval `[v[2], v[3]]`; mask 1.
+    fn vec4_zw(v: Self::Vec4f) -> Self::Vec2f;
+
+    /// `v.yz` — the rounded-box RIGHT-side radius pair `(tr, br)` (`r.yz`). On Eval
+    /// `[v[1], v[2]]`; mask 2.
+    fn vec4_yz(v: Self::Vec4f) -> Self::Vec2f;
+
+    /// `v.xw` — the rounded-box LEFT-side radius pair `(tl, bl)` (`r.xw`). On Eval
+    /// `[v[0], v[3]]`; mask 3.
+    fn vec4_xw(v: Self::Vec4f) -> Self::Vec2f;
+
+    /// `v.a` — a `float4` → `float` ALPHA read (`src.a`, the premultiplied-over source alpha),
+    /// spelled `.a` (the committed color spelling), not `.w`. On Eval `v[3]`; on Emit a
+    /// `Vec4Alpha` node.
+    fn vec4_alpha(v: Self::Vec4f) -> Self::Scalar;
+
+    /// `float4(<x>, <y>, <z>, <w>)` from FOUR already-`float` scalar expressions (the
+    /// `ui_unpack_rgba8` channel ctor). The `float4` analogue of
+    /// [`vec2_from_scalars`](Self::vec2_from_scalars). On Eval `[x, y, z, w]`; on Emit a
+    /// `Vec4FromScalars` node.
+    fn vec4_from_scalars(
+        x: Self::Scalar,
+        y: Self::Scalar,
+        z: Self::Scalar,
+        w: Self::Scalar,
+    ) -> Self::Vec4f;
+
+    /// `v * s` — a `float4` times a `float` scalar (`bc * border_cov`, `float4(...) * (1.0 /
+    /// 255.0)`). The `float4` analogue of [`vec2_mul_scalar`](Self::vec2_mul_scalar). On Eval
+    /// `[v0*s, .., v3*s]`; on Emit a `Vec4MulScalar` node (whose printer wraps a NON-LEAF
+    /// scalar operand — the committed `(1.0 / 255.0)` / `(1.0 - src.a)` parens).
+    fn vec4_mul_scalar(v: Self::Vec4f, s: Self::Scalar) -> Self::Vec4f;
+
+    /// `a + b` over two `float4`s (`src + dst * (1.0 - src.a)`, the premultiplied OVER) —
+    /// component-wise. On Eval `[a0+b0, .., a3+b3]`; on Emit a `Vec4Add` node.
+    fn vec4_add(a: Self::Vec4f, b: Self::Vec4f) -> Self::Vec4f;
+
+    /// Declares a NAMED `float2` temp (`float2 rx = <rhs>;`) — the `float2` analogue of
+    /// [`temp_vec3`](Self::temp_vec3) / [`temp_float`](Self::temp_float). Eval is identity
+    /// (the value flows directly); Emit records a named `float2` `Stmt::DeclTemp`. Returns the
+    /// temp handle so later reads spell `rx`.
+    fn temp_vec2(name: &'static str, v: Self::Vec2f) -> Self::Vec2f;
+
+    // `temp_vec4` (`float4 src = <rhs>;`) already exists on this axis (the Increment-5c
+    // `m2_brick_cubic_hit` facet above) and is reused by the UI leaves rather than
+    // re-declared; its Eval arm becomes the identity now that a leaf
+    // (`ui_premultiplied_over_body`) legitimately runs over EvalCf.
 }
 
 /// The control-flow EVAL backend — REAL host `for`/`if`/`continue`, a unit ZST.
@@ -1847,8 +1980,13 @@ impl Cf for EvalCf {
         unreachable!("Cf::vec3_from_scalars is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
     }
     #[inline]
-    fn temp_vec4(_name: &'static str, _v: [f32; 4]) -> [f32; 4] {
-        unreachable!("Cf::temp_vec4 is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    fn temp_vec4(_name: &'static str, v: [f32; 4]) -> [f32; 4] {
+        // Identity on Eval — a temp is an Emit-only materialization concern. This arm was an
+        // "EMIT-ONLY" honest panic while `m2_brick_cubic_hit_body` was its only caller (that
+        // body is never run over EvalCf); UI-ADVANCED S1's `ui_premultiplied_over_body` IS
+        // oracle-swept, so the identity is now the correct Eval semantics — the same shape
+        // `temp_vec3`/`temp_float`/`temp_vec2` have always had.
+        v
     }
 
     // ---- Track B Increment G1: the `float2` axis + bitwise `uint` `&`/`>>` (native host) ----
@@ -2062,5 +2200,128 @@ impl Cf for EvalCf {
         // so this arm stays `no_std`-clean. It is a CLOSE mirror of the GPU's approximate
         // `InverseSqrt` (2 ULP allowed), not a bit-exact one — see the trait doc.
         f32::lit(1.0).div(FieldScalar::sqrt(x))
+    }
+
+    // ---- UI-ADVANCED S1: the `ui_rect` fragment-leaf facets ------------------------------
+
+    // The `float4` return cell — the same interior-mutability shape `RetCellV2` uses.
+    type RetCellV4 = core::cell::Cell<[f32; 4]>;
+
+    #[inline]
+    fn ret_vec4(cell: &core::cell::Cell<[f32; 4]>, value: [f32; 4]) -> Flow {
+        cell.set(value);
+        Flow::Break(LoopOp::Return)
+    }
+
+    #[inline]
+    fn vec2_sub(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
+        [a[0] - b[0], a[1] - b[1]]
+    }
+
+    #[inline]
+    fn vec2_sub_scalar(v: [f32; 2], s: f32) -> [f32; 2] {
+        [v[0] - s, v[1] - s]
+    }
+
+    #[inline]
+    fn vec2_max_scalar(v: [f32; 2], s: f32) -> [f32; 2] {
+        [v[0].max(s), v[1].max(s)]
+    }
+
+    #[inline]
+    fn vec2_length(v: [f32; 2]) -> f32 {
+        // The host norm through the SAME `nightly`/`std` sqrt shim the field leaves use, so
+        // this arm stays `no_std`-clean. Sqrt-family precision — see the trait doc.
+        FieldScalar::sqrt(v[0].mul(v[0]).add(v[1].mul(v[1])))
+    }
+
+    #[inline]
+    fn vec2_dot(a: [f32; 2], b: [f32; 2]) -> f32 {
+        // The left-associated fold. `OpDot` may contract into an FMA on the GPU, so this is a
+        // CLOSE mirror, not a bit-exact one (the trait doc's standing carve-out).
+        a[0].mul(b[0]).add(a[1].mul(b[1]))
+    }
+
+    #[inline]
+    fn vec2_smoothstep(e0: [f32; 2], e1: [f32; 2], x: [f32; 2]) -> [f32; 2] {
+        // The spec polynomial per lane: `t = clamp((x - e0) / (e1 - e0), 0, 1); t*t*(3 - 2t)`.
+        // Contains a DIVIDE, so it is exact only at the saturated ends (the trait doc).
+        #[inline]
+        fn lane(e0: f32, e1: f32, x: f32) -> f32 {
+            let t = x.sub(e0).div(e1.sub(e0)).clamp01();
+            t.mul(t).mul(f32::lit(3.0).sub(f32::lit(2.0).mul(t)))
+        }
+        [lane(e0[0], e1[0], x[0]), lane(e0[1], e1[1], x[1])]
+    }
+
+    #[inline]
+    fn vec2_fwidth(_v: [f32; 2]) -> [f32; 2] {
+        // A device derivative has NO host semantics — the honest-panic discipline (`call1`'s
+        // Eval arm): a loud panic, never a wrong value. The one leaf that spells `fwidth`
+        // (`ui_screen_px_range_body`) is deliberately not oracle-swept.
+        unreachable!("fwidth is a fragment-stage derivative; the Eval oracle never reaches it")
+    }
+
+    #[inline]
+    fn vec2_rdiv_scalar(s: f32, v: [f32; 2]) -> [f32; 2] {
+        [s.div(v[0]), s.div(v[1])]
+    }
+
+    #[inline]
+    fn select_vec2(cond: bool, t: [f32; 2], e: [f32; 2]) -> [f32; 2] {
+        // Eager: both arms are pure swizzles (no side effects), matching the GPU computing
+        // both operands of an `OpSelect`-shaped ternary.
+        if cond { t } else { e }
+    }
+
+    #[inline]
+    fn vec4_xy(v: [f32; 4]) -> [f32; 2] {
+        [v[0], v[1]]
+    }
+
+    #[inline]
+    fn vec4_zw(v: [f32; 4]) -> [f32; 2] {
+        [v[2], v[3]]
+    }
+
+    #[inline]
+    fn vec4_yz(v: [f32; 4]) -> [f32; 2] {
+        [v[1], v[2]]
+    }
+
+    #[inline]
+    fn vec4_xw(v: [f32; 4]) -> [f32; 2] {
+        [v[0], v[3]]
+    }
+
+    #[inline]
+    fn vec4_alpha(v: [f32; 4]) -> f32 {
+        v[3]
+    }
+
+    #[inline]
+    fn vec4_from_scalars(x: f32, y: f32, z: f32, w: f32) -> [f32; 4] {
+        [x, y, z, w]
+    }
+
+    #[inline]
+    fn vec4_mul_scalar(v: [f32; 4], s: f32) -> [f32; 4] {
+        [v[0].mul(s), v[1].mul(s), v[2].mul(s), v[3].mul(s)]
+    }
+
+    #[inline]
+    fn vec4_add(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+        [
+            a[0].add(b[0]),
+            a[1].add(b[1]),
+            a[2].add(b[2]),
+            a[3].add(b[3]),
+        ]
+    }
+
+    #[inline]
+    fn temp_vec2(_name: &'static str, v: [f32; 2]) -> [f32; 2] {
+        // Identity on Eval — a temp is an Emit-only materialization concern.
+        v
     }
 }

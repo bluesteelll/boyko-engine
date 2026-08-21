@@ -59,5 +59,13 @@ name = "emit_particles"
 path = "src/bin/emit_particles.rs"
 required-features = ["emit"]
 
+# The UI-rect shader emitter (`docs/UI-PLAN-SPRITES.md` rung S1, architecture D30) — writes
+# BOTH committed files: `boyko_render/shaders/ui_rect.{vs,fs}.hlsl` (no `-D` axis; one `.spv`
+# each, byte-gated by `boyko_render/tests/ui_rect_spv_sync.rs`).
+[[bin]]
+name = "emit_ui"
+path = "src/bin/emit_ui.rs"
+required-features = ["emit"]
+
 [lints]
 workspace = true

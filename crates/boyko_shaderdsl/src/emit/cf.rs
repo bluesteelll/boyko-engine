@@ -969,4 +969,93 @@ impl Cf for EmitCf {
     fn rsqrt(x: Emit) -> Emit {
         Emit(push(Node::Rsqrt(x.0)))
     }
+
+    // ---- UI-ADVANCED S1: the `ui_rect` fragment-leaf facets ------------------------------
+
+    // The `float4` return cell — a ZST; the expression travels in the recorded `Stmt::Return`.
+    type RetCellV4 = RetCellV4;
+
+    fn ret_vec4(_cell: &RetCellV4, value: Emit) -> Flow {
+        // The `float4` return — a single `Stmt::Return(value)` (the hand-written
+        // `float4 ui_unpack_rgba8` / `float4 ui_premultiplied_over` signatures supply the
+        // return type). Fall through on Emit.
+        record_stmt(Stmt::Return(value.0));
+        Flow::Continue(())
+    }
+
+    fn vec2_sub(a: Emit, b: Emit) -> Emit {
+        Emit(push(Node::Vec2Sub(a.0, b.0)))
+    }
+
+    fn vec2_sub_scalar(v: Emit, s: Emit) -> Emit {
+        Emit(push(Node::Vec2SubScalar(v.0, s.0)))
+    }
+
+    fn vec2_max_scalar(v: Emit, s: Emit) -> Emit {
+        Emit(push(Node::Vec2MaxScalar(v.0, s.0)))
+    }
+
+    fn vec2_length(v: Emit) -> Emit {
+        Emit(push(Node::Vec2Length(v.0)))
+    }
+
+    fn vec2_dot(a: Emit, b: Emit) -> Emit {
+        Emit(push(Node::Vec2Dot(a.0, b.0)))
+    }
+
+    fn vec2_smoothstep(e0: Emit, e1: Emit, x: Emit) -> Emit {
+        Emit(push(Node::Vec2Smoothstep(e0.0, e1.0, x.0)))
+    }
+
+    fn vec2_fwidth(v: Emit) -> Emit {
+        Emit(push(Node::Vec2Fwidth(v.0)))
+    }
+
+    fn vec2_rdiv_scalar(s: Emit, v: Emit) -> Emit {
+        Emit(push(Node::Vec2RDivScalar(s.0, v.0)))
+    }
+
+    fn select_vec2(cond: EmitMask, t: Emit, e: Emit) -> Emit {
+        // The cond-wrapped, arms-bare `float2` ternary (`(p.x > 0.0) ? r.yz : r.xw`).
+        Emit(push(Node::SelectVec2(cond.0, t.0, e.0)))
+    }
+
+    fn vec4_xy(v: Emit) -> Emit {
+        // `clip.xy` — a `Vec4SwizzleV2` with mask 0 (`"xy"`), typed `Float2`.
+        Emit(push(Node::Vec4SwizzleV2(v.0, 0)))
+    }
+
+    fn vec4_zw(v: Emit) -> Emit {
+        Emit(push(Node::Vec4SwizzleV2(v.0, 1)))
+    }
+
+    fn vec4_yz(v: Emit) -> Emit {
+        Emit(push(Node::Vec4SwizzleV2(v.0, 2)))
+    }
+
+    fn vec4_xw(v: Emit) -> Emit {
+        Emit(push(Node::Vec4SwizzleV2(v.0, 3)))
+    }
+
+    fn vec4_alpha(v: Emit) -> Emit {
+        Emit(push(Node::Vec4Alpha(v.0)))
+    }
+
+    fn vec4_from_scalars(x: Emit, y: Emit, z: Emit, w: Emit) -> Emit {
+        Emit(push(Node::Vec4FromScalars(x.0, y.0, z.0, w.0)))
+    }
+
+    fn vec4_mul_scalar(v: Emit, s: Emit) -> Emit {
+        Emit(push(Node::Vec4MulScalar(v.0, s.0)))
+    }
+
+    fn vec4_add(a: Emit, b: Emit) -> Emit {
+        Emit(push(Node::Vec4Add(a.0, b.0)))
+    }
+
+    fn temp_vec2(name: &'static str, v: Emit) -> Emit {
+        // A NAMED `float2` temp (`float2 rx = ...;`). The `float4` analogue (`temp_vec4`)
+        // already exists above (the Increment-5c facet) and is reused by the UI leaves.
+        record_temp(Some(name), EmitTy::Float2, v)
+    }
 }
