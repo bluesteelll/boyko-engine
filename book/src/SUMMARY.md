@@ -56,6 +56,7 @@
 - [Materials](aether/materials.md)
 - [Scenes](aether/scenes.md)
 - [Diagnostics](aether/diagnostics.md)
+- [Language Reference](aether/reference.md)
 
 # Architecture
 
