@@ -32,6 +32,24 @@ boyko-macros = { path = "../boyko_macros" }
 #                     mouse delta) directly. `boyko_input` is a LEAF â€” it does
 #                     NOT depend on `boyko_scene` â€” so this edge is acyclic.
 boyko-input = { path = "../boyko_input" }
+# OPTIONAL editor-only reflection layer (docs/REFLECTION-PLAN-GATES.md D3 C2/C3;
+# docs/REFLECTION-ANALYSIS.md B.12 option (b), owner sheet B.13 #1 — the plan proceeds
+# on (b) pending the owner). Pulled ONLY by the non-default `reflect` feature below;
+# never in a ship closure — gated by the reflect manifest/resolver/artifact censuses
+# (GATES G1/G2/G3), not by this comment.
+boyko-reflect = { path = "../boyko_reflect", optional = true }
+
+[features]
+default = []
+# Reflection opt-in seam for this crate's own components (`Transform` / `Name` /
+# `Visibility` are dogfood targets defined HERE, and the derive's emitted
+# `#[cfg(feature = "reflect")]` is evaluated in the DEFINING crate — CORE D2). NON-DEFAULT,
+# and nothing in the workspace enables it except the `reflect-dogfood` leaf umbrella and
+# explicit command lines: the property that defeats feature unification is "nothing
+# enables it", not "nobody declares it" (the in-tree `hwrt` precedent — three shared
+# crates deep, default OFF at every level, in no ship build). The gated bodies arrive
+# with CORE C7/C8's `#[component(reflect)]` opt-ins.
+reflect = ["dep:boyko-reflect"]
 
 [dev-dependencies]
 # Test-only: the S2 propagation gates drive `propagate_transforms` through a

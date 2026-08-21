@@ -1,0 +1,42 @@
+[package]
+name = "reflect-dogfood"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# GATES G0 / D15 (docs/REFLECTION-PLAN-GATES.md): the REAL-ENGINE-TYPES acceptance
+# package — the dogfood claim, proved separately from `reflect-fixture` (which must stay
+# FFI-free because it is the package the CI Miri row names; THIS package reaches
+# `boyko_render` → `boyko_rhi_vulkan`, so it is NEVER on that allowlist). Empty except
+# this manifest until REFLECTION-PLAN-ECS.md EG8 fills it with the acceptance test
+# against the real `Transform` / `Name` / `Visibility` / `GpuTransform3D` /
+# `EmitterActive`.
+#
+# Exists because the owner sheet's B.13 #1 proceeds on option (b) — engine crates may
+# carry a non-default `reflect` feature (REFLECTION-ANALYSIS.md B.12). If the owner
+# declines, this package and its umbrella are deleted together and nothing else moves
+# (B.12 "Reversibility").
+[dependencies]
+boyko-ecs = { path = "../boyko_ecs" }
+boyko-macros = { path = "../boyko_macros" }
+# OPTIONAL (GATES D3 C2), pulled only by the `dep:` form below (D3 C3).
+boyko-reflect = { path = "../boyko_reflect", optional = true }
+# The engine crates whose components the dogfood inspects. PLAIN, NON-OPTIONAL edges
+# with NO `features` array (GATES D3 C4 — an edge is the one enabler nothing can switch
+# off: "an explicit `features = [...]` survives `--no-default-features` by design").
+# Enablement happens ONLY through the leaf umbrella below or a command line.
+boyko-scene = { path = "../boyko_scene" }
+boyko-render = { path = "../boyko_render" }
+
+[features]
+default = []
+# The LEAF UMBRELLA (GATES D15): the one place the engine crates' non-default `reflect`
+# features are forwarded. `cargo test -p reflect-dogfood --features
+# reflect-dogfood/reflect` is the dogfood invocation; it unifies workspace-wide when the
+# root selects every member — WHICH IS EXPECTED and is not a leak: it is not the ship
+# invocation, and G2's harness asserts the ship-closure gate never runs under a feature
+# selection.
+reflect = ["dep:boyko-reflect", "boyko-scene/reflect", "boyko-render/reflect"]
+
+[lints]
+workspace = true

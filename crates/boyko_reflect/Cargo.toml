@@ -1,0 +1,24 @@
+[package]
+name = "boyko-reflect"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# GATES G0 (docs/REFLECTION-PLAN-GATES.md): the EDITOR-ONLY reflection layer. This crate
+# is depended on ONLY as `optional = true` behind a consumer feature named `reflect`
+# (CORE D1/D2), so a ship build's resolved closure never contains it — a property gated
+# by G1/G2/G3, never trusted to this comment. Directional rule (CORE F13):
+# `boyko_serialize` and every shipping crate must never depend on this crate.
+#
+# NO `[features]` table, now or ever (GATES D4): the `#[cfg(feature = "reflect")]` in the
+# derive's output is a CONSUMER-side construct, evaluated in the crate the derive expanded
+# into. A self-hosted `reflect` feature here would test a configuration no consumer ever
+# has — and four documents once specified a Miri row that could not run because they
+# assumed one existed.
+#
+# CORE D18: depends on `boyko_ecs` and `std` only. No third-party crate, ever.
+[dependencies]
+boyko-ecs = { path = "../boyko_ecs" }
+
+[lints]
+workspace = true

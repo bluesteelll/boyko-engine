@@ -1,0 +1,76 @@
+[package]
+name = "reflect-fixture"
+version = "0.1.0"
+edition = "2024"
+publish = false
+# Target auto-discovery OFF for bins and benches — MEASURED at G0 (2026-08-21): with it
+# on, deleting a [[bin]] row does NOT remove the target (src/bin auto-discovery silently
+# re-mints it from the file path), so G0's third RED — "delete `[[bin]] reflect_never` ⇒
+# gate 6 reds naming it" — cannot fire as the plan writes it. With discovery off, the
+# reconciled target table below is the SINGLE source of truth, and a deleted row is a
+# missing target that gate 6's named-target invocation reds.
+autobins = false
+autobenches = false
+
+# GATES G0 (docs/REFLECTION-PLAN-GATES.md): the reflection campaign's PRIMARY GATED
+# SUBJECT — a consumer stand-in for a game's own crate, not for the engine (the
+# `profile-fixture` census argument, verbatim). This dependency table is the gate's
+# argument in exactly the sense `crates/profile_fixture/Cargo.toml` states for itself:
+# a third production dependency here does not weaken the gate's number, it destroys the
+# gate's ARGUMENT, which is worse, because the number still looks right. It also has a
+# second, harder reason (GATES D4/D15): this is the package the CI Miri row names
+# (`-p reflect-fixture --features reflect-fixture/reflect`), and Miri cannot execute
+# FFI — so this package must never reach `boyko_rhi_vulkan`. Deps are `boyko-ecs`,
+# `boyko-macros`, `boyko-reflect` — and nothing else, ever.
+[dependencies]
+boyko-ecs = { path = "../boyko_ecs" }
+boyko-macros = { path = "../boyko_macros" }
+# OPTIONAL (GATES D3 C2): only the `reflect` feature pulls it, in the `dep:` form
+# (D3 C3); no `default` enables it (D3 C1). Feature OFF ⇒ `boyko-reflect` is not in this
+# package's resolved dependency graph at all — the campaign's central claim, gated by
+# G2/G3 rather than trusted to this comment.
+boyko-reflect = { path = "../boyko_reflect", optional = true }
+
+[features]
+default = []
+# The reflect-enabling feature MUST be named `reflect` in every consumer (CORE D2): the
+# derive's emitted `#[cfg(feature = "reflect")]` is evaluated in the crate the derive
+# expanded into, so the name is a cross-crate contract, not a local choice.
+reflect = ["dep:boyko-reflect"]
+
+# The four bins + one bench, RECONCILED with every rung that consumes them (GATES G0's
+# target table). A target required by a later rung and created by no rung is this
+# campaign's most-repeated defect — twelve benches in a gate table, none of which existed.
+#
+# | target                | source                         | consumer                                        |
+# |-----------------------|--------------------------------|-------------------------------------------------|
+# | reflect_on            | src/bin/reflect_on.rs          | G3 L2 (present control)                         |
+# | reflect_off_twin      | THE SAME FILE, feature off     | G3 L1 (ship cell); G7a N1/N2 (determinism null) |
+# | reflect_never         | same shape minus the linkage   | G3 L3 (linked-unused, feature ON); G6c/G7a T    |
+# | reflect_off_twin_plus | twin + one #[inline(never)] fn | G7a P (positive control)                        |
+# | reflect_optin_cost    | benches/reflect_optin_cost.rs  | G7b                                             |
+
+[[bin]]
+name = "reflect_on"
+path = "src/bin/reflect_on.rs"
+
+[[bin]]
+name = "reflect_off_twin"
+# Deliberately the SAME SOURCE as `reflect_on` (GATES G0's target table): the ship cell
+# is the same program with the feature off, so the two legs cannot drift apart.
+path = "src/bin/reflect_on.rs"
+
+[[bin]]
+name = "reflect_never"
+path = "src/bin/reflect_never.rs"
+
+[[bin]]
+name = "reflect_off_twin_plus"
+path = "src/bin/reflect_off_twin_plus.rs"
+
+[[bench]]
+name = "reflect_optin_cost"
+harness = false
+
+[lints]
+workspace = true

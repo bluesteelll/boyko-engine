@@ -34,8 +34,20 @@ hwrt = ["boyko_rhi_vulkan/hwrt"]
 # the shipped/golden render path records exactly the commands it did before (the increments are
 # host-side `Cell<u32>` adds that compile to nothing here). Enabled only by G10's A/B gate.
 profiling-census = ["boyko_rhi_vulkan/profiling-census"]
+# Reflection opt-in seam for this crate's own components (`GpuTransform3D` /
+# `EmitterActive` are dogfood targets defined HERE — docs/REFLECTION-PLAN-GATES.md D3;
+# docs/REFLECTION-ANALYSIS.md B.12 option (b)). NON-DEFAULT; enabled only by the
+# `reflect-dogfood` leaf umbrella or a command line — the same containment shape as
+# `hwrt` above, with the CI-coverage half owed by GATES G1 clause C6 so it does not
+# inherit hwrt's F17 defect (zero CI legs compiling the gated bodies). The gated bodies
+# arrive with CORE C7/C8's `#[component(reflect)]` opt-ins.
+reflect = ["dep:boyko-reflect"]
 
 [dependencies]
+# OPTIONAL editor-only reflection layer (GATES D3 C2/C3): pulled ONLY by the non-default
+# `reflect` feature above; never in a ship closure — gated by G1/G2/G3, not by this
+# comment.
+boyko-reflect = { path = "../boyko_reflect", optional = true }
 boyko-ecs = { path = "../boyko_ecs" }
 boyko-macros = { path = "../boyko_macros" }
 boyko_rhi = { path = "../boyko_rhi" }
