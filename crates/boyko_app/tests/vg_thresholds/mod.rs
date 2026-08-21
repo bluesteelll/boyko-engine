@@ -15,8 +15,14 @@ use boyko_render::vg_census::Sha256;
 /// The frozen thresholds file, relative to `crates/boyko_app`.
 pub const THRESHOLDS: &str = "../../docs/VG-CAMPAIGN-THRESHOLDS.toml";
 
-/// The sha256 R0a recorded. Re-asserted by every rung that DRIVES the ladder, because a ladder read
-/// from an edited frozen file is not read from the frozen file.
+/// The sha256 R0a recorded, over the frozen file with `\r\n` NORMALISED to `\n`. Re-asserted by
+/// every rung that DRIVES the ladder, because a ladder read from an edited frozen file is not read
+/// from the frozen file.
+///
+/// The normalisation is part of the number's DEFINITION, not a convenience: this literal is the
+/// same one `crates/boyko_render/tests/vg_thresholds_freeze.rs` pins (R0a asserts the two agree by
+/// extracting it from that file's source), and the tripwire has hashed normalised bytes since it
+/// was written. See [`assert_thresholds_frozen`].
 pub const THRESHOLDS_SHA256: &str =
     "137379553feafa19217ce1b964f1663d3912815f12c8ebfd0ca14e94eedc41fa";
 
@@ -30,10 +36,43 @@ pub fn read_thresholds() -> String {
         .expect("invariant: the frozen thresholds file is in the repository")
 }
 
+/// `\r\n` → `\n`, because this repository has `core.autocrlf` behaviour active and a hash over raw
+/// bytes would be a hash of the CHECKOUT CONFIGURATION rather than of the thresholds.
+///
+/// MEASURED 2026-08-21: Git for Windows ships `core.autocrlf = true` in its system gitconfig, so
+/// every checkout made under it writes this file with CRLF and every one made before it kept LF.
+/// The owner's main checkout has LF and hashed to the pinned value; all three worktrees have CRLF
+/// and hashed to `a2db34e6…`. The gate therefore reddened on where it was run, and said "the frozen
+/// file has moved" — a diagnosis that would send the next reader looking for an edit that does not
+/// exist. The content is byte-identical either way: `tr -d '\r'` over the CRLF copy reproduces the
+/// pinned digest exactly.
+///
+/// This is the same normalisation, for the same stated reason, that
+/// `crates/boyko_render/tests/vg_thresholds_freeze.rs` and `vg_r0_reference_rig.rs` already apply;
+/// this module was the one copy of the three that pinned the literal and dropped the definition.
+fn normalised_thresholds() -> Vec<u8> {
+    let raw = std::fs::read(repo_path(THRESHOLDS)).expect("the frozen file is readable");
+    let mut out = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == b'\r' && i + 1 < raw.len() && raw[i + 1] == b'\n' {
+            i += 1; // skip the CR, keep the LF
+            continue;
+        }
+        out.push(raw[i]);
+        i += 1;
+    }
+    out
+}
+
 /// Re-asserts the frozen file's digest.
+///
+/// Line endings are normalised first — see [`normalised_thresholds`]. Everything else is still
+/// byte-exact: a changed threshold, an added or removed line, a reordered table or an edited
+/// comment all still red, because none of them survive `\r\n` → `\n`.
 pub fn assert_thresholds_frozen() {
     let mut h = Sha256::new();
-    h.update(&std::fs::read(repo_path(THRESHOLDS)).expect("the frozen file is readable"));
+    h.update(&normalised_thresholds());
     assert_eq!(
         h.finish_hex(),
         THRESHOLDS_SHA256,

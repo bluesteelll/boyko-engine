@@ -3166,8 +3166,10 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         //
         // The decoded values are inserted into the WORLD rather than written to a file: `App::run`
         // returns once this loop exits, so the fixture that armed the capture reads them straight
-        // out of the resource. The artifact line is still printed, so a run whose caller asserted
-        // nothing is still diagnosable from its own log.
+        // out of the resource. The artifact line is ALSO emitted as an `info!` record, so a run
+        // whose caller asserted nothing is still diagnosable from its own log — under `BOYKO_LOG`,
+        // like every other diagnostic in the engine. It was an unconditional `println!` until the
+        // L8c print census reddened on it; the resource, not the console, is what the gate reads.
         let particle_readback_ready = match particle_readback.as_mut() {
             Some(p) => p.after_present(presented_ok),
             None => false,
@@ -3188,7 +3190,6 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     );
                     let line = readback.artifact_line();
                     boyko_log::info!(boyko_log::Host, "{}", boyko_log::dsp!(line, 256));
-                    println!("{line}");
                     // Rung P2 item 3 (plan P2's "sort monotonicity readback"): the SECOND capture,
                     // taken only when the sort was armed at boot. It reads the alpha class from
                     // BOTH `p_render_sorted` and `p_render` in one submit, so the measurement and
@@ -3210,13 +3211,18 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     ) {
                         let lines = sort_readback.artifact_lines();
                         boyko_log::info!(boyko_log::Host, "{}", boyko_log::dsp!(lines, 512));
-                        println!("{lines}");
                         app.world_mut().insert_resource(sort_readback);
                     }
                     app.world_mut().insert_resource(readback);
                 }
                 None => {
-                    println!(
+                    // `info!` with no registry code, not `warn!`: a disarmed run is a legitimate
+                    // configuration reporting itself, not a degradation. The gate that armed the
+                    // probe learns WHICH arming axis it missed from the ABSENCE of
+                    // `ParticleCountersReadback` in the world, which is a structural answer this
+                    // record annotates rather than replaces.
+                    boyko_log::info!(
+                        boyko_log::Host,
                         "particle_counters UNARMED: no particle GPU bundle exists on this run \
                          (ParticleConfig::mode == Off at boot), so there is nothing to read back"
                     );

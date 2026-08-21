@@ -23,6 +23,7 @@
 use core::f32::consts::PI;
 
 use boyko_ecs::ecs::core::system::{Res, ResMut};
+use boyko_log::codes::{OnceSite, W2207};
 use boyko_macros::{Component, Resource};
 use boyko_scene::{GlobalTransform, Transform};
 
@@ -1024,14 +1025,26 @@ pub fn sync_cluster_light_gate(
     }
 }
 
-/// Logs the first SV0 request this boot could not honour, and nothing thereafter.
+/// `boyko-W2207`'s per-site `Once` latch — the VB-SV0 request-clamped report.
+///
+/// A module-level `static` rather than one tucked inside the reporter, for the reason
+/// `light_system.rs`'s [`W2201_SITE`](crate::light_system::W2201_SITE) gives: a `Once` latch is
+/// PROCESS state, so an observer must be able to reset it — otherwise a test's green only means
+/// "nothing else in this binary tripped the condition first". Several sibling tests in this file
+/// drive `sync_sv0_light_gate` over unarmable pairs for reasons of their own, and they do trip it.
+pub(crate) static W2207_SITE: OnceSite = OnceSite::new();
+
+/// Reports `boyko-W2207` — the first SV0 request this boot could not honour, and nothing after.
 ///
 /// `#[cold]` + `#[inline(never)]` for the same reason as `light_system`'s
 /// `report_dropped_non_finite_light`: only the two compares of [`sync_sv0_light_gate`]'s
 /// capability test stay on the per-frame straight-line code.
 ///
-/// The `eprintln!` is bounded at ONE per process by the latch below — unlike a per-transition
-/// diagnostic it cannot be driven at frame rate by any input, so it needs no build-profile gate.
+/// Bounded at ONE per process by [`W2207_SITE`]. This was an unconditional `eprintln!` with a
+/// hand-rolled `AtomicBool` until the L8c print census reddened on it: the argument in its place
+/// ("it cannot be driven at frame rate, so it needs no build-profile gate") is about RATE, and rate
+/// is what `RatePolicy::Once` is for — it was never a reason to bypass the logger. `OnceSite::claim`
+/// short-circuits on a `Relaxed` load, so the steady state after the first report is one load.
 ///
 /// # Why this is worth a diagnostic at all
 ///
@@ -1042,20 +1055,21 @@ pub fn sync_cluster_light_gate(
 #[cold]
 #[inline(never)]
 fn report_sv0_request_clamped(shadow: bool, ao: bool) {
-    use core::sync::atomic::{AtomicBool, Ordering};
-    static LOGGED: AtomicBool = AtomicBool::new(false);
-    // Relaxed: a best-effort one-shot log guard, not a synchronization edge — nothing is
-    // published through this flag and a racing double-print is cosmetic.
-    if !LOGGED.swap(true, Ordering::Relaxed) {
-        eprintln!(
-            "boyko_render: VB-SV0 was requested (shadow={shadow}, ao={ao}) on a boot whose \
-             resolved render path cannot carry it (needs path == VisibilityBuffer, a mesh leg, \
-             ShadowSources::SDF_SOFT_MARCH, RG8-UNORM storage, and — since DP6a — the geo/shade \
-             split, whose geometry half is the term's only producer) — both gate bits forced OFF \
-             for this run. NOTE: the split is resolved from a BOOT SNAPSHOT of this same request, \
-             so a request first raised AFTER boot is clamped for the process lifetime"
-        );
+    if !W2207_SITE.claim() {
+        return;
     }
+    boyko_log::warn!(
+        boyko_log::Render,
+        W2207,
+        "VB-SV0 was requested (shadow={}, ao={}) on a boot whose resolved render path cannot carry \
+         it (needs path == VisibilityBuffer, a mesh leg, ShadowSources::SDF_SOFT_MARCH, RG8-UNORM \
+         storage, and -- since DP6a -- the geo/shade split, whose geometry half is the term's only \
+         producer) -- both gate bits forced OFF for this run. NOTE: the split is resolved from a \
+         BOOT SNAPSHOT of this same request, so a request first raised AFTER boot is clamped for \
+         the process lifetime",
+        shadow,
+        ao
+    );
 }
 
 /// **VB-SV0 (`docs/VB-SV0-SDF-SHADOW-PLAN.md` §S4, "arm"): the SOLE production writer of the
@@ -2204,6 +2218,12 @@ mod tests {
     ) -> (LightingConfig, bool) {
         use boyko_ecs::ecs::core::app::App;
 
+        // Every caller may drive an unarmable request, which SPENDS `W2207_SITE` — process state.
+        // Taken here, in the one funnel, so `sv0_gate_reports_the_clamp_once_as_w2207` cannot have
+        // its window emptied by a sibling running concurrently. Per CALL, not per test: the guard
+        // drops with this frame, so the three-call cases below do not self-deadlock.
+        let _observe = boyko_log::probe::observe_lock();
+
         let mut app = App::new();
         app.insert_resource(resolved);
         app.insert_resource(LightingConfig {
@@ -2223,6 +2243,88 @@ mod tests {
         (cfg, app.world().resource::<LightTableDirty>().0)
     }
 
+    /// **`boyko-W2207` is emitted on a clamp, exactly once per process, and NOT on an honoured
+    /// request.** The observing half of the site the L8c print census forced out of `eprintln!`.
+    ///
+    /// All three of the things an observer of a `Once` site needs are here, and each fixes a
+    /// different failure (`boyko_log::probe`'s module doc has the table): [`probe::watch`] counts
+    /// per thread and per code, [`OnceSite::reset`] undoes a latch an EARLIER test spent, and
+    /// `observe_lock` keeps a CONCURRENT sibling from spending it mid-window.
+    ///
+    /// The negative leg is the one that matters most. Keying the report on the value the gate
+    /// wrote instead of on request-vs-capability would make every armed boot report a clamp, and
+    /// a diagnostic that fires when nothing is wrong is one nobody reads by the third run.
+    #[test]
+    fn sv0_gate_reports_the_clamp_once_as_w2207() {
+        use boyko_ecs::ecs::core::app::App;
+
+        use crate::render_path_config::GeometryLegs;
+
+        let _observe = boyko_log::probe::observe_lock();
+        // Raise the `Render` ceiling: a `Warn` below it is never emitted at all. MEASURED while
+        // writing this test — without the arm the POSITIVE leg reads 0, which is exactly the
+        // "reporting `never emitted` as success" that `log_probe`'s own doc warns about. The
+        // positive leg is what caught it; a test of only the negative legs would have passed
+        // vacuously and pinned nothing.
+        crate::log_probe::arm();
+
+        // VB x Mesh with the term requested: unarmable, so the gate must clamp AND report.
+        let unarmable =
+            sv0_resolved(GeometryLegs::Mesh, /* ssao */ true, /* hwrt */ false, /* term */ true);
+        assert!(!unarmable.vb_sdf_mesh_armable(), "test setup: this boot must NOT be armable");
+
+        let drive = |resolved, shadow, ao| {
+            let mut app = App::new();
+            app.insert_resource(resolved);
+            app.insert_resource(LightingConfig {
+                vb_sdf_mesh_shadow: shadow,
+                vb_sdf_mesh_ao: ao,
+                ..LightingConfig::default()
+            });
+            app.insert_resource(LightTableDirty(false));
+            app.world_mut().run_system(sync_sv0_light_gate);
+        };
+
+        W2207_SITE.reset();
+        boyko_log::probe::watch(b'W', W2207.number());
+        drive(unarmable, true, true);
+        assert_eq!(
+            boyko_log::probe::watched(),
+            1,
+            "an unarmable boot with a live request must report the clamp"
+        );
+
+        // The latch is spent: a second frame on the same boot says nothing. Without this the site
+        // would report every frame, on the per-frame path, for the life of the process.
+        boyko_log::probe::watch(b'W', W2207.number());
+        drive(unarmable, true, true);
+        assert_eq!(boyko_log::probe::watched(), 0, "a spent latch emits nothing");
+
+        // The negative: an ARMABLE boot honours the request, so there is no clamp to report.
+        let armable =
+            sv0_resolved(GeometryLegs::Both, /* ssao */ false, /* hwrt */ false, /* term */ true);
+        assert!(armable.vb_sdf_mesh_armable(), "test setup: VB x Both must be SV0-armable");
+        W2207_SITE.reset();
+        boyko_log::probe::watch(b'W', W2207.number());
+        drive(armable, true, true);
+        assert_eq!(
+            boyko_log::probe::watched(),
+            0,
+            "an HONOURED request is not a clamp — reporting it would cry wolf on every armed boot"
+        );
+
+        // An unarmable boot that never asked for the term is also silent: the report is keyed on
+        // the REQUEST, not on the capability alone.
+        W2207_SITE.reset();
+        boyko_log::probe::watch(b'W', W2207.number());
+        drive(unarmable, false, false);
+        assert_eq!(
+            boyko_log::probe::watched(),
+            0,
+            "no request means no clamp — the 0%-gate boot must stay silent"
+        );
+    }
+
     /// **Code-review P2-c, the cost the separation buys.** An owner who re-asserts the request
     /// EVERY frame on a boot that cannot carry SV0 dirties the light table exactly zero times.
     ///
@@ -2235,6 +2337,10 @@ mod tests {
         use boyko_ecs::ecs::core::app::App;
 
         use crate::render_path_config::GeometryLegs;
+
+        // Drives the gate on an unarmable request, so it SPENDS `W2207_SITE` and joins the
+        // serialized set — see `run_sv0_gate`, which this test deliberately bypasses.
+        let _observe = boyko_log::probe::observe_lock();
 
         // VB x Mesh: structurally unarmable, so the request can never be honoured — the exact
         // configuration the fused design would have re-folded on forever.
