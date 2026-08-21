@@ -70,6 +70,16 @@ boyko_image = { path = "../boyko_image" }
 # once its condition had diverged), a GPU dispatch failure a `System` body has no `Result` channel
 # to report, and the material loader's fallback notes. Already in the graph through `boyko_ecs`.
 boyko-log = { path = "../boyko_log" }
+# UI-ADVANCED S0 (`docs/UI-PLAN-SPRITES.md` rung S0 item 1): PROMOTED from
+# `[dev-dependencies]`, where it sat annotated TEST-ONLY for the P6b/P7b screenshot
+# tests. The canonical UI gather (`ui::gather::gather_ui_nodes`), the
+# `ui_pack_inputs!` single spelling, and the `ui_render_discovery` system now name
+# `boyko_ui`'s components (`ComputedRect`/`UiBackground`/`ComputedClip`/`StackIndex`/
+# `UiRoot`) in PRODUCTION code — per the layering rule at the top of this file:
+# boyko_render is the home of per-entity GPU data paths, and the render-side gather
+# IS one. Acyclic: `boyko-ui` names no render crate (verified: its deps are
+# ecs/macros/utils/input/fontbake/scene/math).
+boyko-ui = { path = "../boyko_ui" }
 # S4: the 3D GPU instance (`Gpu3dInstance`) is a `bytemuck::Pod` component whose
 # column uploads zero-copy via `cast_slice` (same discipline as the demo's 2D
 # `GpuInstance`). The `derive` feature gives the `Pod` / `Zeroable` derives.
@@ -80,6 +90,12 @@ bytemuck.workspace = true
 # a migrated site reports ONCE and not once per frame. A dev-dependency, so the feature reaches
 # this crate's test and bench targets and never a shipping build.
 boyko-log = { path = "../boyko_log", features = ["test-probe"] }
+# UI-ADVANCED S1 (`docs/UI-PLAN-SPRITES.md`): `tests/ui_rect_edsl_sync.rs` re-runs the
+# `emit_hlsl_ui_*` span printers against the committed `ui_rect.{vs,fs}.hlsl` (which live in
+# THIS crate's `shaders/`), and feeds the HOST `UiInstance` offsets into the mirror printer so
+# the committed struct span is pinned to `offset_of!`, not to a copied literal. TEST-ONLY: the
+# production build never links the emitter (the `emit` feature stays off the prod graph).
+boyko_shaderdsl = { path = "../boyko_shaderdsl", features = ["emit"] }
 # W2: self-referential dev-dependency that turns the `test-readback` feature ON
 # for THIS crate's integration tests (now that it is OFF by default). The
 # integration tests in `tests/*.rs` compile against `boyko_render` as an external
@@ -104,13 +120,12 @@ boyko_rhi_vulkan = { path = "../boyko_rhi_vulkan", features = ["goldens"] }
 # physics pipeline fans across.
 boyko-physics = { path = "../boyko_physics" }
 boyko-threadpool = { path = "../boyko_threadpool" }
-# GUI P6b screenshot test ONLY: the HUD test drives the SHIPPED data-binding chain
+# GUI P6b screenshot test: the HUD test drives the SHIPPED data-binding chain
 # (`BindText` -> `UiTextBuffer` -> `emit_glyphs`) that lives in boyko-ui, then renders
 # the bound glyphs through this crate's reused `pack_ui_instance` / `record_ui_rects`
-# path. Acyclic + TEST-ONLY: `boyko_render` (dev) -> `boyko-ui`; `boyko-ui` names no
-# render crate (verified: its deps are ecs/macros/utils/input/fontbake/scene/math), so
-# no production cycle is introduced.
-boyko-ui = { path = "../boyko_ui" }
+# path. UI-ADVANCED S0 PROMOTED `boyko-ui` to `[dependencies]` above (the gather /
+# discovery / `ui_pack_inputs!` production code names its components), so the tests
+# now reach it through the production edge and no dev row remains.
 # GUI P7b screenshot test ONLY: the world-UI proof drives the SHIPPED pick/project/
 # visibility systems (boyko-ui::world), whose pick reads `PhysicalInput` (boyko-input).
 # Acyclic + TEST-ONLY: `boyko_render` (dev) -> `boyko-input`; `boyko-input` names no

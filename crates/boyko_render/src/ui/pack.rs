@@ -13,6 +13,7 @@ use boyko_macros::Resource;
 use crate::ui::instance::{
     premultiply_rgba8, FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, FLAG_TEXT, UiInstance,
 };
+use crate::ui::FRAMES_IN_FLIGHT;
 
 /// One source node's pack inputs (logical-px component values + the node's z key),
 /// the testable boundary of [`pack_ui_instance`] (no Arena/world dependency, so the
@@ -137,7 +138,7 @@ pub fn pack_ui_instance(input: &PackInput, scale_factor: f32) -> UiInstance {
 /// side store). Allocated/grown ONLY at setup or on a capacity-crossing frame; a
 /// steady-state frame only `clear()`s + `extend`s + sorts in place (capacity
 /// persists), so there is zero steady-state allocation.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct UiRenderScratch {
     /// Packed records, sorted by `StackIndex`; `clear()` + `extend`, never `Vec::new`.
     pub pack: Vec<UiInstance>,
@@ -150,9 +151,42 @@ pub struct UiRenderScratch {
     pub keys: Vec<(u32, u32)>,
     /// The instance count uploaded last frame (for the change gate / debug).
     pub last_count: u32,
-    /// The last generation seen — the O(1) change gate (A1 step 1): a static frame
-    /// short-circuits on `gen == last_seen_generation`.
-    pub last_seen_generation: u64,
+    /// The last generation seen, PER frame-in-flight ring slot — the O(1) D6a
+    /// change gate (UI-ADVANCED S0 item 5). One `u64` per slot, because a skip
+    /// serves the SLOT's ring contents: with a single scalar, the second frame
+    /// after a change would compare equal, skip its repack, and present the
+    /// sibling slot's STALE ring (the M0-a red — the defect was in the original
+    /// scalar SPECIFICATION, not the wiring). Initialized to `u64::MAX`
+    /// ("never seen") so a fresh world's generation 0 still packs both slots.
+    pub last_seen_generation: [u64; FRAMES_IN_FLIGHT],
+    /// The instance count last uploaded into each ring slot — what a skipped
+    /// frame's [`UiFramePlan`](crate::ui::plan::UiFramePlan) reports for the
+    /// slot it re-serves (the ortho is rebuilt from the LIVE extent each frame;
+    /// only the count is slot-resident state).
+    pub last_counts: [u32; FRAMES_IN_FLIGHT],
+    /// DIAGNOSTIC (S0 item 6, deliberately NOT `#[cfg(test)]` — the §10.4
+    /// `relayout_count` lesson): repacks ever executed by
+    /// [`pack_sort_upload`](crate::ui::upload::UiUploadSystem::pack_sort_upload),
+    /// wrapping. Sample before/after a frame for a per-frame count; a static
+    /// frame under the hoisted gate must not advance it (G0-2), and one changed
+    /// frame advances it once per ring slot (G0-3).
+    pub repacks: u64,
+}
+
+impl Default for UiRenderScratch {
+    /// Empty buffers + the `u64::MAX` "never seen" gate sentinel — a fresh
+    /// scratch NEVER skips: generation 0 (a fresh [`UiRenderGeneration`])
+    /// compares unequal on both slots, so the first frame on each slot packs.
+    fn default() -> Self {
+        UiRenderScratch {
+            pack: Vec::new(),
+            keys: Vec::new(),
+            last_count: 0,
+            last_seen_generation: [u64::MAX; FRAMES_IN_FLIGHT],
+            last_counts: [0; FRAMES_IN_FLIGHT],
+            repacks: 0,
+        }
+    }
 }
 
 impl UiRenderScratch {
@@ -186,12 +220,16 @@ impl UiRenderScratch {
     }
 }
 
-/// The monotonic UI-render generation counter (A1 step 1) — a `Resource` bumped by
-/// any writer of the pack inputs (`ComputedRect` via the layout system,
-/// `UiBackground` / `StackIndex` / `ComputedClip` via authoring/commands, and the
-/// viewport/swapchain extent). The upload system's gate is one `u64` compare:
-/// `if gen == scratch.last_seen_generation { return; }` — the 0%-when-static
-/// guarantee is an O(1) compare, not an O(N) Changed scan.
+/// The monotonic UI-render generation counter (A1 step 1) — a `Resource` bumped
+/// once per changed frame by
+/// [`ui_render_discovery`](crate::ui::gather::ui_render_discovery) (the ONE
+/// production bump site since UI-ADVANCED S0; the host additionally bumps on a
+/// DPI/scale change, which no component carries). The upload seam's gate is one
+/// `u64` compare PER frame-in-flight slot, hoisted AHEAD of the gather in
+/// [`host_upload_frame_from_world`](crate::ui::upload::UiUploadSystem::host_upload_frame_from_world):
+/// a static frame costs one compare and ZERO component probes — an O(1) skip,
+/// not an O(N) Changed scan (the discovery system pays that scan once,
+/// archetype-filtered, for the whole set).
 #[derive(Resource, Default)]
 pub struct UiRenderGeneration {
     /// The current generation; bumped on any pack-input change.

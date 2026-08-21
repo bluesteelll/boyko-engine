@@ -34,11 +34,15 @@
 //!
 //! The host-drivable
 //! [`host_upload_frame_from_world`](UiUploadSystem::host_upload_frame_from_world)
-//! seam (#31) gathers the visible nodes from a [`DispatcherToken::world`]
-//! [`WorldView`] (a read-only ECS
-//! projection, #30) FIRST, ends that borrow, then delegates to `host_upload_frame`
-//! with only the `!Send` borrows live. `WorldView` (#30) supplies the
-//! column/resource-read HALF of the world access the in-schedule site needs.
+//! seam (#31) runs the D6a per-slot generation gate FIRST — one `u64` compare
+//! against `scratch.last_seen_generation[slot]`, AHEAD of the gather, so a
+//! static frame costs zero component probes and zero repacks (UI-ADVANCED S0
+//! item 5) — then, on a changed slot, gathers the visible nodes from a
+//! [`DispatcherToken::world`] [`WorldView`] (a read-only ECS projection, #30),
+//! ends that borrow, and delegates to `host_upload_frame` with only the `!Send`
+//! borrows live. `WorldView` (#30) supplies the column/resource-read HALF of
+//! the world access the in-schedule site needs. The canonical gather to wire in
+//! is [`gather_ui_nodes`](crate::ui::gather::gather_ui_nodes).
 //!
 //! The `impl System` shell ([`System::run_dispatcher`]) is registered for its
 //! scheduler SHAPE only (EMPTY access, `is_gpu()`, dispatcher-solo) and is an honest
@@ -159,6 +163,12 @@ impl UiUploadSystem {
         token: &FrameWriteToken,
         ctx: &mut RhiContext,
     ) -> Result<UiFramePlan, GpuColumnError> {
+        // DIAGNOSTIC (S0 item 6): one repack executed. Counted HERE — at the
+        // pack itself, not at the gate — so a wrongly-placed gate that still
+        // gathers but skips the pack keeps this at zero while the probe counter
+        // moves (the two counters split exactly on the M0-b mutation).
+        scratch.repacks = scratch.repacks.wrapping_add(1);
+
         // (2) pack — clear + extend into the preallocated scratch, never Vec::new.
         scratch.pack.clear();
         scratch.keys.clear();
@@ -228,25 +238,55 @@ impl UiUploadSystem {
         Ok((plan, token))
     }
 
-    /// Host-drivable per-frame upload that gathers the visible UI nodes from the
-    /// ECS [`WorldView`] FIRST (a read-only world borrow), lets that borrow end,
-    /// then drives the `!Send`-only upload via
-    /// [`host_upload_frame`](Self::host_upload_frame).
+    /// Host-drivable per-frame upload with the D6a generation gate HOISTED ahead
+    /// of the gather (UI-ADVANCED S0 item 5): a static frame costs ONE `u64`
+    /// compare and ZERO component probes — the gather closure is never entered,
+    /// the pack never runs, and the slot's existing ring contents are re-served.
     ///
-    /// This is the world-read half of the Rung-4 seam (#30/#31): `gather_nodes`
-    /// fills `node_buf` (reused, never `Vec::new`) using ONLY the view's `&self`
-    /// read surface ([`WorldView::resource`], [`WorldView::get_component_raw`],
-    /// [`WorldView::query_entities_buf`]). The world-read borrow ENDS with the
-    /// closure; only `&mut RhiContext` + `&Renderer` are live during the upload,
-    /// so the world-read and `!Send` borrows are sequential, never simultaneous.
+    /// Per frame, in order:
+    ///
+    /// 1. read the target ring slot ([`Renderer::frame_index`] — the slot the
+    ///    frame-ending present will use) and the current
+    ///    [`UiRenderGeneration`] from the world;
+    /// 2. **the gate**: if the generation equals
+    ///    `scratch.last_seen_generation[slot]`, mint the [`FrameWriteToken`]
+    ///    (present still needs the fence proof) and return a plan re-serving
+    ///    the slot's uploaded count with THIS frame's `ortho` — no gather, no
+    ///    pack, no upload;
+    /// 3. otherwise gather the visible nodes from the read-only [`WorldView`]
+    ///    (`gather_nodes` fills `node_buf` using ONLY the view's `&self` read
+    ///    surface — [`WorldView::resource`], [`WorldView::get_component_raw`],
+    ///    [`WorldView::query_entities_buf`]), let that borrow end, then drive
+    ///    [`host_upload_frame`](Self::host_upload_frame) and record the
+    ///    generation + count for the slot.
+    ///
+    /// The gate is PER ring slot (`[u64; FRAMES_IN_FLIGHT]`): after one change,
+    /// each slot repacks once (its ring holds stale bytes until its own repack)
+    /// and only then skips — a single scalar would skip the second slot onto
+    /// stale contents (rung S0 gate G0-3 / red mutation M0-a).
     ///
     /// The swapchain `Renderer` is still host-supplied (it is not yet an ECS
     /// resource), so this is a host driver, not the in-schedule site — see the
     /// module docs' world-access seam.
     ///
+    /// > **UI-ADVANCED S0 status (2026-08-21): this seam currently has NO
+    /// > possible caller** — a `WorldView` is mintable only inside a
+    /// > `System: Send + Sync + 'static` body, where `&mut RhiContext` is
+    /// > M1-exclusive with the view (E0502) and host locals are unreachable
+    /// > (E0277/E0521). The gate below is therefore landed per the plan's item
+    /// > 5 but UNGATED until the callability fork is resolved — see
+    /// > `docs/OPEN-QUESTIONS.md`, entry 2026-08-21.
+    ///
     /// Like [`host_upload_frame`](Self::host_upload_frame), returns the minted
     /// [`FrameWriteToken`] alongside the plan — the host passes it BY VALUE to the
     /// frame-ending `present_sampled` consume (R0b).
+    ///
+    /// # Panics
+    /// If the world has no [`UiRenderGeneration`] resource. The gate refuses to
+    /// guess: a host that never registered
+    /// [`ui_render_discovery`](crate::ui::gather::ui_render_discovery) (and its
+    /// resource) would otherwise silently repack every frame — the "gate that
+    /// cannot fail" shape this project keeps recording.
     ///
     /// # Errors
     /// [`GpuColumnError::Swapchain`] on the fence wait, or any
@@ -266,11 +306,53 @@ impl UiUploadSystem {
     where
         F: FnOnce(WorldView<'_>, &mut Vec<UiNode>),
     {
+        // (1) The slot this frame's present will fence + bind (round-robin; the
+        // fence wait below and `present_sampled` both use it), and the current
+        // generation — read BEFORE the gather so the gate can skip it (D6a).
+        let slot = renderer.frame_index();
+        debug_assert!(
+            slot < crate::ui::FRAMES_IN_FLIGHT,
+            "invariant: the swapchain frame index addresses a UI ring slot"
+        );
+        let generation = world.resource::<UiRenderGeneration>().generation;
+
+        // (2) The per-slot gate: nothing changed since this SLOT last packed ⇒
+        // its ring bytes are current — skip the gather AND the pack. The token
+        // is still minted (the frame-ending present consumes it), and the plan
+        // re-serves the slot's count under THIS frame's ortho (the ortho is
+        // extent-derived per frame; the packed bytes do not depend on it).
+        if generation == scratch.last_seen_generation[slot] {
+            let token = renderer.wait_frame_in_flight()?;
+            debug_assert_eq!(
+                token.slot(),
+                slot,
+                "invariant: the fenced slot is the slot the gate compared"
+            );
+            return Ok((
+                UiFramePlan {
+                    instance_count: scratch.last_counts[slot],
+                    ortho,
+                    frame_index: slot,
+                },
+                token,
+            ));
+        }
+
+        // (3) Changed for this slot: gather, then upload. The `world` view (the
+        // read borrow) is consumed by the closure; only the `!Send`
+        // `&mut RhiContext` + `&Renderer` borrows are live during the upload.
         node_buf.clear();
         gather_nodes(world, node_buf);
-        // The `world` view (the read borrow) is consumed by the closure above; only
-        // the `!Send` `&mut RhiContext` + `&Renderer` borrows are live below.
-        self.host_upload_frame(node_buf.drain(..), scratch, gather, ortho, renderer, ctx)
+        let (plan, token) =
+            self.host_upload_frame(node_buf.drain(..), scratch, gather, ortho, renderer, ctx)?;
+        debug_assert_eq!(
+            token.slot(),
+            slot,
+            "invariant: the uploaded slot is the slot the gate compared"
+        );
+        scratch.last_seen_generation[slot] = generation;
+        scratch.last_counts[slot] = plan.instance_count;
+        Ok((plan, token))
     }
 }
 

@@ -65,6 +65,7 @@
 //! exists.
 
 pub mod draw;
+pub mod gather;
 pub mod instance;
 pub mod pack;
 pub mod plan;
@@ -72,6 +73,7 @@ pub(crate) mod resources;
 pub mod upload;
 
 pub use draw::record_ui_rects;
+pub use gather::{gather_ui_nodes, probe_component, ui_render_discovery, UiGatherScratch};
 pub use instance::{
     premultiply_rgba8, UiInstance, UiOrtho, FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, FLAG_TEXT,
     UI_INSTANCE_SIZE,

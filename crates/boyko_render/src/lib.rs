@@ -650,8 +650,8 @@ pub use view::{
     view_proj_columns,
 };
 pub use ui::{
-    pack_ui_instance, premultiply_rgba8, record_ui_rects, ui_rect_fs_spirv, ui_rect_vs_spirv,
-    FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, FLAG_TEXT, FRAMES_IN_FLIGHT as UI_FRAMES_IN_FLIGHT,
-    PackInput, UiFramePlan, UiInstance, UiNode, UiOrtho, UiRenderGeneration, UiRenderScratch,
-    UiUploadSystem, UI_INSTANCE_SIZE,
+    gather_ui_nodes, pack_ui_instance, premultiply_rgba8, record_ui_rects, ui_rect_fs_spirv,
+    ui_rect_vs_spirv, ui_render_discovery, FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, FLAG_TEXT,
+    FRAMES_IN_FLIGHT as UI_FRAMES_IN_FLIGHT, PackInput, UiFramePlan, UiGatherScratch, UiInstance,
+    UiNode, UiOrtho, UiRenderGeneration, UiRenderScratch, UiUploadSystem, UI_INSTANCE_SIZE,
 };
