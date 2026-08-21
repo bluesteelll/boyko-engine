@@ -152,6 +152,77 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p profile-fixture --test profile_axis_census
 
+  # Reflection GATES G4 item 1 (docs/REFLECTION-PLAN-GATES.md D7): the feature-ON legs,
+  # debug AND release — §5's release-editor gap lives exactly where `debug_assert!`
+  # compiles out, so a debug-only ON leg never exercises the configuration the gap is
+  # about; the matrix mirrors the `test` job's. The OFF side is every other job: nothing
+  # in the workspace enables `reflect`, so the ship configuration is what they compile.
+  # Without this job, `boyko_reflect` is a package in the tree that never sees a compiler
+  # — the `default-members` vacuity in a new costume.
+  #
+  # The `pkg/feature` spelling is load-bearing: a bare `--features reflect` across a
+  # multi-package selection is ambiguous and is the form that silently selects nothing.
+  #
+  # BOYKO_REFLECT_LEG is the per-test non-vacuity marker (GATES G4 "non-vacuity inside
+  # each leg"): `reflect_leg_nonvacuity.rs` asserts `cfg!(feature = "reflect")` whenever
+  # this variable names a leg, and reds naming the leg if the feature is off — so
+  # dropping `--features` here cannot turn the leg into a no-op that reports green
+  # (`gj1_flag_cost`'s `flags_on()` precedent). The variable exists because an outer
+  # feature selection is UNOBSERVABLE from inside a test process (measured at G2: the
+  # test env is byte-identical under `--features …`), so the leg must name itself.
+  # `tests/reflect_ci_coverage.rs` pins the flag and the variable together.
+  reflect-on:
+    name: cargo test reflect ON (${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        profile: [debug, release]
+    env:
+      BOYKO_REFLECT_LEG: reflect-on
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test reflect ON (${{ matrix.profile }})
+        run: |
+          if [ "${{ matrix.profile }}" = "release" ]; then
+            cargo test -p boyko-reflect -p reflect-fixture --all-targets --no-fail-fast --release \
+              --features reflect-fixture/reflect
+          else
+            cargo test -p boyko-reflect -p reflect-fixture --all-targets --no-fail-fast \
+              --features reflect-fixture/reflect
+          fi
+
+  # Reflection GATES G4 item 2, mirroring `profile-census` above: `components: llvm-tools`
+  # is load-bearing and its absence is a RED, never a SKIP (GATES D6) — the census
+  # panics without `llvm-nm` rather than reporting a pass on a machine that cannot
+  # measure.
+  reflect-census:
+    name: reflect absence census (G3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p reflect-fixture --test reflect_absence_census
+
+  # Reflection GATES G4 item 4 / D15: the ONLY CI leg that compiles an engine crate's
+  # `reflect` feature — the leg that makes D3's whole permission meaningful. Deliberately
+  # OUTSIDE Miri: this package reaches boyko_render -> boyko_rhi_vulkan, and Miri cannot
+  # execute FFI (F18). The feature selection legitimately reaches boyko_demo's closure
+  # through unification (F16); that is expected and is not the ship invocation — G2's
+  # harness takes its ship readings from its own feature-clean `cargo tree` spawns.
+  reflect-dogfood:
+    name: cargo test reflect dogfood
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p reflect-dogfood --all-targets --no-fail-fast --features reflect-dogfood/reflect
+
   clippy:
     name: cargo clippy
     runs-on: ubuntu-latest
@@ -219,8 +290,23 @@ jobs:
       # pure-compute crates, which is what it could ever have meaningfully covered.
       # The FFI/GPU side is covered instead by `cargo careful` + the validation-layer
       # golden runs (docs/AUDIT-2026-07-PLAN.md's tool matrix).
+      # Reflection GATES G4 item 3 / D4: TWO reflect rows with DIFFERENT shapes, and the
+      # difference is the point. `-p boyko-reflect` is PLAIN — the crate carries no
+      # `reflect` feature (D4) and never will, so `--features reflect` on it is a hard
+      # cargo error ("none of the selected packages contains these features"); and with
+      # the feature "off" it is NOT empty — nothing in its source is cfg-gated. That row
+      # covers the arithmetic and the registry. `-p reflect-fixture` carries the
+      # `pkg/feature` spelling — the ONLY row that reaches any derive-generated unsafe,
+      # because only a consumer can hold a `#[component(reflect)]` type (B.9).
+      # `reflect-dogfood` is deliberately ABSENT: it reaches boyko_render ->
+      # boyko_rhi_vulkan, and Miri cannot execute FFI — which is why this sweep is
+      # hand-listed at all (F18). The fixture's census/codegen harnesses carry
+      # `#[cfg(not(miri))]`: Miri cannot spawn processes either, and without the guard
+      # this row reds for a reason that has nothing to do with reflection.
       - name: cargo miri test (pure-compute sweep)
         run: |
           cargo +nightly miri test --all-targets \
             -p boyko-ecs -p boyko-utils -p boyko-threadpool -p boyko-serialize \
-            -p boyko-math -p boyko_sdf_math -p boyko_image
+            -p boyko-math -p boyko_sdf_math -p boyko_image \
+            -p boyko-reflect \
+            -p reflect-fixture --features reflect-fixture/reflect
