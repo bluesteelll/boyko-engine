@@ -1,4 +1,4 @@
-error: unknown #[component(...)] key; valid keys: on_add, on_insert, on_replace, on_remove, no_bundle, no_clone, clone = <fn>, storage = "bitset", no_serialize, stable_name = "..", format_version = N
+error: unknown #[component(...)] key; valid keys: on_add, on_insert, on_replace, on_remove, no_bundle, no_clone, clone = <fn>, storage = "bitset", no_serialize, stable_name = "..", format_version = N, reflect
   --> tests/compile_fail_hooks/unknown_key_rejected.rs:13:13
    |
 13 | #[component(bogus = h)]

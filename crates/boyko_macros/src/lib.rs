@@ -16,6 +16,7 @@ mod bundle;
 mod common;
 mod component;
 mod event;
+mod reflect;
 mod relationship;
 mod resource;
 mod system_set;
@@ -107,9 +108,38 @@ use proc_macro::TokenStream;
 /// is expected (wrap it in a `#[derive(Bundle)]` struct instead). The flag is
 /// also the escape hatch when a type must derive BOTH `Component` and
 /// `Bundle` — without it the two derives now collide on the `Bundle` impl.
+/// # Reflection opt-in (`reflect`, CORE C7)
+///
+/// The bare `reflect` flag key opts a component into the **editor-only** reflection
+/// layer:
+///
+/// ```ignore
+/// #[derive(Component, Default)]
+/// #[component(reflect)]
+/// struct Health { current: f32, max: f32 }
+/// ```
+///
+/// It emits a `static boyko_reflect::TypeInfo` describing the type's fields — every
+/// offset a `core::mem::offset_of!` — plus `impl boyko_reflect::Reflect`, all behind
+/// `#[cfg(feature = "reflect")]` **evaluated in the crate the derive expanded into**. A
+/// consumer that has not enabled its own `reflect` feature emits nothing, and this crate
+/// never gains a dependency edge to `boyko_reflect`.
+///
+/// `default_in_place` is baked from `Default`; a type with no `Default` is refused by the
+/// `boyko_reflect::ReflectDefault` bound, spanned at the type name. Opt out with the
+/// helper attribute `#[reflect(no_default)]`, which bakes `None` instead.
+///
+/// **Tuple structs are accepted, with one caveat that cannot be a diagnostic.** A tuple
+/// struct's field names are the decimal indices (`"0"`, `"1"`, …), so *by-name* and
+/// *by-position* coincide for it: the reorder stability by-name access otherwise gives
+/// you does **not** hold, and swapping two tuple fields silently re-binds their names.
+/// Named-field structs are recommended for anything serialized. There is no
+/// `compile_error!` carrying this text because a tuple struct is accepted rather than
+/// refused, and a non-fatal proc-macro warning needs the nightly-only
+/// `proc_macro::Diagnostic`.
 #[proc_macro_derive(
     Component,
-    attributes(component, require, entities, relationship, relationship_target)
+    attributes(component, require, entities, relationship, relationship_target, reflect)
 )]
 pub fn component_macro(input: TokenStream) -> TokenStream {
     component::expand(input)

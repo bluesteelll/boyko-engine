@@ -41,6 +41,11 @@
 //!   count` (CORE C5), with the bounds check ordered **before** the multiply so
 //!   `usize::MAX` is a refusal in both profiles rather than a debug panic and a
 //!   release wild pointer.
+//! * [`reflect`] — [`Reflect`] (the descriptor's one associated const) and
+//!   [`ReflectDefault`] (D20's named refusal for a missing `Default`), the two items
+//!   `#[component(reflect)]`'s expansion names (CORE C7 / D22). Both were *used* by the
+//!   plan set before any rung created them, which is why they land here beside the
+//!   derive that emits them rather than in a fenced sketch inside a decision.
 //! * [`cursor`] — [`NestedCursor`] / [`FieldValue`], the `Nested` descend (CORE C6).
 //!   One `add` and one pointer copy per level, with the `'a` doing the validity
 //!   guarantee the compiler can check; the two properties that make that arithmetic
@@ -50,11 +55,13 @@
 pub mod array;
 pub mod cursor;
 pub mod prim;
+pub mod reflect;
 pub mod registry;
 pub mod scalar;
 pub mod type_info;
 
 pub use cursor::{FieldValue, NestedCursor};
+pub use reflect::{Reflect, ReflectDefault};
 pub use registry::{install_type_info, type_info_of};
 pub use scalar::{Scalar, ScalarKind};
 pub use type_info::{

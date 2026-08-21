@@ -502,8 +502,25 @@ gate whose first run is green, and a first run that is green teaches nothing.
   > `reflect_off_twin_plus.rs`) carries a **direct `#[cfg(feature = "reflect")]`-gated
   > fn-pointer reference to `boyko_reflect::install_type_info`** (`reflect_linkage()`), which
   > puts needle A and needle B in the feature-ON image by the same mechanism the annotation
-  > will; `reflect_never.rs` is the same shape **minus that linkage**. **CORE C7 swaps the
-  > linkage for the real `#[component(reflect)]` annotation**, and the swap-over is named in
+  > will; `reflect_never.rs` is the same shape **minus that linkage**. ~~**CORE C7 swaps the
+  > linkage for the real `#[component(reflect)]` annotation**~~ → **corrected 2026-08-21
+  > (architect's C7 ruling, [CORE D26](REFLECTION-PLAN-CORE.md)): CORE **C7 ADDS** the annotation
+  > beside the linkage and **C8 RETIRES** the linkage.** The equivalence claimed above is false at
+  > C7 and true only at C8: **needle B is the literal name `install_type_info`**, and the only
+  > thing that references it from the derive is C8's install slot — CORE C7 states *"No install
+  > call is emitted at this rung. The static exists and is inert."* Swapping at C7 would leave L2,
+  > the present control, carrying no `install_type_info` reference, and **nothing would red**: this
+  > gate ~~asserts only L2 needle A `> 0` and the calibration table has no L2-needle-B column~~.
+  > **Both halves of that sentence were fixed rather than left as the reason for a deferral**:
+  > C7 added the calibration table's `L2 B` column, and the **C7 follow-up added the gate clause
+  > `l2_b > 0`** — the column alone was a printed instrument inside an `#[ignore]`d test that
+  > asserted nothing, which is the same silence with a table in it. The deferral itself stands
+  > unchanged, and the clause is honest about being a *constant until C8*: what puts
+  > `install_type_info` in the L2 image today is the linkage the same test already requires by
+  > source text. Its worth is precisely at C8 — that rung
+  > deletes the linkage, updates `OPT_IN_TOKENS`, and corrects the file headers, all in one change,
+  > and `l2_b > 0` is what reds if the derive's install call does not arrive to replace it.
+  > The swap-over is named in
   > both file headers (`src/bin/reflect_on.rs`, `src/bin/reflect_never.rs`) so the deviation
   > cannot silently outlive the rung that retires it. G3 carries the same statement at its leg
   > table, because its "`#[component(reflect)]` in the source?" column is what this deviation
@@ -793,7 +810,7 @@ mean anything.
 | leg | fixture bin | `reflect` feature | `#[component(reflect)]` in the source? | the cell's role |
 |---|---|---|---|---|
 | **L1** `off` | `reflect_off_twin` | off | **present**, and `#[cfg]`-stripped | **the ship cell** — needle A must read 0 |
-| **L2** `on` | `reflect_on` | on | **present**, and live | **the present control** — needle A must read > 0, or L1's zero is indistinguishable from "no fixture" |
+| **L2** `on` | `reflect_on` | on | **present**, and live | **the present control** — needle A must read > 0, or L1's zero is indistinguishable from "no fixture"; **and needle B must read > 0** (added at the C7 follow-up), or L1 B's and L3 B's zeros are indistinguishable from "the needle matches nothing anywhere" |
 | **L3** `linked-unused` | **`reflect_never`** | **on** | **absent from the source** | **the instrument's discriminator** — the crate is resolved, compiled and linked, and nothing in the image names it |
 
 > **Until CORE C7 lands the `reflect` key, the "`#[component(reflect)]` in the source?" column
@@ -875,6 +892,63 @@ LTO probe. D5.)*
 > starts referencing *some* of the crate's symbols, and per-symbol decidability inside a
 > pulled object — exactly what the non-LTO rows lack — becomes the census's whole
 > question. Re-run this calibration at C7 with the annotation in place.
+
+> **RE-CALIBRATED at CORE C7 (2026-08-21, this box), as the note above required —
+> `reflect_on.rs`'s `FixturePod` now carries `#[component(reflect)]` BESIDE the linkage
+> (CORE D26), so L2 is the first image containing derive-emitted reflection code.
+> The table gains an `L2 needle B` column, added in the same change (CORE C7 gate 9a).**
+>
+> | link configuration | L1 needle A | L2 needle A | L3 needle A | L1 needle B | **L2 needle B** | L3 needle B |
+> |---|---|---|---|---|---|---|
+> | default release | 0 | **41** | 0 | 0 | **1** | 0 |
+> | `-C link-arg=-Wl,--gc-sections` | 0 | **41** | 0 | 0 | **1** | 0 |
+> | `lto = "fat"`, `codegen-units = 1` | 0 | **5** | 0 | 0 | **1** | 0 |
+>
+> **Why the column was added, and what it immediately shows.** The table printed six
+> aggregate columns and had no L2-needle-B cell at all, while the gate asserts L2 needle
+> A `> 0` only. So the property the re-run exists to check — *per-symbol* decidability,
+> which is a statement about needle B in the one leg where needle B has a subject — was
+> not something the instrument could report. It now reads **1 in every row**: the single
+> `install_type_info` reference `reflect_linkage()` puts there. That is the number D26
+> refused to let go silently to 0 by retiring the linkage at C7, and the column is what
+> makes the refusal mechanical instead of a paragraph.
+>
+> **The gated cells still did not move** — L1 and L3 are 0 in every row, both needles —
+> so the census keeps distinguishing *reachable* from *linked*, and the C7 run of the G3
+> gate stayed GREEN.
+>
+> **L2 needle A goes 6 → 41 in the two non-LTO rows, and NONE of the growth is the
+> derive's. MEASURED by A/B, not attributed.** The obvious reading — *"the annotation is
+> in the image now, so the derive put ~35 symbols there"* — was written into this note
+> first and then checked, and it is **false**. Building the identical L2 leg with the
+> annotation commented out and rebuilding it with the annotation back gives **41 both
+> times** (default release, same `CARGO_TARGET_DIR`, source restored byte-identically
+> afterwards). Two separate facts explain it, and each is worth more than the number:
+>
+> * **The 6 → 41 growth is C3–C6's**, not C7's. The calibration was last run at C2, when
+>   the crate was `REFLECT` + two fns. Since then it gained `prim` (24 accessors),
+>   `array_get`/`array_set`, `validate` with `walk_nested`/`exhaust`, and the
+>   `Violation`/`Problem` `Debug`/`Display` impls plus the `Vec<Problem>` `RawVec`
+>   instantiations they drag in. **One referenced symbol pulls the whole object**, and the
+>   object got bigger — the pulled-object rule, four rungs of it, arriving at once.
+> * **Needle A structurally CANNOT see the derive's emission**, and this is the finding
+>   the re-run bought. `__REFLECT_TYPE_INFO`, `__REFLECT_FIELDS` and
+>   `__reflect_type_id_of::<T>` are defined in the **consumer** crate, so v0 mangling
+>   encodes *`reflect_on`* as their defining crate, not `boyko_reflect` — a needle keyed
+>   on the crate-name fragment counts none of them by construction. And in fact the image
+>   contains **zero** symbols matching `REFLECT_TYPE_INFO` / `REFLECT_FIELDS` /
+>   `reflect_type_id_of` in any row: the descriptor is unreferenced, so it is dropped
+>   before the linker ever sees it. That is C7's own claim — *"No install call is emitted
+>   at this rung. The static exists and is inert"* — with an artifact-level witness, and
+>   it is why the fat-LTO row reads **5 → 5**, unchanged.
+>
+> **Consequence for what G3 can claim, stated because it is narrower than it looks.** G3
+> answers *"does `boyko_reflect` contribute reachable symbols to this image"*. It does
+> **not** answer *"is the derive's emission in this image"* — that is G6b's question (the
+> token-absence gate on the expansion) and, from C8 onward, needle B's, because the
+> install slot is the first thing that references `boyko_reflect` **from** the emission.
+> **Re-run this calibration at CORE C8**, where the fat-LTO row is expected to move for
+> the first time.
 
 **Gate.**
 

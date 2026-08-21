@@ -13,7 +13,17 @@
 use boyko_macros::Component;
 
 /// Copy of `reflect_on`'s `FixturePod` (see the header for why this file is a copy).
-#[derive(Component)]
+///
+/// **Tracked at CORE C7** (2026-08-21): `reflect_on.rs` gained `#[component(reflect)]` +
+/// `#[derive(Default)]` there, and this file's whole contract is *"the twin's source plus
+/// exactly one fn"*. Leaving it un-tracked would make G7a's positive control differ from
+/// its baseline by the marker **plus a `Default` impl** — a delta that is still non-zero,
+/// so the control would keep reporting a pass while no longer measuring what its own
+/// header says it measures. The `reflect` emission is `#[cfg(feature = "reflect")]` and
+/// this bin is built feature-OFF for G7a, so the key contributes nothing to the image;
+/// the point is that the two SOURCES stay one edit apart.
+#[derive(Component, Default)]
+#[component(reflect)]
 #[repr(C)]
 pub struct FixturePod {
     /// One POD field so the derive has a real (non-ZST) subject.

@@ -14,10 +14,18 @@
 //! | L2 | `reflect_on` | on | present, live | the PRESENT CONTROL — needle A must read > 0 |
 //! | L3 | `reflect_never` | **on** | **absent** | the DISCRIMINATOR — resolved, compiled, linked, and named by nothing |
 //!
-//! Until CORE C7 lands the `#[component(reflect)]` key, "present" means G0's landed
+//! ~~Until CORE C7 lands the `#[component(reflect)]` key, "present" means G0's landed
 //! deviation: the direct `#[cfg(feature = "reflect")]` fn-pointer reference to
 //! `boyko_reflect::install_type_info` (`reflect_linkage()`), and "absent" means
-//! `reflect_never.rs` carries no such linkage.
+//! `reflect_never.rs` carries no such linkage.~~ → **corrected at C7's landing
+//! (2026-08-21, CORE D26).** C7 landed the key and `reflect_on.rs` now carries **both**:
+//! the annotation *and* `reflect_linkage()`. "Present" therefore means the pair, and
+//! "absent" means `reflect_never.rs` carries neither. The linkage cannot go until
+//! **C8**, because needle B is the literal name `install_type_info` and C7 emits no
+//! install — deleting the reference here would leave the present control with no
+//! needle-B subject, and the gate asserts only `l2_a > 0`. `OPT_IN_TOKENS` below and its
+//! assertion's failure text still say "C7" and are **deliberately left**: C8's `Lands`
+//! carries them, in the same change that deletes the linkage.
 //!
 //! # THE MEASURED LINK-CONFIGURATION TABLE (this box, `x86_64-pc-windows-gnu`)
 //!
@@ -78,6 +86,55 @@
 //! `_RNvCsd7WGKwjPoHP_13boyko_reflect17install_type_info`, then the crate's only fn; v0
 //! mangling encodes the defining crate, so needle A counts it. At C2 the same symbol
 //! survives at its new module path, `…13boyko_reflect8registry17install_type_info`.)
+//!
+//! **RE-CALIBRATED at CORE C7 (2026-08-21) — `reflect_on.rs`'s `FixturePod` now carries
+//! `#[component(reflect)]` BESIDE the linkage (CORE D26), and the table gains its
+//! missing `L2 B` column (C7 gate 9a):**
+//!
+//! | link configuration | L1 A | L2 A | L3 A | L1 B | **L2 B** | L3 B |
+//! |---|---|---|---|---|---|---|
+//! | default release | 0 | **41** | **0** | 0 | **1** | **0** |
+//! | `-C link-arg=-Wl,--gc-sections` | 0 | **41** | **0** | 0 | **1** | **0** |
+//! | `lto = "fat"`, `codegen-units = 1` | 0 | **5** | **0** | 0 | **1** | **0** |
+//!
+//! The gated cells did not move: L1 and L3 read 0 in every row, both needles.
+//!
+//! **`L2 B` is the column this table did not have, and it is why D26 exists.** Needle B
+//! is the literal `install_type_info`, and the property every scheduled re-run of this
+//! calibration checks is *per-symbol* decidability — a statement about needle B in the
+//! one leg where needle B has a subject, which is L2. With no such cell, and with the
+//! gate asserting only `l2_a > 0`, retiring the linkage at C7 would have taken L2's
+//! `install_type_info` reference to zero and moved nothing this instrument reports. It
+//! now reads **1** in every row.
+//!
+//! **And `L2 B` is now ASSERTED, not merely printed.** As landed, the column lived only
+//! in `measure_link_configuration_table`, which is `#[ignore]`d and asserts nothing —
+//! the instrument existed and the gate still could not see it, which is this campaign's
+//! dead-datum class (five instances found so far). `l2_b > 0` is a clause of
+//! `reflect_absence_census_three_legs_under_fat_lto` as of the C7 follow-up; the
+//! reasoning for `> 0` rather than `== 1`, and the honest statement that the clause is a
+//! **constant until C8**, are at the assertion itself.
+//!
+//! **The 6 → 41 growth in L2 A is C3–C6's, NOT the derive's — measured by A/B rather
+//! than attributed.** Rebuilding the identical leg with the annotation commented out
+//! gives **41 as well** (default release, same `CARGO_TARGET_DIR`; the source was
+//! restored byte-identically). The crate's own surface is what grew since the C2 run:
+//! `prim`'s 24 accessors, `array_get`/`array_set`, `validate` with
+//! `walk_nested`/`exhaust`, and the `Violation`/`Problem` `Debug`/`Display` impls with
+//! their `Vec<Problem>` `RawVec` instantiations. One referenced symbol still pulls the
+//! whole object; the object got bigger.
+//!
+//! **And needle A structurally cannot see the derive's emission at all.**
+//! `__REFLECT_TYPE_INFO` / `__REFLECT_FIELDS` / `__reflect_type_id_of::<T>` are defined
+//! in the CONSUMER crate, so v0 mangling names *`reflect_on`* as their defining crate — a
+//! needle keyed on `boyko_reflect` counts none of them by construction. The image in fact
+//! contains **zero** symbols matching those names in any row: at C7 the descriptor is
+//! referenced by nothing and is dropped before the linker sees it, which is C7's own
+//! *"the static exists and is inert"* with an artifact-level witness, and why the fat-LTO
+//! row is unchanged at 5. Whether the emission reached the image is **G6b's** question,
+//! not this gate's — and from CORE C8 it becomes needle B's, because the install slot is
+//! the first thing that references `boyko_reflect` FROM the emission. Re-run this
+//! calibration at C8.
 //!
 //! And "absent from the image" still does not mean "absent from the build": L3's build
 //! DID resolve, compile and link the crate. That is G1/G2's question and not this
@@ -379,6 +436,7 @@ fn reflect_absence_census_three_legs_under_fat_lto() {
     let l1_a = symbols_matching(&l1, NEEDLE_A);
     let l1_b = symbols_matching(&l1, NEEDLE_B);
     let l2_a = symbols_matching(&l2, NEEDLE_A);
+    let l2_b = symbols_matching(&l2, NEEDLE_B);
     let l3_a = symbols_matching(&l3, NEEDLE_A);
     let l3_b = symbols_matching(&l3, NEEDLE_B);
 
@@ -390,6 +448,39 @@ fn reflect_absence_census_three_legs_under_fat_lto() {
          carries NO `{NEEDLE_A}` symbol, so the ship cell's zero below is \
          indistinguishable from `no fixture` -- suspect the link configuration or the \
          needle before believing anything this census says (L2 A = {l2_a})"
+    );
+
+    // Gate 2's needle-B half (CORE D26). The clause above is the present control for
+    // needle A and says NOTHING about needle B, whose zeros are asserted twice below
+    // (L1 B, L3 B). L2 is the one leg where needle B has a subject at all, so this is
+    // the only place its presence can be controlled for.
+    //
+    // `> 0`, not `== 1`, and the difference is the property: the measurand is "needle B
+    // HAS a subject in the present control", exactly as `l2_a > 0` is for needle A. The
+    // count itself is not stable across link configurations -- the header's own table
+    // shows needle A moving 6 -> 5 when fat LTO strips an `__imp_` import thunk -- so an
+    // equality here would red on the linker's bookkeeping rather than on the property.
+    // Measured 1 in all three rows at C7.
+    //
+    // **This assertion is a CONSTANT until C8, and that is written down rather than
+    // discovered later.** What puts `install_type_info` in the L2 image today is
+    // `reflect_on.rs`'s temporary `reflect_linkage()`, whose presence the OPT_IN_TOKENS
+    // clause at the top of this test already requires -- so at C7 the two clauses cannot
+    // disagree, and deleting the linkage reds the source-text clause first. Its worth is
+    // at C8: that rung deletes `reflect_linkage()` and replaces it with the derive's
+    // emitted install call, and this is the clause that reds if the replacement does not
+    // arrive. Without it, C8 could take L2's `install_type_info` to zero and move nothing
+    // this instrument reports -- a probe losing its subject in silence, which is the
+    // entire reason D26 exists.
+    assert!(
+        l2_b > 0,
+        "NOT RESOLVED (needle B inert): the present control (reflect_on, feature on) \
+         carries NO `{NEEDLE_B}` symbol, so L1 B = {l1_b} and L3 B = {l3_b} below are \
+         indistinguishable from `the needle matches nothing anywhere` and neither zero \
+         is evidence of anything. At C7 this means the `reflect_linkage()` reference was \
+         neutered while its NAME survived in the source; from C8 it means the derive's \
+         install call did not reach the image after the linkage was retired (L2 B = \
+         {l2_b}, measured 1 in every link configuration at C7)"
     );
 
     // Gate 1 — the ship cell.
@@ -418,22 +509,41 @@ fn reflect_absence_census_three_legs_under_fat_lto() {
 /// header and in `docs/REFLECTION-PLAN-GATES.md` §G3. Ignored by default: it is the
 /// instrument's calibration run (~9 builds), not the gate; run it with
 /// `cargo test -p reflect-fixture --test reflect_absence_census -- --ignored --nocapture`.
+///
+/// # The **L2 B** column, added at CORE C7 (D23 gate 9a)
+///
+/// The table printed six aggregate columns and carried **no needle-B column for L2** —
+/// the present control. Needle B is the literal name `install_type_info` (GATES D5's
+/// LTO-sensitivity probe), and every scheduled re-run of this calibration exists to
+/// re-check *per-symbol* decidability inside a pulled object; that property is about
+/// needle B in the leg where needle B has a subject, and L2 is that leg. Without the
+/// column, a change that removed L2's `install_type_info` reference would move nothing
+/// the table reports and nothing the gate asserts (`l2_a > 0` only) — which is exactly
+/// why D26 refused to retire the linkage at C7: **a probe losing its subject in
+/// silence.** The column is the instrument half of that refusal.
+///
+/// The **gate** half arrived in the C7 follow-up. An instrument that only ever prints,
+/// from inside a test that is `#[ignore]`d and asserts nothing, is not a check — it is
+/// the same silence with a table in it, and `l2_b` was computed here and asserted
+/// nowhere. `reflect_absence_census_three_legs_under_fat_lto` now carries `l2_b > 0`
+/// beside `l2_a > 0`; see that clause for why `> 0` and for what it is worth before C8.
 #[test]
 #[ignore = "calibration: builds 3 legs x 3 link configurations and prints the table"]
 fn measure_link_configuration_table() {
-    println!("| link configuration | L1 A | L2 A | L3 A | L1 B | L3 B |");
-    println!("|---|---|---|---|---|---|");
+    println!("| link configuration | L1 A | L2 A | L3 A | L1 B | L2 B | L3 B |");
+    println!("|---|---|---|---|---|---|---|");
     for link in [LinkCfg::DefaultRelease, LinkCfg::GcSections, LinkCfg::FatLto] {
         let l1 = build("reflect_off_twin", false, link);
         let l2 = build("reflect_on", true, link);
         let l3 = build("reflect_never", true, link);
         println!(
-            "| {} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} | {} |",
             link.tag(),
             symbols_matching(&l1, NEEDLE_A),
             symbols_matching(&l2, NEEDLE_A),
             symbols_matching(&l3, NEEDLE_A),
             symbols_matching(&l1, NEEDLE_B),
+            symbols_matching(&l2, NEEDLE_B),
             symbols_matching(&l3, NEEDLE_B),
         );
     }

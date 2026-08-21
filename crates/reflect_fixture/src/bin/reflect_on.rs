@@ -12,14 +12,28 @@
 // EXIST until REFLECTION-PLAN-CORE.md C7 lands it; today the Component derive hard-errors
 // on unknown keys ("unknown #[component(...)] key", boyko_macros/src/component.rs:775).
 // Until C7, the reflect linkage is the direct `#[cfg(feature = "reflect")]` reference
-// below; C7 swaps it for the annotation.
+// below; ~~C7 swaps it for the annotation~~ → corrected 2026-08-21 (CORE D26): C7 ADDS
+// the annotation BESIDE this reference, and C8 removes the reference. The swap cannot
+// happen at C7 because G3's needle B is the literal name `install_type_info` and C7
+// emits NO install call — swapping there would leave L2, the present control, with no
+// needle-B subject, and no gate would red. C8 deletes the reference below and updates
+// `OPT_IN_TOKENS` in tests/reflect_absence_census.rs in the same change.
+// Implementer note for C7: adding the annotation reds D20's `ReflectDefault` witness on
+// `FixturePod`, which has no `Default` — `#[derive(Default)]` goes on it (and on
+// `reflect_never.rs`'s twin shape, or L3 stops being the same source minus the opt-in).
 
 use boyko_macros::Component;
 
 /// The fixture's consumer component: a stand-in for a game's own type (the
-/// `profile-fixture` census argument, verbatim). Gains `#[component(reflect)]` at
-/// CORE C7 (see the header comment).
-#[derive(Component)]
+/// `profile-fixture` census argument, verbatim).
+///
+/// **Annotated at CORE C7** (landed 2026-08-21), BESIDE the linkage below rather than
+/// instead of it (D26 — see the header comment). `#[derive(Default)]` is load-bearing,
+/// not decoration: `#[component(reflect)]` bakes `default_in_place` from `Default` and
+/// asserts the bound through `boyko_reflect::ReflectDefault`, so the annotation alone
+/// reds this file on a type that has none.
+#[derive(Component, Default)]
+#[component(reflect)]
 #[repr(C)]
 pub struct FixturePod {
     /// One POD field so the derive has a real (non-ZST) subject.

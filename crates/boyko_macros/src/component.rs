@@ -152,6 +152,25 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             }
         };
 
+    // Reflection CORE C7: `#[component(reflect)]` emits a free `static TypeInfo` plus the
+    // `impl boyko_reflect::Reflect` pointing at it, and D20's `ReflectDefault` witness.
+    // The whole emission is `#[cfg(feature = "reflect")]` evaluated in the EXPANDING
+    // crate (D2), so an un-annotated derive and a feature-off consumer both emit nothing,
+    // and this crate keeps no edge to `boyko_reflect` (D17). NO install call is emitted
+    // here — the static is inert until C8 wires it into `component_id()`.
+    //
+    // Computed BEFORE `input.ident` moves below, like every other codegen that needs to
+    // walk the fields.
+    let (reflect_items, reflect_default_witness) = if hooks.reflect {
+        let no_default = match crate::reflect::parse_reflect_no_default(&input.attrs) {
+            Ok(v) => v,
+            Err(ts) => return ts,
+        };
+        crate::reflect::codegen(&input, &input.ident, no_default)
+    } else {
+        (TokenStream2::new(), TokenStream2::new())
+    };
+
     let name = input.ident;
 
     // Emit `const HAS_HOOKS = true;` + a `register_hooks` impl only when at
@@ -321,6 +340,10 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     let expanded = quote! {
         #bundle_items
 
+        #reflect_items
+
+        #reflect_default_witness
+
         #require_ctor_fns
 
         #relationship_clone_assert
@@ -452,6 +475,12 @@ pub(crate) struct ComponentHookPaths {
     /// Serialization S0 (§3.5): `Some(v)` iff `format_version = N` was supplied —
     /// the human-facing layout/semantic version. Default `0` when omitted.
     format_version: Option<u16>,
+    /// Reflection CORE C7: `true` iff the bare `reflect` flag was supplied — opts the
+    /// component into the EDITOR-ONLY reflection layer. The emission it turns on is
+    /// itself `#[cfg(feature = "reflect")]`, evaluated in the crate the derive expanded
+    /// into (CORE D2), so the key is inert in a consumer that has not enabled the
+    /// feature and this crate never gains an edge to `boyko_reflect` (CORE D17).
+    reflect: bool,
 }
 
 impl ComponentHookPaths {
@@ -642,7 +671,7 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
                     "on_despawn is not supported in this version (deferred to Phase 14b); \
                      valid keys: on_add, on_insert, on_replace, on_remove, no_bundle, \
                      no_clone, clone = <fn>, storage = \"bitset\", no_serialize, \
-                     stable_name = \"..\", format_version = N",
+                     stable_name = \"..\", format_version = N, reflect",
                 ));
             }
 
@@ -654,6 +683,20 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
                     ));
                 }
                 paths.no_bundle = true;
+                return Ok(());
+            }
+
+            // Reflection CORE C7: bare flag key `reflect` — opt this component into the
+            // editor-only reflection layer. `no_bundle` (just above) is the precedent
+            // for the shape: no `= <value>` follows, and a repeat is an error rather
+            // than a silent second `true`.
+            if meta.path.is_ident("reflect") {
+                if paths.reflect {
+                    return Err(meta.error(
+                        "duplicate #[component(...)] key; reflect may be set at most once",
+                    ));
+                }
+                paths.reflect = true;
                 return Ok(());
             }
 
@@ -776,7 +819,7 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
                     "unknown #[component(...)] key; \
                      valid keys: on_add, on_insert, on_replace, on_remove, no_bundle, \
                      no_clone, clone = <fn>, storage = \"bitset\", no_serialize, \
-                     stable_name = \"..\", format_version = N",
+                     stable_name = \"..\", format_version = N, reflect",
                 ));
             };
 
