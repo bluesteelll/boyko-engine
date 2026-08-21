@@ -15,7 +15,7 @@
 
 use boyko_render::ui::{
     pack_ui_instance, premultiply_rgba8, PackInput, UiInstance, UiOrtho, UiRenderGeneration,
-    UiRenderScratch, FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, UI_INSTANCE_SIZE,
+    UiRenderScratch, FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, FLAG_TEXT, UI_INSTANCE_SIZE,
 };
 
 // --- helpers ---------------------------------------------------------------
@@ -206,6 +206,101 @@ fn instance_byte_view_roundtrips_first_field() {
 fn instance_empty_slice_is_zero_bytes() {
     let bytes = UiInstance::slice_as_bytes(&[]);
     assert_eq!(bytes.len(), 0, "empty instance slice yields zero bytes");
+}
+
+/// UI-ADVANCED S2 gate G2-4: the byte view is sound AND correctly laid out at the
+/// widened 80 B stride — `uv` reads back at offset 48 and `flags` at 76, straight out
+/// of the raw byte image (this file runs under Miri, so the view's provenance is
+/// exercised over the new size, not just its length).
+#[test]
+fn instance_byte_view_roundtrips_uv_and_flags_at_80b_offsets() {
+    let mut input = plain_rect(1.0, 2.0, 3.0, 4.0, OPAQUE_RED);
+    input.text_uv = Some([0.25, 0.5, 0.75, 1.0]);
+    let inst = pack_ui_instance(&input, 1.0);
+    let one = [inst];
+    let bytes = UiInstance::slice_as_bytes(&one);
+    assert_eq!(bytes.len(), UI_INSTANCE_SIZE, "one record is exactly the 80 B stride");
+
+    let f32_at = |off: usize| {
+        f32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]])
+    };
+    // uv @ 48 — the four normalized components, verbatim.
+    assert_eq!(f32_at(48), 0.25, "uv.u0 must sit at byte offset 48");
+    assert_eq!(f32_at(52), 0.5, "uv.v0 must sit at byte offset 52");
+    assert_eq!(f32_at(56), 0.75, "uv.u1 must sit at byte offset 56");
+    assert_eq!(f32_at(60), 1.0, "uv.v1 must sit at byte offset 60");
+    // flags @ 76 — the FLAG_TEXT bit, read from the raw bytes.
+    let flags = u32::from_le_bytes([bytes[76], bytes[77], bytes[78], bytes[79]]);
+    assert_eq!(flags, FLAG_TEXT, "flags must sit at byte offset 76 (FLAG_TEXT only)");
+}
+
+// --- UI-ADVANCED S2: the un-aliasing (D1) ----------------------------------
+
+/// Gate G2-5: the text lane REALLY migrated — a `FLAG_TEXT` instance carries the UV in
+/// `uv` and ZERO in `corner_radius` (the retire is complete, not additive: a shader
+/// still reading the old alias field would see zeros, not a stale copy of the UV).
+#[test]
+fn text_lane_writes_uv_and_zeroes_corner_radius() {
+    let mut input = plain_rect(0.0, 0.0, 10.0, 10.0, OPAQUE_RED);
+    input.text_uv = Some([0.125, 0.25, 0.5, 0.875]);
+    let inst = pack_ui_instance(&input, 2.0);
+    assert_ne!(inst.flags & FLAG_TEXT, 0, "text_uv sets FLAG_TEXT");
+    assert_eq!(
+        inst.uv,
+        [0.125, 0.25, 0.5, 0.875],
+        "the glyph UV must land in `uv`, verbatim (never scale-folded)"
+    );
+    assert_eq!(
+        inst.corner_radius,
+        [0.0; 4],
+        "a glyph's corner_radius must be ZERO — the alias is retired, not shadowed"
+    );
+}
+
+/// S2's rect-lane default (S-D8): a plain rect packs the identity UV `(0,0,1,1)` —
+/// the constant every pre-S2 node now carries, unread by its shader branch.
+#[test]
+fn rect_lane_packs_identity_uv() {
+    let mut input = plain_rect(0.0, 0.0, 10.0, 10.0, OPAQUE_RED);
+    input.corner_radius = [3.0; 4];
+    let inst = pack_ui_instance(&input, 1.0);
+    assert_eq!(inst.flags & FLAG_TEXT, 0, "a rect is not a glyph");
+    assert_eq!(inst.uv, [0.0, 0.0, 1.0, 1.0], "a rect packs the identity UV");
+    assert_eq!(inst.corner_radius, [3.0; 4], "the radius stays the radius");
+}
+
+/// Gate G2-6: the reserved bits are actually zero — at S2 every packed instance uses
+/// only bits 0..2 (`flags & 0xFFFF_FFF8 == 0`). Bits 3..31 are S-D2's budget (bit 3
+/// FLAG_TEXTURED at S3, bit 4 reserved, 5..19 free, 20..31 the bindless slot) and
+/// nothing may set them before the rung that owns them.
+#[test]
+fn packed_flags_reserved_bits_are_zero() {
+    // Every lane the pack has: plain, bordered+rounded, clipped, and a clipped glyph.
+    let plain = plain_rect(0.0, 0.0, 8.0, 8.0, OPAQUE_RED);
+    let mut bordered = plain_rect(0.0, 0.0, 8.0, 8.0, OPAQUE_RED);
+    bordered.border_width = [2.0; 4];
+    bordered.border_color = OPAQUE_WHITE;
+    bordered.corner_radius = [1.0; 4];
+    let mut clipped = plain_rect(0.0, 0.0, 8.0, 8.0, OPAQUE_RED);
+    clipped.clip = Some([1.0, 1.0, 4.0, 4.0]);
+    let mut glyph = plain_rect(0.0, 0.0, 8.0, 8.0, OPAQUE_RED);
+    glyph.text_uv = Some([0.0, 0.0, 1.0, 1.0]);
+    glyph.clip = Some([1.0, 1.0, 4.0, 4.0]);
+
+    for (label, input) in [
+        ("plain", plain),
+        ("bordered+rounded", bordered),
+        ("clipped", clipped),
+        ("clipped glyph", glyph),
+    ] {
+        let inst = pack_ui_instance(&input, 1.0);
+        assert_eq!(
+            inst.flags & 0xFFFF_FFF8,
+            0,
+            "{label}: bits 3..31 of flags must be zero at S2 (got {:#010x})",
+            inst.flags
+        );
+    }
 }
 
 // --- UiOrtho: pixel→NDC, top-left origin, G11 corners ----------------------

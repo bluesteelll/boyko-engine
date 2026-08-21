@@ -98,9 +98,9 @@ pub struct UiNode {
 }
 
 /// Rows in the preallocated [`UiUploadSystem`] staging box (sized at
-/// [`System::initialize`], never grown in the frame loop). 4096 × 64 B = 256 KiB —
-/// 2× the plan's own N = 2048 measurement scene, so steady state never touches the
-/// overflow clamp.
+/// [`System::initialize`], never grown in the frame loop). 4096 × 80 B = 320 KiB
+/// (the S2-widened stride) — 2× the plan's own N = 2048 measurement scene, so
+/// steady state never touches the overflow clamp.
 pub const UI_STAGING_ROWS: usize = 4096;
 
 /// The all-zero [`UiInstance`] the staging box is seeded with at initialize.
@@ -109,6 +109,7 @@ const UI_INSTANCE_ZERO: UiInstance = UiInstance {
     size_px: [0.0; 2],
     clip: [0.0; 4],
     corner_radius: [0.0; 4],
+    uv: [0.0; 4],
     color: 0,
     border_color: 0,
     border_width: 0.0,

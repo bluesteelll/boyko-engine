@@ -19,17 +19,18 @@
 
 // === GENERATED ui_instance_mirror BEGIN ===
 // The std430 UiInstance record -- the byte-layout mirror of the Rust
-// #[repr(C, align(16))] UiInstance (stride 64 B). The offsets below are emit_ui
+// #[repr(C, align(16))] UiInstance (stride 80 B). The offsets below are emit_ui
 // GENERATOR INPUTS, pinned to the host offset_of! constants by ui_rect_edsl_sync.
 struct UiInstance {
     float2 min_px;        // @0
     float2 size_px;       // @8
     float4 clip;          // @16  (min.xy, max.xy; valid iff CLIP_PRESENT)
-    float4 corner_radius; // @32  (tl, tr, br, bl)
-    uint   color;         // @48  premultiplied RGBA8
-    uint   border_color;  // @52  premultiplied RGBA8
-    float  border_width;  // @56  uniform, physical px
-    uint   flags;         // @60  bit0 BORDER_ANY, bit1 CLIP_PRESENT, bit2 TEXT
+    float4 corner_radius; // @32  (tl, tr, br, bl) -- ALWAYS the radius (the alias is retired)
+    float4 uv;            // @48  normalized (u0, v0, u1, v1) -- glyphs AND sprites
+    uint   color;         // @64  premultiplied RGBA8
+    uint   border_color;  // @68  premultiplied RGBA8
+    float  border_width;  // @72  uniform, physical px
+    uint   flags;         // @76  bit0 BORDER_ANY, bit1 CLIP_PRESENT, bit2 TEXT
 };
 // === GENERATED ui_instance_mirror END ===
 

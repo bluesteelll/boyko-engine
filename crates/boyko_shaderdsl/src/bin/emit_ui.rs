@@ -39,19 +39,21 @@ use boyko_shaderdsl::emit::{self, UiInstanceLayout};
 // ---- Generator inputs (mirrored host-side; S-D10) ------------------------------------------
 
 /// The `UiInstance` byte layout — MIRRORS `boyko_render::ui::instance` (`#[repr(C, align(16))]`,
-/// 64 B, nine `offset_of!` const-asserts). `ui_rect_edsl_sync::ui_instance_mirror_matches_host`
-/// re-derives every number from the host struct and pins the committed span, so a drift on
-/// either side is a red test, not a silent skew.
+/// 80 B since the UI-ADVANCED S2 widening, per-field `offset_of!` const-asserts).
+/// `ui_rect_edsl_sync::ui_instance_mirror_matches_host` re-derives every number from the host
+/// struct and pins the committed span, so a drift on either side is a red test, not a silent
+/// skew.
 const UI_INSTANCE_LAYOUT: UiInstanceLayout = UiInstanceLayout {
-    size: 64,
+    size: 80,
     min_px: 0,
     size_px: 8,
     clip: 16,
     corner_radius: 32,
-    color: 48,
-    border_color: 52,
-    border_width: 56,
-    flags: 60,
+    uv: 48,
+    color: 64,
+    border_color: 68,
+    border_width: 72,
+    flags: 76,
     flag_border_any_bit: 0,
     flag_clip_present_bit: 1,
     flag_text_bit: 2,
@@ -258,9 +260,10 @@ float4 main(VsOut input) : SV_Target0 {{
 
     // GUI P5b text branch (Decision T4-G): a uniform-per-instance branch (every
     // fragment of one glyph takes the same side), so the rect majority is unregressed.
-    // `corner_radius` is reinterpreted as the glyph's normalized atlas UV rect.
+    // The glyph's normalized atlas UV rect lives in the record's OWN `uv` field
+    // (UI-ADVANCED S2 -- the corner_radius alias is retired).
     if ((inst.flags & FLAG_TEXT) != 0u) {{
-        float2 uv  = lerp(inst.corner_radius.xy, inst.corner_radius.zw, input.local_uv);
+        float2 uv  = lerp(inst.uv.xy, inst.uv.zw, input.local_uv);
         float4 msd = g_atlas.Sample(g_atlas_sampler, uv);   // RGBA8 MTSDF (rgb = MSDF)
         float  sd  = ui_median3(msd.r, msd.g, msd.b);
         float  cov = clamp(ui_screen_px_range(uv) * (sd - 0.5) + 0.5, 0.0, 1.0);

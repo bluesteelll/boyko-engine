@@ -121,14 +121,25 @@ impl<const N: usize> SpirvBlob<N> {
 /// The committed `ui_rect.vs.spv` (vertexless quad, a VERTEX-stage SSBO transform
 /// read, and the ortho push constant). The `const N` byte length must match the file
 /// on disk (a mismatch is a compile error).
-static UI_RECT_VS_SPV: SpirvBlob<2368> = SpirvBlob(*include_bytes!(concat!(
+///
+/// RE-BLESSED 2368 → 2408 at UI-ADVANCED S2 (the D1 widening): the `UiInstance`
+/// mirror gained the `uv` member (stride 64 → 80 B), which the VS declares but never
+/// reads — the byte move is the struct declaration alone. Diff read before the
+/// re-bless; the four S-D6 image hashes reproduced the 64 B build's exactly.
+static UI_RECT_VS_SPV: SpirvBlob<2408> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/ui_rect.vs.spv"
 )));
 
 /// The committed `ui_rect.fs.spv` (`sdRoundedBox` + `fwidth` AA + uniform border +
 /// flag-gated clip, premultiplied out; FRAGMENT-stage SSBO read).
-static UI_RECT_FS_SPV: SpirvBlob<7060> = SpirvBlob(*include_bytes!(concat!(
+///
+/// RE-BLESSED 7060 → 7136 at UI-ADVANCED S2 (the D1 widening): the mirror gained
+/// `uv` (stride 64 → 80 B) and the `FLAG_TEXT` branch now reads `inst.uv` instead of
+/// the retired `corner_radius` alias — the whole semantic delta of the rung. Diff
+/// read before the re-bless; the four S-D6 image hashes reproduced the 64 B build's
+/// exactly (G2-3).
+static UI_RECT_FS_SPV: SpirvBlob<7136> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/ui_rect.fs.spv"
 )));

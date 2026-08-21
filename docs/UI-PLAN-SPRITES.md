@@ -500,8 +500,12 @@ record twice.*
                               // = 80 B, multiple of 16, no tail pad
 ```
 
-**Lockstep sites — all ten, in one commit:** the Rust struct; `UI_INSTANCE_SIZE`; the **ten**
-`offset_of!` const-asserts; S-D2's `BINDLESS_TEXTURE_CAPACITY` const-assert; the `UiInstance` mirror in
+**Lockstep sites — all ten, in one commit:** the Rust struct; `UI_INSTANCE_SIZE`; the ~~**ten**~~
+**nine per-field** `offset_of!` const-asserts *(amended 2026-08-21 at landing: D1's field list has
+NINE fields, so nine per-field asserts — plus the `size_of == 80` and `align_of == 16` pins beside
+them. The "ten" carried forward the fact table's counting convention, which called today's eight
+per-field asserts "9"; the same off-by-one, twice)*; S-D2's `BINDLESS_TEXTURE_CAPACITY` const-assert;
+the `UiInstance` mirror in
 `ui_rect.vs.hlsl`; the mirror in `ui_rect.fs.hlsl` (both now via `emit_ui.rs` — the offsets are
 generator inputs, so this is one edit, not two, which is S1's dividend); the two `SpirvBlob<N>` byte
 lengths; `pack_ui_instance`'s text branch (writes `uv`, leaves `corner_radius` zero); the Miri
@@ -518,7 +522,7 @@ so "identical" has a referent. The two-commit protocol is the rung:
 
 | # | Claim | How |
 |---|---|---|
-| **G2-1** | Rust layout is exactly D1's | ten `offset_of!` asserts + `size_of == 80` + `align_of == 16` |
+| **G2-1** | Rust layout is exactly D1's | ~~ten~~ **nine** `offset_of!` asserts *(one per field — the 2026-08-21 count amendment above)* + `size_of == 80` + `align_of == 16` |
 | **G2-2** | The 12-bit slot field cannot silently truncate | S-D2's `BINDLESS_TEXTURE_CAPACITY <= 1 << 12` const-assert |
 | **G2-3** | The widening is pixel-invisible | The four UI goldens reproduce commit A's hashes exactly |
 | **G2-4** | The byte view is sound at the new size | the Miri byte-view test over an 80 B record |
@@ -541,6 +545,39 @@ so "identical" has a referent. The two-commit protocol is the rung:
 wall-clock pack+sort at N ∈ {256, 2048}, same scene, 64 B vs 80 B, criterion, median of the two builds.
 The bytes are arithmetic; the time is not, and only the time can say whether the sort's gather (which
 touches every record twice) notices.
+
+*Landed 2026-08-21 (this box, RTX 3060 host, criterion 0.5 bench profile,
+`benches/ui_pack_sort.rs` — one deterministic scene, 16 stack strata, every 4th node clipped, half
+rounded): arithmetic 2048 × 64 B = 128 KiB → 2048 × 80 B = 160 KiB (+25 % bytes, touched twice by
+the sort gather). Wall-clock medians 64 B → 80 B: **5.62 µs → 5.71 µs @ N=256 (+4.3 %)**,
+**49.12 µs → 51.16 µs @ N=2048 (+4.7 %)** — the sort's gather notices the widening at a fifth of
+the byte growth; the pack is compute-, not bandwidth-, bound at these N. Affordable; D1 stands.*
+
+*Landing notes, 2026-08-21, recorded per S-D10/SR1 (the reconciliations the rung surfaced):*
+
+* *The `.spv` MOVED, deliberately — this rung is the shader-surface edit S1's gates exist for.
+  `ui_rect.vs.spv` 2368 → 2408 B (the mirror gains the `uv` member the VS declares and never
+  reads); `ui_rect.fs.spv` 7060 → 7136 B (the mirror + the `FLAG_TEXT` branch reading `inst.uv`
+  instead of the retired alias — the rung's whole semantic delta). The generated-HLSL diff was read
+  before the re-bless and contains exactly those two changes; the reason is recorded at both
+  `SpirvBlob<N>` pins (`src/ui/mod.rs`).*
+* *Commit A blessed the four S-D6 hashes on the 64 B build (BMPs dumped and looked at); commit B
+  reproduced all four EXACTLY on the 80 B build — G2-3 held with zero re-blessing.*
+* *S-D6 refinement for the swapchain golden: its "full readback" is the WSI-owned frame, whose
+  extent and byte order the driver decides (this box clamps the requested 64×64 window to
+  **120×64 BGRA**), so that pin carries `(extent, is_bgra)` qualifiers beside the hash and is
+  asserted only when the live shape matches the blessed one — a mismatched WSI shape prints a loud
+  NOTE rather than silently passing-as-checked. The three offscreen goldens pin fixed 64×64 /
+  128×128 RGBA frames and carry the bare hash, as written.*
+* *`UI_STAGING_ROWS`' doc arithmetic followed the stride (4096 × 80 B = 320 KiB — the S0 seam's
+  staging box, untouched otherwise).*
+* *An ELEVENTH lockstep site the ten-site list missed, found by the unconditional full-suite gate
+  (`cargo test -p boyko-render --all-targets --no-fail-fast`), not by the enumerated ten:
+  `ui_hud_screenshot.rs::hud_glyph_packing_golden` — a device-free test in the (otherwise
+  `#[ignore]`d ×8) HUD binary that PINNED the retired contract verbatim ("the GPU pack lane
+  carries that same UV into the `corner_radius` alias"). Its pin migrated with the field
+  (`inst.uv == expected`, `corner_radius == [0;4]`). The lesson is the fact table's own: a
+  grep-shaped site census misses a consumer that names the CONTRACT rather than the field.*
 
 ---
 

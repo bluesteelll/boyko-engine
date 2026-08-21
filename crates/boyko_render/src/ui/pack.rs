@@ -34,11 +34,13 @@ pub struct PackInput {
     pub clip: Option<[f32; 4]>,
     /// GUI P5b text lane (Decision T4-G): when `Some`, this node is a GLYPH quad, not
     /// a rect. The value is the glyph's NORMALIZED atlas UV rect `(left, top, right,
-    /// bottom)` in `[0, 1]`, written verbatim (NOT scale-folded) into the
-    /// `corner_radius` alias with `FLAG_TEXT` set; `rect` is then the glyph quad
-    /// (already physical-or-logical px, scale-folded like a rect), `color` the
+    /// bottom)` in `[0, 1]`, written verbatim (NOT scale-folded) into
+    /// [`UiInstance::uv`] with `FLAG_TEXT` set (its OWN field since the UI-ADVANCED
+    /// S2 widening — the `corner_radius` alias is retired, and a glyph packs
+    /// `corner_radius` ZERO); `rect` is then the glyph quad (already
+    /// physical-or-logical px, scale-folded like a rect), `color` the
     /// premultiplied-at-pack foreground, and `border_*` are ignored. `None` ⇒ the
-    /// rect path (P5a, unchanged).
+    /// rect path (P5a, unchanged; packs the identity `uv = (0, 0, 1, 1)`).
     pub text_uv: Option<[f32; 4]>,
 }
 
@@ -77,9 +79,11 @@ pub fn pack_ui_instance(input: &PackInput, scale_factor: f32) -> UiInstance {
         None => [0.0; 4],
     };
 
-    // GUI P5b text branch (Decision T4-G): a glyph quad. The UV rect aliases
-    // `corner_radius` (written verbatim, NOT scale-folded — it is already normalized);
-    // `FLAG_TEXT` selects the MSDF branch in the FS. Border is N/A for a glyph.
+    // GUI P5b text branch (Decision T4-G): a glyph quad. The UV rect goes into the
+    // record's OWN `uv` field (UI-ADVANCED S2 — the `corner_radius` alias is retired;
+    // a glyph packs the radius ZERO, gate G2-5), written verbatim, NOT scale-folded —
+    // it is already normalized. `FLAG_TEXT` selects the MSDF branch in the FS. Border
+    // is N/A for a glyph.
     if let Some(uv) = input.text_uv {
         debug_assert!(
             uv.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)),
@@ -90,7 +94,8 @@ pub fn pack_ui_instance(input: &PackInput, scale_factor: f32) -> UiInstance {
             min_px,
             size_px,
             clip,
-            corner_radius: uv,
+            corner_radius: [0.0; 4],
+            uv,
             color: premultiply_rgba8(input.color),
             border_color: 0,
             border_width: 0.0,
@@ -126,6 +131,11 @@ pub fn pack_ui_instance(input: &PackInput, scale_factor: f32) -> UiInstance {
         size_px,
         clip,
         corner_radius,
+        // The identity UV (S-D8): a plain rect's shader branch never reads it, so
+        // every pre-S2 node packs a constant and the widening is pixel-invisible
+        // (gate G2-3); when S3's textured lane lands, `(0,0,1,1)` is also the
+        // correct whole-texture default.
+        uv: [0.0, 0.0, 1.0, 1.0],
         color: premultiply_rgba8(input.color),
         border_color: premultiply_rgba8(input.border_color),
         border_width,

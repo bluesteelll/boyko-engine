@@ -114,6 +114,7 @@ fn host_layout() -> UiInstanceLayout {
         size_px: core::mem::offset_of!(UiInstance, size_px) as u32,
         clip: core::mem::offset_of!(UiInstance, clip) as u32,
         corner_radius: core::mem::offset_of!(UiInstance, corner_radius) as u32,
+        uv: core::mem::offset_of!(UiInstance, uv) as u32,
         color: core::mem::offset_of!(UiInstance, color) as u32,
         border_color: core::mem::offset_of!(UiInstance, border_color) as u32,
         border_width: core::mem::offset_of!(UiInstance, border_width) as u32,

@@ -637,9 +637,17 @@ fn hud_glyph_packing_golden() {
             "char {c:?}: emitter UV {shaped:?} must match the atlas cell UV {expected:?}"
         );
 
-        // The GPU pack lane carries that same UV verbatim into the `corner_radius` alias.
+        // The GPU pack lane carries that same UV verbatim into the record's own `uv`
+        // field (UI-ADVANCED S2: the `corner_radius` alias is retired — a glyph now
+        // packs the radius ZERO, and this test is the lockstep site the S2 plan's
+        // ten-site list missed, found by the full-suite gate).
         let inst = glyph_quad(X0 + i as f32 * GADV, Y0, GW, GH, FG, expected);
-        assert_eq!(inst.corner_radius, expected, "char {c:?} packs its atlas cell UV");
+        assert_eq!(inst.uv, expected, "char {c:?} packs its atlas cell UV");
+        assert_eq!(
+            inst.corner_radius,
+            [0.0; 4],
+            "char {c:?}: a glyph's corner_radius is zero — the alias is retired"
+        );
         assert_eq!(inst.size_px, [GW, GH], "char {c:?} packs the fixed glyph quad size");
     }
 }

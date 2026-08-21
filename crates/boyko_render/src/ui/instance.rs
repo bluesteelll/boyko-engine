@@ -18,12 +18,14 @@
 /// # std430 layout contract (the compile-time oracle)
 ///
 /// Field order places the two `float2`s first (off 0, 8 — so the first `float4`
-/// lands on a 16 B boundary at off 16), then the two `float4`s (off 16, 32), then
-/// four scalars (off 48..60). The total stride is **64 B**, a multiple of 16, so
-/// the std430 array stride is legal with NO internal padding and NO tail pad. The
-/// HLSL `struct UiInstance` mirrors these offsets; the per-field `offset_of!`
-/// const-asserts below are the build-time oracle that catches a Rust↔HLSL offset
-/// drift the size assert alone would miss.
+/// lands on a 16 B boundary at off 16), then the three `float4`s (off 16, 32, 48),
+/// then four scalars (off 64..76). The total stride is **80 B** (UI-ADVANCED S2 /
+/// architecture D1 — widened ONCE from 64 B when the `uv` field retired the
+/// `corner_radius` text-lane alias), a multiple of 16, so the std430 array stride
+/// is legal with NO internal padding and NO tail pad. The HLSL `struct UiInstance`
+/// mirrors these offsets; the per-field `offset_of!` const-asserts below are the
+/// build-time oracle that catches a Rust↔HLSL offset drift the size assert alone
+/// would miss.
 ///
 /// `align(16)` is forced explicitly so the Rust struct's alignment matches the
 /// std430 array's 16 B stride alignment (a `[f32; 4]` field is only 4-aligned in
@@ -40,33 +42,41 @@ pub struct UiInstance {
     /// Clip AABB `min.xy, max.xy`, physical px (valid iff `CLIP_PRESENT`). Shared by
     /// rect AND text nodes (text clips too).
     pub clip: [f32; 4],
-    /// Per-corner radius `tl, tr, br, bl`, physical px.
+    /// Per-corner radius `tl, tr, br, bl`, physical px — **ALWAYS the radius**.
     ///
-    /// # Text-lane alias (GUI P5b Decision T4-G)
+    /// # The text-lane alias is RETIRED (UI-ADVANCED S2 / architecture D1)
     ///
-    /// When [`FLAG_TEXT`] is set, the fragment shader REINTERPRETS this field as the
-    /// glyph's atlas UV rect `(left, top, right, bottom)`, NORMALIZED to `[0, 1]` over
-    /// the atlas size. A text node never sets `corner_radius`/`border`, and a rect node
-    /// never sets a UV, so the two are mutually exclusive by `FLAG_TEXT` — aliasing the
-    /// field keeps `UiInstance` at 64 B, one pipeline, one z-sort, one draw. The
-    /// reinterpret is VALUE-ONLY in the shader (no Rust transmute): Rust-side this stays
-    /// a plain `[f32; 4]`, so the `offset_of!` oracle and the Miri-TB byte view are
-    /// unchanged. A future textured/nine-slice rect (needing BOTH a radius and a UV on
-    /// one instance) retires this alias and widens `UiInstance` to 80 B — the recorded
-    /// deliberate-revisit trigger.
+    /// Until S2 this field was REINTERPRETED as the glyph UV under [`FLAG_TEXT`]
+    /// (GUI P5b Decision T4-G), which kept the record at 64 B but forbade a node
+    /// carrying BOTH a radius and a UV — the exact case sprites trigger (a rounded
+    /// avatar, a nine-slice chip). The recorded deliberate-revisit fired: the UV now
+    /// lives in its own [`uv`](UiInstance::uv) field, this field means ONE thing, and
+    /// a `FLAG_TEXT` instance packs it ZERO (gate G2-5).
     pub corner_radius: [f32; 4],
+    /// Normalized UV rect `(u0, v0, u1, v1)` in `[0, 1]` — glyphs AND (from S3)
+    /// sprites. Written verbatim at pack (never scale-folded). A plain rect packs the
+    /// identity `(0, 0, 1, 1)` and its shader branch never reads it (S-D8: the
+    /// widening is default-OFF — every existing image is byte-identical).
+    pub uv: [f32; 4],
     /// PREMULTIPLIED RGBA8 fill (`byte0=R .. byte3=A`).
     pub color: u32,
     /// PREMULTIPLIED-at-pack RGBA8 border color.
     pub border_color: u32,
     /// Uniform border width, physical px (P5a is uniform; per-side is deferred).
     pub border_width: f32,
-    /// Bit flags: bit0 `BORDER_ANY`, bit1 `CLIP_PRESENT`, the rest reserved.
+    /// Bit flags under the S-D2 bit budget (fixed at S2, once):
+    /// bit0 [`FLAG_BORDER_ANY`], bit1 [`FLAG_CLIP_PRESENT`], bit2 [`FLAG_TEXT`],
+    /// bit3 FLAG_TEXTURED (S3's sprite lane, not yet defined), bit4 reserved for
+    /// S7's deferred per-sprite sampler index, bits 5..19 free, bits 20..31 the
+    /// bindless slot — 12 bits, slots 0..4095, EXACTLY the table's range (the
+    /// capacity const-assert below). At S2 every packed instance has bits 3..31
+    /// zero (gate G2-6).
     pub flags: u32,
 }
 
-/// The byte size of [`UiInstance`] (the std430 array stride).
-pub const UI_INSTANCE_SIZE: usize = 64;
+/// The byte size of [`UiInstance`] (the std430 array stride) — 80 B since the
+/// UI-ADVANCED S2 widening (architecture D1; 64 B before it).
+pub const UI_INSTANCE_SIZE: usize = 80;
 
 /// `UiInstance.flags` bit0 — the rect has a (uniform, P5a) border to draw. Set at
 /// pack when `border_width > 0`; gates the fragment shader's border branch.
@@ -76,12 +86,23 @@ pub const FLAG_BORDER_ANY: u32 = 1 << 0;
 /// sentinel-free uniform branch — unclipped rects never evaluate `clip_coverage`).
 pub const FLAG_CLIP_PRESENT: u32 = 1 << 1;
 /// `UiInstance.flags` bit2 — the instance is a GLYPH quad, not a rounded rect (GUI
-/// P5b Decision T4-G). When set, the fragment shader REINTERPRETS `corner_radius` as
-/// the glyph's normalized atlas UV rect `(left, top, right, bottom)` and samples the
-/// MSDF atlas (`median` + `screenPxRange` AA, premultiplied out) instead of
-/// evaluating the rounded-box SDF. A uniform-per-instance branch, so the rect
-/// majority is unregressed.
+/// P5b Decision T4-G). When set, the fragment shader reads the glyph's normalized
+/// atlas UV rect from [`UiInstance::uv`] (its own field since the S2 widening — the
+/// `corner_radius` alias is retired) and samples the MSDF atlas (`median` +
+/// `screenPxRange` AA, premultiplied out) instead of evaluating the rounded-box
+/// SDF. A uniform-per-instance branch, so the rect majority is unregressed.
 pub const FLAG_TEXT: u32 = 1 << 2;
+
+// S-D2 (UI-ADVANCED S2): the 12-bit bindless-slot field in `flags` bits 20..31 has
+// EXACTLY zero headroom over the live table capacity — and D3 refuses a UI slot
+// reservation, so "raise the capacity" is the natural response to slot pressure,
+// and a raised capacity would SILENTLY truncate the field and make a UI quad
+// sample a different texture. This assert is against the LIVE constant the
+// allocator uses (mutation M2-c: a copy of it here would keep passing).
+const _: () = assert!(
+    boyko_rhi_vulkan::bindless::BINDLESS_TEXTURE_CAPACITY <= 1 << 12,
+    "UiInstance.flags carries the bindless slot in bits 20..31"
+);
 
 // --- std430 layout oracle (compile-time). The size/align pin the array stride;
 //     the per-field `offset_of!` asserts pin every field's byte offset against the
@@ -93,10 +114,11 @@ const _: () = assert!(core::mem::offset_of!(UiInstance, min_px) == 0);
 const _: () = assert!(core::mem::offset_of!(UiInstance, size_px) == 8);
 const _: () = assert!(core::mem::offset_of!(UiInstance, clip) == 16);
 const _: () = assert!(core::mem::offset_of!(UiInstance, corner_radius) == 32);
-const _: () = assert!(core::mem::offset_of!(UiInstance, color) == 48);
-const _: () = assert!(core::mem::offset_of!(UiInstance, border_color) == 52);
-const _: () = assert!(core::mem::offset_of!(UiInstance, border_width) == 56);
-const _: () = assert!(core::mem::offset_of!(UiInstance, flags) == 60);
+const _: () = assert!(core::mem::offset_of!(UiInstance, uv) == 48);
+const _: () = assert!(core::mem::offset_of!(UiInstance, color) == 64);
+const _: () = assert!(core::mem::offset_of!(UiInstance, border_color) == 68);
+const _: () = assert!(core::mem::offset_of!(UiInstance, border_width) == 72);
+const _: () = assert!(core::mem::offset_of!(UiInstance, flags) == 76);
 
 impl UiInstance {
     /// Re-views a packed `&[UiInstance]` as the contiguous `&[u8]` the upload
@@ -108,7 +130,7 @@ impl UiInstance {
     #[inline]
     pub fn slice_as_bytes(instances: &[UiInstance]) -> &[u8] {
         // SAFETY: `UiInstance` is `#[repr(C, align(16))]` all-POD (f32/u32), with no
-        // padding (const-asserted 64 B / 16-align / per-field offsets above), so the
+        // padding (const-asserted 80 B / 16-align / per-field offsets above), so the
         // byte image of `instances` is a valid initialized `[u8]` of exactly
         // `len * UI_INSTANCE_SIZE` bytes. The `&[UiInstance]` borrow keeps the
         // backing alive for the returned slice's lifetime; the slice is read-only.

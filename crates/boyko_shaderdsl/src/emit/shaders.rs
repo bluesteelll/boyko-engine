@@ -3197,6 +3197,9 @@ pub struct UiInstanceLayout {
     pub clip: u32,
     /// `offset_of!(UiInstance, corner_radius)`.
     pub corner_radius: u32,
+    /// `offset_of!(UiInstance, uv)` — the normalized UV rect that retired the
+    /// `corner_radius` text-lane alias (UI-ADVANCED S2 / architecture D1).
+    pub uv: u32,
     /// `offset_of!(UiInstance, color)`.
     pub color: u32,
     /// `offset_of!(UiInstance, border_color)`.
@@ -3227,7 +3230,8 @@ struct UiInstance {{
     float2 min_px;        // @{min_px}
     float2 size_px;       // @{size_px}
     float4 clip;          // @{clip}  (min.xy, max.xy; valid iff CLIP_PRESENT)
-    float4 corner_radius; // @{corner_radius}  (tl, tr, br, bl)
+    float4 corner_radius; // @{corner_radius}  (tl, tr, br, bl) -- ALWAYS the radius (the alias is retired)
+    float4 uv;            // @{uv}  normalized (u0, v0, u1, v1) -- glyphs AND sprites
     uint   color;         // @{color}  premultiplied RGBA8
     uint   border_color;  // @{border_color}  premultiplied RGBA8
     float  border_width;  // @{border_width}  uniform, physical px
@@ -3239,6 +3243,7 @@ struct UiInstance {{
         size_px = l.size_px,
         clip = l.clip,
         corner_radius = l.corner_radius,
+        uv = l.uv,
         color = l.color,
         border_color = l.border_color,
         border_width = l.border_width,
