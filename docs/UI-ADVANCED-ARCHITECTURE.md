@@ -564,7 +564,7 @@ Capability is component **presence** throughout; every component is `#[repr(C)]`
 | Component | Size | Meaning | Storage |
 |---|---|---|---|
 | `UiImage` *(exists, 24 B)* | 24 B | `texture` **reinterpreted as the bindless slot**; presence ⇒ textured lane | table (authored, cold) |
-| `UiNineSlice` | 20 B | `border_px: [f32;4]`, `mode: u8` (`Stretch`\|`Tile`), `fill_center: bool` — presence ⇒ pack emits 9 records instead of 1 | table (authored, cold) |
+| `UiNineSlice` | 20 B | `border_px: [f32;4]`, `mode: u8` (`Stretch`; `Tile` lands at S5), `fill_center: bool`, `_pad: [u8;2]` — presence ⇒ pack emits 9 sub-quads (8 without the centre) **in addition to** the node's background | table (authored, cold) |
 | `UiSpriteSheet` | 4 B | `sheet: u16`, `index: u16` — presence ⇒ pack derives `uv` from the sheet table instead of reading `uv_min`/`uv_max` | table (authored, cold) |
 | `UiSpriteAnim` | 12 B | the **cold track**: `first: u16, last: u16, fps: f32, mode: u8` (`Forward`\|`Reverse`\|`PingPong`\|`Once`), `repeats: u8` — author-written, never system-written | table (authored, cold) |
 | `UiSpriteCursor` | 8 B | the **hot cursor**: `elapsed: f32, frame: u16, dir: i8` — the only column the flipbook system writes per frame | **dense** |
@@ -617,8 +617,24 @@ float table. Also deferred; uniform fps is v1.
 
 ### 4.3 Nine-slice — CPU expansion into the pack scratch
 
-**D8d.** `UiNineSlice` present ⇒ the pack emits **9 sub-quads** into the existing pack scratch;
-absent ⇒ it emits 1.
+**D8d.** ~~`UiNineSlice` present ⇒ the pack emits **9 sub-quads** into the existing pack scratch;
+absent ⇒ it emits 1.~~ **`UiNineSlice` present ⇒ the pack emits the node's background rect (unchanged)
+PLUS 9 sub-quads (8 when `fill_center == false`) into the pack scratch; absent ⇒ it emits 1, exactly as
+before.**
+
+*(corrected 2026-08-21 at the S4 pre-build audit — see `UI-PLAN-SPRITES.md` **S-D11**. As written this
+sentence said the sub-quads REPLACE the node's record, while **D4** at `:250` lists "background rect →
+nine-slice sub-quads → image" as distinct elements, i.e. ADD; a third number had already reached the
+tree at `crates/boyko_render/tests/ui_s0_seam.rs:245`. Three readings, three different values for
+`UI_RECORDS_PER_NODE`, and the rung was unbuildable until one won. **ADD wins, and the reason is
+correctness rather than economy:** a nine-slice source is a **frame**, and frames have transparent
+regions — under REPLACE a translucent corner would composite against whatever is behind the entire UI
+instead of against the node's own background, so the background rect is not redundant overdraw but the
+surface the frame sits on. It is also why Bevy, Godot and Unity all keep the node's background beneath
+the slice. REPLACE carries a second cost ADD does not pay at all: it would force a decision about how
+one node's `corner_radius` and `border_width` distribute across nine sub-quads, which under ADD simply
+does not arise — the sub-quads are uniform textured rects with zero radius and zero border, the shape
+`pack_ui_image_instance` already has.)*
 
 **Reason:** all three shipped strategies were compared and only this one keeps the crate's asset.
 Bevy pays a **separate pipeline** plus shader plus 16 extra floats — disqualified outright, it breaks
@@ -631,14 +647,41 @@ is *cheaper here than in Unity* because:
 * all 9 inherit the parent's `StackIndex` and get **consecutive** `append` indices, so the existing
   total-order sort keeps them contiguous and in painter's order with **no change to the sort**;
 * they inherit the parent's `ComputedClip` verbatim, so per-instance clipping composes for free;
-* radius and border stay meaningful on the sub-quads (they are ordinary rects), where a single-quad
-  shader route would have to reconcile radius, border and slice math in one branch.
+* ~~radius and border stay meaningful on the sub-quads (they are ordinary rects), where a single-quad
+  shader route would have to reconcile radius, border and slice math in one branch.~~ **the sub-quads
+  need no radius and no border at all — they are uniform textured rects, the shape
+  `pack_ui_image_instance` already emits — so the reconciliation a single-quad shader route would owe
+  between radius, border and slice math simply never arises here.**
+
+  *(corrected 2026-08-21 at the S4 pre-build audit. The struck clause claimed the opposite of the
+  amendment fourteen lines above it, which settled that the sub-quads carry zero radius and zero
+  border. It survived the D8d correction because that edit was made by quoting the sentence it
+  replaced, and this one is in the supporting list rather than the claim — the doc-rot-repair hazard
+  this project has measured: a repair that reads the sentence it is fixing and not the paragraph that
+  argues for it. The list item is load-bearing prose: it is one of the three reasons CPU expansion is
+  chosen over Bevy's separate pipeline.)*
 
 Layout is untouched — slicing is purely visual.
 
-**Tiled** (rather than stretched) sides and center is where D2 pays again: with a real per-texture
-sampler, `REPEAT` handles it in one quad. Under an atlas it is Unity's quad-per-tile explosion and
-its documented 16 250-quad cap.
+**Tiled** (rather than stretched) sides and center: ~~this is where D2 pays again — with a real
+per-texture sampler, `REPEAT` handles it in one quad.~~ **the mechanism is a fragment-side `frac`
+inside the sprite's sub-rect, and it lands at S5, not S4.** Under an atlas the CPU alternative is
+Unity's quad-per-tile explosion and its documented 16 250-quad cap, which is still the reason not to
+expand tiles on the CPU.
+
+*(corrected 2026-08-21 at the S4 pre-build audit — see `UI-PLAN-SPRITES.md` **S-D11 (1)**. `REPEAT`
+is not available and never was: `crates/boyko_render/src/ui/resources.rs:310` sets
+`AddressMode::ClampToEdge` **unconditionally, in both `UiSamplerMode` variants**, and the fragment
+shader samples the UI's own sampler rather than the bindless set's. A `Tile` edge written against
+`REPEAT` would have rendered a clamped streak. This false lead cost a decision (**S-D7**, since
+retired) and a gate (**G4-5**) before anyone read the sampler.*
+
+*The correction pays for itself: `frac` wraps to the **sub-rect**, whereas `REPEAT` wraps to the
+whole texture. The sheet hazard S-D7 existed to forbid — a tiled nine-slice whose repeat runs off its
+frame and into its neighbours — cannot arise, because the sub-rect **is** the frame. A `debug_assert!`,
+a release clamp, a diagnostic counter and a gate all dissolve, and the combination they forbade
+becomes the correct picture. That counter could only ever have read zero: the dead-datum class, by
+construction.)*
 
 ### 4.4 Batching
 

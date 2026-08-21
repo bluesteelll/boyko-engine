@@ -14,6 +14,105 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-21 — UI-ADVANCED S4 stopped BEFORE the first line: the nine slices are painted, then covered by the image they slice
+
+**Status: BLOCKING. Two contradictions and one wrong number, in the rung as AMENDED by the
+2026-08-21 pre-build audit. No S4 code was written; the protocol's stop condition ("a gate that
+cannot fail, a red that cannot fire, a contradiction") is met three times over.**
+
+### 1 — the emission contract occludes itself (BLOCKING)
+
+**S-D11 (3)** fixed the record count as ADD and stated the consequence "so no gate has to guess"
+(`UI-PLAN-SPRITES.md:389-392`): sub **0** background, subs **1..=9** the nine-slice regions,
+sub **10** the image — *"A nine-sliced node emits **10** records …, **11** with an image."*
+
+Four facts in the tree turn that arithmetic into a self-cancelling picture:
+
+* **The only texture a sub-quad can sample is the node's own `UiImage`.** `UiNineSlice` as ruled
+  (`UI-PLAN-SPRITES.md:917`) carries `border_px`, `mode`, `fill_center`, `_pad` — **no slot and no
+  UV**. So a *visible* nine-slice REQUIRES the node to carry `UiImage`.
+* **The image record is the WHOLE node rect at the WHOLE authored sub-rect.**
+  `pack_ui_image_instance` covers "the SAME `ComputedRect` as the node's background"
+  (`pack.rs:190-193`) and packs `input.rect` verbatim with `uv: image.uv` (`pack.rs:233-243`).
+* **It paints LAST.** D4's order is *background → nine-slice sub-quads → image*
+  (`UI-ADVANCED-ARCHITECTURE.md:250`), and both pack loops emit in ascending append order
+  (`upload.rs:364-374`, `upload.rs:456-467`), so sub 10 lands after subs 1..=9.
+* **Premultiplied-alpha blend means an opaque source REPLACES the destination**
+  (`resources.rs:438`, `BlendState::PREMULTIPLIED_ALPHA`).
+
+**Therefore, on G4-3's own scene** (96×96 node, 3×3 opaque source, opaque tint, `border_px = 16`):
+the nine slices cover 9 216 px and the sub-10 image covers the same 9 216 px on top of them. The
+pinned image IS a plain stretched sprite, and:
+
+* **G4-3 cannot fail as a pin** — it would bless the picture that proves nine-slice does NOT work;
+* **M4-b cannot fire** (`:1043`) — moving a corner from 16×16 to 32×32 moves only occluded geometry;
+* **M4-e cannot fire** (`:1068`) — permuting two sub-quads' source UVs moves only occluded geometry.
+
+Note the audit ledger's own row 3 caught the mirror-image of this for glyphs and the focus ring
+("subject unconstructible") but did not ask whether the two terms it KEPT can coexist.
+
+**The escape hatch is closed too.** G4-3 could avoid the occlusion by hand-packing nine
+`UiInstance`s directly (the shape `ui_sprite_gpu_golden.rs:130-149` already uses), never
+constructing an ECS node and so never emitting sub 10. But that is the *self-gating* defect this
+same audit flagged one row later for G4-4 — "its `build_frame` calls `pack_ui_instance` directly, so
+extending it would re-implement the expansion policy inside the test and gate the test against
+itself" (`UI-PLAN-SPRITES.md:1019`). So G4-3 either drives the production emitter and is occluded,
+or hand-rolls the expansion and tests itself. **Both branches are defective; there is no third.**
+
+**The decision needed (architect's, not the implementer's — S-D11 (3) is where the record count was
+ruled).** Does `UiNineSlice` **suppress** the sub-10 image record — the slices ARE the image, sliced
+— leaving a nine-sliced node at 10 records (9 without the centre) and `UI_RECORDS_PER_NODE = 11` as
+the *stride*? That is the only reading found in which the rung draws what it exists to draw, it
+leaves D4's ORDER intact (the image term is simply absent when slicing is on, the way a rect-only
+node has no image term), and it keeps S-D8's default-OFF row byte-for-byte. But it contradicts
+S-D11's stated arithmetic, and S-D11's ADD reasoning ("the background is the surface the frame sits
+on") argues only about the BACKGROUND — it never contemplated the image record surviving beside the
+slices.
+
+### 2 — the SOURCE-side UV split is stated nowhere (BLOCKING)
+
+Nine destination rects come from `border_px`. Nine **source** sub-rects come from nothing:
+
+* `UiNineSlice` carries no source inset (`UI-PLAN-SPRITES.md:917`);
+* `UiImageInput` is `{ slot, uv, tint }` — **no texture dimensions** (`pack.rs:28-40`), and
+  `border_px` is a *destination* quantity, so px → UV is not convertible without them;
+* the dimensions cannot be fetched at S4 even in principle: the bindless table lives behind
+  `RhiContext`, which is **Phase 2's `!Send` projection** (`upload.rs:676`) and is structurally
+  unreachable from the Phase-1 pack — and reading them in the shader is a shader change, which S4
+  is defined not to make (S-D11 (2)).
+
+Unity and Bevy both specify the border in **source texels** and both have the texture size; this
+pack has neither. A grep across the plan, the architecture and the research corpus returns **no
+statement of the rule** (`UiSheet.inset_uv` at `:1133` is S5's half-texel bleed guard, a different
+thing). Meanwhile **M4-e presupposes it exists** ("swap the TL and TR sub-quads' *source UV
+sub-rects*"), and G4-3 pins a 3×3 source without saying why 3×3.
+
+Only one rule is implementable at S4 from data the node carries: **split the node's `uv` rect into
+equal thirds**. It is exact for G4-3's 3×3 source and it makes M4-b and M4-e fire. It is also
+genuinely restrictive (a 32×32 chrome with an 8 px border wants 1/4, not 1/3). The degenerate
+alternative — source fractions = destination fractions — is excluded by measurement-free reasoning:
+it makes slicing a no-op and M4-b unable to fire. **This is a decision by elimination, and the
+campaign's own rule is that an undetermined datum gets ruled, not guessed** — it is the same class
+as the record count the audit itself escalated (ledger row 4).
+
+### 3 — M4-f's threshold is a category error (recorded, non-blocking)
+
+`:1074` — *"the box overflows at 187 nine-sliced imaged nodes"*. At stride 11 into a 4 096-row box,
+**187 nodes emit 2 057 records and do not overflow**; the first overflowing node is **373**
+(11 × 372 = 4 092 ≤ 4 096 < 4 103). `187 = ceil(2048 / 11)` — the NODE budget divided by the stride
+instead of the ROW budget. The red still fires because G4-6 drives `UI_MAX_NODES = 2048` nodes
+(22 528 records), so only the explanatory number is wrong; but it is a number asserted rather than
+computed, in a rung whose own ledger opens with that class.
+
+### What is NOT in dispute
+
+Lands items 6 (`ui_pack_inputs!` gains `UiNineSlice`), 7 (the decode becomes a match, the key push
+becomes a loop) and 8 (`UI_STAGING_ROWS = UI_MAX_NODES * UI_RECORDS_PER_NODE` = 22 528 rows =
+1.72 MiB) are all verified correct against the tree and are buildable the moment (1) and (2) are
+ruled. G4-6's scene fits the derived box exactly (2 048 × 11 = 22 528).
+
+---
+
 ## 2026-08-21 — UI-ADVANCED S0 stopped at a plan defect: `host_upload_frame_from_world` has no POSSIBLE caller, and S0's observer + two gates are specified against it
 
 **RESOLVED 2026-08-21 (architect's WorldView ruling; landed the same day).** The finding, in

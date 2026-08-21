@@ -170,8 +170,15 @@ Three consequences, none of which the research or the architecture recorded:
 1. **A pixel-art UI sprite cannot be `NEAREST`.** Under D2 the UI would inherit LINEAR forever.
    Under the rejected Model A the UI owns its atlas sampler and could pick either — so this is a real
    cost of D2 that must be paid rather than discovered.
-2. **`REPEAT` is what makes tiled nine-slice cheap (D8d), and it is also what makes it narrow.** A UV
-   outside `[0,1]` wraps to the **whole texture**, not to a sheet frame — see S-D7.
+2. ~~**`REPEAT` is what makes tiled nine-slice cheap (D8d), and it is also what makes it narrow.** A UV
+   outside `[0,1]` wraps to the **whole texture**, not to a sheet frame — see S-D7.~~
+   **`REPEAT` is not what makes tiled nine-slice cheap, and this consequence was a false lead that cost
+   a decision (S-D7) and a gate (G4-5).** *(corrected 2026-08-21 at the S4 pre-build audit.)* The
+   decision below gives the UI a `ClampToEdge` sampler in both modes — which was the right call and the
+   S3 code says so at `resources.rs:307-309` — and therefore **`REPEAT` is not on the UI's sampling path
+   at all**, so nothing downstream may reason from it. Tiling is a `frac` inside the sprite's own
+   sub-rect (**S-D11**), which costs one shader instruction, wraps to a **sheet frame** rather than to
+   the whole texture, and consequently has no narrowness to guard against.
 3. **`mipmapMode = LINEAR`, `maxLod = 1000`.** A single-mip UI texture always resolves to level 0, so
    nothing is wrong today; a UI texture uploaded *with* mips would trilinear-blend across sheet frames
    under minification.
@@ -243,22 +250,34 @@ readbacks in `boyko_render/tests` with a graceful device-less skip, and forcing 
 would mean building a windowed UI dump test before the widening. (b) leaving the texel assertions
 alone — the widening then lands with no gate that can fail on the shader half.
 
-### S-D7 — `Tile` nine-slice requires a whole-texture sprite; with a sheet it is a hard error
+### S-D7 — ~~`Tile` nine-slice requires a whole-texture sprite; with a sheet it is a hard error~~ **RETIRED 2026-08-21 — the hazard was an artifact of a mechanism that will never ship (see S-D11)**
 
-Tiled edges work by letting the UV run past `[0,1]` and letting `REPEAT` wrap. Under a sheet, `REPEAT`
-wraps to the **whole sheet**, so a tiled edge would tile the neighbouring frames.
+> **RETIRED at the S4 pre-build audit, 2026-08-21.** Every sentence below is preserved because the
+> reasoning was sound *given its premise*, and the premise is the interesting part: the whole decision
+> is downstream of "tiling = UV past `[0,1]` + `REPEAT`", and **S3 landed a UI sampler that is
+> `ClampToEdge` in BOTH modes** (`resources.rs:310`, whose own comment names this rung). There is no
+> `REPEAT` anywhere on the UI's sampling path — `ui_rect.fs.hlsl:198` samples
+> `g_sprites[…].Sample(g_ui_sampler, uv)`, the UI's own sampler, never the bindless set's. So the
+> mechanism does not exist, the sheet hazard it creates does not arise, and the clamp that guards it
+> guards nothing. **S-D11 replaces it**: tiling is `frac` *within the sub-rect*, which is well-defined
+> under a sheet and therefore needs no guard at all. The gate this decision spawned (`G4-5`) named
+> `UiSpriteSheet`, a type S5 creates — so it was also a gate that could not fail. Both are gone.
 
-**Decision:** `UiNineSlice { mode: Tile }` on a node that also carries `UiSpriteSheet` is a
+~~Tiled edges work by letting the UV run past `[0,1]` and letting `REPEAT` wrap. Under a sheet, `REPEAT`
+wraps to the **whole sheet**, so a tiled edge would tile the neighbouring frames.~~
+
+~~**Decision:** `UiNineSlice { mode: Tile }` on a node that also carries `UiSpriteSheet` is a
 `debug_assert!` in dev and a **clamp to `Stretch`** in release, with the clamp counted in a diagnostic
-counter so it is observable rather than silent.
+counter so it is observable rather than silent.~~
 
-**Reason.** The combination is not expressible under S-D4's sampler and cannot be made expressible
+~~**Reason.** The combination is not expressible under S-D4's sampler and cannot be made expressible
 without per-sprite address modes. Failing loudly in dev and degrading visibly-but-safely in release is
-the house pattern (`D15`-shaped release-present clamps in `PARTICLES-PLAN.md`).
+the house pattern (`D15`-shaped release-present clamps in `PARTICLES-PLAN.md`).~~
 
-**Rejected:** (a) emulate tiling with geometry (Unity's quad-per-tile explosion and its documented
-16 250-quad cap — the exact thing D2 exists to avoid); (b) silently treat it as `Stretch` (a wrong
-image with no trace).
+**Rejected (still rejected, and now for a second reason):** (a) emulate tiling with geometry (Unity's
+quad-per-tile explosion and its documented 16 250-quad cap — the exact thing D2 exists to avoid);
+(b) silently treat it as `Stretch` (a wrong image with no trace). Under S-D11 (a) is additionally
+unnecessary, because the shader-side `frac` costs one instruction and zero records.
 
 ### S-D8 — the default-OFF ladder, stated rung by rung
 
@@ -268,8 +287,8 @@ image with no trace).
 | S1 | eDSL-generated shader | **byte-identical `.spv`** — nothing changes | never (it is a refactor) |
 | S2 | 80 B record, `uv` field | every existing node packs `uv = (0,0,1,1)` and `flags` bits 3..31 zero | never (image pins must be identical) |
 | S3 | `FLAG_TEXTURED`, set 1, UI sampler | `UiImage`'s default tint is **alpha 0** ⇒ an authored-but-untextured Image is invisible (`components.rs:454-466`) | S3's own new golden `ui_sprite_bindless` |
-| S4 | `UiNineSlice` | absent ⇒ pack emits 1 record, exactly as S3 | S4's own golden `ui_nine_slice` |
-| S5 | sheets + flipbook | `UiSpriteSheet` absent ⇒ `uv` comes from `UiImage`; `UiSpriteCursor` absent ⇒ no tick | S5's own golden `ui_flipbook` |
+| S4 | `UiNineSlice` (**`Stretch` only** — `Tile` moved to S5 by the 2026-08-21 audit, S-D11) | absent ⇒ pack emits 1 record (+ its image), **byte-identical to S3** | S4's own golden `ui_nine_slice` |
+| S5 | sheets + flipbook **+ `NineSliceMode::Tile`** *(added 2026-08-21: `Tile` needs the sub-rect arithmetic S5 builds — S-D11)* | `UiSpriteSheet` absent ⇒ `uv` comes from `UiImage`; `UiSpriteCursor` absent ⇒ no tick; **`mode != Tile` ⇒ no `frac`, `FLAG_TILED` zero** | S5's own goldens `ui_flipbook` + `ui_nine_slice_tiled` |
 | S6 | `.ui` vocabulary | authoring only; no runtime behaviour | — |
 
 **Every rung's own goldens are the only images that change at that rung.** The S2 image pins
@@ -300,6 +319,80 @@ semantics — a plausible outcome of a whitespace or declaration-order change �
 recorded re-bless**: the four UI goldens are re-run on a device, the images compared by a human, the
 `SpirvBlob<N>` lengths and the S-D6 hashes updated in one commit whose message says the `.spv` moved
 and why. What is **not** acceptable is landing S1 without noticing which of the two happened.
+
+### S-D11 — tiling is `frac` **inside the sub-rect**, it belongs to S5, and the nine sub-quads are **added to** the background rect, not substituted for it
+
+*(added 2026-08-21 at the S4 pre-build audit — three findings with one root, so one decision)*
+
+**(1) The mechanism.** S-D7 assumed tiling = "let the UV run past `[0,1]` and let `REPEAT` wrap". That
+is not available and never was: S3 landed the UI's own sampler as `AddressMode::ClampToEdge` in
+**both** `UiSamplerMode` variants (`resources.rs:310`), and the fragment shader samples the bindless
+texture *through it* (`ui_rect.fs.hlsl:198`), so the bindless set's `REPEAT` sampler is not on the UI's
+path at all. A UV of 1.5 under the landed pipeline reads the edge texel — a smear, not a tile.
+
+**Decision: `Tile` is a fragment-side `frac` applied to the sprite's normalized position within its
+own sub-rect**, selected by a new `FLAG_TILED` bit out of the free bits 5..19 (S-D2's budget), with
+the tile count folded into `uv` at pack exactly as S4 originally proposed. Concretely the sprite
+branch computes `uv = sub_min + frac(t) * (sub_max - sub_min)` instead of `uv = lerp(sub_min, sub_max, t)`.
+
+**Reason, and it is the interesting half: this DISSOLVES S-D7 rather than implementing it.** The sheet
+hazard S-D7 designed a `debug_assert!` + release clamp + diagnostic counter around exists only because
+`REPEAT` wraps to the *whole texture*. `frac` inside the sub-rect wraps to the **sub-rect**, which is
+precisely a sheet frame. So a tiled nine-slice over a sheet frame is not a hard error — it is the
+correct picture, for free. A guard, a clamp, a counter and a gate all disappear, and the thing they
+were guarding becomes expressible. *(A counter that can only ever read zero is this campaign's
+dead-datum class; S-D7's would have been one by construction.)*
+
+**Rejected:** (a) *a second UI sampler with `REPEAT`, selected per draw* — needs either two pipelines
+or a per-instance address-mode index; the latter IS S7's deferred per-sprite sampler lever (bit 4
+reserved), and it is the wrong lever, because tiling under `frac` needs no sampler change at all.
+(b) *`REPEAT` as the UI sampler's default* — `resources.rs:307-309` already refused this in S3, on the
+grounds that S4's tiled nine-slice "does not get to set the default" for every glyph and every sprite;
+that refusal stands and is now vindicated, since the caller it was protecting the default from does not
+need the default changed.
+
+**(2) The rung.** **`Tile` lands at S5, not S4.** Not because S4 cannot afford it, but because S4
+cannot *gate* it: the mechanism is a **shader** change (an eDSL leaf, a re-emit, a re-DXC, two
+`SpirvBlob<N>` lengths, two manifest rows) and S4 is otherwise a pure CPU rung — that "no shader
+change" property is D8d's entire argument for CPU expansion over Bevy's separate-pipeline strategy,
+and it should not be spent on the half of `mode` nothing yet asks for. S5 already owns sprite sub-rect
+arithmetic (`UiSheet.inset_uv`, the frame rect from `(cols, rows, index)`), which is the same
+arithmetic `frac`-in-sub-rect needs, so the two are one shader edit at S5 and two at S4+S5.
+
+**What S4 lands anyway, so S5 widens rather than re-specifies:** the `mode: u8` field exists at S4
+with **exactly one legal value** (`NineSliceMode::Stretch = 0`), a `const` assert pinning the variant
+count, and a rejection path for an out-of-range discriminant. The byte layout does not move at S5;
+only the set of accepted values grows.
+
+**(3) The record count — D4 and D8d disagreed, and D4 wins.** `UI-ADVANCED-ARCHITECTURE.md:620`
+(D8d) says the nine sub-quads REPLACE the node's single record ("present ⇒ 9; absent ⇒ 1");
+`:250` (D4) lists "background rect → nine-slice sub-quads → image" as *distinct* elements, i.e. the
+sub-quads are ADDED. A third number is already written into the tree
+(`tests/ui_s0_seam.rs:245`, "seven more sub-quads"). Three readings, three different values for
+`UI_RECORDS_PER_NODE`, and the rung is unbuildable until one wins.
+
+**Decision: ADD. The background rect is always sub 0 and keeps `UiBackground`'s colour, border and
+corner radius verbatim, exactly as it packs today; the nine-slice sub-quads are pure textured rects
+with zero radius and zero border.**
+
+**Reason.** Not economy — *correctness*. A nine-slice source is a **frame**, and frames have
+transparent regions (a rounded window chrome is the canonical case). Under REPLACE, a translucent
+corner would composite against whatever is behind the entire UI instead of against the node's own
+background — the background rect is not redundant overdraw, it is the surface the frame sits on. This
+is also why Bevy, Godot and Unity all keep the node's own background beneath the slice. REPLACE has a
+second cost that ADD does not pay at all: it would force S4 to decide how one node's `corner_radius`
+and `border_width` distribute across nine sub-quads (does a 4 px radius mean 4 px on TL's *outer*
+corner only? what happens to `border_width` on the shared interior edges?) — a real visual question
+with no cheap answer, gated by nothing S4 has. Under ADD the sub-quads are uniform: one new pack
+function, zero radius, zero border, the same shape `pack_ui_image_instance` already has.
+
+**Consequence, stated so no gate has to guess:** `UI_RECORDS_PER_NODE = 11` — sub **0** the background
+rect, subs **1..=9** the nine-slice regions in D4's TL..BR order (sub **5** is the centre, emitted iff
+`fill_center == true`), sub **10** the image. A nine-sliced node emits **10** records (9 with
+`fill_center == false`), **11** with an image (10 without the centre). A node with no `UiNineSlice`
+emits exactly what it emits today — 1, or 2 with an image — so S-D8's default-OFF row holds byte for
+byte. `UI-ADVANCED-ARCHITECTURE.md:620-621` owes the same strike-and-correct; this plan is the
+authority until it gets it.
 
 ---
 
@@ -786,8 +879,15 @@ component that does not exist would be measuring nothing.
   (because `sort_by_stack` gathers `pack[idx]` by it) and `gather_into_staging` uses the
   `node * UI_RECORDS_PER_NODE + sub` CODE (because it packs directly in sorted order and must find
   each record's SOURCE from its key). Both are unique and strictly increasing in emission order, so
-  both yield the same painter's order. S4's nine-slice raises `UI_RECORDS_PER_NODE` and nothing else
-  at that site.
+  both yield the same painter's order. ~~S4's nine-slice raises `UI_RECORDS_PER_NODE` and nothing else
+  at that site.~~ **S4's nine-slice raises `UI_RECORDS_PER_NODE` AND rewrites two things at that site**
+  *(corrected 2026-08-21 at the S4 pre-build audit)*: the key push is hard-coded to at most two
+  sub-records (`upload.rs:337-343`) and must become a loop, and the pack dispatch is BINARY
+  (`if append.is_multiple_of(UI_RECORDS_PER_NODE) { … } else { pack_ui_image_instance(..).expect(…) }`,
+  `upload.rs:367-373`) and must become a full `match` over the sub code — because with the stride raised
+  every sub-quad key takes the `else` arm, and on a nine-sliced node **without** `UiImage` that `.expect`
+  panics in release as well as debug. **The same false sentence is in the tree** at `pack.rs:183-184`
+  and is corrected in the same edit.
 * **S-D3's `bind_descriptor_set_at` landed as specified**, `bind_descriptor_set` became its
   `set_index == 0` case, and no existing call site moved. `VulkanBindlessSet::as_bind_group()` is the
   new (non-owning, loudly documented) view that lets the shared table be bound through the generic
@@ -798,49 +898,219 @@ component that does not exist would be measuring nothing.
 
 ### S4 — nine-slice: CPU expansion + the D4 emission contract — **size M**
 
-*Architecture D8d and D4, plus S-D7.*
+*Architecture D8d and D4, plus ~~S-D7~~ **S-D11** (S-D7 is retired; see the audit ruling immediately
+below).*
+
+> **PRE-BUILD AUDIT RULING — 2026-08-21, before one line of S4 was written.** Three lenses read this
+> rung against the tree S3 landed in. **Eleven findings were confirmed by direct verification**, five
+> of them blocking; two claims were **refuted by measurement** and are recorded as such rather than
+> acted on. The rung as originally written **could not be built**: three of its five gates had no
+> constructible subject, one red mutation was unwritable, its two headline numbers (the record count
+> and the staging budget) were undetermined or wrong, and the one item that would have made
+> `UiNineSlice` visible to the renderer at all was missing from the list. Every sentence below is
+> struck rather than deleted — the record of what was believed and why it was wrong is the point.
+> The full ruling is the **S4 audit ledger** after the red mutations.
 
 **Lands.**
 
-1. `UiNineSlice { border_px: [f32;4], mode: u8 /* Stretch|Tile */, fill_center: bool }` — 20 B,
-   `#[repr(C)]` POD, padding spelled. Table (authored, cold).
-2. The pack emits **9** sub-quads (8 with `fill_center == false`) into the **existing**
-   `UiRenderScratch.pack` when the component is present, and **1** when it is absent. All nine inherit
-   the parent's `StackIndex` and `ComputedClip` verbatim and take **consecutive** `append` indices —
-   so the existing `(stack, append)` total-order sort keeps them contiguous and in painter's order
-   **with no change to the sort**.
-3. `Tile` mode folds the tile count into `uv` at pack (UVs run past 1.0 and `REPEAT` wraps), with
+1. ~~`UiNineSlice { border_px: [f32;4], mode: u8 /* Stretch|Tile */, fill_center: bool }` — 20 B,
+   `#[repr(C)]` POD, padding spelled.~~ **`UiNineSlice { border_px: [f32;4], mode: u8, fill_center: bool, _pad: [u8; 2] }` — 20 B,
+   `#[repr(C)]` POD, `_pad` SPELLED, `mode` a `NineSliceMode` with exactly ONE legal value at S4
+   (`Stretch = 0`), pinned by a variant-count `const` assert; an out-of-range discriminant is
+   rejected at pack.** Table (authored, cold).
+   *(amended 2026-08-21: (a) the original field list is 20 B — **verified by compiling both spellings
+   under rustc 1.97.1: size 20 / align 4 with and without `_pad`** — but those two bytes were IMPLICIT
+   TAIL PADDING, which is exactly what "padding spelled" forbids; S5's own `UiSheet` at the next rung
+   spells its `_pad` with a reason, and this one now matches its own prose. (b) `Tile` moves to S5 —
+   S-D11.)*
+2. ~~The pack emits **9** sub-quads (8 with `fill_center == false`) into the **existing**
+   `UiRenderScratch.pack` when the component is present, and **1** when it is absent.~~
+   **The pack emits the node's background rect at sub 0 (unchanged from S3) PLUS 9 sub-quads at subs
+   1..=9 (8 when `fill_center == false` — the centre, sub 5, is the one that is skipped), in BOTH pack
+   loops.** All nine inherit the parent's `StackIndex` and `ComputedClip` verbatim and take
+   **consecutive** `append` indices — so the existing `(stack, append)` total-order sort keeps them
+   contiguous and in painter's order **with no change to the sort**.
+   *(amended 2026-08-21, two corrections. (a) **Replace vs add was undetermined** — D8d says the
+   sub-quads replace the background record, D4 lists the background as a distinct preceding element,
+   and `tests/ui_s0_seam.rs:245` records a third number. S-D11 rules ADD, with the reason: a nine-slice
+   source is a FRAME with transparent regions, so the background rect is the surface it sits on, not
+   redundant overdraw. `UI_RECORDS_PER_NODE = 11`. (b) **"the existing `UiRenderScratch.pack`" names
+   the LEGACY loop only.** `UiRenderScratch` is reached solely through `pack_sort_upload`
+   (`upload.rs:452-477`, documented at `:140-142` as the host/golden driver); the IN-SCHEDULE path the
+   scheduler runs is `gather_into_staging`, which packs into `UiUploadSystem::staging` and never names
+   `UiRenderScratch`. This rung's own S3 retrospective at §"Reconciliations" knows there are two loops
+   with two append encodings; the item named one. The expansion lands in BOTH.)*
+3. ~~`Tile` mode folds the tile count into `uv` at pack (UVs run past 1.0 and `REPEAT` wraps), with
    S-D7's `debug_assert!` + release clamp when a sheet is also present, and a diagnostic counter for
-   the clamp.
-4. **D4's emission contract, pinned:** *background rect → nine-slice sub-quads (TL..BR) → image →
-   glyphs → focus ring*, per node.
-5. Layout is untouched — slicing is purely visual.
+   the clamp.~~ **MOVED TO S5 in its entirety (S-D11).**
+   *(amended 2026-08-21 — the mechanism does not exist and its guard has no subject. **`REPEAT` is not
+   on the UI's sampling path**: S3 landed the UI's own sampler as `AddressMode::ClampToEdge` in BOTH
+   modes (`resources.rs:310`) and the fragment shader samples the bindless texture through it
+   (`ui_rect.fs.hlsl:198`) — the comment at `resources.rs:307-309` names this rung by name and says it
+   "does not get to set the default". As written, a `Tile` edge would render one clamped streak. And
+   the guard's subject, `UiSpriteSheet`, has **zero occurrences in any `.rs` file in the tree** — S5's
+   Lands item 2 creates it, so at S4 the `debug_assert!` cannot be written, the clamp guards an
+   unconstructible combination, and the counter can only ever read zero. S-D11 replaces the mechanism
+   with `frac` inside the sub-rect, which is well-defined under a sheet and therefore needs no guard,
+   no clamp and no counter — and, separately, removes the need to thread a `&mut u64` through
+   `pack_ui_instance`/`pack_ui_image_instance`, which are free functions with no receiver
+   (`pack.rs:86`, `:204`) and had nowhere to put a counter.)*
+4. **D4's emission contract, pinned** — ~~*background rect → nine-slice sub-quads (TL..BR) → image →
+   glyphs → focus ring*, per node~~ **at S4, over the terms S4 emits: *background rect → nine-slice
+   sub-quads (TL..BR, centre at sub 5) → image*, per node.** The two remaining terms of D4's full
+   contract keep their home in D4 and are pinned at the rungs that emit them: **glyphs are not
+   per-node sub-records at all** — the canonical gather hard-codes `text_uv: None` (`gather.rs:272`)
+   and every glyph in the tree is a separate `UiNode` row a host appends (D4's own preamble concedes
+   their order "is decided purely by the order the host appends them"), and `pack.rs:208`'s
+   `debug_assert!` forbids one record being both glyph and sprite — while the **focus ring is
+   Interaction's I9** (`UI-PLAN-INTERACTION.md:884`, opt-in `FocusRing`; **zero occurrences in
+   `crates/`**), and §6 of this plan already assigns it there.
+   *(amended 2026-08-21: as written, two of the five terms could not be emitted, so G4-2's subject was
+   unconstructible and M4-c was unwritable.)*
+5. Layout is untouched — slicing is purely visual. *(verified 2026-08-21 and it is TRUE and structural,
+   not a promise: `boyko_ui` takes **no render dependency** (`boyko_ui/Cargo.toml`, whose own comment
+   states it) and never names `UiInstance` or the pack, so nothing in layout can read a record count.)*
+6. **`ui_pack_inputs!` gains `UiNineSlice`** *(added 2026-08-21 — the omission that would have made the
+   whole rung invisible)*. The single component list at `gather.rs:72-82` drives BOTH the gather's
+   per-node read tuple AND `ui_render_discovery`'s `Changed<..>` filter; the macro's own doc says
+   "sprites add the rest at **S4**–S5", and §6 names it as the surface neither sibling plan may bypass.
+   Without this edit the gather cannot read the component at all, and an author's runtime edit to a
+   nine-slice would never bump `UiRenderGeneration` — the frame would not repaint. This is S3 defect 4
+   repeating one rung later, and it was in no Lands list: S5's item 6 wires *its* three components,
+   never this one. The derived probe census (`ui_pack_inputs!(count)`) moves 6 → 7 per node per frame.
+7. **`gather_into_staging`'s sub-record decode becomes a full match, and its key-push loop a loop**
+   *(added 2026-08-21 — "S4's nine-slice raises `UI_RECORDS_PER_NODE` and nothing else changes at that
+   call site" is FALSE, and the same false claim sits in the tree at `pack.rs:183-184` and must be
+   corrected in the same edit)*. Two concrete blockers at `upload.rs:337-373`: the key push is
+   hard-coded to at most two sub-records (`base`, then conditionally `base + 1`), and the pack dispatch
+   is BINARY — `if append.is_multiple_of(UI_RECORDS_PER_NODE) { pack_ui_instance(..) } else {
+   pack_ui_image_instance(..).expect("invariant: a sub-record key is emitted only for a node carrying
+   UiImage") }`. With the stride raised, every sub-quad key falls into the `else` arm, and on a
+   nine-sliced node **without** `UiImage` that `.expect` **panics in release as well as debug**
+   (`pack_ui_image_instance` opens `let image = input.image?;`, `pack.rs:205`). The decode must become
+   `match append % UI_RECORDS_PER_NODE` over {background, sub-quad 0..=8, image}.
+8. **`UI_STAGING_ROWS` is re-derived from a stated node budget, and its doc comment is corrected**
+   *(added 2026-08-21)*. The in-schedule path packs into a FIXED `Box<[UiInstance]>` of
+   `UI_STAGING_ROWS = 4096` (`upload.rs:107`, `:571`) whose overflow arm is `debug_assert!(false, …)` —
+   a debug **panic** — then a release `truncate` of the emission TAIL with `staging_overflows` bumped
+   (`upload.rs:346-359`). Its doc claims "2× the plan's own N = 2048 measurement scene": **that was
+   already false at S3** (2 records/node × 2048 nodes = 4096 = exactly 1×), and at stride 11 the box
+   overflows at 187 nine-sliced nodes. Replace with
+   `UI_MAX_NODES: usize = 2048; UI_STAGING_ROWS: usize = UI_MAX_NODES * UI_RECORDS_PER_NODE as usize`
+   — 22 528 rows × 80 B = **1.72 MiB**, one host allocation at `initialize`, never grown, never walked
+   beyond the live prefix. **Reason for paying it rather than sizing for a "typical" mix:** a box sized
+   for a typical composition overflows as a function of *what the scene contains*, which is precisely
+   the composition-dependent silent truncation the clamp exists to make loud. A constant that cannot
+   overflow within the stated node budget is worth 1.4 MiB of host RAM. *(The GPU ring needs no change:
+   `UiRingSlot` is grow-only pow2 on overflow — `resources.rs:190-203` — so the CPU box is the sole
+   hard cap.)*
 
 **Gate.**
 
+*(the whole table was re-pointed 2026-08-21 — three of the five rows named a subject that cannot be
+constructed at S4; each row below states **which pack loop it drives**, because the rung has two and
+S3's ledger already recorded that naming one leaves the other ungated)*
+
 | # | Claim | How |
 |---|---|---|
-| **G4-1** | The expansion is 9 (or 8), consecutive, inheriting | CPU unit test, no GPU: assert record count, that `append` is `k..k+9`, that all nine carry the parent's `StackIndex` and clip |
-| **G4-2** | The emission order is D4's | A node with background + nine-slice + image + glyphs + focus ring: assert the `append` lane's order equals the contract, by name |
-| **G4-3** | Slicing preserves corners | GPU golden `ui_nine_slice`: a 3×3 procedural source (S-D5) stretched to a 64×16 rect; the four corner regions are **unstretched** (their texel pattern matches the source's corners 1:1) and the edges are; image hash pinned |
-| **G4-4** | The pack still never reallocates | `ui_no_realloc.rs` extended: the 9× expansion at N=1024 nodes must not grow the scratch after the first frame |
-| **G4-5** | S-D7 is enforced | `Tile` + `UiSpriteSheet`: `debug_assert!` fires in dev; the release build clamps to `Stretch` and the counter increments |
+| **G4-1** | The expansion is 9 (or 8) sub-quads **in addition to** the background rect, consecutive, inheriting *(S-D11 — "in addition to" is the ruled reading of a contradiction, not a restatement)* | ~~CPU unit test, no GPU: assert record count, that `append` is `k..k+9`~~ **CPU unit test, no GPU, run against BOTH loops: for `gather_into_staging` via `sys.staged()` on a bare `EcsMaster` (the device-free precedent is `ui_s0_seam.rs:251`, whose own doc anticipates this rung), and for `pack_sort_upload` via `UiRenderScratch`. Assert the record count DERIVED from `UI_RECORDS_PER_NODE` and `fill_center` — never a literal — that the sub-quads occupy consecutive `append` codes `base+1..=base+9` (`base+5` absent iff `fill_center == false`)**, that all nine carry the parent's `StackIndex` and clip |
+| **G4-2** | The emission order is D4's | ~~A node with background + nine-slice + image + glyphs + focus ring~~ **A node with background + nine-slice + image** *(amended 2026-08-21: glyphs are not per-node sub-records — `gather.rs:272` hard-codes `text_uv: None` and `pack.rs:208` forbids one record being both — and `FocusRing` has zero occurrences in `crates/`; it is Interaction's I9. As written this gate's subject was unconstructible)*: assert the `append` lane's order equals the contract, **by name**, off `sys.staged()` — the shape `ui_s0_seam.rs:288-302` already uses to assert staged records by `FLAG_TEXTURED` |
+| **G4-3** | Slicing preserves corners | GPU golden `ui_nine_slice`: a 3×3 procedural source (S-D5) ~~stretched to a 64×16 rect~~ **whose nine cells carry NINE DISTINCT values, stretched to a 96×96 rect at `border_px = [16,16,16,16]`** *(amended 2026-08-21, two reasons. (a) A **symmetric** source makes region assignment unobservable: the natural corner=A/edge=B/centre=C source is invariant under the full dihedral group, so all 24 corner permutations hash identically — and the existing S-D5 checkerboard is itself invariant under 180° rotation and transpose (`ui_sprite_gpu_golden.rs:117-124`). Nine distinct values make every region individually visible, which is what M4-e needs. (b) At 64×16 from a 3×3 source, a correct corner is **one destination pixel**, so "matches the source's corners 1:1" degenerates to a single-texel assertion that is exact only because a 1-px quad's centre lands at u = 1/6 — any half-texel convention error blends instead of failing. 96×96 at 16 px borders gives every corner real width.)*; the four corner regions are **unstretched** and the edges are; image hash pinned |
+| **G4-4** | The pack still never reallocates | ~~`ui_no_realloc.rs` extended: the 9× expansion at N=1024 nodes must not grow the scratch after the first frame~~ **`ui_no_realloc.rs` extended at its own `N = 4096`** *(amended 2026-08-21: there is no N=1024 configuration in that file — it runs `N = 4096` at `:102` and `:191` and `WARM_N = 2048` / `STEADY_N = 16` at `:148-149`; the gate named a scene that does not exist)*, **driving the expansion through the production emitter rather than the test's own hand-rolled loop** *(its `build_frame` at `:83-93` calls `pack_ui_instance` directly and pushes keys by hand, so "extending it" would re-implement the expansion policy inside the test and gate the test against itself — S4 exposes the expansion as a callable seam and G4-4 calls it)*. The steady-state half of this file is sound as it stands and needs no work: a 3-frame warm-up whose allocations are excluded (`:108-110`), capacities captured (`:112-114`) and asserted byte-stable in an armed window (`:118-134`) |
+| **G4-5** | ~~S-D7 is enforced~~ **`mode` has exactly one legal value at S4** | ~~`Tile` + `UiSpriteSheet`: `debug_assert!` fires in dev; the release build clamps to `Stretch` and the counter increments~~ **A `const` assert on the variant count plus a CPU test that an out-of-range `mode` discriminant is rejected at pack.** *(amended 2026-08-21 — **this was a gate that could not fail.** Its subject `UiSpriteSheet` has **zero occurrences in any `.rs` file in the tree**; S5's Lands item 2 creates it. A gate whose subject a later rung introduces cannot be written, therefore cannot fail — the exact class S3's M3-e already exhibited, caught here before the code rather than after. S-D7 is retired (S-D11) and the tiling half moves to S5; what remains at S4 is the half that HAS a subject: `mode` is a one-variant enum and the rung says so mechanically, so S5 widens the value set instead of re-specifying the field.)* |
+| **G4-6** | The staging box holds the stated node budget | *(added 2026-08-21 — nothing in the original table looked at the box that actually truncates.)* Drive `gather_into_staging` with `UI_MAX_NODES` nine-sliced, imaged nodes: `sys.staged()` equals the derived emission count, `staging_overflows == 0`, and no `debug_assert!` fires. The original G4-4 could not see this: it drives `UiRenderScratch`, a growable `Vec`, while production packs into a fixed `Box` that **clamps** rather than grows |
+| **G4-7** | `UiNineSlice` reaches the renderer at all | *(added 2026-08-21 with Lands item 6.)* The `ui_s0_discovery` shape: mutate `UiNineSlice` on a live node and assert `UiRenderGeneration` bumps **exactly once**; assert the derived probe census is `ui_pack_inputs!(count) + 1` per node per frame. Without the macro edit the component is invisible to both halves and the frame silently does not repaint |
 
 **Red mutations.**
 
-* **M4-a — give all nine sub-quads the same `append` index.** G4-1 reds, and the golden's paint order
+* **M4-a — give all nine sub-quads the same `append` index.** G4-1 reds. ~~and the golden's paint order
   becomes order-of-iteration. *Proves the "the key is TOTAL because `append` is unique" claim is
   load-bearing rather than a description — an unstable sort over a non-total key is a real
-  nondeterminism.*
+  nondeterminism.*~~ ***The mutation FIRES; its stated rationale is wrong on BOTH halves, and both were
+  checked rather than assumed (2026-08-21).*** *(1) `append` is not a tie-break — it is the record's
+  **SOURCE ADDRESS** in both loops. `sort_by_stack` gathers `self.pack[idx]` by it (`pack.rs:315`), so
+  nine equal keys emit `pack[first]` NINE TIMES and **drop the other eight records**;
+  `gather_into_staging` decodes the source as `node_buf[append / UI_RECORDS_PER_NODE]` and the sub-kind
+  as `append % …` (`upload.rs:366-373`), so nine equal keys all resolve to the same node and the same
+  sub. The observed failure is **record duplication and loss — a wrong picture, not a shuffled one**.
+  (2) There is no nondeterminism to prove: `sort_unstable_by_key` is a deterministic pure function.
+  **MEASURED under rustc 1.97.1** over true tie blocks of nine identical keys at n = 9 / 27 / 72 / 576 /
+  1800 — the within-tie order IS permuted (at n ≥ 72 the block comes back scrambled), but **identically
+  on every repeat and across fresh processes**. A golden blessed after this mutation would stay green
+  run after run. What the codebase's comments actually claim (`pack.rs:257-259`, `upload.rs:316-318`)
+  is "unstable result == stable result" — an equality of orderings — and that is the property this
+  mutation should be said to prove.*
 * **M4-b — expand the corners proportionally instead of at fixed `border_px`.** G4-3 reds. *Proves the
   golden tests **slicing** rather than "a textured rect appeared" — the mutation that a texel-only
-  assertion would survive.*
-* **M4-c — swap the image and glyph emission order.** G4-2 reds. *Proves the contract is pinned. Note
-  that this mutation is **invisible** to every image gate unless the glyph and the image overlap —
-  which is why G4-2 asserts the order directly and not through a picture.*
-* **M4-d — pre-`reserve` the 9× worst case at setup.** G4-4 stays green but the scratch's steady-state
-  capacity grows 9× for a world with one nine-sliced node. *Not a red — recorded as the tempting
-  wrong fix, because the scratch is a `Resource` and the growth is permanent.*
+  assertion would survive.* *(margin confirmed 2026-08-21, and it is large, not marginal: at the
+  amended 96×96 destination with 16 px borders a correct corner is 16×16 px and a proportional one is
+  32×32, so four corners move ~3 000 of 9 216 px — far above any 8-bit hash threshold, unlike the ~1-ULP
+  shader edits an 8-bit golden genuinely cannot see.)*
+* **M4-c — ~~swap the image and glyph emission order~~ swap the image and the LAST sub-quad (BR)
+  emission order.** G4-2 reds. *(respecified 2026-08-21: **the original mutation could not be applied
+  at all.** There is no site that emits a glyph and an image into one per-node lane to swap — the
+  canonical gather hard-codes `text_uv: None` (`gather.rs:272`), and `pack.rs:208`'s `debug_assert!`
+  forbids one record being both. What would have been "observed" is that the mutation is unwritable,
+  which is not a red. The swap of image against the last sub-quad is writable, fires the same gate, and
+  tests the same property.)* *Proves the contract is pinned. Note that this mutation is **invisible**
+  to every image gate unless the two quads overlap — which is why G4-2 asserts the order directly and
+  not through a picture.*
+* **M4-d — pre-`reserve` the 11× worst case at setup.** ~~G4-4 stays green but the scratch's
+  steady-state capacity grows 9× for a world with one nine-sliced node. *Not a red — recorded as the
+  tempting wrong fix, because the scratch is a `Resource` and the growth is permanent.*~~
+  **CONFIRMED green-as-written, and therefore UPGRADED to a real red** *(2026-08-21)*: `ui_no_realloc.rs`
+  asserts capacity **stability**, not magnitude — the warm-up check is a LOWER bound (`cap >= N`), the
+  armed window compares against the warmed value, and a setup-time reserve is set once and allocates
+  nothing inside the window, so all three pass. A mutation no gate can see is not a mutation. **G4-4
+  gains an UPPER bound** (`assert!(scratch.pack.capacity() < 2 * emitted)`) — one line — and M4-d becomes
+  a red like the others. *The tempting wrong fix is still worth recording as such: the scratch is a
+  `Resource` and the growth is permanent.*
+* **M4-e — permute which source region a sub-quad samples** *(added 2026-08-21)*: swap the TL and TR
+  sub-quads' source UV sub-rects while leaving their **destination** rects correct. G4-3 reds. *Proves
+  the golden sees **region assignment**, which the original four mutations left entirely uncovered:
+  G4-1 asserts count/consecutiveness/inheritance (blind to UVs), G4-2 asserts record KIND order, G4-4
+  is capacity, G4-5 is the enum's value set. Only the picture can see this, and only if the source
+  breaks symmetry — which is why G4-3 now requires nine distinct cell values.*
+* **M4-f — leave `UI_STAGING_ROWS` at 4096** *(added 2026-08-21)*. G4-6 reds: the box overflows at 187
+  nine-sliced imaged nodes, `debug_assert!` fires in the test build, and in release the frame is
+  silently truncated at the tail with `staging_overflows` bumped. *Proves item 8's constant is
+  load-bearing rather than tidy — and that the gate looks at the box production actually packs into,
+  not at the growable `Vec` the legacy loop uses.*
+
+**Measurement.** *(added 2026-08-21 — S4 carried no measurement paragraph, and §5 assigns leg 10.8(c)
+to "S3–S5". Every other rung states its obligation in the rung; S4 and S5 were the only two without
+one.)* **§10.8 leg (c), next increment.** S3 established that the gather cost is the LIST getting
+longer, not component presence — a probe returning `None` is still a probe — and landed at 5 pack
+inputs + `Children` = **6.00** probes/node/frame. S4's `UiNineSlice` makes it 7 pack inputs' worth:
+**6.00 → 7.00 (+16.7 %)**, paid by every node of every changed frame whether or not it is nine-sliced.
+The instrument exists and already derives its per-node figure from `ui_pack_inputs!(count)`
+(`ui_s0_measure.rs:241-248`), so the leg is a one-line extension. **Report the instrument's own
+resolution with the number** (§5's standing rule). ⚠️ **One trap in that harness, found in the audit:**
+`ui_s0_measure.rs:276` asserts `sys.staged().len() == n` — record count equated with NODE count. It
+holds today only because that scene is rect-only. A leg-(c) scene containing nine-sliced nodes reds it
+**with nothing wrong** — the same false-red shape S3 recorded when `ui_s0_discovery` wrote the
+pack-input list's length down a second time. Convert it to a derived expression in the same edit that
+moves `UI_RECORDS_PER_NODE`.
+
+#### The S4 audit ledger — what the rung claimed, and what the tree said
+
+*(2026-08-21, before any S4 code. Verified by reading the named sites and, where a claim was about
+behaviour rather than text, by compiling and running a probe.)*
+
+| # | The rung's claim | Verdict |
+|---|---|---|
+| 1 | `Tile` works because "UVs run past 1.0 and `REPEAT` wraps" | **REFUTED at source.** `resources.rs:310` is `ClampToEdge` in both `UiSamplerMode` variants and `ui_rect.fs.hlsl:198` samples through it. S3's own comment at `resources.rs:307-309` names S4 as the caller that would want `REPEAT` and denies it the default. `Tile` moves to S5 on a new mechanism (S-D11). |
+| 2 | G4-5 gates S-D7 by constructing `Tile` + `UiSpriteSheet` | **GATE THAT CANNOT FAIL.** `UiSpriteSheet` has zero `.rs` occurrences tree-wide; S5 creates it. Retired with S-D7; G4-5 re-pointed at the enum's value set. |
+| 3 | G4-2 asserts a five-term order on one node's `append` lane | **SUBJECT UNCONSTRUCTIBLE.** Glyphs: `gather.rs:272` hard-codes `text_uv: None`; `pack.rs:208` forbids one record being both glyph and sprite. Focus ring: zero occurrences in `crates/`, and §6 assigns it to Interaction I9. Narrowed to the three terms S4 emits; M4-c respecified. |
+| 4 | The record count is determined | **CONTRADICTION, three readings.** D8d `:620` = replace (9/1); D4 `:250` = add; `ui_s0_seam.rs:245` = "seven more". Ruled ADD by S-D11, with the reason (a nine-slice source is a translucent FRAME; the background is the surface it sits on). `UI_RECORDS_PER_NODE = 11`. |
+| 5 | "S4's nine-slice raises `UI_RECORDS_PER_NODE` and nothing else at that site" | **FALSE, and the same sentence is already in the tree** at `pack.rs:183-184`. The key push is hard-coded to two (`upload.rs:337-343`) and the decode is binary with an `.expect` that **panics in release** for a nine-sliced node without `UiImage` (`upload.rs:367-373` + `pack.rs:205`). Lands item 7. |
+| 6 | G4-4 gates the expansion against reallocation | **WRONG INSTRUMENT, WRONG N, AND SELF-GATING.** It drives `UiRenderScratch` (legacy-only, reached solely via `pack_sort_upload`), at N=4096 not 1024, through a `build_frame` that hand-rolls the emission. Production packs into a fixed 4096-row `Box` that **clamps**, not grows. Re-pointed; G4-6 added; M4-f added. |
+| 7 | S4's Lands list is complete | **`ui_pack_inputs!` was missing.** The macro's own doc says "sprites add the rest at S4–S5"; §6 forbids bypassing it; S5's item 6 wires only its own three. Without it `UiNineSlice` is invisible to gather and discovery both. Lands item 6, gate G4-7. |
+| 8 | M4-a proves an unstable sort over a non-total key is nondeterministic | **REFUTED BY MEASUREMENT.** `sort_unstable_by_key` over true nine-key tie blocks at n = 9…1800 returned byte-identical output on every repeat and across fresh processes (rustc 1.97.1). The mutation fires; its rationale is rewritten — `append` is the SOURCE ADDRESS, so the real failure is duplication and loss. |
+| 9 | M4-d "stays green — not a red" | **CONFIRMED green, and that is the defect.** Upgraded to a red by one upper-bound assert. |
+| 10 | `UiNineSlice { … }` is "20 B, padding spelled" | **HALF TRUE — verified by compiling both spellings**: 20 B / align 4 with and without `_pad`. The two bytes were implicit TAIL padding, which is what the prose forbids. `_pad: [u8; 2]` added. |
+| 11 | "Layout is untouched" | **CONFIRMED, and structurally so** — `boyko_ui` takes no render dependency and never names `UiInstance` or the pack. Not a defect. |
+| 12 | `UI_STAGING_ROWS`'s doc: "2× the plan's own N = 2048 scene" | **ALREADY FALSE AT S3** (2 × 2048 = 4096 = exactly 1×). Corrected and re-derived in Lands item 8. |
 
 ---
 
@@ -874,6 +1144,21 @@ component that does not exist would be measuring nothing.
 5. `ui_sprite_flipbook` — one system over `(UiSpriteAnim, UiSpriteCursor, UiSpriteSheet)` advancing
    `elapsed`, flipping `dir` at the ends for `PingPong`, and writing `index`.
 6. `ui_pack_inputs!` gains the three components that affect the picture.
+7. **`NineSliceMode::Tile`, inherited from S4 by the 2026-08-21 audit ruling (S-D11).** S4 lands the
+   `mode` field with one legal value; S5 widens the value set. What S5 owes, and why it is cheap
+   *here* and was not cheap at S4: the mechanism is `uv = sub_min + frac(t) * (sub_max - sub_min)` on
+   the fragment shader's sprite branch, selected by a new `FLAG_TILED` bit out of the free bits 5..19
+   (S-D2), with the tile count folded into `uv` at pack. That is **the same sub-rect arithmetic items
+   1–2 above already build** for sheet frames, so it is one shader edit at S5 (eDSL leaf, re-emit,
+   re-DXC, two `SpirvBlob<N>` lengths, two manifest rows) instead of two at S4 and S5 — and S4 keeps
+   the "pure CPU rung, no shader change" property that is D8d's whole argument for CPU expansion over
+   Bevy's separate pipeline. **`frac` inside the sub-rect wraps to the sub-rect, which IS a sheet
+   frame**, so `Tile` + `UiSpriteSheet` is the correct picture rather than S-D7's hard error — the
+   guard, the clamp and the diagnostic counter S4 was going to build are not built by anyone.
+   Gates: **G5-7** the tiled golden `ui_nine_slice_tiled` (a tiled edge shows N repeats of the source's
+   edge cell, not one clamped streak — the failure the retired mechanism would have shipped silently),
+   and **G5-8** `Tile` over a sheet frame samples only within that frame's sub-rect (the assertion
+   S-D7 could not make because it forbade the combination instead).
 
 **Uniform grids only (D8c).** Ragged/trimmed sheets and per-frame durations are deferred with their
 shape recorded: a second sub-rect column and an optional run-length `frame_run: u8` column (Unreal's
@@ -896,9 +1181,16 @@ S5 is therefore **not blocked** on the animation plan; it is only less configura
 | **G5-4** | The cursor is dense and does not migrate | Insert/remove `UiSpriteCursor`, assert the entity's archetype id is unchanged (`dense_d2_routing`'s property, re-asserted at this consumer). |
 | **G5-5** | It animates on the GPU | Golden `ui_flipbook_frame3`: a 4×4 procedural grid (S-D5) at a fixed tick count; image hash pinned. |
 | **G5-6** | `frame_count < cols*rows` is honoured | `index >= frame_count` clamps and increments a diagnostic counter (trailing cells are never sampled). |
+| **G5-7** | `Tile` actually tiles | *(inherited from S4, 2026-08-21 — S-D11.)* Golden `ui_nine_slice_tiled`: the same nine-distinct-value 3×3 source as G4-3, at a destination whose edge spans **4 whole tiles**; the edge shows four repeats of the source's edge cell, not one clamped streak. **This is the gate S4 did not have** — its table tested `Stretch` only (G4-3) and the `Tile`+sheet clamp (G4-5), so half of a two-valued field would have landed ungated. |
+| **G5-8** | `Tile` under a sheet stays inside its frame | *(inherited, and it is the assertion S-D7 could not make because it FORBADE the combination.)* A tiled nine-slice on a node carrying `UiSpriteSheet`: every sampled texel lies within that frame's sub-rect — no neighbouring frame contributes. `frac`-in-sub-rect makes this true by construction; the gate is what proves the construction. |
 
 **Red mutations.**
 
+* **M5-e — implement `Tile` as a UV past `[0,1]` instead of `frac` in the sub-rect** *(inherited from
+  S4's retired mechanism, 2026-08-21)*. G5-7 reds with a clamped streak on every edge, and G5-8 reds
+  under a sheet. *Proves S-D11's mechanism is load-bearing and re-runs, as a red, the exact thing S-D7
+  believed was the only option — the UI's sampler is `ClampToEdge` in both modes, so the retired
+  mechanism does not even reach the sheet hazard it was designed around: it fails one step earlier.*
 * **M5-a — merge `UiSpriteAnim` and `UiSpriteCursor` into one component.** G5-3 reds — the change tick
   fires every frame. *This is the mutation that makes D8a a measurement rather than a preference: the
   merged shape destroys `Changed<UiSpriteAnim>` as a signal, and nothing else in the ladder would
@@ -984,6 +1276,11 @@ that was not measurable.
 | **10.7** | The eDSL migration is faithful | `ui_rect_edsl_sync` + `ui_rect_spv_sync` | byte identity of re-emitted HLSL and re-DXC'd `.spv` | S1 |
 | **10.8** | **The gather** — the one cost this campaign adds to every node of every frame | a probe counter in `gather_ui_nodes` **plus** wall-clock over the gather alone, separated from pack+sort | probes/node/frame and gather µs at N ∈ {256, 2048} in four states: **(a)** today's rect-only baseline; **(b)** + `UiVisual`; **(c)** + the sprite components; **(d)** a **static** frame with the D6 compare hoisted — which must be **zero probes** | (a),(d) S0 · (b),(c) S3–S5 |
 
+*(clarified 2026-08-21 at the S4 audit: leg **(c)** is an INCREMENT PER RUNG, not one number at the
+end — S3 landed 5.00 → 6.00, S4 owes 6.00 → 7.00 (`UiNineSlice`), S5 owes 7.00 → 10.00 (its three).
+S4 and S5 were the only rungs in this plan with no measurement paragraph of their own; S4's is now
+written into the rung, and S5 inherits the same obligation.)*
+
 §10.4, §10.5, §10.6 and §10.9 belong to the sibling plans and are not restated here.
 
 **Where a rung reports a number, it reports the instrument's own resolution too.** The particles
@@ -1006,7 +1303,7 @@ there.
 | **S2** | `UiInstance` at 80 B with `uv` and S-D2's bit map. **Bits 5..19 are free; bit 4 is reserved.** | **Animation**: D5 folds the visual transform at pack and costs **zero** GPU bytes, so animation needs none of these bits. If it ever does, it takes bits 5..19 and says so here. |
 | **S3** | `FLAG_TEXTURED`, the bindless slot lane, the UI sampler binding, font-optional boot. | **Aether**: the `ui` construct's `image` / `sheet` vocabulary can only name what S3–S5 built. |
 | **S5** | The `u16 sheet_id` dense-handle mint. | **Aether**: the sheet-id mint is the natural thing for the construct to own at expand time (research §11 item 6). |
-| **S4** | D4's pinned emission order. | **Interaction**: the focus ring is the last quad of the contract, so a focused node's ring is never painted under its own glyphs. |
+| **S4** | D4's pinned emission order — **over the three terms S4 emits (background → nine-slice TL..BR → image), with `UI_RECORDS_PER_NODE = 11` as the sub-record stride** *(amended 2026-08-21: S4 pins what it emits; the contract's last two terms are pinned by their own rungs, because at S4 neither exists — see the S4 audit ledger)*. | **Interaction**: the focus ring is the last quad of the contract, so a focused node's ring is never painted under its own glyphs — **but S4 does not gate that, because `FocusRing` has zero occurrences in `crates/` and I9 is the rung that emits it. Interaction inherits the obligation to extend the `append`-lane order assertion (G4-2's shape) when it lands the ring, and to raise `UI_RECORDS_PER_NODE` for it.** Likewise the glyph term: D4 itself records that glyph order "is decided purely by the order the host appends them", so it is a HOST APPEND DISCIPLINE, not a property of this lane. |
 
 **And what this plan needs from them:**
 
