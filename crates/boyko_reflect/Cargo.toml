@@ -20,5 +20,11 @@ publish = false
 [dependencies]
 boyko-ecs = { path = "../boyko_ecs" }
 
+# D18 governs the SHIP-VISIBLE table above; dev-dependencies enter no consumer's
+# resolved closure. `proptest` is the workspace's dev-only property-test instrument,
+# mandated by CORE C1 gate 2 (full-range per-kind round-trips).
+[dev-dependencies]
+proptest.workspace = true
+
 [lints]
 workspace = true

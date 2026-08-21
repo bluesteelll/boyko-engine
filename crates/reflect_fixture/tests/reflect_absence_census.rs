@@ -19,10 +19,12 @@
 //! `boyko_reflect::install_type_info` (`reflect_linkage()`), and "absent" means
 //! `reflect_never.rs` carries no such linkage.
 //!
-//! # THE MEASURED LINK-CONFIGURATION TABLE (this box, `x86_64-pc-windows-gnu`, 2026-08-21)
+//! # THE MEASURED LINK-CONFIGURATION TABLE (this box, `x86_64-pc-windows-gnu`)
 //!
 //! Filled by running `measure_link_configuration_table` (`--ignored --nocapture`);
-//! pasted into `docs/REFLECTION-PLAN-GATES.md` §G3 as that rung requires:
+//! pasted into `docs/REFLECTION-PLAN-GATES.md` §G3 as that rung requires.
+//!
+//! **At G0 (2026-08-21, the hollow stub — one fn in the crate):**
 //!
 //! | link configuration | L1 A | L2 A | L3 A | L1 B | L3 B |
 //! |---|---|---|---|---|---|
@@ -30,22 +32,52 @@
 //! | `-C link-arg=-Wl,--gc-sections` | 0 | 1 | **0** | 0 | **0** |
 //! | `lto = "fat"`, `codegen-units = 1` | 0 | 1 | **0** | 0 | **0** |
 //!
-//! **L3 reads 0 under fat LTO — and, unlike B.6's `mint_cold`, 0 in every row.** The
-//! plan deliberately did not predict which way this would go; the measurement says: the
-//! census genuinely distinguishes *reachable* from *linked* on this subject, so P-C is
-//! an independent property rather than the resolver's zero wearing the census's name.
+//! **RE-CALIBRATED at CORE C2 (2026-08-21, the real registry surface), as the G0
+//! measured note required:**
+//!
+//! | link configuration | L1 A | L2 A | L3 A | L1 B | L3 B |
+//! |---|---|---|---|---|---|
+//! | default release | 0 | **6** | **0** | 0 | **0** |
+//! | `-C link-arg=-Wl,--gc-sections` | 0 | **6** | **0** | 0 | **0** |
+//! | `lto = "fat"`, `codegen-units = 1` | 0 | **5** | **0** | 0 | **0** |
+//!
+//! The gated cells did not move: **L1 and L3 read 0 in every row, needle B included**,
+//! so the census still distinguishes *reachable* from *linked* and P-C stays an
+//! independent property. What moved is L2's magnitude — the pulled-object rule made
+//! visible: the one referenced symbol (`install_type_info`) pulls its object, which now
+//! carries the `REFLECT` static and three std `OnceLock`/`Once` instantiations whose
+//! v0-mangled names embed `boyko_reflect` as the type parameter's defining crate (the
+//! instantiations-in-a-downstream-CGU class needle A was designed to count; fat LTO
+//! strips the non-LTO rows' extra `__imp_` import thunk for the `REFLECT` data symbol,
+//! 6 → 5). `type_info_of` appears in NO row — `#[inline]`, uncalled by the fixture, so
+//! it has no instantiation to carry. The C2 re-run of G3's first RED (drop fat LTO from
+//! `build()`) left the gate GREEN again: both gated zeros are protected upstream of the
+//! link configuration — L1 by the resolver (the crate is not in the graph), L3 by the
+//! pulled-object rule (nothing references the crate, so no object is pulled) — and L2 is
+//! asserted only `> 0`. B.6's "every cell reads 1" still does not reproduce on this
+//! subject. The leg stays fat-LTO for the reason that now has a date on it: at CORE C7
+//! the derive's expansion starts referencing SOME of the crate's symbols, and per-symbol
+//! decidability inside a pulled object — exactly what the non-LTO rows lack — becomes
+//! the census's whole question.
+//!
+//! **At G0, L3 read 0 under fat LTO — and, unlike B.6's `mint_cold`, 0 in every row**
+//! (confirmed unchanged by the C2 re-calibration above). The plan deliberately did not
+//! predict which way this would go; the measurement says: the census genuinely
+//! distinguishes *reachable* from *linked* on this subject, so P-C is an independent
+//! property rather than the resolver's zero wearing the census's name.
 //! Why this subject decides differently from `mint_cold` (which read 1 without LTO and
 //! `--gc-sections` could not fix it): a PE linker pulls an rlib's object only when some
 //! undefined symbol resolves into it. `profile_fixture` CALLS into `boyko_diag`, so that
 //! object is pulled and every symbol in it — `mint_cold` included — rides along.
 //! `reflect_never` references NOTHING in `boyko_reflect`, so its object is never pulled
 //! at all. The distinction that survives both measurements: **"one referenced symbol
-//! pulls the whole object"** — the moment CORE C2 gives the crate a real surface and any
-//! site references any of it, the non-LTO rows stop being sharp per-symbol instruments,
-//! which is why the gate leg stays fat-LTO even though today's table is flat.
-//! (Verified: L2's single needle-A hit IS needle B's subject —
-//! `_RNvCsd7WGKwjPoHP_13boyko_reflect17install_type_info`, the crate's only fn; v0
-//! mangling encodes the defining crate, so needle A counts it.)
+//! pulls the whole object"** — at C2 the crate gained its real surface and the L2 rows
+//! above show the rule in action; per-symbol sharpness without LTO is what C7's
+//! derive-emission census will need, which is why the gate leg stays fat-LTO.
+//! (Verified at G0: L2's single needle-A hit was needle B's subject —
+//! `_RNvCsd7WGKwjPoHP_13boyko_reflect17install_type_info`, then the crate's only fn; v0
+//! mangling encodes the defining crate, so needle A counts it. At C2 the same symbol
+//! survives at its new module path, `…13boyko_reflect8registry17install_type_info`.)
 //!
 //! And "absent from the image" still does not mean "absent from the build": L3's build
 //! DID resolve, compile and link the crate. That is G1/G2's question and not this

@@ -631,6 +631,44 @@ configuration (`[lints] workspace = true`), per §4's preamble.
 *Second red, for the sign rule:* make `I8`'s extractor zero-extend instead of sign-extend. Gate 2
 reds on negative values only — so the proptest range must include them, and the test name says so.
 
+> **Executed 2026-08-21 (worktree `D:/wt/reflect`, toolchain `stable-x86_64-pc-windows-gnu` 1.97.1).**
+> *Lands:* `crates/boyko_reflect/src/scalar.rs` — `ScalarKind` (12 kinds), the `#[repr(C)]`
+> `Scalar { pub kind, pub bits: u64 }`, `From` constructors per kind, checked extractors
+> (`Option`, D10's shape; a hand-built non-canonical payload is `None`, never a truncated
+> value), and the sign rule written ONCE (`ix_to_bits`/`ix_from_bits` — store side
+> sign-extends to `i64`, read side reinterprets the whole `bits` two's-complement and narrows
+> via `try_from`, which is exactly the shape whose zero-extending typo the second RED
+> observes). `ScalarKind::EntityId` carries the kernel's `EntityId` **index** (a `usize`
+> newtype — the full `Entity {id, generation}` handle is 96 bits of payload and does not fit
+> the cell; it is a later rung's question, not a scalar). Float trips are bit-exact
+> (`to_bits`/`from_bits`), so the gate asserts BITS — value equality would reject NaN wrongly
+> and accept a `-0.0 → 0.0` swap wrongly. `proptest` added as a **dev**-dependency (D18
+> governs the ship-visible table; the workspace's dev-only instrument, `Cargo.toml:52`); the
+> full-range proptests are `#[cfg_attr(miri, ignore = …)]` with the deterministic edge tests
+> (MIN/MAX/NaN/±0/subnormals) carrying the edges under Miri. No `unsafe` anywhere in the rung.
+> *Gate 1:* **measured size 16, align 8**, printed by
+> `tests/c1_scalar.rs::scalar_layout_measured_and_pinned` and pinned at those values by the
+> `const _` in `scalar.rs`. *Gates 2–3:* 19 tests green (`cargo test -p boyko-reflect
+> --test c1_scalar`, exit 0), including the 12×12 off-diagonal-`None` matrix over an
+> exhaustive `sample()` match (a new kind fails to compile until classified).
+> *First RED, two stages as the rung intends ("the pin alone could be 'fixed' by editing the
+> number"):* stage A — `bits: u32` with minimal casts, pin intact → **compile-time red**,
+> `error[E0080]` *"Scalar layout moved off its measured pin (16 bytes, align 8)"*, exit 101;
+> stage B — the adversarial "fix" (pin edited to 8/4) → **13 runtime reds** including the
+> named `u64`/`i64`/`f64` round-trips (`u64_roundtrip_full_range`,
+> `i64_roundtrip_full_range_negatives_included`, `f64_roundtrip_all_bit_patterns_bitwise`),
+> exit 101 — two independent reds, the second surviving the first's defeat. *Second RED:*
+> `as_i8` reading the payload unsigned (`i8::try_from(self.payload(…)?)`, the
+> `ix_from_bits` call dropped) → 3 reds, **all negative-driven**: proptest shrank to
+> **minimal failing input `v = -1`**, the edge test failed at `i8 -128`, and every positive
+> stayed green (16 passed) — the red the test names promise. *Restoration:* byte-identical
+> (sha256 verified against the pre-mutation copy). *Regression:* the G0–G4 battery re-run
+> green and non-vacuous after restoration — G0 census 3, G1 census 7, G2 closure 2, G3
+> absence census 1 (+1 ignored calibration; the three fat-LTO legs rebuilt against the C1
+> surface and all cells held), G4 coverage 6, leg-nonvacuity 1 — plus
+> `cargo test -p boyko-reflect --all-targets` 19 and
+> `cargo clippy -p boyko-reflect --all-targets -- -D warnings` clean, touch-first.
+
 ---
 
 ### C2 — The registry: `REFLECT`, `install_type_info`, `type_info_of`
@@ -672,6 +710,60 @@ prevent, and seeing it is how the rule is believed.
 
 *Second red:* make `install_type_info` use `OnceLock::get_or_init`-style last-writer-wins. Gate 1
 reds.
+
+> **Executed 2026-08-21 (worktree `D:/wt/reflect`, toolchain `stable-x86_64-pc-windows-gnu` 1.97.1).**
+> *Lands:* `crates/boyko_reflect/src/registry.rs` — the `REFLECT` table exactly as sketched
+> (`[OnceLock<&'static TypeInfo>; MAX_COMPONENTS]`, `MAX_COMPONENTS` imported from
+> `boyko_ecs::ecs::core::component::component_registry`), `type_info_of` (`#[inline]`, one
+> acquire-load + branch), and G0's stub REPLACED by the real `install_type_info` — same name,
+> same signature, still a plain `#[inline(never)] pub fn`, so GATES needle B survived (verified
+> in the recalibration below: the symbol persists at its new module path
+> `…13boyko_reflect8registry17install_type_info`, and `reflect_fixture`'s linkage deviation
+> compiles against the new body unchanged, feature on and off). Bounds discipline copied
+> verbatim from `install_bind_accessor` (F6): `debug_assert!` + release guard, first-writer-wins
+> `OnceLock::set`. The placeholder `TypeInfo` stays opaque — C3's subject, not this rung's.
+> *Gate 1 (and the reason the registry gates are UNIT tests):* the `#[non_exhaustive]`
+> placeholder is deliberately unconstructible outside the crate, so only an in-crate test can
+> mint the two distinct `&'static TypeInfo` subjects — and since `TypeInfo` is a ZST with no
+> guaranteed-distinct static addresses, the instrument is a `#[repr(C)] { a: TypeInfo, _pad:
+> u64, b: TypeInfo }` static (offsets 0 and 8 guaranteed) with the distinctness precondition
+> ASSERTED before use. First writer wins observed; second install a silent no-op. *Gate 2:*
+> `cargo test -p boyko-reflect --release --lib` → `running 5` (non-vacuous), both
+> `#[cfg(not(debug_assertions))]` OOB tests green (install at `MAX_COMPONENTS`/`usize::MAX`
+> no-ops; reads `None`); the debug twin `#[should_panic(expected = "exceeds maximum allowed")]`
+> pins the loud half. *Gate 3:* `tests/c2_registry_source_census.rs` — needles `const
+> MAX_COMPONENTS` + array-length `512` + a NON-VACUITY clause (the `use boyko_ecs::…` import
+> must be seen); `#[cfg(not(miri))]` because Miri refuses host file I/O (the `CreateFileW`
+> class measured at GATES G4's fifth RED). *Gate 4:* footprint MEASURED **8192 bytes = 16 per
+> slot × 512**, printed by `footprint_reported_and_pinned`, pinned as `16 * MAX_COMPONENTS` so
+> the pin moves with the kernel. *Gate 5:* `cargo +nightly-x86_64-pc-windows-gnu miri test -p
+> boyko-reflect --all-targets` (MIRIFLAGS `-Zmiri-tree-borrows` from `.cargo/config.toml`) —
+> 4 lib + 8 scalar-edge tests green, proptests carried as reasoned Miri-ignores.
+> *First RED:* the local `const MAX_COMPONENTS: usize = 512;` → gate 3 reds naming
+> `registry.rs:19`, exit 101. *The drift demonstration, with one execution finding:* the plan's
+> "change `boyko_ecs`'s `MAX_COMPONENTS` to `256`" does not rebuild as written — the kernel is
+> SELF-PINNED and three `E0080`s fire first (`size_of::<Archetype>() == 8704` and the two
+> `bit_owners` base-spacing asserts in `filtered_access_set.rs`), so the demo carried the
+> bound-move through as a real one would (bases re-spaced 0/256/512/768, `OWNERSHIP_SLOT_COUNT`
+> 1024, the Archetype pin relaxed for the experiment's duration only). **Leg A (import in
+> place): everything moved with the kernel** — `MAX_COMPONENTS = 256`, footprint 4096, gate 2's
+> release OOB tests probing at the NEW boundary, all green. **Leg B (local const): the 512-slot
+> table over the 256-id space — all four lib tests green, footprint still 8192, NOTHING REDS**
+> except the source census; the drift the rule exists to prevent, seen. All five mutated files
+> restored byte-identically (sha256-verified). *Second RED, one recorded deviation:*
+> `get_or_init`-style is not buildable as last-writer-wins (`get_or_init` IS first-wins, and
+> `OnceLock` has no evict through `&self`), so the mutation that expresses last-writer-wins is
+> the `[AtomicPtr<TypeInfo>; MAX_COMPONENTS]` store/load table — which is exactly D5's
+> forbidden shape, so the mutation doubles as its demonstration. Gate 1 red observed with its
+> named message (*"FIRST WRITER MUST WIN … last-writer-wins semantics, which is not OnceLock's
+> contract and not F6's"*), exit 101. *G3 recalibration (the G0 measured note's standing
+> instruction):* `measure_link_configuration_table --ignored` re-run against the real surface
+> and the table re-pasted at GATES §G3 — gated cells unmoved (L1/L3 = 0 in every row, both
+> needles), L2's magnitude 1 → 6/6/5 (the pulled-object rule visible; fat LTO strips the
+> `__imp_` thunk); the drop-LTO RED re-run **stayed green a second time** (both gated zeros
+> protected upstream of the linker), ledger row extended, next re-run scheduled at C7.
+> *Regression:* the G0–G4 battery + both `boyko-reflect` profiles + clippy touch-first all
+> green after restoration (tails in the rung report).
 
 ---
 

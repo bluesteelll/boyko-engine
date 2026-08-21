@@ -848,6 +848,34 @@ LTO probe. D5.)*
 >   **re-run the calibration (`measure_link_configuration_table`, `--ignored`) at CORE C2
 >   and re-paste this table.**
 
+> **RE-CALIBRATED at CORE C2 (2026-08-21, this box), as the note above required — the
+> stub is now the real registry (`REFLECT` + `install_type_info` + `type_info_of`):**
+>
+> | link configuration | L1 needle A | L2 needle A | L3 needle A | L1 needle B | L3 needle B |
+> |---|---|---|---|---|---|
+> | default release | 0 | **6** | 0 | 0 | 0 |
+> | `-C link-arg=-Wl,--gc-sections` | 0 | **6** | 0 | 0 | 0 |
+> | `lto = "fat"`, `codegen-units = 1` | 0 | **5** | 0 | 0 | 0 |
+>
+> **The gated cells did not move** — L1 and L3 are 0 in every row, both needles — so the
+> census still distinguishes *reachable* from *linked* and P-C stays an independent
+> property. What moved is L2's magnitude, and it is the pulled-object rule made visible:
+> the one referenced symbol (`install_type_info`, at its new module path
+> `…13boyko_reflect8registry17install_type_info`) pulls its object, which carries the
+> `REFLECT` static and three std `OnceLock`/`Once` instantiations whose v0-mangled names
+> embed `boyko_reflect` as the type parameter's defining crate — the
+> instantiations-in-a-downstream-CGU class needle A was designed to count (D5). Fat LTO
+> strips the non-LTO rows' extra `__imp_` import thunk for `REFLECT`, 6 → 5;
+> `type_info_of` appears in **no** row (`#[inline]`, uncalled by the fixture, no
+> instantiation to carry). **The first RED was re-run at C2 and the gate stayed GREEN
+> again** (ledger row updated): both gated zeros are protected upstream of the link
+> configuration — L1 by the resolver, L3 by the pulled-object rule — and L2 is asserted
+> only `> 0`, so B.6's *"every cell reads 1"* still does not reproduce on this subject.
+> The leg stays fat-LTO with the reason now dated: at CORE **C7** the derive's expansion
+> starts referencing *some* of the crate's symbols, and per-symbol decidability inside a
+> pulled object — exactly what the non-LTO rows lack — becomes the census's whole
+> question. Re-run this calibration at C7 with the annotation in place.
+
 **Gate.**
 
 1. L1 needle A **== 0**, L1 needle B **== 0**.
@@ -1379,7 +1407,7 @@ in this table is a prediction.
 | **G2** | `boyko_demo` gains `default = ["reflect"]` | ship clause reds | `ship_closures_contain_no_reflect` FAILED naming `boyko_demo` and printing the offending rows (*"boyko-reflect feature \"default\"" / "boyko-reflect v0.1.0"*). Note: the mutation needs the `reflect = ["dep:boyko-reflect"]` feature definition too, or the manifest does not load (`default` may only name an existing feature) | 2026-08-21 |
 | **G2** | needle spelled `boyko_reflect` (lib name, not package) | positive control reds, ship clauses stay green | exactly that: `positive_control_finds_the_crate` FAILED (*"NOT RESOLVED (closure census inert)"*), `ship_closures_contain_no_reflect` ok — and this shape depends on parsed-name matching: a raw-substring needle would keep finding `boyko_reflect` in the worktree's own path | 2026-08-21 |
 | **G2** | run the harness under `--features reflect-dogfood/reflect` | the invocation guard reds: *"not a ship closure"* | **two halves, per the G2 measured note.** Outer form (`cargo test -p boyko-engine -p reflect-dogfood --features reflect-dogfood/reflect --test reflect_ship_closure`): green, exit 0 — correctly, since the harness's own spawned `cargo tree` is feature-clean by construction and the reported number IS a ship closure (the env form that would have detected the outer selection is unbuildable: `CARGO_ENCODED_ARGS` does not exist, env NO-DIFF, measured). Portable-form RED (route `--features reflect-dogfood/reflect` into `ship_tree`'s argv): the purity guard reds with *"the ship-closure gate was invoked under a feature selection ([\"--features\"]); the number below is not a ship closure"* | 2026-08-21 |
-| **G3** | drop `lto = "fat"` | **all six cells re-read and recorded** | re-read: **unchanged** (L1 0/0, L2 A=1, L3 0/0) and the gate **stayed green** — B.6's *"every cell reads 1"* does NOT reproduce on this subject today, because at G0 the crate has exactly one fn and L1/L3 reference none of it (the pulled-object rule, §G3's measured note); the LTO sensitivity is expected to appear when CORE C2 lands a real surface — re-run this RED and the calibration there | 2026-08-21 |
+| **G3** | drop `lto = "fat"` | **all six cells re-read and recorded** | re-read: **unchanged** (L1 0/0, L2 A=1, L3 0/0) and the gate **stayed green** — B.6's *"every cell reads 1"* does NOT reproduce on this subject today, because at G0 the crate has exactly one fn and L1/L3 reference none of it (the pulled-object rule, §G3's measured note); the LTO sensitivity is expected to appear when CORE C2 lands a real surface — re-run this RED and the calibration there. **C2 re-run (2026-08-21, real registry surface): the gate stayed GREEN a second time** — gated cells L1/L3 still 0/0 in every configuration (the resolver and the pulled-object rule protect them upstream of the linker); the LTO sensitivity appeared where nothing is gated: L2's needle-A magnitude (6 non-LTO vs 5 fat-LTO). Calibration re-pasted at §G3; next re-run scheduled at C7, where the derive's emission makes per-symbol sharpness the question | 2026-08-21 |
 | **G3** | L1 built from `reflect_on` | ship cell fills | two layers, both observed: as a bare bin swap, **gate 5 reds first** (*"L1's artifact reports bin=reflect_on reflect_feature=on linkage=present -- the build did not use the leg this test asked for"*); with gate 5's L1 expectation aligned so the counts are reached, **the ship cell fills**: *"THE SHIP CELL IS NOT ZERO: needle A = 1, needle B = 1"* — the needle names image content, not source text | 2026-08-21 |
 | **G3** | `reflect` key deleted from `reflect_on` | L2 present control reds (census inert) | run in the landed-deviation form (the call to `reflect_linkage()` deleted): *"NOT RESOLVED (census inert): the present control carries NO `boyko_reflect` symbol … (L2 A = 0)"* | 2026-08-21 |
 | **G3** | L3 built from `reflect_off_twin` instead of `reflect_never` | L3's no-opt-in assertion reds — the discriminator caught becoming a duplicate of L2 | the non-collision assertion reds naming the resolved source (*"L3's fixture (…src/bin/reflect_on.rs) contains the reflect opt-in tokens [\"reflect_linkage\", \"boyko_reflect::\"]"*) — note the path: the bin→source mapping goes through the `[[bin]]` table, so the swapped bin name resolves to the twin's SOURCE and cannot dodge the scan | 2026-08-21 |

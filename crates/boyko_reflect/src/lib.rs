@@ -23,38 +23,26 @@
 //! a ship path — the property that defeats feature unification is *"nothing enables it"*,
 //! not *"nobody declares it"*.
 //!
-//! # Contents at G0
+//! # Contents
 //!
-//! Deliberately hollow (GATES G0): one stub that exists to be a census subject three
-//! rungs before the registry does. CORE C2 replaces the stub's body, KEEPING the name and
-//! the signature — the artifact census's needle B is `install_type_info` precisely
-//! because the name survives that replacement (GATES D5).
+//! * [`scalar`] — `Scalar` / `ScalarKind`, the 16-byte POD value cell (CORE C1).
+//! * [`registry`] — the dense `ComponentId`-indexed `REFLECT` table behind
+//!   [`install_type_info`] / [`type_info_of`] (CORE C2). `install_type_info` keeps
+//!   G0's stub name and signature — the artifact census's needle B is that name
+//!   precisely because it survives the replacement (GATES D5).
 
-// Unused until CORE C2 imports `MAX_COMPONENTS` (CORE D5: imported, never redeclared).
-// Anchored at the skeleton rung so the dependency graph this crate is allowed is fixed
-// from the first commit (CORE D18: `boyko_ecs` and `std` only).
-use boyko_ecs as _;
+pub mod registry;
+pub mod scalar;
+
+pub use registry::{install_type_info, type_info_of};
+pub use scalar::{Scalar, ScalarKind};
 
 /// Opaque placeholder for the reflection type descriptor.
 ///
 /// Replaced by CORE C3's real `TypeInfo` (name, layout, kind, `&'static [FieldInfo]`,
-/// accessors). Deliberately not constructible outside this crate: at G0 nothing can
-/// install one, so nothing can observe a half-built registry.
+/// accessors). Deliberately not constructible outside this crate: until C3, nothing
+/// downstream can install one, so nothing can observe a half-built registry — which is
+/// also why the C2 registry gates live in `registry`'s own unit-test module rather
+/// than in `tests/`.
 #[non_exhaustive]
 pub struct TypeInfo;
-
-/// Install `T`'s `TypeInfo` under its dense `ComponentId` index.
-///
-/// **G0 stub — deliberately hollow** (GATES G0): it exists so the ship-absence artifact
-/// census (GATES G3) has a plain-`fn` subject (needle B, GATES D5) three rungs before the
-/// real registry lands. CORE C2 replaces this body with the write-once
-/// `[OnceLock<&'static TypeInfo>; MAX_COMPONENTS]` install (first-writer-wins, bounds
-/// discipline copied from `install_bind_accessor`), keeping this exact name and this
-/// exact signature — `component_id: usize` per the in-tree installer convention
-/// (CORE D6: the derive calls installers as `…::component_id().0`).
-#[inline(never)]
-pub fn install_type_info(component_id: usize, info: &'static TypeInfo) {
-    // Hollow on purpose; see the doc comment. The bindings keep the signature honest
-    // without inventing a body C2 would only delete.
-    let _ = (component_id, info);
-}
