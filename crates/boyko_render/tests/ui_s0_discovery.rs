@@ -178,25 +178,72 @@ fn g0_1_discovery_bumps_exactly_once_per_pack_input_mutation() {
 
     // Each pack input in turn: exactly one bump on the mutation frame, zero on
     // the frame after.
-    fn mutate_pack_input(world: &mut EcsMaster, node: Entity, which: usize) {
+    /// One variant per entry in `ui_pack_inputs!`.
+    ///
+    /// The enum exists so that [`mutate_pack_input`]'s match is **exhaustiveness-checked**.
+    /// It used to take a `usize` and end in `_ =>`, and that catch-all made this test a gate
+    /// that could not fail: a sixth pack input added to `ui_pack_inputs!` and to the driving
+    /// list would arrive here as index 5, fall into `_`, re-insert `UiImage`, bump the
+    /// generation — and the loop would report the new input as covered while never having
+    /// touched it. MEASURED 2026-08-21 by simulating exactly that edit: `running 2 tests`,
+    /// both green, over an input nothing had wired.
+    ///
+    /// The `ALL.len() == ui_pack_inputs!(count)` assertion below cannot see that, because it
+    /// compares list LENGTHS and the hole is in arm COVERAGE. The two checks are complementary
+    /// and both are needed: the assertion catches "added to the macro but not to this test",
+    /// the exhaustive match catches "added to this test's list but never actually driven".
+    #[derive(Clone, Copy)]
+    enum PackInput {
+        ComputedRect,
+        UiBackground,
+        ComputedClip,
+        StackIndex,
+        UiImage,
+    }
+
+    impl PackInput {
+        /// Every pack input this test drives. Adding a variant without extending this array
+        /// reds the count assertion; extending this array without adding a variant does not
+        /// compile.
+        const ALL: [PackInput; 5] = [
+            PackInput::ComputedRect,
+            PackInput::UiBackground,
+            PackInput::ComputedClip,
+            PackInput::StackIndex,
+            PackInput::UiImage,
+        ];
+
+        fn name(self) -> &'static str {
+            match self {
+                PackInput::ComputedRect => "ComputedRect",
+                PackInput::UiBackground => "UiBackground",
+                PackInput::ComputedClip => "ComputedClip",
+                PackInput::StackIndex => "StackIndex",
+                PackInput::UiImage => "UiImage",
+            }
+        }
+    }
+
+    fn mutate_pack_input(world: &mut EcsMaster, node: Entity, which: PackInput) {
         world.run_system(move |mut cmds: Commands| {
+            // NO catch-all arm, deliberately — see [`PackInput`].
             match which {
-                0 => {
+                PackInput::ComputedRect => {
                     cmds.entity(node).insert(ComputedRect { x: 1.0, y: 2.0, w: 20.0, h: 20.0 });
                 }
-                1 => {
+                PackInput::UiBackground => {
                     cmds.entity(node).insert(UiBackground {
                         color: 0xFF00_FF00,
                         ..UiBackground::default()
                     });
                 }
-                2 => {
+                PackInput::ComputedClip => {
                     cmds.entity(node).insert(ComputedClip { x: 1.0, y: 1.0, w: 8.0, h: 8.0 });
                 }
-                3 => {
+                PackInput::StackIndex => {
                     cmds.entity(node).insert(StackIndex(7));
                 }
-                _ => {
+                PackInput::UiImage => {
                     // UI-ADVANCED S3: the fifth pack input. Adding a component to
                     // `ui_pack_inputs!` wires the discovery filter for free — this arm is
                     // what proves the "for free" is real and not a claim.
@@ -216,23 +263,18 @@ fn g0_1_discovery_bumps_exactly_once_per_pack_input_mutation() {
     // "each pack-input mutation" while checking a strict subset — which is exactly what
     // happened when S3 added `UiImage` (the loop kept passing on four of five). The
     // length check makes the omission a red WITH A REASON instead of a silent hole.
-    const NAMES: [&str; 5] = [
-        "ComputedRect",
-        "UiBackground",
-        "ComputedClip",
-        "StackIndex",
-        "UiImage",
-    ];
     assert_eq!(
-        NAMES.len(),
+        PackInput::ALL.len(),
         boyko_render::ui_pack_inputs!(count),
         "this test drives {} pack inputs but `ui_pack_inputs!` declares {} — add the new \
-         one to `mutate_pack_input` and to NAMES, or the discovery gate is untested for it",
-        NAMES.len(),
+         one as a `PackInput` variant, to `PackInput::ALL`, and to `mutate_pack_input`, or \
+         the discovery gate is untested for it",
+        PackInput::ALL.len(),
         boyko_render::ui_pack_inputs!(count)
     );
 
-    for (which, name) in NAMES.iter().enumerate() {
+    for which in PackInput::ALL {
+        let name = which.name();
         let g0 = generation(&world);
         mutate_pack_input(&mut world, node, which);
         schedule.run(&mut world);
