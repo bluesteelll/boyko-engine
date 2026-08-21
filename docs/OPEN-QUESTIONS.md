@@ -2851,3 +2851,37 @@ pseudocode is not the same thing as recording a deviation. **Ruled 2026-08-20: c
 ERRATUM.** The second half — whether a fixture with a `k > 0` edit should exist to exercise the
 `L > 1` regime — stays open: today no shipped scene has one, so the divergence remains unmeasured in
 both directions and the shipped form's soundness rests on the derivation.
+
+---
+
+## The owner channel exists twice, and the copies have diverged (2026-08-21)
+
+**Measured, not suspected.** `git merge-tree --write-tree feat/multi-paradigm-render
+claude/trusting-ramanujan-0f8927` reports five conflicts, and one of them is an **add/add on this
+very file**. Both branches created `docs/OPEN-QUESTIONS.md` independently as "the standing owner
+channel per CLAUDE.md", neither knowing the other had:
+
+* `claude/trusting-ramanujan-0f8927` seeded its copy at `867dd734` with the worktree-clippy
+  decision and the two-dispatcher-lanes observation;
+* this branch grew the copy you are reading now, to 2853 lines.
+
+Neither is a subset of the other. **A reader cannot tell which is current, and finds out only by
+acting on the stale one** — the same failure mode the `docs/ru/` rule exists to prevent, where a
+diverged pair is worse than a missing one.
+
+**Why this is filed rather than fixed.** The merge that would reconcile them is not mechanical.
+Its other four conflicts are `docs/FEATURE_MAP.md`, `docs/SYSTEMS.md`, and — load-bearing —
+`crates/boyko_ecs/src/ecs/core/ecs_master/event_api.rs` and
+`crates/boyko_ecs/src/ecs/core/schedule/schedule.rs`. Both sides edited the same executor: the
+event-lane branch moved completion publication under unwind protection, and this branch moved
+elsewhere in the same functions. Resolving that requires understanding both changes, not choosing
+a side, and it touches the ECS kernel's panic path — the part of the scheduler whose failure mode
+was a **silent hang**, which is the worst-shaped bug this kernel has produced.
+
+**What the owner needs to decide:** whether the event-lane fix reaches this branch by merging
+`claude/trusting-ramanujan-0f8927` directly, or by landing it on `master` first and merging that.
+The kernel conflict is the same either way; the difference is which history carries it.
+
+**Not started because** the main checkout currently holds ~484 lines of live uncommitted work in
+`crates/boyko_rhi_vulkan/src/present/targets.rs` and `device.rs`. A kernel merge wants a clean
+tree and its own worktree.
