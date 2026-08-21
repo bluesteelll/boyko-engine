@@ -14,6 +14,168 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-21 (second pass) — `boyko_reflect`: the four owner calls are FIVE, two of them were the same call, and the largest was on no list
+
+A critique pass over the four plan documents (`REFLECTION-PLAN-CORE/ECS/BOUNDARY/GATES.md`) found
+five blockers. Four were fixed inside the plans without needing you. The fifth is a scope call and it
+is **new**, so the entry below supersedes the previous one **as a list** — the four items it names are
+unchanged and still stand.
+
+**The single list is now `docs/REFLECTION-ANALYSIS.md` **B.13**.** Five rows, each with what the plan
+does *while it waits*, so nothing stalls and nothing is decided behind your back:
+
+| # | Decision | Blocks | Plan's position while it waits |
+|---|---|---|---|
+| **1** | **NEW — may engine crates carry a `reflect` feature?** | rung 0 | proceeds on **yes** |
+| **2** | **MERGED — the by-id `boyko_ecs` seam: FOUR items, ONE call** | ECS EG2 | **blocked**, does not start |
+| **3** | `BindAccessor`: one table or two | CORE C3/C8 | proceeds on Horn 2 |
+| **4** | Aether components reflectable by default or opt-in | the Aether seam | proceeds on opt-in |
+| **5** | Build order within (B): arrays → nested → enums → `String` last | what ships first | taken |
+
+**Row 1 is new and it is the largest, because it decides whether v1 can inspect the engine's own
+components at all.** The design's rule was *"the consumer writes the opt-in"* — but every dogfood
+target the campaign names (`Transform`, `Name`, `Visibility`, `GpuTransform3D`, `EmitterActive`) is
+defined in a **shared engine crate**, so there is no consumer to write it. The opt-in's
+`#[cfg(feature = "reflect")]` is evaluated in the *defining* crate, which means `boyko_scene` and
+`boyko_render` must declare a `reflect` feature — and `boyko_scene` has five workspace dependents, so
+the gate rule as first written (*"only a leaf may declare it"*) reds mechanically the moment
+`Transform` opts in. Nor can the declaration be dodged: the workspace's `unexpected_cfgs` lint turns a
+`cfg(feature = "reflect")` in a crate with no such feature into a warning, and `-D warnings` makes it
+red.
+
+**Yes** ⇒ `boyko_scene` / `boyko_render` gain a **non-default** `reflect` feature plus an optional
+`boyko-reflect` edge, contained by six mechanical clauses instead of the leaf rule (never in a
+`default`; optional edges only; `dep:` spelling; **no dependency edge may enable it**; ship targets
+declare and forward nothing; **every enabling command line is a named CI leg**). This is not novel:
+`hwrt` is already a non-default feature forwarded across three shared shipping crates
+(`boyko_rhi_vulkan` → `boyko_render` → `boyko_app`) and reaches no ship build, because nothing enables
+it. The one thing wrong with `hwrt` is that **no CI leg compiles it at all** — which the sixth clause
+exists to prevent here.
+
+**No** ⇒ v1's dogfood becomes fixture-local *copies* of the engine's shapes, the phrase "real engine
+types" leaves four gates, and the campaign loses the one claim that makes reflection worth building.
+One commit either way; nothing else in the design moves.
+
+**Row 2 was two questions.** The ECS plan routed a three-item structural seam to you and *rejected*
+`EnableTagId::try_from_component_id` (landing a compile-fail fixture asserting it must not exist);
+the BOUNDARY plan called that same constructor *"a required `boyko_ecs` seam"* and filed it as its own
+question. You were about to receive one decision twice with opposite recommendations. It is one call
+over four items — and the ECS plan's substitute turned out to be **wrong**, not merely inferior:
+`register_enable_tag(name)` is idempotent only within the dynamic-tag name table, which *derived*
+`storage = "bitset"` components never enter, so "toggle a bitset component off" would have minted a
+brand-new tag, cleared **its** bit, left the real one set, and reported success.
+
+**Fixed without you, recorded for visibility:** the mandatory Miri obligation was written as
+`-p boyko-reflect --features reflect` in four documents — a command that **fails before compiling
+anything**, because that crate has no such feature (the `cfg` is consumer-side); it is now two rows
+with different shapes, and the row that reaches derive-generated `unsafe` is the fixture's. The ship
+census's third leg — the one that decides whether the census means anything — was specified with a
+fixture that made it a duplicate of its own control, so it would have recorded a **false conclusion
+about the instrument, produced by the instrument**. And the first commit of the campaign was
+specified by two documents that disagreed about its contents, with a completion condition that
+required a rung standing behind itself.
+
+---
+
+## 2026-08-21 — `boyko_reflect`: the scope fork is TAKEN, and re-grounding it opened four owner calls
+
+`docs/REFLECTION-ANALYSIS.md` was a 2026-06-15 snapshot of branch `ecs`. Re-grounding it against
+today's tree (`feat/reflection`) confirmed its central finding untouched — "reflection only in a
+Debug build" is not a compiler property; the mechanism is an optional crate behind a Cargo feature
+plus a CI absence gate — but falsified several of its supporting claims and surfaced work the
+document had no way to scope. **§6's scope fork is recorded as TAKEN: option (B)** (POD + `String` +
+nested + `#[repr(Int)]` enum in v1; collections deferred to v2), with its reason, and marked
+reversible by construction. What follows is what could **not** be decided without the owner.
+
+**1. `BindAccessor`: one table or two? — the largest one, and it is about SHIPPING API surface.**
+
+`#[derive(Bindable)]` / `BIND_ACCESSORS` shipped 2026-06-21 (`8a11f31b`), six days after the
+snapshot, and is ~80 % of the field model the reflection design proposes to invent: a per-
+`ComponentId` `[OnceLock<T>; MAX_COMPONENTS]` table of flat `fn` pointers, by-`u8`-index access, a
+`field_id(name)` resolver, a documented cold-path discipline. It is read-only, flat, numeric-only,
+requires named fields, and it **ships** (in `boyko_ecs`, read by `boyko_ui`, in the release binary).
+
+* **Horn 1 — merge into `TypeInfo`.** One source of truth about a component's fields; `boyko_ui`
+  gets kinds and nesting for free. **Cost:** a *shipping* crate then consumes reflection metadata,
+  which strains the directional rule that keeps "dev-only" honest.
+* **Horn 2 — two parallel tables.** Nothing that ships changes. **Cost:** two descriptions of the
+  same fields, which drift silently on a rename; needs a feature-on consistency test to stay honest.
+
+Neither is obviously right. Horn 2 is the lower-risk default. **Blocks Wave 1.** *(Nuance that makes
+the call cheaper than it looks: there is no production `#[derive(Bindable)]` type yet — all five
+registration sites are tests registering one fixture — so this is a decision about API direction,
+not a migration.)*
+
+**2. A public by-id structural seam on `EcsMaster` — a dev-only feature widening a shipping crate.**
+
+`add_default` / `remove` were specified as "routes through the existing structural insert/remove, so
+they inherit hooks/observers for free." A genuine by-id path now exists and is already driven by the
+public `add_tag` / `remove_tag` — but all five helpers (`merged_archetype_id_dyn`,
+`without_ids_archetype_id`, `migrate_entity_attach_ids`, `migrate_entity_detach_ids`,
+`retag_in_place`) are **`pub(crate)`**, so an external `boyko_reflect` cannot call any of them. The
+seam must therefore be made public, and it lands in `boyko_ecs` — **permanent shipping API surface
+added for a dev-only feature.** It does not breach the directional rule (the signature is pure
+`Entity` + `ComponentId`, as `add_tag` proves), and it is arguably useful on its own merits to scene
+loading and the editor. But it should be a decision, not a Wave-3 discovery. **Blocks Wave 3.**
+
+**3. Are Aether components reflectable by default, or opt-in?**
+
+The design says "the *consumer* writes `#[cfg_attr(feature = "reflect", derive(Reflect))]`". For a
+component declared in an `aether! { component Foo { … } }` block **the consumer never writes the
+struct** — `aether_lang`'s expander emits it, and `ComponentDef` has no attribute-passthrough
+grammar, so there is no syntactic slot. The macro must add it. The change is small and costs
+`aether_lang` no new dependency (the emitted `#[component(reflect)]` is a token resolved downstream —
+the tokens-not-deps rule its own manifest already states). The **question** is the default: opt-in
+matches the rest of the design; default-on matches what a gameplay-authoring DSL usually wants.
+
+Second-order and worth knowing: once Aether emits the opt-in, the reflection design's rule that
+*"the consumer's reflect-enabling feature MUST be named `reflect`"* becomes a requirement Aether
+silently imposes on **every crate containing an `aether!` block**. That belongs in the Aether
+language docs, not in a reflection appendix. **Blocks Wave 2.**
+
+**4. Build order within (B): arrays before `String`.**
+
+(B)'s justification was that v1 could then dogfood `Name(String)`, `Transform`, and
+`#[repr(u8)] enum State`. Two of those three are wrong about today's tree: `Name` carries a `u32`
+(`Name(NameId)`, layout-pinned to 4 bytes; the string lives in a leak-backed setup-only interner),
+and `State<S>` is a **generic Resource**, not an enum component. A whole-tree walk found **zero**
+`#[derive(Component)]` structs with a `String`, `Box<str>`, or `&str` field — the engine's idiom for
+component text is a fixed-capacity inline byte array (`UiName`, `UiTextBuffer`).
+
+So the `String` half of v1 — the half this document spent its **headline CRITICAL** on (the raw
+`drop_in_place` + `ptr::write` dance and its Miri-TB gate) — has no consumer, while
+**fixed-size arrays `[T; N]` are pervasive and appear in neither the v1 taxonomy nor the v2
+exclusion list.** They fall through to `Opaque`, which is a hard error, so the flagship dense
+component (`GpuTransform3D { prev, curr }` over `TrsPacked { [f32;4] × 3 }`) is **un-derivable
+today**. Arrays are strictly easier than `String` (offset + stride + count, all `const`, zero alloc,
+no drop, no TB exposure).
+
+**(B) stays taken.** The recommendation is only that Wave 2 build nested + enums + arrays first and
+`String` last. This changes what the first inspector can show, so it is a scope call. *(The enum
+half, by contrast, has eleven in-tree consumers — `Visibility`, `Interaction`, `FocusPolicy` are
+themselves components, and eight more `#[repr(u8)]` enums are component fields — so it is
+load-bearing, not speculative.)* **Blocks Wave 2.**
+
+**Not asked, decided with evidence, recorded for visibility:** enumeration must take three sources
+rather than the archetype signature alone (both `Bitset` and `Dense` are excluded from every
+signature, so the design as written would refuse to *show* `GpuTransform3D` — the one component it is
+fully able to *read*); the refusal matrix needs all four storage citizens plus GPU residency and
+runtime-minted dynamic tags, not just "bitset + ZST"; and three CI-shaped items that would otherwise
+have produced gates that cannot fail — the symbol-absence gate is inert without fat LTO (measured
+in-tree, `--gc-sections` does nothing), CI's Miri is a hand-listed **allowlist** that would not cover
+a new `boyko_reflect` package, and a bare root `cargo build` now selects every crate, so feature
+unification needs no `--workspace` flag to reach the ship crate.
+
+**One incidental `boyko_ecs` finding**, surfaced because reflection is the code that would hit it:
+`EcsMaster::has_component(e, id)` **silently returns `false` for every bitset enable tag.** It
+branches on `Dense` but has no `Bitset` branch, so a bitset id falls through to the archetype column
+lookup, finds a null column (a bitset tag has no column by construction), and reports absent for a
+tag the entity demonstrably has enabled. Wrong answer rather than a refusal. Not fixed here — it is
+a kernel question, not a reflection one.
+
+
+---
+
 ## 2026-08-20 — Gate #17: two findings about the INSTRUMENT, one fixed in this commit and one still open
 
 Measuring the particle passes (213 legs over four sessions) produced two facts about the measuring
