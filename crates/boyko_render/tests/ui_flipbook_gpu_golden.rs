@@ -77,6 +77,7 @@ use boyko_ui::components::{
     ComputedRect, SpriteAnimMode, StackIndex, UiBackground, UiImage, UiRoot, UiSpriteAnim,
     UiSpriteCursor, UiSpriteSheet,
 };
+use boyko_ui::animation::{ui_clock_tick, UiClock};
 use boyko_ui::sprite::{ui_sprite_flipbook, UiSheet, UiSheetTable};
 
 use common::{assert_ui_golden_image_pin, assert_validation_clean, boot_or_skip};
@@ -255,11 +256,18 @@ struct CursorBundle {
     c: UiSpriteCursor,
 }
 
+/// The flipbook AHEAD of discovery, and `ui_clock_tick` ahead of the flipbook
+/// (A0b). The clock resource is inserted here for the same reason as in
+/// `ui_s5_sprite_sheet.rs`: the flipbook takes `Res<UiClock>` since A0b. The two
+/// blessed hashes below are unchanged by this — `dt_virtual` is the arithmetic
+/// the system already performed inline.
 fn flipbook_schedule(world: &mut EcsMaster) -> Schedule {
+    world.insert_resource(UiClock::default());
     let pool = ThreadPoolBuilder::new().num_threads(2).build();
     let mut b = ScheduleBuilder::new(pool);
     let discovery = b.add_system(ui_render_discovery).key();
-    b.add_system(ui_sprite_flipbook).before(discovery);
+    let tick = b.add_system(ui_clock_tick).key();
+    b.add_system(ui_sprite_flipbook).before(discovery).after(tick);
     b.build(world)
 }
 

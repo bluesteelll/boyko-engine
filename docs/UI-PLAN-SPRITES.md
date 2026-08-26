@@ -1256,9 +1256,9 @@ handle inside a scheduled `Query`-bearing system: the only world-shaped read sur
 minted solely from a `DispatcherToken`'s `&self` and `!Send`/`!Sync`, and a `&mut EcsMaster`
 parameter would force `ui_sprite_flipbook` to be an EXCLUSIVE system. The in-tree spelling — and the
 shape of the thing that replaces it (`Res<UiClock>`, AD1) — is a `SystemParam`. **The seam is
-`Res<Time>` today and `Res<UiClock>` after the animation plan lands**, one parameter swapped and one
-clamp deleted; the plan stops promising a function signature that neither the fallback nor the
-replacement has.
+`Res<Time>` today and `Res<UiClock>`'s `dt_virtual` after the animation plan lands**, one parameter
+swapped and one clamp deleted; the plan stops promising a function signature that neither the
+fallback nor the replacement has. *(2026-08-26, `UI-PLAN-ANIMATION.md` **AD9 (1)/(2)** at the A0 pre-build audit — **the field is `dt_virtual`.** Neither document named one, and the animation plan's own AD1 called `dt_real` "the default": taking it reds two legs of this rung's SHIPPED `g5_2_the_clock_fallback_is_clamped_scaled_and_pause_aware` — a paused game animates, and `set_relative_speed(0.5)` stops halving. `dt_virtual` is `time.delta_secs().min(max_delta)`, i.e. `ui_sprite_flipbook`'s pre-A0b inline `min` *(DELETED by A0b; deliberately unanchored — a coordinate into deleted state resolves to whatever live line now occupies it)*'s arithmetic verbatim, so "one parameter swapped, one clamp deleted" is true of that field and of no other. The swap itself is owned by animation rung **A0b** — it belonged to no rung in either ladder until then.)*
 
 ### S-D18 — the S5 gate table: what each device row samples, and where the clamp counter lives
 
@@ -2939,7 +2939,8 @@ frame nothing, because the D6a gate still returns before one component is probed
    cannot instead be `Changed<UiSpriteCursor>`, because a dense `Changed<C>` inside `Or<..>` was
    MEASURED to never fire on this tree — see S-D16 (1)'s table. `set_if_neq` rather than a plain
    deref so a 12 fps flipbook does not bump the generation on the four frames in five where the index
-   is unchanged.)*. The clock is `Res<Time>` plus S5's own clamp until `UiClock` lands — S-D17.
+   is unchanged.)*. The clock is `Res<Time>` plus S5's own clamp until `UiClock` lands — S-D17, and
+   the field it lands on is `dt_virtual` (`UI-PLAN-ANIMATION.md` AD9), swapped by that plan's rung A0b.
 6. ~~`ui_pack_inputs!` gains the three components that affect the picture.~~ **`ui_pack_inputs!`
    gains exactly ONE component — `UiSpriteSheet`.** *(corrected 2026-08-21 — S-D16 (2)(3): only one
    of the three affects the picture. The pack never reads `UiSpriteAnim` (author configuration) and,
@@ -3019,7 +3020,7 @@ sentence — an alt-tab stall that skips whole cycles AND a paused game that kee
 tighter clamp still applies on top of it. G5-2's clock test asserts all three properties, because a
 remedy that covers one of two named defects and is silent about the other is the shape this campaign
 keeps finding.)* — and the replacement is one parameter swapped for
-`Res<UiClock>` and one clamp deleted.** *(both halves corrected 2026-08-21 — **S-D17**. The struck
+`Res<UiClock>`'s **`dt_virtual`** and one clamp deleted.** *(2026-08-26, `UI-PLAN-ANIMATION.md` **AD9 (1)/(2)** at the A0 pre-build audit — **the field is `dt_virtual`.** Neither document named one, and the animation plan's own AD1 called `dt_real` "the default": taking it reds two legs of this rung's SHIPPED `g5_2_the_clock_fallback_is_clamped_scaled_and_pause_aware` — a paused game animates, and `set_relative_speed(0.5)` stops halving. `dt_virtual` is `time.delta_secs().min(max_delta)`, i.e. `ui_sprite_flipbook`'s pre-A0b inline `min` *(DELETED by A0b; deliberately unanchored — a coordinate into deleted state resolves to whatever live line now occupies it)*'s arithmetic verbatim, so "one parameter swapped, one clamp deleted" is true of that field and of no other. The swap itself is owned by animation rung **A0b** — it belonged to no rung in either ladder until then.)* *(both halves corrected 2026-08-21 — **S-D17**. The struck
 value is the option `UI-PLAN-ANIMATION.md` AD1 REJECTS by name, for this consumer by name: `Time`'s
 `DEFAULT_MAX_DELTA` clamps the virtual delta only — `time.rs:197` assigns `real_delta = raw` BEFORE
 the clamp at `:201`, and `real_delta()` is documented "unclamped, unscaled, pause-blind" — so an
@@ -3579,7 +3580,7 @@ there.
 | Needed | From | Blocks | Fallback if it is late |
 |---|---|---|---|
 | **D7's registration table** | ~~`UI-PLAN-AETHER.md`~~ **unowned — S-D20 (7)** | ~~**S6 only**~~ **NOTHING — S6 LANDED 2026-08-26 on the fallback** | S6 lands with ~~fifteen~~ **about thirty** hand-written landings (S-D20 (6)); S0–S5 are unaffected. **Taken: 27 landings (9 × 3) plus 4 new leaf parsers plus 6 comparator rows.** D7 is still unowned and now blocks nothing in this plan |
-| **The UI clock (D15)** | `UI-PLAN-ANIMATION.md` | nothing | ~~S5 reads `Time`'s real delta through a one-function seam the animation plan later replaces~~ **S5 takes `Res<Time>` and applies AM6's clamp itself at the one site (`UI_FALLBACK_MAX_DELTA = 0.1`, AD1's own number); the replacement swaps the parameter for `Res<UiClock>` and deletes the clamp** *(corrected 2026-08-21 — **S-D17**: the struck fallback is the option AD1 rejects by name and for this consumer by name, and `Time`'s clamp provably does not reach the real delta. The animation plan's exposure table lists `UiClock` as consumed by this flipbook and records no fallback, so the dependency was declared satisfied on one side and waived on the other.)* |
+| **The UI clock (D15)** | `UI-PLAN-ANIMATION.md` | nothing | ~~S5 reads `Time`'s real delta through a one-function seam the animation plan later replaces~~ **S5 takes `Res<Time>` and applies AM6's clamp itself at the one site (`UI_FALLBACK_MAX_DELTA = 0.1`, AD1's own number); the replacement swaps the parameter for `Res<UiClock>` and reads **`dt_virtual`** (`UI-PLAN-ANIMATION.md` AD9, 2026-08-26 — the field was unnamed on both sides, and the documented default `dt_real` would have reversed this rung's pause and scale semantics), deletes the clamp, and is owned by animation rung **A0b**, which is where it was finally sequenced** *(corrected 2026-08-21 — **S-D17**: the struck fallback is the option AD1 rejects by name and for this consumer by name, and `Time`'s clamp provably does not reach the real delta. The animation plan's exposure table lists `UiClock` as consumed by this flipbook and records no fallback, so the dependency was declared satisfied on one side and waived on the other.)* |
 | **`UiVisual`** in `ui_pack_inputs!` | `UI-PLAN-ANIMATION.md` | nothing | S0's macro is already shaped to take it; §10.8 leg (b) simply does not run until it exists |
 | **The `paint_seq` agreement** | `UI-PLAN-INTERACTION.md` | G0-4 | G0-4 asserts the gather's pre-order against `collect_candidates` as it exists **today**; if the interaction plan changes that traversal, G0-4 is its gate too |
 

@@ -436,7 +436,7 @@ land before the sprite plan's D30 eDSL migration, per R1.
 instance's presence. `:focus-visible` is one bool on `UiInputFocus`, not a component and not a flag
 bit.
 
-### ID12 — momentum is UIKit's frame-rate-independent form, on `Time`'s real delta
+### ID12 — momentum is UIKit's frame-rate-independent form, on ~~`Time`'s real delta~~ **`Time`'s VIRTUAL delta**
 
 `ScrollMomentum { vel: [f32; 2] }` **added** on fling release, **removed** below `STOP_EPS`, so the
 integrate system's query is **empty** when nothing is coasting.
@@ -452,9 +452,20 @@ if v.length() < STOP_EPS { remove ScrollMomentum; }
 
 **Clock:** `Time::delta_secs()` — already `min(raw, max_delta)`-clamped, speed-scaled and pause-aware
 (`time/time.rs:63-75`, `:193-207`). A fling therefore pauses with the game and slows in slow motion,
-for free, and needs no subsystem clock. This is the animation plan's D15 default (real delta,
+for free, and needs no subsystem clock. ~~This is the animation plan's D15 default (real delta,
 virtual opt-in per row) applied here; if that plan makes the UI clock virtual-by-default, momentum
-follows it rather than keeping a second answer.
+follows it rather than keeping a second answer.~~
+
+*(2026-08-26 — **the heading contradicted its own body, and the question it asked is now answered.**
+`Time::delta_secs()` is the VIRTUAL delta; `real_delta()` is the other accessor, documented
+"unclamped, unscaled, pause-blind" (`time/time.rs:79-83`). So this decision has always chosen virtual
+while its heading said real, and the body then described that choice as "D15's default applied here",
+which it is not. **The answer:** `UI-PLAN-ANIMATION.md` **AM7 / AD9** rule that D15's real default is
+a rule of the TWEEN lane — the only lane with the per-row `flags` bit D15's own opt-in is spelled in
+— and that every consumer without that bit reads `dt_virtual`. Momentum has no `flags` bit, so it
+reads `dt_virtual`, which is exactly `Time::delta_secs()` clamped again at 100 ms. **This decision's
+choice stands unchanged; only its heading and its justification were wrong.** The same rule covers
+I10's dwell clock (`:967`), which chose `Time::delta_secs()` for the same reason.)*
 
 ---
 
@@ -476,7 +487,7 @@ Named explicitly, in both directions, because the Aether plan depends on what th
 |---|---|---|
 | **`UiVisual` + `TweenTint` + the D14 transition trigger** | I10's tooltip fade and the hover/press *visual* response are animations. This plan ships the **timing and state** half only — `HoverDwell` presence/removal, `DragActive` presence, `Interaction` edges — and never defines `UiVisual`. | The visible half of I10. `HoverDwell`'s timer and its gates land without it. |
 | **G-STANDING-1 (owed by this plan to that one)** | D14 keys on `Changed<Interaction>`. Every rung here that touches `write_interactions` must keep the set-if-changed discipline or the transition trigger fires on still frames. | Nothing, if honoured. Everything, if not. |
-| **The clock default (D15)** | ID12's momentum uses `Time::delta_secs()`. If the animation plan makes the UI clock virtual-by-default, momentum follows that one answer. | Nothing — a one-line follow. |
+| **The clock default (D15)** | ~~ID12's momentum uses `Time::delta_secs()`. If the animation plan makes the UI clock virtual-by-default, momentum follows that one answer.~~ **ANSWERED 2026-08-26 — `UI-PLAN-ANIMATION.md` AM7/AD9: a consumer with no per-row `flags` bit reads `UiClock::dt_virtual`. Momentum and the dwell timer have none, so both read `dt_virtual`, which is `Time::delta_secs()` re-clamped at the UI's 100 ms — the value ID12 and I10's dwell rule (`:967`) already chose. No follow-up edit is owed beyond ID12's struck heading.** | Nothing. |
 
 ### On [`UI-PLAN-AETHER.md`](UI-PLAN-AETHER.md) — and what it depends on here
 

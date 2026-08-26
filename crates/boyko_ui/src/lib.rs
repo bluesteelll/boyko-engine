@@ -31,6 +31,7 @@
 //! shaped run; an `Auto` leaf hugs the measured size).
 
 pub mod anchor;
+pub mod animation;
 pub mod binding;
 pub mod bundles;
 pub mod components;
@@ -79,6 +80,7 @@ pub mod prelude {
         UiTextBuffer, UiValue, NO_FIELD,
     };
     pub use crate::anchor::{resolve_anchor_origin, AnchorOrigin};
+    pub use crate::animation::{ui_clock_tick, UiAnimationPlugin, UiAnimationSet, UiClock};
     pub use crate::bundles::{
         BarBundle, ButtonBundle, GridBundle, ImageBundle, LabelBundle, PanelBundle, UiNodeBundle,
     };

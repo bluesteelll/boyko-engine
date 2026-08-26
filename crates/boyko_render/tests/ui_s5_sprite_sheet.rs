@@ -57,6 +57,7 @@ use boyko_ui::components::{
     ComputedRect, NineSliceMode, SpriteAnimMode, StackIndex, UiBackground, UiImage, UiRoot,
     UiSpriteAnim, UiSpriteCursor, UiSpriteSheet,
 };
+use boyko_ui::animation::{ui_clock_tick, UiClock};
 use boyko_ui::sprite::{ui_sprite_flipbook, SheetId, UiSheet, UiSheetTable};
 
 // ───────────────────────── the authored sheet ──────────────────────────────
@@ -136,12 +137,21 @@ const TINT_OPAQUE_WHITE: u32 = 0xFF_FF_FF_FF;
 
 // ───────────────────────── shared plumbing ─────────────────────────────────
 
-/// A schedule with the flipbook ORDERED AHEAD of discovery (module doc).
+/// A schedule with the flipbook ORDERED AHEAD of discovery (module doc), and
+/// `ui_clock_tick` ordered ahead of the flipbook (A0b).
+///
+/// The clock resource is inserted HERE rather than in each world builder: since
+/// A0b `ui_sprite_flipbook` takes `Res<UiClock>`, so every world that registers
+/// it needs one, and a missing resource panics at `get_param`. Nothing else in
+/// this file reads the clock, and G5-2 is unedited — the migration's whole claim
+/// is that its three legs stay green with only the harness changed.
 fn flipbook_schedule(world: &mut EcsMaster) -> Schedule {
+    world.insert_resource(UiClock::default());
     let pool = ThreadPoolBuilder::new().num_threads(2).build();
     let mut b = ScheduleBuilder::new(pool);
     let discovery = b.add_system(ui_render_discovery).key();
-    b.add_system(ui_sprite_flipbook).before(discovery);
+    let clock = b.add_system(ui_clock_tick).key();
+    b.add_system(ui_sprite_flipbook).before(discovery).after(clock);
     b.build(world)
 }
 
@@ -604,10 +614,12 @@ fn g5_3_the_churn_split_is_real() {
     let (mut world, node) = flipbook_world(0, 3, SpriteAnimMode::Forward, 0, FPS);
     world.insert_resource(ChangedCensus::default());
 
+    world.insert_resource(UiClock::default());
     let pool = ThreadPoolBuilder::new().num_threads(2).build();
     let mut b = ScheduleBuilder::new(pool);
     let discovery = b.add_system(ui_render_discovery).key();
-    let flip = b.add_system(ui_sprite_flipbook).before(discovery).key();
+    let clock = b.add_system(ui_clock_tick).key();
+    let flip = b.add_system(ui_sprite_flipbook).before(discovery).after(clock).key();
     b.add_system(count_anim_changed).after(flip);
     b.add_system(count_sheet_changed).after(flip);
     let mut schedule = b.build(&mut world);

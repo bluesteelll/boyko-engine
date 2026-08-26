@@ -14,6 +14,66 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-26 — VALUES: **the UI hitch clamp is 100 ms, it was never measured, and it SHIPPED before the question was ever asked**
+
+**Status: OPEN — a VALUES call. Blocks nothing, because the number is already load-bearing in
+shipped, gated code.** Found at the `UI-PLAN-ANIMATION.md` A0 pre-build audit.
+
+### The situation
+
+`UI-PLAN-ANIMATION.md` §7 has carried this as its question 1 since 2026-08-21, and that section's
+own heading promises its questions are *"also to be filed in `docs/OPEN-QUESTIONS.md`"*. **This one
+never was.** In the meantime the sprites ladder's S5 rung landed the value:
+
+```rust
+pub const UI_FALLBACK_MAX_DELTA: f32 = 0.1;   // crates/boyko_ui/src/sprite.rs:297
+```
+
+It is `pub` inside `pub mod sprite` (`lib.rs:44`), i.e. **public API**. It was applied INLINE inside
+`ui_sprite_flipbook` until animation rung **A0b** (landed 2026-08-26) moved that system onto
+`Res<UiClock>` and DELETED the inline `min` *(no line anchor for it: a coordinate into deleted
+state resolves to whatever live line now occupies it)*; since then the clamp is taken once per
+frame by `ui_clock_tick`
+(`crates/boyko_ui/src/animation.rs`) and this const has exactly one reader, `UiClock::default()`.
+One leg of a shipped gate asserts its effect
+(`g5_2_the_clock_fallback_is_clamped_scaled_and_pause_aware` (a), `ui_s5_sprite_sheet.rs:534`: a
+two-second alt-tab stall advances the flipbook ONE frame, not twenty). So a VALUES question was
+answered by landing it — the shape this file exists to prevent.
+
+### What the number decides
+
+It is a **UI-local** clamp applied on top of the kernel's own `Time::max_delta` (250 ms,
+`time/time.rs:23`), and it is what a user sees after a stall: below it, a transition that was running
+when the game hitched resumes mid-flight; above it, the transition jumps to its end, which reads as a
+glitch rather than as an animation. 100 ms is the plan's proposal *"because it is below the shortest
+hitch a user perceives as a stall and above any frame time a shipping build targets"* — the plan says
+outright that this is not measured, and no instrument in the tree measures perception.
+
+### The options
+
+1. **Accept 100 ms.** The value ships today; nothing changes.
+2. **Name another number.** It is **one** line: `UI-PLAN-ANIMATION.md` AD9 (3) makes
+   `UiClock::default()` *reference* this const rather than restate `0.1`, so the flipbook and the
+   tweens cannot come to disagree about what a hitch is.
+3. **Make it per-app rather than a constant.** A0 **landed** a validated
+   `UiClock::set_max_delta(f32)` (mirroring `Time::set_max_delta`, `time/time.rs:155-160`; panics on
+   non-finite or non-positive input, gated by four unit legs in `boyko_ui::animation::tests`), so a
+   host can already override it TODAY; the question is only what the DEFAULT is.
+   *(2026-08-26 — **"already TODAY" was itself ungated until the A0 verification.** The setter
+   worked, but `UiAnimationPlugin` inserts `UiClock` only if the world has none, and nothing tested
+   that: MEASURED, replacing that guard with an unconditional `insert_resource` left the rung's
+   whole gate at 7/7 while silently restoring the 0.1 default over any host value. A host that set
+   its clamp BEFORE `add_plugin` — the exact shape this option describes — would have lost it.
+   `a_host_configured_clock_survives_the_plugin` (`crates/boyko_ui/tests/ui_a0_clock.rs`) now runs
+   that shape and reads the host's clamp back out of a truncated 2 s hitch, so the override is
+   behavioural, not merely a field that retained a number.)*
+
+### What it blocks
+
+Nothing. Recorded because a VALUES call that was promised to the owner, never delivered, and then
+settled by an implementation is worse than an open question — the owner cannot weigh in on a decision
+he was never shown.
+
 ## 2026-08-26 — SCOPE: **the doc-anchor gate covers four documents; the five UI campaign plans are not among them, and 96 of their 143 anchors are STALE**
 
 **Status: OPEN — a SCOPE call. Blocks nothing; it is what makes every other measurement in those

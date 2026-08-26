@@ -42,14 +42,19 @@
 //! the wrong order pins a stale picture. The order is the host's responsibility
 //! (this module ships the system, not an App schedule), exactly as it is for the
 //! layout pair and the text measure system.
+//!
+//! Since rung A0b the flipbook also needs
+//! [`ui_clock_tick`](crate::animation::ui_clock_tick) ahead of it, for the same
+//! reason and with the same remedy: the clock is written once per frame and read
+//! here, so a tick ordered after this system hands it the PREVIOUS frame's delta.
 
 use boyko_ecs::ecs::core::component::hooks::deferred_master::DeferredEcsMaster;
 use boyko_ecs::ecs::core::component::hooks::HookContext;
 use boyko_ecs::ecs::core::iters::query::{Mut, Query};
 use boyko_ecs::ecs::core::system::Res;
-use boyko_ecs::ecs::core::time::time::Time;
 use boyko_macros::{Bundle, Resource};
 
+use crate::animation::UiClock;
 use crate::components::{SpriteAnimMode, UiSpriteAnim, UiSpriteCursor, UiSpriteSheet};
 
 /// A one-field `#[derive(Bundle)]` wrapper carrying the DENSE
@@ -272,14 +277,23 @@ impl UiSheetTable {
     }
 }
 
-/// The UI's fallback frame-delta clamp, in seconds — `UI-PLAN-ANIMATION.md`
-/// AD1's own default, spelled at the one site that applies it.
+/// The UI's frame-delta hitch clamp, in seconds — `UI-PLAN-ANIMATION.md` AD1's
+/// default, and **the crate's only definition of it** (AD9 (3)).
 ///
-/// S5 consumes whatever time source the animation plan exposes; until `UiClock`
-/// lands it takes `Res<Time>` and applies AD1's clamp ITSELF, so the later
-/// replacement is one parameter swapped and one `min` deleted rather than a
-/// behaviour change. Without the clamp an alt-tab stall hands the flipbook a
-/// multi-second delta that skips whole cycles and jumps `Once` to its end.
+/// Without the clamp an alt-tab stall hands a UI consumer a multi-second delta
+/// that skips whole cycles and jumps `Once` to its end.
+///
+/// # Its one reader is now [`UiClock::default`], not this module
+///
+/// S5 landed this const and applied it inline here, because the animation plan's
+/// clock did not exist yet. Rung A0 landed
+/// [`UiClock`], whose `Default` **references** this
+/// const rather than restating `0.1`, and A0b moved
+/// [`ui_sprite_flipbook`] onto that clock — so the clamp is applied once per
+/// frame for every consumer instead of once per consumer. The name and the site
+/// stayed put deliberately: no public symbol moves in the same rung that changes
+/// a system's signature. Whichever rung deletes the last reader moves the
+/// definition onto `UiClock` and drops this const.
 pub const UI_FALLBACK_MAX_DELTA: f32 = 0.1;
 
 /// Advances every animated sprite by one frame's delta (S5 item 5).
@@ -289,25 +303,33 @@ pub const UI_FALLBACK_MAX_DELTA: f32 = 0.1;
 /// [`UiSpriteSheet::index`](UiSpriteSheet) through `Mut::set_if_neq` — see the
 /// module doc for why each of those three is the component it is.
 ///
-/// # The clock
+/// # The clock (A0b — `UI-PLAN-ANIMATION.md` AD9 (1), (2))
 ///
-/// `Res<Time>` plus [`UI_FALLBACK_MAX_DELTA`], and the delta is the VIRTUAL one
-/// (`Time::delta_secs`), not the real one. `real_delta()` is documented
-/// "unclamped, unscaled, pause-blind" — three defects, and a `min` fixes only the
-/// first: a paused game would keep animating and `set_relative_speed` would do
-/// nothing. `delta_secs()` is already clamped, scaled and pause-aware, and AD1's
-/// tighter clamp still applies on top. (The plan named `real_delta().min(..)`;
-/// that spelling fixes the stall it cites and leaves the pause it cites in the
-/// same sentence. Recorded in the S5 landing ledger.)
+/// [`UiClock::dt_virtual`](crate::animation::UiClock::dt_virtual), which is the
+/// CLAMPED VIRTUAL delta — the same arithmetic, from the same source, against
+/// the same clamp value this system spelled inline before A0b, so the migration
+/// is behaviour-preserving and `g5_2_the_clock_fallback_is_clamped_scaled_and_pause_aware`
+/// re-runs unedited.
+///
+/// `dt_real` is AD9's default only for a lane carrying D15's per-row `flags`
+/// bit, and the flipbook has no such bit: it has no endpoint to be robbed of by
+/// a pause, so the real delta's "unclamped, unscaled, pause-blind" would make a
+/// paused game keep animating and `set_relative_speed` do nothing — the two
+/// defects S5 measured and AD9 ruled on. Register
+/// [`ui_clock_tick`](crate::animation::ui_clock_tick) ahead of this system (or
+/// add [`UiAnimationPlugin`](crate::animation::UiAnimationPlugin) and order this
+/// system `.after_set(UiAnimationSet)`); a world with no
+/// [`UiClock`] panics loudly at `get_param` rather
+/// than animating on a stale zero.
 pub fn ui_sprite_flipbook(
-    time: Res<Time>,
+    clock: Res<UiClock>,
     mut sprites: Query<(&UiSpriteAnim, Mut<UiSpriteCursor>, Mut<UiSpriteSheet>)>,
 ) {
-    let dt = time.delta_secs().min(UI_FALLBACK_MAX_DELTA);
-    // A plain `<=` rather than the NaN-safe `!(dt > 0.0)`: `delta_secs` is derived from a
-    // `Duration` and is therefore always finite and non-negative, and `f32::min` against a
-    // finite literal cannot introduce a NaN. (The pack's own degenerate guards DO need the
-    // negated form, because their inputs are author-written floats — see
+    let dt = clock.dt_virtual();
+    // A plain `<=` rather than the NaN-safe `!(dt > 0.0)`: `dt_virtual` is derived from a
+    // `Duration` and `min`-ed against a finite, positive, setter-validated clamp, so it is
+    // always finite and non-negative and cannot be a NaN. (The pack's own degenerate guards
+    // DO need the negated form, because their inputs are author-written floats — see
     // `ui_nine_slice_tiles_axis`.)
     if dt <= 0.0 {
         // A paused clock (or the very first frame) advances nothing — and does

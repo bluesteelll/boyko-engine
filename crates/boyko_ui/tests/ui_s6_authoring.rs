@@ -54,6 +54,7 @@ use boyko_ui::components::{
     NineSliceMode, SpriteAnimMode, UiNineSlice, UiSpriteAnim, UiSpriteCursor, UiSpriteSheet,
 };
 use boyko_ui::reload::tree_view::UiTreeView;
+use boyko_ui::animation::{ui_clock_tick, UiClock};
 use boyko_ui::sprite::ui_sprite_flipbook;
 use boyko_ui::text::{parse_ui, serialize_ui, spawn_ui_tree, UiParseReport};
 
@@ -352,9 +353,14 @@ version=1
 /// the ORDER it pins (`flipbook.before(discovery)`) is S5's gate, not S6's. What
 /// S6 owes is that a PARSED node ticks at all.
 fn flipbook_only(world: &mut EcsMaster) -> Schedule {
+    // A0b: the flipbook reads `Res<UiClock>`, so the clock resource and its tick
+    // come with it. `ui_clock_tick` is ordered AHEAD of the flipbook — the only
+    // ordering edge this schedule carries, and the one A0b introduces.
+    world.insert_resource(UiClock::default());
     let pool = ThreadPoolBuilder::new().num_threads(2).build();
     let mut b = ScheduleBuilder::new(pool);
-    b.add_system(ui_sprite_flipbook);
+    let tick = b.add_system(ui_clock_tick).key();
+    b.add_system(ui_sprite_flipbook).after(tick);
     b.build(world)
 }
 
@@ -370,8 +376,9 @@ fn flipbook_only(world: &mut EcsMaster) -> Schedule {
 /// 4. `UiSpriteSheet.index` MOVED.
 ///
 /// No `UiSheetTable` is inserted, and the rung's own text was corrected for it:
-/// `ui_sprite_flipbook` takes `Res<Time>` and a `Query` over the three
-/// components and never reads the table — the table is the RENDER gather's input.
+/// `ui_sprite_flipbook` takes `Res<UiClock>` (A0b; `Res<Time>` before it) and a
+/// `Query` over the three components and never reads the table — the table is
+/// the RENDER gather's input.
 /// Inserting one here would be a dead datum dressed as a precondition.
 #[test]
 fn g6_4_a_dot_ui_authored_animation_ticks() {
