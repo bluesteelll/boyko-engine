@@ -1,0 +1,5 @@
+error: this field's type is not one the v1 reflection model can describe, so its bytes would be silently absent from a descriptor whose wire is shared with the shipped `boyko_serialize` -- and a silent omission there is unacceptable. Give the field a describable type (a primitive, a `[Prim; N]`, or a nested reflected struct), or opt it out explicitly with `#[reflect(skip)]`.
+  --> tests/reflect_compile_fail/vec_field_rejected.rs:28:16
+   |
+28 |     pub items: Vec<u32>,
+   |                ^^^

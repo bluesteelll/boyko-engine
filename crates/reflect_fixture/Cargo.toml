@@ -31,6 +31,31 @@ boyko-macros = { path = "../boyko_macros" }
 # G2/G3 rather than trusted to this comment.
 boyko-reflect = { path = "../boyko_reflect", optional = true }
 
+# CORE C9 / D32-D33 — the derive's refusal corpus lives HERE, at the paths
+# `docs/REFLECTION-PLAN-GATES.md`'s G5 reserved, and it needs the workspace's compile-fail
+# instrument. `boyko_ecs`'s `compile_fail_*` harnesses cannot host it and the reason is
+# MEASURED in both directions (D33): that package declares no `reflect` feature, trybuild
+# copies the host manifest's `[features]` table into the generated crate, and the derive's
+# whole reflect emission is `#[cfg(feature = "reflect")]` evaluated THERE — so every fixture
+# would compile and the harness would red with "expected compile failure" on all of them.
+#
+# **DEV, and the distinction is the argument** — the same one `reflect_dogfood/Cargo.toml`
+# records for its own `boyko-ui` edge. The "deps are `boyko-ecs`, `boyko-macros`,
+# `boyko-reflect` — and nothing else, ever" rule above governs `[dependencies]`, which is
+# what the gate's ARGUMENT is about: a third *production* edge would destroy the ship-absence
+# claim this package stands for. A dev edge enters no ship closure, so G2's censuses do not
+# move; it names no `boyko-reflect`, so it moves no reflect surface; and it carries no
+# `features = [...]` array, so none of G1's manifest clauses touch it. The Miri disposition
+# is unchanged for the same reason the harness carries `#[cfg(not(miri))]`: trybuild shells
+# out to cargo, which Miri cannot execute, so the target is skipped rather than reached.
+#
+# Declared as a bare `"1"` like the five members that already do it (`boyko_ecs`, `boyko_ui`,
+# `boyko_log`, `aether_tests`, `boyko_rhi_vulkan`, and `boyko_reflect` since C6) rather than
+# hoisted into `[workspace.dependencies]` — hoisting is a separate change and does not belong
+# inside a rung.
+[dev-dependencies]
+trybuild = "1"
+
 [features]
 default = []
 # The reflect-enabling feature MUST be named `reflect` in every consumer (CORE D2): the

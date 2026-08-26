@@ -52,7 +52,7 @@ more than two of them.
 
 **Why P-D is separate from P-A/P-B/P-C and cannot be folded into any of them.** The reflection opt-in
 is a *token* emitted by `boyko_macros` into whatever crate wrote `#[component(reflect)]`
-(A.5, and `crates/boyko_macros/src/component.rs:425` — the `component_id()` install funnel, whose six
+(A.5, and `crates/boyko_macros/src/component.rs:434` — the `component_id()` install funnel, whose six
 existing slots `#storage_install` … `#serialize_install` are exactly this shape). Tokens are not
 dependency edges: `boyko_macros` does **not** depend on `boyko_ecs` and never will
 (`crates/boyko_macros/Cargo.toml`), and `aether_lang` states the same rule verbatim in its own
@@ -498,7 +498,7 @@ gate whose first run is green, and a first run that is green teaches nothing.
   > `reflect_on` row's "annotated" cell could not be built as written: the `reflect` derive key
   > does not exist until CORE C7 lands it, and the `Component` derive **hard-errors on unknown
   > keys** — *"unknown #[component(...)] key; valid keys: on_add, …"*
-  > (`crates/boyko_macros/src/component.rs:871~`, verified at G0 by writing the annotation and
+  > (`crates/boyko_macros/src/component.rs:892~`, verified at G0 by writing the annotation and
   > watching the derive refuse it). What landed instead: `reflect_on.rs` (and its copy
   > `reflect_off_twin_plus.rs`) carries a **direct `#[cfg(feature = "reflect")]`-gated
   > fn-pointer reference to `boyko_reflect::install_type_info`** (`reflect_linkage()`), which
@@ -1195,7 +1195,48 @@ somebody wrote. Five gates, five independent mutations, five reds.
 
 ### G5 — the derive's refusals: one trybuild corpus, two legs — **size M** *(prerequisite: `docs/REFLECTION-PLAN-CORE.md`'s derive)*
 
-**Lands.** `crates/reflect_fixture/tests/reflect_compile_fail.rs` +  <!-- doc-path-planned -->
+> **DISCHARGED 2026-08-26 by `docs/REFLECTION-PLAN-CORE.md`'s C9 (CORE D32) — this rung is a
+> cross-reference now, not work.** C9 built this corpus, at these paths and under these fixture
+> names, with both legs. What follows is kept as the specification it was, with the four things C9
+> measured about it recorded inline; do not build it twice.
+>
+> **How the duplication survived.** This rung addresses CORE by **document** (*"prerequisite:
+> `docs/REFLECTION-PLAN-CORE.md`'s derive"*), never by rung, and CORE's C9 mentioned neither `G5`
+> nor `reflect_fixture` nor a feature. Grepping all four sibling documents for the literal `C9`
+> returned **zero** hits. A cross-plan obligation addressed to a document rather than to a rung is
+> structurally unfindable from the rung that owes it — the same class as the C8 → EG8 edge.
+>
+> **Four corrections, each measured from the CORE side:**
+>
+> 1. ⚠️ **Gate 2 and the second RED were FALSE for two of the nine fixtures, before C9 landed
+>    anything.** *"Feature off: every fixture compiles"* does not hold for `generic_component_rejected`
+>    (15 errors with the feature OFF, 20 with it ON) or `repr_packed_rejected` (`E0793` either way):
+>    `#[derive(Component)]` and rustc already refuse both inputs, with **no `reflect` opt-in in the
+>    input at all**. CORE D34 struck both from the derive's `REFUSALS` for the same reason — *a row
+>    C9 does not author is a fixture whose red cannot fire* — and C9 keeps them as regression pins in
+>    `tests/reflect_compile_fail_upstream/`, outside the census and in the feature-ON leg only,
+>    because their output differs between the legs and one fixture cannot carry two blessed files.
+> 2. **`option_field_rejected` and `vec_field_rejected` are ONE rule.** `Vec`, `Box`, `Option<T>`,
+>    `PhantomData<T>`, `&T` and raw pointers all bake `ValueKind::Opaque` from a single fallthrough,
+>    so both fixtures would pin one verdict at one span. Merged into `vec_field_rejected` (D34).
+> 3. **`union_rejected` had no counterpart in CORE's matrix at all**, and the derive **accepted** a
+>    union until C9 (`kind=Opaque fields=0 size=4 align=4`, measured). This rung's corpus was right
+>    and CORE's matrix was short; D38 added the row.
+> 4. **The `aether_tests` twin for `bitset_storage_rejected` is a fixture for an input Aether cannot
+>    emit.** `reflect` is a key on the `component` construct only, and only `tag` emits
+>    `storage = "bitset"`; verified in the tree — `crates/aether_lang/src/expand.rs` spells `reflect`
+>    nowhere except as the PBR material key `reflectance`. CORE D37 spans the refusal at the
+>    `reflect` key on that ground instead.
+>
+> **As built:** six census fixtures (this list minus the two upstream pins, minus the merged
+> `option_field_rejected`, plus `missing_default_rejected`), five accepting fixtures in a sibling
+> `reflect_pass/` directory (`vec_field_skip_accepted` among them, exactly as this rung asked), and a
+> `REFUSALS`-keyed census at `tests/reflect_refusal_census.rs`. Gate 3's compiler-witness row and
+> gate 4's *"name the rule and the way out"* both hold: the witness is green, and every row's message
+> names its remedy, asserted against the blessed bytes.
+
+
+**Lands.** `crates/reflect_fixture/tests/reflect_compile_fail.rs` +
 `crates/reflect_fixture/tests/reflect_compile_fail/*.rs` + blessed `.stderr`, following
 `crates/boyko_ecs/tests/compile_fail_zero_init.rs`'s shape exactly (including its `#[cfg(not(miri))]`
 guard — trybuild spawns cargo, which Miri cannot).
@@ -1651,7 +1692,7 @@ Verified against the tree at **2026-08-21**, branch `feat/reflection`. This file
 | `tests/trybuild_corpus_compiler_witness.rs` | `BLESSED_RUSTC`, the corpus count, the chocolatey hazard (D13) |
 | `tests/internal_docs_anchors.rs:280` | `GATED_DOCS` — the registration that makes this file's anchors machine-checked |
 | `crates/boyko_ecs/tests/compile_fail_zero_init.rs` | the trybuild harness shape G5 copies |
-| `crates/boyko_macros/src/component.rs:425` | the `component_id()` funnel and its six install slots — the emission site P-D watches |
+| `crates/boyko_macros/src/component.rs:434` | the `component_id()` funnel and its six install slots — the emission site P-D watches |
 | `crates/boyko_macros/Cargo.toml` | tokens-are-not-deps, stated in the manifest |
 | `crates/boyko_ecs/src/ecs/core/component/component_registry/serialize.rs:277` | `BIND_ACCESSORS` — the shipping table D16's Horn 1 would merge into |
 | `crates/boyko_render/Cargo.toml` | `boyko_rhi_vulkan` edge ⇒ `GpuTransform3D` is Miri-unreachable (G4) |

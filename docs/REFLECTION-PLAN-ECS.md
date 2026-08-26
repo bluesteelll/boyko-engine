@@ -73,7 +73,7 @@ Every row was read in this worktree on 2026-08-21. The anchors are load-bearing:
 | F25 | `proptest` is a workspace dependency ([`Cargo.toml`](../Cargo.toml):52~) already used by six crates. | `crates/boyko_ecs/Cargo.toml:93~` and five siblings |
 | F26 | Package names use hyphens: `boyko-ecs`, `boyko-scene`. The new crate is therefore `boyko-reflect` in `crates/boyko_reflect/`. | `crates/boyko_ecs/Cargo.toml:2~` |
 | F27 | 🔴 **`register_enable_tag(name)` MINTS A NEW ID for any name not already in `TAG_NAMES`, and a derived `#[component(storage = "bitset")]` type never interns its name there.** Traced end to end: `EcsMaster::register_enable_tag` → `try_register_enable_tag_by_name` → `try_register_tag_by_name`, whose table is `TAG_NAMES` and whose miss path calls `try_register_dynamic(ComponentLayout::new_dynamic_tag(leaked))`. A derived bitset component's id came from `register_new::<Self>()` (`component_registry/mod.rs:918`, a monotonic `NEXT_ID.fetch_add`) and its name was never interned. | `enable_tag_api.rs:60`, `component_registry/tags.rs:134`, `:155`, `:182-196`, `component_registry/mod.rs:918` |
-| F28 | `NEXT_ID` is a monotonic `AtomicUsize` with `fetch_add`; **ids are never recycled**, and `component_id()` is a per-type `static ID: OnceLock<ComponentId>` resolved once per process. So *"the id re-registered to a different type"* is not a state this process can reach. | `component_registry/mod.rs:212, :918`; `boyko_macros/src/component.rs:425-427` |
+| F28 | `NEXT_ID` is a monotonic `AtomicUsize` with `fetch_add`; **ids are never recycled**, and `component_id()` is a per-type `static ID: OnceLock<ComponentId>` resolved once per process. So *"the id re-registered to a different type"* is not a state this process can reach. | `component_registry/mod.rs:212, :918`; `boyko_macros/src/component.rs:434-436` |
 | F29 | `try_register_tag_by_name` returns `None` when `NEXT_ID >= MAX_COMPONENTS` and `name` was never minted; `register_enable_tag` turns that `None` into `register_enable_tag_exhausted_panic`. Dynamic tags and typed components share the one 512-id budget. | `component_registry/tags.rs:189-192~`, `enable_tag_api.rs:59-65~` |
 
 ### The five contradictions, named
@@ -1078,7 +1078,7 @@ dynamic-tag rows; re-read everything.
    **LANDED 2026-08-21, ahead of this rung and wider than it.** Add `REFLECTION-PLAN-ECS.md` and its
    three siblings to `GATED_DOCS` (`tests/internal_docs_anchors.rs:280`, which held exactly four
    documents when this rung was written, none of them a reflection plan) and give each a
-   `("REFLECTION-PLAN-*.md", 0)` row in `OVER_WAIVED_MAX` (`:1824-1845`). **What actually landed
+   `("REFLECTION-PLAN-*.md", 0)` row in `OVER_WAIVED_MAX` (`:1845-1880`). **What actually landed
    registers five documents, not four** — `REFLECTION-ANALYSIS.md` alongside the four plans — each
    with its `0` row, and it also carried the `GATES` Appendix GC caveat deletion this rung owed.
    Whether EG8 keeps a gate-6 line item is bookkeeping for the campaign owner. The gate then checks, on every `cargo test`, that every `crates/...` path these

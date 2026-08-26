@@ -75,9 +75,9 @@ finds one false stops and escalates rather than working around it.
 | F4 | `STORAGE_KIND` / `RESIDENCY_CLASS` are `[AtomicU8; MAX_COMPONENTS]` with `Relaxed`, deliberately, because *"the kind is a registration-time, write-once datum with **no payload published through it**"* | `component_registry/mod.rs:373`, `:501` |
 | F5 | In-tree installer/getter convention is `(component_id: usize, …)`, because the derive calls them as `…::component_id().0` | `component_registry/serialize.rs:287`, `:308` |
 | F6 | `install_bind_accessor` is **`pub`** specifically *"so the `#[derive(Bindable)]` expansion (which lives in downstream crates where `pub(crate)` is unreachable) can call it"*; write-once, *"a same-id re-install is a silent no-op (first writer wins)"* | `component_registry/serialize.rs:299~-318` |
-| F7 | The `component_id()` funnel is `static ID: OnceLock<ComponentId>` → `get_or_init` → `register_new::<Self>()` → **six** install slots (`storage`, `require`, `clone`, `relationship`, `residency`, `serialize`) + the const-gated `if Self::HAS_HOOKS` | ~~`boyko_macros/src/component.rs:350~-374`~~ → ~~`:371~-397` (re-measured at the C8 **audit**, i.e. against the pre-landing tree)~~ → **`:423-450`, re-measured 2026-08-21 AFTER C8 LANDED.** The content of this fact is unchanged and still true, and it is still **six** slots — `#reflect_install` is the seventh and is cited separately wherever it matters. The anchors have now moved twice for the same reason, and this row is the record of both: C7 inserted `#reflect_items` / `#reflect_default_witness` into the same `quote!` (**now** `:395~` and `:397~`), and C8 inserted the D29 condition block (+15 lines, ending at the condition itself, `:178~`), the `reflect_install` binding with its rationale (+37, `:339~-375`) and the slot itself (+1, `:447~`), moving everything from the funnel down a further 52–53 lines. **Live, in the tree this rung leaves behind:** `fn component_id()` `:425`, `get_or_init` `:428~`, `register_new::<Self>()` `:429~`, the const-gated `install_hooks` `:438~-440`, the six slots `:441~-446`, the seventh `#reflect_install` `:447~`, `ComponentId(raw)` `:448~`. **The C8 audit re-measured this row and the C8 landing rotted it again inside the same rung** — and nothing reds on that, because `internal_docs_anchors.rs`'s `GATED_DOCS` names `FEATURE_MAP.md` / `SYSTEMS.md` / `ARCHITECTURE.md` / `MESHLET-VIRTUAL-GEOMETRY-PLAN.md` and **no `REFLECTION-PLAN-*.md`**. Every number in this table is checked by a person or not at all |
-| F8 | Install slots come in two flavours: **const-gated** (`if Self::HAS_HOOKS`, for the derive-XOR-runtime-builder contract) and **ungated + self-gating** (`install_residency_class::<Self>` short-circuits on the default const) | `boyko_macros/src/component.rs:314~-337` |
-| F9 | `#[component(...)]` already parses a bare flag key (`no_bundle`) and a `storage = "bitset"|"dense"` key, with duplicate detection and a *"valid keys: …"* diagnostic | `boyko_macros/src/component.rs:725~-856` |
+| F7 | The `component_id()` funnel is `static ID: OnceLock<ComponentId>` → `get_or_init` → `register_new::<Self>()` → **six** install slots (`storage`, `require`, `clone`, `relationship`, `residency`, `serialize`) + the const-gated `if Self::HAS_HOOKS` | `boyko_macros/src/component.rs:432-459`, **re-derived 2026-08-26 after C9 landed.** The content of this fact is unchanged and still **six** slots — `#reflect_install` is the seventh and is cited separately wherever it matters. **The anchors have now moved three times for the same reason** (C7 inserted the descriptor emission into the same `quote!`; C8 inserted the D29 condition block, the `reflect_install` binding and the slot; C9 replaced that condition block with the refusal argument and the `reflect_refused` gate), which is why the former numbers are recorded here as *"it moved"* and no longer as digits: a struck anchor rots exactly like a live one and reds nothing extra. **Live, in the tree C9 leaves behind:** `fn component_id()` `:434`, `get_or_init` `:437~`, `register_new::<Self>()` `:438~`, the const-gated `install_hooks` `:447~-449`, the six slots `:450~-455`, the seventh `#reflect_install` `:456~`, `ComponentId(raw)` `:457~`. **Since HEAD `eeb567be` all five reflection documents ARE in `internal_docs_anchors.rs`'s `GATED_DOCS`, so this row now reds when it rots** — which is how C9's own landing found it |
+| F8 | Install slots come in two flavours: **const-gated** (`if Self::HAS_HOOKS`, for the derive-XOR-runtime-builder contract) and **ungated + self-gating** (`install_residency_class::<Self>` short-circuits on the default const) | `boyko_macros/src/component.rs:323~-346` |
+| F9 | `#[component(...)]` already parses a bare flag key (`no_bundle`) and a `storage = "bitset"|"dense"` key, with duplicate detection and a *"valid keys: …"* diagnostic | `boyko_macros/src/component.rs:742~-873` |
 | F10 | `StorageKind` is 3-way (`Table=0`, `Bitset=1`, `Dense=2`); `Bitset` has **no `ComponentPool`**, `Dense` has a global `DenseStore` and is **always `ResidencyKind::Cpu`** | `component_registry/mod.rs:323-339` |
 | F11 | The `Bindable` derive's trampoline takes `let this: &T = unsafe { &*(p as *const T) }` off arena-rooted provenance, and it has passed Miri | `boyko_macros/src/bindable.rs:113`, `:119` |
 | F12 | `core::mem::offset_of!` is load-bearing engine-wide on this toolchain, including as `const _: () = assert!(offset_of!(…) == N)` layout pins | `boyko_render/src/gpu_transform3d.rs:108-115` (317 sites tree-wide) |
@@ -429,7 +429,7 @@ items that exist nowhere:
   modules, and `boyko_reflect/src/lib.rs:59-70` re-exports only the `TypeInfo` family plus
   `install_type_info`/`type_info_of`/`Scalar`/`ScalarKind`/`NestedCursor`/`FieldValue`. The
   identifier appears in the plan set at exactly two sites and **both are uses** (C7
-  `REFLECTION-PLAN-CORE.md:2197`, C8 `:2811`). `REFLECTION-ANALYSIS.md:11` even records *the absence of a `trait Reflect`* as a finding
+  `REFLECTION-PLAN-CORE.md:2381`, C8 `:2995`). `REFLECTION-ANALYSIS.md:11` even records *the absence of a `trait Reflect`* as a finding
   about the tree.
 * **`boyko_reflect::ReflectDefault`.** Its only occurrence anywhere is inside **D20's prose**
   (:344-349), in a fenced sketch introduced by *"where `boyko_reflect` declares"*. D20 is a
@@ -501,7 +501,7 @@ the file that **nominates itself** for the role in its own header (`c6_nested_de
 
 **And the invocation is part of the gate.** Every C7 gate file is `#![cfg(feature = "reflect")]`,
 so a plain `cargo test -p reflect-fixture` compiles it to nothing and exits 0 — C6's own record
-measures exactly that (`REFLECTION-PLAN-CORE.md:2143-2144`). The rung records `cargo test -p reflect-fixture --features
+measures exactly that (`REFLECTION-PLAN-CORE.md:2327-2328`). The rung records `cargo test -p reflect-fixture --features
 reflect-fixture/reflect --test <name>` and the `running [1-9]` check, for the green side **and for
 every red**. This campaign's standing rule is that `running 0 tests` is a vacuous pass, and a gate
 table that names no invocation is the shortest path to one.
@@ -524,7 +524,7 @@ C7's derived descriptors inside §7.2's Miri row instead of behind a `#![cfg(not
 three, so `drop_in_place` is `None` for all three **whether the derive is right or sabotaged**, the
 count is identically zero, and *"no leak, no double-free"* is unfalsifiable. **A.8 prescribed a set
 that would have worked** — `{ pod, String, Nested{String} }`
-(`REFLECTION-ANALYSIS.md:1054-1055`) — and §3.3's row (`REFLECTION-PLAN-CORE.md:1036`) substituted the drop-free one. The
+(`REFLECTION-ANALYSIS.md:1054-1055`) — and §3.3's row (`REFLECTION-PLAN-CORE.md:1220`) substituted the drop-free one. The
 substitution is the defect; the harness C7 builds is not.
 
 **The decision.** Gate 4's set gains `Owned { tag: u32 }` with an instrumented `impl Drop`, and one
@@ -680,7 +680,7 @@ recorded; **they are not predicted here.**
 obligation **C7's follow-up scheduled at C8 and C8's own list did not carry**.
 
 `type_info_of` returns `Option<&'static TypeInfo>` (`boyko_reflect/src/registry.rs:54-64`) and the
-table is write-once, **first writer wins** (`:83-94`). So `install_type_info(raw, <Sibling as
+table is write-once, **first writer wins** (`:87-128`). So `install_type_info(raw, <Sibling as
 Reflect>::TYPE_INFO)` leaves an `is_some()` gate green *permanently* — the wrong descriptor is
 never corrected — and `install_type_info(0, …)` is indistinguishable from `install_type_info(raw, …)`
 for any subject that happens to hold id 0. That second shape is C7's red *"baked zeros into offsets
@@ -737,12 +737,12 @@ errors there is no expansion left in which to observe an absent install), and th
 carrying `#[derive(Component, Default)] #[component(reflect, storage = "bitset")] pub struct
 AuditBitsetTag;`, built `--features reflect-fixture/reflect`, ran `running 1 test`, exit 0, and
 printed `bitset+reflect ACCEPTED: name=…::AuditBitsetTag size=0 align=1 fields=0 kind=Struct`.
-Nothing rejects the pair: `reject_non_zst_bitset_tag` (`boyko_macros/src/component.rs:71~-75`) only requires
+Nothing rejects the pair: `reject_non_zst_bitset_tag` (`boyko_macros/src/component.rs:72~-76`) only requires
 fieldlessness and `AuditBitsetTag` is fieldless; the `hooks.any()` rejection (`:84~-94`) covers only
-lifecycle hooks; `Fields::Unit` maps to a zero-field `Struct` (`boyko_macros/src/reflect.rs:345~`). **And the
-suppression does not exist either:** `boyko_macros/src/component.rs:164~` gates the reflect emission on
+lifecycle hooks; `Fields::Unit` maps to a zero-field `Struct` (`boyko_macros/src/reflect.rs:704~`). **And the
+suppression does not exist either:** `boyko_macros/src/component.rs:181~` gates the reflect emission on
 `hooks.reflect` alone, the one slot in its neighbourhood carrying no `storage_bitset` term — its six
-neighbours all do (`:123~`, `:144~`, `:239~`, `:263~`, `:315~`, `:334~`).
+neighbours all do (`:124~`, `:144~`, `:263~`, `:287~`, `:339~`, `:395~`).
 
 > **The anchors in the paragraph above are the PRE-C8 tree's** (HEAD `bf7803d6`) and are left as
 > measured, because the paragraph is a dated record of what the audit found. **Post-landing they are
@@ -796,7 +796,7 @@ Three things are wrong with the gate as written, and the third is the one the au
    (and is what D16 names as **Horn 1's** cost).
 3. **The stated red is not expressible, and never becomes expressible.** *"Rename a field on one
    side only"* has no "one side": a single struct definition feeds both derives, both read the same
-   `syn::Field::ident` (`boyko_macros/src/bindable.rs:36~-40,:54~`; `boyko_macros/src/reflect.rs:172~-175`), and neither admits a rename
+   `syn::Field::ident` (`boyko_macros/src/bindable.rs:36~-40,:54~`; `boyko_macros/src/reflect.rs:459~-462`), and neither admits a rename
    — `attributes(bind)` is declared at `boyko_macros/src/lib.rs:559~` and **never parsed** (`bindable.rs` never touches
    `f.attrs`). The audit's expectation that C9's `#[reflect(skip)]` would supply the divergence is
    **wrong, and D14 is why**: *"`#[reflect(skip)]` emits a `FieldInfo` with `kind: Opaque` … **it
@@ -816,7 +816,7 @@ plan delivers at C8"* — but it is respecified as what it can see, and given a 
   (`boyko_ui/src/binding/bindable.rs:25-46`) — and the `FIELD_COUNT` clause is the half that catches
   a name reflect stopped emitting, which the name-driven loop cannot see.
 * **What its RED is** — and this is the change: a mutation of one **generator**, not of a subject.
-  Reverse `boyko_macros/src/bindable.rs:53~`'s `ids` (`(0..n).rev()`), or suffix `boyko_macros/src/reflect.rs:190~`'s baked `name:`.
+  Reverse `boyko_macros/src/bindable.rs:53~`'s `ids` (`(0..n).rev()`), or suffix `boyko_macros/src/reflect.rs:501~`'s baked `name:`.
   Either reds; a source rename does not and cannot.
 * **Where the subject lives:** `reflect_dogfood`, which already has a `reflect` feature, a library
   target, an existing CI leg (`reflect-dogfood`, `cargo test -p reflect-dogfood --all-targets
@@ -847,7 +847,7 @@ C8 declares **both** its reds required.
 
 Worse, the sentence that made the deferral look safe is false in **direction**. *"Under G6b's
 `compile_fail` form the same mutation makes the fixture compile"* — it cannot. G6b's compile_fail
-body (`GATES:1274-1279`) is `let _ = <MyComp as boyko_reflect::Reflect>::TYPE_INFO;` in
+body (`GATES:1316-1321`) is `let _ = <MyComp as boyko_reflect::Reflect>::TYPE_INFO;` in
 `reflect-fixture` compiled **feature-off**, where `boyko-reflect` is not in the resolved graph at
 all (`reflect_fixture/Cargo.toml:32~,39`, `default = []`). The fixture's own `boyko_reflect::` path is therefore
 `E0433` **regardless of what the derive emits** — the form is satisfied by the dep's absence and is
@@ -880,9 +880,193 @@ minus the `reflect` key) must emit the same symbol multiset and the same `.text`
 carry the funnel touch so the comparison is exactly *"does the seventh slot's existence perturb the
 other six"*. **C8 does not need it:** for an un-annotated type the slot is `TokenStream2::new()`
 interpolated into a `quote!`, which emits nothing as a language guarantee — the same guarantee the
-six existing slots at ~~`boyko_macros/src/component.rs:389~-394`~~ → **`:441~-446`** (re-derived after C8 landed; the
-seventh, `#reflect_install`, is `:447~`) already rely on. This edge is recorded in §7 so it
+six existing slots at ~~`boyko_macros/src/component.rs:389~-394`~~ → `:441~-446` → **`:450~-455`** (re-derived again after C9 landed; the
+seventh, `#reflect_install`, is `:456~`) already rely on. This edge is recorded in §7 so it
 cannot expire, which is how the last two rungs lost obligations.
+
+### D32 — C9's trybuild corpus is **GATES G5's**, and two rungs were about to build one corpus because neither document could see the other.
+
+[`REFLECTION-PLAN-GATES.md`](REFLECTION-PLAN-GATES.md):1196-1301 is a fully specified rung — *"G5 —
+the derive's refusals: one trybuild corpus, two legs"* — that lands
+`reflect_compile_fail.rs` + a `reflect_compile_fail/` directory in `crates/reflect_fixture/`, with
+nine named fixtures, a feature-ON leg, a feature-OFF leg, the compiler-witness row, and four gates.
+Its bitset paragraph ends with the sentence *"Named here so the two are not built twice."* C9 as
+written re-specifies that corpus from scratch, in a different package, with a different row set and
+no feature-off leg, and mentions neither `G5` nor `reflect_fixture` nor a feature.
+
+**The duplication was invisible to the obvious search.** Grepping the four sibling documents for the
+literal string `C9` returns **zero** hits in ECS, BOUNDARY, GATES and ANALYSIS — G5 refers to this
+rung only as *"`docs/REFLECTION-PLAN-CORE.md`'s derive"*, and GATES' cross-plan table row reads
+*"The derive's refusal set | `docs/REFLECTION-PLAN-CORE.md` | G5 — one trybuild fixture per
+refusal"*. A cross-plan obligation addressed to a **document** rather than to a **rung** is
+structurally unfindable from the rung that owes it, which is the same class as the C8 → EG8 edge
+§7.4 records.
+
+**The decision.** C9 builds the corpus, at G5's paths, under G5's fixture names, with G5's two legs.
+G5 is thereby **discharged** and is to be struck to a cross-reference the next time GATES is
+touched; the two defects this audit measured in G5 from the CORE side are recorded in §7.3d so they
+travel with it. C9 owns the derive-side mechanism, `REFUSALS`, and the migration of the landed tests
+its rows uncompile; nothing else about the corpus is re-invented here.
+
+---
+
+### D33 — The refusals live INSIDE the `#[cfg(feature = "reflect")]` emission, which forces the corpus's home. `boyko_ecs` cannot host it, and the reason is measured in both directions.
+
+A refusal that fired with the feature **off** would refuse a program that compiles to nothing, which
+contradicts D1's zero-cost-when-off premise and makes GATES G5's feature-off leg unsatisfiable by
+construction. So each `compile_error!` is emitted inside the same `#[cfg(feature = "reflect")]` block
+as the emission it guards — the `cfg` is evaluated in the **expanding** crate (D2), so the refusal
+appears exactly where reflection was actually asked for.
+
+That decides the corpus's home, because C9 gate 1 as written named
+`crates/boyko_ecs/tests/compile_fail_*.rs`:
+
+* `boyko_ecs`'s `[features]` table is `default`, `profiling-analysis`, `big_query_table`,
+  `bench-alloc` — **no `reflect`**. trybuild copies the host manifest's `[features]` table into the
+  generated crate and passes `--features` from the host's *enabled* set, so no fixture there can ever
+  turn the `cfg` on. Every fixture would compile and the harness would red with *"expected compile
+  failure"* — a gate that cannot go green, and whose repair by re-blessing would be vacuity.
+* MEASURED on rustc 1.97.1: `#[derive(Component)] #[component(reflect)]` on a struct in
+  `boyko_ecs`'s own test tree **compiles clean** — which is itself the proof that the `cfg` is dead
+  there, since `boyko_ecs` has no `boyko-reflect` edge and a live `cfg` would be `E0433` — and emits
+  `warning: unexpected cfg condition value: reflect`, promoted to an error by CI's clippy
+  `-D warnings`.
+
+The home is `reflect-fixture`: the only package that has `boyko-macros`, the `reflect` feature, and a
+CI leg that builds it (`.github/workflows/ci.yml:174-194`). `boyko_reflect` is excluded for the same
+`cfg` reason **plus** GATES D4's *"NO `[features]` table, now or ever"* and its lack of a
+`boyko-macros` edge — the trap C7's gate 1 fell into, recorded at D23.
+
+---
+
+### D34 — Three of C9's seven rows refuse inputs that are ALREADY refused, and a row C9 does not author must not be in `REFUSALS`.
+
+The census that keeps refusals honest has a mirror nobody had written down. *A refusal outside
+`REFUSALS` is invisible to it* (D20 item 2). **A row in `REFUSALS` that C9 does not author is a
+fixture whose red cannot fire**: the prescribed red is *"delete the refusal from the derive ⇒ its
+fixture compiles ⇒ trybuild reds"*, and if rustc or `#[derive(Component)]` refuses the input anyway,
+the fixture still does not compile and the red is unobservable. Measured on rustc 1.97.1, three rows
+are in that state, and the third is a duplicate rather than an import:
+
+* **Generic type parameters** — 15 errors with **no** `reflect` opt-in in the input, 20 with it. The
+  seam is never reached, so the stated hazard is unreachable. **Deleted.**
+* **`#[repr(packed)]`** — `E0793` from a plain `#[derive(Component)]` whenever a field needs align
+  > 1; and with every field of align 1 the type **compiles, installs and is sound**. The reachable
+  set is the harmless set. **Deleted**, with the condition under which the obligation returns
+  recorded at the row.
+* **The v2-kinds field row** — `Vec`, `Box`, `Option<T>`, `PhantomData<T>`, `&T` and raw pointers all
+  bake `ValueKind::Opaque` from one fallthrough, so the `Opaque`-field row already refuses every one
+  of them at the same span. **Merged**, not deleted: one rule, one message, one fixture.
+
+Two `.stderr` fixtures pinning the *upstream* refusals are still worth keeping as regression pins,
+but they live outside the census directory and are **not counted** — they pin rustc's diagnostic, not
+C9's. Their feature-off behaviour is *does not compile* either way, which is what exposed GATES G5's
+second leg (§7.3d).
+
+**The same lens found the opposite defect too.** Two shapes the derive **accepts** today had no row
+in any document's matrix — see D38.
+
+---
+
+### D35 — `#[reflect(skip)]` lands at C9, with the refusal it is the way out of. A refusal defined in terms of an escape hatch that does not exist is a refusal with no way out.
+
+Five sites schedule it here and none of them is a **Lands** list: landed code
+(`crates/boyko_macros/src/reflect.rs:288`’s `parse_reflect_skip` — the comment that said *"D14's field-level `#[reflect(skip)]` lands at C9 and is
+parsed there"* has been replaced by the parser it promised), **D25**'s *"…without waiting for `#[reflect(skip)]` (C9)"*, §4's
+*"`blob: OpaqueBlob` is a D15 hard error until C9's `#[reflect(skip)]`"*,
+[`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md):1149 (which **blocks** rung B2 on it),
+and GATES G5's `vec_field_skip_accepted` fixture. C9's Lands was a table of refusals only, and C9 is
+the **last** CORE rung (§5), so nothing downstream could pick it up.
+
+MEASURED 2026-08-26: `#[reflect(skip)]` on a field is accepted and **completely inert** —
+`parse_reflect_no_default` scans `input.attrs` (type-level) exclusively, so a field attribute is
+never read, and a `Vec<u32>` field carrying the skip bakes the same `Opaque` descriptor as one
+without it. C9 therefore lands the field-attribute parse, D14's semantics (`fields.len()` unchanged,
+`kind: Opaque`, all four accessor slots `None` — *never* an omission, because by-index access would
+otherwise depend on which fields were skipped) and an ACCEPT fixture. It is also the migration for
+`crates/reflect_fixture/tests/c7_derive_bake.rs:219`'s `Padded`.
+
+---
+
+### D36 — `REFUSALS` is a table of `(rule, message)` read AT the refusal sites, and its census is a source-text scan. A `const` a proc-macro crate "iterates" cannot be read by any test, and a list nothing emits from is a dead datum.
+
+Gate 2 as written asks for *"a `const REFUSALS: &[&str]` the derive itself iterates"* and a test
+comparing its length to a fixture count. Neither half is constructible:
+
+* `boyko_macros` is `[lib] proc-macro = true`, so no test can import the const — D31 measured this
+  same obstacle about this same crate for `component::expand`. The only available instrument is a
+  **source-text scan**, the shape `tests/internal_docs_anchors.rs` uses.
+* Nothing *iterates* a list of rule names to decide anything: each refusal is a distinct syntactic
+  condition, evaluated at its own site. A `const` the derive merely **declares** is computed and
+  never read — the class this campaign has now found five times.
+* And an equality of counts is one-directional. It sees a rule added without a fixture. It cannot see
+  the failure D20 item 2 exists to name — a refusal added to the derive and **not** to `REFUSALS` —
+  because a `&[&str]` carries neither span nor message, so each refusal's text lives at its own site
+  and a new site can simply not appear. That is C8 gate 5's shape: a drift test that cannot detect
+  drift by construction.
+
+**The shape that makes the datum live:** `const REFUSALS: &[(&str, &str)]` with one `IDX_*` per rule,
+and every refusal site emitting `REFUSALS[IDX_X].1` inside its `quote_spanned!`, so the row's bytes
+**are** the diagnostic's bytes. A refusal with no row then has nothing to say and does not compile.
+The census scans for `REFUSALS` rows, counts them against `.rs` files in the compile_fail directory
+only, and asserts each row's message literal appears at a `quote_spanned!` site in
+`crates/boyko_macros/src/reflect.rs` — or, for the one **message-only** row (D20's, which is a trait
+bound and cannot be a `compile_error!`), at `crates/boyko_reflect/src/reflect.rs:84`'s
+`on_unimplemented`.
+
+---
+
+### D37 — The bitset refusal is spanned at the **`reflect` key**, and it REPLACES D29's derive-side suppression rather than sitting beside it.
+
+**The span.** Three census-gated documents specified three different carets for one refusal:
+this plan's C9 table said *"the `storage` key"*;
+[`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):340-347 and its §10 dependency row said *"the
+user's own type name"*; [`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md):1069-1072 said
+*"pins the span on `reflect`, not on the struct and not on `aether! {`"*. One emission has one span,
+and gate 1's blessed `.stderr` freezes whichever is built first, so the choice had to be made before
+the corpus. ECS's rationale is analysis B.5's Aether case, which
+[`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md):520-529 **deleted by construction** and
+which this audit verified in the tree: Aether emits `#[component(storage = "bitset")]` from
+`tag Foo(bitset);`, and the string `reflect` does not appear in `crates/aether_lang/src/` at all
+except as the PBR material key `reflectance`. The remaining user is hand-written Rust, where
+`storage = "bitset"` is legitimate on its own and **`reflect` is the token that is wrong**. Span on
+`reflect`; ECS's *"type name"* is superseded, and GATES' `aether_tests` twin for this combination is
+a fixture for an input Aether cannot emit (§7.3d).
+
+**The replacement.** D29 landed a *silent* suppression at C8 — the `!hooks.storage_bitset` term in `codegen`'s condition (`crates/boyko_macros/src/component.rs:181~`’s binding today) —
+`let reflect_enabled = hooks.reflect && !hooks.storage_bitset;` — and handed the message here. With
+the refusal in place the term is unreachable in its suppressing branch, and its only witness
+(`reflect_fixture`’s `c8_bitset_suppression.rs`, deleted by C9) no longer compiles: a dead datum whose gate
+has just been deleted, and D29's own RED (*"drop the `storage_bitset` term"*) becomes unobservable
+because no subject can be constructed to observe it. The term is **deleted with the gate it served**,
+and C8's clauses migrate into the corpus. Nothing is lost: feature off, the whole emission is
+`cfg`-stripped and nothing installs; feature on, the refusal stops the compile. ECS D5's *"two
+mechanisms at two boundaries"* is the compile-time refusal plus the release `assert!` — not three.
+
+**And the release `assert!`'s ownership claim was wrong.** C9's *"It was on no rung's list in any of
+the four documents"* is false: [`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):1135 carries it
+against rung **EG3** with a live fallback (*"If CORE declines it, EG3 must add the check on its own
+read path and say so"*). C9 accepting the item creates a **C9 → EG3** edge and an obligation to
+retire that conditional; both are recorded in §7.4.
+
+---
+
+### D38 — Two shapes the derive ACCEPTS had no row in any matrix: a union, and a data-carrying enum at the ITEM level. The audit's own lens found them by asking the reachability question in the opposite direction.
+
+`crates/boyko_macros/src/reflect.rs` used to send every enum **and** every union down one arm — one arm,
+two shapes — baking `TypeKind::Opaque` with an empty field list. C9 split it: `:712~` is the enum arm, `:729~` the union arm. C9's matrix named *"a fieldless enum
+with no `#[repr(Int)]`"* (item span) and *"a data-carrying enum … | the field"* (field span), and
+nothing at all about unions. MEASURED 2026-08-26: `#[component(reflect)]` on a **two-field union**
+compiles and prints `kind=Opaque fields=0 size=4 align=4`, and on a `#[repr(u8)]` enum with payload
+variants likewise — both published through C8's install seam. `reflect_fixture`’s `c7_derive_bake.rs` (its `the_non_struct_arm_bakes_an_opaque_fieldless_descriptor`, deleted by C9)
+pins exactly that lie for the enum and calls it *"the claim this test pins"*; after C9 as written the
+identical claim for a union would be unpinned **and** unrefused.
+
+Two ITEM-level rows are therefore added — a data-carrying enum, and a union — matching GATES G5's
+`union_rejected`, which this plan had no counterpart for. What remains accepted is a fieldless
+`#[repr(Int)]` enum, for which `fields: &[]` is *true* rather than a lie; its `kind: Opaque` is still
+a silent `Opaque` until **C10** replaces it with `TypeKind::Enum`, and §5 permits C9 to land first,
+so the window is recorded at the row rather than left to be rediscovered.
 
 ---
 
@@ -2164,7 +2348,7 @@ verified against the tree rather than argued.
 **In `boyko_reflect` (D22):**
 
 * `pub trait Reflect { const TYPE_INFO: &'static TypeInfo; }` — C7's first emission bullet names
-  it and C8's install (`<Self as boyko_reflect::Reflect>::TYPE_INFO`, `REFLECTION-PLAN-CORE.md:2811`) consumes it, but
+  it and C8's install (`<Self as boyko_reflect::Reflect>::TYPE_INFO`, `REFLECTION-PLAN-CORE.md:2995`) consumes it, but
   `crates/boyko_reflect/src/` declares **no trait at all** (six modules, `boyko_reflect/src/lib.rs:59-70`), and no
   rung's `Lands` created one. Without it the emission does not compile.
 * `ReflectDefault` **exactly as D20 sketches it** (`#[diagnostic::on_unimplemented]` with D20's
@@ -2177,11 +2361,11 @@ verified against the tree rather than argued.
 
 * the `reflect` **flag key** on `#[component(…)]` — F9's mechanism is accurately described
   (bare flag, duplicate detection, a "valid keys" diagnostic; `no_bundle` is the precedent at
-  `boyko_macros/src/component.rs:732~-740`) but ~~one match arm~~ → **four sites, and there is no match**: the
+  `boyko_macros/src/component.rs:749~-757`) but ~~one match arm~~ → **four sites, and there is no match**: the
   parser is a linear `if meta.path.is_ident(..)` chain inside one `parse_nested_meta` closure
-  (`boyko_macros/src/component.rs:719~-887`), so the key needs a field on `ComponentHookPaths`, its own `if` block
+  (`boyko_macros/src/component.rs:736~-908`), so the key needs a field on `ComponentHookPaths`, its own `if` block
   with its own duplicate-detection error, and **both** copies of the "valid keys: …" literal —
-  `boyko_macros/src/component.rs:725~` (the `on_despawn` arm) and `:873~` (the unknown-key arm), two independent
+  `boyko_macros/src/component.rs:742~` (the `on_despawn` arm) and `:894~` (the unknown-key arm), two independent
   strings. Updating one and not the other ships a diagnostic that lies about which keys are valid;
 * the **registration of `reflect` as a derive helper attribute.**
   `#[proc_macro_derive(Component, attributes(component, require, entities, relationship,
@@ -2294,7 +2478,7 @@ opt-in".
 > "reflect")]` evaluated in the **expanding** crate (D2), and no package's `default` enables
 > `reflect`; the established shape for such a file is a whole-file `#![cfg(feature = "reflect")]`
 > (`c6_nested_descend.rs:31~`), which C6's own record confirms compiles to **0 tests feature-off by
-> design** (`REFLECTION-PLAN-CORE.md:2143-2144`). A C7 gate or red run as a plain `cargo test -p reflect-fixture` therefore
+> design** (`REFLECTION-PLAN-CORE.md:2327-2328`). A C7 gate or red run as a plain `cargo test -p reflect-fixture` therefore
 > prints `running 0 tests` and exits 0 — a vacuous pass on the green side *and* on the red side.
 > Every red below must be OBSERVED under this invocation.
 
@@ -2357,7 +2541,7 @@ opt-in".
      three **whether the derive is correct or sabotaged**; the count is identically zero and "no
      leak, no double-free" is unfalsifiable over that set. A.8 — which this gate cites by name —
      prescribes `{ pod, String, Nested{String} }` (`REFLECTION-ANALYSIS.md:1054-1055`); §3.3's row
-     (`REFLECTION-PLAN-CORE.md:1036`) silently substituted the drop-free set, and the substitution is what removed the
+     (`REFLECTION-PLAN-CORE.md:1220`) silently substituted the drop-free set, and the substitution is what removed the
      instrument. **`Owned { tag: u32 }` with `impl Drop` bumping a thread-local restores it at C7
      without waiting for `Str`** (C11), and it is a *stronger* subject than `String` for this
      property: an exact count separates leak (too low) from double-free (too high), where an
@@ -2388,7 +2572,7 @@ opt-in".
    apart, for no gain"*, :7~-11) — but the subject here is **derive-generated**, and `boyko_reflect`
    can neither invoke the derive nor compile its output (gate 1's three reasons), so an arm added
    there would measure a **hand-written** `default_in_place` wearing the derived one's verdict:
-   exactly the weaker-subject substitution C11 already forbids by name (`REFLECTION-PLAN-CORE.md:3354-3356`). The gain the
+   exactly the weaker-subject substitution C11 already forbids by name (`REFLECTION-PLAN-CORE.md:3835-3837`). The gain the
    c4 header could not see is therefore real, and it is not the only one: a `#[global_allocator]`
    is one per binary and c4's is `#![cfg(not(miri))]` (`c4_prim_zero_alloc.rs:95~`), so folding this arm into
    `c7_derive_bake.rs` would carry that `cfg` onto **all** of C7's gates and delete C7's derived
@@ -2422,7 +2606,7 @@ opt-in".
    never a reflected field.
 9. **NEW (D23) — the two obligations landed rungs deferred TO C7, which its table did not carry.**
    (a) **Re-run G3's link-configuration calibration with the annotation in place**, which C2's
-   landing note schedules here (`REFLECTION-PLAN-CORE.md:1350`, *"next re-run scheduled at C7"*) and
+   landing note schedules here (`REFLECTION-PLAN-CORE.md:1534`, *"next re-run scheduled at C7"*) and
    [`REFLECTION-PLAN-GATES.md`](REFLECTION-PLAN-GATES.md):911-914 schedules with its reason (*"at
    CORE C7 the derive's expansion starts referencing some of the crate's symbols, and per-symbol
    decidability inside a pulled object … becomes the census's whole question"*). D26 keeps the
@@ -2459,7 +2643,7 @@ more.
 reds on the drop count — which is the mutation a naive "all POD" assumption would actually
 produce.~~ → **respecified as TWO reds, one per slot (D24), because the original named the wrong
 slot, had no subject, and mutated a datum nothing read.** Gate 4 is a **`default_in_place`** test
-(§3.3's row, `REFLECTION-PLAN-CORE.md:1036`) and `drop_in_place` is a different `TypeInfo` field
+(§3.3's row, `REFLECTION-PLAN-CORE.md:1220`) and `drop_in_place` is a different `TypeInfo` field
 (`type_info.rs:262` vs `:269`); its fixture set owned no `String` and no `Drop`, and a repo-wide grep finds **no `impl
 Drop` in `reflect_fixture` or `reflect_dogfood` at all**; and with no install and no call site the
 mutated slot was written and never read. The naive "all POD" assumption is still the mutation worth
@@ -2742,7 +2926,7 @@ length red — which is the whole point: the defect moves the index and touches 
 > 16 of 17 still green, which is the measured proof that no other gate covered it.
 >
 > **4. Field-level `#[reflect(...)]` — verified, no code change.** `parse_reflect_no_default` is
-> called from exactly one site, ~~`boyko_macros/src/component.rs:165~`~~ → **`:180~`** (re-derived after C8 landed;
+> called from exactly one site, ~~`boyko_macros/src/component.rs:165~`~~ → `:180~` → **`:182~`** (re-derived again after C9 landed;
 > still exactly one site), with `&input.attrs`; field attributes are
 > never passed, so a field-level `#[reflect(anything)]` is inert while the same unknown key at
 > type level errors. This **is** already documented at the site (`reflect.rs`'s
@@ -2816,9 +3000,9 @@ length red — which is the whole point: the defect moves the index and touches 
 ```
 
 *Why, and why it is a decision rather than an accident:* **every** other path the reflect emission
-puts into a consumer crate is already absolute — `::boyko_reflect::FieldInfo` (`boyko_macros/src/reflect.rs:190~`),
-`<#field_ty as ::boyko_reflect::Reflect>::TYPE_INFO` (`:249~`), `impl ::boyko_reflect::Reflect`
-(`:463`), `::boyko_reflect::ReflectDefault` (`:378~`, `:404`); a grep for a non-absolute
+puts into a consumer crate is already absolute — `::boyko_reflect::FieldInfo` (`boyko_macros/src/reflect.rs:501~`),
+`<#field_ty as ::boyko_reflect::Reflect>::TYPE_INFO` (`:560~`), `impl ::boyko_reflect::Reflect`
+(`:863`), `::boyko_reflect::ReflectDefault` (`:778~`, `:804`); a grep for a non-absolute
 `boyko_reflect::` in that file returns **only doc comments**. A bare first segment inside
 `component_id()`'s body resolves through the consumer's own scope before the extern prelude, so a
 consumer `mod boyko_reflect` or `use x as boyko_reflect` shadows it. The six existing funnel slots
@@ -3019,7 +3203,7 @@ struct definition feeds both derives, both read the same `syn::Field::ident`, ne
 (`attributes(bind)` is declared and never read), and D14 fixes `#[reflect(skip)]` to *emit* an
 `Opaque` field rather than omit it — *precisely* so the by-index vocabulary cannot drift. The two
 indices agree by construction, permanently. **The red that fires is a generator mutation:** reverse
-`boyko_macros/src/bindable.rs:53~`'s `ids`, or suffix `boyko_macros/src/reflect.rs:190~`'s baked `name:`. That is the drift Horn 2 buys
+`boyko_macros/src/bindable.rs:53~`'s `ids`, or suffix `boyko_macros/src/reflect.rs:501~`'s baked `name:`. That is the drift Horn 2 buys
 and the reason the test is the price of taking it.
 
 *Fourth red (gate 4 — D29):* drop the `!hooks.storage_bitset` term from the emission's condition.
@@ -3179,32 +3363,229 @@ distinct ids: a one-subject gate whose subject happens to hold id 0 cannot see i
 
 ### C9 — The refusal matrix, spanned, with an anti-rot census
 
-**Lands.** Every rejection the derive must make, each a `compile_error!` **spanned at the offending
-token** (never at the derive attribute):
+> **LANDED 2026-08-26**, under the rung protocol (observer before gate, gate before edit). Every
+> gate ran green with an unpiped exit code and a non-vacuous `running [1-9]`; every RED was applied,
+> its failure OBSERVED, and every source restored byte-identically (`cmp` + MD5). C9 is the LAST
+> CORE rung, so what follows is also this plan's closing record.
+>
+> **What landed, file by file.** `crates/boyko_macros/src/reflect.rs`: `REFUSALS` (six rows),
+> six `IDX_*` constants, a const-eval name pin over all six, `parse_reflect_skip`,
+> `has_integer_repr`, `spanned_message`, `push_opaque_field_refusal`, five spanned refusal sites,
+> and the refused-item early return. `crates/boyko_macros/src/component.rs`: `reflect_span` on
+> `ComponentHookPaths`, D29's `!hooks.storage_bitset` term **deleted**, and `reflect_enabled`
+> re-derived as `hooks.reflect && !reflect_refused`. `crates/boyko_reflect/src/registry.rs`: the
+> release `assert!` plus a hand-written `Component` subject and two release gates.
+> `crates/reflect_fixture/`: the `trybuild` dev-edge, `tests/reflect_compile_fail.rs` and its six
+> census fixtures, five `reflect_pass/` fixtures, two `reflect_compile_fail_upstream/` pins, **eight**
+> blessed `.stderr` (the four accepting fixtures have none — a `t.pass()` case pins a runtime
+> assertion, not compiler prose). `tests/reflect_refusal_census.rs`: the census, eight clauses. Deleted:
+> the whole of `reflect_fixture`'s `c8_bitset_suppression.rs`, whose two subjects both migrated.
+>
+> **The refusal matrix as BUILT — six rows, every one of them authored by C9.**
+>
+> | `REFUSALS` row | caret, measured | fixture |
+> |---|---|---|
+> | `bitset_storage_rejected` | the `reflect` key — `^^^^^^^` under `reflect` in `#[component(reflect, storage = "bitset")]` | compile_fail |
+> | `vec_field_rejected` | the field's **type** — under `Vec`, not under the field's doc comment (see finding 1) | compile_fail |
+> | `fieldless_enum_without_repr_rejected` | the `enum` keyword | compile_fail |
+> | `data_carrying_enum_rejected` | the `enum` keyword | compile_fail |
+> | `union_rejected` | the `union` keyword | compile_fail |
+> | `missing_default_rejected` | the type NAME, via `ReflectDefault`'s `on_unimplemented`; **message-only**, no `compile_error!` | compile_fail |
+>
+> **1. The `Opaque`-field caret was wrong as first built, and only blessing it showed that.** The
+> matrix says *"the field"*, so the first emission used `syn::Field::span()`. A `Field`'s span starts
+> at its first **attribute**, and a documented field's first attribute is its `///` line — so the
+> caret landed under the doc comment, pointing at prose. Corrected to `field.ty.span()`: the type is
+> what the kind table declined, it identifies the field unambiguously, and it is the one span that
+> reads the same for a named field and for a tuple field (which has no ident to point at). The row's
+> span column now says *the field's type*, and the reason is at the emission site.
+>
+> **2. A refused item emits its refusals and NOTHING ELSE, which the rung did not say and the
+> corpus forced.** `codegen` returns a third value, `refused`, and `component.rs` gates the install
+> slot on it. Without that a union fixture pins **three** errors — the refusal, D20's `Default`
+> witness (a union cannot derive `Default`), and `<Self as Reflect>::TYPE_INFO` on a type with no
+> `impl Reflect` — and a `.stderr` that pins two derived errors freezes rustc's rendering of them
+> too. One refusal, one error.
+>
+> **3. The two upstream pins cannot live in the census directory OR in the feature-off leg**, and
+> that is a *third* consequence of D34 the decision did not reach. Their output DIFFERS between the
+> legs — a generic fixture is 15 errors with the feature off and 20 with it on — and one fixture
+> cannot carry two blessed files. They are in `tests/reflect_compile_fail_upstream/`, run in the
+> feature-ON leg only, and a census clause asserts they never gain a `REFUSALS` row.
+>
+> **4. An empty trybuild glob is a VACUOUS PASS, measured.** With a directory emptied, `trybuild`
+> prints *"There are no trybuild tests enabled yet"* and returns success — so every clause in
+> `reflect_compile_fail.rs` would stay green with its subject gone. The census covers
+> `reflect_compile_fail/` by bijection; the other two directories now state their own `>=` floor in
+> the harness, because nothing outside that file knows how many fixtures they are supposed to have.
+>
+> **5. ⚠️ Gate 2's first form COULD NOT FIRE, and RED 5 is what found it.** The clause read *"every
+> `IDX_` constant is mentioned at least twice — one declaration, one use"*. The const-eval name pin
+> (`same_str(REFUSALS[IDX_X].0, …)`) is itself a second mention, so **deleting a whole
+> `quote_spanned!` site left the census green**: MEASURED, `7 passed` while `bitset_storage_rejected`
+> compiled. The distinguishing byte is the tuple element — the pin reads `.0`, and only a refusal
+> SITE reads `.1`. The clause now asserts `REFUSALS[IDX_X].1` appears **exactly once** for each
+> emitted row and **never** for the message-only one, which is D36's own sentence in a form a scan
+> can check. Re-run under RED 5: red.
+>
+> **6. And its replacement's first draft reddened in the GREEN state**, for the reason this campaign
+> has already met once: a clause counting `quote_spanned!` occurrences matched **this file's own
+> rustdoc**, which spells the macro's name three times while explaining the mechanism. Deleted with
+> the measurement recorded at its site. Whether a site uses `quote_spanned!` rather than `quote!` is
+> not a text property at all — it is a CARET, and the second RED measures it where carets live.
+>
+> **7. `{Self}` is a TEMPLATE, and the `.stderr` clause reddened on it first.** D36's *"each row's
+> message literal appears …"* is a plain `contains` for five rows and false for the sixth:
+> `on_unimplemented` substitutes `{Self}` with the offending type's name, so the row's bytes and the
+> printed bytes differ by exactly the placeholders. The clause matches literal SEGMENTS in order,
+> which keeps the drift it exists to catch fully visible while allowing the one substitution rustc is
+> entitled to make.
+>
+> **8. One deviation from D36, with its reason.** D36 asks for *"every refusal site emitting
+> `REFUSALS[IDX_X].1` inside its `quote_spanned!`"*. Each site does spell `REFUSALS[IDX_X].1` — that
+> is what the census keys on — but the value goes through `spanned_message`, which re-mints the
+> literal with the site's span. It has to: `quote`'s `ToTokens for str` builds its `Literal` at
+> `Span::call_site()`, which is the derive attribute, i.e. exactly the caret C9 forbids. Setting the
+> span on the literal as well as on the block makes the caret independent of which of the two rustc
+> reads.
+>
+> **THE RED LEDGER — seven mutations, seven observations, four sources restored `cmp`-clean.**
+> Pre-mutation MD5: `reflect.rs` `cfdd3ea8ac08523d8233a623e8b696fc`, `component.rs`
+> `044442bcb0c00af36088a487801d5873`, `registry.rs` `e970da516ff5ec3ef6b147c0d5a905fd`,
+> `boyko_reflect/src/reflect.rs` `540fee01aeda0923792a5a6f25fb2523`; all four verified identical
+> afterwards by `md5sum -c` **and** `cmp`. ⚠️ **The identity claim is AT THE MOMENT OF RESTORE, and
+> `registry.rs` was edited twice AFTER the ledger closed** — a missing `///` separator before its
+> `# Panics` heading, and `#[cfg(not(debug_assertions))]` on the hand-written subject and its id,
+> which `-D warnings` demanded because in a DEBUG build the two release-only gates are their only
+> consumers. Both were re-gated (`boyko-reflect` debug 4 / release 7, clippy clean). Recorded here
+> because *"restored byte-identically"* and *"unchanged since"* are two claims, and only the first
+> one is what a RED ledger earns.
+>
+> | RED | mutation | OBSERVED |
+> |---|---|---|
+> | 1 | a `REFUSALS` row with no fixture | census exit **101**, 3 clauses red, naming `red1_invented_rule_rejected` as *"rows with no fixture"* |
+> | 2 | one refusal's `quote_spanned!` → plain `quote!` | trybuild **mismatch**: the caret moved off the `union` keyword and onto the line above the item — the `#[derive(Component, …)]` attribute |
+> | 3 | delete `#[diagnostic::on_unimplemented]` | trybuild **mismatch**: the message became rustc's generic *"the trait bound `NoDefaultImpl: ReflectDefault` is not satisfied"*; the census's message-only clause red too |
+> | 3b | … **and** delete the row AND the fixture (the corrected form) | the bijection clause goes **GREEN** — the pre-D20 blindness, exactly as the correction predicts — while two other clauses red, because the message-only row is pinned BY NAME. Stronger than the correction expected, and measured rather than argued |
+> | 4 | a spanned refusal site with no row | `boyko-macros` does not compile: `error[E0425]: cannot find value 'IDX_RED4_NEW_RULE' in this scope` |
+> | 5 | delete the bitset refusal | trybuild: *"Expected test case to fail to compile, but it succeeded."* — and see finding 5 above for what it also found. ⚠️ **Its SECOND stated observation is not observable, and the rung should not have offered it:** *"`bitset_storage_rejected`'s migrated positive-control twin reads `Some` where C8's landed clause read `None`"* needs a live subject carrying `reflect` **and** `storage = "bitset"`, and with the refusal in place no such subject compiles — which is why the twin (`reflect_pass/bitset_tag_without_reflect_accepted.rs`) carries the tag WITHOUT `reflect` and is unmoved by this mutation. The consequence is real; the reading of it is the trybuild line, not a second assertion |
+> | 6 | mis-scope the bitset refusal to any `storage` key (gate 5(a)'s own) | `dense_storage_accepted` reds — the dense control now carries the bitset message on its own `reflect` key |
+> | 7 | delete the release `assert!` | `cargo test -p boyko-reflect --release`: *"test did not panic as expected"*, 1 red / 6 green — its positive control (`…table_id_still_works`) stays green, which is what tells the two apart |
+>
+> **GATES G5 IS DISCHARGED (D32).** Its `<!-- doc-path-planned -->` marker on
+> `crates/reflect_fixture/tests/reflect_compile_fail.rs` is removed and the document's
+> planned-deliverable pin went **4 → 3** — the anchors census's *"DOWN means a deliverable landed"*
+> direction, fired by this rung and satisfied in the same edit.
+>
+> *Gates, all unpiped, all exit 0:* corpus feature-ON `running 3` (6 refusals + 2 upstream pins + 4
+> accepting fixtures) · corpus feature-OFF `running 1`, and all six census fixtures **compile**, which
+> is D33 measured rather than argued · census `running 7` · `boyko-reflect --release` `running 7`
+> (the bitset gate + its control) · `c7_derive_bake` `running 16`.
+>
+> *Regression, all unpiped, all exit 0:* `boyko-macros` (a COMPILE — 0 passed, 15 ignored doctests,
+> as C8 recorded) · `boyko-reflect` debug **4+19+1+13+7+9+8+1+14** and release **7+19+1+13+7+9+8+1+14**
+> · `reflect-fixture --features reflect-fixture/reflect --all-targets` (`c6_nested_descend` 4,
+> `c7_alloc_delta` 2, `c7_derive_bake` 16, `reflect_absence_census` 2+1 ignored,
+> `reflect_leg_nonvacuity` 1, `reflect_compile_fail` 3) · `reflect-dogfood --features reflect
+> --all-targets` (4+3+2+3) · **all nine `boyko_ecs` trybuild corpora** · the root censuses
+> `internal_docs_anchors` 8, `engine_packages_census` 3, `trybuild_corpus_compiler_witness` 2,
+> `reflect_manifest_census` 7, `reflect_ship_closure` 2, `reflect_ci_coverage` 6,
+> `reflect_refusal_census` 8 · clippy `-D warnings`, touch-first, on all four edited packages in both
+> feature states.
 
-| refused | reason | span |
-|---|---|---|
-| generic type parameters | a per-impl `static TYPE_INFO` collapses across monomorphizations — the documented Bundle / Phase-12.5 `static SLOT` / Phase-17 `State<S>` trap | the generic param |
-| `#[repr(packed)]` | taking `&field` on a packed type is UB; the `*_unaligned` ops are v2 | the `repr` attribute |
-| `storage = "bitset"` | no per-row bytes exist — the bit *is* the datum, so "read field at offset" is meaningless | the `storage` key |
-| an `Opaque` field without `#[reflect(skip)]` | D15 — the wire is shared with the shipped `boyko_serialize`; silent omission is unacceptable | **the field** |
-| a fieldless enum with no `#[repr(Int)]` | no guaranteed discriminant width (FIX Mi3) — a silent `Opaque` would be worse | the enum item |
-| a data-carrying enum, `Option<T>`, `Vec`, `Map`, `Box`, `&T`, raw pointers | v2 kinds; `Option<T>` is the *smallest* data-carrying enum and niche optimization means **no** guaranteed discriminant location, so it inherits the full data-enum hazard and is **not** "cheap enough" | the field |
-| **a type with no `Default` and no `#[reflect(no_default)]`** — **D20** | `default_in_place`'s `Some` arm is baked from `Default`, and an inspector's "Add Component" needs it. **This row is not a `compile_error!` and cannot be**: a proc macro cannot see trait impls, so the refusal is a trait bound carrying `#[diagnostic::on_unimplemented]`, which is this tree's existing answer for that class (`query/chunked_data.rs:67~`, `query/filter.rs:2507~`, with a blessed fixture at `tests/compile_fail_chunk/changed_filter_rejected.rs:11~`) | the **type name**, via the `const _: fn() = …` witness the derive emits |
+
+**Lands.** Every rejection the derive must make, each a `compile_error!` **spanned at the offending
+token** (never at the derive attribute).
+
+⚠️ **RE-COUNTED, RE-SPANNED AND RE-HOMED by the C9 audit, 2026-08-26 — D32–D38.** The table below
+is the corrected matrix; the rows it replaces are struck beneath it, each with the measurement that
+struck it. Three of the original rows refused inputs that **`#[derive(Component)]` or rustc already
+refuses**, one row's field half was a strict subset of another row's, and two shapes the derive
+accepts today had **no row at all**. The census trap is why this had to be settled before a line of
+code: *a refusal outside `REFUSALS` is invisible to the census that keeps refusals honest* — and its
+mirror, **a row in `REFUSALS` that C9 does not author is a fixture whose red cannot fire**, because
+deleting C9's refusal leaves the program non-compiling anyway.
+
+| refused | reason | span | `REFUSALS` |
+|---|---|---|---|
+| `storage = "bitset"` together with `reflect` | no per-row bytes exist — the bit *is* the datum, so "read field at offset" is meaningless | **the `reflect` key** (D37) | yes |
+| an `Opaque` field without `#[reflect(skip)]` | D15 — the wire is shared with the shipped `boyko_serialize`; silent omission is unacceptable. **This ONE rule refuses every standard indirection** (`Vec`, `Box`, `Option<T>`, `Map`, `&T`, raw pointers, `PhantomData<T>`, a data-carrying enum *in a field*): all of them fall through the same arm of the classifier to `ValueKind::Opaque` — D34, measured | **the field's TYPE** — corrected at the landing: a `syn::Field` span starts at its first ATTRIBUTE, so on a documented field the caret landed under the `///` line | yes |
+| a fieldless enum with no `#[repr(Int)]` | no guaranteed discriminant width (FIX Mi3) | the enum item | yes |
+| **a data-carrying enum as the component ITSELF** — D38 | C7's non-struct arm accepts it and bakes `TypeKind::Opaque` with `fields: &[]` — *a coherent descriptor asserting that a type with two payload variants has no fields* | the enum item | yes |
+| **a union as the component ITSELF** — D38 | the same arm, the same lie, and **no document had a row for it**: GATES' G5 corpus carries `union_rejected` and this matrix carried nothing | the union item | yes |
+| **a type with no `Default` and no `#[reflect(no_default)]`** — **D20** | `default_in_place`'s `Some` arm is baked from `Default`, and an inspector's "Add Component" needs it. **This row is not a `compile_error!` and cannot be**: a proc macro cannot see trait impls, so the refusal is a trait bound carrying `#[diagnostic::on_unimplemented]`, which is this tree's existing answer for that class (`query/chunked_data.rs:67~`, `query/filter.rs:2507~`, with a blessed fixture at `tests/compile_fail_chunk/changed_filter_rejected.rs:11~`) | the **type name**, via the `const _: fn() = …` witness the derive emits | yes — as a **message-only** row (D36) |
+
+**And one ACCEPT, which is not decoration:** field-level **`#[reflect(skip)]`** lands here (D35),
+because the `Opaque`-field row is *defined in terms of it*. Five sites schedule it at C9, one of them
+landed code, and it was on no rung's **Lands** list
+anywhere. MEASURED 2026-08-26: `#[reflect(skip)]` on a field is accepted today and **completely
+inert** — a `Vec<u32>` field carrying it still bakes `Opaque`, byte-identical to the same field
+without it.
+
+~~| generic type parameters | a per-impl `static TYPE_INFO` collapses across monomorphizations — the documented Bundle / Phase-12.5 `static SLOT` / Phase-17 `State<S>` trap | the generic param |~~
+**STRUCK — D34.** MEASURED on rustc 1.97.1 with **no `reflect` opt-in in the input at all**: a
+generic `#[derive(Component)]` struct fails with **15 errors** (`E0107` *missing generics for
+struct* plus `E0425` *cannot find type `T` in this scope*), because the derive emits `impl #name`
+and `impl … Component for #name` from the bare ident and threads no generics —
+`crates/boyko_macros/src/component.rs:416` and `crates/boyko_macros/src/component.rs:432`. With
+`#[component(reflect)]` added it is
+**20**. The row's stated hazard — a per-impl `static TYPE_INFO` collapsing across monomorphizations
+— is therefore **not reachable**: the reflect seam is never entered. The only thing the row could
+still buy is one spanned error instead of fifteen, and that needs the *whole* derive to
+early-return, which is not `cfg`-able (D33) and would therefore fire with the feature **off** as
+well. Deleted from `REFUSALS`; §6 already defers generics to v2, and rustc enforces the deferral
+today.
+
+~~| `#[repr(packed)]` | taking `&field` on a packed type is UB; the `*_unaligned` ops are v2 | the `repr` attribute |~~
+**STRUCK — D34, and the reason survives its row.** MEASURED, two subjects: `#[repr(packed)]` with
+fields `u8, u32` under a **plain** `#[derive(Component)]` (no `reflect` anywhere) →
+`error[E0793]: reference to field of packed struct is unaligned`, one error, caret on `Component`.
+`#[repr(packed)] #[component(reflect)]` with fields `u8, u8` → **compiles, installs, and is sound**:
+with every field of align 1 the struct is align 1, so every `base + offset` read is aligned by
+construction. The *reachable* set of this row is exactly its *harmless* set, and its unsound set is
+refused by a diagnostic C9 neither authors nor controls. The reason stays true of the accessors
+(`crates/boyko_reflect/src/prim.rs`'s scalar reads take a shared reborrow, which requires
+alignment), so the obligation **returns** the day `#[derive(Component)]` stops taking a reference to
+a field — recorded here rather than gated, because a refusal for a case rustc already refuses has no
+observable red.
+
+~~| a data-carrying enum, `Option<T>`, `Vec`, `Map`, `Box`, `&T`, raw pointers | v2 kinds; `Option<T>` is the smallest data-carrying enum … | the field |~~
+**MERGED into the `Opaque`-field row — D34.** MEASURED in one run, at offsets 0, 24, 32, 40, 0 and
+8 respectively: `Vec<u32>`, `Box<u32>`, `Option<u32>`, `PhantomData<u64>`, `&'static u32` and
+`*const u8` **all** bake `ValueKind::Opaque`, from the single fallthrough at
+`crates/boyko_macros/src/reflect.rs:568~` after `scalar_kind`, the array arm and `is_nested_path`
+have all declined. The `Opaque`-field row therefore already refuses, **at the field span**, every
+input this row enumerated: two rows, one verdict, one message, one fixture. *(Raw pointers are
+additionally refused upstream by `Bundle: Send + Sync` unless `storage = "dense"` or `no_bundle`
+suppresses the bundle impl — measured both ways.)* The **item**-level halves of this row are neither
+merged nor lost: they are the two new D38 rows above.
+
+**On the fieldless-enum row's own reason.** *"a silent `Opaque` would be worse"* indicts the branch
+the row permits: a fieldless `#[repr(u8)]` enum is **accepted** and gets exactly that silent
+`Opaque` (measured) until **C10** gives it `TypeKind::Enum`, and §5 lets C9 land first. The row is
+kept because its stated ground — no guaranteed discriminant width, FIX Mi3 — is real and
+C10-independent; the window is recorded so it is not rediscovered.
 
 **Also lands at C9 — ECS D5's second mechanism, moved here by D29 (2026-08-21).** A release
 `assert!` inside `install_type_info`: `storage_kind(id) != Bitset`
-(`boyko_ecs/src/ecs/core/component/component_registry/mod.rs:388` is the public getter;
+(`crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs:388` is the public getter;
 [`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):340-347 states the requirement as *"refusal is
-TWO mechanisms at TWO boundaries; neither substitutes for the other"*). **It was on no rung's list
-in any of the four documents** — the landed installer carries only its `MAX_COMPONENTS`
-`debug_assert!` and bounds guard, `boyko_reflect` names neither `storage_kind` nor `Bitset` anywhere,
-and this document mentioned `storage_kind` zero times before the C8 audit. It belongs here and not
-at C8 because C8's derive-side suppression (D29) already stops the derive — C8's only caller — from
-ever passing a bitset id; the runtime half exists for the callers the derive cannot see, which
-ECS D5 names as the Aether-expanded path and a future runtime reclassification, and neither exists
-before this rung. Gate: an out-of-band `install_type_info(bitset_id, info)` panics under
-`--release`. RED: delete the assert; the gate reds.
+TWO mechanisms at TWO boundaries; neither substitutes for the other"*). ~~**It was on no rung's list
+in any of the four documents**~~ — **FALSE, corrected 2026-08-26 (D37).**
+[`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):1135 lists this exact item against rung **EG3**,
+with a live fallback clause — *"If CORE declines it, EG3 must add the check on its own read path and
+say so"* — which C9 accepting the item does **not** retire. The substantive half of the claim holds
+(no rung's *Lands* carried it), and the wrongness mattered twice: it hid the obligation to retire
+ECS's conditional, and it hid the new **C9 → EG3** edge, now recorded in §7.4. Re-verified at this
+audit: the landed installer (`crates/boyko_reflect/src/registry.rs:87`) still carries only its
+`MAX_COMPONENTS` `debug_assert!` and bounds guard, and `boyko_reflect` names neither `storage_kind`
+nor `Bitset` anywhere. It belongs here and not at C8 because the runtime half exists for the callers
+the derive cannot see. **Gate:** an out-of-band `install_type_info(bitset_id, info)` panics. The gate
+is `#[cfg(not(debug_assertions))]` and **its invocation is part of it** —
+`cargo test -p boyko-reflect --release`, output read for a non-vacuous `running [1-9]`, exactly the
+discipline `crates/boyko_reflect/src/registry.rs:141~`'s own note already states for the release
+halves beside it. **RED:** delete the assert; the gate reds. *(The CI leg exists: `reflect-on` runs a
+`profile: [debug, release]` matrix, `.github/workflows/ci.yml:174-194`.)*
 
 **`storage = "dense"` is NOT refused** — a dense component has real per-row bytes at a stable
 address, and it is the one non-table kind that is fully readable. Its *enumeration* problem is
@@ -3212,56 +3593,157 @@ address, and it is the one non-table kind that is fully readable. Its *enumerati
 refuse it and refusing it would make the design decline the one flagship component it can fully
 read.
 
-**Diagnostics quality is a deliverable, not a nicety.** Aether emits `#[derive(Component)]` items
+**Diagnostics quality is a deliverable, not a nicety.** ~~Aether emits `#[derive(Component)]` items
 the user never wrote and can already produce `#[component(storage = "bitset")]` from
 `tag Foo(bitset);` — so a user who typed three words would otherwise get an error about a derive
-they never typed. Aether solves this class with `quote_spanned! { name.span() => … }` and has a
-recorded measurement of what happens without it (*"rustc's 'previous definition of the type `Foo`
-here' pointed at `aether! {`"*). Refusals stay spanned at the user's own token.
+they never typed.~~ **STRUCK 2026-08-26 (D37): that user cannot exist.**
+[`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md):520-529 deletes the combination by
+construction — `reflect` is a key on the **`component`** construct only, and only `tag` emits
+`storage = "bitset"` — and it is verified in the tree: `crates/aether_lang/src/expand.rs` emits
+`#[component(storage = "bitset")]`, while the string `reflect` appears in that crate **only** as the
+PBR material key `reflectance`. The discipline is kept on its own, stronger ground: Aether solves
+this class with `quote_spanned! { name.span() => … }` and has a **recorded measurement** of what
+happens without it (`crates/aether_lang/src/expand.rs:187~` — *"rustc's 'previous definition of the
+type `Foo` here' pointed at `aether! {`"*), with a blessed fixture that now shows the caret on the
+user's own `tag Foo;`. The remaining user of the bitset refusal is **hand-written Rust**
+([`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md):534-536), and D37 spans it at the
+`reflect` key.
+**MIGRATION — nineteen landed tests in two files stop compiling, and C9 owns every one of them.**
+The rung as first written listed zero. MEASURED green at the audit and therefore deleted by this
+rung: `cargo test -p reflect-fixture --features reflect-fixture/reflect --test c7_derive_bake --test
+c8_bitset_suppression` → `running 17` and `running 2`, exit 0. One compile error in a file deletes
+**every** test in it, which is why a subject collision is a whole-file loss.
+
+| subject | refused by | migration |
+|---|---|---|
+| `c7_derive_bake.rs`'s `Padded` — an un-skipped `PhantomData<u8>` | the `Opaque`-field row | **DONE**: gained `#[reflect(skip)]` (`crates/reflect_fixture/tests/c7_derive_bake.rs:219`), which is why D35 lands the attribute here. `crates/reflect_fixture/tests/c7_derive_bake.rs:911`'s index-faithfulness assertions are **unchanged** by the skip and were re-run green: D14 keeps `fields.len()` at 3, keeps the name and the offset, and keeps all four accessor slots `None` |
+| `c7_derive_bake.rs`'s `NonStruct` — a data-carrying enum | the new D38 item row | **DONE**: moved to the corpus as `crates/reflect_fixture/tests/reflect_compile_fail/data_carrying_enum_rejected.rs`, subject and variants verbatim. Its gate's doc said *"C10 replaces this test rather than deleting it"* — **C9 did, four rungs early**, and the replacement is a blessed `.stderr`, not a deletion. `every_derived_descriptor` went 16 → 15 and the file went `running 17` → `running 16` |
+| `c8_bitset_suppression.rs`'s `C8BitsetTag` | the bitset row | **DONE**: the whole file is deleted. The tag became `crates/reflect_fixture/tests/reflect_compile_fail/bitset_storage_rejected.rs`; that file predicted it — *"If this file ever stops compiling, the message arrived early and C9's row is the place to record it"* — and D37 records it. Its positive control and its storage-kind clause moved together into `crates/reflect_fixture/tests/reflect_pass/bitset_tag_without_reflect_accepted.rs`, a `t.pass()` case, so **both** are still RUN |
+
+*(The falsehood at that file's header — *"the four `REFLECTION-PLAN-*.md` documents are not in
+`internal_docs_anchors.rs`'s `GATED_DOCS`"* — died with the file. HEAD `eeb567be` had put all four
+in, at `tests/internal_docs_anchors.rs:280`, one commit before the comment was read. The by-name
+citation practice it defended is still right; only its stated reason was doc-rot.)*
 
 **Gate.**
-1. A `trybuild` corpus, one case per row, with blessed `.stderr` — the established harness
-   (`crates/boyko_ecs/tests/compile_fail_*.rs`), `#[cfg(not(miri))]` like its siblings.
-2. **Anti-rot census:** a test asserting that the number of `.stderr` fixtures **equals** the
-   number of refusal rules enumerated in the derive source (a `const REFUSALS: &[&str]` the derive
-   itself iterates). A rule added without a fixture reds; a fixture deleted reds.
-   **Re-scoped 2026-08-21 (architect's C6 ruling, D21): this census covers DIAGNOSTIC quality, not
-   termination.** It asserts the derive names the five standard indirection kinds (`Box`, `Vec`,
-   `&T`, `Option<Box<_>>`, raw pointers) so a user who writes one gets a **spanned compile error at
-   the field** rather than a registration-time `Problem`. It is **not** the acyclicity proof and
-   never was — that is `validate`'s `NestedCycle` arm, with `NestedNotInline` alongside it for
-   addressing-validity, both landing at **C6** (§3.1). The consequence of a missing kind is
-   therefore a **worse diagnostic**, not an unsound descend: the descend is refused by C6's checks
-   either way. D20's item 2 (`REFUSALS` counts `missing_default_rejected`, so the hidden `T: Default`
-   bound stays census-visible) is unaffected by this re-scoping.
-3. The corpus is run under `--no-fail-fast`. **`cargo test` stops at the first failing target**,
-   so one known-red target shadows every target behind it — this repo has measured a trybuild
-   fixture staying red for **87 commits** because a line was added and its `.stderr` was never
-   re-blessed, invisible until the flag was passed.
-4. The dense case is a **positive** control: `#[component(reflect, storage = "dense")]` compiles
-   and installs.
-5. **The two D20 fixtures, and the second is a `t.pass()`:** `missing_default_rejected` (a type with
+1. A `trybuild` corpus, one case per `REFUSALS` row, with blessed `.stderr`. ~~the established
+   harness (`crates/boyko_ecs/tests/compile_fail_*.rs`)~~ — **STRUCK, D33: that package cannot host
+   it, and the measurement runs in both directions.** `boyko_ecs` declares no `reflect` feature,
+   trybuild copies the host manifest's `[features]` table into the generated crate, and the derive's
+   whole emission is `#[cfg(feature = "reflect")]` evaluated *there* — so every fixture would
+   **compile** and the harness would red with *"expected compile failure"* on all of them. MEASURED
+   directly: `#[component(reflect)]` on a struct in `boyko_ecs` compiles clean (it would be `E0433`
+   if the `cfg` were live — that package has no `boyko-reflect` edge at all) and emits
+   `warning: unexpected cfg condition value: reflect`, which CI's clippy promotes under
+   `-D warnings`. **The home is `reflect-fixture`**, at the paths and fixture names
+   [`REFLECTION-PLAN-GATES.md`](REFLECTION-PLAN-GATES.md):1196-1301 already reserves (D32), and it
+   needs a `trybuild` **dev**-dependency in `crates/reflect_fixture/Cargo.toml`, which has no
+   `[dev-dependencies]` table today. `reflect_dogfood`'s recorded dev-edge argument applies verbatim:
+   a dev edge enters no ship closure, so G2's censuses do not move, and it carries no
+   `features = [...]` array, so none of G1's manifest clauses touch it. `#[cfg(not(miri))]` like its
+   siblings.
+2. **Anti-rot census, and it is BIDIRECTIONAL or it is nothing (D36).** ~~a test asserting that the
+   number of `.stderr` fixtures equals the number of refusal rules enumerated in the derive source
+   (a `const REFUSALS: &[&str]` the derive itself iterates)~~ — **STRUCK: no test can read it and
+   nothing would emit from it.** `boyko_macros` is `[lib] proc-macro = true`, so a `const` there is
+   unreachable from any test — D31 measured that obstacle about this same crate — and *"the derive
+   itself iterates"* is not a construction: each refusal is a distinct syntactic condition, so
+   nothing iterates a list of names to decide anything. A `const` the derive only **declares** is the
+   dead-datum class this campaign has now found five times. **The shape that makes it live:**
+   `const REFUSALS: &[(&str, &str)]` — rule name, message — with one `IDX_*` per rule, and every
+   refusal site emitting `REFUSALS[IDX_X].1` inside its `quote_spanned!`. Then a refusal added
+   without a row has literally **nothing to say**, which closes the direction §2's D20 item 2 names
+   (*"a rule that is not in `REFUSALS` is structurally invisible to it"*) and which the
+   equality-of-counts version could not see. The census itself is a **source-text scan** — the shape
+   `tests/internal_docs_anchors.rs` uses, and the only one available across a proc-macro boundary:
+   it counts `REFUSALS` rows against `.rs` files in the compile_fail directory **only** (the
+   `t.pass()` cases live in a sibling directory), and it asserts each row's message literal appears
+   either at a `quote_spanned!` site in `crates/boyko_macros/src/reflect.rs` or, for the row marked
+   *message-only*, at `crates/boyko_reflect/src/reflect.rs:84`'s `on_unimplemented`.
+   ~~**Re-scoped 2026-08-21 (architect's C6 ruling, D21)** … It asserts the derive names the five
+   standard indirection kinds (`Box`, `Vec`, `&T`, `Option<Box<_>>`, raw pointers) …~~ — **the
+   CONCLUSION stands, the INSTRUMENT is struck 2026-08-26 (D34).** D21's ruling is unchanged and
+   restated: this census covers DIAGNOSTIC quality, not termination; it is **not** the acyclicity
+   proof and never was — that is `validate`'s `NestedCycle` arm, with `NestedNotInline` alongside it
+   for addressing-validity, both landing at **C6** (§3.1); the consequence of a missing kind is a
+   worse diagnostic, not an unsound descend. What is struck is the name table: it is a **dead datum**
+   (the `Opaque`-field row already reaches the same verdict at the same span — measured, D34) and it
+   is not a sound detector (`crates/boyko_macros/src/reflect.rs:436`'s `is_nested_path` decides on
+   *"has generic arguments anywhere"*, so a user's `MyArena<T>` is syntactically identical to
+   `Vec<T>` — the very reason C6 ruled a runtime refusal **list** impossible, and the reason that
+   file's header says the structural checks *"enumerate no type name at all and therefore cannot
+   drift against this list"*). Adding the list back would re-create the drift surface D21 removed.
+3. **Two legs, and the second is what makes the corpus test the derive rather than test rustc.**
+   Feature ON: every fixture fails with its blessed `.stderr`. Feature OFF: every fixture
+   **compiles**, because D33 puts the refusals inside the same `#[cfg(feature = "reflect")]` block as
+   the emission they guard — a refusal that fired with the feature off would refuse a program that
+   compiles to nothing. ⚠️ **This is also the second reason the two struck rows could not have
+   stayed:** MEASURED with the feature OFF, a generic fixture fails with 15 errors and a packed
+   fixture with `E0793`. GATES G5's *"Feature off: every fixture **compiles**"* and its second RED
+   (*"the harness reds on all nine at once"*) are therefore **false today, for two of its nine
+   fixtures, before C9 lands anything** — recorded in §7.3d as G5's to fix.
+4. The corpus is run under `--no-fail-fast`, and so is every leg of this rung. **`cargo test` stops
+   at the first failing target**, so one known-red target shadows every target behind it — this repo
+   has measured a trybuild fixture staying red for **87 commits** because a line was added and its
+   `.stderr` was never re-blessed, invisible until the flag was passed. *(This is an invocation, not
+   an instrument: nothing in the tree can red if it is omitted. It is listed with the invocation and
+   **not counted as a gate** — this campaign has twice shipped a gate table whose members could not
+   move.)*
+5. **Two positive CONTROLS, labelled as controls.** (a) `#[component(reflect, storage = "dense")]`
+   compiles and installs. ⚠️ MEASURED green **today, before any C9 code exists**:
+   `storage_kind(id) == Dense`, `type_info_of(id).is_some() == true`, two `Prim(F32)` fields at
+   offsets 0 and 4. It excludes *"the refusals ate the dense case too"*, which is real value, but
+   under the reds below it cannot move — so it carries its own red: **mis-scope the bitset refusal to
+   match any `storage` key**; the control reds. (b) `#[reflect(skip)]` on a `Vec` field compiles and
+   bakes D14's descriptor (`fields.len()` unchanged, `Opaque`, all four slots `None`) — the way out
+   of the `Opaque`-field row, and a `t.pass()` case, so it is **run**, not merely compiled
+   (trybuild's `check_pass` executes the fixture binary and requires success — verified in trybuild
+   1.0.120).
+6. **The two D20 fixtures, and the second is a `t.pass()`:** `missing_default_rejected` (a type with
    no `Default` — its `.stderr` pins `ReflectDefault`'s `on_unimplemented` *message*, not rustc's
    generic E0277 text, which is the whole point of the row) and `no_default_accepted`
    (`#[reflect(no_default)]` compiles, `TYPE_INFO.default_in_place.is_none()`). **`REFUSALS` counts
-   the first**, so gate 2's census sees the rule — the defect D20 exists to close was precisely that
-   a hidden `T: Default` bound is structurally invisible to a census keyed on `REFUSALS`.
+   the first**, as a *message-only* row (D36), so gate 2's census sees the rule — the defect D20
+   exists to close was precisely that a hidden `T: Default` bound is structurally invisible to a
+   census keyed on `REFUSALS`.
    *(Both fixtures depend on two items **C7** lands under D22 — the `ReflectDefault` trait whose
    message the first `.stderr` pins, and the `reflect` helper-attribute registration without which
    `no_default_accepted`'s `#[reflect(no_default)]` is a "cannot find attribute" error at the use
-   site. Neither existed when this gate was written.)*
+   site. Both now exist: `crates/boyko_reflect/src/reflect.rs:84`.)*
 
-**RED MUTATION.** Add a refusal rule to `REFUSALS` without adding its fixture. Gate 2
-reds. *Second red:* change one refusal's `quote_spanned!` to plain `quote!`. The `.stderr` no
-longer matches (the caret moves to the derive) and gate 1 reds — which is how span quality becomes
+**RED MUTATION.** Add a refusal rule to `REFUSALS` without adding its fixture. Gate 2 reds.
+*Second red:* change one refusal's `quote_spanned!` to plain `quote!`. The `.stderr` no longer
+matches (the caret moves to the derive) and gate 1 reds — which is how span quality becomes
 gate-visible instead of aspirational.
 
-*Third red, D20's own, and it is the one that shows the census could not have seen this before:*
-delete `#[diagnostic::on_unimplemented]` from `ReflectDefault`. Gate 5's first fixture reds because
-its `.stderr` now carries rustc's generic *"the trait bound `Foo: Default` is not satisfied"* pointing
-into the expansion. **Then delete the `REFUSALS` row too** and confirm gate 2 goes back to green with
-the rule gone — that green is the state this plan shipped in before D20, and seeing it is how the row
-is believed.
+*Third red, and it is the one that shows the census could not have seen D20 before:* delete
+`#[diagnostic::on_unimplemented]` from `ReflectDefault`. Gate 6's first fixture reds because its
+`.stderr` now carries rustc's generic *"the trait bound `Foo: Default` is not satisfied"* pointing
+into the expansion. ~~**Then delete the `REFUSALS` row too** and confirm gate 2 goes back to green
+with the rule gone~~ — **CORRECTED 2026-08-26: as written, this predicts the opposite of what its own
+gate prints.** With the row gone and `missing_default_rejected` still on disk the counts are N
+fixtures against N−1 rules, so gate 2 **reds**. The state being demonstrated — the one this plan
+shipped in before D20 — had neither the row **nor** the fixture, so the mutation must delete
+**both**. A red whose predicted observation is inverted is how a red that cannot fire gets certified.
+
+*Fourth red, D36's own, and it is the direction the struck census could not see at all:* add a
+spanned refusal to the derive **without** adding its `REFUSALS` row. Under the struck `&[&str]` shape
+this was silently fine, because each refusal's message lived at its own site. Under D36 the new site
+has no message to emit and does not compile, so the drift is caught at the derive rather than at a
+fixture count.
+
+*Fifth red, D37's own:* delete the bitset refusal. Because D37 also deletes
+the `!hooks.storage_bitset` term from `component.rs`'s condition, the tag then **installs a
+descriptor**, and `bitset_storage_rejected`'s migrated positive-control twin reads `Some` where C8's
+landed clause read `None`.
+
+**D29's derive-side term is REPLACED, not joined (D37).** With the refusal in place,
+`component.rs`'s `!hooks.storage_bitset` term is unreachable in its
+suppressing branch and its only witness no longer compiles — a dead datum whose gate has just been
+deleted. It is deleted together with the gate it served. Nothing is lost: with the feature **off**
+the whole emission is `cfg`-stripped and nothing installs, and with the feature **on** the refusal
+stops the compile. ECS D5's *"two mechanisms at two boundaries"* is satisfied by the compile-time
+refusal and the release `assert!` — not by three.
 
 ---
 
@@ -3462,6 +3944,25 @@ defect.
      comparison (`reflect_off_twin` vs `reflect_never`: same symbol multiset, same `.text`). After
      C8's D27 touch both legs carry the funnel, which is what makes the comparison answer C8's
      question. G6c must also gain the twin-source identity guard its own note already demands.
+3d. **GATES G5 is DISCHARGED by C9 (D32), and it carries two defects this audit measured from the
+   CORE side.** G5 (*"the derive's refusals: one trybuild corpus, two legs"*,
+   [`REFLECTION-PLAN-GATES.md`](REFLECTION-PLAN-GATES.md):1196-1301) specifies the same corpus C9
+   builds, in the same package, and closes with *"Named here so the two are not built twice"* — while
+   naming CORE only by document, never by rung, so the collision was invisible to a grep for `C9`
+   (**zero** hits in all four siblings). C9 builds it at G5's paths and fixture names; G5 becomes a
+   cross-reference the next time GATES is edited. Travelling with it:
+   * **G5's feature-off leg is false today, before C9 lands anything.** Gate 2 says *"Feature off:
+     every fixture **compiles**"* and its second RED says the harness *"reds on all nine at once"*.
+     MEASURED on rustc 1.97.1 with the feature OFF: `generic_component_rejected` fails with 15 errors
+     and `repr_packed_rejected` with `E0793`, because both are refused by `#[derive(Component)]`
+     itself rather than by the reflect emission (D34). Under D34 those two rows leave `REFUSALS`, so
+     the leg becomes true again for the corpus that is actually built — but the *claim* has to be
+     corrected where it is written, not left to be inherited.
+   * **G5's `aether_tests` twin is a fixture for an input Aether cannot emit.** G5 assigns *"the
+     spanned version of this refusal"* to an `aether_tests` trybuild fixture and calls it *"CORE's
+     Aether item"*. [`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md):520-529 deleted that
+     combination by construction and this audit verified it in the tree (D37). The fixture is retired
+     with the motivation, not kept as decoration.
 4. **ECS owes CORE nothing; CORE owes ECS the model.** CORE's accessors take a bare `*const u8` /
    `*mut u8` and never reach into `boyko_ecs`'s storage, so C1–C11 are buildable and gateable with
    no ECS glue at all. The seam is deliberate: it is what lets the value model be proven before the
@@ -3474,6 +3975,15 @@ defect.
    enumeration"*) cannot pass without it. EG8 additionally needs the real engine types to be
    *annotated*, which **no rung in any of the four documents schedules**; that is EG8's to carry or
    to hand to a rung of its own, and it is recorded here so it stops being invisible.
+   **And CORE now owes ECS a second install-side item: `C9` carries ECS D5's release
+   `assert!(storage_kind(id) != Bitset)` inside `install_type_info` (D29, re-confirmed at the C9 audit
+   under D37), so **ECS EG3 depends on CORE C9** — the last rung of this plan.
+   [`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):1135 has carried that item against EG3 all
+   along, with the fallback *"If CORE declines it, EG3 must add the check on its own read path and say
+   so"*; CORE does **not** decline it, so that conditional is retired and must be struck when ECS is
+   next edited, or EG3 builds the same check twice. C9's own text claimed the item *"was on no rung's
+   list in any of the four documents"*, which was false and is struck at the rung; the sentence is
+   what hid this edge, exactly as the C8 → EG8 edge above was hidden.
 5. **BOUNDARY owes CORE the `serialize` slot's first reader** (D9), and consumes
    `get_serialize_info(id).stable_name` rather than a `TypeInfo` field (D8).
 6. **OWNER decisions that block rungs.** The single list is analysis **B.13** (it supersedes B.11 as

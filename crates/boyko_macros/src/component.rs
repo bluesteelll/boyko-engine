@@ -9,6 +9,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
+use syn::spanned::Spanned;
 use syn::{Data, DeriveInput, Expr, Fields, Ident, Path, Type, parse_macro_input};
 
 use crate::common::FieldAccess;
@@ -159,32 +160,40 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     // and this crate keeps no edge to `boyko_reflect` (D17). CORE C8 adds the install
     // call in `component_id()` below, which is what makes the descriptor reachable.
     //
-    // CORE C8 / D29 — the `storage_bitset` term, and why ONE binding rather than two
-    // matching conditions: a bitset enable tag has no `ComponentPool` and no per-row
-    // bytes, so a descriptor published for its id is a coherent lie — an editor reading
-    // by id would be handed a zero-field view of something whose state is a bit in a
-    // bitset. Up to C7 the emission was inert and the combination merely compiled
-    // (MEASURED at the C8 audit: `size=0 align=1 fields=0 kind=Struct`); C8 is the rung
-    // that makes it publish, so C8 is where the suppression lands. This slot was the ONE
-    // in its neighbourhood carrying no `storage_bitset` term — its six neighbours
-    // (`entities_items`, `serialize_items`, `clone_install`, `relationship_install`,
-    // `serialize_install`, `bundle_items`) all do. Read TWICE below, by the descriptor
-    // emission and by the install slot: a single binding is what makes it impossible for
-    // the two to drift into "installs something it did not emit". C9 owns the spanned
-    // refusal message and, with it, ECS D5's release `assert!` inside `install_type_info`.
+    // CORE C9 / D37 — D29's `!hooks.storage_bitset` term is REPLACED here, not joined.
+    //
+    // C8 landed a *silent* suppression: `hooks.reflect && !hooks.storage_bitset`, so a
+    // `#[component(reflect, storage = "bitset")]` tag compiled and published nothing. C9
+    // makes the combination a spanned `compile_error!`, which leaves that term unreachable
+    // in its suppressing branch and its only witness (`reflect_fixture`'s
+    // `c8_bitset_suppression.rs`) unable to compile — a dead datum whose gate has just been
+    // deleted, and a RED (*"drop the `storage_bitset` term"*) with no subject left to
+    // observe it. So the term goes with the gate it served. Nothing is lost: feature off,
+    // the whole emission is `cfg`-stripped and nothing installs; feature on, the refusal
+    // stops the compile. ECS D5's *"two mechanisms at two boundaries"* is the compile-time
+    // refusal plus the release `assert!` inside `install_type_info` — not three.
+    //
+    // The bitset condition is now an ARGUMENT rather than a suppression: `codegen` needs
+    // the `reflect` key's span to put the caret on it (D37), and a `bool` cannot carry one.
     //
     // Computed BEFORE `input.ident` moves below, like every other codegen that needs to
     // walk the fields.
-    let reflect_enabled = hooks.reflect && !hooks.storage_bitset;
-    let (reflect_items, reflect_default_witness) = if reflect_enabled {
+    let (reflect_items, reflect_default_witness, reflect_refused) = if hooks.reflect {
         let no_default = match crate::reflect::parse_reflect_no_default(&input.attrs) {
             Ok(v) => v,
             Err(ts) => return ts,
         };
-        crate::reflect::codegen(&input, &input.ident, no_default)
+        let bitset_reflect_key = if hooks.storage_bitset { hooks.reflect_span } else { None };
+        crate::reflect::codegen(&input, &input.ident, no_default, bitset_reflect_key)
     } else {
-        (TokenStream2::new(), TokenStream2::new())
+        (TokenStream2::new(), TokenStream2::new(), false)
     };
+    // A REFUSED item emits refusals and no descriptor, so the install slot below must go
+    // with it: `<Self as Reflect>::TYPE_INFO` on a type with no `impl Reflect` is an
+    // E0277 that would land in every refused fixture's blessed `.stderr` beside the real
+    // message, freezing rustc's rendering of a second, derived error. One refusal, one
+    // error.
+    let reflect_enabled = hooks.reflect && !reflect_refused;
 
     let name = input.ident;
 
@@ -534,6 +543,14 @@ pub(crate) struct ComponentHookPaths {
     /// into (CORE D2), so the key is inert in a consumer that has not enabled the
     /// feature and this crate never gains an edge to `boyko_reflect` (CORE D17).
     reflect: bool,
+    /// Reflection CORE C9 / D37: the span of the `reflect` key itself, kept so the
+    /// `storage = "bitset"` refusal can put its caret **on that token**.
+    ///
+    /// A `bool` cannot carry a caret, and the caret is the deliverable here: three
+    /// census-gated documents specified three different ones for this single refusal, and
+    /// the blessed `.stderr` freezes whichever is emitted. `storage = "bitset"` is
+    /// legitimate on its own; `reflect` is the token that is wrong.
+    reflect_span: Option<proc_macro2::Span>,
 }
 
 impl ComponentHookPaths {
@@ -750,6 +767,10 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
                     ));
                 }
                 paths.reflect = true;
+                // CORE C9 / D37 -- the caret for the `storage = "bitset"` refusal. Taken
+                // from the key's own path so it survives whatever else the attribute
+                // carries and however it is formatted.
+                paths.reflect_span = Some(meta.path.span());
                 return Ok(());
             }
 

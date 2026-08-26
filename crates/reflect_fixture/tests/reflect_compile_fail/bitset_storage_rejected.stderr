@@ -1,0 +1,5 @@
+error: `#[component(reflect)]` cannot be combined with `storage = "bitset"`: a bitset enable tag has no ComponentPool and no per-row bytes -- the bit IS the datum, so "read the field at offset N" describes nothing. Drop `reflect` to keep the tag, or drop `storage = "bitset"` to keep the descriptor.
+  --> tests/reflect_compile_fail/bitset_storage_rejected.rs:17:13
+   |
+17 | #[component(reflect, storage = "bitset")]
+   |             ^^^^^^^

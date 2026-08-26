@@ -1,0 +1,5 @@
+error: a union has no v1 reflection descriptor: the walk would bake `fields: &[]`, asserting that a type whose members overlap has no fields. Drop `reflect` from this item, or reflect a struct that wraps it behind a describable field.
+  --> tests/reflect_compile_fail/union_rejected.rs:44:5
+   |
+44 | pub union Overlap {
+   |     ^^^^^

@@ -336,6 +336,16 @@ struct Anchor {
     line_no: usize,
     /// `M` of an `N-M` range. Checked for coherence (`M >= N`) and for being inside the file;
     /// the definition-shape test still applies to `N` alone.
+    ///
+    /// ⚠️ **Stated as a limit of the instrument, not a bug in it: `M` is bounds-checked, never
+    /// content-checked.** A range may therefore end in the middle of an unrelated construct — or
+    /// short of the very line that carries the fact the citation is making — and this census stays
+    /// green, because it has verified only that `M` is a line the file has. MEASURED:
+    /// `REFLECTION-PLAN-CORE.md` cited `boyko_reflect/src/registry.rs:87-118` for *"the table is
+    /// write-once, first writer wins"*; `:87` is the right signature, but `:118` is the middle of an
+    /// `assert!` condition and the `OnceLock::set` that IS the write-once claim sits at `:127`,
+    /// outside the cited range. The repaired citation is `:87-128`. A reader following a
+    /// census-green range can still land on the wrong text; only the anchor line is shape-checked.
     range_end: Option<usize>,
     /// `true` when written with a trailing `~` — the definition checks are waived for this
     /// anchor only.
@@ -348,8 +358,17 @@ struct Anchor {
 /// `GATED_DOCS`: they cite `.github/workflows/ci.yml:62` and `docs/FEATURE_MAP.md:112` in prose,
 /// neither of which the scan could see. An unseen mention is not a skipped check — it is a
 /// **misbinding**, because the anchor after it falls through to the last `crates/...` path instead,
-/// and the run then reports that file's line count. `REFLECTION-PLAN-GATES.md:1641` cited seven
+/// and the run then reports that file's line count. `REFLECTION-PLAN-GATES.md:1684` cited seven
 /// `ci.yml` legs and every one was checked against `crates/profile_fixture/Cargo.toml` (18 lines).
+///
+/// ⚠️ **That `:1684` is prose, and nothing checks it.** It was written `:1641`, was already off by
+/// two when written, and drifted to `:1684` when a discharge banner went in above it — found by
+/// reading, not by a run. The reason is structural and worth naming rather than repairing twice:
+/// **this census scans `.md` files for citations into `.rs`, never the reverse.** A `.rs` file
+/// citing a `.md` line — this comment, and any other — is outside every census in the tree, so its
+/// line numbers rot silently. Recorded as a known gap, not scheduled: the reverse direction is a
+/// second scanner with its own false-binding surface, and the citations it would cover are
+/// explanatory rather than load-bearing.
 ///
 /// ⚠️ **`src/` and `tests/` are deliberately NOT here, and adding them would be a regression.**
 /// Both exist at the repository root *and* inside every crate, so a bare `src/lib.rs` or
@@ -1702,7 +1721,9 @@ fn planned_paths_are_reported_and_pinned() {
         ("REFLECTION-PLAN-BOUNDARY.md", 4),
         ("REFLECTION-PLAN-CORE.md", 0),
         ("REFLECTION-PLAN-ECS.md", 2),
-        ("REFLECTION-PLAN-GATES.md", 4),
+        // 4 → 3 on 2026-08-26: CORE C9 built G5's `reflect_compile_fail.rs`, so its
+    // `doc-path-planned` marker came off in the same edit as this decrement.
+    ("REFLECTION-PLAN-GATES.md", 3),
         ("SYSTEMS.md", 0),
     ];
 

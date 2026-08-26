@@ -741,7 +741,7 @@ gate that can fail and a gate that cannot.
 - Lazy first-call registration via the existing `component_id()` `OnceLock` —
   avoids the `linkme` dead-strip / init-order hazard class entirely.
   *(Re-confirmed 2026-08-21 and now **more** viable than when written: the funnel at
-  `boyko_macros/src/component.rs:425-450` is intact — `static ID: OnceLock<ComponentId>`
+  `boyko_macros/src/component.rs:434-459` is intact — `static ID: OnceLock<ComponentId>`
   → `ID.get_or_init(|| { let raw = register_new::<Self>(); if Self::HAS_HOOKS { … } … })`
   — and it has grown from one install slot to **six**: `storage_install`,
   `require_install`, `clone_install`, `relationship_install`, `residency_install`,
@@ -960,7 +960,7 @@ zero mechanism risk.
 >
 > Meanwhile the **lazy funnel this section recommends is healthier than when this was
 > written** — it has grown from one install slot to six
-> (`boyko_macros/src/component.rs:425-450`; §8). So the recommendation is *more*
+> (`boyko_macros/src/component.rs:434-459`; §8). So the recommendation is *more*
 > viable, not less. What changed is the burden of proof: **A.5 must now argue against
 > a shipped in-tree precedent that went the other way**, and say why reflection goes
 > lazy where binding went explicit.

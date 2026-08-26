@@ -16,7 +16,7 @@
 
 use std::sync::OnceLock;
 
-use boyko_ecs::ecs::core::component::component_registry::MAX_COMPONENTS;
+use boyko_ecs::ecs::core::component::component_registry::{MAX_COMPONENTS, StorageKind, storage_kind};
 
 use crate::TypeInfo;
 
@@ -79,6 +79,10 @@ pub fn type_info_of(component_id: usize) -> Option<&'static TypeInfo> {
 /// G0's stub's, kept deliberately — the ship-absence census's needle B is this
 /// name (GATES D5), and the calibration re-run recorded at this rung is what the
 /// body replacement changes about that census.
+///
+/// # Panics
+///
+/// If `component_id` is classified [`StorageKind::Bitset`] — see below.
 #[inline(never)]
 pub fn install_type_info(component_id: usize, info: &'static TypeInfo) {
     debug_assert!(
@@ -90,6 +94,36 @@ pub fn install_type_info(component_id: usize, info: &'static TypeInfo) {
     if component_id >= MAX_COMPONENTS {
         return;
     }
+    // ── ECS D5's SECOND mechanism, moved here by CORE D29 and landed at C9 ──────
+    //
+    // *"Refusal is TWO mechanisms at TWO boundaries; neither substitutes for the other"*
+    // (`docs/REFLECTION-PLAN-ECS.md`). The first is the derive's spanned
+    // `compile_error!` for `#[component(reflect, storage = "bitset")]`, and it covers
+    // exactly the callers the derive can see. This one covers the callers it cannot: this
+    // fn is `pub` because the expansion lives in downstream crates, so any editor tool,
+    // any test, and any future runtime component-builder can reach it with an id the
+    // derive never touched.
+    //
+    // A bitset enable tag has no `ComponentPool` and no per-row bytes — the bit IS the
+    // datum — so a descriptor filed under its id is a coherent lie: an inspector reading
+    // by id would be handed a zero-field view and nothing downstream could tell. Refusing
+    // loudly is the only outcome that does not silently corrupt the editor's model.
+    //
+    // A plain `assert!`, deliberately, NOT a `debug_assert!`: the editor tooling this
+    // table exists for is built in release as often as in debug, and the check is one
+    // relaxed byte load on a cold, once-per-type path (§8). The release half is gated by
+    // `#[cfg(not(debug_assertions))]` tests run under `cargo test -p boyko-reflect
+    // --release`, the same discipline the release halves below already state.
+    assert!(
+        storage_kind(component_id) != StorageKind::Bitset,
+        "install_type_info({component_id}) was called for a component classified \
+         StorageKind::Bitset. A bitset enable tag has no ComponentPool and no per-row \
+         bytes, so `read the field at offset N` describes nothing and a descriptor filed \
+         under this id is a coherent lie an inspector cannot detect. The derive refuses \
+         `#[component(reflect, storage = \"bitset\")]` with a spanned compile_error!; this \
+         is the same refusal at the runtime boundary, for the callers the derive cannot \
+         see."
+    );
     let _ = REFLECT[component_id].set(info);
 }
 
@@ -222,5 +256,99 @@ mod tests {
     fn release_type_info_of_out_of_bounds_is_none() {
         assert!(type_info_of(MAX_COMPONENTS).is_none());
         assert!(type_info_of(usize::MAX).is_none());
+    }
+
+    // ─────────── CORE C9 — ECS D5's second mechanism, at the RUNTIME boundary ────
+    //
+    // The derive's spanned `compile_error!` covers the callers the derive can see. This
+    // pair covers the one it cannot: a hand-written `impl Component` that classifies
+    // itself `Bitset` and then reaches the `pub` installer directly, which is exactly
+    // what an editor tool or a future runtime component-builder is.
+
+    /// A hand-written bitset-classified component — **deliberately not the derive's**.
+    ///
+    /// `#[derive(Component)]` cannot produce this subject any more (C9 refuses
+    /// `#[component(reflect, storage = "bitset")]` at compile time), and that is the
+    /// point: the subject of a runtime refusal has to be a caller the compile-time
+    /// refusal never sees. `STORAGE_IS_BITSET` is the only override; every other
+    /// associated item takes the trait default.
+    ///
+    /// `#[cfg(not(debug_assertions))]` like the two gates that use it: the release-only
+    /// gates are the only consumers, so in a debug build this type and the id below are
+    /// genuinely dead and `-D warnings` says so.
+    #[cfg(not(debug_assertions))]
+    struct HandWrittenBitsetTag;
+
+    #[cfg(not(debug_assertions))]
+    impl boyko_ecs::ecs::core::component::component::Component for HandWrittenBitsetTag {
+        fn component_id() -> boyko_ecs::ecs::identifiers::primitives::ComponentId {
+            // Never called by the gate below -- `install_storage_kind` takes the raw id
+            // as an argument -- but the trait requires the item, and minting through the
+            // real funnel keeps this a genuine `Component` rather than a stub that would
+            // panic if anything else ever touched it.
+            static ID: OnceLock<boyko_ecs::ecs::identifiers::primitives::ComponentId> =
+                OnceLock::new();
+            *ID.get_or_init(|| {
+                boyko_ecs::ecs::identifiers::primitives::ComponentId(
+                    boyko_ecs::ecs::core::component::component_registry::register_new::<Self>(),
+                )
+            })
+        }
+
+        const STORAGE_IS_BITSET: bool = true;
+    }
+
+    /// The id this pair classifies `Bitset`. Distinct from every other id these unit
+    /// tests touch (7, 11, `MAX_COMPONENTS`, `usize::MAX`), because `STORAGE_KIND` is a
+    /// process-global and the whole file shares one test binary.
+    #[cfg(not(debug_assertions))]
+    const BITSET_ID: usize = 23;
+
+    /// **The gate (CORE C9), RELEASE profile only.** Installing a descriptor for a
+    /// `StorageKind::Bitset` id panics.
+    ///
+    /// `#[cfg(not(debug_assertions))]` is the whole point rather than a filter: the check
+    /// is a plain `assert!`, and what has to be shown is that it is **still there** in the
+    /// profile where `debug_assert!` has vanished — the editor tooling this table exists
+    /// for is built in release as often as in debug. Run it with
+    /// `cargo test -p boyko-reflect --release`, and read the output for a non-vacuous
+    /// `running [1-9]`: a filtered-out test is a vacuous pass, which is the discipline the
+    /// release halves above already state for themselves.
+    #[test]
+    #[cfg(not(debug_assertions))]
+    #[should_panic(expected = "StorageKind::Bitset")]
+    fn release_installing_a_descriptor_for_a_bitset_id_panics() {
+        boyko_ecs::ecs::core::component::component_registry::install_storage_kind::<
+            HandWrittenBitsetTag,
+        >(BITSET_ID);
+        assert_eq!(
+            boyko_ecs::ecs::core::component::component_registry::storage_kind(BITSET_ID),
+            boyko_ecs::ecs::core::component::component_registry::StorageKind::Bitset,
+            "INSTRUMENT DEAD: id {BITSET_ID} did not classify as Bitset, so the install \
+             below would be an ordinary install and this gate would report a pass for a \
+             subject it never built"
+        );
+        install_type_info(BITSET_ID, &INFOS.a);
+    }
+
+    /// The positive control for the gate above, in the SAME profile: a `Table` id still
+    /// installs.
+    ///
+    /// Without it, `#[should_panic]` is satisfied by any panic — including one from a
+    /// refusal so broad it rejects every install — and the campaign's own lesson is that
+    /// a gate whose subject is a refusal needs an acceptance beside it. C9's fifth RED
+    /// (delete the assert) reds the gate above and leaves this one green, which is what
+    /// tells the two apart.
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn release_installing_a_descriptor_for_a_table_id_still_works() {
+        const TABLE_ID: usize = 29;
+        assert_eq!(
+            boyko_ecs::ecs::core::component::component_registry::storage_kind(TABLE_ID),
+            boyko_ecs::ecs::core::component::component_registry::StorageKind::Table,
+            "instrument precondition: id {TABLE_ID} must be table-classified"
+        );
+        install_type_info(TABLE_ID, &INFOS.b);
+        assert!(type_info_of(TABLE_ID).is_some());
     }
 }

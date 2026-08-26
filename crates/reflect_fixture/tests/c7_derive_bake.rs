@@ -203,42 +203,42 @@ pub struct Empty;
 /// A struct with one field the v1 kind table cannot classify. `PhantomData<u8>` bakes
 /// `Opaque` with no accessors; the field is **not** omitted, because a shorter list
 /// would make by-index access depend on which fields were skipped (D14).
+///
+/// # The `#[reflect(skip)]` is CORE C9's migration, and it changes nothing this gate reads
+///
+/// Until C9 an un-skipped `Opaque` field was accepted silently; C9 makes it the spanned
+/// refusal D15 requires, so this subject would otherwise stop compiling and take all
+/// sixteen tests in this file with it. D14's semantics are what keep the migration
+/// invisible to [`the_walk_is_index_faithful_over_an_unclassifiable_field`]: a skipped
+/// field keeps its index, its name and its `offset_of!`, and bakes exactly the same
+/// `Opaque` descriptor with all four accessor slots `None`. The refusal's own fixture is
+/// `reflect_compile_fail/vec_field_rejected.rs`; the accepting twin is
+/// `reflect_pass/vec_field_skip_accepted.rs`.
 #[derive(Component, Default)]
 #[component(reflect)]
 pub struct Padded {
     /// Index 0.
     pub a: u32,
     /// Index 1 — unclassifiable, and the reason this gate exists.
+    #[reflect(skip)]
     pub _pd: PhantomData<u8>,
     /// Index 2 — the field whose NAME an index-shifting walk moves.
     pub b: u32,
 }
 
-// ────────────────────── the derive's NON-STRUCT arm subject ─────────────────
-
-/// The subject for `codegen`'s `Data::Enum(_) | Data::Union(_)` arm, which shipped with
-/// **zero** coverage — all fifteen of [`every_derived_descriptor`]'s original entries are
-/// structs, and nothing in this file constructed the other arm at all.
-///
-/// The payload variants are deliberate. A fieldless enum would make `fields: &[]` look
-/// like a tautology; `Something(u32)` and `Named { x: f32 }` mean the baked
-/// *"this type has no fields"* is a **substantive claim about a type that has some**, and
-/// it is the claim [`the_non_struct_arm_bakes_an_opaque_fieldless_descriptor`] pins.
-#[derive(Component, Default, Debug)]
-#[component(reflect)]
-#[repr(u8)]
-pub enum NonStruct {
-    /// The `Default` variant.
-    #[default]
-    Nothing,
-    /// A tuple payload the descriptor does not describe.
-    Something(u32),
-    /// A named payload the descriptor does not describe.
-    Named {
-        /// Not reachable through the descriptor.
-        x: f32,
-    },
-}
+// ─────── the derive's NON-STRUCT arm subject — MOVED OUT BY CORE C9 ─────────
+//
+// `NonStruct` — a `#[repr(u8)]` enum with two payload variants — lived here from the C7
+// follow-up until C9. Its gate pinned what the `Data::Enum(_) | Data::Union(_)` arm
+// ACTUALLY did: bake `TypeKind::Opaque` with `fields: &[]`, a coherent descriptor
+// asserting that a type with two payload variants has no fields, which `validate` accepts
+// because "has no fields" is structurally well-formed.
+//
+// D38 turned that acceptance into a refusal, so the subject can no longer be declared in a
+// file that must compile. It moved to `reflect_compile_fail/data_carrying_enum_rejected.rs`
+// and its claim moved with it — the assertion it used to make is now a blessed `.stderr`.
+// Its own doc said *"C10 replaces this test rather than deleting it"*; C9 replaced it four
+// rungs early, and the replacement is a refusal rather than a deletion.
 
 // ─────────────────── the `#[reflect(no_default)]` opt-out subject ───────────
 
@@ -451,9 +451,12 @@ fn oracle_pairs() -> [(&'static TypeInfo, &'static TypeInfo); 5] {
 
 /// Every descriptor this file's derive produced — gate 7's subject set.
 ///
-/// [`NonStruct`] joined it at the C7 follow-up: gate 7 sweeps `validate` over this array,
-/// and until then the derive's non-struct arm was outside every sweep in the file.
-fn every_derived_descriptor() -> [&'static TypeInfo; 16] {
+/// It was 16 until CORE C9: `NonStruct`, the derive's non-struct arm, was added at the C7
+/// follow-up because until then that arm was outside every sweep in the file, and it left
+/// with D38's refusal. The arm itself is still swept — a fieldless `#[repr(Int)]` enum is
+/// still accepted through it — but no such subject is declared here, so what this array
+/// covers is the struct half. The enum half's coverage is the corpus's.
+fn every_derived_descriptor() -> [&'static TypeInfo; 15] {
     [
         <Body as Reflect>::TYPE_INFO,
         <Placement as Reflect>::TYPE_INFO,
@@ -470,7 +473,6 @@ fn every_derived_descriptor() -> [&'static TypeInfo; 16] {
         <Empty as Reflect>::TYPE_INFO,
         <Padded as Reflect>::TYPE_INFO,
         <NoDefaultAtAll as Reflect>::TYPE_INFO,
-        <NonStruct as Reflect>::TYPE_INFO,
     ]
 }
 
@@ -939,81 +941,27 @@ fn the_walk_is_index_faithful_over_an_unclassifiable_field() {
     assert_eq!(ti.fields[2].offset, offset_of!(Padded, b));
 }
 
-// ─────────────────────── the non-struct arm (uncovered until now) ───────────
-
-/// **`codegen`'s `Data::Enum(_) | Data::Union(_)` arm — pinned, not left accidental.**
-///
-/// The arm shipped with no coverage: every subject in this file was a struct, so
-/// `#[component(reflect)]` on an enum was neither refused nor described by any gate. What
-/// it actually does is *accept*: it bakes `TypeKind::Opaque` with an empty field list,
-/// and `validate` returns `Ok`.
-///
-/// # Why acceptance is the deliberate behaviour, and why it still needs a gate
-///
-/// The implementer's reasoning holds: a `compile_error!` here would be a **refusal living
-/// outside C9's `const REFUSALS`**, and C9's census is what keeps this derive's refusals
-/// honest — an un-enumerated one is invisible to it. So the arm accepts, and C10 is the
-/// rung that gives enums `TypeKind::Enum` plus a real `EnumInfo`.
-///
-/// But its output is a *coherent* descriptor asserting that a type with two payload
-/// variants **has no fields**, and a coherent lie is the one thing this campaign's gates
-/// exist to catch. Unpinned, the arm's behaviour is accidental: any edit to `codegen`'s
-/// match could change `Opaque` to `Struct` (a fieldless *struct* is a shape the model
-/// claims to describe, so that lie validates too) and nothing would red.
-///
-/// C10 replaces this test rather than deleting it — the assertions below are the exact
-/// "before" it changes.
-#[test]
-fn the_non_struct_arm_bakes_an_opaque_fieldless_descriptor() {
-    let ti = <NonStruct as Reflect>::TYPE_INFO;
-
-    assert_eq!(
-        ti.kind,
-        TypeKind::Opaque,
-        "the non-struct arm must bake `Opaque` -- *a type the model cannot describe*, \
-         which is what it is. `Struct` would claim the model DOES describe it, and a \
-         fieldless struct is coherent, so nothing else here would red; `TypeKind::Enum` \
-         is C10's, and it comes with an `EnumInfo` this rung does not build"
-    );
-    assert!(
-        ti.fields.is_empty(),
-        "the non-struct arm bakes NO fields, and the subject has two payload variants -- \
-         `fields.len()` is {} ",
-        ti.fields.len()
-    );
-    assert!(ti.enum_info.is_none(), "`EnumInfo` is CORE C10's, not this arm's");
-
-    // The type-level slots are still the compiler's own: `Opaque` is a statement about the
-    // FIELD WALK, not a licence to bake wrong bytes. C8 installs this descriptor, and
-    // `size`/`align` are what a consumer would allocate from.
-    assert_eq!((ti.type_id_fn)(), TypeId::of::<NonStruct>(), "type identity");
-    assert_eq!(ti.size, size_of::<NonStruct>(), "size");
-    assert_eq!(ti.align, align_of::<NonStruct>(), "align");
-    assert_eq!(ti.type_name, "c7_derive_bake::NonStruct");
-
-    // D20 is orthogonal to the arm: the witness and the slot are driven by `no_default`,
-    // not by the data shape, so an annotated enum that derives `Default` still gets one.
-    let default_in_place = ti.default_in_place.expect("`NonStruct` derives `Default`");
-    let mut slot = MaybeUninit::<NonStruct>::uninit();
-    // SAFETY: `slot` is an owned, correctly aligned, uninitialized `NonStruct` destination
-    // holding no initialized value, so no drop glue is owed -- `default_in_place`'s
-    // contract. `NonStruct` is drop-free, so nothing is leaked by not dropping it.
-    unsafe { default_in_place(slot.as_mut_ptr().cast::<u8>()) };
-    assert!(
-        ti.drop_in_place.is_none(),
-        "`NonStruct` owns no drop glue, so the slot is None -- decided by `needs_drop`, \
-         which does not care which arm baked the descriptor"
-    );
-
-    // And the coherence oracle accepts it. This is the clause that makes the descriptor's
-    // *lie* explicit: `validate` cannot see it, because "has no fields" is structurally
-    // well-formed. Only this test knows the subject has some.
-    assert!(
-        validate(ti).is_ok(),
-        "the non-struct arm's descriptor must be coherent -- an accepted arm that emits an \
-         INCOHERENT descriptor would be worse than a refusal"
-    );
-}
+// ───── the non-struct arm gate — MOVED TO THE CORPUS BY CORE C9 (D38) ──────
+//
+// `the_non_struct_arm_bakes_an_opaque_fieldless_descriptor` asserted that a
+// `#[component(reflect)]` enum with two payload variants bakes `TypeKind::Opaque` with
+// `fields: &[]`, and that `validate` accepts it. That was a pin on a COHERENT LIE, kept
+// because an unpinned accidental behaviour is worse than a pinned wrong one. D38 refuses
+// the input instead, so the same claim is now carried by a blessed `.stderr`
+// (`reflect_compile_fail/data_carrying_enum_rejected.rs`) rather than by an assertion --
+// moved from *"this is what it bakes"* to *"this does not compile"*.
+//
+// What is NOT lost: the arm still runs for a fieldless `#[repr(Int)]` enum, which stays
+// ACCEPTED because its `fields: &[]` is true, until C10 replaces its `kind` with
+// `TypeKind::Enum`.
+//
+// ⚠️ That sentence was PROSE ONLY until `reflect_pass/fieldless_repr_enum_accepted.rs`.
+// Moving the subject out of this file left `has_integer_repr` returning **true** reached by
+// no test in the tree: MEASURED, forcing it to `return false` unconditionally left the
+// refusal corpus, this file and the census all green, so an over-broad enum refusal would
+// have shipped while three documents went on claiming the shape was accepted. The claim is
+// now a `t.pass()` fixture, which is where it belongs -- the arm is not exercised here any
+// more, and a comment is not a gate.
 
 /// `[T; N]` of a `Prim` bakes `ValueKind::Array` with the element kind, the element's
 /// own `size_of` as the stride, and `N` (D12/D19).
