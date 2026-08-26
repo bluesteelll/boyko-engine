@@ -48,33 +48,33 @@ Every row was read in this worktree on 2026-08-21. The anchors are load-bearing:
 |---|---|---|
 | F1 | `get_component_raw(e, id) -> Option<*const u8>` routes **Table** through a raw `columns` projection and **Dense** through `dense_get_raw`; returns `None` for stale generation, dead slot, null column. | `ecs_master/component_api.rs:176-247` |
 | F2 | `get_component_raw_mut` is the write-capable twin, same three-way prologue, dense arm re-resolves `slot_of` + `row_ptr`. | `component_api.rs:253-300` |
-| F3 | `dense_contains` / `dense_slot_of` / `dense_get_raw` are **`pub` on `EcsMaster`**. | `component_api.rs:49`, `:58`, `:66` |
+| F3 | `dense_contains` / `dense_slot_of` / `dense_get_raw` are **`pub` on `EcsMaster`**. | `component_api.rs:49`, `:58`, `:76` |
 | F4 | `DenseRegistry::dense_ids() -> &[ComponentId]` is **`pub`**, registration-ordered; `EcsMaster::dense_registry()` is **`pub`**. | `dense/dense_registry.rs:156`, `ecs_master.rs:590` |
 | F5 | `is_signature_storage(kind)` is `matches!(kind, Table)` — **both `Bitset` and `Dense` are excluded from every archetype signature**. | `component_registry/mod.rs:354-356` |
 | F6 | `EcsMaster::has_component` branches `Dense → dense_contains`, else column-null. **There is no `Bitset` branch**, so it returns `false` for every enabled bitset tag. | `component_api.rs:673-702` |
 | F7 | `entity_archetype_id(e) -> Option<ArchetypeId>` is `pub` and generation-checked; `archetype_master()` is `pub`; `ArchetypeMaster::get_archetype(id) -> Option<&Archetype>` and `get_archetype_ptr(id) -> Option<*const Archetype>` are both `pub`. | `entity_query_api.rs:35`, `ecs_master.rs:575`, `archetype_master.rs:242`, `:271` |
 | F8 | `Archetype::component_ids()` is `pub`, but the **field** `component_ids` (like `columns`, `id`, `signature`) is `pub(crate)` — an external crate **cannot** write `addr_of!((*p).component_ids)`. | `archetype/archetype.rs:1411`, `:127-160` |
-| F9 | ⚠️ **`migrate_entity_attach_ids` `debug_assert!`s that every added id is a ZST.** *"D9: this path skips byte-writes for `added` — sound ONLY for size-0 columns. A data component routed through here would leave its bytes uninitialized."* | `commands/migration_helpers.rs:1386-1394` |
-| F10 | `migrate_entity_detach_ids` is **data-general** — it collects retained bytes, fires `on_replace`/`on_remove` on the dying row, and runs `drop_fn` exactly once per removed id. No ZST assertion. | `migration_helpers.rs:1635-1652` |
-| F11 | The only **data** insert helper is `migrate_entity_insert<B: Bundle>(…, bundle: B)` — **generic, taking the bundle by value**. There is no by-id data attach anywhere in the tree. | `migration_helpers.rs:322-336` |
+| F9 | ⚠️ **`migrate_entity_attach_ids` `debug_assert!`s that every added id is a ZST.** *"D9: this path skips byte-writes for `added` — sound ONLY for size-0 columns. A data component routed through here would leave its bytes uninitialized."* | `commands/migration_helpers.rs:1387-1394~` |
+| F10 | `migrate_entity_detach_ids` is **data-general** — it collects retained bytes, fires `on_replace`/`on_remove` on the dying row, and runs `drop_fn` exactly once per removed id. No ZST assertion. | `migration_helpers.rs:1635-1652~` |
+| F11 | The only **data** insert helper is `migrate_entity_insert<B: Bundle>(…, bundle: B)` — **generic, taking the bundle by value**. There is no by-id data attach anywhere in the tree. | `migration_helpers.rs:332-338` |
 | F12 | All five migration helpers are **`pub(crate)`**. | `migration_helpers.rs:1230, :1305, :1372, :1658, :1922` |
 | F13 | `EcsMaster::add_tag` / `remove_tag` are `pub` and drive the by-id migration end to end for ZSTs: inland resolve → presence test → `retag_in_place` or `merged_archetype_id_dyn` + `migrate_entity_{attach,detach}_ids` → `DeferredScopeGuard` → `drain_deferred_hook_queue`. **This is the template.** | `ecs_master/tag_api.rs:130-183`, `:200-238` |
 | F14 | `set_component_raw`'s **dense** arm bumps the slot's `changed` tick; its **table** arm does not (it memcpys through `get_component_raw_mut`). The asymmetry is documented at the fn but not resolved. | `component_api.rs:444-497` |
-| F15 | The only change-detecting write path is `get_component_mut<T>() -> Mut<'_, T>` — **generic over `T`**. `get_component_changed_tick(e, id)` is a `pub` **read**; there is no `pub` by-id **write**. | `component_api.rs:337-379`, `:553` |
+| F15 | The only change-detecting write path is `get_component_mut<T>() -> Mut<'_, T>` — **generic over `T`**. `get_component_changed_tick(e, id)` is a `pub` **read**; there is no `pub` by-id **write**. | `component_api.rs:553`, `:337-379` |
 | F16 | `EnableTagId` and `TagId` are `#[repr(transparent)]` over `ComponentId` with `pub(crate)` fields and, in each case, an explicit doc line: *"The reverse direction has NO constructor."* `is_enabled_id` / `enable_id` / `disable_id` take `EnableTagId`. | `component_registry/tags.rs:49, :93`, `enable_tag_api.rs:113-129` |
 | F17 | There is **no public high-water mark of minted `ComponentId`s**. `next_id_for_test()` is `pub(crate)` and test-only; `NEXT_ID` is a private `AtomicUsize`. | `component_registry/mod.rs:212, :1090` |
 | F18 | `register_enable_tag(name)` / `register_tag(name)` are `pub`, `&mut self`, and **idempotent by name** — a second call for a live name returns the existing id and mints nothing. ⚠️ **Idempotent *within `TAG_NAMES`* — see F27, which is the half that makes this fact dangerous rather than useful for derived bitset components.** | `enable_tag_api.rs:60`, `tag_api.rs:65` |
 | F19 | `storage_kind(usize) -> StorageKind`, `residency_class(usize) -> ResidencyKind`, `get_layout(usize) -> Option<&'static ComponentLayout>` and `MAX_COMPONENTS = 512` are all `pub`. | `component_registry/mod.rs:388`, `:577`, `:1123`, `:61` |
-| F20 | `ComponentLayout { size, alignment, drop_fn, type_name, type_id }` is `pub`, pinned at 56 B. For a **dynamic tag** `type_name` is the interned user name and `type_id` is `DynamicTagMarker`'s — and `DynamicTagMarker` is **private and unnameable outside `boyko_ecs`**. | `mod.rs:107-120`, `:171-179`, `:192-194` |
-| F21 | `make_component_device_backed` sets `columns[cid] = Column::null()` and `assert!`s (release) that the id is `ResidencyKind::Gpu`. It is `#[cfg(not(miri))]` and needs a `DeviceColumnHandle`. | `archetype/archetype.rs:694-730` |
-| F22 | **`grep -rn 'residency = "gpu"' crates/*/src/` returns zero hits** — there is no GPU-resident component in the tree. `classify_component_residency` is the `pub` runtime classifier. | (measured) `mod.rs:685-688` |
-| F23 | The fixture types the acceptance test needs all exist: `Transform` (`boyko_scene/src/transform.rs:46`), `Visibility` `#[repr(u8)]` (`render_caps.rs:226`), `GpuTransform3D` `#[component(storage="dense")]` (`boyko_render/src/gpu_transform3d.rs:84`), `TrsPacked` (`:55`), `ParticleEmitter` (`particle.rs:127`), `ParticleEffectHandle` with `on_insert`/`on_replace` (`:185`), `EmitterActive` `#[component(storage="bitset")]` (`:164`). | (as cited) |
-| F24 | ⚠️ **`force_alloc_panic` has ZERO `#[cfg(force_alloc_panic)]` sites in any `.rs` file in the tree.** It survives only in the root `Cargo.toml`'s `check-cfg` list and an **archived** doc, while CI still runs a whole job under it. That job asserts nothing. | `Cargo.toml:26`, `docs/archive/PHASE-9-FORCE-ALLOC-PANIC.md`, `.github/workflows/ci.yml:178-191` |
-| F25 | `proptest` is a workspace dependency (`Cargo.toml:52`) already used by six crates. | `crates/boyko_ecs/Cargo.toml:93` and five siblings |
-| F26 | Package names use hyphens: `boyko-ecs`, `boyko-scene`. The new crate is therefore `boyko-reflect` in `crates/boyko_reflect/`. | `crates/boyko_ecs/Cargo.toml:2` |
-| F27 | 🔴 **`register_enable_tag(name)` MINTS A NEW ID for any name not already in `TAG_NAMES`, and a derived `#[component(storage = "bitset")]` type never interns its name there.** Traced end to end: `EcsMaster::register_enable_tag` → `try_register_enable_tag_by_name` → `try_register_tag_by_name`, whose table is `TAG_NAMES` and whose miss path calls `try_register_dynamic(ComponentLayout::new_dynamic_tag(leaked))`. A derived bitset component's id came from `register_new::<Self>()` (`mod.rs:918`, a monotonic `NEXT_ID.fetch_add`) and its name was never interned. | `enable_tag_api.rs:60`, `component_registry/tags.rs:134`, `:155`, `:184-196`, `component_registry/mod.rs:918` |
-| F28 | `NEXT_ID` is a monotonic `AtomicUsize` with `fetch_add`; **ids are never recycled**, and `component_id()` is a per-type `static ID: OnceLock<ComponentId>` resolved once per process. So *"the id re-registered to a different type"* is not a state this process can reach. | `component_registry/mod.rs:212, :918`; `boyko_macros/src/component.rs:351-353` |
-| F29 | `try_register_tag_by_name` returns `None` when `NEXT_ID >= MAX_COMPONENTS` and `name` was never minted; `register_enable_tag` turns that `None` into `register_enable_tag_exhausted_panic`. Dynamic tags and typed components share the one 512-id budget. | `component_registry/tags.rs:189-192`, `enable_tag_api.rs:59-65` |
+| F20 | `ComponentLayout { size, alignment, drop_fn, type_name, type_id }` is `pub`, pinned at 56 B. For a **dynamic tag** `type_name` is the interned user name and `type_id` is `DynamicTagMarker`'s — and `DynamicTagMarker` is **private and unnameable outside `boyko_ecs`**. | `mod.rs:107-120`, `:171-179`, `:192-194~` |
+| F21 | `make_component_device_backed` sets `columns[cid] = Column::null()` and `assert!`s (release) that the id is `ResidencyKind::Gpu`. It is `#[cfg(not(miri))]` and needs a `DeviceColumnHandle`. | `archetype/archetype.rs:694-730~` |
+| F22 | **`grep -rn 'residency = "gpu"' crates/*/src/` returns zero hits** — there is no GPU-resident component in the tree. `classify_component_residency` is the `pub` runtime classifier. | (measured) `component_registry/mod.rs:685-688~` |
+| F23 | The fixture types the acceptance test needs all exist: `Transform` (`boyko_scene/src/transform.rs:46`), `Visibility` `#[repr(u8)]` (`render_caps.rs:226`), `GpuTransform3D` `#[component(storage="dense")]` (`boyko_render/src/gpu_transform3d.rs:84~`), `TrsPacked` (`:55`), `ParticleEmitter` (`boyko_render/src/particle.rs:127`), `ParticleEffectHandle` with `on_insert`/`on_replace` (`:185`), `EmitterActive` `#[component(storage="bitset")]` (`:164`). | (as cited) |
+| F24 | ⚠️ **`force_alloc_panic` has ZERO `#[cfg(force_alloc_panic)]` sites in any `.rs` file in the tree.** It survives only in the root `Cargo.toml`'s `check-cfg` list and an **archived** doc, while CI still runs a whole job under it. That job asserts nothing. | [`Cargo.toml`](../Cargo.toml):26~, `docs/archive/PHASE-9-FORCE-ALLOC-PANIC.md`, `.github/workflows/ci.yml:178-191` |
+| F25 | `proptest` is a workspace dependency ([`Cargo.toml`](../Cargo.toml):52~) already used by six crates. | `crates/boyko_ecs/Cargo.toml:93~` and five siblings |
+| F26 | Package names use hyphens: `boyko-ecs`, `boyko-scene`. The new crate is therefore `boyko-reflect` in `crates/boyko_reflect/`. | `crates/boyko_ecs/Cargo.toml:2~` |
+| F27 | 🔴 **`register_enable_tag(name)` MINTS A NEW ID for any name not already in `TAG_NAMES`, and a derived `#[component(storage = "bitset")]` type never interns its name there.** Traced end to end: `EcsMaster::register_enable_tag` → `try_register_enable_tag_by_name` → `try_register_tag_by_name`, whose table is `TAG_NAMES` and whose miss path calls `try_register_dynamic(ComponentLayout::new_dynamic_tag(leaked))`. A derived bitset component's id came from `register_new::<Self>()` (`component_registry/mod.rs:918`, a monotonic `NEXT_ID.fetch_add`) and its name was never interned. | `enable_tag_api.rs:60`, `component_registry/tags.rs:134`, `:155`, `:182-196`, `component_registry/mod.rs:918` |
+| F28 | `NEXT_ID` is a monotonic `AtomicUsize` with `fetch_add`; **ids are never recycled**, and `component_id()` is a per-type `static ID: OnceLock<ComponentId>` resolved once per process. So *"the id re-registered to a different type"* is not a state this process can reach. | `component_registry/mod.rs:212, :918`; `boyko_macros/src/component.rs:425-427` |
+| F29 | `try_register_tag_by_name` returns `None` when `NEXT_ID >= MAX_COMPONENTS` and `name` was never minted; `register_enable_tag` turns that `None` into `register_enable_tag_exhausted_panic`. Dynamic tags and typed components share the one 512-id budget. | `component_registry/tags.rs:189-192~`, `enable_tag_api.rs:59-65~` |
 
 ### The five contradictions, named
 
@@ -235,7 +235,7 @@ not fixed here. §9 records the disposition.)*
 | S1 | `EcsMaster::add_component_by_id(&mut self, e: Entity, id: ComponentId, bytes: &[u8]) -> AddOutcome` | F9 + F11: the ZST attach helper asserts size-0; the data attach helper is generic over `Bundle`. Nothing in the tree attaches a data component by id. | **Yes** — scene loading, prefab instantiation, undo/redo and network apply all want a by-id data attach; today each would have to be generic over the component set. `add_tag` proves the signature can be pure `Entity` + `ComponentId` + bytes and name no reflection type. |
 | S2 | `EcsMaster::remove_component_by_id(&mut self, e: Entity, id: ComponentId) -> bool` | F10 + F12: the data-general detach helper exists and is correct; it is `pub(crate)`. | **Yes** — the exact twin of the already-public `remove_tag`, generalised off the ZST restriction it never actually needed. |
 | S3 | `EcsMaster::mark_component_changed(&mut self, e: Entity, id: ComponentId) -> bool` | F14 + F15: no by-id change-tick write exists, so a table-path `set_field` is invisible to `Changed<T>`. | **Yes** — the write twin of the already-public `get_component_changed_tick`; any by-id writer (scene apply, replication) has the same hole. |
-| ~~S4~~ **S4′** | `EnableTagId::try_from_component_id(id: ComponentId) -> Option<Self>` — `None` unless `storage_kind(id) == Bitset` (lands in `component_registry::tags`, not on `EcsMaster`) | F16 + **F27**: `is_enabled_id` / `enable_id` / `disable_id` all need an `EnableTagId`, which has no reverse constructor, and the by-name re-mint route **writes the wrong bit**. Both the read half and the write half need this. | **Yes** — it is the inbound half of a bridge the crate already advertises outbound (`EnableTagId::component_id()`, *"bridges to the shared `ComponentId` space"*) and already tests internally (`enable_tag_id_bridges_to_component_id_round_trip`, `mod.rs:1676`). It is total, safe, `storage_kind`-checked, and mints **no capability the crate does not already have** — every enable/disable it unlocks is reachable from inside `boyko_ecs` today. |
+| ~~S4~~ **S4′** | `EnableTagId::try_from_component_id(id: ComponentId) -> Option<Self>` — `None` unless `storage_kind(id) == Bitset` (lands in `component_registry::tags`, not on `EcsMaster`) | F16 + **F27**: `is_enabled_id` / `enable_id` / `disable_id` all need an `EnableTagId`, which has no reverse constructor, and the by-name re-mint route **writes the wrong bit**. Both the read half and the write half need this. | **Yes** — it is the inbound half of a bridge the crate already advertises outbound (`EnableTagId::component_id()`, *"bridges to the shared `ComponentId` space"*) and already tests internally (`enable_tag_id_bridges_to_component_id_round_trip`, `component_registry/mod.rs:1676`). It is total, safe, `storage_kind`-checked, and mints **no capability the crate does not already have** — every enable/disable it unlocks is reachable from inside `boyko_ecs` today. |
 
 **S1's return type is an enum, not a `bool`.** `enum AddOutcome { Added, AlreadyPresent, Rejected(RejectReason) }` where `RejectReason` covers `{ EntityDead, WrongByteLen, NotTableOrDense, GpuResident }`. An editor's "Add Component" must **refuse** rather than clobber a present value; `add_tag`'s in-place-replace semantics are right for a tag (zero bytes to lose) and wrong for data.
 
@@ -280,7 +280,7 @@ argument's (rung EG1's gate).
 *Rejected:* a new `pub fn component_ids_of(&self, e) -> &[ComponentId]` projection on `EcsMaster`
 (a fifth shipping-API addition to buy nothing); re-implementing `get_component_raw`'s prologue
 inside `boyko_reflect` (duplicates audited `unsafe` and goes stale the day a fourth storage kind
-lands — the `StorageKind` discriminant space is explicitly extensible, `mod.rs:320`).
+lands — the `StorageKind` discriminant space is explicitly extensible, `component_registry/mod.rs:320~`).
 
 **D3 — the bitset source scans `0..MAX_COMPONENTS` on `storage_kind`, not a registry-held list.**
 *Reason:* F17 — there is no public high-water mark, and `next_id_for_test` is `pub(crate)`
@@ -324,7 +324,7 @@ route is needed, the choice is between the constructor and a **second** `EcsMast
    ECS seam and BOUNDARY's B-1 into a single four-item owner call.
 3. **It completes a bridge the crate already advertises and already tests.** `component_id()` is
    documented as *"bridges to the shared `ComponentId` space"*, and
-   `enable_tag_id_bridges_to_component_id_round_trip` (`mod.rs:1676`) asserts a round-trip the public
+   `enable_tag_id_bridges_to_component_id_round_trip` (`component_registry/mod.rs:1676`) asserts a round-trip the public
    API cannot perform. The inbound half is a completion, not a new capability.
 
 *Now rejected:* `EcsMaster::is_enabled_raw` (it is `EnableTagId::try_from_component_id(id).map(|t|
@@ -383,7 +383,7 @@ a null-column test could only be reddened on a machine with a device. F21 makes 
 *Reason:* `default_in_place` may unwind — CORE bakes it as `ptr::write(p.cast::<T>(), T::default())`
 and a hand-written `Default` impl can panic. In `migrate_entity_attach_ids`, Step 2 calls
 `dst_pool.commit_units(row, 1)` **before** Step 3 advances `entity_ids` / `current_index`
-(`migration_helpers.rs:1517-1545`). An unwind between the commit and the write therefore leaves a
+(`migration_helpers.rs:1518-1544~`). An unwind between the commit and the write therefore leaves a
 **committed, uninitialised row** that the pool's drop walk will later run `drop_fn` over. Evaluating
 first moves the entire unwind window in front of every structural change: if `T::default()` panics,
 the scratch is still uninitialised (`MaybeUninit` drops nothing) and the world is byte-for-byte
@@ -415,7 +415,7 @@ generic over `Bundle` for the same reason, and an editor edit must be visible be
 **D10 — `set_field` writes bytes and bumps the changed tick. It fires NO hooks.**
 *Reason:* `on_replace` / `on_insert` in this tree carry **whole-value replace** semantics, and
 `ParticleEffectHandle` is the proof: `on_replace` pushes `-1` for the OLD slot and `on_insert`
-pushes `+1` for the NEW one (`particle.rs:171-185`). A field-level poke is not a value replacement;
+pushes `+1` for the NEW one (`boyko_render/src/particle.rs:171-185~`). A field-level poke is not a value replacement;
 firing the pair per field would double-count the refcount on any multi-field edit, and firing it
 once per field would fire it N times for an N-field edit. The tick bump, by contrast, is
 **mandatory** — without it the table-path edit is invisible to every `Changed<T>`-gated system
@@ -461,7 +461,7 @@ per-entity source-2 cost is `len × O(1)` with a named `len`.
 `components_of_into` returns `Err(BufferTooSmall)` rather than a short count.
 *Reason:* a truncated component list is a *wrong answer that looks like an answer* — the inspector
 would display an entity as not having a component it has. The upper bound is `MAX_COMPONENTS`
-(512), so a caller can size a stack array once and never see the error; the error exists so that
+(`512`), so a caller can size a stack array once and never see the error; the error exists so that
 undersizing is loud.
 
 ---
@@ -547,7 +547,7 @@ asserts nothing. This is reported to `docs/OPEN-QUESTIONS.md` and routed to
 [`docs/REFLECTION-PLAN-GATES.md`](REFLECTION-PLAN-GATES.md); this plan does not build on it.
 
 **Instrument used instead:** a test-binary-local counting `#[global_allocator]` in
-`crates/reflect_fixture/tests/ecs_alloc.rs` — **the fixture's, not `boyko_reflect`'s own**: the
+`crates/reflect_fixture/tests/ecs_alloc.rs` — **the fixture's, not `boyko_reflect`'s own**: the  <!-- doc-path-planned -->
 harness drives the glue over `#[component(reflect)]` types, and a derived reflect fixture cannot
 live in `crates/boyko_reflect/tests/` at all — the crate declares no `reflect` feature (GATES D4,
 "now or ever"), so the derive's consumer-side `#[cfg(feature = "reflect")]` there is an
@@ -614,7 +614,7 @@ benches in a gate table, none of which existed), and at B.6.
 
 ### EG0 — the seam census: compile the reachability claim before writing glue — **size S**
 
-**Lands.** `crates/boyko_reflect/tests/seam_census.rs` (**plain** — the census compiles against
+**Lands.** `crates/boyko_reflect/tests/seam_census.rs` (**plain** — the census compiles against  <!-- doc-path-planned -->
 `boyko_ecs`'s public surface and constructs no reflect component, so it is the one glue test that
 belongs in `boyko_reflect`'s own tests; there is no feature leg to name, GATES D4) that *compiles against*
 `boyko_ecs`'s public surface and calls every accessor the glue intends to use: `entity_archetype_id`,
@@ -747,7 +747,7 @@ on the same answer** and does not ask separately.
 8. **`EnableTagId::try_from_component_id`** returns `Some` for a bitset id and `None` for
    `Table`/`Dense`, **and the round-trip closes**: `EnableTagId::try_from_component_id(t.component_id())
    == Some(t)` for a tag minted by `register_enable_tag` — the public counterpart of the internal
-   `enable_tag_id_bridges_to_component_id_round_trip` (`mod.rs:1676`).
+   `enable_tag_id_bridges_to_component_id_round_trip` (`component_registry/mod.rs:1676`).
 9. **The F27 assertion, and it is the one this rung exists to make impossible to get wrong.** For a
    **derived** `#[component(storage = "bitset")]` type — a `boyko_ecs`-test-local fixture registered
    through `register_new` (that route, not the name mint, is what "derived" means here; the
@@ -792,7 +792,7 @@ and the plan uses `tag_by_name` there anyway so that the write path cannot mint 
 
 **Gate.**
 1. The fixture's derived bitset tag (`EmitterActive`'s shape — the real `EmitterActive`,
-   `particle.rs:164`, is EG8's, in `reflect_dogfood`) enabled on the fixture entity appears in
+   `boyko_render/src/particle.rs:164`, is EG8's, in `reflect_dogfood`) enabled on the fixture entity appears in
    `components_of_into` with `kind == Bitset`, and `presence_of` returns `Ok(true)`.
 2. `presence_of` on a `Bitset` id whose bit is clear returns `Ok(false)` — **not** `ComponentAbsent`.
    The two are different rows.
@@ -915,7 +915,7 @@ every successful write (D10, D11); the release `-> Result<(), KindMismatch>` gua
    and leaves the bytes **byte-identical**, asserted in `--release`.
 4. Writing a `Bitset` / `Gpu` / non-reflectable id returns the matching refusal, in release.
 5. `set_field` on the fixture's hook-bearing tuple struct (a local `on_insert`/`on_replace` pair
-   modelled on `ParticleEffectHandle`, `particle.rs:185` — the production type is EG8's) fires
+   modelled on `ParticleEffectHandle`, `boyko_render/src/particle.rs:185` — the production type is EG8's) fires
    **no** hooks — the D10 limitation asserted, not assumed — while the changed tick **does**
    move. A hook-fire ledger counts zero.
 6. Nested-leaf write through `NestedCursorMut` at composed offset (A.4's "no field handle escapes")
@@ -959,7 +959,7 @@ every successful write (D10, D11); the release `-> Result<(), KindMismatch>` gua
    and afterwards `components_of_into` is byte-identical to before, the entity's archetype id is
    unchanged, and a subsequent `EcsMaster` drop runs clean under Miri.
 7. `remove` of the **last** component routes the entity into the EMPTY archetype and leaves it
-   alive with zero components (the O3 contract, `migration_helpers.rs:1650-1658`).
+   alive with zero components (the O3 contract, `migration_helpers.rs:1652-1658~`).
 8. Zero bespoke allocations on `add_default`; the `#[cold]` fallback counter is `0` on the fixture.
 9. **Miri-TB** over U4 + U5 + the whole attach/detach pair.
 10. **proptest**: random `add_default` / `remove` / `set_field` sequences over a 5-component fixture;
@@ -1074,11 +1074,14 @@ dynamic-tag rows; re-read everything.
    at B.6, B.9 and L10. ⚠️ And the fixture's process-spawning tests and its bench carry
    `#[cfg(not(miri))]`, or this row reds for a reason unrelated to reflection and the likeliest "fix"
    deletes the row.
-6. **The four plan documents join the repo-wide anchor gate — and this rung is its single owner.**
-   Add `REFLECTION-PLAN-ECS.md` and its three siblings to `GATED_DOCS`
-   (`tests/internal_docs_anchors.rs:231`, verified to hold exactly four documents today, none of them
-   a reflection plan) and give each a `("REFLECTION-PLAN-*.md", 0)` row in `OVER_WAIVED_MAX`
-   (`:1283-1298`). The gate then checks, on every `cargo test`, that every `crates/...` path these
+6. ~~**The four plan documents join the repo-wide anchor gate — and this rung is its single owner.**~~
+   **LANDED 2026-08-21, ahead of this rung and wider than it.** Add `REFLECTION-PLAN-ECS.md` and its
+   three siblings to `GATED_DOCS` (`tests/internal_docs_anchors.rs:280`, which held exactly four
+   documents when this rung was written, none of them a reflection plan) and give each a
+   `("REFLECTION-PLAN-*.md", 0)` row in `OVER_WAIVED_MAX` (`:1824-1845`). **What actually landed
+   registers five documents, not four** — `REFLECTION-ANALYSIS.md` alongside the four plans — each
+   with its `0` row, and it also carried the `GATES` Appendix GC caveat deletion this rung owed.
+   Whether EG8 keeps a gate-6 line item is bookkeeping for the campaign owner. The gate then checks, on every `cargo test`, that every `crates/...` path these
    plans mention exists on disk and that every `file.rs:N` anchor lands on a definition-shaped line —
    which is what makes §1's twenty-nine rows worth citing rather than decorative. **Ordering note,
    and it is the reason this is not an EG0 item:** the gate's *path* check fails on a dead markdown

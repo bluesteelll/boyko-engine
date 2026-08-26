@@ -73,22 +73,22 @@ finds one false stops and escalates rather than working around it.
 | F2 | `LAYOUTS` and `HOOKS` are `[OnceLock<T>; MAX_COMPONENTS]`, *"a single acquire-load + branch — no `Mutex`, no `static mut`, no data race"* | `component_registry/mod.rs:206`, `:224` |
 | F3 | `SERIALIZE` and `BIND_ACCESSORS` are the same shape and are **newer than the analysis snapshot** — the pattern is four instances deep, not two | `component_registry/serialize.rs:277` |
 | F4 | `STORAGE_KIND` / `RESIDENCY_CLASS` are `[AtomicU8; MAX_COMPONENTS]` with `Relaxed`, deliberately, because *"the kind is a registration-time, write-once datum with **no payload published through it**"* | `component_registry/mod.rs:373`, `:501` |
-| F5 | In-tree installer/getter convention is `(component_id: usize, …)`, because the derive calls them as `…::component_id().0` | `component_registry/serialize.rs:287`, `:299` |
-| F6 | `install_bind_accessor` is **`pub`** specifically *"so the `#[derive(Bindable)]` expansion (which lives in downstream crates where `pub(crate)` is unreachable) can call it"*; write-once, *"a same-id re-install is a silent no-op (first writer wins)"* | `component_registry/serialize.rs:293-318` |
-| F7 | The `component_id()` funnel is `static ID: OnceLock<ComponentId>` → `get_or_init` → `register_new::<Self>()` → **six** install slots (`storage`, `require`, `clone`, `relationship`, `residency`, `serialize`) + the const-gated `if Self::HAS_HOOKS` | ~~`boyko_macros/src/component.rs:350-374`~~ → ~~`:371-397` (re-measured at the C8 **audit**, i.e. against the pre-landing tree)~~ → **`:423-450`, re-measured 2026-08-21 AFTER C8 LANDED.** The content of this fact is unchanged and still true, and it is still **six** slots — `#reflect_install` is the seventh and is cited separately wherever it matters. The anchors have now moved twice for the same reason, and this row is the record of both: C7 inserted `#reflect_items` / `#reflect_default_witness` into the same `quote!` (**now** `:395` and `:397`), and C8 inserted the D29 condition block (+15 lines, ending at the condition itself, `:178`), the `reflect_install` binding with its rationale (+37, `:339-375`) and the slot itself (+1, `:447`), moving everything from the funnel down a further 52–53 lines. **Live, in the tree this rung leaves behind:** `fn component_id()` `:425`, `get_or_init` `:428`, `register_new::<Self>()` `:429`, the const-gated `install_hooks` `:438-440`, the six slots `:441-446`, the seventh `#reflect_install` `:447`, `ComponentId(raw)` `:448`. **The C8 audit re-measured this row and the C8 landing rotted it again inside the same rung** — and nothing reds on that, because `internal_docs_anchors.rs`'s `GATED_DOCS` names `FEATURE_MAP.md` / `SYSTEMS.md` / `ARCHITECTURE.md` / `MESHLET-VIRTUAL-GEOMETRY-PLAN.md` and **no `REFLECTION-PLAN-*.md`**. Every number in this table is checked by a person or not at all |
-| F8 | Install slots come in two flavours: **const-gated** (`if Self::HAS_HOOKS`, for the derive-XOR-runtime-builder contract) and **ungated + self-gating** (`install_residency_class::<Self>` short-circuits on the default const) | `boyko_macros/src/component.rs:280-303` |
-| F9 | `#[component(...)]` already parses a bare flag key (`no_bundle`) and a `storage = "bitset"|"dense"` key, with duplicate detection and a *"valid keys: …"* diagnostic | `boyko_macros/src/component.rs:643-760` |
+| F5 | In-tree installer/getter convention is `(component_id: usize, …)`, because the derive calls them as `…::component_id().0` | `component_registry/serialize.rs:287`, `:308` |
+| F6 | `install_bind_accessor` is **`pub`** specifically *"so the `#[derive(Bindable)]` expansion (which lives in downstream crates where `pub(crate)` is unreachable) can call it"*; write-once, *"a same-id re-install is a silent no-op (first writer wins)"* | `component_registry/serialize.rs:299~-318` |
+| F7 | The `component_id()` funnel is `static ID: OnceLock<ComponentId>` → `get_or_init` → `register_new::<Self>()` → **six** install slots (`storage`, `require`, `clone`, `relationship`, `residency`, `serialize`) + the const-gated `if Self::HAS_HOOKS` | ~~`boyko_macros/src/component.rs:350~-374`~~ → ~~`:371~-397` (re-measured at the C8 **audit**, i.e. against the pre-landing tree)~~ → **`:423-450`, re-measured 2026-08-21 AFTER C8 LANDED.** The content of this fact is unchanged and still true, and it is still **six** slots — `#reflect_install` is the seventh and is cited separately wherever it matters. The anchors have now moved twice for the same reason, and this row is the record of both: C7 inserted `#reflect_items` / `#reflect_default_witness` into the same `quote!` (**now** `:395~` and `:397~`), and C8 inserted the D29 condition block (+15 lines, ending at the condition itself, `:178~`), the `reflect_install` binding with its rationale (+37, `:339~-375`) and the slot itself (+1, `:447~`), moving everything from the funnel down a further 52–53 lines. **Live, in the tree this rung leaves behind:** `fn component_id()` `:425`, `get_or_init` `:428~`, `register_new::<Self>()` `:429~`, the const-gated `install_hooks` `:438~-440`, the six slots `:441~-446`, the seventh `#reflect_install` `:447~`, `ComponentId(raw)` `:448~`. **The C8 audit re-measured this row and the C8 landing rotted it again inside the same rung** — and nothing reds on that, because `internal_docs_anchors.rs`'s `GATED_DOCS` names `FEATURE_MAP.md` / `SYSTEMS.md` / `ARCHITECTURE.md` / `MESHLET-VIRTUAL-GEOMETRY-PLAN.md` and **no `REFLECTION-PLAN-*.md`**. Every number in this table is checked by a person or not at all |
+| F8 | Install slots come in two flavours: **const-gated** (`if Self::HAS_HOOKS`, for the derive-XOR-runtime-builder contract) and **ungated + self-gating** (`install_residency_class::<Self>` short-circuits on the default const) | `boyko_macros/src/component.rs:314~-337` |
+| F9 | `#[component(...)]` already parses a bare flag key (`no_bundle`) and a `storage = "bitset"|"dense"` key, with duplicate detection and a *"valid keys: …"* diagnostic | `boyko_macros/src/component.rs:725~-856` |
 | F10 | `StorageKind` is 3-way (`Table=0`, `Bitset=1`, `Dense=2`); `Bitset` has **no `ComponentPool`**, `Dense` has a global `DenseStore` and is **always `ResidencyKind::Cpu`** | `component_registry/mod.rs:323-339` |
 | F11 | The `Bindable` derive's trampoline takes `let this: &T = unsafe { &*(p as *const T) }` off arena-rooted provenance, and it has passed Miri | `boyko_macros/src/bindable.rs:113`, `:119` |
 | F12 | `core::mem::offset_of!` is load-bearing engine-wide on this toolchain, including as `const _: () = assert!(offset_of!(…) == N)` layout pins | `boyko_render/src/gpu_transform3d.rs:108-115` (317 sites tree-wide) |
-| F13 | `boyko_serialize`'s manifest and lib header assert the directional rule at the source: *"never `boyko_reflect` (the codegen-not-reflection invariant)"* | `crates/boyko_serialize/Cargo.toml:6-10`, `src/lib.rs:6` |
+| F13 | `boyko_serialize`'s manifest and lib header assert the directional rule at the source: *"never `boyko_reflect` (the codegen-not-reflection invariant)"* | `crates/boyko_serialize/Cargo.toml:6~-10`, `boyko_serialize/src/lib.rs:6~` |
 | F14 | Package names are dashed, directories underscored (`boyko-serialize` in `crates/boyko_serialize`), and every member carries `[lints] workspace = true` | `crates/boyko_serialize/Cargo.toml` |
 | F15 | `clippy.toml` bans `HashMap`/`HashSet`/`Mutex`/`RwLock`/`Rc`/`RefCell` at **deny** via `[workspace.lints.clippy] disallowed_types = "deny"`; `OnceLock` is **not** banned; exceptions carry `#[allow(clippy::disallowed_types)]` + a rationale | `clippy.toml`, root `Cargo.toml` |
-| F16 | The root is **also a package**, so `default-members` names every member **plus `"."`** — *"there is no non-workspace-wide root build any more"* | root `Cargo.toml:1-40` |
+| F16 | The root is **also a package**, so `default-members` names every member **plus `"."`** — *"there is no non-workspace-wide root build any more"* | root [`Cargo.toml`](../Cargo.toml):1-40 |
 | F17 | **`grep -c hwrt .github/workflows/ci.yml` = 0.** Every `#[cfg(feature = "hwrt")]` body in the tree is compiled by **no CI leg**. A feature-gated body is invisible to the default gate — measured, not feared | `.github/workflows/ci.yml` |
 | F18 | CI's Miri step is a **hand-listed package allowlist** (`-p boyko-ecs -p boyko-utils -p boyko-threadpool -p boyko-serialize -p boyko-math -p boyko_sdf_math -p boyko_image`), required, not `continue-on-error`; `MIRIFLAGS=-Zmiri-tree-borrows` is workspace-wide | `.github/workflows/ci.yml:193-226`, `.cargo/config.toml` |
-| F19 | Features unify **per package**, and the tree has recorded the consequence: *"a `#[cfg]`'d field on a struct `boyko_app` constructs appears or vanishes for that crate depending on a flag none of its own source names"* | `crates/boyko_rhi_vulkan/Cargo.toml:21-25` |
-| F20 | A counting-global-allocator **delta** harness with baseline subtraction is the tree's established zero-allocation instrument | `crates/boyko_ui/tests/p4_bind_zero_alloc.rs:1-20` |
+| F19 | Features unify **per package**, and the tree has recorded the consequence: *"a `#[cfg]`'d field on a struct `boyko_app` constructs appears or vanishes for that crate depending on a flag none of its own source names"* | `crates/boyko_rhi_vulkan/Cargo.toml:21~-25` |
+| F20 | A counting-global-allocator **delta** harness with baseline subtraction is the tree's established zero-allocation instrument | `crates/boyko_ui/tests/p4_bind_zero_alloc.rs:1~-20` |
 | F21 | 220 hand-written `impl Component for` sites exist; of the 40 files sampled, **every one is a bench, an integration test, or a `#[cfg(test)]` module** — none is production source | `crates/boyko_ecs/{benches,tests}/*`, `…/src/**/mod tests` |
 
 ---
@@ -119,7 +119,7 @@ compile-both-ways PoC.
   Aether work knows it owes it;
 * **every engine crate that opts a component in inherits it too** — `boyko_scene` for `Transform` /
   `Name` / `Visibility`, `boyko_render` for `GpuTransform3D`. That is not optional and it cannot be
-  dodged by declining to declare the feature: root `Cargo.toml:25-26`'s
+  dodged by declining to declare the feature: root [`Cargo.toml`](../Cargo.toml):25-26's
   `[workspace.lints.rust] unexpected_cfgs` check-cfg list **adds to** Cargo's per-manifest feature
   list, and every member opts in via `[lints] workspace = true`, so a `#[cfg(feature = "reflect")]`
   in a crate with no such feature **warns** and the existing `-D warnings` gate reds it. A missing
@@ -287,7 +287,7 @@ resolution is then a new rung, not an edit.
 The directional rule is about crate deps, not emitted tokens — and this is already house doctrine
 stated verbatim in a shipping manifest: *"this crate does NOT depend on `boyko-ecs`: every
 `boyko_ecs::…`/`boyko_macros::…` occurrence in the expander is an emitted TOKEN resolved in the
-downstream crate"* (`crates/aether_lang/Cargo.toml:6-11`). A.5's jurisdictional point was
+downstream crate"* (`crates/aether_lang/Cargo.toml:6~-11`). A.5's jurisdictional point was
 independently reinvented by the tree; this decision cites it rather than re-arguing it.
 
 ### D18 — `boyko_reflect` depends on `boyko_ecs` and `std` only. No third-party crate. No `Mutex`/`HashMap`.
@@ -357,9 +357,9 @@ pair, and the third is the one that makes it a plan defect rather than a taste q
   through four documents.
 
   `#[diagnostic::on_unimplemented]` is stable since 1.78 and is **already load-bearing in this tree**
-  — `crates/boyko_ecs/src/ecs/core/iters/query/chunked_data.rs:67` and
-  `.../query/filter.rs:2507`, the second with a `compile_fail` fixture
-  (`crates/boyko_ecs/tests/compile_fail_chunk/changed_filter_rejected.rs:11`) that pins the message.
+  — `crates/boyko_ecs/src/ecs/core/iters/query/chunked_data.rs:67~` and
+  `query/filter.rs:2507~`, the second with a `compile_fail` fixture
+  (`crates/boyko_ecs/tests/compile_fail_chunk/changed_filter_rejected.rs:11~`) that pins the message.
   So this is the tree's existing answer to "a trait bound needs a human-readable refusal", not a new
   mechanism.
 * **`#[reflect(no_default)]` emits `None`** and is the documented way out, named in the label above.
@@ -426,10 +426,10 @@ C7's `Lands` opened *"In `boyko_macros`: …"* and then emitted, from that crate
 items that exist nowhere:
 
 * **`boyko_reflect::Reflect`.** `crates/boyko_reflect/src/` declares **no trait at all** — six
-  modules, and `lib.rs:53-64` re-exports only the `TypeInfo` family plus
+  modules, and `boyko_reflect/src/lib.rs:59-70` re-exports only the `TypeInfo` family plus
   `install_type_info`/`type_info_of`/`Scalar`/`ScalarKind`/`NestedCursor`/`FieldValue`. The
-  identifier appears in the plan set at exactly two sites and **both are uses** (C7 :1683, C8
-  :1737). `REFLECTION-ANALYSIS.md:11` even records *the absence of a `trait Reflect`* as a finding
+  identifier appears in the plan set at exactly two sites and **both are uses** (C7
+  `REFLECTION-PLAN-CORE.md:2197`, C8 `:2811`). `REFLECTION-ANALYSIS.md:11` even records *the absence of a `trait Reflect`* as a finding
   about the tree.
 * **`boyko_reflect::ReflectDefault`.** Its only occurrence anywhere is inside **D20's prose**
   (:344-349), in a fenced sketch introduced by *"where `boyko_reflect` declares"*. D20 is a
@@ -441,12 +441,12 @@ items that exist nowhere:
 that emits them. `Reflect` carries `const TYPE_INFO: &'static TypeInfo`; `ReflectDefault` is D20's
 sketch verbatim, attribute and blanket impl. The mechanism D20 leans on is sound and was verified,
 not assumed: `#[diagnostic::on_unimplemented]` is stable on the pinned 1.97.1 and already
-load-bearing at `boyko_ecs/src/ecs/core/iters/query/chunked_data.rs:67` and `.../filter.rs:2507`,
+load-bearing at `boyko_ecs/src/ecs/core/iters/query/chunked_data.rs:67~` and `query/filter.rs:2507~`,
 the second with a blessed `compile_fail` fixture.
 
 **Second part: `reflect` is registered as a derive helper attribute.**
 `#[proc_macro_derive(Component, attributes(component, require, entities, relationship,
-relationship_target))]` (`boyko_macros/src/lib.rs:110-112`) names five, and `reflect` is not one.
+relationship_target))]` (`boyko_macros/src/lib.rs:140~-142`) names five, and `reflect` is not one.
 An unregistered helper attribute is a hard error at the **use** site — *"cannot find attribute
 `reflect` in this scope"* — resolved before the derive runs, so `#[reflect(no_default)]` is not
 something the derive can inspect, it is something the user's crate fails to compile. C7's `Lands`
@@ -459,7 +459,7 @@ is *"error: associated `static` items are not allowed"* on the pinned toolchain 
 `&T::__REFLECT_TYPE_INFO` naming a `static` is not expressible. The two escapes are **not**
 interchangeable: an associated `const` gives the type **one descriptor per crate that reads it**,
 and **C6's Check B identifies types by address** (`ptr::from_ref` + `ptr::eq` over the `path` and
-`done` arrays, `type_info.rs:626,641-643,651`), so a `const` descriptor degrades both its cycle
+`done` arrays, `type_info.rs:626~,641-643,651`), so a `const` descriptor degrades both its cycle
 test and its memoization while `validate` goes on returning `Ok`. One stable address per type is
 a C6 obligation. The form is a free `static` inside a generated `const _: () = { … };` block —
 which is what every hand-baked static in the campaign already is.
@@ -492,16 +492,16 @@ C7's headline gate named C3's hand-written statics as its oracle. That oracle is
 three independent, measured reasons — the C3 types are **private items of an integration-test
 binary** (`c3_type_info.rs:43,52,63,70`); `boyko_reflect` has **no `boyko-macros` edge** and cannot
 get one usefully, because `boyko-macros` is a **dev**-dependency of `boyko_ecs`
-(`boyko_ecs/Cargo.toml:89-90`) and does not propagate; and `crates/boyko_reflect/Cargo.toml:12-16`
+(`boyko_ecs/Cargo.toml:89-90`) and does not propagate; and `crates/boyko_reflect/Cargo.toml:12~-16`
 forbids a `[features]` table *"now or ever"*, so the derive's consumer-side `#[cfg(feature =
 "reflect")]` is permanently false there. Three of the four C3 types are also out of rung order at
 C7. **The decision:** C7's gates live in `crates/reflect_fixture/tests/c7_derive_bake.rs` and take
 `c6_nested_descend.rs`'s `Body → Placement → Point` and `Slot → Handle` as the comparison target —
-the file that **nominates itself** for the role in its own header (:20-23).
+the file that **nominates itself** for the role in its own header (`c6_nested_descend.rs:20~-23`).
 
 **And the invocation is part of the gate.** Every C7 gate file is `#![cfg(feature = "reflect")]`,
 so a plain `cargo test -p reflect-fixture` compiles it to nothing and exits 0 — C6's own record
-measures exactly that (:1666-1667). The rung records `cargo test -p reflect-fixture --features
+measures exactly that (`REFLECTION-PLAN-CORE.md:2143-2144`). The rung records `cargo test -p reflect-fixture --features
 reflect-fixture/reflect --test <name>` and the `running [1-9]` check, for the green side **and for
 every red**. This campaign's standing rule is that `running 0 tests` is a vacuous pass, and a gate
 table that names no invocation is the shortest path to one.
@@ -509,7 +509,7 @@ table that names no invocation is the shortest path to one.
 **Consequences the same ruling settles.** Gate 5's alloc arm cannot be an arm on
 `c4_prim_zero_alloc.rs` — that file is in the package that cannot run the derive, so the arm would
 measure a hand-written `default_in_place` wearing the derived one's verdict (the weaker-subject
-substitution C11 already forbids by name at :1934-1936). It becomes a **second** instrument, in
+substitution C11 already forbids by name at :3354-3356). It becomes a **second** instrument, in
 `reflect_fixture`, with its own positive control; the c4 header's *"for no gain"* argument against a
 second `#[global_allocator]` was written before a subject existed that its binary cannot reach, and
 the gain is now twofold, because keeping the allocator out of `c7_derive_bake.rs` is also what keeps
@@ -524,7 +524,7 @@ C7's derived descriptors inside §7.2's Miri row instead of behind a `#![cfg(not
 three, so `drop_in_place` is `None` for all three **whether the derive is right or sabotaged**, the
 count is identically zero, and *"no leak, no double-free"* is unfalsifiable. **A.8 prescribed a set
 that would have worked** — `{ pod, String, Nested{String} }`
-(`REFLECTION-ANALYSIS.md:1054-1055`) — and §3.3's row (:562) substituted the drop-free one. The
+(`REFLECTION-ANALYSIS.md:1054-1055`) — and §3.3's row (`REFLECTION-PLAN-CORE.md:1036`) substituted the drop-free one. The
 substitution is the defect; the harness C7 builds is not.
 
 **The decision.** Gate 4's set gains `Owned { tag: u32 }` with an instrumented `impl Drop`, and one
@@ -557,7 +557,7 @@ after it inherits the clause rather than re-deciding it.
 
 **The second half is about the index, and it is the one nothing could see.** D14 forbids omitting a
 field because by-index access would then depend on which fields were skipped, and
-`c3_type_info.rs:304-306` records the consequence — but the natural walk shape, `fields.iter()
+`c3_type_info.rs:304~-306` records the consequence — but the natural walk shape, `fields.iter()
 .filter(|f| /* classifies */ …)`, keeps every surviving field's **name and offset right** and
 shifts only the index. No C7 fixture had an unclassifiable field, so no gate could see it. `struct
 Padded { a: u32, _pd: PhantomData<u8>, b: u32 }` gives it one, at C7, without waiting for
@@ -567,11 +567,11 @@ accepts and D15's refusal later upgrades to a spanned error.
 ### D26 — G0's linkage deviation is retired at **C8**, not C7, because needle B is `install_type_info` and C7 emits no install. C7 adds the annotation BESIDE the linkage.
 
 *Architect's ruling on the C7 audit, 2026-08-21.* Amends **C7**, **C8's `Lands`**, and corrects
-[`REFLECTION-PLAN-GATES.md`](REFLECTION-PLAN-GATES.md):503-506.
+[`REFLECTION-PLAN-GATES.md`](REFLECTION-PLAN-GATES.md):504-507.
 
 GATES schedules the swap at C7 on the ground that the annotation *"puts needle A and needle B in the
 feature-ON image by the same mechanism the annotation will"*. **Needle B is the literal name
-`install_type_info`** (~~`reflect_absence_census.rs:124`~~ → ~~`:181`, re-measured at the C8
+`install_type_info`** (~~`reflect_absence_census.rs:124~`~~ → ~~`:181~`, re-measured at the C8
 audit~~ → **`:228`, re-derived after C8 landed — the landing rewrote that file's header and moved
 its own re-measurement**; GATES D5 calls it the LTO-sensitivity
 probe), and the only thing that will ever reference it from the derive is **C8's** install slot —
@@ -584,29 +584,30 @@ in its purest form.
 **The decision, in two halves.** At **C7** `reflect_on.rs` gains `#[component(reflect)]` **beside**
 its existing `reflect_linkage()` — so the derive key is exercised in the fixture, the G3 calibration
 re-run that C2 and GATES both scheduled at C7 has the annotation it was scheduled for, and
-`OPT_IN_TOKENS`'s live assertion (~~`reflect_absence_census.rs:314,339-349`~~ → ~~`:371` for the
-const, `:397-402` for the assertion, re-measured at the C8 audit~~ → **`:571` for the const,
-`:622-630` for the L2 assertion and `:601-610` for the L3 one, re-derived after the C8 landing and
+`OPT_IN_TOKENS`'s live assertion (~~`reflect_absence_census.rs:314~,339-349`~~ → ~~`:371~` for the
+const, `:397~-402` for the assertion, re-measured at the C8 audit~~ → **`:571` for the const,
+`:622~-630` for the L2 assertion and `:601~-610` for the L3 one, re-derived after the C8 landing and
 its follow-up**) stays green. At **C8**
 the linkage is deleted and `OPT_IN_TOKENS` is updated to the annotation form **in the same change**,
 which is what that assertion's own failure text instructs.
-~~Both bin headers (`reflect_on.rs:10-15`, `reflect_never.rs:1-3`,
-`reflect_off_twin_plus.rs:8-11`) name C7 as the retiring rung and are corrected to C8 at that
+~~Both bin headers (`reflect_on.rs:10~-15`, `reflect_never.rs:1~-3`,
+`reflect_off_twin_plus.rs:8~-11`) name C7 as the retiring rung and are corrected to C8 at that
 landing.~~
 
 > **Struck 2026-08-21 (C8 audit) — the word "Both" carries three anchors, and the third names no
-> rung.** `reflect_off_twin_plus.rs:8-11` reads *"This file is a copy of src/bin/reflect_on.rs (the
+> rung.** `reflect_off_twin_plus.rs:8~-11` reads *"This file is a copy of src/bin/reflect_on.rs (the
 > twin's source) plus the marker … G7a's harness is the drift gate"* — no rung at all. The file does
-> name C7, but **at `:17`, in the item doc** (*"Tracked at CORE C7"*), and it names it as the rung
+> name C7, but **at `:18~`, in the item doc** (*"Tracked at CORE C7"*), and it names it as the rung
 > that ADDED the annotation, not as a retiring rung — so it needs no correction either. **C8's own
 > sentence (*"`reflect_off_twin_plus.rs` names no rung and needed none"*) is right about the header
 > and wrong about the file**, and is corrected at C8 for the same reason. Reading either line and
 > going to look for a C7 reference to fix is how this tree has introduced fresh rot before.
-> **Corrected:** two bin *headers* name C7 as the retiring rung — `reflect_on.rs:10-20` and
-> `reflect_never.rs:1-11` — and both were corrected in place at the C7 ruling.
-> `reflect_off_twin_plus.rs` carries the linkage fn itself (`:40-41`, `:59-65`) and its own
-> C7 tracking note (`:17-24`); the fn and the sentences that describe it are on C8's list, the
-> tracking note is not.
+> **Corrected:** two bin *headers* name C7 as the retiring rung — `reflect_on.rs:10~-20` and
+> `reflect_never.rs:1~-11` — and both were corrected in place at the C7 ruling.
+> `reflect_off_twin_plus.rs` **carried** the linkage fn itself; **C8 deleted it**, exactly as
+> the rest of this sentence predicted, so no line can be cited for it any more. Its own C7
+> tracking note (`reflect_off_twin_plus.rs:18~-25`) survived: the fn and the sentences that
+> describe it were on C8's list, the tracking note was not.
 
 **Why this is a decision and not a scheduling detail.** Three landed file headers, one GATES
 paragraph and one live assertion all point at C7, and C7's own `Lands` mentioned none of them. That
@@ -623,9 +624,9 @@ D26 rests on one sentence: *"C8 is the rung whose install slot puts the literal 
 deleted without voiding the probe."* **MEASURED FALSE.** The seventh slot lives inside
 `component_id()`'s `get_or_init` closure (F7), and `reflect_on.rs`'s `main()` never calls
 `FixturePod::component_id()` — it constructs the value and black-boxes one field
-(`reflect_on.rs:43-51`). An uncalled non-generic `#[inline]` method is dropped before the linker
+(`reflect_on.rs:43~-51`). An uncalled non-generic `#[inline]` method is dropped before the linker
 sees it, exactly as C7's descriptor already is (*"at C7 the descriptor is referenced by nothing and
-is dropped"*, ~~`reflect_absence_census.rs:127-137`~~ → **`:171-184`**, re-derived after the landing
+is dropped"*, ~~`reflect_absence_census.rs:127~-137`~~ → **`:171~-184`**, re-derived after the landing
 rewrote that header).
 
 `llvm-nm` over the three images the census itself builds
@@ -643,15 +644,15 @@ rewrote that header).
 The whole funnel is absent in every link configuration; the **six existing slots are already in the
 image's absence and the seventh would join them there**. The single `install_type_info` hit is
 `_RNvNtCsd7WGKwjPoHP_13boyko_reflect8registry17install_type_info`, referenced only by
-`reflect_on.rs:70`'s `reflect_linkage()` — and by the pulled-object rule the census header states
-(~~`:78-84`~~ → **`:86-94`**) it is also the sole reason the other `boyko_reflect` symbols are there.
+`reflect_on.rs:70~`'s `reflect_linkage()` — and by the pulled-object rule the census header states
+(~~`reflect_absence_census.rs:78~-84`~~ → **`:86~-94`**) it is also the sole reason the other `boyko_reflect` symbols are there.
 **Deleting the linkage as D26 schedules it therefore takes needle B to 0 AND needle A to 0,
-reddening both `l2_b > 0` (~~`:475-484`~~ → **`:727-738`**) and `l2_a > 0` (~~`:445-451`~~ →
-**`:673-679`**)** — a census that was green at the audit (`cargo test -p reflect-fixture --features
+reddening both `l2_b > 0` (~~`reflect_absence_census.rs:475~-484`~~ → **`:727~-738`**) and `l2_a > 0` (~~`:445~-451`~~ →
+**`:673~-679`**)** — a census that was green at the audit (`cargo test -p reflect-fixture --features
 reflect-fixture/reflect --test reflect_absence_census`, exit 0, ~~`running 2 tests`~~ →
 **`running 3 tests`** since the C8 follow-up added `code_only_keeps_code_and_drops_prose`).
 
-> *The `reflect_on.rs` anchors in this ruling (`:43-51`, `:70`) are the PRE-C8 tree's and are left
+> *The `reflect_on.rs` anchors in this ruling (`reflect_on.rs:43~-51`, `:70~`) are the PRE-C8 tree's and are left
 > as measured: they point at `reflect_linkage()`, which this rung deleted. The census anchors above
 > are corrected instead of struck, because those clauses still exist. Re-derived by reading the
 > files, 2026-08-21, after the landing and its follow-up.*
@@ -659,9 +660,9 @@ reflect-fixture/reflect --test reflect_absence_census`, exit 0, ~~`running 2 tes
 **The decision.** C8's `Lands` gains the obligation D26 did not carry: **the funnel is touched**.
 `main()` gains `core::hint::black_box(<FixturePod as Component>::component_id());` in **all three**
 fixture bins — `reflect_on.rs` (L1 and L2 share this source), `reflect_off_twin_plus.rs` (its own
-contract is *"the twin's source plus exactly one fn"*, `:8-11` — still lands) and `reflect_never.rs`
-(*"nothing else about the two shapes may diverge, or L3 stops discriminating"*, ~~`:18-21`~~ →
-**`:24-26`**). Un-touched, the
+contract is *"the twin's source plus exactly one fn"*, `reflect_off_twin_plus.rs:8~-11` — still lands) and `reflect_never.rs`
+(*"nothing else about the two shapes may diverge, or L3 stops discriminating"*, ~~`reflect_never.rs:18~-21`~~ →
+**`:24~-26`**). Un-touched, the
 seventh slot is a **dead datum in the artifact** — this campaign's most-repeated class, and the
 sixth instance was found one rung ago.
 
@@ -669,8 +670,8 @@ sixth instance was found one rung ago.
 the first time. Today the funnel is in neither image, so `l1_a == 0 && l1_b == 0` is earned by the
 funnel's absence; after the touch the funnel is in **both** images and only the emitted
 `#[cfg(feature = "reflect")]` separates them — which is precisely the property gate 2 claims. The
-census's re-calibration, already scheduled at C8 by its own header (~~`:134-137`~~ → the schedule
-line is now **`:180-181`** and the table it produced is **`:137-184`**), is where the new cells are
+census's re-calibration, already scheduled at C8 by its own header (~~`reflect_absence_census.rs:134~-137`~~ → the schedule
+line is now **`:180~-181`** and the table it produced is **`:137~-184`**), is where the new cells are
 recorded; **they are not predicted here.**
 
 ### D28 — C8's gate 1 reads an ADDRESS, not `is_some()`. The install seam's two characteristic failures are wrong-descriptor and wrong-id, and `is_some()` sees neither.
@@ -688,11 +689,11 @@ where every subject was one field wide"* wearing new clothes.
 It is also an inherited obligation. C7's follow-up states the one-address-per-type property *"goes
 live at **C8**'s install seam and **ECS EG8**, both of which read a descriptor from a crate other
 than the one defining it"* (§C7 follow-up, and verbatim in
-`reflect_dogfood/tests/c7_cross_crate_address.rs:36-38`) — and C8's gate list read no address at all.
+`reflect_dogfood/tests/c7_cross_crate_address.rs:36~-38`) — and C8's gate list read no address at all.
 
 **The decision.** Gate 1 becomes an address identity over **at least two distinct subjects**, one of
 them defined in a crate other than the one reading it. The rig exists and needs no new package:
-`reflect_dogfood`'s `ProbeLeaf` / `ProbeRoot` (`src/address.rs:66-84`) with
+`reflect_dogfood`'s `ProbeLeaf` / `ProbeRoot` (`src/address.rs:66~-84`) with
 `probe_*_type_info_in_defining_crate`, already consumed by `c7_cross_crate_address.rs`. The gate
 asserts, on the **first** touch of `component_id()`:
 
@@ -736,17 +737,17 @@ errors there is no expansion left in which to observe an absent install), and th
 carrying `#[derive(Component, Default)] #[component(reflect, storage = "bitset")] pub struct
 AuditBitsetTag;`, built `--features reflect-fixture/reflect`, ran `running 1 test`, exit 0, and
 printed `bitset+reflect ACCEPTED: name=…::AuditBitsetTag size=0 align=1 fields=0 kind=Struct`.
-Nothing rejects the pair: `reject_non_zst_bitset_tag` (`component.rs:71-75`) only requires
-fieldlessness and `AuditBitsetTag` is fieldless; the `hooks.any()` rejection (`:84-94`) covers only
-lifecycle hooks; `Fields::Unit` maps to a zero-field `Struct` (`reflect.rs:345`). **And the
-suppression does not exist either:** `component.rs:164` gates the reflect emission on
+Nothing rejects the pair: `reject_non_zst_bitset_tag` (`boyko_macros/src/component.rs:71~-75`) only requires
+fieldlessness and `AuditBitsetTag` is fieldless; the `hooks.any()` rejection (`:84~-94`) covers only
+lifecycle hooks; `Fields::Unit` maps to a zero-field `Struct` (`boyko_macros/src/reflect.rs:345~`). **And the
+suppression does not exist either:** `boyko_macros/src/component.rs:164~` gates the reflect emission on
 `hooks.reflect` alone, the one slot in its neighbourhood carrying no `storage_bitset` term — its six
-neighbours all do (`:123`, `:144`, `:239`, `:263`, `:315`, `:334`).
+neighbours all do (`:123~`, `:144~`, `:239~`, `:263~`, `:315~`, `:334~`).
 
 > **The anchors in the paragraph above are the PRE-C8 tree's** (HEAD `bf7803d6`) and are left as
 > measured, because the paragraph is a dated record of what the audit found. **Post-landing they are
-> `:178` for the condition — which now reads `hooks.reflect && !hooks.storage_bitset` — and `:123`,
-> `:144`, `:254`, `:278`, `:330`, `:386` for the six neighbours** (`entities_items`,
+> `:178~` for the condition — which now reads `hooks.reflect && !hooks.storage_bitset` — and `:123~`,
+> `:144~`, `:254~`, `:278~`, `:330~`, `:386~` for the six neighbours** (`entities_items`,
 > `serialize_items`, `clone_install`, `relationship_install`, `serialize_install`, `bundle_items`,
 > in that order; only the first two did not move). Re-derived by reading the file, 2026-08-21, after
 > the landing. Cite the neighbours **by binding name** in new text: names survive an insertion and
@@ -767,7 +768,7 @@ neighbours all do (`:123`, `:144`, `:239`, `:263`, `:315`, `:334`).
   inside `install_type_info`: `storage_kind(id) != Bitset`"*, and the landed installer has no such
   check — `boyko_reflect` names neither `storage_kind` nor `Bitset` anywhere, and this document
   mentioned `storage_kind` **zero** times before this decision. The getter is real and public
-  (`boyko_ecs/…/component_registry/mod.rs:388`). **C8 does not need it:** after the suppression
+  (`boyko_ecs/src/ecs/core/component/component_registry/mod.rs:388`). **C8 does not need it:** after the suppression
   above, the derive — C8's only caller of `install_type_info` — can no longer pass a bitset id, and
   the runtime half exists for the callers the derive cannot see, which ECS D5 names as the
   Aether-expanded path and a future runtime reclassification. Neither exists before C9's refusal
@@ -781,22 +782,22 @@ sharpens **D16**'s delivery clause.
 Three things are wrong with the gate as written, and the third is the one the audit found last.
 
 1. **The subject set is empty tree-wide.** Every `#[derive(…Bindable…)]` site
-   (`boyko_ui/tests/p4_bind.rs:40`, `p4_bind_zero_alloc.rs:94`, `p4_miri.rs:63`,
-   `text_bind_emit.rs:50`, `boyko_render/tests/ui_hud_screenshot.rs:455`) carries no
+   (`boyko_ui/tests/p4_bind.rs:40~`, `p4_bind_zero_alloc.rs:94~`, `p4_miri.rs:63~`,
+   `text_bind_emit.rs:50~`, `boyko_render/tests/ui_hud_screenshot.rs:455~`) carries no
    `#[component(reflect)]`, and every `#[component(reflect)]` site carries no `Bindable`. The only
    file holding both strings is `boyko_macros/src/lib.rs`, where they are two unrelated rustdoc
-   examples (`:554` and the reflect key's own docs).
+   examples (`boyko_macros/src/lib.rs:554~` and the reflect key's own docs).
 2. **No listed package can host one.** The derive emits `impl ::boyko_ui::binding::Bindable`
-   (`bindable.rs:70`), so the subject needs a `boyko-ui` edge; D2 makes `#[cfg(feature = "reflect")]`
+   (`boyko_macros/src/bindable.rs:70`), so the subject needs a `boyko-ui` edge; D2 makes `#[cfg(feature = "reflect")]`
    evaluate in the **annotating** crate, so it also needs a feature literally named `reflect`.
    `reflect_fixture` forbids a third production dep — *"Deps are `boyko-ecs`, `boyko-macros`,
-   `boyko-reflect` — and nothing else, ever"* (`Cargo.toml:23-24`) — `reflect_dogfood` has no
+   `boyko-reflect` — and nothing else, ever"* (`reflect_fixture/Cargo.toml:23~-24`) — `reflect_dogfood` has no
    `boyko-ui` edge, and `boyko_ui` itself has neither a `reflect` feature nor a `boyko-reflect` dep
    (and is what D16 names as **Horn 1's** cost).
 3. **The stated red is not expressible, and never becomes expressible.** *"Rename a field on one
    side only"* has no "one side": a single struct definition feeds both derives, both read the same
-   `syn::Field::ident` (`bindable.rs:36-40,:54`; `reflect.rs:172-175`), and neither admits a rename
-   — `attributes(bind)` is declared at `lib.rs:559` and **never parsed** (`bindable.rs` never touches
+   `syn::Field::ident` (`boyko_macros/src/bindable.rs:36~-40,:54~`; `boyko_macros/src/reflect.rs:172~-175`), and neither admits a rename
+   — `attributes(bind)` is declared at `boyko_macros/src/lib.rs:559~` and **never parsed** (`bindable.rs` never touches
    `f.attrs`). The audit's expectation that C9's `#[reflect(skip)]` would supply the divergence is
    **wrong, and D14 is why**: *"`#[reflect(skip)]` emits a `FieldInfo` with `kind: Opaque` … **it
    does not omit the field**"*, chosen precisely so *"the by-index API's indices"* cannot depend on
@@ -812,10 +813,10 @@ plan delivers at C8"* — but it is respecified as what it can see, and given a 
   equals the reflect field index, **for every field name**, plus `<T as Bindable>::FIELD_COUNT as
   usize == TYPE_INFO.fields.len()`. The iteration is driven by the **reflect descriptor's** names,
   because `Bindable` exposes no name enumeration at all — only `FIELD_COUNT` and `field_id(name)`
-  (`boyko_ui/src/binding/bindable.rs:23-46`) — and the `FIELD_COUNT` clause is the half that catches
+  (`boyko_ui/src/binding/bindable.rs:25-46`) — and the `FIELD_COUNT` clause is the half that catches
   a name reflect stopped emitting, which the name-driven loop cannot see.
 * **What its RED is** — and this is the change: a mutation of one **generator**, not of a subject.
-  Reverse `bindable.rs:53`'s `ids` (`(0..n).rev()`), or suffix `reflect.rs:190`'s baked `name:`.
+  Reverse `boyko_macros/src/bindable.rs:53~`'s `ids` (`(0..n).rev()`), or suffix `boyko_macros/src/reflect.rs:190~`'s baked `name:`.
   Either reds; a source rename does not and cannot.
 * **Where the subject lives:** `reflect_dogfood`, which already has a `reflect` feature, a library
   target, an existing CI leg (`reflect-dogfood`, `cargo test -p reflect-dogfood --all-targets
@@ -825,7 +826,7 @@ plan delivers at C8"* — but it is respecified as what it can see, and given a 
   reflect surface. None of G1's six manifest clauses touch it (C2/C3/C4 are about `boyko-reflect`
   edges and `features = […]` arrays; a plain dev edge with no features array is outside all of
   them). The alternative host — a test target in `boyko_render`, which already has both a
-  non-default `reflect` feature (`Cargo.toml:44`) and `boyko-ui` as a dev dep (`:125`) at **zero**
+  non-default `reflect` feature (`boyko_render/Cargo.toml:44~`) and `boyko-ui` as a dev dep (`:125~`) at **zero**
   manifest cost — was **rejected**: no CI leg builds `-p boyko-render --features reflect`, so the
   test would be compiled by nothing (F17's measured class), and buying it back costs a CI job plus a
   `reflect_ci_coverage` row — more than the one line it saves.
@@ -837,7 +838,7 @@ plan delivers at C8"* — but it is respecified as what it can see, and given a 
 
 **Gate 3 (token absence, feature OFF).** Its deferral to G6b is not a route to an instrument:
 G6b has **selected no form** (*"Which form lands is an implementation choice with a stated
-criterion … Record the choice and the reason in the ledger"*, GATES `:1194-1196`), has **no ledger
+criterion … Record the choice and the reason in the ledger"*, GATES `:1280-1282`), has **no ledger
 row at all** (Appendix GB carries two `G6` rows and one `G6c`, no `G6b`), and has **no implementing
 file** — `reflect_fixture/tests/` holds five files, none of them a token census. Every `G5`/`G6`/
 `G6c`/`G7a`/`G7b`/`G8` row reads `— | —`, which that appendix's own preamble defines as *not
@@ -846,9 +847,9 @@ C8 declares **both** its reds required.
 
 Worse, the sentence that made the deferral look safe is false in **direction**. *"Under G6b's
 `compile_fail` form the same mutation makes the fixture compile"* — it cannot. G6b's compile_fail
-body (`GATES:1188-1193`) is `let _ = <MyComp as boyko_reflect::Reflect>::TYPE_INFO;` in
+body (`GATES:1274-1279`) is `let _ = <MyComp as boyko_reflect::Reflect>::TYPE_INFO;` in
 `reflect-fixture` compiled **feature-off**, where `boyko-reflect` is not in the resolved graph at
-all (`Cargo.toml:32,39`, `default = []`). The fixture's own `boyko_reflect::` path is therefore
+all (`reflect_fixture/Cargo.toml:32~,39`, `default = []`). The fixture's own `boyko_reflect::` path is therefore
 `E0433` **regardless of what the derive emits** — the form is satisfied by the dep's absence and is
 blind to the `cfg` it is meant to probe — and under the mutation it fails *harder*, never
 "starts to compile". Measured at the workspace level in the same session:
@@ -879,8 +880,8 @@ minus the `reflect` key) must emit the same symbol multiset and the same `.text`
 carry the funnel touch so the comparison is exactly *"does the seventh slot's existence perturb the
 other six"*. **C8 does not need it:** for an un-annotated type the slot is `TokenStream2::new()`
 interpolated into a `quote!`, which emits nothing as a language guarantee — the same guarantee the
-six existing slots at ~~`component.rs:389-394`~~ → **`:441-446`** (re-derived after C8 landed; the
-seventh, `#reflect_install`, is `:447`) already rely on. This edge is recorded in §7 so it
+six existing slots at ~~`boyko_macros/src/component.rs:389~-394`~~ → **`:441~-446`** (re-derived after C8 landed; the
+seventh, `#reflect_install`, is `:447~`) already rely on. This edge is recorded in §7 so it
 cannot expire, which is how the last two rungs lost obligations.
 
 ---
@@ -1180,7 +1181,10 @@ configuration (`[lints] workspace = true`), per §4's preamble.
 > re-specified):* canary appended to `crates/boyko_threadpool/src/lib.rs`;
 > `cargo clippy -p boyko-threadpool --all-targets -- -D warnings` → **exit 101**,
 > *"error: unexpected `cfg` condition value: `reflect`"* spanned at the cfg
-> (`lib.rs:151:7`), with *"expected values for `feature` are: `default` and `scheduler-trace`"*
+> (at the appended canary's own `cfg` line in `crates/boyko_threadpool/src/lib.rs` — a
+> coordinate in the MUTATED file state, which was then restored byte-identically, so there
+> is deliberately no line to cite), with *"expected values for `feature` are: `default` and
+> `scheduler-trace`"*
 > and *"`-D unexpected-cfgs` implied by `-D warnings`"* — and the canary's own text appears
 > **nowhere** in the output (0 hits): the diagnostic is the red, the `compile_error!` never
 > fires. A missing feature is a diagnostic, not a silence — the answer D16 and B6 gate 6 rest
@@ -1225,7 +1229,7 @@ reds on negative values only — so the proptest range must include them, and th
 > the cell; it is a later rung's question, not a scalar). Float trips are bit-exact
 > (`to_bits`/`from_bits`), so the gate asserts BITS — value equality would reject NaN wrongly
 > and accept a `-0.0 → 0.0` swap wrongly. `proptest` added as a **dev**-dependency (D18
-> governs the ship-visible table; the workspace's dev-only instrument, `Cargo.toml:52`); the
+> governs the ship-visible table; the workspace's dev-only instrument, [`Cargo.toml`](../Cargo.toml):52~); the
 > full-range proptests are `#[cfg_attr(miri, ignore = …)]` with the deterministic edge tests
 > (MIN/MAX/NaN/±0/subnormals) carrying the edges under Miri. No `unsafe` anywhere in the rung.
 > *Gate 1:* **measured size 16, align 8**, printed by
@@ -1322,7 +1326,7 @@ reds.
 > boyko-reflect --all-targets` (MIRIFLAGS `-Zmiri-tree-borrows` from `.cargo/config.toml`) —
 > 4 lib + 8 scalar-edge tests green, proptests carried as reasoned Miri-ignores.
 > *First RED:* the local `const MAX_COMPONENTS: usize = 512;` → gate 3 reds naming
-> `registry.rs:19`, exit 101. *The drift demonstration, with one execution finding:* the plan's
+> `registry.rs:19~`, exit 101. *The drift demonstration, with one execution finding:* the plan's
 > "change `boyko_ecs`'s `MAX_COMPONENTS` to `256`" does not rebuild as written — the kernel is
 > SELF-PINNED and three `E0080`s fire first (`size_of::<Archetype>() == 8704` and the two
 > `bit_owners` base-spacing asserts in `filtered_access_set.rs`), so the demo carried the
@@ -1584,7 +1588,7 @@ the return value is still `false`.
 > is the whole claim:* `set_f32`'s `-> bool` check replaced by
 > `debug_assert_eq!(v.kind, ScalarKind::F32); true` with an unconditional
 > `ptr::write(p, f32::from_bits(v.bits as u32))`. **Debug → exit 101, and it reds as a PANIC
-> inside the library** (`prim.rs:142: assertion left == right failed; left: Bool, right: F32`)
+> inside the library** (`prim.rs:142~: assertion left == right failed; left: Bool, right: F32`)
 > — not as a refusal, and exactly the shape a maintainer "fixes" with `#[should_panic]`.
 > **Release → exit 101, and it reds as a CONTRACT VIOLATION in the test**
 > (`set_F32 accepted a Bool scalar -- the kind check did not refuse`), the assertion vanished
@@ -1722,7 +1726,7 @@ untested here is the `array read` **arm**, not the counter.)*
 > *Third RED, not named by the rung, run because gate 2 otherwise has no observed red —
 > and it REFUTED a sentence this rung's first draft had written into the module header.*
 > Moving the bounds check below the multiply: **debug → exit 101**, and it reds as
-> *"attempt to multiply with overflow"* raised at `array.rs:63` — a **panic out of a
+> *"attempt to multiply with overflow"* raised at `array.rs:63~` — a **panic out of a
 > library whose entire contract is to refuse rather than fail**, which is the shape a
 > maintainer "fixes" with `#[should_panic]`. **Release → exit 0, GREEN**: the wrapped
 > product is simply discarded, because the check is still keyed on `index`. So the cost
@@ -1776,7 +1780,7 @@ gate 5 and the G1 clause below). **This does not violate D18.** D18 governs the 
 *ship-visible* dependency surface — the manifest already states it in those words (*"D18 governs the
 SHIP-VISIBLE table above; dev-dependencies enter no consumer's resolved closure"*, written when
 `proptest` landed for C1). `trybuild` is the workspace's vetted compile-fail harness, declared the
-same way in **five** members already, e.g. `crates/boyko_ecs/Cargo.toml:91` (`trybuild = "1"` under
+same way in **five** members already, e.g. `crates/boyko_ecs/Cargo.toml:91~` (`trybuild = "1"` under
 `[dev-dependencies]`), and also `crates/boyko_ui/Cargo.toml`, `crates/boyko_log/Cargo.toml`,
 `crates/aether_tests/Cargo.toml`, `crates/boyko_rhi_vulkan/Cargo.toml`. It is pinned as a bare
 `"1"` rather than through `[workspace.dependencies]` because every existing site does — hoisting it
@@ -1897,8 +1901,8 @@ the user's own token instead of at registration.
 > **Evidence, measured on this worktree at `793d8d3a` + C5:**
 > * `grep -rn "REFUSALS" crates/ docs/ tests/` → **7 hits, every one inside C9's own prose in this
 >   file** (lines 318–319, 1369, 1380, 1382, 1384, 1392). **Zero occurrences in any source file.**
-> * `grep -rn "reflect" crates/boyko_macros/src/` → 2 hits, both unrelated prose (`bundle.rs:274`
->   *"the registry layout reflects `size_of`"*, `lib.rs:504` *"reflection-free"*). The derive key
+> * `grep -rn "reflect" crates/boyko_macros/src/` → 2 hits, both unrelated prose (`boyko_macros/src/bundle.rs:274~`
+>   *"the registry layout reflects `size_of`"*, `boyko_macros/src/lib.rs:534~` *"reflection-free"*). The derive key
 >   `#[component(reflect)]` does not exist and does not land until **C7**, as the binding context
 >   for this session states.
 > * §5's own dependency tree is `C6 → C7 → C8 → C9`. C9's Lands is *"In `boyko_macros`: every
@@ -1937,7 +1941,7 @@ the user's own token instead of at registration.
 >
 > ```text
 > error[E0392]: lifetime parameter `'a` is never used
->  --> src\lib.rs:2:25
+>  --> src\lib.rs:2:25 <!-- doc-anchor-ignore -->
 >   | pub struct NestedCursor<'a> {
 >   |                         ^^ unused lifetime parameter
 > ```
@@ -2052,7 +2056,7 @@ the user's own token instead of at registration.
 > and must answer *"already proved"* rather than *"cycle"* — asserted, not assumed. **The dogfood
 > half needed one manifest edge**: `boyko-math`, because it must bake `Vec3`/`Quat`'s **real**
 > `offset_of!` / `size_of` / `align_of` and `boyko_scene` does not re-export them
-> (`transform.rs:33` imports them from there). Plain, non-optional, no `features` array — the rule
+> (`transform.rs:33~` imports them from there). Plain, non-optional, no `features` array — the rule
 > that manifest's own comment states.
 >
 > *Gate 2, MEASURED:* `nested descend (depth 2): baseline=0 measured=0 delta=0` over 1000 walks, on
@@ -2160,8 +2164,8 @@ verified against the tree rather than argued.
 **In `boyko_reflect` (D22):**
 
 * `pub trait Reflect { const TYPE_INFO: &'static TypeInfo; }` — C7's first emission bullet names
-  it and C8's install (`<Self as boyko_reflect::Reflect>::TYPE_INFO`, :1737) consumes it, but
-  `crates/boyko_reflect/src/` declares **no trait at all** (six modules, `lib.rs:53-64`), and no
+  it and C8's install (`<Self as boyko_reflect::Reflect>::TYPE_INFO`, `REFLECTION-PLAN-CORE.md:2811`) consumes it, but
+  `crates/boyko_reflect/src/` declares **no trait at all** (six modules, `boyko_reflect/src/lib.rs:59-70`), and no
   rung's `Lands` created one. Without it the emission does not compile.
 * `ReflectDefault` **exactly as D20 sketches it** (`#[diagnostic::on_unimplemented]` with D20's
   two strings, blanket `impl<T: Default> ReflectDefault for T {}`). D20 is a *decision*, not a
@@ -2173,15 +2177,15 @@ verified against the tree rather than argued.
 
 * the `reflect` **flag key** on `#[component(…)]` — F9's mechanism is accurately described
   (bare flag, duplicate detection, a "valid keys" diagnostic; `no_bundle` is the precedent at
-  `component.rs:650-658`) but ~~one match arm~~ → **four sites, and there is no match**: the
+  `boyko_macros/src/component.rs:732~-740`) but ~~one match arm~~ → **four sites, and there is no match**: the
   parser is a linear `if meta.path.is_ident(..)` chain inside one `parse_nested_meta` closure
-  (`component.rs:637-791`), so the key needs a field on `ComponentHookPaths`, its own `if` block
+  (`boyko_macros/src/component.rs:719~-887`), so the key needs a field on `ComponentHookPaths`, its own `if` block
   with its own duplicate-detection error, and **both** copies of the "valid keys: …" literal —
-  `component.rs:643` (the `on_despawn` arm) and `:777` (the unknown-key arm), two independent
+  `boyko_macros/src/component.rs:725~` (the `on_despawn` arm) and `:873~` (the unknown-key arm), two independent
   strings. Updating one and not the other ships a diagnostic that lies about which keys are valid;
 * the **registration of `reflect` as a derive helper attribute.**
   `#[proc_macro_derive(Component, attributes(component, require, entities, relationship,
-  relationship_target))]` (`boyko_macros/src/lib.rs:110-112`) lists five names and `reflect` is not
+  relationship_target))]` (`boyko_macros/src/lib.rs:140~-142`) lists five names and `reflect` is not
   one, so `#[reflect(no_default)]` is a hard *"cannot find attribute `reflect` in this scope"*
   resolved **before** the derive runs — the derive cannot inspect what does not resolve. `reflect`
   is a different attribute namespace from `component`, and no rung in any of the four plans lands
@@ -2200,7 +2204,7 @@ and the emission — behind `#[cfg(feature = "reflect")]` (D2) — of
   static X: u32 = 7; }` under `--edition 2024` on the pinned 1.97.1 gives *"error: associated
   `static` items are not allowed"*, exit 1. **And the escape must be a `static`, not a `const`**:
   C6's Check B identifies types by ADDRESS (`ptr::from_ref` + `ptr::eq` over the `path` and `done`
-  arrays, `type_info.rs:626,641-643,651`), and ~~a `const` is const-promoted afresh at each
+  arrays, `type_info.rs:626~,641-643,651`), and ~~a `const` is const-promoted afresh at each
   `&`-site~~ → **corrected 2026-08-21: a `const` gives the type ONE DESCRIPTOR PER CRATE that
   evaluates it** (measurement in the boxed note at §D22's "Third part" — the expansion has exactly
   one `&`-site, so the *within-crate* address is stable and every same-crate `ptr::eq` in this
@@ -2210,7 +2214,7 @@ and the emission — behind `#[cfg(feature = "reflect")]` (D2) — of
   is exactly what C8's install seam and ECS EG8 hand it. One stable address per type is a C6
   obligation, not a style choice. Gated by `reflect_dogfood/tests/c7_cross_crate_address.rs`,
   landed at C7. It is also the shape every hand-baked static already uses (`nested:
-  Some(&D_LEAF_TYPE_INFO)`, `c4_prim_zero_alloc.rs:722`);
+  Some(&D_LEAF_TYPE_INFO)`, `c4_prim_zero_alloc.rs:722~`);
 * that `static`'s `fields`, a baked `&'static [FieldInfo]`, every `offset` a
   `core::mem::offset_of!(T, f)` (F12 — ~~the exact idiom already load-bearing 317 times on this
   toolchain~~ → **317 lines under `crates/*/src` at the plan-authoring commit `e1b430f2`;
@@ -2219,8 +2223,8 @@ and the emission — behind `#[cfg(feature = "reflect")]` (D2) — of
   also the weaker of two available proofs: `gpu_transform3d.rs:108-115` is `offset_of!` in
   **expression** position inside a `const _: () = assert!(…)`, which witnesses const-evaluability;
   the position C7 bakes into is a **`static` initializer**, and the tree witnesses that one exactly
-  — `boyko_reflect/tests/c3_type_info.rs:185` (`offset: offset_of!(Inner, x)` inside `static
-  INNER_FIELDS: [FieldInfo; 2]`) and `c4_prim_zero_alloc.rs:484,680,717,754,765`. Cite those);
+  — `boyko_reflect/tests/c3_type_info.rs:185~` (`offset: offset_of!(Inner, x)` inside `static
+  INNER_FIELDS: [FieldInfo; 2]`) and `c4_prim_zero_alloc.rs:484~,680,717,754,765`. Cite those);
 * `default_in_place` / `drop_in_place` from `Default` / `needs_drop` — **`default_in_place` is
   `Option`, and its `Some` arm carries a named bound assertion, D20.** The derive emits
   `Some(__default_in_place::<T>)` plus the `const _: fn() = || { fn __assert_reflect_default<T:
@@ -2242,7 +2246,7 @@ INDEX, which is the entire addressing model, and gate 8 exists because nothing e
 could see it.
 
 **Tuple structs:** `FieldInfo.name` is `"0"`, `"1"`, … and `TypeInfo.kind` is
-`TypeKind::TupleStruct` (`type_info.rs:109` — the arm exists and the derive must set it, which no
+`TypeKind::TupleStruct` (`type_info.rs:109~` — the arm exists and the derive must set it, which no
 gate said). **For tuple structs by-name == by-position**, so the reorder stability the design
 advertises does **not** hold for them — ~~stated in the derive's diagnostic~~ → **stated in the
 type's docs and in `#[component(reflect)]`'s own rustdoc, because a derive diagnostic for it is not
@@ -2250,8 +2254,8 @@ expressible**: a tuple struct is *accepted*, so there is no `compile_error!` to 
 a non-fatal proc-macro warning needs the nightly-only `proc_macro::Diagnostic` (`boyko_macros/src/`
 contains no `Diagnostic` / `emit_warning` site to model one on, and this campaign's toolchain is
 stable). (Named-field structs are recommended for anything serialized; ~~the wire consequence is
-BOUNDARY's~~ → **the wire consequence is delegated to BOUNDARY by §0's owner table (:22) and
-BOUNDARY does not state it** — its only tuple-struct text is :977, and it carries no "caveat" /
+BOUNDARY's~~ → **the wire consequence is delegated to BOUNDARY by §0's owner table (`REFLECTION-PLAN-CORE.md:22`) and
+BOUNDARY does not state it** — its only tuple-struct text is `REFLECTION-PLAN-BOUNDARY.md:977`, and it carries no "caveat" /
 "by-position" / "positional" sentence at all. A delegated statement with no recipient text is a
 caveat that exists in one document's index and nowhere else; **BOUNDARY owes the paragraph, and
 §0's row is annotated to say the debt is open** — see the §0 note.)
@@ -2261,16 +2265,16 @@ them keeps "the derive computes the right offsets" separable from "the funnel ap
 which are two different failures.
 
 **Consequence for the G0 linkage deviation, and it moves a scheduled retirement (D26).**
-[`REFLECTION-PLAN-GATES.md`](REFLECTION-PLAN-GATES.md):503-506 schedules *"CORE C7 swaps the
+[`REFLECTION-PLAN-GATES.md`](REFLECTION-PLAN-GATES.md):504-507 schedules *"CORE C7 swaps the
 linkage for the real `#[component(reflect)]` annotation"* on the ground that the annotation *"puts
 needle A and needle B in the feature-ON image by the same mechanism"*. **Needle B is the literal
-name `install_type_info`** (`reflect_absence_census.rs:124`, GATES D5's LTO-sensitivity probe) and
+name `install_type_info`** (`reflect_absence_census.rs:228`, GATES D5's LTO-sensitivity probe) and
 the only thing that will ever reference it from the derive is **C8's** install slot. So at C7 the
 sentence is false and at C8 it is true. **C7 therefore ADDS the annotation and KEEPS the linkage;
 C8 deletes the linkage and updates `OPT_IN_TOKENS`.** Concretely, at C7 `src/bin/reflect_on.rs`
 gains `#[component(reflect)]` on `FixturePod` **beside** its existing `reflect_linkage()`, so
-`reflect_absence_census.rs:314`'s `OPT_IN_TOKENS = ["reflect_linkage", "boyko_reflect::"]` and its
-live assertion at :339-349 stay green — the assertion whose own failure text says *"if CORE C7 has
+`reflect_absence_census.rs:571`'s `OPT_IN_TOKENS = ["reflect_linkage", "boyko_reflect::"]` and its
+live assertion at :622~-630 stay green — the assertion whose own failure text says *"if CORE C7 has
 landed the `#[component(reflect)]` key, update `OPT_IN_TOKENS` … in the same change"*, an
 instruction C7's `Lands` and regression list did not carry. **Implementer trap, named because the
 compiler finds it and the plan should have:** `FixturePod` has **no `Default`**, so the annotation
@@ -2289,8 +2293,8 @@ opt-in".
 > **whose output must read `running [1-9]`.** The derive's emission is `#[cfg(feature =
 > "reflect")]` evaluated in the **expanding** crate (D2), and no package's `default` enables
 > `reflect`; the established shape for such a file is a whole-file `#![cfg(feature = "reflect")]`
-> (`c6_nested_descend.rs:31`), which C6's own record confirms compiles to **0 tests feature-off by
-> design** (:1666-1667). A C7 gate or red run as a plain `cargo test -p reflect-fixture` therefore
+> (`c6_nested_descend.rs:31~`), which C6's own record confirms compiles to **0 tests feature-off by
+> design** (`REFLECTION-PLAN-CORE.md:2143-2144`). A C7 gate or red run as a plain `cargo test -p reflect-fixture` therefore
 > prints `running 0 tests` and exits 0 — a vacuous pass on the green side *and* on the red side.
 > Every red below must be OBSERVED under this invocation.
 
@@ -2306,13 +2310,13 @@ opt-in".
    `boyko-ecs` as its only dependency and `proptest`/`trybuild` as its only dev-dependencies, and
    `boyko-macros` is a **dev**-dependency of `boyko_ecs` (`boyko_ecs/Cargo.toml:89-90`, under
    `[dev-dependencies]`), so it does not propagate, and `boyko_ecs/src` re-exports it nowhere;
-   (c) even with the edge added, `crates/boyko_reflect/Cargo.toml:12-16` states there is **NO
+   (c) even with the edge added, `crates/boyko_reflect/Cargo.toml:12~-16` states there is **NO
    `[features]` table, now or ever (GATES D4)**, so the derive's emitted `#[cfg(feature =
    "reflect")]` is permanently false there and `T::TYPE_INFO` would never exist. Three of the four
    C3 types are additionally out of rung order at C7 (`Facing` is C10; `label: String` is C11's
    `Str`; `blob: OpaqueBlob` is a D15 hard error until C9's `#[reflect(skip)]`), and `Everything`
    has no `Default`. **The reachable oracle already exists and nominates itself**:
-   `c6_nested_descend.rs:20-23` — *"C7 replaces these statics with generated ones and inherits this
+   `c6_nested_descend.rs:20~-23` — *"C7 replaces these statics with generated ones and inherits this
    file as an independently-pinned comparison target"* — in the one package that has
    `boyko-macros`, the `reflect` feature, and locally-declared depth-2 named **and** tuple nests.
    ~~The hand-baked side is the oracle and it is independently pinned by C3 gate 4.~~ →
@@ -2353,7 +2357,7 @@ opt-in".
      three **whether the derive is correct or sabotaged**; the count is identically zero and "no
      leak, no double-free" is unfalsifiable over that set. A.8 — which this gate cites by name —
      prescribes `{ pod, String, Nested{String} }` (`REFLECTION-ANALYSIS.md:1054-1055`); §3.3's row
-     (:562) silently substituted the drop-free set, and the substitution is what removed the
+     (`REFLECTION-PLAN-CORE.md:1036`) silently substituted the drop-free set, and the substitution is what removed the
      instrument. **`Owned { tag: u32 }` with `impl Drop` bumping a thread-local restores it at C7
      without waiting for `Str`** (C11), and it is a *stronger* subject than `String` for this
      property: an exact count separates leak (too low) from double-free (too high), where an
@@ -2379,20 +2383,20 @@ opt-in".
 5. Alloc-delta arm for `default_in_place` = 0 bespoke. **In `crates/reflect_fixture/tests/
    c7_alloc_delta.rs`, its own binary, with its own `#[global_allocator]`, arming protocol and
    permanent positive control — a deliberate second instrument, and the reason is load-bearing
-   (D23).** The existing harness is `boyko_reflect/tests/c4_prim_zero_alloc.rs:156`, and its own
+   (D23).** The existing harness is `boyko_reflect/tests/c4_prim_zero_alloc.rs:156~`, and its own
    header argues in advance against a second copy (*"three things that would then be free to drift
-   apart, for no gain"*, :7-11) — but the subject here is **derive-generated**, and `boyko_reflect`
+   apart, for no gain"*, :7~-11) — but the subject here is **derive-generated**, and `boyko_reflect`
    can neither invoke the derive nor compile its output (gate 1's three reasons), so an arm added
    there would measure a **hand-written** `default_in_place` wearing the derived one's verdict:
-   exactly the weaker-subject substitution C11 already forbids by name (:1934-1936). The gain the
+   exactly the weaker-subject substitution C11 already forbids by name (`REFLECTION-PLAN-CORE.md:3354-3356`). The gain the
    c4 header could not see is therefore real, and it is not the only one: a `#[global_allocator]`
-   is one per binary and c4's is `#![cfg(not(miri))]` (:95), so folding this arm into
+   is one per binary and c4's is `#![cfg(not(miri))]` (`c4_prim_zero_alloc.rs:95~`), so folding this arm into
    `c7_derive_bake.rs` would carry that `cfg` onto **all** of C7's gates and delete C7's derived
    descriptors from the Miri row §7.2 exists to give them (*"the only row that reaches
    derive-generated `unsafe`"*). Separate binary, `#![cfg(not(miri))]` on **this file only**.
 6. Tuple-struct fixture: names are `"0"`,`"1"`, over a locally-declared `#[repr(transparent)]`
    tuple struct in `reflect_fixture`. **The subject already exists** — `Handle(pub u32)` /
-   `Slot(pub Handle)`, both `#[repr(transparent)]`, `c6_nested_descend.rs:76-83` — and both fields
+   `Slot(pub Handle)`, both `#[repr(transparent)]`, `c6_nested_descend.rs:76~-83` — and both fields
    sit at **offset 0** (measured), so this is a naming-and-`TypeKind` gate, never an offset one.
    `ParticleEffectHandle(pub u32)` is the production instance of the shape (hook-bearing,
    `boyko_render`) — it cannot be this gate's subject, because the fixture package must stay
@@ -2402,15 +2406,15 @@ opt-in".
    is `Ok` for every fixture type in this file. C7 is the **first** rung whose descriptors are
    machine-made, and the rung called the coherence oracle C3 built for exactly this **nowhere** —
    while every hand-baked fixture in the campaign calls it (`c3_type_info.rs:365-372`,
-   `c6_nested_descend.rs:281`, `c6_dogfood_descend.rs:213`). Gate 1 catches incoherence only where
+   `c6_nested_descend.rs:281~`, `c6_dogfood_descend.rs:213~`). Gate 1 catches incoherence only where
    the hand-baked oracle happens to cover the slot, and gate 6's tuple subject has no oracle at
    all, so without this a derive emitting `ValueKind::Nested` with `nested: None`, or `Prim` with
    `get: Some(..)` and `set: None`, is green across every other gate and is caught at C8 or later,
    if ever.
 8. **NEW (D25) — the walk is index-faithful.** Over `struct Padded { a: u32, _pd:
    PhantomData<u8>, b: u32 }`: `fields.len() == 3`, `fields[1].kind == ValueKind::Opaque` with all
-   accessors `None`, and `fields[2].name == "b"`. D14 fixes the never-omit rule (:253) and
-   `c3_type_info.rs:304-306` records its consequence — *"a shorter list would make by-index access
+   accessors `None`, and `fields[2].name == "b"`. D14 fixes the never-omit rule (`REFLECTION-PLAN-CORE.md:253`) and
+   `c3_type_info.rs:304~-306` records its consequence — *"a shorter list would make by-index access
    depend on which fields were skipped"* — but **no gate could see a violation**, because no C7
    fixture had an unclassifiable field: `Body`/`Placement`/`Point` are all-`Prim`, gate 4's set is
    POD structs, gate 6's is a one-field transparent tuple, and gates 2/3/5 never look at field
@@ -2418,18 +2422,26 @@ opt-in".
    never a reflected field.
 9. **NEW (D23) — the two obligations landed rungs deferred TO C7, which its table did not carry.**
    (a) **Re-run G3's link-configuration calibration with the annotation in place**, which C2's
-   landing note schedules here (:873, *"next re-run scheduled at C7"*) and
-   [`REFLECTION-PLAN-GATES.md`](REFLECTION-PLAN-GATES.md):874-877 schedules with its reason (*"at
+   landing note schedules here (`REFLECTION-PLAN-CORE.md:1350`, *"next re-run scheduled at C7"*) and
+   [`REFLECTION-PLAN-GATES.md`](REFLECTION-PLAN-GATES.md):911-914 schedules with its reason (*"at
    CORE C7 the derive's expansion starts referencing some of the crate's symbols, and per-symbol
    decidability inside a pulled object … becomes the census's whole question"*). D26 keeps the
    annotation landing at C7, so the schedule stands. Invocation: `cargo test -p reflect-fixture
    --test reflect_absence_census -- --ignored --nocapture measure_link_configuration_table`
-   (`reflect_absence_census.rs:421-440`) — **nine `--release` builds into per-leg
-   `CARGO_TARGET_DIR`s, and a missing `llvm-nm` is a hard RED, not a skip** (:195-206); budget the
-   disk. **And the instrument must be extended in the same change**: it prints six aggregate
-   columns, `| link configuration | L1 A | L2 A | L3 A | L1 B | L3 B |` (:425), with **no L2
+   (`reflect_absence_census.rs:784~-804`) — **nine `--release` builds into per-leg
+   `CARGO_TARGET_DIR`s, and a missing `llvm-nm` is a hard RED, not a skip** (:299~-310); budget the
+   disk. ~~**And the instrument must be extended in the same change**: it prints six aggregate
+   columns, `| link configuration | L1 A | L2 A | L3 A | L1 B | L3 B |` (:787~), with **no L2
    needle-B column** — so "per-symbol sharpness", the property it is being re-run for, is not
-   something the table can report today. Add the L2-B column. (b) **Re-run G3's census itself**
+   something the table can report today. Add the L2-B column.~~ **DISCHARGED — the column landed,
+   and this sentence outlived it.** `reflect_absence_census.rs:787~` now prints **seven** columns,
+   `| link configuration | L1 A | L2 A | L3 A | L1 B | L2 B | L3 B |`, with seven separators at
+   `:788~` and seven values at `:793~-801`. *(Struck 2026-08-21 at the anchor sweep. The coordinate
+   `(:787~)` was re-pointed to this line during the sweep **without the line being read** — so a
+   repair whose whole purpose was to stop coordinates from lying moved this one onto a line that
+   refutes the sentence around it. That is why the strike records the reason and not just the
+   number: the anchor was right and the claim was wrong, which no bounds check can distinguish.)*
+   (b) **Re-run G3's census itself**
    after the annotation lands (`OPT_IN_TOKENS` stays valid at C7 per D26 — this is a regression
    check, not a bless).
 
@@ -2447,8 +2459,8 @@ more.
 reds on the drop count — which is the mutation a naive "all POD" assumption would actually
 produce.~~ → **respecified as TWO reds, one per slot (D24), because the original named the wrong
 slot, had no subject, and mutated a datum nothing read.** Gate 4 is a **`default_in_place`** test
-(§3.3's row, :562) and `drop_in_place` is a different `TypeInfo` field (`type_info.rs:262` vs
-`:269`); its fixture set owned no `String` and no `Drop`, and a repo-wide grep finds **no `impl
+(§3.3's row, `REFLECTION-PLAN-CORE.md:1036`) and `drop_in_place` is a different `TypeInfo` field
+(`type_info.rs:262` vs `:269`); its fixture set owned no `String` and no `Drop`, and a repo-wide grep finds **no `impl
 Drop` in `reflect_fixture` or `reflect_dogfood` at all**; and with no install and no call site the
 mutated slot was written and never read. The naive "all POD" assumption is still the mutation worth
 making — it just needed a subject that can show it:
@@ -2461,7 +2473,7 @@ making — it just needed a subject that can show it:
   uninitialized bytes only" is a claim and not a comment.
 
 *Fourth red (gate 7):* emit `nested: None` for a `Nested` field. `validate` reds with
-`Violation::NestedWithoutTypeInfo` — the variant already exists (`type_info.rs:325`), which is why
+`Violation::NestedWithoutTypeInfo` — the variant already exists (`type_info.rs:325~`), which is why
 this gate costs one line.
 
 *Fifth red (gate 8):* filter unclassifiable fields out of the walk. `Padded` bakes two fields
@@ -2730,7 +2742,7 @@ length red — which is the whole point: the defect moves the index and touches 
 > 16 of 17 still green, which is the measured proof that no other gate covered it.
 >
 > **4. Field-level `#[reflect(...)]` — verified, no code change.** `parse_reflect_no_default` is
-> called from exactly one site, ~~`component.rs:165`~~ → **`:180`** (re-derived after C8 landed;
+> called from exactly one site, ~~`boyko_macros/src/component.rs:165~`~~ → **`:180~`** (re-derived after C8 landed;
 > still exactly one site), with `&input.attrs`; field attributes are
 > never passed, so a field-level `#[reflect(anything)]` is inert while the same unknown key at
 > type level errors. This **is** already documented at the site (`reflect.rs`'s
@@ -2804,9 +2816,9 @@ length red — which is the whole point: the defect moves the index and touches 
 ```
 
 *Why, and why it is a decision rather than an accident:* **every** other path the reflect emission
-puts into a consumer crate is already absolute — `::boyko_reflect::FieldInfo` (`reflect.rs:190`),
-`<#field_ty as ::boyko_reflect::Reflect>::TYPE_INFO` (`:249`), `impl ::boyko_reflect::Reflect`
-(`:463`), `::boyko_reflect::ReflectDefault` (`:378`, `:404`); a grep for a non-absolute
+puts into a consumer crate is already absolute — `::boyko_reflect::FieldInfo` (`boyko_macros/src/reflect.rs:190~`),
+`<#field_ty as ::boyko_reflect::Reflect>::TYPE_INFO` (`:249~`), `impl ::boyko_reflect::Reflect`
+(`:463`), `::boyko_reflect::ReflectDefault` (`:378~`, `:404`); a grep for a non-absolute
 `boyko_reflect::` in that file returns **only doc comments**. A bare first segment inside
 `component_id()`'s body resolves through the consumer's own scope before the extern prelude, so a
 consumer `mod boyko_reflect` or `use x as boyko_reflect` shadows it. The six existing funnel slots
@@ -2819,16 +2831,16 @@ No `IS_REFLECT` const (D7). `boyko_macros` gains **no dependency** on `boyko_ref
 this line was written.)*
 
 **Also lands: the bitset suppression (D29).** The emission's condition becomes
-`hooks.reflect && !hooks.storage_bitset`, joining the six neighbours ~~at `component.rs:123`,
-`:144`, `:239`, `:263`, `:315`, `:334`. Today `:164` gates on `hooks.reflect` alone~~ and
+`hooks.reflect && !hooks.storage_bitset`, joining the six neighbours ~~at `boyko_macros/src/component.rs:123~`,
+`:144~`, `:239~`, `:263~`, `:315~`, `:334~`. Today `:164~` gates on `hooks.reflect` alone~~ and
 `#[component(reflect, storage = "bitset")]` compiles and bakes a zero-field descriptor —
 **measured**, see D29. C9 adds the spanned message; C8 stops the install.
 
 > **Anchors corrected 2026-08-21, after the landing that rotted them — every number re-derived by
-> reading the file, not by trusting the previous text.** *"Today `:164` gates on `hooks.reflect`
+> reading the file, not by trusting the previous text.** *"Today `:164~` gates on `hooks.reflect`
 > alone"* was true of HEAD `bf7803d6` and is false of the tree this rung leaves: the condition is
-> **`:178`**, `let reflect_enabled = hooks.reflect && !hooks.storage_bitset;`, and it carries the
-> term. The six neighbours are now **`:123`, `:144`, `:254`, `:278`, `:330`, `:386`** — only
+> **`:178~`**, `let reflect_enabled = hooks.reflect && !hooks.storage_bitset;`, and it carries the
+> term. The six neighbours are now **`:123~`, `:144~`, `:254~`, `:278~`, `:330~`, `:386~`** — only
 > `entities_items` and `serialize_items` kept their numbers; `clone_install`, `relationship_install`,
 > `serialize_install` and `bundle_items` each moved. **Cite them by binding name.** This is the same
 > defect F7's row records, in the same rung, and it is invisible to every check the tree has: the
@@ -2852,31 +2864,31 @@ and `l2_b > 0` both. Measured; see D27.**
 **In the same change — the full edit list, re-derived at the C8 audit because the previous list was
 short by four live sites:**
 
-1. Delete `reflect_linkage()` from `reflect_on.rs` (`:49-50` call, `:64-72` fn) **and** from
-   `reflect_off_twin_plus.rs` (`:40-41` call, `:59-65` fn incl. its doc line *"Same linkage as
+1. Delete `reflect_linkage()` from `reflect_on.rs` (`reflect_on.rs:49~-50` call, `:64~-72` fn) **and** from
+   `reflect_off_twin_plus.rs` (`:40-41` call, `:59-65` fn incl. its doc line *"Same linkage as <!-- doc-anchor-ignore -->
    `reflect_on`"*).
 2. Add the D27 funnel touch to `reflect_on.rs`, `reflect_off_twin_plus.rs` **and** `reflect_never.rs`.
-3. `reflect_absence_census.rs:371`'s `OPT_IN_TOKENS`: `["reflect_linkage", "boyko_reflect::"]` →
+3. `reflect_absence_census.rs:371~`'s `OPT_IN_TOKENS`: `["reflect_linkage", "boyko_reflect::"]` →
    the annotation form.
-4. That file's `OPT_IN_TOKENS` doc comment (`:365-370`) and the twin-source assertion's failure text
-   (`:396-402`).
-5. The `l2_b > 0` clause — comment `:453-474`, assertion `:475-484` (*the earlier citation
-   ":461-483" was a sub-range of the block to be edited*). It names C7 and C8, and C8's landing is
+4. That file's `OPT_IN_TOKENS` doc comment (`:365~-370`) and the twin-source assertion's failure text
+   (`:396~-402`).
+5. The `l2_b > 0` clause — comment `:453~-474`, assertion `:475~-484` (*the earlier citation
+   ":461~-483" was a sub-range of the block to be edited*). It names C7 and C8, and C8's landing is
    what converts it from a constant into a live check; its failure text already says so.
-6. **NEW — the file's module header, `:17-28`.** It is the census's most explicit present-tense
+6. **NEW — the file's module header, `:17~-28`.** It is the census's most explicit present-tense
    description of the pre-C8 state (*"C7 landed the key and `reflect_on.rs` now carries **both**…
    `OPT_IN_TOKENS` below and its assertion's failure text still say 'C7' and are **deliberately
    left**: C8's `Lands` carries them"*). After C8 both sentences are false, and the second one
    describes a list it was not on.
-7. **NEW — the header's C7 calibration block, `:90-137`,** which ends *"Re-run this calibration at
+7. **NEW — the header's C7 calibration block, `:90~-137`,** which ends *"Re-run this calibration at
    C8."* The re-run is C8's, and its new `L2 B` / `L2 A` cells are **recorded from the run, never
    predicted here**.
-8. **NEW — `reflect_on.rs:30-31`,** the `FixturePod` item doc: *"BESIDE the linkage below rather
+8. **NEW — `reflect_on.rs:30~-31`,** the `FixturePod` item doc: *"BESIDE the linkage below rather
    than instead of it (D26 …)"*, which names a linkage that will no longer exist. The previous list
    accounted only for the bin *headers*.
-9. **NEW — `reflect_never.rs:19`, and it reds the census if it is not touched.** The L3
-   non-collision clause (`:383-393`) scans that file's **source text** for any `OPT_IN_TOKENS`
-   entry, and `:19` contains the literal `#[component(reflect)]` inside a rustdoc line (*"is the
+9. **NEW — `reflect_never.rs:19~`, and it reds the census if it is not touched.** The L3
+   non-collision clause (`reflect_absence_census.rs:383~-393`) scans that file's **source text** for any `OPT_IN_TOKENS`
+   entry, and `reflect_never.rs:19~` contains the literal `#[component(reflect)]` inside a rustdoc line (*"is the
    `#[component(reflect)]` key and the linkage fn, both of which this file lacks"*). The instant
    `OPT_IN_TOKENS` becomes the annotation form, that substring matches and the census fails claiming
    the linked-unused discriminator has collapsed into the present control — **a red caused by the
@@ -2884,9 +2896,9 @@ short by four live sites:**
    at the assertion site saying so: **L3's source may not quote the opt-in tokens, in prose or in
    code.**
 
-**The two bin headers were corrected in place at the C7 ruling** (`reflect_on.rs:10-20`,
-`reflect_never.rs:1-11`). ~~`reflect_off_twin_plus.rs` names no rung and needed none.~~ →
-**corrected at the C8 audit: that is true of its header (`:8-11`) and false of the file** — `:17-24`
+**The two bin headers were corrected in place at the C7 ruling** (`reflect_on.rs:10~-20`,
+`reflect_never.rs:1~-11`). ~~`reflect_off_twin_plus.rs` names no rung and needed none.~~ →
+**corrected at the C8 audit: that is true of its header (`reflect_off_twin_plus.rs:8~-11`) and false of the file** — `:18~-25`
 reads *"Tracked at CORE C7"*, naming C7 as the rung that ADDED the annotation, which stays true and
 needs no edit. Its **linkage** and the sentence describing it are item 1 above. See D26's strike.
 The census's own failure text is the instruction; the earlier plan's omission was that no rung's
@@ -2898,7 +2910,7 @@ regression list carried it.
    `is_some()` is blind to both of the seam's characteristic failures.** **Feature ON**, on the
    **first** touch of `component_id()` and before `T` can enter any archetype, over **two distinct
    subjects** defined in `reflect_dogfood`'s library and read from its test — `ProbeLeaf` /
-   `ProbeRoot` (`src/address.rs:66-84`), the rig `c7_cross_crate_address.rs` already uses, so no new
+   `ProbeRoot` (`src/address.rs:66~-84`), the rig `c7_cross_crate_address.rs` already uses, so no new
    package or fixture is needed:
    `ptr::eq(type_info_of(T::component_id().0).expect(…), <T as Reflect>::TYPE_INFO)`,
    with the two ids asserted **distinct** as a stated instrument precondition. This is also where
@@ -2907,7 +2919,7 @@ regression list carried it.
 2. **Feature OFF, in a crate whose resolved graph does not have the dep at all:**
    `#[component(reflect)]` compiles. This is the whole D1/D2 mechanism and it is a compile, not an
    argument. The subject is `reflect_off_twin` — `reflect-fixture` built feature-off, where
-   `boyko-reflect` is not in the graph (`Cargo.toml:32,39`). *(Wording tightened at the C8 audit:
+   `boyko-reflect` is not in the graph (`reflect_fixture/Cargo.toml:32~,39`). *(Wording tightened at the C8 audit:
    no crate in the tree lacks the dep **unconditionally** while carrying the key; every annotating
    crate declares it `optional`. The resolved-graph form is what gate 2 tests, and it is a real
    subject.)* This is **G6a**, and GATES states its strength: *"The fixture compiling **is** the
@@ -2946,8 +2958,8 @@ regression list carried it.
    "bitset")]`, **no install is emitted** and `type_info_of(T::component_id().0)` is `None`. Not a
    derive error at C8 — C9 owns the message and, with it, ECS D5's release `assert!`. The subject is
    one unit struct this rung creates. *(Measured at the audit: the combination compiles today and
-   bakes `size=0 align=1 fields=0 kind=Struct`, and `component.rs:164` — the pre-landing anchor;
-   **`:178` after C8, where the term now is** — is the one slot in its neighbourhood with no
+   bakes `size=0 align=1 fields=0 kind=Struct`, and `boyko_macros/src/component.rs:164~` — the pre-landing anchor;
+   **`:178~` after C8, where the term now is** — is the one slot in its neighbourhood with no
    `storage_bitset` term.)*
 5. ~~**Horn-2 drift test (D16):** for every type carrying both `#[derive(Bindable)]` and
    `#[component(reflect)]`, `<T as Bindable>::field_id(name)` and the reflect field index
@@ -3007,7 +3019,7 @@ struct definition feeds both derives, both read the same `syn::Field::ident`, ne
 (`attributes(bind)` is declared and never read), and D14 fixes `#[reflect(skip)]` to *emit* an
 `Opaque` field rather than omit it — *precisely* so the by-index vocabulary cannot drift. The two
 indices agree by construction, permanently. **The red that fires is a generator mutation:** reverse
-`bindable.rs:53`'s `ids`, or suffix `reflect.rs:190`'s baked `name:`. That is the drift Horn 2 buys
+`boyko_macros/src/bindable.rs:53~`'s `ids`, or suffix `boyko_macros/src/reflect.rs:190~`'s baked `name:`. That is the drift Horn 2 buys
 and the reason the test is the price of taking it.
 
 *Fourth red (gate 4 — D29):* drop the `!hooks.storage_bitset` term from the emission's condition.
@@ -3054,7 +3066,7 @@ distinct ids: a one-subject gate whose subject happens to hold id 0 cannot see i
 > comment, **trailing** comment, real code, `//` inside a string) — an instrument exercised only by
 > the gate is this campaign's dead-datum class, and it has now been found six times.
 >
-> **RED OBSERVED** (delete `#[component(reflect)]` at `reflect_on.rs:46`, leave the header's two
+> **RED OBSERVED** (delete `#[component(reflect)]` at `reflect_on.rs:46~`, leave the header's two
 > mentions): exit **101**, `running 3 tests`, 1 failed, **`finished in 0.00s`** — it reds *before the
 > first build*, where the old shape reported after three assertions and three fat-LTO links:
 >
@@ -3117,18 +3129,18 @@ distinct ids: a one-subject gate whose subject happens to hold id 0 cannot see i
 > **5. Six plan anchors this rung's own edit rotted — and the enumeration was short.** Corrected in
 > place, **each re-derived by reading the file** rather than by trusting the number reported to me
 > (this tree has measured that repairing doc-rot introduces fresh rot when the repair trusts a
-> report): the D29 condition `:164` → **`:178`** at three sites (§D29's measured paragraph, C8's
-> `Lands`, and C8 gate 4's respecification); the six neighbours `:239 :263 :315 :334` → **`:254 :278
-> :330 :386`** (`:123`, `:144` unmoved) at two sites; D31's *"six existing slots"* `:389-394` →
-> **`:441-446`** (the verifier's report said `:441-447`, which is **seven** — `:447` is
-> `#reflect_install`, the slot D31's sentence is explicitly *not* counting). **Beyond the six:** F7's
-> whole anchor block (`:371-397` → **`:423-450`** plus seven live anchors), §D14's
-> `parse_reflect_no_default` call site `:165` → **`:180`**, and five `reflect_absence_census.rs`
-> anchors that C8 re-measured **at the audit** and then rotted **at the landing** (`:124`→`:181`→
-> **`:228`**; the `OPT_IN_TOKENS` const and its two assertions; the pulled-object paragraph; the
-> `l2_a`/`l2_b` clauses; the C7-descriptor paragraph). **Nothing reds on any of this:**
+> report): the D29 condition `:164` → **`:178`** at three sites (§D29's measured paragraph, C8's  <!-- doc-anchor-ignore -->
+> `Lands`, and C8 gate 4's respecification); the six neighbours `:239 :263 :315 :334` → **`:254 :278  <!-- doc-anchor-ignore -->
+> :330 :386`** (`:123`, `:144` unmoved) at two sites; D31's *"six existing slots"* `:389-394` →  <!-- doc-anchor-ignore -->
+> **`:441-446`** (the verifier's report said `:441-447`, which is **seven** — `:447` is  <!-- doc-anchor-ignore -->
+> `#reflect_install`, the slot D31's sentence is explicitly *not* counting). **Beyond the six:** F7's  <!-- doc-anchor-ignore -->
+> whole anchor block (`:371-397` → **`:423-450`** plus seven live anchors), §D14's  <!-- doc-anchor-ignore -->
+> `parse_reflect_no_default` call site `:165` → **`:180`**, and five `reflect_absence_census.rs`  <!-- doc-anchor-ignore -->
+> anchors that C8 re-measured **at the audit** and then rotted **at the landing** (`:124`→`:181`→  <!-- doc-anchor-ignore -->
+> **`:228`**; the `OPT_IN_TOKENS` const and its two assertions; the pulled-object paragraph; the  <!-- doc-anchor-ignore -->
+> `l2_a`/`l2_b` clauses; the C7-descriptor paragraph). ~~**Nothing reds on any of this:**
 > `internal_docs_anchors.rs`'s `GATED_DOCS` is `FEATURE_MAP.md` / `SYSTEMS.md` / `ARCHITECTURE.md` /
-> `MESHLET-VIRTUAL-GEOMETRY-PLAN.md` and covers **no** `REFLECTION-PLAN-*.md`. New text should cite
+> `MESHLET-VIRTUAL-GEOMETRY-PLAN.md` and covers **no** `REFLECTION-PLAN-*.md`.~~ **NO LONGER TRUE, 2026-08-21:** all five reflection documents are now in `GATED_DOCS`, so this rung's anchors DO red. The numbers quoted just above are a record of a past repair, not live citations, and carry `doc-anchor-ignore` for that reason. New text should cite
 > `component.rs`'s slots **by binding name**; names survive an insertion and these numbers do not.
 >
 > **6. Two over-claims corrected in place.** *(a)* **Red (ii)** (`raw` → literal `0`). Its stated
@@ -3178,11 +3190,11 @@ token** (never at the derive attribute):
 | an `Opaque` field without `#[reflect(skip)]` | D15 — the wire is shared with the shipped `boyko_serialize`; silent omission is unacceptable | **the field** |
 | a fieldless enum with no `#[repr(Int)]` | no guaranteed discriminant width (FIX Mi3) — a silent `Opaque` would be worse | the enum item |
 | a data-carrying enum, `Option<T>`, `Vec`, `Map`, `Box`, `&T`, raw pointers | v2 kinds; `Option<T>` is the *smallest* data-carrying enum and niche optimization means **no** guaranteed discriminant location, so it inherits the full data-enum hazard and is **not** "cheap enough" | the field |
-| **a type with no `Default` and no `#[reflect(no_default)]`** — **D20** | `default_in_place`'s `Some` arm is baked from `Default`, and an inspector's "Add Component" needs it. **This row is not a `compile_error!` and cannot be**: a proc macro cannot see trait impls, so the refusal is a trait bound carrying `#[diagnostic::on_unimplemented]`, which is this tree's existing answer for that class (`query/chunked_data.rs:67`, `query/filter.rs:2507`, with a blessed fixture at `tests/compile_fail_chunk/changed_filter_rejected.rs:11`) | the **type name**, via the `const _: fn() = …` witness the derive emits |
+| **a type with no `Default` and no `#[reflect(no_default)]`** — **D20** | `default_in_place`'s `Some` arm is baked from `Default`, and an inspector's "Add Component" needs it. **This row is not a `compile_error!` and cannot be**: a proc macro cannot see trait impls, so the refusal is a trait bound carrying `#[diagnostic::on_unimplemented]`, which is this tree's existing answer for that class (`query/chunked_data.rs:67~`, `query/filter.rs:2507~`, with a blessed fixture at `tests/compile_fail_chunk/changed_filter_rejected.rs:11~`) | the **type name**, via the `const _: fn() = …` witness the derive emits |
 
 **Also lands at C9 — ECS D5's second mechanism, moved here by D29 (2026-08-21).** A release
 `assert!` inside `install_type_info`: `storage_kind(id) != Bitset`
-(`boyko_ecs/…/component_registry/mod.rs:388` is the public getter;
+(`boyko_ecs/src/ecs/core/component/component_registry/mod.rs:388` is the public getter;
 [`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):340-347 states the requirement as *"refusal is
 TWO mechanisms at TWO boundaries; neither substitutes for the other"*). **It was on no rung's list
 in any of the four documents** — the landed installer carries only its `MAX_COMPONENTS`

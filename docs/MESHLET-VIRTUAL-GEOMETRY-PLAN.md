@@ -483,7 +483,7 @@ raster-path decision, not independent of it.** R0 records this and touches none 
 
 **Exactly one mesh loader existed when this section was written.** `MeshGpu::LOADERS` is a
 compile-time table ([`mesh.rs`](../crates/boyko_render/src/mesh.rs):240) that held `ObjMeshLoader` alone, whose `EXTENSIONS` is `&["obj"]`
-(`loaders/obj.rs:60~`). ⚠️ **Rev 36 added the second entry** — `GlbMeshLoader`, §3.3's decoder — and
+(`loaders/obj.rs:60`). ⚠️ **Rev 36 added the second entry** — `GlbMeshLoader`, §3.3's decoder — and
 the anchors gate caught this line's number going stale in the same commit, which is amendment 2
 working as intended: adding the entry lengthened the table's doc comment and moved the definition. It
 decodes to `MeshData { vertices: Vec<Vertex>, indices: Vec<u32> }` and runs `generate_tangents` once
@@ -549,7 +549,7 @@ VB-visible. The **host-authored** primitives pass `None` at their own call site
 **Decision: glTF 2.0 binary (`.glb`), in-house decoder, deliberately narrow subset.**
 
 * **Why not extend OBJ.** Licence-clean high-poly corpora ship as `.glb`/`.gltf`. OBJ carries no
-  tangents, no index buffer (the loader sort-dedups every corner — `loaders/obj.rs:39`), and is a
+  tangents, no index buffer (the loader sort-dedups every corner — `loaders/obj.rs:39~`), and is a
   text parse over hundreds of megabytes.
 * **Why in-house.** A `.glb` is a 12-byte header + a JSON chunk + a BIN chunk; only the JSON chunk
   needs a new reader. That is loader code, not hot-path code, and the same class of work
@@ -1003,7 +1003,7 @@ triangles below it. If the ceiling does not reach the regime, no LOD scheme reac
 K1 is therefore decidable today, without the error target Rev 1's phrasing implied it needed.
 
 All statistics are reported per camera path, path definitions checked in as test constants — the
-shape `sv0_scene/mod.rs:149~-162` already uses for its camera. (*Checked in*, not *committed*:
+shape `sv0_scene/mod.rs:149-162` already uses for its camera. (*Checked in*, not *committed*:
 "committed path" is reserved for manifest membership per `[k1].committed_paths_rule`.)
 
 > ⚠️ **A CENSUS ROW is one reading, at one `(camera path, ladder rung)` pair, of every statistic
@@ -1585,7 +1585,7 @@ trusted**;
 > (i) a new layout transition of a **ring** image — `COLOR_ATTACHMENT_OPTIMAL → TRANSFER_SRC_OPTIMAL
 > →` its `SAMPLED` read — inside the RDG auto-barrier system, and (ii) a **host read of a per-FIF
 > resource**, which is the exact shape of this project's recorded cross-frame bug class (host
-> access racing the fence on per-FIF rings, with `FRAMES_IN_FLIGHT == 2` at `ui/mod.rs:87~`).
+> access racing the fence on per-FIF rings, with `FRAMES_IN_FLIGHT == 2` at `boyko_render/src/ui/mod.rs:87`).
 > Neither is visible to gate (a), because both exist only on **armed** frames — the frames the
 > goldens never render. The readback must therefore wait on the frame's own fence before mapping.
 >
@@ -2497,7 +2497,7 @@ contradiction is direct evidence that the older block was never re-verified ·
 
 **Rev 2/Rev 3 additions, verified this session:**
 `crates/boyko_rhi_vulkan/src/present/targets.rs:851~-856` (`VbTargets` doc — the ring is **one
-`R32G32_UINT` texel per pixel**, which is what caps §5.4's statistic (1~) at 1), **`:866~`
+`R32G32_UINT` texel per pixel**, which is what caps §5.4's statistic (1) at 1), **`:866~`
 (`format: Format::R32G32Uint` — Rev 2 cited `:865~`, which is `depth: 1`)**, `:868~` (the usage bits,
 correct) · `crates/boyko_app/tests/sv0_scene/mod.rs:162` (`DUMP_EXTENT = 512`) ·
 `crates/boyko_app/tests/sv0_oracle/mod.rs:279-287` (**`rasterize` takes ONE indexed mesh and

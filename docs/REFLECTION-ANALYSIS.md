@@ -74,9 +74,9 @@ gate, not an inherent compiler property.
 > directional rule below is no longer a doc-only aspiration — it is asserted at the
 > source, in the shipping crate's own manifest and lib header:
 >
-> * `crates/boyko_serialize/Cargo.toml:6-10` — depends on `boyko_ecs`, the diagnostic
+> * `crates/boyko_serialize/Cargo.toml:6~-10` — depends on `boyko_ecs`, the diagnostic
 >   seam and `std` only, *"never `boyko_reflect` (the codegen-not-reflection invariant)"*.
-> * `crates/boyko_serialize/src/lib.rs:6` — *"This crate never depends on `boyko_reflect`."*
+> * `crates/boyko_serialize/src/lib.rs:6~` — *"This crate never depends on `boyko_reflect`."*
 >
 > A whole-tree `grep -rn boyko_reflect` returns **only** those two comments plus this
 > document. No manifest edge to `boyko_reflect` exists anywhere.
@@ -283,23 +283,23 @@ pub fn install_type_info(id: ComponentId, info: &'static TypeInfo) {
 >
 > **(b) Substantive — `STORAGE_KIND` was never an `OnceLock` table.** It is
 > `[AtomicU8; MAX_COMPONENTS]` with `Relaxed` ordering
-> (`component_registry/mod.rs:373-374`), and so is its sibling `RESIDENCY_CLASS`
-> (`:501-502`). That is deliberate, and the reason is stated at the declaration:
+> (`component_registry/mod.rs:373-374`), and so is its sibling
+> `RESIDENCY_CLASS` (`:501-502`). That is deliberate, and the reason is stated at the declaration:
 > *"`Relaxed` is sufficient: the kind is a registration-time, write-once datum with
 > **no payload published through it**."* An `AtomicU8` is the right shape for a
 > classification byte and the **wrong** shape to copy for a `&'static TypeInfo`
 > table, which *does* publish a payload and therefore needs the release/acquire
 > edge an `OnceLock` provides.
 >
-> The genuine `[OnceLock<T>; MAX_COMPONENTS]` payload tables are **`LAYOUTS`**
-> (`:206`), **`HOOKS`** (`:224`), and — new since this snapshot — **`SERIALIZE`**
+> The genuine `[OnceLock<T>; MAX_COMPONENTS]` payload tables are **`LAYOUTS`** (`:206`),
+> **`HOOKS`** (`:224`), and — new since this snapshot — **`SERIALIZE`**
 > and **`BIND_ACCESSORS`** (`component_registry/serialize.rs:277`). The last two are
 > the *exact* shape §3.1 sketches, which **strengthens** the design rather than
 > weakening it: the pattern is now four instances deep, not two.
 >
 > **(c) Signature convention.** In-tree installers take **`component_id: usize`**,
 > not `ComponentId` — `install_bind_accessor(component_id: usize, acc: BindAccessor)`
-> (`component_registry/serialize.rs:299-308`), `get_bind_accessor(component_id: usize)` (`:287`). The
+> (`component_registry/serialize.rs:299~-308`), `get_bind_accessor(component_id: usize)` (`:287`). The
 > reason is that the derive expansion calls them as `…::component_id().0`. Match the
 > convention: `install_type_info(component_id: usize, info: &'static TypeInfo)`.
 
@@ -376,7 +376,7 @@ extra cost.
   bare `fn` pointers dispatched through a `match` on a `u8` field index, and it is
   documented in-tree as a **cold, change-gated** path — *"read ONLY from the
   change-gated `boyko_ui` bind-apply path — never on a still frame or the per-frame
-  hot path"* (`component_registry/serialize.rs:283-287`). Nobody in this tree
+  hot path"* (`component_registry/serialize.rs:283~-287`). Nobody in this tree
   pretends this shape is free. The withdrawal was correct.
 - **Two APIs:** the type-erased `get_field(...) -> Scalar` (what an editor needs —
   it does not know `T`), and an optional genuinely-monomorphic
@@ -433,7 +433,7 @@ and (b) a null-column check that safely covers device-backed columns. It is a
 >
 > | helper | `commands/migration_helpers.rs` | visibility |
 > |---|---|---|
-> | `merged_archetype_id_dyn` | `:1230` | **`pub(crate)`** |
+> | `merged_archetype_id_dyn` | `commands/migration_helpers.rs:1230` | **`pub(crate)`** |
 > | `without_ids_archetype_id` | `:1305` | **`pub(crate)`** |
 > | `migrate_entity_attach_ids` | `:1372` | **`pub(crate)`** |
 > | `migrate_entity_detach_ids` | `:1658` | **`pub(crate)`** |
@@ -608,10 +608,10 @@ that hands back a **leaked `&'static str`** via `resolve()`. Two consequences:
 **(b) There is no `String` consumer in the tree at all.** Every `#[derive(Component)]`
 struct under `crates/*/src` was walked: **zero** have a `String`, `Box<str>`, or
 `&str` field. Every `String` in production source is host / dump / profiling / error
-plumbing (`boyko_app/src/host_dump.rs:46`, `boyko_app/src/profiling/artifact.rs`,
-`boyko_ecs/src/ecs/core/asset/error.rs:18`) — none of them components. The engine deliberately
+plumbing (`boyko_app/src/host_dump.rs:46~`, `boyko_app/src/profiling/artifact.rs`,
+`boyko_ecs/src/ecs/core/asset/error.rs:18~`) — none of them components. The engine deliberately
 went the other way, and says so at the source: *"A `Name` component carries its
-`NameId` inline"* (`boyko_scene/src/identity.rs:1-27`). The idiom for "a component needs text" is a
+`NameId` inline"* (`boyko_scene/src/identity.rs:1~-27`). The idiom for "a component needs text" is a
 **fixed-capacity inline byte array**: `UiName { bytes: [u8; CAP], len: u8 }`
 (`boyko_ui/src/components.rs:274`), `UiTextBuffer` (`boyko_ui/src/binding/components.rs:67`)
 — both `#[repr(C, align(64))]`. *That is an array case, not a `String` case.*
@@ -701,8 +701,8 @@ gate that can fail and a gate that cannot.
 - **Wave 2** — `#[derive(Reflect)]` (field walk, `offset_of!` baking, `Reflect`
   impl, `IS_REFLECT` const + `component_id()` install append, generics/packed/bitset
   rejection). trybuild for the rejections; `cfg_attr`-off compiles to nothing.
-  - ⊕ **Refusal matrix, not a single bitset rejection** — `StorageKind` (3) ×
-    `ResidencyKind` (3) × dynamic tags (**B.4**). Each refusal needs a **good span**,
+  - ⊕ **Refusal matrix, not a single bitset rejection** — `StorageKind` (3) × <!-- doc-anchor-ignore -->
+    `ResidencyKind` (3) × dynamic tags (**B.4**). Each refusal needs a **good span**, <!-- doc-anchor-ignore -->
     because an Aether user wrote `tag Foo(bitset);` and will otherwise get an error
     about a derive they never typed (**B.5**).
   - ⊕ **Argue A.5's install mechanism against the shipped precedent that chose the
@@ -741,7 +741,7 @@ gate that can fail and a gate that cannot.
 - Lazy first-call registration via the existing `component_id()` `OnceLock` —
   avoids the `linkme` dead-strip / init-order hazard class entirely.
   *(Re-confirmed 2026-08-21 and now **more** viable than when written: the funnel at
-  `boyko_macros/src/component.rs:350-374` is intact — `static ID: OnceLock<ComponentId>`
+  `boyko_macros/src/component.rs:425-450` is intact — `static ID: OnceLock<ComponentId>`
   → `ID.get_or_init(|| { let raw = register_new::<Self>(); if Self::HAS_HOOKS { … } … })`
   — and it has grown from one install slot to **six**: `storage_install`,
   `require_install`, `clone_install`, `relationship_install`, `residency_install`,
@@ -858,7 +858,7 @@ call site); reads sign-extend per `EnumRepr` for `Ix` reprs.
 > A.1/A.4/A.6 use as its illustration: `Name` holds a `u32`, and the string comes
 > from a cold `resolve()` against a **process-global interner that leaks** its
 > allocations, so the `&str` is **`'static`** — not `'a`-borrowed
-> (`boyko_scene/src/identity.rs:1-27,:56`). Reading `Name` needs no lifetime argument
+> (`boyko_scene/src/identity.rs:1~-27,:56`). Reading `Name` needs no lifetime argument
 > at all: a `u32` read plus a cold call. Keep the `'a` reasoning for future user
 > components; do not cite `Name` for it.
 
@@ -939,7 +939,7 @@ zero mechanism risk.
 > trait decl at `boyko_ui/src/binding/bindable.rs:45`) that a human must call at setup.
 > Its own doc-comment spells out the failure mode when you forget: *"the entire
 > `.ui`-dynamic data-bind path for `C` is unreachable"*
-> (`boyko_ui/src/interaction/plugin.rs:183-186`).
+> (`boyko_ui/src/interaction/plugin.rs:183~-186`).
 >
 > **And the precedent is more damning than it first looks.** There are two registration
 > entry points, and the tree uses the *weaker* one everywhere:
@@ -949,8 +949,8 @@ zero mechanism risk.
 >   discovery gate. **It has ZERO callers anywhere in the tree.**
 > * `C::register_bind_accessor()` — the raw half, which installs the accessor and
 >   *not* the gate id. This is what all five call sites actually use:
->   `boyko_render/tests/ui_hud_screenshot.rs:490`, `boyko_ui/tests/p4_bind.rs:87`,
->   `p4_bind_zero_alloc.rs:148`, `p4_miri.rs:116`, `text_bind_emit.rs:115`.
+>   `boyko_render/tests/ui_hud_screenshot.rs:490~`, `boyko_ui/tests/p4_bind.rs:87~`,
+>   `p4_bind_zero_alloc.rs:148~`, `p4_miri.rs:116~`, `text_bind_emit.rs:115~`.
 >
 > All five are **tests**, and every one registers the same fixture type (`Health`) — so
 > there is **no production `#[derive(Bindable)]` component at all** today. An explicit
@@ -960,7 +960,7 @@ zero mechanism risk.
 >
 > Meanwhile the **lazy funnel this section recommends is healthier than when this was
 > written** — it has grown from one install slot to six
-> (`boyko_macros/src/component.rs:350-374`; §8). So the recommendation is *more*
+> (`boyko_macros/src/component.rs:425-450`; §8). So the recommendation is *more*
 > viable, not less. What changed is the burden of proof: **A.5 must now argue against
 > a shipped in-tree precedent that went the other way**, and say why reflection goes
 > lazy where binding went explicit.
@@ -999,7 +999,7 @@ omission is unacceptable.
 > types the design intends to support:
 >
 > * **`GpuTransform3D`** — `{ prev: TrsPacked, curr: TrsPacked }`, each
->   `{ pos: [f32;4], rot: [f32;4], scale: [f32;4] }` (`boyko_render/src/gpu_transform3d.rs:55-62,:84`).
+>   `{ pos: [f32;4], rot: [f32;4], scale: [f32;4] }` (`boyko_render/src/gpu_transform3d.rs:55-62,:84~`).
 >   Un-derivable today. This is the **first production `#[component(storage = "dense")]`
 >   type** — see **B.3** for the second, worse problem it has.
 > * **`SoftBody`** — an ordinary `#[derive(Component)]` with **fourteen**
@@ -1128,7 +1128,7 @@ blind to a production component (**B.3**). Both are **decisions**, not adjustmen
 ## B.1 `#[derive(Bindable)]` / `BIND_ACCESSORS` — a shipped, reflection-shaped, **ship-build-resident** field accessor table
 
 > **The single largest thing this document does not know about.**
-> `crates/boyko_macros/src/bindable.rs` · `crates/boyko_ecs/src/ecs/core/component/component_registry/serialize.rs:244-315` · `crates/boyko_ui/src/binding/bindable.rs:45`
+> `crates/boyko_macros/src/bindable.rs` · `crates/boyko_ecs/src/ecs/core/component/component_registry/serialize.rs:244~-315` · `crates/boyko_ui/src/binding/bindable.rs:45`
 > Commit `8a11f31b` (2026-06-21) — *"P4 — action + data binding (… **reflection-free
 > codegen binding**)"*, six days after the snapshot.
 
@@ -1142,7 +1142,7 @@ It is roughly **80 % of §3.2's field model, already in production**:
 | `name → index` resolver | ✅ `field_id(name) -> Option<u8>` |
 | documented cold-path discipline | ✅ *"never on a still frame, never on the per-frame hot path"* |
 | bounded field count | ✅ ≤ 255 fields |
-| `get_*(component_id: usize)` / `install_*(component_id: usize, …)` | ✅ `:287` / `:299-308` |
+| `get_*(component_id: usize)` / `install_*(component_id: usize, …)` | ✅ `:287` / `:299~-308` |
 
 **What it does NOT do** — and each gap is a place the two could diverge or merge:
 
@@ -1219,10 +1219,10 @@ resolution" is **already built** and is a consumption task, not a construction t
 ## B.3 Enumeration is structurally blind — the signature is no longer the component set
 
 > `component_registry/mod.rs:323-356` · `archetype/archetype.rs:1411` ·
-> `ecs_master/component_api.rs:176,:76` · `boyko_render/src/gpu_transform3d.rs:84`
+> `ecs_master/component_api.rs:176,:76` · `boyko_render/src/gpu_transform3d.rs:84~`
 
 §4 makes `components_of` — the archetype signature — the enumeration entry point.
-**That premise is false today.** `is_signature_storage` (`component_registry/mod.rs:341-356`) returns true
+**That premise is false today.** `is_signature_storage` (`component_registry/mod.rs:341~-356`) returns true
 for **`StorageKind::Table` only**; both `Bitset` and `Dense` are excluded from every
 archetype signature, so `Archetype::component_ids()` silently omits them.
 
@@ -1232,13 +1232,13 @@ snapshot.** The resulting asymmetry decides real design:
 | | in signature? | has per-row bytes at a stable address? | `get_component_raw` works? |
 |---|---|---|---|
 | `Table` | ✅ | ✅ | ✅ |
-| `Dense` | ❌ | ✅ | ✅ (dense branch → `dense_get_raw`, `:76`) |
+| `Dense` | ❌ | ✅ | ✅ (dense branch → `dense_get_raw`, `ecs_master/component_api.rs:76`) |
 | `Bitset` | ❌ | ❌ (the bit *is* the datum) | ❌ (no column, by construction) |
 
 So for a dense component **the read path already works and the enumeration path is
 blind**. The concrete victim is not hypothetical: **`GpuTransform3D`** — the *first*
 production `#[component(storage = "dense")]` type, a 96 B interpolation pose pair
-(`gpu_transform3d.rs:84`) — would **never appear** in an inspector built on
+(`gpu_transform3d.rs:84~`) — would **never appear** in an inspector built on
 `components_of`. The design would **refuse to show the one component it is fully able
 to read.**
 
@@ -1293,8 +1293,8 @@ round-trip test — `enable_tag_id_bridges_to_component_id_round_trip`,
 > "get the display name, then re-mint by name" (`display_name(id)` → `register_enable_tag(name)`
 > → `enable_id`) is **idempotent by name only within `TAG_NAMES`**, and a *derived*
 > `#[component(storage = "bitset")]` type never interns its name there. Traced:
-> `EcsMaster::register_enable_tag` (`enable_tag_api.rs:60`) → `try_register_enable_tag_by_name`
-> (`tags.rs:134`) → `try_register_tag_by_name` (`tags.rs:184`), whose name table is `TAG_NAMES`
+> `EcsMaster::register_enable_tag` (`enable_tag_api.rs:60`) → `try_register_enable_tag_by_name` (`tags.rs:134`)
+> → `try_register_tag_by_name` (`tags.rs:182`), whose name table is `TAG_NAMES`
 > (`tags.rs:155`) and whose miss path calls
 > `try_register_dynamic(ComponentLayout::new_dynamic_tag(leaked))` — **it MINTS A NEW ID.** A
 > derived bitset component's id came from `register_new::<Self>()` and its name was never
@@ -1305,7 +1305,7 @@ round-trip test — `enable_tag_id_bridges_to_component_id_round_trip`,
 > **Therefore the presence view needs a real seam:** a checked
 > `EnableTagId::try_from_component_id(id) -> Option<Self>`, `None` unless
 > `storage_kind(id) == Bitset`. It mints no capability the crate does not already have
-> internally and it completes the bridge `mod.rs:1676` already tests. This is a **shipping-API
+> internally and it completes the bridge `component_registry/mod.rs:1676` already tests. This is a **shipping-API
 > owner call**, and it is **the same decision** as the ECS glue's bitset-probe seam — one item,
 > not two. See the owner sheet, **B.13 row 2**.
 >
@@ -1340,7 +1340,7 @@ only gap is enumeration. **Dense components are in v1 scope.**
 
 ### (3) `ResidencyKind::Gpu` — enumerated but unreadable, a **third shape** of refusal
 
-> `component_registry/mod.rs:475-483` · `archetype/archetype.rs:696-730`
+> `component_registry/mod.rs:475-483` · `archetype/archetype.rs:695-730`
 
 Crossed with the storage axis is a three-way residency axis: `Cpu = 0`, `Gpu = 1`,
 `CpuPinned = 2`. A `Gpu` component is **`Table`-kind**, so it **is** in the archetype
@@ -1355,13 +1355,13 @@ device."** v1 must read `residency_class(id)` and say **"GPU-resident — no hos
 bytes"** explicitly.
 
 Note also: `CpuPinned` exists and must never be flipped to device backing (the archetype
-mint `assert!`s on it at `:711-720`), and **an archetype signature mixing `Gpu` with
+mint `assert!`s on it at `:711~-720`), and **an archetype signature mixing `Gpu` with
 non-`Gpu` is rejected outright** at mint — so "some fields on device" is not a state
 that can occur.
 
 ### (4) Dynamic tags — signature-resident ids with **no Rust type at all**
 
-> `component_registry/tags.rs:12-45` · `ecs_master/tag_api.rs:47-200`
+> `component_registry/tags.rs:12~-45` · `ecs_master/tag_api.rs:47-200`
 
 `EcsMaster::register_tag(name) -> TagId` (`tag_api.rs:65`) mints a **size-0,
 `Table`-kind, name-keyed id at RUNTIME**. It **is** in the archetype signature,
@@ -1370,7 +1370,7 @@ no `#[derive]` ever ran for it. This breaks an unstated premise of §4 — *that
 in a signature has a Rust type behind it.*
 
 Worse for any `TypeId` cross-check: **all dynamic tags share `DynamicTagMarker`'s
-`TypeId`** (`mod.rs`, and `component_registry/tags.rs:12-16` states the reason — a generic-fn-body static
+`TypeId`** (`mod.rs`, and `component_registry/tags.rs:12~-16` states the reason — a generic-fn-body static
 would collapse across monomorphisations, rust#22991). So **`ComponentId → TypeId` is no
 longer injective**, and the premise `BindAccessor`'s own SAFETY comment leans on —
 *"`ComponentId` IS the type's identity"* — **does not hold for this class.**
@@ -1437,7 +1437,7 @@ Crucially, the emitted `#[component(reflect)]` is a **token resolved downstream*
 exactly the tokens-not-deps rule `aether_lang`'s own manifest already states: *"this
 crate does NOT depend on `boyko-ecs`: every `boyko_ecs::…`/`boyko_macros::…` occurrence
 in the expander is an emitted TOKEN resolved in the downstream crate"*
-(`crates/aether_lang/Cargo.toml:6-11`). A.5's subtle jurisdictional point — *"the
+(`crates/aether_lang/Cargo.toml:6~-11`). A.5's subtle jurisdictional point — *"the
 directional rule is about crate deps, not emitted tokens"* — has been **independently
 reinvented and is now house doctrine, stated verbatim in a manifest.** That is
 confirmation, not a conflict.
@@ -1585,7 +1585,7 @@ revision.
 
 ## B.8 Fixed-size arrays `[T; N]` — the real v1 coverage question, and a hard error today
 
-> `boyko_render/src/gpu_transform3d.rs:55-62,:84-89` · `boyko_render/src/csm_config.rs:392`
+> `boyko_render/src/gpu_transform3d.rs:55-62,:84~-89` · `boyko_render/src/csm_config.rs:392`
 > · `boyko_render/src/ddgi_config.rs:76` · `boyko_render/src/frustum.rs:33` ·
 > `boyko_physics/src/soft/component.rs:69-87`
 
@@ -1714,7 +1714,7 @@ or it compiles an empty crate and reports green.~~
 
 ## B.10 Particles are a clean, entirely-v1 consumer — not an obstacle
 
-> `crates/boyko_render/src/particle.rs:125-191`
+> `crates/boyko_render/src/particle.rs:125~-191`
 
 Recorded because the campaign brief flagged particles as a possible obstacle. They are
 not; they are a **model consumer**, and they exercise three of B.4's rows at once:
@@ -1781,12 +1781,12 @@ target lives in a shared engine crate:
 | `Transform { translation: Vec3, rotation: Quat, scale: Vec3 }` | `boyko_scene/src/transform.rs:46` | the `Nested` depth-2 case (A.9) |
 | `Name(pub NameId)` / `NameId(pub u32)` | `boyko_scene/src/identity.rs:47` | tuple struct + `Nested` |
 | `Visibility` `#[repr(u8)]` | `boyko_scene/src/render_caps.rs:226` | the top-level `TypeKind::Enum` case |
-| `GpuTransform3D` / `TrsPacked` | `boyko_render/src/gpu_transform3d.rs:84` | `storage = "dense"` **and** `[f32;4]` arrays — B.3's and B.8's joint case |
+| `GpuTransform3D` / `TrsPacked` | `boyko_render/src/gpu_transform3d.rs:84~` | `storage = "dense"` **and** `[f32;4]` arrays — B.3's and B.8's joint case |
 | `EmitterActive` | `boyko_render/src/particle.rs:164` | the bitset presence view (B.4) |
 
 Writing `#[component(reflect)]` on any of them forces its **defining** crate to declare a
 `reflect` feature and an optional `boyko-reflect` edge. **The declaration cannot be dodged by
-omission**, because of an instrument the workspace already carries: root `Cargo.toml:25-26`
+omission**, because of an instrument the workspace already carries: root [`Cargo.toml`](../Cargo.toml)`:25-26`
 sets `[workspace.lints.rust] unexpected_cfgs` with a `check-cfg` list that **adds to** Cargo's
 per-manifest feature list rather than replacing it, and every member opts in via
 `[lints] workspace = true` — so a `#[cfg(feature = "reflect")]` in a crate with no such feature
@@ -1841,7 +1841,7 @@ boyko_app          hwrt = ["boyko-render/hwrt"]      default OFF at every level)
 `hwrt` is a non-default feature on three **non-leaf** shipping crates, forwarded twice, and it
 does **not** reach any ship build — because nothing enables it. `boyko_render`'s
 `test-readback` is the same shape with a different enabler (a self-referential
-dev-dependency, `crates/boyko_render/Cargo.toml:91`). Both are load-bearing today.
+dev-dependency, `crates/boyko_render/Cargo.toml:103~`). Both are load-bearing today.
 
 The one thing wrong with `hwrt` is **F17**: `grep -c hwrt .github/workflows/ci.yml` = **0**, so
 every `#[cfg(feature = "hwrt")]` body in the tree is compiled by no CI leg. That is a *coverage*

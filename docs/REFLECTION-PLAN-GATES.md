@@ -30,7 +30,7 @@ is not abstract:
   reported success while every engine crate went unchecked (root `Cargo.toml`'s `default-members`
   comment records the measurement: 0 errors where `--workspace` found 4);
 * a Miri job that is a **hand-listed allowlist**, so a new package is not covered until it is named
-  (`.github/workflows/ci.yml:222-226`).
+  (`.github/workflows/ci.yml:306-312`).
 
 Each of those four lands directly on this plan, and each has a rung.
 
@@ -52,7 +52,7 @@ more than two of them.
 
 **Why P-D is separate from P-A/P-B/P-C and cannot be folded into any of them.** The reflection opt-in
 is a *token* emitted by `boyko_macros` into whatever crate wrote `#[component(reflect)]`
-(A.5, and `crates/boyko_macros/src/component.rs:348` — the `component_id()` install funnel, whose six
+(A.5, and `crates/boyko_macros/src/component.rs:425` — the `component_id()` install funnel, whose six
 existing slots `#storage_install` … `#serialize_install` are exactly this shape). Tokens are not
 dependency edges: `boyko_macros` does **not** depend on `boyko_ecs` and never will
 (`crates/boyko_macros/Cargo.toml`), and `aether_lang` states the same rule verbatim in its own
@@ -107,8 +107,8 @@ compiles.
 **Reason.** §2's `game_app` / `editor_app` do not exist; the analysis says so itself. What exists:
 `crates/boyko_demo` is the only game-shaped `[[bin]]` member (`crates/boyko_demo/Cargo.toml:7`), and the
 workspace root is also a package (`boyko-engine`, `src/main.rs`). But `boyko_demo` is **excluded from
-every CI leg** — `--exclude boyko_demo` appears on `.github/workflows/ci.yml:62, :87, :89, :129, :167,
-:176, :191` — and it pulls eframe/egui/winit/wgpu. A gate whose artifact takes minutes to link is a
+every CI leg** — `--exclude boyko_demo` appears on `.github/workflows/ci.yml:62, :87, :89, :129, :238,
+:247, :262` — and it pulls eframe/egui/winit/wgpu. A gate whose artifact takes minutes to link is a
 gate that gets moved to a nightly and then to nowhere.
 
 **`boyko_app` is NOT a ship target and must not be named as one.** `docs/REFLECTION-PLAN-CORE.md`'s
@@ -136,7 +136,7 @@ and inventing a package to satisfy a gate is the gate deciding the architecture.
 > `EmitterActive` (`boyko_render`) — and the opt-in's `#[cfg(feature = "reflect")]` is evaluated in
 > the **defining** crate. Measured: `boyko-scene` has **five** workspace dependents (`aether_tests`,
 > `boyko_app`, `boyko_physics`, `boyko_render`, `boyko_ui`), so C1-as-written reds the moment
-> `Transform` opts in. And the declaration cannot be dodged by omission: root `Cargo.toml:25-26`'s
+> `Transform` opts in. And the declaration cannot be dodged by omission: root [`Cargo.toml`](../Cargo.toml):25-26's
 > `unexpected_cfgs` check-cfg list **adds to** Cargo's per-manifest feature list, so a
 > `#[cfg(feature = "reflect")]` in a crate with no such feature warns and the existing `-D warnings`
 > gate reds it. Full analysis, the three candidates and the decision: **`REFLECTION-ANALYSIS.md`
@@ -152,10 +152,11 @@ says. Enable it the same way `hwrt` and `bench-alloc` are enabled: `--features
 boyko-ecs/profiling-analysis`."*
 
 The tree then built the general case, three crates deep and all shared:
-`boyko_rhi_vulkan` `hwrt = []` → `boyko_render` `hwrt = ["boyko_rhi_vulkan/hwrt"]` (`:31`) →
-`boyko_app` `hwrt = ["boyko-render/hwrt"]` (`:48`). Default OFF at every level, in no ship build,
+`boyko_rhi_vulkan` `hwrt = []` → `boyko_render` `hwrt = ["boyko_rhi_vulkan/hwrt"]`
+(`crates/boyko_render/Cargo.toml:31~`) → `boyko_app` `hwrt = ["boyko-render/hwrt"]`
+(`crates/boyko_app/Cargo.toml:48~`). Default OFF at every level, in no ship build,
 because **nothing enables it**. `boyko_render`'s `test-readback` is the same shape with a different
-enabler (a self-referential dev-dependency, `crates/boyko_render/Cargo.toml:91`). The property that
+enabler (a self-referential dev-dependency, `crates/boyko_render/Cargo.toml:103~`). The property that
 defeats unification is *"nothing enables it"*, not *"nobody declares it"*.
 
 The one thing wrong with `hwrt` is **F17** — `grep -c hwrt .github/workflows/ci.yml` = **0**, so every
@@ -290,7 +291,7 @@ the measurement that would look like one.
 
 **A feature-on-vs-off wall-clock A/B is cross-build by construction** — the feature decides what is
 compiled — and this campaign has already measured what a cross-build absolute is worth on this box.
-`crates/boyko_ecs/benches/gj1_flag_cost.rs:22-29` refused its own leg C for exactly this: *"the same
+`crates/boyko_ecs/benches/gj1_flag_cost.rs:22-29~` refused its own leg C for exactly this: *"the same
 unchanged bench leg read **10.16 / 10.94 / 11.72 / 12.11 ns** across four sittings, a spread wider
 than anything the comparison could have found. A number taken that way would be drift wearing a
 verdict's name."*
@@ -315,7 +316,7 @@ recorded with the observed diff.
 
 ### D10 — The codegen-identity instrument needs **two** controls, and its null is a determinism null, not a resolution null.
 
-`crates/boyko_log/benches/log_gate_cost.rs:42-46` records the trap in the general form: *"a zero
+`crates/boyko_log/benches/log_gate_cost.rs:42-46~` records the trap in the general form: *"a zero
 control whose expected value is exactly zero measures DRIFT, not RESOLUTION"* — P4-6's twin read 0 on
 all ten passes, the rule silently became "is nonzero", and it reported a false RESOLVED.
 
@@ -497,7 +498,7 @@ gate whose first run is green, and a first run that is green teaches nothing.
   > `reflect_on` row's "annotated" cell could not be built as written: the `reflect` derive key
   > does not exist until CORE C7 lands it, and the `Component` derive **hard-errors on unknown
   > keys** — *"unknown #[component(...)] key; valid keys: on_add, …"*
-  > (`crates/boyko_macros/src/component.rs:775`, verified at G0 by writing the annotation and
+  > (`crates/boyko_macros/src/component.rs:871~`, verified at G0 by writing the annotation and
   > watching the derive refuse it). What landed instead: `reflect_on.rs` (and its copy
   > `reflect_off_twin_plus.rs`) carries a **direct `#[cfg(feature = "reflect")]`-gated
   > fn-pointer reference to `boyko_reflect::install_type_info`** (`reflect_linkage()`), which
@@ -1103,7 +1104,7 @@ defect this campaign keeps finding:
 2. **`components: llvm-tools`** on a `reflect-census` job running
    `cargo test -p reflect-fixture --test reflect_absence_census`, mirroring `profile-census`
    (`.github/workflows/ci.yml:144-153`).
-3. **Miri allowlist** — `.github/workflows/ci.yml:222-226` grows **two rows with different
+3. **Miri allowlist** — `.github/workflows/ci.yml:306-312` grows **two rows with different
    shapes**, and the difference is the whole point (D4):
 
    ```
@@ -1194,7 +1195,7 @@ somebody wrote. Five gates, five independent mutations, five reds.
 
 ### G5 — the derive's refusals: one trybuild corpus, two legs — **size M** *(prerequisite: `docs/REFLECTION-PLAN-CORE.md`'s derive)*
 
-**Lands.** `crates/reflect_fixture/tests/reflect_compile_fail.rs` +
+**Lands.** `crates/reflect_fixture/tests/reflect_compile_fail.rs` +  <!-- doc-path-planned -->
 `crates/reflect_fixture/tests/reflect_compile_fail/*.rs` + blessed `.stderr`, following
 `crates/boyko_ecs/tests/compile_fail_zero_init.rs`'s shape exactly (including its `#[cfg(not(miri))]`
 guard — trybuild spawns cargo, which Miri cannot).
@@ -1285,7 +1286,7 @@ without nightly. Record the choice and the reason in the ledger.
 > nightly and the mandated toolchain is `stable-x86_64-pc-windows-gnu` 1.97.1 — that half was
 > already known. What was not: **the `compile_fail` candidate has no red either, because it is
 > already satisfied for a reason the derive cannot touch.** With `reflect` off, `boyko-reflect` is
-> not in `reflect-fixture`'s resolved graph at all (`crates/reflect_fixture/Cargo.toml:32,39`,
+> not in `reflect-fixture`'s resolved graph at all (`crates/reflect_fixture/Cargo.toml:32~,39`,
 > `default = []`), so the fixture's OWN `boyko_reflect::` path fails `E0433` whatever the derive
 > emits; and under CORE C8's RED (the `#[cfg(feature = "reflect")]` wrapper removed from the
 > emitted install) it fails *harder*, not less — `cargo check -p reflect-fixture --bin
@@ -1335,7 +1336,7 @@ funnel that failed to const-fold, or a `#[used]` static that survives.
 > and differ in exactly one token:
 >
 > ```rust
-> // crates/reflect_fixture/src/twin_body.rs   — the ONE source
+> // crates/reflect_fixture/src/twin_body.rs   — the ONE source  <!-- doc-path-planned -->
 > macro_rules! twin_components { ($($extra:meta),*) => {
 >     #[derive(::boyko_macros::Component, Default)] $(#[$extra])*
 >     pub struct TwinPod { pub a: u32, pub b: f32 }
@@ -1350,7 +1351,7 @@ funnel that failed to const-fold, or a `#[used]` static that survives.
 > `macro_rules!` changes what the derive sees in a way that makes the comparison less faithful than a
 > plain item (measure it — it is one `cargo expand`-free A/B of the two symbol multisets against
 > hand-written twins), keep two files and add
-> `crates/reflect_fixture/tests/twin_source_identity.rs`: read both, delete every occurrence of the
+> `crates/reflect_fixture/tests/twin_source_identity.rs`: read both, delete every occurrence of the  <!-- doc-path-planned -->
 > `reflect` key, assert the remainders are **byte-identical**. Note the deletion is of a **key inside
 > `#[component(…)]`**, not of a whole line — a line-wise filter would also delete `no_bundle`,
 > `storage = "dense"` and every hook path that shares the attribute, and would pass while the twins
@@ -1379,7 +1380,7 @@ than the 14a/14b runtime-branch discipline"* from a claim into a measurement.
 
 #### G7a — the codegen-identity instrument (primary)
 
-**Lands.** `crates/reflect_fixture/tests/reflect_codegen_identity.rs`. It builds **four** images with
+**Lands.** `crates/reflect_fixture/tests/reflect_codegen_identity.rs`. It builds **four** images with  <!-- doc-path-planned -->
 identical link configuration (fat LTO, `codegen-units = 1`, own `CARGO_TARGET_DIR`, `RUSTFLAGS`
 cleared) and compares symbol multisets and `.text` sizes:
 
@@ -1443,7 +1444,7 @@ registration is real cold cost and *"must not be mistaken for a hot-path regress
 **steady-state** query/spawn inner loop is the subject. So the registration happens outside the timed
 block, and a second, explicitly-labelled reading reports the first-touch cost on its own.
 
-**It must compile with the feature OFF.** `.github/workflows/ci.yml:176` runs
+**It must compile with the feature OFF.** `.github/workflows/ci.yml:247` runs
 `cargo bench --workspace --no-run`, so a bench that only compiles with a feature reds a job that has
 nothing to do with reflection. Feature off, `main()` prints `NOT BUILT (feature off)` and returns —
 and the `reflect-on` job asserts the *printed verdict token* is present, so the vacuous form cannot
@@ -1500,9 +1501,9 @@ a set equality that is only ever tested in one direction is a subset check weari
 | item | deferred to | why, and what it costs to defer |
 |---|---|---|
 | Censusing the **real** `boyko_demo` artifact | a rung of its own, once a ship binary exists that CI builds | `boyko_demo` is `--exclude`d from every CI leg today (`.github/workflows/ci.yml:62` and five siblings) and pulls eframe/wgpu. Deferring costs: G3's artifact claim is about a fixture, and the fixture stands in for the demo by *argument*, not by identity. Stated in G3's "cannot claim". |
-| Adding `REFLECTION-PLAN-*.md` to `GATED_DOCS` | ~~after the four plans stop moving~~ → **`docs/REFLECTION-PLAN-ECS.md`'s EG8 gate 6, which owns it** | Two plans held opposite decisions on one gate: ECS EG8 gate 6 registers all four documents in `GATED_DOCS` with a `("REFLECTION-PLAN-*.md", 0)` row in `OVER_WAIVED_MAX`, while this row deferred exactly that and called the deferral *"a choice, not an omission"*. **EG8 wins, and it wins on its own reasoning**: it is the last rung of the longest ladder, so by then all four documents exist — which answers this row's real objection, that the anchor gate's *path* check reds on a dead link to a sibling that has not landed. Verified: `tests/internal_docs_anchors.rs:231`'s `GATED_DOCS` holds four documents today and `PARTICLES-PLAN.md` is not among them, so this is a genuine addition and not a restatement. **Until EG8 lands, this file's anchors are hand-checked** (Appendix GC), and **EG8's checklist includes deleting that caveat in the same commit** — a document that says its anchors are hand-checked while a gate checks them is the doc-rot class this campaign has measured at 75 %. |
+| Adding `REFLECTION-PLAN-*.md` to `GATED_DOCS` | ~~after the four plans stop moving~~ → **`docs/REFLECTION-PLAN-ECS.md`'s EG8 gate 6, which owns it** | Two plans held opposite decisions on one gate: ECS EG8 gate 6 registers all four documents in `GATED_DOCS` with a `("REFLECTION-PLAN-*.md", 0)` row in `OVER_WAIVED_MAX`, while this row deferred exactly that and called the deferral *"a choice, not an omission"*. **EG8 wins, and it wins on its own reasoning**: it is the last rung of the longest ladder, so by then all four documents exist — which answers this row's real objection, that the anchor gate's *path* check reds on a dead link to a sibling that has not landed. Verified: `tests/internal_docs_anchors.rs:280`'s `GATED_DOCS` holds four documents today and `PARTICLES-PLAN.md` is not among them, so this is a genuine addition and not a restatement. ~~**Until EG8 lands, this file's anchors are hand-checked** (Appendix GC), and **EG8's checklist includes deleting that caveat in the same commit**~~ — a document that says its anchors are hand-checked while a gate checks them is the doc-rot class this campaign has measured at 75 %. **UPDATE 2026-08-21 — landed, ahead of EG8.** All **five** reflection documents (the four plans and `REFLECTION-ANALYSIS.md`) are registered, each with a `0` row in `OVER_WAIVED_MAX`; Appendix GC's caveat is deleted. Whether EG8 still carries a gate-6 line item is bookkeeping for the campaign owner, not a claim this row can settle. |
 | The **bevy-shaped baseline** bench (`get_field` vs `HashMap<TypeId>` + `&dyn Reflect` + downcast) | `docs/REFLECTION-PLAN-CORE.md`, Wave 5 | It is a *beats-bevy* claim, not an *absence* claim. §3.3 is explicit that the feature-on/off delta *"does not prove beats-bevy"* and that both benches are required. Two claims, two owners. |
-| A **cross-build wall-clock** feature-on/off A/B | **REFUSED, not deferred** | D8. The measured cross-build drift on this box (10.16 → 12.11 ns on an unchanged leg, `crates/boyko_ecs/benches/gj1_flag_cost.rs:22-29`) is wider than any effect the comparison could find. Recorded as refused so it is not re-proposed as "the obvious missing measurement". |
+| A **cross-build wall-clock** feature-on/off A/B | **REFUSED, not deferred** | D8. The measured cross-build drift on this box (10.16 → 12.11 ns on an unchanged leg, `crates/boyko_ecs/benches/gj1_flag_cost.rs:22-29~`) is wider than any effect the comparison could find. Recorded as refused so it is not re-proposed as "the obvious missing measurement". |
 | `cargo-deny` / licence-surface assertions about the absent crate | out of scope | The claim is about this workspace's own graph. |
 | A gate on the **editor** build's own hygiene (release + feature on) | `docs/REFLECTION-PLAN-ECS.md` | §5's release-editor gap is a *soundness* property of the setters, tested by the ECS plan's release-mode tests. G4 provides the leg it runs in (D7); it does not own the assertions. |
 | Gating `has_component`'s missing `Bitset` branch | `boyko_ecs`, independently | B.4's incidental finding: a wrong answer rather than a refusal. Found via reflection, owned by the kernel. Already in `docs/OPEN-QUESTIONS.md`. |
@@ -1523,7 +1524,7 @@ than this plan expects.
 | **5** | **The public by-id seam on `EcsMaster`** — now **four** items in **one** owner call: `add_component_by_id`, `remove_component_by_id`, `mark_component_changed`, and `EnableTagId::try_from_component_id` (the fourth was filed twice, as B.11 #2 and as the BOUNDARY plan's B-1, because it was reached from two directions) | `docs/REFLECTION-PLAN-ECS.md` EG2 (owner call, **B.13 #2**) | nothing in this ladder **directly** — and that is the point worth recording: it widens a **shipping** crate's public API for a dev-only feature, and **no gate here can see it**, because a public fn taking `Entity` + `ComponentId` names no reflection type and leaves no symbol with a reflection name | If it lands, the honest statement of the ship claim becomes "the reflection *crate* is absent; the seam it needed is not" — a sentence that belongs in the ECS plan and in `docs/REFLECTION-ANALYSIS.md` §4, not hidden in a gate's green |
 | **8** | **May engine crates carry a `reflect` feature?** (`REFLECTION-ANALYSIS.md` B.12, owner sheet **B.13 #1**) | the owner; this plan **proceeds on yes** | **G0** (whether `reflect_dogfood` exists at all), **G1** (whether C5 has any subject beyond the ship targets), **G4** (whether the `reflect-dogfood` job exists) | If **no**: delete `crates/reflect_dogfood/`, its `USER_PACKAGES` row, its CI job, and G1's leaf-umbrella non-vacuity clause; four gates in the sibling plans stop saying "real engine types" and say "the engine's shapes". Nothing else in this ladder moves — D3's six clauses are correct either way, they simply have less to check |
 | **9** | **CORE's C2 replaces G0's hollow `install_type_info`** — same name, same signature, real body | `docs/REFLECTION-PLAN-CORE.md` C2 (its D6) | **G3's needle B**, which is that name | If C2 renames it or makes it generic, needle B goes silently subject-less and the LTO-sensitivity probe stops probing. D5 records that the name's survival is *why* this needle was chosen; a rename is therefore a change to this plan, not only to CORE's |
-| **10** | **`GATED_DOCS` registration for the four plan documents** | `docs/REFLECTION-PLAN-ECS.md` EG8 gate 6 | **Appendix GC's hand-checked caveat**, which EG8 deletes in the same commit | This plan previously deferred the registration and called the deferral a choice; EG8 registers it. One owner (EG8), one commit, and the caveat is not allowed to outlive the gate |
+| **10** | **`GATED_DOCS` registration for the four plan documents** | `docs/REFLECTION-PLAN-ECS.md` EG8 gate 6 | **Appendix GC's hand-checked caveat**, which EG8 deletes in the same commit | This plan previously deferred the registration and called the deferral a choice; EG8 registers it. One owner (EG8), one commit, and the caveat is not allowed to outlive the gate. **LANDED 2026-08-21, ahead of EG8 and covering five documents, not four; the caveat did not outlive the gate** |
 | **6** | **The v1 taxonomy** — specifically `ValueKind::Array` (B.8) | `docs/REFLECTION-PLAN-CORE.md` | **G4's Miri fixture shape** — the dense/array shapes are reproduced locally because the real ones live in `boyko_render`, which Miri cannot reach | If arrays slip to v2, the local dense fixture drops its array member and the Miri row shrinks accordingly |
 | **7** | **`Sink`/`Source`'s one `dyn`** | `docs/REFLECTION-PLAN-BOUNDARY.md` | **G7a's twin comparison** — a `dyn` in the feature-on arm is fine; a vtable that survives into the feature-off image is a residue and clause 3 fires | — |
 
@@ -1622,34 +1623,35 @@ in this table is a prediction.
 
 ## Appendix GC — anchors used by this document
 
-Verified against the tree at **2026-08-21**, branch `feat/reflection`. This file is **not yet** in
-`tests/internal_docs_anchors.rs`'s `GATED_DOCS`, so these are hand-checked, not machine-checked —
-recorded here so a future reader knows which kind of claim they are.
+Verified against the tree at **2026-08-21**, branch `feat/reflection`. This file **is** registered in
+`tests/internal_docs_anchors.rs`'s `GATED_DOCS`, so every anchor below is machine-checked on each
+`cargo test` — recorded here so a future reader knows which kind of claim they are.
 
-> ⏳ **This caveat has an expiry, and deleting it is a line item on another rung.**
-> `docs/REFLECTION-PLAN-ECS.md`'s **EG8 gate 6** registers this file and its three siblings in
-> `GATED_DOCS` with an `OVER_WAIVED_MAX` row of `0`. When EG8 lands, every anchor below becomes
-> machine-checked on every `cargo test`, and **this paragraph must be deleted in the same commit** —
-> a document that still claims its anchors are hand-checked after a gate started checking them is the
-> doc-rot class, and it is the kind that makes a reader distrust the gate rather than the sentence.
+> ✅ **The hand-checked caveat that stood here has expired and is deleted, exactly as it required.**
+> It said these anchors were hand-checked until `docs/REFLECTION-PLAN-ECS.md`'s **EG8 gate 6**
+> registered the file, and that the paragraph had to go in the same commit as the registration.
+> The registration landed **ahead of EG8**, in the change that armed the gate over all five
+> reflection documents at once; EG8 keeps its remaining deliverables. Deleting this on time is the
+> whole point: a document that still claims its anchors are hand-checked after a gate started
+> checking them is the doc-rot class this campaign measured at 75 %.
 
 | anchor | what it carries for this plan |
 |---|---|
 | `crates/profile_fixture/tests/profile_axis_census.rs` | the measured census template: the LTO finding, the present control, the RED-not-SKIP tool rule, the self-building legs |
 | `crates/profile_fixture/tests/profile_axis_census.rs:90` | `ZONE_EMIT_SYMBOL = "mint_cold"` — the plain-fn symbol class D5 mirrors |
 | `crates/profile_fixture/Cargo.toml` | *"Adding any second dependency here … destroys the gate's ARGUMENT"* — G0's fixture rule |
-| `.github/workflows/ci.yml:62, :87, :89, :129, :167, :176, :191` | the `--exclude boyko_demo` legs — D2's reason |
+| `.github/workflows/ci.yml:62, :87, :89, :129, :238, :247, :262` | the `--exclude boyko_demo` legs — D2's reason |
 | `.github/workflows/ci.yml:78-79` | the existing `[debug, release]` matrix the ON leg mirrors (D7) |
 | `.github/workflows/ci.yml:144-153` | the `profile-census` job + `components: llvm-tools` (D6) |
-| `.github/workflows/ci.yml:222-226` | the hand-listed Miri sweep — B.9's allowlist, G4's row |
+| `.github/workflows/ci.yml:306-312` | the hand-listed Miri sweep — B.9's allowlist, G4's row |
 | `crates/boyko_ecs/Cargo.toml` | the `profiling-analysis` measurement: unification defeated `--no-default-features` (D3, G2) |
-| `crates/boyko_ecs/benches/gj1_flag_cost.rs` | the ABBA/twin/verdict idiom; the cross-build refusal at `:22-29` (D8) |
-| `crates/boyko_log/benches/log_gate_cost.rs:42-46` | *"a zero control whose expected value is exactly zero measures DRIFT"* (D10) |
+| `crates/boyko_ecs/benches/gj1_flag_cost.rs` | the ABBA/twin/verdict idiom; the cross-build refusal at `:22-29~` (D8) |
+| `crates/boyko_log/benches/log_gate_cost.rs:42-46~` | *"a zero control whose expected value is exactly zero measures DRIFT"* (D10) |
 | `tests/engine_packages_census.rs` | the two census rows G0 owes (D15) |
 | `tests/trybuild_corpus_compiler_witness.rs` | `BLESSED_RUSTC`, the corpus count, the chocolatey hazard (D13) |
-| `tests/internal_docs_anchors.rs:231` | `GATED_DOCS` — why this file's anchors are hand-checked |
+| `tests/internal_docs_anchors.rs:280` | `GATED_DOCS` — the registration that makes this file's anchors machine-checked |
 | `crates/boyko_ecs/tests/compile_fail_zero_init.rs` | the trybuild harness shape G5 copies |
-| `crates/boyko_macros/src/component.rs:348` | the `component_id()` funnel and its six install slots — the emission site P-D watches |
+| `crates/boyko_macros/src/component.rs:425` | the `component_id()` funnel and its six install slots — the emission site P-D watches |
 | `crates/boyko_macros/Cargo.toml` | tokens-are-not-deps, stated in the manifest |
 | `crates/boyko_ecs/src/ecs/core/component/component_registry/serialize.rs:277` | `BIND_ACCESSORS` — the shipping table D16's Horn 1 would merge into |
 | `crates/boyko_render/Cargo.toml` | `boyko_rhi_vulkan` edge ⇒ `GpuTransform3D` is Miri-unreachable (G4) |

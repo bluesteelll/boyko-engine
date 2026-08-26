@@ -43,7 +43,7 @@ The boundary exists for the editor: copy/paste a component, author a prefab, dif
 live-tuning session, dump an entity into a bug report. It is **not** the save/load
 engine — that is `boyko_serialize`, it ships, and it is forbidden from depending on
 `boyko_reflect` (`REFLECTION-ANALYSIS.md` §1; asserted at the source in
-`crates/boyko_serialize/Cargo.toml:6-10` and `crates/boyko_serialize/src/lib.rs:6`).
+`crates/boyko_serialize/Cargo.toml:6~-10` and `crates/boyko_serialize/src/lib.rs:6~`).
 
 | Property | v1 target | How it is established |
 |---|---|---|
@@ -97,13 +97,13 @@ precedent.**
 * `boyko_serialize` `MAGIC = *b"BOYKOSAV"` (`format.rs:22`), `FORMAT_VERSION = 2` (`:34`).
 * `TypeTableEntry` = 40 B, padding-free, `{ stable_name_hash@0, layout_fingerprint@8,
   size@16, align@20, name_off@24, name_len@28, format_version@32, serializability@34,
-  _pad@35 }` with `const _: () = assert!` pins on every offset (`format.rs:210-258`).
+  _pad@35 }` with `const _: () = assert!` pins on every offset (`format.rs:210~-258`).
 * `load.rs::resolve_type_table` materializes a **dense `Vec<ResolvedType>` indexed by the
   file-local type index**, one `resolve_stable_name` per file type, never per entity
-  (`load.rs:340-408`). This is the shape rung B4 copies.
+  (`load.rs:340~-408`). This is the shape rung B4 copies.
 * **A `format_version` mismatch is a hard `LoadError::VersionMismatch`** — *"never a
   silent blit of stale bytes, even when the `layout_fingerprint` still matches (a
-  same-shape semantic reinterpretation)"* (`load.rs:198-200`). Precedent for **D7**.
+  same-shape semantic reinterpretation)"* (`load.rs:198~-200`). Precedent for **D7**.
 * Leniency is always **counted**: `LoadReport { types_skipped, types_bitset_skipped,
   types_defaulted, … }` (`load.rs:81-111`). Precedent for **D8**/**D12**.
 * `boyko_serialize/tests/load_roundtrip.rs:361 absent_file_type_is_skipped` performs
@@ -113,7 +113,7 @@ precedent.**
 **`EnableTagId` has only one public direction.**
 
 * `pub struct EnableTagId(pub(crate) ComponentId)` — `component_registry/tags.rs:93`.
-* `EnableTagId::component_id(self) -> ComponentId` (`:95-102`) and
+* `EnableTagId::component_id(self) -> ComponentId` (`:99-101`) and
   `impl From<EnableTagId> for ComponentId` (`:104-109`) exist. **The inverse does not.**
   A whole-crate grep for `EnableTagId(` finds six construction sites, **all inside
   `boyko_ecs`**; there is no `From<ComponentId>`, no `from_component_id`, and
@@ -132,7 +132,7 @@ precedent.**
 
 **The Aether seam is three files and no new dependency.**
 
-* `crates/aether_lang/Cargo.toml:6-11` states the rule verbatim: *"this crate does NOT
+* `crates/aether_lang/Cargo.toml:6~-11` states the rule verbatim: *"this crate does NOT
   depend on `boyko-ecs`: every `boyko_ecs::…`/`boyko_macros::…` occurrence in the
   expander is an emitted TOKEN resolved in the downstream crate (the tokens-not-deps
   rule)."* Its only dependencies are `syn`, `quote`, `proc-macro2`.
@@ -144,23 +144,23 @@ precedent.**
   definition of the type `Foo` here' pointed at `aether! {`"*).
 * `ast.rs::ComponentDef { name, fields, requires, hooks, no_bundle }` — **five fields, no
   `attrs`, no attribute-passthrough grammar anywhere**.
-* `parse.rs::parse_component` (`:206-300`) is an item loop with a bare-flag precedent
-  (`no_bundle`, `:273-278`) **and a lookahead list** at `:256-263` that decides whether an
+* `crates/aether_lang/src/parse.rs::parse_component` (`:208-300`) is an item loop with a bare-flag precedent
+  (`no_bundle`, `:273~-278`) **and a lookahead list** at `:256~-263` that decides whether an
   identifier after a comma continues a `requires` path or opens a new item. **That
   lookahead is the easily-missed third touch point** — see rung B6.
-* `boyko_macros::component::parse_component_hooks` (`component.rs:605+`) already accepts
+* `boyko_macros::component::parse_component_hooks` (`boyko_macros/src/component.rs:701+`) already accepts
   bare flag keys (`no_bundle`, `no_clone`, `no_serialize`) and NameValue keys
   (`clone = <fn>`, `storage = "bitset"|"dense"`, `stable_name = ".."`,
   `format_version = N`). A `reflect` bare flag is **not a new shape**, it is the sixth
   instance of an existing one.
-* The `component_id()` funnel (`component.rs:350-374`) already carries **six** install
+* The `component_id()` funnel (`boyko_macros/src/component.rs:425-450`) already carries **six** install
   slots (`storage_install`, `require_install`, `clone_install`, `relationship_install`,
   `residency_install`, `serialize_install`), each an independently-emitted
   `TokenStream2`. Appending a seventh is a well-trodden pattern here.
 
 **The missing-feature case is diagnosable, and only because of one existing table.**
 
-* Root `Cargo.toml:25-26`: `[workspace.lints.rust] unexpected_cfgs = { level = "warn",
+* Root [`Cargo.toml`](../Cargo.toml):25-26: `[workspace.lints.rust] unexpected_cfgs = { level = "warn",
   check-cfg = ['cfg(loom)', 'cfg(force_alloc_panic)'] }`, and **every member opts in**
   via `[lints] workspace = true`. Cargo's own `--check-cfg` for `feature = "..."` values
   is generated from each manifest, and this table **adds to** it rather than replacing
@@ -316,7 +316,7 @@ asymmetry is the whole reason name-keying exists.
 | guard | shipped loader (`boyko_serialize`) | reflect boundary | why |
 |---|---|---|---|
 | `layout_fingerprint` | hard error before a POB blit | **recorded, surfaced, not gated** | a field-wise apply does not blit. A changed layout is *precisely* the case name-keying is designed to survive; gating on it would refuse the only case reflection adds value in |
-| `format_version` | **hard `LoadError::VersionMismatch`, even when the fingerprint matches** (`load.rs:198-200`) | **hard refusal**, counted (v1 is `Strict`-only — D19(b); a counts-and-continues mode is the v2 arm) | a `format_version` bump means a **semantic** reinterpretation of the same bytes. Neither a blit nor a field-wise apply can detect it; the loader's own doc says so. A name-keyed apply is not smarter here, only quieter, and quieter is worse |
+| `format_version` | **hard `LoadError::VersionMismatch`, even when the fingerprint matches** (`load.rs:198~-200`) | **hard refusal**, counted (v1 is `Strict`-only — D19(b); a counts-and-continues mode is the v2 arm) | a `format_version` bump means a **semantic** reinterpretation of the same bytes. Neither a blit nor a field-wise apply can detect it; the loader's own doc says so. A name-keyed apply is not smarter here, only quieter, and quieter is worse |
 
 ### D8 — Patch semantics: a field absent from the dump is left untouched, and counted
 
@@ -542,7 +542,7 @@ Two things follow and both are rungs, not remarks:
 A.5 says reflection cannot tolerate, arriving through a different door.
 
 It is caught mechanically, and only because the workspace already carries the instrument:
-`[workspace.lints.rust] unexpected_cfgs` (root `Cargo.toml:25-26`) with every member
+`[workspace.lints.rust] unexpected_cfgs` (root [`Cargo.toml`](../Cargo.toml):25-26) with every member
 opted in, promoted to red by the existing `cargo clippy --workspace --all-targets --
 -D warnings` gate.
 
@@ -592,15 +592,15 @@ cannot drift** — and with **no anti-drift gate of the kind D8/B.2 demand every
 campaign. That omission is the real defect here**, and it is fixed first.
 
 **(a) The anti-drift gate, which was missing.** D1 forbids the dependency, so the gate cannot be a
-type-level one. It is `crates/boyko_reflect/tests/format_divergence_ledger.rs`, and it asserts a
+type-level one. It is `crates/boyko_reflect/tests/format_divergence_ledger.rs`, and it asserts a  <!-- doc-path-planned -->
 **ledger**, not an equality:
 
 | borrowed shape | `boyko_serialize`'s | the dump's | divergence |
 |---|---|---|---|
 | magic | `*b"BOYKOSAV"` (`format.rs:22`) | `*b"BOYKORD1"` | **intended** (D17) — and the test asserts they *differ*, so a copy-paste that unified them reds |
-| type-table entry | `TypeTableEntry`, 40 B, offsets `const _: () = assert!`-pinned (`format.rs:210-258`) | `TypeDecl`, its own `const` offset pins | **intended** — the dump carries no `size`/`align`/`serializability`; the ledger names each omitted field so a *silent* omission is impossible |
-| resolution shape | `resolve_type_table` → dense `Vec<ResolvedType>` by file-local index (`load.rs:340-408`) | the same shape | **adopted deliberately**; the ledger row is the statement that it was adopted, so a later divergence is a decision |
-| version guard | `LoadError::VersionMismatch`, hard (`load.rs:198-200`) | hard by default (D7) | **adopted** |
+| type-table entry | `TypeTableEntry`, 40 B, offsets `const _: () = assert!`-pinned (`format.rs:210~-258`) | `TypeDecl`, its own `const` offset pins | **intended** — the dump carries no `size`/`align`/`serializability`; the ledger names each omitted field so a *silent* omission is impossible |
+| resolution shape | `resolve_type_table` → dense `Vec<ResolvedType>` by file-local index (`load.rs:340~-408`) | the same shape | **adopted deliberately**; the ledger row is the statement that it was adopted, so a later divergence is a decision |
+| version guard | `LoadError::VersionMismatch`, hard (`load.rs:198~-200`) | hard by default (D7) | **adopted** |
 | fingerprint guard | hard error before a POB blit | **recorded, not gated** (D7) | **intended** — the one row where the dump is deliberately more permissive, and B4 gate 4 asserts it |
 | leniency accounting | `LoadReport { types_skipped, … }` (`load.rs:81-111`) | `ApplyReport` | **adopted** |
 
@@ -750,7 +750,7 @@ package and must stay FFI-free). So:
 
 ### B0 — The fixture crate and the id-difference harness — size S
 
-**Lands.** `crates/reflect_fixture/tests/fixtures/` (a module, not a crate — **the
+**Lands.** `crates/reflect_fixture/tests/fixtures/` (a module, not a crate — **the  <!-- doc-path-planned -->
 fixture package's**, per the placement rule above; every type here is
 `#[component(reflect)]` and cannot live in `boyko_reflect`'s own tests): `Pod3 { a: u32,
 b: f32, c: i16 }` with an explicit `#[component(stable_name = "reflect::fixture::Pod3")]`
@@ -763,8 +763,8 @@ top-level-enum case — ~~a re-export of `Visibility`~~ is not expressible here
 to prove a mis-keyed apply corrupts something).
 
 The **id-difference harness**: two test binaries over the same fixtures.
-* `crates/reflect_fixture/tests/boundary_roundtrip.rs` — touches fixtures directly.
-* `crates/reflect_fixture/tests/boundary_id_reorder.rs` — a `OnceLock` prelude that runs **before any fixture
+* `crates/reflect_fixture/tests/boundary_roundtrip.rs` — touches fixtures directly.  <!-- doc-path-planned -->
+* `crates/reflect_fixture/tests/boundary_id_reorder.rs` — a `OnceLock` prelude that runs **before any fixture  <!-- doc-path-planned -->
   `component_id()` touch**, minting `K` spacer ids via `EcsMaster::register_tag`
   (`tag_api.rs:65`; tags draw from the same `NEXT_ID` counter as `register_new`,
   `component_registry/mod.rs::register_new`), then touching `Decoy`, then the fixtures.
@@ -902,7 +902,7 @@ the `Strict` arm to swallow the mismatch as `Ok` → gate 4's count reds.
 
 **Lands.** The `BeginDump`/`TypeDecl` prologue sorted by stable name (D18); the
 once-per-dump `Vec<Option<ComponentId>>` materialization (the
-`boyko_serialize::resolve_type_table` shape, `load.rs:340-408`); `format_version` refusal
+`boyko_serialize::resolve_type_table` shape, `load.rs:340~-408`); `format_version` refusal
 (D7); `layout_fingerprint` recorded-not-gated (D7); D9's bitset name scan; D12's refusal
 records; `dump_entity` / `apply_entity` (**single-entity in v1**, D19(b)); **and the
 `format_divergence_ledger` test D19(a) requires** — the anti-drift gate this plan owed for every
@@ -1020,34 +1020,34 @@ transposed while gates 1–3 stay green.
 
 1. **`aether_lang/src/ast.rs`** — `ComponentDef` gains `pub reflect: bool` (the sixth
    field).
-2. **`aether_lang/src/parse.rs::parse_component`** — `reflect` as a bare flag key,
-   modelled exactly on `no_bundle` (`:273-278`), with **three touch points, and the third
+2. **`crates/aether_lang/src/parse.rs::parse_component`** — `reflect` as a bare flag key,
+   modelled exactly on `no_bundle` (`:273~-278`), with **three touch points, and the third
    is the one a careless patch misses**:
    * the flag branch itself (duplicate `reflect` → a spanned error);
-   * the item-head error string at `:230` and the field-fallback error string at `:295`
+   * the item-head error string at `:230~` and the field-fallback error string at `:295~`
      (both enumerate the known items and would otherwise lie);
-   * **the `requires`-continuation lookahead at `:256-263`** — `reflect` must join
+   * **the `requires`-continuation lookahead at `:256~-263`** — `reflect` must join
      `"requires"` / `"no_bundle"` / `HookKind::from_str` in the `is_item_head` set, or
      `requires A, reflect` parses `reflect` as a *path* and the key silently vanishes.
 3. **`aether_lang/src/expand.rs::component`** — `if def.reflect { keys.push(quote! {
    reflect }); }`, one line in the existing vector. The `#[component(...)]` attribute is
    already emitted only when the vector is non-empty, so a block without `reflect` emits
    byte-identical tokens to today.
-4. **`boyko_macros/src/component.rs`** — `parse_component_hooks` gains the `reflect` bare
+4. **`crates/boyko_macros/src/component.rs`** — `parse_component_hooks` gains the `reflect` bare
    flag (the sixth instance of that shape); a `reflect_install` `TokenStream2` appended as
-   the **seventh** install slot in the `component_id()` funnel (`:350-374`), and the
+   the **seventh** install slot in the `component_id()` funnel (`:425-450`), and the
    `#[cfg(feature = "reflect")]`-wrapped `Reflect` impl + `TYPE_INFO` static. The refusal
    for `storage = "bitset"` + `reflect` is spanned at the offending key.
 
 **Gate.**
 1. **`aether_lang` acquires no dependency** — `cargo tree -p aether-lang` output is pinned
    against a committed expectation. Its manifest's tokens-not-deps comment
-   (`Cargo.toml:6-11`) is the invariant; the pin is the instrument.
+   (`crates/aether_lang/Cargo.toml:6~-11`) is the invariant; the pin is the instrument.
 2. **Zero-token identity for the unchanged path** — an expander unit test asserting that a
    `component` block **without** `reflect` produces byte-identical `TokenStream` output to
    the pre-change expander (the string form is compared). This is the DSL's 0 %-gate.
 3. **The lookahead** — a parse test for `component Foo { requires A, reflect, hp: f32 }`
-   asserting `def.reflect == true` **and** `def.requires == [A]`. Without the `:256-263`
+   asserting `def.reflect == true` **and** `def.requires == [A]`. Without the `crates/aether_lang/src/parse.rs:256~-263`
    edit this test fails with `reflect` swallowed into `requires`.
 4. **End-to-end against the real engine**, in `crates/aether_tests` (the §8 R4 anti-drift
    gate — its whole purpose): a `component Health { reflect, hp: f32 }` block that
@@ -1077,7 +1077,7 @@ transposed while gates 1–3 stay green.
    points**; if it points at the derive call site rather than the user's key, add
    `quote_spanned!` at the emitted key and re-measure.
 
-**RED MUTATION.** (1) Skip the `:256-263` lookahead edit → gate 3 reds (this is the
+**RED MUTATION.** (1) Skip the `crates/aether_lang/src/parse.rs:256~-263` lookahead edit → gate 3 reds (this is the
 mutation worth doing *first*, because it is the one a reviewer's eye slides over).
 (2) Emit the `reflect` key unconditionally in `expand.rs` → gate 2 reds, and gate 6's
 fixture becomes every `aether!`-bearing crate — which is exactly D14's stated flip cost,

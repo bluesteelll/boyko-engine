@@ -39,8 +39,10 @@
 //!
 //! # What is checked
 //!
-//! 1. **Paths** — every markdown link target `](...)` and every bare `crates/...` mention in
-//!    prose or backticks must exist on disk.
+//! 1. **Paths** — every markdown link target `](...)` and every bare root-relative mention in
+//!    prose or backticks must exist on disk. The root-relative set is [`ROOT_PREFIXES`]; it was
+//!    `crates/` alone until the reflection documents showed what an unseen mention actually costs,
+//!    which is not a skipped check but a **misbinding** of every anchor behind it.
 //! 2. **Line anchors, in both forms the documents write them** — the suffix form `file.rs:N` and
 //!    the bare parenthesised `(N)` that member tables use under a sticky **File:** header. Every
 //!    citation must be within the cited file, and line N must look like a definition (`fn` /
@@ -188,25 +190,59 @@
 //!   ⚠️ **All four numbers here were 26/16/25/25 and went stale in the commit that un-waived one
 //!   anchor in SYSTEMS.md** — a repair that changed a measured INPUT rather than restating a fact,
 //!   so grepping for the sentence would not have found them. They are re-derived, not adjusted.
-//!   This pattern deliberately covers only the three navigation documents; the meshlet plan writes
-//!   its waivers before the range (`:N~-M`), a spelling with zero occurrences in these three.
+//!   That pattern reads only the three navigation documents, and it is deliberately NOT the
+//!   whole-corpus census: the meshlet plan writes its waivers before the range (`:N~-M`), a
+//!   spelling with zero occurrences in these three. To enumerate every waiver in `GATED_DOCS`,
+//!   accept the tilde on either side — `grep -oE '[:(][0-9]+~(-[0-9]+)?|[:(][0-9]+(-[0-9]+)?~'` —
+//!   and run it over all nine.
 //! * **Historical quotes** — a line that deliberately reproduces a former, now-wrong anchor
 //!   ("this used to say ...") carries `<!-- doc-anchor-ignore -->` and is skipped whole. This is
 //!   an explicit opt-out rather than a heuristic on words like "formerly": a heuristic would
-//!   silently switch the gate off on ordinary lines that happen to use the word. No line in the
-//!   three documents needs it today.
+//!   silently switch the gate off on ordinary lines that happen to use the word.
+//!   ⚠️ This bullet used to end "No line in the three documents needs it today", and that was
+//!   already false when written — the meshlet plan carries two, at its `vg_corpus_ingest.rs` and
+//!   `vg_density_census.rs` mentions. The sentence survived because nothing re-derived it; it is a
+//!   count, so it is not restated here either. `grep -c doc-anchor-ignore docs/*.md` answers it.
+//! * **A citation's own file fragment overrides the sticky binding.** Where an anchor is written
+//!   directly after a path fragment — `` `component_registry/tags.rs:134` `` — that fragment is the
+//!   document's statement of which file it means, and it wins over whatever path the section named
+//!   earlier. It is resolved by [`resolve_unique_fragment`], which requires the fragment to match
+//!   **exactly one** file in the tree; zero or several matches mean the anchor is SKIPPED, never
+//!   guessed at, and the skip is counted and pinned by
+//!   [`unbindable_fragments_are_reported_and_pinned`]. A resolved fragment also rebinds the sticky
+//!   target, so the `` `:155` `` continuations that follow it inherit the right file.
+//!   This rule is what makes the reflection plans checkable at all: they write **one row per
+//!   claim**, each row naming its own file, which is the exact inverse of the member tables the
+//!   sticky binding was designed for. Measured when they entered scope — of their 634 citations,
+//!   only 53 were rooted `crates/...`, against 303 bare fragments and 258 bare `:N` continuations.
+//! * **A plan may name a file it has not built.** `<!-- doc-path-planned -->` waives the existence
+//!   check for one line's mentions and nothing else; see [`PLANNED_MARKER`].
+//! * **A glob is not a path, and a ratio is not an anchor.** `docs/PHASE-*-RESULTS.md` names a
+//!   family, not a file, and `(3840/1920 = 2.000)` is arithmetic. Both were being read as claims;
+//!   both rejections are at the point of extraction, with the measurement, in `scan_line`.
 //!
 //! # Scope
 //!
-//! The three navigation documents **and** `MESHLET-VIRTUAL-GEOMETRY-PLAN.md`. The rest of `docs/`
-//! is audit and results files: dated records of what was believed at a point in time. Rewriting
-//! their anchors to match today's source would falsify the record, so they stay out of scope.
+//! The three navigation documents, `MESHLET-VIRTUAL-GEOMETRY-PLAN.md`, and the reflection
+//! campaign's five planning and analysis documents. The rest of `docs/` is audit and results files:
+//! dated records of what was believed at a point in time. Rewriting their anchors to match today's
+//! source would falsify the record, so they stay out of scope.
+//!
+//! ⚠️ **The reflection documents were added because their absence had been MEASURED, twice.** An
+//! implementer's own edit shifted the lines its plan cited and nothing reddened; the rot was found
+//! by a human reading pass, and a follow-up then enumerated ten more anchors that had been stale
+//! before that. Arming the gate over them — before repairing anything, which is the only order that
+//! proves the gate can see them — reported **12 dead paths and 150 stale anchors of 231 checked**.
+//! Classifying that list is what found the binding defect above: the majority were not stale, they
+//! were being checked against a file the document never named. Repairing the binding took the same
+//! corpus to **541 anchors checked**, and the reds that survived were the real ones.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// The internal documents `CLAUDE.md` points agents at for navigation.
-/// The three navigation documents, plus the virtual-geometry plan.
+/// The internal documents `CLAUDE.md` points agents at for navigation, plus the campaign plans
+/// that cite the source tree densely enough to rot between rungs: the three navigation documents,
+/// the virtual-geometry plan, and the reflection campaign's five.
 ///
 /// The plan was ADDED, REMOVED, and ADDED AGAIN, and the round trip is worth recording because it
 /// measured a real limit of this gate rather than a preference.
@@ -228,10 +264,50 @@ use std::path::{Path, PathBuf};
 /// runs, so a waived anchor that is simply WRONG about which line holds the symbol still passes.
 /// What the plan's membership does buy is the class that actually rots — a cited file that
 /// disappears or shrinks — and it caught three dead paths on the first run.
-const GATED_DOCS: &[&str] = &["FEATURE_MAP.md", "SYSTEMS.md", "ARCHITECTURE.md", "MESHLET-VIRTUAL-GEOMETRY-PLAN.md"];
+/// The reflection campaign's five planning documents, added 2026-08-21.
+///
+/// They were added because the absence was MEASURED, twice in two rungs: an implementer's own edit
+/// shifted the lines its plan cited, nothing reddened, and the rot was found by a reading pass. A
+/// follow-up then enumerated ten more anchors that had already been stale before those rungs.
+///
+/// ⚠️ **Read the coverage note in the module doc before trusting a green run here.** These five
+/// documents write most of their citations as a *bare relative fragment* — `` `format.rs:210-258`
+/// ``, `` `component_registry/mod.rs:61` `` — under a section that names the full path once. This
+/// scanner binds an anchor to the nearest resolvable path mention, and a bare fragment is not one,
+/// so those anchors bind to the section's last full `crates/...` path. That is the intended sticky
+/// binding when the fragment names the section's own subject, and a MISBINDING when it names a
+/// sibling file. The arming run is documented in the same note.
+const GATED_DOCS: &[&str] = &[
+    "FEATURE_MAP.md",
+    "SYSTEMS.md",
+    "ARCHITECTURE.md",
+    "MESHLET-VIRTUAL-GEOMETRY-PLAN.md",
+    "REFLECTION-ANALYSIS.md",
+    "REFLECTION-PLAN-BOUNDARY.md",
+    "REFLECTION-PLAN-CORE.md",
+    "REFLECTION-PLAN-ECS.md",
+    "REFLECTION-PLAN-GATES.md",
+];
 
 /// Opt-out marker for a line that quotes a stale anchor on purpose.
 const IGNORE_MARKER: &str = "<!-- doc-anchor-ignore -->";
+
+/// Opt-out marker for a line that names an artifact the plan has **not built yet**.
+///
+/// The navigation documents describe a tree that exists, so every path they name must be on disk.
+/// A *plan* also names the files it is going to create — `` **Lands.**
+/// `crates/reflect_fixture/tests/boundary_roundtrip.rs` `` — and that is a commitment, not a claim
+/// about today's disk. Ten such declarations reddened the path check when the reflection plans
+/// entered `GATED_DOCS`, and every available way to silence them was worse than a marker: deleting
+/// the path deletes the deliverable's name, `<!-- doc-anchor-ignore -->` says "historical quote"
+/// which is false and also drops the line's anchors, and dropping the plans from the path check
+/// entirely would forfeit the class that actually rots.
+///
+/// It waives **only** the existence check, and only on its own line; anchors are unaffected. The
+/// count is pinned per document by [`planned_paths_are_reported_and_pinned`], so the marker is a
+/// visible ledger of what each plan still owes rather than a way to make the check quiet. When the
+/// artifact lands, the marker comes off and the path is checked like any other.
+const PLANNED_MARKER: &str = "<!-- doc-path-planned -->";
 
 /// The workspace root. This test lives in the root package, so the manifest dir *is* the root.
 fn repo_root() -> PathBuf {
@@ -266,6 +342,30 @@ struct Anchor {
     shape_waived: bool,
 }
 
+/// Repo-root-relative prefixes a **bare** (unlinked) path mention may start with.
+///
+/// This was `crates/` alone, and the omission was measured when the reflection documents entered
+/// `GATED_DOCS`: they cite `.github/workflows/ci.yml:62` and `docs/FEATURE_MAP.md:112` in prose,
+/// neither of which the scan could see. An unseen mention is not a skipped check — it is a
+/// **misbinding**, because the anchor after it falls through to the last `crates/...` path instead,
+/// and the run then reports that file's line count. `REFLECTION-PLAN-GATES.md:1641` cited seven
+/// `ci.yml` legs and every one was checked against `crates/profile_fixture/Cargo.toml` (18 lines).
+///
+/// ⚠️ **`src/` and `tests/` are deliberately NOT here, and adding them would be a regression.**
+/// Both exist at the repository root *and* inside every crate, so a bare `src/lib.rs` or
+/// `tests/foo.rs` is ambiguous between root-relative and crate-relative — and these documents write
+/// far more of the second kind (measured over the five: 22 bare `src/…`, 47 bare `tests/…`).
+/// Treating them as root-relative would resolve `src/lib.rs` onto the workspace root's own file,
+/// which EXISTS, so the path check would pass while every anchor behind it bound to the wrong crate
+/// — a silent wrong answer, strictly worse than the current silence. Those citations are reached as
+/// anchors instead, by [`resolve_unique_fragment`], which refuses rather than guesses.
+///
+/// The consequence, stated plainly so it is not mistaken for coverage: a bare `tests/…`, `src/…`,
+/// `book/…`, `scripts/…` or `tools/…` mention is **not existence-checked**. Only its anchor is, and
+/// only when the fragment names one file. Write it as a markdown link or a full `crates/…` path to
+/// bring it under the path check.
+const ROOT_PREFIXES: &[&str] = &["crates/", "docs/", ".github/"];
+
 /// Characters that may appear inside a bare `crates/...` mention.
 fn is_path_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'/' | b'-')
@@ -291,7 +391,7 @@ fn resolve(raw: &str) -> Option<PathBuf> {
     }
     let mut path = if let Some(rest) = base.strip_prefix("../") {
         repo_root().join(rest)
-    } else if base.starts_with("crates/") {
+    } else if ROOT_PREFIXES.iter().any(|p| base.starts_with(p)) {
         repo_root().join(base)
     } else {
         docs_dir().join(base)
@@ -354,33 +454,45 @@ fn scan_line(text: &str) -> (Vec<Mention>, Vec<Anchor>) {
         i += 1;
     }
 
-    // 2. Bare `crates/...` mentions in prose or backticks.
-    let needle = b"crates/";
+    // 2. Bare root-relative mentions in prose or backticks — see `ROOT_PREFIXES`.
     let mut i = 0;
-    while i + needle.len() <= bytes.len() {
-        if &bytes[i..i + needle.len()] == needle
-            && !link_spans.iter().any(|&(s, e)| i >= s && i < e)
-            // Only a path *start*: `subcrates/` and the tail of `../crates/` handled elsewhere.
-            && (i == 0 || !is_path_byte(bytes[i - 1]))
-        {
-            let mut end = i;
-            while end < bytes.len() && is_path_byte(bytes[end]) {
-                end += 1;
-            }
-            if let Some(slice) = text.get(i..end) {
-                let raw = trim_path_punctuation(slice);
-                if !raw.is_empty()
-                    && let Some(resolved) = resolve(raw)
-                {
-                    mentions.push(Mention {
-                        col: i,
-                        raw: raw.to_string(),
-                        resolved,
-                    });
+    'outer: while i < bytes.len() {
+        for needle in ROOT_PREFIXES {
+            let n = needle.as_bytes();
+            if i + n.len() <= bytes.len()
+                && &bytes[i..i + n.len()] == n
+                && !link_spans.iter().any(|&(s, e)| i >= s && i < e)
+                // Only a path *start*: `subcrates/` and the tail of `../crates/` handled elsewhere.
+                && (i == 0 || !is_path_byte(bytes[i - 1]))
+            {
+                let mut end = i;
+                while end < bytes.len() && is_path_byte(bytes[end]) {
+                    end += 1;
                 }
+                // A GLOB is not a claim that one file exists. `*` and `?` are not path bytes, so
+                // the scan stops in front of them and the truncated head would be checked as if it
+                // were a whole path: `docs/PHASE-*-RESULTS.md` became `docs/PHASE-`, then
+                // `docs/PHASE` after punctuation trimming, and was reported dead in FEATURE_MAP.md
+                // and SYSTEMS.md the moment `docs/` joined ROOT_PREFIXES. The pattern is prose
+                // about a family of files; only a literal path asserts that one of them is there.
+                let is_glob = matches!(bytes.get(end).copied(), Some(b'*' | b'?'));
+                if let Some(slice) = text.get(i..end)
+                    && !is_glob
+                {
+                    let raw = trim_path_punctuation(slice);
+                    if !raw.is_empty()
+                        && let Some(resolved) = resolve(raw)
+                    {
+                        mentions.push(Mention {
+                            col: i,
+                            raw: raw.to_string(),
+                            resolved,
+                        });
+                    }
+                }
+                i = end;
+                continue 'outer;
             }
-            i = end;
-            continue;
         }
         i += 1;
     }
@@ -452,8 +564,36 @@ fn scan_line(text: &str) -> (Vec<Mention>, Vec<Anchor>) {
                 // dedup)`, `(0%-gate …)`, `(19 members)`, `(12.6)`, `(14a)` are all rejected here
                 // rather than by a unit blacklist.
                 // `after` already steps past whichever side the waiver was written on.
-                let closes =
-                    !paren || matches!(bytes.get(after).copied(), Some(b')' | b',' | b'/'));
+                // ⚠️ The `/` alternative exists for a `(a) / (b)` member list, where the slash is a
+                // SEPARATOR. A slash followed directly by another digit is a RATIO, and reading it
+                // as a citation was a latent false positive: the meshlet plan's
+                // `(3840/1920 = 2.000)` was parsed as an anchor on line 3840. It stayed invisible
+                // only because the file it happened to bind to was large enough; the moment
+                // `docs/` joined `ROOT_PREFIXES` it rebound to a 94-line document and reported
+                // ``past end of file``. A real list writes `(a) / (b)` with spaces.
+                // ⚠️ A bare `(N)` must be a MEMBER CITATION, which in these documents always
+                // trails the backticked symbol it cites — `` `spawn_one::<A>` (582) ``. A `(1)`
+                // that opens an enumerated clause — "…recorded at execution.** (1) Gate 5 requires
+                // …" — satisfies every other rule here and was read as an anchor on line 1. That is
+                // not hypothetical: it reported four such "stale" anchors in
+                // REFLECTION-PLAN-GATES.md, and the first repair pass WAIVED them, writing `(1~)`
+                // `(2~)` `(3~)` into the prose — a scanner false positive laundered into the
+                // document as if it were a deliberate citation. Requiring a closing backtick or
+                // `)` in front separates the two structurally; measured over the four incumbent
+                // documents, every genuine bare citation has one and no enumerator does.
+                let mut back = i;
+                while back > 0 && bytes[back - 1] == b' ' {
+                    back -= 1;
+                }
+                let cited_symbol_in_front =
+                    back > 0 && matches!(bytes[back - 1], b'`' | b')');
+                let after_byte = bytes.get(after).copied();
+                let ratio = after_byte == Some(b'/')
+                    && bytes.get(after + 1).is_some_and(u8::is_ascii_digit);
+                let closes = !paren
+                    || (!ratio
+                        && cited_symbol_in_front
+                        && matches!(after_byte, Some(b')' | b',' | b'/')));
                 if line_no > 0 && closes {
                     anchors.push(Anchor {
                         col: i,
@@ -498,27 +638,56 @@ fn looks_like_definition(line: &str, ext: &str) -> bool {
     if t.starts_with("//") || t.starts_with("/*") || t.starts_with('*') || t.starts_with("#[") {
         return false;
     }
+    // ⚠️ These were written WITH a trailing space, and the space silently excluded every
+    // definition whose keyword is followed by a generic parameter list. Measured when the
+    // reflection documents entered `GATED_DOCS`: `impl<S: States> Resource for State<S> {` —
+    // `state.rs:43`, cited by three separate paragraphs of REFLECTION-ANALYSIS.md — was reported
+    // ``is not a definition``, because `impl<` is not `impl `. The boundary is now checked on BOTH
+    // sides instead, so `impl<T>` and `struct Foo<T>` qualify while `implementation` and
+    // `type_name` still do not.
     const KEYWORDS: &[&str] = &[
-        "fn ",
-        "struct ",
-        "enum ",
-        "const ",
-        "static ",
-        "impl ",
-        "trait ",
-        "type ",
-        "pub ",
+        "fn",
+        "struct",
+        "enum",
+        "const",
+        "static",
+        "impl",
+        "trait",
+        "type",
         "macro_rules!",
-        "union ",
-        "mod ",
+        "union",
+        "mod",
     ];
-    KEYWORDS.iter().any(|kw| {
+    let b = t.as_bytes();
+    let is_ident_byte = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let word_at = |kw: &str| {
         t.match_indices(kw).any(|(idx, _)| {
-            // Word boundary: the keyword must not be the tail of a longer identifier.
-            idx == 0
-                || !t.as_bytes()[idx - 1].is_ascii_alphanumeric() && t.as_bytes()[idx - 1] != b'_'
+            // Word boundary on both sides: the keyword must be neither the tail nor the head of a
+            // longer identifier.
+            let before_ok = idx == 0 || !is_ident_byte(b[idx - 1]);
+            let after = idx + kw.len();
+            let after_ok = after >= b.len() || !is_ident_byte(b[after]);
+            before_ok && after_ok
         })
-    })
+    };
+    // ⚠️ `pub` keeps its trailing space and is NOT given the two-sided boundary above, because it
+    // is a VISIBILITY QUALIFIER rather than an item keyword — every item it can precede is already
+    // matched by its own keyword (`pub(crate) fn` by `fn`, `pub struct` by `struct`). What `pub`
+    // alone still reaches is a STRUCT FIELD, `pub next: Option<Row>`, which is not a definition and
+    // is the canonical `~` waiver class in these documents. Two-siding it would additionally match
+    // `pub(crate) enable_store: EnableStore,` — measured: doing so turned three long-standing
+    // waivers in FEATURE_MAP.md and SYSTEMS.md into over-waivers, i.e. it reclassified two
+    // documents' struct-field citations by widening a qualifier, which is not the defect that was
+    // being fixed. The defect was `impl<S: States>`, and it is fixed above.
+    //
+    // It therefore keeps the ORIGINAL one-sided rule: the space is already the right-hand
+    // boundary, and demanding a non-identifier byte after it rejects `pub use scope::Scope;` and
+    // `pub geometry_slot: u32,` — measured, three fresh stale anchors in SYSTEMS.md and one in the
+    // meshlet plan, on citations that had been correct for their whole life.
+    let pub_prefixed = t.match_indices("pub ").any(|(idx, _)| {
+        idx == 0 || !is_ident_byte(b[idx - 1])
+    });
+    pub_prefixed || KEYWORDS.iter().copied().any(word_at)
 }
 
 /// Rust keywords, which a doc line uses as prose (`for x in &q`) far more often than as a symbol.
@@ -709,6 +878,92 @@ fn resolve_fragment(frag: &str, sticky: Option<&PathBuf>, base: Option<&PathBuf>
     }
 }
 
+/// Every source file a bare fragment could name, walked once per process.
+///
+/// `target/` and `.git/` are excluded: they hold generated copies of tree files, and a fragment
+/// matching both the source and its build artefact would be reported ambiguous for no reason.
+fn repo_files() -> &'static Vec<PathBuf> {
+    static FILES: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    FILES.get_or_init(|| {
+        let mut out = Vec::new();
+        let mut stack = vec![repo_root()];
+        while let Some(dir) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in rd.flatten() {
+                let p = entry.path();
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if p.is_dir() {
+                    if name != "target" && name != ".git" && name != "node_modules" {
+                        stack.push(p);
+                    }
+                } else {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    })
+}
+
+/// Resolve a bare fragment — `enable_tag_api.rs`, `component_registry/tags.rs` — to **the one**
+/// file in the tree whose path ends with it.
+///
+/// # Why this exists
+///
+/// The three navigation documents anchor a file once and list members under it, which is what the
+/// sticky binding models. The five reflection planning documents do the opposite: their tables give
+/// **one row per claim**, and each row names its own file by a relative fragment —
+/// `` `enable_tag_api.rs:60`, `component_registry/tags.rs:134`, `:155` ``. A fragment is not a
+/// resolvable path mention, so before this existed every such anchor fell through to the section's
+/// last `crates/...` path. Measured over the five documents at the moment they entered
+/// `GATED_DOCS`: **634 citations, of which 53 were rooted `crates/...`** — the only form that bound
+/// correctly — **303 bare fragments and 258 bare `:N` continuations**. The arming run reported 150
+/// "stale" anchors of 231, and classifying them showed the majority were not stale at all: they
+/// were checked against a file the document never named. `REFLECTION-PLAN-ECS.md:75` cites
+/// `component_registry/mod.rs:918` and was reported ``past end of file (263 lines)`` against
+/// `crates/boyko_ecs/Cargo.toml`.
+///
+/// # Nothing is guessed
+///
+/// Zero matches and two-or-more matches both return `None`, and the caller then **skips** the
+/// anchor rather than falling back to the sticky binding. Falling back is what produced the
+/// misbindings, so an unresolvable fragment must cost coverage, never correctness. A bare `mod.rs`
+/// is ambiguous in this tree by construction and is skipped every time; the count is printed and
+/// pinned by [`unbindable_fragments_are_reported_and_pinned`] so it cannot grow unnoticed.
+///
+/// The suffix must land on a path separator, so `tags.rs` never matches `component_tags.rs`.
+fn resolve_unique_fragment(frag: &str) -> Option<PathBuf> {
+    let mut found: Option<&PathBuf> = None;
+    for p in repo_files() {
+        if path_ends_with_fragment(p, frag) {
+            if found.is_some() {
+                // Ambiguous: two files in the tree end with this fragment.
+                return None;
+            }
+            found = Some(p);
+        }
+    }
+    found.cloned()
+}
+
+/// Does `path` end with `frag` on a **path-segment boundary**?
+///
+/// `ends_with` alone is not enough and the difference is not academic: `tags.rs` is a suffix of
+/// `component_tags.rs`, so a plain suffix test would bind one file's citations to the other and
+/// report line numbers from a file the document never named.
+fn path_ends_with_fragment(path: &Path, frag: &str) -> bool {
+    let s = path.to_string_lossy().replace('\\', "/");
+    let needle = frag.replace('\\', "/");
+    match s.len().checked_sub(needle.len()) {
+        Some(0) => s == needle,
+        Some(k) => s.as_bytes()[k - 1] == b'/' && s.ends_with(&needle),
+        None => false,
+    }
+}
+
 /// How strongly one anchor was checked. Printed as a per-document decomposition so the module
 /// doc's claim about the gate's reach is re-derived from the gate rather than remembered.
 ///
@@ -735,6 +990,11 @@ struct DocScan {
     classes: [usize; 4],
     path_violations: Vec<String>,
     anchor_violations: Vec<String>,
+    /// Path mentions on a `<!-- doc-path-planned -->` line: named as deliverables, not yet on disk.
+    planned_paths: Vec<String>,
+    /// Anchors written with a file fragment that resolves to no single file in the tree, and were
+    /// therefore skipped rather than checked against a file the document did not name.
+    unbindable: Vec<String>,
     /// Waived anchors whose cited line is nevertheless definition-shaped.
     ///
     /// ⚠️ A `~` says "this line is deliberately not the definition of that symbol", and it waives
@@ -875,6 +1135,8 @@ fn scan_doc(doc: &str) -> DocScan {
     let mut path_violations = Vec::new();
     let mut anchor_violations = Vec::new();
     let mut over_waived = Vec::new();
+    let mut unbindable = Vec::new();
+    let mut planned_paths = Vec::new();
 
     // Cache of file contents, so a document citing one file 15 times reads it once.
     let mut file_lines: BTreeMap<PathBuf, Option<Vec<String>>> = BTreeMap::new();
@@ -908,6 +1170,8 @@ fn scan_doc(doc: &str) -> DocScan {
         if line.contains(IGNORE_MARKER) {
             continue;
         }
+        // A deliverable the plan has not built yet is not a dead path. See `PLANNED_MARKER`.
+        let planned = line.contains(PLANNED_MARKER);
 
         if in_fence {
             // Paths are not checked inside a fence — an ASCII tree or an example command is not
@@ -975,7 +1239,8 @@ fn scan_doc(doc: &str) -> DocScan {
                 let m = &line_mentions[mi];
                 mentions += 1;
                 if !m.resolved.exists() {
-                    path_violations.push(format!(
+                    let bucket = if planned { &mut planned_paths } else { &mut path_violations };
+                    bucket.push(format!(
                         "  {doc}:{lineno}  path does not exist: `{}`",
                         m.raw
                     ));
@@ -986,6 +1251,34 @@ fn scan_doc(doc: &str) -> DocScan {
                     current = Some((m.raw.clone(), m.resolved.clone(), m.resolved.is_file()));
                 }
                 mi += 1;
+            }
+
+            // A fragment written immediately left of the anchor is the document's own statement of
+            // which file it means, and it OVERRIDES the sticky binding. Where the two agree the
+            // sticky one is kept (it is the fuller path); where the fragment names something else,
+            // it is resolved on its own, and if it cannot be resolved uniquely the anchor is
+            // SKIPPED. Falling back to the sticky binding here is precisely what checked
+            // `component_registry/mod.rs:918` against `crates/boyko_ecs/Cargo.toml`.
+            if let Some(frag) = fragment_before(line, anchor.col) {
+                // The suffix must land on a path separator. Without that boundary `tags.rs` would
+                // "agree" with a sticky `component_tags.rs`, and the anchor would be checked
+                // against a file the document did not name — the very failure this override exists
+                // to remove.
+                let sticky_agrees = current
+                    .as_ref()
+                    .is_some_and(|(_, p, _)| path_ends_with_fragment(p, frag));
+                if !sticky_agrees {
+                    match resolve_unique_fragment(frag) {
+                        Some(p) => current = Some((frag.to_string(), p, true)),
+                        None => {
+                            unbindable.push(format!(
+                                "  {doc}:{lineno}  `{frag}:{}` names no single file in the tree",
+                                anchor.line_no
+                            ));
+                            continue;
+                        }
+                    }
+                }
             }
 
             let Some((raw, target, exists)) = current.as_ref() else {
@@ -1017,7 +1310,8 @@ fn scan_doc(doc: &str) -> DocScan {
         for m in &line_mentions[mi..] {
             mentions += 1;
             if !m.resolved.exists() {
-                path_violations.push(format!(
+                let bucket = if planned { &mut planned_paths } else { &mut path_violations };
+                bucket.push(format!(
                     "  {doc}:{lineno}  path does not exist: `{}`",
                     m.raw
                 ));
@@ -1036,6 +1330,8 @@ fn scan_doc(doc: &str) -> DocScan {
         classes,
         path_violations,
         anchor_violations,
+        planned_paths,
+        unbindable,
         over_waived,
     }
 }
@@ -1256,6 +1552,251 @@ fn the_gated_docs_actually_exercise_the_range_tail() {
     );
 }
 
+/// Controls for the binding repair, the two extraction rejections, and the shape fix.
+///
+/// Each of these mechanisms was added or corrected because a WRONG result was measured on the live
+/// corpus, and each is asserted here directly rather than through a corpus run — a green corpus
+/// cannot distinguish "the rule works" from "the rule never fired". That distinction is the single
+/// most-repeated defect in this campaign, and it is what the `#[test]` below exists to deny.
+#[test]
+fn the_binding_and_extraction_rules_are_asserted_directly() {
+    // --- Fragment resolution: unique resolves, ambiguous and absent do NOT guess. ---
+    let unique = resolve_unique_fragment("component_registry/tags.rs")
+        .expect("invariant: exactly one component_registry/tags.rs exists in this tree");
+    assert!(
+        unique.ends_with("tags.rs"),
+        "a unique fragment must resolve to the file it names, got {}",
+        unique.display()
+    );
+    assert_eq!(
+        resolve_unique_fragment("mod.rs"),
+        None,
+        "`mod.rs` names dozens of files here. Resolving it would pick one arbitrarily, which is \
+         the misbinding this function exists to prevent — zero and many must both refuse."
+    );
+    assert_eq!(
+        resolve_unique_fragment("no_such_file_in_this_tree_xyz.rs"),
+        None,
+        "an absent fragment must refuse rather than resolve"
+    );
+    // The path-segment boundary: `tags.rs` must not match `component_tags.rs`.
+    assert!(
+        !path_ends_with_fragment(Path::new("crates/x/src/component_tags.rs"), "tags.rs"),
+        "a fragment must land on a path separator; a bare suffix test binds one file's citations \
+         to another file whose name merely ends the same way"
+    );
+    assert!(path_ends_with_fragment(
+        Path::new("crates/x/src/component_registry/tags.rs"),
+        "component_registry/tags.rs"
+    ));
+
+    // --- `ROOT_PREFIXES`: a bare `.github/...` mention is seen at all. ---
+    let (mentions, anchors) = scan_line("`--exclude boyko_demo` at `.github/workflows/ci.yml:62`");
+    assert_eq!(
+        mentions.len(),
+        1,
+        "a bare `.github/...` mention must be extracted. While it was not, the anchor behind it \
+         fell through to the section's last `crates/...` path and was checked against that file."
+    );
+    assert!(mentions[0].resolved.is_file(), "and it must resolve on disk");
+    assert_eq!(anchors.len(), 1);
+    assert_eq!(anchors[0].line_no, 62);
+
+    // --- A glob is not a path claim; the literal beside it still is. ---
+    assert_eq!(
+        scan_line("its record is `docs/PHASE-*-RESULTS.md`.").0.len(),
+        0,
+        "a glob names a FAMILY. Read as a path it truncates at the `*` to `docs/PHASE-`, then \
+         `docs/PHASE` — a file that was never claimed to exist, reported dead in two documents."
+    );
+    assert_eq!(
+        scan_line("see `docs/FEATURE_MAP.md` for the map").0.len(),
+        1,
+        "rejecting globs must not reject literal paths under the same prefix"
+    );
+
+    // --- A ratio is not an anchor; a `(a) / (b)` list still is. ---
+    assert_eq!(
+        scan_line("the two targets sum to exactly 2.000 (3840/1920 = 2.000)").1.len(),
+        0,
+        "`(3840/1920` was parsed as an anchor on line 3840. The `/` alternative is for a member \
+         list separator, never for a slash sitting directly between two digits."
+    );
+    let list = scan_line("`spawn_one` (582) / `spawn_batch` (611)").1;
+    assert_eq!(
+        list.len(),
+        2,
+        "rejecting ratios must not break the `(a) / (b)` member list the `/` was added for"
+    );
+    assert_eq!((list[0].line_no, list[1].line_no), (582, 611));
+
+    // --- A prose enumerator is not a citation; a trailing member ref still is. ---
+    assert_eq!(
+        scan_line("**Landed notes (2026-08-21, recorded at execution).** (1) Gate 5 requires the")
+            .1
+            .len(),
+        0,
+        "`(1)` opening an enumerated clause is not an anchor on line 1. Reading it as one produced \
+         four `stale` reds in REFLECTION-PLAN-GATES.md, and the first repair pass answered them by \
+         writing `(1~)` `(2~)` `(3~)` INTO the prose — a scanner false positive laundered into the \
+         document as a deliberate citation."
+    );
+    assert_eq!(
+        scan_line("the blindness as (1) and the reason (2) is carried").1.len(),
+        0,
+        "a numbered reference back to an earlier item is prose, not a citation"
+    );
+    assert_eq!(
+        scan_line("G0's census (3 tests), G1 (7), G2 (2), G3 (2, the").1.len(),
+        0,
+        "counts in parentheses are quantities; `(2,` even satisfies the comma continuation"
+    );
+    let member = scan_line("| everything | `clear()` (1026) |").1;
+    assert_eq!(
+        member.len(),
+        1,
+        "the member-table form must survive: it is the densest citation shape in these documents"
+    );
+    assert_eq!(member[0].line_no, 1026);
+
+    // --- Definition shape: generic items count; a `pub(crate)` FIELD still does not. ---
+    assert!(
+        looks_like_definition("impl<S: States> Resource for State<S> {", "rs"),
+        "a generic impl is a definition. Requiring `impl ` with a trailing space excluded every \
+         one of them, and reported `state.rs:43` stale to three separate paragraphs."
+    );
+    assert!(
+        looks_like_definition("pub use scope::Scope;", "rs"),
+        "`pub ` keeps its one-sided rule; demanding a non-identifier byte after the space rejects \
+         every `pub use` and every `pub field: T`, which are long-standing passes"
+    );
+    assert!(
+        !looks_like_definition("pub(crate) enable_store: EnableStore,", "rs"),
+        "a struct field is NOT a definition — it is the canonical `~` waiver class in these \
+         documents, and widening `pub` to match `pub(` reclassifies it in two incumbent documents"
+    );
+    assert!(
+        !looks_like_definition("    implementation_note();", "rs"),
+        "the two-sided boundary must still reject a keyword that heads a longer identifier"
+    );
+}
+
+/// Paths a plan names as deliverables it has not built — reported and pinned.
+///
+/// This is the ledger of what the reflection campaign still owes, derived from the plans rather
+/// than tracked beside them. It is pinned so the marker cannot be used to quiet an ordinary dead
+/// path: raising a ceiling here is a claim that the plan grew a NEW unbuilt deliverable, which is a
+/// thing a reviewer can check.
+///
+/// ⚠️ The number is expected to go **down** as the campaign lands its rungs. A ceiling is the wrong
+/// shape for that — it goes quiet exactly when the work finishes — so this asserts EQUALITY. When a
+/// deliverable lands, its marker comes off and this number is decremented in the same commit.
+#[test]
+fn planned_paths_are_reported_and_pinned() {
+    /// Exact count of `<!-- doc-path-planned -->` mentions per document.
+    const PLANNED_EXACT: &[(&str, usize)] = &[
+        ("ARCHITECTURE.md", 0),
+        ("FEATURE_MAP.md", 0),
+        ("MESHLET-VIRTUAL-GEOMETRY-PLAN.md", 0),
+        ("REFLECTION-ANALYSIS.md", 0),
+        ("REFLECTION-PLAN-BOUNDARY.md", 4),
+        ("REFLECTION-PLAN-CORE.md", 0),
+        ("REFLECTION-PLAN-ECS.md", 2),
+        ("REFLECTION-PLAN-GATES.md", 4),
+        ("SYSTEMS.md", 0),
+    ];
+
+    let scans = scan_all();
+    let mut report = String::new();
+
+    for (doc, scan) in &scans {
+        let n = scan.planned_paths.len();
+        let want = PLANNED_EXACT
+            .iter()
+            .find(|(d, _)| d == doc)
+            .map(|(_, c)| *c)
+            .unwrap_or_else(|| panic!("docs/{doc} has no entry in PLANNED_EXACT"));
+        println!("docs/{doc}: {n} planned-but-unbuilt path(s) (pinned at {want})");
+        if n != want {
+            report.push_str(&format!(
+                "docs/{doc}: {n} planned-but-unbuilt path(s), pinned at {want}\n{}\n",
+                scan.planned_paths.join("\n")
+            ));
+        }
+    }
+
+    assert!(
+        report.is_empty(),
+        "the plans' unbuilt-deliverable ledger moved.\n\
+         DOWN means a deliverable landed: remove its `<!-- doc-path-planned -->` marker so the path \
+         is checked like any other, and decrement the pin here in the same commit.\n\
+         UP means a plan named a new artifact it has not built — or that an ordinary path rotted \
+         and someone reached for the marker instead of re-deriving it. Only the first is a reason \
+         to raise the pin.\n{report}"
+    );
+}
+
+/// Anchors whose own file fragment resolves to no single file — reported and pinned.
+///
+/// These are the anchors the gate **cannot** check. Before [`resolve_unique_fragment`] existed they
+/// were not visible as a gap at all: they were checked, loudly and wrongly, against whatever file
+/// the section last named. Skipping them is correct and misbinding them was not, but a skip is
+/// still lost coverage, and lost coverage that nobody counts is how a census ends up green over
+/// nothing — the defect this whole file exists to prevent.
+///
+/// Two shapes reach here, and they want opposite responses:
+///
+/// * **Ambiguous** — `mod.rs`, `lib.rs`, `component.rs` name dozens of files in this tree. Only the
+///   document can say which, by writing more of the path. Fixing one is a doc edit.
+/// * **Absent** — the fragment names a file that no longer exists anywhere. That is real rot, and
+///   it hides here instead of in the path check because a fragment is not a path mention.
+///
+/// The ceiling is per document so one document's improvement cannot pay for another's regression.
+#[test]
+fn unbindable_fragments_are_reported_and_pinned() {
+    /// Per-document ceiling on anchors skipped for an unresolvable file fragment.
+    const UNBINDABLE_MAX: &[(&str, usize)] = &[
+        ("ARCHITECTURE.md", 0),
+        ("FEATURE_MAP.md", 0),
+        ("MESHLET-VIRTUAL-GEOMETRY-PLAN.md", 0),
+        ("REFLECTION-ANALYSIS.md", 0),
+        ("REFLECTION-PLAN-BOUNDARY.md", 0),
+        ("REFLECTION-PLAN-CORE.md", 0),
+        ("REFLECTION-PLAN-ECS.md", 0),
+        ("REFLECTION-PLAN-GATES.md", 0),
+        ("SYSTEMS.md", 0),
+    ];
+
+    let scans = scan_all();
+    let mut report = String::new();
+    let mut failed = false;
+
+    for (doc, scan) in &scans {
+        let n = scan.unbindable.len();
+        let cap = UNBINDABLE_MAX
+            .iter()
+            .find(|(d, _)| d == doc)
+            .map(|(_, c)| *c)
+            .unwrap_or_else(|| panic!("docs/{doc} has no entry in UNBINDABLE_MAX"));
+        println!("docs/{doc}: {n} anchor(s) skipped for an unresolvable fragment (cap {cap})");
+        if n > cap {
+            failed = true;
+            report.push_str(&format!(
+                "docs/{doc}: {n} unbindable, cap {cap}\n{}\n",
+                scan.unbindable.join("\n")
+            ));
+        }
+    }
+
+    assert!(
+        !failed,
+        "more anchors are skipped for an unresolvable file fragment than the pinned ceiling.\n\
+         An anchor whose fragment names no single file is NOT checked at all. Write enough of the \
+         path to make it unique (`component_registry/mod.rs`, not `mod.rs`) rather than raising \
+         this ceiling — raising it buys a green by shrinking the gate.\n{report}"
+    );
+}
+
 /// Waivers sitting on definition-shaped lines — reported and pinned, because a waiver that buys
 /// nothing is a silently weakened assertion.
 ///
@@ -1294,6 +1835,26 @@ fn waivers_that_were_not_needed_are_reported_and_pinned() {
         // That advice is right for a genuine over-waiver and WRONG for this shape, where it
         // manufactures stale anchors out of correct ones — measured, not supposed.
         ("MESHLET-VIRTUAL-GEOMETRY-PLAN.md", 7),
+        // The zero is a real ceiling rather than an unmeasured default — the arming run printed
+        // 0 over-waivers for each of the five — but NOT for the reason first written here.
+        //
+        // ~~"The reflection documents write no `~` waivers at all — they cite definitions, not
+        // evidence lines."~~ MEASURED 2026-08-21, immediately after the arming: the five carry
+        // **242** waivers between them, 183 of them in CORE alone. They cite evidence lines
+        // constantly.
+        //
+        // What is zero is the OVER-waiver count, which is a different quantity: no waiver in
+        // these five sits on a definition-shaped line. That is the property this ceiling pins,
+        // and it survives the correction intact.
+        //
+        // The false sentence is struck rather than deleted because of the direction it failed
+        // in: it invited a future reader to trust a number whose stated reason had stopped
+        // being true, which is the one way a sound gate still misleads.
+        ("REFLECTION-ANALYSIS.md", 0),
+        ("REFLECTION-PLAN-BOUNDARY.md", 0),
+        ("REFLECTION-PLAN-CORE.md", 0),
+        ("REFLECTION-PLAN-ECS.md", 0),
+        ("REFLECTION-PLAN-GATES.md", 0),
         ("SYSTEMS.md", 0),
     ];
 
