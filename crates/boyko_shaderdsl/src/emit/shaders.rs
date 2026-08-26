@@ -3045,6 +3045,12 @@ fn emit_ui_leaf<F: FnOnce()>(
             .expect("invariant: the function body block was pushed above")
     });
 
+    // UI-ADVANCED S5: `ui_tile_uv` spells FLAG_TILED / UI_TILE_*_SHIFT / UI_TILE_MASK as
+    // INTERNED SYMBOLS (`Cf::named_uint_val`), so the symbol table has to reach the printer.
+    // It was `NO_NAMED_LITS` while the six S1 leaves spelled only bare literals -- and an
+    // empty table under a symbol node is an index-out-of-bounds panic AT GENERATION, which
+    // is how this was caught rather than shipped.
+    let named_lit = NAMED_LITS.with(|n| n.borrow().clone());
     let vars = VARS.with(|v| v.borrow().clone());
     let names = Names {
         float_in,
@@ -3053,7 +3059,7 @@ fn emit_ui_leaf<F: FnOnce()>(
         uint3_in: NO_UINT3_INPUTS,
         buf_in: NO_BUF_INPUTS,
         out_in: NO_OUT_INPUTS,
-        named_lit: NO_NAMED_LITS,
+        named_lit: &named_lit,
         vars: &vars,
         vec4_in,
         call_in: NO_CALL_INPUTS,
@@ -3179,6 +3185,28 @@ pub fn emit_hlsl_ui_premultiplied_over() -> String {
     )
 }
 
+/// Generates the **`ui_tile_uv`** BODY span by tracing [`crate::ui::ui_tile_uv_body`] over
+/// `EmitCf` — UI-ADVANCED S5's whole sprite-`uv` computation (the untiled `lerp` and the
+/// `FLAG_TILED` `frac`-in-sub-rect wrap).
+///
+/// This leaf exists in part to CLOSE A HOLE: `emit_ui.rs` owns the whole file as a `format!`
+/// template, `ui_rect_edsl_sync` compares only the sentinel spans, and `ui_rect_spv_sync`
+/// compares the committed `.hlsl` to the committed `.spv` — so nothing in the workspace
+/// compares the generator's `main` template to the committed `main`. The S3 sprite branch's
+/// UV line lived there, ungated. Moving the mechanism into a leaf puts it under the gate that
+/// already exists (S-D15 (4)).
+pub fn emit_hlsl_ui_tile_uv() -> String {
+    use crate::ui;
+
+    emit_ui_leaf(&[], &["flags"], &["local_uv"], &["uv"], || {
+        let uv = Emit(push(Node::Vec4Param(0)));
+        let local_uv = Emit(push(Node::Vec2Param(0)));
+        let flags = Emit::uint_input(0);
+        let ret_out = RetCellV2;
+        let _ = ui::ui_tile_uv_body::<EmitCf>(uv, local_uv, flags, &ret_out);
+    })
+}
+
 /// The `UiInstance` byte layout as GENERATOR INPUTS (`docs/UI-PLAN-SPRITES.md` S-D10): the
 /// field offsets, the stride, and the three flag-bit indices. `emit_ui.rs` spells them as
 /// literals mirroring `boyko_render::ui::instance`; `ui_rect_edsl_sync` re-derives them from
@@ -3221,6 +3249,15 @@ pub struct UiInstanceLayout {
     /// `UI_SLOT_BITS` — the bindless-slot field's WIDTH in bits (12; S-D2: slots
     /// `0..4095`, EXACTLY `BINDLESS_TEXTURE_CAPACITY`'s range, zero headroom).
     pub slot_bits: u32,
+    /// `FLAG_TILED.trailing_zeros()` — bit 5 (UI-ADVANCED S5's tiled nine-slice lane,
+    /// S-D15).
+    pub flag_tiled_bit: u32,
+    /// `UI_TILE_X_SHIFT` — the LOW bit of the X repeat-count field (6; bits 6..=12).
+    pub tile_x_shift: u32,
+    /// `UI_TILE_Y_SHIFT` — the LOW bit of the Y repeat-count field (13; bits 13..=19).
+    pub tile_y_shift: u32,
+    /// `UI_TILE_BITS` — each repeat-count field's WIDTH in bits (7; counts `1..=127`).
+    pub tile_bits: u32,
 }
 
 /// Generates the `UiInstance` STRUCT MIRROR span — the std430 record both `ui_rect` stages
@@ -3243,6 +3280,7 @@ struct UiInstance {{
     uint   border_color;  // @{border_color}  premultiplied RGBA8
     float  border_width;  // @{border_width}  uniform, physical px
     uint   flags;         // @{flags}  bit{b0} BORDER_ANY, bit{b1} CLIP_PRESENT, bit{b2} TEXT, bit{b3} TEXTURED,
+                          //      bit{b5} TILED, bits {tx_lo}..{ty_hi} the two 7-bit repeat counts,
                           //      bits {slot_lo}..{slot_hi} the bindless sprite slot
 }};
 ",
@@ -3260,6 +3298,9 @@ struct UiInstance {{
         b1 = l.flag_clip_present_bit,
         b2 = l.flag_text_bit,
         b3 = l.flag_textured_bit,
+        b5 = l.flag_tiled_bit,
+        tx_lo = l.tile_x_shift,
+        ty_hi = l.tile_y_shift + l.tile_bits - 1,
         slot_lo = l.slot_shift,
         slot_hi = l.slot_shift + l.slot_bits - 1,
     )
@@ -3278,6 +3319,13 @@ static const uint FLAG_BORDER_ANY   = 1u << {b0};
 static const uint FLAG_CLIP_PRESENT = 1u << {b1};
 static const uint FLAG_TEXT         = 1u << {b2};
 static const uint FLAG_TEXTURED     = 1u << {b3};
+static const uint FLAG_TILED        = 1u << {b5};
+// The two 7-bit nine-slice REPEAT COUNTS ride flags bits {tx_lo}..{tx_hi} / {ty_lo}..{ty_hi}
+// (counts 1..{max_tile}); FLAG_TILED is set only when a count exceeds 1, so an untiled record
+// leaves the flag AND both fields zero and is byte-identical to its Stretch record (S-D15).
+static const uint UI_TILE_X_SHIFT   = {tx_lo}u;
+static const uint UI_TILE_Y_SHIFT   = {ty_lo}u;
+static const uint UI_TILE_MASK      = 0x{tile_mask:X}u;
 // The bindless sprite slot rides flags bits {slot_lo}..{slot_hi} ({bits} bits, slots 0..{max_slot}).
 static const uint UI_SLOT_SHIFT     = {slot_lo}u;
 static const uint UI_SLOT_MASK      = 0x{mask:X}u;
@@ -3286,6 +3334,13 @@ static const uint UI_SLOT_MASK      = 0x{mask:X}u;
         b1 = l.flag_clip_present_bit,
         b2 = l.flag_text_bit,
         b3 = l.flag_textured_bit,
+        b5 = l.flag_tiled_bit,
+        tx_lo = l.tile_x_shift,
+        tx_hi = l.tile_x_shift + l.tile_bits - 1,
+        ty_lo = l.tile_y_shift,
+        ty_hi = l.tile_y_shift + l.tile_bits - 1,
+        max_tile = (1u32 << l.tile_bits) - 1,
+        tile_mask = (1u32 << l.tile_bits) - 1,
         slot_lo = l.slot_shift,
         slot_hi = l.slot_shift + l.slot_bits - 1,
         bits = l.slot_bits,

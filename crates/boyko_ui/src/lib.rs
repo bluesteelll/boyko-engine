@@ -40,6 +40,7 @@ pub mod plugin;
 pub mod profiling_overlay;
 pub mod reload;
 pub mod resources;
+pub mod sprite;
 pub mod text;
 pub mod units;
 pub mod widgets;

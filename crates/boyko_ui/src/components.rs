@@ -470,29 +470,56 @@ impl Default for UiImage {
 /// (UI-ADVANCED S4). `#[repr(u8)]`, so the render side can carry the
 /// discriminant as a raw `u8` across the crate boundary.
 ///
-/// At S4 there is exactly ONE legal value, and that is pinned mechanically by
-/// the one-variant `const` match below rather than asserted in prose: S5's
-/// `Tile` cannot arrive without turning that match into
-/// `error[E0004]: non-exhaustive patterns`, which walks the author to every
-/// site that assumes a single mode. (`std::mem::variant_count` would be the
-/// obvious spelling; MEASURED on rustc 1.97.1 it is `E0658` *and* "not yet
-/// stable as a const fn" — two errors on one line — so it does not exist on
-/// this toolchain.)
+/// At S4 there was exactly ONE legal value, pinned mechanically by the
+/// one-variant `const` match below rather than asserted in prose. **S5 added
+/// [`Tile`](NineSliceMode::Tile), and the mechanism worked exactly as
+/// designed**: the match went `error[E0004]: non-exhaustive patterns` and
+/// walked the author to the gather's narrowing site, which is the one place
+/// that must bump `UI_NINE_SLICE_MODE_COUNT`.
+/// (`std::mem::variant_count` would be the obvious spelling; MEASURED on rustc
+/// 1.97.1 it is `E0658` *and* "not yet stable as a const fn" — two errors on
+/// one line — so it does not exist on this toolchain.)
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum NineSliceMode {
     /// The edges and the centre are STRETCHED to fill their destination
-    /// region. The only mode at S4; `Tile` arrives with S5's sub-rect `frac`
-    /// mechanism (`docs/UI-PLAN-SPRITES.md` S-D11).
+    /// region — one copy of the source region, scaled.
     #[default]
     Stretch = 0,
+    /// The edges and the centre REPEAT their source region across the
+    /// destination, at a count DERIVED from the two borders (UI-ADVANCED S5,
+    /// `docs/UI-PLAN-SPRITES.md` S-D15).
+    ///
+    /// # The count is derived, not authored, and it needs no texture size
+    ///
+    /// The engine records a texture's dimensions nowhere, so the reference
+    /// engines' `dest_px / source_px` is unavailable. It is not needed: a
+    /// nine-slice already states its own source→destination scale twice —
+    /// [`border_px`](UiNineSlice::border_px) is a corner's destination size
+    /// and [`border_uv`](UiNineSlice::border_uv) is the same corner's source
+    /// extent — and their ratio IS the scale. The sub-rect's own extent
+    /// CANCELS out of that ratio, which is what makes the count identical
+    /// under a whole texture and under a [`UiSpriteSheet`] frame.
+    ///
+    /// A nine-slice with a zero border on an axis has no scale to read and
+    /// does not get to guess one: that axis renders as `Stretch`.
+    ///
+    /// # It composes with a sprite sheet, rather than colliding with one
+    ///
+    /// The wrap is `frac` of the QUAD PARAMETER, applied inside the record's
+    /// own UV sub-rect, so the sample never leaves that sub-rect for any
+    /// count. Under a sheet the sub-rect is one frame, so `Tile` repeats
+    /// within the frame and cannot reach its neighbours.
+    Tile = 1,
 }
 
-// S4's "exactly one legal value", made mechanical. NO outer braces: MEASURED —
-// `const _: () = { match … };` emits `unused_braces`, which the project's
-// `clippy --all-targets -- -D warnings` gate turns into an error.
+// S4's "exactly one legal value" made mechanical, and S5's "exactly two". NO
+// outer braces: MEASURED — `const _: () = { match … };` emits `unused_braces`,
+// which the project's `clippy --all-targets -- -D warnings` gate turns into an
+// error.
 const _: () = match NineSliceMode::Stretch {
     NineSliceMode::Stretch => (),
+    NineSliceMode::Tile => (),
 };
 
 /// Nine-slice (nine-patch) rendering for a node's [`UiImage`] (UI-ADVANCED S4).
@@ -565,8 +592,12 @@ pub struct UiNineSlice {
     /// the domain and needs the other remedy — a negative inset is not a
     /// proportion of anything, and no sum test sees it.
     pub border_uv: [f32; 4],
-    /// How the edges and the centre fill their destination. One legal value at
-    /// S4 ([`NineSliceMode::Stretch`]).
+    /// How the edges and the centre fill their destination —
+    /// [`NineSliceMode::Stretch`] (the `Default`) or
+    /// [`NineSliceMode::Tile`] (UI-ADVANCED S5). The four CORNERS are
+    /// unaffected by either: a corner is exactly `border_px` in both spaces,
+    /// so it has nothing to stretch or repeat, and it packs byte-identically
+    /// under both modes.
     pub mode: NineSliceMode,
     /// Emit the CENTRE sub-quad (region 4, sub code 5)? `false` leaves the
     /// centre hole unpainted — the node's background shows through — and the
@@ -601,6 +632,229 @@ impl Default for UiNineSlice {
             border_uv: [1.0 / 3.0; 4],
             mode: NineSliceMode::Stretch,
             fill_center: true,
+            _pad: [0; 2],
+        }
+    }
+}
+
+/// Draw a [`UiImage`] as ONE FRAME of a sprite sheet (UI-ADVANCED S5).
+/// AUTHOR-OWNED, OPT-IN, TABLE storage. `#[repr(C)]`, POD, 4 B.
+///
+/// # The sheet OVERRIDES `UiImage`; it does not replace it
+///
+/// [`UiImage`] remains the capability — a node carrying `UiSpriteSheet` and no
+/// `UiImage` draws its background alone, the same structural skip
+/// `UiNineSlice` alone takes. What this component changes is what the sprite
+/// record SAMPLES: the render gather substitutes the frame's computed UV
+/// sub-rect and the sheet's own bindless slot into the image inputs, so
+/// [`UiImage::uv_min`]/[`uv_max`](UiImage::uv_max)/[`texture`](UiImage::texture)
+/// stop being read while [`tint`](UiImage::tint) still is.
+///
+/// That substitution site is why [`UiNineSlice::border_uv`]'s "a fraction of
+/// the node's CURRENT `UiImage` UV sub-rect" stays literally true, and why a
+/// nine-sliced sheet-framed node slices THE FRAME rather than the atlas — the
+/// two components compose with no code between them.
+///
+/// # `index` is what the flipbook writes, and that is deliberate
+///
+/// [`ui_sprite_flipbook`](crate::sprite::ui_sprite_flipbook) writes this field
+/// (through `Mut::set_if_neq`) rather than a cursor field, because THIS write's
+/// change tick is the repaint signal: it is what `ui_render_discovery`'s
+/// `Or<(Changed<…>, …)>` filter sees. A dense component in that filter would be
+/// invisible to it — MEASURED, `docs/UI-PLAN-SPRITES.md` S-D16 (1) — so the
+/// per-frame write has to land on a TABLE column, and this is it.
+#[repr(C)]
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UiSpriteSheet {
+    /// The sheet's dense handle — a [`SheetId`](crate::sprite::SheetId) index
+    /// into the [`UiSheetTable`](crate::sprite::UiSheetTable) resource, never a
+    /// string or a map key (the [`FontId`](crate::text::FontId) discipline).
+    ///
+    /// An id no sheet was registered for leaves the sheet INERT: the node draws
+    /// its `UiImage` exactly as it would without this component. An absent
+    /// table does the same — the gather reads it through the non-panicking
+    /// resource verb, because eight in-tree harnesses build UI worlds by hand
+    /// and never insert one.
+    pub sheet: u16,
+    /// Which frame, in ROW-MAJOR order (`col = index % cols`,
+    /// `row = index / cols`).
+    ///
+    /// An `index` at or above the sheet's
+    /// [`frame_count`](crate::sprite::UiSheet::frame_count) is CLAMPED to the
+    /// last frame and counted in the render gather's `sheet_index_clamps`
+    /// diagnostic, rather than panicking or sampling a trailing cell that
+    /// holds nothing.
+    pub index: u16,
+}
+
+const _: () = assert!(size_of::<UiSpriteSheet>() == 4);
+const _: () = assert!(align_of::<UiSpriteSheet>() == 2);
+
+/// How [`UiSpriteAnim`] walks its frame range (UI-ADVANCED S5).
+///
+/// A TYPED enum on the authored component rather than a raw `u8`: S-D13 (4)(3)
+/// ruled that the authored component keeps the type system's guarantee and only
+/// a byte that CROSSES a crate boundary is `debug_assert!`ed against a count.
+/// This one never crosses — the flipbook and the component both live in
+/// `boyko_ui`, and the render pack never sees it — so no count const and no
+/// conversion site are minted for it.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SpriteAnimMode {
+    /// `first → last`, then wrap to `first`. One cycle = one pass.
+    #[default]
+    Forward = 0,
+    /// `last → first`, then wrap to `last`. One cycle = one pass.
+    Reverse = 1,
+    /// `first → last → first`. One cycle = one ROUND TRIP; the two endpoints
+    /// are each shown once per cycle, not twice (the turn does not repeat the
+    /// end frame).
+    PingPong = 2,
+    /// Exactly [`Forward`](SpriteAnimMode::Forward) with
+    /// [`repeats`](UiSpriteAnim::repeats)` == 1`: one pass, then HOLD `last`
+    /// forever. It is spelled as its own variant because that is how authors
+    /// reach for it, and the equivalence is stated so the two knobs cannot
+    /// disagree.
+    Once = 3,
+}
+
+/// A flipbook animation over a [`UiSpriteSheet`]'s frames (UI-ADVANCED S5).
+/// AUTHOR-OWNED, OPT-IN, TABLE storage, **COLD** — author-written, never
+/// system-written. `#[repr(C)]`, POD, 12 B.
+///
+/// # The churn split, which is the whole point of two components
+///
+/// This component is the animation's CONFIGURATION and nothing writes it per
+/// frame, so `Changed<UiSpriteAnim>` means "an author retargeted the
+/// animation" and never "a frame ticked". The per-frame state lives in
+/// [`UiSpriteCursor`] (dense, flipbook-private) and the per-frame RESULT in
+/// [`UiSpriteSheet::index`] (table, the repaint signal).
+///
+/// # The cursor is NOT `#[require]`d, and it cannot be — spawn the bundle
+///
+/// The flipbook queries all three components, so an authored `UiSpriteAnim` with
+/// no [`UiSpriteCursor`] silently never ticks. `#[require(UiSpriteCursor)]` is the
+/// obvious remedy and it does not work: **MEASURED on this kernel, a `#[require]`
+/// whose target is a DENSE component panics at insert** — the require pass
+/// resolves the required id's `ComponentPool` in the target ARCHETYPE
+/// (`migration_helpers.rs`: *"invariant: target hosts every required id (expanded
+/// archetype)"*), and a dense id is excluded from every archetype signature and
+/// owns no per-archetype pool by construction (dense plan D0). The panic names an
+/// expansion that never happened, so the message does not say what is wrong.
+/// Filed as a kernel defect in `docs/OPEN-QUESTIONS.md`.
+///
+/// The buildable remedy is a BUNDLE, which makes the pairing structural at the
+/// authoring site instead of at the component:
+/// [`AnimatedSpriteBundle`](crate::bundles::AnimatedSpriteBundle) carries the
+/// layout base, the image, the sheet, the animation and the cursor in one spawn.
+/// Gate G5-12 pins both halves — the bundle ticks, and a hand-spawned
+/// `UiSpriteAnim` without a cursor does not.
+#[repr(C)]
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct UiSpriteAnim {
+    /// First frame of the range, INCLUSIVE (a [`UiSpriteSheet::index`]).
+    pub first: u16,
+    /// Last frame of the range, INCLUSIVE. `last < first` is a degenerate
+    /// range: the flipbook holds `first` and never advances.
+    pub last: u16,
+    /// Frames per second. `<= 0` or non-finite ⇒ the flipbook never advances
+    /// (a paused animation an author can express without removing a
+    /// component).
+    pub fps: f32,
+    /// How the range is walked.
+    pub mode: SpriteAnimMode,
+    /// How many CYCLES to run before holding, or `0` for INFINITE.
+    ///
+    /// The two knobs are defined against each other rather than left to
+    /// collide: [`SpriteAnimMode::Once`] is exactly `Forward` with
+    /// `repeats == 1`, and every mode holds the frame its LAST cycle ended on —
+    /// `Forward` holds [`last`](Self::last), `Reverse` and `PingPong` hold
+    /// [`first`](Self::first). Cycles completed are counted in
+    /// [`UiSpriteCursor::loops_done`], which saturates at `u8::MAX` so an
+    /// infinite animation cannot wrap the counter back under a budget.
+    pub repeats: u8,
+    /// Explicit tail padding to 12 B. SPELLED rather than implicit, the
+    /// [`UiNineSlice::_pad`] rule: MEASURED on rustc 1.97.1 the field list
+    /// without it is *also* 12 B / align 4, i.e. the two bytes are implicit
+    /// tail padding — which is precisely what "the padding is spelled" forbids
+    /// leaving unwritten in a `#[repr(C)]` POD.
+    pub _pad: [u8; 2],
+}
+
+const _: () = assert!(size_of::<UiSpriteAnim>() == 12);
+const _: () = assert!(align_of::<UiSpriteAnim>() == 4);
+
+impl Default for UiSpriteAnim {
+    /// Frames `0..=0` at 12 fps, `Forward`, infinite — a one-frame animation
+    /// that moves nothing until an author sets a range. The zero-configuration
+    /// value is the null one, `UiImage`'s alpha-0 default tint one component
+    /// over.
+    #[inline]
+    fn default() -> Self {
+        UiSpriteAnim {
+            first: 0,
+            last: 0,
+            fps: 12.0,
+            mode: SpriteAnimMode::Forward,
+            repeats: 0,
+            _pad: [0; 2],
+        }
+    }
+}
+
+/// [`ui_sprite_flipbook`](crate::sprite::ui_sprite_flipbook)'s PRIVATE per-frame
+/// state (UI-ADVANCED S5). **DENSE** storage; read by no other system and by no
+/// pack input. `#[repr(C)]`, POD, 8 B.
+///
+/// # Why dense, and why NOT in the pack-input list
+///
+/// Dense because it is written every frame on every animated node and read by
+/// exactly one system: a table column would migrate the archetype on
+/// insert/remove and would put per-frame churn in the same store as the cold
+/// authored data. And it is deliberately absent from `ui_pack_inputs!` — the
+/// gather probes every listed component on every visited node, so listing it
+/// would charge a dead probe to every node of every changed frame, and a dense
+/// term inside the discovery filter's `Or<..>` was MEASURED never to fire
+/// (S-D16 (1)).
+///
+/// There is no `frame` field: the frame index lives in
+/// [`UiSpriteSheet::index`], where the pack reads it. A cursor-local copy would
+/// be written by the flipbook and read by nobody.
+#[repr(C)]
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+#[component(storage = "dense")]
+pub struct UiSpriteCursor {
+    /// Seconds accumulated toward the next frame step; always less than one
+    /// frame's duration after a tick.
+    pub elapsed: f32,
+    /// [`SpriteAnimMode::PingPong`]'s current direction: `+1` forward, `-1`
+    /// backward. Ignored by the other three modes.
+    pub dir: i8,
+    /// Completed cycles, saturating at `u8::MAX` — what makes
+    /// [`UiSpriteAnim::repeats`] and [`SpriteAnimMode::Once`] expressible at
+    /// all. Nothing in `{elapsed, dir}` counts cycles, so without this field
+    /// both were unimplementable.
+    pub loops_done: u8,
+    /// Explicit tail padding to 8 B (the [`UiSpriteAnim::_pad`] rule).
+    pub _pad: [u8; 2],
+}
+
+const _: () = assert!(size_of::<UiSpriteCursor>() == 8);
+const _: () = assert!(align_of::<UiSpriteCursor>() == 4);
+
+impl Default for UiSpriteCursor {
+    /// Zero elapsed, direction FORWARD, zero completed cycles.
+    ///
+    /// `dir: 1`, not `0`, and that is why this is written rather than derived:
+    /// `#[require(UiSpriteAnim => UiSpriteCursor)]` materializes the cursor
+    /// through `Default`, and a derived `dir: 0` would make every `PingPong`
+    /// animation stand still on frame `first` with nothing to say so.
+    #[inline]
+    fn default() -> Self {
+        UiSpriteCursor {
+            elapsed: 0.0,
+            dir: 1,
+            loops_done: 0,
             _pad: [0; 2],
         }
     }

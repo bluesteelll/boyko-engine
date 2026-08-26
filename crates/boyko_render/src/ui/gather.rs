@@ -53,9 +53,12 @@ use boyko_ecs::ecs::core::iters::query::query::Query;
 use boyko_ecs::ecs::core::system::dispatcher_token::WorldView;
 use boyko_ecs::ecs::core::system::ResMut;
 use boyko_ecs::ecs::identifiers::primitives::ArchetypeId;
-use boyko_ui::components::{NineSliceMode, UiRoot};
+use boyko_ui::components::{NineSliceMode, UiRoot, UiSpriteSheet};
+use boyko_ui::sprite::{SheetId, UiSheetTable};
 
-use crate::ui::pack::{PackInput, UiImageInput, UiNineSliceInput, UiRenderGeneration};
+use crate::ui::pack::{
+    PackInput, UiImageInput, UiNineSliceInput, UiRenderGeneration, UI_NINE_SLICE_MODE_TILE,
+};
 use crate::ui::upload::UiNode;
 
 /// The ONE component list behind [`ui_pack_inputs!`] — every expansion routes
@@ -68,9 +71,26 @@ use crate::ui::upload::UiNode;
 /// adds the sixth, `UiNineSlice`, for exactly the same two reasons: without it the
 /// gather cannot READ the component at all, and an author's runtime edit to a
 /// nine-slice would never bump `UiRenderGeneration` — the frame would not repaint.
-/// Animation adds `UiVisual` HERE; S5 adds the sheet/flipbook trio HERE;
-/// interaction adds its scroll datum HERE — never directly in the gather or the
-/// filter (§6 of the plan).
+/// UI-ADVANCED S5 adds the seventh, `UiSpriteSheet` — and **exactly one** of its
+/// three components, not the trio an earlier draft named. The pack never reads
+/// `UiSpriteAnim` (author configuration the flipbook consumes) and never reads
+/// `UiSpriteCursor` (the flipbook's private state), and the gather probes EVERY
+/// listed component on EVERY visited node whether present or not, so listing
+/// either would charge a dead probe to every node of every changed frame.
+/// `UiSpriteCursor` additionally could not work here: it is DENSE, and a dense
+/// `Changed<C>` inside this macro's `Or<..>` was MEASURED never to fire
+/// (`docs/UI-PLAN-SPRITES.md` S-D16 (1)).
+///
+/// **That measurement narrows this macro's own promise, and the narrowing is
+/// stated here because this is where the promise lives:** "adding a component to
+/// `ui_pack_inputs!` wires the discovery filter for free" is true for TABLE
+/// components only. A DENSE component added to this list would be read correctly
+/// by the gather and would be INVISIBLE to `ui_render_discovery` — the frame
+/// would never repaint, with nothing saying so.
+///
+/// Animation adds `UiVisual` HERE (a table component — the animation plan's own
+/// text is corrected to say so); interaction adds its scroll datum HERE — never
+/// directly in the gather or the filter (§6 of the plan).
 #[macro_export]
 #[doc(hidden)]
 macro_rules! __ui_pack_inputs_list {
@@ -81,7 +101,8 @@ macro_rules! __ui_pack_inputs_list {
             ::boyko_ui::components::ComputedClip,
             ::boyko_ui::components::StackIndex,
             ::boyko_ui::components::UiImage,
-            ::boyko_ui::components::UiNineSlice
+            ::boyko_ui::components::UiNineSlice,
+            ::boyko_ui::components::UiSpriteSheet
         ] }
     };
 }
@@ -204,6 +225,22 @@ pub struct UiGatherScratch {
     /// frame under the hoisted D6a gate must not advance it at all (G0-2);
     /// §10.8 reports it per node per frame.
     pub probes: u64,
+    /// DIAGNOSTIC (UI-ADVANCED S5, gate G5-6): sprite-sheet frame indices
+    /// CLAMPED because the authored `UiSpriteSheet.index` was at or above the
+    /// sheet's `frame_count`, ever (wrapping).
+    ///
+    /// Unconditional, on [`probes`](Self::probes)' precedent and for its reason
+    /// (a `#[cfg(test)]` counter cannot be read by the observer rung). It lives
+    /// HERE and not in the pack because the sheet arithmetic lives here: the
+    /// pack's five entry points are receiverless free functions with nowhere to
+    /// put a counter, which is why the S4 ledger retired this very counter for
+    /// want of a home.
+    ///
+    /// A clamp is not an error — a trailing cell of a partly-filled grid holds
+    /// nothing, and sampling it would draw garbage silently. The counter is what
+    /// makes "an author is asking for a frame this sheet does not have" visible
+    /// without a panic and without a picture to read it out of.
+    pub sheet_index_clamps: u64,
 }
 
 /// The canonical UI render gather (S0 item 3): fills `node_buf` with one
@@ -244,6 +281,14 @@ pub fn gather_ui_nodes(
 
     scratch.stack.clear();
 
+    // UI-ADVANCED S5: the sheet table, read ONCE per gather — not per node, so
+    // it is NOT a probe and does not move the census. `try_resource`, not
+    // `resource`: the panicking verb would take down every UI harness in the
+    // tree, and eight of them build worlds by hand and insert only what they
+    // need. An absent table is not an error — it means no sheet is registered,
+    // and every node then draws its `UiImage` exactly as it did at S4.
+    let sheets = view.try_resource::<UiSheetTable>();
+
     // Roots in a deterministic order (entity id) for a stable cross-root paint
     // sequence; pushed in reverse so they pop in id order (collect_candidates'
     // exact discipline).
@@ -255,7 +300,7 @@ pub fn gather_ui_nodes(
     while let Some((node, inherited_clip)) = scratch.stack.pop() {
         // The ONE spelling of the pack-input reads (G0-1): arity-locked to the
         // component list — an edit there that does not land here fails to build.
-        let (rect, background, clip, stack_index, image, nine_slice) =
+        let (rect, background, clip, stack_index, image, nine_slice, sprite_sheet) =
             ui_pack_inputs!(read view, node, &mut scratch.probes);
 
         // The node's own clip narrows the inherited clip for its subtree.
@@ -281,10 +326,33 @@ pub fn gather_ui_nodes(
                     // invisible until an author writes an opaque tint over the
                     // alpha-0 default. `texture` IS the bindless slot — the dense
                     // handle discipline the component was authored for.
-                    image: image.map(|img| UiImageInput {
-                        slot: img.texture,
-                        uv: [img.uv_min[0], img.uv_min[1], img.uv_max[0], img.uv_max[1]],
-                        tint: img.tint,
+                    // UI-ADVANCED S5: the sheet OVERRIDES the image's slot and UV
+                    // sub-rect; it does NOT replace `UiImage`, which remains the
+                    // capability. Substituting HERE — the one site that already
+                    // flattens components into `PackInput` — is what keeps
+                    // `ui_node_sub_codes` the sole authority on which records a
+                    // node emits, keeps `pack.rs` free of every `boyko_ui` type,
+                    // and keeps `UiNineSlice::border_uv`'s "a fraction of the
+                    // node's CURRENT UV sub-rect" literally true: once the frame
+                    // IS that sub-rect, a nine-sliced sheet node slices the frame
+                    // rather than the atlas, with no code between the two
+                    // components (S-D16 (3)).
+                    image: image.map(|img| {
+                        match sheet_frame(sheets, sprite_sheet, &mut scratch.sheet_index_clamps) {
+                            Some((slot, uv)) => UiImageInput {
+                                slot,
+                                uv,
+                                // The TINT still comes from `UiImage`: the sheet
+                                // substitutes what is sampled, not how it is
+                                // modulated.
+                                tint: img.tint,
+                            },
+                            None => UiImageInput {
+                                slot: img.texture,
+                                uv: [img.uv_min[0], img.uv_min[1], img.uv_max[0], img.uv_max[1]],
+                                tint: img.tint,
+                            },
+                        }
                     }),
                     // UI-ADVANCED S4: the same capability-is-presence rule. This
                     // is also the ONE site that narrows the authored
@@ -297,6 +365,7 @@ pub fn gather_ui_nodes(
                         border_uv: ns.border_uv,
                         mode: match ns.mode {
                             NineSliceMode::Stretch => 0,
+                            NineSliceMode::Tile => UI_NINE_SLICE_MODE_TILE,
                         },
                         fill_center: ns.fill_center,
                     }),
@@ -314,6 +383,45 @@ pub fn gather_ui_nodes(
             }
         }
     }
+}
+
+/// Resolves a node's sprite-sheet frame to `(bindless slot, UV sub-rect)`, or
+/// `None` when the sheet is absent or INERT — in which case the caller falls back
+/// to the node's own `UiImage`, unchanged (UI-ADVANCED S5).
+///
+/// Four ways to be inert, and none of them is an error:
+///
+/// * no `UiSpriteSheet` on the node;
+/// * no `UiSheetTable` resource in the world (the S4 harnesses, verbatim);
+/// * a `sheet` id the table never registered;
+/// * `frame_count == 0` — a registered sheet with no frames.
+///
+/// The last is worth stating, because the plan's G5-6 row said instead that such
+/// a node "emits no sprite record". It cannot: which records a node emits is
+/// `ui_node_sub_codes`'s alone (gate G4-8), and a second opinion here is exactly
+/// the shape S-D12 (3) ruled out one rung ago. Inert-and-fall-back is the S-D16 (3)
+/// behaviour and the one this function implements.
+///
+/// An `index` at or above `frame_count` CLAMPS to the last frame and increments
+/// `clamps` — the G5-6 counter.
+#[inline]
+fn sheet_frame(
+    sheets: Option<&UiSheetTable>,
+    sprite_sheet: Option<&UiSpriteSheet>,
+    clamps: &mut u64,
+) -> Option<(u32, [f32; 4])> {
+    let want = sprite_sheet?;
+    let sheet = sheets?.get(SheetId(want.sheet))?;
+    if sheet.frame_count == 0 {
+        return None;
+    }
+    let index = if want.index >= sheet.frame_count {
+        *clamps = clamps.wrapping_add(1);
+        sheet.frame_count - 1
+    } else {
+        want.index
+    };
+    Some((sheet.slot, sheet.frame_uv(index)))
 }
 
 /// The render-discovery system (S0 item 4): ONE normal scheduled system that

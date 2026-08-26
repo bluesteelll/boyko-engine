@@ -11,8 +11,8 @@
 use boyko_macros::Resource;
 
 use crate::ui::instance::{
-    premultiply_rgba8, FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, FLAG_TEXT, FLAG_TEXTURED, UiInstance,
-    UI_SLOT_MASK, UI_SLOT_SHIFT,
+    premultiply_rgba8, FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, FLAG_TEXT, FLAG_TEXTURED, FLAG_TILED,
+    UiInstance, UI_SLOT_MASK, UI_SLOT_SHIFT, UI_TILE_MAX, UI_TILE_X_SHIFT, UI_TILE_Y_SHIFT,
 };
 
 /// The SPRITE half of one node's pack inputs (UI-ADVANCED S3): the `UiImage`
@@ -79,14 +79,21 @@ pub struct UiNineSliceInput {
 /// The number of legal [`UiNineSliceInput::mode`] values — the bound the pack
 /// `debug_assert!`s a raw discriminant against (gate G4-5).
 ///
-/// It is `1` at S4 and it is BOUND to `boyko_ui`'s `NineSliceMode` by the
-/// EXHAUSTIVE conversion match in
+/// It was `1` at S4 and is `2` since S5's `Tile`, and it is BOUND to
+/// `boyko_ui`'s `NineSliceMode` by the EXHAUSTIVE conversion match in
 /// [`gather_ui_nodes`](crate::ui::gather::gather_ui_nodes) — the one site that
 /// turns the authored enum into this raw byte. Adding a variant there is
-/// `error[E0004]`, which is what walks the author to this line. (The count
-/// cannot be derived: `std::mem::variant_count` is nightly-only on 1.97.1, and
-/// the enum lives in the crate this module is deliberately type-free of.)
-pub const UI_NINE_SLICE_MODE_COUNT: u8 = 1;
+/// `error[E0004]`, which is what walked the author to this line at S5. (The
+/// count cannot be derived: `std::mem::variant_count` is nightly-only on 1.97.1,
+/// and the enum lives in the crate this module is deliberately type-free of.)
+pub const UI_NINE_SLICE_MODE_COUNT: u8 = 2;
+
+/// The [`UiNineSliceInput::mode`] discriminant of `NineSliceMode::Tile`
+/// (UI-ADVANCED S5). The pack's ONE mode comparison; `Stretch` is `0` and needs
+/// no name because it is the absence of this one.
+pub const UI_NINE_SLICE_MODE_TILE: u8 = 1;
+
+const _: () = assert!(UI_NINE_SLICE_MODE_TILE < UI_NINE_SLICE_MODE_COUNT);
 
 /// One source node's pack inputs (logical-px component values + the node's z key),
 /// the testable boundary of [`pack_ui_instance`] (no Arena/world dependency, so the
@@ -379,6 +386,136 @@ fn split_axis(lo: f32, hi: f32, extent: f32) -> [f32; 3] {
     [lo, extent - lo - hi, hi]
 }
 
+/// One axis's REPEAT COUNT for a `Tile` nine-slice — S-D15 (3)'s derivation,
+/// factored out so the CPU gate (G5-11) can drive the arithmetic directly
+/// instead of reading it back out of a packed `flags` word.
+///
+/// All four arguments come from the SAME [`split_axis`] pair the region cuts use,
+/// so a border shrunk by S4's proportional overrun remedy is the one that counts:
+///
+/// * `dest_centre` — the centre region's DESTINATION extent (logical px);
+/// * `dest_border_sum` — the two destination insets, after the shrink;
+/// * `src_centre` — the centre region's SOURCE extent as a fraction of the
+///   sub-rect;
+/// * `src_border_sum` — the two source insets, as fractions.
+///
+/// ```text
+/// tiles = round( dest_centre * src_border_sum / (src_centre * dest_border_sum) )
+/// ```
+///
+/// # Why this needs no texture size, and why it is the same under a sheet
+///
+/// The engine records a texture's dimensions NOWHERE, so the reference engines'
+/// `dest_px / source_px` is unavailable. It is not needed: `border_px` is a
+/// corner's destination size and `border_uv` is the same corner's source extent,
+/// so their ratio IS the source→destination scale. The ratio is dimensionless
+/// and the sub-rect's own extent CANCELS out of it — which is exactly what makes
+/// the count identical under a whole texture and under a sprite-sheet frame, and
+/// therefore what makes "the same sub-rect arithmetic" true rather than hoped.
+///
+/// # The degenerate inputs, and why each is `1`
+///
+/// A zero source border, a zero destination border, a non-positive centre source
+/// extent, or a non-finite ratio all yield `1` (i.e. `Stretch`): a nine-slice
+/// with no border on an axis states no scale on that axis, and it does not get to
+/// guess one. The result is clamped into `1..=`[`UI_TILE_MAX`] because that is
+/// the field's width; the clamp is a `min` and is NOT counted — the S4 ledger's
+/// finding still holds that the pack's five entry points are receiverless free
+/// functions with nowhere to put a counter, and S5 moved only the GATHER's
+/// arithmetic (and therefore only the gather's clamp) to a place that has one.
+// NaN handling is an EXPLICIT first guard rather than an artefact of comparison spelling.
+//
+// Every argument here is derived from AUTHOR-WRITTEN floats (`border_px`, `border_uv`), so a
+// NaN is reachable, and it must take the degenerate `Stretch` arm rather than reach the divide
+// and the `as u32` cast — whose result for a NaN is 0, a repeat count the shader would turn
+// into `frac(local_uv * 0) == 0`, one texel smeared across the region.
+//
+// ~~This was written as `!(x > 0.0)` under an `#[allow(clippy::neg_cmp_op_on_partial_ord)]`,
+// justified as "the negated form is what routes a NaN into the degenerate arm, and
+// `g5_11_every_degenerate_tile_input_is_stretch` asserts the NaN row directly, so this
+// exception is gated rather than merely argued."~~ **Both halves were false, MEASURED at the S5
+// verification.** Replacing all three guards with the plain `x <= 0.0` left every test green,
+// because a NaN in any of them propagates through the multiply and the divide and is caught by
+// `!n.is_finite()` two lines below — so the negated spelling routed nothing the plain one did
+// not. And the gate's NaN row passes `f32::NAN` as `dest_centre`, which is not one of the three
+// guarded arguments at all: it exercised `is_finite`, never the spelling the exception existed
+// for. An exception argued as measured, whose subject the gate never constructs.
+//
+// The repair is not a better rationale — it is not needing one. The finiteness check is now
+// stated once, first, over ALL FOUR inputs, so the property no longer rides on NaN surviving
+// two arithmetic steps (which a later reordering could silently break), and the comparisons are
+// the plain form clippy asks for. One fewer entry in the `#[allow]` census.
+#[inline]
+pub fn ui_nine_slice_tiles_axis(
+    dest_centre: f32,
+    dest_border_sum: f32,
+    src_centre: f32,
+    src_border_sum: f32,
+) -> u32 {
+    // A non-finite INPUT takes the degenerate arm here, stated rather than inferred from the
+    // divide below. `dest_centre` is guarded too: the gate's NaN row passes it, and under the
+    // previous spelling it was the one argument no guard covered.
+    if !dest_centre.is_finite()
+        || !dest_border_sum.is_finite()
+        || !src_centre.is_finite()
+        || !src_border_sum.is_finite()
+    {
+        return 1;
+    }
+    if src_border_sum <= 0.0 || dest_border_sum <= 0.0 || src_centre <= 0.0 {
+        return 1;
+    }
+    // Still needed after the input guard: `0.0 / 0.0` and `inf / inf` are NaN, and a finite
+    // numerator over a denormal denominator overflows to infinity.
+    let n = (dest_centre * src_border_sum) / (src_centre * dest_border_sum);
+    if !n.is_finite() {
+        return 1;
+    }
+    let n = n.round();
+    if n <= 1.0 {
+        return 1;
+    }
+    if n >= UI_TILE_MAX as f32 {
+        return UI_TILE_MAX;
+    }
+    n as u32
+}
+
+/// Both axes' repeat counts for one nine-sliced node — `(1, 1)` unless the mode
+/// is [`UI_NINE_SLICE_MODE_TILE`]. See [`ui_nine_slice_tiles_axis`].
+///
+/// `tiles.0` applies to the centre COLUMN (regions T, C, B) and `tiles.1` to the
+/// centre ROW (L, C, R); every other axis of every other region is `1`, so the
+/// four corners are `1×1` and untiled by construction.
+#[inline]
+pub fn ui_nine_slice_tiles(input: &PackInput, ns: &UiNineSliceInput) -> (u32, u32) {
+    if ns.mode != UI_NINE_SLICE_MODE_TILE {
+        return (1, 1);
+    }
+    let dw = split_axis(ns.border_px[0], ns.border_px[2], input.rect[2]);
+    let dh = split_axis(ns.border_px[1], ns.border_px[3], input.rect[3]);
+    let fu = split_axis(ns.border_uv[0], ns.border_uv[2], 1.0);
+    let fv = split_axis(ns.border_uv[1], ns.border_uv[3], 1.0);
+    (
+        ui_nine_slice_tiles_axis(dw[1], dw[0] + dw[2], fu[1], fu[0] + fu[2]),
+        ui_nine_slice_tiles_axis(dh[1], dh[0] + dh[2], fv[1], fv[0] + fv[2]),
+    )
+}
+
+/// The `flags` contribution of one region's repeat counts — [`FLAG_TILED`] plus
+/// the two 7-bit fields, or ZERO when neither count exceeds `1`.
+///
+/// Zero-when-untiled is the whole reason a `Tile` corner is BYTE-IDENTICAL to its
+/// `Stretch` corner: the flag AND both fields stay clear, so the record differs in
+/// no bit at all.
+#[inline]
+fn tile_flag_bits(rx: u32, ry: u32) -> u32 {
+    if rx <= 1 && ry <= 1 {
+        return 0;
+    }
+    FLAG_TILED | (rx << UI_TILE_X_SHIFT) | (ry << UI_TILE_Y_SHIFT)
+}
+
 /// Folds one nine-slice REGION of a node into the [`UiInstance`] that draws it
 /// (UI-ADVANCED S4), or `None` when the node is missing either half of the
 /// capability — absence is the structural skip, exactly as in
@@ -405,6 +542,16 @@ fn split_axis(lo: f32, hi: f32, extent: f32) -> [f32; 3] {
 /// edges pinned to the node's own rect and the image's own UV, so the nine
 /// regions TILE their parents exactly — no seam, no overlap, no accumulated
 /// drift at the far edge.
+///
+/// # `Tile` (UI-ADVANCED S5)
+///
+/// Under [`UI_NINE_SLICE_MODE_TILE`] the record additionally carries
+/// [`FLAG_TILED`] and a REPEAT COUNT per axis, derived by
+/// [`ui_nine_slice_tiles`] and applied per region (the centre column gets the X
+/// count, the centre row the Y count). The source rect is UNCHANGED — the wrap
+/// happens in the fragment shader, on the quad parameter, inside this same
+/// sub-rect. The four corners are `1×1` and therefore pack BYTE-IDENTICALLY
+/// under both modes.
 pub fn pack_ui_nine_slice_instance(
     input: &PackInput,
     region: u32,
@@ -490,7 +637,15 @@ pub fn pack_ui_nine_slice_instance(
         image.uv[3],
     ];
 
-    let mut flags = FLAG_TEXTURED | ((image.slot & UI_SLOT_MASK) << UI_SLOT_SHIFT);
+    // UI-ADVANCED S5 (S-D15): the repeat counts, DERIVED from the two borders and
+    // applied PER REGION — `tiles.0` to the centre column, `tiles.1` to the centre
+    // row, `1` everywhere else. A corner is `1×1` and packs no tile bits at all.
+    let (tx, ty) = ui_nine_slice_tiles(input, &ns);
+    let rx = if col == 1 { tx } else { 1 };
+    let ry = if row == 1 { ty } else { 1 };
+
+    let mut flags =
+        FLAG_TEXTURED | ((image.slot & UI_SLOT_MASK) << UI_SLOT_SHIFT) | tile_flag_bits(rx, ry);
     let clip = match input.clip {
         Some(c) => {
             flags |= FLAG_CLIP_PRESENT;

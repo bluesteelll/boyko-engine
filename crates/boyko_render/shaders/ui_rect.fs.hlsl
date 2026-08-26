@@ -33,6 +33,7 @@ struct UiInstance {
     uint   border_color;  // @68  premultiplied RGBA8
     float  border_width;  // @72  uniform, physical px
     uint   flags;         // @76  bit0 BORDER_ANY, bit1 CLIP_PRESENT, bit2 TEXT, bit3 TEXTURED,
+                          //      bit5 TILED, bits 6..19 the two 7-bit repeat counts,
                           //      bits 20..31 the bindless sprite slot
 };
 // === GENERATED ui_instance_mirror END ===
@@ -85,6 +86,13 @@ static const uint FLAG_BORDER_ANY   = 1u << 0;
 static const uint FLAG_CLIP_PRESENT = 1u << 1;
 static const uint FLAG_TEXT         = 1u << 2;
 static const uint FLAG_TEXTURED     = 1u << 3;
+static const uint FLAG_TILED        = 1u << 5;
+// The two 7-bit nine-slice REPEAT COUNTS ride flags bits 6..12 / 13..19
+// (counts 1..127); FLAG_TILED is set only when a count exceeds 1, so an untiled record
+// leaves the flag AND both fields zero and is byte-identical to its Stretch record (S-D15).
+static const uint UI_TILE_X_SHIFT   = 6u;
+static const uint UI_TILE_Y_SHIFT   = 13u;
+static const uint UI_TILE_MASK      = 0x7Fu;
 // The bindless sprite slot rides flags bits 20..31 (12 bits, slots 0..4095).
 static const uint UI_SLOT_SHIFT     = 20u;
 static const uint UI_SLOT_MASK      = 0xFFFu;
@@ -144,6 +152,25 @@ float ui_screen_px_range(float2 uv) {
 }
 // === GENERATED ui_screen_px_range END ===
 
+// === GENERATED ui_tile_uv BEGIN ===
+// UI-ADVANCED S5 (S-D15): the SPRITE branch's whole UV computation
+// (`boyko_shaderdsl::ui::ui_tile_uv_body`). Without FLAG_TILED it is the committed
+// `lerp` into the record's UV sub-rect; with it, the 0..1 quad corner is first swept
+// `tiles` times and wrapped by `frac`, so the sample stays INSIDE the sub-rect for any
+// repeat count -- which is what makes Tile + a sprite-sheet frame correct by
+// construction. The two 7-bit counts and the flag ride `flags` bits 5..19 because all
+// four `uv` floats are consumed as sub_min/sub_max; folding a count into them would
+// sweep whole neighbouring FRAMES.
+float2 ui_tile_uv(float4 uv, float2 local_uv, uint flags) {
+    uint tiled = flags & FLAG_TILED;
+    uint tx = flags >> UI_TILE_X_SHIFT & UI_TILE_MASK;
+    uint ty = flags >> UI_TILE_Y_SHIFT & UI_TILE_MASK;
+    float2 tiles = float2((float)tx, (float)ty);
+    float2 t = (tiled > 0u) ? frac(local_uv * tiles) : local_uv;
+    return lerp(uv.xy, uv.zw, t);
+}
+// === GENERATED ui_tile_uv END ===
+
 // === GENERATED ui_premultiplied_over BEGIN ===
 // Premultiplied "over" (`boyko_shaderdsl::ui::ui_premultiplied_over_body`): composite
 // the border ring (premultiplied color `bc`, area-weighted by `border_cov`) ON TOP of
@@ -194,7 +221,11 @@ float4 main(VsOut input) : SV_Target0 {
     // may pack warps differently, so it stays (risk SR3).
     if ((inst.flags & FLAG_TEXTURED) != 0u) {
         uint   slot = (inst.flags >> UI_SLOT_SHIFT) & UI_SLOT_MASK;
-        float2 uv   = lerp(inst.uv.xy, inst.uv.zw, input.local_uv);
+        // UI-ADVANCED S5: the UV computation moved INTO a generated leaf. It used to be an
+        // inline `lerp` in this template -- which nothing compared against the committed file,
+        // because edsl_sync compares only the sentinel spans and spv_sync compares the
+        // committed .hlsl to its own .spv (S-D15 (4)).
+        float2 uv   = ui_tile_uv(inst.uv, input.local_uv, inst.flags);
         float4 t    = g_sprites[NonUniformResourceIndex(slot)].Sample(g_ui_sampler, uv);
 
         // The sprite source is STRAIGHT RGBA8; premultiply it, then MODULATE by the

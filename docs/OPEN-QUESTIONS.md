@@ -14,6 +14,128 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-26 — KERNEL DEFECT: `#[require(C)]` where `C` is a DENSE component PANICS at insert, and the panic names an expansion that never happened
+
+**Status: OPEN — a real kernel bug, found while BUILDING UI-ADVANCED S5 and reproduced on every
+insert. Not blocking S5**, which routes around it with a `Bundle`. Filed because the next subsystem
+to pair a table component with a dense one will reach for exactly this attribute, and because the
+panic message points away from the cause.
+
+### The measurement
+
+`UiSpriteAnim` (table) with `#[require(UiSpriteCursor)]` where `UiSpriteCursor` is
+`#[component(storage = "dense")]`. Every spawn that inserts the animation panics:
+
+```
+crates\boyko_ecs\src\ecs\core\commands\migration_helpers.rs:728:22:
+invariant: target hosts every required id (expanded archetype)
+```
+
+Three S5 gates failed this way before the attribute was removed; nothing about the message suggests
+the storage kind.
+
+### The cause, and why it is structural rather than a slip
+
+The require pass resolves each required id's `ComponentPool` **in the target ARCHETYPE**
+(`tgt!().component_pools_mut().get_pool_mut(req_id)`), because it materialises the required value
+into that pool's next row. A dense id **has no per-archetype pool**: dense plan D0 makes it a
+NON-SIGNATURE storage kind — "excluded from every archetype signature, owns NO per-archetype
+`ComponentPool`; its global `DenseStore` is owned by the per-world `DenseRegistry`"
+(`dense_d0_spawn_rejection.rs`'s own module doc). So the archetype expansion the `.expect` names
+cannot have included the id, and the `.expect` is the first thing to notice.
+
+Note that the SPAWN path already handles the mix correctly — dense plan D2 PARTITIONS a component
+list, routing the table subset into the archetype and the dense subset to its `DenseStore`. The
+require pass is the one structural path that did not learn the partition.
+
+### The three options, and what each costs
+
+1. **Route required dense ids to the `DenseStore`**, the way D2 already routes a spawn list. The
+   honest fix, and it makes `#[require]` mean the same thing for both storage kinds.
+2. **Reject it at COMPILE time** — the derive knows the target's `STORAGE_IS_DENSE` and could refuse
+   with a message naming the storage kind. Cheaper than (1) and strictly better than today, but it
+   leaves the capability missing rather than fixed.
+3. **Leave it, and document it.** What S5 did, because the rung is not the place to change kernel
+   structural ops: `AnimatedSpriteBundle` carries the animation, the sheet AND the cursor in one
+   spawn, so the pairing is structural at the AUTHORING site instead of at the component. Gate
+   G5-12 pins both halves — the bundle animates, and a hand-spawned animation without a cursor is
+   frozen, silently.
+
+**What it blocks:** nothing today. It costs every future dense/table pairing the same discovery,
+and today that discovery is a panic message about archetypes on a line that never touches storage
+kind. Option (2) alone would turn a runtime panic into a compile error for one afternoon's work;
+whether (1) is worth doing is a SCOPE call.
+
+---
+
+## 2026-08-21 — KERNEL DEFECT: a dense `Changed<C>` / `Added<C>` inside `Or<..>` can NEVER be true, and it fails SILENTLY
+
+**Status: OPEN — a real kernel bug, found at the UI-ADVANCED S5 pre-build audit and MEASURED. Not
+blocking S5**, which routes around it (`UI-PLAN-SPRITES.md` **S-D16**: the flipbook's per-frame write
+lands on a TABLE column and the dense cursor is never a discovery term). Filed because the next
+subsystem to reach for it will not know, and because there is no diagnostic — the query compiles,
+runs, and quietly matches nothing.
+
+### The measurement
+
+A three-frame schedule on a `boyko-ecs` world with one entity carrying a table `TSheet` and a dense
+`DCursor` (rustc 1.97.1, this tree at `b2318ac5`; the probe was deleted after reading):
+
+| frame | `Query<(), Changed<DCursor>>` | `Query<(), Or<(Changed<TSheet>, Changed<DCursor>)>>` |
+|---|---|---|
+| 1 — insert | 1 | 1 |
+| 2 — idle | 0 | 0 |
+| 3 — **dense write through `Mut`** | **1** | **0** |
+
+Frame 1's `1` in the right-hand column comes from the TABLE arm. The dense arm is never true.
+
+### The cause
+
+`Changed<C>` and `Added<C>` support dense storage completely — `HAS_DENSE`, `HAS_DENSE_INCLUDE`,
+`resolve_dense`, `dense_include_candidates` and a per-slot tick read
+(`crates/boyko_ecs/src/ecs/core/iters/query/filter.rs:1000-1060`, `:1321-1390`). The `Or<(..)>`
+`QueryFilter` impl **overrides none of them** (`filter.rs:1834-2030` sets `IS_ARCHETYPAL`,
+`NEEDS_CHANGE_DETECTION`, `CONTAINS_ENABLE_TERM`, `CONTAINS_CHANGE_DETECTION` and nothing else), so
+they all take the trait defaults: `HAS_DENSE = false`, `HAS_DENSE_INCLUDE = false`, `resolve_dense`
+an empty body. The cursor therefore never resolves the inner term's `DenseStore`, its
+`ChangedFetch.dense` stays the `init_fetch` NULL, and `filter_fetch`'s first line is
+`if fetch.dense.is_null() { return false; }` (`filter.rs:1483-1484`). The tuple-as-AND impl should be
+checked for the same omission.
+
+Note that `matches_component_set` for a dense `Changed<C>` returns `true` unconditionally
+("signature-excluded; the exact per-row gate is `filter_fetch`"), so the `Or`'s per-arm `matches`
+flag is set and the dead arm IS evaluated — it just always answers `false`. Nothing anywhere reports
+it.
+
+### Why it matters beyond the UI
+
+Two in-flight plans were writing against the property this refutes.
+`UI-ADVANCED-ARCHITECTURE.md`'s tier table listed the **dense** `UiSpriteCursor` as "a term of
+`ui_render_discovery`'s `Or<…>`", and `UI-PLAN-ANIMATION.md` plans `UiVisual` as a dense include
+(`AM2`, `:112`) while `ui_render_discovery`'s filter is a flat `Or` — so `Changed<UiVisual>` would
+have been dead too, and the symptom in both cases is a frozen picture with no error, no panic and no
+failing assertion. Both documents are amended.
+
+### The options, for the owner
+
+1. **Fix the `Or` impl** — OR-fold `HAS_DENSE` / `HAS_DENSE_INCLUDE` over the members, forward
+   `resolve_dense` and `dense_include_candidates` to each. It is the same paired-ident macro that
+   already forwards `set_table_*`, so the shape exists; the gate is a runtime test per the existing
+   `dense_d4_change_detection.rs` shape, since a type-level test cannot see it.
+2. **Forbid it at compile time** — a sealed `OrComposable`-style bound that a dense `Changed`/`Added`
+   does not satisfy, turning a silent no-op into `error[E0277]`. Cheaper, and it is the `M1`
+   precedent this same impl already uses to keep `Enabled<T>` out of an `Or`.
+3. **Document it and move on** — the S5 route: keep repaint-driving data in table columns. This is
+   the status quo plus a written warning, and it leaves the trap armed for the next reader.
+
+**Recommendation: (2) now, (1) when a subsystem actually needs it.** A silent always-false filter term
+is the campaign's own headline defect class — a gate that cannot fire — and (2) removes the
+possibility rather than handling it, which is the discipline `ui_node_sub_codes` was rewritten under.
+This is a VALUES/SCOPE call because (1) touches the kernel's query core and its cost is a real design
+review, not a patch.
+
+---
+
 ## 2026-08-21 — SCOPE: `host_upload_frame` + `pack_sort_upload` are public API with no caller in the workspace — delete them, or wire the host that `APP-HOST-PLAN.md` already specifies?
 
 **Status: OPEN — SCOPE, owner's call. Not blocking S4**, which routes around them

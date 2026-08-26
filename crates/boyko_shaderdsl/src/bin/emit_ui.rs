@@ -60,6 +60,12 @@ const UI_INSTANCE_LAYOUT: UiInstanceLayout = UiInstanceLayout {
     flag_textured_bit: 3,
     slot_shift: 20,
     slot_bits: 12,
+    // UI-ADVANCED S5 (S-D15): `FLAG_TILED` + the two 7-bit nine-slice repeat counts. This
+    // EXHAUSTS the bit budget — bits 5..19 were the fifteen free bits and these are fifteen.
+    flag_tiled_bit: 5,
+    tile_x_shift: 6,
+    tile_y_shift: 13,
+    tile_bits: 7,
 };
 
 /// Wraps a generated BODY span in its sentinel pair + doc comment + signature + closing brace.
@@ -187,6 +193,19 @@ fn build_fs() -> String {
         "float ui_screen_px_range(float2 uv)",
         &emit::emit_hlsl_ui_screen_px_range(),
     );
+    let tile = leaf(
+        "ui_tile_uv",
+        "// UI-ADVANCED S5 (S-D15): the SPRITE branch's whole UV computation\n\
+         // (`boyko_shaderdsl::ui::ui_tile_uv_body`). Without FLAG_TILED it is the committed\n\
+         // `lerp` into the record's UV sub-rect; with it, the 0..1 quad corner is first swept\n\
+         // `tiles` times and wrapped by `frac`, so the sample stays INSIDE the sub-rect for any\n\
+         // repeat count -- which is what makes Tile + a sprite-sheet frame correct by\n\
+         // construction. The two 7-bit counts and the flag ride `flags` bits 5..19 because all\n\
+         // four `uv` floats are consumed as sub_min/sub_max; folding a count into them would\n\
+         // sweep whole neighbouring FRAMES.\n",
+        "float2 ui_tile_uv(float4 uv, float2 local_uv, uint flags)",
+        &emit::emit_hlsl_ui_tile_uv(),
+    );
     let over = leaf(
         "ui_premultiplied_over",
         "// Premultiplied \"over\" (`boyko_shaderdsl::ui::ui_premultiplied_over_body`): composite\n\
@@ -275,6 +294,7 @@ struct VsOut {{
 {clip}
 {median}
 {range}
+{tile}
 {over}
 float4 main(VsOut input) : SV_Target0 {{
     UiInstance inst = g_instances[input.inst_index];     // SSBO read in the FRAGMENT stage
@@ -312,7 +332,11 @@ float4 main(VsOut input) : SV_Target0 {{
     // may pack warps differently, so it stays (risk SR3).
     if ((inst.flags & FLAG_TEXTURED) != 0u) {{
         uint   slot = (inst.flags >> UI_SLOT_SHIFT) & UI_SLOT_MASK;
-        float2 uv   = lerp(inst.uv.xy, inst.uv.zw, input.local_uv);
+        // UI-ADVANCED S5: the UV computation moved INTO a generated leaf. It used to be an
+        // inline `lerp` in this template -- which nothing compared against the committed file,
+        // because edsl_sync compares only the sentinel spans and spv_sync compares the
+        // committed .hlsl to its own .spv (S-D15 (4)).
+        float2 uv   = ui_tile_uv(inst.uv, input.local_uv, inst.flags);
         float4 t    = g_sprites[NonUniformResourceIndex(slot)].Sample(g_ui_sampler, uv);
 
         // The sprite source is STRAIGHT RGBA8; premultiply it, then MODULATE by the
@@ -369,6 +393,19 @@ fn main() {
     const _: () = assert!(UI_INSTANCE_LAYOUT.size.is_multiple_of(16));
     const _: () = assert!(UI_INSTANCE_LAYOUT.flags < UI_INSTANCE_LAYOUT.size);
     const _: () = assert!(UI_INSTANCE_LAYOUT.flag_text_bit < 32);
+    // UI-ADVANCED S5: the tile fields the `ui_flag_consts` span emits must be the SAME
+    // numbers `boyko_shaderdsl::ui`'s leaf spells as symbols. The leaf carries its own copy
+    // (it is traced with no access to this struct), so this is the one line that makes the
+    // two copies one number — and `ui_rect_edsl_sync` pins BOTH to the host constants.
+    const _: () = assert!(UI_INSTANCE_LAYOUT.flag_tiled_bit == boyko_shaderdsl::ui::UI_TILE_FLAG_BIT);
+    const _: () = assert!(UI_INSTANCE_LAYOUT.tile_x_shift == boyko_shaderdsl::ui::UI_TILE_X_SHIFT);
+    const _: () = assert!(UI_INSTANCE_LAYOUT.tile_y_shift == boyko_shaderdsl::ui::UI_TILE_Y_SHIFT);
+    const _: () = assert!(UI_INSTANCE_LAYOUT.tile_bits == boyko_shaderdsl::ui::UI_TILE_BITS);
+    // The flag and the two fields fill exactly the fifteen free bits, ending below the slot.
+    const _: () = assert!(
+        UI_INSTANCE_LAYOUT.tile_y_shift + UI_INSTANCE_LAYOUT.tile_bits
+            == UI_INSTANCE_LAYOUT.slot_shift
+    );
 
     let shaders = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")

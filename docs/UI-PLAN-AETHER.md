@@ -563,9 +563,24 @@ the sprite plan has decided how an author names a texture (a `TextureGpu` bindle
 per D2/D3). Until then the same trees are authorable through the universal fallback — this rung buys
 spelling, not capability.
 
+*(precondition note, 2026-08-21 at the S5 pre-build audit — `UI-PLAN-SPRITES.md` **S-D16**. **The
+texture-naming half now covers the sheet route too, and that is a ruling, not an accident:**
+`UiSpriteSheet` was specified as *replacing* `UiImage`'s slot, which would have given `sheet:` a
+second, sheet-shaped naming surface this precondition does not describe. It was ruled a MODIFIER
+instead — a sheet-bearing node still carries `UiImage`, and the gather substitutes the slot and the
+frame rect — so `sheet:` lowers to `UiImage` + `UiSpriteSheet` and inherits D2/D3's naming verbatim.
+**Two field lists also moved after this precondition was written**: `UiSpriteAnim` is
+`{ first: u16, last: u16, fps: f32, mode: SpriteAnimMode, repeats: u8, _pad: [u8;2] }` with `mode` a
+TYPED four-variant enum — so `flipbook:`'s `mode` key is a closed name set, like `EasingId`, not a
+number — and `UiSpriteCursor` is `{ elapsed: f32, dir: i8, loops_done: u8, _pad: [u8;2] }`, which
+S6 excludes from the vocabulary anyway.)*
+
 *(field-list note, 2026-08-21 — `UI-PLAN-SPRITES.md` **S-D12 (2)**: `UiNineSlice` gained
-**`border_uv: [f32;4]`** (36 B, not 20), so `nine_slice:`'s positional key table is **five** keys, not
-four: `border_px`, `border_uv`, `mode`, `fill_center`. It has a real `Default` — equal thirds — rather
+**`border_uv: [f32;4]`** (36 B, not 20), so `nine_slice:`'s positional key table is ~~**five** keys,
+not four~~ **FOUR authorable keys, not three**: `border_px`, `border_uv`, `mode`, `fill_center`
+*(count corrected 2026-08-21 at the S5 audit: the sentence said five and then listed four. The
+struct's fifth member is `_pad: [u8; 2]`, which is not authorable, so the authorable table is four —
+one more than the three that existed before `border_uv`.)*. It has a real `Default` — equal thirds — rather
 than a zero one, so an author who omits it gets the 3×3-cell case for free; the key table must carry
 that default rather than deriving it, or an omitted `border_uv` degenerates every corner to zero
 source width. Recorded here because "final field lists" is this rung's stated precondition and the

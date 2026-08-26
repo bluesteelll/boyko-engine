@@ -76,14 +76,15 @@ pub use draw::record_ui_rects;
 pub use gather::{gather_ui_nodes, probe_component, ui_render_discovery, UiGatherScratch};
 pub use instance::{
     premultiply_rgba8, UiInstance, UiOrtho, FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, FLAG_TEXT,
-    FLAG_TEXTURED, UI_INSTANCE_SIZE, UI_SLOT_BITS, UI_SLOT_MASK, UI_SLOT_SHIFT,
+    FLAG_TEXTURED, FLAG_TILED, UI_INSTANCE_SIZE, UI_SLOT_BITS, UI_SLOT_MASK, UI_SLOT_SHIFT,
+    UI_TILE_BITS, UI_TILE_MASK, UI_TILE_MAX, UI_TILE_X_SHIFT, UI_TILE_Y_SHIFT,
 };
 pub use pack::{
     emit_ui_node_records, pack_ui_image_instance, pack_ui_instance, pack_ui_nine_slice_instance,
-    pack_ui_sub_record, ui_node_sub_codes, PackInput, UiImageInput, UiNineSliceInput,
-    UiRenderGeneration, UiRenderScratch, UI_IMAGE_SUB, UI_MAX_SUBS_PER_NODE,
-    UI_NINE_SLICE_CENTER_SUB, UI_NINE_SLICE_MODE_COUNT, UI_NINE_SLICE_REGIONS,
-    UI_NINE_SLICE_SUB_BASE, UI_RECORDS_PER_NODE,
+    pack_ui_sub_record, ui_nine_slice_tiles, ui_nine_slice_tiles_axis, ui_node_sub_codes,
+    PackInput, UiImageInput, UiNineSliceInput, UiRenderGeneration, UiRenderScratch, UI_IMAGE_SUB,
+    UI_MAX_SUBS_PER_NODE, UI_NINE_SLICE_CENTER_SUB, UI_NINE_SLICE_MODE_COUNT,
+    UI_NINE_SLICE_MODE_TILE, UI_NINE_SLICE_REGIONS, UI_NINE_SLICE_SUB_BASE, UI_RECORDS_PER_NODE,
 };
 pub use resources::UiSamplerMode;
 pub use plan::UiFramePlan;
@@ -155,7 +156,19 @@ static UI_RECT_VS_SPV: SpirvBlob<2408> = SpirvBlob(*include_bytes!(concat!(
 /// read before the re-bless. Its SIBLING `ui_rect.vs.spv` did NOT move (2408 → 2408,
 /// byte-identical): the VS's only S3 edit is a comment inside the shared struct mirror,
 /// and DXC's output is measurably indifferent to it.
-static UI_RECT_FS_SPV: SpirvBlob<8760> = SpirvBlob(*include_bytes!(concat!(
+///
+/// RE-BLESSED 8760 → 9120 at UI-ADVANCED S5 (the tiled lane, S-D15): the stage gained the
+/// `FLAG_TILED` + `UI_TILE_{X_SHIFT, Y_SHIFT, MASK}` constants and the seventh eDSL leaf
+/// `ui_tile_uv`, into which the sprite branch's WHOLE UV computation moved — the line was
+/// previously an inline `lerp` in the generator's `main` template, where nothing compared
+/// it to the committed copy. The untiled arm still spells the same `lerp(uv.xy, uv.zw, t)`
+/// intrinsic on the same operands (S-D15 (4) / `Cf::vec2_lerp`), which is why all SIX
+/// committed image pins (four S2 + one S3 + one S4) reproduced byte-for-byte across this
+/// re-bless rather than needing one. The VS again did NOT move (2408 → 2408): its only S5
+/// edit is one comment line in the shared struct mirror. *(S-D15 (4) said "only the FS blob
+/// moves" — true of the `.spv` and NOT of the `.hlsl`: the tile bits land in the SHARED
+/// mirror span, so the VS SOURCE moves and `ui_rect_edsl_sync`'s VS half covers it.)*
+static UI_RECT_FS_SPV: SpirvBlob<9120> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/ui_rect.fs.spv"
 )));

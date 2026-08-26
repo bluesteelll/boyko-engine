@@ -228,12 +228,16 @@ fn measure_gather_baseline() {
 /// * after  S3: 5 pack inputs + `Children` = **6.00 probes/node/frame** (+20 %)
 /// * after  S4: 6 pack inputs + `Children` = **7.00 probes/node/frame** (+16.7 %) —
 ///   `UiNineSlice` joined the list
+/// * after  S5: 7 pack inputs + `Children` = **8.00 probes/node/frame** (+14.3 %) —
+///   `UiSpriteSheet` joined the list, and it alone: S5's other two components
+///   (`UiSpriteAnim`, `UiSpriteCursor`) are NOT pack inputs, so the rung's cost is one
+///   probe rather than the three an earlier draft projected (S-D16 (2)(3))
 ///
 /// paid by every node of every changed frame whether or not it is a sprite, and whether or
 /// not it is nine-sliced. The printed per-node figure below is derived from
 /// `ui_pack_inputs!(count)`, so it stays true as the list grows — and it is the number this
 /// paragraph must agree with, so the ladder above gains a row in the same edit that moves
-/// the list. MEASURED on the S4 build (2026-08-21): `probes/node = 7.00` in both worlds at
+/// the list. MEASURED on the S5 build (2026-08-26): `probes/node = 8.00` in both worlds at
 /// both N. The two worlds are still both run, because the probe-HIT vs probe-MISS
 /// difference (and the different archetype behind it) is the only part that is not
 /// arithmetic — and the run says it is under this instrument's noise at both N.

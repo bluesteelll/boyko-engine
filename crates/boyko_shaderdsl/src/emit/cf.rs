@@ -1011,6 +1011,22 @@ impl Cf for EmitCf {
         Emit(push(Node::Vec2Fwidth(v.0)))
     }
 
+    fn named_uint_val(sym: &'static str, val: u32) -> Emit {
+        // Interns into the SAME symbol table `named_lit` / `named_uint` use, but records a
+        // `NamedUint` node so `type_of` says `Uint` — which is what lets it be an operand of
+        // `and_u` / `shr_u` (both `chk` their operands `Uint`).
+        let sym_id = intern_named_lit(sym);
+        Emit(push(Node::NamedUint { sym_id, val }))
+    }
+
+    fn vec2_frac(v: Emit) -> Emit {
+        Emit(push(Node::Vec2Frac(v.0)))
+    }
+
+    fn vec2_lerp(a: Emit, b: Emit, t: Emit) -> Emit {
+        Emit(push(Node::Vec2Lerp(a.0, b.0, t.0)))
+    }
+
     fn vec2_rdiv_scalar(s: Emit, v: Emit) -> Emit {
         Emit(push(Node::Vec2RDivScalar(s.0, v.0)))
     }

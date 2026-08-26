@@ -196,6 +196,23 @@ enum Node {
         #[allow(dead_code)]
         val: f32,
     },
+    /// A NAMED `uint` constant that types as [`EmitTy::Uint`] — `FLAG_TILED`,
+    /// `UI_TILE_X_SHIFT`, `UI_TILE_MASK` (UI-ADVANCED S5's `ui_tile_uv`).
+    ///
+    /// DISTINCT from [`Node::NamedLit`], which types `Float`: `NamedLit` was minted for a
+    /// symbol whose only consumer is a bare `Stmt::Return` (no `chk`), and the S5 leaf's
+    /// symbols are operands of [`Node::And`] / [`Node::Shr`], which `chk` their operands
+    /// `Uint`. Spelling them as bare `uint` literals instead would put a SECOND copy of the
+    /// bit layout in the leaf body, next to the copy `emit_hlsl_ui_flag_consts` already
+    /// generates from the layout — the drift class S-D2 / S-D10 exist to close.
+    ///
+    /// `val` is the concrete value the Eval backend uses (through
+    /// [`crate::cf::Cf::named_uint_val`], not through a node); the printer spells the symbol.
+    NamedUint {
+        sym_id: u32,
+        #[allow(dead_code)]
+        val: u32,
+    },
     /// A call to the hand-written field function `sdf(<arg>)`. The operand is a
     /// VECTOR-expression handle into the separate [`VNode`] arena (the `float3`
     /// argument), so the printer emits `sdf(<vexpr>)`. The field is NOT inlined: the
@@ -650,6 +667,18 @@ enum Node {
     /// evaluate a device derivative, so the leaf that records this node is not oracle-swept
     /// (see [`crate::ui::ui_screen_px_range_body`]). Result type [`EmitTy::Float2`].
     Vec2Fwidth(u32),
+    /// `frac(v)` over a `float2` (`frac(local_uv * tiles)`, UI-ADVANCED S5's tile wrap) —
+    /// `OpExtInst GLSL.std.450 Fract`, component-wise. Exact on both backends
+    /// (`x - floor(x)`, one subtract, no rounding step), so unlike [`Node::Vec2RDivScalar`]
+    /// it CAN carry a bit-exact oracle contract. Result type [`EmitTy::Float2`].
+    Vec2Frac(u32),
+    /// `lerp(a, b, t)` over three `float2`s (`lerp(uv.xy, uv.zw, t)`, the UNTILED arm of
+    /// `ui_tile_uv`) — `OpExtInst GLSL.std.450 FMix`, component-wise. Spelled as the
+    /// intrinsic rather than decomposed into `a + t * (b - a)`: `FMix` is specified as
+    /// `x * (1 - t) + y * t` and the six committed UI image pins were blessed against the
+    /// intrinsic, so the decomposition would move the sprite's pixel by ~1 ULP with no gate
+    /// able to see it. Result type [`EmitTy::Float2`].
+    Vec2Lerp(u32, u32, u32),
     /// `s / v` — a `float` scalar (broadcast) DIVIDED by a `float2`, scalar on the LEFT
     /// (`g_atlas_ubo.px_range / g_atlas_ubo.atlas_size`, `1.0 / fwidth(uv)`). `(scalar, vec)`.
     /// A DIVIDE — per the house rule it is never part of a bit-exact oracle contract
@@ -805,6 +834,9 @@ fn var_type(id: u32) -> EmitTy {
 fn type_of(node: Node) -> EmitTy {
     match node {
         Node::UintInput(_) | Node::UintLit(_) | Node::And(_, _) | Node::Shr(_, _) => EmitTy::Uint,
+        // UI-ADVANCED S5: the named `uint` constant types `Uint` (the whole reason it is a
+        // separate node from `NamedLit`, which types `Float`).
+        Node::NamedUint { .. } => EmitTy::Uint,
         // Increment 3 `uint`-result nodes: the cell index math, the buffer load, the
         // `(uint)` cast, the `uint3` swizzle, and a named `uint` constant.
         Node::Uint3Swizzle(_, _)
@@ -851,6 +883,9 @@ fn type_of(node: Node) -> EmitTy {
         | Node::Vec2MaxScalar(_, _)
         | Node::Vec2Smoothstep(_, _, _)
         | Node::Vec2Fwidth(_)
+        // UI-ADVANCED S5: the two `float2` primitives `ui_tile_uv` adds.
+        | Node::Vec2Frac(_)
+        | Node::Vec2Lerp(_, _, _)
         | Node::Vec2RDivScalar(_, _) => EmitTy::Float2,
         Node::Vec4FromScalars(_, _, _, _) | Node::Vec4MulScalar(_, _) | Node::Vec4Add(_, _) => {
             EmitTy::Float4
@@ -1369,6 +1404,8 @@ fn is_inline_leaf(node: Node) -> bool {
             | Node::UintLit(_)
             | Node::VecIndex(_, _)
             | Node::NamedLit { .. }
+            // UI-ADVANCED S5: a named `uint` constant spells its SYMBOL at every use.
+            | Node::NamedUint { .. }
             | Node::VecParamRef(_)
             | Node::VarRef(_)
             | Node::TempRef(_)
@@ -1518,6 +1555,9 @@ fn operand_str(
         Node::VecIndex(vec_id, iv_id) => format!("{}[{}]", names.vec_in[vec_id as usize], opl(iv_id)),
         // The named literal prints the SYMBOL (`BRICK_EXIT_EPS`), not its `val`.
         Node::NamedLit { sym_id, .. } => names.named_lit[sym_id as usize].to_string(),
+        // UI-ADVANCED S5: a named `uint` constant (`FLAG_TILED`, `UI_TILE_MASK`) spells the
+        // SYMBOL, exactly like `NamedLit` — it differs only in typing `Uint` (see the node).
+        Node::NamedUint { sym_id, .. } => names.named_lit[sym_id as usize].to_string(),
         // A mutable-local read prints the variable NAME (`exit`), not a `tN` temp.
         Node::VarRef(v) => names.vars[v as usize].to_string(),
         // A materialized-temp reference prints its NAME (`rel`/`ix`, a named brick-cell
@@ -1769,6 +1809,7 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
         | Node::UintLit(_)
         | Node::VecIndex(_, _)
         | Node::NamedLit { .. }
+        | Node::NamedUint { .. }
         | Node::VecParamRef(_)
         | Node::VarRef(_)
         | Node::TempRef(_)
@@ -2120,6 +2161,21 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
         Node::Vec2Fwidth(v) => {
             chk(v, EmitTy::Float2);
             format!("fwidth({})", op(v))
+        }
+        // `frac(v)` over a `float2` (`frac(local_uv * tiles)`). A function-call form: the
+        // multiplicative `Vec2Mul` argument spells FLAT at Root.
+        Node::Vec2Frac(v) => {
+            chk(v, EmitTy::Float2);
+            format!("frac({})", op(v))
+        }
+        // `lerp(a, b, t)` over three `float2`s (`lerp(uv.xy, uv.zw, t)`). A function-call
+        // form; all three arguments spell FLAT at Root, which is the committed spelling the
+        // S3 sprite branch already carried inline.
+        Node::Vec2Lerp(a, b, t) => {
+            chk(a, EmitTy::Float2);
+            chk(b, EmitTy::Float2);
+            chk(t, EmitTy::Float2);
+            format!("lerp({}, {}, {})", op(a), op(b), op(t))
         }
         // `s / v` — `float / float2`, scalar on the LEFT (`1.0 / fwidth(uv)`). Both operands
         // spell at MulSide (an additive child would wrap; the committed operands are leaves and

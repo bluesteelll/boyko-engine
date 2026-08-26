@@ -22,8 +22,8 @@
 use std::path::PathBuf;
 
 use boyko_render::ui::instance::{
-    UiInstance, FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, FLAG_TEXT, FLAG_TEXTURED, UI_INSTANCE_SIZE,
-    UI_SLOT_BITS, UI_SLOT_SHIFT,
+    UiInstance, FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, FLAG_TEXT, FLAG_TEXTURED, FLAG_TILED,
+    UI_INSTANCE_SIZE, UI_SLOT_BITS, UI_SLOT_SHIFT, UI_TILE_BITS, UI_TILE_X_SHIFT, UI_TILE_Y_SHIFT,
 };
 use boyko_shaderdsl::emit::{self, UiInstanceLayout};
 
@@ -131,7 +131,55 @@ fn host_layout() -> UiInstanceLayout {
         flag_textured_bit: FLAG_TEXTURED.trailing_zeros(),
         slot_shift: UI_SLOT_SHIFT,
         slot_bits: UI_SLOT_BITS,
+        // UI-ADVANCED S5: the tiled lane's bit and its two 7-bit repeat-count fields.
+        // Derived from the LIVE host constants like every number above, so a host that
+        // moved a field and a shader that did not is a red test rather than a quad tiling
+        // a different number of times.
+        flag_tiled_bit: FLAG_TILED.trailing_zeros(),
+        tile_x_shift: UI_TILE_X_SHIFT,
+        tile_y_shift: UI_TILE_Y_SHIFT,
+        tile_bits: UI_TILE_BITS,
     }
+}
+
+/// G1-1, the S5 THIRD pin: the eDSL leaf's OWN copy of the tile bit layout is the host's.
+///
+/// The other two pins cover the generator's copy — `emit_ui.rs` spells
+/// `UI_INSTANCE_LAYOUT` literals and `host_layout()` above pins them through the emitted
+/// `ui_flag_consts` / mirror spans. But `ui_tile_uv`'s body is TRACED, with no access to
+/// that struct, so `boyko_shaderdsl::ui` carries a third copy of the same four numbers —
+/// the one that decides which bits the shader actually shifts and masks.
+///
+/// Without this test that copy is pinned by nothing: the emitted `ui_flag_consts` could
+/// say `UI_TILE_X_SHIFT = 6u` while the leaf's `named_uint_val` said `7`, the generated
+/// span would still be byte-identical to the printer's output (both sides come from the
+/// leaf), `ui_rect_spv_sync` would still pass (the `.spv` is the re-DXC of that `.hlsl`),
+/// and the pack would write counts into bits the shader never reads. A frozen picture with
+/// no error — the failure class this rung already measured once, in the kernel.
+#[test]
+fn ui_tile_bit_layout_matches_the_host() {
+    assert_eq!(
+        boyko_shaderdsl::ui::UI_TILE_FLAG_BIT,
+        FLAG_TILED.trailing_zeros(),
+        "the eDSL leaf's FLAG_TILED bit and the host's FLAG_TILED are different bits"
+    );
+    assert_eq!(
+        boyko_shaderdsl::ui::UI_TILE_X_SHIFT,
+        UI_TILE_X_SHIFT,
+        "the eDSL leaf shifts the X repeat count out of a different field than the pack \
+         shifts it into"
+    );
+    assert_eq!(
+        boyko_shaderdsl::ui::UI_TILE_Y_SHIFT,
+        UI_TILE_Y_SHIFT,
+        "the eDSL leaf shifts the Y repeat count out of a different field than the pack \
+         shifts it into"
+    );
+    assert_eq!(
+        boyko_shaderdsl::ui::UI_TILE_BITS,
+        UI_TILE_BITS,
+        "the eDSL leaf masks a different number of count bits than the pack writes"
+    );
 }
 
 // ---- The per-file generator pins (gate G1-1) ------------------------------------------------
@@ -151,8 +199,11 @@ fn ui_rect_vs_matches_edsl_emit() {
     );
 }
 
-/// G1-1, FS half: all eight generated spans — the struct mirror, the flag constants, and the
-/// six leaf function bodies — are the printers' output, each inside the right function.
+/// G1-1, FS half: all NINE generated spans — the struct mirror, the flag constants, and the
+/// SEVEN leaf function bodies — are the printers' output, each inside the right function.
+/// (`ui_tile_uv` is the seventh, UI-ADVANCED S5: the sprite branch's UV computation moved
+/// OUT of the generator's `main` template and into a sentinel span, because nothing in the
+/// workspace compares the template's `main` to the committed one.)
 #[test]
 fn ui_rect_fs_matches_edsl_emit() {
     let src = read_shader("ui_rect.fs.hlsl");
@@ -205,6 +256,13 @@ fn ui_rect_fs_matches_edsl_emit() {
         "ui_rect.fs.hlsl",
         "float ui_screen_px_range(float2 uv) {",
         "ui_screen_px_range",
+        &span,
+    );
+    let span = emit::emit_hlsl_ui_tile_uv().replace("\r\n", "\n");
+    assert_span_is_the_body_of(
+        "ui_rect.fs.hlsl",
+        "float2 ui_tile_uv(float4 uv, float2 local_uv, uint flags) {",
+        "ui_tile_uv",
         &span,
     );
     let span = emit::emit_hlsl_ui_premultiplied_over().replace("\r\n", "\n");

@@ -1309,6 +1309,56 @@ pub trait Cf {
     /// temp handle so later reads spell `rx`.
     fn temp_vec2(name: &'static str, v: Self::Vec2f) -> Self::Vec2f;
 
+    // ---- UI-ADVANCED S5: the two `float2` primitives `ui_tile_uv` needs -------------------
+    //
+    // MEASURED at the S5 build: neither existed. `frac` / `floor` / `fract` occurred NOWHERE
+    // in this crate (S-D15 (4) says so), and NEITHER did a `float2` `lerp` — the only `lerp`
+    // on the axis is the SCALAR [`crate::scalar::FieldScalar::lerp`]. S-D15 (4)'s cost line
+    // named one primitive; it is two, and the second is the one that matters for byte
+    // identity (see [`vec2_lerp`](Self::vec2_lerp)).
+
+    /// A NAMED `uint` constant that types as `uint` on the Emit backend — `FLAG_TILED`,
+    /// `UI_TILE_X_SHIFT`, `UI_TILE_MASK`.
+    ///
+    /// DISTINCT from [`named_uint`](Self::named_uint), whose Emit node is a `NamedLit`
+    /// typed `Float`: that one was minted for a symbol whose only consumer is a bare
+    /// `return` (no operand type check), and these three are operands of
+    /// [`and_u`](Self::and_u) / [`shr_u`](Self::shr_u), which DO check their operands
+    /// `Uint`. The alternative — spelling them as bare `uint` literals — would put a
+    /// second copy of the S-D2 bit layout inside the leaf body, beside the copy
+    /// `emit_hlsl_ui_flag_consts` generates from the layout; S-D10's rule is that no
+    /// shader spells a number a host constant also spells.
+    ///
+    /// On Eval returns `val` (the real number, so the oracle sweeps the real decode); on
+    /// Emit records the SYMBOL.
+    fn named_uint_val(sym: &'static str, val: u32) -> Self::Uint;
+
+    /// `frac(v)` over a `float2` — the component-wise fractional part, `OpExtInst
+    /// GLSL.std.450 Fract`. The wrap that makes `Tile` tile (S-D15's
+    /// `frac(local_uv * tiles)`).
+    ///
+    /// On Eval `x - x.floor()` per lane, which is HLSL's own definition and matches
+    /// `Fract` on the whole finite domain including negatives (`frac(-0.25) == 0.75`).
+    /// Exact: a subtract of two exactly-representable values, no rounding step — so unlike
+    /// a divide it CAN carry a bit-exact oracle contract.
+    fn vec2_frac(v: Self::Vec2f) -> Self::Vec2f;
+
+    /// `lerp(a, b, t)` over three `float2`s — the linear blend, `OpExtInst GLSL.std.450
+    /// FMix`. It is the UNTILED arm of `ui_tile_uv`, and it is spelled as the intrinsic
+    /// rather than decomposed into `a + t * (b - a)` ON PURPOSE: `FMix`'s specified form is
+    /// `x * (1 - t) + y * t`, the decomposition rounds differently, and the four S2 / one S3
+    /// / one S4 image pins were blessed against the committed `lerp(inst.uv.xy, inst.uv.zw,
+    /// input.local_uv)`. Keeping the intrinsic makes the untiled sprite's pixel IDENTICAL
+    /// rather than merely equal to within a ULP — which is the difference between six image
+    /// pins that hold by construction and six that hold by luck (`reference-golden-fp-
+    /// resolution`: an 8-bit golden cannot SEE a 1-ULP shader edit, so it would not have
+    /// caught the decomposition either way).
+    ///
+    /// On Eval `a * (1 - t) + b * t` per lane — the spec form, not the decomposition.
+    /// Mul/add only, so it carries the crate's standing FMA-contraction carve-out and no
+    /// divide.
+    fn vec2_lerp(a: Self::Vec2f, b: Self::Vec2f, t: Self::Vec2f) -> Self::Vec2f;
+
     // `temp_vec4` (`float4 src = <rhs>;`) already exists on this axis (the Increment-5c
     // `m2_brick_cubic_hit` facet above) and is reused by the UI leaves rather than
     // re-declared; its Eval arm becomes the identity now that a leaf
@@ -2323,5 +2373,29 @@ impl Cf for EvalCf {
     fn temp_vec2(_name: &'static str, v: [f32; 2]) -> [f32; 2] {
         // Identity on Eval — a temp is an Emit-only materialization concern.
         v
+    }
+
+    #[inline]
+    fn named_uint_val(_sym: &'static str, val: u32) -> u32 {
+        val
+    }
+
+    #[inline]
+    fn vec2_frac(v: [f32; 2]) -> [f32; 2] {
+        // HLSL's own definition of `frac` (and `GLSL.std.450 Fract`): `x - floor(x)`, so a
+        // negative input wraps upward (`frac(-0.25) == 0.75`) rather than truncating toward
+        // zero the way `%` would.
+        [v[0] - v[0].floor(), v[1] - v[1].floor()]
+    }
+
+    #[inline]
+    fn vec2_lerp(a: [f32; 2], b: [f32; 2], t: [f32; 2]) -> [f32; 2] {
+        // `FMix`'s SPECIFIED form `x * (1 - t) + y * t`, not the `a + t * (b - a)`
+        // decomposition — the two round differently and the committed shader spells the
+        // intrinsic (see the trait doc).
+        [
+            a[0] * (1.0 - t[0]) + b[0] * t[0],
+            a[1] * (1.0 - t[1]) + b[1] * t[1],
+        ]
     }
 }

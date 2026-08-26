@@ -45,6 +45,7 @@ use boyko_input::PhysicalInput;
 use boyko_render::{gather_ui_nodes, ui_render_discovery, UiGatherScratch, UiNode, UiRenderGeneration};
 use boyko_ui::components::{
     ComputedClip, ComputedRect, StackIndex, UiBackground, UiImage, UiLayout, UiNineSlice, UiRoot,
+    UiSpriteSheet,
 };
 use boyko_ui::interaction::components::Interaction;
 use boyko_ui::interaction::focus::{
@@ -200,19 +201,21 @@ fn g0_1_discovery_bumps_exactly_once_per_pack_input_mutation() {
         StackIndex,
         UiImage,
         UiNineSlice,
+        UiSpriteSheet,
     }
 
     impl PackInput {
         /// Every pack input this test drives. Adding a variant without extending this array
         /// reds the count assertion; extending this array without adding a variant does not
         /// compile.
-        const ALL: [PackInput; 6] = [
+        const ALL: [PackInput; 7] = [
             PackInput::ComputedRect,
             PackInput::UiBackground,
             PackInput::ComputedClip,
             PackInput::StackIndex,
             PackInput::UiImage,
             PackInput::UiNineSlice,
+            PackInput::UiSpriteSheet,
         ];
 
         fn name(self) -> &'static str {
@@ -223,6 +226,7 @@ fn g0_1_discovery_bumps_exactly_once_per_pack_input_mutation() {
                 PackInput::StackIndex => "StackIndex",
                 PackInput::UiImage => "UiImage",
                 PackInput::UiNineSlice => "UiNineSlice",
+                PackInput::UiSpriteSheet => "UiSpriteSheet",
             }
         }
     }
@@ -256,6 +260,19 @@ fn g0_1_discovery_bumps_exactly_once_per_pack_input_mutation() {
                         uv_max: [0.5, 0.5],
                         tint: 0xFF_FF_FF_FF,
                     });
+                }
+                PackInput::UiSpriteSheet => {
+                    // UI-ADVANCED S5, gate G5-10: the seventh pack input. The claim is
+                    // the same as the fifth's and the sixth's -- an author's runtime edit
+                    // to a sprite sheet must bump `UiRenderGeneration` -- but this rung
+                    // has a SECOND writer of the same component, and it is the one the
+                    // rung turns on: `ui_sprite_flipbook` writes `index` every time the
+                    // frame moves, through `Mut::set_if_neq`, and that write's tick is
+                    // what repaints an animating sprite. Driving the AUTHOR's edit here
+                    // proves the filter sees the component at all; `ui_s5_sprite_sheet`'s
+                    // G5-3 proves it sees the flipbook's own write and stays silent when
+                    // the index does not move.
+                    cmds.entity(node).insert(UiSpriteSheet { sheet: 0, index: 3 });
                 }
                 PackInput::UiNineSlice => {
                     // UI-ADVANCED S4: the sixth pack input. Same claim as the

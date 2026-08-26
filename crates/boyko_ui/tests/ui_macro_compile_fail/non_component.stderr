@@ -15,6 +15,7 @@ help: the trait `Bundle` is not implemented for `NotAComponent`
  9 | struct NotAComponent {
    | ^^^^^^^^^^^^^^^^^^^^
    = help: the following other types implement trait `Bundle`:
+             AnimatedSpriteBundle
              Bar
              BarBundle
              BarFill
@@ -22,7 +23,6 @@ help: the trait `Bundle` is not implemented for `NotAComponent`
              BindValue
              Button
              ButtonBundle
-             ChildOf
            and $N others
 note: required by a bound in `EntityCommands::<'a, 's>::insert`
   --> $WORKSPACE/crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs

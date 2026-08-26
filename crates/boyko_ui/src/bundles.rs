@@ -10,7 +10,8 @@ use boyko_macros::Bundle;
 
 use crate::binding::{UiTextBuffer, UiValue};
 use crate::components::{
-    Bar, Button, ComputedRect, ContentSize, UiBackground, UiGrid, UiImage, UiLayout,
+    Bar, Button, ComputedRect, ContentSize, UiBackground, UiGrid, UiImage, UiLayout, UiSpriteAnim,
+    UiSpriteCursor, UiSpriteSheet,
 };
 use crate::interaction::{Focusable, Interaction, OnClick};
 use crate::text::UiText;
@@ -132,6 +133,43 @@ pub struct ImageBundle {
     pub rect: ComputedRect,
     /// Image fill (texture handle + UV + tint).
     pub image: UiImage,
+}
+
+/// An ANIMATED sprite node (UI-ADVANCED S5): an image node plus the sprite-sheet
+/// trio, in ONE spawn.
+///
+/// # This bundle is the requirement, because `#[require]` cannot be
+///
+/// [`ui_sprite_flipbook`](crate::sprite::ui_sprite_flipbook) queries all three of
+/// [`UiSpriteAnim`], [`UiSpriteCursor`] and [`UiSpriteSheet`], so an authored
+/// animation missing the cursor silently never ticks — a frozen sprite with no
+/// error and no failing assertion. `#[require(UiSpriteCursor)]` on the animation
+/// would have made the pairing structural, and MEASURED on this kernel it panics:
+/// the require pass resolves the required id's pool in the target ARCHETYPE, and
+/// a dense id has no per-archetype pool (see [`UiSpriteAnim`]'s doc and
+/// `docs/OPEN-QUESTIONS.md`).
+///
+/// A bundle carries the same guarantee at the authoring site: one spawn, all six
+/// components, and the cursor cannot be forgotten because it is not a separate
+/// step. Its `dir` comes from [`UiSpriteCursor::default`], which is `+1` — the
+/// value `PingPong` needs.
+#[derive(Bundle)]
+pub struct AnimatedSpriteBundle {
+    /// Primary layout input.
+    pub layout: UiLayout,
+    /// Resolved screen-space rectangle.
+    pub rect: ComputedRect,
+    /// Image fill — the CAPABILITY (the tint, and the fallback texture/UV when
+    /// the sheet is inert). Its authored default tint is alpha 0, so an animated
+    /// sprite still needs an opaque tint to show.
+    pub image: UiImage,
+    /// Which sheet, and which frame right now. The flipbook writes `index`.
+    pub sheet: UiSpriteSheet,
+    /// The animation's configuration — author-written, never system-written.
+    pub anim: UiSpriteAnim,
+    /// The flipbook's private per-frame state (DENSE). Spawned here so it cannot
+    /// be forgotten.
+    pub cursor: UiSpriteCursor,
 }
 
 /// A grid container: a [`UiLayout`]`{ layout_type: Grid }` + the [`UiGrid`] track

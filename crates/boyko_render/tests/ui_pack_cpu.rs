@@ -354,6 +354,14 @@ fn sprite_slot_round_trips_through_the_flags_bit_field() {
 /// unchanged (bits 3..31 still zero, which is what keeps the S2 image pins identical),
 /// and a sprite record uses ONLY bit 3 plus its slot field, leaving bit 4 (S7's reserved
 /// per-sprite sampler index) and bits 5..19 zero.
+///
+/// **UI-ADVANCED S5 spent bits 5..19 (`FLAG_TILED` + the two 7-bit repeat counts), and this
+/// test's claim is UNCHANGED — deliberately.** Those bits are set only on a nine-slice
+/// SUB-QUAD whose own repeat count exceeds 1, and this file's subject is
+/// `pack_ui_image_instance`, the WHOLE-RECT sprite record, which is emitted only for a node
+/// with no `UiNineSlice` and therefore never carries them. The tiled lane's own bit census
+/// is `ui_s5_sprite_sheet`'s G5-11, which asserts the same property from the other side: a
+/// `1x1` region carries NO tile bits at all.
 #[test]
 fn packed_flags_use_only_the_bits_their_lane_owns() {
     let input = sprite_node(0x0AB, OPAQUE_WHITE);

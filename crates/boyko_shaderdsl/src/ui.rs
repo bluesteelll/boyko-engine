@@ -1,5 +1,6 @@
 //! The **UI-rect fragment leaves** (`docs/UI-PLAN-SPRITES.md` rung S1 — architecture D30): the
-//! six generic `C: Cf` bodies `boyko_render/shaders/ui_rect.fs.hlsl` splices its math out of.
+//! SEVEN generic `C: Cf` bodies `boyko_render/shaders/ui_rect.fs.hlsl` splices its math out of
+//! (six at S1; [`ui_tile_uv_body`] joins them at S5).
 //!
 //! This module is the first `boyko_ui`-side consumer of the eDSL, and the first `float2`/`float4`
 //! VALUE math in the crate ([`crate::cf::Cf`]'s UI-ADVANCED S1 facet section). Every leaf is
@@ -19,6 +20,9 @@
 //! points whose radicand is an exact square. [`ui_clip_coverage_body`] adds `smoothstep`
 //! (a divide inside the spec polynomial), so its table pins the SATURATED ends, where the
 //! result is exactly 0 or 1. [`ui_unpack_rgba8_body`] is integer unpack + one multiply.
+//! [`ui_tile_uv_body`] is an integer field decode + `frac` + `lerp` — the decode is integer,
+//! `frac` is one exact subtract, and `lerp` is mul/add under the standing FMA carve-out — so it
+//! IS oracle-swept, on BOTH arms (the tiled one and the identity one).
 //! [`ui_screen_px_range_body`] spells `fwidth` — a device derivative with NO host semantics —
 //! so it is deliberately **not oracle-swept**: its Eval instantiation panics loudly at the
 //! [`Cf::vec2_fwidth`] arm (the honest-panic discipline), and its gate is the byte-identity
@@ -34,6 +38,39 @@
 
 use crate::cf::{Cf, Flow};
 use crate::scalar::FieldScalar;
+
+// ---- UI-ADVANCED S5: the tile-field generator inputs (S-D2's bit budget) -------------------
+//
+// These four numbers mirror `boyko_render::ui::instance`'s `FLAG_TILED` / `UI_TILE_X_SHIFT` /
+// `UI_TILE_Y_SHIFT` / `UI_TILE_BITS`, and they are PINNED to those host constants by
+// `boyko_render/tests/ui_rect_edsl_sync.rs` — the same S-D10 discipline that pins
+// `emit_ui.rs`'s `UI_INSTANCE_LAYOUT` literals. They are `pub` precisely so that test can
+// name them; nothing else reads them outside [`ui_tile_uv_body`].
+
+/// The bit index of `FLAG_TILED` in `UiInstance.flags` (bit 5 — S-D15).
+pub const UI_TILE_FLAG_BIT: u32 = 5;
+/// The LOW bit of the X repeat-count field in `UiInstance.flags` (bits 6..=12).
+pub const UI_TILE_X_SHIFT: u32 = 6;
+/// The LOW bit of the Y repeat-count field in `UiInstance.flags` (bits 13..=19).
+pub const UI_TILE_Y_SHIFT: u32 = 13;
+/// The WIDTH in bits of each repeat-count field (7 — counts `1..=127`, S-D15).
+pub const UI_TILE_BITS: u32 = 7;
+
+/// `FLAG_TILED` as a mask — DERIVED from [`UI_TILE_FLAG_BIT`], never spelled.
+const UI_TILE_FLAG: u32 = 1 << UI_TILE_FLAG_BIT;
+/// The repeat-count field mask AFTER its shift (`0x7F`) — DERIVED from [`UI_TILE_BITS`].
+const UI_TILE_MASK: u32 = (1 << UI_TILE_BITS) - 1;
+
+/// The `> 0u` comparand of the `FLAG_TILED` test (`(flags & FLAG_TILED) > 0u`) — a bare
+/// `uint` literal, the [`crate::cf::Cf::uint_lit`] spelling.
+const UINT_ZERO: u32 = 0;
+
+// The two fields and the flag must fit the fifteen bits S-D2 left free (5..=19) without
+// overlapping each other or the bindless slot field at bit 20. Fifteen free, fifteen spent:
+// this assert is what says the budget is EXHAUSTED at the site that spends it.
+const _: () = assert!(UI_TILE_X_SHIFT == UI_TILE_FLAG_BIT + 1);
+const _: () = assert!(UI_TILE_Y_SHIFT == UI_TILE_X_SHIFT + UI_TILE_BITS);
+const _: () = assert!(UI_TILE_Y_SHIFT + UI_TILE_BITS == 20);
 
 // ---- Constants mirrored by the generated HLSL as bare literals ----------------------------
 
@@ -75,7 +112,7 @@ const RANGE_HALF: f32 = 0.5;
 /// guard).
 const RANGE_FLOOR: f32 = 1.0;
 
-// ---- The six S1 leaves --------------------------------------------------------------------
+// ---- The six S1 leaves + the S5 tile leaf --------------------------------------------------
 
 /// **`ui_unpack_rgba8`** — unpacks a premultiplied RGBA8 word (byte0 = R .. byte3 = A) to a
 /// `float4` in `[0, 1]`.
@@ -271,6 +308,94 @@ pub fn ui_screen_px_range_body<C: Cf>(
             .mul(C::vec2_dot(unit_range, screen_tex_sz))
             .max(C::Scalar::lit(RANGE_FLOOR)),
     )
+}
+
+/// **`ui_tile_uv`** — the sprite branch's WHOLE UV computation (UI-ADVANCED S5, S-D15):
+/// the untiled `lerp` into the record's UV sub-rect, or — under `FLAG_TILED` — the same
+/// `lerp` with the quad corner first swept `tiles` times and wrapped back INSIDE the
+/// sub-rect.
+///
+/// ```text
+/// uint tiled = flags & FLAG_TILED;
+/// uint tx = flags >> UI_TILE_X_SHIFT & UI_TILE_MASK;
+/// uint ty = flags >> UI_TILE_Y_SHIFT & UI_TILE_MASK;
+/// float2 tiles = float2((float)tx, (float)ty);
+/// float2 t = (tiled > 0u) ? frac(local_uv * tiles) : local_uv;
+/// return lerp(uv.xy, uv.zw, t);
+/// ```
+///
+/// # `frac` INSIDE the sub-rect, and why the count cannot ride `uv`
+///
+/// `local_uv` is the `0..1` quad corner (`ui_rect.vs.hlsl`'s `o.local_uv = corner`), so
+/// `frac(local_uv)` is the IDENTITY on every covered fragment — which is why the mechanism
+/// S-D11 first ruled rendered exactly as `Stretch`. The repeat count is what makes the wrap
+/// mean anything, and it rides `flags` rather than `uv`: all four `uv` floats are consumed
+/// as `sub_min`/`sub_max`, so folding a count into them would sweep N whole SUB-RECTS —
+/// under a sprite sheet, N whole neighbouring FRAMES, which is the bleed the gate G5-8
+/// exists to forbid.
+///
+/// Because the wrap is `frac` of the *parameter* and the `lerp` is into the *sub-rect*, the
+/// sample never leaves the sub-rect for any `tiles`. Under a sheet the sub-rect IS a frame,
+/// so `Tile` + `UiSpriteSheet` is correct by construction rather than a forbidden pair.
+///
+/// # The untiled arm is the committed `lerp`, deliberately
+///
+/// It spells [`Cf::vec2_lerp`] (the `FMix` intrinsic), NOT `a + t * (b - a)`: the two round
+/// differently and the six committed UI image pins were blessed against the intrinsic. See
+/// [`Cf::vec2_lerp`]'s doc.
+///
+/// `FLAG_TILED` is set at pack ONLY when a repeat count exceeds 1, so a corner sub-quad
+/// (always `1×1`) leaves the flag AND both fields zero and takes this leaf's untiled arm —
+/// which is what makes a `Tile` corner byte-identical to its `Stretch` corner.
+#[inline]
+pub fn ui_tile_uv_body<C: Cf>(
+    uv: C::Vec4f,
+    local_uv: C::Vec2f,
+    flags: C::Uint,
+    ret_out: &C::RetCellV2,
+) -> Flow {
+    // uint tiled = flags & FLAG_TILED;
+    //
+    // MATERIALIZED rather than nested into the `> 0u` test: `>` binds TIGHTER than `&` in
+    // HLSL, so `flags & FLAG_TILED > 0u` would parse as `flags & (FLAG_TILED > 0u)`. The
+    // frozen `and_u` printer arm spells its operands un-wrapped (the `pack_material_id_ba`
+    // byte-identity contract), so the temp is the correct spelling, not a stylistic one.
+    let tiled = C::temp_uint(
+        "tiled",
+        C::and_u(flags, C::named_uint_val("FLAG_TILED", UI_TILE_FLAG)),
+    );
+    // uint tx = flags >> UI_TILE_X_SHIFT & UI_TILE_MASK;   (`>>` binds tighter than `&`)
+    let tx = C::temp_uint(
+        "tx",
+        C::and_u(
+            C::shr_u(flags, C::named_uint_val("UI_TILE_X_SHIFT", UI_TILE_X_SHIFT)),
+            C::named_uint_val("UI_TILE_MASK", UI_TILE_MASK),
+        ),
+    );
+    // uint ty = flags >> UI_TILE_Y_SHIFT & UI_TILE_MASK;
+    let ty = C::temp_uint(
+        "ty",
+        C::and_u(
+            C::shr_u(flags, C::named_uint_val("UI_TILE_Y_SHIFT", UI_TILE_Y_SHIFT)),
+            C::named_uint_val("UI_TILE_MASK", UI_TILE_MASK),
+        ),
+    );
+    // float2 tiles = float2((float)tx, (float)ty);
+    let tiles = C::temp_vec2(
+        "tiles",
+        C::vec2_from_scalars(C::float_from_uint(tx), C::float_from_uint(ty)),
+    );
+    // float2 t = (tiled > 0u) ? frac(local_uv * tiles) : local_uv;
+    let t = C::temp_vec2(
+        "t",
+        C::select_vec2(
+            C::ugt(tiled, C::uint_lit(UINT_ZERO)),
+            C::vec2_frac(C::vec2_mul(local_uv, tiles)),
+            local_uv,
+        ),
+    );
+    // return lerp(uv.xy, uv.zw, t);
+    C::ret_vec2(ret_out, C::vec2_lerp(C::vec4_xy(uv), C::vec4_zw(uv), t))
 }
 
 /// **`ui_premultiplied_over`** — composites the border ring (premultiplied color `bc`,

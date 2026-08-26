@@ -293,7 +293,12 @@ premultiply.
 **"The 95 % of nodes that animate nothing pay nothing" is true of GPU bytes and of tick cost, and
 false of the gather — so the exception is stated here rather than left to be discovered.** Reading
 `UiVisual` at gather time is a random-access `get_component` probe **per node per frame**, and the
-sprite lane adds four more (`UiImage`, `UiNineSlice`, `UiSpriteSheet`, `UiSpriteCursor`). That is the
+sprite lane adds ~~four more (`UiImage`, `UiNineSlice`, `UiSpriteSheet`, `UiSpriteCursor`)~~ **THREE
+more (`UiImage` at S3, `UiNineSlice` at S4, `UiSpriteSheet` at S5)** *(corrected 2026-08-21 —
+`UI-PLAN-SPRITES.md` **S-D16 (2)(3)**: `UiSpriteCursor` is the flipbook's private state and is read
+by no pack input, so it is deliberately NOT in `ui_pack_inputs!` and costs the gather nothing. Listing
+it would have been a dead probe on every node of every frame — the cost this very paragraph exists to
+account for. Measured census: 5.00 before S3 → 6.00 → 7.00 → **8.00** after S5.)*. That is the
 same cost class D23 identifies as the likely dominant term in the interaction spine — *"~6
 random-access `get_component` probes per node per frame"* (`focus.rs:221-234`; verified:
 `ComputedClip`, `ComputedRect`, `Interaction`, `StackIndex`, `FocusPolicy`, `Children`) — and it is
@@ -472,7 +477,9 @@ enforcement's actual teeth (D10), R2's whole mitigation — is downstream of it.
 **The measured state of the edge:**
 
 * every new visual datum (`UiVisual`, `UiImage`, `UiNineSlice`, `UiSpriteSheet`, `UiSpriteCursor`)
-  lives in `boyko_ui`;
+  lives in `boyko_ui` *(of these, `UiSpriteCursor` is the one the pack never reads — it is the
+  flipbook's private state, `UI-PLAN-SPRITES.md` S-D16 (2) — so it crosses no crate edge and is
+  listed here only for completeness of the `boyko_ui` side)*;
 * the type that must read them (`PackInput` / `UiNode`, `ui/pack.rs:21`, `ui/upload.rs:71`) lives in
   `boyko_render` and is deliberately `boyko_ui`-agnostic — *"so the pack is driven by a host-owned
   `Query` without this crate naming the query types"*;
@@ -578,9 +585,24 @@ Capability is component **presence** throughout; every component is `#[repr(C)]`
 |---|---|---|---|
 | `UiImage` *(exists, 24 B)* | 24 B | `texture` **reinterpreted as the bindless slot**; presence ⇒ textured lane | table (authored, cold) |
 | `UiNineSlice` | ~~20 B~~ **36 B** | `border_px: [f32;4]`, **`border_uv: [f32;4]`**, `mode: u8` (`Stretch`; `Tile` lands at S5), `fill_center: bool`, `_pad: [u8;2]` — both border arrays are `[l,t,r,b]`; presence ⇒ pack emits 9 sub-quads (8 without the centre) **in addition to the node's background and INSTEAD OF its image record** | table (authored, cold) |
-| `UiSpriteSheet` | 4 B | `sheet: u16`, `index: u16` — presence ⇒ pack derives `uv` from the sheet table instead of reading `uv_min`/`uv_max` | table (authored, cold) |
-| `UiSpriteAnim` | 12 B | the **cold track**: `first: u16, last: u16, fps: f32, mode: u8` (`Forward`\|`Reverse`\|`PingPong`\|`Once`), `repeats: u8` — author-written, never system-written | table (authored, cold) |
-| `UiSpriteCursor` | 8 B | the **hot cursor**: `elapsed: f32, frame: u16, dir: i8` — the only column the flipbook system writes per frame | **dense** |
+| `UiSpriteSheet` | 4 B | `sheet: u16`, `index: u16` — presence ⇒ pack derives `uv` from the sheet table instead of reading `uv_min`/`uv_max`. **It MODIFIES `UiImage`, it does not replace it: the node still carries `UiImage` (the capability), and the GATHER substitutes the sheet's slot and the computed frame rect into `UiImageInput`** *(added 2026-08-21 — `UI-PLAN-SPRITES.md` **S-D16 (3)**: `ui_node_sub_codes` is the sole authority and its truth table is keyed on `input.image`; substituting in the gather keeps `pack.rs` free of every `boyko_ui` type and keeps `border_uv`'s "a fraction of the CURRENT `UiImage` sub-rect" sentence true — which is what makes nine-slice-over-a-sheet-frame compose for free.)*. **`index` is also the column the flipbook WRITES each frame, through `Mut<_>::set_if_neq`** — see the `UiSpriteCursor` row. | table (authored, cold **— but system-WRITTEN per frame; see the cursor row**) |
+| `UiSpriteAnim` | 12 B | the **cold track**: ~~`first: u16, last: u16, fps: f32, mode: u8` (`Forward`\|`Reverse`\|`PingPong`\|`Once`), `repeats: u8`~~ **`first: u16, last: u16, fps: f32, mode: SpriteAnimMode` (a `#[repr(u8)]` TYPED enum — `Forward`\|`Reverse`\|`PingPong`\|`Once`), `repeats: u8, _pad: [u8; 2]`** — author-written, never system-written | table (authored, cold) |
+| `UiSpriteCursor` | 8 B | the **hot cursor**: ~~`elapsed: f32, frame: u16, dir: i8` — the only column the flipbook system writes per frame~~ **`elapsed: f32, dir: i8, loops_done: u8, _pad: [u8; 2]` — the flipbook's PRIVATE state, read by no other system and by no pack input** | **dense** |
+
+*(all three rows corrected 2026-08-21 at the S5 pre-build audit — `UI-PLAN-SPRITES.md` **S-D16**.
+Three findings. **(a)** The "only column written per frame" claim contradicted the very next line of
+the sprites plan, which has the same system writing `index` — a field of `UiSpriteSheet`, a table
+component. **(b)** The contradiction is settled by a KERNEL MEASUREMENT, not a preference: a dense
+`Changed<C>` inside `Or<..>` can never be true (the `Or` `QueryFilter` impl overrides none of the
+dense hooks, so the inner term's store pointer stays NULL and `filter_fetch` returns `false` on its
+first line), and `ui_render_discovery`'s filter is a flat `Or`. So a per-frame write that lands only
+on the dense cursor is INVISIBLE to the repaint gate and the sprite freezes on frame 0 with no
+diagnostic. The per-frame write must land on the table column, and it does. **(c)** `frame` was then
+written and read by nobody, and `UiSpriteAnim.repeats` had no reader at all — nothing in
+`{elapsed, frame, dir}` counts completed cycles, so `Once` was unimplementable. `loops_done` replaces
+`frame` and gives `repeats` its reader. All four sizes now spell their tail padding and are pinned by
+`const _: () = assert!(size_of…)` — §4.2's own rule, which the two structs that actually HAD tail
+padding were the ones not following.)*
 
 **D8a — the cold-track / hot-cursor split.** `components.rs:5` already prescribes exactly this churn
 split ("a node animating only its size bumps only `UiLayout`'s tick"). Keeping the track cold
@@ -617,6 +639,23 @@ document and in the crate spells its padding (`TweenTint._pad`), and because the
 `offset_of!` const-assert habit only catches a layout change if the layout is stated. The field is
 also renamed `pad_uv` → `inset_uv`: sitting next to a `_pad` byte-padding field, "pad" meant two
 different things in one struct.
+
+**The mint verb is `UiSheetTable::register(UiSheet) -> SheetId`** *(added 2026-08-21 at the S5
+pre-build audit — `UI-PLAN-SPRITES.md` **S-D16 (3)**: this section named the `FontId` discipline as
+its precedent and then landed only the struct and the column, so no line of the rung said who inserts
+a row or how `sheet_id` is allocated — and `UI-PLAN-SPRITES.md` §6 exposed "the `u16 sheet_id`
+dense-handle mint" to the Aether plan as if it existed. `FontTable::load(&BakedFont) -> FontId`
+(`crates/boyko_ui/src/text/font.rs:130-158`) is the whole precedent, verbatim: a setup-time push into
+a `Vec` inside a `#[derive(Resource)]` struct, returning the dense index. Setup-only; the table never
+grows in-frame.)* **and the table is read at gather time through
+`WorldView::resource::<UiSheetTable>()`** — a read-only projection the view already offers, so the
+gather's signature is unchanged and the read is once per gather rather than once per node (it is
+therefore NOT a `probe_component` and does not move the §10.8 census).
+
+**The `inset_uv` value is a property of the SOURCE, not a constant.** Half a texel of a 16×16 sheet
+is `1/32`; half a texel of a 4×4 sheet is `1/8`, which on a 4×4 sheet (one texel per frame) insets a
+frame to **zero extent**. A sheet whose frames are one texel wide cannot carry a half-texel inset at
+all, and any gate using one must size its source accordingly (`UI-PLAN-SPRITES.md` S-D18 (4)).
 
 **D8c — uniform grids only in v1; ragged sheets deferred.** A uniform grid makes the frame UV **pure
 arithmetic** from `(cols, rows, index)` and needs *zero* per-frame storage. Ragged/trimmed sheets need
@@ -707,6 +746,18 @@ per-texture sampler, `REPEAT` handles it in one quad.~~ **the mechanism is a fra
 inside the sprite's sub-rect, and it lands at S5, not S4.** Under an atlas the CPU alternative is
 Unity's quad-per-tile explosion and its documented 16 250-quad cap, which is still the reason not to
 expand tiles on the CPU.
+
+**And it is `frac(t * tiles)`, not `frac(t)`: tiling needs a per-instance REPEAT COUNT, which rides
+`UiInstance.flags` bits 6..=19 beside `FLAG_TILED` at bit 5** *(added 2026-08-21 at the S5 pre-build
+audit — `UI-PLAN-SPRITES.md` **S-D15**. `t` is `input.local_uv`, the 0..1 quad corner, so
+`frac(t) == t` for every covered fragment and `frac` ALONE is the identity function — the mechanism
+as first ruled would have rendered `Tile` as `Stretch`. The count cannot ride `uv`: all four of its
+floats are consumed as `sub_min`/`sub_max`, and pushing a count into them makes the wrap sweep N
+whole frames, which is the sheet bleed the `frac` mechanism exists to prevent. The count is DERIVED
+at pack from `border_px / border_uv` — the corner states its own source→destination scale twice, and
+the sub-rect extent cancels out of the ratio, so no texture dimensions are needed and the number is
+identical under a sheet frame and under a whole texture. **This exhausts the S-D2 bit budget: bits
+5..19 were the last fifteen free, and `FLAG_TILED` plus two 7-bit counts is fifteen.**)*
 
 *(corrected 2026-08-21 at the S4 pre-build audit — see `UI-PLAN-SPRITES.md` **S-D11 (1)**. `REPEAT`
 is not available and never was: `crates/boyko_render/src/ui/resources.rs:310` sets
@@ -887,10 +938,22 @@ property metadata.
 
 | Tier | Channels | Sink | Dirties |
 |---|---|---|---|
-| **1 — paint** | tint, opacity, `UiText.color`, sprite frame/UV | `UiVisual`, `UiSpriteCursor` | **repack only** — the sink is a term of `ui_render_discovery`'s `Or<…>` (D6b) |
+| **1 — paint** | tint, opacity, `UiText.color`, sprite frame/UV | `UiVisual`, ~~`UiSpriteCursor`~~ **`UiSpriteSheet`** | **repack only** — the sink is a term of `ui_render_discovery`'s `Or<…>` (D6b) |
 | **2 — composite** | offset x/y, scale x/y | `UiVisual` | **repack only** — folded at pack (D5) |
 | **2 — composite** | **scroll offset x/y** (D19) | `ScrollPosition` | **repack only** — folded during the gather's DFS descent (D19), never at layout time |
 | **3 — layout** | width, height, padding, gaps, `UiText.size_px`, `Unit::Pct` | `UiLayout`, `ContentSize` | **relayout** — allowed, documented expensive, steered to FLIP (D11) |
+
+⚠️ *(row 1's sink corrected 2026-08-21 at the S5 pre-build audit — `UI-PLAN-SPRITES.md` **S-D16 (1)**,
+MEASURED. `UiSpriteCursor` is **dense**, and a dense `Changed<C>` inside `Or<..>` can NEVER be true:
+the `Or` `QueryFilter` impl overrides none of the dense hooks (`HAS_DENSE`, `resolve_dense`,
+`dense_include_candidates`), so the inner term's `dense` pointer stays the `init_fetch` NULL and
+`filter_fetch` returns `false` on its first line — observed 0 rows on a dense-only `Mut` write while
+a bare `Changed<C>` on the same component observed 1. So the cursor could not be "a term of
+`ui_render_discovery`'s `Or<…>`" as this row claimed; the sprite-frame sink is `UiSpriteSheet.index`,
+a table column, written per frame through `Mut<_>::set_if_neq`. **The general rule this table now
+carries: a DENSE component cannot be a repaint sink through D6b.** A subsystem wanting one either
+keeps the datum in a table column or bumps `UiRenderGeneration` at its own writer. Filed as a kernel
+defect in `docs/OPEN-QUESTIONS.md`.)*
 
 **The table is exhaustive over the channels v1 ships, and the scroll row is why that sentence is
 here.** Scroll is the highest-frame-rate interaction a UI has, and the original record placed it on a

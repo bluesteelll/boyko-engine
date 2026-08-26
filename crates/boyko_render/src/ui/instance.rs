@@ -64,18 +64,29 @@ pub struct UiInstance {
     pub border_color: u32,
     /// Uniform border width, physical px (P5a is uniform; per-side is deferred).
     pub border_width: f32,
-    /// Bit flags under the S-D2 bit budget (fixed at S2, once):
+    /// Bit flags under the S-D2 bit budget (fixed at S2, once — and **SPENT OUT at S5**):
     /// bit0 [`FLAG_BORDER_ANY`], bit1 [`FLAG_CLIP_PRESENT`], bit2 [`FLAG_TEXT`],
     /// bit3 [`FLAG_TEXTURED`] (S3's sprite lane), bit4 reserved for S7's deferred
-    /// per-sprite sampler index, bits 5..19 free, bits
+    /// per-sprite sampler index, bit5 [`FLAG_TILED`] (S5's tiled nine-slice lane),
+    /// bits [`UI_TILE_X_SHIFT`]`..=12` / [`UI_TILE_Y_SHIFT`]`..=19` the two
+    /// [`UI_TILE_BITS`]-bit repeat counts, bits
     /// [`UI_SLOT_SHIFT`]`..32` the bindless slot — [`UI_SLOT_BITS`] bits, slots
     /// `0..=`[`UI_SLOT_MASK`], EXACTLY the table's range (the capacity
     /// const-assert below).
     ///
-    /// At S2 every packed instance had bits 3..31 zero. **S3 moves that gate,
+    /// **The budget is EXHAUSTED**: S-D2 left bits 5..19 free — fifteen — and S5's flag
+    /// plus its two 7-bit fields are fifteen. Only bit 4 remains, and it is S7's. The next
+    /// per-instance datum widens the record instead of taking a bit; the animation and
+    /// interaction plans read §6's exposure row to learn that.
+    ///
+    /// At S2 every packed instance had bits 3..31 zero. **S3 moved that gate,
     /// deliberately**: an UNTEXTURED instance still has bits 3..31 zero, and a
-    /// `FLAG_TEXTURED` one has bit 3 set plus its slot in the top 12 — bits 4..19
-    /// stay zero on BOTH (gate G3-5 / the S2 G2-6 successor).
+    /// `FLAG_TEXTURED` one has bit 3 set plus its slot in the top 12. **S5 moves it
+    /// again, and only for one lane**: a TILED nine-slice sub-quad additionally carries
+    /// bit 5 and its two count fields. Every other record — background, glyph, whole-rect
+    /// sprite, `Stretch` slice, and a `Tile` slice whose own counts are both `1` (every
+    /// corner) — still leaves bits 4..19 zero, which is what keeps the six committed image
+    /// pins identical (gate G5-11 / the S3 G3-5 successor).
     pub flags: u32,
 }
 
@@ -105,6 +116,43 @@ pub const FLAG_TEXT: u32 = 1 << 2;
 /// glyph and a sprite are different quads, emitted separately (D4's per-node
 /// emission contract), never one record wearing both flags.
 pub const FLAG_TEXTURED: u32 = 1 << 3;
+/// `UiInstance.flags` bit5 — the instance is a TILED sprite quad: the fragment shader wraps
+/// the quad corner `(`[`UI_TILE_X_SHIFT`]`, `[`UI_TILE_Y_SHIFT`]`)` times inside the
+/// record's own UV sub-rect (`frac`) instead of stretching it across (`lerp`) — UI-ADVANCED
+/// S5, S-D15.
+///
+/// Set at pack ONLY when at least one of the two repeat counts exceeds `1`, which is what
+/// makes a corner sub-quad (always `1×1`) pack BYTE-IDENTICALLY to its `Stretch` record.
+/// Implies [`FLAG_TEXTURED`]: it is only ever set on a nine-slice sub-quad, and those are
+/// emitted only for a node carrying both `UiNineSlice` and `UiImage`.
+///
+/// **The wrap is of the quad PARAMETER, not of the UV**, so the sample can never leave the
+/// sub-rect for any count — which is what makes `Tile` over a sprite-sheet frame correct by
+/// construction rather than a forbidden pair (the hazard the retired S-D7 guarded).
+pub const FLAG_TILED: u32 = 1 << 5;
+
+/// The LOW bit of the X repeat-count field inside `UiInstance.flags` (S-D15): bits
+/// `6..=12`, [`UI_TILE_BITS`] wide, holding `1..=`[`UI_TILE_MAX`] repeats ACROSS the
+/// record's UV sub-rect. Zero when [`FLAG_TILED`] is clear.
+pub const UI_TILE_X_SHIFT: u32 = 6;
+/// The LOW bit of the Y repeat-count field inside `UiInstance.flags` (S-D15): bits
+/// `13..=19`, repeats DOWN the sub-rect. See [`UI_TILE_X_SHIFT`].
+pub const UI_TILE_Y_SHIFT: u32 = 13;
+/// The WIDTH in bits of each repeat-count field (S-D15).
+///
+/// **7, not 8 and not 6**, and the reason is measured against the use: a UI chrome edge
+/// tiles an 8–32 px source over up to ~1000 px, i.e. tens of repeats. 6 bits (63) could
+/// clip a long scrollbar track; 7 bits (127) cannot, and 8 would not fit beside the flag in
+/// the fifteen bits S-D2 left.
+pub const UI_TILE_BITS: u32 = 7;
+/// Each repeat-count field's mask AFTER its shift (`0x7F`). Derived from [`UI_TILE_BITS`],
+/// never spelled — the emitted HLSL derives its own `UI_TILE_MASK` from the same generator
+/// input, so the two cannot drift into a quad tiling a different number of times.
+pub const UI_TILE_MASK: u32 = (1u32 << UI_TILE_BITS) - 1;
+/// The largest repeat count a field can hold (`127`) — the `min` the pack clamps a derived
+/// count into. Equal to [`UI_TILE_MASK`] because the counts are stored verbatim (a count of
+/// `0` is unreachable: the flag is set only when a count exceeds `1`).
+pub const UI_TILE_MAX: u32 = UI_TILE_MASK;
 
 /// The LOW bit of the bindless-slot field inside `UiInstance.flags` (S-D2).
 ///
@@ -139,11 +187,33 @@ const _: () = assert!(
     UI_SLOT_SHIFT + UI_SLOT_BITS == 32,
     "the bindless-slot field must end at bit 31 (S-D2's bit budget)"
 );
-// Bit 4 is RESERVED for S7's deferred per-sprite sampler index and bits 5..19 are
-// free, so the slot field must not reach down into either.
+// Bit 4 is RESERVED for S7's deferred per-sprite sampler index, so the slot field must not
+// reach down into it.
 const _: () = assert!(
     FLAG_TEXTURED.trailing_zeros() < UI_SLOT_SHIFT - 1,
     "bit 4 stays reserved between the flags and the slot field"
+);
+// S-D15's bit budget, made mechanical. The three relations below say, together, that the
+// flag and the two count fields EXACTLY fill S-D2's fifteen free bits (5..=19), do not
+// overlap each other, do not collide with S7's reserved bit 4, and stop below the slot
+// field. The budget is spent out; a rung that wants a bit widens the record instead, and
+// this is the line that tells it so.
+const _: () = assert!(
+    FLAG_TILED.trailing_zeros() == FLAG_TEXTURED.trailing_zeros() + 2,
+    "FLAG_TILED sits at bit 5, one above S7's reserved bit 4"
+);
+const _: () = assert!(
+    UI_TILE_X_SHIFT == FLAG_TILED.trailing_zeros() + 1,
+    "the X repeat-count field starts immediately above FLAG_TILED"
+);
+const _: () = assert!(
+    UI_TILE_Y_SHIFT == UI_TILE_X_SHIFT + UI_TILE_BITS,
+    "the two repeat-count fields are adjacent and do not overlap"
+);
+const _: () = assert!(
+    UI_TILE_Y_SHIFT + UI_TILE_BITS == UI_SLOT_SHIFT,
+    "the tile fields end exactly where the bindless-slot field begins — the S-D2 budget is \
+     EXHAUSTED (fifteen free bits, fifteen spent)"
 );
 
 // --- std430 layout oracle (compile-time). The size/align pin the array stride;

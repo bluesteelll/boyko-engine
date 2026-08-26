@@ -54,6 +54,23 @@ fn eval_median3(r: f32, g: f32, b: f32) -> f32 {
     cell.get()
 }
 
+/// Runs `ui_tile_uv` over `EvalCf` (UI-ADVANCED S5).
+fn eval_tile_uv(uv: [f32; 4], local_uv: [f32; 2], flags: u32) -> [f32; 2] {
+    let cell: Cell<[f32; 2]> = Cell::new([f32::NAN; 2]);
+    let _ = leaves::ui_tile_uv_body::<EvalCf>(uv, local_uv, flags, &cell);
+    cell.get()
+}
+
+/// Packs a `flags` word carrying `FLAG_TILED` and the two repeat counts — the
+/// same bit layout `boyko_render::ui::pack` writes and this leaf reads, spelled
+/// here from `boyko_shaderdsl::ui`'s own constants so the oracle exercises the
+/// DECODE rather than a second copy of it.
+fn tiled_flags(tx: u32, ty: u32) -> u32 {
+    (1 << leaves::UI_TILE_FLAG_BIT)
+        | (tx << leaves::UI_TILE_X_SHIFT)
+        | (ty << leaves::UI_TILE_Y_SHIFT)
+}
+
 /// Runs `ui_premultiplied_over` over `EvalCf`.
 fn eval_over(bc: [f32; 4], border_cov: f32, fill: [f32; 4], inner_cov: f32) -> [f32; 4] {
     let cell: Cell<[f32; 4]> = Cell::new([0.0; 4]);
@@ -168,6 +185,85 @@ fn ui_premultiplied_over_algebra() {
     );
 }
 
+/// `ui_tile_uv`'s Eval table (UI-ADVANCED S5 / S-D15) — BOTH arms, at points
+/// chosen to be exact in `f32`.
+///
+/// The leaf is oracle-swept where its S1 siblings' `fwidth` sibling is not: the
+/// field decode is integer, `frac` is one exact subtract, and the `lerp` is the
+/// `FMix` spec form (mul/add, the standing FMA carve-out). Every constant below
+/// is a sum of negative powers of two.
+///
+/// The UNTILED arm is pinned as hard as the tiled one, and that is deliberate:
+/// it is the arm the four S2 / one S3 / one S4 committed image pins ride on, and
+/// the whole reason [`Cf::vec2_lerp`] spells the intrinsic rather than the
+/// `a + t * (b - a)` decomposition.
+#[test]
+fn ui_tile_uv_oracle_table() {
+    // A sub-rect that is NOT (0,0,1,1), so "wraps inside the SUB-RECT" is
+    // falsifiable against "wraps inside the whole texture".
+    let sub = [0.5, 0.25, 0.75, 0.5];
+
+    // (1) UNTILED (`FLAG_TILED` clear, both count fields zero): the plain lerp.
+    assert_eq!(eval_tile_uv(sub, [0.0, 0.0], 0), [0.5, 0.25]);
+    assert_eq!(eval_tile_uv(sub, [1.0, 1.0], 0), [0.75, 0.5]);
+    assert_eq!(eval_tile_uv(sub, [0.5, 0.5], 0), [0.625, 0.375]);
+    assert_eq!(eval_tile_uv(sub, [0.25, 0.75], 0), [0.5625, 0.4375]);
+
+    // (2) `tiles == (1, 1)` under the FLAG is the SAME picture as untiled, for
+    //     every `t` in [0, 1) — `frac(t * 1) == t`. This is S-D15 (1)'s finding,
+    //     and it is why `FLAG_TILED` alone (without a count) would have been a
+    //     mechanism that does nothing.
+    for t in [0.0f32, 0.125, 0.5, 0.875] {
+        assert_eq!(
+            eval_tile_uv(sub, [t, t], tiled_flags(1, 1)),
+            eval_tile_uv(sub, [t, t], 0),
+            "a 1x1 tile count is the identity — `frac(t) == t` on [0, 1)"
+        );
+    }
+
+    // (3) TILED (4, 2): the quad corner sweeps the sub-rect four times across and
+    //     twice down, and NEVER leaves it.
+    //     t = 0.25 -> frac(1.0) = 0.0  -> u = sub_min.x  (the second repeat's start)
+    //     t = 0.375 -> frac(1.5) = 0.5 -> u = the sub-rect's midpoint
+    let f = tiled_flags(4, 2);
+    assert_eq!(eval_tile_uv(sub, [0.25, 0.5], f), [0.5, 0.25]);
+    assert_eq!(eval_tile_uv(sub, [0.375, 0.75], f), [0.625, 0.375]);
+    //     t = 0.9375 -> x: frac(3.75)  = 0.75  -> u = 0.5  + 0.75  * 0.25 = 0.6875
+    //                   y: frac(1.875) = 0.875 -> v = 0.25 + 0.875 * 0.25 = 0.46875
+    //     (the two axes carry DIFFERENT counts, so they land on different fractions of
+    //     their own repeat — which is the point of the pair being separate fields)
+    assert_eq!(eval_tile_uv(sub, [0.9375, 0.9375], f), [0.6875, 0.46875]);
+
+    // (4) The CONTAINMENT property itself, swept — the assertion G5-8 makes on the
+    //     GPU with a palette census, made here directly on the arithmetic for every
+    //     count the field can hold.
+    for tx in [1u32, 2, 3, 7, 63, 127] {
+        for i in 0..64u32 {
+            let t = i as f32 / 64.0;
+            let got = eval_tile_uv(sub, [t, t], tiled_flags(tx, tx));
+            assert!(
+                got[0] >= sub[0] && got[0] < sub[2] && got[1] >= sub[1] && got[1] < sub[3],
+                "tiles={tx} t={t}: the sample must stay INSIDE the sub-rect — got {got:?}, \
+                 sub-rect {sub:?}. `frac` wraps the PARAMETER, so no count can escape"
+            );
+        }
+    }
+
+    // (5) The two count fields are read from DIFFERENT bits: an X count must not
+    //     move the Y sample. Pinned because the two shifts differ by one word and
+    //     a transposed pair is invisible to any symmetric input.
+    assert_eq!(
+        eval_tile_uv(sub, [0.25, 0.25], tiled_flags(4, 1)),
+        [0.5, 0.3125],
+        "tiles = (4, 1): x wraps at t = 0.25, y does not"
+    );
+    assert_eq!(
+        eval_tile_uv(sub, [0.25, 0.25], tiled_flags(1, 4)),
+        [0.5625, 0.25],
+        "tiles = (1, 4): y wraps at t = 0.25, x does not"
+    );
+}
+
 // ---- The Emit span pins (the crate-local half of G1-1) -----------------------------------
 
 /// Every UI leaf's FULL emitted span, pinned as a literal — a wrong spelling, a lost paren or
@@ -207,6 +303,21 @@ fn ui_leaf_spans_match_committed_shape() {
         "    float2 unit_range = g_atlas_ubo.px_range / g_atlas_ubo.atlas_size;\n\
          \x20   float2 screen_tex_sz = 1.0 / fwidth(uv);\n\
          \x20   return max(0.5 * dot(unit_range, screen_tex_sz), 1.0);\n"
+    );
+    // UI-ADVANCED S5. The load-bearing characters here are the SYMBOLS: `FLAG_TILED`,
+    // `UI_TILE_X_SHIFT`, `UI_TILE_Y_SHIFT` and `UI_TILE_MASK` are emitted as names, not as
+    // `32u` / `6u` / `13u` / `0x7Fu`, so the leaf and the generated `ui_flag_consts` span
+    // cannot drift into shifting different bits (S-D2 / S-D10). And `tiled` is a TEMP
+    // rather than nested into the comparison: `>` binds tighter than `&` in HLSL, so
+    // `flags & FLAG_TILED > 0u` would parse as `flags & (FLAG_TILED > 0u)`.
+    assert_eq!(
+        emit::emit_hlsl_ui_tile_uv(),
+        "    uint tiled = flags & FLAG_TILED;\n\
+         \x20   uint tx = flags >> UI_TILE_X_SHIFT & UI_TILE_MASK;\n\
+         \x20   uint ty = flags >> UI_TILE_Y_SHIFT & UI_TILE_MASK;\n\
+         \x20   float2 tiles = float2((float)tx, (float)ty);\n\
+         \x20   float2 t = (tiled > 0u) ? frac(local_uv * tiles) : local_uv;\n\
+         \x20   return lerp(uv.xy, uv.zw, t);\n"
     );
     // The `(1.0 - src.a)` parens are load-bearing for the same reason as the unpack's.
     assert_eq!(

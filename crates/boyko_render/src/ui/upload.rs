@@ -321,6 +321,15 @@ impl UiUploadSystem {
         self.gather_scratch.probes
     }
 
+    /// DIAGNOSTIC (UI-ADVANCED S5, gate G5-6): sprite-sheet frame indices this
+    /// system's gathers ever CLAMPED to the sheet's last frame (forwards
+    /// [`UiGatherScratch::sheet_index_clamps`]). Sample before/after a frame for
+    /// a per-frame count.
+    #[inline]
+    pub fn sheet_index_clamps(&self) -> u64 {
+        self.gather_scratch.sheet_index_clamps
+    }
+
     /// COMMAND CENSUS, pack half: packs ever executed by
     /// [`gather_into_staging`](Self::gather_into_staging). A static run must
     /// not advance it (G0-2).

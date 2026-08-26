@@ -1113,7 +1113,7 @@ that R0's harness must be built to avoid:
 
 * **A null control that read a third of the signal.** Strict `A,B,A,B` interleaving aliased the A/B
   phase with the frame-in-flight slot, because `FRAMES_IN_FLIGHT == 2`
-  (`crates/boyko_render/src/ui/mod.rs:96`). Each phase therefore always landed on the same query
+  (`crates/boyko_render/src/ui/mod.rs:97`). Each phase therefore always landed on the same query
   pool, descriptor ring slot and staging region. The fix is a counterbalanced **ABBA quadruple**
   whose statistic is `(d1 + d2)/2` and whose *residual* `(d1 − d2)/2` is **printed, not hidden**
   ([`sv0_deferred_term_bench.rs`](../crates/boyko_app/tests/sv0_deferred_term_bench.rs):53~-77).
@@ -2477,7 +2477,7 @@ block and lines 350/378 in another; **the `357`/`373`/`385` set is the correct o
 down by ten lines, and `357`/`373`/`385` after step 6c deleted this file's windowed driver — the
 same three constants, moved twice in one day by two different deletions), and the
 contradiction is direct evidence that the older block was never re-verified ·
-`crates/boyko_render/src/ui/mod.rs:96` (`FRAMES_IN_FLIGHT = 2`) ·
+`crates/boyko_render/src/ui/mod.rs:97` (`FRAMES_IN_FLIGHT = 2`) ·
 `crates/boyko_render/src/mesh_draw.rs:81-98` (`DrawBatch`) ·
 `crates/boyko_rhi_vulkan/src/window.rs:252` (`Window::open`), `:310~` (`AdjustWindowRectEx`),
 `:342~-352` (`BOYKO_WIN_HIDDEN` — hidden, but still created at the requested size).

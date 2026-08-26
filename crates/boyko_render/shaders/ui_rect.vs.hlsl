@@ -31,6 +31,7 @@ struct UiInstance {
     uint   border_color;  // @68  premultiplied RGBA8
     float  border_width;  // @72  uniform, physical px
     uint   flags;         // @76  bit0 BORDER_ANY, bit1 CLIP_PRESENT, bit2 TEXT, bit3 TEXTURED,
+                          //      bit5 TILED, bits 6..19 the two 7-bit repeat counts,
                           //      bits 20..31 the bindless sprite slot
 };
 // === GENERATED ui_instance_mirror END ===

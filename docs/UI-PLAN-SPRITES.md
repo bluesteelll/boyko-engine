@@ -288,7 +288,7 @@ unnecessary, because the shader-side `frac` costs one instruction and zero recor
 | S2 | 80 B record, `uv` field | every existing node packs `uv = (0,0,1,1)` and `flags` bits 3..31 zero | never (image pins must be identical) |
 | S3 | `FLAG_TEXTURED`, set 1, UI sampler | `UiImage`'s default tint is **alpha 0** ⇒ an authored-but-untextured Image is invisible (`components.rs:454-466`) | S3's own new golden `ui_sprite_bindless` |
 | S4 | `UiNineSlice` (**`Stretch` only** — `Tile` moved to S5 by the 2026-08-21 audit, S-D11) | absent ⇒ pack emits 1 record (+ its image), **byte-identical to S3** | S4's own golden `ui_nine_slice` |
-| S5 | sheets + flipbook **+ `NineSliceMode::Tile`** *(added 2026-08-21: `Tile` needs the sub-rect arithmetic S5 builds — S-D11)* | `UiSpriteSheet` absent ⇒ `uv` comes from `UiImage`; `UiSpriteCursor` absent ⇒ no tick; **`mode != Tile` ⇒ no `frac`, `FLAG_TILED` zero** | S5's own goldens `ui_flipbook` + `ui_nine_slice_tiled` |
+| S5 | sheets + flipbook **+ `NineSliceMode::Tile`** *(added 2026-08-21: `Tile` needs the sub-rect arithmetic S5 builds — S-D11)* | `UiSpriteSheet` absent ⇒ `uv` comes from `UiImage`; `UiSpriteCursor` absent ⇒ no tick; **`mode != Tile` ⇒ no `frac`, `FLAG_TILED` zero — and `mode == Tile` on a region whose two counts are both 1 (every corner) ALSO packs `FLAG_TILED` zero, so a tiled node's four corners are byte-identical to their `Stretch` records** *(added 2026-08-21 — S-D15: the flag is set only when a count exceeds 1, which is what lets G4-3's corner claim carry over unchanged)* | S5's own goldens `ui_flipbook` + `ui_nine_slice_tiled` |
 | S6 | `.ui` vocabulary | authoring only; no runtime behaviour | — |
 
 **Every rung's own goldens are the only images that change at that rung.** The S2 image pins
@@ -331,9 +331,20 @@ texture *through it* (`ui_rect.fs.hlsl:198`), so the bindless set's `REPEAT` sam
 path at all. A UV of 1.5 under the landed pipeline reads the edge texel — a smear, not a tile.
 
 **Decision: `Tile` is a fragment-side `frac` applied to the sprite's normalized position within its
-own sub-rect**, selected by a new `FLAG_TILED` bit out of the free bits 5..19 (S-D2's budget), with
+own sub-rect**, selected by a new `FLAG_TILED` bit out of the free bits 5..19 (S-D2's budget), ~~with
 the tile count folded into `uv` at pack exactly as S4 originally proposed. Concretely the sprite
-branch computes `uv = sub_min + frac(t) * (sub_max - sub_min)` instead of `uv = lerp(sub_min, sub_max, t)`.
+branch computes `uv = sub_min + frac(t) * (sub_max - sub_min)` instead of
+`uv = lerp(sub_min, sub_max, t)`.~~ **with the repeat count in `flags` bits 6..=19 and the sprite
+branch computing `uv = sub_min + frac(t * tiles) * (sub_max - sub_min)`.** *(the mechanism's two
+concrete clauses REFUTED and replaced 2026-08-21 at the S5 pre-build audit — **S-D15**. `t` is the
+0..1 quad corner, so `frac(t) == t` on every covered fragment and the ruled expression was
+bit-identical to the `lerp` it claimed to replace: `Tile` would have rendered as `Stretch`. And
+folding the count into `uv` — a clause carried over from the `REPEAT` mechanism this decision
+retired, where it worked because `REPEAT` wrapped at the texture boundary — makes `frac` sweep N
+whole frames under the new wrap, reproducing the sheet bleed this decision claims to dissolve. The
+DIRECTION of the decision survives intact and is vindicated: tiling really is one fragment-side
+`frac` inside the sub-rect, it really does dissolve S-D7, and no sampler change is needed. Only the
+two arithmetic clauses were wrong.)*
 
 **Reason, and it is the interesting half: this DISSOLVES S-D7 rather than implementing it.** The sheet
 hazard S-D7 designed a `debug_assert!` + release clamp + diagnostic counter around exists only because
@@ -352,8 +363,12 @@ that refusal stands and is now vindicated, since the caller it was protecting th
 need the default changed.
 
 **(2) The rung.** **`Tile` lands at S5, not S4.** Not because S4 cannot afford it, but because S4
-cannot *gate* it: the mechanism is a **shader** change (an eDSL leaf, a re-emit, a re-DXC, two
-`SpirvBlob<N>` lengths, two manifest rows) and S4 is otherwise a pure CPU rung — that "no shader
+cannot *gate* it: the mechanism is a **shader** change (an eDSL leaf, a re-emit, a re-DXC, ~~two
+`SpirvBlob<N>` lengths, two manifest rows~~ **ONE `SpirvBlob<N>` length and zero new manifest
+rows — plus a `frac` primitive the eDSL does not have and a NEW leaf, since none of `ui.rs`'s six
+touches the sprite `uv`; corrected 2026-08-21 — S-D15 (4). The cost estimate was wrong in both
+directions at once, and the argument it supports is unaffected: a shader rung is a shader rung.**)
+and S4 is otherwise a pure CPU rung — that "no shader
 change" property is D8d's entire argument for CPU expansion over Bevy's separate-pipeline strategy,
 and it should not be spent on the half of `mode` nothing yet asks for. S5 already owns sprite sub-rect
 arithmetic (`UiSheet.inset_uv`, the frame rect from `(cols, rows, index)`), which is the same
@@ -981,6 +996,441 @@ and reported a missing slice on a picture that was CORRECT. A colour census that
 subjects is an instrument defect, not a finding; the background is olive, chosen to collide with no
 cell.
 
+### S-D15 — `Tile` needs a per-instance REPEAT COUNT; `frac(t)` alone is the identity function
+
+*(added 2026-08-21 at the S5 pre-build audit. S-D11 (1) retired a mechanism that could not work and
+replaced it with one that does nothing. Both halves of its decision sentence are refuted below, and
+the second half is refuted by the FIRST half's own arithmetic.)*
+
+**(1) `uv = sub_min + frac(t) * (sub_max - sub_min)` is bit-identical to the `lerp` it replaces.**
+~~S-D11 (1): "Concretely the sprite branch computes `uv = sub_min + frac(t) * (sub_max - sub_min)`
+instead of `uv = lerp(sub_min, sub_max, t)`."~~ **REFUTED at source.** `t` is `input.local_uv`, which
+the VS sets to `CORNERS[vid]` — *"0..1 within the quad"* (`ui_rect.vs.hlsl:74`) — and which the FS
+already uses as the `lerp` parameter (`ui_rect.fs.hlsl:197`). For every `t` in `[0, 1)`,
+`frac(t) == t`, so the two expressions agree on every fragment; they differ only at exactly
+`t == 1.0`, which a pixel centre does not land on. **`Tile` as S-D11 spelled it renders as
+`Stretch`**, and its own red (M5-e) compares two implementations that compute the same fragment.
+
+**(2) "the tile count folded into `uv` at pack" cannot be done and would break the property S-D11
+was built to obtain.** ~~That clause.~~ **STRUCK.** `UiInstance.uv` is four floats, `offset_of! == 48`,
+documented *"Normalized UV rect `(u0, v0, u1, v1)` in `[0, 1]` … Written verbatim at pack"*
+(`instance.rs:56-62`), and all four are consumed as `sub_min`/`sub_max`. Folding a count in means
+`uv.zw = sub_min + N * extent`, and then `sub_min + frac(t) * (sub_max - sub_min)` sweeps N whole
+frames — the sheet bleed S-D7 designed a guard around, reproduced by the mechanism that retired
+S-D7, on the gate (G5-8) that exists to forbid it. The clause is inherited verbatim from the
+mechanism S-D11 replaced: there, N in `uv` worked because `REPEAT` wrapped at the TEXTURE boundary.
+Under `frac`-in-sub-rect it does not. **The repair rewrote the sentence and kept the clause that
+belonged to the paragraph it deleted.**
+
+**Decision: the repeat count is a per-instance integer PAIR and it rides `flags` bits 5..19.**
+
+```
+bit  5          FLAG_TILED          set iff tiles_x > 1 || tiles_y > 1
+bits 6..=12     UI_TILE_X  (7 b)    repeats across the sub-rect, 1..=127
+bits 13..=19    UI_TILE_Y  (7 b)    repeats down  the sub-rect, 1..=127
+```
+
+and the fragment computes
+
+```
+uv = sub_min + ui_tile_frac(local_uv * float2(tiles_x, tiles_y)) * (sub_max - sub_min)
+```
+
+on the `FLAG_TILED` side and the landed `lerp` on the other.
+
+**Consequences, stated because each moves a number somewhere else.**
+
+* **The bit budget is now EXHAUSTED.** Bits 5..19 were fifteen; `FLAG_TILED` + two 7-bit fields are
+  fifteen. Bit 4 stays reserved for S7. §6's exposure row is amended, because the animation and
+  interaction plans read it to decide whether they may take a bit — after S5 they may not, and the
+  next per-instance datum widens the record instead. `instance.rs:69-78`'s prose and the
+  `ui_flag_consts` generated span both move with this.
+* **`FLAG_TILED` is set only when a count exceeds 1**, so a corner sub-quad (always `1×1`) packs
+  BYTE-IDENTICALLY to its `Stretch` record. That is what lets G4-3's corner claim carry over
+  unchanged and what makes S-D8's `mode != Tile ⇒ FLAG_TILED zero` row exact on both sides.
+* **7 bits, not 8 and not 6:** a UI chrome edge tiles a 8–32 px source over up to ~1000 px, i.e.
+  tens of repeats; 63 could clip a long scrollbar track and 127 cannot. The clamp is a `min` and it
+  is ~~shares G5-6's diagnostic counter (S-D18)~~ **NOT counted** *(corrected 2026-08-26 at the
+  landing: the tile clamp happens in `pack_ui_nine_slice_instance`, a receiverless free function —
+  which is exactly the reason the S4 ledger retired this counter and the reason S-D18 (1) had to
+  move the SHEET clamp's counter into the gather. Only the gather's arithmetic moved; the pack's
+  did not, so the pack's clamp still has nowhere to put a counter.)*
+
+**(3) The count is DERIVED, not authored, and it needs no texture dimensions.** The engine records a
+texture's size nowhere — `components.rs:520-525` says so and `BindlessTextureTable` confirms it — so
+the reference-engine derivation (`dest_px / source_px`) is unavailable. It is not needed. A
+nine-slice already states its own source→destination scale twice: `border_px` is the corner's
+destination size and `border_uv` is the same corner's source extent. Their ratio IS the scale, and
+the sub-rect width cancels out of it:
+
+```
+tiles_x = round( (rect_w - bp_l - bp_r) * (bu_l + bu_r) / ((1 - bu_l - bu_r) * (bp_l + bp_r)) )
+tiles_y = round( (rect_h - bp_t - bp_b) * (bu_t + bu_b) / ((1 - bu_t - bu_b) * (bp_t + bp_b)) )
+```
+
+both clamped into `1..=127`. It is dimensionless, it is computed from values
+`pack_ui_nine_slice_instance` already holds (after S4's proportional shrink, so a shrunk border is
+the one that counts), and **because the source extent cancels, it is identical under a sheet frame
+and under a whole texture** — which is what makes item 7's "the same sub-rect arithmetic" claim true
+for the first time. Degenerate inputs (`bu_l + bu_r == 0`, `bp_l + bp_r == 0`, a non-positive centre
+source extent, or a non-finite result) yield `1`, i.e. `Stretch`; a zero-border nine-slice has no
+scale to read and does not get to guess one.
+
+**It also retires an asserted number.** G5-7's *"a destination whose edge spans 4 whole tiles"* had
+no mechanism that could produce a 4. On G4-3's own landed scene — `rect 96×96`,
+`border_px = [16, 24, 16, 24]`, `border_uv` at its equal-thirds `Default` — the formula gives
+`tiles_x = 64 * (2/3) / ((1/3) * 32) = 4` and `tiles_y = 48 * (2/3) / ((1/3) * 48) = 2`, exactly. The
+gate stops asserting 4 and starts computing it.
+
+**Per region**, `tiles_x` applies to the centre COLUMN (regions T, C, B) and `tiles_y` to the centre
+ROW (L, C, R); every other axis of every other region is `1`. Corners are `1×1` and therefore
+untiled by construction.
+
+**Rejected.** (a) *CPU expansion — one sub-quad per tile*, the pure-CPU route D8d otherwise prefers:
+`ui_node_sub_codes` writes into a fixed `[u32; UI_MAX_SUBS_PER_NODE]` and the staging key is
+`node * UI_RECORDS_PER_NODE + sub` (`upload.rs`), so an unbounded per-node emission does not merely
+cost records — it destroys the `(node, sub)` code the sorted loop recovers each record's source
+from. It is Unity's documented quad explosion and its 16 250-quad cap (research §, `Image.cs`
+`GenerateTiledSprite`). (b) *carry the counts in a field the sprite branch does not read* —
+`corner_radius` (16 dead bytes on every textured record), `border_width` or `border_color`: this is
+exactly the `corner_radius`-as-UV alias S2 spent 16 B per record to retire, and reviving it one rung
+later for one flag's worth of data would trade a permanent invariant ("this field means ONE thing")
+for fifteen bits the budget already has. (c) *a `-D TILE` shader variant* — the manifest records
+these two sources as having **no `-D` axis**, and a runtime flag costs one branch that is
+uniform-per-instance exactly like `FLAG_TEXT` and `FLAG_TEXTURED` beside it.
+
+**(4) The shader edit is ONE new eDSL leaf and ONE `SpirvBlob<N>`, not "two lengths, two manifest
+rows".** ~~"one shader edit at S5 (eDSL leaf, re-emit, re-DXC, two `SpirvBlob<N>` lengths, two
+manifest rows)"~~ **CORRECTED, three ways, each measured:**
+
+* **The eDSL has no `frac`.** No `frac`, `floor` or `fract` occurs anywhere in
+  `crates/boyko_shaderdsl/src/`. The leaf costs a `Cf` method, its `EvalCf` `f32` arm
+  (`x - x.floor()`), its `Emit` printer arm, and a host oracle row in
+  `crates/boyko_shaderdsl/tests/ui_leaves.rs`.
+* **There is no existing leaf to extend.** `crates/boyko_shaderdsl/src/ui.rs` holds exactly six leaf
+  bodies and none of them touches the sprite `uv`; the line to be replaced
+  (`ui_rect.fs.hlsl:197`) sits in `main`, below the last `// === GENERATED … END ===` sentinel at
+  `:159`. S5 mints a NEW leaf `ui_tile_uv(uv, local_uv, flags) -> float2`, a new spliced span, and a
+  new `assert_span_is_the_body_of` row in `ui_rect_edsl_sync.rs`.
+* **Only the FS blob moves.** `ui_rect.vs.hlsl` has no sprite branch and no `ui_flag_consts` span;
+  the manifest's own landing history records the VS at `2408 → 2408, byte-identical` across the
+  whole S3 sprite landing. One length (`UI_RECT_FS_SPV: SpirvBlob<8760>`), and **zero** new manifest
+  rows — `FLAG_TILED` is a runtime bit, and the manifest's rule is one row per `-D` variant, of
+  which these files have none. The two existing rows gain notes; the landing-history table gains an
+  S5 row.
+
+**And the whole sprite-`uv` computation moves INTO the new leaf**, so the template line becomes
+`float2 uv = ui_tile_uv(inst.uv, input.local_uv, inst.flags);`. That is not tidiness: it closes a
+real hole. `emit_ui.rs` owns the whole file as a `format!` template, `ui_rect_edsl_sync.rs` compares
+only the sentinel spans and the six leaf bodies, and `ui_rect_spv_sync.rs` compares the committed
+`.hlsl` to the committed `.spv` — so **nothing in the workspace compares the generator's `main`
+template to the committed `main`**. An edit applied to one copy and not the other is green under
+`cargo test` and is silently reverted by the next `emit_ui` run. Putting the mechanism inside a
+sentinel span puts it under the gate that already exists.
+
+### S-D16 — the flipbook writes `UiSpriteSheet.index`, and it MUST: a dense `Changed<C>` inside `Or<..>` is measurably DEAD
+
+*(added 2026-08-21 at the S5 pre-build audit. The rung's Lands list contradicted itself; the
+contradiction is resolved by a kernel measurement, not by a preference.)*
+
+**(1) The contradiction.** Item 4 says `UiSpriteCursor` is *"the only column the flipbook system
+writes per frame"*; item 5 says the same system writes `index`, which is a field of
+`UiSpriteSheet` — item 2's `4 B, table`. Both cannot hold, and
+`UI-ADVANCED-ARCHITECTURE.md:581`/`:583` repeat both halves verbatim, so neither document arbitrates.
+
+**(2) The measurement that decides it.** Written and run against this tree at `b2318ac5` on rustc
+1.97.1 (`boyko-ecs`, a three-frame schedule; the probe was deleted after reading):
+
+| frame | `Query<(), Changed<DCursor>>` | `Query<(), Or<(Changed<TSheet>, Changed<DCursor>)>>` |
+|---|---|---|
+| 1 — insert | 1 | 1 |
+| 2 — idle | 0 | 0 |
+| 3 — **dense write through `Mut`** | **1** | **0** |
+
+**A dense `Changed<C>` inside `Or<..>` can never be true.** The cause is structural and is in the
+kernel, not in the test: `Changed<C>` supports dense fully (`HAS_DENSE`, `HAS_DENSE_INCLUDE`,
+`resolve_dense`, the per-slot tick read — `filter.rs:1321-1390`), but the `Or<(..)>` `QueryFilter`
+impl **overrides none of them** (`filter.rs:1834-2030` sets `IS_ARCHETYPAL`,
+`NEEDS_CHANGE_DETECTION`, `CONTAINS_*` and nothing else), so `Or::HAS_DENSE` takes the trait default
+`false`, `resolve_dense` is never called on the inner term, its `ChangedFetch.dense` stays the
+`init_fetch` NULL, and `filter_fetch`'s first line is `if fetch.dense.is_null() { return false; }`
+(`filter.rs:1483-1484`). Frame 1's `or = 1` comes from the TABLE arm.
+
+**Consequence for this rung, and it is the decisive one.** `ui_render_discovery`'s filter is
+`Query<(), ui_pack_inputs!(changed)>` — a flat `Or`. A dense `UiSpriteCursor` placed in that list
+would be READ correctly by the gather (`WorldView::get_component_raw` routes dense ids to
+`dense_get_raw`, `component_api.rs:199-205`) and would be INVISIBLE to the discovery filter, so the
+generation would never bump on a flipbook tick, the D6a per-slot gate would keep skipping, and **the
+sprite would render a frozen first frame with nothing saying so** — the exact failure
+`gather.rs:66-70` records for the S3 case. The macro's own promise, *"adding a component to
+`ui_pack_inputs!` wires the discovery filter for free"*, **is true for TABLE components only**, and
+that sentence is amended where it lives.
+
+**Decision, three parts.**
+
+1. **The flipbook writes `UiSpriteSheet.index` through `Mut<UiSpriteSheet>`, and that tick IS the
+   repaint signal.** It uses `set_if_neq` (`data.rs`, MUT4-gated), so a tick at 12 fps does not bump
+   the generation on the ~4 frames out of 5 where the frame index does not change — the churn is
+   proportional to visible change, not to frame rate. `&mut T` is FORBIDDEN at this site: it does not
+   consult ticks (`write.rs:234`), and the repaint depends on the tick.
+2. **`UiSpriteCursor` stays dense, loses `frame`, and gains `loops_done`.** `frame` under the ruling
+   above is written and read by nobody — the dead-datum class this campaign names at `:343`. And
+   `UiSpriteAnim.repeats` had no reader at all: nothing in `{ elapsed, frame, dir }` counts completed
+   cycles, so `Once`/`repeats` could not be honoured and `repeats` was a second dead datum in the
+   same pair. The cursor becomes
+   `#[repr(C)] #[derive(Clone, Copy)] UiSpriteCursor { elapsed: f32, dir: i8, loops_done: u8, _pad: [u8; 2] }`
+   — **8 B, align 4, padding SPELLED** (the `UiNineSlice::_pad` rule, `components.rs:582-586`: both
+   S5 structs reached their stated sizes through IMPLICIT tail padding, which is what that rule
+   forbids). `UiSpriteAnim` likewise becomes
+   `#[repr(C)] #[derive(Clone, Copy)] UiSpriteAnim { first: u16, last: u16, fps: f32, mode: SpriteAnimMode, repeats: u8, _pad: [u8; 2] }`
+   — **12 B, align 4**, with `mode` a `#[repr(u8)]` **typed enum** (`Forward|Reverse|PingPong|Once`)
+   rather than a raw `u8`: S-D13 (4)(3) ruled that the AUTHORED component keeps the typed enum and
+   only a CROSS-CRATE raw byte is `debug_assert!`ed, and `mode` never crosses — the flipbook and the
+   component both live in `boyko_ui`, and the pack never sees it. No count const and no conversion
+   site are minted for it. **All four sizes are MEASURED with a `const _: () = assert!(size_of…)`,
+   not asserted in prose** (S-D12 (2)).
+3. **`ui_pack_inputs!` gains exactly ONE component: `UiSpriteSheet`.** ~~"the three components that
+   affect the picture"~~ **STRUCK — only one of the three affects the picture.** The pack derives
+   `uv` from `(cols, rows, index)` and takes the slot from `UiSheet`; it never reads `UiSpriteAnim`
+   (author configuration the flipbook consumes) and, after (2), never reads `UiSpriteCursor` (the
+   flipbook's private state). The gather probes EVERY listed component on EVERY visited node — a
+   probe that returns `None` is still a probe (`ui_s0_measure.rs:218-224`) — so listing the other
+   two would have charged two dead probes to every node of every changed frame, and one of the two
+   would additionally have sat in the `Or` as a term that cannot fire.
+
+**Cascade, all of it downstream of "ONE, not three":** the probe census goes **7.00 → 8.00**
+(+14.3 %), not 7.00 → 10.00; the `Or` arity goes **6 → 7** (ceiling 12; `UiVisual` makes 8 and the
+interaction plan's scroll datum 9); `ui_s0_discovery.rs` gains **one** `PackInput` variant, one
+`ALL` entry, one `name()` arm and one `mutate_pack_input` arm (three landings, not nine — and the
+array's hard-coded arity in `const ALL: [PackInput; 6]` is one of them); `ui_s0_measure.rs`'s prose
+ladder gains one row. §5's *"S5 owes 7.00 → 10.00 (its three)"* is corrected in place.
+
+**(3) The sheet OVERRIDES `UiImage`; it does not replace it.** Item 2 never said whether a
+sheet-bearing node still needs `UiImage`, and both answers cost something. **Ruled: `UiImage`
+remains the capability**, and the GATHER — the one site that already flattens components into
+`PackInput` — substitutes the sheet's slot and the computed frame rect into `UiImageInput`. Three
+reasons, each a landed mechanism: (a) `ui_node_sub_codes` is documented *"the SOLE authority"* and
+its truth table plus `pack_ui_sub_record`'s two `.expect` preconditions are keyed on `input.image` —
+that is the machinery G4-8 and M4-g exist to protect, and S-D12 (3) ruled its shape one rung ago;
+(b) `pack.rs` stays free of every `boyko_ui` type, so `UiImageInput` keeps its three fields and the
+pack learns nothing about sheets; (c) it keeps `components.rs:520-525` TRUE — `border_uv` is *"a
+FRACTION of the node's current `UiImage` UV sub-rect"*, and because the sheet writes the frame INTO
+that sub-rect, item 7's "`border_uv` composes for free" is true rather than merely hoped. A node
+carrying `UiSpriteSheet` and no `UiImage` therefore draws its background alone — the same structural
+skip S-D12 (3) ruled for `UiNineSlice` alone, and it gets the same truth-table row.
+
+**The gather reads the sheet table through `WorldView::resource::<UiSheetTable>()`**
+(`dispatcher_token.rs:284`), which is a read-only projection the view already offers — so
+`gather_ui_nodes`' signature does not change, and the resource read is once per gather, not per
+node, and is therefore NOT a probe. **The table gets the mint verb item 1 omitted**, on the
+`FontTable` precedent it cites but did not copy: `FontTable::load(&BakedFont) -> FontId`
+(`text/font.rs:130-158`) is a setup-time push into a `Vec` inside a `#[derive(Resource)]` struct
+returning the dense index. `UiSheetTable::register(UiSheet) -> SheetId` is the same verb; §6's
+*"the `u16 sheet_id` dense-handle mint"* row names a surface that Lands item 1 otherwise never
+creates.
+
+### S-D17 — S5 carries AM6's clamp itself, and the seam is a resource read, not a `world` call
+
+*(added 2026-08-21 at the S5 pre-build audit.)*
+
+~~"If the animation plan has not landed, S5 reads `Time`'s real delta directly and the seam is one
+function — `ui_frame_delta(world) -> f32`."~~ **Both halves struck.**
+
+**(1) The value is the refuted one.** `UI-PLAN-ANIMATION.md` AD1 rejects *"each system reads
+`Res<Time>`"* by name, for this consumer by name (*"The sprites plan's flipbook and the interaction
+plan's `ScrollMomentum` … read `UiClock`, not `Time`"*), and rejects *"no clamp, trusting `Time`'s"*
+because AM6 measured that `Time`'s clamp does not reach the real delta. The kernel confirms it:
+`time.rs:197` assigns `self.real_delta = raw` BEFORE the clamp at `:201`, and `real_delta()` is
+documented *"unclamped, unscaled, pause-blind"*. An alt-tab stall hands the flipbook a two-second
+delta, which skips whole cycles for `PingPong` and `Forward` and jumps `Once` to its end; a paused
+game keeps animating.
+
+**Decision: the fallback is `Res<Time>` PLUS AM6's clamp, spelled at the one site, with the constant
+named `UI_FALLBACK_MAX_DELTA = 0.1` — AD1's own default — and a comment pointing at AD1 as the value
+this line will be deleted in favour of.** S5 stays unblocked, but it does not adopt the option its
+sibling rejected: it adopts the sibling's *conclusion* with the sibling's *number*, in one place, so
+that the later replacement is a deletion rather than a behaviour change.
+
+**(2) `ui_frame_delta(world)` is not callable from the system item 5 describes.** There is no `world`
+handle inside a scheduled `Query`-bearing system: the only world-shaped read surface is `WorldView`,
+minted solely from a `DispatcherToken`'s `&self` and `!Send`/`!Sync`, and a `&mut EcsMaster`
+parameter would force `ui_sprite_flipbook` to be an EXCLUSIVE system. The in-tree spelling — and the
+shape of the thing that replaces it (`Res<UiClock>`, AD1) — is a `SystemParam`. **The seam is
+`Res<Time>` today and `Res<UiClock>` after the animation plan lands**, one parameter swapped and one
+clamp deleted; the plan stops promising a function signature that neither the fallback nor the
+replacement has.
+
+### S-D18 — the S5 gate table: what each device row samples, and where the clamp counter lives
+
+*(added 2026-08-21 at the S5 pre-build audit — the row-level corrections S-D15 and S-D16 force, plus
+the two the S4 landing already paid for and this rung repeated.)*
+
+**(1) The diagnostic counter has a home now, and it did not before.** G5-6 requires a counter for the
+`index >= frame_count` clamp. The S4 ledger retired that counter for want of a home
+(`:1644-1646`: the pack entry points *"are free functions with no receiver … and had nowhere to put
+a counter"*, which is still true of all five of them), and S5's item 7 says in the same breath that
+*"the diagnostic counter S4 was going to build are not built by anyone"* — one rung both retiring a
+counter and requiring one. S-D16 (3) moves the sheet arithmetic into the GATHER, which owns
+`UiGatherScratch` — the struct that already carries `probes`, deliberately not `#[cfg(test)]`
+because *"a `#[cfg(test)]` counter cannot be read by the observer rung"* (`gather.rs:26-36`). The
+clamp counter is `UiGatherScratch::sheet_index_clamps: u64`, unconditional, on the `probes`
+precedent, exposed the way `UiUploadSystem::probes()` already exposes its sibling. *(Aside: the
+struck citation `pack.rs:86`, `:204` in `:1645` is stale after S4's own landing —
+`pack_ui_instance` is at `:141` and `pack_ui_image_instance` at `:296`; `:86` is mid-doc-comment and
+`:204` is inside a `corner_radius` scaling. The claim survives; the anchors do not.)*
+
+**(2) Every device row names its `UiSamplerMode`, because the sibling row it inherits from was
+amended for exactly this one rung ago** (S-D13 (4)(2): G4-3 *"stated no mode, and its own assertion …
+is FALSE under the default"*; `Smooth` is `Filter::Linear` and is `#[default]`,
+`resources.rs:103-118`). G5-5, G5-7 and G5-8 all make which-texel-was-sampled claims. **G5-5, G5-7
+and G5-8 run `UiSamplerMode::Pixel`**; the one claim that is *about* filtering — `inset_uv`'s
+purpose, *"half-texel inset against bilinear bleed"* — gets its own `Smooth` row, **G5-9**, because
+under NEAREST there is no tap to bleed and the field's entire effect is inert. M5-b's second half
+moves onto G5-9.
+
+**(3) A SKIP IS NOT A PASS, and it is NOT inherited.** `BOYKO_UI_GOLDEN_REQUIRE_DEVICE` occurs in
+exactly one file in the workspace — `ui_nine_slice_gpu_golden.rs:586-589` — and
+`tests/common/mod.rs` offers only `boot_or_skip`, which `eprintln!`s and exits 0. S5 has four
+device-bound rows and two of its reds land only on them, so **each new golden file replicates the
+guard**, exactly as S-D14 (7) ruled for S4's single row.
+
+**(4) Every source must be able to SHOW what its row claims.** Two of the three sources as specified
+cannot, and both are the S4 amendment (a) — *"a symmetric source makes region assignment
+unobservable"* — recurring one axis over:
+
+* **G5-7's 3×3 source cannot distinguish a tile from a stretch.** Each nine-slice region of a 3×3
+  source under `border_uv`'s equal-thirds `Default` is EXACTLY ONE uniform texel; four repeats of a
+  uniform texel and one stretched copy of it are the same solid block, byte-identical under NEAREST.
+  The blessed hash would be reproduced exactly by a `Tile` that silently fell back to `Stretch` —
+  which is the entire failure the row exists to catch. **G5-7's source becomes 6×6: nine 2×2 cells,
+  each cell two distinct values.** Its top edge is then 64 px from a 2-texel source: stretched, two
+  32-px bands; tiled ×4, eight 8-px bands. The row asserts NAMED PROBE COLUMNS as well as the hash,
+  because the columns are what depend on the count.
+* **`inset_uv` on a 4×4-texel source is degenerate.** S-D5's *"4×4 flipbook grid"* read as 4×4
+  TEXELS gives 16 frames of one texel; a half-texel inset is `0.5/4 = 0.125` uv against a frame
+  extent of `0.25`, so insetting both sides leaves an extent of **exactly zero** — `u0 == u1` at the
+  texel centre. `frac`, `lerp` and the inset are then all no-ops and M5-b moves no pixel. **S-D5's
+  flipbook source is 4×4 FRAMES of 4×4 TEXELS — a 16×16 RGBA8 grid** — so `inset_uv = (1/32, 1/32)`,
+  the frame extent is `0.25 - 1/16 = 0.1875`, and G5-1's hand-computed constant at
+  `(cols=4, rows=4, index=6)` is `uv = (0.53125, 0.28125, 0.71875, 0.46875)`, exact in binary FP.
+  **All sixteen frames must be mutually distinct**, and specifically frames 5, 6 and 7 must differ,
+  or an off-by-one in the decode is invisible to a hash.
+* **G5-8's sheet source is 4×4 frames of 6×6 texels (24×24), with `inset_uv = (0, 0)`**, stated with
+  its reason: G5-8 runs NEAREST, where the inset protects against nothing, and a zero inset makes
+  each frame exactly 6 texels per axis so each nine-slice region is exactly 2×2 — which is what makes
+  *"every sampled texel lies within that frame's sub-rect"* decidable per texel instead of per
+  sub-texel blend.
+
+**(5) The missing red is the characteristic sheet defect.** G5-1 and G5-5 both use a SQUARE grid, and
+with `cols == rows` the natural decode `col = index % cols; row = index / cols` is bit-identical to
+the same expression with `cols` and `rows` interchanged — so a transposed `(cols, rows)`, the
+standard sprite-sheet bug, passes the hand-computed constant AND the pinned hash. **G5-1 additionally
+carries a NON-SQUARE case (`cols = 4, rows = 2, frame_count = 8`)**, and **M5-f — swap `cols` and
+`rows` in the frame decode** is added, reddening it. This is S4's own dihedral-symmetry finding
+(`ui_nine_slice_gpu_golden.rs:22-31`) one axis over.
+
+**(6) M5-b as spelled is a compile error, not a red.** *"drop `inset_uv`"* deletes a field G5-1 names
+as one of its four inputs, so the target fails to BUILD rather than to assert, and the protocol
+requires the predicted failure OBSERVED. **M5-b becomes "ignore `inset_uv` in the frame-UV
+derivation", leaving the field in place** — and it now reds G5-1 (the constant moves) and G5-9 (the
+`Smooth` probe at the frame edge takes its neighbour's contribution).
+
+**(7) M5-a is verb-dependent and the verb is now pinned.** Merging `UiSpriteAnim` into
+`UiSpriteCursor` reds G5-3 only if the merged component's write stamps a tick. Under S-D16 (1) the
+flipbook's tick-bearing write is `Mut<UiSpriteSheet>::set_if_neq`, and the merge moves
+`UiSpriteAnim`'s fields into a component the flipbook writes with `&mut` — which does NOT consult
+ticks. **M5-a is restated as "merge `UiSpriteAnim` INTO `UiSpriteSheet`"**, the component the
+flipbook already tick-writes: then `Changed<UiSpriteAnim>` becomes `Changed<UiSpriteSheet>`, fires
+every frame the index moves, and G5-3's *"never on a per-frame advance"* half reds for the reason
+D8a exists. As originally spelled it was a red that could not fire.
+
+**(8) Item 6's landing is gated, because S4's identical line was.** G4-7 existed for the S4 macro
+edit and the landed ledger calls that edit *"the omission that would have made the rung invisible"*.
+S5's table had no row driving it. **G5-10** is added: the new `PackInput` variant is driven end to
+end by `ui_s0_discovery`'s no-catch-all loop, and `PackInput::ALL.len() == ui_pack_inputs!(count)`
+holds — the assertion that turns "added to the macro but not to the test" into a red with a reason.
+
+### S-D19 — the six corrections BUILDING S5 found, and the one red that did not fire
+
+*(added 2026-08-26 at the S5 landing. The pre-build audit and its check lens between them refuted
+seventeen claims and amended sixteen rows; these six are the ones neither could have found without
+running the code, and the last is the one the RED PROTOCOL found rather than the build.)*
+
+**(1) The untiled arm keeps the `lerp` INTRINSIC, and "bit-identical" was the wrong word for what
+S-D15 (1) refuted.** S-D15 (1) says `uv = sub_min + frac(t) * (sub_max - sub_min)` is *"bit-identical
+to the `lerp` it replaces"*. It is not: HLSL `lerp` lowers to `OpExtInst GLSL.std.450 FMix`, whose
+specified form is `x * (1 - t) + y * t`, while the decomposition spells `x + t * (y - x)`. They agree
+to about one ULP, not bit-for-bit. **The refutation still lands** — an 8-bit golden cannot see a
+1-ULP shader edit (`reference-golden-fp-resolution`), so `Tile`-as-spelled rendered as `Stretch`
+either way — but the word matters DOWNSTREAM: the six committed UI image pins were blessed against
+the intrinsic, and had the new leaf decomposed it, all six would have held by luck rather than by
+construction. `Cf::vec2_lerp` therefore spells the intrinsic and its doc says why, and the leaf's
+oracle table pins the untiled arm as hard as the tiled one.
+
+**(2) The leaf costs THREE new eDSL facets, not one — and the third is a printer bug the leaf found.**
+S-D15 (4) costed `frac` alone. Measured: `vec2_add` does not exist either (only `vec2_add_scalar`),
+and no `float2` `lerp` exists (`lerp` is scalar-only on `FieldScalar`), so the leaf needs `vec2_frac`
+AND `vec2_lerp`. The third is subtler. `Cf::named_uint` exists — but its Emit node is a `NamedLit`
+typed `Float`, minted for a symbol whose only consumer is a bare `return` with no operand check, and
+`and_u`/`shr_u` DO check their operands `Uint`. Spelling the tile constants as bare literals instead
+would have put a SECOND copy of the S-D2 bit layout inside the leaf, beside the copy
+`emit_hlsl_ui_flag_consts` generates from the layout — the drift class S-D10 exists to close. So
+`named_uint_val` + `Node::NamedUint` were added. **And then the generator PANICKED**: `emit_ui_leaf`
+passed `NO_NAMED_LITS` to the printer, because the six S1 leaves spelled only bare literals, and an
+empty symbol table under a symbol node is an index-out-of-bounds AT GENERATION. Found by running the
+generator, not by reading it.
+
+**(3) "Only the FS blob moves" is true of the `.spv` and FALSE of the `.hlsl`.** S-D15 (4) says the
+VS is untouched because it has no sprite branch and no `ui_flag_consts` span. Both halves are true,
+and the conclusion still does not follow: the tile bits are described in the `UiInstance` MIRROR
+span, which both stages carry. `ui_rect.vs.hlsl` gained one comment line and `ui_rect_edsl_sync`'s
+VS half is what covers it. The `.spv` did stay byte-identical (2408 → 2408), exactly as the S3
+landing recorded for the same reason.
+
+**(4) The gather reads the sheet table through `try_resource`, not `resource`.** S-D16 (3) and Lands
+item 2 both name `WorldView::resource::<UiSheetTable>()` and cite `dispatcher_token.rs:284` — the
+PANICKING verb, whose own doc says *"Panics if no resource of type `R` has been inserted … Use
+`try_resource` for the non-panicking variant."* The read is hoisted above the DFS in
+`gather_ui_nodes`, which runs for every UI scene in the tree, and EIGHT in-tree harnesses build
+worlds by hand and insert only what they need. Following the plan literally panics every one of them
+at the first gather. An absent table is not an error — it means no sheet is registered — so the
+gather takes `Option<&UiSheetTable>` and an absent table leaves every node's `UiImage` untouched,
+which is the S-D12 (3) structural-skip shape the rung already uses. **The same ruling settles a
+residual contradiction:** G5-6's parenthetical says a `frame_count == 0` sheet makes the node *"emit
+no sprite record"*. It cannot — `ui_node_sub_codes` is the SOLE authority on a node's records (gate
+G4-8) and the gather is not allowed a second opinion. Inert-and-fall-back is the behaviour, and
+G5-1's second test pins all three ways to be inert.
+
+**(5) `#[require(UiSpriteCursor)]` is UNBUILDABLE, and the reason is a kernel defect.** S-D18's
+closing amendment adds it so an authored `flipbook:` cannot silently never tick. Applied, it PANICS
+on every insert: the require pass resolves the required id's `ComponentPool` in the target
+ARCHETYPE, and a dense id owns no per-archetype pool by construction (dense plan D0). Three S5 gates
+failed this way. The panic even names an expansion that never happened, so its message points away
+from the cause. Filed in `docs/OPEN-QUESTIONS.md` (+ the `ru/` twin, same edit). **The buildable
+remedy is a BUNDLE**: `AnimatedSpriteBundle` carries the layout base, the image, the sheet, the
+animation and the cursor in one spawn, so the pairing is structural at the AUTHORING site instead of
+at the component. **G5-12** pins both halves — the bundle animates, and a hand-spawned
+`UiSpriteAnim` with no cursor is FROZEN, silently.
+
+**(6) ⚠️ A RED THAT DID NOT FIRE, and what it exposed.** **M5-j** — set `FLAG_TILED` unconditionally,
+so a `1×1` corner stops being byte-identical to its `Stretch` record — left EVERY gate green on its
+first run: G5-7, G5-8, the S4 nine-slice golden and all twelve CPU tests. Two causes, and both are
+instructive:
+
+* **The picture genuinely does not move.** `frac(local_uv * 1) == local_uv` for every covered
+  fragment — S-D15 (1)'s own finding, one level down. No golden can see this mutation, ever.
+* **G5-11's corner leg was a COMPARISON between two arms that share the mutated code.** It asserted
+  `tile_record.flags == stretch_record.flags`, and `tile_flag_bits` is called on the `Stretch` path
+  too — so the mutation moved both sides equally and the equality held. A gate that compares two
+  outputs of the mutated function is not an instrument for mutations of that function.
+
+The repair is to assert the ABSOLUTE property S-D15 states and the comparison only implies: a `1×1`
+region's record carries NO tile bits at all — not the flag, not either count field. With that line
+added, M5-j reds immediately (`flags & tile_mask == 0x2060`). **This is the campaign's
+"gate that cannot fail" class caught by the protocol working**, and it is worth naming the shape:
+*a relative assertion between two arms of the same function is blind to every change that is
+symmetric across them* — which is most single-line changes to that function.
+
 ---
 
 ## 4 · The rung ladder
@@ -1056,6 +1506,8 @@ render); author-only commit.
 | **G0-3** | The packed-count return crosses the seam | Phase 1's contract: mutate one node once ⇒ the next dispatch packs **exactly once**, `gather_into_staging`'s packed-count is observable off the system (the count AND the repacked row carrying the new value — not a stale re-serve), and the dispatch after that skips again (`ui_s0_seam.rs::g0_3_one_mutation_one_repack_count_returned`). |
 | **G0-4** | The DFS carries the inherited clip and its pre-order is paint order | A three-level tree with a clip at the middle level: the leaf's packed `clip` is the ancestor's, and the emitted `append` order equals `collect_candidates`'s `paint_seq` for the same tree. |
 | **G0-5** | **THE SEAM GATE: the fusion is unrepresentable** | Two halves. (1) Signature pins: Phase 1's signature names **no** `!Send`/graphics type, Phase 2's names **no** world type — pinned by fn-pointer coercions that stop compiling if either signature grows the other phase's type (`ui_s0_seam.rs::g0_5_seam_signatures_do_not_cross`). (2) A trybuild fixture where **re-fusing them fails to compile**: one call site holding Phase 1's `WorldView` live across Phase 2's `&mut RhiContext` projection is E0502 (`tests/ui_s0_seam_fusion/refused_refusion.rs`, blessed `.stderr`). That makes the fusion unrepeatable rather than fixed. |
+| **G5-11** | The repeat count is DERIVED, the bit layout is what the shader reads, and every degenerate input is `Stretch` | *(added 2026-08-26 at the landing.)* **The rung's headline mechanism had NO device-free gate**: an eight-input ratio with a `round`, two clamps and four degenerate cases, exercised only by G5-7 and G5-8 — two `BOYKO_UI_GOLDEN_REQUIRE_DEVICE` goldens that `boot_or_skip` past on a GPU-less box. A CPU table over `pack_ui_nine_slice_instance`'s FLAGS word on G4-3's own scene: the derivation COMPUTES `(4, 2)`; the four corners pack **no tile bits at all** (the ABSOLUTE form of S-D15's byte-identity claim — see S-D19 (6)); the top/bottom edges pack `(4, 1)`, the left/right `(1, 2)`, the centre `(4, 2)`; `Tile` moves NO source and NO destination coordinate; and each of `ui_nine_slice_tiles_axis`'s degenerate inputs yields `1`. It also gates the bit LAYOUT (bit 5, 6..=12, 13..=19), which no picture can see. CPU, device-free. |
+| **G5-12** | The cursor pairing is structural at the AUTHORING site | *(added 2026-08-26 at the landing — S-D19 (5): `#[require(UiSpriteCursor)]` PANICS, because the require pass resolves the required id's pool in the target ARCHETYPE and a dense id owns none.)* Two legs: a node spawned from **`AnimatedSpriteBundle`** animates; and a node hand-spawned with `UiSpriteAnim` and NO cursor is FROZEN — asserted, because stating the hazard as an assertion is the difference between a documented hazard and a claimed one. CPU, device-free. |
 
 **Red mutations.**
 
@@ -1286,9 +1738,14 @@ the byte growth; the pack is compute-, not bandwidth-, bound at these N. Afforda
 5. `FLAG_TEXTURED` (bit 3); the slot in bits 20..31; `PackInput` gains `image: Option<UiImageInput>`
    carrying `(slot, uv, tint)`.
 6. The fragment shader's textured branch, **through the eDSL** — `emit_ui.rs` re-emitted, both `.hlsl`
-   re-spliced, both `.spv` re-DXC'd and re-committed, the two `SpirvBlob<N>` lengths updated, the two
-   `SHADER-VARIANT-MANIFEST.md` rows updated (still no `-D` axis), and `ui_rect_{vs,fs}_spv_sync`
-   re-run with dxc present.
+   re-spliced, both `.spv` re-DXC'd and re-committed, ~~the two `SpirvBlob<N>` lengths updated~~
+   **ONE `SpirvBlob<N>` length updated** *(corrected 2026-08-21 at the S5 audit, by MEASUREMENT of
+   what S3 actually landed: the FS went `7136 → 8760` and the VS did **not** move — `2408 → 2408`,
+   byte-identical, "DXC's output is measurably indifferent" to the comment-only edit inside the
+   shared mirror (`ui/mod.rs:154-157`, and the manifest's own landing-history row). The prescription
+   said two and one moved; the same over-count was about to be repeated verbatim in S5's item 7.)*,
+   the two `SHADER-VARIANT-MANIFEST.md` rows updated (still no `-D` axis), and
+   `ui_rect_{vs,fs}_spv_sync` re-run with dxc present.
 7. Both recorders bind set 1: `record_ui_rects` via `bind_descriptor_set_at(1, …)`, `present_blit.rs`
    via its existing `cmd_bind_descriptor_sets` with `first_set = 1` — the shape `gbuffer.rs:1081-1095`
    already uses.
@@ -2139,27 +2596,111 @@ frame nothing, because the D6a gate still returns before one component is probed
    }                       // 20 B, no tail pad
    ```
 
+   **Plus the mint verb** *(added 2026-08-21 — S-D16 (3): the struct and the column were landed and
+   the REGISTRATION was not, so §6 exposed a "sheet-id mint" no line of this rung created)*:
+   `UiSheetTable::register(UiSheet) -> SheetId`, the `FontTable::load` verb
+   (`text/font.rs:130-158`) — a setup-time push into a `Vec` inside a `#[derive(Resource)]` struct,
+   returning the dense index. Setup-only; the table never grows in-frame.
 2. `UiSpriteSheet { sheet: u16, index: u16 }` — 4 B, table. Presence ⇒ the pack derives `uv` from the
    sheet table by **pure arithmetic** from `(cols, rows, index)` instead of reading `UiImage`'s
-   `uv_min`/`uv_max`, and takes the slot from `UiSheet` rather than from `UiImage`.
-3. `UiSpriteAnim { first: u16, last: u16, fps: f32, mode: u8, repeats: u8 }` — 12 B, table, **cold**:
-   author-written, never system-written.
-4. `UiSpriteCursor { elapsed: f32, frame: u16, dir: i8 }` — 8 B, **dense**: the only column the
-   flipbook system writes per frame.
+   `uv_min`/`uv_max`, and takes the slot from `UiSheet` rather than from `UiImage`. **The
+   substitution happens in the GATHER, into `UiImageInput`, and `UiImage` remains the capability**
+   *(ruled 2026-08-21 — S-D16 (3): `ui_node_sub_codes` is the SOLE authority and its truth table plus
+   `pack_ui_sub_record`'s two `.expect` preconditions are keyed on `input.image`; substituting in the
+   gather keeps `pack.rs` free of every `boyko_ui` type and keeps `components.rs:520-525`'s
+   `border_uv` sentence — "a fraction of the node's CURRENT `UiImage` UV sub-rect" — true, which is
+   what makes item 7's "composes for free" a fact rather than a hope. A node with `UiSpriteSheet` and
+   no `UiImage` emits its background alone, the S-D12 (3) row for `UiNineSlice` alone.)*. The table is
+   read via ~~`WorldView::resource::<UiSheetTable>()` (`dispatcher_token.rs:284`)~~
+   **`WorldView::try_resource::<UiSheetTable>()`** — once per gather, not per node, so it is **not**
+   a probe and does not move the census. *(corrected 2026-08-26 at the landing — S-D19 (4): `:284`
+   is the PANICKING verb, and the gather it sits in runs for every UI scene in the tree, including
+   eight harnesses that build worlds by hand and insert no sheet table. An absent table is not an
+   error; it means no sheet is registered, and every node then draws its `UiImage` exactly as it did
+   at S4.)*
+3. ~~`UiSpriteAnim { first: u16, last: u16, fps: f32, mode: u8, repeats: u8 }` — 12 B, table,
+   **cold**~~ **`#[repr(C)] #[derive(Clone, Copy)] UiSpriteAnim { first: u16, last: u16, fps: f32,
+   mode: SpriteAnimMode, repeats: u8, _pad: [u8; 2] }` — 12 B, align 4, table, cold** *(corrected
+   2026-08-21 — S-D16 (2). Two defects in one line. The stated 12 B was reached through IMPLICIT
+   tail padding, which `UiNineSlice::_pad`'s own doc calls "precisely what 'the padding is spelled'
+   forbids leaving unwritten in a `#[repr(C)]` POD" — and the sibling item one row up spells its own.
+   And `mode` is a raw `u8` on an AUTHORED component with four legal values, which is the shape
+   S-D13 (4)(3) ruled against one rung earlier: the authored component keeps the typed enum, where
+   the type system forbids the fifth value; only a CROSS-CRATE byte is `debug_assert!`ed, and this
+   one never crosses — the flipbook and the component both live in `boyko_ui` and the pack never
+   reads `mode`. `SpriteAnimMode` is `#[repr(u8)] { Forward, Reverse, PingPong, Once }`; no count
+   const and no conversion site are minted. The size is pinned by `const _: () = assert!(size_of…)`,
+   MEASURED not asserted — S-D12 (2).)*: author-written, never system-written.
+4. ~~`UiSpriteCursor { elapsed: f32, frame: u16, dir: i8 }` — 8 B, **dense**: the only column the
+   flipbook system writes per frame.~~ **`#[repr(C)] #[derive(Clone, Copy)] UiSpriteCursor
+   { elapsed: f32, dir: i8, loops_done: u8, _pad: [u8; 2] }` — 8 B, align 4, dense: the flipbook's
+   PRIVATE state, read by no other system and by no pack input.** *(corrected 2026-08-21 —
+   S-D16 (2). `frame` was written by the flipbook and read by nobody — item 2's pack reads
+   `UiSpriteSheet.index` — which is this campaign's dead-datum class at `:343`. `loops_done` replaces
+   it because `UiSpriteAnim.repeats` had NO reader either: nothing in `{elapsed, frame, dir}` counts
+   completed cycles, so `Once` and `repeats` were unimplementable and `repeats` was a second dead
+   datum in the same pair. Padding spelled, size const-asserted, same reasons as item 3. The "only
+   column written per frame" claim is struck: item 5 writes a table column too, and S-D16 (1)
+   measured that it MUST.)*
 5. `ui_sprite_flipbook` — one system over `(UiSpriteAnim, UiSpriteCursor, UiSpriteSheet)` advancing
-   `elapsed`, flipping `dir` at the ends for `PingPong`, and writing `index`.
-6. `ui_pack_inputs!` gains the three components that affect the picture.
+   `elapsed`, flipping `dir` at the ends for `PingPong`, counting `loops_done` against `repeats`, and
+   writing `index` **through `Mut<UiSpriteSheet>::set_if_neq`** *(added 2026-08-21 — S-D16 (1), and
+   it is the rung's load-bearing verb. `&mut T` does not consult ticks (`write.rs:234`), and this
+   tick IS the repaint signal: it is what bumps `UiRenderGeneration` through the discovery filter. It
+   cannot instead be `Changed<UiSpriteCursor>`, because a dense `Changed<C>` inside `Or<..>` was
+   MEASURED to never fire on this tree — see S-D16 (1)'s table. `set_if_neq` rather than a plain
+   deref so a 12 fps flipbook does not bump the generation on the four frames in five where the index
+   is unchanged.)*. The clock is `Res<Time>` plus S5's own clamp until `UiClock` lands — S-D17.
+6. ~~`ui_pack_inputs!` gains the three components that affect the picture.~~ **`ui_pack_inputs!`
+   gains exactly ONE component — `UiSpriteSheet`.** *(corrected 2026-08-21 — S-D16 (2)(3): only one
+   of the three affects the picture. The pack never reads `UiSpriteAnim` (author configuration) and,
+   after item 4, never reads `UiSpriteCursor` (flipbook-private). The gather probes every listed
+   component on every visited node whether it is present or not, so the other two would have been
+   dead probes charged to every node of every changed frame — and `UiSpriteCursor`, being dense,
+   would additionally have sat in the `Or` as a term that CANNOT be true. Probe census **7.00 →
+   8.00**, not 7.00 → 10.00; `Or` arity **6 → 7** against a ceiling of 12.)* The landing is
+   lockstep — the component, the macro list, the arity-locked destructure, the `PackInput`
+   construction, `UiImageInput`'s substitution site, `ui_s0_discovery`'s enum + `ALL` + `name()` +
+   `mutate_pack_input` arm, and `ui_s0_measure`'s prose ladder row — and **G5-10 drives it**, because
+   S4's identical line was gated by G4-7 and this table had no row for it.
 7. **`NineSliceMode::Tile`, inherited from S4 by the 2026-08-21 audit ruling (S-D11).** S4 lands the
    `mode` field with one legal value; S5 widens the value set. What S5 owes, and why it is cheap
-   *here* and was not cheap at S4: the mechanism is `uv = sub_min + frac(t) * (sub_max - sub_min)` on
-   the fragment shader's sprite branch, selected by a new `FLAG_TILED` bit out of the free bits 5..19
-   (S-D2), with the tile count folded into `uv` at pack. That is **the same sub-rect arithmetic items
-   1–2 above already build** for sheet frames, so it is one shader edit at S5 (eDSL leaf, re-emit,
-   re-DXC, two `SpirvBlob<N>` lengths, two manifest rows) instead of two at S4 and S5 — and S4 keeps
+   *here* and was not cheap at S4: ~~the mechanism is `uv = sub_min + frac(t) * (sub_max - sub_min)`
+   on the fragment shader's sprite branch, selected by a new `FLAG_TILED` bit out of the free bits
+   5..19 (S-D2), with the tile count folded into `uv` at pack.~~ **the mechanism is
+   `uv = sub_min + ui_tile_frac(t * tiles) * (sub_max - sub_min)`, with `FLAG_TILED` at bit 5 and the
+   two 7-bit repeat counts at bits 6..=12 / 13..=19, and the counts DERIVED at pack from
+   `border_px`/`border_uv`** *(both halves corrected 2026-08-21 — **S-D15**, and this is the rung's
+   blocking finding. `t` is the 0..1 quad corner (`ui_rect.vs.hlsl:74`), so `frac(t) == t` for every
+   covered fragment and the ruled expression was BIT-IDENTICAL to the `lerp` it said it replaced —
+   `Tile` as specified rendered as `Stretch`, and M5-e compared two implementations that compute the
+   same pixel. And "the tile count folded into `uv`" is a clause inherited from the mechanism S-D11
+   RETIRED: `uv` is four floats all consumed as `sub_min`/`sub_max`, and pushing a count into them
+   makes `frac` sweep N whole frames — reproducing, in the replacement, exactly the sheet bleed S-D7
+   existed to guard, on the gate that forbids it. The count needs its own carrier and the free bits
+   are it; the derivation needs no texture dimensions because the source extent cancels out of the
+   border ratio.)*. That is **the same sub-rect arithmetic items 1–2 above already build** for sheet
+   frames — and now literally so, since the cancellation makes the count identical under a frame and
+   under a whole texture — so it is one shader edit at S5 (**one NEW eDSL leaf `ui_tile_uv` plus a
+   new `frac` primitive the eDSL does not have, re-emit, re-DXC, ONE `SpirvBlob<N>` length, ZERO new
+   manifest rows**) *(corrected 2026-08-21 — S-D15 (4): there is no `frac`/`floor`/`fract` anywhere
+   in `boyko_shaderdsl/src/`, none of `ui.rs`'s six leaves touches the sprite `uv` (the line is in
+   `main`, below the last sentinel), `ui_rect.vs.hlsl` has no sprite branch or flag span so only the
+   FS blob moves — the manifest's own history records the VS byte-identical across the whole S3
+   sprite landing — and `FLAG_TILED` is a runtime bit, not a `-D` variant, on two sources the
+   manifest records as having NO `-D` axis. The existing two rows gain notes; the landing-history
+   table gains an S5 row.)* instead of two at S4 and S5 — and S4 keeps
    the "pure CPU rung, no shader change" property that is D8d's whole argument for CPU expansion over
    Bevy's separate pipeline. **`frac` inside the sub-rect wraps to the sub-rect, which IS a sheet
    frame**, so `Tile` + `UiSpriteSheet` is the correct picture rather than S-D7's hard error — the
-   guard, the clamp and the diagnostic counter S4 was going to build are not built by anyone.
+   guard and the clamp S4 was going to build are not built by anyone. ~~the diagnostic counter~~
+   **The COUNTER, however, is built — by this rung, in the gather** *(corrected 2026-08-21 —
+   S-D18 (1): G5-6 three rows below requires a clamp counter, so the rung both retired one for want
+   of a home and demanded one two paragraphs later. S-D16 (3) puts the sheet arithmetic in the
+   gather, which owns `UiGatherScratch` — the struct that already carries the unconditional `probes`
+   counter for exactly this reason.)* as `UiGatherScratch::sheet_index_clamps`.
+   **The bit budget is EXHAUSTED by this** — fifteen free bits, fifteen spent — and §6's exposure row
+   says so, because the animation and interaction plans read it to decide whether they may take one.
    **S4's `border_uv` composes with this for free and needs no S5 edit** *(added 2026-08-21 —
    S-D12 (2))*: it is a fraction of the node's CURRENT sub-rect, so once item 2 makes that sub-rect a
    sheet frame, a nine-sliced sheet-framed node slices the frame rather than the atlas — the same
@@ -2177,41 +2718,241 @@ exercises.
 
 **Dependency — the clock.** D15 (real vs virtual delta, per row) belongs to
 [`UI-PLAN-ANIMATION.md`](UI-PLAN-ANIMATION.md). This rung consumes whatever time source that plan
-exposes. **If the animation plan has not landed, S5 reads `Time`'s real delta directly and the seam is
-one function** — `ui_frame_delta(world) -> f32` — which the animation plan later replaces in one edit.
-S5 is therefore **not blocked** on the animation plan; it is only less configurable without it.
+exposes. ~~**If the animation plan has not landed, S5 reads `Time`'s real delta directly and the seam
+is one function** — `ui_frame_delta(world) -> f32` — which the animation plan later replaces in one
+edit.~~ **If the animation plan has not landed, `ui_sprite_flipbook` takes `Res<Time>` as a
+`SystemParam` and applies AM6's clamp itself at that one site —
+~~`dt = time.real_delta().as_secs_f32().min(UI_FALLBACK_MAX_DELTA)`~~
+**`dt = time.delta_secs().min(UI_FALLBACK_MAX_DELTA)`** with `UI_FALLBACK_MAX_DELTA = 0.1`, AD1's own
+default *(corrected 2026-08-26 at the landing: S-D17 (1) names TWO defects of `real_delta()` in one
+sentence — an alt-tab stall that skips whole cycles AND a paused game that keeps animating — and a
+`min` fixes only the first. `delta_secs()` is already clamped, scaled and pause-aware, and AD1's
+tighter clamp still applies on top of it. G5-2's clock test asserts all three properties, because a
+remedy that covers one of two named defects and is silent about the other is the shape this campaign
+keeps finding.)* — and the replacement is one parameter swapped for
+`Res<UiClock>` and one clamp deleted.** *(both halves corrected 2026-08-21 — **S-D17**. The struck
+value is the option `UI-PLAN-ANIMATION.md` AD1 REJECTS by name, for this consumer by name: `Time`'s
+`DEFAULT_MAX_DELTA` clamps the virtual delta only — `time.rs:197` assigns `real_delta = raw` BEFORE
+the clamp at `:201`, and `real_delta()` is documented "unclamped, unscaled, pause-blind" — so an
+alt-tab stall hands the flipbook a two-second delta that skips whole cycles and jumps `Once` to its
+end, and a paused game keeps animating. And the struck SIGNATURE is uncallable: there is no `world`
+handle inside a scheduled `Query`-bearing system (`WorldView` is minted only from a
+`DispatcherToken`'s `&self` and is `!Send`/`!Sync`; a `&mut EcsMaster` would force the flipbook to be
+an EXCLUSIVE system), so it matched neither the mechanism it fell back to nor the one it is replaced
+by — both of which are resource reads.)* S5 is therefore **not blocked** on the animation plan; it is
+only less configurable without it.
+
+**Measurement.** *(added 2026-08-21 — S5 was, after S4's was written in, the LAST rung in this plan
+with no measurement paragraph, while §5 assigns it leg 10.8(c). Every other rung that moves the
+number carries the paragraph in its own text.)* §5 leg **10.8(c)**, the increment this rung owes:
+the list holds six pack inputs today (`gather.rs:76-86`) and the census is `ui_pack_inputs!(count)
++ 1` = **7.00 probes/node/frame** (MEASURED on the S4 build). Item 6 adds ONE, giving **8.00
+(+14.3 %)**, paid by every node of every changed frame whether or not it is a sprite. Report it in
+both worlds at N ∈ {256, 2048}, on `ui_s0_measure`'s existing instrument, and **add the row to that
+file's prose ladder in the same edit that moves the list** — the ladder's own doc requires it and
+nothing machine-checks it. The number is arithmetic and is stated as such; the wall-clock half is
+reported with the instrument's floor, per §5's closing rule. *(§5's "S5 owes 7.00 → 10.00 (its
+three)" and §6's "SIX after S4 … 7.00" are corrected in place.)*
+
+**What a node actually DRAWS under these rulings** *(added 2026-08-21 at the S5 pre-build audit. S4's
+second ruling was self-cancelling — it fixed the defect it was asked about and created a new
+gate-that-cannot-fail in the same sentence, and only an implementer's end-to-end trace caught it. So
+the trace is written down here, before the code, for the three combinations this rung makes
+expressible.)*
+
+**(a) A plain sheet frame** — `UiImage` + `UiSpriteSheet{ sheet, index: 6 }`, no `UiNineSlice`.
+Gather: 8 probes; `index < frame_count` (else clamp + `sheet_index_clamps`); `col = 2, row = 1`;
+`UiImageInput{ slot: sheet.slot, uv: (0.53125, 0.28125, 0.71875, 0.46875), tint }`.
+`ui_node_sub_codes` takes the `(None, Some(_))` row ⇒ **2 records**, `[0, UI_IMAGE_SUB]`. The image
+record packs `FLAG_TEXTURED | slot<<20`, no `FLAG_TILED` (no `nine_slice` ⇒ no `mode`). The FS takes
+the untiled side and reads only frame 6's texels. *G5-1's pixel is the uv constant; G5-5's is the
+frame's identity, which is why all sixteen frames must be mutually distinct; G5-6's is a clamp on a
+node whose `index` exceeds `frame_count`, observed in a counter rather than in a picture.*
+
+**(b) A tiled nine-slice, no sheet** — `UiImage` + `UiNineSlice{ mode: Tile }` on G4-3's scene.
+`ui_node_sub_codes` takes `(Some, Some)` ⇒ **10 records**, `[0, 1..=9]`; the whole-rect image record
+is suppressed (S-D12 (1)). Pack derives `tiles = (4, 2)` from `border_px`/`border_uv`; the four
+corners get `(1, 1)` and therefore **no `FLAG_TILED`**, the top/bottom edges `(4, 1)`, the left/right
+edges `(1, 2)`, the centre `(4, 2)`. The FS wraps inside each region's own sub-rect. *The top edge's
+64 px carries eight 8-px bands where `Stretch` carries two 32-px bands — G5-7's probe pair is a
+pixel whose value is a function of `tiles_x`, which is the thing the row exists to prove, and M5-e
+moves it because a UV past `[0,1]` clamps instead of wrapping.*
+
+**(c) A nine-sliced sheet frame** — all three. The gather substitutes the frame rect into
+`UiImageInput.uv` **first**, and `pack_ui_nine_slice_instance` then slices THAT by `border_uv`
+fractions — so the nine sub-rects live inside frame 6, and `border_uv`'s landed doc sentence stays
+true. `tiles` is unchanged from (b), because the sub-rect extent cancels out of S-D15 (3)'s ratio.
+Still **10 records**. *G5-8's pixel is a colour drawn from frame 6's disjoint palette; under M5-e the
+top edge's UV sweeps four frame-widths past `sub_min` and lands in frame 7's palette, which is what
+makes the census red rather than merely different.*
+
+**The one thing this trace does NOT make true, stated rather than gated away:** under
+`UiSamplerMode::Smooth` the hardware's bilinear tap at a TILE SEAM straddles `sub_max → sub_min` and
+therefore reads one texel outside the sub-rect. `UiSheet.inset_uv` cannot fix it — the inset is on
+the frame's outer edge and the seam is interior. G5-7 and G5-8 run `Pixel`, where the artifact does
+not exist; a per-sprite `REPEAT` sampler would fix it and is S7's deferred lever (bit 4).
 
 **Gate.**
 
 | # | Claim | How |
 |---|---|---|
-| **G5-1** | The frame UV is the stated arithmetic | CPU table test: `(cols=4, rows=4, index=6, inset_uv=(h,h))` → an exact hand-computed `uv` constant. Asserted against the constant, **not** against the implementation. |
-| **G5-2** | The four modes are exactly right at the turns | A deterministic tick harness at fixed `dt` over 3 cycles per mode; the `frame` sequence pinned as a **literal array** in the test. |
-| **G5-3** | The churn split is real | `Changed<UiSpriteAnim>` fires on an author retarget and **never** on a per-frame cursor advance. |
-| **G5-4** | The cursor is dense and does not migrate | Insert/remove `UiSpriteCursor`, assert the entity's archetype id is unchanged (`dense_d2_routing`'s property, re-asserted at this consumer). |
-| **G5-5** | It animates on the GPU | Golden `ui_flipbook_frame3`: a 4×4 procedural grid (S-D5) at a fixed tick count; image hash pinned. |
-| **G5-6** | `frame_count < cols*rows` is honoured | `index >= frame_count` clamps and increments a diagnostic counter (trailing cells are never sampled). |
-| **G5-7** | `Tile` actually tiles | *(inherited from S4, 2026-08-21 — S-D11.)* Golden `ui_nine_slice_tiled`: the same nine-distinct-value 3×3 source as G4-3, at a destination whose edge spans **4 whole tiles**; the edge shows four repeats of the source's edge cell, not one clamped streak. **This is the gate S4 did not have** — its table tested `Stretch` only (G4-3) and the `Tile`+sheet clamp (G4-5), so half of a two-valued field would have landed ungated. |
-| **G5-8** | `Tile` under a sheet stays inside its frame | *(inherited, and it is the assertion S-D7 could not make because it FORBADE the combination.)* A tiled nine-slice on a node carrying `UiSpriteSheet`: every sampled texel lies within that frame's sub-rect — no neighbouring frame contributes. `frac`-in-sub-rect makes this true by construction; the gate is what proves the construction. |
+| **G5-1** | The frame UV is the stated arithmetic | CPU table test: `(cols=4, rows=4, index=6, inset_uv=(h,h))` → an exact hand-computed `uv` constant. Asserted against the constant, **not** against the implementation. **On S-D18 (4)'s 16×16 source, `h = 1/32` and the constant is `(0.53125, 0.28125, 0.71875, 0.46875)` — exact in binary FP.** **Plus a NON-SQUARE case `(cols=4, rows=2, frame_count=8)`** *(added 2026-08-21 — S-D18 (5): with `cols == rows` the decode `col = index % cols; row = index / cols` is bit-identical to the same expression with the two interchanged, so the standard sprite-sheet transpose passes both this constant and G5-5's hash. This is S4's dihedral-symmetry finding one axis over, and it costs one extra row.)* |
+| **G5-2** | The four modes are exactly right at the turns | A deterministic tick harness at fixed `dt` over 3 cycles per mode; the `frame` sequence pinned as a **literal array** in the test. **`Time::advance_with(fixed)` between `Schedule::run`s is the harness** — it is `pub` (`time.rs:178`) and its `debug_assert!` forbids only calling it INSIDE a system body, so a driver-shaped test may. **`Once` and `repeats` are covered, since `UiSpriteCursor.loops_done` is what makes them expressible** (S-D16 (2)). |
+| **G5-3** | The churn split is real | `Changed<UiSpriteAnim>` fires on an author retarget and **never** on a per-frame advance. **The per-frame advance it must stay silent through is a `Mut<UiSpriteSheet>::set_if_neq` write** *(clarified 2026-08-21 — S-D16 (1): the flipbook's tick-bearing per-frame write lands on `UiSpriteSheet`, not on the cursor, and D8a's stated benefit is precisely that `UiSpriteAnim` is untouched by it.)* **Second leg: at a frame rate where the index does NOT move between two ticks, `Changed<UiSpriteSheet>` must ALSO stay silent** — that is `set_if_neq`'s whole purpose and nothing else in the ladder reads it. |
+| **G5-4** | The cursor is dense and does not migrate | Insert/remove `UiSpriteCursor`, assert the entity's archetype id is unchanged (`dense_d2_routing`'s property, re-asserted at this consumer). *(Constructible: `EcsMaster::entity_archetype_id` is `pub` at `entity_query_api.rs:35` and `dense_d2_routing.rs:302/316` already asserts exactly this shape.)* |
+| **G5-5** | It animates on the GPU | Golden `ui_flipbook_frame3`: a 4×4 procedural grid (S-D5) at a fixed tick count; image hash pinned. **At `UiSamplerMode::Pixel`, on a 16×16 source (4×4 frames of 4×4 texels) whose SIXTEEN frames are mutually distinct, and honouring `BOYKO_UI_GOLDEN_REQUIRE_DEVICE=1`** *(added 2026-08-21 — S-D18 (2)(3)(4). The mode, because a which-frame claim under `Smooth`/LINEAR is a filter claim — the amendment G4-3 already took. The source size, because "4×4 grid" read as 4×4 TEXELS gives one-texel frames on which the half-texel inset collapses the frame extent to exactly ZERO. The distinctness, because a hash cannot see an off-by-one between two identical frames — the S4 lesson, one axis over. The env guard, because it is not a shared helper: `BOYKO_UI_GOLDEN_REQUIRE_DEVICE` occurs in exactly ONE file in the workspace and `boot_or_skip` exits 0.)* |
+| **G5-6** | `frame_count < cols*rows` is honoured | `index >= frame_count` clamps to `frame_count - 1` and increments **`UiGatherScratch::sheet_index_clamps`** (trailing cells are never sampled). *(The counter's home is S-D18 (1)'s finding: the pack's five entry points are receiverless free functions with nowhere to put one — the reason the S4 ledger retired this very counter — but S-D16 (3) moves the sheet arithmetic into the gather, which owns the scratch that already carries `probes` unconditionally for exactly this reason. `frame_count == 0` ⇒ the sheet is treated as absent and the node emits no sprite record.)* CPU, device-free. |
+| **G5-7** | `Tile` actually tiles | *(inherited from S4, 2026-08-21 — S-D11; respecified 2026-08-21 — S-D15 + S-D18 (2)(4).)* Golden `ui_nine_slice_tiled`, **at `UiSamplerMode::Pixel`**, on G4-3's scene verbatim (`rect 96×96`, `border_px = [16, 24, 16, 24]`, `border_uv` at its equal-thirds `Default`, opaque white tint) — for which S-D15 (3)'s derivation **computes** `tiles = (4, 2)` rather than asserting it — over a **6×6 source: nine 2×2 cells, each cell two distinct values** *(the 3×3 source CANNOT distinguish tiling: each region of it is exactly one uniform texel, and four repeats of a uniform texel are byte-identical to one stretched copy, so the blessed hash would be reproduced by a `Tile` that silently fell back to `Stretch` — the entire failure this row exists to catch, and the S4 amendment (a) recurring one axis over)*. The 64-px top edge shows **eight 8-px bands, not two 32-px bands**; assert NAMED PROBE COLUMNS as well as the hash, because the columns are what depend on the count — **`x = 36` and `x = 44` on the top edge, and `y = 46` and `y = 58` on the left edge, each pair DIFFERING under `Tile` and AGREEING under `Stretch`** (the top edge spans x 32..96 at `tiles_x = 4`, so each repeat is 16 px and each source texel 8 px; the left edge spans y 40..88 at `tiles_y = 2`, so each repeat is 24 px and each texel 12 px — under `Stretch` both probes of each pair fall in the first source texel). **The four corner regions must be byte-identical to THE SAME SCENE rendered at `NineSliceMode::Stretch`** — a second leg of this row, not a comparison with G4-3, whose source is 3×3 — since S-D15 leaves `FLAG_TILED` clear wherever both counts are 1. Honours `BOYKO_UI_GOLDEN_REQUIRE_DEVICE=1`. ~~**This is the gate S4 did not have** — its table tested `Stretch` only (G4-3) and the `Tile`+sheet clamp (G4-5), so half of a two-valued field would have landed ungated.~~ **This is the gate S4 did not have, and the true statement is stronger than the struck one: S4 gated no mode BEHAVIOUR at all.** *(corrected 2026-08-21 — the `Tile`+sheet G4-5 was STRUCK at the S4 pre-build audit as a gate that could not fail and never landed; what landed as G4-5 is a `#[should_panic]` on the raw-`u8` bound (`ui_s4_nine_slice.rs`, `#[cfg(debug_assertions)]`). And `mode` is ONE-valued at S4, not two: `UI_NINE_SLICE_MODE_COUNT = 1`.)* |
+| **G5-8** | `Tile` under a sheet stays inside its frame | *(inherited, and it is the assertion S-D7 could not make because it FORBADE the combination.)* A tiled nine-slice on a node carrying `UiSpriteSheet`: every sampled texel lies within that frame's sub-rect — no neighbouring frame contributes. `frac`-in-sub-rect makes this true by construction; the gate is what proves the construction. **The instrument is a COLOUR-PALETTE census, because "which texel was sampled" is not directly observable in a readback** *(added 2026-08-21 — S-D18 (2): the row stated a property with no way to read it. Each of the sheet's sixteen frames gets a PALETTE DISJOINT from every other frame's — 16 frames × 36 texels, all 576 values distinct — and the assertion is that every non-background pixel of the readback belongs to frame 6's 36. That is decidable per pixel under NEAREST, it names the neighbour that would contribute if the wrap escaped, and it is the same "a colour census can confuse two subjects" discipline the S4 golden's own accounting earned.)* **At `UiSamplerMode::Pixel`, on a 24×24 sheet (4×4 frames of 6×6 texels) with `inset_uv = (0, 0)`, honouring `BOYKO_UI_GOLDEN_REQUIRE_DEVICE=1`** *(added 2026-08-21 — S-D18 (2)(4). NEAREST because "every sampled TEXEL" is decidable per texel only under NEAREST: under LINEAR the hardware tap at a tile seam straddles `sub_max → sub_min` and reaches outside the frame, and no inset can fix an interior seam — that limitation is recorded here rather than gated away. Zero inset because it protects against a bleed NEAREST does not have, and because it makes each frame exactly six texels per axis so each nine-slice region is exactly 2×2. The frame's NEIGHBOURS must be distinct, or M5-e's escape has nothing to land in.)* |
+| **G5-9** | `inset_uv` is protecting something | *(added 2026-08-21 — S-D18 (2): the field's entire stated purpose is "half-texel inset against bilinear bleed", which is INERT under NEAREST, so on a `Pixel` row M5-b's second half cannot fire — the exact shape of a red that cannot fire.)* The G5-5 scene at **`UiSamplerMode::Smooth`**, asserting NAMED PROBES at the frame's outer edge rather than a hash: with the inset, the edge probe lies within frame 6's own colour range; without it, it carries a measurable contribution from frame 5 / frame 2. **Probes, not a hash and not an image statistic** — an 8-bit hash is blind to a sub-texel blend and image statistics lie about render changes; the number comes from the readback at a named texel. |
+| **G5-10** | The macro landing is driven, not just written | *(added 2026-08-21 — S-D18 (8): S4's identical Lands line was gated by G4-7, and the landed ledger calls that edit "the omission that would have made the rung invisible"; this table had no row for it.)* `ui_s0_discovery`'s no-catch-all loop drives the new `PackInput` variant end to end — an author's runtime edit to `UiSpriteSheet` bumps `UiRenderGeneration` — and `PackInput::ALL.len() == ui_pack_inputs!(count)` holds (the assertion that turns "added to the macro but not to this test" into a red with a reason; the array's arity is hard-coded in its own TYPE, so it is one of the landings). CPU, device-free. |
 
 **Red mutations.**
 
 * **M5-e — implement `Tile` as a UV past `[0,1]` instead of `frac` in the sub-rect** *(inherited from
-  S4's retired mechanism, 2026-08-21)*. G5-7 reds with a clamped streak on every edge, and G5-8 reds
-  under a sheet. *Proves S-D11's mechanism is load-bearing and re-runs, as a red, the exact thing S-D7
-  believed was the only option — the UI's sampler is `ClampToEdge` in both modes, so the retired
-  mechanism does not even reach the sheet hazard it was designed around: it fails one step earlier.*
-* **M5-a — merge `UiSpriteAnim` and `UiSpriteCursor` into one component.** G5-3 reds — the change tick
-  fires every frame. *This is the mutation that makes D8a a measurement rather than a preference: the
-  merged shape destroys `Changed<UiSpriteAnim>` as a signal, and nothing else in the ladder would
-  notice.*
-* **M5-b — drop `inset_uv`.** G5-1 reds, and G5-5's sampled frame-edge texel takes the neighbouring
-  frame's colour under LINEAR filtering. *Proves the half-texel inset is protecting something.*
+  S4's retired mechanism, 2026-08-21; re-armed 2026-08-21 — S-D15, because under the mechanism as
+  S-D11 spelled it this red could not fire at all: `lerp(uv.xy, uv.zw, t)` and
+  `uv.xy + frac(t)*(uv.zw - uv.xy)` compute the same fragment for every `t` in `[0,1)`, so the
+  mutation changed no pixel and G5-7 could not distinguish the two. It fires against S-D15's
+  `frac(t * tiles)`: the mutated form sweeps `tiles ×` the sub-rect extent, which leaves the frame.)*
+  G5-7 reds with a clamped streak on every edge, and G5-8 reds under a sheet. *Proves S-D15's
+  mechanism is load-bearing and re-runs, as a red, the exact thing S-D7 believed was the only option
+  — the UI's sampler is `ClampToEdge` in both modes, so the retired mechanism does not even reach the
+  sheet hazard it was designed around: it fails one step earlier.*
+* ~~**M5-a — merge `UiSpriteAnim` and `UiSpriteCursor` into one component.**~~ **M5-a — merge
+  `UiSpriteAnim` INTO `UiSpriteSheet`.** G5-3 reds — the change tick fires every frame the index
+  moves. *(respecified 2026-08-21 — S-D18 (7): as spelled it was a red that could not fire. The
+  merged target was the cursor, which the flipbook writes with `&mut` (no tick — `write.rs:234`), so
+  the merged component would not be `Changed` either and G5-3 would have stayed green while proving
+  nothing. `UiSpriteSheet` is the component the flipbook DOES tick-write, so merging the track into
+  it makes `Changed<UiSpriteAnim>` fire exactly as D8a says it must not.)* *This is the mutation that
+  makes D8a a measurement rather than a preference: the merged shape destroys `Changed<UiSpriteAnim>`
+  as a signal, and nothing else in the ladder would notice.*
+* ~~**M5-b — drop `inset_uv`.**~~ **M5-b — IGNORE `inset_uv` in the frame-UV derivation, leaving the
+  field in place.** G5-1 reds (the constant moves), and **G5-9**'s `Smooth` frame-edge probe takes a
+  measurable contribution from the neighbouring frame. *(respecified 2026-08-21 — S-D18 (2)(6):
+  DELETING the field is a compile error, not a red — G5-1 names `inset_uv` as one of its four inputs
+  — and the protocol requires the predicted failure OBSERVED. The second half moved off G5-5 because
+  G5-5 runs `Pixel`, under which the inset is inert.)* *Proves the half-texel inset is protecting
+  something.*
 * **M5-c — make `UiSpriteCursor` a table component.** G5-4 reds. *Proves the storage claim is
   enforced.*
 * **M5-d — flip `dir` one frame late at the `PingPong` turn.** G5-2's pinned array reds. *The classic
   flipbook off-by-one, and the reason G5-2 pins a literal sequence: an eyeball check of "it animates"
   cannot see it, and neither can an image golden at a single tick count.*
+* **M5-f — swap `cols` and `rows` in the frame decode.** *(added 2026-08-21 — S-D18 (5).)* G5-1's
+  NON-SQUARE row reds; its square row does not, and neither does G5-5's hash. *The characteristic
+  sprite-sheet defect, and the reason G5-1 carries a second case: on a square grid the transposed
+  decode is bit-identical to the correct one, so the whole gate table was blind to it.*
+* **M5-g — write `UiSpriteSheet.index` through `&mut` instead of `Mut::set_if_neq`.** *(added
+  2026-08-21 — S-D16 (1).)* G5-10's discovery leg still passes (the author's edit is a separate
+  write), but the FLIPBOOK's own repaint stops: `UiRenderGeneration` never bumps on a tick, the D6a
+  gate keeps skipping, and G5-5's golden shows frame 0 at every tick count. *This is the rung's
+  quietest failure and the one the kernel measurement in S-D16 (1) exists to make impossible to walk
+  into: it is a frozen picture with no error, no panic and no failing assertion anywhere else.*
+* **M5-h — clamp an out-of-range sheet index to `frame_count` instead of `frame_count - 1`, and
+  (separately) drop the counter increment.** *(added 2026-08-26 at the landing: **G5-6 was named by
+  no mutation at all**, and the protocol wants the failure OBSERVED.)* (a) reds G5-6's UV leg — the
+  node samples a TRAILING cell of a partly-filled grid, which holds nothing; (b) reds its counter
+  leg. *The clamp is not otherwise observable: a clamped node draws a real frame, so no picture and
+  no UV assertion can tell "the author asked for frame 13 of a 12-frame sheet" from "the author
+  asked for frame 11".*
+* **M5-i — add `UiSpriteSheet` to `ui_pack_inputs!` but NOT to `PackInput::ALL`.** *(added
+  2026-08-26 at the landing, for the same gap: **G5-10 was named by no mutation**.)* Reds
+  `ALL.len() == ui_pack_inputs!(count)` with its own reason.
+* **M5-j — set `FLAG_TILED` unconditionally, so a `1×1` corner stops being byte-identical to its
+  `Stretch` record.** *(added 2026-08-26 at the landing.)* ⚠️ **It did NOT fire on its first run** —
+  see **S-D19 (6)**, which is the finding, not the mutation. After G5-11 gained the ABSOLUTE
+  assertion it reds immediately. *The two causes are both worth knowing: no golden can EVER see this
+  mutation (`frac(local_uv * 1) == local_uv`), and the gate that was supposed to was a COMPARISON
+  between two arms that share the mutated function.*
+
+---
+
+### S5 · LANDED 2026-08-26 — the landed set, the RED ledger, the goldens, and what the build found
+
+*(First build, after the pre-build audit's S-D15..S-D18 amendments and the check lens's row-level
+corrections. Every gate below was run with its exit code seen UNPIPED and `running N` confirmed in
+BOTH profiles; every red was APPLIED and its failure OBSERVED; every mutated source was restored and
+verified byte-identical with `cmp` against a pre-mutation snapshot. Six corrections landing found are
+ruled in **S-D19**.)*
+
+#### The landed set, file by file
+
+| File | What landed |
+|---|---|
+| `crates/boyko_shaderdsl/src/cf.rs` | THREE new `Cf` facets, not the one S-D15 (4) costed: `vec2_frac` (the wrap), `vec2_lerp` (the untiled arm, spelled as the `FMix` INTRINSIC — see S-D19 (1)), and `named_uint_val` (a `uint` symbol that types as `Uint`, which the existing `named_uint` does not — S-D19 (2)). Eval arms for all three. |
+| `crates/boyko_shaderdsl/src/emit/{mod,cf}.rs` | `Node::{Vec2Frac, Vec2Lerp, NamedUint}` + their type-table, inline-leaf and printer arms. |
+| `crates/boyko_shaderdsl/src/ui.rs` | The SEVENTH leaf `ui_tile_uv_body`, plus the four tile-bit generator inputs (`UI_TILE_FLAG_BIT`/`X_SHIFT`/`Y_SHIFT`/`BITS`) and three `const _` budget relations. |
+| `crates/boyko_shaderdsl/src/emit/shaders.rs` | `emit_hlsl_ui_tile_uv`; `UiInstanceLayout` gains four tile fields; the mirror and `ui_flag_consts` spans emit them. **And `emit_ui_leaf` now feeds the interned symbol table to the printer** — it was `NO_NAMED_LITS` while the six S1 leaves spelled only bare literals, and an empty table under a symbol node is an index-out-of-bounds panic AT GENERATION (S-D19 (2)). |
+| `crates/boyko_shaderdsl/src/bin/emit_ui.rs` | The layout literals; the seventh `leaf(..)`; the template's sprite line becomes `ui_tile_uv(inst.uv, input.local_uv, inst.flags)`; four `const _` asserts binding the layout to `boyko_shaderdsl::ui`'s copy. |
+| `crates/boyko_render/shaders/ui_rect.{vs,fs}.hlsl` + `.spv` | RE-EMITTED and re-DXC'd with the frozen recipe. FS `8760 → 9120`; **VS `2408 → 2408`, byte-identical** — but its `.hlsl` DID move by one comment line, because the tile bits land in the SHARED mirror span (S-D19 (3)). |
+| `crates/boyko_render/src/ui/instance.rs` | `FLAG_TILED` (bit 5), `UI_TILE_X_SHIFT`/`Y_SHIFT`/`BITS`/`MASK`/`MAX`, and FOUR `const _` relations that together say the S-D2 budget is EXHAUSTED (fifteen free, fifteen spent, ending exactly at the slot field). |
+| `crates/boyko_render/src/ui/pack.rs` | `UI_NINE_SLICE_MODE_COUNT` `1 → 2` + `UI_NINE_SLICE_MODE_TILE`; **`ui_nine_slice_tiles_axis`** (S-D15 (3)'s ratio, with its four degenerate arms) and `ui_nine_slice_tiles`; `tile_flag_bits`; the per-region application inside `pack_ui_nine_slice_instance` (X on the centre column, Y on the centre row, `1` elsewhere). |
+| `crates/boyko_render/src/ui/gather.rs` | `UiSpriteSheet` — **and it alone** — added to `__ui_pack_inputs_list!`; the read tuple widened; `sheet_frame` (the substitution, through `try_resource` — S-D19 (4)); `UiGatherScratch::sheet_index_clamps`; the `NineSliceMode::Tile` arm of the one exhaustive conversion, reached via `E0004` exactly as S4 designed. The macro's own doc gains the S-D16 (1) narrowing: "wires the discovery filter for free" is TRUE FOR TABLE COMPONENTS ONLY. |
+| `crates/boyko_render/src/ui/upload.rs` | `UiUploadSystem::sheet_index_clamps()`, on `probes()`'s precedent. |
+| `crates/boyko_render/src/ui/mod.rs`, `src/lib.rs` | The new surface re-exported; `SpirvBlob<8760>` → `<9120>` with the re-bless recorded in its doc. |
+| `crates/boyko_ui/src/components.rs` | `NineSliceMode::Tile`; `UiSpriteSheet` (4 B, table, `PartialEq` for `set_if_neq`); `SpriteAnimMode`; `UiSpriteAnim` (12 B, table, cold, spelled `_pad`); `UiSpriteCursor` (8 B, **dense**, spelled `_pad`, hand-written `Default` with `dir: 1`). All four sizes MEASURED by `const _: () = assert!` — plus the two-variant brace-less `const` match that now pins "exactly two modes". |
+| `crates/boyko_ui/src/sprite.rs` | **NEW** — `SheetId`, `UiSheet` (20 B) + `frame_uv`, `UiSheetTable` + `register` (the mint S-D16 (3) found missing), `UI_FALLBACK_MAX_DELTA`, and `ui_sprite_flipbook` with its mode/repeat semantics. |
+| `crates/boyko_ui/src/bundles.rs` | **`AnimatedSpriteBundle`** — the cursor pairing made structural at the AUTHORING site, because `#[require]` cannot make it structural at the component (S-D19 (5), a kernel defect filed in `OPEN-QUESTIONS.md`). |
+| `crates/boyko_render/tests/ui_s5_sprite_sheet.rs` | **NEW** — G5-1 (two tests), G5-2 (two), G5-3, G5-4 (two), G5-6 (two), G5-11 (two), G5-12. Twelve device-free tests, driving `gather_into_staging` and a real `Schedule`. |
+| `crates/boyko_render/tests/ui_flipbook_gpu_golden.rs` | **NEW** — G5-5 (two tick counts, two hashes) and G5-9 (named `Smooth` probes). |
+| `crates/boyko_render/tests/ui_nine_slice_tiled_gpu_golden.rs` | **NEW** — G5-7 (four named probes + corner byte-identity vs `Stretch` + a 19-colour census + a hash) and G5-8 (the 577-value palette census + a hash). |
+| `crates/boyko_shaderdsl/tests/ui_leaves.rs` | The `ui_tile_uv` Eval table (BOTH arms, plus a 6×64-point containment sweep over every count the field can hold) and its literal span pin. |
+| `crates/boyko_render/tests/ui_s0_discovery.rs` | G5-10: the seventh `PackInput` variant, `ALL`, `name()` and `mutate_pack_input` arm. |
+| `crates/boyko_render/tests/ui_rect_edsl_sync.rs` | The `ui_tile_uv` span row, the layout's four tile fields, and a THIRD pin — `ui_tile_bit_layout_matches_the_host` — because the leaf carries its own copy of the bit layout and no existing gate could see it drift. |
+| `crates/boyko_render/tests/ui_s0_measure.rs` | The §10.8(c) ladder row: 7 pack inputs + `Children` = **8.00 probes/node/frame** (+14.3 %). |
+| `docs/SHADER-VARIANT-MANIFEST.md` | The two existing rows gain the tiled lane and the seventh leaf; the landing-history table gains its S5 row. **ZERO new variant rows** — `FLAG_TILED` is a runtime bit. |
+| `docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md` | Two anchors re-pointed `ui/mod.rs:96 → :97`; the `SpirvBlob` doc edit moved `FRAMES_IN_FLIGHT`, and `internal_docs_anchors` caught it — the same instrument, the same file, one rung later. |
+| `docs/OPEN-QUESTIONS.md` + `docs/ru/OPEN-QUESTIONS.md` | The `#[require]`-on-dense kernel defect, both sides, same edit. |
+
+#### The RED ledger — nine mutations, nine observations
+
+| Red | What was mutated | What was OBSERVED |
+|---|---|---|
+| **M5-b** | `UiSheet::frame_uv` ignores `inset_uv` | G5-1 reds (`uv` becomes the un-inset `[0.5, 0.25, 0.75, 0.5]`) **and** G5-9's `Smooth` left-edge probe reads `[109, 97, 153, 255]` — between frame 6's `[114, 104, 150]` and frame 5's `[103, 90, 157]`, i.e. the ~48 % neighbour contribution the row's own arithmetic predicts, to the byte |
+| **M5-f** | `cols`/`rows` swapped in the decode | G5-1's NON-SQUARE row reds with exactly the hand-computed transposed value `[0.03125, 0.78125, 0.46875, 0.96875]`; the SQUARE row does not, and neither does G5-5's hash — S-D18 (5)'s finding, confirmed by measurement |
+| **M5-d** | `PingPong` flips `dir` one frame late | G5-2's literal array reds: `[1,2,3,3,2,1,0,0,1,2,3,3]` — the endpoint repeated at both turns |
+| **M5-g** | `index` written through `bypass_change_detection` | G5-3's first leg reds (`Changed<UiSpriteSheet>` count 0 on an advance frame) **and** G5-5's golden reds with the FROZEN picture — no panic, no error, just frame 0 at every tick count. The harness dispatches the upload EVERY tick precisely so this can fire |
+| **M5-c** | `UiSpriteCursor` made a table component | G5-4 alone reds, at the `dense_contains` assertion |
+| **M5-a** | the flipbook tick-writes `UiSpriteAnim` too | G5-3's D8a leg reds (`Changed<UiSpriteAnim>` fires on a per-frame advance). *Applied in the check lens's source-only form rather than as a literal merge: S-D18 (7)'s "merge `UiSpriteAnim` INTO `UiSpriteSheet`" DELETES a type three gates name, so the target fails to BUILD rather than to assert — the very shape S-D18 (6) struck for M5-b two bullets earlier. A per-frame tick-write on the animation track has the identical observable consequence and is one line.* |
+| **M5-h** | (a) clamp to `frame_count`; (b) drop the counter | (a) G5-6 reds sampling frame 12 (`[0.0, 0.75, 0.25, 1.0]`); (b) G5-6 reds with `clamps == 0`. Added because G5-6 was named by NO mutation |
+| **M5-i** | `PackInput::ALL` left at 6 while the macro says 7 | G5-10 reds with its own reason. Added for the same gap |
+| **M5-j** | `FLAG_TILED` set unconditionally | ⚠️ **DID NOT FIRE on the first attempt — see S-D19 (6).** After the gate was repaired it reds with `flags & tile_mask == 0x2060` |
+
+**G5-12 has no red mutation, and the reason is that it is one.** Its subject is a `Bundle` field
+list, and every mutation of a field list is a compile error at the construction site rather than an
+assertion failure (S-D18 (6)'s shape). Its SECOND leg is the standing red: a hand-spawned
+`UiSpriteAnim` with no cursor is asserted FROZEN, which is the hazard the bundle exists to remove,
+observed on every run rather than once.
+
+#### The goldens
+
+Four new SHA-256 image pins, taking the campaign's total from six to ten. Each was blessed on this
+box (RTX 3060 Laptop, validation on), **LOOKED AT**, and its every distinct colour accounted for:
+
+* `ui_flipbook_frame3` `0fd69179…` and `ui_flipbook_frame7` `c948b989…` — **2 colours each**: the
+  clear ground (7 168 px = 128² − 96²) and the frame's own (9 216 px = 96²), with a bounding box
+  measured at cols 16..111 / rows 16..111. The two frame colours read back as `(0x51,0x3E,0xAB)` and
+  `(0x7D,0x76,0x8F)`, which are `frame_rgba(3)` and `frame_rgba(7)` EXACTLY.
+* `ui_nine_slice_tiled` `9dc817b6…` — **19 colours**: the clear ground and all eighteen source
+  values, every one present. The rendered top edge is `ddddeeee` repeated FOUR times — eight 8-px
+  bands where `Stretch` carries two 32-px bands — and the left edge shows its two source rows twice
+  over 48 px. The corners show two texels each, unrepeated.
+* `ui_tiled_sheet` `766f7997…` — **37 colours**: the clear ground and ALL 36 of frame 6's texels,
+  none of any other frame's.
+
+**The six pre-existing pins did NOT move**, and that is the shader edit's own evidence: the untiled
+arm still spells the same `lerp(uv.xy, uv.zw, t)` intrinsic on the same operands, so an untiled
+sprite's pixel is IDENTICAL rather than equal-to-within-a-ULP (which an 8-bit golden could not tell
+apart either way — `reference-golden-fp-resolution`).
+
+#### Both profiles
+
+`ui_s5_sprite_sheet` reports **`running 12 tests`** in debug AND release, and unlike
+`ui_s4_nine_slice` the two SETS are the same twelve: no S5 sentence is profile-gated, because none
+of them is about a `debug_assert!`. The release leg is still run, because the rung packs into a
+`flags` word through shifts and masks and release is where an overflow would be silent.
 
 ---
 
@@ -2225,6 +2966,34 @@ D7). `ImageBundle` gains the optional members. `UiSpriteCursor` **deliberately d
 `.ui` file must not be able to inject a running cursor into a live world, which is the same
 structural-safety property `parse_and_insert` already claims for its closed `match`
 (`text/dispatch.rs:5-8`).
+
+⚠️ **The exclusion is right and it is INCOMPLETE as written** *(added 2026-08-21 at the S5 pre-build
+audit)*. `ui_sprite_flipbook` matches `(UiSpriteAnim, UiSpriteCursor, UiSpriteSheet)` — all three —
+and no rung gives an authored `UiSpriteAnim` a cursor. A `.ui` file spelling `flipbook:` therefore
+produces a node the flipbook system never matches: it renders `index` forever and never ticks, with
+no diagnostic. ~~**S5 lands `#[require(UiSpriteCursor)]` on `UiSpriteAnim`** — the kernel already has
+the mechanism (`component_registry/required.rs`, the `#[require]` derive attribute), it is exactly
+the "capability = presence, state supplied structurally" shape this campaign uses elsewhere, and it
+keeps the cursor un-authorable while making it un-missable.~~ **STRUCK 2026-08-26 at the S5 landing
+— S-D19 (5): `#[require]` whose target is a DENSE component PANICS at insert on this kernel** (the
+require pass resolves the required id's `ComponentPool` in the target ARCHETYPE, and a dense id owns
+none by construction — dense plan D0). Three S5 gates failed that way before the attribute came off,
+and the panic names an expansion that never happened. Filed in `docs/OPEN-QUESTIONS.md`.
+
+**What S5 landed instead: `AnimatedSpriteBundle`** (`boyko_ui/src/bundles.rs`) — the layout base,
+the image, the sheet, the animation and the cursor in ONE spawn, so the pairing is structural at the
+AUTHORING site rather than at the component. That is the buildable form of the same guarantee for a
+hand-spawned node, and **G5-12** pins both halves (the bundle animates; a hand-spawned
+`UiSpriteAnim` with no cursor is FROZEN, silently).
+
+**It does NOT reach a `.ui` file, and S6 still owes the hole a fix.** A parsed `flipbook:` goes
+through `parse_and_insert`'s closed `match`, not through a Rust bundle literal, so S6's landing must
+either (a) have the dispatch insert a `UiSpriteCursor` beside every parsed `UiSpriteAnim` — the
+bundle's guarantee, spelled at the one authoring site that cannot use the bundle — or (b) wait for
+the kernel defect to close and restore the `#[require]`. **No gate in either rung can see this
+today**: G5-2 and G5-5 insert the components by hand, and G6-1/G6-2/G6-3 test round-trip, reload and
+the exclusion diagnostic — none drives a tick on a PARSED node. **G6-4** stays as specified: a `.ui`
+file spelling `flipbook:` and no cursor, spawned, ticked N times, asserts `index` MOVED.
 
 **Gate.**
 
@@ -2287,9 +3056,15 @@ that was not measurable.
 | **10.8** | **The gather** — the one cost this campaign adds to every node of every frame | a probe counter in `gather_ui_nodes` **plus** wall-clock over the gather alone, separated from pack+sort | probes/node/frame and gather µs at N ∈ {256, 2048} in four states: **(a)** today's rect-only baseline; **(b)** + `UiVisual`; **(c)** + the sprite components; **(d)** a **static** frame with the D6 compare hoisted — which must be **zero probes** | (a),(d) S0 · (b),(c) S3–S5 |
 
 *(clarified 2026-08-21 at the S4 audit: leg **(c)** is an INCREMENT PER RUNG, not one number at the
-end — S3 landed 5.00 → 6.00, S4 owes 6.00 → 7.00 (`UiNineSlice`), S5 owes 7.00 → 10.00 (its three).
-S4 and S5 were the only rungs in this plan with no measurement paragraph of their own; S4's is now
-written into the rung, and S5 inherits the same obligation.)*
+end — S3 landed 5.00 → 6.00, S4 owes 6.00 → 7.00 (`UiNineSlice`), ~~S5 owes 7.00 → 10.00 (its
+three)~~ **S5 owes 7.00 → 8.00 (`UiSpriteSheet`, and it alone)**. S4 and S5 were the only rungs in
+this plan with no measurement paragraph of their own; ~~S4's is now written into the rung, and S5
+inherits the same obligation.~~ **both now carry one.**)* *(the 10.00 corrected 2026-08-21 at the S5
+audit — **S-D16 (2)(3)**: of the three components S5 was to add, only `UiSpriteSheet` is read at
+pack. `UiSpriteAnim` is author configuration the flipbook consumes and `UiSpriteCursor` is the
+flipbook's private state; listing them would have charged two dead probes to every node of every
+changed frame, and `UiSpriteCursor` — being dense — would additionally have sat in the discovery
+`Or` as a term MEASURED never to fire.)*
 
 §10.4, §10.5, §10.6 and §10.9 belong to the sibling plans and are not restated here.
 
@@ -2306,13 +3081,13 @@ there.
 
 | Exposed at | Surface | Consumer |
 |---|---|---|
-| **S0** | **`ui_pack_inputs!`** — the single spelling of the pack-input set. Adding a visual component to it wires the discovery filter **and** the gather read list together, or fails to compile. **The list holds SIX after S4 added `UiNineSlice`** (S4 Lands item 6), so the derived census is `ui_pack_inputs!(count) + 1` = **7.00 probes/node/frame**. | **Animation** adds `UiVisual`. **Interaction** adds its scroll datum. Neither may add a component to the gather without adding it here — and neither may write the count down a second time: `ui_s0_discovery`'s length assertion and `ui_s0_measure`'s report both DERIVE it, because S3 already turned a hand-written `5 * 5` into a red with nothing wrong. |
+| **S0** | **`ui_pack_inputs!`** — the single spelling of the pack-input set. Adding a visual component to it wires the discovery filter **and** the gather read list together, or fails to compile. ⚠️ **THAT IS TRUE FOR TABLE COMPONENTS ONLY** *(added 2026-08-21 — **S-D16 (1)**, MEASURED: a dense `Changed<C>` inside `Or<..>` can never be true, because the `Or` `QueryFilter` impl overrides none of the dense hooks (`HAS_DENSE`, `resolve_dense`, `dense_include_candidates`), so the inner term's `dense` pointer stays the `init_fetch` NULL and `filter_fetch` returns `false` on its first line. The gather READS the dense component correctly; the discovery filter never sees it change. **A dense component put in this list gets half the wiring and no diagnostic.** Any plan adding one must bump `UiRenderGeneration` at its own writer, or keep the datum in a table column.)* **The list holds SIX after S4 added `UiNineSlice`** (S4 Lands item 6), so the derived census is `ui_pack_inputs!(count) + 1` = **7.00 probes/node/frame** — **and SEVEN / 8.00 after S5 adds `UiSpriteSheet`** *(added 2026-08-21 — S-D16 (3); S5's other two components are deliberately NOT listed)*. **Arity headroom:** the expansion is a FLAT `Or<(Changed<C1>, …)>` and `Or` caps at **12** (arity 13+ are `panic!` stubs that TYPE-CHECK and die at first-frame `init_state`, `filter.rs:2161-2185` — `UI-PLAN-ANIMATION.md` R4). Six today, **seven after S5**, eight with `UiVisual`, nine with the interaction plan's scroll datum. R4's projection of twelve counted `UiText` and `Children`, neither of which is a list member, and counted two sprite components rather than S5's one. R4's mitigation — *"the D31 macro must emit the nested form unconditionally"* — is still owed by this plan's seam rung, which landed the flat form. | **Animation** adds `UiVisual`. **Interaction** adds its scroll datum. Neither may add a component to the gather without adding it here — and neither may write the count down a second time: `ui_s0_discovery`'s length assertion and `ui_s0_measure`'s report both DERIVE it, because S3 already turned a hand-written `5 * 5` into a red with nothing wrong. |
 | **S0** | **`gather_ui_nodes`** — the DFS over `UiRoot`/`Children` carrying the inherited clip on its stack. Its pre-order **is** paint order. | **Interaction**: this DFS and `collect_candidates` are the same traversal; D19a's traversal-folded scroll offset rides this stack. |
 | **S0** | `UiRenderGeneration` + the per-slot gate, hoisted ahead of the gather. | **Animation**: an animating frame bumps the generation every frame and the gate cannot help it — §10.3 reports that number unchanged, so the animation plan inherits an honest baseline rather than a claim. |
 | **S0** | The **two-phase seam** (`gather_into_staging` / `upload_staging`, G0-5-pinned signatures) + the host drive protocol (`stage_frame` → `run_system_once` → `take_frame_output`). The `boyko_app` UI rung (D32's floor) is **deferred** to the Renderer-as-ECS-resource rung (2026-08-21 ruling) — the observer S0 ships is Phase 1, device-free. | **All three.** The device-free observer makes the seam's behaviour falsifiable on any machine; the human-visible floor arrives with the windowed rung, and until then **R1**/**R2**'s visual half rests on the owner-run windowed leg. |
-| **S2** | `UiInstance` at 80 B with `uv` and S-D2's bit map. **Bits 5..19 are free; bit 4 is reserved.** | **Animation**: D5 folds the visual transform at pack and costs **zero** GPU bytes, so animation needs none of these bits. If it ever does, it takes bits 5..19 and says so here. |
+| **S2** | `UiInstance` at 80 B with `uv` and S-D2's bit map. ~~**Bits 5..19 are free; bit 4 is reserved.**~~ ⚠️ **AFTER S5 THE FREE BITS ARE GONE: bit 4 stays reserved for S7, and bits 5..19 are spent by `FLAG_TILED` (bit 5) plus the two 7-bit tile counts (bits 6..=12, 13..=19).** *(amended 2026-08-21 — **S-D15**: `Tile` needs a per-instance repeat count, `uv`'s four floats are all consumed as `sub_min`/`sub_max`, and the record has no spare word — so the count takes the budget the budget exists for. Fifteen bits free, fifteen spent.)* | **Animation**: D5 folds the visual transform at pack and costs **zero** GPU bytes, so animation needs none of these bits. ~~If it ever does, it takes bits 5..19 and says so here.~~ **If it ever does, there is nothing left to take: the next per-instance datum WIDENS the record (the S2 decision, again) or aliases a field, which S2 spent 16 B per record to stop doing. Say so here either way.** |
 | **S3** | `FLAG_TEXTURED`, the bindless slot lane, the UI sampler binding, font-optional boot. | **Aether**: the `ui` construct's `image` / `sheet` vocabulary can only name what S3–S5 built. |
-| **S5** | The `u16 sheet_id` dense-handle mint. | **Aether**: the sheet-id mint is the natural thing for the construct to own at expand time (research §11 item 6). |
+| **S5** | The `u16 sheet_id` dense-handle mint — **`UiSheetTable::register(UiSheet) -> SheetId`, the `FontTable::load` verb** *(named 2026-08-21 — S-D16 (3): Lands item 1 landed the struct and the column and no registration verb, so this row exposed a surface no line of the rung created — and no gate constructed one either)*. **Also: `UiSpriteSheet` is a MODIFIER of `UiImage`, not a replacement — a sheet-bearing node still carries `UiImage`, whose `texture`/`uv_*` the gather substitutes.** | **Aether**: the sheet-id mint is the natural thing for the construct to own at expand time (research §11 item 6). **U5's precondition is stated purely in texture-naming terms (`UI-PLAN-AETHER.md:561-566`) and therefore does not cover the sheet route; under the ruling above it does not have to — a `sheet:` prop still emits a `UiImage`.** *(U5's own field-list note also says `nine_slice:` is "**five** keys, not four" and then lists four; the fifth would be `_pad`, which is not authorable. Corrected in that file.)* |
 | **S4** | D4's pinned emission order — ~~**over the three terms S4 emits (background → nine-slice TL..BR → image)**~~ **over the terms S4 emits: background → EITHER the nine-slice sub-quads (row-major TL..BR) OR the image**, with `UI_RECORDS_PER_NODE = 11` as the sub-record **stride** (the maximum emission is 10) *(amended 2026-08-21: S4 pins what it emits; the contract's last two terms are pinned by their own rungs, because at S4 neither exists — see the S4 audit ledger. **Amended again the same day — S-D12 (1): the nine-slice and image terms are ALTERNATIVES, since `UiNineSlice` suppresses the image record it slices.** A sibling adding a term takes a free sub code and raises the stride; it does not renumber these.)*. | **Interaction**: the focus ring is the last quad of the contract, so a focused node's ring is never painted under its own glyphs — **but S4 does not gate that, because `FocusRing` has zero occurrences in `crates/` and I9 is the rung that emits it. Interaction inherits the obligation to extend the ~~`append`-lane~~ **STAGED** order assertion (G4-2's shape) when it lands the ring, and to raise `UI_RECORDS_PER_NODE` for it — ~~raise~~ **it takes the next free sub code and `UI_RECORDS_PER_NODE` follows, because S-D13 (3) derives the stride as `UI_IMAGE_SUB + 1` rather than authoring it**.** *(both corrected 2026-08-21 — S-D13 (5)(2) and (3). "`append` lane" is the noun S-D12 struck from G4-1 as unobservable — `UiUploadSystem.keys` is private (`upload.rs:160`) — and this sentence was propagating it into the sibling plan, which is where a struck claim does the most damage: Interaction would have written a gate against a lane it cannot read.)* Likewise the glyph term: D4 itself records that glyph order "is decided purely by the order the host appends them", so it is a HOST APPEND DISCIPLINE, not a property of this lane. |
 
 **And what this plan needs from them:**
@@ -2320,7 +3095,7 @@ there.
 | Needed | From | Blocks | Fallback if it is late |
 |---|---|---|---|
 | **D7's registration table** | `UI-PLAN-AETHER.md` | **S6 only** | S6 lands with fifteen hand-written landings; S0–S5 are unaffected |
-| **The UI clock (D15)** | `UI-PLAN-ANIMATION.md` | nothing | S5 reads `Time`'s real delta through a one-function seam the animation plan later replaces |
+| **The UI clock (D15)** | `UI-PLAN-ANIMATION.md` | nothing | ~~S5 reads `Time`'s real delta through a one-function seam the animation plan later replaces~~ **S5 takes `Res<Time>` and applies AM6's clamp itself at the one site (`UI_FALLBACK_MAX_DELTA = 0.1`, AD1's own number); the replacement swaps the parameter for `Res<UiClock>` and deletes the clamp** *(corrected 2026-08-21 — **S-D17**: the struck fallback is the option AD1 rejects by name and for this consumer by name, and `Time`'s clamp provably does not reach the real delta. The animation plan's exposure table lists `UiClock` as consumed by this flipbook and records no fallback, so the dependency was declared satisfied on one side and waived on the other.)* |
 | **`UiVisual`** in `ui_pack_inputs!` | `UI-PLAN-ANIMATION.md` | nothing | S0's macro is already shaped to take it; §10.8 leg (b) simply does not run until it exists |
 | **The `paint_seq` agreement** | `UI-PLAN-INTERACTION.md` | G0-4 | G0-4 asserts the gather's pre-order against `collect_candidates` as it exists **today**; if the interaction plan changes that traversal, G0-4 is its gate too |
 

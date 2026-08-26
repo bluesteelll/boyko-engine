@@ -780,12 +780,36 @@ has drifted from AD5, and it escalates rather than getting a `// SAFETY:` commen
 The stub **type-checks**, so an oversized `Or` compiles cleanly and dies at first-frame
 `init_state` — not at build time.
 
-`ui_render_discovery`'s pack-input set (D31 point 2) already names `ComputedRect`, `UiBackground`,
+~~`ui_render_discovery`'s pack-input set (D31 point 2) already names `ComputedRect`, `UiBackground`,
 `ComputedClip`, `StackIndex`, `UiText`, `UiVisual`, `UiImage`, `UiNineSlice`, `UiSpriteSheet`,
 `UiSpriteCursor`, `ScrollPosition`, `Children` — **twelve, before this plan's channels or the
-interaction plan's components are counted.** `Or` **is** `OrComposable`, so nesting is legal
+interaction plan's components are counted.**~~ `Or` **is** `OrComposable`, so nesting is legal
 (`filter.rs:2420-2424`), and the fix is either `Or<(Or<(…)>, Or<(…)>)>` or N discovery systems ORing
 into one scratch bool.
+
+**The projection is corrected, and the ceiling is further off than R4 feared** *(2026-08-21 at the S5
+pre-build audit — `UI-PLAN-SPRITES.md` **S-D16 (3)** and its §6 exposure row)*. The landed
+`__ui_pack_inputs_list!` holds **seven**: `ComputedRect`, `UiBackground`, `ComputedClip`,
+`StackIndex`, `UiImage`, `UiNineSlice`, `UiSpriteSheet` (`crates/boyko_render/src/ui/gather.rs:96`).
+*(Was "six" at `:76-86` — written before S5 and invalidated by the rung it was written for. This
+document is not in the anchors census's `GATED_DOCS`, so nothing reddened.)* `UiText` and `Children` are
+**not** members — `Children` is a separate traversal probe the gather pays outside the macro, and
+`UiText` is not in the list at all — so two of R4's twelve were never there. The sprites plan's S5
+adds **one**, not two: `UiSpriteSheet` alone, because `UiSpriteAnim` is author configuration the pack
+never reads and `UiSpriteCursor` is the flipbook's private state. **The flat arity therefore runs
+6 → 7 (S5) → 8 (`UiVisual`) → 9 (the interaction plan's scroll datum), against a ceiling of 12.**
+
+**R4's real finding survives and gets sharper, though — and it is now a HARD constraint rather than a
+budget worry.** ⚠️ A **dense** `Changed<C>` inside `Or<..>` can never be true, MEASURED on this tree:
+the `Or` `QueryFilter` impl overrides none of the dense hooks (`HAS_DENSE`, `HAS_DENSE_INCLUDE`,
+`resolve_dense`, `dense_include_candidates` — `filter.rs:1834-2030`), so the inner term's store
+pointer stays the `init_fetch` NULL and `filter_fetch` returns `false` on its first line
+(`filter.rs:1483-1484`), while the same `Changed<C>` used BARE observes the row. **`UiVisual` must
+therefore be a table component if this plan intends `Changed<UiVisual>` to drive the repack**, or
+each tween system bumps `UiRenderGeneration` at its own writer. The mitigation R4 hands to the seam
+rung — *"the D31 macro must emit the nested form unconditionally, and the seam rung needs a test that
+RUNS the discovery system"* — is still owed and is still correct; a runtime test would also have
+caught the dense hole, which a type-level test cannot.
 
 **This risk is recorded here because animation is the subsystem that discovers it** — `UiVisual` is
 the thirteenth term — but **the fix belongs to whichever rung ships D6b** (the sprites plan's seam
@@ -827,7 +851,7 @@ type-level test cannot see a panic that lives in `init_state`.
 
 | Exposed | Consumed by |
 |---|---|
-| `UiClock` — the one UI delta source, clamped, real/virtual (AD1) | Sprites plan (the `UiSpriteCursor` flipbook); interaction plan (`ScrollMomentum`, `HoverDwell`) |
+| `UiClock` — the one UI delta source, clamped, real/virtual (AD1) | Sprites plan (the `UiSpriteCursor` flipbook); interaction plan (`ScrollMomentum`, `HoverDwell`). **Fallback, recorded because this row previously implied there was none:** if this plan lands second, the sprites plan's `ui_sprite_flipbook` takes `Res<Time>` and applies **AM6's clamp itself at that one site**, using AD1's own `100 ms` as `UI_FALLBACK_MAX_DELTA`; the replacement swaps one `SystemParam` and deletes one `min`. It does **not** adopt the raw `real_delta()` AD1 rejects. *(`UI-PLAN-SPRITES.md` **S-D17**, 2026-08-21 — the sprites plan had named the rejected option as its fallback, so the dependency read as satisfied here and as waived there.)* |
 | `UiVisual` — the Tier-1/2 sink, and its **identity** default (AD6) | Sprites plan (the pack fold reads it; the sprite lane's future `uv_shift`, AM5) |
 | AD3's affine + AD4's composition rule | Sprites plan (nine-slice sub-quads must use the origin-relative form, AM3); interaction plan (A6's hit-test fold) |
 | `EasingId` + the built-in family + the LUT table (AD2) | **Aether plan** — the `ui` construct's easing spelling is `family-direction` name → `EasingId`, a closed 30-name set plus a custom handle |
