@@ -216,7 +216,10 @@
 //!   sticky binding was designed for. Measured when they entered scope — of their 634 citations,
 //!   only 53 were rooted `crates/...`, against 303 bare fragments and 258 bare `:N` continuations.
 //! * **A plan may name a file it has not built.** `<!-- doc-path-planned -->` waives the existence
-//!   check for one line's mentions and nothing else; see [`PLANNED_MARKER`].
+//!   check for one line's mentions and nothing else; see [`PLANNED_MARKER`]. A marker that waives
+//!   NOTHING -- every path on its line already on disk -- is itself a violation, because the
+//!   waiver outlives the deliverable and silences the next path written on that line; see
+//!   [`DocScan::stale_planned`].
 //! * **A glob is not a path, and a ratio is not an anchor.** `docs/PHASE-*-RESULTS.md` names a
 //!   family, not a file, and `(3840/1920 = 2.000)` is arithmetic. Both were being read as claims;
 //!   both rejections are at the point of extraction, with the measurement, in `scan_line`.
@@ -307,6 +310,12 @@ const IGNORE_MARKER: &str = "<!-- doc-anchor-ignore -->";
 /// count is pinned per document by [`planned_paths_are_reported_and_pinned`], so the marker is a
 /// visible ledger of what each plan still owes rather than a way to make the check quiet. When the
 /// artifact lands, the marker comes off and the path is checked like any other.
+///
+/// ⚠️ **"Comes off" is now CHECKED, and it was not before.** The count above moves the moment
+/// the file appears, whether or not anyone deleted the marker, so a plan could land a deliverable,
+/// decrement its pin, keep the marker, and stay green -- MEASURED. [`DocScan::stale_planned`]
+/// carries the other half: a marker on a line whose every path exists is reported and failed by
+/// the same test.
 const PLANNED_MARKER: &str = "<!-- doc-path-planned -->";
 
 /// The workspace root. This test lives in the root package, so the manifest dir *is* the root.
@@ -1011,6 +1020,21 @@ struct DocScan {
     anchor_violations: Vec<String>,
     /// Path mentions on a `<!-- doc-path-planned -->` line: named as deliverables, not yet on disk.
     planned_paths: Vec<String>,
+    /// Lines whose `<!-- doc-path-planned -->` marker waives **nothing** — every path written on
+    /// them is already on disk.
+    ///
+    /// ⚠️ **This is the half of the marker's contract that used to stop being observable at the
+    /// exact moment the work succeeded.** [`planned_paths`](DocScan::planned_paths) is filled only
+    /// inside the *missing-file* branch, so once a deliverable lands, its marker becomes invisible
+    /// to the scan: the count decrements because the FILE now exists, not because the marker came
+    /// off, and putting the marker back leaves this census green. MEASURED 2026-08-27 on
+    /// `REFLECTION-PLAN-ECS.md` §7's `ecs_alloc.rs` line — restored marker, still 8/8, exit 0. A rung
+    /// whose gate is *"the marker comes off AND the pin decrements"* was therefore gating one fact
+    /// and reporting two.
+    ///
+    /// A line carrying the marker and **no** path mention is not a subject: the plans discuss the
+    /// marker in prose, in backticks, and that prose waives nothing by construction.
+    stale_planned: Vec<String>,
     /// Anchors written with a file fragment that resolves to no single file in the tree, and were
     /// therefore skipped rather than checked against a file the document did not name.
     unbindable: Vec<String>,
@@ -1156,6 +1180,7 @@ fn scan_doc(doc: &str) -> DocScan {
     let mut over_waived = Vec::new();
     let mut unbindable = Vec::new();
     let mut planned_paths = Vec::new();
+    let mut stale_planned = Vec::new();
 
     // Cache of file contents, so a document citing one file 15 times reads it once.
     let mut file_lines: BTreeMap<PathBuf, Option<Vec<String>>> = BTreeMap::new();
@@ -1242,6 +1267,21 @@ fn scan_doc(doc: &str) -> DocScan {
         }
 
         let (line_mentions, line_anchors) = scan_line(line);
+        // A marker on a line whose every path is already on disk waives nothing. See
+        // `DocScan::stale_planned` for why this is checked here and not in the branch above: the
+        // branch above can only see a marker while the file is still missing.
+        if planned && !line_mentions.is_empty() && line_mentions.iter().all(|m| m.resolved.exists())
+        {
+            stale_planned.push(format!(
+                "  {doc}:{lineno}  `{PLANNED_MARKER}` waives nothing -- every path on the \
+                 line exists: {}",
+                line_mentions
+                    .iter()
+                    .map(|m| format!("`{}`", m.raw))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
         // Positional pairing of the line's backticked symbols to its anchors, and only when the
         // two counts match exactly: `add_tag` / `remove_tag` / `has_tag` against `:130/:200/:89`
         // pairs one-to-one, in order, whichever side of the anchors the symbols are written on.
@@ -1350,6 +1390,7 @@ fn scan_doc(doc: &str) -> DocScan {
         path_violations,
         anchor_violations,
         planned_paths,
+        stale_planned,
         unbindable,
         over_waived,
     }
@@ -1720,7 +1761,7 @@ fn planned_paths_are_reported_and_pinned() {
         ("REFLECTION-ANALYSIS.md", 0),
         ("REFLECTION-PLAN-BOUNDARY.md", 4),
         ("REFLECTION-PLAN-CORE.md", 0),
-        ("REFLECTION-PLAN-ECS.md", 1), // 2 → 1 on 2026-08-26: EG0 built `seam_census.rs`; EG1's `ecs_alloc.rs` is the marker left. Kept on ONE line: a bare `:1845-1880` fragment below cites this file and shifts silently.
+        ("REFLECTION-PLAN-ECS.md", 0), // 1 → 0 on 2026-08-26: EG1 built `ecs_alloc.rs`, the last marker this document carried. (2 → 1 the same day: EG0 built `seam_census.rs`.) Kept on ONE line: a bare `:1906-1941` fragment below cites this file and shifts silently.
         // 4 → 3 on 2026-08-26: CORE C9 built G5's `reflect_compile_fail.rs`, so its
     // `doc-path-planned` marker came off in the same edit as this decrement.
     ("REFLECTION-PLAN-GATES.md", 3),
@@ -1729,6 +1770,7 @@ fn planned_paths_are_reported_and_pinned() {
 
     let scans = scan_all();
     let mut report = String::new();
+    let mut stale = String::new();
 
     for (doc, scan) in &scans {
         let n = scan.planned_paths.len();
@@ -1744,7 +1786,26 @@ fn planned_paths_are_reported_and_pinned() {
                 scan.planned_paths.join("\n")
             ));
         }
+
+        // The OTHER half of the same contract: a marker that waives nothing. Printed per
+        // document like the count above, so its zero is a measured zero and not an absent line.
+        let s = scan.stale_planned.len();
+        println!("docs/{doc}: {s} stale `{PLANNED_MARKER}` marker(s)");
+        if s != 0 {
+            stale.push_str(&format!("docs/{doc}:\n{}\n", scan.stale_planned.join("\n")));
+        }
     }
+
+    assert!(
+        stale.is_empty(),
+        "a `{PLANNED_MARKER}` marker waives nothing -- every path on its line is already on \
+         disk. DELETE THE MARKER.\n\
+         It is not inert: it suppresses the dead-path check on that line for every future \
+         edit, so the next path written there goes unchecked.\n\
+         And it is the half of a `Lands`-gate pair that was previously unobservable -- the \
+         pin below decrements because the FILE appeared, not because the marker came off, \
+         so the marker could stay and the rung still report green.\n{stale}"
+    );
 
     assert!(
         report.is_empty(),

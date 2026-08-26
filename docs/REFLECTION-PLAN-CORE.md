@@ -19,7 +19,7 @@
 | every refusal the derive makes (generics, packed, bitset, `Opaque`, un-`repr`'d enum) | **this file** |
 | the Nested / Opaque recursion contract and its allocation audit | **this file** |
 | entity/component enumeration · `get_field`/`set_field` glue · `add_default`/`remove` · the public by-id structural seam on `EcsMaster` · the `StorageKind`×`ResidencyKind`×dynamic-tag runtime matrix · `BUG-MIGRATE-TB-1` in the enumeration glue | [`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md) |
-| `Sink`/`Source` · the name-keyed wire · `stable_name` consumption at the wire · tuple-struct reorder caveat — ⚠️ **DEBT, opened 2026-08-21 (C7 audit): BOUNDARY does not state the caveat.** Its only tuple-struct text is :977 and it carries no "caveat" / "by-position" / "positional" sentence; B4 gate 4's reorder subjects are all named-field types, so nothing there depends on what C7 retracts. This is a delegated statement with no recipient text, not a contradiction. **BOUNDARY owes the paragraph before its first `Sink` rung lands** | [`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md) |
+| `Sink`/`Source` · the name-keyed wire · `stable_name` consumption at the wire · tuple-struct reorder caveat — ⚠️ **DEBT, opened 2026-08-21 (C7 audit): BOUNDARY does not state the caveat.** Its only tuple-struct text is [`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md):977 and it carries no "caveat" / "by-position" / "positional" sentence; B4 gate 4's reorder subjects are all named-field types, so nothing there depends on what C7 retracts. This is a delegated statement with no recipient text, not a contradiction. **BOUNDARY owes the paragraph before its first `Sink` rung lands** | [`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md) |
 | CI legs (feature-on/off matrix) · the ship absence gate (`cargo tree` + symbol census + present control) · the Miri package allowlist · the hot-loop 0 % bench · the bevy-shaped `get_field` baseline | [`REFLECTION-PLAN-GATES.md`](REFLECTION-PLAN-GATES.md) |
 
 **Every rung below has a gate that a GATES-plan leg must actually run.** The dependency is
@@ -425,12 +425,12 @@ amend. This entry exists so the next author meets the reasoning, not just the tw
 C7's `Lands` opened *"In `boyko_macros`: …"* and then emitted, from that crate, paths into two
 items that exist nowhere:
 
-* **`boyko_reflect::Reflect`.** `crates/boyko_reflect/src/` declares **no trait at all** — six
-  modules, and `boyko_reflect/src/lib.rs:59-70` re-exports only the `TypeInfo` family plus
-  `install_type_info`/`type_info_of`/`Scalar`/`ScalarKind`/`NestedCursor`/`FieldValue`. The
-  identifier appears in the plan set at exactly two sites and **both are uses** (C7
-  `REFLECTION-PLAN-CORE.md:2381`, C8 `:2995`). `REFLECTION-ANALYSIS.md:11` even records *the absence of a `trait Reflect`* as a finding
-  about the tree.
+* **`boyko_reflect::Reflect`.** ~~`crates/boyko_reflect/src/` declares **no trait at all** — six modules, and its re-export block carries only the `TypeInfo` family plus `install_type_info`/`type_info_of`/`Scalar`/`ScalarKind`/`NestedCursor`/`FieldValue`.~~ **STATE AT THE C7 AUDIT (2026-08-21). The finding STOOD and C7/D22 discharged it** — `crates/boyko_reflect/src/reflect.rs:51` declares `pub trait Reflect` today, and `lib.rs` re-exports it beside the `TypeInfo` family.
+  ⚠️ **Re-derived 2026-08-27 (ECS D25) rather than re-anchored a third time.** The count is
+  **eight** modules, not six: it was already seven when the EG1 rung last edited this sentence, and
+  that edit moved it one further from true while re-deriving the clause's own range onto a span
+  that now includes the `pub use reflect::{Reflect, ReflectDefault};` line — its own
+  counter-example. A range containing what its sentence denies is worse than no range, so it is retired rather than widened. The identifier appears in the plan set at exactly two sites and **both are uses** (C7 `REFLECTION-PLAN-CORE.md:2381`, C8 `:2995`). `REFLECTION-ANALYSIS.md:11` even records *the absence of a `trait Reflect`* as a finding about the tree.
 * **`boyko_reflect::ReflectDefault`.** Its only occurrence anywhere is inside **D20's prose**
   (:344-349), in a fenced sketch introduced by *"where `boyko_reflect` declares"*. D20 is a
   decision, not a rung. By C9 the trait is load-bearing twice — gate 5 blesses a `.stderr` against
@@ -1044,7 +1044,7 @@ and C8's clauses migrate into the corpus. Nothing is lost: feature off, the whol
 mechanisms at two boundaries"* is the compile-time refusal plus the release `assert!` — not three.
 
 **And the release `assert!`'s ownership claim was wrong.** C9's *"It was on no rung's list in any of
-the four documents"* is false: [`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):1203 carries it
+the four documents"* is false: [`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):1320 carries it
 against rung **EG3** with a live fallback (*"If CORE declines it, EG3 must add the check on its own
 read path and say so"*). C9 accepting the item creates a **C9 → EG3** edge and an obligation to
 retire that conditional; both are recorded in §7.4.
@@ -2349,8 +2349,8 @@ verified against the tree rather than argued.
 
 * `pub trait Reflect { const TYPE_INFO: &'static TypeInfo; }` — C7's first emission bullet names
   it and C8's install (`<Self as boyko_reflect::Reflect>::TYPE_INFO`, `REFLECTION-PLAN-CORE.md:2995`) consumes it, but
-  `crates/boyko_reflect/src/` declares **no trait at all** (six modules, `boyko_reflect/src/lib.rs:59-70`), and no
-  rung's `Lands` created one. Without it the emission does not compile.
+  ~~`crates/boyko_reflect/src/` declares **no trait at all** (six modules)~~ — **state at the D22 audit; DISCHARGED, and the count was wrong in both directions (ECS D25, 2026-08-27): the crate is EIGHT modules, and `crates/boyko_reflect/src/reflect.rs:51` declares the trait today.** At the time no
+  rung's `Lands` created one, and without it the emission did not compile.
 * `ReflectDefault` **exactly as D20 sketches it** (`#[diagnostic::on_unimplemented]` with D20's
   two strings, blanket `impl<T: Default> ReflectDefault for T {}`). D20 is a *decision*, not a
   rung; its sketch was never assigned to anyone. C9 gate 5 already blesses a `.stderr` against
@@ -3572,7 +3572,7 @@ C10-independent; the window is recorded so it is not rediscovered.
 [`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):340-347 states the requirement as *"refusal is
 TWO mechanisms at TWO boundaries; neither substitutes for the other"*). ~~**It was on no rung's list
 in any of the four documents**~~ — **FALSE, corrected 2026-08-26 (D37).**
-[`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):1203 lists this exact item against rung **EG3**,
+[`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):1320 lists this exact item against rung **EG3**,
 with a live fallback clause — *"If CORE declines it, EG3 must add the check on its own read path and
 say so"* — which C9 accepting the item does **not** retire. The substantive half of the claim holds
 (no rung's *Lands* carried it), and the wrongness mattered twice: it hid the obligation to retire
@@ -3622,7 +3622,7 @@ c8_bitset_suppression` → `running 17` and `running 2`, exit 0. One compile err
 
 *(The falsehood at that file's header — *"the four `REFLECTION-PLAN-*.md` documents are not in
 `internal_docs_anchors.rs`'s `GATED_DOCS`"* — died with the file. HEAD `eeb567be` had put all four
-in, at `tests/internal_docs_anchors.rs:280`, one commit before the comment was read. The by-name
+in, at `tests/internal_docs_anchors.rs:283`, one commit before the comment was read. The by-name
 citation practice it defended is still right; only its stated reason was doc-rot.)*
 
 **Gate.**
@@ -3978,7 +3978,7 @@ defect.
    **And CORE now owes ECS a second install-side item: `C9` carries ECS D5's release
    `assert!(storage_kind(id) != Bitset)` inside `install_type_info` (D29, re-confirmed at the C9 audit
    under D37), so **ECS EG3 depends on CORE C9** — the last rung of this plan.
-   [`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):1203 has carried that item against EG3 all
+   [`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):1320 has carried that item against EG3 all
    along, with the fallback *"If CORE declines it, EG3 must add the check on its own read path and say
    so"*; CORE does **not** decline it, so that conditional is retired and must be struck when ECS is
    next edited, or EG3 builds the same check twice. C9's own text claimed the item *"was on no rung's

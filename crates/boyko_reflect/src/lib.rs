@@ -46,6 +46,12 @@
 //!   `#[component(reflect)]`'s expansion names (CORE C7 / D22). Both were *used* by the
 //!   plan set before any rung created them, which is why they land here beside the
 //!   derive that emits them rather than in a fenced sketch inside a decision.
+//! * [`ecs`] — the ECS glue (`docs/REFLECTION-PLAN-ECS.md`): everything between a
+//!   `ComponentId` and a byte. EG1 lands [`ecs::components_of_into`] (sources 1 and 2,
+//!   kind-tagged, zero-alloc) and [`ecs::display_name`]. Namespaced rather than
+//!   re-exported at the crate root: `Refusal` and `IdKind` are the ECS view's vocabulary,
+//!   not the value model's, and flattening them would put two unrelated `Kind` families
+//!   in one namespace.
 //! * [`cursor`] — [`NestedCursor`] / [`FieldValue`], the `Nested` descend (CORE C6).
 //!   One `add` and one pointer copy per level, with the `'a` doing the validity
 //!   guarantee the compiler can check; the two properties that make that arithmetic
@@ -54,6 +60,7 @@
 
 pub mod array;
 pub mod cursor;
+pub mod ecs;
 pub mod prim;
 pub mod reflect;
 pub mod registry;

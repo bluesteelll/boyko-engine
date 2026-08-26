@@ -14,6 +14,69 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-26 — ⚠️ `add_tag` / `remove_tag` PANIC IN RELEASE on any entity whose archetype has ever hosted a dense component. Found while landing ECS EG1; NOT fixed here.
+
+Landing `components_of_into` needed a fixture entity carrying three components. The obvious route —
+`spawn_two(table, dense)` then `add_tag` — panicked, and the panic is in the kernel, not in the glue.
+
+**What it is.** `migrate_entity_attach_ids` copies the retained columns by walking the **source
+archetype's `component_ids()`** and calling `component_pools().get_pool(cid)` for every id in it:
+
+```
+crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs:1472
+    .expect("invariant: source hosts its own component id");
+```
+
+`component_ids()` is the raw id list the archetype was minted from, and it **retains** `Bitset` and
+`Dense` ids by the kernel's own documented design — only the signature *mask* is filtered. A `Dense`
+id has no per-archetype pool by construction, so the walk dies. `migrate_entity_detach_ids` has the
+identical defect at `migration_helpers.rs:1749`. Both are `.expect`, not `debug_assert!` — this is
+**release-present**, and `add_tag` / `remove_tag` are `pub` on `EcsMaster`.
+
+**The victim class is wider than it looks, and this is the part worth your attention.** It is not
+"an entity that carries a dense component". Archetype dedup keys on the FILTERED mask while the
+retained list belongs to whichever call first minted that archetype, so a **table-only** entity that
+dedups into an archetype first minted by a table+dense spawn panics on `add_tag` as well — it never
+carried the dense component at all. Spawn order decides whether the program works.
+
+**Measured**, in `D:/wt/reflect` on `feat/reflection`, in a throwaway probe with no reflection code
+on the stack (probe deleted, tree left clean):
+
+* `spawn_two(table, dense)` → `add_tag` → panic at `migration_helpers.rs:1472`.
+* the same entity built with the tag in its signature → `remove_tag` → panic at `:1749`.
+* `spawn_one(table)` → `add_tag` → fine, **when** no dense-carrying entity minted that archetype
+  first.
+
+In the production tree the one dense component is `GpuTransform3D`, so any entity that is
+GPU-interpolated cannot be tagged, and neither can anything sharing its archetype.
+
+**Why I did not fix it.** It changes the behaviour of a shipping API with existing callers, for
+reasons that belong to a reflection campaign — the inversion the directional rule exists to prevent,
+and the same disposition already recorded for `has_component`'s missing `Bitset` branch (F6) and
+`set_component_raw`'s tick asymmetry (F14). EG1 routed around it: gate 4 builds its three-component
+subject with `create_entity`, and gate 6 spawns its table-only sibling *before* the dense-carrying
+subject so the shared archetype retains no dense id. Both sites say so, with this as the reason.
+
+**What it blocks, and the call.** Not EG1 — the glue is read-only. But **EG2 and EG6 are built on
+these two functions**: `S1` is specified as *"a bytes-carrying sibling of
+`migrate_entity_attach_ids`"* and `S2` as the already-existing detach helper made `pub`. So
+`add_default` / `remove` inherit the panic unless the retained-id walk is filtered through
+`is_signature_storage` first.
+
+* **(a)** Fix it in `boyko_ecs` **before EG2**, as its own change, on the kernel's schedule. The fix
+  is one `if !is_signature_storage(storage_kind(cid)) { continue; }` in each of the two walks — the
+  same predicate every other kernel consumer of `component_ids()` already routes through.
+* **(b)** Leave it, and have EG2's new `add_component_by_id` / `remove_component_by_id` carry the
+  filter themselves while `add_tag` / `remove_tag` stay broken. This ships a seam that is correct
+  where its sibling is not, which is worse than either.
+* **(c)** Fold the fix into EG2. It is the same code path, but it puts a shipping-behaviour change
+  inside a reflection rung.
+
+I did not choose. **(a)** is what the directional rule points at, and it is the reason this is here
+rather than in a report.
+
+---
+
 ## 2026-08-21 (second pass) — `boyko_reflect`: the four owner calls are FIVE, two of them were the same call, and the largest was on no list
 
 A critique pass over the four plan documents (`REFLECTION-PLAN-CORE/ECS/BOUNDARY/GATES.md`) found
