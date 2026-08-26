@@ -43,12 +43,95 @@
 //! (this module ships the system, not an App schedule), exactly as it is for the
 //! layout pair and the text measure system.
 
+use boyko_ecs::ecs::core::component::hooks::deferred_master::DeferredEcsMaster;
+use boyko_ecs::ecs::core::component::hooks::HookContext;
 use boyko_ecs::ecs::core::iters::query::{Mut, Query};
 use boyko_ecs::ecs::core::system::Res;
 use boyko_ecs::ecs::core::time::time::Time;
-use boyko_macros::Resource;
+use boyko_macros::{Bundle, Resource};
 
 use crate::components::{SpriteAnimMode, UiSpriteAnim, UiSpriteCursor, UiSpriteSheet};
+
+/// A one-field `#[derive(Bundle)]` wrapper carrying the DENSE
+/// [`UiSpriteCursor`], so an insert verb can take it at all.
+///
+/// This is not a style choice. Dense storage (plan D0) SUPPRESSES the
+/// single-component `Bundle` impl the derive normally emits — `boyko_macros`'
+/// `component.rs` gates `bundle_items` on
+/// `no_bundle || storage_bitset || storage_dense` — so
+/// `insert(UiSpriteCursor::default())` is `error[E0277]: the trait bound
+/// UiSpriteCursor: Bundle is not satisfied`. A wrapper bundle is the only
+/// spelling that compiles, and it is the same `dense_d2_routing::T4DenseBundle`
+/// idiom the S5 harnesses use.
+#[derive(Bundle)]
+struct SpriteCursorBundle {
+    /// The cursor the hook materializes.
+    cursor: UiSpriteCursor,
+}
+
+/// [`UiSpriteAnim`]'s `on_add` hook (UI-ADVANCED S6, `docs/UI-PLAN-SPRITES.md`
+/// S-D20 (1)): materializes the node's [`UiSpriteCursor`] at its `Default`.
+///
+/// # Why this is a HOOK and not `#[require]` or a dispatch-side insert
+///
+/// [`ui_sprite_flipbook`] queries all three of the animation, the cursor and the
+/// sheet, so an animation with no cursor is FROZEN — silently, with no panic and
+/// no failing assertion. `#[require(UiSpriteCursor)]` is the obvious remedy and
+/// MEASURED it panics on this kernel: the require pass resolves the required id's
+/// `ComponentPool` in the target ARCHETYPE, and a dense id owns none. The hook
+/// route reaches the one path that already learned the dense partition —
+/// `InsertCommand` filters dense ids out of the table replace path — so the
+/// deferred insert lands where the require expansion could not.
+///
+/// Inserting the cursor from the `.ui` dispatch instead would be THREE sites
+/// (spawn, the reconcile's insert branch, the reconcile's remove branch) and
+/// would make a `.ui` node carry a component a `ui!` node does not — a
+/// `.ui` ≡ `ui!` ≡ hand-spawn divergence no comparator can see, because the
+/// cursor is excluded from the authorable vocabulary by design. One landing at
+/// the component is inherited by every construction site instead.
+///
+/// # The insert is DEFERRED, and `on_add` is not `on_insert`
+///
+/// The cursor is present after the outermost apply, not inside the window that
+/// added the animation: the pairing is structural, not instantaneous. Nothing in
+/// this campaign reads a cursor at spawn time, and it is stated because a future
+/// reader must be told which.
+///
+/// `on_add` fires only on a NEW add, so (MEASURED) re-inserting an edited
+/// `UiSpriteAnim` over an existing one — what a `.ui` hot-reload does when an
+/// author changes `fps` — does NOT re-fire it, and a running cursor keeps its
+/// phase. `on_insert` would reset it, and would also stomp
+/// [`AnimatedSpriteBundle`](crate::bundles::AnimatedSpriteBundle)'s own cursor on
+/// every re-insert rather than only on the spawn frame where the two values are
+/// equal anyway.
+///
+/// # There is deliberately no symmetric `on_remove`
+///
+/// An animation REMOVED from a surviving node leaves its 8 B dense cursor row
+/// behind, inert (the flipbook needs all three components) and self-healing (a
+/// re-added animation gets a fresh `Default` cursor, MEASURED). The symmetric
+/// `on_remove` hook that would tidy it is UNLANDABLE: `on_remove` also fires on
+/// the per-component pass of a DESPAWN, where the entity is still live at hook
+/// time and dead by the drain, and the enqueued removal then panics
+/// `RemoveCommand::apply: stale entity`. A `w.is_alive(ctx.entity)` guard does
+/// not help — MEASURED, it reads `true` at hook time. Despawn already reclaims
+/// the dense row on its own, so the hook would buy nothing there and cost a hard
+/// panic on every despawn of an animated node. Recorded in
+/// `docs/OPEN-QUESTIONS.md`.
+///
+/// # Safety
+///
+/// The [`HookFn`](boyko_ecs::ecs::core::component::hooks::HookFn) contract: the
+/// kernel calls this during a hook dispatch with an exclusively-borrowed live
+/// world and the added entity's context. This body performs no direct storage
+/// access — it only enqueues one structural command into the world-resident
+/// deferred queue, which the outermost drain applies strictly later.
+pub(crate) unsafe fn ui_sprite_anim_on_add(mut world: DeferredEcsMaster<'_>, ctx: HookContext) {
+    world
+        .commands()
+        .entity(ctx.entity)
+        .insert(SpriteCursorBundle { cursor: UiSpriteCursor::default() });
+}
 
 /// A registered sheet's dense handle — an index into [`UiSheetTable`], minted
 /// only by [`UiSheetTable::register`]. The [`FontId`](crate::text::FontId)

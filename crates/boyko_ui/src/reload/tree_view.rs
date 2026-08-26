@@ -20,8 +20,8 @@ use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::hierarchy::Children;
 
 use crate::components::{
-    ComputedClip, ContentSize, StackIndex, UiAbsolute, UiAlign, UiLayout, UiName, UiRoot,
-    UiSourceOrder, UiSpacing,
+    ComputedClip, ContentSize, StackIndex, UiAbsolute, UiAlign, UiLayout, UiName, UiNineSlice,
+    UiRoot, UiSourceOrder, UiSpacing, UiSpriteAnim, UiSpriteSheet,
 };
 
 /// The owned, text-relevant component snapshot of one live node.
@@ -53,6 +53,18 @@ pub struct LiveNode {
     pub content_size: Option<ContentSize>,
     pub stack_index: Option<StackIndex>,
     pub clip: Option<ComputedClip>,
+    // UI-ADVANCED S6 — the sprite vocabulary. These three fields are what make
+    // the serializer's arms and the reconcile's `TextStruct` impls REACHABLE:
+    // `serialize_ui` writes only from `LiveNode`, and `patch_unit_struct` takes
+    // its `live_val` only from `LiveNode`, so a component landed everywhere else
+    // but here is dead code that silently drops on every round trip and goes
+    // stale on every reload (`docs/UI-PLAN-SPRITES.md` S-D20 (6)).
+    //
+    // `UiSpriteCursor` is NOT here and must not be: it is runtime state, so
+    // snapshotting it would make it serializable and then authorable-by-round-trip.
+    pub nine_slice: Option<UiNineSlice>,
+    pub sprite_sheet: Option<UiSpriteSheet>,
+    pub sprite_anim: Option<UiSpriteAnim>,
     pub is_root: bool,
 }
 
@@ -102,6 +114,9 @@ impl UiTreeView {
                 content_size: world.get_component::<ContentSize>(entity).copied(),
                 stack_index: world.get_component::<StackIndex>(entity).copied(),
                 clip: world.get_component::<ComputedClip>(entity).copied(),
+                nine_slice: world.get_component::<UiNineSlice>(entity).copied(),
+                sprite_sheet: world.get_component::<UiSpriteSheet>(entity).copied(),
+                sprite_anim: world.get_component::<UiSpriteAnim>(entity).copied(),
                 is_root: world.has_component(entity, UiRoot::component_id()),
             };
             nodes.push(node);

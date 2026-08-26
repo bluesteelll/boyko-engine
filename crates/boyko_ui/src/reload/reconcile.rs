@@ -55,8 +55,8 @@ use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::system::Commands;
 
 use crate::components::{
-    ComputedClip, ContentSize, StackIndex, UiAbsolute, UiAlign, UiName, UiRoot, UiSourceOrder,
-    UiSpacing,
+    ComputedClip, ContentSize, StackIndex, UiAbsolute, UiAlign, UiName, UiNineSlice, UiRoot,
+    UiSourceOrder, UiSpacing, UiSpriteAnim, UiSpriteSheet,
 };
 use crate::reload::state::UiHotReload;
 use crate::reload::tree_view::{LiveNode, UiTreeView};
@@ -447,6 +447,21 @@ fn patch_node(
     patch_unit_struct::<UiAbsolute>(new, "UiAbsolute", node.absolute, entity, cmds, report);
     patch_unit_struct::<ContentSize>(new, "ContentSize", node.content_size, entity, cmds, report);
     patch_unit_struct::<ComputedClip>(new, "ComputedClip", node.clip, entity, cmds, report);
+    // UI-ADVANCED S6 — the sprite vocabulary. `UiSpriteCursor` is absent on
+    // purpose: it is not text-owned, so it is preserved by omission exactly like
+    // the transient components, and a reload that edits an animation's `fps`
+    // therefore does not reset the running phase (the `on_add` hook does not
+    // re-fire on a re-insert — MEASURED).
+    patch_unit_struct::<UiNineSlice>(new, "UiNineSlice", node.nine_slice, entity, cmds, report);
+    patch_unit_struct::<UiSpriteSheet>(
+        new,
+        "UiSpriteSheet",
+        node.sprite_sheet,
+        entity,
+        cmds,
+        report,
+    );
+    patch_unit_struct::<UiSpriteAnim>(new, "UiSpriteAnim", node.sprite_anim, entity, cmds, report);
     patch_stack_index(new, node.stack_index, entity, cmds, report);
     patch_ui_root(new, node, entity, cmds);
     patch_ui_name(new, node, entity, cmds);
@@ -719,6 +734,51 @@ impl TextStruct for ComputedClip {
     }
     fn remove(entity: Entity, cmds: &mut Commands) {
         cmds.entity(entity).remove::<ComputedClip>();
+    }
+}
+
+impl TextStruct for UiNineSlice {
+    fn parse(body: &str, body_col: u16, report: &mut UiParseReport) -> Self {
+        crate::text::dispatch::parse_ui_nine_slice_public(body, body_col, report)
+    }
+    fn insert(self, entity: Entity, cmds: &mut Commands) {
+        cmds.entity(entity).insert(self);
+    }
+    fn remove(entity: Entity, cmds: &mut Commands) {
+        cmds.entity(entity).remove::<UiNineSlice>();
+    }
+}
+
+impl TextStruct for UiSpriteSheet {
+    fn parse(body: &str, body_col: u16, report: &mut UiParseReport) -> Self {
+        crate::text::dispatch::parse_ui_sprite_sheet_public(body, body_col, report)
+    }
+    fn insert(self, entity: Entity, cmds: &mut Commands) {
+        cmds.entity(entity).insert(self);
+    }
+    fn remove(entity: Entity, cmds: &mut Commands) {
+        cmds.entity(entity).remove::<UiSpriteSheet>();
+    }
+}
+
+impl TextStruct for UiSpriteAnim {
+    fn parse(body: &str, body_col: u16, report: &mut UiParseReport) -> Self {
+        crate::text::dispatch::parse_ui_sprite_anim_public(body, body_col, report)
+    }
+    fn insert(self, entity: Entity, cmds: &mut Commands) {
+        cmds.entity(entity).insert(self);
+    }
+    /// Removing the ANIMATION leaves its dense [`UiSpriteCursor`] row behind —
+    /// 8 B, inert without the animation (the flipbook needs all three
+    /// components), and self-healing (a re-added animation gets a fresh `Default`
+    /// cursor from the `on_add` hook). The symmetric `on_remove` hook that would
+    /// tidy it is unlandable on this kernel: it also fires on a DESPAWN's
+    /// per-component pass, where the deferred removal then panics
+    /// `RemoveCommand::apply: stale entity` — MEASURED, and a liveness guard does
+    /// not help because the entity is still live at hook time. See
+    /// `crate::sprite::ui_sprite_anim_on_add` and `docs/OPEN-QUESTIONS.md`.
+    fn remove(entity: Entity, cmds: &mut Commands) {
+        cmds.entity(entity).remove::<UiSpriteAnim>();
     }
 }
 

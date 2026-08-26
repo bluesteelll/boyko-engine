@@ -6,12 +6,13 @@
 //!
 //! # What is copied vs. new
 //!
-//! * [`split_top_level`] is COPIED VERBATIM from the `.keys` parser
-//!   (`boyko_input::persist::grammar::split_top_level`). Copying (not depending
-//!   on `boyko_input`) avoids a `boyko_ui → boyko_input` crate edge for a
-//!   ~20-line pure function. It tracks paren depth + quote state ONLY; it is
-//!   NOT brace-aware, so P3 uses it strictly on the already-extracted INNER
-//!   field list (Decision 5), never to isolate a component span.
+//! * [`split_top_level`] was copied from the `.keys` parser
+//!   (`boyko_input::persist::grammar::split_top_level`) and has since DIVERGED —
+//!   see its own doc. Copying (not depending on `boyko_input`) avoids a
+//!   `boyko_ui → boyko_input` crate edge for a ~20-line pure function. It tracks
+//!   paren + BRACKET depth and quote state; it is NOT brace-aware, so P3 uses it
+//!   strictly on the already-extracted INNER field list (Decision 5), never to
+//!   isolate a component span.
 //! * [`strip_comment_slashslash`] is NEW: the `.keys` strip-comment is a
 //!   single-byte `#` rule, but `.ui` reserves `#` for the name sigil, so the
 //!   comment lead is the two-byte `//` (Decision 2). It returns the PRE-TRIM
@@ -22,14 +23,39 @@
 /// The canonical indentation step: 4 spaces per nesting level (P3 §1).
 pub(crate) const STEP: u32 = 4;
 
-/// Splits a top-level comma-separated list while tracking paren depth and
-/// quotes. A comma inside `(...)` or inside `"…"` does not split. The returned
-/// slices borrow from `s`.
+/// Splits a top-level comma-separated list while tracking paren and BRACKET
+/// depth plus quotes. A comma inside `(...)`, inside `[...]`, or inside `"…"`
+/// does not split. The returned slices borrow from `s`.
 ///
-/// COPIED VERBATIM from `boyko_input::persist::grammar::split_top_level`
-/// (Decision 5). Used ONLY on the inner field list of a component body, which is
-/// provably free of `{`/`[`/quoted-comma values in the P3 grammar (locked by a
-/// rejection test), so paren+quote awareness is sufficient.
+/// Used ONLY on the inner field list of a component body (Decision 5), never to
+/// isolate a component span — that is [`extract_component_span`]'s brace-matching
+/// job.
+///
+/// # The bracket rule is a FIX, and the doc it replaces was false twice
+///
+/// This function was copied from
+/// `boyko_input::persist::grammar::split_top_level`, whose grammar has no
+/// bracketed values, and its doc claimed the P3 field list was *"provably free of
+/// `{`/`[`/quoted-comma values … locked by a rejection test"*. Neither half held:
+/// GUI P6a added `UiImage`'s `uv_min`/`uv_max`, which are `[u, v]`, and no such
+/// rejection test exists anywhere in the tree.
+///
+/// The consequence was silent. MEASURED at the UI-ADVANCED S6 build: a `.ui`
+/// source spelling `UiImage { texture: 7, uv_min: [0, 0], uv_max: [1, 1], tint: … }`
+/// split into `uv_min: [0` / `0]` / `uv_max: [1` / `1]`, so `parse_f32_pair`
+/// rejected both UV fields, they kept their `Default`s, and four recoverable
+/// errors went into the LOWERING report — the report `p3_common::spawn_dot_ui`
+/// clones and drops. `p6a_equivalence::image_widget_three_ways_equivalent` was
+/// green over it only because the authored UVs happened to EQUAL the defaults
+/// (`[0,0]`/`[1,1]`). Bracketed values in a `.ui` file had never parsed.
+///
+/// # One depth counter, not two
+///
+/// `(` and `[` both open and `)` and `]` both close the same counter. A crossed
+/// pair (`[a)`) is not diagnosed here — it is a malformed value that the
+/// type-directed leaf parser rejects one step later with a per-field error, which
+/// is the layer that owns value shape. Two independent counters would trade one
+/// pathological mis-split for another, at the same cost.
 pub(crate) fn split_top_level(s: &str) -> Vec<&str> {
     let bytes = s.as_bytes();
     let mut out = Vec::new();
@@ -40,8 +66,8 @@ pub(crate) fn split_top_level(s: &str) -> Vec<&str> {
     while i < bytes.len() {
         match bytes[i] {
             b'"' => in_quotes = !in_quotes,
-            b'(' if !in_quotes => depth += 1,
-            b')' if !in_quotes => depth = depth.saturating_sub(1),
+            b'(' | b'[' if !in_quotes => depth += 1,
+            b')' | b']' if !in_quotes => depth = depth.saturating_sub(1),
             b',' if !in_quotes && depth == 0 => {
                 out.push(&s[start..i]);
                 start = i + 1;

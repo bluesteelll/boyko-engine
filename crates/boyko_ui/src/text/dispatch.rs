@@ -26,8 +26,9 @@ use boyko_input::resolve_action_name;
 
 use crate::binding::components::{BindText, BindValue, TemplateId, NO_FIELD};
 use crate::components::{
-    AnchorEdge, Bar, BarFill, Button, ComputedClip, ComputedRect, ContentSize, StackIndex, UiAbsolute,
-    UiAlign, UiAnchor, UiGrid, UiImage, UiLayout, UiName, UiRoot, UiSpacing,
+    AnchorEdge, Bar, BarFill, Button, ComputedClip, ComputedRect, ContentSize, NineSliceMode,
+    SpriteAnimMode, StackIndex, UiAbsolute, UiAlign, UiAnchor, UiGrid, UiImage, UiLayout, UiName,
+    UiNineSlice, UiRoot, UiSpacing, UiSpriteAnim, UiSpriteSheet,
 };
 use crate::interaction::action::{OnClick, OnHover, OnSubmit};
 use crate::text::ast::{CompKind, ParsedComponent};
@@ -165,6 +166,25 @@ pub(crate) fn parse_and_insert(
         "UiAnchor" => {
             expect_struct(name, kind, line_no, body_col, rep)?;
             cmds.entity(entity).insert(parse_ui_anchor(body, body_col, rep));
+        }
+        // UI-ADVANCED S6 — the sprite vocabulary (`docs/UI-PLAN-SPRITES.md` S6).
+        // `UiSpriteCursor` is DELIBERATELY not here and never will be: it is the
+        // flipbook's private per-frame state, and the property this closed match
+        // enforces is that a `.ui` file cannot NAME a runtime-state component or
+        // give one a value. The cursor still appears beside an authored
+        // `UiSpriteAnim` — from that component's `on_add` hook, at its `Default`,
+        // author-uncontrollable, on every authoring path alike (S-D20 (1)/(2)).
+        "UiNineSlice" => {
+            expect_struct(name, kind, line_no, body_col, rep)?;
+            cmds.entity(entity).insert(parse_ui_nine_slice(body, body_col, rep));
+        }
+        "UiSpriteSheet" => {
+            expect_struct(name, kind, line_no, body_col, rep)?;
+            cmds.entity(entity).insert(parse_ui_sprite_sheet(body, body_col, rep));
+        }
+        "UiSpriteAnim" => {
+            expect_struct(name, kind, line_no, body_col, rep)?;
+            cmds.entity(entity).insert(parse_ui_sprite_anim(body, body_col, rep));
         }
         // Action-emitting tuple newtypes carrying a dense `u16` action index
         // (P4 Decision 3). BOTH forms resolve here (GUI #27): the integer-index
@@ -315,6 +335,36 @@ pub(crate) fn parse_computed_clip_public(
     rep: &mut UiParseReport,
 ) -> ComputedClip {
     parse_computed_clip(body, body_col, rep)
+}
+
+/// Parses a `UiNineSlice` body (the reconcile patcher reads the typed value).
+#[inline]
+pub(crate) fn parse_ui_nine_slice_public(
+    body: &str,
+    body_col: u16,
+    rep: &mut UiParseReport,
+) -> UiNineSlice {
+    parse_ui_nine_slice(body, body_col, rep)
+}
+
+/// Parses a `UiSpriteSheet` body (the reconcile patcher reads the typed value).
+#[inline]
+pub(crate) fn parse_ui_sprite_sheet_public(
+    body: &str,
+    body_col: u16,
+    rep: &mut UiParseReport,
+) -> UiSpriteSheet {
+    parse_ui_sprite_sheet(body, body_col, rep)
+}
+
+/// Parses a `UiSpriteAnim` body (the reconcile patcher reads the typed value).
+#[inline]
+pub(crate) fn parse_ui_sprite_anim_public(
+    body: &str,
+    body_col: u16,
+    rep: &mut UiParseReport,
+) -> UiSpriteAnim {
+    parse_ui_sprite_anim(body, body_col, rep)
 }
 
 // ── Per-component parsers (default-then-overwrite, Decision 4) ────────────────
@@ -469,6 +519,51 @@ fn parse_ui_anchor(body: &str, body_col: u16, rep: &mut UiParseReport) -> UiAnch
         "offset_y" => set(&mut out.offset_y, parse_f32(value), col, key, rep),
         "use_safe_area" => set(&mut out.use_safe_area, parse_bool(value), col, key, rep),
         other => unknown_field("UiAnchor", other, col, rep),
+    });
+    out
+}
+
+/// Parses a `UiNineSlice` body (UI-ADVANCED S6): `border_px`/`border_uv`
+/// (`[f32; 4]` as `[l, t, r, b]`), `mode` ([`NineSliceMode`]), `fill_center`
+/// (`bool`). The private `_pad` is not authorable. Default-then-overwrite.
+fn parse_ui_nine_slice(body: &str, body_col: u16, rep: &mut UiParseReport) -> UiNineSlice {
+    let mut out = UiNineSlice::default();
+    for_each_field(body, body_col, line_of(rep), rep, |key, value, col, rep| match key {
+        "border_px" => set(&mut out.border_px, parse_f32_quad(value), col, key, rep),
+        "border_uv" => set(&mut out.border_uv, parse_f32_quad(value), col, key, rep),
+        "mode" => set(&mut out.mode, parse_nine_slice_mode(value), col, key, rep),
+        "fill_center" => set(&mut out.fill_center, parse_bool(value), col, key, rep),
+        other => unknown_field("UiNineSlice", other, col, rep),
+    });
+    out
+}
+
+/// Parses a `UiSpriteSheet` body (UI-ADVANCED S6): `sheet` (a dense
+/// [`SheetId`](crate::sprite::SheetId) index) and `index` (the frame), both
+/// `u16`. Default-then-overwrite.
+fn parse_ui_sprite_sheet(body: &str, body_col: u16, rep: &mut UiParseReport) -> UiSpriteSheet {
+    let mut out = UiSpriteSheet::default();
+    for_each_field(body, body_col, line_of(rep), rep, |key, value, col, rep| match key {
+        "sheet" => set(&mut out.sheet, parse_u16(value), col, key, rep),
+        "index" => set(&mut out.index, parse_u16(value), col, key, rep),
+        other => unknown_field("UiSpriteSheet", other, col, rep),
+    });
+    out
+}
+
+/// Parses a `UiSpriteAnim` body (UI-ADVANCED S6): `first`/`last` (`u16` frame
+/// range, inclusive), `fps` (`f32`), `mode` ([`SpriteAnimMode`]), `repeats`
+/// (`u8`, `0` = infinite). The private `_pad` is not authorable.
+/// Default-then-overwrite.
+fn parse_ui_sprite_anim(body: &str, body_col: u16, rep: &mut UiParseReport) -> UiSpriteAnim {
+    let mut out = UiSpriteAnim::default();
+    for_each_field(body, body_col, line_of(rep), rep, |key, value, col, rep| match key {
+        "first" => set(&mut out.first, parse_u16(value), col, key, rep),
+        "last" => set(&mut out.last, parse_u16(value), col, key, rep),
+        "fps" => set(&mut out.fps, parse_f32(value), col, key, rep),
+        "mode" => set(&mut out.mode, parse_sprite_anim_mode(value), col, key, rep),
+        "repeats" => set(&mut out.repeats, parse_u8(value), col, key, rep),
+        other => unknown_field("UiSpriteAnim", other, col, rep),
     });
     out
 }
@@ -670,6 +765,58 @@ fn parse_f32_pair(value: &str) -> Option<[f32; 2]> {
         return None; // more than two components
     }
     Some([a, b])
+}
+
+/// Parses a `u16` (the `u16` field arm — UI-ADVANCED S6 sheet handles, frame
+/// indices and animation range endpoints).
+#[inline]
+fn parse_u16(value: &str) -> Option<u16> {
+    value.trim().parse::<u16>().ok()
+}
+
+/// Parses a `[f32; 4]` (the `[f32; 4]` field arm — UI-ADVANCED S6
+/// `UiNineSlice::border_px` / `border_uv`, both `[l, t, r, b]`). Accepts the
+/// bracketed form `[l, t, r, b]`; the four comma-separated parts each parse as
+/// `f32`.
+///
+/// Deliberately NOT built on [`parse_f32_pair`] with a length parameter: a
+/// wrong-arity literal must be a per-field error rather than a silent truncation
+/// or a zero-fill, and the two arities have different destination TYPES, which is
+/// the whole point of Decision 4's type-directed leaves.
+fn parse_f32_quad(value: &str) -> Option<[f32; 4]> {
+    let v = value.trim();
+    let inner = v.strip_prefix('[')?.strip_suffix(']')?;
+    let mut it = inner.split(',');
+    let a = parse_f32(it.next()?)?;
+    let b = parse_f32(it.next()?)?;
+    let c = parse_f32(it.next()?)?;
+    let d = parse_f32(it.next()?)?;
+    if it.next().is_some() {
+        return None; // more than four components
+    }
+    Some([a, b, c, d])
+}
+
+/// Parses a [`NineSliceMode`] (bare or `NineSliceMode::`-qualified —
+/// UI-ADVANCED S6).
+fn parse_nine_slice_mode(value: &str) -> Option<NineSliceMode> {
+    match strip_qualifier(value.trim(), "NineSliceMode") {
+        "Stretch" => Some(NineSliceMode::Stretch),
+        "Tile" => Some(NineSliceMode::Tile),
+        _ => None,
+    }
+}
+
+/// Parses a [`SpriteAnimMode`] (bare or `SpriteAnimMode::`-qualified —
+/// UI-ADVANCED S6).
+fn parse_sprite_anim_mode(value: &str) -> Option<SpriteAnimMode> {
+    match strip_qualifier(value.trim(), "SpriteAnimMode") {
+        "Forward" => Some(SpriteAnimMode::Forward),
+        "Reverse" => Some(SpriteAnimMode::Reverse),
+        "PingPong" => Some(SpriteAnimMode::PingPong),
+        "Once" => Some(SpriteAnimMode::Once),
+        _ => None,
+    }
 }
 
 /// Parses an [`AnchorEdge`] (bare or `AnchorEdge::`-qualified — GUI P6a).

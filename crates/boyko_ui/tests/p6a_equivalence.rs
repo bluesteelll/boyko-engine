@@ -35,7 +35,8 @@ use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::entity::entity::Entity;
 
 use boyko_ui::components::{
-    AnchorEdge, Bar, BarFill, Button, ComputedRect, UiAnchor, UiGrid, UiImage, UiLayout, UiRoot,
+    AnchorEdge, Bar, BarFill, Button, ComputedRect, NineSliceMode, SpriteAnimMode, UiAnchor,
+    UiGrid, UiImage, UiLayout, UiName, UiNineSlice, UiRoot, UiSpriteAnim, UiSpriteSheet,
 };
 use boyko_ui::interaction::action::OnClick;
 use boyko_ui::prelude::ui;
@@ -67,6 +68,13 @@ fn assert_widget_node_equiv(world: &EcsMaster, a: Entity, b: Entity, what: &str)
     pres!(UiAnchor, "UiAnchor");
     pres!(OnClick, "OnClick");
     pres!(UiRoot, "UiRoot");
+    // UI-ADVANCED S6 — the sprite vocabulary (G6-5). This is the SECOND of the two
+    // independent hand lists a new `.ui` component must join; the first is
+    // `p3_common::presence_vector`. `UiSpriteCursor` is deliberately absent — it is
+    // not authorable, and the `on_add` hook puts it on every authoring path alike.
+    pres!(UiNineSlice, "UiNineSlice");
+    pres!(UiSpriteSheet, "UiSpriteSheet");
+    pres!(UiSpriteAnim, "UiSpriteAnim");
 
     // Value comparison (Debug projection) for the struct/tuple components present.
     macro_rules! valeq {
@@ -81,6 +89,9 @@ fn assert_widget_node_equiv(world: &EcsMaster, a: Entity, b: Entity, what: &str)
     valeq!(UiGrid, "UiGrid");
     valeq!(UiAnchor, "UiAnchor");
     valeq!(OnClick, "OnClick");
+    valeq!(UiNineSlice, "UiNineSlice");
+    valeq!(UiSpriteSheet, "UiSpriteSheet");
+    valeq!(UiSpriteAnim, "UiSpriteAnim");
 }
 
 /// Children of a node in slice order, or empty.
@@ -295,4 +306,199 @@ version=1
     assert_widget_node_equiv(&ui.world, mc[0], dc[0], "BarFill ui!-vs-.ui");
     assert!(ui.world.has_component(mc[0], BarFill::component_id()), "ui! fill carries BarFill");
     assert!(ui.world.has_component(dc[0], BarFill::component_id()), ".ui fill carries BarFill");
+}
+
+// ───────────────────────── 6. Sprite node — UI-ADVANCED S6 / G6-5 ─────────
+
+/// Runs `f` and asserts it PANICKED, with the default panic hook silenced so a
+/// deliberate negative control does not print a scary backtrace in a green run.
+///
+/// This is the campaign's own "prove the gate is live by injecting an error"
+/// discipline applied inside a test: a comparator row that is never exercised by
+/// a divergence is indistinguishable from a missing row.
+/// `AssertUnwindSafe` is sound here and not a shortcut: the closure only READS
+/// the world through `&EcsMaster`, and the comparator's only failure mode is an
+/// `assert_eq!` unwind, which cannot leave a half-written structure behind —
+/// there is nothing written at all. `&EcsMaster` is not `RefUnwindSafe` because
+/// the archetype and dense stores hold `UnsafeCell`s, which is about mutation
+/// this path does not perform.
+#[track_caller]
+fn must_detect(what: &str, f: impl FnOnce()) {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    std::panic::set_hook(prev);
+    assert!(
+        outcome.is_err(),
+        "{what}: the comparator did NOT report this divergence — the row is missing from its \
+         hand list, and the gate is green over a real difference"
+    );
+}
+
+/// **G6-5** — the three S6 components are in BOTH equivalence comparators, and
+/// both comparators can actually SEE them.
+///
+/// Two independent hand lists exist — `p3_common::presence_vector` /
+/// `assert_same_values`, and this file's local `pres!` / `valeq!` — and a
+/// component in one is not in the other. MEASURED why this is a gate and not
+/// bookkeeping: `button_widget_three_ways_equivalent` is GREEN today over a real
+/// divergence, because its `.ui` arm authors `UiBackground { color: 0 }`,
+/// `UiBackground` has no dispatch arm anywhere, and neither comparator lists the
+/// name. Add the three dispatch arms, forget the two rows, and this gate reports
+/// green over a `.ui`-vs-`ui!` divergence exactly the same way.
+///
+/// So the rows are not asserted by their own presence — a row nothing exercises
+/// is a row that cannot fail.
+///
+/// ~~Each half of this test injects a divergence the row is the only thing that
+/// can catch (M6-d removes the local rows and reds the second half; removing the
+/// `p3_common` rows reds the first).~~ **FALSE, measured at the S6 verification.**
+/// Deleting the `p3_common::presence_vector` row for `UiNineSlice` **alone**, and
+/// deleting `pres!(UiNineSlice, …)` **alone**, each leave
+/// `cargo test -p boyko-ui --tests --no-fail-fast` at **exit 0, 48/48 green**.
+/// The controls are satisfied by the VALUE rows, not the presence rows they name:
+/// `eqc!` and `valeq!` both compare `Option<String>`, so an absent component
+/// already diverges there and is caught first. M6-d as recorded removes `pres!`
+/// and `valeq!` together, so the red it observed came from `valeq!`.
+///
+/// **The honest statement, which is what this comment should have said:** a
+/// presence row is **unfalsifiable by construction while a value row for the same
+/// component exists** — any divergence presence can see, value sees first. Of the
+/// twelve comparator rows S6 added, these two controls gate exactly four (the
+/// `eqc!`/`valeq!` pairs for `UiNineSlice` and `UiSpriteSheet`); the six presence
+/// rows and both `UiSpriteAnim` value rows are gated by nothing in the tree.
+///
+/// The RULE is still enforced — redundantly, by the value rows — so this is a
+/// false claim about the instrument, not an unprotected property. Inventing a
+/// control that "catches" a presence row would mean removing its value row first,
+/// which trades a redundant check for a fragile one.
+#[test]
+fn sprite_node_three_ways_equivalent_and_both_comparators_see_a_divergence() {
+    let mut ui = Ui::default_world();
+
+    let nine = UiNineSlice {
+        border_px: [8.0, 8.0, 8.0, 8.0],
+        border_uv: [0.25, 0.25, 0.25, 0.25],
+        mode: NineSliceMode::Tile,
+        fill_center: true,
+        _pad: [0; 2],
+    };
+    let sheet = UiSpriteSheet { sheet: 1, index: 2 };
+    let anim = UiSpriteAnim {
+        first: 0,
+        last: 3,
+        fps: 12.0,
+        mode: SpriteAnimMode::PingPong,
+        repeats: 4,
+        _pad: [0; 2],
+    };
+    let layout = UiLayout {
+        layout_type: LayoutType::Column,
+        width: Unit::Px(64.0),
+        height: Unit::Px(64.0),
+        ..UiLayout::default()
+    };
+
+    // ui!
+    let sink: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
+    let probe = Arc::clone(&sink);
+    ui.author(move |mut cmds| {
+        let r = ui! {
+            #sprite {
+                UiNineSlice { border_px: [8.0f32, 8.0f32, 8.0f32, 8.0f32], border_uv: [0.25f32, 0.25f32, 0.25f32, 0.25f32], mode: NineSliceMode::Tile, fill_center: true, _pad: [0u8; 2] },
+                UiSpriteSheet { sheet: 1u16, index: 2u16 },
+                UiSpriteAnim { first: 0u16, last: 3u16, fps: 12.0f32, mode: SpriteAnimMode::PingPong, repeats: 4u8, _pad: [0u8; 2] },
+                UiLayout { layout_type: LayoutType::Column, width: Unit::Px(64.0), height: Unit::Px(64.0), ..UiLayout::default() }
+            }
+        };
+        *probe.lock().unwrap() = Some(r);
+    });
+    let macro_root = sink.lock().unwrap().expect("macro sprite");
+
+    // .ui
+    let src = "\
+version=1
+#sprite  UiLayout { layout_type: Column, width: Px(64), height: Px(64) }
+    UiNineSlice { border_px: [8, 8, 8, 8], border_uv: [0.25, 0.25, 0.25, 0.25], mode: Tile, fill_center: true }
+    UiSpriteSheet { sheet: 1, index: 2 }
+    UiSpriteAnim { first: 0, last: 3, fps: 12, mode: PingPong, repeats: 4 }
+";
+    let dot = spawn_dot_ui(&mut ui.world, src);
+    assert_eq!(dot.len(), 1, "one .ui sprite root");
+    let dot_root = dot[0];
+
+    // hand-spawn
+    let hsink: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
+    let hprobe = Arc::clone(&hsink);
+    ui.author(move |mut cmds| {
+        let mut ec = cmds.spawn(layout);
+        ec.insert(ComputedRect::default());
+        ec.insert(UiName::new("sprite"));
+        ec.insert(nine);
+        ec.insert(sheet);
+        ec.insert(anim);
+        *hprobe.lock().unwrap() = Some(ec.id());
+    });
+    let hand = hsink.lock().unwrap().expect("hand sprite");
+
+    // Both comparators, all three pairings.
+    assert_widget_node_equiv(&ui.world, macro_root, dot_root, "Sprite ui!-vs-.ui");
+    assert_widget_node_equiv(&ui.world, macro_root, hand, "Sprite ui!-vs-hand");
+    assert_widget_node_equiv(&ui.world, dot_root, hand, "Sprite .ui-vs-hand");
+    p3_common::assert_subtree_equiv(&ui.world, macro_root, dot_root, "sprite");
+    p3_common::assert_subtree_equiv(&ui.world, macro_root, hand, "sprite-hand");
+
+    // ── the negative controls ──
+    //
+    // Two nodes that differ in exactly one sprite component. If the comparator's
+    // hand list does not name it, the difference is invisible and the assertion
+    // below is what says so.
+    let nsink: Arc<Mutex<(Option<Entity>, Option<Entity>)>> = Arc::new(Mutex::new((None, None)));
+    let nprobe = Arc::clone(&nsink);
+    ui.author(move |mut cmds| {
+        // (a) presence divergence: the nine-slice is on one node only.
+        let mut a = cmds.spawn(layout);
+        a.insert(ComputedRect::default());
+        a.insert(UiName::new("diverge"));
+        a.insert(nine);
+        let ae = a.id();
+        let mut b = cmds.spawn(layout);
+        b.insert(ComputedRect::default());
+        b.insert(UiName::new("diverge"));
+        *nprobe.lock().unwrap() = (Some(ae), Some(b.id()));
+    });
+    let (pa, pb) = *nsink.lock().unwrap();
+    let (pa, pb) = (pa.expect("presence a"), pb.expect("presence b"));
+
+    let vsink: Arc<Mutex<(Option<Entity>, Option<Entity>)>> = Arc::new(Mutex::new((None, None)));
+    let vprobe = Arc::clone(&vsink);
+    ui.author(move |mut cmds| {
+        // (b) value divergence: both carry the sheet, on DIFFERENT frames.
+        let mut a = cmds.spawn(layout);
+        a.insert(ComputedRect::default());
+        a.insert(UiName::new("diverge"));
+        a.insert(UiSpriteSheet { sheet: 1, index: 2 });
+        let ae = a.id();
+        let mut b = cmds.spawn(layout);
+        b.insert(ComputedRect::default());
+        b.insert(UiName::new("diverge"));
+        b.insert(UiSpriteSheet { sheet: 1, index: 5 });
+        *vprobe.lock().unwrap() = (Some(ae), Some(b.id()));
+    });
+    let (va, vb) = *vsink.lock().unwrap();
+    let (va, vb) = (va.expect("value a"), vb.expect("value b"));
+
+    let w = &ui.world;
+    must_detect("p3_common::presence_vector row (UiNineSlice)", || {
+        p3_common::assert_subtree_equiv(w, pa, pb, "neg-presence")
+    });
+    must_detect("p3_common::assert_same_values row (UiSpriteSheet)", || {
+        p3_common::assert_subtree_equiv(w, va, vb, "neg-value")
+    });
+    must_detect("p6a_equivalence pres! row (UiNineSlice)", || {
+        assert_widget_node_equiv(w, pa, pb, "neg-presence")
+    });
+    must_detect("p6a_equivalence valeq! row (UiSpriteSheet)", || {
+        assert_widget_node_equiv(w, va, vb, "neg-value")
+    });
 }

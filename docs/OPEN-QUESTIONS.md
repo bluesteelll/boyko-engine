@@ -14,6 +14,151 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-26 — SCOPE: **the doc-anchor gate covers four documents; the five UI campaign plans are not among them, and 96 of their 143 anchors are STALE**
+
+**Status: OPEN — a SCOPE call. Blocks nothing; it is what makes every other measurement in those
+five documents unverifiable.** Found at the `UI-PLAN-SPRITES.md` S6 pre-build audit (S-D20 (11))
+while trying to CERTIFY the amendments rather than trust them.
+
+### The measurement
+
+`tests/internal_docs_anchors.rs` is the only thing in the tree that checks a `file.rs:N` citation.
+Its scope is a hand list of four: `GATED_DOCS` (`:231`) = `FEATURE_MAP.md`, `SYSTEMS.md`,
+`ARCHITECTURE.md`, `MESHLET-VIRTUAL-GEOMETRY-PLAN.md`. **PROVEN vacuous for the UI corpus:** an
+anchor deliberately repointed to `insert_command.rs:999999` inside `docs/UI-PLAN-SPRITES.md` left the
+gate at `5 passed`, exit 0.
+
+Widening `GATED_DOCS` to the five UI documents for one run (then restoring the test file
+byte-identically, `cmp`):
+
+| Document | anchors checked | STALE |
+|---|---|---|
+| the four already gated | **735** | **0** |
+| `UI-PLAN-SPRITES.md` | 118 | **80** |
+| `UI-ADVANCED-ARCHITECTURE.md` | 7 | **7** |
+| `UI-PLAN-AETHER.md` | 6 | **4** |
+| `UI-PLAN-ANIMATION.md` | 4 | **3** |
+| `UI-PLAN-INTERACTION.md` | 8 | **2** |
+| **the five UI documents** | **143** | **96 (67%)** |
+
+Three dead PATHS as well: `crates/boyko_ui/benches/ui_animation.rs` (`UI-PLAN-ANIMATION.md:663`) and
+`crates/boyko_render/shaders/ui_rect` twice (`UI-PLAN-SPRITES.md:3067`, `:3470`).
+
+**0 of 735 against 96 of 143 is the gate, not the authors.** The gate's own module doc already
+records the same shape from the other side: 75% of `FEATURE_MAP`/`SYSTEMS`/`ARCHITECTURE`'s anchors
+were wrong before it existed, and *"a wrong anchor is worse than no anchor — it sends a reader, human
+or agent, to a plausible-looking but unrelated line"*.
+
+### The options
+
+1. **Add the five to `GATED_DOCS` and repair the 96** — a repair rung with its own protocol and
+   budget. The gate's `~` waiver and `<!-- doc-anchor-ignore -->` marker exist for the anchors that
+   should not be shape-checked, so the repair has an escape hatch and does not have to be perfect.
+2. **Add them and waive the backlog**, arming the gate for NEW anchors only. Cheaper, and it stops
+   the bleeding at the cost of leaving 96 wrong pointers in place.
+3. **Leave the five ungated** and stop writing `file.rs:N` in them — the anchors are the value, so
+   this is really "accept that the plans' evidence is unverifiable".
+
+**What it blocks:** nothing mechanically. It decides whether "MEASURED at `file.rs:NN`" in a plan
+means anything a week later.
+
+---
+
+## 2026-08-26 — SCOPE: **D7, the `.ui` registration table, has no owning document** — three plans name three different owners and none of them builds it
+
+**Status: OPEN — a SCOPE call. Blocks nothing today** because `UI-PLAN-SPRITES.md`'s S6 carries a
+hand-written fallback, but the fallback is now the path rather than the contingency, and it is
+roughly twice the size the plans say.
+
+### The sweep
+
+| Document | What it says about D7 |
+|---|---|
+| `UI-PLAN-SPRITES.md` §0, §6 | owner is **`UI-PLAN-AETHER.md`**; §0 explicitly **Rejects** sprites owning it |
+| `UI-PLAN-AETHER.md:73` | files D7 in its own **INBOUND** dependency table, *"soft"*, *"**D7 does not gate any rung here**"*; no rung U0–U8 lands a registration table |
+| `UI-PLAN-ANIMATION.md:846` | owner is *"`docs/UI-PLAN-SPRITES.md` (rung 1) or wherever it is sequenced"* — the option SPRITES §0 rejected |
+| `UI-PLAN-INTERACTION.md:501-504` | names no owner; *"This plan does not block on D7"* |
+| `UI-ADVANCED-ARCHITECTURE.md:371`, `:1773` | D7 is §11 **sequencing item 1** — an architecture ladder no plan file claims |
+
+`grep -rn UiVocab docs/` finds the derive named only in the architecture and the research corpus,
+never in a rung. **Exactly one rung in the whole campaign is behind D7** — SPRITES' S6 — and
+`grep -rn "\bS6\b"` across the siblings, the architecture and the book returns one passing citation,
+so nobody outside `UI-PLAN-SPRITES.md` knows that rung exists either.
+
+### What it costs to leave it
+
+Two numbers moved when the landing count was traced site-by-site (`UI-PLAN-SPRITES.md` S-D20 (6)):
+a hand-written component is **nine** landings, not five, so S6's fallback is ~30 rather than 15 and
+D7's own justification figure is ~108 rather than 60. The argument for doing D7 gets STRONGER; the
+schedule for doing it still does not exist.
+
+Also: `UI-ADVANCED-ARCHITECTURE.md` §11 item 1 pins *"§10.9 must be green — all 19 existing
+components — before **rung 4** adds the twentieth"*, and rung 4 is D1, which adds no vocabulary
+member. The rung that adds the twentieth `.ui` name is S6, which §11 does not list. Landing S6 on the
+fallback spends that pin and makes the literal "19" stale at 22 in three places.
+
+### The options
+
+1. **Give D7 to a document and schedule it.** `UI-PLAN-AETHER.md` is the natural home only if it
+   wants it — today it explicitly does not, and its reason is sound (the construct emits Rust, never
+   `.ui` text). A fifth plan file, or the architecture's own ladder, are the alternatives.
+2. **Declare D7 out of scope for this campaign** and delete the dependency rows. S6 then lands
+   hand-written by decision rather than by default, the "cost of not doing it" arithmetic becomes
+   historical, and §11's pin is retired explicitly instead of being quietly spent.
+3. **Leave it.** What happens today. The cost is that four documents keep pointing at each other and
+   the one rung behind it lands on a fallback nobody chose.
+
+**What it blocks:** nothing today. It decides whether ~30 landings are written once for sprites and
+then again for animation and interaction.
+
+---
+
+## 2026-08-26 — SCOPE: **ten of the nineteen `.ui` components already round-trip and hot-reload SILENTLY WRONG**, and D7's pin would reproduce it
+
+**Status: OPEN — a SCOPE call. Pre-existing; found at the `UI-PLAN-SPRITES.md` S6 pre-build audit
+(S-D20 (4)) and MEASURED, not inferred.**
+
+### The measurement
+
+A `.ui` source spelling `UiImage { texture: 7, uv_min: [0, 0], uv_max: [1, 1], tint: 4294967295 }`
+parses and inserts — `UiImage present after parse = true` — and `serialize_ui` then emits the node's
+`UiLayout` line **and nothing else**: `round-trip contains UiImage = false`. (Probe test, written,
+run and deleted; the worktree was restored byte-identically.)
+
+`parse_and_insert` has **19** component arms. `serialize_ui` writes **8** of them plus `UiName` from
+the `#name` sigil, because `write_node` reads only `LiveNode`'s seven component fields
+(`reload/tree_view.rs:49-56`); `ComputedRect` is deliberately excluded (Decision 14, documented in
+place). `patch_node` reconciles the same 8. The remaining **ten** — `UiText`, `Button`, `Bar`,
+`BarFill`, `UiImage`, `UiGrid`, `UiAnchor`, `OnClick`, `OnHover`, `OnSubmit` — have neither a
+serializer nor a reconcile arm.
+
+**Why no gate sees it.** The round-trip corpus asserts a FIXED POINT —
+`assert_serialize_fixed_point` compares `s1` to `s2` (`p3_round_trip.rs:66-78`) — and a component the
+serializer drops is dropped from both sides. A fixed point cannot see a missing `serialize.rs` arm.
+
+### Why it matters now
+
+This is precisely the failure `UI-ADVANCED-ARCHITECTURE.md`'s D7 cites as its own justification
+(*"a silent failure mode — hot reload drops the component; the round trip loses it"*), and **D7c
+pins "same round-trip bytes" for all 19**, which would reproduce the loss rather than remove it. It
+also lands on sprites directly: a realistic sprite node carries `UiImage` (the sheet only substitutes
+its slot and UV), so S6's three components would be landed MORE completely than the component they
+modify, and S6's own round-trip gate has to use a `UiImage`-free fixture to be achievable at all.
+
+### The options
+
+1. **Land the missing halves for the ten** — ~9 landings each on today's hand-written path, ~90.
+2. **Land only `UiImage`'s** (~9), because it is the one an S6 sprite node actually needs, and record
+   the other nine as known.
+3. **Declare the ten write-only by decision** — they are authorable but never serialized, and the
+   round-trip contract covers the 8 + `UiName` only. Cheap and honest, and it makes D7c's pin
+   expressible without reproducing a bug; it also means a `.ui` file is not a faithful save format.
+
+**What it blocks:** nothing today; S6 works around it with a `UiImage`-free round-trip fixture. It
+decides what `.ui` round-trip MEANS.
+
+---
+
 ## 2026-08-26 — KERNEL DEFECT: `#[require(C)]` where `C` is a DENSE component PANICS at insert, and the panic names an expansion that never happened
 
 **Status: OPEN — a real kernel bug, found while BUILDING UI-ADVANCED S5 and reproduced on every
@@ -65,6 +210,19 @@ require pass is the one structural path that did not learn the partition.
 and today that discovery is a panic message about archetypes on a line that never touches storage
 kind. Option (2) alone would turn a runtime panic into a compile error for one afternoon's work;
 whether (1) is worth doing is a SCOPE call.
+
+**Addendum 2026-08-26 (S6 pre-build audit — `UI-PLAN-SPRITES.md` S-D20 (1)): there is a FOURTH
+option, and it is buildable today.** A TABLE component's `#[component(on_add = …)]` hook can
+deferred-insert the dense component through a one-field `#[derive(Bundle)]` wrapper. MEASURED in a
+probe: after the apply, `has_component` reports the dense `UiSpriteCursor` present with its correct
+`Default`. It works because `InsertCommand` **partitions** the bundle's ids and routes the dense
+subset off the table path (`commands/insert_command.rs:128-137`) — the same partition (dense plan
+D2) the require pass never learned. Note the trap: the BARE type does not work —
+`insert(UiSpriteCursor::default())` is `error[E0277]: UiSpriteCursor: Bundle is not satisfied`,
+because dense storage suppresses the single-component `Bundle` impl
+(`boyko_macros/src/component.rs:315`). This does not close the defect — `#[require]` still panics,
+and the hook is more code and DEFERRED rather than synchronous — but it means **no rung has to wait
+for this entry to resolve**, and "the capability is missing" is now only true of the attribute.
 
 ---
 
@@ -3383,3 +3541,93 @@ actually make a divergent-descriptor read wrong (a vendor whose warps span primi
 synthetic shader that forces one wave across two indices), or whether "spec-required, byte-gated,
 consequence-unobservable-here" is the honest resting place. Nothing in S3–S5 depends on the answer;
 S7's Model-A disposition already has its number from §10.1.
+
+---
+
+## 2026-08-26: UI-ADVANCED S6 — a component's `on_remove` hook CANNOT enqueue a removal, because despawn fires it too and the entity is dead by the drain
+
+**Status: KERNEL DEFECT, worked around in S6. Owner-facing because the workaround leaves a capability
+missing, and because the shape generalises to every `on_remove` hook anyone writes.**
+
+S6 closes the sprite-cursor hole with `#[component(on_add = …)]` on `UiSpriteAnim`: the hook
+deferred-inserts the dense `UiSpriteCursor` through a one-field `Bundle` wrapper. That half works on
+every construction path (MEASURED: a fresh `Commands::spawn`, and `cmds.entity(e).insert(anim)` onto
+a live entity, both leave `has_component(e, UiSpriteCursor::component_id()) == true` with
+`dir: 1` after the apply).
+
+**The symmetric `on_remove` hook does not, and the failure is a panic rather than a no-op.**
+
+```
+thread '…' panicked at crates/boyko_ecs/src/ecs/core/commands/remove_command.rs:75:13:
+RemoveCommand::apply: stale entity Entity { id: EntityId(0), generation: 0 }
+```
+
+MEASURED, in this order:
+
+1. `on_remove` fires on an ordinary `cmds.entity(e).remove::<Anim>()` and the enqueued
+   `remove::<Cursor>()` applies correctly. That is the case the hook is for.
+2. `on_remove` ALSO fires on the per-component pass of a DESPAWN. At hook time the entity is still
+   live — `w.is_alive(ctx.entity)` reads **`true`** — so the obvious guard does not help. By the time
+   the outermost drain runs the enqueued `RemoveCommand`, the entity is gone, and
+   `RemoveCommand::apply` panics on the stale handle rather than treating it as a no-op.
+3. A despawn already reclaims the dense row on its own (`has_component` after despawn = `false`), so
+   the hook would buy nothing at despawn even if it could run.
+
+**So the hook is safe only for components nobody ever despawns**, which is not a property a component
+author can check. Today the only hazard is the one S6 declined to take, but any future
+`on_remove` hook that touches `commands()` inherits it silently.
+
+**Three options, and the SCOPE call is the owner's:**
+
+1. **Make `RemoveCommand::apply` (and `InsertCommand::apply`) tolerate a stale entity** — a dead
+   entity's component removal is already a no-op semantically. This is the smallest change and the
+   one that makes `on_remove` hooks generally usable. It weakens a deliberate liveness assertion,
+   which is presumably there to catch a different class of bug, so it is not free.
+2. **Give the hook a way to know it is firing inside a despawn** — an `on_despawn`-in-progress flag
+   on `HookContext`, or simply documenting that `on_remove` must not enqueue anything and enforcing
+   it. This keeps the assertion and makes the restriction visible instead of latent.
+3. **Leave it, and document `on_remove` + `commands()` as unsupported.** That is effectively the
+   status quo, and it is what S6 assumed once the measurement came back.
+
+**What it blocks today:** nothing. S6 lands `on_add` alone. An animation removed from a SURVIVING
+node (a `.ui` deletion that keeps the node) leaves an 8 B dense cursor row behind; it is inert (the
+flipbook queries all three components) and self-healing (a re-added animation gets a fresh `Default`
+cursor — MEASURED). Recorded in `docs/UI-PLAN-SPRITES.md` S-D20 (1) and S-D21 (1).
+
+---
+
+## 2026-08-26: UI-ADVANCED S6 — `.ui` bracketed values had NEVER parsed, and the test that should have caught it was green by coincidence
+
+**Status: FIXED in S6, recorded because the FALSE DOC and the coincidental green are the interesting
+half, not the one-line fix.**
+
+`crates/boyko_ui/src/text/split.rs`'s `split_top_level` tracked paren depth and quotes but not
+`[`/`]`. Its own doc said the P3 field list is *"provably free of `{`/`[`/quoted-comma values …
+locked by a rejection test"*. **Both halves were false**: GUI P6a added `UiImage`'s
+`uv_min`/`uv_max`, which are `[u, v]`, and `grep` finds no such rejection test anywhere in the tree.
+
+MEASURED consequence: `UiImage { texture: 7, uv_min: [0, 0], uv_max: [1, 1], tint: … }` split into
+`uv_min: [0` / `0]` / `uv_max: [1` / `1]`; `parse_f32_pair` rejected both UV fields; both kept their
+`Default`s; four recoverable errors went into the LOWERING report.
+
+**`p6a_equivalence::image_widget_three_ways_equivalent` was green over it for two independent
+reasons, and closing either one alone would not have been enough:**
+
+* `p3_common::spawn_dot_ui` asserts the PARSE report and hands the lowering an
+  `owned.report.clone()` that is dropped, so the four errors were unobservable through the harness;
+* the authored UVs happen to EQUAL `UiImage::default()`'s (`[0,0]` / `[1,1]`), so the mis-parse
+  landed back on the right values.
+
+A test that meant to prove "the `.ui` path carries these UVs" proved that the defaults are
+`[0,0]`/`[1,1]`.
+
+**Fixed** by making `(` and `[` open the same depth counter (and `)`/`]` close it). The
+`boyko_input` copy of the function is untouched — `.keys` has no bracketed values — so the file's
+"COPIED VERBATIM" header now reads "copied, then DIVERGED, and here is why".
+
+**The open half, for the owner:** the *harness* defect is still there. `spawn_dot_ui` drops the
+lowering report, so any `.ui` corpus test can be green over a per-field parse error. S6's own gates
+route around it (`ui_s6_authoring` captures the lowering report itself), but the shared harness is
+what most `.ui` tests use. Making `spawn_dot_ui` assert the lowering report would red today on
+anything else already mis-parsing, which is a repair rung with its own budget rather than a line in
+S6.

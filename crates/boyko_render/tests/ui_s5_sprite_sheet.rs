@@ -11,11 +11,11 @@
 //! # Two invocations, on purpose
 //!
 //! ```text
-//! cargo test -p boyko-render --test ui_s5_sprite_sheet             # running 10 tests
-//! cargo test -p boyko-render --test ui_s5_sprite_sheet --release   # running 10 tests
+//! cargo test -p boyko-render --test ui_s5_sprite_sheet             # running 12 tests
+//! cargo test -p boyko-render --test ui_s5_sprite_sheet --release   # running 12 tests
 //! ```
 //!
-//! Unlike `ui_s4_nine_slice`, the two SETS here are the same ten tests: no S5
+//! Unlike `ui_s4_nine_slice`, the two SETS here are the same twelve tests: no S5
 //! sentence is profile-gated, because none of them is about a `debug_assert!`.
 //! Both profiles are still run, because the rung packs into a `flags` word through
 //! shifts and masks and a release build is where an overflow would be silent.
@@ -408,12 +408,13 @@ fn flipbook_world(
             repeats,
             _pad: [0; 2],
         });
-        // The cursor is spelled EXPLICITLY here, and G5-12 is why: on this kernel
-        // `#[require(UiSpriteCursor)]` cannot make it structural, because the
-        // require pass resolves the required id's pool in the target ARCHETYPE and
-        // a dense id has none. `AnimatedSpriteBundle` is the authoring remedy;
-        // these hand-built scenes insert the components one at a time on purpose,
-        // so they exercise the same path a `ui!` tree does.
+        // The cursor is spelled EXPLICITLY here, and since UI-ADVANCED S6 it is
+        // REDUNDANT: the animation's `on_add` hook materializes one anyway, and
+        // its deferred insert lands at this `run_system`'s own drain with an equal
+        // `Default` value. It is kept so the four mode walks below measure the
+        // FLIPBOOK and depend on the hook for nothing — G5-12 is the row that
+        // pins the hook, and a walk that silently relied on it would be measuring
+        // two things at once.
         e.insert(CursorBundle {
             c: UiSpriteCursor::default(),
         });
@@ -751,34 +752,47 @@ fn g5_4_the_three_components_are_the_stated_sizes_with_spelled_padding() {
     assert_eq!(size_of::<UiSpriteAnim>(), 12);
     assert_eq!(size_of::<UiSpriteCursor>(), 8);
     assert_eq!(size_of::<UiSheet>(), 20);
-    // The cursor's `dir` DEFAULT is +1, not the derived 0: `#[require]`
-    // materializes the cursor through `Default`, and a zero direction would make
+    // The cursor's `dir` DEFAULT is +1, not the derived 0: every path that
+    // materializes the cursor materializes it through `Default` — S6's `on_add`
+    // hook and `AnimatedSpriteBundle` alike — and a zero direction would make
     // every PingPong stand still with nothing to say so.
     assert_eq!(UiSpriteCursor::default().dir, 1);
 }
 
 // ───────────────────────── G5-12 ───────────────────────────────────────────
 
-/// **G5-12** — the cursor pairing is structural at the AUTHORING site, because it
-/// cannot be structural at the component.
+/// **G5-12** — the cursor pairing is structural, at the COMPONENT.
 ///
-/// The plan ruled `#[require(UiSpriteCursor)]` on `UiSpriteAnim` so that an
-/// authored `flipbook:` could not silently never tick. MEASURED at the S5 build,
-/// that spelling PANICS on this kernel: the require pass resolves the required
-/// id's `ComponentPool` in the target ARCHETYPE, and a dense id is excluded from
-/// every archetype signature and owns no per-archetype pool (dense plan D0). The
-/// panic even names an expansion that never happened.
+/// # This row was RE-POINTED at the S6 landing, and the old half was right when
+/// it was written
 ///
-/// `AnimatedSpriteBundle` is the buildable remedy, and this row pins BOTH halves —
-/// the bundle animates, and the hazard it protects against is real:
+/// The plan ruled `#[require(UiSpriteCursor)]` on `UiSpriteAnim` so an authored
+/// animation could not silently never tick. MEASURED at the S5 build, that
+/// spelling PANICS on this kernel: the require pass resolves the required id's
+/// `ComponentPool` in the target ARCHETYPE, and a dense id is excluded from every
+/// archetype signature and owns no per-archetype pool (dense plan D0). The panic
+/// even names an expansion that never happened.
 ///
-/// 1. a node spawned from the bundle ticks;
-/// 2. a node hand-spawned with `UiSpriteAnim` and NO cursor does not, and does so
-///    silently — no panic, no error, a frozen frame 0. That is what the bundle
-///    exists to make unreachable, and stating it as an assertion is the difference
-///    between a documented hazard and a claimed one.
+/// S5 therefore landed `AnimatedSpriteBundle` — structural at the AUTHORING site
+/// — and this row pinned the hazard it protected against: *a node hand-spawned
+/// with `UiSpriteAnim` and no cursor is FROZEN, silently.* That assertion was
+/// true and is now FALSE, because UI-ADVANCED S6 closed the hazard at the
+/// component through the route `#[require]` could not take:
+/// `UiSpriteAnim`'s `#[component(on_add = …)]` hook deferred-inserts the cursor,
+/// and `InsertCommand` already partitions dense ids off the table path
+/// (`docs/UI-PLAN-SPRITES.md` S-D20 (1)). It was OBSERVED red at that landing,
+/// reporting `index 3` where it demanded `0`.
+///
+/// Both halves still pin something a mutation can move — deleting the hook
+/// (M6-c) reds leg 2 here as well as G6-4:
+///
+/// 1. a node spawned from the bundle ticks — the bundle's own `cursor` field is
+///    replaced by a fresh `Default` at the hook's drain, and on a spawn frame the
+///    two values are equal, so the bundle keeps working unchanged;
+/// 2. a node hand-spawned with `UiSpriteAnim` and NO cursor ALSO ticks, because
+///    the pairing no longer depends on the author remembering it.
 #[test]
-fn g5_12_the_bundle_carries_the_cursor_and_a_cursorless_animation_is_frozen() {
+fn g5_12_the_bundle_and_the_bare_components_both_animate() {
     const FPS: f32 = 10.0;
     let step = Duration::from_millis(100);
 
@@ -822,11 +836,12 @@ fn g5_12_the_bundle_carries_the_cursor_and_a_cursorless_animation_is_frozen() {
     assert_eq!(
         index_of(&world, node),
         3,
-        "a node spawned from `AnimatedSpriteBundle` animates — the bundle IS the cursor \
-         requirement, since `#[require]` cannot target a dense component on this kernel"
+        "a node spawned from `AnimatedSpriteBundle` animates — and keeps animating with \
+         the S6 hook in place, which replaces the bundle's own cursor with an equal \
+         `Default` at the drain"
     );
 
-    // (2) the hazard the bundle protects against, stated as an assertion.
+    // (2) the hazard S6 closed: the components spawned one at a time.
     let mut world = EcsMaster::new();
     world.insert_resource(UiRenderGeneration::default());
     world.insert_resource(Time::default());
@@ -851,20 +866,27 @@ fn g5_12_the_bundle_carries_the_cursor_and_a_cursorless_animation_is_frozen() {
             repeats: 0,
             _pad: [0; 2],
         });
-        // NO cursor.
+        // NO cursor spelled here — the animation's `on_add` hook supplies it.
         e.insert(UiRoot);
         *sink.lock().expect("probe") = Some(e.id());
     });
     let node = probe.lock().expect("probe").expect("spawned node");
+    assert!(
+        world.dense_contains(node, UiSpriteCursor::component_id()),
+        "the hook materialized the cursor — it is DEFERRED, so it is present after the \
+         apply window rather than inside it, and this reads it after"
+    );
     let mut schedule = flipbook_schedule(&mut world);
     for _ in 0..3 {
         tick(&mut world, &mut schedule, step);
     }
     assert_eq!(
         index_of(&world, node),
-        0,
-        "a `UiSpriteAnim` with no cursor is FROZEN — silently, with no panic and no error. \
-         Spawn `AnimatedSpriteBundle` instead of the components one at a time"
+        3,
+        "a `UiSpriteAnim` spawned WITHOUT a cursor animates anyway: UI-ADVANCED S6 moved \
+         the pairing to the component's own `on_add` hook, so it is inherited by the \
+         `.ui` dispatch, the reload reconcile, `ui!`, a hand-spawn and the bundle alike. \
+         Delete the hook and this is the frozen frame 0 the row used to pin"
     );
 }
 

@@ -32,7 +32,7 @@ use std::sync::{Arc, Mutex};
 
 use boyko_ui::components::{
     ComputedClip, ComputedRect, ContentSize, StackIndex, UiAbsolute, UiAlign, UiLayout, UiName,
-    UiRoot, UiSpacing,
+    UiNineSlice, UiRoot, UiSpacing, UiSpriteAnim, UiSpriteSheet,
 };
 use boyko_ui::text::{parse_ui, spawn_ui_tree, UiParseReport};
 
@@ -59,8 +59,24 @@ fn lower_one(src: &str) -> (EcsMaster, Option<Entity>, UiParseReport) {
     (world, ent, rep)
 }
 
-/// The nine dispatchable component type names. `UiName` (the 10th) is sigil-only.
-const DISPATCHABLE: [&str; 9] = [
+/// The dispatchable component type names this census walks.
+///
+/// ⚠️ **It is a SUBSET, and saying so is the point.** `parse_and_insert`'s closed
+/// match has 22 arms as of UI-ADVANCED S6; this list carries the P1 layout set
+/// plus S6's three. The GUI P6a widget arms (`Button`, `Bar`, `BarFill`,
+/// `UiImage`, `UiGrid`, `UiAnchor`, `OnClick`/`OnHover`/`OnSubmit`) are covered by
+/// `p6a_equivalence` instead and were never added here, so a census that claimed
+/// completeness would be claiming more than it walks.
+///
+/// ⚠️ **And 12 + 9 is 21, not 22.** The twenty-second arm is **`UiText`**, which is
+/// in neither list: it has a dispatch arm, it is not in `DISPATCHABLE`, and
+/// `grep -c UiText p6a_equivalence.rs` returns **0**. Caught at the S6
+/// verification — the correction written to stop this comment claiming more than
+/// it walks was itself claiming coverage for a name that has none. `UiText` is
+/// walked by nothing; that is a gap, recorded here rather than papered over. Widening it to all 22 is a
+/// separate rung's work (`docs/UI-PLAN-SPRITES.md` S-D20); what S6 owes is that
+/// the components IT adds are in it.
+const DISPATCHABLE: [&str; 12] = [
     "UiLayout",
     "UiSpacing",
     "UiAlign",
@@ -70,6 +86,10 @@ const DISPATCHABLE: [&str; 9] = [
     "ComputedClip",
     "StackIndex",
     "UiRoot",
+    // UI-ADVANCED S6 — the sprite vocabulary.
+    "UiNineSlice",
+    "UiSpriteSheet",
+    "UiSpriteAnim",
 ];
 
 #[test]
@@ -136,6 +156,14 @@ fn dispatch_text_name_equals_type_name_each_component() {
             "UiSpacing" => "    UiSpacing { padding_left: Px(0) }".to_string(),
             "UiAlign" => "    UiAlign { main: Start }".to_string(),
             "UiAbsolute" => "    UiAbsolute { left: Px(0) }".to_string(),
+            // UI-ADVANCED S6. `mode: Stretch` on the nine-slice is the token-shape
+            // collision Decision 4 exists for: the SAME spelling is
+            // `AlignCross::Stretch` in a `UiAlign` field and `Unit::Stretch(f)` in
+            // a `Unit` field, and it resolves here only because the leaf parser is
+            // chosen by the DESTINATION field's type.
+            "UiNineSlice" => "    UiNineSlice { mode: Stretch }".to_string(),
+            "UiSpriteSheet" => "    UiSpriteSheet { sheet: 0 }".to_string(),
+            "UiSpriteAnim" => "    UiSpriteAnim { mode: PingPong }".to_string(),
             other => panic!("unhandled component {other}"),
         };
         // A host node carrying UiLayout (required) + the component under test.
@@ -159,6 +187,9 @@ fn dispatch_text_name_equals_type_name_each_component() {
             "ComputedClip" => world.has_component(e, ComputedClip::component_id()),
             "StackIndex" => world.has_component(e, StackIndex::component_id()),
             "UiRoot" => world.has_component(e, UiRoot::component_id()),
+            "UiNineSlice" => world.has_component(e, UiNineSlice::component_id()),
+            "UiSpriteSheet" => world.has_component(e, UiSpriteSheet::component_id()),
+            "UiSpriteAnim" => world.has_component(e, UiSpriteAnim::component_id()),
             _ => unreachable!(),
         };
         assert!(present, "component `{ty}` landed on the entity via its type-name key");

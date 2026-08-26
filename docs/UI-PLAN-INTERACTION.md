@@ -498,8 +498,14 @@ components**:
 | `FocusGroup { order }` | I9 | struct |
 | `FocusNeighbors { up, down, left, right }` | I9 | **struct, entity-valued — see below** |
 
-If D7's registration table has landed, each is one derive. If it has not, each is the five
-hand-written landings D7 exists to collapse — a `.ui` dispatch arm, a field parser, a `serialize_ui`
+If D7's registration table has landed, each is one derive. If it has not, each is ~~the five~~
+**NINE** hand-written landings D7 exists to collapse *(count corrected 2026-08-26 —
+`UI-PLAN-SPRITES.md` S-D20 (6), traced site-by-site against `UiSpacing`; this plan's own I1 rung at
+§"Lands" already names the `reload/tree_view.rs` pair the five-item list omits, so the two statements
+in this file disagreed. Add the `parse_<comp>_public` wrapper, the `write_node` emit block, the
+`patch_unit_struct::<C>` line, and a SECOND comparator row — `p3_common::presence_vector` and
+`p6a_equivalence`'s local lists are separate hand lists. D7 itself has no owning document — S-D20
+(7))* — a `.ui` dispatch arm, a field parser, a `serialize_ui`
 arm plus a `LiveNode` field, a reconcile diff arm, and a row in the equivalence gate. **This plan
 does not block on D7**; it states the cost of landing without it, and the fallback is the status quo.
 

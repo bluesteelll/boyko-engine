@@ -730,27 +730,38 @@ pub enum SpriteAnimMode {
 /// [`UiSpriteCursor`] (dense, flipbook-private) and the per-frame RESULT in
 /// [`UiSpriteSheet::index`] (table, the repaint signal).
 ///
-/// # The cursor is NOT `#[require]`d, and it cannot be — spawn the bundle
+/// # The cursor arrives on its own — an `on_add` HOOK, not `#[require]`
 ///
 /// The flipbook queries all three components, so an authored `UiSpriteAnim` with
-/// no [`UiSpriteCursor`] silently never ticks. `#[require(UiSpriteCursor)]` is the
-/// obvious remedy and it does not work: **MEASURED on this kernel, a `#[require]`
-/// whose target is a DENSE component panics at insert** — the require pass
-/// resolves the required id's `ComponentPool` in the target ARCHETYPE
-/// (`migration_helpers.rs`: *"invariant: target hosts every required id (expanded
-/// archetype)"*), and a dense id is excluded from every archetype signature and
-/// owns no per-archetype pool by construction (dense plan D0). The panic names an
-/// expansion that never happened, so the message does not say what is wrong.
-/// Filed as a kernel defect in `docs/OPEN-QUESTIONS.md`.
+/// no [`UiSpriteCursor`] would silently never tick. `#[require(UiSpriteCursor)]`
+/// is the obvious remedy and it does not work: **MEASURED on this kernel, a
+/// `#[require]` whose target is a DENSE component panics at insert** — the
+/// require pass resolves the required id's `ComponentPool` in the target
+/// ARCHETYPE (`migration_helpers.rs`: *"invariant: target hosts every required id
+/// (expanded archetype)"*), and a dense id is excluded from every archetype
+/// signature and owns no per-archetype pool by construction (dense plan D0). The
+/// panic names an expansion that never happened, so the message does not say what
+/// is wrong. Filed as a kernel defect in `docs/OPEN-QUESTIONS.md`.
 ///
-/// The buildable remedy is a BUNDLE, which makes the pairing structural at the
-/// authoring site instead of at the component:
-/// [`AnimatedSpriteBundle`](crate::bundles::AnimatedSpriteBundle) carries the
-/// layout base, the image, the sheet, the animation and the cursor in one spawn.
-/// Gate G5-12 pins both halves — the bundle ticks, and a hand-spawned
-/// `UiSpriteAnim` without a cursor does not.
+/// **UI-ADVANCED S6 closes the hazard at this component anyway**, through the
+/// route the require pass could not take:
+/// `sprite::ui_sprite_anim_on_add` deferred-inserts
+/// the cursor at its `Default` through a one-field `Bundle` wrapper, and
+/// `InsertCommand` already PARTITIONS dense ids off the table path. One landing,
+/// at the component, inherited by every construction site — the `.ui` dispatch,
+/// the reload reconcile, `ui!`, a hand-spawn, and
+/// [`AnimatedSpriteBundle`](crate::bundles::AnimatedSpriteBundle). See that hook's
+/// doc for why it is `on_add` rather than `on_insert`, why the insert being
+/// DEFERRED matters, and why there is deliberately no symmetric `on_remove`.
+///
+/// [`AnimatedSpriteBundle`](crate::bundles::AnimatedSpriteBundle) remains the
+/// ergonomic one-spawn form (the layout base, the image, the sheet, the animation
+/// and the cursor together); it is no longer the only thing standing between an
+/// author and a frozen sprite. Gate G5-12 pins both halves — the bundle ticks,
+/// and so do the components spawned one at a time.
 #[repr(C)]
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
+#[component(on_add = crate::sprite::ui_sprite_anim_on_add)]
 pub struct UiSpriteAnim {
     /// First frame of the range, INCLUSIVE (a [`UiSpriteSheet::index`]).
     pub first: u16,
@@ -846,9 +857,20 @@ impl Default for UiSpriteCursor {
     /// Zero elapsed, direction FORWARD, zero completed cycles.
     ///
     /// `dir: 1`, not `0`, and that is why this is written rather than derived:
-    /// `#[require(UiSpriteAnim => UiSpriteCursor)]` materializes the cursor
-    /// through `Default`, and a derived `dir: 0` would make every `PingPong`
-    /// animation stand still on frame `first` with nothing to say so.
+    /// every path that materializes the cursor materializes it through
+    /// `Default`, and a derived `dir: 0` would make every `PingPong` animation
+    /// stand still on frame `first` with nothing to say so.
+    ///
+    /// The materializing path is `UiSpriteAnim`'s
+    /// `on_add` hook `sprite::ui_sprite_anim_on_add` (UI-ADVANCED S6,
+    /// `docs/UI-PLAN-SPRITES.md` S-D20), with
+    /// [`AnimatedSpriteBundle`](crate::bundles::AnimatedSpriteBundle) as the
+    /// ergonomic one-spawn form. It is NOT `#[require]`: that attribute panics on
+    /// a dense target on this kernel (see [`UiSpriteAnim`]'s doc and
+    /// `docs/OPEN-QUESTIONS.md`), and the spelling this comment previously
+    /// showed — `#[require(A => B)]` — has never existed; the derive parses
+    /// `#[require(B)]`, `#[require(C = expr)]` and `#[require(D(args))]` only
+    /// (`boyko_macros/src/component.rs:901-909`).
     #[inline]
     fn default() -> Self {
         UiSpriteCursor {

@@ -371,10 +371,30 @@ and skip the gate — defensible, but the gate is ~15 lines and a static HUD is 
 ### D7 — the `.ui` component vocabulary becomes a **registration table**, before any new component is added
 
 `parse_and_insert` (`text/dispatch.rs:71`) is a hand-written closed `match` over 19 type-names.
-Today, **every new component costs five hand-written landings**: a `.ui` dispatch arm, a `.ui` field
+Today, ~~**every new component costs five hand-written landings**: a `.ui` dispatch arm, a `.ui` field
 parser, a `serialize.rs` arm (or `.ui` round-trip breaks), a `reload/reconcile.rs` `TextStruct` impl
 (or hot reload silently drops it), and a row in the equivalence gate. The Aether construct makes it
-six.
+six.~~ **STRUCK 2026-08-26 at the S6 pre-build audit — `UI-PLAN-SPRITES.md` S-D20 (6): the count is
+NINE, and the list omits the file without which two of its own five are unreachable code.** Traced
+site-by-site against `UiSpacing`: a dispatch arm (`dispatch.rs:87`); a private field parser (`:371`);
+a `parse_<comp>_public` wrapper (`:276` — the reconcile lives in another module and the parser is
+private, so this is mandatory; exactly seven exist, one per reconciled component); a `write_<comp>`
+formatter (`serialize.rs:134`); its emit block in `write_node` (`:66-70`); a **`LiveNode` field**
+(`reload/tree_view.rs:50`); its **snapshot read** in `UiTreeView::build` (`:99`); a `TextStruct` impl
+(`reconcile.rs:665`); and the `patch_unit_struct::<C>` line (`:445`). `serialize_ui` reads ONLY
+`LiveNode` and `patch_unit_struct` takes `live_val` ONLY from `LiveNode`, so **without the two
+`reload/tree_view.rs` landings the `serialize.rs` arm and the `TextStruct` impl are both dead**. Add
+**two** comparator rows rather than one (`p3_common::presence_vector` and `p6a_equivalence`'s own
+`pres!`/`valeq!` lists are separate hand lists), and for a component with a field type the dispatch
+has no leaf for, one new leaf parser each. **And the two parenthetical justifications are already
+false for TEN of the ~~nineteen~~ twenty-two**: `serialize_ui` writes 8 arms and the reconcile patches the same 8,
+so `UiText`, `Button`, `Bar`, `BarFill`, `UiImage`, `UiGrid`, `UiAnchor`, `OnClick`, `OnHover` and
+`OnSubmit` parse and are silently lost on both paths today — MEASURED for `UiImage` — which means
+D7c's *"same round-trip bytes"* pin below would REPRODUCE the loss rather than remove it.
+**Still exactly ten after S6 (2026-08-26): S6's three components landed WITH their serializer and
+reconcile arms — all nine landings each — so the vocabulary grew to 22 and the silently-lost set
+did not grow with it. The three new components are landed more completely than `UiImage`, the one
+they modify.**
 
 **Decision:** convert the vocabulary into a registration table installed by the derive. One table,
 spelling and dispatch together.
@@ -400,7 +420,7 @@ Extending it: a `.ui` file must not be able to inject a running tween row, a `Dr
 `TextPreedit` into a live world. The vocabulary table's membership is therefore **opt-in per
 component**, and runtime state does not opt in.
 
-So the cost of *not* doing D7 is **12 × 5 = 60** hand-written landings, not 75.
+So the cost of *not* doing D7 is ~~**12 × 5 = 60**~~ **12 × ~9 = ~108** hand-written landings, not 75 *(recomputed 2026-08-26 from the corrected per-component count above — `UI-PLAN-SPRITES.md` S-D20 (6); the conclusion the figure supports gets STRONGER, not weaker)*.
 
 **And the cost of doing it, which the original record did not state at all.** The claim that the table
 is installed *"exactly as `register_bind_accessor` already installs a `ComponentId`-keyed fn-pointer
@@ -419,7 +439,7 @@ parse/serialize codegen framework**, and this is its full parts list:
 * a new `UiField` trait — `parse(&str) -> Option<Self>` plus `write(&self, &mut String)` — and one
   impl per destination field type: `Unit`, `AlignCross`, `AlignMain`, `LayoutType`, `PositionType`,
   `AnchorEdge`, `TextAlign`, `FontId`, `f32`, `u32`, `u8`, `bool`, `[f32; 2]`, `ComponentId`,
-  `TemplateId`. **The bodies already exist** as the free leaf fns at `dispatch.rs:545-875`
+  `TemplateId`. **The bodies already exist** *(true of the fifteen listed and false beyond them — 2026-08-26, `UI-PLAN-SPRITES.md` S-D20 (6): the sprite trio alone needed four leaves this list had none of — `[f32; 4]`, `u16`, `NineSliceMode`, `SpriteAnimMode`. **S6 landed those four on 2026-08-26, so the list is NINETEEN today** — `parse_u16`, `parse_f32_quad`, `parse_nine_slice_mode`, `parse_sprite_anim_mode`; the general claim stays false for the next field type nobody has written a leaf for)* as the free leaf fns at `dispatch.rs:545-875`
   (`parse_unit`, `parse_layout_type`, `parse_align_main`, `parse_align_cross`, `parse_position_type`,
   `parse_anchor_edge`, `parse_font_id`, `parse_text_align`, `parse_f32`, `parse_u32`, `parse_u8`,
   `parse_bool`, `parse_f32_pair`, `parse_component_id`, `parse_template_id`) — so the impls are
@@ -447,10 +467,10 @@ keeps the hand-written arm as its parse fn. **The derive covers the regular case
 keep the code they already have.** A table that could not express them would be a table nobody could
 finish.
 
-#### D7c — the pin that bounds the rung: reproduce the nineteen before adding the twentieth
+#### D7c — the pin that bounds the rung: reproduce the ~~nineteen~~ **twenty-two** before adding the ~~twentieth~~ **twenty-third**
 
 D7 lands as a **refactor with a byte-level pin**, never as a new feature: the generated table must
-reproduce the existing hand-written behaviour for all 19 components — same worlds, same
+reproduce the existing hand-written behaviour for all ~~19~~ **22** components — same worlds, same
 `UiParseReport` diagnostics, same round-trip bytes — **before any new component is added**. §10.9 is
 that gate, and it is what makes the rung's end condition observable instead of a judgement call. If
 some component cannot be reproduced, it takes `#[ui_vocab(manual)]` and the rung still closes.
@@ -1762,7 +1782,7 @@ each entry names the instrument and the discriminating comparison — not just "
 | **10.6** | D23 item 3 — SoA vs the probes | criterion over the focus pass | N ∈ {100, 1000}: today's AoS+probes vs dirty-gated-only vs dirty-gated+SoA. Item 3 ships **only** if it beats item 1 alone. |
 | **10.7** | The eDSL migration is faithful | `ui_rect_edsl_sync` + `ui_rect_spv_sync` | Byte identity of re-emitted HLSL and re-DXC'd `.spv`. This gate does not exist today in **any** form. |
 | **10.8** | **The gather** — the one cost this campaign adds to every node of every frame (D5, D6a, D31) | a probe counter in `gather_ui_nodes` **plus** wall-clock over the gather alone, separated from pack+sort (which §10.2 owns) | Probes/node/frame and gather µs at N ∈ {256, 2048}, in four states: **(a)** today's baseline (rect-only reads); **(b)** + `UiVisual`; **(c)** + the four sprite components; **(d)** a **static** frame with the D6 compare hoisted ahead of the gather — which must be **zero probes**, or D6a is not wired where it claims to be. This is the number §10 previously omitted entirely, and it is the one that decides whether the sprite lane needs an archetype-shaped gather rather than per-node probes. |
-| **10.9** | **D7 reproduces the hand-written vocabulary before it extends it** (D7c) | the existing `.ui` round-trip + hot-reload equivalence corpus, re-run against the generated table | For all **19** existing components: identical spawned worlds, identical `UiParseReport` diagnostics (message, line, column), identical `serialize_ui` bytes. A component that cannot be reproduced takes `#[ui_vocab(manual)]` and is listed. **The rung does not close on judgement**, and no new component is added until this is green — which is what bounds R4. |
+| **10.9** | **D7 reproduces the hand-written vocabulary before it extends it** (D7c) | the existing `.ui` round-trip + hot-reload equivalence corpus, re-run against the generated table | For all ~~**19**~~ **22** existing components (**S6 landed the twentieth, twenty-first and twenty-second on 2026-08-26 while D7 was still unowned and unbuilt — `UI-PLAN-SPRITES.md` S-D20 (7) / S6 · LANDED; the R4-bounding pin at §11 item 1 is SPENT**): identical spawned worlds, identical `UiParseReport` diagnostics (message, line, column), identical `serialize_ui` bytes. A component that cannot be reproduced takes `#[ui_vocab(manual)]` and is listed. **The rung does not close on judgement**, and no new component is added until this is green — which is what bounds R4. |
 
 ---
 
@@ -1772,9 +1792,24 @@ Ordered by dependency and by the cost of doing it late.
 
 1. **D7 — the `.ui` registration table.** First, because it converts a linear per-component cost into
    a constant one *before* the 12 authored components are added (D7a). Doing it after means writing
-   ~60 landings and deleting them. It lands as a **pinned refactor**: **§10.9 must be green — the
-   generated table reproducing all 19 existing components — before rung 4 adds the twentieth.** That
-   pin is what bounds **R4**.
+   ~~~60~~ ~108 landings and deleting them. It lands as a **pinned refactor**: **§10.9 must be green —
+   the generated table reproducing all 19 existing components — before ~~rung 4~~ the rung that adds
+   the twentieth.** That pin is what bounds **R4**. *(referent corrected 2026-08-26 at the S6
+   pre-build audit — `UI-PLAN-SPRITES.md` S-D20 (7): **rung 4 is D1, the 80 B widening, and it adds
+   no vocabulary member.** The rung that adds the twentieth `.ui` NAME is `UI-PLAN-SPRITES.md`'s
+   **S6**, which this list does not contain — a rung this pin binds and cannot name. Two further
+   facts the pin's owner needs: **D7 has no owning document** (SPRITES names AETHER, AETHER files it
+   as its own inbound dependency and lands it in no rung, ANIMATION names SPRITES, INTERACTION names
+   nobody), and S6 therefore lands on its hand-written fallback — after which "all **19** existing
+   components" here and at §10.9 / D7c is stale at **22**, and this pin is spent. Filed for the owner
+   in `docs/OPEN-QUESTIONS.md`.)*
+   ⚠️ **THE PIN IS NOW SPENT — S6 LANDED 2026-08-26** (`UI-PLAN-SPRITES.md` S6 · LANDED). D7 was
+   still unowned and unbuilt, so S6 took the hand-written fallback and added `UiNineSlice`,
+   `UiSpriteSheet` and `UiSpriteAnim` to `parse_and_insert`'s closed match. **Every "all 19 existing
+   components" in this document — here, at §10.9 and in D7c — now reads 22**, and every count of the
+   landings D7 would save rises with it. §10.9 was never green; it was never run; nothing was
+   waiting on it. This is recorded rather than silently renumbered, because the pin's whole purpose
+   was to be spent BEFORE the twentieth name landed, and it was not.
 2. **D31 + D6 + D32 — the seam, the gate, and the observer.** These three are one rung because each
    is worthless without the others: D31 promotes `boyko-ui` to a production dependency of
    `boyko_render` and ships `gather_ui_nodes`; D6 wires the per-slot generation gate **hoisted ahead
@@ -1889,12 +1924,12 @@ parse/serialize codegen framework (D7a), and a framework at the head of a campai
 go to die.
 
 *Mitigation, in three parts, all now in the plan.* **(1)** The parts list is enumerated (D7a) rather
-than gestured at, and the honest reuse is named: the ~15 leaf parsers already exist as free fns at
+than gestured at, and the honest reuse is named: the ~~~15~~ **19** leaf parsers already exist as free fns at
 `dispatch.rs:545-875`, so the field impls are delegations, not new parsing logic. **(2)** The
 irregulars have a declared escape hatch (D7b, `#[ui_vocab(manual)]`) — a derive that had to express
 `StackIndex`'s tuple-only form, the `BindParse<C>` two-pass deferral and `resolve_action_name` would
 have no end. **(3)** The rung's end condition is a **gate, not a judgement**: §10.9 requires the
-generated table to reproduce all 19 existing components — worlds, diagnostics and round-trip bytes —
+generated table to reproduce all ~~19~~ **22** existing components — worlds, diagnostics and round-trip bytes —
 before the twentieth is added.
 
 *The residual risk, stated because the mitigation does not remove it:* if §10.9 stays red, the whole

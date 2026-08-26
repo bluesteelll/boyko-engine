@@ -138,21 +138,27 @@ pub struct ImageBundle {
 /// An ANIMATED sprite node (UI-ADVANCED S5): an image node plus the sprite-sheet
 /// trio, in ONE spawn.
 ///
-/// # This bundle is the requirement, because `#[require]` cannot be
+/// # Ergonomics, no longer the requirement itself
 ///
 /// [`ui_sprite_flipbook`](crate::sprite::ui_sprite_flipbook) queries all three of
-/// [`UiSpriteAnim`], [`UiSpriteCursor`] and [`UiSpriteSheet`], so an authored
-/// animation missing the cursor silently never ticks — a frozen sprite with no
-/// error and no failing assertion. `#[require(UiSpriteCursor)]` on the animation
-/// would have made the pairing structural, and MEASURED on this kernel it panics:
-/// the require pass resolves the required id's pool in the target ARCHETYPE, and
-/// a dense id has no per-archetype pool (see [`UiSpriteAnim`]'s doc and
-/// `docs/OPEN-QUESTIONS.md`).
+/// [`UiSpriteAnim`], [`UiSpriteCursor`] and [`UiSpriteSheet`], so an animation
+/// missing the cursor would silently never tick — a frozen sprite with no error
+/// and no failing assertion. Until UI-ADVANCED S6 this bundle WAS the only remedy
+/// (`#[require(UiSpriteCursor)]` panics on a dense target on this kernel — see
+/// [`UiSpriteAnim`]'s doc and `docs/OPEN-QUESTIONS.md`).
 ///
-/// A bundle carries the same guarantee at the authoring site: one spawn, all six
-/// components, and the cursor cannot be forgotten because it is not a separate
-/// step. Its `dir` comes from [`UiSpriteCursor::default`], which is `+1` — the
-/// value `PingPong` needs.
+/// S6 moved the guarantee to the component:
+/// `sprite::ui_sprite_anim_on_add` materializes
+/// the cursor wherever a `UiSpriteAnim` is added, so a `.ui` file, a `ui!` tree
+/// and a hand-spawn all get one. What this bundle still buys is ONE spawn into
+/// one archetype rather than a sequence of inserts.
+///
+/// The hook fires on the animation's add and its deferred insert lands AFTER this
+/// bundle's own `cursor` field, so that field is replaced by a fresh `Default` at
+/// the drain. On a spawn frame the two values are equal, so this is inert; it
+/// would become a visible reset if a caller ever spawned a non-default cursor
+/// here. `dir` is `+1` either way — [`UiSpriteCursor::default`]'s value, the one
+/// `PingPong` needs.
 #[derive(Bundle)]
 pub struct AnimatedSpriteBundle {
     /// Primary layout input.
