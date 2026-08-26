@@ -1,0 +1,11 @@
+error[E0599]: no associated function or constant named `try_from_component_id` found for struct `EnableTagId` in the current scope
+  --> tests/seam_compile_fail/s4_enable_tag_id_try_from_component_id.rs:30:26
+   |
+30 |     let _ = EnableTagId::try_from_component_id(id);
+   |                          ^^^^^^^^^^^^^^^^^^^^^ associated function or constant not found in `EnableTagId`
+   |
+help: there is a method `component_id` with a similar name, but with different arguments
+  --> $WORKSPACE/crates/boyko_ecs/src/ecs/core/component/component_registry/tags.rs
+   |
+   |     pub const fn component_id(self) -> ComponentId {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,25 @@
+error[E0599]: no associated function or constant named `mark_component_changed` found for struct `EcsMaster` in the current scope
+  --> tests/seam_compile_fail/s3_mark_component_changed.rs:20:24
+   |
+20 |     let _ = EcsMaster::mark_component_changed(&mut ecs, entity, id);
+   |                        ^^^^^^^^^^^^^^^^^^^^^^ associated function or constant not found in `EcsMaster`
+   |
+note: if you're trying to build a new `EcsMaster` consider using one of the following associated functions:
+      EcsMaster::new
+      EcsMaster::with_capacity
+  --> $WORKSPACE/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs
+   |
+   |     pub fn new() -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^
+...
+   |     pub fn with_capacity(entity_capacity: usize, archetype_capacity: usize) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: there is a method `get_component_changed_tick` with a similar name, but with different arguments
+  --> $WORKSPACE/crates/boyko_ecs/src/ecs/core/ecs_master/component_api.rs
+   |
+   | /     pub fn get_component_changed_tick(
+   | |         &self,
+   | |         entity: Entity,
+   | |         component_id: ComponentId,
+   | |     ) -> Option<Tick> {
+   | |_____________________^

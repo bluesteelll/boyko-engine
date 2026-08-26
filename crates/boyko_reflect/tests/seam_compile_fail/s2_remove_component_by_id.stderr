@@ -1,0 +1,24 @@
+error[E0599]: no associated function or constant named `remove_component_by_id` found for struct `EcsMaster` in the current scope
+  --> tests/seam_compile_fail/s2_remove_component_by_id.rs:19:24
+   |
+19 |     let _ = EcsMaster::remove_component_by_id(&mut ecs, entity, id);
+   |                        ^^^^^^^^^^^^^^^^^^^^^^ associated function or constant not found in `EcsMaster`
+   |
+note: if you're trying to build a new `EcsMaster` consider using one of the following associated functions:
+      EcsMaster::new
+      EcsMaster::with_capacity
+  --> $WORKSPACE/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs
+   |
+   |     pub fn new() -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^
+...
+   |     pub fn with_capacity(entity_capacity: usize, archetype_capacity: usize) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: there is a method `get_component` with a similar name, but with different arguments
+  --> $WORKSPACE/crates/boyko_ecs/src/ecs/core/ecs_master/component_api.rs
+   |
+   | /     pub fn get_component<T: crate::ecs::core::component::component::Component>(
+   | |         &self,
+   | |         entity: Entity,
+   | |     ) -> Option<&T> {
+   | |___________________^

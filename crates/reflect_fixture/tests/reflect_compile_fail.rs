@@ -82,12 +82,12 @@
 
 /// **An empty glob is a VACUOUS PASS, measured.** `trybuild` prints *"There are no
 /// trybuild tests enabled yet"* and returns success, so every clause in this file would
-/// stay green with its subject directory emptied.
+/// stay green with its subject directory emptied. Each glob states a `>=` floor against
+/// this count — adding a fixture must never red it, and deleting the last one must.
 ///
-/// The census (`tests/reflect_refusal_census.rs`) covers `reflect_compile_fail/` by
-/// bijection with `REFUSALS`, but nothing outside this file knows how many fixtures the
-/// other two directories are supposed to have. So each glob states its own floor, as a
-/// `>=` — adding a fixture must never red a count, and deleting the last one must.
+/// ⚠️ **A floor guards a glob only while both name the SAME directory**, and until
+/// 2026-08-26 these did not: every `dir` was spelled a second time inside the glob literal.
+/// The spellings are the three constants below now, and each glob is built from one.
 fn fixture_count(dir: &str) -> usize {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join(dir);
     std::fs::read_dir(&path)
@@ -97,34 +97,53 @@ fn fixture_count(dir: &str) -> usize {
         .count()
 }
 
+/// C9's own refusal corpus — the directory `tests/reflect_refusal_census.rs` holds in
+/// bijection with `REFUSALS`.
+///
+/// The three constants below exist so that a corpus directory is named **once** in this file.
+/// The decoupled shape they replace was measured in
+/// `crates/boyko_reflect/tests/seam_census.rs`, which inherited it from here: mutating one
+/// character of a glob literal, with the directory and its fixtures untouched, emptied the
+/// `trybuild` run and left the target at exit **0** — the floor still counting a directory the
+/// harness no longer compiled. `tests/trybuild_corpus_compiler_witness.rs` gates the class.
+const REFUSALS_DIR: &str = "reflect_compile_fail";
+
+/// The two upstream regression pins — not C9's refusals; see the header.
+#[cfg(feature = "reflect")]
+const UPSTREAM_DIR: &str = "reflect_compile_fail_upstream";
+
+/// The accepting twins, which trybuild's `check_pass` also **runs** — see the header.
+#[cfg(feature = "reflect")]
+const PASS_DIR: &str = "reflect_pass";
+
 /// **Leg 1 (feature ON).** Every refusal C9 authors, with its blessed message.
 #[cfg(feature = "reflect")]
 #[test]
 fn every_refusal_fails_with_its_blessed_message() {
-    let n = fixture_count("reflect_compile_fail");
+    let n = fixture_count(REFUSALS_DIR);
     assert!(n >= 6, "the refusal corpus holds {n} fixtures, and C9 lands 6");
     let t = trybuild::TestCases::new();
-    t.compile_fail("tests/reflect_compile_fail/*.rs");
+    t.compile_fail(format!("tests/{REFUSALS_DIR}/*.rs"));
 }
 
 /// **Leg 1, the upstream pins.** Not C9's refusals — see the header.
 #[cfg(feature = "reflect")]
 #[test]
 fn the_two_upstream_refusals_still_refuse() {
-    let n = fixture_count("reflect_compile_fail_upstream");
+    let n = fixture_count(UPSTREAM_DIR);
     assert!(n >= 2, "the upstream pins are {n}, and D34 struck exactly 2 rows");
     let t = trybuild::TestCases::new();
-    t.compile_fail("tests/reflect_compile_fail_upstream/*.rs");
+    t.compile_fail(format!("tests/{UPSTREAM_DIR}/*.rs"));
 }
 
 /// **Leg 1, the accepting twins.** Compiled *and run* — see the header on `check_pass`.
 #[cfg(feature = "reflect")]
 #[test]
 fn every_accepted_shape_compiles_and_runs() {
-    let n = fixture_count("reflect_pass");
+    let n = fixture_count(PASS_DIR);
     assert!(n >= 5, "the accepting corpus holds {n}: C9's 4, plus the `#[repr(Int)]` twin");
     let t = trybuild::TestCases::new();
-    t.pass("tests/reflect_pass/*.rs");
+    t.pass(format!("tests/{PASS_DIR}/*.rs"));
 }
 
 /// **Leg 2 (feature OFF).** The SAME directory, and now every fixture must **compile**.
@@ -136,8 +155,8 @@ fn every_accepted_shape_compiles_and_runs() {
 #[cfg(not(feature = "reflect"))]
 #[test]
 fn the_same_fixtures_compile_with_the_feature_off() {
-    let n = fixture_count("reflect_compile_fail");
+    let n = fixture_count(REFUSALS_DIR);
     assert!(n >= 6, "the refusal corpus holds {n} fixtures, and C9 lands 6");
     let t = trybuild::TestCases::new();
-    t.pass("tests/reflect_compile_fail/*.rs");
+    t.pass(format!("tests/{REFUSALS_DIR}/*.rs"));
 }

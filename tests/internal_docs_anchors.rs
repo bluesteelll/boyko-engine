@@ -1720,7 +1720,7 @@ fn planned_paths_are_reported_and_pinned() {
         ("REFLECTION-ANALYSIS.md", 0),
         ("REFLECTION-PLAN-BOUNDARY.md", 4),
         ("REFLECTION-PLAN-CORE.md", 0),
-        ("REFLECTION-PLAN-ECS.md", 2),
+        ("REFLECTION-PLAN-ECS.md", 1), // 2 → 1 on 2026-08-26: EG0 built `seam_census.rs`; EG1's `ecs_alloc.rs` is the marker left. Kept on ONE line: a bare `:1845-1880` fragment below cites this file and shifts silently.
         // 4 → 3 on 2026-08-26: CORE C9 built G5's `reflect_compile_fail.rs`, so its
     // `doc-path-planned` marker came off in the same edit as this decrement.
     ("REFLECTION-PLAN-GATES.md", 3),

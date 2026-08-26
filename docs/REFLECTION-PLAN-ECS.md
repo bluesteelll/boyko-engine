@@ -614,15 +614,17 @@ benches in a gate table, none of which existed), and at B.6.
 
 ### EG0 — the seam census: compile the reachability claim before writing glue — **size S**
 
-**Lands.** `crates/boyko_reflect/tests/seam_census.rs` (**plain** — the census compiles against  <!-- doc-path-planned -->
+**Lands.** `crates/boyko_reflect/tests/seam_census.rs` (**plain** — the census compiles against
 `boyko_ecs`'s public surface and constructs no reflect component, so it is the one glue test that
 belongs in `boyko_reflect`'s own tests; there is no feature leg to name, GATES D4) that *compiles against*
-`boyko_ecs`'s public surface and calls every accessor the glue intends to use: `entity_archetype_id`,
+`boyko_ecs`'s public surface and calls every accessor **on the glue's own route**: `entity_archetype_id`,
 `archetype_master().get_archetype(_).component_ids()`, `get_component_raw`, `get_component_raw_mut`,
 `dense_contains`, `dense_slot_of`, `dense_get_raw`, `dense_registry().dense_ids()`,
 `get_component_changed_tick`, `storage_kind`, `residency_class`, `get_layout`, `register_tag`,
-`tag_by_name`, `register_enable_tag`, `add_tag`, `remove_tag`. Plus a `trybuild` `compile_fail` case
-per item on the **not-yet-reachable list**, which holds **two kinds** and the distinction is
+`tag_by_name`, ~~`register_enable_tag`~~, `add_tag`, `remove_tag`, **`is_enabled_id` / `enable_id` /
+`disable_id`** — the list was stale against F27 in **both** directions and **D16** corrects it, along
+with the *"intends to use"* framing that made two of its rows unfalsifiable. Plus a `trybuild`
+`compile_fail` case per item on the **not-yet-reachable list**, which holds **two kinds** and is
 load-bearing: the four things §4 must **add** (S1, S2, S3, **S4′**), whose fixtures are expected to
 **flip to `pass` at EG2**, and the one thing this plan **refuses** to add
 (`TagId::from_component_id`), whose fixture must stay red forever. A single undifferentiated
@@ -645,28 +647,94 @@ between those two sentences is three rungs of work, and the cheapest way to know
 is to make the compiler say it — before EG6 discovers it halfway through.
 
 **Gate.**
-1. The positive-list file compiles and runs green in the plain `-p boyko-reflect` leg.
-2. Each negative-list item has a `trybuild` `compile_fail` fixture with a blessed `.stderr`.
-3. The test's header carries the reachability table with `file:line` for every row, and a local
-   assertion compares it against §1 of this document. *(The repo-wide anchor gate is a **separate**
-   EG8 deliverable and cannot be added here — see the ordering note there.)*
+1. `seam_census.rs` compiles and runs green in the plain `-p boyko-reflect` leg. **The rung's
+   central claim is MEASURED and holds** (EG0 audit, 2026-08-26): a throwaway probe in that exact
+   package called every accessor above and reported `running 1 test … ok`. What follows are the
+   gates that could **not** have detected it being wrong.
+2. **FIVE** `compile_fail` fixtures with a blessed `.stderr` — one per item on the
+   not-yet-reachable list, of **both** kinds: S1, S2, S3 and **S4′**, which flip to `pass` at EG2,
+   and `TagId::from_component_id`, which never does. ~~*“Each **negative-list** item has a
+   `trybuild` `compile_fail` fixture with a blessed `.stderr`.”*~~ **STRUCK (D18):** after the
+   sidebar above moved S4′ to the positive list, “negative list” denotes exactly **one** item — so
+   this gate demanded one fixture while the paragraph three lines above it demanded five, and
+   both REDs below operate on fixtures the gate never required to exist. That is the C8 shape:
+   the probe measures scaffolding the gate never pinned.
+3. **The glob states a `>=` floor**, read from a `fixture_count(dir)` helper — the one
+   `crates/reflect_fixture/tests/reflect_compile_fail.rs:91` already declares and which each of
+   its four legs asserts against. **An empty glob is a VACUOUS PASS, and it was MEASURED in
+   *this* package** (EG0 audit): `trybuild` printed *“There are no trybuild tests enabled yet”*,
+   the harness reported `running 1 test … ok`, and the process exited **0**. `running N` does
+   **not** catch it — the harness function runs and passes over zero fixtures. The nearest
+   template, `crates/boyko_reflect/tests/c6_compile_fail.rs`, carries **no** floor, so the
+   vacuous shape is the one an implementer inherits by proximity (D18).
+4. The header cites §1 **by anchor**, never by copy, and the local assertion **parses
+   `docs/REFLECTION-PLAN-ECS.md` at run time** — in-tree precedent
+   `crates/boyko_app/tests/vg_r0d_census.rs:56`. Two constants declared in the same file and
+   compared to each other is a gate that **cannot fail**, and a table copied into a `.rs` header
+   is covered by **no** census (`GATED_DOCS` is `.md`-only), so the copy becomes a second carrier
+   of the facts §1's anchors exist to keep single (D19). ~~*(The repo-wide anchor gate is a
+   **separate** EG8 deliverable and cannot be added here — see the ordering note there.)*~~
+   **STRUCK (D19): it LANDED at `eeb567be`, 2026-08-21, ahead of EG8 and wider than it** — all
+   five reflection documents sit in `GATED_DOCS` (`tests/internal_docs_anchors.rs:280`) and the
+   census runs green over eight tests. The ordering note's reason — *“this plan links three
+   siblings that do not exist yet”* — is false: all five are on disk.
+5. **Same commit, or this rung lands RED at the root census.** `seam_census.rs` now exists, so
+   the `<!-- doc-path-planned -->` marker on **this rung's own Lands line** comes off and
+   `PLANNED_EXACT`'s `("REFLECTION-PLAN-ECS.md", 2)` becomes `1`
+   (`tests/internal_docs_anchors.rs:1716`). That pin asserts **equality**, not a ceiling,
+   precisely so it cannot go quiet when the work finishes. No list on this rung carried the
+   obligation until D19.
+6. `#![cfg(not(miri))]` on the trybuild harness, and on `seam_census.rs` if gate 4 reads from
+   disk — see **Miri** below.
 
-**RED MUTATION.** Delete one `compile_fail` expectation and re-run: `trybuild` must red on the
-now-unexpected success. Separately, add `EcsMaster::add_component_by_id` as a stub *before* EG2 and
-confirm its `compile_fail` case flips — the fixture must red the moment the item becomes reachable,
-so the not-yet-landed list cannot silently rot.
+**RED MUTATION.** Delete a fixture's blessed **`.stderr`** — *not* its `.rs` — and re-run:
+`trybuild` reds with **`wip`** and *“writing the following output to `wip/…`”*. ~~*“Delete one
+`compile_fail` expectation and re-run: `trybuild` must red on the now-unexpected success.”*~~
+**STRUCK (D18): all three readings of “expectation” were MEASURED at the EG0 audit, and the
+prescribed one does not fire.** Deleting the fixture `.rs` shrinks the glob and the target exits
+**0**; deleting the `t.compile_fail(…)` call runs nothing; only deleting the `.stderr` reds, and
+it reds with `wip`, **never** with *“unexpected success”* — that is the **next** red's message,
+not this one's. A red whose artifact is ambiguous across three readings, two of which return
+exit 0, is not a red.
+
+Separately, add `EcsMaster::add_component_by_id` as a stub *before* EG2 and confirm its
+`compile_fail` case flips — the fixture must red the moment the item becomes reachable, so the
+not-yet-landed list cannot silently rot. **OBSERVED at the EG0 audit**: the harness reported
+*“Expected test case to fail to compile, but it succeeded”*, exit **101**; the source was then
+restored byte-identically under `cmp`.
 
 *Second RED, and it is the one that would have caught this rung's own defect:* add
-`EnableTagId::try_from_component_id` as a stub and confirm **exactly one** fixture flips. If two do —
-i.e. if a `from_component_id` refusal fixture still exists beside it — the negative and positive
-lists disagree about the same item, which is the state EG0 and
+`EnableTagId::try_from_component_id` as a stub and confirm **exactly one** fixture flips. ~~If two
+do — i.e. if a `from_component_id` refusal fixture still exists beside it — the negative and
+positive lists disagree about the same item, which is the state EG0 and
 [`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md)'s D10 were in until F27 forced the
-question.
+question.~~ **STRUCK (D18): the discriminating half can no longer fire.** After the sidebar, the
+only negative-list fixture names `TagId::from_component_id` — a **different type** and a
+different function name — so stubbing `EnableTagId::try_from_component_id` cannot flip it, and
+“two flipped” is unreachable by construction. What survives is the **exactly one** count; the
+two-plans-disagree state this red was built to detect is now detected by gate 2's count of five.
+
+**These mutations touch `boyko_ecs`, and that is NOT “starting EG2” (D20).** EG2's owner gate
+binds that rung's *Lands* — a public item that survives the commit. A stub applied, its red
+**OBSERVED**, and the source restored byte-identically under `cmp` leaves no public surface
+behind; it is the rung protocol's own instrument, and it was exercised on this very rung at the
+EG0 audit. Said here because EG2 reads *“the rung does not start before the answer”*, and an
+implementer who reads only that either stalls at EG0 or breaches the owner gate to satisfy it.
 
 **Inverted outcome is a result, not a failure.** If a negative-list item *does* compile, the seam
 in §4 shrinks by one and EG2 gets smaller. Record it; do not re-argue it.
 
-**Miri / proptest.** None (no `unsafe`, no data).
+**Miri / proptest.** ~~None (no `unsafe`, no data).~~ **CORRECTED (D19): no proptest and no
+`unsafe` — but TWO guards this rung must carry.** CI runs `cargo +nightly miri test
+--all-targets … -p boyko-reflect …` (`.github/workflows/ci.yml:306`), so `--all-targets` picks
+up every target this rung adds. The trybuild harness needs `#![cfg(not(miri))]` — it shells out
+to `cargo`, which Miri cannot execute, and `crates/boyko_reflect/tests/c6_compile_fail.rs`
+already carries the guard **in this package** for exactly that reason. If gate 4's assertion
+parses the plan at run time, `seam_census.rs` needs the guard too: Miri refuses host file I/O
+under isolation, measured at GATES G4's fifth red and recorded at
+`crates/boyko_reflect/tests/c2_registry_source_census.rs:12~`. ⚠️ The CI comment block names
+only *“the fixture's census/codegen harnesses”* — `reflect_fixture`'s, not this package's — so
+the one place an implementer might have caught this points at the wrong crate.
 
 ---
 
@@ -1130,14 +1198,16 @@ an empty binary, not fail).
 
 | needed | by rung | note |
 |---|---|---|
-| `TypeInfo`, `FieldInfo { offset, kind, get, set }`, `Scalar`, `ValueKind`, `TypeKind`, `FieldValue`, `NestedCursor` / `NestedCursorMut` | EG4, EG5 | the whole value model |
+| `TypeInfo`, `FieldInfo { offset, kind, get, set }`, `Scalar`, `ValueKind`, `TypeKind`, `FieldValue`, `NestedCursor` / ~~`NestedCursorMut`~~ | EG4, EG5 | the whole value model. ⚠️ **`NestedCursorMut` is scheduled by NO CORE rung, and EG5 gate 6 is written around it** — verified 2026-08-26: zero hits in `crates/`, zero in `docs/REFLECTION-PLAN-CORE.md`; CORE's C6 is *"the recursion contract, **read side**"* and its two remaining rungs are C10 (enums) and C11 (`Str`). The type is specified only in `docs/REFLECTION-ANALYSIS.md` A.4 (FIX W1), which also names the escape hatch — *"if TB proves troublesome, nested-leaf write slips to v2"*. This is the **C7 defect class inside the dependency table**: ECS must put it to CORE **before** EG5, not discover it halfway through EG5 (D17) |
 | `type_info_of(id) -> Option<&'static TypeInfo>` | EG1 | EG1 needs it only to classify `Table` vs. `TableOpaque`; a stub returning `None` unblocks EG1 if CORE is behind |
-| `install_type_info` carrying the **release `assert!(storage_kind(id) != Bitset)`** | EG3 | the runtime half of D5. If CORE declines it, EG3 must add the check on its own read path and say so |
+| `install_type_info` carrying the **release `assert!(storage_kind(id) != Bitset)`** | ~~EG3~~ **CORE C9 — LANDED** | the runtime half of D5. ~~If CORE declines it, EG3 must add the check on its own read path and say so~~ **STRUCK 2026-08-26 (D17): CORE did not decline, so this conditional is DISCHARGED.** `crates/boyko_reflect/src/registry.rs:87` carries the plain release `assert!(storage_kind(component_id) != StorageKind::Bitset, …)` today — verified in tree at the EG0 audit. CORE recorded the obligation to strike it here (its §7.4 item 4: *"must be struck when ECS is next edited, or EG3 builds the same check twice"*), and this edit discharges it. The live edge is now **EG3 → CORE C9**, which §11 also lacked |
 | `TypeInfo::default_in_place` and `drop_in_place` | EG6 | D8's scratch fill; `drop_in_place` is used only by the drop-count gate, never by the glue |
 | `ValueKind::Array` (offset + stride + count) | EG4, EG8 | without it `GpuTransform3D` is a hard error and gate EG8-2 cannot exist (B.8) |
 | top-level `TypeKind::Enum` (a component that *is* an enum has no fields) | EG4, EG8 | `Visibility` is the dogfood target (§6.1(c)) |
-| derive-time refusal of `bitset` / generics / `repr(packed)`, **spanned at the user's type name** | EG3 | B.5: an Aether user wrote `tag Foo(bitset);` and must not see an error about a derive they never typed |
+| derive-time refusal of `bitset` ~~/ generics / `repr(packed)`~~, ~~**spanned at the user's type name**~~ → **spanned at the `reflect` key** | EG3 | ~~B.5: an Aether user wrote `tag Foo(bitset);` and must not see an error about a derive they never typed~~ **STRUCK 2026-08-26 (D17), on two grounds CORE MEASURED.** **CORE D34** deleted generics and `repr(packed)` from `REFUSALS` — rustc and `#[derive(Component)]` already refuse both, so those fixtures' reds could not fire; they survive only as upstream regression pins in `crates/reflect_fixture/tests/reflect_compile_fail_upstream/`. **CORE D37** superseded the caret: the Aether user cannot exist, because `reflect` is a key on the `component` construct only while `storage = "bitset"` comes from `tag` — re-verified at this audit (`grep -rn reflect crates/aether_lang/src/` returns nothing but `reflectance`). Only the **bitset** row is ECS's, and its caret is on `reflect` |
 | the **B.1 fork resolved** (one `BindAccessor`+`TypeInfo` table, or two) | before EG4 | the glue reads `type_info_of` either way and is agnostic to *which* — it depends only on the resolution **existing**, because Horn 1 changes what `FieldInfo` is |
+| **CORE C8's install seam** (`type_info_of` returns `Some` only because of it) | **EG8** | **ADDED 2026-08-26 (D17)** — an edge `docs/REFLECTION-PLAN-CORE.md` §7.4 item 4 states explicitly and *"neither document carried"*. §11's EG8 row did not name it either |
+| **the real engine types being *annotated*** with `#[component(reflect)]` — `Transform`, `GpuTransform3D`, `EmitterActive`, `ParticleEffectHandle`, `Visibility` | **EG8, and it is on NO rung's Lands** | **ADDED 2026-08-26 (D17)**, from CORE §7.4 item 4: *"no rung in any of the four documents schedules"* it. Verified at this audit: `grep -rn 'component(reflect' crates/boyko_scene/src crates/boyko_render/src` returns **zero**, while both crates already carry the `reflect` feature (`crates/boyko_scene/Cargo.toml:52~`, `crates/boyko_render/Cargo.toml:44~`). EG8 carries it or hands it to a rung of its own; it is recorded here so it stops being invisible from the ECS side too |
 
 **On [`docs/REFLECTION-PLAN-GATES.md`](REFLECTION-PLAN-GATES.md)** — hard:
 
@@ -1183,12 +1253,293 @@ an empty binary, not fail).
 
 | rung | lands | blocked on |
 |---|---|---|
-| **EG0** | seam census + trybuild not-yet-landed list | GATES G0–G4 (the packages and the legs) |
+| **EG0** | seam census + trybuild not-yet-landed list (**five** fixtures, D18) + the `doc-path-planned` decrement (**D19**) | GATES G0–G4 (the packages and the legs) |
 | **EG1** | `components_of_into` sources 1+2, `IdKind`, `Refusal`, `display_name` | EG0; CORE's `type_info_of` (stub-able) |
 | **EG2** | the four-item public by-id seam in `boyko_ecs` (S1, S2, S3, **S4′**) | EG0; **owner (B.13 #2)** |
-| **EG3** | bitset presence, source 3, the `has_component` trap gate, the F27 mint gate | EG2 (**S4′**) |
+| **EG3** | bitset presence, source 3, the `has_component` trap gate, the F27 mint gate | EG2 (**S4′**); **CORE C9 — LANDED** (the release `assert!` in `install_type_info`; edge added 2026-08-26, D17) |
 | **EG4** | read path, refusal matrix, GPU + dynamic-tag rows | EG1; CORE's value model + `Array` + `TypeKind::Enum` |
 | **EG5** | write path, change tick, release kind check | EG2 (S3), EG4 |
 | **EG6** | `add_default` / `remove`, drop + unwind safety, the `NoDefault` arm | EG2 (S1, S2), CORE's `default_in_place` (**`Option`**, D20) |
 | **EG7** | hook / observer / tick conformance ledger | EG5, EG6 |
-| **EG8** | dogfood acceptance fixture (**in `reflect_dogfood`**) + Miri certification (**both rows**) + anchor-gate registration (**and deleting GATES' two now-false statements about it**) | all of the above; GATES' two Miri rows and `reflect_dogfood`; **owner (B.13 #1)** for the dogfood half; **all four plan documents landed** (the anchor gate's path check reds on a dead sibling link) |
+| **EG8** | dogfood acceptance fixture (**in `reflect_dogfood`**) + Miri certification (**both rows**) + ~~anchor-gate registration (**and deleting GATES' two now-false statements about it**)~~ **LANDED @`eeb567be`, five documents** + **annotating the real engine types** (D17 — on no rung's Lands before this edit) | all of the above; GATES' two Miri rows and `reflect_dogfood`; **owner (B.13 #1)** for the dogfood half; **CORE C8** (D17); ~~**all four plan documents landed** (the anchor gate's path check reds on a dead sibling link)~~ **STRUCK (D19): discharged — all five are on disk and registered** |
+
+---
+
+## 12. Decisions taken at the EG0 audit and its verification — D16–D22
+
+**Why these live here and not in §5.** [`docs/REFLECTION-PLAN-CORE.md`](REFLECTION-PLAN-CORE.md)
+cites this document *by line* at five places — twice into §5's **D5** and three times into §10's
+`install_type_info` row — and MEASURED at this audit: **the anchors census does not check a
+cross-document line citation between two `.md` files.** A one-line insertion above the §10 row was
+applied and the census stayed green over eight tests.
+`tests/internal_docs_anchors.rs:367~` says why, structurally: *"this census scans `.md` files for
+citations into `.rs`, never the reverse."* Growing §5 would therefore rot the sibling's citations
+**silently**, so the new decisions go after the last cited line instead and the §5 series continues
+here. *(Confirming the instrument is not blind everywhere: this very appendix reddened it four times
+while being written — an over-waiver, two `Cargo.toml` lines that are not definitions, and a
+misbinding created by writing a bare `:NNN` fragment next to a sibling's link.)*
+
+---
+
+**D16 — the EG0 census enumerates the glue's ROUTE, and “the accessors it intends to use” was not a
+falsifiable list.** Two rows were wrong in opposite directions, and both were invisible because a
+census of `pub` items compiles either way.
+
+* **`register_enable_tag` comes OFF.** §4's bitset-write bullet that justified it is struck
+  (“*Same trick* — FALSE, struck 2026-08-21”), EG3's route table sends **both** halves through S4′,
+  and **EG3 gate 7 asserts that the glue never called it**. A census in `boyko_reflect` certifying
+  the reachability of a call the glue is gated against calling is a row that argues with a gate.
+  It stays a legitimate call *inside `boyko_ecs`'s own tests* — EG2 gates 8 and 9 mint with it on
+  purpose — which is precisely why it belongs there and not on this list.
+* **`is_enabled_id` / `enable_id` / `disable_id` go ON**, because they *are* the glue's bitset route
+  (EG3's table) and were absent. ⚠️ **And the census must call them the way the glue will, or the
+  row is a gate that cannot fail.** MEASURED at this audit: all three **compile and run today** from
+  `boyko_reflect`'s tests, given a tag from `register_enable_tag`. What is unreachable is not the
+  function — it is the **`ComponentId` → `EnableTagId` direction**, because `EnableTagId` is
+  `pub(crate)`-fielded with *“no constructor”* (F16), which is exactly what **S4′** adds. A census row
+  that mints its tag proves nothing about the property EG0 exists to compile; the row must reach the
+  tag **from an id**, and it therefore belongs on the `compile_fail` side until EG2, not on this list.
+* `register_tag` **stays**, and §7's *“a call this plan no longer makes on either citizen”* is about
+  the **write path** only — EG1 gate 2 and EG3 gate 5 both mint with it in fixture setup. No conflict.
+* `dense_slot_of` and `dense_get_raw` **stay**, on the corrected framing: no rung consumes them (dense
+  reads go through `get_component_raw`, whose dense arm calls `dense_get_raw` *inside* `boyko_ecs`),
+  but §1's **F3** asserts all three are `pub` on `EcsMaster`, and this census is where that fact is
+  compiled. They are rows of the ROUTE's *substrate*, not of its callers — which is what “intends to
+  use” could not express.
+
+**D17 — four §10 dependency rows were settled, wrong, or missing, and CORE had already recorded two
+of them as debts against this document.** Where CORE's completion discharges an ECS conditional, the
+conditional is **struck with its reason**, not left pending on one side and done on the other.
+
+1. `install_type_info`'s release `assert!` — **landed** at CORE C9 (`crates/boyko_reflect/src/registry.rs:87`).
+   ECS's fallback clause is struck; the edge **EG3 → CORE C9** is added to §11, which lacked it.
+2. The derive-refusal row — generics and `repr(packed)` are **deleted** by CORE D34 (their reds could
+   not fire), and the caret is **on `reflect`**, not on the user's type name, by CORE D37 (the Aether
+   user that justified ECS's caret cannot exist).
+3. **`NestedCursorMut` is scheduled by no CORE rung** and EG5 gate 6 is written around it — the C7
+   defect class, sitting in the table that exists to prevent it. ECS escalates before EG5.
+4. Two obligations CORE names against ECS rungs and neither document's list carried: **EG8 → CORE
+   C8**, and **annotating the real engine types**, which is on no rung's *Lands* anywhere.
+
+**D18 — EG0's `compile_fail` half had a gate that could not fail and a red that could not fire, and
+both were MEASURED rather than argued.**
+
+* **Gate 2's noun drifted under the 2026-08-21 sidebar.** After S4′ moved to the positive list,
+  *“negative list”* denotes **one** item while the paragraph above demands **five**. The gate now
+  states the count and both kinds.
+* **The glob needs a `>=` floor.** MEASURED in `boyko_reflect`: an empty glob prints *“There are no
+  trybuild tests enabled yet”*, reports `running 1 test … ok`, and exits **0**. `running N` is blind
+  to it. `crates/reflect_fixture/tests/reflect_compile_fail.rs:91` already carries the helper and
+  calls the shape *“a VACUOUS PASS, measured”*; `crates/boyko_reflect/tests/c6_compile_fail.rs` —
+  the template an implementer copies — does not.
+* **RED 1 named no artifact and predicted a message no reading produces.** All three readings were
+  run: deleting the fixture `.rs` exits 0, deleting the `t.compile_fail(…)` call runs nothing, and
+  deleting the `.stderr` reds with **`wip`**. *“Unexpected success”* is RED 2's message — observed,
+  from stubbing `add_component_by_id`.
+* **RED 2's discriminating half is unreachable** and is struck: the only negative-list fixture names
+  `TagId::from_component_id`, a different type and a different function, so stubbing
+  `EnableTagId::try_from_component_id` can never flip it. Gate 2's count of five now carries that job.
+* ⚠️ **A blessed `.stderr` here embeds `boyko_ecs`'s own source text.** Measured: rustc's
+  *“there is a method `get_component` with a similar name”* suggestion reproduces `get_component`'s
+  four-line signature into the fixture's expected output, computed over `EcsMaster`'s **entire**
+  inherent method set. A rename or a reformat in the kernel re-blesses all four seam fixtures for a
+  reason unrelated to the seam. `tests/trybuild_corpus_compiler_witness.rs` freezes the compiler, not
+  the method table. This fails **loud**, so it is a maintenance cost, not a false green — recorded so
+  the re-bless is expected rather than investigated.
+
+**D19 — two obligations this rung creates that its own list did not carry, and one deferral that
+points at a landed gate.**
+
+* **The `doc-path-planned` decrement — DISCHARGED at EG0's landing.** EG0's *Lands* line carried
+  the marker; `PLANNED_EXACT` asserts **equality** (`tests/internal_docs_anchors.rs:1716`),
+  documented *“When a deliverable lands, its marker comes off and this number is decremented in the
+  same commit.”* Without gate 5, **EG0 lands red at the root census** — the pin was `2` when this
+  was written and is `1` now, with EG1's `ecs_alloc.rs` the one marker left.
+* **The Miri guards.** CI runs `cargo +nightly miri test --all-targets … -p boyko-reflect`, so a new
+  trybuild harness in this package is picked up and Miri cannot shell out to `cargo`. *“Miri /
+  proptest. None”* read as *no obligation*. The CI comment naming the hazard names
+  `reflect_fixture`'s harnesses, not this package's.
+* **Gate 3's deferral to EG8 is struck.** EG8 gate 6 is itself struck as **LANDED 2026-08-21**, and
+  its ordering note's reason — *“this plan links three siblings that do not exist yet”* — is false:
+  all five reflection documents are on disk and in `GATED_DOCS`. Left standing, gate 3 tells an
+  implementer §1 is un-gated and invites a redundant local anchor checker — the duplication C9 paid
+  for. Gate 4 also fixes the **form**: parse this document at run time (precedent
+  `crates/boyko_app/tests/vg_r0d_census.rs:56`), never compare two constants declared in the same
+  file, and cite §1 by anchor rather than copying its rows into a `.rs` header that no census scans.
+
+**D20 — a RED MUTATION applied and restored byte-identically is not “starting” an owner-gated rung.**
+Two of EG0's reds add public items to `boyko_ecs`, which is EG2's surface, and EG2 reads *“the rung
+does not start before the answer”*. The rung protocol already resolves this — the red is **OBSERVED**
+and the source restored under `cmp` — but the plan did not say so at either site, so an implementer
+either stalls at EG0 or breaches the owner gate to satisfy its own gate. Said at both sites now.
+
+---
+
+**D21 — measured while LANDING EG0, 2026-08-26. Two facts the audit could not have had, because
+they only appear once the corpus exists and its reds are run.**
+
+* ⚠️ **The seam items contaminate EACH OTHER'S blessed `.stderr`.** D18 records that a fixture's
+  expected output embeds `boyko_ecs`'s own source text and warns about *kernel renames*. The
+  contaminating change does not have to come from outside the seam. **MEASURED**: RED 2's stub of
+  `add_component_by_id` made S1's fixture flip **and** S2's fixture **mismatch** — rustc's *“there
+  is a method … with a similar name”* line in S2's diagnostic switched from `get_component` to the
+  newly-reachable `add_component_by_id`, with a machine-applicable suggestion rewriting the call.
+  So when EG2 lands S1, S2 and S3 in one commit, **every surviving fixture in the corpus is
+  re-blessed for a reason unrelated to its own item**. Expected, loud, not a false green — but an
+  EG2 implementer who re-blesses one fixture and stops will leave the target red.
+* **“Exactly one fixture flips” counts FLIPS, not REDS**, and the two are different trybuild
+  outcomes. A **flip** is `error` — *“Expected test case to fail to compile, but it succeeded.”* A
+  **mismatch** is a red whose fixture still failed to compile, only with different prose. RED 2
+  produced one flip **and one mismatch**; RED 3 produced one flip and **zero** mismatches. Counting
+  reds would have reported RED 2 as *“two fixtures reacted”* and sent an implementer looking for a
+  second reachable item that does not exist.
+
+**What EG0 actually landed, and the form gates 3 + 4 left unspecified.**
+`crates/boyko_reflect/tests/seam_census.rs` is **one** target carrying all three tests plus the
+trybuild harness, so gate 6's *“on the trybuild harness, and on `seam_census.rs`”* is one
+`#![cfg(not(miri))]`. The corpus is `crates/boyko_reflect/tests/seam_compile_fail/`, five fixtures.
+Three choices are worth not re-deriving at EG2:
+
+1. ~~**The floor is READ FROM THIS DOCUMENT, not written as a literal** — §4's four `S`-rows plus
+   EG0's one refused item, parsed at run time. There is no `5` anywhere in the `.rs`.~~
+   **STRUCK (D22): true as written, and worthless as a guard, because the floor did not guard the
+   glob.** The corpus directory was spelled **twice** — once in the `CORPUS` constant the floor
+   counts, once as a literal inside `t.compile_fail("tests/seam_compile_fail/*.rs")` — so `CORPUS`
+   had exactly one reader and it was not the glob. **MEASURED at the EG0 verification, 2026-08-26:**
+   mutating **only** the glob by one character, directory and fixtures untouched, left the target at
+   exit **0**, `3 passed`, with `trybuild` printing *"There are no trybuild tests enabled yet"* —
+   zero fixtures compiled, the `.stderr` corpus never shown to a compiler, and the correspondence
+   test still green because it reads files from disk rather than from `trybuild`. What is worth not
+   re-deriving is the **repaired** form: the glob is `format!("tests/{CORPUS}/*.rs")`, so the
+   directory has one spelling and one reader, and the same one-character mutation now reds twice
+   (the floor's `read_dir` panics, and the class gate names the site).
+2. ~~**The plan-row ↔ fixture binding is the blessed `.stderr`, never a filename and never a
+   comment.** Each fixture spells its call path-qualified (`EcsMaster::add_component_by_id(&mut
+   ecs, …)`, not `ecs.add_component_by_id(…)`), so rustc echoes the exact `Type::fn` into the
+   diagnostic and `trybuild` byte-checks it. A comment cannot satisfy the assertion; only the
+   compiler having looked and not found it can. This is the answer to *“the repaired clause was
+   still satisfiable by a COMMENT naming the message”*.~~
+   **STRUCK (D22): the binding was `err.contains(&item.path)`, and a substring of the path is not
+   that property. BOTH failure directions were MEASURED at the EG0 verification, 2026-08-26**, and
+   the clause was therefore still satisfiable by exactly the thing it claimed to exclude.
+   * **A comment satisfies it.** rustc renders the *entire source line* of an error span, trailing
+     comments included. Replacing S3's call with
+     `let _ = EcsMaster::zqq_probe(&mut ecs, entity, id); // EcsMaster::mark_component_changed` and
+     re-blessing gave exit **0**, `running 3 tests`, `3 passed`, five fixtures `ok` — while the
+     compiler's actual finding was ``no associated function or constant named `zqq_probe` `` and
+     **nothing had looked for `mark_component_changed` at all**.
+   * **Reachability satisfies it, which is the sharper direction.** With a three-argument
+     `add_component_by_id` stub in the kernel, S1's fixture stopped being `E0599` and became
+     `error[E0061]: this function takes 3 arguments but 4 arguments were supplied`, whose
+     machine-applicable suggestion prints
+     `let _ = EcsMaster::add_component_by_id(&mut ecs, entity, id);` — path-qualified, and produced
+     *precisely by* reachability. `contains` matched **three** times in that one file. So a green
+     census was compatible with the item being reachable, the opposite of what it certifies — and
+     that `.stderr` is one an EG2 implementer would bless on the way to landing S1.
+   **The repaired binding matches the sentence only an ABSENT item can produce**:
+   ``error[E0599]: no … named `<fn>` found for … `<Type>` … in the current scope``, assembled from
+   the `Type::fn` the plan spells. Both mutations above red against it, OBSERVED.
+3. **`is_enabled_id` / `enable_id` / `disable_id` are pinned as `fn`-pointer coercions, not called**
+   (D16). MEASURED that this is not decoration: swapping `is_enabled_id`'s parameter order reds the
+   census with `E0308`, printing both signatures. A call would have minted a tag with
+   `register_enable_tag` — the very route EG3 gate 7 forbids the glue — and proved nothing about the
+   `ComponentId` → `EnableTagId` direction, which is what S4′ adds and what the corpus holds.
+   *(This one survived verification unchanged; 1 and 2 did not.)*
+
+---
+
+**D22 — measured at the EG0 VERIFICATION, 2026-08-26. Two of D21's three "choices worth not
+re-deriving" were FALSE, and both were this campaign's own named defect classes wearing the shape of
+a repair.** The struck text is above with its measurement; what follows is what the class costs and
+what now gates it.
+
+* **A `.stderr` substring is not a proof of absence in EITHER direction**, and the failing direction
+  that matters most is the *reachable* one, because that is the state EG2 creates on purpose. The
+  binding is now the `E0599` sentence, and the two reds are recorded at
+  `crates/boyko_reflect/tests/seam_census.rs`'s header rather than only here.
+* **A floor guards a glob only when both name the same directory — and the decoupling was
+  INHERITED, not invented.** `crates/reflect_fixture/tests/reflect_compile_fail.rs:91`, the shape
+  EG0 gate 3 tells an implementer to copy, spells each of its three directories twice; C9/G5 have
+  been shipping that way. `crates/boyko_reflect/tests/c6_compile_fail.rs` had **no floor at all** —
+  MEASURED: emptying its corpus leaves C6 gate 5 green at exit 0. Both are repaired, and the class
+  is gated once rather than per harness: `tests/trybuild_corpus_compiler_witness.rs` now resolves
+  **every** `trybuild` glob in the repository (**63 call sites across 30 harnesses**, measured) and
+  reds on one that matches no fixture. Its red was OBSERVED on a landed `boyko_ecs` harness, whose
+  own target reported `running 1 test … ok` at exit **0** with the mutated glob.
+* **`SeamItem::flips_at_eg2` was a near-dead datum.** As landed, its only readers were the parse
+  floor inside its own producer and a `println!` label — the header called the two-kind distinction
+  load-bearing while nothing over the corpus treated the kinds differently. It now carries two
+  assertions: the kinds must name **no common item** (the two kinds are parsed from two *different*
+  sections, so a collision is reachable, and it is the state EG0 and BOUNDARY's D10 were in until
+  F27), and the refused item's fixture must be a **different file** from every flipping item's — the
+  per-item count cannot see a single `.stderr` naming both, and D21's first bullet is the proof that
+  such contamination happens. Both reds OBSERVED.
+* **The dense membership count was a tautology.** `dense_ids()` is **empty** in that binary, so
+  `dense_ids.iter().filter(|&&d| ecs.dense_contains(entity, d)).count() == 0` never invokes
+  `dense_contains` and holds for every possible implementation of it — `x || !x` spelled as an
+  iterator, under a message asserting it was not one. It is replaced by the cardinality itself
+  (falsifiable, and it reds on the day EG1's subject exists), a type pin of the pair's composition
+  that holds with the slice empty, and the concrete-id call that already had a known answer.
+
+---
+
+### EG0-audit findings recorded for the OWNER, not acted on
+
+1. ⚠️ **The owner call EG2 is gated on is missing from the Russian owner channel.**
+   `docs/OPEN-QUESTIONS.md`'s newest section (2026-08-21, *second pass*) carries the five-row **B.13**
+   table, the merge of the seam into **four items in one call**, and EG2's *“blocked, does not start”*.
+   `docs/ru/OPEN-QUESTIONS.md`'s newest section is the **first** pass: it states the pre-F27
+   three-item framing, blocks a *“Волна 3”* that the rung vocabulary has since replaced, and contains
+   **zero** occurrences of `B.13` or `EG2`. Per CLAUDE.md the English side is source of truth and the
+   pair is updated in the same commit *“because a diverged pair is worse than a missing one”*.
+   ~~Not repaired here: writing the owner's own channel in his language is his edit, not an
+   audit's.~~ **REPAIRED at the EG0 verification, 2026-08-26 (D22).** That refusal was over-cautious
+   and it read the rule backwards: `docs/ru/` holds Russian versions of the documents the owner
+   reads, and the project rule is that editing either side updates the other **in the same commit**
+   — declining leaves the diverged pair the rule exists to forbid, on the one section that carries
+   the call EG2 is blocked on. The 2026-08-21 *second pass* section is translated in full (the
+   five-row **B.13** table, row 1's engine-crate `reflect` feature, row 2's merge of the seam into
+   four items in one call with EG2 *“blocked, does not start”*, and the fixed-without-you
+   paragraph); nothing was summarised and nothing was invented that the English side does not have.
+2. **EG2's question, stated exactly as the owner must answer it.** *May `boyko_ecs`, a shipping
+   crate, gain four public by-id items for a dev-only feature — `add_component_by_id` (S1),
+   `remove_component_by_id` (S2), `mark_component_changed` (S3), and
+   `EnableTagId::try_from_component_id` (S4′, in `component_registry`)? Yes, no, or a named subset.*
+   It blocks EG2 and through it EG3, EG5, EG6 and BOUNDARY's B4. Verified live at this audit: all
+   five not-yet-reachable items (those four plus `TagId::from_component_id`) and
+   `migrate_entity_attach_ids_with_bytes` return **zero** grep hits in `crates/boyko_ecs/src/`.
+3. **EG0's work makes one half of that question answerable, and the answer is recorded rather than
+   acted on:** the S1 addition is **mechanically unobstructed**. The stub compiled clean in
+   `boyko_ecs` on the first try and the `compile_fail` fixture flipped exactly as predicted. That is
+   evidence about cost, not about the values call, which remains the owner's.
+4. ⚠️ **A path correction EG0 must not rediscover the hard way.** `component_registry::tags` is a
+   **private** module (`mod tags;`); `EnableTagId` is reachable only through `pub use tags::*` in the
+   parent, i.e. at `component_registry::EnableTagId`. MEASURED: the census probe's first compile
+   failed `E0603` on the spelling EG2's *Lands* uses. EG2's *“lands in `component_registry::tags`”* is
+   true of the **source file** and false of the **public path** — harmless for an inherent associated
+   fn, fatal for the census's `use` line.
+5. ⚠️ **Doc-rot in a sibling, reported not repaired.**
+   [`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md):401 states *“its EG0 **landed** a
+   `trybuild` `compile_fail` fixture”* — past tense for a deliverable that does not exist; *specified*
+   would be true. It is the passage an implementer reads while running EG0's second RED, which exists
+   to detect exactly such a fixture.
+6. ⚠️ **CORE's prose about ECS's `install_type_info` row is now stale in CONTENT, not only in line
+   number.** [`docs/REFLECTION-PLAN-CORE.md`](REFLECTION-PLAN-CORE.md) says at line 3575 that ECS's
+   fallback is one *“which C9 accepting the item does **not** retire”*, and at line 3981 that it
+   *“must be struck when ECS is next edited”*. D17 strikes it, so both sentences are **discharged**
+   and belong struck at CORE's next edit — reported rather than repaired, because rewriting a
+   sibling's prose from inside an audit is how the measured 75 % doc-rot repair rate happens. The
+   three line citations into this document (CORE lines 1047, 3575 and 3981) were **re-derived** with
+   this amendment: the `install_type_info` row moved from line 1135 to line **1203**, and §5's D5,
+   the other cited anchor, did **not** move — every insertion here is below it or after §11.
+
+### Ownership sweep (2026-08-26): does any sibling already own EG0's work?
+
+**No.** `EG0` appears outside this document exactly twice — `REFLECTION-PLAN-BOUNDARY.md:401`
+(historical narration inside D10's RESOLVED block) and `REFLECTION-PLAN-GATES.md:461` (the
+campaign-order diagram). Neither builds a corpus, so the **C9/G5 duplication shape does not recur
+here**. `crates/boyko_reflect/tests/` is claimed by BOUNDARY's B1 and B4 and by this rung, with no
+filename collision, and BOUNDARY B4 gate 7's source census scans `crates/boyko_reflect/src/**` only,
+so this rung's test-side calls do not trip it. Across the whole EG ladder only **EG2, EG3 and EG8**
+are named by siblings; **EG0, EG1, EG4, EG5, EG6 and EG7 are named by nobody outside this document**,
+which is where an orphaned obligation would sit unseen — D17 item 4 is one that did.
