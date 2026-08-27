@@ -630,6 +630,214 @@ and a field that is never asserted is the dead-datum class this campaign has fiv
 
 ---
 
+### D20 — `StrFixture` is B7's, not B0's, and the reason is a compile, not a preference
+
+B0's Lands carried `StrFixture { s: String }` with the parenthetical *"unused until the `Str`
+rungs"*. That defence does not apply: a `#[component(reflect)]` item is **classified at
+declaration**, so declaring the type is what reds, not using it — and because the fixtures are one
+module, the red takes both B0 binaries with it, on a leg this ladder's preamble makes mandatory
+(*"for `reflect-fixture`, **both** feature legs"*).
+
+MEASURED 2026-08-27, worktree `D:/wt/reflect` @`087833c1`, `rustc 1.97.1`, on exactly B0's
+declaration:
+
+```text
+cargo test -p reflect-fixture --features reflect-fixture/reflect --test <probe>
+error[E0277]: the trait bound `String: Reflect` is not satisfied
+  --> pub s: String,
+  = note: this error originates in the derive macro `Component`
+EXIT=101
+```
+
+Mechanism: `is_nested_path` (`crates/boyko_macros/src/reflect.rs:436`) returns true for **any**
+argument-free path, so a bare `String` classifies as `Nested` — it never reaches the spanned
+`Opaque` refusal, which is where `Vec<u32>` goes because that path *has* generic arguments — and
+the nested arm bakes `<String as ::boyko_reflect::Reflect>::TYPE_INFO`. No `impl Reflect for
+String` exists; `ValueKind::Str` is a variant with no derive arm behind it, and the arm is **CORE
+C11's**, which has not landed.
+
+⚠️ **The obvious remedy is a trap.** Adding `#[reflect(skip)]` makes it compile —
+`crates/boyko_macros/src/reflect.rs:453`'s `skip` arm short-circuits classification to `Opaque` with all four
+accessor slots `None` — and thereby plants B7's own subject in the wrong shape six rungs early,
+where nothing observes it. That is the dead-datum class by construction. The fix is the move.
+
+⚠️ **`StrFixture` is claimed by THREE plans and owned by none — found by sweeping the ARTEFACT,
+which the name sweep for `B0` could not see.** `REFLECTION-PLAN-CORE.md:3811` says C11's *"fixture
+is local (`struct StrFixture { s: String }`)"*; `REFLECTION-PLAN-ECS.md:1218` puts *"a locally
+declared `StrFixture { s: String }`"* on EG8's acceptance entity and asserts its alloc pair at EG8
+gate 3; and B0 landed it. **This document's copy is now B7's**, whose prerequisite is the rung that
+makes the type expressible. The other two are *uses* of a fixture in their own packages, not a
+second declaration of this one — and that is the distinction the campaign's "sibling plan already
+owns your rung" class turns on.
+
+### D21 — Every fixture carries an explicit `stable_name`, in ONE `#[component(…)]`
+
+Two defects in one line of B0.
+
+**(a) Five of six types had no explicit key.** `Component::stable_name()` defaults to
+`std::any::type_name::<Self>()`
+(`crates/boyko_ecs/src/ecs/core/component/component.rs:185`), which embeds the **test binary's own
+crate name**. `boundary_roundtrip.rs` and `boundary_id_reorder.rs` are separate crates, so a
+`mod fixtures;` type is `boundary_roundtrip::fixtures::T` in one and
+`boundary_id_reorder::fixtures::T` in the other — the two halves of a two-binary, **name-keyed**
+instrument would not agree on a single key. MEASURED 2026-08-27 in the same run:
+
+```text
+BASE     Decoy stable_name = zz_b0_probe_base::Decoy
+REORDER  Decoy stable_name = zz_b0_probe_reorder::Decoy
+BASE/REORDER  Pod3 stable_name = reflect::fixture::Pod3     (the one explicit attribute)
+```
+
+D18's prologue is sorted by stable name, so B5 gate 2's *"byte-identical to the committed blob"*
+would have reded on a **key** difference with nothing to do with ids — the exact confound that gate
+exists to exclude. **B5's Lands, instrument half**, already asserted *"Every type carries an
+explicit `#[component(stable_name = …)]`"*; B0 is the rung that lands them, and it landed one.
+(This read `B5:1078` as written, and that number was **already stale when B0 opened** — the D20–D26
+insert above moved B5 by some 270 lines. A bare `B5:N` names no file, so
+`tests/internal_docs_anchors.rs` cannot see it, cannot red on it, and cannot be relied on to catch
+the next drift either. Replaced with the rung-and-section name, which does not move; re-derived by
+reading the site, 2026-08-27.)
+
+**(b) It is one attribute, not two.** B0 read as `#[component(reflect)]` **plus**
+`#[component(stable_name = "…")]`. MEASURED — that does not compile:
+
+```text
+error: duplicate #[component(...)] attribute; combine all hooks into one
+  --> #[component(stable_name = "reflect::fixture::Pod3")]
+```
+
+The derive parses one `#[component(…)]` list (`crates/boyko_macros/src/component.rs:744~` names the
+accepted key set); the form is `#[component(reflect, stable_name = "…")]`.
+
+### D22 — B0's gate was one-sided, read an artefact five rungs downstream, and had no place to put it
+
+Three failures of the same instrument, corrected together.
+
+**(a) The constant was on B5's Lands.** B0's only gate reads `CAPTURED_POD3_ID`, and B5's **Lands**
+created it (*"written by the capture, read by the reorder binary"*). The first rung of the ladder
+cannot write its gate against the sixth rung's artefact; and the two binaries are separate
+processes, so no runtime capture crosses between them — the value must be *committed*. `ids.rs` is
+therefore B0's, with a stated capture procedure.
+
+**(b) One `assert_ne!` is not a gate.** Against a committed constant it passes for essentially every
+value of that constant, and B0 specified **no assertion at all** for `boundary_roundtrip.rs` — a
+`running 0 tests` binary, the first of the four vacuity routes this campaign has measured, in the
+rung whose stated purpose is to prevent exactly that. Nothing pinned the constant to a value any
+binary observes, so a drifting capture ordering leaves B0 green while B5's blob was captured at an
+id no longer in play. The discriminating pair is `assert_eq!` in the capture binary **beside** the
+`assert_ne!` in the reorder binary.
+
+**(c) The file cannot be a top-level `tests/*.rs`.** `crates/reflect_fixture/Cargo.toml:12-13~`
+disables `autobins` and `autobenches` — **not `autotests`** — so `tests/acceptance_ids.rs` would be
+its own auto-discovered test target: a const-only binary printing `running 0 tests`, and not
+`mod`-includable by the other two. Same hazard one level up: the fixture module must be
+`tests/fixtures/mod.rs`, never `tests/fixtures.rs`.
+
+**(d) `PermA`/`PermB` were on no Lands list anywhere.** They exist only inside B5 gate 4's prose,
+are `#[component(reflect)]` types, and must live in the module B0 creates. Added to B0's Lands.
+
+### D23 — B0's headline RED cannot fire, and the repair beside it is what disarmed it
+
+Recorded at the rung; restated here because the *shape* is the finding. `K = 0` was called *"the
+rung's entire point"*, and it is green: the budget clause — a later repair — mints a probe tag
+ahead of the fixtures, and the prelude also touches `Decoy`, so the shift is `2 + K` and never
+zero. MEASURED: `assert_ne!(2, 0)`.
+
+The general lesson is worth more than the fix: **a parameter cannot be the subject of a gate
+written in terms of that parameter.** Every candidate repair of the form
+`assert_eq!(id, CAPTURED + PRELUDE_COST + K)` moves with `K` and is equally blind. The observable
+that *does* depend on the thing this harness exists to prove is **whether the prelude ran before
+the first touch** — so that is what the corrected RED mutates, and it doubles as the only
+mechanical enforcement of the rung's "every test calls the prelude first" discipline.
+
+⚠️ **AMENDED AT LANDING (2026-08-27) — the sentence above that reads *"nor is the fix a cleverer
+assertion"* is REFUTED, by measurement, and the lesson beside it survives intact.** The quantifier
+is what was wrong: an assertion written *in terms of `K`* is `K`-blind, but an assertion written
+against a **`K`-free committed constant** is not. `K`'s effect on the world is not the size of the
+shift; it is whether the two processes' fixture id sets **overlap**, and that is a property of the
+reorder run against `CAPTURED_FIXTURE_IDS`, which does not move with `K`. The landed reorder gate
+therefore asserts set-disjointness beside the `assert_ne!`, and `K = 0` **does** red — MEASURED
+2026-08-27, `rustc 1.97.1`, on the landed code:
+
+```text
+K = 0   →  reorder ids [2, 3, 4, 5, 1, 6, 7, 8]  vs captured [0..=7]
+           assert_ne!(2, 0)                → PASSES  (D23's original measurement, reconfirmed)
+           set-disjointness clause         → REDS: "fixture `Pod3` minted at id 2 here,
+                                              which is an id the CAPTURE process also used"
+```
+
+So `K` ends up with three distinct reds and no blind range: too small reds the disjointness clause,
+too large reds the budget clause, and a prelude that did not run reds the `assert_ne!`. What
+remains true — and is the part worth carrying forward — is that **the disarmed red was disarmed by
+a repair, and the repair's author could not see it**; the escape was not cleverness about `K` but
+changing the subject to a constant `K` cannot move.
+
+### D24 — The tuple-struct wire caveat, and the fixture that demonstrates it
+
+`REFLECTION-PLAN-CORE.md:22` opened this as a **delegated debt on 2026-08-21** and dated it: *"BOUNDARY
+owes the paragraph before its first `Sink` rung lands"* — that is **B1**, the rung after B0. Paying
+it here.
+
+**The caveat.** The wire is keyed by field **name** (D6/D8), and the derive names a tuple struct's
+fields `"0"`, `"1"`, … So for a tuple struct **by-name resolution is by-position resolution**, and
+the refactor stability this plan advertises — *"reorder the fields, the dump still applies"* — **does
+not hold for them**. Swapping two tuple fields of the same type silently swaps their values on
+apply; swapping two of different types is caught by the kind check (`set(..)` returns false,
+counted in `ApplyReport.fields_kind_mismatch`) and is therefore *loud*, which is the only part of
+the hazard v1 detects. `crates/boyko_macros/src/reflect.rs:453`'s body carries the same statement as a
+source comment — the derive said it and the plan did not.
+
+**And it had no subject here.** B0's declared set was all named-field structs plus one enum; the
+plan's only tuple struct was B5's dogfood `Name`, and the dogfood half is deleted outright by an
+owner "no" on B.13 #1. A caveat whose sole demonstrator an owner call can delete is a caveat with
+no gate, so B0's Lands gains `PosPair(u32, u32)` in the instrument half, where nothing is
+owner-contingent. MEASURED 2026-08-27 on the amended Lands set: `PosPair`'s baked field names
+read `["0", "1"]`, and `PermA`/`PermB`'s first field names genuinely differ (`a` vs `b`) — the
+precondition B5 gate 4 requires and the substance of this caveat, both read off a run rather
+than argued.
+
+### D25 — The panic B0 named three times is not the panic this code path can reach
+
+`EcsMaster::register_tag` turns a `None` into **`register_tag_exhausted_panic`**
+(`crates/boyko_ecs/src/ecs/core/ecs_master/tag_api.rs:68~`, defined at `:245`).
+`register_enable_tag_exhausted_panic` is a different function
+(`crates/boyko_ecs/src/ecs/core/ecs_master/enable_tag_api.rs:221`) reached only from
+`register_enable_tag` — an API this harness never calls. A whole-tree grep for `exhausted_panic`
+returns exactly those four lines.
+
+The name appeared at three sites, and the third is why this is not a typo: it was the **acceptance
+criterion of the second RED** (*"must red … **not** `register_enable_tag_exhausted_panic`"*). An
+observer running that red would truthfully report *"we did not see it"* while learning nothing,
+because that function cannot fire here under any placement of the probe. The one that could was
+unnamed. Corrected at all three sites; the mechanism itself was verified correct by measurement
+(at `K = MAX_COMPONENTS` the budget assertion fires and the panic is never reached).
+
+### D26 — The dependency table was green over CORE C10 and CORE C11, and rows 1–5 are discharged
+
+**Two missing rows.** Row 1 lists `EnumInfo` among the CORE types this plan needs, and the *type*
+does exist in `crates/boyko_reflect/src/type_info.rs` — so the row reads satisfied while the derive
+**never bakes one**. MEASURED 2026-08-27: a fieldless `#[repr(u8)]` enum yields
+`TypeKind::Opaque`, `fields = 0`, `enum_info = None`; the derive emits only
+`ValueKind::{Opaque, Prim, Array, Nested}` and there is no `Enum` arm.
+`tests/reflect_pass/fieldless_repr_enum_accepted.rs` pins this deliberately and names its
+successor. `TypeKind::Enum` is **CORE C10** and `String: Reflect` is **CORE C11**; neither is in
+CORE's completed C0–C9, and neither had a row. B2 gate 4, B5 gate 1's `FixVis` half and all of B7
+depend on them.
+
+**Rows 1–5 are discharged or part-discharged and none was marked**, so an implementer starting this
+ladder could not tell which of ten blockers were real. `REFLECTION-PLAN-ECS.md`'s own rung table
+strikes and annotates discharged edges in place (*"**LANDED — the stub is struck (D23)**"*); this
+table now does the same.
+
+**And the unblocked prefix is B0–B1–B2, not B0–B3.** Row 6 blocks B1 *and B3*, and its `_mut` half
+is ECS **EG5**, which `REFLECTION-PLAN-ECS.md:1377` blocks on **EG2** — the owner-gated rung
+(B.13 #2). The table marked only B4 as owner-blocked, which overstates how much of this ladder is
+startable. **B0 itself is genuinely independent of that gate** — no row names B0, and its fixture
+set (minus `StrFixture`) was MEASURED compiling and running green on today's tree. That is the
+reason to start here.
+
+---
+
 ## The event stream (normative)
 
 ```rust
@@ -750,38 +958,136 @@ package and must stay FFI-free). So:
 
 ### B0 — The fixture crate and the id-difference harness — size S
 
-**Lands.** `crates/reflect_fixture/tests/fixtures/` (a module, not a crate — **the  <!-- doc-path-planned -->
+**Lands.** `crates/reflect_fixture/tests/fixtures/mod.rs` (a module, not a crate — **the
 fixture package's**, per the placement rule above; every type here is
-`#[component(reflect)]` and cannot live in `boyko_reflect`'s own tests): `Pod3 { a: u32,
-b: f32, c: i16 }` with an explicit `#[component(stable_name = "reflect::fixture::Pod3")]`
-(D6); `NestPair { inner: Pod3, tail: u8 }`; `ArrPack { m: [f32; 4] }`; `FixVis`, a
-locally-declared fieldless `#[repr(u8)]` enum with **pinned** discriminants, as the
-top-level-enum case — ~~a re-export of `Visibility`~~ is not expressible here
-(`Visibility` is `boyko_scene`'s, out of this package's dependency table; the real
-`Visibility` is B5's dogfood half, in `reflect_dogfood`); `StrFixture { s: String }`
-(unused until the `Str` rungs — built last per §6.1(d)); `Decoy` (a distinct POD used only
-to prove a mis-keyed apply corrupts something).
+`#[component(reflect)]` and cannot live in `boyko_reflect`'s own tests). **`mod.rs`, not
+`tests/fixtures.rs`** — this package turns off `autobins` and `autobenches`
+(`crates/reflect_fixture/Cargo.toml:12-13~`) but **not `autotests`**, so a `tests/fixtures.rs`
+would auto-mint a test target of its own and print `running 0 tests`; a directory holding
+`mod.rs` is discovered by nothing (D22). The types:
+
+* `Pod3 { a: u32, b: f32, c: i16 }`;
+* `NestPair { inner: Pod3, tail: u8 }`;
+* `ArrPack { m: [f32; 4] }` — a **second, independent** declaration:
+  `crates/reflect_fixture/tests/c7_derive_bake.rs:162` already carries an `ArrPack` whose
+  field is named `data`. Separate `tests/*.rs` are separate crates so this is no collision,
+  but a grep for the type now returns two definitions differing only in the field name, and
+  **B2 gate 3 and B5 gate 1 read `.m`**;
+* `FixVis`, a locally-declared fieldless `#[repr(u8)]` enum with **pinned** discriminants,
+  as the top-level-enum case — ~~a re-export of `Visibility`~~ is not expressible here
+  (`Visibility` is `boyko_scene`'s, out of this package's dependency table; the real
+  `Visibility` is B5's dogfood half, in `reflect_dogfood`). ⚠️ **On today's tree `FixVis`
+  bakes `TypeKind::Opaque`, `fields = 0`, `enum_info = None`** — MEASURED 2026-08-27, and
+  pinned deliberately by `tests/reflect_pass/fieldless_repr_enum_accepted.rs`. Declaring it
+  at B0 is fine; **B2 gate 4 and B5 gate 1's variant assertions are blocked on CORE C10**,
+  which is a dependency row this plan did not carry (D26);
+* `Decoy` (a distinct POD used only to prove a mis-keyed apply corrupts something);
+* `PermA { a: u32, b: f32 }` and `PermB { b: f32, a: u32 }` — **B5 gate 4's
+  field-permutation pair, which until this edit was scheduled inside that gate's prose and
+  appeared on no rung's Lands list anywhere** (D22). They are `#[component(reflect)]` types
+  and this is the module that holds those;
+* `PosPair(u32, u32)` — the **tuple-struct** subject D24's caveat needs. Without it the
+  plan's only tuple struct is B5's dogfood `Name`, which an owner "no" on B.13 #1 deletes,
+  and the caveat would have no demonstrator at all.
+
+~~`StrFixture { s: String }` (unused until the `Str` rungs — built last per §6.1(d))~~ —
+**STRUCK, MOVED TO B7 (D20).** It does not compile today and takes the whole `fixtures`
+module — and therefore *both* B0 binaries — with it.
+
+**Every one of these carries its own explicit `#[component(reflect, stable_name = "…")]`
+— ONE attribute, not two (D21).** As written this rung gave an explicit stable name to
+`Pod3` alone and left the other five on the `Component::stable_name()` default, which is
+`std::any::type_name::<Self>()` (`crates/boyko_ecs/src/ecs/core/component/component.rs:185`,
+already recorded at §1 and by D6) and therefore embeds **the test binary's own crate name**.
 
 The **id-difference harness**: two test binaries over the same fixtures.
-* `crates/reflect_fixture/tests/boundary_roundtrip.rs` — touches fixtures directly.  <!-- doc-path-planned -->
-* `crates/reflect_fixture/tests/boundary_id_reorder.rs` — a `OnceLock` prelude that runs **before any fixture  <!-- doc-path-planned -->
+* `crates/reflect_fixture/tests/boundary_roundtrip.rs` — the **capture** binary; touches
+  fixtures directly, in the order `Pod3` first.
+* `crates/reflect_fixture/tests/boundary_id_reorder.rs` — a `OnceLock` prelude that runs **before any fixture
   `component_id()` touch**, minting `K` spacer ids via `EcsMaster::register_tag`
   (`tag_api.rs:65`; tags draw from the same `NEXT_ID` counter as `register_new`,
   `component_registry/mod.rs::register_new`), then touching `Decoy`, then the fixtures.
   Every test in the file calls the prelude first, so thread order is irrelevant. Separate
   `tests/*.rs` files are separate processes, so the two binaries cannot contaminate each
   other.
+* `crates/reflect_fixture/tests/fixtures/ids.rs` — `CAPTURED_POD3_ID` and friends,
+  ~~committed beside rung B5's golden blob~~ **landed HERE (D22)**, inside the module both
+  binaries `mod`-include, with the capture procedure stated beside them.
 
-**Gate.** `boundary_id_reorder.rs` asserts, as its first executable statement after the
-prelude, that the ids genuinely moved:
-`assert_ne!(Pod3::component_id().0, CAPTURED_POD3_ID)` where `CAPTURED_POD3_ID` is the
-constant committed beside rung B5's golden blob.
+**LANDED 2026-08-27 — the module's surface, and the one place it differs from the text
+above.** `fixtures/mod.rs` exports `touch_all()` (the canonical minting order — statement
+order *is* mint order, and it is the third RED's mutation site), `ids_by_type()` (the ids in a
+**fixed reporting order**, which calls `touch_all` itself so the two can never fuse),
+`FIXTURE_NAMES` and `FIXTURE_TYPE_COUNT`; `fixtures/ids.rs` exports `CAPTURED_POD3_ID` and
+`CAPTURED_FIXTURE_IDS`. **Minting order and reporting order are two separate array literals ON
+PURPOSE, and the reason is measured, not stylistic** — see the third RED below, which was written
+first as one function doing both and could not fire.
+
+**This rung also lands its own census bookkeeping.** B0 builds four of this document's five
+`<!-- doc-path-planned -->` paths, so the four markers come off and `PLANNED_EXACT`'s
+`("REFLECTION-PLAN-BOUNDARY.md", 5)` (`tests/internal_docs_anchors.rs:1757`) becomes `1` **in
+the same change**. Only B4's `format_divergence_ledger.rs` marker survives. Both halves are
+gated and neither substitutes for the other: a marker left on a line whose path now exists
+reds the `stale` clause, and a marker removed without the decrement reds the equality assert.
+
+**Gate.** The invocation is part of the gate (CORE D23):
+
+```text
+cargo test -p reflect-fixture --features reflect-fixture/reflect \
+    --test boundary_roundtrip --test boundary_id_reorder -- --test-threads=1
+```
+
+Both files are `#![cfg(feature = "reflect")]`, so a plain `cargo test -p reflect-fixture`
+compiles them to nothing and exits 0 — on the green side **and on every red side**. The
+output must read `running [1-9]` for **both** binaries.
+
+**The gate is TWO-SIDED, and as written only one side existed (D22).** An `assert_ne!`
+against a committed constant passes for almost every value of that constant; nothing pinned
+the constant to a value any binary actually observes, so a drifting capture ordering would
+leave it green while B5's golden blob had been captured at an id no longer in play.
+
+1. `boundary_roundtrip.rs` — `assert_eq!(Pod3::component_id().0, CAPTURED_POD3_ID)`. This is
+   the **capture endpoint**, and it is what makes `CAPTURED_POD3_ID` a measurement rather
+   than a magic number. It also stops this file being a `running 0 tests` binary at B0,
+   which as written it was: its dump → apply body is B5 gate 1 and every mechanism it calls
+   arrives at B1–B3. **Landed with a whole-vector `assert_eq!(ids_by_type(),
+   CAPTURED_FIXTURE_IDS)` in front of it**, because a pin on one slot is blind to a swap
+   among the other seven.
+2. `boundary_id_reorder.rs` asserts, as its first executable statement after the prelude,
+   that the ids genuinely moved: `assert_ne!(Pod3::component_id().0, CAPTURED_POD3_ID)`.
+   **Landed with a set-disjointness clause after it** — no fixture may mint at an id the
+   capture process also used — which is what B5 gate 3 actually depends on, and which is the
+   only assertion on this rung that can see `K` (D23's amendment).
+
+**Capture procedure for `CAPTURED_POD3_ID`.** Land the fixtures and the two binaries with
+gate 1's constant unset; run the capture binary once with `--nocapture`; write the printed id
+into `fixtures/ids.rs`; re-run. The constant is then re-derived, never edited, whenever gate 1
+reds — and gate 1 reding *is* the signal that the capture ordering moved.
+
+**`K = 7`, and it is derived rather than picked.** The capture process occupies
+`0..FIXTURE_TYPE_COUNT`; in the reorder process the probe takes id 0, the spacers `1..=K`,
+`Decoy` `K + 1`, and the remaining fixtures follow. B5 gate 3 needs `Decoy`'s reorder id to
+collide with nothing the capture used, i.e. `K + 1 >= FIXTURE_TYPE_COUNT`, so
+`K = FIXTURE_TYPE_COUNT - 1 = 7` — the smallest value that satisfies B5, and it additionally
+makes the two id **sets** disjoint. MEASURED 2026-08-27 on the landed code: capture
+`[0, 1, 2, 3, 4, 5, 6, 7]`, reorder `Decoy = 8`, `Pod3 = 9`, …, `PosPair = 15`.
+
+**Buildable as amended — MEASURED, not asserted.** 2026-08-27, worktree `D:/wt/reflect`
+@`087833c1`, `rustc 1.97.1`: the amended Lands set — `Pod3`, `NestPair`, `ArrPack`, `FixVis`,
+`Decoy`, `PermA`, `PermB`, `PosPair`, each with `#[component(reflect, stable_name = "…")]`, and
+**without** `StrFixture` — compiles and runs green under
+`cargo test -p reflect-fixture --features reflect-fixture/reflect`, `running 1 test`, ids
+`0..=7`, every `stable_name` prefixed `reflect::fixture::` in a binary whose own crate name is
+something else. B0 is **independent of the owner gate** (no §Dependencies row names it; the
+first owner-blocked rung is B3, via row 6 → EG5 → EG2), which is the reason to start here.
 
 **`K` is chosen against the remaining budget, and the budget is MEASURED, not assumed.** Dynamic tags
 draw from the **same** 512-id `NEXT_ID` counter as every typed component
 (`component_registry/tags.rs` → `try_register_dynamic`), and `try_register_tag_by_name` returns
 `None` once `NEXT_ID >= MAX_COMPONENTS`, which `EcsMaster::register_tag` turns into
-`register_enable_tag_exhausted_panic`. A `K` picked by eye works until a future test-binary link
+~~`register_enable_tag_exhausted_panic`~~ **`register_tag_exhausted_panic` (D25 — the wrong
+function was named at all three of this rung's sites, one of them a red's acceptance
+criterion)**. A `K` picked by eye works until a future test-binary link
 order pushes this binary's registrations past 512 — and then it panics in a kernel function whose
 name mentions neither reflection nor this test, and nobody connects the two.
 
@@ -794,27 +1100,102 @@ let budget = MAX_COMPONENTS - probe - 1;
 assert!(K + FIXTURE_TYPE_COUNT <= budget,
         "B0's spacer count K={K} plus {FIXTURE_TYPE_COUNT} fixture types exceeds the {budget} ids \
          left in this binary's shared 512-id budget (probe landed at {probe}). Lower K, or split \
-         this test binary — do NOT let it reach register_enable_tag_exhausted_panic, whose message \
+         this test binary — do NOT let it reach register_tag_exhausted_panic, whose message \
          names neither reflection nor this harness.");
 ```
+
+MEASURED 2026-08-27 in this worktree under `rustc 1.97.1`: `probe = 0`, `budget = 511` — the
+arithmetic `MAX_COMPONENTS - probe - 1` is off by none (the probe burns id 0; ids `1..=511`
+remain), and `MAX_COMPONENTS` is `pub` (`component_registry/mod.rs:61`) so the snippet is
+compilable from this external crate.
 
 `K` is then the smallest value that satisfies B5's needs, not the largest that fits: the assertion
 exists to make exhaustion a **named** failure, and the message is the deliverable.
 
-**RED MUTATION.** Set `K = 0` in the prelude. The `assert_ne!` reds. *This is the rung's
-entire point*: without it, every later "survives an id reorder" claim is a gate that
-passes because there was no reorder — the failure this campaign has recorded five times.
+**RED MUTATION.** ~~Set `K = 0` in the prelude. The `assert_ne!` reds.~~ **STRUCK (D23) — IT
+DOES NOT RED, AND THE REPAIR BESIDE IT IS WHAT DISARMED IT.** MEASURED 2026-08-27 in this
+worktree under `rustc 1.97.1`, over two throwaway binaries reproducing exactly these two
+shapes (built, run, deleted; `git status --porcelain` empty afterwards):
+
+```text
+BASE     Pod3=0 NestPair=1 ArrPack=2 FixVis=3 Decoy=4
+REORDER  probe=0 budget=511 → Decoy=1, Pod3=2, NestPair=3, ArrPack=4, FixVis=5   (K = 0)
+GATE     assert_ne!(2, 0) → true → PASSES
+```
+
+The prelude carries **two `K`-independent id consumers** ahead of the fixtures: the
+`__reflect_b0_probe` tag the budget clause mints, and the `Decoy` touch. The shift is `2 + K`
+and is non-zero at *every* `K`, so the mutation changes nothing the assertion can see. The
+budget clause is the LATER repair, and it is what introduced the probe — **the repair
+disarmed the red it was written beside**, which is this campaign's "gate that cannot fail"
+class arriving through the fix rather than through the original.
+
+~~Nor is the fix a cleverer assertion.~~ **`K` cannot be its own gate's subject**: any assertion
+written in terms of `K` — `assert_eq!(id, CAPTURED + 2 + K)` included — moves with `K` and is
+`K`-blind by construction. `K` is a *tuning knob* for how large the shift is (B5 gate 3 needs
+`Decoy`'s reorder id to collide with nothing the capture used); the thing the `assert_ne!`
+proves is that **the prelude ran before the touch**.
+
+⚠️ **AMENDED AT LANDING — the struck sentence was too strong (D23's amendment).** An assertion
+written against the **`K`-free** committed vector *is* `K`-sensitive, because what `K` controls is
+whether the two processes' id sets **overlap**. The landed reorder gate carries that clause, and
+`K = 0` reds on it. MEASURED 2026-08-27 on the landed code: reorder ids
+`[2, 3, 4, 5, 1, 6, 7, 8]`, `assert_ne!(2, 0)` **passes** (the measurement above, reconfirmed),
+and the disjointness clause **reds** naming `Pod3` at id 2. Everything else in this block stands:
+the shift is `2 + K`, the `assert_ne!` is blind to `K`, and the probe that disarmed the original
+red was introduced by a later repair.
+
+**RED MUTATION (corrected).** Delete the `prelude()` call from the reorder test's body — or
+move it after the first `component_id()` touch. The reorder binary then mints in the capture
+binary's order, `Pod3` lands on `CAPTURED_POD3_ID`, and the `assert_ne!` reds. That is the
+real failure mode, *and* it is the only mechanical check on this rung's "every test in the
+file calls the prelude first", which is otherwise a discipline claim with no enforcement: a
+future test that touches a fixture without calling the prelude mints that fixture's id ahead
+of the spacers and silently weakens the reorder — the dump still round-trips and only the
+shifted-id premise is gone.
+
+**Third RED, for gate 1 (the capture endpoint, new at D22):** change the capture binary's
+touch order so `Decoy` precedes `Pod3` — landed, this is `fixtures::touch_all`'s statement
+order. `assert_eq!` reds in `boundary_roundtrip.rs`, and the
+reorder binary stays green — which is exactly the asymmetry that proves the two assertions are
+reading two different endpoints and not one tautology. MEASURED 2026-08-27 on the landed code:
+capture `[1, 2, 3, 4, 0, 5, 6, 7]` vs committed `[0, 1, 2, 3, 4, 5, 6, 7]`, exit 101; reorder
+`[9, 10, 11, 12, 8, 13, 14, 15]`, exit 0.
+
+⚠️ **This red found a gate that could not fail — in the implementation of THIS rung, at
+landing, and only by being run.** The first draft had ONE function that both minted and
+returned, from a single array literal. Element evaluation is left-to-right, so that literal's
+*position* and its *evaluation order* move together: the vector it returns is
+`[0, 1, …, N-1]` for **every permutation of itself**. MEASURED 2026-08-27 — under this exact
+mutation the vector printed `[0, 1, 2, 3, 4, 5, 6, 7]` and the whole-vector `assert_eq!`
+**passed**; only the separate `Pod3`-by-name assertion reded. The repair is to split minting
+order (`touch_all`) from reporting order (`ids_by_type`), which is why the landed module has
+two array literals and says so at both of them. **The class is the campaign's own — a check
+whose subject is structurally constant — and the only thing that exposed it was running the
+red rather than reasoning about it.**
 
 **Second RED, for the budget clause:** set `K = MAX_COMPONENTS`. The **budget assertion** must red,
-with its own message — **not** `register_enable_tag_exhausted_panic`. If the panic wins the race, the
-probe is in the wrong place and the clause is decorative.
+with its own message — **not** ~~`register_enable_tag_exhausted_panic`~~ **`register_tag_exhausted_panic`
+(D25)**. If the panic wins the race, the probe is in the wrong place and the clause is decorative.
+MEASURED 2026-08-27: at `K = MAX_COMPONENTS` the budget assertion fires (exit 101) and the panic is
+never reached — the clause is correctly placed, and it was only its *discriminator* that was wrong.
 
 ### B1 — `Sink`: one trait, one method, one `dyn`, zero allocations — size M
 
 **Lands.** `trait Sink` (D2); `SinkEvent` + the `size_of <= 48` pin; `SinkError`
 (`UnsupportedKind`, `Truncated`, `Sink(u32)` for a caller code); `VecSink` over
 `&mut Vec<u8>` with the D5 encoding; the `prim::emit_*` fn-ptr library for every
-`ScalarKind`; `dump_component` for the `Prim`-only case.
+`ScalarKind`; `dump_component` for the `Prim`-only case; **and `RefusalKind` itself
+(D12's four citizens), which this Lands list did not name.**
+
+> ⚠️ **Inherited, unremedied, and B1's — not B0's.** `REFLECTION-PLAN-ECS.md:1796` recorded on
+> 2026-08-27 that `RefusalKind` is *"named **once** in the whole corpus"* — the `SinkEvent` block
+> at §The event stream — *"is landed by no rung, and its variant set is neither a subset nor a
+> superset of the `Refusal` EG1 lands"* (`crates/boyko_reflect/src/ecs.rs:63`). `SinkEvent` is
+> B1's, so the type is B1's; the **relationship between the two enums** is still undecided and B1
+> must settle it (one type, a `From`, or two with a stated reason) rather than land a second
+> refusal vocabulary silently. Verified at the B0 audit: B0's Lands and Gate carry no refusal type
+> of any kind, so the rung under construction is clear of it.
 
 **Gate.**
 1. **`dyn` census** — a test walks `crates/boyko_reflect/src/**/*.rs` and asserts the set
@@ -964,12 +1345,19 @@ stable names explicit, and the **engine-types claim** must live where the engine
 reachable (the placement rule at the head of this ladder; B.12/B.13 #1).
 
 * **Instrument half, `crates/reflect_fixture/`:** `tests/data/acceptance.rdmp` (the
-  committed golden blob) + `acceptance_ids.rs` (`CAPTURED_POD3_ID` and friends, written by
-  the capture, read by the reorder binary), over the **local** fixture entity —
+  committed golden blob) ~~+ `acceptance_ids.rs` (`CAPTURED_POD3_ID` and friends, written by
+  the capture, read by the reorder binary)~~ **— the ids file MOVED TO B0 as
+  `tests/fixtures/ids.rs` (D22): B0's only gate reads `CAPTURED_POD3_ID`, so leaving it here
+  made the first rung of the ladder depend on the sixth. A rung creating its own instrument
+  is legitimate; a rung whose gate reads an artefact five rungs downstream is not** — over
+  the **local** fixture entity —
   `{ Pod3, NestPair { inner: Pod3 }, ArrPack { m: [f32;4] }, FixVis }` plus `Decoy`. Every
   type carries an explicit `#[component(stable_name = …)]` (D6), which is what makes a
   *committed* golden blob refactor-stable — a blob pinned over engine types would move
-  whenever an engine module moved, since the engine types' keys are bare `type_name`s.
+  whenever an engine module moved, since the engine types' keys are bare `type_name`s. **B0
+  is the rung that actually lands those attributes, and as written it landed exactly one of
+  them (D21); with the other five defaulted, gate 2 below would red on a KEY difference
+  between the two binaries — the precise confound it exists to exclude.**
 * **Dogfood half, `crates/reflect_dogfood/`:** `tests/boundary_dogfood.rs` — dump → apply
   over the fixture entity ECS EG8 already builds, A.9's *corrected* shape:
   `{ Name(NameId(u32)), Transform { translation: Vec3, rotation: Quat, scale: Vec3 },
@@ -1000,7 +1388,9 @@ reachable (the placement rule at the head of this ladder; B.12/B.13 #1).
    would either miss `Pod3` or write into whatever now holds that id; the `Decoy`
    assertion turns a silent corruption into a red.
 4. **Field-permutation apply**: two fixture types `PermA { a: u32, b: f32 }` and
-   `PermB { b: f32, a: u32 }`. Dump `PermA`, `apply_component(.., PermB::component_id(),
+   `PermB { b: f32, a: u32 }` (**declared by B0, whose Lands list now carries them — until
+   D22 they lived only inside this paragraph and were owned by no rung**).
+   Dump `PermA`, `apply_component(.., PermB::component_id(),
    ..)`, assert `b == b` and `a == a` **by value**. The test **first asserts the two types'
    field indices genuinely differ** (`fields_of(PermA)[0].name != fields_of(PermB)[0].name`)
    — without that precondition it is a gate that cannot fail.
@@ -1090,7 +1480,14 @@ derive's emission → the feature-off leg of gate 4 fails to compile with an unr
 **Lands.** `SinkEvent::Str` emission (borrow, zero alloc — A.3); `set_str` on the apply
 side with A.4's raw `ptr::drop_in_place` + `ptr::write` discipline, **never** an
 intermediate `&mut String` (the `Unique`-retag-through-`SharedReadWrite` class that
-Tree Borrows caught after three critic rounds approved it).
+Tree Borrows caught after three critic rounds approved it); **and the fixture type itself —
+`StrFixture { s: String }` in `tests/fixtures/mod.rs`, MOVED HERE FROM B0 (D20)**, because
+declaring it is what needs `String: Reflect` and `String: Reflect` is **CORE C11's**, a rung
+that has not landed (CORE's completed set is C0–C9).
+
+**Prerequisite, stated because it was previously carried by no dependency row:** **CORE C11**
+(`ValueKind::Str`, `get_str`/`set_str`) must land before this rung. See the new row in
+§Dependencies (D26).
 
 **Gate.** Miri-TB under `-Zmiri-tree-borrows` on the setter — **and only after
 `REFLECTION-PLAN-GATES.md` has added BOTH Miri rows** (its D4/G4):
@@ -1143,12 +1540,14 @@ derive.
 
 | # | Needed from | What | Blocks |
 |---|---|---|---|
-| 1 | `REFLECTION-PLAN-CORE.md` | `Scalar`, `ValueKind`, `TypeKind`, `TypeInfo`, `FieldInfo`, `EnumInfo` — the boundary encodes them and adds none | B1 |
-| 2 | `REFLECTION-PLAN-CORE.md` | **`ValueKind::Array`** (B.8). Without it `[T; N]` falls to `Opaque`, A.6 makes `Opaque` a hard error, and `GpuTransform3D` is **un-derivable** — the acceptance fixture cannot be built | B2, B5 |
-| 3 | `REFLECTION-PLAN-CORE.md` | the opt-in surface. **This plan assumes A.5's `#[component(reflect)]` helper attribute and argues for it on Aether grounds (D13)** — under §2's two-derive `cfg_attr` form, `aether_lang` must emit a crate path and a feature string it cannot check | B6 |
-| 4 | `REFLECTION-PLAN-CORE.md` | `#[reflect(skip)]` and the spanned, opt-out-able `Opaque` refusal (A.6 correction). The boundary encodes `Refused(Skipped)`; the syntax is CORE's | B2 |
-| 5 | `REFLECTION-PLAN-ECS.md` | three-source enumeration **with each id kind-tagged** (B.3) — `dump_entity` needs `(ComponentId, StorageKind, ResidencyKind)`, not a bare slice | B4 |
-| 6 | `REFLECTION-PLAN-ECS.md` | `get_component_raw` / `_mut` reached through the ECS glue, incl. the dense branch (`component_api.rs:176`, `:253`, `:76`) | B1, B3 |
+| 1 | `REFLECTION-PLAN-CORE.md` | `Scalar`, `ValueKind`, `TypeKind`, `TypeInfo`, `FieldInfo`, `EnumInfo` — the boundary encodes them and adds none. **LANDED (C0–C9) — `crates/boyko_reflect/src/type_info.rs`.** ⚠️ **But `EnumInfo` the TYPE existing is not `EnumInfo` being BAKED**: the derive has no `Enum` arm and always emits `enum_info: None` (D26, MEASURED). This row read satisfied over nothing; the live edge is row 1b | B1 |
+| 1b | `REFLECTION-PLAN-CORE.md` — **NEW (D26)** | **`TypeKind::Enum` + `ValueKind::Enum` baking = CORE C10**, *not landed*. A fieldless `#[repr(u8)]` enum bakes `TypeKind::Opaque` / `fields = 0` / `enum_info = None` today, pinned deliberately by `crates/reflect_fixture/tests/reflect_pass/fieldless_repr_enum_accepted.rs`. B0 may DECLARE `FixVis`; nothing may assert a `Variant` over it | B2 (gate 4), B5 (gate 1) |
+| 1c | `REFLECTION-PLAN-CORE.md` — **NEW (D26)** | **`String: Reflect` = CORE C11**, *not landed*. Until it does, declaring `StrFixture { s: String }` is `error[E0277]` and takes the whole fixture module with it (D20) | B7 |
+| 2 | `REFLECTION-PLAN-CORE.md` | **`ValueKind::Array`** (B.8). Without it `[T; N]` falls to `Opaque`, A.6 makes `Opaque` a hard error, and `GpuTransform3D` is **un-derivable** — the acceptance fixture cannot be built. **LANDED — `type_info.rs:68` + `ArrayInfo` at `:124`; MEASURED: `ArrPack { m: [f32; 4] }` derives and runs** | B2, B5 |
+| 3 | `REFLECTION-PLAN-CORE.md` | the opt-in surface. **This plan assumes A.5's `#[component(reflect)]` helper attribute and argues for it on Aether grounds (D13)** — under §2's two-derive `cfg_attr` form, `aether_lang` must emit a crate path and a feature string it cannot check. **LANDED at C7**, together with `stable_name` — both are keys of **one** `#[component(…)]` list, never two attributes (D21) | B6 |
+| 4 | `REFLECTION-PLAN-CORE.md` | `#[reflect(skip)]` and the spanned, opt-out-able `Opaque` refusal (A.6 correction). The boundary encodes `Refused(Skipped)`; the syntax is CORE's. **LANDED at C9** — `crates/reflect_fixture/tests/c7_derive_bake.rs:219`, `tests/reflect_compile_fail/vec_field_rejected.stderr`. ⚠️ `skip` short-circuits CLASSIFICATION, so it will silence a *missing* arm as readily as an undescribable field (D20's remedy trap) | B2 |
+| 5 | `REFLECTION-PLAN-ECS.md` | three-source enumeration **with each id kind-tagged** (B.3) — `dump_entity` needs `(ComponentId, StorageKind, ResidencyKind)`, not a bare slice. **PART-DISCHARGED: sources 1+2 LANDED at EG1** (`IdKind` at `crates/boyko_reflect/src/ecs.rs:93`, `components_of_into` at `:169`); **source 3 (bitset presence) is outstanding at EG3**, which EG2 gates | B4 |
+| 6 | `REFLECTION-PLAN-ECS.md` | `get_component_raw` / `_mut` reached through the ECS glue, incl. the dense branch (`component_api.rs:176`, `:253`, `:76`). **NOT landed — `crates/boyko_reflect/src/ecs.rs` exposes only `Refusal`, `IdKind`, `IdEntry`, `components_of_into`, `display_name`.** ⚠️ **The `_mut` half is ECS EG5, which `REFLECTION-PLAN-ECS.md` blocks on EG2 — the owner-gated rung — so B3 is transitively owner-blocked too, not only B4 (D26)** | B1, B3 (**B3 owner-blocked via EG5 → EG2**) |
 | 7 | `REFLECTION-PLAN-ECS.md` — **it claims it; this is no longer "or here"** | **`EnableTagId::try_from_component_id`** = its **S4′**, landing at **EG2** under the single owner call B.13 #2 (D10's resolution note). Without it B.4's presence view is unimplementable from an external crate, and the by-name substitute writes the wrong bit | B4 |
 | 8 | `REFLECTION-PLAN-GATES.md` | **TWO Miri rows**: `-p boyko-reflect` **plain** and `-p reflect-fixture --features reflect-fixture/reflect`, each proven by landing a deliberate red first (B.9, as corrected). ~~`-p boyko-reflect` with the feature ON~~ is a cargo error — the crate has no such feature (GATES D4) | B7 |
 | 9 | `REFLECTION-PLAN-GATES.md` | the feature-off CI leg for `aether_tests`, and the `unexpected_cfgs`-under-`-D warnings` promotion this plan's D16 relies on | B6 |

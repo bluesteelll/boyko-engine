@@ -1759,7 +1759,14 @@ fn planned_paths_are_reported_and_pinned() {
         ("FEATURE_MAP.md", 0),
         ("MESHLET-VIRTUAL-GEOMETRY-PLAN.md", 0),
         ("REFLECTION-ANALYSIS.md", 0),
-        ("REFLECTION-PLAN-BOUNDARY.md", 4),
+        // 5 → 1 on 2026-08-27: rung B0 LANDED, building four of the five — `fixtures/mod.rs`,
+        // `fixtures/ids.rs`, `boundary_roundtrip.rs`, `boundary_id_reorder.rs` — and their markers
+        // came off in this same change. Only B4's `format_divergence_ledger.rs` is still unbuilt.
+        // (4 → 5 earlier the same day, BOUNDARY D22: the B0 audit moved `CAPTURED_POD3_ID` off rung
+        // B5's Lands and onto B0's, writing a repo-relative path where B5 had named
+        // `acceptance_ids.rs` with none — which is what made an always-unbuilt deliverable VISIBLE
+        // to this pin in the first place.)
+        ("REFLECTION-PLAN-BOUNDARY.md", 1),
         ("REFLECTION-PLAN-CORE.md", 0),
         ("REFLECTION-PLAN-ECS.md", 0), // 1 → 0 on 2026-08-26: EG1 built `ecs_alloc.rs`, the last marker this document carried. (2 → 1 the same day: EG0 built `seam_census.rs`.) Kept on ONE line: a bare `:1906-1941` fragment below cites this file and shifts silently.
         // 4 → 3 on 2026-08-26: CORE C9 built G5's `reflect_compile_fail.rs`, so its

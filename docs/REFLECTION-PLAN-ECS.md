@@ -1263,7 +1263,7 @@ dynamic-tag rows; re-read everything.
    **LANDED 2026-08-21, ahead of this rung and wider than it.** Add `REFLECTION-PLAN-ECS.md` and its
    three siblings to `GATED_DOCS` (`tests/internal_docs_anchors.rs:283`, which held exactly four
    documents when this rung was written, none of them a reflection plan) and give each a
-   `("REFLECTION-PLAN-*.md", 0)` row in `OVER_WAIVED_MAX` (`:1906-1941`). **What actually landed
+   `("REFLECTION-PLAN-*.md", 0)` row in `OVER_WAIVED_MAX` (`:1913-1948`). **What actually landed
    registers five documents, not four** — `REFLECTION-ANALYSIS.md` alongside the four plans — each
    with its `0` row, and it also carried the `GATES` Appendix GC caveat deletion this rung owed.
    Whether EG8 keeps a gate-6 line item is bookkeeping for the campaign owner. The gate then checks, on every `cargo test`, that every `crates/...` path these
@@ -1793,7 +1793,7 @@ named by §7, by D19, and by the census pin's own comment — three carriers, no
 EG1** among *"three sibling documents [that] say the Miri row and the real-engine dogfood are the
 same test"*; EG1 gate 1 has since been corrected to say the opposite, so only CORE C6/C10 still do —
 stale in the one place an implementer would look to find which document is wrong. (2)
-[`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md):654 declares `Refused(RefusalKind)` in a normative code block;
+[`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md):835 declares `Refused(RefusalKind)` in a normative code block;
 `RefusalKind` is named **once in the whole corpus**, is landed by no rung, and its variant set is
 neither a subset nor a superset of the `Refusal` EG1 lands. *(EG1's `Refusal` vs CORE C9's `REFUSALS`
 is **not** a collision — a runtime `#[repr(u8)]` enum in `boyko_reflect` against a `pub(crate)`

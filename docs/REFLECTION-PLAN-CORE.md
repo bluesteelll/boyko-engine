@@ -19,7 +19,7 @@
 | every refusal the derive makes (generics, packed, bitset, `Opaque`, un-`repr`'d enum) | **this file** |
 | the Nested / Opaque recursion contract and its allocation audit | **this file** |
 | entity/component enumeration · `get_field`/`set_field` glue · `add_default`/`remove` · the public by-id structural seam on `EcsMaster` · the `StorageKind`×`ResidencyKind`×dynamic-tag runtime matrix · `BUG-MIGRATE-TB-1` in the enumeration glue | [`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md) |
-| `Sink`/`Source` · the name-keyed wire · `stable_name` consumption at the wire · tuple-struct reorder caveat — ⚠️ **DEBT, opened 2026-08-21 (C7 audit): BOUNDARY does not state the caveat.** Its only tuple-struct text is [`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md):977 and it carries no "caveat" / "by-position" / "positional" sentence; B4 gate 4's reorder subjects are all named-field types, so nothing there depends on what C7 retracts. This is a delegated statement with no recipient text, not a contradiction. **BOUNDARY owes the paragraph before its first `Sink` rung lands** | [`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md) |
+| `Sink`/`Source` · the name-keyed wire · `stable_name` consumption at the wire · tuple-struct reorder caveat — ~~⚠️ **DEBT, opened 2026-08-21 (C7 audit): BOUNDARY does not state the caveat.** Its only tuple-struct text is [`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md):977 and it carries no "caveat" / "by-position" / "positional" sentence; B4 gate 4's reorder subjects are all named-field types, so nothing there depends on what C7 retracts. This is a delegated statement with no recipient text, not a contradiction. **BOUNDARY owes the paragraph before its first `Sink` rung lands**~~ **PAID 2026-08-27 at the B0 audit.** BOUNDARY's **D24** states the caveat in full — "caveat", "by-position" and "positional" all present — and it lands a tuple-struct fixture (`PosPair(u32, u32)`) on rung B0, because the plan's only previous tuple struct was B5's dogfood `Name` ([`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md):1292), which an owner “no” on B.13 #1 deletes outright | [`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md) |
 | CI legs (feature-on/off matrix) · the ship absence gate (`cargo tree` + symbol census + present control) · the Miri package allowlist · the hot-loop 0 % bench · the bevy-shaped `get_field` baseline | [`REFLECTION-PLAN-GATES.md`](REFLECTION-PLAN-GATES.md) |
 
 **Every rung below has a gate that a GATES-plan leg must actually run.** The dependency is
@@ -974,7 +974,7 @@ Five sites schedule it here and none of them is a **Lands** list: landed code
 (`crates/boyko_macros/src/reflect.rs:288`’s `parse_reflect_skip` — the comment that said *"D14's field-level `#[reflect(skip)]` lands at C9 and is
 parsed there"* has been replaced by the parser it promised), **D25**'s *"…without waiting for `#[reflect(skip)]` (C9)"*, §4's
 *"`blob: OpaqueBlob` is a D15 hard error until C9's `#[reflect(skip)]`"*,
-[`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md):1149 (which **blocks** rung B2 on it),
+[`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md):1475 (which **blocks** rung B2 on it),
 and GATES G5's `vec_field_skip_accepted` fixture. C9's Lands was a table of refusals only, and C9 is
 the **last** CORE rung (§5), so nothing downstream could pick it up.
 
@@ -1021,7 +1021,7 @@ bound and cannot be a `compile_error!`), at `crates/boyko_reflect/src/reflect.rs
 **The span.** Three census-gated documents specified three different carets for one refusal:
 this plan's C9 table said *"the `storage` key"*;
 [`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):340-347 and its §10 dependency row said *"the
-user's own type name"*; [`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md):1069-1072 said
+user's own type name"*; [`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md):1386-1389 said
 *"pins the span on `reflect`, not on the struct and not on `aether! {`"*. One emission has one span,
 and gate 1's blessed `.stderr` freezes whichever is built first, so the choice had to be made before
 the corpus. ECS's rationale is analysis B.5's Aether case, which
@@ -2439,7 +2439,7 @@ a non-fatal proc-macro warning needs the nightly-only `proc_macro::Diagnostic` (
 contains no `Diagnostic` / `emit_warning` site to model one on, and this campaign's toolchain is
 stable). (Named-field structs are recommended for anything serialized; ~~the wire consequence is
 BOUNDARY's~~ → **the wire consequence is delegated to BOUNDARY by §0's owner table (`REFLECTION-PLAN-CORE.md:22`) and
-BOUNDARY does not state it** — its only tuple-struct text is `REFLECTION-PLAN-BOUNDARY.md:977`, and it carries no "caveat" /
+BOUNDARY does not state it** — ~~its only tuple-struct text is `REFLECTION-PLAN-BOUNDARY.md:977`~~ **PAID 2026-08-27: BOUNDARY's D24 states it, and the `Name` row is now at `REFLECTION-PLAN-BOUNDARY.md:1365`** (re-derived by reading the site when rung B0 landed and moved it; the previous value `:1292` was correct on the day it was written). As written this said it carries no "caveat" /
 "by-position" / "positional" sentence at all. A delegated statement with no recipient text is a
 caveat that exists in one document's index and nowhere else; **BOUNDARY owes the paragraph, and
 §0's row is annotated to say the debt is open** — see the §0 note.)
