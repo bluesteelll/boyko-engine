@@ -889,7 +889,7 @@ rather than as a pass.
 
 ---
 
-### EG2 — the by-id structural seam in `boyko_ecs` — **size M** — **OWNER-GATED**
+### EG2 — the by-id structural seam in `boyko_ecs` — **size M** — **OWNER-APPROVED 2026-08-27**
 
 **Lands** (in `boyko_ecs`, the shipping crate — §4): `add_component_by_id` (S1) with `AddOutcome`;
 `remove_component_by_id` (S2); `mark_component_changed` (S3); **`EnableTagId::try_from_component_id`

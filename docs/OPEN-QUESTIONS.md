@@ -90,7 +90,7 @@ does *while it waits*, so nothing stalls and nothing is decided behind your back
 | # | Decision | Blocks | Plan's position while it waits |
 |---|---|---|---|
 | **1** | **NEW — may engine crates carry a `reflect` feature?** | rung 0 | proceeds on **yes** |
-| **2** | **MERGED — the by-id `boyko_ecs` seam: FOUR items, ONE call** | ECS EG2 | **blocked**, does not start |
+| **2** | **MERGED — the by-id `boyko_ecs` seam: FOUR items, ONE call** | ECS EG2 | **ANSWERED 2026-08-27: approved, all four** — see the entry at the tail |
 | **3** | `BindAccessor`: one table or two | CORE C3/C8 | proceeds on Horn 2 |
 | **4** | Aether components reflectable by default or opt-in | the Aether seam | proceeds on opt-in |
 | **5** | Build order within (B): arrays → nested → enums → `String` last | what ships first | taken |
@@ -3076,3 +3076,52 @@ pseudocode is not the same thing as recording a deviation. **Ruled 2026-08-20: c
 ERRATUM.** The second half — whether a fixture with a `k > 0` edit should exist to exercise the
 `L > 1` regime — stays open: today no shipped scene has one, so the divergence remains unmeasured in
 both directions and the shipped form's soundness rests on the derivation.
+
+---
+
+## ANSWERED 2026-08-27 — B.13 #2 (the four by-id kernel items): **APPROVED, all four**
+
+The owner approved the seam in full: **S1** `add_component_by_id`, **S2**
+`remove_component_by_id`, **S3** `mark_component_changed`, **S4′**
+`EnableTagId::try_from_component_id`. Not a subset — all four, in one call, as asked.
+
+**EG2 is unblocked**, and with it **EG3, EG5, EG6** and **BOUNDARY B4**.
+
+### What was measured before the answer, so the record shows what it rested on
+
+The owner's question was whether this costs the *shipping* build anything. Measured, controlled,
+on this machine:
+
+| | release binary | probe symbols in the image |
+|---|---|---|
+| kernel as committed | 2 656 768 B | — |
+| kernel + four uncalled `pub fn` of EG2's shape | 2 656 768 B | **0** |
+
+**Delta: 0 bytes.** The linker discards an uncalled `pub fn` entirely, and it does so *without*
+LTO — this workspace has no `[profile.release]` section at all, so release runs on Cargo's
+defaults with LTO off.
+
+⚠️ **The first attempt at this measurement lied**, reporting +69 120 B. One of the two builds had
+not recompiled the kernel. Caught by rebuilding three times from identical source and getting a
+byte-identical binary each time — the build is deterministic, so the spread was the instrument's,
+not the code's. The number above is from the controlled repeat.
+
+### The hot path, which was decided before any code
+
+**D9** already refuses the shape that would have cost something: widening
+`migrate_entity_attach_ids` with an `Option<&[&[u8]]>` parameter would put a branch in **every tag
+attach**, and would blur the ZST `debug_assert!` — which is not decoration but the statement that
+makes the byte-write-free fast path sound — into *"…unless bytes were supplied"*, which is no
+longer checkable. S1 is a **bytes-carrying sibling**, so the existing path keeps zero new branches.
+
+### The cost that IS real, stated at approval time
+
+Four `pub fn` become part of `boyko_ecs`'s permanent contract. Removing them later is a breaking
+change. That is the price of the answer, and it was named before it was given.
+
+### Not measured
+
+The delta was taken on a small fixture binary, not on the full engine. The mechanism (an uncalled
+symbol is discarded) does not depend on binary size, but the number was not re-taken there. And
+**S3 is the one of the four that adds a NEW mechanism** rather than opening an existing one —
+there is no by-id change-tick write in the kernel today.
