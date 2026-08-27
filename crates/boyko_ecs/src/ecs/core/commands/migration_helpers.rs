@@ -532,6 +532,20 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
         // mutation of `source`.
         let target_cids: Vec<ComponentId> = tgt!().component_ids().to_vec();
         for target_cid in target_cids.iter().copied() {
+            // Dense plan D2 / W1 — `component_ids()` is the RETAINED id list, NOT
+            // the archetype signature: `create_by_ids` stores it verbatim while
+            // filtering only the mask, so every non-signature-storage id
+            // (`Bitset` OR `Dense`) stays in it and owns NO per-archetype pool by
+            // construction. Skip it BEFORE the pool lookup below, through the
+            // single shared predicate (`is_signature_id` is the per-id companion
+            // of `is_signature_storage`; parity with `clone/materialize.rs`).
+            // Reachable from a PURE-TABLE entity: archetype dedup keys on the
+            // FILTERED mask, so the retained list belongs to whichever spawn
+            // minted the archetype first. For a table-only world nothing is
+            // skipped (the 0%-gate).
+            if !component_registry::is_signature_id(target_cid) {
+                continue;
+            }
             if !src!().component_ids().contains(&target_cid) {
                 continue;
             }
@@ -1042,6 +1056,20 @@ pub(crate) fn migrate_entity_remove<C: Component>(
         let mut retained_count = 0usize;
         let target_cids: Vec<ComponentId> = target.component_ids().to_vec();
         for target_cid in target_cids.iter().copied() {
+            // Dense plan D2 / W1 — `component_ids()` is the RETAINED id list, NOT
+            // the archetype signature: `create_by_ids` stores it verbatim while
+            // filtering only the mask, so every non-signature-storage id
+            // (`Bitset` OR `Dense`) stays in it and owns NO per-archetype pool by
+            // construction. Skip it BEFORE the pool lookup below, through the
+            // single shared predicate (`is_signature_id` is the per-id companion
+            // of `is_signature_storage`; parity with `clone/materialize.rs`).
+            // Reachable from a PURE-TABLE entity: archetype dedup keys on the
+            // FILTERED mask, so the retained list belongs to whichever spawn
+            // minted the archetype first. For a table-only world nothing is
+            // skipped (the 0%-gate).
+            if !component_registry::is_signature_id(target_cid) {
+                continue;
+            }
             let pool = source
                 .component_pools()
                 .get_pool(target_cid)
@@ -1251,6 +1279,18 @@ pub(crate) fn merged_archetype_id_dyn(
             "merged_archetype_id_dyn: source component ids must be canonical-sorted"
         );
         for &cid in source_ids {
+            // Dense plan D2 — the same filter the GENERIC twin
+            // (`merged_archetype_id`) already applies to its own seed. Without it
+            // this resolver copies a retained non-signature id into the union, the
+            // funnel mints a target archetype that RETAINS it (the mask is
+            // filtered, the id list is not), and every entity that later dedups
+            // into that archetype becomes a victim of the retained-walk pool
+            // lookups above — i.e. the kernel manufactures the next trap. The
+            // entity keeps its dense membership / enable bit across the table
+            // migration regardless (both stores are archetype-independent).
+            if !component_registry::is_signature_id(cid) {
+                continue;
+            }
             debug_assert!(
                 len < MAX_MIGRATION_COLUMNS,
                 "migration union exceeds MAX_COMPONENTS"
@@ -1326,6 +1366,13 @@ pub(crate) fn without_ids_archetype_id(
              calling (presence test on the source signature)"
         );
         for &cid in source_ids {
+            // Dense plan D2 — the same filter the GENERIC twin
+            // (`without_component_archetype_id`) already applies to its own
+            // `kept` set; see `merged_archetype_id_dyn` for why an unfiltered
+            // seed manufactures the next retained-walk trap.
+            if !component_registry::is_signature_id(cid) {
+                continue;
+            }
             if !removed.contains(&cid) {
                 // len < MAX_MIGRATION_COLUMNS holds: kept ⊆ source and the
                 // source set already fits the bound.
@@ -1466,6 +1513,20 @@ pub(crate) fn migrate_entity_attach_ids(
         // no scratch copy, no allocation. Attach FROM the empty archetype:
         // zero source columns ⇒ zero iterations, no pool pointers minted (O3).
         for &retained_cid in source.component_ids() {
+            // Dense plan D2 / W1 — `component_ids()` is the RETAINED id list, NOT
+            // the archetype signature: `create_by_ids` stores it verbatim while
+            // filtering only the mask, so every non-signature-storage id
+            // (`Bitset` OR `Dense`) stays in it and owns NO per-archetype pool by
+            // construction. Skip it BEFORE the pool lookup below, through the
+            // single shared predicate (`is_signature_id` is the per-id companion
+            // of `is_signature_storage`; parity with `clone/materialize.rs`).
+            // Reachable from a PURE-TABLE entity: archetype dedup keys on the
+            // FILTERED mask, so the retained list belongs to whichever spawn
+            // minted the archetype first. For a table-only world nothing is
+            // skipped (the 0%-gate).
+            if !component_registry::is_signature_id(retained_cid) {
+                continue;
+            }
             let src_pool = source
                 .component_pools()
                 .get_pool(retained_cid)
@@ -1742,6 +1803,20 @@ pub(crate) fn migrate_entity_detach_ids(
         for &retained_cid in source.component_ids() {
             if removed.contains(&retained_cid) {
                 continue; // dropped in Phase 3, not migrated
+            }
+            // Dense plan D2 / W1 — `component_ids()` is the RETAINED id list, NOT
+            // the archetype signature: `create_by_ids` stores it verbatim while
+            // filtering only the mask, so every non-signature-storage id
+            // (`Bitset` OR `Dense`) stays in it and owns NO per-archetype pool by
+            // construction. Skip it BEFORE the pool lookup below, through the
+            // single shared predicate (`is_signature_id` is the per-id companion
+            // of `is_signature_storage`; parity with `clone/materialize.rs`).
+            // Reachable from a PURE-TABLE entity: archetype dedup keys on the
+            // FILTERED mask, so the retained list belongs to whichever spawn
+            // minted the archetype first. For a table-only world nothing is
+            // skipped (the 0%-gate).
+            if !component_registry::is_signature_id(retained_cid) {
+                continue;
             }
             let pool = source
                 .component_pools()

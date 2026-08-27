@@ -1044,7 +1044,7 @@ and C8's clauses migrate into the corpus. Nothing is lost: feature off, the whol
 mechanisms at two boundaries"* is the compile-time refusal plus the release `assert!` — not three.
 
 **And the release `assert!`'s ownership claim was wrong.** C9's *"It was on no rung's list in any of
-the four documents"* is false: [`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):1501 carries it
+the four documents"* is false: [`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):1514 carries it
 against rung **EG3** with a live fallback (*"If CORE declines it, EG3 must add the check on its own
 read path and say so"*). C9 accepting the item creates a **C9 → EG3** edge and an obligation to
 retire that conditional; both are recorded in §7.4.
@@ -3572,7 +3572,7 @@ C10-independent; the window is recorded so it is not rediscovered.
 [`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):352-359 states the requirement as *"refusal is
 TWO mechanisms at TWO boundaries; neither substitutes for the other"*). ~~**It was on no rung's list
 in any of the four documents**~~ — **FALSE, corrected 2026-08-26 (D37).**
-[`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):1501 lists this exact item against rung **EG3**,
+[`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):1514 lists this exact item against rung **EG3**,
 with a live fallback clause — *"If CORE declines it, EG3 must add the check on its own read path and
 say so"* — which C9 accepting the item does **not** retire. The substantive half of the claim holds
 (no rung's *Lands* carried it), and the wrongness mattered twice: it hid the obligation to retire
@@ -3978,7 +3978,7 @@ defect.
    **And CORE now owes ECS a second install-side item: `C9` carries ECS D5's release
    `assert!(storage_kind(id) != Bitset)` inside `install_type_info` (D29, re-confirmed at the C9 audit
    under D37), so **ECS EG3 depends on CORE C9** — the last rung of this plan.
-   [`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):1501 has carried that item against EG3 all
+   [`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):1514 has carried that item against EG3 all
    along, with the fallback *"If CORE declines it, EG3 must add the check on its own read path and say
    so"*; CORE does **not** decline it, so that conditional is retired and must be struck when ECS is
    next edited, or EG3 builds the same check twice. C9's own text claimed the item *"was on no rung's

@@ -54,10 +54,10 @@ Every row was read in this worktree on 2026-08-21. The anchors are load-bearing:
 | F6 | `EcsMaster::has_component` branches `Dense → dense_contains`, else column-null. **There is no `Bitset` branch**, so it returns `false` for every enabled bitset tag. | `component_api.rs:673-702` |
 | F7 | `entity_archetype_id(e) -> Option<ArchetypeId>` is `pub` and generation-checked; `archetype_master()` is `pub`; `ArchetypeMaster::get_archetype(id) -> Option<&Archetype>` and `get_archetype_ptr(id) -> Option<*const Archetype>` are both `pub`. | `entity_query_api.rs:35`, `ecs_master.rs:575`, `archetype_master.rs:242`, `:271` |
 | F8 | `Archetype::component_ids()` is `pub`, but the **field** `component_ids` (like `columns`, `id`, `signature`) is `pub(crate)` — an external crate **cannot** write `addr_of!((*p).component_ids)`. | `archetype/archetype.rs:1411`, `:196~` |
-| F9 | ⚠️ **`migrate_entity_attach_ids` `debug_assert!`s that every added id is a ZST.** *"D9: this path skips byte-writes for `added` — sound ONLY for size-0 columns. A data component routed through here would leave its bytes uninitialized."* | `commands/migration_helpers.rs:1387-1394~` |
-| F10 | `migrate_entity_detach_ids` is **data-general** — it collects retained bytes, fires `on_replace`/`on_remove` on the dying row, and runs `drop_fn` exactly once per removed id. No ZST assertion. | `migration_helpers.rs:1635-1652~` |
+| F9 | ⚠️ **`migrate_entity_attach_ids` `debug_assert!`s that every added id is a ZST.** *"D9: this path skips byte-writes for `added` — sound ONLY for size-0 columns. A data component routed through here would leave its bytes uninitialized."* | `commands/migration_helpers.rs:1434-1441~` |
+| F10 | `migrate_entity_detach_ids` is **data-general** — it collects retained bytes, fires `on_replace`/`on_remove` on the dying row, and runs `drop_fn` exactly once per removed id. No ZST assertion. | `migration_helpers.rs:1696-1713~` |
 | F11 | The only **data** insert helper is `migrate_entity_insert<B: Bundle>(…, bundle: B)` — **generic, taking the bundle by value**. There is no by-id data attach anywhere in the tree. | `migration_helpers.rs:332-338` |
-| F12 | All five migration helpers are **`pub(crate)`**. | `migration_helpers.rs:1230, :1305, :1372, :1658, :1922` |
+| F12 | All five migration helpers are **`pub(crate)`**. | `migration_helpers.rs:1258, :1345, :1419, :1719, :1997` |
 | F13 | `EcsMaster::add_tag` / `remove_tag` are `pub` and drive the by-id migration end to end for ZSTs: inland resolve → presence test → `retag_in_place` or `merged_archetype_id_dyn` + `migrate_entity_{attach,detach}_ids` → `DeferredScopeGuard` → `drain_deferred_hook_queue`. **This is the template.** | `ecs_master/tag_api.rs:130-183`, `:200-238` |
 | F14 | `set_component_raw`'s **dense** arm bumps the slot's `changed` tick; its **table** arm does not (it memcpys through `get_component_raw_mut`). The asymmetry is documented at the fn but not resolved. | `component_api.rs:444-497` |
 | F15 | The only change-detecting write path is `get_component_mut<T>() -> Mut<'_, T>` — **generic over `T`**. `get_component_changed_tick(e, id)` is a `pub` **read**; there is no `pub` by-id **write**. | `component_api.rs:553`, `:337-379` |
@@ -245,7 +245,7 @@ not fixed here. §9 records the disposition.)*
 **STRUCK (D26): “verbatim” is wrong in FOUR places, and three of them are the difference between a specified refusal and an abort, a clobber or a leak.** `add_tag` returns `()`; S1 returns a value, and the two cannot share every arm. The corrected choreography:
 
 1. **Stale inland ⇒ `Rejected(EntityDead)`**, not `add_tag`'s silent no-op. `add_tag` genuinely no-ops (`tag_api.rs:130`) because it has nothing to say; S1's `RejectReason::EntityDead` has a **reader only if this arm produces it**, and §4's own sentence said “silent no-op on stale” two lines under the enum that forbids it.
-2. **Both refusals are decided BEFORE `merged_archetype_id_dyn`.** `storage_kind(id) ∉ {Table, Dense}` ⇒ `Rejected(NotTableOrDense)`; `residency_class(id) == Gpu` ⇒ `Rejected(GpuResident)`. D7 says *“before any pointer is taken”*; S1 needs the stronger form, because `merged_archetype_id_dyn` ends in `world.get_or_create_archetype(&combined[..len])` (`merged_archetype_id_dyn`, `migration_helpers.rs:1230`) and a `Gpu` id unioned into a CPU archetype is a **RELEASE panic at mint** — `residency_conflict_panic` (`archetype/archetype.rs:1496`), the semantic `GPU_RESIDENT ⇔ all-components-Gpu`, pinned by `create_by_ids_mixed_gpu_and_cpu_panics` (`archetype/archetype.rs:2196`). §3's `Table + Gpu` row already records the panic (D23). Placed after the merge — which is exactly where “verbatim” puts it — gate 5's specified `Rejected` becomes an abort.
+2. **Both refusals are decided BEFORE `merged_archetype_id_dyn`.** `storage_kind(id) ∉ {Table, Dense}` ⇒ `Rejected(NotTableOrDense)`; `residency_class(id) == Gpu` ⇒ `Rejected(GpuResident)`. D7 says *“before any pointer is taken”*; S1 needs the stronger form, because `merged_archetype_id_dyn` ends in `world.get_or_create_archetype(&combined[..len])` (`merged_archetype_id_dyn`, `migration_helpers.rs:1258`) and a `Gpu` id unioned into a CPU archetype is a **RELEASE panic at mint** — `residency_conflict_panic` (`archetype/archetype.rs:1496`), the semantic `GPU_RESIDENT ⇔ all-components-Gpu`, pinned by `create_by_ids_mixed_gpu_and_cpu_panics` (`archetype/archetype.rs:2196`). §3's `Table + Gpu` row already records the panic (D23). Placed after the merge — which is exactly where “verbatim” puts it — gate 5's specified `Rejected` becomes an abort.
 3. **The presence test is PER STORAGE KIND, and the signature answers for only one of them.** Table: `has_component_id` (`archetype/archetype.rs:837`), which IS `self.signature.mask().contains(id)`. Dense: **`dense_contains`** (`component_api.rs:49`, F3) — a dense id is filtered OUT of the mask by construction (`filtered_signature_mask`, `archetype/archetype.rs:314`, called from `create_by_ids`, `:326`), so the signature probe answers `false` for a dense component the entity HAS. This is EG1's measured trap (D23) reaching the write side, one rung later.
 4. **Dense ids route to `dense_insert_and_fire` (`component_api.rs:94`) only AFTER S1's own presence and length checks**, because that helper performs neither: its body is `store.insert(…)` + `mark_arch_present(…)` + an **unconditional** `on_add`/`on_insert` fire. A second call reaches `DenseStore::insert` (`component/dense/dense_store.rs:186`), whose opening statement is `debug_assert!(!self.e2s.contains(entity.get()), …)` — **debug: panic; RELEASE: a second slot is appended and `e2s` remaps to it, orphaning the old slot with its value NEVER DROPPED**, plus a duplicate `on_add`. That is gate 3's clobber and a leak, in the build an editor ships. So §4's sentence is a *prologue plus* a delegation, never a delegation.
 
@@ -395,7 +395,7 @@ a null-column test could only be reddened on a machine with a device. F21 makes 
 *Reason:* `default_in_place` may unwind — CORE bakes it as `ptr::write(p.cast::<T>(), T::default())`
 and a hand-written `Default` impl can panic. In `migrate_entity_attach_ids`, Step 2 calls
 `dst_pool.commit_units(row, 1)` **before** Step 3 advances `entity_ids` / `current_index`
-(`migration_helpers.rs:1518-1544~`). An unwind between the commit and the write therefore leaves a
+(`migration_helpers.rs:1579-1605~`). An unwind between the commit and the write therefore leaves a
 **committed, uninitialised row** that the pool's drop walk will later run `drop_fn` over. Evaluating
 first moves the entire unwind window in front of every structural change: if `T::default()` panics,
 the scratch is still uninitialised (`MaybeUninit` drops nothing) and the world is byte-for-byte
@@ -562,7 +562,7 @@ D9 requires EG2 to duplicate and the arms §4 requires it to write:
 
 | where | count | what |
 |---|---|---|
-| the duplicated `migrate_entity_attach_ids` body | **7** | `&mut *source_ptr`; `&mut *target_ptr`; `slice::from_raw_parts` over the retained row; `read_added_tick`; `read_changed_tick`; the four-call retained write block; `(*target_ptr).flags` (`migration_helpers.rs:1372`) |
+| the duplicated `migrate_entity_attach_ids` body | **7** | `&mut *source_ptr`; `&mut *target_ptr`; `slice::from_raw_parts` over the retained row; `read_added_tick`; `read_changed_tick`; the four-call retained write block; `(*target_ptr).flags` (`migration_helpers.rs:1419`) |
 | **U5**, new | 1 | the added ids' byte write |
 | S1's and S2's `add_tag`-shaped presence read | 2 | `&*inland.archetype_ptr()`, one each (`tag_api.rs:130`) |
 | S3 | 3 | the `addr_of!((*p).component_pools)` projection and `write_changed_tick` on the table arm (`component_pool.rs:1643`), and the dense arm's store through `changed_ticks_ptr` (`component/dense/dense_store.rs:611`) |
@@ -850,8 +850,10 @@ warnings land in the function's `///` at EG1, or the function is public and unga
 4. `Err(BufferTooSmall)` on a 1-slot buffer against a 3-component entity — and the buffer's
    contents are asserted **unmodified**, so a caller cannot mistake a partial fill for an answer.
    (Needs `PartialEq` on `IdEntry`; see *Lands*.) ⚠️ **The three-component subject is built with
-   `create_entity`, NOT with `add_tag`, and that is forced (D24):** `add_tag` on any entity whose
-   archetype retains a dense id panics in RELEASE inside the kernel. An exactly-sized buffer is
+   `create_entity`, NOT with `add_tag`, and that WAS forced (D24):** `add_tag` on any entity whose
+   archetype retains a dense id panicked in RELEASE inside the kernel — **fixed 2026-08-27, its own
+   kernel change; the `create_entity` route stays because the gate is about the enumeration, not
+   about which API built the subject.** An exactly-sized buffer is
    asserted `Ok` beside it, so the boundary is pinned from both sides and `>` cannot be written `>=`.
 5. `const _: () = assert!(size_of::<IdEntry>() == N)` with `N` set from the measurement.
 6. **Miri-TB** (`-Zmiri-tree-borrows`) over the whole enumeration on a world holding table + dense
@@ -928,19 +930,30 @@ rather than as a pass.
 
 ### EG2 — the by-id structural seam in `boyko_ecs` — **size M** — **B.13 #2 OWNER-APPROVED 2026-08-27**
 
-⚠️ **APPROVED IS NOT UNBLOCKED. There is a SECOND owner call — older, unanswered, and it names this
-rung in its own text (D26).** [`docs/OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md)'s **2026-08-26** entry —
+⚠️ ~~**APPROVED IS NOT UNBLOCKED. There is a SECOND owner call — older, unanswered, and it names this
+rung in its own text (D26).**~~ **BOTH CALLS ARE NOW ANSWERED — the second on 2026-08-27, and its fix
+has LANDED in the kernel; see the closing paragraph.**
+[`docs/OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md)'s **2026-08-26** entry —
 *"`add_tag` / `remove_tag` PANIC IN RELEASE on any entity whose archetype has ever hosted a dense
 component"* — closes *"I did not choose"*, and its **What it blocks** paragraph reads *"EG2 and EG6
 are built on these two functions"*. B.13 #2 did not answer it; they are different calls about the
 same two functions. The defect is release-present and it sits in the **exact loop D9 tells S1 to
-duplicate**: `migration_helpers.rs:1472~` and `:1749~` are `.expect("invariant: source hosts its own
+duplicate**: `migration_helpers.rs:1533~` and `:1824~` are `.expect("invariant: source hosts its own
 component id")` inside `for &retained_cid in source.component_ids()`, and `component_ids()` **retains
 Dense and Bitset ids** — D23, measured. That entry's option **(b)** — *"have EG2's new
 `add_component_by_id` / `remove_component_by_id` carry the filter themselves while `add_tag` /
 `remove_tag` stay broken"* — is precisely what a verbatim copy silently produces, and the entry names
-it *"worse than either"*. **This rung does not start until that entry is answered.** Its own ten
-gates cannot see the defect: every one of them is single-fixture and table-only.
+it *"worse than either"*. ~~**This rung does not start until that entry is answered.**~~ **RESOLVED
+2026-08-27: the owner chose (a), and the fix landed in `boyko_ecs` as its own change, outside this
+rung's diff.** The sweep it started with found the defect is a CLASS, not two walks: **five**
+`.expect` sites and **two** archetype resolvers — including `migrate_entity_remove`'s, whose victim
+entity, source archetype and removed component are ALL pure table. Six guards now route through
+`component_registry::is_signature_id`, gated by
+`crates/boyko_ecs/tests/retained_id_walk_pool_skip.rs` (8 tests, watched RED in both profiles first).
+S1 may therefore be written as the specified sibling of `migrate_entity_attach_ids` WITHOUT
+inheriting the panic — but it must copy the CURRENT loop, guard included; copying the pre-fix shape
+re-creates option (b) verbatim. Its own ten gates still cannot see the defect: every one of them is
+single-fixture and table-only.
 
 **Lands** (in `boyko_ecs`, the shipping crate — §4): `add_component_by_id` (S1) with `AddOutcome`;
 `remove_component_by_id` (S2); `mark_component_changed` (S3); **`EnableTagId::try_from_component_id`
@@ -981,7 +994,7 @@ That row is **3** as of this amendment, and gate 11 takes it back to **0**.
    RECORDS THE VALUE IT READS, asserted equal to the written bytes (D26).** A fire-count ledger plus
    a post-call read-back is satisfied by a sibling that fires Phase 2 *before* committing the
    payload; in `migrate_entity_attach_ids` the ordering is load-bearing and explicit
-   (`migration_helpers.rs:1574-1578~` repoints the inland so *"add / insert hooks (Phase 2) read
+   (`migration_helpers.rs:1635-1639~` repoints the inland so *"add / insert hooks (Phase 2) read
    the NEW target row"*), and reproducing it is the sibling's job, so it is the gate's subject.
 2. `add_component_by_id` on a **dense** component routes to `dense_insert_and_fire`, the archetype
    id is **unchanged** (the dense no-migration contract, `entity_archetype_id` before == after), the
@@ -1119,7 +1132,7 @@ That row is **3** as of this amendment, and gate 11 takes it back to **0**.
   and becomes a cast.
 * **NEW (D26) — the wrong-row half, which every gate above is blind to because every fixture is
   single-entity.** Pin the byte write at row `0` instead of `target.current_index`, and delete the
-  `RemoveOutcome::Swapped` inland repoint (`migration_helpers.rs:1561-1568~`). With one entity in
+  `RemoveOutcome::Swapped` inland repoint (`migration_helpers.rs:1622-1629~`). With one entity in
   each archetype the target row IS `0` and the source removal IS `Last`, so **nothing reds**. The
   gate set therefore requires a populated source (≥ 2 entities, so `Swapped` fires) and a populated
   target (so the new row is non-zero), plus an assertion that a **bystander** entity's bytes and
@@ -1320,7 +1333,7 @@ every successful write (D10, D11); the release `-> Result<(), KindMismatch>` gua
    and afterwards `components_of_into` is byte-identical to before, the entity's archetype id is
    unchanged, and a subsequent `EcsMaster` drop runs clean under Miri.
 7. `remove` of the **last** component routes the entity into the EMPTY archetype and leaves it
-   alive with zero components (the O3 contract, `migration_helpers.rs:1652-1658~`).
+   alive with zero components (the O3 contract, `migration_helpers.rs:1713-1719~`).
 8. Zero bespoke allocations on `add_default`; the `#[cold]` fallback counter is `0` on the fixture.
 9. **Miri-TB** over U4 + U5 + the whole attach/detach pair.
 10. **proptest**: random `add_default` / `remove` / `set_field` sequences over a 5-component fixture;
@@ -1904,8 +1917,8 @@ names.** Everything below was run in this worktree, not traced.
   retains a dense id.** Both `migrate_entity_attach_ids` and `migrate_entity_detach_ids` walk the
   **source archetype's** `component_ids()` — the RETAINED list, D23's own subject — and ask
   `component_pools().get_pool(cid)` for every id in it, then `.expect("invariant: source hosts its
-  own component id")` (`commands/migration_helpers.rs:1472~` for attach,
-  `:1749~` for detach). A `Dense` id is retained in that list and structurally has **no**
+  own component id")` (`commands/migration_helpers.rs:1533~` for attach,
+  `:1824~` for detach). A `Dense` id is retained in that list and structurally has **no**
   per-archetype pool, so the walk dies. It is an `.expect`, not a `debug_assert!` — release-present.
   MEASURED in a throwaway probe with **no reflection code on the stack**, both halves, and the probe
   was deleted.
@@ -1916,7 +1929,11 @@ names.** Everything below was run in this worktree, not traced.
   migration path rather than inside the glue's read.
   *Disposition:* `boyko_ecs`'s, not this campaign's — the F6 / F14 class, reported and not fixed
   here (a shipping API's behaviour, changed for reasons belonging to reflection, is the inversion the
-  directional rule exists to prevent). **But EG2 and EG6 own it in a way §9's other rows are not:**
+  directional rule exists to prevent). **RESOLVED 2026-08-27: the owner chose option (a); the fix
+  landed in the kernel as its own change, outside EG2's diff. The measurement above UNDERSTATED it —
+  the sweep found FIVE `.expect` walks and TWO archetype resolvers, and the widest victim is a
+  `remove::<C>()` on an entity that is pure table end to end.** **But EG2 and EG6 own it in a way
+  §9's other rows are not:**
   `S1` is specified as *"a bytes-carrying sibling of `migrate_entity_attach_ids`"* and `S2` as the
   already-existing detach helper made `pub` — i.e. both new seam items are built on the two broken
   walks, so `add_default` / `remove` inherit the panic unless the walk is filtered first. No §9 row
@@ -2180,7 +2197,7 @@ kernel as committed at `97737aae`; `git diff HEAD -- crates/boyko_ecs/src/` is *
 **What SURVIVED the audit, stated first because the approval rests on it.**
 
 * 🟢 **D9 holds, and the sibling is writable with the original BYTE-IDENTICAL.** Not shared: the ZST
-  `debug_assert!` (`migration_helpers.rs:1387-1394~`). Duplicated: the rest of the body. Every
+  `debug_assert!` (`migration_helpers.rs:1434-1441~`). Duplicated: the rest of the body. Every
   private helper the copy needs lives in the same module — `read_source_enable_bits`
   (`migration_helpers.rs:104`), `write_target_enable_bits` (`:129`),
   `fire_enable_column_alloc_bookkeeping` (`:162`) — and the hook / observer dispatch is already
@@ -2225,9 +2242,11 @@ Two sub-facts, because the plan's recorded cost was the wrong one:
   output to bless. The remedy is structural, and the in-tree template already exists at
   `crates/reflect_fixture/tests/reflect_compile_fail.rs:146~`.
 
-**🔴 A SECOND OWNER CALL, unanswered, that names this rung in its own text.** See the rung header.
-B.13 #2 approved four items; the 2026-08-26 `add_tag` / `remove_tag` release-panic entry closes *"I
-did not choose"* and blocks EG2 and EG6. Two channels, two calls, and the plan's header carried one.
+**🔴 ~~A SECOND OWNER CALL, unanswered, that names this rung in its own text.~~ ANSWERED 2026-08-27.**
+See the rung header. B.13 #2 approved four items; the 2026-08-26 `add_tag` / `remove_tag`
+release-panic entry closed *"I did not choose"* on option **(a)**, and the fix landed in `boyko_ecs`
+as its own change. Two channels, two calls, and the plan's header carried one — the finding that
+outlives the fix.
 
 **🔴 SIX GATES, AND EACH OBSERVED SOMETHING OTHER THAN WHAT IT CLAIMS.** The trace that found them
 asked one question per scenario — *is there an observable whose value depends on the thing the gate
@@ -2265,7 +2284,7 @@ plan's own pointer to the single list was told the rung is still blocked. Same c
 later on the approval this rung rests on, which is why it is repaired rather than reported.
 
 **Anchors, because EG2 is the first rung to edit kernel source.** Roughly ten **waived** (`:N~`)
-anchors sit in the four files it touches — `migration_helpers.rs:1387-1394~`, `:1472~`,
+anchors sit in the four files it touches — `migration_helpers.rs:1434-1441~`, `:1533~`,
 `:1518-1544~`, `:1635-1652~`, `:1652-1658~`; `component_api.rs:208~`, `:392~`, `:683-686~`;
 `component_registry/tags.rs:189-192~`; `component_registry/mod.rs:320~`, `:685-688~` — and a waiver
 keeps neither shape nor identity, so those rot **silently** on any line shift, while the unwaived

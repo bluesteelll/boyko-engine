@@ -14,7 +14,59 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
-## 2026-08-26 — ⚠️ `add_tag` / `remove_tag` PANIC IN RELEASE on any entity whose archetype has ever hosted a dense component. Found while landing ECS EG1; NOT fixed here.
+## RESOLVED 2026-08-27 (owner: option **(a)**) — ⚠️ `add_tag` / `remove_tag` PANICKED IN RELEASE on any entity whose archetype has ever hosted a dense component. Raised 2026-08-26 while landing ECS EG1; FIXED in the kernel as its own change.
+
+**RESOLVED 2026-08-27 — the owner chose (a): fixed in `boyko_ecs`, as its own change, before EG2 and
+outside its diff.** The diagnosis below stands as written. What it got wrong is the SIZE — a sweep run
+before the fix measured this as a **class, not two instances**:
+
+* **Five** `.expect` sites walk a retained id list into a per-archetype pool lookup: the two named
+  below, plus `migrate_entity_remove` Step 1, `migrate_entity_insert` Step 1, and the required-ctor
+  pass. All five are `.expect`, so all five are release-present.
+* **Two archetype RESOLVERS** — `merged_archetype_id_dyn` and `without_ids_archetype_id` — seed their
+  union / difference from the same unfiltered list, so every archetype newly minted through `add_tag`
+  / `remove_tag` RETAINED the non-signature id. The kernel was manufacturing the next victim. Their
+  generic twins (`merged_archetype_id`, `without_component_archetype_id`) already filtered, which is
+  what makes this a restoration rather than an invention.
+* **The widest victim class is wider than this entry's.** In `migrate_entity_remove` the entity, its
+  source archetype **and the removed component** are all pure table; only the remove TARGET retains,
+  and the walk over the target's list is unconditional.
+* It is not a *dense* defect but a **non-signature-storage** one — the bitset variant panics at the
+  identical site. Hence the shared predicate rather than a `matches!(.., Dense)`.
+
+**Landed:** six guards in `crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs`, each one
+`if !component_registry::is_signature_id(cid) { continue; }` — four walks plus both resolvers. Pure
+additions; not one existing line was deleted or changed. `is_signature_id` is the per-id companion of
+`is_signature_storage`, i.e. the predicate `clone/materialize.rs` and the two generic twins already
+route through.
+
+**Gated by** `crates/boyko_ecs/tests/retained_id_walk_pool_skip.rs` — 8 positive tests, watched RED
+against the unfixed kernel in BOTH profiles first (identical NAMES, identical panic sites, exit 101),
+green in both afterwards, and Miri-TB clean. Two of them observe the RESOLVER half directly, because
+a filtered walk hides an unfiltered resolver by construction: reverting only
+`without_ids_archetype_id`'s guard reds exactly that one test and nothing else — observed, not
+assumed.
+
+**What was deliberately NOT fixed, and why.** Each is a different premise with a VALUES call inside
+it, so none belongs in a change that had to be the filter restoration and nothing else:
+
+* **The required-ctor pass** (`migrate_entity_insert`, `for_each_required_id_excluding`). Its ids
+  come from `B::component_ids()`, not from a retained list. `#[require(SomeDenseComponent)]` panics
+  because the kernel has no route for CONSTRUCTING a required dense component — filtering there would
+  turn a loud panic into a silently missing component. A missing feature, not a missing filter.
+* **A bundle carrying a BITSET component** (`insert_command.rs`, `bundle_column_cache.rs`). Both
+  guard with a `Dense`-only `matches!`, so a bitset id falls through to a pool lookup and panics in
+  release; reachable from safe user code, because `#[derive(Bundle)]` accepts any `Component` field.
+  Widening the guard is not enough on its own — a bitset id must not be routed to a `DenseStore`
+  either, and what *inserting an enable tag through a bundle* should MEAN is your call, not mine.
+* **The observer-flag walks** (`archetype_master.rs`: `create_archetype`'s OBS-SEED,
+  `remove_observer`'s sibling recompute, and `debug_assert_observer_flags_consistent`). Three
+  writers, two of which read the unfiltered list while `add_observer` uses the signature mask — so
+  registering an observer for a dense component AFTER a retaining archetype exists trips the debug
+  assertion. Reconciling them means deciding which writer is canonical. Nothing dispatches wrongly
+  today: every fire loop already filters through `is_signature_id`.
+
+---
 
 Landing `components_of_into` needed a fixture entity carrying three components. The obvious route —
 `spawn_two(table, dense)` then `add_tag` — panicked, and the panic is in the kernel, not in the glue.
@@ -23,14 +75,14 @@ Landing `components_of_into` needed a fixture entity carrying three components. 
 archetype's `component_ids()`** and calling `component_pools().get_pool(cid)` for every id in it:
 
 ```
-crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs:1472
+crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs:1533
     .expect("invariant: source hosts its own component id");
 ```
 
 `component_ids()` is the raw id list the archetype was minted from, and it **retains** `Bitset` and
 `Dense` ids by the kernel's own documented design — only the signature *mask* is filtered. A `Dense`
 id has no per-archetype pool by construction, so the walk dies. `migrate_entity_detach_ids` has the
-identical defect at `migration_helpers.rs:1749`. Both are `.expect`, not `debug_assert!` — this is
+identical defect at `migration_helpers.rs:1824`. Both are `.expect`, not `debug_assert!` — this is
 **release-present**, and `add_tag` / `remove_tag` are `pub` on `EcsMaster`.
 
 **The victim class is wider than it looks, and this is the part worth your attention.** It is not
@@ -42,8 +94,8 @@ carried the dense component at all. Spawn order decides whether the program work
 **Measured**, in `D:/wt/reflect` on `feat/reflection`, in a throwaway probe with no reflection code
 on the stack (probe deleted, tree left clean):
 
-* `spawn_two(table, dense)` → `add_tag` → panic at `migration_helpers.rs:1472`.
-* the same entity built with the tag in its signature → `remove_tag` → panic at `:1749`.
+* `spawn_two(table, dense)` → `add_tag` → panic at `migration_helpers.rs:1533`.
+* the same entity built with the tag in its signature → `remove_tag` → panic at `:1824`.
 * `spawn_one(table)` → `add_tag` → fine, **when** no dense-carrying entity minted that archetype
   first.
 
@@ -3125,3 +3177,49 @@ The delta was taken on a small fixture binary, not on the full engine. The mecha
 symbol is discarded) does not depend on binary size, but the number was not re-taken there. And
 **S3 is the one of the four that adds a NEW mechanism** rather than opening an existing one —
 there is no by-id change-tick write in the kernel today.
+
+---
+
+## ANSWERED 2026-08-27 — the retained-id migration panic: **(a), fix the kernel first**
+
+The owner chose **(a)**: the retained-id filter is restored in `boyko_ecs`'s two migration walks
+as **its own change, before EG2 and outside its diff**, exactly as `REFLECTION-PLAN-ECS.md`
+prescribes for this answer.
+
+**The ballot was incomplete when the earlier approval was given, and that is recorded here rather
+than quietly fixed.** The plan claimed option (b) *"is precisely what a verbatim copy silently
+produces"*. False: (b) requires deliberately ADDING a filter, and a verbatim copy adds nothing. The
+default is an unenumerated **(d) — both broken**, which was never on the list. The owner was shown
+(d) before answering.
+
+### Re-measured at HEAD, because the original entry's probe had been deleted
+
+Three probes, written from the kernel source rather than from either document, run and deleted:
+
+| probe | profile | result |
+|---|---|---|
+| table+dense entity → `add_tag` | debug / release | **exit 101** at `migration_helpers.rs:1533:18` |
+| **table-only sibling** → `add_tag` | debug / release | **exit 101**, same site |
+| `remove_tag` on a dense-retaining archetype | release | **exit 101** at `:1824:18` |
+
+The table-only probe printed `same=true` for the two archetype ids and asserted `!dense_contains`
+before panicking — **the wider victim class is real**: dedup keys on the filtered mask while the
+retained list belongs to whichever spawn minted the archetype first. Release-present confirmed by
+execution, not by reading an `.expect`.
+
+### Two things that made (a) the answer
+
+**S2 needs no copy at all.** It is the existing detach helper made `pub`, so the approved seam as
+written would ship that helper's release panic under a new public name — and the §4 table the
+approval entry points at says of it *"exists and is correct"*.
+
+**All eleven of EG2's gates are blind to the filter's presence** — traced one by one: the dense
+gates route around migration, the table gates use table-only fixtures in fresh worlds, and the
+rejection gate refuses before the merge.
+
+### The template already in the tree
+
+`clone/materialize.rs:121` walks the same list and skips pool-less ids through
+`is_signature_storage`, whose own doc calls itself *"the single shared predicate every
+signature-exclude / pool-skip site routes through."* The two migration walks are the documented
+outlier.

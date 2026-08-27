@@ -501,7 +501,7 @@ zones stamp on which leg* — and is red-capable.
 
 ## R4.6 Residuals and the dead-datum ledger
 
-**`zone_begin_stage`'s lost gate is NARROWED, not closed.** `docs/OPEN-QUESTIONS.md:471-475` is
+**`zone_begin_stage`'s lost gate is NARROWED, not closed.** `docs/OPEN-QUESTIONS.md:523-527` is
 about the table as a whole. After DP6-0b the VB ids stand in three tiers:
 
 | tier | ids | check |

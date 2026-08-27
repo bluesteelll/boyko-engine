@@ -454,11 +454,11 @@ migration paths — counted against this ledger per the Phase-14b lesson):
 | `EcsMaster::fire_despawn_hooks` | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):691, fires 774/786 | replace, remove |
 | `SpawnAtCommand::apply` | [commands/spawn_at_command.rs](../crates/boyko_ecs/src/ecs/core/commands/spawn_at_command.rs):113, fires 374/394 | add, insert |
 | `InsertCommand::apply_replace_in_place` | [commands/insert_command.rs](../crates/boyko_ecs/src/ecs/core/commands/insert_command.rs):113, fires 176/201 | replace, insert |
-| `migrate_entity_insert` | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):332, fires 899/918 | add, insert |
-| `migrate_entity_remove` | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):980, fires 1132/1138 | replace, remove |
-| `migrate_entity_attach_ids` (Phase 22) | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1372, fires 1613/1625 | add, insert |
-| `migrate_entity_detach_ids` (Phase 22) | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1658, fires 1838/1848 | replace, remove |
-| `retag_in_place` (Phase 22) | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1922, fires 1952/1988 | replace, insert |
+| `migrate_entity_insert` | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):332, fires 913/932 | add, insert |
+| `migrate_entity_remove` | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):994, fires 1160/1166 | replace, remove |
+| `migrate_entity_attach_ids` (Phase 22) | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1419, fires 1674/1686 | add, insert |
+| `migrate_entity_detach_ids` (Phase 22) | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1719, fires 1913/1923 | replace, remove |
+| `retag_in_place` (Phase 22) | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1997, fires 2027/2063 | replace, insert |
 
 The plan's original "6 fire sites" undercounted: Phase 14a also fires at the 4
 deferred-command apply sites (rows 4–7), so observers were silent for
@@ -534,10 +534,10 @@ via the POD `AddTagCommand`/`RemoveTagCommand`
 
 **Dynamic migration (D9)** — allocation-free id-keyed helpers in
 [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):
-`merged_archetype_id_dyn` (:1230) / `without_ids_archetype_id` (:1305, maps
+`merged_archetype_id_dyn` (:1258) / `without_ids_archetype_id` (:1345, maps
 `kept.is_empty()` → the EMPTY archetype — O3) / `migrate_entity_attach_ids`
-(:1372, zero-retained attach-FROM-empty is first-class) /
-`migrate_entity_detach_ids` (:1658) / `retag_in_place` (:1922, the present-tag
+(:1419, zero-retained attach-FROM-empty is first-class) /
+`migrate_entity_detach_ids` (:1719) / `retag_in_place` (:1997, the present-tag
 replace path). All three fire hooks + observers (ledger rows 8–10 in §3.6)
 with Phase-14a §3.4 reborrow confinement. `MAX_BUNDLE_ARITY` raised 8 → 16
 (:58, lock-step with the derive and `spawn_at_command.rs`).

@@ -433,11 +433,11 @@ and (b) a null-column check that safely covers device-backed columns. It is a
 >
 > | helper | `commands/migration_helpers.rs` | visibility |
 > |---|---|---|
-> | `merged_archetype_id_dyn` | `commands/migration_helpers.rs:1230` | **`pub(crate)`** |
-> | `without_ids_archetype_id` | `:1305` | **`pub(crate)`** |
-> | `migrate_entity_attach_ids` | `:1372` | **`pub(crate)`** |
-> | `migrate_entity_detach_ids` | `:1658` | **`pub(crate)`** |
-> | `retag_in_place` | `:1922` | **`pub(crate)`** |
+> | `merged_archetype_id_dyn` | `commands/migration_helpers.rs:1258` | **`pub(crate)`** |
+> | `without_ids_archetype_id` | `:1345` | **`pub(crate)`** |
+> | `migrate_entity_attach_ids` | `:1419` | **`pub(crate)`** |
+> | `migrate_entity_detach_ids` | `:1719` | **`pub(crate)`** |
+> | `retag_in_place` | `:1997` | **`pub(crate)`** |
 >
 > That is exactly the seam `add_default` / `remove` need — and **every one of them is
 > `pub(crate)` in `boyko_ecs`, so `boyko_reflect`, an external crate, cannot call any
@@ -1905,7 +1905,7 @@ accompli.
 | # | Decision | Owner or eng.? | Blocks | Plan's position while it waits |
 |---|---|---|---|---|
 | **1** | **May engine crates carry a `reflect` feature?** (B.12) — the largest, because it decides whether v1 can inspect the engine's own components at all. Yes ⇒ `boyko_scene`/`boyko_render` gain a non-default `reflect` feature + an optional `boyko-reflect` edge, governed by B.12's C1–C6. No ⇒ v1's dogfood is fixture-local clones and the phrase "real engine types" leaves four gates. | **OWNER** (shipping manifest surface + the dogfood claim) | GATES G0/G1; CORE C6/C10; ECS EG8; BOUNDARY B5 | **proceeds on (b)**, with C1–C6 as the census rule and `reflect_dogfood` as a separate leaf package |
-| **2** | **The by-id `boyko_ecs` seam — FOUR public items, one decision.** `add_component_by_id` (S1), `remove_component_by_id` (S2), `mark_component_changed` (S3), `EnableTagId::try_from_component_id` (S4′). *Previously filed twice — as B.11 #2 and as the BOUNDARY plan's B-1 — because the fourth item was reached from two directions.* It is one call: a dev-only feature widening a **shipping** crate's public API. Each item's independent merit is stated in the ECS plan's §4 table. | **OWNER** (API surface); engineering owns the shapes | ECS EG2, and through it EG3/EG5/EG6; BOUNDARY B4 | ~~**blocked** — EG2 does not start before the answer.~~ **ANSWERED 2026-08-27: APPROVED, all four items, not a subset** (`docs/OPEN-QUESTIONS.md`, and its `docs/ru/` twin). ⚠️ **EG2 is still BLOCKED, on a DIFFERENT call:** `OPEN-QUESTIONS.md`'s 2026-08-26 `add_tag` / `remove_tag` release-panic entry closes *"I did not choose"* and its own text reads *"EG2 and EG6 are built on these two functions"*. EG1/EG4 are built against the items that already exist |
+| **2** | **The by-id `boyko_ecs` seam — FOUR public items, one decision.** `add_component_by_id` (S1), `remove_component_by_id` (S2), `mark_component_changed` (S3), `EnableTagId::try_from_component_id` (S4′). *Previously filed twice — as B.11 #2 and as the BOUNDARY plan's B-1 — because the fourth item was reached from two directions.* It is one call: a dev-only feature widening a **shipping** crate's public API. Each item's independent merit is stated in the ECS plan's §4 table. | **OWNER** (API surface); engineering owns the shapes | ECS EG2, and through it EG3/EG5/EG6; BOUNDARY B4 | ~~**blocked** — EG2 does not start before the answer.~~ **ANSWERED 2026-08-27: APPROVED, all four items, not a subset** (`docs/OPEN-QUESTIONS.md`, and its `docs/ru/` twin). ~~⚠️ **EG2 is still BLOCKED, on a DIFFERENT call:**~~ **UNBLOCKED 2026-08-27:** `OPEN-QUESTIONS.md`'s 2026-08-26 `add_tag` / `remove_tag` release-panic entry closed *"I did not choose"* on option **(a)** — the fix landed in `boyko_ecs` as its own change (five `.expect` walks + two archetype resolvers, gated by `crates/boyko_ecs/tests/retained_id_walk_pool_skip.rs`). EG1/EG4 are built against the items that already exist |
 | **3** | **`BindAccessor`: one table or two?** (B.1) — Horn 1 lets a *shipping* crate consume reflection metadata; Horn 2 duplicates the field description and buys a drift test. | **OWNER** (shipping API direction) | CORE C3/C8; the wording (not the construction) of the absence gate | **proceeds on Horn 2**, and pays its price at CORE C8 gate 5 (the `field_id(name)` ↔ reflect-index agreement test) |
 | **4** | **Are Aether components reflectable by default, or opt-in?** (B.5) | **OWNER** (DSL ergonomics) | the Aether seam only | **proceeds on opt-in.** Flip cost, stated precisely: default-on makes a `reflect` feature declaration **mandatory** in every `aether!`-bearing crate under the existing `-D warnings` gate (B.12's `unexpected_cfgs` mechanism), including crates that never asked for reflection |
 | **5** | **Build order inside (B): arrays → nested → enums → `String` last.** (§6.1(d), B.8) — changes what the first inspector can show. | **OWNER** (scope) | what the derive ships first | **taken**, and it is the order all four plans are written in |

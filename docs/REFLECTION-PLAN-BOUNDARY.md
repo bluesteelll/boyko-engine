@@ -663,7 +663,7 @@ where nothing observes it. That is the dead-datum class by construction. The fix
 
 ⚠️ **`StrFixture` is claimed by THREE plans and owned by none — found by sweeping the ARTEFACT,
 which the name sweep for `B0` could not see.** `REFLECTION-PLAN-CORE.md:3811` says C11's *"fixture
-is local (`struct StrFixture { s: String }`)"*; `REFLECTION-PLAN-ECS.md:1403` puts *"a locally
+is local (`struct StrFixture { s: String }`)"*; `REFLECTION-PLAN-ECS.md:1416` puts *"a locally
 declared `StrFixture { s: String }`"* on EG8's acceptance entity and asserts its alloc pair at EG8
 gate 3; and B0 landed it. **This document's copy is now B7's**, whose prerequisite is the rung that
 makes the type expressible. The other two are *uses* of a fixture in their own packages, not a
@@ -830,7 +830,7 @@ strikes and annotates discharged edges in place (*"**LANDED — the stub is stru
 table now does the same.
 
 **And the unblocked prefix is B0–B1–B2, not B0–B3.** Row 6 blocks B1 *and B3*, and its `_mut` half
-is ECS **EG5**, which `REFLECTION-PLAN-ECS.md:1563` blocks on **EG2** — the owner-gated rung
+is ECS **EG5**, which `REFLECTION-PLAN-ECS.md:1576` blocks on **EG2** — the owner-gated rung
 (B.13 #2). The table marked only B4 as owner-blocked, which overstates how much of this ladder is
 startable. **B0 itself is genuinely independent of that gate** — no row names B0, and its fixture
 set (minus `StrFixture`) was MEASURED compiling and running green on today's tree. That is the
@@ -1188,7 +1188,7 @@ never reached — the clause is correctly placed, and it was only its *discrimin
 `ScalarKind`; `dump_component` for the `Prim`-only case; **and `RefusalKind` itself
 (D12's four citizens), which this Lands list did not name.**
 
-> ⚠️ **Inherited, unremedied, and B1's — not B0's.** `REFLECTION-PLAN-ECS.md:1982` recorded on
+> ⚠️ **Inherited, unremedied, and B1's — not B0's.** `REFLECTION-PLAN-ECS.md:1999` recorded on
 > 2026-08-27 that `RefusalKind` is *"named **once** in the whole corpus"* — the `SinkEvent` block
 > at §The event stream — *"is landed by no rung, and its variant set is neither a subset nor a
 > superset of the `Refusal` EG1 lands"* (`crates/boyko_reflect/src/ecs.rs:63`). `SinkEvent` is
