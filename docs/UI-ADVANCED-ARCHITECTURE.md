@@ -830,7 +830,7 @@ columns.**
 /// input, because it is a different type from `UiLayout` and appears in no term of
 /// `ui_layout_discovery`'s `Or<…>` set.
 #[repr(C)]
-#[component(storage = "dense")]
+// ~~#[component(storage = "dense")]~~  — STRUCK 2026-08-27, see the amendment below
 pub struct UiVisual {
     tint_mul:  u32,       // straight RGBA8, multiplied into color at pack
     opacity:   f32,       // folded into the premultiply — zero GPU bytes
@@ -839,6 +839,20 @@ pub struct UiVisual {
     uv_shift:  [f32; 2],  // sprite-frame nudge; the flipbook writes `frame`, not this
 }                          // 32 B
 ```
+
+⚠️ **`UiVisual`'s `dense` attribute is STRUCK, 2026-08-27** — `UI-PLAN-ANIMATION.md` **AM8 / AD10**,
+folded back here in the change that lands A1, per the standing rule that a diverged pair is worse than
+a missing one. **A dense component cannot be a repaint sink through D6b** — this document's own
+general rule, written on 2026-08-21 one page below (§5.2's ⚠️ note) while amending row 1's
+`UiSpriteCursor`, and `UiVisual` was left standing in that same row and the one under it. The `Or`
+`QueryFilter` impl overrides none of the dense hooks, so a dense `Changed<C>` inside `Or<..>` returns
+`false` on `filter.rs:1483-1485`'s first line forever. MEASURED over the tick's exact
+`Mut::set_if_neq` write: a **dense** sink gives 1 row through a bare `Changed` and **0** through the
+discovery filter's `Or`; a **table** sink gives 1 through the `Or`. The symptom of the dense form is
+every animation rendering nothing, with no panic, no error and no failing assertion. The shipped tree
+had already ruled: *"Animation adds `UiVisual` HERE (a table component)"*,
+`crates/boyko_render/src/ui/gather.rs:91-93`. **`UiVisual` is a TABLE component; the four `Tween*`
+stay dense, because nothing filters them** (`AnyOf` forwards the dense hooks, `Or` does not).
 
 Per-channel tween rows, all `#[component(storage = "dense")]`, one per animatable channel:
 `TweenTint`, `TweenOpacity`, `TweenOffset`, `TweenScale`.
@@ -901,14 +915,25 @@ contend for field-wise. Left unstated, that is the kind of thing an implementer 
 
 ```rust
 Query<(
-    &mut UiVisual,
+    Mut<UiVisual>,          // ~~&mut UiVisual~~ — AM1: `&mut T` bumps no tick (2026-08-27)
     AnyOf<(&mut TweenTint, &mut TweenOpacity, &mut TweenOffset, &mut TweenScale)>,
 )>
 ```
 
-`AnyOf` carries a **≥1-member OR predicate that runs per row** (`query/data.rs:136`), so a `UiVisual`
-row with no live channel is skipped — which matters because `UiVisual` **persists after a tween
-finishes** (its final value *is* the resting appearance; removing the row would snap the element
+⚠️ **Two corrections folded back 2026-08-27 with A1** (`UI-PLAN-ANIMATION.md` AM1, AM2):
+the sink term is **`Mut<UiVisual>` written through `Mut::set_if_neq`** — `&mut T` has no change
+tracking, so as written this query would advance the sink's bytes and never advance its tick, and D10's
+own enforcement would never fire (MEASURED: `&mut` write ⇒ 0 `Changed` rows, `Mut::set_if_neq` ⇒ 1);
+and **the ≥1-member predicate does NOT skip a rested row** — the sentence below is struck.
+
+~~`AnyOf` carries a **≥1-member OR predicate that runs per row** (`query/data.rs:136`), so a `UiVisual`
+row with no live channel is skipped~~ **— struck. For a DENSE member the predicate is vacuous
+(`data/mut_.rs:239-247` returns `true` unconditionally) and `AnyOf` folds the arms with `||`
+(`data/anyof.rs:171-175`), while `dense_row_passes` is deliberately NOT forwarded
+(`data/anyof.rs:112-117`), so a rested row is VISITED and yields `(None, None, None, None)`. MEASURED:
+1 animating + 2 rested rows ⇒ 3 visits, 2 of them all-`None`. The tick therefore MUST `continue` on
+the all-`None` case before touching the sink (AD5).** — which matters because `UiVisual` **persists
+after a tween finishes** (its final value *is* the resting appearance; removing the row would snap the element
 back), so `UiVisual` rows accumulate to "every element that has ever animated" while live tween rows
 do not. And `Option<&Dense>` / `AnyOf` are explicitly non-filtering for the dense **seed**
 (`data.rs:227-228`), so the candidate archetypes come from the `&mut UiVisual` include term — the
@@ -974,6 +999,16 @@ a table column, written per frame through `Mut<_>::set_if_neq`. **The general ru
 carries: a DENSE component cannot be a repaint sink through D6b.** A subsystem wanting one either
 keeps the datum in a table column or bumps `UiRenderGeneration` at its own writer. Filed as a kernel
 defect in `docs/OPEN-QUESTIONS.md`.)*
+
+⚠️ *(**and the same rule reaches `UiVisual`, which stands in row 1's sink cell and in row 2's — applied
+2026-08-27 at the A1 pre-build audit, `UI-PLAN-ANIMATION.md` **AM8 / AD10**.** The 2026-08-21 pass
+above wrote the general rule and amended only the `UiSpriteCursor` half of the cell it was standing in,
+while D9 one page up still spelled `#[component(storage = "dense")] pub struct UiVisual`. Under that
+spelling **both rows' "repack only — the sink is a term of `ui_render_discovery`'s `Or<…>` (D6b)" was
+false**, silently. With the sink now a TABLE component (D9's attribute struck at `:833`) the two rows
+are true as written, and the second of the two "either" branches offered just above — *bumps
+`UiRenderGeneration` at its own writer* — is not available to animation at all: that resource lives in
+`boyko_render` and the tick lives in `boyko_ui`, which names no render crate.)*
 
 **The table is exhaustive over the channels v1 ships, and the scroll row is why that sentence is
 here.** Scroll is the highest-frame-rate interaction a UI has, and the original record placed it on a

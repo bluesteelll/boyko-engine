@@ -80,14 +80,20 @@ pub mod prelude {
         UiTextBuffer, UiValue, NO_FIELD,
     };
     pub use crate::anchor::{resolve_anchor_origin, AnchorOrigin};
-    pub use crate::animation::{ui_clock_tick, UiAnimationPlugin, UiAnimationSet, UiClock};
+    pub use crate::animation::{
+        start_tween_offset, start_tween_opacity, start_tween_scale, start_tween_tint,
+        stop_tween_offset, stop_tween_opacity, stop_tween_scale, stop_tween_tint,
+        ui_clock_tick, ui_tween_reap, ui_visual_tick, UiAnimationPlugin, UiAnimationSet,
+        UiClock, UiTweenScratch,
+    };
     pub use crate::bundles::{
         BarBundle, ButtonBundle, GridBundle, ImageBundle, LabelBundle, PanelBundle, UiNodeBundle,
     };
     pub use crate::components::{
-        AnchorEdge, Bar, BarFill, Button, ComputedClip, ComputedRect, ContentSize, StackIndex,
-        UiAbsolute, UiAlign, UiAnchor, UiBackground, UiGrid, UiImage, UiLayout, UiName, UiRoot,
-        UiSpacing,
+        AnchorEdge, Bar, BarFill, Button, ComputedClip, ComputedRect, ContentSize, EasingId,
+        StackIndex, TweenOffset, TweenOffsetBundle, TweenOpacity, TweenOpacityBundle, TweenScale,
+        TweenScaleBundle, TweenTint, TweenTintBundle, UiAbsolute, UiAlign, UiAnchor, UiBackground,
+        UiGrid, UiImage, UiLayout, UiName, UiRoot, UiSpacing, UiVisual, TWEEN_FLAG_VIRTUAL_CLOCK,
     };
     pub use crate::interaction::{
         register_bindable, ui_dispatch_system, ui_focus_system, ui_refreeze_fixed_snapshot,

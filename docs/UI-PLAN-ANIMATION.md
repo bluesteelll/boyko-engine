@@ -44,7 +44,7 @@ the D1 widening remain the sprites plan's rungs; this plan depends on neither.
 
 ## 1 · Amendments to the architecture
 
-~~Six~~ **Seven** statements in the authority did not survive a read of the kernel — or, for
+~~Six~~ ~~Seven~~ **Eight** statements in the authority did not survive a read of the kernel — or, for
 **AM7**, a read of the **shipped tree**, which is the same failure through a later door: the
 architecture named a default, three consumers were built, and none of them took it. They are
 corrected here at their source with the fact that forced each, per this project's standing rule that a diverged pair is
@@ -111,13 +111,31 @@ both v1:
 2. **§10.5's bench measures the wrong axis as specified.** "N ∈ {8, 64, 512} animating rows" cannot
    see this cost at all. The bench needs a **second axis: the resting population** — see §4.
 
-**The cost model, corrected.** `Mut<UiVisual>` is a dense include, so candidates are seeded from the
+~~**The cost model, corrected.** `Mut<UiVisual>` is a dense include, so candidates are seeded from the
 store's `arch_presence` (`state.rs:126-137`, `dense_store.rs:377`) — but seeding is **per archetype**,
 and within a seeded archetype **every row is visited** and rejected by `dense_row_passes`
-(`iter.rs:550-559`). Animated and un-animated panels share an archetype in any real UI. So:
+(`iter.rs:550-559`). Animated and un-animated panels share an archetype in any real UI. So:~~
 
-> per frame ≈ (rows in archetypes hosting ≥1 `UiVisual`) × 1 sparse-map probe
-> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;+ (`UiVisual` rows) × 4 further probes (one per `AnyOf` arm, inside `fetch`).
+> ~~per frame ≈ (rows in archetypes hosting ≥1 `UiVisual`) × 1 sparse-map probe~~
+> ~~+ (`UiVisual` rows) × 4 further probes (one per `AnyOf` arm, inside `fetch`).~~
+
+**Struck 2026-08-27 at the A1 pre-build audit — the whole formula rests on a storage kind AM8 has
+now refused.** The paragraph reads correctly *for a dense sink*, and a dense sink is exactly what
+makes every animation invisible (**AM8**, MEASURED). Under the table sink AM8 mandates, `Mut<UiVisual>`
+contributes an **include bit** — the dense early-return in `aggregate_include` is not taken
+(`data/mut_.rs:250-256`) — so only archetypes that *carry* `UiVisual` are candidates and there is no
+per-archetype bystander term at all. **The corrected model:**
+
+> per frame ≈ (`UiVisual` rows) × 4 dense `slot_of` probes (one per `AnyOf` arm, inside `fetch`).
+> The sink itself costs a **column offset**, not a probe.
+
+MEASURED (A1 pre-build audit, leg L3b): a world of 2 sink rows plus 2 bystanders carrying only the
+shared table marker — which under a *dense* sink would sit in the **same** archetype and be walked —
+yields **2** visits under a table sink, because the bystanders are in a different archetype and are
+never seeded. **Consequence for §4/A8: the bystander axis is structurally empty and is struck there
+too.** Consequence (1) above — the all-`None` `continue` — **survives unchanged**: MEASURED, a rested
+row is still visited and still yields `(None, None, None, None)` under a table sink (leg L3b, 2 visits
+over 2 channel-less rows).
 
 That is the number §4/M2 must report, and it is not the number the architecture's §10.5 asks for.
 
@@ -236,6 +254,53 @@ while its own body six lines down picks `Time::delta_secs()`, the virtual one. A
 one decision, and the half a reader takes on trust is the heading. **Repaired in the same change
 as this amendment** — the heading is struck and the body's "D15's default applied here" justification
 replaced by AD9's rule; the DECISION it always made is unchanged, only its stated reason was wrong.)*
+
+### AM8 — D9 declares `UiVisual` **dense**, and D10 makes it a term of `ui_render_discovery`'s `Or<…>`; those two cannot both be true
+
+*(added 2026-08-27 at the A1 pre-build audit. This is the amendment A1 cannot land without — it is the
+one statement in the authority whose failure mode is a **frozen picture with no panic, no error and no
+failing assertion**.)*
+
+D9 spelled the sink `#[component(storage = "dense")] pub struct UiVisual`
+(`UI-ADVANCED-ARCHITECTURE.md:833-834` — **the attribute is struck there in the same change as this
+amendment**). D10's tier table then says of the same type: *"the sink is a term of
+`ui_render_discovery`'s `Or<…>` (D6b)"* (`:986`, `:987`).
+
+**A dense `Changed<C>` inside `Or<..>` can never be true.** The `Or` `QueryFilter` impl
+(`filter.rs:1813` macro, `1833` impl) overrides **none** of the dense hooks — `grep` over its whole
+body, `filter.rs:1830-2035`, returns zero hits for `HAS_DENSE`, `HAS_DENSE_INCLUDE`, `resolve_dense`,
+`dense_include_candidates` — so `HAS_DENSE` takes the trait default `false` (`filter.rs:155`), the
+cursor's `if const { F::HAS_DENSE }` dense-resolution arm (`iter.rs:188`) is never emitted, the inner
+term's store pointer stays the `init_fetch` NULL, and `Changed::filter_fetch`'s dense arm returns on
+its first line, `if fetch.dense.is_null() { return false; }` (`filter.rs:1483-1485`).
+
+**MEASURED at this audit, over AD5's *exact* write** (`Mut<sink>::set_if_neq`, one changed field),
+with the discovery filter's own shape `Query<(), Or<(Changed<Marker>, Changed<Sink>)>>`:
+
+| sink storage | bare `Changed<Sink>` | the same term inside `Or<..>` |
+|---|---|---|
+| **dense** | **1** | **0** |
+| **table** | — | **1** |
+
+The architecture already carries this rule — *"a DENSE component cannot be a repaint sink through
+D6b"* (`UI-ADVANCED-ARCHITECTURE.md:998-999`) — and it was written on 2026-08-21 while amending **row 1's
+`UiSpriteCursor`**. `UiVisual` stands in that same row and in the row below it, and D9's `dense`
+attribute was never touched. The shipped tree had already ruled the other way and said so at the
+macro that owns the promise: *"Animation adds `UiVisual` HERE (a table component — **the animation
+plan's own text is corrected to say so**)"* — `crates/boyko_render/src/ui/gather.rs:91-93`. **It was
+not.** `docs/OPEN-QUESTIONS.md`'s own 2026-08-21 entry says *"Both documents are amended"*; verified
+false for this plan and for D9, and repaired in the same change as this amendment.
+
+**There is no second option.** §6 R4 offers *"or each tween system bumps `UiRenderGeneration` at its
+own writer"*. That is **structurally impossible**: `UiRenderGeneration` lives in `boyko_render`
+(`crates/boyko_render/src/ui/pack.rs:883`), `ui_visual_tick` lands in `boyko_ui::animation` beside
+`UiClock`, and `boyko-render` depends on `boyko-ui` (`boyko_render/Cargo.toml:80-82`, which states the acyclicity as a rule) while `boyko-ui`
+names no render crate — its own manifest states the acyclicity as a rule. A `boyko_ui` system cannot
+take `ResMut<UiRenderGeneration>` without inverting the crate graph.
+
+**Correction: `UiVisual` is a TABLE component. The four `Tween*` stay dense.** The normative form,
+the reason and the rejected alternatives are **AD10**; the storage kind is stated in A1's Lands list,
+which is the one place an implementer reads to write the derive.
 
 ---
 
@@ -406,6 +471,54 @@ retained completion list; **removal is deferred to `ui_tween_reap`**, an exclusi
 immediately after, because a dense remove inside an iterating query is a structural op during
 iteration.
 
+*(2026-08-27, the A1 pre-build audit — **three things this shape left unsaid, each of which decides a
+behaviour**.*
+
+*(a) **"compose the four channels into a stack-local `UiVisual`" never named the BASE**, and the two
+readings are not interchangeable: from `UiVisual::default()` a node that finished a `TweenOffset` at
+−400 px has its offset snapped back to 0 on the first frame of a subsequent `TweenTint` — the finished
+animation silently undoes itself — while from `*sink` it is carried. **The base is `*sink`: see
+AD12.** No A1 gate ran two channels, so an identity-base implementation passed all eight.*
+
+*(b) **`set_if_neq` requires `UiVisual: PartialEq`, which A1's Lands list never stated**, and the
+derived float equality is **not idempotent under NaN** — which turns AM1's own stated catastrophe
+(*"a tick that bumps every frame defeats the render gate as surely as one that never bumps"*) into a
+release-reachable one. **The equality is bytewise and hand-written: see AD11.***
+
+*(c) **the all-`None` `continue` is load-bearing for more than cost.** AM2 (1) prices it — one
+`PartialEq` on 24 B per ever-animated row per frame — and §4/M2 measures it. But MEASURED at this
+audit, it is also what BOUNDS (b): with AD11's bytewise equality the two are independent, and
+without it the `continue` is the only thing keeping a NaN-carrying rested row from bumping the render
+gate on every frame forever — `[0, 0, 0]` with the `continue`, `[1, 1, 1]` without. A8 gate 3 prices
+the `continue`; it is **not** a licence to delete it.)*
+
+**The trace, row class by row class** *(added 2026-08-27 at the A1 pre-build audit, because every
+defect this rung's audit found was a case one of these five rows answers and no prose did. Read with
+AD10 — the sink is TABLE — and AD11/AD12.)*
+
+| Row class | `AnyOf` yields | What the tick writes | Tick bumped? | What the render gate sees |
+|---|---|---|---|---|
+| **never animated** | *not visited at all* — no `UiVisual` row, and a table `Mut<UiVisual>` include admits only archetypes that carry it (MEASURED: 2 sink rows + 2 sink-less rows ⇒ **2** visits) | nothing | no | nothing. The node folds by the **identity** at pack (AD6) — byte-identical to today, which is A4's disarmed gate |
+| **mid-tween** | ≥1 `Some` | `composed = *sink` with each live channel's own fields overwritten (**AD12**); `set_if_neq` writes it | **yes** — the value differs | `Changed<UiVisual>` → the `Or` term in `ui_pack_inputs!(changed)` fires → `generation.bump()` → the frame repacks. MEASURED end to end for a TABLE sink (1 row through the `Or`); **0 rows for a dense one**, which is AM8 |
+| **channel just finished** (this frame) | that channel `Some`, `elapsed >= duration` | the endpoint **assigned exactly** (§5's property — `to`, not `to ± ULP`); the other fields carried from `*sink`; `(Entity, ComponentId)` pushed onto `UiTweenScratch` | **yes**, if the endpoint differs from last frame's value | one final bump. `ui_tween_reap` (exclusive, immediately after) then removes the dense row, so `ui_transition_apply` can read "no row present ⇒ at rest" the same frame (AD5) |
+| **rested** (all channels reaped, sink retained) | `(None, None, None, None)` — **visited, not skipped** (AM2, MEASURED) | nothing: the all-`None` `continue` fires **before** the sink is touched | no | nothing. The generation holds and D6a's per-slot skip stays armed. *This is the row the sink persists for: its last value IS the resting appearance (AM2), so removing it would snap the element back* |
+| **plateau or NaN-carrying, channel live** | ≥1 `Some`, composing to the value already held | `set_if_neq` compares **bytewise** (AD11) and writes nothing | **no** | nothing. Under `#[derive(PartialEq)]` instead: `NaN != NaN` ⇒ a write and a bump on **every** frame forever ⇒ `UiRenderGeneration` bumps every frame ⇒ the D6a skip is disarmed for the **whole UI**. MEASURED `[0,0,0]` vs `[1,1,1]` |
+
+**Two things the trace makes visible that no gate did.** (1) The `continue` changes **nothing** the
+render gate can see — under AD12's base an all-`None` row composes the value it already holds, so with
+or without it the row is silent. That is why A1's red #2 could not fire and why the `continue`'s gate
+is A8's cost pair, not gate 3. (2) The only row class that can bump the gate **forever** is the last
+one, and the thing that stops it is an equality, not a `debug_assert!` — which is AD11.
+
+**Storage, stated here because AD5 is where the query lives (AM8/AD10).** The sink term is a
+**table** component and the four `AnyOf` arms are **dense**. That combination is the one that works:
+`AnyOf` DOES forward the dense hooks — `HAS_DENSE` OR-folds over its arms (`data/anyof.rs:118`) and
+`resolve_dense` is forwarded to each (`data/anyof.rs:137`) — so a dense channel arm resolves its
+store and yields `Some`/`None` per row correctly (MEASURED, leg L3). `Or` forwards none of them, which
+is why the SINK cannot be dense (AM8). Nothing reads `Changed<Tween*>`, and no `Tween*` appears in any
+`Or` in this plan or in `ui_pack_inputs!`, so the dense arms are never filtered — that is the whole
+condition under which dense storage is safe here.
+
 **Reason for the deferred reap rather than `Commands`:** `Commands` would land the removal at the next
 apply window, which is fine for a *removal* (the row's last write already happened) — but the reap
 also has to run before `ui_transition_apply` can observe "no row present ⇒ at rest", and an exclusive
@@ -433,6 +546,14 @@ is a two-line decision that costs one afternoon if it is discovered from a scree
 #3, and `boyko_render`'s own `default_mode_is_off` precedent — *two* routes into a default, neither
 implying the other.
 
+**The second route is named, 2026-08-27.** `default_mode_is_off`'s precedent works because *two*
+independent spellings produce the same value. `UiVisual` had only one until this amendment, so
+**A1 also lands `pub const UiVisual::IDENTITY`**, and the hand-written `Default` returns it. Gate 4
+then compares two routes that neither derives from the other — which is a gate that can fail, unlike
+the "does not `#[derive(Default)]`" half A1 claimed and could not build (a derived and a hand-written
+`impl Default` are the SAME trait impl to the type system; no Rust test separates them). See A1's
+corrected gate 4.
+
 **And the absent case must agree with it:** a node with **no** `UiVisual` row folds by the identity,
 which is arithmetically the same instance bytes as today. That equality is A4's disarmed gate.
 
@@ -442,17 +563,38 @@ which is arithmetically the same instance bytes as today. That equality is A4's 
 clickable **where it is drawn**. The per-node `UiVisual` probe is skipped wholesale when the frame
 carries no visual at all:
 
-```rust
-let any_visual = world.dense_registry()
-    .store(UiVisual::component_id())
-    .is_some_and(|s| s.live_count() != 0);       // dense_store.rs:353, ecs_master.rs:590
-```
+~~```rust~~
+~~let any_visual = world.dense_registry()~~
+~~    .store(UiVisual::component_id())~~
+~~    .is_some_and(|s| s.live_count() != 0);       // dense_store.rs:353, ecs_master.rs:590~~
+~~```~~
+
+**Struck 2026-08-27 at the A1 pre-build audit — this guard does not survive AD10, and its failure is
+silent in the worst direction.** `DenseRegistry::store` returns `None` for an id no dense store was
+ever created for (`dense_registry.rs:133-136`), and a TABLE id never gets one. So with `UiVisual`
+table the expression evaluates to `false` **forever**: no panic, no `debug_assert`, no compile error —
+`any_visual` reads *"nothing animates"* on every frame of every UI, the fold never runs, and A6 ships
+the exact "the UI is haunted" bug this decision exists to prevent. The mirror error is equally quiet:
+if the guard had been kept and the sink made dense to suit it, **AM8**'s frozen picture arrives
+instead.
+
+**The guard becomes an archetype-level emptiness check** — the crate's own
+`ui_layout_discovery`/`is_empty()` idiom, cited at `crates/boyko_render/src/ui/gather.rs:434-436` as
+*"`is_empty()` is archetype-level only"* — evaluated **once per frame**, not once per node, which is
+the property AD7's reason actually needs. Its exact spelling is **A6's** to pick against
+`collect_candidates`' real parameter list, and A6 must state it; what A1 owes is only that
+`UiVisual` is a table component so an archetype-level answer exists at all. AD7's rejected (b) — *"a
+`With<UiVisual>` query probe per frame … pays an archetype walk where a `live_count()` load answers
+exactly"* — is **re-opened by this strike**: with no `live_count()` available, the archetype walk is
+the cheapest correct answer, and it is O(matched archetypes) once per frame rather than O(nodes).
 
 **Reason.** Without the fold, an animating menu accepts clicks at its pre-animation position for the
 whole animation — the class of bug that is reported as "the UI is haunted" and diagnosed in an
 afternoon. With the fold and without the guard, this plan would add a probe per node per frame to the
 pass D23 already names as the campaign's likely dominant cost, on every UI, including the 100 % of
-UIs that animate nothing. `live_count()` is one load and makes that cost exactly zero.
+UIs that animate nothing. ~~`live_count()` is one load and makes that cost exactly zero.~~ **The
+archetype-level check is one matched-list emptiness test per frame and makes that cost exactly zero**
+(2026-08-27).
 
 **Rejected:** (a) *hit-test on `ComputedRect` only* — defensible for a 1.05 hover pop (2.5 % edge
 error), indefensible for a −400 px slide; the fold cannot be per-channel; (b) *a `With<UiVisual>`
@@ -528,6 +670,171 @@ plan (AD1 reason (4)) and appears in **no rung's landing list** — A1 lands `Tw
 bit is what makes `dt_real` reachable at all, so **A1's Lands list must name the field**, or
 `dt_real` ships with no reader and D15's opt-in becomes another dead datum. Recorded here rather than
 silently assumed.
+
+### AD10 — `UiVisual` is a **table** component; the four `Tween*` are **dense**
+
+*(added 2026-08-27 at the A1 pre-build audit; implements **AM8**. This is the rung's headline decision:
+A1 is the only rung that can make it, and three authorities gave three answers while A1's own Lands
+list gave none.)*
+
+```rust
+#[repr(C)]
+#[derive(Component, Clone, Copy, Debug)]   // NOT dense; NOT #[derive(Default)]; NOT #[derive(PartialEq)]
+pub struct UiVisual { /* 24 B — AM5, AD6, AD11 */ }
+
+#[repr(C)]
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+#[component(storage = "dense")]
+pub struct TweenTint { /* … and TweenOpacity / TweenOffset / TweenScale */ }
+```
+
+**Reason.**
+
+1. **It is the only kind that reaches the render gate.** MEASURED (AM8's table): a dense sink written
+   through AD5's exact `Mut::set_if_neq` is seen by a bare `Changed` (1 row) and **not** by the
+   discovery filter's `Or` (0 rows); a table sink is seen (1 row). The failure is a frozen picture
+   with nothing red.
+2. **The alternative §6 R4 names is impossible, not merely worse.** `ui_visual_tick` lives in
+   `boyko_ui`; `UiRenderGeneration` lives in `boyko_render` (`ui/pack.rs:883`); the dependency runs
+   `boyko-render → boyko-ui` (`boyko_render/Cargo.toml:80-82`, which states the acyclicity as a rule) and `boyko-ui` names no render crate.
+   There is no fork to weigh.
+3. **The crate already ships this exact split, and it shipped for this exact reason.**
+   `UiSpriteSheet` is a **table** component, is a member of `ui_pack_inputs!`, and takes the flipbook's
+   per-frame `Mut::set_if_neq` write *because that write's tick is the repaint signal*
+   (`crates/boyko_ui/src/components.rs:658-665`); `UiSpriteCursor` is **dense**, is deliberately
+   **out** of the list, and holds the flipbook's private state (`components.rs:820-829`).
+   `UiVisual` : `Tween*` :: `UiSpriteSheet` : `UiSpriteCursor` — same split, same reason, one rung
+   later.
+4. **The archetype cost is bounded and it is paid once.** `UiVisual` **persists after a tween
+   finishes** (AM2), so a table sink costs exactly **one** archetype migration per element that ever
+   animates, and none thereafter — while the four channels, which are inserted and reaped per
+   animation, keep their churn out of the signature. The dense-storage argument
+   (`crates/boyko_ui/src/components.rs:822-825`'s "per-frame churn") applies to the CHANNELS and is why they
+   stay dense; it never applied to a sink that is never removed.
+
+**Rejected:** (a) *dense sink + `ui_render_discovery` gains a nested `Or`* — nesting fixes the arity
+ceiling (R4), not the dense blindness: the inner `Or` has the same defaulted `HAS_DENSE`.
+(b) *dense sink + fix the kernel's `Or` impl* — filed as a kernel defect with the owner
+(`docs/OPEN-QUESTIONS.md`, 2026-08-21, option 1) and explicitly a VALUES/SCOPE call; a rung does not
+land on an unanswered kernel change, and the recommendation there is option (2).
+(c) *dense sink + the tick bumps the generation itself* — reason 2: it does not compile.
+(d) *four `Tween*` as table columns* — four archetype migrations per animation start and four more per
+completion, on the pass that starts every hover; and nothing filters them, so dense costs nothing.
+
+### AD11 — `UiVisual`'s `PartialEq` is **bytewise and hand-written**, never derived
+
+*(added 2026-08-27 at the A1 pre-build audit.)*
+
+```rust
+impl PartialEq for UiVisual {
+    /// Bitwise, NOT `f32`'s `PartialEq`: `set_if_neq` is the render gate's only
+    /// throttle, and `NaN != NaN` makes the derived form bump it forever.
+    fn eq(&self, o: &Self) -> bool {
+        self.tint_mul == o.tint_mul
+            && self.opacity.to_bits() == o.opacity.to_bits()
+            && self.offset_px[0].to_bits() == o.offset_px[0].to_bits()
+            && self.offset_px[1].to_bits() == o.offset_px[1].to_bits()
+            && self.scale[0].to_bits() == o.scale[0].to_bits()
+            && self.scale[1].to_bits() == o.scale[1].to_bits()
+    }
+}
+```
+
+**Reason.** AD5's whole render-gate contract is *"a value-preserving frame does not bump"*. Under the
+derived equality that contract has an exception nothing states: `NaN != NaN`, so one NaN anywhere in
+the sink makes `set_if_neq(THE SAME BYTES)` write and bump on **every** frame. One such row bumps
+`UiRenderGeneration` — which is one global counter, bumped if **any** row changed — so the D6a
+per-slot skip is disarmed for the **whole UI**, permanently. **MEASURED**, on the legitimate fixture
+of a *plateau* tween (`from == to`, which an author writes whenever a transition targets the state it
+is already in) over a sink carrying one NaN:
+
+| `UiVisual`'s `PartialEq` | `Changed` rows, 3 still frames |
+|---|---|
+| **bytewise (this decision)** | `[0, 0, 0]` |
+| **`#[derive(PartialEq)]`** | `[1, 1, 1]` |
+
+A NaN is reachable in **release** without any kernel bug: §5's `debug_assert!`s on `inv_duration`,
+`opacity`, `scale` and the fold output all compile out, and the public helpers take author `from`/`to`
+values (`start_tween_offset(world, e, from, to, ms, easing)`) with no release-side filter.
+
+**Rejected:** (a) *a release-time `is_finite()` guard on the composed value before the write* — six
+float tests per animating row per frame, forever, to defend against a case the equality can answer for
+free; and it must then decide what to substitute, which is a product question A1 has no answer to.
+(b) *`#[derive(PartialEq)]` plus a `debug_assert!`* — debug-only, and this branch has already recorded
+that "a rule about RELEASE behaviour is ungatable in debug". (c) *`#[derive(PartialEq, Eq)]` over a
+`[u8; 24]` newtype* — the same bytes with a worse field API and a `Hash`/`Eq` surface nothing wants.
+
+**The cost is not a regression:** six integer compares against six float compares, on a type that is
+already `#[repr(C)]` POD `Copy`. It is priced by A8's tick bench like everything else.
+
+*(± 0.0 note, so the trade is on the record: bytewise equality calls `+0.0` and `−0.0` different, so a
+channel that lands on `−0.0` where `+0.0` stood costs **one** extra bump — one frame, not a state. The
+derived form's NaN case costs **every** frame, forever. This is the direction the trade must run.)*
+
+### AD12 — the fused tick composes from `*sink`, not from the identity
+
+*(added 2026-08-27 at the A1 pre-build audit; closes a hole AD5 left open and A1's eight gates could
+not see.)*
+
+```rust
+let mut composed = *sink;                       // NOT UiVisual::default()
+if let Some(t) = tint     { composed.tint_mul  = eval(t); }
+if let Some(o) = opacity  { composed.opacity   = eval(o); }
+if let Some(f) = offset   { composed.offset_px = eval(f); }
+if let Some(c) = scale    { composed.scale     = eval(c); }
+sink.set_if_neq(composed);
+```
+
+**Reason.** The four channels own **disjoint** fields of the sink, so "compose" means *overwrite the
+fields whose channel is live and carry the rest*. From the identity, a field whose channel has been
+reaped is reset — MEASURED: a node whose `TweenOffset` finished at `−400 px` reads `off = 0` on the
+first frame of a later `TweenTint` under an identity base and `−400` under `*sink`. That contradicts
+`UiVisual`'s stated persistence (AM2), and it is the "UI is haunted" class again: a panel that slid in
+and stayed jumps home the moment anything tints it.
+
+**A consequence that must be stated, because it disarms a red.** Under this base an all-`None` row
+composes **the value it already holds**, so `set_if_neq` writes nothing and bumps nothing — which is
+exactly why A1's original red mutation #2 (*delete the `continue` ⇒ the rested element becomes
+`Changed` every frame*) **cannot fire**. MEASURED, the mutated tick over still frames: `[0,0,0,0]`
+under a `*sink` base, and `[0,0,0,0]` under an identity base too (the single normalizing write lands
+on the tick's first frame, which gate 3's *"on every subsequent still frame"* excludes). The
+`continue` is a **cost** decision (AM2 (1), priced at A8) and a **NaN-containment** decision
+(AD5 (c)) — never a change-detection one — and A1's reds are corrected accordingly.
+
+**Rejected:** (a) *identity base* — above. (b) *identity base plus a "sticky" flag per field* — four
+bits and a second source of truth for a question `*sink` already answers. (c) *let each channel's reap
+write its endpoint back into the sink* — the reap is exclusive and would become a second writer of
+`UiVisual`, which AD5 forbids (`ComputedRect`'s single-writer discipline).
+
+### AD13 — a **dense** member of `ui_pack_inputs!` is a BUILD ERROR, not a comment
+
+*(added 2026-08-27 at the A1 pre-build audit. The decision belongs to whichever rung ships D6b — the
+sprites plan's seam rung — but **animation is the subsystem that discovers it twice**, and A4 is the
+rung it would bite.)*
+
+`crates/boyko_render/src/ui/gather.rs:84-89` already states the rule in prose: *"adding a component to
+`ui_pack_inputs!` wires the discovery filter for free" is true for TABLE components only. A DENSE
+component added to this list would be read correctly by the gather and would be INVISIBLE to
+`ui_render_discovery` — the frame would never repaint, with nothing saying so.* The macro's existing
+lockstep does not cover it: **deleting** a member breaks `gather_ui_nodes`' destructuring at compile
+time (the M0-c red, `gather.rs:128-129`), while **adding** a dense one compiles clean and is silently
+dead.
+
+**The mechanical form exists in the same workspace.**
+`crates/boyko_render/src/occlusion_marker.rs:171-176` const-asserts
+`!<C as Component>::STORAGE_IS_DENSE` with a rationale string, and MEASURED at this audit the const is
+both reachable and discriminating (`true` for a dense derive, `false` for a plain one). So
+`ui_pack_inputs!` grows a `storage` arm that expands the list into one `const _: () = assert!(...)`
+per member, and the wrong storage kind becomes `error[E0080]` at the site that chose it.
+
+**Reason.** The campaign's headline defect class is *the gate that cannot fail*; a prose warning at
+the macro is exactly that shape, and this plan is the second subsystem to walk into it (the first was
+`UiSpriteCursor`, S-D16 (1)). The assert costs nothing at runtime and cannot be forgotten, because
+adding a member is what triggers it.
+
+**Handed over, with what it needs:** the seam rung owes (i) this const-assert arm, (ii) R4's nested-`Or`
+emission, and (iii) a test that **runs** `ui_render_discovery` rather than naming its type — a
+type-level test sees neither the dense hole nor R4's `init_state` panic.
 
 ---
 
@@ -899,32 +1206,114 @@ whichever rung drops its last reader, which after A0b is `UiClock::default()` al
 
 ### A1 — the sink, the four channels, the fused tick — **size L** · *no cross-plan dependency*
 
-**Lands.** `UiVisual` (24 B, AM5, AD6) · `TweenTint` / `TweenOpacity` / `TweenOffset` / `TweenScale`,
-all `#[component(storage = "dense")]` `#[repr(C)]` POD `Copy` — **including the per-row `flags: u8`
+*(rung amended 2026-08-27 at the A1 pre-build audit. **The storage kind of the sink was undecided at
+the only rung that can decide it**, and four authorities gave three answers — D9 said dense
+(`UI-ADVANCED-ARCHITECTURE.md:833`, now struck), AM2's cost model assumed dense, §6 R4 said table, the shipped
+`gather.rs:91-93` said table and claimed this plan had been corrected to say so. It had not. The
+ruling is **AM8 / AD10 — the sink is a TABLE component, the four channels stay dense** — and it is
+stated in the Lands list below, which is the one place an implementer reads to write the derive.
+Three further holes are closed with it: the composition base (**AD12**), the sink's equality
+(**AD11**), and the storage lockstep at the pack-input macro (**AD13**). Gates and reds are rewritten
+to A0's standard — every leg owns one.)*
+
+*(**Ownership sweep, run 2026-08-27.** The rung id "A1" appears **zero** times outside this plan. The
+one grep hit across the sprites, interaction, Aether, architecture, research and OPEN-QUESTIONS
+corpus — `UI-PLAN-AETHER.md:139`, *"Decision A1: cross-construct …"* — is that plan's own DECISION
+namespace colliding with this plan's RUNG namespace, not a reference to this rung. It is recorded
+because a false positive in an ownership sweep is resolved by assuming coverage exists, and this
+branch has already paid for the inverse error. The ARTEFACTS, unlike the rung, are known outside:
+`crates/boyko_render/src/ui/gather.rs:91-93`, `crates/boyko_render/tests/ui_s0_discovery.rs:496` and
+`crates/boyko_render/tests/ui_s0_measure.rs:245` all name `UiVisual`'s arrival, and the first states a
+HARD CONSTRAINT on it that this rung's text did not carry until now.)*
+
+**Lands — the sink.** `UiVisual`, **a TABLE component** (AM8 / **AD10**), 24 B (AM5), `#[repr(C)]` POD
+`Copy`. Its derive list is deliberately short and each absence is a decision:
+
+* **no `#[component(storage = "dense")]`** — AD10. A dense sink is invisible to
+  `ui_render_discovery`'s `Or<…>` and every animation renders nothing (AM8, MEASURED).
+* **no `#[derive(Default)]`** — AD6. A hand-written `impl Default` returning the new
+  **`pub const UiVisual::IDENTITY`**, so gate 4 has two routes into the value rather than one.
+* **no `#[derive(PartialEq)]`** — **AD11**. A hand-written **bytewise** `impl PartialEq`, because
+  `set_if_neq` is the render gate's only throttle and `NaN != NaN` makes the derived form bump it on
+  every frame forever (MEASURED: `[1,1,1]` derived vs `[0,0,0]` bytewise).
+
+**Lands — the channels.** `TweenTint` / `TweenOpacity` / `TweenOffset` / `TweenScale`, all
+`#[component(storage = "dense")]` `#[repr(C)]` POD `Copy` — **including the per-row `flags: u8`
 whose bit 0 selects `dt_virtual` (D15's opt-in, AD1 reason (4), AD9 (4)); it was named once in this
-plan and appeared in no landing list, and it is what makes `dt_real` reachable at all** · `ui_visual_tick` (AD5) ·
-`ui_tween_reap` · `UiTweenScratch` (the retained completion list) · the public start/stop helpers
-(`start_tween_tint(world, e, from, to, ms, easing)` and siblings) · `size_of`/`align_of`/`offset_of!`
-const-asserts on all five types.
+plan and appeared in no landing list, and it is what makes `dt_real` reachable at all**. Dense is
+safe here and nowhere else in this rung, for one stated reason: **nothing filters a `Tween*`.**
+`AnyOf` forwards `HAS_DENSE` and `resolve_dense` to its arms (`data/anyof.rs:118`, `:137`); `Or` does
+not (AM8). No `Tween*` is a member of `ui_pack_inputs!` and nothing reads `Changed<Tween*>`.
+
+**Lands — four one-field wrapper bundles, one per channel.** *Not a style choice, and MEASURED one
+file over:* dense storage SUPPRESSES the single-component `Bundle` impl the derive normally emits, so
+`insert(TweenTint { .. })` is `error[E0277]: the trait bound TweenTint: Bundle is not satisfied` —
+`crates/boyko_ui/src/sprite.rs:60-70` records exactly this for the crate's only existing dense
+component, gated in `boyko_macros`' `component.rs` on `no_bundle || storage_bitset || storage_dense`.
+A wrapper bundle is the only spelling that compiles. The companion fact is recorded at
+`sprite.rs:80-89` and constrains this rung too: **`#[require(<a dense type>)]` PANICS at insert** —
+the require pass resolves the required id's `ComponentPool` in the target archetype and a dense id
+owns none — so no `#[require]` may point at a `Tween*`. (It may point at `UiVisual`, which is now a
+table component; A1 does not use one, because the sink's insert is the helper's job, below.)
+
+**Lands — the systems and the surface.** `ui_visual_tick` (AD5, **AD12** — the composition base is
+`*sink`) · `ui_tween_reap` · `UiTweenScratch` (the retained completion list) · the public start/stop
+helpers (`start_tween_tint(world, e, from, to, ms, easing)` and siblings), which **insert
+`UiVisual::IDENTITY` if the entity has none** — stated because no rung said who inserts the sink, and
+a channel whose sink is missing is a tween that ticks into nothing ·
+`size_of`/`align_of`/`offset_of!` const-asserts on all five types, **plus the storage-kind
+const-asserts of gate 11**.
 
 Easing is **linear only** at this rung — `EasingId` exists as a field and the tick applies `t` — so
 that A1's gates test the machinery and A2's gates test the curves, and a red at A2 cannot be blamed
 on A1.
 
-**Gate.**
+**Gate — eleven, and EVERY LEG OWNS A RED** (A0's standard — its red-mutation header reads *"nine, every one runnable AT THIS RUNG, and EVERY LEG OWNS ONE"*; A1 shipped three reds over eight
+gates until 2026-08-27, and two of the three did not do what they said).
 1. **Presence is running (C2/D9):** inserting `TweenTint` starts it; the reap removes it at
    completion; `DenseStore::live_count()` for each channel returns to **0** after the last tween ends.
-2. **The tick bumps the sink's tick (AM1):** a system running after `ui_visual_tick` with
-   `Query<(), Changed<UiVisual>>` sees the row on an animating frame **and does not** on the frame
-   after the reap.
+2. **The tick bumps the sink's tick, on BOTH routes (AM1 + AM8).** A system running after
+   `ui_visual_tick` with `Query<(), Changed<UiVisual>>` sees the row on an animating frame and does
+   not on the frame after the reap — **and a second system with the discovery filter's own shape,
+   `Query<(), Or<(Changed<C>, Changed<UiVisual>)>>`, sees exactly the same rows.**
+   **`C` must be a component the fixture never writes** (a bare marker, or `ComputedRect` in a
+   layout-stable fixture with the layout pass NOT registered). *Stated because getting it wrong makes
+   this half a gate that cannot fail in the other direction:* if `C` is `Changed` on the frame under
+   test, the `Or` is `true` through `C` and reports success whatever the sink's storage kind is. The
+   arm exists only to make the filter an `Or` at all — a single-element `Or` would be a different
+   type from the one `ui_pack_inputs!(changed)` expands to.
+   *The second half is the storage gate, and it is why the first half alone was not one:* MEASURED,
+   the two routes AGREE for a table sink (1 and 1) and DISAGREE for a dense one (1 and **0**), so a
+   bare `Changed` is green under the storage error that makes every animation invisible. This is the
+   only A1 gate that can see AD10, and A4 — where the symptom first appears — is a rung and a
+   cross-plan dependency away.
 3. **A rested element is silent (AM2):** an entity whose tween has completed keeps its `UiVisual` row
    and, on every subsequent still frame, is **not** `Changed<UiVisual>`. Assert with a live-row count
    of ≥1 and a changed-row count of 0 — the two together are what "rested but retained" means.
-4. **The identity default (AD6):** `UiVisual::default()` equals the hand-written identity, field by
-   field, **and** `UiVisual` does not `#[derive(Default)]` (a compile-time absence, asserted the way
-   `every_variant_states_its_own_answer_without_a_wildcard` asserts its own).
-5. **Arity-one per channel (D9 reason 3):** starting a `TweenTint` on an entity that already has one
-   overwrites rather than stacking; `live_count()` does not grow.
+4. **The identity default, two routes (AD6):** `UiVisual::default()` equals `UiVisual::IDENTITY`,
+   field by field, and `IDENTITY`'s four fields are additionally asserted against literals written
+   into the test. ~~**and** `UiVisual` does not `#[derive(Default)]` (a compile-time absence, asserted
+   the way `every_variant_states_its_own_answer_without_a_wildcard` asserts its own).~~ **Struck
+   2026-08-27 — the named instrument does not do this and cannot be built.** That precedent
+   (`crates/boyko_render/src/occlusion_config.rs:196`) is a WILDCARD-FREE MATCH OVER AN ENUM — *"adding
+   a variant fails to COMPILE here … the compile error is the actual gate"* — and `UiVisual` is a
+   struct with no variant set to exhaust. The property wanted was *"this `Default` was hand-written,
+   not derived"*, and a derived and a hand-written `impl Default` are the SAME trait impl to the type
+   system; no Rust test separates them (having both is E0119 in the implementation, not an assertion
+   in a test). The closer precedent, `default_mode_is_off` (`occlusion_config.rs:155`), is a SECOND
+   ROUTE into the value — which `UiVisual` now has, because AD6 lands `IDENTITY`.
+5. **Arity-one per channel (D9 reason 3), on the property that is not already a kernel invariant:**
+   `start_tween_tint` on an entity that already has one **replaces** `from`/`to`/`duration` and
+   **restarts `elapsed` at 0**; `live_count()` does not grow. *(2026-08-27: the `live_count()` half
+   alone was a tautology — every public insert route for a dense id goes through
+   `DenseStore::insert_or_replace` (`commands/insert_command.rs:259`, `migration_helpers.rs:608`,
+   `ecs_master/component_api.rs:470`), which *"overwrites the slot in place, keeping … the SAME slot"*
+   (`dense_store.rs:253-257`), so `live_count()` — `column.count() - free.len()`, `:353` — is
+   arithmetically incapable of moving and no implementation of `start_tween_tint` could have made it.
+   The bare `DenseStore::insert` opens with `debug_assert!(!self.e2s.contains(…))` (`:186-190`) and is
+   reachable only from fresh-entity paths (`clone/materialize.rs:893`, `spawn_batch_command.rs:592`).
+   The replace-and-restart property is the one A3's reversing transition actually depends on, and it
+   was asserted nowhere.)*
 6. **Zero per-frame allocation** on the steady animating path — the crate's existing
    `zero_alloc.rs` / `p3_watch_zero_alloc.rs` harness shape, extended to the tick.
 7. **Paused-clock leg (A0 leg 2, downstream):** with `Time` paused, a default-clock tween advances and
@@ -933,15 +1322,92 @@ on A1.
    which A0 leg 2 does not provide. That hole is now closed at its own rung by **A0 leg 4**; this
    gate tests the `flags` SELECT, not the field's arithmetic. AD9 keeps `dt_real` the default of
    this lane, so gate 7's expectation is unchanged.)*
-8. **Miri** over the tick + reap, because dense insert/remove during a frame that also iterates the
-   store is the one place this rung could be unsound.
+8. **Miri** over the tick + reap. ~~because dense insert/remove during a frame that also iterates the
+   store is the one place this rung could be unsound.~~ *(2026-08-27: the struck reason names a hazard
+   AD5's deferred reap **designs out**, so Miri passing over the shipped shape says nothing about the
+   deferral — the classic shape of a gate whose subject stops being observable at the moment the rung
+   succeeds. The live subjects, and what gate 8 must therefore exercise, are: (i) the retained
+   `UiTweenScratch` reused across frames without a stale `(Entity, ComponentId)` surviving a despawn;
+   (ii) a **remove-then-insert of the same channel on the same entity within one frame** — the reap
+   frees the slot and a `start_tween_*` in the same frame reuses it, which is where a stale per-slot
+   tick would leak (`dense_store.rs` re-stamps both ticks on a fresh insert, and that is the property
+   under test); (iii) the tick's `AnyOf` fetch over four dense stores.)*
+9. **The composition base (AD12) — NEW, and the first A1 gate that runs two channels.** A node whose
+   `TweenOffset` finished at −400 px, then given a `TweenTint`: on the tint's first frame and every
+   frame after, `UiVisual.offset_px[0]` is still **−400**. *(Gates 1–8 each exercise a single channel,
+   so an identity-base implementation — which silently undoes every finished animation — passed all
+   of them, and the defect would have surfaced first as an A3 transition resetting a slid-in panel.)*
+10. **The sink's equality is idempotent (AD11) — NEW.** A *plateau* tween (`from == to`, and a
+    duration long enough that the channel is still live on the frames under test — otherwise the reap
+    fires, the row goes all-`None`, gate 3's `continue` takes over and gate 10 measures nothing) on a
+    node whose `UiVisual` was inserted directly carrying one NaN field is **not** `Changed<UiVisual>`
+    on any still frame after the first. MEASURED both ways: `[0,0,0]` bytewise, `[1,1,1]` derived. This is the release-side half of
+    AM1's *"a tick that bumps every frame defeats the render gate as surely as one that never bumps"* —
+    §5's `debug_assert!`s all compile out and the public helpers take author `from`/`to` values.
+11. **The storage kinds are const-asserted (AD10) — NEW, and it is a compile-time gate.**
+    `const _: () = assert!(!<UiVisual as Component>::STORAGE_IS_DENSE, "<rationale>")` plus
+    `const _: () = assert!(<TweenTint as Component>::STORAGE_IS_DENSE)` and its three siblings — the
+    `crates/boyko_render/src/occlusion_marker.rs:171-176` idiom verbatim, rationale string included.
+    MEASURED at this audit: `STORAGE_IS_DENSE` is const-reachable and discriminating (`true` for a
+    dense derive, `false` for a plain one), so this is a build error rather than a test.
 
-**RED MUTATIONS — three, each must be run.**
-1. `Mut<UiVisual>` → `&mut UiVisual` ⇒ **gate 2 reds.** *This is the amendment's proof; without seeing
-   this red, AM1 is an assertion.*
-2. Delete the all-`None` `continue` ⇒ **gate 3 reds** (the rested element becomes `Changed` every
-   frame).
-3. Replace the hand-written `Default` with `#[derive(Default)]` ⇒ **gate 4 reds** on both halves.
+**RED MUTATIONS — eleven, one per gate, each must be run and its red OBSERVED.**
+1. Make `ui_tween_reap` skip the remove ⇒ **gate 1 reds** (`live_count()` never returns to 0).
+   *(New 2026-08-27: the deferred reap is this rung's most novel machinery and nothing falsified it.)*
+2. `Mut<UiVisual>` → `&mut UiVisual`, **as a PAIR of edits**: also replace `sink.set_if_neq(composed)`
+   with `if *sink != composed { *sink = composed; }` ⇒ **gate 2 reds** (both halves).
+   *(Corrected 2026-08-27. As a single edit it does not red gate 2 — it fails to COMPILE:
+   `set_if_neq` is an inherent method on `Mut<'w, T>` (`data/mut_.rs:84`) and does not exist on
+   `&mut T`, so the observation would be an E0599 proving only that a method name is spelled on one
+   type and not another. The pair preserves the value-equality short-circuit so the mutation isolates
+   the tick-bump axis and nothing else — which is the whole of AM1. MEASURED: `&mut` write ⇒ 0
+   `Changed` rows; `Mut::set_if_neq` ⇒ 1.)*
+3. **Delete the all-`None` `continue` AND replace `set_if_neq` with the plain `DerefMut` write**
+   (`*sink = composed;`) ⇒ **gate 3 reds** (the rested element becomes `Changed` every frame).
+   *(Corrected 2026-08-27. The original red — delete the `continue` alone — **cannot fire**, and
+   AM2's own sentence says why: `set_if_neq` "saves the tick bump only because the value is
+   unchanged". MEASURED, the mutated tick over still frames: `[0,0,0,0]` under a `*sink` base and
+   `[0,0,0,0]` under an identity base. Either edit alone is silent — with the `continue` in place the
+   deref write never reaches a rested row, and with `set_if_neq` in place the deleted `continue`
+   writes nothing — so the red is the PAIR, which is exactly "AD5's two protections, both removed".
+   The COST the `continue` saves is priced at A8 gate 3; the NaN containment it also provides is
+   gate 10's subject under AD11.)*
+4. Replace the hand-written `Default` with `#[derive(Default)]` ⇒ **gate 4 reds** (`opacity` 0.0 vs
+   1.0, `scale` [0,0] vs [1,1]).
+5. Make `start_tween_tint` early-return when the channel is already present ⇒ **gate 5 reds**
+   (`elapsed` does not restart and `from`/`to` are the old ones). *(New 2026-08-27.)*
+6. Put a `Vec::new()` in the tick body ⇒ **gate 6 reds**. *(New 2026-08-27.)*
+7. **A0's struck red, adopted here — the rung it was deferred to.** Swap the default in the tween
+   row's clock select (`dt_real` → `dt_virtual`) ⇒ **gate 7 reds** (a default-clock tween stops
+   advancing while `Time` is paused). *(A0 struck this red as "structurally unrunnable at this rung"
+   and pointed at "A1 gate 7"; A1's three reds never adopted it, so D15's `flags` bit and `dt_real`'s
+   only reader had no red for a second rung running.)*
+8. Make `ui_tween_reap` **drop the entry without clearing it from `UiTweenScratch`** ⇒ **gate 8
+   reds** on leg (i): the next frame's reap replays a `(Entity, ComponentId)` for a row that is gone,
+   and after a despawn + id reuse it removes a channel from an unrelated entity.
+   *(New 2026-08-27, and deliberately NOT the "perform the removal inline in the tick" mutation an
+   earlier draft of this line proposed. That one is not runnable and its stated mechanism is wrong:
+   the removal needs `&mut EcsMaster` while the `Query` holds its borrow, so the mutation is a
+   BORROW-CHECK error rather than a Miri red — the same failure mode as red #2's original single-edit
+   form — and `dense_store.rs:186-190`'s `debug_assert!` guards insert-when-present, which is the
+   START path, not a removal. **If an implementer finds the inline shape does compile, that is a
+   finding and it escalates**, because AD5's reason for the deferral assumes it does not.)*
+9. Base the composition on `UiVisual::default()` instead of `*sink` ⇒ **gate 9 reds**
+   (`offset_px[0]` reads 0, not −400). *(New 2026-08-27, AD12.)*
+10. Replace the hand-written bytewise `PartialEq` with `#[derive(PartialEq)]` ⇒ **gate 10 reds**
+    (`[1,1,1]` instead of `[0,0,0]`). *(New 2026-08-27, AD11.)*
+11. Add `#[component(storage = "dense")]` to `UiVisual` ⇒ **gate 11 reds at COMPILE TIME**, and
+    **gate 2's `Or` half reds too** — the one mutation this rung has that reds two legs, because it is
+    the defect AM8 exists for. *(New 2026-08-27, AD10.)*
+
+**Measurement obligation — M4b (§4), carried here 2026-08-27.** §4 moved M4b to A1 on 2026-08-26 with
+the reason *"A0's text never carried the obligation at all"*, and A1's text then did not carry it
+either — the same failure, at the receiving rung. **A1 does not close until M4b's PAIR of numbers is
+written into this rung's landing note:** a running tween's `elapsed` advance across one synthetic
+2 000 ms frame delta, **clamped vs unclamped**, against A0's already-recorded `dt_real` 2.0 s / 0.1 s
+pair. It is a *reported comparison*, not gate 7's pass/fail assertion on the same subject — §4
+distinguishes the two deliberately, and the sibling precedent for getting this axis wrong is AM2 (2),
+which found §10.5's bench measuring the wrong axis as specified.
 
 ---
 
@@ -1156,7 +1622,17 @@ written back **into this document**, not into a commit message.
 |---|---|---|
 | Animating rows | 8 / 64 / 512 | §10.5 as specified |
 | **Resting rows** (`UiVisual` present, all channels absent) | **0 / 512 / 4096** | AM2 — the cost the specified bench is structurally blind to |
-| **Bystander rows** (same archetype, no `UiVisual`) | **0 / 4096** | AM2's seed-per-archetype term (`iter.rs:550-559`) |
+| ~~**Bystander rows** (same archetype, no `UiVisual`)~~ | ~~**0 / 4096**~~ | ~~AM2's seed-per-archetype term (`iter.rs:550-559`)~~ |
+
+⚠️ **The third axis is STRUCK, 2026-08-27 — under AD10 it is a bench axis that cannot vary.** It was
+derived from AM2's dense-include cost model, and AM8 refused the storage kind that model assumes. A
+**table** `Mut<UiVisual>` contributes an include bit (`data/mut_.rs:250-256`), so every row of every
+candidate archetype HAS `UiVisual` and "same archetype, no `UiVisual`" is unconstructible — an entity
+without the sink is in a DIFFERENT archetype and is never seeded. MEASURED: 2 sink rows + 2
+marker-only bystanders ⇒ **2** visits. The cited `iter.rs:550-559` per-row `dense_row_passes`
+rejection is real but belongs to the DENSE-include seeding path only. Left as a struck row rather
+than deleted, because an implementer who builds the axis measures a flat line and reports it as
+evidence.
 
 **Gate.**
 1. The bench builds and runs; the numbers land in §4's table below with the machine and toolchain
@@ -1167,8 +1643,14 @@ written back **into this document**, not into a commit message.
    TODO. Shipping it unmeasured would be the "arithmetic instead of a measurement" failure D23 refuses
    elsewhere.
 3. **The all-`None` early-out is priced:** the `resting = 4096, animating = 8` cell is run with and
-   without the `continue`, and both numbers are recorded. This is the second, quantitative proof of
-   A1's red mutation #2.
+   without the `continue`, and both numbers are recorded. ~~This is the second, quantitative proof of
+   A1's red mutation #2.~~ **This is the ONLY proof of AM2 (1), 2026-08-27** — A1's red mutation #2
+   pointed at a change-detection gate and could not fire (AD12), because AM2 (1) is a **cost** claim
+   and gate 3 cannot observe cost. **Pricing it is not licence to delete it:** under
+   `#[derive(PartialEq)]` the `continue` is also the only thing containing a NaN in the sink
+   (AD5 (c), MEASURED `[0,0,0]` with vs `[1,1,1]` without), and under AD11's bytewise equality the two
+   concerns are independent. If the number says the `continue` is free, it stays anyway and the
+   measurement is recorded as the reason it *could* have gone — it is not deleted.
 
 **RED MUTATION.** Not applicable in the usual sense — a bench has no green to falsify. **The
 substitute gate:** the bench must, on first run, show a **monotone** increase with the resting axis.
@@ -1186,27 +1668,37 @@ interaction plans.
 | # | Claim under test | Instrument | Discriminating comparison | Rung |
 |---|---|---|---|---|
 | **M1** | §10.4 — the tier table is real, and FLIP bounds Tier-3 | `LayoutScratch::relayout_count`, promoted out of `#[cfg(test)]` | The five legs in A7's table. Tier-1/2 **must be 0**; FLIP **must be exactly 2 × roots**; raw Tier-3 is reported | A7 |
-| **M2** | §10.5 — the tween tick cost, **on the axis AM2 found** | criterion, `boyko_ui/benches/ui_animation.rs` | animating × resting × bystander, per A8's table; and the with/without-`continue` pair at `(8, 4096, 0)` | A8 |
-| **M3** | AD7 — the hit-test fold costs zero when nothing animates | the probe counter the interaction plan builds for §10.8 (`get_component` calls per node per frame in the focus pass) | Same tree, `UiVisual` live-count 0 vs 1. The zero case **must be unchanged** from the pre-A6 baseline | A6 |
+| **M2** | §10.5 — the tween tick cost, **on the axis AM2 found** | criterion, `boyko_ui/benches/ui_animation.rs` | animating × resting ~~× bystander~~, per A8's table; and the with/without-`continue` pair at `(8, 4096)`. *(The bystander axis is struck 2026-08-27 — unconstructible under AD10's table sink; see A8.)* | A8 |
+| **M3** | AD7 — the hit-test fold costs zero when nothing animates | the probe counter the interaction plan builds for §10.8 (`get_component` calls per node per frame in the focus pass) | Same tree, ~~`UiVisual` live-count 0 vs 1~~ **no archetype carrying `UiVisual` vs one** *(2026-08-27: `live_count()` is a `DenseStore` verb and AD10 makes `UiVisual` a table component — `DenseRegistry::store` returns `None` for it, silently, forever; AD7's guard and this comparison are both restated on the archetype-level check)*. The zero case **must be unchanged** from the pre-A6 baseline | A6 |
 | **M4** | AM6 — the UI clamp is doing something | `dt_real` at a synthetic 2 000 ms delta | Clamped vs unclamped, **both numbers written into the rung's landing note** | A0 |
-| **M4b** | AM6 — and the clamp is doing something *visible* | the same synthetic delta, with one tween running | ~~the resulting tween `elapsed` delta~~ — moved here 2026-08-26: no tween exists at A0 (`UiVisual` and the four `Tween*` land at A1), so half of M4 was unmeasurable at the rung it was assigned to, and A0's text never carried the obligation at all — leg 3 is a pass/fail assertion, not a reported comparison | A1 |
+| **M4b** | AM6 — and the clamp is doing something *visible* | the same synthetic delta, with one tween running | ~~the resulting tween `elapsed` delta~~ — moved here 2026-08-26: no tween exists at A0 (`UiVisual` and the four `Tween*` land at A1), so half of M4 was unmeasurable at the rung it was assigned to, and A0's text never carried the obligation at all — leg 3 is a pass/fail assertion, not a reported comparison. **The axis, stated 2026-08-27 because A1's text did not carry the obligation either:** a running tween's `elapsed` advance across ONE synthetic 2 000 ms frame delta, **clamped vs unclamped**, both numbers written into A1's landing note, against A0's already-recorded `dt_real` 2.0 s / 0.1 s pair | A1 |
 
 **M2's results table** *(to be filled by A8 — empty until then, and the rung does not close while it
 is empty)*:
 
-| animating | resting | bystanders | ns/frame | ns/frame, no early-out |
-|---|---|---|---|---|
-| 8 | 0 | 0 | — | — |
-| 8 | 4096 | 0 | — | — |
-| 64 | 512 | 4096 | — | — |
-| 512 | 4096 | 4096 | — | — |
+| animating | resting | ns/frame | ns/frame, no early-out |
+|---|---|---|---|
+| 8 | 0 | — | — |
+| 8 | 4096 | — | — |
+| 64 | 512 | — | — |
+| 512 | 4096 | — | — |
+
+*(the `bystanders` column is struck 2026-08-27 with A8's third axis — see there.)*
 
 ---
 
 ## 5 · Mandatory tests, invariants and benches
 
-**Unit.** `ui_visual_default_is_the_identity` + `ui_visual_does_not_derive_default` (two routes,
-neither implying the other) · `size_of`/`align_of`/`offset_of!` pins on `UiVisual` and all four
+**Unit.** `ui_visual_default_is_the_identity` + ~~`ui_visual_does_not_derive_default`~~
+**`ui_visual_identity_const_matches_its_literals`** (two routes, neither implying the other — *renamed
+2026-08-27: the struck name promises a compile-time absence no Rust test can assert, because a derived
+and a hand-written `impl Default` are the same trait impl; AD6 lands `UiVisual::IDENTITY` so a real
+second route exists*) · **`ui_visual_partial_eq_is_bytewise` (AD11 — the plateau-tween-over-NaN leg,
+`[0,0,0]`)** · **`ui_visual_is_a_table_component` + `tween_channels_are_dense` (AD10, const-asserted,
+the `occlusion_marker.rs:171-176` idiom)** · **`the_tick_composes_from_the_sink` (AD12 — a finished
+`TweenOffset` survives a later `TweenTint`)** · **`restarting_a_channel_replaces_and_rewinds_it`
+(A1 gate 5 — the property `live_count()` cannot see)** ·
+`size_of`/`align_of`/`offset_of!` pins on `UiVisual` and all four
 `Tween*` · `easing_endpoints_are_exact` (all 30) · `easing_midpoint_oracle` (all 30) ·
 `easing_monotone_where_it_should_be` / `easing_overshoot_is_bounded` · `linear_three_ids_one_body` ·
 `easing_custom_boundary_is_const_asserted` · `state_tint_array_is_three` ·
@@ -1230,7 +1722,16 @@ value after every sequence. Over random trees: AD3's composition is associative
 **`debug_assert!`.** `inv_duration.is_finite() && inv_duration > 0.0` at insert (a zero duration is
 the reciprocal-of-zero trap the `inv_duration` field creates) · `opacity` within `[0, 1]` at fold
 time · `scale` finite and non-negative · `elapsed >= 0.0` · the fold's output `min_px`/`size_px`
-finite before the instance write (mirroring `pack_ui_instance`'s existing finite assert).
+finite before the instance write (mirroring `pack_ui_instance`'s existing finite assert) ·
+**`tint_mul` and `offset_px` at the SINK, added 2026-08-27** — the list covered every field but the
+two the public helpers take straight from an author.
+
+⚠️ **None of these is the NaN defence, and §5 must not be read as one.** They all compile out in
+release, and this branch has recorded that *a rule about RELEASE behaviour is ungatable in debug*.
+The release-side answer is **AD11**: the sink's bytewise `PartialEq` makes `set_if_neq` idempotent
+under NaN, so a NaN that reaches `UiVisual` is a wrong picture on one node rather than a render gate
+disarmed for the whole UI on every frame forever. The `debug_assert!`s stay because they name the
+authoring mistake at the site that made it.
 
 **Benches.** `ui_animation.rs`: the tick over A8's three axes; the fold arithmetic in isolation
 (`pack_ui_instance` with and without a visual); the transition apply at 100 / 1 000 `UiStateTint`
@@ -1288,6 +1789,18 @@ adds **one**, not two: `UiSpriteSheet` alone, because `UiSpriteAnim` is author c
 never reads and `UiSpriteCursor` is the flipbook's private state. **The flat arity therefore runs
 6 → 7 (S5) → 8 (`UiVisual`) → 9 (the interaction plan's scroll datum), against a ceiling of 12.**
 
+**R4's real finding survives, gets sharper, and is now RULED ON — see AM8 / AD10 (2026-08-27).** Two
+things this paragraph left open are closed there: the sink IS a table component (it was written as a
+condition, *"if this plan intends …"*, and this plan does intend it), and the alternative it offers —
+*"or each tween system bumps `UiRenderGeneration` at its own writer"* — **does not compile**:
+`UiRenderGeneration` lives in `boyko_render` (`ui/pack.rs:883`), `ui_visual_tick` lands in
+`boyko_ui::animation`, and the dependency runs `boyko-render → boyko-ui`
+(`boyko_render/Cargo.toml:80-82`, which states the acyclicity as a rule) while `boyko-ui` names no render crate. There is no fork. **And the
+mitigation this risk hands to the seam rung grows a third item: AD13**, the const-assert arm on
+`ui_pack_inputs!` that turns a dense pack input into a build error — because prose at the macro
+(`gather.rs:84-89`) is exactly the "gate that cannot fail" shape, and animation is the second
+subsystem to walk into it.
+
 **R4's real finding survives and gets sharper, though — and it is now a HARD constraint rather than a
 budget worry.** ⚠️ A **dense** `Changed<C>` inside `Or<..>` can never be true, MEASURED on this tree:
 the `Or` `QueryFilter` impl overrides none of the dense hooks (`HAS_DENSE`, `HAS_DENSE_INCLUDE`,
@@ -1337,6 +1850,8 @@ type-level test cannot see a panic that lives in `init_state`.
 | **D31 — `boyko_render::ui::gather_ui_nodes`** and the macro-spelled pack-input set | `docs/UI-PLAN-SPRITES.md` (seam rung) | **A4, A5** | A0–A3 still land; nothing animates on screen (R1) |
 | **D6 / D6b — the per-slot generation gate + `ui_render_discovery` as its single bump site** | `docs/UI-PLAN-SPRITES.md` (seam rung) | **A4** | AM1's `Mut<UiVisual>` write has nothing watching it; animation is invisible even after A4 |
 | **The `Or` arity fix in D6b's macro (R4)** | `docs/UI-PLAN-SPRITES.md` (seam rung) | **A4** | First-frame panic once `UiVisual` becomes the 13th term |
+| **AD13 — the `storage` const-assert arm on `ui_pack_inputs!`** *(added 2026-08-27)* | `docs/UI-PLAN-SPRITES.md` (seam rung), or A4 if it lands first | **A4** | Nothing reds at A4; the guard against the defect AM8 found stays a doc comment, and the next subsystem to add a dense pack input gets a frozen picture with nothing saying so |
+| **The `probes/node = 8.00` prose in `ui_s0_measure.rs:240`** *(added 2026-08-27)* | this plan, at A4 | **A4** | `ui_pack_inputs!(count)` is DERIVED, so `ui_s0_discovery.rs:499-500`'s `PROBES_PER_NODE = PACK_INPUTS + 1` moves by itself when `UiVisual` becomes the eighth member — but the hand-written **8.00** in the measurement harness's doc comment does not, and `:245` already names leg (b) as blocked on this plan |
 | **`impl Default for PackInput` + the 11 literal conversions** | whichever of A4 / sprites' pack rung lands **first** | **A4** | Both plans churn the same 11 test sites |
 | **D7 — the `.ui` registration table** | ~~`docs/UI-PLAN-SPRITES.md` (rung 1)~~ **NOBODY** — or wherever it is sequenced | **A3** (only for authoring `UiStateTint` in `.ui`) | A3 lands with `UiStateTint` inserted from Rust only; the `.ui` spelling follows. *(2026-08-26, `UI-PLAN-SPRITES.md` S-D20 (7) — **D7 has no owning document.** This row, `UI-PLAN-SPRITES.md` §0, `UI-PLAN-ANIMATION.md:846` and `UI-PLAN-INTERACTION.md:501` each name a different owner or none, and no rung in any ladder lands it. SCOPE call filed in `docs/OPEN-QUESTIONS.md`.)* `UI-PLAN-SPRITES.md` §0 explicitly **Rejected** owning D7, so this cell pointed at a refusal. |
 | **`collect_candidates`' post-D16/D17 shape** | `docs/UI-PLAN-INTERACTION.md` | **A6** | Merge conflict, not a design gap — see A6's coordination note |
@@ -1347,7 +1862,7 @@ type-level test cannot see a panic that lives in `init_state`.
 | Exposed | Consumed by |
 |---|---|
 | `UiClock` — ~~the one UI delta source~~ **the one UI FRAME-DELTA source**, clamped, real/virtual (AD1) | Sprites plan (the `UiSpriteCursor` flipbook — **migrated by A0b, reading `dt_virtual`**); interaction plan (`ScrollMomentum`, `HoverDwell` — **neither exists in the tree; `grep -rn` returns nothing for either**, so this cell names planned consumers, not current ones). **Fallback, recorded because this row previously implied there was none:** the sprites plan landed first, so `ui_sprite_flipbook` takes `Res<Time>` and applies AD1's clamp itself at that one site as `UI_FALLBACK_MAX_DELTA = 0.1`; ~~the replacement swaps one `SystemParam` and deletes one `min`. It does **not** adopt the raw `real_delta()` AD1 rejects.~~ **The replacement is A0b, and the field is `dt_virtual` (AD9 (1)) — named here 2026-08-26 because neither document named it, and "not the RAW `real_delta()`" left CLAMPED `dt_real` — the documented default — squarely permitted. `dt_real` reds two legs of the shipped `g5_2_the_clock_fallback_is_clamped_scaled_and_pause_aware`: a paused game animates and `set_relative_speed` stops working. `dt_virtual` reproduces `ui_sprite_flipbook`'s pre-A0b inline `min` *(DELETED by A0b; deliberately unanchored — a coordinate into deleted state resolves to whatever live line now occupies it)*'s arithmetic exactly, so the promise "one `SystemParam` swapped, one `min` deleted" is true only of that field.** *(`UI-PLAN-SPRITES.md` **S-D17**, 2026-08-21 — the sprites plan had named the rejected option as its fallback, so the dependency read as satisfied here and as waived there; the 2026-08-26 landing correction that chose the VIRTUAL delta was applied to the sprites plan only, and the two owner-facing documents then diverged on the axis that decides whether a paused game keeps animating.)* **`UiClock` is not the crate's only clock**: `reload/system.rs:55` throttles the hot-reload file poll on a `std::time::Instant`, a wall clock consuming no frame delta and deliberately outside this rule. |
-| `UiVisual` — the Tier-1/2 sink, and its **identity** default (AD6) | Sprites plan (the pack fold reads it; the sprite lane's future `uv_shift`, AM5) |
+| `UiVisual` — the Tier-1/2 sink, **a TABLE component** (AM8/AD10), its **identity** default (AD6) and its **bytewise** `PartialEq` (AD11) | Sprites plan (the pack fold reads it; the sprite lane's future `uv_shift`, AM5). **The storage kind is part of the contract, not an implementation detail:** the pack-input macro's promise — *"adding a component to `ui_pack_inputs!` wires the discovery filter for free"* — holds for table components only (`gather.rs:84-89`), so a later change of `UiVisual`'s storage silently unwires the repaint. AD13's const-assert is what makes that a build error instead. |
 | AD3's affine + AD4's composition rule | Sprites plan (nine-slice sub-quads must use the origin-relative form, AM3); interaction plan (A6's hit-test fold) |
 | `EasingId` + the built-in family + the LUT table (AD2) | **Aether plan** — the `ui` construct's easing spelling is `family-direction` name → `EasingId`, a closed 30-name set plus a custom handle |
 | `UiStateTint`'s field list and its 3-state array (D14/A3) | **Aether plan** — the `on hover:` / `on press:` styling surface lowers to this component and nothing else |

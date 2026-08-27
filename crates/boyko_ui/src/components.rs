@@ -10,7 +10,7 @@
 
 use core::cmp::Ordering;
 
-use boyko_macros::Component;
+use boyko_macros::{Bundle, Component};
 
 use crate::units::{AlignCross, AlignMain, LayoutType, PositionType, Unit};
 
@@ -989,3 +989,322 @@ impl Default for UiAnchor {
 #[repr(transparent)]
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct UiSourceOrder(pub u32);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UI-ADVANCED rung A1 — the animation sink and the four tween channels
+// (`docs/UI-PLAN-ANIMATION.md` A1, AD3, AD6, AD10, AD11, AD12, AM5, AM8).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// An easing curve identifier (AD2): a `u8` with a reserved custom half.
+///
+/// `0..=29` are the built-in `family * 3 + direction` ids (RmlUi's ten families
+/// × in/out/in-out); `30..=127` are reserved; `128..=255` are custom curves,
+/// whose LUT index is `id - 128`. The custom test is therefore `id & 0x80` — one
+/// branchless bit, never a comparison against a mutable table length.
+///
+/// # A1 lands the TYPE, not the table
+///
+/// Rung A1 is **linear only**: the field exists, every tween carries one, and
+/// [`ui_visual_tick`](crate::animation::ui_visual_tick) applies the raw
+/// normalized `t`. Rung A2 lands the thirty built-in bodies and the const-assert
+/// that holds the custom boundary. The split is deliberate — A1's gates test the
+/// machinery and A2's gates test the curves, so a red at A2 cannot be blamed on
+/// A1.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub struct EasingId(u8);
+
+impl EasingId {
+    /// `linear` (family 0, direction 0). The only curve rung A1 evaluates.
+    pub const LINEAR: EasingId = EasingId(0);
+
+    /// The bit that separates a built-in id from a custom LUT index (AD2).
+    pub const CUSTOM_BIT: u8 = 0x80;
+
+    /// Wraps a raw id. No validation: `128..=255` is the custom half by
+    /// construction and `30..=127` is reserved, so there is no invalid `u8`.
+    #[inline]
+    pub const fn from_raw(raw: u8) -> Self {
+        EasingId(raw)
+    }
+
+    /// The raw id.
+    #[inline]
+    pub const fn raw(self) -> u8 {
+        self.0
+    }
+
+    /// Whether this id addresses the custom curve table (`id & 0x80`).
+    #[inline]
+    pub const fn is_custom(self) -> bool {
+        self.0 & Self::CUSTOM_BIT != 0
+    }
+}
+
+/// Bit 0 of a tween row's `flags`: advance this row on the UI clock's VIRTUAL
+/// delta instead of its real one (D15's per-row opt-in, AD1 reason (4),
+/// AD9 (1)).
+///
+/// The tween lane is the ONE lane that carries this bit, and it is what makes
+/// [`UiClock::dt_real`](crate::animation::UiClock::dt_real) reachable at all: a
+/// consumer WITHOUT the bit reads `dt_virtual`, full stop (AM7 / AD9). Set it on
+/// a tween that should pause with the game and slow in slow-motion; leave it
+/// clear on a tween whose whole purpose is to run while the game is paused — the
+/// pause-menu fade D15 exists for.
+pub const TWEEN_FLAG_VIRTUAL_CLOCK: u8 = 1 << 0;
+
+/// The animation SINK: one node's composed visual transform, read by the pack
+/// fold (A4) and the hit-test fold (A6).
+///
+/// # It is a TABLE component, and that is the rung's headline decision (AD10)
+///
+/// A dense sink is written correctly, read correctly — and is INVISIBLE to
+/// `ui_render_discovery`'s `Or<(Changed<C1>, …)>`, because the kernel's `Or`
+/// overrides none of the dense hooks (`HAS_DENSE` takes the trait default
+/// `false` and the inner term's fetch stays null). MEASURED: the same
+/// `Mut::set_if_neq` write is seen by a bare `Changed` (1 row) and not by the
+/// discovery filter's `Or` (0 rows) for a dense sink; a table sink is seen by
+/// both. The failure mode is a frozen picture with no panic, no error and no
+/// failing assertion — so the storage kind is const-asserted below rather than
+/// merely documented.
+///
+/// The four `Tween*` channels stay DENSE for the opposite reason: nothing
+/// filters them, `AnyOf` DOES forward `HAS_DENSE`/`resolve_dense` to its arms,
+/// and they churn once per animation. The sink never churns — it is inserted
+/// once per element that ever animates and is never removed (its last value IS
+/// the resting appearance), so a table sink costs exactly one archetype
+/// migration per animated element, ever. This is the shipped
+/// [`UiSpriteSheet`] : [`UiSpriteCursor`] split, one rung later.
+///
+/// # Its `Default` is the IDENTITY and its `PartialEq` is BYTEWISE
+///
+/// Neither is derived, and each absence is a decision — see [`UiVisual::IDENTITY`]
+/// (AD6) and the hand-written [`PartialEq`] impl (AD11).
+///
+/// # Layout (AM5)
+///
+/// 24 B, `#[repr(C)]`, POD `Copy`. D9's `uv_shift: [f32; 2]` is deliberately
+/// ABSENT: no v1 channel writes it, and removing it takes this plan's shader
+/// exposure to exactly zero.
+#[repr(C)]
+#[derive(Component, Clone, Copy, Debug)]
+pub struct UiVisual {
+    /// Straight (non-premultiplied) RGBA8 tint, multiplied component-wise into
+    /// the node's colour before the pack's premultiply (AD3).
+    pub tint_mul: u32,
+    /// Scalar opacity, multiplied down the inheritance stack (AD3/AD4) and
+    /// folded into the existing premultiply.
+    pub opacity: f32,
+    /// Origin-relative translation in logical pixels (AD3's `o`).
+    pub offset_px: [f32; 2],
+    /// Origin-relative scale about the node's rect centre (AD3's `s`).
+    pub scale: [f32; 2],
+}
+
+const _: () = assert!(size_of::<UiVisual>() == 24);
+const _: () = assert!(align_of::<UiVisual>() == 4);
+const _: () = assert!(core::mem::offset_of!(UiVisual, tint_mul) == 0);
+const _: () = assert!(core::mem::offset_of!(UiVisual, opacity) == 4);
+const _: () = assert!(core::mem::offset_of!(UiVisual, offset_px) == 8);
+const _: () = assert!(core::mem::offset_of!(UiVisual, scale) == 16);
+
+// A1 gate 11 (AD10 / AD13), the `occlusion_marker.rs` idiom verbatim: the
+// storage kind is a BUILD ERROR when it is wrong, not a comment. `dense` is the
+// non-signature backend — it drops the id from every archetype signature, leaves
+// it without a per-archetype `ComponentPool`, and (this is the one that matters
+// here) is invisible to every `Changed<C>` nested inside an `Or<..>`.
+const _: () = assert!(
+    !<UiVisual as ::boyko_ecs::ecs::core::component::component::Component>::STORAGE_IS_DENSE,
+    "UiVisual MUST be a table component (AD10): a dense Changed<C> inside Or<..> was MEASURED \
+     never to fire on this kernel, and UiVisual is a term of ui_render_discovery's Or from rung \
+     A4 onwards — a dense sink renders a frozen picture with nothing saying so"
+);
+
+impl UiVisual {
+    /// The identity visual: no tint, fully opaque, no offset, unit scale.
+    ///
+    /// The SECOND route into the default value (AD6). `Default` returns this
+    /// const, and gate 4 compares the two against literals written into the
+    /// test — two spellings that neither derives from the other, the
+    /// `default_mode_is_off` precedent. A node with NO `UiVisual` row folds by
+    /// exactly these bytes, which is A4's disarmed gate.
+    pub const IDENTITY: UiVisual = UiVisual {
+        tint_mul: 0xFFFF_FFFF,
+        opacity: 1.0,
+        offset_px: [0.0; 2],
+        scale: [1.0; 2],
+    };
+}
+
+impl Default for UiVisual {
+    /// [`UiVisual::IDENTITY`] — hand-written, never derived (AD6).
+    ///
+    /// A derived `Default` gives `tint = 0` (transparent black), `opacity = 0`
+    /// and `scale = [0, 0]`: an element that inserts a `UiVisual` and animates
+    /// nothing becomes an invisible zero-sized node. That is a two-line decision
+    /// which costs an afternoon when it is discovered from a screenshot instead.
+    #[inline]
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
+
+impl PartialEq for UiVisual {
+    /// BITWISE, not `f32`'s `PartialEq` (AD11).
+    ///
+    /// `Mut::set_if_neq` is the render gate's only throttle, and the derived
+    /// float equality has an exception nothing states: `NaN != NaN`, so ONE NaN
+    /// anywhere in the sink makes `set_if_neq(THE SAME BYTES)` write and bump on
+    /// EVERY frame. One such row bumps `UiRenderGeneration` — a single global
+    /// counter — so the per-slot upload skip is disarmed for the WHOLE UI,
+    /// permanently. MEASURED on a plateau tween (`from == to`, which an author
+    /// writes whenever a transition targets the state it is already in) over a
+    /// sink carrying one NaN: `[0, 0, 0]` bytewise vs `[1, 1, 1]` derived.
+    ///
+    /// A NaN is reachable in RELEASE without any kernel bug: the `debug_assert!`s
+    /// at the authoring sites all compile out and the public start helpers take
+    /// author `from`/`to` values with no release-side filter.
+    ///
+    /// The `± 0.0` trade is on the record: bytewise equality calls `+0.0` and
+    /// `−0.0` different, so a channel landing on `−0.0` where `+0.0` stood costs
+    /// ONE extra bump — one frame, not a state. The derived form's NaN case costs
+    /// every frame, forever. This is the direction the trade must run.
+    #[inline]
+    fn eq(&self, o: &Self) -> bool {
+        self.tint_mul == o.tint_mul
+            && self.opacity.to_bits() == o.opacity.to_bits()
+            && self.offset_px[0].to_bits() == o.offset_px[0].to_bits()
+            && self.offset_px[1].to_bits() == o.offset_px[1].to_bits()
+            && self.scale[0].to_bits() == o.scale[0].to_bits()
+            && self.scale[1].to_bits() == o.scale[1].to_bits()
+    }
+}
+
+/// Generates one `Tween*` channel column: the struct, its layout pins, its
+/// dense-storage const-assert, and its `#[derive(Bundle)]` wrapper.
+///
+/// Four channels with identical bookkeeping (`elapsed`, `inv_duration`,
+/// `easing`, `flags`) and one differing payload type. The macro is here so the
+/// four cannot drift: a field added to the bookkeeping is added to all four, and
+/// the storage-kind assert is emitted per channel rather than remembered per
+/// channel.
+macro_rules! tween_channel {
+    (
+        $(#[$meta:meta])*
+        $name:ident, $payload:ty, $size:expr, $bundle:ident, $bundle_field:ident
+    ) => {
+        $(#[$meta])*
+        ///
+        /// # Storage: DENSE, and safe here for one stated reason (AD10)
+        ///
+        /// **Nothing filters a `Tween*`.** No channel is a member of
+        /// `ui_pack_inputs!`, nothing reads `Changed<Tween*>`, and no channel
+        /// appears in any `Or<..>` in this plan — so the kernel's `Or` blindness
+        /// to dense terms (AM8) cannot reach them. `AnyOf`, which the fused tick
+        /// DOES use, forwards `HAS_DENSE` and `resolve_dense` to every arm, so a
+        /// dense arm resolves its store and yields `Some`/`None` per row
+        /// correctly. Dense also keeps the per-animation insert/reap churn out of
+        /// every archetype signature, which is exactly what
+        /// [`UiSpriteCursor`]'s own dense decision was for.
+        ///
+        /// # `#[require]` may NOT point at this type
+        ///
+        /// MEASURED on this kernel: the require pass resolves the required id's
+        /// `ComponentPool` in the target ARCHETYPE, and a dense id owns none, so
+        /// `#[require(<a dense type>)]` PANICS at insert. The sink arrives by the
+        /// `on_add` hook below instead — the `UiSpriteAnim` → `UiSpriteCursor`
+        /// route, in the opposite direction.
+        #[repr(C)]
+        #[derive(Component, Clone, Copy, Debug, PartialEq)]
+        #[component(storage = "dense", on_add = crate::animation::ui_visual_sink_on_add)]
+        pub struct $name {
+            /// The value at `elapsed == 0`.
+            pub from: $payload,
+            /// The value at `elapsed >= duration`, ASSIGNED exactly at the
+            /// endpoint (never `to ± ULP` — the endpoint is assigned, not
+            /// interpolated).
+            pub to: $payload,
+            /// Seconds since the tween started.
+            pub elapsed: f32,
+            /// `1.0 / duration_secs`. Stored reciprocal so the per-row tick is a
+            /// multiply rather than a divide; the zero-duration trap it creates
+            /// is caught by a `debug_assert!` at the authoring site, where the
+            /// mistake was made.
+            pub inv_duration: f32,
+            /// Which curve (AD2). Rung A1 evaluates LINEAR only.
+            pub easing: EasingId,
+            /// Per-row flags. Bit 0 is [`TWEEN_FLAG_VIRTUAL_CLOCK`].
+            pub flags: u8,
+            /// Explicit tail padding (the [`UiNineSlice::_pad`] rule).
+            pub _pad: [u8; 2],
+        }
+
+        const _: () = assert!(size_of::<$name>() == $size);
+        const _: () = assert!(align_of::<$name>() == 4);
+        const _: () = assert!(core::mem::offset_of!($name, from) == 0);
+
+        // A1 gate 11 (AD10): the channels are the half of the split that MUST be
+        // dense. Plain storage here would put four ids into every animated
+        // node's archetype signature and pay four migrations per animation start
+        // and four more per completion, on the pass that starts every hover.
+        const _: () = assert!(
+            <$name as ::boyko_ecs::ecs::core::component::component::Component>::STORAGE_IS_DENSE,
+            "the Tween* channels MUST be dense (AD10): they are inserted and reaped per \
+             animation, nothing filters them, and AnyOf — unlike Or — forwards the dense hooks"
+        );
+
+        /// A one-field `#[derive(Bundle)]` wrapper, so an insert verb can take
+        /// the channel at all.
+        ///
+        /// Not a style choice, and MEASURED one file over: dense storage
+        /// SUPPRESSES the single-component `Bundle` impl the derive normally
+        /// emits (`boyko_macros`' `component.rs` gates `bundle_items` on
+        /// `no_bundle || storage_bitset || storage_dense`), so
+        /// `insert(TweenTint { .. })` is `error[E0277]: the trait bound
+        /// TweenTint: Bundle is not satisfied`. A wrapper bundle is the only
+        /// spelling that compiles — the same
+        /// [`SpriteCursorBundle`](crate::sprite) idiom.
+        #[derive(Bundle, Clone, Copy, Debug)]
+        pub struct $bundle {
+            /// The channel row.
+            pub $bundle_field: $name,
+        }
+    };
+}
+
+tween_channel!(
+    /// Tween channel: the node's [`UiVisual::tint_mul`], interpolated
+    /// component-wise in STRAIGHT RGBA8 (AD3).
+    TweenTint,
+    u32,
+    20,
+    TweenTintBundle,
+    tween
+);
+
+tween_channel!(
+    /// Tween channel: the node's [`UiVisual::opacity`].
+    TweenOpacity,
+    f32,
+    20,
+    TweenOpacityBundle,
+    tween
+);
+
+tween_channel!(
+    /// Tween channel: the node's [`UiVisual::offset_px`] (AD3's `o`).
+    TweenOffset,
+    [f32; 2],
+    28,
+    TweenOffsetBundle,
+    tween
+);
+
+tween_channel!(
+    /// Tween channel: the node's [`UiVisual::scale`] (AD3's `s`).
+    TweenScale,
+    [f32; 2],
+    28,
+    TweenScaleBundle,
+    tween
+);

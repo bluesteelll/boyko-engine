@@ -330,9 +330,27 @@ it.
 Two in-flight plans were writing against the property this refutes.
 `UI-ADVANCED-ARCHITECTURE.md`'s tier table listed the **dense** `UiSpriteCursor` as "a term of
 `ui_render_discovery`'s `Or<…>`", and `UI-PLAN-ANIMATION.md` plans `UiVisual` as a dense include
-(`AM2`, `:112`) while `ui_render_discovery`'s filter is a flat `Or` — so `Changed<UiVisual>` would
+(`AM2`, ~~`:112`~~ — the claim is the *cost model* paragraph, not the bench-axis line the anchor
+pointed at) while `ui_render_discovery`'s filter is a flat `Or` — so `Changed<UiVisual>` would
 have been dead too, and the symptom in both cases is a frozen picture with no error, no panic and no
-failing assertion. Both documents are amended.
+failing assertion. ~~Both documents are amended.~~
+
+⚠️ **"Both documents are amended" was FALSE for the `UiVisual` half, and stayed false for six days.**
+Verified 2026-08-27 at the A1 pre-build audit: `UI-PLAN-ANIMATION.md`'s AM2 still asserted
+*"`Mut<UiVisual>` is a dense include"* and derived its whole per-frame cost model, A8's bystander
+bench axis and AD7's `dense_registry().store(UiVisual::component_id())` guard from it; A1's landing
+list named the storage kind of the four `Tween*` and **not** of the sink; and
+`UI-ADVANCED-ARCHITECTURE.md`'s D9 still spelled `#[component(storage = "dense")] pub struct
+UiVisual`. Only the `UiSpriteCursor` half had been applied — to the tier table's row 1, which names
+`UiVisual` in the same cell. The shipped tree, meanwhile, had ruled and said so:
+*"Animation adds `UiVisual` HERE (a table component — **the animation plan's own text is corrected to
+say so**)"* (`crates/boyko_render/src/ui/gather.rs:91-93`) — a claim about a document, made in source,
+and untrue at the moment it was written. **Both documents are amended NOW** (2026-08-27):
+`UI-PLAN-ANIMATION.md` **AM8** and **AD10** rule the sink TABLE and the four channels dense, with the
+measurement; `UI-ADVANCED-ARCHITECTURE.md`'s D9 attribute and D9b's query are struck and corrected in
+the same change. *(The lesson is the entry's own: a cross-document amendment is not landed when it is
+decided, and "amended" written in a shared record is a claim that needs the same verification as any
+other. This corpus is outside the anchors census's `GATED_DOCS`, so nothing reddened.)*
 
 ### The options, for the owner
 
