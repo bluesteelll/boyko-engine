@@ -1768,7 +1768,13 @@ fn planned_paths_are_reported_and_pinned() {
         // to this pin in the first place.)
         ("REFLECTION-PLAN-BOUNDARY.md", 1),
         ("REFLECTION-PLAN-CORE.md", 0),
-        ("REFLECTION-PLAN-ECS.md", 0), // 1 → 0 on 2026-08-26: EG1 built `ecs_alloc.rs`, the last marker this document carried. (2 → 1 the same day: EG0 built `seam_census.rs`.) Kept on ONE line: a bare `:1906-1941` fragment below cites this file and shifts silently.
+        // 0 → 3 on 2026-08-27, EG2 AUDIT (that rung's D26): the rung named FOUR public kernel
+        // items and NOT ONE FILE, so its whole test surface was invisible to this pin — it could
+        // not go 1 → 0, could not go stale, and nothing would have redded if the tests were never
+        // written. The three are `ecs_master/seam_by_id.rs`, `boyko_ecs/tests/seam_by_id.rs` and
+        // the `seam_pass` corpus that EG2's gate 11 migrates the flipped fixtures into. Back to 0
+        // when EG2 lands, markers off in the same commit (D25: the marker half is not self-checking).
+        ("REFLECTION-PLAN-ECS.md", 3), // was 1 → 0 on 2026-08-26: EG1 built `ecs_alloc.rs`, the last marker this document carried. (2 → 1 the same day: EG0 built `seam_census.rs`.) Kept on ONE line: a bare `:1906-1941` fragment below cites this file and shifts silently.
         // 4 → 3 on 2026-08-26: CORE C9 built G5's `reflect_compile_fail.rs`, so its
     // `doc-path-planned` marker came off in the same edit as this decrement.
     ("REFLECTION-PLAN-GATES.md", 3),

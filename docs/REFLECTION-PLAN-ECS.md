@@ -234,12 +234,24 @@ not fixed here. §9 records the disposition.)*
 |---|---|---|---|
 | S1 | `EcsMaster::add_component_by_id(&mut self, e: Entity, id: ComponentId, bytes: &[u8]) -> AddOutcome` | F9 + F11: the ZST attach helper asserts size-0; the data attach helper is generic over `Bundle`. Nothing in the tree attaches a data component by id. | **Yes** — scene loading, prefab instantiation, undo/redo and network apply all want a by-id data attach; today each would have to be generic over the component set. `add_tag` proves the signature can be pure `Entity` + `ComponentId` + bytes and name no reflection type. |
 | S2 | `EcsMaster::remove_component_by_id(&mut self, e: Entity, id: ComponentId) -> bool` | F10 + F12: the data-general detach helper exists and is correct; it is `pub(crate)`. | **Yes** — the exact twin of the already-public `remove_tag`, generalised off the ZST restriction it never actually needed. |
-| S3 | `EcsMaster::mark_component_changed(&mut self, e: Entity, id: ComponentId) -> bool` | F14 + F15: no by-id change-tick write exists, so a table-path `set_field` is invisible to `Changed<T>`. | **Yes** — the write twin of the already-public `get_component_changed_tick`; any by-id writer (scene apply, replication) has the same hole. |
+| S3 | `EcsMaster::mark_component_changed(&mut self, e: Entity, id: ComponentId) -> bool` | F14 + F15: no by-id change-tick write exists, so a table-path `set_field` is invisible to `Changed<T>`. | **Yes** — the write twin of the already-public `get_component_changed_tick`; any by-id writer (scene apply, replication) has the same hole. ⚠️ **The twin is ASYMMETRIC (D26):** the READ has no dense arm — `get_component_changed_tick` (`component_api.rs:337`) resolves `pools.get_pool(id)?` and a dense id has no per-archetype pool, so it returns `None` for every dense component — while S3 is specified for both. Any dense assertion about S3 must therefore be made through a `Changed<T>` **query**, never through the read this row calls its twin (EG2 gate 7). |
 | ~~S4~~ **S4′** | `EnableTagId::try_from_component_id(id: ComponentId) -> Option<Self>` — `None` unless `storage_kind(id) == Bitset` (lands in `component_registry::tags`, not on `EcsMaster`) | F16 + **F27**: `is_enabled_id` / `enable_id` / `disable_id` all need an `EnableTagId`, which has no reverse constructor, and the by-name re-mint route **writes the wrong bit**. Both the read half and the write half need this. | **Yes** — it is the inbound half of a bridge the crate already advertises outbound (`EnableTagId::component_id()`, *"bridges to the shared `ComponentId` space"*) and already tests internally (`enable_tag_id_bridges_to_component_id_round_trip`, `component_registry/mod.rs:1676`). It is total, safe, `storage_kind`-checked, and mints **no capability the crate does not already have** — every enable/disable it unlocks is reachable from inside `boyko_ecs` today. |
 
 **S1's return type is an enum, not a `bool`.** `enum AddOutcome { Added, AlreadyPresent, Rejected(RejectReason) }` where `RejectReason` covers `{ EntityDead, WrongByteLen, NotTableOrDense, GpuResident }`. An editor's "Add Component" must **refuse** rather than clobber a present value; `add_tag`'s in-place-replace semantics are right for a tag (zero bytes to lose) and wrong for data.
 
-**S1's implementation is a bytes-carrying sibling of `migrate_entity_attach_ids`, not a widening of it** — see **D9**. `add_component_by_id` follows `add_tag`'s choreography verbatim (F13): inland resolve → silent no-op on stale → `DeferredScopeGuard::enter()` → presence test on the source signature → `merged_archetype_id_dyn` → `migrate_entity_attach_ids_with_bytes` → `drop(scope)` → `drain_deferred_hook_queue()`. Dense ids route instead to the already-existing `dense_insert_and_fire` (`component_api.rs:94`), which already fires `on_add` + `on_insert` and already takes `&[u8]`.
+**S1's implementation is a bytes-carrying sibling of `migrate_entity_attach_ids`, not a widening of it** — see **D9**, which SURVIVES this audit: the sibling is writable with the original byte-identical, because every private helper it needs (`read_source_enable_bits`, `write_target_enable_bits`, `fire_enable_column_alloc_bookkeeping`) lives in the same module and the hook/observer dispatch is already imported there.
+
+~~`add_component_by_id` follows `add_tag`'s choreography verbatim (F13): inland resolve → silent no-op on stale → `DeferredScopeGuard::enter()` → presence test on the source signature → `merged_archetype_id_dyn` → `migrate_entity_attach_ids_with_bytes` → `drop(scope)` → `drain_deferred_hook_queue()`. Dense ids route instead to the already-existing `dense_insert_and_fire` (`component_api.rs:94`), which already fires `on_add` + `on_insert` and already takes `&[u8]`.~~
+**STRUCK (D26): “verbatim” is wrong in FOUR places, and three of them are the difference between a specified refusal and an abort, a clobber or a leak.** `add_tag` returns `()`; S1 returns a value, and the two cannot share every arm. The corrected choreography:
+
+1. **Stale inland ⇒ `Rejected(EntityDead)`**, not `add_tag`'s silent no-op. `add_tag` genuinely no-ops (`tag_api.rs:130`) because it has nothing to say; S1's `RejectReason::EntityDead` has a **reader only if this arm produces it**, and §4's own sentence said “silent no-op on stale” two lines under the enum that forbids it.
+2. **Both refusals are decided BEFORE `merged_archetype_id_dyn`.** `storage_kind(id) ∉ {Table, Dense}` ⇒ `Rejected(NotTableOrDense)`; `residency_class(id) == Gpu` ⇒ `Rejected(GpuResident)`. D7 says *“before any pointer is taken”*; S1 needs the stronger form, because `merged_archetype_id_dyn` ends in `world.get_or_create_archetype(&combined[..len])` (`merged_archetype_id_dyn`, `migration_helpers.rs:1230`) and a `Gpu` id unioned into a CPU archetype is a **RELEASE panic at mint** — `residency_conflict_panic` (`archetype/archetype.rs:1496`), the semantic `GPU_RESIDENT ⇔ all-components-Gpu`, pinned by `create_by_ids_mixed_gpu_and_cpu_panics` (`archetype/archetype.rs:2196`). §3's `Table + Gpu` row already records the panic (D23). Placed after the merge — which is exactly where “verbatim” puts it — gate 5's specified `Rejected` becomes an abort.
+3. **The presence test is PER STORAGE KIND, and the signature answers for only one of them.** Table: `has_component_id` (`archetype/archetype.rs:837`), which IS `self.signature.mask().contains(id)`. Dense: **`dense_contains`** (`component_api.rs:49`, F3) — a dense id is filtered OUT of the mask by construction (`filtered_signature_mask`, `archetype/archetype.rs:314`, called from `create_by_ids`, `:326`), so the signature probe answers `false` for a dense component the entity HAS. This is EG1's measured trap (D23) reaching the write side, one rung later.
+4. **Dense ids route to `dense_insert_and_fire` (`component_api.rs:94`) only AFTER S1's own presence and length checks**, because that helper performs neither: its body is `store.insert(…)` + `mark_arch_present(…)` + an **unconditional** `on_add`/`on_insert` fire. A second call reaches `DenseStore::insert` (`component/dense/dense_store.rs:186`), whose opening statement is `debug_assert!(!self.e2s.contains(entity.get()), …)` — **debug: panic; RELEASE: a second slot is appended and `e2s` remaps to it, orphaning the old slot with its value NEVER DROPPED**, plus a duplicate `on_add`. That is gate 3's clobber and a leak, in the build an editor ships. So §4's sentence is a *prologue plus* a delegation, never a delegation.
+
+**Order, stated once so no rung re-derives it:** inland resolve → refusals (2) → `DeferredScopeGuard::enter()` → presence test (3) → length check → **table:** `merged_archetype_id_dyn` → `migrate_entity_attach_ids_with_bytes`; **dense:** `dense_insert_and_fire` → `drop(scope)` → `drain_deferred_hook_queue()`. Note which sibling the bracket comes from: `add_tag` enters the scope BEFORE its presence test (`tag_api.rs:147~`) while `remove_tag` tests first (`tag_api.rs:220~`); S1's `AlreadyPresent` early-out wants **`remove_tag`'s** order, so nothing is entered and drained for a call that changes nothing.
+
+**S1 takes OWNERSHIP of the bytes, and the doc comment says so.** The row the world writes is the row the world later drops (`drop_fn` on despawn / world drop), so a caller that keeps its own live value and passes a view of it double-drops — through a **safe** `pub fn`. Precedent and its limit: `set_component_raw` (`component_api.rs:444`) is already a safe `pub fn` whose doc admits only that a wrong size *“produce\[s\] undefined behavior in release”*. S1's callers are §4's scene-load / prefab / undo-redo / network-apply users, so the transfer is stated in the doc comment — not discovered by gate 10.
 
 **What the seam does NOT include, and why.**
 
@@ -468,8 +480,8 @@ undersizing is loud.
 
 ## 6. `unsafe` census — every block and the `// SAFETY:` it will carry
 
-The glue writes **four** `unsafe` blocks (U1–U4) plus one in the `boyko_ecs` seam (U5). Everything
-else is safe code over `pub` API. Each comment below is the text that lands verbatim.
+The glue writes **four** `unsafe` blocks (U1–U4) plus ~~one~~ **THIRTEEN** in the `boyko_ecs` seam.
+Everything else is safe code over `pub` API. Each comment below is the text that lands verbatim.
 
 **U1 — field pointer.** `boyko_reflect::ecs::field_ptr`
 ```rust
@@ -530,11 +542,36 @@ else is safe code over `pub` API. Each comment below is the text that lands verb
 //   lockstep, debug-asserted) and `reserve_capacity(1)` guaranteed a committed slot, so
 //   `write_at_unchecked_initialized(row, bytes)` targets a LOGICALLY-UNINIT slot and no
 //   drop runs. `bytes.len() == get_layout(added_cid).size` is checked in RELEASE at the
-//   `add_component_by_id` boundary (a debug-only check would let a short slice write a
-//   partially-uninitialised row in the exact build an editor ships). `commit_units`'s
+//   `add_component_by_id` boundary. A debug-only check does NOT produce a partially
+//   -uninitialised row — measured (D26): `write_at_unchecked_initialized` copies
+//   `self.component_layout.size()` bytes, NOT `bytes.len()`,
+//   so a short slice fully initialises the row from memory PAST THE CALLER'S SLICE.
+//   The release hazard is an out-of-bounds READ, and the debug profile never reaches
+//   it: the pool's own `debug_assert_eq!(bytes.len(), layout.size())` fires
+//   first. Hence the check is a RELEASE `if` returning
+//   `Rejected(WrongByteLen)`, never a `debug_assert!`. `commit_units`'s
 //   precondition `row == count` holds; both ticks land at `current_tick`, uniform with a
 //   fresh insert.
 ```
+
+⚠️ **~~one in the `boyko_ecs` seam (U5)~~ — STRUCK (D26), and the undercount is by TWELVE.** This
+section calls itself *“every `unsafe` block and the `// SAFETY:` it will carry”*, and it is the
+artifact a `code-reviewer` audits `unsafe` against; the owner was shown a zero-BYTE cost measurement,
+which is a different number and still holds. **MEASURED at the EG2 audit, 2026-08-27**, over the body
+D9 requires EG2 to duplicate and the arms §4 requires it to write:
+
+| where | count | what |
+|---|---|---|
+| the duplicated `migrate_entity_attach_ids` body | **7** | `&mut *source_ptr`; `&mut *target_ptr`; `slice::from_raw_parts` over the retained row; `read_added_tick`; `read_changed_tick`; the four-call retained write block; `(*target_ptr).flags` (`migration_helpers.rs:1372`) |
+| **U5**, new | 1 | the added ids' byte write |
+| S1's and S2's `add_tag`-shaped presence read | 2 | `&*inland.archetype_ptr()`, one each (`tag_api.rs:130`) |
+| S3 | 3 | the `addr_of!((*p).component_pools)` projection and `write_changed_tick` on the table arm (`component_pool.rs:1643`), and the dense arm's store through `changed_ticks_ptr` (`component/dense/dense_store.rs:611`) |
+
+The seven duplicated blocks land with their **original** comments, which remain true verbatim — that
+is a property of D9's duplication, not an exemption from principle 8. The kernel-side diff is
+therefore ~236 lines and thirteen annotated blocks, not one; a reviewer told “one” reads the diff as
+a scope breach. The shipping-image cost is unchanged and was re-checked: nothing here is reachable
+from a shipping call graph.
 
 ---
 
@@ -889,65 +926,213 @@ rather than as a pass.
 
 ---
 
-### EG2 — the by-id structural seam in `boyko_ecs` — **size M** — **OWNER-APPROVED 2026-08-27**
+### EG2 — the by-id structural seam in `boyko_ecs` — **size M** — **B.13 #2 OWNER-APPROVED 2026-08-27**
+
+⚠️ **APPROVED IS NOT UNBLOCKED. There is a SECOND owner call — older, unanswered, and it names this
+rung in its own text (D26).** [`docs/OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md)'s **2026-08-26** entry —
+*"`add_tag` / `remove_tag` PANIC IN RELEASE on any entity whose archetype has ever hosted a dense
+component"* — closes *"I did not choose"*, and its **What it blocks** paragraph reads *"EG2 and EG6
+are built on these two functions"*. B.13 #2 did not answer it; they are different calls about the
+same two functions. The defect is release-present and it sits in the **exact loop D9 tells S1 to
+duplicate**: `migration_helpers.rs:1472~` and `:1749~` are `.expect("invariant: source hosts its own
+component id")` inside `for &retained_cid in source.component_ids()`, and `component_ids()` **retains
+Dense and Bitset ids** — D23, measured. That entry's option **(b)** — *"have EG2's new
+`add_component_by_id` / `remove_component_by_id` carry the filter themselves while `add_tag` /
+`remove_tag` stay broken"* — is precisely what a verbatim copy silently produces, and the entry names
+it *"worse than either"*. **This rung does not start until that entry is answered.** Its own ten
+gates cannot see the defect: every one of them is single-fixture and table-only.
 
 **Lands** (in `boyko_ecs`, the shipping crate — §4): `add_component_by_id` (S1) with `AddOutcome`;
 `remove_component_by_id` (S2); `mark_component_changed` (S3); **`EnableTagId::try_from_component_id`
-(S4′, in `component_registry::tags` — not on `EcsMaster`)**;
-`migrate_entity_attach_ids_with_bytes` (`pub(crate)`, D9). Doc comments name `add_tag`/`remove_tag`
-as the precedent and name **no reflection type**.
+(S4′ — ~~in `component_registry::tags`~~ **STRUCK (D26): the SOURCE FILE is
+`component_registry/tags.rs`; the PUBLIC PATH is `component_registry::EnableTagId`, `mod tags` being
+private with `pub use tags::*` — harmless for an inherent associated fn, fatal for any `use` line,
+and already measured as an `E0603` at the EG0 audit (§12 item 4). The landed fixture
+`s4_enable_tag_id_try_from_component_id.rs` spells the public path and says why in its header.** —
+not on `EcsMaster`)**; `migrate_entity_attach_ids_with_bytes` (`pub(crate)`, D9). Doc comments name
+`add_tag`/`remove_tag` as the precedent and name **no reflection type**.
 
-**Owner gate before the first edit.** This rung widens a shipping crate's public API for a
-dev-only feature. Analysis **B.13 #2** routes it to the owner — **as ONE call over FOUR items**,
-which is a change: S4′ was previously filed twice, as B.11 #2 (this plan's seam) and as
-[`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md)'s B-1, with opposite recommendations,
-because it was reached from two directions. §4's table states each item's independent merit; the
-owner sees that table and the four signatures, and says yes or names a subset. **BOUNDARY's B4 blocks
-on the same answer** and does not ask separately.
+**And it lands FILES, which no earlier draft of this list named — D26.** Every sibling rung names its
+deliverables (EG0's `crates/boyko_reflect/tests/seam_census.rs`, EG1's alloc binary in §7); EG2 named
+none, so its row in `PLANNED_EXACT` (`tests/internal_docs_anchors.rs:1757`) sat at **0** and could
+not go 1 → 0, could not go stale, and **nothing would have redded if this rung's tests were
+never written at all** — the campaign's own *"a gate whose subject is not observable"* shape applied to a
+whole rung's test surface. The homes, and each is a decision, not a preference:
+
+* `crates/boyko_ecs/src/ecs/core/ecs_master/seam_by_id.rs` <!-- doc-path-planned --> — S1, S2, S3,
+  `AddOutcome`, `RejectReason`, re-exported from the `ecs_master` root. **A NEW module rather than an
+  append to `component_api.rs`**, because the five reflection plans cite that file by line at twelve
+  places (three of them waived, so they would rot **silently**), and a new module shifts none of them.
+* `crates/boyko_ecs/tests/seam_by_id.rs` <!-- doc-path-planned --> — gates 1–9. In `boyko_ecs`'s own
+  `tests/`, because gate 9 needs `#[derive(Component)]` (`boyko-macros` is a dev-dependency of
+  `boyko-ecs`, `crates/boyko_ecs/Cargo.toml`) and because none of these gates may reach
+  `boyko_reflect`.
+* **Gate 10 is a `#[cfg(test)] mod` inside the EXISTING `crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs`**
+  (which already carries one), because its subject is `pub(crate)` and an integration test cannot
+  reach it. It is covered by CI's Miri sweep, which runs `--all-targets -p boyko-ecs`
+  (`.github/workflows/ci.yml:306`).
+* `crates/boyko_reflect/tests/seam_pass/` <!-- doc-path-planned --> — gate 11's corpus; see below.
+
+That row is **3** as of this amendment, and gate 11 takes it back to **0**.
 
 **Gate.**
 1. `add_component_by_id` on a **table** component: the entity migrates, the bytes land, `on_add` +
-   `on_insert` fire once each, the changed and added ticks are `current_tick`.
+   `on_insert` fire once each, the changed and added ticks are `current_tick`. **And `on_insert`
+   RECORDS THE VALUE IT READS, asserted equal to the written bytes (D26).** A fire-count ledger plus
+   a post-call read-back is satisfied by a sibling that fires Phase 2 *before* committing the
+   payload; in `migrate_entity_attach_ids` the ordering is load-bearing and explicit
+   (`migration_helpers.rs:1574-1578~` repoints the inland so *"add / insert hooks (Phase 2) read
+   the NEW target row"*), and reproducing it is the sibling's job, so it is the gate's subject.
 2. `add_component_by_id` on a **dense** component routes to `dense_insert_and_fire`, the archetype
-   id is **unchanged** (the dense no-migration contract, `entity_archetype_id` before == after), and
-   the hooks fire.
+   id is **unchanged** (the dense no-migration contract, `entity_archetype_id` before == after), the
+   hooks fire, **and the bytes are read back (D26)** — `dense_insert_and_fire` fires
+   unconditionally, so "the hooks fire" alone holds for any routing to it.
 3. `AddOutcome::AlreadyPresent` on a second call — and the existing value is asserted **byte-identical**
-   (an editor's "Add Component" must not clobber).
-4. `AddOutcome::Rejected(WrongByteLen)` for `bytes.len() != get_layout(id).size`, asserted in a
-   `--release` build (the release-editor gap, §5).
-5. `AddOutcome::Rejected(NotTableOrDense)` for a bitset id; `Rejected(GpuResident)` for a `Gpu` id.
+   (an editor's "Add Component" must not clobber). **BOTH storage kinds, and the pairing is not
+   symmetry-for-its-own-sake (D26).** Gates 1 and 2 are deliberately paired by kind and gate 3 was
+   not; the dense half is where the failure lives, because the presence probe §4 originally
+   prescribed — the source signature — **cannot see a dense id at all**, so a dense re-add falls
+   through to `DenseStore::insert` and, in RELEASE, appends a second slot, remaps `e2s` to it and
+   orphans the old value undropped. Table half: a second `add_tag`-shaped call. Dense half: the same,
+   with `dense_contains` as the probe.
+4. `AddOutcome::Rejected(WrongByteLen)` for `bytes.len() != get_layout(id).size`. ~~asserted in a
+   `--release` build (the release-editor gap, §5)~~ **STRUCK (D26): a plain `if … { return Rejected }`
+   behaves identically in both profiles, so a `--release` leg observes nothing the debug leg does
+   not, and `cfg(not(debug_assertions))`-gating the test would run DIFFERENT SETS in the two profiles
+   — the third measured route to a vacuous green.** The gate is profile-independent and asserts the
+   RETURN VALUE; what makes the release build load-bearing is RED 2 below, which is now a mutation
+   that is **green in debug and red only in release**.
+5. `AddOutcome::Rejected(NotTableOrDense)` for a bitset id; `Rejected(GpuResident)` for a `Gpu` id —
+   **both decided BEFORE `merged_archetype_id_dyn` (§4, D26)**, or the `Gpu` arm aborts the process
+   at `residency_conflict_panic` instead of returning. Constructible with no device: `register_new`
+   (`component_registry/mod.rs:918`), `install_storage_kind` (`:729`) and
+   `classify_component_residency` (`:701`) are all `pub`, which is D7(c) holding.
 6. `remove_component_by_id` on a `Drop`-carrying fixture: `on_replace` + `on_remove` fire once each
-   against the **dying** row, and the drop counter increments **exactly once**.
-7. `mark_component_changed` on the table path makes a subsequent `Changed<T>` query match; on the
-   dense path it is idempotent with the arm that already bumps (F14).
+   against the **dying** row, and the drop counter increments **exactly once**. **BOTH storage kinds
+   (D26)**: the dense counterpart `dense_remove_and_fire` (`component_api.rs:130`) exists, is
+   symmetric, fires pre-tombstone and returns `false` for an absent member — but a signature-probed
+   S2 returns a silent `false` on every dense component, indistinguishable from "absent", and §11
+   routes `remove` to **EG6**, so the hole would surface two rungs later inside another rung's gate.
+7. ~~`mark_component_changed` on the table path makes a subsequent `Changed<T>` query match; on the
+   dense path it is idempotent with the arm that already bumps (F14).~~ **STRUCK (D26): both halves
+   were unfalsifiable, in two different ways.** *(a)* The table half states no tick SEPARATION:
+   `Tick::is_newer_than`'s lower bound is EXCLUSIVE (`change_detection/tick.rs:168`) and gate 1
+   asserts the add itself stamps `current_tick`, so add-at-T0 → mark-at-T0 → query matches whether or
+   not the mark wrote anything, and RED 3 leaves it green. *(b)* The dense half asserts a state the
+   OTHER arm already produced, so it holds for **every** implementation of the dense arm, including
+   an empty one that returns `true` and writes nothing — and it names a composition the design never
+   performs: D12 and §6's U3 route every write through `get_component_raw_mut`, whose dense branch
+   returns a raw pointer and **touches no tick** (`component_api.rs:253`), so `set_field` +
+   `mark_component_changed` on a dense component is **NECESSARY, not idempotent**. The replacement,
+   one shape for both kinds:
+   > spawn, **advance the tick**, call `mark_component_changed` **alone**, and assert a `Changed<T>`
+   > query goes from no-match to match with `last_run` set to the add's tick.
+
+   The dense half **must** be observed through the query, not through §4's *"write twin"*: the twin
+   is asymmetric — `get_component_changed_tick` (`component_api.rs:337`) has **no dense arm** at all
+   (it resolves `pools.get_pool(id)?`, and a dense id has no per-archetype pool), so it returns
+   `None` for every dense component. §4's row is amended to say so.
 8. **`EnableTagId::try_from_component_id`** returns `Some` for a bitset id and `None` for
    `Table`/`Dense`, **and the round-trip closes**: `EnableTagId::try_from_component_id(t.component_id())
    == Some(t)` for a tag minted by `register_enable_tag` — the public counterpart of the internal
-   `enable_tag_id_bridges_to_component_id_round_trip` (`component_registry/mod.rs:1676`).
+   `enable_tag_id_bridges_to_component_id_round_trip` (`component_registry/mod.rs:1676`). *(Verified
+   at this audit: that internal test hand-constructs `EnableTagId(ComponentId(475))` over an id never
+   classified `Bitset`, so it is a DIFFERENT and weaker property — the "minted by
+   `register_enable_tag`" qualifier is exactly what makes this gate worth having.
+   `EcsMaster::register_enable_tag` is `pub`, `enable_tag_api.rs:60`.)*
 9. **The F27 assertion, and it is the one this rung exists to make impossible to get wrong.** For a
    **derived** `#[component(storage = "bitset")]` type — a `boyko_ecs`-test-local fixture registered
    through `register_new` (that route, not the name mint, is what "derived" means here; the
    production instance `EmitterActive` lives in `boyko_render`, which this crate's tests cannot
-   reach, and is exercised at EG8) — assert that `register_enable_tag(display_name(id))` returns an
-   `EnableTagId` whose `component_id()` **differs** from `id` — i.e. the by-name route demonstrably
-   mints a *different* tag. This is a test of the
-   kernel's documented behaviour, not a regression guard; it exists so that the next person who
-   reaches for the obvious substitute finds a test saying why it is wrong, in the crate where the
-   behaviour lives.
+   reach, and is exercised at EG8) — assert that
+   `register_enable_tag(get_layout(id.0).unwrap().type_name)` returns an `EnableTagId` whose
+   `component_id()` **differs** from `id` — i.e. the by-name route demonstrably mints a *different*
+   tag. ~~`register_enable_tag(display_name(id))`~~ **STRUCK (D26): the argument does not compile at
+   this gate's own stated home.** `display_name` is a `boyko_reflect` function
+   (`crates/boyko_reflect/src/ecs.rs:246`, declared in §2's glue surface) and `boyko_reflect` depends
+   on `boyko_ecs`, so a `boyko_ecs` test calling it is a dependency cycle — the same class as the
+   `component_registry::tags` path in *Lands*, one rung later. The in-tree substitute is `pub` and
+   needs no new item: `component_registry::get_layout` (`component_registry/mod.rs:1123`) with its
+   `pub type_name` field. This is a test of the kernel's documented behaviour, not a regression
+   guard; it exists so that the next person who reaches for the obvious substitute finds a test
+   saying why it is wrong, in the crate where the behaviour lives.
 10. **Miri-TB** over `migrate_entity_attach_ids_with_bytes` for a table component with a `Drop` field.
+11. **The seam census is MIGRATED, and this is the obligation EG2 inherited and did not carry (D26).**
+    Landing all four items makes four of EG0's five fixtures **compile**, which `trybuild` reports as
+    `error` — *"Expected test case to fail to compile, but it succeeded"* — so this rung's own
+    unconditional gate (`cargo test -p boyko-reflect --all-targets --no-fail-fast`, §8) is RED at
+    landing. **A flip cannot be re-blessed: there is no error output to bless**, and D21's remedy
+    (re-blessing survivors) is the wrong operation and also does not apply — re-checked at this audit,
+    the one survivor `neg_tag_id_from_component_id.stderr` is `TagId`-scoped and its *"similar name"*
+    help points at `TagId::component_id`; EG2 adds nothing to `TagId` (§4 refuses
+    `TagId::from_component_id` outright), so it is **not** contaminated and needs no re-bless. What
+    lands instead, in ONE commit, is a harness restructure copied from the in-tree template
+    `crates/reflect_fixture/tests/reflect_compile_fail.rs:146~` (`t.pass(format!("tests/{PASS_DIR}/*.rs"))`):
+    * the four fixtures **move** into the `seam_pass` sibling directory named in *Lands* and their
+      `.stderr` are **deleted**; a `t.pass()` case is COMPILED AND RUN, so each body gains the return-value
+      assertion it can now make (`Added`, `false`, `false`, `None`) — the flip becomes a gain, not a
+      chore;
+    * `seam_census.rs` gains a `PASS_CORPUS` constant with its own `fixture_count` floor and one
+      `t.pass(format!("tests/{PASS_CORPUS}/*.rs"))`, so `tests/trybuild_corpus_compiler_witness.rs`
+      resolves it like every other glob in the tree;
+    * `the_plan_and_the_corpus_name_the_same_not_yet_reachable_items` moves its
+      `corpus.len() == items.len()` equality onto the **union** of the two directories, and its
+      per-item `E0599` witness onto the **refused** kind only — because the `E0599` sentence is one
+      only an ABSENT item can produce, and after EG2 exactly one item is still absent. `seam_items`'s
+      `assert!(out.len() >= 4)` PARSE FLOOR over §4's table (`seam_census.rs:379`) and the
+      `flips_at_eg2` partition assertions inside
+      `the_plan_and_the_corpus_name_the_same_not_yet_reachable_items` (`seam_census.rs:528`) stay as they
+      are: §4's rows are the owner's approved justification table and are not deleted, and after the
+      migration the field names the directory a row's fixture lives in.
+    * `PLANNED_EXACT`'s `("REFLECTION-PLAN-ECS.md", 3)` goes to **0** in the same commit, and the
+      three `<!-- doc-path-planned -->` markers above come off with it — the marker half of that pin
+      is not self-checking (D25), so it is stated here as an act, not as a consequence.
 
 **RED MUTATION.**
-* Feed `add_component_by_id` a slice one byte short with the length check deleted → Miri reds on
-  the partially-uninitialised row (and the release test reds without Miri).
-* Convert the length check to `debug_assert!` → the `--release` leg of gate 4 goes green-wrong →
-  the rung reds. *(This is the release-editor gap made mechanical rather than documentary.)*
-* Delete the tick write in `mark_component_changed` → gate 7 reds.
+* ~~Feed `add_component_by_id` a slice one byte short with the length check deleted → Miri reds on
+  the partially-uninitialised row (and the release test reds without Miri).~~ **STRUCK (D26): the
+  predicted artifact does not exist in EITHER profile, and this is a red whose subject was not what
+  it named.** `write_at_unchecked_initialized` copies `self.component_layout.size()` bytes, **not**
+  `bytes.len()` (`component_pool.rs:1799~`), so the destination row is always FULLY initialised; the
+  fault is an out-of-bounds **read** past the caller's slice. And in debug — which is how
+  `cargo miri test` builds — the pool's own
+  `debug_assert_eq!(bytes.len(), self.component_layout.size(), …)` (`component_pool.rs:1785~`) fires
+  first, so Miri never reaches the copy. **The repaired mutation:** delete S1's length check *and*
+  the pool's `debug_assert_eq!`, and run gate 10's Miri leg → Miri reds on the OOB read of the
+  caller's slice. Both deletions restored under `cmp`. *(A one-line mutation cannot express this
+  red; that is a fact about the subject, and stating it is cheaper than an implementer mis-attributing
+  a length panic to Miri.)*
+* ~~Convert the length check to `debug_assert!` → the `--release` leg of gate 4 goes green-wrong →
+  the rung reds.~~ **STRUCK (D26): that mutation reds in BOTH profiles** — debug panics on the
+  assert, release returns `Added` where gate 4 wants `Rejected(WrongByteLen)` — so an implementer
+  runs the default target, sees red, records the observation and **never executes `--release` at
+  all**; and *"goes green-wrong → the rung reds"* is self-contradictory besides. **The
+  discriminating mutation:** `if cfg!(debug_assertions) && bytes.len() != size { return
+  Rejected(WrongByteLen) }` → **green in debug, red only in release**. That, and only that, makes the
+  release-editor gap mechanical rather than documentary.
+* Delete the tick write in `mark_component_changed` → gate 7 reds — **on BOTH arms, and only under
+  the repaired gate 7 (D26)**: under the struck wording the table half is green without any tick
+  write (no separation) and the dense half is green for an empty implementation (it asserts the other
+  arm's state). Deleting only the dense store must red, and deleting only the table store must red.
 * Drop the `storage_kind(id) == Bitset` check from `try_from_component_id` → gate 8's `None` arm
   reds for a `Table` id, i.e. the constructor stops being the *proof* F16 says an `EnableTagId` is
   and becomes a cast.
+* **NEW (D26) — the wrong-row half, which every gate above is blind to because every fixture is
+  single-entity.** Pin the byte write at row `0` instead of `target.current_index`, and delete the
+  `RemoveOutcome::Swapped` inland repoint (`migration_helpers.rs:1561-1568~`). With one entity in
+  each archetype the target row IS `0` and the source removal IS `Last`, so **nothing reds**. The
+  gate set therefore requires a populated source (≥ 2 entities, so `Swapped` fires) and a populated
+  target (so the new row is non-zero), plus an assertion that a **bystander** entity's bytes and
+  archetype row survive both the attach and the remove. Under those fixtures both mutations red.
+* **NEW (D26) — the payload-versus-hooks half.** Move the added ids' byte write from Phase 1 to
+  after the Phase-2 fire in `migrate_entity_attach_ids_with_bytes`. Gate 1's fire counts and its
+  post-call read-back both stay green; only gate 1's new `on_insert`-records-what-it-reads assertion
+  reds. `dense_insert_and_fire` already gets this ordering right (`component_api.rs:94`), which is
+  exactly the ordering the new table sibling has to reproduce and which nothing asserted.
 * Point the glue's presence read at `has_component` instead of the constructor → EG3 gate 1 reds
   with a confident wrong `false` (F6). *(Kept here as a cross-rung note: the red lives at EG3, which
-  is where the caller is.)*
+  is where the caller is. **It is NOT a runnable red at EG2** — D26 counts this rung's runnable reds
+  as **six**, not seven.)*
 
 ---
 
@@ -1263,7 +1448,7 @@ dynamic-tag rows; re-read everything.
    **LANDED 2026-08-21, ahead of this rung and wider than it.** Add `REFLECTION-PLAN-ECS.md` and its
    three siblings to `GATED_DOCS` (`tests/internal_docs_anchors.rs:283`, which held exactly four
    documents when this rung was written, none of them a reflection plan) and give each a
-   `("REFLECTION-PLAN-*.md", 0)` row in `OVER_WAIVED_MAX` (`:1913-1948`). **What actually landed
+   `("REFLECTION-PLAN-*.md", 0)` row in `OVER_WAIVED_MAX` (`:1919-1954`). **What actually landed
    registers five documents, not four** — `REFLECTION-ANALYSIS.md` alongside the four plans — each
    with its `0` row, and it also carried the `GATES` Appendix GC caveat deletion this rung owed.
    Whether EG8 keeps a gate-6 line item is bookkeeping for the campaign owner. The gate then checks, on every `cargo test`, that every `crates/...` path these
@@ -1382,7 +1567,7 @@ an empty binary, not fail).
 
 ---
 
-## 12. Decisions taken at the EG0 audit and its verification — D16–D25
+## 12. Decisions taken at the EG0 audit and its verification — D16–**D26**
 
 **Why these live here and not in §5.** [`docs/REFLECTION-PLAN-CORE.md`](REFLECTION-PLAN-CORE.md)
 cites this document *by line* at five places — twice into §5's **D5** and three times into §10's
@@ -1983,3 +2168,148 @@ filename collision, and BOUNDARY B4 gate 7's source census scans `crates/boyko_r
 so this rung's test-side calls do not trip it. Across the whole EG ladder only **EG2, EG3 and EG8**
 are named by siblings; **EG0, EG1, EG4, EG5, EG6 and EG7 are named by nobody outside this document**,
 which is where an orphaned obligation would sit unseen — D17 item 4 is one that did.
+
+---
+
+**D26 — measured at the EG2 AUDIT, 2026-08-27. The rung is buildable and D9 survives; it could not
+reach green as written, for a reason that belongs to no rung, and six of its ten gates observed
+something other than what they claim.** Everything below was read in this worktree against the
+kernel as committed at `97737aae`; `git diff HEAD -- crates/boyko_ecs/src/` is **empty**, so every
+"as landed" statement is about the pre-state EG2 starts from.
+
+**What SURVIVED the audit, stated first because the approval rests on it.**
+
+* 🟢 **D9 holds, and the sibling is writable with the original BYTE-IDENTICAL.** Not shared: the ZST
+  `debug_assert!` (`migration_helpers.rs:1387-1394~`). Duplicated: the rest of the body. Every
+  private helper the copy needs lives in the same module — `read_source_enable_bits`
+  (`migration_helpers.rs:104`), `write_target_enable_bits` (`:129`),
+  `fire_enable_column_alloc_bookkeeping` (`:162`) — and the hook / observer dispatch is already
+  imported there, so no refactor of the original is required and none may be attempted. The one
+  behavioural delta is Step 2, which must adopt **Step 1's** order —
+  `write_at_unchecked_initialized` → `commit_units` → ticks — because that fn's precondition is a
+  logically-uninit slot; U5's own text already says so.
+* 🟢 **The shipping build still pays zero.** Nothing this rung lands is reachable from a shipping
+  call graph; the duplication is uncalled code. The number that CHANGED is the review cost, not the
+  image cost — see the `unsafe` census correction in §6, which was under-counting by twelve.
+* 🟢 **S3 needs no new pool-layer mechanism.** Table: `get_component_changed_tick`'s prologue
+  (`component_api.rs:337`) plus `ComponentPool::write_changed_tick` (`component_pool.rs:1643`),
+  whose receiver is `&self`. Dense: a store through `changed_ticks_ptr`
+  (`component/dense/dense_store.rs:611`). *(`stamp_slot_ticks` is NOT the one: it stamps `added` too,
+  and S3 must preserve it.)*
+* 🟢 **S4′'s home compiles and gate 9's fixture is constructible** — `boyko-macros` is a
+  dev-dependency of `boyko-ecs` (`crates/boyko_ecs/Cargo.toml`), and `register_new`,
+  `install_storage_kind` and `classify_component_residency` are all `pub`.
+
+**🔴 THE OBLIGATION THAT BELONGS TO NO RUNG, and it is the one that stops this rung reaching green.**
+Landing all four items makes four of EG0's five `trybuild` fixtures compile. `seam_census.rs` has
+exactly **one** trybuild call — `t.compile_fail(format!("tests/{CORPUS}/*.rs"))`,
+`crates/boyko_reflect/tests/seam_census.rs:652~` — over **one** directory, and there is no `t.pass()`
+anywhere in the seam corpus. So four fixtures **flip**, the unconditional §8 gate
+`cargo test -p boyko-reflect --all-targets --no-fail-fast` is RED at landing, and EG2's *Lands*, its
+ten gates and its five REDs mentioned the census, the corpus, `.stderr` or blessing **zero** times
+(measured over the rung's own lines). The obligation was stated only at EG0 — *"flip to `pass` at
+EG2"*, three times — i.e. **at the rung that creates the instrument, never at the rung that trips
+it.** It is now gate 11, with the harness restructure spelled out and a template named.
+
+Two sub-facts, because the plan's recorded cost was the wrong one:
+
+* **D21's predicted cost does not occur.** It says *"every surviving fixture is re-blessed for a
+  reason unrelated to its own item"*. Re-checked: the only survivor after EG2 is
+  `neg_tag_id_from_component_id`, whose blessed `.stderr` is **`TagId`-scoped** and whose *"similar
+  name"* help names `TagId::component_id`. EG2 adds nothing to `TagId` — §4 refuses
+  `TagId::from_component_id` outright — so rustc's candidate set for that fixture does not change.
+  D21's measurement was real and was **`EcsMaster`-scoped**; every `EcsMaster`-scoped fixture flips,
+  which makes the contamination moot rather than costly.
+* **And re-blessing is the wrong VERB for a flip.** D21 itself defines a flip (*"Expected test case
+  to fail to compile, but it succeeded"*) as a different outcome from a mismatch. There is no error
+  output to bless. The remedy is structural, and the in-tree template already exists at
+  `crates/reflect_fixture/tests/reflect_compile_fail.rs:146~`.
+
+**🔴 A SECOND OWNER CALL, unanswered, that names this rung in its own text.** See the rung header.
+B.13 #2 approved four items; the 2026-08-26 `add_tag` / `remove_tag` release-panic entry closes *"I
+did not choose"* and blocks EG2 and EG6. Two channels, two calls, and the plan's header carried one.
+
+**🔴 SIX GATES, AND EACH OBSERVED SOMETHING OTHER THAN WHAT IT CLAIMS.** The trace that found them
+asked one question per scenario — *is there an observable whose value depends on the thing the gate
+exists to prove?*
+
+| scenario | gate | what its observable actually depended on |
+|---|---|---|
+| table add | 1 | the bytes and the fire counts — **not** the ORDER, so a sibling firing Phase 2 before committing the payload passes |
+| dense add | 2 | the routing — **not** the payload; `dense_insert_and_fire` fires unconditionally, so *"the hooks fire"* holds for any routing to it |
+| second add | 3 | the table presence test only. On dense the gate's SUBJECT IS UNBUILDABLE as specified: the signature probe cannot see a dense id, so a re-add reaches `DenseStore::insert` (`component/dense/dense_store.rs:186`) — debug panic, **release: a second slot, `e2s` remapped, the old value orphaned undropped, `on_add` fired twice** |
+| wrong-length add | 4 | the return value, identically in both profiles — the `--release` leg discriminated nothing, and its RED reddened both |
+| bitset / GPU id | 5 | the storage-kind arm. The GPU arm is ORDER-dependent: after `merged_archetype_id_dyn` it is a release **abort**, not a refusal |
+| Drop remove | 6 | the table path only; the dense counterpart `dense_remove_and_fire` (`component_api.rs:130`) is ungated here and §11 routes `remove` to EG6, so the hole surfaces two rungs later in another rung's gate |
+| tick mark, table | 7a | **nothing** — no tick separation, and `is_newer_than`'s lower bound is exclusive (`change_detection/tick.rs:168`), so the ADD's own stamp satisfies it and RED 3 stays green |
+| tick mark, dense | 7b | **nothing** — it asserts a state the OTHER arm produced. And it names a composition the design never performs: `set_field` goes through `get_component_raw_mut`, whose dense branch (`component_api.rs:253`) touches no tick, so the pairing is NECESSARY, not idempotent |
+| bitset round-trip | 8 | the check and the wrap. **Sound as written**; the *"minted by `register_enable_tag`"* qualifier is what makes it stronger than the internal test it cites, which hand-constructs `EnableTagId(ComponentId(475))` |
+| Miri-TB | 10 | its subject is `pub(crate)`, so its home was undecidable from the rung — now named |
+
+**🔴 AND THE MUTATIONS THE RUNG SHOULD HAVE HAD.** Both are consequences of every fixture being
+single-entity: `RemoveOutcome::Swapped`'s inland repoint never executes, and a byte write pinned at
+row `0` lands on the only row by coincidence. Two new REDs, and the fixtures that make them fire.
+
+**A note on the count.** The rung listed five REDs; the fifth is a cross-rung *note* whose red lives
+at EG3 and which EG3's own first RED already carries verbatim. With the two struck-and-repaired and
+the two new ones, **EG2 has six runnable reds**. Saying so is not bookkeeping: *"the rung is not done
+until its red has been SEEN"* is unsatisfiable if the list's length is not the number of reds to run.
+
+**Doc-rot found and REPAIRED here, because the divergence is on the row that unblocks this rung.**
+This document's own §11 (*"On the owner"*) names `docs/REFLECTION-ANALYSIS.md` **B.13** as *"the single list"* of
+owner calls, and B.13 row 2 still read *"blocked — EG2 does not start before the answer"*:
+`grep -c "2026-08-27" docs/REFLECTION-ANALYSIS.md` returned **0**, while
+`docs/OPEN-QUESTIONS.md` and its `docs/ru/` twin both carried the answer. A reader who follows this
+plan's own pointer to the single list was told the rung is still blocked. Same class as HEAD's own
+`97737aae` — *"the owner channel exists twice, and the copies have diverged"* — recurring one commit
+later on the approval this rung rests on, which is why it is repaired rather than reported.
+
+**Anchors, because EG2 is the first rung to edit kernel source.** Roughly ten **waived** (`:N~`)
+anchors sit in the four files it touches — `migration_helpers.rs:1387-1394~`, `:1472~`,
+`:1518-1544~`, `:1635-1652~`, `:1652-1658~`; `component_api.rs:208~`, `:392~`, `:683-686~`;
+`component_registry/tags.rs:189-192~`; `component_registry/mod.rs:320~`, `:685-688~` — and a waiver
+keeps neither shape nor identity, so those rot **silently** on any line shift, while the unwaived
+ones in the same files red loudly. Landing each new item at the END of its impl or file, and S1/S2/S3
+in a **new** module rather than appended to `component_api.rs`, keeps the blast radius near zero;
+that is the reason the *Lands* list names a new file rather than leaving the placement open.
+
+### Ownership sweep (2026-08-27): does any sibling already own EG2's work?
+
+**No — the NAME sweep is clean, and the ARTEFACT sweep is what found gate 11.** `EG2` appears in
+`REFLECTION-PLAN-BOUNDARY.md` (9), `REFLECTION-PLAN-GATES.md` (3), `REFLECTION-ANALYSIS.md` (2),
+`docs/OPEN-QUESTIONS.md` (7) and its `docs/ru/` twin (7); **zero** in
+`REFLECTION-PLAN-CORE.md`. BOUNDARY cedes S4′ explicitly — *"does NOT land here"*
+(`REFLECTION-PLAN-BOUNDARY.md`:1292) — and retires its B-1 into B.13 #2, so the two-plans-one-rung
+shape that cost this campaign a whole rung does **not** recur. `AddOutcome` is named only in this
+document; `RejectReason` **exactly once in the entire tree**, in §4; and
+`migrate_entity_attach_ids_with_bytes` returns **zero** hits under `crates/`, so the pre-state is
+intact.
+
+What the name sweep could not see is that
+`crates/boyko_reflect/tests/seam_census.rs` **mechanically owns all four item names** — it parses
+§4's table out of this document at run time — while EG2's rung text never mentioned the file. An
+ownership sweep over identifiers finds sibling PLANS; it does not find a landed INSTRUMENT that
+reads the plan. That is the second time this campaign has been bitten by a relationship its sweep
+did not model, and it is worth the sentence.
+
+### What `git diff HEAD -- crates/boyko_ecs/src/` must contain when EG2 is done
+
+Stated as an inverted invariant, so a scope breach is visible without reading the diff twice.
+
+1. **`ecs_master/seam_by_id.rs` (new)** — S1, S2, S3, `AddOutcome`, `RejectReason`, plus the root
+   re-export line. Nothing appended to `component_api.rs`.
+2. **`commands/migration_helpers.rs`** — exactly ONE additive hunk,
+   `pub(crate) fn migrate_entity_attach_ids_with_bytes`, plus gate 10's `#[cfg(test)]` cases inside
+   the module's existing test mod. **`migrate_entity_attach_ids` — signature, body, and its ZST
+   `debug_assert!` — byte-identical to `HEAD`.** That byte-identity **IS** D9 and is the property the
+   approval was given on; `git diff` it on its own before certifying the rung.
+3. **`component_registry/tags.rs`** — `try_from_component_id` appended inside the existing
+   `impl EnableTagId`.
+4. Nothing else. In particular `has_component` (F6) and `set_component_raw`'s tick asymmetry (F14)
+   are §9-dispositioned as reported-not-fixed; a diff touching either is a scope breach, whatever
+   its merit. *(If the 2026-08-26 owner entry is answered with option (a), the retained-id filter in
+   the two `component_ids()` walks lands as ITS OWN change on the kernel's schedule, before this
+   rung and outside this diff.)*
+
+The zero-cost half is then re-checkable mechanically: the four new names appear outside `tests/` and
+`#[cfg(test)]` **only at their definitions**.
